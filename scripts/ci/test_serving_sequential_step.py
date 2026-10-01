@@ -139,10 +139,21 @@ class WatchedStepTests(unittest.TestCase):
         os.environ[trace_census.STAGE_LOG_FLAG] = '1'
         os.environ[trace_census.CCL_LOG_FLAG] = '1'
         collectives = SimpleNamespace(gather_idx=3, barrier_idx=1, handles=[0, 2], name='ccl')
-        with patch.object(trace_census, 'COLLECTIVES', collectives):
+        with patch.dict(trace_census.COLLECTIVES, {'shared': collectives, 'model': SimpleNamespace(reduce_idx=5)}):
             trace_census.stage('r', 4, 'validate')
         self.assertEqual(self.lines, ['[SEQ-STAGE] request=r rows=4 stage=validate begin '
-                                      'ccl{gather_idx=3 barrier_idx=1 handles=0,2}'])
+                                      'ccl{shared{gather_idx=3 barrier_idx=1 handles=0,2} model{reduce_idx=5}}'])
+
+    def test_collective_state_too_long_for_the_stage_line_follows_it_one_object_per_line(self):
+        os.environ[trace_census.STAGE_LOG_FLAG] = '1'
+        os.environ[trace_census.CCL_LOG_FLAG] = '1'
+        wide = lambda: SimpleNamespace(**{'handle_index_%d' % index: index for index in range(6)})
+        with patch.dict(trace_census.COLLECTIVES, {'shared': wide(), 'model': wide(), 'sampler': wide()}):
+            trace_census.stage('r', 4, 'validate')
+        self.assertEqual(len(self.lines), 4)
+        self.assertEqual(self.lines[0], '[SEQ-STAGE] request=r rows=4 stage=validate begin')
+        for line, name in zip(self.lines[1:], ('shared', 'model', 'sampler')):
+            self.assertTrue(line.startswith('[SEQ-STAGE] request=r rows=4 stage=validate begin ccl{%s{handle_index_0=0' % name), line)
 
     def run_script(self, body, **flags):
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PYTHONPATH=HERE, **flags)

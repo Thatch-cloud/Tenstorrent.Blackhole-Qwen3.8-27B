@@ -12,14 +12,20 @@ QWEN_FAST_SEQ_STAGE_LOG=1: '[SEQ-STAGE] request= rows= stage= begin|end' before 
   verifier_engine_tp.VerifierEngine.verify's stages, publish, serving_packed_step's publication stages), flushed as it is
   written, so the last line names the stage the process entered and never left. Also one '[PINDIAG] first replay' line per
   captured bucket: what the engine's first trace replay runs after.
-QWEN_FAST_CCL_HANDLE_LOG=1: the shared collectives object's integer state (TT_CCL cycles its semaphore handles by host-side
-  index; a trace replay does not advance the index) appended to every '[SEQ-STAGE]' line. This is the test for the documented
-  hang mode: an eager collective reusing a handle a replayed trace baked.
+QWEN_FAST_CCL_HANDLE_LOG=1: the integer state of every collectives object the serving process cycles (TT_CCL cycles its
+  semaphore handles by host-side index; a trace replay does not advance the index) appended to every '[SEQ-STAGE]' line, as
+  three groups: shared (the drafter's), model (the target model's, used by the all-reduces inside the verify and packed traces
+  and by eager prefill) and sampler (the pinned sampler's gathers). This is the test for the documented hang mode: an eager
+  collective reusing a handle a replayed trace baked.
 QWEN_FAST_TRACE_CENSUS=1: every trace capture logs its call site, the DRAM and L1 allocator views before and after, and the
   collectives' state before and after; best effort (QWEN_FAST_TRACE_CENSUS_GRAPH=0 turns it off) the address ranges the
   capture allocated and freed again - its temporaries, which a replay rewrites - from a ttnn.graph capture around it.
-  census_engine then lists each width's persistent buffer extents per chip and reports every buffer that sits inside an
-  earlier trace's freed temporaries ('[PINDIAG] trace overlap'): a replay of that trace writes into the buffer.
+  census_engine then lists each width's persistent buffer extents per chip and reports every buffer that sits inside the freed
+  temporaries of a trace that is still live ('[PINDIAG] trace overlap'): a replay of that trace writes into the buffer. Every
+  range here is a per-bank extent (an address is the same offset in each DRAM bank), and a released trace's ranges are dropped.
+  The graph part is NOT fail-soft end to end: the begin, end and parse are guarded, but the graph processor's work on each
+  captured operation runs inside the capture itself, and an error there fails the trace capture. QWEN_FAST_TRACE_CENSUS_GRAPH=0
+  (the c2-packed-tp4-diag-nograph profile) is the fallback that keeps everything else.
 
 install() is a twin of attention_batch.capture_operation, bound by tp_addresses.install() at QWEN_FAST_TP=4 only; attention_batch.py
 stays the pair's pinned bytes. Without the flag the twin returns the original's result and makes the original's calls.
@@ -38,17 +44,20 @@ CENSUS_FLAG = 'QWEN_FAST_TRACE_CENSUS'
 GRAPH_FLAG = 'QWEN_FAST_TRACE_CENSUS_GRAPH'
 ID_WIDTH = 48
 LINE_BUDGET = 240
+CCL_LINE_BUDGET = 180
 MAX_TRACES = 4096
 MAX_OVERLAP_LINES = 20
 
-# The shared collectives object (serving_runtime.note), the capture sequence number, the traces so far and where the
-# current engine's build began in that sequence.
-COLLECTIVES = None
+# The collectives objects by name (serving_runtime.note: shared, model, sampler), the capture sequence number, the live traces
+# so far and where the current engine's build began in that sequence. PACKED_NOTES counts calls to
+# verifier_engine.note_packed_step, which a four-user packed round makes about six times (verify, each commit, the flush and
+# the step's finally): it is not a count of rounds.
+COLLECTIVES = {}
 TRACES = []
 SEQUENCE = 0
 ENGINE_BOUNDARY = 0
-PACKED_STEPS = 0
-ENGINE_PACKED = 0
+PACKED_NOTES = 0
+ENGINE_NOTES = 0
 BUILT_AT = {}
 UNAVAILABLE_REPORTED = set()
 
@@ -85,7 +94,8 @@ def watching(environ=None):
 
 def log(message):
     """One loguru INFO line; plain flushed print where loguru is absent (host tests)."""
-    message = message[:LINE_BUDGET]
+    if len(message) > LINE_BUDGET:
+        message = message[:LINE_BUDGET - 3] + '...'
     try:
         from loguru import logger
     except ImportError:
@@ -101,15 +111,16 @@ def request_label(request_id):
 # --- live stage markers -------------------------------------------------------------------------------------------------
 
 
-def register_collectives(collectives):
-    global COLLECTIVES
-    COLLECTIVES = collectives
+def register_collectives(collectives, name='shared'):
+    """Name a collectives object for the logs. One object registered under two names stays under the first."""
+    if collectives is None or any(known is collectives for known in COLLECTIVES.values()):
+        return
+    COLLECTIVES[name] = collectives
 
 
-def collective_state(collectives=None):
-    """The integer attributes (and integer lists) of the collectives object, one compact string, or '' when none is
-    registered or none is readable."""
-    collectives = COLLECTIVES if collectives is None else collectives
+def collective_state(collectives):
+    """The integer attributes (and integer lists) of one collectives object, one compact string, or '' when it has none
+    readable."""
     if collectives is None:
         return ''
     try:
@@ -125,19 +136,32 @@ def collective_state(collectives=None):
     return ' '.join(parts) or 'no-integer-attributes'
 
 
-def ccl_suffix():
-    if not flag_on(CCL_LOG_FLAG):
-        return ''
-    state = collective_state()
-    return '' if not state else ' ccl{%s}' % state
+def collective_groups():
+    """[(name, state)] for every registered collectives object that has a readable state."""
+    groups = [(name, collective_state(collectives)) for name, collectives in COLLECTIVES.items()]
+    return [(name, state) for name, state in groups if state]
+
+
+def groups_text(groups):
+    return ' '.join('%s{%s}' % group for group in groups)
 
 
 def stage(request_id, rows, name, edge='begin', extra=''):
-    """'[SEQ-STAGE]' line, flushed as it is written, when QWEN_FAST_SEQ_STAGE_LOG=1; a no-op otherwise."""
+    """'[SEQ-STAGE]' line, flushed as it is written, when QWEN_FAST_SEQ_STAGE_LOG=1; a no-op otherwise. Under
+    QWEN_FAST_CCL_HANDLE_LOG=1 the collectives' state rides the line, or, where that would pass CCL_LINE_BUDGET, follows it on
+    one line per object (the same request, rows and stage)."""
     if not stage_log_enabled():
         return
-    log('[SEQ-STAGE] request=%s rows=%s%s stage=%s %s%s' % (request_label(request_id), rows, extra, name, edge,
-                                                             ccl_suffix()))
+    base = '[SEQ-STAGE] request=%s rows=%s%s stage=%s %s' % (request_label(request_id), rows, extra, name, edge)
+    groups = collective_groups() if flag_on(CCL_LOG_FLAG) else []
+    if not groups:
+        return log(base)
+    whole = '%s ccl{%s}' % (base, groups_text(groups))
+    if len(whole) <= CCL_LINE_BUDGET:
+        return log(whole)
+    log(base)
+    for group in groups:
+        log('%s ccl{%s}' % (base, groups_text([group])))
 
 
 def runtime_context(runtime):
@@ -159,19 +183,19 @@ def program_cache_entries(mesh):
 
 
 def note_packed_step_called():
-    global PACKED_STEPS
-    PACKED_STEPS += 1
+    global PACKED_NOTES
+    PACKED_NOTES += 1
 
 
 def first_replay(engine, request_id, rows):
-    """One line when a bucket replays its captured trace for the first time (QWEN_FAST_SEQ_STAGE_LOG=1): how many packed
-    steps ran since this engine was built, and the program cache's size."""
+    """One line when a bucket replays its captured trace for the first time (QWEN_FAST_SEQ_STAGE_LOG=1): how many packed-step
+    notes (about six per four-user round, PACKED_NOTES) were made since this engine was built, and the program cache's size."""
     if not stage_log_enabled():
         return
     built = BUILT_AT.get(id(engine))
-    log('[PINDIAG] first replay request=%s rows=%s built_after_packed_round=%s packed_rounds_since_build=%s program_cache=%s'
+    log('[PINDIAG] first replay request=%s rows=%s packed_notes_at_build=%s packed_notes_since_build=%s program_cache=%s'
         % (request_label(request_id), rows, 'n/a' if built is None else built,
-           'n/a' if built is None else PACKED_STEPS - built, program_cache_entries(getattr(engine, 'mesh', None))))
+           'n/a' if built is None else PACKED_NOTES - built, program_cache_entries(getattr(engine, 'mesh', None))))
 
 
 def watched_step(request_id, rows, call):
@@ -258,9 +282,12 @@ def _address(value):
     return int(value, 0) if isinstance(value, str) else int(value)
 
 
-def freed_ranges(nodes):
-    """The buffers a ttnn.graph capture saw allocated and then deallocated: [(lo, hi, buffer type)]. `nodes` is the capture's
-    node list (or its JSON text); allocate and deallocate nodes carry their buffer's address in params."""
+def freed_ranges(nodes, banks=1):
+    """The buffers a ttnn.graph capture saw allocated and then deallocated: [(lo, hi, buffer type)], each a PER-BANK extent
+    (an interleaved DRAM buffer sits at the same address in every bank, and the node's `size` is the whole buffer across all
+    of them): the node's max_size_per_bank where it carries one, else a DRAM buffer's size over `banks`. `nodes` is the
+    capture's node list (or its JSON text); allocate and deallocate nodes carry their buffer's address in params. Live buffers
+    are keyed by (type, address); a deallocate node that names no type frees the latest buffer at its address."""
     if isinstance(nodes, (str, bytes)):
         nodes = json.loads(nodes)
     live, freed = {}, []
@@ -270,11 +297,26 @@ def freed_ranges(nodes):
             continue
         address = _address(params['address'])
         if kind == 'buffer_allocate':
-            live[address] = (int(params.get('size', 0)), str(params.get('type', '?')))
-        elif address in live:
-            size, buffer_type = live.pop(address)
-            freed.append((address, address + size, buffer_type))
+            live[(str(params.get('type', '?')), address)] = (int(params.get('size', 0)), _per_bank(params))
+            continue
+        if 'type' in params:
+            key = (str(params['type']), address)
+        else:
+            key = next((key for key in reversed(list(live)) if key[1] == address), None)
+        if key not in live:
+            continue
+        size, per_bank = live.pop(key)
+        buffer_type = key[0]
+        per_bank = _per_bank(params) or per_bank
+        if per_bank is None:
+            per_bank = -(-size // max(banks, 1)) if 'DRAM' in buffer_type.upper() else size
+        freed.append((address, address + per_bank, buffer_type))
     return freed
+
+
+def _per_bank(params):
+    value = params.get('max_size_per_bank')
+    return None if value is None else int(value)
 
 
 def census_capture(original):
@@ -291,7 +333,7 @@ def censused(original, operations, mesh, operation, site):
     global SEQUENCE
     SEQUENCE += 1
     seq = SEQUENCE
-    before, state_before = memory_views(operations, mesh), collective_state()
+    before, state_before = memory_views(operations, mesh), collective_groups()
     started = False
     if os.environ.get(GRAPH_FLAG, '1') != '0':
         try:
@@ -311,20 +353,74 @@ def censused(original, operations, mesh, operation, site):
     ranges = None
     if nodes is not None:
         try:
-            ranges = freed_ranges(nodes)
+            ranges = freed_ranges(nodes, dram_banks(before))
         except BaseException as failure:
             unavailable('graph parse %s: %s' % (type(failure).__name__, str(failure)[:80]))
-    after, state_after = memory_views(operations, mesh), collective_state()
+    after, state_after = memory_views(operations, mesh), collective_groups()
     if ranges is not None and len(TRACES) < MAX_TRACES:
-        TRACES.append(dict(seq=seq, site=site, ranges=ranges))
+        TRACES.append(dict(seq=seq, site=site, ranges=ranges, handle=trace))
     total = sum(hi - lo for lo, hi, _ in ranges) if ranges else 0
-    log('[PINDIAG] trace census seq=%d site=%s temporaries=%s bytes=%s' % (
+    log('[PINDIAG] trace census seq=%d site=%s temporaries=%s bytes_per_bank=%s' % (
         seq, site, 'n/a' if ranges is None else len(ranges), 'n/a' if ranges is None else total))
     for line in view_text(before, after):
         log('[PINDIAG] trace census seq=%d %s' % (seq, line))
-    if state_before or state_after:
-        log('[PINDIAG] trace census seq=%d ccl before{%s} after{%s}' % (seq, state_before, state_after))
+    ccl_lines(seq, state_before, state_after)
     return trace, result
+
+
+def dram_banks(views):
+    """The DRAM bank count of the memory views (memory_views), 1 where they are unavailable."""
+    try:
+        return max(int(views[0]['dram']['banks']), 1)
+    except BaseException:
+        return 1
+
+
+def ccl_lines(seq, before, after):
+    """'ccl before{shared{..} model{..} sampler{..}} after{...}' on one line, or one line per object where that would pass
+    CCL_LINE_BUDGET (and one per side where even that would pass LINE_BUDGET)."""
+    if not before and not after:
+        return
+    head = '[PINDIAG] trace census seq=%d ccl' % seq
+    whole = '%s before{%s} after{%s}' % (head, groups_text(before), groups_text(after))
+    if len(whole) <= CCL_LINE_BUDGET:
+        return log(whole)
+    before_by_name, after_by_name = dict(before), dict(after)
+    for name in [name for name, _ in before] + [name for name, _ in after if name not in before_by_name]:
+        pair = '%s %s before{%s} after{%s}' % (head, name, before_by_name.get(name, ''), after_by_name.get(name, ''))
+        if len(pair) <= LINE_BUDGET:
+            log(pair)
+        else:
+            log('%s %s before{%s}' % (head, name, before_by_name.get(name, '')))
+            log('%s %s after{%s}' % (head, name, after_by_name.get(name, '')))
+
+
+def census_release(original):
+    """The twin of ttnn.release_trace: the original's call, then the trace's freed temporaries are forgotten (a released trace
+    is never replayed, so nothing it wrote can be written again)."""
+    def release_trace(*args, **kwargs):
+        result = original(*args, **kwargs)
+        forget_trace(args + tuple(kwargs.values()))
+        return result
+    release_trace.census_of = original
+    return release_trace
+
+
+def forget_trace(handles):
+    """Drop the recorded traces whose handle is one of `handles`."""
+    if not TRACES:
+        return
+
+    def held(trace):
+        for handle in handles:
+            try:
+                if trace['handle'] is handle or trace['handle'] == handle:
+                    return True
+            except BaseException:
+                continue
+        return False
+
+    TRACES[:] = [trace for trace in TRACES if not held(trace)]
 
 
 def count_packed_step(original):
@@ -339,14 +435,14 @@ def count_packed_step(original):
 
 
 def engine_begin():
-    """An engine's build starts: traces captured before this point are the ones its buffers are checked against, and the
-    packed steps are counted from here (first_replay)."""
-    global ENGINE_BOUNDARY, ENGINE_PACKED
-    ENGINE_BOUNDARY, ENGINE_PACKED = SEQUENCE, PACKED_STEPS
+    """An engine's build starts: the live traces captured before this point are the ones its buffers are checked against, and
+    the packed-step notes are counted from here (first_replay)."""
+    global ENGINE_BOUNDARY, ENGINE_NOTES
+    ENGINE_BOUNDARY, ENGINE_NOTES = SEQUENCE, PACKED_NOTES
 
 
 def overlapping(lo, hi, traces):
-    """The first trace whose freed temporaries intersect [lo, hi), or None."""
+    """The first trace whose freed temporaries intersect the per-bank extent [lo, hi), or None."""
     for trace in traces:
         for start, stop, buffer_type in trace['ranges']:
             if 'DRAM' in buffer_type.upper() and lo < stop and start < hi:
@@ -355,17 +451,31 @@ def overlapping(lo, hi, traces):
 
 
 def census_engine(request_id, request, operations):
-    """After an engine is admitted (QWEN_FAST_TRACE_CENSUS=1): each captured width's persistent buffer extents per chip, and
-    '[PINDIAG] trace overlap' for each buffer inside the freed temporaries of a trace captured before this engine's build.
+    """After an engine is admitted (QWEN_FAST_TRACE_CENSUS=1): each captured width's persistent buffer extents per chip (per
+    bank), and '[PINDIAG] trace overlap' for each buffer inside the freed temporaries of a live trace captured before this
+    engine's build.
     Never raises. Also notes, under QWEN_FAST_SEQ_STAGE_LOG, when the engine was built (first_replay)."""
     if stage_log_enabled():
-        BUILT_AT[id(getattr(request, 'engine', None))] = ENGINE_PACKED
+        BUILT_AT[id(getattr(request, 'engine', None))] = ENGINE_NOTES
     if not census_enabled():
         return
     try:
         _census_engine(request_id, request, operations)
     except BaseException as failure:
         unavailable('engine census %s: %s' % (type(failure).__name__, str(failure)[:80]))
+
+
+def banks_of(operations, shard):
+    """The DRAM bank count of the chip a shard lives on."""
+    return max(int(operations.get_memory_view(shard.device(), operations.BufferType.DRAM).num_banks), 1)
+
+
+def bank_extent(walker, shard, banks):
+    """The bytes a DRAM-interleaved shard occupies in each bank: its pages dealt round-robin over `banks`, so the buffer's
+    address is the same offset in every bank and its extent there is ceil(pages / banks) pages."""
+    page = walker.page_bytes(shard)
+    pages = -(-walker.shard_bytes(shard) // page)
+    return -(-pages // banks) * page
 
 
 def _census_engine(request_id, request, operations):
@@ -385,7 +495,7 @@ def _census_engine(request_id, request, operations):
                 if not all(walker.in_dram(shard) for shard in shards):
                     continue
                 chip_addresses = addresses(operations, tensor)
-                sizes = [walker.shard_bytes(shard) for shard in shards]
+                sizes = [bank_extent(walker, shard, banks_of(operations, shard)) for shard in shards]
             except BaseException:
                 continue
             for chip, (address, size) in enumerate(zip(chip_addresses, sizes)):
@@ -396,7 +506,7 @@ def _census_engine(request_id, request, operations):
                 if trace is not None:
                     reported += 1
                     if reported <= MAX_OVERLAP_LINES:
-                        log('[PINDIAG] trace overlap request=%s rows=%s buffer=chip%d@%#x+%d trace=%s'
+                        log('[PINDIAG] trace overlap request=%s rows=%s buffer=chip%d@%#x+%d/bank trace=%s'
                             % (label, rows, chip, address, size, trace['site']))
         for chip, (low, high) in sorted(extents.items()):
             log('[PINDIAG] engine buffers request=%s rows=%s chip%d buffers=%d lo=%#x hi=%#x'
@@ -406,22 +516,31 @@ def _census_engine(request_id, request, operations):
     log('[PINDIAG] trace census engine request=%s traces=%d overlaps=%d' % (label, len(earlier), reported))
 
 
-def note_collectives(collectives):
-    """serving_runtime: the one collectives object every request shares."""
-    if census_enabled() or stage_log_enabled() or flag_on(CCL_LOG_FLAG):
-        register_collectives(collectives)
+def note_collectives(collectives, model=None, sampler=None):
+    """serving_runtime: the collectives object every request shares ('shared', the drafter's), and the two others that cycle
+    their own semaphore handles: the target model's (the all-reduces in the verify and packed traces, eager prefill) and the
+    pinned sampler's (its gathers, which the packed capture holds under the T1 audit)."""
+    if not (census_enabled() or stage_log_enabled() or flag_on(CCL_LOG_FLAG)):
+        return
+    register_collectives(collectives)
+    register_collectives(getattr(model, 'tt_ccl', None), 'model')
+    sampler_ccl = getattr(sampler, 'tt_ccl', None)
+    if sampler_ccl is None:
+        sampler_ccl = getattr(getattr(sampler, 'tt_sampling', None), 'tt_ccl', None)
+    register_collectives(sampler_ccl, 'sampler')
 
 
 def install(environ=None):
-    """Rebind capture_operation and verifier_engine.note_packed_step to their censusing twins in every loaded module holding the
-    original by name (`from attention_batch import capture_operation` binds a copy), and on attention_batch itself, which the
-    lazy imports in quad_draft read at call time. -> [(namespace, name, original)] for each binding changed, so tp_addresses
+    """Rebind capture_operation, verifier_engine.note_packed_step and ttnn.release_trace to their censusing twins in every loaded
+    module holding the original by name (`from attention_batch import capture_operation` binds a copy), and on attention_batch
+    itself, which the lazy imports in quad_draft read at call time. -> [(namespace, name, original)] for each binding changed, so tp_addresses
     can put them back; [] when already installed."""
     import importlib
 
     changed = []
     for module_name, name, wrap in (('attention_batch', 'capture_operation', census_capture),
-                                    ('verifier_engine', 'note_packed_step', count_packed_step)):
+                                    ('verifier_engine', 'note_packed_step', count_packed_step),
+                                    ('ttnn', 'release_trace', census_release)):
         try:
             module = importlib.import_module(module_name)
         except ImportError:
@@ -440,8 +559,9 @@ def install(environ=None):
 
 def reset():
     """Forget every recorded trace and counter (tests, and a process that rebuilds its engines)."""
-    global COLLECTIVES, SEQUENCE, ENGINE_BOUNDARY, PACKED_STEPS, ENGINE_PACKED
-    COLLECTIVES, SEQUENCE, ENGINE_BOUNDARY, PACKED_STEPS, ENGINE_PACKED = None, 0, 0, 0, 0
+    global SEQUENCE, ENGINE_BOUNDARY, PACKED_NOTES, ENGINE_NOTES
+    SEQUENCE, ENGINE_BOUNDARY, PACKED_NOTES, ENGINE_NOTES = 0, 0, 0, 0
+    COLLECTIVES.clear()
     del TRACES[:]
     BUILT_AT.clear()
     UNAVAILABLE_REPORTED.clear()

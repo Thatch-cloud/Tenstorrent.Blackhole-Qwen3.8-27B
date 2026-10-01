@@ -127,8 +127,8 @@ class StageLogTests(unittest.TestCase):
         self.assertTrue(all(line.startswith('[SEQ-STAGE] request=request-V rows=4 first=1 stage=') for line in lines
                             if line.startswith('[SEQ-STAGE]')))
         census = [line for line in lines if line.startswith('[PINDIAG] first replay')]
-        self.assertEqual(census, ['[PINDIAG] first replay request=request-V rows=4 built_after_packed_round=n/a '
-                                  'packed_rounds_since_build=n/a program_cache=41'])
+        self.assertEqual(census, ['[PINDIAG] first replay request=request-V rows=4 packed_notes_at_build=n/a '
+                                  'packed_notes_since_build=n/a program_cache=41'])
         self.assertEqual(calls, ['validate', 'restore', 'stage_inputs', 'execute', 'sync', 'readback'])
 
     def test_the_retained_replay_path_logs_the_same_stages_and_no_census_line(self):
@@ -142,11 +142,11 @@ class StageLogTests(unittest.TestCase):
         live, ticket, calls = verifying_engine(first=True, retained=False)
         lines = []
         with patch.dict(os.environ, {'QWEN_FAST_SEQ_STAGE_LOG': '1', 'QWEN_FAST_TP': '4'}), patch.object(trace_census, 'log', lines.append), \
-                patch.object(trace_census, 'PACKED_STEPS', 9), \
+                patch.object(trace_census, 'PACKED_NOTES', 9), \
                 patch.dict(trace_census.BUILT_AT, {id(live): 5}), \
                 patch('verifier_engine_tp.stage_inputs', lambda *args: None):
             live.verify(ticket)
-        self.assertIn('built_after_packed_round=5 packed_rounds_since_build=4 program_cache=41',
+        self.assertIn('packed_notes_at_build=5 packed_notes_since_build=4 program_cache=41',
                       [line for line in lines if 'first replay' in line][0])
 
     def test_without_the_flag_nothing_is_logged_and_the_calls_are_the_same(self):

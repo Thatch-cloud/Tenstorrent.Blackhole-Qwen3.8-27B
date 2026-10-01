@@ -531,7 +531,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         experiment = from_environment(directory, runtime_root)
 
         scopes.enter_context(sampler_links(sampler.tt_sampling, 4))
-        trace_census.note_collectives(collectives)
+        trace_census.note_collectives(collectives, model, sampler)
         memory_ledger.record('P3', serving_collectives=collectives, serving_sampler=sampler, gather_experiment=experiment)
         audit = scopes.enter_context(combined_runtime(operations, model, directory=directory,
             runtime_root=runtime_root, native_attention_evidence=native_attention_evidence,
