@@ -689,10 +689,14 @@ def main():
     passed = False
     engine_logs = []
 
-    def read_engine(boot=None):
-        """This boot's engine log (engine_log), kept as engine-<boot>.log and for the verdict when `boot` is named."""
+    def read_engine(boot=None, keep=None):
+        """This boot's engine log (engine_log), kept as engine-<boot>.log and for the verdict when `boot` is named;
+        only kept, as engine-<keep>.log, when `keep` is."""
         logs = run(['docker', 'logs', name], check=False)
         text = engine_log(name, (logs.stdout or '') + (logs.stderr or ''))
+        if keep is not None:
+            with open(os.path.join(options.results, 'engine-%s.log' % keep), 'w') as handle:
+                handle.write(text)
         if boot is not None:
             engine_logs.append((boot, text))
             with open(os.path.join(options.results, 'engine-%s.log' % boot), 'w') as handle:
@@ -705,6 +709,9 @@ def main():
         problem = wait_http(port, name, startup)
         if record('start', dict(ok=problem is None, problem=problem, http_s=round(time.time() - started, 1))):
             if record('load', load(name, model)):
+                # Kept before any traffic: a health recovery reload rewrites the runtime's subprocess log, and v163 lost the
+                # first boot's attach lines that way (engine-load-boot.log, never part of the verdict).
+                read_engine(keep='load-boot')
                 ok = record('served_name', served_name(port, model, served))
                 ok = record('warmup', chat(port, model, 'warmup', 1)) and ok
                 ok = record('coding', chat(port, served, 'Write a Python function that merges two sorted lists, '
@@ -719,6 +726,7 @@ def main():
                 [thread.start() for thread in threads]
                 [thread.join() for thread in threads]
                 ok = record('concurrent4', dict(ok=all(o and o['ok'] for o in outs), users=outs)) and ok
+                read_engine(keep='after-concurrent4')
                 tool = chat(port, served, 'Read src/main.rs using the tool.', 300, tool_choice='auto',
                             tools=[{'type': 'function', 'function': {'name': 'read_file', 'description': 'Read a file',
                                     'parameters': {'type': 'object', 'properties': {'path': {'type': 'string'}},
