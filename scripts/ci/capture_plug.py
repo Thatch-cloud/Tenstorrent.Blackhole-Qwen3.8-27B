@@ -72,6 +72,11 @@ DEFAULT_ENGINE_LEAVE_MB = (256, MB)
 DEFAULT_MIN_FREE_MB = (128, MB)
 MAX_SWEEP_ITERATIONS = 20000
 MAX_SPILL_ROUNDS = 32
+# Per-bank bytes of free memory that no page-sized plug can take: slivers between buffers (a few hundred bytes each, 3136 B in all
+# on the v186 attach). seal() counts them as part of "nothing but the reserve is left" - a reserve zone must never be plugged
+# whole because slivers made the free total a page or two larger than its last hole (v186: the whole 256 MB reserve was plugged
+# and the next allocation ran out of memory).
+SLIVER_ALLOWANCE = 1 * MB   # the cap; a zone's own allowance is 1/64 of its reserve, at least a page (so a small test reserve is not swallowed)
 ABANDONED = []           # blocks of a failed attach: referenced for good, never freed (a freed address under a running kernel)
 PACKED = []              # the open packed plugs of this process: an engine's zone must stay under every one of them
 
@@ -257,8 +262,11 @@ class Zone:
     """One owner's capture zone in one buffer type (see the module docstring): open(), the captures, seal(), release(); the
     plugs close with close() once the owner's traces are gone."""
 
-    def __init__(self, memory, leave, reserve, log=None, name='packed', ceiling=None):
+    def __init__(self, memory, leave, reserve, log=None, name='packed', ceiling=None, floor=None):
         self.memory, self.leave, self.reserve, self.log, self.name = memory, align_down(leave), align_down(reserve), log, name
+        # The least free memory per bank the seal may leave (the kernel-binary reserve); None checks nothing. Only a zone with a
+        # reserve above it is held to it: an engine zone has the packed zone above it, not free memory.
+        self.floor = floor if reserve > 0 else None
         # Where the zone must end at the latest: an engine's zone must stay below the packed zone, never in the binary reserve above.
         self.ceiling = ceiling
         self.low_plugs, self.zone_plugs, self.ballast = [], [], None
@@ -319,13 +327,28 @@ class Zone:
         memory = self.memory
         limit = self.hi
         self.zone_plugs, _ = sweep(memory, limit, self.log)
+        # Slivers (free pieces under a page, which no plug can take) are part of memory.free(); with a reserve above the zone they
+        # must not make the reserve look like "a hole and then more free memory", or it is plugged whole.
+        slack = max(PAGE, min(SLIVER_ALLOWANCE, self.reserve // 64)) if self.reserve > 0 else PAGE
         for unused in range(MAX_SPILL_ROUNDS + 1):
             address, size = lowest_hole(memory)
-            if memory.free() - size < PAGE:
-                limit = max(limit, address)    # one hole holds all the free memory left: the reserve; the used memory ends where it starts
+            remaining = memory.free() - size
+            if remaining < slack:
+                # This hole holds all the free memory that is left: the reserve. It is never plugged; the used memory ends where it
+                # starts (a hole that starts a sliver under the zone top, because the sweep cannot plug under a page, ends the
+                # zone there).
+                if self.floor is not None and size < self.floor:
+                    raise CapturePlugError('capture plug zone %s: only %.1f MB per bank is free above the sealed captures (a hole at '
+                                           '%#x), under the %.1f MB floor for kernel binaries: raise %s' % (
+                                               self.name, size / MB, address, self.floor / MB, RESERVE_FLAG))
+                limit = address
                 break
             if unused == MAX_SPILL_ROUNDS:
                 raise CapturePlugError('capture plug zone %s: more than %d free holes above the zone' % (self.name, MAX_SPILL_ROUNDS))
+            if self.floor is not None and remaining < self.floor:
+                raise CapturePlugError('capture plug zone %s: plugging the freed hole [%#x, %#x) would leave %.1f MB per bank free, '
+                                       'under the %.1f MB floor for kernel binaries (refused instead of taking the last free '
+                                       'memory)' % (self.name, address, address + size, remaining / MB, self.floor / MB))
             self.say('spill: a freed hole [%#x, %#x) lies above the sealed limit %#x; plugging it' % (address, address + size, limit))
             self.zone_plugs.append(memory.allocate(size))
             if self.zone_plugs[-1].address != address:
@@ -468,7 +491,7 @@ class Plug:
         if settings['l1']:
             kinds.append(('L1', settings['l1_leave'], settings['l1_reserve']))
         memories = [memory_factory(operations, mesh, kind) for kind, _, _ in kinds]
-        zones = [Zone(memory, leave, reserve, log, 'packed') for memory, (_, leave, reserve) in zip(memories, kinds)]
+        zones = [Zone(memory, leave, reserve, log, 'packed', floor=settings['min_free']) for memory, (_, leave, reserve) in zip(memories, kinds)]
         return cls(zones, memories, settings['min_free'], log)
 
     @classmethod

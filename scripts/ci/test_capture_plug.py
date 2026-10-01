@@ -378,6 +378,94 @@ class ZoneTests(unittest.TestCase):
         self.assertEqual(heap.used, baseline)
 
 
+class V186SealTests(unittest.TestCase):
+    """The v186 attach (c2-packed-tp4-speed-fix, QWEN_FAST_CAPTURE_PLUG=1): the seal plugged the whole 256 MB reserve and the next
+    allocation died with 'free: 3136 B'. The numbers below are the logged ones (per bank): zone [0xcceba240, 0xeceba240), 512 MB
+    leave, 256 MB reserve; the captures' live memory ended 960 B under the zone top, a freed hole [0xeceb9e80, 0xfce8b680) was
+    left above it (kernel binaries had taken the top 0x2ebc0 bytes), and 3136 B of free slivers (each under a page) sat between
+    buffers, so memory.free() was a page and a half more than that hole."""
+
+    TOP = 0xfceba240
+    LO = 0xcceba240
+    HI = 0xeceba240
+    USED_END = 0xeceb9e80
+    BINARIES = 0xfceba240 - 0xfce8b680
+    SLIVERS = (1045, 1045, 1046)
+
+    def heap_and_zone(self, floor=128 * plug.MB):
+        heap = Heap(self.TOP)
+        low = 0x1000000 + 0x240          # the low region: used, ends where the main free region starts (page-misaligned, as logged)
+        heap.used[0] = low
+        zone = plug.Zone(FakeMemory(heap), 512 * plug.MB, 256 * plug.MB, name='packed', floor=floor)
+        return heap, zone
+
+    def run_captures(self, heap, zone):
+        """Persistent buffers and temporaries inside the zone; the live memory ends at USED_END; slivers between buffers."""
+        slivers = []
+        for size in self.SLIVERS:
+            slivers.append(heap.allocate(size))
+            heap.allocate(64)               # a persistent 64 B between the slivers keeps them apart
+        big = heap.allocate(150 * plug.MB)
+        heap.allocate(200 * plug.MB)
+        heap.free(big)                      # a freed 150 MB temporary: plugged by the seal
+        heap.allocate(self.USED_END - max(a + s for a, s in heap.used.items()))
+        for address in slivers:
+            heap.free(address)
+        heap.allocate_top(self.BINARIES)    # the program cache took the top of the reserve while the captures ran
+
+    def test_the_logged_arithmetic_is_what_the_model_builds(self):
+        heap, zone = self.heap_and_zone()
+        zone.open()
+        self.assertEqual((zone.lo, zone.hi), (self.LO, self.HI))
+        self.run_captures(heap, zone)
+        holes = heap.free_blocks()
+        self.assertEqual(holes[-1], (self.USED_END, 0xfce8b680 - self.USED_END))
+        self.assertEqual(sum(room for _, room in holes) - holes[-1][1], sum(self.SLIVERS) + 150 * plug.MB)
+
+    def test_the_seal_keeps_the_reserve_whole_and_never_runs_the_bank_out_of_memory(self):
+        heap, zone = self.heap_and_zone()
+        zone.open()
+        self.run_captures(heap, zone)
+        zone.seal()                         # the unfixed seal plugged the reserve, then raised 'Out of Memory' from the probe
+        zone.release()
+        reserve = heap.free_blocks()[-1]
+        self.assertEqual(reserve[0], self.USED_END, 'the reserve hole starts where the used memory ends')
+        self.assertEqual(zone.hi, self.USED_END)
+        self.assertGreater(reserve[1], 255 * plug.MB, 'the whole reserve is free for kernel binaries')
+        # no plug lies in the reserve
+        self.assertTrue(all(block.end <= self.USED_END for block in zone.zone_plugs))
+        # the freed 150 MB temporary is plugged: a later allocation cannot land in it
+        later = heap.allocate(64 * PAGE)
+        self.assertLessEqual(later + 64 * PAGE, zone.lo)
+
+    def test_a_reserve_under_the_floor_is_refused_with_a_clear_error_not_an_oom(self):
+        heap, zone = self.heap_and_zone(floor=300 * plug.MB)
+        zone.open()
+        self.run_captures(heap, zone)
+        with self.assertRaisesRegex(plug.CapturePlugError, 'under the 300.0 MB floor'):
+            zone.seal()
+
+    def test_a_freed_hole_above_the_zone_is_refused_when_plugging_it_would_leave_less_than_the_floor(self):
+        heap = Heap()
+        zone = plug.Zone(FakeMemory(heap), 400 * PAGE, 2500 * PAGE, name='packed', floor=2400 * PAGE)
+        zone.open()
+        heap.allocate(450 * PAGE)                  # persistent, 50 pages over the zone top
+        temporary = heap.allocate(100 * PAGE)
+        heap.allocate(10 * PAGE)
+        heap.free(temporary)                       # a freed temporary above the zone top, with 2340 pages of reserve above it
+        with self.assertRaisesRegex(plug.CapturePlugError, 'would leave'):
+            zone.seal()
+        self.assertEqual(zone.state, 'open', 'a refused seal does not claim to be sealed')
+
+    def test_the_wiring_hands_the_floor_to_the_packed_zone_only(self):
+        heap = Heap()
+        settings = dict(plug.config({plug.FLAG: '1'}), leave=400 * PAGE, reserve=700 * PAGE, engine_leave=100 * PAGE, min_free=90 * PAGE)
+        packed = plug.Plug.packed(settings, None, None, memory_factory=lambda operations, mesh, kind: FakeMemory(heap, kind))
+        engine = plug.Plug.engine(settings, None, None, memory_factory=lambda operations, mesh, kind: FakeMemory(heap, kind))
+        self.assertEqual(packed.zones[0].floor, 90 * PAGE)
+        self.assertIsNone(engine.zones[0].floor)
+
+
 class PlugTests(unittest.TestCase):
     def build(self, heap, **extra):
         settings = dict(plug.config({plug.FLAG: '1'}), leave=1200 * PAGE, reserve=800 * PAGE, engine_leave=300 * PAGE,
