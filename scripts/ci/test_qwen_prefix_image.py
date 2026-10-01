@@ -49,7 +49,7 @@ GATE_ONLY_OTHERS = ('general-tp4-bench', 'general-tp4-mmrs', 'c2-packed-tp4-gate
                     'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-gate-quad',
                     'c2-packed-tp4-gate-pairs',
                     # the hang diagnosis's arms (tp4-serve-3)
-                    'c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2',
+                    'c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t1-rshard-audit', 'c2-packed-tp4-diag-t2',
                     # the fix arm (tp4-serve-4)
                     'c2-packed-tp4-speed-fix',
                     # the sampler isolation arms (tp4/sampler)

@@ -81,6 +81,7 @@ SAMPLER_PROFILES = {'c2-packed-tp4-diag-sprewarm': ('c2-packed-tp4-diag', PREWAR
 RSHARD, RSHARD_AUDIT = 'QWEN_FAST_REQUEST_SHARD_ARGMAX', 'QWEN_FAST_REQUEST_SHARD_AUDIT'
 RSHARD_PROFILES = {'c2-packed-tp4-diag-rshard': ('c2-packed-tp4-diag', {RSHARD: '1'}),
                    'c2-packed-tp4-speed-rshard': ('c2-packed-tp4-speed', {RSHARD: '1'}),
+                   'c2-packed-tp4-diag-t1-rshard-audit': ('c2-packed-tp4-diag-t1', {RSHARD: '1', RSHARD_AUDIT: '1'}),
                    'c2-packed-tp4-gate-rshard-audit': ('c2-packed-tp4', {RSHARD: '1', RSHARD_AUDIT: '1', 'QWEN_C2_GATE_PROFILE': '1'})}
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 
@@ -434,7 +435,7 @@ class FixProfileTests(unittest.TestCase):
             with self.subTest(profile=name):
                 self.assertNotIn('QWEN_FAST_CAPTURE_PLUG', env if name != 'c2-packed-tp4-speed-fix' else {})
                 self.assertNotIn('QWEN_FAST_CAPTURE_PLUG_ENGINES', env if name != 'c2-packed-tp4-speed-fix' else {})
-                if name not in DIAG_PROFILES and name != 'c2-packed-tp4-speed-fix' and not name.startswith('c2-packed-tp4-diag-s') and name != 'c2-packed-tp4-diag-rshard':
+                if name not in DIAG_PROFILES and name != 'c2-packed-tp4-speed-fix' and not name.startswith('c2-packed-tp4-diag-s') and name not in ('c2-packed-tp4-diag-rshard', 'c2-packed-tp4-diag-t1-rshard-audit'):
                     for flag in ('QWEN_FAST_STALL_DEADLINE_S', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_TRACE_CENSUS_GRAPH'):
                         self.assertNotIn(flag, env)
 
@@ -657,7 +658,7 @@ class RequestShardProfileTests(unittest.TestCase):
         self.assertNotIn(RSHARD, image_env())
         self.assertNotIn(RSHARD_AUDIT, image_env())
         for name in RSHARD_PROFILES:
-            if name != 'c2-packed-tp4-gate-rshard-audit':
+            if name not in ('c2-packed-tp4-gate-rshard-audit', 'c2-packed-tp4-diag-t1-rshard-audit'):
                 self.assertNotIn(RSHARD_AUDIT, profiles()[name]['env'], 'the audit is the audited arm alone')
 
     def test_the_admission_accepts_each_arm_over_the_image_environment(self):

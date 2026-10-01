@@ -161,7 +161,8 @@ class FlagTests(EngineCase):
         self.assertTrue(live.request_shard and live.request_shard_audit)
 
     def test_the_pairs_engine_file_is_untouched_by_the_flag(self):
-        source = open(pair_engine.__file__, encoding='utf-8').read()
+        with open(pair_engine.__file__, encoding='utf-8') as handle:
+            source = handle.read()
         self.assertNotIn('REQUEST_SHARD', source)
 
 
@@ -302,6 +303,14 @@ class AuditTests(EngineCase):
         mismatches = [line for line in self.lines if line.startswith(verifier_engine_tp.AUDIT_MISMATCH)]
         self.assertEqual(len(mismatches), 1)
         self.assertIn('differing=[0, 3]', mismatches[0])
+
+    def test_a_fold_that_cannot_run_is_logged_and_the_pinned_ids_are_served(self):
+        live = self.engine(AUDITED)
+        full, output = self.operation(live, AUDITED, rows=4)
+        with patch.object(verifier_engine_tp.verify_trace_t1, 'combine_shards', side_effect=ValueError('bad shard id')):
+            served = live.shard_predictions(output, 4)
+        self.assertEqual(served, full.float().argmax(dim=-1).tolist())
+        self.assertTrue([line for line in self.lines if line.startswith(verifier_engine_tp.AUDIT_MISMATCH) and 'combine failed' in line])
 
     def test_a_failing_pinned_sampler_frees_the_shard_outputs_and_the_logits(self):
         live = self.engine(AUDITED)

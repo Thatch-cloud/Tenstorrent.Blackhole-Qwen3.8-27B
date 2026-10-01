@@ -891,7 +891,7 @@ class ProfileGatingTests(unittest.TestCase):
                                  # the batched-draft window's arms (tp4/draft)
                                  'c2-packed-tp4-speed-quad': True, 'c2-packed-tp4-speed-pairs': True,
                                  # the hang diagnosis's arms (tp4-serve-3)
-                                 'c2-packed-tp4-diag': True, 'c2-packed-tp4-diag-t1': True, 'c2-packed-tp4-diag-t2': True, 'c2-packed-tp4-f2': True, 'c2-packed-tp4-f12': True,
+                                 'c2-packed-tp4-diag': True, 'c2-packed-tp4-diag-t1': True, 'c2-packed-tp4-diag-t1-rshard-audit': True, 'c2-packed-tp4-diag-t2': True, 'c2-packed-tp4-f2': True, 'c2-packed-tp4-f12': True,
                                  'c2-packed-tp4-gate-quad': True, 'c2-packed-tp4-gate-pairs': True,
                                  # the fused-commit window's arms (tp4/fcommit)
                                  'c2-packed-tp4-gate-fcommit': True,
@@ -924,7 +924,7 @@ class ProfileGatingTests(unittest.TestCase):
                                       'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-pairs',
                                       'c2-packed-tp4-diag-sprewarm', 'c2-packed-tp4-diag-strace', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace',
                                       'c2-packed-tp4-diag-rshard', 'c2-packed-tp4-speed-rshard', 'c2-packed-tp4-gate-rshard-audit',
-                                      'c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2', 'c2-packed-tp4-f2', 'c2-packed-tp4-f12',
+                                      'c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t1-rshard-audit', 'c2-packed-tp4-diag-t2', 'c2-packed-tp4-f2', 'c2-packed-tp4-f12',
                                       'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-pairs',
                                       'c2-packed-tp4-gate-fcommit', 'c2-packed-tp4-gate-fcommit-live', 'c2-packed-tp4-gate-fcommit-quad', 'c2-packed-tp4-speed-fcommit', 'c2-packed-tp4-speed-fcommit-oop', 'c2-packed-tp4-speed-fcommit-quad',
                                       'c2-packed-tp4-gate-vglue', 'c2-packed-tp4-speed-vglue', 'c2-packed-tp4-speed-vglue-c1a', 'c2-packed-tp4-speed-vglue-v1', 'c2-packed-tp4-speed-vglue-v2', 'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a',

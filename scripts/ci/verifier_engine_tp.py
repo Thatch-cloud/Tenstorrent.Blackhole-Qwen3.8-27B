@@ -125,10 +125,15 @@ class VerifierEngine(PairVerifierEngine):
         chip_values = [self.operations.to_torch(part).reshape(-1)[:rows] for part in value_parts]
         if any(len(value) != rows for value in (*chip_ids, *chip_values)):
             raise AssertionError('Missing target prediction rows')
-        combined = verify_trace_t1.combine_shards(chip_ids, chip_values).tolist()
         if len(output) < 4:
-            return combined
+            return verify_trace_t1.combine_shards(chip_ids, chip_values).tolist()
         pinned = self.operations.to_torch(self.operations.get_device_tensors(output[3])[0]).reshape(-1)[:rows].tolist()
+        try:
+            combined = verify_trace_t1.combine_shards(chip_ids, chip_values).tolist()
+        except Exception as error:
+            # audited, the pinned ids are what is served: a fold that cannot run (a shard id out of range) is a finding, not a failed request
+            verify_trace_t1.log_line('%s rows=%d combine failed: %r' % (AUDIT_MISMATCH, rows, error))
+            return pinned
         differing = [row for row, (mine, kept) in enumerate(zip(combined, pinned)) if mine != kept]
         if differing:
             verify_trace_t1.log_line('%s rows=%d differing=%s shard=%s sampler=%s' % (
