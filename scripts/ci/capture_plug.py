@@ -6,6 +6,12 @@ change the capture's footprint (one more all-gather, +126 MB of kept windows), s
 with them. This is a hypothesis, not a finding: no victim has been named (trace_census's overlap census is what names one), and
 the module is the experiment arm that removes the class, not a claim that the class is the cause.
 
+SIZES ARE PER BANK, NOT PER CHIP. DeviceMemory divides the allocator's totals by the bank count (a p150a has 8 DRAM banks of about 4.24
+GB), so every *_MB below is megabytes in each bank, and a zone of LEAVE_MB takes LEAVE_MB x 8 on a chip. Measured on a four-card
+engine before the packed capture (v174): about 2.5 GB per bank free (20,138 MB per chip), the packed block 224 MB per bank, its verify
+capture 168 MB per bank, one engine 62 MB per bank. The defaults (512 leave, 256 reserve, 256 engine, 128 floor) fit that with margin; a
+default must never be larger than a bank (the first draft asked for 6 GiB and could not attach).
+
 WHAT THIS DOES (code only, no kernel change). Everything lives in per-bank terms (an interleaved buffer sits at the same offset
 in every bank of every chip, so one address is the whole story) and relies on one allocator property: first-fit, bottom-up.
 
@@ -27,9 +33,17 @@ what binaries may use, and monitor() refuses (CapturePlugError) when the free me
 
 WHAT IT DOES NOT COVER, AND WHAT CHECKS IT. The temporaries' high-water mark is not observable without the graph census (a freed
 extent above the zone's top would be merged into the free region), so the zone has to be large enough: a capture that does not fit
-fails at attach (out of memory, fail closed); one that spills into RESERVE does not, and verify_extents() (given the census's
-recorded write sets, QWEN_FAST_TRACE_CENSUS_GRAPH=1) raises for any recorded extent that ends above the zone. Every plug is
-inert: nothing reads it, and nothing is allocated inside a captured region.
+fails at attach (out of memory, fail closed). One that spills into RESERVE does not fail: seal() finds where the used memory ends
+(plugging the zone first, then every hole above it except the last one, the reserve) and seals up to it. Every plug is
+inert: nothing reads it, and nothing is allocated inside a captured region. The graph census is not needed for any of this (it is
+off in every profile: its str() of a tensor inside a capture is what killed v173).
+
+THE FREE-MEMORY FLOOR is read ABOVE the packed zone (free_above): the bytes the reserve still has for kernel binaries and the
+program cache, found by plugging everything below the zone's top for the length of the read. Total free memory would count the
+low region the engines fill and hide a reserve that is nearly gone.
+
+L1 IS NOT MODELLED. tt-metal allocates interleaved L1 buffers top-down by default (only DRAM defaults to bottom-up) and circular
+buffers grow up from the L1 base, so the zone would sit at the wrong end: config() refuses QWEN_FAST_CAPTURE_PLUG_L1=1.
 
 The pair never reaches here: the flag is read by the TP4 attach only.
 
@@ -50,7 +64,14 @@ L1_RESERVE_FLAG = 'QWEN_FAST_CAPTURE_PLUG_L1_RESERVE_KB'
 PAGE = 2048              # bytes per bank of the smallest plug: one bf16 tile page
 MB = 1 << 20
 KB = 1 << 10
+# Per-bank defaults (megabytes, then the unit), sized from the four-card measurements in the module docstring: they must fit in the
+# ~2.4 GiB per bank that was free before the packed capture, with margin (the test asserts it).
+DEFAULT_LEAVE_MB = (512, MB)
+DEFAULT_RESERVE_MB = (256, MB)
+DEFAULT_ENGINE_LEAVE_MB = (256, MB)
+DEFAULT_MIN_FREE_MB = (128, MB)
 MAX_SWEEP_ITERATIONS = 20000
+MAX_SPILL_ROUNDS = 32
 ABANDONED = []           # blocks of a failed attach: referenced for good, never freed (a freed address under a running kernel)
 PACKED = []              # the open packed plugs of this process: an engine's zone must stay under every one of them
 
@@ -69,8 +90,8 @@ def _positive(environ, name, default, unit):
 
 
 def config(environ=None):
-    """None when QWEN_FAST_CAPTURE_PLUG is not '1'; else the zone sizes in bytes PER BANK (and the engine flag). A malformed
-    value is a configuration error. Only QWEN_FAST_TP=4 reaches this: the caller checks."""
+    """None when QWEN_FAST_CAPTURE_PLUG is not '1'; else the zone sizes in bytes PER BANK (not per chip; see the module docstring)
+    and the engine flag. A malformed value, or QWEN_FAST_CAPTURE_PLUG_L1=1, is a configuration error. Only QWEN_FAST_TP=4 reaches this: the caller checks."""
     environ = os.environ if environ is None else environ
     value = environ.get(FLAG)
     if value in (None, '', '0'):
@@ -80,10 +101,13 @@ def config(environ=None):
     for flag in (ENGINES_FLAG, L1_FLAG):
         if environ.get(flag, '0') not in ('0', '1'):
             raise ValueError('%s must be 0 or 1, got %r' % (flag, environ.get(flag)))
-    return dict(leave=_positive(environ, LEAVE_FLAG, 4096, MB), reserve=_positive(environ, RESERVE_FLAG, 2048, MB),
-                engine_leave=_positive(environ, ENGINE_LEAVE_FLAG, 1024, MB),
-                min_free=_positive(environ, MIN_FREE_FLAG, 512, MB), engines=environ.get(ENGINES_FLAG, '0') == '1',
-                l1=environ.get(L1_FLAG, '0') == '1', l1_leave=_positive(environ, L1_LEAVE_FLAG, 512, KB),
+    if environ.get(L1_FLAG, '0') == '1':
+        raise ValueError('%s=1 is refused: the L1 zone assumes bottom-up allocation and tt-metal allocates interleaved L1 top-down '
+                         '(circular buffers grow up from the L1 base); it is not modelled or verified on hardware' % L1_FLAG)
+    return dict(leave=_positive(environ, LEAVE_FLAG, *DEFAULT_LEAVE_MB), reserve=_positive(environ, RESERVE_FLAG, *DEFAULT_RESERVE_MB),
+                engine_leave=_positive(environ, ENGINE_LEAVE_FLAG, *DEFAULT_ENGINE_LEAVE_MB),
+                min_free=_positive(environ, MIN_FREE_FLAG, *DEFAULT_MIN_FREE_MB), engines=environ.get(ENGINES_FLAG, '0') == '1',
+                l1=False, l1_leave=_positive(environ, L1_LEAVE_FLAG, 512, KB),
                 l1_reserve=_positive(environ, L1_RESERVE_FLAG, 256, KB))
 
 
@@ -172,23 +196,52 @@ def sweep(memory, limit, log=None, max_iterations=MAX_SWEEP_ITERATIONS):
     iteration cap is reached with holes possibly left."""
     plugs, iterations = [], 0
     size = align_down(memory.largest_free())
-    while size >= PAGE:
-        iterations += 1
-        if iterations > max_iterations:
-            raise CapturePlugError('plug sweep stopped at %d iterations with holes possibly left below %#x' % (max_iterations, limit))
-        size = min(size, align_down(memory.largest_free()))
-        if size < PAGE:
-            break
-        block = memory.allocate(size)
-        if block.end <= limit:
-            plugs.append(block)
-            continue
-        memory.release(block)
-        size = align_down(size // 2)
+    try:
+        while size >= PAGE:
+            iterations += 1
+            if iterations > max_iterations:
+                raise CapturePlugError('plug sweep stopped at %d iterations with holes possibly left below %#x' % (max_iterations, limit))
+            size = min(size, align_down(memory.largest_free()))
+            if size < PAGE:
+                break
+            block = memory.allocate(size)
+            if block.end <= limit:
+                plugs.append(block)
+                continue
+            memory.release(block)
+            size = align_down(size // 2)
+    except BaseException:
+        # A sweep that fails hands back what it took (inert blocks over memory that was free): the caller never saw the list.
+        for block in plugs:
+            try:
+                memory.release(block)
+            except BaseException:
+                pass
+        raise
     if log:
         log('[PINDIAG] capture plug sweep kind=%s limit=%#x plugs=%d plugged_mb=%.1f iterations=%d' % (
             memory.kind, limit, len(plugs), sum(block.per_bank for block in plugs) / MB, iterations))
     return plugs, iterations
+
+
+def lowest_hole(memory):
+    """-> (address, size) of the lowest free hole: a page probe lands at its start (first fit), and a block of size s lands there
+    exactly when the hole holds s (the lowest hole is the first one tried), so a binary search over s finds the size. Every probe
+    is freed again."""
+    probe = memory.allocate(PAGE)
+    address = probe.address
+    memory.release(probe)
+    low, high = 1, max(align_down(memory.largest_free()) // PAGE, 1)
+    while low < high:
+        middle = (low + high + 1) // 2
+        block = memory.allocate(middle * PAGE)
+        fits = block.address == address
+        memory.release(block)
+        if fits:
+            low = middle
+        else:
+            high = middle - 1
+    return address, low * PAGE
 
 
 def verify_sealed(memory, limit):
@@ -219,23 +272,35 @@ class Zone:
     def open(self):
         if self.state != 'new':
             raise CapturePlugError('capture plug zone %s opened twice' % self.name)
+        try:
+            self._open()
+        except BaseException:
+            # Every refusal (no room, over the ceiling, an allocator failure) gives back what this call took: the sweep's low plugs
+            # and the ballast. A refused engine build must not leak every hole below the main region.
+            self._give_back_open()
+            raise
+
+    def _give_back_open(self):
+        for block in ([self.ballast] if self.ballast is not None else []) + self.low_plugs:
+            try:
+                self.memory.release(block)
+            except BaseException:
+                pass
+        self.ballast, self.low_plugs, self.state = None, [], 'closed'
+
+    def _open(self):
         memory = self.memory
         start = probe_start(memory)
         self.low_plugs, _ = sweep(memory, start, self.log)
         largest = align_down(memory.largest_free())
         size = align_down(largest - self.leave - self.reserve)
         if size < PAGE:
-            raise CapturePlugError('no room for a %d MB zone and %d MB reserve: the largest free block is %.1f MB per bank' % (
-                self.leave // MB, self.reserve // MB, largest / MB))
+            raise CapturePlugError('no room for a %d MB zone and %d MB reserve: the largest free block is %.1f MB per bank '
+                                   '(sizes are per bank)' % (self.leave // MB, self.reserve // MB, largest / MB))
         self.ballast = memory.allocate(size)
         self.lo = self.ballast.end
         self.hi = self.lo + self.leave
         if self.ceiling is not None and self.hi > self.ceiling:
-            memory.release(self.ballast)
-            self.ballast = None
-            for block in self.low_plugs:
-                memory.release(block)
-            self.low_plugs, self.state = [], 'closed'
             raise CapturePlugError('the %s zone [%#x, %#x) would reach above %#x, into the memory reserved for kernel binaries' % (
                 self.name, self.lo, self.hi, self.ceiling))
         self.state = 'open'
@@ -243,16 +308,30 @@ class Zone:
             self.lo, self.hi, self.leave // MB, self.reserve // MB, size / MB, len(self.low_plugs)))
 
     def seal(self):
-        """Plug every hole in the zone. Raises CapturePlugError when the captures spilled past the zone's top (a persistent
-        buffer above it) or a hole survives the sweep."""
+        """Plug every hole in the zone and in whatever the captures used above it. The zone is swept first (the ballast is held, so
+        its holes are the only free memory below its top, however large they are against what is left above). Then the holes above
+        the zone's top are taken in address order, each found exactly (lowest_hole) and plugged, until the one that holds ALL the
+        free memory that is left: the reserve (the region kernel binaries grow down into; binaries are never freed during serving,
+        so no hole lies above it). A capture that spilled past the zone's top and freed temporaries there leaves holes below that
+        region, and they are plugged too, whatever their size against it. Raises CapturePlugError when a hole survives."""
         if self.state != 'open':
             raise CapturePlugError('capture plug zone %s sealed from state %s' % (self.name, self.state))
         memory = self.memory
-        start = probe_start(memory)
-        limit = max(self.hi, start)
-        if start > self.hi:
-            self.say('spill: the free region starts at %#x, above the zone top %#x; sealing up to it' % (start, self.hi))
+        limit = self.hi
         self.zone_plugs, _ = sweep(memory, limit, self.log)
+        for unused in range(MAX_SPILL_ROUNDS + 1):
+            address, size = lowest_hole(memory)
+            if memory.free() - size < PAGE:
+                limit = max(limit, address)    # one hole holds all the free memory left: the reserve; the used memory ends where it starts
+                break
+            if unused == MAX_SPILL_ROUNDS:
+                raise CapturePlugError('capture plug zone %s: more than %d free holes above the zone' % (self.name, MAX_SPILL_ROUNDS))
+            self.say('spill: a freed hole [%#x, %#x) lies above the sealed limit %#x; plugging it' % (address, address + size, limit))
+            self.zone_plugs.append(memory.allocate(size))
+            if self.zone_plugs[-1].address != address:
+                raise CapturePlugError('a spill hole of %d bytes landed at %#x, not at its start %#x' % (
+                    size, self.zone_plugs[-1].address, address))
+            limit = address + size
         verify_sealed(memory, limit)
         self.hi = limit
         self.state = 'sealed'
@@ -289,16 +368,30 @@ class Zone:
                     lo, hi, buffer_type, self.hi, LEAVE_FLAG))
 
 
-def monitor(memories, min_free, log=None, where=''):
-    """Fail closed when the free memory left (kernel binaries and the program cache live in it) is under `min_free` per bank."""
+def free_above(memory, address):
+    """The free bytes per bank at or above `address`: everything free below it is plugged for the length of the read (the same sweep
+    that seals a zone), the allocator's free total is then the free memory above, and the plugs go back at once."""
+    plugs, _ = sweep(memory, address)
+    try:
+        return memory.free()
+    finally:
+        for block in plugs:
+            memory.release(block)
+
+
+def monitor(memories, min_free, log=None, where='', above=None):
+    """Fail closed when the free memory left (kernel binaries and the program cache live in it) is under `min_free` per bank. With
+    `above` (a per-bank address: the top of the packed zone) the free memory counted is the part ABOVE it, the reserve the binaries
+    use; without it, the total free memory (which includes the low region the engines fill, so it cannot see the reserve go)."""
     for memory in memories:
-        free = memory.free()
+        free = memory.free() if above is None else free_above(memory, above)
         if log:
-            log('[PINDIAG] capture plug monitor %s kind=%s free_mb=%.1f largest_free_mb=%.1f min_free_mb=%.1f' % (
-                where, memory.kind, free / MB, memory.largest_free() / MB, min_free / MB))
+            log('[PINDIAG] capture plug monitor %s kind=%s free_%s_mb=%.1f largest_free_mb=%.1f min_free_mb=%.1f' % (
+                where, memory.kind, 'total' if above is None else 'above_%#x' % above, free / MB, memory.largest_free() / MB,
+                min_free / MB))
         if free < min_free:
-            raise CapturePlugError('only %.1f MB per bank of %s is free (%s): the program cache has no room above the plugs' % (
-                free / MB, memory.kind, where or 'monitor'))
+            raise CapturePlugError('only %.1f MB per bank of %s is free %s (%s): the program cache has no room above the plugs' % (
+                free / MB, memory.kind, 'in total' if above is None else 'above the packed zone', where or 'monitor'))
 
 
 def engine_settings(environ=None):
@@ -319,21 +412,41 @@ def open_engine(settings, operations, mesh, log=None, memory_factory=None):
     return plug
 
 
+def give_back(plug, request):
+    """The engine's plugs after its close: back to the allocator only when the request says it released everything
+    (request.closed is True: its traces are gone); otherwise they are abandoned, still held, because the engine's traces may be live
+    and a freed plug is a hole the replay writes through. FastRequest.close raises before touching the engine when the request is
+    busy or the id does not match, and the engine's own close can fail part-way."""
+    if getattr(request, 'closed', False) is True:
+        plug.close()
+    else:
+        plug.abandon()
+
+
 def seal_engine(plug, request, ranges):
     """The engine is built: plug the holes its captures freed, hold the census's recorded extents of them (`ranges`, none without the
     graph census) against the zone's top, and tie the plugs' life to the engine's: they go back when request.close has released its
-    traces, even if that close raises."""
+    traces (request.closed), and are abandoned, never freed, when the close raises or leaves the request open."""
     plug.seal()
     plug.verify_extents(ranges)
     inner = request.close
 
     def close(*args, **kwargs):
         try:
-            return inner(*args, **kwargs)
-        finally:
-            plug.close()
+            result = inner(*args, **kwargs)
+        except BaseException:
+            give_back(plug, request)
+            raise
+        give_back(plug, request)
+        return result
 
     request.close = close
+
+
+def packed_top():
+    """The top of the packed zone: the highest sealed hi of the open packed plugs' DRAM zones (the reserve above all of them is what the
+    free-memory floor counts), None with no packed plug."""
+    return max((plug.zones[0].hi for plug in PACKED if plug.sealed), default=None)
 
 
 def packed_ceiling():
@@ -378,7 +491,7 @@ class Plug:
         for zone in self.zones:
             zone.release()
         self.sealed = True
-        monitor(self.memories, self.min_free, self.log, 'after seal')
+        self.monitor('after seal')
 
     def verify_extents(self, ranges):
         for zone in self.zones:
@@ -392,5 +505,11 @@ class Plug:
         for zone in self.zones:
             zone.abandon()
 
+    def reserve_floor(self):
+        """The address the free-memory floor is read above: this plug's own sealed DRAM zone top, else the packed zone's top (an
+        engine plug before its zone opens), else None (the total free memory)."""
+        own = [zone.hi for zone in self.zones if zone.state in ('sealed', 'released') and zone.memory.kind == 'DRAM']
+        return max(own) if own else packed_top()
+
     def monitor(self, where=''):
-        monitor(self.memories, self.min_free, self.log, where)
+        monitor(self.memories, self.min_free, self.log, where, above=self.reserve_floor())

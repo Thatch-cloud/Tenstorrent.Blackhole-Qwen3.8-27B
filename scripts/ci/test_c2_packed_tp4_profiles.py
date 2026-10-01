@@ -57,14 +57,18 @@ TAIL_CAPS = {'QWEN_FAST_BUDGET_CAP': '1', 'QWEN_FAST_SEQ_DEADLINE_S': '120'}
 DIAG_INSTRUMENTS = {'QWEN_FAST_BUDGET_CAP': '0', 'QWEN_FAST_SEQ_DEADLINE_S': '120', 'QWEN_FAST_SEQ_STAGE_LOG': '1',
                     'QWEN_FAST_TRACE_CENSUS': '1', 'QWEN_FAST_CCL_HANDLE_LOG': '1', 'QWEN_FAST_MEMORY_LEDGER_L1': '1',
                     'QWEN_FAST_STALL_DEADLINE_S': '120', 'QWEN_FAST_CCL_HANDLE_GUARD': 'log'}
-# The graph census is off unless it is exactly '1': the first diag arm turns it on explicitly, every other one says so off.
-DIAG_PROFILES = {'c2-packed-tp4-diag': {'QWEN_FAST_TRACE_CENSUS_GRAPH': '1'},
-                 'c2-packed-tp4-diag-nograph': {'QWEN_FAST_TRACE_CENSUS_GRAPH': '0'},
+# The graph census is off in every diag arm and says so explicitly: it is v173's fatal configuration (the graph processor reads tensors
+# inside a trace capture, which refuses reads).
+DIAG_PROFILES = {'c2-packed-tp4-diag': {'QWEN_FAST_TRACE_CENSUS_GRAPH': '0'},
                  'c2-packed-tp4-diag-t1': {'QWEN_FAST_VERIFY_T1_AUDIT': '1', 'QWEN_FAST_TRACE_CENSUS_GRAPH': '0'},
                  'c2-packed-tp4-diag-t2': {'QWEN_FAST_VERIFY_T2_AUDIT': '1', 'QWEN_FAST_TRACE_CENSUS_GRAPH': '0'}}
 # The fix arm: the audits-off speed twin plus the capture plug (flags default off everywhere else), the stall watch and the guard.
-FIX_ENV = {'QWEN_FAST_CAPTURE_PLUG': '1', 'QWEN_FAST_CAPTURE_PLUG_ENGINES': '1', 'QWEN_FAST_TRACE_CENSUS_GRAPH': '0',
-           'QWEN_FAST_STALL_DEADLINE_S': '120', 'QWEN_FAST_CCL_HANDLE_GUARD': '1'}
+# The plug sizes are per BANK (megabytes), written out so no default decides them; the guard is in log mode (fail mode can refuse a
+# request on a pattern every audited run has).
+FIX_ENV = {'QWEN_FAST_CAPTURE_PLUG': '1', 'QWEN_FAST_CAPTURE_PLUG_ENGINES': '1', 'QWEN_FAST_CAPTURE_PLUG_LEAVE_MB': '512',
+           'QWEN_FAST_CAPTURE_PLUG_RESERVE_MB': '256', 'QWEN_FAST_CAPTURE_PLUG_ENGINE_LEAVE_MB': '256',
+           'QWEN_FAST_CAPTURE_PLUG_MIN_FREE_MB': '128', 'QWEN_FAST_TRACE_CENSUS_GRAPH': '0',
+           'QWEN_FAST_STALL_DEADLINE_S': '120', 'QWEN_FAST_CCL_HANDLE_GUARD': 'log'}
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 
 
@@ -294,7 +298,7 @@ class TailProfileTests(unittest.TestCase):
                         self.assertEqual(mine.get(key), speed.get(key), key)
                 self.assertEqual(contract.mesh_problems(dict(mine, name=name)), [], name)
                 audits = (mine['env']['QWEN_FAST_VERIFY_T1_AUDIT'], mine['env']['QWEN_FAST_VERIFY_T2_AUDIT'])
-                self.assertEqual(audits, {'c2-packed-tp4-diag': ('0', '0'), 'c2-packed-tp4-diag-nograph': ('0', '0'),
+                self.assertEqual(audits, {'c2-packed-tp4-diag': ('0', '0'),
                                           'c2-packed-tp4-diag-t1': ('1', '0'),
                                           'c2-packed-tp4-diag-t2': ('0', '1')}[name])
 
@@ -313,9 +317,9 @@ class TailProfileTests(unittest.TestCase):
         diag = profiles()['c2-packed-tp4-diag']['env']
         for flag in ('QWEN_FAST_SEQ_STAGE_LOG', 'QWEN_FAST_TRACE_CENSUS', 'QWEN_FAST_CCL_HANDLE_LOG', 'QWEN_FAST_MEMORY_LEDGER_L1'):
             self.assertEqual(diag[flag], '1', flag)
-        self.assertEqual(diag['QWEN_FAST_TRACE_CENSUS_GRAPH'], '1', 'the graph census is off by default now: T5 turns it on explicitly')
-        self.assertTrue(trace_census.graph_census_enabled(diag))
-        for name in ('c2-packed-tp4-diag-nograph', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2'):
+        for name in DIAG_PROFILES:
+            self.assertFalse(trace_census.graph_census_enabled(profiles()[name]['env']), name)
+        for name in ('c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2'):
             env = profiles()[name]['env']
             self.assertEqual(env['QWEN_FAST_TRACE_CENSUS_GRAPH'], '0', name)
             self.assertFalse(trace_census.graph_census_enabled(env), name)
@@ -359,9 +363,29 @@ class FixProfileTests(unittest.TestCase):
         settings = capture_plug.config(env)
         self.assertTrue(settings['engines'])
         self.assertFalse(settings['l1'], 'L1 stays opt-in on top of the plug')
-        self.assertEqual(trace_census.handle_guard_mode(env), 'fail')
+        self.assertEqual(trace_census.handle_guard_mode(env), 'log')
         self.assertFalse(trace_census.graph_census_enabled(env))
         self.assertEqual(stall_watch.deadline('step', env), 120.0)
+
+    def test_the_fix_arms_plug_sizes_fit_inside_what_was_free_per_bank_with_margin(self):
+        """v174 before the packed capture: largest_free 20,138 MB per chip on 8 banks = about 2.4 GiB per bank (the sizes are per bank,
+        not per chip: the first draft asked for 4096 + 2048 MB and could not attach). The measured need: packed block 224 MB per bank,
+        verify capture 168, an engine 62."""
+        import capture_plug
+        mb = capture_plug.MB
+        free_per_bank = 20138 // 8 * mb
+        measured = dict(packed_block=224 * mb, verify_capture=168 * mb, engine=62 * mb)
+        for label, env in (('profile', profiles()['c2-packed-tp4-speed-fix']['env']), ('defaults', {'QWEN_FAST_CAPTURE_PLUG': '1'})):
+            settings = capture_plug.config(env)
+            with self.subTest(settings=label):
+                packed = settings['leave'] + settings['reserve'] + settings['min_free']
+                self.assertLessEqual(packed * 2, free_per_bank, 'leave + reserve + floor must fit with 2x margin in a bank')
+                self.assertLess(packed, free_per_bank)
+                self.assertLess(settings['leave'] + settings['reserve'], 4240 * mb, 'never more than a bank holds')
+                self.assertGreaterEqual(settings['leave'], 2 * measured['verify_capture'], 'the zone holds the verify capture twice over')
+                self.assertGreaterEqual(settings['engine_leave'], 2 * measured['engine'], 'an engine zone holds an engine twice over')
+                self.assertLessEqual(settings['engine_leave'], settings['leave'])
+                self.assertLess(settings['min_free'], settings['reserve'])
 
     def test_no_other_profile_carries_the_plug_the_guard_in_fail_mode_or_the_stall_watch_except_the_diagnosis_arms(self):
         for name, profile in profiles().items():

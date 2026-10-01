@@ -23,7 +23,8 @@ DEVICE_STEPS = ('cardm', 'smoke', 'gate', 'prefix', 'fabric', 'replay')
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|'
                     r'/dev/tenstorrent|home/|zot\.|@[A-Z0-9_]+@')
 IMAGE = 'tp4-serve-4'
-ORDERED = ('B4-build-smoke', 'FX-fix-arm', 'F1-diag-t1', 'F2-diag-t2')
+ORDERED = ('B4-build-smoke', 'FX-fix-arm', 'F1-diag-t1', 'F2-diag-t2', 'H4-handback-reset')
+WORK = ORDERED[:-1]   # the jobs that run the stack; the last one hands the cards back
 SS = ['warmup', 'coding', 'long_real_text', 'concurrent4', 'concurrent4_steady', 'steady_resend', 'tool_call', 'stream_tool_call',
       'stream_reasoning', 'refused_n2', 'alive_after_refusal', 'stream_dropped', 'alive_after_drop']
 CODE = ['concurrent4_code', 'concurrent4_code_equal']
@@ -67,6 +68,19 @@ class OrderTests(unittest.TestCase):
         modes = {row[0]: row[1] for row in read_order()}
         self.assertEqual(modes['B4-build-smoke'], 'stop')
         self.assertEqual(modes['FX-fix-arm'], 'optional')
+        self.assertEqual(modes['H4-handback-reset'], 'stop')
+
+    def test_the_hand_back_is_last_and_the_order_says_it_runs_even_when_a_stop_job_halts_the_window(self):
+        self.assertEqual(read_order()[-1][0], 'H4-handback-reset')
+        self.assertEqual(ORDERED[-1], 'H4-handback-reset')
+        with open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8') as handle:
+            order = handle.read()
+        self.assertIn('runs even when a stop job', order)
+        text = text_of('H4-handback-reset')
+        self.assertEqual(parsed('H4-handback-reset')['actions'], 'status reset')
+        self.assertEqual(parsed('H4-handback-reset')['cards'], 'quad')
+        for word in ('AUDITED production image', 'NEVER place a gate arm', 'fabric', ':latest retag', 'admin API'):
+            self.assertIn(word, text)
 
     def test_the_order_says_five_consecutive_fix_runs_are_the_acceptance(self):
         with open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8') as handle:
@@ -86,7 +100,7 @@ class TemplateTests(unittest.TestCase):
                 self.assertIsNone(BANNED.search(text_of(name)), name)
 
     def test_every_job_resets_the_cards_first_and_opens_them_in_one_step(self):
-        for name in ORDERED:
+        for name in WORK:
             actions = parsed(name)['actions'].split()
             with self.subTest(template=name):
                 self.assertLessEqual(len(set(actions) & set(DEVICE_STEPS)), 1)
@@ -115,12 +129,29 @@ class TemplateTests(unittest.TestCase):
         self.assertIn('build', parsed('B4-build-smoke')['actions'].split())
 
 
+class TriageInImageTests(unittest.TestCase):
+    def test_the_build_checks_in_the_image_that_the_triage_tools_and_ttexalens_exist_before_it_tags_the_image(self):
+        """The stall watch runs the pinned triage from inside the container, whose root filesystem is read-only: B4's build says whether
+        the tools are there (informational, never a build failure)."""
+        import stall_watch
+        with open(os.path.join(HERE, 'build-c2-serving-image.sh'), encoding='utf-8') as handle:
+            script = handle.read()
+        self.assertIn('[TRIAGE-CHECK]', script)
+        self.assertIn(stall_watch.DEFAULT_ROOT, script)
+        self.assertIn('ttexalens', script)
+        for tool in stall_watch.TOOLS:
+            self.assertIn(tool, script)
+        self.assertLess(script.index('[TRIAGE-CHECK] root'), script.index('docker tag "$built" "$image"'))
+        self.assertLess(script.index('c2_image_provenance.py" "${provenance[@]}"'), script.index('[TRIAGE-CHECK] root'))
+        self.assertIn('WARNING', script)
+
+
 class SmokeTests(unittest.TestCase):
     def test_every_named_test_is_one_the_smoke_knows_and_runs_in_the_order_the_template_lists_them(self):
         with open(os.path.join(HERE, 'c2_serving_smoke.py'), encoding='utf-8') as handle:
             smoke = handle.read()
         executed = re.findall(r"^\s*record\('([a-z0-9_]+)'", smoke, re.M)
-        for name in ORDERED:
+        for name in WORK:
             listed = tests_of(name)
             with self.subTest(template=name):
                 for test in listed:

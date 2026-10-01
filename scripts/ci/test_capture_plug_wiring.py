@@ -85,7 +85,7 @@ class PackedBlockTests(Isolated):
             block.open_capture_plug('ops')
             self.assertEqual(block.plug.calls, ['open'])
             self.assertEqual(block.plug.args[1], 'mesh')
-            self.assertEqual(block.plug.args[0]['leave'], 4096 * capture_plug.MB)
+            self.assertEqual(block.plug.args[0]['leave'], 512 * capture_plug.MB)
             trace_census.TRACES.extend([dict(seq=2, site='before', ranges=[(1, 2, 'DRAM')], handle='a'),
                                         dict(seq=4, site='packed', ranges=[(10, 20, 'DRAM'), (5, 6, 'L1')], handle='b')])
             block.seal_capture_plug()
@@ -122,7 +122,7 @@ class EnginePlugTests(Isolated):
         self.assertIsNone(capture_plug.engine_settings({'QWEN_FAST_TP': '4'}))
         self.assertIsNone(capture_plug.engine_settings({'QWEN_FAST_TP': '4', 'QWEN_FAST_CAPTURE_PLUG': '1'}))
         self.assertEqual(capture_plug.engine_settings({'QWEN_FAST_TP': '4', 'QWEN_FAST_CAPTURE_PLUG': '1',
-                                                       'QWEN_FAST_CAPTURE_PLUG_ENGINES': '1'})['engine_leave'], 1024 * capture_plug.MB)
+                                                       'QWEN_FAST_CAPTURE_PLUG_ENGINES': '1'})['engine_leave'], 256 * capture_plug.MB)
 
     def test_the_engine_zone_is_checked_then_opened_under_the_packed_zone(self):
         settings = capture_plug.config({'QWEN_FAST_CAPTURE_PLUG': '1', 'QWEN_FAST_CAPTURE_PLUG_ENGINES': '1'})
@@ -143,7 +143,16 @@ class EnginePlugTests(Isolated):
 
     def test_sealing_plugs_the_engine_verifies_its_extents_and_ties_the_plugs_life_to_the_engines(self):
         closed = []
-        request = SimpleNamespace(close=lambda *args: closed.append(('engine', args)) or 'closed')
+
+        class Request:
+            closed = False
+
+            def close(self, *args):
+                closed.append(('engine', args))
+                self.closed = True
+                return 'closed'
+
+        request = Request()
         plug = FakePlug()
         plug.close = lambda: closed.append('plug')
         capture_plug.seal_engine(plug, request, [(30, 40, 'DRAM')])
@@ -151,19 +160,37 @@ class EnginePlugTests(Isolated):
         self.assertEqual(request.close('request-1'), 'closed')
         self.assertEqual(closed, [('engine', ('request-1',)), 'plug'], 'the engine releases its traces first, then the plugs go')
 
-    def test_the_plug_is_given_back_even_when_the_engines_close_raises(self):
+    def test_the_plugs_are_abandoned_never_freed_when_the_engines_close_raises(self):
+        """FastRequest.close raises before it touches the engine when the request is busy or the id differs, and the engine's own close
+        can fail part-way: its traces may be live, and a freed plug is a hole the replay writes through."""
         closed = []
 
         def broken(*args):
             raise RuntimeError('close failed')
 
-        request = SimpleNamespace(close=broken)
+        request = SimpleNamespace(close=broken, closed=False)
         plug = FakePlug()
         plug.close = lambda: closed.append('plug')
         capture_plug.seal_engine(plug, request, [])
         with self.assertRaises(RuntimeError):
             request.close('r')
-        self.assertEqual(closed, ['plug'])
+        self.assertEqual(closed, [])
+        self.assertEqual(plug.calls[-1], 'abandon')
+
+    def test_the_plugs_are_abandoned_when_the_close_returns_with_the_request_still_open(self):
+        request = SimpleNamespace(close=lambda *args: None, closed=False)
+        plug = FakePlug()
+        capture_plug.seal_engine(plug, request, [])
+        request.close('r')
+        self.assertEqual(plug.calls[-1], 'abandon')
+        self.assertNotIn('close', plug.calls)
+
+    def test_a_request_that_really_is_closed_gives_the_plugs_back(self):
+        request = SimpleNamespace(close=lambda *args: None, closed=True)
+        plug = FakePlug()
+        capture_plug.seal_engine(plug, request, [])
+        request.close('r')
+        self.assertEqual(plug.calls[-1], 'close')
 
 
 class BuildGuardTests(Isolated):
@@ -223,25 +250,53 @@ class BuildGuardTests(Isolated):
         request.close('r')
         self.assertEqual(closed, ['engine'])
 
-    def test_a_build_that_fails_gives_the_zone_back_and_a_seal_that_fails_closes_the_engine_first(self):
+    def test_a_build_that_fails_abandons_the_zone_instead_of_freeing_it_under_enqueued_work(self):
         def broken():
             raise RuntimeError('capture failed')
 
         plug, guarded = self.plugged(broken)
         with self.assertRaisesRegex(RuntimeError, 'capture failed'):
             guarded()
-        self.assertEqual(plug.calls, ['close'])
-        closed = []
-        request = SimpleNamespace(close=lambda *args: closed.append(args))
-        plug, guarded = self.plugged(lambda: request)
+        self.assertEqual(plug.calls, ['abandon'])
 
+    def test_a_seal_that_fails_closes_the_engine_and_frees_the_zone_only_when_the_request_is_closed(self):
         def refuse():
             raise capture_plug.CapturePlugError('a hole remains')
 
+        closed = []
+
+        class Request:
+            closed = False
+
+            def close(self, *args):
+                closed.append(args)
+                self.closed = True
+
+        request = Request()
+        plug, guarded = self.plugged(lambda: request)
         plug.seal = refuse
         with self.assertRaisesRegex(capture_plug.CapturePlugError, 'hole remains'):
             guarded()
         self.assertEqual((closed, plug.calls), ([('request-1',)], ['close']))
+        stuck = SimpleNamespace(close=lambda *args: closed.append(('stuck',) + args), closed=False)
+        plug, guarded = self.plugged(lambda: stuck)
+        plug.seal = refuse
+        with self.assertRaisesRegex(capture_plug.CapturePlugError, 'hole remains'):
+            guarded()
+        self.assertEqual(plug.calls, ['abandon'], 'a request that is not closed keeps the zone held')
+
+    def test_an_engine_close_that_raises_in_the_seal_failure_path_still_leaves_the_zone_held(self):
+        def refuse():
+            raise capture_plug.CapturePlugError('a hole remains')
+
+        def broken(*args):
+            raise ValueError('Only the idle owner can release request resources')
+
+        plug, guarded = self.plugged(lambda: SimpleNamespace(close=broken, closed=False))
+        plug.seal = refuse
+        with self.assertRaises(ValueError):
+            guarded()
+        self.assertEqual(plug.calls, ['abandon'])
 
 
 if __name__ == '__main__':

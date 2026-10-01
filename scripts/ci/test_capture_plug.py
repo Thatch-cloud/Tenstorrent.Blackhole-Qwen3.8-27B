@@ -125,17 +125,23 @@ class ConfigTests(unittest.TestCase):
     def test_defaults_and_overrides_are_per_bank_bytes(self):
         found = plug.config({plug.FLAG: '1'})
         self.assertEqual((found['leave'], found['reserve'], found['engine_leave'], found['min_free']),
-                         (4096 * plug.MB, 2048 * plug.MB, 1024 * plug.MB, 512 * plug.MB))
+                         (512 * plug.MB, 256 * plug.MB, 256 * plug.MB, 128 * plug.MB))
         self.assertFalse(found['engines'] or found['l1'])
-        found = plug.config({plug.FLAG: '1', plug.LEAVE_FLAG: '3000', plug.ENGINES_FLAG: '1', plug.L1_FLAG: '1',
-                             plug.L1_LEAVE_KB if hasattr(plug, 'L1_LEAVE_KB') else plug.L1_LEAVE_FLAG: '64'})
-        self.assertEqual((found['leave'], found['engines'], found['l1'], found['l1_leave']), (3000 * plug.MB, True, True, 64 * plug.KB))
+        found = plug.config({plug.FLAG: '1', plug.LEAVE_FLAG: '300', plug.ENGINES_FLAG: '1', plug.L1_LEAVE_FLAG: '64'})
+        self.assertEqual((found['leave'], found['engines'], found['l1'], found['l1_leave']), (300 * plug.MB, True, False, 64 * plug.KB))
         for flag in (plug.LEAVE_FLAG, plug.RESERVE_FLAG, plug.MIN_FREE_FLAG):
             for bad in ('0', '-1', '1.5', 'x'):
                 with self.assertRaises(ValueError, msg=(flag, bad)):
                     plug.config({plug.FLAG: '1', flag: bad})
         with self.assertRaises(ValueError):
             plug.config({plug.FLAG: '1', plug.ENGINES_FLAG: '2'})
+
+    def test_the_l1_zone_is_refused_until_it_is_modelled_for_top_down_allocation(self):
+        with self.assertRaisesRegex(ValueError, 'top-down'):
+            plug.config({plug.FLAG: '1', plug.L1_FLAG: '1'})
+        self.assertFalse(plug.config({plug.FLAG: '1', plug.L1_FLAG: '0'})['l1'])
+        self.assertFalse(plug.config({plug.FLAG: '1'})['l1'])
+        self.assertIsNone(plug.config({plug.L1_FLAG: '1'}), 'the flag alone, without the plug, stays inert')
 
 
 class SweepTests(unittest.TestCase):
@@ -177,6 +183,24 @@ class SweepTests(unittest.TestCase):
         heap.free(first)
         with self.assertRaisesRegex(plug.CapturePlugError, 'hole remains'):
             plug.verify_sealed(FakeMemory(heap), second)
+
+
+class LowestHoleTests(unittest.TestCase):
+    def test_the_lowest_hole_is_found_exactly_and_the_probes_leave_nothing_behind(self):
+        heap = Heap()
+        blocks = [heap.allocate(size * PAGE) for size in (3, 50, 7, 21, 9)]
+        for index in (1, 3):
+            heap.free(blocks[index])
+        baseline = dict(heap.used)
+        self.assertEqual(plug.lowest_hole(FakeMemory(heap)), (blocks[1], 50 * PAGE))
+        self.assertEqual(heap.used, baseline)
+        heap.free(blocks[0])
+        self.assertEqual(plug.lowest_hole(FakeMemory(heap)), (0, (3 + 50) * PAGE))
+
+    def test_the_last_hole_is_the_main_region(self):
+        heap = Heap()
+        heap.allocate(10 * PAGE)
+        self.assertEqual(plug.lowest_hole(FakeMemory(heap)), (10 * PAGE, TOTAL - 10 * PAGE))
 
 
 class ZoneTests(unittest.TestCase):
@@ -247,6 +271,75 @@ class ZoneTests(unittest.TestCase):
         with self.assertRaisesRegex(plug.CapturePlugError, 'ends above the zone top'):
             zone.verify_extents([(zone.lo, zone.hi + PAGE, 'DRAM')])
         zone.verify_extents([(zone.lo, zone.hi, 'DRAM'), (0, 1 << 60, 'L1')])
+
+    def test_a_hole_in_the_zone_larger_than_what_is_left_above_it_does_not_hide_a_spill(self):
+        """The zone's biggest hole is bigger than the free memory above the zone, so the main region does not start above the zone's
+        top. Temporaries that spilled past the top and were freed above it must still be plugged."""
+        heap = Heap()
+        zone = plug.Zone(FakeMemory(heap), 1000 * PAGE, 300 * PAGE, name='packed')
+        zone.open()
+        capture = Capture(heap).run(persistent=[40 * PAGE], temporaries=[900 * PAGE, 200 * PAGE, 50 * PAGE])
+        spilled = [(lo, hi) for lo, hi in capture.temporary if hi > zone.hi]
+        self.assertTrue(spilled, 'the model must put a freed temporary above the zone top')
+        free_above_top = [(a, r) for a, r in heap.free_blocks() if a >= zone.hi]
+        self.assertLess(max(r for _, r in free_above_top), 1000 * PAGE)
+        self.assertGreater(max(r for a, r in heap.free_blocks() if a < zone.hi), max(r for _, r in free_above_top) // 2)
+        zone.seal()
+        zone.release()
+        self.assertGreater(zone.hi, spilled[0][1] - 1, 'sealed up to the end of the spilled temporaries')
+        victim = None
+        for size in (60, 120, 33, 7, 300, 150):
+            try:
+                victim = (heap.allocate(size * PAGE), size * PAGE)
+            except RuntimeError:
+                continue
+            self.assertFalse(hits(victim[0], victim[1], capture.temporary), 'a later buffer sits in a freed temporary')
+            self.assertLessEqual(victim[0] + victim[1], zone.lo)
+
+    def test_a_refused_open_gives_back_every_low_plug_and_the_ballast(self):
+        for kwargs in (dict(leave=2500 * PAGE, reserve=2500 * PAGE), dict(leave=400 * PAGE, reserve=0, ceiling=100 * PAGE)):
+            heap = fragmented_heap()
+            baseline = dict(heap.used)
+            zone = plug.Zone(FakeMemory(heap), name='engine', **kwargs)
+            with self.assertRaises(plug.CapturePlugError):
+                zone.open()
+            self.assertEqual(heap.used, baseline, kwargs)
+            self.assertEqual((zone.low_plugs, zone.ballast, zone.state), ([], None, 'closed'))
+
+    def test_a_sweep_that_fails_hands_back_what_it_took(self):
+        heap = Heap()
+        held = [heap.allocate(PAGE) for _ in range(60)]
+        for address in held[::2]:
+            heap.free(address)
+        baseline = dict(heap.used)
+        with self.assertRaisesRegex(plug.CapturePlugError, 'iterations'):
+            plug.sweep(FakeMemory(heap), held[-1] + PAGE, max_iterations=10)
+        self.assertEqual(heap.used, baseline)
+
+    def test_the_free_memory_above_an_address_is_read_by_plugging_below_it_and_nothing_is_left_behind(self):
+        heap = fragmented_heap()
+        memory = FakeMemory(heap)
+        top = 1500 * PAGE
+        baseline = dict(heap.used)
+        expected = sum(room for address, room in heap.free_blocks() if address >= top) + max(
+            0, sum(min(room, address + room - top) for address, room in heap.free_blocks() if address < top < address + room))
+        self.assertEqual(plug.free_above(memory, top), expected)
+        self.assertEqual(heap.used, baseline)
+
+    def test_the_monitor_counts_the_reserve_above_the_packed_zone_not_the_free_memory_below_it(self):
+        heap, zone = self.zone()
+        zone.open()
+        Capture(heap).run(persistent=[60 * PAGE], temporaries=[300 * PAGE])
+        zone.seal()
+        zone.release()
+        memory = zone.memory
+        total = memory.free()
+        above = plug.free_above(memory, zone.hi)
+        self.assertLess(above, total, 'the low region the ballast held is free but is not the reserve')
+        plug.monitor([memory], above, None, 'ok', above=zone.hi)
+        with self.assertRaisesRegex(plug.CapturePlugError, 'above the packed zone'):
+            plug.monitor([memory], above + PAGE, None, 'reserve nearly gone', above=zone.hi)
+        plug.monitor([memory], above + PAGE, None, 'total passes', above=None)   # the total free memory would not have seen it
 
     def test_the_states_are_enforced(self):
         heap, zone = self.zone()

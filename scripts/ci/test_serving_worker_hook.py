@@ -22,6 +22,65 @@ class Worker:
         return self.model_runner.sample_tokens(grammar_output)
 
 
+class DraftPhaseWatchTests(unittest.TestCase):
+    """The draft phase (the engines' non-blocking proposal replays and their shared fence) is its own call, outside the packed step
+    and the sequential step's scopes: under the stall watch it is a 'step' scope, so a hang in it is triaged."""
+
+    def hook(self):
+        hook = object.__new__(FastWorkerHook)
+        hook.bridges = {'a': object(), 'b': object()}
+        return hook
+
+    def test_the_drafts_run_inside_a_step_scope_of_the_stall_watch(self):
+        import stall_watch
+        seen = []
+
+        class Scope:
+            def __enter__(self):
+                seen.append('enter')
+
+            def __exit__(self, *exc):
+                seen.append('exit')
+                return False
+
+        hook = self.hook()
+        hook._drafts_unwatched = lambda worker: seen.append(('body', worker)) or 'drafts'
+        with patch.object(stall_watch, 'scope', lambda kind, label: seen.append((kind, label)) or Scope()):
+            self.assertEqual(hook._drafts('worker'), 'drafts')
+        self.assertEqual(seen, [('step', 'drafts requests=2'), 'enter', ('body', 'worker'), 'exit'])
+
+    def test_a_raise_in_the_drafts_leaves_the_scope_and_propagates(self):
+        import stall_watch
+        seen = []
+
+        class Scope:
+            def __enter__(self):
+                seen.append('enter')
+
+            def __exit__(self, *exc):
+                seen.append('exit')
+                return False
+
+        hook = self.hook()
+
+        def broken(worker):
+            raise ValueError('Live fast worker owner required')
+
+        hook._drafts_unwatched = broken
+        with patch.object(stall_watch, 'scope', lambda kind, label: Scope()):
+            with self.assertRaises(ValueError):
+                hook._drafts('worker')
+        self.assertEqual(seen, ['enter', 'exit'])
+
+    def test_without_the_flag_the_scope_is_a_no_op_and_the_owner_check_is_unchanged(self):
+        hook = self.hook()
+        hook.closed, hook.worker = True, 'worker'
+        with patch.dict('os.environ'):
+            os.environ.pop('QWEN_FAST_STALL_DEADLINE_S', None)
+            with self.assertRaisesRegex(ValueError, 'Live fast worker owner required'):
+                hook._drafts('worker')
+
+
 class WorkerHookTests(unittest.TestCase):
     def fixture(self):
         bridge, events, scheduled = RunnerBridgeTests().fixture()

@@ -448,6 +448,16 @@ class FastWorkerHook:
         return self.original_sample(grammar_output)
 
     def _drafts(self, worker):
+        # The draft phase is its own call (the engines' proposal replays are enqueued without blocking and fenced once): under the
+        # stall watch (QWEN_FAST_STALL_DEADLINE_S) it is a 'step' scope like the packed round and the sequential step, so a hang in
+        # it gives stacks and the device triage instead of only the smoke's read timeout. A no-op scope without the flag, and
+        # nested inside a step's own scope when the early draft runs there.
+        import stall_watch
+
+        with stall_watch.scope('step', 'drafts requests=%d' % len(self.bridges)):
+            return self._drafts_unwatched(worker)
+
+    def _drafts_unwatched(self, worker):
         if self.closed or worker is not self.worker:
             raise ValueError('Live fast worker owner required')
         if len(self.bridges) == 1 and self.packed_step is None:

@@ -139,6 +139,19 @@ provenance=(--image "$built" --context "$ctx" --models "$models" --previous-graf
 if [ -n "${C2_CHECKOUT:-}" ]; then provenance+=(--checkout "$C2_CHECKOUT"); fi
 if [ -n "${C2_PROVENANCE_REPORT:-}" ]; then provenance+=(--report "$C2_PROVENANCE_REPORT"); fi
 python3 -B "$ctx/c2_image_provenance.py" "${provenance[@]}"
+# The stall watch (stall_watch.py) runs the pinned tt-metal triage tools from INSIDE the serving container, whose root filesystem is
+# read-only, so the tools and their ttexalens dependency must already be in the image. Informational (a missing tool never fails the
+# build: the watch still dumps every stack), but the log says so, and B4's reading checks the line.
+triage_probe='import importlib.util, os, sys
+root = os.environ.get("QWEN_FAST_TRIAGE_ROOT", "/opt/tt-metal/tools/triage")
+tools = ("dump_running_operations", "dump_callstacks", "check_binary_integrity", "check_noc_status", "dump_fast_dispatch", "check_eth_status")
+missing = [tool for tool in tools if not (os.path.isfile(os.path.join(root, tool + ".py")) or os.path.isfile(os.path.join(root, "triage.py")))]
+exalens = importlib.util.find_spec("ttexalens") is not None
+print("[TRIAGE-CHECK] root=%s present=%s ttexalens=%s missing=%s" % (root, os.path.isdir(root), exalens, ",".join(missing) or "none"))
+sys.exit(0 if os.path.isdir(root) and exalens and not missing else 3)'
+if ! docker run --rm --network none --entrypoint python3 "$built" -c "$triage_probe"; then
+  echo "[TRIAGE-CHECK] WARNING: the triage tools or ttexalens are not usable in this image: a stall will give stacks but no device triage" >&2
+fi
 docker tag "$built" "$image"
 built=
 echo "built $image $(docker image inspect "$image" --format '{{.Id}}')"

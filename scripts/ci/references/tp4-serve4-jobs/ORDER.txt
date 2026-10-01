@@ -9,9 +9,13 @@
 # replay_concurrent4) and the four-user sequential tail (the v164 and v163 shape, in concurrent4). Run it five times in a row; one
 # failure restarts the count and keeps the stall watch's triage output for the report. Two repeats cannot separate a fix from chance at
 # the hang rate seen so far. The minutes below are for one run.
+# H4 hands the cards back to production (status, then the all-four reset; the re-placement of the AUDITED production image, never a gate
+# arm, is the template's text). It is always last and it runs even when a stop job (B4) halts the window or FX, F1 or F2 stalled: the
+# stall watch never resets the cards, so a stall leaves them hung until H4's reset.
 # F1 and F2 are the factorial arms with the instruments and the stall watch on (T1 audit only; T2 audit only): run them only if FX
 # stalls or the hang is still not localised, as the stall watch's triage is what they are for.
 B4-build-smoke stop tp4-serve-4 45
 FX-fix-arm optional tp4-serve-4 25
 F1-diag-t1 optional tp4-serve-4 20
 F2-diag-t2 optional tp4-serve-4 20
+H4-handback-reset stop tp4-serve-4 15

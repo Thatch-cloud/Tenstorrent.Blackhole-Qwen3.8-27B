@@ -746,6 +746,45 @@ class HandleGuardTests(InstalledTwin):
         trace_census.census_release(lambda mesh, trace: None)('mesh', 'a')
         self.assertNotIn('a', trace_census.TRACE_SLOTS)
 
+    def test_the_slots_are_keyed_by_the_traces_integer_value_when_it_has_one(self):
+        class TraceId:
+            def __init__(self, value):
+                self.value = value
+
+            def __int__(self):
+                return self.value
+
+            def __eq__(self, other):
+                return isinstance(other, TraceId) and other.value == self.value
+
+            __hash__ = None          # defines __eq__ without __hash__: unhashable
+
+        self.capture(TraceId(7), self.ag)
+        self.assertEqual(list(trace_census.TRACE_SLOTS), [7], 'an unhashable wrapper does not raise TypeError at attach')
+        self.assertEqual(trace_census.trace_key(TraceId(7)), 7)
+        self.ccl.index = 0
+        ran = []
+        original = lambda *args, **kwargs: ran.append(args)
+        replay = trace_census.census_execute(original)
+        with self.assertRaises(trace_census.UnfencedHandleReuse):
+            self.capture(TraceId(8), self.ag)
+            replay('mesh', TraceId(7), 0, False)
+            replay('mesh', TraceId(8), 0, False)
+        trace_census.census_release(lambda mesh, trace: None)('mesh', TraceId(7))
+        self.assertNotIn(7, trace_census.TRACE_SLOTS)
+
+    def test_a_handle_with_neither_an_integer_value_nor_a_hash_is_keyed_by_identity(self):
+        class Opaque:
+            __hash__ = None
+
+            def __eq__(self, other):
+                return self is other
+
+        handle = Opaque()
+        self.assertEqual(trace_census.trace_key(handle), id(handle))
+        self.assertEqual(trace_census.trace_key('t1'), 't1')
+        self.assertEqual(trace_census.trace_key(5), 5)
+
 
 class StallWiringTests(InstalledTwin):
     def test_with_the_stall_flag_a_sequential_step_is_a_watched_scope_and_faulthandlers_exit_is_not_armed(self):

@@ -634,7 +634,7 @@
       "gate_only": true
     },
     "c2-packed-tp4-speed-fix": {
-      "description": "GATE ONLY (the fix arm of the audits-off hang): c2-packed-tp4-speed plus the capture plug (QWEN_FAST_CAPTURE_PLUG=1 and QWEN_FAST_CAPTURE_PLUG_ENGINES=1, default sizes: a 4096 MB zone with 2048 MB of reserve above it for the packed block, 1024 MB for each engine). The verify audits stay OFF and the tail caps stay on. The hypothesis it tests is allocation aliasing: a buffer allocated after a trace capture lands in a hole the capture freed and a later replay rewrites it. The plug runs the packed captures inside a zone, plugs every hole they free with inert never-read tensors, and only then lets later allocations in below the zone; kernel binaries cannot enter the plugged zone (the allocation fails instead of overwriting) and a free-memory monitor refuses an engine when the reserve is nearly gone. The graph census is off (QWEN_FAST_TRACE_CENSUS_GRAPH=0), so the evidence for the mechanism is the plug log lines and the sealed-hole tripwire, not recorded extents. QWEN_FAST_STALL_DEADLINE_S=120 and QWEN_FAST_CCL_HANDLE_GUARD=1 (a replay or eager collective that would reuse the handle the previous op on its slot ended on, with no fence between, is refused before it is enqueued) are on. The tokens are held against c2-packed-tp4-gate on the same prompts; the round time is read against c2-packed-tp4-speed (the plug adds no device work to a round). Not for traffic. UNVERIFIED on hardware.",
+      "description": "GATE ONLY (the fix arm of the audits-off hang): c2-packed-tp4-speed plus the capture plug (QWEN_FAST_CAPTURE_PLUG=1 and QWEN_FAST_CAPTURE_PLUG_ENGINES=1, sizes are PER BANK, not per chip (a p150a has 8 DRAM banks of about 4.24 GB; about 2.4 GiB per bank was free before the packed capture on v174): QWEN_FAST_CAPTURE_PLUG_LEAVE_MB=512 for the packed zone with QWEN_FAST_CAPTURE_PLUG_RESERVE_MB=256 above it, QWEN_FAST_CAPTURE_PLUG_ENGINE_LEAVE_MB=256 for each engine and QWEN_FAST_CAPTURE_PLUG_MIN_FREE_MB=128 as the floor on what the reserve above the packed zone has left, against the measured 224 MB per bank for the packed block, 168 MB per bank for its verify capture and 62 MB per bank for an engine. The verify audits stay OFF and the tail caps stay on. The hypothesis it tests is allocation aliasing: a buffer allocated after a trace capture lands in a hole the capture freed and a later replay rewrites it. The plug runs the packed captures inside a zone, plugs every hole they free with inert never-read tensors, and only then lets later allocations in below the zone; kernel binaries cannot enter the plugged zone (the allocation fails instead of overwriting) and a free-memory monitor refuses an engine when the free bytes above the packed zone drop under the floor. The graph census is off (QWEN_FAST_TRACE_CENSUS_GRAPH=0), so the evidence for the mechanism is the plug log lines and the sealed-hole tripwire, not recorded extents. QWEN_FAST_STALL_DEADLINE_S=120 and QWEN_FAST_CCL_HANDLE_GUARD=log (it logs the handles every trace baked and any collective that reuses the handle the previous op on its slot ended on with no fence between; the refusing mode, 1, can fail a request on patterns that run in every passing audited run, such as the proposal coordinator's back-to-back non-blocking replays, so it is not in this arm) are on. The tokens are held against c2-packed-tp4-gate on the same prompts; the round time is read against c2-packed-tp4-speed (the plug adds no device work to a round). Not for traffic. UNVERIFIED on hardware.",
       "eos_ids": [
         248046,
         248044
@@ -674,98 +674,11 @@
         "QWEN_FAST_SEQ_DEADLINE_S": "120",
         "QWEN_FAST_CAPTURE_PLUG": "1",
         "QWEN_FAST_CAPTURE_PLUG_ENGINES": "1",
+        "QWEN_FAST_CAPTURE_PLUG_LEAVE_MB": "512",
+        "QWEN_FAST_CAPTURE_PLUG_RESERVE_MB": "256",
+        "QWEN_FAST_CAPTURE_PLUG_ENGINE_LEAVE_MB": "256",
+        "QWEN_FAST_CAPTURE_PLUG_MIN_FREE_MB": "128",
         "QWEN_FAST_TRACE_CENSUS_GRAPH": "0",
-        "QWEN_FAST_STALL_DEADLINE_S": "120",
-        "QWEN_FAST_CCL_HANDLE_GUARD": "1"
-      },
-      "engine": {
-        "model": "@SNAPSHOT@",
-        "dtype": "bfloat16",
-        "max-model-len": 131328,
-        "max-num-seqs": 4,
-        "max-num-batched-tokens": 131328,
-        "block-size": 64,
-        "num-gpu-blocks-override": 8208,
-        "no-enable-prefix-caching": true,
-        "no-async-scheduling": true,
-        "limit-mm-per-prompt": {
-          "image": 0,
-          "video": 0
-        },
-        "no-enable-chunked-prefill": true,
-        "shutdown-timeout": 30,
-        "additional-config": {
-          "tt": {
-            "trace_mode": "decode_only",
-            "trace_region_size": 268435456,
-            "l1_small_size": 24576,
-            "fabric_config": "FABRIC_1D"
-          },
-          "qwen_fast_t16": true,
-          "qwen_fast_runtime": {
-            "directory": "/experiment-scripts/ci",
-            "runtime_root": "/opt/tt-metal",
-            "fixtures": "/experiment-dflash-fixture",
-            "target_snapshot": "@SNAPSHOT@"
-          }
-        },
-        "speculative-config": {
-          "model": "/draft-config",
-          "method": "dflash",
-          "num_speculative_tokens": 15,
-          "draft_sample_method": "greedy",
-          "rejection_sample_method": "standard"
-        }
-      },
-      "min_answer_tokens": 256,
-      "default_max_tokens": 8192,
-      "parser_rechunk": true,
-      "gate_only": true
-    },
-    "c2-packed-tp4-diag": {
-      "description": "GATE ONLY (hang diagnosis): c2-packed-tp4-speed as it was before the tail caps - the environment of the direct smoke SS v164 (the verify audits off; v164 ran the traffic profile, so QWEN_C2_GATE_PROFILE=1 here only waives the traffic checks on these prompts and budgets) - with the caps OFF (QWEN_FAST_BUDGET_CAP=0: the old tail narrowing, so the packed-to-sequential transition that hung is reproduced) and the hang instruments on: the sequential-step watchdog (QWEN_FAST_SEQ_DEADLINE_S=120), the stage markers (QWEN_FAST_SEQ_STAGE_LOG), the first-replay trace census (QWEN_FAST_TRACE_CENSUS), the collectives handle log (QWEN_FAST_CCL_HANDLE_LOG) and the L1 allocator view (QWEN_FAST_MEMORY_LEDGER_L1). Every instrument is host-only, so the device allocation sequence is v164's. The graph census is on here (QWEN_FAST_TRACE_CENSUS_GRAPH=1, no longer the default). The stall watch (QWEN_FAST_STALL_DEADLINE_S=120) covers sequential steps, packed rounds, engine builds and prefill segments: on a stall every thread stack is dumped without ending the process, the pinned tt-metal triage tools (dump_running_operations, dump_callstacks, check_binary_integrity, check_noc_status, dump_fast_dispatch, check_eth_status) read the hung mesh, and only then is the process ended. QWEN_FAST_CCL_HANDLE_GUARD=log logs the handles every trace baked and any unfenced same-handle collective. Not for traffic. UNVERIFIED on hardware.",
-      "eos_ids": [
-        248046,
-        248044
-      ],
-      "snapshots": [
-        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
-        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
-      ],
-      "mesh_device": "P150x4",
-      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
-      "env": {
-        "QWEN_FAST_OUTPUT_BUDGET": "16384",
-        "QWEN_FAST_MAX_POSITION": "131328",
-        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
-        "QWEN_FAST_ANY_REQUEST": "1",
-        "QWEN_FAST_FAULTHANDLER": "0",
-        "QWEN_FAST_EXTENT_REPLAY": "1",
-        "QWEN_FAST_TP": "4",
-        "QWEN_FAST_SDPA_MODES": "tail,share",
-        "QWEN_PROJECTION_LINKS": "2",
-        "QWEN_GDN_PREFILL_MMRS": "0",
-        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
-        "QWEN_FAST_TP_KV_SLIDE": "1",
-        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
-        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
-        "QWEN_C2_GATE_PROFILE": "1",
-        "QWEN_FAST_QUAD_DRAFT": "0",
-        "QWEN_FAST_FUSED_COMMIT": "0",
-        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
-        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
-        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
-        "QWEN_FAST_TRACED_PUBLISH": "0",
-        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
-        "QWEN_GDN_DIRECT_WINDOW": "0",
-        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
-        "QWEN_FAST_BUDGET_CAP": "0",
-        "QWEN_FAST_SEQ_DEADLINE_S": "120",
-        "QWEN_FAST_SEQ_STAGE_LOG": "1",
-        "QWEN_FAST_TRACE_CENSUS": "1",
-        "QWEN_FAST_CCL_HANDLE_LOG": "1",
-        "QWEN_FAST_MEMORY_LEDGER_L1": "1",
-        "QWEN_FAST_TRACE_CENSUS_GRAPH": "1",
         "QWEN_FAST_STALL_DEADLINE_S": "120",
         "QWEN_FAST_CCL_HANDLE_GUARD": "log"
       },
@@ -813,8 +726,8 @@
       "parser_rechunk": true,
       "gate_only": true
     },
-    "c2-packed-tp4-diag-nograph": {
-      "description": "GATE ONLY (hang diagnosis): c2-packed-tp4-speed as it was before the tail caps - the environment of the direct smoke SS v164 (the verify audits off; v164 ran the traffic profile, so QWEN_C2_GATE_PROFILE=1 here only waives the traffic checks on these prompts and budgets) - with the caps OFF (QWEN_FAST_BUDGET_CAP=0: the old tail narrowing, so the packed-to-sequential transition that hung is reproduced) and the hang instruments on: the sequential-step watchdog (QWEN_FAST_SEQ_DEADLINE_S=120), the stage markers (QWEN_FAST_SEQ_STAGE_LOG), the first-replay trace census (QWEN_FAST_TRACE_CENSUS), the collectives handle log (QWEN_FAST_CCL_HANDLE_LOG) and the L1 allocator view (QWEN_FAST_MEMORY_LEDGER_L1). Every instrument is host-only, so the device allocation sequence is v164's. The twin of c2-packed-tp4-diag for a process whose ttnn.graph capture is refused at attach or inside the packed capture (QWEN_FAST_TRACE_CENSUS_GRAPH=0: no graph capture around any trace capture, so the freed-temporaries part of the census is off; the watchdog, stage markers, collectives log and L1 view stay). The stall watch (QWEN_FAST_STALL_DEADLINE_S=120) covers sequential steps, packed rounds, engine builds and prefill segments: on a stall every thread stack is dumped without ending the process, the pinned tt-metal triage tools (dump_running_operations, dump_callstacks, check_binary_integrity, check_noc_status, dump_fast_dispatch, check_eth_status) read the hung mesh, and only then is the process ended. QWEN_FAST_CCL_HANDLE_GUARD=log logs the handles every trace baked and any unfenced same-handle collective. Not for traffic. UNVERIFIED on hardware.",
+    "c2-packed-tp4-diag": {
+      "description": "GATE ONLY (hang diagnosis): c2-packed-tp4-speed as it was before the tail caps - the environment of the direct smoke SS v164 (the verify audits off; v164 ran the traffic profile, so QWEN_C2_GATE_PROFILE=1 here only waives the traffic checks on these prompts and budgets) - with the caps OFF (QWEN_FAST_BUDGET_CAP=0: the old tail narrowing, so the packed-to-sequential transition that hung is reproduced) and the hang instruments on: the sequential-step watchdog (QWEN_FAST_SEQ_DEADLINE_S=120), the stage markers (QWEN_FAST_SEQ_STAGE_LOG), the first-replay trace census (QWEN_FAST_TRACE_CENSUS), the collectives handle log (QWEN_FAST_CCL_HANDLE_LOG) and the L1 allocator view (QWEN_FAST_MEMORY_LEDGER_L1). Every instrument is host-only, so the device allocation sequence is v164's. The graph census is OFF (QWEN_FAST_TRACE_CENSUS_GRAPH=0: the ttnn.graph capture reads every tensor argument and the capture refuses reads, which killed v173 at attach, so no diag profile turns it on). The stall watch (QWEN_FAST_STALL_DEADLINE_S=120) covers sequential steps, packed rounds, engine builds and prefill segments: on a stall every thread stack is dumped without ending the process, the pinned tt-metal triage tools (dump_running_operations, dump_callstacks, check_binary_integrity, check_noc_status, dump_fast_dispatch, check_eth_status) read the hung mesh, and only then is the process ended. QWEN_FAST_CCL_HANDLE_GUARD=log logs the handles every trace baked and any unfenced same-handle collective. Not for traffic. UNVERIFIED on hardware.",
       "eos_ids": [
         248046,
         248044
@@ -854,9 +767,9 @@
         "QWEN_FAST_SEQ_DEADLINE_S": "120",
         "QWEN_FAST_SEQ_STAGE_LOG": "1",
         "QWEN_FAST_TRACE_CENSUS": "1",
-        "QWEN_FAST_TRACE_CENSUS_GRAPH": "0",
         "QWEN_FAST_CCL_HANDLE_LOG": "1",
         "QWEN_FAST_MEMORY_LEDGER_L1": "1",
+        "QWEN_FAST_TRACE_CENSUS_GRAPH": "0",
         "QWEN_FAST_STALL_DEADLINE_S": "120",
         "QWEN_FAST_CCL_HANDLE_GUARD": "log"
       },

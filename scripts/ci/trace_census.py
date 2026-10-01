@@ -475,11 +475,27 @@ def census_release(original):
     return release_trace
 
 
+def trace_key(trace):
+    """The key a trace handle is recorded under in TRACE_SLOTS: its integer value when the handle supports int() (a mesh trace id is
+    a small integer wrapper, and a wrapper that defines __eq__ without __hash__ cannot be a dict key), else its `id` attribute,
+    else the handle itself when it is hashable, else the object's identity. Never raises."""
+    for convert in (int, lambda value: int(value.id)):
+        try:
+            return convert(trace)
+        except (TypeError, ValueError, AttributeError, OverflowError):
+            continue
+    try:
+        hash(trace)
+        return trace
+    except TypeError:
+        return id(trace)
+
+
 def forget_trace(handles):
     """Drop the recorded traces whose handle is one of `handles`."""
     for handle in handles:
         try:
-            TRACE_SLOTS.pop(handle, None)
+            TRACE_SLOTS.pop(trace_key(handle), None)
         except TypeError:
             continue
     if not TRACES:
@@ -520,7 +536,7 @@ class UnfencedHandleReuse(RuntimeError):
     is enqueued, under QWEN_FAST_CCL_HANDLE_GUARD=1)."""
 
 
-TRACE_SLOTS = {}    # trace handle -> {slot: [first handle key, last handle key]}
+TRACE_SLOTS = {}    # trace_key(trace handle) -> {slot: [first handle key, last handle key]}
 CAPTURE_SLOTS = []  # the slot record of the capture in progress (a stack of at most one)
 PENDING = {}        # slot -> the handle key the most recent op (eager or replay) ended on, cleared by every fence
 VIOLATIONS = []
@@ -604,7 +620,10 @@ def end_capture_slots(trace, seq, site):
     record = CAPTURE_SLOTS.pop() if CAPTURE_SLOTS else {}
     if handle_guard_mode() is None:
         return
-    TRACE_SLOTS[trace] = record
+    try:
+        TRACE_SLOTS[trace_key(trace)] = record
+    except TypeError:
+        pass
     for slot, (first, last) in sorted(record.items(), key=lambda item: slot_text(item[0])):
         log('[PINDIAG] trace handles seq=%d site=%s slot=%s first=%s last=%s' % (seq, site, slot_text(slot), first, last))
 
@@ -618,7 +637,10 @@ def census_execute(original):
             return original(*args, **kwargs)
         trace = args[1] if len(args) > 1 else kwargs.get('trace_id', kwargs.get('trace'))
         blocking = kwargs.get('blocking', args[3] if len(args) > 3 else True)
-        record = TRACE_SLOTS.get(trace, {})
+        try:
+            record = TRACE_SLOTS.get(trace_key(trace), {})
+        except TypeError:
+            record = {}
         for slot, (first, last) in record.items():
             if PENDING.get(slot) == first:
                 violation('a replay starts on the handle the previous op on its slot ended on', slot, trace)
@@ -827,8 +849,9 @@ def eager_segment(site):
 
 def build_guard(create, operations, mesh, request_id):
     """`create`, the engine build, as it runs under the stall watch (a 'build' scope) and, under QWEN_FAST_CAPTURE_PLUG_ENGINES=1 at
-    four cards, in its own capture zone (capture_plug.open_engine / seal_engine). With neither flag it is `create` itself. A build or
-    a seal that fails gives the zone back (after closing the engine when it was built)."""
+    four cards, in its own capture zone (capture_plug.open_engine / seal_engine). With neither flag it is `create` itself. A build that
+    raises abandons the zone (it stays held, as the packed path does); a seal that fails closes the engine and frees the zone only when
+    request.closed is True."""
     import capture_plug
     import stall_watch
 
@@ -842,18 +865,24 @@ def build_guard(create, operations, mesh, request_id):
         try:
             with stall_watch.scope('build', 'engine request=%s' % request_label(request_id)):
                 request = create()
-            if plug is not None:
-                try:
-                    capture_plug.seal_engine(plug, request, [extent for trace in TRACES if trace['seq'] > sequence
-                                                             for extent in trace['ranges']])
-                except BaseException:
-                    request.close(request_id)
-                    raise
-            return request
         except BaseException:
+            # A build that raised mid-capture may leave enqueued work on the device: the zone is abandoned (still held), as the
+            # packed path does, never freed under it.
             if plug is not None:
-                plug.close()
+                plug.abandon()
             raise
+        if plug is not None:
+            try:
+                capture_plug.seal_engine(plug, request, [extent for trace in TRACES if trace['seq'] > sequence
+                                                         for extent in trace['ranges']])
+            except BaseException:
+                # The engine is built and idle: close it, and give the zone back only when the request says it released everything.
+                try:
+                    request.close(request_id)
+                finally:
+                    capture_plug.give_back(plug, request)
+                raise
+        return request
     return guarded
 
 

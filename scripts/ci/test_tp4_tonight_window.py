@@ -25,7 +25,7 @@ DEVICE_STEPS = ('cardm', 'smoke', 'gate', 'prefix', 'fabric', 'replay')
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|'
                     r'/dev/tenstorrent|home/|zot\.|@[A-Z0-9_]+@')
 IMAGE = 'tp4-serve-3'
-ORDERED = ('T1-build-smoke', 'T2-smoke-audits-off', 'T3-g1-smoke', 'T4-gate-matrix', 'T5-diag-repro', 'T5n-diag-nograph',
+ORDERED = ('T1-build-smoke', 'T2-smoke-audits-off', 'T3-g1-smoke', 'T4-gate-matrix', 'T5-diag-repro',
            'T5b-diag-t1', 'T5c-diag-t2', 'T6-handback-reset')
 # v166's SS list, in its order: the like-for-like part of T1 and T2.
 SS = ['warmup', 'coding', 'long_real_text', 'concurrent4', 'concurrent4_steady', 'steady_resend', 'tool_call', 'stream_tool_call',
@@ -76,7 +76,6 @@ class OrderTests(unittest.TestCase):
     def test_the_diagnosis_is_the_last_device_work_before_the_hand_back(self):
         names = [row[0] for row in read_order()]
         self.assertEqual(names[-1], 'T6-handback-reset')
-        self.assertLess(names.index('T5-diag-repro'), names.index('T5n-diag-nograph'))
         self.assertLess(names.index('T5-diag-repro'), names.index('T5b-diag-t1'))
         self.assertLess(names.index('T5-diag-repro'), names.index('T5c-diag-t2'))
         self.assertLess(max(names.index(name) for name in names[:3]), names.index('T5-diag-repro'),
@@ -112,7 +111,6 @@ class TemplateTests(unittest.TestCase):
                 'T3-g1-smoke': ('reset smoke', 'general-tp4'),
                 'T4-gate-matrix': ('reset gate', 'c2-packed-tp4'),
                 'T5-diag-repro': ('reset smoke', 'c2-packed-tp4-diag'),
-                'T5n-diag-nograph': ('reset smoke', 'c2-packed-tp4-diag-nograph'),
                 'T5b-diag-t1': ('reset smoke', 'c2-packed-tp4-diag-t1'),
                 'T5c-diag-t2': ('reset smoke', 'c2-packed-tp4-diag-t2'),
                 'T6-handback-reset': ('status reset', 'general')}
@@ -124,7 +122,7 @@ class TemplateTests(unittest.TestCase):
                     self.assertIn(profile, PROFILES['profiles'])
 
     def test_the_gate_only_profiles_are_the_speed_and_diag_arms_and_the_traffic_profile_is_not(self):
-        for name in ('T2-smoke-audits-off', 'T5-diag-repro', 'T5b-diag-t1', 'T5c-diag-t2', 'T5n-diag-nograph'):
+        for name in ('T2-smoke-audits-off', 'T5-diag-repro', 'T5b-diag-t1', 'T5c-diag-t2'):
             self.assertIs(PROFILES['profiles'][parsed(name)['profile']].get('gate_only'), True, name)
         for name in ('T1-build-smoke', 'T4-gate-matrix'):
             self.assertNotIn('gate_only', PROFILES['profiles'][parsed(name)['profile']], name)
@@ -135,7 +133,7 @@ class SmokeTests(unittest.TestCase):
     def test_every_named_test_is_one_the_smoke_knows(self):
         with open(os.path.join(HERE, 'c2_serving_smoke.py'), encoding='utf-8') as handle:
             smoke = handle.read()
-        for name in ('T1-build-smoke', 'T2-smoke-audits-off', 'T3-g1-smoke', 'T5-diag-repro', 'T5b-diag-t1', 'T5c-diag-t2', 'T5n-diag-nograph'):
+        for name in ('T1-build-smoke', 'T2-smoke-audits-off', 'T3-g1-smoke', 'T5-diag-repro', 'T5b-diag-t1', 'T5c-diag-t2'):
             for test in tests_of(name):
                 with self.subTest(template=name, test=test):
                     self.assertIn("'%s'" % test, smoke)
@@ -150,7 +148,7 @@ class SmokeTests(unittest.TestCase):
         # The smoke ignores the order of the list it is given: it runs record() calls in source order, filtered by the list.
         with open(os.path.join(HERE, 'c2_serving_smoke.py'), encoding='utf-8') as handle:
             executed = re.findall(r"^\s*record\('([a-z0-9_]+)'", handle.read(), re.M)
-        for name in ('T1-build-smoke', 'T2-smoke-audits-off', 'T3-g1-smoke', 'T5-diag-repro', 'T5b-diag-t1', 'T5c-diag-t2', 'T5n-diag-nograph'):
+        for name in ('T1-build-smoke', 'T2-smoke-audits-off', 'T3-g1-smoke', 'T5-diag-repro', 'T5b-diag-t1', 'T5c-diag-t2'):
             with self.subTest(template=name):
                 listed = tests_of(name)
                 self.assertEqual([test for test in executed if test in listed], listed)
@@ -164,7 +162,7 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(t3, ['warmup', 'coding', 'long_real_text', 'concurrent4', 'concurrent4_steady'] + CODE)
 
     def test_the_diagnosis_runs_v164s_sequence_in_v164s_order(self):
-        for name in ('T5-diag-repro', 'T5b-diag-t1', 'T5c-diag-t2', 'T5n-diag-nograph'):
+        for name in ('T5-diag-repro', 'T5b-diag-t1', 'T5c-diag-t2'):
             self.assertEqual(tests_of(name), DIAG_TESTS, name)
 
     def test_the_smoke_check_judges_the_opt_in_tests_the_templates_name(self):
