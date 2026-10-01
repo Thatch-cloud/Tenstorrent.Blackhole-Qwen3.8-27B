@@ -55,7 +55,8 @@ TAIL_CAPS = {'QWEN_FAST_BUDGET_CAP': '1', 'QWEN_FAST_SEQ_DEADLINE_S': '120'}
 # and the host-only instruments on; the factorial arms turn one verify audit back on each.
 DIAG_INSTRUMENTS = {'QWEN_FAST_BUDGET_CAP': '0', 'QWEN_FAST_SEQ_DEADLINE_S': '120', 'QWEN_FAST_SEQ_STAGE_LOG': '1',
                     'QWEN_FAST_TRACE_CENSUS': '1', 'QWEN_FAST_CCL_HANDLE_LOG': '1', 'QWEN_FAST_MEMORY_LEDGER_L1': '1'}
-DIAG_PROFILES = {'c2-packed-tp4-diag': {}, 'c2-packed-tp4-diag-t1': {'QWEN_FAST_VERIFY_T1_AUDIT': '1'},
+DIAG_PROFILES = {'c2-packed-tp4-diag': {}, 'c2-packed-tp4-diag-nograph': {'QWEN_FAST_TRACE_CENSUS_GRAPH': '0'},
+                 'c2-packed-tp4-diag-t1': {'QWEN_FAST_VERIFY_T1_AUDIT': '1'},
                  'c2-packed-tp4-diag-t2': {'QWEN_FAST_VERIFY_T2_AUDIT': '1'}}
 
 
@@ -285,7 +286,8 @@ class TailProfileTests(unittest.TestCase):
                         self.assertEqual(mine.get(key), speed.get(key), key)
                 self.assertEqual(contract.mesh_problems(dict(mine, name=name)), [], name)
                 audits = (mine['env']['QWEN_FAST_VERIFY_T1_AUDIT'], mine['env']['QWEN_FAST_VERIFY_T2_AUDIT'])
-                self.assertEqual(audits, {'c2-packed-tp4-diag': ('0', '0'), 'c2-packed-tp4-diag-t1': ('1', '0'),
+                self.assertEqual(audits, {'c2-packed-tp4-diag': ('0', '0'), 'c2-packed-tp4-diag-nograph': ('0', '0'),
+                                          'c2-packed-tp4-diag-t1': ('1', '0'),
                                           'c2-packed-tp4-diag-t2': ('0', '1')}[name])
 
     def test_the_diag_instruments_are_the_host_only_flags_and_every_tail_flag_parses(self):
@@ -298,7 +300,9 @@ class TailProfileTests(unittest.TestCase):
         diag = profiles()['c2-packed-tp4-diag']['env']
         for flag in ('QWEN_FAST_SEQ_STAGE_LOG', 'QWEN_FAST_TRACE_CENSUS', 'QWEN_FAST_CCL_HANDLE_LOG', 'QWEN_FAST_MEMORY_LEDGER_L1'):
             self.assertEqual(diag[flag], '1', flag)
-        self.assertNotIn('QWEN_FAST_TRACE_CENSUS_GRAPH', diag, 'the graph-walking census is not asked for')
+        self.assertNotIn('QWEN_FAST_TRACE_CENSUS_GRAPH', diag, 'the graph census is on by default in the diag profile')
+        self.assertEqual(profiles()['c2-packed-tp4-diag-nograph']['env']['QWEN_FAST_TRACE_CENSUS_GRAPH'], '0',
+                         'the fallback twin turns only the graph part off')
 
     def test_the_admission_accepts_each_tail_profile_over_the_image_environment_and_only_the_gate_ones_carry_the_waiver(self):
         image = image_env()
