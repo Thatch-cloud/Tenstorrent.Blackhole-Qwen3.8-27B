@@ -216,6 +216,7 @@ class PackedAnyProfileTest(unittest.TestCase):
         # (the ring fabric, the bfloat16 drafter), and the four batched-draft profiles (tp4/draft).
         self.assertEqual([name for name in names if EXTENT_FLAG in self.load(name)['env']],
                          ['c2-packed', 'c2-packed-gate', 'c2-packed-prefix', 'c2-packed-prefix-gate', 'c2-packed-tp4',
+                          'c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2',
                           'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-noslide',
                           'c2-packed-tp4-gate-pairs', 'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-ring',
                           'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide', 'c2-packed-tp4-speed-pairs',
@@ -230,6 +231,28 @@ class PackedAnyProfileTest(unittest.TestCase):
         self.assertEqual(self.load('exact')['env'], {'QWEN_FAST_OUTPUT_BUDGET': '256', 'QWEN_FAST_MAX_POSITION': '131328',
                                                      'QWEN_DSPARK_REQUEST_CONTEXT': '131072'})
         self.assertEqual(self.load('c2')['env']['QWEN_FAST_PACKED_STEP'], '0')
+
+    def test_apply_environment_exports_the_tail_caps_and_the_diagnostics_and_the_diag_profiles_need_the_gate(self):
+        # tp4-serve-3: the traffic profile carries the tail caps and the watchdog; the diag arms carry the host-only instruments
+        # with the caps off and, being gate only, refuse to boot without QWEN_C2_GATE=1.
+        caps = {'QWEN_FAST_BUDGET_CAP': '1', 'QWEN_FAST_SEQ_DEADLINE_S': '120'}
+        instruments = ('QWEN_FAST_SEQ_STAGE_LOG', 'QWEN_FAST_TRACE_CENSUS', 'QWEN_FAST_CCL_HANDLE_LOG', 'QWEN_FAST_MEMORY_LEDGER_L1')
+        for name in ('c2-packed-tp4', 'c2-packed-tp4-speed'):
+            exported = contract.apply_environment(self.load(name), {})
+            for key, value in caps.items():
+                self.assertEqual(exported[key], value, (name, key))
+            for key in instruments:
+                self.assertNotIn(key, exported, (name, key))
+        for name in ('c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2'):
+            profile = dict(self.load(name), name=name)
+            exported = contract.apply_environment(profile, {})
+            self.assertEqual((exported['QWEN_FAST_BUDGET_CAP'], exported['QWEN_FAST_SEQ_DEADLINE_S']), ('0', '120'), name)
+            for key in instruments:
+                self.assertEqual(exported[key], '1', (name, key))
+            self.assertEqual(len(contract.gate_problems(profile, {})), 1, name)
+            self.assertEqual(contract.gate_problems(profile, {contract.GATE_SWITCH: '1'}), [], name)
+        self.assertEqual(contract.gate_problems(dict(self.load('c2-packed-tp4'), name='c2-packed-tp4'), {}), [])
+        self.assertEqual(len(contract.gate_problems(dict(self.load('c2-packed-tp4-speed'), name='c2-packed-tp4-speed'), {})), 1)
 
     @unittest.skipUnless(os.path.isfile(DOCKERFILE), 'repository checkout only')
     def test_the_image_bakes_neither_the_flag_nor_a_gate_only_knob(self):
@@ -510,7 +533,7 @@ TP4_PROFILES = ('general-tp4', 'general-prefix-tp4', 'general-tp4-131k', 'genera
 RING_FABRIC_PROFILES = ('general-tp4-ring-mmrs', 'c2-packed-tp4-gate-ring')
 MMRS_PROFILES = ('general-tp4-mmrs', 'general-tp4-ring-mmrs')
 # The four-card fast-path (S2) profiles: mesh_device P150x4 with the fast path on, under QWEN_FAST_TP=4.
-FAST_TP4_PROFILES = ('c2-packed-tp4', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16',
+FAST_TP4_PROFILES = ('c2-packed-tp4', 'c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16',
                      'c2-packed-tp4-gate-noslide', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide',
                      'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-gate-quad',
                      'c2-packed-tp4-gate-pairs')

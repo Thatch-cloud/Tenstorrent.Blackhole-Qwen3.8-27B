@@ -287,7 +287,8 @@ class PlanTests(unittest.TestCase):
         self.assertEqual([name for name in sorted(CHECKOUT_PROFILES['profiles'])
                           if driver.any_request_profile(CHECKOUT_PROFILES, name)],
                          ['c2', 'c2-gate', 'c2-packed', 'c2-packed-gate', 'c2-packed-prefix', 'c2-packed-prefix-gate',
-                          'c2-packed-tp4', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-noslide',
+                          'c2-packed-tp4', 'c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t2',
+                          'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-noslide',
                           'c2-packed-tp4-gate-pairs', 'c2-packed-tp4-gate-quad',
                           'c2-packed-tp4-gate-ring', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide',
                           'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-speed-quad'])

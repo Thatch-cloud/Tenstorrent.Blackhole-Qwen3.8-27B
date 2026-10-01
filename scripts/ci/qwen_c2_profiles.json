@@ -303,7 +303,7 @@
       "parser_rechunk": true
     },
     "c2-packed-tp4": {
-      "description": "C2-packed-any at TP4 (plan S2-TP4), the TRAFFIC profile and the image default: the c2-packed stack on all four cards as one (1, 4) mesh (mesh_device P150x4, QWEN_FAST_TP=4): the four-card ring descriptor at two links (tp4_mesh: 2x2), FABRIC_1D with the model's own Ring collectives, the fast path's own collectives at Linear (QWEN_FAST_CCL_TOPOLOGY, mesh_link_policy), QWEN_PROJECTION_LINKS=2 (two trained links per edge), the K64j extent program at ONE KV head per chip (QWEN_FAST_SDPA_MODES=tail,share: 0x23; the q-slice needs a second KV head) at G8B2, the packed GDN launch at 12 value heads on 48 cores, and no on-device sampler: the fast path verifies with its own shard argmax over 62,080 columns per chip (248,320 / 4). Drafting is the PAIR fold at 8 / 2 heads (QWEN_FAST_QUAD_DRAFT=0), and the drafter's K/V publication is the four-card slide (QWEN_FAST_TP_KV_SLIDE=1, draft_kv_slide_tp: the pair's kernel over 2 KV heads on 8 workers per chip; the six-op eager chain stays behind the flag as the reference). Switched OFF because their code carries the pair's chip or head literals: the quad draft, the fused commit and its in-place / live-bank variants, the pair's draft K/V slide experiment, the traced publish's K/V fusion, the MLP block stream, the GDN direct-window and shared-QK experiments. The bring-up switches are general-tp4's: the fused prefill matmul + reduce-scatter off, the exact prefill conv audited beside the FIR for the first four chunks (raises on a byte difference). SERVED WITH THE VERIFY T1/T2 AUDITS ON (QWEN_FAST_VERIFY_T1_AUDIT=1, QWEN_FAST_VERIFY_T2_AUDIT=1), the configuration every four-card gate passed in (the profile carried them and the gate driver adds the extent audit): with them off the traffic profile hung twice at the first four-user answers' tail, where the packed 64-row rounds give way to the per-user 4-row steps (the platform replay SR v163 and the direct smoke SS v164, a per-user carry restore that never completed, then the board dropped off PCIe). The audits-off twin stays c2-packed-tp4-speed until that hang is found. Engine and limits are c2-packed's (prompts up to 123,136 with at least 8,192 tokens of answer room, output ceiling 16,384, default answer 8,192, four seats, 8,208 KV blocks, parser M). The attach is admitted by packed_any_admission only while packed_any_evidence_tp4.json records CB1, CB2a and CB2b as PASS at its pinned sha256; without that record it is refused (fail closed, no fallback) and only c2-packed-tp4-gate, which logs each missing piece as UNQUALIFIED, boots in a gate run. This profile's env is c2-packed-tp4-speed's less the gate switches, and the validated gate profile's less the audits: exactness (S3a matrix, staggered arrivals) and the speed window ran on those twins.",
+      "description": "C2-packed-any at TP4 (plan S2-TP4), the TRAFFIC profile and the image default: the c2-packed stack on all four cards as one (1, 4) mesh (mesh_device P150x4, QWEN_FAST_TP=4): the four-card ring descriptor at two links (tp4_mesh: 2x2), FABRIC_1D with the model's own Ring collectives, the fast path's own collectives at Linear (QWEN_FAST_CCL_TOPOLOGY, mesh_link_policy), QWEN_PROJECTION_LINKS=2 (two trained links per edge), the K64j extent program at ONE KV head per chip (QWEN_FAST_SDPA_MODES=tail,share: 0x23; the q-slice needs a second KV head) at G8B2, the packed GDN launch at 12 value heads on 48 cores, and no on-device sampler: the fast path verifies with its own shard argmax over 62,080 columns per chip (248,320 / 4). Drafting is the PAIR fold at 8 / 2 heads (QWEN_FAST_QUAD_DRAFT=0), and the drafter's K/V publication is the four-card slide (QWEN_FAST_TP_KV_SLIDE=1, draft_kv_slide_tp: the pair's kernel over 2 KV heads on 8 workers per chip; the six-op eager chain stays behind the flag as the reference). Switched OFF because their code carries the pair's chip or head literals: the quad draft, the fused commit and its in-place / live-bank variants, the pair's draft K/V slide experiment, the traced publish's K/V fusion, the MLP block stream, the GDN direct-window and shared-QK experiments. The bring-up switches are general-tp4's: the fused prefill matmul + reduce-scatter off, the exact prefill conv audited beside the FIR for the first four chunks (raises on a byte difference). SERVED WITH THE VERIFY T1/T2 AUDITS ON (QWEN_FAST_VERIFY_T1_AUDIT=1, QWEN_FAST_VERIFY_T2_AUDIT=1), the configuration every four-card gate passed in (the profile carried them and the gate driver adds the extent audit): with them off the traffic profile hung twice at the first four-user answers' tail, where the packed 64-row rounds give way to the per-user 4-row steps (the platform replay SR v163 and the direct smoke SS v164, a per-user carry restore that never completed, then the board dropped off PCIe). The audits stay on and the hang is not found: the audits-off twin stays c2-packed-tp4-speed (gate only). The tail caps are on (QWEN_FAST_BUDGET_CAP=1: a round with more than one user stays packed until a user finishes, a sequential step verifies at full width and the commit is capped at the remaining budget) with the sequential-step watchdog at 120 s (QWEN_FAST_SEQ_DEADLINE_S: a stalled step dumps its stacks instead of waiting silently); neither moves the device allocation sequence. Engine and limits are c2-packed's (prompts up to 123,136 with at least 8,192 tokens of answer room, output ceiling 16,384, default answer 8,192, four seats, 8,208 KV blocks, parser M). The attach is admitted by packed_any_admission only while packed_any_evidence_tp4.json records CB1, CB2a and CB2b as PASS at its pinned sha256; without that record it is refused (fail closed, no fallback) and only c2-packed-tp4-gate, which logs each missing piece as UNQUALIFIED, boots in a gate run. This profile's env is c2-packed-tp4-speed's less the gate switches, and the validated gate profile's less the audits: exactness (S3a matrix, staggered arrivals) and the speed window ran on those twins.",
       "eos_ids": [
         248046,
         248044
@@ -337,7 +337,9 @@
         "QWEN_GDN_DIRECT_WINDOW": "0",
         "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
         "QWEN_FAST_VERIFY_T1_AUDIT": "1",
-        "QWEN_FAST_VERIFY_T2_AUDIT": "1"
+        "QWEN_FAST_VERIFY_T2_AUDIT": "1",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120"
       },
       "engine": {
         "model": "@SNAPSHOT@",
@@ -548,7 +550,7 @@
       "gate_only": true
     },
     "c2-packed-tp4-speed": {
-      "description": "GATE ONLY (the speed window's timed arm): c2-packed-tp4-gate with the verify's T1 shard-argmax and T2 window audits off (QWEN_FAST_VERIFY_T1_AUDIT=0, QWEN_FAST_VERIFY_T2_AUDIT=0), the drafter's K/V slide on. The audits cost about 31 ms of a packed round's readback (256 blocking reads per round for T2, one more for T1) and add work inside the verify trace, so c2-packed-tp4-gate cannot be timed; this arm is what the round time is read from, as the pair's timed arms ran with the audits off. The tokens are held against c2-packed-tp4-gate's on the same prompts (the audited arm). Every other flag and the engine are c2-packed-tp4-gate's. Not for traffic. UNVERIFIED on hardware.",
+      "description": "GATE ONLY (the speed window's timed arm): c2-packed-tp4-gate with the verify's T1 shard-argmax and T2 window audits off (QWEN_FAST_VERIFY_T1_AUDIT=0, QWEN_FAST_VERIFY_T2_AUDIT=0), the drafter's K/V slide on. The audits cost about 31 ms of a packed round's readback (256 blocking reads per round for T2, one more for T1) and add work inside the verify trace, so c2-packed-tp4-gate cannot be timed; this arm is what the round time is read from, as the pair's timed arms ran with the audits off. The tokens are held against c2-packed-tp4-gate's on the same prompts (the audited arm). It carries the traffic profile's tail caps (QWEN_FAST_BUDGET_CAP=1, QWEN_FAST_SEQ_DEADLINE_S=120): the audits-off traffic shape that hung, with the caps that remove the narrow sequential steps. Every other flag and the engine are c2-packed-tp4-gate's. Not for traffic. UNVERIFIED on hardware.",
       "eos_ids": [
         248046,
         248044
@@ -583,7 +585,273 @@
         "QWEN_FAST_TRACED_PUBLISH": "0",
         "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
         "QWEN_GDN_DIRECT_WINDOW": "0",
-        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0"
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-diag": {
+      "description": "GATE ONLY (hang diagnosis): c2-packed-tp4-speed as it was before the tail caps - the environment of the direct smoke SS v164 (the verify audits off, QWEN_C2_GATE_PROFILE=1) - with the caps OFF (QWEN_FAST_BUDGET_CAP=0: the old tail narrowing, so the packed-to-sequential transition that hung is reproduced) and the hang instruments on: the sequential-step watchdog (QWEN_FAST_SEQ_DEADLINE_S=120), the stage markers (QWEN_FAST_SEQ_STAGE_LOG), the first-replay trace census (QWEN_FAST_TRACE_CENSUS), the collectives handle log (QWEN_FAST_CCL_HANDLE_LOG) and the L1 allocator view (QWEN_FAST_MEMORY_LEDGER_L1). Every instrument is host-only, so the device allocation sequence is v164's. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_BUDGET_CAP": "0",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_SEQ_STAGE_LOG": "1",
+        "QWEN_FAST_TRACE_CENSUS": "1",
+        "QWEN_FAST_CCL_HANDLE_LOG": "1",
+        "QWEN_FAST_MEMORY_LEDGER_L1": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-diag-t1": {
+      "description": "GATE ONLY (hang diagnosis): c2-packed-tp4-speed as it was before the tail caps - the environment of the direct smoke SS v164 (the verify audits off, QWEN_C2_GATE_PROFILE=1) - with the caps OFF (QWEN_FAST_BUDGET_CAP=0: the old tail narrowing, so the packed-to-sequential transition that hung is reproduced) and the hang instruments on: the sequential-step watchdog (QWEN_FAST_SEQ_DEADLINE_S=120), the stage markers (QWEN_FAST_SEQ_STAGE_LOG), the first-replay trace census (QWEN_FAST_TRACE_CENSUS), the collectives handle log (QWEN_FAST_CCL_HANDLE_LOG) and the L1 allocator view (QWEN_FAST_MEMORY_LEDGER_L1). Every instrument is host-only, so the device allocation sequence is v164's. The factorial arm with the verify T1 shard-argmax audit ON and the T2 window audit off (QWEN_FAST_VERIFY_T1_AUDIT=1). Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "1",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_BUDGET_CAP": "0",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_SEQ_STAGE_LOG": "1",
+        "QWEN_FAST_TRACE_CENSUS": "1",
+        "QWEN_FAST_CCL_HANDLE_LOG": "1",
+        "QWEN_FAST_MEMORY_LEDGER_L1": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-diag-t2": {
+      "description": "GATE ONLY (hang diagnosis): c2-packed-tp4-speed as it was before the tail caps - the environment of the direct smoke SS v164 (the verify audits off, QWEN_C2_GATE_PROFILE=1) - with the caps OFF (QWEN_FAST_BUDGET_CAP=0: the old tail narrowing, so the packed-to-sequential transition that hung is reproduced) and the hang instruments on: the sequential-step watchdog (QWEN_FAST_SEQ_DEADLINE_S=120), the stage markers (QWEN_FAST_SEQ_STAGE_LOG), the first-replay trace census (QWEN_FAST_TRACE_CENSUS), the collectives handle log (QWEN_FAST_CCL_HANDLE_LOG) and the L1 allocator view (QWEN_FAST_MEMORY_LEDGER_L1). Every instrument is host-only, so the device allocation sequence is v164's. The factorial arm with the verify T2 window audit ON and the T1 shard-argmax audit off (QWEN_FAST_VERIFY_T2_AUDIT=1). Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "1",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_BUDGET_CAP": "0",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_SEQ_STAGE_LOG": "1",
+        "QWEN_FAST_TRACE_CENSUS": "1",
+        "QWEN_FAST_CCL_HANDLE_LOG": "1",
+        "QWEN_FAST_MEMORY_LEDGER_L1": "1"
       },
       "engine": {
         "model": "@SNAPSHOT@",

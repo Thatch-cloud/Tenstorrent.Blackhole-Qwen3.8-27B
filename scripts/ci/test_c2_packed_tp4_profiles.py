@@ -49,13 +49,21 @@ AUDIT_ENV = {'QWEN_FAST_VERIFY_T1_AUDIT': '1', 'QWEN_FAST_VERIFY_T2_AUDIT': '1',
 # The traffic profile serves with the verify audits on (the gate's configuration): with them off it hung twice at the
 # packed-to-sequential tail of the first four-user answers (SR v163, SS v164). Only the gate profile takes the waiver.
 VERIFY_AUDITS = {'QWEN_FAST_VERIFY_T1_AUDIT': '1', 'QWEN_FAST_VERIFY_T2_AUDIT': '1'}
+# The tail caps and the sequential-step watchdog (tp4-serve-3): the traffic profile and its audits-off speed twin carry them.
+TAIL_CAPS = {'QWEN_FAST_BUDGET_CAP': '1', 'QWEN_FAST_SEQ_DEADLINE_S': '120'}
+# The hang diagnosis's profiles: the speed twin as it stood before the caps (the environment of SS v164) with the caps OFF
+# and the host-only instruments on; the factorial arms turn one verify audit back on each.
+DIAG_INSTRUMENTS = {'QWEN_FAST_BUDGET_CAP': '0', 'QWEN_FAST_SEQ_DEADLINE_S': '120', 'QWEN_FAST_SEQ_STAGE_LOG': '1',
+                    'QWEN_FAST_TRACE_CENSUS': '1', 'QWEN_FAST_CCL_HANDLE_LOG': '1', 'QWEN_FAST_MEMORY_LEDGER_L1': '1'}
+DIAG_PROFILES = {'c2-packed-tp4-diag': {}, 'c2-packed-tp4-diag-t1': {'QWEN_FAST_VERIFY_T1_AUDIT': '1'},
+                 'c2-packed-tp4-diag-t2': {'QWEN_FAST_VERIFY_T2_AUDIT': '1'}}
 
 
 SPEED = 'QWEN_FAST_TP_KV_SLIDE'
 # The speed window's profiles (tp4/speed): each is c2-packed-tp4-gate plus exactly these env differences and a description.
 SPEED_PROFILES = {
     'c2-packed-tp4-gate-noslide': {SPEED: '0'},
-    'c2-packed-tp4-speed': {'QWEN_FAST_VERIFY_T1_AUDIT': '0', 'QWEN_FAST_VERIFY_T2_AUDIT': '0'},
+    'c2-packed-tp4-speed': dict({'QWEN_FAST_VERIFY_T1_AUDIT': '0', 'QWEN_FAST_VERIFY_T2_AUDIT': '0'}, **TAIL_CAPS),
     'c2-packed-tp4-speed-noslide': {'QWEN_FAST_VERIFY_T1_AUDIT': '0', 'QWEN_FAST_VERIFY_T2_AUDIT': '0', SPEED: '0'},
 }
 
@@ -114,7 +122,10 @@ class FourCardProfileTests(unittest.TestCase):
         for four, twin, extra in (('c2-packed-tp4', 'c2-packed', VERIFY_AUDITS), ('c2-packed-tp4-gate', 'c2-packed-gate', AUDIT_ENV)):
             mine, theirs = profiles()[four], self.pair(twin)
             with self.subTest(profile=four):
-                self.assertEqual(mine['env'], dict(theirs['env'], **dict(FOUR_ENV, **dict(OFF_ENV, **extra))))
+                expected = dict(theirs['env'], **dict(FOUR_ENV, **dict(OFF_ENV, **extra)))
+                if four == 'c2-packed-tp4':
+                    expected.update(TAIL_CAPS)
+                self.assertEqual(mine['env'], expected)
                 engine = json.loads(json.dumps(mine['engine']))
                 self.assertEqual(engine['additional-config']['tt'].pop('fabric_config'), 'FABRIC_1D')
                 self.assertEqual(engine, theirs['engine'], 'the engine block is the twin\'s: 131,328 x 4 seats, 8,208 blocks')
@@ -223,7 +234,7 @@ class SpeedProfileTests(unittest.TestCase):
     def test_the_speed_pair_differs_only_in_the_slide(self):
         found = profiles()
         on, off = found['c2-packed-tp4-speed']['env'], found['c2-packed-tp4-speed-noslide']['env']
-        self.assertEqual({key for key in on if on[key] != off.get(key)}, {SPEED})
+        self.assertEqual({key for key in on if on[key] != off.get(key)}, {SPEED} | set(TAIL_CAPS), 'the slide, and the caps the noslide twin predates')
         self.assertEqual((on[SPEED], off[SPEED]), ('1', '0'))
         on, off = found['c2-packed-tp4-gate']['env'], found['c2-packed-tp4-gate-noslide']['env']
         self.assertEqual({key for key in on if on[key] != off.get(key)}, {SPEED})
@@ -237,13 +248,77 @@ class SpeedProfileTests(unittest.TestCase):
                 self.assertEqual(admission.check_environment(environ, M3), [])
 
 
+class TailProfileTests(unittest.TestCase):
+    """tp4-serve-3: the tail caps on the traffic profile and its speed twin, and the hang diagnosis's gate-only profiles."""
+
+    def test_the_traffic_profile_and_its_speed_twin_differ_only_in_the_audits_and_the_waiver(self):
+        found = profiles()
+        traffic, speed = found['c2-packed-tp4']['env'], found['c2-packed-tp4-speed']['env']
+        self.assertEqual({key for key in set(traffic) | set(speed) if traffic.get(key) != speed.get(key)},
+                         {'QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT', 'QWEN_C2_GATE_PROFILE'})
+        for env in (traffic, speed):
+            for key, value in TAIL_CAPS.items():
+                self.assertEqual(env[key], value, key)
+        self.assertEqual((traffic['QWEN_FAST_VERIFY_T1_AUDIT'], traffic['QWEN_FAST_VERIFY_T2_AUDIT']), ('1', '1'), 'audits stay on')
+        self.assertIn('hang is not found', found['c2-packed-tp4']['description'])
+
+    def test_the_caps_are_absent_from_every_profile_that_predates_them(self):
+        for name, profile in profiles().items():
+            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed') + tuple(DIAG_PROFILES):
+                self.assertNotIn('QWEN_FAST_BUDGET_CAP', profile['env'], name)
+                self.assertNotIn('QWEN_FAST_SEQ_DEADLINE_S', profile['env'], name)
+
+    def test_each_diag_profile_is_the_speed_twin_before_the_caps_with_only_host_only_instruments(self):
+        found = profiles()
+        speed = found['c2-packed-tp4-speed']
+        before = {key: value for key, value in speed['env'].items() if key not in TAIL_CAPS}
+        for name, difference in DIAG_PROFILES.items():
+            mine = found[name]
+            with self.subTest(profile=name):
+                self.assertEqual(mine['env'], dict(before, **dict(DIAG_INSTRUMENTS, **difference)))
+                self.assertEqual(mine['env']['QWEN_FAST_BUDGET_CAP'], '0', 'the old tail narrowing is what the diagnosis reproduces')
+                self.assertEqual(mine['env']['QWEN_C2_GATE_PROFILE'], '1')
+                self.assertIs(mine['gate_only'], True)
+                self.assertTrue(mine['description'].startswith('GATE ONLY'))
+                for key in set(mine) | set(speed):
+                    if key not in ('description', 'env'):
+                        self.assertEqual(mine.get(key), speed.get(key), key)
+                self.assertEqual(contract.mesh_problems(dict(mine, name=name)), [], name)
+                audits = (mine['env']['QWEN_FAST_VERIFY_T1_AUDIT'], mine['env']['QWEN_FAST_VERIFY_T2_AUDIT'])
+                self.assertEqual(audits, {'c2-packed-tp4-diag': ('0', '0'), 'c2-packed-tp4-diag-t1': ('1', '0'),
+                                          'c2-packed-tp4-diag-t2': ('0', '1')}[name])
+
+    def test_the_diag_instruments_are_the_host_only_flags_and_every_tail_flag_parses(self):
+        import trace_census
+        for name in ('c2-packed-tp4', 'c2-packed-tp4-speed') + tuple(DIAG_PROFILES):
+            env = profiles()[name]['env']
+            with self.subTest(profile=name):
+                self.assertEqual(trace_census.seq_deadline(env), 120.0)
+                self.assertIn(env['QWEN_FAST_BUDGET_CAP'], ('0', '1'))
+        diag = profiles()['c2-packed-tp4-diag']['env']
+        for flag in ('QWEN_FAST_SEQ_STAGE_LOG', 'QWEN_FAST_TRACE_CENSUS', 'QWEN_FAST_CCL_HANDLE_LOG', 'QWEN_FAST_MEMORY_LEDGER_L1'):
+            self.assertEqual(diag[flag], '1', flag)
+        self.assertNotIn('QWEN_FAST_TRACE_CENSUS_GRAPH', diag, 'the graph-walking census is not asked for')
+
+    def test_the_admission_accepts_each_tail_profile_over_the_image_environment_and_only_the_gate_ones_carry_the_waiver(self):
+        image = image_env()
+        for name in ('c2-packed-tp4', 'c2-packed-tp4-speed') + tuple(DIAG_PROFILES):
+            environ = dict(image, **profiles()[name]['env'])
+            with self.subTest(profile=name):
+                self.assertEqual(admission.width(environ), 4)
+                self.assertEqual(admission.check_environment(environ, M3), [])
+        self.assertNotIn('QWEN_C2_GATE_PROFILE', profiles()['c2-packed-tp4']['env'])
+
+
 class DraftProfileTests(unittest.TestCase):
     def test_each_draft_profile_is_its_base_with_only_its_documented_difference(self):
         found = profiles()
         for name, (base_name, difference) in DRAFT_PROFILES.items():
             mine, base = found[name], found[base_name]
             with self.subTest(profile=name):
-                self.assertEqual(mine['env'], dict(base['env'], **difference))
+                # the draft window's profiles predate the tail caps: they are the speed twin without them
+                self.assertEqual(mine['env'], dict({key: value for key, value in base['env'].items() if key not in TAIL_CAPS},
+                                                   **difference))
                 self.assertEqual(mine['engine'], base['engine'])
                 for key in set(mine) | set(base):
                     if key not in ('description', 'env'):
@@ -262,8 +337,9 @@ class DraftProfileTests(unittest.TestCase):
             left, right = found[on]['env'], found[off]['env']
             self.assertEqual({key for key in set(left) | set(right) if left.get(key) != right.get(key)}, {QUAD}, on)
             self.assertEqual((left[QUAD], right[QUAD]), ('1', '0'))
-        self.assertEqual(found['c2-packed-tp4-speed-pairs']['env'], found['c2-packed-tp4-speed']['env'],
-                         'the -pairs profile is the speed profile, stated as the pair of -quad')
+        self.assertEqual(found['c2-packed-tp4-speed-pairs']['env'],
+                         {key: value for key, value in found['c2-packed-tp4-speed']['env'].items() if key not in TAIL_CAPS},
+                         'the -pairs profile is the speed profile (before the tail caps), stated as the pair of -quad')
 
     def test_the_quad_is_the_only_profile_family_with_the_flag_on_and_the_pairs_flags_are_the_images(self):
         found = profiles()

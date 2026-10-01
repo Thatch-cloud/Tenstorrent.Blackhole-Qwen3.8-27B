@@ -1,0 +1,18 @@
+# The order of tonight's four-card window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window. Image: the tag of
+# the tt-vllm image the job serves or builds (T1 builds tp4-serve-3). Minutes: runner time for the job, a quad reset (1-3 min)
+# included where the job has one.
+# T1 first: its failure rules differ by kind: a hang on the production configuration stops the window and goes to T6, while a
+# divergence or a vLLM refusal caused by the tail caps skips T2 and continues with T3 and T5.
+# T2 and T3 are like-for-like speed arms (audits off with the caps; G1) on T1's clock. T4 runs only if T1 passed and tp4-serve-3 is
+# wanted in service soon. T5 is the last device job that can wedge a board (a localisation job, not a service one); T5b and T5c run
+# only if T5 stalled at the same transition. T6 hands the cards back: a quad reset, then the platform's fabric re-measure, the
+# :latest retag and placement outside the job file (the user's go-ahead and an admin token).
+T1-build-smoke stop tp4-serve-3 45
+T2-smoke-audits-off optional tp4-serve-3 25
+T3-g1-smoke optional tp4-serve-3 15
+T4-gate-matrix optional tp4-serve-3 75
+T5-diag-repro optional tp4-serve-3 20
+T5b-diag-t1 optional tp4-serve-3 20
+T5c-diag-t2 optional tp4-serve-3 20
+T6-handback-reset stop tp4-serve-3 15
