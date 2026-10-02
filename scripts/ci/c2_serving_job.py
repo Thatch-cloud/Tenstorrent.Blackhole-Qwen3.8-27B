@@ -48,6 +48,9 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_REPLAY_SERVED_MODEL  the model id the replay's /v1/models must advertise and its requests after
                       the warmup name, org/name[:tag] (default, rendered empty: c2_platform_replay.py's,
                       Qwen/Qwen3.8-27B:tt); Qwen/Qwen3.8-27B replays an image without the alias
+  C2_REPLAY_BUDGET_SMOKE  '' (default) or 1: the replay also runs the image's thinking-budget smoke
+                      (python3 -m serving.budget_smoke) in its container before tearing it down, up to 90 minutes, and
+                      fails the job if the smoke ran and failed; needs the replay action
   C2_CARDM_HARNESS    the cardm action's harness: a .sh under optimisation/ttnn-op/<dir>/ that embeds
                       scripts/ci/qual_card.sh byte for byte and selects its board by it (required with
                       cardm), e.g. optimisation/ttnn-op/k64j/run_card_b.sh
@@ -364,6 +367,11 @@ def read_job(values, profiles, root=ROOT, meshes=None):
     replay_served_model = values.get('C2_REPLAY_SERVED_MODEL', '')
     if replay_served_model and not MODEL_ID.fullmatch(replay_served_model):
         raise JobError('C2_REPLAY_SERVED_MODEL must match %s, got %r' % (MODEL_ID.pattern, replay_served_model))
+    budget_smoke = values.get('C2_REPLAY_BUDGET_SMOKE', '')
+    if budget_smoke not in ('', '1'):
+        raise JobError('C2_REPLAY_BUDGET_SMOKE must be empty or 1, got %r' % budget_smoke)
+    if budget_smoke and 'replay' not in actions:
+        raise JobError('C2_REPLAY_BUDGET_SMOKE runs inside the replay\'s container; C2_ACTIONS has no replay')
     prefix = read_prefix(values, profiles, 'prefix' in actions)
     if meshes is None:
         meshes = profile_meshes()
@@ -378,7 +386,7 @@ def read_job(values, profiles, root=ROOT, meshes=None):
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
                    gate_memory_prompt=str(memory_prompt), replay_profile=replay_profile,
-                   replay_served_model=replay_served_model, cardm_harness=cardm_harness, cardm_args=cardm_args,
+                   replay_served_model=replay_served_model, replay_budget_smoke=budget_smoke, cardm_harness=cardm_harness, cardm_args=cardm_args,
                    cardm_env=cardm_env, bake_default_profile=bake_profile)
     outputs.update(s2)
     outputs.update(prefix)

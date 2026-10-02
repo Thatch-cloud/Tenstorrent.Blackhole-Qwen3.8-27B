@@ -880,10 +880,11 @@ jobs:
       - name: Replay the node agent's serving sequence
         if: contains(steps.job.outputs.actions, 'replay')
         working-directory: c2
-        timeout-minutes: 80
+        timeout-minutes: 180
         shell: bash
         env:
           IMAGE: ${{ steps.job.outputs.platform_image }}
+          REPLAY_BUDGET_SMOKE: ${{ steps.job.outputs.replay_budget_smoke }}
           REPLAY_PROFILE: ${{ steps.job.outputs.replay_profile }}
           REPLAY_SERVED_MODEL: ${{ steps.job.outputs.replay_served_model }}
           CARDS: ${{ steps.job.outputs.cards }}
@@ -914,6 +915,7 @@ jobs:
           fi
           python3 scripts/ci/c2_platform_replay.py --source "$source" --image "$IMAGE" --cards "$CARDS" \
             ${REPLAY_PROFILE:+--profile "$REPLAY_PROFILE"} ${REPLAY_SERVED_MODEL:+--served-model "$REPLAY_SERVED_MODEL"} \
+            ${REPLAY_BUDGET_SMOKE:+--budget-smoke} \
             --results "$RUNNER_TEMP/c2-results/replay"
       - name: Push
         if: contains(steps.job.outputs.actions, 'push')

@@ -35,8 +35,16 @@ out before the container is removed. Exit 0 only if every step passed.
 
 Usage: c2_platform_replay.py --source thatch-inference-Qwen-Qwen3.8-27B|<inspect.json> --image <ref> --results <dir>
        [--profile NAME] [--seed N] [--model CHECKPOINT] [--served-model NAME] [--env NAME=value ...]
-       [--cards pair|quad] [--profiles qwen_c2_profiles.json] [--startup-wait SECONDS]
+       [--cards pair|quad] [--profiles qwen_c2_profiles.json] [--startup-wait SECONDS] [--budget-smoke]
 To replay an image without the alias (a rollback candidate), pass --served-model Qwen/Qwen3.8-27B.
+
+BUDGET SMOKE (--budget-smoke). After the replay's own sequence and checks, whatever their verdict, and before the
+container is removed, a container that is still running and answers /v1/models runs the image's thinking-budget smoke:
+`docker exec <container> python3 -m serving.budget_smoke --url http://127.0.0.1:8000 --model <served model>` (up to 90
+minutes; output in budget-smoke.log in the results). The result is recorded as budget_smoke {ran, exit, seconds} in
+platform-replay.json; an image without the module records ran=false reason=missing and is not failed for it. The exit
+status is the replay's own verdict, and non-zero as well if the smoke ran and failed or timed out. A timeout still
+removes the container.
 
 FOUR CARDS (--cards quad, the c2-packed-tp4 serving of serving/tp4-s2). The copy gets EVERY Blackhole board present
 (exactly four by-id links, resolved now, none named here: c2_serving_gate.card_set) in place of cards M and A, and
@@ -75,6 +83,7 @@ CHECKPOINT = 'Qwen/Qwen3.8-27B'
 SERVED_MODEL = 'Qwen/Qwen3.8-27B:tt'   # what TT advertises; agents opt in to TT by naming it
 ARRIVAL_WINDOW_S = 30.0
 LONG_ANSWER_TOKENS = 3000
+BUDGET_SMOKE_TIMEOUT_S = 90 * 60
 LONG_PROMPT_SHARE = 0.6       # of the served max_model_len
 CHARS_PER_TOKEN = 3.0         # conservative for Python source: the prompt stays under its share
 
@@ -608,6 +617,41 @@ def runtime_log_verdict(text, steps, quad_profile=None, engine_logs=None):
     return dict(ok=not problems, problems=problems, lines=[line for line in lines if line in flagged])
 
 
+def budget_smoke(name, port, served, results, timeout=BUDGET_SMOKE_TIMEOUT_S, clock=time.time):
+    """Run the image's thinking-budget smoke inside the replay's container: {ran, exit, seconds} (plus reason when it
+    did not run, timed_out when it overran). Never raises: the caller is about to remove the container."""
+    try:
+        running = run(['docker', 'inspect', '-f', '{{.State.Running}}', name], check=False)
+        if (running.stdout or '').strip() != 'true':
+            return dict(ran=False, reason='container not running')
+        status, _ = http(port, '/v1/models', timeout=30)
+        if status != 200:
+            return dict(ran=False, reason='/v1/models did not answer (%s)' % status)
+    except Exception as error:  # noqa: BLE001
+        return dict(ran=False, reason='precheck failed: %r' % (error,))
+    command = ['docker', 'exec', name, 'python3', '-m', 'serving.budget_smoke', '--url', 'http://127.0.0.1:8000',
+               '--model', served]
+    started = clock()
+    text, code, timed_out = '', None, False
+    try:
+        result = run(command, timeout=timeout, check=False)
+        code = result.returncode
+        text = (result.stdout or '') + (result.stderr or '')
+    except subprocess.TimeoutExpired as error:
+        timed_out = True
+        partial = [part.decode(errors='replace') if isinstance(part, bytes) else (part or '')
+                   for part in (error.stdout, error.stderr)]
+        text = ''.join(partial) + '\n[BUDGET-SMOKE] timed out after %d s\n' % timeout
+    except Exception as error:  # noqa: BLE001
+        text = '[BUDGET-SMOKE] could not run: %r\n' % (error,)
+    seconds = round(clock() - started, 1)
+    with open(os.path.join(results, 'budget-smoke.log'), 'w') as handle:
+        handle.write(text)
+    if code not in (None, 0) and 'No module named' in text:
+        return dict(ran=False, reason='missing', exit=code, seconds=seconds)
+    return dict(ran=True, exit=code, seconds=seconds, timed_out=timed_out)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--source', required=True, help='the agent\'s container, or a saved `docker inspect` JSON')
@@ -627,6 +671,8 @@ def main():
     parser.add_argument('--startup-wait', type=int, default=None, metavar='SECONDS',
                         help='how long a start may take to answer HTTP (default: %d pair, %d quad)' % (PAIR_STARTUP_S,
                                                                                                         QUAD_STARTUP_S))
+    parser.add_argument('--budget-smoke', action='store_true',
+                        help='run the image\'s thinking-budget smoke in the container before it is removed')
     parser.add_argument('--env', action='append', default=None, metavar='NAME=value',
                         help='extra container env, repeatable (default: %s)' % ' '.join(DEFAULT_ENV))
     options = parser.parse_args()
@@ -688,6 +734,7 @@ def main():
         json.dump(arguments, handle, indent=1)
     passed = False
     engine_logs = []
+    smoke = None
 
     def read_engine(boot=None, keep=None):
         """This boot's engine log (engine_log), kept as engine-<boot>.log and for the verdict when `boot` is named;
@@ -763,13 +810,27 @@ def main():
         runtime_log = runtime_log_verdict(logs.stdout + '\n' + logs.stderr, steps, quad_profile, engine_logs)
         print('RUNTIME_LOG %s' % json.dumps(runtime_log)[:1500], flush=True)
         passed = passed and runtime_log['ok']
-        run(['docker', 'rm', '-f', name], check=False)
+        try:
+            if options.budget_smoke:
+                # After the replay's own verdict (recorded as it is) and before the container goes.
+                smoke = budget_smoke(name, port, served, options.results)
+                print('BUDGET_SMOKE %s' % json.dumps(smoke), flush=True)
+        finally:
+            run(['docker', 'rm', '-f', name], check=False)
+        report = dict(passed=passed, steps=steps, runtime_log=runtime_log)
+        if smoke is not None:
+            report['budget_smoke'] = smoke
         with open(os.path.join(options.results, 'platform-replay.json'), 'w') as handle:
-            json.dump(dict(passed=passed, steps=steps, runtime_log=runtime_log), handle, indent=1)
+            json.dump(report, handle, indent=1)
     restart = steps.get('load_after_restart') or {}
     print('PLATFORM_REPLAY passed=%s restart_http_s=%s restart_to_loaded_s=%s seed=%s' % (
         passed, (steps.get('restart') or {}).get('http_s'), restart.get('restart_to_loaded_s'), seed), flush=True)
-    return 0 if passed else 1
+    smoke_failed = bool(smoke and smoke.get('ran') and smoke.get('exit') != 0)
+    if smoke_failed:
+        print('[BUDGET-SMOKE] FAILED exit=%s' % smoke.get('exit'), flush=True)
+    elif smoke and smoke.get('ran'):
+        print('[BUDGET-SMOKE] PASSED', flush=True)
+    return 0 if passed and not smoke_failed else 1
 
 
 if __name__ == '__main__':
