@@ -1269,7 +1269,7 @@ class ProvenanceTests(unittest.TestCase):
                'c2-packed-tp4-solo-time-gate', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fcommit',
                'c2-packed-tp4-speed-fcommit-oop', 'c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-fix',
                'c2-packed-tp4-speed-noslide', 'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-speed-quad',
-               'c2-packed-tp4-speed-rshard', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-strace-draftwide', 'c2-packed-tp4-speed-strace-ring', 'c2-packed-tp4-speed-strace-fcommit', 'c2-packed-tp4-speed-vglue',
+               'c2-packed-tp4-speed-rshard', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-strace-draftwide', 'c2-packed-tp4-speed-strace-fcommit', 'c2-packed-tp4-speed-strace-ring', 'c2-packed-tp4-speed-vglue',
                'c2-packed-tp4-speed-vglue-c1a', 'c2-packed-tp4-speed-vglue-v1', 'c2-packed-tp4-speed-vglue-v2',
                'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a', 'c2-packed-tp4-time-gate',
                'general-prefix-eager', 'general-tp4-bench',

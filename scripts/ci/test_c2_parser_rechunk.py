@@ -922,7 +922,7 @@ class ProfileGatingTests(unittest.TestCase):
                                       'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-noslide',
                                       'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide', 'c2-packed-tp4-speed-fix',
                                       'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-pairs',
-                                      'c2-packed-tp4-diag-sprewarm', 'c2-packed-tp4-diag-strace', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-strace-draftwide', 'c2-packed-tp4-speed-strace-ring', 'c2-packed-tp4-speed-strace-fcommit',
+                                      'c2-packed-tp4-diag-sprewarm', 'c2-packed-tp4-diag-strace', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-strace-draftwide', 'c2-packed-tp4-speed-strace-fcommit', 'c2-packed-tp4-speed-strace-ring',
                                       'c2-packed-tp4-diag-rshard', 'c2-packed-tp4-speed-rshard', 'c2-packed-tp4-gate-rshard-audit',
                                       'c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t1-rshard-audit', 'c2-packed-tp4-diag-t2', 'c2-packed-tp4-f2', 'c2-packed-tp4-f12',
                                       'c2-packed-tp4-gate-quad', 'c2-packed-tp4-gate-pairs',
