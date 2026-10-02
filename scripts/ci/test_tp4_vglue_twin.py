@@ -63,6 +63,23 @@ class TwinTests(PackedFixture):
                                    memory_config=lambda memory=keywords.get('memory_config'): memory)
 
         operations.empty = Mock(side_effect=empty)
+        # the card's join, measured (N1): an explicit memory_config wins; a join of parts that are not whole tiles
+        # (16-row users) goes untilize / concat / tilize and lands in interleaved DRAM, whatever the parts' placement
+        whole_tile_join = operations.concat.side_effect
+
+        def card_concat(parts, **keywords):
+            joined = whole_tile_join(parts, **keywords)
+            if keywords.get('memory_config') is not None:
+                placed = keywords['memory_config']
+            elif parts[0].shape[1] % 32:
+                placed = 'dram'
+            else:
+                return joined
+            joined.memory_config = lambda: placed
+            return joined
+
+        operations.concat = Mock(side_effect=card_concat)
+        operations.DRAM_MEMORY_CONFIG = 'dram'
         operations.bfloat16, operations.TILE_LAYOUT = 'bf16', 'tile'
         operations.clone = Mock(side_effect=lambda value, memory_config=None: SimpleNamespace(
             shape=value.shape, name='copy:' + value.name, memory_config=lambda: memory_config))
@@ -184,7 +201,8 @@ class TwinTests(PackedFixture):
         self.assertEqual(piece_call.args[0], (1, 16, BLOCK_WIDTH))
         self.assertEqual(piece_call.kwargs['memory_config'], 'l1')
         self.assertEqual(operations.empty.call_args_list[4].args[0], (1, 64, OUTPUT_WIDTH))
-        self.assertEqual(operations.empty.call_args_list[4].kwargs['memory_config'], 'l1', "the outputs' own placement")
+        self.assertEqual(operations.empty.call_args_list[4].kwargs['memory_config'], 'dram',
+                         'where the served concat leaves its join')
 
     def test_flag_on_takes_every_t1_carry_mode_the_pinned_body_takes(self):
         modes = ({}, {'QWEN_FAST_VERIFY_T1': '1'},
@@ -239,8 +257,27 @@ class TwinTests(PackedFixture):
         # held outside `owned`: the layer frees `owned` inside the trace, the audit reads after the replay
         owned_names = [getattr(value, 'name', None) for value in result['owned']]
         self.assertFalse(any(getattr(value, 'name', '').startswith('copy:') for value in result['owned']), owned_names)
-        # the served merge (an L1 concat) is freed at once; only DRAM copies are held
-        self.assertEqual(entries[-1]['placement'], ('l1', 'l1'), 'the launch block and the served concat, as placed')
+        # the served merge is freed at once; only DRAM copies are held
+        self.assertEqual(entries[-1]['placement'], ('dram', 'dram'), 'the launch block and the served concat, as placed')
+
+    def test_every_lever_output_lands_where_its_served_twin_lands(self):
+        """The audit requires placement equality (downstream programs compile per input placement): the pieces, the merged
+        block and the sampler-facing output of the twin are placed exactly as the pinned class places its own."""
+        flags = {'QWEN_FAST_TP4_GDN_GLUE': '1', 'QWEN_FAST_TP4_VGLUE_AUDIT': '1'}
+        with four():
+            served, served_calls, served_ops = self.run_decode(pinned_state.DeviceLoopState)
+            lever, lever_calls, lever_ops = self.run_decode(twin.DeviceLoopState, flags=flags)
+        self.assertEqual(served['output'].memory_config(), 'dram', 'the card joins 16-row outputs into DRAM')
+        self.assertEqual(lever['output'].memory_config(), served['output'].memory_config())
+        merged = lever_ops.empty.call_args_list[4].kwargs['memory_config']
+        self.assertEqual(merged, served['output'].memory_config())
+        # the pieces: the served resident_piece moves into L1; the launch allocates in L1
+        served_memories = {entry[2] for entry in served_calls if entry[0] == 'move'}
+        piece_memories = {lever_ops.empty.call_args_list[index].kwargs['memory_config'] for index in range(4)}
+        self.assertEqual(piece_memories, {lever_ops.L1_MEMORY_CONFIG})
+        self.assertTrue(served_memories <= {served_ops.L1_MEMORY_CONFIG}, served_memories)
+        entry = tp4_vglue.audit_entries(lever)[-1]
+        self.assertEqual(entry['placement'][0], entry['placement'][1])
 
     def test_flag_on_without_the_audit_holds_nothing(self):
         with four():
