@@ -126,7 +126,7 @@ class ArmTests(unittest.TestCase):
     def test_the_plans_are_in_the_jobs_vocabulary_and_are_not_the_s2_plans(self):
         self.assertEqual(job.LANES_GATE_PLANS, plans.PLANS)
         self.assertFalse(set(plans.PLANS) & set(job.S2_GATE_PLANS + job.GATE_PLANS))
-        self.assertEqual(set(job.ALL_GATE_PLANS), set(job.GATE_PLANS + job.S2_GATE_PLANS + plans.PLANS))
+        self.assertEqual(set(job.ALL_GATE_PLANS), set(job.GATE_PLANS + job.S2_GATE_PLANS + plans.PLANS + job.OPS_GATE_PLANS))
         self.assertIn('lanes_report.py', driver.BENCH_SCRIPTS)
 
     def test_lanes_exact_is_the_reference_d0_and_the_lanes_on_the_same_prompts(self):
