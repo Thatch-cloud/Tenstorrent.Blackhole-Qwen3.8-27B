@@ -71,6 +71,14 @@ from contextvars import ContextVar
 
 FLAG = 'QWEN_FAST_TRACED_PUBLISH'
 
+# KV heads per chip of the pair's DraftKVHistory banks (1, 4, 2048, 128): the default of the eager K/V fusion below, which
+# install_fused_kv_history overrides with the served width's own (tp_shapes draft_kv_heads, 2 at four cards) for the
+# four-card sibling class (draft_kv_history_tp). Not a literal in the slices: they read `heads`.
+PAIR_KV_HEADS = 4
+HISTORY_CAPACITY = 2048
+HEAD_DIM = 128
+SIBLING_MODULE = 'draft_kv_history_tp'
+
 # QWEN_FAST_ROUND_B1 (M0a): the host-time split sink of ONE user's packed commit, a dict
 # of {split name: ms}. serving_packed_step.commit_entry sets it (only under
 # QWEN_FAST_PACKED_AUDIT with the flag on) around session.commit and resets it after;
@@ -102,7 +110,7 @@ def traced_publish_enabled(environ=None):
     return value == '1'
 
 
-def _fused_kv_history_prepare(cache, original, features, prefix, *, position):
+def _fused_kv_history_prepare(cache, original, features, prefix, *, position, heads=PAIR_KV_HEADS):
     """The steady-state fusion for one DraftKVHistory instance's own .prepare, run in
     place of the class method by the override install_fused_kv_history installs.
 
@@ -161,8 +169,8 @@ def _fused_kv_history_prepare(cache, original, features, prefix, *, position):
                 operations, inputs, cache.query, tables, retain, parameters=parameter)
             for name in ('k', 'v'):
                 dropped = retain(operations.slice(active[name], (0, 0, cache.history_rows + prefix - rows, 0),
-                    (1, 4, cache.history_rows, 128)))
-                accepted = retain(operations.slice(result[name], (0, 0, 0, 0), (1, 4, prefix, 128)))
+                    (1, heads, cache.history_rows, 128)))
+                accepted = retain(operations.slice(result[name], (0, 0, 0, 0), (1, heads, prefix, 128)))
                 combined = retain(operations.concat([dropped, accepted], dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
                 operations.copy(combined, spare[name])
         operations.synchronize_device(cache.mesh)
@@ -311,6 +319,36 @@ def _fused_kv_history_prepare_via_slide_timed(cache, original, transport, featur
     return cache.pending
 
 
+def _log_declined(reason):
+    from dflash_packed_proposal_coordinator import audit_enabled, audit_log
+
+    if audit_enabled():
+        audit_log(FUSION_DECLINED_LINE, reason=reason)
+
+
+def _eager_fusion_declined(kv_history):
+    """None when the eager slice + concat fusion may be installed on this subclass instance of DraftKVHistory, else the reason
+    it is declined. Only draft_kv_history_tp.DraftKVHistory is recognised (module and class, not a marker anyone could set), and
+    only at the width its banks were built for: the four-card sibling's own prepare takes the slide kernel under
+    QWEN_FAST_TP_KV_SLIDE=1 (one generic_op per bank, runtime history_rows / prefix, no per-prefix program), which is cheaper than
+    this fusion's two ops and a copy per bank, so the fusion yields to it ('tp_slide_live'); with the slide off the sibling's prepare
+    is the pair's six-op chain at tp_shapes' head count, and the fusion is its exact steady-state identity at that count."""
+    import draft_kv_slide_tp
+    import tp_shapes
+
+    cls = type(kv_history)
+    if cls.__module__ != SIBLING_MODULE or cls.__qualname__ != 'DraftKVHistory':
+        return 'unrecognized_prepare'
+    if draft_kv_slide_tp.enabled():
+        return 'tp_slide_live'
+    expected = (1, tp_shapes.active().draft_kv_heads, HISTORY_CAPACITY, HEAD_DIM)
+    banks = [tuple(getattr(bank[name], 'shape', ())) for bank in list(getattr(kv_history, 'active', ())) + list(getattr(kv_history, 'spare', ()))
+             for name in ('k', 'v')]
+    if not banks or any(shape != expected for shape in banks):
+        return 'bank_shape'
+    return None
+
+
 def install_fused_kv_history(kv_history):
     """Install a transient, INSTANCE-level override on kv_history.prepare (shadowing
     draft_kv_history.DraftKVHistory.prepare the same way install_publish_options
@@ -336,6 +374,12 @@ def install_fused_kv_history(kv_history):
         QWEN_FAST_PACKED_AUDIT=1 with reason='unrecognized_slide_candidate') rather
         than guess at reproducing an unknown candidate's behavior.
 
+    A fourth, four-card case: the sibling draft_kv_history_tp.DraftKVHistory (its own prepare, 2 KV heads per chip). It gets the
+    eager fusion at tp_shapes' head count only with QWEN_FAST_TP_KV_SLIDE unset or 0; with the slide on (every four-card traffic
+    profile) the install declines, reason='tp_slide_live', because the sibling's prepare is then one slide op per bank, which this
+    fusion would replace with two ops and a copy. Any other subclass with its own prepare, or a sibling whose banks are not the
+    served width's, declines too (reasons 'unrecognized_prepare', 'bank_shape'). The pair's class takes none of these branches.
+
     Both installed variants fall through to the true original class method whenever
     rows != 2048 (still ramping) - correctness there is never this module's to prove,
     only steady state's algebraic identity is.
@@ -354,12 +398,22 @@ def install_fused_kv_history(kv_history):
         raise ValueError('kv_history.prepare is already overridden')
     live = draft_kv_history.DraftKVHistory.prepare
     original = kv_history.prepare
+    heads = PAIR_KV_HEADS
+    if type(kv_history).prepare is not live:
+        # A subclass with its own prepare: only the four-card sibling is recognised, at its own width and only when its
+        # prepare would not take the slide (see _eager_fusion_declined).
+        reason = _eager_fusion_declined(kv_history)
+        if reason is None and getattr(live, '_draft_kv_slide', False):
+            reason = 'unrecognized_slide_candidate'   # the pair's text-patched scope is the pair's: never over the sibling
+        if reason is not None:
+            _log_declined(reason)
+            return None
+        import tp_shapes
+
+        heads = tp_shapes.active().draft_kv_heads
     if getattr(live, '_draft_kv_slide', False):
         if not _slide_transport_is_recognizable(live):
-            from dflash_packed_proposal_coordinator import audit_enabled, audit_log
-
-            if audit_enabled():
-                audit_log(FUSION_DECLINED_LINE, reason='unrecognized_slide_candidate')
+            _log_declined('unrecognized_slide_candidate')
             return None
         import draft_kv_slide
 
@@ -368,7 +422,7 @@ def install_fused_kv_history(kv_history):
                 features, prefix, position=position)
     else:
         def fused(features, prefix, *, position):
-            return _fused_kv_history_prepare(kv_history, original, features, prefix, position=position)
+            return _fused_kv_history_prepare(kv_history, original, features, prefix, position=position, heads=heads)
 
     kv_history.prepare = fused
 

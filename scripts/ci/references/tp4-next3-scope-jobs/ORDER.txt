@@ -1,0 +1,41 @@
+# The order of the four-card tp4/next-3-scope window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window (its product is data).
+# Image: the tag of the tt-vllm image the jobs serve, built from this branch by a build-only job (C2_ACTIONS=build, no card opened) while production served.
+# Minutes: runner time for ONE run of the job, a quad reset (1 to 3 min) included.
+#
+# WHAT THIS WINDOW TESTS. Lever P1 of the TP4 performance audit, drafter K/V publication as device traces (docs/tp4-traced-publish.md): the fused commit at four cards
+# (one captured projection trace per segment, one captured in-place slide trace per segment and accepted prefix), on the PRODUCTION recipe. The timed arm is
+# c2-packed-tp4-speed-strace-fcommit, which is c2-packed-tp4-speed-strace plus QWEN_FAST_FUSED_COMMIT, _INPLACE and _LIVE_BANKS and nothing else
+# (test_tp4_next3_window holds that). It is a different thing from QWEN_FAST_TRACED_PUBLISH, which captures nothing and stays OFF in every profile here.
+# NOTHING IN THIS WINDOW HAS RUN ON A CARD: the fused commit is exact on one card at two KV heads but has never been timed and never run with the in-trace sampler.
+# Lever V5 (the recurrence value split, docs/tp4-recurrence-split.md) is design only: it needs new kernels and has NO job here.
+#
+# PRODUCTION IS LIVE ON THE CARDS WHEN THE WINDOW OPENS. The window opens with the placement removed through the admin API (the owner's go-ahead and an admin token), and
+# its FIRST job is S0: status, agentstop (stops the node agent and the serving container it started) and unserve. Every later job resets the cards first.
+# THE WINDOW CLOSES WITH S6 AND A HAND-BACK THAT IS NOT IN ANY JOB FILE: S6 is status, the all-four reset, the fabric re-measure and agentstart (the node agent started again,
+# nothing placed); then the OWNER runs /deploy to place today's production recipe. Never place a gate arm, and never include the deploy in a template.
+# S6 is always last and it runs even when a stop job halts the window: a stall leaves the cards hung until its reset.
+#
+# Early-failure order, cheapest first. S1 smokes the PRODUCTION profile on the new image (the change set must not have moved it). S2 is the audited smoke of the fused commit
+# (the bit-for-bit audit of every delta and every bank on every chip, every round); S3 is the audited twin of the timed arm (live banks), whose tokens the timed arm is held against.
+# S4a to S4e are FIVE audits-off runs of the hang shapes on the timed arm, each after its own reset: five consecutive completions are the allocation-order evidence (the fused commit adds
+# about 68 captures before the request-engine builds), and one stall restarts the count and stops the window. Only then S5a to S5d, the paired timing ABAB on coding prompts
+# (4 x 4k and 4 x 32k): S5a (speed-strace, the control) S5b (the fused-commit arm) S5c (control) S5d (arm), judged PAIRED per round, never by unpaired medians. Both timed arms
+# carry the sampler-in-trace hang fix, because with the verify audits off and no hang fix the traffic profile deadlocks. A hang on a timed arm is a finding.
+# The prerequisite of S2 is the one-card two-head in-place slide proof (tp4-fcommit-jobs F1a and F1b); it is not repeated here.
+#
+# Durations (estimate): S0 15, S1 60, S2 100, S3 100, S4 five times 40, S5 four times 60, S6 25. Stop jobs S0 to S4: about 8 h worst case, 4 h expected; the timing adds 4 h.
+S0-unserve stop tp4-next-3s 15
+S1-production-smoke stop tp4-next-3s 60
+S2-fcommit-audited-smoke stop tp4-next-3s 100
+S3-fcommit-live-audited-smoke stop tp4-next-3s 100
+S4a-hang-shapes-fcommit-strace stop tp4-next-3s 40
+S4b-hang-shapes-fcommit-strace stop tp4-next-3s 40
+S4c-hang-shapes-fcommit-strace stop tp4-next-3s 40
+S4d-hang-shapes-fcommit-strace stop tp4-next-3s 40
+S4e-hang-shapes-fcommit-strace stop tp4-next-3s 40
+S5a-speed-timed optional tp4-next-3s 60
+S5b-fcommit-timed optional tp4-next-3s 60
+S5c-speed-timed optional tp4-next-3s 60
+S5d-fcommit-timed optional tp4-next-3s 60
+S6-handback-reset stop tp4-next-3s 25
