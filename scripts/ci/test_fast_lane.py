@@ -111,6 +111,28 @@ class AdmissionTests(unittest.TestCase):
         self.assertTrue(all(line.startswith('[LANE] refused: ') for line in log.lines))
 
 
+class M3BlocksRefusalTests(unittest.TestCase):
+    """QWEN_FAST_M3_BLOCKS=2 (eight seats on two M3 blocks): the lanes are built for one M3 block."""
+
+    def test_two_m3_blocks_are_refused_by_name_beside_the_seat_count(self):
+        env = dict(AdmissionTests.ENV, QWEN_FAST_M3_BLOCKS='2')
+        log = Lines()
+        with self.assertRaises(ValueError) as caught:
+            lane_admission({'slot': 0}, env, seats=8, log=log)
+        text = str(caught.exception)
+        self.assertIn('QWEN_FAST_M3_BLOCKS=2: the lanes are built for one M3 block', text)
+        self.assertIn('not 8', text)
+        self.assertTrue(any('QWEN_FAST_M3_BLOCKS=2' in line for line in log.lines))
+        # named even at four seats: the flag alone is refused, so the seat count is not what hides it
+        with self.assertRaisesRegex(ValueError, 'QWEN_FAST_M3_BLOCKS=2: the lanes are built for one M3 block'):
+            lane_admission({'slot': 0}, env, seats=4)
+
+    def test_one_block_stated_or_not_is_todays_admission(self):
+        for value in (None, '1'):
+            env = dict(AdmissionTests.ENV, **({} if value is None else {'QWEN_FAST_M3_BLOCKS': value}))
+            self.assertEqual(lane_admission({'slot': 0}, env, seats=4).seats, 4)
+
+
 class BookTests(unittest.TestCase):
     def book(self, **changes):
         self.log = Lines()

@@ -847,6 +847,66 @@ class PackedExtentStorageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r'shapes \[\(4, 16\)\]; \(2, 16\) was asked for'):
             pool.packed_extent(2, 16)
 
+    def test_eight_slots_lend_two_independent_m3_table_sets_at_the_served_and_the_pooled_widths(self):
+        """QWEN_FAST_M3_BLOCKS=2 (A1): block A over pool slots 0-3 and block B over 4-7 each take their own (4, 16) set;
+        nothing in one is the other's, at the width 2,052 the 131k profiles serve and at 4,096 (width % 4 == 0 is all the
+        pool asks of it - whether the ordered K/V writer admits 4,096 is the block's business, not the pool's)."""
+        for width in (2052, 4096):
+            with self.subTest(width=width):
+                operations = FakeOperations()
+                pool = extent_pool(operations, users=8, page_width=width, packed_replicas={(4, 16): 2})
+                self.assertEqual((len(pool.slots), pool.packed_shapes, pool.packed_replicas),
+                                 (8, ((4, 16),), {(4, 16): 2}))
+                first = pool.packed_extent(4, 16)
+                first.take()
+                second = pool.packed_extent(4, 16)
+                self.assertIsNot(second, first)
+                second.take()
+                self.assertFalse(second is first or {id(value) for value in first.tensors} & {id(value) for value in second.tensors})
+                for storage in (first, second):
+                    self.assertEqual(len(storage.tensors), 4 * 2, 'one table and one cur_pos per user, one bundle each')
+                    for user in range(4):
+                        ((table,), (positions,)) = storage.tables[user], storage.cur_pos[user]
+                        self.assertEqual((table.shape, positions.shape), ((2, width), (2,)))
+                # on independent chip storage: no two tensors of the pool share an address on either chip
+                for chip in range(2):
+                    addresses = [value.shards[chip].address for value in pool.owned]
+                    self.assertEqual(len(set(addresses)), len(addresses))
+                # a third block asking is refused by the lent-once rule, never handed a block's set again
+                with self.assertRaisesRegex(ValueError, 'already lent'):
+                    pool.packed_extent(4, 16).take()
+                self.assertEqual(pool.describe()['replay_capacities'], [width * 64])
+                self.assertEqual(len(pool.describe()['packed_extent']), 2)
+
+    def test_two_buffers_sharing_an_address_on_any_one_chip_are_refused_at_build(self):
+        """The independence check reads one address set per chip (it no longer compares every pair): a buffer that
+        lands on an earlier one's address on EITHER chip is refused, whatever its other chip says."""
+        for chip in (0, 1):
+            operations = FakeOperations()
+            original = operations.allocate
+            made = []
+
+            def allocate(shape, chip=chip, original=original, made=made, **options):
+                tensor = original(shape, **options)
+                if len(made) == 3:
+                    tensor.shards[chip].address = made[0].shards[chip].address   # chip `chip` hands back the first one's
+                made.append(tensor)
+                return tensor
+
+            operations.allocate = allocate
+            with self.subTest(chip=chip), self.assertRaisesRegex(ValueError, 'must own independent chip storage'):
+                ServingBufferPool(operations, 'mesh', users=2)
+
+    def test_eight_slots_hold_every_slot_the_two_blocks_bind_and_lend_them_independently(self):
+        pool = extent_pool(FakeOperations(), users=8, packed_replicas={(4, 16): 2})
+        lent = [pool.acquire(owner='r%d' % index) for index in range(8)]
+        self.assertEqual([slot.index for slot in lent], list(range(8)))
+        with self.assertRaisesRegex(ValueError, 'All 8 pooled draft history slots are already lent'):
+            pool.acquire()
+        carries = {id(value) for slot in lent for snapshot in slot.verifier.carry for value in snapshot}
+        self.assertEqual(len(carries), 8 * len(lent[0].verifier.carry) * len(lent[0].verifier.carry[0]),
+                         'no two slots share a carry tensor')
+
     def test_no_family_but_c_and_no_replay_width_under_extent(self):
         operations = FakeOperations()
         pool = extent_pool(operations)

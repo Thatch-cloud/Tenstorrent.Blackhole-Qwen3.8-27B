@@ -662,15 +662,24 @@ class ServingBufferPool:
         self.draft_outputs_refused = self.draft_output_indices_from = None
         self.closed = False
         try:
+            # The addresses already adopted, one set per chip: a buffer overlaps an earlier one exactly when some chip
+            # holds both at one address (`overlaps`), so membership in these sets is that test without comparing every
+            # pair - eight slots hold about twice the tensors of four, and the pair-by-pair test grows with the square.
             protected = []
             counted = [0]
 
             def adopt(value, count):
                 self.owned.append(value)
                 current = addresses(operations, value)
-                if any(overlaps(current, other) for other in protected):
+                if protected and len(current) != len(protected):
+                    raise ValueError('zip() argument 2 is longer or shorter than argument 1: every pooled buffer must '
+                                     'report one address per chip')
+                if not protected:
+                    protected.extend(set() for _ in current)
+                if any(address in seen for address, seen in zip(current, protected)):
                     raise ValueError('Pooled draft buffers must own independent chip storage')
-                protected.append(current)
+                for address, seen in zip(current, protected):
+                    seen.add(address)
                 counted[0] += count
                 return value
 

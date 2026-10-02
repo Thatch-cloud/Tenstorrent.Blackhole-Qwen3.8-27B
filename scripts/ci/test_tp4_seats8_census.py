@@ -197,6 +197,87 @@ class BlockSites(unittest.TestCase):
         self.assertEqual(ordered_cache.WIDE_PAGE_WIDTHS, {2052})
 
 
+class MeetsUnderTheFlag(unittest.TestCase):
+    """The sites that CHANGE under QWEN_FAST_M3_BLOCKS=2, each shown with and without the flag."""
+
+    ENV = dict(M3_ENV, QWEN_FAST_M3_BLOCKS='2')
+
+    def test_eight_requests_are_the_m3_shape_with_the_flag_and_four_are_not(self):
+        met, shape = serving_runtime.m3_shape(policy(8), self.ENV)
+        self.assertTrue(met)
+        self.assertEqual(shape, 'users=8 FOUR_AS_TWO=0 PACKED_STEP=1 M3_BLOCKS=2')
+        self.assertFalse(serving_runtime.m3_shape(policy(4), self.ENV)[0])
+        self.assertFalse(serving_runtime.m3_shape(policy(8), dict(self.ENV, QWEN_FAST_FOUR_AS_TWO='1'))[0])
+        self.assertFalse(serving_runtime.m3_shape(policy(8), dict(self.ENV, QWEN_FAST_PACKED_STEP='0'))[0])
+
+    def test_the_single_gate_up_copy_and_the_padded_block_follow_the_shape(self):
+        reason = serving_runtime.register_reader_reason(policy(8), dict(self.ENV, QWEN_FAST_SINGLE_GATEUP='1'))
+        self.assertEqual(reason[0], serving_runtime.SINGLE_GATEUP_SHAPE)
+        self.assertEqual(serving_runtime.padded_block_admission(policy(8), dict(self.ENV, QWEN_FAST_PADDED_BLOCK='1')), 2)
+
+    def test_the_extent_admission_takes_the_shape_and_names_the_blocks(self):
+        import packed_any_admission
+
+        environ = {'QWEN_FAST_REPLAY_GROUP_ROWS': '8', 'QWEN_SDPA_TREE_SCRATCH_ROUNDS': '1',
+                   'QWEN_FAST_SDPA_MODES': 'tail,share,slice', 'QWEN_FAST_ANY_REQUEST': '1',
+                   'QWEN_FAST_EXTENT_REPLAY': '1', 'QWEN_FAST_M3_BLOCKS': '2'}
+        self.assertEqual(packed_any_admission.check_environment(environ, serving_runtime.m3_shape(policy(8), self.ENV)), [])
+
+    def test_the_block_count_is_refused_at_every_other_request_count_by_name(self):
+        for users in (1, 2, 3, 4, 5, 6, 7):
+            with self.subTest(users=users), self.assertRaisesRegex(ValueError, 'QWEN_FAST_M3_BLOCKS=2 builds two 4-user M3 blocks'):
+                serving_runtime.m3_blocks_for(policy(users), self.ENV)
+        self.assertEqual(serving_runtime.m3_blocks_for(policy(8), self.ENV), 2)
+        self.assertEqual(serving_runtime.m3_blocks_for(policy(4), dict(M3_ENV)), 1)
+
+    def test_the_attach_builds_two_blocks_over_disjoint_slots_and_two_table_sets(self):
+        # The attach on the fakes test_serving_runtime drives it with: two (4, 16) blocks over slots 0-3 and 4-7, the
+        # pool told to lend two replicas of the one shape, the per-request captures trimmed to (1, 2, 4), the step over
+        # both blocks, every block built in two phases. exercise() asserts each of them.
+        import test_serving_runtime
+
+        harness = test_serving_runtime.RuntimeAttachmentTests('exercise')
+        harness.exercise(packed=True, users=8, four_as_two=False, m3_blocks=2)
+        self.assertEqual(harness.pool_options['packed_shapes'], ((4, 16),))
+        self.assertEqual(harness.pool_options['packed_replicas'], {(4, 16): 2})
+        self.assertEqual(harness.pool_options['bucket_rows'], (1, 2, 4))
+        self.assertEqual([call.kwargs['pool_slots'] for call in harness.engine_calls], [(0, 1, 2, 3), (4, 5, 6, 7)])
+        self.assertTrue(all(call.kwargs['defer_capture'] for call in harness.engine_calls))
+        for call in harness.engine_calls:
+            self.assertLessEqual(call.kwargs['shape'].users, gdn_user_batch.MAX_USERS)
+            self.assertEqual(call.kwargs['shape'].block_rows, 64)
+
+    def test_eight_requests_without_the_flag_attach_no_block_and_with_the_extent_path_are_refused_naming_it(self):
+        import test_serving_runtime
+
+        harness = test_serving_runtime.RuntimeAttachmentTests('exercise')
+        harness.exercise(packed=True, users=8, four_as_two=False)      # no block: the sequential step serves
+        message = ('QWEN_FAST_EXTENT_REPLAY=1 serves its rounds through the packed block, and this attach builds none '
+                   '(QWEN_FAST_PACKED_STEP=1, 8 scheduler requests); eight requests need QWEN_FAST_M3_BLOCKS=2 '
+                   '(two 64-row M3 blocks)')
+        with self.assertRaisesRegex(ValueError, 'eight requests need QWEN_FAST_M3_BLOCKS=2'):
+            harness.exercise(packed=True, users=8, four_as_two=False, refused_in_attach=message, admission={})
+
+    def test_the_lanes_refuse_two_blocks_by_name(self):
+        import serving_fast_lane
+        import serving_solo_lane
+
+        with self.assertRaisesRegex(ValueError, 'the solo lane is built beside the ONE 64-row M3 block'):
+            serving_solo_lane.solo_lane_admission((True, 'x'), {'QWEN_FAST_SOLO_LANE': '1', 'QWEN_FAST_M3_BLOCKS': '2'},
+                                                  log=lambda *args: None)
+        with self.assertRaisesRegex(ValueError, 'the lanes are built for one M3 block'):
+            serving_fast_lane.lane_admission({'slot': 0}, {'QWEN_FAST_LANE': '1', 'QWEN_FAST_ANY_REQUEST': '1',
+                                                           'QWEN_FAST_M3_BLOCKS': '2'}, seats=8)
+
+    def test_the_startup_marker_says_two_blocks(self):
+        import test_serving_startup
+
+        case = test_serving_startup.WeightStreamTests('run_streams')
+        _, _, marker = case.run_streams(dict(case.C1, QWEN_FAST_M3_BLOCKS='2'), requests=8, built=0)
+        lines = [call.args[0].format(*call.args[1:]) for call in marker.call_args_list]
+        self.assertTrue(lines[0].startswith('[PINDIAG] startup QWEN_FAST_M3_BLOCKS=2'), lines)
+
+
 class SitesOutsideThisLane(unittest.TestCase):
     """Named, not tested here: the sites of the map in files the profile / gate lane owns. They are the seat count in the
     profiles (max-num-seqs, the block count, the trace region), the pair coordinator's fixed slot pairs, the prefill

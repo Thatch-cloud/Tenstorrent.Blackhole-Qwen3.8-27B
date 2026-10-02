@@ -44,8 +44,16 @@ def weight_streams(resources, operations, model, owned_streams, policy, director
     QWEN_FAST_SKIP_BLOCK_STREAM=1 at another shape builds the stream and says so, so such a
     run cannot pass for an A1 measurement. With both unset this enters owned_streams with
     exactly the arguments it always had."""
-    from serving_runtime import SINGLE_GATEUP_SHAPE, SKIP_BLOCK_STREAM_FLAG, m3_shape, register_reader_reason
+    from serving_runtime import (M3_BLOCKS_FLAG, SINGLE_GATEUP_SHAPE, SKIP_BLOCK_STREAM_FLAG, m3_blocks_for, m3_shape,
+                                 register_reader_reason)
 
+    # QWEN_FAST_M3_BLOCKS (default 1): the block count is read here, before any weight stream is built, so a malformed
+    # value or 2 at any request count but eight is refused at startup, and the two-block shape is on the record.
+    if m3_blocks_for(policy) == 2:
+        from dflash_device import pindiag
+
+        pindiag('[PINDIAG] startup {}=2: eight scheduler requests on two 64-row M3 blocks (pool slots 0-3 and 4-7), '
+                '{}', M3_BLOCKS_FLAG, m3_shape(policy)[1])
     skipped = register_reader_reason(policy)
     if skipped is not None:
         from dflash_device import pindiag
