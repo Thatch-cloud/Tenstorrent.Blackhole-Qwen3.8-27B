@@ -1218,3 +1218,71 @@ class TwoPhaseFailureTests(unittest.TestCase):
             block.warm_publication = True
         serving_runtime.complete_blocks_two_phase(blocks, log=lambda *args: None)
         self.assertEqual([block.warm_publication for block in blocks], [True, False])
+
+
+class RequestWarmHookTests(unittest.TestCase):
+    """QWEN_FAST_M3_REQUEST_WARM=1: complete_blocks_two_phase's before_captures hook runs between the two phases."""
+
+    class Model:
+        def __init__(self):
+            self.count = 700
+            self.mesh_device = SimpleNamespace(num_program_cache_entries=lambda: self.count)
+
+    def blocks(self, calls, fail_at=None):
+        result = []
+        for name in 'AB':
+            block = TwoPhaseFailureTests.block(name, calls, fail_at=fail_at if name == 'B' else None)
+            result.append(block)
+        return result
+
+    def test_the_warm_runs_after_every_warm_and_fixture_and_before_every_capture(self):
+        calls = []
+        serving_runtime.complete_blocks_two_phase(self.blocks(calls), log=lambda *args: None,
+                                                  before_captures=lambda: calls.append('warm'))
+        self.assertEqual(calls, [('A', 'warm_and_fixture'), ('B', 'warm_and_fixture'), 'warm', ('A', 'capture_traces'),
+                                 ('B', 'capture_traces'), ('A', 'finish_construction'), ('B', 'finish_construction')])
+
+    def test_without_the_hook_the_recorded_sequence_is_unchanged(self):
+        calls = []
+        serving_runtime.complete_blocks_two_phase(self.blocks(calls), log=lambda *args: None)
+        self.assertEqual(calls, [('A', 'warm_and_fixture'), ('B', 'warm_and_fixture'), ('A', 'capture_traces'),
+                                 ('B', 'capture_traces'), ('A', 'finish_construction'), ('B', 'finish_construction')])
+
+    def test_the_program_count_does_not_move_across_the_captures_once_the_warm_has_compiled(self):
+        model, lines, calls = self.Model(), [], []
+
+        def warm():
+            model.count += 238
+        serving_runtime.complete_blocks_two_phase(self.blocks(calls), model, log=lambda template, *values: lines.append(values),
+                                                  before_captures=warm)
+        self.assertEqual(lines, [(0, 938, 938), (1, 938, 938)])
+
+    def test_a_raising_warm_closes_both_blocks_without_the_fence_and_propagates(self):
+        calls = []
+
+        def warm():
+            raise RuntimeError('warm failed')
+        with self.assertRaisesRegex(RuntimeError, 'warm failed'):
+            serving_runtime.complete_blocks_two_phase(self.blocks(calls), log=lambda *args: None, before_captures=warm)
+        self.assertEqual([call for call in calls if call[1] == 'close'], [('A', 'close', False), ('B', 'close', False)])
+        self.assertFalse([call for call in calls if call[1] == 'capture_traces'], 'no block captured after the failed warm')
+
+    def test_the_flag_is_zero_or_one_and_one_needs_two_blocks(self):
+        flag = serving_runtime.M3_REQUEST_WARM_FLAG
+        self.assertEqual(flag, 'QWEN_FAST_M3_REQUEST_WARM')
+        self.assertFalse(serving_runtime.m3_request_warm(2, {}))
+        self.assertFalse(serving_runtime.m3_request_warm(1, {}))
+        self.assertFalse(serving_runtime.m3_request_warm(1, {flag: '0'}))
+        self.assertTrue(serving_runtime.m3_request_warm(2, {flag: '1'}))
+        for value in ('', 'true', '2', 'on', ' 1'):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, flag):
+                serving_runtime.m3_request_warm(2, {flag: value})
+        with self.assertRaisesRegex(ValueError, flag):
+            serving_runtime.m3_request_warm(1, {flag: '1'})
+
+    def test_the_attach_passes_the_hook_only_under_the_flag(self):
+        with open(serving_runtime.__file__, encoding='utf-8') as handle:
+            source = handle.read()
+        self.assertIn('m3_request_warm_on = m3_request_warm(m3_blocks_count)', source)
+        self.assertIn('if m3_request_warm_on:', source)
+        self.assertIn('before_captures=lambda: warm_request_widths(', source)

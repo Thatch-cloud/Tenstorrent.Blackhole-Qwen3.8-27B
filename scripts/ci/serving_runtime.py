@@ -32,6 +32,10 @@ PADDED_BLOCK_FLAG = 'QWEN_FAST_PADDED_BLOCK'
 M3_BLOCKS_FLAG = 'QWEN_FAST_M3_BLOCKS'
 M3_BLOCKS_USERS = 8
 M3_BLOCKS_MARKER = '[PINDIAG] M3 blocks={} over pool slots {} (QWEN_FAST_M3_BLOCKS={}); each block is the qualified 4-user 64-row block'
+# QWEN_FAST_M3_REQUEST_WARM (default off; '0' or '1' only): under QWEN_FAST_M3_BLOCKS=2, the any-request engine's rows 1/2/4
+# programs and state are compiled and created BETWEEN the two blocks' warm phase and their captures (request_width_warm), so the
+# first engine build after block B's capture creates nothing the block's replays can overwrite. '1' with one block is refused.
+M3_REQUEST_WARM_FLAG = 'QWEN_FAST_M3_REQUEST_WARM'
 CAPTURE_PROGRAMS_MARKER = '[PINDIAG] packed blocks capture block={} programs={}->{}'
 CLOSE_FAILED_MARKER = '[PINDIAG] a sibling block did not close without the fence: {}'
 CAPTURE_POSITION_FLAG = 'QWEN_FAST_PACKED_CAPTURE_POSITION'
@@ -49,6 +53,18 @@ def m3_blocks(environ=None):
     if value not in ('1', '2'):
         raise ValueError('%s must be 1 or 2, got %r' % (M3_BLOCKS_FLAG, value))
     return int(value)
+
+
+def m3_request_warm(blocks, environ=None):
+    """QWEN_FAST_M3_REQUEST_WARM, strictly: unset or '0' is off, '1' is on, and anything else - an empty value included - is a
+    configuration error naming the flag. '1' is refused, naming it, unless `blocks` (m3_blocks_for) is 2: the warm runs between the
+    two blocks' phases, and one block has no such seam."""
+    value = (os.environ if environ is None else environ).get(M3_REQUEST_WARM_FLAG, '0')
+    if value not in ('0', '1'):
+        raise ValueError('%s must be 0 or 1, got %r' % (M3_REQUEST_WARM_FLAG, value))
+    if value == '1' and blocks != 2:
+        raise ValueError('%s=1 warms the request widths between two M3 blocks and needs %s=2' % (M3_REQUEST_WARM_FLAG, M3_BLOCKS_FLAG))
+    return value == '1'
 
 
 def m3_blocks_for(policy, environ=None):
@@ -313,7 +329,7 @@ def extent_replay_requested(environ=None):
     return value == '1'
 
 
-def complete_blocks_two_phase(blocks, model=None, log=None):
+def complete_blocks_two_phase(blocks, model=None, log=None, before_captures=None):
     """QWEN_FAST_M3_BLOCKS=2 (A1c): finish the construction of blocks built with defer_capture=True. Each block has
     already allocated its persistent state (the initial snapshot, checkpoints, taps) and the first phase here runs
     every block's warm forward and builds every fixture (extent words, masks, retained storage); only then does any
@@ -323,11 +339,16 @@ def complete_blocks_two_phase(blocks, model=None, log=None):
     fixture inputs, taps, checkpoints and extent words would have been exactly that.
 
     A log line per capture gives the program-cache count before and after each block: block B compiles zero programs
-    after block A's capture (the probe window reads it)."""
+    after block A's capture (the probe window reads it).
+
+    `before_captures` (QWEN_FAST_M3_REQUEST_WARM=1; request_width_warm): called once, after every block's warm_and_fixture and
+    before the first capture, inside the same guard - a failure closes both blocks without the fence and propagates."""
     log = pindiag if log is None else log
     try:
         for block in blocks:
             block.warm_and_fixture()
+        if before_captures is not None:
+            before_captures()
         for index, block in enumerate(blocks):
             before = program_count(model) if model is not None else None
             block.capture_traces()
@@ -365,6 +386,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     # QWEN_FAST_M3_BLOCKS (default 1; 2 only at eight scheduler requests): read strictly before anything is built, so a
     # malformed value, or 2 at any other request count, is refused here by name.
     m3_blocks_count = m3_blocks_for(policy)
+    m3_request_warm_on = m3_request_warm(m3_blocks_count)
     # Measurement-only, env-gated admission of one named grafted binary (K64 kernel
     # graft): inert unless QWEN_FAST_RUNTIME_BINARY_SHA256 is set, and it neither
     # touches the hash-pinned sources nor lowers the pin itself. Must run before
@@ -717,7 +739,13 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                     memory_ledger.record('P6', point='block%d' % len(packed_blocks), packed_block=packed_block)
                 slot += shape.users
             if m3_blocks_two:
-                complete_blocks_two_phase(packed_blocks, model)
+                if m3_request_warm_on:
+                    from request_width_warm import warm_request_widths
+
+                    complete_blocks_two_phase(packed_blocks, model, before_captures=lambda: warm_request_widths(
+                        operations, model, helpers, sampler, page_width))
+                else:
+                    complete_blocks_two_phase(packed_blocks, model)
                 for index, packed_block in enumerate(packed_blocks, 1):
                     memory_ledger.record('P6', point='block%d' % index, packed_block=packed_block)
             # D0: the one-user block, after M3 (a block is built before any request exists, and the pool's slot 0 is

@@ -1700,7 +1700,25 @@ M3_BLOCKS_HUNKS = [('# Eight seats on TWO 64-row M3 blocks (default off): block 
   "                             '(users=4 FOUR_AS_TWO=0 PACKED_STEP=1), not ' + shape)\n"),
  ("                         '(users=4 FOUR_AS_TWO=0 PACKED_STEP=1; users=8 with QWEN_FAST_M3_BLOCKS=2), not ' + shape)\n",
   "                         '(users=4 FOUR_AS_TWO=0 PACKED_STEP=1), not ' + shape)\n"),
- ('def complete_blocks_two_phase(blocks, model=None, log=None):\n'
+ ("# QWEN_FAST_M3_REQUEST_WARM (default off; '0' or '1' only): under QWEN_FAST_M3_BLOCKS=2, the any-request engine's rows 1/2/4\n"
+  "# programs and state are compiled and created BETWEEN the two blocks' warm phase and their captures (request_width_warm), so the\n"
+  "# first engine build after block B's capture creates nothing the block's replays can overwrite. '1' with one block is refused.\n"
+  "M3_REQUEST_WARM_FLAG = 'QWEN_FAST_M3_REQUEST_WARM'\n",
+  ''),
+ ('def m3_request_warm(blocks, environ=None):\n'
+  '    """QWEN_FAST_M3_REQUEST_WARM, strictly: unset or \'0\' is off, \'1\' is on, and anything else - an empty value included - is a\n'
+  "    configuration error naming the flag. '1' is refused, naming it, unless `blocks` (m3_blocks_for) is 2: the warm runs between the\n"
+  '    two blocks\' phases, and one block has no such seam."""\n'
+  "    value = (os.environ if environ is None else environ).get(M3_REQUEST_WARM_FLAG, '0')\n"
+  "    if value not in ('0', '1'):\n"
+  "        raise ValueError('%s must be 0 or 1, got %r' % (M3_REQUEST_WARM_FLAG, value))\n"
+  "    if value == '1' and blocks != 2:\n"
+  "        raise ValueError('%s=1 warms the request widths between two M3 blocks and needs %s=2' % (M3_REQUEST_WARM_FLAG, M3_BLOCKS_FLAG))\n"
+  "    return value == '1'\n"
+  '\n'
+  '\n',
+  ''),
+ ('def complete_blocks_two_phase(blocks, model=None, log=None, before_captures=None):\n'
   '    """QWEN_FAST_M3_BLOCKS=2 (A1c): finish the construction of blocks built with defer_capture=True. Each block has\n'
   '    already allocated its persistent state (the initial snapshot, checkpoints, taps) and the first phase here runs\n'
   "    every block's warm forward and builds every fixture (extent words, masks, retained storage); only then does any\n"
@@ -1710,11 +1728,16 @@ M3_BLOCKS_HUNKS = [('# Eight seats on TWO 64-row M3 blocks (default off): block 
   '    fixture inputs, taps, checkpoints and extent words would have been exactly that.\n'
   '\n'
   '    A log line per capture gives the program-cache count before and after each block: block B compiles zero programs\n'
-  '    after block A\'s capture (the probe window reads it)."""\n'
+  '    after block A\'s capture (the probe window reads it).\n'
+  '\n'
+  '    `before_captures` (QWEN_FAST_M3_REQUEST_WARM=1; request_width_warm): called once, after every block\'s warm_and_fixture and\n'
+  '    before the first capture, inside the same guard - a failure closes both blocks without the fence and propagates."""\n'
   '    log = pindiag if log is None else log\n'
   '    try:\n'
   '        for block in blocks:\n'
   '            block.warm_and_fixture()\n'
+  '        if before_captures is not None:\n'
+  '            before_captures()\n'
   '        for index, block in enumerate(blocks):\n'
   '            before = program_count(model) if model is not None else None\n'
   '            block.capture_traces()\n'
@@ -1738,7 +1761,8 @@ M3_BLOCKS_HUNKS = [('# Eight seats on TWO 64-row M3 blocks (default off): block 
   ''),
  ('    # QWEN_FAST_M3_BLOCKS (default 1; 2 only at eight scheduler requests): read strictly before anything is built, so a\n'
   '    # malformed value, or 2 at any other request count, is refused here by name.\n'
-  '    m3_blocks_count = m3_blocks_for(policy)\n',
+  '    m3_blocks_count = m3_blocks_for(policy)\n'
+  '    m3_request_warm_on = m3_request_warm(m3_blocks_count)\n',
   ''),
  ('        # QWEN_FAST_M3_BLOCKS=2: two 64-row M3 blocks over pool slots (0..3) and (4..7), the same multi-block path.\n'
   '        m3_blocks_two = False\n',
@@ -1781,7 +1805,13 @@ M3_BLOCKS_HUNKS = [('# Eight seats on TWO 64-row M3 blocks (default off): block 
   "                    memory_ledger.record('P6', point='block%d' % len(packed_blocks), packed_block=packed_block)\n",
   "                memory_ledger.record('P6', point='block%d' % len(packed_blocks), packed_block=packed_block)\n"),
  ('            if m3_blocks_two:\n'
-  '                complete_blocks_two_phase(packed_blocks, model)\n'
+  '                if m3_request_warm_on:\n'
+  '                    from request_width_warm import warm_request_widths\n'
+  '\n'
+  '                    complete_blocks_two_phase(packed_blocks, model, before_captures=lambda: warm_request_widths(\n'
+  '                        operations, model, helpers, sampler, page_width))\n'
+  '                else:\n'
+  '                    complete_blocks_two_phase(packed_blocks, model)\n'
   '                for index, packed_block in enumerate(packed_blocks, 1):\n'
   "                    memory_ledger.record('P6', point='block%d' % index, packed_block=packed_block)\n",
   ''),

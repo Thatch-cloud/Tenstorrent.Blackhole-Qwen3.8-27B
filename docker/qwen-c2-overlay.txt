@@ -95,6 +95,10 @@ scripts/ci/serving_packed_step.py
 scripts/ci/verify_prestage.py
 scripts/ci/early_draft.py
 
+# QWEN_FAST_M3_REQUEST_WARM=1 (the eight-seat profiles): serving_runtime lazy-imports request_width_warm and runs it between the two
+# blocks' warm phase and their captures, so the request engine's rows 1/2/4 programs and state exist before any capture.
+scripts/ci/request_width_warm.py
+
 # D0, the one-user lane (QWEN_FAST_SOLO_LANE, gate only; the lanes window): serving_runtime builds the one-user block beside M3
 # when the flag is on and serving_packed_step routes a lone slot-0 round to it (both lazy-import serving_solo_lane), over the
 # shape packed_shapes.solo_shape names. Flag off, none of the three is read: this is what each was call for call.
