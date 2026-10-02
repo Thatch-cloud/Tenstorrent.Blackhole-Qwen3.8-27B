@@ -219,8 +219,9 @@ class SmokeTests(unittest.TestCase):
 
     def test_the_two_timed_arms_differ_only_in_the_seat_flag_and_the_seats(self):
         a, b = PROFILES['profiles'][FOUR_TIME], PROFILES['profiles'][EIGHT_TIME]
-        self.assertEqual({k: v for k, v in b['env'].items() if a['env'].get(k) != v}, {'QWEN_FAST_M3_BLOCKS': '2'})
-        self.assertEqual(set(a['env']) ^ set(b['env']), {'QWEN_FAST_M3_BLOCKS'})
+        seat_flags = {'QWEN_FAST_M3_BLOCKS': '2', 'QWEN_FAST_M3_REQUEST_WARM': '1'}
+        self.assertEqual({k: v for k, v in b['env'].items() if a['env'].get(k) != v}, seat_flags)
+        self.assertEqual(set(a['env']) ^ set(b['env']), set(seat_flags))
         for name in TIMED:
             self.assertNotIn('c2-packed-tp4-time-gate', text_of(name), name)
 

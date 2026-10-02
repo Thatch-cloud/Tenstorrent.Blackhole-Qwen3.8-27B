@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import sys
 import unittest
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -23,7 +24,9 @@ PROFILES = HERE / 'qwen_c2_profiles.json'
 DOCKERFILE = ROOT / 'docker' / 'qwen-c2-serving.Dockerfile'
 
 PRODUCTION = 'c2-packed-tp4'
-EIGHT = ('c2-packed-tp4-8', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate', 'c2-packed-tp4-8-diag-strace')
+EIGHT = ('c2-packed-tp4-8', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate', 'c2-packed-tp4-8-diag-strace',
+         'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard')
+NOWARM = 'c2-packed-tp4-8-diag-strace-nowarm'
 
 
 def profiles():
@@ -109,8 +112,12 @@ class AttachOnFakes(unittest.TestCase):
         for name in EIGHT:
             harness = self.harness()
             with self.subTest(profile=name):
-                harness.exercise(packed=True, users=8, four_as_two=False, admission={}, m3_blocks=2,
-                                 extra_env=attach_env(name))
+                # the request-width warm is device work (its own tests drive it on fakes); here it is only counted
+                with patch('request_width_warm.warm_request_widths') as warm:
+                    harness.exercise(packed=True, users=8, four_as_two=False, admission={}, m3_blocks=2,
+                                     extra_env=attach_env(name))
+                self.assertEqual(warm.call_count, 0 if name == NOWARM else 1,
+                                 'QWEN_FAST_M3_REQUEST_WARM=1 runs the warm once at attach; =0 never')
                 self.assertEqual([call.kwargs['pool_slots'] for call in harness.engine_calls],
                                  [(0, 1, 2, 3), (4, 5, 6, 7)])
                 self.assertTrue(all(call.kwargs['defer_capture'] for call in harness.engine_calls))
