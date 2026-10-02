@@ -164,6 +164,9 @@ jobs:
         if: contains(steps.job.outputs.actions, 'agentstop')
         shell: bash
         run: |
+          # Actions runs bash with -e: `systemctl is-active` exits 3 for an inactive unit, which killed run 36988136422 after the
+          # stop had worked. Every failure here is handled explicitly instead.
+          set +e
           set -uo pipefail
           # Stopping the agent stops the serving container it started, so the cards come free. The unserve step after
           # this one removes what is left. The unit lives on the host only: a pod has none, and a job that landed on one
@@ -926,6 +929,9 @@ jobs:
         if: ${{ !cancelled() && contains(steps.job.outputs.actions, 'agentstart') }}
         shell: bash
         run: |
+          # Actions runs bash with -e: `systemctl is-active` exits 3 for an inactive unit, which killed run 36988136422 after the
+          # stop had worked. Every failure here is handled explicitly instead.
+          set +e
           set -uo pipefail
           export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
           unit="$HOME/.config/systemd/user/thatch-node-agent.service"
