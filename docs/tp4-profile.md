@@ -8,11 +8,11 @@ round (about 70.8 ms of verify trace with the audits inside it; about 62 ms proj
 
 ## What runs
 
-`C2_ACTIONS=status reset build gate`, `C2_GATE_PLAN=ops-twin,ops-trace` (`scripts/ci/ops_profile_plan.py`):
+`C2_ACTIONS=status reset gate` (the image is built by a separate build-only job, `C2_ACTIONS=build`, BEFORE the window takes production down), `C2_GATE_PLAN=ops-twin,ops-trace` (`scripts/ci/ops_profile_plan.py`):
 
 | arm | what | why |
 |---|---|---|
-| `ops-twin` | unprofiled: 4 real-text users at 4,096 tokens each (the production shape; v170 had 4k / 8k / 16k / 24k, so the attention slope stays v170's); user 0 asks 192 tokens, users 1-3 ask 64, all ignore_eos | the unperturbed `[PACKED-PHASE]` round times and the reference texts |
+| `ops-twin` | unprofiled: 4 real-text users at 4,096 tokens each (the production shape; v170 had 4k / 8k / 16k / 24k, so the attention slope stays v170's); user 0 asks 256 tokens, users 1-3 ask 128, all ignore_eos | the unperturbed `[PACKED-PHASE]` round times and the reference texts |
 | `ops-trace` | the same, under tracy (v138's recipe): `-p --check-exit-code --disable-device-data-dump-to-files --disable-device-data-push-to-tracy --dump-device-data-mid-run --op-support-count 20000` | the CPP device report: every op of every replayed trace, on every chip |
 
 Fixed in code, not in the job file, so a job cannot drift from what the analysis expects: the shapes, the tracy argument list (any

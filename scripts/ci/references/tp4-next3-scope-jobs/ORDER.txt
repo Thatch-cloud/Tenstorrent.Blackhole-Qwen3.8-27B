@@ -1,6 +1,6 @@
 # The order of the four-card tp4/next-3-scope window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
 # stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window (its product is data).
-# Image: the tag of the tt-vllm image the jobs serve, built from this branch by a build-only job (C2_ACTIONS=build, no card opened) while production served.
+# Image: the tag of the tt-vllm image the jobs serve (tp4-next-3m is a PLACEHOLDER for ONE FRESH tag, shared with the cheap window's image), built from the pushed tp4/next-3 commit by B0, a build-only job (C2_ACTIONS=build, no card opened) that runs FIRST while production serves; the driver substitutes it in every template; a reused tag is skipped by the build step and would silently serve an old image.
 # Minutes: runner time for ONE run of the job, a quad reset (1 to 3 min) included.
 #
 # WHAT THIS WINDOW TESTS. Lever P1 of the TP4 performance audit, drafter K/V publication as device traces (docs/tp4-traced-publish.md): the fused commit at four cards
@@ -10,8 +10,9 @@
 # NOTHING IN THIS WINDOW HAS RUN ON A CARD: the fused commit is exact on one card at two KV heads but has never been timed and never run with the in-trace sampler.
 # Lever V5 (the recurrence value split, docs/tp4-recurrence-split.md) is design only: it needs new kernels and has NO job here.
 #
+# B0 RUNS FIRST, BEFORE S0: S0 takes production down, so the image must already exist; without B0 the card jobs fail at their docker run with production down.
 # PRODUCTION IS LIVE ON THE CARDS WHEN THE WINDOW OPENS. The window opens with the placement removed through the admin API (the owner's go-ahead and an admin token), and
-# its FIRST job is S0: status, agentstop (stops the node agent and the serving container it started) and unserve. Every later job resets the cards first.
+# its FIRST production job is S0 (after B0): status, agentstop (stops the node agent and the serving container it started) and unserve. Every later job resets the cards first.
 # THE WINDOW CLOSES WITH S6 AND A HAND-BACK THAT IS NOT IN ANY JOB FILE: S6 is status, the all-four reset, the fabric re-measure and agentstart (the node agent started again,
 # nothing placed); then the OWNER runs /deploy to place today's production recipe. Never place a gate arm, and never include the deploy in a template.
 # S6 is always last and it runs even when a stop job halts the window: a stall leaves the cards hung until its reset.
@@ -24,18 +25,19 @@
 # carry the sampler-in-trace hang fix, because with the verify audits off and no hang fix the traffic profile deadlocks. A hang on a timed arm is a finding.
 # The prerequisite of S2 is the one-card two-head in-place slide proof (tp4-fcommit-jobs F1a and F1b); it is not repeated here.
 #
-# Durations (estimate): S0 15, S1 60, S2 100, S3 100, S4 five times 40, S5 four times 60, S6 25. Stop jobs S0 to S4: about 8 h worst case, 4 h expected; the timing adds 4 h.
-S0-unserve stop tp4-next-3s 15
-S1-production-smoke stop tp4-next-3s 60
-S2-fcommit-audited-smoke stop tp4-next-3s 100
-S3-fcommit-live-audited-smoke stop tp4-next-3s 100
-S4a-hang-shapes-fcommit-strace stop tp4-next-3s 40
-S4b-hang-shapes-fcommit-strace stop tp4-next-3s 40
-S4c-hang-shapes-fcommit-strace stop tp4-next-3s 40
-S4d-hang-shapes-fcommit-strace stop tp4-next-3s 40
-S4e-hang-shapes-fcommit-strace stop tp4-next-3s 40
-S5a-speed-timed optional tp4-next-3s 60
-S5b-fcommit-timed optional tp4-next-3s 60
-S5c-speed-timed optional tp4-next-3s 60
-S5d-fcommit-timed optional tp4-next-3s 60
-S6-handback-reset stop tp4-next-3s 25
+# Durations (estimate): B0 18 (90 at worst, production serving), S0 15, S1 60, S2 100, S3 100, S4 five times 40, S5 four times 60, S6 25. Stop jobs S0 to S4: about 8 h worst case, 4 h expected; the timing adds 4 h.
+B0-build stop tp4-next-3m 30
+S0-unserve stop tp4-next-3m 15
+S1-production-smoke stop tp4-next-3m 60
+S2-fcommit-audited-smoke stop tp4-next-3m 100
+S3-fcommit-live-audited-smoke stop tp4-next-3m 100
+S4a-hang-shapes-fcommit-strace stop tp4-next-3m 40
+S4b-hang-shapes-fcommit-strace stop tp4-next-3m 40
+S4c-hang-shapes-fcommit-strace stop tp4-next-3m 40
+S4d-hang-shapes-fcommit-strace stop tp4-next-3m 40
+S4e-hang-shapes-fcommit-strace stop tp4-next-3m 40
+S5a-speed-timed optional tp4-next-3m 60
+S5b-fcommit-timed optional tp4-next-3m 60
+S5c-speed-timed optional tp4-next-3m 60
+S5d-fcommit-timed optional tp4-next-3m 60
+S6-handback-reset stop tp4-next-3m 25

@@ -24,14 +24,15 @@ with open(HERE / 'qwen_c2_profiles.json', encoding='utf-8') as _handle:
 NAMES = sorted(PROFILES)
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|'
                     r'/dev/tenstorrent|home/|zot\.|@[A-Z0-9_]+@|[A-Za-z]:[\\/]Users')
-IMAGE = 'tp4-next-3s'
+IMAGE = 'tp4-next-3m'
 CONTROL, ARM, PRODUCTION = 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-strace-fcommit', 'c2-packed-tp4'
 FUSED = ('QWEN_FAST_FUSED_COMMIT', 'QWEN_FAST_FUSED_COMMIT_INPLACE', 'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS')
 HANG_RUNS = tuple('S4%s-hang-shapes-fcommit-strace' % letter for letter in 'abcde')
 TIMED = ('S5a-speed-timed', 'S5b-fcommit-timed', 'S5c-speed-timed', 'S5d-fcommit-timed')
-STOP_JOBS = ('S0-unserve', 'S1-production-smoke', 'S2-fcommit-audited-smoke', 'S3-fcommit-live-audited-smoke') + HANG_RUNS
+BUILD = 'B0-build'
+STOP_JOBS = (BUILD, 'S0-unserve', 'S1-production-smoke', 'S2-fcommit-audited-smoke', 'S3-fcommit-live-audited-smoke') + HANG_RUNS
 ORDERED = STOP_JOBS + TIMED + ('S6-handback-reset',)
-PROFILE_OF = {'S0-unserve': PRODUCTION, 'S1-production-smoke': PRODUCTION, 'S2-fcommit-audited-smoke': 'c2-packed-tp4-gate-fcommit',
+PROFILE_OF = {BUILD: PRODUCTION, 'S0-unserve': PRODUCTION, 'S1-production-smoke': PRODUCTION, 'S2-fcommit-audited-smoke': 'c2-packed-tp4-gate-fcommit',
               'S3-fcommit-live-audited-smoke': 'c2-packed-tp4-gate-fcommit-live', **{name: ARM for name in HANG_RUNS},
               'S5a-speed-timed': CONTROL, 'S5b-fcommit-timed': ARM, 'S5c-speed-timed': CONTROL, 'S5d-fcommit-timed': ARM,
               'S6-handback-reset': PRODUCTION}
@@ -80,14 +81,25 @@ class OrderTests(unittest.TestCase):
             self.assertEqual(modes[name], 'optional', name)
 
     def test_the_first_job_is_agentstop_unserve_and_nothing_else_takes_production_down(self):
-        self.assertEqual(read_order()[0][0], 'S0-unserve')
+        self.assertEqual([row[0] for row in read_order()[:2]], [BUILD, 'S0-unserve'], 'the build runs first, production still serving')
         self.assertEqual(parsed('S0-unserve')['actions'], 'status agentstop unserve')
-        for name in ORDERED[1:]:
+        for name in ORDERED[2:]:
             actions = parsed(name)['actions'].split()
             self.assertNotIn('agentstop', actions, name)
             self.assertNotIn('unserve', actions, name)
         order = (FOLDER / 'ORDER.txt').read_text(encoding='utf-8')
-        for word in ('PRODUCTION IS LIVE ON THE CARDS', 'FIRST job is S0', 'agentstop'):
+        for word in ('PRODUCTION IS LIVE ON THE CARDS', 'FIRST production job is S0', 'agentstop'):
+            self.assertIn(word, order)
+
+    def test_the_build_is_a_build_only_job_that_runs_first_with_a_fresh_tag_and_opens_no_card(self):
+        for name in ORDERED:
+            self.assertEqual('build' in parsed(name)['actions'].split(), name == BUILD, name)
+        outputs = parsed(BUILD)
+        self.assertEqual((outputs['actions'], outputs['cards'], outputs['tag']), ('build', 'quad', IMAGE))
+        for word in ('BEFORE S0', 'FRESH', 'already exists', 'PLACEHOLDER', 'production still serves'):
+            self.assertIn(word, text_of(BUILD))
+        order = (FOLDER / 'ORDER.txt').read_text(encoding='utf-8')
+        for word in ('B0 RUNS FIRST, BEFORE S0', 'FRESH tag'):
             self.assertIn(word, order)
 
     def test_the_hand_back_is_last_runs_even_after_a_stop_and_says_the_owner_deploys(self):
@@ -127,7 +139,7 @@ class TemplateTests(unittest.TestCase):
         self.assertIsNone(BANNED.search((FOLDER / 'ORDER.txt').read_text(encoding='utf-8')))
 
     def test_every_device_job_resets_the_cards_first_and_opens_them_in_one_step(self):
-        for name in ORDERED[1:-1]:
+        for name in ORDERED[2:-1]:
             actions = parsed(name)['actions'].split()
             with self.subTest(template=name):
                 self.assertEqual(len(set(actions) & set(DEVICE_STEPS)), 1)
@@ -142,7 +154,7 @@ class TemplateTests(unittest.TestCase):
                 self.assertEqual(parsed(name)['gate_plan'], 'bringup')
         for name in ('S0-unserve', 'S1-production-smoke', 'S6-handback-reset'):
             self.assertNotIn('gate_only', PROFILES[parsed(name)['profile']], name)
-        for name in ORDERED[2:-1]:
+        for name in ORDERED[3:-1]:
             self.assertIs(PROFILES[parsed(name)['profile']].get('gate_only'), True, name)
 
     def test_the_hang_runs_are_five_templates_on_the_hang_shapes_audits_off(self):
@@ -173,7 +185,7 @@ class TemplateTests(unittest.TestCase):
     def test_every_named_smoke_test_is_one_the_smoke_runs_in_the_order_the_template_lists_them(self):
         smoke = (HERE / 'c2_serving_smoke.py').read_text(encoding='utf-8')
         executed = re.findall(r"^\s*record\('([a-z0-9_]+)'", smoke, re.M)
-        for name in ORDERED[1:-1]:
+        for name in ORDERED[2:-1]:
             listed = parsed(name)['tests'].split(',')
             with self.subTest(template=name):
                 for test in listed:

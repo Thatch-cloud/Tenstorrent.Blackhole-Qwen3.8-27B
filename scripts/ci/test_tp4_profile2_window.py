@@ -28,8 +28,8 @@ NAMES = sorted(PROFILES['profiles'])
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|'
                     r'/dev/tenstorrent|home/|zot\.|@[A-Z0-9_]+@|[A-Za-z]:[\\/]')
 IMAGE = 'tp4-prof-2'
-STOP, PROFILE, HANDBACK = 'PA0-agent-stop', 'P2-trace-profile', 'PH-handback-reset'
-ORDERED = (STOP, PROFILE, HANDBACK)
+BUILD, STOP, PROFILE, HANDBACK = 'PB0-build', 'PA0-agent-stop', 'P2-trace-profile', 'PH-handback-reset'
+ORDERED = (BUILD, STOP, PROFILE, HANDBACK)
 SERVED = 'c2-packed-tp4'
 TIMED = 'c2-packed-tp4-speed-strace'
 DEVICE_STEPS = ('cardm', 'smoke', 'gate', 'prefix', 'fabric', 'replay', 'probe', 'drift', 'platform', 'priority')
@@ -75,7 +75,7 @@ class OrderTests(unittest.TestCase):
 
     def test_the_order_carries_the_booking_the_hand_back_and_the_traps(self):
         order = read(os.path.join(FOLDER, 'ORDER.txt'))
-        for word in ('PRODUCTION IS LIVE ON THE CARDS', "'agentstop unserve'", 'book 2 hours', 'HAND-BACK', 'fabric', 'agentstart',
+        for word in ('PRODUCTION IS LIVE ON THE CARDS', "'agentstop unserve'", 'PB0 runs FIRST', 'FRESH tag', 'book 2 hours', 'HAND-BACK', 'fabric', 'agentstart',
                      'asks the owner for /deploy', 'No template', 'deploys anything', 'runs even when a stop job', 'NEVER CANCEL P2',
                      'root-owned', 'EACCES', 'DISK', '85%', 'NEVER delete the P8 base', 'qwen-fast-serving:ci-be9e184e',
                      'HOST MEMORY', 'LAUNCHED argv', 'THE READ-OUT', 'VALIDITY', 'At least 20', 'ops-trace texts == ops-twin',
@@ -86,7 +86,7 @@ class OrderTests(unittest.TestCase):
 
     def test_the_stop_job_is_first_and_the_hand_back_is_last(self):
         rows = read_order()
-        self.assertEqual((rows[0][0], rows[-1][0]), (STOP, HANDBACK))
+        self.assertEqual((rows[0][0], rows[1][0], rows[-1][0]), (BUILD, STOP, HANDBACK), 'the build runs first, production still serving')
 
 
 class TemplateTests(unittest.TestCase):
@@ -101,7 +101,15 @@ class TemplateTests(unittest.TestCase):
             self.assertNotIn(b'\r', handle.read())
         self.assertIsNone(BANNED.search(read(os.path.join(FOLDER, 'ORDER.txt'))))
 
-    def test_the_first_job_stops_the_agent_and_opens_no_board(self):
+    def test_the_build_job_is_build_only_and_the_profile_job_no_longer_builds(self):
+        outputs = parsed(BUILD)
+        self.assertEqual((outputs['actions'], outputs['cards'], outputs['tag']), ('build', 'quad', IMAGE))
+        for word in ('BEFORE PA0', 'FRESH', 'already exists', 'PLACEHOLDER', 'production still serves'):
+            self.assertIn(word, text_of(BUILD))
+        for name in ORDERED:
+            self.assertEqual('build' in parsed(name)['actions'].split(), name == BUILD, name)
+
+    def test_the_first_production_job_stops_the_agent_and_opens_no_board(self):
         outputs = parsed(STOP)
         self.assertEqual(outputs['actions'], 'status agentstop unserve')
         self.assertFalse(set(outputs['actions'].split()) & set(DEVICE_STEPS + ('reset', 'build', 'agentstart', 'push')))
@@ -114,13 +122,13 @@ class TemplateTests(unittest.TestCase):
             actions = parsed(name)['actions'].split()
             with self.subTest(template=name):
                 self.assertEqual('agentstop' in actions, name == STOP)
-                self.assertNotIn('agentstart', actions)
+                self.assertEqual('agentstart' in actions, name == HANDBACK)
                 self.assertNotIn('replay', actions)
                 self.assertNotIn('push', actions)
 
-    def test_the_profile_job_is_status_reset_build_gate_on_the_timed_production_profile(self):
+    def test_the_profile_job_is_status_reset_gate_on_the_timed_production_profile(self):
         outputs = parsed(PROFILE)
-        self.assertEqual(outputs['actions'], 'status reset build gate')
+        self.assertEqual(outputs['actions'], 'status reset gate')
         self.assertEqual((outputs['profile'], outputs['tag']), (TIMED, IMAGE))
         self.assertEqual(outputs['gate_plan'].replace(' ', ','), 'ops-twin,ops-trace')
         self.assertEqual(outputs['gate_jit'], 'record')
@@ -128,11 +136,10 @@ class TemplateTests(unittest.TestCase):
         for word in ('NEVER CANCEL', 'root-owned', 'qwen-fast-serving:ci-be9e184e', '85% disk', 'op-support 20000'):
             self.assertIn(word, text)
         actions = outputs['actions'].split()
-        self.assertLess(actions.index('reset'), actions.index('build'))
-        self.assertLess(actions.index('build'), actions.index('gate'))
+        self.assertLess(actions.index('reset'), actions.index('gate'))
 
-    def test_the_hand_back_is_status_and_reset_and_says_what_follows_it_outside_the_template(self):
-        self.assertEqual(parsed(HANDBACK)['actions'], 'status reset')
+    def test_the_hand_back_is_status_reset_fabric_agentstart_and_the_owner_deploys(self):
+        self.assertEqual(parsed(HANDBACK)['actions'], 'status reset fabric agentstart')
         text = text_of(HANDBACK)
         for word in ('fabric re-measure', 'agentstart', "OWNER's /deploy", 'never deploys anything', 'NEVER place a gate arm',
                      'runs even when a stop job', 'audits off'):

@@ -43,7 +43,7 @@ PREFIX_PROFILES = ('general-prefix', 'general-prefix-eager', 'general-prefix-tp4
 # the four-card S2 gate profile (unqualified until packed_any_evidence_tp4.json records its sections).
 GATE_ONLY_OTHERS = ('general-tp4-bench', 'general-tp4-mmrs', 'c2-packed-tp4-gate', 'general-tp4-ring-mmrs',
                     'c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-strace',
-                    'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-noslide',
+                    'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-draftwide', 'c2-packed-tp4-gate-noslide',
                     'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide',
                     # the batched-draft window's four arms (tp4/draft)
                     'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-gate-quad',

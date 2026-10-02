@@ -8,13 +8,15 @@
 # own report picked the lone user's step. This one reads per-op core counts (the CPP report is kept compressed in the artifact), the
 # cost of the in-trace sampler, the collectives with the tile-split all-reduce and the round around the verify.
 #
-# PRODUCTION IS LIVE ON THE CARDS when the window opens: PA0 is 'agentstop unserve', the first job, and nothing opens a board before it.
-# The window needs a production-down slot: book 2 hours (the template's worst case with reset and build is 3.5 hours; the gate refuses
+# PB0 runs FIRST, while production still serves: a build-only job (C2_ACTIONS=build, no board opened) that makes the one image. It must use a FRESH tag, because the build
+# step skips a tag that already exists on the host and would silently serve an old image; the driver substitutes the placeholder in every template.
+# PRODUCTION IS LIVE ON THE CARDS when the window opens: PA0 is 'agentstop unserve', the first job that touches production, and nothing opens a board before it.
+# The window needs a production-down slot: book 2 hours (P2's worst case with reset, no build, is 3.2 hours; the gate refuses
 # to start if its worst case does not fit the step and job time left).
-# HAND-BACK is not part of P2: PH resets the cards (it runs even when a stop job halted the window). After PH the driver, outside these
-# templates, re-measures the fabric, runs the agentstart action and asks the owner for /deploy of today's production recipe. No template
-# deploys anything.
-# ONE IMAGE FOR THE WHOLE WINDOW (tp4-prof-2, built by P2 from the commit the window's tag sits on: the read-back hook is image code).
+# HAND-BACK is the last job, PH: status, the all-four reset, the fabric re-measure and agentstart (it runs even when a stop job halted the window; the same
+# hand-back as the other tp4/next-3 windows). An owner /deploy is always still needed to place anything; the driver asks the owner for /deploy of today's
+# production recipe. No template deploys anything.
+# ONE IMAGE FOR THE WHOLE WINDOW (tp4-prof-2, a placeholder for one fresh tag; built by PB0 from the commit the window's tag sits on: the read-back hook is image code).
 # The profile image is a GATE image: never place it.
 #
 # THE TRAPS
@@ -51,7 +53,8 @@
 #   Core count per op, from the CSV: fills the cells the audit marked unknown.
 # STOP on an attach refusal, a hang, garbage text, or ops-trace texts differing from ops-twin. SOFT otherwise: the product is data.
 #
-# Duration (estimate, wall clock): PA0 5 min; P2 150 min expected (90 at best, 210 at worst); PH 15 min. About 2.8 hours expected.
+# Duration (estimate, wall clock): PB0 18 min (90 at worst, production serving); PA0 5 min; P2 130 min expected (80 at best, 190 at worst); PH 15 min. Production is down about 2.5 hours.
+PB0-build stop tp4-prof-2 30
 PA0-agent-stop stop tp4-prof-2 5
-P2-trace-profile stop tp4-prof-2 150
+P2-trace-profile stop tp4-prof-2 130
 PH-handback-reset stop tp4-prof-2 15

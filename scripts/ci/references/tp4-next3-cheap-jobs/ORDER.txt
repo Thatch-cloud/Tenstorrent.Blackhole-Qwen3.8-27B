@@ -1,42 +1,45 @@
 # The order of the four-card tp4/next-3-cheap window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
 # stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window (its product is data).
-# Image: the tag of the tt-vllm image the job serves (tp4-next-3, prebuilt by a build-only job while production served). Minutes: runner time
+# Image: the tag of the tt-vllm image the job serves (tp4-next-3m is a PLACEHOLDER for ONE FRESH tag, built from the pushed tp4/next-3 commit by B0, a build-only job that runs FIRST while production serves; the driver substitutes it in every template; a reused tag is skipped by the build step and would silently serve an old image). Minutes: runner time
 # for ONE run of the job, a quad reset (1-3 min) included.
 #
 # THE LANE. Three cheap levers from the TP4 performance audit (synthesis section 4), each behind its own flag, gate-only profiles only:
 #   V6  the ring fabric: c2-packed-tp4-speed-strace-ring = the control + FABRIC_1D_RING + QWEN_FAST_CCL_TOPOLOGY=ring (nothing else).
 #       Audited exactness arm: c2-packed-tp4-gate-ring (E1). Estimate -2 ms per four-user round (-4 at eight seats).
-#   D2  the drafter's wide norms: c2-packed-tp4-speed-strace-draftwide = the control + QWEN_FAST_TP4_DRAFT_WIDE=1 (nothing else). The
+#   D2  the drafter's wide norms (audited arm D1: c2-packed-tp4-gate-draftwide): c2-packed-tp4-speed-strace-draftwide = the control + QWEN_FAST_TP4_DRAFT_WIDE=1 (nothing else). The
 #       hidden-width RMS norms of the drafter (21 per pass) on 20 cores instead of one or two. The drafter's head ops are NOT widened
 #       (one core, 20 us each, no exact multi-core variant). Estimate -1 to -3 ms per four-user round (two pair passes).
 #   V7  the TP4 re-sweep of the gate/up 64-row matmul grids: a one-card eager sweep (V7); it applies nothing, it emits the best exact configs.
 # Production's profile (c2-packed-tp4) carries none of the new flags; the production image path is byte-identical with them off (tests prove it).
 #
-# PRODUCTION IS LIVE ON THE CARDS when a window opens: A0 (agentstop, unserve) is the first job and the only one that takes it down. It runs
+# PRODUCTION IS LIVE ON THE CARDS when a window opens: B0 (build-only) runs before it while production serves; A0 (agentstop, unserve) is the first job that touches production and the only one that takes it down. It runs
 # before anything opens a card. V7 then runs on card M alone (the cardm step; no reset needed). Every four-card job after it opens with its own
 # all-four reset (links train only at board init).
-# Early-failure order, cheapest first: A0; V7 (one card, no model load); E1 (the audited exactness of the ring, a stop for the ring pair only);
+# Early-failure order, cheapest first: B0 (the build, production still serving); A0; V7 (one card, no model load); E1 (the audited exactness of the ring, a stop for the ring pair only);
 # then the paired timing ABAB of each lever against the same control on coding prompts (4 x 4k and 4 x 32k, like tp4-next-2's N4a-N4d):
-# TR1 (control) TR2 (ring) TR3 (control) TR4 (ring); TW1 (control) TW2 (draftwide) TW3 (control) TW4 (draftwide). Each pair differs in its
+# TR1 (control) TR2 (ring) TR3 (control) TR4 (ring); D1 (the audited D2 arm); TW1 (control) TW2 (draftwide) TW3 (control) TW4 (draftwide). Each pair differs in its
 # lever alone (test_tp4_next3_cheap_window holds each twin equal to the control plus exactly its deltas), both arms carry hang fix A and the tail caps.
 # Judge each pair PAIRED per round, never against the other pair, and never by an unpaired median. NOTHING COMBINED HAS RUN ON A CARD: the
 # two levers are never in one arm here; a combination is a later window's, after both pairs read.
-# Skip rules: if E1 fails, skip TR1-TR4. If TW2's log shows a "draft wide fell back" line or no "draft wide engaged" line the smoke check
+# Skip rules: if E1 fails, skip TR1-TR4. If D1 fails or hangs, skip TW1-TW4 (the drafter's wide norms put L1 buffers inside the drafter traces, captured after the verify captures: D1 is the audited proof they overwrite nothing).
+# If E1 passes, also stop at TR2 if its served text differs from the control's (E1 proves ring equals ring-solo; only the TR compare checks ring against production). If TW2's log shows a "draft wide fell back" line or no "draft wide engaged" line the smoke check
 # fails it: fix before TW3/TW4. A hang on any timed arm is a finding; the next job's reset heals the cards.
 # HAND-BACK (H1) runs LAST and even when any earlier job failed or hung: status, the all-four reset, the fabric re-measure, agentstart. It
-# restores TODAY'S PRODUCTION RECIPE only. An owner /deploy is still needed for anything new, and this order never includes a deploy, a
-# :latest retag or a placement call.
-# Durations (estimate, wall clock): A0 10 min; V7 30-45; E1 60-120; TR1-TR4 and TW1-TW4 30-60 min each; H1 25. Whole window: about 7.5 h with
+# starts the node agent again with nothing placed. An owner /deploy is still needed, always, to place TODAY'S PRODUCTION RECIPE (and anything new); this order never includes a deploy, a
+# :latest retag or a placement call (the same hand-back as the scope and profile windows).
+# Durations (estimate, wall clock): B0 18 min (90 at worst; production serving, not counted as downtime); A0 10 min; V7 30-45; E1 60-120; D1 60-120; TR1-TR4 and TW1-TW4 30-60 min each; H1 25. Whole window: about 7.5 h with
 # every job; the sweep, E1 and one pair (3 h) is the short form: A0, V7, E1, TR1-TR4, H1.
-A0-agentstop-unserve stop tp4-next-3 10
-V7-tp4-matmul-sweep optional tp4-next-3 45
-E1-ring-exact-audited optional tp4-next-3 120
-TR1-control-timed optional tp4-next-3 60
-TR2-ring-timed optional tp4-next-3 60
-TR3-control-timed optional tp4-next-3 60
-TR4-ring-timed optional tp4-next-3 60
-TW1-control-timed optional tp4-next-3 60
-TW2-draftwide-timed optional tp4-next-3 60
-TW3-control-timed optional tp4-next-3 60
-TW4-draftwide-timed optional tp4-next-3 60
-H1-handback-reset-fabric-agentstart stop tp4-next-3 25
+B0-build stop tp4-next-3m 30
+A0-agentstop-unserve stop tp4-next-3m 10
+V7-tp4-matmul-sweep optional tp4-next-3m 45
+E1-ring-exact-audited optional tp4-next-3m 120
+TR1-control-timed optional tp4-next-3m 60
+TR2-ring-timed optional tp4-next-3m 60
+TR3-control-timed optional tp4-next-3m 60
+TR4-ring-timed optional tp4-next-3m 60
+D1-draftwide-exact-audited optional tp4-next-3m 120
+TW1-control-timed optional tp4-next-3m 60
+TW2-draftwide-timed optional tp4-next-3m 60
+TW3-control-timed optional tp4-next-3m 60
+TW4-draftwide-timed optional tp4-next-3m 60
+H1-handback-reset-fabric-agentstart stop tp4-next-3m 25

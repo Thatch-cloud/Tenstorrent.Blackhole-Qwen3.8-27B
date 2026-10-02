@@ -28,14 +28,16 @@ NAMES = sorted(PROFILES['profiles'])
 DEVICE_STEPS = ('cardm', 'smoke', 'gate', 'prefix', 'fabric', 'replay')
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|'
                     r'/dev/tenstorrent|home/|zot\.|@[A-Z0-9_]+@')
-IMAGE = 'tp4-next-3'
+IMAGE = 'tp4-next-3m'
 CONTROL, PRODUCTION = 'c2-packed-tp4-speed-strace', 'c2-packed-tp4'
 RING, WIDE, AUDITED_RING = 'c2-packed-tp4-speed-strace-ring', 'c2-packed-tp4-speed-strace-draftwide', 'c2-packed-tp4-gate-ring'
+BUILD, DRAFT_EXACT = 'B0-build', 'D1-draftwide-exact-audited'
 FIRST, SWEEP, EXACT, HANDBACK = 'A0-agentstop-unserve', 'V7-tp4-matmul-sweep', 'E1-ring-exact-audited', 'H1-handback-reset-fabric-agentstart'
 RING_PAIR = ('TR1-control-timed', 'TR2-ring-timed', 'TR3-control-timed', 'TR4-ring-timed')
 WIDE_PAIR = ('TW1-control-timed', 'TW2-draftwide-timed', 'TW3-control-timed', 'TW4-draftwide-timed')
 TIMED = RING_PAIR + WIDE_PAIR
-ORDERED = (FIRST, SWEEP, EXACT) + TIMED + (HANDBACK,)
+ORDERED = (BUILD, FIRST, SWEEP, EXACT) + RING_PAIR + (DRAFT_EXACT,) + WIDE_PAIR + (HANDBACK,)
+AUDITED_WIDE = 'c2-packed-tp4-gate-draftwide'
 TIMING_TESTS = ['warmup', 'coding', 'concurrent4_code_equal', 'concurrent4_code_32k']
 RING_FLAG, WIDE_FLAG = 'QWEN_FAST_CCL_TOPOLOGY', 'QWEN_FAST_TP4_DRAFT_WIDE'
 
@@ -89,18 +91,19 @@ class OrderTests(unittest.TestCase):
                 self.assertEqual(image, IMAGE)
                 self.assertEqual(parsed(name)['tag'], IMAGE)
                 self.assertTrue(minutes.isdigit() and 10 <= int(minutes) <= 180, minutes)
-        for name in (FIRST, HANDBACK):
+        for name in (BUILD, FIRST, HANDBACK):
             self.assertEqual(modes[name], 'stop', name)
-        for name in (SWEEP, EXACT) + TIMED:
+        for name in (SWEEP, EXACT, DRAFT_EXACT) + TIMED:
             self.assertEqual(modes[name], 'optional', name)
 
     def test_the_first_job_takes_production_down_and_nothing_else_does(self):
-        self.assertEqual(read_order()[0][0], FIRST)
+        self.assertEqual([row[0] for row in read_order()[:2]], [BUILD, FIRST], 'the build runs first, production still serving')
         self.assertEqual(parsed(FIRST)['actions'], 'status agentstop unserve')
         actions = parsed(FIRST)['actions'].split()
         self.assertLess(actions.index('agentstop'), actions.index('unserve'))
-        for name in ORDERED[1:]:
-            self.assertFalse({'agentstop', 'unserve'} & set(parsed(name)['actions'].split()), name)
+        for name in ORDERED:
+            if name != FIRST:
+                self.assertFalse({'agentstop', 'unserve'} & set(parsed(name)['actions'].split()), name)
         for word in ('PRODUCTION IS LIVE ON THE CARDS', 'A0 (agentstop, unserve) is the first job'):
             self.assertIn(word, order_text())
 
@@ -121,10 +124,12 @@ class OrderTests(unittest.TestCase):
 
     def test_the_order_runs_the_sweep_then_the_audited_arm_then_the_timing_pairs(self):
         names = [row[0] for row in read_order()]
-        self.assertEqual(names[:3], [FIRST, SWEEP, EXACT])
-        self.assertEqual(names[3:11], list(TIMED))
+        self.assertEqual(names[:4], [BUILD, FIRST, SWEEP, EXACT])
+        self.assertEqual(names[4:8], list(RING_PAIR))
+        self.assertEqual(names[8], DRAFT_EXACT)
+        self.assertEqual(names[9:13], list(WIDE_PAIR))
         for word in ('ABAB', 'NOTHING COMBINED HAS RUN ON A CARD', 'if E1 fails, skip TR1-TR4', 'PAIRED per round', 'V7',
-                     'applies nothing'):
+                     'applies nothing', 'If D1 fails or hangs, skip TW1-TW4'):
             self.assertIn(word, order_text())
 
 
@@ -142,17 +147,43 @@ class TemplateTests(unittest.TestCase):
     def test_every_four_card_job_resets_first_and_opens_the_cards_in_one_step(self):
         for name in ORDERED:
             outputs = parsed(name)
-            if outputs['cards'] != 'quad' or name in (FIRST, HANDBACK):
+            if outputs['cards'] != 'quad' or name in (BUILD, FIRST, HANDBACK):
                 continue
             actions = outputs['actions'].split()
             with self.subTest(template=name):
                 self.assertEqual(len(set(actions) & set(DEVICE_STEPS)), 1)
                 self.assertEqual(actions[0], 'reset', 'links train only at board init: a four-card job follows a reset')
 
-    def test_no_job_builds_the_image_is_prebuilt(self):
+    def test_only_the_first_job_builds_the_image_and_it_opens_no_card_and_runs_before_production_is_taken_down(self):
         for name in ORDERED:
-            self.assertNotIn('build', parsed(name)['actions'].split(), name)
-        self.assertIn('build-only job', text_of(FIRST))
+            self.assertEqual('build' in parsed(name)['actions'].split(), name == BUILD, name)
+        outputs = parsed(BUILD)
+        self.assertEqual((outputs['actions'], outputs['cards'], outputs['tag']), ('build', 'quad', IMAGE))
+        self.assertFalse(set(outputs['actions'].split()) & set(DEVICE_STEPS + ('reset', 'agentstop', 'unserve', 'agentstart', 'push')))
+        for word in ('BEFORE A0', 'FRESH', 'already exists', 'PLACEHOLDER', 'production still serves'):
+            self.assertIn(word, text_of(BUILD))
+        self.assertIn('FRESH tag', order_text())
+        self.assertIn('B0', order_text())
+
+    def test_the_audited_draftwide_arm_is_the_gate_plus_the_flag_and_runs_before_the_draftwide_timing_pair(self):
+        outputs = parsed(DRAFT_EXACT)
+        self.assertEqual((outputs['actions'], outputs['profile'], outputs['gate_plan']), ('reset gate', AUDITED_WIDE, 'matrix'))
+        self.assertEqual((outputs['gate_lengths'], outputs['gate_max_tokens']), ('4096,16384,32768,60000', '512'))
+        gate, audited = body('c2-packed-tp4-gate'), body(AUDITED_WIDE)
+        self.assertEqual(differing(audited['env'], gate['env']), {WIDE_FLAG})
+        self.assertEqual(audited['env'][WIDE_FLAG], '1')
+        self.assertEqual((audited['env']['QWEN_FAST_VERIFY_T1_AUDIT'], audited['env']['QWEN_FAST_VERIFY_T2_AUDIT']), ('1', '1'))
+        for key in set(gate) | set(audited):
+            if key not in ('env', 'description'):
+                self.assertEqual(gate.get(key), audited.get(key), key)
+        self.assertIs(audited.get('gate_only'), True)
+        self.assertTrue(audited['description'].startswith('GATE ONLY'))
+        self.assertNotIn(WIDE_FLAG, body(PRODUCTION)['env'])
+        names = [row[0] for row in read_order()]
+        for name in WIDE_PAIR:
+            self.assertLess(names.index(DRAFT_EXACT), names.index(name))
+        for word in ('INSIDE the drafter pair traces', 'SKIP TW1-TW4'):
+            self.assertIn(word, text_of(DRAFT_EXACT))
 
     def test_only_the_sweep_is_a_one_card_job_and_its_harness_is_the_sweeps(self):
         self.assertEqual([name for name in ORDERED if parsed(name)['cards'] == 'pair'], [SWEEP])
@@ -254,7 +285,7 @@ class ProfileTests(unittest.TestCase):
     def test_no_other_profile_carries_the_new_flags(self):
         for name, profile in PROFILES['profiles'].items():
             with self.subTest(profile=name):
-                self.assertEqual(WIDE_FLAG in profile['env'], name == WIDE)
+                self.assertEqual(WIDE_FLAG in profile['env'], name in (WIDE, AUDITED_WIDE))
                 self.assertEqual(profile['env'].get(RING_FLAG) == 'ring', name in (RING, AUDITED_RING))
                 self.assertEqual(profile['engine']['additional-config']['tt'].get('fabric_config') == 'FABRIC_1D_RING',
                                  name in (RING, AUDITED_RING, 'general-tp4-ring-mmrs'))

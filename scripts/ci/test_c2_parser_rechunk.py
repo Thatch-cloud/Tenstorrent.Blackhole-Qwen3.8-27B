@@ -877,7 +877,7 @@ class ProfileGatingTests(unittest.TestCase):
                                  # the four-card S2 twins of c2-packed and c2-packed-gate (plan S2-TP4)
                                  'c2-packed-tp4': True, 'c2-packed-tp4-gate': True,
                                  'c2-packed-tp4-best': True, 'c2-packed-tp4-best-gate': True, 'c2-packed-tp4-best-rshard': True, 'c2-packed-tp4-best-strace': True,
-                                 'c2-packed-tp4-gate-ring': True, 'c2-packed-tp4-gate-bf16': True,
+                                 'c2-packed-tp4-gate-ring': True, 'c2-packed-tp4-gate-bf16': True, 'c2-packed-tp4-gate-draftwide': True,
                                  # the speed window's arms (tp4/speed)
                                  'c2-packed-tp4-gate-noslide': True, 'c2-packed-tp4-speed': True,
                                  'c2-packed-tp4-speed-noslide': True,
@@ -919,7 +919,7 @@ class ProfileGatingTests(unittest.TestCase):
                              name in ('c2', 'c2-gate', 'c2-packed', 'c2-packed-gate', 'c2-packed-prefix',
                                       'c2-packed-prefix-gate', 'c2-packed-tp4', 'c2-packed-tp4-gate',
                                       'c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-strace',
-                                      'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-noslide',
+                                      'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-draftwide', 'c2-packed-tp4-gate-noslide',
                                       'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide', 'c2-packed-tp4-speed-fix',
                                       'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-pairs',
                                       'c2-packed-tp4-diag-sprewarm', 'c2-packed-tp4-diag-strace', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-strace-draftwide', 'c2-packed-tp4-speed-strace-fcommit', 'c2-packed-tp4-speed-strace-ring',
