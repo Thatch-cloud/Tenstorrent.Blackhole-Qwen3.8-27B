@@ -474,8 +474,9 @@ def real_environment(options, say):  # pragma: no cover - needs the GPU host, th
     group_runner = target_module.GroupRunner(hf, options.chunk, torch.bfloat16, 'cuda')
 
     control = zlab.DFlash2DraftModel.from_pretrained(options.dflash2, dtype=torch.bfloat16).to('cuda').eval()
-    control_port = d2.Dflash2(d2.real_config()).to(torch.bfloat16).to('cuda').eval()
-    drafters.load_port_state(control_port, load_file(os.path.join(options.dflash2, 'model.safetensors'), device='cuda'))
+    control_tensors = load_file(os.path.join(options.dflash2, 'model.safetensors'), device='cuda')
+    selector = drafters.SelectorHead(d2.real_config(), control_tensors, 'cuda', torch.bfloat16)
+    del control_tensors
     dflash2_backbone = drafters.UpstreamBackbone(control, embed, lambda: zlab._make_cache(control.config), zlab._crop_to)
     dspark_tensors = load_file(os.path.join(options.dspark, 'model.safetensors'), device='cuda')
     dspark_model = d2.Dflash2(d2.real_dspark_config()).to(torch.bfloat16).to('cuda').eval()
@@ -487,7 +488,7 @@ def real_environment(options, say):  # pragma: no cover - needs the GPU host, th
 
     def make_arm(spec):
         if spec['drafter'] == 'dflash2':
-            return WalkerArm(drafters.Dflash2Walker(dflash2_backbone, head, control_port, mask, spec['proposals'], spec['window']))
+            return WalkerArm(drafters.Dflash2Walker(dflash2_backbone, head, selector, mask, spec['proposals'], spec['window']))
         return WalkerArm(drafters.DSparkWalker(dspark_backbone, head, predecessor, successor, mask, spec['proposals'], spec['window']))
 
     guard = Guard(options.trip_file, options.deadline, time.time, read_avail_gib, options.floor_gib,

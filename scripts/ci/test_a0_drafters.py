@@ -263,5 +263,29 @@ class WeightsAndV4Tests(unittest.TestCase):
         self.assertFalse(all(agree for agree, _ in rows))
 
 
+class SelectorHeadTests(unittest.TestCase):
+    def test_it_proposes_exactly_what_the_full_model_proposes(self):
+        cfg, model, embed, head, tensor = setup()
+        tensors = dict((name, value) for name, value in model.state_dict().items())
+        selector = dr.SelectorHead(cfg, tensors)
+        generator = torch.Generator().manual_seed(8)
+        hidden = torch.randn(1, 7, cfg.hidden, generator=generator)
+        anchor = torch.tensor([9])
+        with torch.no_grad():
+            self.assertEqual(selector.propose(hidden, anchor, head).tolist(), model.propose(hidden, anchor, head).tolist())
+
+    def test_missing_or_misshapen_tensors_are_refused(self):
+        cfg, model, _, _, _ = setup()
+        tensors = dict(model.state_dict())
+        broken = dict(tensors)
+        broken.pop('candidate_selector.successor_codebook')
+        with self.assertRaises(ValueError):
+            dr.SelectorHead(cfg, broken)
+        wrong = dict(tensors)
+        wrong['candidate_selector.successor_codebook'] = torch.zeros(3, 3)
+        with self.assertRaises(ValueError):
+            dr.SelectorHead(cfg, wrong)
+
+
 if __name__ == '__main__':
     unittest.main()

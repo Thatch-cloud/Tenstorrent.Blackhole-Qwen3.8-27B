@@ -130,6 +130,29 @@ class UpstreamBackbone(object):
         self.cache = None
 
 
+class SelectorHead(object):
+    """The DFlash2 candidate selector alone (three tensors of the checkpoint), for walkers whose backbone is the upstream model: the
+    port's other 1.9B parameters are never loaded. `propose` is dflash2_torch.Dflash2.propose, the same code."""
+
+    def __init__(self, cfg, tensors, device='cpu', dtype=torch.float32):
+        self.selector = d2.CandidateSelector(cfg).to(device=device, dtype=dtype)
+        names = ('predecessor_codebook', 'successor_codebook', 'hidden_projection.weight')
+        wanted = dict(('candidate_selector.' + name, name) for name in names)
+        if not set(wanted) <= set(tensors):
+            raise ValueError('the checkpoint has no candidate selector tensors')
+        with torch.no_grad():
+            state = self.selector.state_dict()
+            for full, short in wanted.items():
+                if tuple(state[short].shape) != tuple(tensors[full].shape):
+                    raise ValueError('shape of %s differs' % full)
+                state[short].copy_(tensors[full].to(device=device, dtype=dtype))
+
+    def propose(self, hidden, anchor_ids, lm_head_weight):
+        logits = hidden @ lm_head_weight.T
+        unary, candidates = torch.topk(logits, self.selector.top_k, dim=-1, sorted=False)
+        return self.selector.greedy_path(candidates, unary, hidden, anchor_ids)
+
+
 class Dflash2Walker(object):
     """The control: proposals by the selector's greedy path. `count` = proposals (15 for T16, 7 for T8)."""
     name = 'dflash2'
