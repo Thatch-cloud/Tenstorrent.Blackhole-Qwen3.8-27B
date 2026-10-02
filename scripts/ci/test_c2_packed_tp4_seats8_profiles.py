@@ -4,7 +4,10 @@ Each profile is defined as a delta from an existing one, and these tests hold th
   c2-packed-tp4-8              = c2-packed-tp4 + QWEN_FAST_M3_BLOCKS=2, max-num-seqs 8, 16,416 KV blocks, a 512 MiB trace region
   c2-packed-tp4-8-gate         = c2-packed-tp4-8 + both verify audits, the waiver marker, the gate limits, gate_only
   c2-packed-tp4-8-time-gate    = c2-packed-tp4-8 + the waiver marker, the gate limits, gate_only (audits stay off)
-  c2-packed-tp4-8-diag-strace  = c2-packed-tp4-8-time-gate + the stall watch, the handle log and the handle guard (log)
+  c2-packed-tp4-8-diag-strace  = c2-packed-tp4-8-time-gate + the stall watch (build deadline 150 s), the handle log and the handle guard (log)
+  c2-packed-tp4-8-diag-strace-nowarm = the diag arm with QWEN_FAST_M3_REQUEST_WARM=0 (the R2 control)
+  c2-packed-tp4-8-diag-strace-rshard = the diag arm + the request-shard argmax arm and its audit (the R3 discriminator)
+Every profile with QWEN_FAST_M3_BLOCKS=2 carries QWEN_FAST_M3_REQUEST_WARM=1 (the request widths warm before the block captures) except the control.
 The production profile c2-packed-tp4 is untouched, and only the gate-only profiles carry the admission waiver."""
 
 import copy
@@ -36,10 +39,12 @@ PAGE = 64
 BLOCKS = 16416
 TRACE_REGION = 536870912
 
-TRAFFIC_ENV = {'QWEN_FAST_M3_BLOCKS': '2'}
+NOWARM, RSHARD = 'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard'
+TRAFFIC_ENV = {'QWEN_FAST_M3_BLOCKS': '2', 'QWEN_FAST_M3_REQUEST_WARM': '1'}
+RSHARD_ENV = {'QWEN_FAST_REQUEST_SHARD_ARGMAX': '1', 'QWEN_FAST_REQUEST_SHARD_AUDIT': '1'}
 GATE_MARKER = {'QWEN_C2_GATE_PROFILE': '1'}
 AUDITS_ON = {'QWEN_FAST_VERIFY_T1_AUDIT': '1', 'QWEN_FAST_VERIFY_T2_AUDIT': '1'}
-DIAG_ENV = {'QWEN_FAST_SEQ_STAGE_LOG': '1', 'QWEN_FAST_TRACE_CENSUS': '1', 'QWEN_FAST_TRACE_CENSUS_GRAPH': '0', 'QWEN_FAST_STALL_DEADLINE_S': '120', 'QWEN_FAST_CCL_HANDLE_LOG': '1', 'QWEN_FAST_CCL_HANDLE_GUARD': 'log'}
+DIAG_ENV = {'QWEN_FAST_SEQ_STAGE_LOG': '1', 'QWEN_FAST_TRACE_CENSUS': '1', 'QWEN_FAST_TRACE_CENSUS_GRAPH': '0', 'QWEN_FAST_STALL_DEADLINE_S': '120', 'QWEN_FAST_STALL_BUILD_S': '150', 'QWEN_FAST_CCL_HANDLE_LOG': '1', 'QWEN_FAST_CCL_HANDLE_GUARD': 'log'}
 # The production profile, held by digest: adding the eight-seat twins must not move what is served today.
 PRODUCTION_ENV_KEYS = {
     'QWEN_FAST_VERIFY_T1_AUDIT': '0', 'QWEN_FAST_VERIFY_T2_AUDIT': '0', 'QWEN_FAST_PACKED_SAMPLER_IN_TRACE': '1',
@@ -112,6 +117,9 @@ class EightSeatProfileTests(unittest.TestCase):
 
         expected_diag = with_deltas(data[TIME_GATE], env=DIAG_ENV)
         self.assertEqual(strip_description(data[DIAG]), expected_diag)
+
+        self.assertEqual(strip_description(data[NOWARM]), with_deltas(data[DIAG], env={'QWEN_FAST_M3_REQUEST_WARM': '0'}))
+        self.assertEqual(strip_description(data[RSHARD]), with_deltas(data[DIAG], env=RSHARD_ENV))
 
     def test_the_deltas_from_production_are_literally_these_keys(self):
         data = profiles()
@@ -213,9 +221,29 @@ class EightSeatProfileTests(unittest.TestCase):
                                 for path in (HERE / 'stall_watch.py', HERE / 'trace_census.py')), flag)
         for flag in ('QWEN_FAST_PACKED_SAMPLER_IN_TRACE', 'QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT'):
             self.assertIn(flag, env)
-        # No capture plug, no request-shard arm: there is no qualified hang fallback at eight seats.
+        # No capture plug, no request-shard arm (the -rshard twin is a discriminator, not a fallback).
         self.assertFalse([key for key in env if key.startswith('QWEN_FAST_CAPTURE_PLUG')])
         self.assertNotIn('QWEN_FAST_REQUEST_SHARD_ARGMAX', env)
+
+    def test_the_request_warm_flag_and_the_discriminator_arms(self):
+        data = profiles()
+        for name in (TRAFFIC, GATE, TIME_GATE, DIAG, RSHARD):
+            with self.subTest(profile=name):
+                self.assertEqual(data[name]['env']['QWEN_FAST_M3_REQUEST_WARM'], '1')
+        self.assertEqual(data[NOWARM]['env']['QWEN_FAST_M3_REQUEST_WARM'], '0')
+        self.assertEqual(data[DIAG]['env']['QWEN_FAST_STALL_BUILD_S'], '150')
+        for name in (NOWARM, RSHARD):
+            with self.subTest(profile=name):
+                self.assertIs(data[name]['gate_only'], True)
+                self.assertEqual(data[name]['env']['QWEN_C2_GATE_PROFILE'], '1')
+                self.assertEqual(data[name]['env']['QWEN_FAST_M3_BLOCKS'], '2')
+                self.assertEqual(data[name]['env']['QWEN_FAST_VERIFY_T1_AUDIT'], '0')
+                self.assertIn('UNVERIFIED', data[name]['description'])
+        self.assertNotIn('QWEN_FAST_REQUEST_SHARD_ARGMAX', data[NOWARM]['env'])
+        for flag in RSHARD_ENV:
+            self.assertIn(flag, (HERE / 'verifier_engine_tp.py').read_text(encoding='utf-8'))
+        self.assertIn('QWEN_FAST_M3_REQUEST_WARM', (HERE / 'serving_runtime.py').read_text(encoding='utf-8'))
+        self.assertNotIn('QWEN_FAST_M3_REQUEST_WARM', data[BASE]['env'])
 
     def test_the_names_are_new_and_the_four_seat_twins_keep_theirs(self):
         data = profiles()
@@ -226,13 +254,14 @@ class EightSeatProfileTests(unittest.TestCase):
 
     def test_the_flag_is_in_no_four_seat_profile(self):
         for name, profile in profiles().items():
-            if name in (TRAFFIC, GATE, TIME_GATE, DIAG):
+            if name in (TRAFFIC, GATE, TIME_GATE, DIAG, NOWARM, RSHARD):
                 continue
             with self.subTest(profile=name):
                 self.assertNotIn('QWEN_FAST_M3_BLOCKS', profile.get('env', {}))
+                self.assertNotIn('QWEN_FAST_M3_REQUEST_WARM', profile.get('env', {}))
 
     def test_the_mesh_contract_and_the_gate_rules_accept_each_profile(self):
-        for name in (TRAFFIC, GATE, TIME_GATE, DIAG):
+        for name in (TRAFFIC, GATE, TIME_GATE, DIAG, NOWARM, RSHARD):
             profile = contract.load_profile(PROFILES, name)
             with self.subTest(profile=name):
                 self.assertEqual(contract.mesh_problems(profile), [])

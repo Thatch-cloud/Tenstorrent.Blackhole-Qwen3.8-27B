@@ -96,7 +96,8 @@ RSHARD_PROFILES = {'c2-packed-tp4-diag-rshard': ('c2-packed-tp4-diag', {RSHARD: 
                    'c2-packed-tp4-gate-rshard-audit': ('c2-packed-tp4', {RSHARD: '1', RSHARD_AUDIT: '1', 'QWEN_C2_GATE_PROFILE': '1'})}
 # The eight-seat twins (tp4/seats8) are production's recipe plus their deltas (test_c2_packed_tp4_seats8_profiles holds them): they carry the
 # tail caps and the in-trace sampler, and the diag twin the stall watch and the handle guard, as c2-packed-tp4 and the diag arms do.
-SEATS8_PROFILES = ('c2-packed-tp4-8', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate', 'c2-packed-tp4-8-diag-strace')
+SEATS8_PROFILES = ('c2-packed-tp4-8', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate', 'c2-packed-tp4-8-diag-strace',
+                   'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard')
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 
 
@@ -694,7 +695,7 @@ class RequestShardProfileTests(unittest.TestCase):
 
     def test_no_other_profile_and_not_the_image_carries_either_flag(self):
         for name, profile in profiles().items():
-            if name not in RSHARD_PROFILES:
+            if name not in RSHARD_PROFILES and name != 'c2-packed-tp4-8-diag-strace-rshard':
                 self.assertNotIn(RSHARD, profile['env'], name)
                 self.assertNotIn(RSHARD_AUDIT, profile['env'], name)
         self.assertNotIn(RSHARD, image_env())
