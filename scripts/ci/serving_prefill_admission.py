@@ -222,6 +222,51 @@ LARGEST_BUFFER_BYTES = 128 * MEGABYTE
 TRACE_CONTIGUOUS_BYTES = 44 * MEGABYTE
 SPLIT_TERMS = ('free', 'contiguous', 'trace')
 
+# EIGHT SEATS (tp4/seats8, review 3): the three bounds that were never measured at eight engines beside two 64-row blocks
+# (PREFILL_TRANSIENT_BYTES, LARGEST_BUFFER_BYTES, ENGINE_BUILD_BYTES) are tunable from the profile's env, in whole
+# megabytes per chip, so a window can change them without an image rebuild. The module constants above stay the
+# DEFAULTS: with the variable unset (every profile today) each bound is exactly the constant, so the four-seat decisions
+# are unchanged byte for byte. A value that is not a non-negative whole number of megabytes is refused (ValueError), never
+# read as a default: a profile that names a bound means it. Read at each decision, never at import.
+TUNING_FLAGS = (('QWEN_FAST_DRAM_ENGINE_BUILD_MB', 'ENGINE_BUILD_BYTES'),
+                ('QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB', 'PREFILL_TRANSIENT_BYTES'),
+                ('QWEN_FAST_DRAM_LARGEST_BUFFER_MB', 'LARGEST_BUFFER_BYTES'))
+
+
+def tuned_bytes(flag, default, environ=None):
+    """The bound in bytes: `default` when `flag` is unset, else the flag's whole megabytes (ValueError otherwise)."""
+    value = (os.environ if environ is None else environ).get(flag)
+    if value is None:
+        return default
+    text = value.strip()
+    if not text.isascii() or not text.isdigit():
+        raise ValueError('%s must be a non-negative whole number of megabytes, got %r' % (flag, value))
+    return int(text) * MEGABYTE
+
+
+def engine_build_bytes(environ=None):
+    return tuned_bytes('QWEN_FAST_DRAM_ENGINE_BUILD_MB', ENGINE_BUILD_BYTES, environ)
+
+
+def prefill_transient_bytes(environ=None):
+    return tuned_bytes('QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB', PREFILL_TRANSIENT_BYTES, environ)
+
+
+def largest_buffer_bytes(environ=None):
+    return tuned_bytes('QWEN_FAST_DRAM_LARGEST_BUFFER_MB', LARGEST_BUFFER_BYTES, environ)
+
+
+def tuning_problems(environ=None):
+    """What is wrong with the tuning flags in `environ`, one string each; [] when every set one parses."""
+    problems = []
+    for flag, constant in TUNING_FLAGS:
+        try:
+            tuned_bytes(flag, 0, environ)
+        except ValueError as failure:
+            problems.append(str(failure))
+    return problems
+
+
 
 def _log(message, *values):
     try:
@@ -260,7 +305,7 @@ def admission(partials, held):
 
 def engine_build_peak():
     """An engine build's DRAM peak per chip: what stays resident and the build's own transient."""
-    return ENGINE_BUILD_BYTES + ENGINE_BUILD_MARGIN_BYTES
+    return engine_build_bytes() + ENGINE_BUILD_MARGIN_BYTES
 
 
 def _reserve(reserve):
@@ -270,10 +315,10 @@ def _reserve(reserve):
 
 
 def prefill_transient(prompt_tokens):
-    """The prefill's transient per chip: PREFILL_TRANSIENT_BYTES from PREFILL_TRANSIENT_FROM tokens on (a length
-    that cannot be read counts as long), none below."""
+    """The prefill's transient per chip: prefill_transient_bytes() (PREFILL_TRANSIENT_BYTES unless the profile tunes it)
+    from PREFILL_TRANSIENT_FROM tokens on (a length that cannot be read counts as long), none below."""
     long_prompt = type(prompt_tokens) is not int or prompt_tokens >= PREFILL_TRANSIENT_FROM
-    return PREFILL_TRANSIENT_BYTES if long_prompt else 0
+    return prefill_transient_bytes() if long_prompt else 0
 
 
 def dram_need(prompt_tokens, reserve):
@@ -291,7 +336,7 @@ def backstop_need(reserve):
 def contiguous_need(reserve):
     """THE SPLIT's contiguous term: the largest free block must hold the largest single buffer and leave the
     reserve beside it (396.4 MB at the 256 MiB default). What the backstop and the coordinator's captures ask."""
-    return _reserve(reserve) + LARGEST_BUFFER_BYTES
+    return _reserve(reserve) + largest_buffer_bytes()
 
 
 def prefill_residue(prompt_tokens):
