@@ -33,6 +33,7 @@ M3_BLOCKS_FLAG = 'QWEN_FAST_M3_BLOCKS'
 M3_BLOCKS_USERS = 8
 M3_BLOCKS_MARKER = '[PINDIAG] M3 blocks={} over pool slots {} (QWEN_FAST_M3_BLOCKS={}); each block is the qualified 4-user 64-row block'
 CAPTURE_PROGRAMS_MARKER = '[PINDIAG] packed blocks capture block={} programs={}->{}'
+CLOSE_FAILED_MARKER = '[PINDIAG] a sibling block did not close without the fence: {}'
 CAPTURE_POSITION_FLAG = 'QWEN_FAST_PACKED_CAPTURE_POSITION'
 CAPTURE_POSITION_MARKER = '[PINDIAG] packed capture position override='
 EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
@@ -324,14 +325,25 @@ def complete_blocks_two_phase(blocks, model=None, log=None):
     A log line per capture gives the program-cache count before and after each block: block B compiles zero programs
     after block A's capture (the probe window reads it)."""
     log = pindiag if log is None else log
-    for block in blocks:
-        block.warm_and_fixture()
-    for index, block in enumerate(blocks):
-        before = program_count(model) if model is not None else None
-        block.capture_traces()
-        log(CAPTURE_PROGRAMS_MARKER, index, before, program_count(model) if model is not None else None)
-    for block in blocks:
-        block.finish_construction()
+    try:
+        for block in blocks:
+            block.warm_and_fixture()
+        for index, block in enumerate(blocks):
+            before = program_count(model) if model is not None else None
+            block.capture_traces()
+            log(CAPTURE_PROGRAMS_MARKER, index, before, program_count(model) if model is not None else None)
+        for block in blocks:
+            block.finish_construction()
+    except BaseException:
+        # The failing block closed itself without the device fence (it may be hung); a sibling still under construction
+        # would be closed by the attach scope WITH the fence and block there on the same hung device. Close it the same
+        # way, here, then let the original failure through.
+        for block in blocks:
+            try:
+                block.close(wait=False)
+            except BaseException as error:
+                log(CLOSE_FAILED_MARKER, repr(error)[:200])
+        raise
 
 
 @contextmanager

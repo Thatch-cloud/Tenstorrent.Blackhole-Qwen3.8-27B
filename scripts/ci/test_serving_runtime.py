@@ -1171,3 +1171,43 @@ class PackedAnyAdmissionAttachTests(unittest.TestCase):
         else:
             self.assertIn('evidence: CB2b: status %s, not PASS' % status, text)
         self.assertFalse(packed_any_admission.admitted())
+
+
+class TwoPhaseFailureTests(unittest.TestCase):
+    """complete_blocks_two_phase: a failing phase closes every sibling still under construction WITHOUT the device fence."""
+
+    @staticmethod
+    def block(name, calls, fail_at=None):
+        block = Mock()
+        block.name = name
+        for phase in ('warm_and_fixture', 'capture_traces', 'finish_construction'):
+            def run(phase=phase):
+                calls.append((name, phase))
+                if fail_at == phase:
+                    raise RuntimeError('%s failed' % phase)
+            getattr(block, phase).side_effect = run
+        block.close.side_effect = lambda wait=True: calls.append((name, 'close', wait))
+        return block
+
+    def test_a_failure_in_block_b_closes_block_a_without_the_fence(self):
+        calls = []
+        blocks = [self.block('A', calls), self.block('B', calls, fail_at='capture_traces')]
+        with self.assertRaisesRegex(RuntimeError, 'capture_traces failed'):
+            serving_runtime.complete_blocks_two_phase(blocks, log=lambda *args: None)
+        closes = [call for call in calls if call[1] == 'close']
+        self.assertTrue(closes)
+        self.assertEqual({call[2] for call in closes}, {False}, 'no close waited on the device')
+        self.assertEqual({call[0] for call in closes}, {'A', 'B'})
+
+    def test_a_close_that_raises_does_not_mask_the_failure_or_skip_the_other_block(self):
+        calls = []
+        blocks = [self.block('A', calls, fail_at='warm_and_fixture'), self.block('B', calls)]
+        blocks[0].close.side_effect = RuntimeError('close failed')
+        with self.assertRaisesRegex(RuntimeError, 'warm_and_fixture failed'):
+            serving_runtime.complete_blocks_two_phase(blocks, log=lambda *args: None)
+        self.assertIn(('B', 'close', False), calls)
+
+    def test_a_clean_run_closes_nothing(self):
+        calls = []
+        serving_runtime.complete_blocks_two_phase([self.block('A', calls), self.block('B', calls)], log=lambda *args: None)
+        self.assertFalse([call for call in calls if call[1] == 'close'])
