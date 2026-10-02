@@ -46,6 +46,12 @@ PACKED_PROPOSAL_FLAG = 'QWEN_FAST_PACKED_PROPOSAL'
 # two packed passes - propose or verify - happens to run first.
 FOUR_AS_TWO_PAIRS = ((0, 1), (2, 3))
 
+# Eight-seat serving (QWEN_FAST_M3_BLOCKS=2, two 64-row blocks over slots 0-3 and 4-7): the same fixed
+# pairing extended to slots 4-7. The first two are FOUR_AS_TWO_PAIRS unchanged, so every active set within
+# slots 0-3 groups exactly as before; a half pair degrades to a single and nothing pairs across a pair
+# boundary (3 with 4).
+DRAFT_PAIRS = FOUR_AS_TWO_PAIRS + ((4, 5), (6, 7))
+
 # QWEN_FAST_ROUND_B1: build 1 of the round host-phase cuts (the 4 x 131k packed round's
 # ~82 ms outside the verify trace) - only the cuts that are token-exact by construction
 # (E1) and change no lifetime across steps:
@@ -225,21 +231,21 @@ def packed_proposal_enabled(environ=None):
 
 
 def pair_slots(active):
-    """Group active pool-slot indices into FOUR_AS_TWO_PAIRS packed rounds.
+    """Group active pool-slot indices into DRAFT_PAIRS packed rounds.
 
     Each fixed pair with BOTH members in `active` packs into one two-element group; a
     fixed pair with only ONE active member degrades to a one-element group for that
     member alone. A slot is never paired across the other fixed pair - so one finished
     neighbour (slot 1 gone, say) never silently recombines slot 0 with slot 2 or 3 just
-    because both happen to be active. Order follows FOUR_AS_TWO_PAIRS, not `active`'s
+    because both happen to be active. Order follows DRAFT_PAIRS, not `active`'s
     own order; an empty `active` returns no groups at all.
     """
-    valid = {slot for pair in FOUR_AS_TWO_PAIRS for slot in pair}
+    valid = {slot for pair in DRAFT_PAIRS for slot in pair}
     active = set(active)
     if any(type(slot) is not int or slot not in valid for slot in active):
-        raise ValueError('Every active slot must be one of the fixed FOUR_AS_TWO_PAIRS slots %r' % (valid,))
+        raise ValueError('Every active slot must be one of the fixed DRAFT_PAIRS slots %r' % (valid,))
     groups = []
-    for pair in FOUR_AS_TWO_PAIRS:
+    for pair in DRAFT_PAIRS:
         present = tuple(slot for slot in pair if slot in active)
         if present:
             groups.append(present)

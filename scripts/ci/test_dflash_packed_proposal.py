@@ -251,7 +251,7 @@ class PairSlotsTests(unittest.TestCase):
     def test_a_slot_outside_the_fixed_pairs_is_refused(self):
         from dflash_packed_proposal import pair_slots
 
-        for bad in ({4}, {-1}, {0, 1, 4}):
+        for bad in ({8}, {-1}, {0, 1, 8}):
             with self.subTest(active=bad):
                 with self.assertRaises(ValueError):
                     pair_slots(bad)
@@ -267,3 +267,53 @@ class PairSlotsTests(unittest.TestCase):
 
         self.assertEqual(pair_slots([1, 0, 3, 2]), [(0, 1), (2, 3)])
         self.assertEqual(pair_slots({0: 'a', 1: 'b'}), [(0, 1)])
+
+
+class EightSeatPairSlotsTests(unittest.TestCase):
+    """Eight-seat serving (two 64-row blocks): DRAFT_PAIRS extends the fixed pairing to slots 4-7."""
+
+    def test_the_first_two_pairs_are_the_four_as_two_pairs_unchanged(self):
+        import dflash_packed_proposal as module
+
+        self.assertEqual(module.FOUR_AS_TWO_PAIRS, ((0, 1), (2, 3)))
+        self.assertEqual(module.DRAFT_PAIRS, ((0, 1), (2, 3), (4, 5), (6, 7)))
+        self.assertEqual(module.DRAFT_PAIRS[:2], module.FOUR_AS_TWO_PAIRS)
+
+    def test_slots_four_to_seven_group_into_their_pairs(self):
+        from dflash_packed_proposal import pair_slots
+
+        self.assertEqual(pair_slots(set(range(8))), [(0, 1), (2, 3), (4, 5), (6, 7)])
+        self.assertEqual(pair_slots({4, 5, 6, 7}), [(4, 5), (6, 7)])
+        self.assertEqual(pair_slots([7, 6, 5, 4]), [(4, 5), (6, 7)])
+
+    def test_a_half_pair_degrades_to_a_single_and_never_pairs_across(self):
+        from dflash_packed_proposal import pair_slots
+
+        self.assertEqual(pair_slots({3, 4}), [(3,), (4,)])
+        self.assertEqual(pair_slots({1, 2, 5, 6}), [(1,), (2,), (5,), (6,)])
+        self.assertEqual(pair_slots({0, 1, 2, 3, 4, 6, 7}), [(0, 1), (2, 3), (4,), (6, 7)])
+        self.assertEqual(pair_slots({5}), [(5,)])
+
+    def test_every_active_set_within_the_first_four_slots_groups_as_before(self):
+        import itertools
+        from dflash_packed_proposal import FOUR_AS_TWO_PAIRS, pair_slots
+
+        for size in range(5):
+            for active in itertools.combinations(range(4), size):
+                expected = []
+                for pair in FOUR_AS_TWO_PAIRS:
+                    present = tuple(slot for slot in pair if slot in active)
+                    if present:
+                        expected.append(present)
+                with self.subTest(active=active):
+                    self.assertEqual(pair_slots(set(active)), expected)
+        pinned = {(): [], (0,): [(0,)], (0, 1): [(0, 1)], (0, 2): [(0,), (2,)], (1, 2, 3): [(1,), (2, 3)],
+                  (0, 1, 2, 3): [(0, 1), (2, 3)]}
+        for active, groups in pinned.items():
+            self.assertEqual(pair_slots(set(active)), groups)
+
+    def test_slot_eight_is_still_refused(self):
+        from dflash_packed_proposal import pair_slots
+
+        with self.assertRaises(ValueError):
+            pair_slots({7, 8})
