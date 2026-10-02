@@ -126,6 +126,13 @@ WARM_LINE = '[PINDIAG] four-card eager prefill warmed before the packed traces'
 UNSAFE_ALLOCATION = 'Allocating device buffers is unsafe due to the existence of an active trace'
 PREFILL_PROGRAMS = re.compile(r'\[PINDIAG\] four-card prefill programs=(\d+|None)->(\d+|None) window=(\d+) prompt=(\d+)')
 ENGINE_PROGRAMS = re.compile(r'\[PINDIAG\] four-card engine programs=(\d+|None)->(\d+|None) ')
+# QWEN_FAST_M3_REQUEST_WARM=1 (the eight-seat profiles): the request widths are warmed between the two blocks' warm phase and their
+# captures, so the first request engine builds almost nothing new. 'Small' is the judge's reading of the hang verdict: only the
+# position-keyed programs of one build (+3 to +6) may remain, against +238 before the warm; the bound leaves headroom for a build at
+# an unwarmed position and still fails the +238 the warm exists to remove.
+REQUEST_WARM_LINE = re.compile(r'\[PINDIAG\] request widths warmed before the packed traces: rows=\(1, 2, 4\) programs=(\d+|None)->(\d+|None)')
+BLOCK0_CAPTURE_LINE = '[PINDIAG] packed blocks capture block=0'
+FIRST_ENGINE_PROGRAMS_MAX = 16
 DEFAULT_PROFILES = Path(__file__).resolve().parent / 'qwen_c2_profiles.json'
 
 
@@ -367,6 +374,30 @@ def late_program_problems(container_text):
                           engines_counted=len(engines), engine_programs=sum(int(after) - int(before) for before, after in engines))
 
 
+def request_warm_problems(container_text):
+    """(problems, facts) under QWEN_FAST_M3_REQUEST_WARM=1: the warm line must exist and precede 'packed blocks capture block=0', and
+    the first four-card engine build's program delta (B - A of its '[PINDIAG] four-card engine programs=' line) must be at most
+    FIRST_ENGINE_PROGRAMS_MAX: the rows 1/2/4 programs compiled before the captures, not after block B's."""
+    problems, lines = [], container_text.splitlines()
+    warm = next((i for i, line in enumerate(lines) if REQUEST_WARM_LINE.search(line)), None)
+    capture = next((i for i, line in enumerate(lines) if BLOCK0_CAPTURE_LINE in line), None)
+    if warm is None:
+        problems.append('QWEN_FAST_M3_REQUEST_WARM=1 but no "[PINDIAG] request widths warmed before the packed traces" line: the warm '
+                        'never ran')
+    elif capture is None:
+        problems.append('no "%s" line to order the request warm against' % BLOCK0_CAPTURE_LINE)
+    elif warm > capture:
+        problems.append('the request warm (log line %d) came after block 0 captured its trace (line %d)' % (warm + 1, capture + 1))
+    engines = [(int(before), int(after)) for before, after in (m.groups() for m in map(ENGINE_PROGRAMS.search, lines) if m)
+               if before != 'None' and after != 'None']
+    first = None if not engines else engines[0][1] - engines[0][0]
+    if first is not None and first > FIRST_ENGINE_PROGRAMS_MAX:
+        problems.append('the first four-card engine build compiled %d programs (limit %d): the request widths were not warmed '
+                        'before the captures' % (first, FIRST_ENGINE_PROGRAMS_MAX))
+    return problems, dict(request_warm_line=None if warm is None else warm + 1, block0_capture_line=None if capture is None else capture + 1,
+                          first_engine_programs=first)
+
+
 def draft_facts(container_text):
     """What the container log says about the batched draft: rounds served by the quad and by two packed pairs, the quad's marker,
     fallback and disable lines, and the two audits' lines."""
@@ -519,6 +550,10 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         if late:
             problems.append('the first prefill left %d model buffers allocated after the packed traces were captured '
                             '([MEMLEDGER] item=model_after_prefill): the prefill warm must run before the traces' % late)
+    if env is not None and env.get('QWEN_FAST_M3_REQUEST_WARM') == '1':
+        warm_problems, warm_facts = request_warm_problems(container_text)
+        problems += warm_problems
+        facts.update(warm_facts)
     if env is not None:
         drafts = draft_facts(container_text)
         facts['draft'] = drafts

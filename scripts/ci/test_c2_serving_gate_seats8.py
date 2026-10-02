@@ -570,5 +570,52 @@ class SmokeCheckKnowsTheEightUserTests(unittest.TestCase):
         self.assertEqual(problems, ['replay_concurrent4 user 0: no tokens'])
 
 
+class SmokeCheckRequestWarmRule(unittest.TestCase):
+    """QWEN_FAST_M3_REQUEST_WARM=1: the warm line precedes block 0's capture and the first engine build's programs delta is small."""
+
+    WARM = '[PINDIAG] request widths warmed before the packed traces: rows=(1, 2, 4) programs=700->938 ms=900'
+    CAPTURE = '[PINDIAG] packed blocks capture block=0 programs=938->938'
+    ENGINE = '[PINDIAG] four-card engine programs=%d->%d req=r1'
+
+    def log(self, *lines):
+        return '\n'.join(lines)
+
+    def problems(self, text, flag='1'):
+        import c2_smoke_check as check
+        return check.check('', text, False, env={'QWEN_FAST_TP': '4', 'QWEN_FAST_M3_REQUEST_WARM': flag})[0]
+
+    def only_warm(self, text, flag='1'):
+        return [p for p in self.problems(text, flag) if 'request warm' in p or 'request widths' in p or 'engine build' in p
+                or 'block 0' in p]
+
+    def test_a_warm_before_the_capture_and_a_small_first_engine_delta_pass(self):
+        text = self.log(self.WARM, self.CAPTURE, self.ENGINE % (938, 944), self.ENGINE % (944, 948))
+        self.assertEqual(self.only_warm(text), [])
+
+    def test_the_bound_is_sixteen_and_the_old_238_fails(self):
+        import c2_smoke_check as check
+        self.assertEqual(check.FIRST_ENGINE_PROGRAMS_MAX, 16)
+        self.assertEqual(self.only_warm(self.log(self.WARM, self.CAPTURE, self.ENGINE % (700, 716))), [])
+        failed = self.only_warm(self.log(self.WARM, self.CAPTURE, self.ENGINE % (768, 1006)))
+        self.assertEqual(len(failed), 1)
+        self.assertIn('compiled 238 programs', failed[0])
+
+    def test_only_the_first_engine_build_is_held_to_the_bound(self):
+        text = self.log(self.WARM, self.CAPTURE, self.ENGINE % (938, 944), self.ENGINE % (944, 1100))
+        self.assertEqual(self.only_warm(text), [])
+
+    def test_a_missing_or_late_warm_fails(self):
+        self.assertTrue(any('never ran' in p for p in self.only_warm(self.log(self.CAPTURE, self.ENGINE % (1, 3)))))
+        late = self.only_warm(self.log(self.CAPTURE, self.WARM, self.ENGINE % (1, 3)))
+        self.assertEqual(len(late), 1)
+        self.assertIn('after block 0 captured', late[0])
+
+    def test_flag_off_the_rule_is_not_applied(self):
+        text = self.log(self.CAPTURE, self.ENGINE % (768, 1006))
+        self.assertEqual(self.only_warm(text, flag='0'), [])
+        import c2_smoke_check as check
+        self.assertEqual(check.check('', text, False, env={'QWEN_FAST_TP': '4'})[1].get('first_engine_programs'), None)
+
+
 if __name__ == '__main__':
     unittest.main()
