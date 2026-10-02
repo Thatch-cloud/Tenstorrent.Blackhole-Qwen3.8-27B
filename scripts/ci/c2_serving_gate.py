@@ -2360,7 +2360,7 @@ def run_memory(plan, runner, arms):
     results = []
     for spec in arms:
         report = run_arm(runner, plan, spec)
-        one = memory_verdict(report, want=asked(spec[1]))
+        one = memory_verdict(report, users=runner.seats_for(spec_profile(runner, spec)), want=asked(spec[1]))
         if report is not None and runner.s2_for(spec_profile(runner, spec)):
             problems, shortfalls = memory_s2_checks(spec[0], report, runner.seats_for(spec_profile(runner, spec)))
             one = with_checks(one, problems, shortfalls,

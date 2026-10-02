@@ -188,6 +188,30 @@ class MemoryAtEightSeatsTests(unittest.TestCase):
         self.assertNotIn('dram-after-engine lines', ' '.join(full['problems']))
 
 
+class RunMemoryWantsTheSeatsTests(unittest.TestCase):
+    """run_memory must judge the engine lines against the PROFILE's seats, not the four-user default."""
+
+    def run_it(self, seats, engines):
+        from unittest import mock
+        report = {'dram': {'engines': engines, 'min_free_gb': 4.0, 'min_largest_free_mb': 900}, 'streams': []}
+        runner = mock.Mock()
+        runner.seats_for.return_value = seats
+        runner.s2_for.return_value = False
+        runner.arms = {}
+        runner.profile = 'p'
+        with mock.patch.object(driver, 'run_arm', return_value=report), mock.patch.object(driver, 'arm_problems', return_value=[]):
+            return driver.run_memory('memory', runner, [('memory', ['--users', '8'], 100)])
+
+    def test_four_engine_lines_do_not_pass_an_eight_seat_profile(self):
+        result = self.run_it(8, 4)
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertIn('4 dram-after-engine lines for 8 users', ' '.join(result['problems']))
+
+    def test_eight_engine_lines_pass_it_and_four_pass_a_four_seat_profile(self):
+        self.assertEqual(self.run_it(8, 8)['verdict'], 'PASS')
+        self.assertEqual(self.run_it(4, 4)['verdict'], 'PASS')
+
+
 class FlagPhaseAtEightTests(unittest.TestCase):
     @staticmethod
     def step(at, live, blocks, packed_users=None, traces=(58.0, 60.0), new=0):
