@@ -13,8 +13,11 @@
 #   op graft (checked against its MANIFEST.sha256 and its _ttnncpp.so pin first), the DFlash2 fixtures
 #   and draft config, and a persistent copy of the gate's cache volume under the platform's /models
 #   mount (~/hf-cache/hub/.qwen-c2).
-#   The image is tagged only after G1 provenance (c2_image_provenance.py) passes; a failed build
-#   is removed (C2_KEEP_FAILED_IMAGE=1 tags it <image>-g1-failed instead).
+#   The image is tagged <image> only after G1 provenance (c2_image_provenance.py) passes; a failed build
+#   is removed (C2_KEEP_FAILED_IMAGE=1 tags it <image>-g1-failed instead). Until then it is NOT dangling:
+#   the build tags it <image>-unverified itself (--tag), because the rig's other CI runs `docker image
+#   prune` on the shared daemon and a dangling image id vanished between the build and provenance
+#   ('No such image: sha256:...'). The provisional tag is removed on success and on failure.
 #   Optional env: C2_CHECKOUT (a checkout to compare the image's trees with, informational),
 #   C2_PROVENANCE_REPORT (where to write the provenance JSON).
 #   The graft is K64j (S2, design W9): its _ttnncpp.so must be $graft_sha, and G1 holds every
@@ -105,8 +108,12 @@ sudo -n du -sh "$persistent" || true
 sudo -n test -d "$persistent/${kernel_cache#/experiment-cache/}" && echo "warm kernel cache present" \
   || echo "kernel cache ${kernel_cache#/experiment-cache/} absent: the first start compiles it"
 
-# Until G1 passes, the built image is untagged and belongs to this script: any failure from here
-# on removes it (the rig is the production control plane; a dangling multi-GB image is not free).
+# Until G1 passes, the built image carries only the provisional tag below and belongs to this script: any failure from here
+# on removes it (the rig is the production control plane; a multi-GB image nobody owns is not free). The provisional tag keeps
+# it from being dangling, so another CI job's `docker image prune` on the shared daemon cannot delete it mid-provenance.
+provisional="$image-unverified"
+# A build killed outright (SIGKILL, a cancelled job) never ran the cleanup below and leaves this tag behind; clear it first.
+docker rmi "$provisional" >/dev/null 2>&1 || true
 iid=$(mktemp)
 built=
 cleanup() {
@@ -115,17 +122,18 @@ cleanup() {
   if [ "$status" -ne 0 ] && [ -n "$built" ]; then
     if [ "${C2_KEEP_FAILED_IMAGE:-0}" = 1 ]; then
       docker tag "$built" "$image-g1-failed" && echo "kept the failed build as $image-g1-failed" >&2
-    else
-      docker rmi "$built" >/dev/null 2>&1 && echo "removed the failed build $built" >&2 \
-        || echo "could not remove the failed build $built (another tag or container holds it)" >&2
     fi
+    docker rmi "$provisional" >/dev/null 2>&1 && echo "removed the provisional tag $provisional" >&2 \
+      || echo "could not remove the provisional tag $provisional (another tag or container holds it)" >&2
   fi
   return "$status"
 }
 trap cleanup EXIT
 DOCKER_BUILDKIT=1 docker build -f "$ctx/Dockerfile" --build-arg "KERNEL_CACHE=$kernel_cache" \
-  --build-arg "SOURCE_REVISION=$source_revision" --iidfile "$iid" "$ctx"
+  --build-arg "SOURCE_REVISION=$source_revision" --tag "$provisional" --iidfile "$iid" "$ctx"
 built=$(cat "$iid")
+# Belt and braces for a builder that ignores --tag: the provisional tag must exist before anything else runs.
+docker tag "$built" "$provisional"
 echo "built $built: G1 provenance before it is tagged $image"
 
 # G1 provenance: (a) the installed binaries and op directories are the K64j graft's, no QWEN_
@@ -158,6 +166,7 @@ if ! docker run --rm --network none --entrypoint python3 "$built" -c "$triage_pr
   echo "[TRIAGE-CHECK] WARNING: the triage tools or ttexalens are not usable in this image: a stall will give stacks but no device triage" >&2
 fi
 docker tag "$built" "$image"
+docker rmi "$provisional" >/dev/null || echo "could not remove the provisional tag $provisional; $image is tagged" >&2
 built=
 echo "built $image $(docker image inspect "$image" --format '{{.Id}}')"
 rm -rf "$ctx"

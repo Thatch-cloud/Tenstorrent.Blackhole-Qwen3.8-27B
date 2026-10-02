@@ -182,8 +182,10 @@ class ProfileTests(unittest.TestCase):
         env = env_of(PRODUCTION)
         for flag in LEVERS + FUSED + (QUAD, 'QWEN_FAST_TP4_VGLUE_AUDIT', 'QWEN_FAST_SOLO_LANE', 'QWEN_FAST_LANE'):
             self.assertIn(env.get(flag, '0'), ('0', ''), flag)
+        # tp4-serve-7: production serves with the verify audits OFF and the pinned sampler recorded in the verify trace
         for flag in ('QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT'):
-            self.assertEqual(env[flag], '1', 'the production profile serves with the audits on')
+            self.assertEqual(env[flag], '0', 'the production profile serves with the audits off (serve-7)')
+        self.assertEqual(env['QWEN_FAST_PACKED_SAMPLER_IN_TRACE'], '1')
 
     def test_the_timed_best_is_its_control_plus_the_levers_and_nothing_else(self):
         control, best = env_of(CONTROL), env_of(BEST)

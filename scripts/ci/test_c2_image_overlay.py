@@ -637,8 +637,15 @@ class OneListTests(unittest.TestCase):
             self.assertLess(earlier, later)
         self.assertIn('--iidfile', text[build:verify])
         self.assertIn('--build-arg "SOURCE_REVISION=$source_revision"', text[build:verify])
+        # prune-safe (tp4-serve-7): the build tags its result provisionally, never with the final name, so another job's
+        # `docker image prune` cannot take a dangling id between the build and provenance.
         self.assertNotIn(' -t ', text[build:verify])
-        self.assertIn('docker rmi "$built"', text[trap - 1000:trap])
+        self.assertIn('--tag "$provisional"', text[build:verify])
+        self.assertNotIn('--tag "$image"', text[build:verify])
+        self.assertLess(text.index('provisional="$image-unverified"'), build)
+        self.assertLess(text.index('docker tag "$built" "$provisional"'), verify)
+        self.assertIn('docker rmi "$provisional"', text[trap - 1200:trap])
+        self.assertIn('docker rmi "$provisional" >/dev/null', text[tag:])
         self.assertIn('built=\n', text[tag:])
         self.assertTrue(text.startswith('#!/usr/bin/env bash'))
         self.assertIn('set -euo pipefail', text)
