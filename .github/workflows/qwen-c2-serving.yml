@@ -168,10 +168,16 @@ jobs:
           # Stopping the agent stops the serving container it started, so the cards come free. The unserve step after
           # this one removes what is left. The unit lives on the host only: a pod has none, and a job that landed on one
           # would otherwise "stop" nothing and report success.
+          # The runner runs as the agent's user with HOME set to the runner's own directory: the unit is under the user's passwd
+          # home, and systemctl --user needs the user's bus (run 36987818797 looked under the runner's HOME and refused).
           export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-          unit="$HOME/.config/systemd/user/thatch-node-agent.service"
-          if [ ! -f "$unit" ]; then
-            echo "::error::$unit is missing: this job is not on the host runner (a pod?); refusing" >&2
+          export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+          agent_home=$(getent passwd "$(id -un)" | cut -d: -f6)
+          unit="${agent_home:-/nonexistent}/.config/systemd/user/thatch-node-agent.service"
+          loaded=$(systemctl --user show -p LoadState --value thatch-node-agent.service 2>&1)
+          echo "runner user $(id -un), passwd home ${agent_home:-?}, unit file $([ -f "$unit" ] && echo present || echo absent), LoadState ${loaded}"
+          if [ ! -f "$unit" ] || [ "$loaded" != loaded ]; then
+            echo "::error::the node agent's user unit is not visible here (unit $unit, LoadState $loaded): not the host runner, or no user bus; refusing" >&2
             exit 1
           fi
           mkdir -p "$RUNNER_TEMP/c2-results"
@@ -928,10 +934,16 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
+          # The runner runs as the agent's user with HOME set to the runner's own directory: the unit is under the user's passwd
+          # home, and systemctl --user needs the user's bus (run 36987818797 looked under the runner's HOME and refused).
           export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-          unit="$HOME/.config/systemd/user/thatch-node-agent.service"
-          if [ ! -f "$unit" ]; then
-            echo "::error::$unit is missing: this job is not on the host runner (a pod?); refusing" >&2
+          export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+          agent_home=$(getent passwd "$(id -un)" | cut -d: -f6)
+          unit="${agent_home:-/nonexistent}/.config/systemd/user/thatch-node-agent.service"
+          loaded=$(systemctl --user show -p LoadState --value thatch-node-agent.service 2>&1)
+          echo "runner user $(id -un), passwd home ${agent_home:-?}, unit file $([ -f "$unit" ] && echo present || echo absent), LoadState ${loaded}"
+          if [ ! -f "$unit" ] || [ "$loaded" != loaded ]; then
+            echo "::error::the node agent's user unit is not visible here (unit $unit, LoadState $loaded): not the host runner, or no user bus; refusing" >&2
             exit 1
           fi
           results="$RUNNER_TEMP/c2-results"
