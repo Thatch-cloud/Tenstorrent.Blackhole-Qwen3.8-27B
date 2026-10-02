@@ -129,8 +129,26 @@ cleanup() {
   return "$status"
 }
 trap cleanup EXIT
+# The eight-seat variant: C2_BAKE_DEFAULT_PROFILE=<profile> bakes that profile as the image's serving default (ENV QWEN_C2_PROFILE) and
+# THATCH_SERVING_SESSION_CAP as its max-num-seqs, from the context's own profiles file. Unset, nothing is baked (production's four-seat default).
+bake=(--build-arg "C2_BAKE_PROFILE=" --build-arg "C2_BAKE_SESSION_CAP=")
+baked_profile=${C2_BAKE_DEFAULT_PROFILE:-}
+baked_cap=
+if [ -n "$baked_profile" ]; then
+  baked_cap=$(python3 -B - "$ctx/overlay/scripts/ci/qwen_c2_profiles.json" "$baked_profile" <<'PY'
+import json, sys
+entry = json.load(open(sys.argv[1], encoding='utf-8'))['profiles'].get(sys.argv[2])
+if entry is None or entry.get('gate_only') is True or entry.get('mesh_device') != 'P150x4':
+    sys.exit('C2_BAKE_DEFAULT_PROFILE %s is not a four-card serving profile of this context' % sys.argv[2])
+print(entry['engine']['max-num-seqs'])
+PY
+  )
+  test -n "$baked_cap"
+  bake=(--build-arg "C2_BAKE_PROFILE=$baked_profile" --build-arg "C2_BAKE_SESSION_CAP=$baked_cap")
+  echo "baking the serving default $baked_profile with a session cap of $baked_cap"
+fi
 DOCKER_BUILDKIT=1 docker build -f "$ctx/Dockerfile" --build-arg "KERNEL_CACHE=$kernel_cache" \
-  --build-arg "SOURCE_REVISION=$source_revision" --tag "$provisional" --iidfile "$iid" "$ctx"
+  --build-arg "SOURCE_REVISION=$source_revision" "${bake[@]}" --tag "$provisional" --iidfile "$iid" "$ctx"
 built=$(cat "$iid")
 # Belt and braces for a builder that ignores --tag: the provisional tag must exist before anything else runs.
 docker tag "$built" "$provisional"
@@ -164,6 +182,13 @@ print("[TRIAGE-CHECK] root=%s present=%s ttexalens=%s missing=%s" % (root, os.pa
 sys.exit(0 if os.path.isdir(root) and exalens and not missing else 3)'
 if ! docker run --rm --network none --entrypoint python3 "$built" -c "$triage_probe"; then
   echo "[TRIAGE-CHECK] WARNING: the triage tools or ttexalens are not usable in this image: a stall will give stacks but no device triage" >&2
+fi
+# What was baked is what the image carries (G1 provenance checked the pair; this is the build's own read-back).
+got=$(docker image inspect "$built" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^(QWEN_C2_PROFILE|THATCH_SERVING_SESSION_CAP)=' | LC_ALL=C sort | tr '\n' ' ')
+want="QWEN_C2_PROFILE=$baked_profile THATCH_SERVING_SESSION_CAP=$baked_cap "
+if [ "$got" != "$want" ]; then
+  echo "the built image carries '$got', the build asked for '$want'" >&2
+  exit 2
 fi
 docker tag "$built" "$image"
 docker rmi "$provisional" >/dev/null || echo "could not remove the provisional tag $provisional; $image is tagged" >&2
