@@ -113,7 +113,8 @@ class OrderTests(unittest.TestCase):
         text = text_of(HANDBACK)
         self.assertEqual(parsed(HANDBACK)['actions'], 'status reset')
         self.assertEqual(parsed(HANDBACK)['cards'], 'quad')
-        for word in ('AUDITED production image', 'NEVER place a gate arm', 'fabric', ':latest retag', 'admin API'):
+        for word in ("TODAY'S PRODUCTION RECIPE", 'NEVER place a gate arm', 'fabric', ':latest retag', 'admin API',
+                     'audits off', 'QWEN_FAST_PACKED_SAMPLER_IN_TRACE=1'):
             self.assertIn(word, text)
 
     def test_the_order_names_the_control_the_hang_fix_precondition_and_the_exactness_before_timing_rule(self):
@@ -153,13 +154,19 @@ class TemplateTests(unittest.TestCase):
             with self.subTest(template=name):
                 self.assertEqual(outputs['profile'], profile)
                 self.assertIn(profile, PROFILES['profiles'])
-                self.assertEqual(outputs['actions'], {'N0-build-smoke': 'status reset build smoke', 'N2-s3a-matrix-best-gate': 'reset gate',
+                self.assertEqual(outputs['actions'], {'N0-build-smoke': 'status unserve reset smoke', 'N2-s3a-matrix-best-gate': 'reset gate',
                                                       'N3-staggered-trigger-best-gate': 'reset gate'}.get(name, 'reset smoke'))
 
-    def test_the_image_is_built_by_the_first_job_only(self):
-        for name in ORDERED[1:]:
+    def test_no_job_builds_and_only_the_first_takes_production_down(self):
+        # The image is prebuilt by a build-only job while production serves; the window only takes the cards.
+        for name in ORDERED:
             self.assertNotIn('build', parsed(name)['actions'].split(), name)
-        self.assertIn('build', parsed('N0-build-smoke')['actions'].split())
+        for name in ORDERED[1:]:
+            self.assertNotIn('unserve', parsed(name)['actions'].split(), name)
+        actions = parsed('N0-build-smoke')['actions'].split()
+        self.assertLess(actions.index('unserve'), actions.index('reset'))
+        with open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8') as handle:
+            self.assertIn('PRODUCTION IS LIVE ON THE CARDS', handle.read())
 
     def test_only_the_production_profile_is_a_traffic_profile(self):
         self.assertNotIn('gate_only', PROFILES['profiles'][parsed('N0-build-smoke')['profile']])

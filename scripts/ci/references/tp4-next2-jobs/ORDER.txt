@@ -1,13 +1,17 @@
 # The order of the four-card tp4/next-2 window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
 # stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window (its product is data).
-# Image: the tag of the tt-vllm image the job serves or builds (N0 builds tp4-next-2). Minutes: runner time for ONE run of the job, a quad
+# Image: the tag of the tt-vllm image the job serves (tp4-next-2, prebuilt by a build-only job while production served). Minutes: runner time for ONE run of the job, a quad
 # reset (1-3 min) included.
 # tp4/next-2 is tp4/serve-4 (tail caps, the capture plug, the stall watch, the repaired trace census, the two sampler arms) merged with
 # tp4/next (the speed slide, per-tile exact collectives, the quad draft on live banks, the TP4 fused commit in place on live banks, the
 # prefill warm before every capture, the five verify-glue levers). Every lever is its own flag and none is in the production profile.
 # NOTHING COMBINED HAS RUN ON A CARD: the best profiles as a set, and the levers on the hang-fix stack, are unverified. ONE IMAGE FOR THE
-# WHOLE WINDOW: C2_IMAGE_TAG=tp4-next-2, built by N0 from the commit the window tag sits on.
-# Early-failure order, cheapest first: N0 builds the image and smokes the PRODUCTION profile (the merge must not have changed it); N1 is
+# WHOLE WINDOW: C2_IMAGE_TAG=tp4-next-2, prebuilt from this branch by a build-only job (no card opened); the window commit
+# carries the same scripts. tp4/next-2 also carries tp4/serve-7 (merged): production's c2-packed-tp4 is audits OFF + the
+# pinned sampler in the verify trace, and the image build is prune-safe.
+# PRODUCTION IS LIVE ON THE CARDS: the window opens with the placement removed through the admin API (the user's go-ahead
+# and an admin token), then N0's unserve; it closes with N6 and the re-placement of today's production recipe.
+# Early-failure order, cheapest first: N0 smokes the PRODUCTION profile on the prebuilt image (the merge must not have changed it); N1 is
 # the audited smoke of the best gate profile (coherence, every audit, the prefill tripwire, the fused-commit and vglue lines); N2 is the
 # S3a matrix on the same profile (strict); N3 the staggered trigger (strict). Then the paired timing ABAB on coding prompts (4 x 4k and
 # 4 x 32k): N4a (speed-strace, the control) N4b (best-strace) N4c (speed-strace) N4d (best-strace); they are optional, their product is the
@@ -26,13 +30,13 @@
 # pair; a hang on any timed arm is a finding. Both hang-fix arms are unqualified until their own evidence says otherwise.
 # N0's read-out must name the ONE UNFLAGGED runtime change tp4/next carries: the D0 tap-protect fix in dflash_device.py (the feature taps
 # are protected under merge_release; production sets QWEN_FAST_PIPELINED_PUBLISH=1, so it runs there). Check N0's exactness against
-# tp4-serve-6's B5 (the production-profile smoke of the serve window): any difference is this fix or the merge, and stops the window.
+# tp4-serve-7's B7s (the production-profile smoke of the serve-7 window): any difference is this fix or the merge, and stops the window.
 # With QWEN_FAST_QUAD_DRAFT=1 the quad trace is captured DURING SERVING, when four users first become packable: outside the capture
 # plug's packed zone (sealed at attach) and outside the engine zone. The fit of the fused-commit traces in the plug zone is also
 # unverified. So if the capture-plug arm is the hang fix chosen, the plug must be shown to cover those captures before any timing run.
 # The hang-fix arm of each pair is added to BOTH of its profiles (the twins of c2-packed-tp4-speed AND c2-packed-tp4-best), the test holds
 # each twin equal to its base plus the one flag.
-# N6 hands the cards back to production (status, then the all-four reset; the re-placement of the AUDITED production image, never a gate
+# N6 hands the cards back to production (status, then the all-four reset; the re-placement of TODAY'S PRODUCTION RECIPE, never a gate
 # arm, is the template's text). It is always last and it runs even when a stop job halts the window: a stall leaves the cards hung until
 # its reset.
 # R1 (x5), R2, R2b, R0 and R3 (x2) (optional, after N0) test one lever in the request engine: QWEN_FAST_REQUEST_SHARD_ARGMAX=1 makes the
@@ -44,11 +48,11 @@
 # its own card reset: five consecutive completions are the evidence, one stall restarts the count. R0 and R3 (and R0b, R3b: an ABAB) are
 # the timing of the speed twin without and with the flag, and run ONLY AFTER ALL FIVE R1 RUNS COMPLETED (R3's read-out says so too); if an
 # R1 run stalls, skip R0 to R3b. The lever is its own flag and is in no other profile.
-# Durations (estimate, wall clock): N0 45 min typical / 120 at most; N1 35 / 55 / 100; N2 40-90 min, up to 170 with a re-run on a
+# Durations (estimate, wall clock): N0 30 min typical / 60 at most; N1 35 / 55 / 100; N2 40-90 min, up to 170 with a re-run on a
 # divergence; N3 35-60 min, worst case about 6 h; N4a-d and N5a-d 30-60 min each; N6 15 min. Stop jobs N0-N3: about 2 h at best, 4 h expected.
 # The optional R jobs ahead of them add about 4.5 h when all run (R2b 25, R2 45, R1 x5 100, R0/R3 x2 100: 270 min); skip them to reach the stop
 # jobs sooner, none is a precondition of N1-N3.
-N0-build-smoke stop tp4-next-2 120
+N0-build-smoke stop tp4-next-2 60
 R2b-rshard-audit-hang-shapes optional tp4-next-2 25
 R2-rshard-audit optional tp4-next-2 45
 R1-diag-rshard optional tp4-next-2 20
