@@ -11,7 +11,7 @@ checkout died with EACCES) - even when the gate step was cancelled.
 
 PLANS, one arm each, run after every judged plan of the job (c2_serving_job refuses any other order), the twin first:
   ops-twin   the four-card TIMED profile (c2-packed-tp4-speed: the verify's T1/T2 audits off, the drafter's K/V slide on),
-             served bytes, no profiler: four real-text users at 4,096 / 8,192 / 16,384 / 24,576 tokens (24k, not 32k: the
+             served bytes, no profiler: four real-text users at 4,096 tokens each, the production shape (v170 had 4k / 8k / 16k / 24k, so the attention slope is v170's; the
              exactness divergence at 32k and above is unresolved), user 0 asked for 256 tokens and users 1-3 for 128 (enough 4-live rounds at ~6 accepted tokens each), all
              with ignore_eos. The unperturbed round times and the texts the profiled arm is compared with.
   ops-trace  the same, profiled with v138's tracy recipe (the qualified op-level recipe): tracy -p, trace tracking, the
@@ -49,7 +49,7 @@ TRACE = 'ops-trace'
 PLAN_KINDS = {TWIN: 'twin', TRACE: 'ops'}
 # The shapes are fixed here, not in the job file, so a job cannot drift from what the analysis expects.
 USERS = 4
-LENGTHS = (4096, 8192, 16384, 24576)
+LENGTHS = (4096, 4096, 4096, 4096)     # the production shape (4 x 4k coding); v170 had 4k / 8k / 16k / 24k
 MAX_TOKENS = 128
 USER_MAX_TOKENS = ((0, 256),)
 # Docker limits (seconds): readiness (a profiled arm compiles every profiler-define kernel cold into its tmpfs) plus the

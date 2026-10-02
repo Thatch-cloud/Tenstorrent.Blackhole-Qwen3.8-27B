@@ -55,7 +55,7 @@ class PlanTests(unittest.TestCase):
         for plan in ops.PLANS:
             arm, = self.arms(plan)
             args = list(arm[1])
-            self.assertEqual(args[args.index('--prompt-lengths') + 1], '4096,8192,16384,24576')
+            self.assertEqual(args[args.index('--prompt-lengths') + 1], '4096,4096,4096,4096')
             self.assertEqual(args[args.index('--users') + 1], '4')
             self.assertEqual(args[args.index('--max-tokens') + 1], '128')
             self.assertEqual(args[args.index('--user-max-tokens') + 1], '0:256')
@@ -130,7 +130,7 @@ class PlanTests(unittest.TestCase):
 
     def test_the_lengths_must_fit_the_profile(self):
         profiles = copy.deepcopy(CHECKOUT_PROFILES)
-        profiles['profiles'][PROFILE]['max_prompt_tokens'] = 20000
+        profiles['profiles'][PROFILE]['max_prompt_tokens'] = 2048
         with self.assertRaisesRegex(driver.PlanError, 'exceed'):
             self.arms('ops-twin', profiles=profiles)
 
@@ -377,6 +377,24 @@ class AroundTheArmTests(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(logs, 'small.log')))
             with gzip.open(os.path.join(results, ops.OPS_SUBDIR, ops.CSV_GZ), 'rt') as handle:
                 self.assertTrue(handle.read(8).startswith('a,b'))
+
+    def test_the_compressed_report_survives_the_prune_even_when_it_is_larger_than_the_prune_size(self):
+        """The core counts and the round anatomy come from the CPP report, so the artifact must keep it: the prune walks
+        the profile tree only, and the kept copy lives in <results>/ops/, outside it (ops-pruned.json never lists it)."""
+        import unittest.mock
+        with tempfile.TemporaryDirectory() as results:
+            arm = os.path.join(results, 'ops-trace')
+            logs = os.path.join(arm, ops.PROFILE_SUBDIR, '.logs')
+            os.makedirs(logs)
+            with open(os.path.join(logs, ops.CSV_NAME), 'wb') as handle:
+                handle.write(os.urandom(64 * 1024))                  # incompressible: the gz stays above the size below
+            with unittest.mock.patch.object(ops, 'KEEP_BYTES', 4096):
+                done = ops.handback_results(results, 'img', handback=lambda image, path: None, log=lambda text: None)
+                kept = os.path.join(results, ops.OPS_SUBDIR, ops.CSV_GZ)
+                self.assertGreater(os.path.getsize(kept), ops.KEEP_BYTES)
+                self.assertEqual([entry['path'] for entry in done['ops-trace']], [os.path.join('.logs', ops.CSV_NAME)])
+                self.assertEqual(ops.prune(os.path.join(arm, ops.PROFILE_SUBDIR)), [])
+                self.assertTrue(os.path.exists(kept))
 
     def test_a_handback_that_raises_is_reported_and_the_prune_still_runs(self):
         def broken(image, path):

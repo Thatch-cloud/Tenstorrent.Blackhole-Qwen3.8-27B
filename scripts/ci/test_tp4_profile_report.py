@@ -451,5 +451,205 @@ class V138PositiveControl(unittest.TestCase):
         self.assertAlmostEqual(self.packed['sdpa_us_by_user']['0'], 276, delta=2)
 
 
+def analyse_files_of(data, **kwargs):
+    """The whole path from a file: load (with its eager rows), analyse."""
+    directory = tempfile.mkdtemp()
+    path = data.write(directory, 'cpp.csv.gz')
+    paths = {}
+    for key, text in (('server_log', kwargs.pop('log_text', None)), ('twin_log', kwargs.pop('twin_text', None))):
+        if text is not None:
+            paths[key] = os.path.join(directory, key + '.log')
+            with open(paths[key], 'w', encoding='utf-8') as handle:
+                handle.write(text)
+    return report.analyse_files(path, **dict(paths, **kwargs))
+
+
+class PackedPickTests(unittest.TestCase):
+    """The packed block is told by what it holds and what the host timed, never by its session count (v170's analyser
+    picked the lone user's 4-row step, which had the most sessions)."""
+
+    def test_a_lone_step_with_more_sessions_is_not_the_packed_block(self):
+        data = build(sessions=('1', '2', '3'))
+        for session in range(1, 10):
+            data.add('71', str(session), dict((d, replay_ops(users=1, device=d)) for d in range(4)))
+        result = analyse(data)
+        self.assertEqual(result['verify_packed']['trace'], '0')
+        self.assertEqual(result['verify_lone']['trace'], '71')
+        self.assertEqual(result['verify_packed']['pick']['candidates'][0]['structural'], 2)
+
+    def test_a_packed_trace_of_another_user_count_loses_to_the_four_user_block(self):
+        data = build(sessions=('1', '2', '3'))
+        for session in range(1, 10):
+            data.add('5', str(session), dict((d, replay_ops(users=2, device=d)) for d in range(4)))
+        result = analyse(data)
+        self.assertEqual(result['verify_packed']['trace'], '0')
+        table = dict((row['trace'], row) for row in result['verify_packed']['pick']['candidates'])
+        self.assertEqual((table['0']['structural'], table['5']['structural']), (2, 0))
+        self.assertEqual((table['5']['sdpa_users'], table['5']['conv_users']), (2, 2))
+
+    def test_between_two_four_user_traces_the_one_the_host_timed_wins(self):
+        data = build(sessions=('1', '2', '3'))
+        for session in range(1, 10):          # more sessions, a slower trace: not what [PACKED-PHASE] timed
+            data.add('9', str(session), dict((d, replay_ops(sdpa_ns=lambda user: 900000, device=d)) for d in range(4)))
+        fast = analyse(build(sessions=('1', '2', '3')))['verify_packed']['span_ms'][0]
+        log = log_of([(n, 4, [], fast, {}) for n in range(1, 4)])
+        picked = analyse(data, log_text=log)['verify_packed']
+        self.assertEqual(picked['trace'], '0')
+        self.assertIn('within', picked['pick']['reason'])
+        self.assertLess(picked['pick']['candidates'][0]['span_error'], 0.01)
+        self.assertGreater(picked['pick']['candidates'][1]['span_error'], 0.1)
+
+    def test_with_nothing_else_to_go_on_the_session_count_decides_and_the_reason_says_so(self):
+        data = build(sessions=('1', '2', '3', '4'))
+        for session in ('1', '2'):
+            data.add('3', session, dict((d, replay_ops(device=d)) for d in range(4)))
+        pick = analyse(data)['verify_packed']['pick']
+        self.assertEqual(pick['candidates'][0]['trace'], '0')
+        self.assertEqual(pick['candidates'][0]['structural'], 2)
+
+    def test_the_conv_gates_per_gdn_layer_are_recorded_beside_the_sdpa_launches(self):
+        listing = analyse(build(sessions=('1', '2')))['traces'][0]
+        self.assertEqual((listing['detail']['users'], listing['detail']['conv_users']), (4, 4))
+
+
+def anatomy_data(rounds=5, with_other=False):
+    """Packed verify sessions with the round around them: the publication's eager burst, two drafter traces with eager glue
+    between them, four one-op commit traces."""
+    data = Csv(4)
+    publication = [('CopyDeviceOperation', 110, 22000)] * 40 + [('AllGatherAsync', 12, 280000)] * 4
+    glue = [('CopyDeviceOperation', 110, 7000)] * 20
+    drafter = [('TopKDeviceOperation', 65, 171000)] * 2 + [('SdpaDecodeDeviceOperation', 64, 173000)] * 5 \
+        + [('MatmulDeviceOperation', 108, 64000)] * 47
+    for number in range(1, rounds + 1):
+        data.add('0', str(number), dict((d, replay_ops(device=d)) for d in range(4)))
+        data.add('', '', dict((d, publication) for d in range(4)))
+        data.add('89', str(number), dict((d, drafter) for d in range(4)))
+        data.add('', '', dict((d, glue) for d in range(4)))
+        data.add('114', str(number), dict((d, drafter) for d in range(4)))
+        for commit in range(4):
+            data.add('c%d' % commit, str(number), dict((d, [('GenericOpDeviceOperation', 96, 650000)]) for d in range(4)))
+        if with_other:
+            data.add('77', str(number), dict((d, replay_ops(users=1, device=d)) for d in range(4)))
+    return data
+
+
+DRAFTER_MS = 2 * 0.171 + 5 * 0.173 + 47 * 0.064
+
+
+class RoundAnatomyTests(unittest.TestCase):
+    def anatomy(self, **kwargs):
+        log = log_of([(n, 4, [], 134.0, {}) for n in range(1, 6)])
+        return analyse_files_of(anatomy_data(**kwargs), log_text=log)['verify_packed']['round_anatomy']
+
+    def test_publication_drafters_glue_and_commits_are_attributed_separately(self):
+        anatomy = self.anatomy()
+        self.assertEqual(anatomy['pairs'], 4)
+        self.assertEqual(anatomy['live'], 4)
+        kinds = anatomy['kinds']
+        self.assertAlmostEqual(kinds['publication (eager)'], 40 * 0.022 + 4 * 0.28, places=3)
+        self.assertAlmostEqual(kinds['draft glue (eager)'], 20 * 0.007, places=3)
+        self.assertAlmostEqual(kinds['drafters'], 2 * DRAFTER_MS, places=3)
+        self.assertAlmostEqual(kinds['commits'], 4 * 0.65, places=3)
+        self.assertEqual(kinds['other traces'], 0.0)
+        self.assertEqual((anatomy['commit_launches'], anatomy['publication_ops']), (4, 44))
+
+    def test_the_drafter_traces_are_listed_with_their_ops_and_time_and_the_publication_ops_are_named(self):
+        anatomy = self.anatomy()
+        self.assertEqual([(d['trace'], d['ops']) for d in anatomy['drafter_traces']], [('114', 54), ('89', 54)])
+        self.assertTrue(all(abs(d['kernel_ms'] - DRAFTER_MS) < 1e-3 for d in anatomy['drafter_traces']))
+        top = anatomy['publication_top']
+        self.assertEqual((top[0]['op'], top[0]['cores'], top[0]['per_round']), ('AllGatherAsync', 12, 4.0))
+        self.assertAlmostEqual(top[0]['ms_per_round'], 1.12, places=3)
+        self.assertEqual(top[1]['op'], 'Copy')
+
+    def test_the_round_is_the_verify_plus_the_interval_and_the_idle_is_what_the_kernels_leave(self):
+        anatomy = self.anatomy()
+        self.assertAlmostEqual(anatomy['round_ms'], anatomy['verify_ms'] + anatomy['interval_ms'], places=2)
+        self.assertAlmostEqual(anatomy['idle_ms'], anatomy['interval_ms'] - anatomy['busy_ms'], places=2)
+        self.assertGreater(anatomy['idle_ms'], 100.0)         # the synthetic host gaps between the replays
+
+    def test_another_replayed_trace_in_the_round_is_named_as_such_not_as_a_drafter(self):
+        anatomy = self.anatomy(with_other=True)
+        self.assertGreater(anatomy['kinds']['other traces'], 50.0)       # a lone 64-layer step
+        self.assertAlmostEqual(anatomy['kinds']['drafters'], 2 * DRAFTER_MS, places=3)
+
+    def test_only_rounds_of_the_asked_live_count_are_taken(self):
+        log = log_of([(1, 4, [], 134.0, {}), (2, 3, [3], 134.0, {}), (3, 4, [], 134.0, {}), (4, 4, [], 134.0, {}),
+                      (5, 4, [], 134.0, {})])
+        anatomy = analyse_files_of(anatomy_data(), log_text=log)['verify_packed']['round_anatomy']
+        self.assertEqual(anatomy['pairs'], 3)         # the pairs that start at rounds 1, 3 and 4
+
+    def test_without_a_log_every_consecutive_pair_counts(self):
+        anatomy = analyse_files_of(anatomy_data())['verify_packed']['round_anatomy']
+        self.assertEqual((anatomy['pairs'], anatomy['live']), (4, None))
+
+    def test_without_a_replay_pair_the_anatomy_is_empty(self):
+        anatomy = analyse_files_of(anatomy_data(rounds=1))['verify_packed']['round_anatomy']
+        self.assertEqual(anatomy, {'pairs': 0})
+
+    def test_the_markdown_carries_the_pick_the_anatomy_and_the_v170_comparison(self):
+        log = log_of([(n, 4, [], 134.0, {}) for n in range(1, 6)])
+        text = report.render_markdown(analyse_files_of(anatomy_data(), log_text=log))
+        for word in ('Picked as the packed block by', 'The round around the verify', 'publication (eager)', 'AllGatherAsync',
+                     'Against the v170 profile', 'verify: weight matmuls', 'round_device: drafters'):
+            self.assertIn(word, text)
+
+
+def stamp(total_ms):
+    return '2026-10-02 12:%02d:%06.3f' % (int(total_ms // 60000), (total_ms % 60000) / 1000.0)
+
+
+def phase_log(rounds):
+    """[PHASE] lines: rounds = [(live, sequential steps, verify, commit, draft, period)] in ms."""
+    lines, clock = [], 0.0
+    for number, (live, steps, verify, commit, draft, period) in enumerate(rounds, 1):
+        lines.append('%s [PHASE] packed_verify r%d begin' % (stamp(clock), number))
+        lines.append('%s [PACKED-PHASE] round=%d users=4 bind_ms=0.1 input_ms=2 trace_ms=60 sync_ms=1 readback_ms=1 '
+                     'live=%d idle=-' % (stamp(clock + 1), number, live))
+        lines.append('%s [PHASE] packed_verify r%d end %.1f ms' % (stamp(clock + verify), number, verify))
+        lines.append('%s [PHASE] packed_commit r%d end %.1f ms' % (stamp(clock + verify + commit), number, commit))
+        lines.append('%s [PHASE] early_draft r%d end %.1f ms' % (stamp(clock + verify + commit + draft), number, draft))
+        for _ in range(steps):
+            lines.append('%s [PHASE] step r%d end 5.0 ms' % (stamp(clock + period - 1), number))
+        clock += period
+    lines.append('%s [PHASE] packed_verify r%d begin' % (stamp(clock), len(rounds) + 1))
+    return '\n'.join(lines) + '\n'
+
+
+class HostBudgetTests(unittest.TestCase):
+    def test_the_phases_are_medians_over_four_live_rounds_without_sequential_steps(self):
+        text = phase_log([(4, 0, 64, 24, 32, 125), (4, 0, 66, 25, 33, 127), (4, 0, 62, 23, 31, 123),
+                          (3, 0, 50, 19, 20, 95), (4, 1, 70, 30, 40, 150)])
+        budget = report.host_budget(text)
+        self.assertEqual((budget['rounds'], budget['sampled'], budget['live']), (5, 3, 4))
+        self.assertEqual((budget['packed_verify_ms'], budget['packed_commit_ms'], budget['early_draft_ms']),
+                         (64.0, 24.0, 32.0))
+        self.assertAlmostEqual(budget['period_ms'], 125.0, delta=1.0)
+        self.assertAlmostEqual(budget['unphased_ms'], 125.0 - 64 - 24 - 32, delta=1.0)
+
+    def test_a_log_without_phase_lines_has_no_budget(self):
+        self.assertIsNone(report.host_budget('nothing\n'))
+        self.assertIsNone(report.host_budget(''))
+
+    def test_the_budget_reaches_the_report_beside_the_anatomy(self):
+        log = phase_log([(4, 0, 64, 24, 32, 125)] * 5)
+        result = analyse_files_of(anatomy_data(), log_text=log)['verify_packed']
+        self.assertEqual(result['host_budget']['packed_commit_ms'], 24.0)
+        self.assertEqual(result['vs_v170']['round_host']['packed_commit_ms']['delta'], -0.5)
+
+
+class V170ComparisonTests(unittest.TestCase):
+    def test_the_comparison_is_per_category_and_carries_deltas(self):
+        packed = analyse(build(sessions=('1', '2')))['verify_packed']
+        comparison = report.vs_v170(packed['groups'], {'kinds': {'publication (eager)': 10.0, 'drafters': 25.0,
+                                                                  'commits': 2.6}}, {'packed_commit_ms': 20.0})
+        self.assertEqual(list(comparison['verify']), list(report.V170_VERIFY))
+        self.assertAlmostEqual(comparison['round_device']['publication (eager)']['delta'], -2.0)
+        self.assertAlmostEqual(comparison['round_host']['packed_commit_ms']['delta'], -4.5)
+        self.assertIsNone(comparison['round_host']['early_draft_ms']['now'])
+        self.assertIsNone(comparison['round_host']['early_draft_ms']['delta'])
+        self.assertEqual(packed['vs_v170']['verify']['weight matmuls']['v170'], 17.0)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -27,6 +27,9 @@ kernel-to-kernel gaps are the in-trace dispatch cost.
 Marks: every figure is measured from the CSV except those in PROJECTION_TP4_4U_8K and TP2_C2_4X32K, which are the
 research file's estimates (e) and derived numbers (d), printed beside the measurement to show which terms moved.
 
+The packed block is picked by structure and by the host's trace_ms (pick_packed), the round around it is attributed by kind
+(round_anatomy: publication, drafters, glue, commits; host_budget from the [PHASE] lines) and set against v170 (vs_v170).
+
 Stdlib only, Python 3.7 syntax.
 """
 import argparse
@@ -116,9 +119,10 @@ def number(row, key):
         return None
 
 
-def load(path):
+def load(path, eager_out=None):
     """({(trace, session, device): [Op sorted by time]}, {device: [(kernel start cycle, kernel ns, trace id)] of every
-    row, replayed or eager}, the columns seen)."""
+    row, replayed or eager}, the columns seen). `eager_out`, a dict, is filled with {device: [(kernel start cycle,
+    kernel ns, op, cores)] of every EAGER row (no trace id)}: the round anatomy names the publication's ops from it."""
     sessions = collections.defaultdict(list)
     every = collections.defaultdict(list)
     with open_text(path) as handle:
@@ -134,6 +138,10 @@ def load(path):
             start = number(row, 'DEVICE KERNEL START CYCLE')
             trace = row.get('METAL TRACE ID') or ''
             every[device].append((start if start is not None else 0.0, duration, trace))
+            if eager_out is not None and not trace:
+                eager_out.setdefault(device, []).append((start if start is not None else 0.0, duration,
+                                                         clean_op(row.get('OP NAME') or ''),
+                                                         int(float(row.get('CORE COUNT') or 0))))
             session = row.get('METAL TRACE REPLAY SESSION ID') or ''
             if not trace or not session:
                 continue
@@ -300,21 +308,28 @@ def sdpa_per_attention_layer(ops, roles):
     return statistics.median(counts.values()) if counts else None
 
 
+def conv_gates_per_gdn_layer(roles):
+    """The conv-gates launches in one GDN layer of this replay (one per user in the block), or None without a GDN layer."""
+    counts = collections.Counter(role[0] for role in roles if role[2] == 'gdn.conv_gates')
+    return statistics.median(counts.values()) if counts else None
+
+
 def trace_signature(ops):
-    """What one replay contains: (kind, detail) - 'verify-packed' (users = SDPA launches per attention layer >= 2),
-    'verify-single' (one), 'drafter', 'small' or 'other'."""
+    """What one replay contains: (kind, detail) - 'verify-packed' (users = SDPA launches per attention layer, or conv-gates
+    launches per GDN layer, >= 2), 'verify-single' (one), 'drafter', 'small' or 'other'."""
     norms = sum(1 for op in ops if is_norm(op.op))
     if norms >= 2 * LAYERS:
         roles, layers, _ = classify(ops)
         users = sdpa_per_attention_layer(ops, roles)
-        if users is not None and users >= 2:
-            return 'verify-packed', dict(layers=layers, users=int(users))
-        return 'verify-single', dict(layers=layers, users=1)
+        conv = conv_gates_per_gdn_layer(roles)
+        if max(users or 0, conv or 0) >= 2:
+            return 'verify-packed', dict(layers=layers, users=int(users or 0), conv_users=int(conv or 0))
+        return 'verify-single', dict(layers=layers, users=1, conv_users=int(conv or 0))
     if any(op.op.startswith('TopK') or 'ArgMax' in op.op for op in ops) and any('Sdpa' in op.op or 'SDPA' in op.op
                                                                               for op in ops):
         return 'drafter', dict(ops=len(ops))
     if len(ops) <= 20:
-        return 'small', dict(ops=len(ops))
+        return 'small', dict(ops=len(ops), names=sorted(set(op.op for op in ops)))
     return 'other', dict(ops=len(ops))
 
 
@@ -702,8 +717,261 @@ def structure_problems(label, analysis, users):
 
 # ---- the whole analysis ----
 
+# ---- which trace is the packed block ----
+
+SPAN_MATCH_TOLERANCE = 0.10   # a candidate's device span matches the host's [PACKED-PHASE] trace_ms within this fraction
+
+
+def span_match(info, rounds):
+    """Median |device span - host trace_ms| / trace_ms of one trace's complete sessions against the rounds the log names
+    by the same session id (None without a log or a matching round). The packed block IS what [PACKED-PHASE] times."""
+    errors = []
+    for sid, per in info['complete'].items():
+        try:
+            round_ = rounds.get(int(sid))
+        except ValueError:
+            round_ = None
+        if round_ and round_['trace_ms']:
+            span = max(span_ns(ops) for ops in per.values()) / 1e6
+            errors.append(abs(span - round_['trace_ms']) / round_['trace_ms'])
+    return round(median(errors), 4) if errors else None
+
+
+def pick_packed(traces, listing, rounds, users):
+    """(trace id or None, how it was chosen). A candidate is a 'verify-packed' trace. In order: it holds one SDPA launch
+    per attention layer and one conv-gates launch per GDN layer for each of the `users` (each criterion counts), then
+    its device span matches the host's trace_ms (when a log names the rounds), then the number of complete sessions. A
+    lone user's 4-row step can have more sessions in a run that ends on it, so the count alone must never decide."""
+    detail_of = dict((row['trace'], row.get('detail') or {}) for row in listing)
+    candidates = [row['trace'] for row in listing if row['kind'] == 'verify-packed' and traces[row['trace']]['complete']]
+    if not candidates:
+        return None, dict(reason='no packed candidate', candidates=[])
+    table = []
+    for trace in candidates:
+        detail = detail_of[trace]
+        structural = (detail.get('users') == users) + (detail.get('conv_users') == users)
+        error = span_match(traces[trace], rounds)
+        table.append(dict(trace=trace, sdpa_users=detail.get('users'), conv_users=detail.get('conv_users'),
+                          structural=structural, span_error=error, complete=len(traces[trace]['complete']),
+                          ops=traces[trace]['ops']))
+    ok = lambda e: e is None or e <= SPAN_MATCH_TOLERANCE
+    table.sort(key=lambda e: (-e['structural'], not ok(e['span_error']),
+                              e['span_error'] if e['span_error'] is not None else 0.0, -e['complete'], -e['ops']))
+    best = table[0]
+    why = []
+    if best['structural']:
+        why.append('%d of 2 structural criteria (SDPA and conv-gates launches per layer = %d users)' % (
+            best['structural'], users))
+    if best['span_error'] is not None:
+        why.append('device span within %.1f%% of the host trace_ms' % (100 * best['span_error']))
+    if not why:
+        why.append('most complete sessions among the packed candidates (no structural or span evidence)')
+    return best['trace'], dict(reason='; '.join(why), candidates=table)
+
+
+# ---- the round around the verify: publication, drafters, commits ----
+
+ANATOMY_KINDS = ('publication (eager)', 'drafters', 'draft glue (eager)', 'commits', 'other traces')
+ANATOMY_TOP_OPS = 8
+
+
+def trace_roles(listing):
+    """{trace id: 'drafter' | 'commit' | 'other'} from what each non-verify trace contains (never from its id)."""
+    out = {}
+    for row in listing:
+        detail = row.get('detail') or {}
+        if row['kind'] == 'drafter':
+            out[row['trace']] = 'drafter'
+        elif row['kind'] == 'small' and detail.get('ops') == 1 and 'GenericOp' in (detail.get('names') or []):
+            out[row['trace']] = 'commit'
+        elif row['kind'] not in ('verify-packed', 'verify-single'):
+            out[row['trace']] = 'other'
+    return out
+
+
+def union_ns(intervals):
+    """Total length of the union of (start cycle, end cycle) intervals, in ns."""
+    busy = 0.0
+    current = None
+    for start, end in sorted(intervals):
+        if current and start <= current[1]:
+            current[1] = max(current[1], end)
+        else:
+            if current:
+                busy += current[1] - current[0]
+            current = [start, end]
+    if current:
+        busy += current[1] - current[0]
+    return busy / CLK_GHZ
+
+
+def round_anatomy(analysis, every, eager, packed_id, listing, rounds, live=None):
+    """What the device does between one packed verify replay and the next (chip 0), by kind: the eager burst right after the
+    verify is the PUBLICATION (packed_commit's K/V and history writes); the traced drafter replays; the eager ops between
+    and after them are the draft glue; the one-op traces are the commits; any other trace is named as such. Kernel ms per
+    kind are medians over the consecutive session pairs (of `live` live users when the log says which). The interval runs from
+    one verify's last kernel to the next one's first; the round is the verify's span plus the interval; the idle is the
+    interval less the union of the kernels in it (an interval holding a profiler read-back or a host stall is inflated: the
+    kernel ms by kind are not, so read those)."""
+    device = analysis['devices'][0]
+    roles = trace_roles(listing)
+    listed = dict((row['trace'], row) for row in listing)
+    sessions = sorted((int(sid), e) for sid, e in analysis['per_session'].items() if sid.isdigit())
+    rows = sorted(every.get(device) or [])
+    eager_rows = sorted((eager or {}).get(device) or [])
+    per_pair = []
+    for (a, ea), (b, eb) in zip(sessions, sessions[1:]):
+        if b != a + 1:
+            continue
+        if live is not None and (rounds.get(a) or {}).get('live') != live:
+            continue
+        start, stop = ea['last_cycle'], eb['first_cycle']
+        if stop <= start:
+            continue
+        inside = [(ks, k, trace) for ks, k, trace in rows if start <= ks < stop and trace != packed_id]
+        drafter_starts = [ks for ks, k, trace in inside if trace and roles.get(trace) == 'drafter']
+        first_drafter = min(drafter_starts) if drafter_starts else None
+        kinds = dict((name, 0.0) for name in ANATOMY_KINDS)
+        drafters = collections.defaultdict(float)
+        commits = 0
+        for ks, k, trace in inside:
+            role = roles.get(trace, 'other')
+            if not trace:
+                kinds['publication (eager)' if first_drafter is None or ks < first_drafter else 'draft glue (eager)'] += k
+            elif role == 'drafter':
+                kinds['drafters'] += k
+                drafters[trace] += k
+            elif role == 'commit':
+                kinds['commits'] += k
+                commits += 1
+            else:
+                kinds['other traces'] += k
+        publication = collections.defaultdict(lambda: [0, 0.0])
+        publication_count = 0
+        for ks, k, op, cores in eager_rows:
+            if start <= ks < stop and (first_drafter is None or ks < first_drafter):
+                publication[(op, cores)][0] += 1
+                publication[(op, cores)][1] += k
+                publication_count += 1
+        busy = union_ns([(ks, ks + k * CLK_GHZ) for ks, k, trace in rows if start <= ks < stop])
+        per_pair.append(dict(round=a, interval_ms=(stop - start) / CLK_GHZ / 1e6, verify_ms=ea['span_ms'],
+                             busy_ms=busy / 1e6, kinds=dict((name, v / 1e6) for name, v in kinds.items()),
+                             drafters=dict((t, v / 1e6) for t, v in drafters.items()), commits=commits,
+                             publication_ops=publication_count, publication=publication))
+    if not per_pair:
+        return dict(pairs=0)
+    median_of = lambda key: round(median([p[key] for p in per_pair]), 3)
+    top = collections.defaultdict(lambda: [0, 0.0])
+    for p in per_pair:
+        for key, (n, ns) in p['publication'].items():
+            top[key][0] += n
+            top[key][1] += ns / 1e6
+    count = float(len(per_pair))
+    top_ops = [dict(op=op, cores=cores, per_round=round(n / count, 1), ms_per_round=round(ms / count, 3))
+               for (op, cores), (n, ms) in sorted(top.items(), key=lambda kv: -kv[1][1])[:ANATOMY_TOP_OPS]]
+    drafter_ids = sorted(set(t for p in per_pair for t in p['drafters']))
+    return dict(
+        chip=device, pairs=len(per_pair), live=live, interval_ms=median_of('interval_ms'),
+        verify_ms=median_of('verify_ms'), busy_ms=median_of('busy_ms'),
+        round_ms=round(median([p['interval_ms'] + p['verify_ms'] for p in per_pair]), 3),
+        idle_ms=round(max(0.0, median([p['interval_ms'] - p['busy_ms'] for p in per_pair])), 3),
+        kinds=collections.OrderedDict((name, round(median([p['kinds'][name] for p in per_pair]), 3))
+                                      for name in ANATOMY_KINDS),
+        commit_launches=int(median([p['commits'] for p in per_pair])),
+        publication_ops=int(median([p['publication_ops'] for p in per_pair])), publication_top=top_ops,
+        drafter_traces=[dict(trace=t, ops=(listed.get(t) or {}).get('ops'),
+                             kernel_ms=round(median([p['drafters'].get(t, 0.0) for p in per_pair]), 3))
+                        for t in drafter_ids])
+
+
+TS_FIELD = re.compile(r'(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:\.\d+)?)')
+PHASE_LINE = re.compile(r'\[PHASE\] (\w+) (\S+) (begin|end(?: ([0-9.]+) ms)?)')
+HOST_PHASES = ('packed_verify', 'packed_commit', 'early_draft', 'prepare_proposals', 'propose_pair')
+
+
+def host_timestamp(line):
+    import datetime
+    found = TS_FIELD.search(line)
+    if not found:
+        return None
+    text = found.group(1).replace('T', ' ')
+    try:
+        return datetime.datetime.strptime(
+            text, '%Y-%m-%d %H:%M:%S.%f' if '.' in text else '%Y-%m-%d %H:%M:%S').timestamp() * 1000
+    except ValueError:
+        return None
+
+
+def host_budget(text):
+    """The packed round's host wall-time budget from [PHASE] begin/end lines: a round runs from one packed_verify begin to
+    the next; per round the period and each phase's time (packed_verify; packed_commit = the publication; early_draft = the
+    drafters and their commits; the rest, unphased, is the scheduler), and the sequential steps it held. Medians over the
+    rounds of four live users with no sequential step. None without the lines."""
+    rounds, current = [], None
+    for line in text.splitlines():
+        found = PHASE_LINE.search(line)
+        if not found:
+            if current is not None and '[PACKED-PHASE]' in line:
+                live = LIVE_FIELD.search(line)
+                if live:
+                    current['live'] = int(live.group(1))
+            continue
+        at = host_timestamp(line)
+        name, what, ms = found.group(1), found.group(3), found.group(4)
+        if name == 'packed_verify' and what == 'begin' and at is not None:
+            if current is not None:
+                current['period'] = at - current['begin']
+                rounds.append(current)
+            current = dict(begin=at, live=None, steps=0, phases=collections.defaultdict(float))
+        elif current is not None and what.startswith('end') and ms:
+            current['phases'][name] += float(ms)
+            if name == 'step':
+                current['steps'] += 1
+    if not rounds:
+        return None
+    four = [r for r in rounds if r['live'] == 4 and not r['steps']]
+    sample = four or [r for r in rounds if not r['steps']]
+    if not sample:
+        return None
+    out = collections.OrderedDict(rounds=len(rounds), sampled=len(sample), live=4 if four else None)
+    out['period_ms'] = round(median([r['period'] for r in sample]), 2)
+    for phase in HOST_PHASES:
+        out['%s_ms' % phase] = round(median([r['phases'].get(phase, 0.0) for r in sample]), 2)
+    out['unphased_ms'] = round(median([
+        r['period'] - r['phases'].get('packed_verify', 0.0) - r['phases'].get('packed_commit', 0.0)
+        - r['phases'].get('early_draft', 0.0) for r in sample]), 2)
+    return out
+
+
+# The one TP4 device profile so far (v170: the packed 64-row verify on c2-packed-tp4-speed, four live users at 4k/8k/16k/24k
+# coding text), ms per chip; the next profile's figures are read against it, category by category. The sampler was not in the
+# trace then and the shapes differ (4 x 4k now), so attention and the sampler move for known reasons.
+V170_VERIFY = collections.OrderedDict([
+    ('weight matmuls', 17.0), ('gdn.recurrence', 9.29), ('gdn.glue', 6.07), ('gdn.conv_gates', 3.97), ('attn.sdpa', 7.12),
+    ('attn.glue', 5.7), ('collectives', 4.63), ('sampler', 1.73), ('norms, adds, input', 2.0), ('in-trace gaps', 4.30)])
+V170_VERIFY_SPAN_MS = 61.82
+V170_ROUND_DEVICE = collections.OrderedDict([
+    ('publication (eager)', 12.0), ('drafters', 24.75), ('commits', 2.6)])      # kernel ms per live-4 round, chip 0
+V170_ROUND_HOST = collections.OrderedDict([
+    ('packed_verify_ms', 64.3), ('packed_commit_ms', 24.5), ('early_draft_ms', 32.6), ('unphased_ms', 2.7),
+    ('period_ms', 124.5)])
+
+
+def vs_v170(groups, anatomy, host):
+    """{section: {part: dict(now, v170, delta)}} per verify group, per round-anatomy kind and per host phase."""
+    def row(now, then):
+        return dict(now=now, v170=then, delta=round(now - then, 3) if now is not None else None)
+    out = collections.OrderedDict()
+    out['verify'] = collections.OrderedDict((group, row(groups.get(group), then)) for group, then in V170_VERIFY.items())
+    out['round_device'] = collections.OrderedDict(
+        (kind, row(((anatomy or {}).get('kinds') or {}).get(kind), then)) for kind, then in V170_ROUND_DEVICE.items())
+    out['round_host'] = collections.OrderedDict(
+        (phase, row((host or {}).get(phase), then)) for phase, then in V170_ROUND_HOST.items())
+    return out
+
+
 def analyse_sessions(sessions, every, columns=(), chips=4, log_text=None, gate_json=None, twin_log=None, twin_json=None,
-                     table=None):
+                     table=None, eager=None):
     table = weight_table(chips) if table is None else table
     traces = complete_sessions(sessions, chips=None)
     devices_all = sorted(set(device for (_, _, device) in sessions))
@@ -726,10 +994,9 @@ def analyse_sessions(sessions, every, columns=(), chips=4, log_text=None, gate_j
         listing.append(row)
     packed = [t for t, k in signatures.items() if k == 'verify-packed']
     single = [t for t, k in signatures.items() if k == 'verify-single']
-    pick = lambda ids: max(ids, key=lambda t: (len(traces[t]['complete']), traces[t]['ops'])) if ids else None
-    detail_of = dict((r['trace'], r.get('detail') or {}) for r in listing)
-    four_user = [t for t in packed if detail_of[t].get('users') == EXPECTED_LAYERS['users']]
-    packed_id = pick(four_user or packed)
+    rounds = (log or {}).get('rounds') or {}
+    # The packed block is told by what it holds and by what the host timed, never by its session count.
+    packed_id, packed_pick = pick_packed(traces, listing, rounds, EXPECTED_LAYERS['users'])
     # The lone lane's widths (1, 2, 4 rows) are told apart by their kernel sums (a wider verify takes longer).
     single_sorted = sorted(single, key=lambda t: next(r['kernel_sum_ms'] for r in listing if r['trace'] == t))
     labels = dict((t, w) for t, w in zip(single_sorted, ('w1', 'w2', 'w4'))) if len(single_sorted) == 3 else {}
@@ -748,9 +1015,9 @@ def analyse_sessions(sessions, every, columns=(), chips=4, log_text=None, gate_j
         problems.append('no verify-64 (packed block) replay is complete on every chip: read the trace list')
     if lone_id and traces[lone_id]['complete']:
         single_analysis = analyse_trace(dict(traces[lone_id]), table)
-    rounds = (log or {}).get('rounds') or {}
     if packed_analysis:
         packed_analysis['trace'] = packed_id
+        packed_analysis['pick'] = packed_pick
         packed_analysis['groups'] = grouped(packed_analysis)
         packed_analysis['sdpa_fit'] = sdpa_fit(packed_analysis, rounds)
         packed_analysis['by_live'] = by_live(packed_analysis, rounds)
@@ -758,6 +1025,12 @@ def analyse_sessions(sessions, every, columns=(), chips=4, log_text=None, gate_j
         packed_analysis['round_timeline'] = round_timeline(packed_analysis, every, packed_id, packed_analysis['devices'],
                                                            rounds)
         packed_analysis['vs_projection'] = compare_with_projection(packed_analysis['groups'])
+        four = 4 if any(r['live'] == 4 for r in rounds.values()) else None
+        packed_analysis['round_anatomy'] = round_anatomy(packed_analysis, every, eager, packed_id, listing, rounds,
+                                                         live=four)
+        packed_analysis['host_budget'] = host_budget(log_text) if log_text else None
+        packed_analysis['vs_v170'] = vs_v170(packed_analysis['groups'], packed_analysis['round_anatomy'],
+                                             packed_analysis['host_budget'])
         packed_analysis['projection_ms'] = PROJECTION_TP4_TRACE_MS
         packed_analysis['tp2_c2_ms'] = TP2_C2_TRACE_MS
         four_live = [sid for sid, entry in packed_analysis['per_session'].items()
@@ -822,8 +1095,9 @@ def analyse_sessions(sessions, every, columns=(), chips=4, log_text=None, gate_j
 
 
 def analyse_files(csv_path, server_log=None, gate_json=None, twin_log=None, twin_json=None, chips=4):
-    sessions, every, columns = load(csv_path)
-    return analyse_sessions(sessions, every, columns, chips=chips, log_text=read_text(server_log),
+    eager = {}
+    sessions, every, columns = load(csv_path, eager_out=eager)
+    return analyse_sessions(sessions, every, columns, chips=chips, eager=eager, log_text=read_text(server_log),
                             gate_json=read_json(gate_json), twin_log=read_text(twin_log), twin_json=read_json(twin_json))
 
 
@@ -852,8 +1126,10 @@ def render_markdown(report):
                                                           row['sessions'], row['complete'], fmt(row.get('kernel_sum_ms'))))
     packed = report.get('verify_packed')
     if packed:
+        pick = packed.get('pick') or {}
         lines += ['', '## The packed 64-row verify (trace %s, %d layers: %d GDN, %d attention)' % (
             packed['trace'], packed['layers'], packed['gdn_layers'], packed['attn_layers']), '',
+            'Picked as the packed block by: %s.' % pick.get('reason'), '',
             'Kernel sum %s ms, device span %s ms, in-trace gaps %s ms (per chip); cross-chip critical path %s ms, '
             'collective skew %s ms. Projection %.1f ms, TP2 C2 %.1f ms.' % (
                 '/'.join(fmt(v) for v in packed['kernel_sum_ms']), '/'.join(fmt(v) for v in packed['span_ms']),
@@ -900,6 +1176,42 @@ def render_markdown(report):
                           timeline['pairs'], fmt(timeline['interval_ms']), fmt(timeline['verify_ms']),
                           fmt(timeline['other_busy_ms']), fmt(timeline['idle_ms']), fmt(timeline['best_idle_ms']),
                           fmt(timeline['worst_idle_ms']))]
+    packed = report.get('verify_packed') or {}
+    anatomy = packed.get('round_anatomy') or {}
+    if anatomy.get('pairs'):
+        lines += ['', '## The round around the verify (chip %s, %d consecutive replay pairs%s)' % (
+            anatomy['chip'], anatomy['pairs'], ', 4 live users' if anatomy.get('live') == 4 else ''), '',
+            'Round %s ms = verify %s + the interval after it %s, of which the device runs %s (union of kernels) and idles '
+            '%s. Kernel ms by kind (medians):' % (fmt(anatomy['round_ms']), fmt(anatomy['verify_ms']),
+                                                  fmt(anatomy['interval_ms']), fmt(anatomy['busy_ms']),
+                                                  fmt(anatomy['idle_ms'])), '',
+            '| kind | kernel ms |', '|---|---:|']
+        for kind, ms in anatomy['kinds'].items():
+            lines.append('| %s | %s |' % (kind, fmt(ms)))
+        lines += ['', 'Publication: %d eager ops per round; commits: %d one-op launches per round. Drafter traces: %s.' % (
+            anatomy['publication_ops'], anatomy['commit_launches'],
+            ', '.join('trace %s (%s ops) %s ms' % (d['trace'], d['ops'], fmt(d['kernel_ms']))
+                      for d in anatomy['drafter_traces']) or 'none'), '',
+            '| publication op | cores | per round | ms per round |', '|---|---:|---:|---:|']
+        for entry in anatomy['publication_top']:
+            lines.append('| %s | %d | %s | %s |' % (entry['op'], entry['cores'], fmt(entry['per_round'], 1),
+                                                    fmt(entry['ms_per_round'])))
+    budget = packed.get('host_budget')
+    if budget:
+        lines += ['', '## The round on the host (%d rounds, %d sampled%s)' % (
+            budget['rounds'], budget['sampled'], ', 4 live and no sequential step' if budget['live'] == 4 else ''), '',
+            'Period %s ms: packed_verify %s, packed_commit (publication) %s, early_draft (drafters and commits) %s, '
+            'scheduler and the rest %s.' % (fmt(budget['period_ms']), fmt(budget['packed_verify_ms']),
+                                            fmt(budget['packed_commit_ms']), fmt(budget['early_draft_ms']),
+                                            fmt(budget['unphased_ms']))]
+    comparison = packed.get('vs_v170')
+    if comparison:
+        lines += ['', '## Against the v170 profile (ms; the shapes and the sampler differ, see docs/tp4-profile.md)', '',
+                  '| part | now | v170 | delta |', '|---|---:|---:|---:|']
+        for section, rows in comparison.items():
+            for part, entry in rows.items():
+                lines.append('| %s: %s | %s | %s | %s |' % (section, part, fmt(entry['now']), fmt(entry['v170']),
+                                                             fmt(entry['delta'])))
     lone = report.get('verify_lone')
     if lone:
         lines += ['', '## The lone-user verify (trace %s; the 4-row step)' % lone['trace'], '',

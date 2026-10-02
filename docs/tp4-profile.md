@@ -12,12 +12,12 @@ round (about 70.8 ms of verify trace with the audits inside it; about 62 ms proj
 
 | arm | what | why |
 |---|---|---|
-| `ops-twin` | unprofiled: 4 real-text users at 4,096 / 8,192 / 16,384 / 24,576 tokens; user 0 asks 192 tokens, users 1-3 ask 64, all ignore_eos | the unperturbed `[PACKED-PHASE]` round times and the reference texts |
+| `ops-twin` | unprofiled: 4 real-text users at 4,096 tokens each (the production shape; v170 had 4k / 8k / 16k / 24k, so the attention slope stays v170's); user 0 asks 192 tokens, users 1-3 ask 64, all ignore_eos | the unperturbed `[PACKED-PHASE]` round times and the reference texts |
 | `ops-trace` | the same, under tracy (v138's recipe): `-p --check-exit-code --disable-device-data-dump-to-files --disable-device-data-push-to-tracy --dump-device-data-mid-run --op-support-count 20000` | the CPP device report: every op of every replayed trace, on every chip |
 
 Fixed in code, not in the job file, so a job cannot drift from what the analysis expects: the shapes, the tracy argument list (any
 op-support other than 20000 is refused: 200000 segfaulted the dispatch thread three times), the profiler environment, and the
-requirement that the profile be a four-card one with both verify audits off. 24k rather than 32k: the exactness divergence at 32k and
+requirement that the profile be a four-card one with both verify audits off. 4k, not 32k: the exactness divergence at 32k and
 above is unresolved.
 
 One container yields 4-live 64-row rounds, then 3- and 2-live padded rounds as users 1-3 finish, then user 0 alone on the 1/2/4-row
@@ -28,7 +28,7 @@ that lane from the 4-row step and the 64-row block.
 TP4 round is about 5,000 programs per core (verify about 3,600, two pair drafts about 1,100, eager commits about 300), so
 `QWEN_FAST_PROFILE_DUMP_EVERY=2` (`packed_verifier.dump_device_profiler_every`, called after every packed round and every sequential
 verify step) reads the profiler back after every second verify replay of any kind and keeps every window under about 11k. The
-prefill (24k = 12 chunks x 64 layers x 7.4, about 5.7k programs) fits one window, so no prefill flush is used (it has never run at
+prefill (4k = 2 chunks x 64 layers x 7.4, about 1k programs per user) fits one window, so no prefill flush is used (it has never run at
 20000). Anything before the first read-back costs at most round 1.
 
 **Traps handled.** Never cancel the job once the gate step has started: the profiler writes as root, and a cancelled profile run once
@@ -92,3 +92,21 @@ over four chips have not been run before (v133 and v138 did one). An out-of-memo
 the CPP report is appended at each read-back and the `always()` step keeps it, so data up to the crash survives. When an arm dies
 this way, read the container's `memory.events` before drawing any conclusion about the profiler, and rerun with the JIT cache on a
 bind-mounted disk directory (TT_METAL_CACHE) rather than the tmpfs.
+
+## Profile 2: the production-shaped verify, and what the analysis now does
+
+The second profile (`scripts/ci/references/tp4-profile2-jobs`, image `tp4-prof-2`) runs the gate plans `ops-twin,ops-trace` on
+`c2-packed-tp4-speed-strace`: production's own recipe (verify audits off, the pinned sampler recorded in the verify trace) plus the gate
+marker, at four users of 4,096 tokens. The analysis (`tp4_profile_report.py`) changed in four ways:
+
+- **The packed block is picked by what it holds and what the host timed.** A candidate is a 64-layer trace with one SDPA launch per
+  attention layer and one conv-gates launch per GDN layer for each of the four users; among those, the one whose device span matches the
+  host's `[PACKED-PHASE]` `trace_ms` (within 10%) wins, and only then the session count. The report prints how it chose. (v170's report
+  picked the lone user's 4-row step, which had the most sessions.)
+- **The round around the verify is attributed by kind**, from the device rows between one packed replay and the next on chip 0: the eager
+  burst right after the verify is the publication (its ops are named), the traced drafter replays (listed per trace), the eager glue
+  between them, the one-op commit traces, and any other trace named as such. The host's `[PHASE]` budget (packed_verify, packed_commit,
+  early_draft, scheduler) is read from the log beside it.
+- **The result is set against v170 per category** (`vs_v170` in the report; the constants are in `tp4_profile_report.py`).
+- **The compressed CPP report stays in the artifact** (`gate/ops/cpp_device_perf_report.csv.gz`): the prune walks the profile tree only, so
+  the kept copy is never pruned whatever its size (a test holds this); per-op core counts come from it.
