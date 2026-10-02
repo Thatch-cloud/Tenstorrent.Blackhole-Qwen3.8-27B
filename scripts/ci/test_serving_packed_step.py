@@ -1583,6 +1583,46 @@ class TwoBlockStepTests(unittest.TestCase):
             self.assertEqual((block.phase, block.pending_segments, block.rounds), ('idle', set(), 1))
         self.assertIsNone(verifier_engine._resident)
 
+    def deferring_blocks(self, fail_a=False):
+        """Both blocks hold deferred commits from an earlier round (a flush that was skipped); one shared log."""
+        log = []
+        for name, block in (('A', self.block_a), ('B', self.block_b)):
+            block.deferred_commits = [(0, 3)]
+            block.flush_commits = (lambda site, name=name, block=block: self.flush(log, name, block, site, fail_a))
+            original = block.verify
+            block.verify = lambda entries, name=name, original=original: (log.append(('verify', name)), original(entries))[1]
+        return log
+
+    @staticmethod
+    def flush(log, name, block, site, fail_a):
+        log.append(('flush', name, site))
+        block.deferred_commits = []
+        if fail_a and name == 'A':
+            raise RuntimeError('flush A failed')
+        return 1
+
+    def test_every_block_holding_deferred_commits_is_flushed_before_any_verify_replays(self):
+        log = self.deferring_blocks()
+        self.step(self.four())
+        kinds = [item[0] for item in log]
+        self.assertEqual(kinds, ['flush', 'flush', 'verify', 'verify'], log)
+        self.assertEqual({item[1] for item in log[:2]}, {'A', 'B'})
+
+    def test_a_flush_that_raises_does_not_stop_the_other_blocks_flush(self):
+        log = self.deferring_blocks(fail_a=True)
+        with self.assertRaises(RuntimeError):
+            PackedStep([self.block_a, self.block_b]).flush_deferred_commits('end')
+        self.assertEqual([item[:2] for item in log], [('flush', 'A'), ('flush', 'B')], 'block B was still flushed')
+
+    def test_one_block_deferred_commits_are_left_to_the_blocks_own_backstop(self):
+        self.block_a.deferred_commits = [(0, 3)]
+        flushed = []
+        self.block_a.flush_commits = lambda site: flushed.append(site)
+        a = self.request(self.block_a, 'A', 0, 100, accept=15)
+        b = self.request(self.block_a, 'B', 1, 3000, accept=9)
+        PackedStep([self.block_a])([entry(a), entry(b)], cancelled=lambda: False)
+        self.assertEqual(flushed, [], 'the single-block path is unchanged')
+
     def test_a_block_whose_pair_is_not_fully_live_falls_to_sequential_while_the_other_stays_packed(self):
         a = self.request(self.block_a, 'A', 0, 100, accept=15)
         b = self.request(self.block_a, 'B', 1, 3000, accept=9)

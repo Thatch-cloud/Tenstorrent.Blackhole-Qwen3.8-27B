@@ -684,12 +684,26 @@ class PackedStep:
     def flush_deferred_commits(self, site):
         """Round-fence plan H2: enqueue every block's deferred GDN commit traces (flush_commits; a no-op
         for a block holding none). Returns how many were enqueued."""
-        count = 0
-        for block in self.all_blocks():
-            flush = getattr(block, 'flush_commits', None)
-            if callable(flush):
+        return flush_blocks_deferred(self.all_blocks(), site)
+
+
+def flush_blocks_deferred(blocks, site):
+    """Flush every block's deferred GDN commits, ATTEMPTING EVERY BLOCK even when one raises (the first error is
+    raised after the last attempt): a block skipped because an earlier one failed would keep retained states that a
+    later block's verify replay overwrites (the retained buffers of one block sit in the holes of another's verify
+    trace). Returns how many traces were enqueued."""
+    count, first_error = 0, None
+    for block in blocks:
+        flush = getattr(block, 'flush_commits', None)
+        if callable(flush):
+            try:
                 count += flush(site) or 0
-        return count
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+    if first_error is not None:
+        raise first_error
+    return count
 
 
 def ineligible(entries, block):
@@ -1026,7 +1040,13 @@ def packed_device_rounds(entries, *, cancelled, blocks):
     just its own live member(s), while another block whose group IS complete still runs
     packed in the same round. Entries bound to no configured block go to that same sequential
     batch. Every request is served exactly once; the returned outputs always follow
-    `entries`' own order, whichever block (or the sequential step) actually produced them."""
+    `entries`' own order, whichever block (or the sequential step) actually produced them.
+
+    ORDERING INVARIANT (the retained GDN states, conv states and histories of a block, and its trace outputs, are
+    allocated inside its own capture and almost certainly sit in the holes of the EARLIER block's verify trace): no
+    block's verify may replay between another block's verify and that block's commit flush. So every block still
+    holding deferred commits is flushed BEFORE any verify of this round, and the in-step, `finally` and reconcile
+    flushes attempt every block."""
     entries = list(entries)
     if not entries:
         raise ValueError('A packed step needs at least one admitted request')
@@ -1038,6 +1058,8 @@ def packed_device_rounds(entries, *, cancelled, blocks):
     groups, sequential_entries = group_by_block(entries, blocks)
     by_block = {id(matched): (matched, group_entries) for matched, group_entries in groups}
     outputs_by_id = {}
+    if len(blocks) > 1:
+        flush_blocks_deferred([block for block in blocks if getattr(block, 'deferred_commits', None)], 'verify')
     for block in blocks:
         group = by_block.get(id(block))
         if group is None:
