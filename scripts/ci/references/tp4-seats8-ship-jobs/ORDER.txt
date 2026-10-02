@@ -1,0 +1,74 @@
+# The order of the tp4-seats8 SHIP window (eight seats on two 64-row M3 blocks, c2-packed-tp4-8): the W-S8 qualification and, if every bar passes,
+# the move of production from four seats to eight. One template per line: <template name without .env> <stop|optional|pre> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job (H8 and A9 still run: they are the hand-back). optional: a failure or a skip does not stop
+# the window (its product is data, which the driver reads against the GO rule). pre: runs BEFORE the window, card-free, while production serves.
+# Minutes: runner time for ONE run of the job, a quad reset (1-3 min) included.
+# ONE IMAGE: tp4-serve-8 is the base SB8 builds from this branch (tp4/seats8 plus the request warm), with c2-packed-tp4-8 baked in as the image's serving
+# default and the platform session cap baked as 8. It is the image that ships: every job below serves it, and the thin layer built on it is what the
+# platform replay SR8 exercises and what :latest moves to. Production's four-seat default is untouched: a build that does not name
+# C2_BAKE_DEFAULT_PROFILE (SB8's one key) bakes nothing, and qwen_c2_profiles.json's default is still c2-packed-tp4.
+# WHY THE FIX IS IN EVERY ARM: QWEN_FAST_M3_REQUEST_WARM=1 (every eight-seat profile carries it) runs every request width's eager warm-up once at attach,
+# between the blocks' warm phase and their captures. Without it the first request-engine build after block B's first round hangs (S8-1 v238, S8-3a v239;
+# the control R2 hangs again with the flag off). The five S8-3 runs therefore restart on this image.
+# DRIVER STEPS BEFORE THE WINDOW (production serving, no card opened; the CPU suite green on this branch first):
+#   P1  SB8: push the tag with SB8-build-base as the job file. Never during a timing job.
+#   P2  push the base to the registry through the platform's image publish lane (the runner has no registry login): source = target = the base's tag.
+#   P3  build the thin layer on that base with the platform's thin-layer workflow (the base given, publish_latest false). The cap needs no platform
+#       code change (it is baked in the base); built from the platform's open seat-cap branch the layer also asserts the effective cap covers the
+#       base default profile's seat count. Record the MANIFEST-LIST digest (the rig daemon uses the containerd image store; a config digest does
+#       not resolve: SR v236).
+#   P4  pre-pull the thin layer into the rig daemon with the publish lane (dry run, report only), so SR8 finds it.
+#   P5  the owner's go-ahead for the window and an admin token for the end; the allowlist covers the tags (the next free numbers).
+# THE WINDOW. Production is DOWN from A0 to the owner's /deploy at the end, about 22 hours at the estimates: W-S8 is the qualification, run once.
+#   Cheapest kill signals first: S8-0 and S8-1 (the same image flag-off and flag-on, the audited eight-seat attach), S8-6 (memory), then the five hang
+#   runs S8-3a to S8-3e (the diag twin: stall watch, handle log and guard), then the matrices S8-2a and S8-2b, S8-4 staggered and S8-5 churn of 16
+#   sessions over 8 seats, then the second timing pair S8-7c/S8-7d, then SR8, the platform replay of the thin layer. H8 and A9 are the hand-back.
+# STOP RULES. One stall in any job (a [STALL] dump, the stall watch, a watchdog or replay-deadline exit) stops the window and restarts the S8-3 count
+# only on a new image or a recorded fix. A kill signal in S8-7c/S8-7d (read by the DRIVER from the [PACKED-PHASE] lines, since the jobs are optional):
+# the median 8-live round above 2 x P(4) + 10 ms (P(4) the four-seat arm's median four-live round) or the 8-live aggregate below 0.85 x the four-live
+# one: stop and hand back; two blocks interfere or cost aggregate and the round levers or a single 128-row block come before eight seats are served.
+# THE GO RULE FOR MOVING :latest (every item; one failure is NO-GO and :latest is not moved):
+#   1. every stop job above passed: S8-0, S8-1, S8-6, S8-3a to S8-3e (five CONSECUTIVE completions on this image), S8-2a, S8-2b, S8-4, S8-5, SR8;
+#   2. ZERO audit mismatches (T1, T2, extent) in S8-1, S8-2a, S8-4 and S8-5 (the audited gate profile arms);
+#   3. NO stall anywhere: no stall-watch dump, no watchdog exit, no replay-deadline exit, no handle-guard line naming a reuse;
+#   4. hash equality: S8-0's concurrent4_code_equal content and reasoning hashes equal the earlier production smokes' AND S8-1's concurrent4_code_equal
+#      hashes equal S8-0's (flag ON against flag OFF, one image); a difference is the image and is NO-GO;
+#   5. S8-6: free DRAM at 8 live at least 3 GB per chip, the floor at least 1 GB, the trace region's largest free block at least 44 MB;
+#   6. S8-2a and S8-2b: eight of eight concurrent identical to solo, strict (one rerun by the policy); S8-4 strict; S8-5 with 0 aborts, 0 refusals, 0
+#      engine deaths and no hold while a seat is free;
+#   7. the timing: the kill signal above did not fire on either pair; bar (a) (at four or fewer live the eight-seat round is at most 1.05 x the
+#      four-seat round, judged PAIRED per round) holds; bar (b) (the 8-live aggregate against the four-live aggregate, users 5 to 8 with no decode-queue
+#      wait): at or above 1.0, or between 0.85 and 1.0 ONLY with the owner's explicit, recorded sign-off (the first pair read about 0.86 at 4k: the
+#      sign-off is needed, and it is asked for with the numbers, never assumed);
+#   8. SR8 passed ('PLATFORM_REPLAY passed=True', the three boot lines, admission passed, the served name before and after the restart) AND the image
+#      inspection shows the baked pair: ENV QWEN_C2_PROFILE=c2-packed-tp4-8 and THATCH_SERVING_SESSION_CAP=8 (the replay runs with the cap off: it
+#      cannot show it), which SB8's provenance read as well;
+#   9. the owner says ship.
+#   GO: move :latest to the thin layer on tp4-serve-8 (publish lane: dry run first, recording the old value, then apply; check the rig daemon's local
+#   :latest is the new image), then fabric re-measure, topology tick, A9, the owner's /deploy with release_first, and the live checks (/v1/models,
+#   the engine log profile line, thatch_serving_session_cap 8, eight concurrent sessions admitted and a ninth refused with 429).
+#   NO-GO: :latest and the rig daemon's local tag stay on today's production thin layer (confirm both), and the hand-back re-places TODAY'S PRODUCTION
+#   RECIPE (c2-packed-tp4, cap 4). Never an eight-seat placement by an environment variable or a gate arm.
+# ROLLBACK after a GO (the cards healthy: no reset): move :latest back to the previous thin layer with the publish lane (dry run, then apply; the image
+# has the :tt alias so no untagged-rollback override), then the owner's /deploy with release_first. The cap goes back to 4 with the image (it is baked,
+# not set anywhere else). Cards wedged: A0, H8's reset, the fabric re-measure, the tick, A9, then /deploy.
+# Time (estimate): SB8 and P2-P4 before the window; the stop jobs about 18.5 hours (the five S8-3 runs 3.75 of them), the timing pair 2.25 hours, SR8 and the hand-back 1.5.
+SB8-build-base pre tp4-serve-8 60
+A0-agent-stop stop tp4-serve-8 5
+S8-0-flag-off-smoke stop tp4-serve-8 75
+S8-1-seats8-attach-audited stop tp4-serve-8 100
+S8-6-memory8 stop tp4-serve-8 75
+S8-3a-hang8-strace stop tp4-serve-8 45
+S8-3b-hang8-strace stop tp4-serve-8 45
+S8-3c-hang8-strace stop tp4-serve-8 45
+S8-3d-hang8-strace stop tp4-serve-8 45
+S8-3e-hang8-strace stop tp4-serve-8 45
+S8-2a-matrix8-gate stop tp4-serve-8 180
+S8-2b-matrix8-traffic stop tp4-serve-8 120
+S8-4-staggered8 stop tp4-serve-8 180
+S8-5-churn16 stop tp4-serve-8 150
+S8-7c-seats4-timed optional tp4-serve-8 60
+S8-7d-seats8-timed optional tp4-serve-8 75
+SR8-platform-replay stop tp4-serve-8 60
+H8-handback-reset stop tp4-serve-8 15
+A9-agent-start stop tp4-serve-8 15
