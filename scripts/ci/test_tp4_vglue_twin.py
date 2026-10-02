@@ -64,7 +64,7 @@ class TwinTests(PackedFixture):
 
         operations.empty = Mock(side_effect=empty)
         # the card's join, measured (N1): an explicit memory_config wins; a join of parts that are not whole tiles
-        # (16-row users) goes untilize / concat / tilize and lands in interleaved DRAM, whatever the parts' placement
+        # (16-row users) lands in interleaved DRAM, whatever the parts' placement; whole-tile joins are unmeasured and keep the parts' placement here
         whole_tile_join = operations.concat.side_effect
 
         def card_concat(parts, **keywords):
@@ -260,9 +260,10 @@ class TwinTests(PackedFixture):
         # the served merge is freed at once; only DRAM copies are held
         self.assertEqual(entries[-1]['placement'], ('dram', 'dram'), 'the launch block and the served concat, as placed')
 
-    def test_every_lever_output_lands_where_its_served_twin_lands(self):
-        """The audit requires placement equality (downstream programs compile per input placement): the pieces, the merged
-        block and the sampler-facing output of the twin are placed exactly as the pinned class places its own."""
+    def test_the_gdn_glue_outputs_land_where_the_served_path_lands_them(self):
+        """The audit requires placement equality (downstream programs compile per input placement): at 4 users and 64 rows the
+        GDN glue pieces, the merged block and the output of the twin are placed as the pinned class places its own (the other
+        vglue sites are not covered here)."""
         flags = {'QWEN_FAST_TP4_GDN_GLUE': '1', 'QWEN_FAST_TP4_VGLUE_AUDIT': '1'}
         with four():
             served, served_calls, served_ops = self.run_decode(pinned_state.DeviceLoopState)
@@ -271,13 +272,25 @@ class TwinTests(PackedFixture):
         self.assertEqual(lever['output'].memory_config(), served['output'].memory_config())
         merged = lever_ops.empty.call_args_list[4].kwargs['memory_config']
         self.assertEqual(merged, served['output'].memory_config())
-        # the pieces: the served resident_piece moves into L1; the launch allocates in L1
-        served_memories = {entry[2] for entry in served_calls if entry[0] == 'move'}
+        # the pieces: the served resident_piece ends in L1 (this fixture records no served move, so only the launch side is checked)
         piece_memories = {lever_ops.empty.call_args_list[index].kwargs['memory_config'] for index in range(4)}
         self.assertEqual(piece_memories, {lever_ops.L1_MEMORY_CONFIG})
-        self.assertTrue(served_memories <= {served_ops.L1_MEMORY_CONFIG}, served_memories)
         entry = tp4_vglue.audit_entries(lever)[-1]
         self.assertEqual(entry['placement'][0], entry['placement'][1])
+
+    def test_the_audit_reports_a_placement_mismatch_of_the_merge(self):
+        """A launch block in L1 against a served join that lands in DRAM must show in the entry (the N1 failure), and the
+        served join must be made exactly as the pinned path makes it (no memory_config)."""
+        with four():
+            state, operations, layer, active, calls = self.build_state(twin.DeviceLoopState)
+            operations.concat = Mock(side_effect=lambda parts, **keywords: SimpleNamespace(
+                shape=(1, 64, 1), memory_config=lambda: keywords.get('memory_config') or 'dram'))
+            operations.clone = Mock(side_effect=lambda value, memory_config=None: SimpleNamespace(
+                shape=value.shape, memory_config=lambda: memory_config))
+            merged = SimpleNamespace(shape=(1, 64, 1), memory_config=lambda: 'l1')
+            entry = state.hold_served_merge([SimpleNamespace(shape=(1, 16, 1))] * 4, merged)[0]
+        self.assertEqual(entry['placement'], ('l1', 'dram'))
+        self.assertNotIn('memory_config', operations.concat.call_args.kwargs)
 
     def test_flag_on_without_the_audit_holds_nothing(self):
         with four():

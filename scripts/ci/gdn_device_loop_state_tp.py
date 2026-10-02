@@ -249,7 +249,7 @@ class DeviceLoopState(_pinned_class()):
         """The served join (concat) of the same outputs and a copy of the launch's block, both in DRAM and held outside
         `owned`: the pair the audit compares, with the two placements the layer would have seen (the launch's block is what the
         layer consumes and is freed after the output projection, so what is compared after the replay is the copy; the served
-        concat is freed at once so the audit does not hold L1 across the trace)."""
+        concat is freed at once so the audit holds no extra memory across the trace)."""
         operations = self.operations
         dram = operations.DRAM_MEMORY_CONFIG
         served = operations.concat(list(outputs), dim=1)
