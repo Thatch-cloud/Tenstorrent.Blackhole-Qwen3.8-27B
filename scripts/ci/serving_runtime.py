@@ -32,12 +32,12 @@ PADDED_BLOCK_FLAG = 'QWEN_FAST_PADDED_BLOCK'
 M3_BLOCKS_FLAG = 'QWEN_FAST_M3_BLOCKS'
 M3_BLOCKS_USERS = 8
 M3_BLOCKS_MARKER = '[PINDIAG] M3 blocks={} over pool slots {} (QWEN_FAST_M3_BLOCKS={}); each block is the qualified 4-user 64-row block'
+CAPTURE_PROGRAMS_MARKER = '[PINDIAG] packed blocks capture block={} programs={}->{}'
+CLOSE_FAILED_MARKER = '[PINDIAG] a sibling block did not close without the fence: {}'
 # QWEN_FAST_M3_REQUEST_WARM (default off; '0' or '1' only): under QWEN_FAST_M3_BLOCKS=2, the any-request engine's rows 1/2/4
 # programs and state are compiled and created BETWEEN the two blocks' warm phase and their captures (request_width_warm), so the
 # first engine build after block B's capture creates nothing the block's replays can overwrite. '1' with one block is refused.
 M3_REQUEST_WARM_FLAG = 'QWEN_FAST_M3_REQUEST_WARM'
-CAPTURE_PROGRAMS_MARKER = '[PINDIAG] packed blocks capture block={} programs={}->{}'
-CLOSE_FAILED_MARKER = '[PINDIAG] a sibling block did not close without the fence: {}'
 CAPTURE_POSITION_FLAG = 'QWEN_FAST_PACKED_CAPTURE_POSITION'
 CAPTURE_POSITION_MARKER = '[PINDIAG] packed capture position override='
 EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
@@ -55,18 +55,6 @@ def m3_blocks(environ=None):
     return int(value)
 
 
-def m3_request_warm(blocks, environ=None):
-    """QWEN_FAST_M3_REQUEST_WARM, strictly: unset or '0' is off, '1' is on, and anything else - an empty value included - is a
-    configuration error naming the flag. '1' is refused, naming it, unless `blocks` (m3_blocks_for) is 2: the warm runs between the
-    two blocks' phases, and one block has no such seam."""
-    value = (os.environ if environ is None else environ).get(M3_REQUEST_WARM_FLAG, '0')
-    if value not in ('0', '1'):
-        raise ValueError('%s must be 0 or 1, got %r' % (M3_REQUEST_WARM_FLAG, value))
-    if value == '1' and blocks != 2:
-        raise ValueError('%s=1 warms the request widths between two M3 blocks and needs %s=2' % (M3_REQUEST_WARM_FLAG, M3_BLOCKS_FLAG))
-    return value == '1'
-
-
 def m3_blocks_for(policy, environ=None):
     """How many M3 blocks this attach builds (1 or 2), refusing - ValueError naming QWEN_FAST_M3_BLOCKS - a malformed
     value and the value 2 at any scheduler request count but eight: two blocks are the eight-seat shape, and at four
@@ -78,6 +66,18 @@ def m3_blocks_for(policy, environ=None):
         raise ValueError('%s=2 builds two 4-user M3 blocks and is admitted at exactly %d scheduler requests, not %s'
                          % (M3_BLOCKS_FLAG, M3_BLOCKS_USERS, policy['scheduler_requests']))
     return blocks
+
+
+def m3_request_warm(blocks, environ=None):
+    """QWEN_FAST_M3_REQUEST_WARM, strictly: unset or '0' is off, '1' is on, and anything else - an empty value included - is a
+    configuration error naming the flag. '1' is refused, naming it, unless `blocks` (m3_blocks_for) is 2: the warm runs between the
+    two blocks' phases, and one block has no such seam."""
+    value = (os.environ if environ is None else environ).get(M3_REQUEST_WARM_FLAG, '0')
+    if value not in ('0', '1'):
+        raise ValueError('%s must be 0 or 1, got %r' % (M3_REQUEST_WARM_FLAG, value))
+    if value == '1' and blocks != 2:
+        raise ValueError('%s=1 warms the request widths between two M3 blocks and needs %s=2' % (M3_REQUEST_WARM_FLAG, M3_BLOCKS_FLAG))
+    return value == '1'
 
 
 def m3_shape(policy, environ=None):
