@@ -229,13 +229,15 @@ class DeviceLoopState(_pinned_class()):
         return rows_dma.problem(outputs, self.operations)
 
     def merge_outputs(self, outputs):
-        """The (1, 16 * users, N) block from one launch, in the placement of the users' outputs (what the served concat's
-        result lands in), every user canonical as the served untilize / concat / tilize leaves it."""
+        """The (1, 16 * users, N) block from one launch, in interleaved DRAM (where the served concat with no memory_config
+        leaves its result: measured on the card, the users' outputs are L1 and the join is not), every user canonical as the
+        served untilize / concat / tilize leaves it. The output projection compiles per input placement, so the placement is
+        part of the contract."""
         operations = self.operations
         width = outputs[0].shape[-1]
         merged = operations.empty((1, PIECE_ROWS * len(outputs), width), dtype=operations.bfloat16,
                                   layout=operations.TILE_LAYOUT, device=self.gdn.mesh,
-                                  memory_config=outputs[0].memory_config())
+                                  memory_config=operations.DRAM_MEMORY_CONFIG)
         try:
             rows_dma.launch(self.gdn.mesh, list(outputs), [merged], rows_dma.merge_outputs(len(outputs), width))
         except BaseException:
@@ -247,7 +249,7 @@ class DeviceLoopState(_pinned_class()):
         """The served join (concat) of the same outputs and a copy of the launch's block, both in DRAM and held outside
         `owned`: the pair the audit compares, with the two placements the layer would have seen (the launch's block is what the
         layer consumes and is freed after the output projection, so what is compared after the replay is the copy; the served
-        L1 concat is freed at once so the audit does not hold L1 across the trace)."""
+        concat is freed at once so the audit holds no extra memory across the trace)."""
         operations = self.operations
         dram = operations.DRAM_MEMORY_CONFIG
         served = operations.concat(list(outputs), dim=1)

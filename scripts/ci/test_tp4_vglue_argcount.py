@@ -128,7 +128,7 @@ class CacheModelTests(unittest.TestCase):
             (rows_dma.canon_block(users, WIDTH), 'L1', 'DRAM'),
             (block.plan_windows(users), 'DRAM', 'DRAM'),
             (block.plan_unstack(users, WIDTH), 'DRAM', 'DRAM'),
-            (rows_dma.merge_outputs(users, found.gdn_a_col - found.gdn_qkv), 'DRAM', 'DRAM'),
+            (rows_dma.merge_outputs(users, found.gdn_a_col - found.gdn_qkv), 'L1', 'DRAM'),
         ]
 
     def test_no_gdn_launch_hits_a_cache_entry_of_another_length(self):
