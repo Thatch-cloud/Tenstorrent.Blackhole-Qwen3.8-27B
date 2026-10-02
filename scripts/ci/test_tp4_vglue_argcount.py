@@ -141,7 +141,7 @@ class CacheModelTests(unittest.TestCase):
                     hit = cache.launch(key_of(rows_dma, per_core, source, destination, (('CANON_DENORM', '1'),), 16384), lengths)
                     if hit is not None:
                         self.assertEqual(hit, lengths, 'order %r users %d: a hit would write %d words into %d word slots' % (
-                            order, users, max(lengths), min(hit)))
+                            order, users, max(lengths), max(hit)))
 
     def test_the_n1_pair_is_the_window_stack_then_the_unstack(self):
         self.assertEqual((len(block.plan_windows(4)), len(block.plan_unstack(4, WIDTH))), (640, 1800))
