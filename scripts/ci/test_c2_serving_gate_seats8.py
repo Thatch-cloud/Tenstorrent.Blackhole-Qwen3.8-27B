@@ -485,7 +485,7 @@ class EightUserSmokeTests(SmokeCase):
 
 
 class SplitSmokeTests(SmokeCase):
-    """concurrent5_split: users 0-3 first, user 4 alone once all four stream, the sixth after user 4's 320 tokens."""
+    """concurrent5_split: users 0-3 first, user 4 alone once all four stream, the sixth after user 4's 60 chunks."""
 
     def test_the_arrivals_are_released_by_the_progress_of_the_one_before(self):
         release_after = {}
@@ -509,16 +509,16 @@ class SplitSmokeTests(SmokeCase):
         # user 4 arrives only after each of users 0-3 has streamed a token
         for user in range(4):
             self.assertGreaterEqual(requests[4]['sent_at_arrival'].get(user, 0), 1, 'user %d was streaming' % user)
-        # the sixth arrives only after user 4 streamed SPLIT_TOKENS tokens, and every earlier user was still mid-stream
-        self.assertGreaterEqual(requests[5]['sent_at_arrival'][4], 320)
+        # the sixth arrives only after user 4 streamed SPLIT_CHUNKS chunks, and every earlier user was still mid-stream
+        self.assertGreaterEqual(requests[5]['sent_at_arrival'][4], 60)
         for user in range(4):
             self.assertLess(requests[5]['sent_at_arrival'][user], 1600, 'user %d had not finished' % user)
         entry = results['concurrent5_split']
         self.assertNotIn('error', entry, entry)
-        self.assertEqual(entry['user4_tokens_at_sixth_arrival'], 320)
+        self.assertEqual(entry['user4_chunks_at_sixth_arrival'], 60)
         self.assertEqual(entry['budgets'], [1600, 1600, 1600, 1600, 1200, 400])
         self.assertEqual([user['tokens'] for user in entry['users']], [1600, 1600, 1600, 1600, 1200, 400])
-        self.assertGreaterEqual(entry['user4_tokens_at_sixth_arrival'] / 6.5, 49, 'at least 50 rounds at tau up to 6.5')
+        self.assertGreaterEqual(entry['user4_chunks_at_sixth_arrival'], 50, 'at least 50 rounds with block B narrowed')
 
     def test_a_dying_fifth_user_does_not_deadlock_the_sixth(self):
         def on_arrival(fake, seq, body):
@@ -530,7 +530,7 @@ class SplitSmokeTests(SmokeCase):
         self.assertEqual(len(fake.requests), 6)
         entry = results['concurrent5_split']
         self.assertIn('error', entry['users'][4])
-        self.assertIsNone(entry['user4_tokens_at_sixth_arrival'])
+        self.assertIsNone(entry['user4_chunks_at_sixth_arrival'])
         self.assertEqual(entry['users'][5]['tokens'], 400)
 
 

@@ -60,7 +60,7 @@ def stream(messages, max_tokens, drop_after=None, timeout=1800, keep_stamps=Fals
     # The full answer is kept as two hashes, one per field: the delta that carries </think> splits differently at a different
     # step width (16 rows packed, 4 solo), so a hash of the merged text would call identical tokens different.
     content, reasoning = ''.join(content), ''.join(reasoning)
-    return dict(ttft=round(first - started, 2) if first else None, tokens=tokens,
+    return dict(ttft=round(first - started, 2) if first else None, tokens=tokens, chunks_streamed=count,
                 prompt_tokens=(usage or {}).get('prompt_tokens'), finish=finish,
                 decode_tok_s=round((tokens - 1) / decode, 2) if decode and tokens > 1 else None,
                 text=''.join(pieces)[:300], completion_tokens=tokens,
@@ -488,7 +488,8 @@ def concurrent8_code_32k():
 
 DRAIN_BUDGETS = (200, 400, 600, 800, 1000, 1200, 1400, 1600)
 SPLIT_BUDGETS = (1600, 1600, 1600, 1600, 1200, 400)
-SPLIT_TOKENS = 320          # user 4's answer before the sixth user arrives: at least 50 rounds at tau up to 6.5
+SPLIT_CHUNKS = 60           # user 4's streamed chunks (about one per engine step, so rounds, NOT tokens: a lone user drafts 4 rows and
+                            # emits 3.75+ tokens a chunk) before the sixth user arrives: at least 50 rounds with its block narrowed
 
 
 def concurrent8_drain():
@@ -502,13 +503,13 @@ def concurrent8_drain():
 
 def concurrent5_split():
     # Opt-in (tp4/seats8). The split-block shape: users 0-3 (block A) start together; user 4 arrives alone in block B once all four
-    # stream and runs at least SPLIT_TOKENS tokens (50+ rounds with its block narrowed to one live user, the other block packed);
+    # stream and streams at least SPLIT_CHUNKS chunks (about 60 rounds with its block narrowed to one live user, the other block packed);
     # then a sixth arrives into block B (a pair, narrow to padded). Every user ignores EOS, budgets 1,600 x 4, 1,200, 400. A user that
-    # dies releases the next arrival (never a deadlock): user 4's death records its token count as None.
+    # dies releases the next arrival (never a deadlock): user 4's death records its chunk count as None.
     prompts, corpus = code_prompts((4096,) * 6)
     out = [None] * 6
     streaming = [threading.Event() for _ in range(5)]      # users 0-4: set at the first token or at the end (a dead user too)
-    split = dict(tokens=None)
+    split = dict(chunks=None)
     split_ready = threading.Event()
 
     def run(index, on_token=None):
@@ -521,8 +522,8 @@ def concurrent5_split():
             if index < 5:
                 streaming[index].set()
             if index == 4:
-                if split['tokens'] is None and isinstance(out[4], dict) and 'error' not in out[4]:
-                    split['tokens'] = out[4].get('tokens')    # it ended before SPLIT_TOKENS: the count it reached
+                if split['chunks'] is None and isinstance(out[4], dict) and 'error' not in out[4]:
+                    split['chunks'] = out[4].get('chunks_streamed')    # it ended before SPLIT_CHUNKS: the count it reached
                 split_ready.set()
 
     def first_token(index):
@@ -532,8 +533,8 @@ def concurrent5_split():
 
     def fifth_token(count):
         streaming[4].set()
-        if count == SPLIT_TOKENS and split['tokens'] is None:
-            split['tokens'] = count
+        if count == SPLIT_CHUNKS and split['chunks'] is None:
+            split['chunks'] = count
             split_ready.set()
 
     threads = [threading.Thread(target=run, args=(index, first_token(index))) for index in range(4)]
@@ -546,11 +547,11 @@ def concurrent5_split():
     sixth = threading.Thread(target=run, args=(5,))
     sixth.start()
     [thread.join() for thread in threads + [fifth, sixth]]
-    print('concurrent5_split user4_tokens_at_sixth_arrival', split['tokens'], flush=True)
+    print('concurrent5_split user4_chunks_at_sixth_arrival', split['chunks'], flush=True)
     for index, user in enumerate(out):
         print('concurrent5_split user', index, json.dumps(dict((key, user.get(key)) for key in (
             'prompt_tokens', 'tokens', 'ttft', 'decode_tok_s', 'finish', 'error'))), flush=True)
-    return dict(users=out, corpus=corpus, budgets=list(SPLIT_BUDGETS), user4_tokens_at_sixth_arrival=split['tokens'])
+    return dict(users=out, corpus=corpus, budgets=list(SPLIT_BUDGETS), user4_chunks_at_sixth_arrival=split['chunks'])
 
 
 if ONLY and 'concurrent8_code_equal' in ONLY:
