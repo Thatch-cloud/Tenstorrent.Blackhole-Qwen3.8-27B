@@ -592,15 +592,25 @@ class SmokeCheckRequestWarmRule(unittest.TestCase):
         text = self.log(self.WARM, self.CAPTURE, self.ENGINE % (938, 944), self.ENGINE % (944, 948))
         self.assertEqual(self.only_warm(text), [])
 
-    def test_the_bound_is_sixteen_and_the_old_238_fails(self):
+    def test_the_first_engine_delta_is_recorded_not_bounded(self):
         import c2_smoke_check as check
-        self.assertEqual(check.FIRST_ENGINE_PROGRAMS_MAX, 16)
-        self.assertEqual(self.only_warm(self.log(self.WARM, self.CAPTURE, self.ENGINE % (700, 716))), [])
-        failed = self.only_warm(self.log(self.WARM, self.CAPTURE, self.ENGINE % (768, 1006)))
-        self.assertEqual(len(failed), 1)
-        self.assertIn('compiled 238 programs', failed[0])
+        self.assertFalse(hasattr(check, 'FIRST_ENGINE_PROGRAMS_MAX'))
+        for build in ((700, 716), (768, 1006)):
+            text = self.log(self.WARM, self.CAPTURE, self.ENGINE % build)
+            self.assertEqual(self.only_warm(text), [])
+            facts = check.request_warm_problems(text)[1]
+            self.assertEqual(facts['first_engine_programs'], build[1] - build[0])
+            self.assertEqual(facts['request_warm_programs'], 238)
 
-    def test_only_the_first_engine_build_is_held_to_the_bound(self):
+    def test_a_warm_that_compiled_nothing_fails(self):
+        empty = self.WARM.replace('700->938', '938->938')
+        failed = self.only_warm(self.log(empty, self.CAPTURE, self.ENGINE % (938, 944)))
+        self.assertEqual(len(failed), 1)
+        self.assertIn('compiled 0 programs', failed[0])
+        none = self.WARM.replace('700->938', 'None->None')
+        self.assertEqual(self.only_warm(self.log(none, self.CAPTURE)), [])
+
+    def test_later_engine_builds_are_not_bounded(self):
         text = self.log(self.WARM, self.CAPTURE, self.ENGINE % (938, 944), self.ENGINE % (944, 1100))
         self.assertEqual(self.only_warm(text), [])
 

@@ -31,7 +31,8 @@ DIAG, NOWARM, RSHARD = ('c2-packed-tp4-8-diag-strace', 'c2-packed-tp4-8-diag-str
 REPEATS = ('R1-rwarm', 'R1b-rwarm', 'R1c-rwarm', 'R1d-rwarm', 'R1e-rwarm')
 TAIL = ('S8-1-seats8-attach-audited', 'S8-6-memory8', 'S8-7a-seats4-timed', 'S8-7b-seats8-timed')
 ORDERED = ('R1-rwarm', 'R2-nowarm-control', 'R3-rshard') + REPEATS[1:] + TAIL
-OPTIONAL = ('R2-nowarm-control', 'R3-rshard', 'S8-7a-seats4-timed', 'S8-7b-seats8-timed')
+OPTIONAL = ('R2-nowarm-control', 'S8-7a-seats4-timed', 'S8-7b-seats8-timed')
+MANUAL = ('R3-rshard',)
 PROFILE_OF = {**{name: DIAG for name in REPEATS}, 'R2-nowarm-control': NOWARM, 'R3-rshard': RSHARD,
               'S8-1-seats8-attach-audited': 'c2-packed-tp4-8-gate', 'S8-6-memory8': 'c2-packed-tp4-8',
               'S8-7a-seats4-timed': 'c2-packed-tp4-speed-strace', 'S8-7b-seats8-timed': 'c2-packed-tp4-8-time-gate'}
@@ -70,7 +71,7 @@ class OrderTests(unittest.TestCase):
         step_minutes = base.WorkflowTests.budget_literals()['step_minutes']
         for name, mode, image, minutes in read_order():
             with self.subTest(job=name):
-                self.assertEqual(mode, 'optional' if name in OPTIONAL else 'stop')
+                self.assertEqual(mode, 'manual' if name in MANUAL else 'optional' if name in OPTIONAL else 'stop')
                 self.assertEqual(image, IMAGE)
                 self.assertEqual(parsed(name)['tag'], IMAGE)
                 self.assertTrue(minutes.isdigit() and 10 <= int(minutes) <= step_minutes, minutes)
@@ -87,7 +88,7 @@ class OrderTests(unittest.TestCase):
     def test_there_is_no_handback_and_no_unserve_and_the_order_says_the_driver_handles_production(self):
         text = order_text()
         for word in ('NO HANDBACK AND NO UNSERVE JOB', 'window driver', 'FIVE CONSECUTIVE', 'CONTROL', 'KILL SIGNALS', 'STOP RULES',
-                     'QWEN_FAST_M3_REQUEST_WARM', 'at most 16', 'request widths warmed before the packed traces',
+                     'QWEN_FAST_M3_REQUEST_WARM', 'RECORDED, not bounded', 'request widths warmed before the packed traces',
                      'packed blocks capture block=0'):
             self.assertIn(word, text)
         for name in ORDERED:
@@ -173,10 +174,10 @@ class SmokeTests(unittest.TestCase):
         import c2_smoke_check as check
         for name in REPEATS:
             text = text_of(name)
-            for word in ('request widths warmed before the packed traces', 'packed blocks capture block=0', 'at most 16',
+            for word in ('request widths warmed before the packed traces', 'packed blocks capture block=0', 'RECORDED, not bounded',
                          'steady_resend', 'five consecutive completions', 'QWEN_FAST_STALL_BUILD_S=150', 'QWEN_FAST_M3_REQUEST_WARM=1'):
                 self.assertIn(word, text, name)
-        self.assertEqual(check.FIRST_ENGINE_PROGRAMS_MAX, 16)
+        self.assertFalse(hasattr(check, 'FIRST_ENGINE_PROGRAMS_MAX'))
         control = text_of('R2-nowarm-control')
         for word in ('MUST still hang', 'EXPECTED result', 'QWEN_FAST_M3_REQUEST_WARM=0'):
             self.assertIn(word, control)

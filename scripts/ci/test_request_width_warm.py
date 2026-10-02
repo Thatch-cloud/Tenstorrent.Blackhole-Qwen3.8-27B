@@ -156,6 +156,7 @@ class WarmTests(unittest.TestCase):
         from dflash_request_runtime import TARGET_TAPS
         self.assertEqual(self.captures, [(tuple(TARGET_TAPS), len(TARGET_TAPS))] * 3)
         begins = [i for i, event in enumerate(self.events) if event == ('tap_begin',)]
+        self.assertEqual(len(begins), 3)
         for begin, rows in zip(begins, (1, 2, 4)):
             self.assertEqual(self.events[begin + 1], ('run', rows, True))
             self.assertEqual(self.events[begin + 2], ('tap_end',))
