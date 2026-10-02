@@ -745,7 +745,13 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             # The step bound to its block (or blocks), carrying the per-round ticket-width
             # policy the worker hook asks before drafting.
             packed_step = PackedStep(packed_blocks if four_as_two or m3_blocks_two else packed_blocks[0],
-                                     **({'solo': solo_block} if solo_block is not None else {}))
+                                     **({'solo': solo_block} if solo_block is not None else {}),
+                                     # QWEN_FAST_M3_BLOCKS=2: each block's ticket width is its own (PackedStep.proposal_groups).
+                                     **({'per_block_widths': True} if m3_blocks_two else {}))
+            if m3_blocks_two:
+                # New arrivals fill a block that has exactly one live user first, else the fuller block that is not full
+                # (ServingBufferPool.place_blocks), so a lone user is rare and a block runs packed whenever it can.
+                pool.place_blocks(tuple(tuple(range(index * 4, index * 4 + 4)) for index in range(2)))
             step_description = dict(describe_packed_step(),
                 **(dict(blocks=[packed_block.describe() for packed_block in packed_blocks])
                    if four_as_two or m3_blocks_two else dict(block=packed_blocks[0].describe())),

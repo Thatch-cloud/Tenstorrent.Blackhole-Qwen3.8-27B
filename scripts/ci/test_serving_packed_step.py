@@ -1692,6 +1692,178 @@ class TwoBlockStepTests(unittest.TestCase):
             PackedStep(None)
 
 
+class PaddedFakeBlock(FakeBlock):
+    """The 64-row M3 block as the policy sees it: four users, padded rounds of two or three live (PackedVerifierEngine.pads)."""
+
+    def __init__(self, users=4):
+        super().__init__(users=users)
+
+    def pads(self, count):
+        return 2 <= count < self.shape.users
+
+    def padded_refusal(self, users):
+        return None
+
+
+class PerBlockWidthTests(unittest.TestCase):
+    """QWEN_FAST_M3_BLOCKS=2 (A3): the ticket width of the coming round is decided PER BLOCK (proposal_groups), where
+    proposal_rows answers one width for the whole round. Two M3 blocks over eight users: a block that cannot serve its own
+    members as one pass narrows only them, and the round runs the other block packed and the lone member sequentially."""
+
+    def setUp(self):
+        verifier_engine.note_prefill()
+        self.block_a, self.block_b = PaddedFakeBlock(), PaddedFakeBlock()
+        self.stepped = []
+        self.counter = 0
+
+    def users(self, block, count, widths=(1, 2, 4)):
+        made = []
+        for segment in range(count):
+            self.counter += 1
+            request = CommittingRequest('R%d' % self.counter, 4100 + 50 * self.counter, self.stepped)
+            request.engine.widths = widths
+            block.bind(request.engine, segment)
+            made.append(request)
+        return made
+
+    def groups(self, requests):
+        return serving_packed_step.proposal_groups((self.block_a, self.block_b), requests)
+
+    def rows(self, requests):
+        return [rows for unused, rows, unused2 in self.groups(requests)]
+
+    def test_four_and_one_runs_block_a_packed_and_only_the_lone_users_width_narrows(self):
+        a, b = self.users(self.block_a, 4), self.users(self.block_b, 1)
+        self.assertEqual(self.groups(a + b), [(self.block_a, 16, a), (self.block_b, None, b)])
+        # proposal_rows over the same round: one lone member answers None for EVERY user (today's whole-round rule)
+        self.assertIsNone(proposal_rows([self.block_a, self.block_b], a + b))
+
+    def test_three_and_two_both_blocks_run_padded(self):
+        a, b = self.users(self.block_a, 3), self.users(self.block_b, 2)
+        self.assertEqual(self.rows(a + b), [16, 16])
+
+    def test_zero_and_four_only_block_b_runs_and_an_empty_block_is_absent(self):
+        b = self.users(self.block_b, 4)
+        self.assertEqual([(block, rows) for block, rows, unused in self.groups(b)], [(self.block_b, 16)])
+
+    def test_one_and_one_narrows_both_and_four_and_four_widens_both(self):
+        a, b = self.users(self.block_a, 1), self.users(self.block_b, 1)
+        self.assertEqual(self.rows(a + b), [None, None])
+        a, b = self.users(self.block_a, 4), self.users(self.block_b, 4)
+        self.assertEqual(self.rows(a + b), [16, 16])
+
+    def test_finished_and_unbound_requests_ride_in_the_last_group_with_no_block(self):
+        a = self.users(self.block_a, 4)
+        a[3].session.finished = True
+        foreign = FakeRequest('X', 9000, self.stepped)
+        groups = self.groups(a + [foreign])
+        # the three live members of A are a padded round; the finished one and the unbound one have no block
+        self.assertEqual([(block, rows) for block, rows, unused in groups], [(self.block_a, 16), (None, None)])
+        self.assertEqual(groups[0][2], a[:3])
+        self.assertEqual(groups[1][2], [a[3], foreign])
+
+    def test_the_budget_and_the_family_are_checked_per_block(self):
+        a, b = self.users(self.block_a, 4), self.users(self.block_b, 4)
+        b[2].session.emitted = [1] * 245
+        self.assertEqual(self.rows(a + b), [16, None], 'fewer than sixteen tokens left for one member of B narrows B alone')
+        b[2].session.emitted = []
+        self.block_a.replay_capacity = 4352
+        a[1].session.position = 4340
+        self.assertEqual(self.rows(a + b), [None, 16], "one frontier out of A's native chunk family narrows A alone")
+
+    def test_the_budget_cap_keeps_any_token_left_in_the_block_round(self):
+        a, b = self.users(self.block_a, 4), self.users(self.block_b, 4)
+        b[2].session.emitted = [1] * 245
+        with patch.dict('os.environ', {'QWEN_FAST_BUDGET_CAP': '1'}):
+            self.assertEqual(self.rows(a + b), [16, 16])
+            b[2].session.emitted = [1] * 256
+            self.assertEqual(self.rows(a + b), [16, None])
+
+    def test_the_step_decides_per_block_only_when_built_so(self):
+        for flag in (False, True):
+            step = PackedStep([self.block_a, self.block_b], per_block_widths=flag)
+            a, b = self.users(self.block_a, 4), self.users(self.block_b, 1)
+            groups = step.proposal_groups(a + b)
+            if flag:
+                self.assertEqual([rows for unused, rows, unused2 in groups], [16, None])
+            else:
+                self.assertIsNone(groups)
+                self.assertIsNone(step.proposal_rows(a + b), 'today: one lone member narrows every user')
+        with self.assertRaises(ValueError):
+            PackedStep([self.block_a], per_block_widths=True)
+        with self.assertRaises(ValueError):
+            PackedStep([self.block_a, self.block_b], solo=PaddedFakeBlock(1), per_block_widths=True)
+        with self.assertRaises(ValueError):
+            PackedStep([self.block_a, self.block_b], per_block_widths=1)
+
+    def ticket(self, request, block, segment, rows, accept=3):
+        predictions = block.predictions_for(segment) if rows == block.rows_per_user else list(range(1000, 1000 + rows))
+        return request.propose(predictions, accept, rows)
+
+    def test_a_four_and_one_round_serves_block_a_packed_and_the_lone_user_sequentially_each_exactly_once(self):
+        a, b = self.users(self.block_a, 4), self.users(self.block_b, 1)
+        for segment, request in enumerate(a):
+            self.ticket(request, self.block_a, segment, 16)
+        self.ticket(b[0], self.block_b, 0, 4, accept=2)
+        step = PackedStep([self.block_a, self.block_b], per_block_widths=True)
+        entries = [entry(b[0]), entry(a[2]), entry(a[0]), entry(a[3]), entry(a[1])]
+        outputs = step(entries, cancelled=lambda: False)
+        self.assertEqual([output.request_id for output in outputs], [item['request_id'] for item in entries],
+                         "the scheduler's own order, whichever block produced each output")
+        self.assertEqual(self.block_a.calls[0], ('verify', [a[2].session.request_id, a[0].session.request_id,
+                                                          a[3].session.request_id, a[1].session.request_id]))
+        self.assertEqual(self.block_b.calls, [], 'block B never ran: its one user is narrower than a pass')
+        self.assertEqual(self.stepped, [(b[0].session.request_id, False)])
+        self.assertEqual(b[0].rows_stepped, [4])
+        served = [output.request_id for output in outputs]
+        self.assertEqual(len(served), len(set(served)), 'every request exactly once')
+
+    def test_a_three_and_two_round_runs_both_blocks_padded_and_nobody_sequentially(self):
+        a, b = self.users(self.block_a, 3), self.users(self.block_b, 2)
+        for segment, request in enumerate(a):
+            self.ticket(request, self.block_a, segment, 16)
+        for segment, request in enumerate(b):
+            self.ticket(request, self.block_b, segment, 16)
+        step = PackedStep([self.block_a, self.block_b], per_block_widths=True)
+        outputs = step([entry(request) for request in a + b], cancelled=lambda: False)
+        self.assertEqual((self.block_a.calls[0][0], self.block_b.calls[0][0]), ('verify', 'verify'))
+        self.assertEqual(self.stepped, [])
+        self.assertEqual(len(outputs), 5)
+
+    def test_a_zero_and_four_round_runs_block_b_alone(self):
+        b = self.users(self.block_b, 4)
+        for segment, request in enumerate(b):
+            self.ticket(request, self.block_b, segment, 16)
+        step = PackedStep([self.block_a, self.block_b], per_block_widths=True)
+        step([entry(request) for request in b], cancelled=lambda: False)
+        self.assertEqual(self.block_a.calls, [])
+        self.assertEqual(self.block_b.calls[0][0], 'verify')
+
+    def window_block(self, block, **flags):
+        block.prestaged, block.round_fences, block.fused = flags.get('prestaged'), flags.get('round_fences', False), None
+        return block
+
+    def test_the_window_covers_every_packed_block_and_drops_the_prestage_when_two_run(self):
+        import verify_prestage
+
+        step = PackedStep([self.window_block(self.block_a, prestaged=object(), round_fences=True),
+                           self.window_block(self.block_b, prestaged=object(), round_fences=True)], per_block_widths=True)
+        a, b = self.users(self.block_a, 4), self.users(self.block_b, 4)
+        window = step.while_waiting_groups(step.proposal_groups(a + b))
+        self.assertIsInstance(window, verify_prestage.CompositeWindow)
+        self.assertEqual([(w.block, w.requests, w.prestage) for w in window.windows],
+                         [(self.block_a, a, False), (self.block_b, b, False)])
+        # one packed block (4+1): that block's own window, pre-stage included - today's single-block window
+        b1 = self.users(self.block_b, 1)
+        window = step.while_waiting_groups(step.proposal_groups(a + b1))
+        self.assertIsInstance(window, verify_prestage.WhileWaiting)
+        self.assertEqual((window.block, window.requests, window.prestage), (self.block_a, a, True))
+        # nothing packed, or no flag on the block: no window
+        self.assertIsNone(step.while_waiting_groups(step.proposal_groups(self.users(self.block_a, 1) + b1)))
+        bare = PackedStep([self.window_block(self.block_a), self.window_block(self.block_b)], per_block_widths=True)
+        self.assertIsNone(bare.while_waiting_groups(bare.proposal_groups(a + b)))
+
+
 class RealBlockTests(BlockFixture):
     """The step over the real PackedVerifierEngine (test_packed_verifier's fakes underneath:
     a fake ttnn, a fake ModelBatch retaining one record per layer, the commit DMA recorded).

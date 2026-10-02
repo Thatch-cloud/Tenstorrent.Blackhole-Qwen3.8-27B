@@ -339,6 +339,65 @@ def proposal_rows(block, requests):
     return width
 
 
+def proposal_groups(blocks, requests):
+    """QWEN_FAST_M3_BLOCKS=2: the coming round's ticket width PER BLOCK, as [(block, rows, requests)] - `rows` the
+    block's rows per user for every member when THAT block serves its own members as one pass, else None: each
+    member then drafts at its engine's own width and the exact sequential step serves it - and one last
+    (None, rows None, rest) entry for every request no block serves (finished, or bound to none). Every request of
+    `requests` is in exactly one entry; the blocks come in their configured order, a block with no member is absent.
+
+    This is `proposal_rows` asked of each block's group alone: the same eligibility, one block at a time. Where
+    `proposal_rows` answers one width for the whole round, so one lone member (a 4+1 split) sends every user to the
+    sequential step, here block A's four users stay one 16-row pass and only the lone user of block B narrows - the
+    step already partitions a round by block (`packed_device_rounds`), so a lone member's engine-width ticket and the
+    other block's 16-row tickets run in one round, each exactly once."""
+    blocks = tuple(blocks)
+    members = {id(block): [] for block in blocks}
+    rest = []
+    for request in requests:
+        if request.session.finished:
+            rest.append(request)
+            continue
+        for block in blocks:
+            try:
+                block.segment_of(request.engine)
+            except ValueError:
+                continue
+            members[id(block)].append(request)
+            break
+        else:
+            rest.append(request)
+    groups = []
+    for block in blocks:
+        group = members[id(block)]
+        if not group:
+            continue
+        groups.append((block, block_rows_for(block, group), group))
+    if rest:
+        groups.append((None, None, rest))
+    return groups
+
+
+def block_rows_for(block, group):
+    """`proposal_rows`' decision for ONE block over its own live members: the block's rows per user, or None. See
+    proposal_rows for each condition; this is the body of its per-block loop."""
+    shape = block.shape
+    padded = len(group) != shape.users and pads(block, len(group))
+    if len(group) != shape.users and not padded:
+        return None
+    for request in group:
+        session = request.session
+        if session.max_new_tokens - len(session.emitted) < (1 if budget_cap_enabled() else shape.rows_per_user):
+            return None
+        if not admitted(block, session.position):
+            return None
+    if padded and padded_refused_at_proposal(group, block) is not None:
+        return None
+    if getattr(block, 'kv_chains', False) and kv_shared_at_proposal(group, block) is not None:
+        return None
+    return shape.rows_per_user
+
+
 def pads(block, count):
     """Whether `block` serves a round of `count` live requests padded (QWEN_FAST_PADDED_BLOCK:
     packed_verifier.PackedVerifierEngine.pads, padded_min_users <= count < users). False for a
@@ -453,12 +512,18 @@ class PackedStep:
     `packed_device_rounds` instead; `self.block` is then None, since no one block owns the
     round."""
 
-    def __init__(self, blocks, *, solo=None):
+    def __init__(self, blocks, *, solo=None, per_block_widths=False):
         if blocks is None:
             raise ValueError('A packed verify block is required')
         self.blocks = tuple(blocks) if isinstance(blocks, (list, tuple)) else (blocks,)
         if not self.blocks:
             raise ValueError('At least one packed verify block is required')
+        # QWEN_FAST_M3_BLOCKS=2 (serving_runtime): the coming round's ticket width is decided PER BLOCK
+        # (`proposal_groups`), so a block that cannot serve its own members as one pass narrows only them. False, the
+        # default, is the one width for the whole round every caller below has always read.
+        if type(per_block_widths) is not bool or (per_block_widths and (len(self.blocks) < 2 or solo is not None)):
+            raise ValueError('per_block_widths is an explicit bool, for several blocks and no solo block')
+        self.per_block_widths = per_block_widths
         self.block = self.blocks[0] if len(self.blocks) == 1 else None
         # D0 (QWEN_FAST_SOLO_LANE, serving_solo_lane; default off): the one-user 16-row block a lone slot-0 user's
         # rounds run on. It is NOT one of `blocks`: proposal_rows and group_by_block match a request to the first
@@ -543,6 +608,41 @@ class PackedStep:
             rows = solo_proposal_rows(self.solo, requests)
             note_solo_skipped(self.solo, requests, rows)
         return rows
+
+    def proposal_groups(self, requests):
+        """[(block, rows, requests)] for the coming round (module `proposal_groups`), when this step decides its widths
+        per block (QWEN_FAST_M3_BLOCKS=2); None otherwise, and the worker hook then asks `proposal_rows` as it always
+        did."""
+        if not self.per_block_widths:
+            return None
+        return proposal_groups(self.blocks, requests)
+
+    def while_waiting_groups(self, groups):
+        """The drafts' fence window for a per-block round: one window per block whose members are drafted at its width
+        (verify_prestage.WhileWaiting), composed (verify_prestage.CompositeWindow) when more than one block runs
+        packed - so every packed block's round fence is armed and every block's fused tables are staged. None when no
+        block runs packed or none holds a flag the window serves, and the hook passes nothing.
+
+        The verify pre-stage is written only when ONE block runs packed in the round: the fixture write epoch is one
+        counter for the process (verify_prestage.bump), a pre-stage and every verify bump it, so a second block's
+        pre-stage or the first block's verify would invalidate the first's snapshot before it is read - the verify then
+        takes the full stage, today's, with the pre-stage's host work spent for nothing."""
+        packed = [(block, members) for block, rows, members in groups if block is not None and rows is not None]
+        windows = []
+        for block, members in packed:
+            if (getattr(block, 'prestaged', None) is None and not getattr(block, 'round_fences', False)
+                    and getattr(block, 'fused', None) is None):
+                continue
+            from verify_prestage import WhileWaiting
+
+            windows.append(WhileWaiting(block, members, prestage=len(packed) == 1))
+        if not windows:
+            return None
+        if len(windows) == 1:
+            return windows[0]
+        from verify_prestage import CompositeWindow
+
+        return CompositeWindow(windows)
 
     def while_waiting(self, requests):
         """Round-fence plan H1a: the drafts' fence-window callable for this step's one block

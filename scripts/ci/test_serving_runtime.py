@@ -115,8 +115,10 @@ class RuntimeAttachmentTests(unittest.TestCase):
                 events.append('runtime_exit')
 
         lifecycle = SimpleNamespace(close=Mock(side_effect=lambda: events.append('lifecycle_close')))
+        self.place_blocks = Mock()
         pool = SimpleNamespace(close=Mock(side_effect=lambda: events.append('pool_close')),
-                               describe=Mock(return_value=dict(users=users)), **(pool_extra or {}))
+                               describe=Mock(return_value=dict(users=users)), place_blocks=self.place_blocks,
+                               **(pool_extra or {}))
         weights = SimpleNamespace(close=Mock(side_effect=lambda: events.append('weights_close')), tensors=[],
                                   describe=Mock(return_value=dict(tensors=0, weights=[])))
         block = SimpleNamespace(close=Mock(side_effect=lambda: events.append('block_close')),
@@ -291,6 +293,12 @@ class RuntimeAttachmentTests(unittest.TestCase):
                                 expected_options['capture_position'] = capture_position
                             self.assertEqual(call.kwargs, expected_options)
                         self.assertIsInstance(packed_step, serving_packed_step.PackedStep)
+                        # A3: only the eight-seat step decides its ticket widths per block and places arrivals by block.
+                        self.assertIs(packed_step.per_block_widths, bool(m3x2))
+                        if m3x2:
+                            self.place_blocks.assert_called_once_with(((0, 1, 2, 3), (4, 5, 6, 7)))
+                        else:
+                            self.place_blocks.assert_not_called()
                         if two_blocks or m3x2:
                             self.assertEqual(packed_step.blocks, (block, block))
                             self.assertIsNone(packed_step.block, 'no single block owns a two-block round')

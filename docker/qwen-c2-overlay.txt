@@ -89,6 +89,12 @@ scripts/ci/serving_worker_hook.py
 scripts/ci/serving_lifecycle.py
 scripts/ci/serving_packed_step.py
 
+# Eight seats on two M3 blocks (QWEN_FAST_M3_BLOCKS=2, default off): serving_packed_step builds one fence window per packed block
+# (verify_prestage.CompositeWindow) and the early draft's key carries every pending ticket's width (early_draft.draft_key). Both ship
+# from the P8 base otherwise, and the step would import a class the base copy of verify_prestage does not have.
+scripts/ci/verify_prestage.py
+scripts/ci/early_draft.py
+
 # D0, the one-user lane (QWEN_FAST_SOLO_LANE, gate only; the lanes window): serving_runtime builds the one-user block beside M3
 # when the flag is on and serving_packed_step routes a lone slot-0 round to it (both lazy-import serving_solo_lane), over the
 # shape packed_shapes.solo_shape names. Flag off, none of the three is read: this is what each was call for call.

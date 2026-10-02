@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 import torch
 
 import dflash_device
+import serving_buffer_pool
 from dflash_device import DFlashDevice, PreparedDraftWeights, pindiag
 from pooled_attention_replay import bundle_batches, family_capacities
 from serving_buffer_pool import (DRAFT_LAYERS, DRAFT_OUTPUTS_REFUSED_LINE, GDN_LAYERS, HISTORY_SHAPE, KV_SHAPE,
@@ -1626,6 +1627,91 @@ class SharedWeightTests(DeviceFixture):
         self.assertFalse(pool.slots[0].lent)
         persistent = [*weights.tensors, *pool.slots[0].tensors]
         self.assertFalse(any(value is kept for value in operations.deallocated for kept in persistent))
+
+
+class BlockPlacementTests(unittest.TestCase):
+    """QWEN_FAST_M3_BLOCKS=2 (A3): a new request takes a slot of the block with exactly one live user first, else the fuller
+    block that is not full - so a lone user (one narrowed to the sequential step) is rare and a block runs packed whenever it can."""
+
+    def pool(self, lent=(), blocks=((0, 1, 2, 3), (4, 5, 6, 7))):
+        pool = SimpleNamespace(slots=[SimpleNamespace(index=index, lent=index in lent) for index in range(8)])
+        pool.place_blocks = lambda groups: serving_buffer_pool.ServingBufferPool.place_blocks(pool, groups)
+        pool.placement_slot = lambda: serving_buffer_pool.ServingBufferPool.placement_slot(pool)
+        if blocks is not None:
+            pool.place_blocks(blocks)
+        return pool
+
+    def placed(self, lent):
+        slot = self.pool(lent).placement_slot()
+        return None if slot is None else slot.index
+
+    def test_an_empty_pool_fills_block_a_first_and_a_one_user_block_is_joined(self):
+        self.assertEqual(self.placed(()), 0)
+        self.assertEqual(self.placed((0,)), 1)
+        self.assertEqual(self.placed((4,)), 5, 'block B holds exactly one: it is joined before the empty block A is used')
+        self.assertEqual(self.placed((2,)), 0, 'the lowest free slot of the block')
+
+    def test_otherwise_the_fuller_block_that_is_not_full_and_the_first_on_a_tie(self):
+        self.assertEqual(self.placed((0, 1)), 2, 'A holds two, B none: the fuller block')
+        self.assertEqual(self.placed((4, 5, 6)), 7)
+        self.assertEqual(self.placed((0, 1, 2, 4, 5)), 3, 'A three, B two: the fuller')
+        self.assertEqual(self.placed((0, 1, 4, 5)), 2, 'two and two: the first block')
+        self.assertEqual(self.placed((0, 1, 2, 3)), 4, 'A full: B')
+        self.assertEqual(self.placed((0, 1, 2, 3, 4)), 5, 'A full, B holds one')
+
+    def test_a_lone_user_is_joined_even_when_the_other_block_is_fuller(self):
+        self.assertEqual(self.placed((0, 1, 2, 4)), 5, 'B holds exactly one: it would run alone, so it is joined')
+        self.assertEqual(self.placed((0, 1, 2, 3, 4, 5, 6)), 7)
+
+    def test_every_block_full_is_no_slot(self):
+        self.assertIsNone(self.placed(tuple(range(8))))
+
+    def test_a_departure_leaves_the_block_to_be_refilled_before_the_empty_one(self):
+        # A: 0 and 1 left, 2 and 3 live; B empty -> the fuller block A takes the next two
+        self.assertEqual(self.placed((2, 3)), 0)
+        # A holds one (3) after another departure: joined first
+        self.assertEqual(self.placed((3,)), 0)
+
+    def test_acquire_places_by_block_and_is_the_lowest_free_slot_without_it(self):
+        pool = self.acquirer(placed=True)
+        order = []
+        for owner in range(8):
+            order.append(serving_buffer_pool.ServingBufferPool.acquire(pool, owner=owner).index)
+        self.assertEqual(order, [0, 1, 2, 3, 4, 5, 6, 7])
+        with self.assertRaises(ValueError):
+            serving_buffer_pool.ServingBufferPool.acquire(pool, owner=9)
+        # a departure from each block, then two arrivals: the block that holds ONE live user is joined first
+        for index in (1, 2, 3, 5, 6, 7):
+            pool.slots[index].lent = False
+        self.assertEqual(serving_buffer_pool.ServingBufferPool.acquire(pool, owner='x').index, 1)
+        flat = self.acquirer(placed=False)
+        flat.slots[0].lent = flat.slots[1].lent = True
+        self.assertEqual(serving_buffer_pool.ServingBufferPool.acquire(flat, owner='y').index, 2)
+
+    def acquirer(self, placed):
+        pool = SimpleNamespace(
+            slots=[SimpleNamespace(index=index, lent=False, owner=None, zeroed=(), verifier=None, addresses=((0, 0),) * 3,
+                                   kv=(), verify=lambda: None) for index in range(8)],
+            closed=False, users=8, operations=SimpleNamespace(full_like=Mock()))
+        pool.placement_slot = lambda: serving_buffer_pool.ServingBufferPool.placement_slot(pool)
+        if placed:
+            serving_buffer_pool.ServingBufferPool.place_blocks(pool, ((0, 1, 2, 3), (4, 5, 6, 7)))
+        return pool
+
+    def test_the_blocks_are_validated_and_set_once(self):
+        pool = self.pool(blocks=None)
+        for bad in (((0, 1, 2, 3),), ((0, 1), (1, 2)), ((0, 1), (8, 9)), ((0, 1), (2, 'x'))):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'disjoint groups of pooled slots'):
+                pool.place_blocks(bad)
+        pool.place_blocks(((0, 1, 2, 3), (4, 5, 6, 7)))
+        with self.assertRaisesRegex(ValueError, 'already set'):
+            pool.place_blocks(((0, 1, 2, 3), (4, 5, 6, 7)))
+
+    def test_a_slot_order_still_decides_for_the_lanes_and_the_default_pool_has_no_blocks(self):
+        pool = self.acquirer(placed=True)
+        pool._slot_order = (5,)
+        self.assertEqual(serving_buffer_pool.ServingBufferPool.acquire(pool, owner='z').index, 5)
+        self.assertFalse(hasattr(serving_buffer_pool.ServingBufferPool, '_blocks'), 'class level: unset, no placement')
 
 
 if __name__ == '__main__':
