@@ -23,7 +23,7 @@ def post(path, body, timeout=900):
         return error.code, error.read().decode(errors='replace')[:400]
 
 
-def stream(messages, max_tokens, drop_after=None, timeout=1800, keep_stamps=False, **extra):
+def stream(messages, max_tokens, drop_after=None, timeout=1800, keep_stamps=False, on_token=None, **extra):
     body = dict(model=MODEL, messages=messages, max_tokens=max_tokens, stream=True,
                 stream_options={'include_usage': True}, **extra)
     request = urllib.request.Request(BASE + '/v1/chat/completions', data=json.dumps(body).encode(), method='POST',
@@ -49,6 +49,8 @@ def stream(messages, max_tokens, drop_after=None, timeout=1800, keep_stamps=Fals
                     content.append(delta.get('content') or '')
                     reasoning.append(delta.get('reasoning_content') or delta.get('reasoning') or '')
                     count += 1
+                    if on_token is not None:
+                        on_token(count)     # the arrival gate of concurrent5_split reads the stream's progress here
                 finish = choice.get('finish_reason') or finish
             if drop_after is not None and count >= drop_after:
                 return dict(dropped_after=count, text=''.join(pieces)[:200])
@@ -154,15 +156,19 @@ def live_report(users):
                 ttft_max_s=max([user.get('ttft') or 0 for user in done] or [0]))
 
 
-def run_users(label, prompts, max_tokens=800, order=None, stagger=0.0, timeout=1800):
-    """The four-user shape: one streamed request per prompt, threads started in `order` (default the prompts' own) `stagger`
-    seconds apart, per-read timeout `timeout`. users[i] is prompt i's answer, whatever the order. Per user: TTFT, decode tok/s
-    on the existing clock and live4_tok_s (live_report); the aggregate is printed and returned first."""
+def run_users(label, prompts, max_tokens=800, order=None, stagger=0.0, timeout=1800, **extra):
+    """The four-user shape (any user count): one streamed request per prompt, threads started in `order` (default the prompts'
+    own) `stagger` seconds apart, per-read timeout `timeout`. users[i] is prompt i's answer, whatever the order. Per user: TTFT,
+    decode tok/s on the existing clock and live4_tok_s (live_report: the window every user is live in, whatever the count);
+    the aggregate is printed and returned first. `max_tokens` is one budget for all or a list, one per prompt; `extra` is
+    added to every request body (the drain test's ignore_eos)."""
     out = [None] * len(prompts)
+    budgets = list(max_tokens) if isinstance(max_tokens, (list, tuple)) else [max_tokens] * len(prompts)
 
     def run(index):
         try:
-            out[index] = stream([{'role': 'user', 'content': prompts[index]}], max_tokens, timeout=timeout, keep_stamps=True)
+            out[index] = stream([{'role': 'user', 'content': prompts[index]}], budgets[index], timeout=timeout, keep_stamps=True,
+                                **extra)
         except Exception as error:
             out[index] = dict(error=repr(error)[:300])
 
@@ -268,10 +274,11 @@ def concurrent8_code():
     return dict(run_users('concurrent8_code', prompts), corpus=corpus)
 
 
-def steady_prompts():
-    # About 3,500 tokens each: four different 14,000-character stretches of the same real code.
+def steady_prompts(count=4):
+    # About 3,500 tokens each: four (or `count`) different 14,000-character stretches of the same real code; the first four are
+    # the same four whatever the count (concurrent8_steady's first four are concurrent4_steady's).
     span = 14000
-    starts = [(index * span) % max(len(source) - span, 1) for index in range(4)]
+    starts = [(index * span) % max(len(source) - span, 1) for index in range(count)]
     return ['Explain what this code does, then rewrite it with complete type annotations:\n\n' + source[start:start + span]
             for start in starts]
 
@@ -286,6 +293,18 @@ def concurrent4_steady():
 
 if ONLY and 'concurrent4_steady' in ONLY:
     record('concurrent4_steady', concurrent4_steady)
+
+
+def concurrent8_steady():
+    # Opt-in (tp4/seats8: the eight-user version of concurrent4_steady, the deterministic audits-off hang shape). Eight users,
+    # every one past the 2,048-row draft window from its first round: eight different 14,000-character stretches of the same
+    # real code (the first four are concurrent4_steady's), started together, so BOTH 64-row blocks run packed rounds, their
+    # four draft pairs pack, and the pair, packed and commit traces replay under eight engines built while traces were live.
+    return run_users('concurrent8_steady', steady_prompts(8))
+
+
+if ONLY and 'concurrent8_steady' in ONLY:
+    record('concurrent8_steady', concurrent8_steady)
 
 
 def steady_resend():
@@ -400,16 +419,19 @@ def concurrent4_solo():
     return dict(users=[stream([{'role': 'user', 'content': prompt}], 800) for prompt in concurrent_prompts()])
 
 
-def replay_concurrent4():
-    # Opt-in (after concurrent4_solo): c2_platform_replay's concurrent4 - four NON-streamed requests, one short prompt each
-    # (a unit test for a CSV, JSON, INI and TOML parser), 300 tokens, all at once: the traffic shape the platform sends.
-    out = [None] * 4
+REPLAY_PARSERS = ('CSV', 'JSON', 'INI', 'TOML', 'YAML', 'XML', 'TSV', 'HTML')
+
+
+def replay_users(count):
+    # c2_platform_replay's concurrent shape: `count` NON-streamed requests, one short prompt each (a unit test for the first
+    # `count` of REPLAY_PARSERS' parsers), 300 tokens, all at once: the traffic shape the platform sends.
+    out = [None] * count
 
     def run(index):
         started = time.time()
         try:
             status, body = post('/v1/chat/completions', dict(model=MODEL, max_tokens=300, messages=[{'role': 'user',
-                                'content': 'Write a unit test for a %s parser in Python.' % ('CSV', 'JSON', 'INI', 'TOML')[index]}]))
+                                'content': 'Write a unit test for a %s parser in Python.' % REPLAY_PARSERS[index]}]))
             wall = time.time() - started
             tokens = ((body.get('usage') or {}).get('completion_tokens') or 0) if status == 200 else 0
             out[index] = dict(status=status, tokens=tokens, wall_s=round(wall, 1), tok_s_e2e=round(tokens / wall, 2),
@@ -417,10 +439,21 @@ def replay_concurrent4():
         except Exception as error:
             out[index] = dict(error=repr(error)[:300])
 
-    threads = [threading.Thread(target=run, args=(index,)) for index in range(4)]
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(count)]
     [thread.start() for thread in threads]
     [thread.join() for thread in threads]
     return dict(users=out)
+
+
+def replay_concurrent4():
+    # Opt-in (after concurrent4_solo): c2_platform_replay's concurrent4 - four NON-streamed requests (CSV, JSON, INI, TOML).
+    return replay_users(4)
+
+
+def replay_concurrent8():
+    # Opt-in (tp4/seats8): the eight-user version of replay_concurrent4, the deterministic audits-off hang shape in the traffic
+    # the platform sends: eight non-streamed requests (the four above and YAML, XML, TSV, HTML), 300 tokens, all at once.
+    return replay_users(8)
 
 
 if ONLY and 'concurrent4_solo' in ONLY:
@@ -437,6 +470,99 @@ if ONLY and 'concurrent4_code_32k' in ONLY:
     record('concurrent4_code_32k', concurrent4_code_32k)
 if ONLY and 'concurrent8_code' in ONLY:
     record('concurrent8_code', concurrent8_code)
+
+
+def concurrent8_code_equal():
+    # Opt-in (tp4/seats8). Eight real-code prompts of the same length (about 4k tokens), a code task each, 800 out, started together:
+    # both blocks padded-equal at once; the audited S8-1 run reads zero mismatches and block B's users equal to solo.
+    prompts, corpus = code_prompts((4096,) * 8)
+    return dict(run_users('concurrent8_code_equal', prompts), corpus=corpus)
+
+
+def concurrent8_code_32k():
+    # Opt-in (tp4/seats8). Eight real-code prompts of about 32k tokens each, 800 out, started together: the eight-user prefill queue
+    # at 32k, then both blocks' packed decode at that depth.
+    prompts, corpus = code_prompts((32768,) * 8)
+    return dict(run_users('concurrent8_code_32k', prompts), corpus=corpus)
+
+
+DRAIN_BUDGETS = (200, 400, 600, 800, 1000, 1200, 1400, 1600)
+SPLIT_BUDGETS = (1600, 1600, 1600, 1600, 1200, 400)
+SPLIT_TOKENS = 320          # user 4's answer before the sixth user arrives: at least 50 rounds at tau up to 6.5
+
+
+def concurrent8_drain():
+    # Opt-in (tp4/seats8). Eight 4k real-code prompts, budgets 200, 400 ... 1,600 with ignore_eos, started together: the users end
+    # one by one at their own budgets, so the live count goes 8 to 1 through every split of the two blocks the placement allows
+    # (a block narrowing to one live user while the other still runs packed, then the last block emptying).
+    prompts, corpus = code_prompts((4096,) * 8)
+    return dict(run_users('concurrent8_drain', prompts, max_tokens=list(DRAIN_BUDGETS), ignore_eos=True), corpus=corpus,
+                budgets=list(DRAIN_BUDGETS))
+
+
+def concurrent5_split():
+    # Opt-in (tp4/seats8). The split-block shape: users 0-3 (block A) start together; user 4 arrives alone in block B once all four
+    # stream and runs at least SPLIT_TOKENS tokens (50+ rounds with its block narrowed to one live user, the other block packed);
+    # then a sixth arrives into block B (a pair, narrow to padded). Every user ignores EOS, budgets 1,600 x 4, 1,200, 400. A user that
+    # dies releases the next arrival (never a deadlock): user 4's death records its token count as None.
+    prompts, corpus = code_prompts((4096,) * 6)
+    out = [None] * 6
+    streaming = [threading.Event() for _ in range(5)]      # users 0-4: set at the first token or at the end (a dead user too)
+    split = dict(tokens=None)
+    split_ready = threading.Event()
+
+    def run(index, on_token=None):
+        try:
+            out[index] = stream([{'role': 'user', 'content': prompts[index]}], SPLIT_BUDGETS[index], on_token=on_token,
+                                ignore_eos=True)
+        except Exception as error:
+            out[index] = dict(error=repr(error)[:300])
+        finally:
+            if index < 5:
+                streaming[index].set()
+            if index == 4:
+                if split['tokens'] is None and isinstance(out[4], dict) and 'error' not in out[4]:
+                    split['tokens'] = out[4].get('tokens')    # it ended before SPLIT_TOKENS: the count it reached
+                split_ready.set()
+
+    def first_token(index):
+        def seen(count):
+            streaming[index].set()
+        return seen
+
+    def fifth_token(count):
+        streaming[4].set()
+        if count == SPLIT_TOKENS and split['tokens'] is None:
+            split['tokens'] = count
+            split_ready.set()
+
+    threads = [threading.Thread(target=run, args=(index, first_token(index))) for index in range(4)]
+    [thread.start() for thread in threads]
+    for event in streaming[:4]:
+        event.wait(1800)
+    fifth = threading.Thread(target=run, args=(4, fifth_token))
+    fifth.start()
+    split_ready.wait(1800)
+    sixth = threading.Thread(target=run, args=(5,))
+    sixth.start()
+    [thread.join() for thread in threads + [fifth, sixth]]
+    print('concurrent5_split user4_tokens_at_sixth_arrival', split['tokens'], flush=True)
+    for index, user in enumerate(out):
+        print('concurrent5_split user', index, json.dumps(dict((key, user.get(key)) for key in (
+            'prompt_tokens', 'tokens', 'ttft', 'decode_tok_s', 'finish', 'error'))), flush=True)
+    return dict(users=out, corpus=corpus, budgets=list(SPLIT_BUDGETS), user4_tokens_at_sixth_arrival=split['tokens'])
+
+
+if ONLY and 'concurrent8_code_equal' in ONLY:
+    record('concurrent8_code_equal', concurrent8_code_equal)
+if ONLY and 'concurrent8_code_32k' in ONLY:
+    record('concurrent8_code_32k', concurrent8_code_32k)
+if ONLY and 'replay_concurrent8' in ONLY:
+    record('replay_concurrent8', replay_concurrent8)
+if ONLY and 'concurrent5_split' in ONLY:
+    record('concurrent5_split', concurrent5_split)
+if ONLY and 'concurrent8_drain' in ONLY:
+    record('concurrent8_drain', concurrent8_drain)
 
 
 def agreement():

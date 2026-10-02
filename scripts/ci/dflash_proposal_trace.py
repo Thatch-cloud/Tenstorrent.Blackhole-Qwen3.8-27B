@@ -527,7 +527,7 @@ class PreparedDFlashProposal:
 
 class PreparedPackedDFlashProposal:
     """QWEN_FAST_PACKED_PROPOSAL: one traced two-user packed proposal for a single
-    FOUR_AS_TWO_PAIRS slot pair (dflash_packed_proposal.FOUR_AS_TWO_PAIRS), mirroring
+    DRAFT_PAIRS slot pair (dflash_packed_proposal.DRAFT_PAIRS), mirroring
     PreparedDFlashProposal's single-user capture above but built over
     dflash_packed_proposal.propose_packed's own cached-path geometry
     (packed_identifiers, dflash_batched_mask.batched_attention_mask/

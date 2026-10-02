@@ -31,6 +31,7 @@ behind it; a released request refused again is held and logged again; and the ho
 """
 
 import enum
+import os
 from pathlib import Path
 import sys
 import types
@@ -1296,6 +1297,179 @@ class InstalledVllmAdmissionTests(GateFreeCase):
                     self.assertEqual(set(admitted.finished_req_ids), set())
                 self.assertIn(call(admission.DRAM_CARRIED_LINE, ['A']), log.call_args_list)
                 self.assertEqual(logged(log, admission.DRAM_HOLD_LINE), [])
+
+
+class EightSeatDramTests(DramFreeCase):
+    """tp4/seats8 (review 3): the DRAM hold at 8 seats, two 64-row blocks and up to 8 per-request engines. The reading
+    is the design's ledger arithmetic on gate v179's measured per-chip items (GB allocated of 33.91): 15.07 after the
+    four-seat attach, +4.575 KV (16,416 blocks against 8,208) +1.265 for four more pool slots +1.798 for the second
+    block = 22.7 after attach, then at most 0.5 per engine, 0.84 for four pair traces and 0.27 of trace-region
+    growth. The three bounds that were never measured at eight engines are env-tunable, and unset they are today's."""
+
+    TOTAL = 33_910 * MB
+    AFTER_ATTACH = 22_750 * MB
+    ENGINE = 500 * MB              # the top of the measured +0.29-0.50 GB per engine
+    PAIRS_AND_TRACE = (840 + 270) * MB
+    # v179 read a 110 MB largest free trace block beside four engines in a 256 MiB region; 110 MB is used here at 8
+    # seats too, though the 512 MiB region leaves about 128 MB over the 409 MB the traces use.
+    TRACE_LARGEST = 110 * MB
+    BLOCK = 1_500 * MB             # a fragmented largest free block, well under the 4 GB v179 read after attach
+    TUNED = {'QWEN_FAST_DRAM_ENGINE_BUILD_MB': '1500', 'QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB': '600',
+             'QWEN_FAST_DRAM_LARGEST_BUFFER_MB': '256'}
+    FLAGS = ('QWEN_FAST_DRAM_ENGINE_BUILD_MB', 'QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB', 'QWEN_FAST_DRAM_LARGEST_BUFFER_MB')
+
+    def setUp(self):
+        super().setUp()
+        self.env = patch.dict('os.environ')
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        for flag in self.FLAGS:
+            os.environ.pop(flag, None)
+
+    def free_before_arrival(self, arrival):
+        """Free DRAM per chip when the `arrival`-th request (1-8) is admitted: arrival - 1 engines are resident."""
+        engines = arrival - 1
+        pairs = self.PAIRS_AND_TRACE if engines else 0
+        return self.TOTAL - self.AFTER_ATTACH - engines * self.ENGINE - pairs
+
+    def pool(self, arrival, block=None):
+        free = self.free_before_arrival(arrival)
+        block = self.BLOCK if block is None else block
+        return TracePool((free, min(block, free)), (free, min(block, free)), trace=self.TRACE_LARGEST)
+
+    def test_unset_the_bounds_are_todays_values_exactly(self):
+        self.assertEqual((admission.ENGINE_BUILD_BYTES, admission.PREFILL_TRANSIENT_BYTES, admission.LARGEST_BUFFER_BYTES),
+                         (800 * MB, 300 * MB, 128 * MB))
+        self.assertEqual((admission.engine_build_bytes(), admission.prefill_transient_bytes(),
+                          admission.largest_buffer_bytes()), (800 * MB, 300 * MB, 128 * MB))
+        self.assertEqual(admission.engine_build_peak(), 1_000 * MB)
+        self.assertEqual(admission.dram_need(120_000, RESERVE), 1_568_435_456, "v79's logged need=1568.4MB")
+        self.assertEqual(admission.contiguous_need(RESERVE), RESERVE + 128 * MB)
+        self.assertEqual(admission.admission_contiguous_need(120_000, RESERVE), 696_435_456)
+        self.assertEqual(admission.tuning_problems(), [])
+        self.assertEqual([flag for flag, _ in admission.TUNING_FLAGS], list(self.FLAGS))
+
+    def test_each_bound_follows_its_flag_in_whole_megabytes_and_only_its_own_term(self):
+        os.environ['QWEN_FAST_DRAM_ENGINE_BUILD_MB'] = '1500'
+        self.assertEqual(admission.engine_build_peak(), 1_700 * MB)
+        self.assertEqual(admission.dram_need(1, RESERVE), 1_700 * MB + RESERVE)
+        self.assertEqual(admission.contiguous_need(RESERVE), RESERVE + 128 * MB, 'the other bounds stay')
+        os.environ['QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB'] = '600'
+        self.assertEqual(admission.prefill_transient(120_000), 600 * MB)
+        self.assertEqual(admission.prefill_transient(2_047), 0, 'still none below PREFILL_TRANSIENT_FROM')
+        self.assertEqual(admission.dram_need(120_000, RESERVE), 1_700 * MB + 600 * MB + RESERVE)
+        self.assertEqual(admission.admission_contiguous_need(120_000, RESERVE), RESERVE + 128 * MB + 600 * MB)
+        self.assertEqual(admission.admission_contiguous_need(1_536, RESERVE), RESERVE + 128 * MB + 100 * MB,
+                         'a short prefill keeps its 100 MB residue')
+        os.environ['QWEN_FAST_DRAM_LARGEST_BUFFER_MB'] = '256'
+        self.assertEqual(admission.contiguous_need(RESERVE), RESERVE + 256 * MB)
+        self.assertEqual(admission.backstop_need(RESERVE), 1_700 * MB + RESERVE)
+        os.environ['QWEN_FAST_DRAM_LARGEST_BUFFER_MB'] = '0'
+        self.assertEqual(admission.contiguous_need(RESERVE), RESERVE, 'zero is a value, not unset')
+
+    def test_a_bad_value_is_refused_not_read_as_the_default(self):
+        for flag in self.FLAGS:
+            for bad in ('', ' ', 'x', '-1', '1.5', '1e3', '0x10', '\u0663', '1 2'):
+                with self.subTest(flag=flag, value=bad):
+                    os.environ[flag] = bad
+                    self.assertEqual(len(admission.tuning_problems()), 1)
+                    self.assertIn(flag, admission.tuning_problems()[0])
+                    with self.assertRaises(ValueError):
+                        admission.dram_need(120_000, RESERVE)
+                        admission.contiguous_need(RESERVE)
+                        admission.engine_build_peak()
+            os.environ.pop(flag)
+        os.environ['QWEN_FAST_DRAM_ENGINE_BUILD_MB'] = ' 900 '
+        self.assertEqual(admission.engine_build_bytes(), 900 * MB, 'surrounding blanks are not part of the number')
+
+    def test_the_explicit_environ_argument_is_what_is_read(self):
+        self.assertEqual(admission.tuned_bytes('QWEN_FAST_DRAM_ENGINE_BUILD_MB', 5, {}), 5)
+        self.assertEqual(admission.tuned_bytes('QWEN_FAST_DRAM_ENGINE_BUILD_MB', 5, {'QWEN_FAST_DRAM_ENGINE_BUILD_MB': '2'}),
+                         2 * MB)
+        self.assertEqual(admission.tuning_problems({'QWEN_FAST_DRAM_LARGEST_BUFFER_MB': 'no'}),
+                         ['QWEN_FAST_DRAM_LARGEST_BUFFER_MB must be a non-negative whole number of megabytes, got \'no\''])
+
+    def test_the_ledger_arithmetic_at_eight_seats(self):
+        self.assertEqual(self.free_before_arrival(1), 11_160 * MB, 'after attach, before any engine: 33.91 - 22.75')
+        # After the 8th engine at the top of the measured per-engine cost the design's running band is 26.8-29.0.
+        running = self.TOTAL - self.free_before_arrival(8) + self.ENGINE
+        self.assertEqual(running, 22_750 * MB + 8 * 500 * MB + 1_110 * MB)
+        self.assertAlmostEqual(running / 1000 / MB, 27.86, places=2)
+        self.assertGreaterEqual(33.91 - 27.86, 3.0, 'the I1 DRAM pass bar: free at 8 live >= 3 GB per chip')
+
+    def test_the_eighth_arrival_fits_at_131k_on_the_defaults_and_on_conservative_bounds(self):
+        for env in ({}, self.TUNED):
+            with self.subTest(tuned=bool(env)), patch.dict('os.environ', env):
+                free = self.free_before_arrival(8)
+                self.assertEqual(free, 6_550 * MB)
+                ok, detail = admission.dram_predicate(self.pool(8), RESERVE)(123_136)
+                self.assertEqual((ok, detail['short']), (True, ()))
+                need = admission.dram_need(123_136, RESERVE)
+                self.assertEqual(detail['need'], need)
+                self.assertGreater(free - admission.STRANDED_BYTES - need, 0)
+                # and through the hold itself, with seven decoding: no hold, one fit line
+                log = Mock()
+                with dram(admission.dram_predicate(self.pool(8), RESERVE)):
+                    held = admission.dram_hold(SimpleNamespace(waiting=Queue([DramRequest('u8', 123_136)])), 7, {}, log)
+                self.assertFalse(held)
+                self.assertEqual(logged(log, admission.DRAM_HOLD_LINE), [])
+                self.assertEqual(len(logged(log, admission.DRAM_FIT_LINE)), 1)
+
+    def test_no_hold_while_a_seat_is_free_and_the_dram_fits_across_all_eight_arrivals(self):
+        for env in ({}, self.TUNED):
+            for arrival in range(1, 9):
+                for prompt in (1_536, 60_000, 123_136):
+                    with self.subTest(tuned=bool(env), arrival=arrival, prompt=prompt), patch.dict('os.environ', env):
+                        log, state = Mock(), {}
+                        request = DramRequest('u%d' % arrival, prompt)
+                        with dram(admission.dram_predicate(self.pool(arrival), RESERVE)):
+                            held = admission.dram_hold(SimpleNamespace(waiting=Queue([request])), arrival - 1, state, log)
+                        self.assertFalse(held)
+                        self.assertIsNone(state.get('dram_held'))
+                        self.assertEqual(logged(log, admission.DRAM_HOLD_LINE), [])
+
+    def test_a_reading_short_of_a_term_still_holds_at_eight_seats(self):
+        # The high end of the design's band: 29.3 GB allocated with the 8th engine resident leaves 4.6 GB, and a ninth
+        # long prompt's need on the conservative bounds (2.57 GB + 300 MB stranded) is still met; a reading under it holds.
+        need = admission.dram_need(123_136, RESERVE)
+        with patch.dict('os.environ', self.TUNED):
+            tuned_need = admission.dram_need(123_136, RESERVE)
+            self.assertEqual(tuned_need, 1_500 * MB + 200 * MB + 600 * MB + RESERVE)
+            self.assertGreater(tuned_need, need)
+            edge = tuned_need + admission.STRANDED_BYTES
+            for free, short in ((edge, ()), (edge - 1, ('free',))):
+                with self.subTest(free=free):
+                    pool = TracePool((free, 1_500 * MB), trace=self.TRACE_LARGEST)
+                    self.assertEqual(admission.dram_predicate(pool, RESERVE)(123_136)[1]['short'], short)
+        # the default bound would have admitted the state the conservative one holds
+        free = tuned_need + admission.STRANDED_BYTES - 1
+        pool = TracePool((free, 1_500 * MB), trace=self.TRACE_LARGEST)
+        self.assertEqual(admission.dram_predicate(pool, RESERVE)(123_136)[1]['short'], ())
+        with patch.dict('os.environ', self.TUNED):
+            self.assertEqual(admission.dram_predicate(pool, RESERVE)(123_136)[1]['short'], ('free',))
+            log = Mock()
+            with dram(admission.dram_predicate(pool, RESERVE)):
+                self.assertTrue(admission.dram_hold(SimpleNamespace(waiting=Queue([DramRequest('u9', 123_136)])), 7, {},
+                                                    log))
+            self.assertEqual(len(logged(log, admission.DRAM_HOLD_LINE)), 1)
+
+    def test_the_tuned_contiguous_bound_binds_a_block_the_defaults_admit(self):
+        block = admission.admission_contiguous_need(123_136, RESERVE)
+        pool = TracePool((6_000 * MB, block), trace=self.TRACE_LARGEST)
+        self.assertEqual(admission.dram_predicate(pool, RESERVE)(123_136)[1]['short'], ())
+        with patch.dict('os.environ', {'QWEN_FAST_DRAM_LARGEST_BUFFER_MB': '256'}):
+            self.assertEqual(admission.dram_predicate(pool, RESERVE)(123_136)[1]['short'], ('contiguous',))
+        with patch.dict('os.environ', {'QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB': '600'}):
+            self.assertEqual(admission.dram_predicate(pool, RESERVE)(123_136)[1]['short'], ('contiguous',))
+
+    def test_the_trace_region_holds_the_eight_engine_traces_in_the_512_mib_region(self):
+        # 71 MB at attach (two blocks), +40.4 MB per engine, +3.6 MB per pair: 409 MB at 8 live (cm), 512 MiB region.
+        region = 512 * 2 ** 20
+        used = 71 * MB + 8 * 40_400_000 + 4 * 3_600_000
+        self.assertLess(used, region)
+        self.assertGreater(region - used, 2 * admission.TRACE_CONTIGUOUS_BYTES)
+        seventh_engine_used = 71 * MB + 7 * 40_400_000 + 3 * 3_600_000
+        self.assertGreaterEqual(region - seventh_engine_used, admission.TRACE_CONTIGUOUS_BYTES)
 
 
 if __name__ == '__main__':

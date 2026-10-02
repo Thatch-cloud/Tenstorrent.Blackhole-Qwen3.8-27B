@@ -1,5 +1,5 @@
 """QWEN_FAST_PACKED_PROPOSAL round-level wiring: pair eligible bridges by their fixed
-pool slot (dflash_packed_proposal.FOUR_AS_TWO_PAIRS), run one traced packed pass per
+pool slot (dflash_packed_proposal.DRAFT_PAIRS), run one traced packed pass per
 full pair (dflash_proposal_trace.PreparedPackedDFlashProposal) instead of two separate
 single-user passes, and hand each pair's per-user result back through the SAME
 has_pending(seed)/finish(count) surface DFlashDevice.propose() already calls on
@@ -62,18 +62,18 @@ PAIR_BUCKET_CONTEXT = (PACKED_CONTEXT, PACKED_CONTEXT)
 def pooled_draft_mask_shapes(users, block_rows):
     """S2 (serving_buffer_pool's `draft_masks=`, which serving_runtime passes at attach under
     QWEN_FAST_EXTENT_REPLAY=1): {slot group: mask shape} for every packed draft a pool of `users` scheduler slots
-    can build - each fixed pair (dflash_packed_proposal.FOUR_AS_TWO_PAIRS) whose slots all exist, at the one
+    can build - each fixed pair (dflash_packed_proposal.DRAFT_PAIRS) whose slots all exist, at the one
     bucket a pair builds (PAIR_BUCKET_CONTEXT, QWEN_FAST_PAIR_ROW_EXACT deciding the fold as the bucket will),
     and the quad over slots 0-3 while QWEN_FAST_QUAD_DRAFT is on - so each borrows a mask allocated before any
     trace instead of uploading its own after them (M0). {} with QWEN_FAST_PACKED_PROPOSAL off: no pair forms."""
     if os.environ.get('QWEN_FAST_PACKED_PROPOSAL') != '1':
         return {}
-    from dflash_packed_proposal import FOUR_AS_TWO_PAIRS
+    from dflash_packed_proposal import DRAFT_PAIRS
     from dflash_proposal_trace import pair_host_mask
 
     shapes = {}
     pair_shape = tuple(pair_host_mask(*PAIR_BUCKET_CONTEXT, block_rows)[0].shape)
-    for group in FOUR_AS_TWO_PAIRS:
+    for group in DRAFT_PAIRS:
         if max(group) < users:
             shapes[tuple(group)] = pair_shape
     if os.environ.get(QUAD_DRAFT_FLAG, '0') != '0':
@@ -112,9 +112,9 @@ def pooled_draft_output_shapes(users, block_rows):
     shapes = {(slot,): spec(block_rows, max(block_rows, PASS_ROWS)) for slot in range(users)}
     if os.environ.get('QWEN_FAST_PACKED_PROPOSAL') != '1':
         return shapes
-    from dflash_packed_proposal import BLOCK_WIDTH, FOUR_AS_TWO_PAIRS
+    from dflash_packed_proposal import BLOCK_WIDTH, DRAFT_PAIRS
 
-    for group in FOUR_AS_TWO_PAIRS:
+    for group in DRAFT_PAIRS:
         if max(group) < users:
             shapes[tuple(group)] = spec(BLOCK_WIDTH, BLOCK_WIDTH)
     if os.environ.get(QUAD_DRAFT_FLAG, '0') != '0':
@@ -488,7 +488,7 @@ def _install(device, trace, which):
 
 
 class PackedProposalCoordinator:
-    """Owns one PreparedPackedDFlashProposal per FOUR_AS_TWO_PAIRS fixed slot pair for
+    """Owns one PreparedPackedDFlashProposal per DRAFT_PAIRS fixed slot pair for
     the life of this object (one per FastWorkerHook, created lazily on first use),
     rebuilding a pair's trace only when the devices occupying that pair's slots
     change identity (a finished request releases its slot, a new one acquires it) -

@@ -225,7 +225,7 @@ REFERENCE = os.path.join(HERE, 'references', 'c2-serving', 'v235-real-text-4x131
 # not v235's engine fails the bring-up; on any other it is reported.
 REFERENCE_PROFILES = ('exact', 'c2-gate', 'c2-packed-gate')
 BRINGUP_USERS, BRINGUP_PROMPT, BRINGUP_MAX_TOKENS = 4, 131072, 256
-MEMORY_USERS = 4
+MEMORY_USERS = 4         # the four-seat default; a plan reads its profile's seats (profile_seats), as the eight-seat profiles ask
 # G5's short-prompt arm, on a profile that takes any request (ANY_REQUEST_FLAG): four users with prompts
 # this short and the profile's whole output ceiling. Each drafter then captures every proposal bucket
 # (256..2048: one per rung from min(position, 2048) to min(2048, position + budget), serving_request_factory),
@@ -365,6 +365,29 @@ STAGGER_SECONDS = 30.0
 CHURN_LENGTHS = (110000, 120000, 123136, 110000, 120000, 123136, 110000, 120000, 123136, 110000, 120000, 1536)
 CHURN_MAX_TOKENS = (768, 1024, 1280, 1536, 768, 1024, 1280, 1536, 768, 1024, 1280, 2304)
 CHURN_MIN_REPLACEMENTS = 8
+# Eight seats (QWEN_FAST_M3_BLOCKS=2): 16 users is the same 8 replacements over eight seats, so the first eight users fill the
+# seats and each of the next eight is admitted into the seat a departure freed (both blocks churn). The prompts and budgets
+# are the four-seat set's, repeated: long prompts first, one short last (the one-bucket ladder under churn).
+CHURN_LENGTHS_8 = (110000, 120000, 123136, 110000, 120000, 123136, 110000, 120000,
+                   123136, 110000, 120000, 123136, 110000, 120000, 123136, 1536)
+CHURN_MAX_TOKENS_8 = (768, 1024, 1280, 1536, 768, 1024, 1280, 1536, 768, 1024, 1280, 1536, 768, 1024, 1280, 2304)
+
+
+def churn_defaults(seats):
+    """(lengths, budgets) of the churn plan on a profile with `seats` seats: the four-seat set (12 users) at four or fewer,
+    the eight-seat one (16 users) at five to eight, and for any other count the four-seat set repeated until
+    CHURN_MIN_REPLACEMENTS users follow the seats (the last user short, as in both sets)."""
+    if type(seats) is not int or seats < 1:
+        raise ValueError('A positive integer seat count is required')
+    if seats <= 4:
+        return CHURN_LENGTHS, CHURN_MAX_TOKENS
+    if seats <= 8:
+        return CHURN_LENGTHS_8, CHURN_MAX_TOKENS_8
+    users = seats + CHURN_MIN_REPLACEMENTS
+    body = users - 1
+    lengths = [CHURN_LENGTHS[index % 11] for index in range(body)] + [CHURN_LENGTHS[-1]]
+    budgets = [CHURN_MAX_TOKENS[index % 4] for index in range(body)] + [CHURN_MAX_TOKENS[-1]]
+    return tuple(lengths), tuple(budgets)
 SINGLE_BUCKET = [2048]           # W6a: the one proposal bucket every engine builds under the extent flag
 # M1: every length a later arm serves (G4's sets, the lifecycle's, G3b's), solo; below 2048 decoding past 2048 of
 # history (WARM_SHORT_TOKENS, ignore_eos) so the drafter's ramp shapes are compiled too.
@@ -702,15 +725,16 @@ def base_plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_
         # when that is smaller (c2: 123,136 + 8,192), so every stream can run to its budget.
         prompt = memory_prompt or room
         check_lengths(profile, [prompt], room, 'memory prompt')
+        memory_users = profile_seats(profiles, profile) if profile in profiles['profiles'] else MEMORY_USERS
         args = common_args(profile, context, STREAM_SECONDS[plan]) + [
-            '--users', str(MEMORY_USERS), '--prompt-lengths', ','.join([str(prompt)] * MEMORY_USERS),
+            '--users', str(memory_users), '--prompt-lengths', ','.join([str(prompt)] * memory_users),
             '--max-tokens', str(answer_room(context, [prompt], ceiling)), '--stagger', str(STAGGER)]
         arms = [('memory-concurrent', args, ARM_SECONDS[plan])]
         if any_request_profile(profiles, profile):
-            short = [MEMORY_SHORT_PROMPT] * MEMORY_USERS
+            short = [MEMORY_SHORT_PROMPT] * memory_users
             check_lengths(profile, short, room, 'memory short prompts')
             arms.append(('memory-short', common_args(profile, context, STREAM_SECONDS[plan]) + [
-                '--users', str(MEMORY_USERS), '--prompt-lengths', ','.join(str(length) for length in short),
+                '--users', str(memory_users), '--prompt-lengths', ','.join(str(length) for length in short),
                 '--max-tokens', str(answer_room(context, short, ceiling)), '--stagger', str(STAGGER)],
                 ARM_SECONDS[plan]))
         return arms
@@ -883,8 +907,9 @@ def s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2):
                 Arm('lifecycle-arrival-solo', base + ['--users', '1', '--sequential-users', users, '--alive-check', '1'],
                     seconds, env=env, rerun=True, role='solo')]
     if plan == 'churn':
-        churn = list(lengths or CHURN_LENGTHS)
-        budgets = list(CHURN_MAX_TOKENS) if lengths is None else [max_tokens] * len(churn)
+        default_lengths, default_budgets = churn_defaults(int(seats))
+        churn = list(lengths or default_lengths)
+        budgets = list(default_budgets) if lengths is None else [max_tokens] * len(churn)
         common, text, _ = sized_arm_args(profile, profiles, plan, churn, max(budgets))
         args = common + ['--prompt-lengths', text, '--max-tokens', str(max(budgets)), '--users', str(len(churn)),
                          '--user-max-tokens', ','.join('%d:%d' % item for item in enumerate(budgets)),
@@ -1288,12 +1313,12 @@ def s2_log_check(log_text, s2_on, env, report):
     return problems
 
 
-def host_live_rate(log_text):
-    """acceptance_report.live_rate over the whole server log (both arms of a G3 pair read the same way), or
-    an error record; never raises."""
+def host_live_rate(log_text, live=4):
+    """acceptance_report.live_rate over the whole server log (both arms of a G3 pair read the same way) at `live`
+    live users (four by default, the profile's seats on an eight-seat one), or an error record; never raises."""
     try:
         import acceptance_report
-        return acceptance_report.live_rate(log_text, 4)
+        return acceptance_report.live_rate(log_text, live)
     except Exception as error:
         return dict(error='%s: %s' % (type(error).__name__, error))
 
@@ -1500,6 +1525,10 @@ class Runner(object):
                                                 facts=facts)
             if log_text is not None and (measure or self.s2_for(profile) or env):
                 report['c2_gate_live4'] = host_live_rate(log_text)
+                seats = self.seats_for(profile)
+                if seats != 4:
+                    # The profile's own full-live rounds (eight seats: both blocks packed), beside the four-live ones.
+                    report[LIVE_N_KEY] = host_live_rate(log_text, seats)
             if cache['before'] is not None or self.s2_for(profile) or env:
                 report['c2_gate_kernel_cache'] = cache
             if problems:
@@ -1678,6 +1707,19 @@ def live4_of(report):
     return live if live and 'error' not in live else None
 
 
+LIVE_N_KEY = 'c2_gate_live_n'
+
+
+def live_n_of(report, n=4):
+    """The packed rounds of an arm with `n` live users, all packed: live4_of at four, else the host's reading of the
+    whole server log at the profile's seats (report[LIVE_N_KEY]; the in-container gate reads four only). None when
+    the arm timed none or read another count."""
+    if n == 4:
+        return live4_of(report)
+    live = (report or {}).get(LIVE_N_KEY)
+    return live if live and 'error' not in live and live.get('live') == n else None
+
+
 # G3's flag phases (the module docstring's control: reported, never judged), each read from one four-live round's own
 # stretch of the server log - its '[PHASE] execute' line up to the next - in the producers' formats (a line 'missing'
 # below leaves that round's F unmeasured in the report; it never fails or shortens the plan):
@@ -1723,8 +1765,11 @@ FLAG_PHASE_LINES = (('verify', "'[PHASE] packed_verify ... end'", 1), ('split', 
 WINDOW_LINE_NAME = '[PACKED-PRESTAGE-WINDOW] ... ms='
 
 
-def flag_phase_rounds(log_text):
-    """Every four-live packed round of an arm's whole server log - a '[PHASE] execute ... new=0 cached=4' step whose
+def flag_phase_rounds(log_text, live=4):
+    """(`live` is four unless an eight-seat arm asks for its full-live rounds: the live and packed filter, the commit
+    lines (one per live user) and the per-block lines - the verify phase, [PACKED-PHASE], [PACKED-FENCES] and the
+    deferred-commit flush, one per 64-row block - are then counted and summed over the blocks.)
+    Every four-live packed round of an arm's whole server log - a '[PHASE] execute ... new=0 cached=4' step whose
     stretch, up to the next execute line, carries four [PACKED] lines - in log order: its fingerprint (the sorted
     (segment, position, emitted) of those four lines), its whole round (round_ms: to the next execute line when that
     is a timed decode step, as acceptance_report.decode_steps times it; None when untimed), its flag phases
@@ -1775,7 +1820,7 @@ def flag_phase_rounds(log_text):
                                     else None)
     rounds = []
     for index, step in enumerate(steps):
-        if step['new'] != 0 or step['live'] != 4 or len(step['packed']) != 4:
+        if step['new'] != 0 or step['live'] != live or len(step['packed']) != live:
             continue
         following = steps[index + 1] if index + 1 < len(steps) else None
         round_ms = None
@@ -1784,17 +1829,22 @@ def flag_phase_rounds(log_text):
             round_ms = (following['at'] - step['at']).total_seconds() * 1000.0
         if round_ms is not None and round_ms <= 0:
             round_ms = None
-        gaps = ['%s x%d' % (what, want) for key, what, want in FLAG_PHASE_LINES
-                if len(step[key]) != want or None in step[key]]
+        blocks = max(1, -(-live // 4))
+        wants = dict(verify=blocks, split=blocks, staging=blocks, commit=live, flush=blocks)
+        gaps = ['%s x%d' % (what, wants[key]) for key, what, _want in FLAG_PHASE_LINES
+                if len(step[key]) != wants[key] or None in step[key]]
         # The window pre-stage is due when the next step serves a packed round (the comment above FLAG_PHASES).
         due = following is not None and bool(following['packed'])
-        if len(step['window']) > 1 or (due and not step['window']):
+        if len(step['window']) > blocks or (due and not step['window']):
             gaps.append('%s x1%s' % (WINDOW_LINE_NAME, ' (due: the next step is packed)' if due else ''))
         phases = flag_ms = None
         if not gaps:
-            _bind, _input, trace, sync, readback = step['split'][0]
-            verify, commit, window = step['verify'][0], sum(step['commit']) + step['flush'][0], sum(step['window'])
-            replay, staging = trace + sync, sum(step['staging'][0])
+            trace = sum(entry[2] for entry in step['split'])
+            sync = sum(entry[3] for entry in step['split'])
+            readback = sum(entry[4] for entry in step['split'])
+            verify = sum(step['verify'])
+            commit, window = sum(step['commit']) + sum(step['flush']), sum(step['window'])
+            replay, staging = trace + sync, sum(sum(entry) for entry in step['staging'])
             phases = dict(replay=replay, staging=staging, readback=readback,
                           bookkeeping=verify - replay - staging - readback, commit=commit, window=window)
             phases = dict((name, round(value, 3)) for name, value in phases.items())
@@ -2149,8 +2199,8 @@ def g4_checks(plan, concurrent, solo, rerun=None, probe=None, seats=MEMORY_USERS
                 shortfalls.append('%s: %d "%s" lines for %d engines: the buckets built are unseen for the rest'
                                   % (label, len(built), '[PINDIAG] proposal buckets built', len(ladders)))
     s2 = s2_of(concurrent)
-    live = live4_of(concurrent)
-    facts = dict(live4=live, rounds=s2.get('rounds'))
+    live = live_n_of(concurrent, seats)
+    facts = {'live4' if seats == 4 else 'live%d' % seats: live, 'rounds': s2.get('rounds')}
     rate = (live or {}).get('net_per_user_tok_s')
     if rate is None and plan == 'staggered':
         # Staggered arrivals (STAGGER_SECONDS apart, EOS on) need not ever have four users live at once on real text
@@ -2160,10 +2210,11 @@ def g4_checks(plan, concurrent, solo, rerun=None, probe=None, seats=MEMORY_USERS
         most = max([int(live_count) for live_count, count in by_live.items() if count] or [0])
         facts['four_live_rate'] = 'not measured: at most %d live (staggered arrivals)' % most
     elif rate is None:
-        shortfalls.append('concurrent: no timed four-live packed round: the per-user rate is unmeasured')
+        shortfalls.append('concurrent: no timed %s-live packed round: the per-user rate is unmeasured' % (
+            'four' if seats == 4 else seats))
     elif rate <= GENERAL_RATE:
-        problems.append('concurrent: %.1f tok/s per user at four live (net of the audit), not above general\'s %.1f '
-                        '(target %.0f)' % (rate, GENERAL_RATE, TARGET_RATE))
+        problems.append('concurrent: %.1f tok/s per user at %s live (net of the audit), not above general\'s %.1f '
+                        '(target %.0f)' % (rate, 'four' if seats == 4 else seats, GENERAL_RATE, TARGET_RATE))
     rounds = s2.get('rounds') or {}
     if plan == 'mixed' and not rounds.get('multi_family_rounds'):
         shortfalls.append('concurrent: no packed round of two or more live families: mixed positions not exercised')
