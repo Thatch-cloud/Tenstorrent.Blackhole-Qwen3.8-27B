@@ -1,0 +1,37 @@
+# The order of the tp4-seats8 request-warm probe (eight seats on two 64-row M3 blocks with QWEN_FAST_M3_REQUEST_WARM=1), one template per line:
+# <template name without .env> <stop|optional> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window (its product is data).
+# Image: tp4-seats8-rwarm, the tag of the tt-vllm image built from tp4/seats8 with request_width_warm and the profiles below (profiles are baked
+# into the image; no job here builds). Minutes: runner time for ONE run of the job, a quad reset (1-3 min) included.
+# NO HANDBACK AND NO UNSERVE JOB: the window driver takes production down before the first job and puts it back after the last, separately
+# (the user's go-ahead and the admin API are the driver's); nothing in this folder serves, unserves or re-places anything. Every job resets the
+# cards first and leaves them idle.
+# WHY: the eight-seat attach hangs (S8-1, S8-3a) at the rows=2 eager warm-up of the first request-engine build after block B's first round. The
+# verdict (hang-judge, confidence about 0.65): that build compiles the rows 1/2/4 programs and creates their state in the holes block B's capture
+# freed, and B's replays overwrite it (the #48536 sequence at block B). The fix: request_width_warm runs every width's eager warm-up once at attach,
+# between the blocks' warm phase and their captures. The flag QWEN_FAST_M3_REQUEST_WARM is in every eight-seat profile (not production).
+# READ-OUTS, every job under the flag (c2_smoke_check enforces the first two): (1) '[PINDIAG] request widths warmed before the packed traces:
+# rows=(1, 2, 4) programs=A->B' precedes '[PINDIAG] packed blocks capture block=0'; (2) the first '[PINDIAG] four-card engine programs=A->B' delta is
+# at most 16 (before the fix +238; only the position-keyed +3 to +6 per build remain); (3) no [STALL] dump; (4) steady_resend's engine build, the
+# first after block B's first round, completes; (5) no handle-guard 'log' line naming a reuse.
+# KILL SIGNALS: a [STALL] dump (the watch kills the hung process after its triage; the cards are reset by the next job), a missing warm line, a
+# first engine delta above 16, or an attach refusal naming QWEN_FAST_M3_REQUEST_WARM. R1 is the gate: if R1 stalls the window stops, and the
+# driver then runs R3 by hand (and R2 if it has not run) to place the hang. R2 is the CONTROL: it must still hang at the same fence, or R1 proves
+# nothing. R3 is run only if R1 hangs at the same fence.
+# STOP RULES: one stall in any R1 run stops the window. The bar is FIVE CONSECUTIVE R1 completions (R1, R1b, R1c, R1d, R1e, each after its own
+# reset); R2 and R3 sit between R1 and R1b on other profiles and do not break the count (a different arm), but any R1 stall restarts it and
+# needs a recorded fix or a new image. After the five, the probe tail runs: S8-1 (the audited attach, zero audit mismatches), S8-6 (memory at eight
+# live, free at least 3 GB per chip, the floor at least 1 GB) and S8-7a/S8-7b (ONE paired timing, judged PAIRED per round; the kill is the DRIVER
+# reading its numbers: the 8-live round above 2 x P(4) + 10 ms). The tail templates are tp4-seats8-jobs' re-pointed at this image.
+# Time (estimate): R1 to R1e about 3.5 hours; R2 and R3 about 75 minutes more if run; the tail about 4.5 hours.
+R1-rwarm stop tp4-seats8-rwarm 40
+R2-nowarm-control optional tp4-seats8-rwarm 35
+R3-rshard optional tp4-seats8-rwarm 40
+R1b-rwarm stop tp4-seats8-rwarm 40
+R1c-rwarm stop tp4-seats8-rwarm 40
+R1d-rwarm stop tp4-seats8-rwarm 40
+R1e-rwarm stop tp4-seats8-rwarm 40
+S8-1-seats8-attach-audited stop tp4-seats8-rwarm 100
+S8-6-memory8 stop tp4-seats8-rwarm 75
+S8-7a-seats4-timed optional tp4-seats8-rwarm 60
+S8-7b-seats8-timed optional tp4-seats8-rwarm 75
