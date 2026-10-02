@@ -125,6 +125,30 @@ class OrderTests(unittest.TestCase):
                       "TODAY'S PRODUCTION", 'ROLLBACK', 'MANIFEST-LIST digest', 'A9'):
             self.assertIn(words, text)
 
+    def test_the_go_rule_makes_the_timing_pairs_and_the_thin_layer_provenance_mandatory(self):
+        text = order_text()
+        for words in ('AND both optional timing jobs S8-7c and S8-7d COMPLETED', 'a skipped, failed, timed-out or hung one is NO-GO',
+                      'READ on BOTH pairs', 'never vacuously clear', 'PER-USER cost', 'The aggregate ratio alone is not the sign-off',
+                      'C2_REPLAY_BUDGET_SMOKE=1', 'RECORD the platform commit', 'MAIN'+chr(10)+'#       branch ONLY', 'THAT thin-layer digest',
+                      'overwrite the rollback fallback', 'NO OTHER WINDOW DRIVER MAY BE ALIVE', 'EVEN IF the re-measure failed',
+                      'only when the re-measure succeeded', 'RIGHT AFTER the /deploy'):
+            self.assertIn(words, text)
+        optional = [row[0] for row in read_order() if row[1] == 'optional']
+        self.assertEqual(optional, list(OPTIONAL))
+        self.assertIn('S8-7c and S8-7d', text.split('1. every stop job above passed')[1].split('2. ZERO')[0])
+
+    def test_the_replay_runs_the_thinking_budget_smoke_on_the_layer_that_ships(self):
+        self.assertEqual(parsed('SR8-platform-replay')['replay_budget_smoke'], '1')
+        for name in ORDERED:
+            if name != 'SR8-platform-replay':
+                self.assertEqual(parsed(name)['replay_budget_smoke'], '', name)
+
+    def test_a9_only_follows_a_successful_fabric_re_measure(self):
+        for name in ('A9-agent-start', 'H8-handback-reset'):
+            self.assertIn('re-measure', text_of(name))
+        self.assertIn('ONLY when the fabric re-measure', text_of('A9-agent-start'))
+        self.assertNotIn('Stop rule: none', text_of('A9-agent-start'))
+
     def test_the_hand_back_is_last_and_places_the_eight_seat_image_only_on_go(self):
         text = text_of('H8-handback-reset')
         self.assertEqual(parsed('H8-handback-reset')['actions'], 'status reset')
