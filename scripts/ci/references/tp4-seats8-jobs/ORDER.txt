@@ -9,8 +9,8 @@
 # TWO STAGES, the first the cheapest kill signals:
 # (a) PROBE, about 4 hours, first: S8-0 production profile on the new image with the seat flag OFF (nothing may differ); S8-1 the first attach
 # of eight seats on the audited gate profile (blocks=2, block B compiles nothing after A's capture, DRAM after attach about 22.7 to 23.0 GB per chip,
-# audited concurrent8_code_equal with zero mismatches); S8-7a and S8-7b ONE paired timing, moved right after S8-1 (kill: the 8-live round above
-# 2 x P(4) + 10 ms); S8-6 memory at 8 live (kill: free below 3 GB per chip). A kill signal in this stage stops the window: the qualification (10 to 19
+# audited concurrent8_code_equal with zero mismatches); S8-6 memory at 8 live (kill: free below 3 GB per chip) right after it; then S8-7a and S8-7b ONE paired timing (kill: the 8-live round above
+# 2 x P(4) + 10 ms; the 7a/7b jobs are optional, so the kill is the DRIVER reading their numbers, not a job failure). The review's E0/E1/E2 harness jobs are not on this branch (their harness work is not here). A kill signal in this stage stops the window: the qualification (10 to 19
 # hours) is not run, and H8 hands the cards back.
 # (b) QUALIFICATION: S8-2a the S3a matrix at eight users on the audited gate profile and S8-2b on the traffic profile (the M7 pattern); S8-3a to
 # S8-3e the audits-off hang shapes on c2-packed-tp4-8-diag-strace (stall watch, handle log and guard), each after its own reset: five consecutive
@@ -21,9 +21,9 @@
 # jobs about 4.5 hours.
 S8-0-flag-off-smoke stop tp4-seats8 75
 S8-1-seats8-attach-audited stop tp4-seats8 100
+S8-6-memory8 stop tp4-seats8 75
 S8-7a-seats4-timed optional tp4-seats8 60
 S8-7b-seats8-timed optional tp4-seats8 75
-S8-6-memory8 stop tp4-seats8 75
 S8-2a-matrix8-gate stop tp4-seats8 180
 S8-2b-matrix8-traffic stop tp4-seats8 120
 S8-3a-hang8-strace stop tp4-seats8 45

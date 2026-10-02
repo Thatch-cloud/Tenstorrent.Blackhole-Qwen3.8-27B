@@ -5276,7 +5276,7 @@
       "gate_only": true
     },
     "c2-packed-tp4-8-diag-strace": {
-      "description": "GATE ONLY (the eight-seat audits-off hang arm, never for traffic): c2-packed-tp4-8-time-gate (audits off, the pinned sampler in the verify trace, the gate marker and limits) plus the host-only instruments of the hang diagnosis: the stall watch (QWEN_FAST_STALL_DEADLINE_S=120: a stalled step dumps the stuck work's stacks instead of waiting silently), the collectives handle log (QWEN_FAST_CCL_HANDLE_LOG=1) and the handle guard in log mode (QWEN_FAST_CCL_HANDLE_GUARD=log). The audits-off hang was an eager collective reusing a handle a replayed trace baked, and two block traces on one shared model, sampler and collectives are a new exposure to exactly that; the in-trace sampler fix is proven only at four users. Eight seats on TWO 64-row M3 blocks (QWEN_FAST_M3_BLOCKS=2: block A over pool slots 0-3, block B over 4-7, run back to back in one step, each block replaying the qualified 64-row programs; four draft pairs). There is no qualified hang fallback at eight seats: the request-shard argmax arm and the capture plug are unqualified or do not fit the eight-seat memory. UNVERIFIED on hardware.",
+      "description": "GATE ONLY (the eight-seat audits-off hang arm, never for traffic): c2-packed-tp4-8-time-gate (audits off, the pinned sampler in the verify trace, the gate marker and limits) plus the host-only instruments of the hang diagnosis: the stall watch (QWEN_FAST_STALL_DEADLINE_S=120: a stalled step dumps the stuck work's stacks instead of waiting silently), the stage log and the allocator census (QWEN_FAST_SEQ_STAGE_LOG=1, QWEN_FAST_TRACE_CENSUS=1 with the graph off: the handle log prints only through the stage log, and the census shows where block B allocates around block A) and the collectives handle log (QWEN_FAST_CCL_HANDLE_LOG=1) and the handle guard in log mode (QWEN_FAST_CCL_HANDLE_GUARD=log). The audits-off hang was an eager collective reusing a handle a replayed trace baked, and two block traces on one shared model, sampler and collectives are a new exposure to exactly that; the in-trace sampler fix is proven only at four users. Eight seats on TWO 64-row M3 blocks (QWEN_FAST_M3_BLOCKS=2: block A over pool slots 0-3, block B over 4-7, run back to back in one step, each block replaying the qualified 64-row programs; four draft pairs). There is no qualified hang fallback at eight seats: the request-shard argmax arm and the capture plug are unqualified or do not fit the eight-seat memory. UNVERIFIED on hardware.",
       "eos_ids": [
         248046,
         248044
@@ -5316,6 +5316,9 @@
         "QWEN_FAST_PACKED_SAMPLER_IN_TRACE": "1",
         "QWEN_FAST_M3_BLOCKS": "2",
         "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_SEQ_STAGE_LOG": "1",
+        "QWEN_FAST_TRACE_CENSUS": "1",
+        "QWEN_FAST_TRACE_CENSUS_GRAPH": "0",
         "QWEN_FAST_STALL_DEADLINE_S": "120",
         "QWEN_FAST_CCL_HANDLE_LOG": "1",
         "QWEN_FAST_CCL_HANDLE_GUARD": "log"

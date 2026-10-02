@@ -30,8 +30,8 @@ IMAGE = 'tp4-seats8'
 PRODUCTION = 'c2-packed-tp4'
 EIGHT, EIGHT_GATE, EIGHT_TIME, EIGHT_DIAG = ('c2-packed-tp4-8', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate',
                                              'c2-packed-tp4-8-diag-strace')
-FOUR_TIME = 'c2-packed-tp4-time-gate'
-PROBE = ('S8-0-flag-off-smoke', 'S8-1-seats8-attach-audited', 'S8-7a-seats4-timed', 'S8-7b-seats8-timed', 'S8-6-memory8')
+FOUR_TIME = 'c2-packed-tp4-speed-strace'
+PROBE = ('S8-0-flag-off-smoke', 'S8-1-seats8-attach-audited', 'S8-6-memory8', 'S8-7a-seats4-timed', 'S8-7b-seats8-timed')
 HANG = tuple('S8-3%s-hang8-strace' % letter for letter in 'abcde')
 QUALIFICATION = ('S8-2a-matrix8-gate', 'S8-2b-matrix8-traffic') + HANG + ('S8-4-staggered8', 'S8-5-churn16', 'S8-7c-seats4-timed',
                                                                          'S8-7d-seats8-timed')
@@ -93,7 +93,8 @@ class OrderTests(unittest.TestCase):
         ordered = [row[0] for row in read_order()]
         self.assertEqual(ordered[:5], list(PROBE))
         self.assertEqual(ordered[5:-1], list(QUALIFICATION))
-        self.assertEqual(ordered.index('S8-7a-seats4-timed'), ordered.index('S8-1-seats8-attach-audited') + 1)
+        self.assertEqual(ordered.index('S8-6-memory8'), ordered.index('S8-1-seats8-attach-audited') + 1)
+        self.assertEqual(ordered.index('S8-7a-seats4-timed'), ordered.index('S8-6-memory8') + 1)
         self.assertEqual(ordered.index('S8-7b-seats8-timed'), ordered.index('S8-7a-seats4-timed') + 1)
         self.assertLess(ordered.index('S8-6-memory8'), ordered.index('S8-2a-matrix8-gate'))
         text = order_text()
@@ -204,7 +205,7 @@ class SmokeTests(unittest.TestCase):
             self.assertEqual(parsed(name)['actions'], 'reset smoke', 'each run follows its own reset')
             text = text_of(name)
             for word in ('NO QUALIFIED HANG FALLBACK AT 8 SEATS', 'FIVE CONSECUTIVE', 'QWEN_FAST_STALL_DEADLINE_S=120',
-                         'QWEN_FAST_CCL_HANDLE_LOG=1', 'QWEN_FAST_CCL_HANDLE_GUARD=log'):
+                         'QWEN_FAST_CCL_HANDLE_LOG=1', 'QWEN_FAST_CCL_HANDLE_GUARD=log', 'QWEN_FAST_SEQ_STAGE_LOG=1', 'QWEN_FAST_TRACE_CENSUS=1'):
                 self.assertIn(word, text, name)
 
     def test_s8_0_is_the_production_profile_with_the_flag_off_and_the_four_user_shapes(self):
@@ -215,6 +216,13 @@ class SmokeTests(unittest.TestCase):
         text = text_of('S8-0-flag-off-smoke')
         for word in ('flag OFF', 'blocks=2', 'STOPS the window'):
             self.assertIn(word, text)
+
+    def test_the_two_timed_arms_differ_only_in_the_seat_flag_and_the_seats(self):
+        a, b = PROFILES['profiles'][FOUR_TIME], PROFILES['profiles'][EIGHT_TIME]
+        self.assertEqual({k: v for k, v in b['env'].items() if a['env'].get(k) != v}, {'QWEN_FAST_M3_BLOCKS': '2'})
+        self.assertEqual(set(a['env']) ^ set(b['env']), {'QWEN_FAST_M3_BLOCKS'})
+        for name in TIMED:
+            self.assertNotIn('c2-packed-tp4-time-gate', text_of(name), name)
 
     def test_the_timing_is_an_abab_of_four_seats_against_eight_on_the_same_tests(self):
         self.assertEqual([parsed(name)['profile'] for name in TIMED], [FOUR_TIME, EIGHT_TIME, FOUR_TIME, EIGHT_TIME])
