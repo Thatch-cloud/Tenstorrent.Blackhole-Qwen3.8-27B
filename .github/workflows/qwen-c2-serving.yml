@@ -160,6 +160,37 @@ jobs:
           df -h /home/thatch/hf-cache/hub 2>&1 | tail -2
           sudo -n du -sh /home/thatch/hf-cache/hub/.qwen-c2 2>&1
           echo "=== serving containers"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}' | grep -E 'thatch-inference|qwen-c2' || echo none
+      - name: Stop the node agent
+        if: contains(steps.job.outputs.actions, 'agentstop')
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Stopping the agent stops the serving container it started, so the cards come free. The unserve step after
+          # this one removes what is left. The unit lives on the host only: a pod has none, and a job that landed on one
+          # would otherwise "stop" nothing and report success.
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+          unit="$HOME/.config/systemd/user/thatch-node-agent.service"
+          if [ ! -f "$unit" ]; then
+            echo "::error::$unit is missing: this job is not on the host runner (a pod?); refusing" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/c2-results"
+          echo "node agent before: $(systemctl --user is-active thatch-node-agent.service)"
+          systemctl --user stop thatch-node-agent.service
+          state=unknown
+          for _ in $(seq 1 45); do
+            state=$(systemctl --user is-active thatch-node-agent.service)
+            [ "$state" != active ] && break
+            sleep 2
+          done
+          echo "node agent after: $state"
+          if [ "$state" = active ]; then
+            echo "::error::the node agent is still active 90 s after the stop" >&2
+            exit 1
+          fi
+          echo "node agent stopped ($state)" >> "$RUNNER_TEMP/c2-results/agent.log"
+          echo "=== inference containers (the unserve step removes them)"
+          docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}' | grep '^thatch-inference-' || echo none
       - name: Platform serving container (read-only)
         if: contains(steps.job.outputs.actions, 'platform')
         shell: bash
@@ -890,6 +921,62 @@ jobs:
           image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
           docker push "$image" | tail -3
           echo "pushed $(docker image inspect "$image" --format '{{index .RepoDigests 0}}')"
+      - name: Start the node agent
+        if: ${{ !cancelled() && contains(steps.job.outputs.actions, 'agentstart') }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+          unit="$HOME/.config/systemd/user/thatch-node-agent.service"
+          if [ ! -f "$unit" ]; then
+            echo "::error::$unit is missing: this job is not on the host runner (a pod?); refusing" >&2
+            exit 1
+          fi
+          results="$RUNNER_TEMP/c2-results"
+          log="$results/agent.log"
+          mkdir -p "$results"
+          # The agent loads its placement onto whatever cards are free: a job's own process still holding one would make that load fail.
+          if sudo -n fuser -s /dev/tenstorrent/[0-9]* 2>/dev/null; then
+            echo "::error::a process holds a card; refusing to start the node agent" >&2
+            sudo -n fuser -v /dev/tenstorrent/[0-9]* 2>&1 | tee -a "$log" >&2
+            exit 1
+          fi
+          systemctl --user start thatch-node-agent.service
+          state=$(systemctl --user is-active thatch-node-agent.service)
+          echo "node agent after start: $state" | tee -a "$log"
+          if [ "$state" != active ]; then
+            echo "::error::the node agent is $state after the start" >&2
+            exit 1
+          fi
+          deadline=$(( $(date +%s) + 1800 ))
+          container=""; ids=""
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            for c in $(docker ps --filter status=running --format '{{.Names}}' | grep '^thatch-inference-' || true); do
+              port=$(docker port "$c" 8000/tcp 2>/dev/null | head -1 | sed 's/.*://')
+              [ -n "$port" ] || continue
+              ids=$(curl -sS -m 10 "http://127.0.0.1:$port/v1/models" 2>/dev/null \
+                | python3 -c 'import json,sys; print(" ".join(m["id"] for m in json.load(sys.stdin).get("data", [])))' 2>/dev/null || true)
+              if [ -n "$ids" ]; then container=$c; break 2; fi
+            done
+            sleep 20
+          done
+          if [ -z "$container" ]; then
+            echo "::error::no inference container answered /v1/models within 30 min" >&2
+            echo "timed out waiting for a serving container" >> "$log"
+            echo "=== agent journal"
+            journalctl --user -u thatch-node-agent --since -35min --no-pager | grep -v -i heartbeat | tail -60 || true
+            for c in $(docker ps -a --format '{{.Names}}' | grep '^thatch-inference-' || true); do
+              echo "=== $c last 80 log lines"; docker logs --tail 80 "$c" 2>&1
+            done
+            exit 1
+          fi
+          image=$(docker inspect -f '{{.Config.Image}}' "$container")
+          {
+            echo "container: $container"
+            echo "image: $image"
+            echo "models: $ids"
+          } | tee -a "$log"
+          docker logs "$container" 2>&1 | grep -E '\[QWEN-C2\] profile|packed sampler arm' | head -5 | tee -a "$log" || true
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

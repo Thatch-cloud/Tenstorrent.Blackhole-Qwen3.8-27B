@@ -151,6 +151,39 @@ class FileTests(unittest.TestCase):
         positions = [text.index("contains(steps.job.outputs.actions, '%s')" % action) for action in job.ACTIONS]
         self.assertEqual(positions, sorted(positions))
 
+    def test_the_agent_actions_bracket_the_job(self):
+        self.assertEqual(job.ACTIONS[1], 'agentstop')
+        self.assertEqual(job.ACTIONS[-1], 'agentstart')
+        self.assertEqual(job.QUAD_ACTIONS[1], 'agentstop')
+        self.assertEqual(job.QUAD_ACTIONS[-1], 'agentstart')
+        self.assertEqual(job.ACTIONS.index('agentstop'), job.ACTIONS.index('status') + 1)
+
+    def test_agent_jobs_parse_in_order_and_open_no_card(self):
+        quad = dict(C2_CARDS='quad', C2_PROFILE='general-tp4')
+        outputs = job.read_job(dict(C2_IMAGE_TAG='v7-agent', C2_ACTIONS='status agentstop unserve reset smoke', **quad),
+                               ['general', 'general-tp4'], meshes=dict(general=None, **{'general-tp4': 'P150x4'}))
+        self.assertEqual(outputs['actions'], 'status agentstop unserve reset smoke')
+        for actions in ('agentstart', 'status reset agentstart', 'status agentstop unserve', 'agentstop unserve agentstart'):
+            for cards in ('quad', 'pair'):
+                self.assertEqual(read(C2_ACTIONS=actions, C2_CARDS=cards)['actions'], actions, (actions, cards))
+
+    def test_agent_actions_out_of_order_are_refused(self):
+        for actions in ('agentstart agentstop', 'unserve agentstop', 'agentstart status', 'push agentstart status'):
+            with self.assertRaisesRegex(job.JobError, 'order'):
+                read(C2_ACTIONS=actions)
+
+    def test_each_agent_action_has_exactly_one_workflow_step_and_it_is_gated(self):
+        text = workflow_text()
+        for action in job.ACTIONS:
+            self.assertGreaterEqual(text.count("contains(steps.job.outputs.actions, '%s')" % action), 1, action)
+        for action, name in (('agentstop', 'Stop the node agent'), ('agentstart', 'Start the node agent')):
+            self.assertEqual(text.count("contains(steps.job.outputs.actions, '%s')" % action), 1, action)
+            self.assertIn("contains(steps.job.outputs.actions, '%s')" % action, step_text(name).split('run: |')[0])
+        self.assertLess(text.index('- name: Stop the node agent'), text.index('- name: Take the platform serving container down'))
+        self.assertLess(text.index('- name: Push'), text.index('- name: Start the node agent'))
+        self.assertLess(text.index('- name: Start the node agent'), text.index('- name: Upload results'))
+        self.assertIn("!cancelled() && contains(steps.job.outputs.actions, 'agentstart')", step_text('Start the node agent'))
+
 
 def workflow_text():
     with open(WORKFLOW, encoding='utf-8') as handle:
