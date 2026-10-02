@@ -55,6 +55,9 @@ SKIP_MARKER = MARKER + ' skipped'
 # window (while_waiting) and arms and flushes every block (all_blocks); a round on the other block than the last one's bumps
 # the fixture write epoch (note_switch).
 UNSUPPORTED_FLAGS = ('QWEN_FAST_FUSED_COMMIT',)
+# Eight seats on two M3 blocks (serving_runtime.M3_BLOCKS_FLAG; named here so this module, which ships in the P8 tree too,
+# imports nothing for it): the solo lane refuses any value but one block.
+M3_BLOCKS_FLAG = 'QWEN_FAST_M3_BLOCKS'
 # What the solo block needs of the environment, beyond what packed_any_admission already requires of the extent path:
 # name, wanted value, why.
 REQUIRED_ENV = (
@@ -112,6 +115,11 @@ def solo_lane_admission(m3, environ=None, *, log=None):
     if not met:
         problems.append('the solo lane is built beside the 64-row M3 block (users=4 FOUR_AS_TWO=0 PACKED_STEP=1), not %s'
                         % shape)
+    if environ.get(M3_BLOCKS_FLAG, '1') != '1':
+        # Eight seats on two M3 blocks (serving_runtime.M3_BLOCKS_FLAG): the solo block is bound by carry identity to
+        # pool slot 0, which is segment 0 of block A, and nothing here has taken block B into account.
+        problems.append('%s=%s: the solo lane is built beside the ONE 64-row M3 block over pool slot 0, not beside two '
+                        'M3 blocks (eight seats)' % (M3_BLOCKS_FLAG, environ.get(M3_BLOCKS_FLAG)))
     for name, wanted, why in REQUIRED_ENV:
         if environ.get(name) != wanted:
             problems.append('%s=%s, not %s: %s' % (name, environ.get(name, '(unset)'), wanted, why))

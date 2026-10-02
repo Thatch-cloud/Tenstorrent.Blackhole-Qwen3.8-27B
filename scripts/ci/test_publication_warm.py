@@ -243,6 +243,20 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(publication_warm.describe_plan(shapes), ('0,16:1-16', 'none'))
         self.assertEqual(publication_warm.runs([1, 3, 4, 7]), '1,3-4,7')
 
+    def test_two_m3_blocks_plan_the_same_shape_list_so_the_second_warm_compiles_nothing_new(self):
+        # QWEN_FAST_M3_BLOCKS=2: block A over slots 0-3 and block B over 4-7 are the same PackedShape, so each block's
+        # plan - every segment's row offset x prefix, then the pooled capture widths - is the same list of the same
+        # (path, rows, offset, prefix) shapes: the programs block A's warm compiled are the ones block B's runs.
+        pool = SimpleNamespace(bucket_rows=(1, 2, 4))
+        first, second = (publication_warm.plan(live_block(), pool) for block in range(2))
+        self.assertEqual(first, second)
+        self.assertEqual(publication_warm.describe_plan(first), publication_warm.describe_plan(second))
+        self.assertEqual(len(first), 64 + 7)
+        # a plan is a function of the block's shape and the pool's widths, not of which pool slots the block binds
+        bound = live_block()
+        bound.segment_slots = tuple(SimpleNamespace(index=index) for index in range(4, 8))
+        self.assertEqual(publication_warm.plan(bound, pool), first)
+
     def test_the_line(self):
         summary = dict(shapes=71, ms=12.25, packed='0,16,32,48:1-16', sequential='1:1,2:1-2,4:1-4', merge_release=True,
                        fused_steady_state=False, program_cache=('n/a', 'n/a'))

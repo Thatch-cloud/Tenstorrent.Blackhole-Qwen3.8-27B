@@ -106,8 +106,10 @@ def log_line(text):
 def draft_key(hook):
     """Everything FastWorkerHook._drafts decides from, per bridge in the hook's order: the id, the
     bridge, its failure, the request's closure and cancellation, the session's phase, pending ticket
-    (by value: request, epoch, position, tokens), position, emitted count and finished flag, and the
-    runner's remaining budget (serving_worker_hook.real_remaining_budget) - with the packed step."""
+    (by value: request, epoch, position, tokens), position, emitted count and finished flag, the runner's
+    remaining budget (serving_worker_hook.real_remaining_budget) and the WIDTH of the pending ticket (rows; with
+    QWEN_FAST_M3_BLOCKS=2 the widths differ per block, so a cache is handed over only while every request's width is
+    the one it was drafted at) - with the packed step."""
     from serving_worker_hook import real_remaining_budget
 
     entries = []
@@ -118,12 +120,21 @@ def draft_key(hook):
                         bool(getattr(request, 'closed', False)), bool(getattr(request, 'cancelled', False)),
                         getattr(session, 'phase', None), getattr(session, 'pending', None),
                         getattr(session, 'position', None), len(getattr(session, 'emitted', None) or ()),
-                        bool(getattr(session, 'finished', False)), real_remaining_budget(bridge)))
+                        bool(getattr(session, 'finished', False)), real_remaining_budget(bridge),
+                        pending_width(getattr(session, 'pending', None))))
     return (id(hook.packed_step), tuple(entries))
 
 
 KEY_FIELDS = ('request', 'bridge', 'failed', 'closed', 'cancelled', 'phase', 'pending', 'position', 'emitted',
-              'finished', 'budget')
+              'finished', 'budget', 'width')
+
+
+def pending_width(ticket):
+    """The rows of a pending ticket (len(ticket.tokens)), None for no ticket or one whose tokens cannot be counted."""
+    try:
+        return None if ticket is None else len(ticket.tokens)
+    except (AttributeError, TypeError):
+        return None
 
 
 def key_difference(before, after):

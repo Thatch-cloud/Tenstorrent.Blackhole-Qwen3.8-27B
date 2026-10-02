@@ -36,6 +36,14 @@ lent (a request device exists, so its traces may too), when the pool or the shar
 draft weights are closed or the weights are not yet uploaded, and while a verifier
 engine is resident in native GDN slot 0 (a request engine exists).
 
+SEVERAL BLOCKS (QWEN_FAST_M3_BLOCKS=2, serving_runtime.complete_blocks_two_phase): the rule holds across blocks, not
+only within one. Block B built after block A's capture would allocate its fixture inputs, taps, checkpoints and
+extent words in the holes A's capture freed, and every replay of A would overwrite them. So a block built with
+defer_capture=True only allocates (initial snapshot, checkpoints, taps) in its constructor; the caller then runs
+`warm_and_fixture` of EVERY block (the warm forward, the captured fixture, the extent readers' words and masks),
+then `capture_traces` of every block, then `finish_construction` of every block (publication warm, reseed, binding
+check). Built whole (the default), the construction is those phases in that order inside one call, as it always was.
+
 WHICH ROWS ARE WHOSE. Segment u of the block is rows [rows_per_user * u,
 rows_per_user * (u + 1)). The verify trace restores segment u's GDN state from the
 pool's slot-u carry (serving_buffer_pool.VerifierSlot.carry) inside the trace, before
@@ -706,9 +714,19 @@ class PackedVerifierEngine:
     publication, `commit_user(segment, prefix)` for each user's decision."""
 
     def __init__(self, operations, model, helpers, sampler, *, pool, shared_weights, shape, feature_taps,
-                 capture_position=None, pool_slots=None, padded_min_users=None, collectives=None):
+                 capture_position=None, pool_slots=None, padded_min_users=None, collectives=None,
+                 defer_capture=False):
         import torch
 
+        # QWEN_FAST_M3_BLOCKS=2 (serving_runtime.complete_blocks_two_phase): True builds only the first part of the
+        # construction here - the persistent allocations (the initial snapshot, the checkpoints, the taps) - and leaves
+        # `warm_and_fixture`, `capture_traces` and `finish_construction` to the caller, so several blocks can allocate
+        # and warm first and capture afterwards (CONSTRUCTION ORDER, module docstring). False, the default, is the whole
+        # construction in this call, in the order it always had.
+        if type(defer_capture) is not bool:
+            raise ValueError('defer_capture must be an explicit bool')
+        self.defer_capture = defer_capture
+        self.build = None
         self.shape = validate_shape(shape)
         # QWEN_FAST_CAPTURE_PLUG (TP4 only, off by default): the capture zone, opened before the warm forward and sealed after
         # the last capture (capture_plug); None otherwise.
@@ -941,113 +959,16 @@ class PackedVerifierEngine:
             placeholders = [SimpleNamespace(position=capture_position,
                                             pages=torch.zeros((1, shape.page_width), dtype=torch.int32))
                             for user in range(shape.users)]
-            self.open_capture_plug(operations)
-            self.stage = 'warm forward'
-            # QWEN_FAST_VERIFY_T2 (#2): the placeholders put every user on page 0's first tile
-            # row, which per-user chains would write concurrently; the warm forward - the one
-            # eager forward with placeholders - writes K/V as ONE chain over all rows instead:
-            # the same kernels and compile args (so the capture's per-user chains are the same
-            # programs), the served row order and the served page-0 bytes. The capture is
-            # recorded, never run, with placeholders.
-            warm = self.build_fixture(placeholders, warm=True)
-            self.warm_kv_chains = self.kv_chains_cut and bool(getattr(warm, 'kv_chains', False))
-            result = None
-            try:
-                result = self.operation(warm, warm=True)
-                self.stage = 'warm forward fence'
-                operations.synchronize_device(self.mesh)
-            finally:
-                if result is not None:
-                    release_vglue_audit(operations, warm, result[2] if len(result) > 2 else None)
-                    release_owned(operations, [value for value in result if value is not None])
-                else:
-                    release_vglue_audit(operations, warm)
-                warm.close()
-            self.stage = 'verify trace capture'
-            self.fixture = self.build_fixture(placeholders)
-            if self.extent:
-                # S2: each extent reader's own word and narrow masks, allocated by this fixture before
-                # any trace: validate_bindings checks them unmoved from here on.
-                self.reader_addresses = self.extent_reader_addresses()
-            if self.verify_t1:
-                verify_trace_t1.take()  # count only what the captured forward engages
-            if self.verify_t2:
-                verify_trace_t2.take()
-            tp4_vglue.take()
-            self.trace, self.output = capture_operation(operations, self.mesh, lambda: self.operation(self.fixture))
-            if self.verify_t1:
-                self.note_verify_t1(verify_trace_t1.take())
-            if self.verify_t2:
-                self.note_verify_t2(verify_trace_t2.take())
-            self.note_vglue(tp4_vglue.take())
-            retained = self.fixture.retained
-            if len(retained.records) != GDN_LAYERS:
-                raise ValueError('The captured packed block must retain every GDN layer')
-            self.stage = 'commit trace capture'
-            for user in range(shape.users):
-                layers = validate_commit_layers(retained.segment_layers(user), self.carries[user])
-                # Prefix 0 is a no-op on the carry (the deferred decode never advanced it, and
-                # the segment's entry IS the carry), so no trace is captured for it: the
-                # retained block's commit_user publishes nothing at prefix 0.
-                publications = {prefix: prepare(self.mesh, layers, prefix) for prefix in range(1, shape.rows_per_user + 1)}
-                for publication in publications.values():
-                    publication()
-                operations.synchronize_device(self.mesh)
-                for prefix, publication in publications.items():
-                    self.commits[user][prefix], unused = capture_operation(operations, self.mesh, publication)
-            if self.fused is not None:
-                # H1b: every segment's T_proj, then (in place) every (segment, prefix) slide trace,
-                # next to the GDN commit traces and after the verify trace.
-                self.stage = 'fused commit capture'
-                self.fused.capture(capture_operation)
-            self.seal_capture_plug()
-            if self.extent:
-                # S2 B6 (publication_warm.py): today's eager publication - what a packed round the fused
-                # commit refuses and every sequential step run - published and discarded once at every shape
-                # serving can ask of it (each segment's row offset x prefix, each pooled width x prefix), on
-                # scratch, fenced and released here, so no serving path compiles a publication program after
-                # attach. After every capture; a raise fails the attach like every stage here.
-                import publication_warm
-
-                self.stage = 'eager publication warm'
-                self.publication_warm = publication_warm.warm(self, operations=operations, mesh=self.mesh, pool=pool,
-                                                              shared_weights=shared_weights, collectives=collectives,
-                                                              log=diagnostic)
-            # Warming the commit traces wrote every carry and slot 0 (as verifier_engine's
-            # own warming does): slot 0 goes back to what attach found, and the carries go
-            # back to the zeros the pool lends - a request's engine seeds its own on
-            # admission (VerifierEngine.save_carry), after the pool zeroes the slot again.
-            self.stage = 'reseeding'
-            self.reseed()
-            operations.synchronize_device(self.mesh)
-            self.stage = 'validating bindings'
-            self.validate_bindings()
-            # The captures rewrote slot 0: nobody is resident.
-            note_prefill()
-            self.setup_ms = (time.perf_counter() - started) * 1000
-            self.phase = 'idle'
-            if self.padded_min_users is not None:
-                diagnostic('%s min_users=%d users=%d max_idle=%d carries_in_place=%d'
-                           % (PADDED_ADMITTED_MARKER, self.padded_min_users, self.users, self.MAX_IDLE_SEGMENTS,
-                              int(self.carries_in_place)))
-            if self.round_fences:
-                # Only this block's retained records: a sequential engine's never take the diet.
-                self.fixture.retained.use_round_fences()
-                diagnostic('%s users=%d' % (verify_prestage.FENCES_ENGAGED_MARKER, self.users))
-            if self.prestaged is not None:
-                diagnostic('%s users=%d audit=%d' % (verify_prestage.ENGAGED_MARKER, self.users,
-                                                     int(self.prestaged.audit)))
-            if self.fused is not None:
-                diagnostic(self.fused.engaged_line())
-            if self.gdn_after_pairs or self.gdn_after_pairs_refusal is not None:
-                import early_draft
-
-                if self.gdn_after_pairs:
-                    diagnostic('%s users=%d pipelined=%d' % (early_draft.GDN_ENGAGED_MARKER, self.users,
-                                                             int(self.pipelined_commits)))
-                else:
-                    diagnostic('%s users=%d reason=%s' % (early_draft.GDN_REFUSED_MARKER, self.users,
-                                                          self.gdn_after_pairs_refusal))
+            # What the later phases of the construction need of this call's arguments.
+            self.build = SimpleNamespace(operations=operations, pool=pool, shared_weights=shared_weights,
+                                         collectives=collectives, placeholders=placeholders, started=started,
+                                         stage='allocated')
+            if defer_capture:
+                self.stage = 'allocated'
+                return
+            self._warm_and_fixture()
+            self._capture_traces()
+            self._finish_construction()
         except BaseException as failure:
             self.phase = 'failed'
             # Logged BEFORE close: run 35505708710 (image v50) raised on the host inside the
@@ -1057,6 +978,165 @@ class PackedVerifierEngine:
             self.report_failure(failure)
             self.close(wait=False)
             raise
+
+    # The construction's phases after the allocations, each a method so that a caller building several blocks can run
+    # every block's first phase before any block's second (serving_runtime.complete_blocks_two_phase). __init__ runs
+    # them in order when the block is not deferred - the order this construction always had - and the caller runs them
+    # one public wrapper at a time when it is. A phase that fails closes the block without the device fence, as
+    # __init__ does for its own.
+    def phase_guard(self, name, expected, following, step):
+        if self.phase in ('failed', 'closed'):
+            raise ValueError('The packed block is %s: %s cannot run' % (self.phase, name))
+        if self.build is None or self.build.stage != expected:
+            raise ValueError('%s needs a block that finished %r, not %r'
+                             % (name, expected, None if self.build is None else self.build.stage))
+        try:
+            step()
+            if self.build is not None:
+                self.build.stage = following
+        except BaseException as failure:
+            self.phase = 'failed'
+            self.report_failure(failure)
+            self.close(wait=False)
+            raise
+
+    def warm_and_fixture(self):
+        """Second phase of a deferred block: the warm forward and the captured fixture (the extent readers' words and
+        masks included), so every persistent allocation the block's traces will bake exists. No capture yet."""
+        self.phase_guard('warm_and_fixture', 'allocated', 'fixture', self._warm_and_fixture)
+
+    def capture_traces(self):
+        """Third phase of a deferred block: the verify trace and every commit trace. No persistent allocation of any
+        block may follow, so the caller runs this for every block only after every block's warm_and_fixture."""
+        self.phase_guard('capture_traces', 'fixture', 'captured', self._capture_traces)
+
+    def finish_construction(self):
+        """Last phase of a deferred block: the publication warm, the reseed, the binding check; the block is idle."""
+        self.phase_guard('finish_construction', 'captured', 'done', self._finish_construction)
+
+    def _warm_and_fixture(self):
+        operations, shape, placeholders = self.build.operations, self.shape, self.build.placeholders
+        if self.defer_capture and os.environ.get('QWEN_FAST_TP', '2') == '4' and capture_plug.config() is not None:
+            raise ValueError('QWEN_FAST_CAPTURE_PLUG is not supported for blocks built in two phases '
+                             '(QWEN_FAST_M3_BLOCKS=2): one zone cannot span the captures of several blocks')
+        self.open_capture_plug(operations)
+        self.stage = 'warm forward'
+        # QWEN_FAST_VERIFY_T2 (#2): the placeholders put every user on page 0's first tile
+        # row, which per-user chains would write concurrently; the warm forward - the one
+        # eager forward with placeholders - writes K/V as ONE chain over all rows instead:
+        # the same kernels and compile args (so the capture's per-user chains are the same
+        # programs), the served row order and the served page-0 bytes. The capture is
+        # recorded, never run, with placeholders.
+        warm = self.build_fixture(placeholders, warm=True)
+        self.warm_kv_chains = self.kv_chains_cut and bool(getattr(warm, 'kv_chains', False))
+        result = None
+        try:
+            result = self.operation(warm, warm=True)
+            self.stage = 'warm forward fence'
+            operations.synchronize_device(self.mesh)
+        finally:
+            if result is not None:
+                release_vglue_audit(operations, warm, result[2] if len(result) > 2 else None)
+                release_owned(operations, [value for value in result if value is not None])
+            else:
+                release_vglue_audit(operations, warm)
+            warm.close()
+        self.stage = 'verify trace capture'
+        self.fixture = self.build_fixture(placeholders)
+        if self.extent:
+            # S2: each extent reader's own word and narrow masks, allocated by this fixture before
+            # any trace: validate_bindings checks them unmoved from here on.
+            self.reader_addresses = self.extent_reader_addresses()
+
+    def _capture_traces(self):
+        operations, shape = self.build.operations, self.shape
+        if self.verify_t1:
+            verify_trace_t1.take()  # count only what the captured forward engages
+        if self.verify_t2:
+            verify_trace_t2.take()
+        tp4_vglue.take()
+        self.trace, self.output = capture_operation(operations, self.mesh, lambda: self.operation(self.fixture))
+        if self.verify_t1:
+            self.note_verify_t1(verify_trace_t1.take())
+        if self.verify_t2:
+            self.note_verify_t2(verify_trace_t2.take())
+        self.note_vglue(tp4_vglue.take())
+        retained = self.fixture.retained
+        if len(retained.records) != GDN_LAYERS:
+            raise ValueError('The captured packed block must retain every GDN layer')
+        self.stage = 'commit trace capture'
+        for user in range(shape.users):
+            layers = validate_commit_layers(retained.segment_layers(user), self.carries[user])
+            # Prefix 0 is a no-op on the carry (the deferred decode never advanced it, and
+            # the segment's entry IS the carry), so no trace is captured for it: the
+            # retained block's commit_user publishes nothing at prefix 0.
+            publications = {prefix: prepare(self.mesh, layers, prefix) for prefix in range(1, shape.rows_per_user + 1)}
+            for publication in publications.values():
+                publication()
+            operations.synchronize_device(self.mesh)
+            for prefix, publication in publications.items():
+                self.commits[user][prefix], unused = capture_operation(operations, self.mesh, publication)
+        if self.fused is not None:
+            # H1b: every segment's T_proj, then (in place) every (segment, prefix) slide trace,
+            # next to the GDN commit traces and after the verify trace.
+            self.stage = 'fused commit capture'
+            self.fused.capture(capture_operation)
+        self.seal_capture_plug()
+
+    def _finish_construction(self):
+        build = self.build
+        operations, pool, shared_weights, collectives, started = (build.operations, build.pool, build.shared_weights,
+                                                                  build.collectives, build.started)
+        shape = self.shape
+        if self.extent:
+            # S2 B6 (publication_warm.py): today's eager publication - what a packed round the fused
+            # commit refuses and every sequential step run - published and discarded once at every shape
+            # serving can ask of it (each segment's row offset x prefix, each pooled width x prefix), on
+            # scratch, fenced and released here, so no serving path compiles a publication program after
+            # attach. After every capture; a raise fails the attach like every stage here.
+            import publication_warm
+
+            self.stage = 'eager publication warm'
+            self.publication_warm = publication_warm.warm(self, operations=operations, mesh=self.mesh, pool=pool,
+                                                          shared_weights=shared_weights, collectives=collectives,
+                                                          log=diagnostic)
+        # Warming the commit traces wrote every carry and slot 0 (as verifier_engine's
+        # own warming does): slot 0 goes back to what attach found, and the carries go
+        # back to the zeros the pool lends - a request's engine seeds its own on
+        # admission (VerifierEngine.save_carry), after the pool zeroes the slot again.
+        self.stage = 'reseeding'
+        self.reseed()
+        operations.synchronize_device(self.mesh)
+        self.stage = 'validating bindings'
+        self.validate_bindings()
+        # The captures rewrote slot 0: nobody is resident.
+        note_prefill()
+        self.setup_ms = (time.perf_counter() - started) * 1000
+        self.phase = 'idle'
+        if self.padded_min_users is not None:
+            diagnostic('%s min_users=%d users=%d max_idle=%d carries_in_place=%d'
+                       % (PADDED_ADMITTED_MARKER, self.padded_min_users, self.users, self.MAX_IDLE_SEGMENTS,
+                          int(self.carries_in_place)))
+        if self.round_fences:
+            # Only this block's retained records: a sequential engine's never take the diet.
+            self.fixture.retained.use_round_fences()
+            diagnostic('%s users=%d' % (verify_prestage.FENCES_ENGAGED_MARKER, self.users))
+        if self.prestaged is not None:
+            diagnostic('%s users=%d audit=%d' % (verify_prestage.ENGAGED_MARKER, self.users,
+                                                 int(self.prestaged.audit)))
+        if self.fused is not None:
+            diagnostic(self.fused.engaged_line())
+        if self.gdn_after_pairs or self.gdn_after_pairs_refusal is not None:
+            import early_draft
+
+            if self.gdn_after_pairs:
+                diagnostic('%s users=%d pipelined=%d' % (early_draft.GDN_ENGAGED_MARKER, self.users,
+                                                         int(self.pipelined_commits)))
+            else:
+                diagnostic('%s users=%d reason=%s' % (early_draft.GDN_REFUSED_MARKER, self.users,
+                                                      self.gdn_after_pairs_refusal))
+        # Nothing of the construction's arguments is kept once the block is idle.
+        self.build = None
 
     def open_capture_plug(self, operations):
         """QWEN_FAST_CAPTURE_PLUG=1 at QWEN_FAST_TP=4: the capture zone (capture_plug.Zone), opened before the block's first

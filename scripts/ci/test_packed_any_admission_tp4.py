@@ -260,6 +260,84 @@ class AdmitTests(unittest.TestCase):
         # a traffic profile run as a gate (the workflow sets QWEN_C2_GATE=1 for every gate boot) is not a gate-only profile
         self.assertFalse(admission.unqualified_allowed(dict(GOOD_ENV, QWEN_C2_GATE='1')))
 
+    # --- QWEN_FAST_M3_BLOCKS=2: eight seats on two M3 blocks (serving_runtime.m3_shape) ------------------------------------
+
+    @staticmethod
+    def blocks_m3(users, blocks=None, **environ):
+        """serving_runtime.m3_shape's (met, description) over the attach's environment, as the real predicate says it."""
+        import serving_runtime
+
+        env = {'QWEN_FAST_FOUR_AS_TWO': '0', 'QWEN_FAST_PACKED_STEP': '1', **environ}
+        if blocks is not None:
+            env['QWEN_FAST_M3_BLOCKS'] = str(blocks)
+        return serving_runtime.m3_shape(dict(scheduler_requests=users), env)
+
+    def test_two_m3_blocks_are_admitted_on_the_committed_evidence_and_the_record_names_them(self):
+        record = self.admit(dict(GOOD_ENV, QWEN_FAST_M3_BLOCKS='2'), m3=self.blocks_m3(8, 2))
+        self.assertNotIn('unqualified', record)
+        self.assertEqual(record['blocks'], 2)
+        self.assertEqual(record['shape'], 'users=8 FOUR_AS_TWO=0 PACKED_STEP=1 M3_BLOCKS=2')
+        self.assertTrue(self.lines[-1].startswith('[PINDIAG] packed-any admission passed: K64j'))
+        self.assertTrue(self.lines[-1].endswith(' blocks=2'), self.lines[-1])
+        # the evidence is the committed four-card record at its own, unchanged pin: each block is the qualified geometry
+        self.assertIn(admission.EVIDENCE_TP4_SHA256[:16], self.lines[-1])
+        self.assertEqual(sha(admission.EVIDENCE_TP4.read_bytes()), admission.EVIDENCE_TP4_SHA256)
+
+    def test_a_one_block_attach_records_and_logs_exactly_what_it_always_did(self):
+        for environ, m3 in ((GOOD_ENV, M3), (dict(GOOD_ENV, QWEN_FAST_M3_BLOCKS='1'), self.blocks_m3(4, 1))):
+            with self.subTest(environ=environ.get('QWEN_FAST_M3_BLOCKS')), mock.patch.dict(admission._STATE, clear=True):
+                self.lines.clear()
+                record = self.admit(environ, m3=m3)
+                self.assertNotIn('blocks', record)
+                self.assertFalse(self.lines[-1].endswith('blocks=2'))
+                self.assertEqual(record['shape'], 'users=4 FOUR_AS_TWO=0 PACKED_STEP=1')
+
+    def test_a_gate_run_names_the_blocks_on_its_unqualified_line_too(self):
+        with skeleton_on_disk():
+            record = self.admit(dict(GATE, QWEN_FAST_M3_BLOCKS='2'), m3=self.blocks_m3(8, 2))
+        self.assertEqual(record['blocks'], 2)
+        self.assertTrue(self.lines[-1].startswith('[PINDIAG] packed-any admission passed UNQUALIFIED'))
+        self.assertTrue(self.lines[-1].endswith(' blocks=2'), self.lines[-1])
+
+    def test_every_other_shape_at_eight_users_is_refused(self):
+        for name, environ, m3 in (
+                ('eight users without the flag', GOOD_ENV, self.blocks_m3(8)),
+                ('eight users with one block asked', dict(GOOD_ENV, QWEN_FAST_M3_BLOCKS='1'), self.blocks_m3(8, 1)),
+                ('two blocks at four users', dict(GOOD_ENV, QWEN_FAST_M3_BLOCKS='2'), self.blocks_m3(4, 2)),
+                ('two blocks with the 32-row pair switch on', dict(GOOD_ENV, QWEN_FAST_M3_BLOCKS='2'),
+                 self.blocks_m3(8, 2, QWEN_FAST_FOUR_AS_TWO='1')),
+                ('two blocks without the packed step', dict(GOOD_ENV, QWEN_FAST_M3_BLOCKS='2'),
+                 self.blocks_m3(8, 2, QWEN_FAST_PACKED_STEP='0'))):
+            with self.subTest(name), mock.patch.dict(admission._STATE, clear=True):
+                with self.assertRaises(admission.AdmissionRefused) as refused:
+                    self.admit(environ, m3=m3)
+                self.assertTrue(any('64-row M3 block' in problem for problem in refused.exception.problems),
+                                refused.exception.problems)
+                self.assertFalse(admission.admitted())
+
+    def test_a_malformed_block_count_is_refused_naming_the_flag(self):
+        for value in ('', '0', '3', 'two'):
+            with self.subTest(value=value), mock.patch.dict(admission._STATE, clear=True):
+                with self.assertRaises(admission.AdmissionRefused) as refused:
+                    self.admit(dict(GOOD_ENV, QWEN_FAST_M3_BLOCKS=value), m3=M3)
+                self.assertTrue(any('QWEN_FAST_M3_BLOCKS must be 1 or 2' in problem
+                                    for problem in refused.exception.problems), refused.exception.problems)
+
+    def test_the_environment_check_reads_the_block_count_strictly(self):
+        self.assertEqual(admission.m3_blocks({}), 1)
+        self.assertEqual(admission.m3_blocks({'QWEN_FAST_M3_BLOCKS': '2'}), 2)
+        with self.assertRaisesRegex(ValueError, 'QWEN_FAST_M3_BLOCKS must be 1 or 2'):
+            admission.m3_blocks({'QWEN_FAST_M3_BLOCKS': '4'})
+        self.assertEqual(admission.check_environment(dict(GOOD_ENV, QWEN_FAST_M3_BLOCKS='2'), self.blocks_m3(8, 2)), [])
+
+    def test_the_block_count_the_admission_reads_is_the_one_the_attach_reads(self):
+        import serving_runtime
+
+        for value in (None, '1', '2'):
+            environ = {} if value is None else {'QWEN_FAST_M3_BLOCKS': value}
+            self.assertEqual(admission.m3_blocks(environ), serving_runtime.m3_blocks(environ))
+        self.assertEqual(admission.M3_BLOCKS_ENV, serving_runtime.M3_BLOCKS_FLAG)
+
 
 class GuardTests(unittest.TestCase):
     def test_the_pair_needs_nothing(self):

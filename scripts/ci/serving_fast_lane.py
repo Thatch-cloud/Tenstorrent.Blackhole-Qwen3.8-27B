@@ -42,6 +42,7 @@ import sys
 import types
 
 LANE_FLAG = 'QWEN_FAST_LANE'
+M3_BLOCKS_FLAG = 'QWEN_FAST_M3_BLOCKS'              # eight seats on two M3 blocks (serving_runtime.M3_BLOCKS_FLAG): refused here
 RATIO_FLAG = 'QWEN_FAST_LANE_RATIO'          # 'auto' (default) or a fixed k: solo rounds per packed round, 0 <= k <= k_max
 KMAX_FLAG = 'QWEN_FAST_LANE_KMAX'            # the most solo rounds between two packed rounds (default 3)
 GAP_FLAG = 'QWEN_FAST_LANE_GAP_MS'           # a packed round at least this often, in ms (default 250)
@@ -165,6 +166,9 @@ def lane_admission(solo_lane, environ=None, *, seats, log=None):
         problems.append('QWEN_FAST_ANY_REQUEST is not 1: a bad lane mark is quarantined by the C2-any consumer')
     if seats != 4:
         problems.append('the lanes are built for four seats (one fast, up to three standard), not %r' % (seats,))
+    if environ.get(M3_BLOCKS_FLAG, '1') != '1':
+        problems.append('%s=%s: the lanes are built for one M3 block, not for eight seats on two (the fast lane on two '
+                        'M3 blocks is an unbuilt scope)' % (M3_BLOCKS_FLAG, environ.get(M3_BLOCKS_FLAG)))
     config = None
     try:
         config = LaneConfig.from_environment(environ, seats=seats)
