@@ -92,9 +92,10 @@ class PrivacyError(ValueError):
     """A value that is not an aggregate; the public summary is refused rather than written."""
 
 
-def assert_public(value, path='summary'):
+def assert_public(value, path='summary', words=None):
     """Refuse anything that is not an aggregate: strings outside PUBLIC_WORDS (the `image_tag` key aside), lists past MAX_LIST,
-    nested lists of lists, non-finite numbers. The Qwen repo is public: its Actions logs and artifacts are too."""
+    nested lists of lists, non-finite numbers. `words`: more public words a caller's own report may use (the A0 screen's
+    verdicts). The Qwen repo is public: its Actions logs and artifacts are too."""
     if isinstance(value, dict):
         for key, item in value.items():
             if not isinstance(key, str) or not PUBLIC_KEY.fullmatch(key):
@@ -103,14 +104,14 @@ def assert_public(value, path='summary'):
                 if not IMAGE_TAG.fullmatch(item):
                     raise PrivacyError('%s.image_tag is not a plain tag' % path)
                 continue
-            assert_public(item, '%s.%s' % (path, key))
+            assert_public(item, '%s.%s' % (path, key), words)
     elif isinstance(value, (list, tuple)):
         if len(value) > MAX_LIST:
             raise PrivacyError('%s: a list of %d (the most an aggregate needs is %d)' % (path, len(value), MAX_LIST))
         for item in value:
             if isinstance(item, (list, tuple)):
                 raise PrivacyError('%s: a list inside a list' % path)
-            assert_public(item, path + '[]')
+            assert_public(item, path + '[]', words)
     elif isinstance(value, bool) or value is None:
         return
     elif isinstance(value, int):
@@ -119,7 +120,7 @@ def assert_public(value, path='summary'):
         if math.isnan(value) or math.isinf(value):
             raise PrivacyError('%s: a non-finite number' % path)
     elif isinstance(value, str):
-        if value not in PUBLIC_WORDS:
+        if value not in PUBLIC_WORDS and not (words and value in words):
             raise PrivacyError('%s: a string that is not one of the report\'s words' % path)
     else:
         raise PrivacyError('%s: a %s' % (path, type(value).__name__))
