@@ -86,7 +86,8 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_TAULAB_PROFILE   the production profile it serves (default c2-packed-tp4; a P150x4 profile of the checkout)
   C2_TAULAB_DATA      the rig-local data directory (default, rendered empty: kwork64/taulab/data under the runner's home);
                       relative paths are under the home, no '..'; the driver READS it and never writes it
-  C2_TAULAB_ARMS      the arms, space or comma separated, run in their own order (default: A1 A2 A3 A4 A5)
+  C2_TAULAB_ARMS      the arms, space or comma separated, run in their own order (default: A1 A2 A3 A4 A5; G, the drafter
+                      fine-tune's generation arm over a training data directory, only when named)
   C2_TAULAB_DEADLINE  the whole run in minutes, container load included (default 270, at most 540)
   C2_TAULAB_IN_FLIGHT requests in flight per independent-turn arm (default 8: the four seats and four queued; 1..16)
   C2_TAULAB_MAX_TOKENS  the answer budget of A1, A2, A4 and A5 (default, rendered empty: 2048; A3 always keeps the lanes' 2400)
@@ -140,6 +141,7 @@ PREFIX_ARM_PLANS = (('exactness-traced', 'exactness'), ('exactness-audit', 'exac
                     ('lifecycle-tiny', 'lifecycle'))
 # The W-T1 tau lab (c2_tau_lab.py): its arms, the production profile it serves and its time box.
 TAULAB_ARMS = ('A1', 'A2', 'A3', 'A4', 'A5')
+TAULAB_OPTIONAL_ARMS = ('G',)       # the drafter fine-tune's generation arm: accepted when named, never in the default
 TAULAB_PROFILE = 'c2-packed-tp4'
 TAULAB_DEADLINE_MINUTES = 270
 MAX_TAULAB_DEADLINE_MINUTES = 540
@@ -481,10 +483,10 @@ def read_taulab(values, profiles, running):
     if profile not in profiles:
         raise JobError('C2_TAULAB_PROFILE %r is not a profile of qwen_c2_profiles.json (%s)' % (profile, ', '.join(profiles)))
     arms = split_list(values.get('C2_TAULAB_ARMS', '')) or list(TAULAB_ARMS)
-    unknown = sorted(set(arms) - set(TAULAB_ARMS))
+    unknown = sorted(set(arms) - set(TAULAB_ARMS + TAULAB_OPTIONAL_ARMS))
     if unknown or len(set(arms)) != len(arms):
         raise JobError('C2_TAULAB_ARMS: %s (known: %s, each once)' % (
-            ('unknown ' + ', '.join(unknown)) if unknown else 'an arm named twice', ' '.join(TAULAB_ARMS)))
+            ('unknown ' + ', '.join(unknown)) if unknown else 'an arm named twice', ' '.join(TAULAB_ARMS + TAULAB_OPTIONAL_ARMS)))
     paths = {}
     for key in ('C2_TAULAB_DATA', 'C2_TAULAB_COUNTERS'):
         path = values.get(key, '')

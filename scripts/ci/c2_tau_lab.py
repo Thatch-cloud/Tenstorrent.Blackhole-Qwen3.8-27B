@@ -25,6 +25,9 @@ THE ARMS (order, default concurrency; design table in section 1.1)
       tool calls; the reasoning is not sent back, as an agent replaying a transcript does not) and each session grown to the
       seed's prompt targets (16k to 60k) with prefix_agent_corpus.Conversation, IN_FLIGHT sessions at once
   A5  the thinking-OFF pair of the 100 turns a5_pairs.json names (the same turn ids as their A1 turns, paired)
+  G   (optional, never in the default run) the drafter fine-tune's generation arm: the turns of a TRAINING data directory
+      (ft_select.py: g_train.jsonl + ids, MANIFEST.json with a G table only), thinking ON, each answered by the target and KEPT in
+      outputs.jsonl (as every arm's answers are); named explicitly: --arms G
 THINKING. Production agents call Qwen3.8 with thinking ON, which is the chat template's default: an ON turn carries NO
 chat_template_kwargs (the smoke's stream_reasoning sends none either); an OFF turn is rendered with enable_thinking false. The
 data's token ids are exactly those renders: A1, A2 and A4 are thinking ON; A5 (and A3, as the lanes baked it) thinking OFF.
@@ -83,6 +86,7 @@ import prefix_replay as replay  # noqa: E402
 import tau_lab_report as report  # noqa: E402
 
 ARMS = ('A1', 'A2', 'A3', 'A4', 'A5')
+OPTIONAL_ARMS = ('G',)           # G: the drafter fine-tune's generation arm (ft_select.py's data directory); never in the default run
 LOG_FLAGS = (('QWEN_FAST_PACKED_AUDIT', '1'), ('QWEN_FAST_PHASE_TIMING', '1'))
 AUDIT_FLAGS = (('QWEN_FAST_VERIFY_T1_AUDIT', '1'), ('QWEN_FAST_VERIFY_T2_AUDIT', '1'))   # production runs with the verify audits ON
 PRODUCTION_TAG = 'tp4-serve-2'
@@ -109,6 +113,8 @@ ARM_SPEC = {
     'A3': dict(kind='calib', set='calib', thinking=False, weight=8, max_tokens=CALIBRATION_MAX_TOKENS),
     'A4': dict(kind='chain', set='chained', thinking=True, weight=60, max_tokens=DEFAULT_MAX_TOKENS),
     'A5': dict(kind='turns', set='swe', thinking=False, weight=20, max_tokens=DEFAULT_MAX_TOKENS),
+    # G: target-regenerated answers for fine-tune training turns; thinking ON like production agents, the answers KEPT in outputs.jsonl
+    'G': dict(kind='turns', set='train', thinking=True, weight=100, max_tokens=DEFAULT_MAX_TOKENS),
 }
 ID = re.compile(r'[A-Za-z0-9_.:-]{1,64}')
 SETS = ('swe', 'own', 'chained', 'calib')
@@ -125,6 +131,7 @@ ARM_FILES = {
     'A3': ('a3_calibration.json',),
     'A4': ('a4_seeds.jsonl',),
     'A5': ('a5_pairs.json', 'a5_think_off.ids.jsonl.gz', 'a1_swe_heldout.jsonl', 'a1_swe_heldout.ids.jsonl.gz'),
+    'G': ('g_train.jsonl', 'g_train.ids.jsonl.gz'),
 }
 SEED_FIELDS = ('id', 'name', 'seed', 'system', 'task_template', 'first_tokens', 'turns', 'prompt_targets')
 
@@ -341,17 +348,24 @@ def calibration_records(path):
 def expected_counts(manifest):
     """{arm: records the manifest says it holds} (A4: sessions, with the turns beside)."""
     arms = manifest['arms']
+    want = {}
     try:
-        return dict(A1=arms['A1']['turns'], A2=arms['A2']['turns'], A3=arms['A3']['turns'], A4=arms['A4']['sessions'],
-                    A5=arms['A5']['turns'], A4_turns=arms['A4']['turns'])
+        if 'G' in arms:
+            want['G'] = arms['G']['turns']
+        if set(arms) != set(['G']):          # a data directory of training turns only has no A tables; any other keeps the full contract
+            want.update(A1=arms['A1']['turns'], A2=arms['A2']['turns'], A3=arms['A3']['turns'], A4=arms['A4']['sessions'],
+                        A5=arms['A5']['turns'], A4_turns=arms['A4']['turns'])
     except (KeyError, TypeError):
         raise LabError('%s lacks an arm table (A1 A2 A3 A4 A5 with their counts)' % MANIFEST_NAME)
+    return want
 
 
 def check_counts(data, manifest, arms):
     """Refuse (before any container) when an arm asked for holds fewer records than the manifest says."""
     want = expected_counts(manifest)
     for arm in arms:
+        if arm not in want:
+            raise LabError('%s lacks the arm table of %s' % (MANIFEST_NAME, arm))
         have = len(data.get(arm) or [])
         if have < want[arm]:
             raise LabError('arm %s holds %d records, the manifest says %d' % (arm, have, want[arm]))
@@ -375,6 +389,8 @@ def load_data(data, arms):
         elif arm == 'A2':
             loaded[arm] = conversation_records(os.path.join(data, ARM_FILES['A2'][0]),
                                                os.path.join(data, ARM_FILES['A2'][1]), 'own')
+        elif arm == 'G':
+            loaded[arm] = conversation_records(os.path.join(data, ARM_FILES['G'][0]), os.path.join(data, ARM_FILES['G'][1]), 'train')
         elif arm == 'A3':
             loaded[arm] = calibration_records(os.path.join(data, ARM_FILES['A3'][0]))
         elif arm == 'A4':
@@ -1087,12 +1103,13 @@ def build_parser():
 
 def parse_arms(text):
     arms = [arm for arm in re.split(r'[,\s]+', text.strip()) if arm]
-    unknown = sorted(set(arms) - set(ARMS))
+    known = ARMS + OPTIONAL_ARMS
+    unknown = sorted(set(arms) - set(known))
     if not arms or unknown:
-        raise LabError('unknown arm(s): %s (known: %s)' % (', '.join(unknown or ['(none)']), ' '.join(ARMS)))
+        raise LabError('unknown arm(s): %s (known: %s)' % (', '.join(unknown or ['(none)']), ' '.join(known)))
     if len(set(arms)) != len(arms):
         raise LabError('an arm named twice')
-    return [arm for arm in ARMS if arm in arms]
+    return [arm for arm in known if arm in arms]
 
 
 def load_corpus(checkout):
