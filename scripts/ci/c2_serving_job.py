@@ -15,6 +15,10 @@ Keys (every one optional but C2_IMAGE_TAG):
                       container it started, so the cards are free; agentstart (last, after push) starts the agent
                       again and waits for its container to answer /v1/models. Neither opens a card, so a job of only
                       status, agentstop, unserve and agentstart is valid with C2_CARDS=pair or quad.
+  C2_RMI_TAGS         space-separated image tags the rmi action (right after status) deletes from the host's Docker, each
+                      matching RMI_TAG and naming the image <registry>/tt-vllm:qwen38-c2-<tag> (the workflow forms the
+                      name). Required with rmi, refused without it; a PROTECTED tag (a production lineage) is refused.
+                      rmi opens no card, so a job of only rmi (or status rmi) is valid with C2_CARDS=pair or quad.
   C2_IMAGE_TAG        the image is zot.thatch.local:5000/tt-vllm:qwen38-c2-<tag>
   C2_FABRIC           the fabric config the fabric action opens the (1, 4) mesh under: FABRIC_1D (the default, what
                       the TT plugin sets) or FABRIC_1D_RING; needs C2_CARDS=quad when set
@@ -98,12 +102,12 @@ import os
 import re
 import sys
 
-ACTIONS = ('status', 'agentstop', 'platform', 'unserve', 'priority', 'reset', 'fabric', 'cardm', 'drift', 'build', 'probe', 'smoke', 'gate',
+ACTIONS = ('status', 'rmi', 'agentstop', 'platform', 'unserve', 'priority', 'reset', 'fabric', 'cardm', 'drift', 'build', 'probe', 'smoke', 'gate',
            'prefix', 'replay', 'push', 'agentstart')
 CARD_SETS = ('pair', 'quad')
 # What a four-card job may run: the pair-shaped steps (a single-card harness on card M, the M+A smoke and replay, the
 # CPU-priority measurement of the M+A container) do not apply to it, and fabric applies to nothing else.
-QUAD_ACTIONS = ('status', 'agentstop', 'platform', 'unserve', 'reset', 'fabric', 'drift', 'build', 'probe', 'smoke', 'gate', 'prefix',
+QUAD_ACTIONS = ('status', 'rmi', 'agentstop', 'platform', 'unserve', 'reset', 'fabric', 'drift', 'build', 'probe', 'smoke', 'gate', 'prefix',
                 'replay', 'push', 'agentstart')
 TP4_MESH_DEVICE = 'P150x4'
 # The mesh_device values of a pair profile: none (the image's P300 under upstream's four-channel p150_x2) and P300
@@ -178,6 +182,15 @@ CARDM_STEP_ENV = ('QUAL_CARD', 'ALLOW_SERVING_CARD', 'RESULTS', 'CARD_B_ARGS')
 # containers: the harness's holder check would look at the wrong one), or its default paths.
 CARDM_REFUSED_ENV = CARDM_STEP_ENV + ('PATH', 'HOME', 'ENV', 'SHELLOPTS', 'IFS', 'PS4', 'CDPATH', 'GLOBIGNORE')
 CARDM_REFUSED_PREFIXES = ('QUAL_', 'BASH', 'LD_', 'DOCKER_', 'SUDO_')
+
+
+# Tags rmi must never delete. Production's base is tt-vllm:qwen38-c2-tp4-serve-7; the P8 base (qwen-fast-serving:ci-*) is a
+# different repository, so no tag here can ever name it. The named tags are the lineages production has run on, the prefixes
+# cover every other serve-N, and anything with 'prod' in it is refused whatever else it says.
+PROTECTED = ('serve-7', 'tp4-serve-7', 'tp4-serve-6', 'tp4-serve-3', 'tp4-serve-2')
+PROTECTED_PREFIXES = ('serve-', 'tp4-serve-')
+PROTECTED_WORDS = ('prod',)
+RMI_TAG = re.compile(r'[a-z0-9][a-z0-9.-]{1,60}')
 
 
 class JobError(ValueError):
@@ -335,6 +348,27 @@ def read_cardm(values, requested, root=ROOT, library=QUAL_CARD_LIBRARY):
     return harness, ' '.join(args), ' '.join(pairs)
 
 
+def read_rmi_tags(values, actions):
+    """C2_RMI_TAGS as a space-joined string: required with the rmi action, refused without it, every tag well formed
+    and none of them protected."""
+    tags = split_list(values.get('C2_RMI_TAGS', ''))
+    if 'rmi' not in actions:
+        if tags:
+            raise JobError('C2_RMI_TAGS is set but C2_ACTIONS has no rmi')
+        return ''
+    if not tags:
+        raise JobError('C2_ACTIONS has rmi: C2_RMI_TAGS must name the image tags to delete')
+    for tag in tags:
+        if not RMI_TAG.fullmatch(tag):
+            raise JobError('C2_RMI_TAGS: %r does not match %s' % (tag, RMI_TAG.pattern))
+        if tag in PROTECTED or tag.startswith(PROTECTED_PREFIXES) or any(word in tag for word in PROTECTED_WORDS):
+            raise JobError('C2_RMI_TAGS: %r is protected (a production lineage: %s, any serve- or tp4-serve- tag, '
+                           'anything containing prod); rmi refuses it' % (tag, ' '.join(PROTECTED)))
+    if len(set(tags)) != len(tags):
+        raise JobError('C2_RMI_TAGS names a tag twice')
+    return ' '.join(tags)
+
+
 def read_job(values, profiles, root=ROOT, meshes=None):
     """The workflow outputs for a parsed job file, or JobError. `meshes`: profile_meshes() (the checkout's when not given)."""
     actions = split_list(values.get('C2_ACTIONS', 'status')) or ['status']
@@ -344,6 +378,7 @@ def read_job(values, profiles, root=ROOT, meshes=None):
     order = [ACTIONS.index(action) for action in actions]
     if order != sorted(order):
         raise JobError('C2_ACTIONS must follow the workflow\'s order: %s' % ' '.join(ACTIONS))
+    rmi_tags = read_rmi_tags(values, actions)
     tag = values.get('C2_IMAGE_TAG', '')
     if not TAG.fullmatch(tag):
         raise JobError('C2_IMAGE_TAG must match %s, got %r' % (TAG.pattern, tag))
@@ -385,7 +420,7 @@ def read_job(values, profiles, root=ROOT, meshes=None):
         named += [('C2_PREFIX_PROFILE', prefix['prefix_profile']), ('C2_PREFIX_BASELINE', prefix['prefix_baseline'])]
     cards = read_cards(values, actions, meshes, named)
     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root)
-    outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
+    outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), rmi_tags=rmi_tags, tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
                    gate_memory_prompt=str(memory_prompt), replay_profile=replay_profile,

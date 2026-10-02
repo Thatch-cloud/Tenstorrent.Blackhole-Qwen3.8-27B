@@ -152,11 +152,14 @@ class FileTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
 
     def test_the_agent_actions_bracket_the_job(self):
-        self.assertEqual(job.ACTIONS[1], 'agentstop')
+        self.assertEqual(job.ACTIONS[2], 'agentstop')
         self.assertEqual(job.ACTIONS[-1], 'agentstart')
-        self.assertEqual(job.QUAD_ACTIONS[1], 'agentstop')
+        self.assertEqual(job.QUAD_ACTIONS[2], 'agentstop')
         self.assertEqual(job.QUAD_ACTIONS[-1], 'agentstart')
-        self.assertEqual(job.ACTIONS.index('agentstop'), job.ACTIONS.index('status') + 1)
+        self.assertEqual(job.ACTIONS.index('rmi'), job.ACTIONS.index('status') + 1)
+        self.assertEqual(job.ACTIONS.index('agentstop'), job.ACTIONS.index('rmi') + 1)
+        self.assertEqual(job.QUAD_ACTIONS.index('rmi'), job.QUAD_ACTIONS.index('status') + 1)
+        self.assertEqual(job.QUAD_ACTIONS.index('agentstop'), job.QUAD_ACTIONS.index('rmi') + 1)
 
     def test_agent_jobs_parse_in_order_and_open_no_card(self):
         quad = dict(C2_CARDS='quad', C2_PROFILE='general-tp4')
@@ -200,6 +203,67 @@ class FileTests(unittest.TestCase):
         self.assertLess(text.index('- name: Push'), text.index('- name: Start the node agent'))
         self.assertLess(text.index('- name: Start the node agent'), text.index('- name: Upload results'))
         self.assertIn("!cancelled() && contains(steps.job.outputs.actions, 'agentstart')", step_text('Start the node agent'))
+
+
+class RmiTests(unittest.TestCase):
+    def test_rmi_alone_and_after_status_parse_for_both_card_sets(self):
+        for actions in ('rmi', 'status rmi', 'status rmi agentstop'):
+            for cards in ('quad', 'pair'):
+                outputs = read(C2_ACTIONS=actions, C2_CARDS=cards, C2_RMI_TAGS='old-one v5.1')
+                self.assertEqual(outputs['actions'], actions)
+                self.assertEqual(outputs['rmi_tags'], 'old-one v5.1')
+        self.assertEqual(read()['rmi_tags'], '')
+
+    def test_the_tags_are_required_with_rmi_and_refused_without_it(self):
+        with self.assertRaisesRegex(job.JobError, 'C2_RMI_TAGS must name'):
+            read(C2_ACTIONS='status rmi')
+        with self.assertRaisesRegex(job.JobError, 'no rmi'):
+            read(C2_ACTIONS='status', C2_RMI_TAGS='old-one')
+
+    def test_a_malformed_tag_is_refused(self):
+        for bad in ('A-upper', '-lead', 'a', 'has_underscore', 'a/b', 'a:b', '.dot', 'x' * 62):
+            with self.assertRaisesRegex(job.JobError, 'does not match'):
+                read(C2_ACTIONS='rmi', C2_RMI_TAGS='fine-one ' + bad)
+        with self.assertRaisesRegex(job.JobError, 'twice'):
+            read(C2_ACTIONS='rmi', C2_RMI_TAGS='old-one old-one')
+
+    def test_every_protected_tag_prefix_and_word_is_refused(self):
+        tags = list(job.PROTECTED) + ['serve-8', 'serve-12-x', 'tp4-serve-9', 'tp4-serve-new', 'prod', 'my-prod-x', 'preprod', 'v1.prod']
+        for tag in tags:
+            with self.assertRaisesRegex(job.JobError, 'protected'):
+                read(C2_ACTIONS='rmi', C2_RMI_TAGS='old-one ' + tag)
+        self.assertEqual(sorted(job.PROTECTED), sorted(('serve-7', 'tp4-serve-7', 'tp4-serve-6', 'tp4-serve-3', 'tp4-serve-2')))
+        for tag in ('tp4-next-2', 'tp4-v266', 'observe-1'):
+            self.assertEqual(read(C2_ACTIONS='rmi', C2_RMI_TAGS=tag)['rmi_tags'], tag)
+
+    def test_rmi_after_agentstop_is_refused(self):
+        for actions in ('agentstop rmi', 'status agentstop rmi', 'unserve rmi'):
+            with self.assertRaisesRegex(job.JobError, 'order'):
+                read(C2_ACTIONS=actions, C2_RMI_TAGS='old-one')
+
+    def test_the_workflow_has_one_rmi_step_between_status_and_agentstop(self):
+        text = workflow_text()
+        gate = "contains(steps.job.outputs.actions, 'rmi')"
+        self.assertEqual(text.count(gate), 1)
+        name = 'Remove superseded images'
+        step = step_text(name)
+        self.assertIn(gate, step.split('run: |')[0])
+        self.assertGreater(text.index('- name: ' + name), text.index('- name: Status of the four-card set'))
+        self.assertLess(text.index('- name: ' + name), text.index('- name: Stop the node agent'))
+        script = step_script(name)
+        self.assertIn('set +e', script)
+        self.assertIn('docker rmi "$full"', script)
+        self.assertIn('--filter "ancestor=$full"', script)
+        self.assertIn('qwen38-c2-$tag', script)
+        self.assertEqual(script.count('df -h /'), 2)
+        for word in ('absent', 'in use'):
+            self.assertIn(word, script)
+        self.assertIsNone(re.search(r'rmi\s+(?:\S+\s+)*(?:-f|--force)', script))
+        self.assertIsNone(re.search(r'(?:^|\s)(?:-f|--force)(?:\s|$)', script))
+        self.assertNotIn('prune', script)
+        for other in ('thatch-serving-tt', 'qwen-fast-serving'):
+            self.assertNotIn(other, script)
+        self.assertEqual(len(re.findall(r'docker (?:image rm|rmi|rm) "', script)), 1)
 
 
 def workflow_text():

@@ -163,6 +163,29 @@ jobs:
           df -h /home/thatch/hf-cache/hub 2>&1 | tail -2
           sudo -n du -sh /home/thatch/hf-cache/hub/.qwen-c2 2>&1
           echo "=== serving containers"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}' | grep -E 'thatch-inference|qwen-c2' || echo none
+      - name: Remove superseded images
+        if: contains(steps.job.outputs.actions, 'rmi')
+        shell: bash
+        env:
+          RMI_TAGS: ${{ steps.job.outputs.rmi_tags }}
+        run: |
+          # Deletes only the named superseded C2 images (scripts/ci/c2_serving_job.py refused any production tag). No force
+          # flag, no pruning: an image a container uses is left alone, and so is everything outside the list.
+          set +e
+          echo "=== disk before"; df -h /
+          for tag in $RMI_TAGS; do
+            full=zot.thatch.local:5000/tt-vllm:qwen38-c2-$tag
+            if ! docker image inspect "$full" >/dev/null 2>&1; then
+              echo "$full: absent"; continue
+            fi
+            users=$(docker ps -a --filter "ancestor=$full" -q)
+            if [ -n "$users" ]; then
+              echo "$full: in use by $(echo $users | wc -w) container(s), kept"; continue
+            fi
+            if docker rmi "$full"; then echo "$full: removed"; else echo "$full: docker rmi failed (kept)"; fi
+          done
+          echo "=== disk after"; df -h /
+          exit 0
       - name: Stop the node agent
         if: contains(steps.job.outputs.actions, 'agentstop')
         shell: bash
