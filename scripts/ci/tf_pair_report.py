@@ -383,13 +383,25 @@ def build(meta, arms, validity=None, resamples=RESAMPLES, seed=0, w8_resamples=W
                      miss_removed_needed=MISS_REMOVED_NEEDED,
                      acceptance_dflash2=acceptance_curve(arm_d, keys), acceptance_dspark=acceptance_curve(arm_s, keys))
     window = window_effect(meta, arms, r_main['point'])
-    verdict = decide(r_main, g_long, g_p10, g_w8, r_own, by_band, validity)
-    public = dict(verdict=verdict['verdict'], reasons=verdict['reasons'], run_arm_e=verdict['run_arm_e'],
-                  window_steer=window['steer'], turns_paired=len(keys), turns_unpaired=excluded,
-                  r=dict(r_main, uncapped_point=r_uncapped), g_long=g_long, g_p10=g_p10, g_w8=g_w8, r_own=r_own,
-                  secondary=secondary, window=window['public'], arms=public_arms,
-                  validity=dict((gate, validity.get(gate, 'NOT_RUN')) for gate in VALIDITY_GATES))
-    private = dict(public, per_turn=per_turn_rows(meta, keys, arm_s, arm_d))
+    rows = per_turn_rows(meta, keys, arm_s, arm_d)
+
+    def assemble(gates):
+        verdict = decide(r_main, g_long, g_p10, g_w8, r_own, by_band, gates)
+        public = dict(verdict=verdict['verdict'], reasons=verdict['reasons'], run_arm_e=verdict['run_arm_e'],
+                      window_steer=window['steer'], turns_paired=len(keys), turns_unpaired=excluded,
+                      r=dict(r_main, uncapped_point=r_uncapped), g_long=g_long, g_p10=g_p10, g_w8=g_w8, r_own=r_own,
+                      secondary=secondary, window=window['public'], arms=public_arms,
+                      validity=dict((gate, gates.get(gate, 'NOT_RUN')) for gate in VALIDITY_GATES))
+        return dict(public, per_turn=rows), public
+
+    # V5 is this report's own check: the public summary must pass assert_public (a leak makes the screen NOT_ESTABLISHED)
+    validity['V5'] = 'PASS'
+    private, public = assemble(validity)
+    try:
+        assert_public(public)
+    except rep.PrivacyError:
+        validity['V5'] = 'FAIL'
+        private, public = assemble(validity)
     return private, public
 
 

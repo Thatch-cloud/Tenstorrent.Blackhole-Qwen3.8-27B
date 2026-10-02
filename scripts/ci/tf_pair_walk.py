@@ -13,20 +13,26 @@ statistics and the tests never need a model:
 Round arithmetic (the served rule):
   anchor index j in the answer (j = 0 is the prefill seed); absolute start s = prompt_len + j; offset = j + 1 (the lab's
   completion-token offset); rows = proposals + 1 (16 for T16, 8 for T8); proposals are compared with answer[j+1 ...];
-  accepted a = the matching prefix; left = answer_len - 1 - j; cap = min(extent_attention_replay.accept_limit(s, rows), left)
+  accepted a = the matching prefix; left = answer_len - 1 - j; cap = min(accept_limit(s, rows), left)
   committed = min(a + 1, cap); uncapped = min(a + 1, left) (the counterfactual without the extent cap).
   The round that reaches the end of the answer (the terminal round) and the prefill seed are not counted (the lab's rule).
 
 Records carry counts only: no token, no text.
 """
-import os
-import sys
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-from extent_attention_replay import accept_limit  # noqa: E402
-
 MAX_PROPOSALS = 15
+EXTENT = 256
+
+
+def extent(start):
+    """The 256-key family a row at `start` reads: [0, E), E = (start // 256 + 1) * 256 (extent_attention_replay.extent, restated here
+    so the GPU host's image does not carry the serving stack; the tests pin the two equal)."""
+    return (start // EXTENT + 1) * EXTENT
+
+
+def accept_limit(start, rows):
+    """How many of a ticket's rows may commit: those at positions < E (extent_attention_replay.accept_limit)."""
+    return min(rows, extent(start) - start)
+
 
 
 def round_geometry(prompt_len, index, answer_len, proposals):

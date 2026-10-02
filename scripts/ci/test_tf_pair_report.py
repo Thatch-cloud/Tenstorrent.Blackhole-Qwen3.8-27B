@@ -271,6 +271,21 @@ class PrivacyAndCliTests(unittest.TestCase):
         finally:
             shutil.rmtree(root)
 
+    def test_v5_is_the_reports_own_gate(self):
+        meta, arms = make_data(clusters_per_set=(5, 5))
+        original = pr.assert_public
+
+        def refuse(summary):
+            raise rep.PrivacyError('leak')
+        pr.assert_public = refuse
+        try:
+            _, public = pr.build(meta, arms, PASS_ALL, **SMALL)
+        finally:
+            pr.assert_public = original
+        self.assertEqual((public['verdict'], public['validity']['V5']), ('NOT_ESTABLISHED', 'FAIL'))
+        _, public = pr.build(meta, arms, dict(PASS_ALL, V5='NOT_RUN'), **SMALL)
+        self.assertEqual(public['validity']['V5'], 'PASS')
+
     def test_failed_turns_in_an_arm_file_are_skipped(self):
         meta, arms = make_data(clusters_per_set=(3, 3), turns_per_cluster=1)
         root = tempfile.mkdtemp()

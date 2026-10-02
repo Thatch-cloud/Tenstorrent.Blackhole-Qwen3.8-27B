@@ -23,7 +23,6 @@ extent_attention_replay.accept_limit at the walk's start convention; `cap_mismat
 """
 import argparse
 import gzip
-import hashlib
 import json
 import os
 import random
@@ -33,25 +32,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import c2_tau_lab as lab  # noqa: E402
 import tau_lab_report as rep  # noqa: E402
+from a0_bundle_io import (BUNDLE_NAME, FORMAT, MANIFEST_NAME, META_NAME, BundleError, read_bundle, sha256_file,  # noqa: E402,F401
+                          verify_bundle)
 from extent_attention_replay import accept_limit  # noqa: E402
 
-FORMAT = 'a0-bundle-1'
-BUNDLE_NAME = 'bundle.jsonl.gz'
-META_NAME = 'meta.jsonl'
-MANIFEST_NAME = 'MANIFEST.json'
 SETS = (('A1', 'swe', 'a1_swe_heldout.jsonl', 'a1_swe_heldout.ids.jsonl.gz'),
         ('A2', 'own', 'a2_own_sessions.jsonl', 'a2_own_sessions.ids.jsonl.gz'))
 DEFAULT_EXPECT = 'swe=240,own=96'
 ROWS = 16
 TAIL_ROUNDS = 2            # a cap below the extent's may be a budget cut: only the last rounds are allowed to differ that way
-
-
-class BundleError(ValueError):
-    """Refused: the message names a file or a count, never a value of the data."""
-
-
-def sha256_file(path):
-    return lab.sha256_file(path)
 
 
 def parse_expect(text):
@@ -268,37 +257,6 @@ def build(data, results, out, map_path, arms=('A1', 'A2'), seed=0, expect=None):
     groups, chained = prefix_groups(records)
     mapping = anonymise(records, seed)
     return write_bundle(out, records, counts, checks, groups, chained, mapping, map_path)
-
-
-# -- reading it back (the GPU host and the tests) -----------------------------------------------------------------------------
-
-def verify_bundle(directory, expect_turns=None):
-    """The manifest of a bundle whose files match their recorded size and sha256, else BundleError."""
-    path = os.path.join(directory, MANIFEST_NAME)
-    if not os.path.isfile(path):
-        raise BundleError('%s is missing' % MANIFEST_NAME)
-    with open(path, encoding='utf-8') as handle:
-        manifest = json.load(handle)
-    if manifest.get('format') != FORMAT or not isinstance(manifest.get('files'), dict):
-        raise BundleError('not an %s manifest' % FORMAT)
-    for name in (BUNDLE_NAME, META_NAME):
-        entry = manifest['files'].get(name)
-        target = os.path.join(directory, name)
-        if not entry or not os.path.isfile(target) or os.path.getsize(target) != entry['bytes'] \
-                or sha256_file(target) != entry['sha256']:
-            raise BundleError('%s does not match the manifest' % name)
-    if expect_turns is not None and manifest['counts'].get('turns') != expect_turns:
-        raise BundleError('the bundle holds %s turns, %d expected' % (manifest['counts'].get('turns'), expect_turns))
-    return manifest
-
-
-def read_bundle(directory):
-    """The turn records of a verified bundle, one at a time."""
-    verify_bundle(directory)
-    with gzip.open(os.path.join(directory, BUNDLE_NAME), 'rt', encoding='utf-8') as handle:
-        for line in handle:
-            if line.strip():
-                yield json.loads(line)
 
 
 def main(argv=None, say=print):

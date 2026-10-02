@@ -99,6 +99,8 @@ jobs:
           python -B -m unittest test_prefix_replay test_c2_prefix_gate
           python -B -m unittest test_tau_lab
           python -B -m unittest test_tf_pair_walk test_tf_pair_report test_a0_bundle
+          python -B -m unittest test_dflash2_torch test_a0_drafters test_a0_target test_a0_upstream test_a0_watchdog test_a0_power
+          python -B -m unittest test_a0_run test_tau_next_public
           python -B -m unittest test_prefix_p0a_probe
           python -B -m unittest test_sticky_sessions
           python -B -m unittest test_lever_n_prefill_profile_report

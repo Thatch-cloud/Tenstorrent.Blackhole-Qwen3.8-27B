@@ -50,6 +50,15 @@ class Peeker(object):
         return [sequence[start + 1]] * count
 
 
+class RuleTests(unittest.TestCase):
+    def test_the_restated_extent_rule_equals_the_serving_rule(self):
+        import extent_attention_replay as serving
+        for start in list(range(0, 3000)) + [4095, 4096, 65535, 65536, 122773, 262143]:
+            self.assertEqual(walk.extent(start), serving.extent(start))
+            for rows in (1, 2, 8, 15, 16):
+                self.assertEqual(walk.accept_limit(start, rows), serving.accept_limit(start, rows))
+
+
 class WalkTests(unittest.TestCase):
     def test_oracle_commits_a_full_block_where_the_extent_allows(self):
         turn = make_turn(prompt_len=300, answer_len=400)
