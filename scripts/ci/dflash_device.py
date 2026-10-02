@@ -13,6 +13,7 @@ from draft_operation_audit import audit_operations
 from draft_selector import select_active_candidates
 from draft_shared_head import shared_head_candidates, merge_chunk_candidates
 from feature_collective import gather_add_projection
+import draft_wide_tp
 import feature_projection
 import feature_projection_tp
 from gdn_multitoken_conv import addresses, release_owned
@@ -721,8 +722,8 @@ class DFlashDevice:
                     compute_kernel_config=self.kernel, program_config=program, memory_config=operations.DRAM_MEMORY_CONFIG))
                 summed = retain(gather_add_projection(operations, self.mesh, self.collectives, partial, retain_temporaries=retain))
                 rounded = retain(operations.typecast(summed, operations.bfloat16))
-                normalized = retain(operations.rms_norm(rounded, epsilon=1e-6, weight=self.feature_norm,
-                    compute_kernel_config=self.kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
+                normalized = retain(draft_wide_tp.rms_norm(operations, rounded, epsilon=1e-6, weight=self.feature_norm,
+                    compute_kernel_config=self.kernel, memory_config=operations.DRAM_MEMORY_CONFIG, site='feature'))
                 chunks.append(retain(operations.slice(normalized, (0, 0, 0, 0), (1, 1, rows, 5120))))
             output = retain(operations.concat(chunks, dim=2)) if len(chunks) > 1 else chunks[0]
             if owned is not None:
@@ -1052,8 +1053,8 @@ class DFlashDevice:
                 **(dict(boundaries=seams) if pack is not None else {}),
                 **(dict(quad=quad) if quad is not None else {}))['output']
         stage('final-norm-and-selector-projection')
-        normalized = watch('selector.normalized', retain(operations.rms_norm(hidden, epsilon=1e-6, weight=self.final_norm,
-            compute_kernel_config=self.kernel, memory_config=operations.DRAM_MEMORY_CONFIG)))
+        normalized = watch('selector.normalized', retain(draft_wide_tp.rms_norm(operations, hidden, epsilon=1e-6, weight=self.final_norm,
+            compute_kernel_config=self.kernel, memory_config=operations.DRAM_MEMORY_CONFIG, site='final')))
         program = operations.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(8, 1),
             in0_block_w=4, out_subblock_h=1, out_subblock_w=1, per_core_M=1 if quad is None else rows // 32,
             per_core_N=1, fuse_batch=True, fused_activation=None, mcast_in0=True)

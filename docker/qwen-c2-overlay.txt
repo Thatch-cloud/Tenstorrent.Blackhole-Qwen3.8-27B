@@ -327,6 +327,8 @@ scripts/ci/attach_scopes_tp.py
 scripts/ci/gdn_snapshot.py
 # TP4 verify-glue levers (tp4/vglue, QWEN_FAST_TP4_*, default off): tp4_vglue.RUNTIME_FILES.
 scripts/ci/tp4_vglue.py
+# The drafter's hidden-width RMS norms on a wide grid (tp4/next-3-cheap, QWEN_FAST_TP4_DRAFT_WIDE, default off): dflash_device, draft_attention_branch and draft_mlp_branch import it.
+scripts/ci/draft_wide_tp.py
 scripts/ci/gdn_commit_lanes_tp.cpp
 scripts/ci/gdn_rows_dma_tp.py
 scripts/ci/gdn_rows_dma_tp.cpp

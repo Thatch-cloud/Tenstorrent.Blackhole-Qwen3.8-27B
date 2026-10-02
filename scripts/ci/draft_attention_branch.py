@@ -5,6 +5,7 @@ from draft_convolution import grouped_causal_convolution
 from feature_collective import gather_add_projection
 from draft_head_layout import split_projected_heads, concatenate_query_heads
 from draft_mlp_branch import draft_projection_dtype
+import draft_wide_tp
 import tp_shapes
 
 
@@ -168,8 +169,8 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         return retain(operations.matmul(value, weight, dtype=operations.float32,
             compute_kernel_config=kernel, program_config=program, memory_config=operations.DRAM_MEMORY_CONFIG))
 
-    normalized = watch('normalized', retain(operations.rms_norm(hidden, epsilon=1e-6, weight=parameters['norm'],
-        compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG)))
+    normalized = watch('normalized', retain(draft_wide_tp.rms_norm(operations, hidden, epsilon=1e-6, weight=parameters['norm'],
+        compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG, site='attention')))
     projected = project(normalized, parameters['convolution'], (8, 5), proposal_rows, 1)
     rounded = watch('conv-kernels', retain(operations.typecast(projected, operations.bfloat16)))
     dynamic = [retain(operations.slice(rounded, (0, 0, 0, offset * 320), (1, 1, proposal_rows, (offset + 1) * 320)))
