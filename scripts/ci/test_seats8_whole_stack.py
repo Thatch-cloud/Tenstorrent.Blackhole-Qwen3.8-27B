@@ -209,5 +209,19 @@ class WholeStackTests(unittest.TestCase):
             self.assertEqual(tokens, true_stream(user, next_token(user, 4099, 1), 4100, len(tokens)))
 
 
+class WholeStackUnderTheProductionBudgetCapTests(WholeStackTests):
+    """The same worlds with QWEN_FAST_BUDGET_CAP=1, the production flag: the per-block width and the commit limit both read the
+    request's remaining budget (the fake session honours commit(max_rows=), as GreedySession does)."""
+
+    def setUp(self):
+        patcher = patch.dict('os.environ', {'QWEN_FAST_BUDGET_CAP': '1'})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_cap_is_on(self):
+        import serving_packed_step
+        self.assertTrue(serving_packed_step.budget_cap_enabled())
+
+
 if __name__ == '__main__':
     unittest.main()

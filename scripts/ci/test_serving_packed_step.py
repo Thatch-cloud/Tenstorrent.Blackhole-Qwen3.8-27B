@@ -119,13 +119,15 @@ class FakeSession:
         self.phase = 'pending'
         return self.pending
 
-    def commit(self, request_id, ticket, predictions, publish):
+    def commit(self, request_id, ticket, predictions, publish, max_rows=None):
         self.check_ticket(request_id, ticket)
         accepted = 0
         for proposed, predicted in zip(ticket.tokens[1:], predictions):
             if proposed != predicted:
                 break
             accepted += 1
+        if max_rows is not None:
+            accepted = min(accepted, max_rows - 1)     # GreedySession.commit(max_rows): at most max_rows state rows
         decision = SimpleNamespace(emitted=(*ticket.tokens[1:accepted + 1], predictions[accepted]),
                                    accepted=accepted, state_rows=accepted + 1, finished=False)
         self.phase = 'committing'
