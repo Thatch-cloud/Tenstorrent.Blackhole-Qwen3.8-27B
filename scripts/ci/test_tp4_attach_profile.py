@@ -60,8 +60,11 @@ NAMED = ('c2-packed-tp4', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-ring', 'c2-p
 # Every four-card fast-path profile (QWEN_FAST_TP=4 with the extent replay on), read from the profile file, so a new window's
 # arms - and the combined profiles that stack several windows' flags (tp4/next's c2-packed-tp4-best, -best-gate) - attach here
 # too, with no list to keep in step.
+# The eight-seat profiles (QWEN_FAST_M3_BLOCKS=2) are admitted at eight scheduler requests and build TWO deferred blocks; this fake
+# attach is the four-seat one (config() says four requests, Block has one phase). They attach in test_seats8_profiles_meet_attach.
 PROFILES = tuple(sorted(name for name, profile in profiles().items()
-                        if profile['env'].get('QWEN_FAST_TP') == '4' and profile['env'].get('QWEN_FAST_EXTENT_REPLAY') == '1'))
+                        if profile['env'].get('QWEN_FAST_TP') == '4' and profile['env'].get('QWEN_FAST_EXTENT_REPLAY') == '1'
+                        and profile['env'].get('QWEN_FAST_M3_BLOCKS', '1') == '1'))
 RING_DESCRIPTOR = HERE / 'qwen_p150x4_ring_mesh_graph_descriptor.textproto'
 
 

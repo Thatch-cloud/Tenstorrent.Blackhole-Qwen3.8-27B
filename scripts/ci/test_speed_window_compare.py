@@ -489,9 +489,12 @@ class SmokeNewTestsTests(unittest.TestCase):
 
     def test_replay_concurrent4_is_the_platform_replays_traffic_shape(self):
         replay = (Path(__file__).resolve().parent / 'c2_platform_replay.py').read_text(encoding='utf-8')
-        for text in ("'Write a unit test for a %s parser in Python.'", "('CSV', 'JSON', 'INI', 'TOML')[index]"):
-            self.assertIn(text, replay)
-            self.assertIn(text, SMOKE_SOURCE)
+        # The smoke's parser list is c2_platform_replay's four, then four more for the eight-user replay (replay_concurrent8).
+        self.assertIn("'Write a unit test for a %s parser in Python.'", replay)
+        self.assertIn("'Write a unit test for a %s parser in Python.'", SMOKE_SOURCE)
+        self.assertIn("('CSV', 'JSON', 'INI', 'TOML')[index]", replay)
+        self.assertIn("REPLAY_PARSERS = ('CSV', 'JSON', 'INI', 'TOML',", SMOKE_SOURCE)
+        self.assertIn("% REPLAY_PARSERS[index]", SMOKE_SOURCE)
         self.assertIn("in Python.'\n                                       % ('CSV', 'JSON', 'INI', 'TOML')[index], 300)", replay)
         self.assertIn('max_tokens=300', SMOKE_SOURCE)
         self.assertNotIn('stream=True', SMOKE_SOURCE[SMOKE_SOURCE.index('def replay_concurrent4'):])
