@@ -16,6 +16,7 @@ PATTERNS = (
     os.path.join(HERE, 'dflash2_torch.py'), os.path.join(HERE, 'test_dflash2_torch.py'), os.path.join(HERE, 'ttml_probe*.py'),
     os.path.join(HERE, 'test_ttml_probe*.py'), os.path.join(ROOT, 'docs', 'a0-*.md'), os.path.join(ROOT, 'docs', 'ft-*.md'),
     os.path.join(ROOT, 'docker', 'a0-spark', '*'), os.path.join(ROOT, 'docker', 'tt-train', '*'),
+    os.path.join(ROOT, 'patches', 'tt-train', '*'),
     os.path.join(HERE, 'references', 'tau-next', '*'))
 # the files that quote the patterns they police
 EXEMPT = ('test_tau_next_public.py', 'test_a0_run.py')

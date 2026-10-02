@@ -1,0 +1,15 @@
+{
+  "purpose": "Upstream tt-metal / tt-train fixes the drafter fine-tune's training image must carry beyond its pinned tree (v0.77.0-rc1). A patch is applied in the order listed; an entry is `ready` only when patches/tt-train/<pr>.patch exists. None has been fetched yet: that is work for the first card window's image build, against the pinned tree, with the owner's go-ahead for building on the rig.",
+  "tree": "tt-bringup v0.77.0-rc1",
+  "backports": [
+    {"pr": "57825", "purpose": "GQA grouped-head gradient ordering (the drafter is GQA 32/8)", "status": "not_fetched"},
+    {"pr": "57829", "purpose": "rectangular transpose-A matmul gradients", "status": "not_fetched"},
+    {"pr": "57933", "purpose": "softmax backward BF16 reduction", "status": "not_fetched"},
+    {"pr": "58002", "purpose": "stale gradient on a frozen parameter (fc and hidden_norm are frozen in the default recipe)", "status": "not_fetched"},
+    {"pr": "57863", "purpose": "checkpoint staleness", "status": "not_fetched"},
+    {"pr": "57748", "purpose": "rectangular SDPA routing", "status": "not_fetched"}
+  ],
+  "guards": [
+    {"pr": "57911", "purpose": "its tests only: fused optimizers update the bf16 copy and leave the FULL view stale; ttml_probe P4 is our own version of that check", "status": "not_fetched"}
+  ]
+}

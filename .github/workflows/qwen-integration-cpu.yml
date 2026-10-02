@@ -103,6 +103,7 @@ jobs:
           python -B -m unittest test_a0_run test_tau_next_public
           python -B -m unittest test_ft_dataset test_ft_anchor test_ft_split test_ft_select
           python -B -m unittest test_ft_loss test_ft_dflash2_train test_ft_train_loop
+          python -B -m unittest test_ttml_probe
           python -B -m unittest test_prefix_p0a_probe
           python -B -m unittest test_sticky_sessions
           python -B -m unittest test_lever_n_prefill_profile_report
