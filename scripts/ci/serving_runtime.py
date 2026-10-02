@@ -332,7 +332,9 @@ def complete_blocks_two_phase(blocks, model=None, log=None):
             before = program_count(model) if model is not None else None
             block.capture_traces()
             log(CAPTURE_PROGRAMS_MARKER, index, before, program_count(model) if model is not None else None)
-        for block in blocks:
+        for index, block in enumerate(blocks):
+            if index:
+                block.warm_publication = False      # block A's warm covered the same plan on the shared program cache
             block.finish_construction()
     except BaseException:
         # The failing block closed itself without the device fence (it may be hung); a sibling still under construction

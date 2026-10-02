@@ -901,6 +901,9 @@ class PackedVerifierEngine:
         # S2 B6 (publication_warm.py): the summary of the eager publication warm the extent block runs at
         # attach, after its last capture; None without the extent block, or when the warm was skipped.
         self.publication_warm = None
+        # complete_blocks_two_phase sets this False on every block after the first: the plan is the same 71 shapes and the
+        # program cache is shared, so a second warm compiles nothing and only cycles the shared drafter collectives again.
+        self.warm_publication = True
         # Round-fence plan H2 (early_draft.py; QWEN_FAST_GDN_AFTER_PAIRS under QWEN_FAST_EARLY_DRAFT, default
         # off): read once here, like the flags above. The block defers a round's GDN commit traces only
         # when the early draft arms it (arm_deferred_commits) and only on the fence diet, whose owed fence
@@ -1088,7 +1091,7 @@ class PackedVerifierEngine:
         operations, pool, shared_weights, collectives, started = (build.operations, build.pool, build.shared_weights,
                                                                   build.collectives, build.started)
         shape = self.shape
-        if self.extent:
+        if self.extent and getattr(self, 'warm_publication', True):
             # S2 B6 (publication_warm.py): today's eager publication - what a packed round the fused
             # commit refuses and every sequential step run - published and discarded once at every shape
             # serving can ask of it (each segment's row offset x prefix, each pooled width x prefix), on

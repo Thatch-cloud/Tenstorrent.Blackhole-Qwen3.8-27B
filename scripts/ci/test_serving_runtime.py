@@ -1211,3 +1211,10 @@ class TwoPhaseFailureTests(unittest.TestCase):
         calls = []
         serving_runtime.complete_blocks_two_phase([self.block('A', calls), self.block('B', calls)], log=lambda *args: None)
         self.assertFalse([call for call in calls if call[1] == 'close'])
+
+    def test_only_the_first_block_runs_the_publication_warm(self):
+        blocks = [self.block('A', []), self.block('B', [])]
+        for block in blocks:
+            block.warm_publication = True
+        serving_runtime.complete_blocks_two_phase(blocks, log=lambda *args: None)
+        self.assertEqual([block.warm_publication for block in blocks], [True, False])
