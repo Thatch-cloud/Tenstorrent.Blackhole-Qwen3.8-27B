@@ -13,7 +13,9 @@
 // Runtime args: [tasks, then per task: destination address, destination page, then per half (A, B): source address,
 // source page, mode]. Mode 0 = zeros, 1 / 2 = raw half 0 / half 1 of the source page, 3 / 4 = canonical half 0 / half 1.
 // Compile-time args: the source accessor, then the destination accessor (every source of a launch shares one layout, and
-// so does every destination). Eight tasks are in flight per barrier.
+// so does every destination), then CAPACITY, the most tasks any core carries: every core's runtime args are padded to
+// 1 + 8 * CAPACITY words, and CAPACITY being a compile-time arg keeps launches with different list lengths in different
+// program cache entries. Eight tasks are in flight per barrier.
 #include "api/dataflow/dataflow_api.h"
 
 #ifndef CANON_DENORM
@@ -35,7 +37,9 @@ FORCE_INLINE uint32_t canonical_half(uint32_t value) {
 void kernel_main() {
     constexpr auto source_args = TensorAccessorArgs<0>();
     constexpr auto destination_args = TensorAccessorArgs<source_args.next_compile_time_args_offset()>();
-    const uint32_t tasks = get_arg_val<uint32_t>(0);
+    constexpr uint32_t CAPACITY = get_compile_time_arg_val(destination_args.next_compile_time_args_offset());
+    const uint32_t given = get_arg_val<uint32_t>(0);
+    const uint32_t tasks = given < CAPACITY ? given : CAPACITY;  // never reads past 1 + TASK_WORDS * CAPACITY
     const uint32_t scratch = get_write_ptr(0);
     for (uint32_t first = 0; first < tasks; first += LANES) {
         const uint32_t lanes = tasks - first < LANES ? tasks - first : LANES;

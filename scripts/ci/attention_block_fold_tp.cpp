@@ -5,7 +5,8 @@
 // writes a user's stacked query or the block output. The tile body below is attention_fold_dma_tp.cpp's, line for line.
 //
 // Runtime args: [inverse, tasks, then per task: source address, destination address, rows, source base, destination
-// base, task]. `task` is the served launch's worker index (tile row * 8 + column); the pages read are
+// base, task], zero padded to 2 + 6 * CAPACITY words (CAPACITY: the last compile-time arg, the most tasks any core
+// carries, so launches of different list lengths never share a program cache entry). `task` is the served launch's worker index (tile row * 8 + column); the pages read are
 // (source base + tile) * 8 + column, the page written is destination base + task.
 #ifndef QWEN_FOLD_HEAD_ROWS
 #error "QWEN_FOLD_HEAD_ROWS is defined by the launch builder (tp_kernels.fold_defines)"
@@ -16,7 +17,9 @@ void kernel_main() {
     constexpr auto source_args = TensorAccessorArgs<0>();
     constexpr auto destination_args = TensorAccessorArgs<source_args.next_compile_time_args_offset()>();
     const bool inverse = get_arg_val<uint32_t>(0) != 0;
-    const uint32_t tasks = get_arg_val<uint32_t>(1);
+    constexpr uint32_t CAPACITY = get_compile_time_arg_val(destination_args.next_compile_time_args_offset());
+    const uint32_t given = get_arg_val<uint32_t>(1);
+    const uint32_t tasks = given < CAPACITY ? given : CAPACITY;  // never reads past 2 + 6 * CAPACITY
     for (uint32_t index = 0; index < tasks; index++) {
         const uint32_t base = 2 + index * 6;
         const auto source = TensorAccessor(source_args, get_arg_val<uint32_t>(base), 2048);

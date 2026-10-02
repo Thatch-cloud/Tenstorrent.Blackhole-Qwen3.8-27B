@@ -139,9 +139,18 @@ def distribute(tasks, cores):
     return per_core
 
 
+def capacity(per_core):
+    """The most tasks any core carries. It is the LAST compile-time arg of the launch (so it is part of the program cache
+    key) and every core's runtime-arg list is padded to 1 + TASK_WORDS * capacity words: generic_op caches on the kernel,
+    defines, compile-time args and cores but NOT on runtime-arg lengths, and a cache hit writes this launch's lists into
+    the cached slots (hardware window N1: a 1800-task unstack hit the 640-task window stack's 49-word slots)."""
+    return max(len(core) for core in per_core)
+
+
 def runtime_arguments(per_core, sources, destinations):
-    """Each core's [tasks, then eight words per task] from per-launch address lists (`sources`, `destinations`: one buffer
-    address per tensor index, for one chip)."""
+    """Each core's [tasks, then eight words per task, zero padded to 1 + TASK_WORDS * capacity] from per-launch address
+    lists (`sources`, `destinations`: one buffer address per tensor index, for one chip)."""
+    size = 1 + TASK_WORDS * capacity(per_core)
     lists = []
     for core in per_core:
         words = [len(core)]
@@ -149,7 +158,7 @@ def runtime_arguments(per_core, sources, destinations):
             words += [destinations[destination], page]
             for source, source_page, source_mode in (first, second):
                 words += [sources[source], source_page, source_mode]
-        lists.append(words)
+        lists.append(words + [0] * (size - len(words)))
     return lists
 
 
@@ -197,7 +206,7 @@ def launch(mesh, sources, destinations, tasks, *, canon_denorm=True):
             raise Unsupported('Every source (and every destination) of one launch must share an accessor layout')
         descriptor = ttnn.KernelDescriptor(kernel_source=str(Path(__file__).with_name(KERNEL)), core_ranges=cores,
             defines=[('CANON_DENORM', '1' if canon_denorm else '0')],
-            compile_time_args=[*source_layouts[0], *destination_layouts[0]],
+            compile_time_args=[*source_layouts[0], *destination_layouts[0], capacity(per_core)],
             config=ttnn.DataMovementConfigDescriptor(processor=ttnn.DataMovementProcessor.RISCV_0,
                                                      noc=ttnn.NOC.RISCV_0_default))
         runtime = ttnn.RuntimeArgs()

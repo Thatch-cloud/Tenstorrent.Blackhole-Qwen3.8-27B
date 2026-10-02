@@ -106,9 +106,21 @@ def distribute(tasks, cores):
     return [tasks[index::count] for index in range(count)]
 
 
+def capacity(per_core):
+    """The most tasks any core carries: the LAST compile-time arg of the launch, so it is part of the program cache key
+    (generic_op does not hash runtime-arg lengths; fold-in and fold-out share everything else)."""
+    return max(len(core) for core in per_core)
+
+
 def runtime_arguments(inverse, per_core):
-    """The runtime args of each core: [inverse, tasks, then the six words of each task]."""
-    return [[int(inverse), len(core)] + [word for task in core for word in task] for core in per_core]
+    """The runtime args of each core: [inverse, tasks, then the six words of each task], zero padded to
+    2 + TASK_WORDS * capacity words."""
+    size = 2 + TASK_WORDS * capacity(per_core)
+    lists = []
+    for core in per_core:
+        words = [int(inverse), len(core)] + [word for task in core for word in task]
+        lists.append(words + [0] * (size - len(words)))
+    return lists
 
 
 def flat_tasks(plan, sources, destinations):
@@ -183,7 +195,7 @@ def _launch(mesh, sources, destinations, plan, *, inverse, tag):
         per_core = distribute(flat, len(points))
         descriptor = ttnn.KernelDescriptor(kernel_source=str(Path(__file__).with_name(KERNEL)), core_ranges=cores,
             defines=tp_kernels.fold_defines(),
-            compile_time_args=[*source_layouts[0], *destination_layouts[0]],
+            compile_time_args=[*source_layouts[0], *destination_layouts[0], capacity(per_core)],
             config=ttnn.DataMovementConfigDescriptor(processor=ttnn.DataMovementProcessor.RISCV_0,
                                                      noc=ttnn.NOC.RISCV_0_default))
         runtime = ttnn.RuntimeArgs()
