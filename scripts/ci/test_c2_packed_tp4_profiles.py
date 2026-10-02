@@ -94,6 +94,9 @@ RSHARD_PROFILES = {'c2-packed-tp4-diag-rshard': ('c2-packed-tp4-diag', {RSHARD: 
                    'c2-packed-tp4-best-rshard': ('c2-packed-tp4-best', {RSHARD: '1'}),
                    'c2-packed-tp4-diag-t1-rshard-audit': ('c2-packed-tp4-diag-t1', {RSHARD: '1', RSHARD_AUDIT: '1'}),
                    'c2-packed-tp4-gate-rshard-audit': ('c2-packed-tp4', {RSHARD: '1', RSHARD_AUDIT: '1', 'QWEN_C2_GATE_PROFILE': '1'})}
+# The cheap-levers timing twins (tp4/next-3-cheap): each is c2-packed-tp4-speed-strace plus exactly its lever (test_tp4_next3_cheap holds the rule);
+# they carry the audits-off recipe, so the caps and the in-trace sampler are theirs as the strace arm's.
+CHEAP_PROFILES = ('c2-packed-tp4-speed-strace-ring', 'c2-packed-tp4-speed-strace-draftwide')
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 
 
@@ -336,7 +339,7 @@ class TailProfileTests(unittest.TestCase):
 
     def test_the_caps_are_absent_from_every_profile_that_predates_them(self):
         for name, profile in profiles().items():
-            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES) + tuple(SAMPLER_PROFILES) + tuple(RSHARD_PROFILES) + BEST_PROFILES:
+            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES) + tuple(SAMPLER_PROFILES) + tuple(RSHARD_PROFILES) + BEST_PROFILES + CHEAP_PROFILES:
                 self.assertNotIn('QWEN_FAST_BUDGET_CAP', profile['env'], name)
                 self.assertNotIn('QWEN_FAST_SEQ_DEADLINE_S', profile['env'], name)
 
@@ -628,7 +631,7 @@ class SamplerProfileTests(unittest.TestCase):
         for name, profile in profiles().items():
             if name not in SAMPLER_PROFILES:
                 self.assertNotIn(PREWARM, profile['env'], name)
-                if name != 'c2-packed-tp4':
+                if name != 'c2-packed-tp4' and name not in CHEAP_PROFILES:
                     self.assertNotIn(IN_TRACE, profile['env'], name)
         # tp4-serve-7: production is the strace arm's recipe (audits off, sampler in the verify trace, no prewarm)
         env = profiles()['c2-packed-tp4']['env']

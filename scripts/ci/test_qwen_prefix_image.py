@@ -53,7 +53,7 @@ GATE_ONLY_OTHERS = ('general-tp4-bench', 'general-tp4-mmrs', 'c2-packed-tp4-gate
                     # the fix arm (tp4-serve-4)
                     'c2-packed-tp4-speed-fix',
                     # the sampler isolation arms (tp4/sampler)
-                    'c2-packed-tp4-diag-sprewarm', 'c2-packed-tp4-diag-strace', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace',
+                    'c2-packed-tp4-diag-sprewarm', 'c2-packed-tp4-diag-strace', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-strace-draftwide', 'c2-packed-tp4-speed-strace-ring',
                     # the request-shard-argmax arms (tp4/next-2)
                     'c2-packed-tp4-diag-rshard', 'c2-packed-tp4-speed-rshard', 'c2-packed-tp4-gate-rshard-audit',
                     # the admission-freeze window's arms (tp4/freeze)

@@ -81,6 +81,11 @@ SOLO_FIELDS = (('content_sha256', 'content'), ('reasoning_sha256', 'reasoning'),
 PUBLISH = re.compile(r'\[PACKED-PUBLISH\] round=\d+ stages=\{.*?prepare_history: \[([0-9.,\s]*)\]')
 MISMATCH = re.compile(r'audit mismatch', re.IGNORECASE)
 VGLUE_FELL_BACK = '[PINDIAG] tp4 vglue fell back'
+# tp4/next-3-cheap (draft_wide_tp): the drafter's wide norms. A fall-back line fails the smoke (the timing is not the lever's); a profile that asks for the lever
+# (QWEN_FAST_TP4_DRAFT_WIDE=1) and logs no engaged line fails too.
+DRAFT_WIDE_FLAG = 'QWEN_FAST_TP4_DRAFT_WIDE'
+DRAFT_WIDE_ENGAGED = '[PINDIAG] tp4 draft wide engaged'
+DRAFT_WIDE_FELL_BACK = '[PINDIAG] tp4 draft wide fell back'
 SLIDE_FLAG = 'QWEN_FAST_TP_KV_SLIDE'
 QUAD_FLAG = 'QWEN_FAST_QUAD_DRAFT'
 SINGLES_AUDIT_FLAG = 'QWEN_FAST_DRAFT_SINGLES_AUDIT'
@@ -503,6 +508,10 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     problems += ['audit mismatch in the container log: %s' % line for line in mismatches[:4]]
     fell = [line.strip()[:200] for line in container_text.splitlines() if VGLUE_FELL_BACK in line]
     problems += ['a vglue lever fell back (its served path ran, it saved nothing): %s' % line for line in fell[:4]]
+    wide_fell = [line.strip()[:200] for line in container_text.splitlines() if DRAFT_WIDE_FELL_BACK in line]
+    problems += ['a drafter norm fell back from the wide grid (the plain call ran, it saved nothing): %s' % line for line in wide_fell[:4]]
+    if env is not None and env.get(DRAFT_WIDE_FLAG) == '1' and DRAFT_WIDE_ENGAGED not in container_text:
+        problems.append('%s is set and no engaged line (%s) was logged: the wide norms never ran' % (DRAFT_WIDE_FLAG, DRAFT_WIDE_ENGAGED))
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
     if env is not None and env.get('QWEN_FAST_TP', '2') != '2':

@@ -3,6 +3,7 @@
 import math
 import os
 
+import draft_wide_tp
 import tp_shapes
 from draft_convolution import grouped_causal_convolution, convolution_reference
 from draft_mlp import split_mlp_weights, swiglu_device, swiglu_reference
@@ -93,8 +94,8 @@ def execute_mlp_branch(operations, mesh, collectives, hidden, weights, convoluti
         return retain(operations.matmul(value, weight, dtype=operations.float32, program_config=program,
             compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
 
-    normalized = watch('normalized', retain(operations.rms_norm(hidden, epsilon=1e-6, weight=parameters['device_norm'],
-        compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG)))
+    normalized = watch('normalized', retain(draft_wide_tp.rms_norm(operations, hidden, epsilon=1e-6, weight=parameters['device_norm'],
+        compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG, site='mlp')))
     projected = project(normalized, parameters['device_conv'], (8, 5), 1)
     rounded = watch('conv-kernels', retain(operations.typecast(projected, operations.bfloat16)))
     dynamic = [retain(operations.slice(rounded, (0, 0, 0, offset * 320), (1, 1, rows, (offset + 1) * 320)))
