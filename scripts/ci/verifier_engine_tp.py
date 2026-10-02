@@ -241,6 +241,11 @@ class VerifierEngine(PairVerifierEngine):
                 raise AssertionError('Missing target prediction rows')
             bucket['first'] = False
             self.phase = 'verified'
+            if os.environ.get('QWEN_FAST_PROFILE_DUMP_EVERY'):
+                # The TP4 op profile's read-back cadence (packed_verifier.dump_device_profiler_every): a sequential
+                # step is a verify replay too. Imported here so an unprofiled run never touches the module.
+                from packed_verifier import dump_device_profiler_every
+                dump_device_profiler_every(self.operations, self.mesh)
             return predictions, dict(input_ms=(staged - started) * 1000,
                 verify_readback_ms=(finished - staged) * 1000,
                 binding_validation_ms=(carry_started - binding_started) * 1000,

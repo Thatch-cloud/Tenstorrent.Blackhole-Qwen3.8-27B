@@ -116,6 +116,7 @@ jobs:
           python -B -m unittest test_tp4_attach_profile test_tp4_served_literals test_tp4_s2_window test_tp4_serving_shapes test_tp4_closure_literals test_solo_lane
           python -B -m unittest test_record_packed_any_evidence_tp4 test_tp4_s2_serve_window test_tp4_s2_serve_code test_tp4_tonight_window test_tp4_serve4_window test_tp4_serve5_window test_tp4_serve7_window test_tp4_sampler_window test_packed_sampler_arms
           python -B -m unittest test_fast_lane test_fast_lane_scheduler test_fast_lane_hook test_lanes_report test_lanes_gate test_tp4_lanes_window
+          python -B -m unittest test_ops_profile_plan test_tp4_profile_report test_tp4_profile2_window
           python -B -m unittest test_gdn_direct_window_hardware_sources test_gdn_direct_window_t32_scope test_dflash_t32_combined_stage test_fused_t16_admission test_frozen_gdn_norm_gate test_frozen_target_replay
           python -B -m unittest test_attention_batch test_attention_fold_dma test_attention_head_fold test_attention_mask_replay test_attention_parallel
           python -B -m unittest test_draft_convolution test_draft_convolution_fused test_draft_head_layout test_draft_kv_projection test_draft_mlp test_feature_collective test_feature_projection
