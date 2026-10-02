@@ -142,7 +142,10 @@ FCOMMIT_PROFILES = {
 BEST_PROFILES = ('c2-packed-tp4-best', 'c2-packed-tp4-best-gate')
 # The timed best with a hang fix (tp4/next-2): c2-packed-tp4-best plus exactly one flag (SAMPLER_PROFILES, RSHARD_PROFILES hold the rule).
 BEST_HANG_FIX = ('c2-packed-tp4-best-strace', 'c2-packed-tp4-best-rshard')
-FUSED_FAMILY = sorted(set(FCOMMIT_PROFILES) | set(BEST_PROFILES) | set(BEST_HANG_FIX))
+# The next-3 window's timed arm (tp4/next-3-scope): the production recipe (c2-packed-tp4-speed-strace: audits off, sampler in the verify
+# trace, tail caps) plus the three fused-commit flags and nothing else (test_tp4_next3_window holds that rule).
+NEXT3_PROFILES = ('c2-packed-tp4-speed-strace-fcommit',)
+FUSED_FAMILY = sorted(set(FCOMMIT_PROFILES) | set(BEST_PROFILES) | set(BEST_HANG_FIX) | set(NEXT3_PROFILES))
 
 
 def without_caps(env):
@@ -339,7 +342,7 @@ class TailProfileTests(unittest.TestCase):
 
     def test_the_caps_are_absent_from_every_profile_that_predates_them(self):
         for name, profile in profiles().items():
-            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES) + tuple(SAMPLER_PROFILES) + tuple(RSHARD_PROFILES) + BEST_PROFILES + CHEAP_PROFILES:
+            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES) + tuple(SAMPLER_PROFILES) + tuple(RSHARD_PROFILES) + BEST_PROFILES + CHEAP_PROFILES + NEXT3_PROFILES:
                 self.assertNotIn('QWEN_FAST_BUDGET_CAP', profile['env'], name)
                 self.assertNotIn('QWEN_FAST_SEQ_DEADLINE_S', profile['env'], name)
 
@@ -631,7 +634,7 @@ class SamplerProfileTests(unittest.TestCase):
         for name, profile in profiles().items():
             if name not in SAMPLER_PROFILES:
                 self.assertNotIn(PREWARM, profile['env'], name)
-                if name != 'c2-packed-tp4' and name not in CHEAP_PROFILES:
+                if name != 'c2-packed-tp4' and name not in CHEAP_PROFILES + NEXT3_PROFILES:
                     self.assertNotIn(IN_TRACE, profile['env'], name)
         # tp4-serve-7: production is the strace arm's recipe (audits off, sampler in the verify trace, no prewarm)
         env = profiles()['c2-packed-tp4']['env']

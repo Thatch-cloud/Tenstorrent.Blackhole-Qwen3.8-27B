@@ -94,7 +94,7 @@ jobs:
           python -B -m unittest discover -s optimisation/ttnn-op/pair_row_probe -p 'test_*.py'
           python -B -m unittest test_m3native_ttft_profile
           python -B -m unittest test_m3native_arm_env
-          python -B -m unittest test_tp4_vglue test_tp4_vglue_attention test_tp4_vglue_gdn test_tp4_vglue_twin test_tp4_vglue_block test_tp4_vglue_window test_tp4_vglue_argcount test_tp4_next_window test_tp4_next2_window
+          python -B -m unittest test_tp4_vglue test_tp4_vglue_attention test_tp4_vglue_gdn test_tp4_vglue_twin test_tp4_vglue_block test_tp4_vglue_window test_tp4_vglue_argcount test_tp4_next_window test_tp4_next2_window test_tp4_next3_window test_tp4_traced_publish
           python -B -m unittest test_qual_card
           python -B -m unittest test_draft_wide_tp test_matmul_tp4_sweep test_tp4_next3_cheap_window
           python -B -m unittest test_real_text_prompts test_acceptance_report test_real_text_compare test_real_text_gate

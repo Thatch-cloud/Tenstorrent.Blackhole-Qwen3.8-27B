@@ -353,9 +353,6 @@ ALLOWED = {
                                               "not device shapes",
     ('target_t16_attention_gate', 'validate'): "checks the pair's recorded qualification report (two chips of the report)",
     ('target_t16_attention_8k_gate', 'validate'): "checks the pair's recorded qualification report (two chips of the report)",
-    ('dflash_traced_publish', '_fused_kv_history_prepare'): 'installed only under QWEN_FAST_TRACED_PUBLISH=1, which both '
-                                                          'four-card profiles set to 0 (install_publish_options reads it '
-                                                          'each round)',
     ('draft_kv_history', '<module>'): "the pair's bank constants; the four-card class reads tp_shapes (held below)",
     ('draft_kv_history', 'DraftKVHistory.__init__'): "the pair's class: dflash_device and publication_warm build "
                                                      "draft_kv_history_tp at four cards, which overrides this (held below)",
