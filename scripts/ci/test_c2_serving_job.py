@@ -172,6 +172,23 @@ class FileTests(unittest.TestCase):
             with self.assertRaisesRegex(job.JobError, 'order'):
                 read(C2_ACTIONS=actions)
 
+    def test_the_replay_budget_smoke_key(self):
+        self.assertEqual(read()['replay_budget_smoke'], '')
+        self.assertEqual(read(C2_ACTIONS='replay')['replay_budget_smoke'], '')
+        self.assertEqual(read(C2_ACTIONS='replay', C2_REPLAY_BUDGET_SMOKE='1')['replay_budget_smoke'], '1')
+        for bad in ('0', 'yes', '2', 'true'):
+            with self.assertRaisesRegex(job.JobError, 'empty or 1'):
+                read(C2_ACTIONS='replay', C2_REPLAY_BUDGET_SMOKE=bad)
+        with self.assertRaisesRegex(job.JobError, 'no replay'):
+            read(C2_ACTIONS='status', C2_REPLAY_BUDGET_SMOKE='1')
+
+    def test_the_replay_step_passes_the_budget_smoke_flag_only_when_set(self):
+        step = step_text('Replay the node agent' + chr(39) + 's serving sequence')
+        self.assertIn('REPLAY_BUDGET_SMOKE: ${{ steps.job.outputs.replay_budget_smoke }}', step)
+        self.assertEqual(step.count('--budget-smoke'), 1)
+        self.assertIn('${REPLAY_BUDGET_SMOKE:+--budget-smoke}', step)
+        self.assertIn('timeout-minutes: 180', step)
+
     def test_each_agent_action_has_exactly_one_workflow_step_and_it_is_gated(self):
         text = workflow_text()
         for action in job.ACTIONS:

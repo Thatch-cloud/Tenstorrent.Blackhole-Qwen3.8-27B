@@ -478,5 +478,109 @@ class ReplayNameTests(unittest.TestCase):
         self.assertEqual({model for model, _ in chats} | set(traffic) | set(loads), {PLAIN})
 
 
+class BudgetSmokeTests(unittest.TestCase):
+    """--budget-smoke: runs after the replay's checks and before the container is removed."""
+
+    def drive(self, smoke=None, flag=True, models_status=200, running='true'):
+        """`smoke`: the docker exec's (returncode, output), or an exception to raise."""
+        commands = []
+
+        def run(command, timeout=None, check=True):
+            commands.append((command, timeout))
+            if command[:3] == ['docker', 'image', 'inspect']:
+                return mock.Mock(returncode=0, stdout=json.dumps([dict(Config=dict(Env=[]))]), stderr='')
+            if command[:2] == ['docker', 'inspect']:
+                return mock.Mock(returncode=0, stdout=running, stderr='')
+            if command[:2] == ['docker', 'exec'] and 'serving.budget_smoke' in command:
+                if isinstance(smoke, Exception):
+                    raise smoke
+                return mock.Mock(returncode=smoke[0], stdout=smoke[1], stderr='')
+            return mock.Mock(returncode=0, stdout='true', stderr='')
+
+        def http(port, path, body=None, timeout=60):
+            return models_status, dict(model=TT, aliases=[TT])
+
+        def chat(port, model, content, max_tokens, timeout=900, **extra):
+            commands.append((['chat'], None))
+            return dict(ok=True, status=200, completion_tokens=max_tokens, tool_calls=[dict(id='call-0')])
+
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            for name, fake in (('run', run), ('http', http), ('chat', chat),
+                               ('traffic_steps', lambda *a, **k: True), ('wait_http', lambda *a, **k: None)):
+                stack.enter_context(mock.patch.object(replay, name, side_effect=fake))
+            stack.enter_context(mock.patch.object(replay.subprocess, 'run'))
+            stack.enter_context(mock.patch.object(sys, 'argv', ['replay', '--source', AGENT, '--image',
+                                                                'zot/new@sha256:b', '--results', directory,
+                                                                '--seed', '5'] + (['--budget-smoke'] if flag else [])))
+            out = io.StringIO()
+            stack.enter_context(redirect_stdout(out))
+            code = replay.main()
+            with open(os.path.join(directory, 'platform-replay.json'), encoding='utf-8') as handle:
+                recorded = json.load(handle)
+            log = os.path.join(directory, 'budget-smoke.log')
+            text = None
+            if os.path.exists(log):
+                with open(log, encoding='utf-8') as handle:
+                    text = handle.read()
+        return code, recorded, commands, text, out.getvalue()
+
+    @staticmethod
+    def position(commands, wanted):
+        return [index for index, (command, _) in enumerate(commands) if command[:len(wanted)] == wanted]
+
+    def test_the_smoke_runs_after_the_checks_and_before_the_container_goes(self):
+        code, recorded, commands, text, out = self.drive((0, 'all cases passed\n'))
+        self.assertEqual(code, 0)
+        exec_at = self.position(commands, ['docker', 'exec', 'qwen-c2-platform', 'python3', '-m', 'serving.budget_smoke'])
+        self.assertEqual(len(exec_at), 1)
+        command, timeout = commands[exec_at[0]]
+        self.assertEqual(command[-4:], ['--url', 'http://127.0.0.1:8000', '--model', TT])
+        self.assertEqual(timeout, 90 * 60)
+        removal = self.position(commands, ['docker', 'rm', '-f', 'qwen-c2-platform'])[-1]
+        self.assertLess(exec_at[0], removal)
+        self.assertLess(max(self.position(commands, ['chat'])), exec_at[0])
+        self.assertLess(max(self.position(commands, ['docker', 'logs'])), exec_at[0])
+        self.assertEqual(text, 'all cases passed\n')
+        self.assertEqual((recorded['budget_smoke']['ran'], recorded['budget_smoke']['exit']), (True, 0))
+        self.assertIn('seconds', recorded['budget_smoke'])
+        self.assertIn('[BUDGET-SMOKE] PASSED', out)
+
+    def test_without_the_flag_nothing_runs(self):
+        code, recorded, commands, text, out = self.drive((1, 'x'), flag=False)
+        self.assertEqual(code, 0)
+        self.assertEqual([i for i, (c, _) in enumerate(commands) if 'serving.budget_smoke' in c], [])
+        self.assertNotIn('budget_smoke', recorded)
+        self.assertIsNone(text)
+
+    def test_a_failing_smoke_fails_the_run_and_keeps_the_replays_own_verdict(self):
+        code, recorded, commands, text, out = self.drive((3, 'case 7 failed\n'))
+        self.assertEqual(code, 1)
+        self.assertTrue(recorded['passed'])
+        self.assertEqual((recorded['budget_smoke']['ran'], recorded['budget_smoke']['exit']), (True, 3))
+        self.assertIn('[BUDGET-SMOKE] FAILED exit=3', out)
+
+    def test_a_missing_module_is_recorded_and_not_fatal(self):
+        code, recorded, commands, text, out = self.drive((1, '/usr/bin/python3: No module named serving.budget_smoke\n'))
+        self.assertEqual(code, 0)
+        self.assertEqual((recorded['budget_smoke']['ran'], recorded['budget_smoke']['reason']), (False, 'missing'))
+        self.assertNotIn('FAILED', out)
+
+    def test_a_timeout_fails_the_run_and_the_container_is_still_removed(self):
+        timeout = replay.subprocess.TimeoutExpired(['docker', 'exec'], 5400, output=b'partial', stderr=None)
+        code, recorded, commands, text, out = self.drive(timeout)
+        self.assertEqual(code, 1)
+        self.assertEqual((recorded['budget_smoke']['ran'], recorded['budget_smoke']['timed_out']), (True, True))
+        self.assertIn('partial', text)
+        self.assertIn('timed out', text)
+        exec_at = self.position(commands, ['docker', 'exec', 'qwen-c2-platform', 'python3', '-m'])[0]
+        self.assertLess(exec_at, self.position(commands, ['docker', 'rm', '-f', 'qwen-c2-platform'])[-1])
+
+    def test_a_container_that_is_down_or_silent_skips_the_smoke(self):
+        for kwargs in (dict(running='false'), dict(models_status=None)):
+            code, recorded, commands, text, out = self.drive((0, 'x'), **kwargs)
+            self.assertFalse(recorded['budget_smoke']['ran'])
+            self.assertEqual([i for i, (c, _) in enumerate(commands) if 'serving.budget_smoke' in c], [])
+
+
 if __name__ == '__main__':
     unittest.main()
