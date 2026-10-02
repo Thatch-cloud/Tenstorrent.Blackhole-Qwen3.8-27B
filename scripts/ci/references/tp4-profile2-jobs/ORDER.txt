@@ -1,0 +1,57 @@
+# The order of the four-card PROFILE-2 window, one template per line: <template name without .env> <stop|soft> <image tag> <minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure is logged and the window goes on (its product is data).
+#
+# What the window is for (docs/tp4-profile.md, the perf audit's section 5): the SECOND TP4 device profile, of the production-shaped
+# verify (c2-packed-tp4-speed-strace: production's own recipe, audits off, the pinned sampler recorded in the verify trace), with the
+# analysis that picks the packed block by what it holds and by what the host timed and attributes the round's publication, drafters and
+# commits separately. v170 was the first profile; it ran on the speed profile without the in-trace sampler, at 4k / 8k / 16k / 24k, and its
+# own report picked the lone user's step. This one reads per-op core counts (the CPP report is kept compressed in the artifact), the
+# cost of the in-trace sampler, the collectives with the tile-split all-reduce and the round around the verify.
+#
+# PRODUCTION IS LIVE ON THE CARDS when the window opens: PA0 is 'agentstop unserve', the first job, and nothing opens a board before it.
+# The window needs a production-down slot: book 2 hours (the template's worst case with reset and build is 3.5 hours; the gate refuses
+# to start if its worst case does not fit the step and job time left).
+# HAND-BACK is not part of P2: PH resets the cards (it runs even when a stop job halted the window). After PH the driver, outside these
+# templates, re-measures the fabric, runs the agentstart action and asks the owner for /deploy of today's production recipe. No template
+# deploys anything.
+# ONE IMAGE FOR THE WHOLE WINDOW (tp4-prof-2, built by P2 from the commit the window's tag sits on: the read-back hook is image code).
+# The profile image is a GATE image: never place it.
+#
+# THE TRAPS
+#   - NEVER CANCEL P2 once its gate step has started: tracy writes as root and a cancelled run leaves root-owned logs (the next checkout
+#     dies with EACCES). The workflow's always() hand-back step keeps the CPP report (compressed) and prunes the rest, but a killed
+#     container can still be writing. A segfault in read_core_data_from_completion_queue is INFRA: do not raise op-support (20000 is the
+#     only count the plan accepts).
+#   - DISK: the gate refuses to start past 80% used and the guard stops the arm at 4 GB of profile output or 85%. NEVER delete the P8 base
+#     image (qwen-fast-serving:ci-be9e184e) to make room; grep the Dockerfiles for FROM before deleting any image.
+#   - HOST MEMORY: the container is capped and the JIT cache is on tmpfs; an out-of-memory kill looks like a hang (read memory.events).
+#   - Read the LAUNCHED argv: host env vars do not reach the container.
+#   - The profiler takes DRAM (about 0.7 GB per chip): fine at 4 x 4k, recheck for more seats or longer contexts.
+#
+# THE READ-OUT (download the artifact; python3 scripts/ci/tp4_profile_report.py --results <the artifact's gate/ directory>)
+#   VALIDITY, all of it, before any number:
+#     1. The launched-argv line: profile c2-packed-tp4-speed-strace, QWEN_FAST_TP=4, QWEN_FAST_VERIFY_T1_AUDIT=0, QWEN_FAST_VERIFY_T2_AUDIT=0,
+#        QWEN_FAST_PACKED_SAMPLER_IN_TRACE=1 and, on ops-trace, the profiler variables.
+#     2. No '[PINDIAG] verify t1 audit' / 't2 audit' line in either log.
+#     3. At least 20 '[PINDIAG] device profiler read back after replay' lines.
+#     4. ops-trace texts == ops-twin texts (profiling must not change arithmetic); a difference is a finding, not noise.
+#     5. Profiling overhead <= 3%: the profiled arm's [PACKED-PHASE] trace_ms against the twin's.
+#     6. The report's trace pick: 'Picked as the packed block by' says SDPA and conv-gates launches per layer = 4 users AND a device span within a
+#        few percent of the host trace_ms; the validity block has no structure problem (64 layers, 48 GDN, 16 attention, 4 launches per layer).
+#     7. At least 8 complete 4-live verify sessions on all four chips (fewer is a note: the figures are medians over few samples).
+#     8. gate/ops/cpp_device_perf_report.csv.gz is in the artifact (core counts and the round anatomy come from it).
+#   THEN, per category, against v170 (the report's 'Against the v170 profile' table; ms per chip, v170 = 4 users at 4k/8k/16k/24k, no sampler
+#   in the trace): weight matmuls 17.0; gdn.recurrence 9.29; gdn.glue 6.07; gdn.conv_gates 3.97; attn.sdpa 7.12 (at 4 x 4k expect about
+#   64 us fixed + 3.5 us per 1k per launch, roughly 5.1 ms); attn.glue 5.7; collectives 4.63 (now with the tile-split all-reduce: read the
+#   reduce-scatter count and the per-call microseconds); sampler 1.73 (now IN the trace: read the argmax and the reduce core counts);
+#   norms 2.0; in-trace gaps 4.30; verify span 61.82. The round around the verify (kernel ms on chip 0 per 4-live round): publication
+#   (eager) 12.0 over about 466 ops, drafters 24.75, commits 2.6; on the host: packed_verify 64.3, packed_commit (publication) 24.5,
+#   early_draft 32.6, scheduler 2.7, period 124.5. A category that moved by more than 10% needs its reason in the write-up (the shape
+#   change moves attention; the sampler moves the sampler and the gaps; the tile split moves the collectives).
+#   Core count per op, from the CSV: fills the cells the audit marked unknown.
+# STOP on an attach refusal, a hang, garbage text, or ops-trace texts differing from ops-twin. SOFT otherwise: the product is data.
+#
+# Duration (estimate, wall clock): PA0 5 min; P2 150 min expected (90 at best, 210 at worst); PH 15 min. About 2.8 hours expected.
+PA0-agent-stop stop tp4-prof-2 5
+P2-trace-profile stop tp4-prof-2 150
+PH-handback-reset stop tp4-prof-2 15
