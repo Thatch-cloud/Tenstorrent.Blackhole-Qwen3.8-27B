@@ -214,7 +214,7 @@ class RunMemoryWantsTheSeatsTests(unittest.TestCase):
 
 class FlagPhaseAtEightTests(unittest.TestCase):
     @staticmethod
-    def step(at, live, blocks, packed_users=None, traces=(58.0, 60.0), new=0):
+    def step(at, live, blocks, packed_users=None, traces=(58.0, 60.0), new=0, window=None):
         packed_users = live if packed_users is None else packed_users
         lines = [STAMP % at + '[PHASE] execute total=%d new=%d cached=%d spec=%d finished=[] preempted=[]' % (
             live * 16, new, live, live)]
@@ -227,9 +227,11 @@ class FlagPhaseAtEightTests(unittest.TestCase):
             lines.append('[PACKED-FENCES] round=%d diff_ms=0.50 write_ms=0.40' % (1 + int(at)))
         for user in range(live):
             lines.append('[PHASE] packed_commit r%d end 1.0 ms' % user)
+        window = blocks == 1 if window is None else window     # two packed blocks in a round pre-stage nothing (prestage=False)
         for block in range(blocks):
             lines.append('[PACKED-GDN-AFTER-PAIRS] round=%d commits=4 site=window enqueue_ms=1.5 segments=a' % (1 + int(at)))
-            lines.append('[PACKED-PRESTAGE-WINDOW] round=%d buffers=2 ms=6.50' % (1 + int(at)))
+            if window:
+                lines.append('[PACKED-PRESTAGE-WINDOW] round=%d buffers=2 ms=6.50' % (1 + int(at)))
         return lines
 
     def test_the_default_is_four_live_and_one_block(self):
@@ -252,6 +254,7 @@ class FlagPhaseAtEightTests(unittest.TestCase):
         self.assertEqual(first['phases']['readback'], round(0.6, 3))
         self.assertEqual(first['phases']['staging'], round(2 * 0.9, 3))
         self.assertEqual(first['phases']['commit'], round(8 * 1.0 + 2 * 1.5, 3))
+        self.assertEqual(first['phases']['window'], 0.0, 'two packed blocks pre-stage nothing: no window line is due')
         self.assertEqual(len(first['fingerprint']), 8)
 
     def test_an_eight_live_round_with_one_block_of_lines_is_reported_missing_not_summed(self):

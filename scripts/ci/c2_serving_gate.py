@@ -1833,8 +1833,9 @@ def flag_phase_rounds(log_text, live=4):
         wants = dict(verify=blocks, split=blocks, staging=blocks, commit=live, flush=blocks)
         gaps = ['%s x%d' % (what, wants[key]) for key, what, _want in FLAG_PHASE_LINES
                 if len(step[key]) != wants[key] or None in step[key]]
-        # The window pre-stage is due when the next step serves a packed round (the comment above FLAG_PHASES).
-        due = following is not None and bool(following['packed'])
+        # The window pre-stage is due when the next step serves a packed round (the comment above FLAG_PHASES) and exactly one
+        # block runs it: with two packed blocks in a round the pre-stage is off for both (serving_packed_step), so no line is due.
+        due = blocks == 1 and following is not None and bool(following['packed'])
         if len(step['window']) > blocks or (due and not step['window']):
             gaps.append('%s x1%s' % (WINDOW_LINE_NAME, ' (due: the next step is packed)' if due else ''))
         phases = flag_ms = None
