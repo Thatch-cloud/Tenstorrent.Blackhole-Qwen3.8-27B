@@ -10,7 +10,11 @@ qwen_c2_profiles.json does not define, an unknown gate plan, a prompt length tha
 integer, and a card-M harness, argument or environment the cardm step must not run (read_cardm).
 
 Keys (every one optional but C2_IMAGE_TAG):
-  C2_ACTIONS          ACTIONS, run in the workflow's order (default: status)
+  C2_ACTIONS          ACTIONS, run in the workflow's order (default: status); a job names them in that order, else it is
+                      refused. agentstop (right after status) stops the host's node agent, and with it the serving
+                      container it started, so the cards are free; agentstart (last, after push) starts the agent
+                      again and waits for its container to answer /v1/models. Neither opens a card, so a job of only
+                      status, agentstop, unserve and agentstart is valid with C2_CARDS=pair or quad.
   C2_IMAGE_TAG        the image is zot.thatch.local:5000/tt-vllm:qwen38-c2-<tag>
   C2_FABRIC           the fabric config the fabric action opens the (1, 4) mesh under: FABRIC_1D (the default, what
                       the TT plugin sets) or FABRIC_1D_RING; needs C2_CARDS=quad when set
@@ -92,13 +96,13 @@ import os
 import re
 import sys
 
-ACTIONS = ('status', 'platform', 'unserve', 'priority', 'reset', 'fabric', 'cardm', 'drift', 'build', 'probe', 'smoke', 'gate',
-           'prefix', 'replay', 'push')
+ACTIONS = ('status', 'agentstop', 'platform', 'unserve', 'priority', 'reset', 'fabric', 'cardm', 'drift', 'build', 'probe', 'smoke', 'gate',
+           'prefix', 'replay', 'push', 'agentstart')
 CARD_SETS = ('pair', 'quad')
 # What a four-card job may run: the pair-shaped steps (a single-card harness on card M, the M+A smoke and replay, the
 # CPU-priority measurement of the M+A container) do not apply to it, and fabric applies to nothing else.
-QUAD_ACTIONS = ('status', 'platform', 'unserve', 'reset', 'fabric', 'drift', 'build', 'probe', 'smoke', 'gate', 'prefix',
-                'replay', 'push')
+QUAD_ACTIONS = ('status', 'agentstop', 'platform', 'unserve', 'reset', 'fabric', 'drift', 'build', 'probe', 'smoke', 'gate', 'prefix',
+                'replay', 'push', 'agentstart')
 TP4_MESH_DEVICE = 'P150x4'
 # The mesh_device values of a pair profile: none (the image's P300 under upstream's four-channel p150_x2) and P300
 # (general-2link: the same pair under the two-channel descriptor this cabling needs).
@@ -331,6 +335,9 @@ def read_job(values, profiles, root=ROOT, meshes=None):
     unknown = sorted(set(actions) - set(ACTIONS))
     if unknown:
         raise JobError('C2_ACTIONS: unknown %s (known: %s)' % (', '.join(unknown), ' '.join(ACTIONS)))
+    order = [ACTIONS.index(action) for action in actions]
+    if order != sorted(order):
+        raise JobError('C2_ACTIONS must follow the workflow\'s order: %s' % ' '.join(ACTIONS))
     tag = values.get('C2_IMAGE_TAG', '')
     if not TAG.fullmatch(tag):
         raise JobError('C2_IMAGE_TAG must match %s, got %r' % (TAG.pattern, tag))
