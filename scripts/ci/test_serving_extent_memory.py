@@ -301,6 +301,20 @@ class ExtentMemoryTests(unittest.TestCase):
         unregister()
         self.assertNotIn(serving_prefill_admission.DRAM_KEY, sys.modules)
 
+    def test_a_malformed_dram_tuning_flag_is_refused_at_registration(self):
+        pool = Pool((1_800 * MB, 1_500 * MB), (9_000 * MB, 2_000 * MB))
+        with self.environ(True), patch.dict(os.environ, {'QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB': 'lots'}):
+            with self.assertRaisesRegex(ValueError, 'QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB'):
+                serving_request_factory.register_dram_admission(pool, log=Mock())
+
+    def test_the_registration_line_logs_the_tuned_bytes_not_the_defaults(self):
+        log = Mock()
+        pool = Pool((1_800 * MB, 1_500 * MB), (9_000 * MB, 2_000 * MB))
+        with self.environ(True), patch.dict(os.environ, {'QWEN_FAST_DRAM_ENGINE_BUILD_MB': '900'}):
+            unregister = serving_request_factory.register_dram_admission(pool, log=log)
+        unregister()
+        self.assertEqual(log.call_args.args[1], 900 * MB)
+
 
 if __name__ == '__main__':
     unittest.main()
