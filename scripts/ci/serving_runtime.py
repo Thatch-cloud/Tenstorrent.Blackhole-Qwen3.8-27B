@@ -87,7 +87,7 @@ def m3_shape(policy, environ=None):
 
 
 def m3_request_warm(blocks, policy, environ=None):
-    """QWEN_FAST_M3_REQUEST_WARM, strictly: unset or '0' is off (None), '1' is the widths (1, 2, 4), 'even' is (1, 2, 4, 1), and
+    """QWEN_FAST_M3_REQUEST_WARM, strictly: unset or '0' is off (None), '1' is the widths (1, 2, 4), 'even' is (1, 2, 4, 1) at one block only, and
     anything else - an empty value included - is a configuration error naming the flag. `blocks` is m3_blocks_for's count.
     One block (the four-seat shape): the warm runs once before the block's capture, and any value but '0' is refused, naming it,
     unless m3_shape(policy) is met (four requests, FOUR_AS_TWO=0, PACKED_STEP=1) and QWEN_FAST_TP is not '2'. Two blocks (the
@@ -107,6 +107,8 @@ def m3_request_warm(blocks, policy, environ=None):
             raise ValueError('%s=%s is admitted on the four-card (TP4) stack only, not QWEN_FAST_TP=2' % (M3_REQUEST_WARM_FLAG, value))
     elif blocks != 2:
         raise ValueError('%s needs one or two M3 blocks, got %r' % (M3_REQUEST_WARM_FLAG, blocks))
+    if blocks == 2 and value == 'even':
+        raise ValueError('%s=even is the one-block parity discriminator; two blocks take 0 or 1' % M3_REQUEST_WARM_FLAG)
     from request_width_warm import EVEN_WIDTHS, WIDTHS
     return WIDTHS if value == '1' else EVEN_WIDTHS
 

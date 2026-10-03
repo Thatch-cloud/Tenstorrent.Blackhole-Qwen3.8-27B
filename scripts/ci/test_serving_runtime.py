@@ -1281,6 +1281,9 @@ class RequestWarmHookTests(unittest.TestCase):
         for value in ('', 'true', '2', 'on', ' 1'):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, flag):
                 serving_runtime.m3_request_warm(2, eight, {flag: value})
+        # 'even' is the one-block parity discriminator: refused at two blocks, naming the flag
+        with self.assertRaisesRegex(ValueError, flag + '=even'):
+            serving_runtime.m3_request_warm(2, eight, {flag: 'even'})
         # one block: warm4's semantics - admitted at the four-card block, refused anywhere else
         self.assertEqual(serving_runtime.m3_request_warm(1, four, {**m3, flag: '1'}), (1, 2, 4))
         with self.assertRaisesRegex(ValueError, flag):
@@ -1293,3 +1296,4 @@ class RequestWarmHookTests(unittest.TestCase):
         self.assertIn('if request_widths and not m3_blocks_two:', source)
         self.assertIn('                if request_widths:\n', source)
         self.assertIn('before_captures=lambda: warm_request_widths(', source)
+        self.assertIn('widths=request_widths))', source)

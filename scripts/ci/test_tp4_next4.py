@@ -160,11 +160,14 @@ class ShipPackTests(unittest.TestCase):
         with open(PROFILES_PATH, encoding='utf-8') as handle:
             self.assertEqual(json.load(handle)['default'], PRODUCTION)
 
-    def test_a_gate_arm_or_the_warm4_twin_can_never_be_baked(self):
+    def test_a_gate_arm_can_never_be_baked_and_the_warm4_twin_is_held_back_only_by_the_order_file(self):
         for name in (EIGHT_BEST, BEST_STRACE, BEST):
             text = text_of('B0-build').replace('=' + SHIP, '=' + name)
             with self.subTest(profile=name), self.assertRaises(job.JobError):
                 job.read_job(job.parse_env(text), sorted(profiles()), root=ROOT)
+        # the warm4 twin CAN be baked by read_job: only ORDER.txt and the profile description hold it back until warm4 proves out
+        twin = text_of('B0-build').replace('=' + SHIP, '=' + SHIP_WARM4)
+        self.assertEqual(job.read_job(job.parse_env(twin), sorted(profiles()), root=ROOT)['bake_default_profile'], SHIP_WARM4)
 
     def test_the_five_hang_runs_name_the_traffic_candidate_and_the_four_user_shapes(self):
         for name in HANG:
@@ -178,6 +181,7 @@ class ShipPackTests(unittest.TestCase):
     def test_the_matrix_and_the_replay_run_the_candidate(self):
         matrix, replay = parsed('M-matrix-traffic'), parsed('SR-platform-replay')
         self.assertEqual((matrix['profile'], matrix['gate_plan']), (SHIP, 'matrix'))
+        self.assertIn('C2_GATE_LENGTHS=4096,16384,32768,60000', text_of('M-matrix-traffic').splitlines())
         self.assertEqual(replay['replay_profile'], SHIP)
         self.assertEqual(replay['replay_budget_smoke'], '1')
         self.assertEqual(replay['platform_image'], 'thin-layer-image-ref')
