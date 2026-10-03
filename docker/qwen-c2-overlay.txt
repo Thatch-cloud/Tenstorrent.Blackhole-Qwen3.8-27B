@@ -86,6 +86,15 @@ scripts/ci/serving_prefill_admission.py
 # worst-case blocks do not fit what the running requests have reserved, and serving_c2_contract refuses one no pool could serve. New: no older
 # layer holds it. Both importers import it lazily, only under the flag.
 scripts/ci/serving_kv_reservation.py
+# Lever N at TP4 (QWEN_FAST_LEVER_N=1, gate-only profiles; docs/lever-n-tp4-design-2026-10-04.md): chunked prefill interleaved with the packed decode rounds.
+# levern_policy is the pure chunking arithmetic and alternation; levern_scheduler caps each prefill step at a 2,048-token boundary and yields decode steps
+# (installed by serving_prefill_admission); levern_platform keeps chunking on past the TT platform's policy (a post-import hook serving_c2_contract arms);
+# levern_route is the model route that continues the suspended GDN scratch, installed at the attach (serving_runtime) and announced per step (serving_lifecycle).
+# New: no older layer holds them, and each importer imports them lazily, only under the flag (or the audit switch).
+scripts/ci/levern_policy.py
+scripts/ci/levern_scheduler.py
+scripts/ci/levern_platform.py
+scripts/ci/levern_route.py
 
 # Stage 1 and 2 of the C2 serving plan change these. Overlaid since before stage 1 landed, so the
 # route was proven before a change depended on it; serving_lifecycle now carries D2 and D4.

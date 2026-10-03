@@ -56,6 +56,17 @@ own SMOKE_JSON line and the container log and exits non-zero on:
     'refused' admission line (the record qualified these bytes, no waiver), and a parser_rechunk profile must log the
     contract's 'parser M armed' line (the parser fix is live in the server that took the requests);
 
+  - Lever N (QWEN_FAST_LEVER_N=1, tp4/lever-n; levern_problems): the lever must have ENGAGED, not merely been installed. The scheduler's install line, the
+    platform wrap's "chunked prefill kept" line, the route's install line and its warm line (before Metal's unsafe-allocation warning, the packed
+    traces' first allocation, and with exactly the plan's three steps) must each be logged; no "lever N REFUSED" line; and every prompt that was
+    split must show the ledger the exactness argument rests on: one route line per step, each start equal to the previous end, every end but the
+    last a multiple of 2,048, the last end the prompt, a decode slot written ONLY by the last step, and no program compiled by a step. While
+    decoders and a partial prefill coexist the alternation must be visible: between two prefill steps of one request that ran with decoders
+    there is a decode step that served at least one seat. In the stall tests every decoding seat must have progressed inside the arrival's prefill
+    window (the control arm freezes them; this arm's point). The digest instrument (QWEN_FAST_LEVERN_AUDIT=1, also alone as the control) must have
+    logged a digest line for every prompt of a levern_equal test that ran. The hang shapes (levern_*) are judged as streams, and the exact-length
+    rows as completions that counted the prompt they were sent. Nothing here compares the two arms: levern_compare.py does.
+
   python c2_smoke_check.py --smoke-log smoke.log --container-log container.log --profile P [--profiles qwen_c2_profiles.json]
 """
 
@@ -75,6 +86,11 @@ EIGHT_TESTS = ('concurrent8_code_equal', 'concurrent8_code_32k', 'concurrent8_co
 # The 262k stall shape (tp4/seats262k): seven decoding users and one cold 253,920-token arrival; its numbers are recorded, not gated, but
 # every stream must end in tokens (the arrival's too) and the arrival's time to first token must exist.
 STALL_TEST = 'stall8_cold262k'
+STALL_TESTS = (STALL_TEST, 'stall8_cold128k')
+# Lever N (tp4/lever-n): the hang shapes are streams of several users (the arrival and the follow-ups included); the equal tests are rows of exact-length completions.
+LEVERN_USER_TESTS = ('levern_equal_busy', 'levern_decoder_finishes', 'levern_all_decoders_finish', 'levern_cancel_mid_prefill',
+                     'levern_arrival_during_prefill', 'levern_seed_stops')
+LEVERN_ROW_TESTS = ('levern_equal', 'levern_equal_long', 'levern_equal_busy')
 REPLAY_TESTS = (REPLAY_TEST, 'replay_concurrent8')
 # Four-user streamed tests: their users get the stream rules; the code ones are code answers too (TEXT_TESTS).
 CONCURRENT_TESTS = ('concurrent4', 'concurrent4_v164order', 'concurrent4_steady', 'concurrent4_code', 'concurrent4_code_equal',
@@ -315,16 +331,18 @@ def smoke_problems(results, container_text=''):
                 problems += stream_problems('%s user %d' % (name, index), user)
                 if name in TEXT_TESTS:
                     problems += answer_problems('%s user %d' % (name, index), user)
-    stall = results.get(STALL_TEST)
-    if isinstance(stall, dict) and 'error' not in stall:
-        for index, user in enumerate(stall.get('users') or []):
-            problems += stream_problems('%s user %d' % (STALL_TEST, index), user)
-        if not isinstance(stall.get('arrival_ttft_s'), (int, float)):
-            problems.append('%s: the cold arrival has no time to first token' % STALL_TEST)
-        if not stall.get('seat_gaps'):
-            problems.append('%s: no seat gap was recorded' % STALL_TEST)
-    elif isinstance(stall, dict):
-        problems.append('%s: %s' % (STALL_TEST, stall['error']))
+    for stall_name in STALL_TESTS:
+        stall = results.get(stall_name)
+        if isinstance(stall, dict) and 'error' not in stall:
+            for index, user in enumerate(stall.get('users') or []):
+                problems += stream_problems('%s user %d' % (stall_name, index), user)
+            if not isinstance(stall.get('arrival_ttft_s'), (int, float)):
+                problems.append('%s: the cold arrival has no time to first token' % stall_name)
+            if not stall.get('seat_gaps'):
+                problems.append('%s: no seat gap was recorded' % stall_name)
+        elif isinstance(stall, dict):
+            problems.append('%s: %s' % (stall_name, stall['error']))
+    problems += levern_smoke_problems(results)
     for replay in REPLAY_TESTS:
         if replay in results and 'error' not in results[replay]:
             for index, user in enumerate(results[replay].get('users') or []):
@@ -353,6 +371,47 @@ def smoke_problems(results, container_text=''):
             for row in rows:
                 if not row.get('tokens'):
                     problems.append('warm_lifecycle %s at %s characters: no tokens' % (label, row.get('chars')))
+    return problems
+
+
+def levern_smoke_problems(results):
+    """The Lever N tests' own results (levern_* in c2_serving_smoke): the exact-length rows and the hang shapes' streams."""
+    problems = []
+    for name in LEVERN_ROW_TESTS + LEVERN_USER_TESTS:
+        entry = results.get(name)
+        if entry is None:
+            continue
+        if 'error' in entry:
+            problems.append('%s: %s' % (name, entry['error']))
+            continue
+        for length, row in sorted((entry.get('prompts') or {}).items(), key=lambda item: int(item[0])):
+            label = '%s prompt %s' % (name, length)
+            if 'error' in row:
+                problems.append('%s: %s' % (label, row['error']))
+                continue
+            if row.get('prompt_tokens') != row.get('prompt_tokens_sent'):
+                problems.append('%s: the server counted %r tokens of the %r it was sent' % (label, row.get('prompt_tokens'),
+                                                                                           row.get('prompt_tokens_sent')))
+            if not row.get('tokens'):
+                problems.append('%s: no tokens' % label)
+            if row.get('finish') is None:
+                problems.append('%s: no finish reason' % label)
+            if not row.get('content_sha256'):
+                problems.append('%s: no answer hash' % label)
+        users = entry.get('users') or []
+        for index, user in enumerate(users):
+            if name == 'levern_seed_stops' and index == len(users) - 2:
+                # the max_tokens=1 request: it must end at its seed, with exactly that token
+                if isinstance(user, dict) and 'error' not in user and user.get('tokens') != 1:
+                    problems.append('%s: the one-token request produced %r tokens' % (name, user.get('tokens')))
+                elif isinstance(user, dict) and 'error' in user:
+                    problems.append('%s user %d: %s' % (name, index, user['error']))
+                continue
+            problems += stream_problems('%s user %d' % (name, index), user)
+        if name == 'levern_cancel_mid_prefill':
+            dropped = entry.get('dropped') or {}
+            if dropped.get('outcome') != 'dropped':
+                problems.append('%s: the cold prefill was not dropped by the client (%r): the abort shape never ran' % (name, dropped.get('outcome')))
     return problems
 
 
@@ -739,6 +798,139 @@ def tpub_problems(env, container_text):
     return problems
 
 
+LEVERN_FLAG = 'QWEN_FAST_LEVER_N'
+LEVERN_AUDIT_FLAG = 'QWEN_FAST_LEVERN_AUDIT'
+LEVERN_CHUNK = 2048
+LEVERN_WARM_REQUEST = '__levern_warm__'
+LEVERN_WARM_STEPS = 3
+LEVERN_INSTALLED = '[PINDIAG] lever N installed on '
+LEVERN_PLATFORM = '[PINDIAG] lever N: chunked prefill kept for qwen3_5'
+LEVERN_ROUTE_INSTALLED = '[PINDIAG] lever N route installed: route=1'
+LEVERN_WARMED = '[PINDIAG] lever N route warmed before the packed traces: steps=%d' % LEVERN_WARM_STEPS
+LEVERN_REFUSED = '[PINDIAG] lever N REFUSED'
+LEVERN_ROUTE = re.compile(r'\[PINDIAG\] lever N route req=(\S+) start=(\d+) end=(\d+) prompt=(\d+) final=([01]) wrote_slot=([01]) '
+                          r'ms=([0-9.]+) programs=(\d+|None)->(\d+|None)')
+LEVERN_STEP = re.compile(r'\[PINDIAG\] lever N step n=(\d+) kind=(prefill|decode) seats=(\d+) req=(\S+) start=(\S+) tokens=(\d+) '
+                         r'end=(\S+) prompt=(\S+) final=(\S+) reason=(\S+) prev=(\S+):(\S+)ms owed_ms=(\S+) owed_rounds=(\d+)')
+LEVERN_DIGEST = re.compile(r'\[PINDIAG\] lever N digest req=(\S+) prompt=(\d+) slot_sha=([0-9a-f]{32}) logits_sha=([0-9a-f]{32}) '
+                           r'kv_sha=([0-9a-f]{32})')
+
+
+def levern_facts(container_text):
+    """The Lever N lines of a container log, parsed in order: route steps, scheduler steps and digests."""
+    routes = [dict(req=m.group(1), start=int(m.group(2)), end=int(m.group(3)), prompt=int(m.group(4)), final=m.group(5) == '1',
+                   wrote=m.group(6) == '1', programs=(m.group(8), m.group(9))) for m in LEVERN_ROUTE.finditer(container_text)]
+    steps = [dict(n=int(m.group(1)), kind=m.group(2), seats=int(m.group(3)), req=m.group(4), start=m.group(5), tokens=int(m.group(6)),
+                  end=m.group(7), prompt=m.group(8), final=m.group(9), reason=m.group(10)) for m in LEVERN_STEP.finditer(container_text)]
+    digests = [dict(req=m.group(1), prompt=int(m.group(2)), slot=m.group(3), logits=m.group(4), kv=m.group(5))
+               for m in LEVERN_DIGEST.finditer(container_text)]
+    return dict(routes=routes, steps=steps, digests=digests)
+
+
+def levern_route_problems(routes):
+    """The ledger of every split prompt: continuity, alignment, one final step, the slot written only by it, no program compiled by a step."""
+    problems, by_request = [], {}
+    for row in routes:
+        by_request.setdefault(row['req'], []).append(row)
+    for request, rows in by_request.items():
+        cursor, label = 0, 'prefill of %s' % request
+        for index, row in enumerate(rows):
+            last = index == len(rows) - 1
+            if row['start'] != cursor:
+                problems.append('%s: step %d starts at %d, the previous ended at %d (a chunk was skipped or replayed)' % (label, index + 1, row['start'], cursor))
+            if row['final'] != (row['end'] == row['prompt']):
+                problems.append('%s: step %d ends at %d of %d with final=%d' % (label, index + 1, row['end'], row['prompt'], row['final']))
+            if not row['final'] and row['end'] % LEVERN_CHUNK:
+                problems.append('%s: a non-final step ends at %d, off the %d-token chunk boundary' % (label, row['end'], LEVERN_CHUNK))
+            if row['wrote'] != row['final']:
+                problems.append('%s: step %d (%d to %d) wrote_slot=%d: the decode slot is written by the final step alone'
+                                % (label, index + 1, row['start'], row['end'], row['wrote']))
+            if row['final'] and not last:
+                problems.append('%s: a step follows its final step' % label)
+            before, after = row['programs']
+            if before != 'None' and after != 'None' and int(after) > int(before):
+                problems.append('%s: step %d compiled %d program(s) after the traces (the #48536 hang class)' % (label, index + 1, int(after) - int(before)))
+            cursor = row['end']
+        if not rows[-1]['final'] and request != LEVERN_WARM_REQUEST:
+            # an unfinished prompt is an aborted one (the cancel shape): legal, but nothing may follow it under this request
+            pass
+    return problems
+
+
+def levern_alternation_problems(steps, env):
+    """Whenever a prefill step ran with decoders (seats > 0) and its request has another prefill step later, a decode step that served at least
+    one seat must lie between them, unless the share is 1.0 (back-to-back chunks, today's stall chunked)."""
+    share_one = str(env.get('QWEN_FAST_LEVERN_PREFILL_SHARE', '')) in ('1', '1.0') and not env.get('QWEN_FAST_LEVERN_ROUNDS')
+    if share_one:
+        return []
+    problems, last_prefill, decoded = [], None, False
+    for step in steps:
+        if step['kind'] == 'decode':
+            if step['seats'] >= 1:
+                decoded = True
+            continue
+        if last_prefill is not None and last_prefill['req'] == step['req'] and last_prefill['seats'] > 0 and not decoded:
+            problems.append('two prefill steps of %s (n=%d and n=%d) ran back to back with %d decoder(s) running: the alternation did not yield'
+                            % (step['req'], last_prefill['n'], step['n'], last_prefill['seats']))
+        last_prefill, decoded = step, False
+    return problems
+
+
+def levern_problems(env, container_text, smoke):
+    """(problems, facts) for the Lever N flags of the served profile `env` (the module docstring); ([], {}) when neither is set."""
+    on = env.get(LEVERN_FLAG) == '1'
+    audit = env.get(LEVERN_AUDIT_FLAG) == '1'
+    if not on and not audit:
+        return [], {}
+    problems, facts = [], levern_facts(container_text)
+    results = smoke or {}
+    if on:
+        for marker, what in ((LEVERN_INSTALLED, 'the scheduler install line'), (LEVERN_PLATFORM, 'the platform wrap line (the policy that turns chunking off ran '
+                                                                                               'unwrapped)'),
+                             (LEVERN_ROUTE_INSTALLED, 'the route install line'), (LEVERN_WARMED, 'the route warm line with %d steps' % LEVERN_WARM_STEPS)):
+            if marker not in container_text:
+                problems.append('Lever N is on and %s ("%s") was never logged: the lever did not engage' % (what, marker))
+        lines = container_text.splitlines()
+        warm = next((i for i, line in enumerate(lines) if LEVERN_WARMED in line), None)
+        unsafe = next((i for i, line in enumerate(lines) if UNSAFE_ALLOCATION in line), None)
+        if warm is not None and unsafe is not None and unsafe < warm:
+            problems.append('the Lever N route warm (log line %d) came after the first allocation made with a trace live (line %d)' % (warm + 1, unsafe + 1))
+        refused = [line.strip()[:200] for line in lines if LEVERN_REFUSED in line]
+        problems += ['a Lever N REFUSED line: %s' % line for line in refused[:4]]
+        warm_steps = [row for row in facts['routes'] if row['req'] == LEVERN_WARM_REQUEST]
+        if warm is not None and len(warm_steps) != LEVERN_WARM_STEPS:
+            problems.append('the route warm logged %d step line(s), not %d' % (len(warm_steps), LEVERN_WARM_STEPS))
+        problems += levern_route_problems(facts['routes'])
+        served = [row for row in facts['routes'] if row['req'] != LEVERN_WARM_REQUEST]
+        facts['split_prompts'] = len({row['req'] for row in served})
+        facts['route_steps'] = len(served)
+        if served:
+            if not facts['steps']:
+                problems.append('prompts were split (%d route lines) and no "lever N step" line was logged: the scheduler\'s alternation never ran'
+                                % len(served))
+            problems += levern_alternation_problems(facts['steps'], env)
+            if not any(step['kind'] == 'decode' and step['seats'] >= 1 for step in facts['steps']) and any(
+                    step['kind'] == 'prefill' and step['seats'] >= 1 for step in facts['steps']):
+                problems.append('decoders ran beside split prefills and no decode step was ever yielded between them')
+        for stall_name in STALL_TESTS:
+            stall = results.get(stall_name)
+            if isinstance(stall, dict) and 'error' not in stall:
+                window = stall.get('window') or {}
+                span = max([seat.get('window_s') or 0.0 for seat in stall.get('seat_windows') or [{}]] or [0.0])
+                if window.get('seats') and span > 5.0 and window.get('seats_progressing') != window.get('seats'):
+                    problems.append('%s: %s of %s decoding seats progressed inside the %.0f s arrival window: the prefill still froze the others'
+                                    % (stall_name, window.get('seats_progressing'), window.get('seats'), span))
+    if audit:
+        seen = {row['prompt'] for row in facts['digests']}
+        for name in LEVERN_ROW_TESTS:
+            entry = results.get(name)
+            if isinstance(entry, dict) and 'error' not in entry:
+                for length in sorted(entry.get('prompts') or {}, key=int):
+                    if int(length) not in seen:
+                        problems.append('%s: no digest line for the prompt of %s tokens (%s=1 logs one per finished prefill)' % (name, length, LEVERN_AUDIT_FLAG))
+    return problems, facts
+
+
 def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=None):
     """(problems, facts) for a smoke log and a container log. `env` (the served profile's) adds the batched-draft
     stop conditions, `entry` (its whole record) the traffic profile's admission and parser conditions."""
@@ -790,6 +982,10 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
             facts['fused'] = fused
         problems += fused_problems(env, container_text, steady, fused)
         problems += tpub_problems(env, container_text)
+        levern, levern_facts_found = levern_problems(env, container_text, smoke)
+        problems += levern
+        if levern_facts_found:
+            facts['levern'] = dict((key, value) for key, value in levern_facts_found.items() if not isinstance(value, list))
     if entry is not None:
         problems += traffic_problems(container_text, entry)
         problems += waiver_problems(container_text, entry)

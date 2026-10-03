@@ -627,7 +627,7 @@ class ProfileTests(unittest.TestCase):
 
     def test_the_flag_is_in_no_other_profile(self):
         self.assertEqual(sorted(name for name, body in self.profiles()['profiles'].items() if BLOCKS in body.get('env', {})),
-                         ['c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-best-quad-gate', 'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit',
+                         ['c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-best-quad-gate', 'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-levern-audit', 'c2-packed-tp4-8x262k-best-levern-control-audit', 'c2-packed-tp4-8x262k-best-levern-final-hold-time-gate', 'c2-packed-tp4-8x262k-best-levern-foreign-time-gate', 'c2-packed-tp4-8x262k-best-levern-r1-time-gate', 'c2-packed-tp4-8x262k-best-levern-time-gate',
                           'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship'])
 
     def test_the_smoke_rules_read_the_profiles_env(self):

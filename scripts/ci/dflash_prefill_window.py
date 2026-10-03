@@ -38,6 +38,10 @@ PREFIX_ROUTE_ENTRY = '_qwen_prefix_prefill_slots'
 # A resumed prefill starts on a 2048-token chunk boundary: the only point a GDN
 # checkpoint is exact at (qwen_prefix_registry.CHUNK).
 RESUME_CHUNK = 2048
+# Lever N at TP4 (QWEN_FAST_LEVER_N=1, levern_route): a batched call that is not the last step of a split prompt writes NO decode slot, and the route
+# says so through this model attribute (levern_route.WROTE_ATTR, pinned equal by test_levern_route). wrap_slots reads and clears it after every call;
+# a model that never sets it (every profile without the flag) gives True, the stock behaviour.
+LEVERN_WROTE_ATTR = '_qwen_levern_wrote_slot'
 
 
 def _log(message, *values):
@@ -235,6 +239,8 @@ class PrefillWindowCapture:
         # a continuation: a chunk written into slot 0, the fast path's working row,
         # has overwritten whichever decoder was resident there.
         self.segment_slot = None
+        # Whether the batched call of the current segment wrote that slot (False only for an intermediate Lever N step; None before a call).
+        self.segment_wrote_slot = None
         # Batched prefill calls in the CURRENT activation. Reset by capture()
         # and segment(), so "one call per step" survives the relaxation that
         # lets a resumed prompt re-enter across steps.
@@ -301,7 +307,10 @@ class PrefillWindowCapture:
             # snapshot of the prefill scratch, so only the final chunk's write holds
             # the finished state; an earlier slot is left stale and unowned.
             self.prefill_slot = self.segment_slot = slot
-            return original(token_ids_list, page_table, empty_slots, *args, **kwargs)
+            vars(self.model).pop(LEVERN_WROTE_ATTR, None)
+            result = original(token_ids_list, page_table, empty_slots, *args, **kwargs)
+            self.segment_wrote_slot = vars(self.model).pop(LEVERN_WROTE_ATTR, True)
+            return result
         return slots
 
     @staticmethod
@@ -440,6 +449,7 @@ class PrefillWindowCapture:
         self.started = self.active = True
         self.segment_calls = 0
         self.segment_slot = None
+        self.segment_wrote_slot = None
         self.segments += 1
         try:
             with instance_overrides(self.bindings()):

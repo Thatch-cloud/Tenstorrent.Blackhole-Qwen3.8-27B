@@ -41,7 +41,7 @@ CPU_WORKFLOW = ROOT / '.github' / 'workflows' / 'qwen-integration-cpu.yml'
 PREFIX_PROFILES = ('general-prefix', 'general-prefix-eager', 'general-prefix-tp4', 'general-prefix-tp4-131k')
 # Gate-only profiles that are not prefix profiles: the TP4 benchmark engine (J3, G5 at TP4), the fused-prefill arm, and
 # the four-card S2 gate profile (unqualified until packed_any_evidence_tp4.json records its sections).
-GATE_ONLY_OTHERS = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-262k-gate', 'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate', 'c2-packed-tp4-8x262k-diag-strace', 'c2-packed-tp4-8-best', 'c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-best-quad-gate', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate', 'c2-packed-tp4-8-diag-strace', 'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard', 'general-tp4-bench', 'general-tp4-mmrs', 'c2-packed-tp4-gate', 'general-tp4-ring-mmrs',
+GATE_ONLY_OTHERS = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-levern-audit', 'c2-packed-tp4-8x262k-best-levern-control-audit', 'c2-packed-tp4-8x262k-best-levern-final-hold-time-gate', 'c2-packed-tp4-8x262k-best-levern-foreign-time-gate', 'c2-packed-tp4-8x262k-best-levern-r1-time-gate', 'c2-packed-tp4-8x262k-best-levern-time-gate', 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-262k-gate', 'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate', 'c2-packed-tp4-8x262k-diag-strace', 'c2-packed-tp4-8-best', 'c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-best-quad-gate', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate', 'c2-packed-tp4-8-diag-strace', 'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard', 'general-tp4-bench', 'general-tp4-mmrs', 'c2-packed-tp4-gate', 'general-tp4-ring-mmrs',
                     'c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-gate-glue', 'c2-packed-tp4-best-gate-tpub', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-best-strace-glue', 'c2-packed-tp4-best-strace-tpub',
                     'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-draftwide', 'c2-packed-tp4-gate-noslide',
                     'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide',
@@ -538,6 +538,9 @@ class GuardTests(unittest.TestCase):
                     expected.append(c2_parser_rechunk.MODULE)
                 if contract.ring_mesh(profile):
                     expected.append(contract.PLUGIN_WORKER)
+                if contract.levern_on(profile):
+                    # tp4/lever-n: the platform wrap that keeps chunked prefill on (levern_platform), not a prefix hook
+                    expected.append(contract.LEVERN_PLATFORM_MODULE)
                 self.assertEqual(sorted(hook.name for hook in hooks), sorted(expected))
                 self.assertFalse(any(line.startswith(('prefix:', 'metrics')) or 'prefix reuse' in line or 'salt' in line
                                      for line in logged), logged)

@@ -1,0 +1,41 @@
+# The order of the tp4/lever-n four-card DEVELOPMENT window: Lever N at TP4 (docs/lever-n-tp4-design-2026-10-04.md), prefill interleaved with the decode rounds of the eight-seat 262k stack, one image, tp4-lever-n-1, built from the pushed tp4/lever-n commit.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# THE CARDS ARE UNDER DEVELOPMENT, PRODUCTION IS DOWN BY THE OWNER'S CHOICE: NO agentstart, NO agentstop (the node agent is already stopped), NO hand-back, NO deploy, NO :latest move. Z ends with a reset
+# and no agentstart. qwen_c2_profiles.json's default stays c2-packed-tp4; nothing is baked as the image default.
+# P0. NO OTHER WINDOW DRIVER MAY BE ALIVE and no privileged builder container may be up. The CPU suite green on this branch first (gh workflow run qwen-cpu-suite.yml -f ref=tp4/lever-n). Every result is UNQUALIFIED (the 262k evidence waiver on the gate-only
+# arms, page_width_tp4.waiver_active). B0 never runs during a timing job. Judge every ABAB PAIRED per round, never by unpaired medians; check the load average.
+# WHAT THIS WINDOW DECIDES: nothing about production. It is evidence for the owner on three things: (1) EXACTNESS - an interleaved prefill equals the whole one (A0c/A1, compared bit for bit); (2) NO HANG - the shapes in which
+# a prefill is interrupted, aborted or outlived by its decoders complete (H1-H3, F1, F2); (3) THE TRADE - what a cold long prompt costs the seats that are decoding and what the decoders get back (S1-S5).
+# ORDER: the cheapest kill signals first: X0 (status, RESCAN, reset), B0, A0c (the control's digests), A1 (the interleaved arm's, compared), H1-H3 (hang shapes, audits off), F1 (the final-step hold's negative control), then the
+# stall ABAB S1-S4 and the static arm S5, then F2 (the foreign owner's negative control, whose engine dies by design), then Z.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS A1 <- A0c
+# NEEDS H1 H2 H3 F1 F2 <- A1
+# NEEDS S1 S2 S3 S4 S5 <- A1 H1 H2 H3
+# READ RULES (each also needs c2_smoke_check clean and no stall):
+#   X0  the status prints, the rescan finds every board, the reset completes on all four.   B0  provenance report with no problem line, the image id printed.
+#   A0c the control attach: admission passed at capacity 262144, every answer completes, a digest line per levern_equal prompt; its smoke and container logs are A1's reference.
+#   A1  the engaged markers, the route ledger and the alternation read clean (c2_smoke_check levern_problems), and levern_compare.py against A0c exits 0: every hash and every digest equal. A difference is NO-GO.
+#   H1-H3  three consecutive completions, every stream at budget, no stall, no owner refusal, no program compiled by a step. One stall stops the window.
+#   F1  exactly one "final-step dram hold ... fault:final-hold" line, the prompt completes with A1's hashes, nothing left held.   F2  the foreign-owner refusal exactly once and the engine gone (the smoke fails by design).
+#   S1-S4  paired ABAB, control (c2-packed-tp4-8x262k-best-time-gate) against interleaved (c2-packed-tp4-8x262k-best-levern-time-gate): per run the newcomer's time to first token, every seat's longest gap, every seat's chunks and estimated tokens a second inside the arrival window, every stream's hashes equal
+#          between the arms (levern_compare.py). Expectation (design 6, an estimate): the seats keep decoding through the arrival (their window rate is the share's cut of the round rate, zero on the control) and the arrival's TTFT rises 37% to 105%
+#          with long decoders. S5 (R=1) is the static arm.   Z  the reset completes; the agent stays stopped.
+# NO-GO for adopting any arm: any stall, any hash or digest difference between arms that must be identical, any route-ledger violation. This window decides nothing about production.
+# Time (estimate): X0 and B0 about 80 min, A0c and A1 4 h, H1-H3 4.5 h, F1 1 h, S 7.5 h, F2 40 min, Z 10 min: about 19 h.
+X0-status-rescan-reset stop tp4-lever-n-1 20
+B0-build stop tp4-lever-n-1 60
+A0c-control-audit-attach stop tp4-lever-n-1 120
+A1-levern-audited-attach stop tp4-lever-n-1 120
+H1-hang-shapes-levern stop tp4-lever-n-1 90
+H2-hang-shapes-levern stop tp4-lever-n-1 90
+H3-hang-shapes-levern stop tp4-lever-n-1 90
+F1-final-hold-fault soft tp4-lever-n-1 60
+S1-stall-A-control soft tp4-lever-n-1 90
+S2-stall-B-levern soft tp4-lever-n-1 90
+S3-stall-A-control soft tp4-lever-n-1 90
+S4-stall-B-levern soft tp4-lever-n-1 90
+S5-stall-C-levern-r1 soft tp4-lever-n-1 90
+F2-foreign-fault soft tp4-lever-n-1 40
+Z-reset soft tp4-lever-n-1 10
