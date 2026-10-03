@@ -22,17 +22,19 @@ FOLDER = os.path.join(HERE, 'references', 'tp4-262k8-best-jobs')
 PROFILES_PATH = os.path.join(HERE, 'qwen_c2_profiles.json')
 IMAGE = 'tp4-262k8-best-1'
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|/dev/tenstorrent|home/|zot\.')
+CONTROL_GATE = 'c2-packed-tp4-8x262k-gate'
 CONTROL, BEST, AUDIT, TIMED = ('c2-packed-tp4-8x262k-time-gate', 'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit',
                                'c2-packed-tp4-8x262k-best-time-gate')
 EXPECTED = {
     'X0-status-rescan-reset': ('status rescan reset', None, 'stop'), 'B0-build': ('build', 'c2-packed-tp4', 'stop'),
-    'S0-audited-attach-smoke': ('reset smoke', AUDIT, 'stop'),
+    'S0c-control-attach-smoke': ('reset smoke', CONTROL_GATE, 'stop'), 'S0-audited-attach-smoke': ('reset smoke', AUDIT, 'stop'),
     'H1-hang-shapes-best': ('reset smoke', TIMED, 'stop'), 'H2-hang-shapes-best': ('reset smoke', TIMED, 'stop'),
     'H3-hang-shapes-best': ('reset smoke', TIMED, 'stop'),
-    'L1-ladder8-best': ('reset gate', BEST, 'stop'),
+    'H4-stall8-cold262k-best': ('reset smoke', TIMED, 'stop'),
     'T1-timed-A-control-8x262k-time-gate': ('reset smoke', CONTROL, 'soft'), 'T2-timed-B-best-8x262k-time-gate': ('reset smoke', TIMED, 'soft'),
     'T3-timed-A-control-8x262k-time-gate': ('reset smoke', CONTROL, 'soft'), 'T4-timed-B-best-8x262k-time-gate': ('reset smoke', TIMED, 'soft'),
-    'P1-best-8-user-profile': ('status reset gate', TIMED, 'soft'), 'Z-reset': ('status reset', None, 'soft'),
+    'P1-best-8-user-profile': ('status reset gate', TIMED, 'soft'),
+    'L1-ladder8-best': ('reset gate', AUDIT, 'soft'), 'C1-churn16-best': ('reset gate', BEST, 'soft'), 'Z-reset': ('status reset', None, 'soft'),
 }
 AGENT_ACTIONS = {'agentstop', 'agentstart', 'unserve', 'platform', 'replay', 'priority', 'cardm'}
 LADDER = '4096,32768,131072,261856,16384,65536,200000,253920'
@@ -55,6 +57,17 @@ def parsed(name):
 def order_lines():
     with open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8') as handle:
         return [line.split() for line in handle.read().splitlines() if line.strip() and not line.startswith('#')]
+
+
+def needs_lines():
+    found = {}
+    with open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8') as handle:
+        for line in handle.read().splitlines():
+            match = re.match(r'# NEEDS (.+) <- (.+)$', line)
+            if match:
+                for name in match.group(1).split():
+                    found.setdefault(name, set()).update(match.group(2).split())
+    return found
 
 
 class JobPackTests(unittest.TestCase):
@@ -117,14 +130,46 @@ class JobPackTests(unittest.TestCase):
         for key in ('QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT'):
             self.assertEqual(found[CONTROL]['env'][key], found[TIMED]['env'][key])
 
-    def test_the_ladder_is_the_262k_ladder_on_the_best_arm_with_the_pool_it_fits(self):
+    def test_the_ladder_is_the_262k_ladder_on_the_audited_best_arm_with_the_pool_it_fits(self):
         result = parsed('L1-ladder8-best')
-        self.assertEqual(result['profile'], BEST)
+        self.assertEqual(result['profile'], AUDIT)
         text = text_of('L1-ladder8-best')
         self.assertIn('C2_GATE_PLAN=matrix', text)
         self.assertIn('C2_GATE_LENGTHS=' + LADDER, text)
         self.assertIn('C2_GATE_MAX_TOKENS=256', text)
         self.assertIn('C2_GATE_AUDITS=extent', text)
+
+    def test_s0c_runs_the_same_smoke_as_s0_on_the_control_and_s0_needs_it(self):
+        self.assertEqual(parsed('S0c-control-attach-smoke')['tests'], parsed('S0-audited-attach-smoke')['tests'])
+        needs = needs_lines()
+        self.assertEqual(needs['S0'], {'S0c'})
+        self.assertIn('S0c', text_of('S0-audited-attach-smoke'))
+
+    def test_the_soft_long_jobs_run_after_the_timing_and_the_profile_and_depend_on_the_gates(self):
+        names = [line[0] for line in order_lines()]
+        for late in ('L1-ladder8-best', 'C1-churn16-best'):
+            self.assertGreater(names.index(late), names.index('P1-best-8-user-profile'))
+        needs = needs_lines()
+        for job_name in ('T1', 'T2', 'T3', 'T4', 'P1'):
+            self.assertEqual(needs[job_name], {'S0', 'H1', 'H2', 'H3', 'H4'})
+        for job_name in ('L1', 'C1'):
+            self.assertEqual(needs[job_name], {'S0', 'H1', 'H2', 'H3', 'H4'})
+        self.assertNotIn('L1', set().union(*needs.values()), 'nothing waits on the five-hour ladder')
+
+    def test_the_cold_arrival_and_the_churn_are_the_262k_shapes_of_the_smaller_pool(self):
+        self.assertEqual(parsed('H4-stall8-cold262k-best')['tests'], 'warmup,stall8_cold262k')
+        text = text_of('C1-churn16-best')
+        self.assertIn('C2_GATE_PLAN=churn', text)
+        self.assertIn('C2_GATE_LENGTHS=253920,253920,253920,200000,200000,200000,131072,65536,32768,16384,8192,4096,253920,200000,131072,1536', text)
+
+    def test_the_read_rule_converts_the_ledger_to_f8_and_the_p1_minutes_cover_two_arms(self):
+        with open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8') as handle:
+            order = handle.read()
+        self.assertIn('1.979 GB', order)
+        self.assertIn('1.979 GB', text_of('S0-audited-attach-smoke'))
+        self.assertEqual((19968 - 16416) * 557056, 1978662912)
+        minutes = {line[0]: int(line[3]) for line in order_lines()}
+        self.assertGreaterEqual(minutes['P1-best-8-user-profile'], 2 * 105 + 20)
 
     def test_the_profile_job_names_the_ops_plans_on_the_timed_arm(self):
         text = text_of('P1-best-8-user-profile')

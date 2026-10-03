@@ -638,6 +638,41 @@ class HostBudgetTests(unittest.TestCase):
         self.assertEqual(result['vs_v170']['round_host']['packed_commit_ms']['delta'], -0.5)
 
 
+def eight_seat_log(steps):
+    """Two 64-row blocks per engine step, one '[PHASE] execute' line at the end of each step: steps = [(live0, live1, period)]."""
+    lines, clock, number = [], 0.0, 0
+    for live0, live1, period in steps:
+        for offset, live in ((0.0, live0), (period / 2.0, live1)):
+            number += 1
+            lines.append('%s [PHASE] packed_verify r%d begin' % (stamp(clock + offset), number))
+            lines.append('%s [PACKED-PHASE] round=%d users=4 trace_ms=60 live=%d idle=-' % (stamp(clock + offset + 1), number, live))
+            lines.append('%s [PHASE] packed_verify r%d end 60.0 ms' % (stamp(clock + offset + 60), number))
+            lines.append('%s [PHASE] packed_commit r%d end 5.0 ms' % (stamp(clock + offset + 65), number))
+            lines.append('%s [PHASE] early_draft r%d end 20.0 ms' % (stamp(clock + offset + 85), number))
+        lines.append('%s [PHASE] execute total=8 new=0 cached=8 spec=64' % stamp(clock + period - 1))
+        clock += period
+    lines.append('%s [PHASE] packed_verify r%d begin' % (stamp(clock), number + 1))
+    lines.append('%s [PHASE] execute total=8 new=0 cached=8 spec=64' % stamp(clock + 1))
+    return '\n'.join(lines) + '\n'
+
+
+class EightSeatHostBudgetTests(unittest.TestCase):
+    def test_both_blocks_of_a_step_are_one_round_of_eight_live_users(self):
+        budget = report.host_budget(eight_seat_log([(4, 4, 300), (4, 4, 296), (4, 4, 304), (4, 3, 250)]))
+        self.assertEqual((budget['live'], budget['blocks_per_round']), (8, 2))
+        self.assertEqual(budget['sampled'], 3)
+        self.assertAlmostEqual(budget['period_ms'], 300.0, delta=1.0)
+        self.assertEqual((budget['packed_verify_ms'], budget['packed_commit_ms'], budget['early_draft_ms']), (120.0, 10.0, 40.0))
+
+    def test_four_seat_logs_with_execute_lines_are_not_grouped(self):
+        text = phase_log([(4, 0, 64, 24, 32, 125)] * 4)
+        text = ''.join(line + '\n' + ('%s [PHASE] execute total=4 new=0 cached=4 spec=64\n' % stamp(0) if 'early_draft' in line else '')
+                       for line in text.splitlines())
+        budget = report.host_budget(text)
+        self.assertEqual(budget['live'], 4)
+        self.assertNotIn('blocks_per_round', budget)
+
+
 class V170ComparisonTests(unittest.TestCase):
     def test_the_comparison_is_per_category_and_carries_deltas(self):
         packed = analyse(build(sessions=('1', '2')))['verify_packed']

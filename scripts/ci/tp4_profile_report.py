@@ -575,7 +575,8 @@ def sdpa_fit(analysis, rounds):
 
 
 def by_live(analysis, rounds):
-    """Median kernel ms of the verify-packed sessions by the live users of their round, and the marginal cost per user."""
+    """Median kernel ms of the verify-packed sessions by the live users of their round, and the marginal cost per user.
+    A session is one 64-row block, so at eight seats the live count is per block (at most 4), not per eight-user step."""
     groups = collections.defaultdict(list)
     for sid, entry in analysis['per_session'].items():
         try:
@@ -902,16 +903,27 @@ def host_timestamp(line):
         return None
 
 
+EXECUTE_STEP = re.compile(r'\[PHASE\] execute total=')
+
+
 def host_budget(text):
     """The packed round's host wall-time budget from [PHASE] begin/end lines: a round runs from one packed_verify begin to
     the next; per round the period and each phase's time (packed_verify; packed_commit = the publication; early_draft = the
     drafters and their commits; the rest, unphased, is the scheduler), and the sequential steps it held. Medians over the
-    rounds of four live users with no sequential step. None without the lines."""
-    rounds, current = [], None
+    rounds of four live users with no sequential step. None without the lines.
+
+    EIGHT SEATS: the engine step runs two 64-row blocks, so packed_verify begins twice per step and each block's
+    [PACKED-PHASE] live is at most 4. When the log has '[PHASE] execute total=' step lines and most steps hold two blocks,
+    the blocks of one step are merged into ONE round (period from the step's first block to the next step's first block,
+    phases summed, live summed) and the sample is the rounds of eight live users; 'blocks_per_round' says so."""
+    blocks, current, step_no, executes = [], None, 0, 0
     for line in text.splitlines():
         found = PHASE_LINE.search(line)
         if not found:
-            if current is not None and '[PACKED-PHASE]' in line:
+            if EXECUTE_STEP.search(line):
+                executes += 1
+                step_no += 1
+            elif current is not None and '[PACKED-PHASE]' in line:
                 live = LIVE_FIELD.search(line)
                 if live:
                     current['live'] = int(live.group(1))
@@ -921,19 +933,40 @@ def host_budget(text):
         if name == 'packed_verify' and what == 'begin' and at is not None:
             if current is not None:
                 current['period'] = at - current['begin']
-                rounds.append(current)
-            current = dict(begin=at, live=None, steps=0, phases=collections.defaultdict(float))
+                blocks.append(current)
+            current = dict(begin=at, live=None, steps=0, step_no=step_no, phases=collections.defaultdict(float))
         elif current is not None and what.startswith('end') and ms:
             current['phases'][name] += float(ms)
             if name == 'step':
                 current['steps'] += 1
+    rounds, target, per_round = blocks, 4, None
+    if executes:
+        by_step = collections.OrderedDict()
+        for block in blocks:
+            by_step.setdefault(block['step_no'], []).append(block)
+        counts = sorted(len(v) for v in by_step.values())
+        if counts and counts[len(counts) // 2] >= 2:
+            rounds, target, per_round = [], 8, counts[len(counts) // 2]
+            for group in by_step.values():
+                lives = [b['live'] for b in group]
+                phases = collections.defaultdict(float)
+                for b in group:
+                    for key, value in b['phases'].items():
+                        phases[key] += value
+                rounds.append(dict(begin=group[0]['begin'], live=None if None in lives else sum(lives),
+                                   steps=sum(b['steps'] for b in group), phases=phases))
+            for earlier, later in zip(rounds, rounds[1:]):
+                earlier['period'] = later['begin'] - earlier['begin']
+            rounds = rounds[:-1]
     if not rounds:
         return None
-    four = [r for r in rounds if r['live'] == 4 and not r['steps']]
+    four = [r for r in rounds if r['live'] == target and not r['steps']]
     sample = four or [r for r in rounds if not r['steps']]
     if not sample:
         return None
-    out = collections.OrderedDict(rounds=len(rounds), sampled=len(sample), live=4 if four else None)
+    out = collections.OrderedDict(rounds=len(rounds), sampled=len(sample), live=target if four else None)
+    if per_round:
+        out['blocks_per_round'] = per_round
     out['period_ms'] = round(median([r['period'] for r in sample]), 2)
     for phase in HOST_PHASES:
         out['%s_ms' % phase] = round(median([r['phases'].get(phase, 0.0) for r in sample]), 2)
@@ -1199,7 +1232,7 @@ def render_markdown(report):
     budget = packed.get('host_budget')
     if budget:
         lines += ['', '## The round on the host (%d rounds, %d sampled%s)' % (
-            budget['rounds'], budget['sampled'], ', 4 live and no sequential step' if budget['live'] == 4 else ''), '',
+            budget['rounds'], budget['sampled'], ', %d live and no sequential step' % budget['live'] if budget['live'] else ''), '',
             'Period %s ms: packed_verify %s, packed_commit (publication) %s, early_draft (drafters and commits) %s, '
             'scheduler and the rest %s.' % (fmt(budget['period_ms']), fmt(budget['packed_verify_ms']),
                                             fmt(budget['packed_commit_ms']), fmt(budget['early_draft_ms']),

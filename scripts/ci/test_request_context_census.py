@@ -185,8 +185,10 @@ class ProfileTests(unittest.TestCase):
     def test_every_262k_profile_sets_it_to_131072_and_the_window_elsewhere(self):
         profiles = json.loads(PROFILES.read_text(encoding='utf-8'))['profiles']
         wide = sorted(name for name, profile in profiles.items() if profile['engine'].get('max-model-len') == 262144)
-        self.assertEqual(wide, ['c2-packed-tp4-262k-gate', 'c2-packed-tp4-8x262k', 'c2-packed-tp4-8x262k-diag-strace',
-                                'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate'])
+        self.assertEqual(wide, sorted(['c2-packed-tp4-262k-gate', 'c2-packed-tp4-8x262k', 'c2-packed-tp4-8x262k-diag-strace',
+                                'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate',
+                                'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit',
+                                'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship']))
         for name in wide:
             env = profiles[name]['env']
             with self.subTest(profile=name):

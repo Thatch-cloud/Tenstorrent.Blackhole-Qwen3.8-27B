@@ -122,7 +122,7 @@ class AttachHookTests(unittest.TestCase):
 
 
 SEATS8 = {'c2-packed-tp4-8', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate', 'c2-packed-tp4-8-diag-strace',
-          'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard', 'c2-packed-tp4-8-best', 'c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-best-quad-gate'}
+          'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard', 'c2-packed-tp4-8-best', 'c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-best-quad-gate'} | {name for name in PROFILES if name.startswith('c2-packed-tp4-8x262k')}
 WARM4 = {'c2-packed-tp4-warm4-diag', 'c2-packed-tp4-warm4-control', 'c2-packed-tp4-warm4-even-diag', 'c2-packed-tp4-warm4-gate',
          'c2-packed-tp4-speed-warm4', 'c2-packed-tp4-warm4-diag-oldtail'}
 
