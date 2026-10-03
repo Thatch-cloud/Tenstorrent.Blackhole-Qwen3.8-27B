@@ -107,6 +107,11 @@ def model_walk(runner, model):
 def start(worker):
     if getattr(worker, '_qwen_fast_resources', None) is not None:
         raise ValueError('Fast worker already initialized')
+    # QWEN_FAST_M8_BLOCK (the one 128-row verify block at eight seats, default off): phase 1 is built, phase 2 is not, so the flag is refused
+    # here, before anything is attached, at either width (tp4_m8.py). Unset or 0 is a no-op.
+    import tp4_m8
+
+    tp4_m8.refuse_until_phase2(os.environ)
     paths = recipe_paths(worker.vllm_config)
     # The tensor-parallel width the launched process asked for (QWEN_FAST_TP; unset is the pair), held against
     # the mesh the model actually opened before anything else is attached: a disagreement stops the worker here.

@@ -85,6 +85,9 @@ COPY scripts/ci/tp4_vglue.py scripts/ci/gdn_commit_lanes_tp.cpp scripts/ci/gdn_r
 # The drafter's hidden-width RMS norms on a wide grid (tp4/next-3-cheap; QWEN_FAST_TP4_DRAFT_WIDE, default off): dflash_device,
 # draft_attention_branch and draft_mlp_branch import draft_wide_tp, so it must reach the image beside them.
 COPY scripts/ci/draft_wide_tp.py /experiment-scripts/ci/
+# The one 128-row verify block at eight seats, phase 1 (tp4/m8-phase1; QWEN_FAST_M8_BLOCK, default off, refused until phase 2): serving_startup imports tp4_m8
+# to refuse the flag before anything is attached, so it must reach the image beside it.
+COPY scripts/ci/tp4_m8.py /experiment-scripts/ci/
 # Variable-user packed rounds M1 (QWEN_FAST_PADDED_PROBE, default off): packed_verifier imports
 # padded_probe when the flag is set. M0 changes only modules already listed above.
 COPY scripts/ci/padded_probe.py /experiment-scripts/ci/

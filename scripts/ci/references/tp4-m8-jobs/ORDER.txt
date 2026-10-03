@@ -1,0 +1,16 @@
+# The order of the tp4/m8-phase1 one-card window: B1 of the one 128-row verify block (block128-design.md stage B), then the all-four reset.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# THE CARDS ARE UNDER DEVELOPMENT, PRODUCTION IS DOWN BY THE OWNER'S CHOICE: NO agentstop, NO agentstart (the node agent is already stopped), NO hand-back,
+# NO deploy, NO :latest move. Z ends with a reset and no agentstart. qwen_c2_profiles.json's default stays c2-packed-tp4; nothing is baked as the image default.
+# ONE IMAGE: tp4-262k8-best-1, built by the tp4/262k8 window and present on the rig; nothing here builds. NO OTHER WINDOW DRIVER MAY BE ALIVE, and no privileged builder
+# container may be up when M1 starts (the card-M step waits for the buildx builders and refuses a held card M or A).
+# The CPU suite green on this branch first (gh workflow run qwen-cpu-suite.yml -f ref=tp4/m8-phase1).
+# READ RULES:
+#   M1  'M8_MATMUL verdict=PASS': every projection and both variants exact against the 64-row halves and the 32-row tiles, no error line, the report complete.
+#       FAIL is a finding, not a harness fault when it names a tile; the LM head's auto config is the expected one. The timing verdicts and the re-grid winner are data.
+#   Z   the status prints, the rescan finds every board, the reset completes on all four.
+# This window decides nothing about production: it is evidence for phase 2 of the 128-row block (graft M = 128 section, K/V halves writer, wiring).
+# Time (estimate): M1 about 60 min, Z 20 min: about 1.3 h.
+M1-card-m-matmul-m128 stop tp4-262k8-best-1 60
+Z-status-rescan-reset soft tp4-262k8-best-1 20
