@@ -9,8 +9,8 @@ This replays what the agent does, step by step, in a copy of the agent's own con
      the runtime entrypoint (serving.server), a new name and port, cards M then A re-resolved by
      board id, and --profile (QWEN_C2_PROFILE) when given. The recorded Env merges the source
      image's ENV with the agent's; replaying it onto another --image needs the source image here to
-     subtract its ENV, else the replay refuses (source_problem) rather than serve the old image's
-     kernel cache key and defaults;
+     subtract its ENV, or a tracked record that carries it (source.image_env, recorded_image_env), else
+     the replay refuses (source_problem) rather than serve the old image's kernel cache key and defaults;
   2. load:  `serving.manage --model <model> --release-first` (the placed job; release-first is
      forced on Tenstorrent; <model> is the checkpoint), then the served name: /v1/models ({model,
      aliases}) must name --served-model (default Qwen/Qwen3.8-27B:tt, the thin layer's
@@ -35,6 +35,11 @@ out before the container is removed. Exit 0 only if every step passed.
 
 Usage: c2_platform_replay.py --source thatch-inference-Qwen-Qwen3.8-27B|<inspect.json> --image <ref> --results <dir>
        [--profile NAME] [--seed N] [--model CHECKPOINT] [--served-model NAME] [--env NAME=value ...]
+       [--device PATH ...] [--expect-profile NAME]
+Four cards: pass one --device per card (default: cards M and A) and --expect-profile NAME, which fails the replay
+unless the copy's logs (its own and the runtime's vLLM subprocess log under /tmp) show the contract launched NAME
+(and, for a P150x4 profile, the ring check said OK). Any --env
+REPLACES the default (THATCH_SERVING_SESSION_CAP=0), so a four-card replay passes that one too.
 To replay an image without the alias (a rollback candidate), pass --served-model Qwen/Qwen3.8-27B.
 """
 import argparse
@@ -53,6 +58,8 @@ import urllib.request
 CARD_M = 'blackhole-CEF5729692C19E6D'
 CARD_A = 'blackhole-3707293C249A5E67'
 CHECKPOINT = 'Qwen/Qwen3.8-27B'
+PROFILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'qwen_c2_profiles.json')
+TP4_MESH_DEVICE = 'P150x4'
 SERVED_MODEL = 'Qwen/Qwen3.8-27B:tt'   # what TT advertises; agents opt in to TT by naming it
 ARRIVAL_WINDOW_S = 30.0
 LONG_ANSWER_TOKENS = 3000
@@ -133,6 +140,28 @@ def image_environment(reference):
         return list(json.loads(result.stdout)[0]['Config'].get('Env') or ())
     except (ValueError, KeyError, IndexError):
         return None
+
+
+def recorded_image_env(source, info):
+    """The source image's own ENV as a tracked record carries it ({'source': {'image_env': [...]}}), or None: the
+    record's stand-in for image_environment when the source image is not on this host. It is accepted only when
+    every entry is one of the record's own Env entries (info, as inspect_source read it), the only ones the replay
+    subtracts - anything else is a record that does not describe this container, and the replay refuses as before.
+    The rig's hourly docker reaper runs `docker image prune`, which deletes an image that no tag names (a pull by
+    digest alone), so a pre-pulled source image does not survive until the replay."""
+    if not os.path.isfile(source):
+        return None
+    try:
+        with open(source, encoding='utf-8') as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    image_env = (data.get('source') or {}).get('image_env') if isinstance(data, dict) else None
+    if not isinstance(image_env, list) or not all(isinstance(value, str) and '=' in value for value in image_env):
+        return None
+    if not set(image_env) <= set((info.get('Config') or {}).get('Env') or ()):
+        return None
+    return list(image_env)
 
 
 def source_problem(source_image, image, inherited):
@@ -433,6 +462,50 @@ def served_name(port, checkpoint, expected):
     return dict(ok=ok, status=status, served=served, advertised=advertised, expected=expected)
 
 
+def profile_mesh(name, path=PROFILES):
+    """The mesh_device a profile of qwen_c2_profiles.json names, or None (the pair's image default)."""
+    with open(path, encoding='utf-8') as handle:
+        return json.load(handle)['profiles'][name].get('mesh_device')
+
+
+def expect_profile_verdict(log_text, name, mesh=None):
+    """Whether the serving contract launched profile `name` (the read-the-launched-argv line) and, when the profile
+    opens the four-card mesh, the ring check on the open said OK (DEGRADED and BROKEN fail: a replay that serves on
+    a bad ring proves nothing about the route). A replay that passed on another profile, or on a ring it never
+    checked, is the silent wrong-configuration pass this step exists to refuse."""
+    lines = (log_text or '').splitlines()
+    argv = [line for line in lines if ('[QWEN-C2] profile %s: vLLM argv' % name) in line]
+    ring = [line for line in lines if '[QWEN-TP4]' in line and ' ring ' in line]
+    problems = []
+    if not argv:
+        launched = sorted(set(line.split('profile ', 1)[1].split(':', 1)[0] for line in lines
+                              if '[QWEN-C2] profile ' in line and 'vLLM argv' in line))
+        problems.append('no "[QWEN-C2] profile %s: vLLM argv" line (the contract launched: %s)' % (
+            name, ', '.join(launched) or 'nothing'))
+    if mesh == TP4_MESH_DEVICE and not any('[QWEN-TP4] ring OK' in line for line in ring):
+        problems.append('no "[QWEN-TP4] ring OK" line (ring lines: %s)' % (' | '.join(ring)[:300] or 'none'))
+    return dict(ok=not problems, expect=name, mesh=mesh, problems=problems, argv_line=(argv[:1] or [''])[0][:300],
+                ring_lines=ring[:4])
+
+
+# Where the Thatch runtime (serving.server) writes its vLLM subprocess's output: a file in the container's /tmp (the
+# agent's tmpfs), NOT the container's stdout - its own log line "vLLM subprocess log: /tmp/thatch_vllm_1.log" says so
+# (replay run 36358575977: `docker logs` held no [QWEN-C2] line, /tmp/thatch_vllm_1.log held all of them). The
+# contract's argv line is logged in the vLLM API server and the ring check in its EngineCore, so both are there.
+ENGINE_LOG_GLOB = '/tmp/thatch_vllm_*.log'
+
+
+def expect_profile(container, name, mesh=None):
+    """expect_profile_verdict over the container's own log AND the runtime's vLLM subprocess log (ENGINE_LOG_GLOB),
+    read from the running container: reading `docker logs` alone refuses every replay of the Thatch runtime."""
+    logs = run(['docker', 'logs', container], check=False)
+    engine = run(['docker', 'exec', container, 'sh', '-c', 'cat %s 2>/dev/null' % ENGINE_LOG_GLOB], check=False)
+    text = chr(10).join((logs.stdout or '', logs.stderr or '', engine.stdout or ''))
+    verdict = expect_profile_verdict(text, name, mesh)
+    verdict['engine_log_chars'] = len(engine.stdout or '')
+    return verdict
+
+
 def wait_http(port, container, seconds):
     deadline = time.time() + seconds
     while time.time() < deadline:
@@ -502,7 +575,12 @@ def main():
     parser.add_argument('--profile', default=None, help='QWEN_C2_PROFILE for the copy (default: the source\'s)')
     parser.add_argument('--seed', type=int, default=None, help='the arrivals\' seed (default: the clock)')
     parser.add_argument('--env', action='append', default=None, metavar='NAME=value',
-                        help='extra container env, repeatable (default: %s)' % ' '.join(DEFAULT_ENV))
+                        help='extra container env, repeatable; any --env REPLACES the default (%s)' % ' '.join(DEFAULT_ENV))
+    parser.add_argument('--device', action='append', default=None, metavar='PATH',
+                        help='a card device to mount, repeatable (default: cards M and A)')
+    parser.add_argument('--expect-profile', default=None, metavar='NAME',
+                        help='fail unless the copy log shows the contract launched this profile (and, for a '
+                             'P150x4 profile, [QWEN-TP4] ring OK)')
     options = parser.parse_args()
     name, port, model, served = options.name, options.port, options.model, options.served_model
     seed = options.seed if options.seed is not None else int(time.time())
@@ -526,9 +604,15 @@ def main():
     with open(os.path.join(options.results, 'source-inspect.json'), 'w') as handle:
         json.dump(info, handle, indent=1)
     inherited = image_environment(source_image) if source_image else None
+    env_from = 'image' if inherited is not None else None
+    if inherited is None:
+        # The tracked record carries the source image's ENV itself (recorded_image_env), so the replay does not
+        # depend on an image the rig's hourly `docker image prune` removes once nothing tags it.
+        inherited = recorded_image_env(options.source, info)
+        env_from = 'record' if inherited is not None else None
     problem = source_problem(source_image, options.image, inherited)
     record('source', dict(ok=problem is None, source=options.source, source_image=source_image,
-                          image_env_subtracted=inherited is not None, problem=problem))
+                          image_env_subtracted=inherited is not None, image_env_from=env_from, problem=problem))
     if problem is not None:
         with open(os.path.join(options.results, 'platform-replay.json'), 'w') as handle:
             json.dump(dict(passed=False, steps=steps), handle, indent=1)
@@ -537,8 +621,8 @@ def main():
     extra_env = tuple(options.env) if options.env is not None else DEFAULT_ENV
     if any('=' not in variable for variable in extra_env):
         parser.error('--env takes NAME=value')
-    arguments = run_arguments(info, options.image, name, port, options.profile, image_env=inherited or (),
-                              extra_env=extra_env)
+    arguments = run_arguments(info, options.image, name, port, options.profile, devices=options.device or None,
+                              image_env=inherited or (), extra_env=extra_env)
     with open(os.path.join(options.results, 'docker-run.json'), 'w') as handle:
         json.dump(arguments, handle, indent=1)
     passed = False
@@ -548,7 +632,11 @@ def main():
         problem = wait_http(port, name, 600)
         if record('start', dict(ok=problem is None, problem=problem, http_s=round(time.time() - started, 1))):
             if record('load', load(name, model)):
-                ok = record('served_name', served_name(port, model, served))
+                ok = True
+                if options.expect_profile:
+                    ok = record('expect_profile', expect_profile(
+                        name, options.expect_profile, profile_mesh(options.expect_profile)))
+                ok = record('served_name', served_name(port, model, served)) and ok
                 ok = record('warmup', chat(port, model, 'warmup', 1)) and ok
                 ok = record('coding', chat(port, served, 'Write a Python function that merges two sorted lists, '
                                                          'with doctests. Code only.', 600)) and ok

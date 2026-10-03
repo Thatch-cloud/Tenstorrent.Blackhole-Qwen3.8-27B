@@ -63,9 +63,54 @@ class JobTests(unittest.TestCase):
             read(C2_ACTIONS='prefix', C2_PREFIX_PROFILE='general-prefix-tp4', C2_PREFIX_BASELINE='general-tp4')
 
     def test_quad_refuses_the_pair_shaped_steps(self):
-        for action in ('cardm', 'replay', 'priority'):
+        for action in ('cardm', 'priority'):
             with self.assertRaisesRegex(job.JobError, 'pair-shaped'):
                 read(C2_CARDS='quad', C2_ACTIONS=action)
+
+    def test_quad_replay_takes_the_four_card_default_or_a_named_tp4_profile(self):
+        # The node agent forwards no profile, so an empty C2_REPLAY_PROFILE replays the image default.
+        default = job.profile_default()
+        self.assertEqual(default, 'general-prefix-tp4')
+        empty = read(C2_CARDS='quad', C2_ACTIONS='replay')
+        self.assertEqual((empty['replay_profile'], empty['replay_expect_profile']), ('', default))
+        named = read(C2_CARDS='quad', C2_ACTIONS='status replay', C2_REPLAY_PROFILE='general-tp4')
+        self.assertEqual((named['replay_profile'], named['replay_expect_profile']), ('general-tp4', 'general-tp4'))
+        with self.assertRaisesRegex(job.JobError, r'C2_REPLAY_PROFILE general opens the \(1, 2\) pair, but C2_CARDS=quad'):
+            read(C2_CARDS='quad', C2_ACTIONS='replay', C2_REPLAY_PROFILE='general')
+        with self.assertRaisesRegex(job.JobError, 'general-prefix opens the'):
+            read(C2_CARDS='quad', C2_ACTIONS='replay', C2_REPLAY_PROFILE='general-prefix')
+
+    def test_a_pair_replay_of_the_four_card_default_is_refused(self):
+        # An empty profile on a pair job would open the TP4 default (P150x4) on two cards.
+        with self.assertRaisesRegex(job.JobError, r'C2_REPLAY_PROFILE \(the image default\) general-prefix-tp4 opens the '
+                                                  r'four-card \(1, 4\) mesh, but C2_CARDS=pair'):
+            read(C2_ACTIONS='replay')
+        self.assertEqual(read(C2_ACTIONS='replay', C2_REPLAY_PROFILE='general-prefix')['replay_expect_profile'],
+                         'general-prefix')
+        self.assertEqual(read(C2_ACTIONS='status')['replay_expect_profile'], '', 'no replay, nothing expected')
+
+    def test_the_quad_replay_step_holds_the_cards_and_passes_the_agents_p150x4_values(self):
+        with open(WORKFLOW, encoding='utf-8') as handle:
+            text = handle.read()
+        ELSE = '          else' + chr(10)
+        step = text[text.index("- name: Replay the node agent's serving sequence"):text.index('- name: Push')]
+        quad = step[step.index('if [ "$CARDS" = quad ]'):step.index(ELSE)]
+        self.assertNotIn('blackhole-', quad, 'the cards are resolved by card_set.sh, never named')
+        self.assertLess(quad.index('card_set_unheld'), quad.index('c2_platform_replay.py'))
+        self.assertIn("grep -q '^thatch-inference-'", quad)
+        self.assertIn('docker ps -a', quad, 'an exited agent container refuses too')
+        self.assertIn('for node in $(card_set_devices); do devices+=(--device "$node"); done', quad)
+        self.assertIn('"${devices[@]}"', quad)
+        for value in ('--env THATCH_SERVING_SESSION_CAP=0', '--env MESH_DEVICE=P150x4',
+                      '--env TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/'
+                      'p150x4_mesh_graph_descriptor.textproto'):
+            self.assertIn(value, quad)
+        pair = step[step.index(ELSE):]
+        self.assertNotIn('--device', pair)
+        for branch in (quad, pair):
+            self.assertIn('--expect-profile "$EXPECT"', branch)
+        self.assertIn('EXPECT: ${{ steps.job.outputs.replay_expect_profile }}', step)
+        self.assertIn('timeout-minutes: 100', step)
 
     def test_fabric_needs_quad(self):
         with self.assertRaisesRegex(job.JobError, 'fabric probe needs C2_CARDS=quad'):
@@ -205,6 +250,41 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("steps.job.outputs.cards != 'quad'", step('Reset cards M and A'))
         quad = step('Reset all four cards')
         self.assertIn("steps.job.outputs.cards == 'quad'", quad)
+
+    def test_both_resets_refuse_while_a_platform_serving_container_exists(self):
+        """fuser sees only a process with the cards open; the node agent's container holds none between its docker
+        run (or a redispatch) and the engine's mesh open, so a reset then would pull the cards from under it."""
+        for name in ('Reset cards M and A', 'Reset all four cards'):
+            with self.subTest(step=name):
+                text = step(name)
+                guard = text.index("docker ps -a --format '{{.Names}}' | grep -q '^thatch-inference-'")
+                self.assertLess(guard, text.index('"$smi" -r'))
+                self.assertIn('refusing to reset the cards under it', text[guard:])
+
+    def test_the_replay_step_removes_its_copy_however_it_ends(self):
+        replay = step("Replay the node agent's serving sequence")
+        trap = replay.index("trap 'docker rm -f qwen-c2-platform")
+        self.assertLess(trap, replay.index('c2_platform_replay.py'))
+
+    def test_the_status_step_prints_the_fleet_tag_and_the_agents_mesh_shape_only(self):
+        status = step('Status')
+        self.assertIn('PLATFORM_IMAGE: ${{ steps.job.outputs.platform_image }}', status)
+        self.assertIn('zot.thatch.local:5000/thatch-serving-tt:latest ${PLATFORM_IMAGE:+"$PLATFORM_IMAGE"}', status)
+        self.assertIn("{{.Id}} {{join .RepoDigests", status)
+        # one variable of the agent's environment, never the rest (the repo and its logs are public)
+        self.assertIn("tr '\\0' '\\n' < \"/proc/$pid/environ\" 2>/dev/null | grep '^THATCH_TT_MESH_SHAPE='", status)
+        self.assertEqual(status.count('/proc/$pid/environ'), 1)
+        self.assertNotIn('systemctl --user show', status)
+
+    def test_the_platform_step_prints_the_profile_the_placement_launched(self):
+        """The agent forwards no QWEN_C2_PROFILE and its containers log to nowhere, so the contract's argv line and
+        the ring check - in the runtime's vLLM subprocess log, where the replay's expect_profile reads them too - are
+        the one direct proof of what a live placement serves. Read-only: a cat inside the running container."""
+        import c2_platform_replay as replay
+        platform = step('Platform serving container (read-only)')
+        self.assertIn("docker exec \"$c\" sh -c 'cat %s 2>/dev/null'" % replay.ENGINE_LOG_GLOB, platform)
+        self.assertIn("grep -F -e ': vLLM argv' -e '[QWEN-TP4] ring '", platform)
+        self.assertLess(platform.index('--- launched profile'), platform.index('/v1/chat/completions'))
 
     def test_the_quad_reset_is_one_tt_smi_call_over_the_resolved_set_then_the_heal(self):
         quad = step('Reset all four cards')

@@ -327,7 +327,9 @@ class SourceTests(unittest.TestCase):
         self.assertIn('Pull zot/old@sha256:a first', problem)
         self.assertIn('source names no image', replay.source_problem(None, 'zot/new@sha256:b', None))
 
-    def test_the_replay_refuses_before_starting_anything(self):
+    def main_without_the_source_image(self, source):
+        """main() where `docker image inspect` of the source image fails (not on the host); the container never
+        answers, so a replay that got past the source step stops at start."""
         commands = []
 
         def run(command, timeout=None, check=True):
@@ -337,16 +339,71 @@ class SourceTests(unittest.TestCase):
             return mock.Mock(returncode=0, stdout='', stderr='')
 
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(replay, 'run', side_effect=run), \
-                mock.patch.object(sys, 'argv', ['replay', '--source', AGENT, '--image', 'zot/new@sha256:b',
+                mock.patch.object(replay.subprocess, 'run'), \
+                mock.patch.object(replay, 'wait_http', return_value='container exited'), \
+                mock.patch.object(sys, 'argv', ['replay', '--source', source, '--image', 'zot/new@sha256:b',
                                                 '--results', directory]), \
                 redirect_stdout(io.StringIO()) as out:
             code = replay.main()
             with open(os.path.join(directory, 'platform-replay.json'), encoding='utf-8') as handle:
                 recorded = json.load(handle)
+            argv = None
+            if os.path.exists(os.path.join(directory, 'docker-run.json')):
+                with open(os.path.join(directory, 'docker-run.json'), encoding='utf-8') as handle:
+                    argv = json.load(handle)
+        return code, commands, recorded, out.getvalue(), argv
+
+    def record_without_image_env(self, directory, image_env=None):
+        with open(AGENT, encoding='utf-8') as handle:
+            data = json.load(handle)
+        data['source'].pop('image_env')
+        if image_env is not None:
+            data['source']['image_env'] = image_env
+        path = os.path.join(directory, 'record.json')
+        with open(path, 'w', encoding='utf-8') as handle:
+            json.dump(data, handle)
+        return path
+
+    def test_the_replay_refuses_before_starting_anything(self):
+        with tempfile.TemporaryDirectory() as directory:
+            code, commands, recorded, out, _ = self.main_without_the_source_image(self.record_without_image_env(directory))
         self.assertEqual(code, 1)
         self.assertFalse(any(command[:2] == ['docker', 'run'] for command in commands))
         self.assertFalse(recorded['steps']['source']['ok'])
-        self.assertIn('refused', out.getvalue())
+        self.assertIn('refused', out)
+
+    def test_a_record_whose_image_env_is_not_its_own_env_is_refused_too(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = self.record_without_image_env(directory, ['PATH=/opt/venv/bin', 'NOT_IN_THE_RECORD=1'])
+            code, commands, recorded, _, _ = self.main_without_the_source_image(source)
+        self.assertEqual(code, 1)
+        self.assertFalse(any(command[:2] == ['docker', 'run'] for command in commands))
+        self.assertFalse(recorded['steps']['source']['ok'])
+        self.assertIsNone(replay.recorded_image_env(source, replay.inspect_source(AGENT)[0]))
+
+    def test_the_tracked_record_carries_its_images_env_so_the_image_need_not_be_on_the_host(self):
+        """The rig's hourly `docker image prune` deletes the source image once no tag names it, so the tracked
+        record carries that image's ENV (source.image_env, a subset of its own Env): the replay subtracts it
+        without the image and says where it came from."""
+        info, _ = replay.inspect_source(AGENT)
+        image_env = replay.recorded_image_env(AGENT, info)
+        self.assertIsNotNone(image_env)
+        self.assertLessEqual(set(image_env), set(info['Config']['Env']))
+        # the old image's kernel cache key, PATH and QWEN_* defaults are the image's, never the agent's
+        for name in ('TT_METAL_CACHE', 'PATH', 'QWEN_C2_SERVING', 'THATCH_SERVING_PORT', 'QWEN36_BATCHED_DECODE_MODE'):
+            self.assertTrue(any(value.startswith(name + '=') for value in image_env), name)
+        # what the agent passed stays in the copy
+        for name in ('THATCH_SERVING_MODEL', 'THATCH_VLLM_KWARGS', 'HF_HOME', 'THATCH_SERVING_STARTUP_CEILING_SECS'):
+            self.assertFalse(any(value.startswith(name + '=') for value in image_env), name)
+        code, commands, recorded, _, argv = self.main_without_the_source_image(AGENT)
+        source = recorded['steps']['source']
+        self.assertTrue(source['ok'], source)
+        self.assertEqual((source['image_env_subtracted'], source['image_env_from']), (True, 'record'))
+        self.assertTrue(any(command[:2] == ['docker', 'run'] for command in commands))
+        env = [argv[i + 1] for i, token in enumerate(argv) if token == '-e']
+        self.assertFalse(set(env) & set(image_env) - set(['THATCH_SERVING_SESSION_CAP=0']))
+        self.assertIn('THATCH_SERVING_MODEL=Qwen/Qwen3.8-27B', env)
+        self.assertEqual(code, 1, 'the fake container never answers: stops at start')
 
 
 class ServedNameTests(unittest.TestCase):
@@ -389,6 +446,8 @@ class ReplayNameTests(unittest.TestCase):
     """main(): serving.manage loads the checkpoint, the agent's warmup names the checkpoint (answered,
     not advertised), and every later request names the served model."""
 
+    logs_text = 'true'   # what `docker logs` answers in drive(); the four-card tests set a real log
+    engine_text = ''     # what the runtime's vLLM subprocess log (/tmp/thatch_vllm_*.log, read by docker exec) holds
     GOOD = dict(model=TT, aliases=[TT])
     BAD = dict(model=PLAIN)   # what an image without the alias advertises: it would take plain traffic
 
@@ -404,6 +463,10 @@ class ReplayNameTests(unittest.TestCase):
                 answers.pop(0)
             if command[:3] == ['docker', 'image', 'inspect']:
                 return mock.Mock(returncode=0, stdout=json.dumps([dict(Config=dict(Env=[]))]), stderr='')
+            if command[:2] == ['docker', 'logs']:
+                return mock.Mock(returncode=0, stdout=self.logs_text, stderr='')
+            if command[:2] == ['docker', 'exec'] and any('thatch_vllm_' in part for part in command):
+                return mock.Mock(returncode=0, stdout=self.engine_text, stderr='')
             return mock.Mock(returncode=0, stdout='true', stderr='')
 
         def http(port, path, body=None, timeout=60):
@@ -428,6 +491,8 @@ class ReplayNameTests(unittest.TestCase):
             code = replay.main()
             with open(os.path.join(directory, 'platform-replay.json'), encoding='utf-8') as handle:
                 steps = json.load(handle)['steps']
+            with open(os.path.join(directory, 'docker-run.json'), encoding='utf-8') as handle:
+                self.docker_run = json.load(handle)
         loads = [command[command.index('--model') + 1] for command in commands if 'serving.manage' in command]
         return code, steps, loads, chats, traffic
 
@@ -476,6 +541,131 @@ class ReplayNameTests(unittest.TestCase):
         code, steps, loads, chats, traffic = self.drive(dict(model=PLAIN), '--served-model', PLAIN)
         self.assertEqual(code, 0)
         self.assertEqual({model for model, _ in chats} | set(traffic) | set(loads), {PLAIN})
+
+
+TP4_LOG = chr(10).join((
+    '[QWEN-C2] profile general-prefix-tp4: vLLM argv ["--model", "Qwen/Qwen3.8-27B"]',
+    '[QWEN-TP4] ring OK order=[0, 1, 2, 3] edges=[(0, 1, 2), (1, 2, 2), (2, 3, 2), (3, 0, 2)] unused=[]'))
+
+
+class ExpectProfileTests(unittest.TestCase):
+    """--expect-profile: the copy's log must show the profile the contract launched, and for a P150x4 profile a ring
+    that said OK - a four-card replay that served another profile, or an unchecked or degraded ring, is refused."""
+
+    def test_the_launched_profile_and_an_ok_ring_pass(self):
+        verdict = replay.expect_profile_verdict(TP4_LOG, 'general-prefix-tp4', 'P150x4')
+        self.assertTrue(verdict['ok'], verdict)
+        self.assertEqual(verdict['problems'], [])
+
+    def test_another_launched_profile_fails_and_says_which(self):
+        log = TP4_LOG.replace('general-prefix-tp4: vLLM', 'general-prefix: vLLM')
+        verdict = replay.expect_profile_verdict(log, 'general-prefix-tp4', 'P150x4')
+        self.assertFalse(verdict['ok'])
+        self.assertIn('the contract launched: general-prefix)', verdict['problems'][0])
+
+    def test_a_missing_argv_line_fails(self):
+        verdict = replay.expect_profile_verdict('nothing useful', 'general-prefix-tp4', None)
+        self.assertFalse(verdict['ok'])
+        self.assertIn('the contract launched: nothing', verdict['problems'][0])
+
+    def test_a_degraded_broken_or_unchecked_ring_fails_a_four_card_profile_only(self):
+        argv = TP4_LOG.splitlines()[0]
+        for ring in ('[QWEN-TP4] ring DEGRADED order=[0, 1, 2, 3]', '[QWEN-TP4] ring BROKEN order=[0, 1]',
+                     '[QWEN-TP4] ring check could not run: OSError: x', ''):
+            verdict = replay.expect_profile_verdict(argv + chr(10) + ring, 'general-prefix-tp4', 'P150x4')
+            self.assertFalse(verdict['ok'], ring)
+            self.assertIn('ring OK', verdict['problems'][0])
+            # A pair profile has no ring to check.
+            self.assertTrue(replay.expect_profile_verdict(
+                argv.replace('general-prefix-tp4', 'general-prefix'), 'general-prefix', None)['ok'])
+
+    def test_the_profile_mesh_is_read_from_the_profiles_file(self):
+        self.assertEqual(replay.profile_mesh('general-prefix-tp4'), 'P150x4')
+        self.assertIsNone(replay.profile_mesh('general-prefix'))
+
+
+# What the Thatch runtime itself prints to the container's stdout (replay run 36358575977): its own lines, the
+# platform's argv BEFORE the contract rewrote it, and where the vLLM subprocess log went. No [QWEN-C2] line.
+RUNTIME_LOG = chr(10).join((
+    '2026-09-27 23:26:22,478 thatch.serving starting vLLM OpenAI server: /opt/venv/bin/python -m '
+    'vllm.entrypoints.openai.api_server --model Qwen/Qwen3.8-27B --served-model-name Qwen/Qwen3.8-27B:tt',
+    '2026-09-27 23:26:22,478 thatch.serving vLLM subprocess log: /tmp/thatch_vllm_1.log',
+    '2026-09-27 23:27:45,580 thatch.serving serving Qwen/Qwen3.8-27B:tt on http://0.0.0.0:8000'))
+
+
+class FourCardReplayTests(unittest.TestCase):
+    """main() with the four-card options: one --device per card, the agent's P150x4 env, --expect-profile. The
+    contract's lines are where the runtime really puts them: its vLLM subprocess log under /tmp, not docker logs."""
+
+    logs_text = RUNTIME_LOG
+    engine_text = TP4_LOG
+    GOOD = dict(model=TT, aliases=[TT])
+    drive = ReplayNameTests.drive
+    CARDS = ['/dev/tenstorrent/%d' % index for index in range(4)]
+    OPTIONS = ['--device', CARDS[0], '--device', CARDS[1], '--device', CARDS[2], '--device', CARDS[3],
+               '--env', 'THATCH_SERVING_SESSION_CAP=0', '--env', 'MESH_DEVICE=P150x4',
+               '--expect-profile', 'general-prefix-tp4']
+
+    def docker_devices(self):
+        run = self.docker_run
+        return [run[i + 1] for i, token in enumerate(run) if token == '--device' and 'tenstorrent' in run[i + 1]]
+
+    def test_every_card_is_mounted_and_the_agents_p150x4_env_replaces_the_recorded_one(self):
+        code, steps, _, _, _ = self.drive(self.GOOD, *self.OPTIONS)
+        self.assertEqual(code, 0, steps)
+        self.assertEqual(self.docker_devices(), self.CARDS)
+        env = [self.docker_run[i + 1] for i, token in enumerate(self.docker_run) if token == '-e']
+        self.assertEqual([variable for variable in env if variable.startswith('MESH_DEVICE=')], ['MESH_DEVICE=P150x4'])
+        self.assertIn('THATCH_SERVING_SESSION_CAP=0', env)
+        self.assertTrue(steps['expect_profile']['ok'])
+        self.assertEqual(list(steps)[:5], ['seed', 'source', 'start', 'load', 'expect_profile'])
+
+    def test_without_device_the_pair_is_mounted_and_no_expectation_is_recorded(self):
+        code, steps, _, _, _ = self.drive(self.GOOD)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.docker_devices()), 2)
+        self.assertNotIn('expect_profile', steps)
+
+    def test_a_replay_that_served_another_profile_fails(self):
+        self.engine_text = TP4_LOG.replace('general-prefix-tp4: vLLM', 'general-prefix: vLLM')
+        code, steps, _, _, _ = self.drive(self.GOOD, *self.OPTIONS)
+        self.assertEqual(code, 1)
+        self.assertFalse(steps['expect_profile']['ok'])
+
+    def test_a_degraded_ring_fails_the_replay(self):
+        self.engine_text = TP4_LOG.replace('ring OK', 'ring DEGRADED')
+        code, steps, _, _, _ = self.drive(self.GOOD, *self.OPTIONS)
+        self.assertEqual(code, 1)
+        self.assertFalse(steps['expect_profile']['ok'])
+
+    def test_the_contract_lines_are_read_from_the_runtimes_vllm_log_not_only_docker_logs(self):
+        """Run 36358575977: `docker logs` of a Thatch-runtime container held no [QWEN-C2] line; the runtime's
+        /tmp/thatch_vllm_1.log held them all. Reading docker logs alone refused every real replay."""
+        self.assertNotIn('[QWEN-C2]', RUNTIME_LOG)
+        code, steps, _, _, _ = self.drive(self.GOOD, *self.OPTIONS)
+        self.assertEqual(code, 0, steps)
+        self.assertTrue(steps['expect_profile']['ok'])
+        self.assertEqual(steps['expect_profile']['engine_log_chars'], len(TP4_LOG))
+        # with the engine log empty (unreadable, or the runtime moved it) the step fails rather than passes
+        self.engine_text = ''
+        code, steps, _, _, _ = self.drive(self.GOOD, *self.OPTIONS)
+        self.assertEqual(code, 1)
+        self.assertFalse(steps['expect_profile']['ok'])
+        self.assertEqual(steps['expect_profile']['engine_log_chars'], 0)
+
+    def test_the_engine_log_is_read_inside_the_container_by_its_glob(self):
+        calls = []
+
+        def run(command, timeout=None, check=True):
+            calls.append(command)
+            return mock.Mock(returncode=0, stdout=TP4_LOG if command[1] == 'exec' else RUNTIME_LOG, stderr='')
+
+        with mock.patch.object(replay, 'run', side_effect=run):
+            verdict = replay.expect_profile('qwen-c2-platform', 'general-prefix-tp4', 'P150x4')
+        self.assertTrue(verdict['ok'], verdict)
+        self.assertEqual(calls[1][:5], ['docker', 'exec', 'qwen-c2-platform', 'sh', '-c'])
+        self.assertIn(replay.ENGINE_LOG_GLOB, calls[1][5])
+        self.assertEqual(replay.ENGINE_LOG_GLOB, '/tmp/thatch_vllm_*.log')
 
 
 if __name__ == '__main__':

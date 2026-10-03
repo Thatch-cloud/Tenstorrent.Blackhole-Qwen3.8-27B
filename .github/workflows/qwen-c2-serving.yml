@@ -55,7 +55,10 @@ name: Qwen C2 serving image
 #            Every prefix container is removed however the step ends, and the kill-switch file only if the
 #            gate wrote it
 #   replay - the agent's serving sequence in a copy of its container (scripts/ci/c2_platform_replay.py);
-#            C2_REPLAY_SERVED_MODEL, when set, is the name it must advertise (default Qwen/Qwen3.8-27B:tt)
+#            C2_REPLAY_SERVED_MODEL, when set, is the name it must advertise (default Qwen/Qwen3.8-27B:tt).
+#            The copy serves C2_REPLAY_PROFILE, or the image default when empty, and the step fails unless the
+#            copy's log shows that profile launched (--expect-profile). Under C2_CARDS=quad it mounts every card
+#            and passes the node agent's P150x4 environment (the profile's contract overrides it)
 #   push   - push it to zot and print the digest
 # (status, platform, unserve, priority and reset are described at their steps.) The job file is
 # parsed by scripts/ci/c2_serving_job.py, which refuses anything these steps must not act on.
@@ -64,7 +67,7 @@ name: Qwen C2 serving image
 # containers, with the general-tp4 profiles). It is one job, one runner and one concurrency group either way: the
 # four-card job holds every card the pair job does, so the group needs no second name and no run of any other
 # hardware workflow can overlap it. scripts/ci/c2_serving_job.py refuses a quad job that asks for a pair-shaped
-# step (cardm, replay, priority) or a profile that does not open the (1, 4) mesh, and the reverse.
+# step (cardm, priority) or a profile that does not open the (1, 4) mesh, and the reverse.
 # The smoke opens M+A, so it shares the two-card concurrency group and refuses if anything
 # holds either card or a platform serving container exists.
 on:
@@ -101,11 +104,31 @@ jobs:
         if: contains(steps.job.outputs.actions, 'status')
         working-directory: c2
         shell: bash
+        env:
+          PLATFORM_IMAGE: ${{ steps.job.outputs.platform_image }}
         run: |
           set +e
           echo "=== manual build log"; tail -40 /home/thatch/c2-build.log 2>&1
           echo "=== build in flight"; pgrep -af build-c2-serving-image || echo none
           echo "=== images"; docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedSince}} {{.Size}}' | grep -E 'qwen38-c2|thatch-serving-tt' | head
+          # The node agent runs this daemon's LOCAL thatch-serving-tt:latest and never pulls it (the 2026-09-28 trap),
+          # so before a placement its id must be the replayed thin layer's: each by id and registry digest, exactly.
+          echo "=== fleet tag and platform image"
+          for ref in zot.thatch.local:5000/thatch-serving-tt:latest ${PLATFORM_IMAGE:+"$PLATFORM_IMAGE"}; do
+            echo "$ref -> $(docker image inspect "$ref" --format '{{.Id}} {{join .RepoDigests " "}}' 2>&1 | head -c 400)"
+          done
+          # The mesh shape the RUNNING node agent serves (THATCH_TT_MESH_SHAPE is read once, at its start): that one
+          # variable from its process environment, never the rest of it. P150x4 for a four-card placement; P300 or
+          # none means the drop-in has not reached the process and a placement would mount two cards or one.
+          echo "=== node agent mesh shape"
+          shapes=0
+          for pid in $(pgrep -f thatch-node-agent 2>/dev/null); do
+            shape=$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep '^THATCH_TT_MESH_SHAPE=')
+            [ -n "$shape" ] || continue
+            shapes=$((shapes + 1))
+            echo "pid $pid started $(ps -o lstart= -p "$pid" 2>/dev/null): $shape"
+          done
+          [ "$shapes" != 0 ] || echo "no node agent process readable here carries THATCH_TT_MESH_SHAPE"
           echo "=== persistent cache"; sudo -n du -sh /home/thatch/hf-cache/hub/.qwen-c2 /home/thatch/hf-cache/hub/.qwen-c2.partial 2>&1
           # Card M and card A only, resolved by board id as the reset step resolves them (scripts/ci/serving_pair.sh):
           # card B is reserved for another project, so its link, its node and its holders are never listed here.
@@ -169,6 +192,12 @@ jobs:
             echo "=== $c"
             docker inspect -f '{{.State.Status}} started={{.State.StartedAt}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} image={{.Image}}' "$c"
             docker inspect -f '{{json .Config.Env}}' "$c" | tr ',' '\n' | grep -E 'QWEN_C2|THATCH_VLLM_KWARGS|MESH|TT_MESH|THATCH_MODEL_ENGINE|QWEN36' | cut -c1-300
+            # What the placement serves, in the contract's own words: the argv line of the profile it launched (the
+            # agent forwards no QWEN_C2_PROFILE, so the Env above cannot show it) and, on four cards, the ring check at
+            # mesh open. Both are in the runtime's vLLM subprocess log in the container's tmpfs, never in `docker logs`
+            # (and the agent's containers log to nowhere). Read-only.
+            echo "--- launched profile"
+            docker exec "$c" sh -c 'cat /tmp/thatch_vllm_*.log 2>/dev/null' | grep -F -e ': vLLM argv' -e '[QWEN-TP4] ring ' | cut -c1-400 | tail -6
             port=$(docker port "$c" 8000/tcp | head -1 | sed 's/.*://')
             echo "published port: $port"
             curl -sS -m 10 "http://127.0.0.1:$port/healthz"; echo
@@ -253,6 +282,14 @@ jobs:
           prefix=()
           if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
           smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          # A platform serving container, running or not, refuses the reset as it refuses every card step: fuser sees
+          # only a process that has the cards open, and the node agent's container holds none in the seconds between
+          # its docker run (or a redispatch) and the engine's mesh open. Take it down first (unserve, after deleting
+          # the placement).
+          if docker ps -a --format '{{.Names}}' | grep -q '^thatch-inference-'; then
+            echo "a platform serving container exists; refusing to reset the cards under it" >&2
+            docker ps -a --format '{{.Names}} {{.Status}}' | grep '^thatch-inference-' >&2; exit 1
+          fi
           . scripts/ci/serving_pair.sh
           serving_pair_resolve 60
           clear=0
@@ -291,6 +328,12 @@ jobs:
           prefix=()
           if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
           smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          # As the pair reset: a platform serving container, running or not, refuses it (fuser cannot see a container
+          # that has not opened the cards yet).
+          if docker ps -a --format '{{.Names}}' | grep -q '^thatch-inference-'; then
+            echo "a platform serving container exists; refusing to reset the cards under it" >&2
+            docker ps -a --format '{{.Names}} {{.Status}}' | grep '^thatch-inference-' >&2; exit 1
+          fi
           . scripts/ci/card_set.sh
           card_set_resolve 60
           if ! card_set_unheld "$results/holders.txt"; then
@@ -872,25 +915,57 @@ jobs:
       - name: Replay the node agent's serving sequence
         if: contains(steps.job.outputs.actions, 'replay')
         working-directory: c2
-        timeout-minutes: 80
+        timeout-minutes: 100
         shell: bash
         env:
           IMAGE: ${{ steps.job.outputs.platform_image }}
           REPLAY_PROFILE: ${{ steps.job.outputs.replay_profile }}
           REPLAY_SERVED_MODEL: ${{ steps.job.outputs.replay_served_model }}
+          EXPECT: ${{ steps.job.outputs.replay_expect_profile }}
+          CARDS: ${{ steps.job.outputs.cards }}
         run: |
           set -euo pipefail
           test -n "$IMAGE"
-          if docker ps --format '{{.Names}}' | grep -q '^thatch-inference-'; then
-            echo "a platform serving container is running; refusing to open M+A under it" >&2; exit 1
-          fi
-          # The agent's container is gone once the pair is taken for development (unserve): then the
+          test -n "$EXPECT"
+          mkdir -p "$RUNNER_TEMP/c2-results"
+          # The script removes its copy (qwen-c2-platform) itself; this covers a step that is timed out or cancelled
+          # before its cleanup ran, which would leave the copy holding every card under the next placement.
+          trap 'docker rm -f qwen-c2-platform >/dev/null 2>&1 || true' EXIT
+          # The agent's container is gone once the cards are taken for development (unserve): then the
           # tracked record of it (replay v11's copy) is the source.
           source=thatch-inference-Qwen-Qwen3.8-27B
           docker inspect "$source" > /dev/null 2>&1 || source=scripts/ci/references/c2-serving/agent-container-36104200953.json
-          python3 scripts/ci/c2_platform_replay.py --source "$source" --image "$IMAGE" \
-            ${REPLAY_PROFILE:+--profile "$REPLAY_PROFILE"} ${REPLAY_SERVED_MODEL:+--served-model "$REPLAY_SERVED_MODEL"} \
-            --results "$RUNNER_TEMP/c2-results/replay"
+          if [ "$CARDS" = quad ]; then
+            # Every Blackhole board, as the node agent mounts them for THATCH_TT_MESH_SHAPE=P150x4: the agent's own
+            # P150x4 values below (the serving contract overrides all of them from the profile, which
+            # --expect-profile then checks in the copy's log), and the session cap off as in the pair replay (any
+            # --env replaces the default, so it is passed again).
+            if docker ps -a --format '{{.Names}}' | grep -q '^thatch-inference-'; then
+              echo "a platform serving container exists; refusing to open the cards under it" >&2; exit 1
+            fi
+            . scripts/ci/card_set.sh
+            card_set_nodes 60
+            if ! card_set_unheld "$RUNNER_TEMP/c2-results/replay-holders.txt"; then
+              echo 'a card of the set is held; refusing the replay' >&2; cat "$RUNNER_TEMP/c2-results/replay-holders.txt" >&2; exit 1
+            fi
+            devices=()
+            for node in $(card_set_devices); do devices+=(--device "$node"); done
+            python3 scripts/ci/c2_platform_replay.py --source "$source" --image "$IMAGE" \
+              ${REPLAY_PROFILE:+--profile "$REPLAY_PROFILE"} ${REPLAY_SERVED_MODEL:+--served-model "$REPLAY_SERVED_MODEL"} \
+              "${devices[@]}" \
+              --env THATCH_SERVING_SESSION_CAP=0 --env MESH_DEVICE=P150x4 \
+              --env TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p150x4_mesh_graph_descriptor.textproto \
+              --expect-profile "$EXPECT" \
+              --results "$RUNNER_TEMP/c2-results/replay"
+          else
+            if docker ps --format '{{.Names}}' | grep -q '^thatch-inference-'; then
+              echo "a platform serving container is running; refusing to open M+A under it" >&2; exit 1
+            fi
+            python3 scripts/ci/c2_platform_replay.py --source "$source" --image "$IMAGE" \
+              ${REPLAY_PROFILE:+--profile "$REPLAY_PROFILE"} ${REPLAY_SERVED_MODEL:+--served-model "$REPLAY_SERVED_MODEL"} \
+              --expect-profile "$EXPECT" \
+              --results "$RUNNER_TEMP/c2-results/replay"
+          fi
       - name: Push
         if: contains(steps.job.outputs.actions, 'push')
         shell: bash

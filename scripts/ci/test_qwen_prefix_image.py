@@ -273,7 +273,7 @@ class ProfileTests(unittest.TestCase):
                 self.assertNotIn('--prefix-caching-hash-algo', contract.engine_arguments(profile, '/snap'))
                 if name not in GATE_ONLY_OTHERS:
                     self.assertNotIn('gate_only', profile)
-        self.assertEqual(profiles()['default'], 'general-prefix', 'general-prefix is the default from the G1 release')
+        self.assertEqual(profiles()['default'], 'general-prefix-tp4', 'general-prefix-tp4 is the image default on the four-card rig')
 
     def test_the_prefix_profiles_pass_the_guard_and_the_scheduler_graft_s_install_rules(self):
         """qwen_prefix_scheduler_patch.install_problems itself, on the scheduler vLLM builds under each prefix
