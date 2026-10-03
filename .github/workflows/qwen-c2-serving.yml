@@ -655,6 +655,7 @@ jobs:
           GATE_LENGTHS: ${{ steps.job.outputs.gate_lengths }}
           GATE_MAX_TOKENS: ${{ steps.job.outputs.gate_max_tokens }}
           GATE_MEMORY_PROMPT: ${{ steps.job.outputs.gate_memory_prompt }}
+          GATE_MEMORY_USERS: ${{ steps.job.outputs.gate_memory_users }}
           GATE_PAIRS: ${{ steps.job.outputs.gate_pairs }}
           GATE_FAMILIES: ${{ steps.job.outputs.gate_families }}
           GATE_JIT: ${{ steps.job.outputs.gate_jit }}
@@ -719,7 +720,7 @@ jobs:
           status=0
           python3 scripts/ci/c2_serving_gate.py --image "$image" --profile "$PROFILE" --plan "$GATE_PLAN" \
             ${GATE_LENGTHS:+--lengths "$GATE_LENGTHS"} --max-tokens "$GATE_MAX_TOKENS" --budget-seconds "$budget" \
-            ${GATE_MEMORY_PROMPT:+--memory-prompt "$GATE_MEMORY_PROMPT"} --results "$results" \
+            ${GATE_MEMORY_PROMPT:+--memory-prompt "$GATE_MEMORY_PROMPT"} ${GATE_MEMORY_USERS:+--memory-users "$GATE_MEMORY_USERS"} --results "$results" \
             ${GATE_PAIRS:+--pairs "$GATE_PAIRS"} ${GATE_FAMILIES:+--families "$GATE_FAMILIES"} \
             ${GATE_JIT:+--jit "$GATE_JIT"} ${GATE_POLICY:+--policy "$GATE_POLICY"} \
             ${GATE_POLICY_DECISION:+--policy-decision "$GATE_POLICY_DECISION"} ${GATE_AUDITS:+--audits "$GATE_AUDITS"} \
