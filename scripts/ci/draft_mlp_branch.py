@@ -13,6 +13,20 @@ from projection_rounding import grouped_projection_reference
 
 
 DRAFT_BF8_FLAG = 'QWEN_FAST_DRAFT_BF8'
+# QWEN_FAST_DRAFTER_BF16=1 keeps every drafter projection bfloat16 whatever QWEN_FAST_DRAFT_BF8 says (the serving image
+# bakes DRAFT_BF8=1). Default off: the dtype is decided by DRAFT_BF8 exactly as before.
+DRAFTER_BF16_FLAG = 'QWEN_FAST_DRAFTER_BF16'
+
+
+ENGAGED_MARKER = '[DRAFTER_BF16] engaged: draft projections upload as bfloat16 (QWEN_FAST_DRAFTER_BF16=1, overrides QWEN_FAST_DRAFT_BF8)'
+_announced = []
+
+
+def _announce_bf16():
+    """The engaged marker, once per process (the dtype is asked for at each of the 36 projection uploads)."""
+    if not _announced:
+        _announced.append(True)
+        print(ENGAGED_MARKER, flush=True)
 
 
 def draft_projection_dtype(operations, environ=None):
@@ -21,6 +35,9 @@ def draft_projection_dtype(operations, environ=None):
     bfloat16 otherwise (the default, and every other draft tensor always: norms,
     convolution kernels and bases, the selector). Read at each upload, never cached."""
     environ = os.environ if environ is None else environ
+    if environ.get(DRAFTER_BF16_FLAG) == '1':
+        _announce_bf16()
+        return operations.bfloat16
     return operations.bfloat8_b if environ.get(DRAFT_BF8_FLAG) == '1' else operations.bfloat16
 
 
