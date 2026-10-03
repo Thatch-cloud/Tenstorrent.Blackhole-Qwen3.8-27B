@@ -77,7 +77,7 @@ GDN_LAYERS = 48
 # name every entry (test_verify_trace_t2 checks it) and the card-M harness mounts exactly
 # these (optimisation/ttnn-op/verify_t2/run_card_m.sh), so what card M tested is what ships.
 RUNTIME_FILES = ('verify_trace_t2.py', 'gdn_conv_windows_packed.py', 'gdn_conv_windows_packed.cpp',
-                 'packed_ordered_cache.py')
+                 'packed_ordered_cache.py', 'page_width_tp4.py')
 
 _COUNTS = {}
 _LOGGED = set()
