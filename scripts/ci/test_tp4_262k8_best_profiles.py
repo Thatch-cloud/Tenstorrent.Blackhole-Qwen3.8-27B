@@ -95,6 +95,9 @@ class DeltaTests(unittest.TestCase):
             self.assertTrue(found[name]['gate_only'], name)
             self.assertEqual(found[name]['min_answer_tokens'], 256)
             self.assertNotIn('max_prompt_tokens', found[name])
+        for name in (BEST, AUDIT, TIMED):
+            self.assertEqual(found[name]['env']['QWEN_FAST_262K_EVIDENCE_WAIVER'], '1', name)
+        self.assertNotIn('QWEN_FAST_262K_EVIDENCE_WAIVER', found[SHIP]['env'], 'a traffic profile never waives the 262k evidence')
         ship = found[SHIP]
         self.assertNotIn('gate_only', ship)
         self.assertNotIn('QWEN_C2_GATE_PROFILE', ship['env'])

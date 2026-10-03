@@ -20,6 +20,7 @@ Stdlib only, importable on py 3.7. Nothing here is sha256-pinned.
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import ordered_cache
@@ -118,12 +119,68 @@ def evidence_state(path=None, expected=None, sources_root=HERE):
     return not problems, problems
 
 
+# THE 262k EVIDENCE WAIVER (gate only). QWEN_FAST_262K_EVIDENCE_WAIVER=1 lets width 4,096 (here) and the admission at capacity 262,144
+# (packed_any_admission) proceed without their evidence records, ONLY in a gate run of a gate-only profile: QWEN_C2_GATE=1 (the contract's
+# boot condition for gate_only profiles) AND the profile's own marker QWEN_C2_GATE_PROFILE=1 (set by no traffic profile; the same pair
+# packed_any_admission.unqualified_allowed reads). Anywhere else the flag is refused by name. Unset (or 0) every path is what it was.
+WAIVER_ENV = 'QWEN_FAST_262K_EVIDENCE_WAIVER'
+WAIVER_GATE_ENV = 'QWEN_C2_GATE'
+WAIVER_GATE_PROFILE_ENV = 'QWEN_C2_GATE_PROFILE'
+WAIVER_MARKER = '262k evidence WAIVED (gate-only)'
+_WAIVER_LOGGED = []
+
+
+class WaiverRefused(ValueError):
+    """QWEN_FAST_262K_EVIDENCE_WAIVER is set in a process that is not a gate run of a gate-only profile (or to a value other than 0/1)."""
+
+
+def waiver_active(environ=None):
+    """False when the waiver is unset (or 0); True when it is 1 in a gate run of a gate-only profile; WaiverRefused otherwise."""
+    environ = os.environ if environ is None else environ
+    value = environ.get(WAIVER_ENV)
+    if value in (None, '', '0'):
+        return False
+    if value != '1':
+        raise WaiverRefused('%s=%r is not 0 or 1' % (WAIVER_ENV, value))
+    if environ.get(WAIVER_GATE_ENV) != '1' or environ.get(WAIVER_GATE_PROFILE_ENV) != '1':
+        raise WaiverRefused('%s=1 is refused: the 262k evidence waiver exists only in a gate run of a gate-only profile (%s=1 and %s=1), '
+                            'never for traffic' % (WAIVER_ENV, WAIVER_GATE_ENV, WAIVER_GATE_PROFILE_ENV))
+    return True
+
+
+def _log(template, *values):
+    text = template.format(*values)
+    try:
+        from loguru import logger
+    except ImportError:
+        print(text, flush=True)
+        return
+    logger.warning('{}', text)
+
+
+def log_waiver_once(what, log=None):
+    """The loud line, once per process: '262k evidence WAIVED (gate-only): <what>'. Returns whether it logged now."""
+    if _WAIVER_LOGGED:
+        return False
+    _WAIVER_LOGGED.append(what)
+    (_log if log is None else log)('{}: {}; every result of this process is UNQUALIFIED (no card evidence record stands behind width 4096 '
+                                   'or capacity 262144)', WAIVER_MARKER, what)
+    return True
+
+
 def admitted(width, environ=None, *, path=None, expected=None, sources_root=HERE):
-    """ordered_cache.page_width_admitted(width), or width 4,096 at four cards on a passing E1 record."""
+    """ordered_cache.page_width_admitted(width), or width 4,096 at four cards on a passing E1 record (or, in a gate run of a
+    gate-only profile with QWEN_FAST_262K_EVIDENCE_WAIVER=1, without one: logged once, loudly)."""
     if ordered_cache.page_width_admitted(width):
         return True
     if type(width) is not int or width != WIDE_WIDTH_TP4 or width % 4:
         return False
     if tp_shapes.chip_count(environ) != 4:
         return False
-    return evidence_state(path, expected, sources_root)[0]
+    waived = waiver_active(environ)
+    if evidence_state(path, expected, sources_root)[0]:
+        return True
+    if waived:
+        log_waiver_once('page-table width %d admitted without ordered_writer_evidence_tp4.json (E1)' % WIDE_WIDTH_TP4)
+        return True
+    return False

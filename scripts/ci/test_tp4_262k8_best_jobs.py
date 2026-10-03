@@ -124,6 +124,7 @@ class JobPackTests(unittest.TestCase):
         self.assertIn('C2_GATE_PLAN=matrix', text)
         self.assertIn('C2_GATE_LENGTHS=' + LADDER, text)
         self.assertIn('C2_GATE_MAX_TOKENS=256', text)
+        self.assertIn('C2_GATE_AUDITS=extent', text)
 
     def test_the_profile_job_names_the_ops_plans_on_the_timed_arm(self):
         text = text_of('P1-best-8-user-profile')
