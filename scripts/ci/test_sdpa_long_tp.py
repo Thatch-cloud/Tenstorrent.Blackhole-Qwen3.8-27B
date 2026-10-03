@@ -50,12 +50,12 @@ class FlagTests(unittest.TestCase):
     def test_every_servable_name_selects_itself(self):
         for name in sdpa_long_tp.servable_names():
             self.assertEqual(sdpa_long_tp.selected(dict(FOUR, **{FLAG: name})), name)
-        self.assertEqual(sdpa_long_tp.servable_names(), ('served', 'grid8x4', 'grid8x10', 'grid11x4', 'grid4x8'))
+        self.assertEqual(sdpa_long_tp.servable_names(), ('served', 'grid8x4', 'grid8x10', 'grid11x4', 'grid4x8', 'multi'))
 
     def test_a_typo_and_a_configuration_that_cannot_be_served_are_different_refusals(self):
         with self.assertRaisesRegex(ValueError, 'is not a configuration'):
             sdpa_long_tp.selected(dict(FOUR, **{FLAG: 'grid9x9'}))
-        for name in ('multi', 'rowsplit', 'ra'):
+        for name in ('rowsplit', 'ra'):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'cannot be served yet: .*Servable: served, grid8x4'):
                 sdpa_long_tp.selected(dict(FOUR, **{FLAG: name}))
 
@@ -159,7 +159,7 @@ class ReaderHookTests(unittest.TestCase):
         original = folded.PackedExtentReplayReader.close
         with patch.object(folded.PackedExtentReplayReader, 'close', lambda self: (closed.append(1), original(self))[1]):
             with self.assertRaisesRegex(ValueError, 'cannot be served yet'):
-                self.reader(**{FLAG: 'multi'})
+                self.reader(**{FLAG: 'rowsplit'})
         self.assertTrue(closed)
 
     def test_the_twin_is_a_subclass_of_the_pinned_reader(self):
@@ -208,9 +208,13 @@ class SmokeAndProfileTests(unittest.TestCase):
         self.assertIn('placeholder', twin['description'].lower())
 
     def test_no_traffic_profile_carries_the_flag(self):
+        # tp4/sdpa-multi's two gate-only twins carry it too (test_sdpa_multi_tp holds them to their control plus exactly the flags).
+        allowed = {self.TWIN, 'c2-packed-tp4-8x262k-best-sdpamulti', 'c2-packed-tp4-8x262k-best-sdpamulti-audit'}
         for name, body in self.PROFILES.items():
-            if name != self.TWIN:
+            if name not in allowed:
                 self.assertNotIn(FLAG, body.get('env', {}), name)
+            else:
+                self.assertIs(body['gate_only'], True, name)
 
     def test_the_smoke_check_fails_a_profile_that_asks_for_the_flag_and_logs_no_engaged_line(self):
         smoke = 'SMOKE ok'

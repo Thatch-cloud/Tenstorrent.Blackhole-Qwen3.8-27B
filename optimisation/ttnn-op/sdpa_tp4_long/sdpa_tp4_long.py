@@ -17,7 +17,7 @@ THE ARMS (names are QWEN_FAST_TP4_SDPA's values: sdpa_long_tp.CONFIGS, one table
             an 11-wide grid), so only the idle-core and dispatch set differs. A win by it is noise or dispatch, not placement.
   multi     ONE launch for all users, one G16 entry per user (16 tokens x 6 heads = 96 rows, 3 row tiles, flags 0x21, no share):
             16 cores per entry (U <= 6), so every user's partition, chunk ranges and tree are the served ones, and the users run
-            concurrently on 16 x U cores. Not servable yet (needs a reader, a mask kernel and a pool-lent table).
+            concurrently on 16 x U cores. SERVABLE (tp4/sdpa-multi: sdpa_multi_tp, with its own mask, page-table gather and fold launches).
   rowsplit  G4B4 per user (4 entries of 4 tokens, 24 rows, 1 row tile, 64 cores, 0x23). Not servable yet.
   ra        the served call with the KV read-ahead flag (0x8: flags 0x2B). Not servable yet (the pinned reader admits 0x23 only).
 An arm that raises is DATA (the error is recorded and the sweep goes on); a hang ends the container (the per-call watchdog writes

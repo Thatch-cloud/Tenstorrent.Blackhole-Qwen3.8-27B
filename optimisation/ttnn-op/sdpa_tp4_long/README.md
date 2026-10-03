@@ -24,7 +24,7 @@ The arm names are the values of `QWEN_FAST_TP4_SDPA` (`sdpa_long_tp.CONFIGS` is 
 | `served` | G8B2 `0x23` per user, the mesh's own worker grid | reference | yes (explicit no-op) |
 | `grid8x4`, `grid8x10`, `grid4x8` | the same call on another worker grid | by construction (the active cores move relative to the DRAM banks; the accumulation order does not); the sweep proves it per row | yes |
 | `grid11x4` | the CONTROL for the grid arms: expected to place the 32 active cores where the served grid does, so only the idle-core and dispatch set differs | by construction; a win by it is noise or dispatch, not placement | yes |
-| `multi` | ONE launch for all users, one G16 entry per user (96 rows, flags `0x21`, 16 cores per entry up to 6 users) | by construction; unproven until the sweep runs | no: needs a reader, a per-entry mask kernel and a pool-lent table |
+| `multi` | ONE launch for all users, one G16 entry per user (96 rows, flags `0x21`, 16 cores per entry up to 6 users) | by construction; the sweep proves it per row, and in serving `QWEN_FAST_TP4_SDPA_AUDIT=1` compares it word for word with the per-user launches | yes (tp4/sdpa-multi: `sdpa_multi_tp`, docs/sdpa-multi.md) |
 | `rowsplit` | G4B4 per user (4 entries of 4 tokens, 64 cores, `0x23`) | by construction | no: slower than served until the reader sizes its KV barrier to the real reader count |
 | `ra` | the served call with the KV read-ahead flag (`0x2B`) | by construction | no: the pinned extent reader admits `0x23` only |
 

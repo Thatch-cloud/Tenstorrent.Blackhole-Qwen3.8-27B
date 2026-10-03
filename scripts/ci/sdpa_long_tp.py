@@ -16,8 +16,13 @@ is expected to put the 32 active cores where the served grid does (rows 0-3 of a
 the idle-core and dispatch set; a win by it is noise or dispatch, never placement. 'served' is the
 explicit no-op (the plumbing control).
 
+'multi' (tp4/sdpa-multi) is the one launch for every live user of a packed block, one G16 entry per user (flags 0x21): servable
+through sdpa_multi_tp, which carries its own mask, page-table gather and fold launches and the per-row audit
+(QWEN_FAST_TP4_SDPA_AUDIT=1, gate profiles only). It needs the packed block's T16 users and refuses any user count for which the
+factory would give an entry other than 16 cores.
+
 Names the sweep measures that are NOT servable here (they need a reader, mask kernel or factory change that is a later lane's:
-the one-launch multi-user entry, the row split, the KV read-ahead flag) are recognised and refused with their reason: a typo and a
+the row split, the KV read-ahead flag) are recognised and refused with their reason: a typo and a
 configuration that cannot be served are different mistakes, and neither silently runs the served call.
 
 extent_attention_replay_tp.py is held unedited by the four-card evidence (its sha256 is pinned), so the hook lives in
@@ -35,7 +40,7 @@ FLAG = 'QWEN_FAST_TP4_SDPA'
 OFF_VALUES = ('', '0', 'off')
 
 ENGAGED = '[PINDIAG] tp4 sdpa engaged'
-RUNTIME_FILES = ('sdpa_long_tp.py',)
+RUNTIME_FILES = ('sdpa_long_tp.py', 'sdpa_multi_tp.py', 'sdpa_multi_mask_tp.cpp', 'sdpa_multi_gather_tp.cpp', 'sdpa_multi_audit_tp.cpp')
 
 # The qualified served flags (tail 0x1 | share 0x2 | extent 0x20) and the bundle width the twin-band check uses (G8B2: two entries).
 SERVED_FLAGS = 0x23
@@ -50,9 +55,10 @@ CONFIGS = {
     'grid8x10': dict(grid=(8, 10), servable=True, why=''),
     'grid11x4': dict(grid=(11, 4), servable=True, why=''),   # the control: expected to place the active cores as served does
     'grid4x8': dict(grid=(4, 8), servable=True, why=''),
-    'multi': dict(grid=None, servable=False,
-                  why='one G16 launch for every live user needs a new reader, a per-entry mask kernel and a pool-lent table '
-                      '(design K2)'),
+    # tp4/sdpa-multi (design K2): ONE launch per layer for every live user of a block, one G16 entry per user (flags 0x21), served by
+    # sdpa_multi_tp (the reader twin's multi path, its own mask, page-table gather and fold launches). Not a grid change: the grid
+    # stays the mesh's, the program is a different one, byte-identical by construction and proven by QWEN_FAST_TP4_SDPA_AUDIT.
+    'multi': dict(grid=None, servable=True, why=''),
     'rowsplit': dict(grid=None, servable=False,
                      why='G4B4 share per user is slower than served until the reader sizes its KV barrier to the real reader '
                          'count (design K1) and the mask and reader bounds lift (K3)'),
@@ -79,6 +85,9 @@ def selected(environ=None):
     source = os.environ if environ is None else environ
     value = source.get(FLAG)
     if value is None or value.strip().lower() in OFF_VALUES:
+        audit = source.get('QWEN_FAST_TP4_SDPA_AUDIT')
+        if audit is not None and audit.strip() not in ('', '0'):
+            raise ValueError('QWEN_FAST_TP4_SDPA_AUDIT=%s audits the multi launch: it needs %s=multi' % (audit, FLAG))
         return None
     name = value.strip()
     if _chip_count(source) == tp_shapes.PAIR:
@@ -88,6 +97,10 @@ def selected(environ=None):
     if not CONFIGS[name]['servable']:
         raise ValueError('%s=%s is measured by the sweep but cannot be served yet: %s. Servable: %s'
                          % (FLAG, name, CONFIGS[name]['why'], ', '.join(servable_names())))
+    import sdpa_multi_tp
+
+    if sdpa_multi_tp.audit_enabled(source) and name != sdpa_multi_tp.MULTI_NAME:
+        raise ValueError('%s audits the multi launch: it needs %s=%s, got %s' % (sdpa_multi_tp.AUDIT_FLAG, FLAG, sdpa_multi_tp.MULTI_NAME, name))
     return name
 
 
@@ -149,6 +162,19 @@ def apply(reader, environ=None):
 
     mesh = reader.mesh.compute_with_storage_grid_size()
     grid = plan(name, (mesh.x, mesh.y))
+    if name == 'multi':
+        # The one-launch multi-user path (sdpa_multi_tp): it checks the qualified flags itself (the readers it reads are the pinned
+        # ones, built and qualified at 0x23 by the pinned constructor), builds its own buffers and programs, and logs its own
+        # ENGAGED line (the same prefix as every configuration's).
+        import sdpa_multi_tp
+
+        for segment in reader.readers:
+            applied = tuple(getattr(segment, 'sdpa_modes_applied', None) or ())
+            if len(applied) != len(segment.metadata) or any(value != SERVED_FLAGS for value in applied):
+                raise ValueError('%s=%s is qualified at flags 0x%x only, the reader runs %s'
+                                 % (FLAG, name, SERVED_FLAGS, ['0x%x' % value for value in applied]))
+        reader.multi = sdpa_multi_tp.attach(reader, environ)
+        return grid
     entries = 0
     for segment in reader.readers:
         applied = tuple(getattr(segment, 'sdpa_modes_applied', None) or ())

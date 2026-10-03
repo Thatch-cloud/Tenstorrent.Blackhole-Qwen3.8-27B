@@ -1803,6 +1803,11 @@ class PackedVerifierEngine:
             if tp4_vglue.audit_enabled():
                 # QWEN_FAST_TP4_VGLUE_AUDIT: each engaged GDN lever's output against the served path's, held beside it.
                 tp4_vglue.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)
+            sdpa_audit = getattr(getattr(self.fixture, 'replay_reader', None), 'sdpa_audit_round', None)
+            if sdpa_audit is not None:
+                # QWEN_FAST_TP4_SDPA_AUDIT (sdpa_multi_tp, gate profiles only): the multi launch's counters against the per-user
+                # launches run beside it in this replay. The reader twin's method returns 0 at once unless the audit is on.
+                sdpa_audit(self.rounds + 1)
             predictions = [host[slice(*segment_rows(self.shape, segment))] for segment in segments]
             finished = time.perf_counter()
             if extent_users is not None:
