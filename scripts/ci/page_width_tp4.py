@@ -126,7 +126,7 @@ def evidence_state(path=None, expected=None, sources_root=HERE):
 WAIVER_ENV = 'QWEN_FAST_262K_EVIDENCE_WAIVER'
 WAIVER_GATE_ENV = 'QWEN_C2_GATE'
 WAIVER_GATE_PROFILE_ENV = 'QWEN_C2_GATE_PROFILE'
-WAIVER_MARKER = '262k evidence WAIVED (gate-only)'
+WAIVER_MARKER = '[PINDIAG] 262k evidence WAIVED (gate-only)'   # [PINDIAG]: the gate harness keeps only such lines
 _WAIVER_LOGGED = []
 
 

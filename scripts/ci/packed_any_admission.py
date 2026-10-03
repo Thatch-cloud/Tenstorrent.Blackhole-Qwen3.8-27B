@@ -748,8 +748,9 @@ def tp_guard(environ=None, *, log=None, sources_root=HERE):
         try:
             check_window_262k(sources_root=sources_root)
         except AdmissionRefused as refusal:
-            if not waiver_for_262k(environ, 'tp_guard: ' + '; '.join(refusal.problems), log):
+            if not waiver_for_262k(environ, 'tp_guard: %d evidence problems, one UNQUALIFIED line each' % len(refusal.problems), log):
                 raise
+            _log_unqualified(log, refusal.problems)
             return list(refusal.problems)
     return []
 
@@ -776,9 +777,9 @@ def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evide
     record = dict(flag=FLAG, shape=m3[1])
     capacity = CAPACITY_131K
     waived_262k = False
-    try:
-        import page_width_tp4
+    import page_width_tp4
 
+    try:
         waived_262k = page_width_tp4.waiver_active(environ)
     except page_width_tp4.WaiverRefused as error:
         problems.append(str(error))
@@ -835,7 +836,7 @@ def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evide
     if waived:
         import page_width_tp4
 
-        page_width_tp4.log_waiver_once('admission at capacity %d passes without the 262k evidence: %s' % (capacity, ' | '.join(waived)), log)
+        page_width_tp4.log_waiver_once('admission at capacity %d passes without the 262k evidence (%d problems, one UNQUALIFIED line each)' % (capacity, len(waived)), log)
         record['waived'] = waived
         _log_unqualified(log, waived)
         log('{} passed UNQUALIFIED: K64j {} x{}; kernels {}; {} evidence problems (262k waiver, gate only){}',

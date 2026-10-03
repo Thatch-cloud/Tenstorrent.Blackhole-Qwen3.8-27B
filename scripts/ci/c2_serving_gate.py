@@ -1468,6 +1468,8 @@ class Runner(object):
     CPU tests. Once an arm hits infrastructure trouble (`infra`: a platform container on M+A, the
     ethernet-core wedge) every later arm is skipped."""
 
+    waived = False   # an arm's server log showed the 262k evidence waiver: the summary is stamped UNQUALIFIED (262k waiver)
+
     def __init__(self, image, profile, results, checkout, devices, hub=HUB, execute=None, log=print,
                  containers=None, corpus=None, any_request=False, profiles=None, cache_entries=None, jit='auto',
                  policy='strict', decision=None, salt=None, salt_key_path=None):
@@ -1582,6 +1584,8 @@ class Runner(object):
         if report is not None:
             # What the server log says about C2-any, judged with the arm's own problems (arm_problems).
             log_text = server_log(arm_dir)
+            if log_text and any(text in log_text for text in WAIVER_STAMP_TEXTS):
+                self.waived = True
             problems, engines, consumers = any_request_check(log_text, self.any_request_for(profile))
             # S2: the harness's S2 problems, the S2 lines off the flag, the knobs reaching the container, the
             # kernel cache, and the four-live rate from the whole server log.
@@ -2341,6 +2345,32 @@ def g4_checks(plan, concurrent, solo, rerun=None, probe=None, seats=MEMORY_USERS
     return problems, shortfalls, facts
 
 
+WAIVER_STAMP = 'UNQUALIFIED (262k waiver)'
+WAIVER_STAMP_TEXTS = ('[PINDIAG] 262k evidence WAIVED (gate-only)', '(262k waiver, gate only)')   # page_width_tp4 / packed_any_admission
+DEEP_FAMILY_FLOOR = 131328   # the 131k window's largest extent family: a round past it ran a user in the extra 262k half
+
+
+def deep_window(profiles, name):
+    """Whether the profile's window is past the 131k window's (max-model-len > 131,328): a 262,144-token profile."""
+    try:
+        return int(profiles['profiles'][name]['engine']['max-model-len']) > DEEP_FAMILY_FLOOR
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def deep_round_shortfalls(label, report):
+    """NOT_EXERCISED for a 262k-window arm whose packed extent rounds never reached a family past DEEP_FAMILY_FLOOR (max over
+    ALL rounds, lever_n_m3native_gate.extent_rounds max_family, not the 64-capped families_seen). Without such a round the
+    strict concurrent-vs-solo comparison ran both arms on the sequential path and passes by construction: it judged nothing
+    past 131k. (Nothing else in the window reads KV contents there: the extent audit reads staged metadata only.)"""
+    rounds = (s2_of(report).get('rounds') or {}) if report is not None else {}
+    deepest = rounds.get('max_family') or 0
+    if deepest > DEEP_FAMILY_FLOOR:
+        return []
+    return ['%s: no packed extent round past %d keys (largest family %d over %s rounds): the deep users never decoded in a packed '
+            'round, so nothing past 131k was compared (NOT_EXERCISED)' % (label, DEEP_FAMILY_FLOOR, deepest, rounds.get('count') or 0)]
+
+
 def with_checks(result, problems, shortfalls, facts=None):
     """A verdict with a plan's own problems (FAIL) and shortfalls (NOT_EXERCISED where it would pass)."""
     if problems:
@@ -2381,6 +2411,8 @@ def run_matrix(plan, runner, arms, checks=None):
         if concurrent is not None and solo is not None:
             problems, shortfalls, facts = g4_checks(checks, concurrent, solo, rerun, probe,
                                                     seats=runner.seats_for(spec_profile(runner, c_spec)))
+            if deep_window(runner.profiles, spec_profile(runner, c_spec)):
+                shortfalls = shortfalls + deep_round_shortfalls('concurrent', concurrent)
             result = with_checks(result, problems, shortfalls, facts)
     return result
 
@@ -2650,6 +2682,8 @@ def run_churn(plan, runner, profiles, arms):
         report, kv_reservation_expected(profiles, spec_profile(runner, spec)), require_hold=True)
     problems += ['churn: %s' % problem for problem in kv_problems if problem not in memory]
     shortfalls += ['churn: %s' % shortfall for shortfall in kv_shortfalls]
+    if deep_window(profiles, spec_profile(runner, spec)):
+        shortfalls += deep_round_shortfalls('churn', report)
     if not report.get('alive'):
         problems.append('churn: the engine did not answer every seat after the streams')
     s2 = s2_of(report)
@@ -3186,13 +3220,16 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
                     log('[C2-GATE] S2 EXIT BLOCKED: %(plan)s %(arm)s user %(user)s is %(verdict)s - its record is '
                         '%(record)s' % blocker)
     finally:
+        if runner.waived:
+            summary['unqualified'] = WAIVER_STAMP
         summary['passed'] = bool(summary['results']) and len(summary['results']) == len(plans) and all(
             result['verdict'] == 'PASS' for result in summary['results'].values())
         summary['infra'] = runner.infra
         with open(os.path.join(options.results, 'c2-gate-summary.json'), 'w') as handle:
             json.dump(summary, handle, indent=2)
-    log('C2_GATE profile=%s plans=%s passed=%s%s' % (options.profile, ','.join(plans), summary['passed'],
-                                                     ' infra=%s' % runner.infra if runner.infra else ''))
+    log('C2_GATE profile=%s plans=%s passed=%s%s%s' % (options.profile, ','.join(plans), summary['passed'],
+                                                       ' infra=%s' % runner.infra if runner.infra else '',
+                                                       ' %s' % WAIVER_STAMP if runner.waived else ''))
     return 0 if summary['passed'] else 1
 
 

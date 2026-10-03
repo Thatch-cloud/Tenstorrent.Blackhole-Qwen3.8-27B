@@ -119,6 +119,10 @@ EXTENT_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
 GATE_PROFILE_FLAG = 'QWEN_C2_GATE_PROFILE'
 ADMISSION_PASSED = '[PINDIAG] packed-any admission passed:'
 ADMISSION_UNQUALIFIED = 'packed-any admission passed UNQUALIFIED'
+WAIVER_FLAG = 'QWEN_FAST_262K_EVIDENCE_WAIVER'
+WAIVER_MARKER = '[PINDIAG] 262k evidence WAIVED (gate-only)'   # page_width_tp4.WAIVER_MARKER
+WAIVER_CAPACITY = 'capacity=262144'
+WAIVER_STAMP = 'UNQUALIFIED (262k waiver)'
 ADMISSION_REFUSED = '[PINDIAG] packed-any admission refused'
 PARSER_ARMED = 'parser M armed'
 FOREIGN_SHARE = 0.3
@@ -493,6 +497,39 @@ def traffic_problems(container_text, entry):
     return problems
 
 
+def waiver_active_in_log(container_text):
+    """Whether the container log shows the 262k evidence waiver (its loud line or the waived admission's own text)."""
+    return WAIVER_MARKER in container_text or '(262k waiver, gate only)' in container_text
+
+
+def waiver_problems(container_text, entry):
+    """The 262k evidence waiver, judged from the container log. A traffic (non gate-only) profile must show none of it, so a leak
+    stands out even if a code-level guard changes later. A gate-only profile that sets QWEN_FAST_262K_EVIDENCE_WAIVER must show the
+    loud line exactly once and an admission that passed UNQUALIFIED at capacity 262144 (and one that does not set it, no waiver)."""
+    env = entry.get('env') or {}
+    flagged = env.get(WAIVER_FLAG) not in (None, '', '0')
+    marker_lines = container_text.count(WAIVER_MARKER)
+    waived_pass = [line for line in container_text.splitlines()
+                   if ADMISSION_UNQUALIFIED in line and '(262k waiver, gate only)' in line]
+    problems = []
+    if not entry.get('gate_only'):
+        if marker_lines or waived_pass or flagged:
+            problems.append('the 262k evidence waiver is active on a traffic profile (%d "%s" lines, %d waived admission lines, flag %s): '
+                            'it exists only in a gate run of a gate-only profile' % (marker_lines, WAIVER_MARKER, len(waived_pass),
+                                                                                    'set' if flagged else 'unset'))
+        return problems
+    if not flagged:
+        if marker_lines or waived_pass:
+            problems.append('the log shows the 262k evidence waiver but the profile does not set %s' % WAIVER_FLAG)
+        return problems
+    if marker_lines != 1:
+        problems.append('"%s" appears %d times, not once (%s is set)' % (WAIVER_MARKER, marker_lines, WAIVER_FLAG))
+    if not any(WAIVER_CAPACITY in line for line in waived_pass):
+        problems.append('no "packed-any admission passed UNQUALIFIED ... (262k waiver, gate only) %s" line (%s is set)'
+                        % (WAIVER_CAPACITY, WAIVER_FLAG))
+    return problems
+
+
 def fused_facts(env, container_text):
     """lever_n_m3native_gate.h1b_summary of the container log (the gate's own reading of the H1b lines), or None when the profile has
     no fused-commit flag on and the log holds none of its lines."""
@@ -585,6 +622,9 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         problems += fused_problems(env, container_text, steady, fused)
     if entry is not None:
         problems += traffic_problems(container_text, entry)
+        problems += waiver_problems(container_text, entry)
+    if waiver_active_in_log(container_text):
+        facts['unqualified'] = WAIVER_STAMP
     if slide:
         if median is None:
             problems.append('no [PACKED-PUBLISH] round with a commit: the ramp commit time is unread (QWEN_FAST_PACKED_AUDIT?)')
@@ -613,6 +653,8 @@ def main(argv=None):
         return 2
     problems, facts = check(smoke, container, slide, options.max_ramp_kv_ms, env, entry)
     print('SMOKE_CHECK profile=%s slide=%s %s' % (options.profile, 'on' if slide else 'off', json.dumps(facts)))
+    if facts.get('unqualified'):
+        print('SMOKE_CHECK %s: the 262k evidence records were waived; this result is a measurement, never evidence' % WAIVER_STAMP)
     for problem in problems:
         print('SMOKE_CHECK FAILED: %s' % problem)
     return 1 if problems else 0

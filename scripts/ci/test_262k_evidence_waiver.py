@@ -100,7 +100,7 @@ class PageWidthTests(Fresh):
             self.assertTrue(pw.admitted(4096, WAIVED_ENV))
         self.assertEqual(log.call_count, 1)
         text = log.call_args[0][0].format(*log.call_args[0][1:])
-        self.assertTrue(text.startswith('262k evidence WAIVED (gate-only): '), text)
+        self.assertTrue(text.startswith('[PINDIAG] 262k evidence WAIVED (gate-only): '), text)
         self.assertIn('UNQUALIFIED', text)
 
     def test_the_waiver_never_admits_another_width_or_the_pair(self):
@@ -134,7 +134,7 @@ class AdmitTests(Fresh):
         self.assertEqual(record['capacity'], 262144)
         self.assertIsNone(record['evidence'])
         self.assertTrue(record['waived'])
-        waived = [line for line in self.lines if line.startswith('262k evidence WAIVED (gate-only): ')]
+        waived = [line for line in self.lines if line.startswith('[PINDIAG] 262k evidence WAIVED (gate-only): ')]
         self.assertEqual(len(waived), 1, self.lines)
         passed = [line for line in self.lines if 'passed UNQUALIFIED' in line]
         self.assertEqual(len(passed), 1, self.lines)
@@ -165,14 +165,12 @@ class AdmitTests(Fresh):
         self.assertTrue(any(FLAG in problem for problem in caught.exception.problems))
 
     def test_every_other_condition_still_refuses_under_the_waiver(self):
-        wrong = dict(binaries={'build_Release/lib/_ttnncpp.so': 'f' * 64})
         with mock.patch.object(admission, 'check_runtime', side_effect=admission.AdmissionRefused('runtime', ['runtime: wrong binary'])), \
                 mock.patch.dict(os.environ, WAIVED_ENV, clear=True):
             with self.assertRaises(admission.AdmissionRefused) as caught:
                 admission.admit('/opt/tt-metal', m3=M3, environ=dict(WAIVED_ENV), log=self.lines)
         self.assertIn('runtime: wrong binary', caught.exception.problems)
         self.assertFalse([line for line in self.lines if 'passed' in line])
-        self.assertIsNotNone(wrong)
         for broken in (dict(WAIVED_ENV, QWEN_FAST_MAX_POSITION='200000'), dict(WAIVED_ENV, QWEN_FAST_EXTENT_REPLAY='0')):
             admission._STATE.clear()
             with self.assertRaises(admission.AdmissionRefused):
@@ -286,6 +284,91 @@ class ProfileContractTests(unittest.TestCase):
         for name in ('c2-packed-tp4-8x262k-time-gate', 'c2-packed-tp4-8x262k-diag-strace', 'c2-packed-tp4-8x262k'):
             env = found[name]['env']
             self.assertEqual((env['QWEN_FAST_VERIFY_T1_AUDIT'], env['QWEN_FAST_VERIFY_T2_AUDIT']), ('0', '0'), name)
+
+
+import c2_smoke_check as smoke  # noqa: E402
+import c2_serving_gate as gate  # noqa: E402
+
+WAIVED_LINE = '[PINDIAG] 262k evidence WAIVED (gate-only): admission at capacity 262144 passes without the 262k evidence'
+WAIVED_PASS = '[PINDIAG] packed-any admission passed UNQUALIFIED: K64j abcd x2; kernels 1,2; 3 evidence problems (262k waiver, gate only) capacity=262144'
+QUALIFIED_PASS = '[PINDIAG] packed-any admission passed: K64j abcd x2'
+NL = chr(10)
+
+
+class BootEndToEnd(unittest.TestCase):
+    def boot(self, profile, **extra):
+        environ = dict(QWEN_C2_SERVING='1', QWEN_C2_PROFILE=profile, **extra)
+        with mock.patch.object(contract, 'fix_sys_path'), mock.patch.object(contract, 'apply_environment') as applied:
+            try:
+                contract.boot(environ)
+            finally:
+                self.applied = applied.called
+
+    def test_a_traffic_profile_with_the_flag_in_the_process_env_dies_before_anything_is_applied(self):
+        with mock.patch.object(contract, 'load_profile', side_effect=lambda path=None, name=None: dict(
+                profiles()['c2-packed-tp4-8x262k'], name='c2-packed-tp4-8x262k')):
+            for extra in (dict(), dict(QWEN_C2_GATE='1'), dict(QWEN_C2_GATE='1', QWEN_C2_GATE_PROFILE='1')):
+                with self.assertRaises(ValueError) as caught:
+                    self.boot('c2-packed-tp4-8x262k', **dict(extra, **{FLAG: '1'}))
+                self.assertIn(FLAG, str(caught.exception))
+                self.assertFalse(self.applied)
+
+
+class SmokeCheckWaiver(unittest.TestCase):
+    TRAFFIC = dict(env={'QWEN_FAST_EXTENT_REPLAY': '1'})
+    GATE_FLAGGED = dict(gate_only=True, env={FLAG: '1', 'QWEN_C2_GATE_PROFILE': '1'})
+    GATE_PLAIN = dict(gate_only=True, env={'QWEN_C2_GATE_PROFILE': '1'})
+
+    def test_a_traffic_profile_shows_no_waiver(self):
+        self.assertEqual(smoke.waiver_problems(QUALIFIED_PASS, self.TRAFFIC), [])
+        for text in (WAIVED_LINE, WAIVED_PASS):
+            self.assertTrue(smoke.waiver_problems(text, self.TRAFFIC), text)
+        self.assertTrue(smoke.waiver_problems(QUALIFIED_PASS, dict(env={FLAG: '1'})))
+
+    def test_a_flagged_gate_profile_needs_exactly_one_loud_line_and_the_waived_admission(self):
+        self.assertEqual(smoke.waiver_problems(WAIVED_LINE + NL + WAIVED_PASS, self.GATE_FLAGGED), [])
+        self.assertTrue(smoke.waiver_problems(WAIVED_PASS, self.GATE_FLAGGED))
+        self.assertTrue(smoke.waiver_problems(WAIVED_LINE + NL + WAIVED_LINE + NL + WAIVED_PASS, self.GATE_FLAGGED))
+        self.assertTrue(smoke.waiver_problems(WAIVED_LINE, self.GATE_FLAGGED))
+
+    def test_a_gate_profile_without_the_flag_shows_no_waiver(self):
+        self.assertEqual(smoke.waiver_problems(QUALIFIED_PASS, self.GATE_PLAIN), [])
+        self.assertTrue(smoke.waiver_problems(WAIVED_LINE, self.GATE_PLAIN))
+
+    def test_check_stamps_a_waived_run_and_flags_a_leak(self):
+        problems, facts = smoke.check('', WAIVED_LINE + NL + WAIVED_PASS, False, entry=self.GATE_FLAGGED)
+        self.assertEqual(facts.get('unqualified'), 'UNQUALIFIED (262k waiver)')
+        self.assertFalse([p for p in problems if 'waiver' in p])
+        problems, facts = smoke.check('', WAIVED_LINE, False, entry=self.TRAFFIC)
+        self.assertTrue([p for p in problems if 'traffic profile' in p])
+
+    def test_the_loud_line_is_kept_by_the_gate_harness(self):
+        import lever_n_m3native_gate as lever
+        self.assertEqual(lever.select_diagnostic([pw.WAIVER_MARKER + ': x']), [pw.WAIVER_MARKER + ': x'])
+
+
+class GateDeepRounds(unittest.TestCase):
+    def report(self, max_family, count=10):
+        return dict(s2=dict(rounds=dict(count=count, max_family=max_family)))
+
+    def test_only_a_262k_window_is_held_to_it(self):
+        found = {'profiles': profiles()}
+        self.assertTrue(gate.deep_window(found, 'c2-packed-tp4-8x262k-gate'))
+        self.assertFalse(gate.deep_window(found, 'c2-packed-tp4-8'))
+        self.assertFalse(gate.deep_window(None, 'c2-packed-tp4-8'))
+
+    def test_a_round_past_131k_exercises_and_none_leaves_it_not_exercised(self):
+        self.assertEqual(gate.deep_round_shortfalls('concurrent', self.report(253952)), [])
+        self.assertTrue(gate.deep_round_shortfalls('concurrent', self.report(131328)))
+        self.assertTrue(gate.deep_round_shortfalls('concurrent', self.report(0, 0)))
+        self.assertTrue(gate.deep_round_shortfalls('concurrent', None))
+
+    def test_max_family_counts_every_round_not_the_capped_sample(self):
+        import lever_n_m3native_gate as lever
+        lines = NL.join('[PINDIAG] packed extent round round=%d live=1 families=[0:%d]' % (n, 256 * (n + 1)) for n in range(100))
+        rounds = lever.extent_rounds(lines)
+        self.assertEqual(rounds['max_family'], 256 * 100)
+        self.assertEqual(len(rounds['families_seen']), 64)
 
 
 if __name__ == '__main__':

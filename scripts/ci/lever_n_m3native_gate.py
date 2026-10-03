@@ -2822,6 +2822,7 @@ def extent_rounds(log_text):
                 capped_rounds=sum(1 for entry in rounds if entry['capped']),
                 capped_segments=sum(len(entry['capped']) for entry in rounds),
                 idle_rounds=sum(1 for entry in rounds if entry['idle']),
+                max_family=max((value for entry in rounds for value in entry['families']), default=0),
                 families_seen=sorted(set(value for entry in rounds for value in entry['families']))[:64])
 
 
