@@ -423,6 +423,8 @@ echo "### $mode $stamp card=$QUAL_CARD ($QUAL_TAG) node=$node image=${IMAGE:7:12
 qual_card_recheck   # the board is still on the node the holder check cleared
 trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
 set +e   # keep the exit status of the run itself, below
+# One card: the serving image bakes TT_MESH_GRAPH_DESC_PATH (the four-card descriptor), which cannot map onto the single
+# card this container sees ("Graph specified in MGD could not fit"), so the run unsets it and tt-metal discovers the card.
 timeout -k 30 "$timeout_s" docker run --rm --name "$name" --network none \
   --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
   --pids-limit 1024 --memory 48g --cpus 8 --shm-size 4g \
@@ -435,7 +437,7 @@ timeout -k 30 "$timeout_s" docker run --rm --name "$name" --network none \
   "${WM[@]}" \
   -e TT_METAL_HOME=/opt/tt-metal -e TT_METAL_CACHE=/kcache -e OMP_NUM_THREADS=8 \
   -e QWEN_SDPA_TREE_SCRATCH_ROUNDS=1 \
-  --entrypoint python3 "$IMAGE" -B /bench/test_sdpa_decode_qwen_card_m.py "${args[@]}" "${extra[@]}" \
+  --entrypoint env "$IMAGE" -u TT_MESH_GRAPH_DESC_PATH python3 -B /bench/test_sdpa_decode_qwen_card_m.py "${args[@]}" "${extra[@]}" \
   2>&1 | tee "$R/$mode-$stamp.log"
 status=${PIPESTATUS[0]}
 echo "### exit $status; report $R/$mode-$stamp.json; native log $R/$mode-$stamp.json.native.log"
