@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -163,9 +164,9 @@ class VerdictTests(unittest.TestCase):
     def good(self):
         tally = dict(cases=10, exact_cases=10, differing=0, differing_bytes=0, unmeasured=0, first_failure=None)
         control = dict(cases=2, exact_cases=0, differing=5, differing_bytes=5, unmeasured=0, first_failure=None)
-        return dict(a_qualified=True, tallies=dict(V=tally, N5r=control, N5x=control), unwritten=[], inputs_moved=[],
+        return dict(a_qualified=True, tallies=dict(V=tally, N5o=control, N5r=control, N5x=control), unwritten=[], inputs_moved=[],
                     missing_scope=[], sections=dict(
-                        negative=dict(error=None, N5r=dict(detects=True), N5x=dict(detects=True)),
+                        negative=dict(error=None, N5o=dict(detects=True), N5r=dict(detects=False), N5x=dict(detects=True)),
                         stale=dict(error=None, exact=True), trace=dict(error=None, exact=True, unwritten=[]),
                         cache=dict(error=None, ok=True, problems=[]), p0=dict(error=None)))
 
@@ -182,7 +183,7 @@ class VerdictTests(unittest.TestCase):
         self.assertIn('V differs from A', problems[0])
 
     def test_each_hard_miss_fails(self):
-        cases = {'blind N5r': lambda r: r['sections']['negative']['N5r'].update(detects=False),
+        cases = {'blind N5o': lambda r: r['sections']['negative']['N5o'].update(detects=False),
                  'blind N5x': lambda r: r['sections']['negative']['N5x'].update(detects=False),
                  'moved': lambda r: r['inputs_moved'].append(dict(user=0, tensor='qkv')),
                  'unwritten': lambda r: r['unwritten'].append(dict(arm='V', pages=1)),
@@ -395,7 +396,8 @@ class Behaviour:
         self.flip_v = flags.get('flip_v', False)             # V differs from A by one bit, always
         self.flip_v_on_replay = flags.get('flip_v_on_replay', False)  # ... only inside a trace replay
         self.flip_v_third = flags.get('flip_v_third', False)  # ... only on a V launch after V has run on two sets
-        self.blind_n5r = flags.get('blind_n5r', False)       # N5r behaves like A
+        self.blind_n5o = flags.get('blind_n5o', False)       # N5o behaves like A
+        self.blind_n5r = flags.get('blind_n5r', True)        # N5r behaves like A (as on the card: a 1-ulp SUM change is invisible)
         self.blind_n5x = flags.get('blind_n5x', False)
         self.move_input = flags.get('move_input', False)      # V overwrites its first input
         self.unwritten_v_states = flags.get('unwritten_v_states', False)
@@ -550,6 +552,8 @@ class FakeBench(FakeTTNN):
             flip_out = None
             if variant == 'N5r' and not self.behaviour.blind_n5r:
                 flip_out = (0, 0)
+            if variant == 'N5o' and not self.behaviour.blind_n5o:
+                flip_out = (3, 0)
             if variant == 'N5x' and not self.behaviour.blind_n5x:
                 flip_out = (1, 1)
             if is_split and variant == 'A' and diag == 'none':
@@ -615,7 +619,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(tally['exact_cases'], tally['cases'])
         self.assertGreater(tally['cases'], 12)
         self.assertEqual(tally['differing_bytes'], 0)
-        self.assertTrue(report['sections']['negative']['N5r']['detects'])
+        self.assertTrue(report['sections']['negative']['N5o']['detects'])
         self.assertTrue(report['sections']['negative']['N5x']['detects'])
         self.assertTrue(report['sections']['stale']['exact'])
         self.assertTrue(report['sections']['trace']['exact'])
@@ -667,10 +671,14 @@ class FlowTests(unittest.TestCase):
         self.assertFalse(failure['first']['padding_row'])
 
     def test_a_blind_control_fails_the_gate(self):
-        code, report, lines, fake = run_probe(Behaviour(blind_n5r=True), extra=('--sections', 'negative'))
+        code, report, lines, fake = run_probe(Behaviour(blind_n5o=True), extra=('--sections', 'negative'))
         self.assertEqual(code, 1)
+        self.assertFalse(report['sections']['negative']['N5o']['detects'])
+        self.assertTrue(any('N5o' in problem for problem in report['problems']))
+        # N5r is informational: blind or not, it never decides the verdict
+        code, report, lines, fake = run_probe(Behaviour(blind_n5r=True), extra=('--sections', 'negative'))
         self.assertFalse(report['sections']['negative']['N5r']['detects'])
-        self.assertTrue(any('N5r' in problem for problem in report['problems']))
+        self.assertFalse(any('N5r' in problem for problem in report['problems']))
         code, report, lines, fake = run_probe(Behaviour(blind_n5x=True), extra=('--sections', 'negative'))
         self.assertEqual(code, 1)
         self.assertFalse(report['sections']['negative']['N5x']['detects'])
@@ -738,7 +746,9 @@ class FlowTests(unittest.TestCase):
             with contextlib.redirect_stdout(stdout), mock.patch.object(probe.os, '_exit', side_effect=fake_exit):
                 thread = threading.Thread(target=lambda: self.run_main(argv), daemon=True)
                 thread.start()
-                thread.join(6)
+                deadline = time.monotonic() + 60  # a loaded CI runner can be slow: wait for the exit, not a fixed 6 s
+                while not exits and time.monotonic() < deadline:
+                    thread.join(0.2)
             self.assertEqual(exits[:1], [3])
             report = json.loads(out.read_text())
             self.assertIn('watchdog', report['error'])

@@ -8,7 +8,10 @@ build is the one the model runs). One p150a, a 1x1 mesh, four users x 16 rows at
   A    K5-A, gdn_seq_block.load_kernels(root, 0): the build production runs (its QUALIFIED triple); the reference.
   V    V5, gdn_seq_block_split.load_kernels(root, unqualified=True): the candidate. Only a full-scope PASS here licenses
        committing its sha256 triple (the verdict line's `v5_triple`).
-  N5r  negative control: V with the owner's rowsum in the order 2, 3, 0, 1 (what a partial-sum split would give).
+  N5o  negative control the gate relies on: V with the owner's rowsum over its own two tiles only (moves the norm
+       factor in every row, far beyond a TF32 ulp).
+  N5r  informational control: V with the owner's rowsum in the order 2, 3, 0, 1 (what a partial-sum split would give).
+       A 1-ulp SUM change almost never reaches the output through the TF32 read, so it is reported, never gated.
   N5x  negative control: V with no exchange and no wait (the owner normalises over stale pages).
 
 Every comparison is bit for bit, on raw page images: ttnn's bf16 upload and readback flush -0.0 and denormals and turn NaN into
@@ -31,7 +34,7 @@ deltas only mean something in a process where V has not run yet):
              parameters, real initial states from a CPU recurrence at offsets 1,024 / 2,048 / 3,072 / 4,080; layers 23 and 47
              as a real-weights proxy on layer-0-style activations)
   users      1, 2 and 3 users (the union of cores, and so the program, differs)
-  negative   N5r must differ from A in at least one byte over R1 and RA; N5x, run straight after V on a DIFFERENT input
+  negative   N5o must differ from A in at least one byte over R1 and RA (N5r is reported only); N5x, run straight after V on a DIFFERENT input
              set, must differ from A on its own set (stale exchange pages show)
   stale      V(X), V(Y), V(X), each against A on the same set
   trace      A and V captured once each; 100 replays, the inputs restaged in place by raw copy, set X and set Y alternately;
@@ -86,7 +89,7 @@ RA_SCALE = 2.0 ** 8
 # The timing labels (e, anchored on K5-A's measured 193.4 us a layer): what V - A must clear.
 PROCEED_US, IMAGE_BUILD_US, WRITE_BOUND_US = -65.0, -40.0, 15.0
 NOSNAP = 'nosnap'
-ARM_BUILDS = ('A', 'V', 'N5r', 'N5x')
+ARM_BUILDS = ('A', 'V', 'N5r', 'N5x', 'N5o')
 TIMING_ARMS = ('A', 'V', 'A-nosnap', 'V-nosnap', 'V-depth1')
 MODULES = ('gdn_seq_block.py', 'gdn_seq_block_compute.cpp', 'gdn_seq_block_reader.cpp', 'gdn_seq_block_writer.cpp',
            'gdn_seq_block_split.py', 'gdn_seq_block_split_compute.cpp', 'gdn_seq_block_split_reader.cpp',
@@ -219,7 +222,7 @@ def decide(report):
         undecided.append('no V case ran')
     negative = sections.get('negative', {})
     if negative and not negative.get('error'):
-        for control in ('N5r', 'N5x'):
+        for control in ('N5o', 'N5x'):
             if not negative.get(control, {}).get('detects'):
                 fail.append('negative control %s did not differ from A: the compare is blind to it' % control)
     if report.get('inputs_moved'):
@@ -545,6 +548,7 @@ def main(argv=None):
         builds = dict(A=seq.load_kernels(arguments.root, 0, unqualified=True),
                       V=v5.load_kernels(arguments.root, unqualified=True),
                       N5r=v5.load_kernels(arguments.root, variant='N5r', unqualified=True),
+                      N5o=v5.load_kernels(arguments.root, variant='N5o', unqualified=True),
                       N5x=v5.load_kernels(arguments.root, variant='N5x', unqualified=True))
         builds['A-nosnap'] = seq.load_kernels(arguments.root, 0, diag=NOSNAP, unqualified=True)
         builds['V-nosnap'] = v5.load_kernels(arguments.root, diag=NOSNAP, unqualified=True)
@@ -738,7 +742,7 @@ def main(argv=None):
             return {'user%d_%s' % (user, name): value for user, parts in enumerate(per_user)
                     for name, value in parts.items() if name != 'where'}
 
-        tallies = report['tallies'] = dict(V=dev.new_tally(), N5r=dev.new_tally(), N5x=dev.new_tally())
+        tallies = report['tallies'] = dict(V=dev.new_tally(), N5o=dev.new_tally(), N5r=dev.new_tally(), N5x=dev.new_tally())
 
         def section(name, body):
             if name not in arguments.sections:
@@ -804,13 +808,21 @@ def main(argv=None):
                     run_pair(case, label, entry, index)
                 finally:
                     case.free()
+            r5_errors = []
             if 'R5' in arguments.regimes:
                 entry['r5'] = []
                 for rank in arguments.r5_layers:
                     label = 'R5/gdn%d' % rank
                     stage('p0-case', case=label)
-                    norm_w, users_host, poison, meta = real_inputs(torch, arguments.model_dir, arguments.real_text, rank,
-                                                                   found, arguments.users)
+                    # A layer whose real weights cannot be read (a checkpoint with another tensor layout) must not
+                    # take the exactness cases after it down: record it, run the rest, then end the section undecided.
+                    try:
+                        norm_w, users_host, poison, meta = real_inputs(
+                            torch, arguments.model_dir, arguments.real_text, rank, found, arguments.users)
+                    except Exception as error:  # noqa: BLE001
+                        r5_errors.append('%s: %r' % (label, error))
+                        entry['r5'].append(dict(layer=rank, error=repr(error)))
+                        continue
                     entry['r5'].append(meta)
                     case = Case((norm_w, users_host, poison))
                     try:
@@ -819,6 +831,8 @@ def main(argv=None):
                         case.free()
             if 'R4' in arguments.regimes:
                 run_r4(entry)
+            if r5_errors:
+                raise AssertionError('R5 inputs unavailable: ' + '; '.join(r5_errors))
 
         def run_r4(entry):
             r4 = entry['r4'] = dict(launches=arguments.r4_launches, completed=0, exact=True, first_failure=None,
@@ -915,19 +929,24 @@ def main(argv=None):
         # ---------------- negative ----------------
         def negative(entry):
             sets = [('R1', seed) for seed in arguments.seeds] + [('RA', seed) for seed in arguments.other_seeds]
-            r5 = dev.new_tally()
+            r5, r5o = dev.new_tally(), dev.new_tally()
             for index, (regime, seed) in enumerate(sets):
-                label = 'N5r/%s/seed%d' % (regime, seed)
+                label = 'N5o/%s/seed%d' % (regime, seed)
                 stage('negative-case', case=label)
                 case = Case(host_inputs(torch, regime, seed, arguments.users, found))
                 try:
-                    results = {arm: execute_arm(arm, case, label, entry) for arm in ('A', 'N5r')}
-                    dev.record(r5, label, merged(compare_users(results['A'], results['N5r'], arguments.users)))
+                    results = {arm: execute_arm(arm, case, label, entry) for arm in ('A', 'N5o', 'N5r')}
+                    dev.record(r5o, label, merged(compare_users(results['A'], results['N5o'], arguments.users)))
+                    dev.record(r5, label.replace('N5o', 'N5r'),
+                               merged(compare_users(results['A'], results['N5r'], arguments.users)))
                 finally:
                     case.free()
+            tallies['N5o'] = r5o
             tallies['N5r'] = r5
+            entry['N5o'] = dict(detects=dev.detects(r5o), differing_bytes=r5o['differing_bytes'], cases=r5o['cases'],
+                                exact_cases=r5o['exact_cases'])
             entry['N5r'] = dict(detects=dev.detects(r5), differing_bytes=r5['differing_bytes'], cases=r5['cases'],
-                                exact_cases=r5['exact_cases'])
+                                exact_cases=r5['exact_cases'], gated=False)
             # N5x straight after V on a DIFFERENT input set: the stale exchange pages are V's, from set X.
             x = Case(host_inputs(torch, 'R1', 1701, arguments.users, found))
             y = Case(host_inputs(torch, 'R1', 1702, arguments.users, found))
@@ -1160,7 +1179,7 @@ def main(argv=None):
         summary.update(verdict=verdict, scope='reduced' if report['missing_scope'] else 'full', problems=problems,
                        p0=dict(exact_cases=tallies['V']['exact_cases'], cases=tallies['V']['cases'],
                                differing_bytes=tallies['V']['differing_bytes']),
-                       negative={name: report['sections'].get('negative', {}).get(name) for name in ('N5r', 'N5x')},
+                       negative={name: report['sections'].get('negative', {}).get(name) for name in ('N5o', 'N5r', 'N5x')},
                        timing={key: report['sections'].get('timing', {}).get(key)
                                for key in ('label', 'a_us', 'v_us', 'delta_us', 'v_nosnap_us', 'write_bound')},
                        v5_triple=report['v5_triple'] if verdict == 'PASS' else None,

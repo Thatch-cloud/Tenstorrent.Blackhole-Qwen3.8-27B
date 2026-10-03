@@ -140,5 +140,5 @@ half, so the compute never waits for the copy. The depth is in the generated sou
 
 **Qualification.** `QUALIFIED` is empty: the flag refuses to serve until the single-card byte gate (`optimisation/ttnn-op/v5split/run_card_m.sh`, the cardm step) has passed at full scope and its
 `v5_triple` is committed. The gate compares K5-A and V5 bit for bit on raw page images: four users x 16 rows at the four-card geometry over random, wide-range, edge, poisoned-padding,
-column-asymmetric, 2,048-token-chain and real-text inputs, the traced replays with the inputs restaged, the program-cache deltas, and two negative controls (the owner's rowsum in the order 2, 3, 0, 1, and
-no exchange) that must differ; then timing. The window's jobs are in `scripts/ci/references/tp4-v5split-jobs`.
+column-asymmetric, 2,048-token-chain and real-text inputs, the traced replays with the inputs restaged, the program-cache deltas, and two gated negative controls (N5o: the owner's rowsum over its own two tiles only, which moves the norm factor in every row; and N5x: no exchange) that must differ, plus an informational
+N5r (rowsum in the order 2, 3, 0, 1: a 1-ulp SUM change almost never survives the TF32 read of the norm factor, so it is reported and never gated); then timing. The window's jobs are in `scripts/ci/references/tp4-v5split-jobs`.

@@ -27,8 +27,9 @@ Flag (read when the process installs the twins and when the verify trace is buil
                           QWEN_FAST_TP=4 (the K5-A launch at the pair keeps 24 heads on 96 cores already).
 
 The split launch is refused unless QUALIFIED holds the generated sha256 triple; the single-card probe builds anything
-else with the explicit `unqualified=True` builder argument, never from the environment. The negative controls N5r (the
-owner's rowsum in the order 2, 3, 0, 1) and N5x (no exchange, no wait) and the timing diagnostics ('nosnap',
+else with the explicit `unqualified=True` builder argument, never from the environment. The negative controls N5o (the
+owner's rowsum over its own two tiles only: the one the gate relies on), N5r (the rowsum in the order 2, 3, 0, 1:
+informational, a 1-ulp SUM change rarely survives the TF32 read) and N5x (no exchange, no wait) and the timing diagnostics ('nosnap',
 'passthrough') are builder arguments too and can never be qualified.
 
 Runtime arguments are the same LENGTH on every core and every launch (generic_op's program cache does not hash runtime
@@ -56,7 +57,7 @@ ROLES = seq.ROLES
 SOURCES = dict(reader='gdn_seq_block_split_reader.cpp', writer='gdn_seq_block_split_writer.cpp',
                compute='gdn_seq_block_split_compute.cpp')
 BUILD_ANCHOR = seq.BUILD_ANCHOR
-VARIANTS = ('A', 'N5r', 'N5x')                  # A: the served candidate; N5r, N5x: negative controls
+VARIANTS = ('A', 'N5r', 'N5x', 'N5o')            # A: the served candidate; N5r, N5x, N5o: negative controls
 DIAGNOSTICS = (None, 'nosnap', 'passthrough')   # timing builds; never exact, never served
 DEPTHS = (1, 2)                                 # TOKA / TOKB depth in tokens; 2 is the plan, 1 is K5-A's
 DEPTH = 2

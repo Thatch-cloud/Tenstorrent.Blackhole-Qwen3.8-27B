@@ -396,6 +396,8 @@ class SourceTests(unittest.TestCase):
         self.assertIn('rowsum_k_rotated(SB_NSQ, SB_SUM, SB_VT)', text('gdn_seq_block_split_compute.cpp'))
         self.assertIn('#define GDN_SEQ_BLOCK_VARIANT 1', build('N5r')['compute'])
         self.assertIn('#define GDN_SEQ_BLOCK_VARIANT 2', build('N5x')['writer'])
+        self.assertIn('#define GDN_SEQ_BLOCK_VARIANT 3', build('N5o')['compute'])
+        self.assertIn('rowsum_k_own_only(SB_NSQ, SB_SUM, SB_VT)', text('gdn_seq_block_split_compute.cpp'))
 
     def test_unknown_variants_diagnostics_and_depths_are_refused(self):
         with SyntheticRoot() as root:
@@ -694,7 +696,7 @@ class QualificationTests(unittest.TestCase):
             self.assertFalse(kernels.qualified)
             with patch.dict(split.QUALIFIED, {0: split.sha256(kernels)}):
                 self.assertTrue(split.load_kernels(root).qualified)
-                for kwargs in (dict(variant='N5r'), dict(variant='N5x'), dict(diag='nosnap'), dict(depth=1)):
+                for kwargs in (dict(variant='N5r'), dict(variant='N5x'), dict(variant='N5o'), dict(diag='nosnap'), dict(depth=1)):
                     with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, 'is not qualified'):
                         split.load_kernels(root, **kwargs)
 
@@ -731,14 +733,18 @@ class TwinTests(unittest.TestCase):
                 'rows, modules = tp_addresses.bound_twins({"QWEN_FAST_TP": "4"})\n'
                 'print(len(rows), len(modules), "gdn_seq_block_split" in sys.modules, "gdn_seq_block" in sys.modules)\n'
                 'rows0, _ = tp_addresses.bound_twins({"QWEN_FAST_TP": "4", "QWEN_FAST_GDN_SPLIT_V": "1"})\n'
-                'print(rows == rows0, ("gdn_seq_block", "execute", "gdn_seq_block_split", "execute") in rows)\n')
-        env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
+                'print(rows == rows0, ("gdn_seq_block", "execute", "gdn_seq_block_split", "execute") in rows)\n'
+                'for raw in ("0", ""):\n'
+                '    tp_addresses.bound_twins({"QWEN_FAST_TP": "4", "QWEN_FAST_GDN_SPLIT_V": raw})\n'
+                'print("gdn_seq_block_split" in sys.modules)\n')
+        env =dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
         env.pop('QWEN_FAST_GDN_SPLIT_V', None)
         out = subprocess.run([sys.executable, '-B', '-c', code], cwd=str(HERE), env=env, capture_output=True,
                              text=True, check=True).stdout.split('\n')
         rows, modules, imported, seq_imported = out[0].split()
         self.assertEqual(imported, 'False')
         self.assertEqual(out[1], 'True False')
+        self.assertEqual(out[2], 'False')  # '1', '0' and '' never import the lever (a fall-through to its parser would)
         self.assertEqual(int(rows), len(tp_addresses.TWINS) - len(tp_addresses.FLAGGED_TWINS))
 
     def test_flag_two_binds_the_twin_and_uninstall_restores_k5a(self):

@@ -430,7 +430,7 @@ jobs:
       - name: Run a qualification harness on card M
         if: contains(steps.job.outputs.actions, 'cardm')
         working-directory: c2
-        timeout-minutes: 100
+        timeout-minutes: 140
         shell: bash
         env:
           HARNESS: ${{ steps.job.outputs.cardm_harness }}

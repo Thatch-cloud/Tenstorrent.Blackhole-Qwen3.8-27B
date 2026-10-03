@@ -56,12 +56,12 @@ constexpr uint32_t TOKB_KCOL = 0, TOKB_Q = 4, TOKB_PAGES = 8;
 static_assert(TOKA_A == 0, "the served bcast_scalar_mul reads its scalar at page 0");
 static_assert(TOKB_KCOL == 0, "the T5 helpers read kcol_i at page i");
 
-constexpr uint32_t SB_VARIANT_A = 0, SB_VARIANT_N5R = 1, SB_VARIANT_N5X = 2;
+constexpr uint32_t SB_VARIANT_A = 0, SB_VARIANT_N5R = 1, SB_VARIANT_N5X = 2, SB_VARIANT_N5O = 3;
 constexpr uint32_t SB_DIAG_NONE = 0, SB_DIAG_NOSNAP = 1, SB_DIAG_PASSTHROUGH = 2;
 constexpr uint32_t SB_LEVEL = GDN_SEQ_BLOCK_LEVEL;
 constexpr uint32_t SB_VARIANT = GDN_SEQ_BLOCK_VARIANT;
 constexpr uint32_t SB_DIAG = GDN_SEQ_BLOCK_DIAG;
-static_assert(SB_VARIANT <= SB_VARIANT_N5X && SB_DIAG <= SB_DIAG_PASSTHROUGH, "unknown build");
+static_assert(SB_VARIANT <= SB_VARIANT_N5O && SB_DIAG <= SB_DIAG_PASSTHROUGH, "unknown build");
 static_assert(SB_LEVEL == 0, "no A+ increment is implemented; level 0 only");
 constexpr uint32_t SB_RT_USED = 1;  // runtime words read: half
 
@@ -182,8 +182,9 @@ void state_out(uint32_t s, uint32_t out, uint32_t out2, uint32_t feedback, bool 
 }
 
 // Negative control N5r: the epilogue's rowsum_k with the value tiles added in the order 2, 3, 0, 1
-// (the owner's own tiles last) - the order a partial-sum split would have produced. Known to change
-// bits whenever the halves differ; the probe must see it.
+// (the owner's own tiles last) - the order a partial-sum split would have produced. INFORMATIONAL only:
+// a 1-ulp change in the fp32 SUM almost never survives the TF32 srcB read in bcast_cols_mul, so the gate
+// does not rely on it (see N5o).
 void rowsum_k_rotated(uint32_t in, uint32_t o, uint32_t Kt) {
     cb_reserve_back(o, 1);
     pack_reconfig_data_format(o);
@@ -192,6 +193,25 @@ void rowsum_k_rotated(uint32_t in, uint32_t o, uint32_t Kt) {
     tile_regs_acquire();
     for (uint32_t k = 0; k < Kt; k++) {
         matmul_tiles(in, cb_ones, (k + Kt / 2) % Kt, 0, 0);
+    }
+    tile_regs_commit();
+    tile_regs_wait();
+    pack_tile(0, o, 0);
+    tile_regs_release();
+    cb_push_back(o, 1);
+}
+
+// Negative control N5o (the one the gate relies on): the rowsum over the owner's OWN two tiles only, the
+// helper's two left out. The norm factor then moves by far more than a TF32 ulp in every row, so a compare
+// that cannot see this one is blind.
+void rowsum_k_own_only(uint32_t in, uint32_t o, uint32_t Kt) {
+    cb_reserve_back(o, 1);
+    pack_reconfig_data_format(o);
+    reconfig_data_format(in, cb_ones);
+    matmul_init(in, cb_ones, 0);
+    tile_regs_acquire();
+    for (uint32_t k = 0; k < Kt / 2; k++) {
+        matmul_tiles(in, cb_ones, k, 0, 0);
     }
     tile_regs_commit();
     tile_regs_wait();
@@ -315,6 +335,8 @@ void kernel_main() {
         WAIT(SB_NSQ, SB_VT);
         if constexpr (SB_VARIANT == SB_VARIANT_N5R) {
             rowsum_k_rotated(SB_NSQ, SB_SUM, SB_VT);
+        } else if constexpr (SB_VARIANT == SB_VARIANT_N5O) {
+            rowsum_k_own_only(SB_NSQ, SB_SUM, SB_VT);
         } else {
             rowsum_k(SB_NSQ, SB_SUM, SB_VT);
         }
