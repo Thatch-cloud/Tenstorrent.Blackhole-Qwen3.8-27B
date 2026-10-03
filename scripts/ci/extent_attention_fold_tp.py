@@ -6,13 +6,15 @@ This twin subclasses the reader and overrides `__call__` only; tp_addresses.inst
 QWEN_FAST_TP=4 only (model_batch reaches the class through the module alias, which is the four-card twin module).
 
 QWEN_FAST_TP4_ATTN_FOLD unset or 0: `__call__` is the pinned reader's, called through `super()` with the same arguments (nothing
-here runs). QWEN_FAST_TP4_ATTN_FOLD=1: the per-segment query slices, fold DMAs, stacking concats, result slices, inverse folds and
+here runs). QWEN_FAST_TP4_SDPA (sdpa_long_tp) is read once, in `__init__`, after the pinned constructor has built and qualified the readers.
+QWEN_FAST_TP4_ATTN_FOLD=1: the per-segment query slices, fold DMAs, stacking concats, result slices, inverse folds and
 concats become attention_block_fold_tp's two launches; a query or a placement the launches are not written for takes the pinned
 path, logged as FALLBACK and counted (nothing is guessed).
 """
 
 import attention_block_fold_tp
 import extent_attention_replay_tp as base_module
+import sdpa_long_tp
 import tp4_vglue
 from tp_addresses import addresses, release_owned
 
@@ -27,6 +29,15 @@ def _pinned_class():
 
 
 class PackedExtentReplayReader(_pinned_class()):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # QWEN_FAST_TP4_SDPA (sdpa_long_tp): flag unset or off, this returns at once and nothing is touched.
+        try:
+            sdpa_long_tp.apply(self)
+        except BaseException:
+            self.close()
+            raise
+
     def __call__(self, query, keys, values, *, page_table_tensor=None, cur_pos_tensor=None, **kwargs):
         if tp4_vglue.enabled(tp4_vglue.ATTN_FOLD):
             self.check_open()
