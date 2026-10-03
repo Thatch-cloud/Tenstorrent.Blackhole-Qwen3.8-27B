@@ -86,7 +86,7 @@ The stock 734c90c0 plus W1-W3. Output **`ac6cf815…`**.
 
    ```
    tar --force-local --exclude=__pycache__ --exclude=.pytest_cache -cf k64i.tar -C optimisation/ttnn-op sdpa_decode_slice sdpa_decode_qwen sdpa_prefill_chain
-   plink -batch -pw thatch thatch@10.10.11.184 "ssh -o BatchMode=yes thatch@192.168.2.165 'mkdir -p ~/kwork64/k64i && cat > ~/kwork64/k64i/k64i.tar'" < k64i.tar
+   (copy k64i.tar to the build host's ~/kwork64/k64i/ with your usual remote-copy method; access details are kept in private operations notes, not in this repository)
    # then, as an argument-sized script:
    cd ~/kwork64/k64i && tar -xf k64i.tar && ls sdpa_decode_slice/build_k64i.sh
    ```
