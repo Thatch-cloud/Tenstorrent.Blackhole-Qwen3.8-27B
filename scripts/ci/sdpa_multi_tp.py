@@ -33,6 +33,7 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 
+import attention_block_fold_tp as fold
 import tp_shapes
 
 HERE = Path(__file__).resolve().parent
@@ -619,7 +620,6 @@ class MultiBlock(object):
     def call(self, query, keys, values, *, scale, memory_config, served=None):
         """One attention layer for the whole block. `served`: under audit, a callable that runs the per-user launches and returns
         their block output (a tensor this call compares with the multi launch's and releases)."""
-        import attention_block_fold_tp as fold
         from tp_addresses import addresses, release_owned
 
         reader, operations = self.reader, self.operations
