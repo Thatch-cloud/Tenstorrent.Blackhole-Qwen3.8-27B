@@ -80,3 +80,32 @@ def verify_checkpoint(directory, expected):
         if not os.path.isfile(target) or sha256_file(target) != digest:
             raise IntakeError('checkpoint file %s is missing or does not match its pin' % name)
     return True
+
+
+def draft_scalars(config):
+    """{name: value} of the scalars upstream applies around a draft model that the A0 port and walkers do NOT: the input embedding scale
+    (dflash_generate), the output multiplier and the final-logit softcap (compute_logits), and the tapped target layers. `config` is
+    the checkpoint's config.json as a dict; z-lab's `_draft_value` reads `dflash_config` first, then the top level."""
+    nested = config.get('dflash_config') if isinstance(config.get('dflash_config'), dict) else {}
+
+    def value(name, default):
+        return nested.get(name, config.get(name, default))
+    return dict(input_embedding_scale=value('input_embedding_scale', 1.0), output_multiplier=value('output_multiplier', 1.0),
+                final_logit_softcapping=value('final_logit_softcapping', None), target_layer_ids=value('target_layer_ids', None))
+
+
+def check_draft_config(config, taps, ids=None, allow_unnamed=False):
+    """{check name: bool}: both scalars neutral, no softcap, and the draft's tapped target layers equal to the layers the harness hooks.
+    `ids`: the layers the loaded model itself resolved (z-lab computes them when the config names none); else the config's own.
+    A checkpoint that names none is refused unless `allow_unnamed` (DSpark: its taps are pinned in the reviewed intake module)."""
+    scalars = draft_scalars(config)
+    ids = scalars['target_layer_ids'] if ids is None else ids
+    softcap = scalars['final_logit_softcapping']
+    if ids is None:
+        taps_match = bool(allow_unnamed)
+    else:
+        taps_match = [int(i) for i in ids] == [int(i) for i in taps]
+    return dict(embedding_scale_neutral=float(scalars['input_embedding_scale']) == 1.0,
+                output_multiplier_neutral=float(scalars['output_multiplier']) == 1.0,
+                no_softcap=softcap is None or float(softcap) <= 0,
+                taps_match=taps_match)

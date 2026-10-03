@@ -219,6 +219,60 @@ class UpstreamBackboneTests(unittest.TestCase):
         self.assertLessEqual(features.highest, 80)
 
 
+class ScaleModel(object):
+    """Records the noise rows it was handed."""
+    def __init__(self):
+        self.noise = None
+
+    def __call__(self, position_ids, noise_embedding, target_hidden, past_key_values, use_cache):
+        self.noise = noise_embedding.clone()
+        return torch.zeros(1, noise_embedding.shape[1], 4)
+
+
+class UpstreamFidelityTests(unittest.TestCase):
+    def test_the_noise_rows_carry_upstreams_input_embedding_scale(self):
+        embed = torch.arange(40, dtype=torch.float32).reshape(10, 4)
+        for scale in (1.0, 2.5):
+            model = ScaleModel()
+            backbone = dr.UpstreamBackbone(model, embed, FakeCache, lambda cache, length: None, embedding_scale=scale)
+            backbone.block_hidden(Features(torch.zeros(100, 6)), [1, 2], 30, 16)
+            self.assertTrue(torch.equal(model.noise[0], embed[[1, 2]] * scale))
+
+    def test_the_default_scale_is_neutral(self):
+        embed = torch.arange(40, dtype=torch.float32).reshape(10, 4)
+        model = ScaleModel()
+        dr.UpstreamBackbone(model, embed, FakeCache, lambda cache, length: None).block_hidden(Features(torch.zeros(100, 6)), [3], 5, 16)
+        self.assertTrue(torch.equal(model.noise[0], embed[[3]]))
+
+    def test_the_proposer_calls_upstreams_propose_with_the_head_module_and_temperature_zero(self):
+        seen = []
+
+        class Model(object):
+            def propose(self, hidden, anchor_ids, output_head, temperature):
+                seen.append((output_head, temperature))
+                return torch.tensor([[7, 8, 9]]), 'candidates', None
+        head = object()
+        proposer = dr.UpstreamProposer(Model(), head)
+        path = proposer.propose(torch.zeros(1, 3, 4), torch.tensor([1]), torch.zeros(5, 4))
+        self.assertEqual(path.tolist(), [[7, 8, 9]])
+        self.assertEqual(seen, [(head, 0.0)])
+
+    def test_the_walker_takes_the_proposer_in_place_of_the_selector(self):
+        class Backbone(object):
+            def reset(self):
+                pass
+
+            def block_hidden(self, features, noise, start, window):
+                return torch.zeros(len(noise), 4)
+
+        class Proposer(object):
+            def propose(self, hidden, anchor_ids, head):
+                return torch.tensor([[11] * hidden.shape[1]])
+        walker = dr.Dflash2Walker(Backbone(), torch.zeros(5, 4), Proposer(), 9, 3, 16)
+        walker.begin(Features(torch.zeros(100, 6)))
+        self.assertEqual(walker.propose([1, 2, 3, 4, 5], 2, 3), [11, 11, 11])
+
+
 class WeightsAndV4Tests(unittest.TestCase):
     def test_load_port_state_round_trip_and_refusals(self):
         cfg, source, _, _, _ = setup()
@@ -261,6 +315,33 @@ class WeightsAndV4Tests(unittest.TestCase):
                                        lambda p, a: len([1 for x, y in zip(p, a) if x == y]))
         self.assertEqual(gpu, 7)
         self.assertFalse(all(agree for agree, _ in rows))
+
+
+class V4SeparateCopiesTests(unittest.TestCase):
+    def test_cpu_copies_of_the_head_and_tables_give_the_same_rows(self):
+        generator = torch.Generator().manual_seed(5)
+        hidden = torch.randn(7, 16, generator=generator)
+        head = torch.randn(VOCAB, 16, generator=generator)
+        pred, succ = torch.randn(VOCAB, 4, generator=generator), torch.randn(VOCAB, 4, generator=generator)
+        answer = dr.markov_chain(hidden @ head.T, 5, pred, succ).tolist()
+        rows, (gpu, cpu) = dr.v4_round(hidden, hidden.clone(), head, pred, succ, 5, answer, dr.matching_prefix,
+                                       cpu_head=head.clone(), cpu_predecessor=pred.clone(), cpu_successor=succ.clone())
+        self.assertTrue(all(agree for agree, _ in rows))
+        self.assertEqual((gpu, cpu), (7, 7))
+
+    def test_a_different_cpu_table_is_seen(self):
+        generator = torch.Generator().manual_seed(6)
+        hidden = torch.randn(7, 16, generator=generator)
+        head = torch.randn(VOCAB, 16, generator=generator)
+        pred, succ = torch.randn(VOCAB, 4, generator=generator), torch.randn(VOCAB, 4, generator=generator)
+        answer = dr.markov_chain(hidden @ head.T, 5, pred, succ).tolist()
+        rows, _ = dr.v4_round(hidden, hidden.clone(), head, pred, succ, 5, answer, dr.matching_prefix, cpu_successor=-4 * succ)
+        self.assertFalse(all(agree for agree, _ in rows))
+
+    def test_matching_prefix(self):
+        self.assertEqual(dr.matching_prefix([1, 2, 3], [1, 2, 9]), 2)
+        self.assertEqual(dr.matching_prefix([1], [2]), 0)
+        self.assertEqual(dr.matching_prefix([1, 2], [1, 2, 3]), 2)
 
 
 class SelectorHeadTests(unittest.TestCase):

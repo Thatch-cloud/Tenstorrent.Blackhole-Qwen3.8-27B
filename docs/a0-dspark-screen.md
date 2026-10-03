@@ -1,6 +1,7 @@
 # A0: the DSpark v2 against DFlash2 acceptance screen
 
-Status: harness built and tested on CPU with fakes; nothing has been run on a GPU, and nothing in this change touches the GPU
+Status: harness built and tested on CPU (fakes, a tiny random Qwen3.5 on the pinned transformers, and the upstream sources where a person
+holds them); nothing has been run on a GPU, and nothing in this change touches the GPU
 host, any service on it, the rig or production. The run needs the owner (decisions D-A0-1 to D-A0-4 below).
 
 ## What it answers
@@ -61,9 +62,12 @@ skips the Markov head.
 
 ## Go / kill rule
 
-* NOT_ESTABLISHED (fix and rerun, never a kill): any validity gate V0, V1, V3, V4, V5, V6 failed or did not run.
+* NOT_ESTABLISHED (fix and rerun, never a kill): any validity gate V0, V1, V3, V4, V5, V6 failed or did not run, or the coverage gate
+  below failed. A run whose V0 or V4 is not PASS stops before any turn (the window is not spent on a verdict that cannot be reached).
 * KILL: R's upper bound below 1.05. The censored-kill exception: if R in the 512-2,047 band exceeds R in the 0-511 band by 0.05 or
-  more, the verdict is HOLD with `run_arm_e` (a greedy continuation past 2,048 tokens) before closing.
+  more, the verdict is HOLD with `run_arm_e` (a greedy continuation past 2,048 tokens) before closing. Arm E is NOT implemented: the
+  answers are capped at 2,048 tokens, which pulls R toward 1 (it protects a GO and threatens a KILL), so a would-be KILL on that
+  pattern is a HOLD until arm E exists. A GO is not affected.
 * GO (proceed to the Tenstorrent Phase A): R's point >= 1.10 and G-long, G-p10, G-w8 pass and R_own >= 1.00.
 * HOLD: everything else; no Phase A spend.
 * Steer: if w8192 keeps at least 90% of (R - 1), Phase B uses a bounded window.
@@ -74,21 +78,45 @@ half-width about 0.02. A true R of 1.10 therefore sits on the bar: a point estim
 
 ## Validity gates
 
-V0 pinned versions, source and checkpoint sha256s, target revision, bundle manifest, memory caps, fast GDN kernels in use (the torch
-fallback would take days). V1 HF argmax equals the logged token on >= 95% of answer rows overall and per set (the first divergence
-offset is recorded). V2 forced DFlash2 against the logged emitted counts: report-only (exact-round share, forced tau ratio). V3 free
-walk DFlash2 tau over the lab's served tau on the same turns inside [0.93, 1.12]. V4 DSpark on the GPU against the repository's CPU
-reference on 7 rows, context <= 1,024, 8 turns x 5 rounds: >= 99% token agreement where the reference top-2 margin >= 0.25, accepted
-length equal in >= 97% of rounds. V5 the public summary passes `assert_public`. V6 process peak below the cap and no watchdog trip.
+V0 (every check must be true; the booleans are written to `calibration.json`): the source and checkpoint sha256 pins; the bundle
+manifest; the pinned transformers and flash-linear-attention versions (`--transformers-version`, `--fla-version`); memory caps set;
+the fast GDN kernel actually BOUND by the model's module (the closure of the decorated function is inspected: `find_spec` succeeding
+is not enough, and the torch fallback would take days); for BOTH drafters the scalars the port and walkers do not apply are neutral
+(input embedding scale 1, output multiplier 1, no logit softcap) and the tapped layers equal the hooked layers (the control's as the
+loaded model resolved them); the mask token; and the branch self-check on the real cache. V1 HF argmax equals the logged token on
+>= 95% of answer rows overall and per set (the first divergence offset is recorded). V2 forced DFlash2 against the logged emitted
+counts: report-only. V3 free-walk DFlash2 tau over the lab's served tau on the same turns (paired): the pooled ratio inside
+[0.93, 1.12] AND its CI lower bound >= 0.98, so a control that walks a few percent below the served one cannot inflate R; the report
+also gives R times that ratio as a sensitivity. The control arm is upstream's own code: `DFlash2DraftModel.propose` (its output
+multiplier, softcap and selector) and its input embedding scale. V4 DSpark on the GPU against the repository's CPU reference
+(`dspark_backbone_reference.py`) on 7 rows, context <= 1,024, 8 turns x 5 rounds (the shortest turns of each set in turn): >= 99% token
+agreement where the reference top-2 margin >= 0.25, accepted length equal in >= 97% of rounds; fewer than 20 rounds is NOT_RUN. V4 and
+the branch self-check run at the start of the canary AND of the main run. V5 the public summary passes `assert_public`. V6 process
+peak below the cap and no watchdog trip.
+
+## Coverage gate
+
+A verdict needs the longest turns. A turn the run ATTEMPTED and did not finish in both core arms (deferred because its projected peak
+would break the memory floor, or an arm failed on it) is LOST; turns the run never reached (the deadline; the order is stratified, so
+those are an unbiased thinning) are not. The report counts them from `deferred.jsonl` and the failed rows, publishes coverage by length
+bucket, and returns NOT_ESTABLISHED when paired / (paired + lost) < 98% or any bucket lost more than one turn. The admission
+projection counts the target KV, the raw taps and DSpark's context K/V cache (doubled while it grows), is evaluated after the
+allocator's cache is released, and any allocation failure from any layer (Triton, cuBLAS, the driver, not only torch's) stops the run.
 
 ## Files
 
-`a0_bundle.py` (rig), `a0_bundle_io.py`, `a0_run.py` (driver), `a0_target.py` (taps, chunked prefill, prefix branching, V1),
-`a0_drafters.py` (the two walkers, the Markov chain, V4 rows), `dflash2_torch.py` (a plain-torch DFlash2 / DSpark-shaped backbone),
-`a0_upstream.py` (pinned intake), `a0_watchdog.py` (abort rule), `a0_power.py`, `tf_pair_walk.py`, `tf_pair_report.py`,
-`docker/a0-spark/Dockerfile`. What is NOT verified without the GPU host: `HFTarget` (the cache layout of the installed transformers),
-`UpstreamBackbone` (upstream's cache calls), `real_environment`, DSpark's backbone port against the real weights (V4 is the check), and
-every speed and memory number below.
+`a0_bundle.py` (rig), `a0_bundle_io.py`, `a0_run.py` (driver, V4 collection, the self-check gate, the page-cache dropper),
+`a0_target.py` (taps, chunked prefill, prefix branching, V1, `HFTarget` for the transformers 5.x cache layers), `a0_drafters.py` (the
+two walkers, the upstream proposer, the Markov chain, V4 rows), `dflash2_torch.py` (a plain-torch DFlash2 / DSpark-shaped backbone),
+`a0_upstream.py` (pinned intake, the neutral-scalar check), `a0_watchdog.py` (abort rule, heartbeat, verified kill, `flags`,
+`handback`), `a0_power.py`, `tf_pair_walk.py`, `tf_pair_report.py`, `docker/a0-spark/Dockerfile`.
+
+Verified on CPU: `HFTarget` against the real transformers 5.17 `Qwen3_5` classes on a tiny random model (hooks equal
+`output_hidden_states`, chunked equals one-shot, snapshot / restore equals a fresh prefill, a prefix group equals independent traces:
+`test_a0_hf_target.py`, the CI install pins that version); the port against z-lab's `model.py` and the loss against the recipe's own
+functions, when a person holds the upstream sources (`test_upstream_parity.py`; skipped in CI). NOT verified without the GPU host:
+`UpstreamBackbone` against the real checkpoint, `real_environment`, DSpark's backbone port against the real weights (V4 is the check),
+and every speed and memory number below.
 
 ## Memory budget on the GPU host (estimates; W0 measures)
 
@@ -97,8 +125,10 @@ operator's private plan says how). Target BF16 text-only 54-56 GB; the two draft
 tokens x 65,536 B) 8.0 GB; GDN state plus one snapshot 0.4 GB; raw taps (51,200 B/token) 6.3 GB; prefill transients 2-4 GB;
 CUDA context 3-6 GB; Python and bundle 2-3 GB. Process peak 82-92 GB; with the OS and agents (about 7 GB) 89-99 GB, leaving 29-39 GB.
 Caps: torch per-process 96 GB; container `--memory 100g` (whether CUDA allocations on this machine are charged to the cgroup is
-unknown: W0 measures it). Weights load shard by shard with `posix_fadvise(DONTNEED)` after each (`drop_file_cache`). If the canary's
-peak exceeds 92 GB: 2,048-token chunks, or post-fc features per drafter instead of raw taps (-3.8 GB). Disk: about 85-95 GB.
+unknown: W0 measures it). While each model loads, a thread drops the page cache of its files every 0.5 s (`CacheDropper`:
+`posix_fadvise(DONTNEED)` reaches the shards the loader has released), so the checkpoint never stacks on its device copy, and it logs
+MemFree / MemAvailable to `load-memory.jsonl`; `--load-only` is the rehearsal that does exactly this and runs no turn. If the
+canary's peak exceeds 92 GB: 2,048-token chunks, or post-fc features per drafter instead of raw taps (-3.8 GB). Disk: about 85-95 GB.
 
 ## Run time (estimates)
 
@@ -111,13 +141,22 @@ Prefill (shared prefix groups) 1.2-2.2 h, not shared 2.6-4.7 h; core walks 0.8-1
 Scheduling, how the host is cleared and handed back, who can recover it, and every host and image name belong to the operator's
 private operations plan, not to this repository. What this repository specifies:
 
-* a bring-up window (W0, the canary: three short turns plus the longest, V0, V1, V4 and the branch self-check) before the long
-  run (W1, resumable: a second invocation continues where the first stopped);
-* the abort rule: `a0_watchdog.py` starts BEFORE the screen's container, polls every 2 s, and kills that container (and only that
-  one) on low available memory, low free memory while CUDA loads, any swap-in, a new Xid, any other container starting, or the
-  deadline; a missing or stale heartbeat stops the harness; inside the harness an out-of-memory stops the run and no turn starts
-  whose projected peak would break the floor;
-* results are counts only (`validity.json`, `arm-*.jsonl`, `meta.jsonl`); `tf_pair_report.py` reads them.
+* a load rehearsal (`a0_run.py --load-only`: load, V0, V4, the branch self-check, the memory log, no turn), then a bring-up window (W0,
+  the canary: three short turns plus the longest) before the long run (W1, resumable: a second invocation continues where the first
+  stopped);
+* the abort rule, FAIL CLOSED: `a0_watchdog.py` starts BEFORE the screen's container and polls every 0.5 s reading only
+  `/proc/meminfo` and `/proc/vmstat` (the kernel log and `docker events` are read by threads; nothing forks in the poll). It kills that
+  container (and only that one) on low available memory (two consecutive polls), low free memory while CUDA loads, any swap-in, a new
+  Xid, any other container starting, or the deadline. It rewrites a heartbeat file every poll and the harness stops when it is missing
+  or older than 10 s. After a trip the kill is verified with `docker inspect` and escalated (`docker kill`, `docker rm -f`, SIGKILL to
+  the last known PID) on a worker thread until the container is gone; the watchdog does not exit before that. It sets its own
+  `oom_score_adj` to -1000 and `mlockall`, and the container runs with a hard memory limit, swap equal to it and the highest OOM score
+  (`a0_watchdog.py flags --memory-gib N` prints the flags);
+* inside the harness an out-of-memory stops the run and no turn starts whose projected peak would break the floor;
+* hand-back (`a0_watchdog.py handback --drop-dir D ... --avail-floor-gib A --free-floor-gib F`): the screen's files are dropped from the
+  page cache, then both MemAvailable and MemFree must reach the floors the operator names (cached files count as available, not free);
+* results are counts only (`validity.json`, `arm-*.jsonl`, `deferred.jsonl`, `meta.jsonl`, `calibration.json`); `tf_pair_report.py` reads
+  them. A results file whose last line was cut by a kill is read without it.
 
 ## Decisions for the owner
 

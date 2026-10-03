@@ -191,25 +191,101 @@ class ViewTests(unittest.TestCase):
             buffer.rows(0, 1)
 
 
+def linear_layer(value):
+    """A cache layer in the transformers 5.x linear-attention layout: dicts of state index -> tensor."""
+    return SimpleNamespace(conv_states={0: torch.full((2,), float(value))}, recurrent_states={0: torch.full((3,), float(value))},
+                           has_previous_state={0: True})
+
+
+class AttentionStub(object):
+    def __init__(self, length):
+        self.keys = torch.zeros(1, 1, length, 2)
+        self.values = torch.zeros(1, 1, length, 2)
+        self.cropped = []
+
+    def get_seq_length(self):
+        return self.keys.shape[-2]
+
+    def crop(self, count):
+        self.cropped.append(count)
+        self.keys, self.values = self.keys[..., :count, :], self.values[..., :count, :]
+
+
 class HFGuardTests(unittest.TestCase):
     def test_an_unexpected_cache_layout_is_refused_not_guessed(self):
         target = tgt.HFTarget.__new__(tgt.HFTarget)
-        state = SimpleNamespace(layers=[SimpleNamespace(keys=1)], get_seq_length=lambda: 3)
+        state = SimpleNamespace(layers=[AttentionStub(3)])
         with self.assertRaises(RuntimeError):
             tgt.HFTarget.snapshot(target, state)
 
-    def test_recurrent_tensors_are_cloned_and_restored(self):
+    def test_the_old_tensor_attribute_layout_is_not_accepted(self):
         target = tgt.HFTarget.__new__(tgt.HFTarget)
         layer = SimpleNamespace(conv_states=torch.ones(2), recurrent_states=torch.zeros(3))
-        cropped = []
-        state = SimpleNamespace(layers=[layer], get_seq_length=lambda: 7, crop=cropped.append)
+        with self.assertRaises(RuntimeError):
+            tgt.HFTarget.snapshot(target, SimpleNamespace(layers=[layer]))
+
+    def test_dict_states_are_cloned_restored_in_place_and_attention_is_cropped_by_a_negative_count(self):
+        target = tgt.HFTarget.__new__(tgt.HFTarget)
+        linear, attention = linear_layer(1), AttentionStub(7)
+        state = SimpleNamespace(layers=[linear, attention])
+        buffer = linear.conv_states[0]
         snapshot = tgt.HFTarget.snapshot(target, state)
-        layer.conv_states.fill_(9)
-        layer.recurrent_states.fill_(9)
+        self.assertEqual(snapshot['length'], 7)
+        linear.conv_states[0].fill_(9)
+        linear.recurrent_states[0].fill_(9)
+        linear.has_previous_state[0] = False
+        attention.keys = torch.zeros(1, 1, 12, 2)
+        attention.values = torch.zeros(1, 1, 12, 2)
         tgt.HFTarget.restore(target, state, snapshot)
-        self.assertEqual(cropped, [7])
-        self.assertEqual(layer.conv_states.tolist(), [1.0, 1.0])
-        self.assertEqual(layer.recurrent_states.tolist(), [0.0, 0.0, 0.0])
+        self.assertEqual(attention.cropped, [-5])
+        self.assertEqual(attention.get_seq_length(), 7)
+        self.assertIs(linear.conv_states[0], buffer)             # the buffer itself, not a replacement
+        self.assertEqual(linear.conv_states[0].tolist(), [1.0, 1.0])
+        self.assertEqual(linear.recurrent_states[0].tolist(), [1.0, 1.0, 1.0])
+        self.assertTrue(linear.has_previous_state[0])
+
+    def test_a_shorter_attention_cache_than_the_snapshot_is_refused(self):
+        target = tgt.HFTarget.__new__(tgt.HFTarget)
+        state = SimpleNamespace(layers=[linear_layer(1), AttentionStub(7)])
+        snapshot = tgt.HFTarget.snapshot(target, state)
+        state.layers[1].keys = torch.zeros(1, 1, 3, 2)
+        with self.assertRaises(RuntimeError):
+            tgt.HFTarget.restore(target, state, snapshot)
+
+    def test_a_widened_conv_state_is_put_back_by_value(self):
+        target = tgt.HFTarget.__new__(tgt.HFTarget)
+        linear = linear_layer(1)
+        state = SimpleNamespace(layers=[linear, AttentionStub(2)])
+        snapshot = tgt.HFTarget.snapshot(target, state)
+        linear.conv_states[0] = torch.zeros(5)                    # past recording keeps the full state
+        tgt.HFTarget.restore(target, state, snapshot)
+        self.assertEqual(linear.conv_states[0].tolist(), [1.0, 1.0])
+
+
+class KernelBindingTests(unittest.TestCase):
+    def test_a_closure_over_an_fla_function_counts_as_fla(self):
+        def fast():
+            return 1
+        fast.__module__ = 'fla.ops.gated_delta_rule.chunk'
+
+        def wrapped():
+            return fast()
+        self.assertTrue(tgt.uses_fla_kernel(wrapped))
+
+    def test_the_torch_fallback_alone_is_not_fla(self):
+        def fallback():
+            return 1
+        fallback.__module__ = 'transformers.models.qwen3_5.modeling_qwen3_5'
+
+        def wrapped():
+            return fallback()
+        self.assertFalse(tgt.uses_fla_kernel(wrapped))
+
+    def test_a_module_name_that_only_starts_with_fla_is_not_fla(self):
+        def other():
+            return 1
+        other.__module__ = 'flat_things.x'
+        self.assertFalse(tgt.uses_fla_kernel(other))
 
 
 if __name__ == '__main__':

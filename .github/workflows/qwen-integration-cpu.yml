@@ -26,6 +26,7 @@ jobs:
         run: |
           python -m pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
           python -m pip install numpy==2.4.6 PyYAML==6.0.2
+          python -m pip install transformers==5.17.0
       - name: T32 and unchanged T16 regression gates
         run: |
           python -B -m unittest test_dflash_host_attribution
@@ -100,7 +101,7 @@ jobs:
           python -B -m unittest test_tau_lab
           python -B -m unittest test_tf_pair_walk test_tf_pair_report test_a0_bundle
           python -B -m unittest test_dflash2_torch test_a0_drafters test_a0_target test_a0_upstream test_a0_watchdog test_a0_power
-          python -B -m unittest test_a0_run test_tau_next_public
+          python -B -m unittest test_a0_run test_a0_hf_target test_upstream_parity test_tau_next_public
           python -B -m unittest test_ft_dataset test_ft_anchor test_ft_split test_ft_select
           python -B -m unittest test_ft_loss test_ft_dflash2_train test_ft_train_loop
           python -B -m unittest test_ttml_probe

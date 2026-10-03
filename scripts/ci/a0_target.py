@@ -163,9 +163,10 @@ class GroupRunner(object):
         del buffer, state
 
 
-def branch_selfcheck(target, prompt, answer_a, answer_b, width, chunk=CHUNK, atol=1e-4):
+def branch_selfcheck_stats(target, prompt, answer_a, answer_b, chunk=CHUNK):
     """The canary's own test of snapshot / restore: prefill, branch into answer A, restore, branch into B, and compare B's taps and
-    argmax with a fresh prefill of prompt + B. True when they agree (per-row argmax equal, taps within `atol` relative)."""
+    argmax with a fresh prefill of prompt + B. -> dict(rows, agree, max_rel): the rows compared, the rows whose argmax agrees, and the
+    largest tap difference relative to the largest tap magnitude."""
     def trace(ids):
         state, rows, preds = target.new_state(), [], []
         for a in range(0, len(ids), chunk):
@@ -190,14 +191,63 @@ def branch_selfcheck(target, prompt, answer_a, answer_b, width, chunk=CHUNK, ato
     fresh_taps, fresh_preds = trace(list(prompt) + list(answer_b))
     fresh_taps, fresh_preds = fresh_taps[len(prompt):], fresh_preds[len(prompt):]
     scale = float(fresh_taps.abs().max()) or 1.0
-    return branch_preds == fresh_preds and float((branch_taps - fresh_taps).abs().max()) <= atol * scale
+    return dict(rows=len(fresh_preds), agree=sum(1 for x, y in zip(branch_preds, fresh_preds) if x == y),
+                max_rel=float((branch_taps - fresh_taps).abs().max()) / scale)
+
+
+def selfcheck_passes(stats, atol=1e-4, min_agree=1.0):
+    return stats['rows'] > 0 and stats['agree'] >= min_agree * stats['rows'] and stats['max_rel'] <= atol
+
+
+def branch_selfcheck(target, prompt, answer_a, answer_b, width=None, chunk=CHUNK, atol=1e-4, min_agree=1.0):
+    """True when branching agrees with a fresh prefill: per-row argmax equal (at least `min_agree` of rows) and taps within `atol`
+    relative. (`width` is unused: kept for the callers that pass it.)"""
+    return selfcheck_passes(branch_selfcheck_stats(target, prompt, answer_a, answer_b, chunk), atol, min_agree)
+
+
+def is_linear_layer(layer):
+    """A linear-attention cache layer (transformers 5.x): per-state dicts of conv and recurrent tensors."""
+    return isinstance(getattr(layer, 'conv_states', None), dict) and isinstance(getattr(layer, 'recurrent_states', None), dict)
+
+
+def is_attention_layer(layer):
+    return hasattr(layer, 'keys') and hasattr(layer, 'values') and hasattr(layer, 'get_seq_length')
+
+
+def kernel_modules(function, depth=4):
+    """The `__module__` names reachable from a (decorated) function through its closure cells and `__wrapped__` chain. How the
+    transformers kernel decorators bind an implementation: the fast one lives in a closure, the torch fallback is the wrapped function."""
+    seen, found, stack = set(), set(), [(function, depth)]
+    while stack:
+        item, left = stack.pop()
+        if id(item) in seen or left < 0 or not callable(item):
+            continue
+        seen.add(id(item))
+        found.add(getattr(item, '__module__', None) or '')
+        for cell in getattr(item, '__closure__', None) or ():
+            try:
+                stack.append((cell.cell_contents, left - 1))
+            except ValueError:
+                pass
+        wrapped = getattr(item, '__wrapped__', None)
+        if wrapped is not None:
+            stack.append((wrapped, left - 1))
+    return found
+
+
+def uses_fla_kernel(function, package='fla'):
+    """True when `function` (the model module's bound chunk_gated_delta_rule) reaches an implementation inside `package`: having the
+    package importable is not the same as the model calling it."""
+    return any(name == package or name.startswith(package + '.') for name in kernel_modules(function))
 
 
 class HFTarget(object):
-    """A Hugging Face Qwen3.5 text model (Qwen3_5ForCausalLM) as a TargetModel. GPU HOST ONLY: nothing here is exercised on CPU, and
-    it is trusted only after the canary's V0 / V1 and `branch_selfcheck` pass. The recurrent-state attribute names of the cache
-    layers are listed in RECURRENT_ATTRS; a transformers version that names them differently makes snapshot() raise, never guess."""
-    RECURRENT_ATTRS = ('conv_states', 'recurrent_states')
+    """A Hugging Face Qwen3.5 text model (Qwen3_5ForCausalLM) as a TargetModel, against the transformers 5.x cache layers: linear-attention
+    layers keep dicts (state index -> tensor) of conv and recurrent states and a has_previous_state flag per state; full-attention
+    layers keep keys / values. snapshot() clones the linear-attention state and records the attention length; restore() copies the
+    linear state back IN PLACE (the layers keep their buffers) and crops the attention layers with a negative count (the only form a
+    layer accepts). A cache layout this does not recognise raises; it never guesses. Trusted after the tiny-model tests (CI, pinned
+    transformers) and the canary's V0 / V1 / `branch_selfcheck` on the real model."""
 
     def __init__(self, model, tap_ids, device, head_chunk=512):
         self.model, self.base, self.device, self.head_chunk = model, model.model, device, head_chunk
@@ -212,21 +262,54 @@ class HFTarget(object):
         out = self.base(input_ids=ids[None].to(self.device), past_key_values=state, use_cache=True)
         return out.last_hidden_state[0]
 
+    @staticmethod
+    def _attention_length(state):
+        for layer in state.layers:
+            if is_attention_layer(layer):
+                return layer.get_seq_length()
+        raise RuntimeError('no attention layer in the cache: the cache layout is not the one expected')
+
     def snapshot(self, state):
-        saved = []
+        saved, linear = [], 0
         for index, layer in enumerate(state.layers):
-            tensors = dict((name, getattr(layer, name).clone()) for name in self.RECURRENT_ATTRS
-                           if getattr(layer, name, None) is not None)
-            saved.append((index, tensors))
-        if not any(tensors for _, tensors in saved):
-            raise RuntimeError('no recurrent state found in the cache layers: the cache layout is not the one expected')
-        return dict(length=state.get_seq_length(), layers=saved)
+            entry = dict(index=index)
+            if is_linear_layer(layer):
+                linear += 1
+                entry['linear'] = dict(
+                    conv=dict((i, v.clone()) for i, v in layer.conv_states.items() if v is not None),
+                    recurrent=dict((i, v.clone()) for i, v in layer.recurrent_states.items() if v is not None),
+                    previous=dict(getattr(layer, 'has_previous_state', {})))
+            if is_attention_layer(layer):
+                entry['length'] = layer.get_seq_length()
+            if len(entry) > 1:
+                saved.append(entry)
+        if not linear:
+            raise RuntimeError('no linear-attention layer in the cache: the cache layout is not the one expected')
+        return dict(length=self._attention_length(state), layers=saved)
 
     def restore(self, state, snapshot):
-        state.crop(snapshot['length'])
-        for index, tensors in snapshot['layers']:
-            for name, value in tensors.items():
-                getattr(state.layers[index], name).copy_(value)
+        for entry in snapshot['layers']:
+            layer = state.layers[entry['index']]
+            if 'linear' in entry:
+                kept = entry['linear']
+                for family, target in (('conv', layer.conv_states), ('recurrent', layer.recurrent_states)):
+                    for i, value in kept[family].items():
+                        current = target.get(i)
+                        if current is not None and current.shape == value.shape:
+                            current.copy_(value)
+                        else:
+                            target[i] = value.clone()      # a conv state widened by past recording: put the saved one back
+                for i, flag in kept['previous'].items():
+                    layer.has_previous_state[i] = flag
+            if 'length' in entry:
+                extra = layer.get_seq_length() - entry['length']
+                if extra < 0:
+                    raise RuntimeError('the attention cache is shorter than the snapshot')
+                if extra:
+                    if is_linear_layer(layer):             # a mixed layer: its linear half was restored above; cut the keys by hand
+                        layer.keys, layer.values = layer.keys[..., :entry['length'], :], layer.values[..., :entry['length'], :]
+                    else:
+                        layer.crop(-extra)
 
     @torch.no_grad()
     def argmax(self, hidden):

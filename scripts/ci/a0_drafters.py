@@ -99,8 +99,9 @@ class UpstreamBackbone(object):
     `model(position_ids=, noise_embedding=, target_hidden=, past_key_values=, use_cache=)`; `make_cache()` and `crop(cache, length)`
     are upstream's (_make_cache, _crop_to). Verified only on the GPU host, by V1 / V3 in the canary."""
 
-    def __init__(self, model, embed_weight, make_cache, crop):
+    def __init__(self, model, embed_weight, make_cache, crop, embedding_scale=1.0):
         self.model, self.embed, self.make_cache, self.crop = model, embed_weight, make_cache, crop
+        self.scale = float(embedding_scale)          # upstream's input_embedding_scale: dflash_generate multiplies the noise rows by it
         self.reset()
 
     def reset(self):
@@ -119,7 +120,7 @@ class UpstreamBackbone(object):
         target = features.rows(self.high, start)[None].to(self.embed.dtype)
         positions = torch.arange(self.high, start + ids.shape[1], device=self.embed.device)[None]
         with torch.no_grad():
-            hidden = self.model(position_ids=positions, noise_embedding=F.embedding(ids, self.embed), target_hidden=target,
+            hidden = self.model(position_ids=positions, noise_embedding=F.embedding(ids, self.embed) * self.scale, target_hidden=target,
                                 past_key_values=self.cache, use_cache=True)[0]
         self.length += start - self.high
         self.crop(self.cache, self.length)
@@ -151,6 +152,19 @@ class SelectorHead(object):
         logits = hidden @ lm_head_weight.T
         unary, candidates = torch.topk(logits, self.selector.top_k, dim=-1, sorted=False)
         return self.selector.greedy_path(candidates, unary, hidden, anchor_ids)
+
+
+class UpstreamProposer(object):
+    """The control's proposal rule, EXACTLY upstream's: `DFlash2DraftModel.propose(hidden, anchor_ids, output_head, temperature)`, which
+    applies the model's own output multiplier and softcap to the logits and runs the candidate selector. `head` is the target's LM head
+    MODULE (upstream calls it on the hidden rows). Greedy: temperature 0. The walker's `propose(hidden, anchor_ids, head_weight)`
+    interface is kept; the weight argument is ignored."""
+
+    def __init__(self, model, head_module):
+        self.model, self.head_module = model, head_module
+
+    def propose(self, hidden, anchor_ids, head_weight=None):
+        return self.model.propose(hidden, anchor_ids, self.head_module, 0.0)[0]
 
 
 class Dflash2Walker(object):
@@ -227,19 +241,34 @@ def load_port_state(model, tensors, ignore=()):
     return model
 
 
-def v4_round(gpu_hidden, cpu_hidden, head, predecessor, successor, anchor, answer_next, accepted):
+def matching_prefix(proposed, answer):
+    """How many leading proposals equal the logged answer tokens."""
+    count = 0
+    for a, b in zip(proposed, answer):
+        if a != b:
+            break
+        count += 1
+    return count
+
+
+def v4_round(gpu_hidden, cpu_hidden, head, predecessor, successor, anchor, answer_next, accepted, cpu_head=None, cpu_predecessor=None,
+             cpu_successor=None):
     """One V4 round. `gpu_hidden` / `cpu_hidden` [rows, H]: the two devices' backbone rows for the same inputs; the chain rule is the
     Markov greedy chain. Each row is compared conditioned on the GPU's OWN previous token: the CPU row's corrected logits are formed
     with that token, and the row agrees when the CPU argmax equals the GPU token. -> ([(agree, top-2 margin)], (gpu accepted, cpu
     accepted)) with the accepted lengths against `answer_next` (the logged tokens after the anchor); `accepted(proposed, answer)`
     is the matching-prefix count."""
-    gpu_logits = gpu_hidden.float() @ head.float().T
+    cpu_head = head if cpu_head is None else cpu_head                       # the CPU rows need CPU copies of the head and the Markov tables
+    cpu_predecessor = predecessor if cpu_predecessor is None else cpu_predecessor
+    cpu_successor = successor if cpu_successor is None else cpu_successor
+    gpu_logits = (gpu_hidden.to(head.dtype) @ head.T).float()       # in the head's own dtype: no 5 GB fp32 copy of the vocabulary matrix
     gpu_tokens = markov_chain(gpu_logits, anchor, predecessor.float(), successor.float()).tolist()
-    cpu_base = cpu_hidden.float() @ head.float().T
-    cpu_chain = markov_chain(cpu_base, anchor, predecessor.float(), successor.float()).tolist()
+    cpu_pred, cpu_succ = cpu_predecessor.float(), cpu_successor.float()
+    cpu_base = (cpu_hidden.to(cpu_head.dtype) @ cpu_head.T).float()
+    cpu_chain = markov_chain(cpu_base, anchor, cpu_pred, cpu_succ).tolist()
     rows, previous = [], anchor
     for at, token in enumerate(gpu_tokens):
-        corrected = cpu_base[at] + predecessor.float()[previous] @ successor.float().T
+        corrected = cpu_base[at] + cpu_pred[previous] @ cpu_succ.T
         top = torch.topk(corrected, 2)
         rows.append((int(top.indices[0]) == token, float(top.values[0] - top.values[1])))
         previous = token

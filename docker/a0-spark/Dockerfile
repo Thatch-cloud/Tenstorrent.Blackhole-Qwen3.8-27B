@@ -14,8 +14,9 @@ RUN test -n "${TRANSFORMERS_VERSION}" && test -n "${FLA_VERSION}" \
  && python3 -m pip install --no-cache-dir "transformers==${TRANSFORMERS_VERSION}" "flash-linear-attention==${FLA_VERSION}" safetensors
 
 WORKDIR /a0
-COPY scripts/ci/a0_run.py scripts/ci/a0_bundle_io.py scripts/ci/a0_target.py scripts/ci/a0_drafters.py scripts/ci/a0_upstream.py      scripts/ci/dflash2_torch.py scripts/ci/tf_pair_walk.py scripts/ci/tf_pair_report.py scripts/ci/tau_lab_report.py      scripts/ci/acceptance_report.py scripts/ci/extent_attention_replay.py /a0/
+COPY scripts/ci/a0_run.py scripts/ci/a0_bundle_io.py scripts/ci/a0_target.py scripts/ci/a0_drafters.py scripts/ci/a0_upstream.py      scripts/ci/dflash2_torch.py scripts/ci/tf_pair_walk.py scripts/ci/tf_pair_report.py scripts/ci/tau_lab_report.py      scripts/ci/acceptance_report.py scripts/ci/extent_attention_replay.py      scripts/ci/dspark_backbone_reference.py scripts/ci/dspark_intake.py scripts/ci/dspark_rope_tables.py scripts/ci/draft_projection_fixture.py /a0/
 # a0_watchdog.py is NOT in the image: it runs on the host beside the container (it needs the docker CLI) and is started first.
+# The four dspark_* / draft_* modules are the CPU reference V4 compares the GPU port against (the closure test walks the lazy imports).
 
 # the screen runs as an unprivileged user with its working files private
 RUN useradd --create-home --uid 1000 a0 && chown -R a0 /a0

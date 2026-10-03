@@ -54,7 +54,10 @@ VALIDITY_GATES = ('V0', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6')
 REPORT_ONLY = ('V2',)
 VERDICT_WORDS = ('KILL', 'GO', 'HOLD', 'NOT_ESTABLISHED', 'PASS', 'FAIL', 'NOT_RUN', 'bounded_window', 'full_window', 'none',
                  'r_upper_below_1_05', 'r_below_1_10', 'g_long_failed', 'g_p10_failed', 'g_w8_failed', 'r_own_below_1',
-                 'validity_gate_failed', 'validity_gate_not_run', 'censored_band_gap', 'no_data', 'all_clear')
+                 'validity_gate_failed', 'validity_gate_not_run', 'censored_band_gap', 'no_data', 'all_clear', 'coverage_below_gate')
+COVERAGE_MIN = 0.98             # paired turns / (paired + attempted-but-lost): the longest turns must not silently drop out
+BUCKET_LOSS_MAX = 1             # no length bucket may lose more than this many turns
+
 
 
 class ReportError(ValueError):
@@ -64,11 +67,17 @@ class ReportError(ValueError):
 # -- loading -------------------------------------------------------------------------------------------------------------
 
 def read_jsonl(path):
+    """The records of a JSONL file. A LAST line that does not parse is a write the run's kill cut short: it is dropped (that turn is
+    simply unfinished); a bad line anywhere else is corruption and raises."""
     out = []
     with open(path, encoding='utf-8') as handle:
-        for line in handle:
-            if line.strip():
-                out.append(json.loads(line))
+        lines = [line for line in handle if line.strip()]
+    for at, line in enumerate(lines):
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            if at != len(lines) - 1:
+                raise ReportError('a line of a results file is not JSON')
     return out
 
 
@@ -89,6 +98,51 @@ def load(results_dir):
         with open(path, encoding='utf-8') as handle:
             validity = json.load(handle)
     return meta, arms, validity
+
+
+def load_lost(results_dir, core=None):
+    """{k} of the turns the run ATTEMPTED and did not complete in the core arms: a turn the driver deferred (its projected peak broke the
+    memory floor) or whose arm failed, and that no later resumed run completed. A turn never reached (the deadline) is not here: the
+    run order is stratified, so those are an unbiased thinning; these are not."""
+    core = core or (ARM_S, ARM_D)
+    lost, done = set(), dict((name, set()) for name in core)
+    for name in core:
+        path = os.path.join(results_dir, 'arm-%s.jsonl' % name)
+        if os.path.exists(path):
+            for entry in read_jsonl(path):
+                if entry.get('status') == 'ok':
+                    done[name].add(entry['k'])
+                elif entry.get('status') == 'failed':
+                    lost.add(entry['k'])
+    path = os.path.join(results_dir, 'deferred.jsonl')
+    if os.path.exists(path):
+        lost.update(entry['k'] for entry in read_jsonl(path))
+    return set(k for k in lost if not all(k in done[name] for name in core))
+
+
+def load_calibration(results_dir):
+    path = os.path.join(results_dir, 'calibration.json')
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding='utf-8') as handle:
+        return json.load(handle)
+
+
+def coverage(meta, keys, arm_s, arm_d, lost=None):
+    """The coverage gate: of the turns the run attempted, the share that finished in BOTH core arms, and the turns lost per length
+    bucket. FAIL when the share is below 98% or any bucket lost more than one turn. A turn that finished in one core arm only counts
+    as lost. -> dict of counts (public) with 'status'."""
+    paired = set(keys)
+    lost_keys = (set(lost or ()) | (set(arm_s) ^ set(arm_d))) - paired
+    attempted = len(paired) + len(lost_keys)
+    by_bucket = {}
+    for k in lost_keys:
+        label = (meta.get(k) or {}).get('bucket') or 'unknown'
+        by_bucket[label] = by_bucket.get(label, 0) + 1
+    share = (len(paired) / float(attempted)) if attempted else 0.0
+    ok = share >= COVERAGE_MIN and all(count <= BUCKET_LOSS_MAX for count in by_bucket.values())
+    return dict(paired=len(paired), lost=len(lost_keys), share=round(share, 4), lost_by_bucket=dict(sorted(by_bucket.items())),
+                status='PASS' if ok else 'FAIL')
 
 
 def paired_keys(meta, first, second):
@@ -334,7 +388,7 @@ def pair_name(tag):
     return tag
 
 
-def build(meta, arms, validity=None, resamples=RESAMPLES, seed=0, w8_resamples=W8_RESAMPLES, w8_draws=W8_DRAWS):
+def build(meta, arms, validity=None, resamples=RESAMPLES, seed=0, w8_resamples=W8_RESAMPLES, w8_draws=W8_DRAWS, lost=None, v3_ratio=None):
     """The private report and the public summary as (private, public). `arms` {name: {k: [round dicts]}}."""
     validity = dict(validity or {})
     if ARM_S not in arms or ARM_D not in arms:
@@ -344,6 +398,7 @@ def build(meta, arms, validity=None, resamples=RESAMPLES, seed=0, w8_resamples=W
     excluded = len(set(arm_s) ^ set(arm_d))
     if not keys:
         raise ReportError('no turn finished in both core arms')
+    covered = coverage(meta, keys, arm_s, arm_d, lost)
     ratio = ratio_statistic()
     units = units_by_set(meta, keys, arm_s, arm_d)
     r_main = cluster_bootstrap(units, ratio, resamples, seed)
@@ -384,13 +439,18 @@ def build(meta, arms, validity=None, resamples=RESAMPLES, seed=0, w8_resamples=W
                      acceptance_dflash2=acceptance_curve(arm_d, keys), acceptance_dspark=acceptance_curve(arm_s, keys))
     window = window_effect(meta, arms, r_main['point'])
     rows = per_turn_rows(meta, keys, arm_s, arm_d)
+    # a control that walks below the served arm inflates R by the same factor: R times V3's ratio is the cautious reading, never a verdict
+    sensitivity = dict(v3_ratio=None, r_times_v3_ratio=None)
+    if v3_ratio is not None and r_main['point'] is not None:
+        sensitivity = dict(v3_ratio=rep.rounded(v3_ratio, 4), r_times_v3_ratio=rep.rounded(r_main['point'] * v3_ratio, 4))
 
     def assemble(gates):
-        verdict = decide(r_main, g_long, g_p10, g_w8, r_own, by_band, gates)
+        verdict = decide(r_main, g_long, g_p10, g_w8, r_own, by_band, gates, covered)
         public = dict(verdict=verdict['verdict'], reasons=verdict['reasons'], run_arm_e=verdict['run_arm_e'],
                       window_steer=window['steer'], turns_paired=len(keys), turns_unpaired=excluded,
                       r=dict(r_main, uncapped_point=r_uncapped), g_long=g_long, g_p10=g_p10, g_w8=g_w8, r_own=r_own,
-                      secondary=secondary, window=window['public'], arms=public_arms,
+                      secondary=secondary, window=window['public'], arms=public_arms, coverage=covered,
+                      r_sensitivity=sensitivity,
                       validity=dict((gate, gates.get(gate, 'NOT_RUN')) for gate in VALIDITY_GATES))
         return dict(public, per_turn=rows), public
 
@@ -427,7 +487,7 @@ def window_effect(meta, arms, r_full):
     return dict(public=out, steer=steer)
 
 
-def decide(r_main, g_long, g_p10, g_w8, r_own, by_band, validity):
+def decide(r_main, g_long, g_p10, g_w8, r_own, by_band, validity, covered=None):
     """(verdict, reasons, run_arm_e): the registered go/kill rule."""
     reasons = []
     for gate in VALIDITY_GATES:
@@ -438,6 +498,8 @@ def decide(r_main, g_long, g_p10, g_w8, r_own, by_band, validity):
             reasons.append('validity_gate_failed')
         elif status != 'PASS':
             reasons.append('validity_gate_not_run')
+    if covered is not None and covered.get('status') != 'PASS':
+        reasons.append('coverage_below_gate')
     if reasons or r_main['point'] is None:
         return dict(verdict='NOT_ESTABLISHED', reasons=sorted(set(reasons or ['no_data'])), run_arm_e=False)
     band_low, band_high = by_band.get('0-511'), by_band.get('512-2047')
@@ -487,7 +549,9 @@ def summary_lines(public):
             'R %s [%s, %s] (uncapped %s) over %d paired turns' % (r['point'], r['low'], r['high'], r['uncapped_point'],
                                                                    public['turns_paired']),
             'guardrails: long %s, p10 %s, w8 %s; R_own %s' % (public['g_long']['status'], public['g_p10']['status'],
-                                                              public['g_w8']['status'], public['r_own']['point'])]
+                                                              public['g_w8']['status'], public['r_own']['point']),
+            'coverage %s: %d paired, %d lost; R x V3 ratio %s' % (public['coverage']['status'], public['coverage']['paired'],
+                                                                 public['coverage']['lost'], public['r_sensitivity']['r_times_v3_ratio'])]
 
 
 def main(argv=None, say=print):
@@ -500,7 +564,9 @@ def main(argv=None, say=print):
     parser.add_argument('--seed', type=int, default=0)
     options = parser.parse_args(argv)
     meta, arms, validity = load(options.results)
-    private, public = build(meta, arms, validity, options.resamples, options.seed, options.w8_resamples, options.w8_draws)
+    ratio = ((load_calibration(options.results).get('v3') or {}).get('ratio'))
+    private, public = build(meta, arms, validity, options.resamples, options.seed, options.w8_resamples, options.w8_draws,
+                            lost=load_lost(options.results), v3_ratio=ratio)
     assert_public(public)                      # refuse before anything is written beside the public directory
     os.makedirs(options.out, exist_ok=True)
     write_json(os.path.join(options.results, 'report.private.json'), private)

@@ -304,5 +304,108 @@ class PrivacyAndCliTests(unittest.TestCase):
             shutil.rmtree(root)
 
 
+class TruncatedFileTests(unittest.TestCase):
+    def test_a_last_line_cut_by_a_kill_is_dropped_and_a_middle_one_is_an_error(self):
+        root = tempfile.mkdtemp()
+        try:
+            path = os.path.join(root, 'arm.jsonl')
+            with open(path, 'w') as handle:
+                handle.write(json.dumps(dict(k=1, status='ok', rounds=[])) + chr(10) + '{"k": 2, "sta')
+            self.assertEqual(pr.read_jsonl(path), [dict(k=1, status='ok', rounds=[])])
+            with open(path, 'w') as handle:
+                handle.write('{"k": 2, "sta' + chr(10) + json.dumps(dict(k=1)) + chr(10))
+            with self.assertRaises(pr.ReportError):
+                pr.read_jsonl(path)
+        finally:
+            shutil.rmtree(root)
+
+
+class CoverageTests(unittest.TestCase):
+    def data(self, **kwargs):
+        return make_data(ratio=1.2, difficulty=False, clusters_per_set=(25, 25), turns_per_cluster=2, long_every=5, **kwargs)
+
+    def test_a_full_run_passes_coverage_and_reaches_a_verdict(self):
+        meta, arms = self.data()
+        _, public = pr.build(meta, arms, PASS_ALL, **SMALL)
+        self.assertEqual(public['coverage']['status'], 'PASS')
+        self.assertEqual((public['coverage']['paired'], public['coverage']['lost']), (len(meta), 0))
+        self.assertNotEqual(public['verdict'], 'NOT_ESTABLISHED')
+
+    def test_losing_the_long_turns_is_not_established_whatever_the_ratio_says(self):
+        meta, arms = self.data()
+        long_turns = [k for k, info in meta.items() if info['bucket'] == '80k']
+        for k in long_turns:                          # the longest turns were deferred: attempted, not completed
+            del arms[pr.ARM_S][k]
+            del arms[pr.ARM_D][k]
+        _, public = pr.build(meta, arms, PASS_ALL, lost=set(long_turns), **SMALL)
+        self.assertEqual(public['verdict'], 'NOT_ESTABLISHED')
+        self.assertIn('coverage_below_gate', public['reasons'])
+        self.assertEqual(public['coverage']['lost_by_bucket'], {'80k': len(long_turns)})
+        self.assertLess(public['coverage']['share'], 0.98)
+
+    def test_two_lost_turns_in_one_bucket_fail_even_when_the_share_is_high(self):
+        meta, arms = make_data(ratio=1.2, difficulty=False, clusters_per_set=(60, 60), turns_per_cluster=2, long_every=0)
+        lost = [0, 1]
+        for k in lost:
+            del arms[pr.ARM_S][k]
+            del arms[pr.ARM_D][k]
+        _, public = pr.build(meta, arms, PASS_ALL, lost=set(lost), **SMALL)
+        self.assertGreater(public['coverage']['share'], 0.98)
+        self.assertEqual(public['coverage']['status'], 'FAIL')
+        self.assertEqual(public['verdict'], 'NOT_ESTABLISHED')
+
+    def test_one_lost_turn_in_a_bucket_is_tolerated(self):
+        meta, arms = make_data(ratio=1.2, difficulty=False, clusters_per_set=(60, 60), turns_per_cluster=2, long_every=0)
+        del arms[pr.ARM_S][0]
+        del arms[pr.ARM_D][0]
+        _, public = pr.build(meta, arms, PASS_ALL, lost={0}, **SMALL)
+        self.assertEqual(public['coverage']['status'], 'PASS')
+
+    def test_a_turn_finished_in_one_core_arm_only_counts_as_lost(self):
+        meta, arms = self.data()
+        del arms[pr.ARM_D][3]
+        _, public = pr.build(meta, arms, PASS_ALL, **SMALL)
+        self.assertEqual(public['coverage']['lost'], 1)
+
+    def test_turns_never_reached_are_not_lost(self):
+        meta, arms = self.data()
+        for k in list(meta)[-20:]:                    # the deadline: never attempted, so not in `lost`
+            del arms[pr.ARM_S][k]
+            del arms[pr.ARM_D][k]
+        _, public = pr.build(meta, arms, PASS_ALL, lost=set(), **SMALL)
+        self.assertEqual(public['coverage']['status'], 'PASS')
+        self.assertEqual(public['coverage']['lost'], 0)
+
+    def test_the_v3_ratio_gives_a_sensitivity_and_stays_public(self):
+        meta, arms = self.data()
+        _, public = pr.build(meta, arms, PASS_ALL, v3_ratio=0.95, **SMALL)
+        self.assertAlmostEqual(public['r_sensitivity']['r_times_v3_ratio'], public['r']['point'] * 0.95, places=3)
+        pr.assert_public(public)
+        _, none = pr.build(meta, arms, PASS_ALL, **SMALL)
+        self.assertIsNone(none['r_sensitivity']['v3_ratio'])
+
+    def test_load_lost_reads_deferred_and_failed_turns_and_forgets_resumed_ones(self):
+        meta, arms = make_data(clusters_per_set=(3, 3), turns_per_cluster=1)
+        root = tempfile.mkdtemp()
+        try:
+            for name in (pr.ARM_S, pr.ARM_D):
+                with open(os.path.join(root, 'arm-%s.jsonl' % name), 'w') as handle:
+                    handle.write(json.dumps(dict(k=0, status='failed', error='ValueError')) + '\n')
+                    handle.write(json.dumps(dict(k=1, status='failed', error='ValueError')) + '\n')
+                    handle.write(json.dumps(dict(k=1, status='ok', rounds=[walk.to_row(e) for e in arms[name][1]])) + '\n')     # resumed
+            with open(os.path.join(root, 'deferred.jsonl'), 'w') as handle:
+                handle.write(json.dumps(dict(k=4, tokens=100000)) + '\n')
+                handle.write(json.dumps(dict(k=5, tokens=100000)) + '\n')
+            self.assertEqual(pr.load_lost(root), set([0, 4, 5]))
+            self.assertEqual(pr.load_lost(tempfile.gettempdir() + os.sep + 'no-such-dir-a0'), set())
+        finally:
+            shutil.rmtree(root)
+
+    def test_decide_without_a_coverage_argument_is_unchanged(self):
+        meta, arms = self.data()
+        _, public = pr.build(meta, arms, PASS_ALL, **SMALL)
+        self.assertEqual(public['coverage']['status'], 'PASS')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -87,5 +87,33 @@ class IntakeTests(unittest.TestCase):
             up.verify_checkpoint(self.root, {'missing.safetensors': good})
 
 
+class DraftScalarTests(unittest.TestCase):
+    TAPS = (5, 19, 33, 47, 61)
+
+    def test_a_neutral_config_with_the_right_taps_passes(self):
+        config = dict(dflash_config=dict(target_layer_ids=[5, 19, 33, 47, 61]))
+        self.assertTrue(all(up.check_draft_config(config, self.TAPS).values()))
+
+    def test_each_scalar_is_checked_on_its_own(self):
+        for name, value, failed in (('input_embedding_scale', 2.0, 'embedding_scale_neutral'), ('output_multiplier', 0.5, 'output_multiplier_neutral'),
+                                    ('final_logit_softcapping', 30.0, 'no_softcap')):
+            config = dict(dflash_config={name: value, 'target_layer_ids': list(self.TAPS)})
+            checks = up.check_draft_config(config, self.TAPS)
+            self.assertFalse(checks[failed], name)
+            self.assertEqual(sorted(k for k, v in checks.items() if not v), [failed])
+
+    def test_the_nested_value_wins_over_the_top_level_as_upstream_reads_it(self):
+        config = dict(output_multiplier=3.0, dflash_config=dict(output_multiplier=1.0, target_layer_ids=list(self.TAPS)))
+        self.assertTrue(up.check_draft_config(config, self.TAPS)['output_multiplier_neutral'])
+        self.assertFalse(up.check_draft_config(dict(output_multiplier=3.0), self.TAPS, ids=self.TAPS)['output_multiplier_neutral'])
+
+    def test_different_taps_fail_and_unnamed_taps_need_the_loaded_models_own(self):
+        self.assertFalse(up.check_draft_config(dict(dflash_config=dict(target_layer_ids=[1, 2, 3, 4, 5])), self.TAPS)['taps_match'])
+        self.assertFalse(up.check_draft_config({}, self.TAPS)['taps_match'])
+        self.assertTrue(up.check_draft_config({}, self.TAPS, ids=[5, 19, 33, 47, 61])['taps_match'])
+        self.assertFalse(up.check_draft_config({}, self.TAPS, ids=[5, 19, 33, 47, 60])['taps_match'])
+        self.assertTrue(up.check_draft_config({}, self.TAPS, allow_unnamed=True)['taps_match'])
+
+
 if __name__ == '__main__':
     unittest.main()

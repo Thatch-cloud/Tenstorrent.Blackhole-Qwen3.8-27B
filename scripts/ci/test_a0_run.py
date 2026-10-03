@@ -1,11 +1,14 @@
 """a0_run end to end on fakes: a tiny hybrid target, drafters that follow the logged answer, a synthetic bundle in the real layout.
 Resume, the deadline, the watchdog's trip file, OOM, failed arms, admission, the plan, the gates, privacy, and the hand-off to the report."""
+import contextlib
+import io
 import json
 import os
 import random
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 sys.dont_write_bytecode = True
@@ -76,6 +79,7 @@ class Fixture(unittest.TestCase):
         self.bundle, self.records = make_bundle(self.root, self.target)
         self.out = os.path.join(self.root, 'results')
         self.trip = os.path.join(self.root, 'trip')
+        self.beat = os.path.join(self.root, 'beat')
         self.lines = []
         self.now = 1000.0
 
@@ -291,12 +295,19 @@ class GateTests(unittest.TestCase):
         self.assertTrue(run.is_oom(OutOfMemoryError()))
         self.assertTrue(run.is_oom(MemoryError()))
         self.assertFalse(run.is_oom(ValueError()))
+        # a RuntimeError out of Triton / cuBLAS / the driver is an OOM when its text says so
+        self.assertTrue(run.is_oom(RuntimeError('CUDA error: out of memory')))
+        self.assertTrue(run.is_oom(RuntimeError('CUBLAS_STATUS_ALLOC_FAILED when calling cublasCreate')))
+        self.assertTrue(run.is_oom(RuntimeError('Triton Error [CUDA]: Failed to allocate 1 GiB')))
+        self.assertFalse(run.is_oom(RuntimeError('shape mismatch')))
 
     def test_guard_admission_arithmetic(self):
         guard = run.Guard(None, 10 ** 9, lambda: 0, lambda: 50.0)
-        self.assertAlmostEqual(guard.projected_gib(122774), 4.0 + 122774 * (65536 + 51200) / float(1 << 30), places=6)
-        self.assertTrue(guard.admits(122774))            # 50 - 17.3 >= 10
-        self.assertFalse(run.Guard(None, 10 ** 9, lambda: 0, lambda: 25.0).admits(122774))
+        per_token = 65536 + 51200 + 2 * 20480           # target KV + raw taps + DSpark's context cache, doubled while torch.cat grows it
+        self.assertAlmostEqual(guard.projected_gib(122774), 4.0 + 122774 * per_token / float(1 << 30), places=6)
+        self.assertTrue(guard.admits(122774))            # 50 - 22.0 >= 10
+        self.assertFalse(run.Guard(None, 10 ** 9, lambda: 0, lambda: 31.0).admits(122774))
+        self.assertTrue(run.Guard(None, 10 ** 9, lambda: 0, lambda: 31.0).admits(100000))
 
 
 class MainTests(Fixture):
@@ -304,9 +315,9 @@ class MainTests(Fixture):
         def environment(options, say):
             group_runner = tgt.GroupRunner(self.target, chunk=7, feature_dtype=torch.float32)
             group_runner.width = 3 * HIDDEN
-            return group_runner, (lambda spec: fakes.FollowsAnswer(good=4)), self.guard(), dict(V0='PASS')
+            return group_runner, (lambda spec: fakes.FollowsAnswer(good=4)), self.guard(), dict(V0='PASS', V4='PASS', _details=dict(x=1))
         lines = []
-        code = run.main(['--bundle', self.bundle, '--out', self.out, '--deadline', '1e12', '--trip-file', self.trip, '--canary'],
+        code = run.main(['--bundle', self.bundle, '--out', self.out, '--deadline', '1e12', '--trip-file', self.trip, '--heartbeat-file', self.beat, '--canary'],
                         say=lines.append, environment=environment)
         self.assertEqual(code, 0)
         canary = os.path.join(self.out, 'canary')
@@ -314,13 +325,15 @@ class MainTests(Fixture):
         meta = [json.loads(line) for line in slurp(os.path.join(self.bundle, bundle.META_NAME)).splitlines()]
         self.assertEqual(done, run.canary_keys(meta))
         self.assertEqual(json.loads(slurp(os.path.join(canary, 'validity.json')))['V0'], 'PASS')
+        self.assertEqual(json.loads(slurp(os.path.join(canary, 'validity.json')))['V4'], 'PASS')
+        self.assertEqual(json.loads(slurp(os.path.join(canary, 'calibration.json')))['checks'], dict(x=1))
         self.assertTrue(any(line.startswith('gates:') for line in lines))
 
     def test_main_prints_the_exception_type_only(self):
         def environment(options, say):
             raise RuntimeError(SENTINEL)
         lines = []
-        code = run.main(['--bundle', self.bundle, '--out', self.out, '--deadline', '1e12', '--trip-file', self.trip],
+        code = run.main(['--bundle', self.bundle, '--out', self.out, '--deadline', '1e12', '--trip-file', self.trip, '--heartbeat-file', self.beat],
                         say=lines.append, environment=environment)
         self.assertEqual(code, 2)
         self.assertEqual(lines, ['refused: RuntimeError'])
@@ -329,7 +342,7 @@ class MainTests(Fixture):
         with open(os.path.join(self.bundle, bundle.META_NAME), 'a') as handle:
             handle.write('{}\n')
         lines = []
-        self.assertEqual(run.main(['--bundle', self.bundle, '--out', self.out, '--deadline', '1e12', '--trip-file', self.trip],
+        self.assertEqual(run.main(['--bundle', self.bundle, '--out', self.out, '--deadline', '1e12', '--trip-file', self.trip, '--heartbeat-file', self.beat],
                                   say=lines.append, environment=None), 2)
         self.assertEqual(lines, ['refused: BundleError'])
 
@@ -343,6 +356,220 @@ class MainTests(Fixture):
             handle.write(b'x')
         count = run.drop_file_cache(self.root)
         self.assertTrue(count == 0 or count >= 1)      # 0 where posix_fadvise does not exist (Windows)
+
+
+    def _environment(self, **gates):
+        def environment(options, say):
+            group_runner = tgt.GroupRunner(self.target, chunk=7, feature_dtype=torch.float32)
+            group_runner.width = 3 * HIDDEN
+            return group_runner, (lambda spec: fakes.FollowsAnswer(good=4)), self.guard(), dict(gates)
+        return environment
+
+    def test_a_failed_v4_or_v0_stops_before_any_turn_and_says_why(self):
+        for gates in (dict(V0='PASS', V4='FAIL'), dict(V0='FAIL', V4='PASS'), dict(V0='PASS', V4='NOT_RUN')):
+            shutil.rmtree(self.out, ignore_errors=True)
+            lines = []
+            code = run.main(['--bundle', self.bundle, '--out', self.out, '--deadline', '1e12', '--trip-file', self.trip,
+                             '--heartbeat-file', self.beat], say=lines.append, environment=self._environment(**gates))
+            self.assertEqual(code, 4)
+            self.assertFalse(os.path.exists(os.path.join(self.out, 'arm-dspark-t16.jsonl')))
+            validity = json.loads(slurp(os.path.join(self.out, 'validity.json')))
+            self.assertEqual((validity['V0'], validity['V4']), (gates['V0'], gates['V4']))
+            self.assertTrue(lines[-1].startswith('stopped before the run'))
+
+    def test_a_missing_gate_is_not_a_pass(self):
+        code = run.main(['--bundle', self.bundle, '--out', self.out, '--deadline', '1e12', '--trip-file', self.trip, '--heartbeat-file',
+                         self.beat], say=lambda line: None, environment=self._environment(V0='PASS'))
+        self.assertEqual(code, 4)
+
+    def test_load_only_runs_the_environment_and_no_turn(self):
+        lines = []
+        code = run.main(['--bundle', self.bundle, '--out', self.out, '--deadline', '1e12', '--trip-file', self.trip, '--heartbeat-file',
+                         self.beat, '--load-only'], say=lines.append, environment=self._environment(V0='PASS', V4='PASS', _details={}))
+        self.assertEqual(code, 0)
+        self.assertEqual(lines, ['loaded: V0=PASS V4=PASS'])
+        self.assertFalse(os.path.exists(os.path.join(self.out, 'arm-dspark-t16.jsonl')))
+
+    def test_the_heartbeat_flag_is_required(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            run.main(['--bundle', self.bundle, '--out', self.out, '--deadline', '1e12', '--trip-file', self.trip], say=lambda line: None)
+
+
+class HeartbeatTests(Fixture):
+    def beat_guard(self, **kwargs):
+        return run.Guard(self.trip, 10 ** 9, lambda: self.now, lambda: 100.0, heartbeat_file=self.beat, **kwargs)
+
+    def beat_at(self, stamp):
+        with open(self.beat, 'w') as handle:
+            handle.write('%r\n' % stamp)
+
+    def test_a_missing_heartbeat_stops_the_run(self):
+        self.assertEqual(self.beat_guard().stop_reason(), 'watchdog_missing')
+
+    def test_a_fresh_heartbeat_is_fine_and_a_stale_one_stops(self):
+        self.beat_at(self.now - 3)
+        guard = self.beat_guard()
+        self.assertIsNone(guard.stop_reason())
+        self.now += 20
+        self.assertEqual(guard.stop_reason(), 'watchdog_stale')
+
+    def test_an_unreadable_heartbeat_counts_as_missing(self):
+        with open(self.beat, 'w') as handle:
+            handle.write('not a number')
+        self.assertEqual(self.beat_guard().stop_reason(), 'watchdog_missing')
+
+    def test_the_trip_file_still_wins(self):
+        self.beat_at(self.now)
+        with open(self.trip, 'w') as handle:
+            handle.write('avail_low\n')
+        self.assertEqual(self.beat_guard().stop_reason(), 'watchdog')
+
+    def test_no_heartbeat_file_means_no_check(self):
+        self.assertIsNone(run.Guard(self.trip, 10 ** 9, lambda: self.now, lambda: 100.0).stop_reason())
+
+    def test_a_run_stops_between_groups_when_the_heartbeat_goes_stale(self):
+        self.beat_at(self.now)
+        runner = self.runner(guard=self.beat_guard())
+        self.now += 100                                   # the watchdog never wrote again
+        runner.run()
+        self.assertEqual(runner.stopped, 'watchdog_stale')
+        self.assertEqual(runner.counts['arm_ok'], 0)
+
+    def test_make_room_calls_the_release_hook_before_every_admission(self):
+        calls = []
+        self.beat_at(self.now)
+        guard = self.beat_guard(release=lambda: calls.append(1))
+        runner = self.runner(guard=guard)
+        runner.run()
+        self.assertGreaterEqual(len(calls), 2 * runner.counts['groups'])
+
+    def test_deferred_turns_are_written_down(self):
+        runner = self.runner(guard=self.guard(avail=10.0))
+        counts = runner.run()
+        self.assertEqual(counts['deferred'], len(self.records))
+        self.assertEqual(sorted(entry['k'] for entry in runner.store.lines('deferred.jsonl')), sorted(range(len(self.records))))
+
+
+class V3CoverageTests(unittest.TestCase):
+    def test_a_ratio_in_the_band_but_with_a_low_interval_end_fails(self):
+        meta = [dict(k=k, set='swe' if k % 2 else 'own', cluster=k // 4, bucket='4k', weight=1.0) for k in range(40)]
+
+        served = dict((k, [dict(committed=5, uncapped=5)] * 5) for k in range(40))
+        free = dict((k, [dict(committed=4.6, uncapped=4.6)] * 5) for k in range(40))      # a control 8% below the served arm
+        status, counts = run.gate_v3(meta, free, served, resamples=100)
+        self.assertGreaterEqual(counts['ratio'], 0.9)
+        self.assertEqual(status, 'FAIL')                                                  # inside [0.93, 1.12] only by a hair: 0.92 here
+        near = dict((k, [dict(committed=4.8, uncapped=4.8)] * 5) for k in range(40))      # 4% below: in the band, interval below 0.98
+        self.assertEqual(run.gate_v3(meta, near, served, resamples=100)[0], 'FAIL')
+        close = dict((k, [dict(committed=4.95, uncapped=4.95)] * 5) for k in range(40))
+        self.assertEqual(run.gate_v3(meta, close, served, resamples=100)[0], 'PASS')
+
+
+class V4PlanTests(unittest.TestCase):
+    def record(self, k, set_name, prompt, answer):
+        return dict(k=k, set=set_name, prompt_ids=list(range(prompt)), output_ids=[1] * answer)
+
+    def test_the_shortest_turns_of_each_set_in_turn_and_only_long_enough_answers(self):
+        records = [self.record(0, 'swe', 30, 40), self.record(1, 'swe', 20, 10), self.record(2, 'own', 50, 40), self.record(3, 'swe', 25, 40),
+                   self.record(4, 'own', 10, 40), self.record(5, 'own', 90, 40)]
+        picked = [r['k'] for r in run.v4_pick(records, turns=4)]
+        self.assertEqual(picked, [4, 3, 2, 0])                  # own 10, swe 25, own 50, swe 30; k=1 has a 10-token answer
+        self.assertEqual(len(run.v4_pick(records, turns=50)), 5)
+
+    def test_positions_are_spread_and_leave_a_full_block(self):
+        positions = run.v4_positions(100)
+        self.assertEqual(len(positions), 5)
+        self.assertEqual(positions[0], 0)
+        self.assertEqual(positions[-1], 100 - 7 - 1)
+        self.assertEqual(run.v4_positions(7), [])
+        self.assertEqual(run.v4_positions(9), [0, 1])
+
+
+class V4CollectTests(Fixture):
+    """V4 end to end on the tiny target: both 'devices' are functions of the view rows and the noise ids."""
+    def env(self, perturb=0.0):
+        generator = torch.Generator().manual_seed(11)
+        head = torch.randn(VOCAB, HIDDEN, generator=generator)
+        pred, succ = torch.randn(VOCAB, 4, generator=generator), torch.randn(VOCAB, 4, generator=generator)
+        embed = torch.randn(VOCAB, HIDDEN, generator=generator)
+        mix = torch.randn(3 * HIDDEN, HIDDEN, generator=generator)
+        self.seen = []
+
+        def block(shift):
+            def fn(view, noise_ids, start, window):
+                low = max(0, start - window)
+                self.seen.append((start - low, len(noise_ids)))
+                context = view.rows(low, start).mean(0) @ mix
+                return embed[torch.as_tensor(noise_ids)] + context[None] + shift * torch.randn(len(noise_ids), HIDDEN, generator=torch.Generator().manual_seed(start))
+            return fn
+        return run.V4Env(block(0.0), block(perturb), head, pred, succ, head.clone(), pred.clone(), succ.clone(), VOCAB - 1)
+
+    def collect(self, perturb):
+        group_runner = tgt.GroupRunner(self.target, chunk=7, feature_dtype=torch.float32)
+        return run.v4_collect(self.records, group_runner, 3 * HIDDEN, self.env(perturb), turns=4, rounds=3)
+
+    def test_identical_devices_agree_on_every_row_and_round(self):
+        rows, pairs, counts = self.collect(0.0)
+        self.assertEqual(counts['turns'], 4)
+        self.assertEqual(counts['rounds'], 4 * 3)
+        self.assertTrue(all(agree for agree, _ in rows))
+        self.assertTrue(all(a == b for a, b in pairs))
+        self.assertEqual(len(rows), 4 * 3 * 7)
+        self.assertTrue(all(count == 7 for _, count in self.seen))      # 7 block rows per round
+        self.assertTrue(all(context <= run.V4_WINDOW for context, _ in self.seen))
+
+    def test_a_diverging_device_is_seen(self):
+        rows, pairs, counts = self.collect(30.0)
+        self.assertFalse(all(agree for agree, _ in rows))
+
+    def test_the_gate_needs_enough_rounds_to_say_anything(self):
+        group_runner = tgt.GroupRunner(self.target, chunk=7, feature_dtype=torch.float32)
+        short = [dict(r, output_ids=r['output_ids'][:10]) for r in self.records]
+        self.assertEqual(run.v4_gate(short, group_runner, 3 * HIDDEN, self.env())[0], 'NOT_RUN')
+
+
+class SelfcheckGateTests(Fixture):
+    def test_a_correct_branch_passes_and_a_broken_restore_fails(self):
+        status, stats = run.selfcheck_gate(self.target, self.records)
+        self.assertEqual(status, 'PASS')
+        self.assertEqual(stats['agree'], stats['rows'])
+
+        class Broken(fakes.TinyTarget):
+            def restore(self, state, snapshot):
+                pass
+        broken = Broken(self.model, TAPS)
+        self.assertEqual(run.selfcheck_gate(broken, self.records)[0], 'FAIL')
+
+    def test_no_usable_turn_is_not_run(self):
+        self.assertEqual(run.selfcheck_gate(self.target, [dict(k=0, prompt_ids=[1] * 10, output_ids=[1] * 5)])[0], 'NOT_RUN')
+
+
+class CacheDropperTests(unittest.TestCase):
+    def test_it_drops_every_directory_samples_and_does_a_last_pass_on_exit(self):
+        dropped, logged = [], []
+        with run.CacheDropper(['a', 'b'], lambda directory: dropped.append(directory) or 1, interval=0.01,
+                              sample=lambda: dict(free_gib=1.0, avail_gib=2.0), log=logged.append):
+            pass
+        self.assertGreaterEqual(len(dropped), 4)                   # at least the first loop pass and the last pass, two directories each
+        self.assertEqual(set(dropped), set(['a', 'b']))
+        self.assertTrue(logged and all(set(entry) == set(['free_gib', 'avail_gib', 't']) for entry in logged))
+
+    def test_a_failing_drop_does_not_stop_the_load(self):
+        def broken(directory):
+            raise OSError('x')
+        with run.CacheDropper(['a'], broken, interval=0.01):
+            pass
+
+    def test_the_loop_keeps_going_while_the_body_runs(self):
+        calls = []
+        with run.CacheDropper(['a'], lambda directory: calls.append(1) or 0, interval=0.01):
+            deadline = time.time() + 2
+            while len(calls) < 3 and time.time() < deadline:
+                time.sleep(0.01)
+        self.assertGreaterEqual(len(calls), 3)
+
+    def test_meminfo_sample_has_the_two_fields(self):
+        self.assertEqual(sorted(run.read_meminfo_sample()), ['avail_gib', 'free_gib'])
 
 
 class ImageClosureTests(unittest.TestCase):
