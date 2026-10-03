@@ -97,6 +97,10 @@ RSHARD_PROFILES = {'c2-packed-tp4-diag-rshard': ('c2-packed-tp4-diag', {RSHARD: 
 # The cheap-levers timing twins (tp4/next-3-cheap): each is c2-packed-tp4-speed-strace plus exactly its lever (test_tp4_next3_cheap holds the rule);
 # they carry the audits-off recipe, so the caps and the in-trace sampler are theirs as the strace arm's.
 CHEAP_PROFILES = ('c2-packed-tp4-speed-strace-ring', 'c2-packed-tp4-speed-strace-draftwide')
+# The GDN glue quick wins (tp4/gluefix, test_gdn_pair_slice holds the rule): the timed and diagnostic arms are c2-packed-tp4-speed-strace plus exactly one flag
+# (same exemptions as the cheap twins); the audited arm is c2-packed-tp4-gate plus the flag and the vglue audit (a four-card profile that may carry the audit).
+CHEAP_PROFILES = CHEAP_PROFILES + ('c2-packed-tp4-speed-strace-pairslice', 'c2-packed-tp4-speed-strace-dispatchdiag')
+GLUEFIX_AUDITED = ('c2-packed-tp4-gate-pairslice',)
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 
 
@@ -881,7 +885,7 @@ class VglueProfileTests(unittest.TestCase):
         image = image_env()
         flags = (C1A, V4A, V2, V1, V3A, VGLUE_AUDIT)
         for name, profile in found.items():
-            if name in VGLUE_PROFILES or name in BEST_HANG_FIX:
+            if name in VGLUE_PROFILES or name in BEST_HANG_FIX or name in GLUEFIX_AUDITED:
                 self.assertEqual(profile['env']['QWEN_FAST_TP'], '4', name)
                 continue
             for flag in flags:

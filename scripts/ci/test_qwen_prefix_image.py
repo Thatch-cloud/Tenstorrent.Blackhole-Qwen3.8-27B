@@ -47,13 +47,13 @@ GATE_ONLY_OTHERS = ('general-tp4-bench', 'general-tp4-mmrs', 'c2-packed-tp4-gate
                     'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide',
                     # the batched-draft window's four arms (tp4/draft)
                     'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-gate-quad',
-                    'c2-packed-tp4-gate-pairs',
+                    'c2-packed-tp4-gate-pairs', 'c2-packed-tp4-gate-pairslice',
                     # the hang diagnosis's arms (tp4-serve-3)
                     'c2-packed-tp4-diag', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t1-rshard-audit', 'c2-packed-tp4-diag-t2',
                     # the fix arm (tp4-serve-4)
                     'c2-packed-tp4-speed-fix',
                     # the sampler isolation arms (tp4/sampler)
-                    'c2-packed-tp4-diag-sprewarm', 'c2-packed-tp4-diag-strace', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-strace-draftwide', 'c2-packed-tp4-speed-strace-fcommit', 'c2-packed-tp4-speed-strace-ring',
+                    'c2-packed-tp4-diag-sprewarm', 'c2-packed-tp4-diag-strace', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-strace-dispatchdiag', 'c2-packed-tp4-speed-strace-draftwide', 'c2-packed-tp4-speed-strace-fcommit', 'c2-packed-tp4-speed-strace-pairslice', 'c2-packed-tp4-speed-strace-ring',
                     # the request-shard-argmax arms (tp4/next-2)
                     'c2-packed-tp4-diag-rshard', 'c2-packed-tp4-speed-rshard', 'c2-packed-tp4-gate-rshard-audit',
                     # the admission-freeze window's arms (tp4/freeze)
