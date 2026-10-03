@@ -582,7 +582,15 @@ def prompt_length(prompt):
     return None
 
 
-def prompt_room(max_model_len, budget, max_prompt_tokens=None, min_answer_tokens=None):
+# The drafter's last position: dflash_proposal_inputs.proposal_contexts takes a prefill position of at most 262,111 and a request
+# budget of at most 262,144 - position - 32, so a request's prompt plus its answer may reach 262,112 and no further
+# (test_serving_c2_contract holds this constant to those two literals). A profile whose max-model-len is above it names
+# drafter_headroom_tokens: the window the clamp leaves unused at the end (32 at max-model-len 262,144), so the 32 positions the
+# drafter's last proposal reaches past a request's final token exist.
+DRAFTER_END_LIMIT = 262112
+
+
+def prompt_room(max_model_len, budget, max_prompt_tokens=None, min_answer_tokens=None, headroom=0):
     """The longest prompt the edge admits.
 
     By default a prompt must leave room for the whole output budget, max_model_len - budget,
@@ -594,12 +602,16 @@ def prompt_room(max_model_len, budget, max_prompt_tokens=None, min_answer_tokens
     min_answer_tokens (lowered, never raised, by max_prompt_tokens), and max_tokens is clamped
     to what is left (enforce_request). A prompt plus its clamped answer never exceeds
     max_model_len either way, so a cache of max-num-seqs x max_model_len still holds every
-    admitted request at once."""
+    admitted request at once.
+
+    `headroom` (a profile's drafter_headroom_tokens, 0 for every profile that does not name one) is the tail of the window the
+    clamp never hands out: the room is max_model_len - headroom less the answer room, so prompt + answer <= max_model_len -
+    headroom (262,112 at max-model-len 262,144 and 32)."""
     if min_answer_tokens is not None and (type(min_answer_tokens) is not int
                                           or not 1 <= min_answer_tokens <= budget):
         raise ValueError('min_answer_tokens must be an integer from 1 to the output budget %d, got %r'
                          % (budget, min_answer_tokens))
-    room = max_model_len - (budget if min_answer_tokens is None else min_answer_tokens)
+    room = max_model_len - headroom - (budget if min_answer_tokens is None else min_answer_tokens)
     return room if max_prompt_tokens is None else min(room, max_prompt_tokens)
 
 
@@ -614,13 +626,17 @@ def omitted_max_tokens(max_tokens, *, prompt_tokens, max_model_len):
 
 
 def enforce_request(params, *, prompt_tokens, max_model_len, budget, eos_ids, max_prompt_tokens=None,
-                    min_answer_tokens=None, default_max_tokens=None):
+                    min_answer_tokens=None, default_max_tokens=None, drafter_headroom_tokens=0, kv_pool_blocks=None):
     """Refuse what the fast path cannot serve; coerce the rest to its greedy contract.
 
     min_answer_tokens and default_max_tokens are the c2 profile's (both None elsewhere, and
     then this is exactly the contract every earlier profile ran): the answer room every
     admitted prompt keeps (prompt_room), and the max_tokens a request gets when the client
-    omits it (omitted_max_tokens) - within the same clamp."""
+    omits it (omitted_max_tokens) - within the same clamp. drafter_headroom_tokens (0 elsewhere: nothing changes) lowers the
+    clamp's window to max_model_len - headroom; omitted_max_tokens still reads max_model_len (what vLLM fills in).
+    kv_pool_blocks (None elsewhere: nothing changes) is the KV pool a profile with the reservation admission serves from
+    (QWEN_FAST_KV_RESERVATION=1, serving_kv_reservation): a request whose worst-case blocks, after the clamp, exceed the WHOLE pool
+    could never be admitted and is refused here (a 400) instead of waiting forever behind the scheduler's hold."""
     if getattr(params, 'n', 1) != 1:
         raise ContractError('n must be 1 on this model')
     if getattr(params, 'logprobs', None) is not None or getattr(params, 'prompt_logprobs', None) is not None:
@@ -640,7 +656,7 @@ def enforce_request(params, *, prompt_tokens, max_model_len, budget, eos_ids, ma
     # The profile may cap prompts below context less budget: the KV cache is sized for
     # max-num-seqs x (max_prompt_tokens + budget), not x max_model_len, and the fast path
     # has no preemption to fall back on when a request outgrows it (prompt_room).
-    room = prompt_room(max_model_len, budget, max_prompt_tokens, min_answer_tokens)
+    room = prompt_room(max_model_len, budget, max_prompt_tokens, min_answer_tokens, drafter_headroom_tokens)
     if prompt_tokens is not None and prompt_tokens > room:
         if min_answer_tokens is None:
             raise ContractError('prompt of %d tokens exceeds the %d-token prompt limit of this model (%d-token '
@@ -657,13 +673,58 @@ def enforce_request(params, *, prompt_tokens, max_model_len, budget, eos_ids, ma
     params.frequency_penalty = 0.0
     params.repetition_penalty = 1.0
     params.seed = None
-    limit = budget if prompt_tokens is None else min(budget, max_model_len - prompt_tokens)
+    limit = budget if prompt_tokens is None else min(budget, max_model_len - drafter_headroom_tokens - prompt_tokens)
     if default_max_tokens is not None and omitted_max_tokens(params.max_tokens, prompt_tokens=prompt_tokens,
                                                              max_model_len=max_model_len):
         params.max_tokens = min(default_max_tokens, limit)
     elif params.max_tokens is None or params.max_tokens > limit:
         params.max_tokens = limit
+    if kv_pool_blocks is not None and prompt_tokens is not None:
+        from serving_kv_reservation import request_blocks
+
+        needed = request_blocks(prompt_tokens, params.max_tokens)
+        if needed > kv_pool_blocks:
+            raise ContractError('a request of %d prompt tokens and up to %d answer tokens needs %d KV blocks of 64 tokens, '
+                                'and the server holds %d in all' % (prompt_tokens, params.max_tokens, needed, kv_pool_blocks))
     return params
+
+
+KV_RESERVATION_FLAG = 'QWEN_FAST_KV_RESERVATION'
+KV_NULL_BLOCKS = 1                 # serving_kv_reservation.NULL_BLOCKS: vLLM's block 0 is never handed out
+
+
+def kv_pooled(profile):
+    """Whether a fast-path (S2 extent) profile's KV cache is smaller than seats x its window: num-gpu-blocks-override below
+    max-num-seqs x ceil(max-model-len / 64), so its seats cannot all be resident at full length. False for every other profile."""
+    engine, env = profile.get('engine', {}), profile.get('env', {})
+    override, seats, window = (engine.get(key) for key in ('num-gpu-blocks-override', 'max-num-seqs', 'max-model-len'))
+    if env.get('QWEN_FAST_EXTENT_REPLAY') != '1' or any(type(value) is not int for value in (override, seats, window)):
+        return False
+    return override < seats * -(-window // 64)
+
+
+def kv_reservation_problem(profile):
+    """What is wrong with a profile's KV reservation setting; None when nothing. A pooled fast-path profile must turn the
+    reservation admission on (the fast path cannot preempt, and a pool smaller than its seats' windows preempts without it); the
+    flag is '0' or '1' only, and '1' needs a pool to read (num-gpu-blocks-override)."""
+    value = profile.get('env', {}).get(KV_RESERVATION_FLAG)
+    if value not in (None, '0', '1'):
+        return '%s must be 0 or 1, got %r' % (KV_RESERVATION_FLAG, value)
+    if kv_pooled(profile) and value != '1':
+        return ('profile %s pools its KV cache (%s blocks for %s seats of %s tokens) and so needs %s=1: the fast path cannot '
+                'preempt' % (profile.get('name'), profile['engine']['num-gpu-blocks-override'],
+                             profile['engine']['max-num-seqs'], profile['engine']['max-model-len'], KV_RESERVATION_FLAG))
+    if value == '1' and type(profile.get('engine', {}).get('num-gpu-blocks-override')) is not int:
+        return '%s=1 needs num-gpu-blocks-override: the reservation is made against that pool' % KV_RESERVATION_FLAG
+    return None
+
+
+def kv_pool_blocks(profile):
+    """The blocks the reservation admission hands out: num-gpu-blocks-override less vLLM's null block, for a profile that turns
+    the reservation on; None for every other."""
+    if profile.get('env', {}).get(KV_RESERVATION_FLAG) != '1':
+        return None
+    return profile['engine']['num-gpu-blocks-override'] - KV_NULL_BLOCKS
 
 
 def request_limits(profile):
@@ -677,16 +738,34 @@ def request_limits(profile):
     if default is not None and (type(default) is not int or not 1 <= default <= budget):
         raise ValueError('default_max_tokens must be an integer from 1 to the output budget %d, got %r'
                          % (budget, default))
+    headroom = profile.get('drafter_headroom_tokens')
+    if headroom is not None:
+        # Named only by the profiles whose window is past the drafter's last position; absent from the key set otherwise, so
+        # every earlier profile's limits are exactly what they were.
+        if type(headroom) is not int or not 0 <= headroom <= 4096:
+            raise ValueError('drafter_headroom_tokens must be an integer from 0 to 4096, got %r' % (headroom,))
+        limits['drafter_headroom_tokens'] = headroom
+    headroom = headroom or 0
+    problem = kv_reservation_problem(profile)
+    if problem:
+        raise ValueError(problem)
+    pool = kv_pool_blocks(profile)
+    if pool is not None:
+        limits['kv_pool_blocks'] = pool
     max_model_len = profile.get('engine', {}).get('max-model-len')
     if type(max_model_len) is int:
+        if max_model_len - headroom > DRAFTER_END_LIMIT:
+            raise ValueError('max-model-len %d less drafter_headroom_tokens %d is past the drafter\'s last position %d '
+                             '(dflash_proposal_inputs): name a drafter_headroom_tokens of at least %d'
+                             % (max_model_len, headroom, DRAFTER_END_LIMIT, max_model_len - DRAFTER_END_LIMIT))
         # Validates min_answer_tokens; the cap must leave a prompt of at least one token.
-        if prompt_room(max_model_len, budget, limits['max_prompt_tokens'], limits['min_answer_tokens']) < 1:
+        if prompt_room(max_model_len, budget, limits['max_prompt_tokens'], limits['min_answer_tokens'], headroom) < 1:
             raise ValueError('The profile admits no prompt at all')
     return limits
 
 
 def install_request_contract(module, *, budget, eos_ids, max_prompt_tokens=None, min_answer_tokens=None,
-                             default_max_tokens=None):
+                             default_max_tokens=None, drafter_headroom_tokens=0, kv_pool_blocks=None):
     processor = module.InputProcessor
     if getattr(processor, '_qwen_c2_contract', False):
         return
@@ -697,7 +776,8 @@ def install_request_contract(module, *, budget, eos_ids, max_prompt_tokens=None,
             enforce_request(params, prompt_tokens=prompt_length(prompt),
                             max_model_len=self.model_config.max_model_len, budget=budget, eos_ids=eos_ids,
                             max_prompt_tokens=max_prompt_tokens, min_answer_tokens=min_answer_tokens,
-                            default_max_tokens=default_max_tokens)
+                            default_max_tokens=default_max_tokens, drafter_headroom_tokens=drafter_headroom_tokens,
+                            kv_pool_blocks=kv_pool_blocks)
         return original(self, request_id, prompt, params, *args, **kwargs)
 
     processor.process_inputs = process_inputs
@@ -708,6 +788,11 @@ def install_request_contract(module, *, budget, eos_ids, max_prompt_tokens=None,
         log('request contract: every prompt keeps >= %s answer tokens, max_tokens defaults to %s when omitted',
             min_answer_tokens if min_answer_tokens is not None else budget,
             default_max_tokens if default_max_tokens is not None else 'the clamp')
+    if drafter_headroom_tokens:
+        log('request contract: prompt + answer <= context - %d (the drafter\'s last position)', drafter_headroom_tokens)
+    if kv_pool_blocks is not None:
+        log('request contract: a request needing more than the %d KV blocks the reservation admission hands out is refused',
+            kv_pool_blocks)
 
 
 def exit_without_device_teardown(modules=None, parent=None, exit=None, streams=None):
@@ -863,5 +948,7 @@ def boot(environ=None, orig_argv=None):
         sys.meta_path.insert(0, PostImportHook(
             INPUT_PROCESSOR, lambda module: install_request_contract(
                 module, budget=budget, eos_ids=eos_ids, max_prompt_tokens=limits['max_prompt_tokens'],
-                min_answer_tokens=limits['min_answer_tokens'], default_max_tokens=limits['default_max_tokens'])))
+                min_answer_tokens=limits['min_answer_tokens'], default_max_tokens=limits['default_max_tokens'],
+                drafter_headroom_tokens=limits.get('drafter_headroom_tokens', 0),
+                kv_pool_blocks=limits.get('kv_pool_blocks'))))
     return profile

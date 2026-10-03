@@ -37,7 +37,7 @@ class JobTests(unittest.TestCase):
         self.assertEqual((outputs['cards'], outputs['fabric']), ('pair', 'FABRIC_1D'))
 
     def test_the_tp4_profiles_are_the_profiles_that_name_the_mesh(self):
-        self.assertEqual(TP4, ['c2-packed-tp4', 'c2-packed-tp4-8', 'c2-packed-tp4-8-diag-strace', 'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate', 'c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-diag', 'c2-packed-tp4-diag-rshard', 'c2-packed-tp4-diag-sprewarm',
+        self.assertEqual(TP4, ['c2-packed-tp4', 'c2-packed-tp4-262k-gate', 'c2-packed-tp4-8', 'c2-packed-tp4-8-diag-strace', 'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate', 'c2-packed-tp4-8x262k', 'c2-packed-tp4-8x262k-diag-strace', 'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate', 'c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-diag', 'c2-packed-tp4-diag-rshard', 'c2-packed-tp4-diag-sprewarm',
                                'c2-packed-tp4-diag-strace', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t1-rshard-audit', 'c2-packed-tp4-diag-t2', 'c2-packed-tp4-f12',
                                'c2-packed-tp4-f2', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-fcommit',
                                'c2-packed-tp4-gate-fcommit-live', 'c2-packed-tp4-gate-fcommit-quad', 'c2-packed-tp4-gate-noslide',

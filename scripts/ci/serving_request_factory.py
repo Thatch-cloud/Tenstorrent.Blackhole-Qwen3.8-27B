@@ -53,6 +53,11 @@ def host_refusals(enabled):
         raise RequestRefused(str(refusal)) from refusal
 
 
+# dflash_proposal_inputs.proposal_contexts' bound (position <= 262,111, budget <= 262,144 - position - 32): a request's prompt plus its
+# output budget may reach 262,112. Duplicated here, as the contract's DRAFTER_END_LIMIT is; test_c2_packed_tp4_262k_profiles pins them equal.
+DRAFTER_END_LIMIT = 262112
+
+
 def request_budget(parameters, *, prompt_tokens, capacity, ceiling=None):
     """One request's output budget under QWEN_FAST_ANY_REQUEST: its own max_tokens, within the
     server ceiling (OUTPUT_BUDGET) and the room its page table leaves after the prompt.
@@ -67,7 +72,14 @@ def request_budget(parameters, *, prompt_tokens, capacity, ceiling=None):
     if max_tokens < 1 or ceiling < 1 or not 1 <= prompt_tokens < capacity:
         raise ValueError('A request budget needs max_tokens >= 1 and a prompt inside its page capacity; '
                          'max_tokens=%d prompt=%d capacity=%d' % (max_tokens, prompt_tokens, capacity))
-    return min(max_tokens, ceiling, capacity - prompt_tokens)
+    # The drafter's own bound (dflash_proposal_inputs.proposal_contexts: a position of at most 262,111 and a budget of at most
+    # 262,144 - position - 32). It cannot bind below a 262,112-token page capacity, so every earlier capacity's budget is what it
+    # was; at 262,144 it is what stops an unclamped request from being refused by the engine build AFTER its prefill has run.
+    room = min(capacity, DRAFTER_END_LIMIT) - prompt_tokens
+    if room < 1:
+        raise ValueError('A request budget needs room for the drafter after the prompt; prompt=%d, the drafter ends at %d'
+                         % (prompt_tokens, DRAFTER_END_LIMIT))
+    return min(max_tokens, ceiling, room)
 
 
 def sequential_captures(capture_rows):
@@ -160,6 +172,11 @@ def register_dram_admission(pool, *, log=None):
         'unavailable (%s)' % reason if reading is None else
         'free {} largest_free {} trace_largest_free {}'.format(reading['free'], reading['largest_free'],
                                                                reading['trace_largest_free']))
+    tier = admission.long_prefill_tier()
+    if tier is not None:
+        (_log if log is None else log)(
+            '[PINDIAG] dram admission long-prefill tier: a prompt of >= {} tokens is charged {} bytes of prefill transient per chip '
+            'instead of {}', tier[0], tier[1], admission.prefill_transient_bytes())
     return unregister
 
 

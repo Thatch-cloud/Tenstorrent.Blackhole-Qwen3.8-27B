@@ -97,7 +97,10 @@ RSHARD_PROFILES = {'c2-packed-tp4-diag-rshard': ('c2-packed-tp4-diag', {RSHARD: 
 # The eight-seat twins (tp4/seats8) are production's recipe plus their deltas (test_c2_packed_tp4_seats8_profiles holds them): they carry the
 # tail caps and the in-trace sampler, and the diag twin the stall watch and the handle guard, as c2-packed-tp4 and the diag arms do.
 SEATS8_PROFILES = ('c2-packed-tp4-8', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate', 'c2-packed-tp4-8-diag-strace',
-                   'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard')
+                   'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard',
+                   # the 262k-window twins (tp4/seats8-262k, test_c2_packed_tp4_262k_profiles holds them): the same recipe
+                   'c2-packed-tp4-8x262k', 'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate',
+                   'c2-packed-tp4-8x262k-diag-strace')
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 
 

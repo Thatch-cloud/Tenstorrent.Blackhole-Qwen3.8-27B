@@ -5561,6 +5561,466 @@
       "default_max_tokens": 8192,
       "parser_rechunk": true,
       "gate_only": true
+    },
+    "c2-packed-tp4-8x262k": {
+      "description": "EIGHT SEATS, EVERY SEAT A 262,144-TOKEN WINDOW (the I2 increment; UNVERIFIED on hardware). Beside c2-packed-tp4-8 the deltas are: max-model-len and max-num-batched-tokens 262,144 (page-table width 4,096: page_width_tp4 behind the E1 record, the admission at capacity 262,144 behind the E2 record and E1, both skeletons until the card windows record them, so this profile does not attach until they do); QWEN_FAST_MAX_POSITION 262,144 (the admitted capacity); QWEN_DSPARK_REQUEST_CONTEXT stays 131,072 (the drafter's request context is a qualified constant that 13 modules read: the census test holds it); drafter_headroom_tokens 32 (prompt + answer <= 262,112, the drafter's last position, so the contract's clamp and the page-table rule agree); a POOLED KV cache of num-gpu-blocks-override 21,760 blocks (PROVISIONAL: 8 x 2,052 = 16,416 plus the free DRAM at eight live seats less 1.0 GB and the 262k growth, at 557,056 bytes a block per chip; the M9b job measures it and the image is rebuilt if it reads lower) instead of 8 x 4,096 = 32,768, which does not fit, so eight windows are NOT all resident at once and QWEN_FAST_KV_RESERVATION=1 admits a request only when its worst-case block count (ceil((prompt + max_tokens + 32) / 64) + 1) fits what is unreserved, holding it otherwise (the fast path cannot preempt); the three DRAM admission bounds are set in whole megabytes (800 / 600 / 256, conservative: M9a measures a 253,920-token prefill and re-sets them). Limits: prompts up to 253,920 tokens with at least 8,192 tokens of answer room (262,144 - 32 - 8,192). c2-packed-tp4-8 (eight 131k seats) stays the shipped eight-seat profile and c2-packed-tp4 the file default and the production profile.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "262144",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_PACKED_SAMPLER_IN_TRACE": "1",
+        "QWEN_FAST_M3_BLOCKS": "2",
+        "QWEN_FAST_M3_REQUEST_WARM": "1",
+        "QWEN_FAST_KV_RESERVATION": "1",
+        "QWEN_FAST_DRAM_ENGINE_BUILD_MB": "800",
+        "QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB": "600",
+        "QWEN_FAST_DRAM_LARGEST_BUFFER_MB": "256"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 262144,
+        "max-num-seqs": 8,
+        "max-num-batched-tokens": 262144,
+        "block-size": 64,
+        "num-gpu-blocks-override": 21760,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 536870912,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "max_prompt_tokens": 253920,
+      "min_answer_tokens": 8192,
+      "default_max_tokens": 8192,
+      "drafter_headroom_tokens": 32,
+      "parser_rechunk": true
+    },
+    "c2-packed-tp4-8x262k-gate": {
+      "description": "GATE ONLY (the 262k exactness arm, never for traffic): EIGHT SEATS, EVERY SEAT A 262,144-TOKEN WINDOW (the I2 increment; UNVERIFIED on hardware). Beside c2-packed-tp4-8 the deltas are: max-model-len and max-num-batched-tokens 262,144 (page-table width 4,096: page_width_tp4 behind the E1 record, the admission at capacity 262,144 behind the E2 record and E1, both skeletons until the card windows record them, so this profile does not attach until they do); QWEN_FAST_MAX_POSITION 262,144 (the admitted capacity); QWEN_DSPARK_REQUEST_CONTEXT stays 131,072 (the drafter's request context is a qualified constant that 13 modules read: the census test holds it); drafter_headroom_tokens 32 (prompt + answer <= 262,112, the drafter's last position, so the contract's clamp and the page-table rule agree); a POOLED KV cache of num-gpu-blocks-override 21,760 blocks (PROVISIONAL: 8 x 2,052 = 16,416 plus the free DRAM at eight live seats less 1.0 GB and the 262k growth, at 557,056 bytes a block per chip; the M9b job measures it and the image is rebuilt if it reads lower) instead of 8 x 4,096 = 32,768, which does not fit, so eight windows are NOT all resident at once and QWEN_FAST_KV_RESERVATION=1 admits a request only when its worst-case block count (ceil((prompt + max_tokens + 32) / 64) + 1) fits what is unreserved, holding it otherwise (the fast path cannot preempt); the three DRAM admission bounds are set in whole megabytes (800 / 600 / 256, conservative: M9a measures a 253,920-token prefill and re-sets them). Both verify audits on (QWEN_FAST_VERIFY_T1_AUDIT=1, QWEN_FAST_VERIFY_T2_AUDIT=1), the admission waiver marker (QWEN_C2_GATE_PROFILE=1; it never waives the 262,144 evidence) and The gate limits (min_answer_tokens 256, no prompt cap) and gate_only. A correctness arm: the audits add a blocking readback per packed round, so it is never a timed one (c2-packed-tp4-8x262k-time-gate is its audits-off twin).",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "262144",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "1",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "1",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_PACKED_SAMPLER_IN_TRACE": "1",
+        "QWEN_FAST_M3_BLOCKS": "2",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_M3_REQUEST_WARM": "1",
+        "QWEN_FAST_KV_RESERVATION": "1",
+        "QWEN_FAST_DRAM_ENGINE_BUILD_MB": "800",
+        "QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB": "600",
+        "QWEN_FAST_DRAM_LARGEST_BUFFER_MB": "256"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 262144,
+        "max-num-seqs": 8,
+        "max-num-batched-tokens": 262144,
+        "block-size": 64,
+        "num-gpu-blocks-override": 21760,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 536870912,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "drafter_headroom_tokens": 32,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-8x262k-time-gate": {
+      "description": "GATE ONLY (the 262k timed twin, never for traffic): EIGHT SEATS, EVERY SEAT A 262,144-TOKEN WINDOW (the I2 increment; UNVERIFIED on hardware). Beside c2-packed-tp4-8 the deltas are: max-model-len and max-num-batched-tokens 262,144 (page-table width 4,096: page_width_tp4 behind the E1 record, the admission at capacity 262,144 behind the E2 record and E1, both skeletons until the card windows record them, so this profile does not attach until they do); QWEN_FAST_MAX_POSITION 262,144 (the admitted capacity); QWEN_DSPARK_REQUEST_CONTEXT stays 131,072 (the drafter's request context is a qualified constant that 13 modules read: the census test holds it); drafter_headroom_tokens 32 (prompt + answer <= 262,112, the drafter's last position, so the contract's clamp and the page-table rule agree); a POOLED KV cache of num-gpu-blocks-override 21,760 blocks (PROVISIONAL: 8 x 2,052 = 16,416 plus the free DRAM at eight live seats less 1.0 GB and the 262k growth, at 557,056 bytes a block per chip; the M9b job measures it and the image is rebuilt if it reads lower) instead of 8 x 4,096 = 32,768, which does not fit, so eight windows are NOT all resident at once and QWEN_FAST_KV_RESERVATION=1 admits a request only when its worst-case block count (ceil((prompt + max_tokens + 32) / 64) + 1) fits what is unreserved, holding it otherwise (the fast path cannot preempt); the three DRAM admission bounds are set in whole megabytes (800 / 600 / 256, conservative: M9a measures a 253,920-token prefill and re-sets them). The verify audits stay OFF and the sampler stays in the verify trace, so its rounds are the traffic profile's; the admission waiver marker (QWEN_C2_GATE_PROFILE=1) and The gate limits (min_answer_tokens 256, no prompt cap) and gate_only. It is the audits-off arm for the paired timing against c2-packed-tp4-8-time-gate (the same eight seats at a 131k window) and for the stall smoke.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "262144",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_PACKED_SAMPLER_IN_TRACE": "1",
+        "QWEN_FAST_M3_BLOCKS": "2",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_M3_REQUEST_WARM": "1",
+        "QWEN_FAST_KV_RESERVATION": "1",
+        "QWEN_FAST_DRAM_ENGINE_BUILD_MB": "800",
+        "QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB": "600",
+        "QWEN_FAST_DRAM_LARGEST_BUFFER_MB": "256"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 262144,
+        "max-num-seqs": 8,
+        "max-num-batched-tokens": 262144,
+        "block-size": 64,
+        "num-gpu-blocks-override": 21760,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 536870912,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "drafter_headroom_tokens": 32,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-8x262k-diag-strace": {
+      "description": "GATE ONLY (the 262k audits-off diagnosis arm, never for traffic): EIGHT SEATS, EVERY SEAT A 262,144-TOKEN WINDOW (the I2 increment; UNVERIFIED on hardware). Beside c2-packed-tp4-8 the deltas are: max-model-len and max-num-batched-tokens 262,144 (page-table width 4,096: page_width_tp4 behind the E1 record, the admission at capacity 262,144 behind the E2 record and E1, both skeletons until the card windows record them, so this profile does not attach until they do); QWEN_FAST_MAX_POSITION 262,144 (the admitted capacity); QWEN_DSPARK_REQUEST_CONTEXT stays 131,072 (the drafter's request context is a qualified constant that 13 modules read: the census test holds it); drafter_headroom_tokens 32 (prompt + answer <= 262,112, the drafter's last position, so the contract's clamp and the page-table rule agree); a POOLED KV cache of num-gpu-blocks-override 21,760 blocks (PROVISIONAL: 8 x 2,052 = 16,416 plus the free DRAM at eight live seats less 1.0 GB and the 262k growth, at 557,056 bytes a block per chip; the M9b job measures it and the image is rebuilt if it reads lower) instead of 8 x 4,096 = 32,768, which does not fit, so eight windows are NOT all resident at once and QWEN_FAST_KV_RESERVATION=1 admits a request only when its worst-case block count (ceil((prompt + max_tokens + 32) / 64) + 1) fits what is unreserved, holding it otherwise (the fast path cannot preempt); the three DRAM admission bounds are set in whole megabytes (800 / 600 / 256, conservative: M9a measures a 253,920-token prefill and re-sets them). c2-packed-tp4-8x262k-time-gate plus the host-only instruments of c2-packed-tp4-8-diag-strace (the stall watch, the stage log, the allocator census, the collectives handle log and the handle guard in log mode); The gate limits (min_answer_tokens 256, no prompt cap) and gate_only. ",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "262144",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_PACKED_SAMPLER_IN_TRACE": "1",
+        "QWEN_FAST_M3_BLOCKS": "2",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_SEQ_STAGE_LOG": "1",
+        "QWEN_FAST_TRACE_CENSUS": "1",
+        "QWEN_FAST_TRACE_CENSUS_GRAPH": "0",
+        "QWEN_FAST_STALL_DEADLINE_S": "120",
+        "QWEN_FAST_CCL_HANDLE_LOG": "1",
+        "QWEN_FAST_CCL_HANDLE_GUARD": "log",
+        "QWEN_FAST_M3_REQUEST_WARM": "1",
+        "QWEN_FAST_STALL_BUILD_S": "150",
+        "QWEN_FAST_KV_RESERVATION": "1",
+        "QWEN_FAST_DRAM_ENGINE_BUILD_MB": "800",
+        "QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB": "600",
+        "QWEN_FAST_DRAM_LARGEST_BUFFER_MB": "256"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 262144,
+        "max-num-seqs": 8,
+        "max-num-batched-tokens": 262144,
+        "block-size": 64,
+        "num-gpu-blocks-override": 21760,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 536870912,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "drafter_headroom_tokens": 32,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-262k-gate": {
+      "description": "GATE ONLY (the first 262k runs, FOUR seats, never for traffic): c2-packed-tp4-gate with a 262,144-token window: max-model-len and max-num-batched-tokens 262,144 (page-table width 4,096), QWEN_FAST_MAX_POSITION 262,144, QWEN_DSPARK_REQUEST_CONTEXT 131,072 (unchanged), drafter_headroom_tokens 32 (prompt + answer <= 262,112), num-gpu-blocks-override 16,384 = 4 x 4,096: every seat is fully reserved at 262,144 positions, so no reservation admission is needed and no request can outgrow the pool (the fast path cannot preempt; whether vLLM spends one override block on its null block, which would make the pool one block short, is what the CPU scheduler proof and the L9a ladder answer). The DRAM admission bounds are set as the eight-seat profiles set them. Every audit on, the gate limits (min_answer_tokens 256, no prompt cap) and gate_only: a correctness arm, never timed. It does not attach until the 262,144 evidence records (packed_any_evidence_tp4_262144.json and E1) are recorded. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "262144",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "1",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "1",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "0",
+        "QWEN_FAST_FUSED_COMMIT": "0",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "0",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "0",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_DRAM_ENGINE_BUILD_MB": "800",
+        "QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB": "600",
+        "QWEN_FAST_DRAM_LARGEST_BUFFER_MB": "256"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 262144,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 262144,
+        "block-size": 64,
+        "num-gpu-blocks-override": 16384,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "drafter_headroom_tokens": 32,
+      "parser_rechunk": true,
+      "gate_only": true
     }
   }
 }
