@@ -152,14 +152,17 @@ class FileTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
 
     def test_the_agent_actions_bracket_the_job(self):
-        self.assertEqual(job.ACTIONS[2], 'agentstop')
+        # status, rmi, prune (disk housekeeping, no card), then agentstop.
+        self.assertEqual(job.ACTIONS[3], 'agentstop')
         self.assertEqual(job.ACTIONS[-1], 'agentstart')
-        self.assertEqual(job.QUAD_ACTIONS[2], 'agentstop')
+        self.assertEqual(job.QUAD_ACTIONS[3], 'agentstop')
         self.assertEqual(job.QUAD_ACTIONS[-1], 'agentstart')
         self.assertEqual(job.ACTIONS.index('rmi'), job.ACTIONS.index('status') + 1)
-        self.assertEqual(job.ACTIONS.index('agentstop'), job.ACTIONS.index('rmi') + 1)
+        self.assertEqual(job.ACTIONS.index('prune'), job.ACTIONS.index('rmi') + 1)
+        self.assertEqual(job.ACTIONS.index('agentstop'), job.ACTIONS.index('prune') + 1)
         self.assertEqual(job.QUAD_ACTIONS.index('rmi'), job.QUAD_ACTIONS.index('status') + 1)
-        self.assertEqual(job.QUAD_ACTIONS.index('agentstop'), job.QUAD_ACTIONS.index('rmi') + 1)
+        self.assertEqual(job.QUAD_ACTIONS.index('prune'), job.QUAD_ACTIONS.index('rmi') + 1)
+        self.assertEqual(job.QUAD_ACTIONS.index('agentstop'), job.QUAD_ACTIONS.index('prune') + 1)
 
     def test_agent_jobs_parse_in_order_and_open_no_card(self):
         quad = dict(C2_CARDS='quad', C2_PROFILE='general-tp4')

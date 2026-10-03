@@ -186,6 +186,19 @@ jobs:
           done
           echo "=== disk after"; df -h /
           exit 0
+      - name: Prune build cache and dangling images
+        # The rig is the production control plane: the kubelet garbage-collects images at 85% of its root disk and evicts
+        # at 95% (2026-09-27 DiskPressure). Image builds add ~32 GB each. This removes only BuildKit cache older than 12 h
+        # and dangling (untagged) images: no tagged image, no volume, no container.
+        if: contains(steps.job.outputs.actions, 'prune')
+        shell: bash
+        run: |
+          set +e
+          echo "=== disk before"; df -h /; docker system df
+          docker builder prune -f --filter until=12h
+          docker image prune -f
+          echo "=== disk after"; df -h /; docker system df
+          exit 0
       - name: Stop the node agent
         if: contains(steps.job.outputs.actions, 'agentstop')
         shell: bash
