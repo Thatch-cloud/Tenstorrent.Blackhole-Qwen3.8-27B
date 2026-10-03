@@ -1,7 +1,7 @@
 """The tp4-seats8-262k windows: their job templates (scripts/ci/references/tp4-262k8-jobs), their order and what each one reads.
 
 Stage 1 is the card evidence on card M alone (E0, E1w, E1, E2w, E2a, E2b, E2xw, E2c on the I1 base image) and stage 2 the 262k window on the quad (SB9, B9, M9, L9a, L9b,
-C9, T9, hand-back, on one image tp4-262k8-1 built from the commit that records stage 1). The order is B9 -> M9 -> L9a -> L9b -> C9 -> T9: MEMORY before the ladders, because
+C9, T9, hand-back, on one image tp4-262k8-1 built from the commit that records stage 1). The order is B9 -> M9 -> L9a -> L9b -> T9 -> C9 -> T9e: MEMORY before the ladders, because
 the pooled KV cache's size is a measurement. The templates are public, so they name no rig, card, host, address, registry or digest, and the only placeholders are the
 one-card harnesses' (the served image, the K64j graft directory and its binary's digest)."""
 
@@ -113,7 +113,7 @@ class OrderTests(unittest.TestCase):
                                ('Z-reset', 'A0e-agent-stop')):
             self.assertLess(names.index(earlier), names.index(later), (earlier, later))
         self.assertEqual(names[len(STAGE2) - 1], 'Z-reset')
-        self.assertIn('B9 -> M9 -> L9a -> L9b -> C9 -> T9', order_text())
+        self.assertIn('B9 -> M9 -> L9a -> L9b -> T9 -> C9 (optional) -> T9e (optional)', order_text())
 
     def test_the_timing_pairs_alternate_131k_and_262k_abab(self):
         names = [row[0] for row in rows() if row[0].startswith('T9') and row[0] != 'T9e-stall8-cold262k']

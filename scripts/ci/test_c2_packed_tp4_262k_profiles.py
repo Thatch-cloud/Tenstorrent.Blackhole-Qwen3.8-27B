@@ -301,7 +301,7 @@ class AdmissionOnFakeRecordsTests(unittest.TestCase):
                 record, lines = admit(writer_ok=False, record=False, waived=True)
                 self.assertEqual(record['capacity'], WINDOW)
                 self.assertTrue(record['waived'])
-                self.assertEqual(len([line for line in lines if line.startswith('262k evidence WAIVED (gate-only): ')]), 1, lines)
+                self.assertEqual(len([line for line in lines if line.startswith('[PINDIAG] 262k evidence WAIVED (gate-only): ')]), 1, lines)
                 self.assertIn('passed UNQUALIFIED', lines[-1])
                 pw._WAIVER_LOGGED[:] = []
 

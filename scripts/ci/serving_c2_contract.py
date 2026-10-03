@@ -413,7 +413,7 @@ def waiver_problems(profile, environ):
     if environ.get(GATE_SWITCH) != '1':
         problems.append('%s=1 needs %s=1 (a gate run)' % (EVIDENCE_WAIVER, GATE_SWITCH))
     if str(env.get(GATE_PROFILE_MARKER, environ.get(GATE_PROFILE_MARKER))) != '1':
-        problems.append('%s=1 needs the profile own marker %s=1' % (EVIDENCE_WAIVER, GATE_PROFILE_MARKER))
+        problems.append('%s=1 needs the own marker of the profile, %s=1' % (EVIDENCE_WAIVER, GATE_PROFILE_MARKER))
     if any(value != '1' for value in values):
         problems.append('%s must be 1 or unset, not %s' % (EVIDENCE_WAIVER, '/'.join(values)))
     return problems
