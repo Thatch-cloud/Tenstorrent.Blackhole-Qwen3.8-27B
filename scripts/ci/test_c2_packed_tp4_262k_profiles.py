@@ -61,7 +61,7 @@ def minus_deltas(profile, traffic):
     out = copy.deepcopy(profile)
     out.pop('description')
     out.pop('drafter_headroom_tokens', None)
-    for key in ('QWEN_FAST_MAX_POSITION', 'QWEN_FAST_KV_RESERVATION', 'QWEN36_MAX_TOKENS_ALL_USERS') + tuple(DRAM):
+    for key in ('QWEN_FAST_MAX_POSITION', 'QWEN_FAST_KV_RESERVATION', 'QWEN36_MAX_TOKENS_ALL_USERS', 'QWEN_FAST_262K_EVIDENCE_WAIVER') + tuple(DRAM):
         out['env'].pop(key, None)
     for key in ('max-model-len', 'max-num-batched-tokens', 'num-gpu-blocks-override'):
         out['engine'].pop(key)
@@ -231,7 +231,10 @@ class AdmissionOnFakeRecordsTests(unittest.TestCase):
     def environment(self, name):
         import test_seats8_profiles_meet_attach as meets
 
-        return meets.container_env(name)
+        environ = meets.container_env(name)
+        if profiles()[name].get('gate_only') is True:
+            environ['QWEN_C2_GATE'] = '1'           # the switch the gate harness adds to a gate-only profile's container
+        return environ
 
     def test_each_eight_seat_profile_passes_the_extent_environment_at_eight_requests_and_two_blocks(self):
         for name in EIGHT:
@@ -256,12 +259,13 @@ class AdmissionOnFakeRecordsTests(unittest.TestCase):
         import test_packed_any_admission_262k as wide
 
         for name in ALL:
-            environ = self.environment(name)
+            waiver_environ = self.environment(name)
+            environ = {key: value for key, value in waiver_environ.items() if key != 'QWEN_FAST_262K_EVIDENCE_WAIVER'}
             blocks = 4 if name == FOUR_GATE else 8
             m3 = serving_runtime.m3_shape(dict(scheduler_requests=blocks), environ)
             runtime = dict(binaries={'a/_ttnncpp.so': admission.K64J_TTNNCPP_SHA256, 'b/_ttnncpp.so': admission.K64J_TTNNCPP_SHA256})
 
-            def admit(writer_ok=True, record=True):
+            def admit(writer_ok=True, record=True, waived=False):
                 lines = wide.Lines()
                 real = admission.check_evidence
 
@@ -275,7 +279,7 @@ class AdmissionOnFakeRecordsTests(unittest.TestCase):
                         mock.patch.object(admission, 'check_evidence', side_effect=read), \
                         mock.patch.object(page_width_tp4, 'evidence_state',
                                           return_value=(True, []) if writer_ok else (False, ['PENDING'])):
-                    return admission.admit('/opt/tt-metal', m3=m3, environ=dict(environ), log=lines), lines
+                    return admission.admit('/opt/tt-metal', m3=m3, environ=dict(waiver_environ if waived else environ), log=lines), lines
 
             with self.subTest(profile=name):
                 record, lines = admit()
@@ -285,6 +289,19 @@ class AdmissionOnFakeRecordsTests(unittest.TestCase):
                     admit(writer_ok=False)
                 with self.assertRaises(admission.AdmissionRefused):
                     admit(record=False)
+                if name == TRAFFIC:
+                    self.assertNotIn('QWEN_FAST_262K_EVIDENCE_WAIVER', waiver_environ)
+                    continue
+                # the gate-only profiles' own waiver: neither record needed, one loud line, UNQUALIFIED
+                import page_width_tp4 as pw
+
+                pw._WAIVER_LOGGED[:] = []
+                record, lines = admit(writer_ok=False, record=False, waived=True)
+                self.assertEqual(record['capacity'], WINDOW)
+                self.assertTrue(record['waived'])
+                self.assertEqual(len([line for line in lines if line.startswith('262k evidence WAIVED (gate-only): ')]), 1, lines)
+                self.assertIn('passed UNQUALIFIED', lines[-1])
+                pw._WAIVER_LOGGED[:] = []
 
     def test_the_pool_the_profile_builds_is_the_admitted_capacity(self):
         for name in ALL:

@@ -1,10 +1,53 @@
 # The order of the tp4-seats8-262k windows (every one of eight seats a 262,144-token WINDOW, not just a prompt; the I2 increment on top of I1's eight 131k
-# seats). One template per line: <template name without .env> <stop|optional|pre> <image tag> <estimated minutes>.
-# stop: the window halts at the first failure of this job (the hand-back still runs: it is the way back to production). optional: a failure or a skip
-# does not stop the window (its product is data, read against the rule). pre: runs BEFORE the window, card-free, while production serves.
+# seats). One template per line: <template name without .env> <stop|optional|pre|deferred> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window (its product is data, read against the rule).
+# pre: runs BEFORE the window, card-free. deferred: NOT part of the quad-first window; kept in the pack after it (the single-card evidence run, owner's call).
 # Minutes: runner time for ONE run of the job, a quad reset (1-3 min) included where the job has one.
 #
-# STAGE 1: the card evidence, on card M alone (about 1.5-2 hours, production DOWN). No new image: every harness runs THIS checkout's code in the I1 base
+# QUAD-FIRST (the owner's decision: "why bother with the single card run"): the eight-seat 262k quad is measured NOW, on the gate-only evidence waiver.
+# The node agent is ALREADY stopped: this window has NO agentstop, NO agentstart and NO hand-back (the agentstop step is broken on the host runner), and X0 resets the
+# boards. The 262k evidence records (ordered_writer_evidence_tp4.json, packed_any_evidence_tp4_262144.json) are PENDING skeletons, so the gate-only 262k profiles carry
+# QWEN_FAST_262K_EVIDENCE_WAIVER=1 (page_width_tp4.waiver_active): width 4,096 and the admission at capacity 262,144 proceed without the records ONLY in a gate run of a gate-only
+# profile (QWEN_C2_GATE=1 and QWEN_C2_GATE_PROFILE=1), are refused by name anywhere else, and log '262k evidence WAIVED (gate-only)' once. EVERY result of this window is
+# UNQUALIFIED: a measurement, never evidence, and the traffic profile c2-packed-tp4-8x262k never carries the flag. The audit flags of the correctness jobs are ON: B9b,
+# L9a, L9b and C9 run QWEN_FAST_VERIFY_T1_AUDIT=1, QWEN_FAST_VERIFY_T2_AUDIT=1 and QWEN_FAST_GDN_PREFILL_CONV_AUDIT=4 (the profile), and L9a, L9b and C9 also the gate arms' QWEN_FAST_EXTENT_AUDIT=1
+# (C2_GATE_AUDITS=extent; a gate-only knob, never in a profile, so not in B9b's smoke), so an ordered-writer or K64j error past 131k is an [EXTENT-AUDIT] MISMATCH; M9 and T9 are audits-off by design (memory and timing).
+#
+#
+# THE QUAD-FIRST WINDOW (about 11 hours typical; production is already DOWN). ONE IMAGE: tp4-262k8-1, built by SB9 from this branch's commit, no baked default.
+# THE ORDER IS B9 -> M9 -> L9a -> L9b -> C9 -> T9: the cheapest kill signals first, and MEMORY (M9) before the ladders, because the pooled KV cache's size is a measurement,
+# not a choice: if M9b reads a free DRAM at eight live seats below what the provisional 21,760 blocks need (about 4.05 GB per chip), the image is rebuilt with the formula's
+# value (tp4-262k8-2, every template re-tagged) BEFORE L9b, never after. C9 and T9e are not in the owner's quad list: they stay after the timing pairs, optional.
+#   B9a   the production profile on this image: the 262k machinery changes NOTHING at 131k (hashes equal to the earlier production smokes');
+#   B9b   the first 262k attach on the audited gate profile: the admission passes UNQUALIFIED at capacity 262,144 (the waiver line is logged), the reservation installs, zero audit mismatches, the 4k hashes equal S8-1's;
+#   M9a   one cold 253,920-token prompt: the prefill transient, and the DRAM bounds it sets (a profile env change, no rebuild); on the audits-off gate-only twin c2-packed-tp4-8x262k-time-gate;
+#   M9b   eight 157,000-token prompts that fill the pool: the floor, the trace region, the final pool (QWEN36_MAX_TOKENS_ALL_USERS with the override); same profile;
+#   L9a   the strict ladder on four seats (4 x 4,096 blocks, fully reserved), L9b the strict ladder on eight pooled seats;
+#   T9    the paired timing against the 131k eight-seat profile, ABAB, PAIRED PER ROUND: the 262k round at most 1.03 x the 131k round; the deep arm's per-seat rate reported (the target is 8 seats x 75 tok/s);
+#   C9    sixteen users over eight seats: zero aborts, refusals or deaths, the reservation hold exercised and released (else NOT_EXERCISED, never a pass), reserved <= pool on every line; T9e the cold-arrival stall.
+# STOP RULES. One stall in any job (a [STALL] dump, a watchdog or replay-deadline exit) stops the window. An audit mismatch, a KV line past the pool, a preempted request or a failed
+# strict comparison stops it. The timing pair is optional (data, read by the DRIVER from the [PACKED-PHASE] lines): a 262k round above 1.03 x the 131k round is reported, not a stop.
+# WHAT THE WINDOW DECIDES. Nothing is moved by it. Every result is UNQUALIFIED (the waiver): the owner decides whether the one-card evidence (the deferred jobs below) is still needed
+# and whether 262k seats are built into a shipping image (a SEPARATE build that bakes c2-packed-tp4-8x262k, its own thin layer and replay). Z only resets the boards; nothing is placed.
+# TODAY'S PRODUCTION RECIPE stays what serves: never a gate arm, never a 262k placement by an environment variable. No other window's driver may be alive before X0.
+#
+X0-status-reset stop tp4-262k8-1 15
+SB9-build pre tp4-262k8-1 60
+B9a-flag-off-smoke stop tp4-262k8-1 75
+B9b-262k-attach stop tp4-262k8-1 100
+M9a-cold262k stop tp4-262k8-1 45
+M9b-pool8 stop tp4-262k8-1 90
+L9a-ladder4 stop tp4-262k8-1 240
+L9b-ladder8 stop tp4-262k8-1 300
+T9a-131k-timed optional tp4-262k8-1 90
+T9b-262k-timed optional tp4-262k8-1 90
+T9c-131k-timed optional tp4-262k8-1 90
+T9d-262k-timed optional tp4-262k8-1 90
+C9-churn16 optional tp4-262k8-1 240
+T9e-stall8-cold262k optional tp4-262k8-1 60
+Z-reset stop tp4-262k8-1 15
+#
+# DEFERRED (STAGE 1: the card evidence, on card M alone (about 1.5-2 hours, production DOWN); NOT part of the quad-first window above - the owner skipped it; kept here for when the records are wanted. No new image: every harness runs THIS checkout's code in the I1 base
 # image (tp4-serve-8). A0e stops the node agent; E0 resets all four boards (card M alone does not open after quad jobs: v140); E1w and E1 qualify the
 # ordered K/V writers at page-table width 4,096 (page_width_tp4, ordered_writer_evidence_tp4.json); E2w, E2a, E2b, E2xw and E2c are CB1, CB2a and CB2b at
 # capacity 262,144 (packed_any_evidence_tp4_262144.json, its own record at its own pin; the 131,328 record is never touched). The watcher jobs (w) run
@@ -14,51 +57,15 @@
 # --capacity 262144 (--cb1 E2a --cb2a E2b --cb2b E2c, the watcher passes cited); commit each JSON and its re-pinned constant TOGETHER, staging by explicit
 # path (scripts/ci/__pycache__ is tracked); run the CPU suite on CI (gh workflow run qwen-cpu-suite.yml -f ref=<branch>); only then build the stage-2 image.
 #
-A0e-agent-stop stop tp4-serve-8 5
-E0-quad-reset stop tp4-serve-8 12
-E1w-ordered-writer-watcher stop tp4-serve-8 10
-E1-ordered-writer stop tp4-serve-8 25
-E2w-card-watcher stop tp4-serve-8 8
-E2a-cb1 stop tp4-serve-8 20
-E2b-cb2a stop tp4-serve-8 20
-E2xw-reader-watcher stop tp4-serve-8 10
-E2c-cb2b stop tp4-serve-8 30
-H1e-status-reset stop tp4-serve-8 15
-A9e-agent-start stop tp4-serve-8 15
+A0e-agent-stop deferred tp4-serve-8 5
+E0-quad-reset deferred tp4-serve-8 12
+E1w-ordered-writer-watcher deferred tp4-serve-8 10
+E1-ordered-writer deferred tp4-serve-8 25
+E2w-card-watcher deferred tp4-serve-8 8
+E2a-cb1 deferred tp4-serve-8 20
+E2b-cb2a deferred tp4-serve-8 20
+E2xw-reader-watcher deferred tp4-serve-8 10
+E2c-cb2b deferred tp4-serve-8 30
+H1e-status-reset deferred tp4-serve-8 15
+A9e-agent-start deferred tp4-serve-8 15
 #
-# STAGE 2: the 262k window on the quad (about 11 hours typical, 18.75 hours of stop-job budget, 6 hours optional; production DOWN from A0 to the hand-back). ONE IMAGE:
-# tp4-262k8-1, built by SB9 from the commit that records the stage-1 evidence, no baked default. THE ORDER IS B9 -> M9 -> L9a -> L9b -> C9 -> T9: the cheapest kill signals first,
-# and MEMORY (M9) before the ladders, because the pooled KV cache's size is a measurement, not a choice: if M9b reads a free DRAM at eight live seats below what the provisional
-# 21,760 blocks need (about 4.05 GB per chip), the image is rebuilt with the formula's value (tp4-262k8-2, every template re-tagged) BEFORE L9b, never after.
-#   B9a   the production profile on this image: the 262k machinery changes NOTHING at 131k (hashes equal to the earlier production smokes');
-#   B9b   the first 262k attach on the audited gate profile: the admission passes at capacity 262,144 on BOTH records, the reservation installs, zero audit mismatches, the 4k hashes equal S8-1's;
-#   M9a   one cold 253,920-token prompt: the prefill transient, and the DRAM bounds it sets (a profile env change, no rebuild);
-#   M9b   eight 157,000-token prompts that fill the pool: the floor, the trace region, the final pool (QWEN36_MAX_TOKENS_ALL_USERS with the override); B9b already shows num_gpu_blocks=21760 and pool=21759 in the install log;
-#   L9a   the strict ladder on four seats (4 x 4,096 blocks, fully reserved), L9b the strict ladder on eight pooled seats;
-#   C9    sixteen users over eight seats: zero aborts, refusals or deaths, the reservation hold exercised and released (else NOT_EXERCISED, never a pass), reserved <= pool on every line;
-#   T9    the paired timing against the 131k eight-seat profile, ABAB, PAIRED PER ROUND: the 262k round at most 1.03 x the 131k round; the deep arm's per-seat rate reported; T9e the cold-arrival stall.
-# STOP RULES. One stall in any job (a [STALL] dump, a watchdog or replay-deadline exit) stops the window. An audit mismatch, a KV line past the pool, a preempted request or a failed
-# strict comparison stops it. The timing pair is optional (data, read by the DRIVER from the [PACKED-PHASE] lines): a 262k round above 1.03 x the 131k round is reported, not a stop, and
-# is the owner's to weigh; it never gates the decision below by itself.
-# WHAT THE WINDOW DECIDES. Nothing is moved by it. Every stop job passed, the optional pairs read and their numbers recorded: the owner decides whether 262k seats are built into a
-# shipping image (a SEPARATE build that bakes c2-packed-tp4-8x262k, its own thin layer and replay). NO-GO and GO alike, the hand-back re-places TODAY'S PRODUCTION RECIPE: never a gate
-# arm, never a 262k placement by an environment variable.
-# DRIVER STEPS BEFORE STAGE 2 (production serving, no card opened): the stage-1 records committed and the CPU suite green on the branch; the vLLM CPU contract
-# (qwen-fast-vllm-cpu.yml, test_serving_kv_reservation_vllm) green on the branch; SB9 (pre). No other window's driver may be alive before A0 (the previous window's script ends with an agentstart).
-#
-SB9-build pre tp4-262k8-1 60
-A0-agent-stop stop tp4-262k8-1 5
-B9a-flag-off-smoke stop tp4-262k8-1 75
-B9b-262k-attach stop tp4-262k8-1 100
-M9a-cold262k stop tp4-262k8-1 45
-M9b-pool8 stop tp4-262k8-1 90
-L9a-ladder4 stop tp4-262k8-1 240
-L9b-ladder8 stop tp4-262k8-1 300
-C9-churn16 stop tp4-262k8-1 240
-T9a-131k-timed optional tp4-262k8-1 90
-T9b-262k-timed optional tp4-262k8-1 90
-T9c-131k-timed optional tp4-262k8-1 90
-T9d-262k-timed optional tp4-262k8-1 90
-T9e-stall8-cold262k optional tp4-262k8-1 60
-H9-handback-reset stop tp4-262k8-1 15
-A9-agent-start stop tp4-262k8-1 15

@@ -75,7 +75,10 @@ pin (EVIDENCE_TP4_262K_SHA256), whose CB1 (K1 plus the 196,864 and 262,144 famil
 over the 131k families plus the full window) and CB2b (R2 over the named families plus 262,144, capacity 262,144) are the design set
 at that capacity (capacity_design), AND ordered_writer_evidence_tp4.json (E1: page_width_tp4 admits width 4,096). Either record
 failing refuses the attach, in a gate run too: the gate-only UNQUALIFIED waiver is the 131,328 record's alone and is never applied
-at 262,144 (a 262k gate arm exercises the machinery, it never runs on the 131k evidence). The capacity is QWEN_FAST_MAX_POSITION
+at 262,144 (a 262k gate arm exercises the machinery, it never runs on the 131k evidence). The ONE exception is explicit and named:
+QWEN_FAST_262K_EVIDENCE_WAIVER=1 (page_width_tp4.waiver_active), honoured only in a gate run of a gate-only profile (QWEN_C2_GATE=1 and
+QWEN_C2_GATE_PROFILE=1), refused by name anywhere else, logged once as '262k evidence WAIVED (gate-only): ...' and followed by
+'passed UNQUALIFIED ... (262k waiver, gate only)': every result of such a run is unqualified. The capacity is QWEN_FAST_MAX_POSITION
 rounded up to a whole 64-key page (unset: 131,328, exactly today's path and today's passed line); any other capacity is refused by
 name. admit_pool then holds the pool to the admitted capacity (pool.page_width * 64).
 
@@ -706,6 +709,20 @@ def check_window_262k(*, sources_root=HERE, evidence_path_=None, expected_sha256
     return record
 
 
+def waiver_for_262k(environ, what, log=None):
+    """QWEN_FAST_262K_EVIDENCE_WAIVER=1 in a gate run of a gate-only profile: log it (loud, once per process) and return True. Unset: False.
+    Set anywhere else: AdmissionRefused naming the flag."""
+    import page_width_tp4
+
+    try:
+        active = page_width_tp4.waiver_active(environ)
+    except page_width_tp4.WaiverRefused as error:
+        raise AdmissionRefused(str(error), [str(error)])
+    if active:
+        page_width_tp4.log_waiver_once(what, log)
+    return active
+
+
 def tp_guard(environ=None, *, log=None, sources_root=HERE):
     """The four-card rule for a process that has not reached admit (serving_request_factory.attach_source_check):
     at the pair nothing (returns None); at four cards the four-card record must qualify, or the process must be a
@@ -726,8 +743,14 @@ def tp_guard(environ=None, *, log=None, sources_root=HERE):
         return list(refusal.problems)
     capacity = served_capacity(environ)
     if capacity == CAPACITY_262K:
-        # The window's own evidence and E1, in a gate run too: the waiver above is the 131,328 record's alone.
-        check_window_262k(sources_root=sources_root)
+        # The window's own evidence and E1, in a gate run too: the waiver above is the 131,328 record's alone. Only the explicit
+        # QWEN_FAST_262K_EVIDENCE_WAIVER=1 (waiver_for_262k: a gate run of a gate-only profile, else refused) passes without them.
+        try:
+            check_window_262k(sources_root=sources_root)
+        except AdmissionRefused as refusal:
+            if not waiver_for_262k(environ, 'tp_guard: ' + '; '.join(refusal.problems), log):
+                raise
+            return list(refusal.problems)
     return []
 
 
@@ -752,6 +775,13 @@ def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evide
     tp = width(environ)
     record = dict(flag=FLAG, shape=m3[1])
     capacity = CAPACITY_131K
+    waived_262k = False
+    try:
+        import page_width_tp4
+
+        waived_262k = page_width_tp4.waiver_active(environ)
+    except page_width_tp4.WaiverRefused as error:
+        problems.append(str(error))
     try:
         capacity = served_capacity(environ)
     except ValueError as error:
@@ -777,7 +807,7 @@ def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evide
         suffix += ' capacity=%d' % capacity
     if blocks != 1:
         record['blocks'] = blocks
-    unqualified = []
+    unqualified, waived = [], []
     if wide:
         window_check = lambda: check_window_262k(evidence_path_=evidence)
     elif tp == tp_shapes.PAIR:
@@ -791,13 +821,28 @@ def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evide
         try:
             record[name] = check()
         except AdmissionRefused as refusal:
-            if name == 'evidence' and not wide and unqualified_allowed(environ):
+            if name == 'evidence' and wide and waived_262k:
+                # QWEN_FAST_262K_EVIDENCE_WAIVER=1 in a gate run of a gate-only profile: the 262k records are not there, say so.
+                waived.extend(refusal.problems)
+                record[name] = None
+            elif name == 'evidence' and not wide and unqualified_allowed(environ):
                 unqualified.extend(refusal.problems)
                 record[name] = None
             else:
                 problems.extend(refusal.problems)
     if problems:
         _refuse(log, 'at attach', problems)
+    if waived:
+        import page_width_tp4
+
+        page_width_tp4.log_waiver_once('admission at capacity %d passes without the 262k evidence: %s' % (capacity, ' | '.join(waived)), log)
+        record['waived'] = waived
+        _log_unqualified(log, waived)
+        log('{} passed UNQUALIFIED: K64j {} x{}; kernels {}; {} evidence problems (262k waiver, gate only){}',
+            MARKER, K64J_TTNNCPP_SHA256[:16], len(record['runtime']['binaries']),
+            ','.join(sha[:8] for _, sha in sorted(K64J_KERNELS.items())), len(waived), suffix)
+        _STATE['record'] = record
+        return record
     if unqualified:
         # A gate run at four cards, before any four-card evidence exists: every missing piece is on the record, one
         # line each, and the process may never take traffic (its profile is gate_only).

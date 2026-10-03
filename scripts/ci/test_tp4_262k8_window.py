@@ -24,24 +24,24 @@ BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3})
 PLACEHOLDERS = {'@SERVED_IMAGE@': 'tt-vllm:four-card-test', '@K64J_GRAFT_DIR@': '/opt/graft-K64j',
                 '@K64J_TTNNCPP_SHA256@': 'ab' * 32}
 BASE, IMAGE = 'tp4-serve-8', 'tp4-262k8-1'
+AUDITS_ON = ('QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT')
 PRODUCTION = 'c2-packed-tp4'
 EIGHT, EIGHT_GATE, EIGHT_TIME, EIGHT_DIAG, FOUR_GATE = ('c2-packed-tp4-8x262k', 'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate',
                                                         'c2-packed-tp4-8x262k-diag-strace', 'c2-packed-tp4-262k-gate')
 TIME_131K = 'c2-packed-tp4-8-time-gate'
 STAGE1 = ('A0e-agent-stop', 'E0-quad-reset', 'E1w-ordered-writer-watcher', 'E1-ordered-writer', 'E2w-card-watcher', 'E2a-cb1', 'E2b-cb2a',
           'E2xw-reader-watcher', 'E2c-cb2b', 'H1e-status-reset', 'A9e-agent-start')
-STAGE2 = ('SB9-build', 'A0-agent-stop', 'B9a-flag-off-smoke', 'B9b-262k-attach', 'M9a-cold262k', 'M9b-pool8', 'L9a-ladder4', 'L9b-ladder8',
-          'C9-churn16', 'T9a-131k-timed', 'T9b-262k-timed', 'T9c-131k-timed', 'T9d-262k-timed', 'T9e-stall8-cold262k', 'H9-handback-reset',
-          'A9-agent-start')
-OPTIONAL = ('T9a-131k-timed', 'T9b-262k-timed', 'T9c-131k-timed', 'T9d-262k-timed', 'T9e-stall8-cold262k')
+STAGE2 = ('X0-status-reset', 'SB9-build', 'B9a-flag-off-smoke', 'B9b-262k-attach', 'M9a-cold262k', 'M9b-pool8', 'L9a-ladder4', 'L9b-ladder8',
+          'T9a-131k-timed', 'T9b-262k-timed', 'T9c-131k-timed', 'T9d-262k-timed', 'C9-churn16', 'T9e-stall8-cold262k', 'Z-reset')
+OPTIONAL = ('C9-churn16', 'T9a-131k-timed', 'T9b-262k-timed', 'T9c-131k-timed', 'T9d-262k-timed', 'T9e-stall8-cold262k')
 ACTIONS = {'A0e-agent-stop': 'agentstop unserve', 'E0-quad-reset': 'reset', 'E1w-ordered-writer-watcher': 'cardm', 'E1-ordered-writer': 'cardm',
            'E2w-card-watcher': 'cardm', 'E2a-cb1': 'cardm', 'E2b-cb2a': 'cardm', 'E2xw-reader-watcher': 'cardm', 'E2c-cb2b': 'cardm',
-           'H1e-status-reset': 'status reset', 'A9e-agent-start': 'agentstart', 'SB9-build': 'status build', 'A0-agent-stop': 'agentstop unserve',
+           'H1e-status-reset': 'status reset', 'A9e-agent-start': 'agentstart', 'SB9-build': 'status build', 'X0-status-reset': 'status reset',
            'B9a-flag-off-smoke': 'status unserve reset smoke', 'B9b-262k-attach': 'reset smoke', 'M9a-cold262k': 'reset gate',
            'M9b-pool8': 'reset gate', 'L9a-ladder4': 'reset gate', 'L9b-ladder8': 'reset gate', 'C9-churn16': 'reset gate',
            'T9a-131k-timed': 'reset smoke', 'T9b-262k-timed': 'reset smoke', 'T9c-131k-timed': 'reset smoke', 'T9d-262k-timed': 'reset smoke',
-           'T9e-stall8-cold262k': 'reset smoke', 'H9-handback-reset': 'status reset', 'A9-agent-start': 'agentstart'}
-PROFILE_OF = {'B9a-flag-off-smoke': PRODUCTION, 'B9b-262k-attach': EIGHT_GATE, 'M9a-cold262k': EIGHT, 'M9b-pool8': EIGHT, 'L9a-ladder4': FOUR_GATE,
+           'T9e-stall8-cold262k': 'reset smoke', 'Z-reset': 'status reset'}
+PROFILE_OF = {'B9a-flag-off-smoke': PRODUCTION, 'B9b-262k-attach': EIGHT_GATE, 'M9a-cold262k': EIGHT_TIME, 'M9b-pool8': EIGHT_TIME, 'L9a-ladder4': FOUR_GATE,
               'L9b-ladder8': EIGHT_GATE, 'C9-churn16': EIGHT_GATE, 'T9a-131k-timed': TIME_131K, 'T9b-262k-timed': EIGHT_TIME,
               'T9c-131k-timed': TIME_131K, 'T9d-262k-timed': EIGHT_TIME, 'T9e-stall8-cold262k': EIGHT_TIME}
 SMOKE_B9A = ['warmup', 'coding', 'concurrent4_steady', 'steady_resend', 'replay_concurrent4', 'concurrent4_code_equal']
@@ -86,7 +86,7 @@ class OrderTests(unittest.TestCase):
         self.assertTrue(all(len(row) == 4 for row in found))
         on_disk = sorted(name[:-4] for name in os.listdir(FOLDER) if name.endswith('.env'))
         self.assertEqual(sorted(row[0] for row in found), on_disk)
-        self.assertEqual([row[0] for row in found], list(STAGE1 + STAGE2))
+        self.assertEqual([row[0] for row in found], list(STAGE2 + STAGE1))
 
     def test_the_stages_run_on_their_images_and_the_modes_and_minutes(self):
         for name, mode, image, minutes in rows():
@@ -94,7 +94,7 @@ class OrderTests(unittest.TestCase):
                 self.assertEqual(image, BASE if name in STAGE1 else IMAGE)
                 self.assertEqual(parsed(name)['tag'], image)
                 self.assertTrue(minutes.isdigit() and 5 <= int(minutes) <= 360, minutes)
-                self.assertEqual(mode, 'pre' if name == 'SB9-build' else 'optional' if name in OPTIONAL else 'stop')
+                self.assertEqual(mode, 'deferred' if name in STAGE1 else 'pre' if name == 'SB9-build' else 'optional' if name in OPTIONAL else 'stop')
 
     def test_the_minutes_fit_the_workflows_step_and_job_budgets(self):
         literals = base_budgets()
@@ -103,15 +103,16 @@ class OrderTests(unittest.TestCase):
                 self.assertLessEqual(int(minutes), literals['step_minutes'], 'one job is one workflow step')
                 self.assertLessEqual(int(minutes), literals['job_minutes'])
 
-    def test_stage_two_is_b9_m9_l9a_l9b_c9_t9_with_memory_before_the_ladders(self):
-        names = [row[0] for row in rows() if row[0] in STAGE2]
-        for earlier, later in (('SB9-build', 'A0-agent-stop'), ('A0-agent-stop', 'B9a-flag-off-smoke'), ('B9a-flag-off-smoke', 'B9b-262k-attach'),
+    def test_the_quad_window_is_x0_sb9_b9_m9_l9_t9_z_with_memory_before_the_ladders_and_the_deferred_jobs_after(self):
+        names = [row[0] for row in rows()]
+        self.assertEqual(names[:len(STAGE2)], list(STAGE2))
+        self.assertEqual(names[len(STAGE2):], list(STAGE1))
+        for earlier, later in (('X0-status-reset', 'SB9-build'), ('SB9-build', 'B9a-flag-off-smoke'), ('B9a-flag-off-smoke', 'B9b-262k-attach'),
                                ('B9b-262k-attach', 'M9a-cold262k'), ('M9a-cold262k', 'M9b-pool8'), ('M9b-pool8', 'L9a-ladder4'),
-                               ('L9a-ladder4', 'L9b-ladder8'), ('L9b-ladder8', 'C9-churn16'), ('C9-churn16', 'T9a-131k-timed'),
-                               ('T9d-262k-timed', 'T9e-stall8-cold262k'), ('T9e-stall8-cold262k', 'H9-handback-reset'),
-                               ('H9-handback-reset', 'A9-agent-start')):
+                               ('L9a-ladder4', 'L9b-ladder8'), ('L9b-ladder8', 'T9a-131k-timed'), ('T9d-262k-timed', 'Z-reset'),
+                               ('Z-reset', 'A0e-agent-stop')):
             self.assertLess(names.index(earlier), names.index(later), (earlier, later))
-        self.assertEqual(names[-2:], ['H9-handback-reset', 'A9-agent-start'])
+        self.assertEqual(names[len(STAGE2) - 1], 'Z-reset')
         self.assertIn('B9 -> M9 -> L9a -> L9b -> C9 -> T9', order_text())
 
     def test_the_timing_pairs_alternate_131k_and_262k_abab(self):
@@ -119,21 +120,26 @@ class OrderTests(unittest.TestCase):
         self.assertEqual([parsed(name)['profile'] for name in names], [TIME_131K, EIGHT_TIME, TIME_131K, EIGHT_TIME])
         self.assertEqual({parsed(name)['tests'] for name in names}, {','.join(SMOKE_TIMED)})
 
-    def test_the_agent_stops_first_and_starts_last_in_each_stage_and_the_build_is_card_free(self):
-        for stage, first, last in ((STAGE1, 'A0e-agent-stop', 'A9e-agent-start'), (STAGE2[1:], 'A0-agent-stop', 'A9-agent-start')):
-            self.assertEqual((stage[0], stage[-1]), (first, last))
-            for name in stage:
+    def test_the_quad_window_has_no_agentstop_no_agentstart_and_no_hand_back_and_the_build_is_card_free(self):
+        for name in STAGE2:
+            with self.subTest(job=name):
                 actions = parsed(name)['actions'].split()
-                self.assertEqual('agentstop' in actions, name == first, name)
-                self.assertEqual('agentstart' in actions, name == last, name)
+                self.assertNotIn('agentstop', actions)
+                self.assertNotIn('agentstart', actions)
+        for gone in ('A0-agent-stop', 'A9-agent-start', 'H9-handback-reset'):
+            self.assertFalse(os.path.exists(os.path.join(FOLDER, gone + '.env')), gone)
+        self.assertEqual(parsed('X0-status-reset')['actions'], 'status reset')
+        self.assertEqual(parsed('Z-reset')['actions'], 'status reset')
         self.assertEqual(parsed('SB9-build')['actions'], 'status build')
         self.assertNotIn('reset', parsed('SB9-build')['actions'].split())
+        for name in STAGE1:
+            self.assertIn('DEFERRED', text_of(name), name)
 
     def test_the_order_names_what_decides_and_what_is_never_placed(self):
         text = order_text()
         for words in ('KILL SIGNAL', 'WHAT THE WINDOW DECIDES', 'Nothing is moved by it', 'TODAY\'S PRODUCTION RECIPE', 'never a gate',
                       'never a 262k placement by an environment variable', 'PAIRED PER ROUND', '1.03', 'NOT_EXERCISED', 'tp4-262k8-2',
-                      '--capacity 262144', 'scripts/ci/__pycache__ is tracked', '4.05 GB', 'a SEPARATE build', 'No other window\'s driver may be alive'):
+                      '--capacity 262144', 'scripts/ci/__pycache__ is tracked', '4.05 GB', 'QWEN_FAST_262K_EVIDENCE_WAIVER', '262k evidence WAIVED (gate-only)', 'NO agentstop, NO agentstart and NO hand-back', 'UNQUALIFIED', 'a SEPARATE build', 'No other window\'s driver may be alive'):
             self.assertIn(words, text)
 
 
@@ -145,7 +151,7 @@ def base_budgets():
 
 class TemplateTests(unittest.TestCase):
     def test_every_template_parses_is_lf_and_names_no_card_host_address_registry_or_digest(self):
-        for name in STAGE1 + STAGE2:
+        for name in STAGE2 + STAGE1:
             with self.subTest(template=name):
                 parsed(name)
                 with open(os.path.join(FOLDER, name + '.env'), 'rb') as handle:
@@ -153,7 +159,7 @@ class TemplateTests(unittest.TestCase):
                 self.assertIsNone(BANNED.search(text_of(name)), name)
 
     def test_only_the_one_card_harnesses_name_placeholders_and_they_are_the_three(self):
-        for name in STAGE1 + STAGE2:
+        for name in STAGE2 + STAGE1:
             body = chr(10).join(line for line in text_of(name).splitlines() if not line.startswith('#'))
             found = set(re.findall(r'@[A-Z0-9_]+@', body))
             if name in ('E1w-ordered-writer-watcher', 'E1-ordered-writer', 'E2xw-reader-watcher', 'E2c-cb2b'):
@@ -192,7 +198,7 @@ class TemplateTests(unittest.TestCase):
         self.assertEqual(known[FOUR_GATE]['engine']['num-gpu-blocks-override'], 4 * 4096)
 
     def test_no_template_bakes_a_default(self):
-        for name in STAGE1 + STAGE2:
+        for name in STAGE2 + STAGE1:
             self.assertEqual(parsed(name)['bake_default_profile'], '', name)
             self.assertNotIn('C2_BAKE_DEFAULT_PROFILE', chr(10).join(line for line in text_of(name).splitlines() if not line.startswith('#')))
 
@@ -242,16 +248,31 @@ class TemplateTests(unittest.TestCase):
         self.assertEqual(sum(kv.request_blocks(length, 1024) for length in gate.CHURN_LENGTHS_262K[:6]), 21384)
         self.assertEqual(sum(kv.request_blocks(length, 256) for length in gate.LADDER8_262K), 15135)
 
-    def test_the_hand_back_is_last_and_places_todays_production_recipe_only(self):
-        for name in ('H1e-status-reset', 'H9-handback-reset'):
-            text = text_of(name)
-            self.assertIn("TODAY'S PRODUCTION RECIPE", text)
-            self.assertIn('NEVER', text)
-        text = text_of('H9-handback-reset')
-        self.assertIn('never a 262k profile by an environment variable', text)
+    def test_z_is_last_resets_and_places_nothing(self):
+        text = text_of('Z-reset')
+        self.assertIn('places NOTHING', text)
+        self.assertIn('no hand-back', text)
         self.assertIn('a SEPARATE build that bakes it', text)
-        self.assertIn('A9 ONLY', text_of('A9-agent-start'))
         self.assertIn('A9e', order_text())
+
+    def test_the_quad_jobs_run_gate_only_profiles_that_carry_the_waiver_and_the_audits_where_correctness_is_read(self):
+        known = profiles()['profiles']
+        for name in STAGE2:
+            profile = parsed(name)['profile']
+            if profile in (EIGHT, ''):
+                self.fail('%s runs a traffic or no profile' % name)
+        for name in ('B9b-262k-attach', 'L9a-ladder4', 'L9b-ladder8', 'C9-churn16'):
+            env = known[parsed(name)['profile']]['env']
+            self.assertIs(known[parsed(name)['profile']]['gate_only'], True)
+            self.assertEqual({key: env.get(key) for key in AUDITS_ON}, {key: '1' for key in AUDITS_ON}, name)
+            self.assertEqual(env['QWEN_FAST_GDN_PREFILL_CONV_AUDIT'], '4')
+            self.assertEqual(env['QWEN_FAST_262K_EVIDENCE_WAIVER'], '1')
+        for name in ('M9a-cold262k', 'M9b-pool8', 'T9b-262k-timed', 'T9d-262k-timed', 'T9e-stall8-cold262k'):
+            env = known[parsed(name)['profile']]['env']
+            self.assertIs(known[parsed(name)['profile']]['gate_only'], True)
+            self.assertEqual(env['QWEN_FAST_262K_EVIDENCE_WAIVER'], '1')
+            self.assertEqual((env['QWEN_FAST_VERIFY_T1_AUDIT'], env['QWEN_FAST_VERIFY_T2_AUDIT']), ('0', '0'))
+        self.assertNotIn('QWEN_FAST_262K_EVIDENCE_WAIVER', known[EIGHT]['env'])
 
     def test_the_build_is_card_free_and_says_what_to_read(self):
         text = text_of('SB9-build')

@@ -395,6 +395,30 @@ def gate_problems(profile, environ):
     return []
 
 
+# The 262k evidence waiver (page_width_tp4.WAIVER_ENV): a gate-only profile's own env may set it, a traffic profile's never.
+EVIDENCE_WAIVER = 'QWEN_FAST_262K_EVIDENCE_WAIVER'
+GATE_PROFILE_MARKER = 'QWEN_C2_GATE_PROFILE'
+
+
+def waiver_problems(profile, environ):
+    """QWEN_FAST_262K_EVIDENCE_WAIVER set (by the profile's env or the process's) outside a gate run of a gate-only profile."""
+    env = profile.get('env') or {}
+    values = [str(source.get(EVIDENCE_WAIVER)) for source in (env, environ) if source.get(EVIDENCE_WAIVER) not in (None, '', '0')]
+    if not values:
+        return []
+    problems = []
+    if profile.get('gate_only') is not True:
+        problems.append('profile %s is not gate only: %s must not be set for it (a traffic profile never waives the 262k evidence)'
+                        % (profile['name'], EVIDENCE_WAIVER))
+    if environ.get(GATE_SWITCH) != '1':
+        problems.append('%s=1 needs %s=1 (a gate run)' % (EVIDENCE_WAIVER, GATE_SWITCH))
+    if str(env.get(GATE_PROFILE_MARKER, environ.get(GATE_PROFILE_MARKER))) != '1':
+        problems.append('%s=1 needs the profile own marker %s=1' % (EVIDENCE_WAIVER, GATE_PROFILE_MARKER))
+    if any(value != '1' for value in values):
+        problems.append('%s must be 1 or unset, not %s' % (EVIDENCE_WAIVER, '/'.join(values)))
+    return problems
+
+
 def launched_values(argv, flag):
     """Every value argv gives the engine flag `flag` (--flag v or --flag=v; underscores read as dashes)."""
     tokens, values = list(argv), []
@@ -928,7 +952,7 @@ def boot(environ=None, orig_argv=None):
         return None
     fix_sys_path()
     profile = load_profile(environ.get('QWEN_C2_PROFILES', PROFILES))
-    problems = gate_problems(profile, environ)
+    problems = gate_problems(profile, environ) + waiver_problems(profile, environ)
     if problems:
         raise ValueError('; '.join(problems))
     problems = prefix_reuse_problems(profile)
