@@ -66,6 +66,7 @@ def pooled_draft_mask_shapes(users, block_rows):
     bucket a pair builds (PAIR_BUCKET_CONTEXT, QWEN_FAST_PAIR_ROW_EXACT deciding the fold as the bucket will),
     and the quad over slots 0-3 while QWEN_FAST_QUAD_DRAFT is on - so each borrows a mask allocated before any
     trace instead of uploading its own after them (M0). {} with QWEN_FAST_PACKED_PROPOSAL off: no pair forms."""
+    refuse_quad_blocks(users)
     if os.environ.get('QWEN_FAST_PACKED_PROPOSAL') != '1':
         return {}
     from dflash_packed_proposal import DRAFT_PAIRS
@@ -85,6 +86,19 @@ def pooled_draft_mask_shapes(users, block_rows):
             for slots, _ in _pooled_quad_blocks(quad_draft, users, block_rows):
                 shapes.setdefault(slots, tuple(quad_draft.quad_host_mask().shape))
     return shapes
+
+
+def refuse_quad_blocks(users):
+    """The attach's refusal of QWEN_FAST_QUAD_DRAFT_BLOCKS (serving_runtime calls it whenever the flag is requested, with or without
+    QWEN_FAST_EXTENT_REPLAY): whenever it is requested, whatever else is set (QWEN_FAST_QUAD_DRAFT off included),
+    ValueError by name - not a later round that silently skips the flag. Nothing when it is off."""
+    if not quad_blocks_requested():
+        return
+    import quad_draft
+
+    reason = quad_blocks_refusal(quad_draft, users)
+    if reason is not None:
+        raise ValueError('%s: %s' % (QUAD_BLOCKS_FLAG, reason))
 
 
 def _pooled_quad_blocks(quad_draft, users, block_rows):
@@ -123,6 +137,7 @@ def pooled_draft_output_shapes(users, block_rows):
         return dict(chunks=chunks, head=(1, 1, head_rows, TOP_CANDIDATES),
                     projected=(1, 1, projected_rows, SELECTOR_WIDTH))
 
+    refuse_quad_blocks(users)
     shapes = {(slot,): spec(block_rows, max(block_rows, PASS_ROWS)) for slot in range(users)}
     if os.environ.get('QWEN_FAST_PACKED_PROPOSAL') != '1':
         return shapes
@@ -1019,13 +1034,21 @@ class PackedProposalCoordinator:
                 self._block_quad(slots, round_number, reason)
             return [], groups
         formed, remaining = [], list(groups)
-        for slots, pairs in quad_block_groups(quad_draft):
-            quad = self._prepare_quad(remaining, by_slot, round_number, batched, slots=slots, pairs=pairs)
-            if quad is None:
-                continue
-            prepared.extend(quad['devices'])
-            formed.append(quad)
-            remaining = [group for group in remaining if tuple(group) not in pairs]
+        try:
+            for slots, pairs in quad_block_groups(quad_draft):
+                quad = self._prepare_quad(remaining, by_slot, round_number, batched, slots=slots, pairs=pairs)
+                if quad is None:
+                    continue
+                prepared.extend(quad['devices'])
+                formed.append(quad)
+                remaining = [group for group in remaining if tuple(group) not in pairs]
+        except BaseException:
+            # A later block raised before the caller holds a fence: the earlier block's replay may still be running, so fence it here
+            # before the caller's handler discards its pending work and releases its transients.
+            if formed:
+                operations, mesh = formed[0]['fence']
+                operations.synchronize_device(mesh)
+            raise
         return formed, remaining
 
     def _block_quad(self, slots, round_number, reason):
@@ -1090,7 +1113,7 @@ class PackedProposalCoordinator:
             # released what that attempt built) - needs the headroom; replaying a built quad allocates nothing. Under
             # the S2 flag the headroom is the admission's split (capture_headroom, gate v79).
             # Per quad: a second block's check reads the free DRAM after the first block's capture landed, so each needs one
-            # quad's bytes (quad_draft_tp.blocks_capture_need is the pair of them, for the attach-time arithmetic).
+            # quad's bytes (quad_draft_tp.blocks_capture_need adds the two up; the attach itself makes no DRAM check).
             short, reading = capture_headroom(devices[0], quad_draft.QUAD_CAPTURE_BYTES_EST)
             if short:
                 reason = 'dram_reserve:headroom=%d' % reading['largest_free']

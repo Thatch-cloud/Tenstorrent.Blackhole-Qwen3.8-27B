@@ -107,7 +107,7 @@ SEATS8_PROFILES = ('c2-packed-tp4-8', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-t
 # tp4/next-4 (test_tp4_next4 holds each as its base plus exact deltas): the traffic candidate, its warm4 twin and the eight-seat levers arm.
 NEXT4_PROFILES = ('c2-packed-tp4-best-ship', 'c2-packed-tp4-best-ship-warm4', 'c2-packed-tp4-8-best')
 # tp4/next-5 (test_tp4_next5 holds each as its base plus exact deltas): the tpub and pair-slice traffic candidates and the pair-slice gate twins.
-NEXT5_PROFILES = ('c2-packed-tp4-best-ship-tpub', 'c2-packed-tp4-best-ship-glue', 'c2-packed-tp4-best-strace-glue', 'c2-packed-tp4-best-gate-glue', 'c2-packed-tp4-8-best-quad')
+NEXT5_PROFILES = ('c2-packed-tp4-best-ship-tpub', 'c2-packed-tp4-best-ship-glue', 'c2-packed-tp4-best-strace-glue', 'c2-packed-tp4-best-gate-glue', 'c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-best-quad-gate')
 # The GDN glue quick wins (tp4/gluefix, test_gdn_pair_slice holds the rule): the timed and diagnostic arms are c2-packed-tp4-speed-strace plus exactly one flag
 # (same exemptions as the cheap twins); the audited arm is c2-packed-tp4-gate plus the flag and the vglue audit (a four-card profile that may carry the audit).
 CHEAP_PROFILES = CHEAP_PROFILES + ('c2-packed-tp4-speed-strace-pairslice', 'c2-packed-tp4-speed-strace-dispatchdiag')
