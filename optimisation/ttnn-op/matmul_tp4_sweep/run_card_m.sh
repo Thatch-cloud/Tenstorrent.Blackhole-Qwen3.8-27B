@@ -394,6 +394,10 @@ echo "### tp4sweep $stamp card=$QUAL_CARD ($QUAL_TAG) node=$node image=$IMAGE"
 qual_card_recheck   # the board is still on the node the holder check cleared
 trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
 set +e   # keep the exit status of the run itself, below
+# One card: the serving image's ENV turns on the C2 boot hook in every python process, and the hook applies the default
+# serving profile's mesh (TT_MESH_GRAPH_DESC_PATH = the four-card descriptor), which cannot map onto the single card this
+# container sees ("Graph specified in MGD could not fit"). QWEN_C2_SERVING=0 turns the hook off (as the K64j harness
+# does) and the baked variable is unset too; the harness needs none of the hook's serving setup.
 timeout -k 30 "$timeout_s" docker run --rm --name "$name" --network none \
   --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges \
   --pids-limit 1024 --memory 32g --cpus 8 --shm-size 4g \
@@ -407,7 +411,7 @@ timeout -k 30 "$timeout_s" docker run --rm --name "$name" --network none \
   -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 \
   -e TT_METAL_HOME=/opt/tt-metal -e TT_METAL_CACHE=/kcache -e OMP_NUM_THREADS=8 \
   --workdir /bench \
-  --entrypoint python3 "$IMAGE" -B /bench/matmul_tp4_sweep.py \
+  -e QWEN_C2_SERVING=0 --entrypoint env "$IMAGE" -u TT_MESH_GRAPH_DESC_PATH python3 -B /bench/matmul_tp4_sweep.py \
   --out "/results/tp4sweep-$stamp.json" --device-id 0 "${extra[@]}" \
   2>&1 | tee "$R/tp4sweep-$stamp.log"
 status=${PIPESTATUS[0]}
