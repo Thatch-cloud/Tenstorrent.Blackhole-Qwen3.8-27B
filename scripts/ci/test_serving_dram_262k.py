@@ -157,6 +157,9 @@ class PoolFormulaTests(unittest.TestCase):
     def test_the_provisional_pool_needs_about_4_05_gb_free_at_eight_live(self):
         provisional = PROFILES['c2-packed-tp4-8x262k']['engine']['num-gpu-blocks-override']
         self.assertEqual(provisional, 21760)
+        # the pool the worker builds is the token variable's, not the flag's (plugin worker.py:388-390)
+        tokens = int(PROFILES['c2-packed-tp4-8x262k']['env']['QWEN36_MAX_TOKENS_ALL_USERS'])
+        self.assertEqual(-(-tokens // 64) + 8, provisional)
         self.assertGreaterEqual(self.blocks(4.05), provisional - 16)
         self.assertLess(self.blocks(4.0), provisional)
         self.assertGreaterEqual(self.blocks(4.06), provisional)

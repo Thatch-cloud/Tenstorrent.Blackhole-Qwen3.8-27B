@@ -61,7 +61,7 @@ def minus_deltas(profile, traffic):
     out = copy.deepcopy(profile)
     out.pop('description')
     out.pop('drafter_headroom_tokens', None)
-    for key in ('QWEN_FAST_MAX_POSITION', 'QWEN_FAST_KV_RESERVATION') + tuple(DRAM):
+    for key in ('QWEN_FAST_MAX_POSITION', 'QWEN_FAST_KV_RESERVATION', 'QWEN36_MAX_TOKENS_ALL_USERS') + tuple(DRAM):
         out['env'].pop(key, None)
     for key in ('max-model-len', 'max-num-batched-tokens', 'num-gpu-blocks-override'):
         out['engine'].pop(key)
@@ -135,6 +135,33 @@ class DeltaTests(unittest.TestCase):
                 self.assertGreater(pool, 8 * 2052, 'at least the 131k reservation of every seat')
                 self.assertEqual(found[name]['env']['QWEN_FAST_KV_RESERVATION'], '1')
                 self.assertEqual({key: found[name]['env'][key] for key in DRAM}, DRAM)
+
+    def test_the_pool_vllm_builds_is_the_override_because_the_worker_overwrites_it_from_the_token_count(self):
+        # plugin worker.py:388-390: num_gpu_blocks = ceil(max_tokens_all_users / 64) + max_num_seqs, whatever the override says
+        found = profiles()
+        for name in EIGHT:
+            with self.subTest(profile=name):
+                profile = found[name]
+                tokens = int(profile['env']['QWEN36_MAX_TOKENS_ALL_USERS'])
+                self.assertEqual(-(-tokens // 64) + profile['engine']['max-num-seqs'], BLOCKS_8)
+                self.assertEqual(contract.real_pool_blocks(profile), BLOCKS_8)
+                self.assertEqual(contract.kv_pool_blocks(profile), BLOCKS_8 - 1)
+                self.assertIsNone(contract.kv_pool_problem(profile))
+                # without the variable the worker would build seats x window + seats blocks: the contract refuses that profile
+                bare = copy.deepcopy(profile)
+                del bare['env']['QWEN36_MAX_TOKENS_ALL_USERS']
+                self.assertIn('must name QWEN36_MAX_TOKENS_ALL_USERS', contract.kv_pool_problem(bare))
+                with self.assertRaisesRegex(ValueError, 'QWEN36_MAX_TOKENS_ALL_USERS'):
+                    contract.request_limits(bare)
+                wrong = copy.deepcopy(profile)
+                wrong['env']['QWEN36_MAX_TOKENS_ALL_USERS'] = str(tokens + 64)
+                with self.assertRaisesRegex(ValueError, 'overwrites the override'):
+                    contract.request_limits(wrong)
+                wrong['env']['QWEN36_MAX_TOKENS_ALL_USERS'] = 'many'
+                self.assertIn('positive integer', contract.kv_pool_problem(wrong))
+        self.assertNotIn('QWEN36_MAX_TOKENS_ALL_USERS', found[FOUR_GATE]['env'])
+        self.assertIsNone(contract.kv_pool_problem(found[FOUR_GATE]))
+        self.assertIsNone(contract.kv_pool_problem(found['c2-packed-tp4']))
 
     def test_the_pool_holds_five_full_windows_at_once_and_the_largest_request_fits(self):
         # a full window reserves ceil((262,144 + 32) / 64) + 1 blocks; the usable pool is the override less vLLM's null block

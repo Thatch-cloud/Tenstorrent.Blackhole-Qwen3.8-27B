@@ -693,6 +693,44 @@ KV_RESERVATION_FLAG = 'QWEN_FAST_KV_RESERVATION'
 KV_NULL_BLOCKS = 1                 # serving_kv_reservation.NULL_BLOCKS: vLLM's block 0 is never handed out
 
 
+POOL_TOKENS_ENV = 'QWEN36_MAX_TOKENS_ALL_USERS'
+LEGACY_WINDOW = 131328             # the windows at or under this keep the override as their pool (the 131k profiles, unchanged)
+
+
+def real_pool_blocks(profile):
+    """The block count vLLM really builds. The TT worker overwrites num-gpu-blocks-override with ceil(max_tokens_all_users / 64) +
+    max_num_seqs (plugin worker.py:388-390), so a profile that names QWEN36_MAX_TOKENS_ALL_USERS owns its pool through that; one
+    that does not has the override's value, as every 131k profile has always been read. None when neither is an integer."""
+    engine, env = profile.get('engine', {}), profile.get('env', {})
+    override, seats = engine.get('num-gpu-blocks-override'), engine.get('max-num-seqs')
+    tokens = env.get(POOL_TOKENS_ENV)
+    if tokens is None:
+        return override if type(override) is int else None
+    if type(seats) is not int or not str(tokens).isdigit() or int(tokens) < 1:
+        return None
+    return -(-int(tokens) // 64) + seats
+
+
+def kv_pool_problem(profile):
+    """What is wrong with how a profile sizes its pool; None when nothing. With QWEN36_MAX_TOKENS_ALL_USERS the worker's pool must
+    equal num-gpu-blocks-override (the number the reservation, the boot rule and the DRAM arithmetic are all written against); a
+    pooled profile past the legacy window must name it, since without it the worker builds seats x window blocks and the override
+    is ignored."""
+    engine, env = profile.get('engine', {}), profile.get('env', {})
+    override, window = engine.get('num-gpu-blocks-override'), engine.get('max-model-len')
+    if POOL_TOKENS_ENV in env:
+        real = real_pool_blocks(profile)
+        if real is None:
+            return '%s must be a positive integer and the profile must name max-num-seqs, got %r' % (POOL_TOKENS_ENV, env[POOL_TOKENS_ENV])
+        if real != override:
+            return ('%s=%s builds %d blocks (ceil(tokens / 64) + max-num-seqs) but num-gpu-blocks-override is %r: the worker '
+                    'overwrites the override, so the two must agree' % (POOL_TOKENS_ENV, env[POOL_TOKENS_ENV], real, override))
+    elif kv_pooled(profile) and type(window) is int and window > LEGACY_WINDOW:
+        return ('profile %s pools its KV cache past the %d-token window and must name %s: the TT worker overwrites '
+                'num-gpu-blocks-override' % (profile.get('name'), LEGACY_WINDOW, POOL_TOKENS_ENV))
+    return None
+
+
 def kv_pooled(profile):
     """Whether a fast-path (S2 extent) profile's KV cache is smaller than seats x its window: num-gpu-blocks-override below
     max-num-seqs x ceil(max-model-len / 64), so its seats cannot all be resident at full length. False for every other profile."""
@@ -724,7 +762,7 @@ def kv_pool_blocks(profile):
     the reservation on; None for every other."""
     if profile.get('env', {}).get(KV_RESERVATION_FLAG) != '1':
         return None
-    return profile['engine']['num-gpu-blocks-override'] - KV_NULL_BLOCKS
+    return real_pool_blocks(profile) - KV_NULL_BLOCKS
 
 
 def request_limits(profile):
@@ -746,7 +784,7 @@ def request_limits(profile):
             raise ValueError('drafter_headroom_tokens must be an integer from 0 to 4096, got %r' % (headroom,))
         limits['drafter_headroom_tokens'] = headroom
     headroom = headroom or 0
-    problem = kv_reservation_problem(profile)
+    problem = kv_reservation_problem(profile) or kv_pool_problem(profile)
     if problem:
         raise ValueError(problem)
     pool = kv_pool_blocks(profile)

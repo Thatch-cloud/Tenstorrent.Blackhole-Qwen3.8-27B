@@ -204,6 +204,22 @@ class HoldTests(base.DramFreeCase):
         self.assertEqual(kv_lines(log, '[PINDIAG] kv reservation too large'),
                          [(kv.TOO_LARGE_LINE, 'HUGE', kv.request_blocks(6000, 200), 10)])
 
+    def test_the_live_pool_is_logged_once_so_a_boot_shows_the_pool_vllm_really_built(self):
+        scheduler, log = plugin(blocks=21761)
+        scheduler.add_request(KvRequest('A', 100, 100))
+        scheduler.add_request(KvRequest('B', 100, 100))
+        scheduler.schedule()
+        scheduler.schedule()
+        self.assertEqual(kv_lines(log, '[PINDIAG] kv reservation pool='), [(kv.POOL_LINE, 21760, 21761)])
+
+    def test_an_unreadable_pool_raises_and_logs_it_never_admits(self):
+        scheduler = KvScheduler(max_num_seqs=8)
+        scheduler.kv_cache_manager = SimpleNamespace(block_pool=SimpleNamespace())
+        log = Mock()
+        with self.assertRaises(ValueError):
+            kv.hold(scheduler, [KvRequest('A', 100, 100)], 0, {}, log)
+        self.assertEqual(len(kv_lines(log, '[PINDIAG] kv reservation unavailable')), 1)
+
     def test_the_waiting_loop_is_fcfs_so_the_head_binds_and_a_small_request_behind_it_does_not_jump(self):
         scheduler, log = plugin(blocks=101)
         scheduler.add_request(KvRequest('A', 3000, 800))                       # r = 61 of a pool of 100

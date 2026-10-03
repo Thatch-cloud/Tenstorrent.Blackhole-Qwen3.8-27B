@@ -65,6 +65,7 @@ FIT_LINE = '[PINDIAG] kv reservation fit request={} reserved={} running={} pool=
 TOO_LARGE_LINE = ('[PINDIAG] kv reservation too large request={} reserved={} pool={}: held; the request contract refuses it '
                   'at the edge')
 UNAVAILABLE_LINE = '[PINDIAG] kv reservation unavailable request={}: {} (the engine stops: it cannot keep the reservation)'
+POOL_LINE = '[PINDIAG] kv reservation pool={} blocks usable (vLLM block_pool.num_gpu_blocks={} less the null block)'
 CARRIED_LINE = ('[PINDIAG] kv reservation carried finished={} past the discarded prefill pass into the decode-only step')
 
 
@@ -168,6 +169,9 @@ def hold(scheduler, candidates, decodes, state, log):
         # vLLM may later have to preempt, which the fast path cannot survive.
         log(UNAVAILABLE_LINE, request_id, str(failure)[:160])
         raise
+    if not state.get('kv_pool_logged'):
+        state['kv_pool_logged'] = True
+        log(POOL_LINE, pool, pool + NULL_BLOCKS)
     running = running_blocks(scheduler)
     held = state.get('kv_held')
     if need > pool:
