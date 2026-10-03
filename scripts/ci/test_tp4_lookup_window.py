@@ -151,7 +151,7 @@ class ProfileTests(unittest.TestCase):
 
     def test_the_flag_is_off_everywhere_else_and_the_policy_parses(self):
         for name, profile in PROFILES.items():
-            self.assertEqual(FLAG in profile['env'], name in (ARM, SMOKE_ARM), name)
+            self.assertEqual(FLAG in profile['env'], name in (ARM, SMOKE_ARM, 'c2-packed-tp4-8x262k-best-time-gate-lookup'), name)
         self.assertEqual(repr(prompt_lookup.parse_policy(PROFILES[ARM]['env'][FLAG])), POLICY)
 
     def test_the_default_stays_production(self):

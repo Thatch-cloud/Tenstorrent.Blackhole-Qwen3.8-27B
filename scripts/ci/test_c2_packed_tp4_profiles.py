@@ -112,7 +112,7 @@ NEXT4_PROFILES = ('c2-packed-tp4-best-ship', 'c2-packed-tp4-best-ship-warm4', 'c
 # tp4/next-5 (test_tp4_next5 holds each as its base plus exact deltas): the tpub and pair-slice traffic candidates and the pair-slice gate twins.
 NEXT5_PROFILES = ('c2-packed-tp4-best-dbf16', 'c2-packed-tp4-best-gate-dbf16', 'c2-packed-tp4-best-ship-tpub', 'c2-packed-tp4-best-ship-glue', 'c2-packed-tp4-best-strace-glue', 'c2-packed-tp4-best-gate-glue', 'c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-best-quad-dbf16', 'c2-packed-tp4-8-best-quad-gate')
 # tp4/262k8 (test_tp4_262k8_best_profiles holds each as its 262k eight-seat twin plus the levers, the smaller pool and the lever audits): the eight-seat 262k best-lever arms.
-BEST262K_PROFILES = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship')
+BEST262K_PROFILES = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-nosamp-audit', 'c2-packed-tp4-8x262k-best-stack-audit', 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-best-time-gate-d2', 'c2-packed-tp4-8x262k-best-time-gate-dbf16', 'c2-packed-tp4-8x262k-best-time-gate-lookup', 'c2-packed-tp4-8x262k-best-time-gate-nosamp', 'c2-packed-tp4-8x262k-best-time-gate-s1', 'c2-packed-tp4-8x262k-best-time-gate-stack', 'c2-packed-tp4-8x262k-ship')
 NEXT5_PROFILES = NEXT5_PROFILES + BEST262K_PROFILES
 # The GDN glue quick wins (tp4/gluefix, test_gdn_pair_slice holds the rule): the timed and diagnostic arms are c2-packed-tp4-speed-strace plus exactly one flag
 # (same exemptions as the cheap twins); the audited arm is c2-packed-tp4-gate plus the flag and the vglue audit (a four-card profile that may carry the audit).
@@ -122,6 +122,11 @@ GLUEFIX_AUDITED = ('c2-packed-tp4-gate-pairslice',)
 # equal to its control plus exactly its flags. They carry the caps, the hang fix, the levers: every exemption NEXT4_PROFILES has, they have.
 SAMPDRAFT_PROFILES = ('c2-packed-tp4-best-samp', 'c2-packed-tp4-best-d2', 'c2-packed-tp4-best-gate-samp', 'c2-packed-tp4-best-gate-d2')
 NEXT5_PROFILES = NEXT5_PROFILES + SAMPDRAFT_PROFILES
+# tp4/262k8-x (test_tp4_262k8_x holds each as the 262k eight-seat timed or audited twin plus/minus exactly its lever): the experiments image's per-lever arms.
+X262K_TIMED = tuple('c2-packed-tp4-8x262k-best-time-gate-' + lever for lever in ('nosamp', 's1', 'd2', 'dbf16', 'lookup', 'stack'))
+X262K_AUDITED = ('c2-packed-tp4-8x262k-best-nosamp-audit', 'c2-packed-tp4-8x262k-best-stack-audit')
+X262K_PROFILES = X262K_TIMED + X262K_AUDITED
+NEXT5_PROFILES = NEXT5_PROFILES + X262K_PROFILES
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 
 
@@ -847,7 +852,7 @@ class LookupProfileTests(unittest.TestCase):
     def test_no_other_profile_nor_the_image_carries_the_flag_and_production_is_unchanged(self):
         found = profiles()
         for name, profile in found.items():
-            if name not in LOOKUP_PROFILES:
+            if name not in LOOKUP_PROFILES + ('c2-packed-tp4-8x262k-best-time-gate-lookup',):
                 self.assertNotIn(LOOKUP, profile['env'], name)
         self.assertNotIn(LOOKUP, image_env())
         self.assertNotIn(LOOKUP, found['c2-packed-tp4']['env'])

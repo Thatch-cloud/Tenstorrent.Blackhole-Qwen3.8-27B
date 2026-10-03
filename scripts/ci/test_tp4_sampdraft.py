@@ -123,9 +123,14 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(env['QWEN_FAST_DRAFT_SINGLES_AUDIT'], 'all')
 
     def test_every_flag_is_set_by_these_four_profiles_and_no_other(self):
+        # plus tp4/262k8-x's eight-seat 262k twins (test_tp4_262k8_x holds each as its control plus exactly these flags)
+        timed = 'c2-packed-tp4-8x262k-best-time-gate-'
+        X262K_FLAGS = {timed + 's1': (sd.SHARD_ARGMAX,), timed + 'd2': (sd.DRAFT_CONV, sd.DRAFT_HEADS),
+                       timed + 'stack': (sd.SHARD_ARGMAX, sd.DRAFT_CONV, sd.DRAFT_HEADS),
+                       'c2-packed-tp4-8x262k-best-stack-audit': sd.ALL_FLAGS}
         for name, profile in PROFILES.items():
             for flag in sd.ALL_FLAGS:
-                wanted = name in DELTAS and flag in DELTAS[name][1]
+                wanted = (name in DELTAS and flag in DELTAS[name][1]) or flag in X262K_FLAGS.get(name, ())
                 self.assertEqual(flag in profile['env'], wanted, (name, flag))
 
     def test_the_samp_pair_and_the_d2_pair_never_share_a_lever(self):

@@ -224,8 +224,8 @@ class ProfileContractTests(unittest.TestCase):
         return sorted(name for name, entry in profiles().items() if FLAG in (entry.get('env') or {}))
 
     def test_exactly_the_gate_only_262k_profiles_carry_the_flag_and_never_a_traffic_profile(self):
-        self.assertEqual(self.carrying(), ['c2-packed-tp4-262k-gate', 'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit',
-                                           'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-diag-strace',
+        self.assertEqual(self.carrying(), ['c2-packed-tp4-262k-gate', 'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-nosamp-audit', 'c2-packed-tp4-8x262k-best-stack-audit',
+                                           'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-best-time-gate-d2', 'c2-packed-tp4-8x262k-best-time-gate-dbf16', 'c2-packed-tp4-8x262k-best-time-gate-lookup', 'c2-packed-tp4-8x262k-best-time-gate-nosamp', 'c2-packed-tp4-8x262k-best-time-gate-s1', 'c2-packed-tp4-8x262k-best-time-gate-stack', 'c2-packed-tp4-8x262k-diag-strace',
                                            'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate'])  # the best arms: tp4/262k8
         self.assertNotIn(FLAG, profiles()['c2-packed-tp4-8x262k-ship']['env'])
         for name, entry in profiles().items():

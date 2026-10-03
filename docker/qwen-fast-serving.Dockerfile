@@ -91,6 +91,9 @@ COPY scripts/ci/draft_wide_tp.py /experiment-scripts/ci/
 # The sampler's tile-native shard argmax and the drafter's conv I/O and head copies (tp4/samp-draft; QWEN_FAST_TP4_SHARD_ARGMAX / _DRAFT_CONV / _DRAFT_HEADS,
 # default off): tp4_sampdraft.RUNTIME_FILES, the one table. verify_trace_t1, packed_verifier and the drafter twins import them.
 COPY scripts/ci/tp4_sampdraft.py scripts/ci/tp4_shard_argmax.py scripts/ci/tp4_shard_argmax_scan.cpp scripts/ci/tp4_shard_argmax_fold.cpp scripts/ci/tp4_draft_conv.py scripts/ci/draft_conv_io_fast.cpp scripts/ci/draft_conv_out.cpp scripts/ci/tp4_draft_heads.py scripts/ci/draft_heads_copy.cpp /experiment-scripts/ci/
+# Prompt-lookup drafting (tp4/lookup; QWEN_FAST_LOOKUP_DRAFT, default off): serving_fast_request.prepare calls the request's lookup, built by serving_request_factory
+# through prompt_lookup.for_request; host only, nothing on a card. Without this line the base has no such module.
+COPY scripts/ci/prompt_lookup.py /experiment-scripts/ci/
 # Variable-user packed rounds M1 (QWEN_FAST_PADDED_PROBE, default off): packed_verifier imports
 # padded_probe when the flag is set. M0 changes only modules already listed above.
 COPY scripts/ci/padded_probe.py /experiment-scripts/ci/
