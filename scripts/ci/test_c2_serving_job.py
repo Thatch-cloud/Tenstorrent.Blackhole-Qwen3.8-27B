@@ -152,13 +152,13 @@ class FileTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
 
     def test_the_agent_actions_bracket_the_job(self):
-        self.assertEqual(job.ACTIONS[2], 'agentstop')
+        self.assertEqual(job.ACTIONS[3], 'agentstop')
         self.assertEqual(job.ACTIONS[-1], 'agentstart')
-        self.assertEqual(job.QUAD_ACTIONS[2], 'agentstop')
+        self.assertEqual(job.QUAD_ACTIONS[3], 'agentstop')
         self.assertEqual(job.QUAD_ACTIONS[-1], 'agentstart')
-        self.assertEqual(job.ACTIONS.index('rmi'), job.ACTIONS.index('status') + 1)
+        self.assertEqual(job.ACTIONS.index('rmi'), job.ACTIONS.index('srcdump') + 1)
         self.assertEqual(job.ACTIONS.index('agentstop'), job.ACTIONS.index('rmi') + 1)
-        self.assertEqual(job.QUAD_ACTIONS.index('rmi'), job.QUAD_ACTIONS.index('status') + 1)
+        self.assertEqual(job.QUAD_ACTIONS.index('rmi'), job.QUAD_ACTIONS.index('srcdump') + 1)
         self.assertEqual(job.QUAD_ACTIONS.index('agentstop'), job.QUAD_ACTIONS.index('rmi') + 1)
 
     def test_agent_jobs_parse_in_order_and_open_no_card(self):
@@ -264,6 +264,48 @@ class RmiTests(unittest.TestCase):
         for other in ('thatch-serving-tt', 'qwen-fast-serving'):
             self.assertNotIn(other, script)
         self.assertEqual(len(re.findall(r'docker (?:image rm|rmi|rm) "', script)), 1)
+
+
+class SrcdumpTests(unittest.TestCase):
+    def test_srcdump_sits_right_after_status_before_rmi_and_agentstop(self):
+        for actions in (job.ACTIONS, job.QUAD_ACTIONS):
+            self.assertEqual(actions.index('srcdump'), actions.index('status') + 1)
+            self.assertEqual(actions.index('rmi'), actions.index('srcdump') + 1)
+            self.assertEqual(actions.index('agentstop'), actions.index('rmi') + 1)
+
+    def test_srcdump_alone_parses_for_both_card_sets_and_opens_no_card(self):
+        for actions in ('srcdump', 'status srcdump', 'status srcdump agentstop'):
+            for cards in ('quad', 'pair'):
+                outputs = read(C2_ACTIONS=actions, C2_CARDS=cards)
+                self.assertEqual(outputs['actions'], actions)
+                self.assertEqual(outputs['cards'], cards)
+
+    def test_srcdump_out_of_order_is_refused(self):
+        for actions in ('srcdump status', 'rmi srcdump', 'agentstop srcdump'):
+            with self.assertRaisesRegex(job.JobError, 'order'):
+                read(C2_ACTIONS=actions, C2_RMI_TAGS='old-one')
+
+    def test_the_workflow_has_one_srcdump_step_after_status_with_its_own_artifact(self):
+        text = workflow_text()
+        gate = "contains(steps.job.outputs.actions, 'srcdump')"
+        name = 'Dump the custom tt-metal sources (image, ttbuild container, host op sources)'
+        self.assertIn(gate, step_text(name).split('run: |')[0])
+        self.assertGreater(text.index('- name: ' + name), text.index('- name: Status of the four-card set'))
+        self.assertLess(text.index('- name: ' + name), text.index('- name: Remove superseded images'))
+        script = step_script(name)
+        self.assertIn('set +e', script)
+        self.assertIn('--network none', script)
+        self.assertIn('--entrypoint bash', script)
+        self.assertIn('qwen-fast-serving:ci-be9e184e672756c8eee040f03e48dbff58e68fda', script)
+        self.assertIn('docker images --digests --no-trunc', script)
+        for word in ('tt-metal.diff', 'untracked.tar.gz', 'ops-and-bindings.tar.gz', 'tt-prstack', 'MANIFEST.txt', 'kwork64', 'opgraft-K64j'):
+            self.assertIn(word, script)
+        self.assertNotIn('zot.', script)
+        self.assertNotIn('docker run -d', script)
+        upload = step_text('Upload the source dump (its own artifact, one day)')
+        self.assertIn('name: srcdump-${{ github.run_id }}', upload)
+        self.assertIn('retention-days: 1', upload)
+        self.assertEqual(text.count('name: srcdump-'), 1)
 
 
 def workflow_text():

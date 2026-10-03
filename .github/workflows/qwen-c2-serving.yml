@@ -163,6 +163,161 @@ jobs:
           df -h /home/thatch/hf-cache/hub 2>&1 | tail -2
           sudo -n du -sh /home/thatch/hf-cache/hub/.qwen-c2 2>&1
           echo "=== serving containers"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}' | grep -E 'thatch-inference|qwen-c2' || echo none
+      - name: Dump the custom tt-metal sources (image, ttbuild container, host op sources)
+        if: contains(steps.job.outputs.actions, 'srcdump')
+        shell: bash
+        run: |
+          # Card-free extraction of the custom tt-metal tree from the local serving base image, from the long-lived ttbuild
+          # container (the K64j graft's build tree), and the host user's per-op sources and graft listing. The image run has no
+          # network. Only counts, sizes and hashes are printed; the dump goes to its own one-day artifact (the next step),
+          # not the results artifact. Explicit checks, no errexit.
+          set +e
+          out="${{ runner.temp }}/srcdump-${{ github.run_id }}"
+          rm -rf "$out"; mkdir -p "$out" && chmod 777 "$out"
+          # The tt-vllm image whose digest or id starts with the wanted prefix, else the local P8 base built on it.
+          want="sha256:f1e9""b1a6"
+          image=""; why=""
+          while read -r ref digest id; do
+            case "$ref" in *tt-vllm*) ;; *) continue ;; esac
+            case "$digest" in "$want"*) image="$id"; why="tt-vllm $ref (digest match)"; break ;; esac
+            case "$id" in "$want"*) image="$id"; why="tt-vllm $ref (id match)"; break ;; esac
+          done < <(docker images --digests --no-trunc --format '{{.Repository}}:{{.Tag}} {{.Digest}} {{.ID}}')
+          if [ -z "$image" ]; then
+            image=qwen-fast-serving:ci-be9e184e672756c8eee040f03e48dbff58e68fda
+            why="local P8 base $image (no tt-vllm image matched the prefix)"
+          fi
+          echo "srcdump image: $why"
+          echo "$why" > "$out/IMAGE_USED.txt"
+          # The collector, run inside the image and inside ttbuild: $OUT is where it writes.
+          cat > "$out/dump.sh" <<'INNER'
+          umask 022
+          OUT=${OUT:-/out}; mkdir -p "$OUT"
+          cd /opt/tt-metal || { echo "no /opt/tt-metal"; exit 1; }
+          G="git -c safe.directory=* -C /opt/tt-metal"
+          $G rev-parse HEAD > $OUT/tt-metal-head.txt
+          $G status --porcelain=v1 --untracked-files=all -- . ":(exclude,glob)build*/**" ":(exclude,glob)**/.cpmcache/**" ":(exclude,glob)**/__pycache__/**" > $OUT/status.txt 2>/dev/null
+          $G diff HEAD --binary > $OUT/tt-metal.diff 2>/dev/null
+          $G diff HEAD --name-status > $OUT/tt-metal.diff-files.txt 2>/dev/null
+          echo "status lines: $(wc -l < $OUT/status.txt)  diff bytes: $(stat -c %s $OUT/tt-metal.diff)"
+          # untracked files, minus build products and anything over 5 MB
+          sed -n 's/^?? //p' $OUT/status.txt | grep -vE '(^|/)(build_Release|build|\.cpmcache|__pycache__)(/|$)|\.so(\.|$)|\.o$' > $OUT/untracked-all.txt
+          : > $OUT/untracked.txt
+          while IFS= read -r f; do
+            [ -f "$f" ] && [ "$(stat -c %s "$f")" -le 5242880 ] && printf '%s\n' "$f" >> $OUT/untracked.txt
+          done < $OUT/untracked-all.txt
+          tar czf $OUT/untracked.tar.gz -T $OUT/untracked.txt 2>/dev/null
+          echo "untracked files: $(wc -l < $OUT/untracked.txt) of $(wc -l < $OUT/untracked-all.txt)"
+          # the five op directories, the bindings that expose them, the build files that list them, nlp_concat_heads_decode and
+          # any SDPA decode file the diff touches
+          T=ttnn/cpp/ttnn/operations/transformer
+          OPS='attn_prep|attn_decode_prep|gdn_conv_gates|gdn_norm_gate|gdn_decay|decode_gated_delta_rule'
+          PYN='attn_decode_prep|gdn_decode_norm_gate|gdn_decode_conv_gates|decode_gated_delta_rule_packed'
+          EX="--exclude-dir=build* --exclude-dir=.cpmcache --exclude-dir=__pycache__ --exclude-dir=.git"
+          { ls -1 $T | grep -E "$OPS" | sed "s|^|$T/|"
+            grep -rlE "$OPS" $T $EX 2>/dev/null | awk -F/ -v t="$T" '{ p=substr($0, length(t)+2); n=split(p, a, "/"); if (n>1) print t "/" a[1]; }'
+          } | sort -u > $OUT/opdirs.txt
+          { find $(cat $OUT/opdirs.txt) -type f ! -name '*.so' ! -name '*.o' ! -path '*/__pycache__/*' 2>/dev/null
+            echo $T/transformer_nanobind.cpp; ls -1 $T/CMakeLists.txt 2>/dev/null
+            ls -1 ttnn/ttnn/operations/transformer*.py ttnn/CMakeLists.txt ttnn/sources.cmake 2>/dev/null
+            find ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode -type f 2>/dev/null
+            awk '{print $NF}' $OUT/tt-metal.diff-files.txt | grep -i sdpa
+            grep -rlE "$PYN|$OPS" ttnn tt_metal tests $EX --include='*.py' --include='*.cpp' --include='*.hpp' --include='*.h' --include='*.txt' --include='*.cmake' 2>/dev/null
+          } | sort -u | while IFS= read -r f; do [ -f "$f" ] && [ "$(stat -c %s "$f")" -le 5242880 ] && printf '%s\n' "$f"; done > $OUT/ops-files.txt
+          tar czf $OUT/ops-and-bindings.tar.gz -T $OUT/ops-files.txt 2>/dev/null
+          echo "op dirs: $(wc -l < $OUT/opdirs.txt)  op/binding files: $(wc -l < $OUT/ops-files.txt)"
+          # the _ttnncpp.so this tree carries (hash only)
+          find /opt/tt-metal -name '_ttnncpp.so' -type f -exec sha256sum {} + > $OUT/ttnncpp-sha256.txt 2>/dev/null
+          if [ -d /opt/tt-prstack ]; then
+            ls -laR /opt/tt-prstack > $OUT/tt-prstack.ls.txt 2>&1
+            tar czf $OUT/tt-prstack.tar.gz -C /opt tt-prstack 2>/dev/null
+            echo "tt-prstack files: $(find /opt/tt-prstack -type f | wc -l)"
+          else
+            echo absent > $OUT/tt-prstack.ls.txt
+          fi
+          chmod -R a+rX $OUT
+          INNER
+          sed -i 's/^          //' "$out/dump.sh"
+          # 1. the image
+          if docker image inspect "$image" >/dev/null 2>&1; then
+            mkdir -p "$out/image"; chmod 777 "$out/image"
+            docker image inspect "$image" --format '{{.Id}}' > "$out/image/image-id.txt"
+            docker run --rm --network none --entrypoint bash -v "$out/image:/out" -v "$out/dump.sh:/dump.sh:ro" "$image" -c 'OUT=/out bash /dump.sh'
+            echo "image dump exit: $?"
+          else
+            echo "image $image is absent"; echo absent > "$out/image-ABSENT.txt"
+          fi
+          # 2. the ttbuild container's tree
+          if [ "$(docker ps -a --filter name='^/ttbuild$' -q | wc -l)" = 1 ]; then
+            if [ "$(docker inspect -f '{{.State.Running}}' ttbuild)" = true ]; then
+              docker cp "$out/dump.sh" ttbuild:/tmp/srcdump.sh
+              docker exec -e OUT=/tmp/srcdump-out ttbuild bash /tmp/srcdump.sh
+              echo "ttbuild dump exit: $?"
+              mkdir -p "$out/ttbuild"
+              docker cp ttbuild:/tmp/srcdump-out/. "$out/ttbuild/"
+              docker exec ttbuild rm -rf /tmp/srcdump-out /tmp/srcdump.sh
+              docker exec ttbuild sh -c 'find /opt/tt-metal/build_Release -name _ttnncpp.so -type f -exec sha256sum {} +' > "$out/ttbuild/ttbuild-build-ttnncpp-sha256.txt" 2>/dev/null
+              mv "$out/ttbuild/tt-metal.diff" "$out/ttbuild/ttbuild-tt-metal.diff" 2>/dev/null
+            else
+              echo "ttbuild exists but is not running; not started"; echo "exists, not running" > "$out/ttbuild-ABSENT.txt"
+            fi
+          else
+            echo "no ttbuild container"; echo absent > "$out/ttbuild-ABSENT.txt"
+          fi
+          # 3. the host user's op sources and the K64j graft listing (the runner's HOME is overridden: ask passwd)
+          home=$(getent passwd "$(id -un)" | cut -d: -f6)
+          echo "host home resolved: $([ -d "$home" ] && echo yes || echo no)"
+          mkdir -p "$out/host"
+          : > "$out/host/kwork-files.txt"
+          for d in kwork kwork64; do
+            if [ -d "$home/$d" ]; then
+              (cd "$home" && find "$d" -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.py' -o -name '*.sh' -o -name '*.txt' -o -name '*.md' -o -name '*.cmake' -o -name '*.patch' \) -size -5120k ! -name '*.so' ! -name '*.o' >> "$out/host/kwork-files.txt")
+            else
+              echo "$d: absent" >> "$out/host/ABSENT.txt"
+            fi
+          done
+          if [ -s "$out/host/kwork-files.txt" ]; then
+            tar czf "$out/host/kwork.tar.gz" -C "$home" -T "$out/host/kwork-files.txt" 2>/dev/null
+          fi
+          echo "host kwork files: $(wc -l < "$out/host/kwork-files.txt")"
+          if [ -d "$home/opgraft-K64j" ]; then
+            cp "$home/opgraft-K64j/MANIFEST.sha256" "$out/host/graft-MANIFEST.sha256" 2>/dev/null
+            (cd "$home/opgraft-K64j" && find . -type f -printf '%s %p\n' | sort -k2 | while read -r size path; do
+              printf '%s  %s  %s\n' "$(sha256sum "$path" | cut -d' ' -f1)" "$size" "$path"; done) > "$out/host/graft-listing.txt"
+            echo "graft listing lines: $(wc -l < "$out/host/graft-listing.txt")"
+          else
+            echo "opgraft-K64j: absent" >> "$out/host/ABSENT.txt"
+          fi
+          # 4. the manifest
+          rm -f "$out/dump.sh"
+          chmod -R a+rX "$out" 2>/dev/null
+          {
+            echo "image used: $(cat "$out/IMAGE_USED.txt")"
+            echo "image id: $(cat "$out/image/image-id.txt" 2>/dev/null)"
+            echo "image tt-metal HEAD: $(cat "$out/image/tt-metal-head.txt" 2>/dev/null)"
+            echo "ttbuild tt-metal HEAD: $(cat "$out/ttbuild/tt-metal-head.txt" 2>/dev/null || echo absent)"
+            for dir in image ttbuild host; do
+              echo "== $dir"
+              for f in "$out/$dir"/*; do
+                [ -f "$f" ] || continue
+                case "$f" in *.tar.gz|*.diff) echo "$(sha256sum "$f" | cut -d' ' -f1)  $(basename "$f")  $(stat -c %s "$f") bytes" ;; esac
+              done
+              [ -f "$out/$dir/untracked.txt" ] && echo "untracked files archived: $(wc -l < "$out/$dir/untracked.txt")"
+              [ -f "$out/$dir/ops-files.txt" ] && echo "op and binding files archived: $(wc -l < "$out/$dir/ops-files.txt")"
+              [ -f "$out/$dir/kwork-files.txt" ] && echo "kwork files archived: $(wc -l < "$out/$dir/kwork-files.txt")"
+            done
+            ls "$out"/*ABSENT* "$out"/host/ABSENT.txt 2>/dev/null | sed "s|$out/|absent marker: |"
+          } > "$out/MANIFEST.txt"
+          if [ ! -s "$out/MANIFEST.txt" ]; then echo "srcdump: no manifest written"; exit 1; fi
+          (cd "$out" && find . -type f -printf '%s %p\n' | sort -k2)
+          exit 0
+      - name: Upload the source dump (its own artifact, one day)
+        if: always() && contains(steps.job.outputs.actions, 'srcdump')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: srcdump-${{ github.run_id }}
+          path: ${{ runner.temp }}/srcdump-${{ github.run_id }}
+          retention-days: 1
+          if-no-files-found: ignore
       - name: Remove superseded images
         if: contains(steps.job.outputs.actions, 'rmi')
         shell: bash
