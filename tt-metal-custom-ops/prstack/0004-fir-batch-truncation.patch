@@ -1,0 +1,13 @@
+diff --git a/models/experimental/gated_attention_gated_deltanet/tt/ttnn_gated_deltanet.py b/models/experimental/gated_attention_gated_deltanet/tt/ttnn_gated_deltanet.py
+index d5c8d4547a7..54c3e6b8e70 100644
+--- a/models/experimental/gated_attention_gated_deltanet/tt/ttnn_gated_deltanet.py
++++ b/models/experimental/gated_attention_gated_deltanet/tt/ttnn_gated_deltanet.py
+@@ -226,7 +226,7 @@ def _causal_conv1d_fir(
+     # Pure memory placement, numerics unchanged; the MAC below still computes in `mc` (L1).
+     out = None
+     for k in range(kernel_size):
+-        x_slice = ttnn.slice(x_padded, (0, k, 0), (1, k + T, D), memory_config=_dram)
++        x_slice = ttnn.slice(x_padded, (0, k, 0), (B, k + T, D), memory_config=_dram)
+         if k != 0:
+             x_slice = ttnn.to_layout(x_slice, ttnn.TILE_LAYOUT)
+         if out is None:

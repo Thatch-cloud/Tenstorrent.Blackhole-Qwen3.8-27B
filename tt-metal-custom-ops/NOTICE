@@ -1,0 +1,25 @@
+tt-metal custom ops for Qwen3.8-27B
+Copyright 2026 Thatch Cloud
+
+The files in this directory are offered under the Apache License, Version 2.0 (see LICENSE).
+
+Portions are derived from tt-metal, which carries this notice (reproduced from its NOTICE file):
+
+    tt-metal
+    Copyright 2026 Tenstorrent USA, Inc.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+Changes: tt-metal.diff, k64j/ and optional/ modify tt-metal source files, and prstack/ holds diffs of pull requests
+to tt-metal. The modified files are listed in README.md ("Licence"). Where a file keeps its original Tenstorrent
+copyright header, the modification is the patch itself (or, for k64j/, the [QWEN-...] comments in the file).

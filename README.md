@@ -3,6 +3,11 @@
 Optimising coding inference on two Tenstorrent cards.
 **Target: 200 committed tokens/s for one stream. Not achieved yet.**
 
+**Reproducing the two-card images from source:** [RECIPES.md](RECIPES.md) lists every two-card serving recipe and how
+to run it, [BUILD.md](BUILD.md) builds the images, and [tt-metal-custom-ops/](tt-metal-custom-ops/) holds the custom
+tt-metal operations and the patch set they need. Building the base image chain from source works from this repository;
+the serving image on top of it (BUILD.md, stages 7-8) does not yet, so the recipes cannot be run from a clean clone today.
+
 ## Hardware and runtime
 
 | Item | Current experiment setup |

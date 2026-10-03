@@ -1,0 +1,114 @@
+diff --git a/models/demos/blackhole/qwen36/demo/text_demo.py b/models/demos/blackhole/qwen36/demo/text_demo.py
+index ac9640f5df9e..65f39a42546a 100644
+--- a/models/demos/blackhole/qwen36/demo/text_demo.py
++++ b/models/demos/blackhole/qwen36/demo/text_demo.py
+@@ -38,7 +38,9 @@
+ from models.tt_transformers.tt.generator import Generator
+ from models.tt_transformers.tt.model_config import determine_device_name
+ 
+-_MESH_SHAPE = {"P150": (1, 1), "P150x4": (1, 4), "P150x8": (1, 8)}.get(os.environ.get("MESH_DEVICE"), (1, 4))
++_MESH_SHAPE = {"P150": (1, 1), "P150x4": (1, 4), "P150x8": (1, 8), "P300": (1, 2)}.get(
++    os.environ.get("MESH_DEVICE"), (1, 4)
++)
+ _MULTI = _MESH_SHAPE != (1, 1)
+ _TP_TRACE_REGION_SIZE = 1024 * 1024 * 1024
+ DEVICE_PARAMS = [
+diff --git a/models/demos/blackhole/qwen36/tt/gdn/tp.py b/models/demos/blackhole/qwen36/tt/gdn/tp.py
+index 0e51476f35ed..a26708667856 100644
+--- a/models/demos/blackhole/qwen36/tt/gdn/tp.py
++++ b/models/demos/blackhole/qwen36/tt/gdn/tp.py
+@@ -193,7 +193,15 @@ def __init__(self, mesh, args, tw, tt_ccl):
+         # PREFILL out-proj fusion (matmul_reduce_scatter, (8,8) grid). Slight TTFT cost at small ISL
+         # (~13k crossover from a fixed warmup/compile overhead) but a large win at long ISL (e.g.
+         # 128k ~-2s); overlaps the fp32 GDN-out reduce-scatter with the matmul.
+-        self._fuse_out_mmrs_prefill = not self._out_sharded and args.num_devices > 1
++        # 2-device meshes with a unit dimension (e.g. P300 1x2 p150a): the fused experimental op
++        # deadlocks there in every offset/links/topology config probed (gdn-silicon-mmrs-probe{,2,3}
++        # .log), while the unfused _row_proj + tt_all_reduce path (reduce_scatter_minimal_async)
++        # is silicon-proven on the same mesh (gdn-silicon-mmrs-probe4.log PASS pcc 1.0007). Keep the
++        # fusion only on the topologies it was validated on (P150x4).
++        _mesh_shape = list(mesh.shape)
++        self._fuse_out_mmrs_prefill = (
++            not self._out_sharded and args.num_devices > 1 and not (args.num_devices == 2 and 1 in _mesh_shape)
++        )
+         # Pre-build chunk masks once (trace-safe; avoids from_torch inside captured trace)
+         self.chunk_seq_masks = create_chunk_masks_seq(args.gdn_chunk_size, mesh)
+         # Prefill fused-op constant tiles, owned by this layer (avoids process-lifetime C++ cache vs device lifetime).
+diff --git a/models/demos/blackhole/qwen36/tt/tp_common.py b/models/demos/blackhole/qwen36/tt/tp_common.py
+index dff296037d01..3497d5bf87ca 100644
+--- a/models/demos/blackhole/qwen36/tt/tp_common.py
++++ b/models/demos/blackhole/qwen36/tt/tp_common.py
+@@ -520,20 +520,47 @@ def _mmrs_prefill_shared_bufs(tt_ccl, M, N, nd, dtype):
+     return cache[key]
+ 
+ 
+-def matmul_reduce_scatter_prefill(x, weight, tt_ccl, compute_cfg, topology, nd, dtype, grid=(8, 8), rs_offset=(0, 8)):
++def _mmrs_prefill_placement(mesh_device, num_links, want_grid=(8, 8)):
++    """Topology-aware (matmul grid, RS core offset) for the fused prefill MMRS.
++
++    ccl choose_worker_cores (ccl_common.cpp) selects the first num_links * 2 * (1 + workers_per_dir)
++    worker cores row-major from (0,0) and then SHIFTS them by reduce_scatter_core_grid_offset; the
++    shifted set must stay on the worker grid AND off the matmul rows (a collision deadlocks the
++    fused CCL). workers_per_dir is data-size dependent (reduce_scatter_default_workers: up to 8 on
++    Linear topologies, which a 1x2 mesh uses, for our ~40MB fp32 GDN-out intermediates), so a
++    2-link call selects 2*2*(1+8)=36 cores. On a p150a 1x2 worker grid the old fixed (8,8)/(0,8)
++    pushes 14 of those 36 cores off the grid (rows 10-11 don't exist). Instead, reserve the bottom
++    ceil(36/W) rows for the RS workers and cap the matmul grid above them, so the two footprints
++    are always disjoint and in-grid on any worker-grid shape.
++    """
++    try:
++        gs = mesh_device.compute_with_storage_grid_size()
++        W, H = int(gs.x), int(gs.y)
++    except Exception:
++        return want_grid, (0, want_grid[1])
++    n_rs = num_links * 2 * 9  # worst case: 8 workers + 1 mux core per direction, 2 directions/link
++    rs_rows = math.ceil(n_rs / W)
++    gx = min(want_grid[0], W)
++    gy = want_grid[1] if want_grid[1] + rs_rows <= H else max(1, H - rs_rows)
++    return (gx, gy), (0, gy)
++
++
++def matmul_reduce_scatter_prefill(x, weight, tt_ccl, compute_cfg, topology, nd, dtype, grid=None, rs_offset=None):
+     """Fused row-parallel out-proj matmul + reduce-scatter for PREFILL (matmul_reduce_scatter_async).
+ 
+     Unlike decode (M=1, where the 2D matmul collapses to ~8 cores and this loses), at prefill M>>1 the
+     2D matmul fills the grid, so overlapping the RS with the matmul is a WIN (biggest for the fp32
+-    GDN-out with its large RS). grid=(8,8): matmul rows 0-7, RS workers rows 8-9. x: K-sharded
++    GDN-out with its large RS). Matmul rows 0..gy-1; RS workers the bottom ceil(36/W) rows
++    (_mmrs_prefill_placement derives both from the device grid). x: K-sharded
+     [.,M,K_local]; weight [K_local,N]. Returns [1,1,M,N/nd] (cloned; shared buffer survives)."""
+     M, K_local = x.shape[-2], x.shape[-1]
+     N = weight.shape[-1]
+     interm, out_buf = _mmrs_prefill_shared_bufs(tt_ccl, M, N, nd, dtype)
+     x4 = ttnn.reshape(x, (1, 1, M, K_local))
+-    # RS-bound: 2 ethernet links parallelize the fp32 cross-device reduce (P150x4 max; traced_8k win).
+-    # grid (8,8) leaves rows 8-9 for the 2 RS worker rows.
++    # RS-bound: 2 ethernet links parallelize the fp32 cross-device reduce (traced_8k win).
+     num_links = 2
++    if grid is None or rs_offset is None:
++        grid, rs_offset = _mmrs_prefill_placement(tt_ccl.mesh_device, num_links)
+     per_core_N = max(1, math.ceil(N / TILE_SIZE / grid[0]))
+     pc = ttnn.MatmulMultiCoreReuseMultiCastProgramConfig(
+         compute_with_storage_grid_size=grid,
+diff --git a/models/experimental/gated_attention_gated_deltanet/tt/ttnn_gated_deltanet.py b/models/experimental/gated_attention_gated_deltanet/tt/ttnn_gated_deltanet.py
+index d9b92c216c9e..d5c8d4547a77 100644
+--- a/models/experimental/gated_attention_gated_deltanet/tt/ttnn_gated_deltanet.py
++++ b/models/experimental/gated_attention_gated_deltanet/tt/ttnn_gated_deltanet.py
+@@ -217,9 +217,16 @@ def _causal_conv1d_fir(
+     total_len = (kernel_size - 1) + T
+     _dram = ttnn.DRAM_MEMORY_CONFIG
+     # Depthwise K-tap FIR via multiply + addcmul; re-tilize k>=1 slices (only k=0 is tile-aligned).
++    # Tap slices land in DRAM on purpose: a k>=1 row begin is non-tile-aligned, so ttnn.slice
++    # takes its rm_only path, which converts the WHOLE tensor TILE->RM, slices, and re-tilizes —
++    # three full-size intermediates in the OUTPUT memory space. With x_padded L1-resident next
++    # to qkvzab (TP-2 P300: ~88% of L1 allocated), tripling ~21 MiB in L1 OOMs at the final
++    # re-tilize (bank_manager.cpp:451). Asking for a DRAM output keeps the whole rm hop in DRAM
++    # (still returns TILE — slice preserves layout); multiply/addcmul read the DRAM taps fine.
++    # Pure memory placement, numerics unchanged; the MAC below still computes in `mc` (L1).
+     out = None
+     for k in range(kernel_size):
+-        x_slice = x_padded[:, k : k + T]
++        x_slice = ttnn.slice(x_padded, (0, k, 0), (1, k + T, D), memory_config=_dram)
+         if k != 0:
+             x_slice = ttnn.to_layout(x_slice, ttnn.TILE_LAYOUT)
+         if out is None:

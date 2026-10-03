@@ -1,0 +1,7 @@
+# Allow list for sanitise_scan.py (--allow scripts/ci/sanitise_scan.allow). One regex per line, matched with re.fullmatch
+# against "path:line:category:matched-text". Keep a reason above every line; never use it to hide a real leak.
+
+# MANIFEST.txt lists the sha256 of the bundle's OWN files (public content); model-sources.sha256 pins the public model
+# source files the bundle's tt-metal.diff was cut from.
+tt-metal-custom-ops/MANIFEST\.txt:\d+:hex64-pin:[0-9a-f]{64}
+tt-metal-custom-ops/model-sources\.sha256:\d+:hex64-pin:[0-9a-f]{64}

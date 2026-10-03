@@ -1,0 +1,71 @@
+diff --git a/ttnn/cpp/ttnn/operations/experimental/ccl/all_gather_async/all_gather_async.cpp b/ttnn/cpp/ttnn/operations/experimental/ccl/all_gather_async/all_gather_async.cpp
+index 5aeac3145bc..25ac2b95f61 100644
+--- a/ttnn/cpp/ttnn/operations/experimental/ccl/all_gather_async/all_gather_async.cpp
++++ b/ttnn/cpp/ttnn/operations/experimental/ccl/all_gather_async/all_gather_async.cpp
+@@ -31,7 +31,7 @@ ttnn::Tensor all_gather_async(
+     auto* mesh_device = input_tensor.device();
+     TT_FATAL(mesh_device != nullptr, "Mesh device is required for all_gather_async operation");
+     uint32_t resolved_num_links =
+-        num_links.value_or(ttnn::operations::ccl::common::get_num_links(*mesh_device, std::nullopt));
++        (num_links.has_value() ? num_links.value() : ttnn::operations::ccl::common::get_num_links(*mesh_device, std::nullopt));
+     tt::tt_fabric::Topology usable_topology = ::ttnn::ccl::get_usable_topology(input_tensor, topology, std::nullopt);
+     bool composite_all_gather_case = composite_common::use_composite_all_gather(input_tensor, dim);
+     bool all_gather_async_llama_sharded_case = composite_common::use_all_gather_async_llama_sharded(
+@@ -95,7 +95,7 @@ ttnn::Tensor all_gather_async(
+     auto* mesh_device_ptr = input_tensor.device();
+     TT_FATAL(mesh_device_ptr != nullptr, "Mesh device is required for all_gather_async operation");
+     uint32_t resolved_num_links =
+-        num_links.value_or(ttnn::operations::ccl::common::get_num_links(*mesh_device_ptr, cluster_axis));
++        (num_links.has_value() ? num_links.value() : ttnn::operations::ccl::common::get_num_links(*mesh_device_ptr, cluster_axis));
+     tt::tt_fabric::Topology usable_topology = ::ttnn::ccl::get_usable_topology(input_tensor, topology, cluster_axis);
+     bool composite_all_gather_case =
+         !use_all_gather_async_via_broadcast && composite_common::use_composite_all_gather(input_tensor, dim);
+@@ -156,7 +156,7 @@ ttnn::Tensor all_gather_async(
+     std::optional<uint32_t> num_workers_per_link,
+     std::optional<uint32_t> num_buffers_per_channel) {
+     uint32_t resolved_links =
+-        num_preferred_links.value_or(ttnn::operations::ccl::common::get_num_links(mesh_device, cluster_axis));
++        (num_preferred_links.has_value() ? num_preferred_links.value() : ttnn::operations::ccl::common::get_num_links(mesh_device, cluster_axis));
+     tt::tt_fabric::Topology usable_topology = ::ttnn::ccl::get_usable_topology(input_tensor, topology, cluster_axis);
+     bool composite_all_gather_case =
+         !use_all_gather_async_via_broadcast && composite_common::use_composite_all_gather(input_tensor, dim);
+@@ -209,7 +209,7 @@ ttnn::Tensor all_gather_async_reversed(
+     auto* mesh_device = input_tensor.device();
+     TT_FATAL(mesh_device != nullptr, "Mesh device is required for all_gather_async_reversed operation");
+     uint32_t resolved_num_links =
+-        num_links.value_or(ttnn::operations::ccl::common::get_num_links(*mesh_device, std::nullopt));
++        (num_links.has_value() ? num_links.value() : ttnn::operations::ccl::common::get_num_links(*mesh_device, std::nullopt));
+     // NOTE: reverse_order parameter is ignored, always use true for reversed API
+     tt::tt_fabric::Topology usable_topology = ::ttnn::ccl::get_usable_topology(input_tensor, topology, std::nullopt);
+     bool composite_all_gather_case = composite_common::use_composite_all_gather(input_tensor, dim);
+@@ -272,7 +272,7 @@ ttnn::Tensor all_gather_async_reversed(
+     auto* mesh_device_ptr = input_tensor.device();
+     TT_FATAL(mesh_device_ptr != nullptr, "Mesh device is required for all_gather_async_reversed operation");
+     uint32_t resolved_num_links =
+-        num_links.value_or(ttnn::operations::ccl::common::get_num_links(*mesh_device_ptr, cluster_axis));
++        (num_links.has_value() ? num_links.value() : ttnn::operations::ccl::common::get_num_links(*mesh_device_ptr, cluster_axis));
+     tt::tt_fabric::Topology usable_topology = ::ttnn::ccl::get_usable_topology(input_tensor, topology, cluster_axis);
+     bool composite_all_gather_case = composite_common::use_composite_all_gather(input_tensor, dim);
+     bool all_gather_async_llama_sharded_case = composite_common::use_all_gather_async_llama_sharded(
+@@ -332,7 +332,7 @@ ttnn::Tensor all_gather_async_reversed(
+     std::optional<uint32_t> num_workers_per_link,
+     std::optional<uint32_t> num_buffers_per_channel) {
+     uint32_t resolved_links =
+-        num_preferred_links.value_or(ttnn::operations::ccl::common::get_num_links(mesh_device, cluster_axis));
++        (num_preferred_links.has_value() ? num_preferred_links.value() : ttnn::operations::ccl::common::get_num_links(mesh_device, cluster_axis));
+     tt::tt_fabric::Topology usable_topology = ::ttnn::ccl::get_usable_topology(input_tensor, topology, cluster_axis);
+     bool composite_all_gather_case = composite_common::use_composite_all_gather(input_tensor, dim);
+     bool all_gather_async_llama_sharded_case = composite_common::use_all_gather_async_llama_sharded(
+diff --git a/ttnn/cpp/ttnn/operations/experimental/ccl/reduce_scatter_minimal_async/reduce_scatter_minimal_async.cpp b/ttnn/cpp/ttnn/operations/experimental/ccl/reduce_scatter_minimal_async/reduce_scatter_minimal_async.cpp
+index 356aa4da086..04cc2ca8146 100644
+--- a/ttnn/cpp/ttnn/operations/experimental/ccl/reduce_scatter_minimal_async/reduce_scatter_minimal_async.cpp
++++ b/ttnn/cpp/ttnn/operations/experimental/ccl/reduce_scatter_minimal_async/reduce_scatter_minimal_async.cpp
+@@ -31,7 +31,7 @@ ttnn::Tensor reduce_scatter_minimal_async(
+     auto* mesh_device = input_tensor.device();
+     TT_FATAL(mesh_device != nullptr, "Mesh device is required for reduce_scatter_minimal_async operation");
+     uint32_t resolved_num_links =
+-        num_links.value_or(ttnn::operations::ccl::common::get_num_links(*mesh_device, cluster_axis));
++        (num_links.has_value() ? num_links.value() : ttnn::operations::ccl::common::get_num_links(*mesh_device, cluster_axis));
+ 
+     int32_t rank = input_tensor.logical_shape().rank();
+     int32_t scatter_dim = (dim < 0) ? rank + dim : dim;

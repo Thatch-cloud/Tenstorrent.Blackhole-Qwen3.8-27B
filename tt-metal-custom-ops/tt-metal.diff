@@ -1,0 +1,923 @@
+diff --git a/models/demos/blackhole/qwen36/tt/attention/tp.py b/models/demos/blackhole/qwen36/tt/attention/tp.py
+index 0337e2f8856..9ab1b915ecb 100644
+--- a/models/demos/blackhole/qwen36/tt/attention/tp.py
++++ b/models/demos/blackhole/qwen36/tt/attention/tp.py
+@@ -159,6 +159,19 @@ class TPAttention:
+         self.paged_v = v_cache
+         self.use_paged = True
+ 
++    def _qkv_raw_decode(self, x):
++        """Decode-only: the fused [q|k|v|gate] projection output, unsliced (for attn_decode_prep)."""
++        tw = self.tw
++        if getattr(self.args, "proj_1d_decode", False):
++            return tpc.matmul_1d_decode(
++                x,
++                tw["wqkv_fused"],
++                self.args.attn_qkv_decode_1d_progcfg,
++                self.compute_cfg,
++                out_memory_config=ttnn.DRAM_MEMORY_CONFIG,
++            )
++        return self._col_proj(x, tw["wqkv_fused"], self.args.attn_qkv_fused_progcfg)
++
+     def _qkv(self, x):
+         """Q+gate/K/V projections → (qg, kp, vp). Fused path: one matmul, then slice."""
+         tw = self.tw
+@@ -510,6 +523,39 @@ class TPAttention:
+         if not use_paged and self.k_caches is None:
+             self.reset_state()
+ 
++        _prep = (
++            os.environ.get("QWEN_ATTN_PREP", "0") == "1"
++            and use_paged
++            and self._fused_qkv
++            and x.shape[-2] <= ttnn.TILE_SIZE
++        )
++        if _prep:
++            qkv_raw = self._qkv_raw_decode(x)
++            _kv_cfg = self._kv_shard_cfg(B)
++            q, gate, k_sh, v_sh = ttnn.transformer.attn_decode_prep(
++                qkv_raw,
++                cos_tt,
++                sin_tt,
++                tw["q_norm"],
++                tw["k_norm"],
++                NH,
++                NKV,
++                HD,
++                self.rope_dim,
++                _kv_cfg,
++                batch=B,
++                memory_config=ttnn.DRAM_MEMORY_CONFIG,
++            )
++            ttnn.deallocate(qkv_raw)
++            if not getattr(self, "_prep_announced", False):
++                self._prep_announced = True
++                print(
++                    f"QWEN_ATTN_PREP engaged: attn_decode_prep -> q {list(q.shape)}, gate {list(gate.shape)}, "
++                    f"k/v {list(k_sh.shape)} height-sharded (B={B}, NH={NH}, NKV={NKV}, HD={HD}, RD={self.rope_dim})",
++                    flush=True,
++                )
++            return self._decode_from_prep(q, gate, k_sh, v_sh, cur_pos_tt, page_table, B)
++
+         qg, kp, vp = self._qkv(x)
+ 
+         if self._use_nlp_decode_heads:
+@@ -666,6 +712,58 @@ class TPAttention:
+             memory_config=ttnn.DRAM_MEMORY_CONFIG,
+         )
+ 
++    def _decode_from_prep(self, q, gate, k_sh, v_sh, cur_pos_tt, page_table, B):
++        """Paged decode tail fed by attn_decode_prep: KV update, SDPA, gate, concat heads, o_proj, all-reduce."""
++        tw, NH, NKV, HD = self.tw, self.NH, self.NKV, self.HD
++        _L1 = ttnn.L1_MEMORY_CONFIG
++        keys, values = self.paged_k, self.paged_v
++        ttnn.experimental.paged_update_cache(keys, k_sh, update_idxs_tensor=cur_pos_tt, page_table=page_table)
++        ttnn.experimental.paged_update_cache(values, v_sh, update_idxs_tensor=cur_pos_tt, page_table=page_table)
++        ttnn.deallocate(k_sh)
++        ttnn.deallocate(v_sh)
++        _sdpa_grid = self.mesh.compute_with_storage_grid_size()
++        sdpa_dec_cfg = ttnn.SDPAProgramConfig(
++            compute_with_storage_grid_size=(_sdpa_grid.x, _sdpa_grid.y),
++            exp_approx_mode=False,
++            q_chunk_size=0,
++            k_chunk_size=0,
++        )
++        attn_out = ttnn.transformer.paged_scaled_dot_product_attention_decode(
++            q,
++            keys,
++            values,
++            page_table_tensor=page_table,
++            cur_pos_tensor=cur_pos_tt,
++            scale=self.scale,
++            program_config=sdpa_dec_cfg,
++            # Emit to L1: consumed by the L1 sigmoid-gate multiply next (output-only, doesn't
++            # change the SDPA reduction), before the wo matmul + all-reduce re-materialize to DRAM.
++            memory_config=_L1,
++        )
++        ttnn.deallocate(q)
++        gated = ttnn.multiply(attn_out, ttnn.sigmoid(gate, memory_config=_L1), memory_config=_L1)
++        ttnn.deallocate(attn_out)
++        ttnn.deallocate(gate)
++
++        if self._use_nlp_decode_heads:
++            gated_flat = self._concat_heads_decode(gated, B)  # consumes + deallocates gated
++        else:
++            gated_flat = ttnn.reshape(gated, (1, B, NH * HD))
++            ttnn.deallocate(gated)
++        wo_partial = self._wo_proj(gated_flat, tw["wo"])
++        ttnn.deallocate(gated_flat)
++        wo_partial = ttnn.reshape(wo_partial, (1, 1, B, wo_partial.shape[-1]))
++        return tt_all_reduce(
++            wo_partial,
++            self.mesh,
++            self.tt_ccl,
++            cluster_axis=0,
++            dim=3,
++            topology=self.args.ccl_topology(),
++            memory_config=ttnn.DRAM_MEMORY_CONFIG,
++        )
++
++
+     def forward_prefill_paged(
+         self,
+         x,
+diff --git a/models/demos/blackhole/qwen36/tt/gdn/tp.py b/models/demos/blackhole/qwen36/tt/gdn/tp.py
+index a2670866785..b57c44bfff5 100644
+--- a/models/demos/blackhole/qwen36/tt/gdn/tp.py
++++ b/models/demos/blackhole/qwen36/tt/gdn/tp.py
+@@ -14,6 +14,7 @@ import ttnn
+ from models.demos.blackhole.qwen36.tt import tp_common as tpc
+ from models.experimental.gated_attention_gated_deltanet.tt.ttnn_delta_rule_ops import (
+     recurrent_gated_delta_rule_decode_ttnn,
++    recurrent_gated_delta_rule_decode_packed_ttnn,
+ )
+ from models.experimental.gated_attention_gated_deltanet.tt.ttnn_delta_rule_seq import (
+     chunk_gated_delta_rule_seq_adapter,
+@@ -1028,23 +1029,27 @@ class TPGatedDeltaNet:
+             memory_config=ttnn.DRAM_MEMORY_CONFIG,
+         )
+ 
+-    def forward_decode(self, x):
+-        tw, Nk, Nv, Dk, Dv = self.tw, self.Nk, self.Nv, self.Dk, self.Dv
+-        Bmax = self.B
+-        _L1 = ttnn.L1_MEMORY_CONFIG  # keep decode conv→recurrence→norm/gate chain L1-resident
+-        if self.conv_states is None:
+-            self.reset_state()
+-        if len(x.shape) == 4:
+-            x = ttnn.reshape(x, (1, x.shape[-2], x.shape[-1]))
+-
+-        # Active decode width, taken from the input. Normally == Bmax. BUCKETED decode: a request
+-        # feeds B<Bmax tokens and the whole step runs on state rows [0:B]; idle rows [B:Bmax] are
+-        # preserved. Conv taps are per-channel (broadcast over batch), so the conv weighted-sum
+-        # works at any width. The B==Bmax path is byte-identical to before.
+-        B = x.shape[-2]
++    def _project_qkvzab_raw(self, x, S, out_mc):
++        """Decode-only: the fused [qkv|z|a|b] projection output, unsliced (milestone 4)."""
++        _proj_mc = out_mc if out_mc is not None else ttnn.DRAM_MEMORY_CONFIG
++        if getattr(self.args, "proj_1d_decode", False) and S <= tpc.TILE_SIZE:
++            return tpc.matmul_1d_decode(
++                x,
++                self.tw["qkvz"],
++                self.args.gdn_qkvz_decode_1d_progcfg,
++                self.cfg,
++                out_memory_config=ttnn.L1_MEMORY_CONFIG if out_mc is not None else ttnn.DRAM_MEMORY_CONFIG,
++            )
++        return self._col_proj(x, self.tw["qkvz"], self.args.gdn_qkvzab_progcfg, out_memory_config=_proj_mc)
+ 
+-        qkv, z, a, b = self._project_qkvzab(x, B, out_mc=_L1)
++    def _conv_gates_enabled(self):
++        return os.environ.get("QWEN_GDN_CONV_GATES", "0") == "1" and self.K == 4 and hasattr(
++            getattr(ttnn, "transformer", None), "gdn_decode_conv_gates"
++        )
+ 
++    def _conv_composed(self, qkv, B, Bmax, _L1):
++        # The original conv shift-register + FIR + SiLU (the control arm's path).
++        tw = self.tw
+         # Conv1d shift-register + weighted sum + SiLU
+         st = self.conv_states
+         if B < Bmax:
+@@ -1066,62 +1071,227 @@ class TPGatedDeltaNet:
+             conv = ttnn.mac(st[j], tw["conv_taps"][j], conv)
+         conv = ttnn.silu(conv, memory_config=_L1)
+ 
+-        kd = self.key_dim_tp
+-        q = ttnn.reshape(ttnn.slice(conv, (0, 0, 0), (1, B, kd)), (B, Nk, Dk))
+-        k = ttnn.reshape(ttnn.slice(conv, (0, 0, kd), (1, B, 2 * kd)), (B, Nk, Dk))
+-        v = ttnn.reshape(ttnn.slice(conv, (0, 0, 2 * kd), (1, B, self.qkv_dim_tp)), (B, Nv, Dv))
+-        ttnn.deallocate(conv)
++        return conv
+ 
+-        # GQA expand Q/K Nk→Nv; recurrence L2-norms + scales internally
+-        rf = Nv // Nk
+-        q = ttnn.repeat_interleave(q, rf, dim=1)
+-        k = ttnn.repeat_interleave(k, rf, dim=1)
+-        # Decode: hand q/k/v to the recurrent kernel in L1. The kernel typecasts + does a LOCAL
+-        # l2-norm (no cross-device gather), so placement is output-neutral here (unlike SDPA-q,
+-        # which hard-requires DRAM, and unlike the residual→DistributedNorm all-gather).
+-        q = ttnn.reshape(q, (B, 1, Nv, Dk), memory_config=_L1)
+-        k = ttnn.reshape(k, (B, 1, Nv, Dk), memory_config=_L1)
+-        v = ttnn.reshape(v, (B, 1, Nv, Dv), memory_config=_L1)
+-
+-        beta = ttnn.reshape(ttnn.sigmoid(b, memory_config=_L1), (B, 1, Nv))
+-        ttnn.deallocate(b)
+-        g = ttnn.multiply(tw["neg_exp_A"], _softplus_add(a, tw["dt_bias"]), memory_config=_L1)
+-        ttnn.deallocate(a)
+-        g = ttnn.reshape(g, (B, 1, Nv))
++    def forward_decode(self, x):
++        tw, Nk, Nv, Dk, Dv = self.tw, self.Nk, self.Nv, self.Dk, self.Dv
++        Bmax = self.B
++        _L1 = ttnn.L1_MEMORY_CONFIG  # keep decode conv→recurrence→norm/gate chain L1-resident
++        if self.conv_states is None:
++            self.reset_state()
++        if len(x.shape) == 4:
++            x = ttnn.reshape(x, (1, x.shape[-2], x.shape[-1]))
++
++        # Active decode width, taken from the input. Normally == Bmax. BUCKETED decode: a request
++        # feeds B<Bmax tokens and the whole step runs on state rows [0:B]; idle rows [B:Bmax] are
++        # preserved. Conv taps are per-channel (broadcast over batch), so the conv weighted-sum
++        # works at any width. The B==Bmax path is byte-identical to before.
++        B = x.shape[-2]
++
++        # Milestone 4 (QWEN_GDN_PROJ_DIRECT=1): keep the fused [qkv|z|a|b] projection output whole
++        # and let the conv+gates kernel read x, a and b out of it by column -- the qkv, ab, a
++        # and b slices disappear (z keeps one slice for the output gate).
++        _direct = (
++            self._conv_gates_enabled()
++            and self._fuse_ab
++            and os.environ.get("QWEN_GDN_PROJ_DIRECT", "0") == "1"
++        )
++        # K's last slice (QWEN_GDN_NORM_GATE=1): the recurrence op finishes the output norm and
++        # gate itself and returns the gated [1,B,Nv*Dv] tiles; z goes in as a column window.
++        _ng_fold = (
++            self._conv_gates_enabled()
++            and os.environ.get("QWEN_GDN_PACKED_QKV", "0") == "1"
++            and os.environ.get("QWEN_GDN_NORM_GATE", "0") == "1"
++            and hasattr(getattr(ttnn, "transformer", None), "decode_gated_delta_rule_packed")
++        )
++        _z_off = 0
++        if _direct:
++            qkvzab = self._project_qkvzab_raw(x, B, _L1)
++            _qz, _az = self.qkv_dim_tp, self.qkvz_dim_tp
++            if _ng_fold:
++                z, _z_off = qkvzab, _qz  # no slice: the op reads z's window straight from qkvzab
++            else:
++                z = ttnn.slice(qkvzab, (0, 0, _qz), (1, B, _az), memory_config=_L1)
++            qkv, a, b = qkvzab, qkvzab, qkvzab
++            _cg_kw = {"channels": _qz, "a_col": _az, "b_col": _az + Nv}
++            if not getattr(self, "_proj_direct_logged", False):
++                self._proj_direct_logged = True
++                print(
++                    f"QWEN_GDN_PROJ_DIRECT engaged: conv+gates reads qkvzab {list(qkvzab.shape)} directly"
++                    f" (channels={_qz} a_col={_az} b_col={_az + Nv})",
++                    flush=True,
++                )
++        else:
++            qkv, z, a, b = self._project_qkvzab(x, B, out_mc=_L1)
++            _cg_kw = {}
++
++        # K's first kernel (QWEN_GDN_CONV_GATES=1): conv shift-register + FIR + SiLU + both
++        # gates in ONE op, replacing the K copies, multiply + (K-1) mac + silu, the B<Bmax pad,
++        # sigmoid, add+softplus and multiply -- 12 ops/layer. Conv states advance in place
++        # (same buffers: the decode trace's address discipline holds).
++        _cg_beta = _cg_g = None
++        if self._conv_gates_enabled():
++            conv, _cg_beta, _cg_g = ttnn.transformer.gdn_decode_conv_gates(
++                qkv,
++                self.conv_states,
++                [tw["conv_taps"][j] for j in range(self.K)],
++                a,
++                b,
++                tw["dt_bias"],
++                tw["neg_exp_A"],
++                batch=B,
++                memory_config=_L1,
++                **_cg_kw,
++            )
++            if not (_direct and _ng_fold):
++                ttnn.deallocate(qkv)  # in direct+fold mode qkvzab is still z: freed after the recurrence
++            if _direct:
++                a = b = None  # same buffer as qkv: freed with it
++            if not getattr(self, "_conv_gates_logged", False):
++                self._conv_gates_logged = True
++                print(
++                    f"QWEN_GDN_CONV_GATES engaged: ttnn.transformer.gdn_decode_conv_gates B={B} Bmax={Bmax}"
++                    f" C={self.qkv_dim_tp} Nv={Nv} K={self.K} -> conv {list(conv.shape)} beta {list(_cg_beta.shape)}",
++                    flush=True,
++                )
++        else:
++            conv = self._conv_composed(qkv, B, Bmax, _L1)
++
++        # Milestone 2 (QWEN_GDN_PACKED_QKV=1, needs the conv+gates kernel engaged): the recurrence
++        # op's reader takes conv [1,B,C] and beta/g [1,B,Nv] directly, GQA included -- the 3
++        # slices, 8 reshapes and 2 repeat_interleaves below disappear.
++        _packed = (
++            _cg_beta is not None
++            and os.environ.get("QWEN_GDN_PACKED_QKV", "0") == "1"
++            and hasattr(getattr(ttnn, "transformer", None), "decode_gated_delta_rule_packed")
++        )
++        if not _packed:
++            kd = self.key_dim_tp
++            q = ttnn.reshape(ttnn.slice(conv, (0, 0, 0), (1, B, kd)), (B, Nk, Dk))
++            k = ttnn.reshape(ttnn.slice(conv, (0, 0, kd), (1, B, 2 * kd)), (B, Nk, Dk))
++            v = ttnn.reshape(ttnn.slice(conv, (0, 0, 2 * kd), (1, B, self.qkv_dim_tp)), (B, Nv, Dv))
++            ttnn.deallocate(conv)
++
++            # GQA expand Q/K Nk→Nv; recurrence L2-norms + scales internally
++            rf = Nv // Nk
++            q = ttnn.repeat_interleave(q, rf, dim=1)
++            k = ttnn.repeat_interleave(k, rf, dim=1)
++            # Decode: hand q/k/v to the recurrent kernel in L1. The kernel typecasts + does a LOCAL
++            # l2-norm (no cross-device gather), so placement is output-neutral here (unlike SDPA-q,
++            # which hard-requires DRAM, and unlike the residual→DistributedNorm all-gather).
++            q = ttnn.reshape(q, (B, 1, Nv, Dk), memory_config=_L1)
++            k = ttnn.reshape(k, (B, 1, Nv, Dk), memory_config=_L1)
++            v = ttnn.reshape(v, (B, 1, Nv, Dv), memory_config=_L1)
++
++        if _packed:
++            if a is not None:
++                ttnn.deallocate(a)
++                ttnn.deallocate(b)
++            beta, g = _cg_beta, _cg_g  # [1,B,Nv]: the packed reader's own layout
++        elif _cg_beta is not None:
++            if a is not None:
++                ttnn.deallocate(a)
++                ttnn.deallocate(b)
++            beta = ttnn.reshape(_cg_beta, (B, 1, Nv))
++            g = ttnn.reshape(_cg_g, (B, 1, Nv))
++        else:
++            beta = ttnn.reshape(ttnn.sigmoid(b, memory_config=_L1), (B, 1, Nv))
++            ttnn.deallocate(b)
++            g = ttnn.multiply(tw["neg_exp_A"], _softplus_add(a, tw["dt_bias"]), memory_config=_L1)
++            ttnn.deallocate(a)
++            g = ttnn.reshape(g, (B, 1, Nv))
+ 
+         # fp32 decode step by default (QWEN35_GDN_DECODE_BF16=1 reverts)
+         init_state = self.rec_state if B == Bmax else self._slice_along(self.rec_state, 0, 0, B)
+-        o, new_rec = recurrent_gated_delta_rule_decode_ttnn(
+-            q,
+-            k,
+-            v,
+-            beta,
+-            g,
+-            scale=self.scale,
+-            initial_state=init_state,
+-            device=self.mesh,
+-            high_precision=(os.environ.get("QWEN35_GDN_DECODE_BF16") != "1"),
++        # QWEN_GDN_FUSED_INPLACE=1: ask the fused op to write the new state straight into
++        # rec_state (its _inplace variant) instead of allocating h and copying it back.
++        # Legal only when init_state IS the persistent buffer (B == Bmax, no slice). The
++        # composed path ignores the flag, so the caller decides by IDENTITY below, not env.
++        _want_inplace = (
++            os.environ.get("QWEN_GDN_FUSED_INPLACE") == "1"
++            and self._stable_state and B == Bmax and init_state is self.rec_state
+         )
++        # Milestone 3 (QWEN_GDN_NORM_GATE=1, needs the packed path): the norm+gate kernel takes o
++        # as the recurrence writes it (ROW_MAJOR sticks) and z, and writes the gated, normed
++        # [1,B,Nv*Dv] tiles the out-projection wants -- the to_layout, two reshapes, rms_norm,
++        # silu and multiply below disappear.
++        _ng = _packed and _ng_fold
++        if _packed:
++            o, new_rec = recurrent_gated_delta_rule_decode_packed_ttnn(
++                conv,
++                beta,
++                g,
++                Nk,
++                Nv,
++                Dk,
++                Dv,
++                scale=self.scale,
++                initial_state=init_state,
++                device=self.mesh,
++                high_precision=(os.environ.get("QWEN35_GDN_DECODE_BF16") != "1"),
++                inplace_state=_want_inplace,
++                z=z if _ng else None,
++                norm_w=tw["norm_w"] if _ng else None,
++                z_col_offset=_z_off,
++            )
++            ttnn.deallocate(conv)
++        else:
++            o, new_rec = recurrent_gated_delta_rule_decode_ttnn(
++                q,
++                k,
++                v,
++                beta,
++                g,
++                scale=self.scale,
++                initial_state=init_state,
++                device=self.mesh,
++                high_precision=(os.environ.get("QWEN35_GDN_DECODE_BF16") != "1"),
++                inplace_state=_want_inplace,
++            )
++        # The op returns *in.initial_state, but nanobind hands back a NEW Python wrapper
++        # around the same device buffer, so `is` sees two objects. Compare the buffer.
++        try:
++            _did_inplace = _want_inplace and new_rec.buffer_address() == init_state.buffer_address()
++        except Exception:
++            _did_inplace = False
++        if _want_inplace and not getattr(self, "_inplace_logged", False):
++            self._inplace_logged = True
++            print(f"QWEN_GDN_FUSED_INPLACE requested; in-place happened={_did_inplace}"
++                  f" (same buffer={new_rec.buffer_address() == init_state.buffer_address()})", flush=True)
+         if init_state is not self.rec_state:
+             ttnn.deallocate(init_state)
+         if self._stable_state:
+             # In-place update preserves rec_state address for decode trace replay
+             if B == Bmax:
+-                ttnn.copy(new_rec, self.rec_state)
+-                ttnn.deallocate(new_rec)
++                if _did_inplace:
++                    pass  # new_rec IS rec_state: nothing to copy, and freeing it would free the state
++                else:
++                    ttnn.copy(new_rec, self.rec_state)
++                    ttnn.deallocate(new_rec)
+             else:
+                 self._write_recurrent_state_prefix(new_rec, B)
+         else:
+             self.rec_state = new_rec
+ 
+-        out_r = ttnn.reshape(o, (B, Nv, Dv))
+-        out_n = ttnn.rms_norm(out_r, weight=tw["norm_w"], epsilon=1e-6, memory_config=_L1)  # gated norm (no +1)
+-        ttnn.deallocate(out_r)
+-        out_f = ttnn.reshape(out_n, (1, B, self.value_dim_tp))
+-        ttnn.deallocate(out_n)
+-        gated = _silu_mul(out_f, z, _L1)
+-        ttnn.deallocate(out_f)
+-        ttnn.deallocate(z)
++        if _ng:
++            gated = o  # the recurrence op returned rms_norm(o) * norm_w * silu(z), [1,B,Nv*Dv] TILE
++            ttnn.deallocate(z)  # in direct+fold mode this is qkvzab itself
++            if not getattr(self, "_norm_gate_logged", False):
++                self._norm_gate_logged = True
++                print(
++                    f"QWEN_GDN_NORM_GATE engaged: norm+gate folded into decode_gated_delta_rule_packed"
++                    f" (z_col_offset={_z_off}) -> gated {list(gated.shape)}",
++                    flush=True,
++                )
++        else:
++            out_r = ttnn.reshape(o, (B, Nv, Dv))
++            out_n = ttnn.rms_norm(out_r, weight=tw["norm_w"], epsilon=1e-6, memory_config=_L1)  # gated norm (no +1)
++            ttnn.deallocate(out_r)
++            out_f = ttnn.reshape(out_n, (1, B, self.value_dim_tp))
++            ttnn.deallocate(out_n)
++            gated = _silu_mul(out_f, z, _L1)
++            ttnn.deallocate(out_f)
++            ttnn.deallocate(z)
+ 
+         partial = self._row_proj(gated, tw["out"])
+         ttnn.deallocate(gated)
+diff --git a/models/experimental/gated_attention_gated_deltanet/tt/ttnn_delta_rule_ops.py b/models/experimental/gated_attention_gated_deltanet/tt/ttnn_delta_rule_ops.py
+index 414c53b923e..c7cb203eecf 100644
+--- a/models/experimental/gated_attention_gated_deltanet/tt/ttnn_delta_rule_ops.py
++++ b/models/experimental/gated_attention_gated_deltanet/tt/ttnn_delta_rule_ops.py
+@@ -8,6 +8,8 @@ FLA layout: q,k [B,T,H,K]; v [B,T,H,V]; beta,g [B,T,H]; state [B,H,K,V].
+ """
+ 
+ import math
++import os
++import warnings
+ 
+ import torch
+ import ttnn
+@@ -380,6 +382,169 @@ def recurrent_delta_rule_step_ttnn(
+     return o_t, h
+ 
+ 
++_FUSED_DECODE_OP_MISSING = object()  # resolved-and-absent sentinel
++_fused_decode_op_cache = None  # None = unresolved; MISSING = absent (warn once)
++_fused_decode_engaged_logged = False  # one-shot engagement marker (log-evidence)
++
++
++def _fused_decode_enabled():
++    """QWEN_GDN_FUSED_DECODE routes the T=1 decode to the fused C++ op. Default OFF:
++    unset/false/0 (case-insensitive) run the stock graph, byte-identical."""
++    return os.environ.get("QWEN_GDN_FUSED_DECODE", "").strip().lower() not in ("", "0", "false")
++
++
++def _fused_decode_op():
++    """Resolve ttnn.transformer.decode_gated_delta_rule once (cached).
++
++    Returns the op, or None after a one-time warning when this ttnn build lacks
++    the binding — callers then fall back to the stock decode graph."""
++    global _fused_decode_op_cache
++    if _fused_decode_op_cache is None:
++        _fused_decode_op_cache = getattr(getattr(ttnn, "transformer", None), "decode_gated_delta_rule", None)
++        if _fused_decode_op_cache is None:
++            _fused_decode_op_cache = _FUSED_DECODE_OP_MISSING
++            warnings.warn(
++                "QWEN_GDN_FUSED_DECODE is set but ttnn.transformer.decode_gated_delta_rule is"
++                " not available in this ttnn build; falling back to the stock decode graph.",
++                stacklevel=2,
++            )
++    return None if _fused_decode_op_cache is _FUSED_DECODE_OP_MISSING else _fused_decode_op_cache
++
++
++def _decode_gated_delta_rule_fused(
++    op, q, k, v, beta, g, scale, initial_state, device, high_precision, inplace_state=False
++):
++    """Drive the fused C++ op (ttnn.transformer.decode_gated_delta_rule) for T=1.
++
++    Implements the same graph as recurrent_gated_delta_rule_decode_ttnn in one
++    device program: L2-norm q/k, q*scale, h*=exp(g), v_read=k@h, delta=v-v_read,
++    rank-1 beta*(k outer delta) write, o=q@h. inplace_state writes new_state
++    into the caller's state buffer (the fused _inplace variant).
++    """
++    K = q.shape[3]
++    global _fused_decode_engaged_logged
++    if not _fused_decode_engaged_logged:
++        _fused_decode_engaged_logged = True
++        # One-shot engagement evidence: proves the env opt-in resolved the
++        # binding AND this call site routed through it (grep in demo logs).
++        print(
++            "QWEN_GDN_FUSED_DECODE engaged: ttnn.transformer.decode_gated_delta_rule"
++            f" T=1 fused path (B={q.shape[0]} H={q.shape[2]} K={q.shape[3]} V={v.shape[3]}"
++            f" inplace_state={inplace_state})",
++            flush=True,
++        )
++    if high_precision:
++        q = ttnn.typecast(q, ttnn.float32)
++        k = ttnn.typecast(k, ttnn.float32)
++        v = ttnn.typecast(v, ttnn.float32)
++        beta = ttnn.typecast(beta, ttnn.float32)
++        g = ttnn.typecast(g, ttnn.float32)
++        if initial_state is not None and initial_state.dtype != ttnn.float32:
++            initial_state = ttnn.typecast(initial_state, ttnn.float32)
++    o, h = op(
++        q=q,
++        k=k,
++        v=v,
++        beta=beta,
++        g=g,
++        scale=scale if scale is not None else K**-0.5,
++        initial_state=initial_state,
++        inplace_state=inplace_state,
++        # Both outputs share one memory config and the new state is [B,H,K,V]
++        # fp32 (192 MiB per die at decode B=128) — L1 is impossible; DRAM is
++        # the proven standalone configuration.
++        memory_config=ttnn.DRAM_MEMORY_CONFIG,
++    )
++    # The op returns o ROW_MAJOR (its exclusive-page write shape); the decode
++    # graph feeds o straight into rms_norm, which requires TILE.
++    o = ttnn.to_layout(o, ttnn.TILE_LAYOUT)
++    return o, h
++
++
++_packed_decode_op_cache = None
++_packed_decode_engaged_logged = False
++
++
++def _packed_decode_op():
++    """Resolve ttnn.transformer.decode_gated_delta_rule_packed once (cached); None if absent."""
++    global _packed_decode_op_cache
++    if _packed_decode_op_cache is None:
++        _packed_decode_op_cache = getattr(getattr(ttnn, "transformer", None), "decode_gated_delta_rule_packed", None) or False
++    return _packed_decode_op_cache or None
++
++
++def recurrent_gated_delta_rule_decode_packed_ttnn(
++    qkv,
++    beta,
++    g,
++    num_k_heads,
++    num_v_heads,
++    head_k,
++    head_v,
++    scale=None,
++    initial_state=None,
++    device=None,
++    high_precision=False,
++    inplace_state=False,
++    return_row_major=False,
++    z=None,
++    norm_w=None,
++    z_col_offset=0,
++):
++    """T=1 decode on the PACKED layout (K milestone 2): qkv [1,B,C] straight from the conv+gates
++    kernel (channels q|k|v head-major), beta/g [1,B,H]. The fused op's reader does the head
++    gather and the GQA expansion, so no slice / reshape / repeat_interleave on the host graph.
++    Returns o [B,1,H,V] TILE, state [B,H,K,V]. Requires the packed binding (no composed fallback)."""
++    op = _packed_decode_op()
++    if op is None:
++        raise RuntimeError("decode_gated_delta_rule_packed binding is absent; mount the K graft")
++    global _packed_decode_engaged_logged
++    if not _packed_decode_engaged_logged:
++        _packed_decode_engaged_logged = True
++        print(
++            "QWEN_GDN_PACKED_QKV engaged: ttnn.transformer.decode_gated_delta_rule_packed"
++            f" (qkv {list(qkv.shape)} Nk={num_k_heads} H={num_v_heads} K={head_k} V={head_v}"
++            f" inplace_state={inplace_state})",
++            flush=True,
++        )
++    fused_ng = z is not None
++    if high_precision:
++        qkv = ttnn.typecast(qkv, ttnn.float32)
++        beta = ttnn.typecast(beta, ttnn.float32)
++        g = ttnn.typecast(g, ttnn.float32)
++        if initial_state is not None and initial_state.dtype != ttnn.float32:
++            initial_state = ttnn.typecast(initial_state, ttnn.float32)
++        if fused_ng:
++            z = ttnn.typecast(z, ttnn.float32)
++            norm_w = ttnn.typecast(norm_w, ttnn.float32)
++    extra = {}
++    if fused_ng:
++        # K's last slice: the op finishes o -> rms_norm * norm_w * silu(z) and returns the gated
++        # [1,B,H*V] TILE tensor the out-projection consumes (assembled across cores in L1).
++        extra = {"z": z, "norm_w": norm_w, "z_col_offset": z_col_offset}
++    o, h = op(
++        qkv,
++        beta,
++        g,
++        num_k_heads,
++        num_v_heads,
++        head_k,
++        head_v,
++        scale=scale if scale is not None else head_k**-0.5,
++        initial_state=initial_state,
++        inplace_state=inplace_state,
++        memory_config=ttnn.L1_MEMORY_CONFIG if fused_ng else ttnn.DRAM_MEMORY_CONFIG,
++        **extra,
++    )
++    if fused_ng:
++        return o, h  # o is already the gated TILE output
++    # return_row_major: hand o back as the op wrote it (one [V] stick per head) for the
++    # norm+gate kernel, which consumes that layout directly (K milestone 3).
++    if not return_row_major:
++        o = ttnn.to_layout(o, ttnn.TILE_LAYOUT)
++    return o, h
++
++
+ def recurrent_gated_delta_rule_decode_ttnn(
+     q,
+     k,
+@@ -390,6 +555,7 @@ def recurrent_gated_delta_rule_decode_ttnn(
+     initial_state=None,
+     device=None,
+     high_precision=False,
++    inplace_state=False,
+ ):
+     """T=1 decode path: no loop/slice overhead. Returns o [B,1,H,V], state [B,H,K,V]."""
+     B = q.shape[0]
+@@ -397,6 +563,15 @@ def recurrent_gated_delta_rule_decode_ttnn(
+     K = q.shape[3]
+     V = v.shape[3]
+ 
++    # QWEN_GDN_FUSED_DECODE: single-kernel C++ path when the binding exists; an absent
++    # binding warns once (inside _fused_decode_op) and falls through to the stock graph.
++    if _fused_decode_enabled():
++        op = _fused_decode_op()
++        if op is not None:
++            return _decode_gated_delta_rule_fused(
++                op, q, k, v, beta, g, scale, initial_state, device, high_precision, inplace_state=inplace_state
++            )
++
+     # high_precision: fp32 step avoids bf16 decay quantization error over long decode.
+     if high_precision:
+         q = ttnn.typecast(q, ttnn.float32)
+@@ -493,6 +668,12 @@ def recurrent_gated_delta_rule_decode_inplace_ttnn(
+     high_precision=False,
+ ):
+     """Decode with in-place state copy to pre-allocated buffer (trace-safe addresses)."""
++    op = _fused_decode_op() if _fused_decode_enabled() else None
++    if op is not None:
++        # Fused path: the kernel writes new_state straight into state_buffer.
++        return _decode_gated_delta_rule_fused(
++            op, q, k, v, beta, g, scale, state_buffer, device, high_precision, inplace_state=True
++        )
+     o, new_h = recurrent_gated_delta_rule_decode_ttnn(
+         q=q,
+         k=k,
+diff --git a/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/kernels/dataflow/reader_tm_tile_layout_nlp_concat_heads_decode.cpp b/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/kernels/dataflow/reader_tm_tile_layout_nlp_concat_heads_decode.cpp
+index 9fb90dfdb8b..aff5bf06be8 100644
+--- a/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/kernels/dataflow/reader_tm_tile_layout_nlp_concat_heads_decode.cpp
++++ b/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/kernels/dataflow/reader_tm_tile_layout_nlp_concat_heads_decode.cpp
+@@ -48,8 +48,22 @@ void kernel_main() {
+     uint32_t tile_size = head_size / head_size_num_tiles;
+     const uint32_t cb_write_ptr_base = cb_q_out.get_write_ptr();
+ 
++    // Rows of the output shard per tile row. The offsets below (16, 512) already assume a 32x32 tile
++    // with 16x16 faces, so one tile row of the output shard is 32 users tall.
++    constexpr uint32_t TILE_ROWS = 32;
++
+     for (uint32_t q = 0; q < batch; ++q) {
+-        uint32_t wptr_offset = q < 16 ? q * SUBTILE_LINE_BYTES : (q - 16) * SUBTILE_LINE_BYTES + 512 * ELEMENT_SIZE;
++        // The output shard is (batch x head_dim) in tile layout: ceil(batch / 32) tile rows of
++        // head_size_num_tiles tiles each, tiles row-major, so one whole tile row is head_size bytes.
++        // User q therefore lives at row (q % 32) of batch tile (q / 32). Within one 32x32 tile, rows
++        // 0..15 are face 0 and rows 16..31 are face 2, which starts 512 elements into the tile.
++        // At batch <= 32 the batch tile index is always 0 and this is byte-for-byte the original offset.
++        uint32_t batch_tile = q / TILE_ROWS;
++        uint32_t row_in_tile = q - batch_tile * TILE_ROWS;
++        uint32_t wptr_offset =
++            batch_tile * head_size + (row_in_tile < 16
++                                          ? row_in_tile * SUBTILE_LINE_BYTES
++                                          : (row_in_tile - 16) * SUBTILE_LINE_BYTES + 512 * ELEMENT_SIZE);
+         uint32_t q_write_addr = cb_write_ptr_base + wptr_offset;
+         for (uint32_t i = 0; i < head_size_num_tiles; ++i) {
+             // Read first phase
+diff --git a/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/kernels/dataflow/reader_tm_tile_layout_nlp_concat_heads_decode_subcoregrid.cpp b/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/kernels/dataflow/reader_tm_tile_layout_nlp_concat_heads_decode_subcoregrid.cpp
+index ad765ad82d5..c684dd786ad 100644
+--- a/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/kernels/dataflow/reader_tm_tile_layout_nlp_concat_heads_decode_subcoregrid.cpp
++++ b/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/kernels/dataflow/reader_tm_tile_layout_nlp_concat_heads_decode_subcoregrid.cpp
+@@ -47,8 +47,21 @@ void kernel_main() {
+     uint32_t tile_size = head_size / head_size_num_tiles;
+     const uint32_t cb_write_ptr_base = cb_q_out.get_write_ptr();
+ 
++    // Rows of the output shard per tile row: faces 0/1 then faces 2/3, face_h rows each. This is the
++    // same rows-per-tile the program factory uses to place a head row within the input shard.
++    constexpr uint32_t TILE_ROWS = 2 * face_h;
++
+     for (uint32_t q = 0; q < batch; ++q) {
+-        uint32_t wptr_offset = q < face_h ? q * SUBTILE_LINE_BYTES : (q + face_h) * SUBTILE_LINE_BYTES;
++        // The output shard is (batch x head_dim) in tile layout: ceil(batch / TILE_ROWS) tile rows of
++        // head_size_num_tiles tiles each, tiles row-major, so one whole tile row is head_size bytes.
++        // User q lives at row (q % TILE_ROWS) of batch tile (q / TILE_ROWS); within a tile the first
++        // face_h rows are face 0 and the rest are face 2 (the (row + face_h) form lands on it directly).
++        // At batch <= TILE_ROWS the batch tile index is always 0 and this is byte-for-byte the original.
++        uint32_t batch_tile = q / TILE_ROWS;
++        uint32_t row_in_tile = q - batch_tile * TILE_ROWS;
++        uint32_t wptr_offset = batch_tile * head_size + (row_in_tile < face_h
++                                                             ? row_in_tile * SUBTILE_LINE_BYTES
++                                                             : (row_in_tile + face_h) * SUBTILE_LINE_BYTES);
+         uint32_t q_write_addr = cb_write_ptr_base + wptr_offset;
+         for (uint32_t i = 0; i < head_size_num_tiles; ++i) {
+             // Read first phase
+diff --git a/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/nlp_concat_heads_decode_device_operation.cpp b/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/nlp_concat_heads_decode_device_operation.cpp
+index c5fd6cf3bbd..c68cf2a6f66 100644
+--- a/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/nlp_concat_heads_decode_device_operation.cpp
++++ b/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/nlp_concat_heads_decode_device_operation.cpp
+@@ -36,7 +36,17 @@ void NLPConcatHeadsDecodeDeviceOperation::validate_on_program_cache_miss(
+         "Input tensor layout must be TILE but got {}",
+         input_tensor.layout());
+     TT_FATAL(input_shape[0] == 1, "seqlen=1 for decode");
+-    TT_FATAL(input_shape[1] <= 32, "currently only support less than 32 users");
++    // Batch (users) is the output's row axis, and the output is one 32-row tile per 32 users.
++    // A batch that is not a whole number of 32-row tiles has no tile-aligned output shard, so it is
++    // still refused; batch < 32 is the exception and is padded up to one tile in compute_output_specs
++    // below. Batch above 32 is now supported when it is a whole number of batch tiles (B=64 is two):
++    // the reader walks ceil(batch/32) tile rows of the output shard. The num_cores == batch check
++    // further down is the real ceiling - one input core per user.
++    constexpr uint32_t batch_tile_height = 32;
++    TT_FATAL(
++        input_shape[1] <= batch_tile_height || input_shape[1] % batch_tile_height == 0,
++        "batch (input_shape[1] = {}) must be at most 32 users or a whole number of 32-user batch tiles",
++        input_shape[1]);
+     TT_FATAL(input_shape[2] % 32 == 0, "padded heads must be a multiple of TILE_HEIGHT (32), got {}", input_shape[2]);
+     TT_FATAL(input_shape[2] >= args.num_heads, "head_dim must be multiple of TILE_WIDTH");
+ 
+diff --git a/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/nlp_concat_heads_decode_program_factory.cpp b/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/nlp_concat_heads_decode_program_factory.cpp
+index 30f1e2c7600..3fe9844f066 100644
+--- a/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/nlp_concat_heads_decode_program_factory.cpp
++++ b/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/nlp_concat_heads_decode_program_factory.cpp
+@@ -32,6 +32,10 @@ ProgramDescriptor NLPConcatHeadsDecodeProgramFactory::create_descriptor(
+     uint32_t single_tile_size = tt::tile_size(cb_data_format);
+ 
+     uint32_t head_tiles = head_dim / TILE_WIDTH;
++    // head_size is both the byte size of one head row of the input shard and the tile-row stride of
++    // the output shard: the output shard is (batch x head_dim) = ceil(batch/32) tile rows of
++    // head_tiles tiles, tiles row-major. The reader relies on the second reading to step from one
++    // 32-user batch tile to the next, so the two must stay the same quantity.
+     uint32_t head_size = head_tiles * single_tile_size;
+ 
+     uint32_t element_size = input_tensor.element_size();
+diff --git a/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/nlp_concat_heads_decode_subcoregrids_program_factory.cpp b/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/nlp_concat_heads_decode_subcoregrids_program_factory.cpp
+index 652c7c3d5e3..083a4b6c6c5 100644
+--- a/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/nlp_concat_heads_decode_subcoregrids_program_factory.cpp
++++ b/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/device/nlp_concat_heads_decode_subcoregrids_program_factory.cpp
+@@ -42,6 +42,10 @@ ProgramDescriptor NLPConcatHeadsDecodeSubcoregridsProgramFactory::create_descrip
+     auto face_hw = face_h * face_w;
+ 
+     const uint32_t head_tiles = head_dim / tile_w;
++    // head_size is both the byte size of one head row of the input shard and the tile-row stride of
++    // the output shard: the output shard is (batch x head_dim) = ceil(batch/tile_h) tile rows of
++    // head_tiles tiles, tiles row-major. The reader relies on the second reading to step from one
++    // batch tile to the next, so the two must stay the same quantity.
+     const uint32_t head_size = head_tiles * single_tile_size;
+ 
+     const uint32_t element_size = input_tensor.element_size();
+diff --git a/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/nlp_concat_heads_decode_nanobind.cpp b/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/nlp_concat_heads_decode_nanobind.cpp
+index 7898350b140..5600fc220f3 100644
+--- a/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/nlp_concat_heads_decode_nanobind.cpp
++++ b/ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode/nlp_concat_heads_decode_nanobind.cpp
+@@ -19,7 +19,7 @@ void bind_nlp_concat_heads_decode(nb::module_& mod) {
+     ttnn::bind_function<"nlp_concat_heads_decode", "ttnn.experimental.">(
+         mod,
+         R"doc(
+-            Shuffles [S=1, B=32, 32(num_heads), head_dim] tensor into tensor with shape [S=1, 1, B=32, num_heads * head_dim]. num_heads should be specified and be less than 32; the op will assume the input padded num_heads to 32 and will unpad it. The output is default width sharded by num heads.
++            Shuffles [S=1, B, 32(num_heads), head_dim] tensor into tensor with shape [S=1, 1, B, num_heads * head_dim]. B (users) is either at most 32, in which case the output batch is padded up to one 32-row tile, or a whole number of 32-user batch tiles (B=64 is two). num_heads should be specified and be less than 32; the op will assume the input padded num_heads to 32 and will unpad it. The output is default width sharded by num heads.
+         )doc",
+         &ttnn::experimental::nlp_concat_heads_decode,
+         nb::arg("input_tensor").noconvert(),
+diff --git a/ttnn/cpp/ttnn/operations/transformer/CMakeLists.txt b/ttnn/cpp/ttnn/operations/transformer/CMakeLists.txt
+index fbb9a608ab5..7d2e2a3546d 100644
+--- a/ttnn/cpp/ttnn/operations/transformer/CMakeLists.txt
++++ b/ttnn/cpp/ttnn/operations/transformer/CMakeLists.txt
+@@ -18,6 +18,10 @@ file(
+     sdpa/device/kernels/*.hpp
+     sdpa_decode/device/kernels/*.hpp
+     gated_delta_attn/device/kernels/*.cpp
++    gdn_decay/device/kernels/*.cpp
++    attn_prep/device/kernels/*.cpp
++    gdn_norm_gate/device/kernels/*.cpp
++    gdn_conv_gates/device/kernels/*.cpp
+     chunk_gated_delta_rule/device/kernels/*.cpp
+ )
+ target_sources(
+diff --git a/ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_program_factory.cpp b/ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_program_factory.cpp
+index de745f8fa90..ecde2c70ed2 100644
+--- a/ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_program_factory.cpp
++++ b/ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_program_factory.cpp
+@@ -703,9 +703,14 @@ ProgramDescriptor SDPAOperation::SDPAProgramFactory::create_descriptor(
+     tt::DataFormat out_df = tt::tt_metal::datatype_to_dataformat_converter(output_tensor.dtype());
+     tt::DataFormat scalar_df =
+         (input_tensor_q.dtype() == DataType::FLOAT32) ? tt::DataFormat::Float32 : tt::DataFormat::Float16_b;
+-    tt::DataFormat im_df =
+-        tt::DataFormat::Float16_b;  // Keep most intermediates in bf16 to save L1; opt-in fp32 per-CB below.
+-    tt::DataFormat stats_df = im_df;
++    const bool qwen_draft_fp32_intermediates =
++        B == 1 && NQH == 16 && NKH == 4 && DHt == 4 && vDHt == 4 &&
++        (Skt == 144 || Skt == 272 || Skt == 528 || Skt == 1040 || Skt == 2064 || Skt == 4112 || Skt == 8208) && Sq_chunk_t == 1 && Sk_chunk_t == 8 &&
++        !is_causal && compute_use_provided_mask && !is_chunked &&
++        !use_attention_sink && !is_windowed && !use_streaming_compute &&
++        fp32_dest_acc_en && !exp_approx_mode;
++    tt::DataFormat im_df = tt::DataFormat::Float16_b;
++    tt::DataFormat stats_df = qwen_draft_fp32_intermediates ? tt::DataFormat::Float32 : im_df;
+     tt::DataFormat qk_im_df = fp32_dest_intermediate_dataformat(fp32_dest_acc_en);
+     tt::DataFormat sum_df = fp32_dest_intermediate_dataformat(fp32_dest_acc_en);
+     // salad_correct_fused inits mul_bcast_cols with out CB and applies it to sum CB too —
+diff --git a/ttnn/cpp/ttnn/operations/transformer/sdpa_decode/device/sdpa_decode_program_factory.cpp b/ttnn/cpp/ttnn/operations/transformer/sdpa_decode/device/sdpa_decode_program_factory.cpp
+index 79cf563e1e6..52a2e9cc724 100644
+--- a/ttnn/cpp/ttnn/operations/transformer/sdpa_decode/device/sdpa_decode_program_factory.cpp
++++ b/ttnn/cpp/ttnn/operations/transformer/sdpa_decode/device/sdpa_decode_program_factory.cpp
+@@ -8,6 +8,7 @@
+ #include <climits>
+ #include <cmath>
+ #include <cstdint>
++#include <cstdlib>
+ #include <map>
+ #include <optional>
+ #include <string>
+@@ -424,7 +425,10 @@ ProgramDescriptor SdpaDecodeDeviceOperation::create_descriptor(
+     const uint32_t out_tiles = PNHt * vDHt;
+     const uint32_t scale_tiles = 1;
+     const uint32_t statistics_tiles = PNHt;
+-    const uint32_t intermed_output_tiles = (out_tiles + 2 * PNHt) * (num_cores_per_head - 1);
++    const char* scratch_rounds_override = std::getenv("QWEN_SDPA_TREE_SCRATCH_ROUNDS");
++    const bool compact_tree_scratch = scratch_rounds_override && std::string(scratch_rounds_override) == "1";
++    const uint32_t intermed_output_tiles =
++        (out_tiles + 2 * PNHt) * (compact_tree_scratch ? num_tree_reduction_rounds : num_cores_per_head - 1);
+ 
+     // ========== Data Formats ==========
+     const tt::DataFormat q_df = tt_metal::datatype_to_dataformat_converter(input_tensor_q.dtype());
+diff --git a/ttnn/cpp/ttnn/operations/transformer/sources.cmake b/ttnn/cpp/ttnn/operations/transformer/sources.cmake
+index 10699f5535f..85041118d83 100644
+--- a/ttnn/cpp/ttnn/operations/transformer/sources.cmake
++++ b/ttnn/cpp/ttnn/operations/transformer/sources.cmake
+@@ -28,6 +28,21 @@ set(TTNN_OP_TRANSFORMER_SRCS
+     sdpa_decode/device/sdpa_decode_program_factory.cpp
+     sdpa_decode/sdpa_decode.cpp
+     split_query_key_value_and_split_heads/split_query_key_value_and_split_heads.cpp
++    gdn_decay/device/gdn_decay_device_operation.cpp
++    gdn_decay/device/gdn_decay_program_factory.cpp
++    gdn_conv_gates/gdn_conv_gates.cpp
++    gdn_conv_gates/device/gdn_conv_gates_device_operation.cpp
++    gdn_conv_gates/device/gdn_conv_gates_program_factory.cpp
++    gdn_norm_gate/gdn_norm_gate.cpp
++    gdn_norm_gate/device/gdn_norm_gate_device_operation.cpp
++    gdn_norm_gate/device/gdn_norm_gate_program_factory.cpp
++    attn_prep/attn_prep.cpp
++    attn_prep/device/attn_prep_device_operation.cpp
++    attn_prep/device/attn_prep_program_factory.cpp
++    decode_gated_delta_rule/decode_gated_delta_rule.cpp
++    decode_gated_delta_rule/device/decode_gated_delta_rule_device_operation.cpp
++    decode_gated_delta_rule/device/decode_gated_delta_rule_program_factory.cpp
++    gdn_decay/gdn_decay.cpp
+     gated_delta_attn/device/gated_delta_attn_device_operation.cpp
+     gated_delta_attn/device/gated_delta_attn_program_factory.cpp
+     gated_delta_attn/gated_delta_attn.cpp
+@@ -49,6 +64,11 @@ set(TTNN_OP_TRANSFORMER_NANOBIND_SRCS
+     sdpa/sdpa_nanobind.cpp
+     sdpa_decode/sdpa_decode_nanobind.cpp
+     split_query_key_value_and_split_heads/split_query_key_value_and_split_heads_nanobind.cpp
++    decode_gated_delta_rule/decode_gated_delta_rule_nanobind.cpp
++    attn_prep/attn_prep_nanobind.cpp
++    gdn_norm_gate/gdn_norm_gate_nanobind.cpp
++    gdn_conv_gates/gdn_conv_gates_nanobind.cpp
++    gdn_decay/gdn_decay_nanobind.cpp
+     gated_delta_attn/gated_delta_attn_nanobind.cpp
+     chunk_gated_delta_rule/chunk_gated_delta_rule_nanobind.cpp
+     transformer_nanobind.cpp
+diff --git a/ttnn/cpp/ttnn/operations/transformer/transformer_nanobind.cpp b/ttnn/cpp/ttnn/operations/transformer/transformer_nanobind.cpp
+index 40cdbbd813f..e5e5371b6c9 100644
+--- a/ttnn/cpp/ttnn/operations/transformer/transformer_nanobind.cpp
++++ b/ttnn/cpp/ttnn/operations/transformer/transformer_nanobind.cpp
+@@ -15,7 +15,12 @@
+ #include "attention_softmax/attention_softmax_nanobind.hpp"
+ #include "concatenate_heads/concatenate_heads_nanobind.hpp"
+ #include "gated_delta_attn/gated_delta_attn_nanobind.hpp"
++#include "gdn_decay/gdn_decay_nanobind.hpp"
+ #include "chunk_gated_delta_rule/chunk_gated_delta_rule_nanobind.hpp"
++#include "decode_gated_delta_rule/decode_gated_delta_rule_nanobind.hpp"
++#include "attn_prep/attn_prep_nanobind.hpp"
++#include "gdn_norm_gate/gdn_norm_gate_nanobind.hpp"
++#include "gdn_conv_gates/gdn_conv_gates_nanobind.hpp"
+ #include "sdpa/sdpa_nanobind.hpp"
+ #include "sdpa_config.hpp"
+ #include "sdpa_decode/sdpa_decode_nanobind.hpp"
+@@ -68,6 +73,10 @@ void py_module(nb::module_& mod) {
+             return fmt::format(
+                 "PagedCacheGeometryOverride(block_size={}, num_kv_heads={})", geo.block_size, geo.num_kv_heads);
+         });
++    bind_decode_gated_delta_rule(mod);
++    bind_attn_prep(mod);
++    bind_gdn_norm_gate(mod);
++    bind_gdn_conv_gates(mod);
+ 
+     bind_attention_softmax(mod);
+     bind_concatenate_heads(mod);
+@@ -76,6 +85,7 @@ void py_module(nb::module_& mod) {
+     bind_sdpa(mod);
+     bind_sdpa_decode(mod);
+     bind_gated_delta_attn_seq(mod);
++    ttnn::transformer::bind_gdn_decay(mod);
+     bind_chunk_gated_delta_rule(mod);
+ }
+ 

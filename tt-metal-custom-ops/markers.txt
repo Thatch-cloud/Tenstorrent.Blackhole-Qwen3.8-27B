@@ -1,0 +1,36 @@
+# What a correct build contains. verify.sh reads this file.
+#
+# [ops] / [k64j]: the COMPLETE set of QWEN_* strings expected in _ttnncpp.so for that tier. The check is an exact
+# match, not a superset: a binary that lost one (a graft that replaced the whole file) or gained one fails.
+# Where each string comes from:
+#   QWEN_GDN_DUMP, QWEN_GDN_PHASED          chunk_gated_delta_rule.cpp (in tt-metal 9f9cd4fd)
+#   QWEN_GDN_PREP_SERIAL, QWEN_GDN_SCAN_SERIAL   chunk_gdn_phased_program_factory.cpp (in tt-metal 9f9cd4fd)
+#   QWEN_SDPA_TREE_SCRATCH_ROUNDS           sdpa_decode_program_factory.cpp (tt-metal.diff)
+#   QWEN_SDPA_PF_TEST                       sdpa_program_factory.cpp (k64j/ overlay only)
+# Observed on the maintainers' binaries: the ops-tier build carries the first five, the K64j build all six.
+# The K64j binary also carries the log literal "[QWEN-SDPA-PF]" (reader_interleaved_qwen_chain.cpp and the factory).
+#
+# [bindings]: Python names that must be callable on ttnn.transformer after import (they live in _ttnn.so, which a
+# plain `ninja ttnncpp` does NOT rebuild; build both libraries).
+
+[ops]
+QWEN_GDN_DUMP
+QWEN_GDN_PHASED
+QWEN_GDN_PREP_SERIAL
+QWEN_GDN_SCAN_SERIAL
+QWEN_SDPA_TREE_SCRATCH_ROUNDS
+
+[k64j]
+QWEN_GDN_DUMP
+QWEN_GDN_PHASED
+QWEN_GDN_PREP_SERIAL
+QWEN_GDN_SCAN_SERIAL
+QWEN_SDPA_PF_TEST
+QWEN_SDPA_TREE_SCRATCH_ROUNDS
+
+[bindings]
+attn_decode_prep
+decode_gated_delta_rule_packed
+gdn_decay
+gdn_decode_conv_gates
+gdn_decode_norm_gate

@@ -1,13 +1,14 @@
 THIRD-PARTY NOTICES
 ===================
 
-This repository contains original work under the MIT licence (see LICENSE), one
-patch derived from Apache-2.0 code, and build definitions that fetch third-party
-components at build time.
+This repository contains original work under the MIT licence (see LICENSE), Apache-2.0
+material that is vendored under tt-metal-custom-ops/ (section 2a), and build
+definitions that fetch third-party components at build time.
 
-Nothing third-party is vendored or redistributed in this repository. The
-Dockerfiles clone or install each component from its own upstream source when an
-image is built, and the resulting images are subject to the licences below.
+Apart from the material in section 2a, nothing third-party is vendored or
+redistributed in this repository. The Dockerfiles clone or install each component
+from its own upstream source when an image is built, and the resulting images are
+subject to the licences below.
 
 
 1. This repository's original work
@@ -39,6 +40,27 @@ upstream. It has been offered back to the upstream project.
 The MIT licence in LICENSE does not apply to this patch. Where the two conflict,
 Apache-2.0 governs the patch and its output.
 
+
+2a. Vendored Apache-2.0 material: tt-metal-custom-ops/
+------------------------------------------------------
+
+    tt-metal-custom-ops/   (see tt-metal-custom-ops/LICENSE)
+
+This directory is offered under the Apache License, Version 2.0, not under the MIT
+licence of the rest of the repository. It contains:
+
+  - the diffs of upstream tt-metal pull requests #53314, #53319 and #53320
+    (prstack/), contributions to tenstorrent/tt-metal, Apache-2.0;
+  - patches against tt-metal source files (tt-metal.diff, k64j/): these are modified
+    versions of Tenstorrent files; they keep their Tenstorrent SPDX headers, and the
+    per-path list of what was changed is in tt-metal-custom-ops/README.md (Apache-2.0
+    section 4(b)); tt-metal-custom-ops/NOTICE reproduces the upstream tt-metal notice;
+  - op directories (ops/): gdn_decay and decode_gated_delta_rule carry Tenstorrent
+    headers; attn_prep, gdn_conv_gates and gdn_norm_gate carry Thatch Cloud headers.
+    All are Apache-2.0 (SPDX-License-Identifier in each file).
+
+    tt-metal:  https://github.com/tenstorrent/tt-metal
+    Licence:   Apache-2.0
 
 3. Components fetched at build time
 ------------------------------------
@@ -82,6 +104,12 @@ Qwen/Qwen3.8-27B
     runs the image, subject to the licence and any use restrictions stated on the
     model card at the time of download.
     https://huggingface.co/Qwen/Qwen3.8-27B
+
+incoai/Qwen3.8-27B-DFlash2
+    The speculative-decoding draft. Not distributed here. The fast-tier profiles fetch it
+    from Hugging Face at the pinned revision dedf8df6 (Apache-2.0 on the model card at
+    that revision) and bake derived fixture weights into the image the builder makes.
+    https://huggingface.co/incoai/Qwen3.8-27B-DFlash2
 
 Benchmark data: GSM8K (openai/grade-school-math) was used to produce the
 correctness figures in README.md. No portion of the dataset is redistributed
