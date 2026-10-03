@@ -722,7 +722,7 @@ def kv_pool_problem(profile):
         real = real_pool_blocks(profile)
         if real is None:
             return '%s must be a positive integer and the profile must name max-num-seqs, got %r' % (POOL_TOKENS_ENV, env[POOL_TOKENS_ENV])
-        if real != override:
+        if type(override) is int and real != override:
             return ('%s=%s builds %d blocks (ceil(tokens / 64) + max-num-seqs) but num-gpu-blocks-override is %r: the worker '
                     'overwrites the override, so the two must agree' % (POOL_TOKENS_ENV, env[POOL_TOKENS_ENV], real, override))
     elif kv_pooled(profile) and type(window) is int and window > LEGACY_WINDOW:
