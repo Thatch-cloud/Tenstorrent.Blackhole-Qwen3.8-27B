@@ -127,6 +127,15 @@ WARM_LINE = '[PINDIAG] four-card eager prefill warmed before the packed traces'
 UNSAFE_ALLOCATION = 'Allocating device buffers is unsafe due to the existence of an active trace'
 PREFILL_PROGRAMS = re.compile(r'\[PINDIAG\] four-card prefill programs=(\d+|None)->(\d+|None) window=(\d+) prompt=(\d+)')
 ENGINE_PROGRAMS = re.compile(r'\[PINDIAG\] four-card engine programs=(\d+|None)->(\d+|None) ')
+# QWEN_FAST_M3_REQUEST_WARM=1 or even (the tp4/warm4 profiles): the request widths are warmed before the one block's capture. The rule is
+# on the warm itself (the line exists, precedes the capture anchor and compiled something). The anchor is block 0's capture line when
+# the log has one (two-block attaches), else the first 'verify t1 engaged site=packed_verify' line, which is logged right after the
+# single block's capture. The first engine build's program delta is RECORDED, not bounded: that build also constructs the per-request
+# drafter, which the warm does not cover. Read the warm arm against its control.
+REQUEST_WARM_LINE = re.compile(r'\[PINDIAG\] request widths warmed before the packed traces: '
+                               r'rows=\((?:1, 2, 4|1, 2, 4, 1)\) programs=(\d+|None)->(\d+|None)')
+BLOCK0_CAPTURE_LINE = '[PINDIAG] packed blocks capture block=0'
+BLOCK_CAPTURE_ANCHOR = '[PINDIAG] verify t1 engaged site=packed_verify'
 DEFAULT_PROFILES = Path(__file__).resolve().parent / 'qwen_c2_profiles.json'
 
 
@@ -367,6 +376,40 @@ def late_program_problems(container_text):
                           engines_counted=len(engines), engine_programs=sum(int(after) - int(before) for before, after in engines))
 
 
+def request_warm_problems(container_text, flag='1'):
+    """(problems, facts) under QWEN_FAST_M3_REQUEST_WARM in ('1', 'even'): the warm line must exist and precede the capture anchor,
+    and the warm must have compiled something (B - A of its programs=A->B above 0). The first four-card engine build's delta is
+    recorded as a fact (it includes the drafter, so it is not bounded)."""
+    problems, lines = [], container_text.splitlines()
+    warm = next((i for i, line in enumerate(lines) if REQUEST_WARM_LINE.search(line)), None)
+    anchor_text = next((text for text in (BLOCK0_CAPTURE_LINE, BLOCK_CAPTURE_ANCHOR)
+                        if any(text in line for line in lines)), None)
+    capture = None if anchor_text is None else next(i for i, line in enumerate(lines) if anchor_text in line)
+    if warm is None:
+        problems.append('QWEN_FAST_M3_REQUEST_WARM=%s but no "[PINDIAG] request widths warmed before the packed traces" line: the warm '
+                        'never ran' % flag)
+    elif capture is None:
+        problems.append('no "%s" or "%s" line to order the request warm against' % (BLOCK0_CAPTURE_LINE, BLOCK_CAPTURE_ANCHOR))
+    elif warm > capture:
+        problems.append('the request warm (log line %d) came after the packed block captured its trace (line %d)' % (warm + 1, capture + 1))
+    engines = [(int(before), int(after)) for before, after in (m.groups() for m in map(ENGINE_PROGRAMS.search, lines) if m)
+               if before != 'None' and after != 'None']
+    first = None if not engines else engines[0][1] - engines[0][0]
+    warm_programs = warm_ms = None
+    if warm is not None:
+        counts = REQUEST_WARM_LINE.search(lines[warm]).groups()
+        timing = re.search(r' ms=(\d+)', lines[warm])
+        warm_ms = None if timing is None else int(timing.group(1))
+        if 'None' not in counts:
+            warm_programs = int(counts[1]) - int(counts[0])
+            if warm_programs <= 0:
+                problems.append('the request warm compiled %d programs: it did not run the request widths (or the program count is '
+                                'not live)' % warm_programs)
+    return problems, dict(request_warm_programs=warm_programs, request_warm_ms=warm_ms,
+                          request_warm_line=None if warm is None else warm + 1,
+                          capture_anchor_line=None if capture is None else capture + 1, first_engine_programs=first)
+
+
 def draft_facts(container_text):
     """What the container log says about the batched draft: rounds served by the quad and by two packed pairs, the quad's marker,
     fallback and disable lines, and the two audits' lines."""
@@ -523,6 +566,10 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         if late:
             problems.append('the first prefill left %d model buffers allocated after the packed traces were captured '
                             '([MEMLEDGER] item=model_after_prefill): the prefill warm must run before the traces' % late)
+    if env is not None and env.get('QWEN_FAST_M3_REQUEST_WARM') in ('1', 'even'):
+        warm_problems, warm_facts = request_warm_problems(container_text, env['QWEN_FAST_M3_REQUEST_WARM'])
+        problems += warm_problems
+        facts.update(warm_facts)
     if env is not None:
         drafts = draft_facts(container_text)
         facts['draft'] = drafts

@@ -95,6 +95,11 @@ scripts/ci/serving_packed_step.py
 scripts/ci/packed_shapes.py
 scripts/ci/serving_solo_lane.py
 
+# QWEN_FAST_M3_REQUEST_WARM=1 or even (tp4/warm4, gate-only profiles): serving_runtime lazy-imports request_width_warm and runs it right
+# after the prefill warm and before the one 64-row block's construction (the process's first trace capture), so the request engine's
+# rows 1/2/4 programs and state exist before any capture. Off unless the flag is set.
+scripts/ci/request_width_warm.py
+
 # The fast lane (QWEN_FAST_LANE, gate only; the lanes window): serving_runtime builds the lane runtime when the flag is on, the lifecycle
 # installs the lane gate on the scheduler class, the worker hook plans each round. Flag off, neither module is imported.
 scripts/ci/serving_fast_lane.py

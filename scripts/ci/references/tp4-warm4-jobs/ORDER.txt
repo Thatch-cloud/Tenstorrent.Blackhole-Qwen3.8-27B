@@ -1,0 +1,43 @@
+# The order of the four-card tp4/warm4 window, one template per line: <template name without .env> <stop|optional|manual> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window (its product is data). manual: not run by the driver; run by hand.
+# Image: the tag of the tt-vllm image the job serves (tp4-warm4a is a PLACEHOLDER for ONE FRESH tag, built from the pushed tp4/warm4 commit by B0, a build-only job that runs FIRST while production serves; the
+# driver substitutes it in every template; a reused tag is skipped by the build step and would silently serve an old image). Minutes: runner time for ONE run of the job, a quad reset (1-3 min) included.
+# RUN AFTER the current next-3 window has handed back (that window pins tp4/next-3; this branch is built from it and never pushes it).
+#
+# THE QUESTION. The audits-off recipe hung without the pinned sampler in the verify trace unless 'hang fix A' (QWEN_FAST_PACKED_SAMPLER_IN_TRACE=1) was on; fix A costs about 4.4 ms per round (~3% of a four-user round).
+# The eight-seat hang's root cause (confirmed on hardware 2026-10-02: the warm on passes x3, the control hangs at the identical fence) is that the request engines' rows 1/2/4 programs and state are first created AFTER the
+# packed captures and land in the captures' freed temporaries; replays overwrite them; the next eager rows=2 warm-up fence hangs. The fix there is a warm of those widths before the captures. The mechanism is judged
+# latent at four seats (first engine build after a packed phase: v172 T2 and v201 S0t returned 0 tokens for all four users). QWEN_FAST_M3_REQUEST_WARM generalises the warm to the one 64-row block; this window asks:
+# with the sampler OUT of the trace and the warm ON, does the four-seat server hang on the S8-0 shapes (W1 x5, with resets), is it exact (G1), and is it faster (TA/TB ABAB, expected about -4 ms per round)?
+# W2 is the control (warm off, expected to hang at the first engine build after a packed phase); W3 the parity discriminator (widths 1, 2, 4, 1). Fix A may work by moving the block's write set rather than curing the
+# cause, and 'warm without fix A' has never run on hardware: that is why there is a control, a parity arm and five repeats.
+# Production's profile (c2-packed-tp4) carries no new flag; the production image path is byte-identical with the flag off (tests prove it). PROMOTION IS OUT OF SCOPE: changing c2-packed-tp4 needs W1 x5, a hanging
+# control, G1 and G2, and the timing gain.
+#
+# PRODUCTION IS LIVE ON THE CARDS when a window opens: B0 (build-only) runs first while production serves; A0 (agentstop, unserve) is the first job that touches production and the only one that takes it down. Every
+# four-card job after it opens with its own all-four reset (links train only at board init).
+# Skip rules: B0 or A0 failure stops the window. Any W1-series stall, a missing or late warm line, a warm with 0 programs or an attach refusal naming the flag stops the series: skip G and T, run W2 and W3 by hand if
+# not yet run, then H1. A stall restarts the count of five only on a new image. A G1 failure skips the timing. TB text different from TA's, or a TB hang, stops the timing and blocks promotion. H1 always runs.
+# Read the W1 stack: the same fence = the class is not cured at four seats (next discriminator: the existing rshard arm); a drafter site (dflash_device, the proposal capture, publish_prewarm) = the class holds and the next code step is a request-drafter warm;
+# elsewhere = record it. Judge each timing pair PAIRED per round, never against the other pair, and never by an unpaired median (ABAB: TA1 TB1 TA2 TB2).
+# HAND-BACK (H1) runs LAST and even when any earlier job failed or hung: status, the all-four reset, the fabric re-measure, agentstart. It starts the node agent again with nothing placed. An owner /deploy is still needed, always, to
+# place TODAY'S PRODUCTION RECIPE (and anything new); this order never includes a deploy, a :latest retag or a placement call.
+# Durations (estimate, wall clock): B0 18-30 min (90 at worst); A0 10; W1 and each repeat 25-40; W2 15-25; W3 25-40; G1 60-120; G2 60-120; TA/TB 30-60 each; W4 20-30; H1 25. Whole window: about 8-11 h with every job; the short form
+# (A0, W1, W2, W1b-W1e, G1, one A/B pair, H1) is about 5-6 h.
+B0-build stop tp4-warm4a 30
+A0-agentstop-unserve stop tp4-warm4a 10
+W1-warm4-diag stop tp4-warm4a 40
+W2-nowarm-control optional tp4-warm4a 25
+W3-even-parity optional tp4-warm4a 40
+W1b-warm4-diag stop tp4-warm4a 40
+W1c-warm4-diag stop tp4-warm4a 40
+W1d-warm4-diag stop tp4-warm4a 40
+W1e-warm4-diag stop tp4-warm4a 40
+G1-warm4-exact-audited stop tp4-warm4a 120
+G2-warm4-served-matrix optional tp4-warm4a 120
+TA1-control-timed optional tp4-warm4a 60
+TB1-warm4-timed optional tp4-warm4a 60
+TA2-control-timed optional tp4-warm4a 60
+TB2-warm4-timed optional tp4-warm4a 60
+W4-oldtail manual tp4-warm4a 30
+H1-handback-reset-fabric-agentstart stop tp4-warm4a 25

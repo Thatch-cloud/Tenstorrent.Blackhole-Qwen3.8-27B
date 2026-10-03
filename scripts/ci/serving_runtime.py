@@ -25,6 +25,11 @@ SINGLE_GATEUP_FLAG = 'QWEN_FAST_SINGLE_GATEUP'
 SINGLE_GATEUP_SHAPE = 'the single gate/up copy'
 M3_SHAPE = 'the 64-row block'
 C2_ANY_SHAPE = 'C2-any with no packed block'
+# QWEN_FAST_M3_REQUEST_WARM (default off; '0', '1' or 'even' only): at the one 64-row M3 block, the any-request engine's rows 1/2/4
+# programs and state are compiled and created BEFORE the process's first trace capture (request_width_warm), so the first engine
+# build after the block's capture creates nothing the block's replays can overwrite. 'even' warms (1, 2, 4, 1), a gate-only
+# discriminator that leaves the model and sampler CCL indices where they started.
+M3_REQUEST_WARM_FLAG = 'QWEN_FAST_M3_REQUEST_WARM'
 PADDED_BLOCK_FLAG = 'QWEN_FAST_PADDED_BLOCK'
 CAPTURE_POSITION_FLAG = 'QWEN_FAST_PACKED_CAPTURE_POSITION'
 CAPTURE_POSITION_MARKER = '[PINDIAG] packed capture position override='
@@ -45,6 +50,26 @@ def m3_shape(policy, environ=None):
                                   environ.get('QWEN_FAST_PACKED_STEP', 'unset'))
     met = users == 4 and four_as_two == '0' and packed == '1'
     return met, 'users=%s FOUR_AS_TWO=%s PACKED_STEP=%s' % (users, four_as_two, packed)
+
+
+def m3_request_warm(policy, environ=None):
+    """QWEN_FAST_M3_REQUEST_WARM, strictly: unset or '0' is off (None), '1' is the widths (1, 2, 4), 'even' is (1, 2, 4, 1), and
+    anything else - an empty value included - is a configuration error naming the flag. Any value but '0' is refused, naming it,
+    unless m3_shape(policy) is met (four requests, FOUR_AS_TWO=0, PACKED_STEP=1) and QWEN_FAST_TP is not '2'."""
+    environ = os.environ if environ is None else environ
+    value = environ.get(M3_REQUEST_WARM_FLAG, '0')
+    if value not in ('0', '1', 'even'):
+        raise ValueError("%s must be 0, 1 or even, got %r" % (M3_REQUEST_WARM_FLAG, value))
+    if value == '0':
+        return None
+    met, shape = m3_shape(policy, environ)
+    if not met:
+        raise ValueError('%s=%s warms the request widths before the one 64-row M3 block and is admitted only at that shape (%s)'
+                         % (M3_REQUEST_WARM_FLAG, value, shape))
+    if environ.get('QWEN_FAST_TP', '2') == '2':
+        raise ValueError('%s=%s is admitted on the four-card (TP4) stack only, not QWEN_FAST_TP=2' % (M3_REQUEST_WARM_FLAG, value))
+    from request_width_warm import EVEN_WIDTHS, WIDTHS
+    return WIDTHS if value == '1' else EVEN_WIDTHS
 
 
 def c2_any_without_block(environ=None):
@@ -294,6 +319,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     from sampling_link_policy import sampler_links
 
     policy = validate_fast_config(worker.vllm_config)
+    request_widths = m3_request_warm(policy)
     # Measurement-only, env-gated admission of one named grafted binary (K64 kernel
     # graft): inert unless QWEN_FAST_RUNTIME_BINARY_SHA256 is set, and it neither
     # touches the hash-pinned sources nor lowers the pin itself. Must run before
@@ -576,6 +602,15 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         scopes.callback(weights.close)
         memory_ledger.record('P5', draft_weights=weights)
         prefill_warm_before_traces(runner, model, policy['scheduler_requests'], operations=operations)
+        if request_widths:
+            if not packed_shapes:
+                raise ValueError('%s warms the request widths before the packed block, and this attach builds none'
+                                 % M3_REQUEST_WARM_FLAG)
+            import stall_watch
+            from request_width_warm import warm_request_widths
+            with stall_watch.scope('build', 'request widths warm'):
+                warm_request_widths(operations, model, helpers, sampler, page_width, widths=request_widths)
+            memory_ledger.record('P5', point='request_warm')
         # The device step. By default the sequential one - correct, not yet fast: one
         # weight pass per user per round - and describe() records that cost so a benchmark
         # reading it is not mistaken for the goal. QWEN_FAST_PACKED_STEP=1 builds the
