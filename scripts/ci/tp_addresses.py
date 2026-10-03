@@ -16,6 +16,7 @@ Stdlib only, except that install() imports the pinned modules it rebinds (gdn_mu
 path's gdn_multitoken) and their twins.
 """
 
+import os
 import sys
 
 import tp_shapes
@@ -98,6 +99,10 @@ TWINS = (
     ('gdn_conv_prefix_copy', 'validate_prefix', 'gdn_conv_prefix_copy_tp', 'validate_prefix'),
     ('gdn_conv_prefix_copy', 'copy_prefix', 'gdn_conv_prefix_copy_tp', 'copy_prefix'),
     ('gdn_working_state', 'WorkingState', 'gdn_working_state_tp', 'WorkingState'),
+    # The K5-A recurrence launch with each head's value columns split over two cores (tp4/v5split, QWEN_FAST_GDN_SPLIT_V=2): the
+    # twin is a sibling module because gdn_seq_block's sources and qualified triple are pinned; gdn_user_batch_conv calls
+    # gdn_seq_block.execute by attribute, so the rebound name redirects the served path and the audit's launch alike.
+    ('gdn_seq_block', 'execute', 'gdn_seq_block_split', 'execute'),
     ('mtp_hidden_rows', 'MTPHiddenRows', 'mtp_hidden_rows_tp', 'MTPHiddenRows'),
     # The attach's pair-only scopes: the sampler's gather links at the ring's proven count, and the direct-window and
     # K/V-publication experiments, which are off at four cards (attach_scopes_tp).
@@ -142,9 +147,22 @@ def _fused_commit(environ):
     return fused_commit.enabled(environ)
 
 
+def _split_v(environ):
+    """QWEN_FAST_GDN_SPLIT_V=2. Unset, '' , '0' and '1' read the environment only: gdn_seq_block_split is not even imported, so
+    production binds exactly what it did before the lever existed. Any other value goes to the lever's own strict parser (which
+    raises on a malformed value and on '2' without K5-A or four-card serving)."""
+    raw = (os.environ if environ is None else environ).get('QWEN_FAST_GDN_SPLIT_V', '')
+    if raw in ('', '0', '1'):
+        return False
+    import gdn_seq_block_split
+
+    return gdn_seq_block_split.enabled(environ)
+
+
 FLAGGED_TWINS = {
     ('gdn_device_loop_state', 'DeviceLoopState'): ('QWEN_FAST_TP4_GDN_GLUE', _gdn_glue),
     ('extent_attention_replay_tp', 'PackedExtentReplayReader'): ('QWEN_FAST_TP4_ATTN_FOLD', _attn_fold),
+    ('gdn_seq_block', 'execute'): ('QWEN_FAST_GDN_SPLIT_V', _split_v),
 }
 FLAGGED_MODULE_TWINS = {
     'fused_commit': ('QWEN_FAST_FUSED_COMMIT', _fused_commit),

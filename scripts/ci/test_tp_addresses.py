@@ -150,9 +150,10 @@ class FlaggedTwinTests(unittest.TestCase):
         return (gdn_device_loop_state.DeviceLoopState, extent_attention_replay_tp.PackedExtentReplayReader,
                 sys.modules['fused_commit'])
 
-    def test_the_flagged_rows_are_the_three_tp4_next_added(self):
+    def test_the_flagged_rows_are_the_three_tp4_next_added_and_the_recurrence_split(self):
         self.assertEqual(sorted(tp_addresses.FLAGGED_TWINS), [('extent_attention_replay_tp', 'PackedExtentReplayReader'),
-                                                              ('gdn_device_loop_state', 'DeviceLoopState')])
+                                                              ('gdn_device_loop_state', 'DeviceLoopState'),
+                                                              ('gdn_seq_block', 'execute')])
         self.assertEqual(list(tp_addresses.FLAGGED_MODULE_TWINS), ['fused_commit'])
         for key in tp_addresses.FLAGGED_TWINS:
             self.assertIn(key, [row[:2] for row in tp_addresses.TWINS])
@@ -170,7 +171,8 @@ class FlaggedTwinTests(unittest.TestCase):
 
     def test_the_other_twins_stay_bound_with_the_flags_off(self):
         rows, modules = tp_addresses.bound_twins(dict(self.FOUR))
-        self.assertEqual(len(rows), len(tp_addresses.TWINS) - 2)
+        self.assertEqual(len(rows), len(tp_addresses.TWINS) - 3)
+        self.assertNotIn(('gdn_seq_block', 'execute', 'gdn_seq_block_split', 'execute'), rows)
         self.assertEqual([row[0] for row in modules], ['extent_attention_replay', 'quad_draft'])
         tp_addresses.install(dict(self.FOUR))
         import quad_draft

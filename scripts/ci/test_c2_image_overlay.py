@@ -1260,7 +1260,7 @@ class ProvenanceTests(unittest.TestCase):
         # ...and the verify-glue window's arms (tp4/vglue): the five levers, singly and together, on the gate and speed profiles.
         # ...and the lanes window's five gate arms (the one-user lane and the fast lane, audited and timed).
         # ...and the combined best (tp4/next): the fcommit-quad arms with all five verify-glue levers on, timed and audited.
-        tp4 = ['c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-diag', 'c2-packed-tp4-diag-rshard', 'c2-packed-tp4-diag-sprewarm',
+        tp4 = ['c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-best-v5', 'c2-packed-tp4-best-v5-gate', 'c2-packed-tp4-diag', 'c2-packed-tp4-diag-rshard', 'c2-packed-tp4-diag-sprewarm',
                'c2-packed-tp4-diag-strace', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t1-rshard-audit', 'c2-packed-tp4-diag-t2', 'c2-packed-tp4-f12',
                'c2-packed-tp4-f2', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-draftwide', 'c2-packed-tp4-gate-fcommit',
                'c2-packed-tp4-gate-fcommit-live', 'c2-packed-tp4-gate-fcommit-quad', 'c2-packed-tp4-gate-noslide',
@@ -1269,7 +1269,7 @@ class ProvenanceTests(unittest.TestCase):
                'c2-packed-tp4-solo-time-gate', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fcommit',
                'c2-packed-tp4-speed-fcommit-oop', 'c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-fix',
                'c2-packed-tp4-speed-noslide', 'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-speed-quad',
-               'c2-packed-tp4-speed-rshard', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-strace-draftwide', 'c2-packed-tp4-speed-strace-fcommit', 'c2-packed-tp4-speed-strace-ring', 'c2-packed-tp4-speed-vglue',
+               'c2-packed-tp4-speed-rshard', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-strace-draftwide', 'c2-packed-tp4-speed-strace-fcommit', 'c2-packed-tp4-speed-strace-ring', 'c2-packed-tp4-speed-strace-v5', 'c2-packed-tp4-speed-vglue',
                'c2-packed-tp4-speed-vglue-c1a', 'c2-packed-tp4-speed-vglue-v1', 'c2-packed-tp4-speed-vglue-v2',
                'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a', 'c2-packed-tp4-time-gate',
                'general-prefix-eager', 'general-tp4-bench',

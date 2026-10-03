@@ -246,9 +246,10 @@ class DocumentTests(unittest.TestCase):
                      'request-engine build', 'trace region', 'G3', 'speed-strace-fcommit', 'OFF in every profile'.lower()):
             self.assertIn(word.lower(), self.publish.lower(), word)
 
-    def test_the_recurrence_document_stops_at_the_design_and_lists_the_files(self):
+    def test_the_recurrence_document_keeps_the_design_lists_the_files_and_says_what_was_built(self):
         for word in ('Design only', 'not a host-side change', 'static_assert', 'gdn_seq_block_split.py', 'gdn_seq_block_split_reader.cpp',
-                     'gdn_user_batch_conv.py', 'Do not edit', '630,784', '96 cores', 'owner', 'helper'):
+                     'gdn_user_batch_conv.py', 'Do not edit', '630,784', '96 cores', 'owner', 'helper',
+                     'built on `tp4/v5split`', 'QWEN_FAST_GDN_SPLIT_V=2', 'As built', 'twin seam', '704,512'):
             self.assertIn(word, self.split, word)
 
     def test_the_files_the_recurrence_document_says_not_to_edit_exist(self):

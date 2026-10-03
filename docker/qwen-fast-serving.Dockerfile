@@ -54,6 +54,9 @@ COPY scripts/ci/packed_verifier.py scripts/ci/serving_packed_step.py scripts/ci/
 # gdn_user_batch_conv, which imports it, as model_batch and packed_verifier do) generates its kernels
 # from the SIBLING gdn_seq_block_{compute,reader,writer}.cpp (gdn_seq_block.SOURCES), so they travel here.
 COPY scripts/ci/gdn_state_copy.py scripts/ci/gdn_state_copy.cpp scripts/ci/gdn_seq_block_compute.cpp scripts/ci/gdn_seq_block_reader.cpp scripts/ci/gdn_seq_block_writer.cpp /experiment-scripts/ci/
+# V5 (QWEN_FAST_GDN_SPLIT_V=2, default off) is the K5-A launch with each head's value columns split over two cores: the sibling module
+# and its three sources travel with K5-A's.
+COPY scripts/ci/gdn_seq_block_split.py scripts/ci/gdn_seq_block_split_compute.cpp scripts/ci/gdn_seq_block_split_reader.cpp scripts/ci/gdn_seq_block_split_writer.cpp /experiment-scripts/ci/
 COPY scripts/ci/gdn_snapshot.py scripts/ci/dflash_prefill_window.py /experiment-scripts/ci/
 COPY scripts/ci/pooled_attention_replay.py /experiment-scripts/ci/
 COPY scripts/ci/target_packed_pages.py /experiment-scripts/ci/

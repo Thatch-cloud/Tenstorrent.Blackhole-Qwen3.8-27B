@@ -229,6 +229,12 @@ scripts/ci/force_argmax.py
 # pair and the four-card sibling otherwise.
 scripts/ci/gdn_seq_block.py
 scripts/ci/gdn_user_batch_tp.py
+# The K5-A recurrence launch with each head's value columns split over two cores (tp4/v5split, QWEN_FAST_GDN_SPLIT_V=2, default off): the
+# sibling module generates its kernels from the three sibling sources, and tp_addresses.install() binds its execute twin only under the flag.
+scripts/ci/gdn_seq_block_split.py
+scripts/ci/gdn_seq_block_split_compute.cpp
+scripts/ci/gdn_seq_block_split_reader.cpp
+scripts/ci/gdn_seq_block_split_writer.cpp
 # The packed GDN block's state plumbing at any width (S2T-03 / S2T-05a): the state copy, conv windows (per-user and
 # packed), conv prefix copy, commit DMA, restore and record helpers read their page counts, channel widths and chip
 # counts from tp_shapes. The pair's kernels are untouched; each DMA kernel that carried a literal page count has a
