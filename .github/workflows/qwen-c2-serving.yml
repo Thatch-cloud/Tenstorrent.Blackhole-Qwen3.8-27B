@@ -305,6 +305,35 @@ jobs:
           sudo -n systemctl status ci-docker-fence.service --no-pager | tail -6
           show after | tee -a "$results/priority.log"
           measure after
+      - name: Rescan the PCI bus for a missing board
+        # A board that drops off the bus outside a reset (a cancelled job, 2026-10-03: "3 Blackhole boards are present, not 4")
+        # has no pre-reset snapshot for the reset's own heal to rescan its port from. This rescans the bus once, only when
+        # fewer than four Tenstorrent boards are on it, waits for the fourth, and prints what the kernel logged.
+        if: contains(steps.job.outputs.actions, 'rescan')
+        shell: bash
+        run: |
+          set +e
+          boards() { lspci -D -d 1e52: 2>/dev/null | wc -l; }
+          echo "=== Tenstorrent boards on the bus before: $(boards)"; lspci -D -d 1e52:
+          if [ "$(boards)" -lt 4 ]; then
+            echo 1 | sudo -n tee /sys/bus/pci/rescan > /dev/null; echo "bus rescan write: exit $?"
+            for i in $(seq 1 36); do [ "$(boards)" -ge 4 ] && break; sleep 5; done
+            echo "=== after the rescan: $(boards)"; lspci -D -d 1e52:
+          fi
+          # A board on the bus without a by-id link (the post-reset telemetry race: udev made no link): re-probe its driver.
+          linked() { local l; for l in "$QUAL_BYID_ROOT"/blackhole-*; do [ -e "$l" ] && udevadm info -q path -n "$(readlink -f "$l")" 2>/dev/null; done; }
+          QUAL_BYID_ROOT=/dev/tenstorrent/by-id
+          paths=$(linked); echo "=== by-id links: $(echo "$paths" | grep -c .)"
+          for p in $(lspci -D -d 1e52: | awk '{print $1}'); do
+            case "$paths" in *"/$p/"*) continue ;; esac
+            echo "board at $p is on the bus without a by-id link: driver re-probe"
+            echo "$p" | sudo -n tee /sys/bus/pci/drivers/tenstorrent/unbind > /dev/null; echo "unbind: exit $?"; sleep 3
+            echo "$p" | sudo -n tee /sys/bus/pci/drivers/tenstorrent/bind > /dev/null; echo "bind: exit $?"
+          done
+          for i in $(seq 1 24); do [ "$(linked | grep -c .)" -ge 4 ] && break; sleep 5; done
+          echo "=== by-id links after: $(linked | grep -c .)"
+          echo "=== kernel"; sudo -n dmesg 2>/dev/null | grep -i -E "pciehp|tenstorrent|train|link" | tail -25
+          [ "$(boards)" -ge 4 ] && [ "$(linked | grep -c .)" -ge 4 ] || { echo "::error::still $(boards) boards on the bus, $(linked | grep -c .) by-id links: the board needs a power cycle"; exit 1; }
       - name: Reset cards M and A
         if: contains(steps.job.outputs.actions, 'reset') && steps.job.outputs.cards != 'quad'
         working-directory: c2

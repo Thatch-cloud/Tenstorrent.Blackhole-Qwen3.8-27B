@@ -108,12 +108,12 @@ import os
 import re
 import sys
 
-ACTIONS = ('status', 'rmi', 'agentstop', 'platform', 'unserve', 'priority', 'reset', 'fabric', 'cardm', 'drift', 'build', 'probe', 'smoke', 'gate',
+ACTIONS = ('status', 'rmi', 'agentstop', 'platform', 'unserve', 'priority', 'rescan', 'reset', 'fabric', 'cardm', 'drift', 'build', 'probe', 'smoke', 'gate',
            'prefix', 'replay', 'push', 'agentstart')
 CARD_SETS = ('pair', 'quad')
 # What a four-card job may run: the pair-shaped steps (a single-card harness on card M, the M+A smoke and replay, the
 # CPU-priority measurement of the M+A container) do not apply to it, and fabric applies to nothing else.
-QUAD_ACTIONS = ('status', 'rmi', 'agentstop', 'platform', 'unserve', 'reset', 'fabric', 'drift', 'build', 'probe', 'smoke', 'gate', 'prefix',
+QUAD_ACTIONS = ('status', 'rmi', 'agentstop', 'platform', 'unserve', 'rescan', 'reset', 'fabric', 'drift', 'build', 'probe', 'smoke', 'gate', 'prefix',
                 'replay', 'push', 'agentstart')
 TP4_MESH_DEVICE = 'P150x4'
 # The mesh_device values of a pair profile: none (the image's P300 under upstream's four-channel p150_x2) and P300
