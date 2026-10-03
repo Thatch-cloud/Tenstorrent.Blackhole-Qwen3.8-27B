@@ -127,6 +127,13 @@ class VerifierEngine(PairVerifierEngine):
         self.request_shard = self.request_shard_audit = False
         self.request_shard_problem = None
         if shard_arm_enabled():
+            import tp4_sampdraft
+
+            if tp4_sampdraft.enabled(tp4_sampdraft.SHARD_ARGMAX):
+                # S1 belongs to the packed block: it reserves the scratch before capture and its audit reads and frees the held
+                # reference every round. This engine runs neither, so the combination is refused rather than half-engaged.
+                raise ValueError('%s is a lever of the packed block sampler; it does not run in the request engine, whose own shard arm '
+                                 '(%s) is on: unset one of them' % (tp4_sampdraft.SHARD_ARGMAX, SHARD_FLAG))
             self.request_shard_problem = (verify_trace_t1.shard_sampling_problem(sampler) if sampler is not None
                                           else 'there is no device sampler')
             self.request_shard = self.request_shard_problem is None

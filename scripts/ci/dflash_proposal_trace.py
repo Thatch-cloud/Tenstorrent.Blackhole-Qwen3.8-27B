@@ -55,6 +55,47 @@ def _log_line(message):
         pass
 
 
+# tp4/samp-draft's drafter audits (QWEN_FAST_TP4_DRAFT_CONV_AUDIT, QWEN_FAST_TP4_DRAFT_HEADS_AUDIT; tp4_draft_conv's scope machinery). A bucket's
+# capture runs inside an audit scope that holds the engaged-versus-served pairs the capture allocated. They are compared right after
+# the bucket's replay (before any verify or commit replay can overwrite a buffer allocated into those traces' freed holes) and freed only
+# when the bucket's trace is released (a trace writes them until then). With both audits off nothing below does anything: the scope is
+# None, bucket.draft_audit is None and every call returns at its first line.
+def open_draft_audit(site):
+    """The audit scope of a bucket about to be captured at `site` ('single', 'pair', 'quad'), or None."""
+    import tp4_sampdraft
+
+    if not tp4_sampdraft.drafter_audit_on():
+        return None
+    import tp4_draft_conv
+
+    return tp4_draft_conv.open_scope(site)
+
+
+def close_draft_audit(scope):
+    """The capture is over, whether it succeeded or not: the scope stops collecting."""
+    if scope is not None:
+        import tp4_draft_conv
+
+        tp4_draft_conv.close_scope(scope)
+
+
+def compare_draft_audit(operations, bucket):
+    """After `bucket`'s replay has completed on the device: byte-compare the pairs its capture held (a no-op without a scope)."""
+    scope = getattr(bucket, 'draft_audit', None)
+    if scope is not None:
+        import tp4_draft_conv
+
+        tp4_draft_conv.compare_scope(operations, scope)
+
+
+def release_draft_audit(operations, scope):
+    """Free a scope's pairs: call after the bucket's trace is released, or when its capture failed."""
+    if scope is not None:
+        import tp4_draft_conv
+
+        tp4_draft_conv.release_scope(operations, scope)
+
+
 def _slot_of(device):
     return getattr(getattr(device, 'pool_slot', None), 'index', None)
 
@@ -299,10 +340,15 @@ class PreparedDFlashProposal:
                 finally:
                     release_owned(operations, transient)
                 bucket.owned, retain = device.temporaries([*device.owned, *self.owned])
-                bucket.trace, bucket.outputs = capture_operation(operations, self.mesh,
-                    lambda: traced_pass(operations, lambda: self.execute(bucket, bucket.owned, retain),
-                                        pooled_outputs))
+                bucket.draft_audit = open_draft_audit('single')
+                try:
+                    bucket.trace, bucket.outputs = capture_operation(operations, self.mesh,
+                        lambda: traced_pass(operations, lambda: self.execute(bucket, bucket.owned, retain),
+                                            pooled_outputs))
+                finally:
+                    close_draft_audit(bucket.draft_audit)
                 operations.execute_trace(self.mesh, bucket.trace, cq_id=0, blocking=True)
+                compare_draft_audit(operations, bucket)
         except BaseException:
             self.close()
             raise
@@ -451,6 +497,7 @@ class PreparedDFlashProposal:
                 device.validated_native_proposal_masks.add(addresses(operations, bucket.mask))
         finally:
             release_owned(operations, owned)
+        compare_draft_audit(operations, bucket)
         return device.select_proposal(bucket.outputs, seed, count)
 
     def discard_pending(self):
@@ -496,6 +543,7 @@ class PreparedDFlashProposal:
             finally:
                 release_owned(operations, owned)
         operations.execute_trace(self.mesh, bucket.trace, cq_id=0, blocking=True)
+        compare_draft_audit(operations, bucket)
         if expected is not None:
             actual = device.proposal_snapshot(bucket.outputs)
             if len(actual) != len(expected) or any(not torch.equal(left, right) for left, right in zip(actual, expected, strict=True)):
@@ -513,6 +561,8 @@ class PreparedDFlashProposal:
             if bucket.trace is not None:
                 self.operations.release_trace(self.mesh, bucket.trace)
                 bucket.trace = None
+            release_draft_audit(self.operations, getattr(bucket, 'draft_audit', None))
+            bucket.draft_audit = None
         for bucket in self.buckets.values():
             if getattr(self.device, 'live_query_qk', False):
                 self.device.validated_live_masks.discard(addresses(self.operations, bucket.mask))
@@ -652,7 +702,7 @@ class PreparedPackedDFlashProposal:
                     [{name: self._upload(torch.zeros((1, tp_shapes.active().draft_kv_heads, context, 128), dtype=torch.bfloat16))
                       for name in ('k', 'v')} for _ in self.device_a.kv_history.active]
                     for context in (context_a, context_b)],
-                trace=None, outputs=None, owned=[], tokens=None, consumed=set())
+                trace=None, outputs=None, owned=[], tokens=None, consumed=set(), draft_audit=None)
             if live_banks is not None:
                 bucket.live_banks = True
             if row_exact:
@@ -687,10 +737,15 @@ class PreparedPackedDFlashProposal:
                 release_owned(operations, transient)
             bucket.owned, retain = device.temporaries([device.history, device.spare_history,
                 self.device_b.history, self.device_b.spare_history, *self.owned, *lent])
-            bucket.trace, bucket.outputs = capture_operation(operations, self.mesh,
-                lambda: traced_pass(operations, lambda: self._execute(bucket, bucket.owned, retain),
-                                    pooled_outputs))
+            audit_scope = bucket.draft_audit = open_draft_audit('pair')
+            try:
+                bucket.trace, bucket.outputs = capture_operation(operations, self.mesh,
+                    lambda: traced_pass(operations, lambda: self._execute(bucket, bucket.owned, retain),
+                                        pooled_outputs))
+            finally:
+                close_draft_audit(audit_scope)
             operations.execute_trace(self.mesh, bucket.trace, cq_id=0, blocking=True)
+            compare_draft_audit(operations, bucket)
             if row_exact:
                 from pair_row_exact import note
 
@@ -705,6 +760,8 @@ class PreparedPackedDFlashProposal:
                 # built.mask is itself one of the placeholders released next.
                 device.validated_native_proposal_masks.discard(addresses(operations, built.mask))
                 release_owned(operations, built.owned)
+                release_draft_audit(operations, built.draft_audit)
+                built.draft_audit = None
             leaked = self.owned[placeholder_mark:]
             del self.owned[placeholder_mark:]
             release_owned(operations, leaked)
@@ -903,6 +960,7 @@ class PreparedPackedDFlashProposal:
                 release_owned(operations, owned)
                 raise AssertionError('Prepared packed proposal input addresses moved')
             release_owned(operations, owned)
+            compare_draft_audit(operations, bucket)
             from dflash_packed_proposal import select_device_outputs
 
             bucket.tokens = select_device_outputs(self.device_a, bucket.outputs, (seed_a, seed_b),
@@ -936,6 +994,7 @@ class PreparedPackedDFlashProposal:
         release_owned(operations, owned)
         if moved:
             raise AssertionError('Prepared packed proposal input addresses moved')
+        compare_draft_audit(operations, bucket)
         from dflash_packed_proposal import read_device_outputs
 
         parts = read_device_outputs(self.device_a, bucket.outputs, 2, self.block_rows)
@@ -989,6 +1048,8 @@ class PreparedPackedDFlashProposal:
             if bucket.trace is not None:
                 self.operations.release_trace(self.mesh, bucket.trace)
                 bucket.trace = None
+            release_draft_audit(self.operations, bucket.draft_audit)
+            bucket.draft_audit = None
             self.device_a.validated_native_proposal_masks.discard(addresses(self.operations, bucket.mask))
             release_owned(self.operations, bucket.owned)
             bucket.owned.clear()

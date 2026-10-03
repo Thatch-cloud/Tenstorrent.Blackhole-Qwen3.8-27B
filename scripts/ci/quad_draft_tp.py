@@ -299,6 +299,19 @@ def _tiled_dram(operations, tensors):
 
 
 def split_projected_heads(operations, query, key, value, retain):
+    """The 64-row head split: the served ops, or with QWEN_FAST_TP4_DRAFT_HEADS=1 (D2c, tp4_draft_heads) one tile-copy launch
+    that produces the same tiles. Flag off, this is served_split_projected_heads."""
+    import tp4_sampdraft
+
+    if not tp4_sampdraft.enabled(tp4_sampdraft.DRAFT_HEADS):
+        return served_split_projected_heads(operations, query, key, value, retain)
+    import tp4_draft_heads
+
+    return tp4_draft_heads.split_heads(operations, query, key, value, retain, site='quad',
+        served=lambda: served_split_projected_heads(operations, query, key, value, retain))
+
+
+def served_split_projected_heads(operations, query, key, value, retain):
     """draft_head_layout_tp.split_projected_heads at 64 rows: query, keys and values share the 64 rows, so there is no query
     pad and no slice back."""
     found = tp_shapes.active()
@@ -342,6 +355,19 @@ def project_key_value(operations, inputs, query, cosine_sine, retain, *, paramet
 
 
 def concatenate_query_heads(operations, value, retain):
+    """The 64-row head merge: nlp_concat_heads, or with QWEN_FAST_TP4_DRAFT_HEADS=1 (D2c) one tile-copy launch. Flag off, this is
+    served_concatenate_query_heads."""
+    import tp4_sampdraft
+
+    if not tp4_sampdraft.enabled(tp4_sampdraft.DRAFT_HEADS):
+        return served_concatenate_query_heads(operations, value, retain)
+    import tp4_draft_heads
+
+    return tp4_draft_heads.merge_heads(operations, value, retain, site='quad',
+        served=lambda: served_concatenate_query_heads(operations, value, retain))
+
+
+def served_concatenate_query_heads(operations, value, retain):
     """draft_head_layout_tp.concatenate_query_heads at 64 rows."""
     if tuple(value.shape) != (1, heads()[0], ROWS, HEAD_DIM) or not _tiled_dram(operations, (value,)):
         raise ValueError('64-row BF16 DRAM query heads required')
@@ -353,6 +379,28 @@ def concatenate_query_heads(operations, value, retain):
 # ---------------------------------------------------------------------------------------------
 
 def quad_fused_convolution(operations, mesh, hidden, dynamic, base, *, boundaries, conv='110'):
+    """The quad's fused convolution: the served call, or with QWEN_FAST_TP4_DRAFT_CONV=1 (D2a, tp4_draft_conv) the same convolution
+    on a rewritten I/O stage that hands the compute kernel byte-identical tiles (the promoted quad_conv_io.cpp stays sha-pinned
+    and untouched). Flag off, this is served_quad_fused_convolution."""
+    import tp4_sampdraft
+
+    if not tp4_sampdraft.enabled(tp4_sampdraft.DRAFT_CONV):
+        return served_quad_fused_convolution(operations, mesh, hidden, dynamic, base, boundaries=boundaries, conv=conv)
+    import tp4_draft_conv
+
+    validate_conv_shapes(hidden, dynamic, base)
+    if conv not in _pinned.CONV_VARIANTS:
+        raise ValueError('The quad conv program runs on 110 or 80 workers, not %r' % (conv,))
+    low, high = seam_words(boundaries, ROWS)
+    spec = _pinned.CONV_VARIANTS[conv]
+    return tp4_draft_conv.convolution(
+        operations, mesh, hidden, dynamic, base, rows=ROWS, seams_low=low, seams_high=high, workers=spec['workers'],
+        coordinates=[spec['core'](worker) for worker in range(spec['workers'])], label='quad',
+        core_set=lambda group: core_ranges(operations, group),
+        served=lambda: served_quad_fused_convolution(operations, mesh, hidden, dynamic, base, boundaries=boundaries, conv=conv))
+
+
+def served_quad_fused_convolution(operations, mesh, hidden, dynamic, base, *, boundaries, conv='110'):
     """quad_draft.quad_fused_convolution over the (1, tp) mesh: the promoted I/O kernel reads each page's tiles and seam
     word, the served compute kernel does the per-page arithmetic, one compile arg per group of workers taking the same
     number of pages. Per chip, runtime args are the six buffer addresses + [rows, worker, workers, low seams, high seams]
@@ -562,7 +610,8 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
             self.last_built = False
             return bucket
         from dflash_packed_proposal import packed_identifiers
-        from dflash_proposal_trace import borrow_pooled_mask, pool_outputs, traced_pass
+        from dflash_proposal_trace import (borrow_pooled_mask, close_draft_audit, compare_draft_audit, open_draft_audit,
+                                           pool_outputs, release_draft_audit, traced_pass)
         from gdn_multitoken_conv import addresses, release_owned
         quad_host_mask, quad_rope = _pinned.quad_host_mask, _pinned.quad_rope
         operations, device = self.operations, self.devices[0]
@@ -581,7 +630,7 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
                 rope=dict(q=tuple(self._upload(value) for value in query),
                           live_k=tuple(self._upload(value) for value in live)),
                 cached_history=self._live_banks() if bind_live else self._placeholder_banks(), trace=None, outputs=None,
-                owned=[], tokens=None, consumed=set(), parts=None, live_banks=bind_live)
+                owned=[], tokens=None, consumed=set(), parts=None, live_banks=bind_live, draft_audit=None)
             if pooled_mask is not None:
                 # Borrowed, never in self.owned: protected like the lent banks (_protected), never released.
                 bucket.lent_mask = (pooled_mask,)
@@ -607,10 +656,15 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
             bucket.owned, retain = device.temporaries(self._protected(bucket))
             from attention_batch import capture_operation
 
-            bucket.trace, bucket.outputs = capture_operation(operations, self.mesh,
-                lambda: traced_pass(operations, lambda: self._execute(bucket, bucket.owned, retain),
-                                    pooled_outputs))
+            audit_scope = bucket.draft_audit = open_draft_audit('quad')
+            try:
+                bucket.trace, bucket.outputs = capture_operation(operations, self.mesh,
+                    lambda: traced_pass(operations, lambda: self._execute(bucket, bucket.owned, retain),
+                                        pooled_outputs))
+            finally:
+                close_draft_audit(audit_scope)
             operations.execute_trace(self.mesh, bucket.trace, cq_id=0, blocking=True)
+            compare_draft_audit(operations, bucket)
             note(self.pair_label(), self.quad.sdpa, self.quad.conv)
             import memory_ledger
 
@@ -627,6 +681,8 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
                     operations.release_trace(self.mesh, built.trace)
                     built.trace = None
                 release_owned(operations, built.owned)
+                release_draft_audit(operations, built.draft_audit)
+                built.draft_audit = None
             leaked = self.owned[placeholder_mark:]
             del self.owned[placeholder_mark:]
             release_owned(operations, leaked)
@@ -715,6 +771,7 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
             raise ValueError('No prepared quad proposal is pending')
         seeds, bucket, owned = self._pending
         if bucket.tokens is None:
+            from dflash_proposal_trace import compare_draft_audit
             from gdn_multitoken_conv import addresses, release_owned
 
             operations = self.operations
@@ -722,6 +779,7 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
             release_owned(operations, owned)
             if moved:
                 raise AssertionError('Prepared quad proposal input addresses moved')
+            compare_draft_audit(operations, bucket)
             bucket.tokens = select_quad_outputs(self.devices[0], bucket.outputs, seeds, (BLOCK - 1,) * USERS)
         tokens = bucket.tokens[which]
         bucket.consumed.add(which)
@@ -738,6 +796,7 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
         seeds, bucket, owned = self._pending
         if bucket.tokens is not None or bucket.consumed:
             raise ValueError('This quad proposal was already selected')
+        from dflash_proposal_trace import compare_draft_audit
         from gdn_multitoken_conv import addresses, release_owned
         read_audit = _pinned.read_audit
         operations = self.operations
@@ -746,6 +805,7 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
         release_owned(operations, owned)
         if moved:
             raise AssertionError('Prepared quad proposal input addresses moved')
+        compare_draft_audit(operations, bucket)
         bucket.parts = read_quad_outputs(self.devices[0], bucket.outputs)
         if isinstance(self._audit, list):
             # QWEN_FAST_QUAD_DRAFT_AUDIT: the pairs' readback and every raw read the audit compares, here and not after
@@ -762,6 +822,18 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
             raise ValueError('No prepared quad proposal is pending')
         seeds, bucket, _ = self._pending
         return select_quad_outputs(self.devices[0], bucket.outputs, seeds, (BLOCK - 1,) * USERS)
+
+    def close(self):
+        """The pinned close (traces released, then the buckets' buffers), then the drafter audit's held pairs: a trace writes them
+        until it is released, so they are freed last (tp4_draft_conv's second rule)."""
+        if self.closed:
+            return
+        from dflash_proposal_trace import release_draft_audit
+
+        scopes = [getattr(bucket, 'draft_audit', None) for bucket in self.buckets.values()]
+        super().close()
+        for scope in scopes:
+            release_draft_audit(self.operations, scope)
 
 
 # ---------------------------------------------------------------------------------------------

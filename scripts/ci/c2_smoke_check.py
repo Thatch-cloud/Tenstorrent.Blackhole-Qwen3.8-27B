@@ -103,6 +103,19 @@ VGLUE_AUDIT_FLAG = 'QWEN_FAST_TP4_VGLUE_AUDIT'
 VGLUE_AUDIT_PASSED = '[PINDIAG] tp4 vglue audit '
 DISPATCH_DIAG_FLAG = 'QWEN_FAST_GDN_DISPATCH_DIAG'
 DISPATCH_DIAG_LINE = '[PINDIAG] tp4 gdn dispatch diag'
+# tp4/samp-draft (tp4_sampdraft): the sampler's shard argmax kernels, the drafter's rewritten conv I/O and its tile-copy head ops. Per lever the
+# same three rules as the wide norms: a fall-back line fails the smoke (the served path ran, the timing is not the lever's), a profile that asks
+# for the lever and logs no engaged line fails, and an audit flag with no 'exact=True' audit line fails (an audited arm must have audited).
+# (flag, engaged marker, fell-back marker, what it is); (audit flag, audit marker) per audited lever. tests hold these equal to tp4_sampdraft's.
+SAMPDRAFT_LEVERS = (('QWEN_FAST_TP4_SHARD_ARGMAX', '[PINDIAG] tp4 shard argmax engaged', '[PINDIAG] tp4 shard argmax fell back',
+                     'shard argmax kernels'),
+                    ('QWEN_FAST_TP4_DRAFT_CONV', '[PINDIAG] tp4 draft conv engaged', '[PINDIAG] tp4 draft conv fell back',
+                     'drafter conv I/O kernels'),
+                    ('QWEN_FAST_TP4_DRAFT_HEADS', '[PINDIAG] tp4 draft heads engaged', '[PINDIAG] tp4 draft heads fell back',
+                     'drafter head copies'))
+SAMPDRAFT_AUDITS = (('QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT', '[PINDIAG] tp4 shard argmax audit', 'shard argmax'),
+                    ('QWEN_FAST_TP4_DRAFT_CONV_AUDIT', '[PINDIAG] tp4 draft conv audit', 'drafter conv'),
+                    ('QWEN_FAST_TP4_DRAFT_HEADS_AUDIT', '[PINDIAG] tp4 draft heads audit', 'drafter heads'))
 SLIDE_FLAG = 'QWEN_FAST_TP_KV_SLIDE'
 QUAD_FLAG = 'QWEN_FAST_QUAD_DRAFT'
 # tp4/next-5: QWEN_FAST_QUAD_DRAFT_BLOCKS=2, the eight-seat quad (two quads of four). The smoke that judges it is concurrent8_steady.
@@ -739,6 +752,23 @@ def tpub_problems(env, container_text):
     return problems
 
 
+def sampdraft_problems(container_text, env):
+    """The tp4/samp-draft stop conditions (see SAMPDRAFT_LEVERS): fall-backs always; a missing engaged line for a lever the profile
+    sets; a missing 'exact=True' audit line for an audit the profile sets."""
+    problems = []
+    lines = container_text.splitlines()
+    for flag, engaged, fell_back, what in SAMPDRAFT_LEVERS:
+        fell = [line.strip()[:200] for line in lines if fell_back in line]
+        problems += ['the %s fell back (the served path ran, it saved nothing): %s' % (what, line) for line in fell[:4]]
+        if env is not None and env.get(flag) == '1' and engaged not in container_text:
+            problems.append('%s is set and no engaged line (%s) was logged: the %s never ran' % (flag, engaged, what))
+    for flag, marker, what in SAMPDRAFT_AUDITS:
+        if env is not None and env.get(flag) == '1' and not any(marker in line and 'exact=True' in line for line in lines):
+            problems.append('%s is set and no passing audit line (%s ... exact=True) was logged: the %s was never audited'
+                            % (flag, marker, what))
+    return problems
+
+
 def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=None):
     """(problems, facts) for a smoke log and a container log. `env` (the served profile's) adds the batched-draft
     stop conditions, `entry` (its whole record) the traffic profile's admission and parser conditions."""
@@ -762,6 +792,7 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         problems.append('%s and %s are set and no passing audit line (%s<n> exact=True) was logged: nothing was compared' % (PAIR_SLICE_FLAG, VGLUE_AUDIT_FLAG, VGLUE_AUDIT_PASSED))
     if env is not None and env.get(DISPATCH_DIAG_FLAG) == '1' and DISPATCH_DIAG_LINE not in container_text:
         problems.append('%s is set and no diagnostic line (%s) was logged' % (DISPATCH_DIAG_FLAG, DISPATCH_DIAG_LINE))
+    problems += sampdraft_problems(container_text, env)
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
     if env is not None and env.get('QWEN_FAST_TP', '2') != '2':

@@ -118,6 +118,10 @@ NEXT5_PROFILES = NEXT5_PROFILES + BEST262K_PROFILES
 # (same exemptions as the cheap twins); the audited arm is c2-packed-tp4-gate plus the flag and the vglue audit (a four-card profile that may carry the audit).
 CHEAP_PROFILES = CHEAP_PROFILES + ('c2-packed-tp4-speed-strace-pairslice', 'c2-packed-tp4-speed-strace-dispatchdiag')
 GLUEFIX_AUDITED = ('c2-packed-tp4-gate-pairslice',)
+# tp4/samp-draft: the sampler and drafter lever twins (timed, on best-strace) and their audited twins (on best-gate); test_tp4_sampdraft holds each
+# equal to its control plus exactly its flags. They carry the caps, the hang fix, the levers: every exemption NEXT4_PROFILES has, they have.
+SAMPDRAFT_PROFILES = ('c2-packed-tp4-best-samp', 'c2-packed-tp4-best-d2', 'c2-packed-tp4-best-gate-samp', 'c2-packed-tp4-best-gate-d2')
+NEXT5_PROFILES = NEXT5_PROFILES + SAMPDRAFT_PROFILES
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 
 

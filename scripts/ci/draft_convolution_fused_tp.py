@@ -11,6 +11,32 @@ import tp_shapes
 
 
 def fused_convolution(operations, mesh, hidden, dynamic, base, *, boundaries=None):
+    """The fused convolution: the served call, or with QWEN_FAST_TP4_DRAFT_CONV=1 (D2a, tp4_draft_conv) the same convolution on a
+    rewritten I/O stage that hands the compute kernel byte-identical tiles. Flag off, this is served_fused_convolution."""
+    import tp4_sampdraft
+
+    if not tp4_sampdraft.enabled(tp4_sampdraft.DRAFT_CONV):
+        return served_fused_convolution(operations, mesh, hidden, dynamic, base, boundaries=boundaries)
+    import tp4_draft_conv
+
+    rows = validate_shapes(hidden, dynamic, base)
+    coordinates = [(worker % 8, worker // 8) for worker in range(80)]
+    return tp4_draft_conv.convolution(
+        operations, mesh, hidden, dynamic, base, rows=rows, seams_low=seam_mask(boundaries, rows), seams_high=0, workers=80,
+        coordinates=coordinates, label='pair',
+        core_set=lambda group: _pair_cores(operations, group),
+        served=lambda: served_fused_convolution(operations, mesh, hidden, dynamic, base, boundaries=boundaries))
+
+
+def _pair_cores(operations, group):
+    """The pair's one 8 x 10 core range, whatever group is asked for: the pair's 160 pages over 80 workers are one page-count group (two
+    pages each), so a group that is not all 80 workers would be a plan this range cannot express."""
+    if len(group) != 80:
+        raise ValueError('The pair conv runs one group of 80 workers on its 8 x 10 range, not %d' % len(group))
+    return operations.CoreRangeSet([operations.CoreRange(operations.CoreCoord(0, 0), operations.CoreCoord(7, 9))])
+
+
+def served_fused_convolution(operations, mesh, hidden, dynamic, base, *, boundaries=None):
     rows = validate_shapes(hidden, dynamic, base)
     seams = seam_mask(boundaries, rows)
     tensors = [hidden, *dynamic, *base]

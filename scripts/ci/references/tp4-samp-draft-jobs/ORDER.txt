@@ -1,0 +1,42 @@
+# The order of the four-card tp4/samp-draft window, one template per line: <template name without .env> <pre|stop|optional> <image tag> <estimated minutes>.
+# pre: runs BEFORE the window, card-free, while production serves. stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop
+# the window (its product is data). The image is the one fresh tag B0 builds (tp4-samp-1); a reused tag is skipped by the build step and would silently serve an old image.
+#
+# THE LANE. Two exact levers behind default-off flags, gate-only profiles only. Production's profile (c2-packed-tp4) carries none of them and its image path is
+# byte-identical with the flags off (tests prove it).
+#   S1  the sampler tail: c2-packed-tp4-best-samp = the control c2-packed-tp4-best-strace + QWEN_FAST_TP4_SHARD_ARGMAX=1 (nothing else). One scan launch on 110 cores and a
+#       one-core fold replace untilize + ArgMax + the V4a gather in verify_trace_t1.sample_shards: the same first-index-of-the-maximum ids. Estimate -0.9 to -1.8 ms per verify.
+#       Audited arm: c2-packed-tp4-best-gate-samp (QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT: today's path beside the kernels, every row of every round compared).
+#   D2  the drafter op fixes: c2-packed-tp4-best-d2 = the control + QWEN_FAST_TP4_DRAFT_CONV=1 + QWEN_FAST_TP4_DRAFT_HEADS=1 (nothing else). The fused convolution's I/O kernel
+#       is rewritten (word copies, a writer on the second data-movement core, double-buffered input) in front of the served compute kernel, and the head split/merge are
+#       tile-copy launches: byte-identical tiles, so tau must be identical. Estimate -4.7 ms (quad) per 4-user round for D2a, -0.3 ms for D2c.
+#       Audited arm: c2-packed-tp4-best-gate-d2 (QWEN_FAST_TP4_DRAFT_CONV_AUDIT and QWEN_FAST_TP4_DRAFT_HEADS_AUDIT: the served I/O kernel and the served head ops beside the new ones inside each drafter bucket's capture, byte-compared on every chip right after that bucket's replays).
+#
+# PRODUCTION IS LIVE ON THE CARDS when a window opens: B0 (build-only) runs before it while production serves; A0 (agentstop, unserve) is the first job that touches production and
+# the only one that takes it down. Every four-card job after it opens with its own all-four reset (links train only at board init).
+# THIS PACK ENDS WITHOUT A HAND-BACK: no agentstart, no deploy, no :latest retag, no placement call. The driver that runs it closes the window with a reset, a fabric re-measure
+# and agentstart (the node agent comes back with nothing placed), and an owner /deploy places today's production recipe afterwards.
+#
+# Early-failure order, cheapest first: B0; A0; S1 (the audited sampler smoke: a failure skips TS1-TS4); TS1 (control) TS2 (sampler) TS3 (control) TS4 (sampler); S2 (the audited drafter
+# smoke: a failure skips TD1-TD4); TD1 (control) TD2 (drafter) TD3 (control) TD4 (drafter). Each pair differs in its lever alone (test_tp4_samp_draft_window holds each twin equal to
+# the control plus exactly its deltas), both arms carry hang fix A and the tail caps. ABAB: judge each pair PAIRED per round, never against the other pair and never by an
+# unpaired median. NOTHING COMBINED HAS RUN ON A CARD: the two levers are never in one arm here; a combination is a later window's, after both pairs read.
+# TAU REPORT. After the TD pair: python scripts/ci/tp4_samp_draft_report.py --control <TD1 log> <TD3 log> --lever <TD2 log> <TD4 log> (exit 0 rule held, 1 not, 2 too few rounds), and
+# python scripts/ci/speed_window_compare.py <TD1 results> <TD2 results> --users 0,1,2,3 --position-keyed --strict-concurrent-prefixes (exit 0: identical proposals). Run the report on the TS pair
+# too: the sampler lever must not move tau either (the ids are the control's).
+# Skip rules: if S1 fails or hangs, skip TS1-TS4; if S2 fails or hangs, skip TD1-TD4. If a lever arm's smoke check reports a fall-back line or no engaged line, fix before its next arm.
+# A hang on any timed arm is a finding; the next job's reset heals the cards.
+# Durations (estimate, wall clock): B0 18 min (90 at worst; production serving, not counted as downtime); A0 10 min; S1 and S2 45-90 min each; each timed arm 30-60 min. Whole window about 8 h with every
+# job; S1, TS1-TS4 and the sampler report (3.5 h) is the short form.
+B0-build pre tp4-samp-1 30
+A0-agentstop-unserve stop tp4-samp-1 10
+S1-sampler-audited-smoke optional tp4-samp-1 90
+TS1-control-timed optional tp4-samp-1 60
+TS2-sampler-timed optional tp4-samp-1 60
+TS3-control-timed optional tp4-samp-1 60
+TS4-sampler-timed optional tp4-samp-1 60
+S2-drafter-audited-smoke optional tp4-samp-1 90
+TD1-control-timed optional tp4-samp-1 60
+TD2-drafter-timed optional tp4-samp-1 60
+TD3-control-timed optional tp4-samp-1 60
+TD4-drafter-timed optional tp4-samp-1 60

@@ -221,6 +221,15 @@ def audit_shard_values(operations, output, block_rows, chip_values):
     """QWEN_FAST_TP4_SHARD_VALUES under QWEN_FAST_TP4_VGLUE_AUDIT: each chip's gathered maxima against the ttnn.max taken beside
     them in the same trace (verify_trace_t1.shard_values), every row. Nothing to compare when the lever is off; when it is on under
     the audit and its gather fell back (no reference was recorded) that is a failure, V4a was not audited."""
+    import tp4_sampdraft
+
+    if tp4_sampdraft.enabled(tp4_sampdraft.SHARD_ARGMAX):
+        import tp4_shard_argmax
+
+        if tp4_shard_argmax.produced(output[2]):
+            # QWEN_FAST_TP4_SHARD_ARGMAX made these maxima (its kernel supersedes the gather); its own audit
+            # (QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT) compares them with today's path, row by row
+            return
     reference = verify_trace_t1.VALUE_REFERENCES.get(id(output[2]))
     if reference is None:
         if tp4_vglue.audit_enabled() and tp4_vglue.enabled(tp4_vglue.SHARD_VALUES):
@@ -236,6 +245,52 @@ def audit_shard_values(operations, output, block_rows, chip_values):
             diagnostic(message)
             raise AssertionError(message)
     diagnostic('%s site=sampler shard_values exact=True rows=%d' % (tp4_vglue.AUDIT_MARKER, block_rows))
+
+
+def audit_sampdraft(operations, output, block_rows, chip_ids, chip_values):
+    """The sampler lever's audit (tp4_sampdraft; a no-op unless QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT is on, which the pair cannot have):
+    the kernel's per-chip ids and values against today's from the same capture, every row. The drafter audits (conv, heads) are not
+    here: a drafter bucket compares its own held pairs right after its own replay (dflash_proposal_trace.compare_draft_audit), because
+    a pair allocated after the verify trace was captured can be overwritten by a verify replay."""
+    import tp4_sampdraft
+
+    if tp4_sampdraft.audit_enabled(tp4_sampdraft.SHARD_ARGMAX_AUDIT):
+        import tp4_shard_argmax
+
+        tp4_shard_argmax.audit_round(operations, output[2], block_rows, chip_ids, chip_values)
+
+
+def release_sampdraft_audit(operations, values=None):
+    """Free what the sampler audit holds for the trace output `values`: today's sampler outputs (and the V4a reference registered
+    for them). The drafter audits' pairs belong to their buckets and are freed with the bucket's trace."""
+    import tp4_sampdraft
+
+    if tp4_sampdraft.enabled(tp4_sampdraft.SHARD_ARGMAX):
+        import tp4_shard_argmax
+
+        tp4_shard_argmax.release_audit(operations, values)
+
+
+def reserve_sampdraft(operations, mesh):
+    """At a block's warm, before any trace of any block is captured: validate the samp-draft flags (an audit without its lever fails
+    here, not at the first round's readback) and reserve the shard-argmax partials buffer (a buffer allocated inside the verify capture
+    would change that trace's hole layout). Returns True when a buffer holder was taken (release with release_sampdraft_reserve)."""
+    import tp4_sampdraft
+
+    tp4_sampdraft.validate()
+    if not tp4_sampdraft.enabled(tp4_sampdraft.SHARD_ARGMAX):
+        return False
+    import tp4_shard_argmax
+
+    tp4_shard_argmax.reserve(operations, mesh)
+    return True
+
+
+def release_sampdraft_reserve(operations, mesh):
+    """At a block's close, after its traces are released: give back the partials buffer holder reserve_sampdraft took."""
+    import tp4_shard_argmax
+
+    tp4_shard_argmax.release_reserved(operations, mesh)
 
 
 def release_vglue_audit(operations, fixture, values=None):
@@ -1058,6 +1113,7 @@ class PackedVerifierEngine:
         if self.defer_capture and os.environ.get('QWEN_FAST_TP', '2') == '4' and capture_plug.config() is not None:
             raise ValueError('QWEN_FAST_CAPTURE_PLUG is not supported for blocks built in two phases '
                              '(QWEN_FAST_M3_BLOCKS=2): one zone cannot span the captures of several blocks')
+        self.sampdraft_reserved = reserve_sampdraft(operations, self.mesh)
         self.open_capture_plug(operations)
         self.stage = 'warm forward'
         # QWEN_FAST_VERIFY_T2 (#2): the placeholders put every user on page 0's first tile
@@ -1075,6 +1131,7 @@ class PackedVerifierEngine:
             operations.synchronize_device(self.mesh)
         finally:
             if result is not None:
+                release_sampdraft_audit(operations, result[2] if len(result) > 2 else None)
                 release_vglue_audit(operations, warm, result[2] if len(result) > 2 else None)
                 release_owned(operations, [value for value in result if value is not None])
             else:
@@ -1480,6 +1537,7 @@ class PackedVerifierEngine:
         if any(len(value) != self.block_rows for value in (*chip_ids, *chip_values)):
             raise AssertionError('Missing packed prediction rows')
         host = verify_trace_t1.combine_shards(chip_ids, chip_values).tolist()
+        audit_sampdraft(self.operations, self.output, self.block_rows, chip_ids, chip_values)
         audit_shard_values(self.operations, self.output, self.block_rows, chip_values)
         if self.shard_audit:
             reference = self.operations.to_torch(self.operations.get_device_tensors(self.output[3])[0])
@@ -2132,6 +2190,11 @@ class PackedVerifierEngine:
         if self.output is not None:
             release_owned(operations, [value for value in self.output if value is not None])
             self.output = None
+        release_sampdraft_audit(operations, shard_values)
+        if getattr(self, 'sampdraft_reserved', False):
+            # after the traces that use it (released above, or abandoned by an unfenced close, whose buffers are freed like this one)
+            release_sampdraft_reserve(operations, self.mesh)
+            self.sampdraft_reserved = False
         if self.fixture is not None:
             release_vglue_audit(operations, self.fixture, shard_values)
             self.fixture.close()

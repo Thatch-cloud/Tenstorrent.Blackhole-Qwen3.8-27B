@@ -91,6 +91,9 @@ jobs:
           for name in draft_wide_tp.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
+          for name in tp4_sampdraft.py tp4_shard_argmax.py tp4_shard_argmax_scan.cpp tp4_shard_argmax_fold.cpp tp4_draft_conv.py draft_conv_io_fast.cpp draft_conv_out.cpp tp4_draft_heads.py draft_heads_copy.cpp; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
           for name in padded_probe.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
