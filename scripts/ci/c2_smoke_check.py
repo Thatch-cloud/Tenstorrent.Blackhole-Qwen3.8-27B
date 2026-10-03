@@ -124,6 +124,9 @@ QUAD_BLOCKS_VALUE = '2'
 QUAD_BLOCK_SLOTS = ('0,1,2,3', '4,5,6,7')
 STEADY_EIGHT_TEST = 'concurrent8_steady'
 SINGLES_AUDIT_FLAG = 'QWEN_FAST_DRAFT_SINGLES_AUDIT'
+DRAFTER_BF16_FLAG = 'QWEN_FAST_DRAFTER_BF16'
+DRAFTER_BF16_ENGAGED = '[DRAFTER_BF16] engaged'
+DRAFTER_BF8_LEND = re.compile(r'\[PINDIAG\] draft weights lent to .*projections dtype=\S*bf8')
 FUSED_FLAG = 'QWEN_FAST_FUSED_COMMIT'
 FUSED_INPLACE_FLAG = 'QWEN_FAST_FUSED_COMMIT_INPLACE'
 FUSED_LIVE_BANKS_FLAG = 'QWEN_FAST_FUSED_COMMIT_LIVE_BANKS'
@@ -499,6 +502,24 @@ def draft_facts(container_text):
 FAST_PATH_KEYS = ('QWEN_FAST_ANY_REQUEST', 'QWEN_FAST_EXTENT_REPLAY', 'QWEN_FAST_TP')
 
 
+def drafter_bf16_problems(env, container_text):
+    """The problems the profile's QWEN_FAST_DRAFTER_BF16 setting leaves. Off: no '[DRAFTER_BF16]' line at all. On (the value 1): at least one engaged
+    line (it is printed once per engine process) and NO draft-weights lend line naming a bf8 projection dtype (a bf8 lend line under the flag means an
+    upload did not take it; with every projection bf16 the lend line carries no dtype)."""
+    on = (env or {}).get(DRAFTER_BF16_FLAG) == '1'
+    engaged = container_text.count(DRAFTER_BF16_ENGAGED)
+    if not on:
+        if '[DRAFTER_BF16]' in container_text:
+            return ['%s is not 1 and the log holds a [DRAFTER_BF16] line: the bf16 drafter ran on a profile without it' % DRAFTER_BF16_FLAG]
+        return []
+    problems = []
+    if not engaged:
+        problems.append('%s=1 and no "%s" line was logged: the drafter projections never took the flag' % (DRAFTER_BF16_FLAG, DRAFTER_BF16_ENGAGED))
+    bf8 = [line.strip()[:200] for line in container_text.splitlines() if DRAFTER_BF8_LEND.search(line)]
+    problems += ['%s=1 and a draft-weights lend line still reports bf8 projections: %s' % (DRAFTER_BF16_FLAG, line) for line in bf8[:4]]
+    return problems
+
+
 def fast_path(env):
     """Whether the profile drafts: it serves the speculative fast path (S2) or names a batched-draft flag. The G1
     profiles (general-*) set none of these keys."""
@@ -809,6 +830,7 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         problems += warm_problems
         facts.update(warm_facts)
     if env is not None:
+        problems += drafter_bf16_problems(env, container_text)
         drafts = draft_facts(container_text)
         facts['draft'] = drafts
         steady = STEADY_TEST in (smoke or {}) and 'error' not in smoke[STEADY_TEST]

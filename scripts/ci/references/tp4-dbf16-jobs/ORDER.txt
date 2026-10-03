@@ -1,0 +1,26 @@
+# The order of the tp4/drafter-bf16 four-card DEVELOPMENT window: does the DFlash2 drafter in bfloat16 (QWEN_FAST_DRAFTER_BF16=1) raise the committed tokens per round by more than its extra weight read costs, on coding prompts, one image tp4-dbf16-1.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# NO agentstop (the node agent is already stopped), NO agentstart, NO hand-back, NO deploy, NO :latest move. Z ends with a reset. qwen_c2_profiles.json's default stays c2-packed-tp4.
+# P0. NO OTHER WINDOW DRIVER MAY BE ALIVE. The CPU suite green on this branch first. B0 never runs during a timing job. Judge every ABAB PAIRED per round.
+# RESCAN FIRST: X0 is 'status rescan' and S1 is 'rescan reset smoke' (tp4/rescan is merged): a board left without a by-id link is recovered before the first reset, never stops the window at a reset.
+# DEPENDENCIES (machine-greppable, pinned by test_tp4_dbf16): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them and the
+# window continues. X0 and B0 are stop jobs; S1 gates the whole bf16 comparison: if S1 fails, D1-D4 and E1-E4 are skipped and Z runs.
+# NEEDS D1 D2 D3 D4 E1 E2 E3 E4 <- S1
+# Eight seats: E1-E4 are the paired ABAB of c2-packed-tp4-8-best-quad against c2-packed-tp4-8-best-quad-dbf16 (131k windows, two quad drafts, so two drafter passes per round, about 1.9 ms). The 8x262k twin is NOT in this pack:
+# its pool sits at the high-band edge (19,968 of 19,979 blocks) and the bf16 weights add 405 MB per chip, so a dbf16 twin of c2-packed-tp4-8x262k-best* (on tp4/seats8-262k, tp4/262k8) needs num-gpu-blocks-override 19,200 and
+# QWEN36_MAX_TOKENS_ALL_USERS 1,228,288 (= (19,200 - 8) x 64; the budget allows 19,251 blocks), which still holds four full 262,144-token windows. 'That profile plus the flag' alone would not fit.
+# READ RULES: each arm also needs c2_smoke_check clean (it now checks the engaged line and the absence of a bf8 lend line itself) and no stall. X0: four boards resolved after the rescan, no holder, 'serving containers: none'.
+# S1 and the D and E arms as written in their templates. NO-GO for adopting bf16: any stall, any text difference between arms, any audit mismatch, or a paired rate ratio B/A not above 1.
+# Time (estimate): X0 10 min, B0 60 min, S1 110 min, D1-D4 4 h, E1-E4 4 h, Z 10 min: about 11.5 h.
+X0-status-rescan stop tp4-dbf16-1 10
+B0-build stop tp4-dbf16-1 60
+S1-dbf16-audited-smoke soft tp4-dbf16-1 110
+D1-timed-A-best-strace soft tp4-dbf16-1 60
+D2-timed-B-best-dbf16 soft tp4-dbf16-1 60
+D3-timed-A-best-strace soft tp4-dbf16-1 60
+D4-timed-B-best-dbf16 soft tp4-dbf16-1 60
+E1-eight-seat-A-best-quad soft tp4-dbf16-1 60
+E2-eight-seat-B-best-quad-dbf16 soft tp4-dbf16-1 60
+E3-eight-seat-A-best-quad soft tp4-dbf16-1 60
+E4-eight-seat-B-best-quad-dbf16 soft tp4-dbf16-1 60
+Z-reset soft tp4-dbf16-1 10
