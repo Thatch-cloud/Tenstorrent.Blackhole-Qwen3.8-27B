@@ -96,6 +96,14 @@ FUSED_AUDIT_FLAG = 'QWEN_FAST_FUSED_COMMIT_AUDIT'
 FUSED_PREFIXES = 16          # one slide trace per (segment, accepted prefix 1..rows_per_user) in place
 FUSED_LINES = ('[PINDIAG] fused commit engaged', '[PINDIAG] fused commit refused', '[PACKED-FUSED] round=',
                '[PACKED-FUSED-AUDIT] round=')
+# tp4/tpub (verifier_engine_tp): the sequential step's carry copies as traces. The engaged line is logged once per request engine; a declined line
+# fails (the timing is then not the lever's); the audit's lines say how many tensors were compared on every chip (48 layers x 5 tensors x chips).
+TPUB_FLAG = 'QWEN_FAST_TP4_TRACED_PUBLISH'
+TPUB_AUDIT_FLAG = 'QWEN_FAST_TP4_TRACED_PUBLISH_AUDIT'
+TPUB_ENGAGED = '[TPUB] carry traces engaged'
+TPUB_DECLINED = '[TPUB] carry traces declined'
+TPUB_AUDIT_LINE = re.compile(r'\[TPUB-AUDIT\] op=(save|restore) checked=(\d+) mismatches=(\d+)')
+TPUB_LAYERS, TPUB_TENSORS_PER_LAYER = 48, 5
 STEADY_TEST = 'concurrent4_steady'
 RESEND_TEST = 'steady_resend'
 # One line per packed round the coordinator selected (dflash_packed_proposal_coordinator.SELECT_LINE, QWEN_FAST_PACKED_AUDIT):
@@ -499,6 +507,39 @@ def fused_problems(env, container_text, steady, facts=None):
     return problems
 
 
+def tpub_problems(env, container_text):
+    """The problems the profile's traced-carry settings leave: with the flag off no [TPUB line at all; on, at least one engaged line, no
+    declined line, and (audited) at least one audit line, every one with mismatches=0 and the item count the width implies."""
+    on = env.get(TPUB_FLAG) == '1'
+    audit_lines = TPUB_AUDIT_LINE.findall(container_text)
+    engaged, declined = container_text.count(TPUB_ENGAGED), container_text.count(TPUB_DECLINED)
+    if not on:
+        if engaged or declined or audit_lines or '[TPUB-AUDIT]' in container_text:
+            return ['%s is not set and the log holds traced-carry lines: the traced carry ran on a profile without it' % TPUB_FLAG]
+        return []
+    problems = []
+    if declined:
+        problems.append("the traced carry declined %d time(s) (%s): its timing is not the lever" % (declined, TPUB_DECLINED))
+    if not engaged and not declined:
+        problems.append('%s is set and no engaged line (%s) was logged: the carry copies were never traced' % (TPUB_FLAG, TPUB_ENGAGED))
+    chips = int(env.get('QWEN_FAST_TP') or 2)
+    if env.get(TPUB_AUDIT_FLAG) == '1':
+        if not audit_lines:
+            problems.append('%s is set and no [TPUB-AUDIT] line was logged' % TPUB_AUDIT_FLAG)
+        unequal = [line for line in audit_lines if int(line[2]) != 0]
+        if unequal:
+            problems.append('%d [TPUB-AUDIT] lines with mismatches>0 (first: op=%s mismatches=%s): a traced carry copy differs from the eager one'
+                            % (len(unequal), unequal[0][0], unequal[0][2]))
+        expected = TPUB_LAYERS * TPUB_TENSORS_PER_LAYER * chips
+        wrong = sorted({int(line[1]) for line in audit_lines if int(line[1]) != expected})
+        if wrong:
+            problems.append('[TPUB-AUDIT] lines checked %s items, not %d (%d layers x %d tensors x %d chips)' % (
+                wrong, expected, TPUB_LAYERS, TPUB_TENSORS_PER_LAYER, chips))
+    elif audit_lines:
+        problems.append('[TPUB-AUDIT] lines on a profile without %s' % TPUB_AUDIT_FLAG)
+    return problems
+
+
 def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=None):
     """(problems, facts) for a smoke log and a container log. `env` (the served profile's) adds the batched-draft
     stop conditions, `entry` (its whole record) the traffic profile's admission and parser conditions."""
@@ -534,6 +575,7 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         if fused is not None:
             facts['fused'] = fused
         problems += fused_problems(env, container_text, steady, fused)
+        problems += tpub_problems(env, container_text)
     if entry is not None:
         problems += traffic_problems(container_text, entry)
     if slide:

@@ -96,7 +96,7 @@ jobs:
           python -B -m unittest test_m3native_arm_env
           python -B -m unittest test_tp4_vglue test_tp4_vglue_attention test_tp4_vglue_gdn test_tp4_vglue_twin test_tp4_vglue_block test_tp4_vglue_window test_tp4_vglue_argcount test_tp4_next_window test_tp4_next2_window test_tp4_next3_window test_tp4_traced_publish
           python -B -m unittest test_qual_card
-          python -B -m unittest test_draft_wide_tp test_matmul_tp4_sweep test_tp4_next3_cheap_window
+          python -B -m unittest test_draft_wide_tp test_matmul_tp4_sweep test_tp4_next3_cheap_window test_tp4_tpub test_tp4_tpub_window
           python -B -m unittest test_real_text_prompts test_acceptance_report test_real_text_compare test_real_text_gate
           python -B -m unittest test_c2_serving_job test_c2_serving_gate test_c2_serving_gate_s2 test_c2_platform_replay
           python -B -m unittest test_qwen_prefix_registry test_qwen_prefix_scheduler_patch test_qwen_prefix_runner_patch test_qwen_prefix_scheduler_vllm test_qwen_prefix_image_closure

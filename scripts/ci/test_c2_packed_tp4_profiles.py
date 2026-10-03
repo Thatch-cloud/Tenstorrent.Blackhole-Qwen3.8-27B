@@ -145,7 +145,11 @@ BEST_HANG_FIX = ('c2-packed-tp4-best-strace', 'c2-packed-tp4-best-rshard')
 # The next-3 window's timed arm (tp4/next-3-scope): the production recipe (c2-packed-tp4-speed-strace: audits off, sampler in the verify
 # trace, tail caps) plus the three fused-commit flags and nothing else (test_tp4_next3_window holds that rule).
 NEXT3_PROFILES = ('c2-packed-tp4-speed-strace-fcommit',)
-FUSED_FAMILY = sorted(set(FCOMMIT_PROFILES) | set(BEST_PROFILES) | set(BEST_HANG_FIX) | set(NEXT3_PROFILES))
+# The traced-publication window's arms (tp4/tpub): each is its best base plus exactly the traced-publication flags (TpubProfileTests).
+TPUB, TPUB_AUDIT = 'QWEN_FAST_TP4_TRACED_PUBLISH', 'QWEN_FAST_TP4_TRACED_PUBLISH_AUDIT'
+TPUB_PROFILES = {'c2-packed-tp4-best-strace-tpub': ('c2-packed-tp4-best-strace', {TPUB: '1'}),
+                 'c2-packed-tp4-best-gate-tpub': ('c2-packed-tp4-best-gate', {TPUB: '1', TPUB_AUDIT: '1'})}
+FUSED_FAMILY = sorted(set(FCOMMIT_PROFILES) | set(BEST_PROFILES) | set(BEST_HANG_FIX) | set(NEXT3_PROFILES) | set(TPUB_PROFILES))
 
 
 def without_caps(env):
@@ -342,7 +346,7 @@ class TailProfileTests(unittest.TestCase):
 
     def test_the_caps_are_absent_from_every_profile_that_predates_them(self):
         for name, profile in profiles().items():
-            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES) + tuple(SAMPLER_PROFILES) + tuple(RSHARD_PROFILES) + BEST_PROFILES + CHEAP_PROFILES + NEXT3_PROFILES:
+            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES) + tuple(SAMPLER_PROFILES) + tuple(RSHARD_PROFILES) + BEST_PROFILES + CHEAP_PROFILES + NEXT3_PROFILES + tuple(TPUB_PROFILES):
                 self.assertNotIn('QWEN_FAST_BUDGET_CAP', profile['env'], name)
                 self.assertNotIn('QWEN_FAST_SEQ_DEADLINE_S', profile['env'], name)
 
@@ -565,7 +569,7 @@ class DraftProfileTests(unittest.TestCase):
         found = profiles()
         on = sorted(name for name, profile in found.items() if profile['env'].get(QUAD) == '1'
                     and profile['env'].get('QWEN_FAST_TP') == '4')
-        self.assertEqual(on, ['c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-gate-fcommit-quad',
+        self.assertEqual(on, ['c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-gate-tpub', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-best-strace-tpub', 'c2-packed-tp4-gate-fcommit-quad',
                               'c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-quad'])
         self.assertEqual([name for name in on if 'fcommit' not in name and 'best' not in name],
                          ['c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-quad'], 'the fused-commit family is the other two')
@@ -634,7 +638,7 @@ class SamplerProfileTests(unittest.TestCase):
         for name, profile in profiles().items():
             if name not in SAMPLER_PROFILES:
                 self.assertNotIn(PREWARM, profile['env'], name)
-                if name != 'c2-packed-tp4' and name not in CHEAP_PROFILES + NEXT3_PROFILES:
+                if name != 'c2-packed-tp4' and name not in CHEAP_PROFILES + NEXT3_PROFILES + tuple(TPUB_PROFILES):
                     self.assertNotIn(IN_TRACE, profile['env'], name)
         # tp4-serve-7: production is the strace arm's recipe (audits off, sampler in the verify trace, no prewarm)
         env = profiles()['c2-packed-tp4']['env']
@@ -739,6 +743,53 @@ class BestHangFixProfileTests(unittest.TestCase):
         for name, twin in (('c2-packed-tp4-best-strace', 'c2-packed-tp4-speed-strace'), ('c2-packed-tp4-best-rshard', 'c2-packed-tp4-speed-rshard')):
             mine, other = found[name]['env'], found[twin]['env']
             self.assertEqual({key for key in set(mine) | set(other) if mine.get(key) != other.get(key)}, levers, name)
+
+
+class TpubProfileTests(unittest.TestCase):
+    """tp4/tpub: the traced publication of the sequential step's carry copies, each arm exactly its best base plus its flags, and
+    the flag in no other profile, the image or production."""
+
+    def test_each_arm_is_its_base_plus_exactly_its_flags_gate_only(self):
+        found = profiles()
+        for name, (base_name, difference) in TPUB_PROFILES.items():
+            with self.subTest(profile=name):
+                mine, base = found[name], found[base_name]
+                self.assertEqual(mine['env'], dict(base['env'], **difference))
+                self.assertEqual(sorted(key for key in mine['env'] if key not in base['env']), sorted(difference))
+                for key in set(mine) | set(base):
+                    if key not in ('description', 'env'):
+                        self.assertEqual(mine.get(key), base.get(key), key)
+                self.assertIs(mine['gate_only'], True)
+                self.assertTrue(mine['description'].startswith('GATE ONLY'))
+                for flag in difference:
+                    self.assertIn(flag + '=1', mine['description'])
+
+    def test_the_timed_arm_is_audits_off_and_the_audited_arm_audits_everything_it_adds(self):
+        found = profiles()
+        timed, audited = found['c2-packed-tp4-best-strace-tpub']['env'], found['c2-packed-tp4-best-gate-tpub']['env']
+        self.assertNotIn(TPUB_AUDIT, timed)
+        self.assertEqual((timed['QWEN_FAST_VERIFY_T1_AUDIT'], timed['QWEN_FAST_VERIFY_T2_AUDIT'], timed[IN_TRACE]), ('0', '0', '1'))
+        self.assertEqual((audited[TPUB], audited[TPUB_AUDIT]), ('1', '1'))
+        self.assertIn('NOT QUALIFIED', found['c2-packed-tp4-best-gate-tpub']['description'])
+
+    def test_no_other_profile_nor_the_image_carries_the_flags_and_production_is_unchanged(self):
+        found = profiles()
+        for name, profile in found.items():
+            if name not in TPUB_PROFILES:
+                self.assertNotIn(TPUB, profile['env'], name)
+                self.assertNotIn(TPUB_AUDIT, profile['env'], name)
+        self.assertNotIn(TPUB, image_env())
+        self.assertNotIn(TPUB_AUDIT, image_env())
+        production = found['c2-packed-tp4']['env']
+        self.assertEqual(production['QWEN_FAST_FUSED_COMMIT'], '0')
+        self.assertEqual(production['QWEN_FAST_TRACED_PUBLISH'], '0')
+
+    def test_the_admission_accepts_each_arm_over_the_image_environment(self):
+        for name in TPUB_PROFILES:
+            environ = dict(image_env(), **profiles()[name]['env'])
+            with self.subTest(profile=name):
+                self.assertEqual(admission.width(environ), 4)
+                self.assertEqual(admission.check_environment(environ, M3), [])
 
 
 class FusedCommitProfileTests(unittest.TestCase):
@@ -881,7 +932,7 @@ class VglueProfileTests(unittest.TestCase):
         image = image_env()
         flags = (C1A, V4A, V2, V1, V3A, VGLUE_AUDIT)
         for name, profile in found.items():
-            if name in VGLUE_PROFILES or name in BEST_HANG_FIX:
+            if name in VGLUE_PROFILES or name in BEST_HANG_FIX or name in TPUB_PROFILES:
                 self.assertEqual(profile['env']['QWEN_FAST_TP'], '4', name)
                 continue
             for flag in flags:

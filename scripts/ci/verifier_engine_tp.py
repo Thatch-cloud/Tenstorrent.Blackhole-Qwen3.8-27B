@@ -12,6 +12,7 @@ import os
 import time
 from contextlib import ExitStack
 
+from attention_batch import capture_operation
 from force_argmax import sample_rows
 from gdn_multitoken_conv import release_owned
 from serving_fast_request import budget_cap_enabled
@@ -34,6 +35,60 @@ FALLBACK_MARKER = '[PINDIAG] request shard argmax kept the pinned sampler'
 AUDIT_MARKER = '[PINDIAG] request shard argmax audit'
 AUDIT_MISMATCH = '[PINDIAG] request shard argmax audit mismatch'
 _LOGGED = set()
+
+# QWEN_FAST_TP4_TRACED_PUBLISH=1 (default off, read once per engine at construction): the sequential step's per-step GDN carry save
+# (and the restore a resident-engine switch pays) replay one captured trace each instead of 48 eager launches (16.4 ms median host
+# enqueue a lone step, run N4b). The traces are captured once, inside the engine's own build, right after its verify and commit traces:
+# the carry slots are pool storage allocated at attach (allocate_carry, before any capture), the copy kernels run eagerly once before
+# the capture (the save is the build's own seed; the restore is an identity warm, carry == slot zero by construction), and the captured
+# programs allocate no persistent buffer, so nothing is created after a capture that a replay could overwrite. An engine whose carry or
+# helpers do not fit (not the direct DMA copy) declines with a logged reason and stays eager. The bytes moved, their addresses and
+# their order are the eager loop's.
+# QWEN_FAST_TP4_TRACED_PUBLISH_AUDIT=1 (beside the arm): after every traced copy the eager loop runs too, and the destination is read
+# back before and after on every chip and compared bit for bit ('[TPUB-AUDIT]'); a mismatch is logged and the eager bytes stand.
+TRACED_FLAG = 'QWEN_FAST_TP4_TRACED_PUBLISH'
+TRACED_AUDIT_FLAG = 'QWEN_FAST_TP4_TRACED_PUBLISH_AUDIT'
+TRACED_ENGAGED = '[TPUB] carry traces engaged'
+TRACED_DECLINED = '[TPUB] carry traces declined'
+TRACED_AUDIT = '[TPUB-AUDIT]'
+
+
+def traced_publish_enabled(environ=None):
+    return (os.environ if environ is None else environ).get(TRACED_FLAG) == '1'
+
+
+def traced_audit_enabled(environ=None):
+    return traced_publish_enabled(environ) and (os.environ if environ is None else environ).get(TRACED_AUDIT_FLAG) == '1'
+
+
+def carry_trace_problem(helpers, carry):
+    """Why the carry copies cannot be traced, or None: every helper must be the direct DMA copy (the ttnn slice path allocates
+    inside the copy) and every layer must hold a complete carry slot."""
+    if not helpers or len(carry) != len(helpers):
+        return 'carry holds %d layers for %d helpers' % (len(carry), len(helpers))
+    for index, (helper, slot) in enumerate(zip(helpers, carry)):
+        if getattr(helper, 'direct', False) is not True:
+            return 'layer %d helper is not the direct copy' % index
+        if len(slot) != len(helper.live):
+            return 'layer %d carry holds %d tensors for %d live' % (index, len(slot), len(helper.live))
+    return None
+
+
+def _bits_equal(left, right):
+    import torch
+
+    if tuple(left.shape) != tuple(right.shape) or left.dtype != right.dtype:
+        return False
+    width = {1: torch.int8, 2: torch.int16, 4: torch.int32, 8: torch.int64}.get(left.element_size())
+    if width is None:
+        return bool(torch.equal(left, right))
+    return bool(torch.equal(left.contiguous().view(width), right.contiguous().view(width)))
+
+
+def carry_log_line(message, **values):
+    from verifier_engine import carry_log
+
+    carry_log(message, **values)
 
 
 def shard_arm_enabled(environ=None):
@@ -78,6 +133,11 @@ class VerifierEngine(PairVerifierEngine):
             self.request_shard_audit = self.request_shard and shard_audit_enabled()
             if self.request_shard_problem is not None:
                 _log_once(('sampler', self.request_shard_problem), '%s: %s' % (FALLBACK_MARKER, self.request_shard_problem))
+        # read before the base constructor too: its last step is save_carry, where the traces are captured
+        self.carry_trace_arm = traced_publish_enabled()
+        self.carry_traces = None if self.carry_trace_arm else False
+        self.carry_trace_audit = traced_audit_enabled()
+        self.carry_audit_checked = self.carry_audit_mismatches = 0
         super().__init__(*args, sampler=sampler, **options)
 
     def operation(self, fixture, *, hidden_capture=None, feature_capture=None):
@@ -141,6 +201,101 @@ class VerifierEngine(PairVerifierEngine):
         else:
             _log_once(('audit', rows), '%s exact=True rows=%d' % (AUDIT_MARKER, rows))
         return pinned
+
+    def copy_carry(self, operation, source):
+        """The inherited eager copies, unless QWEN_FAST_TP4_TRACED_PUBLISH has captured this engine's carry traces: then one replay.
+        The first save, which the base constructor makes last, runs eagerly and captures them (only while the engine is still being
+        built; an engine past its build never captures)."""
+        traces = getattr(self, 'carry_traces', False)
+        if traces is False:
+            return super().copy_carry(operation, source)
+        if traces is None:
+            super().copy_carry(operation, source)
+            if operation == 'save' and getattr(self, 'phase', None) == 'preparing':
+                self.capture_carry_traces()
+            return
+        if self.slot_addresses() != self.carry_addresses:
+            raise ValueError('Carried GDN state moved under the engine')
+        logging = os.environ.get('QWEN_FAST_CARRY_LOG') == '1'
+        request, layers = str(self.session.request_id)[:48], len(self.carry)
+        if logging:
+            carry_log_line('[CARRY] op={op} request={request}{origin} layers={layers} begin traced=1', op=operation,
+                request=request, origin='' if source is None else ' from=' + source, layers=layers)
+        started = time.perf_counter()
+        if self.carry_trace_audit:
+            self.audited_carry_copy(operation)
+        else:
+            self.operations.execute_trace(self.mesh, traces[operation], cq_id=0, blocking=False)
+        enqueued = time.perf_counter()
+        if logging:
+            self.operations.synchronize_device(self.mesh)
+            carry_log_line('[CARRY] op={op} request={request} layers={layers} enqueue_ms={enqueue:.1f} fence_ms={fence:.1f} traced=1',
+                op=operation, request=request, layers=layers, enqueue=(enqueued - started) * 1000,
+                fence=(time.perf_counter() - enqueued) * 1000)
+
+    def eager_carry_copy(self, operation):
+        for helper, slot in zip(self.helpers, self.carry, strict=True):
+            getattr(helper, operation)(slot)
+
+    def capture_carry_traces(self):
+        problem = carry_trace_problem(self.helpers, self.carry)
+        request = str(self.session.request_id)[:48]
+        if problem is not None:
+            self.carry_traces = False
+            verify_trace_t1.log_line('%s request=%s: %s' % (TRACED_DECLINED, request, problem))
+            return
+        operations, traces = self.operations, {}
+        try:
+            # The save just ran; the restore has not. An identity warm (carry was seeded from slot zero a moment ago and nothing
+            # ran between), so every program is compiled before its capture and the live bytes are unchanged.
+            self.eager_carry_copy('restore')
+            operations.synchronize_device(self.mesh)
+            for operation in ('save', 'restore'):
+                traces[operation], unused = capture_operation(operations, self.mesh,
+                    lambda operation=operation: self.eager_carry_copy(operation))
+        except BaseException:
+            for trace in traces.values():
+                operations.release_trace(self.mesh, trace)
+            self.carry_traces = False
+            raise
+        operations.synchronize_device(self.mesh)
+        self.carry_traces = traces
+        verify_trace_t1.log_line('%s request=%s layers=%d audit=%d' % (TRACED_ENGAGED, request, len(self.carry),
+                                                                      int(self.carry_trace_audit)))
+
+    def carry_destination(self, operation):
+        if operation == 'save':
+            return [value for slot in self.carry for value in slot]
+        return [value for helper in self.helpers for value in helper.live]
+
+    def carry_readback(self, tensors):
+        return [[self.operations.to_torch(part) for part in self.operations.get_device_tensors(tensor)] for tensor in tensors]
+
+    def audited_carry_copy(self, operation):
+        """The trace, then the eager loop over the same destination: bytes read back between and after must be equal on every chip.
+        The eager bytes stand either way."""
+        destination = self.carry_destination(operation)
+        self.operations.execute_trace(self.mesh, self.carry_traces[operation], cq_id=0, blocking=False)
+        self.operations.synchronize_device(self.mesh)
+        traced = self.carry_readback(destination)
+        self.eager_carry_copy(operation)
+        self.operations.synchronize_device(self.mesh)
+        eager = self.carry_readback(destination)
+        differing = sum(1 for left, right in zip(traced, eager, strict=True) for a, b in zip(left, right, strict=True)
+                        if not _bits_equal(a, b))
+        total = sum(len(parts) for parts in traced)
+        self.carry_audit_checked += total
+        self.carry_audit_mismatches += differing
+        verify_trace_t1.log_line('%s op=%s checked=%d mismatches=%d' % (TRACED_AUDIT, operation, total, differing))
+
+    def close(self):
+        traces = getattr(self, 'carry_traces', False)
+        if isinstance(traces, dict) and getattr(self, 'phase', None) in ('idle', 'preparing', 'failed'):
+            self.operations.synchronize_device(self.mesh)
+            for trace in traces.values():
+                self.operations.release_trace(self.mesh, trace)
+            self.carry_traces = False
+        super().close()
 
     def proposal_rows(self, packed_rows=None):
         """QWEN_FAST_BUDGET_CAP: while any budget is left the engine answers its widest capture the

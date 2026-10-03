@@ -1,0 +1,35 @@
+# The order of the four-card tp4/tpub window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window (its product is data).
+# Image: the tag of the tt-vllm image the jobs serve (tp4-tpub-1 is a PLACEHOLDER for ONE FRESH tag), built from the pushed tp4/tpub commit by B0, a build-only job (C2_ACTIONS=build, no card opened) that runs FIRST while production serves; the driver substitutes it in every template; a reused tag is skipped by the build step and would silently serve an old image.
+# Minutes: runner time for ONE run of the job, a quad reset (1 to 3 min) included.
+#
+# WHAT THIS WINDOW TESTS. The traced publication of the sequential (lone-user) step at four cards (docs/tp4-tpub.md): the 48 eager launches of the per-step GDN carry save, and of the restore a resident-engine switch pays,
+# replay one captured trace each (QWEN_FAST_TP4_TRACED_PUBLISH, audited by QWEN_FAST_TP4_TRACED_PUBLISH_AUDIT). The packed block's publication is already traced in the combined best (the fused commit, QWEN_FAST_FUSED_COMMIT) and is the base here,
+# not the subject. The timed arm is c2-packed-tp4-best-strace-tpub, c2-packed-tp4-best-strace plus the one flag (test_tp4_tpub_window holds that). It is a different thing from QWEN_FAST_TRACED_PUBLISH, the eager history-write cut,
+# which stays OFF in every profile here.
+# NOTHING IN THIS WINDOW HAS RUN ON A CARD: the carry trace has never been captured on hardware, never audited, and never run beside the in-trace sampler recipe.
+#
+# B0 RUNS FIRST, BEFORE A0: A0 takes production down, so the image must already exist; without B0 the card jobs fail at their docker run with production down.
+# PRODUCTION IS LIVE ON THE CARDS WHEN THE WINDOW OPENS. The window opens with the placement removed through the admin API (the owner go-ahead and an admin token), and
+# its FIRST production job is A0 (after B0): status, agentstop (stops the node agent and the serving container it started) and unserve. Every later job resets the cards first.
+# THE WINDOW CLOSES WITH S4 AND A HAND-BACK THAT IS NOT IN ANY JOB FILE: S4 is status, the all-four reset, the fabric re-measure and agentstart (the node agent started again,
+# nothing placed); then the OWNER runs /deploy to place today production recipe. Never place a gate arm, and never include the deploy in a template.
+# S4 is always last and it runs even when a stop job halts the window: a stall leaves the cards hung until its reset.
+#
+# Early-failure order, cheapest first. S1 is the audited smoke (bit-for-bit comparison of every traced carry copy with the eager one, every chip, every copy). S2a to S2c are THREE audits-off runs of the hang shapes on the timed
+# arm, each after its own reset: three consecutive completions are the allocation-order evidence (the request engine build captures two more traces), and one stall restarts the count and stops the window. Only then S3a to S3d, the paired
+# timing ABAB on coding prompts: S3a (best-strace, the control) S3b (the tpub arm) S3c (control) S3d (arm), judged PAIRED per step, never by unpaired medians. Both timed arms carry the sampler-in-trace hang fix, because with the
+# verify audits off and no hang fix the traffic profile deadlocks. A hang on a timed arm is a finding.
+#
+# Durations (estimate): B0 18 (90 at worst, production serving), A0 15, S1 100, S2 three times 40, S3 four times 60, S4 25. Stop jobs A0 to S2: about 4 h worst case, 3 h expected; the timing adds 4 h.
+B0-build stop tp4-tpub-1 30
+A0-agentstop stop tp4-tpub-1 15
+S1-audited-smoke stop tp4-tpub-1 100
+S2a-hang-shapes-tpub-strace stop tp4-tpub-1 40
+S2b-hang-shapes-tpub-strace stop tp4-tpub-1 40
+S2c-hang-shapes-tpub-strace stop tp4-tpub-1 40
+S3a-best-timed optional tp4-tpub-1 60
+S3b-tpub-timed optional tp4-tpub-1 60
+S3c-best-timed optional tp4-tpub-1 60
+S3d-tpub-timed optional tp4-tpub-1 60
+S4-handback-reset stop tp4-tpub-1 25
