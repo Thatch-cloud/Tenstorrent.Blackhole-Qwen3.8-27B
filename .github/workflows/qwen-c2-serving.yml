@@ -450,6 +450,46 @@ jobs:
           echo "node agent stopped ($state)" >> "$RUNNER_TEMP/c2-results/agent.log"
           echo "=== inference containers (the unserve step removes them)"
           docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}' | grep '^thatch-inference-' || echo none
+      - name: Dump the serving bundle tree (image copy, no card)
+        if: contains(steps.job.outputs.actions, 'bundledump')
+        shell: bash
+        run: |
+          # Card-free: docker create (never start) on the local P8 base image, docker cp of the runtime bundle trees and the
+          # native-cache manifest into one directory, tarred for its own one-day artifact (the next step). No device is opened.
+          set +e
+          out="${{ runner.temp }}/bundledump-${{ github.run_id }}"
+          rm -rf "$out"; mkdir -p "$out/bundle" && chmod 777 "$out"
+          image=qwen-fast-serving:ci-be9e184e672756c8eee040f03e48dbff58e68fda
+          if ! docker image inspect "$image" > /dev/null 2>&1; then
+            image=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E '^qwen-fast-serving:ci-be9e184e' | head -1)
+          fi
+          echo "bundledump image: ${image:-none}"
+          if [ -z "$image" ]; then echo "bundledump: P8 base image not present"; exit 1; fi
+          echo "$image" > "$out/IMAGE_USED.txt"
+          cid=$(docker create "$image")
+          if [ -z "$cid" ]; then echo "bundledump: docker create failed"; exit 1; fi
+          for p in /experiment-scripts /experiment-optimisation /speculative-decoding /opt/qwen-serving /tmp/native-cache-manifest.json /opt/qwen-c2; do
+            name=$(echo "$p" | sed 's|^/||; s|/|__|g')
+            if docker cp "$cid:$p" "$out/bundle/$name" 2>"$out/cp-$name.err"; then echo "copied $p"; else echo "absent in image: $p"; echo "$p" >> "$out/ABSENT.txt"; fi
+          done
+          for p in /tmp/qwen-runtime.so /tmp/native-cache-manifest.json; do
+            docker cp "$cid:$p" - 2>/dev/null | tar -tv 2>/dev/null | sed "s|^|listing $p: |"
+          done
+          docker rm "$cid" > /dev/null
+          find "$out/bundle" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null
+          find "$out/bundle" \( -name '*.pyc' -o -name '*.so' \) -type f -delete 2>/dev/null
+          find "$out" -name '*.err' -size 0 -delete
+          (cd "$out" && tar -czf bundle.tar.gz bundle && sha256sum bundle.tar.gz && ls -l bundle.tar.gz)
+          (cd "$out" && find bundle -type f -printf '%s %p\n' | sort -k2 | head -5000)
+          exit 0
+      - name: Upload the bundle dump (its own artifact, one day)
+        if: always() && contains(steps.job.outputs.actions, 'bundledump')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: bundledump-${{ github.run_id }}
+          path: ${{ runner.temp }}/bundledump-${{ github.run_id }}
+          retention-days: 1
+          if-no-files-found: ignore
       - name: Platform serving container (read-only)
         if: contains(steps.job.outputs.actions, 'platform')
         shell: bash
