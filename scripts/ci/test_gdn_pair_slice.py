@@ -451,7 +451,7 @@ class ProfileTests(unittest.TestCase):
             self.assertNotIn(SLICE, env_of(name), name)
             self.assertNotIn(DIAG, env_of(name), name)
         flagged = sorted(name for name, body in PROFILES.items() if SLICE in body['env'] or DIAG in body['env'])
-        self.assertEqual(flagged, sorted([TIMED_ARM, AUDITED_ARM, DIAG_ARM]))
+        self.assertEqual(flagged, sorted([TIMED_ARM, AUDITED_ARM, DIAG_ARM, 'c2-packed-tp4-best-ship-glue', 'c2-packed-tp4-best-strace-glue', 'c2-packed-tp4-best-gate-glue']))
 
 
 class SmokeCheckTests(unittest.TestCase):

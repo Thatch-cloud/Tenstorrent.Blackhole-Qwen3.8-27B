@@ -211,7 +211,7 @@ class ProfileTests(unittest.TestCase):
 
     def test_production_the_image_and_every_other_profile_are_untouched(self):
         for name, profile in PROFILES.items():
-            if name not in (ARM, AUDITED):
+            if name not in (ARM, AUDITED, 'c2-packed-tp4-best-ship-tpub'):
                 self.assertNotIn(FLAG, profile['env'], name)
                 self.assertNotIn(AUDIT, profile['env'], name)
         self.assertEqual(env_of(PRODUCTION)['QWEN_FAST_FUSED_COMMIT'], '0')

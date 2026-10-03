@@ -106,6 +106,8 @@ SEATS8_PROFILES = ('c2-packed-tp4-8', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-t
                    'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard')
 # tp4/next-4 (test_tp4_next4 holds each as its base plus exact deltas): the traffic candidate, its warm4 twin and the eight-seat levers arm.
 NEXT4_PROFILES = ('c2-packed-tp4-best-ship', 'c2-packed-tp4-best-ship-warm4', 'c2-packed-tp4-8-best')
+# tp4/next-5 (test_tp4_next5 holds each as its base plus exact deltas): the tpub and pair-slice traffic candidates and the pair-slice gate twins.
+NEXT5_PROFILES = ('c2-packed-tp4-best-ship-tpub', 'c2-packed-tp4-best-ship-glue', 'c2-packed-tp4-best-strace-glue', 'c2-packed-tp4-best-gate-glue')
 # The GDN glue quick wins (tp4/gluefix, test_gdn_pair_slice holds the rule): the timed and diagnostic arms are c2-packed-tp4-speed-strace plus exactly one flag
 # (same exemptions as the cheap twins); the audited arm is c2-packed-tp4-gate plus the flag and the vglue audit (a four-card profile that may carry the audit).
 CHEAP_PROFILES = CHEAP_PROFILES + ('c2-packed-tp4-speed-strace-pairslice', 'c2-packed-tp4-speed-strace-dispatchdiag')
@@ -359,7 +361,7 @@ class TailProfileTests(unittest.TestCase):
 
     def test_the_caps_are_absent_from_every_profile_that_predates_them(self):
         for name, profile in profiles().items():
-            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES) + tuple(SAMPLER_PROFILES) + tuple(RSHARD_PROFILES) + BEST_PROFILES + CHEAP_PROFILES + WARM4_PROFILES + NEXT3_PROFILES + SEATS8_PROFILES + NEXT4_PROFILES + tuple(TPUB_PROFILES):
+            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES) + tuple(SAMPLER_PROFILES) + tuple(RSHARD_PROFILES) + BEST_PROFILES + CHEAP_PROFILES + WARM4_PROFILES + NEXT3_PROFILES + SEATS8_PROFILES + NEXT4_PROFILES + NEXT5_PROFILES + tuple(TPUB_PROFILES):
                 self.assertNotIn('QWEN_FAST_BUDGET_CAP', profile['env'], name)
                 self.assertNotIn('QWEN_FAST_SEQ_DEADLINE_S', profile['env'], name)
 
@@ -582,7 +584,7 @@ class DraftProfileTests(unittest.TestCase):
         found = profiles()
         on = sorted(name for name, profile in found.items() if profile['env'].get(QUAD) == '1'
                     and profile['env'].get('QWEN_FAST_TP') == '4')
-        on = [name for name in on if name not in NEXT4_PROFILES]
+        on = [name for name in on if name not in NEXT4_PROFILES + NEXT5_PROFILES]
         self.assertEqual(on, ['c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-gate-tpub', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-best-strace-tpub', 'c2-packed-tp4-gate-fcommit-quad',
                               'c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-quad'])
         self.assertEqual([name for name in on if 'fcommit' not in name and 'best' not in name],
@@ -652,7 +654,7 @@ class SamplerProfileTests(unittest.TestCase):
         for name, profile in profiles().items():
             if name not in SAMPLER_PROFILES:
                 self.assertNotIn(PREWARM, profile['env'], name)
-                if name != 'c2-packed-tp4' and name not in CHEAP_PROFILES + NEXT3_PROFILES + SEATS8_PROFILES + NEXT4_PROFILES + tuple(TPUB_PROFILES):
+                if name != 'c2-packed-tp4' and name not in CHEAP_PROFILES + NEXT3_PROFILES + SEATS8_PROFILES + NEXT4_PROFILES + NEXT5_PROFILES + tuple(TPUB_PROFILES):
                     self.assertNotIn(IN_TRACE, profile['env'], name)
         # tp4-serve-7: production is the strace arm's recipe (audits off, sampler in the verify trace, no prewarm)
         env = profiles()['c2-packed-tp4']['env']
@@ -789,7 +791,7 @@ class TpubProfileTests(unittest.TestCase):
     def test_no_other_profile_nor_the_image_carries_the_flags_and_production_is_unchanged(self):
         found = profiles()
         for name, profile in found.items():
-            if name not in TPUB_PROFILES:
+            if name not in TPUB_PROFILES and name != 'c2-packed-tp4-best-ship-tpub':
                 self.assertNotIn(TPUB, profile['env'], name)
                 self.assertNotIn(TPUB_AUDIT, profile['env'], name)
         self.assertNotIn(TPUB, image_env())
@@ -828,10 +830,10 @@ class FusedCommitProfileTests(unittest.TestCase):
         found = profiles()
         on = sorted(name for name, profile in found.items() if profile['env'].get(FUSED) == '1'
                     and profile['env'].get('QWEN_FAST_TP') == '4')
-        on = [name for name in on if name not in NEXT4_PROFILES]
+        on = [name for name in on if name not in NEXT4_PROFILES + NEXT5_PROFILES]
         self.assertEqual(on, FUSED_FAMILY)
         for name, profile in found.items():
-            if name not in FUSED_FAMILY + list(NEXT4_PROFILES) and profile['env'].get('QWEN_FAST_TP') == '4':
+            if name not in FUSED_FAMILY + list(NEXT4_PROFILES + NEXT5_PROFILES) and profile['env'].get('QWEN_FAST_TP') == '4':
                 for flag in (FUSED, INPLACE, LIVE, AUDIT):
                     self.assertEqual(profile['env'].get(flag, '0'), '0', (name, flag))
 
@@ -947,7 +949,7 @@ class VglueProfileTests(unittest.TestCase):
         image = image_env()
         flags = (C1A, V4A, V2, V1, V3A, VGLUE_AUDIT)
         for name, profile in found.items():
-            if name in VGLUE_PROFILES or name in BEST_HANG_FIX or name in NEXT4_PROFILES or name in TPUB_PROFILES or name in GLUEFIX_AUDITED:
+            if name in VGLUE_PROFILES or name in BEST_HANG_FIX or name in NEXT4_PROFILES + NEXT5_PROFILES or name in TPUB_PROFILES or name in GLUEFIX_AUDITED:
                 self.assertEqual(profile['env']['QWEN_FAST_TP'], '4', name)
                 continue
             for flag in flags:
