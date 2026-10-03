@@ -645,7 +645,8 @@ class FastServingLifecycle:
         # Round-fence plan H1a: every Lever N chunk, whichever GDN slot it writes, bumps the
         # packed fixture write epoch (a pre-staged verify then restages in full).
         note_fixture_writer('prefill-chunk')
-        if self.levern is not None:
+        levern = getattr(self, 'levern', None)
+        if levern is not None:
             cached = scheduled.scheduled_cached_reqs
             begun = int(list(cached.num_computed_tokens)[0])
             self._levern_announce(self.request_id, begun, begun + int(scheduled.num_scheduled_tokens[self.request_id]),
@@ -654,7 +655,8 @@ class FastServingLifecycle:
             with self.capture.segment():
                 result = self.original_execute(scheduled)
         finally:
-            self._levern_withdraw()
+            if levern is not None:
+                self._levern_withdraw()
         self._displace_after_continuation()
         return self._after_prefill_chunk(result, False)
 

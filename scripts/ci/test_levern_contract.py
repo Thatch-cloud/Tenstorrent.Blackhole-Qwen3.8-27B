@@ -79,7 +79,7 @@ class ProfileTests(unittest.TestCase):
                 self.assertIs(profile['gate_only'], True)
                 self.assertEqual(profile['env']['QWEN_FAST_262K_EVIDENCE_WAIVER'], '1')
                 self.assertIn('UNQUALIFIED', profile['description'])
-                self.assertIn(BASE[name], profile['description'])
+                self.assertIn(BASE[name] if name not in (HOLD, FOREIGN) else TIMED, profile['description'])
         self.assertEqual(json.loads(PROFILES.read_text(encoding='utf-8'))['default'], 'c2-packed-tp4')
 
     def test_the_chunked_arms_keep_the_budget_equal_to_the_window_so_only_the_cap_splits(self):

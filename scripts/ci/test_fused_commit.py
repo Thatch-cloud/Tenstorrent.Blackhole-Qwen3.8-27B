@@ -1565,8 +1565,8 @@ class ParentTests(unittest.TestCase):
         if result.returncode != 0:
             self.skipTest('no git history for %s' % PARENT)
         before = result.stdout.decode('utf-8').splitlines()
-        after = without_trace_census(without_diag_trim(without_prefill_scratch(without_any_request(without_sticky(
-            without_solo_and_lanes(without_m3_blocks(without_request_warm((HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines()))))))))
+        after = without_trace_census(without_levern(without_diag_trim(without_prefill_scratch(without_any_request(without_sticky(
+            without_solo_and_lanes(without_m3_blocks(without_request_warm((HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines())))))))))
         changed = [line for line in difflib.unified_diff(before, after, lineterm='', n=0)
                    if line[:1] in '+-' and not line.startswith(('+++', '---'))]
         added = [line[1:].strip() for line in changed if line.startswith('+')]
@@ -1893,6 +1893,16 @@ def without_request_warm(lines):
     text = cut(text, '    # QWEN_FAST_M3_REQUEST_WARM: the widths to warm', '    # Measurement-only, env-gated admission of one named', True)
     text = cut(text, '        if request_widths and not m3_blocks_two:\n', "        # The device step. By default the sequential one", True)
     return text.split('\n')
+
+
+def without_levern(lines):
+    """serving_runtime.py less Lever N's attach block (tp4/lever-n: the route's install and warm under QWEN_FAST_LEVER_N / QWEN_FAST_LEVERN_AUDIT, never
+    imported otherwise), which landed after this parent: the one contiguous block from its flag test to the warm call, found once."""
+    start = [index for index, value in enumerate(lines) if value.strip().startswith("if os.environ.get('QWEN_FAST_LEVER_N', '0') != '0'")]
+    if len(start) != 1:
+        raise AssertionError('Lever N attach block is not in serving_runtime.py exactly once')
+    end = next(index for index in range(start[0], len(lines)) if lines[index].strip() == 'levern_route.warm(runner, model, log=pindiag)')
+    return lines[:start[0]] + lines[end + 1:]
 
 
 def without_trace_census(lines):

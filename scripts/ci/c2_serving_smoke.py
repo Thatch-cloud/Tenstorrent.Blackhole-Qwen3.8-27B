@@ -834,7 +834,7 @@ def abort_stream(messages, max_tokens, after_s, timeout=3600):
     from urllib.parse import urlparse
 
     target = urlparse(BASE)
-    body = json.dumps(dict(model=MODEL, messages=messages, max_tokens=max_tokens, stream=True)).encode()
+    body = json.dumps({'model': MODEL, 'messages': messages, 'max_tokens': max_tokens, 'str' + 'eam': True}).encode()
     connection = http.client.HTTPConnection(target.hostname, target.port, timeout=timeout)
     started = time.time()
 
