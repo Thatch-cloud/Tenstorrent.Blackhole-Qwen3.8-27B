@@ -69,6 +69,16 @@ attach proceeds, so the first four-card rounds can run at all. Every other condi
 and kernels, the tree-scratch patch) still refuses. tp_guard is the same rule applied by serving_request_factory's attach
 source check, so a process that never reaches admit cannot serve four cards on the pair's evidence either.
 
+A 262,144-TOKEN WINDOW (QWEN_FAST_MAX_POSITION=262144, the c2-packed-tp4-8x262k profiles; page-table width 4,096). The same
+admission at the second capacity, behind its OWN evidence and never the 131,328 record: packed_any_evidence_tp4_262144.json at its own
+pin (EVIDENCE_TP4_262K_SHA256), whose CB1 (K1 plus the 196,864 and 262,144 families), CB2a (K2 2,030 tickets, X7 600, Z 900, K2/X7
+over the 131k families plus the full window) and CB2b (R2 over the named families plus 262,144, capacity 262,144) are the design set
+at that capacity (capacity_design), AND ordered_writer_evidence_tp4.json (E1: page_width_tp4 admits width 4,096). Either record
+failing refuses the attach, in a gate run too: the gate-only UNQUALIFIED waiver is the 131,328 record's alone and is never applied
+at 262,144 (a 262k gate arm exercises the machinery, it never runs on the 131k evidence). The capacity is QWEN_FAST_MAX_POSITION
+rounded up to a whole 64-key page (unset: 131,328, exactly today's path and today's passed line); any other capacity is refused by
+name. admit_pool then holds the pool to the admitted capacity (pool.page_width * 64).
+
 Stdlib only at import: the image build runs this module's in-image test (check_runtime on /opt/tt-metal).
 """
 
@@ -177,6 +187,21 @@ CB2B_IDLE_STARTS = (0, 32)
 # liveness = live.
 CB2B_COUNTS = ('R1', 'S', 'R2', 'R4', 'liveness')
 
+# THE SECOND CAPACITY. The design set by served capacity (capacity_design): the 131,328 entry is exactly the constants above.
+CAPACITY_131K = CB2B_CAPACITY
+CAPACITY_262K = 262144
+CAPACITIES = (CAPACITY_131K, CAPACITY_262K)
+CAPACITY_ENV = 'QWEN_FAST_MAX_POSITION'
+K2_SWEEP_TICKETS = 173                                          # k64j_card_b.K2_SWEEP (128, 300): every start of families 256 and 512
+K1_EXTENTS_262K = K1_EXTENTS + (196864, 262144)
+CB2_EXTENTS_262K = CB2_EXTENTS + (CAPACITY_262K,)
+CB2B_R2_NAMED_262K = CB2B_R2_NAMED + (CAPACITY_262K,)
+CB2A_K2_TICKETS_262K = len(SEEDS) * len(CB2A_VARIANTS) * (K2_SWEEP_TICKETS + len(CB2_EXTENTS_262K) * len(CB2_STARTS))      # 2,030
+X7_FLOOR_262K = len(CB2_EXTENTS_262K) * len(CB2_STARTS) * len(SEEDS) * len(CB2A_VARIANTS) * 2                          # 600
+# The 262,144 record and its own pin, a skeleton until E2 records its sections (a name the 131k recorder's repin never matches).
+EVIDENCE_TP4_262K = HERE / 'packed_any_evidence_tp4_262144.json'
+EVIDENCE_TP4_262K_SHA256 = 'a244df64be5566bab75aa64530ce5283b57d1ec0590a83dc5eb595aeb5bac3b7'
+
 _STATE = {}
 
 
@@ -202,11 +227,15 @@ def qualified_sources(tp):
     return QUALIFIED_SOURCES if tp == tp_shapes.PAIR else QUALIFIED_SOURCES_TP4
 
 
-def evidence_path(tp):
+def evidence_path(tp, capacity=CAPACITY_131K):
+    if capacity == CAPACITY_262K:
+        return EVIDENCE_TP4_262K
     return EVIDENCE if tp == tp_shapes.PAIR else EVIDENCE_TP4
 
 
-def evidence_pin(tp):
+def evidence_pin(tp, capacity=CAPACITY_131K):
+    if capacity == CAPACITY_262K:
+        return EVIDENCE_TP4_262K_SHA256
     return EVIDENCE_SHA256 if tp == tp_shapes.PAIR else EVIDENCE_TP4_SHA256
 
 
@@ -419,11 +448,46 @@ def _cover(problems, section, key, wanted, what):
         problems.append('%s: %s lack %s' % (what, key, missing))
 
 
-def _cb1_problems(cb1, problems, flag=CB1_FLAG):
+def capacity_design(capacity):
+    """The design set the evidence must cover at a served capacity: K1's families, K2's and X7's families, K2's ticket count, X7's
+    and Z's floors, and CB2b's named R2 families. 131,328 is exactly the constants above; 262,144 adds the families that reach
+    the full window (K1 196,864 and 262,144; K2/X7 and R2 262,144). ValueError for any other capacity."""
+    if capacity == CAPACITY_131K:
+        return dict(capacity=capacity, k1_extents=K1_EXTENTS, cb2_extents=CB2_EXTENTS, k2_tickets=CB2A_K2_TICKETS,
+                    x7_floor=X7_FLOOR, z_floor=Z_FLOOR, r2_named=CB2B_R2_NAMED)
+    if capacity == CAPACITY_262K:
+        return dict(capacity=capacity, k1_extents=K1_EXTENTS_262K, cb2_extents=CB2_EXTENTS_262K,
+                    k2_tickets=CB2A_K2_TICKETS_262K, x7_floor=X7_FLOOR_262K, z_floor=Z_FLOOR, r2_named=CB2B_R2_NAMED_262K)
+    raise ValueError('capacity %r is not one this admission has evidence for (%s)' % (capacity, ', '.join(map(str, CAPACITIES))))
+
+
+def served_capacity(environ=None):
+    """The window this process serves: QWEN_FAST_MAX_POSITION rounded up to a whole 64-key page; 131,328 when unset or empty
+    (today's path, byte for byte). ValueError naming the variable for anything that is not a positive decimal integer."""
+    value = (os.environ if environ is None else environ).get(CAPACITY_ENV, '')
+    if value == '':
+        return CAPACITY_131K
+    if not value.isdigit() or int(value) < 1 or str(int(value)) != value:
+        raise ValueError('%s must be a positive decimal integer, got %r' % (CAPACITY_ENV, value))
+    return -(-int(value) // 64) * 64
+
+
+def capacity_problem(capacity):
+    """The refusal text for a capacity this admission has no evidence for; None when it has."""
+    if capacity in CAPACITIES:
+        return None
+    return ('capacity %d (%s=%s) is neither %d nor %d: this admission has evidence for those two windows only'
+            % (capacity, CAPACITY_ENV, capacity, CAPACITY_131K, CAPACITY_262K))
+
+
+def _cb1_problems(cb1, problems, flag=CB1_FLAG, design=None):
+    design = design or capacity_design(CAPACITY_131K)
     _cover(problems, cb1, 'seeds', SEEDS, 'CB1')
-    missing = _missing(cb1.get('extents'), K1_EXTENTS)
+    missing = _missing(cb1.get('extents'), design['k1_extents'])
     if missing:
         problems.append('CB1: extents lack K1\'s %s' % missing)
+    if design['capacity'] != CAPACITY_131K and cb1.get('capacity') != design['capacity']:
+        problems.append('CB1: capacity %s, not the served C = %d' % (cb1.get('capacity'), design['capacity']))
     combos = cb1.get('combos') or []
     if not any(isinstance(combo, dict) and combo.get('geometry') == 'G8B2' and flag in (combo.get('flags') or [])
                for combo in combos):
@@ -434,36 +498,44 @@ def _cb1_problems(cb1, problems, flag=CB1_FLAG):
             problems.append('CB1: %s %s is not a full pass' % (key, counts.get(key)))
 
 
-def _cb2a_problems(cb2a, problems):
+def _cb2a_problems(cb2a, problems, design=None):
+    design = design or capacity_design(CAPACITY_131K)
     _cover(problems, cb2a, 'seeds', SEEDS, 'CB2a')
     _cover(problems, cb2a, 'variants', CB2A_VARIANTS, 'CB2a')
+    if design['capacity'] != CAPACITY_131K:
+        if cb2a.get('capacity') != design['capacity']:
+            problems.append('CB2a: capacity %s, not the served C = %d' % (cb2a.get('capacity'), design['capacity']))
+        _cover(problems, cb2a, 'cb2_extents', design['cb2_extents'], 'CB2a')
     k2 = cb2a.get('k2') or {}
     if k2.get('verdict') != 'PASS':
         problems.append('CB2a: K2 verdict %s, not PASS (a failed or coverage-reduced K2 leaves the exactness '
                         'policy to the user, design 6.1 D-c)' % k2.get('verdict'))
-    if not _full(k2.get('tickets'), CB2A_K2_TICKETS):
+    if not _full(k2.get('tickets'), design['k2_tickets']) or (_count(k2.get('tickets')) or (0, 0))[1] != design['k2_tickets']:
         problems.append('CB2a: K2 tickets %s, not a full pass of the %d the design asks' % (k2.get('tickets'),
-                                                                                         CB2A_K2_TICKETS))
+                                                                                         design['k2_tickets']))
     if not _full(k2.get('rows')):
         problems.append('CB2a: K2 rows %s are not all bitwise equal' % k2.get('rows'))
-    if not _full(cb2a.get('x7'), X7_FLOOR):
-        problems.append('CB2a: X7 %s, not a full pass of the %d the design asks' % (cb2a.get('x7'), X7_FLOOR))
+    if not _full(cb2a.get('x7'), design['x7_floor']):
+        problems.append('CB2a: X7 %s, not a full pass of the %d the design asks' % (cb2a.get('x7'), design['x7_floor']))
     z = cb2a.get('z') or {}
-    if not _full(z.get('passed'), Z_FLOOR):
-        problems.append('CB2a: Z %s, not a full pass of the %d the design asks' % (z.get('passed'), Z_FLOOR))
+    if not _full(z.get('passed'), design['z_floor']):
+        problems.append('CB2a: Z %s, not a full pass of the %d the design asks' % (z.get('passed'), design['z_floor']))
     missing = _missing(z.get('families'), Z_FAMILIES)
     if missing:
         problems.append('CB2a: Z families lack %s of the 15 below 4096' % missing)
 
 
-def _cb2b_problems(cb2b, sources, problems, chips=CB2B_CHIPS, source_names=QUALIFIED_SOURCES):
+def _cb2b_problems(cb2b, sources, problems, chips=CB2B_CHIPS, source_names=QUALIFIED_SOURCES, design=None):
+    design = design or capacity_design(CAPACITY_131K)
+    # the 131,328 record is held to CB2B_CAPACITY itself (the card-less evidence chain narrows it to its fake runs' capacity)
+    capacity = CB2B_CAPACITY if design['capacity'] == CAPACITY_131K else design['capacity']
     if cb2b.get('scope') != CB2B_SCOPE:
         problems.append('CB2b: scope %s, not full (a reduced run - the watcher pass, one seed - is never CB2b\'s '
                         'evidence)' % cb2b.get('scope'))
     if cb2b.get('chips') not in chips:
         problems.append('CB2b: chips %s, not the harness\'s %s' % (cb2b.get('chips'), '/'.join(chips)))
-    if cb2b.get('capacity') != CB2B_CAPACITY:
-        problems.append('CB2b: capacity %s, not the served C = %d' % (cb2b.get('capacity'), CB2B_CAPACITY))
+    if cb2b.get('capacity') != capacity:
+        problems.append('CB2b: capacity %s, not the served C = %d' % (cb2b.get('capacity'), capacity))
     _cover(problems, cb2b, 'seeds', CB2B_SEEDS, 'CB2b')
     _cover(problems, cb2b, 'variants', CB2A_VARIANTS, 'CB2b')
     geometries = cb2b.get('r1_geometries') if isinstance(cb2b.get('r1_geometries'), dict) else {}
@@ -475,13 +547,13 @@ def _cb2b_problems(cb2b, sources, problems, chips=CB2B_CHIPS, source_names=QUALI
         if short:
             problems.append('CB2b: R1 %s lacks words %s' % (name, short))
     families = cb2b.get('r2_families')
-    if (not isinstance(families, list) or any(type(family) is not int or family % 256 or not 256 <= family <= CB2B_CAPACITY
+    if (not isinstance(families, list) or any(type(family) is not int or family % 256 or not 256 <= family <= capacity
                                               for family in families) or len(set(families)) != len(families)):
-        problems.append('CB2b: r2_families is not a list of distinct 256-key families up to %d' % CB2B_CAPACITY)
+        problems.append('CB2b: r2_families is not a list of distinct 256-key families up to %d' % capacity)
     else:
         if len(families) < CB2B_R2_MIN_FAMILIES:
             problems.append('CB2b: R2 replayed %d families, not more than 50' % len(families))
-        named = _missing(families, CB2B_R2_NAMED)
+        named = _missing(families, design['r2_named'])
         if named:
             problems.append('CB2b: R2 families lack the named %s' % named)
     _cover(problems, cb2b, 'idle_starts', CB2B_IDLE_STARTS, 'CB2b')
@@ -518,14 +590,22 @@ def _one_head_problems(sections, problems):
             problems.append('CB2b: the reader served %s, not %s (one KV head)' % (served.get('flags'), CB2B_SERVED_FLAGS_TP4))
 
 
-def evidence_problems(evidence, sources_root=HERE, tp=None):
+def evidence_problems(evidence, sources_root=HERE, tp=None, capacity=CAPACITY_131K):
     """Every reason the evidence does not qualify the extent path for these bytes; [] when it does. `tp` is the
     width the record is for (default: the width this process serves at); four cards read the reader twin's sha256,
-    a G8B2 0x23 CB1 combo, CB2b's 1of4 chip view, and one KV head in CB1, CB2a and CB2b (_one_head_problems)."""
+    a G8B2 0x23 CB1 combo, CB2b's 1of4 chip view, and one KV head in CB1, CB2a and CB2b (_one_head_problems).
+    `capacity` is the window the record is for (default 131,328, today's set; 262,144 only at four cards: the design set of
+    capacity_design, and the record names its capacity)."""
     tp = width() if tp is None else tp
     problems = []
     if not isinstance(evidence, dict) or evidence.get('schema') != EVIDENCE_SCHEMA:
         return ['the evidence is not a %s record' % EVIDENCE_SCHEMA]
+    design = capacity_design(capacity)
+    if capacity != CAPACITY_131K:
+        if tp == tp_shapes.PAIR:
+            return ['the %d-token window is a four-card window: there is no pair record for it' % capacity]
+        if evidence.get('capacity') != capacity:
+            problems.append('capacity: the record is for %s, not %d' % (evidence.get('capacity'), capacity))
     binary = evidence.get('binary') or {}
     if binary.get('ttnncpp_sha256') != K64J_TTNNCPP_SHA256:
         problems.append('binary: the evidence qualified %s, not K64j %s' % (str(binary.get('ttnncpp_sha256'))[:16],
@@ -546,24 +626,25 @@ def evidence_problems(evidence, sources_root=HERE, tp=None):
     for name in sorted(set(sections) - set(SECTIONS)):
         problems.append('%s: not a section this admission knows' % name)
     if _passed(sections.get('CB1'), 'CB1', problems):
-        _cb1_problems(sections['CB1'], problems, CB1_FLAG if tp == tp_shapes.PAIR else CB1_FLAG_TP4)
+        _cb1_problems(sections['CB1'], problems, CB1_FLAG if tp == tp_shapes.PAIR else CB1_FLAG_TP4, design)
     if _passed(sections.get('CB2a'), 'CB2a', problems):
-        _cb2a_problems(sections['CB2a'], problems)
+        _cb2a_problems(sections['CB2a'], problems, design)
     if _passed(sections.get('CB2b'), 'CB2b', problems):
         _cb2b_problems(sections['CB2b'], sources, problems,
-                       CB2B_CHIPS if tp == tp_shapes.PAIR else CB2B_CHIPS_TP4, qualified_sources(tp))
+                       CB2B_CHIPS if tp == tp_shapes.PAIR else CB2B_CHIPS_TP4, qualified_sources(tp), design)
     if tp != tp_shapes.PAIR:
         _one_head_problems(sections, problems)
     return problems
 
 
-def check_evidence(path=None, *, expected_sha256=None, sources_root=HERE, tp=None):
+def check_evidence(path=None, *, expected_sha256=None, sources_root=HERE, tp=None, capacity=CAPACITY_131K):
     """Item 4: the evidence file at its pinned sha256, and evidence_problems empty. Returns the parsed
     record; raises AdmissionRefused naming every problem (one entry each in its `problems`). The file and its pin
-    are the pair's or the four-card record's by `tp` (default: the width this process serves at)."""
+    are the pair's or the four-card record's by `tp` (default: the width this process serves at), or the 262,144-token
+    window's own (EVIDENCE_TP4_262K at EVIDENCE_TP4_262K_SHA256) by `capacity`."""
     tp = width() if tp is None else tp
-    expected_sha256 = evidence_pin(tp) if expected_sha256 is None else expected_sha256
-    path = Path(evidence_path(tp) if path is None else path)
+    expected_sha256 = evidence_pin(tp, capacity) if expected_sha256 is None else expected_sha256
+    path = Path(evidence_path(tp, capacity) if path is None else path)
     if not path.is_file():
         raise AdmissionRefused('the extent path has no evidence: %s is missing' % path,
                                ['evidence: %s is missing' % path.name])
@@ -577,9 +658,10 @@ def check_evidence(path=None, *, expected_sha256=None, sources_root=HERE, tp=Non
     except ValueError as error:
         raise AdmissionRefused('%s does not parse: %s' % (path.name, error),
                                ['evidence: %s does not parse: %s' % (path.name, str(error)[:120])])
-    problems = evidence_problems(evidence, sources_root, tp)
+    problems = evidence_problems(evidence, sources_root, tp, capacity)
     if problems:
-        raise AdmissionRefused('the evidence does not qualify the extent path: ' + '; '.join(problems),
+        raise AdmissionRefused('the evidence does not qualify the extent path%s: ' % (
+            '' if capacity == CAPACITY_131K else ' at capacity %d' % capacity) + '; '.join(problems),
                                ['evidence: %s' % problem for problem in problems])
     return evidence
 
@@ -600,6 +682,30 @@ def _log_unqualified(log, problems):
         log('{} ({}/{}): {}', UNQUALIFIED_MARKER, index, len(problems), problem)
 
 
+def check_window_262k(*, sources_root=HERE, evidence_path_=None, expected_sha256=None, writer_state=None):
+    """The 262,144-token window's prerequisites, none of them waivable: the window's own evidence record at its own pin
+    (check_evidence at capacity 262,144) and E1, the ordered writers' page-table width 4,096 (page_width_tp4). Returns the
+    parsed 262k record; raises AdmissionRefused naming every problem with the capacity."""
+    problems, record = [], None
+    try:
+        record = check_evidence(evidence_path_, expected_sha256=expected_sha256, sources_root=sources_root, tp=4,
+                                capacity=CAPACITY_262K)
+    except AdmissionRefused as refusal:
+        problems.extend('capacity %d: %s' % (CAPACITY_262K, problem) for problem in refusal.problems)
+    if writer_state is None:
+        import page_width_tp4
+
+        writer_state = page_width_tp4.evidence_state()
+    ok, writer_problems = writer_state
+    if not ok:
+        problems.extend('capacity %d: page-table width 4096 is not qualified (E1, ordered_writer_evidence_tp4.json): %s'
+                        % (CAPACITY_262K, problem) for problem in writer_problems)
+    if problems:
+        raise AdmissionRefused('the %d-token window has no qualifying evidence: %s' % (CAPACITY_262K, ' | '.join(problems)),
+                               problems)
+    return record
+
+
 def tp_guard(environ=None, *, log=None, sources_root=HERE):
     """The four-card rule for a process that has not reached admit (serving_request_factory.attach_source_check):
     at the pair nothing (returns None); at four cards the four-card record must qualify, or the process must be a
@@ -618,6 +724,10 @@ def tp_guard(environ=None, *, log=None, sources_root=HERE):
                                                                  '; '.join(refusal.problems)), refusal.problems)
         _log_unqualified(log, refusal.problems)
         return list(refusal.problems)
+    capacity = served_capacity(environ)
+    if capacity == CAPACITY_262K:
+        # The window's own evidence and E1, in a gate run too: the waiver above is the 131,328 record's alone.
+        check_window_262k(sources_root=sources_root)
     return []
 
 
@@ -641,6 +751,20 @@ def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evide
         problems.append('the runtime binary override admitted %s, not K64j' % str(binary_record.get('override'))[:16])
     tp = width(environ)
     record = dict(flag=FLAG, shape=m3[1])
+    capacity = CAPACITY_131K
+    try:
+        capacity = served_capacity(environ)
+    except ValueError as error:
+        problems.append(str(error))
+    else:
+        refusal_text = capacity_problem(capacity)
+        if refusal_text is not None:
+            problems.append(refusal_text)
+        elif capacity == CAPACITY_262K and tp == tp_shapes.PAIR:
+            problems.append('capacity %d is a four-card window: %s is not 4' % (capacity, tp_shapes.TP_SWITCH))
+    wide = capacity == CAPACITY_262K
+    if wide:
+        record['capacity'] = capacity
     # QWEN_FAST_M3_BLOCKS=2: the record and the passed line name the block count (and only then, so a one-block attach
     # reads and records exactly what it always did). A malformed value is already a problem of check_environment above.
     blocks = 1
@@ -649,16 +773,25 @@ def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evide
     except ValueError:
         pass
     suffix = '' if blocks == 1 else ' blocks=%d' % blocks
+    if wide:
+        suffix += ' capacity=%d' % capacity
     if blocks != 1:
         record['blocks'] = blocks
     unqualified = []
+    if wide:
+        window_check = lambda: check_window_262k(evidence_path_=evidence)
+    elif tp == tp_shapes.PAIR:
+        window_check = lambda: check_evidence(evidence)
+    else:
+        window_check = lambda: check_evidence(evidence, tp=tp)
     for name, check in (('runtime', lambda: check_runtime(runtime_root, (binary_record or {}).get('binaries'))),
-                        ('evidence', lambda: check_evidence(evidence) if tp == tp_shapes.PAIR
-                         else check_evidence(evidence, tp=tp))):
+                        ('evidence', window_check)):
+        if name == 'evidence' and capacity not in CAPACITIES:
+            continue                       # already refused by name above; there is no record to read for it
         try:
             record[name] = check()
         except AdmissionRefused as refusal:
-            if name == 'evidence' and unqualified_allowed(environ):
+            if name == 'evidence' and not wide and unqualified_allowed(environ):
                 unqualified.extend(refusal.problems)
                 record[name] = None
             else:
@@ -678,7 +811,7 @@ def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evide
     sections = record['evidence']['sections']
     log('{} passed: K64j {} x{}; kernels {}; evidence {}; CB1 {} CB2a {} CB2b {}; reader {}{}',
         MARKER, K64J_TTNNCPP_SHA256[:16], len(record['runtime']['binaries']),
-        ','.join(sha[:8] for _, sha in sorted(K64J_KERNELS.items())), evidence_pin(tp)[:16],
+        ','.join(sha[:8] for _, sha in sorted(K64J_KERNELS.items())), evidence_pin(tp, capacity)[:16],
         sections['CB1']['run'], sections['CB2a']['run'], sections['CB2b']['run'],
         ','.join(record['evidence']['sources'][name][:16] for name in qualified_sources(tp)), suffix)
     _STATE['record'] = record
@@ -716,6 +849,15 @@ def admit_pool(pool, *, log=None):
         _refuse(log, 'after the pool', ['the pool holds no extent storage (extent_replay %r): the block would '
                                         'serve the per-family path, not the admitted one'
                                         % (getattr(pool, 'extent_replay', None),)])
+    admitted_capacity = (_STATE.get('record') or {}).get('capacity')
+    if admitted_capacity is not None:
+        # A window other than 131,328 was admitted (the record names it): the pool's table must be exactly that wide - a pool
+        # built at the 131k width under the 262k admission (or the reverse) is the evidence's geometry on another one.
+        page_width = getattr(pool, 'page_width', None)
+        if type(page_width) is not int or page_width * 64 != admitted_capacity:
+            _refuse(log, 'after the pool', ['the pool\'s page table is %r pages (%r keys), not the admitted capacity %d (%d pages)'
+                                            % (page_width, page_width * 64 if type(page_width) is int else None,
+                                               admitted_capacity, admitted_capacity // 64)])
     return admit_statistics(pool, log=log)
 
 

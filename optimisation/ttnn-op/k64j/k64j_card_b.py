@@ -199,6 +199,16 @@ MIN_LIVE_START = 128                                    # the admission floor (d
 K2_SWEEP = (128, 300)                                   # every ticket start in it (families 256 and 512)
 K2_FLOOR = (100, 127)                                   # recorded: the floor's other side
 CB2_EXTENTS = (2304, 4352, 16640, 65792, 131328)        # K2's and X7's families
+CAPACITY_262K = 262144                                  # the 262k window's table: 4,096 pages of 64 keys (E2)
+CB2_EXTENTS_262K = CB2_EXTENTS + (CAPACITY_262K,)       # its K2 / X7 families: the 131k set and the full window
+
+
+def cb2_extents_for(capacity):
+    """The K2 / X7 design families at a served capacity: the 131,328 set, plus the full window at 262,144; any other capacity
+    is not a served one and has no design set (None)."""
+    return {CAPACITY: CB2_EXTENTS, CAPACITY_262K: CB2_EXTENTS_262K}.get(capacity)
+
+
 CB2_STARTS = (0, 7, 127, 240, 255)                      # s mod 256 of their tickets
 Z_FAMILIES = tuple(range(K_CHUNK, 4096, K_CHUNK))       # the 15 families with E / 256 < 16 cores per head
 IDLE_STARTS = (0, 32)                                   # an idle segment's start: page 0, tile row 0 or 1
@@ -642,9 +652,11 @@ def k2_coverage(report):
     CB2_EXTENTS x CB2_STARTS, for each seed of K2_DESIGN_SEEDS and variant of K2_DESIGN_VARIANTS): how many of those
     (seed, variant, ticket) a k2_native_vs_extent comparison covered, `full` only when every one was, and `short`, the
     dimensions that fell short ('seeds', 'variants', 'sweep', 'family'; 'combinations' when each is present somewhere
-    but not in every combination)."""
+    but not in every combination). The families are the report's capacity's design set (cb2_extents_for: 131,328, the default
+    when the report names none, or 262,144 with the full window as a sixth family: 2,030 tickets instead of 1,980)."""
+    extents = cb2_extents_for(report.get('capacity', CAPACITY)) or CB2_EXTENTS
     tickets = [('sweep', start) for start in range(K2_SWEEP[0], K2_SWEEP[1] + 1)]
-    tickets += [('family', extent, offset) for extent in CB2_EXTENTS for offset in CB2_STARTS]
+    tickets += [('family', extent, offset) for extent in extents for offset in CB2_STARTS]
     design = {(seed, variant) + ticket for seed in K2_DESIGN_SEEDS for variant in K2_DESIGN_VARIANTS
               for ticket in tickets}
     got = set()
@@ -734,6 +746,9 @@ def verdict_line(report):
     decision = report['decision']
     counts = tally(report.get('comparisons', []))
     words = [CARD, 'verdict=%s' % decision['verdict']]
+    if report.get('capacity') == CAPACITY_262K:
+        # Only the 262,144 window is named, so every other line (131,328, and the small test capacities) is what it always was.
+        words.append('capacity=%d' % CAPACITY_262K)
 
     def part(name, kinds):
         runs = sum(counts.get(kind, {}).get('runs', 0) for kind in kinds)

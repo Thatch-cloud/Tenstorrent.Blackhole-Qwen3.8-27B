@@ -189,7 +189,7 @@ class MemoryAtEightSeatsTests(unittest.TestCase):
 
 
 class RunMemoryWantsTheSeatsTests(unittest.TestCase):
-    """run_memory must judge the engine lines against the PROFILE's seats, not the four-user default."""
+    """run_memory judges the engine lines against the streams the ARM asks for (--users: the profile's seats by default, fewer for M9a), not the four-user default."""
 
     def run_it(self, seats, engines):
         from unittest import mock
@@ -200,7 +200,7 @@ class RunMemoryWantsTheSeatsTests(unittest.TestCase):
         runner.arms = {}
         runner.profile = 'p'
         with mock.patch.object(driver, 'run_arm', return_value=report), mock.patch.object(driver, 'arm_problems', return_value=[]):
-            return driver.run_memory('memory', runner, [('memory', ['--users', '8'], 100)])
+            return driver.run_memory('memory', runner, [('memory', ['--users', str(seats)], 100)])
 
     def test_four_engine_lines_do_not_pass_an_eight_seat_profile(self):
         result = self.run_it(8, 4)

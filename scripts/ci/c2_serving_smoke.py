@@ -233,15 +233,18 @@ def code_corpus():
     return real_text_prompts.build_corpus(root), real_text_prompts.TASKS
 
 
-def code_prompts(targets):
-    """One real-code prompt per target token count (about: characters at CODE_CHARS_PER_TOKEN). User i reads its own disjoint
+def code_prompts(targets, chars_per_token=None):
+    """One real-code prompt per target token count (about: characters at CODE_CHARS_PER_TOKEN, or at `chars_per_token`: one number
+    for all or a list, one per prompt - fitted_code_prompts calibrates it against the server). User i reads its own disjoint
     window of the corpus (from i * len // users, as real_text_prompts does) inside the repository framing, then a code task
     from real_text_prompts.TASKS (each asks for a long answer, so no user ends early and thins the rounds)."""
     (corpus, info), tasks = code_corpus()
+    ratios = (list(chars_per_token) if isinstance(chars_per_token, (list, tuple))
+              else [CODE_CHARS_PER_TOKEN if chars_per_token is None else chars_per_token] * len(targets))
     prompts = []
     for index, target in enumerate(targets):
         start = index * len(corpus) // len(targets)
-        excerpt = corpus[start:start + int(target * CODE_CHARS_PER_TOKEN)]
+        excerpt = corpus[start:start + int(target * ratios[index])]
         prompts.append('<repository_context>\n%s\n</repository_context>\n\n%s' % (excerpt, tasks[index % len(tasks)]))
     return prompts, dict(files=info['files'], characters=info['characters'])
 
@@ -486,6 +489,130 @@ def concurrent8_code_32k():
     return dict(run_users('concurrent8_code_32k', prompts), corpus=corpus)
 
 
+def server_tokens(prompt):
+    """The server's own token count of a prompt (POST /tokenize, vLLM's OpenAI server), or None where it cannot say (no endpoint,
+    a failure): the rig host has no tokenizer, and a character estimate at CODE_CHARS_PER_TOKEN is only an estimate."""
+    try:
+        status, body = post('/tokenize', dict(model=MODEL, messages=[{'role': 'user', 'content': prompt}]), timeout=600)
+    except Exception:
+        return None
+    if status == 200 and isinstance(body, dict) and isinstance(body.get('count'), int):
+        return body['count']
+    return None
+
+
+def fitted_code_prompts(targets, tolerance=0.01, rounds=4):
+    """code_prompts calibrated to the SERVER's token counts: each prompt is rebuilt at the characters-per-token its own count
+    showed until it is within `tolerance` of its target and never above it (a prompt over the profile's limit is a 400, not a
+    measurement). Where the server cannot count (server_tokens is None) the estimate stands and `calibrated` says so. Returns
+    (prompts, corpus info, dict(calibrated, counts, targets, ratios))."""
+    ratios = [CODE_CHARS_PER_TOKEN] * len(targets)
+    prompts, corpus = code_prompts(targets, ratios)
+    counts = [server_tokens(prompt) for prompt in prompts]
+    calibrated = all(count is not None for count in counts)
+    for _ in range(rounds if calibrated else 0):
+        pending = [index for index, (count, target) in enumerate(zip(counts, targets))
+                   if count > target or count < target * (1 - tolerance)]
+        if not pending:
+            break
+        for index in pending:
+            # the characters each token cost this prompt, aimed at the target (a hair under it when it was over)
+            ratios[index] = ratios[index] * targets[index] / counts[index] * (0.998 if counts[index] > targets[index] else 1.0)
+        prompts, corpus = code_prompts(targets, ratios)
+        counts = [server_tokens(prompt) for prompt in prompts]
+        calibrated = all(count is not None for count in counts)
+        if not calibrated:
+            break
+    return prompts, corpus, dict(calibrated=calibrated, counts=counts, targets=list(targets),
+                                 ratios=[round(ratio, 4) for ratio in ratios])
+
+
+def concurrent8_code_128k():
+    # Opt-in (tp4/seats262k). Eight real-code prompts of about 120,000 tokens AS THE SERVER COUNTS THEM (fitted_code_prompts: /tokenize,
+    # never above the target), a code task each, 800 out, started together. About 120,000 and not 131,072: the 131k time-gate profile's
+    # room is 131,072 less the answer, so the same arm runs on the 131k and the 262k eight-seat profiles for the paired timing
+    # (the 262k round must cost at most 1.03 x the 131k one), and the 262k profile reads the deep per-seat rate: 8 x 120,800 tokens
+    # reserve 15,112 blocks of its pool, so every seat is live at once.
+    prompts, corpus, fit = fitted_code_prompts((DEEP_PROMPT_TOKENS,) * 8)
+    return dict(run_users('concurrent8_code_128k', prompts), corpus=corpus, fit=fit)
+
+
+DEEP_PROMPT_TOKENS = 120000
+STALL_SHORT_SEATS = 7
+STALL_SHORT_TOKENS = 4096
+STALL_SHORT_BUDGET = 6000
+STALL_COLD_TOKENS = 253920
+STALL_WARM_CHUNKS = 12              # each decoding seat streams this many chunks before the cold prompt arrives
+
+
+def longest_gap(stamps, after=None):
+    """(the longest gap in seconds between consecutive delta stamps, the stamp it began at); `after` keeps only the gaps that end
+    after that time (the cold arrival's). (None, None) with fewer than two stamps."""
+    best, at = None, None
+    for first, second in zip(stamps, stamps[1:]):
+        if after is not None and second <= after:
+            continue
+        if best is None or second - first > best:
+            best, at = second - first, first
+    return (round(best, 3), round(at, 3)) if best is not None else (None, None)
+
+
+def stall8_cold262k():
+    # Opt-in (tp4/seats262k). The stall shape of a cold 262k arrival: seven users decode 4k prompts (ignore_eos, 6,000-token budgets,
+    # so they outlast the arrival's prefill), and once each has streamed STALL_WARM_CHUNKS chunks an eighth user arrives with a
+    # 253,920-token prompt. Recorded, not gated: the arrival's time to first token, and every decoding seat's longest inter-token gap
+    # from the arrival on (the prefill's admission freeze: a long prefill holds the gate and no live user decodes).
+    prompts, corpus = code_prompts((STALL_SHORT_TOKENS,) * STALL_SHORT_SEATS)
+    cold, cold_corpus, fit = fitted_code_prompts((STALL_COLD_TOKENS,))
+    out = [None] * (STALL_SHORT_SEATS + 1)
+    streaming = [threading.Event() for _ in range(STALL_SHORT_SEATS)]
+    arrival = dict(at=None)
+
+    def run(index, prompt, budget, event=None, **extra):
+        counted = dict(chunks=0)
+
+        def seen(count):
+            counted['chunks'] = count
+            if event is not None and count >= STALL_WARM_CHUNKS:
+                event.set()
+
+        try:
+            out[index] = stream([{'role': 'user', 'content': prompt}], budget, timeout=3600, keep_stamps=True, on_token=seen,
+                                **extra)
+        except Exception as error:
+            out[index] = dict(error=repr(error)[:300])
+        finally:
+            if event is not None:
+                event.set()
+
+    threads = [threading.Thread(target=run, args=(index, prompts[index], STALL_SHORT_BUDGET, streaming[index]),
+                                kwargs=dict(ignore_eos=True)) for index in range(STALL_SHORT_SEATS)]
+    [thread.start() for thread in threads]
+    for event in streaming:
+        event.wait(3600)
+    arrival['at'] = time.time()
+    cold_thread = threading.Thread(target=run, args=(STALL_SHORT_SEATS, cold[0], 200))
+    cold_thread.start()
+    [thread.join() for thread in threads + [cold_thread]]
+    gaps = []
+    for index in range(STALL_SHORT_SEATS):
+        user = out[index] if isinstance(out[index], dict) else {}
+        gap, began = longest_gap(user.pop('delta_stamps', None) or [], after=arrival['at'])
+        gaps.append(dict(seat=index, longest_gap_s=gap, began_at=began, tokens=user.get('tokens'), error=user.get('error')))
+    newcomer = out[STALL_SHORT_SEATS] if isinstance(out[STALL_SHORT_SEATS], dict) else {}
+    newcomer.pop('delta_stamps', None)
+    worst = max([gap['longest_gap_s'] for gap in gaps if gap['longest_gap_s'] is not None] or [None]) if any(
+        gap['longest_gap_s'] is not None for gap in gaps) else None
+    print('stall8_cold262k arrival_ttft_s', arrival_ttft(newcomer), 'worst_gap_s', worst, flush=True)
+    return dict(users=out, corpus=corpus, fit=fit, arrival_started_at=round(arrival['at'], 3),
+                arrival_ttft_s=arrival_ttft(newcomer), arrival_prompt_tokens=newcomer.get('prompt_tokens'),
+                seat_gaps=gaps, longest_gap_s=worst)
+
+
+def arrival_ttft(newcomer):
+    return newcomer.get('ttft') if isinstance(newcomer, dict) else None
+
+
 DRAIN_BUDGETS = (200, 400, 600, 800, 1000, 1200, 1400, 1600)
 SPLIT_BUDGETS = (1600, 1600, 1600, 1600, 1200, 400)
 SPLIT_CHUNKS = 60           # user 4's streamed chunks (about one per engine step, so rounds, NOT tokens: a lone user drafts 4 rows and
@@ -558,6 +685,10 @@ if ONLY and 'concurrent8_code_equal' in ONLY:
     record('concurrent8_code_equal', concurrent8_code_equal)
 if ONLY and 'concurrent8_code_32k' in ONLY:
     record('concurrent8_code_32k', concurrent8_code_32k)
+if ONLY and 'concurrent8_code_128k' in ONLY:
+    record('concurrent8_code_128k', concurrent8_code_128k)
+if ONLY and 'stall8_cold262k' in ONLY:
+    record('stall8_cold262k', stall8_cold262k)
 if ONLY and 'replay_concurrent8' in ONLY:
     record('replay_concurrent8', replay_concurrent8)
 if ONLY and 'concurrent5_split' in ONLY:

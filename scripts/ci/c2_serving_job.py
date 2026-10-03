@@ -48,6 +48,8 @@ Keys (every one optional but C2_IMAGE_TAG):
                       ladder, whose top rung the gate lowers to what the image's profile admits)
   C2_GATE_MAX_TOKENS  the matrix's answer budget per user (default 4096)
   C2_GATE_MEMORY_PROMPT  G5's prompt length (default: the profile's largest admitted prompt)
+  C2_GATE_MEMORY_USERS   G5's concurrent streams (default, rendered empty: the profile's seats; M9a runs ONE cold 253,920-token prompt on an
+                      eight-seat 262k profile); never more than the profile's seats
   C2_REPLAY_PROFILE   the profile the replay's container serves (default: the source container's)
   C2_REPLAY_SERVED_MODEL  the model id the replay's /v1/models must advertise and its requests after
                       the warmup name, org/name[:tag] (default, rendered empty: c2_platform_replay.py's,
@@ -404,6 +406,7 @@ def read_job(values, profiles, root=ROOT, meshes=None):
         if values.get('C2_GATE_MAX_TOKENS') else DEFAULT_MAX_TOKENS
     memory_prompt = positive_int('C2_GATE_MEMORY_PROMPT', values['C2_GATE_MEMORY_PROMPT']) \
         if values.get('C2_GATE_MEMORY_PROMPT') else ''
+    memory_users = positive_int('C2_GATE_MEMORY_USERS', values['C2_GATE_MEMORY_USERS'])         if values.get('C2_GATE_MEMORY_USERS') else ''
     replay_profile = values.get('C2_REPLAY_PROFILE', '')
     if replay_profile and replay_profile not in profiles:
         raise JobError('C2_REPLAY_PROFILE %r is not a profile of qwen_c2_profiles.json' % replay_profile)
@@ -428,7 +431,7 @@ def read_job(values, profiles, root=ROOT, meshes=None):
     outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), rmi_tags=rmi_tags, tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
-                   gate_memory_prompt=str(memory_prompt), replay_profile=replay_profile,
+                   gate_memory_prompt=str(memory_prompt), gate_memory_users=str(memory_users), replay_profile=replay_profile,
                    replay_served_model=replay_served_model, replay_budget_smoke=budget_smoke, cardm_harness=cardm_harness, cardm_args=cardm_args,
                    cardm_env=cardm_env, bake_default_profile=bake_profile)
     outputs.update(s2)

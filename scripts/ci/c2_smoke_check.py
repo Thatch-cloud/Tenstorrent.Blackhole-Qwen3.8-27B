@@ -70,7 +70,11 @@ SOLO_TEST = 'concurrent4_solo'
 REPLAY_TEST = 'replay_concurrent4'
 # The eight-seat tests (tp4/seats8: QWEN_FAST_M3_BLOCKS=2), judged as the four-user ones are: every user a stream that ends in tokens,
 # the code ones code answers too; the eight-user replay is judged as the four-user one.
-EIGHT_TESTS = ('concurrent8_code_equal', 'concurrent8_code_32k', 'concurrent5_split', 'concurrent8_drain', 'concurrent8_steady')
+EIGHT_TESTS = ('concurrent8_code_equal', 'concurrent8_code_32k', 'concurrent8_code_128k', 'concurrent5_split', 'concurrent8_drain',
+               'concurrent8_steady')
+# The 262k stall shape (tp4/seats262k): seven decoding users and one cold 253,920-token arrival; its numbers are recorded, not gated, but
+# every stream must end in tokens (the arrival's too) and the arrival's time to first token must exist.
+STALL_TEST = 'stall8_cold262k'
 REPLAY_TESTS = (REPLAY_TEST, 'replay_concurrent8')
 # Four-user streamed tests: their users get the stream rules; the code ones are code answers too (TEXT_TESTS).
 CONCURRENT_TESTS = ('concurrent4', 'concurrent4_v164order', 'concurrent4_steady', 'concurrent4_code', 'concurrent4_code_equal',
@@ -302,6 +306,16 @@ def smoke_problems(results, container_text=''):
                 problems += stream_problems('%s user %d' % (name, index), user)
                 if name in TEXT_TESTS:
                     problems += answer_problems('%s user %d' % (name, index), user)
+    stall = results.get(STALL_TEST)
+    if isinstance(stall, dict) and 'error' not in stall:
+        for index, user in enumerate(stall.get('users') or []):
+            problems += stream_problems('%s user %d' % (STALL_TEST, index), user)
+        if not isinstance(stall.get('arrival_ttft_s'), (int, float)):
+            problems.append('%s: the cold arrival has no time to first token' % STALL_TEST)
+        if not stall.get('seat_gaps'):
+            problems.append('%s: no seat gap was recorded' % STALL_TEST)
+    elif isinstance(stall, dict):
+        problems.append('%s: %s' % (STALL_TEST, stall['error']))
     for replay in REPLAY_TESTS:
         if replay in results and 'error' not in results[replay]:
             for index, user in enumerate(results[replay].get('users') or []):

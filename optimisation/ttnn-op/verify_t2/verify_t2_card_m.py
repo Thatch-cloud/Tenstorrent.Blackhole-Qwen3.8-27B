@@ -1503,7 +1503,7 @@ def parse_args(argv=None):
     parser.add_argument('--harness-dir', type=Path, default=Path('/bench/vt2-harness'))
     parser.add_argument('--image-ci', type=Path, default=Path('/experiment-scripts/ci'))
     parser.add_argument('--runtime-files', default='verify_trace_t2.py,gdn_conv_windows_packed.py,'
-                                                   'gdn_conv_windows_packed.cpp,packed_ordered_cache.py')
+                                                   'gdn_conv_windows_packed.cpp,packed_ordered_cache.py,page_width_tp4.py')
     parser.add_argument('--expect', action='append', default=[], help='name=sha256 of the checkout copy')
     parser.add_argument('--device-id', type=int, default=0)
     parser.add_argument('--seeds', default=','.join(map(str, SEEDS)))

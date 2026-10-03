@@ -82,6 +82,10 @@ scripts/ci/serving_request_quarantine.py
 # fast path's own scheduler_cls): serving_lifecycle installs it beside the quarantine under
 # QWEN_FAST_ANY_REQUEST (run 36211578069).
 scripts/ci/serving_prefill_admission.py
+# KV reservation admission (QWEN_FAST_KV_RESERVATION=1, the 262k-window profiles): serving_prefill_admission's wrapper holds a fresh prompt whose
+# worst-case blocks do not fit what the running requests have reserved, and serving_c2_contract refuses one no pool could serve. New: no older
+# layer holds it. Both importers import it lazily, only under the flag.
+scripts/ci/serving_kv_reservation.py
 
 # Stage 1 and 2 of the C2 serving plan change these. Overlaid since before stage 1 landed, so the
 # route was proven before a change depended on it; serving_lifecycle now carries D2 and D4.
@@ -160,6 +164,9 @@ scripts/ci/packed_any_evidence.json
 # The four-card record (QWEN_FAST_TP=4), read from the same directory at its own pin: a skeleton until the card windows record
 # its sections, so admission refuses a four-card attach except in a gate run.
 scripts/ci/packed_any_evidence_tp4.json
+# The 262,144-token window's own record (QWEN_FAST_MAX_POSITION=262144), at its own pin (EVIDENCE_TP4_262K_SHA256): a skeleton until the E2
+# windows record its sections, so a 262,144 attach is refused - a gate run included - and the 131,328 record above is never touched.
+scripts/ci/packed_any_evidence_tp4_262144.json
 # S2 B6: the extent block (packed_verifier, overlaid above) imports publication_warm at attach and publishes the
 # drafter's eager publication once at every shape serving can ask of it, so a refused fused commit or a sequential
 # step compiles nothing after attach. New: no older layer holds it, so without this line the extent block's attach
@@ -270,6 +277,12 @@ scripts/ci/attention_mask_replay_tp.py
 scripts/ci/attention_parallel_tp.py
 scripts/ci/ordered_cache_tp.py
 scripts/ci/packed_ordered_cache.py
+# 262,144-token windows (page-table width 4,096): both writers above ask page_width_tp4.admitted, which adds 4,096 to the pinned
+# ordered_cache answer ONLY at four cards on a passing E1 record at its pin. The record ships as a PENDING skeleton (4,096 refused).
+scripts/ci/page_width_tp4.py
+# verify_trace_t2.RUNTIME_FILES now names page_width_tp4.py (packed_ordered_cache imports it): the P8 image's copy is older.
+scripts/ci/verify_trace_t2.py
+scripts/ci/ordered_writer_evidence_tp4.json
 scripts/ci/serving_cache_owner.py
 # The drafter at one 8-query / 2-KV-head shard per chip (S2T-07, host side): the fc feature projection over four 1,280-column
 # taps, the GQA validation and native SDPA call at the width's heads, the head layout, K/V projection, MLP shards and gate /

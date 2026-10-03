@@ -270,10 +270,12 @@ class PlanTests(unittest.TestCase):
             # Every limit the contract's boot reads from the profile (request_limits), as it installs them.
             kwargs = dict(max_model_len=context, eos_ids=frozenset(profile['eos_ids']),
                           **contract.request_limits(profile))
+            # a profile past the drafter's last position names drafter_headroom_tokens: the clamp's window is context less it
+            headroom = kwargs.get('drafter_headroom_tokens', 0)
             with self.subTest(profile=name):
                 params = Params()
                 params.max_tokens = ceiling + 1000
-                contract.enforce_request(params, prompt_tokens=min(room, context - ceiling), **kwargs)
+                contract.enforce_request(params, prompt_tokens=min(room, context - headroom - ceiling), **kwargs)
                 self.assertEqual(params.max_tokens, ceiling, 'a budget past the ceiling is cut without a word')
                 contract.enforce_request(Params(), prompt_tokens=room, **kwargs)
                 with self.assertRaises(contract.ContractError):
@@ -287,7 +289,7 @@ class PlanTests(unittest.TestCase):
         self.assertEqual([name for name in sorted(CHECKOUT_PROFILES['profiles'])
                           if driver.any_request_profile(CHECKOUT_PROFILES, name)],
                          ['c2', 'c2-gate', 'c2-packed', 'c2-packed-gate', 'c2-packed-prefix', 'c2-packed-prefix-gate',
-                          'c2-packed-tp4', 'c2-packed-tp4-8', 'c2-packed-tp4-8-best', 'c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-diag-strace', 'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate', 'c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-gate-glue', 'c2-packed-tp4-best-gate-tpub', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-ship', 'c2-packed-tp4-best-ship-glue', 'c2-packed-tp4-best-ship-tpub', 'c2-packed-tp4-best-ship-warm4', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-best-strace-glue', 'c2-packed-tp4-best-strace-tpub', 'c2-packed-tp4-diag',
+                          'c2-packed-tp4', 'c2-packed-tp4-262k-gate', 'c2-packed-tp4-8', 'c2-packed-tp4-8-best', 'c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-diag-strace', 'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate', 'c2-packed-tp4-8x262k', 'c2-packed-tp4-8x262k-diag-strace', 'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate', 'c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-gate-glue', 'c2-packed-tp4-best-gate-tpub', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-ship', 'c2-packed-tp4-best-ship-glue', 'c2-packed-tp4-best-ship-tpub', 'c2-packed-tp4-best-ship-warm4', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-best-strace-glue', 'c2-packed-tp4-best-strace-tpub', 'c2-packed-tp4-diag',
                           'c2-packed-tp4-diag-rshard', 'c2-packed-tp4-diag-sprewarm', 'c2-packed-tp4-diag-strace', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t1-rshard-audit', 'c2-packed-tp4-diag-t2',
                           'c2-packed-tp4-f12', 'c2-packed-tp4-f2', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-draftwide',
                           'c2-packed-tp4-gate-fcommit', 'c2-packed-tp4-gate-fcommit-live', 'c2-packed-tp4-gate-fcommit-quad',

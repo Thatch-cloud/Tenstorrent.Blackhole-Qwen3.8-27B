@@ -256,6 +256,29 @@ def largest_buffer_bytes(environ=None):
     return tuned_bytes('QWEN_FAST_DRAM_LARGEST_BUFFER_MB', LARGEST_BUFFER_BYTES, environ)
 
 
+# THE LONG-PREFILL TIER (tp4/seats8-262k, B5; optional): a 253,920-token prefill may need more DRAM beside the blocks than a 2,048-token one, and the flat
+# PREFILL_TRANSIENT_BYTES charges every prompt of PREFILL_TRANSIENT_FROM tokens or more the same. With BOTH flags set - the prompt length from which the tier
+# applies (whole tokens, at least PREFILL_TRANSIENT_FROM) and its transient in whole megabytes per chip - a prompt at or past that length is charged the tier's
+# bytes instead of the flat ones, and a shorter one the flat ones as ever. With both unset (every profile today) prefill_transient is exactly what it was; one
+# without the other, or a value that is not a whole number, is refused (ValueError), never read as unset. Read at each decision, never at import.
+LONG_FROM_FLAG = 'QWEN_FAST_DRAM_PREFILL_LONG_FROM'
+LONG_MB_FLAG = 'QWEN_FAST_DRAM_PREFILL_LONG_MB'
+
+
+def long_prefill_tier(environ=None):
+    """(from_tokens, bytes) of the long-prefill tier, or None when both flags are unset; ValueError for any other state."""
+    environ = os.environ if environ is None else environ
+    start, size = environ.get(LONG_FROM_FLAG), environ.get(LONG_MB_FLAG)
+    if start is None and size is None:
+        return None
+    if start is None or size is None:
+        raise ValueError('%s and %s are set together or not at all' % (LONG_FROM_FLAG, LONG_MB_FLAG))
+    text = start.strip()
+    if not text.isascii() or not text.isdigit() or int(text) < PREFILL_TRANSIENT_FROM:
+        raise ValueError('%s must be a whole number of tokens of at least %d, got %r' % (LONG_FROM_FLAG, PREFILL_TRANSIENT_FROM, start))
+    return int(text), tuned_bytes(LONG_MB_FLAG, 0, environ)
+
+
 def tuning_problems(environ=None):
     """What is wrong with the tuning flags in `environ`, one string each; [] when every set one parses."""
     problems = []
@@ -264,6 +287,10 @@ def tuning_problems(environ=None):
             tuned_bytes(flag, 0, environ)
         except ValueError as failure:
             problems.append(str(failure))
+    try:
+        long_prefill_tier(environ)
+    except ValueError as failure:
+        problems.append(str(failure))
     return problems
 
 
@@ -316,9 +343,15 @@ def _reserve(reserve):
 
 def prefill_transient(prompt_tokens):
     """The prefill's transient per chip: prefill_transient_bytes() (PREFILL_TRANSIENT_BYTES unless the profile tunes it)
-    from PREFILL_TRANSIENT_FROM tokens on (a length that cannot be read counts as long), none below."""
+    from PREFILL_TRANSIENT_FROM tokens on (a length that cannot be read counts as long), none below; and from the long-prefill
+    tier's length on (long_prefill_tier, both of its flags set) the tier's bytes instead."""
     long_prompt = type(prompt_tokens) is not int or prompt_tokens >= PREFILL_TRANSIENT_FROM
-    return prefill_transient_bytes() if long_prompt else 0
+    if not long_prompt:
+        return 0
+    tier = long_prefill_tier()
+    if tier is not None and (type(prompt_tokens) is not int or prompt_tokens >= tier[0]):
+        return tier[1]                # an unreadable length counts as long here too
+    return prefill_transient_bytes()
 
 
 def dram_need(prompt_tokens, reserve):
@@ -625,6 +658,18 @@ def dram_hold(scheduler, decodes, state, log, modules=None):
     return True
 
 
+KV_FLAG = 'QWEN_FAST_KV_RESERVATION'
+
+
+def kv_reservation_requested(environ=None):
+    """QWEN_FAST_KV_RESERVATION, strictly (serving_kv_reservation.enabled's rule, read here so that an image without that module
+    still schedules as before while the flag is off): unset or '0' off, '1' on, anything else refused (ValueError)."""
+    value = (os.environ if environ is None else environ).get(KV_FLAG, '0')
+    if value not in ('0', '1'):
+        raise ValueError('%s must be 0 or 1, got %r' % (KV_FLAG, value))
+    return value == '1'
+
+
 def decode_steps_per_admission(environ=None):
     """R, the decode-only steps owed after an admission (STEPS_FLAG): a whole number from 0 to MAX_STEPS in plain
     digits, 0 when unset. Anything else is a configuration error, not a silent 0."""
@@ -677,9 +722,11 @@ def new_state():
     return dict(live=False, seen=set(), dram_held=None, dram_noted=None, credit=0, asked=False)
 
 
-def wrap(original, *, queue_factory, log, steps=None, state=None):
+def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None):
     """The wrapper installed as <class>._schedule_prefill_only around `original`. `steps` is R, the decode credit
-    (decode_steps_per_admission() when None); `state` is shared with the schedule() wrapper (wrap_schedule)."""
+    (decode_steps_per_admission() when None); `state` is shared with the schedule() wrapper (wrap_schedule); `kv` is
+    serving_kv_reservation (QWEN_FAST_KV_RESERVATION=1: install() passes it), None for every profile that does not turn the
+    reservation on, whose steps are then exactly what they were."""
     steps = decode_steps_per_admission() if steps is None else steps
     if type(steps) is not int or steps < 0:
         raise ValueError('A non-negative integer decode credit is required, got %r' % (steps,))
@@ -698,6 +745,13 @@ def wrap(original, *, queue_factory, log, steps=None, state=None):
                 state['credit'] = 0
             elif state['credit'] and not hide:
                 allowed, hide, credit_held = 0, True, True
+        # KV RESERVATION (QWEN_FAST_KV_RESERVATION=1, serving_kv_reservation): asked first, when this step would admit a fresh
+        # prompt, so a prompt whose worst-case blocks do not fit what is unreserved waits as behind a held gate - before the
+        # DRAM is even read. Never lifted: with nothing running the pool is empty and any request the contract admitted fits.
+        kv_held = (kv is not None and not hide and waiting_capacity(self.max_num_running_reqs, decodes, allowed) > 0
+                   and kv.hold(self, admission_candidates(self), decodes, state, log))
+        if kv_held:
+            allowed, hide = 0, True
         # S2 W6b: asked only when this step would admit a fresh prompt - nothing in flight, the gate free and a
         # seat free (with every seat decoding the waiting loop admits nobody, and nothing is asked or logged).
         # When the prompt does not fit the DRAM left, it waits as behind a held gate.
@@ -745,6 +799,8 @@ def wrap(original, *, queue_factory, log, steps=None, state=None):
         if dram_held:
             # S2 W6b: the pass the plugin is about to discard took the finished ids; its decode-only pass carries them.
             carry_finished(self, result, decodes, log)
+        elif kv_held:
+            carry_finished(self, result, decodes, log, kv.CARRIED_LINE)
         elif credit_held:
             carry_finished(self, result, decodes, log, CREDIT_CARRIED_LINE)
         elif steps and not hide and allowed and getattr(result, 'total_num_scheduled_tokens', 0):
@@ -799,9 +855,20 @@ def install(config, *, importer=importlib.import_module, log=None, queue_factory
     schedule = getattr(cls, 'schedule', None)
     if steps and not callable(schedule):
         raise ValueError('%s has no schedule: the decode credit cannot see its decode-only steps' % name)
+    kv = None
+    if kv_reservation_requested():
+        # QWEN_FAST_KV_RESERVATION=1: the reservation rule (serving_kv_reservation, overlay only), on the vLLM it was proved
+        # against; a vLLM that moved the pool's count refuses the install by name, before anything is wrapped.
+        import serving_kv_reservation as kv
+
+        problems = kv.install_check()
+        if problems:
+            raise ValueError('%s=1 cannot be installed on %s: %s' % (kv.FLAG, name, '; '.join(problems)))
     state = new_state()
-    setattr(cls, METHOD, wrap(original, queue_factory=queue_factory, log=log, steps=steps, state=state))
+    setattr(cls, METHOD, wrap(original, queue_factory=queue_factory, log=log, steps=steps, state=state, kv=kv))
     log(INSTALLED + '{}', name)
+    if kv is not None:
+        log(kv.INSTALLED_LINE, name)
     if steps:
         setattr(cls, 'schedule', wrap_schedule(schedule, state))
         log(CREDIT_INSTALLED_LINE, name, steps)

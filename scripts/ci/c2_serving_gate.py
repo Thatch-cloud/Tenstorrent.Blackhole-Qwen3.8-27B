@@ -245,6 +245,7 @@ MEMORY_SHORT_PROMPT = 60
 # The one-fresh-prefill cap (serving_prefill_admission) logs ADMISSION_LIVE_PREFIX + the class from its
 # first prefill step (the platform warmup). Without it the TTScheduler batches simultaneous arrivals into
 # one step and the lifecycle kills the engine (run 36211578069), so every arm under the switch must show it.
+KV_RESERVATION_FLAG = 'QWEN_FAST_KV_RESERVATION'
 ANY_REQUEST_FLAG = 'QWEN_FAST_ANY_REQUEST'
 QUARANTINE_LIVE_PREFIX = '[PINDIAG] request quarantine consumer live in '
 QUARANTINE_LIVE = QUARANTINE_LIVE_PREFIX + 'TTScheduler'
@@ -375,12 +376,31 @@ CHURN_LENGTHS_8 = (110000, 120000, 123136, 110000, 120000, 123136, 110000, 12000
 CHURN_MAX_TOKENS_8 = (768, 1024, 1280, 1536, 768, 1024, 1280, 1536, 768, 1024, 1280, 1536, 768, 1024, 1280, 2304)
 
 
-def churn_defaults(seats):
+# THE 262,144-TOKEN WINDOW (tp4/seats8-262k, B6). The ladders of the L9 jobs, the contract's prompt limit being 261,856 (262,112 less the
+# gate's 256 tokens of answer room) on the gate profiles: LADDER4_262K is the four-seat gate's (one KV block each, 16,384 blocks all
+# resident), LADDER8_262K the eight-seat one's - four rungs more, 200,000 and 253,920 among them - whose reservations total 15,135 blocks
+# of the 21,759 usable, so no hold is expected and every seat is judged on its own text. CHURN_262K is C9's: sixteen users over
+# eight seats (eight replacements), the longest first and a short last, every budget 1,024 so the departures spread; six of the long
+# ones reserve 21,384 blocks and fit, the seventh would reserve 23,450 and is HELD by the reservation admission - the churn must see
+# that hold and its release (run_churn), or it is NOT_EXERCISED.
+WINDOW_262K = 262144
+LADDER4_262K = (4096, 32768, 131072, 261856)
+LADDER8_262K = (4096, 32768, 131072, 261856, 16384, 65536, 200000, 253920)
+CHURN_LENGTHS_262K = (253920, 253920, 253920, 200000, 200000, 200000, 131072, 65536, 32768, 16384, 8192, 4096, 253920, 200000,
+                      131072, 1536)
+CHURN_MAX_TOKENS_262K = (1024,) * 16
+CHURN_262K = (CHURN_LENGTHS_262K, CHURN_MAX_TOKENS_262K)
+
+
+def churn_defaults(seats, window=None):
     """(lengths, budgets) of the churn plan on a profile with `seats` seats: the four-seat set (12 users) at four or fewer,
     the eight-seat one (16 users) at five to eight, and for any other count the four-seat set repeated until
-    CHURN_MIN_REPLACEMENTS users follow the seats (the last user short, as in both sets)."""
+    CHURN_MIN_REPLACEMENTS users follow the seats (the last user short, as in both sets). `window` (the profile's max-model-len;
+    None for every earlier caller) selects CHURN_262K at a 262,144-token window on eight seats."""
     if type(seats) is not int or seats < 1:
         raise ValueError('A positive integer seat count is required')
+    if window == WINDOW_262K and seats == 8:
+        return CHURN_262K
     if seats <= 4:
         return CHURN_LENGTHS, CHURN_MAX_TOKENS
     if seats <= 8:
@@ -510,8 +530,14 @@ def profile_limits(profiles, name):
     context = int(profile['engine']['max-model-len'])
     limits = serving_c2_contract.request_limits(profile)
     room = serving_c2_contract.prompt_room(context, limits['budget'], limits['max_prompt_tokens'],
-                                           limits['min_answer_tokens'])
+                                           limits['min_answer_tokens'], limits.get('drafter_headroom_tokens', 0))
     return context, limits['budget'], room
+
+
+def profile_headroom(profiles, name):
+    """The profile's drafter_headroom_tokens (0 for every profile that names none): the tail of the window the contract's clamp
+    never hands out, so a request's prompt plus its answer is at most context - headroom (262,112 at 262,144 and 32)."""
+    return serving_c2_contract.request_limits(profiles['profiles'][name]).get('drafter_headroom_tokens', 0)
 
 
 def profile_seats(profiles, name):
@@ -685,7 +711,7 @@ def check_budget(profile, max_tokens, ceiling, what):
 
 
 def plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_job.DEFAULT_MAX_TOKENS,
-              memory_prompt=None, notes=None, s2=None):
+              memory_prompt=None, notes=None, s2=None, memory_users=None):
     """The arms one plan runs, in order: [(arm name, harness arguments, docker timeout seconds)].
     Refuses (PlanError) what the profile cannot serve as asked; `lengths` None is the default ladder,
     whose rungs past the profile's largest admitted prompt are lowered to it (noted in `notes`). An S2
@@ -697,7 +723,7 @@ def plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_job.D
         return ops_profile_plan.plan_arms(plan, profile, profiles, sys.modules[__name__])
     if plan in S2_PLANS:
         return s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2 or {})
-    arms = base_plan_arms(plan, profile, profiles, lengths, max_tokens, memory_prompt, notes)
+    arms = base_plan_arms(plan, profile, profiles, lengths, max_tokens, memory_prompt, notes, memory_users)
     if profile in profiles['profiles'] and s2_profile(profiles, profile):
         env = s2_env(profiles, profile, (s2 or {}).get('audits'), g4=plan == 'matrix')
         arms = [Arm(name, args, timeout, env=env) for name, args, timeout in arms]
@@ -705,9 +731,10 @@ def plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_job.D
 
 
 def base_plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_job.DEFAULT_MAX_TOKENS,
-                   memory_prompt=None, notes=None):
+                   memory_prompt=None, notes=None, memory_users=None):
     """plan_arms for the four S1 plans."""
     context, ceiling, room = profile_limits(profiles, profile)
+    window = context - profile_headroom(profiles, profile)      # what the contract's clamp hands out (answer_room)
     notes = notes if notes is not None else []
     if plan == 'bringup':
         args = common_args(profile, context, STREAM_SECONDS[plan]) + [
@@ -724,11 +751,11 @@ def base_plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_
         lengths = list(lengths)
         check_lengths(profile, lengths, room, 'matrix prompt lengths')
         check_budget(profile, max_tokens, ceiling, 'matrix --max-tokens')
-        fits = answer_room(context, lengths, max_tokens)
+        fits = answer_room(window, lengths, max_tokens)
         if fits < max_tokens:
             raise PlanError('matrix --max-tokens %d: a %d-token prompt leaves %d tokens of profile %s\'s context %d, '
                             'so the contract would cut that answer to %d and its \'length\' finish would read as a '
-                            'budget cut' % (max_tokens, context - fits, fits, profile, context, fits))
+                            'budget cut' % (max_tokens, window - fits, fits, profile, context, fits))
         text = ','.join(str(length) for length in lengths)
         base = common_args(profile, context, STREAM_SECONDS[plan]) + ['--prompt-lengths', text,
                                                                        '--max-tokens', str(max_tokens)]
@@ -740,17 +767,21 @@ def base_plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_
         # when that is smaller (c2: 123,136 + 8,192), so every stream can run to its budget.
         prompt = memory_prompt or room
         check_lengths(profile, [prompt], room, 'memory prompt')
-        memory_users = profile_seats(profiles, profile) if profile in profiles['profiles'] else MEMORY_USERS
+        seats = profile_seats(profiles, profile) if profile in profiles['profiles'] else MEMORY_USERS
+        # C2_GATE_MEMORY_USERS (M9a's one cold 253,920-token prompt on an eight-seat profile): fewer streams than seats; never more
+        memory_users = seats if memory_users is None else memory_users
+        if type(memory_users) is not int or not 1 <= memory_users <= seats:
+            raise PlanError('memory --memory-users %r: profile %s has %d seats' % (memory_users, profile, seats))
         args = common_args(profile, context, STREAM_SECONDS[plan]) + [
             '--users', str(memory_users), '--prompt-lengths', ','.join([str(prompt)] * memory_users),
-            '--max-tokens', str(answer_room(context, [prompt], ceiling)), '--stagger', str(STAGGER)]
+            '--max-tokens', str(answer_room(window, [prompt], ceiling)), '--stagger', str(STAGGER)]
         arms = [('memory-concurrent', args, ARM_SECONDS[plan])]
         if any_request_profile(profiles, profile):
             short = [MEMORY_SHORT_PROMPT] * memory_users
             check_lengths(profile, short, room, 'memory short prompts')
             arms.append(('memory-short', common_args(profile, context, STREAM_SECONDS[plan]) + [
                 '--users', str(memory_users), '--prompt-lengths', ','.join(str(length) for length in short),
-                '--max-tokens', str(answer_room(context, short, ceiling)), '--stagger', str(STAGGER)],
+                '--max-tokens', str(answer_room(window, short, ceiling)), '--stagger', str(STAGGER)],
                 ARM_SECONDS[plan]))
         return arms
     if plan == 'lifecycle':
@@ -805,9 +836,10 @@ def four_user_args(profiles, profile, plan, prompt, max_tokens=BELOW_MAX_TOKENS)
     context, ceiling, room = profile_limits(profiles, profile)
     check_lengths(profile, [prompt], room, '%s prompt' % plan)
     check_budget(profile, max_tokens, ceiling, '%s --max-tokens' % plan)
-    if prompt + max_tokens > context:
+    window = context - profile_headroom(profiles, profile)
+    if prompt + max_tokens > window:
         raise PlanError('%s: a %d-token prompt leaves %d of profile %s\'s context, not %d' % (
-            plan, prompt, context - prompt, profile, max_tokens))
+            plan, prompt, window - prompt, profile, max_tokens))
     return common_args(profile, context, STREAM_SECONDS[plan]) + [
         '--users', '4', '--prompt-tokens', str(prompt), '--max-tokens', str(max_tokens), '--stagger', str(STAGGER)]
 
@@ -827,10 +859,11 @@ def sized_arm_args(profile, profiles, plan, lengths, budget):
     context, ceiling, room = profile_limits(profiles, profile)
     check_lengths(profile, lengths, room, '%s prompt lengths' % plan)
     check_budget(profile, budget, ceiling, '%s --max-tokens' % plan)
-    fits = answer_room(context, lengths, budget)
+    window = context - profile_headroom(profiles, profile)
+    fits = answer_room(window, lengths, budget)
     if fits < budget:
         raise PlanError('%s --max-tokens %d: a %d-token prompt leaves %d tokens of profile %s\'s context %d' % (
-            plan, budget, context - fits, fits, profile, context))
+            plan, budget, window - fits, fits, profile, context))
     return common_args(profile, context, STREAM_SECONDS[plan]), ','.join(str(length) for length in lengths), context
 
 
@@ -922,7 +955,7 @@ def s2_plan_arms(plan, profile, profiles, lengths, max_tokens, notes, s2):
                 Arm('lifecycle-arrival-solo', base + ['--users', '1', '--sequential-users', users, '--alive-check', '1'],
                     seconds, env=env, rerun=True, role='solo')]
     if plan == 'churn':
-        default_lengths, default_budgets = churn_defaults(int(seats))
+        default_lengths, default_budgets = churn_defaults(int(seats), context if context == WINDOW_262K else None)
         churn = list(lengths or default_lengths)
         budgets = list(default_budgets) if lengths is None else [max_tokens] * len(churn)
         common, text, _ = sized_arm_args(profile, profiles, plan, churn, max(budgets))
@@ -1050,10 +1083,61 @@ def acceptance_problems(report):
     return problems
 
 
+def kv_reservation_problems(report):
+    """What the KV reservation's own lines (lever_n_m3native_gate.kv_reservations) say went wrong, judged whenever the server
+    logged the reservation at all: a request admitted with running + reserved past the pool, a hold logged while the request
+    fit, a request too large for the whole pool reaching the scheduler, a pool that could not be read. [] when the profile does
+    not run the reservation (every earlier report: no such record)."""
+    record = ((report or {}).get('s2') or {}).get('kv_reservation') or {}
+    if not record.get('installed'):
+        return []
+    problems = []
+    if record.get('over_pool_count'):
+        problems.append('%d requests were admitted with the running reservations plus their own past the pool (%s): the KV '
+                        'reservation admitted what vLLM would preempt for' % (record['over_pool_count'],
+                                                                              record.get('over_pool')))
+    if record.get('hold_that_fits_count'):
+        problems.append('%d KV holds were logged for a request that fit the pool (%s)' % (
+            record['hold_that_fits_count'], record.get('hold_that_fits')))
+    if record.get('too_large'):
+        problems.append('%d requests larger than the whole KV pool reached the scheduler: the request contract admitted what no '
+                        'pool can serve' % record['too_large'])
+    if record.get('unavailable'):
+        problems.append('the KV reservation could not read vLLM\'s block pool (%d lines)' % record['unavailable'])
+    return problems
+
+
+def kv_reservation_expected(profiles, name):
+    """Whether the profile turns the KV reservation on (QWEN_FAST_KV_RESERVATION=1): the executed path it must show."""
+    if profiles is None or name not in profiles['profiles']:
+        return False
+    return str((profiles['profiles'][name].get('env') or {}).get(KV_RESERVATION_FLAG, '0')) == '1'
+
+
+def kv_reservation_checks(report, expected, require_hold=False):
+    """(problems, shortfalls) of the KV reservation on an arm: the executed-path marker when the profile names the flag, the
+    own-line problems (kv_reservation_problems), and - for the churn, `require_hold` - at least one hold followed by a release, else
+    a shortfall (NOT_EXERCISED, never a pass): a churn that never outran the pool proved nothing about the hold."""
+    record = ((report or {}).get('s2') or {}).get('kv_reservation') or {}
+    problems, shortfalls = [], []
+    if expected and not record.get('installed'):
+        problems.append('the profile names %s=1 but the server never logged the reservation\'s install line: the reservation '
+                        'did not run' % KV_RESERVATION_FLAG)
+    problems += kv_reservation_problems(report)
+    if expected and require_hold:
+        if not record.get('holds'):
+            shortfalls.append('no KV reservation hold was logged: the churn never outran the pool (0 holds), so the hold is '
+                              'NOT_EXERCISED')
+        elif not record.get('released'):
+            shortfalls.append('%d KV holds but none released (a held request was never admitted): NOT_EXERCISED' % record['holds'])
+    return problems, shortfalls
+
+
 def arm_problems(label, report, want=None, acceptance=False):
     """Everything besides the texts that fails an arm: the contract's problems, stream problems, a fatal
     error, what it served against what it asked, and (the matrix) a collapsed acceptance."""
     problems = ['%s: %s' % (label, p) for p in ((report.get('platform') or {}).get('problems') or [])]
+    problems += ['%s: %s' % (label, p) for p in kv_reservation_problems(report)]
     problems += ['%s: %s' % (label, p) for p in report.get('c2_gate_problems') or []]
     problems += ['%s: %s' % (label, p) for p in stream_problems(report)]
     if report.get('fatal'):
@@ -1628,9 +1712,18 @@ def run_arm(runner, plan, spec, suffix='', ops=None):
     judgement (Runner.judges); `suffix` names a re-run ('-rerun'); `ops` an ops-* arm prepared by ops_profile_plan."""
     name, args, timeout = spec
     profile = spec_profile(runner, spec)
-    return runner.run(name + suffix, args, timeout, profile=getattr(spec, 'profile', None), env=getattr(spec, 'env', ()),
-                      judged=runner.judges(plan, profile, getattr(spec, 'judged', True)), measure=plan in S2_PLANS,
-                      ops=ops)
+    report = runner.run(name + suffix, args, timeout, profile=getattr(spec, 'profile', None), env=getattr(spec, 'env', ()),
+                        judged=runner.judges(plan, profile, getattr(spec, 'judged', True)), measure=plan in S2_PLANS,
+                        ops=ops)
+    if report is not None and kv_reservation_expected(getattr(runner, 'profiles', None), profile):
+        record = (report.get('s2') or {}).get('kv_reservation') or {}
+        if not record.get('installed'):
+            # the executed path (memory: graft-mounted-is-not-graft-executed): the profile asked for the reservation, so its
+            # install line must be in the server log, or no verdict on this arm may stand
+            report.setdefault('c2_gate_problems', []).append(
+                'the profile names %s=1 but the server never logged the reservation\'s install line: it did not run'
+                % KV_RESERVATION_FLAG)
+    return report
 
 
 def s2_of(report):
@@ -2398,7 +2491,7 @@ def run_memory(plan, runner, arms):
     results = []
     for spec in arms:
         report = run_arm(runner, plan, spec)
-        one = memory_verdict(report, users=runner.seats_for(spec_profile(runner, spec)), want=asked(spec[1]))
+        one = memory_verdict(report, users=asked(spec[1])['streams'], want=asked(spec[1]))
         if report is not None and runner.s2_for(spec_profile(runner, spec)):
             problems, shortfalls = memory_s2_checks(spec[0], report, runner.seats_for(spec_profile(runner, spec)))
             one = with_checks(one, problems, shortfalls,
@@ -2590,6 +2683,10 @@ def run_churn(plan, runner, profiles, arms):
     pair_mode = quad_draft_off(profiles, spec_profile(runner, spec))
     memory, shortfalls = memory_s2_checks('churn', report, seats)
     problems = arm_problems('churn', report, asked(spec[1])) + memory
+    kv_problems, kv_shortfalls = kv_reservation_checks(
+        report, kv_reservation_expected(profiles, spec_profile(runner, spec)), require_hold=True)
+    problems += ['churn: %s' % problem for problem in kv_problems if problem not in memory]
+    shortfalls += ['churn: %s' % shortfall for shortfall in kv_shortfalls]
     if not report.get('alive'):
         problems.append('churn: the engine did not answer every seat after the streams')
     s2 = s2_of(report)
@@ -2627,7 +2724,8 @@ def run_churn(plan, runner, profiles, arms):
     region = s2.get('trace_region') or {}
     facts = dict(releases=releases, replacements=replacements, quads_built=s2.get('quads_built'),
                  before=s2.get('before'), dram_hold=s2.get('dram_hold'), trace_region=region,
-                 request_buffers=s2.get('request_buffers'), draft_outputs=s2.get('draft_outputs'))
+                 request_buffers=s2.get('request_buffers'), draft_outputs=s2.get('draft_outputs'),
+                 kv_reservation=s2.get('kv_reservation'))
     if pair_mode:
         first = ('departures %s (%s while a pair was formed and every live user drafted in one, %s released it; %s '
                  'ambiguous) over %d replacements; %s pair rounds; release lines %s (%s quads, %s pairs); trace '
@@ -2645,8 +2743,19 @@ def run_churn(plan, runner, profiles, arms):
     result = dict(verdict='PASS', lines=[
         first,
         full_seat_admissions_text((s2.get('dram_hold') or {}).get('fit_readings'), seats),
-        request_buffers_text(s2.get('request_buffers')), draft_outputs_text(s2.get('draft_outputs'))])
+        request_buffers_text(s2.get('request_buffers')), draft_outputs_text(s2.get('draft_outputs'))]
+        + kv_reservation_lines(s2.get('kv_reservation')))
     return with_checks(result, problems, shortfalls, facts)
+
+
+def kv_reservation_lines(record):
+    """The KV reservation's readings as a report line ([] where the profile does not run it)."""
+    if not record or not record.get('installed'):
+        return []
+    return ['kv reservation: %s holds (%s released), %s admitted without a hold, pool %s blocks, the most reserved by one request '
+            '%s, by the running set %s' % (record.get('holds'), record.get('released'), record.get('fits'),
+                                          ','.join(str(pool) for pool in record.get('pools') or []) or 'unread',
+                                          record.get('max_reserved'), record.get('max_running'))]
 
 
 def draft_outputs_text(record):
@@ -2782,10 +2891,10 @@ def run_ops_plan(plan, runner, arms):
 
 
 def run_plan(plan, runner, profiles, reference=None, lengths=None, max_tokens=c2_serving_job.DEFAULT_MAX_TOKENS,
-             memory_prompt=None, s2=None):
+             memory_prompt=None, s2=None, memory_users=None):
     notes = []
     unjudged_from = len(runner.unjudged)
-    arms = plan_arms(plan, runner.profile, profiles, lengths, max_tokens, memory_prompt, notes, s2)
+    arms = plan_arms(plan, runner.profile, profiles, lengths, max_tokens, memory_prompt, notes, s2, memory_users)
     for note in notes:
         runner.log('[C2-GATE] note: %s' % note)
     if plan in LANES_PLANS:
@@ -2941,6 +3050,8 @@ def build_parser():
                                                         'set in place of its default')
     parser.add_argument('--max-tokens', type=int, default=c2_serving_job.DEFAULT_MAX_TOKENS)
     parser.add_argument('--memory-prompt', type=int, default=None)
+    parser.add_argument('--memory-users', type=int, default=None,
+                        help="the memory plan's concurrent streams (default: the profile's seats): M9a's one cold 253,920-token prompt")
     parser.add_argument('--budget-seconds', type=int, default=None,
                         help='refuse a plan list whose worst case (every arm to its limit, every re-run) is longer')
     parser.add_argument('--reference', default=REFERENCE)
@@ -3063,7 +3174,7 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
     for plan in plans:
         try:
             arms_of[plan] = plan_arms(plan, options.profile, profiles, lengths, options.max_tokens, options.memory_prompt,
-                                      s2=s2)
+                                      s2=s2, memory_users=options.memory_users)
         except PlanError as error:
             log('refused: %s' % error)
             return 2
@@ -3132,7 +3243,7 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
     try:
         for plan in plans:
             summary['results'][plan] = run_plan(plan, runner, profiles, reference, lengths, options.max_tokens,
-                                                options.memory_prompt, s2=s2)
+                                                options.memory_prompt, s2=s2, memory_users=options.memory_users)
             write_phase_record(options.results, summary['results'][plan])
             for notice in summary['results'][plan].get('notices') or []:
                 # Reported prominently, never a verdict (the module docstring's control).

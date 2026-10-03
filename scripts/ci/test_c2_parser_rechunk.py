@@ -912,6 +912,10 @@ class ProfileGatingTests(unittest.TestCase):
                                  'c2-packed-tp4-8': True, 'c2-packed-tp4-8-gate': True,
                                  'c2-packed-tp4-8-time-gate': True, 'c2-packed-tp4-8-diag-strace': True,
                                  'c2-packed-tp4-8-diag-strace-nowarm': True, 'c2-packed-tp4-8-diag-strace-rshard': True,
+                                 # the 262k-window twins (tp4/seats8-262k): the same parser and limits at a 262,144 window
+                                 'c2-packed-tp4-262k-gate': True, 'c2-packed-tp4-8x262k': True,
+                                 'c2-packed-tp4-8x262k-gate': True, 'c2-packed-tp4-8x262k-time-gate': True,
+                                 'c2-packed-tp4-8x262k-diag-strace': True,
                                  'coding': None, 'general': None, 'general-prefix': None,
                                  'general-prefix-eager': None,
                                  # the four-card (TP4) G1 family decodes one token per step, as general does
@@ -940,7 +944,9 @@ class ProfileGatingTests(unittest.TestCase):
                                       'c2-packed-tp4-warm4-control', 'c2-packed-tp4-warm4-diag', 'c2-packed-tp4-warm4-diag-oldtail', 'c2-packed-tp4-warm4-even-diag', 'c2-packed-tp4-warm4-gate', 'c2-packed-tp4-speed-warm4',
                                       'c2-packed-tp4-8', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate',
                                       'c2-packed-tp4-8-diag-strace', 'c2-packed-tp4-8-diag-strace-nowarm',
-                                      'c2-packed-tp4-8-diag-strace-rshard'), name)
+                                      'c2-packed-tp4-8-diag-strace-rshard', 'c2-packed-tp4-262k-gate', 'c2-packed-tp4-8x262k',
+                                      'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate',
+                                      'c2-packed-tp4-8x262k-diag-strace'), name)
         with self.assertRaisesRegex(ValueError, 'parser_rechunk must be true or false'):
             contract.parser_rechunk({'parser_rechunk': 'yes'})
 

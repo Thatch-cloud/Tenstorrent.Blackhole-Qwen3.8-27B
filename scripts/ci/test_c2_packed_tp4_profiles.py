@@ -103,7 +103,10 @@ WARM4_PROFILES = ('c2-packed-tp4-warm4-diag', 'c2-packed-tp4-warm4-control', 'c2
 # The eight-seat twins (tp4/seats8) are production's recipe plus their deltas (test_c2_packed_tp4_seats8_profiles holds them): they carry the
 # tail caps and the in-trace sampler, and the diag twin the stall watch and the handle guard, as c2-packed-tp4 and the diag arms do.
 SEATS8_PROFILES = ('c2-packed-tp4-8', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate', 'c2-packed-tp4-8-diag-strace',
-                   'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard')
+                   'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard',
+                   # the 262k-window twins (tp4/seats8-262k, test_c2_packed_tp4_262k_profiles holds them): the same recipe
+                   'c2-packed-tp4-8x262k', 'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate',
+                   'c2-packed-tp4-8x262k-diag-strace')
 # tp4/next-4 (test_tp4_next4 holds each as its base plus exact deltas): the traffic candidate, its warm4 twin and the eight-seat levers arm.
 NEXT4_PROFILES = ('c2-packed-tp4-best-ship', 'c2-packed-tp4-best-ship-warm4', 'c2-packed-tp4-8-best')
 # tp4/next-5 (test_tp4_next5 holds each as its base plus exact deltas): the tpub and pair-slice traffic candidates and the pair-slice gate twins.

@@ -105,6 +105,12 @@
 #                             four sections and three seeds). TP4_WIDTH=2 runs its PARITY section instead (QWEN_FAST_TP
 #                             unset: the pinned DMA kernels against their _tp siblings at the pair's page counts):
 #                               C2_CARDM_ENV=K64J_HARNESS=gdn_tp4 TP4_WIDTH=2 ... C2_CARDM_ARGS=--sections PARITY
+#   K64J_HARNESS=ordered_writer  scripts/ci/ordered_writer_tp4_card_test.py (E1, the 262k window's first card evidence): the four-card
+#                             ordered K/V writers - the packed block's chained launch and the engines' 32-row tile - at page-table
+#                             widths 2,052 (control) and 4,096 on this ONE card with QWEN_FAST_TP=4, eager and under trace replay
+#                             (table rewritten in place, and untouched), the complete cache read back against the host prediction.
+#                             Verdict line ORDERED_WRITER (scope full needs both writers, both widths and seeds 0,1,2). QWEN_FAST_TP=4
+#                             is set by the script; TP4_WIDTH is not read.
 # Before anything is launched the graft must verify against its MANIFEST.sha256, its _ttnncpp.so must be
 # EXPECT_TTNNCPP_SHA256 (REQUIRED for a real run: K64j's sha is the K64J_TTNNCPP_SHA256 line build_k64j.sh prints)
 # and carry the F22 literal '[QWEN-SDPA] runtime-extent entries=', its four qwen decode kernels must be K64j's
@@ -117,8 +123,8 @@
 #
 # Env: KOPGRAFT64 (default ~/opgraft-K64j), EXPECT_TTNNCPP_SHA256, IMAGE (default image P8), RESULTS
 # (~/kwork64/k64j/<card tag>), CARD_B_ARGS (extra harness args, appended last, e.g. "--sections X,M --seeds 0"),
-# WATCHER=1, WATCHDOG_S, K64J_CARD_DRY_RUN=1, K64J_HARNESS (card, the default, extent_reader, nkv1_spike or gdn_tp4; the last
-# two are the four-card port's one-card window, see below; TP4_WIDTH=2 is gdn_tp4's PARITY run; TP4_WIDTH=4 is extent_reader's
+# WATCHER=1, WATCHDOG_S, K64J_CARD_DRY_RUN=1, K64J_HARNESS (card, the default, extent_reader, nkv1_spike, gdn_tp4 or ordered_writer; the
+# last three are the four-card port's one-card window, see below; TP4_WIDTH=2 is gdn_tp4's PARITY run; TP4_WIDTH=4 is extent_reader's
 # four-card run, unset being its pair run), QUAL_CARD (the
 # target board id under /dev/tenstorrent/by-id; required, no default: card B is reserved for another project and refused; card M or card A, the
 # serving pair, is refused unless ALLOW_SERVING_CARD=1, which prints a loud warning). QWEN_SDPA_TREE_SCRATCH_ROUNDS=1
@@ -492,8 +498,10 @@ case $MAIN in
   extent_reader) stem=reader; verdict_tag=K64J_READER ;;
   nkv1_spike) stem=nkv1; verdict_tag=K64J_NKV1 ;;
   gdn_tp4) stem=gdn; verdict_tag=GDN_TP4 ;;
+  ordered_writer) stem=ordered; verdict_tag=ORDERED_WRITER ;;
   *) echo "refusing: K64J_HARNESS=$MAIN is none of card (k64j_card_b.py), extent_reader" \
-       "(extent_reader_card_b.py), nkv1_spike (k64j_nkv1_spike.py) and gdn_tp4 (scripts/ci/gdn_tp4_card_test.py)" >&2
+       "(extent_reader_card_b.py), nkv1_spike (k64j_nkv1_spike.py), gdn_tp4 (scripts/ci/gdn_tp4_card_test.py) and" \
+       "ordered_writer (scripts/ci/ordered_writer_tp4_card_test.py)" >&2
      exit 1 ;;
 esac
 name=qwen-k64j-$stem-$QUAL_TAG
@@ -578,6 +586,20 @@ if [ "$MAIN" = gdn_tp4 ]; then
   esac
 fi
 
+if [ "$MAIN" = ordered_writer ]; then
+  # E1: this checkout's scripts/ci first on PYTHONPATH (the pinned ordered_cache.py it loads is the checkout's too: the image's
+  # copy is the same bytes, and the report records its sha256 for the recorder to compare with the live file).
+  ci=$(cd "$here/../../../scripts/ci" 2>/dev/null && pwd || echo "$here/../../../scripts/ci")
+  for file in ordered_writer_tp4_card_test.py ordered_cache_hw_plan.py ordered_cache.py ordered_cache_tp.py packed_ordered_cache.py \
+              page_width_tp4.py ordered_writer_evidence_tp4.json chip_view.py tp_shapes.py verify_trace_t1.py verify_trace_t2.py; do
+    test -s "$ci/$file" \
+      || { echo "refusing: $ci/$file missing (the ordered-writer test runs this checkout's scripts/ci)" >&2; exit 1; }
+  done
+  echo "### code under test: $ci (QWEN_FAST_TP=4)"
+  XE=(-e PYTHONPATH=/bench/ci:/experiment-scripts/ci:/speculative-decoding/harness:/opt/tt-metal/ttnn:/opt/tt-metal
+      -e QWEN_FAST_TP=4 -e QWEN_C2_SERVING=0)
+fi
+
 # Graft K64j, checked before anything is launched (in a dry run, only when it exists here).
 if [ "$DRY" = 1 ] && [ ! -e "$G" ]; then
   echo "### dry run: $G does not exist here; the graft was not checked"
@@ -648,7 +670,7 @@ BM=()
 for file in "${HARNESS[@]}"; do
   BM+=(--mount "type=bind,src=$file,dst=/bench/$(basename "$file"),readonly")
 done
-if [ "$MAIN" = extent_reader ] || [ "$MAIN" = gdn_tp4 ]; then
+if [ "$MAIN" = extent_reader ] || [ "$MAIN" = gdn_tp4 ] || [ "$MAIN" = ordered_writer ]; then
   BM+=(--mount "type=bind,src=$ci,dst=/bench/ci,readonly")
 fi
 WM=()
@@ -663,6 +685,8 @@ if [ "${WATCHER:-}" = "1" ]; then
     args+=(--extents 2304 --starts 128,255 --seeds 0 --iterations 0 --no-legacy --watchdog "${WATCHDOG_S:-120}")
   elif [ "$MAIN" = gdn_tp4 ]; then
     args+=(--seeds 17 --prefixes 0,16 --iterations 0 --watchdog "${WATCHDOG_S:-120}")
+  elif [ "$MAIN" = ordered_writer ]; then
+    args+=(--seeds 0 --modes eager,replay_changed --watchdog "${WATCHDOG_S:-120}")
   else
     if [ "$ONE_HEAD" = 1 ] && [ "$MAIN" = card ]; then
       watcher_combos=(--combos G4B3:0x21,G4B3:0x23,G8B2:0x23 --trace-combos G4B3:0x21,G8B2:0x23)
@@ -706,6 +730,8 @@ elif [ "$MAIN" = nkv1_spike ]; then
   inner+='exec python3 -B /bench/k64j_nkv1_spike.py "$@"'
 elif [ "$MAIN" = gdn_tp4 ]; then
   inner+='exec python3 -B /bench/ci/gdn_tp4_card_test.py "$@"'
+elif [ "$MAIN" = ordered_writer ]; then
+  inner+='exec python3 -B /bench/ci/ordered_writer_tp4_card_test.py "$@"'
 else
   inner+='exec python3 -B /bench/k64j_card_b.py "$@"'
 fi

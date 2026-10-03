@@ -7,9 +7,13 @@ update_cache kernels at v0.77.0-rc1) are 1. The prepared input tile stays (1, T,
 holds head h, so at one head only row 0 is read. This twin is the same validation and launch with those numbers from
 tp_shapes; the kernels are ordered_cache.load_kernels' hash-pinned sources, imported, never copied.
 tp_addresses.install() rebinds ordered_cache.validate_shapes / update to these at QWEN_FAST_TP=4 only.
+
+The admitted page-table widths are page_width_tp4.admitted's: the pinned answer, plus 4,096 (a 262,144-token window) once the
+E1 record qualifies it. It is looked up through the module at every call, so a harness can scope it.
 """
 
 import ordered_cache as pinned
+import page_width_tp4
 import tp_shapes
 
 
@@ -25,7 +29,7 @@ def validate_shapes(cache, packed, positions, pages):
     if len(cache) != 4 or cache[0] < 1 or tuple(cache[1:]) != (cache_heads(), 64, 256):
         raise ValueError('Expected %s-head 64-row BF8 paged cache' % {1: 'one', 2: 'two'}[cache_heads()])
     if (tuple(positions) != (rows,) or len(pages) != 2 or pages[0] != rows
-            or not pinned.page_width_admitted(pages[1]) or pages[1] > cache[0]):
+            or not page_width_tp4.admitted(pages[1]) or pages[1] > cache[0]):
         raise ValueError('Paired position vector and page-table rows required')
     return rows
 

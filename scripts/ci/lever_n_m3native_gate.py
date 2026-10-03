@@ -2665,6 +2665,19 @@ DRAM_HOLD_LINE = re.compile(r'\[PINDIAG\] dram hold prompt=(\S+) largest_free=(\
                             r'decodes=([0-9]+)')
 DRAM_RELEASED_MARKER = '[PINDIAG] dram hold released '
 DRAM_LIFTED_MARKER = '[PINDIAG] dram hold lifted '
+# serving_kv_reservation (QWEN_FAST_KV_RESERVATION=1, the 262k profiles): a hold once per held (request, running); 'released' once
+# it fits; 'fit' once per request admitted without a hold; 'too large' for a request needing more than the whole pool; 'installed'
+# once at install (the executed-path marker: a profile that names the flag must show it). Only lines that start with
+# KV_HOLD_MARKER are holds. Each line names the request's reserved blocks, the blocks the running requests had reserved and the
+# pool: an admission (fit or released) must have running + reserved <= pool, a hold must not.
+KV_INSTALLED_MARKER = '[PINDIAG] kv reservation installed '
+KV_HOLD_MARKER = '[PINDIAG] kv reservation hold request='
+KV_RELEASED_MARKER = '[PINDIAG] kv reservation released '
+KV_FIT_MARKER = '[PINDIAG] kv reservation fit '
+KV_TOO_LARGE_MARKER = '[PINDIAG] kv reservation too large '
+KV_CARRIED_MARKER = '[PINDIAG] kv reservation carried '
+KV_UNAVAILABLE_MARKER = '[PINDIAG] kv reservation unavailable '
+KV_FIELDS = re.compile(r'request=(\S+) reserved=([0-9]+)(?: running=([0-9]+))? pool=([0-9]+)')
 DRAM_UNAVAILABLE_MARKER = '[PINDIAG] dram hold unavailable '
 DRAM_DEFERRED_MARKER = '[PINDIAG] dram admission deferred '
 DRAM_CARRIED_MARKER = '[PINDIAG] dram admission carried '
@@ -2881,6 +2894,41 @@ def dram_holds(log_text):
                 unavailable=len(unavailable), unavailable_lines=unavailable[:2],
                 deferred=len(picked(DRAM_DEFERRED_MARKER)), carried=len(picked(DRAM_CARRIED_MARKER)),
                 fits=len(fits), fit_readings=fits[:64])
+
+
+def kv_reservations(log_text):
+    """The KV reservation's lines (serving_kv_reservation): installed, the holds, releases and fits with each one's reserved
+    blocks, running reservations and pool, the too-large and unavailable lines, and the admissions whose running + reserved
+    passed the pool (over_pool: a request admitted past what the rule allows, which must never be)."""
+    lines = log_text.splitlines()
+
+    def picked(marker):
+        return [line.strip()[:240] for line in lines if marker in line]
+
+    def parsed(marker):
+        out = []
+        for line in lines:
+            if marker not in line:
+                continue
+            match = KV_FIELDS.search(line)
+            if match:
+                running = int(match.group(3)) if match.group(3) is not None else 0
+                out.append(dict(request=match.group(1), reserved=int(match.group(2)), running=running,
+                                pool=int(match.group(4))))
+        return out
+
+    holds, released, fits = parsed(KV_HOLD_MARKER), parsed(KV_RELEASED_MARKER), parsed(KV_FIT_MARKER)
+    admitted = released + fits
+    over = [entry for entry in admitted if entry['running'] + entry['reserved'] > entry['pool']]
+    fitting_holds = [entry for entry in holds if entry['running'] + entry['reserved'] <= entry['pool']]
+    pools = sorted({entry['pool'] for entry in holds + admitted})
+    return dict(installed=len(picked(KV_INSTALLED_MARKER)), holds=len(holds), released=len(released), fits=len(fits),
+                too_large=len(picked(KV_TOO_LARGE_MARKER)), unavailable=len(picked(KV_UNAVAILABLE_MARKER)),
+                carried=len(picked(KV_CARRIED_MARKER)), pools=pools[:4], over_pool=over[:4], over_pool_count=len(over),
+                hold_that_fits=fitting_holds[:4], hold_that_fits_count=len(fitting_holds),
+                max_reserved=max([entry['reserved'] for entry in holds + admitted] or [0]),
+                max_running=max([entry['running'] for entry in holds + admitted] or [0]),
+                lines=picked(KV_HOLD_MARKER)[:4])
 
 
 def pair_count(text):
@@ -3202,7 +3250,7 @@ def s2_report(environ, log_text, streams=None, prompt_lengths=None):
         refused=refused_rounds_report(log_text),
         narrowed=sum(1 for line in lines if NARROWED_MARKER in line),
         narrowing_refused=sum(1 for line in lines if NARROWING_REFUSED_MARKER in line),
-        dram_hold=dram_holds(log_text),
+        dram_hold=dram_holds(log_text), kv_reservation=kv_reservations(log_text),
         quarantined=sum(1 for line in lines if QUARANTINED_MARKER in line), quarantined_lines=first(QUARANTINED_MARKER),
         releases=proposal_releases(log_text),
         quads_built=len(QUAD_BUILT_LINE.findall(log_text)),

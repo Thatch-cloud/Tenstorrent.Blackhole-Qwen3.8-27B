@@ -1,0 +1,7 @@
+{
+ "schema": "qwen-c2-ordered-writer-evidence/1",
+ "what": "The four-card record of page_width_tp4: the packed block's chained K/V write and the engines' 32-row-tile write at page-table width 4,096 (a 262,144-token window), on one chip of four. Until status is PASS, width 4,096 is refused. record_ordered_writer_evidence_tp4.py writes this file and its pin (ORDERED_WRITER_EVIDENCE_TP4_SHA256 in page_width_tp4.py) in one go.",
+ "status": "PENDING",
+ "provenance": "No run recorded yet. Produced by the E1 window: K64J_HARNESS=ordered_writer through run_card_b.sh (scripts/ci/ordered_writer_tp4_card_test.py).",
+ "sources": {}
+}

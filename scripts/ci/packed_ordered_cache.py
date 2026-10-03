@@ -20,7 +20,8 @@ slice would have put at page i * 8 + t, so no slice is needed.
 CB16 stays at the served 256 pages (`min(rows, 32) * 8`, not `rows * 8`): the compute kernel
 pushes 8 pages per head and the writer pops them before the next, so no more than 16 are ever
 outstanding and the capacity only changes back-pressure, never a value. The per-core CB
-footprint is therefore the audited launch's own (390,160 bytes at page width 2052).
+footprint is therefore the audited launch's own (390,160 bytes at page width 2052; 398,336 bytes at 4,096, whose CB3 page is
+8,176 bytes larger - 16,384 against 8,208 - which the E1 record qualifies, page_width_tp4).
 
 WHY THE BYTES ARE THE SERVED ONES. Each 32-row cache tile row X = (physical page, head, tile
 row) ends as RMW_{r_k}(...RMW_{r_1}(X0)) over the rows r_1 < ... < r_k that target it, in row
@@ -162,14 +163,14 @@ def grid_problem(grid_x, grid_y, rows):
 
 def validate_chained(cache, packed, positions, pages, rows):
     """ordered_cache.validate_shapes, widened from 32 to the chained launch rows (64 or 32)."""
-    from ordered_cache import page_width_admitted
+    import page_width_tp4
 
     if rows not in LAUNCH_ROWS or tuple(packed) != (1, rows, KV_HEADS, KV_WIDTH):
         raise ValueError('Chained K/V writes take (1, 64 or 32, 32, 256) prepared tiles; got %r' % (tuple(packed),))
     if len(cache) != 4 or cache[0] < 1 or tuple(cache[1:]) != (cache_heads(), 64, 256):
         raise ValueError('Expected %s-head 64-row BF8 paged cache' % {1: 'one', 2: 'two'}[cache_heads()])
     if (tuple(positions) != (rows,) or len(pages) != 2 or pages[0] != rows
-            or not page_width_admitted(pages[1]) or pages[1] > cache[0]):
+            or not page_width_tp4.admitted(pages[1]) or pages[1] > cache[0]):
         raise ValueError('Paired position vector and page-table rows required')
     return rows
 
@@ -283,7 +284,7 @@ class ChainedOrderedCacheWriter:
     per layer per forward) and notes 'kv_chains' once per call (32 per captured forward)."""
 
     def __init__(self, mesh, operations, kernels, *, positions, pages, spans, tiles, launch_rows=64):
-        from ordered_cache import page_width_admitted
+        import page_width_tp4
         from packed_cache_writer import validate_tiles
 
         if launch_rows not in LAUNCH_ROWS:
@@ -293,7 +294,7 @@ class ChainedOrderedCacheWriter:
                 or len(pages.shape) != 2 or pages.shape[0] != rows or pages.dtype != operations.int32
                 or pages.layout != operations.ROW_MAJOR_LAYOUT):
             raise Unsupported('the chained writer serves the 64-row block staged as row-major int32 metadata')
-        if not page_width_admitted(pages.shape[1]):
+        if not page_width_tp4.admitted(pages.shape[1]):
             raise Unsupported('page width %r is not admitted' % (pages.shape[1],))
         self.spans = validate_spans(rows, spans)
         self.tiles, block_rows, width = validate_tiles(operations, tiles)

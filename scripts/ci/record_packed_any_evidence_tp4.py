@@ -23,6 +23,12 @@ PUBLIC-REPO HYGIENE: the record holds run ids, experiment tags, commit shas, rep
 Never an image digest or registry, a host path, an address or a board id: the record is checked for them before it is written, and
 the image is recorded by its tag name only. The report itself stays with the run's artifacts.
 
+THE 262,144-TOKEN WINDOW (--capacity 262144): the same recorder for the second capacity's own record, packed_any_evidence_tp4_262144.json
+at EVIDENCE_TP4_262K_SHA256. The reports are checked against that capacity's design set (admission.capacity_design: CB1 over K1's families
+plus 196,864 and 262,144, CB2a with K2 2,030 tickets / X7 600 / Z 900 and the 262,144 family, CB2b at capacity 262,144 with 262,144 among the
+named R2 families), the sections carry `capacity`, and ONLY the 262k file and its pin are written: the 131,328 record and
+EVIDENCE_TP4_SHA256 are never opened for writing. Without --capacity nothing changes.
+
 Stdlib only, Python 3.7 syntax.
 """
 import argparse
@@ -191,9 +197,18 @@ def combos_of(report):
     return grouped
 
 
-def build_cb1(report, digest, path, run, tag, watcher=None):
+def capacity_problems(label, report, capacity, problems):
+    """At a capacity other than 131,328 the harness's own report must name it (--capacity)."""
+    if capacity != admission.CAPACITY_131K and report.get('capacity') != capacity:
+        problems.append('%s: the report is for capacity %s, not %d (run the harness with --capacity %d)'
+                        % (label, report.get('capacity'), capacity, capacity))
+
+
+def build_cb1(report, digest, path, run, tag, watcher=None, capacity=admission.CAPACITY_131K):
     """sections.CB1 from the final report of the card harness (--kv-heads 1, the default sections), or RecordError."""
+    design = admission.capacity_design(capacity)
     problems = []
+    capacity_problems('CB1', report, capacity, problems)
     words = line_words(report.get('verdict_line'))
     common_problems('CB1', report, words, problems)
     binary_problems('CB1', report, problems)
@@ -205,8 +220,8 @@ def build_cb1(report, digest, path, run, tag, watcher=None):
     if not set(admission.SEEDS) <= set(seeds):
         problems.append('CB1: seeds %s lack %s' % (seeds, sorted(set(admission.SEEDS) - set(seeds))))
     extents = sorted(report.get('extents') or ())
-    if not set(admission.K1_EXTENTS) <= set(extents):
-        problems.append('CB1: extents %s lack K1\'s %s' % (extents, sorted(set(admission.K1_EXTENTS) - set(extents))))
+    if not set(design['k1_extents']) <= set(extents):
+        problems.append('CB1: extents %s lack K1\'s %s' % (extents, sorted(set(design['k1_extents']) - set(extents))))
     combos = combos_of(report)
     if not any(entry['geometry'] == 'G8B2' and admission.CB1_FLAG_TP4 in entry['flags'] for entry in combos):
         problems.append('CB1: no G8B2 %s combo (combos %s)' % (admission.CB1_FLAG_TP4, report.get('combos')))
@@ -233,6 +248,9 @@ def build_cb1(report, digest, path, run, tag, watcher=None):
         seeds=seeds, extents=extents, combos=combos,
         comparisons=len(report.get('comparisons') or ()), failures=0,
         families=int(report.get('trace_families_distinct', words.get('families', 0)) or 0), counts=counts)
+    if capacity != admission.CAPACITY_131K:
+        section['capacity'] = capacity
+        section['harness'] += ' --capacity %d --extents %s' % (capacity, ','.join(str(extent) for extent in extents))
     if report.get('skip_written'):
         section['skipped_rows'] = str(report['skip_written'])
     if watcher:
@@ -242,9 +260,14 @@ def build_cb1(report, digest, path, run, tag, watcher=None):
     return section
 
 
-def build_cb2a(report, digest, path, run, tag, watcher=None):
+def build_cb2a(report, digest, path, run, tag, watcher=None, capacity=admission.CAPACITY_131K):
     """sections.CB2a from the final report of the card harness (--sections K2,X7,Z at --kv-heads 1), or RecordError."""
+    design = admission.capacity_design(capacity)
     problems = []
+    capacity_problems('CB2a', report, capacity, problems)
+    ran = sorted((report.get('cb2a') or {}).get('cb2_extents') or ())
+    if capacity != admission.CAPACITY_131K and not set(design['cb2_extents']) <= set(ran):
+        problems.append('CB2a: K2/X7 families %s lack %s' % (ran, sorted(set(design['cb2_extents']) - set(ran))))
     words = line_words(report.get('verdict_line'))
     decision = report.get('decision') or {}
     common_problems('CB2a', report, words, problems)
@@ -264,20 +287,20 @@ def build_cb2a(report, digest, path, run, tag, watcher=None):
         problems.append('CB2a: K2 verdict %s, coverage %s (only a full PASS sets the exactness policy)' % (decision.get('k2'),
                                                                                                           coverage))
     tickets = [int(coverage.get('covered', 0)), int(coverage.get('design', 0))]
-    if tickets != [admission.CB2A_K2_TICKETS] * 2:
-        problems.append('CB2a: K2 tickets %s, not %d of %d' % (tickets, admission.CB2A_K2_TICKETS, admission.CB2A_K2_TICKETS))
+    if tickets != [design['k2_tickets']] * 2:
+        problems.append('CB2a: K2 tickets %s, not %d of %d' % (tickets, design['k2_tickets'], design['k2_tickets']))
     rows = report.get('k2_rows') or {}
     k2_rows = [int(rows.get('equal', 0)), int(rows.get('compared', 0))]
     if not k2_rows[1] or k2_rows[0] != k2_rows[1]:
         problems.append('CB2a: K2 rows %s are not all bitwise equal' % k2_rows)
     floor = [int(rows.get('floor_differing', 0)), int(rows.get('floor', 0))]
     x7 = tally_count(report, X7_KINDS)
-    if x7[1] < admission.X7_FLOOR or x7[0] != x7[1]:
-        problems.append('CB2a: X7 %s, not a full pass of at least %d' % (x7, admission.X7_FLOOR))
+    if x7[1] < design['x7_floor'] or x7[0] != x7[1]:
+        problems.append('CB2a: X7 %s, not a full pass of at least %d' % (x7, design['x7_floor']))
     z_passed = tally_count(report, Z_KINDS)
     families = sorted(report.get('z_families') or ())
-    if z_passed[1] < admission.Z_FLOOR or z_passed[0] != z_passed[1]:
-        problems.append('CB2a: Z %s, not a full pass of at least %d' % (z_passed, admission.Z_FLOOR))
+    if z_passed[1] < design['z_floor'] or z_passed[0] != z_passed[1]:
+        problems.append('CB2a: Z %s, not a full pass of at least %d' % (z_passed, design['z_floor']))
     if set(admission.Z_FAMILIES) - set(families):
         problems.append('CB2a: Z families lack %s' % sorted(set(admission.Z_FAMILIES) - set(families)))
     for key, got in (('x7', x7), ('z', z_passed), ('k2_rows', k2_rows)):
@@ -304,6 +327,9 @@ def build_cb2a(report, digest, path, run, tag, watcher=None):
     for key in ('local_heads', 'kv_heads_local'):
         if key in report:
             section[key] = report[key]
+    if capacity != admission.CAPACITY_131K:
+        section.update(capacity=capacity, cb2_extents=ran)
+        section['harness'] += ' --capacity %d --cb2-extents %s' % (capacity, ','.join(str(extent) for extent in ran))
     if watcher:
         section['watcher_pass'] = watcher
     section['report'] = report_name(path)
@@ -316,8 +342,9 @@ def reader_sha(root=HERE):
         return hashlib.sha256(handle.read()).hexdigest()
 
 
-def build_cb2b(report, digest, path, run, tag, commit, image, watcher=None, root=HERE):
+def build_cb2b(report, digest, path, run, tag, commit, image, watcher=None, root=HERE, capacity=admission.CAPACITY_131K):
     """sections.CB2b from the final report of the four-card extent reader (full scope, chips=1of4), or RecordError."""
+    design = admission.capacity_design(capacity)
     problems = []
     line = report.get('verdict_line') or ''
     words = line_words(line)
@@ -331,8 +358,14 @@ def build_cb2b(report, digest, path, run, tag, commit, image, watcher=None, root
                                                                    decision.get('scope_short')))
     if words.get('chips') not in admission.CB2B_CHIPS_TP4:
         problems.append('CB2b: chips %s on the verdict line, not %s' % (words.get('chips'), '/'.join(admission.CB2B_CHIPS_TP4)))
-    if report.get('capacity') != admission.CB2B_CAPACITY:
-        problems.append('CB2b: capacity %s, not %d' % (report.get('capacity'), admission.CB2B_CAPACITY))
+    served_capacity = admission.CB2B_CAPACITY if capacity == admission.CAPACITY_131K else capacity
+    if report.get('capacity') != served_capacity:
+        problems.append('CB2b: capacity %s, not %d' % (report.get('capacity'), served_capacity))
+    if capacity != admission.CAPACITY_131K and str(words.get('capacity')) != str(capacity):
+        problems.append('CB2b: capacity %s on the verdict line, not %d' % (words.get('capacity'), capacity))
+    named = [family for family in design['r2_named'] if family not in (report.get('r2_families_replayed') or ())]
+    if named:
+        problems.append('CB2b: R2 replayed no family %s of the %d design\'s named ones' % (named, capacity))
     served = report.get('served') or {}
     if served.get('flags') != SERVED_FLAGS:
         problems.append('CB2b: the reader served flags %s, not %s (one KV head)' % (served.get('flags'), SERVED_FLAGS))
@@ -395,6 +428,8 @@ def build_cb2b(report, digest, path, run, tag, commit, image, watcher=None, root
         served=dict(flags=served['flags'], rows=served.get('rows'), batch=served.get('batch'),
                     segments=len(report.get('segments') or ())),
         pinned_modules=pinned, sources={READER_TP: sha})
+    if capacity != admission.CAPACITY_131K:
+        section['harness'] += ' --capacity %d' % capacity
     if watcher:
         section['watcher_pass'] = watcher
     return section, sha
@@ -454,31 +489,46 @@ WHAT_RECORDED = ('The four-card (QWEN_FAST_TP=4) record of packed_any_admission:
                  'there (EVIDENCE_TP4_SHA256), so a new record changes both in one commit.')
 
 
-def record(evidence, sections, audit=None):
+WHAT_RECORDED_262K = ('The four-card (QWEN_FAST_TP=4) record of packed_any_admission for the 262,144-token window (page-table width 4,096): the '
+                      'same three sections as packed_any_evidence_tp4.json at capacity 262,144 (CB1 over K1\'s families plus 196,864 and '
+                      '262,144; CB2a with K2 2,030 tickets, X7 600, Z 900 and the 262,144 family; CB2b at capacity 262,144), at one KV head '
+                      'per chip (K64j flags 0x23) and the reader twin through the 1of4 chip view. packed_any_admission.check_evidence reads it '
+                      'at every 262,144 attach and its sha256 is pinned there (EVIDENCE_TP4_262K_SHA256), so a new record changes both in one '
+                      'commit; the 131,328 record and its pin are never touched.')
+
+
+def record(evidence, sections, audit=None, capacity=admission.CAPACITY_131K):
     """A new evidence dict: `sections` (name -> section dict) replaces the PENDING ones; the reader sha256 joins `sources`."""
     evidence = json.loads(json.dumps(evidence))
+    if capacity != admission.CAPACITY_131K:
+        evidence['capacity'] = capacity
     evidence['sections'] = dict(evidence.get('sections') or {})
     for name, section in sections.items():
         evidence['sections'][name] = section
     if all((evidence['sections'].get(name) or {}).get('status') == 'PASS' for name in admission.SECTIONS):
-        evidence['what'] = WHAT_RECORDED
+        evidence['what'] = WHAT_RECORDED if capacity == admission.CAPACITY_131K else WHAT_RECORDED_262K
     evidence['provenance'] = provenance_text(evidence, audit)
     return evidence
 
 
-def repin(admission_path, digest):
-    """packed_any_admission.py with EVIDENCE_TP4_SHA256 set to `digest`, the bytes otherwise untouched."""
+def repin(admission_path, digest, capacity=admission.CAPACITY_131K):
+    """packed_any_admission.py with EVIDENCE_TP4_SHA256 (or, for the 262,144-token window, EVIDENCE_TP4_262K_SHA256) set to `digest`,
+    the bytes otherwise untouched: the other capacity's pin is never rewritten."""
+    name = 'EVIDENCE_TP4_SHA256' if capacity == admission.CAPACITY_131K else 'EVIDENCE_TP4_262K_SHA256'
     with open(admission_path, 'rb') as handle:
         text = handle.read().decode('utf-8')
-    new, count = re.subn(r"^(EVIDENCE_TP4_SHA256 = )'[0-9a-f]{64}'", r"\1'%s'" % digest, text, flags=re.M)
+    new, count = re.subn(r"^(%s = )'[0-9a-f]{64}'" % name, r"\1'%s'" % digest, text, flags=re.M)
     if count != 1:
-        raise RecordError(['%s has %d EVIDENCE_TP4_SHA256 assignments, not 1' % (os.path.basename(admission_path), count)])
+        raise RecordError(['%s has %d %s assignments, not 1' % (os.path.basename(admission_path), count, name)])
     return new.encode('utf-8')
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--evidence', default=str(admission.EVIDENCE_TP4))
+    parser.add_argument('--capacity', type=int, default=admission.CAPACITY_131K, choices=admission.CAPACITIES,
+                        help='the window the reports are for: 131328 (the default: packed_any_evidence_tp4.json) or 262144 '
+                             '(packed_any_evidence_tp4_262144.json at its own pin)')
+    parser.add_argument('--evidence', default=None, help='the record to write (default: the capacity\'s own)')
     parser.add_argument('--admission', default=os.path.join(HERE, 'packed_any_admission.py'))
     parser.add_argument('--sources-root', default=HERE, help='where extent_attention_replay_tp.py is read (default: here)')
     for name in ('cb1', 'cb2a', 'cb2b'):
@@ -498,6 +548,9 @@ def parse_args(argv=None):
 
 def main(argv=None, out=print):
     args = parse_args(argv)
+    capacity = args.capacity
+    if args.evidence is None:
+        args.evidence = str(admission.evidence_path(4, capacity))
     if not (args.cb1 or args.cb2a or args.cb2b):
         out('nothing to record: name at least one of --cb1, --cb2a, --cb2b')
         return 2
@@ -513,7 +566,7 @@ def main(argv=None, out=print):
             watcher = watcher_entry(getattr(args, name + '_watcher_run'), getattr(args, name + '_watcher_tag'),
                                     getattr(args, name + '_watcher'))
             sections[section_name] = builder(report, digest, path, getattr(args, name + '_run'), getattr(args, name + '_tag'),
-                                             watcher)
+                                             watcher, capacity)
         except RecordError as error:
             problems += error.problems
     if args.cb2b:
@@ -521,7 +574,7 @@ def main(argv=None, out=print):
             report, digest = read_report(args.cb2b)
             watcher = watcher_entry(args.cb2b_watcher_run, args.cb2b_watcher_tag, args.cb2b_watcher)
             sections['CB2b'], sha = build_cb2b(report, digest, args.cb2b, args.cb2b_run, args.cb2b_tag, args.cb2b_commit,
-                                               args.cb2b_image, watcher, args.sources_root)
+                                               args.cb2b_image, watcher, args.sources_root, capacity)
             sources[READER_TP] = sha
         except RecordError as error:
             problems += error.problems
@@ -530,7 +583,7 @@ def main(argv=None, out=print):
             out('REFUSED: ' + problem)
         return 1
     evidence = record(current, sections, (args.extent_audit_run, args.extent_audit_tag)
-                      if args.extent_audit_run and args.extent_audit_tag else None)
+                      if args.extent_audit_run and args.extent_audit_tag else None, capacity)
     evidence['sources'] = dict(current.get('sources') or {}, **sources)
     dirty = hygiene_problems(evidence)
     if dirty:
@@ -539,19 +592,20 @@ def main(argv=None, out=print):
         return 1
     payload = dump(evidence)
     digest = hashlib.sha256(payload).hexdigest()
-    remaining = admission.evidence_problems(evidence, args.sources_root, tp=4)
+    remaining = admission.evidence_problems(evidence, args.sources_root, tp=4, capacity=capacity)
     out('evidence sha256 %s; sections recorded: %s; %d problems left for the admission%s' % (
         digest, ','.join(sorted(sections)), len(remaining), '' if not remaining else ':'))
     for problem in remaining:
         out('  - ' + problem)
-    pinned = repin(args.admission, digest)        # both payloads are made before either file is opened for writing
+    pinned = repin(args.admission, digest, capacity)   # both payloads are made before either file is opened for writing
     if args.dry_run:
         return 0
     with open(args.evidence, 'wb') as handle:
         handle.write(payload)
     with open(args.admission, 'wb') as handle:
         handle.write(pinned)
-    out('wrote %s and re-pinned EVIDENCE_TP4_SHA256 in %s' % (args.evidence, args.admission))
+    out('wrote %s and re-pinned %s in %s' % (args.evidence, 'EVIDENCE_TP4_SHA256' if capacity == admission.CAPACITY_131K
+                                              else 'EVIDENCE_TP4_262K_SHA256', args.admission))
     return 0
 
 

@@ -79,7 +79,7 @@ COPY scripts/ci/verify_trace_t1.py /experiment-scripts/ci/
 # Verify-trace T2 (QWEN_FAST_VERIFY_T2, default off): verify_trace_t2.RUNTIME_FILES, the one table.
 # gdn_user_batch_conv, model_batch, packed_verifier and serving_packed_step import it; the
 # packed windows kernel is the SIBLING .cpp of its driver, so the pair travels together.
-COPY scripts/ci/verify_trace_t2.py scripts/ci/gdn_conv_windows_packed.py scripts/ci/gdn_conv_windows_packed.cpp scripts/ci/packed_ordered_cache.py /experiment-scripts/ci/
+COPY scripts/ci/verify_trace_t2.py scripts/ci/gdn_conv_windows_packed.py scripts/ci/gdn_conv_windows_packed.cpp scripts/ci/packed_ordered_cache.py scripts/ci/page_width_tp4.py /experiment-scripts/ci/
 # TP4 verify-glue levers (tp4/vglue; QWEN_FAST_TP4_*, default off): tp4_vglue.RUNTIME_FILES, the one table.
 COPY scripts/ci/tp4_vglue.py scripts/ci/gdn_commit_lanes_tp.cpp scripts/ci/gdn_rows_dma_tp.py scripts/ci/gdn_rows_dma_tp.cpp scripts/ci/gdn_device_loop_state_tp.py scripts/ci/gdn_block_conv_tp.py scripts/ci/attention_block_fold_tp.py scripts/ci/attention_block_fold_tp.cpp scripts/ci/extent_attention_fold_tp.py scripts/ci/gdn_pair_slice_tp.py /experiment-scripts/ci/
 # The drafter's hidden-width RMS norms on a wide grid (tp4/next-3-cheap; QWEN_FAST_TP4_DRAFT_WIDE, default off): dflash_device,
