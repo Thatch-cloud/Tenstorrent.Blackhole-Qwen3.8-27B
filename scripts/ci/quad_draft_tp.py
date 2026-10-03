@@ -134,14 +134,18 @@ def blocks_capture_bytes(blocks=len(QUADS)):
 def blocks_capture_need(blocks, reserve_bytes):
     """What `blocks` quads need free in one chip's DRAM before the first capture: their bytes and the packed reserve once (the reserve
     guards what the engine and the prefill still allocate, not each quad). The coordinator checks one quad at a time, after the
-    previous one landed, so this is the attach-time total of the same per-quad checks: blocks x 450 MiB + reserve."""
+    previous one landed, so this total is what the per-quad checks add up to: blocks x 450 MiB + reserve. It is arithmetic for the gate's
+    reading of the headroom figures, not a check the attach makes (the attach has no free-DRAM reading; each quad checks its own)."""
     return blocks_capture_bytes(blocks) + reserve_bytes
 
 
 def blocks_refusal(users=None, environ=None):
     """Why the per-block quads cannot serve this process, or None. `users` is the pool's slot count when the caller knows it (the attach),
     None at a round. The reasons, in order: the value (only '2' is served), the four-card width, QWEN_FAST_QUAD_DRAFT off, the
-    quad audit (its shadow pairs are the first block's (0, 1) and (2, 3) only), and a pool that is not eight slots."""
+    quad audit (its shadow pairs are the first block's (0, 1) and (2, 3) only), a pool that is not eight slots, and - at the attach only, when
+    `users` is given - QWEN_FAST_PACKED_PROPOSAL and QWEN_FAST_EXTENT_REPLAY not both 1 (the pooled pre-trace masks and outputs of slots 4-7
+    are only built under them; without them a quad would upload its own masks and read its own outputs after the request traces exist, the
+    v86 hazard)."""
     environ = os.environ if environ is None else environ
     value = environ.get(BLOCKS_FLAG, '')
     if value in ('', '0'):
@@ -156,6 +160,11 @@ def blocks_refusal(users=None, environ=None):
         return '%s audits the first block\'s pair traces only: unset it with %s' % (_pinned.AUDIT_FLAG, BLOCKS_FLAG)
     if users is not None and users != BLOCKS_SEATS:
         return 'the two-quad draft needs eight seats (the pool has %d)' % users
+    if users is not None:
+        # The attach's question (a round has no pool to ask about): the pooled pre-trace buffers exist only under these two flags.
+        for name in ('QWEN_FAST_PACKED_PROPOSAL', 'QWEN_FAST_EXTENT_REPLAY'):
+            if environ.get(name) != '1':
+                return '%s=%s needs %s=1 (the quads pre-trace buffers come from the pool)' % (BLOCKS_FLAG, BLOCKS_VALUE, name)
     return None
 
 

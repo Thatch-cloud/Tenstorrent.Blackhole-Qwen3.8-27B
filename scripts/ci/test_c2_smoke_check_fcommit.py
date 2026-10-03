@@ -23,6 +23,9 @@ HERE = Path(__file__).resolve().parent
 PROFILES = json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))['profiles']
 
 
+NL = chr(10)
+
+
 def env_of(profile):
     return PROFILES[profile]['env']
 
@@ -169,6 +172,59 @@ class FusedProblemTests(unittest.TestCase):
         log = '\n'.join([engaged(traces=4, inplace=0, live=0)] + publications(2)
                         + audits([(n, s) for n in (1, 2) for s in range(4)], checked=40, mode='oop'))
         self.assertEqual(check.fused_problems(oop_audited, log, False), [])
+
+
+class TwoBlockTests(unittest.TestCase):
+    """QWEN_FAST_M3_BLOCKS=2 (eight seats): each 64-row block builds its own fused commit and logs its own engaged line, and both
+    blocks count their own rounds, so one round of eight users logs eight publication lines under one round number."""
+    EIGHT = env_of('c2-packed-tp4-8-best')
+
+    def log(self, engaged_lines=2, rounds=4, both=True):
+        body = [engaged() for _ in range(engaged_lines)] + [LIVE_MARKER]
+        body += publications(rounds)
+        if both:
+            body += publications(rounds)
+        return NL.join(body)
+
+    def problems(self, log, env=None, steady=False):
+        return check.fused_problems(self.EIGHT if env is None else env, log, steady)
+
+    def test_the_profile_is_two_blocks_and_one_block_is_the_default(self):
+        self.assertEqual(self.EIGHT.get('QWEN_FAST_M3_BLOCKS'), '2')
+        self.assertEqual(check.m3_blocks(self.EIGHT), 2)
+        self.assertEqual(check.m3_blocks({}), 1)
+        self.assertEqual(check.m3_blocks({'QWEN_FAST_M3_BLOCKS': '1'}), 1)
+
+    def test_two_engaged_lines_one_per_block_pass_on_the_eight_seat_profile(self):
+        self.assertEqual([text for text in self.problems(self.log()) if 'engaged line' in text], [])
+
+    def test_one_or_three_engaged_lines_fail_by_name_at_two_blocks(self):
+        for lines in (1, 3, 0):
+            with self.subTest(lines=lines):
+                found = [text for text in self.problems(self.log(engaged_lines=lines)) if 'engaged line' in text]
+                self.assertEqual(len(found), 1, found)
+                self.assertIn('appears %d times, not once per M3 block (2 blocks)' % lines, found[0])
+
+    def test_one_block_still_wants_exactly_one_engaged_line(self):
+        four = env_of('c2-packed-tp4-best-gate')
+        one = NL.join([engaged(), LIVE_MARKER] + publications(2))
+        self.assertEqual([text for text in check.fused_problems(four, one, False) if 'engaged line' in text], [])
+        found = check.fused_problems(four, NL.join([engaged(), engaged(), LIVE_MARKER] + publications(2)), False)
+        self.assertTrue(any('appears 2 times, not once' in text for text in found), found)
+
+    def test_every_block_captures_its_own_trace_count(self):
+        first_bad = self.log().replace(engaged(traces=68), engaged(traces=60), 1)
+        found = self.problems(first_bad)
+        self.assertTrue(any('captured 60 traces' in text for text in found), found)
+        second_bad = NL.join([engaged(traces=68), engaged(traces=60), LIVE_MARKER] + publications(2))
+        found = self.problems(second_bad)
+        self.assertTrue(any('a further fused-commit block captured 60 traces, not 68' in text for text in found), found)
+
+    def test_the_steady_round_of_both_blocks_counts_as_a_fused_round(self):
+        self.assertEqual([text for text in self.problems(self.log(rounds=4, both=True), steady=True) if 'all four users' in text], [])
+        no_round = NL.join([engaged(), engaged(), LIVE_MARKER] + publications(4, reasons={(n, n - 1): 'parity' for n in range(1, 5)}))
+        found = self.problems(no_round, steady=True)
+        self.assertTrue(any('no round had all four users on the fused path' in text for text in found), found)
 
 
 class CheckIntegrationTests(unittest.TestCase):

@@ -136,6 +136,11 @@ QUAD_DISABLED = '[PINDIAG] quad draft disabled'
 QUAD_FALLBACK = '[QUAD-DRAFT] fallback'
 QUAD_LINE = re.compile(r'\[QUAD-DRAFT\] round=\d+ built=')
 QUAD_AUDIT = re.compile(r'\[QUAD-AUDIT\] round=\S+ equal=([01]) ')
+SINGLES_GROUP_EQUAL = re.compile(r'\[DRAFT-SINGLES-AUDIT\] round=\S+ group=\[([0-9, ]*)\] equal=1 ')
+# A draft build that borrowed the pool's pre-trace mask / output set (dflash_proposal_trace.POOLED_*_LINE) and one the pool could not serve.
+POOLED_MASK_SLOTS = re.compile(r'\[PINDIAG\] draft mask pooled slots=\[([0-9,]*)\]')
+POOLED_OUTPUT_SLOTS = re.compile(r'\[PINDIAG\] draft outputs pooled slots=\[([0-9,]*)\]')
+POOLED_REFUSED = ('[PINDIAG] draft mask pooled refused', '[PINDIAG] draft outputs pooled refused')
 SINGLES_AUDIT_LINE = re.compile(r'\[DRAFT-SINGLES-AUDIT\] round=\S+ group=\[[0-9, ]*\] equal=([01]) stage=(\S+) ')
 # A code prompt asked to be explained and rewritten (800 or 1500 tokens out) does not end by itself in a few tokens.
 MIN_ANSWER_TOKENS = 16
@@ -452,6 +457,10 @@ def draft_facts(container_text):
                 quad_markers=container_text.count(QUAD_MARKER), quad_disabled=container_text.count(QUAD_DISABLED),
                 quad_fallbacks=container_text.count(QUAD_FALLBACK), quad_lines=len(QUAD_LINE.findall(container_text)),
                 quad_audits=len(quad_audit), quad_audits_unequal=sum(1 for equal in quad_audit if equal != '1'),
+                singles_groups_equal=sorted({''.join(group.split()) for group in SINGLES_GROUP_EQUAL.findall(container_text)}),
+                pooled_mask_slots=sorted(set(POOLED_MASK_SLOTS.findall(container_text))),
+                pooled_output_slots=sorted(set(POOLED_OUTPUT_SLOTS.findall(container_text))),
+                pooled_refused=sum(container_text.count(line) for line in POOLED_REFUSED),
                 singles_audits=len(singles), singles_audits_unequal=sum(1 for equal, _ in singles if equal != '1'),
                 singles_audit_stages=sorted({stage for equal, stage in singles if equal != '1'})[:4])
 
@@ -477,9 +486,12 @@ def blocks_problems(facts, env, steady_eight):
         return problems
     if value != QUAD_BLOCKS_VALUE:
         return ['%s=%r: only %s is served' % (QUAD_BLOCKS_FLAG, value, QUAD_BLOCKS_VALUE)]
-    if env.get(QUAD_FLAG) != '1':
+    # The image sets QWEN_FAST_QUAD_DRAFT=1, so a profile that does not name it relies on that default: only an explicit other value refuses.
+    if env.get(QUAD_FLAG, '1') != '1':
         problems.append('%s=%s without %s=1: no quad can form' % (QUAD_BLOCKS_FLAG, value, QUAD_FLAG))
     if not steady_eight:
+        problems.append('the profile asks for the eight-seat quad and the smoke did not run %s (or it errored): the blocks were not judged'
+                        % STEADY_EIGHT_TEST)
         return problems
     if facts['quad_markers'] != 2 or list(facts['quad_marker_slots']) != sorted(QUAD_BLOCK_SLOTS):
         problems.append('the quad marker (%s) appears %d times with slots %s, not once for each of %s: a block never engaged or '
@@ -490,6 +502,21 @@ def blocks_problems(facts, env, steady_eight):
                         'eight steady users drafted some other way')
     if facts['quad_fallbacks'] or facts['quad_disabled']:
         problems.append('a quad fell back %d times and was disabled %d times' % (facts['quad_fallbacks'], facts['quad_disabled']))
+    # The pre-capture buffers of both quads: a quad that built without them uploaded its own mask and read its own outputs after the
+    # request traces existed (the post-capture allocation hazard of v86), which no text comparison can see.
+    for label, key in (('mask', 'pooled_mask_slots'), ('outputs', 'pooled_output_slots')):
+        missing = [slots for slots in QUAD_BLOCK_SLOTS if slots not in facts.get(key, ())]
+        if missing:
+            problems.append('no "[PINDIAG] draft %s pooled slots=[...]" line for the quad over slots %s: it built without the pool pre-trace '
+                            '%s' % (label, ' and '.join(missing), label))
+    if facts.get('pooled_refused'):
+        problems.append('%d "pooled refused" lines: the pool could not serve a draft mask or output set' % facts['pooled_refused'])
+    # With the singles audit on, each block's quad must have been audited, not any one line.
+    if env.get(SINGLES_AUDIT_FLAG) not in (None, '', '0'):
+        missing = [slots for slots in QUAD_BLOCK_SLOTS if slots not in facts.get('singles_groups_equal', ())]
+        if missing:
+            problems.append('%s is set and no [DRAFT-SINGLES-AUDIT] group=[%s] equal=1 line was logged for the quad over slots %s'
+                            % (SINGLES_AUDIT_FLAG, '...', ' and '.join(missing)))
     return problems
 
 
@@ -504,9 +531,8 @@ def draft_problems(facts, env, steady, steady_eight=False):
         problems.append('%d [DRAFT-SINGLES-AUDIT] lines with equal=0 (%s): a batched draft differs from the single-user draft'
                         % (facts['singles_audits_unequal'], ', '.join(facts['singles_audit_stages'])))
     if env.get(QUAD_BLOCKS_FLAG, '') not in ('', '0'):
+        # blocks_problems holds the singles audit to one equal=1 line per quad (more than the any-line rule below).
         problems += blocks_problems(facts, env, steady_eight)
-        if env.get(SINGLES_AUDIT_FLAG) not in (None, '', '0') and steady_eight and not facts['singles_audits']:
-            problems.append('%s is set and no [DRAFT-SINGLES-AUDIT] line was logged' % SINGLES_AUDIT_FLAG)
         return problems
     if not steady:
         return problems
@@ -563,6 +589,11 @@ def fused_facts(env, container_text):
     return gate.h1b_summary(container_text)
 
 
+def m3_blocks(env):
+    """QWEN_FAST_M3_BLOCKS as the attach reads it: 2 for two 64-row blocks (eight seats), else 1."""
+    return 2 if env.get('QWEN_FAST_M3_BLOCKS') == '2' else 1
+
+
 def fused_problems(env, container_text, steady, facts=None):
     """The problems the profile's fused-commit settings leave: see the module docstring."""
     import lever_n_m3native_gate as gate
@@ -577,11 +608,17 @@ def fused_problems(env, container_text, steady, facts=None):
     problems += report['problems']
     facts = report if facts is None else facts
     engaged_lines = container_text.count(gate.FUSED_ENGAGED_MARKER)
-    if engaged_lines != 1:
-        problems.append('the fused commit\'s engaged line (%s) appears %d times, not once' % (gate.FUSED_ENGAGED_MARKER,
-                                                                                            engaged_lines))
+    # Every 64-row M3 block builds its own fused commit and logs its own engaged line (packed_verifier, once per block): one line a block.
+    blocks = m3_blocks(env)
+    if engaged_lines != blocks:
+        problems.append('the fused commit engaged line (%s) appears %d times, not %s' % (
+            gate.FUSED_ENGAGED_MARKER, engaged_lines, 'once' if blocks == 1 else 'once per M3 block (%d blocks)' % blocks))
     engaged = facts.get('engaged')
     inplace = env.get(FUSED_INPLACE_FLAG) == '1'
+    for later in list(gate.FUSED_ENGAGED_LINE.finditer(container_text))[1:]:
+        wanted = int(later.group(1)) * (1 + FUSED_PREFIXES) if inplace else int(later.group(1))
+        if int(later.group(7)) != wanted:
+            problems.append('a further fused-commit block captured %d traces, not %d (%s users)' % (int(later.group(7)), wanted, later.group(1)))
     if engaged is not None:
         wanted = engaged['users'] * (1 + FUSED_PREFIXES) if inplace else engaged['users']
         if engaged['traces'] != wanted:
@@ -599,7 +636,14 @@ def fused_problems(env, container_text, steady, facts=None):
         if not facts.get('audits'):
             problems.append('%s is set and no [PACKED-FUSED-AUDIT] line was logged' % FUSED_AUDIT_FLAG)
     if steady:
-        if not facts.get('four_fused_rounds'):
+        # Under two M3 blocks both log the same round number (each block counts its own rounds): a round of both blocks has eight lines.
+        both_blocks = 0
+        if blocks > 1:
+            rounds = {}
+            for match in gate.FUSED_LINE.finditer(container_text):
+                rounds.setdefault(match.group(1), []).append(match.group(4))
+            both_blocks = sum(1 for paths in rounds.values() if len(paths) == 4 * blocks and all(path == 'fused' for path in paths))
+        if not (facts.get('four_fused_rounds') or both_blocks):
             problems.append('no round had all four users on the fused path (%d fused publications, %d today; reasons %s)' % (
                 facts.get('fused', 0), facts.get('today', 0), facts.get('today_reasons')))
         if env.get(FUSED_LIVE_BANKS_FLAG) == '1' and not facts.get('live_banks'):
