@@ -31,6 +31,6 @@ QWEN_SDPA_TREE_SCRATCH_ROUNDS
 [bindings]
 attn_decode_prep
 decode_gated_delta_rule_packed
-gdn_decay
+gdn_recurrent_step
 gdn_decode_conv_gates
 gdn_decode_norm_gate

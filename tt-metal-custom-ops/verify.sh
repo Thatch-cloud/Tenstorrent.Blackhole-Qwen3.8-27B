@@ -52,10 +52,20 @@ if [ "$python_check" -eq 1 ]; then
   names=$(section bindings | tr '\n' ' ')
   ( cd "$root" && python3 - $names <<'PY'
 import sys, ttnn
+import ttnn._ttnn.operations.transformer as raw
 names = sys.argv[1:]
-missing = [n for n in names if not callable(getattr(ttnn.transformer, n, None))]
-assert not missing, "ttnn.transformer lacks: %s" % missing
-print("ok   ttnn.transformer binds: " + ", ".join(names))
+# Ops bound with ttnn::bind_function are re-exported on ttnn.transformer; gdn_recurrent_step (the gdn_decay op) is a
+# plain nanobind mod.def and is reachable only on the raw extension module, so accept either and say which one.
+found = {}
+for n in names:
+    for label, mod in (("ttnn.transformer", ttnn.transformer), ("ttnn._ttnn.operations.transformer", raw)):
+        if callable(getattr(mod, n, None)):
+            found[n] = label
+            break
+missing = [n for n in names if n not in found]
+assert not missing, "ttnn.transformer (and the raw module) lack: %s" % missing
+for n in names:
+    print("ok   %s bound on %s" % (n, found[n]))
 PY
   ) || fail=1
 fi

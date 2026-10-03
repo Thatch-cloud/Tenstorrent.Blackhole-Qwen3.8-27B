@@ -9,7 +9,7 @@ Without them the serving image cannot be rebuilt from this repository (issue #33
 | `attn_decode_prep` | `attn_prep` |
 | `gdn_decode_conv_gates` | `gdn_conv_gates` |
 | `gdn_decode_norm_gate` | `gdn_norm_gate` |
-| `gdn_decay` | `gdn_decay` |
+| `gdn_recurrent_step` (on `ttnn._ttnn.operations.transformer`) | `gdn_decay` |
 | `decode_gated_delta_rule_packed` | `decode_gated_delta_rule` |
 
 Base: tt-metal `9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9` (tag `v0.77.0-rc1`).
