@@ -467,6 +467,7 @@ FAKES = NL.join([
     '    "ps -q") cat "$FAKE_DIR/ids" ;;',
     '    "inspect -f") case $3 in *Devices*) cat "$FAKE_DIR/devices-$4" 2>/dev/null ;; *) cat "$FAKE_DIR/name-$4" ;; esac ;;',
     '    "rm -f") echo "$3" >> "$FAKE_DIR/removed" ;;',
+    '    "ps --filter") cat "$FAKE_DIR/builders" 2>/dev/null ;;',
     '    *) echo "unexpected docker $*" >&2; return 99 ;;',
     '  esac',
     '}',
@@ -549,6 +550,13 @@ class CardMStepRunTests(unittest.TestCase):
         full.update(env)
         return subprocess.run([BASH, '--noprofile', '--norc', '-eo', 'pipefail', self.path('step.sh')], env=full,
                               cwd=self.dir, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=120)
+
+    def test_a_buildx_builder_is_waited_for_not_refused(self):
+        # Other CI builds on the host with privileged buildx builders; the step waits for them (2026-10-03, v336).
+        step = step_script('Run a qualification harness on card M')
+        self.assertIn("docker ps --filter name=buildx_buildkit_", step)
+        self.assertLess(step.index('buildx_buildkit_'), step.index('thatch-inference-'))
+        self.assertIn('seq 1 180', step)
 
     def test_a_platform_serving_container_refuses_before_the_cards_are_looked_at(self):
         self.write('names', 'qwen-something-else' + NL + 'thatch-inference-Qwen-Qwen3.8-27B' + NL)
