@@ -167,13 +167,33 @@ def read_manifest(data):
     return manifest
 
 
-def files_needed(arms):
+PUBLIC_SOURCES = ('swe', 'chained', 'code')       # training sources that are public text: no scrub report is needed for them alone
+
+
+def g_needs_scrub(data):
+    """True when arm G's conversation file holds ANY conversation whose source is not a public one (our own traces, or a record that
+    names no source at all: unknown is treated as own). Read before the manifest check; the same file's size and sha256 are verified in
+    the same pass, so an edit that hides an `own` source is refused there."""
+    path = os.path.join(data, ARM_FILES['G'][0])
+    try:
+        conversations = read_jsonl(path, ARM_FILES['G'][0])
+    except OSError:
+        return True
+    return any(not isinstance(conv, dict) or conv.get('source') not in PUBLIC_SOURCES for conv in conversations)
+
+
+def needs_scrub(data, arms):
+    """A2 always (it is our own sessions); G whenever any of its conversations could be our own."""
+    return 'A2' in arms or ('G' in arms and g_needs_scrub(data))
+
+
+def files_needed(arms, data=None):
     names = []
     for arm in arms:
         for name in ARM_FILES[arm]:
             if name not in names:
                 names.append(name)
-    if 'A2' in arms:
+    if 'A2' in arms or ('G' in arms and (data is None or g_needs_scrub(data))):
         names.append(SCRUB_REPORT_NAME)
     return names
 
@@ -181,7 +201,7 @@ def files_needed(arms):
 def verify_files(data, manifest, arms):
     """Every file the arms read must be in the manifest at its recorded size and sha256 (a stale or edited copy is refused)."""
     entries = manifest['files']
-    for name in files_needed(arms):
+    for name in files_needed(arms, data):
         entry = entries.get(name)
         path = os.path.join(data, name)
         if not isinstance(entry, dict) or not os.path.isfile(path):
@@ -191,9 +211,10 @@ def verify_files(data, manifest, arms):
 
 
 def check_scrub_report(data, arms):
-    """A2's gate before the run: the data agent's scrub report must record a clean FINAL check of the written files (no
-    residual detector hit in the conversations or the decoded ids) and name the conversations kept. -> counts (never values)."""
-    if 'A2' not in arms:
+    """The gate before an arm that could carry our own traces (A2, and G when any of its conversations is not a public source): the
+    data agent's scrub report must record a clean FINAL check of the written files (no residual detector hit in the conversations or the
+    decoded ids) and name the conversations kept. -> counts (never values)."""
+    if not needs_scrub(data, arms):
         return {}
     try:
         with open(os.path.join(data, SCRUB_REPORT_NAME), encoding='utf-8') as handle:

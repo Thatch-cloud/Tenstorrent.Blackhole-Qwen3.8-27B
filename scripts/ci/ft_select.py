@@ -72,8 +72,9 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def write_training_directory(out, conversations, a1=(), a2=(), eval_tier=(), d4_cleared=False):
-    """Check the guard, then write the lab data directory. -> the manifest (counts only). Refuses an existing non-empty directory."""
+def write_training_directory(out, conversations, a1, a2, eval_tier, d4_cleared=False):
+    """Check the guard, then write the lab data directory. -> the manifest (counts only). Refuses an existing non-empty directory. The
+    held-out sets are required (ft_split.load_held_out reads them from the lab's data directory)."""
     records = [dict((key, value) for key, value in c.items() if key not in ('turns', 'id')) for c in conversations]
     ft_split.guard_training_set(records, a1=a1, a2=a2, eval_tier=eval_tier, d4_cleared=d4_cleared)
     ids_seen = set()
@@ -103,3 +104,41 @@ def write_training_directory(out, conversations, a1=(), a2=(), eval_tier=(), d4_
     for name in os.listdir(out):
         os.chmod(os.path.join(out, name), 0o600)
     return manifest
+
+
+def read_candidates(path):
+    """Candidate conversations (private lab data: dicts with source, group, id, turns[turn_id, ids] and the source's identifiers)."""
+    out = []
+    with open(path, encoding='utf-8') as handle:
+        for line in handle:
+            if line.strip():
+                out.append(json.loads(line))
+    return out
+
+
+def main(argv=None, say=print):
+    """Select, guard against the REAL held-out sets read from the lab's data directory, and write the training directory. Counts only on
+    stdout; a failure prints its exception type only (a message could carry an identifier)."""
+    import argparse
+    parser = argparse.ArgumentParser(description=main.__doc__.split(chr(10))[0])
+    parser.add_argument('--lab-dir', required=True, help='the lab data directory holding the held-out A1 / A2 / eval-tier files')
+    parser.add_argument('--candidates', required=True, help='JSONL of candidate conversations (private)')
+    parser.add_argument('--out', required=True)
+    parser.add_argument('--total-turns', type=int, required=True)
+    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--d4-cleared', action='store_true', help='the owner decision that lets own traces in (default: refused)')
+    options = parser.parse_args(argv)
+    try:
+        held = ft_split.load_held_out(options.lab_dir)
+        chosen = select_conversations(read_candidates(options.candidates), ft_split.DEFAULT_MIX, options.total_turns, options.seed,
+                                      options.d4_cleared)
+        manifest = write_training_directory(options.out, chosen, d4_cleared=options.d4_cleared, **held)
+    except Exception as error:
+        say('refused: %s' % type(error).__name__)
+        return 2
+    say('wrote %d conversations, %d turns' % (manifest['arms'][ARM]['conversations'], manifest['arms'][ARM]['turns']))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -59,42 +59,165 @@ class SplitTests(unittest.TestCase):
             sp.split_by_key([dict(other='a')], 'repo', 0.5, 1)
 
 
+def held(**override):
+    """Non-vacuous held-out sets: A1 repositories, A2 sessions, an eval tier of repositories and groups."""
+    sets = dict(a1=swe('held-a'), a2=[own('c9', 'p9')], eval_tier=swe('eval-a') + [dict(group='g9')])
+    sets.update(override)
+    return sets
+
+
 class GuardTests(unittest.TestCase):
     def test_a_clean_set_passes(self):
-        train = swe('train-a', 3) + swe('train-b') + [dict(source='chained', group='g1'), dict(source='code', group='c1')]
-        self.assertTrue(sp.guard_training_set(train, a1=swe('held-a'), eval_tier=swe('eval-a') + [dict(group='g9')]))
+        train = swe('train-a', 3) + swe('train-b') + [dict(source='chained', group='g1', repo='train-c'), dict(source='code', group='c1', repo_free=True)]
+        self.assertTrue(sp.guard_training_set(train, **held()))
 
     def test_a_repository_in_a1_is_refused(self):
         with self.assertRaises(sp.SplitError) as caught:
-            sp.guard_training_set(swe('shared') + swe('x'), a1=swe('shared'))
+            sp.guard_training_set(swe('shared') + swe('x'), **held(a1=swe('shared')))
         self.assertIn('repo', str(caught.exception))
         self.assertNotIn('shared', str(caught.exception))                          # the count and the key, never the value
         self.assertIn('1 repo', str(caught.exception))
 
     def test_a_repository_in_the_eval_tier_is_refused(self):
         with self.assertRaises(sp.SplitError):
-            sp.guard_training_set(swe('e1'), eval_tier=swe('e1'))
+            sp.guard_training_set(swe('e1'), **held(eval_tier=swe('e1')))
 
     def test_a_group_in_the_eval_tier_is_refused(self):
         with self.assertRaises(sp.SplitError):
-            sp.guard_training_set([dict(source='code', group='g')], eval_tier=[dict(group='g')])
+            sp.guard_training_set([dict(source='code', group='g', repo_free=True)], **held(eval_tier=[dict(group='g')]))
 
     def test_own_traces_are_refused_without_d4_even_if_disjoint(self):
         with self.assertRaises(sp.SplitError):
-            sp.guard_training_set([own('c1', 'p1')], a2=[own('c9', 'p9')])
-        self.assertTrue(sp.guard_training_set([own('c1', 'p1')], a2=[own('c9', 'p9')], d4_cleared=True))
+            sp.guard_training_set([own('c1', 'p1')], **held())
+        self.assertTrue(sp.guard_training_set([own('c1', 'p1')], d4_cleared=True, **held()))
 
     def test_own_traces_must_be_disjoint_by_conversation_and_by_project(self):
-        a2 = [own('c9', 'p9')]
         with self.assertRaises(sp.SplitError):
-            sp.guard_training_set([own('c9', 'p1')], a2=a2, d4_cleared=True)       # same conversation
+            sp.guard_training_set([own('c9', 'p1')], d4_cleared=True, **held())       # same conversation
         with self.assertRaises(sp.SplitError):
-            sp.guard_training_set([own('c1', 'p9')], a2=a2, d4_cleared=True)       # same project, another conversation
+            sp.guard_training_set([own('c1', 'p9')], d4_cleared=True, **held())       # same project, another conversation
 
     def test_records_without_their_identifiers_are_refused(self):
         for record in (dict(source='swe'), dict(source='own', conversation='c'), dict(source='web'), dict()):
             with self.assertRaises(sp.SplitError):
-                sp.guard_training_set([record], d4_cleared=True)
+                sp.guard_training_set([record], d4_cleared=True, **held())
+
+
+class VacuousGuardTests(unittest.TestCase):
+    """The guard that checks nothing was the defect: every way to hand it nothing is now a refusal."""
+
+    def test_the_held_out_sets_have_no_defaults(self):
+        with self.assertRaises(TypeError):
+            sp.guard_training_set(swe('a'))
+        with self.assertRaises(TypeError):
+            sp.guard_training_set(swe('a'), a1=swe('h'), a2=[own('c', 'p')])
+
+    def test_an_empty_or_missing_held_out_set_is_refused(self):
+        for name in ('a1', 'a2', 'eval_tier'):
+            with self.assertRaises(sp.SplitError) as caught:
+                sp.guard_training_set(swe('a'), **held(**{name: []}))
+            self.assertIn('empty', str(caught.exception))
+            with self.assertRaises(sp.SplitError):
+                sp.guard_training_set(swe('a'), **held(**{name: None}))
+        with self.assertRaises(sp.SplitError):
+            sp.guard_training_set(swe('a'), **held(a1='held-a'))
+
+    def test_a_held_out_record_without_its_key_is_refused_not_ignored(self):
+        with self.assertRaises(sp.SplitError) as caught:
+            sp.guard_training_set(swe('shared'), **held(a1=swe('x') + [dict(source='swe', turn=1)]))       # an A1 record with no repo
+        self.assertIn('1 records', str(caught.exception))
+        with self.assertRaises(sp.SplitError):
+            sp.guard_training_set(swe('a'), **held(a2=[dict(conversation='c9')]))                          # no project
+        with self.assertRaises(sp.SplitError):
+            sp.guard_training_set(swe('a'), **held(eval_tier=[dict(turn=3)]))                              # neither repo nor group
+        with self.assertRaises(sp.SplitError):
+            sp.guard_training_set(swe('a'), **held(a1=['not a record']))
+
+    def test_a_chained_or_code_record_with_a_repository_is_checked_against_a1(self):
+        train = [dict(source='chained', group='g1', repo='shared')]
+        with self.assertRaises(sp.SplitError):
+            sp.guard_training_set(train, **held(a1=swe('shared')))
+        with self.assertRaises(sp.SplitError):
+            sp.guard_training_set([dict(source='code', group='c1', repo='e1')], **held(eval_tier=swe('e1')))
+
+    def test_a_chained_or_code_record_must_name_a_repository_or_say_it_has_none(self):
+        for source in ('chained', 'code'):
+            with self.assertRaises(sp.SplitError) as caught:
+                sp.guard_training_set([dict(source=source, group='g1')], **held())
+            self.assertIn('repo_free', str(caught.exception))
+            with self.assertRaises(sp.SplitError):
+                sp.guard_training_set([dict(source=source, group='g1', repo_free='yes')], **held())              # only a real True counts
+            self.assertTrue(sp.guard_training_set([dict(source=source, group='g1', repo_free=True)], **held()))
+
+    def test_every_record_with_a_repo_is_checked_whatever_its_source(self):
+        with self.assertRaises(sp.SplitError):
+            sp.guard_training_set([dict(source='own', conversation='c1', project='p1', repo='shared')], d4_cleared=True, **held(a1=swe('shared')))
+
+
+class LoadHeldOutTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.root = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.root)
+
+    def write(self, name, records, gz=False):
+        import gzip
+        import json
+        path = os.path.join(self.root, name)
+        opener = gzip.open if gz else open
+        with opener(path, 'wt', encoding='utf-8') as handle:
+            for record in records:
+                handle.write(json.dumps(record) + chr(10))
+
+    def full(self):
+        self.write(sp.HELD_OUT_FILES['a1'], [dict(id='a', group='gg', repo='r1', turns=[dict(turn_id='t', secret='NOT-LOADED')])])
+        self.write(sp.HELD_OUT_FILES['a2'], [dict(id='b', conversation='c1', project='p1')])
+        self.write(sp.HELD_OUT_FILES['eval_tier'], [dict(repo='r2'), dict(group='g2')])
+
+    def test_the_three_sets_are_read_and_only_identity_fields_are_kept(self):
+        self.full()
+        sets = sp.load_held_out(self.root)
+        self.assertEqual(sorted(sets), ['a1', 'a2', 'eval_tier'])
+        self.assertEqual(sets['a1'], [dict(group='gg', repo='r1')])
+        self.assertNotIn('turns', sets['a1'][0])
+        self.assertTrue(sp.guard_training_set(swe('fresh'), **sets))
+        with self.assertRaises(sp.SplitError):
+            sp.guard_training_set(swe('r1'), **sets)
+
+    def test_a_missing_file_an_empty_file_or_a_record_without_its_key_is_refused(self):
+        with self.assertRaises(sp.SplitError):
+            sp.load_held_out(self.root)
+        self.full()
+        os.remove(os.path.join(self.root, sp.HELD_OUT_FILES['eval_tier']))
+        with self.assertRaises(sp.SplitError):
+            sp.load_held_out(self.root)
+        self.write(sp.HELD_OUT_FILES['eval_tier'], [])
+        with self.assertRaises(sp.SplitError):
+            sp.load_held_out(self.root)
+        self.write(sp.HELD_OUT_FILES['eval_tier'], [dict(note='x')])
+        with self.assertRaises(sp.SplitError):
+            sp.load_held_out(self.root)
+        self.write(sp.HELD_OUT_FILES['eval_tier'], [dict(repo='r2')])
+        self.write(sp.HELD_OUT_FILES['a1'], [dict(group='no-repo')])
+        with self.assertRaises(sp.SplitError):
+            sp.load_held_out(self.root)
+
+    def test_a_line_that_is_not_json_is_refused(self):
+        self.full()
+        with open(os.path.join(self.root, sp.HELD_OUT_FILES['a2']), 'a') as handle:
+            handle.write('not json' + chr(10))
+        with self.assertRaises(sp.SplitError):
+            sp.load_held_out(self.root)
+
+    def test_the_messages_name_the_set_and_a_count_never_a_value(self):
+        self.full()
+        self.write(sp.HELD_OUT_FILES['a2'], [dict(conversation='SENTINEL-CONV')])
+        with self.assertRaises(sp.SplitError) as caught:
+            sp.load_held_out(self.root)
+        self.assertNotIn('SENTINEL', str(caught.exception))
 
 
 if __name__ == '__main__':
