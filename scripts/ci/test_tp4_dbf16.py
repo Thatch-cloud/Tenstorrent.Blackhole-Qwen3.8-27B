@@ -16,7 +16,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import c2_serving_job as job  # noqa: E402
 import draft_mlp_branch  # noqa: E402
+import c2_smoke_check  # noqa: E402
 import drafter_bf16  # noqa: E402
+import lever_n_m3native_gate  # noqa: E402
 from draft_attention_branch import prepare_attention_branch  # noqa: E402
 from draft_mlp_branch import DRAFT_BF8_FLAG, DRAFTER_BF16_FLAG, draft_projection_dtype, prepare_mlp_branch  # noqa: E402
 from test_draft_projection_bf8 import FakeOperations, attention_weights, convolution_weights, mlp_weights  # noqa: E402
@@ -27,12 +29,16 @@ FOLDER = os.path.join(HERE, 'references', 'tp4-dbf16-jobs')
 PROFILES_PATH = os.path.join(HERE, 'qwen_c2_profiles.json')
 STRACE, BEST_DBF16 = 'c2-packed-tp4-best-strace', 'c2-packed-tp4-best-dbf16'
 GATE, GATE_DBF16 = 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-gate-dbf16'
+EIGHT, EIGHT_DBF16 = 'c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-best-quad-dbf16'
 IMAGE = 'tp4-dbf16-1'
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|/dev/tenstorrent|home/|zot\.')
 EXPECTED = {
-    'B0-build': ('build', 'c2-packed-tp4'), 'S1-dbf16-audited-smoke': ('reset smoke', GATE_DBF16),
+    'X0-status-rescan': ('status rescan', 'c2-packed-tp4'), 'B0-build': ('build', 'c2-packed-tp4'),
+    'S1-dbf16-audited-smoke': ('rescan reset smoke', GATE_DBF16),
     'D1-timed-A-best-strace': ('reset smoke', STRACE), 'D2-timed-B-best-dbf16': ('reset smoke', BEST_DBF16),
     'D3-timed-A-best-strace': ('reset smoke', STRACE), 'D4-timed-B-best-dbf16': ('reset smoke', BEST_DBF16),
+    'E1-eight-seat-A-best-quad': ('reset smoke', EIGHT), 'E2-eight-seat-B-best-quad-dbf16': ('reset smoke', EIGHT_DBF16),
+    'E3-eight-seat-A-best-quad': ('reset smoke', EIGHT), 'E4-eight-seat-B-best-quad-dbf16': ('reset smoke', EIGHT_DBF16),
     'Z-reset': ('status reset', 'c2-packed-tp4'),
 }
 AGENT_ACTIONS = {'agentstop', 'agentstart', 'unserve', 'platform', 'replay', 'priority', 'cardm'}
@@ -101,7 +107,7 @@ class ProfileTests(unittest.TestCase):
 
     def test_each_profile_is_its_base_plus_exactly_the_flag(self):
         found = profiles()['profiles']
-        for name, base in ((BEST_DBF16, STRACE), (GATE_DBF16, GATE)):
+        for name, base in ((BEST_DBF16, STRACE), (GATE_DBF16, GATE), (EIGHT_DBF16, EIGHT)):
             with self.subTest(profile=name):
                 self.assertEqual(found[name]['env'], dict(found[base]['env'], **{DRAFTER_BF16_FLAG: '1'}))
                 for key in set(found[name]) | set(found[base]):
@@ -113,7 +119,7 @@ class ProfileTests(unittest.TestCase):
 
     def test_the_flag_sits_only_in_those_two_profiles(self):
         found = profiles()['profiles']
-        self.assertEqual(sorted(n for n, body in found.items() if DRAFTER_BF16_FLAG in body['env']), sorted([BEST_DBF16, GATE_DBF16]))
+        self.assertEqual(sorted(n for n, body in found.items() if DRAFTER_BF16_FLAG in body['env']), sorted([BEST_DBF16, GATE_DBF16, EIGHT_DBF16]))
         self.assertNotIn(DRAFTER_BF16_FLAG, found['c2-packed-tp4']['env'])
 
     def test_the_timed_pair_keeps_the_audits_off_and_the_audited_one_keeps_them(self):
@@ -143,17 +149,26 @@ class CostTests(unittest.TestCase):
         self.assertAlmostEqual(drafter_bf16.cost(2)['extra_mb_per_chip'], 2 * drafter_bf16.cost(4)['extra_mb_per_chip'], places=0)
 
 
-def round_log(counts_per_round, seconds, start=0.0):
-    """A server log: per round one '[PHASE] execute ... new=0 cached=4 spec=...' stamp and four '[PACKED] request=' lines."""
+def round_log(counts_per_round, seconds, start=0.0, users=4, gap_after=None):
+    """A server log: per round one '[PHASE] execute ... new=0 cached=<users>' stamp and the users' '[PACKED] request=' lines. gap_after=(round index, seconds)
+    inserts an idle gap after that round, which ends the episode."""
     lines, clock = [], start
-    for counts in counts_per_round:
-        total_ms = int(clock * 1000)
-        lines.append('2026-10-03 10:%02d:%02d.%03d | INFO | [PHASE] execute total=4 new=0 cached=4 spec=60' % (total_ms // 60000, total_ms // 1000 % 60, total_ms % 1000))
+
+    def stamp(at):
+        total_ms = int(round(at * 1000))
+        return '2026-10-03 10:%02d:%02d.%03d | INFO | [PHASE] execute total=%d new=0 cached=%d spec=60' % (
+            total_ms // 60000, total_ms // 1000 % 60, total_ms % 1000, users, users)
+
+    for index, counts in enumerate(counts_per_round):
+        lines.append(stamp(clock))
         for user, emitted in enumerate(counts):
             lines.append('[PACKED] request=r%d segment=0 position=100 prefix=0 emitted=%d' % (user, emitted))
         clock += seconds
-    total_ms = int(clock * 1000)
-    lines.append('2026-10-03 10:%02d:%02d.%03d | INFO | [PHASE] execute total=4 new=0 cached=4 spec=60' % (total_ms // 60000, total_ms // 1000 % 60, total_ms % 1000))
+        if gap_after and gap_after[0] == index:
+            lines.append('2026-10-03 10:%02d:%02d.%03d | INFO | [PHASE] execute total=1 new=500 cached=0 spec=60' % (
+                int(clock * 1000) // 60000, int(clock * 1000) // 1000 % 60, int(clock * 1000) % 1000))
+            clock += gap_after[1]
+    lines.append(stamp(clock))
     return '\n'.join(lines) + '\n'
 
 
@@ -163,21 +178,84 @@ class CompareTests(unittest.TestCase):
         b = round_log([(7, 6, 7, 6)] * 10, 0.101)
         result = drafter_bf16.compare(a, b, 4)
         self.assertEqual((result['a']['tau'], result['b']['tau']), (6.0, 6.5))
-        self.assertEqual((result['a']['median_round_ms'], result['b']['median_round_ms']), (100.0, 101.0))
+        self.assertEqual((result['a']['mean_round_ms'], result['b']['mean_round_ms']), (100.0, 101.0))
         self.assertEqual((result['a']['per_user_tok_s'], result['b']['per_user_tok_s']), (60.0, 64.36))
         self.assertAlmostEqual(result['tau_ratio_b_over_a'], 1.0833, places=4)
         self.assertAlmostEqual(result['round_time_ratio_b_over_a'], 1.01, places=4)
         self.assertTrue(result['bf16_wins'])
-        self.assertEqual(result['paired_rounds'], 10)
+        self.assertEqual((result['paired_rounds'], result['episodes']), (10, 1))
+        self.assertEqual(result['rounds_b_faster'], 10)
+        self.assertGreater(result['paired_rate_delta_mean_tok_s'], 0)
         self.assertEqual(result['per_round_committed']['b'][0], [7, 6, 7, 6])
 
     def test_a_tau_gain_below_the_extra_round_time_does_not_win(self):
         result = drafter_bf16.compare(round_log([(6, 6, 6, 6)] * 6, 0.100), round_log([(6, 6, 6, 6)] * 6, 0.101), 4)
         self.assertFalse(result['bf16_wins'])
+        self.assertEqual(result['rounds_b_faster'], 0)
 
     def test_an_arm_without_timed_rounds_is_refused(self):
         with self.assertRaises(ValueError):
             drafter_bf16.compare('nothing\n', round_log([(6, 6, 6, 6)] * 3, 0.1), 4)
+
+    def test_only_the_common_prefix_of_each_episode_is_paired(self):
+        # A runs 6 rounds in its first test and 4 in its second; B runs 3 and 4 (the last round before a prefill has no timing). Rounds beyond B's first episode are not summarised.
+        a = round_log([(5, 5, 5, 5)] * 3 + [(9, 9, 9, 9)] * 3 + [(6, 6, 6, 6)] * 4, 0.1, gap_after=(5, 5.0))
+        b = round_log([(5, 5, 5, 5)] * 3 + [(6, 6, 6, 6)] * 4, 0.1, gap_after=(2, 5.0))
+        result = drafter_bf16.compare(a, b, 4)
+        self.assertEqual((result['episodes'], result['paired_rounds']), (2, 6))
+        self.assertEqual(result['a']['tau'], round((5 * 2 + 6 * 4) / 6.0, 3))
+        self.assertEqual(result['a']['tau'], result['b']['tau'])
+        self.assertNotIn([9, 9, 9, 9], result['per_round_committed']['a'])
+
+    def test_eight_seat_rounds_read_with_live_8(self):
+        a = round_log([(4,) * 8] * 5, 0.3, users=8)
+        b = round_log([(5,) * 8] * 5, 0.302, users=8)
+        result = drafter_bf16.compare(a, b, 8)
+        self.assertEqual((result['a']['tau'], result['b']['tau'], result['paired_rounds']), (4.0, 5.0, 5))
+        with self.assertRaises(ValueError):
+            drafter_bf16.compare(a, b, 4)
+
+
+class SmokeRuleTests(unittest.TestCase):
+    ON, OFF = {DRAFTER_BF16_FLAG: '1'}, {'QWEN_FAST_DRAFT_BF8': '1'}
+    ENGAGED = draft_mlp_branch.ENGAGED_MARKER
+    LEND_BF16 = '[PINDIAG] draft weights lent to quad (borrowers=1 tensors=36)'
+    LEND_BF8 = '[PINDIAG] draft weights lent to quad (borrowers=1 tensors=36) projections dtype=bf8 x36'
+
+    def test_on_needs_the_engaged_line_and_no_bf8_lend_line(self):
+        self.assertEqual(c2_smoke_check.drafter_bf16_problems(self.ON, self.ENGAGED + '\n' + self.LEND_BF16 + '\n'), [])
+        missing = c2_smoke_check.drafter_bf16_problems(self.ON, self.LEND_BF16 + '\n')
+        self.assertEqual(len(missing), 1)
+        self.assertIn('never took the flag', missing[0])
+        bad = c2_smoke_check.drafter_bf16_problems(self.ON, self.ENGAGED + '\n' + self.LEND_BF8 + '\n')
+        self.assertEqual(len(bad), 1)
+        self.assertIn('still reports bf8', bad[0])
+
+    def test_off_allows_a_bf8_lend_line_and_refuses_any_bf16_line(self):
+        self.assertEqual(c2_smoke_check.drafter_bf16_problems(self.OFF, self.LEND_BF8 + '\n'), [])
+        self.assertEqual(c2_smoke_check.drafter_bf16_problems({}, 'nothing\n'), [])
+        self.assertEqual(len(c2_smoke_check.drafter_bf16_problems(self.OFF, self.ENGAGED + '\n')), 1)
+        self.assertEqual(len(c2_smoke_check.drafter_bf16_problems({DRAFTER_BF16_FLAG: '0'}, self.ENGAGED + '\n')), 1)
+
+    def test_the_real_engaged_marker_matches_the_rule(self):
+        self.assertTrue(self.ENGAGED.startswith(c2_smoke_check.DRAFTER_BF16_ENGAGED))
+        self.assertEqual(c2_smoke_check.DRAFTER_BF16_ENGAGED, lever_n_m3native_gate.DRAFTER_BF16_MARKER)
+
+    def test_the_gate_plan_promises_the_engaged_marker_not_the_baked_bf8_one(self):
+        baked = {'QWEN_FAST_DRAFT_BF8': '1'}
+        self.assertEqual(lever_n_m3native_gate.required_flag_markers(baked, 4), {'QWEN_FAST_DRAFT_BF8': [lever_n_m3native_gate.DRAFT_BF8_MARKER]})
+        both = lever_n_m3native_gate.required_flag_markers(dict(baked, **{DRAFTER_BF16_FLAG: '1'}), 4)
+        self.assertEqual(both, {DRAFTER_BF16_FLAG: [lever_n_m3native_gate.DRAFTER_BF16_MARKER]})
+        self.assertEqual(lever_n_m3native_gate.required_flag_markers({DRAFTER_BF16_FLAG: '0'}, 4), {})
+
+    def test_every_dbf16_profile_resolves_to_the_engaged_marker_through_the_gate(self):
+        found = profiles()['profiles']
+        for name in (BEST_DBF16, GATE_DBF16, EIGHT_DBF16):
+            with self.subTest(profile=name):
+                environ = dict(found[name]['env'], QWEN_FAST_DRAFT_BF8='1')   # the image bakes it
+                markers = lever_n_m3native_gate.required_flag_markers(environ, 4)
+                self.assertIn(DRAFTER_BF16_FLAG, markers)
+                self.assertNotIn('QWEN_FAST_DRAFT_BF8', markers)
 
 
 class JobPackTests(unittest.TestCase):
@@ -207,6 +285,45 @@ class JobPackTests(unittest.TestCase):
         self.assertEqual([self.parsed(n)['profile'] for n in names], [STRACE, BEST_DBF16, STRACE, BEST_DBF16])
         self.assertEqual(len({self.parsed(n)['tests'] for n in names}), 1)
         self.assertIn('coding', self.parsed(names[0])['tests'])
+
+    def needs(self):
+        with open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8') as handle:
+            rows = [re.match(r'# NEEDS (.+?) <- (.+)$', line) for line in handle.read().splitlines()]
+        return [(m.group(1).split(), m.group(2).split()) for m in rows if m]
+
+    def test_a_failed_smoke_skips_every_timed_arm(self):
+        needs = self.needs()
+        self.assertEqual(needs, [(['D1', 'D2', 'D3', 'D4', 'E1', 'E2', 'E3', 'E4'], ['S1'])])
+        with open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8') as handle:
+            modes = {line.split()[0].split('-')[0]: line.split()[1] for line in handle.read().splitlines() if line.strip() and not line.startswith('#')}
+        self.assertEqual((modes['X0'], modes['B0'], modes['S1']), ('stop', 'stop', 'soft'))
+        for name in ('D1', 'D2', 'D3', 'D4', 'E1', 'E2', 'E3', 'E4'):
+            self.assertEqual(modes[name], 'soft')
+
+    def test_rescan_precedes_the_first_reset_and_s1_rescans(self):
+        names = list(EXPECTED)
+        self.assertEqual(names[0], 'X0-status-rescan')
+        self.assertEqual(self.parsed('X0-status-rescan')['actions'].split(), ['status', 'rescan'])
+        actions = self.parsed('S1-dbf16-audited-smoke')['actions'].split()
+        self.assertEqual(actions, ['rescan', 'reset', 'smoke'])
+        first_reset = next(n for n in names if 'reset' in EXPECTED[n][0].split())
+        self.assertLess(names.index('X0-status-rescan'), names.index(first_reset))
+
+    def test_the_eight_seat_pair_alternates_with_one_test_list(self):
+        names = ['E1-eight-seat-A-best-quad', 'E2-eight-seat-B-best-quad-dbf16', 'E3-eight-seat-A-best-quad', 'E4-eight-seat-B-best-quad-dbf16']
+        self.assertEqual([self.parsed(n)['profile'] for n in names], [EIGHT, EIGHT_DBF16, EIGHT, EIGHT_DBF16])
+        self.assertEqual(len({self.parsed(n)['tests'] for n in names}), 1)
+
+    def test_the_262k_twin_budget_arithmetic_in_the_pack_and_doc(self):
+        blocks = 16416 + int((4.0155 - 0.9605 - 0.4054 - 1.07) * 1e9 // 557056)
+        self.assertEqual(blocks, 19251)
+        self.assertEqual((19200 - 8) * 64, 1228288)
+        self.assertLessEqual(19200, blocks)
+        for relative in ('docs/tp4-drafter-bf16.md', 'scripts/ci/references/tp4-dbf16-jobs/ORDER.txt'):
+            with open(os.path.join(ROOT, relative), encoding='utf-8') as handle:
+                text = handle.read()
+            self.assertIn('19,200', text, relative)
+            self.assertIn('1,228,288', text, relative)
 
     def test_no_hostname_address_registry_or_digest_and_lf(self):
         for name in os.listdir(FOLDER):

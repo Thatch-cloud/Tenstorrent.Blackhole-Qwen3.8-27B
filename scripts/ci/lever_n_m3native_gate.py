@@ -410,6 +410,9 @@ VERIFY_T2_KV_SHARED = '[PINDIAG] verify t2 kv shared'
 VERIFY_T2_PACKED = re.compile(r'\[PINDIAG\] verify t2 engaged site=packed_verify((?: [a-z_]+=[a-z0-9_]+)*)')
 VERIFY_T2_CUTS = ('windows', 'kv_chains')
 DRAFT_BF8_MARKER = 'projections dtype=bf8 x36'
+# QWEN_FAST_DRAFTER_BF16=1 overrides the baked QWEN_FAST_DRAFT_BF8=1 (draft_mlp_branch.draft_projection_dtype): the lend line then carries no bf8 dtype,
+# and the promised marker is the engaged line instead.
+DRAFTER_BF16_MARKER = '[DRAFTER_BF16] engaged'
 LEDGER_MARKERS = ('[MEMLEDGER] phase=P7 ', ' check=residual status=')
 # QWEN_FAST_SDPA_MODES (optimisation/ttnn-op/sdpa_decode_qwen: 'tail' stage 1, 'share' stage 3).
 # The two [PINDIAG] lines are emitted inside pooled_attention_replay.apply_sdpa_modes (the
@@ -1320,7 +1323,9 @@ def required_flag_markers(environ, users, prompt_tokens=None):
         required['QWEN_FAST_SINGLE_GATEUP'] = single_gateup_markers(environ)
     elif on('QWEN_FAST_SKIP_BLOCK_STREAM'):
         required['QWEN_FAST_SKIP_BLOCK_STREAM'] = [SKIP_BLOCK_STREAM_MARKER]
-    if on('QWEN_FAST_DRAFT_BF8'):
+    if on('QWEN_FAST_DRAFTER_BF16'):
+        required['QWEN_FAST_DRAFTER_BF16'] = [DRAFTER_BF16_MARKER]
+    elif on('QWEN_FAST_DRAFT_BF8'):
         required['QWEN_FAST_DRAFT_BF8'] = [DRAFT_BF8_MARKER]
     if on('QWEN_FAST_ROUND_B1'):
         required['QWEN_FAST_ROUND_B1'] = [ROUND_B1_MARKER]

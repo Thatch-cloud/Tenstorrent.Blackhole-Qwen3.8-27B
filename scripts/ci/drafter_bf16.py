@@ -7,8 +7,9 @@ and stdlib only (nothing served imports it):
   cost(tp, ...)       the per-chip weight bytes at bf16 and bf8, the extra DRAM read per drafter pass, per round at
                       a seat count, and the committed-token gain that pays for it.
   compare(log_a, log_b, live)
-                      the paired reading of two server logs (A = bf8 control, B = bf16): the committed tokens per user
-                      per round (tau), the round time, and the per-user rate, the rounds paired by ordinal.
+                      the PAIRED reading of two server logs (A = bf8 control, B = bf16): rounds paired by (episode ordinal, round index) over the
+                      common prefix; per arm tau, mean round and mean(committed) / mean(seconds) over the paired rounds only, the B/A ratios and
+                      the per-round rate difference.
 
     py -3.11 -B scripts/ci/drafter_bf16.py cost [--tp 4] [--bandwidth-gb-s 420]
     py -3.11 -B scripts/ci/drafter_bf16.py compare A.log B.log [--live 4]
@@ -16,7 +17,6 @@ and stdlib only (nothing served imports it):
 
 import argparse
 import json
-import statistics
 import sys
 
 # The drafter's shapes (draft_attention_fixture.py, draft_mlp_fixture.py, draft_projection_full_fixture.py; tp_shapes DRAFT_*).
@@ -59,35 +59,58 @@ def cost(tp=4, *, passes_per_round=1, round_ms=None, bandwidth_gb_s=ACHIEVED_GB_
     return result
 
 
-def paired_rounds(log_text, live):
-    """Per timed packed round with `live` live users: (emitted per user, seconds), in log order."""
+def episodes(log_text, live):
+    """The timed packed rounds with `live` live users, split into episodes: a maximal run of back-to-back decode steps (one test's decode phase, or
+    one steady stretch). A new episode starts when a step is not the immediate successor of the previous one (a prefill step, an admission or a gap
+    came between). Each round is (emitted per user, seconds)."""
     import acceptance_report
 
-    return [(list(step['packed']), step['seconds']) for step in acceptance_report.decode_steps(log_text)
-            if step['live'] == live and len(step['packed']) == live and step['seconds'] and step['seconds'] > 0]
+    result, current, previous_end = [], None, None
+    for step in acceptance_report.decode_steps(log_text):
+        if step['live'] != live or len(step['packed']) != live or not step['seconds'] or step['seconds'] <= 0:
+            previous_end = None
+            continue
+        if current is None or previous_end is None or abs(step['at'] - previous_end) > 0.002:
+            current = []
+            result.append(current)
+        current.append((list(step['packed']), step['seconds']))
+        previous_end = step['at'] + step['seconds']
+    return result
 
 
-def _summary(rounds):
+def paired_rounds(log_text, live):
+    """Every timed packed round with `live` live users, in log order (episodes flattened)."""
+    return [round_ for episode in episodes(log_text, live) for round_ in episode]
+
+
+def _paired_summary(rounds):
     emitted = [value for counts, _ in rounds for value in counts]
     seconds = [second for _, second in rounds]
-    tau = sum(emitted) / len(emitted)
-    median = statistics.median(seconds)
-    return dict(rounds=len(rounds), tau=round(tau, 3), median_round_ms=round(median * 1000.0, 2),
-                per_user_tok_s=round(tau / median, 2))
+    tau, mean_round = sum(emitted) / len(emitted), sum(seconds) / len(seconds)
+    return dict(rounds=len(rounds), tau=round(tau, 3), mean_round_ms=round(mean_round * 1000.0, 2),
+                per_user_tok_s=round(tau / mean_round, 2))
 
 
 def compare(log_a, log_b, live=4):
-    """A (control, bf8) against B (bf16): each arm's tau, median round and per-user rate, and the rounds paired by
-    ordinal over the shorter arm (same prompts, same admission order, greedy: round i of A and of B serve the same text
-    position only while both arms commit the same tokens, so the pairing is by round index and read as a distribution,
-    not as a per-round difference). Also the round-time ratio B/A, which is the tau ratio B must beat to be faster."""
-    a, b = paired_rounds(log_a, live), paired_rounds(log_b, live)
-    if not a or not b:
-        raise ValueError('no timed packed round with %d live users in %s' % (live, 'A' if not a else 'B'))
-    count = min(len(a), len(b))
-    result = dict(live=live, a=_summary(a), b=_summary(b), paired_rounds=count,
+    """The PAIRED reading of A (control, bf8) against B (bf16). Both arms run the same tests in the same admission order, so the episodes (one test's
+    back-to-back decode rounds) are paired by ordinal and, inside an episode, the rounds by index over the common prefix. Only paired rounds are
+    summarised: per arm, tau (mean committed per user per round), the mean round time, and the rate mean(committed) / mean(seconds); then the B/A
+    ratios, the mean of the per-round rate difference (committed per user / seconds, B minus A) and how many paired rounds B won. Episodes beyond
+    the shorter arm's count are dropped. Greedy lossless: the tokens committed differ only through the drafter's proposals."""
+    a_episodes, b_episodes = episodes(log_a, live), episodes(log_b, live)
+    if not a_episodes or not b_episodes:
+        raise ValueError('no timed packed round with %d live users in %s' % (live, 'A' if not a_episodes else 'B'))
+    pairs = []
+    for left, right in zip(a_episodes, b_episodes):
+        pairs += list(zip(left, right))
+    a = [left for left, _ in pairs]
+    b = [right for _, right in pairs]
+    deltas = [sum(rb) / len(rb) / sb - sum(ra) / len(ra) / sa for (ra, sa), (rb, sb) in pairs]
+    result = dict(live=live, episodes=min(len(a_episodes), len(b_episodes)), episodes_unpaired=(len(a_episodes), len(b_episodes)),
+                  paired_rounds=len(pairs), a=_paired_summary(a), b=_paired_summary(b),
+                  paired_rate_delta_mean_tok_s=round(sum(deltas) / len(deltas), 3), rounds_b_faster=sum(1 for d in deltas if d > 0),
                   per_round_committed=dict(a=[counts for counts, _ in a], b=[counts for counts, _ in b]))
-    result['round_time_ratio_b_over_a'] = round(result['b']['median_round_ms'] / result['a']['median_round_ms'], 4)
+    result['round_time_ratio_b_over_a'] = round(result['b']['mean_round_ms'] / result['a']['mean_round_ms'], 4)
     result['tau_ratio_b_over_a'] = round(result['b']['tau'] / result['a']['tau'], 4)
     result['rate_ratio_b_over_a'] = round(result['b']['per_user_tok_s'] / result['a']['per_user_tok_s'], 4)
     result['bf16_wins'] = result['rate_ratio_b_over_a'] > 1.0
