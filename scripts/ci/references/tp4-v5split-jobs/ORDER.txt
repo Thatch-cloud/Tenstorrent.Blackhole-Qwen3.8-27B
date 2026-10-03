@@ -1,0 +1,35 @@
+# The order of the tp4/v5split window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window (its product is data).
+# Images: tp4-v5split-1 (a PLACEHOLDER for ONE FRESH tag, built from the pushed tp4/v5split commit by V0 while production serves) carries the runtime the single-card byte gate runs in; the gate mounts this
+# checkout's scripts, so V1a and V1b need nothing built from the qualified commit. tp4-v5split-2 (a SECOND fresh tag) is built by V2 from the commit that holds the qualified V5 sha256 triple, and every four-card job
+# serves it. The driver substitutes both in every template; a reused tag is skipped by the build step and would silently serve an old image.
+#
+# THE LEVER. V5, the recurrence value split (docs/tp4-recurrence-split.md): the K5-A launch with each head's value columns split over two cores, 96 cores for four users, the gated RMSNorm kept exact by moving data to an
+# owner core instead of summing partials. Behind QWEN_FAST_GDN_SPLIT_V=2 (off by default), refused unless gdn_seq_block_split.QUALIFIED holds the generated sources' sha256 triple, which only a full-scope PASS of the single-card
+# byte gate (V1b) may license. Gate-only profiles: c2-packed-tp4-best-v5 (timed twin of c2-packed-tp4-best), c2-packed-tp4-speed-strace-v5 (the production recipe's twin, for the hang shapes) and c2-packed-tp4-best-v5-gate (audited).
+#
+# PRODUCTION IS LIVE ON THE CARDS when the window opens: V0 (build-only) runs before it while production serves; A0 is the first job that touches production and the only one that takes it down. V1a and V1b then run on card M
+# alone (the cardm step; no reset needed). Stop after V1b if it did not PASS at full scope: nothing after it applies. If it did: commit the triple (gdn_seq_block_split.QUALIFIED, one line), push, run V2; every four-card job
+# after it opens with its own all-four reset (links train only at board init).
+# Early-failure order, cheapest first: V0, A0, V1a (watcher, reduced), V1b (full, the licence), V2 (the qualified build), V3 (the audited four-card arm: every audit line mismatches=0), V4a-V4e (five consecutive hang-shape completions
+# with the audits off), then the paired timing ABAB T1-T4 on coding prompts. Judge each pair PAIRED per round. If V3 fails, skip V4 and T1-T4. If a V4 run stalls, the count restarts at zero and the window stops.
+# HAND-BACK (H1) runs LAST and even when any earlier job failed or hung: status, the all-four reset, the fabric re-measure, agentstart. An owner /deploy is still needed, always, to place TODAY'S PRODUCTION RECIPE; this order never
+# includes a deploy, a :latest retag or a placement call.
+# Durations (estimate, wall clock): V0 18 min (90 at worst; production serving, not counted as downtime); A0 10 min; V1a 30; V1b 90; V2 18; V3 60; V4a-V4e 40 each; T1-T4 60 each; H1 25. Whole window: about 10 h; the short form
+# (V0, A0, V1a, V1b, H1: the byte gate and nothing else) is about 3 h.
+V0-build stop tp4-v5split-1 30
+A0-agentstop-unserve stop tp4-v5split-1 10
+V1a-cardm-watcher stop tp4-v5split-1 30
+V1b-cardm-full stop tp4-v5split-1 120
+V2-build-qualified stop tp4-v5split-2 30
+V3-quad-audited-smoke stop tp4-v5split-2 90
+V4a-hang-shapes-v5 stop tp4-v5split-2 40
+V4b-hang-shapes-v5 stop tp4-v5split-2 40
+V4c-hang-shapes-v5 stop tp4-v5split-2 40
+V4d-hang-shapes-v5 stop tp4-v5split-2 40
+V4e-hang-shapes-v5 stop tp4-v5split-2 40
+T1-control-timed optional tp4-v5split-2 60
+T2-v5-timed optional tp4-v5split-2 60
+T3-control-timed optional tp4-v5split-2 60
+T4-v5-timed optional tp4-v5split-2 60
+H1-handback-reset-fabric-agentstart stop tp4-v5split-2 25

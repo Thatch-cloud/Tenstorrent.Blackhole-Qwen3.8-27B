@@ -42,7 +42,7 @@ PREFIX_PROFILES = ('general-prefix', 'general-prefix-eager', 'general-prefix-tp4
 # Gate-only profiles that are not prefix profiles: the TP4 benchmark engine (J3, G5 at TP4), the fused-prefill arm, and
 # the four-card S2 gate profile (unqualified until packed_any_evidence_tp4.json records its sections).
 GATE_ONLY_OTHERS = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-262k-gate', 'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate', 'c2-packed-tp4-8x262k-diag-strace', 'c2-packed-tp4-8-best', 'c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-best-quad-dbf16', 'c2-packed-tp4-8-best-quad-gate', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate', 'c2-packed-tp4-8-diag-strace', 'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard', 'general-tp4-bench', 'general-tp4-mmrs', 'c2-packed-tp4-gate', 'general-tp4-ring-mmrs',
-                    'c2-packed-tp4-best', 'c2-packed-tp4-best-dbf16', 'c2-packed-tp4-best-d2', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-gate-dbf16', 'c2-packed-tp4-best-gate-d2', 'c2-packed-tp4-best-gate-samp', 'c2-packed-tp4-best-gate-glue', 'c2-packed-tp4-best-gate-lookup', 'c2-packed-tp4-best-gate-tpub', 'c2-packed-tp4-best-lookup', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-samp', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-best-strace-glue', 'c2-packed-tp4-best-strace-tpub',
+                    'c2-packed-tp4-best', 'c2-packed-tp4-best-dbf16', 'c2-packed-tp4-best-d2', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-gate-dbf16', 'c2-packed-tp4-best-gate-d2', 'c2-packed-tp4-best-gate-samp', 'c2-packed-tp4-best-gate-glue', 'c2-packed-tp4-best-gate-lookup', 'c2-packed-tp4-best-gate-tpub', 'c2-packed-tp4-best-lookup', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-samp', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-best-v5', 'c2-packed-tp4-best-v5-gate', 'c2-packed-tp4-best-strace-glue', 'c2-packed-tp4-best-strace-tpub',
                     'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-draftwide', 'c2-packed-tp4-gate-noslide',
                     'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide',
                     # the batched-draft window's four arms (tp4/draft)
@@ -53,7 +53,7 @@ GATE_ONLY_OTHERS = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audi
                     # the fix arm (tp4-serve-4)
                     'c2-packed-tp4-speed-fix',
                     # the sampler isolation arms (tp4/sampler)
-                    'c2-packed-tp4-diag-sprewarm', 'c2-packed-tp4-diag-strace', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-strace-dispatchdiag', 'c2-packed-tp4-speed-strace-draftwide', 'c2-packed-tp4-speed-strace-fcommit', 'c2-packed-tp4-speed-strace-pairslice', 'c2-packed-tp4-speed-strace-ring',
+                    'c2-packed-tp4-diag-sprewarm', 'c2-packed-tp4-diag-strace', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-strace-dispatchdiag', 'c2-packed-tp4-speed-strace-draftwide', 'c2-packed-tp4-speed-strace-fcommit', 'c2-packed-tp4-speed-strace-pairslice', 'c2-packed-tp4-speed-strace-ring', 'c2-packed-tp4-speed-strace-v5',
                     # the request-shard-argmax arms (tp4/next-2)
                     'c2-packed-tp4-diag-rshard', 'c2-packed-tp4-speed-rshard', 'c2-packed-tp4-gate-rshard-audit',
                     # the admission-freeze window's arms (tp4/freeze)

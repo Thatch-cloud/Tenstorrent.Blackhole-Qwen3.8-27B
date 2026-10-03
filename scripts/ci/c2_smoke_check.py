@@ -116,6 +116,10 @@ SAMPDRAFT_LEVERS = (('QWEN_FAST_TP4_SHARD_ARGMAX', '[PINDIAG] tp4 shard argmax e
 SAMPDRAFT_AUDITS = (('QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT', '[PINDIAG] tp4 shard argmax audit', 'shard argmax'),
                     ('QWEN_FAST_TP4_DRAFT_CONV_AUDIT', '[PINDIAG] tp4 draft conv audit', 'drafter conv'),
                     ('QWEN_FAST_TP4_DRAFT_HEADS_AUDIT', '[PINDIAG] tp4 draft heads audit', 'drafter heads'))
+# tp4/v5split (gdn_seq_block_split): the K5-A recurrence launch with each head's value columns split over two cores. A profile that asks for it
+# (QWEN_FAST_GDN_SPLIT_V=2) and logs no engaged line ran K5-A, and its timing says nothing about the lever; the line is logged once per user count.
+GDN_SPLIT_FLAG = 'QWEN_FAST_GDN_SPLIT_V'
+GDN_SPLIT_ENGAGED = '[PINDIAG] gdn split_v build split=2'
 SLIDE_FLAG = 'QWEN_FAST_TP_KV_SLIDE'
 QUAD_FLAG = 'QWEN_FAST_QUAD_DRAFT'
 # tp4/next-5: QWEN_FAST_QUAD_DRAFT_BLOCKS=2, the eight-seat quad (two quads of four). The smoke that judges it is concurrent8_steady.
@@ -846,6 +850,8 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         problems.append('%s and %s are set and no passing audit line (%s<n> exact=True) was logged: nothing was compared' % (PAIR_SLICE_FLAG, VGLUE_AUDIT_FLAG, VGLUE_AUDIT_PASSED))
     if env is not None and env.get(DISPATCH_DIAG_FLAG) == '1' and DISPATCH_DIAG_LINE not in container_text:
         problems.append('%s is set and no diagnostic line (%s) was logged' % (DISPATCH_DIAG_FLAG, DISPATCH_DIAG_LINE))
+    if env is not None and env.get(GDN_SPLIT_FLAG) == '2' and GDN_SPLIT_ENGAGED not in container_text:
+        problems.append('%s=2 is set and no engaged line (%s) was logged: the split recurrence never ran' % (GDN_SPLIT_FLAG, GDN_SPLIT_ENGAGED))
     problems += sampdraft_problems(container_text, env)
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)

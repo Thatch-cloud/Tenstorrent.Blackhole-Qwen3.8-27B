@@ -179,7 +179,11 @@ LOOKUP, LOOKUP_POLICY = 'QWEN_FAST_LOOKUP_DRAFT', 'n3m12'
 LOOKUP_PROFILES = ('c2-packed-tp4-best-lookup', 'c2-packed-tp4-best-gate-lookup')
 # each lookup arm's base: the timed arm sits on best-strace, the audited smoke arm on best-gate
 LOOKUP_BASE = {'c2-packed-tp4-best-lookup': 'c2-packed-tp4-best-strace', 'c2-packed-tp4-best-gate-lookup': 'c2-packed-tp4-best-gate'}
-FUSED_FAMILY = sorted(set(FCOMMIT_PROFILES) | set(BEST_PROFILES) | set(BEST_HANG_FIX) | set(NEXT3_PROFILES) | set(TPUB_PROFILES) | set(LOOKUP_PROFILES))
+# The recurrence value split's twins (tp4/v5split, test_tp4_v5split_window holds the rules): the combined best (timed and audited) and the
+# production recipe, each plus QWEN_FAST_GDN_SPLIT_V=2 (and the K5-A audit on the audited one).
+V5_BEST = ('c2-packed-tp4-best-v5', 'c2-packed-tp4-best-v5-gate')
+V5_PROFILES = V5_BEST + ('c2-packed-tp4-speed-strace-v5',)
+FUSED_FAMILY = sorted(set(FCOMMIT_PROFILES) | set(BEST_PROFILES) | set(BEST_HANG_FIX) | set(NEXT3_PROFILES) | set(TPUB_PROFILES) | set(LOOKUP_PROFILES) | set(V5_BEST))
 
 
 def without_caps(env):
@@ -376,7 +380,7 @@ class TailProfileTests(unittest.TestCase):
 
     def test_the_caps_are_absent_from_every_profile_that_predates_them(self):
         for name, profile in profiles().items():
-            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES) + tuple(SAMPLER_PROFILES) + tuple(RSHARD_PROFILES) + BEST_PROFILES + CHEAP_PROFILES + WARM4_PROFILES + NEXT3_PROFILES + SEATS8_PROFILES + NEXT4_PROFILES + NEXT5_PROFILES + tuple(TPUB_PROFILES) + LOOKUP_PROFILES:
+            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES) + tuple(SAMPLER_PROFILES) + tuple(RSHARD_PROFILES) + BEST_PROFILES + CHEAP_PROFILES + WARM4_PROFILES + NEXT3_PROFILES + SEATS8_PROFILES + NEXT4_PROFILES + NEXT5_PROFILES + tuple(TPUB_PROFILES) + LOOKUP_PROFILES + V5_PROFILES:
                 self.assertNotIn('QWEN_FAST_BUDGET_CAP', profile['env'], name)
                 self.assertNotIn('QWEN_FAST_SEQ_DEADLINE_S', profile['env'], name)
 
@@ -600,7 +604,7 @@ class DraftProfileTests(unittest.TestCase):
         on = sorted(name for name, profile in found.items() if profile['env'].get(QUAD) == '1'
                     and profile['env'].get('QWEN_FAST_TP') == '4')
         on = [name for name in on if name not in NEXT4_PROFILES + NEXT5_PROFILES]
-        self.assertEqual(on, ['c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-gate-lookup', 'c2-packed-tp4-best-gate-tpub', 'c2-packed-tp4-best-lookup', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-best-strace-tpub', 'c2-packed-tp4-gate-fcommit-quad',
+        self.assertEqual(on, ['c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-gate-lookup', 'c2-packed-tp4-best-gate-tpub', 'c2-packed-tp4-best-lookup', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-best-v5', 'c2-packed-tp4-best-v5-gate', 'c2-packed-tp4-best-strace-tpub', 'c2-packed-tp4-gate-fcommit-quad',
                               'c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-quad'])
         self.assertEqual([name for name in on if 'fcommit' not in name and 'best' not in name],
                          ['c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-quad'], 'the fused-commit family is the other two')
@@ -669,7 +673,7 @@ class SamplerProfileTests(unittest.TestCase):
         for name, profile in profiles().items():
             if name not in SAMPLER_PROFILES:
                 self.assertNotIn(PREWARM, profile['env'], name)
-                if name != 'c2-packed-tp4' and name not in CHEAP_PROFILES + NEXT3_PROFILES + SEATS8_PROFILES + NEXT4_PROFILES + NEXT5_PROFILES + tuple(TPUB_PROFILES) + LOOKUP_PROFILES:
+                if name != 'c2-packed-tp4' and name not in CHEAP_PROFILES + NEXT3_PROFILES + SEATS8_PROFILES + NEXT4_PROFILES + NEXT5_PROFILES + tuple(TPUB_PROFILES) + LOOKUP_PROFILES + V5_PROFILES:
                     self.assertNotIn(IN_TRACE, profile['env'], name)
         # tp4-serve-7: production is the strace arm's recipe (audits off, sampler in the verify trace, no prewarm)
         env = profiles()['c2-packed-tp4']['env']
@@ -997,7 +1001,7 @@ class VglueProfileTests(unittest.TestCase):
         image = image_env()
         flags = (C1A, V4A, V2, V1, V3A, VGLUE_AUDIT)
         for name, profile in found.items():
-            if name in VGLUE_PROFILES or name in BEST_HANG_FIX or name in NEXT4_PROFILES + NEXT5_PROFILES or name in TPUB_PROFILES or name in LOOKUP_PROFILES or name in GLUEFIX_AUDITED:
+            if name in VGLUE_PROFILES or name in BEST_HANG_FIX or name in NEXT4_PROFILES + NEXT5_PROFILES or name in TPUB_PROFILES or name in LOOKUP_PROFILES or name in V5_BEST or name in GLUEFIX_AUDITED:
                 self.assertEqual(profile['env']['QWEN_FAST_TP'], '4', name)
                 continue
             for flag in flags:

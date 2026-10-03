@@ -1,6 +1,6 @@
 # TP4 recurrence value split, lever V5 (branch tp4/next-3-scope)
 
-Design only. **This is not a host-side change, so no flag and no code were added** (`QWEN_FAST_GDN_SPLIT_V` is reserved here for the build that implements it). The split needs new C++ kernels, and the existing three are hash-qualified. Nothing here has run on a card.
+Status: **built on `tp4/v5split`, behind `QWEN_FAST_GDN_SPLIT_V=2` (off by default), and not yet run on a card.** This document began as the design ("Design only. **This is not a host-side change, so no flag and no code were added**": the split needs new C++ kernels, and the existing three are hash-qualified) and stays the design record; section 9 says what was built and how it differs from the plan below. Nothing here has run on a card.
 
 Labels: (m) measured, (src) read from the code, (cm) computed from measured numbers, (e) estimate, (U) unknown.
 
@@ -112,3 +112,33 @@ A single 128-row block at 8 seats (the weights read once) would put 8 users x 12
 - The helper's remote write against the owner's `O` ring: the ring has a fixed L1 address and no other user, and the owner's zeroing touches only faces 2 and 3 (words 512 to 1023) of each tile, which the helper's tiles hold as zeros too, so either order leaves the same bytes; the ordering to confirm is that the owner never pops or reuses `O` before the semaphore, and that the semaphore is re-initialised each launch (U until a card shows it).
 - DST accumulation at LVt = 2: same ops, but a different loop trip count; P0 decides.
 - The coalescing of descriptors (one per role) with per-core runtime arguments of different lengths: owner and helper must be given arguments of one length.
+
+## 9. As built (tp4/v5split)
+
+**Files.** `scripts/ci/gdn_seq_block_split.py` (the sibling module) and `gdn_seq_block_split_{reader,writer,compute}.cpp`. The K5-A files are not edited (their sha256 triple is pinned by
+`test_gdn_seq_block`); the module reuses them by import (the hash-checked native prefix, the audit helpers, `gdn_user_batch_tp.core_shares` and `coalesced_descriptors`).
+
+**Binding: the twin seam, not an edit of `gdn_user_batch_conv.py`.** `tp_addresses.TWINS` gains `('gdn_seq_block', 'execute', 'gdn_seq_block_split', 'execute')`, flagged: it binds only when
+`QWEN_FAST_GDN_SPLIT_V=2`, and with the flag unset `bound_twins` is what it was and `gdn_seq_block_split` is not imported. `gdn_user_batch_conv` calls `gdn_seq_block.execute` by attribute, so the
+rebound name redirects it. The twin takes the qualified K5-A build the conv code passes (it uses it for its level report), substitutes the qualified split build and refuses anything else. One
+`[PINDIAG] gdn split_v build split=2 users=U qualified=1` line per user count per process says the split launch ran. The flag requires `QWEN_FAST_GDN_SEQ_BLOCK=1` and `QWEN_FAST_TP=4`.
+
+**Work split.** Worker `w` of a user is head `w // 2`, half `w % 2` (half 0 is the owner), 24 cores a user, 96 for four users. A head pair is two consecutive cores of one grid column (the owner's row is
+even), so the exchange is one hop. The owner runs value tiles 0 and 1 and the whole epilogue; the helper runs tiles 2 and 3, writes its two fp32 O tiles into the owner's O ring (same L1 address on every core:
+the ring is allocated once over the union) and increments the owner's semaphore (id 0, one for the union) after the write is acknowledged. The owner waits, resets the semaphore, pushes O. The epilogue is
+K5-A's statements, in order, on four tiles (a test compares the two sources line for line).
+
+**Snapshot.** Each half writes its own columns: writer page `base + 4i + c0 + jl` for K rows 0 and 1, reader page `base + 8 + 4ii + c0 + jl` for rows 2 and 3, each in a rotated order (start `h % 4`
+and `(h + 2) % 4`) so that owners sit on DRAM banks {0, 1, 4, 5} and helpers on {2, 3, 6, 7}. The write rate per DRAM bank rises with the chain at half the length: this is the main performance risk and the
+`nosnap` timing build measures it.
+
+**CB plan.** K5-A's, with TOKA and TOKB two tokens deep (704,512 B a core, 688 KiB; `plan(depth=1)` is K5-A's 630,784 B exactly). The reader stages token t's operands before issuing token t-1's snapshot
+half, so the compute never waits for the copy. The depth is in the generated source header, so the program cache cannot share a depth-1 and a depth-2 build.
+
+**Arguments.** Runtime words are a constant length on every core and every launch (reader 9, writer 6, compute 1; the owner's writer is given its helper's coordinates, unused), and each kernel
+`static_assert`s that the highest `get_arg_val` index it reads is below its `RT_WORDS` compile argument: generic_op does not hash runtime-argument lengths (f945486e).
+
+**Qualification.** `QUALIFIED` is empty: the flag refuses to serve until the single-card byte gate (`optimisation/ttnn-op/v5split/run_card_m.sh`, the cardm step) has passed at full scope and its
+`v5_triple` is committed. The gate compares K5-A and V5 bit for bit on raw page images: four users x 16 rows at the four-card geometry over random, wide-range, edge, poisoned-padding,
+column-asymmetric, 2,048-token-chain and real-text inputs, the traced replays with the inputs restaged, the program-cache deltas, and two gated negative controls (N5o: the owner's rowsum over its own two tiles only, which moves the norm factor in every row; and N5x: no exchange) that must differ, plus an informational
+N5r (rowsum in the order 2, 3, 0, 1: a 1-ulp SUM change almost never survives the TF32 read of the norm factor, so it is reported and never gated); then timing. The window's jobs are in `scripts/ci/references/tp4-v5split-jobs`.
