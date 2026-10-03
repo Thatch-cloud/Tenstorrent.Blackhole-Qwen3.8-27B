@@ -10,7 +10,7 @@
 #   D2  the drafter op fixes: c2-packed-tp4-best-d2 = the control + QWEN_FAST_TP4_DRAFT_CONV=1 + QWEN_FAST_TP4_DRAFT_HEADS=1 (nothing else). The fused convolution's I/O kernel
 #       is rewritten (word copies, a writer on the second data-movement core, double-buffered input) in front of the served compute kernel, and the head split/merge are
 #       tile-copy launches: byte-identical tiles, so tau must be identical. Estimate -4.7 ms (quad) per 4-user round for D2a, -0.3 ms for D2c.
-#       Audited arm: c2-packed-tp4-best-gate-d2 (QWEN_FAST_TP4_DRAFT_CONV_AUDIT: the served I/O kernel beside the new one, byte-compared on every chip).
+#       Audited arm: c2-packed-tp4-best-gate-d2 (QWEN_FAST_TP4_DRAFT_CONV_AUDIT and QWEN_FAST_TP4_DRAFT_HEADS_AUDIT: the served I/O kernel and the served head ops beside the new ones inside each drafter bucket's capture, byte-compared on every chip right after that bucket's replays).
 #
 # PRODUCTION IS LIVE ON THE CARDS when a window opens: B0 (build-only) runs before it while production serves; A0 (agentstop, unserve) is the first job that touches production and
 # the only one that takes it down. Every four-card job after it opens with its own all-four reset (links train only at board init).

@@ -15,6 +15,7 @@ import torch
 
 import draft_head_layout_tp as pair_twin
 import quad_draft_tp as quad_twin
+import tp4_draft_conv as conv
 import tp4_draft_heads as heads
 import tp4_sampdraft
 from test_tp4_shard_argmax import FakeOperations
@@ -232,6 +233,101 @@ class LaunchTests(Setup):
             heads.split_heads(operations, query, key, value, self.retain, served=Mock(), site='pair')
         self.assertEqual(operations.freed, operations.empties)
         self.assertEqual(self.owned, [])
+
+
+class AuditTests(Setup):
+    """QWEN_FAST_TP4_DRAFT_HEADS_AUDIT: inside a drafter capture scope the served split / merge runs beside the launch and each output pair
+    is held (the engaged output cloned) for the bucket's compare; outside a scope nothing is audited."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = patch.dict(os.environ, {tp4_sampdraft.DRAFT_HEADS_AUDIT: '1'})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        conv._CURRENT['scope'] = None
+        conv._OPENED.clear()
+        self.addCleanup(lambda: conv._CURRENT.update(scope=None))
+
+    def operations(self):
+        operations = FakeOperations()
+        operations.clone = Mock(side_effect=lambda value, memory_config=None: operations.tensor(value.shape))
+        return operations
+
+    def split(self, operations):
+        query, key, value = tile(operations, (1, 1, 32, 1024)), tile(operations, (1, 1, 32, 256)), tile(operations, (1, 1, 32, 256))
+        references = [tile(operations, (1, 8, 32, 128)), tile(operations, (1, 2, 32, 128)), tile(operations, (1, 2, 32, 128))]
+        served = Mock(return_value=dict(q=references[0], k=references[1], v=references[2]))
+        return heads.split_heads(operations, query, key, value, self.retain, served=served, site='pair'), served, references
+
+    def test_inside_a_scope_the_split_pairs_each_head_tensor_with_the_served_one(self):
+        operations = self.operations()
+        scope = conv.open_scope('pair')
+        try:
+            result, served, references = self.split(operations)
+        finally:
+            conv.close_scope(scope)
+        served.assert_called_once()
+        self.assertEqual(len(scope), 3)
+        self.assertEqual([pair[0] for pair in scope.pairs], ['heads'] * 3)
+        self.assertEqual([pair[2] for pair in scope.pairs], references)
+        self.assertEqual([pair[3] for pair in scope.pairs], [False] * 3)          # the caller's retain owns the served outputs
+        self.assertEqual(operations.clone.call_count, 3)
+        self.assertEqual([tensor.shape for tensor in (result['q'], result['k'], result['v'])],
+                         [(1, 8, 32, 128), (1, 2, 32, 128), (1, 2, 32, 128)])
+
+    def test_inside_a_scope_the_merge_pairs_its_result(self):
+        operations = self.operations()
+        reference = tile(operations, (1, 1, 32, 1024))
+        scope = conv.open_scope('quad')
+        try:
+            result = heads.merge_heads(operations, tile(operations, (1, 8, 32, 128)), self.retain,
+                                       served=Mock(return_value=reference), site='quad')
+        finally:
+            conv.close_scope(scope)
+        self.assertEqual(len(scope), 1)
+        self.assertIs(scope.pairs[0][2], reference)
+        self.assertIsNot(result, reference)
+
+    def test_with_no_scope_the_served_function_is_not_run_beside_the_launch(self):
+        operations = self.operations()
+        result, served, _ = self.split(operations)
+        served.assert_not_called()
+        self.assertEqual(operations.clone.call_count, 0)
+
+    def test_the_pairs_compare_and_release_without_freeing_the_callers_tensors(self):
+        operations = self.operations()
+        scope = conv.open_scope('pair')
+        try:
+            _, _, references = self.split(operations)
+        finally:
+            conv.close_scope(scope)
+        operations.to_torch = lambda part: torch.zeros(1, 1, 32, 1024, dtype=torch.bfloat16)
+        self.assertEqual(conv.compare_scope(operations, scope), 3)
+        self.assertTrue(any(line.startswith('%s exact=True tensors=3 round=1' % tp4_sampdraft.HEADS_AUDIT) for line in self.lines))
+        clones = [pair[1] for pair in scope.pairs]
+        conv.release_scope(operations, scope)
+        self.assertEqual(operations.freed, clones)
+        for reference in references:
+            self.assertNotIn(reference, operations.freed)
+
+    def test_a_differing_head_tensor_logs_the_heads_mismatch_marker_and_raises(self):
+        operations = self.operations()
+        scope = conv.open_scope('pair')
+        try:
+            self.split(operations)
+        finally:
+            conv.close_scope(scope)
+        _, mine, served, _ = scope.pairs[1]
+        mine_ids = {id(part) for part in mine.shards}
+        operations.to_torch = lambda part: torch.full((1, 1, 32, 128), 1.0 if id(part) in mine_ids else 2.0, dtype=torch.bfloat16)
+        with self.assertRaises(AssertionError):
+            conv.compare_scope(operations, scope)
+        self.assertTrue(self.lines[-1].startswith(tp4_sampdraft.HEADS_MISMATCH))
+
+    def test_the_audit_flag_without_the_lever_is_refused(self):
+        with patch.dict(os.environ, {tp4_sampdraft.DRAFT_HEADS: '0'}):
+            with self.assertRaises(ValueError):
+                tp4_sampdraft.audit_enabled(tp4_sampdraft.DRAFT_HEADS_AUDIT)
 
 
 class TwinTests(unittest.TestCase):

@@ -5285,7 +5285,7 @@
       "gate_only": true
     },
     "c2-packed-tp4-best-gate-d2": {
-      "description": "GATE ONLY (audited arm of tp4/samp-draft levers D2a and D2c): c2-packed-tp4-best-gate plus QWEN_FAST_TP4_DRAFT_CONV=1, QWEN_FAST_TP4_DRAFT_HEADS=1 and QWEN_FAST_TP4_DRAFT_CONV_AUDIT=1. Every engaged drafter conv also runs the served I/O kernel on the same operands and the two outputs are byte-compared on every chip for the first rounds: '[PINDIAG] tp4 draft conv audit exact=True convs=N'. The quad-against-singles audit (QWEN_FAST_DRAFT_SINGLES_AUDIT=all) and the T1/T2 audits run too. The head copies are held byte-identical by the card harness and by the proposal-identity compare of this arm's matrix tree against c2-packed-tp4-best-gate's. A correctness arm, never a timed one. Not for traffic. UNVERIFIED on hardware.",
+      "description": "GATE ONLY (audited arm of tp4/samp-draft levers D2a and D2c): c2-packed-tp4-best-gate plus QWEN_FAST_TP4_DRAFT_CONV=1, QWEN_FAST_TP4_DRAFT_HEADS=1, QWEN_FAST_TP4_DRAFT_CONV_AUDIT=1 and QWEN_FAST_TP4_DRAFT_HEADS_AUDIT=1. Inside each drafter bucket's capture (the first two buckets of each of the single, pair and quad sites) every engaged drafter conv also runs the served I/O kernel and every engaged head split/merge also runs the served ops, on the same operands; the pairs are byte-compared on every chip right after that bucket's own replays (its build replay and its first real rounds), before any verify or commit replay can overwrite them: '[PINDIAG] tp4 draft conv audit exact=True convs=N' and '[PINDIAG] tp4 draft heads audit exact=True tensors=N'. The quad-against-singles audit (QWEN_FAST_DRAFT_SINGLES_AUDIT=all) and the T1/T2 audits run too. A correctness arm, never a timed one. Not for traffic. UNVERIFIED on hardware.",
       "eos_ids": [
         248046,
         248044
@@ -5333,7 +5333,8 @@
         "QWEN_FAST_SEQ_DEADLINE_S": "120",
         "QWEN_FAST_TP4_DRAFT_CONV": "1",
         "QWEN_FAST_TP4_DRAFT_HEADS": "1",
-        "QWEN_FAST_TP4_DRAFT_CONV_AUDIT": "1"
+        "QWEN_FAST_TP4_DRAFT_CONV_AUDIT": "1",
+        "QWEN_FAST_TP4_DRAFT_HEADS_AUDIT": "1"
       },
       "engine": {
         "model": "@SNAPSHOT@",

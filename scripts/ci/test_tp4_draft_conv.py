@@ -178,8 +178,8 @@ class Setup(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         tp4_sampdraft._LOGGED.clear()
-        del conv._HELD[:]
-        conv._STATE.update(rounds=0, convs=0)
+        conv._CURRENT['scope'] = None
+        conv._OPENED.clear()
         self.lines = []
         logger = patch.object(tp4_sampdraft, 'log_line', side_effect=self.lines.append)
         logger.start()
@@ -311,51 +311,161 @@ class AuditTests(Setup):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def audited(self, operations, calls=1):
+    def audited(self, operations, calls=1, scope=True):
+        """`calls` engaged convs inside an open capture scope; returns (scope, last served mock)."""
         coordinates = [(worker % 8, worker // 8) for worker in range(80)]
-        for _ in range(calls):
-            served = Mock(return_value=operations.tensor((1, 1, 32, 5120)))
-            self.call(operations, 32, 80, coordinates, 1, 0, served)
-        return served
+        opened = conv.open_scope('pair') if scope else None
+        served = None
+        try:
+            for _ in range(calls):
+                served = Mock(return_value=operations.tensor((1, 1, 32, 5120)))
+                self.call(operations, 32, 80, coordinates, 1, 0, served)
+        finally:
+            conv.close_scope(opened)
+        return opened, served
 
-    def test_an_audited_call_runs_the_served_kernel_and_holds_a_pair(self):
+    def test_a_call_inside_a_scope_runs_the_served_kernel_and_the_scope_holds_the_pair(self):
         operations = self.operations()
-        served = self.audited(operations)
+        scope, served = self.audited(operations)
         served.assert_called_once()
-        self.assertEqual(len(conv._HELD), 1)
+        self.assertEqual(len(scope), 1)
         self.assertEqual(operations.clone.call_count, 1)
+
+    def test_a_call_with_no_scope_is_not_audited_and_holds_nothing(self):
+        operations = self.operations()
+        scope, served = self.audited(operations, scope=False)
+        served.assert_not_called()
+        self.assertEqual(operations.clone.call_count, 0)
+        self.assertIsNone(scope)
+
+    def test_the_scope_closes_so_later_calls_hold_nothing(self):
+        operations = self.operations()
+        scope, _ = self.audited(operations)
+        _, served = self.audited(operations, scope=False)
+        served.assert_not_called()
+        self.assertEqual(len(scope), 1)
+        self.assertFalse(conv.capturing())
 
     def test_identical_pairs_pass_and_log_the_audit_marker(self):
         operations = self.operations()
-        self.audited(operations, 2)
+        scope, _ = self.audited(operations, 2)
         data = torch.zeros(1, 1, 32, 5120, dtype=torch.bfloat16)
         operations.to_torch = lambda part: data
-        self.assertEqual(conv.compare_pending(operations), 2)
-        self.assertTrue(any(line == '%s exact=True convs=2 round=1' % tp4_sampdraft.CONV_AUDIT for line in self.lines))
+        self.assertEqual(conv.compare_scope(operations, scope), 2)
+        self.assertTrue(any(line == '%s exact=True convs=2 round=1 site=pair' % tp4_sampdraft.CONV_AUDIT for line in self.lines))
 
     def test_a_differing_pair_raises_and_logs_the_mismatch_marker(self):
         operations = self.operations()
-        self.audited(operations)
-        mine, served = conv._HELD[0]
+        scope, _ = self.audited(operations)
+        _, mine, served, _ = scope.pairs[0]
         seen = {id(part): index for index, part in enumerate([*mine.shards, *served.shards])}
         operations.to_torch = lambda part: torch.full((1, 1, 32, 5120), 1.0 if seen[id(part)] < 4 else 2.0, dtype=torch.bfloat16)
         with self.assertRaises(AssertionError):
-            conv.compare_pending(operations)
+            conv.compare_scope(operations, scope)
         self.assertTrue(self.lines[-1].startswith(tp4_sampdraft.CONV_MISMATCH))
 
-    def test_it_stops_reading_back_after_the_audited_rounds_and_release_frees_every_held_tensor(self):
+    def test_a_scope_stops_reading_back_after_the_audited_rounds_and_release_frees_what_it_holds(self):
         operations = self.operations()
-        self.audited(operations)
+        scope, _ = self.audited(operations)
         operations.to_torch = lambda part: torch.zeros(1, 1, 32, 5120, dtype=torch.bfloat16)
-        results = [conv.compare_pending(operations) for _ in range(conv.AUDIT_ROUNDS + 2)]
+        results = [conv.compare_scope(operations, scope) for _ in range(conv.AUDIT_ROUNDS + 2)]
         self.assertEqual(results, [1] * conv.AUDIT_ROUNDS + [0, 0])
-        held = [tensor for pair in conv._HELD for tensor in pair]
-        conv.release_audit(operations)
-        self.assertEqual(conv._HELD, [])
-        self.assertEqual(operations.freed, held)
+        _, mine, served, owned = scope.pairs[0]
+        self.assertTrue(owned)
+        conv.release_scope(operations, scope)
+        self.assertEqual(scope.pairs, [])
+        self.assertEqual(operations.freed, [mine, served])
+
+    def test_a_scope_is_freed_by_its_own_release_only(self):
+        operations = self.operations()
+        first, _ = self.audited(operations)
+        second, _ = self.audited(operations)
+        conv.release_scope(operations, first)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(len(operations.freed), 2)
+
+    def test_the_module_holds_nothing_once_the_scope_is_released(self):
+        operations = self.operations()
+        scope, _ = self.audited(operations)
+        conv.release_scope(operations, scope)
+        self.assertFalse(hasattr(conv, '_HELD'))
+        self.assertIsNone(conv._CURRENT['scope'])
+
+    def test_only_the_first_scopes_of_a_site_are_audited(self):
+        scopes = []
+        for _ in range(conv.AUDIT_SCOPES + 2):
+            scope = conv.open_scope('quad')
+            scopes.append(scope)
+            conv.close_scope(scope)
+        self.assertEqual([scope is None for scope in scopes], [False] * conv.AUDIT_SCOPES + [True, True])
+        other = conv.open_scope('pair')
+        self.assertIsNotNone(other)
+        conv.close_scope(other)
+
+    def test_two_open_scopes_are_refused(self):
+        scope = conv.open_scope('pair')
+        with self.assertRaises(RuntimeError):
+            conv.open_scope('quad')
+        conv.close_scope(scope)
 
     def test_nothing_held_compares_nothing(self):
-        self.assertEqual(conv.compare_pending(self.operations()), 0)
+        self.assertEqual(conv.compare_scope(self.operations(), None), 0)
+        self.assertEqual(conv.compare_scope(self.operations(), conv.Scope('pair')), 0)
+
+    def test_a_failing_clone_frees_the_served_output(self):
+        operations = self.operations()
+        operations.clone = Mock(side_effect=RuntimeError('clone'))
+        coordinates = [(worker % 8, worker // 8) for worker in range(80)]
+        scope = conv.open_scope('pair')
+        reference = operations.tensor((1, 1, 32, 5120))
+        try:
+            with self.assertRaises(RuntimeError):
+                self.call(operations, 32, 80, coordinates, 1, 0, Mock(return_value=reference))
+        finally:
+            conv.close_scope(scope)
+        self.assertIn(reference, operations.freed)
+
+
+class DrafterTraceHooksTests(unittest.TestCase):
+    """dflash_proposal_trace's scope helpers: inert with both audits off, a scope per bucket with one on."""
+
+    def setUp(self):
+        patcher = patch.dict(os.environ, {'QWEN_FAST_TP': '4'})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name in tp4_sampdraft.ALL_FLAGS:
+            os.environ.pop(name, None)
+        conv._CURRENT['scope'] = None
+        conv._OPENED.clear()
+
+    def test_with_both_audits_off_nothing_opens_compares_or_frees(self):
+        import dflash_proposal_trace as trace
+        self.assertIsNone(trace.open_draft_audit('pair'))
+        trace.close_draft_audit(None)
+        trace.compare_draft_audit('ops', SimpleNamespace())
+        trace.compare_draft_audit('ops', SimpleNamespace(draft_audit=None))
+        trace.release_draft_audit('ops', None)
+        self.assertEqual(conv._OPENED, {})
+
+    def test_either_audit_opens_a_scope_and_the_helpers_compare_and_free_it(self):
+        import dflash_proposal_trace as trace
+        for lever, audit in ((tp4_sampdraft.DRAFT_CONV, tp4_sampdraft.DRAFT_CONV_AUDIT),
+                             (tp4_sampdraft.DRAFT_HEADS, tp4_sampdraft.DRAFT_HEADS_AUDIT)):
+            conv._OPENED.clear()
+            with patch.dict(os.environ, {lever: '1', audit: '1'}):
+                scope = trace.open_draft_audit('pair')
+                self.assertIsInstance(scope, conv.Scope)
+                trace.close_draft_audit(scope)
+                with patch('tp4_draft_conv.compare_scope') as compare, patch('tp4_draft_conv.release_scope') as release:
+                    trace.compare_draft_audit('ops', SimpleNamespace(draft_audit=scope))
+                    trace.release_draft_audit('ops', scope)
+                compare.assert_called_once_with('ops', scope)
+                release.assert_called_once_with('ops', scope)
+
+    def test_an_audit_without_its_lever_fails_at_the_first_open(self):
+        import dflash_proposal_trace as trace
+        with patch.dict(os.environ, {tp4_sampdraft.DRAFT_HEADS_AUDIT: '1'}), self.assertRaises(ValueError):
+            trace.open_draft_audit('pair')
 
 
 class TwinTests(unittest.TestCase):

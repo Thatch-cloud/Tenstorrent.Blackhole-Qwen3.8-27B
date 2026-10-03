@@ -375,15 +375,19 @@ class BuilderTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         tp4_sampdraft._LOGGED.clear()
         sarg.REFERENCES.clear()
+        sarg.PRODUCED.clear()
+        sarg._RESERVED.clear()
         sarg._STATE['rounds'] = 0
         quiet = patch.object(tp4_sampdraft, 'log_line')
         quiet.start()
         self.addCleanup(quiet.stop)
 
-    def test_two_launches_per_call_with_constant_argument_lengths_and_the_partials_freed(self):
+    def test_two_launches_per_call_with_constant_argument_lengths_and_the_reserved_partials_untouched(self):
         lengths = set()
         for rows in (1, 16, 32, 33, 48, 64):
+            sarg._RESERVED.clear()
             operations = FakeOperations()
+            sarg.reserve(operations, 'mesh')
             logits = logits_for(operations, rows)
             ids, values = sarg.sample(operations, logits, rows)
             self.assertEqual(ids.shape, (1, 1, 1, 64))
@@ -396,7 +400,8 @@ class BuilderTests(unittest.TestCase):
             self.assertEqual(partials.shape, (1, 1, 220, 32))
             self.assertEqual(scan_tensors, [logits, partials])
             self.assertEqual(fold_tensors, [partials, ids, values])
-            self.assertEqual(operations.freed, [partials])
+            self.assertEqual(operations.freed, [])
+            self.assertEqual(len(operations.empties), 3)     # the reserved partials, ids, values: nothing allocated for the scratch
             self.assertEqual(len(scan), 4)
             self.assertEqual(len(fold), 4)
             for chip, program in enumerate(scan.values()):
@@ -426,6 +431,7 @@ class BuilderTests(unittest.TestCase):
 
     def test_the_scan_tasks_land_one_per_core_per_risc(self):
         operations = FakeOperations()
+        sarg.reserve(operations, 'mesh')
         sarg.sample(operations, logits_for(operations, 64), 64)
         program = next(iter(operations.generic[0][1].values()))
         seen = []
@@ -440,6 +446,7 @@ class BuilderTests(unittest.TestCase):
         lines = []
         with patch.object(tp4_sampdraft, 'log_line', side_effect=lines.append):
             operations = FakeOperations()
+            sarg.reserve(operations, 'mesh')
             for shape, rows in (((1, 1, 64, 124160), 64), ((1, 1, 32, 62080), 64), ((1, 1, 65, 62080), 65), ((64, 62080), 64)):
                 bad = operations.tensor(shape)
                 self.assertIsNone(sarg.sample(operations, bad, rows))
@@ -450,7 +457,7 @@ class BuilderTests(unittest.TestCase):
             placed.memory_config = lambda: 'l1'
             self.assertIsNone(sarg.sample(operations, placed, 64))
         self.assertEqual(operations.generic, [])
-        self.assertEqual(operations.empties, [])
+        self.assertEqual(len(operations.empties), 1)         # only the reservation
         self.assertTrue(all(line.startswith(tp4_sampdraft.SARG_FALLBACK) for line in lines))
         self.assertEqual(len(lines), len(set(lines)))   # the same reason prints once
         self.assertGreaterEqual(len(lines), 5)
@@ -459,24 +466,51 @@ class BuilderTests(unittest.TestCase):
         lines = []
         with patch.object(tp4_sampdraft, 'log_line', side_effect=lines.append):
             operations = FakeOperations()
+            sarg.reserve(operations, 'mesh')
             for rows in (64, 64, 16, 16):
                 sarg.sample(operations, logits_for(operations, rows), rows)
         engaged = [line for line in lines if line.startswith(tp4_sampdraft.SARG_ENGAGED)]
         self.assertEqual(len(engaged), 2)
         self.assertIn('rows=64 workers=110 tasks=220 fold=1', engaged[0])
 
-    def test_a_failing_launch_frees_the_outputs_and_the_partials(self):
+    def test_a_failing_launch_frees_the_outputs_and_keeps_the_reserved_partials(self):
         operations = FakeOperations()
+        reserved = sarg.reserve(operations, 'mesh')
         calls = []
         operations.generic_op = lambda tensors, program: (calls.append(1), (_ for _ in ()).throw(RuntimeError('submit')) if len(calls) == 2 else None)
         with self.assertRaises(RuntimeError):
             sarg.sample(operations, logits_for(operations, 64), 64)
         freed = {value.name for value in operations.freed}
-        self.assertEqual(freed, {value.name for value in operations.empties})
+        self.assertEqual(freed, {value.name for value in operations.empties} - {reserved.name})
+
+    def test_no_reservation_is_a_logged_fall_back_never_an_allocation_inside_a_capture(self):
+        lines = []
+        with patch.object(tp4_sampdraft, 'log_line', side_effect=lines.append):
+            operations = FakeOperations()
+            self.assertIsNone(sarg.sample(operations, logits_for(operations, 64), 64))
+        self.assertEqual(operations.empties, [])
+        self.assertEqual(operations.generic, [])
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith(tp4_sampdraft.SARG_FALLBACK))
+        self.assertIn('reserved', lines[0])
+
+    def test_the_reservation_is_shared_counted_and_freed_by_its_last_holder(self):
+        operations = FakeOperations()
+        first = sarg.reserve(operations, 'mesh')
+        self.assertIs(sarg.reserve(operations, 'mesh'), first)
+        self.assertEqual(len(operations.empties), 1)
+        self.assertEqual(first.shape, (1, 1, 220, 32))
+        sarg.release_reserved(operations, 'mesh')
+        self.assertEqual(operations.freed, [])
+        sarg.release_reserved(operations, 'mesh')
+        self.assertEqual(operations.freed, [first])
+        sarg.release_reserved(operations, 'mesh')          # nothing reserved: a no-op
+        self.assertEqual(operations.freed, [first])
 
     def test_the_audit_holds_todays_outputs_and_a_fallback_holds_nothing(self):
         with patch.dict(os.environ, {tp4_sampdraft.SHARD_ARGMAX_AUDIT: '1'}):
             operations = FakeOperations()
+            sarg.reserve(operations, 'mesh')
             served = Mock(return_value=('old ids', 'old values'))
             ids, values = sarg.sample(operations, logits_for(operations, 16), 16, served=served)
             served.assert_called_once()
@@ -484,6 +518,26 @@ class BuilderTests(unittest.TestCase):
             sarg.release_audit(operations, values)
             self.assertEqual(sarg.REFERENCES, {})
             self.assertEqual(operations.freed[-2:], ['old ids', 'old values'])
+
+    def test_the_release_also_frees_the_v4a_reference_registered_for_todays_values(self):
+        import verify_trace_t1
+        with patch.dict(os.environ, {tp4_sampdraft.SHARD_ARGMAX_AUDIT: '1'}):
+            operations = FakeOperations()
+            sarg.reserve(operations, 'mesh')
+            old_values = object()
+            served = Mock(return_value=('old ids', old_values))
+            _, values = sarg.sample(operations, logits_for(operations, 16), 16, served=served)
+            verify_trace_t1.VALUE_REFERENCES[id(old_values)] = 'ttnn max reference'
+            sarg.release_audit(operations, values)
+            self.assertEqual(verify_trace_t1.VALUE_REFERENCES, {})
+            self.assertIn('ttnn max reference', operations.freed)
+            self.assertEqual(sarg.PRODUCED, {})
+
+    def test_a_listed_output_is_kept_alive_so_its_id_cannot_be_reused(self):
+        operations = FakeOperations()
+        sarg.reserve(operations, 'mesh')
+        _, values = sarg.sample(operations, logits_for(operations, 16), 16)
+        self.assertIs(sarg.PRODUCED[id(values)], values)
 
 
 class AuditTests(unittest.TestCase):
@@ -629,7 +683,7 @@ class PackedVerifierCouplingTests(unittest.TestCase):
     def test_the_value_audit_leaves_kernel_made_maxima_to_the_kernel_audit(self):
         import packed_verifier
         values = object()
-        sarg.PRODUCED[id(values)] = True
+        sarg.PRODUCED[id(values)] = values
         packed_verifier.audit_shard_values(None, (None, None, values), 3, [])      # returns: nothing to compare, nothing raised
 
     def test_the_value_audit_still_fails_a_served_gather_that_recorded_no_reference(self):
@@ -641,7 +695,7 @@ class PackedVerifierCouplingTests(unittest.TestCase):
         import packed_verifier
         operations = FakeOperations()
         values = object()
-        sarg.PRODUCED[id(values)] = True
+        sarg.PRODUCED[id(values)] = values
         sarg.REFERENCES[id(values)] = ('old ids', 'old values')
         packed_verifier.release_sampdraft_audit(operations, values)
         self.assertEqual((sarg.PRODUCED, sarg.REFERENCES), ({}, {}))
@@ -655,6 +709,49 @@ class PackedVerifierCouplingTests(unittest.TestCase):
             with patch.dict(os.environ, {tp4_sampdraft.SHARD_ARGMAX_AUDIT: '1'}):
                 packed_verifier.audit_sampdraft('ops', (None, None, 'values'), 3, ['ids'], ['vals'])
             audit.assert_called_once_with('ops', 'values', 3, ['ids'], ['vals'])
+
+    def test_the_block_warm_reserves_the_partials_once_and_the_close_gives_the_holder_back(self):
+        import packed_verifier
+        operations = FakeOperations()
+        sarg._RESERVED.clear()
+        self.assertTrue(packed_verifier.reserve_sampdraft(operations, 'mesh'))
+        self.assertTrue(packed_verifier.reserve_sampdraft(operations, 'mesh'))       # a second block: the same buffer
+        self.assertEqual(len(operations.empties), 1)
+        packed_verifier.release_sampdraft_reserve(operations, 'mesh')
+        self.assertEqual(operations.freed, [])
+        packed_verifier.release_sampdraft_reserve(operations, 'mesh')
+        self.assertEqual(operations.freed, operations.empties)
+
+    def test_the_warm_reserves_nothing_with_the_lever_off(self):
+        import packed_verifier
+        operations = FakeOperations()
+        with patch.dict(os.environ, {tp4_sampdraft.SHARD_ARGMAX: '0'}):
+            self.assertFalse(packed_verifier.reserve_sampdraft(operations, 'mesh'))
+        self.assertEqual(operations.empties, [])
+
+    def test_an_audit_without_its_lever_fails_at_the_block_warm_not_at_a_readback(self):
+        import packed_verifier
+        for lever, audit in ((tp4_sampdraft.SHARD_ARGMAX, tp4_sampdraft.SHARD_ARGMAX_AUDIT),
+                             (tp4_sampdraft.DRAFT_CONV, tp4_sampdraft.DRAFT_CONV_AUDIT),
+                             (tp4_sampdraft.DRAFT_HEADS, tp4_sampdraft.DRAFT_HEADS_AUDIT)):
+            with patch.dict(os.environ, {lever: '0', audit: '1'}), self.assertRaises(ValueError):
+                packed_verifier.reserve_sampdraft(FakeOperations(), 'mesh')
+
+    def test_the_audit_round_leaves_the_drafter_audits_to_their_buckets(self):
+        import packed_verifier
+        with patch.dict(os.environ, {tp4_sampdraft.DRAFT_CONV: '1', tp4_sampdraft.DRAFT_CONV_AUDIT: '1'}), \
+                patch('tp4_draft_conv.compare_scope') as compare, patch('tp4_shard_argmax.audit_round') as audit:
+            packed_verifier.audit_sampdraft('ops', (None, None, 'values'), 3, ['ids'], ['vals'])
+        compare.assert_not_called()
+        audit.assert_not_called()
+        self.assertFalse(hasattr(__import__('tp4_draft_conv'), 'compare_pending'))
+        self.assertFalse(hasattr(__import__('tp4_draft_conv'), 'release_audit'))
+
+    def test_the_request_engine_refuses_the_lever_instead_of_half_engaging_it(self):
+        import verifier_engine_tp
+        engine = verifier_engine_tp.VerifierEngine.__new__(verifier_engine_tp.VerifierEngine)
+        with patch.dict(os.environ, {verifier_engine_tp.SHARD_FLAG: '1'}), self.assertRaisesRegex(ValueError, 'request engine'):
+            engine.__init__()
 
 
 if __name__ == '__main__':

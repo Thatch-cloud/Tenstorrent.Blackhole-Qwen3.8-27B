@@ -7,9 +7,10 @@ control's; the report states the rule it applies instead of assuming that:
   - the controls (the two A arms of the ABAB, run on the same image) must reproduce each other: full-draft mean tau within
     CONTROL_TOLERANCE (greedy decoding with identical proposals is deterministic, so a spread here is host noise in WHICH rounds ran, not
     in tau; a wide spread means the pool is too thin to judge a lever);
-  - the lever's pooled full-draft mean tau must be at least the controls' pooled mean less TOLERANCE (1%), over at least MIN_ROUNDS
+  - the lever's pooled full-draft mean tau must be within TOLERANCE (1%) of the controls' pooled mean, on either side (byte-identical
+    drafts give equal tau: a lever that RAISES tau changed the proposals as surely as one that lowers it), over at least MIN_ROUNDS
     full-draft rounds on each side;
-  - no per-position acceptance rate of the lever may fall more than POSITION_POINTS (2 points) below the controls'.
+  - no per-position acceptance rate of the lever may differ from the controls' by more than POSITION_POINTS (2 points), either way.
 
 Exit 0: the rule holds. 1: it does not. 2: too few full-draft rounds to judge (the report says which side). Reads each log with
 acceptance_report.report (the same four-source reader the gates use); the log paths are arguments, nothing is fetched.
@@ -81,18 +82,22 @@ def judge(controls, levers, *, tolerance=TOLERANCE, control_tolerance=CONTROL_TO
                            % (100 * spread, 100 * control_tolerance))
             if verdict == 'PASS':
                 verdict = 'INSUFFICIENT'
-    floor = control['mean'] * (1 - tolerance)
+    floor, ceiling = control['mean'] * (1 - tolerance), control['mean'] * (1 + tolerance)
     if lever['mean'] < floor:
         verdict = 'FAIL'
         reasons.append('lever tau %.4f is below the controls\' %.4f less %.1f%% (%.4f)' % (
             lever['mean'], control['mean'], 100 * tolerance, floor))
+    elif lever['mean'] > ceiling:
+        verdict = 'FAIL'
+        reasons.append('lever tau %.4f is above the controls\' %.4f plus %.1f%% (%.4f): byte-identical drafts cannot change tau' % (
+            lever['mean'], control['mean'], 100 * tolerance, ceiling))
     drops = []
     for index, (mine, theirs) in enumerate(zip(lever['positions'], control['positions']), 1):
-        if mine is not None and theirs is not None and theirs - mine > position_points:
+        if mine is not None and theirs is not None and abs(theirs - mine) > position_points:
             drops.append((index, theirs, mine))
     if drops:
         verdict = 'FAIL'
-        reasons.append('per-position acceptance fell more than %.0f points at position(s) %s' % (
+        reasons.append('per-position acceptance moved more than %.0f points at position(s) %s' % (
             100 * position_points, ', '.join('%d (%.3f -> %.3f)' % drop for drop in drops)))
     return dict(verdict=verdict, reasons=reasons, control=control, lever=lever, spread=spread,
                 tau_ratio=lever['mean'] / control['mean'])

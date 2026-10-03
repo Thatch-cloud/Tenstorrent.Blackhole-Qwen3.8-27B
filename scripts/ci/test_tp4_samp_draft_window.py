@@ -80,7 +80,7 @@ class OrderTests(unittest.TestCase):
     def test_the_build_runs_first_production_is_taken_down_second_and_nothing_else_does_it(self):
         self.assertEqual([row[0] for row in read_order()[:2]], [BUILD, FIRST])
         actions = parsed(FIRST)['actions'].split()
-        self.assertEqual(actions, ['status', 'agentstop', 'unserve'])
+        self.assertEqual(actions, ['agentstop', 'unserve'])
         for name in ORDERED:
             if name != FIRST:
                 self.assertFalse({'agentstop', 'unserve'} & set(parsed(name)['actions'].split()), name)
@@ -157,6 +157,7 @@ class TemplateTests(unittest.TestCase):
                 self.assertIn('SKIP the lever\'s timing pair', text_of(name))
         self.assertIn('shard argmax audit N exact=True', text_of(SAMP_AUDIT))
         self.assertIn('draft conv audit exact=True', text_of(D2_AUDIT))
+        self.assertIn('draft heads audit exact=True', text_of(D2_AUDIT))
 
     def test_the_timing_jobs_of_each_pair_run_the_same_coding_tests_4x4k_and_4x32k(self):
         for name in SAMP_PAIR + D2_PAIR:

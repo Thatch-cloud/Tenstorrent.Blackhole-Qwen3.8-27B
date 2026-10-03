@@ -19,6 +19,12 @@ CONTRACT. It returns (ids, values) like sample_shards: ids uint32 and values bf1
 shape is not). Rows at and past `rows` are zero. Every consumer reads them with to_torch(part).reshape(-1)[:rows]
 (PackedVerifierEngine.shard_predictions, verifier_engine_tp.shard_predictions), so the shape change is invisible to them.
 
+PERSISTENT SCRATCH. The partials buffer is allocated once per mesh by reserve(), which the packed block calls at its warm, before any trace
+is captured, and freed by release_reserved() when the last block closes: a buffer allocated inside the verify capture would change
+that trace's hole layout (the traced-publish hang mechanism). One buffer serves every block: replays are serial on one queue and
+the fold consumes the partials inside the same trace that wrote them. A call on a mesh with no reservation (the request engine, a
+caller that never reserved) is a logged fall-back, never an allocation inside a capture.
+
 FALLBACK. Any call it cannot take (another shard shape, dtype, layout, placement, more than 64 rows, a tile-column plan whose runs
 exceed the scan kernel's scratch) is logged once and answered by today's untilize / argmax / max / gather path.
 
@@ -29,6 +35,7 @@ row of every chip: ids exactly, values as numbers (-0 == +0, NaN with NaN). A di
 Stdlib only at import, py 3.7.
 """
 
+import sys
 from pathlib import Path
 
 import tp4_sampdraft
@@ -53,8 +60,37 @@ TILE_BYTES = 2048
 # output a kernel launch made (not today's path), so the V4a value audit (packed_verifier.audit_shard_values), which compares gathered
 # maxima with a ttnn.max taken beside them in served_shards, knows these are not its outputs and leaves them to this module's audit.
 REFERENCES = {}
-PRODUCED = {}
+PRODUCED = {}                      # id(values) -> the values tensor itself, so a freed tensor's id cannot be reused while it is listed
 _STATE = {'rounds': 0}
+_RESERVED = {}                     # 'mesh' -> [partials tensor, holders, mesh]: one mesh per process (logits.device() need not be the
+                                   # same Python object as the block's mesh, so identity is not the key)
+
+
+def reserve(operations, mesh):
+    """Allocate the process's partials buffer on `mesh` (or add a holder to the one that exists). Call before any trace is captured; pair it with
+    release_reserved. Returns the tensor."""
+    entry = _RESERVED.get('mesh')
+    if entry is None:
+        tensor = operations.empty((1, 1, TASKS, PAGE_WORDS), dtype=operations.uint32, layout=operations.ROW_MAJOR_LAYOUT,
+                                  device=mesh, memory_config=operations.DRAM_MEMORY_CONFIG)
+        entry = _RESERVED['mesh'] = [tensor, 0, mesh]
+    entry[1] += 1
+    return entry[0]
+
+
+def release_reserved(operations, mesh):
+    """Drop one holder of this mesh's partials buffer; the last holder frees it. A mesh with no reservation is a no-op. Call only after
+    every trace that reads or writes the buffer is released."""
+    entry = _RESERVED.get('mesh')
+    if entry is None:
+        return
+    entry[1] -= 1
+    if entry[1] <= 0:
+        del _RESERVED['mesh']
+        try:
+            operations.deallocate(entry[0])
+        except BaseException:
+            pass
 
 
 def column_runs(tile_columns, workers=WORKERS):
@@ -152,11 +188,15 @@ def sample(operations, logits, rows, served=None):
     if len(logit_shards) != chips:
         tp4_sampdraft.note(tp4_sampdraft.SARG_FALLBACK, 'rows=%d reason=logits are not one shard per chip' % rows)
         return None
+    reserved = _RESERVED.get('mesh')
+    if reserved is None:
+        tp4_sampdraft.note(tp4_sampdraft.SARG_FALLBACK, 'rows=%d reason=no partials buffer reserved before capture (only the packed '
+                           'block reserves one)' % rows)
+        return None
+    partials = reserved[0]
     dram = operations.DRAM_MEMORY_CONFIG
-    partials = ids = values = None
+    ids = values = None
     try:
-        partials = operations.empty((1, 1, TASKS, PAGE_WORDS), dtype=operations.uint32, layout=operations.ROW_MAJOR_LAYOUT,
-                                    device=mesh, memory_config=dram)
         ids = operations.empty((1, 1, 1, OUTPUT_WORDS), dtype=operations.uint32, layout=operations.ROW_MAJOR_LAYOUT,
                                device=mesh, memory_config=dram)
         values = operations.empty((1, 1, 1, OUTPUT_WORDS), dtype=operations.bfloat16, layout=operations.ROW_MAJOR_LAYOUT,
@@ -211,9 +251,6 @@ def sample(operations, logits, rows, served=None):
             if tensor is not None:
                 operations.deallocate(tensor)
         raise
-    finally:
-        if partials is not None:
-            operations.deallocate(partials)
     if audit and served is not None:
         try:
             REFERENCES[id(values)] = served()
@@ -221,7 +258,7 @@ def sample(operations, logits, rows, served=None):
             operations.deallocate(ids)
             operations.deallocate(values)
             raise
-    PRODUCED[id(values)] = True
+    PRODUCED[id(values)] = values
     tp4_sampdraft.note(tp4_sampdraft.SARG_ENGAGED, 'rows=%d workers=%d tasks=%d fold=1 audit=%d' % (
         rows, WORKERS, len(tasks), int(audit)))
     return ids, values
@@ -286,8 +323,14 @@ def release_audit(operations, values):
         PRODUCED.pop(id(values), None)
     reference = REFERENCES.pop(id(values), None) if values is not None else None
     if reference is not None:
-        for tensor in reference:
-            try:
-                operations.deallocate(tensor)
-            except BaseException:
-                pass
+        # today's path's maxima may also be the V4a audit's own reference entry (verify_trace_t1.shard_values registers
+        # VALUE_REFERENCES[id(served values)] under QWEN_FAST_TP4_VGLUE_AUDIT, and release_vglue_audit pops only the kernel's id): pop it
+        # here so a stale id cannot match a later tensor, and free its ttnn.max reference with the pair.
+        module = sys.modules.get('verify_trace_t1')
+        stale = module.VALUE_REFERENCES.pop(id(reference[1]), None) if module is not None else None
+        for tensor in (*reference, stale):
+            if tensor is not None:
+                try:
+                    operations.deallocate(tensor)
+                except BaseException:
+                    pass

@@ -16,6 +16,8 @@ and the pair's launches stay exactly what they were.
                                         operands and the two outputs are byte-compared (compare_pending, called per round).
   QWEN_FAST_TP4_DRAFT_HEADS        D2c  drafter: nlp_create_qkv_heads / nlp_concat_heads (one core each) become one multi-core
                                         tile-copy launch each (a tile permutation: head_dim 128 is four whole tiles).
+  QWEN_FAST_TP4_DRAFT_HEADS_AUDIT       a correctness arm only (needs D2c): the served head split / merge runs beside the launch on the
+                                        same operands and the outputs are byte-compared on every chip, as D2a's audit does.
 
 Markers: every FALLBACK and AUDIT_MISMATCH line fails a gated arm (c2_smoke_check); ENGAGED is the proof a lever ran.
 
@@ -32,9 +34,10 @@ SHARD_ARGMAX_AUDIT = 'QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT'
 DRAFT_CONV = 'QWEN_FAST_TP4_DRAFT_CONV'
 DRAFT_CONV_AUDIT = 'QWEN_FAST_TP4_DRAFT_CONV_AUDIT'
 DRAFT_HEADS = 'QWEN_FAST_TP4_DRAFT_HEADS'
+DRAFT_HEADS_AUDIT = 'QWEN_FAST_TP4_DRAFT_HEADS_AUDIT'
 
 LEVERS = (SHARD_ARGMAX, DRAFT_CONV, DRAFT_HEADS)
-AUDITS = {SHARD_ARGMAX_AUDIT: SHARD_ARGMAX, DRAFT_CONV_AUDIT: DRAFT_CONV}
+AUDITS = {SHARD_ARGMAX_AUDIT: SHARD_ARGMAX, DRAFT_CONV_AUDIT: DRAFT_CONV, DRAFT_HEADS_AUDIT: DRAFT_HEADS}
 ALL_FLAGS = LEVERS + tuple(AUDITS)
 
 # One (engaged, fell back, audit, audit mismatch) marker prefix per lever; c2_smoke_check and the tests read these.
@@ -48,6 +51,8 @@ CONV_AUDIT = '[PINDIAG] tp4 draft conv audit'
 CONV_MISMATCH = '[PINDIAG] tp4 draft conv audit mismatch'
 HEADS_ENGAGED = '[PINDIAG] tp4 draft heads engaged'
 HEADS_FALLBACK = '[PINDIAG] tp4 draft heads fell back'
+HEADS_AUDIT = '[PINDIAG] tp4 draft heads audit'
+HEADS_MISMATCH = '[PINDIAG] tp4 draft heads audit mismatch'
 
 # What each lever needs at run time, by basename. The image copy lists and the CPU allowlist must name every entry
 # (test_tp4_sampdraft checks it), so what the CPU tests proved is what ships.
@@ -93,6 +98,21 @@ def audit_enabled(audit, environ=None):
     if not _read(AUDITS[audit], environ):
         raise ValueError('%s needs %s=1: the audit would compare nothing' % (audit, AUDITS[audit]))
     return True
+
+
+def drafter_audit_on(environ=None):
+    """Whether either drafter audit (D2a's conv audit, D2c's heads audit) is on: the capture sites open an audit scope for it."""
+    return audit_enabled(DRAFT_CONV_AUDIT, environ) or audit_enabled(DRAFT_HEADS_AUDIT, environ)
+
+
+def validate(environ=None):
+    """Every flag strict and every audit paired with its lever, checked once at attach: a misconfigured audit arm must fail before
+    the first capture, not at its first round's readback after the cards are loaded. Raises ValueError."""
+    _check_width(environ)
+    for name in ALL_FLAGS:
+        _read(name, environ)
+    for audit in AUDITS:
+        audit_enabled(audit, environ)
 
 
 def log_line(message):

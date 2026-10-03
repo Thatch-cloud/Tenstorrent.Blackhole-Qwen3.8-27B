@@ -24,7 +24,7 @@ SAMP_GATE, D2_GATE = 'c2-packed-tp4-best-gate-samp', 'c2-packed-tp4-best-gate-d2
 DELTAS = {SAMP: (CONTROL, {sd.SHARD_ARGMAX: '1'}),
           D2: (CONTROL, {sd.DRAFT_CONV: '1', sd.DRAFT_HEADS: '1'}),
           SAMP_GATE: (CONTROL_GATE, {sd.SHARD_ARGMAX: '1', sd.SHARD_ARGMAX_AUDIT: '1'}),
-          D2_GATE: (CONTROL_GATE, {sd.DRAFT_CONV: '1', sd.DRAFT_HEADS: '1', sd.DRAFT_CONV_AUDIT: '1'})}
+          D2_GATE: (CONTROL_GATE, {sd.DRAFT_CONV: '1', sd.DRAFT_HEADS: '1', sd.DRAFT_CONV_AUDIT: '1', sd.DRAFT_HEADS_AUDIT: '1'})}
 FOUR = {'QWEN_FAST_TP': '4'}
 
 
@@ -115,6 +115,7 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(env['QWEN_FAST_BUDGET_CAP'], '1')
             self.assertNotIn(sd.SHARD_ARGMAX_AUDIT, env)
             self.assertNotIn(sd.DRAFT_CONV_AUDIT, env)
+            self.assertNotIn(sd.DRAFT_HEADS_AUDIT, env)
         for name in (SAMP_GATE, D2_GATE):
             env = PROFILES[name]['env']
             self.assertEqual((env['QWEN_FAST_VERIFY_T1_AUDIT'], env['QWEN_FAST_VERIFY_T2_AUDIT']), ('1', '1'))
@@ -149,7 +150,8 @@ class SmokeRuleTests(unittest.TestCase):
                                    sd.DRAFT_CONV: (sd.CONV_ENGAGED, sd.CONV_FALLBACK),
                                    sd.DRAFT_HEADS: (sd.HEADS_ENGAGED, sd.HEADS_FALLBACK)})
         self.assertEqual({flag: marker for flag, marker, _ in c2_smoke_check.SAMPDRAFT_AUDITS},
-                         {sd.SHARD_ARGMAX_AUDIT: sd.SARG_AUDIT, sd.DRAFT_CONV_AUDIT: sd.CONV_AUDIT})
+                         {sd.SHARD_ARGMAX_AUDIT: sd.SARG_AUDIT, sd.DRAFT_CONV_AUDIT: sd.CONV_AUDIT,
+                          sd.DRAFT_HEADS_AUDIT: sd.HEADS_AUDIT})
 
     def log(self, *lines):
         return '\n'.join(lines) + '\n'
@@ -185,14 +187,20 @@ class SmokeRuleTests(unittest.TestCase):
         self.assertEqual(c2_smoke_check.sampdraft_problems(passing, self.ENV_SAMP_GATE), [])
         mismatch = engaged + self.log(sd.SARG_MISMATCH + ' round=1 chip=0 rows=[3] kernel=[5] served=[6]')
         self.assertEqual(len(c2_smoke_check.sampdraft_problems(mismatch, self.ENV_SAMP_GATE)), 1)
-        conv = engaged + self.log(sd.CONV_AUDIT + ' exact=True convs=20 round=1')
-        self.assertEqual(c2_smoke_check.sampdraft_problems(conv, self.ENV_D2_GATE), [])
-        self.assertEqual(len(c2_smoke_check.sampdraft_problems(engaged, self.ENV_D2_GATE)), 1)
+        conv = engaged + self.log(sd.CONV_AUDIT + ' exact=True convs=20 round=1 site=quad')
+        heads = engaged + self.log(sd.HEADS_AUDIT + ' exact=True tensors=3 round=1 site=pair')
+        both = conv + self.log(sd.HEADS_AUDIT + ' exact=True tensors=3 round=1 site=pair')
+        self.assertEqual(c2_smoke_check.sampdraft_problems(both, self.ENV_D2_GATE), [])
+        for partial, missing in ((conv, sd.DRAFT_HEADS_AUDIT), (heads, sd.DRAFT_CONV_AUDIT)):
+            problems = c2_smoke_check.sampdraft_problems(partial, self.ENV_D2_GATE)
+            self.assertEqual(len(problems), 1)
+            self.assertIn(missing, problems[0])
+        self.assertEqual(len(c2_smoke_check.sampdraft_problems(engaged, self.ENV_D2_GATE)), 2)
 
     def test_a_mismatch_line_trips_the_checkers_existing_audit_mismatch_rule(self):
-        for line in (sd.SARG_MISMATCH + ' round=1', sd.CONV_MISMATCH + ' round=1 pairs=20'):
+        for line in (sd.SARG_MISMATCH + ' round=1', sd.CONV_MISMATCH + ' round=1 pairs=20', sd.HEADS_MISMATCH + ' site=pair round=1 pairs=3'):
             self.assertTrue(c2_smoke_check.MISMATCH.search(line), line)
-        for line in (sd.SARG_AUDIT + ' 1 exact=True', sd.CONV_AUDIT + ' exact=True convs=1'):
+        for line in (sd.SARG_AUDIT + ' 1 exact=True', sd.CONV_AUDIT + ' exact=True convs=1', sd.HEADS_AUDIT + ' exact=True tensors=3'):
             self.assertFalse(c2_smoke_check.MISMATCH.search(line), line)
 
     def test_check_runs_the_rules_with_the_served_profiles_environment(self):

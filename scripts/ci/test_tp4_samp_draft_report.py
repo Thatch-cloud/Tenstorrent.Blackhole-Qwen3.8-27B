@@ -60,9 +60,18 @@ class JudgeTests(unittest.TestCase):
         failed = report.judge([stats(3000, 7.0)], [stats(3000, 6.9)])
         self.assertEqual(failed['verdict'], 'FAIL')
         self.assertIn('below', failed['reasons'][0])
+        raised = report.judge([stats(3000, 7.0)], [stats(3000, 7.1)])
+        self.assertEqual(raised['verdict'], 'FAIL')
+        self.assertIn('above', raised['reasons'][0])
+        self.assertEqual(report.judge([stats(3000, 7.0)], [stats(3000, 7.06)])['verdict'], 'PASS')
 
     def test_a_per_position_drop_of_more_than_two_points_fails_even_at_equal_tau(self):
         found = report.judge([stats(3000, 7.0, [0.9, 0.8])], [stats(3000, 7.0, [0.9, 0.77])])
+        self.assertEqual(found['verdict'], 'FAIL')
+        self.assertIn('position(s) 2', found['reasons'][0])
+
+    def test_a_per_position_rise_of_more_than_two_points_fails_too(self):
+        found = report.judge([stats(3000, 7.0, [0.9, 0.8])], [stats(3000, 7.0, [0.9, 0.83])])
         self.assertEqual(found['verdict'], 'FAIL')
         self.assertIn('position(s) 2', found['reasons'][0])
 

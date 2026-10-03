@@ -548,7 +548,8 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
             self.last_built = False
             return bucket
         from dflash_packed_proposal import packed_identifiers
-        from dflash_proposal_trace import borrow_pooled_mask, pool_outputs, traced_pass
+        from dflash_proposal_trace import (borrow_pooled_mask, close_draft_audit, compare_draft_audit, open_draft_audit, pool_outputs,
+                                           traced_pass)
         from gdn_multitoken_conv import addresses, release_owned
         quad_host_mask, quad_rope = _pinned.quad_host_mask, _pinned.quad_rope
         operations, device = self.operations, self.devices[0]
@@ -567,7 +568,7 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
                 rope=dict(q=tuple(self._upload(value) for value in query),
                           live_k=tuple(self._upload(value) for value in live)),
                 cached_history=self._live_banks() if bind_live else self._placeholder_banks(), trace=None, outputs=None,
-                owned=[], tokens=None, consumed=set(), parts=None, live_banks=bind_live)
+                owned=[], tokens=None, consumed=set(), parts=None, live_banks=bind_live, draft_audit=None)
             if pooled_mask is not None:
                 # Borrowed, never in self.owned: protected like the lent banks (_protected), never released.
                 bucket.lent_mask = (pooled_mask,)
@@ -593,10 +594,15 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
             bucket.owned, retain = device.temporaries(self._protected(bucket))
             from attention_batch import capture_operation
 
-            bucket.trace, bucket.outputs = capture_operation(operations, self.mesh,
-                lambda: traced_pass(operations, lambda: self._execute(bucket, bucket.owned, retain),
-                                    pooled_outputs))
+            audit_scope = bucket.draft_audit = open_draft_audit('quad')
+            try:
+                bucket.trace, bucket.outputs = capture_operation(operations, self.mesh,
+                    lambda: traced_pass(operations, lambda: self._execute(bucket, bucket.owned, retain),
+                                        pooled_outputs))
+            finally:
+                close_draft_audit(audit_scope)
             operations.execute_trace(self.mesh, bucket.trace, cq_id=0, blocking=True)
+            compare_draft_audit(operations, bucket)
             note(self.pair_label(), self.quad.sdpa, self.quad.conv)
             import memory_ledger
 
@@ -613,6 +619,8 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
                     operations.release_trace(self.mesh, built.trace)
                     built.trace = None
                 release_owned(operations, built.owned)
+                release_draft_audit(operations, built.draft_audit)
+                built.draft_audit = None
             leaked = self.owned[placeholder_mark:]
             del self.owned[placeholder_mark:]
             release_owned(operations, leaked)
@@ -708,6 +716,7 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
             release_owned(operations, owned)
             if moved:
                 raise AssertionError('Prepared quad proposal input addresses moved')
+            compare_draft_audit(operations, bucket)
             bucket.tokens = select_quad_outputs(self.devices[0], bucket.outputs, seeds, (BLOCK - 1,) * USERS)
         tokens = bucket.tokens[which]
         bucket.consumed.add(which)
@@ -732,6 +741,7 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
         release_owned(operations, owned)
         if moved:
             raise AssertionError('Prepared quad proposal input addresses moved')
+        compare_draft_audit(operations, bucket)
         bucket.parts = read_quad_outputs(self.devices[0], bucket.outputs)
         if isinstance(self._audit, list):
             # QWEN_FAST_QUAD_DRAFT_AUDIT: the pairs' readback and every raw read the audit compares, here and not after
@@ -748,6 +758,18 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
             raise ValueError('No prepared quad proposal is pending')
         seeds, bucket, _ = self._pending
         return select_quad_outputs(self.devices[0], bucket.outputs, seeds, (BLOCK - 1,) * USERS)
+
+    def close(self):
+        """The pinned close (traces released, then the buckets' buffers), then the drafter audit's held pairs: a trace writes them
+        until it is released, so they are freed last (tp4_draft_conv's second rule)."""
+        if self.closed:
+            return
+        from dflash_proposal_trace import release_draft_audit
+
+        scopes = [getattr(bucket, 'draft_audit', None) for bucket in self.buckets.values()]
+        super().close()
+        for scope in scopes:
+            release_draft_audit(self.operations, scope)
 
 
 # ---------------------------------------------------------------------------------------------

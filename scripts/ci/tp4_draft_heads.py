@@ -14,6 +14,9 @@ over up to 24 cores, reading key and value directly (no concat) and the query's 
 ops' bytes: the drafter's proposals are identical. test_tp4_draft_heads holds the permutation against a torch reshape / permute
 reference of both ops at the drafter's per-chip head counts.
 
+AUDIT (QWEN_FAST_TP4_DRAFT_HEADS_AUDIT=1, needs the lever). Inside a drafter bucket's capture scope the served ops run beside the launch
+and every output pair is byte-compared on every chip after the bucket's replay (tp4_draft_conv's scope machinery and its two rules).
+
 FLAG OFF. The twins (draft_head_layout_tp, quad_draft_tp) call their served functions exactly as before and this module is not
 imported. A call this module cannot take (another dtype, layout or placement, head_dim, a row count that is not a whole number of
 tiles, more tasks than a core's argument budget) is handed to the served function with a 'fell back' line.
@@ -151,6 +154,22 @@ def launch(operations, mesh, sources, destinations, tasks):
     return len(runs)
 
 
+def _audit(operations, engaged, served):
+    """QWEN_FAST_TP4_DRAFT_HEADS_AUDIT, inside a drafter capture scope (tp4_draft_conv.open_scope): the served split / merge runs on the
+    same operands and each of its outputs is held with a clone of the matching tile-copy output, for compare_scope to byte-compare after
+    the bucket's replay. The served outputs are the caller's `retain`'s (it frees them with the bucket), so the scope does not own them."""
+    import tp4_draft_conv
+
+    if not tp4_draft_conv.capturing() or not tp4_sampdraft.audit_enabled(tp4_sampdraft.DRAFT_HEADS_AUDIT):
+        return
+    reference = served()
+    reference = tuple(reference[name] for name in ('q', 'k', 'v')) if isinstance(reference, dict) else (reference,)
+    if len(reference) != len(engaged):
+        raise AssertionError('The heads audit pairs %d launch outputs with %d served outputs' % (len(engaged), len(reference)))
+    for mine, theirs in zip(engaged, reference):
+        tp4_draft_conv.hold(operations, 'heads', mine, theirs, own_served=False)
+
+
 def split_heads(operations, query, key, value, retain, *, served, site):
     """(query heads, key heads, value heads) as dict(q=, k=, v=) for (1, 1, rows, heads * 128) projections: the tile-copy launch,
     or `served()` (the twin's served split) when this call cannot take it."""
@@ -186,6 +205,7 @@ def split_heads(operations, query, key, value, retain, *, served, site):
             operations.deallocate(tensor)
         raise
     query_heads, key_heads, value_heads = (retain(tensor) for tensor in outputs)
+    _audit(operations, (query_heads, key_heads, value_heads), served)
     tp4_sampdraft.note(tp4_sampdraft.HEADS_ENGAGED, 'site=%s op=split rows=%dx%d heads=%d/%d tiles=%d cores=%d' % (
         site, query_rows, kv_rows, heads, kv_heads, len(tasks), cores))
     return dict(q=query_heads, k=key_heads, v=value_heads)
@@ -220,6 +240,7 @@ def merge_heads(operations, value, retain, *, served, site):
         operations.deallocate(output)
         raise
     result = retain(output)
+    _audit(operations, (result,), served)
     tp4_sampdraft.note(tp4_sampdraft.HEADS_ENGAGED, 'site=%s op=merge rows=%d heads=%d tiles=%d cores=%d' % (
         site, rows, heads, len(tasks), cores))
     return result

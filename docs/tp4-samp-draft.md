@@ -12,7 +12,12 @@ claim is either by construction (held on the CPU by transliterations of the kern
 
 Audit flags (a correctness arm only, each needs its lever, name ends in `_AUDIT`): `QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT` runs today's path beside the
 kernels in the same capture and compares every row of every chip every round (ids exactly, values as numbers); `QWEN_FAST_TP4_DRAFT_CONV_AUDIT`
-runs the served I/O kernel beside the new one and byte-compares every conv output on every chip for the first rounds.
+runs the served I/O kernel beside the new one and `QWEN_FAST_TP4_DRAFT_HEADS_AUDIT` the served head split/merge beside the tile copies, and each
+byte-compares the outputs on every chip. The drafter audits run inside a drafter bucket's capture (the first two buckets of each of the single, pair
+and quad sites): the pairs are compared right after that bucket's own replays (its build replay and its first real rounds), never at the verify
+readback, because a buffer allocated after the verify trace was captured can sit in that trace's freed holes and be overwritten by its replay; and
+they are freed only when the bucket's trace is released. The sampler lever keeps its partials scratch in one buffer reserved at the packed
+block's warm (before any capture) and freed at the last block's close; it is refused in the request engine.
 
 Not here (design routes S2 and S3, D2b exists, D2d): the hang-fix diet (the in-trace pinned sampler, 4.3 ms a verify, output never read), one
 collective and one readback instead of eight, the wide hidden norms (`QWEN_FAST_TP4_DRAFT_WIDE`, built on tp4/next-3-cheap), the quad's double LM head.
@@ -40,7 +45,7 @@ collective and one readback instead of eight, the wide hidden norms (`QWEN_FAST_
 | `c2-packed-tp4-best-samp` | `c2-packed-tp4-best-strace` | `QWEN_FAST_TP4_SHARD_ARGMAX=1` |
 | `c2-packed-tp4-best-d2` | `c2-packed-tp4-best-strace` | `QWEN_FAST_TP4_DRAFT_CONV=1`, `QWEN_FAST_TP4_DRAFT_HEADS=1` |
 | `c2-packed-tp4-best-gate-samp` | `c2-packed-tp4-best-gate` | `QWEN_FAST_TP4_SHARD_ARGMAX=1`, `QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT=1` |
-| `c2-packed-tp4-best-gate-d2` | `c2-packed-tp4-best-gate` | `QWEN_FAST_TP4_DRAFT_CONV=1`, `QWEN_FAST_TP4_DRAFT_HEADS=1`, `QWEN_FAST_TP4_DRAFT_CONV_AUDIT=1` |
+| `c2-packed-tp4-best-gate-d2` | `c2-packed-tp4-best-gate` | `QWEN_FAST_TP4_DRAFT_CONV=1`, `QWEN_FAST_TP4_DRAFT_HEADS=1`, `QWEN_FAST_TP4_DRAFT_CONV_AUDIT=1`, `QWEN_FAST_TP4_DRAFT_HEADS_AUDIT=1` |
 
 ## The window
 

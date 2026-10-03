@@ -17,11 +17,18 @@ quad_draft_tp.served_quad_fused_convolution) exactly as before; this module is n
 (another dtype, layout, mesh, rows) is handed to the served function with a 'fell back' line, which raises its own refusal if the
 call is truly invalid.
 
-AUDIT (QWEN_FAST_TP4_DRAFT_CONV_AUDIT=1, needs the lever). Each engaged call also runs the served call on the same operands, and the
-engaged output is cloned; both are held, outside the owners' lifetimes, as a pair. compare_pending() byte-compares every held pair on
-every chip (int16 bit patterns: -0 and +0 differ) and logs '[PINDIAG] tp4 draft conv audit exact=True convs=N'; any difference
-logs the mismatch marker and raises. packed_verifier calls it at the top of each round's readback (everything the drafter traces
-enqueued has completed by then) for the first AUDIT_ROUNDS rounds. release_audit() frees what the audit holds.
+AUDIT (QWEN_FAST_TP4_DRAFT_CONV_AUDIT=1, needs the lever; the same machinery serves QWEN_FAST_TP4_DRAFT_HEADS_AUDIT). A call made while a
+capture scope is open (a drafter bucket's capture; see below) also runs the served call on the same operands and the engaged output is
+cloned; the pair is held by the SCOPE, not by the module. Two rules come from how a trace's memory behaves
+(dflash_proposal_trace's M0 header): a buffer allocated after an earlier trace was captured can sit in that trace's freed holes, and
+that trace's replay overwrites it; and a buffer a captured trace writes must outlive the trace. So (1) a scope's pairs are compared
+right after the replay of the bucket that owns them (dflash_proposal_trace.compare_draft_audit, called at the bucket's build replay and at
+every finish / collect / propose readback), before any verify or commit replay can run; and (2) they are freed only when that
+bucket's trace is released (release_draft_audit), never earlier and never by another bucket's warm. Memory is bounded: only the first
+AUDIT_SCOPES scopes of each site are audited, and a scope compares on its first AUDIT_ROUNDS replays and then reads nothing back.
+compare_scope byte-compares every held pair on every chip (int16 bit patterns: -0 and +0 differ) and logs
+'[PINDIAG] tp4 draft conv audit exact=True convs=N round=R'; any difference logs the mismatch marker and raises. A call made with
+no scope open (the eager warm-ups, any capture that does not open one) is not audited and runs the engaged launch only.
 
 Stdlib only at import, py 3.7.
 """
@@ -38,11 +45,57 @@ TILE_PAGES = 160          # pages per tile row of the 5,120-wide hidden block
 TILE_BYTES = 2048
 SLOT_TILES = 7            # one page's input image: hidden, shift, base0, dynamic0, base1, dynamic1, zero
 SLOTS = 2                 # CB 0 holds two images so the next page is prepared while the compute kernel runs this one
-AUDIT_ROUNDS = 4          # compare_pending compares on this many calls, then stops reading back
+AUDIT_ROUNDS = 4          # a scope compares on this many replays, then stops reading back
+AUDIT_SCOPES = 2          # capture scopes audited per site ('single', 'pair', 'quad'); later buckets run unaudited
+_CURRENT = {'scope': None}
+_OPENED = {}              # site -> scopes opened so far
 
-# Held (engaged output clone, served output) pairs of the audit, and how many compare_pending calls ran.
-_HELD = []
-_STATE = {'rounds': 0, 'convs': 0}
+
+class Scope:
+    """What one drafter bucket's capture held for the audit: (kind, engaged clone, served output, owns the served output) pairs,
+    in capture order, and how many replays were compared."""
+
+    def __init__(self, site):
+        self.site = site
+        self.pairs = []
+        self.rounds = 0
+
+    def __len__(self):
+        return len(self.pairs)
+
+
+def open_scope(site):
+    """Open the capture scope of a bucket at `site` and return it, or None (nothing opened) when this site has already audited
+    AUDIT_SCOPES buckets. Pair with close_scope in a finally."""
+    if _OPENED.get(site, 0) >= AUDIT_SCOPES:
+        return None
+    if _CURRENT['scope'] is not None:
+        raise RuntimeError('a drafter audit scope is already open (%s)' % _CURRENT['scope'].site)
+    _OPENED[site] = _OPENED.get(site, 0) + 1
+    _CURRENT['scope'] = Scope(site)
+    return _CURRENT['scope']
+
+
+def close_scope(scope):
+    """The capture is over (also on failure): later calls hold nothing."""
+    if scope is not None and _CURRENT['scope'] is scope:
+        _CURRENT['scope'] = None
+
+
+def hold(operations, kind, engaged, served, *, own_served):
+    """Hold (engaged clone, served output) in the open scope. Returns False (and holds nothing) with no scope open. `own_served`: the
+    scope frees the served output with the pair (False when its owner already frees it, as the head ops' `retain` does)."""
+    scope = _CURRENT['scope']
+    if scope is None:
+        return False
+    copy = operations.clone(engaged, memory_config=operations.DRAM_MEMORY_CONFIG)
+    scope.pairs.append((kind, copy, served, own_served))
+    return True
+
+
+def capturing():
+    """Whether a drafter audit scope is open (an audited call runs the served call beside the engaged one only then)."""
+    return _CURRENT['scope'] is not None
 
 
 def pages_for(workers, rows):
@@ -96,7 +149,7 @@ def convolution(operations, mesh, hidden, dynamic, base, *, rows, seams_low, sea
     groups = group_workers(pages)
     output = operations.empty(tuple(hidden.shape), dtype=operations.bfloat16, layout=operations.TILE_LAYOUT,
                               device=mesh, memory_config=operations.DRAM_MEMORY_CONFIG)
-    audit = tp4_sampdraft.audit_enabled(tp4_sampdraft.DRAFT_CONV_AUDIT)
+    audit = capturing() and tp4_sampdraft.audit_enabled(tp4_sampdraft.DRAFT_CONV_AUDIT)
     parts.append(operations.get_device_tensors(output))
     cores = core_set(coordinates)
     buffers = [operations.CBDescriptor(total_size=TILE_BYTES * count, core_ranges=cores,
@@ -139,43 +192,55 @@ def convolution(operations, mesh, hidden, dynamic, base, *, rows, seams_low, sea
     if audit:
         reference = served()
         try:
-            _HELD.append((operations.clone(output, memory_config=operations.DRAM_MEMORY_CONFIG), reference))
+            hold(operations, 'conv', output, reference, own_served=True)
         except BaseException:
             operations.deallocate(reference)
             raise
     return output
 
 
-def compare_pending(operations):
-    """Byte-compare every held (engaged, served) pair on every chip, for the first AUDIT_ROUNDS calls. Returns the number of
-    pairs compared (0 when nothing is held or the rounds are spent). Logs the audit marker; a difference logs the mismatch
-    marker and raises AssertionError."""
-    if not _HELD or _STATE['rounds'] >= AUDIT_ROUNDS:
+def compare_scope(operations, scope):
+    """Byte-compare every pair `scope` holds on every chip, for the scope's first AUDIT_ROUNDS calls. Returns the number of pairs compared
+    (0 for no scope, nothing held or the rounds spent). Logs one audit marker per kind held; a difference logs the mismatch marker and
+    raises AssertionError."""
+    if scope is None or not scope.pairs or scope.rounds >= AUDIT_ROUNDS:
         return 0
     import torch
 
-    _STATE['rounds'] += 1
-    bad = []
-    for index, (mine, served) in enumerate(_HELD):
+    scope.rounds += 1
+    bad = {}
+    for index, (kind, mine, served, _) in enumerate(scope.pairs):
         for chip, (left, right) in enumerate(zip(operations.get_device_tensors(mine), operations.get_device_tensors(served))):
             a = operations.to_torch(left).contiguous().view(torch.int16)
             b = operations.to_torch(right).contiguous().view(torch.int16)
             if a.shape != b.shape or not torch.equal(a, b):
-                bad.append((index, chip))
-    count = len(_HELD)
-    _STATE['convs'] += count
-    if bad:
-        message = '%s round=%d pairs=%d differing=%s' % (tp4_sampdraft.CONV_MISMATCH, _STATE['rounds'], count, bad[:8])
+                bad.setdefault(kind, []).append((index, chip))
+    counts = {}
+    for kind, _, _, _ in scope.pairs:
+        counts[kind] = counts.get(kind, 0) + 1
+    names = {'conv': (tp4_sampdraft.CONV_AUDIT, tp4_sampdraft.CONV_MISMATCH, 'convs'),
+             'heads': (tp4_sampdraft.HEADS_AUDIT, tp4_sampdraft.HEADS_MISMATCH, 'tensors')}
+    for kind in sorted(bad):
+        message = '%s site=%s round=%d pairs=%d differing=%s' % (names[kind][1], scope.site, scope.rounds, counts[kind], bad[kind][:8])
         tp4_sampdraft.log_line(message)
         raise AssertionError(message)
-    tp4_sampdraft.log_line('%s exact=True convs=%d round=%d' % (tp4_sampdraft.CONV_AUDIT, count, _STATE['rounds']))
-    return count
+    for kind in sorted(counts):
+        tp4_sampdraft.log_line('%s exact=True %s=%d round=%d site=%s' % (names[kind][0], names[kind][2], counts[kind], scope.rounds,
+                                                                      scope.site))
+    return len(scope.pairs)
 
 
-def release_audit(operations):
-    """Free every tensor the audit holds."""
-    held = [tensor for pair in _HELD for tensor in pair]
-    del _HELD[:]
+def release_scope(operations, scope):
+    """Free what `scope` holds: every engaged clone and the served outputs it owns. Call it only once the trace its pairs were
+    captured in is released (or never replayed again): until then the trace still writes them."""
+    if scope is None:
+        return
+    held = []
+    for _, mine, served, own_served in scope.pairs:
+        held.append(mine)
+        if own_served:
+            held.append(served)
+    del scope.pairs[:]
     for tensor in held:
         try:
             operations.deallocate(tensor)

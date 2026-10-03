@@ -101,7 +101,8 @@ SAMPDRAFT_LEVERS = (('QWEN_FAST_TP4_SHARD_ARGMAX', '[PINDIAG] tp4 shard argmax e
                     ('QWEN_FAST_TP4_DRAFT_HEADS', '[PINDIAG] tp4 draft heads engaged', '[PINDIAG] tp4 draft heads fell back',
                      'drafter head copies'))
 SAMPDRAFT_AUDITS = (('QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT', '[PINDIAG] tp4 shard argmax audit', 'shard argmax'),
-                    ('QWEN_FAST_TP4_DRAFT_CONV_AUDIT', '[PINDIAG] tp4 draft conv audit', 'drafter conv'))
+                    ('QWEN_FAST_TP4_DRAFT_CONV_AUDIT', '[PINDIAG] tp4 draft conv audit', 'drafter conv'),
+                    ('QWEN_FAST_TP4_DRAFT_HEADS_AUDIT', '[PINDIAG] tp4 draft heads audit', 'drafter heads'))
 SLIDE_FLAG = 'QWEN_FAST_TP_KV_SLIDE'
 QUAD_FLAG = 'QWEN_FAST_QUAD_DRAFT'
 SINGLES_AUDIT_FLAG = 'QWEN_FAST_DRAFT_SINGLES_AUDIT'
