@@ -1,7 +1,7 @@
 """The tp4/sdpa-long window: its job templates (scripts/ci/references/tp4-sdpa-long-jobs), their order, and the sweep harness they run.
 
-One sweep job (Q1, cardm on one card, optional) between the window's two bookends: A0 takes production down, H1 hands the cards back. No
-build job: the harness mounts its scripts from the checkout and the image already on the rig carries the served SDPA graft. The templates
+One sweep job (Q1, cardm on one card, optional) after A0, which takes production down. The window has NO hand-back job: the driver hands
+the cards back (reset, fabric re-measure, agentstart), so no job of the pack can start the node agent mid-programme. No build job: the harness mounts its scripts from the checkout and the image already on the rig carries the served SDPA graft. The templates
 are public, so they name no rig, card, address, registry or digest.
 
 Run at py 3.11: `py -3.11 -B -m unittest test_tp4_sdpa_long_window` from scripts/ci.
@@ -27,8 +27,8 @@ FOLDER = HERE / 'references' / 'tp4-sdpa-long-jobs'
 PROFILES = json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))
 NAMES = sorted(PROFILES['profiles'])
 IMAGE = 'tp4-next-3a'
-FIRST, SWEEP, HANDBACK = 'A0-agentstop-unserve', 'Q1-sdpa-long-sweep', 'H1-handback-reset-fabric-agentstart'
-ORDERED = (FIRST, SWEEP, HANDBACK)
+FIRST, SWEEP = 'A0-agentstop-unserve', 'Q1-sdpa-long-sweep'
+ORDERED = (FIRST, SWEEP)
 DEVICE_STEPS = ('cardm', 'smoke', 'gate', 'prefix', 'fabric', 'replay')
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|'
                     r'/dev/tenstorrent|home/|zot\.|@[A-Z0-9_]+@')
@@ -64,7 +64,7 @@ class OrderTests(unittest.TestCase):
                 self.assertEqual(image, IMAGE)
                 self.assertEqual(parsed(name)['tag'], IMAGE)
                 self.assertTrue(minutes.isdigit() and 10 <= int(minutes) <= 180, minutes)
-        self.assertEqual(modes, {FIRST: 'stop', SWEEP: 'optional', HANDBACK: 'stop'})
+        self.assertEqual(modes, {FIRST: 'stop', SWEEP: 'optional'})
 
     def test_no_build_job_and_the_order_says_why(self):
         for name in ORDERED:
@@ -74,24 +74,32 @@ class OrderTests(unittest.TestCase):
             self.assertIn(word, text)
 
     def test_the_first_job_takes_production_down_and_nothing_else_does(self):
-        self.assertEqual(parsed(FIRST)['actions'], 'status agentstop unserve')
+        self.assertEqual(parsed(FIRST)['actions'], 'agentstop unserve', 'no status: the driver flags production container as stale')
         self.assertEqual(parsed(FIRST)['cards'], 'quad')
         for name in ORDERED:
             if name != FIRST:
                 self.assertFalse({'agentstop', 'unserve'} & set(parsed(name)['actions'].split()), name)
         self.assertIn('PRODUCTION IS LIVE ON THE CARDS', (FOLDER / 'ORDER.txt').read_text(encoding='utf-8'))
 
-    def test_the_hand_back_is_last_resets_remeasures_the_fabric_restarts_the_agent_and_never_deploys(self):
-        self.assertEqual(read_order()[-1][0], HANDBACK)
-        self.assertEqual(parsed(HANDBACK)['actions'].split(), ['status', 'reset', 'fabric', 'agentstart'])
-        self.assertEqual(parsed(HANDBACK)['cards'], 'quad')
-        for word in ("TODAY'S PRODUCTION RECIPE", 'NEVER place a gate arm', 'AN OWNER /deploy IS STILL NEEDED', 'fabric re-measure',
-                     'stops before agentstart', 'c2-packed-tp4-best-sdpa'):
-            self.assertIn(word, text_of(HANDBACK))
+    def test_no_job_hands_back_and_the_driver_does(self):
+        self.assertEqual(sorted(path.name for path in FOLDER.iterdir() if path.name.startswith('H')), [], 'no hand-back template')
         for name in ORDERED:
-            self.assertNotIn('push', parsed(name)['actions'].split(), 'no :latest retag, no publish')
+            actions = set(parsed(name)['actions'].split())
+            self.assertFalse({'agentstart', 'reset', 'fabric', 'status', 'push'} & actions, name)
             self.assertFalse(re.search(r'(?im)^C2_(PLACE|DEPLOY)', text_of(name)), name)
-        self.assertIn('runs LAST and even when any earlier job failed or hung', (FOLDER / 'ORDER.txt').read_text(encoding='utf-8'))
+        order = (FOLDER / 'ORDER.txt').read_text(encoding='utf-8')
+        self.assertNotIn('H1-', order)
+        for word in ("HAND-BACK IS THE DRIVER'S", 'EVEN WHEN Q1 FAILED OR HUNG', 'never includes a deploy'):
+            self.assertIn(word, order)
+
+    def test_the_order_has_the_card_free_image_check_before_the_first_job(self):
+        order = (FOLDER / 'ORDER.txt').read_text(encoding='utf-8')
+        for word in ('DRIVER STEP BEFORE THE WINDOW', 'P1', 'IMAGE_CHECK_ONLY=1', 'PLACEHOLDER', 'never start A0 on an unchecked tag'):
+            self.assertIn(word, order)
+        script = (ROOT / 'optimisation' / 'ttnn-op' / 'sdpa_tp4_long' / 'run_card_m.sh').read_text(encoding='utf-8')
+        self.assertIn('IMAGE_CHECK_ONLY', script)
+        self.assertLess(script.index('IMAGE_CHECK_ONLY'), script.index(chr(10) + 'qual_card_resolve' + chr(10)), 'the check opens no device')
+        self.assertLess(script.index('IMAGE_CHECK_ONLY'), script.index(chr(10) + 'qual_refuse_holders' + chr(10)))
 
     def test_the_order_says_what_comes_after_and_that_nothing_is_applied(self):
         text = (FOLDER / 'ORDER.txt').read_text(encoding='utf-8')
@@ -114,7 +122,7 @@ class TemplateTests(unittest.TestCase):
         self.assertEqual([name for name in ORDERED if parsed(name)['cards'] == 'pair'], [SWEEP])
         for name in ORDERED:
             steps = set(parsed(name)['actions'].split()) & set(DEVICE_STEPS)
-            self.assertEqual(steps, {'cardm'} if name == SWEEP else (set() if name == FIRST else {'fabric'}), name)
+            self.assertEqual(steps, {'cardm'} if name == SWEEP else set(), name)
 
     def test_the_sweep_runs_the_sdpa_harness_with_the_windows_tag_and_arguments_the_sweep_parses(self):
         outputs = parsed(SWEEP)

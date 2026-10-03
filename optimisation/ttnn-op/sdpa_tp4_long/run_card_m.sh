@@ -371,12 +371,6 @@ timeout_s=${SWEEP_TIMEOUT_S:-3000}
 case $timeout_s in ''|*[!0-9]*) echo "refusing: SWEEP_TIMEOUT_S=$timeout_s is not a number of seconds" >&2; exit 1 ;; esac
 test "$timeout_s" -gt 1200 || { echo "refusing: SWEEP_TIMEOUT_S=$timeout_s leaves no room under the 600 s margin" >&2; exit 1; }
 
-# The target's node, resolved by board id now; never shared: refuse while a container or a host
-# process can reach it (a container on another board does not block).
-qual_card_resolve
-node=$QUAL_NODE
-qual_refuse_holders
-
 IMAGE=${IMAGE:-}
 if [ -z "$IMAGE" ]; then
   test -n "${IMAGE_TAG:-}" || { echo "set IMAGE (an image reference) or IMAGE_TAG (the tag of a local qwen38-c2-<tag> image)" >&2; exit 1; }
@@ -384,6 +378,29 @@ if [ -z "$IMAGE" ]; then
   IMAGE=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E ":qwen38-c2-${IMAGE_TAG//./\.}\$" | head -n 1 || true)
   test -n "$IMAGE" || { echo "no local image tagged qwen38-c2-$IMAGE_TAG" >&2; exit 1; }
 fi
+
+
+# CARD-FREE PRE-CHECK (the driver runs it BEFORE the window's first job takes production down): IMAGE_CHECK_ONLY=1 resolves the image,
+# and prints and checks the sha256 of every _ttnncpp.so the image holds against the graft this checkout's build script pins. It opens no
+# device and needs the same QUAL_CARD (and ALLOW_SERVING_CARD) the run does, because the canonical block selects the board first; exit 0 only when the image exists and every installed binary is the pinned graft.
+if [ "${IMAGE_CHECK_ONLY:-}" = 1 ]; then
+  want=${EXPECT_TTNNCPP_SHA256-$(sed -n 's/^graft_sha=\([0-9a-f]\{64\}\)$/\1/p' "$REPO/scripts/ci/build-c2-serving-image.sh" | head -n 1)}
+  echo "### image check: $IMAGE"
+  found=$(timeout 120 docker run --rm --network none --entrypoint sh "$IMAGE" -c 'find /opt/tt-metal -name _ttnncpp.so -type f -exec sha256sum {} +' 2>/dev/null) || { echo "could not list the image's _ttnncpp.so" >&2; exit 1; }
+  echo "$found"
+  test -n "$found" || { echo "the image holds no _ttnncpp.so" >&2; exit 1; }
+  if [ -n "$want" ]; then
+    echo "$found" | awk -v want="$want" '$1 != want { bad = 1 } END { exit bad }' || { echo "an installed _ttnncpp.so is not the pinned graft" >&2; exit 1; }
+  fi
+  echo "image ok"
+  exit 0
+fi
+
+# The target's node, resolved by board id now; never shared: refuse while a container or a host
+# process can reach it (a container on another board does not block).
+qual_card_resolve
+node=$QUAL_NODE
+qual_refuse_holders
 
 # The graft the image must carry: EXPECT_TTNNCPP_SHA256 if set (empty skips), else the K64j pin in this checkout's build script.
 if [ -z "${EXPECT_TTNNCPP_SHA256+x}" ]; then
@@ -435,6 +452,13 @@ case "$status" in
   124|137)
     echo "HANG SUSPECTED (exit $status): the container is removed on exit." >&2
     qual_reset_hint >&2
+    ;;
+  1)
+    # the sweep's faulthandler backstop (it works while a ttnn call holds the GIL) dumps every thread and exits 1: its dump is a hang
+    if grep -q '^Timeout (' "$R/sdpalong-$stamp.log" 2>/dev/null; then
+      echo "HANG SUSPECTED (exit 1 after a faulthandler timeout dump in the log): the container is removed on exit." >&2
+      qual_reset_hint >&2
+    fi
     ;;
 esac
 exit "$status"

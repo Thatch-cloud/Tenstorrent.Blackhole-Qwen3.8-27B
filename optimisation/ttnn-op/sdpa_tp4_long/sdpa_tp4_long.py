@@ -10,8 +10,11 @@ launches; the question is how much of the chip's DRAM bandwidth a candidate conf
 
 THE ARMS (names are QWEN_FAST_TP4_SDPA's values: sdpa_long_tp.CONFIGS, one table):
   served    G8B2 0x23 per user, the mesh's own worker grid. The reference every other arm is compared with.
-  grid8x4, grid8x10, grid11x4, grid4x8
-            the same call on another worker grid (placement only): exact by construction, SERVABLE.
+  grid8x4, grid8x10, grid4x8
+            the same call on another worker grid (the 32 active cores land elsewhere relative to the DRAM banks): exact by
+            construction, SERVABLE.
+  grid11x4  the CONTROL for the grid arms: it is expected to put the 32 active cores exactly where the served grid does (rows 0-3 of
+            an 11-wide grid), so only the idle-core and dispatch set differs. A win by it is noise or dispatch, not placement.
   multi     ONE launch for all users, one G16 entry per user (16 tokens x 6 heads = 96 rows, 3 row tiles, flags 0x21, no share):
             16 cores per entry (U <= 6), so every user's partition, chunk ranges and tree are the served ones, and the users run
             concurrently on 16 x U cores. Not servable yet (needs a reader, a mask kernel and a pool-lent table).
@@ -19,6 +22,13 @@ THE ARMS (names are QWEN_FAST_TP4_SDPA's values: sdpa_long_tp.CONFIGS, one table
   ra        the served call with the KV read-ahead flag (0x8: flags 0x2B). Not servable yet (the pinned reader admits 0x23 only).
 An arm that raises is DATA (the error is recorded and the sweep goes on); a hang ends the container (the per-call watchdog writes
 the partial report and exits 124, and run_card_m.sh prints the reset line).
+
+ONE PAGE-TABLE WIDTH. The factory's St and the page table's width are compile-time, so every case uses the width the pool serves
+(--page-width, default max(4100 pages, the longest case + one chunk) pages) and the same program shape: a per-case capacity would
+understate the fixed term of the fit. The device grid must be the serving mesh's 11x10 or the run is NO-DECISION.
+
+PHASES. The safe arms run in every case first; the arms that have never run at one KV head (rowsplit, ra: 'risky') run in a second
+pass over the cases, each case with its own served arm, so a hang there costs only the risky data. A report case has 'phase'.
 
 THE CASES. For each extent E (--extents, a multiple of 256: the user's 256-key family) a one-user case u1@E and a --users case
 uN@E (every user at E), then 'mixed' (four users at 262,400 / 131,328 / 65,792 / 33,024) and 'skewed' (262,400 and three at 4,352)
@@ -41,13 +51,15 @@ THE CHECKS, per case and arm:
 
 The verdict line: 'SDPA_TP4_LONG verdict=PASS|FAIL|NO-DECISION ...'. PASS: the served arm ran, its liveness control moved, every
 output was finite, no factory line was missing, and at least one case was timed. The winners are reported (the fastest EXACT arm
-per case kind), never applied: a name goes to QWEN_FAST_TP4_SDPA only after the job that proves it in a serving gate.
+per case kind that is faster than served in every paired round and by at least 2% on average), never applied: a name goes to QWEN_FAST_TP4_SDPA only after the job that proves it in a serving gate.
 
 The helpers above the device part import no ttnn and no torch at module level and are tested on CPU (test_sdpa_tp4_long.py), which
 also runs the whole flow on a fake device whose attention honours cur_pos, the mask and the page table per row.
 """
 
 import argparse
+import collections
+import faulthandler
 import hashlib
 import json
 import math
@@ -89,6 +101,10 @@ DEFAULT_EXTENTS = (33024, 65792, 131328, 262400)
 DEFAULT_STARTS = (240,)
 MIXED = (262400, 131328, 65792, 33024)
 SKEWED = (262400, 4352, 4352, 4352)
+SERVED_POOL_PAGES = 4100            # the served pool's page-table width at a 262,144-token window (2052 at 131k); the sweep never goes below it
+WIN_MEAN_RATIO = 0.98              # a winner must beat served by at least 2% on average ...
+WIN_MAX_RATIO = 1.0                # ... and be faster than served in EVERY paired round (ratio_max < 1): below that is noise
+WATCHDOG_BACKSTOP_S = 30.0         # faulthandler (no GIL) fires this long after the Python watchdog would have
 MAX_MULTI_USERS = 6                # B = 7 would drop below 16 cores per entry (the factory gives 110 // B)
 
 # arm -> layout. rows: tokens per entry; entries: entries per user (launch B for per-user arms); one_launch: all users in one
@@ -156,8 +172,12 @@ def parse_args(argv=None):
     parser.add_argument('--device-id', type=int, default=int(os.environ.get('SDPA_DEVICE_ID', '0')))
     parser.add_argument('--deadline-s', type=float, default=0.0, help='stop cleanly between cases after this long (0: none)')
     parser.add_argument('--watchdog', type=float, default=300.0, help='seconds one device step may take before exit 124 (0: off)')
+    parser.add_argument('--page-width', type=int, default=0,
+                        help='pages in every page-table row (0: max(%d, longest case + one chunk) pages, the served pool width)'
+                        % SERVED_POOL_PAGES)
     parser.add_argument('--expect-binary-sha256', default='')
-    parser.add_argument('--binary', default='/opt/tt-metal/build_Release/lib/_ttnncpp.so')
+    parser.add_argument('--binary', default='/opt/tt-metal/build_Release/lib/_ttnncpp.so',
+                        help='fallback path when no _ttnncpp.so is mapped (the mapped one is hashed otherwise)')
     args = parser.parse_args(argv)
     args.extents = parse_ints(args.extents, '--extents', multiple=K_CHUNK, low=K_CHUNK)
     args.starts = parse_ints(args.starts, '--starts', low=0, high=K_CHUNK - TOKENS)
@@ -165,10 +185,26 @@ def parse_args(argv=None):
     args.arms = parse_arms(args.arms)
     if not 1 <= args.users <= MAX_MULTI_USERS:
         parser.error('--users is 1..%d (a seventh entry takes the factory below 16 cores per entry)' % MAX_MULTI_USERS)
+    longest = max(max(args.extents), max(MIXED) if args.users == 4 and not args.no_mixed else 0)
+    args.page_width = page_width(args.page_width, longest)
     for name in ('rounds', 'iterations', 'calls'):
         if getattr(args, name) < 1:
             parser.error('--%s must be at least 1' % name)
     return args
+
+
+def page_width(requested, longest):
+    """Pages per page-table row for every case: the served pool's width, or the longest case plus its one-chunk poisoned tail."""
+    needed = (longest + K_CHUNK) // PAGE
+    if requested and requested < needed:
+        raise ValueError('--page-width %d is below the %d pages the longest case and its poisoned chunk need' % (requested, needed))
+    return requested or max(SERVED_POOL_PAGES, needed)
+
+
+def grid_problem(grid):
+    """Why the device's worker grid is not the serving mesh's, or None."""
+    expected = list(sdpa_long_tp.MESH_GRID_MAX)
+    return None if list(grid) == expected else 'worker grid %s is not the serving mesh %s' % (list(grid), expected)
 
 
 def busiest_chunks(extent, cores=KV_CORES_PER_ENTRY):
@@ -208,11 +244,11 @@ def words_for(arm, positions, extents, users):
     return [(positions[0] // K_CHUNK + 1) * K_CHUNK - 1] * spec['entries']
 
 
-def expected_programs(arm, users):
-    """The factory lines this arm's launches must have: {(flags, B, PNHt)}."""
+def expected_programs(arm, users, pages=SERVED_POOL_PAGES):
+    """The factory line this arm's launches must have: {(flags, B, PNHt, St)}. St is the page table's key length in tiles."""
     spec = ARMS[arm]
     entries = users * spec['entries'] if spec['one_launch'] else spec['entries']
-    return {(spec['flags'], entries, -(-spec['rows'] * HEAD_ROWS // TILE))}
+    return {(spec['flags'], entries, -(-spec['rows'] * HEAD_ROWS // TILE), pages * PAGE // TILE)}
 
 
 def launches_per_step(arm, users):
@@ -220,7 +256,8 @@ def launches_per_step(arm, users):
 
 
 def program_lines(lines):
-    return {(int(line['flags'], 16), line['B'], line['PNHt']) for line in lines}
+    """{(flags, B, PNHt, St): how many factory lines}. Every distinct program (a grid arm is one) prints its own line when it is built."""
+    return collections.Counter((int(line['flags'], 16), line['B'], line['PNHt'], line['St']) for line in lines)
 
 
 def digest(bits_bytes):
@@ -264,8 +301,11 @@ def fits(report):
     for case in report.get('cases', []):
         if case['kind'] != 'u1':
             continue
+        skip_served = case.get('phase') == 'risky'
         for arm, state in case['arms'].items():
             timing = state.get('timing')
+            if arm == REFERENCE and skip_served:
+                continue
             if timing and timing.get('median_us') is not None:
                 result.setdefault(arm, []).append((busiest_chunks(case['extents'][0]), timing['median_us']))
     out = {}
@@ -277,8 +317,10 @@ def fits(report):
 
 
 def winners(report):
-    """{case kind: {arm, ratio_median, gbps}}: the fastest arm per case kind that is exact on every case of that kind, by the
-    median paired ratio over the cases (served excluded; it is the reference)."""
+    """{case kind: {arm, ratio_mean, gbps}}: the fastest arm per case kind that is exact on every case of that kind, by the mean of
+    the median paired ratios over the cases (served excluded; it is the reference), and only if it is a real win: faster than served
+    in EVERY paired round of every case (ratio_max < WIN_MAX_RATIO) and by at least 2% on average (mean <= WIN_MEAN_RATIO). The
+    grid11x4 control sits at about 1.0 by construction, so a ratio of 0.995 on noise is not a winner."""
     by_kind = {}
     for case in report.get('cases', []):
         for arm, state in case['arms'].items():
@@ -294,7 +336,11 @@ def winners(report):
                       state['timing'].get('ratio_median') is not None]
             if len(ratios) != len(states):
                 continue
+            if any(state['timing'].get('ratio_max') is None or state['timing']['ratio_max'] >= WIN_MAX_RATIO for state in states):
+                continue
             mean_ratio = statistics.mean(ratios)
+            if mean_ratio > WIN_MEAN_RATIO:
+                continue
             if kind not in best or mean_ratio < best[kind]['ratio_mean']:
                 best[kind] = dict(arm=arm, ratio_mean=mean_ratio,
                                   gbps=statistics.mean(state['timing']['gbps_median'] for state in states))
@@ -381,6 +427,27 @@ class Watchdog:
                 finally:
                     os._exit(124)
 
+    def arm_backstop(self, label):
+        """ The Python thread above cannot run while a ttnn call that holds the GIL hangs; faulthandler's timer is a C thread and can.
+        It dumps every thread's stack (the dump names the hung call) and exits 1 after the Python watchdog's window plus a margin;
+        run_card_m.sh reads that dump in the log as a hang. The report on disk is the one written after the last finished arm. """
+        if not self.seconds:
+            return
+        try:
+            faulthandler.dump_traceback_later(self.seconds + WATCHDOG_BACKSTOP_S, exit=True, file=sys.stderr)
+        except Exception:  # noqa: BLE001 - a stderr without a file descriptor must not fail the sweep
+            try:
+                faulthandler.dump_traceback_later(self.seconds + WATCHDOG_BACKSTOP_S, exit=True)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def disarm_backstop(self):
+        if self.seconds:
+            try:
+                faulthandler.cancel_dump_traceback_later()
+            except Exception:  # noqa: BLE001
+                pass
+
     def op(self, label):
         watchdog = self
 
@@ -388,10 +455,12 @@ class Watchdog:
             def __enter__(self):
                 with watchdog.lock:
                     watchdog.label, watchdog.since = label, time.time()
+                watchdog.arm_backstop(label)
 
             def __exit__(self, *exc):
                 with watchdog.lock:
                     watchdog.label = None
+                watchdog.disarm_backstop()
                 return False
 
         return Guard()
@@ -404,8 +473,9 @@ class Cache:
     def __init__(self, rig, extents, seed):
         ttnn, torch = rig.ttnn, rig.torch
         self.rig, self.extents = rig, list(extents)
-        self.capacity = max(extents) + K_CHUNK          # one chunk of poisoned pages past the longest family (the liveness read)
-        self.width = self.capacity // PAGE
+        self.width = rig.args.page_width                # the served pool's width in every case (St is compile-time): never per case
+        self.capacity = self.width * PAGE
+        assert self.capacity >= max(extents) + K_CHUNK, 'one chunk of poisoned pages must follow the longest family (the liveness read)'
         generator = torch.Generator().manual_seed(4000 + seed)
         shape = (1, PAGE, HEAD_DIM)
         clean = [extent // PAGE for extent in extents]
@@ -552,10 +622,14 @@ def liveness(rig, served):
     """cur_pos one chunk past E for the first launch: the poisoned chunk must change the output. -> dict(moved=bool)."""
     ttnn, torch = rig.ttnn, rig.torch
     entry = served.launches[0]
-    base = ttnn.to_torch(served.launch(entry))
+    base_output = served.launch(entry)
+    base = ttnn.to_torch(base_output)
+    ttnn.deallocate(base_output)
     extra = rig.upload(torch.tensor([word + K_CHUNK for word in entry['host_words']], dtype=torch.int32), ttnn.int32)
     try:
-        moved = ttnn.to_torch(served.launch(entry, words=extra))
+        moved_output = served.launch(entry, words=extra)
+        moved = ttnn.to_torch(moved_output)
+        ttnn.deallocate(moved_output)
     finally:
         ttnn.deallocate(extra)
     return dict(moved=bool((bits_of(torch, base) != bits_of(torch, moved)).any()))
@@ -602,18 +676,19 @@ def time_eager(rig, call):
     return (time.perf_counter() - start) / (rig.args.iterations * rig.args.calls)
 
 
-def run_case(rig, args, report, case, seed, deadline, write):
+def run_case(rig, args, report, case, seed, deadline, write, arms=None, phase='safe'):
     torch, ttnn = rig.torch, rig.ttnn
-    state = dict(name=case['name'], kind=case['kind'], extents=case['extents'], seed=seed, arms={})
+    arms = list(args.arms if arms is None else arms)
+    state = dict(name=case['name'], kind=case['kind'], extents=case['extents'], seed=seed, phase=phase, arms={})
     report['cases'].append(state)
     cache = Cache(rig, case['extents'], seed)
     calls, traces = {}, {}
     try:
         start = args.starts[0]
         served_rows = None
-        for arm in args.arms:
+        for arm in arms:
             if deadline.reached():
-                report['deadline'] = 'stopped in %s before %s' % (case['name'], arm)
+                report['deadline'] = 'stopped in %s (%s pass) before %s' % (case['name'], phase, arm)
                 break
             if arm == 'multi' and len(case['extents']) < 2:
                 state['arms'][arm] = dict(status='skipped', error='needs two or more users')
@@ -626,8 +701,9 @@ def run_case(rig, args, report, case, seed, deadline, write):
                 with rig.watchdog.op('%s/%s run' % (case['name'], arm)):
                     rows = call.read()
                 arm_state['finite'] = bool(torch.isfinite(rows.float()).all())
-                arm_state['programs'] = sorted(list(key) for key in expected_programs(arm, len(case['extents'])))
-                report['requested'].update(expected_programs(arm, len(case['extents'])))
+                arm_state['programs'] = sorted(list(key) for key in expected_programs(arm, len(case['extents']), args.page_width))
+                for key in expected_programs(arm, len(case['extents']), args.page_width):
+                    report['requested'].setdefault(key, set()).add(arm)
                 if arm == REFERENCE:
                     served_rows = rows
                     arm_state['user_hashes'] = [digest(bits_of(torch, rows[user]).numpy().tobytes()) for user in range(rows.shape[0])]
@@ -648,7 +724,7 @@ def run_case(rig, args, report, case, seed, deadline, write):
                     break
             write()
         if args.timing != 'none' and REFERENCE in calls and state['arms'][REFERENCE].get('status') == 'ok':
-            timed = [arm for arm in args.arms if arm in calls and state['arms'][arm].get('status') == 'ok']
+            timed = [arm for arm in arms if arm in calls and state['arms'][arm].get('status') == 'ok']
             modes = {}
             for arm in timed:
                 modes[arm] = 'eager'
@@ -701,7 +777,7 @@ def run_case(rig, args, report, case, seed, deadline, write):
 
 def write_report(args, report):
     payload = {key: value for key, value in report.items() if not key.startswith('_') and key != 'requested'}
-    payload['requested_programs'] = sorted(list(key) for key in report['requested'])
+    payload['requested_programs'] = sorted(list(key) + [sorted(arms)] for key, arms in report['requested'].items())
     payload['fits'] = fits(report)
     payload['winners'] = winners(report)
     args.out.write_text(json.dumps(payload, indent=2, default=str))
@@ -715,29 +791,56 @@ def sha256_of(path):
     return digester.hexdigest()
 
 
-def check_binary(args, report):
-    """Record the installed op binary's sha256 and hold it to --expect-binary-sha256: the K64j graft must be the one in the image."""
+def mapped_binaries(maps='/proc/self/maps'):
+    """ The distinct _ttnncpp.so paths this process has mapped (the image installs the graft at ttnn/ and at lib/; the loader chose one). """
     try:
-        got = sha256_of(args.binary)
-    except OSError as error:
-        report['binary'] = dict(path=args.binary, error=str(error))
-        if args.expect_binary_sha256:
-            report['failures'].append('cannot read %s to check it: %s' % (args.binary, error))
+        text = Path(maps).read_text()
+    except OSError:
+        return []
+    return sorted({line.split()[-1] for line in text.splitlines() if line.rstrip().endswith('_ttnncpp.so')})
+
+
+def check_binary(args, report, maps='/proc/self/maps'):
+    """ Record the sha256 of the op binary this process MAPPED (after the device is open) and hold it to --expect-binary-sha256: the
+    K64j graft must be the one in the image. With nothing mapped (no /proc, a fake device) --binary is hashed instead, said so. """
+    mapped = mapped_binaries(maps)
+    if len(mapped) > 1:
+        report['binary'] = dict(mapped=mapped, error='more than one _ttnncpp.so is mapped')
+        report['failures'].append('more than one _ttnncpp.so is mapped: %s' % ', '.join(mapped))
         return
-    report['binary'] = dict(path=args.binary, sha256=got)
+    path = mapped[0] if mapped else args.binary
+    source = 'mapped' if mapped else 'fallback path (nothing mapped)'
+    try:
+        got = sha256_of(path)
+    except OSError as error:
+        report['binary'] = dict(path=path, source=source, error=str(error))
+        if args.expect_binary_sha256:
+            report['failures'].append('cannot read %s to check it: %s' % (path, error))
+        return
+    report['binary'] = dict(path=path, source=source, sha256=got)
     if args.expect_binary_sha256 and got != args.expect_binary_sha256:
-        report['failures'].append('%s is %s, not the expected graft %s' % (args.binary, got, args.expect_binary_sha256))
+        report['failures'].append('%s is %s, not the expected graft %s' % (path, got, args.expect_binary_sha256))
 
 
 def check_factory_lines(report, text, card):
     """Every program an arm launched has its [QWEN-SDPA] factory line in the native log (flags, B, PNHt)."""
     lines = card.factory_lines(text)
     seen = program_lines(lines)
-    report['factory_lines'] = sorted({(line['flags'], line['B'], line['PNHt'], line['kv_share'], line['scratch_slots'],
+    report['factory_lines'] = sorted({(line['flags'], line['B'], line['PNHt'], line['St'], line['kv_share'], line['scratch_slots'],
                                        line['cb_bytes']) for line in lines})
-    for key in sorted(report['requested']):
-        if key not in seen:
-            report['failures'].append('no [QWEN-SDPA] factory line for flags=0x%x B=%d PNHt=%d' % key)
+    for key, arms in sorted(report['requested'].items()):
+        # one program per arm that launched this shape (a grid arm is a program of its own): fewer lines than arms means an arm ran
+        # on a program that was not the one it asked for. More are allowed (a program cache that was off prints repeats).
+        if seen.get(key, 0) < len(arms):
+            report['failures'].append('no [QWEN-SDPA] factory line for flags=0x%x B=%d PNHt=%d St=%d: %d line(s) for %d arm(s) (%s)'
+                                      % (key + (seen.get(key, 0), len(arms), ','.join(sorted(arms)))))
+
+
+def phases(arms):
+    """ [(phase, arms)]: the safe arms over every case, then (when there are any) the risky ones, each with the served arm beside them. """
+    safe = [arm for arm in arms if not ARMS[arm]['risky']]
+    risky = [arm for arm in arms if ARMS[arm]['risky']]
+    return [('safe', safe)] + ([('risky', [REFERENCE] + risky)] if risky else [])
 
 
 def run(args, report):
@@ -750,7 +853,6 @@ def run(args, report):
         report['failures'].append('%s=1 is required: the G8 programs do not fit L1 without the compact scratch' % card.SCRATCH_ENV)
         return
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    check_binary(args, report)
     native = card.NativeLog(args.out.with_name(args.out.name + '.native.log'))
     deadline = Deadline(args.deadline_s)
 
@@ -773,18 +875,25 @@ def run(args, report):
                 pass
             grid = device.compute_with_storage_grid_size()
             report['grid'] = [grid.x, grid.y]
+            check_binary(args, report)
+            wrong_grid = grid_problem((grid.x, grid.y))
+            if wrong_grid:
+                report['failures'].append(wrong_grid + ': the served arm and every grid arm are only meaningful on it')
+                return
             rig = Rig(ttnn, torch, device, args, watchdog)
-            for case in case_list(args.extents, args.users, not args.no_mixed):
-                for seed in args.seeds:
-                    if deadline.reached():
-                        report['deadline'] = 'stopped before %s' % case['name']
-                        break
-                    try:
-                        run_case(rig, args, report, case, seed, deadline, lambda: write_report(args, report))
-                    except BaseException as error:  # noqa: BLE001 - a case that cannot be built is data; the sweep continues
-                        report['failures'].append('%s: %s: %s' % (case['name'], type(error).__name__, str(error)[:300]))
-                        print(traceback.format_exc(), flush=True)
-                        write_report(args, report)
+            for phase, arms in phases(args.arms):
+                for case in case_list(args.extents, args.users, not args.no_mixed):
+                    for seed in args.seeds:
+                        if deadline.reached():
+                            report['deadline'] = 'stopped before %s (%s pass)' % (case['name'], phase)
+                            break
+                        try:
+                            run_case(rig, args, report, case, seed, deadline, lambda: write_report(args, report), arms=arms,
+                                     phase=phase)
+                        except BaseException as error:  # noqa: BLE001 - a case that cannot be built is data; the sweep continues
+                            report['failures'].append('%s (%s pass): %s: %s' % (case['name'], phase, type(error).__name__, str(error)[:300]))
+                            print(traceback.format_exc(), flush=True)
+                            write_report(args, report)
         finally:
             ttnn.close_device(device)
     check_factory_lines(report, native.text(), card)
@@ -795,7 +904,7 @@ def main(argv=None):
     report = dict(plan='SDPA decode at the four-card per-chip shape: every configuration against the served one',
                   argv=list(sys.argv[1:] if argv is None else argv), extents=args.extents, users=args.users,
                   starts=args.starts, seeds=args.seeds, arms=args.arms, timing_mode=args.timing, rounds=args.rounds,
-                  iterations=args.iterations, calls=args.calls, cases=[], failures=[], requested=set(),
+                  iterations=args.iterations, calls=args.calls, cases=[], failures=[], requested={}, page_width=args.page_width,
                   env={name: os.environ.get(name) for name in ('QWEN_SDPA_TREE_SCRATCH_ROUNDS', 'TT_METAL_WATCHER')},
                   dram_gbps_reference=DRAM_GBPS, expect_binary_sha256=args.expect_binary_sha256)
     try:

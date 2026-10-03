@@ -10,8 +10,10 @@ configuration the sweep measured.
 WHAT. Unset, empty, '0' or 'off': nothing here runs and the pinned reader is untouched (byte for byte). A name from CONFIGS that
 is servable rebuilds each segment reader's SDPAProgramConfig after the pinned reader has built and qualified it (the same
 sentinel q_chunk_size, the same 256-key chunks, exp_approx_mode off), changing only the worker grid the program may place on.
-Placement moves where the 16 leaders and twins sit relative to the DRAM banks; it does not touch the accumulation order, so
-the result is byte-identical by construction, and the sweep proves it per row before a name is offered. 'served' is the
+A grid moves where the 16 leaders and twins sit relative to the DRAM banks; it does not touch the accumulation order, so
+the result is byte-identical by construction, and the sweep proves it per row before a name is offered. grid11x4 is the CONTROL: it
+is expected to put the 32 active cores where the served grid does (rows 0-3 of an 11-wide grid), so it differs from served only in
+the idle-core and dispatch set; a win by it is noise or dispatch, never placement. 'served' is the
 explicit no-op (the plumbing control).
 
 Names the sweep measures that are NOT servable here (they need a reader, mask kernel or factory change that is a later lane's:
@@ -46,7 +48,7 @@ CONFIGS = {
     'served': dict(grid=None, servable=True, why=''),
     'grid8x4': dict(grid=(8, 4), servable=True, why=''),
     'grid8x10': dict(grid=(8, 10), servable=True, why=''),
-    'grid11x4': dict(grid=(11, 4), servable=True, why=''),
+    'grid11x4': dict(grid=(11, 4), servable=True, why=''),   # the control: expected to place the active cores as served does
     'grid4x8': dict(grid=(4, 8), servable=True, why=''),
     'multi': dict(grid=None, servable=False,
                   why='one G16 launch for every live user needs a new reader, a per-entry mask kernel and a pool-lent table '
