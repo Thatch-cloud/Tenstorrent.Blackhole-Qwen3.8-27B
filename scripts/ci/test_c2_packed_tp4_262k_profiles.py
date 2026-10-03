@@ -35,6 +35,8 @@ EIGHT = (TRAFFIC, GATE, TIME_GATE, DIAG)
 TWIN = {TRAFFIC: 'c2-packed-tp4-8', GATE: 'c2-packed-tp4-8-gate', TIME_GATE: 'c2-packed-tp4-8-time-gate',
         DIAG: 'c2-packed-tp4-8-diag-strace', FOUR_GATE: 'c2-packed-tp4-gate'}
 ALL = EIGHT + (FOUR_GATE,)
+# tp4/262k8: the best-lever arms (test_tp4_262k8_best_profiles holds them); they are not the 131k twins' 262k deltas, so the twin rule does not apply
+BEST262K = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship')
 DRAM = {'QWEN_FAST_DRAM_ENGINE_BUILD_MB': '800', 'QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB': '600',
         'QWEN_FAST_DRAM_LARGEST_BUFFER_MB': '256'}
 # Canonical-JSON sha256 prefixes at 20d8adcd (the I1 head this branch starts from).
@@ -80,11 +82,11 @@ class ProtectedProfileTests(unittest.TestCase):
     def test_the_file_default_is_still_production_and_the_new_profiles_are_new(self):
         self.assertEqual(document()['default'], 'c2-packed-tp4')
         self.assertTrue(set(ALL) <= set(profiles()))
-        self.assertEqual(sorted(name for name in profiles() if '262k' in name), sorted(ALL))
+        self.assertEqual(sorted(name for name in profiles() if '262k' in name), sorted(ALL + BEST262K))
 
     def test_the_131k_profiles_carry_none_of_the_262k_knobs(self):
         for name, profile in profiles().items():
-            if name in ALL:
+            if name in ALL + BEST262K:
                 continue
             with self.subTest(profile=name):
                 self.assertNotIn('drafter_headroom_tokens', profile)

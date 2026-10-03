@@ -52,6 +52,9 @@ USERS = 4
 LENGTHS = (4096, 4096, 4096, 4096)     # the production shape (4 x 4k coding); v170 had 4k / 8k / 16k / 24k
 MAX_TOKENS = 128
 USER_MAX_TOKENS = ((0, 256),)
+# An eight-seat profile (engine max-num-seqs 8: two 64-row blocks) is profiled with eight of the same 4k users: the shape per user is unchanged,
+# only the count follows the seats (tp4/262k8). Every four-seat profile keeps the four users it always had, byte for byte.
+SEAT_USERS = 8
 # Docker limits (seconds): readiness (a profiled arm compiles every profiler-define kernel cold into its tmpfs) plus the
 # stream timeout plus the close (the last read-back, tracy's post-process).
 READINESS_SECONDS = 1800
@@ -161,6 +164,12 @@ def check_timed_profile(profiles, profile):
                 profile, name, env.get(name), ', '.join('%s=%s' % pair for pair in REQUIRED_CONFIGURATION)))
 
 
+def plan_users(profiles, profile):
+    """How many 4k users the plan runs on `profile`: the eight seats of an eight-seat profile, else USERS."""
+    seats = ((profiles['profiles'].get(profile) or {}).get('engine') or {}).get('max-num-seqs')
+    return SEAT_USERS if seats == SEAT_USERS else USERS
+
+
 def plan_arms(plan, profile, profiles, gate):
     """[gate.Arm] of one ops-* plan on `profile`, refused (gate.PlanError) where the profile cannot serve it."""
     if plan not in PLAN_KINDS:
@@ -174,15 +183,19 @@ def plan_arms(plan, profile, profiles, gate):
         ops = dict(plan=plan, kind=kind, env=check_env(arm_env(kind)), tracy=tracy_args() if kind == 'ops' else None)
     except OpsPlanError as error:
         raise gate.PlanError(str(error))
+    users = plan_users(profiles, profile)
+    lengths = LENGTHS if users == USERS else (LENGTHS[0],) * users
+    if users != USERS:
+        ops['users'] = users
     context, ceiling, room = gate.profile_limits(profiles, profile)
-    gate.check_lengths(profile, list(LENGTHS), room, '%s prompt lengths' % plan)
+    gate.check_lengths(profile, list(lengths), room, '%s prompt lengths' % plan)
     gate.check_budget(profile, max(MAX_TOKENS, max(tokens for _, tokens in USER_MAX_TOKENS)), ceiling,
                       '%s --max-tokens' % plan)
     args = gate.common_args(profile, context, STREAM_SECONDS[plan], readiness=READINESS_SECONDS) + [
-        '--users', str(USERS), '--prompt-lengths', ','.join(str(length) for length in LENGTHS),
+        '--users', str(users), '--prompt-lengths', ','.join(str(length) for length in lengths),
         '--max-tokens', str(MAX_TOKENS),
         '--user-max-tokens', ','.join('%d:%d' % pair for pair in USER_MAX_TOKENS),
-        '--user-ignore-eos', ','.join(str(user) for user in range(USERS)), '--stagger', str(gate.STAGGER)]
+        '--user-ignore-eos', ','.join(str(user) for user in range(users)), '--stagger', str(gate.STAGGER)]
     return [gate.Arm(plan, args, ARM_SECONDS[plan], rerun=False, judged=False, role='ops', ops=ops)]
 
 
@@ -458,7 +471,7 @@ def log_problems(log_text, kind):
     return problems, notes
 
 
-def verdict(plan, report, arm, twin_report, log_text=None, analysis=None):
+def verdict(plan, report, arm, twin_report, log_text=None, analysis=None, users=USERS):
     """The plan's result dict from the arm's harness report, its runner record and the twin's report."""
     kind = PLAN_KINDS[plan]
     ops = (arm or {}).get('ops') or {}
@@ -472,8 +485,8 @@ def verdict(plan, report, arm, twin_report, log_text=None, analysis=None):
     if report.get('fatal'):
         problems.append('fatal: %s' % report['fatal'])
     problems += ['stream: %s' % problem for problem in report.get('real_text_stream_problems') or []]
-    if len(report.get('streams') or []) != USERS:
-        problems.append('%d streams, asked %d' % (len(report.get('streams') or []), USERS))
+    if len(report.get('streams') or []) != users:
+        problems.append('%d streams, asked %d' % (len(report.get('streams') or []), users))
     problems += arrival_problems(report, (arm or {}).get('ops_env') or ())
     problems += text_problems(report, 'this arm\'s')
     found, notes = log_problems(log_text, kind)

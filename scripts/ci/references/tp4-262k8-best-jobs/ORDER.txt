@@ -1,0 +1,32 @@
+# The order of the tp4/262k8 four-card DEVELOPMENT window: eight seats, every seat a 262,144-token window, on the nine best levers with the two quad draft blocks, one image, tp4-262k8-best-1, built from the pushed tp4/262k8 commit.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# THE CARDS ARE UNDER DEVELOPMENT, PRODUCTION IS DOWN BY THE OWNER'S CHOICE: NO agentstart, NO agentstop (the node agent is already stopped), NO hand-back, NO deploy, NO :latest move. Z ends with a reset
+# and no agentstart. qwen_c2_profiles.json's default stays c2-packed-tp4; nothing is baked as the image default.
+# P0. NO OTHER WINDOW DRIVER MAY BE ALIVE and no privileged builder container may be up. The CPU suite green on this branch first, and the 262k stage-1 evidence recorded and re-pinned on it (B0's precondition). B0 never runs
+# during a timing job. Judge every ABAB PAIRED per round, never by unpaired medians; check the load average.
+# ORDER: the cheapest kill signals first: X0 (status, RESCAN, reset: the rescan first in the first quad job), B0, S0 (audited attach), H1-H3 (hang shapes, audits off), L1 (the 262k ladder), then the timing pair T1-T4 and the profile P1.
+# READ RULES (each also needs c2_smoke_check clean and no stall):
+#   X0  the status prints, the rescan finds every board, the reset completes on all four.   B0  provenance report with no problem line, the image id printed.
+#   S0  admission passed at capacity 262144, reservation installed with num_gpu_blocks=19968, fused commit engaged on both blocks, ZERO audit mismatches, exactly two quad markers and a both-quads round, hashes equal
+#       the 8x262k-gate's and solo's. Record F8 (free DRAM per chip at eight live seats, levers in): 21,760 blocks needs F8 >= 4.05 GB, the stated 19,968 needs about 3.06 GB.
+#   H1-H3  three consecutive completions, every user at budget, concurrent8_code_equal hashes equal in every run and equal to S0's. One stall stops the window.
+#   L1  strict on eight seats over the eight lengths, zero audit mismatches, reservation lines fitting, no hold with a seat free.
+#   T1-T4  paired ABAB, control (8x262k-time-gate) against best (8x262k-best-time-gate): the round time at eight live users, per seat tok/s at 32k and about 120k, texts equal. Expectation from the four-seat result: the levers
+#       take tens of ms off an eight-user round; a best round no faster than the control's is the finding (two-block host overlap, or the quads falling back by headroom).
+#   P1  both gate arms complete, ops-trace texts equal ops-twin's, the per-op table and per-live-count table at eight users.   Z  the reset completes; the agent stays stopped.
+# NO-GO for adopting any arm: any stall, any hash difference between arms that must be identical, any audit mismatch. This window decides nothing about production: it is evidence for the owner.
+# Time (estimate): X0 and B0 about 80 min, S0 2 h, H 4.5 h, L1 5 h, T 6 h, P1 2.5 h, Z 10 min: about 21 h.
+X0-status-rescan-reset stop tp4-262k8-best-1 20
+B0-build stop tp4-262k8-best-1 60
+S0-audited-attach-smoke stop tp4-262k8-best-1 120
+H1-hang-shapes-best stop tp4-262k8-best-1 90
+H2-hang-shapes-best stop tp4-262k8-best-1 90
+H3-hang-shapes-best stop tp4-262k8-best-1 90
+L1-ladder8-best stop tp4-262k8-best-1 300
+T1-timed-A-control-8x262k-time-gate soft tp4-262k8-best-1 90
+T2-timed-B-best-8x262k-time-gate soft tp4-262k8-best-1 90
+T3-timed-A-control-8x262k-time-gate soft tp4-262k8-best-1 90
+T4-timed-B-best-8x262k-time-gate soft tp4-262k8-best-1 90
+P1-best-8-user-profile soft tp4-262k8-best-1 150
+Z-reset soft tp4-262k8-best-1 10

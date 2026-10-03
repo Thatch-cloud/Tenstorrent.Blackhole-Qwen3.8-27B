@@ -2887,7 +2887,8 @@ def run_ops_plan(plan, runner, arms):
         with open(log_path, errors='replace') as handle:
             log_text = handle.read()
     return ops_profile_plan.verdict(plan, report, runner.arms.get(spec[0]), ops_profile_plan.twin_report_of(runner.results, plan),
-                                    log_text=log_text, analysis=analysis)
+                                    log_text=log_text, analysis=analysis,
+                                    users=ops.get('users', ops_profile_plan.USERS))
 
 
 def run_plan(plan, runner, profiles, reference=None, lengths=None, max_tokens=c2_serving_job.DEFAULT_MAX_TOKENS,
