@@ -219,6 +219,8 @@ jobs:
           { find $(cat $OUT/opdirs.txt) -type f ! -name '*.so' ! -name '*.o' ! -path '*/__pycache__/*' 2>/dev/null
             echo $T/transformer_nanobind.cpp; ls -1 $T/CMakeLists.txt 2>/dev/null
             ls -1 ttnn/ttnn/operations/transformer*.py ttnn/CMakeLists.txt ttnn/sources.cmake 2>/dev/null
+            find $T/sdpa $T/sdpa_decode -type f ! -name '*.so' ! -name '*.o' ! -path '*/__pycache__/*' 2>/dev/null
+            ls -1 $T/sources.cmake 2>/dev/null
             find ttnn/cpp/ttnn/operations/experimental/transformer/nlp_concat_heads_decode -type f 2>/dev/null
             awk '{print $NF}' $OUT/tt-metal.diff-files.txt | grep -i sdpa
             grep -rlE "$PYN|$OPS" ttnn tt_metal tests $EX --include='*.py' --include='*.cpp' --include='*.hpp' --include='*.h' --include='*.txt' --include='*.cmake' 2>/dev/null
@@ -247,19 +249,43 @@ jobs:
             echo "image $image is absent"; echo absent > "$out/image-ABSENT.txt"
           fi
           # 2. the ttbuild container's tree
+          # ttbuild is a build-only container (no cards). If it is stopped it is started for the dump and stopped again on any
+          # exit; its state before and after is logged.
+          tt_started=0
+          tt_cleanup() {
+            if [ "$tt_started" = 1 ]; then
+              docker stop ttbuild >/dev/null 2>&1
+              echo "ttbuild state after: $(docker inspect -f '{{.State.Status}}' ttbuild 2>&1)"
+              tt_started=0
+            fi
+          }
+          trap tt_cleanup EXIT
           if [ "$(docker ps -a --filter name='^/ttbuild$' -q | wc -l)" = 1 ]; then
-            if [ "$(docker inspect -f '{{.State.Running}}' ttbuild)" = true ]; then
+            tt_before=$(docker inspect -f '{{.State.Status}}' ttbuild)
+            echo "ttbuild state before: $tt_before"
+            echo "ttbuild state before: $tt_before" > "$out/ttbuild-state.txt"
+            if [ "$tt_before" != running ]; then
+              docker start ttbuild >/dev/null 2>&1 && tt_started=1
+              for _ in $(seq 1 60); do
+                [ "$(docker inspect -f '{{.State.Status}}' ttbuild)" = running ] && break
+                sleep 1
+              done
+              echo "ttbuild state after start: $(docker inspect -f '{{.State.Status}}' ttbuild)"
+            fi
+            if [ "$(docker inspect -f '{{.State.Status}}' ttbuild)" = running ]; then
               docker cp "$out/dump.sh" ttbuild:/tmp/srcdump.sh
               docker exec -e OUT=/tmp/srcdump-out ttbuild bash /tmp/srcdump.sh
               echo "ttbuild dump exit: $?"
               mkdir -p "$out/ttbuild"
               docker cp ttbuild:/tmp/srcdump-out/. "$out/ttbuild/"
               docker exec ttbuild rm -rf /tmp/srcdump-out /tmp/srcdump.sh
-              docker exec ttbuild sh -c 'find /opt/tt-metal/build_Release -name _ttnncpp.so -type f -exec sha256sum {} +' > "$out/ttbuild/ttbuild-build-ttnncpp-sha256.txt" 2>/dev/null
+              docker exec ttbuild sh -c 'sha256sum /opt/tt-metal/build_Release/ttnn/_ttnncpp.so /opt/tt-metal/build_Release/lib/_ttnncpp.so' > "$out/ttbuild/ttbuild-build-ttnncpp-sha256.txt" 2>&1
               mv "$out/ttbuild/tt-metal.diff" "$out/ttbuild/ttbuild-tt-metal.diff" 2>/dev/null
             else
-              echo "ttbuild exists but is not running; not started"; echo "exists, not running" > "$out/ttbuild-ABSENT.txt"
+              echo "ttbuild is not running and could not be started"; echo "not running" > "$out/ttbuild-ABSENT.txt"
             fi
+            tt_cleanup
+            echo "ttbuild state final: $(docker inspect -f '{{.State.Status}}' ttbuild)" | tee -a "$out/ttbuild-state.txt"
           else
             echo "no ttbuild container"; echo absent > "$out/ttbuild-ABSENT.txt"
           fi
@@ -284,6 +310,9 @@ jobs:
             (cd "$home/opgraft-K64j" && find . -type f -printf '%s %p\n' | sort -k2 | while read -r size path; do
               printf '%s  %s  %s\n' "$(sha256sum "$path" | cut -d' ' -f1)" "$size" "$path"; done) > "$out/host/graft-listing.txt"
             echo "graft listing lines: $(wc -l < "$out/host/graft-listing.txt")"
+            (cd "$home/opgraft-K64j" && find . -type f -size -5120k ! -name '*.so' ! -name '*.o' ! -name '*.so.*') > "$out/host/graft-src-files.txt"
+            tar czf "$out/host/graft-src.tar.gz" -C "$home/opgraft-K64j" -T "$out/host/graft-src-files.txt" 2>/dev/null
+            echo "graft source files: $(wc -l < "$out/host/graft-src-files.txt")"
           else
             echo "opgraft-K64j: absent" >> "$out/host/ABSENT.txt"
           fi
@@ -295,6 +324,9 @@ jobs:
             echo "image id: $(cat "$out/image/image-id.txt" 2>/dev/null)"
             echo "image tt-metal HEAD: $(cat "$out/image/tt-metal-head.txt" 2>/dev/null)"
             echo "ttbuild tt-metal HEAD: $(cat "$out/ttbuild/tt-metal-head.txt" 2>/dev/null || echo absent)"
+            echo "ttbuild state: $(paste -sd";" "$out/ttbuild-state.txt" 2>/dev/null)"
+            echo "ttbuild _ttnncpp.so sha256:"; cat "$out/ttbuild/ttbuild-build-ttnncpp-sha256.txt" 2>/dev/null
+            echo "graft MANIFEST _ttnncpp.so: $(grep "_ttnncpp.so" "$out/host/graft-MANIFEST.sha256" 2>/dev/null)"
             for dir in image ttbuild host; do
               echo "== $dir"
               for f in "$out/$dir"/*; do
