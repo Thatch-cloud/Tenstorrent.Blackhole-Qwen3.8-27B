@@ -115,6 +115,9 @@ NEXT5_PROFILES = ('c2-packed-tp4-best-ship-tpub', 'c2-packed-tp4-best-ship-glue'
 # tp4/262k8 (test_tp4_262k8_best_profiles holds each as its 262k eight-seat twin plus the levers, the smaller pool and the lever audits): the eight-seat 262k best-lever arms.
 BEST262K_PROFILES = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship')
 NEXT5_PROFILES = NEXT5_PROFILES + BEST262K_PROFILES
+# tp4/sdpa-multi (test_sdpa_multi_tp holds each as the best-time-gate arm plus exactly the SDPA flag, and the audited one plus the audit flag).
+SDPAMULTI_PROFILES = ('c2-packed-tp4-8x262k-best-sdpamulti', 'c2-packed-tp4-8x262k-best-sdpamulti-audit')
+NEXT5_PROFILES = NEXT5_PROFILES + SDPAMULTI_PROFILES
 # The GDN glue quick wins (tp4/gluefix, test_gdn_pair_slice holds the rule): the timed and diagnostic arms are c2-packed-tp4-speed-strace plus exactly one flag
 # (same exemptions as the cheap twins); the audited arm is c2-packed-tp4-gate plus the flag and the vglue audit (a four-card profile that may carry the audit).
 CHEAP_PROFILES = CHEAP_PROFILES + ('c2-packed-tp4-speed-strace-pairslice', 'c2-packed-tp4-speed-strace-dispatchdiag')

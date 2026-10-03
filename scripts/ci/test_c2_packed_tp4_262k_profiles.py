@@ -36,7 +36,9 @@ TWIN = {TRAFFIC: 'c2-packed-tp4-8', GATE: 'c2-packed-tp4-8-gate', TIME_GATE: 'c2
         DIAG: 'c2-packed-tp4-8-diag-strace', FOUR_GATE: 'c2-packed-tp4-gate'}
 ALL = EIGHT + (FOUR_GATE,)
 # tp4/262k8: the best-lever arms (test_tp4_262k8_best_profiles holds them); they are not the 131k twins' 262k deltas, so the twin rule does not apply
-BEST262K = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship')
+BEST262K = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship',
+            # tp4/sdpa-multi: the timed twin and its audited twin are the best-time-gate arm plus the SDPA flag(s) (test_sdpa_multi_tp holds them)
+            'c2-packed-tp4-8x262k-best-sdpamulti', 'c2-packed-tp4-8x262k-best-sdpamulti-audit')
 DRAM = {'QWEN_FAST_DRAM_ENGINE_BUILD_MB': '800', 'QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB': '600',
         'QWEN_FAST_DRAM_LARGEST_BUFFER_MB': '256'}
 # Canonical-JSON sha256 prefixes at 20d8adcd (the I1 head this branch starts from).
