@@ -81,7 +81,21 @@ def pooled_draft_mask_shapes(users, block_rows):
 
         if max(quad_draft.SLOTS) < users and block_rows == quad_draft.BLOCK:
             shapes[tuple(quad_draft.SLOTS)] = tuple(quad_draft.quad_host_mask().shape)
+        if quad_blocks_requested():
+            for slots, _ in _pooled_quad_blocks(quad_draft, users, block_rows):
+                shapes.setdefault(slots, tuple(quad_draft.quad_host_mask().shape))
     return shapes
+
+
+def _pooled_quad_blocks(quad_draft, users, block_rows):
+    """QWEN_FAST_QUAD_DRAFT_BLOCKS: the per-block quads a pool of `users` slots holds buffers for. A value it cannot serve, or a pool that is
+    not eight slots, refuses the attach by name (ValueError) rather than leave a quad that can never form."""
+    reason = quad_blocks_refusal(quad_draft, users)
+    if reason is not None:
+        raise ValueError('%s: %s' % (QUAD_BLOCKS_FLAG, reason))
+    if block_rows != quad_draft.BLOCK:
+        raise ValueError('%s: the quads are %d-row T16 blocks, not %r' % (QUAD_BLOCKS_FLAG, quad_draft.BLOCK, block_rows))
+    return [(slots, pairs) for slots, pairs in quad_block_groups(quad_draft) if max(slots) < users]
 
 
 # What a draft pass's head leaves per candidate chunk (draft_shared_head: top-16 values and indices) and the width
@@ -122,6 +136,9 @@ def pooled_draft_output_shapes(users, block_rows):
 
         if max(quad_draft.SLOTS) < users and block_rows == quad_draft.BLOCK:
             shapes[tuple(quad_draft.SLOTS)] = spec(quad_draft.ROWS, quad_draft.ROWS)
+        if quad_blocks_requested():
+            for slots, _ in _pooled_quad_blocks(quad_draft, users, block_rows):
+                shapes.setdefault(slots, spec(quad_draft.ROWS, quad_draft.ROWS))
     return shapes
 
 
@@ -167,6 +184,29 @@ def unpair_groups(groups, round_number):
 # quad pass replaces the two pair passes. Read at each round; '0' or unset and nothing here imports quad_draft,
 # every round is today's.
 QUAD_DRAFT_FLAG = 'QWEN_FAST_QUAD_DRAFT'
+# tp4/next-5 (quad_draft_tp.QUADS, default off): at eight seats one 64-row quad per block of four slots, (0, 1, 2, 3) and (4, 5, 6, 7), each with
+# its own trace, state and capture headroom check. '' and '0' are off - the quad is then exactly the one over slots 0-3 above, and nothing
+# here reads quad_draft_tp. Any other value reaches quad_draft_tp.blocks_refusal, which names why it is not served ('2' is the only one that is).
+QUAD_BLOCKS_FLAG = 'QWEN_FAST_QUAD_DRAFT_BLOCKS'
+
+
+def quad_blocks_requested(environ=None):
+    """QWEN_FAST_QUAD_DRAFT_BLOCKS set to anything but '' or '0'."""
+    return (os.environ if environ is None else environ).get(QUAD_BLOCKS_FLAG, '') not in ('', '0')
+
+
+def quad_block_groups(quad_draft):
+    """The per-block quads: ((slots, pairs), ...) from the twin's QUADS - ((0, 1, 2, 3), ((0, 1), (2, 3))), ((4, 5, 6, 7), ((4, 5), (6, 7)))."""
+    return tuple((tuple(slots), tuple(zip(slots[::2], slots[1::2]))) for slots in quad_draft.QUADS)
+
+
+def quad_blocks_refusal(quad_draft, users=None, environ=None):
+    """Why the per-block quads cannot serve this process, or None: quad_draft_tp.blocks_refusal where the module has it, and a named reason
+    where it does not (the pair's pinned quad_draft has no QUADS)."""
+    refuse = getattr(quad_draft, 'blocks_refusal', None)
+    if refuse is None:
+        return 'the two-quad draft serves QWEN_FAST_TP=4 only (this quad_draft has no QUADS)'
+    return refuse(users, environ)
 
 # QWEN_FAST_DRAFT_SINGLES_AUDIT (draft_singles_audit.py; default off): every batched group of a round - a packed pair or the
 # quad - against its members' own single-user drafts, prepared with the same seeds in the same round and compared bit for bit
@@ -515,6 +555,11 @@ class PackedProposalCoordinator:
         self.quad_failures = 0
         self.quad_disabled = False
         self.quad_rounds = 0
+        # QWEN_FAST_QUAD_DRAFT_BLOCKS: the per-block quads' own state, keyed by slot tuple - (devices, trace, released) as self.quad, the
+        # consecutive failures, and the blocks given up (slots -> reason). Empty, and nothing reads them, with the flag off.
+        self.quad_blocks = {}
+        self.quad_block_failures = {}
+        self.quad_blocked = {}
         # QWEN_FAST_DRAFT_SINGLES_AUDIT: the rounds that ran a batched group (the audit's own count).
         self.singles_audit_candidates = 0
 
@@ -525,6 +570,9 @@ class PackedProposalCoordinator:
         if self.quad is not None:
             self.quad[1].close()
             self.quad = None
+        for state in self.quad_blocks.values():
+            state[1].close()
+        self.quad_blocks.clear()
 
     def release_closed(self):
         """S2 W6c: close, now, every proposal trace a closed device was captured for - the quad if any of its
@@ -540,6 +588,11 @@ class PackedProposalCoordinator:
             self.quad[1].close()
             self.quad = None
             quad = 1
+        for slots, state in list(self.quad_blocks.items()):
+            if any(getattr(device, 'closed', False) for device in state[0]):
+                state[1].close()
+                del self.quad_blocks[slots]
+                quad += 1
         pairs = []
         for group, (device_a, device_b, trace, _) in list(self.pairs.items()):
             if getattr(device_a, 'closed', False) or getattr(device_b, 'closed', False):
@@ -703,6 +756,8 @@ class PackedProposalCoordinator:
         batched = [] if os.environ.get('QWEN_FAST_ROUND_B1') == '1' else None
         # QWEN_FAST_QUAD_DRAFT: this round's quad (_prepare_quad), None in every round it does not serve.
         quad = None
+        # QWEN_FAST_QUAD_DRAFT_BLOCKS: this round's per-block quads (_prepare_quad_blocks), empty in every round it does not serve.
+        block_quads = []
         # QWEN_FAST_DRAFT_SINGLES_AUDIT: this round's audit (draft_singles_audit.Round), None in every round it does not run.
         singles_audit = None
 
@@ -720,7 +775,12 @@ class PackedProposalCoordinator:
             return False
 
         try:
-            if os.environ.get(QUAD_DRAFT_FLAG, '0') != '0':
+            if os.environ.get(QUAD_DRAFT_FLAG, '0') != '0' and quad_blocks_requested():
+                # One quad per block of four slots; the pairs of a block that did not form stay with `groups`.
+                block_quads, groups = self._prepare_quad_blocks(groups, by_slot, round_number, batched, prepared)
+                if block_quads:
+                    fence = block_quads[0]['fence']
+            elif os.environ.get(QUAD_DRAFT_FLAG, '0') != '0':
                 # Q4: all four live and packable - one 64-row pass, and no pair runs. Anything else (or a quad
                 # that fails, refuses or gave up) leaves `groups` to today's pairs below.
                 quad = self._prepare_quad(groups, by_slot, round_number, batched)
@@ -875,6 +935,8 @@ class PackedProposalCoordinator:
         if quad is not None:
             # QWEN_FAST_QUAD_DRAFT_AUDIT: the pair traces replayed beside the quad, compared after the selection.
             quad['trace'].run_audit(round_number)
+        for formed in block_quads:
+            formed['trace'].run_audit(round_number)
         if singles_audit is not None:
             singles_module.finish(singles_audit)
         if audit_enabled() and pair_labels:
@@ -886,20 +948,25 @@ class PackedProposalCoordinator:
         return prepared
 
     # -- QWEN_FAST_QUAD_DRAFT (quad_draft.py) --------------------------------------------------------------
-    def _retire_quad(self, by_slot):
+    def _retire_quad(self, by_slot, slots=None):
         """Close the quad trace once a device it was built for has closed or a slot holds another device (a
         finished request's slot reused): it can never replay again, and its capture is 0.3-0.45 GB per chip (est.)
-        the pairs need back. A device merely absent this round keeps it."""
-        if self.quad is None:
+        the pairs need back. A device merely absent this round keeps it. `slots` names a per-block quad
+        (QWEN_FAST_QUAD_DRAFT_BLOCKS); None is the quad over slots 0-3 in self.quad, as ever."""
+        state = self.quad if slots is None else self.quad_blocks.get(slots)
+        if state is None:
             return
         import quad_draft
 
-        devices, trace, _ = self.quad
+        devices, trace, _ = state
         if any(device.closed for device in devices) or any(
                 slot in by_slot and by_slot[slot]['device'] is not device
-                for slot, device in zip(quad_draft.SLOTS, devices)):
+                for slot, device in zip(quad_draft.SLOTS if slots is None else slots, devices)):
             trace.close()
-            self.quad = None
+            if slots is None:
+                self.quad = None
+            else:
+                del self.quad_blocks[slots]
 
     def _disable_quad(self, round_number, reason):
         """Give up on the quad for the process: close its trace and log DISABLED_MARKER (the gate fails on it)."""
@@ -914,29 +981,69 @@ class PackedProposalCoordinator:
         audit_log('{marker} round={round} failures={failures} reason={reason}', marker=quad_draft.DISABLED_MARKER,
                   round=round_number, failures=self.quad_failures, reason=str(reason).replace(' ', '_')[:160])
 
-    def _quad_audit_pairs(self, devices, seeds, round_number):
+    def _quad_audit_pairs(self, devices, seeds, round_number, pairs=None):
         """QWEN_FAST_QUAD_DRAFT_AUDIT: both pair traces (built here if they are not), prepared with the quad's seeds
         before the round's fence, so they read the same live banks, seeds and RoPE. A reason string when they
         cannot be - the audit line then reads equal=0."""
         import quad_draft
         from dflash_proposal_trace import pair_mask_audit_enabled
 
-        pairs = []
+        prepared = []
         try:
-            for group in quad_draft.PAIRS:
-                trace = self._trace_for(group, devices[group[0]], devices[group[1]])
+            for position, group in enumerate(quad_draft.PAIRS):
+                # `pairs` (a per-block quad's slot pairs) names the pool slots; `group` is the position within the quad's devices.
+                slot_group = group if pairs is None else tuple(pairs[position])
+                trace = self._trace_for(slot_group, devices[group[0]], devices[group[1]])
                 if pair_mask_audit_enabled():
                     trace.round_number = round_number
                 if not trace.prepare_device(seeds[group[0]], seeds[group[1]]):
-                    raise ValueError('pair %s declined to prepare' % (group,))
-                pairs.append((list(group), trace))
+                    raise ValueError('pair %s declined to prepare' % (slot_group,))
+                prepared.append((list(slot_group), trace))
         except Exception as failure:
-            for _, trace in pairs:
+            for _, trace in prepared:
                 trace.discard_pending()
             return 'pairs-unavailable:%s' % type(failure).__name__
-        return pairs
+        return prepared
 
-    def _prepare_quad(self, groups, by_slot, round_number, batched):
+    def _prepare_quad_blocks(self, groups, by_slot, round_number, batched, prepared):
+        """QWEN_FAST_QUAD_DRAFT_BLOCKS: one _prepare_quad per block of four slots (quad_draft_tp.QUADS), each on its own state. Returns
+        (the quads formed this round, in block order, and the groups they leave to the pairs). A quad that forms is appended to
+        `prepared` here, at once, so a later block's failure leaves the earlier one's devices where the caller's exception path finds
+        them. A refusal the process cannot serve (the value, the width) blocks every quad by name, before any capture."""
+        import quad_draft
+
+        reason = quad_blocks_refusal(quad_draft)
+        if reason is not None:
+            blocks = quad_block_groups(quad_draft) if hasattr(quad_draft, 'QUADS') else ((tuple(quad_draft.SLOTS), ()),)
+            for slots, _ in blocks:
+                self._block_quad(slots, round_number, reason)
+            return [], groups
+        formed, remaining = [], list(groups)
+        for slots, pairs in quad_block_groups(quad_draft):
+            quad = self._prepare_quad(remaining, by_slot, round_number, batched, slots=slots, pairs=pairs)
+            if quad is None:
+                continue
+            prepared.extend(quad['devices'])
+            formed.append(quad)
+            remaining = [group for group in remaining if tuple(group) not in pairs]
+        return formed, remaining
+
+    def _block_quad(self, slots, round_number, reason):
+        """Give up on one per-block quad for the process: close its trace and log DISABLED_MARKER with its slots (the gate fails on it).
+        The other block keeps serving."""
+        import quad_draft
+
+        if slots in self.quad_blocked:
+            return
+        self.quad_blocked[slots] = reason
+        state = self.quad_blocks.pop(slots, None)
+        if state is not None:
+            state[1].close()
+        audit_log('{marker} round={round} failures={failures} reason={reason} slots={slots}', marker=quad_draft.DISABLED_MARKER,
+                  round=round_number, failures=self.quad_block_failures.get(slots, 0),
+                  reason=str(reason).replace(' ', '_')[:160], slots=','.join(str(slot) for slot in slots))
+
+    def _prepare_quad(self, groups, by_slot, round_number, batched, slots=None, pairs=None):
         """Q4: prepare the four users' one 64-row pass, or None for today's pairs. Engages only when the groups are
         exactly [(0, 1), (2, 3)], both pairs are packable, quad_draft.refusal finds nothing and it has not given up.
         A fresh build needs quad_draft.QUAD_CAPTURE_BYTES_EST plus the packed reserve of free DRAM (capture_headroom:
@@ -944,30 +1051,46 @@ class PackedProposalCoordinator:
         pairs (FALLBACK_LINE); GIVE_UP_FAILURES in a row disable it for the process. On success each device wears a
         view of the quad, the first success releases every single-user capture still held (R6; the pair traces are
         kept, unless the quad leaves under PAIR_RELEASE_BELOW_BYTES free - capture_headroom again - and no audit
-        needs them), and the quad joins the round's batched selection."""
+        needs them), and the quad joins the round's batched selection.
+
+        `slots` and `pairs` (QWEN_FAST_QUAD_DRAFT_BLOCKS, from _prepare_quad_blocks; both None is the quad over slots 0-3, every line
+        below as it always was): a per-block quad. It engages when both its pairs are among `groups` (the other block's need not be),
+        keeps its state in self.quad_blocks[slots], and a refusal or two failures in a row block that quad only (_block_quad)."""
         import quad_draft
         from serving_worker_hook import phase
 
+        block = slots is not None
+        if not block:
+            slots, pairs = tuple(quad_draft.SLOTS), tuple(quad_draft.PAIRS)
         quad_draft.enabled()
-        self._retire_quad(by_slot)
-        if self.quad_disabled or [tuple(group) for group in groups] != list(quad_draft.PAIRS):
+        self._retire_quad(by_slot, slots if block else None)
+        if block:
+            if slots in self.quad_blocked or not all(pair in [tuple(group) for group in groups] for pair in pairs):
+                return None
+        elif self.quad_disabled or [tuple(group) for group in groups] != list(quad_draft.PAIRS):
             return None
-        entries = [by_slot[slot] for slot in quad_draft.SLOTS]
+        entries = [by_slot[slot] for slot in slots]
         devices = [entry['device'] for entry in entries]
         if not (packable(devices[0], devices[1]) and packable(devices[2], devices[3])):
             return None
         reason = quad_draft.refusal(devices, batched)
         if reason is not None:
-            self._disable_quad(round_number, reason)
+            if block:
+                self._block_quad(slots, round_number, reason)
+            else:
+                self._disable_quad(round_number, reason)
             return None
+        state = self.quad_blocks.get(slots) if block else self.quad
         trace = None
-        if self.quad is not None and all(old is new for old, new in zip(self.quad[0], devices)):
-            trace = self.quad[1]
+        if state is not None and all(old is new for old, new in zip(state[0], devices)):
+            trace = state[1]
         fresh = trace is None or not trace.buckets
         if fresh:
             # A fresh capture - a new quad, or the same four devices' quad whose last build failed (its _bucket
             # released what that attempt built) - needs the headroom; replaying a built quad allocates nothing. Under
             # the S2 flag the headroom is the admission's split (capture_headroom, gate v79).
+            # Per quad: a second block's check reads the free DRAM after the first block's capture landed, so each needs one
+            # quad's bytes (quad_draft_tp.blocks_capture_need is the pair of them, for the attach-time arithmetic).
             short, reading = capture_headroom(devices[0], quad_draft.QUAD_CAPTURE_BYTES_EST)
             if short:
                 reason = 'dram_reserve:headroom=%d' % reading['largest_free']
@@ -976,10 +1099,13 @@ class PackedProposalCoordinator:
                 audit_log(quad_draft.FALLBACK_LINE, round=round_number, reason=reason)
                 return None
         if trace is None:
-            if self.quad is not None:
-                self.quad[1].close()
+            if state is not None:
+                state[1].close()
             trace = quad_draft.PreparedQuadDFlashProposal(devices)
-            self.quad = (tuple(devices), trace, False)
+            if block:
+                self.quad_blocks[slots] = (tuple(devices), trace, False)
+            else:
+                self.quad = (tuple(devices), trace, False)
         from dflash_proposal_trace import pair_mask_audit_enabled
 
         if pair_mask_audit_enabled():
@@ -987,7 +1113,8 @@ class PackedProposalCoordinator:
         seeds = [entry['seed'] for entry in entries]
         ids = ','.join(str(entry['bridge'].request.session.request_id) for entry in entries)
         # S2 W6d: a fresh quad capture allocates; the ledger reads either side of it.
-        ledger_token = ledger_before('quad', quad_draft.QUAD_CAPTURE_BYTES_EST, 'slots=0,1,2,3') if fresh else None
+        ledger_token = ledger_before('quad', quad_draft.QUAD_CAPTURE_BYTES_EST,
+                                     'slots=' + ','.join(str(slot) for slot in slots)) if fresh else None
         started = time.perf_counter()
         try:
             ready = phase('propose_quad', ids, lambda: trace.prepare_device(seeds))
@@ -996,25 +1123,39 @@ class PackedProposalCoordinator:
             # As a pair's failure (above): this round falls back to today's pairs - never the engine. The trace
             # stays valid (its _bucket released what the attempt built); two in a row give up for good.
             trace.discard_pending()
-            self.quad_failures += 1
+            if block:
+                failures = self.quad_block_failures[slots] = self.quad_block_failures.get(slots, 0) + 1
+            else:
+                self.quad_failures += 1
+                failures = self.quad_failures
             audit_log(quad_draft.FALLBACK_LINE, round=round_number,
                       reason=('%s:%s' % (type(failure).__name__, str(failure)[:120])).replace(' ', '_'))
-            if self.quad_failures >= quad_draft.GIVE_UP_FAILURES:
-                self._disable_quad(round_number, 'consecutive_failures=%d' % self.quad_failures)
+            if failures >= quad_draft.GIVE_UP_FAILURES:
+                if block:
+                    self._block_quad(slots, round_number, 'consecutive_failures=%d' % failures)
+                else:
+                    self._disable_quad(round_number, 'consecutive_failures=%d' % failures)
             return None
         ledger_after(ledger_token)
         if not ready:
             return None
         built_ms = quad_draft.elapsed_ms(started)
-        self.quad_failures = 0
+        if block:
+            self.quad_block_failures[slots] = 0
+        else:
+            self.quad_failures = 0
         self.quad_rounds += 1
         try:
             for which, device in enumerate(devices):
                 _install(device, trace, which)
-            if not self.quad[2]:
+            held = self.quad_blocks[slots] if block else self.quad
+            if not held[2]:
                 for device in devices:
                     self._release_single_user(device)
-                self.quad = (self.quad[0], trace, True)
+                if block:
+                    self.quad_blocks[slots] = (held[0], trace, True)
+                else:
+                    self.quad = (held[0], trace, True)
             audited = quad_draft.audit_selected(self.quad_rounds)
             if trace.last_built and not audited:
                 # Under the S2 flag the release reads the admission's split too (capture_headroom, gate v79): the
@@ -1022,8 +1163,8 @@ class PackedProposalCoordinator:
                 # block below the reserve plus the largest buffer.
                 short, reading = capture_headroom(devices[0], quad_draft.PAIR_RELEASE_BELOW_BYTES, reserve=False)
                 if short:
-                    released = [list(group) for group in quad_draft.PAIRS if group in self.pairs]
-                    for group in quad_draft.PAIRS:
+                    released = [list(group) for group in pairs if group in self.pairs]
+                    for group in pairs:
                         if group in self.pairs:
                             self.pairs.pop(group)[2].close()
                     if released and 'free' in reading:
@@ -1039,14 +1180,14 @@ class PackedProposalCoordinator:
                 except Exception as failure:
                     trace.attach_audit('snapshot-unavailable:%s' % type(failure).__name__)
                 else:
-                    trace.attach_audit(self._quad_audit_pairs(devices, seeds, round_number))
+                    trace.attach_audit(self._quad_audit_pairs(devices, seeds, round_number, pairs if block else None))
         except BaseException:
             # The quad's replay is enqueued and not yet among `prepared`: fence it and drop its pending (and any
             # attached audit pairs) here, as the caller's own exception path does for everything it prepared.
             devices[0].operations.synchronize_device(devices[0].mesh)
             trace.discard_pending()
             raise
-        batched.append((list(quad_draft.SLOTS), trace))
+        batched.append((list(slots), trace))
         if audit_enabled():
             audit_log(quad_draft.ROUND_LINE, round=round_number, built=int(trace.last_built), ms=built_ms)
         return dict(devices=devices, fence=(devices[0].operations, devices[0].mesh), trace=trace)

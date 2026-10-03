@@ -67,6 +67,16 @@ LIVE_BANKS_NEEDS = ('QWEN_FAST_FUSED_COMMIT', 'QWEN_FAST_FUSED_COMMIT_INPLACE')
 TP4 = 4
 GROUP_USERS = 2                   # users per half: the pair fold's two
 
+# QWEN_FAST_QUAD_DRAFT_BLOCKS=2 (tp4/next-5, default off): the eight-seat quad. Two quads, one per block of four pool slots; each is
+# the pinned four-user pass over its own devices (every index inside the pass is the position within the quad's tuple, so the
+# second quad is the first's program on slots 4-7). The coordinator holds one trace and one headroom check per slot tuple, and the
+# pool holds one mask and one output set per slot tuple (dflash_packed_proposal_coordinator.pooled_draft_*_shapes). The pinned
+# module's SLOTS / PAIRS are the first quad's and are never touched.
+QUADS = ((0, 1, 2, 3), (4, 5, 6, 7))
+BLOCKS_FLAG = 'QWEN_FAST_QUAD_DRAFT_BLOCKS'
+BLOCKS_VALUE = '2'
+BLOCKS_SEATS = 8
+
 
 def __getattr__(name):
     """Every name this twin does not define is the pinned module's own (markers, line formats, flag readers, the K/V plan,
@@ -110,11 +120,54 @@ def missing_requirements(environ=None):
     return [name for name in REQUIRED_FLAGS if environ.get(name) != '1']
 
 
+def blocks_requested(environ=None):
+    """QWEN_FAST_QUAD_DRAFT_BLOCKS set to anything but '' or '0' (blocks_refusal says whether it is served)."""
+    return (os.environ if environ is None else environ).get(BLOCKS_FLAG, '') not in ('', '0')
+
+
+def blocks_capture_bytes(blocks=len(QUADS)):
+    """DRAM per chip the capture of `blocks` quads needs: blocks x the pinned QUAD_CAPTURE_BYTES_EST (450 MiB each, a lower-bound estimate
+    until a card measures the real figure)."""
+    return blocks * _pinned.QUAD_CAPTURE_BYTES_EST
+
+
+def blocks_capture_need(blocks, reserve_bytes):
+    """What `blocks` quads need free in one chip's DRAM before the first capture: their bytes and the packed reserve once (the reserve
+    guards what the engine and the prefill still allocate, not each quad). The coordinator checks one quad at a time, after the
+    previous one landed, so this is the attach-time total of the same per-quad checks: blocks x 450 MiB + reserve."""
+    return blocks_capture_bytes(blocks) + reserve_bytes
+
+
+def blocks_refusal(users=None, environ=None):
+    """Why the per-block quads cannot serve this process, or None. `users` is the pool's slot count when the caller knows it (the attach),
+    None at a round. The reasons, in order: the value (only '2' is served), the four-card width, QWEN_FAST_QUAD_DRAFT off, the
+    quad audit (its shadow pairs are the first block's (0, 1) and (2, 3) only), and a pool that is not eight slots."""
+    environ = os.environ if environ is None else environ
+    value = environ.get(BLOCKS_FLAG, '')
+    if value in ('', '0'):
+        return None
+    if value != BLOCKS_VALUE:
+        return '%s must be %s (two quads of four seats) or unset, got %r' % (BLOCKS_FLAG, BLOCKS_VALUE, value)
+    if tp_shapes.chip_count(environ) != TP4:
+        return 'the two-quad draft serves QWEN_FAST_TP=4 only'
+    if environ.get(_pinned.FLAG, '0') != '1':
+        return '%s=%s needs %s=1' % (BLOCKS_FLAG, BLOCKS_VALUE, _pinned.FLAG)
+    if _pinned.audit_rounds(environ) is not None:
+        return '%s audits the first block\'s pair traces only: unset it with %s' % (_pinned.AUDIT_FLAG, BLOCKS_FLAG)
+    if users is not None and users != BLOCKS_SEATS:
+        return 'the two-quad draft needs eight seats (the pool has %d)' % users
+    return None
+
+
 def note(slots, sdpa, conv, *, log=None):
     """MARKER once per process, at the first quad bucket that captured and replayed (the pinned module's once-flag:
     whichever module logs it, it is logged once)."""
     noted = _pinned._NOTED
-    if noted:
+    if blocks_requested():
+        # One marker per quad (the smoke check counts two at eight seats): the once-flag is per slot tuple.
+        if tuple(slots) in noted:
+            return False
+    elif noted:
         return False
     noted.append(tuple(slots))
     query, key = heads()[0], heads()[1]

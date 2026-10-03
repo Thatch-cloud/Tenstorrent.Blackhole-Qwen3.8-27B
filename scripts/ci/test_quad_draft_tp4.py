@@ -72,7 +72,8 @@ TWIN_OWN = {'heads', 'missing_requirements', 'note', 'validate_quad', 'quad_fold
             'quad_unfold_output', 'fold_attention', 'pairs_attention', 'quad_head_map', 'split_projected_heads',
             'project_key_value', 'concatenate_query_heads', 'quad_fused_convolution', 'halves_convolution',
             'head_candidates', 'QuadPass', 'read_quad_outputs', 'select_quad_outputs', 'PreparedQuadDFlashProposal',
-            'refusal', '_tiled_dram', 'live_banks_requested', 'live_banks_missing'}
+            'refusal', '_tiled_dram', 'live_banks_requested', 'live_banks_missing', 'blocks_requested', 'blocks_refusal',
+            'blocks_capture_bytes', 'blocks_capture_need'}
 
 
 def clean_environment(**flags):

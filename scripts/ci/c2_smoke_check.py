@@ -101,6 +101,11 @@ DISPATCH_DIAG_FLAG = 'QWEN_FAST_GDN_DISPATCH_DIAG'
 DISPATCH_DIAG_LINE = '[PINDIAG] tp4 gdn dispatch diag'
 SLIDE_FLAG = 'QWEN_FAST_TP_KV_SLIDE'
 QUAD_FLAG = 'QWEN_FAST_QUAD_DRAFT'
+# tp4/next-5: QWEN_FAST_QUAD_DRAFT_BLOCKS=2, the eight-seat quad (two quads of four). The smoke that judges it is concurrent8_steady.
+QUAD_BLOCKS_FLAG = 'QWEN_FAST_QUAD_DRAFT_BLOCKS'
+QUAD_BLOCKS_VALUE = '2'
+QUAD_BLOCK_SLOTS = ('0,1,2,3', '4,5,6,7')
+STEADY_EIGHT_TEST = 'concurrent8_steady'
 SINGLES_AUDIT_FLAG = 'QWEN_FAST_DRAFT_SINGLES_AUDIT'
 FUSED_FLAG = 'QWEN_FAST_FUSED_COMMIT'
 FUSED_INPLACE_FLAG = 'QWEN_FAST_FUSED_COMMIT_INPLACE'
@@ -122,6 +127,9 @@ RESEND_TEST = 'steady_resend'
 # One line per packed round the coordinator selected (dflash_packed_proposal_coordinator.SELECT_LINE, QWEN_FAST_PACKED_AUDIT):
 # the quad's one group of four slots, or two packed pairs.
 QUAD_ROUND = re.compile(r'\[PACKED-SELECT\] round=\d+ pairs=\[\[0, 1, 2, 3\]\] users=4 ')
+# Both quads in one round: eight users, one select line (the quad's group of four slots, twice).
+QUADS_ROUND = re.compile(r'\[PACKED-SELECT\] round=\d+ pairs=\[\[0, 1, 2, 3\], \[4, 5, 6, 7\]\] users=8 ')
+QUAD_MARKER_SLOTS = re.compile(r'\[PINDIAG\] quad draft engaged slots=\[([0-9,]*)\]')
 PAIR_ROUND = re.compile(r'\[PACKED-SELECT\] round=\d+ pairs=\[\[0, 1\], \[2, 3\]\] users=4 ')
 QUAD_MARKER = '[PINDIAG] quad draft engaged'
 QUAD_DISABLED = '[PINDIAG] quad draft disabled'
@@ -437,7 +445,10 @@ def draft_facts(container_text):
     fallback and disable lines, and the two audits' lines."""
     singles = SINGLES_AUDIT_LINE.findall(container_text)
     quad_audit = QUAD_AUDIT.findall(container_text)
-    return dict(quad_rounds=len(QUAD_ROUND.findall(container_text)), pair_rounds=len(PAIR_ROUND.findall(container_text)),
+    return dict(quad_rounds=len(QUAD_ROUND.findall(container_text)),
+                quads_rounds=len(QUADS_ROUND.findall(container_text)),
+                quad_marker_slots=sorted(QUAD_MARKER_SLOTS.findall(container_text)),
+                pair_rounds=len(PAIR_ROUND.findall(container_text)),
                 quad_markers=container_text.count(QUAD_MARKER), quad_disabled=container_text.count(QUAD_DISABLED),
                 quad_fallbacks=container_text.count(QUAD_FALLBACK), quad_lines=len(QUAD_LINE.findall(container_text)),
                 quad_audits=len(quad_audit), quad_audits_unequal=sum(1 for equal in quad_audit if equal != '1'),
@@ -452,18 +463,51 @@ def fast_path(env):
     """Whether the profile drafts: it serves the speculative fast path (S2) or names a batched-draft flag. The G1
     profiles (general-*) set none of these keys."""
     return (any(env.get(key) not in (None, '', '0') for key in FAST_PATH_KEYS)
-            or any(key in env for key in (QUAD_FLAG, SINGLES_AUDIT_FLAG)))
+            or any(key in env for key in (QUAD_FLAG, QUAD_BLOCKS_FLAG, SINGLES_AUDIT_FLAG)))
 
 
-def draft_problems(facts, env, steady):
+def blocks_problems(facts, env, steady_eight):
+    """QWEN_FAST_QUAD_DRAFT_BLOCKS: what a profile that asks for the eight-seat quad must show. A value other than '2' fails whatever
+    ran (the coordinator refuses it by name). Held to the log only by a smoke that ran concurrent8_steady (eight users past the
+    2,048-row draft window together, the only mix both quads can serve): exactly two engaged markers, one for each block of slots, at
+    least one round both quads served, no fallback and no disable line."""
+    problems = []
+    value = env.get(QUAD_BLOCKS_FLAG, '')
+    if value in ('', '0'):
+        return problems
+    if value != QUAD_BLOCKS_VALUE:
+        return ['%s=%r: only %s is served' % (QUAD_BLOCKS_FLAG, value, QUAD_BLOCKS_VALUE)]
+    if env.get(QUAD_FLAG) != '1':
+        problems.append('%s=%s without %s=1: no quad can form' % (QUAD_BLOCKS_FLAG, value, QUAD_FLAG))
+    if not steady_eight:
+        return problems
+    if facts['quad_markers'] != 2 or list(facts['quad_marker_slots']) != sorted(QUAD_BLOCK_SLOTS):
+        problems.append('the quad marker (%s) appears %d times with slots %s, not once for each of %s: a block never engaged or '
+                        'engaged twice' % (QUAD_MARKER, facts['quad_markers'], facts['quad_marker_slots'],
+                                           ' and '.join(QUAD_BLOCK_SLOTS)))
+    if not facts['quads_rounds']:
+        problems.append('no round was served by both quads (no [PACKED-SELECT] pairs=[[0, 1, 2, 3], [4, 5, 6, 7]] users=8 line): the '
+                        'eight steady users drafted some other way')
+    if facts['quad_fallbacks'] or facts['quad_disabled']:
+        problems.append('a quad fell back %d times and was disabled %d times' % (facts['quad_fallbacks'], facts['quad_disabled']))
+    return problems
+
+
+def draft_problems(facts, env, steady, steady_eight=False):
     """The problems the profile's batched-draft settings leave: see the module docstring. Only a smoke that ran the steady
-    four-user mix can be held to it; the audits' unequal lines fail whatever ran."""
+    four-user mix can be held to it; the audits' unequal lines fail whatever ran. With QWEN_FAST_QUAD_DRAFT_BLOCKS set the quad
+    rules are blocks_problems' (the eight-user mix), not the four-user ones."""
     problems = []
     if facts['quad_audits_unequal']:
         problems.append('%d [QUAD-AUDIT] lines with equal=0: the quad differs from the pair traces' % facts['quad_audits_unequal'])
     if facts['singles_audits_unequal']:
         problems.append('%d [DRAFT-SINGLES-AUDIT] lines with equal=0 (%s): a batched draft differs from the single-user draft'
                         % (facts['singles_audits_unequal'], ', '.join(facts['singles_audit_stages'])))
+    if env.get(QUAD_BLOCKS_FLAG, '') not in ('', '0'):
+        problems += blocks_problems(facts, env, steady_eight)
+        if env.get(SINGLES_AUDIT_FLAG) not in (None, '', '0') and steady_eight and not facts['singles_audits']:
+            problems.append('%s is set and no [DRAFT-SINGLES-AUDIT] line was logged' % SINGLES_AUDIT_FLAG)
+        return problems
     if not steady:
         return problems
     if env.get(QUAD_FLAG) == '1':
@@ -644,7 +688,8 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         steady = STEADY_TEST in (smoke or {}) and 'error' not in smoke[STEADY_TEST]
         # The batched-draft conditions are the S2 fast path's: a G1 profile (general-*) never drafts, so they would fail it.
         if fast_path(env):
-            problems += draft_problems(drafts, env, steady)
+            steady_eight = STEADY_EIGHT_TEST in (smoke or {}) and 'error' not in smoke[STEADY_EIGHT_TEST]
+            problems += draft_problems(drafts, env, steady, steady_eight)
         fused = fused_facts(env, container_text)
         if fused is not None:
             facts['fused'] = fused
