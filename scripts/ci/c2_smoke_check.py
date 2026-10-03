@@ -526,6 +526,9 @@ def tpub_problems(env, container_text):
     if env.get(TPUB_AUDIT_FLAG) == '1':
         if not audit_lines:
             problems.append('%s is set and no [TPUB-AUDIT] line was logged' % TPUB_AUDIT_FLAG)
+        elif not any(line[0] == 'restore' for line in audit_lines):
+            problems.append('%s is set and no [TPUB-AUDIT] op=restore line was logged: the restore writes the live slot and was never compared'
+                            % TPUB_AUDIT_FLAG)
         unequal = [line for line in audit_lines if int(line[2]) != 0]
         if unequal:
             problems.append('%d [TPUB-AUDIT] lines with mismatches>0 (first: op=%s mismatches=%s): a traced carry copy differs from the eager one'

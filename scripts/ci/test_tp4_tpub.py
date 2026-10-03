@@ -312,6 +312,38 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(live.carry_audit_mismatches, 2)
         self.assertTrue(torch.equal(live.carry[2][1].value, torch.full((4,), 1.0, dtype=torch.bfloat16)))
 
+    def restore_audit(self, *, corrupt):
+        device = Device()
+        live = engine(device, arm=True, audit=True)
+        live.carry_traces = {'save': 1, 'restore': 2}
+        for helper in live.helpers:
+            for value in helper.live:
+                value.value = torch.zeros(4, dtype=torch.bfloat16)
+        for helper in live.helpers:
+            helper.restore.side_effect = lambda slot, helper=helper: [setattr(v, 'value', torch.zeros(4, dtype=torch.bfloat16)) for v in helper.live]
+        if corrupt:
+            def execute(mesh, trace, cq_id, blocking):
+                live.helpers[3].live[1].value = torch.full((4,), 5.0, dtype=torch.bfloat16)
+
+            device.operations.execute_trace = execute
+        lines = []
+        with patch.object(verifier_engine_tp.verify_trace_t1, 'log_line', lines.append):
+            live.audited_carry_copy('restore')
+        return live, lines
+
+    def test_the_restore_audit_reads_the_live_state_not_the_carry(self):
+        live = engine(Device(), arm=True, audit=True)
+        live_tensors = [value for helper in live.helpers for value in helper.live]
+        self.assertEqual([id(v) for v in live.carry_destination('restore')], [id(v) for v in live_tensors])
+        carry = [value for slot in live.carry for value in slot]
+        self.assertFalse({id(v) for v in carry} & {id(v) for v in live.carry_destination('restore')})
+
+    def test_a_restore_that_differs_from_the_eager_loop_is_counted(self):
+        live, lines = self.restore_audit(corrupt=True)
+        self.assertEqual(lines, ['[TPUB-AUDIT] op=restore checked=%d mismatches=2' % (LAYERS * 5 * 2)])
+        live, lines = self.restore_audit(corrupt=False)
+        self.assertEqual(lines, ['[TPUB-AUDIT] op=restore checked=%d mismatches=0' % (LAYERS * 5 * 2)])
+
     def test_bit_equality_distinguishes_signed_zero_and_shape(self):
         zero, negative = torch.zeros(2, dtype=torch.bfloat16), -torch.zeros(2, dtype=torch.bfloat16)
         self.assertTrue(torch.equal(zero, negative))
@@ -346,6 +378,16 @@ class SmokeCheckTests(unittest.TestCase):
         self.assertIn('no [TPUB-AUDIT] line', self.problems(self.ENGAGED, **env)[0])
         self.assertIn('mismatches>0', ' '.join(self.problems(good + '\n' + self.LINE % ('save', 960, 3), **env)))
         self.assertIn('960', ' '.join(self.problems(self.ENGAGED + '\n' + self.LINE % ('save', 480, 0), **env)))
+
+    def test_the_audited_arm_needs_a_restore_line_the_restore_writes_the_live_slot(self):
+        env = {c2_smoke_check.TPUB_FLAG: '1', c2_smoke_check.TPUB_AUDIT_FLAG: '1'}
+        saves_only = self.ENGAGED + '\n' + self.LINE % ('save', 960, 0)
+        self.assertIn('op=restore', ' '.join(self.problems(saves_only, **env)))
+
+    def test_check_runs_the_tpub_rules(self):
+        env = {'QWEN_FAST_TP': '4', c2_smoke_check.TPUB_FLAG: '1'}
+        problems, _facts = c2_smoke_check.check('', 'nothing', False, env=env)
+        self.assertTrue([p for p in problems if c2_smoke_check.TPUB_FLAG in p and 'engaged' in p], problems)
 
     def test_audit_lines_without_the_audit_flag_fail(self):
         self.assertEqual(len(self.problems(self.ENGAGED + '\n' + self.LINE % ('save', 960, 0), **{c2_smoke_check.TPUB_FLAG: '1'})), 1)
