@@ -4,38 +4,36 @@
 # THE CARDS ARE UNDER DEVELOPMENT, PRODUCTION IS DOWN BY THE OWNER'S CHOICE: NO agentstop, NO agentstart, NO hand-back, NO deploy, NO :latest move. Z ends with a reset and no agentstart. qwen_c2_profiles.json's default stays c2-packed-tp4.
 # P0. NO OTHER WINDOW DRIVER MAY BE ALIVE and no privileged builder container may be up. The CPU suite green on this branch first. Every result is UNQUALIFIED (the 262k evidence waiver on the gate-only arms). B0 never runs during a timing job.
 # THE CONTROL of every pair is c2-packed-tp4-8x262k-best-time-gate (measured: 8 users live 32k prompts 136-150 tok/s aggregate, slowest seat 13-14; 128k prompts 123-128). Each lever arm is the control plus or minus EXACTLY one change:
-#   nosamp  c2-packed-tp4-8x262k-best-time-gate-nosamp   minus QWEN_FAST_PACKED_SAMPLER_IN_TRACE (the dead in-trace pinned sampler; est. -8.6 ms per round; H1-H3 first)
+#   nosamp  c2-packed-tp4-8x262k-best-time-gate-nosamp   minus QWEN_FAST_PACKED_SAMPLER_IN_TRACE (the dead in-trace pinned sampler; est. -8.6 ms per round; H1-H5 first)
 #   s1      ...-s1      plus QWEN_FAST_TP4_SHARD_ARGMAX=1 (one scan launch on 110 cores + a fold per block; est. -2 to -3.6 ms per round)
 #   d2      ...-d2      plus QWEN_FAST_TP4_DRAFT_CONV=1 and QWEN_FAST_TP4_DRAFT_HEADS=1 (the drafter's conv I/O and head copies; est. -10 ms per round at two quad passes)
 #   stack   ...-stack   nosamp + s1 + d2 together (est. -20 ms)
 #   dbf16   ...-dbf16   plus QWEN_FAST_DRAFTER_BF16=1 with the 19,200-block pool its 405 MB forces (est. +1.9 ms per round; a TAU lever)
 #   lookup  ...-lookup  plus QWEN_FAST_LOOKUP_DRAFT=n3m12 (host-side prompt lookup; offline at most +3% tau; a TAU lever)
-# Left out: V5 (the recurrence split, tp4/v5split) has no arm: it is unqualified until its card byte gate passes; its flag refuses, and it is merged and inert. M8 (the 128-row block) and SDPA multi are not on any branch yet.
-# ORDER: X0 (status, RESCAN, reset), B0 (build), A1 (the AUDITED stack attach: the shard argmax, drafter conv and drafter heads audits with concurrent8_steady in its tests), H1-H3 (the eight-seat hang shapes on the nosamp arm: prove the in-trace sampler's removal),
+# Left out: V5 (the recurrence split, tp4/v5split) has no arm: it is unqualified until its card byte gate passes; its flag refuses, and it is merged and inert. M8 (the 128-row block, tp4/m8-phase1) and SDPA multi (tp4/sdpa-multi) are on their own branches and not merged here.
+# ORDER: X0 (status, RESCAN, reset), B0 (build), A1 (the AUDITED stack attach: the shard argmax, drafter conv and drafter heads audits with concurrent8_steady in its tests), then the four pairs that carry the control's in-trace sampler and do not depend on any hang gate: s1 (TS), d2 (TD), dbf16 (TB), lookup (TL);
+# then H1-H5 (five out of five audits-off eight-seat hang shapes on the nosamp arm: prove the in-trace sampler's removal), the nosamp pair (TN), HK1-HK5 (the same five hang shapes on the STACK arm, which also adds the S1 partials buffer, the scan and fold kernels and the D2 drafter kernels to the allocation sequence and capture set), the stack pair (TK), then Z.
+# A hang in H or HK therefore costs only the pairs that share its trace, never the independent ones. 24 timed jobs: the pairs are SOFT and independent, so the driver may stop after any pair.
 # then the ABAB pairs, each lever against the control, in this order: nosamp (TN), s1 (TS), d2 (TD), stack (TK), dbf16 (TB), lookup (TL), then Z. 24 timed jobs: the pairs are SOFT and independent, so the driver may stop after any pair.
 # DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
 # NEEDS A1 <- B0 X0
-# NEEDS H1 H2 H3 <- A1
-# NEEDS TN1 TN2 TN3 TN4 TK1 TK2 TK3 TK4 <- A1 H1 H2 H3
+# NEEDS H1 H2 H3 H4 H5 <- A1
+# NEEDS HK1 HK2 HK3 HK4 HK5 <- A1 H1 H2 H3 H4 H5
+# NEEDS TN1 TN2 TN3 TN4 <- A1 H1 H2 H3 H4 H5
+# NEEDS TK1 TK2 TK3 TK4 <- A1 H1 H2 H3 H4 H5 HK1 HK2 HK3 HK4 HK5
 # NEEDS TS1 TS2 TS3 TS4 TD1 TD2 TD3 TD4 TB1 TB2 TB3 TB4 TL1 TL2 TL3 TL4 <- A1
 # READ RULES (each job's template says how to read it; each also needs c2_smoke_check clean and no stall):
 #   X0  the status prints, the rescan finds every board, the reset completes on all four.   B0  provenance report with no problem line, the image id printed.
 #   A1  admission passed at capacity 262144, reservation num_gpu_blocks=19968, fused commit on both blocks, ZERO audit mismatches, the lever audit lines exact=True, two quad markers and a both-quads round, hashes equal to the control attach's and to solo.
-#   H1-H3  three consecutive completions of the eight-seat hang shapes with the sampler removed. One stall stops the window and the nosamp and stack pairs are not run.
+#   H1-H5  five CONSECUTIVE completions of the eight-seat hang shapes with the sampler removed (nosamp arm). One stall stops the window and the nosamp and stack pairs are not run.
+#   HK1-HK5  the same five runs on the stack arm (audits off). One stall stops the window and the stack pair is not run.
 #   T*  per pair, A B A B, judged PAIRED per round at live=8 (the round time and the per-seat rate), texts equal between the arms; the lever's own reading is in the template (tau report for d2, stack, dbf16 and lookup).
 #       The quad smoke rule is judged by concurrent8_steady, which every timed job runs. A lever that raises or lowers tau is a finding for the exact levers (they must not); for dbf16 and lookup tau is the point.
 # NO-GO for adopting any arm: any stall, any hash difference between arms that must be identical, any audit mismatch, any fall-back or missing engaged line. This window decides nothing about production: it is evidence for the owner.
-# Time (estimate): X0 and B0 about 80 min, A1 2 h, H1-H3 4.5 h, 24 timed jobs of 90 min = 36 h, Z 10 min: about 44 h with every job; the nosamp pair and the stack pair are the two that matter most (the 8.6 ms term and the sum).
+# Time (estimate): X0 and B0 about 80 min, A1 2 h, H1-H5 7.5 h, HK1-HK5 7.5 h, 24 timed jobs of 90 min = 36 h, Z 10 min: about 56 h with every job; the nosamp pair and the stack pair are the two that matter most (the 8.6 ms term and the sum).
 X0-status-rescan-reset stop tp4-262k8-x-1 20
 B0-build stop tp4-262k8-x-1 60
 A1-stack-audited-attach stop tp4-262k8-x-1 120
-H1-hang-shapes-nosamp stop tp4-262k8-x-1 90
-H2-hang-shapes-nosamp stop tp4-262k8-x-1 90
-H3-hang-shapes-nosamp stop tp4-262k8-x-1 90
-TN1-timed-A-control soft tp4-262k8-x-1 90
-TN2-timed-B-nosamp soft tp4-262k8-x-1 90
-TN3-timed-A-control soft tp4-262k8-x-1 90
-TN4-timed-B-nosamp soft tp4-262k8-x-1 90
 TS1-timed-A-control soft tp4-262k8-x-1 90
 TS2-timed-B-s1 soft tp4-262k8-x-1 90
 TS3-timed-A-control soft tp4-262k8-x-1 90
@@ -44,10 +42,6 @@ TD1-timed-A-control soft tp4-262k8-x-1 90
 TD2-timed-B-d2 soft tp4-262k8-x-1 90
 TD3-timed-A-control soft tp4-262k8-x-1 90
 TD4-timed-B-d2 soft tp4-262k8-x-1 90
-TK1-timed-A-control soft tp4-262k8-x-1 90
-TK2-timed-B-stack soft tp4-262k8-x-1 90
-TK3-timed-A-control soft tp4-262k8-x-1 90
-TK4-timed-B-stack soft tp4-262k8-x-1 90
 TB1-timed-A-control soft tp4-262k8-x-1 90
 TB2-timed-B-dbf16 soft tp4-262k8-x-1 90
 TB3-timed-A-control soft tp4-262k8-x-1 90
@@ -56,4 +50,22 @@ TL1-timed-A-control soft tp4-262k8-x-1 90
 TL2-timed-B-lookup soft tp4-262k8-x-1 90
 TL3-timed-A-control soft tp4-262k8-x-1 90
 TL4-timed-B-lookup soft tp4-262k8-x-1 90
+H1-hang-shapes-nosamp stop tp4-262k8-x-1 90
+H2-hang-shapes-nosamp stop tp4-262k8-x-1 90
+H3-hang-shapes-nosamp stop tp4-262k8-x-1 90
+H4-hang-shapes-nosamp stop tp4-262k8-x-1 90
+H5-hang-shapes-nosamp stop tp4-262k8-x-1 90
+TN1-timed-A-control soft tp4-262k8-x-1 90
+TN2-timed-B-nosamp soft tp4-262k8-x-1 90
+TN3-timed-A-control soft tp4-262k8-x-1 90
+TN4-timed-B-nosamp soft tp4-262k8-x-1 90
+HK1-hang-shapes-stack stop tp4-262k8-x-1 90
+HK2-hang-shapes-stack stop tp4-262k8-x-1 90
+HK3-hang-shapes-stack stop tp4-262k8-x-1 90
+HK4-hang-shapes-stack stop tp4-262k8-x-1 90
+HK5-hang-shapes-stack stop tp4-262k8-x-1 90
+TK1-timed-A-control soft tp4-262k8-x-1 90
+TK2-timed-B-stack soft tp4-262k8-x-1 90
+TK3-timed-A-control soft tp4-262k8-x-1 90
+TK4-timed-B-stack soft tp4-262k8-x-1 90
 Z-reset soft tp4-262k8-x-1 10

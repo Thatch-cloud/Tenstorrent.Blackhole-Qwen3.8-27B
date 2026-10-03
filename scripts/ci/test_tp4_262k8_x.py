@@ -262,10 +262,16 @@ class ImageTests(unittest.TestCase):
 
 class OrderTests(unittest.TestCase):
     def expected(self):
-        names = ['X0-status-rescan-reset', 'B0-build', 'A1-stack-audited-attach', 'H1-hang-shapes-nosamp', 'H2-hang-shapes-nosamp', 'H3-hang-shapes-nosamp']
-        for lever in LEVER_ORDER:
+        names = ['X0-status-rescan-reset', 'B0-build', 'A1-stack-audited-attach']
+
+        def pair(lever):
             prefix = LEVER_PREFIX[lever]
-            names += ['%s%d-timed-%s-%s' % (prefix, number, 'A' if number % 2 else 'B', 'control' if number % 2 else lever) for number in (1, 2, 3, 4)]
+            return ['%s%d-timed-%s-%s' % (prefix, number, 'A' if number % 2 else 'B', 'control' if number % 2 else lever) for number in (1, 2, 3, 4)]
+        # the pairs that need no hang gate first, then the nosamp gate and pair, then the stack gate and pair
+        for lever in ('s1', 'd2', 'dbf16', 'lookup'):
+            names += pair(lever)
+        names += ['H%d-hang-shapes-nosamp' % number for number in (1, 2, 3, 4, 5)] + pair('nosamp')
+        names += ['HK%d-hang-shapes-stack' % number for number in (1, 2, 3, 4, 5)] + pair('stack')
         return names + ['Z-reset']
 
     def test_the_order_lists_exactly_the_templates_in_the_asked_order_with_four_columns(self):
@@ -301,10 +307,11 @@ class OrderTests(unittest.TestCase):
         for test in ('concurrent8_steady', 'concurrent8_code_equal'):
             self.assertIn(test, tests_of('A1-stack-audited-attach'))
 
-    def test_the_hang_shapes_run_the_eight_seat_shapes_on_the_nosamp_arm_three_times(self):
-        for number in (1, 2, 3):
-            name = 'H%d-hang-shapes-nosamp' % number
-            self.assertEqual(parsed(name)['profile'], TIMED + '-nosamp')
+    def test_the_hang_shapes_run_the_eight_seat_shapes_on_the_nosamp_and_stack_arms_five_times_each(self):
+        gates = [('H%d-hang-shapes-nosamp' % number, '-nosamp') for number in (1, 2, 3, 4, 5)]
+        gates += [('HK%d-hang-shapes-stack' % number, '-stack') for number in (1, 2, 3, 4, 5)]
+        for name, suffix in gates:
+            self.assertEqual(parsed(name)['profile'], TIMED + suffix)
             for shape in ('concurrent4_steady', 'concurrent8_steady', 'steady_resend', 'replay_concurrent8', 'concurrent8_code_equal'):
                 self.assertIn(shape, tests_of(name), name)
             env = PROFILES[parsed(name)['profile']]['env']
@@ -327,13 +334,27 @@ class OrderTests(unittest.TestCase):
             if match:
                 for name in match.group(1).split():
                     needs.setdefault(name, set()).update(match.group(2).split())
+        nosamp_gate = {'A1', 'H1', 'H2', 'H3', 'H4', 'H5'}
+        stack_gate = nosamp_gate | {'HK1', 'HK2', 'HK3', 'HK4', 'HK5'}
         for number in (1, 2, 3, 4):
-            for lever in ('nosamp', 'stack'):
-                self.assertEqual(needs['%s%d' % (LEVER_PREFIX[lever], number)],
-                                 {'A1', 'H1', 'H2', 'H3'})
+            self.assertEqual(needs['TN%d' % number], nosamp_gate)
+            self.assertEqual(needs['TK%d' % number], stack_gate)
             for lever in ('s1', 'd2', 'dbf16', 'lookup'):
                 self.assertEqual(needs['%s%d' % (LEVER_PREFIX[lever], number)], {'A1'})
-        self.assertEqual((needs['H1'], needs['H2'], needs['H3'], needs['A1']), ({'A1'}, {'A1'}, {'A1'}, {'B0', 'X0'}))
+        for number in (1, 2, 3, 4, 5):
+            self.assertEqual(needs['H%d' % number], {'A1'})
+            self.assertEqual(needs['HK%d' % number], nosamp_gate)
+        self.assertEqual(needs['A1'], {'B0', 'X0'})
+
+    def test_the_independent_pairs_run_before_either_hang_gate_so_a_stall_never_costs_them(self):
+        names = [line[0] for line in order_lines()]
+        first_gate = names.index('H1-hang-shapes-nosamp')
+        for lever in ('s1', 'd2', 'dbf16', 'lookup'):
+            for name in names:
+                if name.startswith(LEVER_PREFIX[lever]):
+                    self.assertLess(names.index(name), first_gate, name)
+        self.assertLess(names.index('H5-hang-shapes-nosamp'), names.index('TN1-timed-A-control'))
+        self.assertLess(names.index('HK5-hang-shapes-stack'), names.index('TK1-timed-A-control'))
 
     def test_every_template_is_lf_parses_and_names_no_card_host_address_registry_or_digest(self):
         for name in self.expected():
