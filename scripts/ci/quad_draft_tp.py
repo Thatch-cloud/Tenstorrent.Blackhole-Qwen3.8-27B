@@ -435,20 +435,6 @@ def head_candidates(operations, model, normalized, owned, retain):
     return _pinned.concat_candidates(operations, halves[0], halves[1], retain)
 
 
-def compare_draft_audit(operations, bucket):
-    """dflash_proposal_trace.compare_draft_audit (tp4/samp-draft's drafter audits): the bucket's held pairs, after its replay."""
-    from dflash_proposal_trace import compare_draft_audit as compare
-
-    compare(operations, bucket)
-
-
-def release_draft_audit(operations, scope):
-    """dflash_proposal_trace.release_draft_audit: free a scope's pairs once its trace is released."""
-    from dflash_proposal_trace import release_draft_audit as release
-
-    release(operations, scope)
-
-
 class QuadPass(_pinned.QuadPass):
     """What execute_proposal and the two branches take from the quad (their `quad` keyword), at this width: the pinned pass's
     64 rows and K/V plan, with the SDPA, the head helpers, the conv and the head of this module."""
@@ -562,8 +548,8 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
             self.last_built = False
             return bucket
         from dflash_packed_proposal import packed_identifiers
-        from dflash_proposal_trace import (borrow_pooled_mask, close_draft_audit, open_draft_audit, pool_outputs,
-                                           traced_pass)
+        from dflash_proposal_trace import (borrow_pooled_mask, close_draft_audit, compare_draft_audit, open_draft_audit,
+                                           pool_outputs, release_draft_audit, traced_pass)
         from gdn_multitoken_conv import addresses, release_owned
         quad_host_mask, quad_rope = _pinned.quad_host_mask, _pinned.quad_rope
         operations, device = self.operations, self.devices[0]
@@ -723,6 +709,7 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
             raise ValueError('No prepared quad proposal is pending')
         seeds, bucket, owned = self._pending
         if bucket.tokens is None:
+            from dflash_proposal_trace import compare_draft_audit
             from gdn_multitoken_conv import addresses, release_owned
 
             operations = self.operations
@@ -747,6 +734,7 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
         seeds, bucket, owned = self._pending
         if bucket.tokens is not None or bucket.consumed:
             raise ValueError('This quad proposal was already selected')
+        from dflash_proposal_trace import compare_draft_audit
         from gdn_multitoken_conv import addresses, release_owned
         read_audit = _pinned.read_audit
         operations = self.operations
@@ -778,6 +766,8 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
         until it is released, so they are freed last (tp4_draft_conv's second rule)."""
         if self.closed:
             return
+        from dflash_proposal_trace import release_draft_audit
+
         scopes = [getattr(bucket, 'draft_audit', None) for bucket in self.buckets.values()]
         super().close()
         for scope in scopes:
