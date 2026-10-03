@@ -29,9 +29,9 @@ BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3})
 IMAGE = 'tp4-lookup-1'
 CONTROL, ARM, PRODUCTION = 'c2-packed-tp4-best-strace', 'c2-packed-tp4-best-lookup', 'c2-packed-tp4'
 FLAG, POLICY = 'QWEN_FAST_LOOKUP_DRAFT', 'n3m12'
-BUILD, SMOKE, RESET = 'B0-build', 'L1-lookup-audited-smoke', 'Z-reset'
+STATUS, BUILD, SMOKE, RESET = 'X0-status-rmi', 'B0-build', 'L1-lookup-audited-smoke', 'Z-reset'
 TIMED = ('TL1-timed-A-best-strace', 'TL2-timed-B-best-lookup', 'TL3-timed-A-best-strace', 'TL4-timed-B-best-lookup')
-ORDERED = (BUILD, SMOKE) + TIMED + (RESET,)
+ORDERED = (STATUS, BUILD, SMOKE) + TIMED + (RESET,)
 PROFILE_OF = {BUILD: PRODUCTION, SMOKE: ARM, TIMED[0]: CONTROL, TIMED[1]: ARM, TIMED[2]: CONTROL, TIMED[3]: ARM}
 FORBIDDEN_ACTIONS = {'agentstop', 'agentstart', 'unserve', 'push', 'replay', 'prefix', 'platform'}
 
@@ -60,10 +60,12 @@ class OrderTests(unittest.TestCase):
         for name, mode, image, minutes in read_order():
             with self.subTest(job=name):
                 self.assertIn(mode, ('stop', 'soft'))
-                self.assertEqual(mode, 'stop' if name == BUILD else 'soft')
+                self.assertEqual(mode, 'stop' if name in (STATUS, BUILD) else 'soft')
                 self.assertEqual(image, IMAGE)
                 self.assertEqual(parsed(name)['tag'], IMAGE)
                 self.assertTrue(minutes.isdigit() and 10 <= int(minutes) <= 180, minutes)
+        total = sum(int(row[3]) for row in read_order())
+        self.assertIn('sum to %d min' % total, (FOLDER / 'ORDER.txt').read_text(encoding='utf-8'))
 
     def test_each_template_parses_through_the_job_parser_on_four_cards(self):
         for name in ORDERED:
@@ -94,13 +96,19 @@ class OrderTests(unittest.TestCase):
         for name in TIMED:
             self.assertEqual(parsed(name)['actions'], 'reset smoke')
             self.assertEqual(parsed(name)['tests'], 'warmup,coding,concurrent4_code_equal,concurrent4_code_32k')
-        self.assertEqual(parsed(SMOKE)['tests'], 'warmup,coding,long_real_text,concurrent4,concurrent4_code_equal')
+        self.assertEqual(parsed(SMOKE)['tests'], 'warmup,coding,long_real_text,concurrent4_solo,concurrent4,concurrent4_code_equal')
+        self.assertEqual((parsed(STATUS)['actions'], parsed(STATUS)['cards']), ('status', 'quad'))
         self.assertEqual(parsed(RESET)['actions'], 'status reset')
+
+    def test_the_dependencies_are_written_down_machine_greppable(self):
+        text = (FOLDER / 'ORDER.txt').read_text(encoding='utf-8')
+        needs = [line[len('# NEEDS '):].split(' <- ') for line in text.splitlines() if line.startswith('# NEEDS ')]
+        self.assertEqual({tuple(left.split()): tuple(right.split()) for left, right in needs}, {('TL1', 'TL2', 'TL3', 'TL4'): ('L1',)})
 
     def test_the_timed_arms_alternate_A_B_A_B_and_the_order_names_the_pairing(self):
         self.assertEqual([parsed(name)['profile'] for name in TIMED], [CONTROL, ARM, CONTROL, ARM])
         order = (FOLDER / 'ORDER.txt').read_text(encoding='utf-8')
-        for word in ('PAIRED per round', 'ABAB', 'lookup_tau_report.py', 'lookup_sim.py', 'NO-GO', 'rescan before reset'):
+        for word in ('PAIRED per round', 'ABAB', 'lookup_tau_report.py', 'lookup_sim.py', 'NO-GO', 'rescan before reset', 'SMOKE_JSON', 'FOUR boards'):
             self.assertIn(word, order)
 
     def test_public_text_names_no_rig_card_address_or_digest(self):

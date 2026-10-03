@@ -64,9 +64,9 @@ log line.
 ## Profile and window
 
 `c2-packed-tp4-best-lookup` is `c2-packed-tp4-best-strace` plus `QWEN_FAST_LOOKUP_DRAFT=n3m12`, nothing else (gate only; a test holds the
-difference to that one key). The job pack `scripts/ci/references/tp4-lookup-jobs`: B0 builds `tp4-lookup-1`; L1 is the audited smoke (rescan before
-reset); TL1..TL4 are the paired ABAB of best-strace against best-lookup on coding prompts at 4k and 32k; Z resets. No job stops or starts the node
-agent, hands back or deploys. `prompt_lookup.py` is in `docker/qwen-c2-overlay.txt`.
+difference to that one key). The job pack `scripts/ci/references/tp4-lookup-jobs`: X0 reads the rig status (four boards, no holder); B0 builds `tp4-lookup-1`; L1 is the
+audited smoke (rescan before reset); TL1..TL4 are the paired ABAB of best-strace against best-lookup on coding prompts at 4k and 32k (exactness read from
+the SMOKE_JSON hashes, tau from `lookup_tau_report.py`); Z resets. No job stops or starts the node agent, hands back or deploys. `prompt_lookup.py` is in `docker/qwen-c2-overlay.txt`.
 
 ## The offline estimate (`optimisation/lookup/`)
 
