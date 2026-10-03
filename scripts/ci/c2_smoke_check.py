@@ -122,6 +122,11 @@ TPUB_ENGAGED = '[TPUB] carry traces engaged'
 TPUB_DECLINED = '[TPUB] carry traces declined'
 TPUB_AUDIT_LINE = re.compile(r'\[TPUB-AUDIT\] op=(save|restore) checked=(\d+) mismatches=(\d+)')
 TPUB_LAYERS, TPUB_TENSORS_PER_LAYER = 48, 5
+# tp4/lookup (prompt_lookup, serving_fast_request.prepare): QWEN_FAST_LOOKUP_DRAFT names a policy (n<N>m<M>); the engaged line is logged once per
+# request, and one round line per user per round says which source proposed it and what the round committed.
+LOOKUP_FLAG = 'QWEN_FAST_LOOKUP_DRAFT'
+LOOKUP_ENGAGED = '[LOOKUP-DRAFT] engaged'
+LOOKUP_ROUND = re.compile(r'\[LOOKUP-ROUND\] request=(\S+) position=(\d+) source=(lookup|dflash2) match=(\d+) offered=(\d+) proposed=(\d+) committed=(\d+)')
 STEADY_TEST = 'concurrent4_steady'
 RESEND_TEST = 'steady_resend'
 # One line per packed round the coordinator selected (dflash_packed_proposal_coordinator.SELECT_LINE, QWEN_FAST_PACKED_AUDIT):
@@ -644,6 +649,34 @@ def tpub_problems(env, container_text):
     return problems
 
 
+def lookup_problems(env, container_text):
+    """The problems the profile's lookup setting leaves: with the flag off no [LOOKUP line at all; on, at least one engaged line naming the
+    policy and at least one well-formed round line (a user, a source, a proposed count of 0..15 (not 0 for a lookup round) and a committed
+    count of 1..16), and every [LOOKUP-ROUND] line must parse."""
+    value = (env.get(LOOKUP_FLAG) or '').strip().lower()
+    on = value not in ('', '0', 'off')
+    rounds = LOOKUP_ROUND.findall(container_text)
+    marked = container_text.count('[LOOKUP-ROUND]')
+    if not on:
+        if container_text.count(LOOKUP_ENGAGED) or marked or '[LOOKUP-DRAFT]' in container_text:
+            return ['%s is not set and the log holds lookup lines: the lookup ran on a profile without it' % LOOKUP_FLAG]
+        return []
+    problems = []
+    if not container_text.count(LOOKUP_ENGAGED):
+        problems.append('%s=%s and no engaged line (%s) was logged: the lookup was never built' % (LOOKUP_FLAG, value, LOOKUP_ENGAGED))
+    elif 'policy=%s' % value not in container_text:
+        problems.append('the engaged line does not name the policy of the profile (policy=%s)' % value)
+    if not marked:
+        problems.append('%s=%s and no [LOOKUP-ROUND] line was logged: no round carried the lookup bookkeeping' % (LOOKUP_FLAG, value))
+    elif len(rounds) != marked:
+        problems.append('%d [LOOKUP-ROUND] lines, %d of them malformed' % (marked, marked - len(rounds)))
+    bad = [line for line in rounds if not (0 <= int(line[5]) <= 15 and 1 <= int(line[6]) <= 16 and (line[2] != 'lookup' or int(line[5]) > 0))]
+    if bad:
+        problems.append('%d [LOOKUP-ROUND] lines with an impossible count (first: request=%s source=%s proposed=%s committed=%s)'
+                        % (len(bad), bad[0][0], bad[0][2], bad[0][5], bad[0][6]))
+    return problems
+
+
 def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=None):
     """(problems, facts) for a smoke log and a container log. `env` (the served profile's) adds the batched-draft
     stop conditions, `entry` (its whole record) the traffic profile's admission and parser conditions."""
@@ -695,6 +728,7 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
             facts['fused'] = fused
         problems += fused_problems(env, container_text, steady, fused)
         problems += tpub_problems(env, container_text)
+        problems += lookup_problems(env, container_text)
     if entry is not None:
         problems += traffic_problems(container_text, entry)
     if slide:

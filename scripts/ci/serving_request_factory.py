@@ -576,5 +576,14 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
             publish_prewarm.warm(device, engine)
         request = FastRequest(session, engine, runtime, release_drafter=device.close,
             collect_timings=os.environ.get('QWEN_FAST_PHASE_TIMING') == '1')
+        # QWEN_FAST_LOOKUP_DRAFT (default off): a host-side lookup over this request's token history that replaces
+        # DFlash2's proposal rows on the rounds its policy picks. Unset, nothing is imported or built.
+        if os.environ.get('QWEN_FAST_LOOKUP_DRAFT', '').strip().lower() not in ('', '0', 'off'):
+            import prompt_lookup
+
+            request.lookup = prompt_lookup.for_request(prompt, session, request_id=state.req_id)
+            if request.lookup is not None:
+                _log('{} policy={} request={} history={}', prompt_lookup.ENGAGED, request.lookup.policy, state.req_id,
+                     len(request.lookup.index))
         owned.pop_all()
     return request
