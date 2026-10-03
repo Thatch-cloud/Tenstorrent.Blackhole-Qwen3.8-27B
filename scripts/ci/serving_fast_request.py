@@ -39,6 +39,9 @@ class FastRequest:
         self.collect_timings = collect_timings
         self.timings = []
         self.prepared_timing = self.last_commit_time = None
+        # QWEN_FAST_LOOKUP_DRAFT (prompt_lookup.RequestLookup), set by the request factory only when the flag names a
+        # policy; None is every caller as it always was.
+        self.lookup = None
 
     def prepare(self, request_id, packed_rows=None):
         """Prepare this request's ticket. `packed_rows` is the width of a round the packed
@@ -61,6 +64,10 @@ class FastRequest:
                                               full_width=True)
             else:
                 ticket = self.session.propose(request_id, max_rows=rows, selected=self.runtime.drafter_name)
+            if self.lookup is not None:
+                # After the session proposed and before anything reads the ticket: vLLM's drafts, the scheduler's
+                # admission and the verify's staging all see the lookup's rows, never DFlash2's replaced ones.
+                ticket = self.lookup.apply(self.session, ticket)
             if self.collect_timings:
                 self.prepared_timing = (started, time.perf_counter())
             return ticket
@@ -123,6 +130,8 @@ class FastRequest:
             return
         if self.session.phase == 'pending' and self.engine.phase == 'idle':
             self.session.fail_verification(request_id, self.session.pending)
+        if self.lookup is not None:
+            self.lookup.finish(len(self.session.emitted))
         self.engine.close()
         self.release_drafter()
         self.session.close(request_id)
