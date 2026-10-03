@@ -245,7 +245,7 @@ class ShipmentTests(unittest.TestCase):
     def test_the_importing_module_ships_beside_it(self):
         importing = [path.name for path in HERE.glob('*.py') if not path.name.startswith('test_')
                      and re.search(r'^\s*(import|from) sdpa_long_tp\b', path.read_text(encoding='utf-8'), re.M)]
-        self.assertEqual(importing, ['extent_attention_fold_tp.py', 'tp_addresses.py'])
+        self.assertEqual(sorted(importing), ['extent_attention_fold_tp.py', 'tp_addresses.py'])
         self.assertIn('extent_attention_fold_tp.py', self.read('docker/qwen-fast-serving.Dockerfile'))
 
     def test_the_module_is_py37_stdlib_only(self):
