@@ -96,7 +96,10 @@ def main(argv=None):
     ids = {}
     for path in args.ids:
         for record in jl(path):
-            ids[record['turn_id']] = record['ids']
+            slot = (record.get('arm'), record['turn_id'])
+            if slot in ids and ids[slot] != record['ids']:
+                raise SystemExit('two different prompt id lists for the same turn %r: refusing to overwrite one arm prompt with another (records carry no arm: build one arm at a time with --arms and that arm ids file)' % (slot,))
+            ids[slot] = record['ids']
     by_stream = dict((t['request_id'], key) for key, t in chosen.items() if t.get('request_id'))
     rounds, unattributed = parse_log(args.log, by_stream)
 
@@ -105,10 +108,10 @@ def main(argv=None):
         if key[0] not in args.arms:
             continue
         out = outputs.get(key) or []
-        prompt = ids.get(key[1]) or []
+        prompt = ids.get(key) or ids.get((None, key[1])) or []
         plen = turn.get('prompt_tokens') or len(prompt)
         if prompt and len(prompt) != plen:
-            print('prompt length mismatch for a turn: %d vs %d' % (len(prompt), plen), file=sys.stderr)
+            raise SystemExit('prompt length mismatch for turn %r: %d ids vs %d prompt tokens' % (key, len(prompt), plen))
         log = rounds.get(key) or []
         entries, last = [], len(log) - 1
         for index, entry in enumerate(log):

@@ -20,6 +20,10 @@ conditioned on DFlash2's chain, not on the lookup's, so they only matter when th
 
 No device state is touched here. The index is plain Python integers; it allocates nothing on a card and runs while
 the verify replays or before the ticket is handed to vLLM, so there is no capture hazard to keep ahead of.
+
+THE ADMISSION COST. The index is built synchronously when the request is created, after its prefill and on the step
+thread, so it is NOT hidden behind the prefill. To bound the stall it indexes at most the last MAX_INDEXED_PROMPT
+prompt tokens (32768; about 0.07 s), plus every committed token.
 """
 
 import os
@@ -28,6 +32,12 @@ LOOKUP_FLAG = 'QWEN_FAST_LOOKUP_DRAFT'
 TOKEN_BITS = 18                      # the vocabulary (248,320) fits in 18 bits: a key is an exact packed integer
 MAX_BACK = 64                        # how far a match is extended backwards (and the largest gate)
 MIN_N, MAX_N = 2, 6
+# The index is built on the engine step thread right after the prefill (FastRequest is created from the prefilled
+# session), so its cost stalls every decoding seat. Only the most recent MAX_INDEXED_PROMPT prompt tokens are
+# indexed: about 0.07 s and 4 MB at the cap, however long the prompt (0.27 s for 123k tokens, 0.6 s for 254k
+# uncapped). The code a reply copies is overwhelmingly in the recent context, and the committed tokens are
+# always indexed whole.
+MAX_INDEXED_PROMPT = 32768
 OFF_VALUES = ('', '0', 'off')
 
 ENGAGED = '[LOOKUP-DRAFT] engaged'
@@ -150,7 +160,7 @@ class RequestLookup:
         if not isinstance(policy, LookupPolicy):
             raise ValueError('A parsed lookup policy is required')
         self.policy, self.request_id, self.vocab_size = policy, request_id, vocab_size
-        self.index = TokenLookup(prompt, policy.n)
+        self.index = TokenLookup(tuple(prompt)[-MAX_INDEXED_PROMPT:], policy.n)
         self.synced = 0              # how many of session.emitted are in the index
         self.open = None             # the round whose commit has not been logged yet
         self.rounds = self.lookup_rounds = 0

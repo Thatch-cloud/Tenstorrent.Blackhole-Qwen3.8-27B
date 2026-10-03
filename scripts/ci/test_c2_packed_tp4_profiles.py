@@ -166,7 +166,9 @@ TPUB_PROFILES = {'c2-packed-tp4-best-strace-tpub': ('c2-packed-tp4-best-strace',
                  'c2-packed-tp4-best-gate-tpub': ('c2-packed-tp4-best-gate', {TPUB: '1', TPUB_AUDIT: '1'})}
 # The prompt-lookup window's timed arm (tp4/lookup): c2-packed-tp4-best-strace plus QWEN_FAST_LOOKUP_DRAFT=n3m12 and nothing else (LookupProfileTests).
 LOOKUP, LOOKUP_POLICY = 'QWEN_FAST_LOOKUP_DRAFT', 'n3m12'
-LOOKUP_PROFILES = ('c2-packed-tp4-best-lookup',)
+LOOKUP_PROFILES = ('c2-packed-tp4-best-lookup', 'c2-packed-tp4-best-gate-lookup')
+# each lookup arm's base: the timed arm sits on best-strace, the audited smoke arm on best-gate
+LOOKUP_BASE = {'c2-packed-tp4-best-lookup': 'c2-packed-tp4-best-strace', 'c2-packed-tp4-best-gate-lookup': 'c2-packed-tp4-best-gate'}
 FUSED_FAMILY = sorted(set(FCOMMIT_PROFILES) | set(BEST_PROFILES) | set(BEST_HANG_FIX) | set(NEXT3_PROFILES) | set(TPUB_PROFILES) | set(LOOKUP_PROFILES))
 
 
@@ -588,7 +590,7 @@ class DraftProfileTests(unittest.TestCase):
         on = sorted(name for name, profile in found.items() if profile['env'].get(QUAD) == '1'
                     and profile['env'].get('QWEN_FAST_TP') == '4')
         on = [name for name in on if name not in NEXT4_PROFILES + NEXT5_PROFILES]
-        self.assertEqual(on, ['c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-gate-tpub', 'c2-packed-tp4-best-lookup', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-best-strace-tpub', 'c2-packed-tp4-gate-fcommit-quad',
+        self.assertEqual(on, ['c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-gate-lookup', 'c2-packed-tp4-best-gate-tpub', 'c2-packed-tp4-best-lookup', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-best-strace-tpub', 'c2-packed-tp4-gate-fcommit-quad',
                               'c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-quad'])
         self.assertEqual([name for name in on if 'fcommit' not in name and 'best' not in name],
                          ['c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-quad'], 'the fused-commit family is the other two')
@@ -818,7 +820,7 @@ class LookupProfileTests(unittest.TestCase):
         found = profiles()
         for name in LOOKUP_PROFILES:
             with self.subTest(profile=name):
-                mine, base = found[name], found['c2-packed-tp4-best-strace']
+                mine, base = found[name], found[LOOKUP_BASE[name]]
                 self.assertEqual(mine['env'], dict(base['env'], **{LOOKUP: LOOKUP_POLICY}))
                 self.assertEqual(sorted(key for key in mine['env'] if key not in base['env']), [LOOKUP])
                 for key in set(mine) | set(base):

@@ -32,7 +32,8 @@ FLAG, POLICY = 'QWEN_FAST_LOOKUP_DRAFT', 'n3m12'
 STATUS, BUILD, SMOKE, RESET = 'X0-status-rmi', 'B0-build', 'L1-lookup-audited-smoke', 'Z-reset'
 TIMED = ('TL1-timed-A-best-strace', 'TL2-timed-B-best-lookup', 'TL3-timed-A-best-strace', 'TL4-timed-B-best-lookup')
 ORDERED = (STATUS, BUILD, SMOKE) + TIMED + (RESET,)
-PROFILE_OF = {BUILD: PRODUCTION, SMOKE: ARM, TIMED[0]: CONTROL, TIMED[1]: ARM, TIMED[2]: CONTROL, TIMED[3]: ARM}
+SMOKE_ARM = 'c2-packed-tp4-best-gate-lookup'   # the audited twin: best-gate plus the flag, so the lever audits run beside the lookup
+PROFILE_OF = {BUILD: PRODUCTION, SMOKE: SMOKE_ARM, TIMED[0]: CONTROL, TIMED[1]: ARM, TIMED[2]: CONTROL, TIMED[3]: ARM}
 FORBIDDEN_ACTIONS = {'agentstop', 'agentstart', 'unserve', 'push', 'replay', 'prefix', 'platform'}
 
 
@@ -85,8 +86,9 @@ class OrderTests(unittest.TestCase):
         outputs = parsed(BUILD)
         self.assertEqual((outputs['actions'], outputs['cards'], outputs['tag'], outputs['profile']), ('build', 'quad', IMAGE, PRODUCTION))
         self.assertEqual(parsed(SMOKE)['actions'], 'rescan reset smoke')
+        self.assertEqual(parsed(STATUS)['actions'], 'status rescan')
         for name in ORDERED:
-            if name not in (BUILD, SMOKE):
+            if name not in (BUILD, SMOKE, STATUS):
                 self.assertNotIn('rescan', parsed(name)['actions'].split(), name)
             self.assertEqual('build' in parsed(name)['actions'].split(), name == BUILD, name)
 
@@ -97,7 +99,7 @@ class OrderTests(unittest.TestCase):
             self.assertEqual(parsed(name)['actions'], 'reset smoke')
             self.assertEqual(parsed(name)['tests'], 'warmup,coding,concurrent4_code_equal,concurrent4_code_32k')
         self.assertEqual(parsed(SMOKE)['tests'], 'warmup,coding,long_real_text,concurrent4_solo,concurrent4,concurrent4_code_equal')
-        self.assertEqual((parsed(STATUS)['actions'], parsed(STATUS)['cards']), ('status', 'quad'))
+        self.assertEqual((parsed(STATUS)['actions'], parsed(STATUS)['cards']), ('status rescan', 'quad'))
         self.assertEqual(parsed(RESET)['actions'], 'status reset')
 
     def test_the_dependencies_are_written_down_machine_greppable(self):
@@ -134,9 +136,22 @@ class ProfileTests(unittest.TestCase):
         self.assertIn('GATE ONLY', arm['description'])
         self.assertIn('UNVERIFIED on hardware', arm['description'])
 
+    def test_the_audited_smoke_arm_is_best_gate_plus_the_one_flag_and_carries_the_lever_audits(self):
+        gate, arm = PROFILES['c2-packed-tp4-best-gate'], PROFILES[SMOKE_ARM]
+        self.assertEqual(arm['env'], dict(gate['env'], **{FLAG: POLICY}))
+        for key in set(gate) | set(arm):
+            if key not in ('env', 'description'):
+                self.assertEqual(arm.get(key), gate.get(key), key)
+        for audit in ('QWEN_FAST_VERIFY_T1_AUDIT', 'QWEN_FAST_VERIFY_T2_AUDIT', 'QWEN_FAST_FUSED_COMMIT_AUDIT', 'QWEN_FAST_DRAFT_SINGLES_AUDIT', 'QWEN_FAST_TP4_VGLUE_AUDIT'):
+            self.assertNotIn(PROFILES[ARM]['env'].get(audit, '0'), ('1', 'all'), 'the timed arm stays unaudited: ' + audit)
+            self.assertIn(arm['env'].get(audit), ('1', 'all'), audit)
+        self.assertTrue(arm['gate_only'])
+        self.assertIn('GATE ONLY', arm['description'])
+        self.assertIn('UNVERIFIED on hardware', arm['description'])
+
     def test_the_flag_is_off_everywhere_else_and_the_policy_parses(self):
         for name, profile in PROFILES.items():
-            self.assertEqual(FLAG in profile['env'], name == ARM, name)
+            self.assertEqual(FLAG in profile['env'], name in (ARM, SMOKE_ARM), name)
         self.assertEqual(repr(prompt_lookup.parse_policy(PROFILES[ARM]['env'][FLAG])), POLICY)
 
     def test_the_default_stays_production(self):

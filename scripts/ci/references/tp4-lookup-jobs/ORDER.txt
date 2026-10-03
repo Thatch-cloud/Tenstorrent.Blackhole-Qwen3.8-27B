@@ -6,15 +6,15 @@
 # P0. NO OTHER WINDOW DRIVER MAY BE ALIVE (a ship window's driver ends in agentstart: confirm it finished or is dead). The CPU suite green on this branch first. B0 never runs during a timing job.
 # Judge every ABAB PAIRED per round, never by unpaired medians; check the load average; push nothing to CI during a timed arm (CI runs on the same host's runners).
 # DEPENDENCIES (machine-greppable, pinned by test_tp4_lookup_window): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the
-# driver skips them and the window continues (a skipped soft job does not stop it). X0 and B0 are stop jobs. L1 is the first job that resets the quad: its actions put rescan before reset.
+# driver skips them and the window continues (a skipped soft job does not stop it). X0 and B0 are stop jobs. X0 runs a bus rescan (so a board without a by-id link is recovered before its stop rule); L1, the first job that resets the quad, keeps rescan before reset.
 # NEEDS TL1 TL2 TL3 TL4 <- L1
 # READ RULES (what passing each arm means; each also needs c2_smoke_check clean and no stall):
-#   X0  the status block shows FOUR boards resolved, no holder, 'serving containers: none'. Anything else stops the window.
+#   X0  after the rescan step all FOUR boards resolved (the status block precedes the rescan and may show a board it recovers: judge the rescan step's after-the-rescan list), no holder, 'serving containers: none'. Anything else stops the window.
 #   B0  provenance report with no problem line (prompt_lookup.py is in docker/qwen-c2-overlay.txt), the image id printed.
-#   L1  '[LOOKUP-DRAFT] engaged policy=n3m12' once per request and [LOOKUP-ROUND] lines every round; concurrent4_solo and concurrent4 equal in-job; concurrent4_code_equal hashes recorded as the lookup arm's (a lossless
+#   L1  (on c2-packed-tp4-best-gate-lookup: the combined best's verify, fused-commit, vglue and singles audits ON beside the lookup; none may report a mismatch) '[LOOKUP-DRAFT] engaged policy=n3m12' once per request and [LOOKUP-ROUND] lines every round; concurrent4_solo and concurrent4 equal in-job; concurrent4_code_equal hashes recorded as the lookup arm's (a lossless
 #       drafter changes no text, so they must equal TL1's).
 #   TL1-TL4  paired ABAB, best-strace against best-lookup. THE QUESTION is tau, not speed alone: B must commit more tokens per round on the rounds the lookup serves, and the round time must not grow by
-#       more than the host lookup costs (a dict probe and a 15-token copy per user: tens of microseconds; the index is built at admission, once, in the prefill's shadow).
+#       more than the host lookup costs (a dict probe and a 15-token copy per user: tens of microseconds; the index is built once per request on the step thread right after the prefill, NOT in its shadow, and is capped at the last 32768 prompt tokens: about 0.07 s, nothing at the 4k and 32k prompts timed here).
 #       Report tau per arm and per source with scripts/ci/lookup_tau_report.py; the offline estimate (optimisation/lookup/lookup_sim.py) predicts what B should see: compare it with the measured share
 #       of lookup rounds and their tau. SMOKE_JSON content_sha256, reasoning_sha256, completion_tokens and finish identical A against B, test by test and user by user.
 #       NO-GO for adopting the flag: any text difference between A and B, any stall, B's round slower than A's by more than 2 ms at equal live count with no tau gain.

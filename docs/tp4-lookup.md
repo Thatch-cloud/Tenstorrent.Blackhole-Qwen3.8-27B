@@ -40,9 +40,12 @@ advances it from the target's verified features at the committed prefix, never f
 
 ## Cost
 
-The index is built once per request at admission: a dict from the packed integer key (18 bits a token) to the end index of the most recent
-earlier occurrence, plus the history list. Measured on a laptop CPU with 123,000 random tokens (the worst case: every key distinct): 0.27 s to build,
-14 MB, in the shadow of a prefill that takes seconds. A round costs about 5 microseconds to propose (a dict probe, a backward comparison of at most 64 tokens, a
+The index is built once per request, synchronously, when the request is created: `serving_request_factory` calls `prompt_lookup.for_request` after the
+prefill, on the engine step thread. It is NOT in the shadow of the prefill: while it builds, every decoding seat waits. A dict from the packed integer key
+(18 bits a token) to the end index of the most recent earlier occurrence, plus the history list. Measured on a laptop CPU with 123,000 random tokens (the
+worst case: every key distinct): 0.27 s to build, 14 MB; a 253,920-token prompt would cost about 0.6 s and 30 MB, about two eight-seat rounds of stall per
+admission. So the prompt is capped: only the last `MAX_INDEXED_PROMPT` = 32,768 prompt tokens are indexed (about 0.07 s and 4 MB at the cap), and every
+committed token is indexed whole. The offline estimate's prompt-inclusive history is the uncapped one; at 4k and 32k prompts (the timed arms) the cap changes nothing. A round costs about 5 microseconds to propose (a dict probe, a backward comparison of at most 64 tokens, a
 copy of 15) and about 36 microseconds with the six committed tokens appended to the index.
 
 ## Flag off
@@ -78,11 +81,12 @@ restart model the earlier alt-drafting analysis fitted). The `dflash` row of the
 
 Result on the 336 thinking-on turns of the lab's A1/A2 arms, 3 restart draws, spliced tickets:
 
-* With committed tokens only (no prompt ids at hand when this was written), the lookup is a lower bound and it is nothing: gate 16 gives +0.002 to +0.003 tau
+* With committed tokens only (no prompt ids at hand when this was written), the lookup finds nothing worth having (not a strict lower bound: extra matches from the prompt can pass the gate and still lose to DFlash2): gate 16 gives +0.002 to +0.003 tau
   (+0.1%) for every key length; gates below 8 lose (n3 gate 3: -3.4%, n2 gate 2: -10.7%).
 * The gain is in the prompt. The same lab data with the prompt ids, in the earlier alt-drafting analysis (longest match instead of most recent occurrence, no
   completion with DFlash2 rows), gives lookup-first hybrids of +0.133 to +0.135 tau (+3.0%) at gates 8-16, used on 6% of rounds at gate 16, and almost all of it
-  from sources more than 2,048 tokens back (beyond the drafter's window). Lookup alone is 1.96 against the drafter's 4.49.
+  from sources more than 2,048 tokens back (beyond the drafter's window). Lookup alone is 1.96 against the drafter's 4.49. That +0.13 comes from the earlier
+  longest-match matcher, not the served n3m12 most-recent policy, so n3m12 is not validated by it: TL1-TL4 are what measure it.
 * The recorded-start count says +0.44 for the same gate; the walk says +0.13. Trust the walk.
 
 Re-run with prompts (private inputs, stdlib only, any python 3.7+):

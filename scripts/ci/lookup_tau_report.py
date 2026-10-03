@@ -36,9 +36,11 @@ def logs_under(path):
         return [path]
     found = []
     for root, _, names in os.walk(path):
-        for name in names:
-            if name in ('container.log', 'server.log'):
+        # one log per arm directory: container.log and server.log can carry the same [PACKED] lines, which would count every round twice
+        for name in ('container.log', 'server.log'):
+            if name in names:
                 found.append(os.path.join(root, name))
+                break
     return sorted(found)
 
 

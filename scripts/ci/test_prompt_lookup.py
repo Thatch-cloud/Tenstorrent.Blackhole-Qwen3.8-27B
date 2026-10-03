@@ -258,6 +258,70 @@ class EngagedTests(unittest.TestCase):
         self.assertEqual(request.lookup.index.propose(15), prompt_lookup.TokenLookup(history, 2).propose(15))
 
 
+class VllmPathTests(unittest.TestCase):
+    """The scheduler's side: FastRunnerBridge.drafts -> draft_token_ids -> admit_scheduler_output, the real bridge and contract functions."""
+    ENVIRON = {prompt_lookup.LOOKUP_FLAG: 'n2m3'}
+
+    def bridge_for(self, environ):
+        from unittest.mock import patch
+        import serving_runner_bridge
+
+        request, events, seen, lines = session_fixture(self, environ=environ)
+        runner = SimpleNamespace(non_dp_async_scheduling=False, tt_data_parallel_size=1,
+                                 requests={'request': SimpleNamespace(block_ids=((0,),))})
+        page_binding = SimpleNamespace(engine=request.engine)
+        bridge = serving_runner_bridge.FastRunnerBridge(runner, request, page_binding)
+        outputs = SimpleNamespace(DraftTokenIds=lambda req_ids, draft_token_ids: SimpleNamespace(req_ids=req_ids, draft_token_ids=draft_token_ids))
+        stub = {'vllm': SimpleNamespace(), 'vllm.v1': SimpleNamespace(), 'vllm.v1.outputs': outputs}
+        return bridge, request, patch.dict(sys.modules, stub)
+
+    @staticmethod
+    def scheduled(ticket, rows):
+        cached = SimpleNamespace(req_ids=['request'], num_computed_tokens=[ticket.position], resumed_req_ids=())
+        return SimpleNamespace(scheduled_cached_reqs=cached, scheduled_new_reqs=(), finished_req_ids=(), preempted_req_ids=(),
+                               has_structured_output_requests=False, scheduled_encoder_inputs={},
+                               num_scheduled_tokens={'request': len(ticket.tokens)}, total_num_scheduled_tokens=len(ticket.tokens),
+                               scheduled_spec_decode_tokens={'request': list(rows)})
+
+    def test_vllm_is_handed_the_lookup_rows_and_admission_checks_against_them(self):
+        import serving_vllm_contract
+
+        bridge, request, patched = self.bridge_for(self.ENVIRON)
+        with patched:
+            drafts = bridge.drafts()
+            ticket = request.session.pending
+            self.assertEqual(ticket.source, 'lookup')
+            self.assertEqual(drafts.draft_token_ids, [list(ticket.tokens[1:])])
+            self.assertEqual(drafts.draft_token_ids[0][:9], [4, 5, 6, 7, 8, 9, 1, 2, 3])   # the lookup's rows lead
+            self.assertIs(serving_vllm_contract.admit_scheduler_output(request, self.scheduled(ticket, drafts.draft_token_ids[0])), ticket)
+            # a scheduler holding DFlash2's rows (what vLLM would carry had the lookup not replaced them) is refused
+            dflash_rows = list(range(4, 19))
+            with self.assertRaises(ValueError):
+                serving_vllm_contract.admit_scheduler_output(request, self.scheduled(ticket, dflash_rows))
+
+    def test_flag_off_vllm_is_handed_dflash2s_rows(self):
+        bridge, request, patched = self.bridge_for({})
+        with patched:
+            drafts = bridge.drafts()
+            self.assertEqual(drafts.draft_token_ids, [list(range(4, 19))])
+            self.assertEqual(request.session.pending.source, 'dflash2')
+
+
+class IndexCapTests(unittest.TestCase):
+    def test_a_long_prompt_is_indexed_only_to_its_recent_tail_and_the_committed_tokens_whole(self):
+        cap = prompt_lookup.MAX_INDEXED_PROMPT
+        prompt = tuple(range(1, 11)) + tuple(7 + (i % 3) for i in range(cap))      # the first ten tokens fall outside the cap
+        policy = prompt_lookup.LookupPolicy(2, 2)
+        lookup = prompt_lookup.RequestLookup(policy, prompt, request_id='r', vocab_size=1000, log=lambda *a, **k: None)
+        self.assertEqual(len(lookup.index), cap)
+        self.assertEqual(tuple(lookup.index.history), prompt[-cap:])
+        lookup.sync((5, 6))
+        self.assertEqual(len(lookup.index), cap + 2)
+        self.assertEqual(lookup.index.history[-2:], [5, 6])
+        short = prompt_lookup.RequestLookup(policy, PROMPT, request_id='r', vocab_size=1000, log=lambda *a, **k: None)
+        self.assertEqual(tuple(short.index.history), PROMPT)
+
+
 class WriteOrderingTests(unittest.TestCase):
     """The tokens reach the card in stage_packed from each entry's ticket (PackedVerifier.segment_users), at verify time."""
 
