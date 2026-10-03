@@ -285,10 +285,7 @@ class RetainedGDNBlock:
             self.replay_ready = True
             self.replay_fence, self.replay_fence_ms = 'replay', (time.perf_counter() - started) * 1000
 
-    def replay(self, operation, validated=False):
-        """`validated` (tp4/hostgap 1c, QWEN_FAST_TP4_WINDOW_VALIDATE): the caller has just validated this block's native bindings
-        (the pre-stage window, vouched by the fixture write epoch), so the check right before the trace is skipped. False, the
-        default, is the check every replay has always made."""
+    def replay(self, operation):
         if self.round_fences and not self.replay_ready:
             self.fence_at_replay()
         if self.closed or not self.replay_ready or self.selected_prefix is None or len(self.records) != 48:
@@ -296,8 +293,7 @@ class RetainedGDNBlock:
         if not callable(operation):
             raise ValueError('Bound trace replay operation required')
         self.replay_ready = False
-        if not validated:
-            self.validate_bindings()
+        self.validate_bindings()
         mesh = self.bound_mesh()
         if operation() is not None:
             raise RuntimeError('Replay operation must return None after enqueueing the bound trace')

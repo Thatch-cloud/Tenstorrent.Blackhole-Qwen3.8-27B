@@ -171,6 +171,38 @@ def window_validate_enabled(environ=None):
     return _flag(WINDOW_VALIDATE_FLAG, environ) and enabled(environ)
 
 
+def skip_next_binding_check(block):
+    """1c (QWEN_FAST_TP4_WINDOW_VALIDATE): a context manager under which the retained block's NEXT validate_bindings call is a no-op and every
+    later one is the block's own. RetainedGDNBlock.replay (a pinned source, never edited) makes its first check right before the trace, with nothing
+    between its entry and that check that validates (fence_at_replay only synchronizes); the check after the trace's sync, when there are no round
+    fences, is the second call and still runs. The instance attribute is put back (or removed) on exit, raise or not."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def scope():
+        had = 'validate_bindings' in vars(block)
+        previous = vars(block).get('validate_bindings')
+        inner = block.validate_bindings
+        state = {'skipped': 0}
+
+        def once():
+            if not state['skipped']:
+                state['skipped'] = 1
+                return None
+            return inner()
+
+        block.validate_bindings = once
+        try:
+            yield state
+        finally:
+            if had:
+                block.validate_bindings = previous
+            else:
+                del block.validate_bindings
+
+    return scope()
+
+
 def entry_diet_enabled(environ=None):
     """QWEN_FAST_TP4_ENTRY_DIET=1 (1d: one storage check per validator, incremental page validation)."""
     return _flag(ENTRY_DIET_FLAG, environ)

@@ -365,8 +365,6 @@ scripts/ci/attention_block_fold_tp.cpp
 scripts/ci/extent_attention_fold_tp.py
 # Traced publication K/V fusion head-count fix (tp4/next-3-scope): its TP4 sibling cache slices the per-chip KV head count.
 scripts/ci/dflash_traced_publish.py
-# tp4/hostgap (the eight-seat host gap, every flag default off): the retained block's replay takes the 1c `validated` argument that packed_verifier passes under
-# QWEN_FAST_TP4_WINDOW_VALIDATE, and the packed bridge's step entry carries the entry diet and the stage 0 timing. Both are in the P8 copy lists, so without these lines the image
-# would run the P8 base's copies: packed_verifier would call replay(validated=True) on a replay that does not take it.
-scripts/ci/gdn_records.py
+# tp4/hostgap (the eight-seat host gap, every flag default off): the packed bridge's step entry carries the entry diet and the stage 0 timing. It is in the P8 copy lists, so without this
+# line the image would run the P8 base's copy.
 scripts/ci/serving_packed_bridge.py

@@ -1811,7 +1811,8 @@ class PackedVerifierEngine:
                     if self.prestaged.audit or self.prestaged.full_audit:
                         self.fixture.retained.validate_bindings()
                         diagnostic('[PACKED-PRESTAGE-SHADOW] round=%d retained_bindings=ok' % (self.rounds + 1))
-                    self.fixture.retained.replay(operation, validated=True)
+                    with verify_prestage.skip_next_binding_check(self.fixture.retained):
+                        self.fixture.retained.replay(operation)
                 else:
                     self.fixture.retained.replay(operation)
                 # QWEN_FAST_ROUND_FENCES: the replay validated every native binding right before

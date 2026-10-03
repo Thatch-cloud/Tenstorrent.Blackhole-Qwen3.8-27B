@@ -459,15 +459,15 @@ class RealBlockTests(tvp.PrestageFixture):
 
     def verify_binding_checks(self, block, entries):
         """The retained block's own binding checks made inside the verify outside its replay (the audit's shadow), and the keyword
-        arguments the verify gave its replay. (The fake retained block's replay makes no check of its own: the real one is pinned in
-        ReplayValidatedTests.)"""
+        state the verify gave its replay: whether the block's validate_bindings was wrapped (its next call skipped) while the replay ran.
+        (The fake retained block's replay makes no check of its own: the real one is pinned in ReplayValidatedTests.)"""
         retained = block.fixture.retained
         replays = []
         original = retained.replay
-        retained.validate_bindings = Mock()
+        checker = retained.validate_bindings = Mock()
 
         def wrapped(operation, **kwargs):
-            replays.append(kwargs)
+            replays.append({'wrapped': retained.validate_bindings is not checker, **kwargs})
             return original(operation, **kwargs)
 
         retained.replay = wrapped
@@ -475,7 +475,8 @@ class RealBlockTests(tvp.PrestageFixture):
             predictions, metrics = block.verify(entries)
         finally:
             retained.replay = original
-        return retained.validate_bindings.call_count, replays, predictions, metrics
+        self.assertIs(retained.validate_bindings, checker, 'the instance attribute is put back after the replay')
+        return checker.call_count, replays, predictions, metrics
 
     def diff_round_checks(self, **flags):
         block = self.open_hostgap(**flags)
@@ -494,15 +495,15 @@ class RealBlockTests(tvp.PrestageFixture):
         off = self.diff_round_checks()
         on = self.diff_round_checks(QWEN_FAST_TP4_WINDOW_VALIDATE='1')
         self.assertEqual((off[3], on[3]), ('diff', 'diff'))
-        self.assertEqual(off[1], [{}], 'flag off: the replay is called as it always was')
-        self.assertEqual(on[1], [{'validated': True}])
+        self.assertEqual(off[1], [{'wrapped': False}], 'flag off: the replay is called as it always was')
+        self.assertEqual(on[1], [{'wrapped': True}])
         self.assertEqual((off[0], on[0]), (0, 0), 'no shadow without the audit')
         self.assertEqual(on[2], off[2], 'the same predictions')
 
     def test_under_the_audit_the_skipped_check_runs_as_a_shadow(self):
         self.h1a.clear()
         on = self.diff_round_checks(QWEN_FAST_TP4_WINDOW_VALIDATE='1', QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT='1')
-        self.assertEqual(on[1], [{'validated': True}])
+        self.assertEqual(on[1], [{'wrapped': True}])
         self.assertEqual(on[0], 1, 'the skipped check ran, once, before the replay')
         self.assertTrue(any(line.startswith('[PACKED-PRESTAGE-SHADOW] round=') and line.endswith('retained_bindings=ok')
                             for line in self.h1a))
@@ -512,7 +513,7 @@ class RealBlockTests(tvp.PrestageFixture):
         users = tvp.base_users()
         self.round(block, users)
         checks, replays, predictions, metrics = self.verify_binding_checks(block, self.entries(tvp.advanced(users, 2)))
-        self.assertEqual((checks, replays), (0, [{}]), 'no snapshot: the replay keeps its own check')
+        self.assertEqual((checks, replays), (0, [{'wrapped': False}]), 'no snapshot: the replay keeps its own check')
         self.assertEqual(self.paths()[-1], 'full')
 
     def test_stage_0_writes_new_lines_only_under_the_log_flag(self):
@@ -1046,7 +1047,7 @@ class PackTests(unittest.TestCase):
 
 
 class ShippingTests(unittest.TestCase):
-    RUNTIME = ('verify_prestage.py', 'packed_verifier.py', 'gdn_records.py', 'serving_packed_step.py', 'serving_packed_bridge.py',
+    RUNTIME = ('verify_prestage.py', 'packed_verifier.py', 'serving_packed_step.py', 'serving_packed_bridge.py',
                'serving_page_binding.py', 'quad_draft_tp.py', 'dflash_packed_proposal_coordinator.py')
 
     def test_every_module_the_levers_touch_is_in_both_image_copy_lists(self):
@@ -1076,9 +1077,9 @@ class ShippingTests(unittest.TestCase):
 
 
 class ReplayValidatedTests(unittest.TestCase):
-    """The real retained block: replay(validated=True) drops exactly the check right before the trace."""
+    """The real retained block, unedited: skip_next_binding_check drops exactly the check right before the trace."""
 
-    def replays(self, **kwargs):
+    def replays(self, skip):
         block = tgr.unpacked_block(48, 4)
         counted = Mock(side_effect=block.validate_bindings)
         block.validate_bindings = counted
@@ -1086,23 +1087,39 @@ class ReplayValidatedTests(unittest.TestCase):
             block.commit(2, synchronize=True)
             before = counted.call_count
             operation = Mock(return_value=None)
-            block.replay(operation, **kwargs)
+            if skip:
+                with vp.skip_next_binding_check(block):
+                    block.replay(operation)
+            else:
+                block.replay(operation)
         operation.assert_called_once_with()
+        self.assertIs(block.validate_bindings, counted, 'the block keeps the attribute it had')
         return counted.call_count - before, block
 
-    def test_validated_skips_the_pre_trace_check_and_nothing_else(self):
-        default, block = self.replays()
-        skipped, skipped_block = self.replays(validated=True)
-        explicit, unused = self.replays(validated=False)
-        self.assertEqual((default, explicit), (2, 2), 'before the trace and, without round fences, after its sync')
+    def test_skipping_drops_the_pre_trace_check_and_nothing_else(self):
+        default, block = self.replays(False)
+        skipped, skipped_block = self.replays(True)
+        self.assertEqual(default, 2, 'before the trace and, without round fences, after its sync')
         self.assertEqual(skipped, 1, 'the post-sync check stays')
         self.assertEqual((block.replay_epoch, skipped_block.replay_epoch), (1, 1))
         self.assertIsNone(skipped_block.selected_prefix)
 
-    def test_validated_still_refuses_a_replay_with_no_synchronized_commit(self):
+    def test_the_block_class_attribute_is_restored_and_a_raise_inside_restores_it_too(self):
+        block = tgr.unpacked_block(48, 4)
+        self.assertNotIn('validate_bindings', vars(block))
+        with vp.skip_next_binding_check(block):
+            self.assertIn('validate_bindings', vars(block))
+        self.assertNotIn('validate_bindings', vars(block))
+        with self.assertRaises(ValueError):
+            with vp.skip_next_binding_check(block):
+                block.replay(Mock())
+        self.assertNotIn('validate_bindings', vars(block))
+
+    def test_skipping_still_refuses_a_replay_with_no_synchronized_commit(self):
         block = tgr.unpacked_block(48, 4)
         with self.assertRaises(ValueError):
-            block.replay(Mock(), validated=True)
+            with vp.skip_next_binding_check(block):
+                block.replay(Mock())
 
     def test_a_rebound_native_buffer_still_fails_the_check_that_remains(self):
         block = tgr.unpacked_block(48, 4)
@@ -1110,7 +1127,8 @@ class ReplayValidatedTests(unittest.TestCase):
             block.commit(2, synchronize=True)
         block.validate_bindings = Mock(side_effect=[ValueError('Native layer binding changed')])
         with self.assertRaises(ValueError):
-            block.replay(Mock(return_value=None), validated=True)
+            with vp.skip_next_binding_check(block):
+                block.replay(Mock(return_value=None))
 
 
 class FlagOffIdentityTests(tvp.PrestageFixture):
