@@ -139,8 +139,15 @@ def passed(report):
     """True when the run completed, nothing errored, and every (projection, variant) is exact against the halves AND the tiles."""
     if not report.get('complete') or report.get('errors') or report.get('fatal_error'):
         return False
+    if compute_invalid(report):
+        return False
     results = report.get('results', [])
     return bool(results) and all(row.get('exact_halves') is True and row.get('exact_tiles') is True for row in results)
+
+
+def compute_invalid(report):
+    """True when a compute config was a guess, not the image's own constant: the verdict would be about a config the server does not use."""
+    return any(source == 'fallback' for source in (report.get('compute_sources') or {}).values())
 
 
 def verdict_lines(report):
@@ -159,7 +166,11 @@ def verdict_lines(report):
             None if best is None else '%s %.1f us builder %s' % (_label(best['config']), best['us'], json.dumps(best['arguments'], sort_keys=True))))
     lines.append('M8_MATMUL timing_total_ok=%s sum_t64=%s sum_t128=%s' % (report.get('timing_total_ok'), _us(report.get('sum_t64_us')),
                                                                          _us(report.get('sum_t128_us'))))
-    lines.append('M8_MATMUL verdict=%s' % ('PASS' if passed(report) else 'FAIL'))
+    lines.append('M8_MATMUL compute_sources=%s' % json.dumps(report.get('compute_sources') or {}, sort_keys=True))
+    if compute_invalid(report):
+        lines.append('M8_MATMUL verdict=INVALID (the HiFi2 compute config is the harness fallback, not tp_common.COMPUTE_HIFI2: mount the model sources)')
+    else:
+        lines.append('M8_MATMUL verdict=%s' % ('PASS' if passed(report) else 'FAIL'))
     return lines
 
 
@@ -198,6 +209,7 @@ class DeviceBackend(object):
         self.ttnn, self.torch, self.device = ttnn, torch, device
         self.hosts = {}
         self.compute = {}
+        self.compute_sources = {}     # compute key -> 'tp_common' (the image's constant) | 'fallback' (a guess: the verdict is INVALID)
 
     def weight_dtype(self, key):
         return {'bfp4': self.ttnn.bfloat4_b, 'bfp8': self.ttnn.bfloat8_b, 'bf16': self.ttnn.bfloat16}[key]
@@ -230,9 +242,15 @@ class DeviceBackend(object):
             try:
                 from models.demos.blackhole.qwen36.tt import tp_common
                 config = tp_common.COMPUTE_HIFI2
-            except Exception:  # noqa: BLE001 - the image's own constant when it imports, the same fields otherwise
+                self.compute_sources[key] = 'tp_common'
+            except Exception as error:  # noqa: BLE001 - the fields a guess; recorded, and the run's verdict is INVALID
+                print('!! tp_common.COMPUTE_HIFI2 not importable (%s: %s): HiFi2 falls back to a guessed config, verdict will be INVALID' % (
+                    type(error).__name__, error), flush=True)
+                self.compute_sources[key] = 'fallback'
                 config = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi2, math_approx_mode=False,
                                                           fp32_dest_acc_en=True, packer_l1_acc=True)
+        if key == 'lofi':
+            self.compute_sources[key] = 'harness'
         self.compute[key] = config
         return config
 
@@ -330,6 +348,7 @@ def main(argv=None):
     try:
         device = ttnn.open_device(device_id=args.device_id, l1_small_size=args.l1_small_size)
         backend = DeviceBackend(ttnn, torch, device)
+        report['compute_sources'] = backend.compute_sources
         for name in args.projection_list:
             entry = plan.named(name)
             variants = [None] if name == 'lm_head' else args.variant_list

@@ -7,7 +7,7 @@
 # container may be up when M1 starts (the card-M step waits for the buildx builders and refuses a held card M or A).
 # The CPU suite green on this branch first (gh workflow run qwen-cpu-suite.yml -f ref=tp4/m8-phase1).
 # READ RULES:
-#   M1  'M8_MATMUL verdict=PASS': every projection and both variants exact against the 64-row halves and the 32-row tiles, no error line, the report complete.
+#   M1  'M8_MATMUL verdict=PASS' with 'M8_MATMUL compute_sources=' showing hifi2 tp_common (verdict=INVALID means the model mount was missing and HiFi2 was a guess: rerun with it): every projection and both variants exact against the 64-row halves and the 32-row tiles, no error line, the report complete.
 #       FAIL is a finding, not a harness fault when it names a tile; the LM head's auto config is the expected one. The timing verdicts and the re-grid winner are data.
 #   Z   the status prints, the rescan finds every board, the reset completes on all four.
 # This window decides nothing about production: it is evidence for phase 2 of the 128-row block (graft M = 128 section, K/V halves writer, wiring).

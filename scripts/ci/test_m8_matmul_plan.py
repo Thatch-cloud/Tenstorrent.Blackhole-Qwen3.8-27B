@@ -298,6 +298,24 @@ class OrchestrationTests(unittest.TestCase):
             self.assertFalse(bytes_run.passed(dict(report, **{key: value})), key)
         self.assertFalse(bytes_run.passed(dict(complete=True, errors={}, results=[])))
 
+    def test_a_guessed_hifi2_config_makes_the_verdict_invalid(self):
+        """B1 must not return PASS about a compute config the server does not use: a tp_common import failure is recorded and INVALID."""
+        import types
+        fake = types.SimpleNamespace(MathFidelity=types.SimpleNamespace(HiFi2='hifi2', LoFi='lofi'),
+                                     WormholeComputeKernelConfig=lambda **kw: kw)
+        backend = bytes_run.DeviceBackend(fake, None, None)
+        self.assertEqual(backend.compute_config('hifi2')['math_fidelity'], 'hifi2')   # tp_common is not importable here
+        self.assertEqual(backend.compute_sources, {'hifi2': 'fallback'})
+        results = [bytes_run.run_projection(FakeBackend(), plan.named('mlp_w1'), 'served', 3, 2)]
+        report = dict(complete=True, errors={}, results=results, regrid={}, compute_sources=backend.compute_sources)
+        bytes_run.summarize(report)
+        self.assertTrue(bytes_run.compute_invalid(report))
+        self.assertFalse(bytes_run.passed(report))
+        self.assertIn('M8_MATMUL verdict=INVALID', bytes_run.verdict_lines(report)[-1])
+        ok = dict(report, compute_sources={'hifi2': 'tp_common', 'lofi': 'harness'})
+        self.assertTrue(bytes_run.passed(ok))
+        self.assertEqual(bytes_run.verdict_lines(ok)[-1], 'M8_MATMUL verdict=PASS')
+
     def test_the_regrid_lines_name_the_winner_with_its_builder_arguments(self):
         entry = plan.named('mlp_w3')
         rows, best = bytes_run.run_regrid(FakeBackend(), entry, 3, 2, 99)
