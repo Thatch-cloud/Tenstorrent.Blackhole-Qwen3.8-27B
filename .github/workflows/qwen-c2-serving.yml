@@ -238,6 +238,24 @@ jobs:
           fi
           chmod -R a+rX $OUT
           INNER
+          cat > "$out/markers.sh" <<'MKR'
+          # usage: markers.sh label:path ...; writes markers-<label>.txt, bindings-<label>.txt and symbols.txt under $OUT
+          OUT=${OUT:-/out}; mkdir -p "$OUT"
+          for pair in "$@"; do
+            label=${pair%%:*}; so=${pair#*:}
+            if [ ! -f "$so" ]; then echo "$label: absent" >> $OUT/symbols.txt; echo absent > $OUT/markers-$label.txt; continue; fi
+            grep -aoE 'QWEN_[A-Z0-9_]+' "$so" | sort -u > $OUT/markers-$label.txt
+            if command -v nm >/dev/null 2>&1; then
+              n=$(nm -D --defined-only "$so" 2>/dev/null | grep -ciE 'gated_delta|gdn_|attn_prep|nlp_concat')
+            else
+              n=nm-missing
+            fi
+            echo "$label: size=$(stat -c %s "$so") symbols=$n markers=$(wc -l < $OUT/markers-$label.txt)" >> $OUT/symbols.txt
+            case "$so" in */_ttnn.so) grep -aoE '(attn_decode_prep|gdn_decode_norm_gate|gdn_decode_conv_gates|decode_gated_delta_rule_packed|gdn_decay[a-z_]*)' "$so" | sort -u > $OUT/bindings-$label.txt ;; esac
+          done
+          chmod -R a+rX $OUT
+          MKR
+          sed -i 's/^          //' "$out/markers.sh"
           sed -i 's/^          //' "$out/dump.sh"
           # 1. the image
           if docker image inspect "$image" >/dev/null 2>&1; then
@@ -247,6 +265,15 @@ jobs:
             echo "image dump exit: $?"
           else
             echo "image $image is absent"; echo absent > "$out/image-ABSENT.txt"
+          fi
+          mhome=$(getent passwd "$(id -un)" | cut -d: -f6)
+          mkdir -p "$out/markers"; chmod 777 "$out/markers"
+          if [ -d "$mhome/opgraft-K64j" ] && docker image inspect "$image" >/dev/null 2>&1; then
+            docker run --rm --network none --entrypoint bash -v "$out/markers:/out" -v "$out/markers.sh:/markers.sh:ro" \
+              -v "$mhome/opgraft-K64j:/graft:ro" "$image" -c 'OUT=/out bash /markers.sh graft:/graft/_ttnncpp.so graft-ttnn:/graft/_ttnn.so image:/opt/tt-metal/build_Release/lib/_ttnncpp.so image-ttnn:/opt/tt-metal/build_Release/ttnn/_ttnncpp.so'
+            echo "markers (graft, image) exit: $?"
+          else
+            echo "markers: no graft dir or image" > "$out/markers/ABSENT.txt"
           fi
           # 2. the ttbuild container's tree
           # ttbuild is a build-only container (no cards). If it is stopped it is started for the dump and stopped again on any
@@ -279,6 +306,14 @@ jobs:
               mkdir -p "$out/ttbuild"
               docker cp ttbuild:/tmp/srcdump-out/. "$out/ttbuild/"
               docker exec ttbuild rm -rf /tmp/srcdump-out /tmp/srcdump.sh
+              docker cp "$out/markers.sh" ttbuild:/tmp/markers.sh
+              docker exec -e OUT=/tmp/mk-out ttbuild bash /tmp/markers.sh ttbuild-lib:/opt/tt-metal/build_Release/lib/_ttnncpp.so ttbuild-ttnn:/opt/tt-metal/build_Release/ttnn/_ttnncpp.so
+              echo "markers (ttbuild) exit: $?"
+              docker cp ttbuild:/tmp/mk-out/. "$out/markers/ttbuild-tmp/" 2>/dev/null
+              cat "$out/markers/ttbuild-tmp/symbols.txt" >> "$out/markers/symbols.txt" 2>/dev/null
+              mv "$out"/markers/ttbuild-tmp/markers-*.txt "$out/markers/" 2>/dev/null
+              rm -rf "$out/markers/ttbuild-tmp"
+              docker exec ttbuild rm -rf /tmp/mk-out /tmp/markers.sh
               docker exec ttbuild sh -c 'sha256sum /opt/tt-metal/build_Release/ttnn/_ttnncpp.so /opt/tt-metal/build_Release/lib/_ttnncpp.so' > "$out/ttbuild/ttbuild-build-ttnncpp-sha256.txt" 2>&1
               mv "$out/ttbuild/tt-metal.diff" "$out/ttbuild/ttbuild-tt-metal.diff" 2>/dev/null
             else
@@ -317,7 +352,7 @@ jobs:
             echo "opgraft-K64j: absent" >> "$out/host/ABSENT.txt"
           fi
           # 4. the manifest
-          rm -f "$out/dump.sh"
+          rm -f "$out/dump.sh" "$out/markers.sh"
           chmod -R a+rX "$out" 2>/dev/null
           {
             echo "image used: $(cat "$out/IMAGE_USED.txt")"
@@ -327,6 +362,8 @@ jobs:
             echo "ttbuild state: $(paste -sd";" "$out/ttbuild-state.txt" 2>/dev/null)"
             echo "ttbuild _ttnncpp.so sha256:"; cat "$out/ttbuild/ttbuild-build-ttnncpp-sha256.txt" 2>/dev/null
             echo "graft MANIFEST _ttnncpp.so: $(grep "_ttnncpp.so" "$out/host/graft-MANIFEST.sha256" 2>/dev/null)"
+            echo "== markers"; cat "$out/markers/symbols.txt" 2>/dev/null
+            (cd "$out/markers" 2>/dev/null && sha256sum markers-*.txt bindings-*.txt 2>/dev/null)
             for dir in image ttbuild host; do
               echo "== $dir"
               for f in "$out/$dir"/*; do
