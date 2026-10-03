@@ -1,0 +1,1 @@
+{"projection": "mlp_down", "entrypoint": "gdn-output-grid-probe.py", "before": "c6f8ac7226b06f7f28345ba44691607f7574a55c1e0efae1d67568089ffcfad0", "probe": "1e1cff6a32bf72d234877eace99953180e29e431300248f875dfee190f3e7d6f", "helper": "e6c70e8ca61bb524de79b09d2007869c39d4bd377f3e90c18d95a8b9702c6bec", "simulator_qualified": false}

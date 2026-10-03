@@ -1,0 +1,128 @@
+"""Fused SFPU dot-product correctness and isolated hardware latency."""
+
+import argparse
+import hashlib
+import json
+import os
+import time
+from pathlib import Path
+
+from draft_dot import fused_dot, dot_geometry
+from feature_projection import require_projection_environment
+from gdn_multitoken_conv import release_owned
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--keys', type=int, default=32)
+    parser.add_argument('--width', type=int, default=128)
+    parser.add_argument('--hardware', action='store_true')
+    parser.add_argument('--timing', action='store_true')
+    parser.add_argument('--cache-tiles', action='store_true')
+    parser.add_argument('--workers', type=int, choices=(64, 80, 110), default=64)
+    parser.add_argument('--columns-per-task', type=int, choices=(8, 32), default=32)
+    parser.add_argument('--selector-fixture', type=Path)
+    options = parser.parse_args()
+    require_projection_environment(os.environ, options.hardware)
+    if options.selector_fixture and (options.keys, options.width) != (32, 256):
+        parser.error('Learned selector scoring requires keys32/width256')
+    if options.selector_fixture and options.hardware and not (
+            options.cache_tiles and options.workers == 64 and options.columns_per_task == 32):
+        parser.error('Learned selector hardware requires validated cached 64-worker full-tile configuration')
+    split_validated = (options.workers == 110 and options.cache_tiles
+        and (options.keys, options.width, options.columns_per_task) == (128, 2080, 8))
+    if options.hardware and options.columns_per_task != 32 and not split_validated:
+        parser.error('Partial-tile tasks require simulator validation')
+    if options.hardware and options.workers != 64 and not (
+            (options.workers == 110 and options.cache_tiles and (options.keys, options.width) == (2080, 128)) or split_validated):
+        parser.error('Wider worker distribution requires simulator validation')
+    if options.hardware and not options.selector_fixture and (options.keys, options.width) not in ((32, 128), (2080, 128), (128, 2080)):
+        parser.error('Hardware requires a simulator-validated dot shape')
+    if options.timing and not options.hardware:
+        parser.error('Timing requires allocated hardware')
+    import torch
+    import ttnn
+
+    report = dict(passed=False, checks=[], scope=__doc__, keys=options.keys, width=options.width,
+        cache_tiles=options.cache_tiles,
+        worker_limit=options.workers,
+        columns_per_task=options.columns_per_task,
+        active_workers=dot_geometry((1, 16, 32, options.width), (1, 16, options.keys, options.width), options.workers, options.columns_per_task)[0],
+        timings_ms=[], backend='hardware' if options.hardware else 'simulator',
+        timing_scope='Warm dispatch, output allocation and synchronization; excludes input uploads and output readback/release',
+        sources={name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+            for name in ('draft-dot-probe.py', 'draft_dot.py', 'draft_dot_io.cpp', 'draft_dot_compute.cpp')})
+    mesh = None
+    tensors = []
+    try:
+        ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D if options.hardware else ttnn.FabricConfig.DISABLED)
+        mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), l1_small_size=24576)
+        mesh.enable_program_cache()
+        generator = torch.Generator().manual_seed(319)
+        left = torch.randn((1, 16, 32, options.width), generator=generator)
+        right = torch.randn((1, 16, options.keys, options.width), generator=generator)
+        selector = None
+        if options.selector_fixture:
+            from draft_selector_fixture import load_selector
+            from draft_selector_dot_fixture import prepare_selector_dot
+            from draft_selector_transitions import select_transition_scores
+            manifest, weights = load_selector(options.selector_fixture)
+            selector = prepare_selector_dot(weights)
+            left, right = selector['left'], selector['right']
+            report.update(selector_checkpoint=manifest,
+                selector_scope='Learned codebook dot scores with host-prepared synthetic candidates/hidden/unary; host greedy path; no shared LM head or full drafter')
+            report['sources'].update({name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                for name in ('draft_selector_dot_fixture.py', 'draft_selector_transitions.py', 'draft_selector.py', 'draft_selector_fixture.py')})
+        for host in (left, right):
+            tensors.append(ttnn.from_torch(host, device=mesh, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh)))
+        output = fused_dot(mesh, tensors[0], tensors[1], tensors, cache_tiles=options.cache_tiles, worker_limit=options.workers,
+            columns_per_task=options.columns_per_task)
+        control = fused_dot(mesh, tensors[0], tensors[1], tensors, cache_tiles=options.cache_tiles) if options.workers != 64 or options.columns_per_task != 32 else (
+            fused_dot(mesh, tensors[0], tensors[1], tensors) if options.cache_tiles else None)
+        expected = (left.double() @ right.double().transpose(-1, -2)).float()
+        for chip, tensor in enumerate(ttnn.get_device_tensors(output)):
+            actual = ttnn.to_torch(tensor)
+            torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-4)
+            if control is not None and not torch.equal(actual, ttnn.to_torch(ttnn.get_device_tensors(control)[chip])):
+                raise AssertionError('Dot candidate differs from baseline control')
+            report['checks'].append(dict(chip=chip, max_error=float((actual - expected).abs().max())))
+            if selector is not None:
+                scores = actual[:, :7, :16, :16].double() + selector['unary'].double()[:, :, None, :]
+                torch.testing.assert_close(scores, selector['expected_scores'], rtol=1e-5, atol=1e-4)
+                path, _ = select_transition_scores(scores, selector['candidates'])
+                if not torch.equal(path, selector['expected_path']):
+                    raise AssertionError('Learned selector dot scores changed the greedy proposal path')
+                report['checks'][-1].update(selector_score_max_error=float((scores - selector['expected_scores']).abs().max()),
+                    selector_path_exact=True, proposal_ids=path.tolist())
+        if options.timing:
+            baselines = [ttnn.to_torch(tensor).clone() for tensor in ttnn.get_device_tensors(output)]
+            for repetition in range(5):
+                temporary = []
+                try:
+                    ttnn.synchronize_device(mesh)
+                    started = time.perf_counter()
+                    repeated = fused_dot(mesh, tensors[0], tensors[1], temporary, cache_tiles=options.cache_tiles, worker_limit=options.workers,
+                        columns_per_task=options.columns_per_task)
+                    ttnn.synchronize_device(mesh)
+                    elapsed_ms = (time.perf_counter() - started) * 1000
+                    for chip, tensor in enumerate(ttnn.get_device_tensors(repeated)):
+                        if not torch.equal(ttnn.to_torch(tensor), baselines[chip]):
+                            raise AssertionError('Repeated dot output changed')
+                    report['timings_ms'].append(elapsed_ms)
+                finally:
+                    ttnn.synchronize_device(mesh)
+                    release_owned(ttnn, temporary)
+    finally:
+        if mesh is not None:
+            ttnn.synchronize_device(mesh)
+            release_owned(ttnn, tensors)
+            ttnn.close_mesh_device(mesh)
+        options.output.write_text(json.dumps(report, indent=2))
+    report['passed'] = True
+    options.output.write_text(json.dumps(report, indent=2))
+
+
+if __name__ == '__main__':
+    main()

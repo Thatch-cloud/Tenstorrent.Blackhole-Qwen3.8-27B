@@ -1,0 +1,25 @@
+diff --git a/ttnn/cpp/ttnn/operations/transformer/sources.cmake b/ttnn/cpp/ttnn/operations/transformer/sources.cmake
+--- a/ttnn/cpp/ttnn/operations/transformer/sources.cmake
++++ b/ttnn/cpp/ttnn/operations/transformer/sources.cmake
+@@ -2,6 +2,21 @@
+ # Module owners should update this file when adding/removing/renaming source files.
+ 
+ set(TTNN_OP_TRANSFORMER_SRCS
++    attn_prep/attn_prep.cpp
++    attn_prep/device/attn_prep_device_operation.cpp
++    attn_prep/device/attn_prep_program_factory.cpp
++    gdn_conv_gates/gdn_conv_gates.cpp
++    gdn_conv_gates/device/gdn_conv_gates_device_operation.cpp
++    gdn_conv_gates/device/gdn_conv_gates_program_factory.cpp
++    gdn_norm_gate/gdn_norm_gate.cpp
++    gdn_norm_gate/device/gdn_norm_gate_device_operation.cpp
++    gdn_norm_gate/device/gdn_norm_gate_program_factory.cpp
++    gdn_decay/gdn_decay.cpp
++    gdn_decay/device/gdn_decay_device_operation.cpp
++    gdn_decay/device/gdn_decay_program_factory.cpp
++    decode_gated_delta_rule/decode_gated_delta_rule.cpp
++    decode_gated_delta_rule/device/decode_gated_delta_rule_device_operation.cpp
++    decode_gated_delta_rule/device/decode_gated_delta_rule_program_factory.cpp
+     attention_softmax/attention_softmax.cpp
+     concatenate_heads/concatenate_heads.cpp
+     sdpa/device/ring_fusion.cpp

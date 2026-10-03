@@ -1,0 +1,199 @@
+{
+  "passed": true,
+  "closed_cleanly": true,
+  "backend": "simulator",
+  "sources": {
+    "/experiment-scripts/ci/gdn-output-grid-probe.py": "1e1cff6a32bf72d234877eace99953180e29e431300248f875dfee190f3e7d6f",
+    "/experiment-scripts/ci/mlp_down_grid.py": "e6c70e8ca61bb524de79b09d2007869c39d4bd377f3e90c18d95a8b9702c6bec",
+    "/experiment-scripts/ci/attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "/opt/tt-metal/models/demos/blackhole/qwen36/tt/tp_common.py": "5419361f26071b388fd58768f003b11c704b40d508524b968aab78362843aa66"
+  },
+  "checks": [
+    {
+      "label": "eager_0",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "label": "eager_0",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "label": "eager_1",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "label": "eager_1",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "label": "eager_2",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "label": "eager_2",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "label": "replay_1",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "label": "replay_1",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "label": "replay_2",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "label": "replay_2",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "label": "replay_0",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "label": "replay_0",
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "immutable_checks": [
+    {
+      "label": "eager_0",
+      "operand": "activation",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "label": "eager_0",
+      "operand": "activation",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "label": "eager_1",
+      "operand": "activation",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "label": "eager_1",
+      "operand": "activation",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "label": "eager_2",
+      "operand": "activation",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "label": "eager_2",
+      "operand": "activation",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "label": "replay_1",
+      "operand": "activation",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "label": "replay_1",
+      "operand": "activation",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "label": "replay_2",
+      "operand": "activation",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "label": "replay_2",
+      "operand": "activation",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "label": "replay_0",
+      "operand": "activation",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "label": "replay_0",
+      "operand": "activation",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "label": "complete",
+      "operand": "weight",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "label": "complete",
+      "operand": "weight",
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "negative_controls": [
+    {
+      "label": "replay_1",
+      "poisoned": true
+    },
+    {
+      "label": "replay_2",
+      "poisoned": true
+    },
+    {
+      "label": "replay_0",
+      "poisoned": true
+    }
+  ],
+  "hardware_qualified": false,
+  "timing_qualified": false,
+  "scope": "Synthetic native T16 MLP-down grids; no throughput or full-model claim.",
+  "projection": "mlp_down",
+  "rows": 16,
+  "k": 8704,
+  "n": 5120,
+  "grids": {
+    "control": [
+      11,
+      3
+    ],
+    "candidate": [
+      11,
+      8
+    ]
+  },
+  "output_placement": "L1",
+  "weights": "bfloat8_b",
+  "stage": "complete",
+  "sources_after": {
+    "/experiment-scripts/ci/gdn-output-grid-probe.py": "1e1cff6a32bf72d234877eace99953180e29e431300248f875dfee190f3e7d6f",
+    "/experiment-scripts/ci/mlp_down_grid.py": "e6c70e8ca61bb524de79b09d2007869c39d4bd377f3e90c18d95a8b9702c6bec",
+    "/experiment-scripts/ci/attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "/opt/tt-metal/models/demos/blackhole/qwen36/tt/tp_common.py": "5419361f26071b388fd58768f003b11c704b40d508524b968aab78362843aa66"
+  }
+}

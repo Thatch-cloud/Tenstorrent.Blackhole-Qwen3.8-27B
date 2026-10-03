@@ -1,0 +1,699 @@
+{
+  "passed": true,
+  "closed_cleanly": true,
+  "backend": "hardware",
+  "capacity": 66560,
+  "initial_position": 65535,
+  "scope": "Weight-free two-chip history writer and changed-input trace replay; not model or throughput acceptance.",
+  "checks": [
+    {
+      "ordinal": 0,
+      "chip": 0,
+      "name": "delta_device_baseline_exact",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 0,
+      "chip": 1,
+      "name": "delta_device_baseline_exact",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 0,
+      "chip": 0,
+      "name": "active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 0,
+      "chip": 1,
+      "name": "active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 0,
+      "chip": 0,
+      "name": "prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 0,
+      "chip": 1,
+      "name": "prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 0,
+      "chip": 0,
+      "name": "delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 0,
+      "chip": 1,
+      "name": "delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 0,
+      "chip": 0,
+      "name": "replay_active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 0,
+      "chip": 1,
+      "name": "replay_active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 0,
+      "chip": 0,
+      "name": "replay_prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 0,
+      "chip": 1,
+      "name": "replay_prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 0,
+      "chip": 0,
+      "name": "replay_delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 0,
+      "chip": 1,
+      "name": "replay_delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 1,
+      "chip": 0,
+      "name": "delta_device_baseline_exact",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 1,
+      "chip": 1,
+      "name": "delta_device_baseline_exact",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 1,
+      "chip": 0,
+      "name": "active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 1,
+      "chip": 1,
+      "name": "active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 1,
+      "chip": 0,
+      "name": "prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 1,
+      "chip": 1,
+      "name": "prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 1,
+      "chip": 0,
+      "name": "delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 1,
+      "chip": 1,
+      "name": "delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 1,
+      "chip": 0,
+      "name": "replay_active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 1,
+      "chip": 1,
+      "name": "replay_active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 1,
+      "chip": 0,
+      "name": "replay_prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 1,
+      "chip": 1,
+      "name": "replay_prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 1,
+      "chip": 0,
+      "name": "replay_delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 1,
+      "chip": 1,
+      "name": "replay_delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 2,
+      "chip": 0,
+      "name": "delta_device_baseline_exact",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 2,
+      "chip": 1,
+      "name": "delta_device_baseline_exact",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 2,
+      "chip": 0,
+      "name": "active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 2,
+      "chip": 1,
+      "name": "active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 2,
+      "chip": 0,
+      "name": "prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 2,
+      "chip": 1,
+      "name": "prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 2,
+      "chip": 0,
+      "name": "delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 2,
+      "chip": 1,
+      "name": "delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 2,
+      "chip": 0,
+      "name": "replay_active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 2,
+      "chip": 1,
+      "name": "replay_active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 2,
+      "chip": 0,
+      "name": "replay_prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 2,
+      "chip": 1,
+      "name": "replay_prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 2,
+      "chip": 0,
+      "name": "replay_delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 2,
+      "chip": 1,
+      "name": "replay_delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 3,
+      "chip": 0,
+      "name": "delta_device_baseline_exact",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 3,
+      "chip": 1,
+      "name": "delta_device_baseline_exact",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 3,
+      "chip": 0,
+      "name": "active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 3,
+      "chip": 1,
+      "name": "active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 3,
+      "chip": 0,
+      "name": "prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 3,
+      "chip": 1,
+      "name": "prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 3,
+      "chip": 0,
+      "name": "delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 3,
+      "chip": 1,
+      "name": "delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 3,
+      "chip": 0,
+      "name": "replay_active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 3,
+      "chip": 1,
+      "name": "replay_active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 3,
+      "chip": 0,
+      "name": "replay_prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 3,
+      "chip": 1,
+      "name": "replay_prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 3,
+      "chip": 0,
+      "name": "replay_delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 3,
+      "chip": 1,
+      "name": "replay_delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 4,
+      "chip": 0,
+      "name": "delta_device_baseline_exact",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 4,
+      "chip": 1,
+      "name": "delta_device_baseline_exact",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 4,
+      "chip": 0,
+      "name": "active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 4,
+      "chip": 1,
+      "name": "active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 4,
+      "chip": 0,
+      "name": "prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 4,
+      "chip": 1,
+      "name": "prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 4,
+      "chip": 0,
+      "name": "delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 4,
+      "chip": 1,
+      "name": "delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 4,
+      "chip": 0,
+      "name": "replay_active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 4,
+      "chip": 1,
+      "name": "replay_active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 4,
+      "chip": 0,
+      "name": "replay_prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 4,
+      "chip": 1,
+      "name": "replay_prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 4,
+      "chip": 0,
+      "name": "replay_delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 4,
+      "chip": 1,
+      "name": "replay_delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 5,
+      "chip": 0,
+      "name": "delta_device_baseline_exact",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 5,
+      "chip": 1,
+      "name": "delta_device_baseline_exact",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 5,
+      "chip": 0,
+      "name": "active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 5,
+      "chip": 1,
+      "name": "active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 5,
+      "chip": 0,
+      "name": "prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 5,
+      "chip": 1,
+      "name": "prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 5,
+      "chip": 0,
+      "name": "delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 5,
+      "chip": 1,
+      "name": "delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 5,
+      "chip": 0,
+      "name": "replay_active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 5,
+      "chip": 1,
+      "name": "replay_active_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 5,
+      "chip": 0,
+      "name": "replay_prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 5,
+      "chip": 1,
+      "name": "replay_prepared_spare",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 5,
+      "chip": 0,
+      "name": "replay_delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    },
+    {
+      "ordinal": 5,
+      "chip": 1,
+      "name": "replay_delta_unchanged",
+      "exact": true,
+      "mismatch_count": 0,
+      "mismatches": []
+    }
+  ],
+  "performance_qualified": false,
+  "model_integrated": false,
+  "trace_qualified": true,
+  "sources": {
+    "history-append-probe.py": "457c617f080e15c0ac7b89f600a537a89ed02caa64da03db340e502f4740883d",
+    "history_append_plan.py": "c3f0144478367c9ad2157ca86d105d24df30c3d1921c924eab645867721ec083",
+    "history_append_dma.py": "15eafc4fc9163d412d7fa06886a700eddb685254024c07985285e9e0bd0a3011",
+    "history_append_dma.cpp": "ab18e7fa4a3fbbe8df80dbcf3ac94eaef128ec30c32d15cf8fa108a2d639286f"
+  },
+  "upload_zero_sign_changes": [
+    5,
+    32,
+    68,
+    2,
+    68,
+    35
+  ]
+}

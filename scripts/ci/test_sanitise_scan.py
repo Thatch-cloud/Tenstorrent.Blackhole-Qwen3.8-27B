@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import sanitise_scan as scan
@@ -207,6 +208,29 @@ class ModeTests(unittest.TestCase):
         cache.mkdir()
         (cache / 'x.cpython-311.pyc').write_bytes(b'\0' + SAMPLES['card-serial'].encode())
         self.assertFalse([h for h in scan.scan_dir(self.tmp) if h[2].startswith('__pycache__')])
+
+    def test_dir_mode_fails_closed_on_an_unreadable_file(self):
+        (self.tmp / 'locked.txt').write_text('ok\n')
+        real_open = open
+
+        def refuse(path, *args, **kwargs):
+            if str(path).endswith('locked.txt'):
+                raise PermissionError('denied')
+            return real_open(path, *args, **kwargs)
+
+        with unittest.mock.patch('builtins.open', refuse):
+            hits = scan.scan_dir(self.tmp)
+        self.assertIn(('BLOCK', 'unreadable-file', 'locked.txt'), [(h[0], h[1], h[2]) for h in hits])
+
+    def test_dir_mode_reads_a_path_longer_than_260_characters(self):
+        deep = self.tmp
+        for _ in range(6):
+            deep = deep / ('d' * 45)
+        os.makedirs(scan._long(str(deep)))
+        with open(scan._long(str(deep / 'leak.txt')), 'w') as handle:
+            handle.write(SAMPLES['credential'] + '\n')
+        self.assertGreater(len(str(deep / 'leak.txt')), 260)
+        self.assertIn('credential', [h[1] for h in scan.scan_dir(self.tmp) if h[0] == 'BLOCK'])
 
     def test_main_exit_codes(self):
         self.commit('clean.txt', 'ok\n')

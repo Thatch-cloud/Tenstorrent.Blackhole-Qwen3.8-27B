@@ -1,0 +1,617 @@
+{
+  "passed": true,
+  "closed_cleanly": true,
+  "backend": "simulator",
+  "policy": "native-bf16-proposal-only",
+  "context": 31,
+  "target_integrated": false,
+  "accuracy_qualified": false,
+  "scope": "Approximate native proposal attention: mask isolation and replay, not an exact target replacement.",
+  "sources": {
+    "proposal_native_attention.py": "d3ff5e5d34fcbf271a70679fe57ef1c446135fc137f67b5cfd8211e2e72a9289",
+    "proposal-native-attention-probe.py": "f43b83b1eac3c25d5182f03f33f72404f74b1979b3e335f3f4bcea27acdc309f",
+    "proposal_native_attention_gate.py": "b290cb8cac9c75b171047ec4acf36d1fbbb193e34d37efb3e3f5fed4b349a8ce",
+    "draft_attention.py": "a6684d962b9c5aece726ad555962805e2283fed5db54efd3652efc92ae3f443d",
+    "draft_live_qk.py": "2f145d0320ca58a4b7c0ec3f143720c3f105a560d20ff1576a9c872601dd9774",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859",
+    "feature_projection.py": "615edcc56d83155b3eb40ccd85d3fa46d06b4cc16733ae3ce02c5763d132478a",
+    "live_qk_gate.py": "1e64ab6bbdc4936b6fb94d1291375aea31648639830fc64e0ce6f009105a7c78"
+  },
+  "native_sources": {
+    "tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h": "8aaf199a2439c5956ee077a5e9451981909e9589d5b81d1c5d7fc65f76e0e5d7",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/sdpa.cpp": "09abecee481f0c305e035402fbc237265f2bda52fee9d1cc75e16899b1b04f45",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/sdpa.hpp": "2689a3b30c13b61b7ae138ec8e6f50f18c19c0a60e41fd841006485b534b55da",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/sdpa_nanobind.cpp": "5b7434fc3612bce3ae55bce6ba7806af4ddfbae1f829114597cb2388ba93492b",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_device_operation.cpp": "cfc854c310905c130cb7d787fe103e6710dc9606468e33718d6e926ab8b6f018",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_device_operation.hpp": "606228b55844c4a5ea110b2067b487bb392734e86154a95466e91e38c5b3ef39",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_device_operation_types.hpp": "d0c2db73d3638174d8376d8e37b9927f439db68f4133397351fd77b79ae1d6bc",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_program_factory.cpp": "a263559fe23cdf6fa8194604b238a939d299a356592eae1c7b2df11868383ebc",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_interleaved_cb_ids.hpp": "4337da64e7233683157b74228be94af5906193363c5079fc8291badb0bd8a25d",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_subblock_utils.hpp": "751f40da1a6a1e095a8a36134276a8f0bb4321eb027d0be715bd52a719d56add",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/kernels/compute/compute_common.hpp": "3fb5da2440c3bf90ebceb8acd55424c7739339de4c6b02db83836e1e3414fa19",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/kernels/compute/compute_streaming.hpp": "cd38bbf8ea7d0745770a7e5836281951b4715f2de2c6f84556185c2de7ab3efa",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/kernels/compute/sdpa.cpp": "a3f48af8ba0fd63b136c79a54c8b6f7b4b5b8fb0d7a209bf5701f081ed7fa3e0",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/kernels/dataflow/reader_interleaved.cpp": "f97f5490cf476db92d575de33c85f8707f96d7474896ee086ee864c23a3efa27",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/kernels/dataflow/writer_interleaved.cpp": "2a0959ff7cce507eab39f2e063f4dbc264d8b51f4db9f479b8c2419435c745c2"
+  },
+  "packer_zero_graft": true,
+  "fixture_sha256": "0974cf572f0db9291f56b4ee322829d60f61484e2521b4b69c8393035b541e49",
+  "operand_scope": "Learned layer0 rank0 replicated on both chips plus changed synthetic inputs",
+  "eager_checks": [
+    {
+      "pattern": 0,
+      "chip": 0,
+      "finite_all_rows": true,
+      "numerical_difference": {
+        "max_abs": 0.39284801483154297,
+        "mean_abs": 0.04848885163664818,
+        "rms": 0.06452528387308121,
+        "reference_max_abs": 24.055360794067383,
+        "legacy_close": false
+      }
+    },
+    {
+      "pattern": 0,
+      "chip": 1,
+      "finite_all_rows": true,
+      "numerical_difference": {
+        "max_abs": 0.39284801483154297,
+        "mean_abs": 0.04848885163664818,
+        "rms": 0.06452528387308121,
+        "reference_max_abs": 24.055360794067383,
+        "legacy_close": false
+      }
+    },
+    {
+      "pattern": 1,
+      "chip": 0,
+      "finite_all_rows": true,
+      "numerical_difference": {
+        "max_abs": 0.0319216251373291,
+        "mean_abs": 0.0046599265187978745,
+        "rms": 0.005963678006082773,
+        "reference_max_abs": 1.531278133392334,
+        "legacy_close": false
+      }
+    },
+    {
+      "pattern": 1,
+      "chip": 1,
+      "finite_all_rows": true,
+      "numerical_difference": {
+        "max_abs": 0.0319216251373291,
+        "mean_abs": 0.0046599265187978745,
+        "rms": 0.005963678006082773,
+        "reference_max_abs": 1.531278133392334,
+        "legacy_close": false
+      }
+    },
+    {
+      "pattern": 2,
+      "chip": 0,
+      "finite_all_rows": true,
+      "numerical_difference": {
+        "max_abs": 0.39284801483154297,
+        "mean_abs": 0.04848885163664818,
+        "rms": 0.06452528387308121,
+        "reference_max_abs": 24.055360794067383,
+        "legacy_close": false
+      }
+    },
+    {
+      "pattern": 2,
+      "chip": 1,
+      "finite_all_rows": true,
+      "numerical_difference": {
+        "max_abs": 0.39284801483154297,
+        "mean_abs": 0.04848885163664818,
+        "rms": 0.06452528387308121,
+        "reference_max_abs": 24.055360794067383,
+        "legacy_close": false
+      }
+    }
+  ],
+  "replay_checks": [
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "chip": 0,
+      "exact_eager_all_rows": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 0,
+      "pattern": 0,
+      "chip": 1,
+      "exact_eager_all_rows": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "chip": 0,
+      "exact_eager_all_rows": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 1,
+      "pattern": 1,
+      "chip": 1,
+      "exact_eager_all_rows": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 2,
+      "chip": 0,
+      "exact_eager_all_rows": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 2,
+      "pattern": 2,
+      "chip": 1,
+      "exact_eager_all_rows": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 3,
+      "pattern": 0,
+      "chip": 0,
+      "exact_eager_all_rows": true,
+      "bindings_stable": true
+    },
+    {
+      "repetition": 3,
+      "pattern": 0,
+      "chip": 1,
+      "exact_eager_all_rows": true,
+      "bindings_stable": true
+    }
+  ],
+  "input_checks": [
+    {
+      "phase": 0,
+      "pattern": 0,
+      "tensor": 0,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 0,
+      "tensor": 0,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 0,
+      "tensor": 1,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 0,
+      "tensor": 1,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 0,
+      "tensor": 2,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 0,
+      "tensor": 2,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 0,
+      "tensor": 3,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 0,
+      "tensor": 3,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 1,
+      "tensor": 0,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 1,
+      "tensor": 0,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 1,
+      "tensor": 1,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 1,
+      "tensor": 1,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 1,
+      "tensor": 2,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 1,
+      "tensor": 2,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 1,
+      "tensor": 3,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 1,
+      "tensor": 3,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 2,
+      "tensor": 0,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 2,
+      "tensor": 0,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 2,
+      "tensor": 1,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 2,
+      "tensor": 1,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 2,
+      "tensor": 2,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 2,
+      "tensor": 2,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 2,
+      "tensor": 3,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 0,
+      "pattern": 2,
+      "tensor": 3,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 0,
+      "tensor": 0,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 0,
+      "tensor": 0,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 0,
+      "tensor": 1,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 0,
+      "tensor": 1,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 0,
+      "tensor": 2,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 0,
+      "tensor": 2,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 0,
+      "tensor": 3,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 0,
+      "tensor": 3,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 1,
+      "tensor": 0,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 1,
+      "tensor": 0,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 1,
+      "tensor": 1,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 1,
+      "tensor": 1,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 1,
+      "tensor": 2,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 1,
+      "tensor": 2,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 1,
+      "tensor": 3,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 1,
+      "tensor": 3,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 2,
+      "tensor": 0,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 2,
+      "tensor": 0,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 2,
+      "tensor": 1,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 2,
+      "tensor": 1,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 2,
+      "tensor": 2,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 2,
+      "tensor": 2,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 2,
+      "tensor": 3,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 2,
+      "tensor": 3,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 3,
+      "tensor": 0,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 3,
+      "tensor": 0,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 3,
+      "tensor": 1,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 3,
+      "tensor": 1,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 3,
+      "tensor": 2,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 3,
+      "tensor": 2,
+      "chip": 1,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 3,
+      "tensor": 3,
+      "chip": 0,
+      "unchanged": true
+    },
+    {
+      "phase": 1,
+      "pattern": 3,
+      "tensor": 3,
+      "chip": 1,
+      "unchanged": true
+    }
+  ],
+  "negative_controls": [
+    {
+      "chip": 0,
+      "stale_detected": true
+    },
+    {
+      "chip": 1,
+      "stale_detected": true
+    }
+  ],
+  "masked_input_checks": [
+    {
+      "phase": 0,
+      "chip": 0,
+      "masked_changes_ignored": true
+    },
+    {
+      "phase": 0,
+      "chip": 1,
+      "masked_changes_ignored": true
+    },
+    {
+      "phase": 1,
+      "chip": 0,
+      "masked_changes_ignored": true
+    },
+    {
+      "phase": 1,
+      "chip": 1,
+      "masked_changes_ignored": true
+    }
+  ],
+  "stage": "complete",
+  "native_sources_after": {
+    "tt_metal/tt-llk/tt_llk_blackhole/common/inc/cpack_common.h": "8aaf199a2439c5956ee077a5e9451981909e9589d5b81d1c5d7fc65f76e0e5d7",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/sdpa.cpp": "09abecee481f0c305e035402fbc237265f2bda52fee9d1cc75e16899b1b04f45",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/sdpa.hpp": "2689a3b30c13b61b7ae138ec8e6f50f18c19c0a60e41fd841006485b534b55da",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/sdpa_nanobind.cpp": "5b7434fc3612bce3ae55bce6ba7806af4ddfbae1f829114597cb2388ba93492b",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_device_operation.cpp": "cfc854c310905c130cb7d787fe103e6710dc9606468e33718d6e926ab8b6f018",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_device_operation.hpp": "606228b55844c4a5ea110b2067b487bb392734e86154a95466e91e38c5b3ef39",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_device_operation_types.hpp": "d0c2db73d3638174d8376d8e37b9927f439db68f4133397351fd77b79ae1d6bc",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_program_factory.cpp": "a263559fe23cdf6fa8194604b238a939d299a356592eae1c7b2df11868383ebc",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_interleaved_cb_ids.hpp": "4337da64e7233683157b74228be94af5906193363c5079fc8291badb0bd8a25d",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_subblock_utils.hpp": "751f40da1a6a1e095a8a36134276a8f0bb4321eb027d0be715bd52a719d56add",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/kernels/compute/compute_common.hpp": "3fb5da2440c3bf90ebceb8acd55424c7739339de4c6b02db83836e1e3414fa19",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/kernels/compute/compute_streaming.hpp": "cd38bbf8ea7d0745770a7e5836281951b4715f2de2c6f84556185c2de7ab3efa",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/kernels/compute/sdpa.cpp": "a3f48af8ba0fd63b136c79a54c8b6f7b4b5b8fb0d7a209bf5701f081ed7fa3e0",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/kernels/dataflow/reader_interleaved.cpp": "f97f5490cf476db92d575de33c85f8707f96d7474896ee086ee864c23a3efa27",
+    "ttnn/cpp/ttnn/operations/transformer/sdpa/device/kernels/dataflow/writer_interleaved.cpp": "2a0959ff7cce507eab39f2e063f4dbc264d8b51f4db9f479b8c2419435c745c2"
+  }
+}

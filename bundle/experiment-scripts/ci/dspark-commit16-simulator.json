@@ -1,0 +1,98 @@
+{
+  "passed": true,
+  "backend": "ttsim",
+  "rows": 16,
+  "norm_gate": true,
+  "seed": 1,
+  "handoff_runtime_hashes": {
+    "tt_metal/hw/ckernels/blackhole/metal/llk_io/llk_io_pack.h": "ed351e7c47fbd5b5ecca43af7fc87a38e80b63a20032d806dc16916388b587c7",
+    "tt_metal/hw/inc/api/dataflow/dataflow_api.h": "0288b90d5f179ad4db02e3a6a48c31010f74f56b4fec8a1c15ea9cfaaa0025ee"
+  },
+  "convolution": true,
+  "batched_convolution": true,
+  "dma_windows": true,
+  "window_prefix_checks": 0,
+  "packed_checkpoints": true,
+  "window_prefix_hashes": {
+    "py": "9ac3e1af4dac3508f0ed65727dbc1386e10c30cd14fab361d2f10f1155ae7316",
+    "cpp": "a694b75598c606135e514997c3d3731d46522c4865bff9171b4c5bff258b4361"
+  },
+  "window_dma_hashes": {
+    "py": "06e09a9046312690d50b42b223fc9e2b5d4ab50859bbad744388980a766ee9e2",
+    "cpp": "176f2fa93c3e36fc7d136b3e3e3743782b3999702d4c107a8ae157428af988c4"
+  },
+  "batched_adapter_sha256": "6d5fe07d4fbabd953fa5681b3f055578e18f3719a23a128edbb7fb5de5b1af27",
+  "continuation_enabled": true,
+  "output_projection": false,
+  "model_adapter_checks": 17,
+  "compact_prologue": true,
+  "model_adapter_sha256": "38165a181716f9e4a34f5197792582dc6389c8b979b193ca1eb400f075dff292",
+  "output_projection_scope": null,
+  "adapter_sha256": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859",
+  "continuation_checks": 17,
+  "stale_controls": 1,
+  "native_hashes": {
+    "compute/decode_gated_delta_rule.cpp": "b59314e0acaea06b574feffe91a256d3022e819fb5257154e2e72eeb7978b928",
+    "dataflow/reader_decode_gated_delta_rule.cpp": "fb2d44f415567ef2bb1e6210f30ac731018443bbc372f3d3a4b54ca44476b6fe",
+    "dataflow/writer_decode_gated_delta_rule.cpp": "3dd507f77f9932c6cf3f171530ff4fba48a437436aa1b2ab3408d79e242d798a"
+  },
+  "generated_hashes": {
+    "compute": "9512188a20fd63f2853f1ac427f1b7dfaf96bab18f9bfb32e73c2d647283a9e0",
+    "reader": "6c56547a34384f9727c72fff1905566459b96233e703d5415d3f88328df0d072",
+    "writer": "2d62a883af12d4adc2834d1eb50920dce25f910320c5432a456705bb3daef68a"
+  },
+  "scope": "Slow-dispatch functional liveness/exactness against serial T1 of same kernel; not native oracle certification or performance",
+  "commit_sources": {
+    "../../optimisation/sim/gdn-multitoken.py": "be906e56c795ae547f141462ab530ae5aec17c7fb01bc31b77edee3e754ec2f7",
+    "gdn_commit_provenance.py": "495b175c80c341e1df75a3dbcd2c630a849930ee3c61b2adf2614fc7fff60f3c",
+    "gdn_multitoken.py": "6436703e10ac46485a95b6c371edcbc1cd5fbb98d6973d29c2ec6ceeea14c4b4",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859",
+    "gdn_batched_conv.py": "6d5fe07d4fbabd953fa5681b3f055578e18f3719a23a128edbb7fb5de5b1af27",
+    "gdn_device_loop_state.py": "38165a181716f9e4a34f5197792582dc6389c8b979b193ca1eb400f075dff292",
+    "gdn_vsplit.py": "e70bc1be39953d316cb24785a7f4f435d9f8ccb807168e3e4f886f0c7d5a57a5",
+    "gdn_vsplit_norm_batch.py": "1c451370058f19e011490c458015e00b3ee0f47abff19ac4d35503b4732bfe9e",
+    "gdn_vsplit_prefetch.py": "4e818cee01f0d2667a590d533c14fe5a761cb8b33ab474a71b687d56cfaeb509",
+    "gdn_snapshot.py": "01fa7e7a68f5fa463815f85431834a6b672ba8b881c0de5e08f9bfe4d3941408",
+    "gdn_prefix.py": "b80de85463d7485af92b3144e9da6a8499d11d3504ff1d2904591cdc6d354f6b",
+    "gdn_records.py": "6cf8aa037750b6cab81fefe877478cc0d424d04b9da385c9882260a244ffeae1",
+    "gdn_state_copy.py": "4cc8f6529b94f78965a7d6701d5279652b84f3db9526d138c752c7ff80dc3dc5",
+    "gdn_state_copy.cpp": "4f921500b63817a5f26f288725a9da1fee9223841a68d058d96fac0f67a23428",
+    "gdn_conv_windows.py": "06e09a9046312690d50b42b223fc9e2b5d4ab50859bbad744388980a766ee9e2",
+    "gdn_conv_windows.cpp": "176f2fa93c3e36fc7d136b3e3e3743782b3999702d4c107a8ae157428af988c4",
+    "gdn_conv_prefix_copy.py": "9ac3e1af4dac3508f0ed65727dbc1386e10c30cd14fab361d2f10f1155ae7316",
+    "gdn_conv_prefix_copy.cpp": "a694b75598c606135e514997c3d3731d46522c4865bff9171b4c5bff258b4361",
+    "gdn_commit_dma.py": "2674e657b10125be456b1a1eb948ca8b06a613978fd36c92bcba09dfb020830e",
+    "gdn_commit_dma.cpp": "ba513253101a62a921ac402ac0fe9e6c14bca73f4077efd4e88c5a2b9af92019"
+  },
+  "last_stage": {
+    "stage": "complete"
+  },
+  "ttnn_path": "/opt/ttsim/tt-metal/ttnn/ttnn/__init__.py",
+  "extension_sha256": "9fa83a78556aaf99e3cf59f59e44199d8ffa1839b09505e399c26ad2018de5aa",
+  "norm_batch_layer": true,
+  "deferred_conv_publication": true,
+  "commit_only_gdn": true,
+  "precommit_unchanged_checks": 17,
+  "commit_sources_after": {
+    "../../optimisation/sim/gdn-multitoken.py": "be906e56c795ae547f141462ab530ae5aec17c7fb01bc31b77edee3e754ec2f7",
+    "gdn_commit_provenance.py": "495b175c80c341e1df75a3dbcd2c630a849930ee3c61b2adf2614fc7fff60f3c",
+    "gdn_multitoken.py": "6436703e10ac46485a95b6c371edcbc1cd5fbb98d6973d29c2ec6ceeea14c4b4",
+    "gdn_multitoken_conv.py": "6a39d5dfe9b48500621a4900aee01f1656c578d09e84f27edd03046abf59f859",
+    "gdn_batched_conv.py": "6d5fe07d4fbabd953fa5681b3f055578e18f3719a23a128edbb7fb5de5b1af27",
+    "gdn_device_loop_state.py": "38165a181716f9e4a34f5197792582dc6389c8b979b193ca1eb400f075dff292",
+    "gdn_vsplit.py": "e70bc1be39953d316cb24785a7f4f435d9f8ccb807168e3e4f886f0c7d5a57a5",
+    "gdn_vsplit_norm_batch.py": "1c451370058f19e011490c458015e00b3ee0f47abff19ac4d35503b4732bfe9e",
+    "gdn_vsplit_prefetch.py": "4e818cee01f0d2667a590d533c14fe5a761cb8b33ab474a71b687d56cfaeb509",
+    "gdn_snapshot.py": "01fa7e7a68f5fa463815f85431834a6b672ba8b881c0de5e08f9bfe4d3941408",
+    "gdn_prefix.py": "b80de85463d7485af92b3144e9da6a8499d11d3504ff1d2904591cdc6d354f6b",
+    "gdn_records.py": "6cf8aa037750b6cab81fefe877478cc0d424d04b9da385c9882260a244ffeae1",
+    "gdn_state_copy.py": "4cc8f6529b94f78965a7d6701d5279652b84f3db9526d138c752c7ff80dc3dc5",
+    "gdn_state_copy.cpp": "4f921500b63817a5f26f288725a9da1fee9223841a68d058d96fac0f67a23428",
+    "gdn_conv_windows.py": "06e09a9046312690d50b42b223fc9e2b5d4ab50859bbad744388980a766ee9e2",
+    "gdn_conv_windows.cpp": "176f2fa93c3e36fc7d136b3e3e3743782b3999702d4c107a8ae157428af988c4",
+    "gdn_conv_prefix_copy.py": "9ac3e1af4dac3508f0ed65727dbc1386e10c30cd14fab361d2f10f1155ae7316",
+    "gdn_conv_prefix_copy.cpp": "a694b75598c606135e514997c3d3731d46522c4865bff9171b4c5bff258b4361",
+    "gdn_commit_dma.py": "2674e657b10125be456b1a1eb948ca8b06a613978fd36c92bcba09dfb020830e",
+    "gdn_commit_dma.cpp": "ba513253101a62a921ac402ac0fe9e6c14bca73f4077efd4e88c5a2b9af92019"
+  }
+}

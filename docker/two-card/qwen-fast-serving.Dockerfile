@@ -1,15 +1,15 @@
-# Stage 7 of the two-card chain: the fast-path runtime tree on top of the custom-ops image. NOT RUNNABLE FROM THIS
-# REPOSITORY ALONE yet: the COPY sources named bundle/... below are a runtime tree that the earlier build read from CI
-# artifacts which no longer exist (BUILD.md, "What is not here yet").
+# Stage 7 of the two-card chain: the fast-path runtime tree on top of the custom-ops image. The COPY sources named
+# bundle/... below are published in this repository (bundle/README.md): a flattened copy of the serving runtime tree,
+# cut from the qualified image and sanitised, with a sha256 manifest in bundle/serving-bundle.json.
 #
 # Portable build arguments. REGISTRY is only a name prefix: FROM resolves a local image first, so no registry has to
 # run. BASE is the K64j-tier image (tt-vllm:qwen38-k64j, docker/two-card/50-qwen-k64j.Dockerfile; the `ops` tier lacks
 # the prefill-chain factory the serving environment turns on). It is a source build, so this copy does NOT replace its
 # libraries: the earlier step that installed a prebuilt _ttnncpp.so over the image's is removed.
 #
-# BUILD CONTEXT: this repository's scripts/ci/ (the COPY lines) plus a directory bundle/ holding experiment-scripts/,
-# experiment-optimisation/, speculative-decoding/ and serving-bundle.json: the serving runtime tree, which this
-# repository does not publish.
+# BUILD CONTEXT: the repository root. The COPY lines read this repository's scripts/ci/ (the overlay, which replaces
+# same-named files of the tree) and bundle/ (experiment-scripts/, experiment-optimisation/, speculative-decoding/ and
+# serving-bundle.json). Build it as: docker build -f docker/two-card/qwen-fast-serving.Dockerfile -t localhost:5000/qwen-fast-serving:p8 .
 ARG REGISTRY=localhost:5000
 ARG BASE=${REGISTRY}/tt-vllm:qwen38-k64j
 FROM ${BASE}
@@ -124,6 +124,10 @@ RUN git clone --filter=blob:none https://github.com/tenstorrent/vllm-tt-plugin.g
     && git -C /opt/qwen-fast-plugin checkout --detach bf77cd63756fc891b8fb7f7cb3f5c1420f0e044c \
     && python3 -B /experiment-scripts/ci/serving_plugin_patch.py /opt/qwen-fast-plugin \
     && python3 -m pip install --no-deps -e /opt/qwen-fast-plugin
+# test_serving_runtime (run below) imports these inside its test bodies: the DRAM-admission tests need
+# serving_prefill_admission (and, through it, serving_request_quarantine); the extent-replay tests need
+# packed_any_admission and the evidence record it reads from its own directory. They are not in the bundle.
+COPY scripts/ci/serving_prefill_admission.py scripts/ci/serving_request_quarantine.py scripts/ci/packed_any_admission.py scripts/ci/packed_any_evidence.json /experiment-scripts/ci/
 COPY scripts/ci/test_serving_*.py /experiment-scripts/ci/
 COPY scripts/ci/test_packed_verifier.py /experiment-scripts/ci/
 RUN OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 VLLM_PLUGINS='' python3 -B -m unittest \

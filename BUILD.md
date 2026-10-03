@@ -101,15 +101,30 @@ Mount that directory at `/models` when you run (RECIPES.md). The profiles refer 
 
 ## 6. Serving image (stages 7 and 8)
 
-Not runnable from this repository alone yet (see "What is not here yet"). The Dockerfiles are portable and are
-published so that the shape of the build is visible and the missing inputs are exactly the ones listed.
+Both Dockerfiles are portable. Stage 7's runtime tree is published in `bundle/` (see `bundle/README.md`); stage 8 needs
+the DFlash2 fixtures for the fast tier and a stage 6 binary hash. Neither stage has been rebuilt end to end from this
+repository by the maintainers: the P8 image was built from the same recipe earlier, from CI artifacts. Read "What is not
+here yet" and "Pins that `exact`, `c2` and `c2-packed` check" before relying on the speculative-decoding profiles.
 
 - Stage 7, `docker/two-card/qwen-fast-serving.Dockerfile`: the fast-path runtime tree on top of the **k64j-tier** image
   (`tt-vllm:qwen38-k64j`, the default `BASE`). `BASE` and `REGISTRY` are build arguments; no registry or digest is
   hard-coded. The copy no longer replaces your libraries with a prebuilt one. Tag the result
-  `localhost:5000/qwen-fast-serving:p8` (the default `BASE` of stage 8). Its build context is this repository's
-  `scripts/ci/` plus a `bundle/` directory (`experiment-scripts/`, `experiment-optimisation/`, `speculative-decoding/`,
-  `serving-bundle.json`) that this repository does not publish.
+  `localhost:5000/qwen-fast-serving:p8` (the default `BASE` of stage 8). The build context is the repository root: the
+  `COPY` lines read this repository's `scripts/ci/` (the overlay, which wins over same-named bundle files) and `bundle/`
+  (`experiment-scripts/`, `experiment-optimisation/`, `speculative-decoding/`, `serving-bundle.json`, all published):
+
+  ```bash
+  docker build -f docker/two-card/qwen-fast-serving.Dockerfile -t localhost:5000/qwen-fast-serving:p8 .
+  ```
+
+  `native-cache-manifest.json` and a prebuilt `_ttnncpp.so` are **not** inputs of this stage (this Dockerfile copies
+  neither; the one consumer of the manifest, `serving_native_install.py`, is removed from this stage, item 2 below). Two image-build steps run checks: the `unittest` step (14 test modules, CPU only) and
+  `serving_image_preflight.py`, which pins the sha256 of three files under `/opt/tt-metal`
+  (`p150_x2_mesh_graph_descriptor.textproto`, `models/common/modules/tt_ccl.py`, `models/common/sampling/tt_sampling.py`).
+  No patch in the build chain touches them, so a v0.77.0-rc1 tree should match; `sha256sum` them in your k64j image
+  before building (expected `e5d25de8...`, `ec24c3ab...`, `d3d32ea9...`; full values in
+  `scripts/ci/dram-mlp-down-hardware.json`, lines 273-275). The preflight is fatal and has no override.
+  The step also clones `vllm-tt-plugin` at `bf77cd63` from GitHub, so it needs network access.
 - Stage 8, `docker/two-card/qwen-c2-serving.Dockerfile`: the model graft, the overlay, the prefix stage and the
   serving environment. Build arguments:
   - `BASE`: the stage-7 image (default `${REGISTRY}/qwen-fast-serving:p8`);
@@ -143,23 +158,78 @@ repository's head has moved since; keep the pinned revision) and writes `OUT_DIR
 `OUT_DIR/draft-config/` in the layout stage 8 copies. `FIXTURE_CACHE` names the directory it caches downloads in. It
 needs torch and transformers and about 10 GB; it has not been run end to end from a clean checkout by the maintainers.
 
+## Pins that `exact`, `c2` and `c2-packed` check
+
+Found by reading the code against the k64j source set, not by running a build. Report what you see.
+
+**`general`, `general-2link` and `general-prefix` avoid every pin below.** They do not set `qwen_fast_t16`, so the
+combined-runtime attach never runs, and none of these modules executes for them: `runtime_binary_override`,
+`dflash_t16_native_scope`, `sdpa_tree_scratch`, the frozen evidence, the evidence gates, `packed_any_admission`. They need
+none of the evidence directories.
+
+**`exact` and `c2` are refused on a source-built k64j tree, and no environment variable or build argument unblocks them.**
+The k64j build patches the SDPA prefill factory, so the on-disk file is not the one the pins name:
+
+| What | Pinned value | Your k64j tree |
+|---|---|---|
+| `sdpa/device/sdpa_program_factory.cpp` (combined factory) | `fd8c067661a6ed5438bcbd31ee782fab2653fb7e8c00456a0fb43883a6a89783` | `bfab8558d889ad215f0e9ee732c75a4142be1a1e7f37810f4ca8c5e3c73bdf65` (`tt-metal-custom-ops/MANIFEST.txt`) |
+| `sdpa_decode/device/sdpa_decode_program_factory.cpp` | `05708e6d...` (original) or `3e0a69af...` (patched; `scripts/ci/probe_sdpa_decode_sources.py`) | `bb4dc6a759d40054d31089792f617a1d66f5837da2065fa12f61438d09a55080` |
+| the `_ttnncpp.so` binary | `4b7299c1c9233b25aad310bc9a9d751a0631c6af0602cb1a151f934b4bfa07ea` (maintainers' build) | whatever stage 6 printed |
+
+- **Binary override (`runtime_binary_override.py`).** Stage 8 sets `QWEN_FAST_RUNTIME_BINARY_SHA256` to the hash you pass as
+  `RUNTIME_BINARY_SHA256`. With it set, `install` admits your binary only if the on-disk `sdpa_program_factory.cpp`
+  still hashes to `fd8c0676...`; yours hashes to `bfab8558...`, so it refuses. Without the variable the binary pin
+  (`4b7299c1...`) refuses instead. `build_k64j.sh` derives `bfab8558` from `fd8c0676` plus `apply_factory_pf.py`.
+- **T16 evidence.** `dflash-t16-31.json` and `dflash-t16-2048.json` (in `bundle/.../dflash-t16-native-evidence/`) record
+  15 native SDPA sources with the factory at `fd8c0676...`; `dflash_t16_native_scope.admit` refuses on any mismatch.
+  Fixing the override alone does not help.
+- **Evidence gates** pin further native sources: `mlp_down_grid_gate` pins `qwen36/tt/tp_common.py`;
+  `gdn_direct_window` and `shared_qk_norm_scatter` pin their own lists. Whether those match your tree is **unknown**.
+  `dflash_combined_sim_runtime.native_hashes('/opt/tt-metal')` computes the live hashes to compare with the reports.
+- **`sdpa_tree_scratch.audit`** pins the *decode* factory and two decode kernels (not the prefill factory), so the k64j
+  decode factory (`bb4dc6a7...`) refuses it. At serve time it runs only in `c2-packed`'s `check_runtime`; `exact` and `c2`
+  use only `history_limit` and `validate_request` from `dspark_8k_admission`.
+- **`c2-packed`** also pins the K64j binary, four kernels and `packed_any_evidence.json`.
+
+Why the maintainers' images pass: they keep the audited baseline on disk (prefill factory `fd8c0676`, decode factory
+`3e0a69af`) under a separately built binary. The factory `.cpp` files are compiled into the binary, so the on-disk copies
+do not change what runs; the pins then vouch for the sources the binary was built from only by convention.
+
+**Two ways forward. Neither is done here, and neither is a measurement.**
+
+1. *No code change, a bypass.* After stage 6, write the combined factory over the on-disk file, the way the maintainers'
+   images are laid out: take the **original** factory (the file at the tt-metal base, with its sha256 equal to
+   `ORIGINAL_FACTORY = a263559fe23cdf6fa8194604b238a939d299a356592eae1c7b2df11868383ebc`; stop if it is not), and write
+   `dflash_combined_sim_runtime.factory_bytes(original)` to
+   `ttnn/cpp/ttnn/operations/transformer/sdpa/device/sdpa_program_factory.cpp`. The pins for the factory then pass. It
+   makes the audits describe sources your binary was not built from, so treat a pass as "the rest of the checks
+   pass", not as qualification. The other 14 T16 pins and the gate pins must still match, and the decode pins for
+   `c2-packed` need the same treatment for the decode factory. Do this only in a throwaway image.
+2. *Code change, by the maintainers.* Accept `bfab8558` (and `bb4dc6a7` for the tree-scratch audit; both already in
+   `MANIFEST.txt`) as descendants of the pinned factories. That needs a judgement that the prefill-chain and k64j
+   changes do not touch the qualified draft path, plus fresh evidence runs. It has not been made.
+
 ## What is not here yet
 
 Honest list, so that nobody loses a day on it:
 
-1. **The serving runtime tree for stage 7.** The earlier build read it from CI artifacts that no longer exist
-   (`bundle/experiment-scripts`, `bundle/experiment-optimisation`, `bundle/speculative-decoding`,
-   `bundle/serving-bundle.json`, `native-cache-manifest.json`). A flattened, hash-manifested replacement, cut from the
-   qualified image, is planned and is not in this branch. Until it is, stage 7 cannot be built from this repository
-   alone, and neither can stage 8 (which builds on it).
+1. **Stage 7 has not been built from this repository.** `bundle/` is published (flattened, hash-manifested, cut from the
+   qualified image, with operator-specific material withheld: `bundle/README.md` lists what and why). The Dockerfile
+   was checked by reading it: every `COPY` source exists, and every module-level import of the image's unit-test step
+   resolves inside the image tree. It was not built. One build failure was found and fixed by reading: the
+   `test_serving_runtime` step imports `serving_prefill_admission`, `serving_request_quarantine` and
+   `packed_any_admission` (with `packed_any_evidence.json`) inside test bodies, and they are in neither the bundle nor
+   the earlier copy list, so the Dockerfile now copies them. Expect to find the next one the same way. Report it.
 2. **`serving_native_install.py`** is removed from the stage 7 copy: it refuses any binary but the maintainers'
    own and re-applies a patch the source build already contains. Its other output, `/opt/qwen-serving/native-install.json`, is
    not written; whether the fast path's start-up check needs it has not been tested on a rebuilt image.
-3. **The frozen-evidence tree** that the fast path's startup check reads (`<runtime>/frozen-evidence/`) exists only in
-   the maintainers' images. The `general*` profiles do not need it; `exact`, `c2` and `c2-packed` do.
-4. **c2-packed evidence.** The packed-admission check pins the maintainers' binary and an evidence record. On your own
-   binary it needs fresh evidence runs on your cards. The harnesses are not published here. Until then c2-packed serves
-   as `c2`.
+3. **The frozen-evidence tree** is now in `bundle/experiment-scripts/ci/frozen-evidence/` (byte-exact, only the files
+   the reports pin). The `general*` profiles do not read it; `exact`, `c2` and `c2-packed` do. Having the files does not
+   mean the checks pass on your build: see the next section.
+4. **c2-packed evidence.** The packed-admission check pins the maintainers' binary, four kernels and an evidence record.
+   On your own binary it needs fresh evidence runs on your cards, and the harnesses are not published here. **When the
+   check refuses, the engine does not start** (by reading the code: the refusal, `AdmissionRefused`, is not caught at
+   attach). Earlier versions of these docs said it falls back to serving as `c2`; that is wrong.
 5. **Hardware validation of a rebuilt image.** The maintainers can only re-check the two-link path (`general-2link`) on
    their current cabling; the four-link profiles, rebuilt from source, are unvalidated.
 6. **`scripts/ci/build-c2-serving-image.sh`** and several CI helpers still carry the maintainers' paths and registry. They

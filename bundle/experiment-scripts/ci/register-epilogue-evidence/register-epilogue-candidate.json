@@ -1,0 +1,26 @@
+{
+  "before": {
+    "fused_1d.py": "4c215d945e723ef3d8c2be1757e7c170bf21eebb01e204359243d766c6c7cf93",
+    "fused-batch-probe.py": "36898752ac8d46054fa753ee074b11761f1ea3241a22cdff385de97704488c9a"
+  },
+  "after": {
+    "fused_1d.py": "d26d67ab4c893de327c8a2c6aa9ec949d904332a9b2a91353c5889f30272b6d4",
+    "fused-batch-probe.py": "e549766aab7728318f464c088c4b558a742ee746e23dae34d2af98ae10ce808f",
+    "mlp_register_epilogue.py": "a44b8bff866c1c1b4ae07f54800849c2d4a7c94dcb5ad70e6bde433b07120cca",
+    "mlp_rounding_policy.py": "39f108b367984a07d960f5188ab690e9475268751b7ac9ec69e8b04495e54b9f",
+    "simulator-suite.sh": "283120fcbfda363992a3b7768c999edfa41a4383ad1d18da9fd4013915687c5c"
+  },
+  "token_rows": 16,
+  "pairs_per_worker": 3,
+  "readers_changed": false,
+  "buffers_changed": false,
+  "activation_diagnostic": false,
+  "rounding_diagnostic": false,
+  "nearest_away_hypothesis": true,
+  "accumulation_changed": false,
+  "activation_processor": "MATH instead of PACK",
+  "bf16_rounding": "explicit SFPU before unchanged BF16 product",
+  "simulator_qualified": false,
+  "hardware_qualified": false,
+  "performance_qualified": false
+}

@@ -1,0 +1,294 @@
+{
+  "passed": true,
+  "backend": "simulator",
+  "scope": "Selected-context BF16 KV target replay; not full-model correctness or TG",
+  "context": 32768,
+  "kv_dtype": "bfloat16",
+  "checks": [
+    {
+      "capacity": 33024,
+      "start": 32768,
+      "ticket": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 32768,
+      "ticket": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 32785,
+      "ticket": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 32785,
+      "ticket": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 33008,
+      "ticket": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 33008,
+      "ticket": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 32768,
+      "ticket": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 32768,
+      "ticket": 3,
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "mask_checks": [
+    {
+      "capacity": 33024,
+      "start": 32768,
+      "ticket": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 32768,
+      "ticket": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 32768,
+      "ticket": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 32768,
+      "ticket": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 32785,
+      "ticket": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 32785,
+      "ticket": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 32785,
+      "ticket": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 32785,
+      "ticket": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 33008,
+      "ticket": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 33008,
+      "ticket": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 33008,
+      "ticket": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 33008,
+      "ticket": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 32768,
+      "ticket": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 32768,
+      "ticket": 3,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 32768,
+      "ticket": 3,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "start": 32768,
+      "ticket": 3,
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "source_checks": [
+    {
+      "capacity": 33024,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "capacity": 33024,
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "stale_controls": 2,
+  "mask_poison_controls": 8,
+  "sources": {
+    "attention_replay.py": "4eff1c51fd42bb04adf68fc40bf74a0cca0cd455c3ae2fc50caf720f5281137a",
+    "attention_mask_replay.py": "6a31981cb9203439b8e6e78e8bd712e078f00335a7f211c732d4ac47cabca3a8",
+    "attention_mask_replay.cpp": "e10cae1d6fe97f9b1509ac5ef918f6e7eda8d51bfbd77dcfd9e95662bb838af8",
+    "attention_parallel.py": "7bf5ba445100d184f7b9289fed4c20b4a730dbee29ee382cb97b6c2ad17f0e58",
+    "attention_fold_dma.py": "5ce9d7d1590be2a9739a01d7604037f9fe70556594396067025bf1b3188151e5",
+    "attention_fold_dma.cpp": "066fa6709127dcddbcdc033de9f0e0ad59a2c6756ceba3a99c5b0fd94cf26ab9",
+    "target-t16-attention-8k-probe.py": "4ca3482dc1f4c53d065dec29c3daf6263a09217fcdb4e7a3a9a3c49a2ae4ada9",
+    "frozen_context_geometry.py": "03b9627aa16ca8ed53c7623b336ca462ceb5176f3b2df15ca15bc7cb70ea3672"
+  },
+  "compact_tree_scratch": true,
+  "native_sources": {
+    "sdpa_decode_program_factory.cpp": "3e0a69af9563ae8899db1363286d6dc6cdc1744e0154887dc91a630b16084a4a",
+    "kernels/dataflow/writer_decode_all.cpp": "734c90c01c7a7174497133fae9df80110ead55275955faeb566d345bdccb60b8",
+    "kernels/compute/sdpa_flash_decode.cpp": "d24769bdcbb8635f83f5f91a301fe0d89298d38263d4493a39c6d2decb57867f"
+  },
+  "factory_build": {
+    "passed": true,
+    "precision_variant": "stats-only",
+    "factory_enabled": true,
+    "source_before": "a263559fe23cdf6fa8194604b238a939d299a356592eae1c7b2df11868383ebc",
+    "binaries_before": {
+      "build_Release/lib/_ttnncpp.so": "f65ac9e332d34ff462a051a021221fc12377b05711dc67d1faa5aa6fe37858c3",
+      "build_Release/ttnn/_ttnncpp.so": "d6c53113a104719a442b4d4a9ec2b344cdd0e00daa1e4d907afb9c13d1e531d9"
+    },
+    "builders": {
+      "dspark_fp32_build.py": "bd61dc51fc2ece3f02034582b47fcbb4a325a5a69a13a143512ada31a5c707db",
+      "dspark_fp32_intermediates.py": "6e1960ad9a2d0f5ae3a76aa770f5420008857e25864c44520628d3916e2fe807"
+    },
+    "jobs": 8,
+    "timeout_seconds": 1800,
+    "device_access": false,
+    "registration": {
+      "registration_sha256": "a2fb5b6ea5769c57f79353f2a8c3859f85d161f3a94ced173862d10cd5adca10",
+      "implementation_sources": {
+        "attn_prep/attn_prep.cpp": "9aeba2de7a4c693677b5f8ceaf1a32e139808a025003615fb7c2cd4de09107e3",
+        "attn_prep/device/attn_prep_device_operation.cpp": "6a1c85e09b4acab45cd26655bb3f205c89cd0d0db8329d2c9111125f5cbf9076",
+        "attn_prep/device/attn_prep_program_factory.cpp": "757880fa91b955b6c3aec5b5cb92807bc6d9c069d9f535a8bd731255254736e3",
+        "gdn_conv_gates/gdn_conv_gates.cpp": "58bacb288f1cd9d53bbf4cf9204ef603f5b6f435bd93f289ba3288e5664ef7f7",
+        "gdn_conv_gates/device/gdn_conv_gates_device_operation.cpp": "a726fb8176993fed5b8f39b60358238f72bda7543c3afb2988255d08b699ca4f",
+        "gdn_conv_gates/device/gdn_conv_gates_program_factory.cpp": "0d02d3422ede6f814d9663ee4d739f16399b5bdf543c66f754db5f20127429f5",
+        "gdn_norm_gate/gdn_norm_gate.cpp": "3b2dabd64ff3ead40cf10658f27b70cebde0731f5f3eb18201ad75a379e67949",
+        "gdn_norm_gate/device/gdn_norm_gate_device_operation.cpp": "37cb0a9c162c6becf4dbbcf98193bca492adb1fe756c75f087a526e46a03da01",
+        "gdn_norm_gate/device/gdn_norm_gate_program_factory.cpp": "1859bda8dd90608ae6101403964b2ad8cf074c3c96768c12ee18ff620b82ec51",
+        "gdn_decay/gdn_decay.cpp": "e9c67e4b0a2db6452e9c122c6861928cfa693edb1b0a9b640c88d9658e0e230b",
+        "gdn_decay/device/gdn_decay_device_operation.cpp": "31dd380c0d8f80556395389a5091a3fdc4c9cf99201492ea0d327afd64dc5bc4",
+        "gdn_decay/device/gdn_decay_program_factory.cpp": "e7d05dbc8edda1c41435d911ae1ee45b5c464cdd8030826e7756567b834f94fa",
+        "decode_gated_delta_rule/decode_gated_delta_rule.cpp": "5e34249202c20a2cfe9fc0471c7dacc27eddfa3bbdc5c4083b5221973b9b1414",
+        "decode_gated_delta_rule/device/decode_gated_delta_rule_device_operation.cpp": "81e15215ffbc075206855563de6cf333bf7cd1619654767ed3b17ec135e8bae3",
+        "decode_gated_delta_rule/device/decode_gated_delta_rule_program_factory.cpp": "27984ef8a09bfa207ad91142c737db63b2d9144c5d530dc855cc7af21473877f"
+      },
+      "scope": "Restore existing on-disk implementations to CMake; no kernel or binding edits",
+      "source_after": "f517c85f2125b8384698f04d71c74c6bca8b42635e7d848b7884e4d481cdc576"
+    },
+    "source_after": "fd8c067661a6ed5438bcbd31ee782fab2653fb7e8c00456a0fb43883a6a89783",
+    "binaries_after": {
+      "build_Release/lib/_ttnncpp.so": "e41370bd0cfb2e27431cf40741439b1e138debf69f4d222f3c2b2b9e075e1aa4",
+      "build_Release/ttnn/_ttnncpp.so": "e41370bd0cfb2e27431cf40741439b1e138debf69f4d222f3c2b2b9e075e1aa4"
+    },
+    "import_passed": true
+  },
+  "unpoisoned_replay": [
+    {
+      "chip": 0,
+      "exact": true,
+      "nonfinite": 0,
+      "mismatches": 0
+    },
+    {
+      "chip": 1,
+      "exact": true,
+      "nonfinite": 0,
+      "mismatches": 0
+    }
+  ],
+  "native_sources_after": {
+    "sdpa_decode_program_factory.cpp": "3e0a69af9563ae8899db1363286d6dc6cdc1744e0154887dc91a630b16084a4a",
+    "kernels/dataflow/writer_decode_all.cpp": "734c90c01c7a7174497133fae9df80110ead55275955faeb566d345bdccb60b8",
+    "kernels/compute/sdpa_flash_decode.cpp": "d24769bdcbb8635f83f5f91a301fe0d89298d38263d4493a39c6d2decb57867f"
+  },
+  "closed": true,
+  "sources_after": {
+    "attention_replay.py": "4eff1c51fd42bb04adf68fc40bf74a0cca0cd455c3ae2fc50caf720f5281137a",
+    "attention_mask_replay.py": "6a31981cb9203439b8e6e78e8bd712e078f00335a7f211c732d4ac47cabca3a8",
+    "attention_mask_replay.cpp": "e10cae1d6fe97f9b1509ac5ef918f6e7eda8d51bfbd77dcfd9e95662bb838af8",
+    "attention_parallel.py": "7bf5ba445100d184f7b9289fed4c20b4a730dbee29ee382cb97b6c2ad17f0e58",
+    "attention_fold_dma.py": "5ce9d7d1590be2a9739a01d7604037f9fe70556594396067025bf1b3188151e5",
+    "attention_fold_dma.cpp": "066fa6709127dcddbcdc033de9f0e0ad59a2c6756ceba3a99c5b0fd94cf26ab9",
+    "target-t16-attention-8k-probe.py": "4ca3482dc1f4c53d065dec29c3daf6263a09217fcdb4e7a3a9a3c49a2ae4ada9",
+    "frozen_context_geometry.py": "03b9627aa16ca8ed53c7623b336ca462ceb5176f3b2df15ca15bc7cb70ea3672"
+  }
+}

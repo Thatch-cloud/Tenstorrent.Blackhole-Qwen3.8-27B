@@ -1,0 +1,66 @@
+{
+  "passed": false,
+  "backend": "simulator",
+  "scope": "T16 long-context attention component, at CTX4096; not full-model correctness or TG",
+  "checks": [],
+  "mask_checks": [],
+  "source_checks": [],
+  "stale_controls": 0,
+  "mask_poison_controls": 2,
+  "sources": {
+    "attention_replay.py": "4eff1c51fd42bb04adf68fc40bf74a0cca0cd455c3ae2fc50caf720f5281137a",
+    "attention_mask_replay.py": "7841495a15ee090aae7b78edc118ba0de2967bb3ad72b843d53251a091435749",
+    "attention_mask_replay.cpp": "e10cae1d6fe97f9b1509ac5ef918f6e7eda8d51bfbd77dcfd9e95662bb838af8",
+    "attention_parallel.py": "7bf5ba445100d184f7b9289fed4c20b4a730dbee29ee382cb97b6c2ad17f0e58",
+    "attention_fold_dma.py": "5ce9d7d1590be2a9739a01d7604037f9fe70556594396067025bf1b3188151e5",
+    "attention_fold_dma.cpp": "066fa6709127dcddbcdc033de9f0e0ad59a2c6756ceba3a99c5b0fd94cf26ab9",
+    "target-t16-attention-probe.py": "fd90ed44d8ea657b0ec4dd3d684be2f635cd7a9f0bafb764600a93b6d519ccc1"
+  },
+  "unpoisoned_replay": [
+    {
+      "chip": 0,
+      "exact": true,
+      "nonfinite": 0,
+      "mismatches": 0
+    },
+    {
+      "chip": 1,
+      "exact": true,
+      "nonfinite": 0,
+      "mismatches": 0
+    }
+  ],
+  "failure": {
+    "chip": 0,
+    "start": 4096,
+    "ticket": 0,
+    "mismatches": 49099,
+    "nonfinite": 0,
+    "max_abs": 0.00531005859375,
+    "query_exact": [
+      true,
+      true
+    ],
+    "mask_exact": [
+      [
+        false,
+        false
+      ],
+      [
+        false,
+        false
+      ]
+    ]
+  },
+  "error": "AssertionError: T16 replay differs from native B1: capacity=4352, start=4096, chip=0",
+  "closed": true,
+  "sources_after": {
+    "attention_replay.py": "4eff1c51fd42bb04adf68fc40bf74a0cca0cd455c3ae2fc50caf720f5281137a",
+    "attention_mask_replay.py": "7841495a15ee090aae7b78edc118ba0de2967bb3ad72b843d53251a091435749",
+    "attention_mask_replay.cpp": "e10cae1d6fe97f9b1509ac5ef918f6e7eda8d51bfbd77dcfd9e95662bb838af8",
+    "attention_parallel.py": "7bf5ba445100d184f7b9289fed4c20b4a730dbee29ee382cb97b6c2ad17f0e58",
+    "attention_fold_dma.py": "5ce9d7d1590be2a9739a01d7604037f9fe70556594396067025bf1b3188151e5",
+    "attention_fold_dma.cpp": "066fa6709127dcddbcdc033de9f0e0ad59a2c6756ceba3a99c5b0fd94cf26ab9",
+    "target-t16-attention-probe.py": "fd90ed44d8ea657b0ec4dd3d684be2f635cd7a9f0bafb764600a93b6d519ccc1"
+  }
+}

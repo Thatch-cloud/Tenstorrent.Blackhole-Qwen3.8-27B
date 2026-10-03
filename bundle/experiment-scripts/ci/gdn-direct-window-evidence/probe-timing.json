@@ -1,0 +1,9 @@
+{
+  "phase": "probe",
+  "budget_seconds": 510,
+  "status": "completed",
+  "elapsed_seconds": 40.71628384105861,
+  "exit_code": 0,
+  "timed_out": false,
+  "killed_or_timeout": false
+}

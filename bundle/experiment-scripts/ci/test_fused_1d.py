@@ -1,0 +1,100 @@
+import unittest
+from unittest.mock import Mock, patch
+
+from fused_1d import BF16_PRODUCT, FusedProjection, fused_compute, mapping, native_gate_up_control
+
+
+class Fused1DTests(unittest.TestCase):
+    def test_target_math_is_explicit_and_recorded_without_changing_default(self):
+        source = '                            if (last_out) {discard\n                            } else {\n                                tile_regs_commit();\n}'
+        with patch('pathlib.Path.read_text', return_value=source):
+            control = FusedProjection(None, None)
+            candidate = FusedProjection(None, None, token_rows=16, math_approx_mode=True)
+            self.assertIs(control.math_approx_mode, False)
+            self.assertIs(candidate.math_approx_mode, True)
+            self.assertIs(candidate.manifest['math_approx_mode'], True)
+            self.assertEqual(candidate.compute, control.compute)
+        for invalid in (0, 1, None, 'true'):
+            with self.assertRaisesRegex(ValueError, 'boolean math'):
+                FusedProjection(None, None, math_approx_mode=invalid)
+
+    def test_control_fuses_silu_before_gate_output_rounding(self):
+        operations = Mock()
+        operations.MatmulMultiCoreReuseMultiCast1DProgramConfig.side_effect = lambda **options: options
+        operations.linear.side_effect = ['activated_gate', 'up']
+        operations.multiply.return_value = 'product'
+        owned = []
+        self.assertEqual(native_gate_up_control(operations, 'input', 'gate_weight', 'up_weight', 'kernel', owned), 'product')
+        gate, up = operations.linear.call_args_list
+        self.assertEqual(gate.kwargs['program_config']['fused_activation'], operations.UnaryOpType.SILU)
+        self.assertIsNone(up.kwargs['program_config']['fused_activation'])
+        operations.silu.assert_not_called()
+        operations.multiply.assert_called_once_with('activated_gate', 'up')
+        self.assertEqual(owned, ['activated_gate', 'up', 'product'])
+
+    def test_token_rows_are_explicit_and_do_not_change_compute(self):
+        source = '                            if (last_out) {discard\n                            } else {\n                                tile_regs_commit();\n}'
+        with patch('pathlib.Path.read_text', return_value=source):
+            control = FusedProjection(None, None)
+            self.assertEqual(control.token_rows, 1)
+            for rows in (2, 4, 8, 16, 32):
+                candidate = FusedProjection(None, None, token_rows=rows)
+                self.assertEqual(candidate.compute, control.compute)
+                self.assertEqual(candidate.manifest['token_rows'], rows)
+        for rows in (0, 3, 33, True, 8.0):
+            with self.assertRaisesRegex(ValueError, 'single-tile'):
+                FusedProjection(None, None, token_rows=rows)
+
+    def test_pair_mapping_matches_39_worker_control(self):
+        workers = mapping()
+        self.assertEqual(len(workers), 39)
+        self.assertEqual(workers[-1], (5, 3, 266, 6))
+        self.assertEqual([pair for _, _, begin, count in workers for pair in range(begin, begin + count)], list(range(272)))
+
+    def test_only_final_pack_is_replaced(self):
+        start = "                            if (last_out) {"
+        end = "                            } else {\n                                tile_regs_commit();"
+        source = "prefix" + start + "old pack" + end + "native partial loop\n}"
+        result = fused_compute(source)
+        self.assertIn("prefix", result)
+        self.assertIn(end + "native partial loop", result)
+        self.assertLess(result.index("native partial loop"), result.index("mul_binary_tile_init"))
+        self.assertIn("apply_activation_from_pack<KernelActivation::SILU>(1)", result)
+        self.assertLess(result.index("pack_block(start_dst_index, rounded_cb, 2)"), result.index(BF16_PRODUCT))
+        self.assertIn("DST_SYNC_MODE, DST_ACCUM_MODE, calculate_sfpu_binary_mul", result)
+        self.assertIn("(APPROX, ckernel::BinaryOp::MUL, 8, false)", result)
+
+    def test_changed_source_fails_closed(self):
+        with self.assertRaises(ValueError):
+            fused_compute("no matching native kernel")
+
+    def test_reviewed_grids_cover_each_pair_once(self):
+        for pairs_per_worker, count in ((3, 91), (4, 68), (5, 55), (7, 39)):
+            workers = mapping(pairs_per_worker)
+            self.assertEqual(len(workers), count)
+            self.assertEqual([pair for _, _, begin, valid in workers for pair in range(begin, begin + valid)], list(range(272)))
+            self.assertTrue(all(core_x < 11 and core_y < 10 for core_x, core_y, _, _ in workers))
+        for invalid in (0, 1, 2, 6, 8):
+            with self.assertRaises(ValueError):
+                mapping(invalid)
+
+    def test_generated_epilogue_matches_worker_capacity(self):
+        source = "                            if (last_out) {old pack" + "                            } else {\n                                tile_regs_commit();\n}"
+        for pairs in (3, 4, 5, 7):
+            result = fused_compute(source, pairs_per_worker=pairs)
+            self.assertIn(f"cb_wait_front(rounded_cb, {2 * pairs});", result)
+            self.assertIn(f"pair < {pairs};", result)
+
+    def test_intermediate_variant_preserves_both_rounded_tiles(self):
+        source = "                            if (last_out) {old pack" + "                            } else {\n                                tile_regs_commit();\n}"
+        result = fused_compute(source, intermediates=True)
+        self.assertNotIn("mul_binary_tile_init();", result)
+        self.assertNotIn("mul_binary_tile(0, 1, 0);", result)
+        self.assertNotIn(BF16_PRODUCT, result)
+        self.assertIn("pack_tile(1, out_dfb_id);", result)
+        self.assertIn("cb_reserve_back(out_dfb_id, 2);", result)
+        self.assertIn("cb_push_back(out_dfb_id, 2);", result)
+
+
+if __name__ == "__main__":
+    unittest.main()

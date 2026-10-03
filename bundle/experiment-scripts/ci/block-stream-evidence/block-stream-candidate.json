@@ -1,0 +1,38 @@
+{
+  "transport_admission": {
+    "transport_qualified": true,
+    "mlp_qualified": false,
+    "hardware_qualified": false,
+    "performance_qualified": false,
+    "sources": {
+      "mlp_block_stream.py": "4b826527eec61ae0a24757c51cc4aed982d17157cb46b39d4d234dc73f80fdd9",
+      "mlp_block_stream.cpp": "d2cb451e48702c93eaa499c421560dbf94e78ca4fae246650e338a10d4011e17",
+      "mlp-block-stream-probe.py": "e1fa55dd738538182c9de50171e7cdf005cde8e635cb52c9a12485abfda7f8fa"
+    },
+    "checks": 8
+  },
+  "transport_report_sha256": "1febb741244d258ba603694dabf0168ec0a61fa010d8b09e2611a0839c93007d",
+  "before": {
+    "fused_1d.py": "4c215d945e723ef3d8c2be1757e7c170bf21eebb01e204359243d766c6c7cf93",
+    "fused-batch-probe.py": "36898752ac8d46054fa753ee074b11761f1ea3241a22cdff385de97704488c9a"
+  },
+  "after": {
+    "fused_1d.py": "00f29b83acb3eb93929b623e426c9312c158c8b8a9b9db028e7011e4f51db6d7",
+    "fused-batch-probe.py": "a86674d6005dd375b10eb22e8188aff18c34bc52a0022caa26fcdf58245e2b41",
+    "simulator-suite.sh": "71fcfa67dd785be0eadc230cc400c303589e1618156f884dd19161075d8186e2",
+    "mlp_block_stream.py": "4b826527eec61ae0a24757c51cc4aed982d17157cb46b39d4d234dc73f80fdd9",
+    "mlp_block_stream.cpp": "d2cb451e48702c93eaa499c421560dbf94e78ca4fae246650e338a10d4011e17",
+    "mlp_block_stream_projection.py": "5d5bb9b1cd41bb19de992dba99c4001f39a9684519d55da98d3fe0ff62445e66",
+    "mlp_block_stream_probe.py": "5e9320bf561cdc2658b221c81ac0a542fb37bbfb4dfc5735b9ec79677f782269",
+    "mlp_register_epilogue.py": "a44b8bff866c1c1b4ae07f54800849c2d4a7c94dcb5ad70e6bde433b07120cca",
+    "mlp_rounding_policy.py": "39f108b367984a07d960f5188ab690e9475268751b7ac9ec69e8b04495e54b9f",
+    "frozen_mlp_buffer_trial.py": "de99b61ebec7c8b3a8e8bbd08feda023c436aa4fa15bcc8257f223050a915886",
+    "mlp_register_epilogue_stage.py": "a1843d20465a005ab829f9b0bf801bfe124aa082ca29ce0f2f0b3c88567e5d05",
+    "frozen_recipe_context.py": "713f2ed804b9c2557d61ef14d2e151965ef11dfc00d2ad1dc985287da2a7b8b9",
+    "frozen_context_geometry.py": "a5bcc57042153ad09ff0dcc151bda16532b974d57c6afdc2d49574b746234c0f"
+  },
+  "simulator_qualified": false,
+  "hardware_qualified": false,
+  "performance_qualified": false,
+  "scope": "T16 transport plus existing rounded register arithmetic; no combined qualification"
+}

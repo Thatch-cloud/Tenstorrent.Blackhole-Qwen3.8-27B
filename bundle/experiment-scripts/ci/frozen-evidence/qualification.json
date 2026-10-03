@@ -1,0 +1,31 @@
+{
+  "context": 32768,
+  "capacity": 33024,
+  "reports": {
+    "draft-numerical.json": "091cbdd2ad2b01a9c529083ef1ac11bbc78784fae59f471b4daf075420fbccef",
+    "draft-diagnostics.json": "1dc508f7235cea9a52f6c34cb928581895dc6376a3cf70e7ff7644697df5820b",
+    "target-replay.json": "92c5187536e53739d00536216d0d00d9c901b4963648bb6bfda5195b593007e0"
+  },
+  "draft": {
+    "context": 32768,
+    "capacity": 33024,
+    "reciprocal_variant": "scalar-fp32",
+    "complete_probe_coverage": true,
+    "source_files_verified": false,
+    "artifact_provenance_verified": false,
+    "full_request_qualified": false,
+    "performance_qualified": false
+  },
+  "target": {
+    "context": 32768,
+    "capacity": 33024,
+    "kv_dtype": "bfloat16",
+    "compact_tree_scratch": true,
+    "component_qualified": true,
+    "full_request_qualified": false,
+    "performance_qualified": false
+  },
+  "component_sources_verified": true,
+  "combined_runtime_qualified": false,
+  "performance_qualified": false
+}

@@ -1,0 +1,975 @@
+{
+  "passed": true,
+  "closed_cleanly": true,
+  "checks": [
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": -1,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": -1,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": -1,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": -1,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": -1,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": -1,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 0,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 0,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 0,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 0,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 0,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 0,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 1,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 1,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 1,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 1,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 1,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 1,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 2,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 2,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 2,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 2,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 2,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 31,
+      "prefix": 2,
+      "ordinal": 2,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": -1,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": -1,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": -1,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": -1,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": -1,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": -1,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 0,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 0,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 0,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 0,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 0,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 0,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 1,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 1,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 1,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 1,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 1,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 1,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 2,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 2,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 2,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 2,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 2,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2047,
+      "prefix": 2,
+      "ordinal": 2,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": -1,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": -1,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": -1,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": -1,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": -1,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": -1,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 0,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 0,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 0,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 0,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 0,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 0,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 1,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 1,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 1,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 1,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 1,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 1,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 2,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 2,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 2,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 2,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 2,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 1,
+      "ordinal": 2,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": -1,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": -1,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": -1,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": -1,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": -1,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": -1,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 0,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 0,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 0,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 0,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 0,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 0,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 1,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 1,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 1,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 1,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 1,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 1,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 2,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 2,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 2,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 2,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 2,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 16,
+      "ordinal": 2,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": -1,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": -1,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": -1,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": -1,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": -1,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": -1,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 0,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 0,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 0,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 0,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 0,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 0,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 1,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 1,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 1,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 1,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 1,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 1,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 2,
+      "name": "active_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 2,
+      "name": "active_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 2,
+      "name": "delta_unchanged",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 2,
+      "name": "delta_unchanged",
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 2,
+      "name": "sliding_output",
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "history": 2048,
+      "prefix": 32,
+      "ordinal": 2,
+      "name": "sliding_output",
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "backend": "simulator",
+  "scope": "Weight-free two-chip sliding K/V transport qualification; no throughput claim.",
+  "model_integrated": false,
+  "performance_qualified": false,
+  "sources": {
+    "history-append-probe.py": "9d0164c4a835c1f5cbc53c6366fc3cf1bb48c26b6736eca32e6ddf7e30f33322",
+    "draft_kv_slide.py": "8ea58ae42260cb03f37e224d18572c4efe467ff556912a64ebcb1d15aed9c7fc",
+    "draft_kv_slide.cpp": "1679bbd779add56b4bd445a6b4c51bd3e49c39a8a520dfaddfc3bd9f36667d47"
+  }
+}

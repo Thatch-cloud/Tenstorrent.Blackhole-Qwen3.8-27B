@@ -125,14 +125,18 @@ output budget: the shape the maintainers' real-text gate measured.
   ("about 28.3 tok/s per user") and `docs/real-text-2026-09-24.md` (real-text single stream 32.5 tok/s at 131k, about
   20.7 tok/s per user at four on the earlier image).
 - **Limits:** **it admits only prompts of exactly 131,072 tokens**, so it is a benchmark shape, not a server. It needs
-  the frozen-evidence tree, four trained links and `QWEN_FAST_RUNTIME_BINARY_SHA256` set to your build's hash (the
-  image takes it as a build argument).
+  the frozen-evidence tree (now in `bundle/`), four trained links and `QWEN_FAST_RUNTIME_BINARY_SHA256` set to your
+  build's hash (the image takes it as a build argument). **On a source-built `k64j` tree it is refused at attach**:
+  the binary override and the T16 evidence pin the SDPA prefill factory at `fd8c0676...`, and the k64j build leaves
+  `bfab8558...` on disk. No variable or build argument changes that; BUILD.md, "Pins that `exact`, `c2` and
+  `c2-packed` check", has the table and the two ways forward. Only the `general*` profiles avoid it.
 
 ## 5. `c2`
 
 `exact`'s geometry serving any request: prompts up to 123,136 tokens, outputs up to 16,384.
 
-- **Run:** `PROFILE=c2`; same requirements as `exact`.
+- **Run:** `PROFILE=c2`; same requirements as `exact`, **and the same pin refusal on a source-built `k64j` tree**
+  (BUILD.md, "Pins that `exact`, `c2` and `c2-packed` check").
 - **Results:** no published figure yet.
 - **Limits:** below `general` under concurrency (the maintainers' own measurements say so). The profile's description still says "not qualified for production
   traffic".
@@ -144,10 +148,11 @@ the K64j binary tier.
 
 - **Run:** `PROFILE=c2-packed`, on the `k64j` tier only.
 - **Results:** no published figure yet.
-- **Limits:** the admission check pins the maintainers' binary and its evidence record. **On a binary you built, the
-  attach is refused until you run the evidence checks on your own cards and re-pin**, and the profile then serves as `c2`
-  (it fails closed). The evidence harnesses and re-pin procedure are not in this repository yet (BUILD.md, "What is
-  not here yet").
+- **Limits:** the admission check pins the maintainers' binary, four kernels and its evidence record, and it also pins
+  the decode factory the k64j build changes. **On a binary you built, the attach is refused until you run the evidence
+  checks on your own cards and re-pin, and a refusal stops the engine from starting** (by reading the code: it does not
+  fall back to `c2`; an earlier version of this page said it did). The evidence harnesses and re-pin procedure are not
+  in this repository yet (BUILD.md, "What is not here yet").
 
 ---
 

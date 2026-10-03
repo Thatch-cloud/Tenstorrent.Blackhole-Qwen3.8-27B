@@ -1,0 +1,1494 @@
+{
+  "passed": true,
+  "closed_cleanly": true,
+  "backend": "hardware",
+  "checks": [
+    {
+      "name": "reference_eager",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_eager",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_eager",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_eager",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_timed",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_timed",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_timed",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_timed",
+      "position": 33024,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_eager",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_eager",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_eager",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_eager",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_timed",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_timed",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_timed",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_timed",
+      "position": 33024,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_eager",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_eager",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_eager",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_eager",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_timed",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_timed",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_timed",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_timed",
+      "position": 33056,
+      "proposals": 7,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_eager",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_eager",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_eager",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_eager",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 1,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 1,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 0,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_replay",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_replay",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "history_unchanged",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "queries_unchanged",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "reference_timed",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "reference_timed",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    },
+    {
+      "name": "candidate_timed",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 0,
+      "exact": true
+    },
+    {
+      "name": "candidate_timed",
+      "position": 33056,
+      "proposals": 15,
+      "seed": 2,
+      "chip": 1,
+      "exact": true
+    }
+  ],
+  "component_timings": [
+    {
+      "position": 33024,
+      "proposals": 7,
+      "arm": "reference",
+      "repeat": 0,
+      "elapsed_ms": 1.4234674163162708
+    },
+    {
+      "position": 33024,
+      "proposals": 7,
+      "arm": "candidate",
+      "repeat": 0,
+      "elapsed_ms": 0.2119811251759529
+    },
+    {
+      "position": 33024,
+      "proposals": 7,
+      "arm": "candidate",
+      "repeat": 0,
+      "elapsed_ms": 0.21070102229714394
+    },
+    {
+      "position": 33024,
+      "proposals": 7,
+      "arm": "reference",
+      "repeat": 0,
+      "elapsed_ms": 1.4103078283369541
+    },
+    {
+      "position": 33024,
+      "proposals": 7,
+      "arm": "reference",
+      "repeat": 1,
+      "elapsed_ms": 1.415617298334837
+    },
+    {
+      "position": 33024,
+      "proposals": 7,
+      "arm": "candidate",
+      "repeat": 1,
+      "elapsed_ms": 0.20622089505195618
+    },
+    {
+      "position": 33024,
+      "proposals": 7,
+      "arm": "candidate",
+      "repeat": 1,
+      "elapsed_ms": 0.2069510519504547
+    },
+    {
+      "position": 33024,
+      "proposals": 7,
+      "arm": "reference",
+      "repeat": 1,
+      "elapsed_ms": 1.4113271608948708
+    },
+    {
+      "position": 33024,
+      "proposals": 7,
+      "arm": "reference",
+      "repeat": 2,
+      "elapsed_ms": 1.4116480015218258
+    },
+    {
+      "position": 33024,
+      "proposals": 7,
+      "arm": "candidate",
+      "repeat": 2,
+      "elapsed_ms": 0.20841136574745178
+    },
+    {
+      "position": 33024,
+      "proposals": 7,
+      "arm": "candidate",
+      "repeat": 2,
+      "elapsed_ms": 0.21107075735926628
+    },
+    {
+      "position": 33024,
+      "proposals": 7,
+      "arm": "reference",
+      "repeat": 2,
+      "elapsed_ms": 1.4032782055437565
+    },
+    {
+      "position": 33024,
+      "proposals": 7,
+      "arm": "reference",
+      "repeat": 3,
+      "elapsed_ms": 1.4092777855694294
+    },
+    {
+      "position": 33024,
+      "proposals": 7,
+      "arm": "candidate",
+      "repeat": 3,
+      "elapsed_ms": 0.20856084302067757
+    },
+    {
+      "position": 33024,
+      "proposals": 7,
+      "arm": "candidate",
+      "repeat": 3,
+      "elapsed_ms": 0.20735105499625206
+    },
+    {
+      "position": 33024,
+      "proposals": 7,
+      "arm": "reference",
+      "repeat": 3,
+      "elapsed_ms": 1.4108670875430107
+    },
+    {
+      "position": 33024,
+      "proposals": 15,
+      "arm": "reference",
+      "repeat": 0,
+      "elapsed_ms": 1.4228369109332561
+    },
+    {
+      "position": 33024,
+      "proposals": 15,
+      "arm": "candidate",
+      "repeat": 0,
+      "elapsed_ms": 0.21433085203170776
+    },
+    {
+      "position": 33024,
+      "proposals": 15,
+      "arm": "candidate",
+      "repeat": 0,
+      "elapsed_ms": 0.21189125254750252
+    },
+    {
+      "position": 33024,
+      "proposals": 15,
+      "arm": "reference",
+      "repeat": 0,
+      "elapsed_ms": 1.4174580574035645
+    },
+    {
+      "position": 33024,
+      "proposals": 15,
+      "arm": "reference",
+      "repeat": 1,
+      "elapsed_ms": 1.4105970039963722
+    },
+    {
+      "position": 33024,
+      "proposals": 15,
+      "arm": "candidate",
+      "repeat": 1,
+      "elapsed_ms": 0.21005095914006233
+    },
+    {
+      "position": 33024,
+      "proposals": 15,
+      "arm": "candidate",
+      "repeat": 1,
+      "elapsed_ms": 0.3082812763750553
+    },
+    {
+      "position": 33024,
+      "proposals": 15,
+      "arm": "reference",
+      "repeat": 1,
+      "elapsed_ms": 1.4052176848053932
+    },
+    {
+      "position": 33024,
+      "proposals": 15,
+      "arm": "reference",
+      "repeat": 2,
+      "elapsed_ms": 1.4115781523287296
+    },
+    {
+      "position": 33024,
+      "proposals": 15,
+      "arm": "candidate",
+      "repeat": 2,
+      "elapsed_ms": 0.21178089082241058
+    },
+    {
+      "position": 33024,
+      "proposals": 15,
+      "arm": "candidate",
+      "repeat": 2,
+      "elapsed_ms": 0.21806079894304276
+    },
+    {
+      "position": 33024,
+      "proposals": 15,
+      "arm": "reference",
+      "repeat": 2,
+      "elapsed_ms": 1.4133881777524948
+    },
+    {
+      "position": 33024,
+      "proposals": 15,
+      "arm": "reference",
+      "repeat": 3,
+      "elapsed_ms": 1.4110580086708069
+    },
+    {
+      "position": 33024,
+      "proposals": 15,
+      "arm": "candidate",
+      "repeat": 3,
+      "elapsed_ms": 0.2107410691678524
+    },
+    {
+      "position": 33024,
+      "proposals": 15,
+      "arm": "candidate",
+      "repeat": 3,
+      "elapsed_ms": 0.20744139328598976
+    },
+    {
+      "position": 33024,
+      "proposals": 15,
+      "arm": "reference",
+      "repeat": 3,
+      "elapsed_ms": 1.4195777475833893
+    },
+    {
+      "position": 33056,
+      "proposals": 7,
+      "arm": "reference",
+      "repeat": 0,
+      "elapsed_ms": 1.2811371125280857
+    },
+    {
+      "position": 33056,
+      "proposals": 7,
+      "arm": "candidate",
+      "repeat": 0,
+      "elapsed_ms": 0.21741120144724846
+    },
+    {
+      "position": 33056,
+      "proposals": 7,
+      "arm": "candidate",
+      "repeat": 0,
+      "elapsed_ms": 0.20640110597014427
+    },
+    {
+      "position": 33056,
+      "proposals": 7,
+      "arm": "reference",
+      "repeat": 0,
+      "elapsed_ms": 1.2374869547784328
+    },
+    {
+      "position": 33056,
+      "proposals": 7,
+      "arm": "reference",
+      "repeat": 1,
+      "elapsed_ms": 1.2355856597423553
+    },
+    {
+      "position": 33056,
+      "proposals": 7,
+      "arm": "candidate",
+      "repeat": 1,
+      "elapsed_ms": 0.20469212904572487
+    },
+    {
+      "position": 33056,
+      "proposals": 7,
+      "arm": "candidate",
+      "repeat": 1,
+      "elapsed_ms": 0.20492076873779297
+    },
+    {
+      "position": 33056,
+      "proposals": 7,
+      "arm": "reference",
+      "repeat": 1,
+      "elapsed_ms": 1.2357360683381557
+    },
+    {
+      "position": 33056,
+      "proposals": 7,
+      "arm": "reference",
+      "repeat": 2,
+      "elapsed_ms": 1.2336568906903267
+    },
+    {
+      "position": 33056,
+      "proposals": 7,
+      "arm": "candidate",
+      "repeat": 2,
+      "elapsed_ms": 0.20330073311924934
+    },
+    {
+      "position": 33056,
+      "proposals": 7,
+      "arm": "candidate",
+      "repeat": 2,
+      "elapsed_ms": 0.20700087770819664
+    },
+    {
+      "position": 33056,
+      "proposals": 7,
+      "arm": "reference",
+      "repeat": 2,
+      "elapsed_ms": 1.232655718922615
+    },
+    {
+      "position": 33056,
+      "proposals": 7,
+      "arm": "reference",
+      "repeat": 3,
+      "elapsed_ms": 1.2306771241128445
+    },
+    {
+      "position": 33056,
+      "proposals": 7,
+      "arm": "candidate",
+      "repeat": 3,
+      "elapsed_ms": 0.2043209969997406
+    },
+    {
+      "position": 33056,
+      "proposals": 7,
+      "arm": "candidate",
+      "repeat": 3,
+      "elapsed_ms": 0.2027507871389389
+    },
+    {
+      "position": 33056,
+      "proposals": 7,
+      "arm": "reference",
+      "repeat": 3,
+      "elapsed_ms": 1.235836185514927
+    },
+    {
+      "position": 33056,
+      "proposals": 15,
+      "arm": "reference",
+      "repeat": 0,
+      "elapsed_ms": 1.250747125595808
+    },
+    {
+      "position": 33056,
+      "proposals": 15,
+      "arm": "candidate",
+      "repeat": 0,
+      "elapsed_ms": 0.2117818221449852
+    },
+    {
+      "position": 33056,
+      "proposals": 15,
+      "arm": "candidate",
+      "repeat": 0,
+      "elapsed_ms": 0.2078413963317871
+    },
+    {
+      "position": 33056,
+      "proposals": 15,
+      "arm": "reference",
+      "repeat": 0,
+      "elapsed_ms": 1.2398161925375462
+    },
+    {
+      "position": 33056,
+      "proposals": 15,
+      "arm": "reference",
+      "repeat": 1,
+      "elapsed_ms": 1.2419559061527252
+    },
+    {
+      "position": 33056,
+      "proposals": 15,
+      "arm": "candidate",
+      "repeat": 1,
+      "elapsed_ms": 0.22975075989961624
+    },
+    {
+      "position": 33056,
+      "proposals": 15,
+      "arm": "candidate",
+      "repeat": 1,
+      "elapsed_ms": 0.20478107035160065
+    },
+    {
+      "position": 33056,
+      "proposals": 15,
+      "arm": "reference",
+      "repeat": 1,
+      "elapsed_ms": 1.2410669587552547
+    },
+    {
+      "position": 33056,
+      "proposals": 15,
+      "arm": "reference",
+      "repeat": 2,
+      "elapsed_ms": 1.2395069934427738
+    },
+    {
+      "position": 33056,
+      "proposals": 15,
+      "arm": "candidate",
+      "repeat": 2,
+      "elapsed_ms": 0.20751077681779861
+    },
+    {
+      "position": 33056,
+      "proposals": 15,
+      "arm": "candidate",
+      "repeat": 2,
+      "elapsed_ms": 0.2136407420039177
+    },
+    {
+      "position": 33056,
+      "proposals": 15,
+      "arm": "reference",
+      "repeat": 2,
+      "elapsed_ms": 1.2445361353456974
+    },
+    {
+      "position": 33056,
+      "proposals": 15,
+      "arm": "reference",
+      "repeat": 3,
+      "elapsed_ms": 1.241777092218399
+    },
+    {
+      "position": 33056,
+      "proposals": 15,
+      "arm": "candidate",
+      "repeat": 3,
+      "elapsed_ms": 0.2095010131597519
+    },
+    {
+      "position": 33056,
+      "proposals": 15,
+      "arm": "candidate",
+      "repeat": 3,
+      "elapsed_ms": 0.20770123228430748
+    },
+    {
+      "position": 33056,
+      "proposals": 15,
+      "arm": "reference",
+      "repeat": 3,
+      "elapsed_ms": 1.238327007740736
+    }
+  ],
+  "simulator_report_sha256": "57ef37a3f2fbc44943e33c0e636e96afedd453bf992c60b9e5b3c030535af279",
+  "harness_sha256": "0da9b70b5216c5a0cc94d6d4162a1a91e8e464c6965f44c7397694e8825e308a",
+  "performance_qualified": false,
+  "model_integrated": false,
+  "scope": "Weight-free tiled draft-tail correctness and replay; not model or speed acceptance.",
+  "sources": {
+    "draft-tail-probe.py": "64e476e307ae37133dd4b020ea731e66b9e75973942c948dac3a07709162b84c",
+    "frozen_draft_tail.py": "2382347ac68912730d3ff177fbf9d7492670d57ec4731fb5ccc06c42e736ca1c",
+    "dspark_native_cached_layer.py": "2372feb6a5f54f9847e3b408bc17ac81f09a8f7ecdf0c28eecd5b9e46822adad",
+    "dspark_full_attention.py": "6dfde13f646530227d2ff15eee2cf0893081b8f19fcc5db6392eed039bebb450",
+    "dspark_projection.py": "15a19fe6a57ad6791c74e36a290613513e8f547695a72c0a285d12fff1a70a99",
+    "attention_batch.py": "64e2ed10cdb5f38485ac07178300a784a5ea2700f4c5275601abd6188304c9f0"
+  }
+}

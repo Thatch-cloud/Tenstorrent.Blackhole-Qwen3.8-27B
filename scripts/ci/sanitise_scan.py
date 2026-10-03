@@ -130,16 +130,31 @@ def run_git(repo, *args):
                           check=True).stdout
 
 
+def _long(path):
+    """Windows refuses paths of 260 characters or more unless they carry the extended-length prefix."""
+    path = os.path.abspath(path)
+    prefix = chr(92) * 2 + '?' + chr(92)
+    return prefix + path if os.name == 'nt' and not path.startswith((chr(92) * 2)) else path
+
+
 def scan_dir(root, allow=()):
-    root = Path(root)
+    """Fail closed: a file that cannot be read is a BLOCK, never a silent skip."""
+    root = os.path.abspath(str(root))
     hits = []
-    for path in sorted(root.rglob('*')):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(root).as_posix()
-        if skipped(rel):
-            continue
-        hits.extend(scan_blob(rel, path.read_bytes(), allow))
+    for dirpath, dirnames, filenames in os.walk(_long(root)):
+        dirnames.sort()
+        for fname in sorted(filenames):
+            full = os.path.join(dirpath, fname)
+            rel = os.path.relpath(full, _long(root)).replace(os.sep, '/')
+            if skipped(rel):
+                continue
+            try:
+                with open(full, 'rb') as handle:
+                    data = handle.read()
+            except OSError as exc:
+                hits.append(('BLOCK', 'unreadable-file', rel, 0, '(%s)' % exc.__class__.__name__))
+                continue
+            hits.extend(scan_blob(rel, data, allow))
     return hits
 
 

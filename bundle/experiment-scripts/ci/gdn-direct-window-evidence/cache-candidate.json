@@ -1,0 +1,9 @@
+{
+  "sources": {
+    "gdn_direct_window.py": "f9bc15e4653e1aa4f54817b3c87fed55372e2e2d868cb75dbbef8f03fb6bd16e",
+    "gdn_direct_window_device.py": "06cb0b8e843f9018665a053ebea2feeea309a45ef074da96c780e0e4596b081b",
+    "gdn-output-grid-probe.py": "700259b0ce07b0f46bfabfdbb8c5419973c383bdc22eb6336bf04212b1bc77b8"
+  },
+  "simulator_qualified": false,
+  "hardware_qualified": false
+}
