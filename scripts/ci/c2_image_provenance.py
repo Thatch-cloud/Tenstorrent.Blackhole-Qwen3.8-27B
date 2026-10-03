@@ -551,6 +551,27 @@ def check_revision(context, labels, image_files):
     return problems, lines
 
 
+def check_baked_serving(env, profiles):
+    """Problems with the baked serving variables of an image's ENV (Dockerfile ARG C2_BAKE_PROFILE): both empty (the
+    default build: the image default is profiles.json's and the platform's own session cap applies), or the baked profile
+    a serving profile (P150x4, not gate_only) and THATCH_SERVING_SESSION_CAP exactly its max-num-seqs, so the platform
+    never admits more sessions than the engine has seats and the image is the unit of rollback."""
+    baked = env.get('QWEN_C2_PROFILE') or ''
+    cap = env.get('THATCH_SERVING_SESSION_CAP') or ''
+    if not baked:
+        return ['(c) THATCH_SERVING_SESSION_CAP=%s is baked without a baked profile' % cap] if cap else []
+    entry = profiles['profiles'].get(baked)
+    if entry is None:
+        return []   # reported by the caller: not a profile of the context
+    problems = []
+    if entry.get('gate_only') is True or entry.get('mesh_device') != 'P150x4':
+        problems.append('(c) the baked default %s is not a four-card serving profile' % baked)
+    seats = str(entry['engine'].get('max-num-seqs'))
+    if cap != seats:
+        problems.append('(c) THATCH_SERVING_SESSION_CAP is %r, the baked profile %s has max-num-seqs %s' % (cap, baked, seats))
+    return problems
+
+
 def check_argv(contract, profiles_path, profile, expected_name, log_text):
     """Problems and report lines for one boot (c). profile is the QWEN_C2_PROFILE passed (None
     for the image default); expected_name the profile that should answer."""
@@ -947,9 +968,19 @@ def verify(image, context, models, checkout=None, docker=None, log=print, previo
     contract = load_contract(context / 'overlay' / 'scripts/ci/serving_c2_contract.py')
     boots = {}
     gates = {name: profile.get('gate_only') is True for name, profile in profiles['profiles'].items()}
+    # The image default: profiles.json's, unless the build baked a serving profile into the image ENV (the eight-seat
+    # variant: --build-arg C2_BAKE_PROFILE, build-c2-serving-image.sh), which load_profile reads before the file's default.
+    default_name = (config['env'].get('QWEN_C2_PROFILE') or '') or profiles['default']
+    if default_name not in profiles['profiles']:
+        problems.append('(c) the image ENV QWEN_C2_PROFILE %r is not a profile of the context' % default_name)
+        default_name = profiles['default']
+    if default_name != profiles['default']:
+        report.append('(c) the image default is the BAKED profile %s (the file default of the context is %s)' % (
+            default_name, profiles['default']))
+    problems.extend(check_baked_serving(env, profiles))
     for profile in [None] + sorted(profiles['profiles']):
-        boots[profile] = docker.boot(image, models, profile, gate=gates.get(profile or profiles['default'], False))
-        found, lines = check_argv(contract, profiles_path, profile, profile or profiles['default'], boots[profile])
+        boots[profile] = docker.boot(image, models, profile, gate=gates.get(profile or default_name, False))
+        found, lines = check_argv(contract, profiles_path, profile, profile or default_name, boots[profile])
         problems += found
         report += lines
     environments = {name: docker.environment(image, name, gate=gates[name]) for name in sorted(profiles['profiles'])}

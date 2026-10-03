@@ -941,6 +941,204 @@ class FourUserConstructionTests(FourUserFixture):
         self.assertEqual((FakeModelBatch.instances, self.prepared), ([], []))
 
 
+class TwoPhaseConstructionTests(FourUserFixture):
+    """QWEN_FAST_M3_BLOCKS=2 (A1c, serving_runtime.complete_blocks_two_phase): two M3 blocks over one eight-slot pool,
+    built with defer_capture so that every block allocates and warms before any block captures a trace. The fake
+    operations log every device allocation, every capture window and every eager forward, in order, so the test can
+    state the construction-order rule (packed_verifier.py, CONSTRUCTION ORDER) as a property of the log: after the first
+    capture begins, no persistent allocation of any block follows - only what a capture allocates inside its own window
+    (its output) does."""
+
+    USERS = 4
+
+    def setUp(self):
+        super().setUp()
+        self.events = []
+        self.compiled = set()
+        self.programs = [0]
+        ttnn = self.ttnn
+        self.in_capture = [False]
+
+        original_allocate = ttnn.allocate
+
+        def allocate(shape, *args, **options):
+            self.events.append(('alloc', 'capture' if self.in_capture[0] else 'persistent', tuple(shape)))
+            return original_allocate(shape, *args, **options)
+
+        ttnn.allocate = allocate
+        self.model.mesh_device.num_program_cache_entries = lambda: self.programs[0]
+        # eight slots, and two independent (4, 16) table sets, one per block (serving_buffer_pool.packed_replay)
+        self.pool = pool(ttnn, self.helpers, users=8, packed={(4, 16): packed_tables(ttnn, users=4)})
+        sets = [packed_tables(ttnn, users=4), packed_tables(ttnn, users=4)]
+        self.pool.packed_replay = lambda count, rows: next((tables for tables in sets if not tables.taken), sets[-1])
+        self.sets = sets
+
+        def capture_operation(operations, mesh, operation):
+            self.events.append(('capture-begin',))
+            self.in_capture[0] = True
+            try:
+                return 'trace%d' % next(self.traces), operation()
+            finally:
+                self.in_capture[0] = False
+                self.events.append(('capture-end',))
+
+        packed_verifier.capture_operation.side_effect = capture_operation
+        for helper in self.helpers:
+            original = helper.allocate.side_effect
+            helper.allocate.side_effect = lambda original=original: (self.events.append(('helper-allocate',)), original())[1]
+        original_forward = FakeModelBatch.forward
+
+        def forward(batch, *, sharded_logits):
+            key = batch.rows
+            if key not in self.compiled and not self.in_capture[0]:
+                self.compiled.add(key)
+                self.programs[0] += 1
+            self.events.append(('forward', 'capture' if self.in_capture[0] else 'eager'))
+            return original_forward(batch, sharded_logits=sharded_logits)
+
+        patcher = patch.object(FakeModelBatch, 'forward', forward)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.events.clear()    # the pool's own allocations are not the blocks'
+
+    def block(self, slots, **options):
+        return PackedVerifierEngine(self.ttnn, self.model, self.helpers, 'sampler', pool=self.pool,
+                                    shared_weights=self.weights, shape=self.shape(), feature_taps=TAPS,
+                                    pool_slots=slots, **options)
+
+    def two_blocks(self):
+        blocks = [self.block((0, 1, 2, 3), defer_capture=True), self.block((4, 5, 6, 7), defer_capture=True)]
+        self.assertEqual([block.phase for block in blocks], ['preparing', 'preparing'])
+        return blocks
+
+    def test_every_block_allocates_and_warms_before_any_block_captures(self):
+        import serving_runtime
+
+        blocks = self.two_blocks()
+        serving_runtime.complete_blocks_two_phase(blocks, self.model, log=lambda *args: None)
+        self.assertEqual([block.phase for block in blocks], ['idle', 'idle'])
+        kinds = [event[0] if event[0] != 'alloc' else 'alloc-' + event[1] for event in self.events]
+        first_capture = kinds.index('capture-begin')
+        # both blocks' persistent allocations (initial snapshot, checkpoints, taps, warm and captured fixtures) and both
+        # warm forwards come first
+        before = self.events[:first_capture]
+        self.assertEqual(sum(1 for event in before if event == ('forward', 'eager')), 2, 'both warm forwards')
+        self.assertEqual(sum(1 for event in before if event[0] == 'helper-allocate'), 2 * GDN_LAYERS * 5)
+        # nothing persistent is allocated once a capture has begun: the only allocations after that are inside a window
+        late = [event for event in self.events[first_capture:] if event[0] == 'alloc' and event[1] != 'capture']
+        self.assertEqual(late, [], 'no block allocates anything it keeps across rounds after a capture')
+        self.assertFalse(any(event[0] == 'helper-allocate' for event in self.events[first_capture:]))
+        # eager forwards (the warm ones) all precede every capture; the captures are two verify windows then commits
+        eager = [index for index, event in enumerate(self.events) if event == ('forward', 'eager')]
+        captured = [index for index, event in enumerate(self.events) if event == ('forward', 'capture')]
+        self.assertTrue(max(eager) < min(captured))
+        self.assertEqual(len(captured), 2)
+
+    def test_the_single_block_order_is_the_old_one_in_effect(self):
+        # a block built whole (the production path) logs exactly what the same block built in three phases logs
+        whole = self.block((0, 1, 2, 3))
+        built_whole, whole_commits = list(self.events), whole.describe()['commit_traces']
+        whole.close()
+        self.events.clear()
+        self.compiled.clear()
+        self.programs[0] = 0
+        for tables in self.sets:
+            tables.taken = False
+        FakeModelBatch.instances = []
+        phased = self.block((0, 1, 2, 3), defer_capture=True)
+        phased.warm_and_fixture()
+        phased.capture_traces()
+        phased.finish_construction()
+        shape = lambda events: [event[:2] if event[0] == 'alloc' else event for event in events]
+        self.assertEqual(shape(self.events), shape(built_whole))
+        self.assertEqual(phased.phase, 'idle')
+        self.assertEqual(phased.describe()['commit_traces'], whole_commits)
+
+    def test_block_b_compiles_no_program_after_block_a_captures_and_the_line_says_so(self):
+        import serving_runtime
+
+        lines = []
+        blocks = self.two_blocks()
+        serving_runtime.complete_blocks_two_phase(blocks, self.model, log=lambda template, *values: lines.append(
+            template.format(*values)))
+        self.assertEqual(lines, ['[PINDIAG] packed blocks capture block=0 programs=1->1',
+                                 '[PINDIAG] packed blocks capture block=1 programs=1->1'])
+
+    def test_a_block_that_compiles_in_its_capture_shows_it_in_the_line(self):
+        import serving_runtime
+
+        lines = []
+        blocks = self.two_blocks()
+        capture = blocks[1].capture_traces
+
+        def compiling():
+            self.programs[0] += 3
+            capture()
+
+        blocks[1].capture_traces = compiling
+        serving_runtime.complete_blocks_two_phase(
+            blocks, self.model, log=lambda template, *values: lines.append(template.format(*values)))
+        self.assertEqual(lines[1], '[PINDIAG] packed blocks capture block=1 programs=1->4')
+
+    def test_a_deferred_block_is_not_servable_before_it_is_finished_and_the_phases_run_in_order(self):
+        (first, second) = self.two_blocks()
+        with self.assertRaisesRegex(ValueError, "capture_traces needs a block that finished 'fixture'"):
+            first.capture_traces()
+        with self.assertRaisesRegex(ValueError, "finish_construction needs a block that finished 'captured'"):
+            first.finish_construction()
+        first.warm_and_fixture()
+        with self.assertRaisesRegex(ValueError, "warm_and_fixture needs a block that finished 'allocated'"):
+            first.warm_and_fixture()
+        with self.assertRaisesRegex(ValueError, 'idle'):
+            first.verify(self.four())
+        self.assertEqual(first.phase, 'preparing')
+        for block in (first, second):
+            block.close(wait=False)
+
+    def test_a_phase_that_fails_closes_the_block_without_the_device_fence_and_names_its_stage(self):
+        (first, second) = self.two_blocks()
+        first.warm_and_fixture()
+        second.warm_and_fixture()
+        lines = []
+        failure = RuntimeError('commit capture refused')
+        fences = self.ttnn.synchronized
+        with patch.object(packed_verifier, 'diagnostic', Mock(side_effect=lines.append)), \
+                patch.object(packed_verifier, 'prepare', Mock(side_effect=failure)):
+            with self.assertRaisesRegex(RuntimeError, 'commit capture refused'):
+                first.capture_traces()
+        self.assertEqual(first.phase, 'closed')
+        self.assertEqual(self.ttnn.synchronized, fences, 'a failed phase never fences the device')
+        self.assertTrue(lines[0].startswith('[PINDIAG] packed block warm failed with RuntimeError: commit capture refused; '
+                                            'stage commit trace capture'))
+        with self.assertRaisesRegex(ValueError, 'closed'):
+            first.finish_construction()
+        second.close(wait=False)
+
+    def test_the_capture_zone_is_refused_for_deferred_blocks_by_name(self):
+        (first, second) = self.two_blocks()
+        with patch.dict('os.environ', {'QWEN_FAST_TP': '4', 'QWEN_FAST_CAPTURE_PLUG': '1'}), \
+                patch.object(packed_verifier.capture_plug, 'config', Mock(return_value=object())):
+            with self.assertRaisesRegex(ValueError, 'QWEN_FAST_CAPTURE_PLUG is not supported for blocks built in two phases'):
+                first.warm_and_fixture()
+        second.close(wait=False)
+
+    def test_the_flag_off_default_is_the_whole_construction_in_one_call(self):
+        block = self.block((0, 1, 2, 3))
+        self.assertEqual((block.phase, block.defer_capture, block.build), ('idle', False, None))
+        with self.assertRaisesRegex(ValueError, 'explicit bool'):
+            self.block((4, 5, 6, 7), defer_capture=1)
+
+    def test_each_block_binds_its_own_pool_slots_and_table_set(self):
+        import serving_runtime
+
+        first, second = self.two_blocks()
+        serving_runtime.complete_blocks_two_phase([first, second], self.model, log=lambda *args: None)
+        self.assertEqual((first.pool_slots, second.pool_slots), ((0, 1, 2, 3), (4, 5, 6, 7)))
+        self.assertIs(first.replay, self.sets[0])
+        self.assertIs(second.replay, self.sets[1])
+        self.assertTrue(all(tables.taken for tables in self.sets))
+
+
 class FourUserRoundTests(FourUserFixture):
     def test_one_trace_serves_four_users_each_from_the_segment_its_carry_binds(self):
         block = self.build()

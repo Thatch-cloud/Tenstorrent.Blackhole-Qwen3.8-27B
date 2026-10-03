@@ -972,6 +972,7 @@ PATH_KINDS = {'PACKED': 'P', 'SEQUENTIAL': 'S', 'SEQ-PUBLISH': 'S'}
 # space-separated in round order (real_text_compare.decode_paths reads it back).
 PATH_FORMAT_FIELDS = ('position', 'prefix', 'emitted', 'rows', 'cap')
 EMITTED_FIELD = re.compile(r'(?<![A-Za-z0-9_])emitted=([0-9]+)')
+PACKED_PHASE_TRACE_MS = re.compile(r'\[PACKED-PHASE\] round=[0-9]+ users=[0-9]+[^\n]*?(?<![A-Za-z0-9_])trace_ms=(-?[0-9.]+)')
 AUDIT_MS_FIELD = re.compile(r'\[EXTENT-AUDIT\] round=[0-9]+ [^\n]*?(?<![A-Za-z0-9_])ms=([0-9.]+)')
 
 
@@ -1048,7 +1049,7 @@ def decode_steps(log_text):
             _total, new, cached, _spec = (int(value) for value in match.groups()[1:])
             if current is not None:
                 current['next'] = (at, new, cached)
-            current = dict(at=at, new=new, live=cached, packed=[], sequential=0, audit_ms=None, next=None)
+            current = dict(at=at, new=new, live=cached, packed=[], sequential=0, audit_ms=None, next=None, trace_ms=[])
             steps.append(current)
             continue
         if current is None:
@@ -1056,6 +1057,11 @@ def decode_steps(log_text):
         if '[PACKED] request=' in line:
             emitted = EMITTED_FIELD.search(line)
             current['packed'].append(int(emitted.group(1)) if emitted else 0)
+        elif '[PACKED-PHASE] round=' in line:
+            # One line per 64-row block that ran a verify trace this step (two blocks at eight seats: block A's, then B's).
+            trace = PACKED_PHASE_TRACE_MS.search(line)
+            if trace:
+                current['trace_ms'].append(float(trace.group(1)))
         elif '[SEQUENTIAL] request=' in line or ('[SEQ-PUBLISH] request=' in line and ' rows=' in line):
             current['sequential'] += 1
         elif '[EXTENT-AUDIT] round=' in line:
@@ -1069,8 +1075,43 @@ def decode_steps(log_text):
         following = step['next']
         seconds = following[0] - step['at'] if following is not None and following[1] == 0 and following[2] > 0 else None
         decode.append(dict(at=step['at'], live=step['live'], seconds=seconds, packed=step['packed'],
-                           sequential=step['sequential'], audit_ms=step['audit_ms']))
+                           sequential=step['sequential'], audit_ms=step['audit_ms'], trace_ms=step['trace_ms']))
     return decode
+
+
+def block_trace_split(steps):
+    """The per-block verify-trace split of decode steps (decode_steps' dicts), for the eight-seat two-block build
+    (QWEN_FAST_M3_BLOCKS=2: block A then block B run back to back in one step, each logging its own [PACKED-PHASE]
+    line): None when no step carries two or more trace lines (one block: nothing to split), else
+    dict(blocks, rounds, median_trace_ms=[block A, block B], total_trace_ms, share_of_round=[A, B] - each block's
+    median trace over the median round, and share_total). Steps with exactly `blocks` lines are the ones read; a step
+    whose live users all sit in one block carries one line and is not in it. The second block's share of the median
+    8-live round is what the I3 (one 128-row block) go rule asks for."""
+    sized = [step for step in steps if len(step.get('trace_ms') or []) >= 2]
+    if not sized:
+        return None
+    blocks = max(len(step['trace_ms']) for step in sized)
+    full = [step for step in sized if len(step['trace_ms']) == blocks]
+    medians = [statistics.median(step['trace_ms'][index] for step in full) for index in range(blocks)]
+    timed = [step['seconds'] for step in full if step.get('seconds')]
+    round_ms = statistics.median(timed) * 1000.0 if timed else None
+    shares = [round(value / round_ms, 4) for value in medians] if round_ms else [None] * blocks
+    return dict(blocks=blocks, rounds=len(full), median_trace_ms=[round(value, 2) for value in medians],
+                total_trace_ms=round(sum(medians), 2), share_of_round=shares,
+                share_total=round(sum(medians) / round_ms, 4) if round_ms else None)
+
+
+def split_round_share(log_text):
+    """How many decode rounds ran traces in two blocks, by live count: {live: (rounds, rounds with two or more
+    [PACKED-PHASE] lines)}. Under two blocks a live set that straddles both costs an extra trace (the placement
+    fills a partial block first, so this happens after departures); S8-7 reports the share."""
+    by_live = {}
+    for step in decode_steps(log_text):
+        if step['live'] <= 0:
+            continue
+        rounds, split = by_live.get(step['live'], (0, 0))
+        by_live[step['live']] = (rounds + 1, split + (1 if len(step['trace_ms']) >= 2 else 0))
+    return by_live
 
 
 def live_rate(log_text, live=4):
@@ -1089,11 +1130,16 @@ def live_rate(log_text, live=4):
     audits = [step['audit_ms'] for step in timed if step['audit_ms'] is not None]
     audit_ms = statistics.median(audits) if audits else None
     net = median - (audit_ms or 0.0) / 1000.0
-    return dict(live=live, rounds=len(rounds), timed_rounds=len(timed), median_round_ms=round(median * 1000.0, 2),
-                median_audit_ms=round(audit_ms, 3) if audit_ms is not None else None,
-                net_median_round_ms=round(net * 1000.0, 2), tokens_per_user_per_round=round(per_round, 3),
-                per_user_tok_s=round(per_round / median, 2),
-                net_per_user_tok_s=round(per_round / net, 2) if net > 0 else None)
+    result = dict(live=live, rounds=len(rounds), timed_rounds=len(timed), median_round_ms=round(median * 1000.0, 2),
+                  median_audit_ms=round(audit_ms, 3) if audit_ms is not None else None,
+                  net_median_round_ms=round(net * 1000.0, 2), tokens_per_user_per_round=round(per_round, 3),
+                  per_user_tok_s=round(per_round / median, 2),
+                  net_per_user_tok_s=round(per_round / net, 2) if net > 0 else None)
+    split = block_trace_split(timed)
+    if split is not None:
+        # Two or more 64-row blocks ran in these rounds (eight seats): each block's trace, apart.
+        result['block_trace'] = split
+    return result
 
 
 def read_gate_report(path):

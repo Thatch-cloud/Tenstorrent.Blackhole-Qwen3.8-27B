@@ -565,6 +565,12 @@ class FastWorkerHook:
                 # takes no drafts after an empty step. The non-members are drafted after the members, below.
                 held_back = [bridge for bridge in bridges if bridge.request.session.request_id not in plan.members]
                 bridges = [bridge for bridge in bridges if bridge.request.session.request_id in plan.members]
+        # QWEN_FAST_M3_BLOCKS=2: the ticket width is decided PER BLOCK (PackedStep.proposal_groups), so a block that
+        # cannot serve its own members as one pass narrows only them. Any other step answers None (or has no such
+        # method) and the single width below is what it always was.
+        block_groups = self.block_groups(bridges) if have_policy and self.lanes is None else None
+        if block_groups is not None:
+            return self._drafts_by_block(bridges, block_groups, early)
         packed_rows = policy([bridge.request for bridge in bridges]) if have_policy else None
         if packed_rows is not None:
             # QWEN_FAST_BUDGET_CAP: the round keeps the block's width for any user with a token
@@ -710,6 +716,94 @@ class FastWorkerHook:
                     continue
                 request_ids.extend(drafts.req_ids)
                 tokens.extend(drafts.draft_token_ids)
+        if not request_ids:
+            return None
+        return DraftTokenIds(req_ids=request_ids, draft_token_ids=tokens)
+
+    def block_groups(self, bridges):
+        """The packed step's per-block ticket widths for these bridges' requests - [(block, rows, requests)] - or None
+        when its widths are one for the whole round (every step but the QWEN_FAST_M3_BLOCKS=2 one)."""
+        ask = getattr(self.packed_step, 'proposal_groups', None)
+        if not callable(ask):
+            return None
+        groups = ask([bridge.request for bridge in bridges])
+        return groups if isinstance(groups, list) else None
+
+    def _drafts_by_block(self, bridges, groups, early):
+        """`_drafts`' body for a step that decides its width per block (QWEN_FAST_M3_BLOCKS=2). Per block: the budget
+        narrowing (a member vLLM no longer owes a token, or one too near the context end for the scheduler to offer the
+        rows, sends only ITS block to the engines' widths), the stale-ticket discard, and the width each member drafts at
+        - the block's rows, or None for the engine's own. The proposals, the pair traces, the fence window and the early
+        draft's flush are the one `_drafts` runs, over every bridge; the window is one per packed block."""
+        from vllm.v1.outputs import DraftTokenIds
+
+        by_request = {id(bridge.request): bridge for bridge in bridges}
+        capped = budget_cap_enabled()
+        width_of, final = {}, []
+        for block, rows, members in groups:
+            members = [by_request[id(request)] for request in members]
+            if rows is not None:
+                for bridge in members:
+                    if getattr(bridge.request.session, 'finished', False):
+                        continue
+                    remaining = real_remaining_budget(bridge)
+                    if capped:
+                        room = schedulable_rows(bridge)
+                        if (remaining is not None and remaining < 1) or (room is not None and room < rows):
+                            rows = None
+                            break
+                    elif remaining is not None and remaining < rows:
+                        rows = None
+                        break
+            for bridge in members:
+                width_of[id(bridge)] = rows
+            final.append((block, rows, [bridge.request for bridge in members]))
+        for bridge in bridges:
+            discard_stale_ticket(bridge.request, width_of[id(bridge)])
+        if os.environ.get('QWEN_FAST_PIPELINED_PROPOSALS') == '1':
+            ids = ','.join(str(bridge.request.session.request_id)[:48] for bridge in bridges)
+            from dflash_packed_proposal import packed_proposal_enabled
+
+            if packed_proposal_enabled():
+                coordinator = getattr(self, '_packed_coordinator', None)
+                if coordinator is None:
+                    from dflash_packed_proposal_coordinator import PackedProposalCoordinator
+
+                    coordinator = self._packed_coordinator = PackedProposalCoordinator()
+                options = {}
+                if any(rows is not None for unused, rows, unused2 in final) and window_flags_on():
+                    make = getattr(self.packed_step, 'while_waiting_groups', None)
+                    while_waiting = make(final) if callable(make) else None
+                    if while_waiting is not None:
+                        options['while_waiting'] = while_waiting
+                if early is not None and early.drafting:
+                    options.update(early.coordinator_options(self))
+                if os.environ.get('QWEN_FAST_PAIRS_PACKED_ONLY') == '1':
+                    # Pairs never span blocks, so the split is by bridge: the members of a block that runs packed prepare
+                    # as pairs (one call, with the window and the early draft's flush), the members of one that does not
+                    # prepare on their own captures (a second call, no window), each exactly as the one call does.
+                    packed = [bridge for bridge in bridges if width_of[id(bridge)] is not None]
+                    narrow = [bridge for bridge in bridges if width_of[id(bridge)] is None]
+                    if packed and narrow:
+                        phase('prepare_proposals', ids, lambda: coordinator.prepare(packed, packed_round=True, **options))
+                        phase('prepare_proposals', ids, lambda: coordinator.prepare(narrow, packed_round=False))
+                    else:
+                        round_packed = bool(packed)
+                        phase('prepare_proposals', ids, lambda: coordinator.prepare(bridges, packed_round=round_packed,
+                                                                                    **options))
+                else:
+                    phase('prepare_proposals', ids, lambda: coordinator.prepare(bridges, **options))
+            else:
+                phase('prepare_proposals', ids, lambda: prepare_pipelined_drafts(bridges))
+        request_ids, tokens = [], []
+        for bridge in bridges:
+            width = width_of[id(bridge)]
+            drafts = phase('propose', bridge.request.session.request_id,
+                           bridge.drafts if width is None else partial(bridge.drafts, packed_rows=width))
+            if drafts is None:
+                continue
+            request_ids.extend(drafts.req_ids)
+            tokens.extend(drafts.draft_token_ids)
         if not request_ids:
             return None
         return DraftTokenIds(req_ids=request_ids, draft_token_ids=tokens)

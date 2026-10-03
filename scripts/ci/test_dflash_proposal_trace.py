@@ -775,6 +775,19 @@ class V73SequenceTests(unittest.TestCase):
         with patch.dict(os.environ, QWEN_FAST_PACKED_PROPOSAL='0'):
             self.assertEqual(coordinator_module.pooled_draft_mask_shapes(4, 16), {}, 'no pair forms: nothing pooled')
 
+    def test_the_pool_masks_cover_a_pair_per_two_slots_at_eight_seats(self):
+        pair = (1, 1, 32, 2080)
+        self.assertEqual(coordinator_module.pooled_draft_mask_shapes(8, 16),
+                         {(0, 1): pair, (2, 3): pair, (4, 5): pair, (6, 7): pair})
+        self.assertEqual(coordinator_module.pooled_draft_mask_shapes(6, 16),
+                         {(0, 1): pair, (2, 3): pair, (4, 5): pair})
+        self.assertEqual(coordinator_module.pooled_draft_mask_shapes(5, 16), {(0, 1): pair, (2, 3): pair},
+                         'a pair exists only when both its slots do')
+        with patch.dict(os.environ, QWEN_FAST_QUAD_DRAFT='1'):
+            shapes = coordinator_module.pooled_draft_mask_shapes(8, 16)
+            self.assertEqual(len(shapes), 5, 'four pairs and the one quad over slots 0-3')
+            self.assertEqual(shapes[(0, 1, 2, 3)], (1, 1, 32, 2080))
+
     def test_a_pool_mask_of_another_shape_is_refused_and_the_pair_uploads_its_own(self):
         from serving_buffer_pool import ServingBufferPool
 
@@ -1114,6 +1127,21 @@ class V86SequenceTests(unittest.TestCase):
             self.assertEqual(coordinator_module.pooled_draft_output_shapes(4, 16), singles,
                              'no pair or quad forms: the singles only')
         self.assertEqual(coordinator_module.pooled_draft_output_shapes(2, 8)[(1,)], spec(8, 32))
+
+    def test_the_output_sets_cover_four_pairs_at_eight_seats(self):
+        from draft_shared_head import candidate_chunks
+
+        chunks = tuple(candidate_chunks())
+
+        def spec(head_rows, projected_rows):
+            return dict(chunks=chunks, head=(1, 1, head_rows, 16), projected=(1, 1, projected_rows, 256))
+
+        singles = {(slot,): spec(16, 32) for slot in range(8)}
+        pairs = {pair: spec(32, 32) for pair in ((0, 1), (2, 3), (4, 5), (6, 7))}
+        self.assertEqual(coordinator_module.pooled_draft_output_shapes(8, 16), {**singles, **pairs})
+        self.assertEqual(coordinator_module.pooled_draft_output_shapes(7, 16),
+                         {**{(slot,): spec(16, 32) for slot in range(7)},
+                          (0, 1): spec(32, 32), (2, 3): spec(32, 32), (4, 5): spec(32, 32)})
 
 
 def pooled_lines(lines):

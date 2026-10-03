@@ -93,6 +93,23 @@ class AdmissionTests(unittest.TestCase):
                     lane.solo_lane_admission(m3, gate_environment(**changes), log=log)
                 self.assertTrue(log.lines and all(line.startswith(lane.MARKER + ' refused') for line in log.lines))
 
+    def test_two_m3_blocks_are_refused_by_name_whatever_else_holds(self):
+        # QWEN_FAST_M3_BLOCKS=2: eight seats on two M3 blocks. The solo block is bound to pool slot 0, segment 0 of block
+        # A, and nothing has taken block B into account: refused naming the flag, with every other reason still listed.
+        eight = (True, 'users=8 FOUR_AS_TWO=0 PACKED_STEP=1 M3_BLOCKS=2')
+        log = Lines()
+        with self.assertRaisesRegex(ValueError, 'QWEN_FAST_M3_BLOCKS=2: the solo lane is built beside the ONE 64-row M3 block'):
+            lane.solo_lane_admission(eight, gate_environment(QWEN_FAST_M3_BLOCKS='2'), log=log)
+        self.assertTrue(log.lines and all(line.startswith(lane.MARKER + ' refused') for line in log.lines))
+        # the value is strict: anything but '1' is refused here, never read as one block
+        for value in ('2', '3', '', 'x'):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'QWEN_FAST_M3_BLOCKS='):
+                lane.solo_lane_admission(M3, gate_environment(QWEN_FAST_M3_BLOCKS=value), log=Lines())
+        # one block, stated or not, is today's admission
+        for value in (None, '1'):
+            lane.solo_lane_admission(M3, gate_environment(QWEN_FAST_M3_BLOCKS=value), log=Lines())
+        self.assertEqual(lane.M3_BLOCKS_FLAG, 'QWEN_FAST_M3_BLOCKS')
+
     def test_the_fused_commit_is_refused(self):
         for flag in lane.UNSUPPORTED_FLAGS:
             with self.subTest(flag=flag):

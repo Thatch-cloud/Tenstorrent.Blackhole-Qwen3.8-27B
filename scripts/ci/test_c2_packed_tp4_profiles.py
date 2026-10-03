@@ -100,6 +100,12 @@ CHEAP_PROFILES = ('c2-packed-tp4-speed-strace-ring', 'c2-packed-tp4-speed-strace
 # tp4/warm4 (test_tp4_warm4 holds each as its base plus exact deltas): the request-width warm twins, which carry the caps and the stall watch.
 WARM4_PROFILES = ('c2-packed-tp4-warm4-diag', 'c2-packed-tp4-warm4-control', 'c2-packed-tp4-warm4-even-diag', 'c2-packed-tp4-warm4-gate',
                   'c2-packed-tp4-speed-warm4', 'c2-packed-tp4-warm4-diag-oldtail')
+# The eight-seat twins (tp4/seats8) are production's recipe plus their deltas (test_c2_packed_tp4_seats8_profiles holds them): they carry the
+# tail caps and the in-trace sampler, and the diag twin the stall watch and the handle guard, as c2-packed-tp4 and the diag arms do.
+SEATS8_PROFILES = ('c2-packed-tp4-8', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate', 'c2-packed-tp4-8-diag-strace',
+                   'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard')
+# tp4/next-4 (test_tp4_next4 holds each as its base plus exact deltas): the traffic candidate, its warm4 twin and the eight-seat levers arm.
+NEXT4_PROFILES = ('c2-packed-tp4-best-ship', 'c2-packed-tp4-best-ship-warm4', 'c2-packed-tp4-8-best')
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 
 
@@ -345,7 +351,7 @@ class TailProfileTests(unittest.TestCase):
 
     def test_the_caps_are_absent_from_every_profile_that_predates_them(self):
         for name, profile in profiles().items():
-            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES) + tuple(SAMPLER_PROFILES) + tuple(RSHARD_PROFILES) + BEST_PROFILES + CHEAP_PROFILES + WARM4_PROFILES + NEXT3_PROFILES:
+            if name not in ('c2-packed-tp4', 'c2-packed-tp4-speed', 'c2-packed-tp4-speed-fix') + tuple(DIAG_PROFILES) + tuple(FREEZE_PROFILES) + tuple(SAMPLER_PROFILES) + tuple(RSHARD_PROFILES) + BEST_PROFILES + CHEAP_PROFILES + WARM4_PROFILES + NEXT3_PROFILES + SEATS8_PROFILES + NEXT4_PROFILES:
                 self.assertNotIn('QWEN_FAST_BUDGET_CAP', profile['env'], name)
                 self.assertNotIn('QWEN_FAST_SEQ_DEADLINE_S', profile['env'], name)
 
@@ -461,7 +467,7 @@ class FixProfileTests(unittest.TestCase):
             with self.subTest(profile=name):
                 self.assertNotIn('QWEN_FAST_CAPTURE_PLUG', env if name != 'c2-packed-tp4-speed-fix' else {})
                 self.assertNotIn('QWEN_FAST_CAPTURE_PLUG_ENGINES', env if name != 'c2-packed-tp4-speed-fix' else {})
-                if name not in DIAG_PROFILES and name != 'c2-packed-tp4-speed-fix' and not name.startswith('c2-packed-tp4-diag-s') and name not in ('c2-packed-tp4-diag-rshard', 'c2-packed-tp4-diag-t1-rshard-audit') and name not in WARM4_PROFILES:
+                if name not in DIAG_PROFILES and name != 'c2-packed-tp4-speed-fix' and not name.startswith('c2-packed-tp4-diag-s') and name not in ('c2-packed-tp4-diag-rshard', 'c2-packed-tp4-diag-t1-rshard-audit') and name not in WARM4_PROFILES + SEATS8_PROFILES:
                     for flag in ('QWEN_FAST_STALL_DEADLINE_S', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_TRACE_CENSUS_GRAPH'):
                         self.assertNotIn(flag, env)
 
@@ -568,6 +574,7 @@ class DraftProfileTests(unittest.TestCase):
         found = profiles()
         on = sorted(name for name, profile in found.items() if profile['env'].get(QUAD) == '1'
                     and profile['env'].get('QWEN_FAST_TP') == '4')
+        on = [name for name in on if name not in NEXT4_PROFILES]
         self.assertEqual(on, ['c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-gate-fcommit-quad',
                               'c2-packed-tp4-gate-quad', 'c2-packed-tp4-speed-fcommit-quad', 'c2-packed-tp4-speed-quad'])
         self.assertEqual([name for name in on if 'fcommit' not in name and 'best' not in name],
@@ -637,7 +644,7 @@ class SamplerProfileTests(unittest.TestCase):
         for name, profile in profiles().items():
             if name not in SAMPLER_PROFILES:
                 self.assertNotIn(PREWARM, profile['env'], name)
-                if name != 'c2-packed-tp4' and name not in CHEAP_PROFILES + NEXT3_PROFILES:
+                if name != 'c2-packed-tp4' and name not in CHEAP_PROFILES + NEXT3_PROFILES + SEATS8_PROFILES + NEXT4_PROFILES:
                     self.assertNotIn(IN_TRACE, profile['env'], name)
         # tp4-serve-7: production is the strace arm's recipe (audits off, sampler in the verify trace, no prewarm)
         env = profiles()['c2-packed-tp4']['env']
@@ -700,7 +707,7 @@ class RequestShardProfileTests(unittest.TestCase):
 
     def test_no_other_profile_and_not_the_image_carries_either_flag(self):
         for name, profile in profiles().items():
-            if name not in RSHARD_PROFILES:
+            if name not in RSHARD_PROFILES and name != 'c2-packed-tp4-8-diag-strace-rshard':
                 self.assertNotIn(RSHARD, profile['env'], name)
                 self.assertNotIn(RSHARD_AUDIT, profile['env'], name)
         self.assertNotIn(RSHARD, image_env())
@@ -766,9 +773,10 @@ class FusedCommitProfileTests(unittest.TestCase):
         found = profiles()
         on = sorted(name for name, profile in found.items() if profile['env'].get(FUSED) == '1'
                     and profile['env'].get('QWEN_FAST_TP') == '4')
+        on = [name for name in on if name not in NEXT4_PROFILES]
         self.assertEqual(on, FUSED_FAMILY)
         for name, profile in found.items():
-            if name not in FUSED_FAMILY and profile['env'].get('QWEN_FAST_TP') == '4':
+            if name not in FUSED_FAMILY + list(NEXT4_PROFILES) and profile['env'].get('QWEN_FAST_TP') == '4':
                 for flag in (FUSED, INPLACE, LIVE, AUDIT):
                     self.assertEqual(profile['env'].get(flag, '0'), '0', (name, flag))
 
@@ -884,7 +892,7 @@ class VglueProfileTests(unittest.TestCase):
         image = image_env()
         flags = (C1A, V4A, V2, V1, V3A, VGLUE_AUDIT)
         for name, profile in found.items():
-            if name in VGLUE_PROFILES or name in BEST_HANG_FIX:
+            if name in VGLUE_PROFILES or name in BEST_HANG_FIX or name in NEXT4_PROFILES:
                 self.assertEqual(profile['env']['QWEN_FAST_TP'], '4', name)
                 continue
             for flag in flags:

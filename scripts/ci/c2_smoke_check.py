@@ -68,13 +68,17 @@ from pathlib import Path
 
 SOLO_TEST = 'concurrent4_solo'
 REPLAY_TEST = 'replay_concurrent4'
+# The eight-seat tests (tp4/seats8: QWEN_FAST_M3_BLOCKS=2), judged as the four-user ones are: every user a stream that ends in tokens,
+# the code ones code answers too; the eight-user replay is judged as the four-user one.
+EIGHT_TESTS = ('concurrent8_code_equal', 'concurrent8_code_32k', 'concurrent5_split', 'concurrent8_drain', 'concurrent8_steady')
+REPLAY_TESTS = (REPLAY_TEST, 'replay_concurrent8')
 # Four-user streamed tests: their users get the stream rules; the code ones are code answers too (TEXT_TESTS).
 CONCURRENT_TESTS = ('concurrent4', 'concurrent4_v164order', 'concurrent4_steady', 'concurrent4_code', 'concurrent4_code_equal',
-                    'concurrent4_code_32k', 'concurrent8_code')
+                    'concurrent4_code_32k', 'concurrent8_code') + EIGHT_TESTS
 # The tests whose users are the four concurrent4 prompts, comparable with their solo runs.
 SOLO_COMPARED = ('concurrent4', 'concurrent4_v164order')
 CORE = ('warmup', 'warm_lifecycle', 'coding', 'concurrent4', 'concurrent4_v164order', 'concurrent4_steady', 'concurrent4_code',
-        'concurrent4_code_equal', 'concurrent4_code_32k', 'concurrent8_code', SOLO_TEST, REPLAY_TEST, 'long_real_text', 'steady_resend')
+        'concurrent4_code_equal', 'concurrent4_code_32k', 'concurrent8_code') + EIGHT_TESTS + (SOLO_TEST, REPLAY_TEST, 'replay_concurrent8', 'long_real_text', 'steady_resend')
 PACKED_LINE = re.compile(r'\[PACKED\] request=(\S+) segment=(\d+) position=(\d+) ')
 SOLO_FIELDS = (('content_sha256', 'content'), ('reasoning_sha256', 'reasoning'), ('completion_tokens', 'tokens'),
                ('finish', 'finish'))
@@ -110,7 +114,7 @@ QUAD_AUDIT = re.compile(r'\[QUAD-AUDIT\] round=\S+ equal=([01]) ')
 SINGLES_AUDIT_LINE = re.compile(r'\[DRAFT-SINGLES-AUDIT\] round=\S+ group=\[[0-9, ]*\] equal=([01]) stage=(\S+) ')
 # A code prompt asked to be explained and rewritten (800 or 1500 tokens out) does not end by itself in a few tokens.
 MIN_ANSWER_TOKENS = 16
-TEXT_TESTS = ('coding', STEADY_TEST, RESEND_TEST, 'concurrent4_code', 'concurrent4_code_equal', 'concurrent4_code_32k', 'concurrent8_code')
+TEXT_TESTS = ('coding', STEADY_TEST, RESEND_TEST, 'concurrent4_code', 'concurrent4_code_equal', 'concurrent4_code_32k', 'concurrent8_code') + EIGHT_TESTS
 STREAM_PARSER_TESTS = ('stream_tool_call', 'stream_reasoning')
 EXTENT_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
 GATE_PROFILE_FLAG = 'QWEN_C2_GATE_PROFILE'
@@ -273,17 +277,18 @@ def smoke_problems(results, container_text=''):
                 problems += stream_problems('%s user %d' % (name, index), user)
                 if name in TEXT_TESTS:
                     problems += answer_problems('%s user %d' % (name, index), user)
-    if REPLAY_TEST in results and 'error' not in results[REPLAY_TEST]:
-        for index, user in enumerate(results[REPLAY_TEST].get('users') or []):
-            name = '%s user %d' % (REPLAY_TEST, index)
-            if 'error' in user:
-                problems.append('%s: %s' % (name, user['error']))
-            elif user.get('status') != 200:
-                problems.append('%s: status %s' % (name, user.get('status')))
-            elif not user.get('tokens'):
-                problems.append('%s: no tokens' % name)
-            elif user.get('finish') is None:
-                problems.append('%s: no finish reason' % name)
+    for replay in REPLAY_TESTS:
+        if replay in results and 'error' not in results[replay]:
+            for index, user in enumerate(results[replay].get('users') or []):
+                name = '%s user %d' % (replay, index)
+                if 'error' in user:
+                    problems.append('%s: %s' % (name, user['error']))
+                elif user.get('status') != 200:
+                    problems.append('%s: status %s' % (name, user.get('status')))
+                elif not user.get('tokens'):
+                    problems.append('%s: no tokens' % name)
+                elif user.get('finish') is None:
+                    problems.append('%s: no finish reason' % name)
     problems += solo_problems(results, container_text)
     for name in STREAM_PARSER_TESTS:
         entry = results.get(name)

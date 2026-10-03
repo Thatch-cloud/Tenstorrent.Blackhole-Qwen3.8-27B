@@ -33,21 +33,21 @@ M3_ENV = {'QWEN_FAST_FOUR_AS_TWO': '0', 'QWEN_FAST_PACKED_STEP': '1', 'QWEN_FAST
 class FlagTests(unittest.TestCase):
     def test_unset_and_zero_are_off(self):
         self.assertEqual(serving_runtime.M3_REQUEST_WARM_FLAG, FLAG)
-        self.assertIsNone(serving_runtime.m3_request_warm(POLICY, {}))
-        self.assertIsNone(serving_runtime.m3_request_warm(POLICY, {FLAG: '0'}))
+        self.assertIsNone(serving_runtime.m3_request_warm(1, POLICY, {}))
+        self.assertIsNone(serving_runtime.m3_request_warm(1, POLICY, {FLAG: '0'}))
         # off is off at every shape: nothing is refused when the flag is not asked for
-        self.assertIsNone(serving_runtime.m3_request_warm({'scheduler_requests': 2}, {FLAG: '0'}))
+        self.assertIsNone(serving_runtime.m3_request_warm(1, {'scheduler_requests': 2}, {FLAG: '0'}))
 
     def test_one_and_even_name_their_widths_at_the_four_card_m3_shape(self):
-        self.assertEqual(serving_runtime.m3_request_warm(POLICY, {**M3_ENV, FLAG: '1'}), (1, 2, 4))
-        self.assertEqual(serving_runtime.m3_request_warm(POLICY, {**M3_ENV, FLAG: 'even'}), (1, 2, 4, 1))
+        self.assertEqual(serving_runtime.m3_request_warm(1, POLICY, {**M3_ENV, FLAG: '1'}), (1, 2, 4))
+        self.assertEqual(serving_runtime.m3_request_warm(1, POLICY, {**M3_ENV, FLAG: 'even'}), (1, 2, 4, 1))
         self.assertEqual(request_width_warm.WIDTHS, (1, 2, 4))
         self.assertEqual(request_width_warm.EVEN_WIDTHS, (1, 2, 4, 1))
 
     def test_a_malformed_value_is_refused_naming_the_flag(self):
         for value in ('', '2', 'true', 'EVEN', ' 1', 'on'):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, FLAG):
-                serving_runtime.m3_request_warm(POLICY, {**M3_ENV, FLAG: value})
+                serving_runtime.m3_request_warm(1, POLICY, {**M3_ENV, FLAG: value})
 
     def test_it_is_refused_off_the_m3_shape_and_at_tp2(self):
         for value in ('1', 'even'):
@@ -58,11 +58,11 @@ class FlagTests(unittest.TestCase):
                     ('two users', {'scheduler_requests': 2}, M3_ENV),
                     ('eight users', {'scheduler_requests': 8}, M3_ENV)):
                 with self.subTest(value=value, shape=name), self.assertRaisesRegex(ValueError, FLAG):
-                    serving_runtime.m3_request_warm(policy, {**environ, FLAG: value})
+                    serving_runtime.m3_request_warm(1, policy, {**environ, FLAG: value})
             for tp in ({'QWEN_FAST_TP': '2'}, {}):
                 environ = {k: v for k, v in M3_ENV.items() if k != 'QWEN_FAST_TP'}
                 with self.subTest(value=value, tp=tp), self.assertRaisesRegex(ValueError, 'QWEN_FAST_TP'):
-                    serving_runtime.m3_request_warm(POLICY, {**environ, **tp, FLAG: value})
+                    serving_runtime.m3_request_warm(1, POLICY, {**environ, **tp, FLAG: value})
 
 
 class AttachHookTests(unittest.TestCase):
@@ -114,13 +114,15 @@ class AttachHookTests(unittest.TestCase):
 
     def test_the_hook_is_one_contiguous_block_in_the_source(self):
         source = (HERE / 'serving_runtime.py').read_text()
-        self.assertEqual(source.count('warm_request_widths('), 1)
-        hook = source.index('        if request_widths:\n')
+        self.assertEqual(source.count('warm_request_widths('), 2, 'one call before the single block, one between the two blocks phases')
+        hook = source.index('        if request_widths and not m3_blocks_two:\n')
         self.assertLess(source.index('        prefill_warm_before_traces(runner'), hook)
         self.assertLess(hook, source.index('        if packed_shapes:\n            from packed_verifier import PackedVerifierEngine'))
         self.assertIn("with stall_watch.scope('build', 'request widths warm'):", source)
 
 
+SEATS8 = {'c2-packed-tp4-8', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate', 'c2-packed-tp4-8-diag-strace',
+          'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard', 'c2-packed-tp4-8-best'}
 WARM4 = {'c2-packed-tp4-warm4-diag', 'c2-packed-tp4-warm4-control', 'c2-packed-tp4-warm4-even-diag', 'c2-packed-tp4-warm4-gate',
          'c2-packed-tp4-speed-warm4', 'c2-packed-tp4-warm4-diag-oldtail'}
 
@@ -176,7 +178,10 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(production['env']['QWEN_FAST_PACKED_SAMPLER_IN_TRACE'], '1')
         self.assertFalse(production.get('gate_only'))
         carriers = {name for name, profile in PROFILES.items() if FLAG in profile.get('env', {})}
-        self.assertEqual(carriers, WARM4)
+        self.assertEqual(carriers - SEATS8 - {'c2-packed-tp4-best-ship-warm4'}, WARM4)
+        self.assertEqual(carriers & SEATS8, SEATS8, 'the eight-seat profiles carry the flag with QWEN_FAST_M3_BLOCKS=2')
+        for name in SEATS8:
+            self.assertEqual(PROFILES[name]['env']['QWEN_FAST_M3_BLOCKS'], '2', name)
 
     def test_every_carrier_meets_the_attach_rule_laid_over_the_m3_env(self):
         for name in WARM4:
@@ -184,7 +189,7 @@ class ProfileTests(unittest.TestCase):
             value = env[FLAG]
             with self.subTest(profile=name):
                 self.assertEqual(env['QWEN_FAST_TP'], '4')
-                result = serving_runtime.m3_request_warm(POLICY, {**M3_ENV, **env})
+                result = serving_runtime.m3_request_warm(1, POLICY, {**M3_ENV, **env})
                 self.assertEqual(result, {'0': None, '1': (1, 2, 4), 'even': (1, 2, 4, 1)}[value])
 
 

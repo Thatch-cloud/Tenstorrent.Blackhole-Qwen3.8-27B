@@ -539,6 +539,7 @@ jobs:
         shell: bash
         env:
           TAG: ${{ steps.job.outputs.tag }}
+          C2_BAKE_DEFAULT_PROFILE: ${{ steps.job.outputs.bake_default_profile }}
         run: |
           set -euo pipefail
           image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG

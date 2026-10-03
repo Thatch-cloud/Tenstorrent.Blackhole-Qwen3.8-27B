@@ -340,9 +340,12 @@ class WhileWaiting:
     `fenced()` right after that fence. Built by serving_packed_step.PackedStep.while_waiting only
     when the coming round is this block's packed round and a flag is on."""
 
-    def __init__(self, block, requests):
+    def __init__(self, block, requests, prestage=True):
         self.block, self.requests = block, list(requests)
         self.token = None
+        # False: this window is one of several (CompositeWindow) and the verify pre-stage is left out of it - see
+        # serving_packed_step.PackedStep.while_waiting_groups. True, the default, is the one block's window as it was.
+        self.prestage = prestage
 
     def __call__(self):
         block = self.block
@@ -356,7 +359,7 @@ class WhileWaiting:
             # pre-stage below always runs.
             fused.stage_window(self.requests)
         prestaged = getattr(block, 'prestaged', None)
-        if prestaged is not None:
+        if prestaged is not None and self.prestage:
             prestaged.prestage_requests(self.requests)
 
     def drop(self, failure):
@@ -375,3 +378,43 @@ class WhileWaiting:
         if self.token is not None:
             self.block.note_round_fence(self.token)
             self.token = None
+
+
+class CompositeWindow:
+    """QWEN_FAST_M3_BLOCKS=2: the drafts' fence window over SEVERAL packed blocks, one WhileWaiting each, in the blocks'
+    order. `coordinator.prepare(..., while_waiting=this)` calls it once before its fence and `fenced()` once after, as it
+    does a single block's window; a window that raises is dropped on its own (its `drop`) and the others still run, so
+    one block's failed window never costs another block its round fence."""
+
+    def __init__(self, windows):
+        self.windows = list(windows)
+        if not self.windows:
+            raise ValueError('A composite window needs at least one block window')
+
+    def __call__(self):
+        for window in self.windows:
+            try:
+                window()
+            except Exception as failure:
+                try:
+                    window.drop(failure)
+                except Exception:
+                    pass
+
+    def drop(self, failure):
+        for window in self.windows:
+            try:
+                window.drop(failure)
+            except Exception:
+                pass
+
+    def fenced(self):
+        """F9 has just drained CQ0: every block's round fence is armed; the first failure is raised after the rest ran."""
+        first = None
+        for window in self.windows:
+            try:
+                window.fenced()
+            except Exception as failure:
+                first = first or failure
+        if first is not None:
+            raise first

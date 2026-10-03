@@ -523,5 +523,91 @@ class PackedCompareByPositionTests(unittest.TestCase):
         self.assertFalse(ar.compare_by_position([], [])[1])
 
 
+class EightLiveRateTests(unittest.TestCase):
+    """live_rate at n live (QWEN_FAST_M3_BLOCKS=2, eight seats): the filter reads steps with exactly n live users and n [PACKED]
+    lines, and the [PACKED-PHASE] lines - one per 64-row block - split the round's verify trace per block."""
+
+    STAMP = '(EngineCore pid=1) 2026-10-02 03:18:%06.3f | INFO     | serving_worker_hook:_execute:229 - '
+
+    def step(self, at, live, emitted, traces, new=0):
+        lines = [self.STAMP % at + '[PHASE] execute total=%d new=%d cached=%d spec=%d finished=[] preempted=[]'
+                 % (live * 16, new, live, live)]
+        for segment in range(len(emitted)):
+            lines.append('[PACKED] request=r%d segment=%d position=%d prefix=%d emitted=%d' % (
+                segment, segment, 1000 + at, emitted[segment], emitted[segment]))
+        for number, trace in enumerate(traces):
+            lines.append('[PACKED-PHASE] round=%d users=4 bind_ms=0.10 input_ms=1.00 trace_ms=%.2f sync_ms=0.20 '
+                         'readback_ms=0.30' % (at, trace))
+        return lines
+
+    def log(self):
+        lines = []
+        # 6 steps at eight live (both blocks traced, 0.25 s apart), 3 at four live (one block), 2 at five live (one
+        # block packed: 4 + 1 sequential), one at eight live with ONE trace (not both packed).
+        at = 10.0
+        for _ in range(6):
+            lines += self.step(at, 8, [5, 6, 5, 6, 5, 6, 5, 6], [58.0, 60.0])
+            at += 0.25
+        for _ in range(3):
+            lines += self.step(at, 4, [5, 6, 5, 6], [58.6])
+            at += 0.142
+        for _ in range(2):
+            lines += self.step(at, 5, [5, 6, 5, 6], [58.6])
+            at += 0.2
+        lines += self.step(at, 8, [5] * 8, [58.0])
+        at += 0.25
+        lines += self.step(at, 8, [5] * 8, [58.0, 61.0])
+        at += 0.25
+        lines += self.step(at, 8, [5] * 8, [58.0, 62.0])
+        at += 0.25
+        lines += self.step(at, 1, [5], [], new=0)
+        return chr(10).join(lines)
+
+    def test_the_filter_reads_exactly_n_live_with_n_packed_lines(self):
+        text = self.log()
+        eight = ar.live_rate(text, live=8)
+        self.assertEqual((eight['live'], eight['rounds']), (8, 9))
+        four = ar.live_rate(text, live=4)
+        self.assertEqual((four['live'], four['rounds']), (4, 3))
+        self.assertIsNone(ar.live_rate(text, live=7))
+        # five live with four packed lines is not a five-live packed round
+        self.assertIsNone(ar.live_rate(text, live=5))
+
+    def test_the_rate_is_the_tokens_each_live_user_took_over_the_median_round(self):
+        eight = ar.live_rate(self.log(), live=8)
+        self.assertEqual(eight['median_round_ms'], 250.0)
+        self.assertAlmostEqual(eight['per_user_tok_s'], eight['tokens_per_user_per_round'] / 0.25, places=1)
+        self.assertEqual(eight['median_audit_ms'], None)
+
+    def test_the_trace_is_split_per_block_with_each_blocks_share_of_the_round(self):
+        eight = ar.live_rate(self.log(), live=8)
+        split = eight['block_trace']
+        self.assertEqual((split['blocks'], split['rounds']), (2, 8))
+        self.assertEqual(split['median_trace_ms'], [58.0, 60.0])
+        self.assertEqual(split['total_trace_ms'], 118.0)
+        self.assertEqual(split['share_of_round'], [round(58.0 / 250.0, 4), round(60.0 / 250.0, 4)])
+        self.assertEqual(split['share_total'], round(118.0 / 250.0, 4))
+
+    def test_one_block_rounds_carry_no_split_and_the_four_live_result_is_unchanged(self):
+        four = ar.live_rate(self.log(), live=4)
+        self.assertNotIn('block_trace', four)
+        self.assertEqual(set(four), {'live', 'rounds', 'timed_rounds', 'median_round_ms', 'median_audit_ms',
+                                     'net_median_round_ms', 'tokens_per_user_per_round', 'per_user_tok_s',
+                                     'net_per_user_tok_s'})
+
+    def test_the_share_of_rounds_that_ran_traces_in_both_blocks_is_counted_by_live(self):
+        shares = ar.split_round_share(self.log())
+        self.assertEqual(shares[8], (9, 8))
+        self.assertEqual(shares[4], (3, 0))
+        self.assertEqual(shares[5], (2, 0))
+        self.assertEqual(shares[1], (1, 0))
+
+    def test_the_four_seat_fixture_reads_as_before(self):
+        log, _streams = fixture('v155')
+        four = ar.live_rate(log, 4)
+        self.assertIsNotNone(four)
+        self.assertNotIn('block_trace', four)
+
+
 if __name__ == '__main__':
     unittest.main()

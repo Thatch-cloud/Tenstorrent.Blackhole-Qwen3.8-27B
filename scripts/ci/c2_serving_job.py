@@ -39,6 +39,10 @@ Keys (every one optional but C2_IMAGE_TAG):
                       and bench-<profile>.json)
   C2_BENCH_SHAPES     the bench test's shapes, comma-separated STREAMSxPROMPT (default: tp_decode_bench's ladder)
   C2_PLATFORM_IMAGE   the thatch-serving-tt image the replay runs
+  C2_BAKE_DEFAULT_PROFILE  build only: bake this profile as the image's serving default (the image ENV QWEN_C2_PROFILE) and
+                      THATCH_SERVING_SESSION_CAP as its max-num-seqs (the node agent forwards neither, so the image is what a platform launch
+                      serves and what a rollback moves). Default, rendered empty: nothing is baked, the default is qwen_c2_profiles.json's
+                      (production's four seats). Needs the build action, C2_CARDS=quad and a four-card (P150x4), not gate_only, profile
   C2_GATE_PLAN        GATE_PLANS, comma- or space-separated, run in order (default: bringup)
   C2_GATE_LENGTHS     the matrix's prompt lengths, one per user (default, rendered empty: the S1 G4
                       ladder, whose top rung the gate lowers to what the image's profile admits)
@@ -419,13 +423,14 @@ def read_job(values, profiles, root=ROOT, meshes=None):
     if 'prefix' in actions:
         named += [('C2_PREFIX_PROFILE', prefix['prefix_profile']), ('C2_PREFIX_BASELINE', prefix['prefix_baseline'])]
     cards = read_cards(values, actions, meshes, named)
+    bake_profile = read_bake(values, actions, cards, root)
     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root)
     outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), rmi_tags=rmi_tags, tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
                    gate_memory_prompt=str(memory_prompt), replay_profile=replay_profile,
                    replay_served_model=replay_served_model, replay_budget_smoke=budget_smoke, cardm_harness=cardm_harness, cardm_args=cardm_args,
-                   cardm_env=cardm_env)
+                   cardm_env=cardm_env, bake_default_profile=bake_profile)
     outputs.update(s2)
     outputs.update(prefix)
     return outputs
@@ -447,6 +452,28 @@ def check_ops_order(plans):
     if 'ops-trace' in named and named[0] != 'ops-twin':
         raise JobError('C2_GATE_PLAN: ops-trace needs ops-twin before it (its texts are held against the twin texts)')
     return plans
+
+
+def read_bake(values, actions, cards, root=ROOT):
+    """C2_BAKE_DEFAULT_PROFILE (module docstring), '' when unset, or JobError. Read against the profiles file of the checkout
+    the job runs from: the build script reads the same file from the staged context."""
+    name = values.get('C2_BAKE_DEFAULT_PROFILE', '')
+    if not name:
+        return ''
+    if not PROFILE_NAME.fullmatch(name):
+        raise JobError('C2_BAKE_DEFAULT_PROFILE must match %s, got %r' % (PROFILE_NAME.pattern, name))
+    if 'build' not in actions:
+        raise JobError('C2_BAKE_DEFAULT_PROFILE is baked at build time: C2_ACTIONS has no build')
+    if cards != 'quad':
+        raise JobError('C2_BAKE_DEFAULT_PROFILE is a four-card serving default: it needs C2_CARDS=quad')
+    with open(os.path.join(root, 'scripts', 'ci', 'qwen_c2_profiles.json'), encoding='utf-8') as handle:
+        entry = json.load(handle)['profiles'].get(name)
+    if entry is None:
+        raise JobError('C2_BAKE_DEFAULT_PROFILE %r is not a profile of qwen_c2_profiles.json' % name)
+    if entry.get('gate_only') is True or entry.get('mesh_device') != TP4_MESH_DEVICE:
+        raise JobError('C2_BAKE_DEFAULT_PROFILE %s is not a four-card serving profile (%s, not gate_only): a gate arm is never '
+                       'an image default' % (name, TP4_MESH_DEVICE))
+    return name
 
 
 def below_family(name, text):

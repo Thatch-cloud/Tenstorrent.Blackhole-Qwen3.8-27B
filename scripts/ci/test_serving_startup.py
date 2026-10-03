@@ -76,7 +76,7 @@ class WeightStreamTests(unittest.TestCase):
         policy = Mock(return_value=dict(scheduler_requests=requests))
         resources = ExitStack()
         flags = ('QWEN_FAST_SKIP_BLOCK_STREAM', 'QWEN_FAST_PACKED_STEP', 'QWEN_FAST_FOUR_AS_TWO',
-                 'QWEN_FAST_SINGLE_GATEUP')
+                 'QWEN_FAST_SINGLE_GATEUP', 'QWEN_FAST_M3_BLOCKS')
         clean = {name: value for name, value in os.environ.items() if name not in flags}
         with patch.dict(os.environ, dict(clean, **environ), clear=True), \
                 patch('dflash_device.pindiag') as marker:
@@ -119,6 +119,31 @@ class WeightStreamTests(unittest.TestCase):
                                  '[PINDIAG] block stream NOT skipped: QWEN_FAST_SKIP_BLOCK_STREAM=1 but ' + shape)
 
     C1 = {'QWEN_FAST_SINGLE_GATEUP': '1', 'QWEN_FAST_PACKED_STEP': '1', 'QWEN_FAST_FOUR_AS_TWO': '0'}
+
+    # QWEN_FAST_M3_BLOCKS=2 (eight seats on two M3 blocks): read at startup, before any stream is built.
+    M3X2 = dict(C1, QWEN_FAST_M3_BLOCKS='2')
+
+    def test_two_m3_blocks_put_one_startup_marker_on_the_record_and_admit_the_register_reader(self):
+        (block_stream, pool), events, marker = self.run_streams(self.M3X2, requests=8, built=0)
+        self.assertEqual((block_stream, pool, events), (None, None, []))
+        lines = [call.args[0].format(*call.args[1:]) for call in marker.call_args_list]
+        self.assertEqual(lines[0], '[PINDIAG] startup QWEN_FAST_M3_BLOCKS=2: eight scheduler requests on two 64-row M3 '
+                                   'blocks (pool slots 0-3 and 4-7), users=8 FOUR_AS_TWO=0 PACKED_STEP=1 M3_BLOCKS=2')
+        self.assertEqual(lines[1], '[PINDIAG] block stream skipped for the single gate/up copy: '
+                                   'w_gate_up present on 0 of 3 layers')
+        self.assertEqual(len(lines), 2)
+
+    def test_two_m3_blocks_at_any_other_request_count_or_malformed_are_refused_at_startup_naming_the_flag(self):
+        for requests in (1, 2, 4, 6):
+            with self.subTest(requests=requests), self.assertRaisesRegex(ValueError, 'QWEN_FAST_M3_BLOCKS=2 builds two 4-user'):
+                self.run_streams(self.M3X2, requests=requests, built=0)
+        with self.assertRaisesRegex(ValueError, 'QWEN_FAST_M3_BLOCKS must be 1 or 2'):
+            self.run_streams(dict(self.C1, QWEN_FAST_M3_BLOCKS='3'), requests=8, built=0)
+
+    def test_one_block_stated_prints_no_startup_marker(self):
+        (block_stream, pool), events, marker = self.run_streams(dict(self.M3, QWEN_FAST_M3_BLOCKS='1'))
+        self.assertEqual(marker.call_count, 1)
+        self.assertEqual(marker.call_args.args[0], '[PINDIAG] block stream skipped for {}: {}')
 
     def test_the_single_gate_up_flag_at_the_sixty_four_row_block_counts_what_the_model_holds(self):
         (block_stream, pool), events, marker = self.run_streams(self.C1, built=0)

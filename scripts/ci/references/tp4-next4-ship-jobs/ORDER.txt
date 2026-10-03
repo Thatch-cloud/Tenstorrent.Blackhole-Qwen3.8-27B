@@ -1,0 +1,43 @@
+# The order of the tp4/next-4 four-seat SHIP window: the qualification of c2-packed-tp4-best-ship (the proven round-time levers at production limits, the in-trace sampler kept) and, if every bar
+# passes, the move of production onto it. One template per line: <template name without .env> <stop|optional|pre> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job (H still runs: it is the hand-back). optional: a failure or a skip does not stop the window. pre: runs BEFORE the window, card-free, while production serves.
+# ONE IMAGE: tp4-serve-9 is the base B0 builds from the pushed tp4/next-4 commit with c2-packed-tp4-best-ship baked in as the image's serving default and the platform session cap baked as 4.
+# Production's default is untouched: a build that does not name C2_BAKE_DEFAULT_PROFILE (B0's one key) bakes nothing, and qwen_c2_profiles.json's default is still c2-packed-tp4.
+# NAMING: c2-packed-tp4-best is the older GATE-ONLY combined-best timing control of the tp4/next windows (no in-trace sampler) and is unchanged; the traffic candidate is c2-packed-tp4-best-ship.
+# AFTER THIS WINDOW, SEPARATELY: c2-packed-tp4-best-ship-warm4 (the same with the in-trace sampler off and QWEN_FAST_M3_REQUEST_WARM=1) is only for after the tp4/warm4 window proves the warm out; and
+# c2-packed-tp4-8-best (gate only: eight seats plus the levers) is a test arm for a later eight-seat window. Neither is in this order.
+# DRIVER STEPS BEFORE THE WINDOW (production serving, no card opened; the CPU suite green on this branch first):
+#   P0  NO OTHER WINDOW DRIVER MAY BE ALIVE (a previous window's driver ends with a reset, a fabric re-measure and an agentstart that would put the node agent back mid-qualification).
+#   P1  B0: push the tag with B0-build as the job file. Never during a timing job.
+#   P2  push the base to the registry through the platform's image publish lane (the runner has no registry login): source = target = the base's tag.
+#   P3  build the thin layer on that base with the platform's thin-layer workflow (the base given, publish_latest false) from the platform's MAIN branch only, never from an open pull-request branch and
+#       never from the ref whose sha7 names the current rollback layer (the layer's tag is its commit's sha7). RECORD the platform commit and the MANIFEST-LIST digest (the rig daemon uses the containerd
+#       image store; a config digest does not resolve).
+#   P4  pre-pull the thin layer into the rig daemon with the publish lane (dry run, report only), so SR finds it.
+#   P5  the owner's go-ahead for the window and an admin token for the end; the allowlist covers the tags.
+#   P6  prove the rollback resolves BEFORE the window: the publish lane as a dry run (apply=false) with today's production thin layer digest as the source, target :latest. Never apply it here.
+# THE WINDOW. Production is DOWN from A0 to the owner's /deploy at the end. Cheapest kill signals first: BH1..BH5 (five hang-shape runs, each after its own reset), then the matrix M, then SR; H is the hand-back.
+# STOP RULES. One stall in any job (a watchdog or replay-deadline exit, a job timeout without a result) stops the window and restarts the BH count only on a new image or a recorded fix.
+# THE GO RULE FOR MOVING :latest (every item; one failure is NO-GO and :latest is not moved):
+#   1. BH1 to BH5 five CONSECUTIVE completions on this image, every user at budget, concurrent4_code_equal hashes equal in every run and equal to the production recipe's recorded hashes;
+#   2. M: POLICY PASS, four of four concurrent identical to solo in every arm;
+#   3. no stall anywhere, c2_smoke_check clean in every job;
+#   4. SR passed ('PLATFORM_REPLAY passed=True', the boot lines, admission passed, the served name before and after the restart, the thinking-budget smoke run and passed) on the thin layer built from the
+#      RECORDED platform main commit AND the image inspection of THAT thin-layer digest shows the baked pair: ENV QWEN_C2_PROFILE=c2-packed-tp4-best-ship and THATCH_SERVING_SESSION_CAP=4;
+#   5. the timing evidence of 2026-10-03 (N4: best-strace against speed-strace, +39 percent at 4 x 4k and +42 percent at 4 x 32k) stands for this recipe: the only differences are the marker and limits;
+#   6. the owner says ship.
+#   GO: move :latest to the thin layer on tp4-serve-9 (publish lane: dry run first, recording the old value, then apply; check the rig daemon's local :latest is the new image), then H (reset, fabric
+#   re-measure, agentstart), the owner's /deploy with release_first, and the live checks (/v1/models, the engine log profile line, the session cap gauge at 4, four concurrent sessions and a fifth refused).
+#   NO-GO: :latest and the rig daemon's local tag stay on today's production thin layer (confirm both), and the hand-back re-places TODAY'S PRODUCTION RECIPE (c2-packed-tp4).
+# ROLLBACK after a GO: move :latest back to the previous thin layer with the publish lane (dry run, then apply), then the owner's /deploy with release_first. Cards wedged: A0, H's reset, the fabric re-measure, agentstart, then /deploy.
+# Time (estimate): B0 and P2-P4 before the window; BH1-BH5 about 3.5 hours, M 2 hours, SR 2.5 hours, H 0.5.
+B0-build pre tp4-serve-9 60
+A0-agentstop stop tp4-serve-9 5
+BH1-hang-shapes-audits-off stop tp4-serve-9 45
+BH2-hang-shapes-audits-off stop tp4-serve-9 45
+BH3-hang-shapes-audits-off stop tp4-serve-9 45
+BH4-hang-shapes-audits-off stop tp4-serve-9 45
+BH5-hang-shapes-audits-off stop tp4-serve-9 45
+M-matrix-traffic stop tp4-serve-9 120
+SR-platform-replay stop tp4-serve-9 150
+H-handback-reset-fabric-agentstart stop tp4-serve-9 25

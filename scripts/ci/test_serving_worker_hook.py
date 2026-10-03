@@ -836,6 +836,186 @@ class DeadProposalReleaseTests(unittest.TestCase):
                 self.assertEqual(events, [('close', 'a')])
 
 
+class PerBlockDraftTests(unittest.TestCase):
+    """QWEN_FAST_M3_BLOCKS=2 (A3): the hook drafts each block's members at THAT block's width (PackedStep.proposal_groups),
+    narrows and discards per block, passes one fence window per packed block and splits PAIRS_PACKED_ONLY by block."""
+
+    def setUp(self):
+        self.outputs = ModuleType('vllm.v1.outputs')
+        self.outputs.DraftTokenIds = SimpleNamespace
+        patcher = patch.dict('sys.modules', {'vllm.v1.outputs': self.outputs})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def hook(self, groups, **step):
+        worker, bridge, events, scheduled = WorkerHookTests().fixture()
+        packed_step = SimpleNamespace(proposal_rows=Mock(side_effect=AssertionError('the single width is never asked')),
+                                      proposal_groups=Mock(side_effect=lambda requests: groups(requests)), **step)
+        hook = FastWorkerHook(worker, bridge, cancelled=lambda: False, packed_step=packed_step)
+        self.addCleanup(hook.close)
+        original = hook.bridges
+        self.addCleanup(setattr, hook, 'bridges', original)
+        return worker, hook
+
+    def bridge(self, name, *, pending=None, max_tokens=None, emitted=0):
+        session = SimpleNamespace(request_id=name, pending=pending, phase='idle' if pending is None else 'pending',
+                                  finished=False, position=4100)
+        runtime = SimpleNamespace(discard_proposal=Mock())
+        state = None if max_tokens is None else SimpleNamespace(sampling_params=SimpleNamespace(max_tokens=max_tokens),
+                                                               output_token_ids=[0] * emitted)
+        return SimpleNamespace(request=SimpleNamespace(session=session, runtime=runtime), state=state,
+                               drafts=Mock(return_value=SimpleNamespace(req_ids=[name], draft_token_ids=[[1]])))
+
+    def draft(self, worker, hook, bridges):
+        hook.bridges = bridges
+        return worker.take_draft_token_ids()
+
+    def test_members_of_a_full_block_draft_at_sixteen_and_the_lone_member_at_its_engine_width(self):
+        bridges = {name: self.bridge(name) for name in 'abcde'}
+        requests = {name: bridge.request for name, bridge in bridges.items()}
+        worker, hook = self.hook(lambda asked: [('A', 16, [requests[name] for name in 'abcd']),
+                                                ('B', None, [requests['e']])])
+        result = self.draft(worker, hook, bridges)
+        self.assertEqual(result.req_ids, list('abcde'))
+        for name in 'abcd':
+            bridges[name].drafts.assert_called_once_with(packed_rows=16)
+        bridges['e'].drafts.assert_called_once_with()
+
+    def test_a_stale_sixteen_row_ticket_of_a_lone_member_is_discarded_and_a_matching_one_kept(self):
+        stale = SimpleNamespace(tokens=(0,) * 16)
+        lone = self.bridge('e', pending=stale)
+        full = self.bridge('a', pending=SimpleNamespace(tokens=(0,) * 16))
+        worker, hook = self.hook(lambda asked: [('A', 16, [full.request]), ('B', None, [lone.request])])
+        self.draft(worker, hook, {'a': full, 'e': lone})
+        lone.request.runtime.discard_proposal.assert_called_once_with()
+        self.assertEqual((lone.request.session.pending, lone.request.session.phase), (None, 'idle'))
+        full.request.runtime.discard_proposal.assert_not_called()
+        self.assertIsNotNone(full.request.session.pending)
+
+    def test_the_budget_narrows_only_the_block_it_belongs_to(self):
+        # a: vLLM owes one more token only (1 of 16 rows offered is still a block round under the cap, 0 is not)
+        bridges = {'a': self.bridge('a', max_tokens=100, emitted=100), 'b': self.bridge('b', max_tokens=100, emitted=10),
+                   'c': self.bridge('c', max_tokens=100, emitted=10), 'd': self.bridge('d', max_tokens=100, emitted=10)}
+        requests = {name: bridge.request for name, bridge in bridges.items()}
+        worker, hook = self.hook(lambda asked: [('A', 16, [requests['a'], requests['b']]),
+                                                ('B', 16, [requests['c'], requests['d']])])
+        with patch.dict(os.environ, {'QWEN_FAST_BUDGET_CAP': '1'}):
+            self.draft(worker, hook, bridges)
+        bridges['a'].drafts.assert_called_once_with()
+        bridges['b'].drafts.assert_called_once_with()
+        for name in 'cd':
+            bridges[name].drafts.assert_called_once_with(packed_rows=16)
+        # no cap: fewer than sixteen left narrows the block of the member that has them
+        for bridge in bridges.values():
+            bridge.drafts.reset_mock()
+        bridges['a'].state.output_token_ids = [0] * 10
+        bridges['c'].state.output_token_ids = [0] * 90
+        with patch.dict(os.environ, {'QWEN_FAST_BUDGET_CAP': '0'}):
+            self.draft(worker, hook, bridges)
+        for name in 'cd':
+            bridges[name].drafts.assert_called_once_with()
+        for name in 'ab':
+            bridges[name].drafts.assert_called_once_with(packed_rows=16)
+
+    def test_a_step_that_answers_one_width_for_the_round_is_todays(self):
+        worker, bridge, events, scheduled = WorkerHookTests().fixture()
+        policy = Mock(return_value=16)
+        hook = FastWorkerHook(worker, bridge, cancelled=lambda: False,
+                              packed_step=SimpleNamespace(proposal_rows=policy, proposal_groups=Mock(return_value=None)))
+        original = hook.bridges
+        bridges = {name: self.bridge(name) for name in 'ab'}
+        hook.bridges = bridges
+        try:
+            worker.take_draft_token_ids()
+            policy.assert_called_once()
+            for name in 'ab':
+                bridges[name].drafts.assert_called_once_with(packed_rows=16)
+        finally:
+            hook.bridges = original
+            hook.close()
+
+    def pipelined(self, name, order):
+        bridge = self.bridge(name)
+        device = SimpleNamespace(prepare_device=Mock(side_effect=lambda seed: order.append(('prepare', name)) or True),
+                                 operations=SimpleNamespace(synchronize_device=Mock(side_effect=lambda mesh: order.append(('sync',)))),
+                                 mesh=object(), proposal_capture=SimpleNamespace(discard_pending=Mock()))
+        bridge.request.runtime.drafter = device
+        bridge.request.session.seed = 5
+        bridge.request.closed = bridge.request.cancelled = False
+        return bridge
+
+    def test_the_fence_window_and_the_pair_traces_are_per_packed_block(self):
+        order = []
+        bridges = {name: self.pipelined(name, order) for name in 'abcde'}
+        requests = {name: bridge.request for name, bridge in bridges.items()}
+        window = Mock(name='window')
+        groups = [('A', 16, [requests[name] for name in 'abcd']), ('B', None, [requests['e']])]
+        worker, hook = self.hook(lambda asked: groups, while_waiting_groups=Mock(return_value=window))
+        coordinator = Mock()
+        with patch.dict(os.environ, {'QWEN_FAST_PIPELINED_PROPOSALS': '1', 'QWEN_FAST_PACKED_PROPOSAL': '1',
+                                     'QWEN_FAST_PRESTAGE': '1'}), \
+                patch('dflash_packed_proposal_coordinator.PackedProposalCoordinator', return_value=coordinator):
+            self.draft(worker, hook, bridges)
+        hook.packed_step.while_waiting_groups.assert_called_once_with(groups)
+        coordinator.prepare.assert_called_once()
+        call = coordinator.prepare.call_args
+        self.assertEqual(call.args[0], list(bridges.values()))
+        self.assertEqual(call.kwargs, dict(while_waiting=window))
+
+    def test_no_window_is_asked_when_no_block_runs_packed(self):
+        bridges = {name: self.pipelined(name, []) for name in 'ab'}
+        groups = [('A', None, [bridges['a'].request]), ('B', None, [bridges['b'].request])]
+        worker, hook = self.hook(lambda asked: groups, while_waiting_groups=Mock(return_value=Mock()))
+        coordinator = Mock()
+        with patch.dict(os.environ, {'QWEN_FAST_PIPELINED_PROPOSALS': '1', 'QWEN_FAST_PACKED_PROPOSAL': '1',
+                                     'QWEN_FAST_PRESTAGE': '1'}), \
+                patch('dflash_packed_proposal_coordinator.PackedProposalCoordinator', return_value=coordinator):
+            self.draft(worker, hook, bridges)
+        hook.packed_step.while_waiting_groups.assert_not_called()
+        self.assertEqual(coordinator.prepare.call_args.kwargs, {})
+
+    def test_pairs_packed_only_prepares_the_packed_blocks_members_as_pairs_and_the_narrow_ones_alone(self):
+        bridges = {name: self.pipelined(name, []) for name in 'abcde'}
+        requests = {name: bridge.request for name, bridge in bridges.items()}
+        groups = [('A', 16, [requests[name] for name in 'abcd']), ('B', None, [requests['e']])]
+        worker, hook = self.hook(lambda asked: groups)
+        coordinator = Mock()
+        with patch.dict(os.environ, {'QWEN_FAST_PIPELINED_PROPOSALS': '1', 'QWEN_FAST_PACKED_PROPOSAL': '1',
+                                     'QWEN_FAST_PAIRS_PACKED_ONLY': '1'}), \
+                patch('dflash_packed_proposal_coordinator.PackedProposalCoordinator', return_value=coordinator):
+            self.draft(worker, hook, bridges)
+        self.assertEqual([(call.args[0], call.kwargs) for call in coordinator.prepare.call_args_list],
+                         [([bridges[name] for name in 'abcd'], dict(packed_round=True)),
+                          ([bridges['e']], dict(packed_round=False))])
+        # every block packed (or none): one call, the flag as the one width gave it
+        coordinator.reset_mock()
+        groups[:] = [('A', 16, [requests[name] for name in 'abcd']), ('B', 16, [requests['e']])]
+        with patch.dict(os.environ, {'QWEN_FAST_PIPELINED_PROPOSALS': '1', 'QWEN_FAST_PACKED_PROPOSAL': '1',
+                                     'QWEN_FAST_PAIRS_PACKED_ONLY': '1'}):
+            self.draft(worker, hook, bridges)
+        coordinator.prepare.assert_called_once_with(list(bridges.values()), packed_round=True)
+        coordinator.reset_mock()
+        groups[:] = [('A', None, [requests[name] for name in 'abcd']), ('B', None, [requests['e']])]
+        with patch.dict(os.environ, {'QWEN_FAST_PIPELINED_PROPOSALS': '1', 'QWEN_FAST_PACKED_PROPOSAL': '1',
+                                     'QWEN_FAST_PAIRS_PACKED_ONLY': '1'}):
+            self.draft(worker, hook, bridges)
+        coordinator.prepare.assert_called_once_with(list(bridges.values()), packed_round=False)
+
+    def test_the_early_draft_flush_rides_the_first_prepare_only(self):
+        bridges = {name: self.pipelined(name, []) for name in 'abcde'}
+        requests = {name: bridge.request for name, bridge in bridges.items()}
+        groups = [('A', 16, [requests[name] for name in 'abcd']), ('B', None, [requests['e']])]
+        worker, hook = self.hook(lambda asked: groups)
+        hook._early_draft = SimpleNamespace(drafting=True, coordinator_options=lambda owner: dict(after_reads='flush'))
+        coordinator = Mock()
+        with patch.dict(os.environ, {'QWEN_FAST_PIPELINED_PROPOSALS': '1', 'QWEN_FAST_PACKED_PROPOSAL': '1',
+                                     'QWEN_FAST_PAIRS_PACKED_ONLY': '1'}), \
+                patch('dflash_packed_proposal_coordinator.PackedProposalCoordinator', return_value=coordinator):
+            self.draft(worker, hook, bridges)
+        self.assertEqual([call.kwargs for call in coordinator.prepare.call_args_list],
+                         [dict(packed_round=True, after_reads='flush'), dict(packed_round=False)])
+
+
 class PhaseLogTests(unittest.TestCase):
     def test_phase_runs_the_call_and_returns_its_result_when_logging_is_off(self):
         import serving_worker_hook

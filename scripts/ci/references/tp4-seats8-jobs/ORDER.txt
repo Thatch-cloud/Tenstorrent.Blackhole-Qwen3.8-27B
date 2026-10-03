@@ -1,0 +1,38 @@
+# The order of the tp4-seats8 window (eight seats on two 64-row M3 blocks, QWEN_FAST_M3_BLOCKS=2), one template per line:
+# <template name without .env> <stop|optional> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window (its product is data).
+# Image: the tag of the tt-vllm image the job serves (tp4-seats8, prebuilt by a build-only job while production served; no job here builds).
+# Minutes: runner time for ONE run of the job, a quad reset (1-3 min) included.
+# PRODUCTION IS LIVE ON THE CARDS when the window opens: the placement is removed through the admin API first (the user's go-ahead and an admin
+# token), then S8-0 unserves (the only job that does). The window closes with H8, which runs even when a stop job halts the window, and re-places
+# TODAY'S PRODUCTION RECIPE (the image and profile c2-packed-tp4 that served before; the :latest tag unchanged), never a gate arm.
+# TWO STAGES, the first the cheapest kill signals:
+# (a) PROBE, about 4 hours, first: S8-0 production profile on the new image with the seat flag OFF (nothing may differ); S8-1 the first attach
+# of eight seats on the audited gate profile (blocks=2, block B compiles nothing after A's capture, DRAM after attach about 22.7 to 23.0 GB per chip,
+# audited concurrent8_code_equal with zero mismatches); S8-6 memory at 8 live (kill: free below 3 GB per chip) right after it; then S8-7a and S8-7b ONE paired timing (kill: the 8-live round above
+# 2 x P(4) + 10 ms; the 7a/7b jobs are optional, so the kill is the DRIVER reading their numbers, not a job failure). The review's E0/E1/E2 harness jobs are not on this branch (their harness work is not here). A kill signal in this stage stops the window: the qualification (10 to 19
+# hours) is not run, and H8 hands the cards back.
+# (b) QUALIFICATION: S8-2a the S3a matrix at eight users on the audited gate profile and S8-2b on the traffic profile (the M7 pattern); S8-3a to
+# S8-3e the audits-off hang shapes on c2-packed-tp4-8-diag-strace (stall watch, handle log and guard), each after its own reset: five consecutive
+# completions, and there is NO qualified hang fallback at 8 seats; S8-4 staggered and S8-5 churn of 16 sessions over 8 seats; S8-7c and S8-7d the
+# second pair of the ABAB.
+# The seat flag is implemented by the serving runtime; the eight-seat profiles carry it, c2-packed-tp4 does not. Nothing here changes production.
+# Time (estimate): the probe stop jobs about 4 hours typical and 6 worst; the qualification stop jobs about 8 hours typical and 13 worst; the timing
+# jobs about 4.5 hours.
+S8-0-flag-off-smoke stop tp4-seats8 75
+S8-1-seats8-attach-audited stop tp4-seats8 100
+S8-6-memory8 stop tp4-seats8 75
+S8-7a-seats4-timed optional tp4-seats8 60
+S8-7b-seats8-timed optional tp4-seats8 75
+S8-2a-matrix8-gate stop tp4-seats8 180
+S8-2b-matrix8-traffic stop tp4-seats8 120
+S8-3a-hang8-strace stop tp4-seats8 45
+S8-3b-hang8-strace stop tp4-seats8 45
+S8-3c-hang8-strace stop tp4-seats8 45
+S8-3d-hang8-strace stop tp4-seats8 45
+S8-3e-hang8-strace stop tp4-seats8 45
+S8-4-staggered8 stop tp4-seats8 180
+S8-5-churn16 stop tp4-seats8 150
+S8-7c-seats4-timed optional tp4-seats8 60
+S8-7d-seats8-timed optional tp4-seats8 75
+H8-handback-reset stop tp4-seats8 15

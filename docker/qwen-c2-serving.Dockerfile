@@ -135,6 +135,15 @@ ENV QWEN_ATTN_PREP=1 QWEN_CARDS_ALLOCATED=1 QWEN_DRAFT_KV_SLIDE_EXPERIMENT=1 QWE
     MESH_DEVICE=P300 OMP_NUM_THREADS=8 TT_CACHE_PATH=/experiment-cache/weights TT_METAL_CACHE=${KERNEL_CACHE} \
     VLLM_CACHE_ROOT=/tmp/vllm-cache QWEN_C2_SERVING=1
 
+# The SERVING DEFAULT, baked only when the build asks (--build-arg C2_BAKE_PROFILE=<profile>, build-c2-serving-image.sh, from the job
+# key C2_BAKE_DEFAULT_PROFILE): the node agent forwards neither QWEN_C2_PROFILE nor THATCH_SERVING_SESSION_CAP, so what a platform launch serves is the
+# image's own default, and the image is the unit of rollback. Unset (every build before the eight-seat variant, and every default build) both are
+# empty: load_profile and the platform's session_cap_from_env treat an empty value as unset, so the default is profiles.json's and the
+# cap is the platform's own. Set, the script computes the cap from the profile's max-num-seqs, and G1 provenance holds the pair to each other.
+ARG C2_BAKE_PROFILE=
+ARG C2_BAKE_SESSION_CAP=
+ENV QWEN_C2_PROFILE=${C2_BAKE_PROFILE} THATCH_SERVING_SESSION_CAP=${C2_BAKE_SESSION_CAP}
+
 # Provenance, last so a new commit or stamp never invalidates the cached layers above (an ARG
 # busts the cache of every RUN after it). P8's revision label names P8's commit; this one names
 # the commit the context was staged from (c2_overlay.py stage writes source-revision). The build

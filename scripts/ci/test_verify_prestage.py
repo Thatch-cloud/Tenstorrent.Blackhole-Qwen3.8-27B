@@ -690,6 +690,70 @@ class PlumbingTests(unittest.TestCase):
             owner.original_execute.assert_called_once_with(new)
 
 
+class CompositeWindowTests(unittest.TestCase):
+    """QWEN_FAST_M3_BLOCKS=2 (A3): the fence window over two packed blocks - one WhileWaiting per block, run in order."""
+
+    def block(self, name, log, **attributes):
+        prestaged = SimpleNamespace(prestage_requests=Mock(side_effect=lambda requests: log.append(('prestage', name))),
+                                    drop=Mock())
+        block = SimpleNamespace(round_fences=True, prestaged=prestaged, fused=None,
+                                fence_token=Mock(side_effect=lambda: log.append(('token', name)) or name),
+                                note_round_fence=Mock(side_effect=lambda token: log.append(('armed', token))), rounds=0)
+        for key, value in attributes.items():
+            setattr(block, key, value)
+        return block
+
+    def test_a_window_without_the_prestage_still_takes_the_fence_token_and_arms_the_round_fence(self):
+        log = []
+        block = self.block('A', log)
+        window = verify_prestage.WhileWaiting(block, ['r'], prestage=False)
+        window()
+        window.fenced()
+        self.assertEqual(log, [('token', 'A'), ('armed', 'A')], 'no pre-stage: only the round fence')
+        block.prestaged.prestage_requests.assert_not_called()
+        # the default is the one block's window as it always was
+        log.clear()
+        window = verify_prestage.WhileWaiting(block, ['r'])
+        window()
+        self.assertEqual(log, [('token', 'A'), ('prestage', 'A')])
+
+    def test_every_blocks_window_runs_in_order_before_the_fence_and_is_armed_after_it(self):
+        log = []
+        windows = [verify_prestage.WhileWaiting(self.block(name, log), [name], prestage=False) for name in 'AB']
+        composite = verify_prestage.CompositeWindow(windows)
+        composite()
+        self.assertEqual(log, [('token', 'A'), ('token', 'B')])
+        composite.fenced()
+        self.assertEqual(log[2:], [('armed', 'A'), ('armed', 'B')])
+        with self.assertRaises(ValueError):
+            verify_prestage.CompositeWindow([])
+
+    def test_a_window_that_raises_is_dropped_alone_and_the_other_blocks_window_still_runs(self):
+        log = []
+        first, second = self.block('A', log), self.block('B', log)
+        first.fence_token = Mock(side_effect=RuntimeError('x'))
+        composite = verify_prestage.CompositeWindow([verify_prestage.WhileWaiting(first, ['A']),
+                                                    verify_prestage.WhileWaiting(second, ['B'])])
+        with patch.object(verify_prestage, 'log_line'):
+            composite()
+        first.prestaged.drop.assert_called_once_with('prestage-failed:RuntimeError')
+        second.prestaged.drop.assert_not_called()
+        self.assertEqual(log, [('token', 'B'), ('prestage', 'B')])
+
+    def test_the_composite_drops_every_window_and_a_fence_failure_does_not_skip_the_next_block(self):
+        log = []
+        first, second = self.block('A', log), self.block('B', log)
+        first.note_round_fence = Mock(side_effect=RuntimeError('fence'))
+        windows = [verify_prestage.WhileWaiting(first, ['A']), verify_prestage.WhileWaiting(second, ['B'])]
+        composite = verify_prestage.CompositeWindow(windows)
+        composite.drop(RuntimeError('y'))
+        self.assertEqual((first.prestaged.drop.call_count, second.prestaged.drop.call_count), (1, 1))
+        composite()
+        with self.assertRaisesRegex(RuntimeError, 'fence'):
+            composite.fenced()
+        self.assertIn(('armed', 'B'), log, "block B's round fence is armed though A's failed")
+
+
 class GateTests(unittest.TestCase):
     ON = {'QWEN_FAST_PRESTAGE': '1', 'QWEN_FAST_PRESTAGE_AUDIT': '1', 'QWEN_FAST_ROUND_FENCES': '1',
           'QWEN_FAST_PACKED_AUDIT': '1', 'QWEN_FAST_PACKED_PROPOSAL': '1', 'QWEN_FAST_PIPELINED_PROPOSALS': '1'}

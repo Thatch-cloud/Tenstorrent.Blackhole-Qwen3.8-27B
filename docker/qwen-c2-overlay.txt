@@ -89,15 +89,22 @@ scripts/ci/serving_worker_hook.py
 scripts/ci/serving_lifecycle.py
 scripts/ci/serving_packed_step.py
 
+# Eight seats on two M3 blocks (QWEN_FAST_M3_BLOCKS=2, default off): serving_packed_step builds one fence window per packed block
+# (verify_prestage.CompositeWindow) and the early draft's key carries every pending ticket's width (early_draft.draft_key). Both ship
+# from the P8 base otherwise, and the step would import a class the base copy of verify_prestage does not have.
+scripts/ci/verify_prestage.py
+scripts/ci/early_draft.py
+
 # D0, the one-user lane (QWEN_FAST_SOLO_LANE, gate only; the lanes window): serving_runtime builds the one-user block beside M3
 # when the flag is on and serving_packed_step routes a lone slot-0 round to it (both lazy-import serving_solo_lane), over the
 # shape packed_shapes.solo_shape names. Flag off, none of the three is read: this is what each was call for call.
 scripts/ci/packed_shapes.py
 scripts/ci/serving_solo_lane.py
 
-# QWEN_FAST_M3_REQUEST_WARM=1 or even (tp4/warm4, gate-only profiles): serving_runtime lazy-imports request_width_warm and runs it right
-# after the prefill warm and before the one 64-row block's construction (the process's first trace capture), so the request engine's
-# rows 1/2/4 programs and state exist before any capture. Off unless the flag is set.
+# QWEN_FAST_M3_REQUEST_WARM=1 or even (tp4/warm4 and the eight-seat profiles): serving_runtime lazy-imports request_width_warm and runs it
+# before the process's first trace capture - right after the prefill warm and before the one 64-row block's construction, or, at two
+# blocks, between their warm phase and their captures - so the request engine's rows 1/2/4 programs and state exist before any
+# capture. Off unless the flag is set.
 scripts/ci/request_width_warm.py
 
 # The fast lane (QWEN_FAST_LANE, gate only; the lanes window): serving_runtime builds the lane runtime when the flag is on, the lifecycle

@@ -25,12 +25,21 @@ SINGLE_GATEUP_FLAG = 'QWEN_FAST_SINGLE_GATEUP'
 SINGLE_GATEUP_SHAPE = 'the single gate/up copy'
 M3_SHAPE = 'the 64-row block'
 C2_ANY_SHAPE = 'C2-any with no packed block'
-# QWEN_FAST_M3_REQUEST_WARM (default off; '0', '1' or 'even' only): at the one 64-row M3 block, the any-request engine's rows 1/2/4
-# programs and state are compiled and created BEFORE the process's first trace capture (request_width_warm), so the first engine
-# build after the block's capture creates nothing the block's replays can overwrite. 'even' warms (1, 2, 4, 1), a gate-only
+# QWEN_FAST_M3_REQUEST_WARM (default off; '0', '1' or 'even' only): the any-request engine's rows 1/2/4 programs and state are
+# compiled and created BEFORE the process's first trace capture (request_width_warm), so the first engine build after the last
+# block's capture creates nothing the block's replays can overwrite: at the one 64-row M3 block, once before its capture; under
+# QWEN_FAST_M3_BLOCKS=2, between the two blocks' warm phase and their captures. 'even' warms (1, 2, 4, 1), a gate-only
 # discriminator that leaves the model and sampler CCL indices where they started.
 M3_REQUEST_WARM_FLAG = 'QWEN_FAST_M3_REQUEST_WARM'
 PADDED_BLOCK_FLAG = 'QWEN_FAST_PADDED_BLOCK'
+# Eight seats on TWO 64-row M3 blocks (default off): block A over pool slots (0..3), block B over (4..7), each exactly
+# the qualified 4-user block, run back to back in one step. '1' (or unset) is today's one block at four requests; '2'
+# is admitted at exactly eight scheduler requests and nowhere else; any other value is refused.
+M3_BLOCKS_FLAG = 'QWEN_FAST_M3_BLOCKS'
+M3_BLOCKS_USERS = 8
+M3_BLOCKS_MARKER = '[PINDIAG] M3 blocks={} over pool slots {} (QWEN_FAST_M3_BLOCKS={}); each block is the qualified 4-user 64-row block'
+CAPTURE_PROGRAMS_MARKER = '[PINDIAG] packed blocks capture block={} programs={}->{}'
+CLOSE_FAILED_MARKER = '[PINDIAG] a sibling block did not close without the fence: {}'
 CAPTURE_POSITION_FLAG = 'QWEN_FAST_PACKED_CAPTURE_POSITION'
 CAPTURE_POSITION_MARKER = '[PINDIAG] packed capture position override='
 EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
@@ -39,35 +48,65 @@ EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
 STICKY_ENGINE_MARKER = '[PINDIAG] sticky engine built req='
 
 
+def m3_blocks(environ=None):
+    """QWEN_FAST_M3_BLOCKS, strictly: unset or '1' is one M3 block (today's), '2' is two (eight seats), and anything
+    else - an empty value included - is a configuration error naming the flag, refused before anything is built."""
+    value = (os.environ if environ is None else environ).get(M3_BLOCKS_FLAG, '1')
+    if value not in ('1', '2'):
+        raise ValueError('%s must be 1 or 2, got %r' % (M3_BLOCKS_FLAG, value))
+    return int(value)
+
+
+def m3_blocks_for(policy, environ=None):
+    """How many M3 blocks this attach builds (1 or 2), refusing - ValueError naming QWEN_FAST_M3_BLOCKS - a malformed
+    value and the value 2 at any scheduler request count but eight: two blocks are the eight-seat shape, and at four
+    requests the flag would be a second, silent way to ask for something the four-seat attach already is."""
+    environ = os.environ if environ is None else environ
+    blocks = m3_blocks(environ)
+    policy = policy() if callable(policy) else policy
+    if blocks == 2 and policy['scheduler_requests'] != M3_BLOCKS_USERS:
+        raise ValueError('%s=2 builds two 4-user M3 blocks and is admitted at exactly %d scheduler requests, not %s'
+                         % (M3_BLOCKS_FLAG, M3_BLOCKS_USERS, policy['scheduler_requests']))
+    return blocks
+
+
 def m3_shape(policy, environ=None):
     """(met, description): whether this is the 64-row M3 block - four scheduler requests,
-    QWEN_FAST_FOUR_AS_TWO=0 and QWEN_FAST_PACKED_STEP=1 - and a short description of the
-    shape actually configured, for a marker. `policy` is validate_fast_config's dict, or a
-    zero-argument callable returning it."""
+    QWEN_FAST_FOUR_AS_TWO=0 and QWEN_FAST_PACKED_STEP=1 - or, under QWEN_FAST_M3_BLOCKS=2, the two M3 blocks
+    of eight scheduler requests (each block exactly that same 4-user block), and a short description of the
+    shape actually configured, for a marker (it names the block count only when it is not one). `policy` is
+    validate_fast_config's dict, or a zero-argument callable returning it."""
     environ = os.environ if environ is None else environ
     policy = policy() if callable(policy) else policy
     users, four_as_two, packed = (policy['scheduler_requests'], environ.get('QWEN_FAST_FOUR_AS_TWO', 'unset'),
                                   environ.get('QWEN_FAST_PACKED_STEP', 'unset'))
-    met = users == 4 and four_as_two == '0' and packed == '1'
-    return met, 'users=%s FOUR_AS_TWO=%s PACKED_STEP=%s' % (users, four_as_two, packed)
+    blocks = m3_blocks(environ)
+    met = users == (4 if blocks == 1 else M3_BLOCKS_USERS) and four_as_two == '0' and packed == '1'
+    return met, 'users=%s FOUR_AS_TWO=%s PACKED_STEP=%s%s' % (users, four_as_two, packed,
+                                                             '' if blocks == 1 else ' M3_BLOCKS=%d' % blocks)
 
 
-def m3_request_warm(policy, environ=None):
+def m3_request_warm(blocks, policy, environ=None):
     """QWEN_FAST_M3_REQUEST_WARM, strictly: unset or '0' is off (None), '1' is the widths (1, 2, 4), 'even' is (1, 2, 4, 1), and
-    anything else - an empty value included - is a configuration error naming the flag. Any value but '0' is refused, naming it,
-    unless m3_shape(policy) is met (four requests, FOUR_AS_TWO=0, PACKED_STEP=1) and QWEN_FAST_TP is not '2'."""
+    anything else - an empty value included - is a configuration error naming the flag. `blocks` is m3_blocks_for's count.
+    One block (the four-seat shape): the warm runs once before the block's capture, and any value but '0' is refused, naming it,
+    unless m3_shape(policy) is met (four requests, FOUR_AS_TWO=0, PACKED_STEP=1) and QWEN_FAST_TP is not '2'. Two blocks (the
+    eight-seat shape): the warm runs between the two blocks' phases (complete_blocks_two_phase); the shape is m3_blocks_for's."""
     environ = os.environ if environ is None else environ
     value = environ.get(M3_REQUEST_WARM_FLAG, '0')
     if value not in ('0', '1', 'even'):
         raise ValueError("%s must be 0, 1 or even, got %r" % (M3_REQUEST_WARM_FLAG, value))
     if value == '0':
         return None
-    met, shape = m3_shape(policy, environ)
-    if not met:
-        raise ValueError('%s=%s warms the request widths before the one 64-row M3 block and is admitted only at that shape (%s)'
-                         % (M3_REQUEST_WARM_FLAG, value, shape))
-    if environ.get('QWEN_FAST_TP', '2') == '2':
-        raise ValueError('%s=%s is admitted on the four-card (TP4) stack only, not QWEN_FAST_TP=2' % (M3_REQUEST_WARM_FLAG, value))
+    if blocks == 1:
+        met, shape = m3_shape(policy, environ)
+        if not met:
+            raise ValueError('%s=%s warms the request widths before the one 64-row M3 block and is admitted only at that shape (%s)'
+                             % (M3_REQUEST_WARM_FLAG, value, shape))
+        if environ.get('QWEN_FAST_TP', '2') == '2':
+            raise ValueError('%s=%s is admitted on the four-card (TP4) stack only, not QWEN_FAST_TP=2' % (M3_REQUEST_WARM_FLAG, value))
+    elif blocks != 2:
+        raise ValueError('%s needs one or two M3 blocks, got %r' % (M3_REQUEST_WARM_FLAG, blocks))
     from request_width_warm import EVEN_WIDTHS, WIDTHS
     return WIDTHS if value == '1' else EVEN_WIDTHS
 
@@ -117,7 +156,7 @@ def register_reader_reason(policy, environ=None):
     if single:
         if not met:
             raise ValueError('QWEN_FAST_SINGLE_GATEUP=1 is admitted only at the 64-row M3 block '
-                             '(users=4 FOUR_AS_TWO=0 PACKED_STEP=1), not ' + shape)
+                             '(users=4 FOUR_AS_TWO=0 PACKED_STEP=1; users=8 with QWEN_FAST_M3_BLOCKS=2), not ' + shape)
         return (SINGLE_GATEUP_SHAPE, 'QWEN_FAST_SINGLE_GATEUP=1 builds no w_gate_up to stream')
     if not met:
         return None
@@ -141,7 +180,7 @@ def padded_block_admission(policy, environ=None):
     met, shape = m3_shape(policy, environ)
     if not met:
         raise ValueError('QWEN_FAST_PADDED_BLOCK=1 is admitted only at the 64-row M3 block '
-                         '(users=4 FOUR_AS_TWO=0 PACKED_STEP=1), not ' + shape)
+                         '(users=4 FOUR_AS_TWO=0 PACKED_STEP=1; users=8 with QWEN_FAST_M3_BLOCKS=2), not ' + shape)
     return minimum
 
 
@@ -305,6 +344,46 @@ def extent_replay_requested(environ=None):
     return value == '1'
 
 
+def complete_blocks_two_phase(blocks, model=None, log=None, before_captures=None):
+    """QWEN_FAST_M3_BLOCKS=2 (A1c): finish the construction of blocks built with defer_capture=True. Each block has
+    already allocated its persistent state (the initial snapshot, checkpoints, taps) and the first phase here runs
+    every block's warm forward and builds every fixture (extent words, masks, retained storage); only then does any
+    block capture a trace, and the publication warm and the reseed come after the LAST capture. The rule is
+    packed_verifier's CONSTRUCTION ORDER: a buffer a block keeps across rounds that is allocated after a capture
+    lands in the holes that capture freed, and every replay overwrites it. Built one after the other, block B's
+    fixture inputs, taps, checkpoints and extent words would have been exactly that.
+
+    A log line per capture gives the program-cache count before and after each block: block B compiles zero programs
+    after block A's capture (the probe window reads it).
+
+    `before_captures` (QWEN_FAST_M3_REQUEST_WARM on at two blocks; request_width_warm): called once, after every block's warm_and_fixture and
+    before the first capture, inside the same guard - a failure closes both blocks without the fence and propagates."""
+    log = pindiag if log is None else log
+    try:
+        for block in blocks:
+            block.warm_and_fixture()
+        if before_captures is not None:
+            before_captures()
+        for index, block in enumerate(blocks):
+            before = program_count(model) if model is not None else None
+            block.capture_traces()
+            log(CAPTURE_PROGRAMS_MARKER, index, before, program_count(model) if model is not None else None)
+        for index, block in enumerate(blocks):
+            if index:
+                block.warm_publication = False      # block A's warm covered the same plan on the shared program cache
+            block.finish_construction()
+    except BaseException:
+        # The failing block closed itself without the device fence (it may be hung); a sibling still under construction
+        # would be closed by the attach scope WITH the fence and block there on the same hung device. Close it the same
+        # way, here, then let the original failure through.
+        for block in blocks:
+            try:
+                block.close(wait=False)
+            except BaseException as error:
+                log(CLOSE_FAILED_MARKER, repr(error)[:200])
+        raise
+
+
 @contextmanager
 def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixtures,
                             native_attention_evidence, block_stream, kv_publication_evidence,
@@ -319,7 +398,12 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
     from sampling_link_policy import sampler_links
 
     policy = validate_fast_config(worker.vllm_config)
-    request_widths = m3_request_warm(policy)
+    # QWEN_FAST_M3_BLOCKS (default 1; 2 only at eight scheduler requests): read strictly before anything is built, so a
+    # malformed value, or 2 at any other request count, is refused here by name.
+    m3_blocks_count = m3_blocks_for(policy)
+    # QWEN_FAST_M3_REQUEST_WARM: the widths to warm (None when off), before the one block's capture (one block) or between the
+    # two blocks' phases (two blocks).
+    request_widths = m3_request_warm(m3_blocks_count, policy)
     # Measurement-only, env-gated admission of one named grafted binary (K64 kernel
     # graft): inert unless QWEN_FAST_RUNTIME_BINARY_SHA256 is set, and it neither
     # touches the hash-pinned sources nor lowers the pin itself. Must run before
@@ -437,11 +521,22 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # the same four users. QWEN_FAST_FOUR_AS_TWO=0 keeps the single M3 block.
         packed_requested = os.environ.get('QWEN_FAST_PACKED_STEP') == '1'
         four_as_two = False
+        # QWEN_FAST_M3_BLOCKS=2: two 64-row M3 blocks over pool slots (0..3) and (4..7), the same multi-block path.
+        m3_blocks_two = False
         packed_shapes = ()
+        if m3_blocks_count == 2 and not packed_requested:
+            raise ValueError('%s=2 builds packed blocks and needs QWEN_FAST_PACKED_STEP=1, not %s'
+                             % (M3_BLOCKS_FLAG, os.environ.get('QWEN_FAST_PACKED_STEP', 'unset')))
         if packed_requested:
-            from packed_shapes import m1_shape, serving_shape
+            from packed_shapes import m1_shape, m3_shape as m3_block_shape, serving_shape
 
-            if policy['scheduler_requests'] == 4 and os.environ.get('QWEN_FAST_FOUR_AS_TWO', '1') != '0':
+            if m3_blocks_count == 2:
+                if os.environ.get('QWEN_FAST_FOUR_AS_TWO', '1') != '0':
+                    raise ValueError('%s=2 needs QWEN_FAST_FOUR_AS_TWO=0, not %s'
+                                     % (M3_BLOCKS_FLAG, os.environ.get('QWEN_FAST_FOUR_AS_TWO', 'unset')))
+                m3_blocks_two = True
+                packed_shapes = (m3_block_shape(page_width), m3_block_shape(page_width))
+            elif policy['scheduler_requests'] == 4 and os.environ.get('QWEN_FAST_FOUR_AS_TWO', '1') != '0':
                 four_as_two = True
                 packed_shapes = (m1_shape(page_width), m1_shape(page_width))
             else:
@@ -458,9 +553,12 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # this unreachable in serving; refused here too, before the pool, the first allocation.
         if extent_replay and not packed_shapes:
             raise ValueError('%s=1 serves its rounds through the packed block, and this attach builds none '
-                             '(QWEN_FAST_PACKED_STEP=%s, %d scheduler requests)'
+                             '(QWEN_FAST_PACKED_STEP=%s, %d scheduler requests)%s'
                              % (EXTENT_REPLAY_FLAG, os.environ.get('QWEN_FAST_PACKED_STEP', 'unset'),
-                                policy['scheduler_requests']))
+                                policy['scheduler_requests'],
+                                # Eight requests are the two-block shape: say which flag builds it.
+                                '; eight requests need %s=2 (two 64-row M3 blocks)' % M3_BLOCKS_FLAG
+                                if policy['scheduler_requests'] == M3_BLOCKS_USERS else ''))
         # The per-request engines' capture widths, and the pool's buckets that hold them:
         # the full T16 set by default and beside the 32-row block, the sequential widths
         # (1, 2, 4) beside the 64-row block, whose four engines' 8- and 16-row captures do
@@ -481,7 +579,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # rather than by either shape alone.
         from packed_shapes import M3_SEQUENTIAL_CAPTURE_ROWS, sequential_capture_rows
 
-        if four_as_two:
+        if four_as_two or m3_blocks_two:
             capture_rows = M3_SEQUENTIAL_CAPTURE_ROWS
         else:
             capture_rows = sequential_capture_rows(packed_shapes[0] if packed_shapes else None)
@@ -516,6 +614,8 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         elif trimmed:
             pindiag('[PINDIAG] per-request captures trimmed to widths {} for the four-user block',
                     tuple(sorted(set(bucket_rows))))
+        if m3_blocks_two:
+            pindiag(M3_BLOCKS_MARKER, 2, '(0, 1, 2, 3) and (4, 5, 6, 7)', 2)
         # packed_shapes covers each distinct shape once (validate_packed_shapes still
         # refuses a shape repeated there); four_as_two's two blocks share one (2, 16) shape,
         # so its multiplicity is named separately, and the pool lends each block asking for
@@ -555,7 +655,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             feature_taps=len(TARGET_TAPS), rope=rope,
             **({} if not packed_shapes else dict(packed_shapes=distinct_shapes,
                 packed_replay_group_rows=replay_group_rows(),
-                **({'packed_replicas': {distinct_shapes[0]: len(packed_shapes)}} if four_as_two else {}),
+                **({'packed_replicas': {distinct_shapes[0]: len(packed_shapes)}} if four_as_two or m3_blocks_two else {}),
                 # S2: the extent storage in place of the per-family tables; flag off, no keyword at all.
                 **({'extent_replay': True} if extent_replay else {}))),
             **({'draft_masks': draft_masks} if draft_masks else {}),
@@ -602,7 +702,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         scopes.callback(weights.close)
         memory_ledger.record('P5', draft_weights=weights)
         prefill_warm_before_traces(runner, model, policy['scheduler_requests'], operations=operations)
-        if request_widths:
+        if request_widths and not m3_blocks_two:
             if not packed_shapes:
                 raise ValueError('%s warms the request widths before the packed block, and this attach builds none'
                                  % M3_REQUEST_WARM_FLAG)
@@ -640,7 +740,11 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             for shape in packed_shapes:
                 packed_block = PackedVerifierEngine(operations, model, helpers, sampler, pool=pool, shared_weights=weights,
                                                     shape=shape, feature_taps=TARGET_TAPS,
-                                                    **({'pool_slots': tuple(range(slot, slot + shape.users))} if four_as_two else {}),
+                                                    **({'pool_slots': tuple(range(slot, slot + shape.users))}
+                                                       if four_as_two or m3_blocks_two else {}),
+                                                    # QWEN_FAST_M3_BLOCKS=2 (A1c): every block allocates and warms
+                                                    # first, then every block captures (complete_blocks_two_phase above).
+                                                    **({'defer_capture': True} if m3_blocks_two else {}),
                                                     **({'padded_min_users': padded_min_users}
                                                        if padded_min_users is not None else {}),
                                                     # S2 G3b's gate-only knob; unset, no keyword at all.
@@ -657,8 +761,19 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                                                            and os.environ.get('QWEN_FAST_TP', '2') != '2') else {}))
                 scopes.callback(packed_block.close)
                 packed_blocks.append(packed_block)
-                memory_ledger.record('P6', point='block%d' % len(packed_blocks), packed_block=packed_block)
+                if not m3_blocks_two:
+                    memory_ledger.record('P6', point='block%d' % len(packed_blocks), packed_block=packed_block)
                 slot += shape.users
+            if m3_blocks_two:
+                if request_widths:
+                    from request_width_warm import warm_request_widths
+
+                    complete_blocks_two_phase(packed_blocks, model, before_captures=lambda: warm_request_widths(
+                        operations, model, helpers, sampler, page_width, widths=request_widths))
+                else:
+                    complete_blocks_two_phase(packed_blocks, model)
+                for index, packed_block in enumerate(packed_blocks, 1):
+                    memory_ledger.record('P6', point='block%d' % index, packed_block=packed_block)
             # D0: the one-user block, after M3 (a block is built before any request exists, and the pool's slot 0 is
             # bound by carry identity to M3's segment 0 AND to this block's only segment), over slot 0 alone.
             solo_block = None
@@ -677,6 +792,15 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                                                          and os.environ.get('QWEN_FAST_TP', '2') != '2') else {}))
                 scopes.callback(solo_block.close)
                 memory_ledger.record('P6', point='solo', packed_block=solo_block)
+            # QWEN_FAST_M3_BLOCKS=2: refused unless BOTH blocks report that their captured trace reads every carry in
+            # place (QWEN_FAST_VERIFY_T1 #3). Every block's commit DMA writes the model's native slot 0, so a block whose
+            # trace read slot 0 instead of its own carries would be fed another block's state: the attach is refused.
+            if m3_blocks_two:
+                refused_blocks = [index for index, packed_block in enumerate(packed_blocks)
+                                  if getattr(packed_block, 'carries_in_place', False) is not True]
+                if refused_blocks:
+                    raise ValueError('%s=2 needs every M3 block to read its carries in place (QWEN_FAST_VERIFY_T1 #3); '
+                                     'blocks %s do not report carries_in_place' % (M3_BLOCKS_FLAG, refused_blocks))
             # S2: every block must be the extent block under the flag, and none may be without it. The
             # block keys on the pool's storage alone (PackedVerifierEngine.extent), so this is the one
             # attach-time proof that the flag reached the storage and the storage the block (design W2,
@@ -688,11 +812,17 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                                  % (EXTENT_REPLAY_FLAG, int(extent_replay), extents))
             # The step bound to its block (or blocks), carrying the per-round ticket-width
             # policy the worker hook asks before drafting.
-            packed_step = PackedStep(packed_blocks if four_as_two else packed_blocks[0],
-                                     **({'solo': solo_block} if solo_block is not None else {}))
+            packed_step = PackedStep(packed_blocks if four_as_two or m3_blocks_two else packed_blocks[0],
+                                     **({'solo': solo_block} if solo_block is not None else {}),
+                                     # QWEN_FAST_M3_BLOCKS=2: each block's ticket width is its own (PackedStep.proposal_groups).
+                                     **({'per_block_widths': True} if m3_blocks_two else {}))
+            if m3_blocks_two:
+                # New arrivals fill a block that has exactly one live user first, else the fuller block that is not full
+                # (ServingBufferPool.place_blocks), so a lone user is rare and a block runs packed whenever it can.
+                pool.place_blocks(tuple(tuple(range(index * 4, index * 4 + 4)) for index in range(2)))
             step_description = dict(describe_packed_step(),
-                **(dict(blocks=[packed_block.describe() for packed_block in packed_blocks]) if four_as_two
-                   else dict(block=packed_blocks[0].describe())),
+                **(dict(blocks=[packed_block.describe() for packed_block in packed_blocks])
+                   if four_as_two or m3_blocks_two else dict(block=packed_blocks[0].describe())),
                 **(dict(solo=solo_block.describe()) if solo_block is not None else {}))
         elif packed_requested:
             step_description = dict(step_description,

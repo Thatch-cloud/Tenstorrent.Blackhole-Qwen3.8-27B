@@ -877,6 +877,7 @@ class ProfileGatingTests(unittest.TestCase):
                                  # the four-card S2 twins of c2-packed and c2-packed-gate (plan S2-TP4)
                                  'c2-packed-tp4': True, 'c2-packed-tp4-gate': True,
                                  'c2-packed-tp4-best': True, 'c2-packed-tp4-best-gate': True, 'c2-packed-tp4-best-rshard': True, 'c2-packed-tp4-best-strace': True,
+                                 'c2-packed-tp4-best-ship': True, 'c2-packed-tp4-best-ship-warm4': True, 'c2-packed-tp4-8-best': True,
                                  'c2-packed-tp4-gate-ring': True, 'c2-packed-tp4-gate-bf16': True, 'c2-packed-tp4-gate-draftwide': True,
                                  # the speed window's arms (tp4/speed)
                                  'c2-packed-tp4-gate-noslide': True, 'c2-packed-tp4-speed': True,
@@ -907,6 +908,10 @@ class ProfileGatingTests(unittest.TestCase):
                                  'c2-packed-tp4-solo-time-gate': True, 'c2-packed-tp4-lanes-gate': True,
                                  'c2-packed-tp4-lanes-time-gate': True,
                                  'c2-packed-tp4-warm4-control': True, 'c2-packed-tp4-warm4-diag': True, 'c2-packed-tp4-warm4-diag-oldtail': True, 'c2-packed-tp4-warm4-even-diag': True, 'c2-packed-tp4-warm4-gate': True, 'c2-packed-tp4-speed-warm4': True,
+                                 # the eight-seat twins (tp4/seats8): c2-packed-tp4's parser and limits
+                                 'c2-packed-tp4-8': True, 'c2-packed-tp4-8-gate': True,
+                                 'c2-packed-tp4-8-time-gate': True, 'c2-packed-tp4-8-diag-strace': True,
+                                 'c2-packed-tp4-8-diag-strace-nowarm': True, 'c2-packed-tp4-8-diag-strace-rshard': True,
                                  'coding': None, 'general': None, 'general-prefix': None,
                                  'general-prefix-eager': None,
                                  # the four-card (TP4) G1 family decodes one token per step, as general does
@@ -920,6 +925,7 @@ class ProfileGatingTests(unittest.TestCase):
                              name in ('c2', 'c2-gate', 'c2-packed', 'c2-packed-gate', 'c2-packed-prefix',
                                       'c2-packed-prefix-gate', 'c2-packed-tp4', 'c2-packed-tp4-gate',
                                       'c2-packed-tp4-best', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-strace',
+                                      'c2-packed-tp4-best-ship', 'c2-packed-tp4-best-ship-warm4', 'c2-packed-tp4-8-best',
                                       'c2-packed-tp4-gate-ring', 'c2-packed-tp4-gate-bf16', 'c2-packed-tp4-gate-draftwide', 'c2-packed-tp4-gate-noslide',
                                       'c2-packed-tp4-speed', 'c2-packed-tp4-speed-noslide', 'c2-packed-tp4-speed-fix',
                                       'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-pairs',
@@ -931,7 +937,10 @@ class ProfileGatingTests(unittest.TestCase):
                                       'c2-packed-tp4-gate-vglue', 'c2-packed-tp4-speed-vglue', 'c2-packed-tp4-speed-vglue-c1a', 'c2-packed-tp4-speed-vglue-v1', 'c2-packed-tp4-speed-vglue-v2', 'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a',
                                       'c2-packed-tp4-time-gate', 'c2-packed-tp4-solo-gate', 'c2-packed-tp4-solo-time-gate',
                                       'c2-packed-tp4-lanes-gate', 'c2-packed-tp4-lanes-time-gate',
-                                      'c2-packed-tp4-warm4-control', 'c2-packed-tp4-warm4-diag', 'c2-packed-tp4-warm4-diag-oldtail', 'c2-packed-tp4-warm4-even-diag', 'c2-packed-tp4-warm4-gate', 'c2-packed-tp4-speed-warm4'), name)
+                                      'c2-packed-tp4-warm4-control', 'c2-packed-tp4-warm4-diag', 'c2-packed-tp4-warm4-diag-oldtail', 'c2-packed-tp4-warm4-even-diag', 'c2-packed-tp4-warm4-gate', 'c2-packed-tp4-speed-warm4',
+                                      'c2-packed-tp4-8', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate',
+                                      'c2-packed-tp4-8-diag-strace', 'c2-packed-tp4-8-diag-strace-nowarm',
+                                      'c2-packed-tp4-8-diag-strace-rshard'), name)
         with self.assertRaisesRegex(ValueError, 'parser_rechunk must be true or false'):
             contract.parser_rechunk({'parser_rechunk': 'yes'})
 

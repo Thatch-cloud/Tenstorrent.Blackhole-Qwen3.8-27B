@@ -375,6 +375,20 @@ class HookTests(unittest.TestCase):
         self.assertEqual(early_draft.key_difference(before, early_draft.draft_key(harness.hook)), 'bridges')
         harness.hook.bridges = harness.bridges
 
+    def test_the_draft_key_carries_each_requests_ticket_width_so_a_cache_is_taken_only_while_widths_are_unchanged(self):
+        # QWEN_FAST_M3_BLOCKS=2: the widths differ per block, so the key names every pending ticket's rows
+        harness = Harness(self, GDN)
+        session = harness.bridges['a'].request.session
+        session.pending = SimpleNamespace(tokens=(0,) * 16)
+        before = early_draft.draft_key(harness.hook)
+        self.assertEqual([entry[-1] for entry in before[1]], [16, None])
+        self.assertEqual(early_draft.KEY_FIELDS[-1], 'width')
+        session.pending.tokens = (0,) * 4          # the same ticket object, narrowed in place: only the width moved
+        self.assertEqual(early_draft.key_difference(before, early_draft.draft_key(harness.hook)), 'request=a:width')
+        self.assertIsNone(early_draft.pending_width(None))
+        self.assertIsNone(early_draft.pending_width('not a ticket'))
+        self.assertEqual(early_draft.pending_width(SimpleNamespace(tokens=(1, 2))), 2)
+
     def test_discard_ticket_is_the_stale_ticket_reset(self):
         runtime = SimpleNamespace(discard_proposal=Mock())
         request = SimpleNamespace(session=SimpleNamespace(pending='t', phase='pending'), runtime=runtime)

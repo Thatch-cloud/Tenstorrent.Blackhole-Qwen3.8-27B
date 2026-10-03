@@ -143,16 +143,20 @@ def register_dram_admission(pool, *, log=None):
     import serving_prefill_admission as admission
     from dflash_packed_proposal_coordinator import dram_reserve_bytes
 
+    problems = admission.tuning_problems()
+    if problems:
+        # A mis-set QWEN_FAST_DRAM_*_MB would raise inside a hold decision while serving and read as 'admit': refuse it here.
+        raise ValueError('; '.join(problems))
     reserve = dram_reserve_bytes()
     unregister = admission.register_dram_predicate(admission.dram_predicate(pool, reserve))
     reading, reason = admission.dram_reading(pool)
     (_log if log is None else log)(
         DRAM_REGISTERED + 'need = engine {} + build margin {} + prefill {} at >= {} prompt tokens + reserve {} bytes '
         'per chip, of the free less {} stranded; the largest free block >= the reserve + {} (the largest buffer), + '
-        'that prefill at admission; the trace region\'s >= {}; now {}', admission.ENGINE_BUILD_BYTES,
-        admission.ENGINE_BUILD_MARGIN_BYTES, admission.PREFILL_TRANSIENT_BYTES, admission.PREFILL_TRANSIENT_FROM,
+        'that prefill at admission; the trace region\'s >= {}; now {}', admission.engine_build_bytes(),
+        admission.ENGINE_BUILD_MARGIN_BYTES, admission.prefill_transient_bytes(), admission.PREFILL_TRANSIENT_FROM,
         reserve, admission.STRANDED_BYTES,
-        admission.LARGEST_BUFFER_BYTES, admission.TRACE_CONTIGUOUS_BYTES,
+        admission.largest_buffer_bytes(), admission.TRACE_CONTIGUOUS_BYTES,
         'unavailable (%s)' % reason if reading is None else
         'free {} largest_free {} trace_largest_free {}'.format(reading['free'], reading['largest_free'],
                                                                reading['trace_largest_free']))

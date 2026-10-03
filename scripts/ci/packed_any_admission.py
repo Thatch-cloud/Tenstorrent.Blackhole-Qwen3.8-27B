@@ -13,7 +13,9 @@ and the c2 profile (S1) keeps serving (design section 5, Admission).
 WHAT IS CHECKED, under QWEN_FAST_EXTENT_REPLAY=1 only (unset or '0': admit is never called and nothing
 here runs; any other value is refused by extent_replay_enabled):
   1. the shape (check_environment): the 64-row M3 block (serving_runtime.m3_shape: four scheduler
-     requests, QWEN_FAST_FOUR_AS_TWO=0, QWEN_FAST_PACKED_STEP=1), QWEN_FAST_ANY_REQUEST=1,
+     requests, QWEN_FAST_FOUR_AS_TWO=0, QWEN_FAST_PACKED_STEP=1; or, under QWEN_FAST_M3_BLOCKS=2, two of
+     them for eight requests - each block is that same block, so the evidence's geometry is unchanged and the
+     record and the passed line name blocks=2), QWEN_FAST_ANY_REQUEST=1,
      QWEN_FAST_REPLAY_GROUP_ROWS=8 (G8B2, the one geometry CB1 qualified 0x27 at) and
      QWEN_SDPA_TREE_SCRATCH_ROUNDS=1, the pinned reader's G8 precondition (attention_replay.py:23-24;
      design B7), which the image sets but nothing checked before;
@@ -269,14 +271,30 @@ def _hex64(value):
     return isinstance(value, str) and len(value) == 64 and all(char in '0123456789abcdef' for char in value)
 
 
+M3_BLOCKS_ENV = 'QWEN_FAST_M3_BLOCKS'
+
+
+def m3_blocks(environ=None):
+    """QWEN_FAST_M3_BLOCKS as the attach reads it (serving_runtime.m3_blocks, which ships beside this module): 1 unset
+    or '1', 2 for '2', ValueError naming the flag for anything else."""
+    value = (os.environ if environ is None else environ).get(M3_BLOCKS_ENV, '1')
+    if value not in ('1', '2'):
+        raise ValueError('%s must be 1 or 2, got %r' % (M3_BLOCKS_ENV, value))
+    return int(value)
+
+
 def check_environment(environ, m3):
     """Refusal strings for the shape and the modes (items 1-2); [] when they hold. `m3` is
     serving_runtime.m3_shape's (met, description)."""
     problems = []
     met, shape = m3
+    try:
+        m3_blocks(environ)
+    except ValueError as error:
+        problems.append(str(error))
     if not met:
-        problems.append('the extent path is the 64-row M3 block\'s (users=4 FOUR_AS_TWO=0 PACKED_STEP=1), not %s'
-                        % shape)
+        problems.append('the extent path is the 64-row M3 block\'s (users=4 FOUR_AS_TWO=0 PACKED_STEP=1; or users=8 '
+                        'with %s=2, two such blocks), not %s' % (M3_BLOCKS_ENV, shape))
     for name, wanted, why in REQUIRED_ENV:
         if environ.get(name) != wanted:
             problems.append('%s=%s, not %s: %s' % (name, environ.get(name, '(unset)'), wanted, why))
@@ -623,6 +641,16 @@ def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evide
         problems.append('the runtime binary override admitted %s, not K64j' % str(binary_record.get('override'))[:16])
     tp = width(environ)
     record = dict(flag=FLAG, shape=m3[1])
+    # QWEN_FAST_M3_BLOCKS=2: the record and the passed line name the block count (and only then, so a one-block attach
+    # reads and records exactly what it always did). A malformed value is already a problem of check_environment above.
+    blocks = 1
+    try:
+        blocks = m3_blocks(environ)
+    except ValueError:
+        pass
+    suffix = '' if blocks == 1 else ' blocks=%d' % blocks
+    if blocks != 1:
+        record['blocks'] = blocks
     unqualified = []
     for name, check in (('runtime', lambda: check_runtime(runtime_root, (binary_record or {}).get('binaries'))),
                         ('evidence', lambda: check_evidence(evidence) if tp == tp_shapes.PAIR
@@ -642,17 +670,17 @@ def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evide
         # line each, and the process may never take traffic (its profile is gate_only).
         record['unqualified'] = unqualified
         _log_unqualified(log, unqualified)
-        log('{} passed UNQUALIFIED: K64j {} x{}; kernels {}; {} evidence problems (gate only)',
+        log('{} passed UNQUALIFIED: K64j {} x{}; kernels {}; {} evidence problems (gate only){}',
             MARKER, K64J_TTNNCPP_SHA256[:16], len(record['runtime']['binaries']),
-            ','.join(sha[:8] for _, sha in sorted(K64J_KERNELS.items())), len(unqualified))
+            ','.join(sha[:8] for _, sha in sorted(K64J_KERNELS.items())), len(unqualified), suffix)
         _STATE['record'] = record
         return record
     sections = record['evidence']['sections']
-    log('{} passed: K64j {} x{}; kernels {}; evidence {}; CB1 {} CB2a {} CB2b {}; reader {}',
+    log('{} passed: K64j {} x{}; kernels {}; evidence {}; CB1 {} CB2a {} CB2b {}; reader {}{}',
         MARKER, K64J_TTNNCPP_SHA256[:16], len(record['runtime']['binaries']),
         ','.join(sha[:8] for _, sha in sorted(K64J_KERNELS.items())), evidence_pin(tp)[:16],
         sections['CB1']['run'], sections['CB2a']['run'], sections['CB2b']['run'],
-        ','.join(record['evidence']['sources'][name][:16] for name in qualified_sources(tp)))
+        ','.join(record['evidence']['sources'][name][:16] for name in qualified_sources(tp)), suffix)
     _STATE['record'] = record
     return record
 

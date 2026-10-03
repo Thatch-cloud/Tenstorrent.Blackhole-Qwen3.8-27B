@@ -662,15 +662,24 @@ class ServingBufferPool:
         self.draft_outputs_refused = self.draft_output_indices_from = None
         self.closed = False
         try:
+            # The addresses already adopted, one set per chip: a buffer overlaps an earlier one exactly when some chip
+            # holds both at one address (`overlaps`), so membership in these sets is that test without comparing every
+            # pair - eight slots hold about twice the tensors of four, and the pair-by-pair test grows with the square.
             protected = []
             counted = [0]
 
             def adopt(value, count):
                 self.owned.append(value)
                 current = addresses(operations, value)
-                if any(overlaps(current, other) for other in protected):
+                if protected and len(current) != len(protected):
+                    raise ValueError('zip() argument 2 is longer or shorter than argument 1: every pooled buffer must '
+                                     'report one address per chip')
+                if not protected:
+                    protected.extend(set() for _ in current)
+                if any(address in seen for address, seen in zip(current, protected)):
                     raise ValueError('Pooled draft buffers must own independent chip storage')
-                protected.append(current)
+                for address, seen in zip(current, protected):
+                    seen.add(address)
                 counted[0] += count
                 return value
 
@@ -868,6 +877,32 @@ class ServingBufferPool:
             return None
         return self.draft_outputs.get(tuple(group))
 
+    def place_blocks(self, blocks):
+        """QWEN_FAST_M3_BLOCKS=2: the pool slots each packed block binds, so acquire() places a new request by block
+        (`placement_slot`) instead of the lowest free slot. Called once at attach, before any request; not called (the
+        default), acquire lends the lowest free slot as ever."""
+        blocks = tuple(tuple(block) for block in blocks)
+        flat = [index for block in blocks for index in block]
+        if (len(blocks) < 2 or len(set(flat)) != len(flat)
+                or any(type(index) is not int or not 0 <= index < len(self.slots) for index in flat)):
+            raise ValueError('Placement blocks are two or more disjoint groups of pooled slots')
+        if getattr(self, '_blocks', None) is not None:
+            raise ValueError('The placement blocks are already set')
+        self._blocks = blocks
+
+    def placement_slot(self):
+        """The free slot a new request takes under place_blocks: in the block with exactly ONE live request first (it
+        would otherwise run alone, narrowed to the sequential step), else in the fuller of the blocks that are not full
+        (the first, on a tie), the lowest free slot of that block. None when every block is full."""
+        blocks = self._blocks
+        live = [sum(1 for index in block if self.slots[index].lent) for block in blocks]
+        open_blocks = [position for position, block in enumerate(blocks) if live[position] < len(block)]
+        if not open_blocks:
+            return None
+        lone = [position for position in open_blocks if live[position] == 1]
+        chosen = lone[0] if lone else max(open_blocks, key=lambda position: (live[position], -position))
+        return next(self.slots[index] for index in blocks[chosen] if not self.slots[index].lent)
+
     @contextmanager
     def slot_order(self, order):
         """The slots the next acquire() may lend, in preference order (the fast lane, QWEN_FAST_LANE: slot 0 is the fast request's
@@ -889,7 +924,9 @@ class ServingBufferPool:
         if self.closed:
             raise ValueError('Closed serving buffer pool cannot lend a slot')
         order = getattr(self, '_slot_order', None)
-        if order is None:
+        if order is None and getattr(self, '_blocks', None) is not None:
+            slot = self.placement_slot()
+        elif order is None:
             slot = next((candidate for candidate in self.slots if not candidate.lent), None)
         else:
             slot = next((self.slots[index] for index in order if not self.slots[index].lent), None)
