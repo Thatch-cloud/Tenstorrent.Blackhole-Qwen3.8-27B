@@ -237,6 +237,19 @@ def _tiled_dram(operations, tensors):
 
 
 def split_projected_heads(operations, query, key, value, retain):
+    """The 64-row head split: the served ops, or with QWEN_FAST_TP4_DRAFT_HEADS=1 (D2c, tp4_draft_heads) one tile-copy launch
+    that produces the same tiles. Flag off, this is served_split_projected_heads."""
+    import tp4_sampdraft
+
+    if not tp4_sampdraft.enabled(tp4_sampdraft.DRAFT_HEADS):
+        return served_split_projected_heads(operations, query, key, value, retain)
+    import tp4_draft_heads
+
+    return tp4_draft_heads.split_heads(operations, query, key, value, retain, site='quad',
+        served=lambda: served_split_projected_heads(operations, query, key, value, retain))
+
+
+def served_split_projected_heads(operations, query, key, value, retain):
     """draft_head_layout_tp.split_projected_heads at 64 rows: query, keys and values share the 64 rows, so there is no query
     pad and no slice back."""
     found = tp_shapes.active()
@@ -280,6 +293,19 @@ def project_key_value(operations, inputs, query, cosine_sine, retain, *, paramet
 
 
 def concatenate_query_heads(operations, value, retain):
+    """The 64-row head merge: nlp_concat_heads, or with QWEN_FAST_TP4_DRAFT_HEADS=1 (D2c) one tile-copy launch. Flag off, this is
+    served_concatenate_query_heads."""
+    import tp4_sampdraft
+
+    if not tp4_sampdraft.enabled(tp4_sampdraft.DRAFT_HEADS):
+        return served_concatenate_query_heads(operations, value, retain)
+    import tp4_draft_heads
+
+    return tp4_draft_heads.merge_heads(operations, value, retain, site='quad',
+        served=lambda: served_concatenate_query_heads(operations, value, retain))
+
+
+def served_concatenate_query_heads(operations, value, retain):
     """draft_head_layout_tp.concatenate_query_heads at 64 rows."""
     if tuple(value.shape) != (1, heads()[0], ROWS, HEAD_DIM) or not _tiled_dram(operations, (value,)):
         raise ValueError('64-row BF16 DRAM query heads required')
@@ -291,6 +317,28 @@ def concatenate_query_heads(operations, value, retain):
 # ---------------------------------------------------------------------------------------------
 
 def quad_fused_convolution(operations, mesh, hidden, dynamic, base, *, boundaries, conv='110'):
+    """The quad's fused convolution: the served call, or with QWEN_FAST_TP4_DRAFT_CONV=1 (D2a, tp4_draft_conv) the same convolution
+    on a rewritten I/O stage that hands the compute kernel byte-identical tiles (the promoted quad_conv_io.cpp stays sha-pinned
+    and untouched). Flag off, this is served_quad_fused_convolution."""
+    import tp4_sampdraft
+
+    if not tp4_sampdraft.enabled(tp4_sampdraft.DRAFT_CONV):
+        return served_quad_fused_convolution(operations, mesh, hidden, dynamic, base, boundaries=boundaries, conv=conv)
+    import tp4_draft_conv
+
+    validate_conv_shapes(hidden, dynamic, base)
+    if conv not in _pinned.CONV_VARIANTS:
+        raise ValueError('The quad conv program runs on 110 or 80 workers, not %r' % (conv,))
+    low, high = seam_words(boundaries, ROWS)
+    spec = _pinned.CONV_VARIANTS[conv]
+    return tp4_draft_conv.convolution(
+        operations, mesh, hidden, dynamic, base, rows=ROWS, seams_low=low, seams_high=high, workers=spec['workers'],
+        coordinates=[spec['core'](worker) for worker in range(spec['workers'])], label='quad',
+        core_set=lambda group: core_ranges(operations, group),
+        served=lambda: served_quad_fused_convolution(operations, mesh, hidden, dynamic, base, boundaries=boundaries, conv=conv))
+
+
+def served_quad_fused_convolution(operations, mesh, hidden, dynamic, base, *, boundaries, conv='110'):
     """quad_draft.quad_fused_convolution over the (1, tp) mesh: the promoted I/O kernel reads each page's tiles and seam
     word, the served compute kernel does the per-page arithmetic, one compile arg per group of workers taking the same
     number of pages. Per chip, runtime args are the six buffer addresses + [rows, worker, workers, low seams, high seams]

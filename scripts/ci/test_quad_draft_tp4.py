@@ -72,7 +72,9 @@ TWIN_OWN = {'heads', 'missing_requirements', 'note', 'validate_quad', 'quad_fold
             'quad_unfold_output', 'fold_attention', 'pairs_attention', 'quad_head_map', 'split_projected_heads',
             'project_key_value', 'concatenate_query_heads', 'quad_fused_convolution', 'halves_convolution',
             'head_candidates', 'QuadPass', 'read_quad_outputs', 'select_quad_outputs', 'PreparedQuadDFlashProposal',
-            'refusal', '_tiled_dram', 'live_banks_requested', 'live_banks_missing'}
+            'refusal', '_tiled_dram', 'live_banks_requested', 'live_banks_missing',
+            # tp4/samp-draft: the three served bodies the flag-gated dispatchers (QWEN_FAST_TP4_DRAFT_CONV / _DRAFT_HEADS) keep
+            'served_split_projected_heads', 'served_concatenate_query_heads', 'served_quad_fused_convolution'}
 
 
 def clean_environment(**flags):

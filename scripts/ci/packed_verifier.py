@@ -221,6 +221,15 @@ def audit_shard_values(operations, output, block_rows, chip_values):
     """QWEN_FAST_TP4_SHARD_VALUES under QWEN_FAST_TP4_VGLUE_AUDIT: each chip's gathered maxima against the ttnn.max taken beside
     them in the same trace (verify_trace_t1.shard_values), every row. Nothing to compare when the lever is off; when it is on under
     the audit and its gather fell back (no reference was recorded) that is a failure, V4a was not audited."""
+    import tp4_sampdraft
+
+    if tp4_sampdraft.enabled(tp4_sampdraft.SHARD_ARGMAX):
+        import tp4_shard_argmax
+
+        if tp4_shard_argmax.produced(output[2]):
+            # QWEN_FAST_TP4_SHARD_ARGMAX made these maxima (its kernel supersedes the gather); its own audit
+            # (QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT) compares them with today's path, row by row
+            return
     reference = verify_trace_t1.VALUE_REFERENCES.get(id(output[2]))
     if reference is None:
         if tp4_vglue.audit_enabled() and tp4_vglue.enabled(tp4_vglue.SHARD_VALUES):
@@ -236,6 +245,36 @@ def audit_shard_values(operations, output, block_rows, chip_values):
             diagnostic(message)
             raise AssertionError(message)
     diagnostic('%s site=sampler shard_values exact=True rows=%d' % (tp4_vglue.AUDIT_MARKER, block_rows))
+
+
+def audit_sampdraft(operations, output, block_rows, chip_ids, chip_values):
+    """The samp-draft arms' audits (tp4_sampdraft; each a no-op unless its flag is on, and neither flag can be on at the pair):
+    QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT compares the kernel's per-chip ids and values with today's from the same capture, every row;
+    QWEN_FAST_TP4_DRAFT_CONV_AUDIT byte-compares the held drafter conv pairs (the drafter traces ran before this readback)."""
+    import tp4_sampdraft
+
+    if tp4_sampdraft.audit_enabled(tp4_sampdraft.SHARD_ARGMAX_AUDIT):
+        import tp4_shard_argmax
+
+        tp4_shard_argmax.audit_round(operations, output[2], block_rows, chip_ids, chip_values)
+    if tp4_sampdraft.audit_enabled(tp4_sampdraft.DRAFT_CONV_AUDIT):
+        import tp4_draft_conv
+
+        tp4_draft_conv.compare_pending(operations)
+
+
+def release_sampdraft_audit(operations, values=None):
+    """Free what the samp-draft audits hold: today's sampler outputs for the trace output `values` and the drafter conv pairs."""
+    import tp4_sampdraft
+
+    if tp4_sampdraft.enabled(tp4_sampdraft.SHARD_ARGMAX):
+        import tp4_shard_argmax
+
+        tp4_shard_argmax.release_audit(operations, values)
+    if tp4_sampdraft.audit_enabled(tp4_sampdraft.DRAFT_CONV_AUDIT):
+        import tp4_draft_conv
+
+        tp4_draft_conv.release_audit(operations)
 
 
 def release_vglue_audit(operations, fixture, values=None):
@@ -1075,6 +1114,7 @@ class PackedVerifierEngine:
             operations.synchronize_device(self.mesh)
         finally:
             if result is not None:
+                release_sampdraft_audit(operations, result[2] if len(result) > 2 else None)
                 release_vglue_audit(operations, warm, result[2] if len(result) > 2 else None)
                 release_owned(operations, [value for value in result if value is not None])
             else:
@@ -1480,6 +1520,7 @@ class PackedVerifierEngine:
         if any(len(value) != self.block_rows for value in (*chip_ids, *chip_values)):
             raise AssertionError('Missing packed prediction rows')
         host = verify_trace_t1.combine_shards(chip_ids, chip_values).tolist()
+        audit_sampdraft(self.operations, self.output, self.block_rows, chip_ids, chip_values)
         audit_shard_values(self.operations, self.output, self.block_rows, chip_values)
         if self.shard_audit:
             reference = self.operations.to_torch(self.operations.get_device_tensors(self.output[3])[0])
@@ -2132,6 +2173,7 @@ class PackedVerifierEngine:
         if self.output is not None:
             release_owned(operations, [value for value in self.output if value is not None])
             self.output = None
+        release_sampdraft_audit(operations, shard_values)
         if self.fixture is not None:
             release_vglue_audit(operations, self.fixture, shard_values)
             self.fixture.close()

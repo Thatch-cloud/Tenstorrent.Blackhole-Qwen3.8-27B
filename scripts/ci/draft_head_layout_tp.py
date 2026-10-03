@@ -8,6 +8,19 @@ import tp_shapes
 
 
 def split_projected_heads(operations, query, key, value, retain):
+    """The head split: the served ops, or with QWEN_FAST_TP4_DRAFT_HEADS=1 (D2c, tp4_draft_heads) one tile-copy launch that
+    produces the same tiles. Flag off, this is served_split_projected_heads."""
+    import tp4_sampdraft
+
+    if not tp4_sampdraft.enabled(tp4_sampdraft.DRAFT_HEADS):
+        return served_split_projected_heads(operations, query, key, value, retain)
+    import tp4_draft_heads
+
+    return tp4_draft_heads.split_heads(operations, query, key, value, retain, site='pair',
+        served=lambda: served_split_projected_heads(operations, query, key, value, retain))
+
+
+def served_split_projected_heads(operations, query, key, value, retain):
     found = tp_shapes.active()
     query_count, kv_count = found.draft_heads, found.draft_kv_heads
     key_rows = key.shape[2] if len(key.shape) == 4 else 0
@@ -30,6 +43,19 @@ def split_projected_heads(operations, query, key, value, retain):
 
 
 def concatenate_query_heads(operations, value, retain):
+    """The head merge: nlp_concat_heads, or with QWEN_FAST_TP4_DRAFT_HEADS=1 (D2c) one tile-copy launch. Flag off, this is
+    served_concatenate_query_heads."""
+    import tp4_sampdraft
+
+    if not tp4_sampdraft.enabled(tp4_sampdraft.DRAFT_HEADS):
+        return served_concatenate_query_heads(operations, value, retain)
+    import tp4_draft_heads
+
+    return tp4_draft_heads.merge_heads(operations, value, retain, site='pair',
+        served=lambda: served_concatenate_query_heads(operations, value, retain))
+
+
+def served_concatenate_query_heads(operations, value, retain):
     if (tuple(value.shape) != (1, tp_shapes.active().draft_heads, 32, 128) or value.dtype != operations.bfloat16
             or value.layout != operations.TILE_LAYOUT or value.memory_config() != operations.DRAM_MEMORY_CONFIG):
         raise ValueError('Padded BF16 DRAM query heads required')

@@ -217,6 +217,21 @@ def sample_shards(operations, logits, rows):
     dtype, layout = getattr(logits, 'dtype', None), getattr(logits, 'layout', None)
     if dtype != operations.bfloat16 or layout != operations.TILE_LAYOUT:
         raise ValueError('Per-shard argmax needs bf16 TILE logits; got %r %r' % (dtype, layout))
+    import tp4_sampdraft
+
+    if tp4_sampdraft.enabled(tp4_sampdraft.SHARD_ARGMAX):
+        # QWEN_FAST_TP4_SHARD_ARGMAX (S1, tp4_shard_argmax): the scan and fold launches; None after one logged line when this call
+        # cannot take them, and today's path below answers. Under the audit today's path also runs, beside the kernel's.
+        import tp4_shard_argmax
+
+        taken = tp4_shard_argmax.sample(operations, logits, rows, served=lambda: served_shards(operations, logits, rows))
+        if taken is not None:
+            return taken
+    return served_shards(operations, logits, rows)
+
+
+def served_shards(operations, logits, rows):
+    """sample_shards's served path (untilize, argmax, max or the V4a gather) on logits it has already checked."""
     import tp4_vglue
 
     dram = operations.DRAM_MEMORY_CONFIG
