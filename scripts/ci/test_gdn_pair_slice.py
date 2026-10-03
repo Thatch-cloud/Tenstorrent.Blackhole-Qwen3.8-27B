@@ -233,6 +233,16 @@ class PairSliceTwinTests(TwinFakes):
         self.assertIn('rm:projected:16', frees)
         self.assertIn('rm:projected:48', frees)
 
+    def test_the_shared_conversion_is_freed_after_the_last_slice_not_at_close(self):
+        with four():
+            result, calls, operations, state = self.run_decode(twin.DeviceLoopState, flags={SLICE: '1'})
+        names = [(entry[0], entry[1] if entry[0] == 'free' else None) for entry in calls]
+        freed = names.index(('free', 'rm:projected'))
+        last_slice = max(index for index, entry in enumerate(calls) if entry[0] == 'slice')
+        batched = [index for index, entry in enumerate(calls) if entry[0] == 'batched'][0]
+        self.assertGreater(freed, last_slice)
+        self.assertLess(freed, batched)
+
     def test_the_pieces_are_owned_like_the_slices(self):
         with four():
             result, calls, operations, state = self.run_decode(twin.DeviceLoopState, flags={SLICE: '1'})
@@ -469,6 +479,27 @@ class SmokeCheckTests(unittest.TestCase):
         self.assertEqual(self.slice_problems('', CONTROL), [])
         self.assertEqual(self.slice_problems('', DIAG_ARM), [])
 
+    def audit_problems(self, log, profile=AUDITED_ARM):
+        problems, _ = c2_smoke_check.check('', log, False, env=env_of(profile))
+        return [problem for problem in problems if 'nothing was compared' in problem]
+
+    def test_the_audited_arm_needs_a_passing_audit_line(self):
+        engaged = '%s site=gdn_slice\n' % pair_slice.ENGAGED
+        self.assertEqual(len(self.audit_problems(engaged)), 1)
+        self.assertEqual(len(self.audit_problems(engaged + '[PINDIAG] tp4 vglue audit mismatch round=1 x')), 1)
+        self.assertEqual(self.audit_problems(engaged + '[PINDIAG] tp4 vglue audit 1 exact=True layers=all entries=8'), [])
+
+    def test_the_timed_arm_is_not_asked_for_an_audit_line(self):
+        self.assertEqual(self.audit_problems('%s site=gdn_slice' % pair_slice.ENGAGED, TIMED_ARM), [])
+
+    def test_the_diagnostic_arm_needs_a_diagnostic_line(self):
+        def found(log, profile=DIAG_ARM):
+            problems, _ = c2_smoke_check.check('', log, False, env=env_of(profile))
+            return [problem for problem in problems if 'diagnostic line' in problem]
+        self.assertEqual(len(found('')), 1)
+        self.assertEqual(found('[PINDIAG] tp4 gdn dispatch diag ops=3'), [])
+        self.assertEqual(found('', CONTROL), [])
+
     def test_the_markers_are_the_modules(self):
         self.assertEqual(c2_smoke_check.PAIR_SLICE_ENGAGED, pair_slice.ENGAGED)
         self.assertEqual(c2_smoke_check.PAIR_SLICE_FELL_BACK, pair_slice.FALLBACK)
@@ -482,6 +513,25 @@ def order_rows():
 
 def parsed(name):
     return job.read_job(job.parse_env((FOLDER / (name + '.env')).read_text(encoding='utf-8')), NAMES)
+
+
+class BindingTests(unittest.TestCase):
+    """The twin only runs if tp_addresses binds it: the new levers must bind it, production and the control must not."""
+
+    def bound_state_row(self, name):
+        import tp_addresses
+        rows, _modules = tp_addresses.bound_twins(env_of(name))
+        return any(row[:2] == ('gdn_device_loop_state', 'DeviceLoopState') for row in rows)
+
+    def test_the_new_profiles_bind_the_device_loop_state_twin(self):
+        for name in (TIMED_ARM, AUDITED_ARM, DIAG_ARM):
+            with self.subTest(name=name):
+                self.assertTrue(self.bound_state_row(name))
+
+    def test_production_and_the_control_leave_it_unbound(self):
+        for name in ('c2-packed-tp4', CONTROL):
+            with self.subTest(name=name):
+                self.assertFalse(self.bound_state_row(name))
 
 
 ORDERED = ('B0-build', 'A0-agentstop-unserve', 'G1-pairslice-exact-audited', 'GT1-control-timed', 'GT2-pairslice-timed',
@@ -501,7 +551,7 @@ class WindowTests(unittest.TestCase):
             self.assertEqual(image, IMAGE)
             self.assertEqual(parsed(name)['tag'], IMAGE)
             self.assertTrue(minutes.isdigit() and 10 <= int(minutes) <= 180)
-        for name in ('B0-build', 'A0-agentstop-unserve', 'H1-handback-reset-fabric-agentstart'):
+        for name in ('B0-build', 'A0-agentstop-unserve', 'G1-pairslice-exact-audited', 'H1-handback-reset-fabric-agentstart'):
             self.assertEqual(modes[name], 'stop')
 
     def test_templates_parse_are_lf_and_name_no_card_host_address_registry_or_digest(self):

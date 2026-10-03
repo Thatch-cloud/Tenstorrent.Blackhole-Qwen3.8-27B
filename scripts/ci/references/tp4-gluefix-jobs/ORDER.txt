@@ -13,7 +13,7 @@
 # Durations (estimate): B0 18 min; A0 10; G1 60-120; GT1-GT4 30-60 each; DD1 30-45; H1 25. Whole window: about 5.5 h; the short form is A0, G1, GT1-GT4, H1.
 B0-build stop tp4-gluefix-1 30
 A0-agentstop-unserve stop tp4-gluefix-1 10
-G1-pairslice-exact-audited optional tp4-gluefix-1 120
+G1-pairslice-exact-audited stop tp4-gluefix-1 120
 GT1-control-timed optional tp4-gluefix-1 60
 GT2-pairslice-timed optional tp4-gluefix-1 60
 GT3-control-timed optional tp4-gluefix-1 60

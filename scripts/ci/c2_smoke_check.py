@@ -91,6 +91,10 @@ DRAFT_WIDE_FELL_BACK = '[PINDIAG] tp4 draft wide fell back'
 PAIR_SLICE_FLAG = 'QWEN_FAST_GDN_PAIR_SLICE'
 PAIR_SLICE_ENGAGED = '[PINDIAG] tp4 pair slice engaged'
 PAIR_SLICE_FELL_BACK = '[PINDIAG] tp4 pair slice fell back'
+VGLUE_AUDIT_FLAG = 'QWEN_FAST_TP4_VGLUE_AUDIT'
+VGLUE_AUDIT_PASSED = '[PINDIAG] tp4 vglue audit '
+DISPATCH_DIAG_FLAG = 'QWEN_FAST_GDN_DISPATCH_DIAG'
+DISPATCH_DIAG_LINE = '[PINDIAG] tp4 gdn dispatch diag'
 SLIDE_FLAG = 'QWEN_FAST_TP_KV_SLIDE'
 QUAD_FLAG = 'QWEN_FAST_QUAD_DRAFT'
 SINGLES_AUDIT_FLAG = 'QWEN_FAST_DRAFT_SINGLES_AUDIT'
@@ -522,6 +526,11 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     if (env is not None and env.get(PAIR_SLICE_FLAG) == '1' and env.get('QWEN_FAST_TP4_GDN_GLUE') != '1'
             and PAIR_SLICE_ENGAGED not in container_text):
         problems.append('%s is set and no engaged line (%s) was logged: the shared conversion never ran' % (PAIR_SLICE_FLAG, PAIR_SLICE_ENGAGED))
+    if (env is not None and env.get(PAIR_SLICE_FLAG) == '1' and env.get('QWEN_FAST_TP4_GDN_GLUE') != '1' and env.get(VGLUE_AUDIT_FLAG) == '1'
+            and not any(VGLUE_AUDIT_PASSED in line and 'exact=True' in line for line in container_text.splitlines())):
+        problems.append('%s and %s are set and no passing audit line (%s<n> exact=True) was logged: nothing was compared' % (PAIR_SLICE_FLAG, VGLUE_AUDIT_FLAG, VGLUE_AUDIT_PASSED))
+    if env is not None and env.get(DISPATCH_DIAG_FLAG) == '1' and DISPATCH_DIAG_LINE not in container_text:
+        problems.append('%s is set and no diagnostic line (%s) was logged' % (DISPATCH_DIAG_FLAG, DISPATCH_DIAG_LINE))
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
     if env is not None and env.get('QWEN_FAST_TP', '2') != '2':

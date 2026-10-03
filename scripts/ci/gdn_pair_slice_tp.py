@@ -99,8 +99,15 @@ class PairSlice:
         finally:
             operations.deallocate(rows)
         self.served += 1
-        if self.audit:
-            self.hold(tensor, starts, ends, piece, start // USER_ROWS)
+        try:
+            if self.audit:
+                self.hold(tensor, starts, ends, piece, start // USER_ROWS)
+        finally:
+            if tuple(ends)[1] == shape[1]:
+                # The last half-tile slice of this source: free the shared copy now, as ttnn's own slice frees its conversion, so the L1 layout
+                # inside the trace does not carry it through the recurrence and seq-block launches.
+                self.converted.pop(id(tensor), None)
+                operations.deallocate(entry[1])
         return piece
 
     def hold(self, tensor, starts, ends, piece, user):
