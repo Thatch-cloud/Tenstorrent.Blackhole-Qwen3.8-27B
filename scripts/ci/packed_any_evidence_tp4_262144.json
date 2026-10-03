@@ -1,0 +1,31 @@
+{
+ "schema": "qwen-c2-packed-any-evidence/1",
+ "capacity": 262144,
+ "what": "The four-card (QWEN_FAST_TP=4) record of packed_any_admission for the 262,144-token window (page-table width 4,096): the same three sections as packed_any_evidence_tp4.json at capacity 262,144 - CB1 over K1's families plus 196,864 and 262,144, CB2a (K2 2,030 tickets, X7 600, Z 900, K2 and X7 over the 131k families plus 262,144) and CB2b (R2 named families plus 262,144, capacity 262,144) - at one KV head per chip (K64j flags 0x23) and the reader twin through the 1of4 chip view. SKELETON: every section is PENDING, so a 262,144 attach is refused (a gate run included: the gate-only waiver is the 131,328 record's alone). Recording the sections (record_packed_any_evidence_tp4.py --capacity 262144) changes this file and EVIDENCE_TP4_262K_SHA256 in the same commit; the 131,328 record and EVIDENCE_TP4_SHA256 are never touched.",
+ "provenance": "Skeleton written with the 262k window (tp4/seats8-262k). Nothing here has run on a card.",
+ "binary": {
+  "ttnncpp_sha256": "152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7",
+  "note": "the same K64j binary and kernels as the 131,328 records: K64j takes the head count, geometry and capacity as arguments; whether it is exact at capacity 262,144 is what E2 decides"
+ },
+ "kernels": {
+  "dataflow/reader_decode_qwen.cpp": "adb6091878ba3f0a0805846ff56f05352610d7fe779b5ae96320c437c095db49",
+  "dataflow/reader_decode_qwen_slice.cpp": "518d8096e3cceb160eaef8ab4f0ae976ccbffd3904d31176b7f9d02828c37f8a",
+  "compute/sdpa_flash_decode_qwen.cpp": "409a1aafc3ffaaca2c6afba0e999525b7d141491f0a52e5583efa70447ee5c0e",
+  "dataflow/writer_decode_qwen_slice.cpp": "642c36f809be0f1ad1664deb405dc310dabaa32d5628710320a118eb37a6cc7a"
+ },
+ "sources": {},
+ "sections": {
+  "CB1": {
+   "status": "PENDING",
+   "what": "K64j K1/K3 at one KV head and capacity 262,144 (E2a)"
+  },
+  "CB2a": {
+   "status": "PENDING",
+   "what": "K2 (bitwise), X7 and Z at one KV head with the extent flag, capacity 262,144 (E2b)"
+  },
+  "CB2b": {
+   "status": "PENDING",
+   "what": "The extent reader twin (extent_attention_replay_tp.py) at full scope with the 1of4 chip view, C = 262144 (E2c)"
+  }
+ }
+}

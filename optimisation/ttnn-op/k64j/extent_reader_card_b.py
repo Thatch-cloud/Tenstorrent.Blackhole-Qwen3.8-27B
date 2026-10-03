@@ -165,6 +165,10 @@ SERVED_ROWS, SERVED_BATCH, SERVED_OFFSETS = card_b.SERVED_ROWS, card_b.SERVED_BA
 SERVED_FLAGS, COMPILE_FLAGS = card_b.SERVED_FLAGS, card_b.COMPILE_FLAGS         # 0x27 (the reader), 0x7 (v235)
 MIN_LIVE_START = card_b.MIN_LIVE_START
 R2_NAMED = (256, 2304, 16640, 65792, 131328)
+CAPACITY_262K = card_b.CAPACITY_262K
+# The design set by served capacity (E2c): the 131,328 run is what it always was; the 262,144 run also replays the full window's family.
+R2_NAMED_262K = R2_NAMED + (CAPACITY_262K,)
+CAPACITIES = {CAPACITY: dict(r2_named=R2_NAMED), CAPACITY_262K: dict(r2_named=R2_NAMED_262K)}
 R2_FAMILIES = 56
 R2_MIN_FAMILIES = 51                           # design W10b R2: "restaged across more than 50 families"
 R2_RESTAGES = 2
@@ -482,7 +486,7 @@ def tally(comparisons):
 def scope(report):
     """('full', []) when the run covered the design's set, else ('reduced', what fell short)."""
     short = []
-    if report.get('capacity') != CAPACITY:
+    if report.get('capacity') not in (CAPACITY, CAPACITY_262K):
         short.append('capacity')
     if set(SECTIONS) - set(report.get('sections') or ()):
         short.append('sections')
@@ -490,7 +494,8 @@ def scope(report):
     if set(R1_GEOMETRIES) - set(ran) or any(set(DESIGN_RESIDUES) - set(words) for words in ran.values()):
         short.append('r1')
     families = set(report.get('r2_families_replayed') or ())
-    if len(families) < R2_MIN_FAMILIES or set(R2_NAMED) - families:
+    named = R2_NAMED_262K if report.get('capacity') == CAPACITY_262K else R2_NAMED
+    if len(families) < R2_MIN_FAMILIES or set(named) - families:
         short.append('r2_families')
     if set(VARIANTS) - set(report.get('variants_run') or ()):
         short.append('variants')
@@ -556,6 +561,8 @@ def verdict_line(report):
     liveness = report.get('liveness', [])
     words.append('live=%d/%d' % (sum(1 for entry in liveness if entry['live']), len(liveness)))
     words.append('families=%d' % len(report.get('r2_families_replayed') or ()))
+    if report.get('capacity') == CAPACITY_262K:
+        words.append('capacity=%d' % CAPACITY_262K)           # only the 262,144 window is named: every other line is unchanged
     geometry = GEOMETRIES.get(report.get('width', PAIR_WIDTH), PAIR)
     view = report.get(geometry.view_key) or {}
     if view:
