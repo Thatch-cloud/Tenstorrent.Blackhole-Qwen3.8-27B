@@ -639,6 +639,12 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # so the drafts need not upload theirs after the request traces exist (serving_buffer_pool's last
         # section). Flag off, no keyword at all. The T16 block: the draft weights below are built at 16 rows.
         draft_masks = {}
+        if os.environ.get('QWEN_FAST_QUAD_DRAFT_BLOCKS', '') not in ('', '0'):
+            # tp4/next-5: the eight-seat quad is refused by name here whatever else is set - without the extent replay no pool shapes are
+            # built below, and a quad would upload its own masks and read its own outputs after the request traces exist.
+            from dflash_packed_proposal_coordinator import refuse_quad_blocks
+
+            refuse_quad_blocks(policy['scheduler_requests'])
         if extent_replay:
             from dflash_packed_proposal_coordinator import pooled_draft_mask_shapes
 
