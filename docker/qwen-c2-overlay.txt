@@ -278,6 +278,8 @@ scripts/ci/packed_ordered_cache.py
 # 262,144-token windows (page-table width 4,096): both writers above ask page_width_tp4.admitted, which adds 4,096 to the pinned
 # ordered_cache answer ONLY at four cards on a passing E1 record at its pin. The record ships as a PENDING skeleton (4,096 refused).
 scripts/ci/page_width_tp4.py
+# verify_trace_t2.RUNTIME_FILES now names page_width_tp4.py (packed_ordered_cache imports it): the P8 image's copy is older.
+scripts/ci/verify_trace_t2.py
 scripts/ci/ordered_writer_evidence_tp4.json
 scripts/ci/serving_cache_owner.py
 # The drafter at one 8-query / 2-KV-head shard per chip (S2T-07, host side): the fc feature projection over four 1,280-column
