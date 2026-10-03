@@ -288,11 +288,14 @@ class AuditTests(Setup):
         self.assertIs(scope.pairs[0][2], reference)
         self.assertIsNot(result, reference)
 
-    def test_with_no_scope_the_served_function_is_not_run_beside_the_launch(self):
+    def test_with_no_scope_the_audit_is_warmed_and_nothing_is_held(self):
+        # The bucket's warm pass: the served split and one clone per output run once before the capture (v403); the clones
+        # are freed, the served outputs are left to the caller's retain, and no scope holds anything.
         operations = self.operations()
         result, served, _ = self.split(operations)
-        served.assert_not_called()
-        self.assertEqual(operations.clone.call_count, 0)
+        served.assert_called_once()
+        self.assertEqual(operations.clone.call_count, 3)
+        self.assertFalse(conv.capturing())
 
     def test_the_pairs_compare_and_release_without_freeing_the_callers_tensors(self):
         operations = self.operations()

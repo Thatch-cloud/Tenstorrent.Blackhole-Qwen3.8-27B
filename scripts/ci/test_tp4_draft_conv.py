@@ -331,18 +331,29 @@ class AuditTests(Setup):
         self.assertEqual(len(scope), 1)
         self.assertEqual(operations.clone.call_count, 1)
 
-    def test_a_call_with_no_scope_is_not_audited_and_holds_nothing(self):
+    def test_a_call_with_no_scope_warms_the_audit_and_holds_nothing(self):
+        # The bucket's warm pass (no scope): the served conv and the audit clone run once so the capture only replays them
+        # (v403: 'Cannot load new binaries during trace capture'); both outputs are freed and nothing is held.
         operations = self.operations()
         scope, served = self.audited(operations, scope=False)
+        served.assert_called_once()
+        self.assertEqual(operations.clone.call_count, 1)
+        self.assertIn(served.return_value, operations.freed)
+        self.assertIsNone(scope)
+        self.assertFalse(conv.capturing())
+
+    def test_with_the_audit_off_a_call_runs_no_served_conv_and_no_clone(self):
+        operations = self.operations()
+        with patch.dict(os.environ, {tp4_sampdraft.DRAFT_CONV_AUDIT: '0'}):
+            scope, served = self.audited(operations, scope=False)
         served.assert_not_called()
         self.assertEqual(operations.clone.call_count, 0)
-        self.assertIsNone(scope)
 
     def test_the_scope_closes_so_later_calls_hold_nothing(self):
         operations = self.operations()
         scope, _ = self.audited(operations)
         _, served = self.audited(operations, scope=False)
-        served.assert_not_called()
+        served.assert_called_once()  # the warm pass, not an audit: nothing is held
         self.assertEqual(len(scope), 1)
         self.assertFalse(conv.capturing())
 

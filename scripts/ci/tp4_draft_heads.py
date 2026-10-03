@@ -160,7 +160,12 @@ def _audit(operations, engaged, served):
     the bucket's replay. The served outputs are the caller's `retain`'s (it frees them with the bucket), so the scope does not own them."""
     import tp4_draft_conv
 
-    if not tp4_draft_conv.capturing() or not tp4_sampdraft.audit_enabled(tp4_sampdraft.DRAFT_HEADS_AUDIT):
+    if not tp4_sampdraft.audit_enabled(tp4_sampdraft.DRAFT_HEADS_AUDIT):
+        return
+    if not tp4_draft_conv.capturing():
+        # The bucket's warm pass: compile the served split / merge and the audit clone before the capture (v403). The served
+        # outputs are the caller's retain's, as inside the scope, so only the clones are freed here.
+        tp4_draft_conv.warm_audit(operations, served(), engaged, own_served=False)
         return
     reference = served()
     reference = tuple(reference[name] for name in ('q', 'k', 'v')) if isinstance(reference, dict) else (reference,)

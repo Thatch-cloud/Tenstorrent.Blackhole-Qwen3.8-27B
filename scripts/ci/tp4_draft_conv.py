@@ -149,7 +149,8 @@ def convolution(operations, mesh, hidden, dynamic, base, *, rows, seams_low, sea
     groups = group_workers(pages)
     output = operations.empty(tuple(hidden.shape), dtype=operations.bfloat16, layout=operations.TILE_LAYOUT,
                               device=mesh, memory_config=operations.DRAM_MEMORY_CONFIG)
-    audit = capturing() and tp4_sampdraft.audit_enabled(tp4_sampdraft.DRAFT_CONV_AUDIT)
+    audit_on = tp4_sampdraft.audit_enabled(tp4_sampdraft.DRAFT_CONV_AUDIT)
+    audit = capturing() and audit_on
     parts.append(operations.get_device_tensors(output))
     cores = core_set(coordinates)
     buffers = [operations.CBDescriptor(total_size=TILE_BYTES * count, core_ranges=cores,
@@ -196,7 +197,21 @@ def convolution(operations, mesh, hidden, dynamic, base, *, rows, seams_low, sea
         except BaseException:
             operations.deallocate(reference)
             raise
+    elif audit_on:
+        warm_audit(operations, served(), (output,), own_served=True)
     return output
+
+
+def warm_audit(operations, reference, engaged, *, own_served):
+    """The audited call outside a drafter capture scope (the bucket's warm pass): run what the audit will run inside the capture -
+    the served call (already done by the caller: `reference`) and a DRAM clone of each engaged output - so both programs are in the
+    program cache before the capture, which may only replay them (v403: 'Cannot load new binaries during trace capture'). The
+    clones are freed here; the reference is freed here only when this call owns it (`own_served`)."""
+    for value in engaged:
+        operations.deallocate(operations.clone(value, memory_config=operations.DRAM_MEMORY_CONFIG))
+    if own_served:
+        for value in (reference if isinstance(reference, (tuple, list)) else (reference,)):
+            operations.deallocate(value)
 
 
 def compare_scope(operations, scope):
