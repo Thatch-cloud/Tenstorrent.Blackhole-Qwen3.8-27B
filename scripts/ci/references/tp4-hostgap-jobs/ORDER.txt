@@ -1,0 +1,39 @@
+# The order of the tp4/hostgap four-card DEVELOPMENT window: the eight-seat host gap (the two-block verify pre-stage and its companions), one image, tp4-hostgap-1, built from the pushed tp4/hostgap commit.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# THE CARDS ARE UNDER DEVELOPMENT: NO agentstart, NO agentstop (the node agent is already stopped), NO hand-back, NO deploy, NO :latest move. Z ends with a reset and no agentstart.
+# P0. NO OTHER WINDOW DRIVER MAY BE ALIVE and no privileged builder container may be up. The CPU suite green on this branch first (gh workflow run qwen-cpu-suite.yml -f ref=tp4/hostgap). Every result is UNQUALIFIED
+# (the 262k evidence waiver on the gate-only arms). B0 never runs during a timing job. Judge every ABAB PAIRED per round, never by unpaired medians; check the load average.
+# BASE: origin/tp4/262k8 (52ad5839), the measured eight-seat 262k stack with every lever. CONTROL for every pair: c2-packed-tp4-8x262k-best-time-gate. The arms are that profile plus flags and nothing else.
+# WHAT IS BUILT: stage 0 (log fields: QWEN_FAST_TP4_HOSTGAP_LOG), 1a-lite and 1a (QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE, QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS), 1c (QWEN_FAST_TP4_WINDOW_VALIDATE), 1d's storage-check dedup and incremental
+# page validation (QWEN_FAST_TP4_ENTRY_DIET). NOT built: 1b keyed diff, 1d's lazy sequential-table write, 1e gc.freeze, 1f log diet, stages 2 and 3.
+# ORDER: the cheapest kill signals first: X0 (status, RESCAN, reset), B0, A1 (audited attach: zero mismatches), A2 (the lite audit, soft), H1-H5 (five hang shapes on the arm, audits off), then the timing pairs T1-T4 (control against the full arm) and
+# T5-T6 (the lite arm bracketed by the control), then Z.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS H1 H2 H3 H4 H5 <- A1
+# NEEDS T1 T2 T3 T4 T5 T6 <- A1 H1 H2 H3 H4 H5
+# READ RULES (each also needs c2_smoke_check clean and no stall):
+#   X0  the status prints, the rescan finds every board, the reset completes on all four.   B0  provenance report with no problem line, the image id printed.
+#   A1  engaged on both blocks (mode=blocks), the block epochs engaged, ZERO [PACKED-PRESTAGE-FULLAUDIT] mismatches with a line for block A and for block B, the shadow lines, answers' hashes equal to the control's.
+#   A2  (soft) the same for the lite arm: mode=first, block A alone.
+#   H1-H5  five consecutive completions, every user at budget, concurrent8_code_equal hashes equal in every run and equal to the control's. One stall stops the window.
+#   T1-T6  paired ABAB, control against arm: the round time at eight live users and per seat tok/s at 32k and about 120k, texts equal, the 4-live verifies on path=diff, the window lines (a fence_wait_ms near 0 beside a window_ms past the quads'
+#       device time is an overrun, charged against the lever). Kill lines on the paired mean round: the full arm -12 ms (aim -15 to -19), the lite arm -5 ms (aim -8 to -9.5).
+# NO-GO for adopting any arm: any stall, any hash difference between arms that must be identical, any audit mismatch. This window decides nothing about production: it is evidence for the owner.
+# Time (estimate): X0 and B0 about 80 min, A1 2.5 h, A2 2 h, H1-H5 7.5 h, T1-T6 9 h, Z 10 min: about 22 h.
+X0-status-rescan-reset stop tp4-hostgap-1 20
+B0-build stop tp4-hostgap-1 60
+A1-audited-attach-smoke stop tp4-hostgap-1 150
+A2-audited-attach-lite soft tp4-hostgap-1 120
+H1-hang-shapes-hostgap stop tp4-hostgap-1 90
+H2-hang-shapes-hostgap stop tp4-hostgap-1 90
+H3-hang-shapes-hostgap stop tp4-hostgap-1 90
+H4-hang-shapes-hostgap stop tp4-hostgap-1 90
+H5-hang-shapes-hostgap stop tp4-hostgap-1 90
+T1-timed-A-control soft tp4-hostgap-1 90
+T2-timed-B-hostgap-2 soft tp4-hostgap-1 90
+T3-timed-A-control soft tp4-hostgap-1 90
+T4-timed-B-hostgap-2 soft tp4-hostgap-1 90
+T5-timed-C-hostgap-1 soft tp4-hostgap-1 90
+T6-timed-A-control soft tp4-hostgap-1 90
+Z-reset soft tp4-hostgap-1 10

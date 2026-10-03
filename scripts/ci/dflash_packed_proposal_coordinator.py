@@ -1277,9 +1277,16 @@ def select_round(batched, prepared, round_number, after_collect=None):
 
     audit = round_b1_audit_enabled()
     started = time.perf_counter()
+    import verify_prestage
+
+    hostgap = verify_prestage.hostgap_log_enabled()
+    cpu_started = verify_prestage.thread_ms() if hostgap else 0.0
+    if hostgap:
+        verify_prestage.take_scratch('collect')
     try:
         collected = [(labels, trace, trace.collect()) for labels, trace in batched]
         collected_at = select_started = time.perf_counter()
+        cpu_collected = verify_prestage.thread_ms() if hostgap else 0.0
         if after_collect is not None:
             after_collect()
             select_started = time.perf_counter()
@@ -1313,6 +1320,13 @@ def select_round(batched, prepared, round_number, after_collect=None):
         from dflash_packed_proposal import note_round_b1_audit
 
         note_round_b1_audit()
+    if hostgap:
+        # Stage 0: the readback's reads against its merge (quad blocks only; 0 on the pair path), and the thread CPU time of the
+        # collect and of the rest (the H2 flush, then the selection; the collect's blocking reads are mostly waiting, not CPU).
+        read_ms, merge_ms = verify_prestage.take_scratch('collect', [0.0, 0.0])
+        verify_prestage.log_line('%s round=%d read_ms=%.2f merge_ms=%.2f collect_cpu_ms=%.2f select_cpu_ms=%.2f' % (
+            verify_prestage.HOSTGAP_SELECT_MARKER, round_number, read_ms, merge_ms, cpu_collected - cpu_started,
+            verify_prestage.thread_ms() - cpu_collected))
     if audit_enabled():
         finished = time.perf_counter()
         audit_log(SELECT_LINE, round=round_number, pairs=[labels for labels, _, _ in collected],

@@ -184,7 +184,8 @@ class FakeRetained:
         self.rows, self.records, self.closed = rows, [], False
         self.operations, self.mesh = operations, mesh
         self.commit_user = Mock(side_effect=self.commit)
-        self.replay = Mock(side_effect=lambda operation: operation())
+        # `validated` (tp4/hostgap 1c): the real replay's keyword, which the fake ignores
+        self.replay = Mock(side_effect=lambda operation, validated=False: operation())
         self.commits = []
 
     def segment_layers(self, segment):

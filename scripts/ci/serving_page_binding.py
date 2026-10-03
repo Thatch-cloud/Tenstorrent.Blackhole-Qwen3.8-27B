@@ -33,6 +33,9 @@ class VerifierPageBinding:
             raise ValueError('Idle verifier and one bounded host page table required')
         self.capacity = engine.pages.shape[1]
         self.blocks = self.validate_blocks(initial_blocks)
+        # tp4/hostgap 1d (QWEN_FAST_TP4_ENTRY_DIET): (the tuple, its frozenset) of the allocation the last full validation accepted;
+        # None until a refresh sets it.
+        self._known_set = None
         if tuple(engine.pages[0, :len(self.blocks)].tolist()) != self.blocks:
             raise ValueError('Captured initial pages differ from scheduler-owned blocks')
         tensors = []
@@ -74,12 +77,38 @@ class VerifierPageBinding:
             raise ValueError('Unique bounded scheduler-owned physical pages required')
         return blocks
 
+    def note_known(self):
+        """1d: remember the accepted allocation as a set, once per change (QWEN_FAST_TP4_ENTRY_DIET only; else nothing)."""
+        from verify_prestage import entry_diet_enabled
+
+        if entry_diet_enabled() and (self._known_set is None or self._known_set[0] is not self.blocks):
+            self._known_set = (self.blocks, frozenset(self.blocks))
+
+    def checked_blocks(self, blocks):
+        """validate_blocks, and under QWEN_FAST_TP4_ENTRY_DIET the same acceptance by an incremental route: when `blocks` extends the
+        allocation this binding already holds (whose every entry a full validation accepted: unique, int, in range), only the new
+        suffix is checked - the same types and range, unique among itself and against the held set, the whole within capacity. Anything
+        that route does not accept takes validate_blocks (so a refusal, and its message, is today's). Flag off, validate_blocks."""
+        from verify_prestage import entry_diet_enabled
+
+        if not entry_diet_enabled():
+            return self.validate_blocks(blocks)
+        blocks = tuple(blocks)
+        known, held = self._known_set, len(self.blocks)
+        if (known is not None and known[0] is self.blocks and held and held <= len(blocks) <= self.capacity
+                and blocks[:held] == self.blocks):
+            suffix = blocks[held:]
+            if (all(type(block) is int and 0 <= block < self.physical_pages for block in suffix)
+                    and len(set(suffix)) == len(suffix) and known[1].isdisjoint(suffix)):
+                return blocks
+        return self.validate_blocks(blocks)
+
     def refresh(self, blocks, *, position, rows):
         import torch
 
         if self.failed or self.engine.phase != 'idle':
             raise ValueError('Only an idle unpoisoned verifier may bind pages')
-        blocks = self.validate_blocks(blocks)
+        blocks = self.checked_blocks(blocks)
         if (type(position) is not int or position < 0 or type(rows) is not int or rows not in (1, 2, 4, 8, 16)
                 or (position + rows + 63) // 64 > len(blocks)
                 or blocks[:len(self.blocks)] != self.blocks):
@@ -90,6 +119,7 @@ class VerifierPageBinding:
                 self.engine.phase = 'failed'
                 raise ValueError('Captured page metadata addresses changed')
         if blocks == self.blocks:
+            self.note_known()
             return False
         host = torch.full((1, self.capacity), blocks[0], dtype=torch.int32)
         host[0, :len(blocks)] = torch.tensor(blocks, dtype=torch.int32)
@@ -106,6 +136,7 @@ class VerifierPageBinding:
                     raise ValueError('Page upload replaced a captured device buffer')
             self.engine.pages.copy_(host)
             self.blocks = blocks
+            self.note_known()
             return True
         except BaseException:
             self.failed = True

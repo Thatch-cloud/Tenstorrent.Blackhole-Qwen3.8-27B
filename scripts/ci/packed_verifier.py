@@ -323,7 +323,8 @@ def stage_packed(operations, model, fixture, shape, users):
     the same order as before the split. Every call bumps the fixture write epoch
     (verify_prestage.bump): a snapshot taken before it no longer describes the buffers.
     """
-    verify_prestage.bump('stage_packed')
+    # tp4/hostgap: with the per-block epochs engaged only THIS fixture's snapshot goes stale; otherwise the global bump, as ever.
+    verify_prestage.bump_fixture(fixture, 'stage_packed')
     values, readers = packed_values(operations, model, fixture, shape, users)
     write_packed(operations, model, values, readers)
     for own, (user_tokens, start, table) in zip(readers, users, strict=True):
@@ -1163,6 +1164,9 @@ class PackedVerifierEngine:
         if self.prestaged is not None:
             diagnostic('%s users=%d audit=%d' % (verify_prestage.ENGAGED_MARKER, self.users,
                                                  int(self.prestaged.audit)))
+        if verify_prestage.hostgap_log_enabled():
+            # tp4/hostgap stage 0: the gen-2 collection log, once per process (idempotent).
+            verify_prestage.install_gc_log()
         if self.fused is not None:
             diagnostic(self.fused.engaged_line())
         if self.gdn_after_pairs or self.gdn_after_pairs_refusal is not None:
@@ -1475,8 +1479,10 @@ class PackedVerifierEngine:
         value_parts = self.operations.get_device_tensors(values)
         if len(id_parts) != tp_shapes.chip_count() or len(value_parts) != tp_shapes.chip_count():
             raise AssertionError('%s chip-local outputs required' % tp_shapes.count_word())
+        reads_started = time.perf_counter()
         chip_ids = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in id_parts]
         chip_values = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in value_parts]
+        reads_ms = (time.perf_counter() - reads_started) * 1000
         if any(len(value) != self.block_rows for value in (*chip_ids, *chip_values)):
             raise AssertionError('Missing packed prediction rows')
         host = verify_trace_t1.combine_shards(chip_ids, chip_values).tolist()
@@ -1484,7 +1490,27 @@ class PackedVerifierEngine:
         if self.shard_audit:
             reference = self.operations.to_torch(self.operations.get_device_tensors(self.output[3])[0])
             verify_trace_t1.audit_round(host, reference.reshape(-1)[:self.block_rows].tolist())
+        # tp4/hostgap stage 0: the eight reads against the combine and the audits (read by note_hostgap_verify).
+        self.readback_split = (reads_ms, (time.perf_counter() - reads_started) * 1000 - reads_ms)
         return host
+
+    def note_hostgap_verify(self, segments, snapshot, input_ms, bind_ms, stage_cpu_ms, rest_cpu_ms, readback_ms):
+        """Stage 0 (QWEN_FAST_TP4_HOSTGAP_LOG): this verify's staging path and its host split, on a line of its own - the block, the
+        path the verify-time stage took, bind and input wall time beside the staging's thread CPU time (GC and host compute count
+        there, a descheduled thread does not), the prediction readback split into its reads and its combine and audits
+        (shard_predictions; both 0 on the unsharded readback), and the CPU time of everything after the staging (the trace's
+        blocking wait is not CPU). Never raises."""
+        try:
+            prestaged = self.prestaged
+            path = 'off' if prestaged is None else prestaged.last['path']
+            reads_ms, checks_ms = getattr(self, 'readback_split', (0.0, 0.0))
+            diagnostic('%s block=%s round=%d live=%d path=%s bind_ms=%.2f input_ms=%.2f stage_cpu_ms=%.2f reads_ms=%.2f '
+                       'checks_ms=%.2f readback_ms=%.2f after_stage_cpu_ms=%.2f'
+                       % (verify_prestage.HOSTGAP_VERIFY_MARKER, verify_prestage.block_label(self), self.rounds + 1,
+                          len(segments), path, bind_ms, input_ms, stage_cpu_ms, reads_ms, checks_ms, readback_ms,
+                          rest_cpu_ms))
+        except Exception:
+            pass
 
     def note_verify_t1(self, counts):
         """VERIFY_T1_MARKER once per captured verify trace: which T1 cuts the capture engaged."""
@@ -1752,11 +1778,14 @@ class PackedVerifierEngine:
             if snapshot is None:
                 self.validate_bindings()
             started = time.perf_counter()
+            hostgap = verify_prestage.hostgap_log_enabled()
+            cpu_started = verify_prestage.thread_ms() if hostgap else 0.0
             if self.prestaged is None:
                 staged = self.stage_packed_inputs(entries)
             else:
                 staged = self.prestaged.stage(entries, segments, snapshot, reason)
             staged_at = time.perf_counter()
+            cpu_staged = verify_prestage.thread_ms() if hostgap else 0.0
             # Claimed before the trace: its segment restores rewrite slot 0, so no engine
             # may trust its residency from here on, even if the trace fails part way.
             note_packed_step()
@@ -1775,7 +1804,16 @@ class PackedVerifierEngine:
                 operation()
                 self.operations.synchronize_device(self.mesh)
             else:
-                self.fixture.retained.replay(operation)
+                if snapshot is not None and verify_prestage.window_validate_enabled():
+                    # tp4/hostgap 1c (QWEN_FAST_TP4_WINDOW_VALIDATE): the window validated this block's bindings and the epoch
+                    # vouches that nothing that can move a native buffer happened since, so the replay skips its own second check.
+                    # Audited, the skipped check still runs, here, as a shadow (a failure raises exactly as the check would).
+                    if self.prestaged.audit or self.prestaged.full_audit:
+                        self.fixture.retained.validate_bindings()
+                        diagnostic('[PACKED-PRESTAGE-SHADOW] round=%d retained_bindings=ok' % (self.rounds + 1))
+                    self.fixture.retained.replay(operation, validated=True)
+                else:
+                    self.fixture.retained.replay(operation)
                 # QWEN_FAST_ROUND_FENCES: the replay validated every native binding right before
                 # this trace, and nothing moves one between here and the round's commits.
                 self.validated_this_round = self.round_fences
@@ -1805,6 +1843,10 @@ class PackedVerifierEngine:
                 tp4_vglue.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)
             predictions = [host[slice(*segment_rows(self.shape, segment))] for segment in segments]
             finished = time.perf_counter()
+            if hostgap:
+                self.note_hostgap_verify(segments, snapshot, (staged_at - started) * 1000,
+                                         (started - binding_started) * 1000, cpu_staged - cpu_started,
+                                         verify_prestage.thread_ms() - cpu_staged, (finished - replayed) * 1000)
             if extent_users is not None:
                 # S2, after the replay and outside the round's phase timings: the executed path's line,
                 # then (QWEN_FAST_EXTENT_AUDIT, gate profiles only) the read-back audit.

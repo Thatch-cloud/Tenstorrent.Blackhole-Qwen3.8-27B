@@ -82,6 +82,7 @@ import memory_ledger
 import stall_watch
 import trace_census
 import verifier_engine
+from verify_prestage import entry_line, hostgap_log_enabled
 
 # Under QWEN_FAST_PACKED_AUDIT=1, one line per user per round for the token-exact gate
 # (docs/packed-device-step-plan-2026-09-20.md section 6): which segment served which
@@ -535,6 +536,15 @@ class PackedStep:
         self.solo = solo
         self.last_solo = None
         self.route = None
+        if len(self.blocks) > 1:
+            # tp4/hostgap: the two-block pre-stage and the per-block epochs, engaged (or refused, with the reason) once, here, by
+            # the flags; host only. Neither flag set, nothing changes. Stage 0 also labels the blocks for its lines.
+            import verify_prestage
+
+            verify_prestage.engage_two_block(self.blocks)
+            if verify_prestage.hostgap_log_enabled():
+                for index, block in enumerate(self.blocks):
+                    verify_prestage.block_label(block, index)
         # QWEN_FAST_GATE_FORCE_CAP (gate only): refused here, at attach, if malformed; logged once when set.
         cap = forced_cap()
         if cap is not None:
@@ -626,8 +636,22 @@ class PackedStep:
         The verify pre-stage is written only when ONE block runs packed in the round: the fixture write epoch is one
         counter for the process (verify_prestage.bump), a pre-stage and every verify bump it, so a second block's
         pre-stage or the first block's verify would invalidate the first's snapshot before it is read - the verify then
-        takes the full stage, today's, with the pre-stage's host work spent for nothing."""
+        takes the full stage, today's, with the pre-stage's host work spent for nothing.
+
+        tp4/hostgap (verify_prestage.engage_two_block, attach): QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE=1 pre-stages the ONE block
+        that verifies first (the first, in this step's block order, whose members run packed - the block packed_device_rounds
+        verifies first), under the very same epoch: nothing bumps it between that pre-stage and that verify (the other block's
+        pre-stage is left out, and the first block's own diff comes after it consumed its snapshot). With
+        QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS=1 as well, every packed block is pre-staged, each against its own epoch. Neither
+        set, today's rule."""
         packed = [(block, members) for block, rows, members in groups if block is not None and rows is not None]
+        from verify_prestage import two_block_mode
+
+        mode = two_block_mode()
+        first_block = None
+        if mode == 'first' and len(packed) > 1:
+            order = {id(block): index for index, block in enumerate(self.blocks)}
+            first_block = min((block for block, members in packed), key=lambda block: order.get(id(block), len(order)))
         windows = []
         for block, members in packed:
             if (getattr(block, 'prestaged', None) is None and not getattr(block, 'round_fences', False)
@@ -635,7 +659,8 @@ class PackedStep:
                 continue
             from verify_prestage import WhileWaiting
 
-            windows.append(WhileWaiting(block, members, prestage=len(packed) == 1))
+            windows.append(WhileWaiting(block, members, prestage=len(packed) == 1 or mode == 'blocks'
+                                        or (mode == 'first' and block is first_block)))
         if not windows:
             return None
         if len(windows) == 1:
@@ -940,7 +965,10 @@ def packed_device_step(entries, *, cancelled, block):
     if not callable(cancelled) or block is None:
         raise ValueError('A cancellation callback and the packed verify block are required')
     validate_packed_entries(entries)
+    started = time.perf_counter() if hostgap_log_enabled() else None
     reason = ineligible(entries, block)
+    if started is not None and reason is None:
+        entry_line((time.perf_counter() - started) * 1000)
     if reason is not None:
         # A round drafted for the block (proposal_rows) whose entries changed before the
         # step: a partner aborted after the drafts (vLLM names it one step late: the 2->1,
@@ -1047,6 +1075,10 @@ def packed_device_rounds(entries, *, cancelled, blocks):
     block's verify may replay between another block's verify and that block's commit flush. So every block still
     holding deferred commits is flushed BEFORE any verify of this round, and the in-step, `finally` and reconcile
     flushes attempt every block."""
+    # tp4/hostgap stage 0 (QWEN_FAST_TP4_HOSTGAP_LOG): this step's own checks before its first verify, for the [PACKED-ENTRY] line.
+    log = hostgap_log_enabled()
+    checks_started = time.perf_counter() if log else 0.0
+    checks_ms = 0.0
     entries = list(entries)
     if not entries:
         raise ValueError('A packed step needs at least one admitted request')
@@ -1058,8 +1090,12 @@ def packed_device_rounds(entries, *, cancelled, blocks):
     groups, sequential_entries = group_by_block(entries, blocks)
     by_block = {id(matched): (matched, group_entries) for matched, group_entries in groups}
     outputs_by_id = {}
+    if log:
+        checks_ms = (time.perf_counter() - checks_started) * 1000
     if len(blocks) > 1:
         flush_blocks_deferred([block for block in blocks if getattr(block, 'deferred_commits', None)], 'verify')
+    if log:
+        checks_started = time.perf_counter()
     for block in blocks:
         group = by_block.get(id(block))
         if group is None:
@@ -1083,6 +1119,11 @@ def packed_device_rounds(entries, *, cancelled, blocks):
         if reason is not None:
             sequential_entries.extend(group_entries)
             continue
+        if log:
+            # The first verify of the step: everything before it was entry (the line is written once, with that block's checks).
+            checks_ms += (time.perf_counter() - checks_started) * 1000
+            entry_line(checks_ms)
+            log = False
         for output in run_verified_block(group_entries, cancelled=cancelled, block=block):
             outputs_by_id[output.request_id] = output
     if sequential_entries:
