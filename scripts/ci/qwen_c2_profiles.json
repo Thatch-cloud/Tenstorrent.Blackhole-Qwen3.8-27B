@@ -6429,7 +6429,7 @@
       "gate_only": true
     },
     "c2-packed-tp4-8-best-quad": {
-      "description": "GATE ONLY (the eight-seat quad arm, never for traffic; tp4/next-5): c2-packed-tp4-8-best plus QWEN_FAST_QUAD_DRAFT_BLOCKS=2, which gives each block of four seats its own 64-row quad draft, (0, 1, 2, 3) and (4, 5, 6, 7), instead of the pair drafts the eight-seat pool runs today (the quad draft flag the base already names forms no quad beyond four seats). Its paired control is c2-packed-tp4-8-best (the blocks flag is the only difference). The smoke expects two quad engaged markers, one per block, and a round both quads served, in concurrent8_steady. Untested on hardware: an attach refusal here is a finding, not a defect of the arm.",
+      "description": "GATE ONLY (the eight-seat quad arm, never for traffic; tp4/next-5): c2-packed-tp4-8-best plus QWEN_FAST_QUAD_DRAFT_BLOCKS=2, which gives each block of four seats its own 64-row quad draft, (0, 1, 2, 3) and (4, 5, 6, 7), instead of the pair drafts the eight-seat pool runs today (the quad draft flag the base already names forms no quad beyond four seats). Its paired control is c2-packed-tp4-8-best (the blocks flag is the only difference). The smoke expects two quad engaged markers, one per block, and a round both quads served, in concurrent8_steady. Untested on hardware: an attach refusal here is a finding, not a defect of the arm. Both quads can share a round only while the hook makes one prepare call for the whole step: with QWEN_FAST_PAIRS_PACKED_ONLY set and one block packed, the calls split and a both-quads round never forms. The blocks flag needs QWEN_FAST_EXTENT_REPLAY=1 and QWEN_FAST_PACKED_PROPOSAL=1 (the attach refuses it otherwise).",
       "eos_ids": [
         248046,
         248044
@@ -8075,7 +8075,7 @@
       "gate_only": true
     },
     "c2-packed-tp4-8x262k-best": {
-      "description": "GATE ONLY (never for traffic; tp4/262k8): c2-packed-tp4-8x262k-gate (eight seats, every seat a 262,144-token window, a pooled KV cache under the reservation admission, both verify audits on, the waiver marker, the gate limits) plus the nine best levers of c2-packed-tp4-best-strace that two 64-row blocks serve (the quad draft, the fused commit in place on live banks, the five verify-glue levers: QWEN_FAST_QUAD_DRAFT, QWEN_FAST_FUSED_COMMIT, QWEN_FAST_FUSED_COMMIT_INPLACE, QWEN_FAST_FUSED_COMMIT_LIVE_BANKS, QWEN_FAST_TP4_COMMIT_LANES, QWEN_FAST_TP4_SHARD_VALUES, QWEN_FAST_TP4_GDN_GLUE, QWEN_FAST_TP4_GDN_BLOCK_CONV, QWEN_FAST_TP4_ATTN_FOLD) and QWEN_FAST_QUAD_DRAFT_BLOCKS=2 (each block of four seats drafts as its own 64-row quad, instead of the pair passes). Every lever of c2-packed-tp4-best-strace is in; none refuses at two blocks (nothing is left out): the verify-glue levers refuse only at the pair (QWEN_FAST_TP below 4), the fused commit is built per block over that block's own pool slots and a block that cannot build it logs its refusal and serves today's publication, and the quad blocks refuse only a non-eight-seat pool, the draft singles audit and a non-four-card width. The request warm (QWEN_FAST_M3_REQUEST_WARM=1) and the in-trace sampler hang fix are the eight-seat family's own. KV POOL: 19968 blocks (num-gpu-blocks-override and QWEN36_MAX_TOKENS_ALL_USERS=1277440 = (19968 - 8) x 64, the pair the contract holds equal), 1,792 blocks (0.998 GB per chip, 114,688 tokens) fewer than c2-packed-tp4-8x262k's 21,760, because the levers add about 0.96 GB per chip that the 21,760-block pool's margin does not have at the design's high non-KV band: two quad captures at 450 MiB (943,718,400 bytes; quad_draft.QUAD_CAPTURE_BYTES_EST x 2, captured at the first round of each block and kept beside the pair traces) and the fused commit's tables and deltas for eight segments (8 x 344,064 bytes = 2,752,512; its T_proj temporaries are bounded at 16 MiB in all); the pool formula 16,416 + floor((F8 - 1.0 GB - 0.07 GB RoPE and transient growth) / 557,056 B), with F8 the free DRAM at eight live seats less the levers' 0.96 GB, gives 19,979 at the high band, 19,968 is the 64-aligned value below it. Five full 262,144-token windows no longer fit at once (5 x 4,097 reserved blocks = 20,485 > 19,967): four do (4.87 windows of tokens); the reservation admission holds the rest. PROVISIONAL: the first card job that reads F8 with the levers on (the P1 profile job, the S0 smoke's memory ledger) re-sets it; 21,760 needs F8 of at least 4.05 GB with the levers in. The verify audits stay on and the sampler stays in the verify trace as in the gate (the in-trace sampler arm disengages under the shard audit), so this is the exactness arm for the ladder; the lever audits are c2-packed-tp4-8x262k-best-audit's. Untested on hardware: an attach refusal here is a finding, not a defect of the arm. The paired control for timing is c2-packed-tp4-8x262k-gate (the levers, the quad blocks and the 19968-block pool are the only differences).",
+      "description": "GATE ONLY (never for traffic; tp4/262k8): c2-packed-tp4-8x262k-gate (eight seats, every seat a 262,144-token window, a pooled KV cache under the reservation admission, both verify audits on, the waiver marker, the gate limits) plus the nine best levers of c2-packed-tp4-best-strace that two 64-row blocks serve (the quad draft, the fused commit in place on live banks, the five verify-glue levers: QWEN_FAST_QUAD_DRAFT, QWEN_FAST_FUSED_COMMIT, QWEN_FAST_FUSED_COMMIT_INPLACE, QWEN_FAST_FUSED_COMMIT_LIVE_BANKS, QWEN_FAST_TP4_COMMIT_LANES, QWEN_FAST_TP4_SHARD_VALUES, QWEN_FAST_TP4_GDN_GLUE, QWEN_FAST_TP4_GDN_BLOCK_CONV, QWEN_FAST_TP4_ATTN_FOLD) and QWEN_FAST_QUAD_DRAFT_BLOCKS=2 (each block of four seats drafts as its own 64-row quad, instead of the pair passes). Every lever of c2-packed-tp4-best-strace is in; none refuses at two blocks (nothing is left out): the verify-glue levers refuse only at the pair (QWEN_FAST_TP below 4), the fused commit is built per block over that block's own pool slots and a block that cannot build it logs its refusal and serves today's publication, and the quad blocks refuse (by name, at the attach) only a pool that is not eight slots, a process without QWEN_FAST_EXTENT_REPLAY=1 and QWEN_FAST_PACKED_PROPOSAL=1 (the image sets the second; the profile the first), the quad audit flag and a non-four-card width. The request warm (QWEN_FAST_M3_REQUEST_WARM=1) and the in-trace sampler hang fix are the eight-seat family's own. KV POOL: 19968 blocks (num-gpu-blocks-override and QWEN36_MAX_TOKENS_ALL_USERS=1277440 = (19968 - 8) x 64, the pair the contract holds equal), 1,792 blocks (0.998 GB per chip, 114,688 tokens) fewer than c2-packed-tp4-8x262k's 21,760, because the levers add about 0.96 GB per chip that the 21,760-block pool's margin does not have at the design's high non-KV band: two quad captures at 450 MiB (943,718,400 bytes; quad_draft.QUAD_CAPTURE_BYTES_EST x 2, captured at the first round of each block and kept beside the pair traces) and the fused commit's tables and deltas for eight segments (8 x 344,064 bytes = 2,752,512; its T_proj temporaries are bounded at 16 MiB in all); the pool formula 16,416 + floor((F8 - 1.0 GB - 0.07 GB RoPE and transient growth) / 557,056 B), with F8 the free DRAM at eight live seats less the levers' 0.96 GB, gives 19,979 at the high band, 19,968 is the 64-aligned value below it. Five full 262,144-token windows no longer fit at once (5 x 4,097 reserved blocks = 20,485 > 19,967): four do (4.87 windows of tokens); the reservation admission holds the rest. PROVISIONAL: the first card job that reads F8 with the levers on (the P1 profile job, the S0 smoke's memory ledger) re-sets it; 21,760 needs F8 of at least 4.05 GB with the levers in. The verify audits stay on and the sampler stays in the verify trace as in the gate (the in-trace sampler arm disengages under the shard audit), so this is the exactness arm for the ladder; the lever audits are c2-packed-tp4-8x262k-best-audit's. Untested on hardware: an attach refusal here is a finding, not a defect of the arm. The paired control for timing is c2-packed-tp4-8x262k-gate (the levers, the quad blocks and the 19968-block pool are the only differences).",
       "eos_ids": [
         248046,
         248044
@@ -8174,7 +8174,7 @@
       "gate_only": true
     },
     "c2-packed-tp4-8x262k-best-audit": {
-      "description": "GATE ONLY (the lever-audited twin; tp4/262k8): c2-packed-tp4-8x262k-best plus QWEN_FAST_FUSED_COMMIT_AUDIT=1 (every fused publication is shadowed by today's eager one and compared, both blocks) and QWEN_FAST_TP4_VGLUE_AUDIT=1 (each engaged verify-glue lever is compared with the served path in the trace). The draft singles audit (QWEN_FAST_DRAFT_SINGLES_AUDIT) is NOT set: with QWEN_FAST_QUAD_DRAFT_BLOCKS the quad refuses it (its shadow pairs are the first block's only), so the quad draft is judged by the round text, the quad engaged markers and the verify audits. The attach smoke arm: the audits add blocking readbacks, so it is never a timed one. Pool and levers as c2-packed-tp4-8x262k-best (19968 blocks).",
+      "description": "GATE ONLY (the lever-audited twin; tp4/262k8): c2-packed-tp4-8x262k-best plus QWEN_FAST_FUSED_COMMIT_AUDIT=1 (every fused publication is shadowed by today's eager one and compared, both blocks), QWEN_FAST_TP4_VGLUE_AUDIT=1 (each engaged verify-glue lever is compared with the served path in the trace) and QWEN_FAST_DRAFT_SINGLES_AUDIT=all (every member of each batched quad is drafted again on its own single-user capture with the same seed and compared bit for bit: a wrong quad draft for seats 4 to 7 only lowers acceptance, so text equality cannot see it; as c2-packed-tp4-8-best-quad-gate does at 131k, the smoke requires an equal=1 line for each of the groups [0, 1, 2, 3] and [4, 5, 6, 7]). The attach smoke arm: the audits add blocking readbacks and the singles audit extra drafts, so it is never a timed one. Pool and levers as c2-packed-tp4-8x262k-best (19968 blocks).",
       "eos_ids": [
         248046,
         248044
@@ -8227,6 +8227,7 @@
         "QWEN_FAST_TP4_ATTN_FOLD": "1",
         "QWEN_FAST_QUAD_DRAFT_BLOCKS": "2",
         "QWEN_FAST_FUSED_COMMIT_AUDIT": "1",
+        "QWEN_FAST_DRAFT_SINGLES_AUDIT": "all",
         "QWEN_FAST_TP4_VGLUE_AUDIT": "1"
       },
       "engine": {
@@ -8275,7 +8276,7 @@
       "gate_only": true
     },
     "c2-packed-tp4-8x262k-best-time-gate": {
-      "description": "GATE ONLY (the timed twin; tp4/262k8): c2-packed-tp4-8x262k-time-gate (eight seats, every seat a 262,144-token window, a pooled KV cache under the reservation admission, the verify audits OFF, the sampler in the verify trace as the hang fix, the waiver marker, the gate limits) plus the nine best levers of c2-packed-tp4-best-strace that two 64-row blocks serve (the quad draft, the fused commit in place on live banks, the five verify-glue levers: QWEN_FAST_QUAD_DRAFT, QWEN_FAST_FUSED_COMMIT, QWEN_FAST_FUSED_COMMIT_INPLACE, QWEN_FAST_FUSED_COMMIT_LIVE_BANKS, QWEN_FAST_TP4_COMMIT_LANES, QWEN_FAST_TP4_SHARD_VALUES, QWEN_FAST_TP4_GDN_GLUE, QWEN_FAST_TP4_GDN_BLOCK_CONV, QWEN_FAST_TP4_ATTN_FOLD) and QWEN_FAST_QUAD_DRAFT_BLOCKS=2 (each block of four seats drafts as its own 64-row quad, instead of the pair passes). Every lever of c2-packed-tp4-best-strace is in; none refuses at two blocks (nothing is left out): the verify-glue levers refuse only at the pair (QWEN_FAST_TP below 4), the fused commit is built per block over that block's own pool slots and a block that cannot build it logs its refusal and serves today's publication, and the quad blocks refuse only a non-eight-seat pool, the draft singles audit and a non-four-card width. The request warm (QWEN_FAST_M3_REQUEST_WARM=1) and the in-trace sampler hang fix are the eight-seat family's own. KV POOL: 19968 blocks (num-gpu-blocks-override and QWEN36_MAX_TOKENS_ALL_USERS=1277440 = (19968 - 8) x 64, the pair the contract holds equal), 1,792 blocks (0.998 GB per chip, 114,688 tokens) fewer than c2-packed-tp4-8x262k's 21,760, because the levers add about 0.96 GB per chip that the 21,760-block pool's margin does not have at the design's high non-KV band: two quad captures at 450 MiB (943,718,400 bytes; quad_draft.QUAD_CAPTURE_BYTES_EST x 2, captured at the first round of each block and kept beside the pair traces) and the fused commit's tables and deltas for eight segments (8 x 344,064 bytes = 2,752,512; its T_proj temporaries are bounded at 16 MiB in all); the pool formula 16,416 + floor((F8 - 1.0 GB - 0.07 GB RoPE and transient growth) / 557,056 B), with F8 the free DRAM at eight live seats less the levers' 0.96 GB, gives 19,979 at the high band, 19,968 is the 64-aligned value below it. Five full 262,144-token windows no longer fit at once (5 x 4,097 reserved blocks = 20,485 > 19,967): four do (4.87 windows of tokens); the reservation admission holds the rest. PROVISIONAL: the first card job that reads F8 with the levers on (the P1 profile job, the S0 smoke's memory ledger) re-sets it; 21,760 needs F8 of at least 4.05 GB with the levers in. Untested on hardware: an attach refusal here is a finding, not a defect of the arm. The paired control for timing is c2-packed-tp4-8x262k-time-gate (the levers, the quad blocks and the 19968-block pool are the only differences).",
+      "description": "GATE ONLY (the timed twin; tp4/262k8): c2-packed-tp4-8x262k-time-gate (eight seats, every seat a 262,144-token window, a pooled KV cache under the reservation admission, the verify audits OFF, the sampler in the verify trace as the hang fix, the waiver marker, the gate limits) plus the nine best levers of c2-packed-tp4-best-strace that two 64-row blocks serve (the quad draft, the fused commit in place on live banks, the five verify-glue levers: QWEN_FAST_QUAD_DRAFT, QWEN_FAST_FUSED_COMMIT, QWEN_FAST_FUSED_COMMIT_INPLACE, QWEN_FAST_FUSED_COMMIT_LIVE_BANKS, QWEN_FAST_TP4_COMMIT_LANES, QWEN_FAST_TP4_SHARD_VALUES, QWEN_FAST_TP4_GDN_GLUE, QWEN_FAST_TP4_GDN_BLOCK_CONV, QWEN_FAST_TP4_ATTN_FOLD) and QWEN_FAST_QUAD_DRAFT_BLOCKS=2 (each block of four seats drafts as its own 64-row quad, instead of the pair passes). Every lever of c2-packed-tp4-best-strace is in; none refuses at two blocks (nothing is left out): the verify-glue levers refuse only at the pair (QWEN_FAST_TP below 4), the fused commit is built per block over that block's own pool slots and a block that cannot build it logs its refusal and serves today's publication, and the quad blocks refuse (by name, at the attach) only a pool that is not eight slots, a process without QWEN_FAST_EXTENT_REPLAY=1 and QWEN_FAST_PACKED_PROPOSAL=1 (the image sets the second; the profile the first), the quad audit flag and a non-four-card width. The request warm (QWEN_FAST_M3_REQUEST_WARM=1) and the in-trace sampler hang fix are the eight-seat family's own. KV POOL: 19968 blocks (num-gpu-blocks-override and QWEN36_MAX_TOKENS_ALL_USERS=1277440 = (19968 - 8) x 64, the pair the contract holds equal), 1,792 blocks (0.998 GB per chip, 114,688 tokens) fewer than c2-packed-tp4-8x262k's 21,760, because the levers add about 0.96 GB per chip that the 21,760-block pool's margin does not have at the design's high non-KV band: two quad captures at 450 MiB (943,718,400 bytes; quad_draft.QUAD_CAPTURE_BYTES_EST x 2, captured at the first round of each block and kept beside the pair traces) and the fused commit's tables and deltas for eight segments (8 x 344,064 bytes = 2,752,512; its T_proj temporaries are bounded at 16 MiB in all); the pool formula 16,416 + floor((F8 - 1.0 GB - 0.07 GB RoPE and transient growth) / 557,056 B), with F8 the free DRAM at eight live seats less the levers' 0.96 GB, gives 19,979 at the high band, 19,968 is the 64-aligned value below it. Five full 262,144-token windows no longer fit at once (5 x 4,097 reserved blocks = 20,485 > 19,967): four do (4.87 windows of tokens); the reservation admission holds the rest. PROVISIONAL: the first card job that reads F8 with the levers on (the P1 profile job, the S0 smoke's memory ledger) re-sets it; 21,760 needs F8 of at least 4.05 GB with the levers in. Untested on hardware: an attach refusal here is a finding, not a defect of the arm. The paired control for timing is c2-packed-tp4-8x262k-time-gate (the levers, the quad blocks and the 19968-block pool are the only differences).",
       "eos_ids": [
         248046,
         248044
@@ -8374,7 +8375,7 @@
       "gate_only": true
     },
     "c2-packed-tp4-8x262k-ship": {
-      "description": "The ship-shaped eight-seat 262k traffic candidate (NOT gate_only; tp4/262k8; for later, after the 8x262k-best window passes its ladder, hang shapes and timed pairs): c2-packed-tp4-8x262k (production limits: max_prompt_tokens 253,920, min_answer_tokens 8,192, no waiver marker, audits off, the in-trace sampler) plus the nine best levers of c2-packed-tp4-best-strace that two 64-row blocks serve (the quad draft, the fused commit in place on live banks, the five verify-glue levers: QWEN_FAST_QUAD_DRAFT, QWEN_FAST_FUSED_COMMIT, QWEN_FAST_FUSED_COMMIT_INPLACE, QWEN_FAST_FUSED_COMMIT_LIVE_BANKS, QWEN_FAST_TP4_COMMIT_LANES, QWEN_FAST_TP4_SHARD_VALUES, QWEN_FAST_TP4_GDN_GLUE, QWEN_FAST_TP4_GDN_BLOCK_CONV, QWEN_FAST_TP4_ATTN_FOLD) and QWEN_FAST_QUAD_DRAFT_BLOCKS=2 (each block of four seats drafts as its own 64-row quad, instead of the pair passes). Every lever of c2-packed-tp4-best-strace is in; none refuses at two blocks (nothing is left out): the verify-glue levers refuse only at the pair (QWEN_FAST_TP below 4), the fused commit is built per block over that block's own pool slots and a block that cannot build it logs its refusal and serves today's publication, and the quad blocks refuse only a non-eight-seat pool, the draft singles audit and a non-four-card width. The request warm (QWEN_FAST_M3_REQUEST_WARM=1) and the in-trace sampler hang fix are the eight-seat family's own. KV POOL: 19968 blocks (num-gpu-blocks-override and QWEN36_MAX_TOKENS_ALL_USERS=1277440 = (19968 - 8) x 64, the pair the contract holds equal), 1,792 blocks (0.998 GB per chip, 114,688 tokens) fewer than c2-packed-tp4-8x262k's 21,760, because the levers add about 0.96 GB per chip that the 21,760-block pool's margin does not have at the design's high non-KV band: two quad captures at 450 MiB (943,718,400 bytes; quad_draft.QUAD_CAPTURE_BYTES_EST x 2, captured at the first round of each block and kept beside the pair traces) and the fused commit's tables and deltas for eight segments (8 x 344,064 bytes = 2,752,512; its T_proj temporaries are bounded at 16 MiB in all); the pool formula 16,416 + floor((F8 - 1.0 GB - 0.07 GB RoPE and transient growth) / 557,056 B), with F8 the free DRAM at eight live seats less the levers' 0.96 GB, gives 19,979 at the high band, 19,968 is the 64-aligned value below it. Five full 262,144-token windows no longer fit at once (5 x 4,097 reserved blocks = 20,485 > 19,967): four do (4.87 windows of tokens); the reservation admission holds the rest. PROVISIONAL: the first card job that reads F8 with the levers on (the P1 profile job, the S0 smoke's memory ledger) re-sets it; 21,760 needs F8 of at least 4.05 GB with the levers in. Not for traffic until that window passes; the file default stays c2-packed-tp4.",
+      "description": "The ship-shaped eight-seat 262k traffic candidate (NOT gate_only; tp4/262k8; for later, after the 8x262k-best window passes its ladder, hang shapes and timed pairs): c2-packed-tp4-8x262k (production limits: max_prompt_tokens 253,920, min_answer_tokens 8,192, no waiver marker, audits off, the in-trace sampler) plus the nine best levers of c2-packed-tp4-best-strace that two 64-row blocks serve (the quad draft, the fused commit in place on live banks, the five verify-glue levers: QWEN_FAST_QUAD_DRAFT, QWEN_FAST_FUSED_COMMIT, QWEN_FAST_FUSED_COMMIT_INPLACE, QWEN_FAST_FUSED_COMMIT_LIVE_BANKS, QWEN_FAST_TP4_COMMIT_LANES, QWEN_FAST_TP4_SHARD_VALUES, QWEN_FAST_TP4_GDN_GLUE, QWEN_FAST_TP4_GDN_BLOCK_CONV, QWEN_FAST_TP4_ATTN_FOLD) and QWEN_FAST_QUAD_DRAFT_BLOCKS=2 (each block of four seats drafts as its own 64-row quad, instead of the pair passes). Every lever of c2-packed-tp4-best-strace is in; none refuses at two blocks (nothing is left out): the verify-glue levers refuse only at the pair (QWEN_FAST_TP below 4), the fused commit is built per block over that block's own pool slots and a block that cannot build it logs its refusal and serves today's publication, and the quad blocks refuse (by name, at the attach) only a pool that is not eight slots, a process without QWEN_FAST_EXTENT_REPLAY=1 and QWEN_FAST_PACKED_PROPOSAL=1 (the image sets the second; the profile the first), the quad audit flag and a non-four-card width. The request warm (QWEN_FAST_M3_REQUEST_WARM=1) and the in-trace sampler hang fix are the eight-seat family's own. KV POOL: 19968 blocks (num-gpu-blocks-override and QWEN36_MAX_TOKENS_ALL_USERS=1277440 = (19968 - 8) x 64, the pair the contract holds equal), 1,792 blocks (0.998 GB per chip, 114,688 tokens) fewer than c2-packed-tp4-8x262k's 21,760, because the levers add about 0.96 GB per chip that the 21,760-block pool's margin does not have at the design's high non-KV band: two quad captures at 450 MiB (943,718,400 bytes; quad_draft.QUAD_CAPTURE_BYTES_EST x 2, captured at the first round of each block and kept beside the pair traces) and the fused commit's tables and deltas for eight segments (8 x 344,064 bytes = 2,752,512; its T_proj temporaries are bounded at 16 MiB in all); the pool formula 16,416 + floor((F8 - 1.0 GB - 0.07 GB RoPE and transient growth) / 557,056 B), with F8 the free DRAM at eight live seats less the levers' 0.96 GB, gives 19,979 at the high band, 19,968 is the 64-aligned value below it. Five full 262,144-token windows no longer fit at once (5 x 4,097 reserved blocks = 20,485 > 19,967): four do (4.87 windows of tokens); the reservation admission holds the rest. PROVISIONAL: the first card job that reads F8 with the levers on (the P1 profile job, the S0 smoke's memory ledger) re-sets it; 21,760 needs F8 of at least 4.05 GB with the levers in. Not for traffic until that window passes; the file default stays c2-packed-tp4.",
       "eos_ids": [
         248046,
         248044
@@ -8470,6 +8471,100 @@
       "default_max_tokens": 8192,
       "drafter_headroom_tokens": 32,
       "parser_rechunk": true
+    },
+    "c2-packed-tp4-8-best-quad-gate": {
+      "description": "GATE ONLY (the eight-seat quad exactness arm, never for traffic; tp4/next-5): c2-packed-tp4-8-best-quad plus QWEN_FAST_DRAFT_SINGLES_AUDIT=all, which drafts every member of each batched group again on its own single-user capture with the same seed and compares bit for bit. A wrong quad draft for seats 4 to 7 only lowers acceptance (the target verifies every draft), so text equality cannot see it; this arm can. The smoke requires an equal=1 audit line for each of the groups [0, 1, 2, 3] and [4, 5, 6, 7], both quads' pooled pre-trace mask and output lines, and no pooled-refused line. The audit costs time: not for timing. Its control is c2-packed-tp4-8-best-quad (the audit flag is the only difference); the blocks flag needs QWEN_FAST_EXTENT_REPLAY=1 and QWEN_FAST_PACKED_PROPOSAL=1, and the two quads can share a round only while the hook makes one prepare call for the whole step (QWEN_FAST_PAIRS_PACKED_ONLY unset).",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "1",
+        "QWEN_FAST_FUSED_COMMIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "1",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "1",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_PACKED_SAMPLER_IN_TRACE": "1",
+        "QWEN_FAST_M3_BLOCKS": "2",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_M3_REQUEST_WARM": "1",
+        "QWEN_FAST_TP4_COMMIT_LANES": "1",
+        "QWEN_FAST_TP4_SHARD_VALUES": "1",
+        "QWEN_FAST_TP4_GDN_GLUE": "1",
+        "QWEN_FAST_TP4_GDN_BLOCK_CONV": "1",
+        "QWEN_FAST_TP4_ATTN_FOLD": "1",
+        "QWEN_FAST_QUAD_DRAFT_BLOCKS": "2",
+        "QWEN_FAST_DRAFT_SINGLES_AUDIT": "all"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 8,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 16416,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 536870912,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
     }
   }
 }

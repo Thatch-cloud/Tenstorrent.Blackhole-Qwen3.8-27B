@@ -3,31 +3,40 @@
 # stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window. X0 is card-free.
 # THE CARDS ARE UNDER DEVELOPMENT, PRODUCTION IS DOWN BY THE OWNER'S CHOICE: NO agentstop (the node agent is already stopped; X0 only reads status), NO agentstart, NO hand-back, NO deploy, NO :latest move.
 # Z ends with a reset and no agentstart. qwen_c2_profiles.json's default stays c2-packed-tp4; nothing is baked as the image default.
-# P0. NO OTHER WINDOW DRIVER MAY BE ALIVE. The CPU suite green on this branch first. B0 never runs during a timing job. Judge every ABAB PAIRED per round, never by unpaired medians; check the load average.
-# DEPENDENCIES: S0 and BS1-BS3 are stop jobs on the traffic recipe. T1 is stop for the tpub arm only: if T1 fails, the driver skips T2, T3 and TT1-TT4 and the window continues with G1. Everything else is soft.
+# P0. NO OTHER WINDOW DRIVER MAY BE ALIVE (the next-4 ship window's driver ends in agentstart: confirm it finished or is dead). The CPU suite green on this branch first. B0 never runs during a timing job.
+# Judge every ABAB PAIRED per round, never by unpaired medians; check the load average; push nothing to CI during a timed arm (CI runs on the same host's runners).
+# DEPENDENCIES (machine-greppable, pinned by test_tp4_next5_jobs): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver
+# skips them and the window continues (a skipped soft job does not stop it). S0 and BS1-BS3 are stop jobs on the traffic recipe. X0 is a stop job on the rig precondition.
+# NEEDS T2 T3 TT1 TT2 TT3 TT4 <- T1
+# NEEDS TT1 TT2 TT3 TT4 <- T2 T3
+# NEEDS G1 <- G0
+# NEEDS GT1 GT2 GT3 GT4 <- G1
+# NEEDS E2 E3 <- E1
+# NEEDS E3 <- E2
+# NEEDS W1 W2 <- BS1 BS2 BS3
 # READ RULES (what passing each arm means; each also needs c2_smoke_check clean and no stall):
-#   X0  the status prints and the delete step ends (an absent tag is fine); no protected tag is touched.
+#   X0  the status block shows FOUR boards resolved, no holder, 'serving containers: none'; the delete step ends (an absent tag is fine); no protected tag is touched. Anything else stops the window.
 #   B0  provenance report with no problem line, the image id printed.
 #   S0  production's recipe unchanged by the merge: all tests complete, concurrent4_code_equal hashes equal to the recorded production ones, no new-flag marker anywhere.
-#   BS1-BS3  three consecutive completions of the audits-off hang shapes on best-ship, every user at budget, concurrent4_code_equal hashes equal in every run. One stall stops the window.
-#   W1-W2  the same shapes on best-ship-warm4: completion and equal hashes; a hang is a finding recorded against warm4.
-#   T1  [TPUB] engaged, no declined, [TPUB-AUDIT] mismatches=0 on every line, texts equal best-gate. T2-T3  completion with the engaged line. TT1-TT4  paired ABAB, best-ship against best-ship-tpub:
-#       B should shave about 15 ms off each lone-user [SEQUENTIAL] step and leave the four-user rounds unchanged within noise; speed_window_compare exit 0 (identical texts and prefixes).
-#   G1  pair-slice engaged on the V2-off arm, audits mismatches=0, texts equal the control's. GT1-GT4  EXPECT NO DIFFERENCE: the glue profiles keep V2 on, which replaces the slices the flag shortens, so
-#       the flag is idle by construction there; they only prove it harmless beside V2. A real gain needs a V2-off timed arm, which this window does not run.
-#   E1  eight-seat best attaches (no refusal), concurrent8_code_equal equals solo, drain and split complete. E2  as E1 plus exactly two engaged quad markers (0,1,2,3 and 4,5,6,7), a PACKED-SELECT round with
-#       both groups and users=8, no fallback and no disable line. Record any capture refusal by quad and headroom.
-#   P1  both gate arms complete, ops-trace texts equal ops-twin's, the per-op table for the next lever. Never cancel it. Z  the reset completes; the agent stays stopped.
+#   BS1-BS3  three consecutive completions of the audits-off hang shapes on best-ship (the ship window's BH set), every user at budget, concurrent4_code_equal hashes equal in every run. One stall stops the window.
+#   T1  [TPUB] engaged, no declined, [TPUB-AUDIT] op=save and op=restore lines with mismatches=0, concurrent4_solo and concurrent4 equal in-job, concurrent4_code_equal hashes equal to S0's and BS's.
+#       T2-T3  the same eight shapes each (completion, engaged line, no declined, four-user texts equal BS's). A hang or failure in T1, T2 or T3 skips TT1-TT4.
+#       TT1-TT4  paired ABAB, best-ship against best-ship-tpub: B should shave about 15 ms off each lone-user [SEQ-PUBLISH] step_ms and the [CARRY] op=save enqueue_ms, and leave the four-user rounds unchanged
+#       within noise; SMOKE_JSON content_sha256, reasoning_sha256, completion_tokens and finish identical A against B, test by test and user by user.
+#   G0  the audited control on c2-packed-tp4-gate: audits mismatches=0, no pair-slice marker, hashes recorded. G1  pair-slice engaged on the V2-off arm, audits mismatches=0, hashes equal G0's.
+#       GT1-GT4  paired ABAB, speed-strace against speed-strace-pairslice (V2 off, the flag is live): judged per round, texts identical A against B. Skipped if G1 failed.
+#   E1  eight-seat best attaches (no refusal), concurrent4 and concurrent4_code_equal equal to solo and to BS's hashes, concurrent8 tests, drain and split complete; record accepted tokens and verify rounds per request.
+#       E2  as E1 plus exactly two engaged quad markers (0,1,2,3 and 4,5,6,7), both quads' pooled mask and output lines, a PACKED-SELECT round with both groups and users=8, no fallback, disable or pooled-refused line,
+#       and per-request accepted tokens and verify rounds IDENTICAL to E1's. E3  the singles-audited twin: an equal=1 audit line for each of the groups [0, 1, 2, 3] and [4, 5, 6, 7], no equal=0.
+#   W1-W2  the same shapes on best-ship-warm4, only if the tp4/warm4 window passed: completion and equal hashes; a hang is a finding recorded against warm4. Z  the reset completes; whether the agent is stopped is the owner's to confirm.
 # NO-GO for adopting any arm into production: any stall, any hash difference between arms that must be identical, any audit mismatch. This window decides nothing about production: it is evidence for the owner.
-# Time (estimate): X0 and B0 about 70 min, S0 and BS1-BS3 about 3 h, W 1.5 h, T and TT about 6 h, G and GT 5 h, E 4 h, P1 2 h, Z 10 min: about 22 h in all; drivers may cut the soft arms.
-X0-status-rmi soft tp4-next-5a 10
+# Time (estimate): the job lines below sum to 1,510 min (about 25.2 h); drivers may cut the soft arms. The device-profile job (P1) was dropped: v315 profiled best-strace already and the host's disk is near its guard.
+X0-status-rmi stop tp4-next-5a 10
 B0-build stop tp4-next-5a 60
 S0-production-smoke stop tp4-next-5a 45
 BS1-hang-shapes-best-ship stop tp4-next-5a 45
 BS2-hang-shapes-best-ship stop tp4-next-5a 45
 BS3-hang-shapes-best-ship stop tp4-next-5a 45
-W1-hang-shapes-best-ship-warm4 soft tp4-next-5a 45
-W2-hang-shapes-best-ship-warm4 soft tp4-next-5a 45
 T1-tpub-audited-smoke soft tp4-next-5a 100
 T2-tpub-hang-shapes soft tp4-next-5a 60
 T3-tpub-hang-shapes soft tp4-next-5a 60
@@ -35,12 +44,15 @@ TT1-timed-A-best-ship soft tp4-next-5a 60
 TT2-timed-B-best-ship-tpub soft tp4-next-5a 60
 TT3-timed-A-best-ship soft tp4-next-5a 60
 TT4-timed-B-best-ship-tpub soft tp4-next-5a 60
+G0-pairslice-control-audited soft tp4-next-5a 60
 G1-pairslice-exact-audited soft tp4-next-5a 60
-GT1-timed-A-best-ship soft tp4-next-5a 55
-GT2-timed-B-best-ship-glue soft tp4-next-5a 55
-GT3-timed-A-best-ship soft tp4-next-5a 55
-GT4-timed-B-best-ship-glue soft tp4-next-5a 55
+GT1-timed-A-speed-strace soft tp4-next-5a 55
+GT2-timed-B-speed-strace-pairslice soft tp4-next-5a 55
+GT3-timed-A-speed-strace soft tp4-next-5a 55
+GT4-timed-B-speed-strace-pairslice soft tp4-next-5a 55
 E1-eight-seat-best-attach soft tp4-next-5a 120
 E2-eight-seat-quad-blocks soft tp4-next-5a 120
-P1-best-ship-profile soft tp4-next-5a 130
+E3-eight-seat-quad-audited soft tp4-next-5a 120
+W1-hang-shapes-best-ship-warm4 soft tp4-next-5a 45
+W2-hang-shapes-best-ship-warm4 soft tp4-next-5a 45
 Z-reset soft tp4-next-5a 10

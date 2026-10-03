@@ -34,7 +34,7 @@ LEVERS = {'QWEN_FAST_FUSED_COMMIT': '1', 'QWEN_FAST_FUSED_COMMIT_INPLACE': '1', 
           'QWEN_FAST_QUAD_DRAFT': '1', 'QWEN_FAST_TP4_COMMIT_LANES': '1', 'QWEN_FAST_TP4_SHARD_VALUES': '1',
           'QWEN_FAST_TP4_GDN_GLUE': '1', 'QWEN_FAST_TP4_GDN_BLOCK_CONV': '1', 'QWEN_FAST_TP4_ATTN_FOLD': '1',
           'QWEN_FAST_QUAD_DRAFT_BLOCKS': '2'}
-LEVER_AUDITS = {'QWEN_FAST_FUSED_COMMIT_AUDIT': '1', 'QWEN_FAST_TP4_VGLUE_AUDIT': '1'}
+LEVER_AUDITS = {'QWEN_FAST_FUSED_COMMIT_AUDIT': '1', 'QWEN_FAST_TP4_VGLUE_AUDIT': '1', 'QWEN_FAST_DRAFT_SINGLES_AUDIT': 'all'}
 
 
 def profiles():
@@ -77,11 +77,13 @@ class DeltaTests(unittest.TestCase):
                     with self.subTest(profile=name, lever=key):
                         self.assertEqual(found[name]['env'].get(key), value)
 
-    def test_the_audit_arms_carry_the_draft_singles_audit_never_because_the_quad_blocks_refuse_it(self):
+    def test_only_the_audited_twin_carries_the_lever_audits_and_the_singles_audit_the_quad_gate_runs(self):
         found = profiles()
-        for name in NEW:
-            self.assertNotIn('QWEN_FAST_DRAFT_SINGLES_AUDIT', found[name]['env'], name)
-        self.assertIn('audits the first block', (HERE / 'quad_draft_tp.py').read_text(encoding='utf-8'))
+        for name in (BEST, TIMED, SHIP):
+            for key in LEVER_AUDITS:
+                self.assertNotIn(key, found[name]['env'], (name, key))
+        self.assertEqual({key: found[AUDIT]['env'][key] for key in LEVER_AUDITS}, LEVER_AUDITS)
+        self.assertEqual(found['c2-packed-tp4-8-best-quad-gate']['env']['QWEN_FAST_DRAFT_SINGLES_AUDIT'], 'all')
 
     def test_audits_gate_only_and_limits(self):
         found = profiles()

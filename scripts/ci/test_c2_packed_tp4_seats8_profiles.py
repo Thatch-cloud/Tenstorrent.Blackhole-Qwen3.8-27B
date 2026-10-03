@@ -254,7 +254,7 @@ class EightSeatProfileTests(unittest.TestCase):
 
     def test_the_flag_is_in_no_four_seat_profile(self):
         for name, profile in profiles().items():
-            if name in (TRAFFIC, GATE, TIME_GATE, DIAG, NOWARM, RSHARD, 'c2-packed-tp4-8-best', 'c2-packed-tp4-8-best-quad') or name.startswith('c2-packed-tp4-8x262k'):
+            if name in (TRAFFIC, GATE, TIME_GATE, DIAG, NOWARM, RSHARD, 'c2-packed-tp4-8-best', 'c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-best-quad-gate') or name.startswith('c2-packed-tp4-8x262k'):
                 continue
             with self.subTest(profile=name):
                 self.assertNotIn('QWEN_FAST_M3_BLOCKS', profile.get('env', {}))

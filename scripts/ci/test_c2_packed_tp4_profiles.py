@@ -110,7 +110,7 @@ SEATS8_PROFILES = ('c2-packed-tp4-8', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-t
 # tp4/next-4 (test_tp4_next4 holds each as its base plus exact deltas): the traffic candidate, its warm4 twin and the eight-seat levers arm.
 NEXT4_PROFILES = ('c2-packed-tp4-best-ship', 'c2-packed-tp4-best-ship-warm4', 'c2-packed-tp4-8-best')
 # tp4/next-5 (test_tp4_next5 holds each as its base plus exact deltas): the tpub and pair-slice traffic candidates and the pair-slice gate twins.
-NEXT5_PROFILES = ('c2-packed-tp4-best-ship-tpub', 'c2-packed-tp4-best-ship-glue', 'c2-packed-tp4-best-strace-glue', 'c2-packed-tp4-best-gate-glue', 'c2-packed-tp4-8-best-quad')
+NEXT5_PROFILES = ('c2-packed-tp4-best-ship-tpub', 'c2-packed-tp4-best-ship-glue', 'c2-packed-tp4-best-strace-glue', 'c2-packed-tp4-best-gate-glue', 'c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-best-quad-gate')
 # tp4/262k8 (test_tp4_262k8_best_profiles holds each as its 262k eight-seat twin plus the levers, the smaller pool and the lever audits): the eight-seat 262k best-lever arms.
 BEST262K_PROFILES = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship')
 NEXT5_PROFILES = NEXT5_PROFILES + BEST262K_PROFILES

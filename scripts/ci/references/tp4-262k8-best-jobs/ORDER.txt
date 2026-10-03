@@ -6,6 +6,9 @@
 # P0. NO OTHER WINDOW DRIVER MAY BE ALIVE and no privileged builder container may be up. The CPU suite green on this branch first, and the 262k stage-1 evidence recorded and re-pinned on it (B0's precondition). B0 never runs
 # during a timing job. Judge every ABAB PAIRED per round, never by unpaired medians; check the load average.
 # ORDER: the cheapest kill signals first: X0 (status, RESCAN, reset: the rescan first in the first quad job), B0, S0 (audited attach), H1-H3 (hang shapes, audits off), L1 (the 262k ladder), then the timing pair T1-T4 and the profile P1.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS H1 H2 H3 L1 <- S0
+# NEEDS T1 T2 T3 T4 P1 <- S0 H1 H2 H3
 # READ RULES (each also needs c2_smoke_check clean and no stall):
 #   X0  the status prints, the rescan finds every board, the reset completes on all four.   B0  provenance report with no problem line, the image id printed.
 #   S0  admission passed at capacity 262144, reservation installed with num_gpu_blocks=19968, fused commit engaged on both blocks, ZERO audit mismatches, exactly two quad markers and a both-quads round, hashes equal

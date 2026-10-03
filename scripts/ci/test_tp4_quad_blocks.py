@@ -189,6 +189,39 @@ class TwoQuadsTests(Harness):
         self.assertEqual([labels for labels, _ in pinned], [[0, 1], [2, 3]], 'the four-seat call is unchanged')
 
 
+class FenceTests(Harness):
+    def test_a_failure_in_the_second_block_fences_the_first_blocks_replay_before_its_work_is_dropped(self):
+        # Block B raises before the caller has set its fence: block A's replay may still run, so it is fenced first (the sync is logged).
+        coordinator, bridges = self.coordinator(), self.bridges(EIGHT)
+        real = quad_draft_tp.refusal
+        calls = []
+
+        def refusal(devices, batched, environ=None):
+            calls.append(tuple(device.pool_slot.index for device in devices))
+            if len(calls) == 2:
+                raise RuntimeError('block B failed before its own guard')
+            return None
+
+        with patch('quad_draft_tp.refusal', Mock(side_effect=refusal)):
+            with self.assertRaises(RuntimeError):
+                self.prepare(coordinator, bridges)
+        self.assertEqual(calls, [(0, 1, 2, 3), (4, 5, 6, 7)])
+        self.assertIn(('sync',), LOG, 'block A was fenced before the exception reached the caller')
+        self.assertLess(LOG.index(('quad', (100, 101, 102, 103))), LOG.index(('sync',)))
+        self.assertIsNotNone(real)
+
+    def test_a_first_block_failure_has_nothing_to_fence(self):
+        coordinator, bridges = self.coordinator(), self.bridges(EIGHT)
+
+        def refusal(devices, batched, environ=None):
+            raise RuntimeError('block A failed')
+
+        with patch('quad_draft_tp.refusal', Mock(side_effect=refusal)):
+            with self.assertRaises(RuntimeError):
+                self.prepare(coordinator, bridges)
+        self.assertNotIn(('sync',), LOG)
+
+
 class RefusalTests(Harness):
     def test_a_value_but_two_is_refused_by_name_and_no_quad_forms(self):
         for value in ('1', '3', 'two'):
@@ -205,9 +238,11 @@ class RefusalTests(Harness):
                 self.Pair.instances = []
 
     def test_the_named_reasons(self):
-        ok = {FLAG: '1', BLOCKS: '2', 'QWEN_FAST_TP': '4'}
+        ok = {FLAG: '1', BLOCKS: '2', 'QWEN_FAST_TP': '4', 'QWEN_FAST_EXTENT_REPLAY': '1', 'QWEN_FAST_PACKED_PROPOSAL': '1'}
         self.assertIsNone(quad_draft_tp.blocks_refusal(8, ok))
         self.assertIsNone(quad_draft_tp.blocks_refusal(None, ok))
+        # a round has no pool to ask about: the extent replay and the packed proposal are the attach's question (users given) only
+        self.assertIsNone(quad_draft_tp.blocks_refusal(None, {k: v for k, v in ok.items() if k != 'QWEN_FAST_EXTENT_REPLAY'}))
         self.assertIsNone(quad_draft_tp.blocks_refusal(3, {}), 'off: nothing to refuse')
         self.assertIsNone(quad_draft_tp.blocks_refusal(3, {BLOCKS: '0'}))
         for environ, users, text in ((dict(ok, **{BLOCKS: '3'}), None, 'must be 2'),
@@ -217,6 +252,9 @@ class RefusalTests(Harness):
                                      (dict(ok, **{FLAG: '0'}), None, 'needs QWEN_FAST_QUAD_DRAFT=1'),
                                      ({k: v for k, v in ok.items() if k != FLAG}, None, 'needs QWEN_FAST_QUAD_DRAFT=1'),
                                      (dict(ok, **{quad_draft.AUDIT_FLAG: 'all'}), None, 'QWEN_FAST_QUAD_DRAFT_AUDIT'),
+                                     ({k: v for k, v in ok.items() if k != 'QWEN_FAST_EXTENT_REPLAY'}, 8, 'needs QWEN_FAST_EXTENT_REPLAY=1'),
+                                     (dict(ok, QWEN_FAST_EXTENT_REPLAY='0'), 8, 'needs QWEN_FAST_EXTENT_REPLAY=1'),
+                                     ({k: v for k, v in ok.items() if k != 'QWEN_FAST_PACKED_PROPOSAL'}, 8, 'needs QWEN_FAST_PACKED_PROPOSAL=1'),
                                      (ok, 4, 'needs eight seats (the pool has 4)'),
                                      (ok, 16, 'needs eight seats (the pool has 16)')):
             with self.subTest(text=text, users=users):
@@ -269,10 +307,44 @@ class RefusalTests(Harness):
                 self.assertIn('needs eight seats (the pool has %d)' % users, str(caught.exception))
                 self.assertIn(BLOCKS, str(caught.exception))
 
+    def test_the_attach_refuses_the_flag_whatever_else_is_set(self):
+        # Requested with the quad flag off, or without the extent replay or the packed proposal, the attach refuses by name: a later round never
+        # silently skips the flag (and a quad never builds without the pool's pre-trace buffers).
+        import dflash_packed_proposal_coordinator as coordinator
+
+        base_flags = {FLAG: '1', BLOCKS: '2', 'QWEN_FAST_TP': '4', 'QWEN_FAST_EXTENT_REPLAY': '1', 'QWEN_FAST_PACKED_PROPOSAL': '1'}
+        for name, flags, text in (('quad flag off', {FLAG: '0'}, 'needs QWEN_FAST_QUAD_DRAFT=1'),
+                                  ('quad flag unset', {FLAG: None}, 'needs QWEN_FAST_QUAD_DRAFT=1'),
+                                  ('no extent replay', {'QWEN_FAST_EXTENT_REPLAY': None}, 'QWEN_FAST_EXTENT_REPLAY=1'),
+                                  ('no packed proposal', {'QWEN_FAST_PACKED_PROPOSAL': None}, 'QWEN_FAST_PACKED_PROPOSAL=1')):
+            for shapes in (coordinator.pooled_draft_mask_shapes, coordinator.pooled_draft_output_shapes):
+                with self.subTest(name=name, shapes=shapes.__name__):
+                    merged = dict(base_flags, **flags)
+                    with patch.dict(os.environ, {key: value for key, value in merged.items() if value is not None}, clear=False):
+                        for key, value in merged.items():
+                            if value is None:
+                                os.environ.pop(key, None)
+                        with self.assertRaises(ValueError) as caught:
+                            shapes(8, 16)
+                    self.assertIn(text, str(caught.exception))
+                    self.assertIn(BLOCKS, str(caught.exception))
+        with patch.dict(os.environ, base_flags):
+            self.assertIn((4, 5, 6, 7), coordinator.pooled_draft_mask_shapes(8, 16))
+            coordinator.refuse_quad_blocks(8)
+
+    def test_the_attach_calls_the_refusal_outside_the_extent_branch(self):
+        # Without QWEN_FAST_EXTENT_REPLAY serving_runtime builds no pool shapes at all, so the refusal must not live only in them.
+        with open(os.path.join(HERE, 'serving_runtime.py'), encoding='utf-8') as handle:
+            text = handle.read()
+        call = text.index('refuse_quad_blocks(policy')
+        self.assertLess(call, text.index('draft_masks = pooled_draft_mask_shapes('))
+        self.assertIn("QWEN_FAST_QUAD_DRAFT_BLOCKS', '') not in ('', '0')", text[call - 700:call])
+        self.assertNotIn('if extent_replay', text[call - 700:call].split('draft_masks = {}')[-1], 'unconditional on the extent replay')
+
     def test_the_attach_refuses_another_block_width(self):
         import dflash_packed_proposal_coordinator as coordinator
 
-        with self.assertRaises(ValueError) as caught:
+        with patch.dict(os.environ, {'QWEN_FAST_EXTENT_REPLAY': '1'}), self.assertRaises(ValueError) as caught:
             coordinator._pooled_quad_blocks(quad_draft_tp, 8, 32)
         self.assertIn('16-row T16', str(caught.exception))
 
@@ -281,8 +353,9 @@ class PooledShapesTests(Harness):
     def test_eight_seats_pool_a_mask_and_an_output_set_for_each_quad(self):
         import dflash_packed_proposal_coordinator as coordinator
 
-        masks = coordinator.pooled_draft_mask_shapes(8, 16)
-        outputs = coordinator.pooled_draft_output_shapes(8, 16)
+        with patch.dict(os.environ, {'QWEN_FAST_EXTENT_REPLAY': '1'}):
+            masks = coordinator.pooled_draft_mask_shapes(8, 16)
+            outputs = coordinator.pooled_draft_output_shapes(8, 16)
         for group in ((0, 1, 2, 3), (4, 5, 6, 7), (0, 1), (2, 3), (4, 5), (6, 7)):
             self.assertIn(group, masks)
         self.assertEqual(masks[(0, 1, 2, 3)], masks[(4, 5, 6, 7)])
@@ -429,8 +502,10 @@ class SmokeRulesTests(unittest.TestCase):
     ENV = {FLAG: '1', BLOCKS: '2'}
 
     @staticmethod
-    def log(*, markers=('0,1,2,3', '4,5,6,7'), rounds=5, extra=()):
+    def log(*, markers=('0,1,2,3', '4,5,6,7'), rounds=5, extra=(), pooled=('0,1,2,3', '4,5,6,7')):
         lines = ['[PINDIAG] quad draft engaged slots=[%s] heads=32/8 rows=64 sdpa=fold conv=110' % slots for slots in markers]
+        lines += ['[PINDIAG] draft mask pooled slots=[%s] shape=1x1x64x4160' % slots for slots in pooled]
+        lines += ['[PINDIAG] draft outputs pooled slots=[%s] head=1x1x64x16 projected=1x1x64x256' % slots for slots in pooled]
         lines += ['[PACKED-SELECT] round=%d pairs=[[0, 1, 2, 3], [4, 5, 6, 7]] users=8 calls=1 collect_ms=1.0 select_ms=2.0' % n
                   for n in range(1, rounds + 1)]
         lines += list(extra)
@@ -443,8 +518,61 @@ class SmokeRulesTests(unittest.TestCase):
         self.assertEqual(self.problems(self.log()), [])
 
     def test_the_four_user_rules_are_not_the_blocks_rules(self):
-        # concurrent4_steady alone cannot judge two quads
-        self.assertEqual(self.problems(self.log(markers=('0,1,2,3',), rounds=0), steady_eight=False), [])
+        # concurrent4_steady alone cannot judge two quads: the log is not read, and the profile is reported as not judged
+        problems = self.problems(self.log(markers=('0,1,2,3',), rounds=0), steady_eight=False)
+        self.assertEqual(len(problems), 1)
+        self.assertIn('the blocks were not judged', problems[0])
+        self.assertIn('concurrent8_steady', problems[0])
+
+    def test_a_blocks_profile_without_concurrent8_steady_fails_the_whole_check(self):
+        smoke = {'warmup': {}, 'concurrent4_steady': {}}
+        env = {FLAG: '1', BLOCKS: '2', 'QWEN_FAST_TP': '4'}
+        drafts = check.draft_facts(self.log())
+        steady = 'concurrent4_steady' in smoke
+        self.assertTrue(check.draft_problems(drafts, env, steady, 'concurrent8_steady' in smoke))
+        self.assertEqual(check.draft_problems(drafts, env, steady, True), [])
+
+    def test_the_pooled_buffers_of_both_quads_are_required(self):
+        for pooled in (('0,1,2,3',), ('4,5,6,7',), ()):
+            with self.subTest(pooled=pooled):
+                problems = self.problems(self.log(pooled=pooled))
+                self.assertEqual(len(problems), 2, problems)
+                self.assertTrue(any('draft mask pooled' in problem for problem in problems))
+                self.assertTrue(any('draft outputs pooled' in problem for problem in problems))
+        only_mask = self.log().replace('[PINDIAG] draft outputs pooled slots=[4,5,6,7]', '[PINDIAG] draft outputs x slots=[4,5,6,7]')
+        problems = self.problems(only_mask)
+        self.assertEqual(len(problems), 1)
+        self.assertIn('slots 4,5,6,7', problems[0])
+
+    def test_any_pooled_refused_line_fails(self):
+        for line in ('[PINDIAG] draft mask pooled refused slots=[4,5,6,7] shape=1x1x64x4160: the pool holds []',
+                     '[PINDIAG] draft outputs pooled refused slots=[4,5,6,7]: copy refused: X: y',
+                     '[PINDIAG] draft outputs pooled refused at attach groups=[[4, 5, 6, 7]]: ValueError: x'):
+            with self.subTest(line=line):
+                problems = self.problems(self.log(extra=[line]))
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn('pooled refused', problems[0])
+
+    def test_with_the_singles_audit_each_quad_must_have_an_equal_audit_line(self):
+        env = dict(self.ENV, QWEN_FAST_DRAFT_SINGLES_AUDIT='all')
+
+        def audit(group, equal=1):
+            return '[DRAFT-SINGLES-AUDIT] round=3 group=%s equal=%d stage=head checks=4 ' % (group, equal)
+
+        both = self.log(extra=[audit('[0, 1, 2, 3]'), audit('[4, 5, 6, 7]')])
+        self.assertEqual(self.problems(both, env), [])
+        for kept in ('[0, 1, 2, 3]', '[4, 5, 6, 7]'):
+            with self.subTest(kept=kept):
+                problems = self.problems(self.log(extra=[audit(kept)]), env)
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn('no [DRAFT-SINGLES-AUDIT]', problems[0])
+        # a pair's audit line (group=[4, 5]) is not the quad's
+        problems = self.problems(self.log(extra=[audit('[0, 1]'), audit('[4, 5]')]), env)
+        self.assertEqual(len(problems), 1)
+        # an unequal line fails by the existing rule
+        self.assertTrue(self.problems(self.log(extra=[audit('[0, 1, 2, 3]'), audit('[4, 5, 6, 7]'), audit('[4, 5, 6, 7]', 0)]), env))
+        # without the audit flag the audit lines are not required
+        self.assertEqual(self.problems(self.log()), [])
 
     def test_one_marker_a_wrong_pair_of_markers_or_three_fail(self):
         for markers in (('0,1,2,3',), ('4,5,6,7',), ('0,1,2,3', '0,1,2,3'), ('0,1,2,3', '4,5,6,7', '0,1,2,3'), ()):
@@ -464,7 +592,9 @@ class SmokeRulesTests(unittest.TestCase):
 
     def test_a_blocks_value_other_than_two_or_without_the_quad_flag_fails_whatever_ran(self):
         self.assertIn('only 2 is served', self.problems(self.log(), {FLAG: '1', BLOCKS: '3'}, False)[0])
-        self.assertIn('no quad can form', self.problems(self.log(), {BLOCKS: '2'}, False)[0])
+        self.assertIn('no quad can form', self.problems(self.log(), {BLOCKS: '2', FLAG: '0'}, False)[0])
+        # the image sets QWEN_FAST_QUAD_DRAFT=1: a profile that does not name it relies on that default and is not refused for it
+        self.assertFalse([problem for problem in self.problems(self.log(), {BLOCKS: '2'}, True) if 'no quad can form' in problem])
         self.assertEqual(self.problems(self.log(), {FLAG: '1', BLOCKS: '0'}, False), [])
 
     def test_the_profile_flag_makes_the_profile_a_fast_path_one(self):
@@ -497,13 +627,18 @@ class ProfileTests(unittest.TestCase):
 
     def test_the_flag_is_in_no_other_profile(self):
         self.assertEqual(sorted(name for name, body in self.profiles()['profiles'].items() if BLOCKS in body.get('env', {})),
-                         ['c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit',
+                         ['c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-best-quad-gate', 'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit',
                           'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship'])
 
     def test_the_smoke_rules_read_the_profiles_env(self):
         env = self.profiles()['profiles']['c2-packed-tp4-8-best-quad']['env']
         self.assertEqual((env[FLAG], env[BLOCKS]), ('1', '2'))
         self.assertTrue(check.draft_problems(check.draft_facts(''), env, False, True), 'a log with no marker fails it')
+        gate = self.profiles()['profiles']['c2-packed-tp4-8-best-quad-gate']['env']
+        self.assertEqual(gate['QWEN_FAST_DRAFT_SINGLES_AUDIT'], 'all')
+        problems = check.draft_problems(check.draft_facts(SmokeRulesTests.log()), gate, False, True)
+        self.assertEqual(len(problems), 1, 'the markers and the pooled lines pass; the missing audit lines fail')
+        self.assertIn('no [DRAFT-SINGLES-AUDIT]', problems[0])
 
     def test_the_description_names_no_host_address_registry_or_digest(self):
         from test_tp4_next5 import BANNED
