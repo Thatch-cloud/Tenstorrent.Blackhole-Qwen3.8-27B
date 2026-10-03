@@ -213,7 +213,7 @@ class ArmTests(unittest.TestCase):
         document = profiles()
         self.assertEqual(gate.PLANS, job.PREFIX_PLANS + tuple(arm for arm, _ in job.PREFIX_ARM_PLANS))
         self.assertEqual(sorted(arm for arm, _ in job.PREFIX_ARM_PLANS),
-                         sorted(entry[0] for plan in ('exactness', 'lifecycle') for entry in gate.PLAN_ARMS[plan]))
+                         sorted(entry[0] for plan in ('exactness', 'lifecycle', 'agent-turns') for entry in gate.PLAN_ARMS[plan]))
         for arm, plan in job.PREFIX_ARM_PLANS:
             with self.subTest(arm=arm):
                 alone = gate.plan_arms(arm, 'general-prefix', 'general', document)
@@ -322,7 +322,8 @@ class ShapeTests(unittest.TestCase):
             for arm in gate.plan_arms(plan, 'general-prefix', 'general', document):
                 wanted[arm['arm']] = gate.wants_digests(arm)
         self.assertEqual(sorted(name for name, on in wanted.items() if not on),
-                         ['bringup-reference', 'timing-baseline', 'timing-prefix'])
+                         ['agent-turns-baseline', 'agent-turns-prefix', 'bringup-reference', 'timing-baseline',
+                          'timing-prefix'])
 
     def test_the_contract_reads_the_derived_file(self):
         """serving_c2_contract.boot loads QWEN_C2_PROFILES: the derived file is what serves, and its

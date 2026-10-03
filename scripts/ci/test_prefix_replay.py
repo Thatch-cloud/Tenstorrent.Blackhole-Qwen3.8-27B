@@ -1971,5 +1971,98 @@ class StickyScenarioTests(unittest.TestCase):
                 self.assertTrue(live, 'the four agents decoded in one packed round')
 
 
+class AgentTurnsScenarioTests(unittest.TestCase):
+    """tp4/packed-prefix: the agent-turn replay (scenario_agent_turns) on the sticky fake, two arms over the same
+    conversations (prefix_agent_turns reads them), and the shared-block arm's eight-agent form on an eight-seat driver."""
+
+    def setUp(self):
+        self.engine = None
+        patcher = burst_aware(lambda: self.engine)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_arm(self, arm):
+        self.engine = engine = sticky_engine()
+        driver = sticky_driver(engine, arm)
+        with mock.patch.object(replay, 'TIMING_FIRST_RANGE', (5000, 9000)):
+            replay.scenario_agent_turns(driver, agents=(3,), turns=4, max_tokens=24, gap_mean_s=0.0)
+        return driver, resolved(driver, engine)
+
+    def test_the_replay_is_eight_agents_of_eight_turns_by_default_and_short_answers(self):
+        self.assertEqual((replay.AGENT_TURNS_AGENTS, replay.AGENT_TURNS, replay.AGENT_TURN_MAX_TOKENS), ((8,), 8, 192))
+        self.assertIn('agent_turns', replay.SCENARIOS)
+
+    def test_each_agent_runs_its_turns_as_one_growing_conversation_under_its_own_salt(self):
+        driver, records = self.run_arm('agent-turns-prefix')
+        self.assertEqual(sorted(driver.phases), ['agents-3'])
+        agents = [r for r in records if r['role'] == 'agent']
+        self.assertEqual(len(agents), 12)
+        self.assertEqual(len(set(r['salt'] for r in agents)), 3)
+        by_conv = {}
+        for r in agents:
+            by_conv.setdefault(r['conv'], []).append(r)
+        self.assertEqual(len(by_conv), 3)
+        for conv, turns in by_conv.items():
+            turns.sort(key=lambda r: r['turn'])
+            self.assertEqual([r['turn'] for r in turns], [0, 1, 2, 3], conv)
+            sizes = [r['prompt_tokens'] for r in turns]
+            self.assertEqual(sizes, sorted(sizes), 'the context only grows')
+            self.assertTrue(all(r['continuation'] for r in turns[1:]) and not turns[0]['continuation'])
+
+    def test_the_prefix_arm_reuses_tokens_on_returning_turns_and_the_rows_say_how_many(self):
+        import prefix_agent_turns as agent_turns
+        driver, records = self.run_arm('agent-turns-prefix')
+        rows = agent_turns.turn_rows(records)
+        self.assertEqual(len(rows), 12)
+        self.assertTrue(any(row['reused'] for row in rows if row['continuation']))
+        for row in rows:
+            if row['reused']:
+                self.assertEqual(row['reused'] + row['new'], row['prompt_tokens'])
+                self.assertEqual(row['reused'] % 2048, 0)
+        problems, missing, lines = agent_turns.reuse_findings(records)
+        self.assertEqual(problems, [])
+        self.assertEqual(missing, [], lines)
+
+    def test_two_arms_send_the_same_conversations_and_their_transcripts_agree(self):
+        import prefix_agent_turns as agent_turns
+        _, mine = self.run_arm('agent-turns-prefix')
+        _, control = self.run_arm('agent-turns-baseline')
+        result = agent_turns.compare(mine, control, 'prefix', 'control')
+        self.assertEqual(result['problems'], [])
+        self.assertEqual(result['verdict'], 'PASS')
+        self.assertEqual(result['counts']['IDENTICAL'], 12)
+
+    def test_the_shared_arm_is_four_agents_on_a_four_seat_driver_and_eight_on_an_eight_seat_one(self):
+        self.assertEqual(len(replay.SHARED_AGENT_TARGETS), 4)
+        self.assertEqual(len(replay.SHARED_AGENT_TARGETS_8), 8)
+        self.assertEqual(replay.SHARED_AGENT_TARGETS_8[:4], replay.SHARED_AGENT_TARGETS)
+        small = ((5000, 9000), (4800, 7000), (4600, 6000), (4400, 5200), (5200, 8000), (5100, 7500), (4900, 6500),
+                 (4700, 5600))
+        for seats, count in ((4, 4), (8, 8)):
+            with self.subTest(seats=seats), mock.patch.object(replay, 'SHARED_AGENT_TARGETS_8', small),                     mock.patch.object(replay, 'SHARED_AGENT_TARGETS', small[:4]),                     mock.patch.object(replay, 'SHARED_AGENT_MAX_TOKENS', 32):
+                self.engine = engine = sticky_engine(QWEN_PREFIX_AUDIT='1', QWEN_FAST_EXTENT_AUDIT='1')
+                driver = sticky_driver(engine, 'exactness-shared')
+                driver.seats = seats
+                replay.SCENARIOS['exactness_shared'](driver)
+                kinds = [pair['kind'] for pair in driver.pairs]
+                self.assertEqual(kinds, ['sequential'] * count + ['concurrent'] * count)
+                self.assertEqual(len(set(r['conv'] for r in driver.records if r['role'] == 'hit')), count)
+
+    def test_the_chain_runs_through_the_262k_targets_only_where_the_prompt_limit_reaches_them(self):
+        self.assertEqual(replay.CHAIN_HITS_262K, (150000, 200000))
+        engine = sticky_engine(context=262144)
+        driver = sticky_driver(engine, 'exactness-eager', prompt_limit=253920)
+        driver.context_tokens = 262144
+        hits = replay.chain_hits(driver, True)
+        self.assertEqual(hits[-1], 253920)
+        for target in (150000, 200000):
+            self.assertIn(target, hits)
+        self.assertEqual(list(hits), sorted(set(hits)))
+        small = sticky_driver(sticky_engine(), 'exactness-eager', prompt_limit=123136)
+        small.context_tokens = 131328
+        self.assertEqual(replay.chain_hits(small, True)[-1], 123136)
+        self.assertNotIn(150000, replay.chain_hits(small, True))
+
+
 if __name__ == '__main__':
     unittest.main()

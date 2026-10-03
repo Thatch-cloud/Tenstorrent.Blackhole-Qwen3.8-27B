@@ -8178,6 +8178,110 @@
       "parser_rechunk": true,
       "gate_only": true
     },
+    "c2-packed-tp4-8x262k-prefix-gate": {
+      "description": "GATE ONLY (the audited arm; never for traffic): c2-packed-tp4-8x262k-best (both verify audits on) with sticky sessions, the flag-on twin of the control for the exactness and the audited attach. Sticky sessions on the TP4 eight-seat 262k packed path (tp4/packed-prefix, stage 1): QWEN_FAST_STICKY_SESSIONS=1 beside QWEN_PREFIX_REUSE=1. A turn that extends an earlier one of the same salted conversation resumes exactly from the last 2048-token boundary at or below its prompt minus 2048 whose GDN checkpoint and KV prefix the prefix-reuse grafts kept - vLLM's prefix cache (sha256 block hashes, published below floor2048(P)) and the host checkpoint store (QWEN_PREFIX_STORE_GIB) - and prefills only the tail; the drafter window is always produced by that tail's own chunks, so the drafter state after a hit equals a cold prefill's; the per-request engine is built as on the no-reuse parent, and anything else takes the parent's cold path. A hit is byte-identical to a cold prefill of the same prompt (the G1 exactness argument: the same chunk program from a canonical checkpoint). Hits need a platform-minted cache_salt (serving_c2_contract.salt_verdict); unsalted requests neither hit nor publish. The argv is the parent's with enable-prefix-caching and enable-chunked-prefill in place of the no- flags (vLLM asserts chunking for a hybrid model with prefix caching; the TT platform turns it off again) and prefix-caching-hash-algo sha256. Kill switch: the prefix-reuse.off file under the image's .qwen-c2 directory. Everything else is the parent's (every lever, the 19,968-block pooled KV cache under the reservation admission, the waiver marker, the gate limits). UNVERIFIED on hardware, every result UNQUALIFIED (the 262k evidence waiver): the sticky-session hardware ladder has not run at TP4; this profile is what it runs.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "262144",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "1",
+        "QWEN_FAST_FUSED_COMMIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "1",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "1",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "1",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "1",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_PACKED_SAMPLER_IN_TRACE": "1",
+        "QWEN_FAST_M3_BLOCKS": "2",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_262K_EVIDENCE_WAIVER": "1",
+        "QWEN_FAST_M3_REQUEST_WARM": "1",
+        "QWEN_FAST_KV_RESERVATION": "1",
+        "QWEN36_MAX_TOKENS_ALL_USERS": "1277440",
+        "QWEN_FAST_DRAM_ENGINE_BUILD_MB": "800",
+        "QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB": "600",
+        "QWEN_FAST_DRAM_LARGEST_BUFFER_MB": "256",
+        "QWEN_FAST_TP4_COMMIT_LANES": "1",
+        "QWEN_FAST_TP4_SHARD_VALUES": "1",
+        "QWEN_FAST_TP4_GDN_GLUE": "1",
+        "QWEN_FAST_TP4_GDN_BLOCK_CONV": "1",
+        "QWEN_FAST_TP4_ATTN_FOLD": "1",
+        "QWEN_FAST_QUAD_DRAFT_BLOCKS": "2",
+        "QWEN_PREFIX_REUSE": "1",
+        "QWEN_PREFIX_STORE_GIB": "8",
+        "QWEN_FAST_STICKY_SESSIONS": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 262144,
+        "max-num-seqs": 8,
+        "max-num-batched-tokens": 262144,
+        "block-size": 64,
+        "num-gpu-blocks-override": 19968,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 536870912,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        },
+        "enable-prefix-caching": true,
+        "enable-chunked-prefill": true,
+        "prefix-caching-hash-algo": "sha256"
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "drafter_headroom_tokens": 32,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
     "c2-packed-tp4-8x262k-best-audit": {
       "description": "GATE ONLY (the lever-audited twin; tp4/262k8): c2-packed-tp4-8x262k-best plus QWEN_FAST_FUSED_COMMIT_AUDIT=1 (every fused publication is shadowed by today's eager one and compared, both blocks), QWEN_FAST_TP4_VGLUE_AUDIT=1 (each engaged verify-glue lever is compared with the served path in the trace) and QWEN_FAST_DRAFT_SINGLES_AUDIT=all (every member of each batched quad is drafted again on its own single-user capture with the same seed and compared bit for bit: a wrong quad draft for seats 4 to 7 only lowers acceptance, so text equality cannot see it; as c2-packed-tp4-8-best-quad-gate does at 131k, the smoke requires an equal=1 line for each of the groups [0, 1, 2, 3] and [4, 5, 6, 7]). It carries QWEN_FAST_262K_EVIDENCE_WAIVER=1 as the 8x262k gate-only profiles do (every result UNQUALIFIED). The attach smoke arm: the audits add blocking readbacks and the singles audit extra drafts, so it is never a timed one. Pool and levers as c2-packed-tp4-8x262k-best (19968 blocks).",
       "eos_ids": [
@@ -8374,6 +8478,110 @@
           "draft_sample_method": "greedy",
           "rejection_sample_method": "standard"
         }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "drafter_headroom_tokens": 32,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-8x262k-prefix-time-gate": {
+      "description": "GATE ONLY (the timed arm, audits off; never for traffic): c2-packed-tp4-8x262k-best-time-gate with sticky sessions, the flag-on twin of the timed control for the agent-turn replay (prefix against control, ABAB). Sticky sessions on the TP4 eight-seat 262k packed path (tp4/packed-prefix, stage 1): QWEN_FAST_STICKY_SESSIONS=1 beside QWEN_PREFIX_REUSE=1. A turn that extends an earlier one of the same salted conversation resumes exactly from the last 2048-token boundary at or below its prompt minus 2048 whose GDN checkpoint and KV prefix the prefix-reuse grafts kept - vLLM's prefix cache (sha256 block hashes, published below floor2048(P)) and the host checkpoint store (QWEN_PREFIX_STORE_GIB) - and prefills only the tail; the drafter window is always produced by that tail's own chunks, so the drafter state after a hit equals a cold prefill's; the per-request engine is built as on the no-reuse parent, and anything else takes the parent's cold path. A hit is byte-identical to a cold prefill of the same prompt (the G1 exactness argument: the same chunk program from a canonical checkpoint). Hits need a platform-minted cache_salt (serving_c2_contract.salt_verdict); unsalted requests neither hit nor publish. The argv is the parent's with enable-prefix-caching and enable-chunked-prefill in place of the no- flags (vLLM asserts chunking for a hybrid model with prefix caching; the TT platform turns it off again) and prefix-caching-hash-algo sha256. Kill switch: the prefix-reuse.off file under the image's .qwen-c2 directory. Everything else is the parent's (every lever, the 19,968-block pooled KV cache under the reservation admission, the waiver marker, the gate limits). UNVERIFIED on hardware, every result UNQUALIFIED (the 262k evidence waiver): the sticky-session hardware ladder has not run at TP4; this profile is what it runs.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "262144",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "1",
+        "QWEN_FAST_FUSED_COMMIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "1",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "1",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_PACKED_SAMPLER_IN_TRACE": "1",
+        "QWEN_FAST_M3_BLOCKS": "2",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_262K_EVIDENCE_WAIVER": "1",
+        "QWEN_FAST_M3_REQUEST_WARM": "1",
+        "QWEN_FAST_KV_RESERVATION": "1",
+        "QWEN36_MAX_TOKENS_ALL_USERS": "1277440",
+        "QWEN_FAST_DRAM_ENGINE_BUILD_MB": "800",
+        "QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB": "600",
+        "QWEN_FAST_DRAM_LARGEST_BUFFER_MB": "256",
+        "QWEN_FAST_TP4_COMMIT_LANES": "1",
+        "QWEN_FAST_TP4_SHARD_VALUES": "1",
+        "QWEN_FAST_TP4_GDN_GLUE": "1",
+        "QWEN_FAST_TP4_GDN_BLOCK_CONV": "1",
+        "QWEN_FAST_TP4_ATTN_FOLD": "1",
+        "QWEN_FAST_QUAD_DRAFT_BLOCKS": "2",
+        "QWEN_PREFIX_REUSE": "1",
+        "QWEN_PREFIX_STORE_GIB": "8",
+        "QWEN_FAST_STICKY_SESSIONS": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 262144,
+        "max-num-seqs": 8,
+        "max-num-batched-tokens": 262144,
+        "block-size": 64,
+        "num-gpu-blocks-override": 19968,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 536870912,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        },
+        "enable-prefix-caching": true,
+        "enable-chunked-prefill": true,
+        "prefix-caching-hash-algo": "sha256"
       },
       "min_answer_tokens": 256,
       "default_max_tokens": 8192,

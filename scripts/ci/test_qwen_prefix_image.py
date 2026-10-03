@@ -70,7 +70,9 @@ GATE_ONLY_OTHERS = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audi
                     'c2-packed-tp4-warm4-control', 'c2-packed-tp4-warm4-diag', 'c2-packed-tp4-warm4-diag-oldtail',
                     'c2-packed-tp4-warm4-even-diag', 'c2-packed-tp4-warm4-gate', 'c2-packed-tp4-speed-warm4')
 # The fast path's prefix-reuse profiles (sticky sessions): test_sticky_sessions holds them.
-STICKY_PROFILES = ('c2-packed-prefix', 'c2-packed-prefix-gate')
+# tp4/packed-prefix: the eight-seat 262k twins, gate-only (test_tp4_packed_prefix_profiles holds them).
+STICKY_GATE_ONLY = ('c2-packed-tp4-8x262k-prefix-gate', 'c2-packed-tp4-8x262k-prefix-time-gate')
+STICKY_PROFILES = ('c2-packed-prefix', 'c2-packed-prefix-gate') + STICKY_GATE_ONLY
 JOB = Path('C:/Users/liamb/.claude/jobs/8376c877/tmp')
 PLUGIN_CHECKOUT = Path(os.environ.get('QWEN_TT_PLUGIN_CHECKOUT') or JOB / 'risks' / 'vllm-tt-plugin')
 IMG_TREE = Path(os.environ.get('QWEN_IMG_TREE') or JOB / 'matmul-attr' / 'img')
@@ -272,7 +274,7 @@ class ProfileTests(unittest.TestCase):
         self.assertTrue(eager['description'].startswith('GATE ONLY'))
         self.assertIs(eager['gate_only'], True)
         self.assertEqual(sorted(name for name, profile in profiles()['profiles'].items() if profile.get('gate_only')),
-                         sorted(('general-prefix-eager',) + GATE_ONLY_OTHERS))
+                         sorted(('general-prefix-eager',) + GATE_ONLY_OTHERS + STICKY_GATE_ONLY))
 
     def test_the_prefix_profiles_launch_with_prefix_caching_and_chunking_on(self):
         for name in PREFIX_PROFILES:

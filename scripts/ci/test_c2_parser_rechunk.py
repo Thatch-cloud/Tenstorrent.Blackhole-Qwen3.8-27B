@@ -918,6 +918,8 @@ class ProfileGatingTests(unittest.TestCase):
                                  'c2-packed-tp4-8x262k-diag-strace': True,
                                  'c2-packed-tp4-8x262k-best': True, 'c2-packed-tp4-8x262k-best-audit': True, 'c2-packed-tp4-8x262k-best-time-gate': True,
                                  'c2-packed-tp4-8x262k-ship': True,
+                                 # tp4/packed-prefix: the sticky-session twins (the parser and limits of their parents)
+                                 'c2-packed-tp4-8x262k-prefix-gate': True, 'c2-packed-tp4-8x262k-prefix-time-gate': True,
                                  'coding': None, 'general': None, 'general-prefix': None,
                                  'general-prefix-eager': None,
                                  # the four-card (TP4) G1 family decodes one token per step, as general does
@@ -949,7 +951,8 @@ class ProfileGatingTests(unittest.TestCase):
                                       'c2-packed-tp4-8-diag-strace-rshard', 'c2-packed-tp4-262k-gate', 'c2-packed-tp4-8x262k',
                                       'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate',
                                       'c2-packed-tp4-8x262k-diag-strace', 'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit',
-                                      'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship'), name)
+                                      'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship',
+                                      'c2-packed-tp4-8x262k-prefix-gate', 'c2-packed-tp4-8x262k-prefix-time-gate'), name)
         with self.assertRaisesRegex(ValueError, 'parser_rechunk must be true or false'):
             contract.parser_rechunk({'parser_rechunk': 'yes'})
 
