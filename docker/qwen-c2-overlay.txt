@@ -349,5 +349,7 @@ scripts/ci/gdn_block_conv_tp.py
 scripts/ci/attention_block_fold_tp.py
 scripts/ci/attention_block_fold_tp.cpp
 scripts/ci/extent_attention_fold_tp.py
+# The long-context SDPA configuration (tp4/sdpa-long, QWEN_FAST_TP4_SDPA, default off): sdpa_long_tp.RUNTIME_FILES, imported by extent_attention_fold_tp.
+scripts/ci/sdpa_long_tp.py
 # Traced publication K/V fusion head-count fix (tp4/next-3-scope): its TP4 sibling cache slices the per-chip KV head count.
 scripts/ci/dflash_traced_publish.py

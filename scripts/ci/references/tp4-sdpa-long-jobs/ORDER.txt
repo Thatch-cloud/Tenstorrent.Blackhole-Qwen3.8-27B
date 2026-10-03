@@ -1,0 +1,26 @@
+# The order of the tp4/sdpa-long window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window (its product is data).
+# Image: tp4-next-3a, the four-card image already on the rig (it carries the K64j op graft the sweep needs). NO build job (B0) is needed: the
+# sweep harness mounts its scripts from the checkout, mounts no graft and needs no weights, and nothing in this window serves the new flag.
+# Minutes: runner time for ONE run of the job.
+#
+# THE LANE. Long-context SDPA bandwidth at TP4 (design: per-chip decode attention reads K and V at about 150 GB/s against about 405 GB/s of
+# DRAM; at a 262,144-token window attention is the largest term of the round). Q1 is the one-card sweep that times every candidate
+# configuration against the served call and byte-compares each with it; it applies nothing. Its arms are the values of QWEN_FAST_TP4_SDPA
+# (scripts/ci/sdpa_long_tp.py): served, grid8x4, grid8x10, grid11x4, grid4x8 (servable: placement only), multi, rowsplit, ra (measured only).
+#
+# PRODUCTION IS LIVE ON THE CARDS when the window opens: A0 (agentstop, unserve) is the first job and the only one that takes it down. Q1 then
+# runs on card M alone (the cardm step; no reset needed). H1 hands back.
+# WHAT COMES AFTER (a later window, not this order): when Q1's winners are read, edit the one value of the profile c2-packed-tp4-best-sdpa
+# (QWEN_FAST_TP4_SDPA, a placeholder "served" today) to the winner, build an image from the pushed tp4/sdpa-long commit (the flag's module is new, and
+# tp4-next-3a does not carry it), run the audited matrix on it, the 5/5 hang gates, then ABAB timed pairs against c2-packed-tp4-best-strace at
+# 4 x 4k, 4 x 32k and 4 x 131k, judged PAIRED per round, never by an unpaired median. Only a name that Q1 found exact (differing_rows 0 in every
+# case of its kind) and that the flag accepts as servable can be tried; the engaged line "[PINDIAG] tp4 sdpa engaged" must appear in the engine log.
+# HAND-BACK (H1) runs LAST and even when any earlier job failed or hung: status, the all-four reset, the fabric re-measure, agentstart. It
+# starts the node agent again with nothing placed. An owner /deploy is still needed, always, to place TODAY'S PRODUCTION RECIPE (and anything new); this order never includes a deploy,
+# a :latest retag or a placement call.
+# Never cancel a running card job (root-owned logs): the next job's reset heals the cards.
+# Durations (estimate, wall clock): A0 10 min; Q1 40-50 (container timeout 50); H1 25. Whole window: about 1.5 h.
+A0-agentstop-unserve stop tp4-next-3a 10
+Q1-sdpa-long-sweep optional tp4-next-3a 50
+H1-handback-reset-fabric-agentstart stop tp4-next-3a 25

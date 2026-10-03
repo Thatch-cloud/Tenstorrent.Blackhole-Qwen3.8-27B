@@ -4647,6 +4647,97 @@
       "parser_rechunk": true,
       "gate_only": true
     },
+    "c2-packed-tp4-best-sdpa": {
+      "description": "GATE ONLY (timing twin of c2-packed-tp4-best-strace, long-context SDPA configuration): c2-packed-tp4-best-strace plus QWEN_FAST_TP4_SDPA=served, nothing else. The flag value is the NAME of an SDPA decode configuration the one-card sweep (optimisation/ttnn-op/sdpa_tp4_long, job pack tp4-sdpa-long-jobs) measured; PLACEHOLDER: \"served\" is the explicit no-op (the plumbing control: the flag is read, the engaged line is logged, the served call runs unchanged), so this profile is the control twin until a sweep names a winner. After the sweep picks one, edit the one value to that name (a servable one: grid8x4, grid8x10, grid11x4 or grid4x8 today; multi, rowsplit and ra are measured but refused until their reader work lands) and pair it with c2-packed-tp4-best-strace on the same image: the flag is the only difference. Every named servable configuration is placement only, byte-identical to the served call by construction and proven per row by the sweep. Not for traffic. UNVERIFIED on hardware.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "131328",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "1",
+        "QWEN_FAST_FUSED_COMMIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "1",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "1",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_TP4_COMMIT_LANES": "1",
+        "QWEN_FAST_TP4_SHARD_VALUES": "1",
+        "QWEN_FAST_TP4_GDN_GLUE": "1",
+        "QWEN_FAST_TP4_GDN_BLOCK_CONV": "1",
+        "QWEN_FAST_TP4_ATTN_FOLD": "1",
+        "QWEN_FAST_PACKED_SAMPLER_IN_TRACE": "1",
+        "QWEN_FAST_TP4_SDPA": "served"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 131328,
+        "max-num-seqs": 4,
+        "max-num-batched-tokens": 131328,
+        "block-size": 64,
+        "num-gpu-blocks-override": 8208,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 268435456,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
     "c2-packed-tp4-best-ship": {
       "description": "C2-packed-any at TP4, the FOUR-SEAT BEST-LEVERS TRAFFIC candidate (tp4/next-4; not the file default and not production today; the served default only of an image built with C2_BAKE_DEFAULT_PROFILE, the ship variant): c2-packed-tp4 (the verified winning recipe: verify audits off, the pinned sampler recorded in the verify trace, the tail caps, 4 x 131,328 limits, no gate marker) plus exactly the nine levers c2-packed-tp4-best-strace proved on hardware 2026-10-03: the quad draft (QWEN_FAST_QUAD_DRAFT=1), the fused commit in place on live banks (QWEN_FAST_FUSED_COMMIT, _INPLACE, _LIVE_BANKS) and the five verify-glue levers (QWEN_FAST_TP4_COMMIT_LANES, _SHARD_VALUES, _GDN_GLUE, _GDN_BLOCK_CONV, _ATTN_FOLD). Equivalently c2-packed-tp4-best-strace less the admission waiver marker (QWEN_C2_GATE_PROFILE), the gate limits and gate_only: production's prompt cap and 8,192-token answer room. The name c2-packed-tp4-best is the older gate-only combined-best timing control of the tp4/next windows and is unchanged.",
       "eos_ids": [
