@@ -1,0 +1,22 @@
+# The order of the four-card tp4/gluefix window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window (its product is data).
+# Image: tp4-gluefix-1 is a PLACEHOLDER for ONE FRESH tag, built from the pushed tp4/gluefix commit by B0 (build-only, runs FIRST while production serves); the driver substitutes it in every template.
+#
+# THE LANE. GDN glue quick wins from the TP4 performance audit, each behind its own flag, gate-only profiles only, production byte-identical with them off (the twin's _decode_packed returns the pinned call untouched):
+#   PAIR_SLICE  QWEN_FAST_GDN_PAIR_SLICE: the odd users' half-tile slices of the packed projection share ONE row-major conversion (about -18 us per GDN layer, -0.9 ms per four-user verify). V2 (QWEN_FAST_TP4_GDN_GLUE) already
+#              replaces these slices with one DMA launch and is engaged in the best recipe; this is its exact fallback and needs no new kernel. Audited arm G1, timed pair GT1-GT4 (control = speed-strace, V2 off).
+#   DISPATCH    QWEN_FAST_GDN_DISPATCH_DIAG: a host log of each layer's launch order (DD1). The ~16 us conv-gates dispatch stall has no host-side cause in the trace replay, so there is no fix flag; V1 (one conv-gates launch per layer)
+#              already removes three of the four launches in the best recipe.
+# The timing pair GT1-GT4 is an ABAB (control, lever, control, lever, each after its own all-four reset). Nothing combined has run on a card. Judge GT pairs PAIRED per round.
+# Skip rules: if G1 fails (audit mismatch, a missing entry, a hang), skip GT1-GT4. If GT2's log shows 'pair slice fell back' or no 'pair slice engaged' the smoke fails it: fix before GT3/GT4. A hang on a timed arm is a finding; the next job's reset heals the cards.
+# HAND-BACK (H1) runs LAST and even when any earlier job failed. An owner /deploy is still needed to place today's production recipe; this order never includes a deploy or a :latest retag.
+# Durations (estimate): B0 18 min; A0 10; G1 60-120; GT1-GT4 30-60 each; DD1 30-45; H1 25. Whole window: about 5.5 h; the short form is A0, G1, GT1-GT4, H1.
+B0-build stop tp4-gluefix-1 30
+A0-agentstop-unserve stop tp4-gluefix-1 10
+G1-pairslice-exact-audited optional tp4-gluefix-1 120
+GT1-control-timed optional tp4-gluefix-1 60
+GT2-pairslice-timed optional tp4-gluefix-1 60
+GT3-control-timed optional tp4-gluefix-1 60
+GT4-pairslice-timed optional tp4-gluefix-1 60
+DD1-dispatchdiag-timed optional tp4-gluefix-1 45
+H1-handback-reset-fabric-agentstart stop tp4-gluefix-1 25

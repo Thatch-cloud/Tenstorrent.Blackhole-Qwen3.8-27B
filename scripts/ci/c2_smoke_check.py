@@ -86,6 +86,11 @@ VGLUE_FELL_BACK = '[PINDIAG] tp4 vglue fell back'
 DRAFT_WIDE_FLAG = 'QWEN_FAST_TP4_DRAFT_WIDE'
 DRAFT_WIDE_ENGAGED = '[PINDIAG] tp4 draft wide engaged'
 DRAFT_WIDE_FELL_BACK = '[PINDIAG] tp4 draft wide fell back'
+# tp4/gluefix (gdn_pair_slice_tp): the packed GDN block's odd-user slices from one row-major conversion. Same rule as the wide norms: a fall-back line fails
+# the smoke, and a profile that sets QWEN_FAST_GDN_PAIR_SLICE=1 without V2 (QWEN_FAST_TP4_GDN_GLUE, which replaces the slices and leaves it idle) must log the engaged line.
+PAIR_SLICE_FLAG = 'QWEN_FAST_GDN_PAIR_SLICE'
+PAIR_SLICE_ENGAGED = '[PINDIAG] tp4 pair slice engaged'
+PAIR_SLICE_FELL_BACK = '[PINDIAG] tp4 pair slice fell back'
 SLIDE_FLAG = 'QWEN_FAST_TP_KV_SLIDE'
 QUAD_FLAG = 'QWEN_FAST_QUAD_DRAFT'
 SINGLES_AUDIT_FLAG = 'QWEN_FAST_DRAFT_SINGLES_AUDIT'
@@ -512,6 +517,11 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     problems += ['a drafter norm fell back from the wide grid (the plain call ran, it saved nothing): %s' % line for line in wide_fell[:4]]
     if env is not None and env.get(DRAFT_WIDE_FLAG) == '1' and DRAFT_WIDE_ENGAGED not in container_text:
         problems.append('%s is set and no engaged line (%s) was logged: the wide norms never ran' % (DRAFT_WIDE_FLAG, DRAFT_WIDE_ENGAGED))
+    slice_fell = [line.strip()[:200] for line in container_text.splitlines() if PAIR_SLICE_FELL_BACK in line]
+    problems += ['the GDN pair slice fell back (the plain slices ran, it saved nothing): %s' % line for line in slice_fell[:4]]
+    if (env is not None and env.get(PAIR_SLICE_FLAG) == '1' and env.get('QWEN_FAST_TP4_GDN_GLUE') != '1'
+            and PAIR_SLICE_ENGAGED not in container_text):
+        problems.append('%s is set and no engaged line (%s) was logged: the shared conversion never ran' % (PAIR_SLICE_FLAG, PAIR_SLICE_ENGAGED))
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
     if env is not None and env.get('QWEN_FAST_TP', '2') != '2':

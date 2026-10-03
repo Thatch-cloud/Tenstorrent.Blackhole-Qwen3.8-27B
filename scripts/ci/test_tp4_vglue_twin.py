@@ -156,7 +156,9 @@ class TwinTests(PackedFixture):
     def test_only_the_two_methods_are_overridden_and_the_pinned_ones_reach_them_through_self(self):
         own = {name for name, value in vars(twin.DeviceLoopState).items() if callable(value) and not name.startswith('__')}
         self.assertTrue({'_recurrence_user_batched', '_finish_packed'} <= own)
-        for name in ('decode', '_decode_packed', '_recurrence', 'close'):
+        # _decode_packed is wrapped too (tp4/gluefix: the pair slice and the dispatch diagnostic), and calls the pinned one
+        self.assertIn('_decode_packed', own)
+        for name in ('decode', '_recurrence', 'close'):
             self.assertNotIn(name, own)
         source = (HERE / 'gdn_device_loop_state.py').read_text()
         self.assertIn('self._recurrence_user_batched(projected, spans, slots, entries, owned)', source)

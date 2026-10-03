@@ -13,6 +13,11 @@ and the pair's launches stay exactly what they were.
   QWEN_FAST_TP4_ATTN_FOLD      V3a  attention query fold-in / result fold-out as one DMA launch each.
   QWEN_FAST_TP4_VGLUE_AUDIT    a correctness arm only: each engaged lever is compared with the served path in-trace.
 
+tp4/gluefix adds two flags that are not levers of this table (gdn_pair_slice_tp has them): QWEN_FAST_GDN_PAIR_SLICE (the odd users'
+half-tile slices of the packed projection share ONE row-major conversion; only when V2 is off, V2 already replaces the slices) and
+QWEN_FAST_GDN_DISPATCH_DIAG (a host log of each GDN layer's launch order and enqueue gaps). Both are strict, refused at the pair, and
+PAIR_SLICE is audited by QWEN_FAST_TP4_VGLUE_AUDIT like a lever.
+
 Markers: FALLBACK and AUDIT_MISMATCH fail a gated arm; ENGAGED is the proof a lever ran.
 
 Stdlib only, py 3.7.
@@ -28,9 +33,11 @@ GDN_GLUE = 'QWEN_FAST_TP4_GDN_GLUE'
 GDN_BLOCK_CONV = 'QWEN_FAST_TP4_GDN_BLOCK_CONV'
 ATTN_FOLD = 'QWEN_FAST_TP4_ATTN_FOLD'
 AUDIT = 'QWEN_FAST_TP4_VGLUE_AUDIT'
+PAIR_SLICE = 'QWEN_FAST_GDN_PAIR_SLICE'
+DISPATCH_DIAG = 'QWEN_FAST_GDN_DISPATCH_DIAG'
 
 LEVERS = (COMMIT_LANES, SHARD_VALUES, GDN_GLUE, GDN_BLOCK_CONV, ATTN_FOLD)
-ALL_FLAGS = LEVERS + (AUDIT,)
+ALL_FLAGS = LEVERS + (PAIR_SLICE, DISPATCH_DIAG, AUDIT)
 
 ENGAGED = '[PINDIAG] tp4 vglue engaged'
 FALLBACK = '[PINDIAG] tp4 vglue fell back'
@@ -41,7 +48,7 @@ AUDIT_MISMATCH = '[PINDIAG] tp4 vglue audit mismatch'
 # (test_tp4_vglue checks it), so what the CPU tests proved is what ships.
 RUNTIME_FILES = ('tp4_vglue.py', 'gdn_commit_lanes_tp.cpp', 'gdn_rows_dma_tp.py', 'gdn_rows_dma_tp.cpp',
                  'gdn_device_loop_state_tp.py', 'gdn_block_conv_tp.py', 'attention_block_fold_tp.py',
-                 'attention_block_fold_tp.cpp', 'extent_attention_fold_tp.py')
+                 'attention_block_fold_tp.cpp', 'extent_attention_fold_tp.py', 'gdn_pair_slice_tp.py')
 
 
 def _read(name, environ):
@@ -74,10 +81,22 @@ def enabled(name, environ=None):
     return on
 
 
-def audit_enabled(environ=None):
-    """QWEN_FAST_TP4_VGLUE_AUDIT=1 with at least one lever on."""
+def pair_slice_enabled(environ=None):
+    """QWEN_FAST_GDN_PAIR_SLICE (tp4/gluefix). Strict; raises at the pair."""
     _check_width(environ)
-    return _read(AUDIT, environ) and any(_read(name, environ) for name in LEVERS)
+    return _read(PAIR_SLICE, environ)
+
+
+def dispatch_diag_enabled(environ=None):
+    """QWEN_FAST_GDN_DISPATCH_DIAG (tp4/gluefix): a host-side log only. Strict; raises at the pair."""
+    _check_width(environ)
+    return _read(DISPATCH_DIAG, environ)
+
+
+def audit_enabled(environ=None):
+    """QWEN_FAST_TP4_VGLUE_AUDIT=1 with at least one lever (or the pair slice) on."""
+    _check_width(environ)
+    return _read(AUDIT, environ) and (any(_read(name, environ) for name in LEVERS) or _read(PAIR_SLICE, environ))
 
 
 def engaged_levers(environ=None):
@@ -125,7 +144,7 @@ def take():
 # below, on a user's result (per-user tensors) or on the block's combined result. packed_verifier compares them after the
 # replay, on every chip, as int16 bit patterns (-0 and +0 differ), and ModelBatch frees them with the retained records.
 
-AUDIT_KEYS = ('vglue_audit', 'vglue_merge_audit', 'vglue_block_audit')
+AUDIT_KEYS = ('vglue_audit', 'vglue_merge_audit', 'vglue_block_audit', 'vglue_pair_audit')
 
 
 def audit_entries(result):
@@ -178,6 +197,10 @@ def expected_entries(result, environ=None):
             want['piece user %d' % user] = 1
         if users >= 2:
             want['merged output'] = 1
+    elif pair_slice_enabled(environ):
+        # V2 off: the pair slice serves the odd users' slices (V2 on replaces them, and the slice stays idle).
+        for user in range(1, users, 2):
+            want['pair slice user %d' % user] = 1
     if enabled(GDN_BLOCK_CONV, environ):
         for user in range(users):
             want['block conv user %d ' % user] = BLOCK_ENTRIES_PER_USER
@@ -206,7 +229,7 @@ def audit_round(operations, records, round_number):
     this audit to read (V4a has its own in packed_verifier) and it returns 0 without a line."""
     import verify_trace_t2
 
-    if not enabled(GDN_GLUE):
+    if not (enabled(GDN_GLUE) or pair_slice_enabled()):
         return 0
     layers = verify_trace_t2.audit_layers(round_number, len(records) or verify_trace_t2.GDN_LAYERS)
     compared, mismatches = 0, []

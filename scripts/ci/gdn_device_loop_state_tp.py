@@ -15,12 +15,18 @@ logged as FALLBACK and counted (nothing is guessed).
 QWEN_FAST_TP4_GDN_BLOCK_CONV=1 (needs the glue flag) additionally runs the layer's convolution and gates as one block launch
 (gdn_block_conv_tp) instead of one per user.
 
+QWEN_FAST_GDN_PAIR_SLICE=1 (V2 off): the packed decode's odd-user half-tile slices share one row-major conversion of the projection
+instead of one each (gdn_pair_slice_tp); QWEN_FAST_GDN_DISPATCH_DIAG=1 logs each layer's launch order (a host log, no op changes).
+Both go through `_decode_packed`, which hands the pinned body a proxy for `self.operations` for that one call; with both off it is
+the pinned method.
+
 QWEN_FAST_TP4_VGLUE_AUDIT=1 (gate arms only): beside each launch this builds what the served path would have produced and holds
 it, outside `owned`, for tp4_vglue.audit_round to compare after the replay (the served path is never the one whose outputs the
 layer uses).
 """
 
 import gdn_block_conv_tp
+import gdn_pair_slice_tp
 import gdn_device_loop_state as pinned
 import gdn_rows_dma_tp as rows_dma
 import tp4_vglue
@@ -91,6 +97,23 @@ class DeviceLoopState(_pinned_class()):
         return [pinned.resident_piece(operations,
                                       operations.slice(projected, (0, start, 0), (1, stop, projected.shape[-1])), owned)
                 for start, stop in spans]
+
+    def _decode_packed(self, packed, rows, spans, checkpoints, prefixes, slots, defer_publication, deferred):
+        call = gdn_pair_slice_tp.wrap(self.operations, tp4_vglue.enabled(tp4_vglue.GDN_GLUE))
+        if call is None:
+            return super()._decode_packed(packed, rows, spans, checkpoints, prefixes, slots, defer_publication, deferred)
+        real = self.operations
+        self.operations = call.operations
+        try:
+            result = super()._decode_packed(packed, rows, spans, checkpoints, prefixes, slots, defer_publication, deferred)
+        except BaseException:
+            call.abort()
+            raise
+        finally:
+            self.operations = real
+            call.close()
+        call.finish(result)
+        return result
 
     def _recurrence_user_batched(self, projected, spans, slots, entries, owned):
         if not tp4_vglue.enabled(tp4_vglue.GDN_GLUE):
