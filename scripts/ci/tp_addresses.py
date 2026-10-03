@@ -127,7 +127,9 @@ MODULE_TWINS = (
 def _gdn_glue(environ):
     import tp4_vglue
 
-    return tp4_vglue.enabled(tp4_vglue.GDN_GLUE, environ) or tp4_vglue.enabled(tp4_vglue.GDN_BLOCK_CONV, environ)
+    # The gluefix flags (pair slice, dispatch diagnostic) live in the same twin's _decode_packed; with V2 off its other overrides hand straight back to the pinned methods.
+    return (tp4_vglue.enabled(tp4_vglue.GDN_GLUE, environ) or tp4_vglue.enabled(tp4_vglue.GDN_BLOCK_CONV, environ)
+            or tp4_vglue.pair_slice_enabled(environ) or tp4_vglue.dispatch_diag_enabled(environ))
 
 
 def _attn_fold(environ):

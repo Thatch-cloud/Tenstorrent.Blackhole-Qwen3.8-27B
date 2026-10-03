@@ -106,6 +106,10 @@ SEATS8_PROFILES = ('c2-packed-tp4-8', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-t
                    'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard')
 # tp4/next-4 (test_tp4_next4 holds each as its base plus exact deltas): the traffic candidate, its warm4 twin and the eight-seat levers arm.
 NEXT4_PROFILES = ('c2-packed-tp4-best-ship', 'c2-packed-tp4-best-ship-warm4', 'c2-packed-tp4-8-best')
+# The GDN glue quick wins (tp4/gluefix, test_gdn_pair_slice holds the rule): the timed and diagnostic arms are c2-packed-tp4-speed-strace plus exactly one flag
+# (same exemptions as the cheap twins); the audited arm is c2-packed-tp4-gate plus the flag and the vglue audit (a four-card profile that may carry the audit).
+CHEAP_PROFILES = CHEAP_PROFILES + ('c2-packed-tp4-speed-strace-pairslice', 'c2-packed-tp4-speed-strace-dispatchdiag')
+GLUEFIX_AUDITED = ('c2-packed-tp4-gate-pairslice',)
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 
 
@@ -943,7 +947,7 @@ class VglueProfileTests(unittest.TestCase):
         image = image_env()
         flags = (C1A, V4A, V2, V1, V3A, VGLUE_AUDIT)
         for name, profile in found.items():
-            if name in VGLUE_PROFILES or name in BEST_HANG_FIX or name in NEXT4_PROFILES or name in TPUB_PROFILES:
+            if name in VGLUE_PROFILES or name in BEST_HANG_FIX or name in NEXT4_PROFILES or name in TPUB_PROFILES or name in GLUEFIX_AUDITED:
                 self.assertEqual(profile['env']['QWEN_FAST_TP'], '4', name)
                 continue
             for flag in flags:
