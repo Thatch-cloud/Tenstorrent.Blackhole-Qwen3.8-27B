@@ -34,6 +34,11 @@ EXPECTED = {
     'X0-status-rescan-reset': ('status rescan reset', None, 'stop'),
     'B0-build': ('build', 'c2-packed-tp4', 'stop'),
     'A1-audited-attach-smoke': ('reset smoke', AUDITED, 'stop'),
+    'H1-hang-shapes-multi': ('reset smoke', MULTI, 'stop'),
+    'H2-hang-shapes-multi': ('reset smoke', MULTI, 'stop'),
+    'H3-hang-shapes-multi': ('reset smoke', MULTI, 'stop'),
+    'H4-hang-shapes-multi': ('reset smoke', MULTI, 'stop'),
+    'H5-hang-shapes-multi': ('reset smoke', MULTI, 'stop'),
     'T1-timed-A-control-8x262k-time-gate': ('reset smoke', CONTROL, 'soft'),
     'T2-timed-B-multi-8x262k-time-gate': ('reset smoke', MULTI, 'soft'),
     'T3-timed-A-control-8x262k-time-gate': ('reset smoke', CONTROL, 'soft'),
@@ -117,18 +122,32 @@ class PackTests(unittest.TestCase):
         needs = needs_lines()
         self.assertEqual(needs['A1'], {'B0'})
         for name in ('T1', 'T2', 'T3', 'T4'):
-            self.assertEqual(needs[name], {'A1'})
+            self.assertEqual(needs[name], {'A1', 'H1', 'H2', 'H3', 'H4', 'H5'})
         tests = parsed('A1-audited-attach-smoke')['tests'].split(',')
-        for shape in ('concurrent8_code_equal', 'concurrent8_steady', 'concurrent8_code'):
+        for shape in ('concurrent8_code_equal', 'concurrent8_steady', 'concurrent8_code', 'concurrent8_code_32k'):
             self.assertIn(shape, tests)
 
+    def test_five_audits_off_hang_runs_gate_the_timing(self):
+        needs = needs_lines()
+        self.assertEqual(needs['H1'], {'A1'})
+        for name in ('H1', 'H2', 'H3', 'H4', 'H5'):
+            self.assertEqual(needs[name], {'A1'})
+        hangs = [name for name in EXPECTED if name.startswith('H')]
+        self.assertEqual(len(hangs), 5)
+        for name in hangs:
+            result = parsed(name)
+            self.assertEqual(result['profile'], MULTI)
+            for shape in ('concurrent8_steady', 'steady_resend', 'replay_concurrent8', 'concurrent8_code_equal'):
+                self.assertIn(shape, result['tests'].split(','))
+            self.assertEqual(EXPECTED[name][2], 'stop')
+
     def test_the_pair_is_abab_at_eight_users_32k_and_128k_and_differs_in_the_profile_alone(self):
-        names = [name for name in EXPECTED if name.startswith('T')]
+        names = [name for name in EXPECTED if name.startswith('T') and name[1].isdigit()]
         self.assertEqual([parsed(name)['profile'] for name in names], [CONTROL, MULTI, CONTROL, MULTI])
         reference = parsed(names[0])
         for name in names:
             result = parsed(name)
-            self.assertEqual(result['tests'], 'warmup,coding,concurrent8_code_32k,concurrent8_code_128k')
+            self.assertEqual(result['tests'], 'warmup,coding,concurrent8_steady,concurrent8_code_32k,concurrent8_code_128k')
             self.assertEqual({key: value for key, value in result.items() if key != 'profile'},
                              {key: value for key, value in reference.items() if key != 'profile'}, name)
 
