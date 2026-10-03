@@ -3,7 +3,8 @@ resumably, under a memory guard and a deadline, and writes counts to a private r
 tf_pair_report.py). Everything here but `real_environment` runs on CPU against fakes in the tests; `real_environment` loads the models
 and is verified only by the W0 canary (V0, V1, V3, V4 and the branch self-check).
 
-    python3 scripts/ci/a0_run.py --bundle <bundle dir> --out <results dir> --deadline <epoch> --trip-file <file> [--canary] ...
+    python3 scripts/ci/a0_run.py --bundle <bundle dir> --out <results dir> --deadline <epoch> --trip-file <file> --heartbeat-file <file>
+        [--canary | --load-only] ...
 
 THE ORDER IS THE PRIORITY. Groups run in a seeded, set-interleaved order, so any prefix of the run is a stratified sample and a stop
 at the deadline still leaves a usable screen; within a turn the arms run in the registered order. A turn's failure is recorded (the
@@ -11,7 +12,8 @@ exception TYPE only) and the run goes on; an out-of-memory stops the run (it nev
 would break the memory floor is not started (counted as deferred, resumable later).
 
 RESULTS (out/): meta.jsonl (copied from the bundle), arm-<name>.jsonl (k, status, compact rounds), v1.jsonl, timing.jsonl, plan.json,
-state.json, calibration.json, validity.json. stdout carries counts only; an exception prints its type only.
+state.json, calibration.json, validity.json, deferred.jsonl (turns not started for want of memory: the report counts them as lost),
+load-memory.jsonl (MemFree / MemAvailable while the models load). stdout carries counts only; an exception prints its type only.
 """
 import argparse
 import json
