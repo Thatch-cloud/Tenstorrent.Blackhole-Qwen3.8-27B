@@ -1566,7 +1566,7 @@ class ParentTests(unittest.TestCase):
             self.skipTest('no git history for %s' % PARENT)
         before = result.stdout.decode('utf-8').splitlines()
         after = without_trace_census(without_diag_trim(without_prefill_scratch(without_any_request(without_sticky(
-            without_solo_and_lanes((HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines()))))))
+            without_solo_and_lanes(without_request_warm((HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines())))))))
         changed = [line for line in difflib.unified_diff(before, after, lineterm='', n=0)
                    if line[:1] in '+-' and not line.startswith(('+++', '---'))]
         added = [line[1:].strip() for line in changed if line.startswith('+')]
@@ -1687,6 +1687,26 @@ def without_sticky(lines):
                      "pindiag(STICKY_ENGINE_MARKER + '{} ms={:.1f} frontier={} prompt={}', str(state.req_id)[:48],",
                      '(time.perf_counter() - began) * 1000.0, state.num_computed_tokens,',
                      'len(state.prompt_token_ids))'))
+
+
+def without_request_warm(lines):
+    """serving_runtime.py less the tp4/warm4 hunks (QWEN_FAST_M3_REQUEST_WARM, default off), which landed after this parent: the flag
+    constants, m3_request_warm, the parse line after validate_fast_config and the hook between the prefill warm and the block; each
+    found exactly once, so nothing else is hidden."""
+    text = '\n'.join(lines)
+
+    def cut(text, start, end, keep_end=True):
+        if text.count(start) != 1:
+            raise AssertionError('The request-warm hunk starting %r is not in serving_runtime.py exactly once' % start[:50])
+        head, rest = text.split(start)
+        tail = rest[rest.index(end):] if keep_end else rest[rest.index(end) + len(end):]
+        return head + tail
+
+    text = cut(text, '# QWEN_FAST_M3_REQUEST_WARM (default off;', "M3_REQUEST_WARM_FLAG = 'QWEN_FAST_M3_REQUEST_WARM'\n", False)
+    text = cut(text, 'def m3_request_warm(policy', 'def c2_any_without_block(')
+    text = cut(text, '    request_widths = m3_request_warm(policy)\n', '    # Measurement-only, env-gated admission of one named', True)
+    text = cut(text, '        if request_widths:\n', "        # The device step. By default the sequential one", True)
+    return text.split('\n')
 
 
 def without_trace_census(lines):

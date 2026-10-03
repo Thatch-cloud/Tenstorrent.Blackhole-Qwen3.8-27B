@@ -227,7 +227,8 @@ class PackedAnyProfileTest(unittest.TestCase):
                           'c2-packed-tp4-speed-noslide', 'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-speed-quad',
                           'c2-packed-tp4-speed-rshard', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-strace-draftwide', 'c2-packed-tp4-speed-strace-fcommit', 'c2-packed-tp4-speed-strace-ring', 'c2-packed-tp4-speed-vglue',
                           'c2-packed-tp4-speed-vglue-c1a', 'c2-packed-tp4-speed-vglue-v1', 'c2-packed-tp4-speed-vglue-v2',
-                          'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a', 'c2-packed-tp4-time-gate'])
+                          'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a', 'c2-packed-tp4-speed-warm4', 'c2-packed-tp4-time-gate', 'c2-packed-tp4-warm4-control', 'c2-packed-tp4-warm4-diag', 'c2-packed-tp4-warm4-diag-oldtail',
+                          'c2-packed-tp4-warm4-even-diag', 'c2-packed-tp4-warm4-gate'])
         for name in names:
             env = self.load(name)['env']
             with self.subTest(profile=name):
@@ -552,7 +553,8 @@ FAST_TP4_PROFILES = ('c2-packed-tp4', 'c2-packed-tp4-best', 'c2-packed-tp4-best-
                      'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-speed-quad', 'c2-packed-tp4-speed-rshard', 'c2-packed-tp4-speed-sprewarm',
                      'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-strace-draftwide', 'c2-packed-tp4-speed-strace-fcommit', 'c2-packed-tp4-speed-strace-ring', 'c2-packed-tp4-speed-vglue', 'c2-packed-tp4-speed-vglue-c1a',
                      'c2-packed-tp4-speed-vglue-v1', 'c2-packed-tp4-speed-vglue-v2', 'c2-packed-tp4-speed-vglue-v3a',
-                     'c2-packed-tp4-speed-vglue-v4a', 'c2-packed-tp4-time-gate')
+                     'c2-packed-tp4-speed-vglue-v4a', 'c2-packed-tp4-speed-warm4', 'c2-packed-tp4-time-gate', 'c2-packed-tp4-warm4-control', 'c2-packed-tp4-warm4-diag', 'c2-packed-tp4-warm4-diag-oldtail',
+                          'c2-packed-tp4-warm4-even-diag', 'c2-packed-tp4-warm4-gate')
 # The bring-up switches every TP4 profile carries in its env (see the profiles' descriptions): the fused prefill
 # out-projection off (general-tp4-mmrs is the arm that turns it on) and the prefill conv audited for four chunks.
 TP4_BRINGUP_ENV = {'QWEN_GDN_PREFILL_MMRS': '0', 'QWEN_FAST_GDN_PREFILL_CONV_AUDIT': '4'}

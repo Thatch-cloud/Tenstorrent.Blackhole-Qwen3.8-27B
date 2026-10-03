@@ -60,8 +60,12 @@ NAMED = ('c2-packed-tp4', 'c2-packed-tp4-gate', 'c2-packed-tp4-gate-ring', 'c2-p
 # Every four-card fast-path profile (QWEN_FAST_TP=4 with the extent replay on), read from the profile file, so a new window's
 # arms - and the combined profiles that stack several windows' flags (tp4/next's c2-packed-tp4-best, -best-gate) - attach here
 # too, with no list to keep in step.
+# The request-width warm profiles (QWEN_FAST_M3_REQUEST_WARM, tp4/warm4) run the warm's real eager forwards before the block; this fake
+# attach has no model to run them on. Their attach is held in test_tp4_warm4 (the hook order, with the warm itself faked) and by the
+# profile and flag-parsing tests there.
 PROFILES = tuple(sorted(name for name, profile in profiles().items()
-                        if profile['env'].get('QWEN_FAST_TP') == '4' and profile['env'].get('QWEN_FAST_EXTENT_REPLAY') == '1'))
+                        if profile['env'].get('QWEN_FAST_TP') == '4' and profile['env'].get('QWEN_FAST_EXTENT_REPLAY') == '1'
+                        and profile['env'].get('QWEN_FAST_M3_REQUEST_WARM', '0') == '0'))
 RING_DESCRIPTOR = HERE / 'qwen_p150x4_ring_mesh_graph_descriptor.textproto'
 # The environment the ops-trace arm adds (ops_profile_plan.PROFILER_ENV, which test_ops_profile_plan holds this equal to; that
 # module is host-only and must not be imported by an attach test: the closure test takes every module the attach loads).

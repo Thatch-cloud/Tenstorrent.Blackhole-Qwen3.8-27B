@@ -1271,7 +1271,7 @@ class ProvenanceTests(unittest.TestCase):
                'c2-packed-tp4-speed-noslide', 'c2-packed-tp4-speed-pairs', 'c2-packed-tp4-speed-quad',
                'c2-packed-tp4-speed-rshard', 'c2-packed-tp4-speed-sprewarm', 'c2-packed-tp4-speed-strace', 'c2-packed-tp4-speed-strace-draftwide', 'c2-packed-tp4-speed-strace-fcommit', 'c2-packed-tp4-speed-strace-ring', 'c2-packed-tp4-speed-vglue',
                'c2-packed-tp4-speed-vglue-c1a', 'c2-packed-tp4-speed-vglue-v1', 'c2-packed-tp4-speed-vglue-v2',
-               'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a', 'c2-packed-tp4-time-gate',
+               'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a', 'c2-packed-tp4-speed-warm4', 'c2-packed-tp4-time-gate', 'c2-packed-tp4-warm4-control', 'c2-packed-tp4-warm4-diag', 'c2-packed-tp4-warm4-diag-oldtail', 'c2-packed-tp4-warm4-even-diag', 'c2-packed-tp4-warm4-gate',
                'general-prefix-eager', 'general-tp4-bench',
                'general-tp4-mmrs', 'general-tp4-ring-mmrs']
         self.assertEqual(gated, sorted("('%s', '%s')" % (step, name) for step in ('boot', 'environment') for name in tp4))

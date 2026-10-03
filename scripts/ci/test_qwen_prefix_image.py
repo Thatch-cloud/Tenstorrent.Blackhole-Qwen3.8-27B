@@ -65,7 +65,10 @@ GATE_ONLY_OTHERS = ('general-tp4-bench', 'general-tp4-mmrs', 'c2-packed-tp4-gate
                     'c2-packed-tp4-speed-vglue', 'c2-packed-tp4-speed-vglue-c1a', 'c2-packed-tp4-speed-vglue-v1', 'c2-packed-tp4-speed-vglue-v2', 'c2-packed-tp4-speed-vglue-v3a', 'c2-packed-tp4-speed-vglue-v4a', 'c2-packed-tp4-gate-vglue',
                     # the lanes window's five gate arms
                     'c2-packed-tp4-lanes-gate', 'c2-packed-tp4-lanes-time-gate', 'c2-packed-tp4-solo-gate',
-                    'c2-packed-tp4-solo-time-gate', 'c2-packed-tp4-time-gate')
+                    'c2-packed-tp4-solo-time-gate', 'c2-packed-tp4-time-gate',
+                    # the request-width warm twins (tp4/warm4)
+                    'c2-packed-tp4-warm4-control', 'c2-packed-tp4-warm4-diag', 'c2-packed-tp4-warm4-diag-oldtail',
+                    'c2-packed-tp4-warm4-even-diag', 'c2-packed-tp4-warm4-gate', 'c2-packed-tp4-speed-warm4')
 # The fast path's prefix-reuse profiles (sticky sessions): test_sticky_sessions holds them.
 STICKY_PROFILES = ('c2-packed-prefix', 'c2-packed-prefix-gate')
 JOB = Path('C:/Users/liamb/.claude/jobs/8376c877/tmp')
