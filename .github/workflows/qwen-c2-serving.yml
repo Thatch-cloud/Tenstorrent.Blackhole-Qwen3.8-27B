@@ -450,6 +450,15 @@ jobs:
           # never resets: after a hang it prints the pair's reset, which is the reset action's, never this step's.
           test -n "$HARNESS"
           results="/tmp/c2-cardm-results/$GITHUB_RUN_ID"
+          # Other CI jobs build on this host with privileged buildx builder containers (docker/setup-buildx-action
+          # removes them when its job ends). The harness refuses any privileged container, so wait for them first
+          # (up to 45 minutes) instead of failing the window (2026-10-03, v336).
+          for i in $(seq 1 180); do
+            builders=$(docker ps --filter name=buildx_buildkit_ --format '{{.Names}}' | head -3 | tr '\n' ' ' || true)
+            [ -z "${builders// /}" ] && break
+            if [ $((i % 20)) = 1 ]; then echo "waiting for buildx builders to finish: $builders"; fi
+            sleep 15
+          done
           if docker ps -a --format '{{.Names}}' | grep -q '^thatch-inference-'; then
             echo "a platform serving container exists; refusing to open card M under it" >&2; exit 1
           fi
