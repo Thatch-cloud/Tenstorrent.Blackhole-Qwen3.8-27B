@@ -113,7 +113,9 @@ NEXT4_PROFILES = ('c2-packed-tp4-best-ship', 'c2-packed-tp4-best-ship-warm4', 'c
 NEXT5_PROFILES = ('c2-packed-tp4-best-dbf16', 'c2-packed-tp4-best-gate-dbf16', 'c2-packed-tp4-best-ship-tpub', 'c2-packed-tp4-best-ship-glue', 'c2-packed-tp4-best-strace-glue', 'c2-packed-tp4-best-gate-glue', 'c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-best-quad-dbf16', 'c2-packed-tp4-8-best-quad-gate')
 # tp4/262k8 (test_tp4_262k8_best_profiles holds each as its 262k eight-seat twin plus the levers, the smaller pool and the lever audits): the eight-seat 262k best-lever arms.
 BEST262K_PROFILES = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-nosamp-audit', 'c2-packed-tp4-8x262k-best-stack-audit', 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-best-time-gate-d2', 'c2-packed-tp4-8x262k-best-time-gate-dbf16', 'c2-packed-tp4-8x262k-best-time-gate-lookup', 'c2-packed-tp4-8x262k-best-time-gate-nosamp', 'c2-packed-tp4-8x262k-best-time-gate-s1', 'c2-packed-tp4-8x262k-best-time-gate-stack', 'c2-packed-tp4-8x262k-ship')
-NEXT5_PROFILES = NEXT5_PROFILES + BEST262K_PROFILES
+# tp4/hostgap (test_tp4_hostgap holds each as the best-time-gate control plus flags): the eight-seat host-gap arms and their audited twins.
+HOSTGAP_PROFILES = ('c2-packed-tp4-8x262k-hostgap-1', 'c2-packed-tp4-8x262k-hostgap-1-audit', 'c2-packed-tp4-8x262k-hostgap-2', 'c2-packed-tp4-8x262k-hostgap-2-audit')
+NEXT5_PROFILES = NEXT5_PROFILES + BEST262K_PROFILES + HOSTGAP_PROFILES
 # The GDN glue quick wins (tp4/gluefix, test_gdn_pair_slice holds the rule): the timed and diagnostic arms are c2-packed-tp4-speed-strace plus exactly one flag
 # (same exemptions as the cheap twins); the audited arm is c2-packed-tp4-gate plus the flag and the vglue audit (a four-card profile that may carry the audit).
 CHEAP_PROFILES = CHEAP_PROFILES + ('c2-packed-tp4-speed-strace-pairslice', 'c2-packed-tp4-speed-strace-dispatchdiag')

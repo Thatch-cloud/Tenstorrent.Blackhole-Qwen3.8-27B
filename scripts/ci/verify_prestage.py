@@ -52,6 +52,34 @@ still needs every segment decided, and a poisoned block still refuses.
 H1b (fused_commit.py, QWEN_FAST_FUSED_COMMIT): the same window also writes each live segment's
 T_proj RoPE tables for its next frontier (WhileWaiting -> FusedCommit.stage_window), before the
 pre-stage; they are not fixture inputs and move no epoch.
+
+THE EIGHT-SEAT HOST GAP (tp4/hostgap; every flag below default off, byte-identical off). With two packed 64-row
+blocks the window leaves the verify pre-stage out (serving_packed_step.while_waiting_groups): the fixture write epoch
+is one counter, so a second block's pre-stage or the first block's verify would kill the other's snapshot, and 744 of
+788 measured verifies took the full stage (22.7 ms of device idle a round).
+
+  QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE=1   1a-lite: under today's ONE epoch the block that verifies first is pre-staged in
+                            the two-block window. Between its pre-stage and its verify nothing bumps the epoch (the
+                            other block's pre-stage is left out; A's own diff bumps it only after A consumed its
+                            snapshot), so this is the one-block mechanism four seats already qualified. The second
+                            block takes the full stage, as today. Needs QWEN_FAST_PRESTAGE=1 and two blocks.
+  QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS=1   1a proper (needs the flag above): each block's OWN writes (its pre-stage,
+                            its verify-time diff, its full stage_packed) bump a per-fixture epoch instead of the global
+                            one, so BOTH blocks keep a usable snapshot; every external writer still bumps the global
+                            epoch and kills both. A snapshot is usable only while (global, local) both stand. Engaged at
+                            attach only when the blocks' fixtures, replay readers and extent storage are distinct
+                            objects, and disengaged (global bumps again) the moment a staging destination of one block
+                            shares a chip-local address with the other's.
+  QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT=1   after each verify-time diff write, every destination is read back from
+                            every chip and compared with the verify-time (full) values, then the round is staged IN
+                            FULL anyway, so the trace sees the control's inputs. [PACKED-PRESTAGE-FULLAUDIT].
+  QWEN_FAST_TP4_WINDOW_VALIDATE=1      1c: a verify that took a usable snapshot (its window ran validate_bindings)
+                            skips the retained block's second binding check right before its trace; under the audit
+                            the skipped check still runs, as a shadow, and must pass.
+  QWEN_FAST_TP4_ENTRY_DIET=1           1d: one storage check per distinct validator a step, and an incremental
+                            page-allocation validation (serving_packed_bridge, serving_page_binding).
+  QWEN_FAST_TP4_HOSTGAP_LOG=1          stage 0: [PACKED-ENTRY], [PACKED-HOSTGAP-VERIFY], [PACKED-HOSTGAP-SELECT],
+                            [PACKED-HOSTGAP-WINDOW] and [PINDIAG] gc lines; new lines only, no existing line changes.
 """
 
 import os
@@ -61,6 +89,14 @@ import time
 PRESTAGE_FLAG = 'QWEN_FAST_PRESTAGE'
 PRESTAGE_AUDIT_FLAG = 'QWEN_FAST_PRESTAGE_AUDIT'
 ROUND_FENCES_FLAG = 'QWEN_FAST_ROUND_FENCES'
+TWO_BLOCK_FLAG = 'QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE'
+BLOCK_EPOCHS_FLAG = 'QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS'
+FULL_AUDIT_FLAG = 'QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT'
+WINDOW_VALIDATE_FLAG = 'QWEN_FAST_TP4_WINDOW_VALIDATE'
+ENTRY_DIET_FLAG = 'QWEN_FAST_TP4_ENTRY_DIET'
+HOSTGAP_LOG_FLAG = 'QWEN_FAST_TP4_HOSTGAP_LOG'
+HOSTGAP_FLAGS = (TWO_BLOCK_FLAG, BLOCK_EPOCHS_FLAG, FULL_AUDIT_FLAG, WINDOW_VALIDATE_FLAG, ENTRY_DIET_FLAG,
+                 HOSTGAP_LOG_FLAG)
 
 # Once at attach, from the block that engaged the flag (packed_verifier).
 ENGAGED_MARKER = '[PINDIAG] verify prestage engaged'
@@ -70,6 +106,19 @@ FENCES_ENGAGED_MARKER = '[PINDIAG] round fences engaged'
 WINDOW_MARKER = '[PACKED-PRESTAGE-WINDOW]'
 MARKER = '[PACKED-PRESTAGE]'
 AUDIT_MARKER = '[PACKED-PRESTAGE-AUDIT]'
+# tp4/hostgap: once per block at attach (mode=first|blocks), once for the per-block epochs, a refusal with its reason, and per
+# audited verify the full read-back of every destination.
+TWO_BLOCK_ENGAGED_MARKER = '[PINDIAG] verify prestage two-block engaged'
+TWO_BLOCK_REFUSED_MARKER = '[PINDIAG] verify prestage two-block refused'
+BLOCK_EPOCHS_ENGAGED_MARKER = '[PINDIAG] verify prestage block epochs engaged'
+BLOCK_EPOCHS_REFUSED_MARKER = '[PINDIAG] verify prestage block epochs refused'
+FULL_AUDIT_MARKER = '[PACKED-PRESTAGE-FULLAUDIT]'
+ENTRY_MARKER = '[PACKED-ENTRY]'
+HOSTGAP_VERIFY_MARKER = '[PACKED-HOSTGAP-VERIFY]'
+HOSTGAP_SELECT_MARKER = '[PACKED-HOSTGAP-SELECT]'
+HOSTGAP_WINDOW_MARKER = '[PACKED-HOSTGAP-WINDOW]'
+GC_MARKER = '[PINDIAG] gc'
+GC_LOG_MS = 5.0
 FENCES_MARKER = '[PACKED-FENCES]'
 AUDIT_BUFFERS = 8
 
@@ -102,6 +151,68 @@ def any_enabled(environ=None):
     return enabled(environ) or round_fences_enabled(environ)
 
 
+def two_block_enabled(environ=None):
+    """QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE=1 (1a-lite; engaged only with QWEN_FAST_PRESTAGE=1 and two blocks, engage_two_block)."""
+    return _flag(TWO_BLOCK_FLAG, environ)
+
+
+def block_epochs_enabled(environ=None):
+    """QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS=1 (1a proper; needs the two-block flag)."""
+    return _flag(BLOCK_EPOCHS_FLAG, environ)
+
+
+def full_audit_enabled(environ=None):
+    """QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT=1 under QWEN_FAST_PRESTAGE=1 (alone it audits nothing)."""
+    return _flag(FULL_AUDIT_FLAG, environ) and enabled(environ)
+
+
+def window_validate_enabled(environ=None):
+    """QWEN_FAST_TP4_WINDOW_VALIDATE=1 under QWEN_FAST_PRESTAGE=1 (1c)."""
+    return _flag(WINDOW_VALIDATE_FLAG, environ) and enabled(environ)
+
+
+def skip_next_binding_check(block):
+    """1c (QWEN_FAST_TP4_WINDOW_VALIDATE): a context manager under which the retained block's NEXT validate_bindings call is a no-op and every
+    later one is the block's own. RetainedGDNBlock.replay (a pinned source, never edited) makes its first check right before the trace, with nothing
+    between its entry and that check that validates (fence_at_replay only synchronizes); the check after the trace's sync, when there are no round
+    fences, is the second call and still runs. The instance attribute is put back (or removed) on exit, raise or not."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def scope():
+        had = 'validate_bindings' in vars(block)
+        previous = vars(block).get('validate_bindings')
+        inner = block.validate_bindings
+        state = {'skipped': 0}
+
+        def once():
+            if not state['skipped']:
+                state['skipped'] = 1
+                return None
+            return inner()
+
+        block.validate_bindings = once
+        try:
+            yield state
+        finally:
+            if had:
+                block.validate_bindings = previous
+            else:
+                del block.validate_bindings
+
+    return scope()
+
+
+def entry_diet_enabled(environ=None):
+    """QWEN_FAST_TP4_ENTRY_DIET=1 (1d: one storage check per validator, incremental page validation)."""
+    return _flag(ENTRY_DIET_FLAG, environ)
+
+
+def hostgap_log_enabled(environ=None):
+    """QWEN_FAST_TP4_HOSTGAP_LOG=1 (stage 0: new log lines only)."""
+    return _flag(HOSTGAP_LOG_FLAG, environ)
+
+
 # The fixture write epoch: one counter per process (every packed block's fixture lives in this
 # process), bumped by every writer of fixture inputs other than the pre-stage it invalidates.
 _EPOCH = [0, 'start']
@@ -120,6 +231,252 @@ def bump(reason):
     taken before now is stale. Host only, never raises."""
     _EPOCH[0] += 1
     _EPOCH[1] = str(reason)
+
+
+# tp4/hostgap. The mode the attach engaged (engage_two_block): 'first' (1a-lite: the first block to verify is pre-staged under
+# the one global epoch), 'blocks' (1a proper: per-fixture epochs), or None (today's rule). _LOCAL holds the per-fixture epoch
+# {id(fixture): (count, last reason)}, moved only in 'blocks' mode; _ADDRESSES the chip-local addresses of each block's staging
+# destinations, filled by the block's first pre-stage. Process state, like _EPOCH.
+_MODE = dict(first=False, blocks=False)
+_LOCAL = {}
+_ADDRESSES = {}
+
+
+def two_block_mode():
+    """'blocks', 'first' or None."""
+    return 'blocks' if _MODE['blocks'] else 'first' if _MODE['first'] else None
+
+
+def local_epoch(fixture):
+    return _LOCAL.get(id(fixture), (0, 'start'))[0]
+
+
+def bump_fixture(fixture, reason):
+    """A write to THIS fixture's own inputs (its pre-stage, its verify-time diff, its full stage_packed). With the per-block
+    epochs engaged only this fixture's snapshot goes stale; otherwise it is `bump`, argument for argument. Host only."""
+    if _MODE['blocks']:
+        _LOCAL[id(fixture)] = (local_epoch(fixture) + 1, str(reason))
+    else:
+        bump(reason)
+
+
+def last_local_bump(fixture):
+    return _LOCAL.get(id(fixture), (0, 'start'))[1]
+
+
+def leaf_ids(value, seen=None):
+    """The ids of every non-container object inside nested lists, tuples and dicts (the extent storage's tensors)."""
+    seen = set() if seen is None else seen
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            leaf_ids(item, seen)
+    elif isinstance(value, dict):
+        for item in value.values():
+            leaf_ids(item, seen)
+    elif value is not None:
+        seen.add(id(value))
+    return seen
+
+
+def two_block_refusal(blocks):
+    """Why the two-block pre-stage cannot engage on these blocks, or None: one block, or a block built without the pre-stage
+    state (QWEN_FAST_PRESTAGE=1), or two blocks sharing one fixture."""
+    blocks = tuple(blocks)
+    if len(blocks) < 2:
+        return 'one packed block (QWEN_FAST_M3_BLOCKS=2 needed)'
+    if any(getattr(block, 'prestaged', None) is None for block in blocks):
+        return 'a block was built without the pre-stage (QWEN_FAST_PRESTAGE=1 needed)'
+    if len({id(getattr(block, 'fixture', None)) for block in blocks}) != len(blocks):
+        return 'two blocks share one fixture'
+    return None
+
+
+def block_epochs_refusal(blocks):
+    """Why per-block epochs cannot engage, or None: every block has its own fixture, replay reader and extent storage
+    (distinct objects, no tensor in two blocks' extent storage)."""
+    readers = [getattr(block.fixture, 'replay_reader', None) for block in blocks]
+    if any(reader is None for reader in readers):
+        return 'a block has no replay reader'
+    if len({id(reader) for reader in readers}) != len(blocks):
+        return 'two blocks share one replay reader'
+    seen, total = set(), 0
+    for block in blocks:
+        leaves = leaf_ids(getattr(block, 'extent_storage', None))
+        total += len(leaves)
+        seen |= leaves
+    if len(seen) != total:
+        return 'two blocks share extent storage'
+    return None
+
+
+def block_label(block, index=None):
+    """The label the hostgap lines name a block by ('A', 'B', ...): set at attach, '-' for a block never labelled."""
+    label = getattr(block, 'hostgap_label', None)
+    if label is None and index is not None:
+        label = 'ABCDEFGH'[index % 8]
+        try:
+            block.hostgap_label = label
+        except Exception:
+            pass
+    return label or '-'
+
+
+def engage_two_block(blocks, environ=None):
+    """Attach (serving_packed_step.PackedStep, several blocks): reset the mode and engage what the flags ask for. The first is
+    1a-lite (QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE), the second per-block epochs (QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS, which needs
+    the first). One refusal line, with its reason, per refused flag; the mode stays what it was able to engage. Returns the mode."""
+    _MODE.update(first=False, blocks=False)
+    _LOCAL.clear()
+    _ADDRESSES.clear()
+    blocks = tuple(blocks)
+    # Every host-gap flag is read once here: a value but 0 or 1 raises at the attach, not at the first step that reads it.
+    for name in HOSTGAP_FLAGS:
+        _flag(name, environ)
+    asked, per_block = two_block_enabled(environ), block_epochs_enabled(environ)
+    if per_block and not asked:
+        log_line('%s reason=%s' % (BLOCK_EPOCHS_REFUSED_MARKER, '%s_needs_%s=1' % (BLOCK_EPOCHS_FLAG, TWO_BLOCK_FLAG)))
+    if not asked:
+        return None
+    reason = two_block_refusal(blocks)
+    if reason is not None:
+        log_line('%s reason=%s' % (TWO_BLOCK_REFUSED_MARKER, reason.replace(' ', '_')))
+        return None
+    _MODE['first'] = True
+    mode = 'first'
+    if per_block:
+        reason = block_epochs_refusal(blocks)
+        if reason is None:
+            _MODE['blocks'] = True
+            mode = 'blocks'
+            log_line('%s blocks=%d' % (BLOCK_EPOCHS_ENGAGED_MARKER, len(blocks)))
+        else:
+            log_line('%s reason=%s' % (BLOCK_EPOCHS_REFUSED_MARKER, reason.replace(' ', '_')))
+    for index, block in enumerate(blocks):
+        log_line('%s block=%s users=%d mode=%s window_validate=%d audit=%d' % (
+            TWO_BLOCK_ENGAGED_MARKER, block_label(block, index), getattr(block, 'users', 0), mode,
+            int(window_validate_enabled(environ)), int(full_audit_enabled(environ))))
+    return mode
+
+
+def register_destinations(block, destinations, addresses):
+    """Per-block epochs only, once per block (its first pre-stage, before any bump or copy): the chip-local addresses of the
+    staging destinations against every other registered block's. A shared address means one block's write could change what the
+    other's snapshot holds, so the per-block epochs disengage (global bumps again, the safe direction) and say so. Returns
+    'overlap' on a disengage, else None."""
+    if not _MODE['blocks'] or id(block.fixture) in _ADDRESSES:
+        return None
+    mine = frozenset((chip, address) for destination in destinations for chip, address in enumerate(addresses(destination)))
+    for key, other in _ADDRESSES.items():
+        if key != id(block.fixture) and not mine.isdisjoint(other):
+            _MODE['blocks'] = False
+            log_line('%s reason=%s' % (BLOCK_EPOCHS_REFUSED_MARKER, 'staging_destinations_overlap_between_blocks'))
+            return 'overlap'
+    _ADDRESSES[id(block.fixture)] = mine
+    return None
+
+
+# Stage 0 scratch (QWEN_FAST_TP4_HOSTGAP_LOG): values one step leaves for the line another function writes.
+_SCRATCH = {}
+
+
+def note_scratch(key, value):
+    _SCRATCH[key] = value
+
+
+def take_scratch(key, default=None):
+    return _SCRATCH.pop(key, default)
+
+
+def add_collect_split(read_ms, merge_ms):
+    """Stage 0: one quad's readback split (quad_draft_tp.read_quad_outputs), summed over the round's quads until select_round
+    writes its line."""
+    total = _SCRATCH.setdefault('collect', [0.0, 0.0])
+    total[0] += read_ms
+    total[1] += merge_ms
+
+
+def entry_line(checks_ms):
+    """Stage 0: the step entry's [PACKED-ENTRY] line - what serving_packed_bridge.execute_packed_decode left (admit, the storage check, vLLM's
+    _update_states, the reservation checks, the page refreshes and how many wrote the device) and the packed step's own checks
+    (validate, group, ineligible), with the whole entry's wall time up to now. One line a step; nothing left, nothing written."""
+    drain_gc_lines()
+    entry = take_scratch('entry')
+    if entry is None:
+        return
+    try:
+        log_line('%s admit_ms=%.2f update_states_ms=%.2f storage_ms=%.2f reservation_ms=%.2f refresh_ms=%.2f refresh_writes=%d '
+                 'checks_ms=%.2f entry_ms=%.2f' % (ENTRY_MARKER, entry['admit_ms'], entry['update_states_ms'], entry['storage_ms'],
+                                                  entry['reservation_ms'], entry['refresh_ms'], entry['refresh_writes'], checks_ms,
+                                                  (time.perf_counter() - entry['started']) * 1000))
+    except BaseException:
+        pass
+
+
+def thread_ms():
+    """This thread's CPU time in ms, beside wall time: GC and host compute count here, a descheduled thread does not. Read only
+    under QWEN_FAST_TP4_HOSTGAP_LOG (0.0 otherwise): with the flag off the staging path makes no extra clock call."""
+    try:
+        if not hostgap_log_enabled():
+            return 0.0
+        return time.thread_time() * 1000
+    except Exception:
+        return 0.0
+
+
+GC_PENDING_MAX = 64
+_GC = dict(installed=False, started=0.0, callback=None, pending=[])
+
+
+def install_gc_log():
+    """Stage 0: one [PINDIAG] gc line for any collection over GC_LOG_MS (the 50-170 ms host stalls: gen-2 collections or not).
+    The callback only APPENDS (generation, collected, ms) to a bounded list (as publication_diagnostics does): a collection can
+    start inside the logger's own emit, so it never logs. `drain_gc_lines` writes the lines, from window_line and entry_line.
+    Idempotent; a callback never raises."""
+    if _GC['installed']:
+        return False
+    import gc
+
+    def callback(phase, info):
+        try:
+            if phase == 'start':
+                _GC['started'] = time.perf_counter()
+                return
+            ms = (time.perf_counter() - _GC['started']) * 1000
+            pending = _GC['pending']
+            if ms >= GC_LOG_MS and len(pending) < GC_PENDING_MAX:
+                pending.append((info.get('generation'), info.get('collected'), ms))
+        except BaseException:
+            pass
+
+    gc.callbacks.append(callback)
+    _GC['callback'] = callback
+    _GC['installed'] = True
+    return True
+
+
+def uninstall_gc_log():
+    """Remove the callback and forget what it held (tests; a process never needs it)."""
+    import gc
+
+    callback = _GC['callback']
+    if callback is not None:
+        try:
+            gc.callbacks.remove(callback)
+        except ValueError:
+            pass
+    _GC.update(installed=False, started=0.0, callback=None, pending=[])
+
+
+def drain_gc_lines():
+    """Write one [PINDIAG] gc line per collection the callback recorded since the last drain. Never raises."""
+    try:
+        pending = _GC['pending']
+        taken = pending[:]
+        del pending[:len(taken)]
+        for generation, collected, ms in taken:
+            log_line('%s gen=%s collected=%s ms=%.2f' % (GC_MARKER, generation, collected, ms))
+    except BaseException:
+        pass
 
 
 def log_line(text):
@@ -161,11 +518,13 @@ class Snapshot:
     """What one pre-stage wrote: every destination of the fixture's staging list, in order, and
     the raw host value written into each - None for the tokens, never pre-staged."""
 
-    __slots__ = ('epoch', 'destinations', 'values', 'buffers', 'ms', 'round')
+    __slots__ = ('epoch', 'destinations', 'values', 'buffers', 'ms', 'round', 'local', 'cpu_ms')
 
-    def __init__(self, epoch_value, destinations, values, buffers, ms, round_number):
+    def __init__(self, epoch_value, destinations, values, buffers, ms, round_number, local=0, cpu_ms=0.0):
         self.epoch, self.destinations, self.values = epoch_value, tuple(destinations), list(values)
         self.buffers, self.ms, self.round = buffers, ms, round_number
+        # tp4/hostgap: the fixture's own epoch when the block epochs are engaged (always 0 otherwise, so `usable` is today's check).
+        self.local, self.cpu_ms = local, cpu_ms
 
 
 class BlockPrestage:
@@ -182,6 +541,12 @@ class BlockPrestage:
         self.counts = dict(prestaged=0, dropped=0, diff=0, full=0, audited=0, mismatches=0)
         # The last verify's split, for serving_packed_step's fence line.
         self.last = dict(path='off', buffers=0, reason='-', prestage_ms=0.0, diff_ms=0.0, write_ms=0.0)
+        # tp4/hostgap: the full read-back audit (every destination, then the round staged in full) and the thread CPU time of
+        # the last verify-time write, for the stage 0 line.
+        self.full_audit = full_audit_enabled()
+        self.last_cpu_ms = 0.0
+        if self.full_audit:
+            self.counts.update(full_audited=0, full_mismatches=0)
 
     # -- the window ---------------------------------------------------------------------------
     def drop(self, reason):
@@ -227,10 +592,21 @@ class BlockPrestage:
             raise ValueError('the block is %s, not idle' % block.phase)
         # Invalidates any older snapshot before the first copy: a pre-stage that fails part way
         # leaves nothing a verify could diff against.
-        bump('prestage')
+        # tp4/hostgap, per-block epochs: the bump is this fixture's own and comes after the values (their destinations are
+        # first checked against the other block's), still before the first copy; every other mode bumps first, as before.
+        per_block = _MODE['blocks']
+        if not per_block:
+            bump('prestage')
         started = time.perf_counter()
+        cpu_started = thread_ms()
         block.validate_bindings()
         values, readers = packed_values(block.operations, block.model, block.fixture, block.shape, users, guard=False)
+        if per_block:
+            import packed_verifier
+
+            register_destinations(block, [value[0] for value in values],
+                                  lambda destination: packed_verifier.addresses(block.operations, destination))
+            bump_fixture(block.fixture, 'prestage')
         tokens = block.fixture.tokens
         indices = [index for index, value in enumerate(values) if value[0] is not tokens]
         self.inflight = write_packed(block.operations, block.model, values, readers, indices=indices, fence=False,
@@ -238,7 +614,8 @@ class BlockPrestage:
         ms = (time.perf_counter() - started) * 1000
         self.snapshot = Snapshot(epoch(), [value[0] for value in values],
                                  [None if value[0] is tokens else value[1:] for value in values],
-                                 len(indices), ms, round_number)
+                                 len(indices), ms, round_number, local=local_epoch(block.fixture),
+                                 cpu_ms=thread_ms() - cpu_started)
         self.dropped = None
         self.counts['prestaged'] += 1
         log_line('%s round=%d buffers=%d ms=%.2f live=%s' % (WINDOW_MARKER, round_number, len(indices), ms,
@@ -252,6 +629,8 @@ class BlockPrestage:
             return None, self.dropped or 'no-snapshot'
         if snapshot.epoch != epoch():
             return None, 'epoch:%s' % last_bump()
+        if snapshot.local != local_epoch(self.block.fixture):
+            return None, 'epoch:%s' % last_local_bump(self.block.fixture)
         return snapshot, None
 
     def stage(self, entries, segments, snapshot, reason):
@@ -268,6 +647,7 @@ class BlockPrestage:
         self.dropped = 'no-snapshot'
         prestage_ms = 0.0 if snapshot is None else snapshot.ms
         started = time.perf_counter()
+        cpu_started = thread_ms()
         values = None
         if snapshot is not None:
             values, readers = packed_values(block.operations, block.model, block.fixture, block.shape, users)
@@ -291,17 +671,47 @@ class BlockPrestage:
                 raise
             for own, user in zip(readers, users, strict=True):
                 own.start = user[1]
-            bump('verify')
+            bump_fixture(block.fixture, 'verify')
             written, path, reason = len(changed), 'diff', '-'
             self.counts['diff'] += 1
         finished = time.perf_counter()
+        self.last_cpu_ms = thread_ms() - cpu_started
         self.last = dict(path=path, buffers=written, reason=reason, prestage_ms=prestage_ms,
                          diff_ms=(diffed - started) * 1000, write_ms=(finished - diffed) * 1000)
         log_line('%s round=%d path=%s buffers=%d reason=%s live=%d' % (
             MARKER, round_number, path, written, str(reason).replace(' ', '_')[:120], len(segments)))
         if self.audit:
             self.audit_round(users, round_number, path)
+        if self.full_audit:
+            self.full_audit_round(values, users, round_number, path)
         return written
+
+    def full_audit_round(self, values, users, round_number, path='diff'):
+        """QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT, after a verify-time write: EVERY destination read back from every chip
+        and compared with the verify-time (full-stage) value. After a DIFF write the round is then staged in full anyway, so
+        the trace sees what today's verify sees whatever the audit found; a mismatch is logged and fails the arm at the gate.
+        After a FULL write (path=full, `values` is None: the full stage is the reference itself) the same read-back runs
+        against the values the verify computes now: a mismatch there is an artifact of the comparator (layout, padding, dtype),
+        never of the lever, and the smoke judges the two paths separately. Nothing is restaged after a full write."""
+        from packed_verifier import packed_values, stage_packed
+
+        block = self.block
+        operations = block.operations
+        if values is None:
+            values, unused = packed_values(operations, block.model, block.fixture, block.shape, users, guard=False)
+        mismatched, checked = [], 0
+        for index, value in enumerate(values):
+            for chip, shard in enumerate(operations.get_device_tensors(value[0])):
+                checked += 1
+                if not same_readback(value[1], operations.to_torch(shard)):
+                    mismatched.append('%d.%d' % (index, chip))
+        self.counts['full_audited'] += checked
+        self.counts['full_mismatches'] += len(mismatched)
+        log_line('%s block=%s round=%d path=%s buffers=%d checked=%d mismatches=%d%s' % (
+            FULL_AUDIT_MARKER, block_label(block), round_number, path, len(values), checked, len(mismatched),
+            (' at=%s' % ','.join(mismatched[:8])) if mismatched else ''))
+        if path == 'diff':
+            stage_packed(operations, block.model, block.fixture, block.shape, users)
 
     def audit_round(self, users, round_number, path):
         """QWEN_FAST_PRESTAGE_AUDIT: AUDIT_BUFFERS destinations in rotation, read back from both
@@ -346,6 +756,10 @@ class WhileWaiting:
         # False: this window is one of several (CompositeWindow) and the verify pre-stage is left out of it - see
         # serving_packed_step.PackedStep.while_waiting_groups. True, the default, is the one block's window as it was.
         self.prestage = prestage
+        # tp4/hostgap (QWEN_FAST_TP4_HOSTGAP_LOG): this window's own timing, read by the line `window_line` writes; a window inside a
+        # CompositeWindow leaves the line to it.
+        self.timing = dict(stage_window_ms=0.0, prestage_ms=0.0, prestaged=0, ended=0.0)
+        self.logs_own_line = True
 
     def __call__(self):
         block = self.block
@@ -353,14 +767,21 @@ class WhileWaiting:
             # Taken before the fence: only commits enqueued before it may be armed by it.
             self.token = block.fence_token()
         fused = getattr(block, 'fused', None)
+        started = time.perf_counter()
         if fused is not None:
             # Round-fence plan H1b (fused_commit.py): the next round's T_proj RoPE tables for each
             # live segment. Never raises (a segment that fails is staged at its commit), so the
             # pre-stage below always runs.
             fused.stage_window(self.requests)
+        staged_window = time.perf_counter()
         prestaged = getattr(block, 'prestaged', None)
-        if prestaged is not None and self.prestage:
-            prestaged.prestage_requests(self.requests)
+        try:
+            if prestaged is not None and self.prestage:
+                prestaged.prestage_requests(self.requests)
+                self.timing['prestaged'] = 1
+        finally:
+            self.timing.update(stage_window_ms=(staged_window - started) * 1000,
+                               prestage_ms=(time.perf_counter() - staged_window) * 1000, ended=time.perf_counter())
 
     def drop(self, failure):
         """The pre-stage raised (the coordinator catches it): its snapshot is gone and the round
@@ -375,6 +796,8 @@ class WhileWaiting:
 
     def fenced(self):
         """F9 has just drained CQ0: arm the retained block's replay (round fences)."""
+        if self.logs_own_line and hostgap_log_enabled():
+            window_line([self])
         if self.token is not None:
             self.block.note_round_fence(self.token)
             self.token = None
@@ -390,8 +813,17 @@ class CompositeWindow:
         self.windows = list(windows)
         if not self.windows:
             raise ValueError('A composite window needs at least one block window')
+        self.ended = 0.0
+        for window in self.windows:
+            window.logs_own_line = False
 
     def __call__(self):
+        try:
+            self.run_windows()
+        finally:
+            self.ended = time.perf_counter()
+
+    def run_windows(self):
         for window in self.windows:
             try:
                 window()
@@ -411,6 +843,8 @@ class CompositeWindow:
     def fenced(self):
         """F9 has just drained CQ0: every block's round fence is armed; the first failure is raised after the rest ran."""
         first = None
+        if hostgap_log_enabled():
+            window_line(self.windows, self.ended)
         for window in self.windows:
             try:
                 window.fenced()
@@ -418,3 +852,24 @@ class CompositeWindow:
                 first = first or failure
         if first is not None:
             raise first
+
+
+def window_line(windows, ended=None):
+    """Stage 0 / D3 (QWEN_FAST_TP4_HOSTGAP_LOG): one line a round for the drafts' window, written right after its fence F9 -
+    each block's T_proj table staging and pre-stage in ms (and whether it pre-staged), the window's host total, and how long the
+    host then waited in the fence. A fence_wait_ms near 0 with a long window_ms is a window that overran the quads' device
+    time: the pre-stages cost the lever device idle. Never raises."""
+    drain_gc_lines()
+    try:
+        now = time.perf_counter()
+        if ended is None:
+            ended = max(window.timing['ended'] for window in windows)
+        timing = [window.timing for window in windows]
+        log_line('%s round=%d blocks=%d stage_window_ms=%s prestage_ms=%s prestaged=%s window_ms=%.2f fence_wait_ms=%.2f' % (
+            HOSTGAP_WINDOW_MARKER, windows[0].block.rounds + 1, len(windows),
+            ','.join('%.2f' % item['stage_window_ms'] for item in timing),
+            ','.join('%.2f' % item['prestage_ms'] for item in timing),
+            ','.join(str(item['prestaged']) for item in timing),
+            sum(item['stage_window_ms'] + item['prestage_ms'] for item in timing), (now - ended) * 1000))
+    except BaseException:
+        pass

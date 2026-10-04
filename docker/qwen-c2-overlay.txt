@@ -384,3 +384,6 @@ scripts/ci/dflash_traced_publish.py
 # Prompt-lookup drafting (tp4/lookup, QWEN_FAST_LOOKUP_DRAFT, default off): serving_request_factory imports it when the flag names a policy and
 # serving_fast_request.prepare calls the request's lookup; host only, nothing allocated on a card. Without this line the base has no such module.
 scripts/ci/prompt_lookup.py
+# tp4/hostgap (the eight-seat host gap, every flag default off): the packed bridge's step entry carries the entry diet and the stage 0 timing. It is in the P8 copy lists, so without this
+# line the image would run the P8 base's copy.
+scripts/ci/serving_packed_bridge.py

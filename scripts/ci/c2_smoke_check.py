@@ -27,6 +27,14 @@ own SMOKE_JSON line and the container log and exits non-zero on:
     cards), and - in a smoke that ran `concurrent4_steady` - that a round of four fused publications happened and, under
     QWEN_FAST_FUSED_COMMIT_LIVE_BANKS, that the live-bank marker was logged. A profile with the flag off must log no fused line.
 
+  - the eight-seat host-gap levers (tp4/hostgap, hostgap_problems): QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE=1 must log its engaged line once
+    for each M3 block and no refusal line; QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS=1 its block-epochs line and, in a smoke that ran
+    concurrent8_steady (and QWEN_FAST_TP4_HOSTGAP_LOG=1), at least 95% of the 4-live verifies of the pre-staged blocks (A and B under the
+    epochs, A under the lite arm) on the diff path, counting every full stage as a miss but those after an external writer
+    (epoch:admission, detach, prefill, prefill-chunk, bookkeeping, lane-switch: a 'no-snapshot' or an 'epoch:verify' is a miss); the audit flag (QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT=1) at least one [PACKED-PRESTAGE-FULLAUDIT] line for
+    each block that pre-stages, at least one path=full line (the comparator checked against the full stage itself), buffers x chips
+    checked on every line, and zero mismatches in every one (a path=full mismatch is the comparator's artifact, a path=diff one the lever's, and the
+    two are reported apart); a profile without the flag logs none of these lines;
   - a code-prompt answer that is not text (coding, concurrent4_steady, steady_resend): a stream that finished with `stop` at
     its first token (an instant EOS: v172's users 0 and 1) or before MIN_ANSWER_TOKENS, or whose sample is mostly non-Latin
     script (v172's users 2 and 3: mixed-script symbols), and, at four cards (QWEN_FAST_TP not 2), a first prefill whose [MEMLEDGER] item=model_after_prefill
@@ -746,6 +754,143 @@ def fused_problems(env, container_text, steady, facts=None):
     return problems
 
 
+# tp4/hostgap: the two-block verify pre-stage (verify_prestage), judged on the eight-seat steady mix.
+HOSTGAP_TWO_BLOCK_FLAG = 'QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE'
+HOSTGAP_EPOCHS_FLAG = 'QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS'
+HOSTGAP_AUDIT_FLAG = 'QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT'
+HOSTGAP_WINDOW_VALIDATE_FLAG = 'QWEN_FAST_TP4_WINDOW_VALIDATE'
+HOSTGAP_ENGAGED = '[PINDIAG] verify prestage two-block engaged'
+HOSTGAP_REFUSED = '[PINDIAG] verify prestage two-block refused'
+HOSTGAP_EPOCHS_ENGAGED = '[PINDIAG] verify prestage block epochs engaged'
+HOSTGAP_EPOCHS_REFUSED = '[PINDIAG] verify prestage block epochs refused'
+HOSTGAP_FULL_AUDIT = re.compile(r'\[PACKED-PRESTAGE-FULLAUDIT\] block=(\S+) round=\d+ path=(diff|full) buffers=(\d+) checked=(\d+) mismatches=(\d+)')
+HOSTGAP_VERIFY_LINE = re.compile(r'\[PACKED-HOSTGAP-VERIFY\] block=(\S+) round=\d+ live=(\d+) path=(\w+) reason=(\S+)')
+HOSTGAP_LOG_FLAG = 'QWEN_FAST_TP4_HOSTGAP_LOG'
+HOSTGAP_DIFF_MIN_SHARE = 0.95
+# The only reasons a pre-staged block may legitimately take the full stage: an external writer between the window and the verify
+# (a membership or prefill event). Every other 'full' (no-snapshot, epoch:verify, destinations) counts against the share.
+HOSTGAP_EXCUSED_REASONS = ('epoch:admission', 'epoch:detach', 'epoch:prefill', 'epoch:prefill-chunk', 'epoch:bookkeeping',
+                           'epoch:lane-switch')
+HOSTGAP_SHADOW = '[PACKED-PRESTAGE-SHADOW]'
+HOSTGAP_PRESTAGE_LINE = re.compile(r'\[PACKED-PRESTAGE\] round=\d+ path=(\w+) buffers=\d+ reason=(\S+) live=(\d+)')
+HOSTGAP_LINE_PREFIXES = (HOSTGAP_ENGAGED, HOSTGAP_REFUSED, HOSTGAP_EPOCHS_ENGAGED, HOSTGAP_EPOCHS_REFUSED,
+                         '[PACKED-PRESTAGE-FULLAUDIT]')
+HOSTGAP_NO_SNAPSHOT_MAX_SHARE = 0.10
+HOSTGAP_MIN_LIVE4_VERIFIES = 20
+
+
+def hostgap_facts(container_text):
+    """What the log says about the two-block pre-stage: the 4-live verify paths, the audited blocks and their mismatches."""
+    live4 = [(path, reason) for path, reason, live in HOSTGAP_PRESTAGE_LINE.findall(container_text) if live == '4']
+    audits = HOSTGAP_FULL_AUDIT.findall(container_text)
+    verifies = [(block, path, reason) for block, live, path, reason in HOSTGAP_VERIFY_LINE.findall(container_text) if live == '4']
+    return dict(hostgap_engaged=container_text.count(HOSTGAP_ENGAGED), hostgap_refused=container_text.count(HOSTGAP_REFUSED),
+                hostgap_epochs_engaged=container_text.count(HOSTGAP_EPOCHS_ENGAGED),
+                hostgap_live4_verifies=len(live4),
+                hostgap_live4_full_no_snapshot=sum(1 for path, reason in live4 if path == 'full' and reason == 'no-snapshot'),
+                hostgap_live4_diff=sum(1 for path, reason in live4 if path == 'diff'),
+                hostgap_verify_live4=verifies, hostgap_audit_lines=audits,
+                hostgap_full_audits=len(audits), hostgap_full_audit_blocks=sorted({item[0] for item in audits}),
+                hostgap_full_audits_full=sum(1 for item in audits if item[1] == 'full'),
+                hostgap_audit_mismatches_diff=sum(int(item[4]) for item in audits if item[1] == 'diff'),
+                hostgap_audit_mismatches_full=sum(int(item[4]) for item in audits if item[1] == 'full'),
+                hostgap_full_audit_mismatches=sum(int(item[4]) for item in audits),
+                hostgap_shadow_checks=container_text.count(HOSTGAP_SHADOW))
+
+
+def hostgap_share_problems(verifies, per_block):
+    """The share of the pre-staged blocks' 4-live verifies on the diff path: blocks A and B under the per-block epochs, block A
+    alone under the lite arm (B takes the full stage there by design). Only a full stage after an external writer
+    (HOSTGAP_EXCUSED_REASONS) is left out of the count; 'no-snapshot', 'epoch:verify' and the rest count as misses.
+    At least HOSTGAP_DIFF_MIN_SHARE must be on the diff path."""
+    judged = None if per_block else {'A'}
+    eligible = [(block, path, reason) for block, path, reason in verifies
+                if (judged is None or block in judged) and not (path == 'full' and reason in HOSTGAP_EXCUSED_REASONS)]
+    if len(eligible) < HOSTGAP_MIN_LIVE4_VERIFIES:
+        return ['only %d 4-live verifies of the pre-staged block(s) were logged (%d needed to judge the diff share)' % (
+            len(eligible), HOSTGAP_MIN_LIVE4_VERIFIES)]
+    diff = sum(1 for item in eligible if item[1] == 'diff')
+    if diff < HOSTGAP_DIFF_MIN_SHARE * len(eligible):
+        misses = {}
+        for block, path, reason in eligible:
+            if path != 'diff':
+                key = '%s:%s:%s' % (block, path, reason)
+                misses[key] = misses.get(key, 0) + 1
+        return ['%d of %d 4-live verifies of the pre-staged block(s) took the diff path (%d%% needed); the rest: %s' % (
+            diff, len(eligible), int(HOSTGAP_DIFF_MIN_SHARE * 100), ', '.join('%s x%d' % item for item in sorted(misses.items())))]
+    return []
+
+
+def hostgap_problems(env, container_text, steady_eight):
+    """(problems, facts) for the eight-seat host-gap levers: see the module docstring. Judged only where the profile asked for one;
+    a profile without QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE logs none of the lever's lines."""
+    facts = hostgap_facts(container_text)
+    problems = []
+    asked = env.get(HOSTGAP_TWO_BLOCK_FLAG) == '1'
+    if not asked:
+        if any(prefix in container_text for prefix in HOSTGAP_LINE_PREFIXES):
+            problems.append('%s is not set and the log holds two-block pre-stage lines: the lever ran on a profile without it'
+                            % HOSTGAP_TWO_BLOCK_FLAG)
+        if env.get(HOSTGAP_EPOCHS_FLAG) == '1':
+            problems.append('%s=1 without %s=1: the per-block epochs need the two-block pre-stage' % (
+                HOSTGAP_EPOCHS_FLAG, HOSTGAP_TWO_BLOCK_FLAG))
+        return problems, facts
+    blocks = m3_blocks(env)
+    if facts['hostgap_refused']:
+        problems.append('the two-block pre-stage was refused at attach (%d line(s) %s): the arm measures nothing' % (
+            facts['hostgap_refused'], HOSTGAP_REFUSED))
+    elif facts['hostgap_engaged'] != blocks:
+        problems.append('the two-block engaged line (%s) appears %d times, not once per M3 block (%d)' % (
+            HOSTGAP_ENGAGED, facts['hostgap_engaged'], blocks))
+    per_block = env.get(HOSTGAP_EPOCHS_FLAG) == '1'
+    if per_block:
+        if HOSTGAP_EPOCHS_REFUSED in container_text:
+            problems.append('the per-block epochs were refused or disengaged (%s): the second block was not pre-staged'
+                            % HOSTGAP_EPOCHS_REFUSED)
+        elif facts['hostgap_epochs_engaged'] != 1:
+            problems.append('the block-epochs engaged line (%s) appears %d times, not once' % (
+                HOSTGAP_EPOCHS_ENGAGED, facts['hostgap_epochs_engaged']))
+    if not steady_eight:
+        problems.append('the profile asks for the two-block pre-stage and the smoke did not run %s (or it errored): the lever was '
+                        'not judged' % STEADY_EIGHT_TEST)
+        return problems, facts
+    if not facts['hostgap_live4_diff']:
+        problems.append('no 4-live verify took the diff path: the pre-stage never served a verify')
+    if env.get(HOSTGAP_LOG_FLAG) == '1':
+        problems.extend(hostgap_share_problems(facts['hostgap_verify_live4'], per_block))
+    elif per_block:
+        problems.append('%s=1 is not set: the per-block epochs arm cannot be judged on the share of verifies that took the diff path'
+                        % HOSTGAP_LOG_FLAG)
+    if env.get(HOSTGAP_AUDIT_FLAG) == '1':
+        wanted = ['A', 'B'] if per_block else ['A']
+        if facts['hostgap_audit_mismatches_diff']:
+            problems.append('%d staged buffers differed from the full stage after a DIFF write in the full audit '
+                            '([PACKED-PRESTAGE-FULLAUDIT] path=diff): the lever staged something other than the full stage'
+                            % facts['hostgap_audit_mismatches_diff'])
+        if facts['hostgap_audit_mismatches_full']:
+            problems.append('%d buffers differed after a FULL stage in the full audit ([PACKED-PRESTAGE-FULLAUDIT] path=full): the '
+                            'comparator itself disagrees with the full stage (layout, padding or dtype), so a diff-path mismatch '
+                            'in this run says nothing about the lever' % facts['hostgap_audit_mismatches_full'])
+        if not facts['hostgap_full_audits_full']:
+            problems.append('%s is set and no [PACKED-PRESTAGE-FULLAUDIT] path=full line was logged: the comparator was never '
+                            'checked against the full stage' % HOSTGAP_AUDIT_FLAG)
+        chips = int(env.get('QWEN_FAST_TP') or 2)
+        short = [item for item in facts['hostgap_audit_lines'] if not int(item[2]) or int(item[3]) != int(item[2]) * chips]
+        if short:
+            problems.append('%d [PACKED-PRESTAGE-FULLAUDIT] lines checked fewer than buffers x %d chips (first: buffers=%s checked=%s)'
+                            % (len(short), chips, short[0][2], short[0][3]))
+        missing = [label for label in wanted if label not in facts['hostgap_full_audit_blocks']]
+        if missing:
+            problems.append('%s is set and no [PACKED-PRESTAGE-FULLAUDIT] line was logged for block %s' % (
+                HOSTGAP_AUDIT_FLAG, ' and '.join(missing)))
+        if env.get(HOSTGAP_WINDOW_VALIDATE_FLAG) == '1' and not facts['hostgap_shadow_checks']:
+            problems.append('%s and %s are set and the skipped binding check never ran as a shadow (no %s line)' % (
+                HOSTGAP_WINDOW_VALIDATE_FLAG, HOSTGAP_AUDIT_FLAG, HOSTGAP_SHADOW))
+    elif facts['hostgap_full_audits']:
+        problems.append('[PACKED-PRESTAGE-FULLAUDIT] lines on a profile without %s' % HOSTGAP_AUDIT_FLAG)
+    return problems, facts
+
+
 def tpub_problems(env, container_text):
     """The problems the profile's traced-carry settings leave: with the flag off no [TPUB line at all; on, at least one engaged line, no
     declined line, and (audited) at least one audit line, every one with mismatches=0 and the item count the width implies."""
@@ -883,6 +1028,11 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         problems += fused_problems(env, container_text, steady, fused)
         problems += tpub_problems(env, container_text)
         problems += lookup_problems(env, container_text)
+        hostgap, hostgap_found = hostgap_problems(
+            env, container_text, STEADY_EIGHT_TEST in (smoke or {}) and 'error' not in smoke[STEADY_EIGHT_TEST])
+        problems += hostgap
+        if any(hostgap_found[key] for key in ('hostgap_engaged', 'hostgap_refused', 'hostgap_live4_diff', 'hostgap_full_audits')):
+            facts['hostgap'] = hostgap_found
     if entry is not None:
         problems += traffic_problems(container_text, entry)
         problems += waiver_problems(container_text, entry)

@@ -47,6 +47,7 @@ Stdlib and torch only at call time (torch inside functions), importable on py 3.
 """
 
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -539,6 +540,10 @@ def read_quad_outputs(device, outputs):
 
     operations = device.operations
     chips = tp_shapes.chip_count()
+    # tp4/hostgap stage 0 (QWEN_FAST_TP4_HOSTGAP_LOG): how much of the collect is the blocking reads and how much the merge and checks.
+    import verify_prestage
+
+    stamps = [time.perf_counter()] if verify_prestage.hostgap_log_enabled() else None
     halves = ([], [])
     for chunk in outputs.chunks:
         values = operations.get_device_tensors(chunk['values'])
@@ -561,14 +566,25 @@ def read_quad_outputs(device, outputs):
             report_rejected_outputs(device, outputs, host_chunks, failure)
             raise
 
+    if stamps is not None:
+        stamps.append(time.perf_counter())
     merged_halves = [merged(list(part)) for part in halves]
+    if stamps is not None:
+        stamps.append(time.perf_counter())
     candidates = torch.cat([merged_halves[0][0], torch.zeros_like(merged_halves[0][0][:, :1]), merged_halves[1][0]], dim=1)
     unary = torch.cat([merged_halves[0][1], torch.zeros_like(merged_halves[0][1][:, :1]), merged_halves[1][1]], dim=1)
     parts = [operations.to_torch(value) for value in operations.get_device_tensors(outputs.projected)]
+    if stamps is not None:
+        stamps.append(time.perf_counter())
     if len(parts) != chips or any(not torch.equal(parts[0], other) for other in parts[1:]):
         raise AssertionError('Replicated learned selector features differ')
     hidden = parts[0].reshape(1, ROWS, 256)
-    return split_selection(hidden, candidates, unary, USERS, BLOCK, block_width=ROWS)
+    selection = split_selection(hidden, candidates, unary, USERS, BLOCK, block_width=ROWS)
+    if stamps is not None:
+        finished = time.perf_counter()
+        verify_prestage.add_collect_split((stamps[1] - stamps[0] + stamps[3] - stamps[2]) * 1000,
+                                          (stamps[2] - stamps[1] + finished - stamps[3]) * 1000)
+    return selection
 
 
 def select_quad_outputs(device, outputs, seeds, counts):

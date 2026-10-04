@@ -11,6 +11,8 @@ The device step is injected rather than reached for. The packed fixture lives in
 contract be exercised without a device.
 """
 
+import time
+
 from serving_vllm_packed import admit_packed_scheduler_output, packed_model_runner_output
 
 
@@ -22,7 +24,13 @@ def execute_packed_decode(bridges, scheduled, *, cancelled, packed_step):
     were matched to.
     """
     from serving_vllm_state import apply_committed_output, validate_runner_reservation
+    import verify_prestage
 
+    # tp4/hostgap: QWEN_FAST_TP4_HOSTGAP_LOG times the step entry's parts (stage 0: one [PACKED-ENTRY] line a step, written by the
+    # packed step once it has its own checks' time); QWEN_FAST_TP4_ENTRY_DIET runs each distinct storage validator once (1d).
+    # Both unset, the body below is today's.
+    log, diet = verify_prestage.hostgap_log_enabled(), verify_prestage.entry_diet_enabled()
+    stamps = [time.perf_counter()] if log else None
     if not bridges or not callable(packed_step):
         raise ValueError('Live packed bridges and an explicit device step required')
     if any(bridge.failed for bridge in bridges.values()):
@@ -34,19 +42,49 @@ def execute_packed_decode(bridges, scheduled, *, cancelled, packed_step):
     ordered = [dict(entry, bridge=bridges[entry['request_id']]) for entry in entries]
     runner = ordered[0]['bridge'].runner
     try:
+        if log:
+            stamps.append(time.perf_counter())
+        validated = []
         for entry in ordered:
             bridge = entry['bridge']
             if bridge.validate_storage is not None:
+                if diet:
+                    # 1d: every bridge holds the same bound owner.validate, which re-inspects every paged-KV buffer: the same check
+                    # once, at the same point, before any device work. A validator not equal to an earlier one still runs.
+                    if any(bridge.validate_storage == earlier for earlier in validated):
+                        continue
+                    validated.append(bridge.validate_storage)
                 bridge.validate_storage()
+        if log:
+            stamps.append(time.perf_counter())
         # once, because it consumes the whole SchedulerOutput rather than one request
         runner._update_states(scheduled)
+        if log:
+            stamps.append(time.perf_counter())
+        # One loop, as ever: a user's reservation check, then its page refresh, then the next user's.
+        reservation_ms = refresh_ms = 0.0
+        writes = 0
         for entry in ordered:
             bridge, ticket = entry['bridge'], entry['ticket']
+            if log:
+                lap = time.perf_counter()
             validate_runner_reservation(runner, bridge.state, ticket, len(ordered))
             if len(bridge.state.block_ids) != 1:
                 raise ValueError('One explicit target KV page group required')
-            bridge.page_binding.refresh(bridge.state.block_ids[0], position=ticket.position,
-                                        rows=len(ticket.tokens))
+            if log:
+                lapped = time.perf_counter()
+                reservation_ms += (lapped - lap) * 1000
+            wrote = bridge.page_binding.refresh(bridge.state.block_ids[0], position=ticket.position,
+                                                rows=len(ticket.tokens))
+            if log:
+                refresh_ms += (time.perf_counter() - lapped) * 1000
+                writes += 1 if wrote is True else 0
+        if log:
+            stamps.append(time.perf_counter())
+            verify_prestage.note_scratch('entry', dict(
+                admit_ms=(stamps[1] - stamps[0]) * 1000, storage_ms=(stamps[2] - stamps[1]) * 1000,
+                update_states_ms=(stamps[3] - stamps[2]) * 1000, reservation_ms=reservation_ms,
+                refresh_ms=refresh_ms, refresh_writes=writes, started=stamps[0]))
         outputs = packed_step(ordered, cancelled=cancelled)
         if len(outputs) != len(ordered):
             raise ValueError('The packed step must commit one output per packed request')

@@ -36,7 +36,8 @@ TWIN = {TRAFFIC: 'c2-packed-tp4-8', GATE: 'c2-packed-tp4-8-gate', TIME_GATE: 'c2
         DIAG: 'c2-packed-tp4-8-diag-strace', FOUR_GATE: 'c2-packed-tp4-gate'}
 ALL = EIGHT + (FOUR_GATE,)
 # tp4/262k8: the best-lever arms (test_tp4_262k8_best_profiles holds them); they are not the 131k twins' 262k deltas, so the twin rule does not apply
-BEST262K = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship')
+BEST262K = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship',
+            'c2-packed-tp4-8x262k-hostgap-1', 'c2-packed-tp4-8x262k-hostgap-1-audit', 'c2-packed-tp4-8x262k-hostgap-2', 'c2-packed-tp4-8x262k-hostgap-2-audit')
 # tp4/262k8-x (test_tp4_262k8_x holds each as the best-time-gate or best-audit twin plus/minus exactly one lever): the experiments image's arms; 262k knobs by inheritance.
 X262K = tuple('c2-packed-tp4-8x262k-best-time-gate-' + lever for lever in ('nosamp', 's1', 'd2', 'dbf16', 'lookup', 'stack')) + (
     'c2-packed-tp4-8x262k-best-nosamp-audit', 'c2-packed-tp4-8x262k-best-stack-audit')
