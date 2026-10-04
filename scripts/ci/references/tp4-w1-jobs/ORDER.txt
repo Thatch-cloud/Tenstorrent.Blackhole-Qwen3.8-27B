@@ -1,0 +1,44 @@
+# The order of the tp4/w1 four-card DEVELOPMENT window: the built levers of the fusion audit's wave 1 gated TOGETHER on the eight-seat 262k stack, one image, tp4-w1-1, built from the pushed tp4/w1 commit.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# THE CARDS ARE UNDER DEVELOPMENT: NO agentstart, NO agentstop (the node agent is already stopped), NO hand-back, NO deploy, NO :latest move. Z ends with a reset and no agentstart.
+# P0. NO OTHER WINDOW DRIVER MAY BE ALIVE and no privileged builder container may be up. The CPU suite green on this branch first (gh workflow run qwen-cpu-suite.yml -f ref=tp4/w1). Every result is UNQUALIFIED
+# (the 262k evidence waiver on the gate-only arms). B0 never runs during a timing job. Judge every ABAB PAIRED per round, never by unpaired medians; check the load average.
+# BASE: origin/tp4/262k8-x (bb77911d: nosamp, the drafter ops with the warm-pass fix, drafter-bf16, lookup and the v5 split, all default off) plus tp4/hostgap (efbdaf27) and tp4/u1 (985e8eb0), merged. CONTROL for every pair: c2-packed-tp4-8x262k-best-time-gate.
+# WHAT IS IN c2-packed-tp4-8x262k-w1: the control MINUS QWEN_FAST_PACKED_SAMPLER_IN_TRACE (nosamp), PLUS QWEN_FAST_TP4_DRAFT_CONV and QWEN_FAST_TP4_DRAFT_HEADS (D2a, D2c), QWEN_FAST_TP4_HOSTGAP_LOG, QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE,
+# QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS, QWEN_FAST_TP4_WINDOW_VALIDATE, QWEN_FAST_TP4_ENTRY_DIET (host-gap stage 1, the epochs arm) and QWEN_FAST_TP4_RS_UNIT_MAJOR (U1). c2-packed-tp4-8x262k-w1-audit is that plus every audit flag of those levers
+# (QWEN_FAST_TP4_DRAFT_CONV_AUDIT, QWEN_FAST_TP4_DRAFT_HEADS_AUDIT, QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT, QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT) and the fused-commit, verify-glue and draft-singles audits of the best-audit profile.
+# LEFT OUT, by name: S1 (QWEN_FAST_TP4_SHARD_ARGMAX: measured no gain) and D1 (QWEN_FAST_CCL_TOPOLOGY=ring for the drafter's gathers: the ring arms also set the engine block's fabric_config to FABRIC_1D_RING (the mesh descriptor is already the ring one in the control), a fabric the whole process runs on,
+# which also changes the verify's collectives; it is not a drafter-only switch and does not belong in a stack gate; it keeps its own arm and its own window).
+# ORDER: the cheapest kill signals first: X0 (status, RESCAN, reset), B0, S0c (the control attach: the reference for every hash READ below), A1 (the audited attach of the whole stack: zero mismatches), H1-H5 (five hang shapes on the stack, audits off),
+# then the timing pairs T1-T4 (control against the stack, ABAB, 32k and 128k), P1 (the eight-user device profile: the delivered per-lever gains), then Z.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS A1 <- S0c
+# NEEDS H1 H2 H3 H4 H5 <- A1
+# NEEDS T1 T2 T3 T4 <- A1 H1 H2 H3 H4 H5
+# NEEDS P1 <- A1 H1
+# READ RULES (each also needs c2_smoke_check clean and no stall):
+#   X0  the status prints, the rescan finds every board, the reset completes on all four.   B0  provenance report with no problem line, the image id printed.
+#   S0c  admission passed at capacity 262144, every answer completes; RECORD the concurrent8_code_32k and concurrent8_code_equal answer hashes (the reference of A1 and H1-H5).
+#   A1  every lever engaged (prestage mode=blocks on both blocks, block epochs, tp4 u1 unit_major above 0, draft conv, draft heads), no refusal or fall-back line, ZERO audit mismatches of every kind, the U1 replay audits for both block owners, answers' hashes equal to S0c's.
+#   H1-H5  five consecutive completions, every user at budget, concurrent8_code_equal hashes equal in every run and equal to S0c's. One stall stops the window.
+#   T1-T4  paired ABAB, control against the stack: the round time at eight live users and per seat tok/s at 32k and about 120k, PAIRED per round, texts equal. W1's projected 32k round is about 182 ms against 222 ms today and about 236 ms against 279 ms at 128k;
+#       the gain of each lever is NOT read from this pair (it is the sum of all of them): it is read from P1's per-op and per-gap tables, lever by lever.
+#   P1  ops-trace texts equal ops-twin's; the reduce-scatter and all-gather rows, the sampler tail, the quad draft's conv and head-copy rows and the gaps between the traces, each against the control's tp4-262k8-best-jobs P1.
+# NO-GO for adopting the stack: any stall, any hash difference between arms that must be identical, any audit mismatch. This window decides nothing about production: it is evidence for the owner.
+# Time (estimate): X0 and B0 about 80 min, S0c 1.5 h, A1 3 h, H1-H5 7.5 h, T1-T4 6 h, P1 2.5 h, Z 10 min: about 22 h.
+X0-status-rescan-reset stop tp4-w1-1 20
+B0-build stop tp4-w1-1 60
+S0c-control-attach-smoke stop tp4-w1-1 90
+A1-audited-attach-smoke stop tp4-w1-1 180
+H1-hang-shapes-w1 stop tp4-w1-1 90
+H2-hang-shapes-w1 stop tp4-w1-1 90
+H3-hang-shapes-w1 stop tp4-w1-1 90
+H4-hang-shapes-w1 stop tp4-w1-1 90
+H5-hang-shapes-w1 stop tp4-w1-1 90
+T1-timed-A-control soft tp4-w1-1 90
+T2-timed-B-w1 soft tp4-w1-1 90
+T3-timed-A-control soft tp4-w1-1 90
+T4-timed-B-w1 soft tp4-w1-1 90
+P1-w1-8-user-profile soft tp4-w1-1 150
+Z-reset soft tp4-w1-1 10
