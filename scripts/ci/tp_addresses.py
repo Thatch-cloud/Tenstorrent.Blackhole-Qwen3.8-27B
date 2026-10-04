@@ -140,7 +140,13 @@ def _gdn_glue(environ):
 def _attn_fold(environ):
     import tp4_vglue
 
-    return tp4_vglue.enabled(tp4_vglue.ATTN_FOLD, environ)
+    return tp4_vglue.enabled(tp4_vglue.ATTN_FOLD, environ) or _sdpa_long(environ)
+
+
+def _sdpa_long(environ):
+    import sdpa_long_tp
+
+    return sdpa_long_tp.enabled(environ)
 
 
 def _fused_commit(environ):
@@ -163,7 +169,7 @@ def _split_v(environ):
 
 FLAGGED_TWINS = {
     ('gdn_device_loop_state', 'DeviceLoopState'): ('QWEN_FAST_TP4_GDN_GLUE', _gdn_glue),
-    ('extent_attention_replay_tp', 'PackedExtentReplayReader'): ('QWEN_FAST_TP4_ATTN_FOLD', _attn_fold),
+    ('extent_attention_replay_tp', 'PackedExtentReplayReader'): ('QWEN_FAST_TP4_ATTN_FOLD or QWEN_FAST_TP4_SDPA', _attn_fold),
     ('gdn_seq_block', 'execute'): ('QWEN_FAST_GDN_SPLIT_V', _split_v),
 }
 FLAGGED_MODULE_TWINS = {

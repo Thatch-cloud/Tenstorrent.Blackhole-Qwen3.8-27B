@@ -1,0 +1,32 @@
+# The order of the tp4/sdpa-multi four-card DEVELOPMENT window: eight seats, every seat a 262,144-token window, on the nine best levers with the two quad draft blocks, and ONE SDPA decode launch per attention layer for every user of a 64-row block (QWEN_FAST_TP4_SDPA=multi), one image, tp4-sdpa-multi-1, built from the pushed tp4/sdpa-multi commit.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# THE CARDS ARE UNDER DEVELOPMENT, PRODUCTION IS DOWN BY THE OWNER'S CHOICE: NO agentstop, NO agentstart, NO hand-back, NO deploy, NO :latest move. Z ends with a reset and no agentstart. qwen_c2_profiles.json's default stays c2-packed-tp4; nothing is baked as the image default.
+# P0. NO OTHER WINDOW DRIVER MAY BE ALIVE and no privileged builder container may be up. The CPU suite green on this branch first (gh workflow run qwen-cpu-suite.yml -f ref=tp4/sdpa-multi). Every result is UNQUALIFIED (the 262k evidence waiver on the gate-only arms). B0 never runs during a timing job. Judge every ABAB PAIRED per round, never by unpaired medians; check the load average.
+# WHAT THIS WINDOW DECIDES: whether the one-launch SDPA is byte-identical to the per-user launches on the card (A1: the audit compares every word of every layer's block output, in the trace, at eight live seats) and what it saves per eight-seat round (T1-T4). It decides nothing about production.
+# ORDER: X0 (status, RESCAN, reset), B0 (the image), A1 (the audited attach: the exactness gate, STOP on any mismatch), H1-H5 (five consecutive audits-off hang-shape runs on the multi arm: new persistent buffers and trace ops), then the timing pair T1-T4 (ABAB), then Z.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS A1 <- B0
+# NEEDS H1 H2 H3 H4 H5 <- A1
+# NEEDS T1 T2 T3 T4 <- A1 H1 H2 H3 H4 H5
+# READ RULES (each also needs c2_smoke_check clean and no stall):
+#   X0  the status prints, the rescan finds every board, the reset completes on all four.   B0  provenance report with no problem line, the image id printed, the four multi files in the image.
+#   A1  admission passed at capacity 262144, both blocks engaged config=multi flags=0x21 users=4 cores_per_entry=16, the call line, at least one exact=True audit line per round and ZERO audit mismatches, hashes equal to solo.
+#   H1-H5  five consecutive completions of the eight-seat hang shapes, audits off; one stall stops the window and the timing is skipped.
+#   T1-T4  paired ABAB, control (8x262k-best-time-gate) against multi (8x262k-best-sdpamulti): the round time at eight live users, per seat tok/s at 32k and about 120k, texts equal (they must be: same arithmetic).
+#   Z  the reset completes; the agent stays stopped.
+# NO-GO for adopting the arm: any audit mismatch (a differing word), any stall, any text difference between the arms. A multi round no faster than the control is a result, not a failure: record the per-round pairs.
+# Time (estimate): X0 and B0 about 80 min, A1 2 h, H1-H5 7.5 h, T 6 h, Z 10 min: about 17.5 h.
+X0-status-rescan-reset stop tp4-sdpa-multi-1 20
+B0-build stop tp4-sdpa-multi-1 60
+A1-audited-attach-smoke stop tp4-sdpa-multi-1 120
+H1-hang-shapes-multi stop tp4-sdpa-multi-1 90
+H2-hang-shapes-multi stop tp4-sdpa-multi-1 90
+H3-hang-shapes-multi stop tp4-sdpa-multi-1 90
+H4-hang-shapes-multi stop tp4-sdpa-multi-1 90
+H5-hang-shapes-multi stop tp4-sdpa-multi-1 90
+T1-timed-A-control-8x262k-time-gate soft tp4-sdpa-multi-1 90
+T2-timed-B-multi-8x262k-time-gate soft tp4-sdpa-multi-1 90
+T3-timed-A-control-8x262k-time-gate soft tp4-sdpa-multi-1 90
+T4-timed-B-multi-8x262k-time-gate soft tp4-sdpa-multi-1 90
+Z-reset soft tp4-sdpa-multi-1 10

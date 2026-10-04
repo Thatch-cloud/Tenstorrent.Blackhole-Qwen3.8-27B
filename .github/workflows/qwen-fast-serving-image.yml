@@ -88,6 +88,9 @@ jobs:
           for name in tp4_vglue.py gdn_commit_lanes_tp.cpp gdn_rows_dma_tp.py gdn_rows_dma_tp.cpp gdn_device_loop_state_tp.py gdn_block_conv_tp.py attention_block_fold_tp.py attention_block_fold_tp.cpp extent_attention_fold_tp.py gdn_pair_slice_tp.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
+          for name in sdpa_long_tp.py sdpa_multi_tp.py sdpa_multi_mask_tp.cpp sdpa_multi_gather_tp.cpp sdpa_multi_audit_tp.cpp; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
           for name in draft_wide_tp.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done

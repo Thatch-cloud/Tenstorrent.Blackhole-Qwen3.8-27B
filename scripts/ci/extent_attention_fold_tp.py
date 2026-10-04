@@ -6,13 +6,18 @@ This twin subclasses the reader and overrides `__call__` only; tp_addresses.inst
 QWEN_FAST_TP=4 only (model_batch reaches the class through the module alias, which is the four-card twin module).
 
 QWEN_FAST_TP4_ATTN_FOLD unset or 0: `__call__` is the pinned reader's, called through `super()` with the same arguments (nothing
-here runs). QWEN_FAST_TP4_ATTN_FOLD=1: the per-segment query slices, fold DMAs, stacking concats, result slices, inverse folds and
+here runs). QWEN_FAST_TP4_SDPA=multi (sdpa_multi_tp) replaces the per-user launches with one launch for the block (and
+QWEN_FAST_TP4_SDPA_AUDIT=1 runs both and compares them); `multi` is None otherwise and every method here is the one without it. QWEN_FAST_TP4_SDPA (sdpa_long_tp) is read once, in `__init__`, after the pinned constructor has built and qualified the readers.
+QWEN_FAST_TP4_ATTN_FOLD=1: the per-segment query slices, fold DMAs, stacking concats, result slices, inverse folds and
 concats become attention_block_fold_tp's two launches; a query or a placement the launches are not written for takes the pinned
 path, logged as FALLBACK and counted (nothing is guessed).
 """
 
+from contextlib import contextmanager
+
 import attention_block_fold_tp
 import extent_attention_replay_tp as base_module
+import sdpa_long_tp
 import tp4_vglue
 from tp_addresses import addresses, release_owned
 
@@ -27,7 +32,35 @@ def _pinned_class():
 
 
 class PackedExtentReplayReader(_pinned_class()):
+    # QWEN_FAST_TP4_SDPA=multi (sdpa_multi_tp.MultiBlock, set by sdpa_long_tp.apply in the constructor): None unless that
+    # configuration is on, and then every path below that reads it is the pinned reader's.
+    multi = None
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # QWEN_FAST_TP4_SDPA (sdpa_long_tp): flag unset or off, this returns at once and nothing is touched.
+        try:
+            sdpa_long_tp.apply(self)
+        except BaseException:
+            self.close()
+            raise
+
     def __call__(self, query, keys, values, *, page_table_tensor=None, cur_pos_tensor=None, **kwargs):
+        multi = self.multi
+        if multi is not None:
+            # QWEN_FAST_TP4_SDPA=multi: ONE launch for every user of the block. Under QWEN_FAST_TP4_SDPA_AUDIT the served per-user
+            # launches run beside it (served_call, this method's own path with the flag off) and the two block outputs are
+            # compared bit for bit in the trace; the multi output is the one returned.
+            served = None
+            if multi.audit:
+                def served():
+                    return self.served_call(query, keys, values, page_table_tensor=page_table_tensor,
+                                            cur_pos_tensor=cur_pos_tensor, **kwargs)
+            return multi.call(query, keys, values, scale=kwargs['scale'], memory_config=kwargs['memory_config'], served=served)
+        return self.served_call(query, keys, values, page_table_tensor=page_table_tensor, cur_pos_tensor=cur_pos_tensor, **kwargs)
+
+    def served_call(self, query, keys, values, *, page_table_tensor=None, cur_pos_tensor=None, **kwargs):
+        """The served __call__ (V3a's two launches under QWEN_FAST_TP4_ATTN_FOLD, else the pinned reader's), unchanged."""
         if tp4_vglue.enabled(tp4_vglue.ATTN_FOLD):
             self.check_open()
             if tuple(query.shape) != (1, self.rows, base_module.head_rows(), 256):
@@ -39,6 +72,39 @@ class PackedExtentReplayReader(_pinned_class()):
                                               cur_pos_tensor=cur_pos_tensor, **kwargs)
             self.note_fold_fallback(reason)
         return super().__call__(query, keys, values, page_table_tensor=page_table_tensor, cur_pos_tensor=cur_pos_tensor, **kwargs)
+
+    def shared_masks(self, expected_calls):
+        """Flag off (multi None): the pinned reader's context manager itself. Multi: the multi launch's own scope (which refreshes its
+        stacked table, cur_pos and mask once per forward) and, under the audit, the pinned scope around it, so the served launches
+        beside it find their per-user masks refreshed and their call budget booked."""
+        if self.multi is None:
+            return super().shared_masks(expected_calls)
+        return self.multi_masks(expected_calls)
+
+    @contextmanager
+    def multi_masks(self, expected_calls):
+        multi = self.multi
+        if multi.audit:
+            with super().shared_masks(expected_calls):
+                with multi.scope(expected_calls):
+                    yield
+        else:
+            with multi.scope(expected_calls):
+                yield
+
+    def sdpa_audit_round(self, round_number):
+        """QWEN_FAST_TP4_SDPA_AUDIT: after a replay, the multi launch's counters (packed_verifier calls this beside the other audits).
+        0 and no effect unless the multi audit is on."""
+        multi = self.multi
+        if multi is None or not multi.audit:
+            return 0
+        return multi.audit_round(round_number)
+
+    def close(self):
+        multi = self.multi
+        if multi is not None:
+            multi.close()
+        super().close()
 
     def fold_chunks(self):
         """QWEN_FAST_TP4_ATTN_FOLD: the block's SDPA bundles in dispatch order (attention_block_fold_tp.Chunk)."""

@@ -128,6 +128,56 @@ SAMPDRAFT_AUDITS = (('QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT', '[PINDIAG] tp4 shard ar
 # (QWEN_FAST_GDN_SPLIT_V=2) and logs no engaged line ran K5-A, and its timing says nothing about the lever; the line is logged once per user count.
 GDN_SPLIT_FLAG = 'QWEN_FAST_GDN_SPLIT_V'
 GDN_SPLIT_ENGAGED = '[PINDIAG] gdn split_v build split=2'
+
+# tp4/sdpa-long (sdpa_long_tp): a profile that names an SDPA configuration (QWEN_FAST_TP4_SDPA, anything but unset, 0 or off) and logs no engaged
+# line ran the served call unchanged, so its timing is not the configuration's.
+SDPA_LONG_FLAG = 'QWEN_FAST_TP4_SDPA'
+SDPA_LONG_ENGAGED = '[PINDIAG] tp4 sdpa engaged'
+SDPA_LONG_OFF = ('', '0', 'off')
+
+
+def sdpa_long_problems(env, container_text):
+    """[problem] when the profile's env names an SDPA configuration and the container log has no engaged line."""
+    value = (env or {}).get(SDPA_LONG_FLAG)
+    if value is None or value.strip().lower() in SDPA_LONG_OFF or SDPA_LONG_ENGAGED in container_text:
+        return []
+    return ['%s=%s is set and no engaged line (%s) was logged: the configuration never ran' % (SDPA_LONG_FLAG, value, SDPA_LONG_ENGAGED)]
+
+
+# tp4/sdpa-multi (sdpa_multi_tp): QWEN_FAST_TP4_SDPA=multi needs ITS engaged line (config=multi, flags=0x21: the attach built the launch),
+# the executed path's own line (the first multi call in a forward: a launch that was built and never called proves nothing), and, under
+# QWEN_FAST_TP4_SDPA_AUDIT=1, at least one audit line that says exact=True and NONE that says otherwise: the audit compares the multi
+# launch's block output with the per-user launches' word for word, so a mismatch line (or an exact=False one) fails the arm.
+SDPA_MULTI_NAME = 'multi'
+SDPA_MULTI_CALL = '[PINDIAG] tp4 sdpa multi call'
+SDPA_AUDIT_FLAG = 'QWEN_FAST_TP4_SDPA_AUDIT'
+SDPA_AUDIT_LINE = '[PINDIAG] tp4 sdpa audit'
+SDPA_AUDIT_MISMATCH = '[PINDIAG] tp4 sdpa audit MISMATCH'
+
+
+def sdpa_multi_problems(env, container_text):
+    """[problem] for a profile that names QWEN_FAST_TP4_SDPA=multi: the engaged line with config=multi flags=0x21, the call line, and
+    (audit flag) every audit line exact with at least one logged, none a MISMATCH."""
+    env = env or {}
+    if (env.get(SDPA_LONG_FLAG) or '').strip() != SDPA_MULTI_NAME:
+        return []
+    lines = container_text.splitlines()
+    problems = []
+    engaged = [line for line in lines if SDPA_LONG_ENGAGED in line]
+    if not any('config=%s' % SDPA_MULTI_NAME in line and 'flags=0x21' in line for line in engaged):
+        problems.append('%s=multi is set and no engaged line with config=multi flags=0x21 was logged: the one-launch path never attached'
+                        % SDPA_LONG_FLAG)
+    if SDPA_MULTI_CALL not in container_text:
+        problems.append('%s=multi is set and no call line (%s) was logged: the launch was built and never called' % (SDPA_LONG_FLAG, SDPA_MULTI_CALL))
+    audits = [line for line in lines if SDPA_AUDIT_LINE in line]
+    mismatched = [line.strip()[:200] for line in audits if SDPA_AUDIT_MISMATCH in line or 'exact=False' in line]
+    problems += ['the multi SDPA audit found a difference: %s' % line for line in mismatched[:4]]
+    if (env.get(SDPA_AUDIT_FLAG) or '').strip() == '1' and not any('exact=True' in line for line in audits if SDPA_AUDIT_MISMATCH not in line):
+        problems.append('%s=1 is set and no passing audit line (%s <n> exact=True) was logged: nothing was compared'
+                        % (SDPA_AUDIT_FLAG, SDPA_AUDIT_LINE))
+    return problems
+
+
 SLIDE_FLAG = 'QWEN_FAST_TP_KV_SLIDE'
 QUAD_FLAG = 'QWEN_FAST_QUAD_DRAFT'
 # tp4/next-5: QWEN_FAST_QUAD_DRAFT_BLOCKS=2, the eight-seat quad (two quads of four). The smoke that judges it is concurrent8_steady.
@@ -1064,6 +1114,8 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         problems.append('%s=2 is set and no engaged line (%s) was logged: the split recurrence never ran' % (GDN_SPLIT_FLAG, GDN_SPLIT_ENGAGED))
     problems += sampdraft_problems(container_text, env)
     problems += u1_problems(env, container_text)
+    problems += sdpa_long_problems(env, container_text)
+    problems += sdpa_multi_problems(env, container_text)
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
     if env is not None and env.get('QWEN_FAST_TP', '2') != '2':

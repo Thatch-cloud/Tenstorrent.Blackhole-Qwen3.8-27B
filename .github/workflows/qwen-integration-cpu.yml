@@ -101,6 +101,7 @@ jobs:
           python -B -m unittest test_tp4_262k8_x
           python -B -m unittest test_tp4_w1
           python -B -m unittest test_tp4_sampdraft test_tp4_shard_argmax test_tp4_draft_conv test_tp4_draft_heads test_tp4_samp_draft_report test_tp4_samp_draft_window
+          python -B -m unittest test_sdpa_long_tp test_sdpa_tp4_long test_tp4_sdpa_long_window test_sdpa_multi_tp test_tp4_sdpa_multi_window
           python -B -m unittest test_request_width_warm test_tp4_warm4 test_tp4_warm4_window
           python -B -m unittest test_gdn_pair_slice
           python -B -m unittest test_real_text_prompts test_acceptance_report test_real_text_compare test_real_text_gate

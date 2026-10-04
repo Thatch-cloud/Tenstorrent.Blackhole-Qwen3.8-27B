@@ -1924,6 +1924,11 @@ class PackedVerifierEngine:
                 tp4_vglue.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)
             # QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT: this replay's unit-major reductions against the split's held beside them.
             tile_collective_tp.audit_round(self.operations, self.fixture, self.rounds + 1)
+            sdpa_audit = getattr(getattr(self.fixture, 'replay_reader', None), 'sdpa_audit_round', None)
+            if sdpa_audit is not None:
+                # QWEN_FAST_TP4_SDPA_AUDIT (sdpa_multi_tp, gate profiles only): the multi launch's counters against the per-user
+                # launches run beside it in this replay. The reader twin's method returns 0 at once unless the audit is on.
+                sdpa_audit(self.rounds + 1)
             predictions = [host[slice(*segment_rows(self.shape, segment))] for segment in segments]
             finished = time.perf_counter()
             if hostgap:
