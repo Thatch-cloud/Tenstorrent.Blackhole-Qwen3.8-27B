@@ -30,12 +30,14 @@ from unittest.mock import Mock, patch
 
 import torch
 
+from dflash_packed_proposal_coordinator import note_fenced, run_while_waiting
 import c2_serving_job as job
 import c2_smoke_check
 import packed_verifier
 import serving_packed_bridge
 import serving_packed_step
 import test_gdn_records as tgr
+import test_padded_probe as tpp
 import test_serving_packed_bridge as tbridge
 import test_serving_packed_step as tstep
 import test_serving_page_binding as tbinding
@@ -52,6 +54,7 @@ CONTROL = 'c2-packed-tp4-8x262k-best-time-gate'
 LITE, ARM = 'c2-packed-tp4-8x262k-hostgap-1', 'c2-packed-tp4-8x262k-hostgap-2'
 LITE_AUDIT, ARM_AUDIT = LITE + '-audit', ARM + '-audit'
 FLAGS = vp.HOSTGAP_FLAGS
+NAMES = tvp.NAMES
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|/dev/tenstorrent|home/|zot\.')
 
 
@@ -91,6 +94,7 @@ class Clean(unittest.TestCase):
         vp._LOCAL.clear()
         vp._ADDRESSES.clear()
         vp._SCRATCH.clear()
+        vp.uninstall_gc_log()
 
     def engage(self, **flags):
         environ = dict(os.environ)
@@ -186,6 +190,11 @@ class EngageTests(Clean):
         self.assertIsNone(vp.engage_two_block(self.blocks(), self.engage(QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS='1')))
         self.assertEqual(len(lines_of(self.log, vp.BLOCK_EPOCHS_REFUSED_MARKER)), 1)
         self.assertEqual(vp.two_block_mode(), None)
+
+    def test_a_misset_host_gap_flag_fails_at_the_attach_not_at_the_first_step(self):
+        for name in FLAGS:
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, name):
+                vp.engage_two_block(self.blocks(), self.engage(**{name: 'yes'}))
 
     def test_engaging_again_starts_from_a_clean_state(self):
         vp._MODE.update(first=True, blocks=True)
@@ -380,9 +389,10 @@ class RealBlockTests(tvp.PrestageFixture):
         self.assertEqual(served, self.reference(rounds))
         self.assertEqual(self.paths(), ['full', 'diff', 'diff', 'diff'])
         audits = self.marked(vp.FULL_AUDIT_MARKER)
-        self.assertEqual(len(audits), 3)
+        self.assertEqual(len(audits), 4, 'the first round (full) and the three diff rounds')
+        self.assertEqual([re.search(r'path=(\w+)', line).group(1) for line in audits], ['full', 'diff', 'diff', 'diff'])
         for line in audits:
-            self.assertRegex(line, r'^\[PACKED-PRESTAGE-FULLAUDIT\] block=- round=\d+ path=diff buffers=\d+ checked=\d+ mismatches=0$')
+            self.assertRegex(line, r'^\[PACKED-PRESTAGE-FULLAUDIT\] block=- round=\d+ path=(diff|full) buffers=\d+ checked=\d+ mismatches=0$')
             buffers, checked = (int(value) for value in re.search(r'buffers=(\d+) checked=(\d+)', line).groups())
             self.assertEqual(checked, buffers * chips, 'every destination on every chip')
         self.assertEqual((counts['full_mismatches'], counts['full_audited'] > 0), (0, True))
@@ -527,14 +537,141 @@ class RealBlockTests(tvp.PrestageFixture):
         self.run_window_rounds(block, self.schedule(3))
         verify_lines = self.marked(vp.HOSTGAP_VERIFY_MARKER)
         self.assertEqual(len(verify_lines), 3)
-        self.assertRegex(verify_lines[1], r'^\[PACKED-HOSTGAP-VERIFY\] block=- round=2 live=4 path=diff bind_ms=[0-9.]+ input_ms=[0-9.]+ '
-                                          r'stage_cpu_ms=[0-9.]+ reads_ms=[0-9.]+ checks_ms=[0-9.]+ readback_ms=[0-9.]+ after_stage_cpu_ms=[0-9.]+$')
+        self.assertRegex(verify_lines[1], r'^\[PACKED-HOSTGAP-VERIFY\] block=- round=2 live=4 path=diff reason=- bind_ms=[0-9.]+ input_ms=[0-9.]+ '
+                                          r'stage_cpu_ms=[0-9.]+ reads_ms=[0-9.]+ checks_ms=[0-9.]+ readback_ms=[0-9.]+ after_stage_cpu_ms=[0-9.]+ '
+                                          r'readback_cpu_ms=[0-9.]+$')
         windows = self.marked(vp.HOSTGAP_WINDOW_MARKER)
         self.assertEqual(len(windows), 2)
         self.assertRegex(windows[0], r'^\[PACKED-HOSTGAP-WINDOW\] round=2 blocks=1 stage_window_ms=[0-9.]+ prestage_ms=[0-9.]+ prestaged=1 '
                                      r'window_ms=[0-9.]+ fence_wait_ms=[0-9.]+$')
         self.assertTrue(vp._GC['installed'], 'the gc log is installed at the first block built with the log flag')
         self.assertTrue(users)
+
+
+class TwoRealBlockTests(tvp.PrestageFixture):
+    """Two REAL four-user blocks over one eight-slot pool and the fake device model, in blocks mode (per-block epochs), driven as
+    serving drives them: both windows, one fence, then verify and commits of A, then verify and commits of B. Review should-fix 6:
+    nothing else exercises A's window, A's diff, A's verify and commits, and then B's diff over a shared process."""
+
+    PAIR = ((0, 1, 2, 3), (4, 5, 6, 7))
+
+    def setUp(self):
+        super().setUp()
+        packed = tvp.tpv
+        self.sets = [packed.packed_tables(self.ttnn, users=4), packed.packed_tables(self.ttnn, users=4)]
+        self.pool = packed.pool(self.ttnn, self.helpers, users=8, packed={(4, 16): self.sets[0]})
+        self.pool.packed_replay = lambda count, rows: next((tables for tables in self.sets if not tables.taken), self.sets[-1])
+        self.hooks = {}
+        base = self.ttnn.execute_trace
+
+        def execute_trace(mesh, trace, cq_id=0, blocking=True):
+            base(mesh, trace, cq_id=cq_id, blocking=blocking)
+            hook = self.hooks.get(trace)
+            if hook is not None:
+                hook()
+
+        self.ttnn.execute_trace = execute_trace
+        self.addCleanup(lambda: (vp._MODE.update(first=False, blocks=False), vp._LOCAL.clear(), vp._ADDRESSES.clear()))
+
+    def open_pair(self, **flags):
+        os.environ.update(flags)
+        verifier_engine.note_prefill()
+        for tables in self.sets:
+            tables.taken = False
+        self.hooks.clear()
+        blocks = []
+        for slots in self.PAIR:
+            block = packed_verifier.PackedVerifierEngine(
+                self.ttnn, self.model, self.helpers, 'sampler', pool=self.pool, shared_weights=self.weights, shape=self.shape(),
+                feature_taps=tvp.tpv.TAPS, pool_slots=slots)
+            self.hooks[block.trace] = tpp.DeviceModel(self, block)
+            blocks.append(block)
+        return blocks
+
+    def entries_of(self, index, users, token_base):
+        made = []
+        for name, (position, pages) in users.items():
+            slot = 4 * index + NAMES.index(name)
+            owner = tvp.tpv.request('%s%d' % (name, index), self.pool.slots[slot], position, 1)
+            owner.engine.pages = pages.clone()
+            first = (token_base + 10 * NAMES.index(name)) % 80
+            made.append(tvp.tpv.entry(owner, range(first, first + 16)))
+        return made
+
+    def requests_of(self, index, users):
+        requests = []
+        for name, (position, pages) in users.items():
+            carry = [list(snapshot) for snapshot in self.pool.slots[4 * index + NAMES.index(name)].verifier.carry]
+            requests.append(SimpleNamespace(session=SimpleNamespace(finished=False, position=position),
+                                            engine=SimpleNamespace(carry=carry, pages=pages.clone())))
+        return requests
+
+    def rounds(self, steps=3):
+        users = [tvp.base_users(), tvp.advanced(tvp.base_users(), 7)]
+        plan = []
+        for step in range(steps):
+            plan.append((users, 3 * step))
+            users = [tvp.advanced(item, 2 + step) for item in users]
+        return plan
+
+    def drive(self, blocks, plan, window):
+        served = []
+        for number, (users, token_base) in enumerate(plan):
+            if number and window:
+                waiting = [vp.WhileWaiting(block, self.requests_of(index, users[index])) for index, block in enumerate(blocks)]
+                for item in waiting:
+                    run_while_waiting(item)
+                self.ttnn.synchronize_device(self.model.mesh_device)
+                for item in waiting:
+                    note_fenced(item)
+            for index, block in enumerate(blocks):
+                entries = self.entries_of(index, users[index], token_base)
+                predictions, metrics = block.verify(entries)
+                for segment, prefix in zip(metrics['segments'], (9, 16, 0, 4)):
+                    block.commit_user(segment, prefix)
+                served.append((index, number, predictions))
+        return served
+
+    def reference(self, plan):
+        blocks = self.open_pair()
+        served = self.drive(blocks, plan, window=False)
+        for block in blocks:
+            block.close()
+        tvp.tpv.FakeModelBatch.instances = []
+        self.h1a.clear()
+        return served
+
+    def run_arm(self, audit):
+        plan = self.rounds()
+        expected = self.reference(plan)
+        flags = {'QWEN_FAST_PRESTAGE': '1', 'QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE': '1', 'QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS': '1',
+                 'QWEN_FAST_TP4_HOSTGAP_LOG': '1'}
+        if audit:
+            flags['QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT'] = '1'
+        blocks = self.open_pair(**flags)
+        self.assertEqual(vp.engage_two_block(blocks, dict(os.environ)), 'blocks', self.h1a)
+        served = self.drive(blocks, plan, window=True)
+        self.assertEqual(served, expected, 'every prediction of both blocks equals the flag-off run over the same rounds')
+        verifies = [re.search(r'block=(\S+) round=(\d+) live=4 path=(\w+) reason=(\S+)', line).groups()
+                    for line in self.marked(vp.HOSTGAP_VERIFY_MARKER)]
+        for label in 'AB':
+            paths = [path for block, number, path, reason in verifies if block == label]
+            self.assertEqual(paths, ['full', 'diff', 'diff'], 'block %s: only the first round is full' % label)
+        self.assertTrue(vp._MODE['blocks'], 'the blocks never shared a destination')
+        return blocks
+
+    def test_both_real_blocks_take_the_diff_path_after_the_first_round_and_predict_what_the_control_predicts(self):
+        self.run_arm(audit=False)
+
+    def test_audited_both_blocks_read_back_every_destination_with_zero_mismatches(self):
+        blocks = self.run_arm(audit=True)
+        chips = len(self.ttnn.get_device_tensors(blocks[0].fixture.tokens))
+        audits = [re.search(r'block=(\S+) round=\d+ path=(\w+) buffers=(\d+) checked=(\d+) mismatches=(\d+)', line).groups()
+                  for line in self.marked(vp.FULL_AUDIT_MARKER)]
+        for label in 'AB':
+            own = [item for item in audits if item[0] == label]
+            self.assertEqual([item[1] for item in own], ['full', 'diff', 'diff'], label)
+            self.assertTrue(all(int(item[4]) == 0 and int(item[3]) == int(item[2]) * chips for item in own), own)
 
 
 class CompositeLineTests(Clean):
@@ -594,41 +731,67 @@ class StageZeroTests(Clean):
         self.assertEqual(vp.take_scratch('collect'), [1.5, 2.25])
         self.assertIsNone(vp.take_scratch('collect'))
 
-    def test_the_gc_log_is_idempotent_and_logs_only_a_collection_over_the_threshold(self):
+    def test_the_gc_callback_only_records_and_the_lines_are_written_from_the_round_lines(self):
         import gc
 
-        before = list(gc.callbacks)
-        vp._GC.update(installed=False, started=0.0)
-        try:
-            self.assertTrue(vp.install_gc_log())
-            self.assertFalse(vp.install_gc_log())
-            callback = [item for item in gc.callbacks if item not in before][0]
-            with patch.object(vp.time, 'perf_counter', side_effect=[10.0, 10.0 + 0.002]):
-                callback('start', {})
-                callback('stop', dict(generation=2, collected=7))
-            self.assertEqual([line for line in self.log if 'collected=7' in line], [])
-            with patch.object(vp.time, 'perf_counter', side_effect=[10.0, 10.0 + 0.0123]):
-                callback('start', {})
-                callback('stop', dict(generation=2, collected=7))
-            self.assertEqual([line for line in self.log if 'collected=7' in line], ['[PINDIAG] gc gen=2 collected=7 ms=12.30'])
-        finally:
-            gc.callbacks[:] = before
-            vp._GC.update(installed=False)
+        self.assertTrue(vp.install_gc_log())
+        self.assertFalse(vp.install_gc_log())
+        callback = vp._GC['callback']
+        self.assertIn(callback, gc.callbacks)
+        with patch.object(vp.time, 'perf_counter', side_effect=[10.0, 10.0 + 0.002]):
+            callback('start', {})
+            callback('stop', dict(generation=2, collected=7))
+        self.assertEqual(vp._GC['pending'], [], 'a collection under the threshold records nothing')
+        with patch.object(vp.time, 'perf_counter', side_effect=[10.0, 10.0 + 0.0123]):
+            callback('start', {})
+            callback('stop', dict(generation=2, collected=7))
+        self.assertEqual(self.log, [], 'the callback never logs: a collection can start inside the logger\'s own emit')
+        self.assertEqual(len(vp._GC['pending']), 1)
+        vp.entry_line(1.0)
+        self.assertEqual([line for line in self.log if 'collected=7' in line], ['[PINDIAG] gc gen=2 collected=7 ms=12.30'])
+        self.assertEqual(vp._GC['pending'], [], 'drained once')
+        with patch.object(vp.time, 'perf_counter', side_effect=[10.0, 10.0 + 0.02]):
+            callback('start', {})
+            callback('stop', dict(generation=0, collected=1))
+        window = SimpleNamespace(timing=dict(ended=0.0, stage_window_ms=0.0, prestage_ms=0.0, prestaged=0), block=SimpleNamespace(rounds=0))
+        vp.window_line([window])
+        self.assertEqual(len([line for line in self.log if 'collected=1 ' in line]), 1, 'the window line drains too')
 
-    def test_thread_time_is_milliseconds(self):
-        with patch.object(vp.time, 'thread_time', return_value=1.5):
-            self.assertEqual(vp.thread_ms(), 1500.0)
+    def test_the_gc_record_is_bounded_and_uninstall_removes_the_callback_and_the_record(self):
+        import gc
+
+        vp.install_gc_log()
+        callback = vp._GC['callback']
+        for _ in range(vp.GC_PENDING_MAX + 10):
+            with patch.object(vp.time, 'perf_counter', side_effect=[1.0, 1.1]):
+                callback('start', {})
+                callback('stop', dict(generation=1, collected=0))
+        self.assertEqual(len(vp._GC['pending']), vp.GC_PENDING_MAX)
+        vp.uninstall_gc_log()
+        self.assertNotIn(callback, gc.callbacks)
+        self.assertEqual((vp._GC['installed'], vp._GC['pending'], vp._GC['callback']), (False, [], None))
+        vp.uninstall_gc_log()
+
+    def test_thread_time_is_milliseconds_under_the_log_flag_and_not_read_without_it(self):
+        with patch.object(vp.time, 'thread_time', return_value=1.5) as clock:
+            self.assertEqual(vp.thread_ms(), 0.0)
+            clock.assert_not_called()
+            with patch.dict(os.environ, {'QWEN_FAST_TP4_HOSTGAP_LOG': '1'}):
+                self.assertEqual(vp.thread_ms(), 1500.0)
 
 
 class EntryTests(Clean):
     """The bridge's step entry: the stage 0 split, and 1d's one storage check per distinct validator."""
 
-    def run_step(self, bridges, scheduled, runner, **environment):
+    def run_step(self, bridges, scheduled, runner, order=None, **environment):
         def packed_step(entries, *, cancelled):
+            if order is not None:
+                order.append('packed-step')
             return [SimpleNamespace(request_id=entry['request_id'], token_ids=[1]) for entry in entries]
 
-        with patch.dict(os.environ, environment), patch('serving_vllm_state.apply_committed_output'), \
-                patch('serving_vllm_state.validate_runner_reservation'), \
+        reserve = patch('serving_vllm_state.validate_runner_reservation',
+                        side_effect=None if order is None else (lambda *args: order.append('reserve')))
+        with patch.dict(os.environ, environment), patch('serving_vllm_state.apply_committed_output'), reserve, \
                 patch('serving_packed_bridge.packed_model_runner_output', side_effect=lambda values: [v.request_id for v in values]):
             return serving_packed_bridge.execute_packed_decode(bridges, scheduled, cancelled=lambda: False, packed_step=packed_step)
 
@@ -682,12 +845,10 @@ class EntryTests(Clean):
             for name, item in bridges.items():
                 item.page_binding.refresh = Mock(side_effect=lambda *a, name=name, **k: order.append('refresh-' + name))
                 item.validate_storage = None
-            with patch('serving_vllm_state.validate_runner_reservation', side_effect=lambda r, s, t, n: order.append('reserve')):
-                pass
-            result = self.run_step(bridges, scheduled, runner, **flags)
+            result = self.run_step(bridges, scheduled, runner, order=order, **flags)
             results.append((result, order))
         self.assertEqual(results[0], results[1])
-        self.assertEqual(results[0][1], ['update', 'refresh-B', 'refresh-A'])
+        self.assertEqual(results[0][1], ['update', 'reserve', 'refresh-B', 'reserve', 'refresh-A', 'packed-step'])
 
     def test_the_log_flag_leaves_the_split_for_the_packed_step_and_nothing_without_it(self):
         runner, bridges, scheduled, _ = self.fixture()
@@ -807,8 +968,18 @@ def prestage_lines(count, path='diff', reason='-', live=4):
     return ['[PACKED-PRESTAGE] round=%d path=%s buffers=3 reason=%s live=%d' % (n, path, reason, live) for n in range(count)]
 
 
-def audit_lines(blocks='AB', mismatches=0, count=3):
-    return ['[PACKED-PRESTAGE-FULLAUDIT] block=%s round=%d path=diff buffers=149 checked=596 mismatches=%d' % (block, n, mismatches)
+def audit_lines(blocks='AB', mismatches=0, count=3, full=True, full_mismatches=0, checked=596):
+    lines = ['[PACKED-PRESTAGE-FULLAUDIT] block=%s round=%d path=diff buffers=149 checked=%d mismatches=%d' % (block, n, checked, mismatches)
+             for block in blocks for n in range(count)]
+    if full:
+        lines += ['[PACKED-PRESTAGE-FULLAUDIT] block=%s round=0 path=full buffers=149 checked=%d mismatches=%d' % (
+            block, checked, full_mismatches) for block in blocks]
+    return lines
+
+
+def verify_lines(count, blocks='AB', path='diff', reason='-', live=4):
+    return ['[PACKED-HOSTGAP-VERIFY] block=%s round=%d live=%d path=%s reason=%s bind_ms=0.10 input_ms=1.00 stage_cpu_ms=0.90 reads_ms=0.5 '
+            'checks_ms=0.1 readback_ms=2.0 after_stage_cpu_ms=0.3 readback_cpu_ms=0.2' % (block, n, live, path, reason)
             for block in blocks for n in range(count)]
 
 
@@ -822,7 +993,9 @@ def text(*groups):
     return '\n'.join(line for group in groups for line in group)
 
 
-ARM_ENV = {'QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE': '1', 'QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS': '1', 'QWEN_FAST_M3_BLOCKS': '2'}
+ARM_ENV = {'QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE': '1', 'QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS': '1', 'QWEN_FAST_M3_BLOCKS': '2',
+           'QWEN_FAST_TP4_HOSTGAP_LOG': '1', 'QWEN_FAST_TP': '4'}
+LITE_ENV = {name: value for name, value in ARM_ENV.items() if name != 'QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS'}
 
 
 class SmokeRuleTests(unittest.TestCase):
@@ -830,7 +1003,7 @@ class SmokeRuleTests(unittest.TestCase):
         return c2_smoke_check.hostgap_problems(env, container, steady)[0]
 
     def test_a_clean_block_epochs_arm_passes(self):
-        self.assertEqual(self.judge(ARM_ENV, text(engaged(), prestage_lines(40))), [])
+        self.assertEqual(self.judge(ARM_ENV, text(engaged(), prestage_lines(40), verify_lines(40))), [])
 
     def test_a_profile_without_the_flag_logs_none_of_the_lines(self):
         self.assertEqual(self.judge({}, text(prestage_lines(40, 'full', 'no-snapshot'))), [])
@@ -846,17 +1019,33 @@ class SmokeRuleTests(unittest.TestCase):
         self.assertTrue(any('refused or disengaged' in item for item in self.judge(ARM_ENV, disengaged)))
 
     def test_the_lite_arm_needs_no_epochs_line_and_may_take_the_second_block_full(self):
-        env = {'QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE': '1', 'QWEN_FAST_M3_BLOCKS': '2'}
-        self.assertEqual(self.judge(env, text(engaged(mode='first'), prestage_lines(20), prestage_lines(20, 'full', 'no-snapshot'))), [])
+        self.assertEqual(self.judge(LITE_ENV, text(engaged(mode='first'), prestage_lines(20), verify_lines(20, 'A'),
+                                                   verify_lines(30, 'B', 'full', 'no-snapshot'))), [])
+        misses = text(engaged(mode='first'), prestage_lines(20), verify_lines(20, 'A'), verify_lines(5, 'A', 'full', 'no-snapshot'))
+        self.assertTrue(any('took the diff path' in item for item in self.judge(LITE_ENV, misses)))
 
-    def test_the_no_snapshot_share_of_the_four_live_verifies_is_bounded_on_the_epochs_arm(self):
-        mostly = text(engaged(), prestage_lines(30), prestage_lines(10, 'full', 'no-snapshot'))
-        self.assertTrue(any("'path=full reason=no-snapshot'" in item for item in self.judge(ARM_ENV, mostly)))
-        few = text(engaged(), prestage_lines(60), prestage_lines(4, 'full', 'no-snapshot'))
+    def test_the_diff_share_of_the_pre_staged_blocks_is_95_percent_and_a_wrong_epoch_is_a_miss(self):
+        base = (engaged(), prestage_lines(40))
+        mostly = text(*base, verify_lines(30), verify_lines(10, 'AB', 'full', 'no-snapshot'))
+        self.assertTrue(any('took the diff path' in item and 'no-snapshot' in item for item in self.judge(ARM_ENV, mostly)))
+        # an epoch killed by the block's own verify (or any other non-external writer) is a miss, not an excused event
+        for reason in ('epoch:verify', 'epoch:verify-failed', 'epoch:stage_packed', 'epoch:prestage', 'destinations'):
+            with self.subTest(reason=reason):
+                wrong = text(*base, verify_lines(30), verify_lines(3, 'AB', 'full', reason))
+                self.assertTrue(any('took the diff path' in item and reason in item for item in self.judge(ARM_ENV, wrong)), reason)
+        # the six external writers are left out of the count
+        for reason in ('epoch:admission', 'epoch:detach', 'epoch:prefill', 'epoch:prefill-chunk', 'epoch:bookkeeping', 'epoch:lane-switch'):
+            with self.subTest(reason=reason):
+                self.assertEqual(self.judge(ARM_ENV, text(*base, verify_lines(30), verify_lines(20, 'AB', 'full', reason))), [])
+        few = text(*base, verify_lines(60), verify_lines(2, 'AB', 'full', 'no-snapshot'))
         self.assertEqual(self.judge(ARM_ENV, few), [])
-        self.assertTrue(any('4-live verifies were logged' in item for item in self.judge(ARM_ENV, text(engaged(), prestage_lines(5)))))
+        self.assertTrue(any('4-live verifies' in item for item in self.judge(ARM_ENV, text(engaged(), prestage_lines(5), verify_lines(3)))))
         # a verify of fewer live users is not a 4+4 round
-        self.assertEqual(self.judge(ARM_ENV, text(engaged(), prestage_lines(40), prestage_lines(30, 'full', 'no-snapshot', live=3))), [])
+        self.assertEqual(self.judge(ARM_ENV, text(*base, verify_lines(40), verify_lines(30, 'AB', 'full', 'no-snapshot', live=3))), [])
+
+    def test_the_share_cannot_be_judged_without_the_log_flag(self):
+        env = {name: value for name, value in ARM_ENV.items() if name != 'QWEN_FAST_TP4_HOSTGAP_LOG'}
+        self.assertTrue(any('HOSTGAP_LOG' in item for item in self.judge(env, text(engaged(), prestage_lines(40)))))
 
     def test_the_lever_is_not_judged_without_the_eight_user_steady_smoke(self):
         self.assertTrue(any('concurrent8_steady' in item for item in self.judge(ARM_ENV, text(engaged()), steady=False)))
@@ -864,22 +1053,42 @@ class SmokeRuleTests(unittest.TestCase):
     def test_the_full_audit_needs_zero_mismatches_a_line_for_each_block_and_the_shadow(self):
         env = dict(ARM_ENV, QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT='1', QWEN_FAST_TP4_WINDOW_VALIDATE='1')
         shadow = ['[PACKED-PRESTAGE-SHADOW] round=3 retained_bindings=ok']
-        clean = text(engaged(), prestage_lines(40), audit_lines('AB'), shadow)
+        body = engaged() + prestage_lines(40) + verify_lines(40)
+        clean = text(body, audit_lines('AB'), shadow)
         self.assertEqual(self.judge(env, clean), [])
-        self.assertTrue(any('differed from the full stage' in item for item in self.judge(
-            env, text(engaged(), prestage_lines(40), audit_lines('AB', mismatches=2), shadow))))
-        self.assertTrue(any('block B' in item for item in self.judge(env, text(engaged(), prestage_lines(40), audit_lines('A'), shadow))))
-        self.assertTrue(any('shadow' in item for item in self.judge(env, text(engaged(), prestage_lines(40), audit_lines('AB')))))
+        self.assertTrue(any('after a DIFF write' in item for item in self.judge(env, text(body, audit_lines('AB', mismatches=2), shadow))))
+        self.assertTrue(any('block B' in item for item in self.judge(env, text(body, audit_lines('A'), shadow))))
+        self.assertTrue(any('shadow' in item for item in self.judge(env, text(body, audit_lines('AB')))))
         lite = dict(env)
         del lite['QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS']
-        self.assertEqual(self.judge(lite, text(engaged(mode='first'), prestage_lines(20), audit_lines('A'), shadow)), [])
+        self.assertEqual(self.judge(lite, text(engaged(mode='first'), prestage_lines(20), verify_lines(20, 'A'), audit_lines('A'), shadow)), [])
         unaudited = dict(ARM_ENV)
-        self.assertTrue(self.judge(unaudited, text(engaged(), prestage_lines(40), audit_lines('AB'))))
+        self.assertTrue(self.judge(unaudited, text(body, audit_lines('AB'))))
+
+    def test_a_mismatch_after_a_full_stage_is_the_comparators_and_is_reported_apart_from_the_levers(self):
+        env = dict(ARM_ENV, QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT='1')
+        body = engaged() + prestage_lines(40) + verify_lines(40)
+        found = self.judge(env, text(body, audit_lines('AB', full_mismatches=3)))
+        self.assertTrue(any('FULL stage' in item and 'comparator' in item for item in found), found)
+        self.assertFalse(any('DIFF write' in item for item in found), 'the diff path alone is clean')
+        found = self.judge(env, text(body, audit_lines('AB', mismatches=1)))
+        self.assertTrue(any('DIFF write' in item for item in found))
+        self.assertFalse(any('comparator' in item for item in found))
+        none_full = self.judge(env, text(body, audit_lines('AB', full=False)))
+        self.assertTrue(any('path=full line' in item for item in none_full), none_full)
+
+    def test_a_short_read_back_cannot_pass(self):
+        env = dict(ARM_ENV, QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT='1')
+        body = engaged() + prestage_lines(40) + verify_lines(40)
+        self.assertTrue(any('fewer than buffers x 4 chips' in item for item in self.judge(env, text(body, audit_lines('AB', checked=300)))))
+        self.assertTrue(any('fewer than buffers x 2 chips' in item for item in self.judge(
+            dict(env, QWEN_FAST_TP='2'), text(body, audit_lines('AB', checked=596)))))
+        self.assertEqual(self.judge(dict(env, QWEN_FAST_TP='2'), text(body, audit_lines('AB', checked=298))), [])
 
     def test_the_check_reads_the_profile_env_and_files_the_facts(self):
-        container = text(engaged(), prestage_lines(40))
+        container = text(engaged(), prestage_lines(40), verify_lines(40))
         problems, facts = c2_smoke_check.check(smoke('warmup', 'concurrent8_steady'), container, False, env=ARM_ENV)
-        self.assertFalse([item for item in problems if 'two-block' in item or 'no-snapshot' in item], problems)
+        self.assertFalse([item for item in problems if 'two-block' in item or 'diff path' in item], problems)
         self.assertEqual(facts['hostgap']['hostgap_engaged'], 2)
 
     def test_the_real_log_lines_are_the_ones_the_rules_read(self):
@@ -894,6 +1103,9 @@ class SmokeRuleTests(unittest.TestCase):
                 'reason=no-snapshot live=4')
         found = c2_smoke_check.hostgap_facts('\n'.join(line))
         self.assertEqual((found['hostgap_live4_diff'], found['hostgap_live4_full_no_snapshot']), (1, 1))
+        found = c2_smoke_check.hostgap_facts('\n'.join(verify_lines(2, 'A', 'full', 'epoch:verify') + audit_lines('A', count=1)))
+        self.assertEqual(found['hostgap_verify_live4'], [('A', 'full', 'epoch:verify')] * 2)
+        self.assertEqual((found['hostgap_full_audits'], found['hostgap_full_audits_full']), (2, 1))
 
 
 def load_profiles():
@@ -947,6 +1159,7 @@ class ProfileTests(unittest.TestCase):
 
 EXPECTED = {
     'X0-status-rescan-reset': ('status rescan reset', None, 'stop'), 'B0-build': ('build', 'c2-packed-tp4', 'stop'),
+    'S0c-control-attach-smoke': ('reset smoke', CONTROL, 'stop'),
     'A1-audited-attach-smoke': ('reset smoke', ARM_AUDIT, 'stop'), 'A2-audited-attach-lite': ('reset smoke', LITE_AUDIT, 'soft'),
     'H1-hang-shapes-hostgap': ('reset smoke', ARM, 'stop'), 'H2-hang-shapes-hostgap': ('reset smoke', ARM, 'stop'),
     'H3-hang-shapes-hostgap': ('reset smoke', ARM, 'stop'), 'H4-hang-shapes-hostgap': ('reset smoke', ARM, 'stop'),
@@ -954,6 +1167,7 @@ EXPECTED = {
     'T1-timed-A-control': ('reset smoke', CONTROL, 'soft'), 'T2-timed-B-hostgap-2': ('reset smoke', ARM, 'soft'),
     'T3-timed-A-control': ('reset smoke', CONTROL, 'soft'), 'T4-timed-B-hostgap-2': ('reset smoke', ARM, 'soft'),
     'T5-timed-C-hostgap-1': ('reset smoke', LITE, 'soft'), 'T6-timed-A-control': ('reset smoke', CONTROL, 'soft'),
+    'C1-churn16-hostgap-2': ('reset gate', ARM, 'soft'),
     'Z-reset': ('status reset', None, 'soft'),
 }
 AGENT_ACTIONS = {'agentstop', 'agentstart', 'unserve', 'platform', 'replay', 'priority', 'cardm'}
@@ -1033,8 +1247,12 @@ class PackTests(unittest.TestCase):
 
     def test_the_dependencies_and_the_read_rules(self):
         order = (FOLDER / 'ORDER.txt').read_text(encoding='utf-8')
+        self.assertIn('# NEEDS A1 A2 <- S0c', order)
         self.assertIn('# NEEDS H1 H2 H3 H4 H5 <- A1', order)
-        self.assertIn('# NEEDS T1 T2 T3 T4 T5 T6 <- A1 H1 H2 H3 H4 H5', order)
+        self.assertIn('# NEEDS T1 T2 T3 T4 <- A1 H1 H2 H3 H4 H5', order)
+        self.assertIn('# NEEDS T5 T6 <- A2 S0c', order)
+        self.assertIn('# NEEDS C1 <- A1', order)
+        self.assertIn('OWN five consecutive hang-shape completions', order)
         self.assertIn('ZERO [PACKED-PRESTAGE-FULLAUDIT] mismatches', order)
         self.assertIn('five consecutive completions', order)
         self.assertIn('PAIRED', order)

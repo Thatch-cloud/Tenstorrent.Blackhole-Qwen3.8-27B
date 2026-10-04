@@ -329,6 +329,9 @@ def engage_two_block(blocks, environ=None):
     _LOCAL.clear()
     _ADDRESSES.clear()
     blocks = tuple(blocks)
+    # Every host-gap flag is read once here: a value but 0 or 1 raises at the attach, not at the first step that reads it.
+    for name in HOSTGAP_FLAGS:
+        _flag(name, environ)
     asked, per_block = two_block_enabled(environ), block_epochs_enabled(environ)
     if per_block and not asked:
         log_line('%s reason=%s' % (BLOCK_EPOCHS_REFUSED_MARKER, '%s_needs_%s=1' % (BLOCK_EPOCHS_FLAG, TWO_BLOCK_FLAG)))
@@ -396,6 +399,7 @@ def entry_line(checks_ms):
     """Stage 0: the step entry's [PACKED-ENTRY] line - what serving_packed_bridge.execute_packed_decode left (admit, the storage check, vLLM's
     _update_states, the reservation checks, the page refreshes and how many wrote the device) and the packed step's own checks
     (validate, group, ineligible), with the whole entry's wall time up to now. One line a step; nothing left, nothing written."""
+    drain_gc_lines()
     entry = take_scratch('entry')
     if entry is None:
         return
@@ -409,18 +413,24 @@ def entry_line(checks_ms):
 
 
 def thread_ms():
-    """This thread's CPU time in ms, beside wall time: GC and host compute count here, a descheduled thread does not."""
+    """This thread's CPU time in ms, beside wall time: GC and host compute count here, a descheduled thread does not. Read only
+    under QWEN_FAST_TP4_HOSTGAP_LOG (0.0 otherwise): with the flag off the staging path makes no extra clock call."""
     try:
+        if not hostgap_log_enabled():
+            return 0.0
         return time.thread_time() * 1000
     except Exception:
         return 0.0
 
 
-_GC = dict(installed=False, started=0.0)
+GC_PENDING_MAX = 64
+_GC = dict(installed=False, started=0.0, callback=None, pending=[])
 
 
 def install_gc_log():
     """Stage 0: one [PINDIAG] gc line for any collection over GC_LOG_MS (the 50-170 ms host stalls: gen-2 collections or not).
+    The callback only APPENDS (generation, collected, ms) to a bounded list (as publication_diagnostics does): a collection can
+    start inside the logger's own emit, so it never logs. `drain_gc_lines` writes the lines, from window_line and entry_line.
     Idempotent; a callback never raises."""
     if _GC['installed']:
         return False
@@ -432,14 +442,41 @@ def install_gc_log():
                 _GC['started'] = time.perf_counter()
                 return
             ms = (time.perf_counter() - _GC['started']) * 1000
-            if ms >= GC_LOG_MS:
-                log_line('%s gen=%s collected=%s ms=%.2f' % (GC_MARKER, info.get('generation'), info.get('collected'), ms))
+            pending = _GC['pending']
+            if ms >= GC_LOG_MS and len(pending) < GC_PENDING_MAX:
+                pending.append((info.get('generation'), info.get('collected'), ms))
         except BaseException:
             pass
 
     gc.callbacks.append(callback)
+    _GC['callback'] = callback
     _GC['installed'] = True
     return True
+
+
+def uninstall_gc_log():
+    """Remove the callback and forget what it held (tests; a process never needs it)."""
+    import gc
+
+    callback = _GC['callback']
+    if callback is not None:
+        try:
+            gc.callbacks.remove(callback)
+        except ValueError:
+            pass
+    _GC.update(installed=False, started=0.0, callback=None, pending=[])
+
+
+def drain_gc_lines():
+    """Write one [PINDIAG] gc line per collection the callback recorded since the last drain. Never raises."""
+    try:
+        pending = _GC['pending']
+        taken = pending[:]
+        del pending[:len(taken)]
+        for generation, collected, ms in taken:
+            log_line('%s gen=%s collected=%s ms=%.2f' % (GC_MARKER, generation, collected, ms))
+    except BaseException:
+        pass
 
 
 def log_line(text):
@@ -645,18 +682,23 @@ class BlockPrestage:
             MARKER, round_number, path, written, str(reason).replace(' ', '_')[:120], len(segments)))
         if self.audit:
             self.audit_round(users, round_number, path)
-        if self.full_audit and path == 'diff':
-            self.full_audit_round(values, users, round_number)
+        if self.full_audit:
+            self.full_audit_round(values, users, round_number, path)
         return written
 
-    def full_audit_round(self, values, users, round_number):
-        """QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT, after a verify-time DIFF write: EVERY destination read back from every chip
-        and compared with the verify-time (full-stage) value, then the round staged in full anyway, so the trace sees what
-        today's verify sees whatever the audit found. A mismatch is logged and fails the arm at the gate."""
-        from packed_verifier import stage_packed
+    def full_audit_round(self, values, users, round_number, path='diff'):
+        """QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT, after a verify-time write: EVERY destination read back from every chip
+        and compared with the verify-time (full-stage) value. After a DIFF write the round is then staged in full anyway, so
+        the trace sees what today's verify sees whatever the audit found; a mismatch is logged and fails the arm at the gate.
+        After a FULL write (path=full, `values` is None: the full stage is the reference itself) the same read-back runs
+        against the values the verify computes now: a mismatch there is an artifact of the comparator (layout, padding, dtype),
+        never of the lever, and the smoke judges the two paths separately. Nothing is restaged after a full write."""
+        from packed_verifier import packed_values, stage_packed
 
         block = self.block
         operations = block.operations
+        if values is None:
+            values, unused = packed_values(operations, block.model, block.fixture, block.shape, users, guard=False)
         mismatched, checked = [], 0
         for index, value in enumerate(values):
             for chip, shard in enumerate(operations.get_device_tensors(value[0])):
@@ -665,10 +707,11 @@ class BlockPrestage:
                     mismatched.append('%d.%d' % (index, chip))
         self.counts['full_audited'] += checked
         self.counts['full_mismatches'] += len(mismatched)
-        log_line('%s block=%s round=%d path=diff buffers=%d checked=%d mismatches=%d%s' % (
-            FULL_AUDIT_MARKER, block_label(block), round_number, len(values), checked, len(mismatched),
+        log_line('%s block=%s round=%d path=%s buffers=%d checked=%d mismatches=%d%s' % (
+            FULL_AUDIT_MARKER, block_label(block), round_number, path, len(values), checked, len(mismatched),
             (' at=%s' % ','.join(mismatched[:8])) if mismatched else ''))
-        stage_packed(operations, block.model, block.fixture, block.shape, users)
+        if path == 'diff':
+            stage_packed(operations, block.model, block.fixture, block.shape, users)
 
     def audit_round(self, users, round_number, path):
         """QWEN_FAST_PRESTAGE_AUDIT: AUDIT_BUFFERS destinations in rotation, read back from both
@@ -816,6 +859,7 @@ def window_line(windows, ended=None):
     each block's T_proj table staging and pre-stage in ms (and whether it pre-staged), the window's host total, and how long the
     host then waited in the fence. A fence_wait_ms near 0 with a long window_ms is a window that overran the quads' device
     time: the pre-stages cost the lever device idle. Never raises."""
+    drain_gc_lines()
     try:
         now = time.perf_counter()
         if ended is None:

@@ -29,9 +29,12 @@ own SMOKE_JSON line and the container log and exits non-zero on:
 
   - the eight-seat host-gap levers (tp4/hostgap, hostgap_problems): QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE=1 must log its engaged line once
     for each M3 block and no refusal line; QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS=1 its block-epochs line and, in a smoke that ran
-    concurrent8_steady, no more than a tenth of the 4-live verifies on the full path with reason no-snapshot (the control's are
-    nearly all of them); the audit flag (QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT=1) at least one [PACKED-PRESTAGE-FULLAUDIT] line for
-    each block that pre-stages and zero mismatches in every one; a profile without the flag logs none of these lines;
+    concurrent8_steady (and QWEN_FAST_TP4_HOSTGAP_LOG=1), at least 95% of the 4-live verifies of the pre-staged blocks (A and B under the
+    epochs, A under the lite arm) on the diff path, counting every full stage as a miss but those after an external writer
+    (epoch:admission, detach, prefill, prefill-chunk, bookkeeping, lane-switch: a 'no-snapshot' or an 'epoch:verify' is a miss); the audit flag (QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT=1) at least one [PACKED-PRESTAGE-FULLAUDIT] line for
+    each block that pre-stages, at least one path=full line (the comparator checked against the full stage itself), buffers x chips
+    checked on every line, and zero mismatches in every one (a path=full mismatch is the comparator's artifact, a path=diff one the lever's, and the
+    two are reported apart); a profile without the flag logs none of these lines;
   - a code-prompt answer that is not text (coding, concurrent4_steady, steady_resend): a stream that finished with `stop` at
     its first token (an instant EOS: v172's users 0 and 1) or before MIN_ANSWER_TOKENS, or whose sample is mostly non-Latin
     script (v172's users 2 and 3: mixed-script symbols), and, at four cards (QWEN_FAST_TP not 2), a first prefill whose [MEMLEDGER] item=model_after_prefill
@@ -717,7 +720,14 @@ HOSTGAP_ENGAGED = '[PINDIAG] verify prestage two-block engaged'
 HOSTGAP_REFUSED = '[PINDIAG] verify prestage two-block refused'
 HOSTGAP_EPOCHS_ENGAGED = '[PINDIAG] verify prestage block epochs engaged'
 HOSTGAP_EPOCHS_REFUSED = '[PINDIAG] verify prestage block epochs refused'
-HOSTGAP_FULL_AUDIT = re.compile(r'\[PACKED-PRESTAGE-FULLAUDIT\] block=(\S+) round=\d+ path=diff buffers=\d+ checked=\d+ mismatches=(\d+)')
+HOSTGAP_FULL_AUDIT = re.compile(r'\[PACKED-PRESTAGE-FULLAUDIT\] block=(\S+) round=\d+ path=(diff|full) buffers=(\d+) checked=(\d+) mismatches=(\d+)')
+HOSTGAP_VERIFY_LINE = re.compile(r'\[PACKED-HOSTGAP-VERIFY\] block=(\S+) round=\d+ live=(\d+) path=(\w+) reason=(\S+)')
+HOSTGAP_LOG_FLAG = 'QWEN_FAST_TP4_HOSTGAP_LOG'
+HOSTGAP_DIFF_MIN_SHARE = 0.95
+# The only reasons a pre-staged block may legitimately take the full stage: an external writer between the window and the verify
+# (a membership or prefill event). Every other 'full' (no-snapshot, epoch:verify, destinations) counts against the share.
+HOSTGAP_EXCUSED_REASONS = ('epoch:admission', 'epoch:detach', 'epoch:prefill', 'epoch:prefill-chunk', 'epoch:bookkeeping',
+                           'epoch:lane-switch')
 HOSTGAP_SHADOW = '[PACKED-PRESTAGE-SHADOW]'
 HOSTGAP_PRESTAGE_LINE = re.compile(r'\[PACKED-PRESTAGE\] round=\d+ path=(\w+) buffers=\d+ reason=(\S+) live=(\d+)')
 HOSTGAP_LINE_PREFIXES = (HOSTGAP_ENGAGED, HOSTGAP_REFUSED, HOSTGAP_EPOCHS_ENGAGED, HOSTGAP_EPOCHS_REFUSED,
@@ -730,14 +740,42 @@ def hostgap_facts(container_text):
     """What the log says about the two-block pre-stage: the 4-live verify paths, the audited blocks and their mismatches."""
     live4 = [(path, reason) for path, reason, live in HOSTGAP_PRESTAGE_LINE.findall(container_text) if live == '4']
     audits = HOSTGAP_FULL_AUDIT.findall(container_text)
+    verifies = [(block, path, reason) for block, live, path, reason in HOSTGAP_VERIFY_LINE.findall(container_text) if live == '4']
     return dict(hostgap_engaged=container_text.count(HOSTGAP_ENGAGED), hostgap_refused=container_text.count(HOSTGAP_REFUSED),
                 hostgap_epochs_engaged=container_text.count(HOSTGAP_EPOCHS_ENGAGED),
                 hostgap_live4_verifies=len(live4),
                 hostgap_live4_full_no_snapshot=sum(1 for path, reason in live4 if path == 'full' and reason == 'no-snapshot'),
                 hostgap_live4_diff=sum(1 for path, reason in live4 if path == 'diff'),
-                hostgap_full_audits=len(audits), hostgap_full_audit_blocks=sorted({block for block, _ in audits}),
-                hostgap_full_audit_mismatches=sum(int(count) for _, count in audits),
+                hostgap_verify_live4=verifies, hostgap_audit_lines=audits,
+                hostgap_full_audits=len(audits), hostgap_full_audit_blocks=sorted({item[0] for item in audits}),
+                hostgap_full_audits_full=sum(1 for item in audits if item[1] == 'full'),
+                hostgap_audit_mismatches_diff=sum(int(item[4]) for item in audits if item[1] == 'diff'),
+                hostgap_audit_mismatches_full=sum(int(item[4]) for item in audits if item[1] == 'full'),
+                hostgap_full_audit_mismatches=sum(int(item[4]) for item in audits),
                 hostgap_shadow_checks=container_text.count(HOSTGAP_SHADOW))
+
+
+def hostgap_share_problems(verifies, per_block):
+    """The share of the pre-staged blocks' 4-live verifies on the diff path: blocks A and B under the per-block epochs, block A
+    alone under the lite arm (B takes the full stage there by design). Only a full stage after an external writer
+    (HOSTGAP_EXCUSED_REASONS) is left out of the count; 'no-snapshot', 'epoch:verify' and the rest count as misses.
+    At least HOSTGAP_DIFF_MIN_SHARE must be on the diff path."""
+    judged = None if per_block else {'A'}
+    eligible = [(block, path, reason) for block, path, reason in verifies
+                if (judged is None or block in judged) and not (path == 'full' and reason in HOSTGAP_EXCUSED_REASONS)]
+    if len(eligible) < HOSTGAP_MIN_LIVE4_VERIFIES:
+        return ['only %d 4-live verifies of the pre-staged block(s) were logged (%d needed to judge the diff share)' % (
+            len(eligible), HOSTGAP_MIN_LIVE4_VERIFIES)]
+    diff = sum(1 for item in eligible if item[1] == 'diff')
+    if diff < HOSTGAP_DIFF_MIN_SHARE * len(eligible):
+        misses = {}
+        for block, path, reason in eligible:
+            if path != 'diff':
+                key = '%s:%s:%s' % (block, path, reason)
+                misses[key] = misses.get(key, 0) + 1
+        return ['%d of %d 4-live verifies of the pre-staged block(s) took the diff path (%d%% needed); the rest: %s' % (
+            diff, len(eligible), int(HOSTGAP_DIFF_MIN_SHARE * 100), ', '.join('%s x%d' % item for item in sorted(misses.items())))]
+    return []
 
 
 def hostgap_problems(env, container_text, steady_eight):
@@ -775,20 +813,29 @@ def hostgap_problems(env, container_text, steady_eight):
         return problems, facts
     if not facts['hostgap_live4_diff']:
         problems.append('no 4-live verify took the diff path: the pre-stage never served a verify')
-    if per_block:
-        total = facts['hostgap_live4_verifies']
-        if total < HOSTGAP_MIN_LIVE4_VERIFIES:
-            problems.append('only %d 4-live verifies were logged (%d needed to judge the no-snapshot share)' % (
-                total, HOSTGAP_MIN_LIVE4_VERIFIES))
-        elif facts['hostgap_live4_full_no_snapshot'] > HOSTGAP_NO_SNAPSHOT_MAX_SHARE * total:
-            problems.append("%d of %d 4-live verifies took 'path=full reason=no-snapshot' (more than %d%%): the second block was "
-                            'not pre-staged' % (facts['hostgap_live4_full_no_snapshot'], total,
-                                                int(HOSTGAP_NO_SNAPSHOT_MAX_SHARE * 100)))
+    if env.get(HOSTGAP_LOG_FLAG) == '1':
+        problems.extend(hostgap_share_problems(facts['hostgap_verify_live4'], per_block))
+    elif per_block:
+        problems.append('%s=1 is not set: the per-block epochs arm cannot be judged on the share of verifies that took the diff path'
+                        % HOSTGAP_LOG_FLAG)
     if env.get(HOSTGAP_AUDIT_FLAG) == '1':
         wanted = ['A', 'B'] if per_block else ['A']
-        if facts['hostgap_full_audit_mismatches']:
-            problems.append('%d staged buffers differed from the full stage in the full audit ([PACKED-PRESTAGE-FULLAUDIT])'
-                            % facts['hostgap_full_audit_mismatches'])
+        if facts['hostgap_audit_mismatches_diff']:
+            problems.append('%d staged buffers differed from the full stage after a DIFF write in the full audit '
+                            '([PACKED-PRESTAGE-FULLAUDIT] path=diff): the lever staged something other than the full stage'
+                            % facts['hostgap_audit_mismatches_diff'])
+        if facts['hostgap_audit_mismatches_full']:
+            problems.append('%d buffers differed after a FULL stage in the full audit ([PACKED-PRESTAGE-FULLAUDIT] path=full): the '
+                            'comparator itself disagrees with the full stage (layout, padding or dtype), so a diff-path mismatch '
+                            'in this run says nothing about the lever' % facts['hostgap_audit_mismatches_full'])
+        if not facts['hostgap_full_audits_full']:
+            problems.append('%s is set and no [PACKED-PRESTAGE-FULLAUDIT] path=full line was logged: the comparator was never '
+                            'checked against the full stage' % HOSTGAP_AUDIT_FLAG)
+        chips = int(env.get('QWEN_FAST_TP') or 2)
+        short = [item for item in facts['hostgap_audit_lines'] if not int(item[2]) or int(item[3]) != int(item[2]) * chips]
+        if short:
+            problems.append('%d [PACKED-PRESTAGE-FULLAUDIT] lines checked fewer than buffers x %d chips (first: buffers=%s checked=%s)'
+                            % (len(short), chips, short[0][2], short[0][3]))
         missing = [label for label in wanted if label not in facts['hostgap_full_audit_blocks']]
         if missing:
             problems.append('%s is set and no [PACKED-PRESTAGE-FULLAUDIT] line was logged for block %s' % (

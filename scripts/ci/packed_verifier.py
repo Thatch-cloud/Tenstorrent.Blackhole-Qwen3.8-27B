@@ -1494,21 +1494,23 @@ class PackedVerifierEngine:
         self.readback_split = (reads_ms, (time.perf_counter() - reads_started) * 1000 - reads_ms)
         return host
 
-    def note_hostgap_verify(self, segments, snapshot, input_ms, bind_ms, stage_cpu_ms, rest_cpu_ms, readback_ms):
+    def note_hostgap_verify(self, segments, snapshot, input_ms, bind_ms, stage_cpu_ms, rest_cpu_ms, readback_ms,
+                            readback_cpu_ms=0.0):
         """Stage 0 (QWEN_FAST_TP4_HOSTGAP_LOG): this verify's staging path and its host split, on a line of its own - the block, the
         path the verify-time stage took, bind and input wall time beside the staging's thread CPU time (GC and host compute count
         there, a descheduled thread does not), the prediction readback split into its reads and its combine and audits
-        (shard_predictions; both 0 on the unsharded readback), and the CPU time of everything after the staging (the trace's
-        blocking wait is not CPU). Never raises."""
+        (shard_predictions; both 0 on the unsharded readback), and the CPU time of everything after the staging up to the replay's end (after_stage_cpu_ms: the fence and the trace's
+        blocking wait, which can spin) and, apart, of the readback (readback_cpu_ms). Never raises."""
         try:
             prestaged = self.prestaged
             path = 'off' if prestaged is None else prestaged.last['path']
+            reason = '-' if prestaged is None else str(prestaged.last['reason']).replace(' ', '_')[:120]
             reads_ms, checks_ms = getattr(self, 'readback_split', (0.0, 0.0))
-            diagnostic('%s block=%s round=%d live=%d path=%s bind_ms=%.2f input_ms=%.2f stage_cpu_ms=%.2f reads_ms=%.2f '
-                       'checks_ms=%.2f readback_ms=%.2f after_stage_cpu_ms=%.2f'
+            diagnostic('%s block=%s round=%d live=%d path=%s reason=%s bind_ms=%.2f input_ms=%.2f stage_cpu_ms=%.2f reads_ms=%.2f '
+                       'checks_ms=%.2f readback_ms=%.2f after_stage_cpu_ms=%.2f readback_cpu_ms=%.2f'
                        % (verify_prestage.HOSTGAP_VERIFY_MARKER, verify_prestage.block_label(self), self.rounds + 1,
-                          len(segments), path, bind_ms, input_ms, stage_cpu_ms, reads_ms, checks_ms, readback_ms,
-                          rest_cpu_ms))
+                          len(segments), path, reason, bind_ms, input_ms, stage_cpu_ms, reads_ms, checks_ms, readback_ms,
+                          rest_cpu_ms, readback_cpu_ms))
         except Exception:
             pass
 
@@ -1804,7 +1806,8 @@ class PackedVerifierEngine:
                 operation()
                 self.operations.synchronize_device(self.mesh)
             else:
-                if snapshot is not None and verify_prestage.window_validate_enabled():
+                if (snapshot is not None and verify_prestage.window_validate_enabled() and self.prestaged is not None
+                        and self.prestaged.last['path'] == 'diff'):
                     # tp4/hostgap 1c (QWEN_FAST_TP4_WINDOW_VALIDATE): the window validated this block's bindings and the epoch
                     # vouches that nothing that can move a native buffer happened since, so the replay skips its own second check.
                     # Audited, the skipped check still runs, here, as a shadow (a failure raises exactly as the check would).
@@ -1819,6 +1822,7 @@ class PackedVerifierEngine:
                 # this trace, and nothing moves one between here and the round's commits.
                 self.validated_this_round = self.round_fences
             replayed = time.perf_counter()
+            cpu_replayed = verify_prestage.thread_ms() if hostgap else 0.0
             if self.shard_argmax:
                 host = self.shard_predictions()
             else:
@@ -1847,7 +1851,8 @@ class PackedVerifierEngine:
             if hostgap:
                 self.note_hostgap_verify(segments, snapshot, (staged_at - started) * 1000,
                                          (started - binding_started) * 1000, cpu_staged - cpu_started,
-                                         verify_prestage.thread_ms() - cpu_staged, (finished - replayed) * 1000)
+                                         cpu_replayed - cpu_staged, (finished - replayed) * 1000,
+                                         verify_prestage.thread_ms() - cpu_replayed)
             if extent_users is not None:
                 # S2, after the replay and outside the round's phase timings: the executed path's line,
                 # then (QWEN_FAST_EXTENT_AUDIT, gate profiles only) the read-back audit.

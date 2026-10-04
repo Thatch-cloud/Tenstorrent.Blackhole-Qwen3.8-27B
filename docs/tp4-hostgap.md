@@ -51,8 +51,19 @@ against both routes).
 
 ## Reading the arms
 
-- Audited attach: zero `[PACKED-PRESTAGE-FULLAUDIT]` mismatches, a line for each pre-staging block, `[PACKED-PRESTAGE-SHADOW]` lines.
-- At most a tenth of the 4-live verifies on `path=full reason=no-snapshot` on the block-epochs arm (the control's are nearly all of them).
+- Audited attach: zero `[PACKED-PRESTAGE-FULLAUDIT]` mismatches, read apart by path. The audit also reads every destination back after a
+  `path=full` stage, where the full stage is the reference itself: a mismatch there is an artifact of the comparator (layout, padding, dtype)
+  and voids the diff-path reading; a mismatch on `path=diff` alone is the lever. A `path=diff` line for each pre-staging block, at least one
+  `path=full` line, `buffers x chips` checked on every line, `[PACKED-PRESTAGE-SHADOW]` lines.
+- At least 95% of the pre-staged blocks' 4-live verifies on `path=diff` (blocks A and B on the epochs arm, A on the lite arm), read from
+  `[PACKED-HOSTGAP-VERIFY] block= path= reason=`. Only a full stage after an external writer (`epoch:admission`, `detach`, `prefill`,
+  `prefill-chunk`, `bookkeeping`, `lane-switch`) is left out of the count; `no-snapshot`, `epoch:verify` and `destinations` are misses.
+- The `[PINDIAG] gc` lines are written from the window and entry lines: the collector callback only records into a bounded list (a collection
+  can start inside the logger's own emit).
+- The per-block epochs are process-wide: they also make the solo lane's own writes bump only its own epoch, and the attach refusal does not
+  look at the solo block. The lane-switch global bumps keep it safe; do not combine `PRESTAGE_BLOCK_EPOCHS` with the solo lane in an arm
+  without a refusal for it.
+- The arms log a few extra lines and thread-time reads per round that the control does not: a bias against the arms.
 - Window overrun: `[PACKED-HOSTGAP-WINDOW]` `window_ms` against `fence_wait_ms`. A `fence_wait_ms` near 0 beside a `window_ms` past the quads'
   device time (38.8 ms; about 25 ms of host slack when the drafter lever D2a lands) means the pre-stages cost the lever device idle.
 - Hang shapes: five consecutive completions (the audits-off hang is unexplained and sensitive to the trace shape; stage 1 removes about 20 ms

@@ -85,7 +85,9 @@ class VerifierPageBinding:
             self._known_set = (self.blocks, frozenset(self.blocks))
 
     def checked_blocks(self, blocks):
-        """validate_blocks, and under QWEN_FAST_TP4_ENTRY_DIET the same acceptance by an incremental route: when `blocks` extends the
+        """validate_blocks, and under QWEN_FAST_TP4_ENTRY_DIET the same acceptance for every allocation the scheduler sends (ints, in range, unique)
+        by an incremental route (the one difference: the held prefix is compared by value with ==, so a held-prefix element of 4.0 or True
+        equal to the held int would pass where validate_blocks refuses it; vLLM sends ints, and the held prefix was itself accepted as ints): when `blocks` extends the
         allocation this binding already holds (whose every entry a full validation accepted: unique, int, in range), only the new
         suffix is checked - the same types and range, unique among itself and against the held set, the whole within capacity. Anything
         that route does not accept takes validate_blocks (so a refusal, and its message, is today's). Flag off, validate_blocks."""
