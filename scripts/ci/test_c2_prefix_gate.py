@@ -213,7 +213,7 @@ class ArmTests(unittest.TestCase):
         document = profiles()
         self.assertEqual(gate.PLANS, job.PREFIX_PLANS + tuple(arm for arm, _ in job.PREFIX_ARM_PLANS))
         self.assertEqual(sorted(arm for arm, _ in job.PREFIX_ARM_PLANS),
-                         sorted(entry[0] for plan in ('exactness', 'lifecycle') for entry in gate.PLAN_ARMS[plan]))
+                         sorted(entry[0] for plan in ('exactness', 'lifecycle', 'agent-turns') for entry in gate.PLAN_ARMS[plan]))
         for arm, plan in job.PREFIX_ARM_PLANS:
             with self.subTest(arm=arm):
                 alone = gate.plan_arms(arm, 'general-prefix', 'general', document)
@@ -322,7 +322,8 @@ class ShapeTests(unittest.TestCase):
             for arm in gate.plan_arms(plan, 'general-prefix', 'general', document):
                 wanted[arm['arm']] = gate.wants_digests(arm)
         self.assertEqual(sorted(name for name, on in wanted.items() if not on),
-                         ['bringup-reference', 'timing-baseline', 'timing-prefix'])
+                         ['agent-turns-baseline', 'agent-turns-prefix', 'bringup-reference', 'timing-baseline',
+                          'timing-prefix'])
 
     def test_the_contract_reads_the_derived_file(self):
         """serving_c2_contract.boot loads QWEN_C2_PROFILES: the derived file is what serves, and its
@@ -1154,6 +1155,29 @@ class StickyRunnerTests(unittest.TestCase):
         self.assertTrue(any('engine build p50/p90 3500.0/3500.0 ms' in line
                             for line in result['arms']['timing-prefix']['lines']))
         self.assertNotIn('build_ms_p50', result['arms']['timing-baseline']['phases']['agents-2'])
+
+
+class LifecycleReservationTests(unittest.TestCase):
+    """A sticky lifecycle arm reads the KV reservation: a re-admitted request is a FAIL, the holds and hits are reported."""
+
+    @staticmethod
+    def record(tag, q=None, admissions=1):
+        return dict(tag=tag, ok=True, markers=dict(q=q, admissions=admissions))
+
+    def test_a_request_vllm_resumed_fails_and_holds_and_hits_are_counted(self):
+        log = '\n'.join(['2026-10-04 [PINDIAG] kv reservation hold request=r1 reserved=4100 running=19000 pool=19967 decodes=3',
+                         'unrelated', '[PINDIAG] kv reservation released request=r1 reserved=4100 running=15000 pool=19967',
+                         '[PINDIAG] kv reservation hold request=r2 reserved=4100 running=19000 pool=19967 decodes=3'])
+        problems, lines = gate.lifecycle_reservation_findings(
+            [self.record('a', q=2048), self.record('b', q=0), self.record('c', q=4096, admissions=2)], log)
+        self.assertEqual(len(problems), 1)
+        self.assertIn('c (2 admissions)', problems[0])
+        self.assertEqual(lines, ['KV reservation: 2 hold lines, 2 hits restored, 1 requests re-admitted (preempted)'])
+
+    def test_no_holds_and_no_resumes_is_reported_and_passes(self):
+        problems, lines = gate.lifecycle_reservation_findings([self.record('a', q=2048)], None)
+        self.assertEqual(problems, [])
+        self.assertIn('0 hold lines', lines[0])
 
 
 class RequiredTestsTests(unittest.TestCase):

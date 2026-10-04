@@ -97,6 +97,9 @@ BOUNDARY_PROMPTS = (2047, 2048, 2049)
 # last target is the limit itself, fitted), and its boundaries are where C0 = floor2048(P) - 2048 first
 # becomes a checkpoint: a previous prompt of 4095 tokens captures nothing, 4096 and 4097 capture 2048.
 CHAIN_HITS_LONG = (72000, 84000, 96000, 108000, 120000)
+# The 262,144-token windows (tp4/packed-prefix): the chain runs on past 120k to the prompt limit through these, each
+# kept only while below the cap, so a 131k profile's chain (cap 123,136) is the one it always was.
+CHAIN_HITS_262K = (150000, 200000)
 # The bring-up's second and third turns on a sticky profile: a second turn past 4096 tokens captures C0 = 2048,
 # which the third resumes (CHAIN_HITS_SHORT's 4,200 may land under 4096 and capture nothing).
 STICKY_BRINGUP_HITS = (6000, 12000)
@@ -110,6 +113,13 @@ SHARED_AGENT_TARGETS = ((6000, 20000, 45000, 80000, 120000),
                         (5600, 12000, 25000, 40000, 60000),
                         (5200, 8000, 14000, 22000, 30000),
                         (4800, 6200, 8000, 12000, 16000))
+# Eight seats (two packed 64-row blocks): eight agents of the one tenant, the first four those above and the
+# second four filling the second block, so a packed round mixes both blocks' families (the scenario reads this when
+# the served profile has eight seats, Driver.seats).
+SHARED_AGENT_TARGETS_8 = SHARED_AGENT_TARGETS + ((6400, 16000, 32000, 60000, 100000),
+                                                 (5000, 9000, 18000, 36000, 72000),
+                                                 (4600, 7000, 11000, 18000, 28000),
+                                                 (5400, 10000, 20000, 40000, 90000))
 SHARED_AGENT_MAX_TOKENS = 512
 BOUNDARY_FIRST_MAX_TOKENS = 256  # so turn 2 stays inside the next chunk: a tail-only hit
 BOUNDARY_FOLLOWUP_TOKENS = 120
@@ -210,6 +220,9 @@ def input_indexes(messages):
 
 # -- the streamed chat completion ----------------------------------------------------------------
 
+CHUNK_TIMES_LIMIT = 2048
+
+
 class StreamState(object):
     """A streamed chat completion, fed line by line (server-sent events): text, reasoning, tool
     calls, output and prompt token ids, usage, finish reason, and when the first token came."""
@@ -219,6 +232,7 @@ class StreamState(object):
         self.started = clock()
         self.first_token_at = None
         self.content, self.reasoning, self.token_ids = [], [], []
+        self.chunk_times = []       # each streamed chunk's offset from the send: the other seats' gaps while a turn prefills
         self.prompt_token_ids = None
         self.calls = {}
         self.usage = None
@@ -254,6 +268,8 @@ class StreamState(object):
             thought = delta.get('reasoning') or delta.get('reasoning_content') or ''
             if (ids or text or thought or delta.get('tool_calls')) and self.first_token_at is None:
                 self.first_token_at = self.clock()
+            if (ids or text or thought) and len(self.chunk_times) < CHUNK_TIMES_LIMIT:
+                self.chunk_times.append(round(self.clock() - self.started, 3))
             self.token_ids.extend(ids)
             if text:
                 self.content.append(text)
@@ -286,7 +302,7 @@ class StreamState(object):
                     prompt_ids=prompt_ids, prompt_sha=judge.token_sha(prompt_ids) if prompt_ids is not None else None,
                     prompt_tokens=len(prompt_ids) if prompt_ids is not None else usage.get('prompt_tokens'),
                     completion_tokens=usage.get('completion_tokens', len(self.token_ids)), finish=self.finish,
-                    error=self.error,
+                    error=self.error, chunk_times=list(self.chunk_times),
                     ttft_s=round(self.first_token_at - self.started, 3) if self.first_token_at else None,
                     wall_s=round(ended - self.started, 3))
 
@@ -612,8 +628,10 @@ class Driver(object):
     def __init__(self, client, arm, corpus, log=None, container=None, seed=0, max_tokens=DEFAULT_MAX_TOKENS,
                  deadline=None, clock=time.time, sleep=time.sleep, say=print, pods=ci_pods, strict=True,
                  store_capacity=None, salt_key=None, context_tokens=None, sticky=False, batch_invariant=False,
-                 prompt_limit=None):
+                 prompt_limit=None, seats=4):
         self.client, self.arm, self.corpus, self.log, self.container = client, arm, corpus, log, container
+        # The served profile's seats (max-num-seqs): the shared-block arm uses eight agents on an eight-seat engine.
+        self.seats = int(seats)
         self.salt_key = salt_key
         self.context_tokens = context_tokens
         # The C2 fast path's sticky sessions (the module docstring): the oracle's model, strict concurrent
@@ -1046,7 +1064,7 @@ def chain_hits(driver, full):
         cap = driver.context() - driver.max_tokens - FIT_MARGIN_TOKENS
         if driver.prompt_limit is not None:
             cap = min(cap, driver.prompt_limit)
-        longer = tuple(target for target in CHAIN_HITS_LONG if hits[-1] < target < cap)
+        longer = tuple(target for target in CHAIN_HITS_LONG + CHAIN_HITS_262K if hits[-1] < target < cap)
         hits = hits + longer + ((cap,) if cap > max(hits + longer) else ())
     return hits
 
@@ -1612,7 +1630,8 @@ def scenario_exactness_shared(driver, targets=None, max_tokens=None):
     compared across rows that share those tokens (prefix_judge.window_findings): the shared blocks a hit
     reads after other agents decoded beside them must be the bytes their first writer left. targets and
     max_tokens default to SHARED_AGENT_TARGETS and SHARED_AGENT_MAX_TOKENS, read when it runs."""
-    targets = SHARED_AGENT_TARGETS if targets is None else targets
+    if targets is None:
+        targets = SHARED_AGENT_TARGETS_8 if getattr(driver, 'seats', 4) >= 8 else SHARED_AGENT_TARGETS
     max_tokens = SHARED_AGENT_MAX_TOKENS if max_tokens is None else max_tokens
     tenant = driver.salt('agents')
     agents = []
@@ -1715,13 +1734,30 @@ def scenario_timing(driver, agents=TIMING_AGENTS, turns=TIMING_TURNS, max_tokens
         driver.event(phase, **driver.phases[phase])
 
 
+# The agent-turn replay (tp4/packed-prefix): the timing scenario's busy agents with fixed settings, so that the
+# prefix arm and its control run the SAME conversations (the schedule, sizes and inputs are seeded by the phase and
+# the agent, never by the arm) and their transcripts can be compared turn by turn (prefix_agent_turns).
+AGENT_TURNS_AGENTS = (8,)
+AGENT_TURNS = 8
+AGENT_TURN_MAX_TOKENS = 192      # short coding-agent answers
+
+
+def scenario_agent_turns(driver, agents=None, turns=AGENT_TURNS, max_tokens=AGENT_TURN_MAX_TOKENS, gap_mean_s=None):
+    """Busy coding agents in the metering shape (about 2k-token tool results, exponential think gaps, compaction past
+    the prompt limit), `agents` of them at once (default eight: every seat), `turns` turns each, on one engine. It is
+    scenario_timing with short answers; the records are the replay's (TTFT, answer tokens, wall time, the output
+    token ids a comparison reads)."""
+    scenario_timing(driver, agents=tuple(agents or AGENT_TURNS_AGENTS), turns=turns, max_tokens=max_tokens,
+                    gap_mean_s=gap_mean_s)
+
+
 SCENARIOS = dict(bringup_reference=scenario_bringup_reference, bringup_prefix=scenario_bringup_prefix,
                  exactness_traced=lambda driver, **_: scenario_exactness(driver, 'traced'),
                  exactness_audit=lambda driver, **_: scenario_exactness(driver, 'audit'),
                  exactness_eager=lambda driver, full=None, **_: scenario_exactness(driver, 'eager', full=full),
                  exactness_shared=lambda driver, **_: scenario_exactness_shared(driver),
                  lifecycle_evict=scenario_lifecycle_evict, lifecycle_store=scenario_lifecycle_store,
-                 lifecycle_tiny=scenario_lifecycle_tiny, timing=scenario_timing)
+                 lifecycle_tiny=scenario_lifecycle_tiny, timing=scenario_timing, agent_turns=scenario_agent_turns)
 
 
 def records_jsonl(records):

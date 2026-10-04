@@ -56,3 +56,7 @@ The pad is recognised without the binding. The bound blocks are unique, so the f
 
 With the flag off, `kv_guard` reads the tables exactly as before (`KvGuardTests` compares it with the
 pre-sticky guard).
+
+The four-card eight-seat levers (the fused commit in place on live banks, the GDN commit lanes, the draft K/V slide, the quad
+drafts at two blocks, the verify-glue levers, the attention fold, 4,096-wide tables) are audited in
+`docs/tp4-packed-prefix.md`; none of them writes the target K/V pool.

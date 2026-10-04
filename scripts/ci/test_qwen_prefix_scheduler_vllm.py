@@ -933,9 +933,12 @@ class StickyEnv(Env):
         register_all_kvcache_specs(self.vllm_config)
         self.structured = StructuredOutputManager(self.vllm_config)
 
-    def make_sticky(self, environ=None, mid_loop=True):
+    def make_sticky(self, environ=None, mid_loop=True, scheduler_cls=None, num_blocks=None):
+        kv_cache_config = self.kv_cache_config
+        if num_blocks is not None:
+            kv_cache_config = dataclasses.replace(kv_cache_config, num_blocks=num_blocks)
         with hook_switches_off():
-            scheduler = self.scheduler_cls(vllm_config=self.vllm_config, kv_cache_config=self.kv_cache_config,
+            scheduler = (scheduler_cls or self.scheduler_cls)(vllm_config=self.vllm_config, kv_cache_config=kv_cache_config,
                                            structured_output_manager=self.structured, block_size=BLOCK,
                                            hash_block_size=BLOCK, include_finished_set=False, log_stats=True)
         scheduler.use_v2_model_runner = False
@@ -1024,6 +1027,124 @@ class StickyDflashOnRealVllmTests(unittest.TestCase):
             self.assertLessEqual(row.start, prefix_judge.resume_ceiling(len(request.prompt_token_ids)))
             prompt = list(request.prompt_token_ids) + list(request.output_token_ids) + tokens(2600, 'sticky-chain-%d' % turn)
         self.assertEqual(state.registry.stats['token_mismatches'], 0)
+
+
+class ReservedDrive(Drive):
+    """Drive that also records, at every step, what the fast path cannot survive: a preemption, and a request holding more
+    blocks than the reservation rule gave it. Tokens are 1 per step (no draft), so the 16-token lookahead is the only margin."""
+
+    def __init__(self, *args, **kwargs):
+        super(ReservedDrive, self).__init__(*args, **kwargs)
+        self.preempted = set()
+        self.over = 0
+        self.max_running = 0
+
+    def step(self):
+        import serving_kv_reservation as kv
+
+        output = self.scheduler.schedule()
+        self.steps += 1
+        self.history.append((self.steps, sorted(output.num_scheduled_tokens)))
+        self.preempted |= set(getattr(output, 'preempted_req_ids', None) or ())
+        for request in self.scheduler.requests.values():
+            if getattr(request, 'num_preemptions', 0) or request.status == RequestStatus.PREEMPTED:
+                self.preempted.add(request.request_id)
+        self.max_running = max(self.max_running, len(self.scheduler.running))
+        for request in self.scheduler.running:
+            held = len(self.scheduler.kv_cache_manager.get_block_ids(request.request_id)[0])
+            self.over = max(self.over, held - kv.request_reservation(request, self.scheduler.max_model_len))
+        self.scheduler.update_from_output(output, self.execute(output))
+        return output
+
+
+@unittest.skipIf(VLLM_ERROR is not None, 'vLLM is not importable here (%s)' % VLLM_ERROR)
+class StickyReservationOnRealVllmTests(unittest.TestCase):
+    """The KV reservation (QWEN_FAST_KV_RESERVATION=1, serving_kv_reservation) under prefix caching: the fast path cannot
+    preempt, and test_serving_kv_reservation_vllm proves the rule only with the prefix cache off. Here the same wrapper is
+    installed over the plugin scheduler the graft is staged on, with enable_prefix_caching, the graft's sticky sessions (the
+    DFlash lookahead of 16, the dropped last block) and a pool smaller than the traffic: conversations that continue (hits),
+    two agents of one tenant sharing a system block (siblings), and four agents at once on a pool that holds fewer. A block a
+    request shares with another conversation counts in the holder's own reservation and is one physical block, so the rule can
+    only over-reserve; this is that claim on vLLM's own block pool and eviction."""
+
+    POOL = 260                      # blocks, the null block included: 259 usable, four requests of 80-100 blocks do not all fit
+    TENANT = 'tenant-shared'
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = StickyEnv()
+
+    def setUp(self):
+        self.env.logs[:] = []
+
+    def build(self, reservation, blocks):
+        import serving_kv_reservation as kv
+        import serving_prefill_admission as admission
+        from types import SimpleNamespace
+        from unittest import mock
+
+        scheduler_type = type('TTSchedulerReservation', (self.env.scheduler_cls,), {})
+        lines = []
+        with mock.patch.dict(os.environ, {kv.FLAG: '1' if reservation else '0'}):
+            admission.install(SimpleNamespace(scheduler_config=SimpleNamespace(scheduler_cls=scheduler_type)),
+                              log=lambda message, *values: lines.append(
+                                  (message.format(*values) if '{}' in message else message % values) if values else message))
+        scheduler, state = self.env.make_sticky(scheduler_cls=scheduler_type, num_blocks=blocks)
+        return scheduler, state, lines
+
+    def traffic(self, drive, turns, answer):
+        """Each turn: four agents arrive together; agents 0 and 1 are one tenant with a shared 2,048-token system block, agents
+        2 and 3 their own salts; every prompt is the previous turn's prompt + answer + new text (the coding-agent shape)."""
+        system = tokens(2048, 'system')
+        prompts = {0: system + tokens(1800, 'a0'), 1: system + tokens(1900, 'a1'),
+                   2: tokens(3700, 'a2'), 3: tokens(3600, 'a3')}
+        salts = {0: self.TENANT, 1: self.TENANT, 2: 'tenant-b', 3: 'tenant-c'}
+        names = []
+        for turn in range(turns):
+            for agent in range(4):
+                name = 'agent%d-turn%d' % (agent, turn)
+                names.append(name)
+                request = drive.add(name, prompts[agent], answer, salt=salts[agent])
+                prompts[agent] = list(request.prompt_token_ids) + [100000 + (turn * 7 + agent) % 1000] * answer + tokens(
+                    1200, 'new-%d-%d' % (agent, turn))
+            drive.run()
+        return names
+
+    def test_with_hits_siblings_and_a_pool_smaller_than_the_traffic_vllm_never_preempts(self):
+        import serving_kv_reservation as kv
+
+        scheduler, state, lines = self.build(True, self.POOL)
+        drive = ReservedDrive(self.env, scheduler, state, 'reserved')
+        names = self.traffic(drive, 3, 64)
+        self.assertEqual(drive.preempted, set(), 'vLLM preempted under caching: the reservation rule is not enough')
+        self.assertLessEqual(drive.over, 0, 'a request held more blocks than it reserved')
+        self.assertTrue(all(name not in scheduler.requests for name in names), 'every request finished')
+        self.assertEqual(scheduler.kv_cache_manager.block_pool.get_num_free_blocks(), kv.pool_blocks(scheduler),
+                         'every block is free again: a cached block that nobody holds is evictable')
+        self.assertGreater(len([line for line in lines if line.startswith(kv.HOLD_PREFIX)]), 0,
+                           'the traffic never outran the pool: the proof exercised no hold')
+        self.assertGreater(drive.max_running, 1, 'requests never ran together')
+        hits = [grant for grants in drive.grants.values() for grant in grants if grant.q > 0]
+        self.assertGreater(len(hits), 0, 'no request hit the prefix cache: the proof exercised no hit')
+        self.assertEqual(state.registry.stats['token_mismatches'], 0)
+
+    def test_a_pool_packed_to_two_requests_is_preempted_without_the_rule_and_never_with_it(self):
+        """The negative control under caching: two 4,032-token prompts fill a 128-block pool with their lookahead, and their
+        answers need a block neither can have. With the rule the second waits; without it vLLM preempts."""
+        def run(reservation):
+            scheduler, state, lines = self.build(reservation, 129)
+            drive = ReservedDrive(self.env, scheduler, state, 'control-%s' % reservation)
+            drive.add('p0', tokens(4032, 'pack-0'), 64, salt='tenant-b')
+            drive.add('p1', tokens(4032, 'pack-1'), 64, salt='tenant-c')
+            drive.run()
+            return drive
+
+        guarded = run(True)
+        self.assertEqual(guarded.preempted, set())
+        self.assertLessEqual(guarded.over, 0)
+        self.assertEqual(guarded.max_running, 1, 'the rule admits one of the two')
+        unguarded = run(False)
+        self.assertTrue(unguarded.preempted, 'the negative control did not preempt: the proof proves nothing')
 
 
 if __name__ == '__main__':

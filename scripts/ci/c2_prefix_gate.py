@@ -78,6 +78,16 @@ named as the arm - c2_serving_job.PREFIX_ARM_PLANS - that runs only it, judged e
              or missing markers, and timing-prefix is NOT_EXERCISED when no continuation restored
              Q > 0 (every turn cold: its numbers would measure no reuse).
 
+  agent-turns  agent-turns-prefix and (unless --baseline none) agent-turns-baseline (tp4/packed-prefix): busy coding agents
+             in the metering shape (prefix_replay.scenario_agent_turns), --agents of them at once (eight on an eight-seat
+             profile), --turns turns each, short answers, growing contexts; the two arms send the SAME conversations (seeded by
+             phase and agent, not by arm). Per turn a '[TURN]' line: tokens reused (the model's [PREFIX] row Q), tokens new,
+             TTFT, decode tokens/s, the engine build (prefix_agent_turns). The prefix arm is NOT_EXERCISED when an agent that
+             continued never reused a token. Run together, the plan compares the two arms' transcripts turn by turn (output
+             token ids: IDENTICAL, or the first DIVERGED turn of a conversation; later turns of it have another prompt) and
+             prints the paired continuation TTFT; each arm is also a plan of its own (the ABAB jobs run one per job, and
+             scripts/ci/prefix_agent_turns.py compares two results directories offline).
+
 THE FAST PATH'S STICKY SESSIONS (phase 1 on the S2 lineage; --profile c2-packed-prefix --baseline c2-packed,
 the profiles with QWEN_FAST_STICKY_SESSIONS=1 beside QWEN_PREFIX_REUSE=1). The same plans, judged for what
 that path is (sticky design, harness items B1, B2 and B4):
@@ -94,7 +104,8 @@ that path is (sticky design, harness items B1, B2 and B4):
     lifecycle-tiny is NOT_APPLICABLE (the profiles budget the KV pool for every seat's whole context and
     the fast path has no preemption: a tiny pool is not a shape it serves); a NOT_APPLICABLE arm alone is
     refused up front;
-  - exactness-shared (the sticky profiles only): four same-tenant agents sharing the full system block
+  - exactness-shared (the sticky profiles only): four same-tenant agents (eight on an eight-seat profile, so both packed
+    64-row blocks are live: prefix_replay.SHARED_AGENT_TARGETS_8) sharing the full system block
     continue concurrently in packed rounds, hits from ~5k to 120k, each hit against its solo cold twin,
     with QWEN_PREFIX_AUDIT's per-window KV digests (derived): every window two requests share must hold
     the same bytes, so the shared blocks a hit reads after other agents decoded beside them are what their
@@ -177,6 +188,7 @@ sys.path.insert(0, HERE)
 import c2_serving_gate as gate  # noqa: E402
 import c2_serving_job  # noqa: E402
 import prefix_agent_corpus as corpus_module  # noqa: E402
+import prefix_agent_turns as agent_turns  # noqa: E402
 import prefix_judge as judge  # noqa: E402
 import prefix_markers as markers  # noqa: E402
 import prefix_replay as replay  # noqa: E402
@@ -249,7 +261,13 @@ PLAN_ARMS = dict(
                ('lifecycle-tiny', 'lifecycle_tiny', 'prefix', 'tiny', 4800, False)),
     timing=(('timing-prefix', 'timing', 'prefix', None, 9000, False),
             ('timing-baseline', 'timing', 'baseline', None, 9000, False)),
+    # The agent-turn replay (prefix_replay.scenario_agent_turns): the same conversations on the prefix profile and on its
+    # no-reuse control, every turn's reuse, TTFT and decode rate logged, the transcripts compared across the two arms.
+    **{'agent-turns': (('agent-turns-prefix', 'agent_turns', 'prefix', None, 9000, False),
+                       ('agent-turns-baseline', 'agent_turns', 'baseline', None, 9000, False))}
 )
+# The scenarios that measure rather than judge exactness: no extent audit, no row digests (they would time the audit).
+TIMED_SCENARIOS = ('timing', 'agent_turns')
 # The single-arm plans (c2_serving_job.PREFIX_ARM_PLANS): the arm exactly as its plan runs it.
 PLAN_ARMS.update([(arm, tuple(entry for entry in PLAN_ARMS[plan] if entry[0] == arm))
                   for arm, plan in c2_serving_job.PREFIX_ARM_PLANS])
@@ -374,7 +392,8 @@ def plan_arms(plan, profile, baseline, profiles):
         chosen = document['profiles'][served]
         context = context_of(document, served)
         entry = dict(arm=arm, scenario=scenario, served=served, derived=derived, timeout=timeout, strict=strict,
-                     prefix=which == 'prefix', kind=kind, context=context)
+                     prefix=which == 'prefix', kind=kind, context=context,
+                     seats=int(((chosen.get('engine') or {}).get('max-num-seqs')) or 4))
         s2 = is_s2_profile(chosen)
         sticky = which == 'prefix' and sticky_profile
         if sticky_profile and scenario.startswith('bringup'):
@@ -385,7 +404,7 @@ def plan_arms(plan, profile, baseline, profiles):
             # The fast path (the module docstring's sticky section): its loop path, strict pairs, the extent
             # audit on every arm but timing, the profile's prompt limit, and the eager arm's whole set.
             entry.update(path='eager' if trace_mode(chosen) == 'decode_only' else 'traced', s2=s2, sticky=sticky,
-                         env=gate.AUDIT_ENV if s2 and scenario != 'timing' else (),
+                         env=gate.AUDIT_ENV if s2 and scenario not in TIMED_SCENARIOS else (),
                          prompt_limit=prompt_limit(document, served), served_env=dict(chosen.get('env') or {}),
                          full=scenario == 'exactness_eager' and trace_mode(names[profile]) == 'decode_only',
                          timeout=max(timeout, S2_TIMEOUTS.get(arm, 0)) if sticky else timeout)
@@ -409,7 +428,7 @@ STATS_NOW_ENV = 'QWEN_PREFIX_STATS_S=0'
 
 
 def wants_digests(arm):
-    return bool(arm.get('prefix')) and arm.get('scenario') != 'timing'
+    return bool(arm.get('prefix')) and arm.get('scenario') not in TIMED_SCENARIOS
 
 
 # The salt key a prefix arm mounts (serving_c2_contract.SALT_KEY_ENV names it in the container): the image
@@ -933,6 +952,27 @@ def tiny_findings(records, events, stats):
     return problems, missing, lines
 
 
+HOLD_MARKER = '[PINDIAG] kv reservation hold request='
+
+
+def lifecycle_reservation_findings(records, log_text):
+    """A sticky lifecycle arm's reading of the KV reservation (QWEN_FAST_KV_RESERVATION=1, which the eight-seat profiles run
+    under): the fast path cannot preempt, so a request vLLM re-admitted (a second [PREFIX] row) is a FAIL and not an excuse,
+    and the holds the reservation made while the arrivals, the flood and the aborts ran are reported, with the number of
+    hits among the requests (a hold with hits in flight is the shape the CPU proof, test_qwen_prefix_scheduler_vllm
+    StickyReservationOnRealVllmTests, covers). Zero holds is reported, not failed: a pool of over a million tokens may never
+    be outrun by this arm's traffic. -> (problems, lines)."""
+    problems, lines = [], []
+    resumed = sorted('%s (%d admissions)' % (r['tag'], judge.admissions(r)) for r in records if judge.admissions(r) > 1)
+    if resumed:
+        problems.append('vLLM preempted and resumed %s: the fast path has no preemption, so the KV reservation did not hold'
+                        % ', '.join(resumed[:6]))
+    holds = len([line for line in (log_text or '').splitlines() if HOLD_MARKER in line])
+    hits = len([r for r in records if r.get('ok') and q_of(r)])
+    lines.append('KV reservation: %d hold lines, %d hits restored, %d requests re-admitted (preempted)' % (holds, hits, len(resumed)))
+    return problems, lines
+
+
 def lifecycle_findings(arm, records, events, scanned, stats):
     """The lifecycle events against what each must leave. -> (problems, not exercised, lines)."""
     problems, missing, lines = [], [], []
@@ -1189,9 +1229,18 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None):
         problems += more_problems
         missing += more_missing
         lines += more_lines
-    elif arm['scenario'] == 'timing' and arm['prefix']:
+        if arm.get('sticky'):
+            more_problems, more_lines = lifecycle_reservation_findings(records, log_text)
+            problems += more_problems
+            lines += more_lines
+    elif arm['scenario'] in TIMED_SCENARIOS and arm['prefix']:
         # The timing arm is not strict (a lost hit is a note), so without this it could pass with every
         # continuation cold and report TTFTs that measure no reuse at all.
+        if arm['scenario'] == 'agent_turns':
+            more_problems, more_missing, more_lines = agent_turns.reuse_findings(records, stats)
+            problems += more_problems
+            missing += more_missing
+            lines += more_lines
         continued = [r for r in records if r.get('continuation') and r.get('ok')]
         restored = [r for r in continued if q_of(r)]
         lines.append('continuations restored: %d of %d' % (len(restored), len(continued)))
@@ -1404,7 +1453,8 @@ class Runner(object):
         driver = replay.Driver(client, arm['arm'], self.get_corpus(), follower, container, seed=self.seed,
                                deadline=deadline, clock=self.clock, sleep=self.sleep, say=self.log,
                                strict=arm['strict'], salt_key=salt_key, sticky=bool(arm.get('sticky')),
-                               batch_invariant=bool(arm.get('s2')), prompt_limit=arm.get('prompt_limit'))
+                               batch_invariant=bool(arm.get('s2')), prompt_limit=arm.get('prompt_limit'),
+                               seats=arm.get('seats') or 4)
         error, stats, metrics, output = None, None, {}, ''
         try:
             code, output = self.docker(arguments, 300)
@@ -1421,7 +1471,7 @@ class Runner(object):
                 kwargs['pool_tokens'] = markers.scan(follower.lines()).get('kv_tokens')
             if arm['scenario'] == 'lifecycle_evict':
                 kwargs['restart'] = lambda: self.restart(container, client, follower, driver)
-            if arm['scenario'] == 'timing':
+            if arm['scenario'] in TIMED_SCENARIOS:
                 kwargs.update(agents=self.agents, turns=self.turns)
             if arm.get('full'):
                 kwargs['full'] = True
@@ -1461,10 +1511,20 @@ class Runner(object):
             (key, value) for key, value in metrics.items() if key in (
                 'vllm:num_preemptions', 'vllm:prefix_cache_queries', 'vllm:prefix_cache_hits',
                 'vllm:prompt_tokens', 'vllm:prompt_tokens_cached')), stats=stats, error=error)
-        if arm['scenario'] == 'timing':
+        if arm['scenario'] in TIMED_SCENARIOS:
             result['phases'] = timing_summary(driver)
             for phase, summary in sorted(result['phases'].items()):
                 result['lines'].append(report.render_phase(phase, summary))
+        if arm['scenario'] == 'agent_turns':
+            # The per-turn logging: reused tokens, new tokens, TTFT and the decode rate, one line per turn.
+            result['turns'] = agent_turns.turn_rows(driver.records)
+            for row in result['turns']:
+                result['lines'].append(agent_turns.render_row(arm['arm'], row))
+            # The per-arrival stall: the other seats' longest gap while each turn prefilled (the lever-N question).
+            result['stalls'] = agent_turns.stall_rows(driver.records)
+            for row in result['stalls']:
+                result['lines'].append(agent_turns.render_stall(arm['arm'], row))
+            result['lines'].append(agent_turns.stall_summary(arm['arm'] + ' stall', result['stalls']))
         if any(markers.WEDGE in (entry.get('line') or '') for entry in scanned.get('failures') or ()):
             self.infra = ('arm %s hit tt-metal\'s ethernet-core wedge (llrt.cpp:594): reset M+A before the next run'
                           % arm['arm'])
@@ -1557,6 +1617,21 @@ def run_plan(plan, arms, runner, anchor=None):
         lines += cross + ['problem: %s' % text for text in problems] + ['not exercised: %s' % text for text in missing]
         verdicts.append('FAIL' if problems else ('NOT_EXERCISED' if missing else 'PASS'))
         extra.update(cross_problems=problems, cross_not_exercised=missing)
+    if plan == 'agent-turns':
+        mine = (results.get('agent-turns-prefix') or (None, {}))
+        control = (results.get('agent-turns-baseline') or (None, {}))
+        if mine[0] is not None and control[0] is not None:
+            compared = agent_turns.compare(mine[0].records, control[0].records, 'prefix', 'control')
+            lines += compared['lines'] + ['problem: %s' % text for text in compared['problems']]
+            verdicts.append(compared['verdict'])
+            extra.update(transcripts=dict(verdict=compared['verdict'], counts=compared['counts'],
+                                          problems=compared['problems']))
+        comparison = report.compare_phases(mine[1].get('phases') or {}, control[1].get('phases') or {})
+        extra['comparison'] = comparison
+        for phase, values in sorted(comparison.items()):
+            lines.append('%s with reuse vs without: continuation TTFT p50 %s vs %s s, p90 %s vs %s s, turns/h %s vs %s'
+                         % (phase, values['ttft_p50'][0], values['ttft_p50'][1], values['ttft_p90'][0],
+                            values['ttft_p90'][1], values['turns_per_hour'][0], values['turns_per_hour'][1]))
     if plan == 'timing':
         prefix = (results.get('timing-prefix') or (None, {}))[1].get('phases') or {}
         base = (results.get('timing-baseline') or (None, {}))[1].get('phases') or {}

@@ -1,0 +1,44 @@
+# The order of the tp4/packed-prefix four-card DEVELOPMENT window: sticky sessions (conversation prefix reuse) on the eight-seat 262k packed path on the nine best levers with the two quad draft blocks, one image, tp4-packed-prefix-1, built from the pushed tp4/packed-prefix commit.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# THE CARDS ARE UNDER DEVELOPMENT, PRODUCTION IS DOWN BY THE OWNER'S CHOICE: NO agentstart, NO agentstop (the node agent is already stopped), NO hand-back, NO deploy, NO :latest move. Z ends with a reset
+# and no agentstart. qwen_c2_profiles.json's default stays c2-packed-tp4; nothing is baked as the image default.
+# P0. NO OTHER WINDOW DRIVER MAY BE ALIVE and no privileged builder container may be up. The CPU suite green on this branch first. Every result is UNQUALIFIED (the 262k evidence waiver on the gate-only arms,
+# page_width_tp4.waiver_active). B0 never runs during a timing job. Judge every ABAB PAIRED per turn, never by unpaired medians; check the load average.
+# ORDER: the cheapest kill signals first: X0 (status, RESCAN, reset: the rescan first in the first quad job), B0, A0 (the control attach, A1's reference), A1 (the audited sticky attach), A2 (the bring-up: engaged,
+# reused tokens > 0, continuation equal to cold), E1 and E2 (exactness against cold prefills: the eager chain to the prompt limit, then eight same-tenant agents on both blocks), L1 (the lifecycle: coupled eviction under a flood, the kill switch, an abort during a hit's prefill, the restart, the reservation read), R0 (the agent-turn replay,
+# both arms, transcripts compared), the ABAB pair R1-R4 (turn TTFT and decode tok/s, prefix against control), then Z.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS A1 <- A0
+# NEEDS A2 E1 E2 <- A1
+# NEEDS L1 <- A1 A2
+# NEEDS R0 R1 R2 R3 R4 <- A1 A2
+# READ RULES (each also needs no stall):
+#   X0  the status prints, the rescan finds every board, the reset completes on all four.   B0  provenance report with no problem line, the image id printed.
+#   A0  the control attach: admission passed at capacity 262144, every answer completes, the hashes, accepted tokens and verify rounds RECORDED per request (A1's reference).
+#   A1  the sticky attach: the argv, the install line sticky=1 lookahead=16 drop_last=True (ENGAGED), the model warm line, admission at 262144, the reservation with 19,968 blocks, ZERO audit mismatches, no KV_SHARED,
+#       hashes, accepted tokens and verify rounds equal A0's; record the ledger's free DRAM per chip.
+#   A2  the bring-up plan PASS: reused tokens > 0 on the returning turn, continuations byte-identical to the cold reference, no compile after the traces were parked.
+#   E1  every pair of the eager set IDENTICAL, every Q, h and plan equal to the oracle, no program growth after a cold twin.   E2  eight agents, every pair IDENTICAL, a packed round with two or more live users, no window finding.
+#   L1  the lifecycle plan PASS (evict and store arms): the flood's coupled eviction on record, the kill switch latched, the abort during a hit's prefill, the restart's miss then hit, no pins held, no commit mismatch, and the 'KV reservation:' line
+#       with 0 re-admitted requests (a preempted request is a FAIL on the fast path).
+#   R0  the plan verdict, the transcripts 'N turns paired, N identical, 0 diverged' (compared per output token), EVERY continuation's reused tokens equal to the oracle's (a miss with no eviction on record is a FAIL), the '[TURN]' lines and the
+#       '[STALL]' lines (the other seats' longest gap while each turn prefilled; the lever-N question).   R1-R4  paired per turn: continuation TTFT and decode tok/s, tokens equal.
+#   Z   the reset completes; the agent stays stopped.
+# NO-GO for adopting the flag: any stall, any hash difference between arms that must be identical, any audit mismatch, any pair not IDENTICAL, any program compiled by a hit. This window decides nothing about production:
+# it is evidence for the owner. NOT in this window (stage 1): parking engines, the host warm tier, the undrop, the chunked-prefill merge (docs/tp4-packed-prefix.md says what is left).
+# Time (estimate): X0 and B0 about 80 min, A0 1.5 h, A1 2 h, A2 2.5 h, E1 4 h, E2 2.5 h, L1 3.7 h, R0 2 h, R1-R4 6 h, Z 10 min: about 25 h.
+X0-status-rescan-reset stop tp4-packed-prefix-1 20
+B0-build stop tp4-packed-prefix-1 60
+A0-control-attach-smoke stop tp4-packed-prefix-1 90
+A1-audited-attach-smoke stop tp4-packed-prefix-1 120
+A2-bringup stop tp4-packed-prefix-1 150
+E1-exactness-eager stop tp4-packed-prefix-1 240
+E2-exactness-shared8 stop tp4-packed-prefix-1 150
+L1-lifecycle stop tp4-packed-prefix-1 220
+R0-agent-turns-both soft tp4-packed-prefix-1 120
+R1-turns-A-control soft tp4-packed-prefix-1 90
+R2-turns-B-prefix soft tp4-packed-prefix-1 90
+R3-turns-A-control soft tp4-packed-prefix-1 90
+R4-turns-B-prefix soft tp4-packed-prefix-1 90
+Z-reset soft tp4-packed-prefix-1 10

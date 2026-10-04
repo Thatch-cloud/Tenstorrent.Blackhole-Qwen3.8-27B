@@ -188,7 +188,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(wide, sorted(['c2-packed-tp4-262k-gate', 'c2-packed-tp4-8x262k', 'c2-packed-tp4-8x262k-diag-strace',
                                 'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate',
                                 'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit',
-                                'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship']
+                                'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship', 'c2-packed-tp4-8x262k-prefix-gate', 'c2-packed-tp4-8x262k-prefix-time-gate', 'c2-packed-tp4-8x262k-ship-prefix', 'c2-packed-tp4-8x262k-ship-prefix-audit']
                                 + ['c2-packed-tp4-8x262k-best-time-gate-' + lever for lever in ('nosamp', 's1', 'd2', 'dbf16', 'lookup', 'stack')]  # tp4/262k8-x
                                 + ['c2-packed-tp4-8x262k-best-nosamp-audit', 'c2-packed-tp4-8x262k-best-stack-audit']
                                 + ['c2-packed-tp4-8x262k-best-time-gate-u1', 'c2-packed-tp4-8x262k-best-u1-audit']

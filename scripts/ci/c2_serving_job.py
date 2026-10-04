@@ -94,11 +94,14 @@ Keys (every one optional but C2_IMAGE_TAG):
                       re-runs that arm alone. Never beside its own plan, and no plan twice (one arm, one
                       results directory). exactness-shared (the four-agent shared-block arm) applies to the
                       sticky-session profiles only; on them exactness-traced and lifecycle-tiny are
-                      NOT_APPLICABLE, and a plan with no applicable arm is refused by the gate
+                      NOT_APPLICABLE, and a plan with no applicable arm is refused by the gate. agent-turns
+                      (tp4/packed-prefix: the agent-turn replay, eight conversations of several turns) runs the prefix
+                      and the control arm; agent-turns-prefix and agent-turns-baseline run one arm each (the ABAB jobs)
   C2_PREFIX_PROFILE   the prefix-reuse profile it serves (default general-prefix; must be a checkout profile)
   C2_PREFIX_BASELINE  the no-reuse profile it compares against (default general; none: timing without
                       the baseline arm)
-  C2_PREFIX_AGENTS    the timing plan's busy-agent counts, one phase each (default 1,4,5,6)
+  C2_PREFIX_AGENTS    the timing and agent-turns plans' busy-agent counts, one phase each (default 1,4,5,6;
+                      the agent-turn replay on eight seats: 8)
   The C2_PREFIX_* keys are read only when C2_ACTIONS has prefix; otherwise their defaults are output.
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
@@ -147,14 +150,16 @@ AUDIT_SETS = ('extent', 'all')
 SALT_MODES = ('none', 'fresh')
 DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
 # The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
-PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing')
+PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns')
 # (arm, its plan): each exactness and lifecycle arm is a plan of its own, named as the arm, that runs
 # only it, judged as inside its plan (neither plan has a cross-arm check; c2_prefix_gate.PLAN_ARMS).
 # G1 v47 (run 36246961161) needed the eager arm again without the traced and audit arms' hour.
 PREFIX_ARM_PLANS = (('exactness-traced', 'exactness'), ('exactness-audit', 'exactness'),
                     ('exactness-eager', 'exactness'), ('exactness-shared', 'exactness'),
                     ('lifecycle-evict', 'lifecycle'), ('lifecycle-store', 'lifecycle'),
-                    ('lifecycle-tiny', 'lifecycle'))
+                    ('lifecycle-tiny', 'lifecycle'),
+                    # tp4/packed-prefix: the agent-turn replay's two arms, each as a job of its own (the ABAB pairs)
+                    ('agent-turns-prefix', 'agent-turns'), ('agent-turns-baseline', 'agent-turns'))
 PREFIX_PROFILE = 'general-prefix'
 PREFIX_BASELINE = 'general'
 PREFIX_AGENTS = (1, 4, 5, 6)

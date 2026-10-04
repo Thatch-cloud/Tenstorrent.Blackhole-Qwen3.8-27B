@@ -110,6 +110,8 @@ jobs:
           python -B -m unittest test_prefix_replay test_c2_prefix_gate
           python -B -m unittest test_prefix_p0a_probe
           python -B -m unittest test_sticky_sessions
+          python -B -m unittest test_prefix_agent_turns test_tp4_packed_prefix_profiles test_tp4_packed_prefix_jobs test_tp4_packed_prefix_audit
+          python -B -m unittest test_ship_262k_prefix
           python -B -m unittest test_lever_n_prefill_profile_report
           python -B -m unittest discover -s optimisation/ttnn-op/sdpa_prefill_bench -p 'test_*.py'
           python -B -m unittest discover -s optimisation/ttnn-op/sdpa_prefill_chain -p 'test_*.py'

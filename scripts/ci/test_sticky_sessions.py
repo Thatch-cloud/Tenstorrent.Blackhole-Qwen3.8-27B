@@ -667,7 +667,10 @@ def profile(name):
 
 
 class ProfileTests(unittest.TestCase):
-    PAIRS = (('c2-packed-prefix', 'c2-packed'), ('c2-packed-prefix-gate', 'c2-packed-gate'))
+    PAIRS = (('c2-packed-prefix', 'c2-packed'), ('c2-packed-prefix-gate', 'c2-packed-gate'),
+             # tp4/packed-prefix: the eight-seat 262k twins (every other delta is the parent's: the levers, the pool)
+             ('c2-packed-tp4-8x262k-prefix-gate', 'c2-packed-tp4-8x262k-best'),
+             ('c2-packed-tp4-8x262k-prefix-time-gate', 'c2-packed-tp4-8x262k-best-time-gate'))
 
     def test_each_sticky_profile_is_its_twin_with_the_prefix_deltas_only(self):
         for name, twin in self.PAIRS:
@@ -690,7 +693,8 @@ class ProfileTests(unittest.TestCase):
 
     def test_only_the_sticky_profiles_set_the_switch(self):
         names = sorted(name for name, data in load_profiles()['profiles'].items() if STICKY in data['env'])
-        self.assertEqual(names, ['c2-packed-prefix', 'c2-packed-prefix-gate'])
+        self.assertEqual(names, ['c2-packed-prefix', 'c2-packed-prefix-gate', 'c2-packed-tp4-8x262k-prefix-gate',
+                                 'c2-packed-tp4-8x262k-prefix-time-gate'])
 
     def test_the_argv_turns_prefix_caching_on_beside_dflash(self):
         argv = contract.engine_arguments(profile('c2-packed-prefix'), '/snap')
@@ -748,8 +752,8 @@ class ProfileTests(unittest.TestCase):
         if parent is None:
             no_history(self)
         for name in sorted(load_profiles()['profiles']):
-            if name.startswith('c2-packed-prefix'):
-                continue
+            if name.startswith('c2-packed-prefix') or STICKY in load_profiles()['profiles'][name]['env']:
+                continue            # the flag-on twins (tp4/packed-prefix's included) are what the flag changes
             with self.subTest(profile=name):
                 self.assertEqual(contract.prefix_reuse_problems(profile(name)), parent.prefix_reuse_problems(profile(name)))
                 self.assertEqual(contract.engine_arguments(profile(name), '/s'), parent.engine_arguments(profile(name), '/s'))
