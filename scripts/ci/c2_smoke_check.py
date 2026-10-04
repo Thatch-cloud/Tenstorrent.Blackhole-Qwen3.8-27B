@@ -1087,6 +1087,39 @@ def u1_problems(env, container_text):
     return problems
 
 
+# tp4/w2 (gdn_conv_gates_spread, F1): the block conv-gates launch with its gate tiles on cores of their own. Three rules: a fall-back line fails
+# the smoke (the served launch ran, the timing is not the lever's), a profile that asks for it and logs no engaged line (with at least one gate
+# core) fails, and an audit flag with no 'exact=True' audit line (or any mismatch line) fails. tests hold these equal to the module's.
+SPREAD_FLAG = 'QWEN_FAST_TP4_CONV_GATES_SPREAD'
+SPREAD_AUDIT_FLAG = 'QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT'
+SPREAD_ENGAGED = '[PINDIAG] tp4 conv gates spread engaged'
+SPREAD_FELL_BACK = '[PINDIAG] tp4 conv gates spread fell back'
+SPREAD_AUDIT = '[PINDIAG] tp4 conv gates spread audit'
+SPREAD_MISMATCH = '[PINDIAG] tp4 conv gates spread audit mismatch'
+
+
+def spread_problems(env, container_text):
+    """[problem] for the F1 conv-gates launch: any mismatch or fall-back line; with the flag, the engaged line (gate_cores at least 1) and, with the
+    audit flag, a passing audit line (the marker, '<n> exact=True')."""
+    lines = container_text.splitlines()
+    problems = ['the conv-gates spread audit found a difference: %s' % line.strip()[:200] for line in lines if SPREAD_MISMATCH in line][:4]
+    problems += ['the conv-gates spread fell back (the served launch ran, it saved nothing): %s' % line.strip()[:200]
+                 for line in lines if SPREAD_FELL_BACK in line][:4]
+    if env is None or env.get(SPREAD_FLAG) != '1':
+        if any(SPREAD_ENGAGED in line or SPREAD_AUDIT in line for line in lines):
+            problems.append('conv-gates spread lines on a profile without %s' % SPREAD_FLAG)
+        return problems
+    engaged = [line for line in lines if SPREAD_ENGAGED in line]
+    if not engaged:
+        problems.append('%s is set and no engaged line (%s) was logged: the spread launch never ran' % (SPREAD_FLAG, SPREAD_ENGAGED))
+    elif not any(re.search(r' gate_cores=[1-9]\d*( |$)', line) for line in engaged):
+        problems.append('%s engaged lines report no gate core: %s' % (SPREAD_FLAG, engaged[0].strip()[:200]))
+    if env.get(SPREAD_AUDIT_FLAG) == '1' and not any(
+            SPREAD_AUDIT in line and 'exact=True' in line and SPREAD_MISMATCH not in line for line in lines):
+        problems.append('%s=1 is set and no passing audit line (%s <n> exact=True) was logged: nothing was compared' % (SPREAD_AUDIT_FLAG, SPREAD_AUDIT))
+    return problems
+
+
 def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=None):
     """(problems, facts) for a smoke log and a container log. `env` (the served profile's) adds the batched-draft
     stop conditions, `entry` (its whole record) the traffic profile's admission and parser conditions."""
@@ -1116,6 +1149,7 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     problems += u1_problems(env, container_text)
     problems += sdpa_long_problems(env, container_text)
     problems += sdpa_multi_problems(env, container_text)
+    problems += spread_problems(env, container_text)
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
     if env is not None and env.get('QWEN_FAST_TP', '2') != '2':

@@ -91,6 +91,9 @@ jobs:
           for name in sdpa_long_tp.py sdpa_multi_tp.py sdpa_multi_mask_tp.cpp sdpa_multi_gather_tp.cpp sdpa_multi_audit_tp.cpp; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
+          for name in gdn_conv_gates_spread.py gdn_conv_gates_spread_reader.cpp gdn_conv_gates_spread_writer.cpp; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
           for name in draft_wide_tp.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done

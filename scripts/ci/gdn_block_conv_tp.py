@@ -26,12 +26,16 @@ compare: conv, beta, g, z and every advanced window, every user, every chip, as 
 Stdlib only at import (ttnn-free until launch), py 3.7.
 """
 
+import os
+
 import gdn_rows_dma_tp as rows_dma
 import tp4_vglue
 import tp_shapes
 from tp_addresses import release_owned
 
 USER_ROWS = rows_dma.USER_ROWS
+SPREAD_FLAG = 'QWEN_FAST_TP4_CONV_GATES_SPREAD'            # gdn_conv_gates_spread.FLAG (a literal here so an unset flag imports nothing)
+SPREAD_AUDIT_FLAG = 'QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT'
 SLOTS = 4
 
 
@@ -112,7 +116,7 @@ def stage(mesh, projected, groups, packed_windows, taps, dt_bias, neg_exp_A, ope
     users, width = len(groups), projected.shape[-1]
     rows = users * USER_ROWS
     dram, dtype, layout = operations.DRAM_MEMORY_CONFIG, operations.bfloat16, operations.TILE_LAYOUT
-    owned, per_user, held, entries = [], [], [], []
+    owned, per_user, held, entries, spread_entries = [], [], [], [], []
 
     def make(shape):
         tensor = operations.empty(shape, dtype=dtype, layout=layout, device=mesh, memory_config=dram)
@@ -125,7 +129,19 @@ def stage(mesh, projected, groups, packed_windows, taps, dt_bias, neg_exp_A, ope
         block_windows = [make((1, rows, found.gdn_qkv)) for slot in range(SLOTS)]
         flat_windows = [window for user in packed_windows for window in user]
         rows_dma.launch(mesh, flat_windows, block_windows, plan_windows(users))
-        conv, beta, g = conv_gates(operations, canon, block_windows, taps, dt_bias, neg_exp_A, rows)
+        spread = None
+        if os.environ.get(SPREAD_FLAG, '0') != '0' or os.environ.get(SPREAD_AUDIT_FLAG, '0') != '0':
+            # QWEN_FAST_TP4_CONV_GATES_SPREAD (F1, gdn_conv_gates_spread): the same launch with the gate tiles on cores of their own; None
+            # (one logged line) when it cannot take the call, and then this is the served call below. Unset, none of this runs.
+            import gdn_conv_gates_spread
+
+            if gdn_conv_gates_spread.enabled():
+                spread = gdn_conv_gates_spread.launch(operations, mesh, canon, block_windows, taps, dt_bias, neg_exp_A, rows,
+                                                      found.gdn_qkv, found.gdn_a_col, found.gdn_b_col, held, spread_entries)
+        if spread is None:
+            conv, beta, g = conv_gates(operations, canon, block_windows, taps, dt_bias, neg_exp_A, rows)
+        else:
+            conv, beta, g = spread
         owned.extend([conv, beta, g])
         conv_users = [make((1, USER_ROWS, found.gdn_qkv)) for user in range(users)]
         beta_users = [make((1, USER_ROWS, found.gdn_nv)) for user in range(users)]
@@ -136,6 +152,10 @@ def stage(mesh, projected, groups, packed_windows, taps, dt_bias, neg_exp_A, ope
         if tp4_vglue.audit_enabled():
             entries = hold_served(mesh, groups, packed_windows, conv_users, beta_users, g_users, z_users, taps, dt_bias,
                                   neg_exp_A, operations, held)
+            if spread_entries:
+                # F1's seven entries (block conv, beta, g and the four advanced block windows against the served op's on clones) ride
+                # the first user's list: the layer's retained record frees them with the rest.
+                entries[0].extend(spread_entries)
     except rows_dma.Unsupported as error:
         release_owned(operations, owned + held)
         return refuse(str(error))
