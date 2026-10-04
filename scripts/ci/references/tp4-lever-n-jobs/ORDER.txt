@@ -23,11 +23,11 @@
 #          between the arms (levern_compare.py). Expectation (design 6, an estimate): the seats keep decoding through the arrival (their window rate is the share's cut of the round rate, zero on the control) and the arrival's TTFT rises 37% to 105%
 #          with long decoders. S5 (R=1) is the static arm.   Z  the reset completes; the agent stays stopped.
 # NO-GO for adopting any arm: any stall, any hash or digest difference between arms that must be identical, any route-ledger violation. This window decides nothing about production.
-# Time (estimate): X0 and B0 about 80 min, A0c and A1 4 h, H1-H3 4.5 h, F1 1 h, S 7.5 h, F2 40 min, Z 10 min: about 19 h.
+# Time (estimate): X0 and B0 about 80 min, A0c and A1 5 h (a KV digest reads the whole pool to the host, about a minute, for each of the twelve prompts of at most 32,785 tokens; longer prompts skip it), H1-H3 4.5 h, F1 1 h, S 7.5 h, F2 40 min, Z 10 min: about 20 h.
 X0-status-rescan-reset stop tp4-lever-n-1 20
 B0-build stop tp4-lever-n-1 60
-A0c-control-audit-attach stop tp4-lever-n-1 120
-A1-levern-audited-attach stop tp4-lever-n-1 120
+A0c-control-audit-attach stop tp4-lever-n-1 150
+A1-levern-audited-attach stop tp4-lever-n-1 150
 H1-hang-shapes-levern stop tp4-lever-n-1 90
 H2-hang-shapes-levern stop tp4-lever-n-1 90
 H3-hang-shapes-levern stop tp4-lever-n-1 90

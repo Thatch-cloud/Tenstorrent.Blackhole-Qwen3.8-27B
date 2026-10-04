@@ -29,15 +29,17 @@ TIMED_BASE, AUDIT_BASE = 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8
 TIMED, R1, AUDIT, CONTROL = ('c2-packed-tp4-8x262k-best-levern-time-gate', 'c2-packed-tp4-8x262k-best-levern-r1-time-gate',
                              'c2-packed-tp4-8x262k-best-levern-audit', 'c2-packed-tp4-8x262k-best-levern-control-audit')
 HOLD, FOREIGN = 'c2-packed-tp4-8x262k-best-levern-final-hold-time-gate', 'c2-packed-tp4-8x262k-best-levern-foreign-time-gate'
-NEW = (AUDIT, CONTROL, HOLD, FOREIGN, R1, TIMED)
-BASE = {TIMED: TIMED_BASE, R1: TIMED_BASE, AUDIT: AUDIT_BASE, CONTROL: AUDIT_BASE, HOLD: TIMED_BASE, FOREIGN: TIMED_BASE}
+HANG = 'c2-packed-tp4-8x262k-best-levern-hang-gate'
+NEW = (AUDIT, CONTROL, HOLD, FOREIGN, HANG, R1, TIMED)
+BASE = {TIMED: TIMED_BASE, R1: TIMED_BASE, AUDIT: AUDIT_BASE, CONTROL: AUDIT_BASE, HOLD: TIMED_BASE, FOREIGN: TIMED_BASE, HANG: TIMED_BASE}
 STEPS = {'QWEN_FAST_LEVER_N': '1', 'QWEN_FAST_LEVERN_STEP_TOKENS': '2048', 'QWEN_FAST_LEVERN_SOLO_STEP_TOKENS': '16384'}
 EXTRA_ENV = {TIMED: dict(STEPS, QWEN_FAST_LEVERN_PREFILL_SHARE='0.5'),
              R1: dict(STEPS, QWEN_FAST_LEVERN_ROUNDS='1'),
              AUDIT: dict(STEPS, QWEN_FAST_LEVERN_PREFILL_SHARE='0.5', QWEN_FAST_LEVERN_AUDIT='1'),
              CONTROL: {'QWEN_FAST_LEVERN_AUDIT': '1'},
              HOLD: dict(STEPS, QWEN_FAST_LEVERN_PREFILL_SHARE='0.5', QWEN_FAST_LEVERN_FAULT='final-hold'),
-             FOREIGN: dict(STEPS, QWEN_FAST_LEVERN_PREFILL_SHARE='0.5', QWEN_FAST_LEVERN_FAULT='foreign')}
+             FOREIGN: dict(STEPS, QWEN_FAST_LEVERN_PREFILL_SHARE='0.5', QWEN_FAST_LEVERN_FAULT='foreign'),
+             HANG: dict(STEPS, QWEN_FAST_LEVERN_PREFILL_SHARE='0.5', QWEN_FAST_STALL_DEADLINE_S='120', QWEN_FAST_CCL_HANDLE_GUARD='log')}
 
 
 def profiles():
@@ -79,12 +81,12 @@ class ProfileTests(unittest.TestCase):
                 self.assertIs(profile['gate_only'], True)
                 self.assertEqual(profile['env']['QWEN_FAST_262K_EVIDENCE_WAIVER'], '1')
                 self.assertIn('UNQUALIFIED', profile['description'])
-                self.assertIn(BASE[name] if name not in (HOLD, FOREIGN) else TIMED, profile['description'])
+                self.assertIn(BASE[name] if name not in (HOLD, FOREIGN, HANG) else TIMED, profile['description'])
         self.assertEqual(json.loads(PROFILES.read_text(encoding='utf-8'))['default'], 'c2-packed-tp4')
 
     def test_the_chunked_arms_keep_the_budget_equal_to_the_window_so_only_the_cap_splits(self):
         found = profiles()
-        for name in (TIMED, R1, AUDIT, HOLD, FOREIGN):
+        for name in (TIMED, R1, AUDIT, HOLD, FOREIGN, HANG):
             engine = found[name]['engine']
             self.assertIs(engine['enable-chunked-prefill'], True)
             self.assertNotIn('no-enable-chunked-prefill', engine)
@@ -99,7 +101,7 @@ class ProfileTests(unittest.TestCase):
         found = profiles()
         self.assertNotIn('QWEN_FAST_LEVER_N', found[CONTROL]['env'])
         self.assertEqual(found[CONTROL]['env']['QWEN_FAST_LEVERN_AUDIT'], '1')
-        for name in (TIMED, R1, AUDIT, HOLD, FOREIGN):
+        for name in (TIMED, R1, AUDIT, HOLD, FOREIGN, HANG):
             self.assertEqual(found[name]['env']['QWEN_FAST_LEVER_N'], '1')
             self.assertEqual(found[name]['env']['QWEN_FAST_KV_RESERVATION'], '1')
         self.assertNotIn('QWEN_FAST_LEVERN_AUDIT', found[TIMED]['env'], 'a timed arm carries no audit')
@@ -133,7 +135,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(levern_policy.config(found[R1]['env']).rounds, 1)
 
     def test_the_argv_of_the_chunked_arms_enables_chunked_prefill(self):
-        for name in (TIMED, AUDIT, HOLD, FOREIGN):
+        for name in (TIMED, AUDIT, HOLD, FOREIGN, HANG):
             args = contract.engine_arguments(dict(profiles()[name], name=name), '/snapshot')
             self.assertIn('--enable-chunked-prefill', args)
             self.assertNotIn('--no-enable-chunked-prefill', args)
@@ -300,6 +302,25 @@ class HookTests(unittest.TestCase):
         calls = []
         contract.install_levern_platform(on_import=lambda name, callback: calls.append((name, callback)))
         self.assertEqual(calls, [('vllm_tt_plugin.platform', levern_platform.install)])
+
+    def test_a_platform_module_that_is_already_imported_is_wrapped_at_once(self):
+        import types
+
+        module = types.ModuleType(contract.LEVERN_PLATFORM_MODULE)
+        module._apply_chunked_prefill_policy = lambda config: None
+        with mock.patch.dict(sys.modules, {contract.LEVERN_PLATFORM_MODULE: module}), mock.patch.object(sys, 'meta_path', list(sys.meta_path)):
+            hooks = len(sys.meta_path)
+            self.assertTrue(contract.install_levern_platform())
+            self.assertEqual(len(sys.meta_path), hooks, 'no post-import hook is left waiting for an import that already happened')
+        self.assertTrue(getattr(module._apply_chunked_prefill_policy, levern_platform.WRAPPED, False))
+
+    def test_a_platform_module_not_yet_imported_gets_the_post_import_hook(self):
+        with mock.patch.dict(sys.modules), mock.patch.object(sys, 'meta_path', list(sys.meta_path)):
+            sys.modules.pop(contract.LEVERN_PLATFORM_MODULE, None)
+            hooks = len(sys.meta_path)
+            contract.install_levern_platform()
+            self.assertEqual(len(sys.meta_path), hooks + 1)
+            self.assertEqual(sys.meta_path[0].name, contract.LEVERN_PLATFORM_MODULE)
 
 
 if __name__ == '__main__':

@@ -63,7 +63,7 @@
    - The worst decoder gap during a cold 254k prefill falls from about 94 s to about 1.1 s inside the prompt. The final step, which merges the last chunk, the tail and the engine build, is about 4 s once.
    - Arrival TTFT depends on the decoders' outputs:
      - with long decoders (the `stall8_cold262k` shape), it rises 37% (one round per chunk) to 105% (prefill share 0.5);
-     - with agent-sized decoders (p50 176 tokens left), it rises only about 16% (94 to 108 s) at any share. The decoders finish their turns in 15-32 s instead of 103 s.
+     - with decoders that have only a short answer left (a few hundred tokens), it rises only about 16% (94 to 108 s) at any share. The decoders finish their turns in 15-32 s instead of 103 s.
    - Lever N is a latency and fairness lever, not a throughput lever.
 5. **It does not fix the burst staircase, or the cost of re-prefilling the whole context every turn.**
    - Eight agent seats re-prefilling about 65k per turn need about 18 s of device time per turn each (cm). That saturates the device with prefill.
@@ -297,7 +297,7 @@ on schedule():
 
 Without this, a quad or pair capture taken between chunks could leave a fully prefilled 254k prompt to be refused by the backstop after about 92 s of work.
 
-**Which f.** For decoders with short remaining work (agent turns, p50 76-176 tokens), the arrival's TTFT is the same at any f < 1. The decode rounds get spent either way, so f only decides how soon the decoders finish (section 6). With long decoders, f trades directly. Plan:
+**Which f.** For decoders with short remaining work (a coding agent's tool-call turns, a few hundred tokens or fewer), the arrival's TTFT is the same at any f < 1. The decode rounds get spent either way, so f only decides how soon the decoders finish (section 6). With long decoders, f trades directly. Plan:
 - start at 0.5;
 - sweep 0.33 / 0.5 / R=1 on `agent8_turns` (section 5, G-N5);
 - pick the share that minimizes p90 turn latency, with arrival TTFT at most 1.5x the flag-off arm.
@@ -509,7 +509,7 @@ The tests run in one window on one image. Paired ABAB for any timing claim, judg
 | **G-N2 `levern_hang`** (x3 consecutive, H1-H3 style) | levern-audit, `CCL_HANDLE_GUARD=1`, stall watch | (a) a decoder finishes mid-prefill (slot move); (b) every decoder finishes mid-prefill (the hook closes, the final step rebuilds it); (c) the prefilling client cancels at chunk 5; (d) an arrival during an in-flight prefill (queued, then admitted); (e) EOS at the seed after 17 chunks; (f) max_tokens=1 chunked; (g) `FAULT=final-hold`; (h) `FAULT=foreign` (must refuse; a separate container) | every stream completes; texts equal solo; 0 owner refusals except (h), where the refusal must fire; the abort frees gate, owner and reservation (the next arrival exact); no stall-watch or replay-deadline exit; no handle-guard refusal |
 | **G-N3 `stall8_cold262k`** (exists: `c2_serving_smoke.py:560`) | ABAB: A best-time-gate, B levern-time-gate (f = 0.5); plus one C arm with `LEVERN_ROUNDS=1` | 7 seats decode 4k (ignore_eos, 6,000 budget); after 12 chunks each, a cold 253,920 arrives | recorded: arrival TTFT; each seat's longest gap after arrival; each seat's tok/s inside the arrival window (**new field**, from the delta stamps); chunk ms from the route lines; transition overhead (B's prefill wall minus the sum of route ms); A gives the never-measured cold baseline (M9a and H4 never ran) |
 | **G-N4** existing shapes | the same ABAB | concurrent8_code_32k, concurrent8_code_128k | the TTFT staircase, live4_min, decode_agg, wall_tok_s; expected: min seat rate up, TTFT max up |
-| **G-N5 `agent8_turns`** (new; chooses f) | B with f in {0.33, 0.5}, R=1, and A | 8 seats replay tau-lab agent tapes (thinking on, coding): 5 turns per seat with growing context 16-140k, outputs from the tapes (p50 76-176), tool gaps 2-8 s. Without prefix reuse each turn re-prefills. | turn latency p50/p90, TTFT p50/p90, per-seat client tok/s from the first token, device busy share; choose f |
+| **G-N5 `agent8_turns`** (new; chooses f) | B with f in {0.33, 0.5}, R=1, and A | 8 seats replay recorded coding-agent tapes (thinking on): 5 turns per seat with growing context 16-140k, short outputs taken from the tapes, tool gaps 2-8 s. Without prefix reuse each turn re-prefills. | turn latency p50/p90, TTFT p50/p90, per-seat client tok/s from the first token, device busy share; choose f |
 | **G-N6** churn | levern-time-gate | churn16 (C9 lengths) | zero aborts, refusals or engine deaths; reserved + running ≤ pool on every line; no DRAM hold with a seat free; no backstop refusal after a long prefill |
 | **v2 later** | +PARK | G-N1 (ii) with a 4k arrival preempting a 131k prefill; `burst8_mixed` (8 arrivals together, 4k-128k mixed) | park/restore digests equal; the short arrival's TTFT ≤ its solo TTFT + 1.5 s |
 

@@ -85,10 +85,18 @@ INSTALLED_LINE = '[PINDIAG] lever N installed on {}: step={} solo={} share={} ro
 PLATFORM_LINE = '[PINDIAG] lever N: chunked prefill kept for qwen3_5 (budget={} threshold={})'
 STEP_LINE = ('[PINDIAG] lever N step n={} kind={} seats={} req={} start={} tokens={} end={} prompt={} final={} reason={} '
              'prev={}:{}ms owed_ms={} owed_rounds={}')
-ROUTE_LINE = ('[PINDIAG] lever N route req={} start={} end={} prompt={} final={} wrote_slot={} ms={:.1f} programs={}->{}')
+# wrote_slot is MEASURED (the number of _write_gdn_slot calls the step made, not a function of the step's position) and window is the
+# program-cache entries the drafter-window snapshot compiled inside the step (dflash_prefill_window.window_programs): they cannot be warmed
+# (keyed on the prompt's geometry), and the four-card tripwire excludes them the same way (B-A-W).
+ROUTE_LINE = ('[PINDIAG] lever N route req={} start={} end={} prompt={} final={} wrote_slot={} ms={:.1f} programs={}->{} window={}')
 ROUTE_INSTALLED_LINE = '[PINDIAG] lever N route installed: {}'
 ROUTE_WARM_LINE = '[PINDIAG] lever N route warmed before the packed traces: steps={} programs={}->{} ms={:.0f}'
-DIGEST_LINE = '[PINDIAG] lever N digest req={} prompt={} slot_sha={} logits_sha={} kv_sha={}'
+# tokens_sha keys a digest to its prompt (two prompts of one length admitted in a different order across arms must not be compared
+# with each other). kv_sha is KV_SKIPPED for a prompt longer than KV_DIGEST_MAX_PROMPT: the digest reads every cache tensor of the whole
+# pool to the host (about a minute or more), so only the single-user rows of levern_equal (the longest is 32,785 tokens) take it.
+DIGEST_LINE = '[PINDIAG] lever N digest req={} prompt={} tokens_sha={} slot_sha={} logits_sha={} kv_sha={}'
+KV_DIGEST_MAX_PROMPT = 32785
+KV_SKIPPED = '0' * 32
 FINAL_HOLD_LINE = '[PINDIAG] lever N final-step dram hold req={} prompt={} decodes={} short={}'
 REFUSED_LINE = '[PINDIAG] lever N REFUSED {}'
 

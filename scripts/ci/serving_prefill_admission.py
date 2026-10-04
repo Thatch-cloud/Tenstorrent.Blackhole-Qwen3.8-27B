@@ -791,9 +791,11 @@ def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None, lever
         saved_skipped = getattr(self, 'skipped_waiting', None)
         # LEVER N (QWEN_FAST_LEVER_N=1): this step advances one request, the partial in flight or the one fresh prompt the
         # waiting loop admits, by at most its step budget (a multiple of 2,048 ending before the final step, levern_policy).
-        restore_cap = None
+        restore_cap = capped = None
         if levern is not None:
-            restore_cap = levern.plan_cap(self, partials, allowed, hide, decodes)[0]
+            restore_cap, target, _fresh, budget = levern.plan_cap(self, partials, allowed, hide, decodes)
+            if restore_cap is not None:
+                capped = (target, levern.computed)
         # The plugin writes max(0, value - len(pure_decodes)) before calling the base scheduler, so
         # the value written here carries the decodes it is about to remove.
         self.max_num_running_reqs = min(saved_max, allowed + decodes)
@@ -817,6 +819,9 @@ def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None, lever
                     self.skipped_waiting = saved_skipped
                 self.waiting = saved_waiting
             self.max_num_running_reqs = saved_max
+        if capped is not None and not (dram_held or kv_held or credit_held):
+            # The pass is about to run: it must be the one the cap was computed for (levern_scheduler.verify), or the engine stops here.
+            levern.verify(result, capped)
         if dram_held:
             # S2 W6b: the pass the plugin is about to discard took the finished ids; its decode-only pass carries them.
             carry_finished(self, result, decodes, log)

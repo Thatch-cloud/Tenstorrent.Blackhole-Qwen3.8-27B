@@ -639,5 +639,61 @@ class InstallTests(GateFreeCase):
         self.assertFalse(hasattr(cls._schedule_prefill_only, admission.WRAPPED))
 
 
+class VerifyTests(GateFreeCase):
+    """The pass the cap shaped is checked before it runs: it must be the request the budget was computed for and end on the model's boundary."""
+
+    def rig(self, *waiting):
+        cls, runtime, log = install_levern({'QWEN_FAST_LEVER_N': '1'})
+        scheduler = new_scheduler(cls)
+        scheduler.add_decoder('d0')
+        for request in waiting:
+            scheduler.add_request(request)
+        return scheduler, runtime, log
+
+    def refused(self, log):
+        return [call.args for call in log.call_args_list if call.args and call.args[0] == levern_policy.REFUSED_LINE]
+
+    def test_a_clean_pass_is_left_alone(self):
+        scheduler, runtime, log = self.rig(Request('cold', 10000))
+        self.assertEqual(scheduler.schedule().num_scheduled_tokens, {'cold': CHUNK})
+        self.assertEqual(self.refused(log), [])
+
+    def test_a_pass_that_admits_another_request_than_the_capped_one_fails_closed(self):
+        scheduler, runtime, log = self.rig(Request('cold', 60000))
+        decoy = Request('decoy', 60000)
+        with patch.object(runtime, 'target', return_value=(decoy, True)):
+            with self.assertRaises(ValueError) as caught:
+                scheduler.schedule()
+        self.assertIn("cap was computed for 'decoy' and the pass admitted 'cold'", str(caught.exception))
+        self.assertTrue(self.refused(log))
+        self.assertEqual(scheduler.max_num_scheduled_tokens, 262144, 'the token budget is put back even then')
+
+    def test_a_misaligned_non_final_end_fails_closed(self):
+        scheduler, runtime, log = self.rig(Request('cold', 60000))
+        with patch.object(runtime, 'budget', return_value=3000):
+            with self.assertRaises(ValueError) as caught:
+                scheduler.schedule()
+        self.assertIn('would end a non-final step at 3000 of 60000', str(caught.exception))
+
+    def test_a_prompt_under_4096_tokens_is_never_split(self):
+        scheduler, runtime, log = self.rig(Request('short', 3000))
+        with patch.object(runtime, 'budget', return_value=CHUNK):
+            with self.assertRaises(ValueError):
+                scheduler.schedule()
+        scheduler, runtime, log = self.rig(Request('short', 3000))
+        self.assertEqual(scheduler.schedule().num_scheduled_tokens, {'short': 3000})
+
+    def test_a_partial_continuing_on_the_boundary_passes_to_its_final_step(self):
+        scheduler, runtime, log = self.rig(Request('cold', 5000))
+        ends = []
+        while scheduler.waiting or any(r.is_prefill_chunk for r in scheduler.running):
+            result = scheduler.schedule()
+            ends.append(result.num_scheduled_tokens.get('cold'))
+            if len(ends) > 6:
+                break
+        self.assertEqual(self.refused(log), [])
+        self.assertEqual(sum(value for value in ends if value and value > 1), 5000)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -77,6 +77,8 @@ import statistics
 import sys
 from pathlib import Path
 
+import levern_policy
+
 SOLO_TEST = 'concurrent4_solo'
 REPLAY_TEST = 'replay_concurrent4'
 # The eight-seat tests (tp4/seats8: QWEN_FAST_M3_BLOCKS=2), judged as the four-user ones are: every user a stream that ends in tokens,
@@ -809,26 +811,29 @@ LEVERN_ROUTE_INSTALLED = '[PINDIAG] lever N route installed: route=1'
 LEVERN_WARMED = '[PINDIAG] lever N route warmed before the packed traces: steps=%d' % LEVERN_WARM_STEPS
 LEVERN_REFUSED = '[PINDIAG] lever N REFUSED'
 LEVERN_ROUTE = re.compile(r'\[PINDIAG\] lever N route req=(\S+) start=(\d+) end=(\d+) prompt=(\d+) final=([01]) wrote_slot=([01]) '
-                          r'ms=([0-9.]+) programs=(\d+|None)->(\d+|None)')
+                          r'ms=([0-9.]+) programs=(\d+|None)->(\d+|None) window=(\d+)')
 LEVERN_STEP = re.compile(r'\[PINDIAG\] lever N step n=(\d+) kind=(prefill|decode) seats=(\d+) req=(\S+) start=(\S+) tokens=(\d+) '
                          r'end=(\S+) prompt=(\S+) final=(\S+) reason=(\S+) prev=(\S+):(\S+)ms owed_ms=(\S+) owed_rounds=(\d+)')
-LEVERN_DIGEST = re.compile(r'\[PINDIAG\] lever N digest req=(\S+) prompt=(\d+) slot_sha=([0-9a-f]{32}) logits_sha=([0-9a-f]{32}) '
-                           r'kv_sha=([0-9a-f]{32})')
+LEVERN_DIGEST = re.compile(r'\[PINDIAG\] lever N digest req=(\S+) prompt=(\d+) tokens_sha=([0-9a-f]{32}) slot_sha=([0-9a-f]{32}) '
+                           r'logits_sha=([0-9a-f]{32}) kv_sha=([0-9a-f]{32})')
 
 
 def levern_facts(container_text):
     """The Lever N lines of a container log, parsed in order: route steps, scheduler steps and digests."""
     routes = [dict(req=m.group(1), start=int(m.group(2)), end=int(m.group(3)), prompt=int(m.group(4)), final=m.group(5) == '1',
-                   wrote=m.group(6) == '1', programs=(m.group(8), m.group(9))) for m in LEVERN_ROUTE.finditer(container_text)]
+                   wrote=m.group(6) == '1', programs=(m.group(8), m.group(9)), window=int(m.group(10))) for m in LEVERN_ROUTE.finditer(container_text)]
     steps = [dict(n=int(m.group(1)), kind=m.group(2), seats=int(m.group(3)), req=m.group(4), start=m.group(5), tokens=int(m.group(6)),
                   end=m.group(7), prompt=m.group(8), final=m.group(9), reason=m.group(10)) for m in LEVERN_STEP.finditer(container_text)]
-    digests = [dict(req=m.group(1), prompt=int(m.group(2)), slot=m.group(3), logits=m.group(4), kv=m.group(5))
+    digests = [dict(req=m.group(1), prompt=int(m.group(2)), tokens=m.group(3), slot=m.group(4), logits=m.group(5), kv=m.group(6))
                for m in LEVERN_DIGEST.finditer(container_text)]
     return dict(routes=routes, steps=steps, digests=digests)
 
 
 def levern_route_problems(routes):
-    """The ledger of every split prompt: continuity, alignment, one final step, the slot written only by it, no program compiled by a step."""
+    """The ledger of every split prompt: continuity, alignment, one final step, the slot written only by it (wrote_slot is the measured count of
+    slot writes), and no program compiled by a step beyond the drafter-window snapshot's own (after - before - window > 0, the four-card
+    tripwire's B-A-W rule: the window's programs are keyed on the prompt's geometry and cannot be warmed). The warm requests are exempt from the
+    program rule: they run before any trace is captured."""
     problems, by_request = [], {}
     for row in routes:
         by_request.setdefault(row['req'], []).append(row)
@@ -848,8 +853,9 @@ def levern_route_problems(routes):
             if row['final'] and not last:
                 problems.append('%s: a step follows its final step' % label)
             before, after = row['programs']
-            if before != 'None' and after != 'None' and int(after) > int(before):
-                problems.append('%s: step %d compiled %d program(s) after the traces (the #48536 hang class)' % (label, index + 1, int(after) - int(before)))
+            if request != LEVERN_WARM_REQUEST and before != 'None' and after != 'None' and int(after) - int(before) - row['window'] > 0:
+                problems.append('%s: step %d compiled %d program(s) beyond its %d window program(s) after the traces (the #48536 hang class)'
+                                % (label, index + 1, int(after) - int(before) - row['window'], row['window']))
             cursor = row['end']
         if not rows[-1]['final'] and request != LEVERN_WARM_REQUEST:
             # an unfinished prompt is an aborted one (the cancel shape): legal, but nothing may follow it under this request
@@ -874,6 +880,61 @@ def levern_alternation_problems(steps, env):
                             % (step['req'], last_prefill['n'], step['n'], last_prefill['seats']))
         last_prefill, decoded = step, False
     return problems
+
+
+LEVERN_SPLIT_FLOOR = 4096
+
+
+def levern_exercise_problems(env, results, facts):
+    """NOT_EXERCISED is not a pass. A levern_equal, levern_equal_long or levern_equal_busy row of at least 4,096 tokens must have been SPLIT:
+    some request of that prompt length has route lines whose (start, end) sequence equals levern_policy.plan(P, decoding=...) (decoding False
+    for the single-user rows, True for the busy ones), and levern_equal_busy must show a decode step that served a seat between two prefill
+    steps of one of its prompts. A scheduler that never capped, or a route never reached, leaves no lines and used to read clean, and then the
+    A1 comparison against the whole-prompt control compared two whole prompts."""
+    try:
+        cfg = levern_policy.config(env)
+    except ValueError as failure:
+        return ['the Lever N flags do not parse, so the expected split cannot be computed: %s' % failure]
+    problems = []
+    by_request = {}
+    for row in facts['routes']:
+        if row['req'] != LEVERN_WARM_REQUEST:
+            by_request.setdefault(row['req'], []).append(row)
+    share_one = str(env.get('QWEN_FAST_LEVERN_PREFILL_SHARE', '')) in ('1', '1.0') and not env.get('QWEN_FAST_LEVERN_ROUNDS')
+    for name in LEVERN_ROW_TESTS:
+        entry = results.get(name)
+        if not isinstance(entry, dict) or 'error' in entry:
+            continue
+        busy = name == 'levern_equal_busy'
+        for length in sorted(entry.get('prompts') or {}, key=int):
+            prompt = int(length)
+            if prompt < LEVERN_SPLIT_FLOOR:
+                continue
+            expected = [list(pair) for pair in levern_policy.plan(prompt, decoding=busy, step=cfg.step, solo=cfg.solo)]
+            sequences = [[[row['start'], row['end']] for row in rows] for rows in by_request.values()
+                         if rows and rows[0]['prompt'] == prompt]
+            if expected not in sequences:
+                problems.append('%s: the prompt of %d tokens was not split as the plan says (decoding=%s: %d steps, last %s); %d request(s) of that '
+                                'length logged route lines of %s step(s): the lever never split it (NOT_EXERCISED)'
+                                % (name, prompt, busy, len(expected), expected[-1], len(sequences),
+                                   [len(sequence) for sequence in sequences] or 'none'))
+        if busy and not share_one:
+            lengths = {int(length) for length in entry.get('prompts') or {} if int(length) >= LEVERN_SPLIT_FLOOR}
+            if lengths and not levern_interleaved(facts['steps'], lengths):
+                problems.append('%s: no decode step that served a seat lay between two prefill steps of one prompt of %s tokens: nothing was interleaved'
+                                % (name, sorted(lengths)))
+    return problems
+
+
+def levern_interleaved(steps, lengths):
+    """Whether, for some prompt whose length is in `lengths`, a decode step with seats >= 1 lies between two prefill steps of one request."""
+    requests = {step['req'] for step in steps if step['kind'] == 'prefill' and step['prompt'].isdigit() and int(step['prompt']) in lengths}
+    for request in requests:
+        index = [i for i, step in enumerate(steps) if step['kind'] == 'prefill' and step['req'] == request]
+        for first, second in zip(index, index[1:]):
+            if any(step['kind'] == 'decode' and step['seats'] >= 1 for step in steps[first + 1:second]):
+                return True
+    return False
 
 
 def levern_problems(env, container_text, smoke):
@@ -904,6 +965,7 @@ def levern_problems(env, container_text, smoke):
         served = [row for row in facts['routes'] if row['req'] != LEVERN_WARM_REQUEST]
         facts['split_prompts'] = len({row['req'] for row in served})
         facts['route_steps'] = len(served)
+        problems += levern_exercise_problems(env, results, facts)
         if served:
             if not facts['steps']:
                 problems.append('prompts were split (%d route lines) and no "lever N step" line was logged: the scheduler\'s alternation never ran'

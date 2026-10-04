@@ -472,6 +472,11 @@ def install_levern_platform(on_import=None, environ=None):
 
     if on_import is None:
         def on_import(name, callback):
+            loaded = sys.modules.get(name)
+            if loaded is not None:
+                # Already imported (an earlier hook or the launcher pulled the platform in): a post-import hook would never fire.
+                callback(loaded)
+                return
             sys.meta_path.insert(0, PostImportHook(name, callback))
     on_import(LEVERN_PLATFORM_MODULE, levern_platform.install)
     return True

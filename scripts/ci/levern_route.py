@@ -145,6 +145,49 @@ def _uint8():
     return torch.uint8
 
 
+def tokens_sha(tokens, total):
+    """sha256 (32 hex) of the first `total` token ids of row 0 as int32: the prompt's identity in a digest line."""
+    import torch
+
+    return hashlib.sha256(_bytes(tokens[0:1, :total].to(torch.int32))).hexdigest()[:32]
+
+
+def window_programs():
+    """The drafter-window snapshots' program count so far (0 when the counter is not installed or the module is absent)."""
+    try:
+        import dflash_prefill_window
+
+        return int(dflash_prefill_window.window_programs())
+    except Exception:
+        return 0
+
+
+class _SlotWrites(object):
+    """Counts the real _write_gdn_slot calls the model makes while it is entered (an instance attribute shadowing the method)."""
+
+    def __init__(self, model):
+        self.model, self.count = model, 0
+
+    def __enter__(self):
+        model = self.model
+        self.had = '_write_gdn_slot' in vars(model)
+        self.saved = vars(model).get('_write_gdn_slot')
+        method = model._write_gdn_slot
+
+        def counted(*args, **kwargs):
+            self.count += 1
+            return method(*args, **kwargs)
+        vars(model)['_write_gdn_slot'] = counted
+        return self
+
+    def __exit__(self, *exc):
+        if self.had:
+            vars(self.model)['_write_gdn_slot'] = self.saved
+        else:
+            vars(self.model).pop('_write_gdn_slot', None)
+        return False
+
+
 def digests(rec_snap, conv_snap, logits):
     """(slot_sha, logits_sha): 32 hex digits each, over every GDN layer's recurrent state then its conv states, and over the logits."""
     gdn = hashlib.sha256()
@@ -196,13 +239,15 @@ def _read_scratch(ttnn, comp, layers):
             [[ttnn.to_torch(conv, mesh_composer=comp) for conv in dn.conv_states] for dn in layers])
 
 
-def audit_prefill(model, step, logits, page_row, rec_snap=None, conv_snap=None, log=_log):
+def audit_prefill(model, step, logits, page_row, rec_snap=None, conv_snap=None, log=_log, tokens=None):
     """Log the digests of a finished prefill (levern_policy.DIGEST_LINE); `rec_snap`/`conv_snap` are the scratch's host copies when the
     caller already holds them (the final step), else the scratch is read here (the whole-prompt path)."""
     if rec_snap is None:
         rec_snap, conv_snap = scratch_snapshot(model)
     slot_sha, logits_sha = digests(rec_snap, conv_snap, logits)
-    log(levern_policy.DIGEST_LINE, step.req_id, step.total, slot_sha, logits_sha, kv_digest(model, page_row, step.total))
+    kv = kv_digest(model, page_row, step.total) if step.total <= levern_policy.KV_DIGEST_MAX_PROMPT else levern_policy.KV_SKIPPED
+    log(levern_policy.DIGEST_LINE, step.req_id, step.total, tokens_sha(tokens, step.total) if tokens is not None else levern_policy.KV_SKIPPED,
+        slot_sha, logits_sha, kv)
 
 
 class Handle(object):
@@ -277,7 +322,7 @@ def install(runner, model, *, environ=None, log=_log):
         if whole(step):
             result = original(*args, **kwargs)
             if audit_on:
-                audit_prefill(model, step, result[0], _page_row(_named(args, kwargs)), log=log)
+                audit_prefill(model, step, result[0], _page_row(_named(args, kwargs)), log=log, tokens=_named(args, kwargs).get('tokens'))
             return result
         if not route_on:
             raise AssertionError('Lever N: a step of a split prompt reached a process without %s=1: %r' % (levern_policy.FLAG, step))
@@ -375,33 +420,36 @@ def route(model, token_ids_list, page_table, empty_slots, starts, ends, valid_le
     page = page_table if isinstance(page_table, torch.Tensor) else ttnn.to_torch(page_table)
     comp = ttnn.ConcatMeshToTensor(model.mesh_device, dim=0)
     layers = [layer.attention for layer in model.layers if not layer.is_full_attention]
-    began, programs_before = time.perf_counter(), program_count(model)
+    began, programs_before, window_before = time.perf_counter(), program_count(model), window_programs()
+    writes = _SlotWrites(model)
     # A start-0 step takes a new owner at once, a continuation keeps its own; an error below leaves nobody owning a half-advanced scratch.
     vars(model)[OWNER_ATTR] = (step.req_id, start)
     previous = model._bind_gdn_prefill_scratch()
     rec_snap = conv_snap = None
-    try:
-        lg = model.prefill_traced_chunked(tokens[:, :end], page[0:1], actual_len=end, start=start)
-        host = (ttnn.to_torch(lg, mesh_composer=comp).reshape(-1, model.args.vocab_size)[:1].float().view(1, 1, -1))
-        ttnn.deallocate(lg)
+    with writes:
+        try:
+            lg = model.prefill_traced_chunked(tokens[:, :end], page[0:1], actual_len=end, start=start)
+            host = (ttnn.to_torch(lg, mesh_composer=comp).reshape(-1, model.args.vocab_size)[:1].float().view(1, 1, -1))
+            ttnn.deallocate(lg)
+            if final(step):
+                rec_snap, conv_snap = _read_scratch(ttnn, comp, layers)
+        except BaseException:
+            vars(model).pop(OWNER_ATTR, None)
+            raise
+        finally:
+            model._unbind_gdn_prefill_scratch(previous)
+        # The window is read before the slot write so a program that write compiled is not forgiven as the window's.
+        window = window_programs() - window_before
         if final(step):
-            rec_snap, conv_snap = _read_scratch(ttnn, comp, layers)
-    except BaseException:
-        vars(model).pop(OWNER_ATTR, None)
-        raise
-    finally:
-        model._unbind_gdn_prefill_scratch(previous)
-    if final(step):
-        model._write_gdn_slot(int(empty_slots[0]), rec_snap, conv_snap)
-        vars(model).pop(OWNER_ATTR, None)
-        vars(model)[WROTE_ATTR] = True
-    else:
-        vars(model)[OWNER_ATTR] = (step.req_id, end)
-        vars(model)[WROTE_ATTR] = False
-    log(levern_policy.ROUTE_LINE, step.req_id, start, end, step.total, int(final(step)), int(final(step)),
-        (time.perf_counter() - began) * 1000.0, programs_before, program_count(model))
+            model._write_gdn_slot(int(empty_slots[0]), rec_snap, conv_snap)
+            vars(model).pop(OWNER_ATTR, None)
+        else:
+            vars(model)[OWNER_ATTR] = (step.req_id, end)
+    vars(model)[WROTE_ATTR] = writes.count > 0
+    log(levern_policy.ROUTE_LINE, step.req_id, start, end, step.total, int(final(step)), writes.count,
+        (time.perf_counter() - began) * 1000.0, programs_before, program_count(model), window)
     if audit and final(step):
-        audit_prefill(model, step, host, page[0], rec_snap, conv_snap, log=log)
+        audit_prefill(model, step, host, page[0], rec_snap, conv_snap, log=log, tokens=tokens)
     return [host]
 
 

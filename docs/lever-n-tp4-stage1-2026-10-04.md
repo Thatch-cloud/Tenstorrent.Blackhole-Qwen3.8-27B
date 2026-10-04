@@ -30,7 +30,16 @@ changes: `levern` is `None` in the lifecycle, the platform wrap is never registe
 3. **A whole prompt takes the scratch owner away.** In the design every row, whole prompts included, goes through the route. Here a whole prompt (and any unannounced prefill, the warm requests) runs the stock path untouched and
    clears the owner, so a suspended prompt's continuation after it is refused instead of running on another prompt's state.
 4. **Two negative-control profiles** (`final-hold`, `foreign`) and the audit-only control profile exist because a job cannot override a profile's environment.
-5. **The digests include the KV pages** (read one cache tensor at a time) on both arms, in addition to the GDN slot and the logits; the drafter window is checked by the capture's own snapshot comparisons.
+5. **The digests include the KV pages** (read one cache tensor at a time) on both arms, in addition to the GDN slot and the logits; the drafter window is checked by the capture's own snapshot comparisons. The KV read
+   copies every cache tensor of the whole pool to the host whatever the prompt length, so only prompts of at most 32,785 tokens (the single-user `levern_equal` rows and the busy rows' three prompts) take it; longer
+   prompts log `kv_sha` as 32 zeros on both arms ("not taken"). Budget a digest at about a minute and the A0c and A1 estimates accordingly. Each digest line also carries `tokens_sha`, the prompt's own identity: the
+   arms are compared per (length, token sha), never by length and log order.
+6. **The hang jobs run on their own profile** (`-levern-hang-gate`: the timed arm plus `QWEN_FAST_STALL_DEADLINE_S=120` and `QWEN_FAST_CCL_HANDLE_GUARD=log`; the refusing mode fails passing runs), because a hang on the
+   time gate burned the job timeout and recorded nothing.
+7. **The scheduler verifies the pass it capped.** After the base scheduler ran under the cap, `LevernRuntime.verify` checks that no request but the capped one was admitted and that a non-final end is a multiple of
+   2,048 inside a prompt of at least 4,096 tokens; otherwise it logs a `REFUSED` line and raises (the engine stops before any device work), instead of handing the route a step it cannot continue.
+8. **`wrote_slot` and the program rule are measured.** The route counts the real `_write_gdn_slot` calls of each step, and logs the drafter-window snapshot's program count (`window=`): the rule is
+   after - before - window == 0 (the four-card tripwire's own B-A-W), the warm requests exempt.
 
 ## What is NOT done
 
@@ -39,7 +48,11 @@ changes: `levern` is `None` in the lifecycle, the platform wrap is never registe
   where vLLM is not installed and runs in `qwen-fast-vllm-cpu.yml`, which a tag push triggers; it has not been triggered. Until it passes, `max_num_scheduled_tokens` as the cap is an assumption (the fallback through
   `long_prefill_token_threshold` is tested on the reduced model only).
 - **v2** (scratch parking, shortest-remaining-first among prefills, more than one prefill in flight), **composition with prefix reuse** (`tp4/packed-prefix`: its CHECKPOINT source would join the owner token; the contract
-  refuses `QWEN_PREFIX_REUSE` and sticky sessions with the flag), **the fast lane** (refused), **`agent8_turns`** (the share-choosing shape) and the optional layer-granularity research of design 3.12.
+  refuses `QWEN_PREFIX_REUSE` and sticky sessions with the flag), **the fast lane** (refused), **`agent8_turns`** (G-N5, the shape that chooses the share f: the pack runs f = 0.5 and R = 1 only, so f stays at its default), the optional layer-granularity research of design 3.12, and three
+  design items dropped from this stage on purpose: **G-N6 churn** (the churn16 admission shape; the eight-seat quad's own churn jobs cover admission and the KV reservation on the base, and the hang jobs here cover the
+  Lever N specific aborts), **the H3 per-round assertion** that every GDN layer's `rec_state` is the batched buffer (the route binds and unbinds the scratch in one try/finally and the owner token refuses a foreign
+  continuation; a decode round that ran on the scratch would show as a digest mismatch in A1, which is the stronger check), and **the trace-census arm** (the route allocates nothing after the warm, which the program rule
+  and the existing unsafe-allocation marker read).
 - Hardware assumptions the CPU tests cannot see: that the text RoPE a step builds for `tokens[:end]` is the one the whole prompt's staging gives (the toy model has no RoPE; G-N1 reads it), that an intermediate step's
   logits (the exact-multiple branch of the eager loop) are harmless and discarded by the runner, that the device scratch is bitwise what the host fixture's is across a synchronize, and every timing in the design's section 6.
 
@@ -67,8 +80,8 @@ The contract (`serving_c2_contract.levern_problems`) requires with `QWEN_FAST_LE
     [PINDIAG] lever N route installed: route=1 audit=<0|1>
     [PINDIAG] lever N route warmed before the packed traces: steps=3 programs=<A>-><B> ms=<..>
     [PINDIAG] lever N step n=<k> kind=<prefill|decode> seats=<d> req=<id> start=<s> tokens=<t> end=<e> prompt=<P> final=<0|1> reason=<..> prev=<kind>:<ms>ms owed_ms=<..> owed_rounds=<..>
-    [PINDIAG] lever N route req=<id> start=<s> end=<e> prompt=<P> final=<0|1> wrote_slot=<0|1> ms=<..> programs=<A>-><B>
-    [PINDIAG] lever N digest req=<id> prompt=<P> slot_sha=<32 hex> logits_sha=<32 hex> kv_sha=<32 hex>
+    [PINDIAG] lever N route req=<id> start=<s> end=<e> prompt=<P> final=<0|1> wrote_slot=<n> ms=<..> programs=<A>-><B> window=<W>
+    [PINDIAG] lever N digest req=<id> prompt=<P> tokens_sha=<32 hex> slot_sha=<32 hex> logits_sha=<32 hex> kv_sha=<32 hex>
     [PINDIAG] lever N final-step dram hold req=<id> prompt=<P> decodes=<d> short=<terms>
     [PINDIAG] lever N REFUSED <why>                      a problem for the check
 

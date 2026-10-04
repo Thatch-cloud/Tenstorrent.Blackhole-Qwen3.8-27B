@@ -112,7 +112,7 @@ NEXT4_PROFILES = ('c2-packed-tp4-best-ship', 'c2-packed-tp4-best-ship-warm4', 'c
 # tp4/next-5 (test_tp4_next5 holds each as its base plus exact deltas): the tpub and pair-slice traffic candidates and the pair-slice gate twins.
 NEXT5_PROFILES = ('c2-packed-tp4-best-ship-tpub', 'c2-packed-tp4-best-ship-glue', 'c2-packed-tp4-best-strace-glue', 'c2-packed-tp4-best-gate-glue', 'c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-best-quad-gate')
 # tp4/262k8 (test_tp4_262k8_best_profiles holds each as its 262k eight-seat twin plus the levers, the smaller pool and the lever audits): the eight-seat 262k best-lever arms.
-BEST262K_PROFILES = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-levern-audit', 'c2-packed-tp4-8x262k-best-levern-control-audit', 'c2-packed-tp4-8x262k-best-levern-final-hold-time-gate', 'c2-packed-tp4-8x262k-best-levern-foreign-time-gate', 'c2-packed-tp4-8x262k-best-levern-r1-time-gate', 'c2-packed-tp4-8x262k-best-levern-time-gate', 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship')
+BEST262K_PROFILES = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-levern-audit', 'c2-packed-tp4-8x262k-best-levern-control-audit', 'c2-packed-tp4-8x262k-best-levern-final-hold-time-gate', 'c2-packed-tp4-8x262k-best-levern-foreign-time-gate', 'c2-packed-tp4-8x262k-best-levern-hang-gate', 'c2-packed-tp4-8x262k-best-levern-r1-time-gate', 'c2-packed-tp4-8x262k-best-levern-time-gate', 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship')
 NEXT5_PROFILES = NEXT5_PROFILES + BEST262K_PROFILES
 # The GDN glue quick wins (tp4/gluefix, test_gdn_pair_slice holds the rule): the timed and diagnostic arms are c2-packed-tp4-speed-strace plus exactly one flag
 # (same exemptions as the cheap twins); the audited arm is c2-packed-tp4-gate plus the flag and the vglue audit (a four-card profile that may carry the audit).
@@ -483,7 +483,7 @@ class FixProfileTests(unittest.TestCase):
             with self.subTest(profile=name):
                 self.assertNotIn('QWEN_FAST_CAPTURE_PLUG', env if name != 'c2-packed-tp4-speed-fix' else {})
                 self.assertNotIn('QWEN_FAST_CAPTURE_PLUG_ENGINES', env if name != 'c2-packed-tp4-speed-fix' else {})
-                if name not in DIAG_PROFILES and name != 'c2-packed-tp4-speed-fix' and not name.startswith('c2-packed-tp4-diag-s') and name not in ('c2-packed-tp4-diag-rshard', 'c2-packed-tp4-diag-t1-rshard-audit') and name not in WARM4_PROFILES + SEATS8_PROFILES:
+                if name not in DIAG_PROFILES and name != 'c2-packed-tp4-speed-fix' and name != 'c2-packed-tp4-8x262k-best-levern-hang-gate' and not name.startswith('c2-packed-tp4-diag-s') and name not in ('c2-packed-tp4-diag-rshard', 'c2-packed-tp4-diag-t1-rshard-audit') and name not in WARM4_PROFILES + SEATS8_PROFILES:
                     for flag in ('QWEN_FAST_STALL_DEADLINE_S', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_TRACE_CENSUS_GRAPH'):
                         self.assertNotIn(flag, env)
 

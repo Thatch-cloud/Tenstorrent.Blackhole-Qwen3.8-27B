@@ -238,8 +238,9 @@ class SkipTests(unittest.TestCase):
         rig.lines.clear()
         rig.split('req', tokens, row, 1)
         for line in rig.marker('lever N route req='):
-            before, after = line.rsplit('programs=', 1)[1].split('->')
+            before, after = line.rsplit('programs=', 1)[1].split(' window=')[0].split('->')
             self.assertEqual(before, after)
+            self.assertIn(' window=0', line)
 
 
 class OwnerTests(unittest.TestCase):
@@ -473,8 +474,8 @@ class AuditTests(unittest.TestCase):
                 self.assertEqual(len(a), 1)
                 self.assertEqual(a, b)
                 fields = dict(item.split('=') for item in a[0].split()[0:0] + a[0].split()[1:])
-                self.assertEqual(sorted(fields), ['kv_sha', 'logits_sha', 'prompt', 'slot_sha'])
-                self.assertTrue(all(len(fields[name]) == 32 for name in ('kv_sha', 'logits_sha', 'slot_sha')))
+                self.assertEqual(sorted(fields), ['kv_sha', 'logits_sha', 'prompt', 'slot_sha', 'tokens_sha'])
+                self.assertTrue(all(len(fields[name]) == 32 for name in ('kv_sha', 'logits_sha', 'slot_sha', 'tokens_sha')))
 
     def test_a_different_prompt_has_different_digests(self):
         one, two = Rig(environ=CONTROL), Rig(environ=CONTROL)
@@ -554,6 +555,49 @@ class WarmTests(unittest.TestCase):
         split = rig.split('s', tokens, row_split, 2)
         self.assertTrue(torch.equal(whole, split))
         assert_same_state(self, rig.state(row_whole, total, 3), rig.state(row_split, total, 2), 'after the warm')
+
+
+class MeasuredLineTests(unittest.TestCase):
+    """The route line reports what the step did (a counted slot write, the window snapshot's programs), and the digest line is keyed on the prompt."""
+
+    def test_wrote_slot_counts_the_real_slot_writes_and_the_shadow_comes_off(self):
+        rig = Rig()
+        total = 6145
+        tokens = F.prompt(total, seed=31)
+        real = rig.model._write_gdn_slot
+        calls = []
+        spy = lambda *a, **k: (calls.append(a[0]), real(*a, **k))[1]  # noqa: E731
+        vars(rig.model)['_write_gdn_slot'] = spy
+        rig.split('req', tokens, rig.pool.row(total), 1)
+        self.assertEqual(calls, [1])
+        lines = rig.marker('lever N route req=')
+        self.assertEqual([line.split('wrote_slot=')[1].split(' ')[0] for line in lines], ['0', '0', '1'])
+        self.assertIs(vars(rig.model)['_write_gdn_slot'], spy, 'the instance attribute the model had is restored')
+        del vars(rig.model)['_write_gdn_slot']
+        rig.split('again', tokens, rig.pool.row(total), 1)
+        self.assertNotIn('_write_gdn_slot', vars(rig.model), 'no shadow is left behind')
+
+    def test_the_step_reports_the_window_programs_it_saw(self):
+        rig = Rig()
+        total = 6145
+        tokens = F.prompt(total, seed=32)
+        counter = iter(range(0, 100, 3))
+        with mock.patch.object(route, 'window_programs', lambda: next(counter)):
+            rig.split('req', tokens, rig.pool.row(total), 1)
+        windows = [line.rsplit('window=', 1)[1] for line in rig.marker('lever N route req=')]
+        self.assertEqual(windows, ['3', '3', '3'])
+
+    def test_a_digest_names_its_prompt_and_a_long_prompt_skips_the_kv_read(self):
+        rig = Rig(AUDIT)
+        total = 6145
+        tokens = F.prompt(total, seed=33)
+        rig.split('req', tokens, rig.pool.row(total), 1)
+        line = rig.marker('lever N digest')[0]
+        self.assertIn('tokens_sha=' + route.tokens_sha(tokens.reshape(1, -1), total), line)
+        self.assertNotIn('kv_sha=' + policy.KV_SKIPPED, line)
+        with mock.patch.object(policy, 'KV_DIGEST_MAX_PROMPT', 4096), mock.patch.object(route, 'kv_digest', side_effect=AssertionError('read')):
+            rig.split('again', tokens, rig.pool.row(total), 1)
+        self.assertIn('kv_sha=' + policy.KV_SKIPPED, rig.marker('lever N digest')[-1])
 
 
 class TracedLoopTests(unittest.TestCase):

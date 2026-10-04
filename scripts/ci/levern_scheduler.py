@@ -51,6 +51,7 @@ class LevernRuntime(object):
         self.steps = 0
         self.final_held = None
         self.cap_fallback_logged = False
+        self.computed = None
 
     # ------------------------------------------------------------------ the cap
 
@@ -118,7 +119,40 @@ class LevernRuntime(object):
         budget = self.budget(scheduler, request, fresh, decodes)
         if budget is None:
             return None, request, fresh, None
+        self.computed = getattr(request, 'num_computed_tokens', None)
         return self.apply_cap(scheduler, budget), request, fresh, budget
+
+    # ------------------------------------------------------------ what the cap actually scheduled
+
+    def verify(self, result, request):
+        """Fail closed when the pass the cap shaped is not the one it was shaped for. The cap is vLLM's token budget for the whole call, and
+        the waiting loop may admit a different request than the one the budget was computed for (a blocked head promoted in this very pass), or
+        end a step off the model's 2,048-token boundary. Either the route would be handed a step it cannot continue exactly (it raises and the
+        engine dies) or a prompt under 4,096 tokens would be split in two (the drafter window straddles two steps, hazard H1). So a pass is
+        checked here, before any device work: no new request but the target is admitted, and the target's non-final end is a multiple of
+        2,048 inside a prompt of at least 4,096 tokens. Logs a REFUSED line and raises ValueError. `request` is the target plan_cap chose with
+        the tokens it had computed before the call; None when no cap was applied (nothing to check)."""
+        if request is None or not getattr(result, 'total_num_scheduled_tokens', 0):
+            return
+        request, computed = request
+        target = getattr(request, 'request_id', None)
+        counts = getattr(result, 'num_scheduled_tokens', None)
+        if not isinstance(counts, dict):
+            return
+        admitted = [value.req_id for value in getattr(result, 'scheduled_new_reqs', None) or () if value.req_id != target]
+        if admitted:
+            self.refuse('the cap was computed for %r and the pass admitted %r' % (target, admitted[0]))
+        prompt, tokens = admission.prompt_tokens(request), counts.get(target)
+        if type(prompt) is not int or type(tokens) is not int or type(computed) is not int:
+            return
+        end = computed + tokens
+        if end < prompt and (end % levern_policy.CHUNK or prompt < 2 * levern_policy.CHUNK):
+            self.refuse('request %r would end a non-final step at %d of %d: off the %d-token boundary, or a prompt too short to split'
+                        % (target, end, prompt, levern_policy.CHUNK))
+
+    def refuse(self, why):
+        self.log(levern_policy.REFUSED_LINE, why)
+        raise ValueError('Lever N REFUSED: %s' % why)
 
     # --------------------------------------------------------------- the final-step DRAM gate
 

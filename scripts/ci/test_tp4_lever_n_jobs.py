@@ -25,14 +25,14 @@ SMOKE = os.path.join(HERE, 'c2_serving_smoke.py')
 IMAGE = 'tp4-lever-n-1'
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|/dev/tenstorrent|home/|zot\.')
 P = 'c2-packed-tp4-8x262k-best'
-CONTROL, CONTROL_AUDIT, TIMED, R1, AUDIT, HOLD, FOREIGN = (
+CONTROL, CONTROL_AUDIT, TIMED, R1, AUDIT, HOLD, FOREIGN, HANG = (
     P + '-time-gate', P + '-levern-control-audit', P + '-levern-time-gate', P + '-levern-r1-time-gate', P + '-levern-audit',
-    P + '-levern-final-hold-time-gate', P + '-levern-foreign-time-gate')
+    P + '-levern-final-hold-time-gate', P + '-levern-foreign-time-gate', P + '-levern-hang-gate')
 EXPECTED = {
     'X0-status-rescan-reset': ('status rescan reset', None, 'stop'), 'B0-build': ('build', 'c2-packed-tp4', 'stop'),
     'A0c-control-audit-attach': ('reset smoke', CONTROL_AUDIT, 'stop'), 'A1-levern-audited-attach': ('reset smoke', AUDIT, 'stop'),
-    'H1-hang-shapes-levern': ('reset smoke', TIMED, 'stop'), 'H2-hang-shapes-levern': ('reset smoke', TIMED, 'stop'),
-    'H3-hang-shapes-levern': ('reset smoke', TIMED, 'stop'),
+    'H1-hang-shapes-levern': ('reset smoke', HANG, 'stop'), 'H2-hang-shapes-levern': ('reset smoke', HANG, 'stop'),
+    'H3-hang-shapes-levern': ('reset smoke', HANG, 'stop'),
     'F1-final-hold-fault': ('reset smoke', HOLD, 'soft'),
     'S1-stall-A-control': ('reset smoke', CONTROL, 'soft'), 'S2-stall-B-levern': ('reset smoke', TIMED, 'soft'),
     'S3-stall-A-control': ('reset smoke', CONTROL, 'soft'), 'S4-stall-B-levern': ('reset smoke', TIMED, 'soft'),

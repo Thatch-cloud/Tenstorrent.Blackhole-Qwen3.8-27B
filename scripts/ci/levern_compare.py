@@ -68,19 +68,22 @@ def compare_rows(name, a, b):
 
 
 def compare_digests(a_text, b_text):
-    """(mismatches, compared): the digest lines of the two container logs, per prompt length in log order."""
+    """(mismatches, compared): the digest lines of the two container logs, per prompt (its length and token sha, so two prompts of one
+    length are never compared with each other) in log order."""
     def grouped(text):
         found = {}
         for row in check.levern_facts(text)['digests']:
-            found.setdefault(row['prompt'], []).append((row['slot'], row['logits'], row['kv']))
+            found.setdefault((row['prompt'], row['tokens']), []).append((row['slot'], row['logits'], row['kv']))
         return found
 
     left, right = grouped(a_text), grouped(b_text)
     mismatches, compared = [], 0
-    for prompt in sorted(set(left) | set(right)):
-        one, two = left.get(prompt, []), right.get(prompt, [])
+    for key in sorted(set(left) | set(right)):
+        prompt = key[0]
+        one, two = left.get(key, []), right.get(key, [])
         if len(one) != len(two):
-            mismatches.append('digests of the %d-token prompt: %d in the control, %d in the interleaved arm' % (prompt, len(one), len(two)))
+            mismatches.append('digests of the %d-token prompt (token sha %s): %d in the control, %d in the interleaved arm'
+                              % (prompt, key[1][:8], len(one), len(two)))
             continue
         for index, (x, y) in enumerate(zip(one, two)):
             for part, what in zip(range(3), ('GDN slot', 'logits', 'KV pages')):

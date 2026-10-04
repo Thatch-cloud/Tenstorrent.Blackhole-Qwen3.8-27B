@@ -187,7 +187,7 @@ class ProfileTests(unittest.TestCase):
         wide = sorted(name for name, profile in profiles.items() if profile['engine'].get('max-model-len') == 262144)
         self.assertEqual(wide, sorted(['c2-packed-tp4-262k-gate', 'c2-packed-tp4-8x262k', 'c2-packed-tp4-8x262k-diag-strace',
                                 'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate',
-                                'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-levern-audit', 'c2-packed-tp4-8x262k-best-levern-control-audit', 'c2-packed-tp4-8x262k-best-levern-final-hold-time-gate', 'c2-packed-tp4-8x262k-best-levern-foreign-time-gate', 'c2-packed-tp4-8x262k-best-levern-r1-time-gate', 'c2-packed-tp4-8x262k-best-levern-time-gate',
+                                'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-levern-audit', 'c2-packed-tp4-8x262k-best-levern-control-audit', 'c2-packed-tp4-8x262k-best-levern-final-hold-time-gate', 'c2-packed-tp4-8x262k-best-levern-foreign-time-gate', 'c2-packed-tp4-8x262k-best-levern-hang-gate', 'c2-packed-tp4-8x262k-best-levern-r1-time-gate', 'c2-packed-tp4-8x262k-best-levern-time-gate',
                                 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship']))
         for name in wide:
             env = profiles[name]['env']

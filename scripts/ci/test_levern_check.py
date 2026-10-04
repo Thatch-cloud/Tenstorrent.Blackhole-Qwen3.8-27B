@@ -5,6 +5,7 @@ lever engaged (not merely installed), the route ledger of a split prompt, the al
 arrival's window, the digest lines of the audit. levern_compare is held to the same standard: identical arms pass, every field that can differ is
 caught, and a comparison that compared nothing is not a pass."""
 
+import hashlib
 import json
 import unittest
 from contextlib import redirect_stdout
@@ -19,13 +20,13 @@ AUDIT_ENV = dict(ENV, QWEN_FAST_LEVERN_AUDIT='1')
 CONTROL_ENV = {'QWEN_FAST_LEVERN_AUDIT': '1', 'QWEN_FAST_TP': '4'}
 
 
-def route(req, start, end, prompt, programs='900->900', ms=812.4):
+def route(req, start, end, prompt, programs='900->900', ms=812.4, window=0):
     final = int(end == prompt)
-    return policy.ROUTE_LINE.format(req, start, end, prompt, final, final, ms, *programs.split('->'))
+    return policy.ROUTE_LINE.format(req, start, end, prompt, final, final, ms, *programs.split('->'), window)
 
 
-def route_lines(req, prompt, **kwargs):
-    return [route(req, start, end, prompt, **kwargs) for start, end in policy.plan(prompt)]
+def route_lines(req, prompt, decoding=True, **kwargs):
+    return [route(req, start, end, prompt, **kwargs) for start, end in policy.plan(prompt, decoding=decoding)]
 
 
 def step(n, kind, seats, req='-', start='-', tokens=0, end='-', prompt='-', final='-', reason='paid', prev='prefill:700.0', owed='350', rounds=0):
@@ -43,6 +44,12 @@ def interleaved_steps(req, prompt, seats=7, first=1):
             lines.append(step(n, 'decode', seats, reason='owed'))
             n += 1
     return lines
+
+
+def solo_steps(req, prompt):
+    """The scheduler's lines for a prompt split with no decoder running (back to back steps, nobody to yield to)."""
+    return [step(n, 'prefill', 0, req, start, end - start, end, prompt, int(end == prompt), 'idle')
+            for n, (start, end) in enumerate(policy.plan(prompt, decoding=False), 1)]
 
 
 def engaged_log(extra=()):
@@ -139,6 +146,17 @@ class RouteLedgerTests(unittest.TestCase):
         lines = route_lines('r', 10000, programs='900->903')
         self.assertTrue(any('compiled 3 program(s)' in problem for problem in self.problems(lines)))
 
+    def test_growth_the_window_snapshot_explains_is_not_a_hang(self):
+        # the four-card tripwire's rule: B - A - W > 0 fails, B - A == W does not (the snapshot compiles per prompt geometry)
+        final = route('r', 4096, 6145, 6145, programs='600->602', window=2)
+        self.assertEqual(self.problems([route('r', 0, 2048, 6145), route('r', 2048, 4096, 6145), final]), [])
+        short = route('r', 4096, 6145, 6145, programs='600->602', window=1)
+        found = self.problems([route('r', 0, 2048, 6145), route('r', 2048, 4096, 6145), short])
+        self.assertTrue(any('compiled 1 program(s) beyond its 1 window program(s)' in problem for problem in found), found)
+
+    def test_the_warm_requests_programs_are_not_judged(self):
+        self.assertEqual(self.problems(route_lines('__levern_warm__', 6208, programs='500->540')), [])
+
     def test_an_unknown_program_count_is_not_growth(self):
         self.assertEqual(self.problems(route_lines('r', 10000, programs='None->None')), [])
 
@@ -152,6 +170,62 @@ class RouteLedgerTests(unittest.TestCase):
             interleaved += [left, right]
         interleaved += a[len(b):]
         self.assertEqual(self.problems(interleaved), [])
+
+
+LONG = 32785
+
+
+def busy_smoke(*lengths):
+    return {'levern_equal_busy': dict(prompts=dict((str(length), dict()) for length in lengths), lengths=list(lengths))}
+
+
+class ExercisedRuleTests(unittest.TestCase):
+    """NOT_EXERCISED is not a pass: a row of 4,096 tokens or more must have been split as the plan says."""
+
+    def problems(self, extra, smoke, env=ENV):
+        return check.levern_problems(env, engaged_log(extra), smoke)[0]
+
+    def test_rows_that_were_never_split_are_a_problem(self):
+        smoke = {'levern_equal': dict(prompts={'2049': dict(), str(LONG): dict()}, lengths=[2049, LONG])}
+        found = self.problems([], smoke)
+        self.assertEqual(len(found), 1, found)
+        self.assertIn('levern_equal: the prompt of %d tokens was not split as the plan says' % LONG, found[0])
+        self.assertIn('NOT_EXERCISED', found[0])
+
+    def test_the_planned_split_is_clean_and_a_short_row_judges_nothing(self):
+        smoke = {'levern_equal': dict(prompts={'2049': dict(), str(LONG): dict()}, lengths=[2049, LONG])}
+        self.assertEqual(self.problems(route_lines('solo', LONG, decoding=False) + solo_steps('solo', LONG), smoke), [])
+
+    def test_the_single_user_rows_are_planned_without_decoders_and_the_busy_ones_with(self):
+        smoke = {'levern_equal': dict(prompts={str(LONG): dict()}, lengths=[LONG])}
+        found = self.problems(route_lines('solo', LONG, decoding=True), smoke)
+        self.assertTrue(any('decoding=False' in problem for problem in found), found)
+
+    def test_a_split_at_other_ends_than_the_plan_is_a_problem(self):
+        smoke = {'levern_equal': dict(prompts={'10000': dict()}, lengths=[10000])}
+        lines = [route('r', 0, 4096, 10000), route('r', 4096, 8192, 10000), route('r', 8192, 10000, 10000)]
+        self.assertTrue(self.problems(lines, smoke))
+
+    def test_the_busy_rows_need_a_decode_step_between_two_prefill_steps(self):
+        smoke = busy_smoke(10000)
+        lines = route_lines('b', 10000)
+        found = self.problems(lines + [s for s in interleaved_steps('b', 10000) if 'kind=decode' not in s], smoke)
+        self.assertTrue(any('nothing was interleaved' in problem for problem in found), found)
+        self.assertEqual(self.problems(lines + interleaved_steps('b', 10000), smoke), [])
+
+    def test_a_decode_step_serving_nobody_does_not_count_as_interleaving(self):
+        lines = route_lines('b', 10000)
+        steps = [line.replace('kind=decode seats=7', 'kind=decode seats=0') for line in interleaved_steps('b', 10000)]
+        self.assertTrue(any('nothing was interleaved' in problem for problem in self.problems(lines + steps, busy_smoke(10000))))
+
+    def test_a_row_that_errored_is_not_judged_here(self):
+        smoke = {'levern_equal': dict(prompts={str(LONG): dict(error='x')}, lengths=[LONG], error='x')}
+        self.assertEqual(self.problems([], smoke), [])
+
+    def test_the_control_arm_is_not_judged(self):
+        smoke = {'levern_equal': dict(prompts={str(LONG): dict()}, lengths=[LONG])}
+        found = check.levern_problems(CONTROL_ENV, digest('x', LONG), smoke)[0]
+        self.assertEqual(found, [])
 
 
 class AlternationRuleTests(unittest.TestCase):
@@ -230,8 +304,12 @@ class WindowRuleTests(unittest.TestCase):
         self.assertEqual(check.levern_problems(CONTROL_ENV, '', smoke)[0], [])
 
 
-def digest(req, prompt, tag='a'):
-    return policy.DIGEST_LINE.format(req, prompt, tag * 32, 'b' * 32, 'c' * 32)
+def token_sha(prompt, salt=''):
+    return hashlib.sha256(('%s%s' % (prompt, salt)).encode()).hexdigest()[:32]
+
+
+def digest(req, prompt, tag='a', salt=''):
+    return policy.DIGEST_LINE.format(req, prompt, token_sha(prompt, salt), tag * 32, 'b' * 32, 'c' * 32)
 
 
 class DigestRuleTests(unittest.TestCase):
@@ -240,15 +318,27 @@ class DigestRuleTests(unittest.TestCase):
     def test_a_digest_line_per_prompt_is_clean_on_both_audit_arms(self):
         log = '\n'.join([digest('x', 4097), digest('y', 6145)])
         self.assertEqual(check.levern_problems(CONTROL_ENV, log, self.SMOKE)[0], [])
-        self.assertEqual(check.levern_problems(AUDIT_ENV, engaged_log([digest('x', 4097), digest('y', 6145)]), self.SMOKE)[0], [])
+        split = (route_lines('x', 4097, decoding=False) + route_lines('y', 6145, decoding=False) + solo_steps('x', 4097) + solo_steps('y', 6145))
+        self.assertEqual(check.levern_problems(AUDIT_ENV, engaged_log([digest('x', 4097), digest('y', 6145)] + split), self.SMOKE)[0], [])
 
     def test_a_prompt_with_no_digest_is_a_problem(self):
         found = check.levern_problems(CONTROL_ENV, digest('x', 4097), self.SMOKE)[0]
         self.assertEqual(len(found), 1)
         self.assertIn('no digest line for the prompt of 6145 tokens', found[0])
 
+    def test_digests_are_keyed_on_the_prompt_not_on_log_order(self):
+        # two prompts of one length admitted in a different order across the arms: each is compared with its own twin
+        control = '\n'.join([digest('p', 4097, 'a', 'one'), digest('q', 4097, 'b', 'two')])
+        swapped = '\n'.join([digest('q', 4097, 'b', 'two'), digest('p', 4097, 'a', 'one')])
+        self.assertEqual(compare.compare_digests(control, swapped), ([], 2))
+        different = '\n'.join([digest('q', 4097, 'b', 'two'), digest('p', 4097, 'e', 'one')])
+        mismatches, compared = compare.compare_digests(control, different)
+        self.assertEqual((len(mismatches), compared), (1, 2))
+        self.assertIn('the GDN slot differs', mismatches[0])
+
     def test_no_audit_flag_no_digest_rule(self):
-        self.assertEqual(check.levern_problems(ENV, engaged_log(), self.SMOKE)[0], [])
+        split = (route_lines('x', 4097, decoding=False) + route_lines('y', 6145, decoding=False) + solo_steps('x', 4097) + solo_steps('y', 6145))
+        self.assertEqual(check.levern_problems(ENV, engaged_log(split), self.SMOKE)[0], [])
 
     def test_the_check_runs_the_rules_through_check(self):
         smoke_line = 'SMOKE_JSON ' + json.dumps({'warmup': {'value': 200}})
@@ -328,15 +418,16 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(len(mismatches), 1)
         self.assertIn('6145-token prompt (run 1): the GDN slot differs', mismatches[0])
         missing = '\n'.join([digest('p', 4097), digest('r', 4097, 'd')])
-        self.assertTrue(any('6145-token prompt: 1 in the control, 0 in the interleaved' in text for text in compare.compare_digests(control, missing)[0]))
+        self.assertTrue(any('6145-token prompt (token sha' in text and '1 in the control, 0 in the interleaved' in text
+                            for text in compare.compare_digests(control, missing)[0]))
 
     def test_each_part_of_a_digest_is_named(self):
         for part, name in ((3, 'GDN slot'), (4, 'logits'), (5, 'KV pages')):
             with self.subTest(part=name):
-                left = policy.DIGEST_LINE.format('x', 4097, 'a' * 32, 'b' * 32, 'c' * 32)
+                left = policy.DIGEST_LINE.format('x', 4097, token_sha(4097), 'a' * 32, 'b' * 32, 'c' * 32)
                 fields = ['a' * 32, 'b' * 32, 'c' * 32]
                 fields[part - 3] = 'f' * 32
-                right = policy.DIGEST_LINE.format('y', 4097, *fields)
+                right = policy.DIGEST_LINE.format('y', 4097, token_sha(4097), *fields)
                 mismatches, _ = compare.compare_digests(left, right)
                 self.assertEqual(len(mismatches), 1)
                 self.assertIn('the %s differs' % name, mismatches[0])
