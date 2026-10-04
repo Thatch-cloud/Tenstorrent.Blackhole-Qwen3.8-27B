@@ -706,6 +706,22 @@ class LaunchTests(LaunchBase, unittest.TestCase):
                                             64, 2560, 4096, 4108))
         self.assertIn('cannot hold', self.lines[-1])
 
+    def test_a_chip_count_that_is_not_the_meshs_is_refused_and_frees_the_outputs(self):
+        with self.assertRaisesRegex(ValueError, 'every chip'):
+            self.call(chips=1)
+        self.assertEqual(sorted(self.operations.freed), sorted(tensor.name for tensor in self.operations.allocated))
+        self.assertEqual(self.operations.launches, [])
+
+    def test_the_chip_count_of_a_one_card_mesh_builds_one_program(self):
+        class OneChip(FakeTTNN):
+            def get_device_tensors(self, tensor):
+                return [Tensor(tensor.name + ':0', tensor.shape, tensor.address, tensor.memory, tensor.dtype, tensor.layout)]
+
+        self.operations = OneChip()
+        self.call(chips=1)
+        program = self.operations.launches[0][1]
+        self.assertEqual(sorted(program), [((0, 0), (0, 0))])
+
     def test_a_failure_in_the_launch_frees_the_outputs(self):
         def refuse(tensors, program):
             raise RuntimeError('device')

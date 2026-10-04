@@ -329,9 +329,10 @@ def _cb(operations, cores, index, pages, kind):
                                                           tile=operations.TileDescriptor(operations.Tile([32, 32])))])
 
 
-def build_program(operations, mesh, tensors, outputs, work_plan, geometry, texts):
-    """The per-chip programs. `tensors` is dict(x, st (4), tap (4), dt_bias, neg_exp_A), `outputs` (conv, beta, g)."""
-    chips = tp_shapes.chip_count()
+def build_program(operations, mesh, tensors, outputs, work_plan, geometry, texts, chips=None):
+    """The per-chip programs. `tensors` is dict(x, st (4), tap (4), dt_bias, neg_exp_A), `outputs` (conv, beta, g); `chips` the mesh's chip
+    count (the card-M probe's one; serving leaves it to the configured width)."""
+    chips = tp_shapes.chip_count() if chips is None else chips
     shards = {name: ([operations.get_device_tensors(value) for value in tensors[name]] if name in ('st', 'tap')
                      else operations.get_device_tensors(tensors[name])) for name in tensors}
     out_shards = [operations.get_device_tensors(value) for value in outputs]
@@ -381,11 +382,11 @@ def build_program(operations, mesh, tensors, outputs, work_plan, geometry, texts
     return program
 
 
-def launch(operations, mesh, x, windows, taps, dt_bias, neg_exp_A, rows, channels, a_col, b_col, held=None, entries=None):
+def launch(operations, mesh, x, windows, taps, dt_bias, neg_exp_A, rows, channels, a_col, b_col, held=None, entries=None, chips=None):
     """(conv, beta, g) by the F1 launch, the block windows advanced in place as the served op advances them; or None after one
     logged line when this call cannot take it (the caller makes the served call; nothing is left allocated and nothing advanced).
     Under the audit it also runs the served op on cloned windows first and appends the seven audit entries to `entries` (and
-    every tensor it holds to `held`)."""
+    every tensor it holds to `held`). `chips` is the mesh's chip count when it is not the configured width (the one-card probe)."""
     reason = problem(operations, x, windows, taps, dt_bias, neg_exp_A, rows, channels, a_col, b_col)
     if reason is not None:
         return fall_back(reason)
@@ -418,7 +419,7 @@ def launch(operations, mesh, x, windows, taps, dt_bias, neg_exp_A, rows, channel
             produced.append(operations.empty(shape, dtype=operations.bfloat16, layout=operations.TILE_LAYOUT, device=mesh,
                                              memory_config=dram))
         tensors = dict(x=x, st=list(windows), tap=list(taps), dt_bias=dt_bias, neg_exp_A=neg_exp_A)
-        program = build_program(operations, mesh, tensors, produced, work_plan, geometry, texts)
+        program = build_program(operations, mesh, tensors, produced, work_plan, geometry, texts, chips)
         io, seen = [], set()
         for value in (x, *windows, *taps, dt_bias, neg_exp_A, *produced):
             if id(value) not in seen:
