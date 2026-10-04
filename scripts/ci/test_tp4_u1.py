@@ -358,6 +358,8 @@ class RefusalTests(Fixture):
         self.assertIn('4 chips', self.wrapper.refusal(tensor, tensor.shape, (wrong_mesh, self.collective), self.options))
         self.assertIn('2 links', self.wrapper.refusal(tensor, tensor.shape, (self.mesh, Collective(links=1)), self.options))
         self.assertIsNone(self.wrapper.refusal(tensor, tensor.shape, (self.mesh, self.collective), self.options))
+        broken = types.SimpleNamespace(get_num_links=lambda axis: 1 / 0)
+        self.assertIn('could not say', self.wrapper.refusal(tensor, tensor.shape, (self.mesh, broken), self.options))
 
     def test_the_census_shapes_are_the_only_unit_major_ones(self):
         for rows in (32, 64, 96, 128, 160):

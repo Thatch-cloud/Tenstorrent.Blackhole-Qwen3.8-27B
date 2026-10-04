@@ -219,7 +219,11 @@ class TileSplitAllReduce:
         if not callable(chips) or chips() != CENSUS_CHIPS:
             return 'the mesh is not %d chips' % CENSUS_CHIPS
         links = getattr(collective, 'get_num_links', None)
-        if not callable(links) or links(kwargs.get('cluster_axis', 0)) != CENSUS_LINKS:
+        try:
+            said = links(kwargs.get('cluster_axis', 0)) if callable(links) else None
+        except Exception as error:
+            return 'the collective could not say its links (%s)' % type(error).__name__
+        if said != CENSUS_LINKS:
             return 'the collective does not say %d links' % CENSUS_LINKS
         return None
 
