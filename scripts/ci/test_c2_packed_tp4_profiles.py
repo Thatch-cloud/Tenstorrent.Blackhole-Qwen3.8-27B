@@ -117,7 +117,7 @@ BEST262K_PROFILES = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-aud
 # tp4/hostgap (test_tp4_hostgap holds each as the best-time-gate control plus flags): the eight-seat host-gap arms and their audited twins.
 HOSTGAP_PROFILES = ('c2-packed-tp4-8x262k-hostgap-1', 'c2-packed-tp4-8x262k-hostgap-1-audit', 'c2-packed-tp4-8x262k-hostgap-2', 'c2-packed-tp4-8x262k-hostgap-2-audit')
 # tp4/w1 (test_tp4_w1 holds each as the best-time-gate control minus the in-trace sampler plus the stack of levers, and its audited twin).
-W1_PROFILES = ('c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit', 'c2-packed-tp4-8x262k-w1-audit-nod1', 'c2-packed-tp4-8x262k-w1-lite', 'c2-packed-tp4-8x262k-w1-nod1')
+W1_PROFILES = ('c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit', 'c2-packed-tp4-8x262k-w1-audit-nod1', 'c2-packed-tp4-8x262k-w1-lite', 'c2-packed-tp4-8x262k-w1-nod1', 'c2-packed-tp4-8x262k-w2', 'c2-packed-tp4-8x262k-w2-audit')
 NEXT5_PROFILES = NEXT5_PROFILES + BEST262K_PROFILES + HOSTGAP_PROFILES + W1_PROFILES
 # tp4/sdpa-multi (test_sdpa_multi_tp holds each as the best-time-gate arm plus exactly the SDPA flag, and the audited one plus the audit flag).
 SDPAMULTI_PROFILES = ('c2-packed-tp4-8x262k-best-sdpamulti', 'c2-packed-tp4-8x262k-best-sdpamulti-audit')
