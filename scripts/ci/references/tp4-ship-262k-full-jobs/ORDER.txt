@@ -1,0 +1,41 @@
+# ship/262k-full pack: the lean qualification of EIGHT SEATS x 262,144-token windows on W1 + Lever N + packed prefix reuse, ONE image.
+# One line per job: <template name without .env> <stop|soft|pre> <image tag> <real minutes>. stop: a failure ends the pack (Z still runs). soft: data, a failure
+# or skip does not stop. pre: X0B, run first (it resets the cards, builds, and leaves them idle). Production is DOWN (node agent stopped): no agentstop, agentstart
+# or hand-back job exists and none may run; no job starts the node agent or places a model.
+# MINUTES are the REAL W1-window job times (status+rescan+reset 4, image build 22, audited attach 17-19, control attach smoke 12, one eight-user hang shape 13-15,
+# cold 262k arrival 15, timed smoke 15); a job's tests add to its attach. P1's 110 is an ESTIMATE (no measured time exists for the prefix arms on these cards).
+# TOTAL: 430 min = 7.2 h for all lines, 406 min = 6.8 h through the stop and pre lines (soft M1 and Z left out). The <= 5 h target is NOT met with P1 at ~110.
+# Cut list, in order, if the owner wants 5 h: M1 (-20), H2 (-15; H1 keeps the hang shape), C16 to soft (-45; the churn shape Seats8 already ran), then P1 to its
+# lifecycle-evict arm only (about -50). Never cut A1, S0, H1, L8, F1 or SR10 (exactness, hangs, long-context isolation, fault, platform path).
+# READ A1 and S0 hashes against W1's reference hashes FIRST (the whole exactness claim); a mismatch ends the pack.
+# NEEDS (before X0B; the operator on branch ship/262k-full, which this pack does not touch):
+#   N1 profiles c2-packed-tp4-8x262k-ship-full (traffic, not gate_only, mesh P150x4, max-num-seqs 8: ship + W1 deltas + Lever N + prefix reuse and sticky),
+#      c2-packed-tp4-8x262k-ship-full-audit (gate: audits and gate marker, NO evidence waiver) and c2-packed-tp4-8x262k-ship-full-final-hold-gate (the audit twin
+#      plus the Lever N final-hold fault injection, for F1) must exist in qwen_c2_profiles.json; the integration merge adds the last if absent.
+#   N2 scripts/ci/ordered_writer_evidence_tp4.json (record_ordered_writer_evidence_tp4.py from E1) and scripts/ci/packed_any_evidence_tp4_262144.json
+#      (record_packed_any_evidence_tp4.py --capacity 262144 --cb1 E2a --cb2a E2b --cb2b E2c), each COMMITTED with its re-pinned constant, on ship/262k-full right
+#      before the image build (the evidence is BAKED into the image). Jobs v569 E0 .. v576 E2c produce them (~20:30Z).
+#   N3 the Lever N levern_* smoke tests and the stall8_cold262k test, and the c2_prefix_gate arms, exist on the branch (from tp4/lever-n, tp4/w1, tp4/packed-prefix).
+#   N4 W1's reference hashes (control attach: concurrent8_steady, concurrent8_code_32k, concurrent8_code_equal) on hand to read A1 and S0 against.
+#   N5 every tag in these templates is tp4-serve-10: a changed commit needs a new tag in every template. @THIN_LAYER_IMAGE@ is filled in SR10 only.
+# GO RULE for moving :latest to the thin layer built on tp4-serve-10: every stop line passed; A1 zero mismatches and hashes equal W1's; S0 equal A1's; H1 and H2 clean;
+# P1 no FAIL (returning turns byte-equal to cold, a packed round with 2+ live users seen, kill switch latched, abort during a hit prefill clean); F1 clean; L8
+# concurrent equal to solo at ~140k and ~253k; C16 16 of 16 and the reservation hold released; SR10 'PLATFORM_REPLAY passed=True' with the budget smoke passed.
+# M1 is data (report the other seats' worst gap against W1's ~100 s; a gap not far below it goes to the owner, not a blocker).
+# POST-GO (the operator, never this pack): (1) push the base tp4-serve-10 through the platform publish lane; build and pre-pull the thin layer BEFORE SR10 from the
+# S0-passed image (never from ref 1531ff3); (2) move :latest to that thin layer through the platform release path, after the owner merges the platform draft PR
+# (liam/tt-seat-cap-8); (3) place per the tt-qwen-serving-deploy skill with the node agent started by the owner; (4) read the cap live after placement: the
+# session metrics gauge shows eight sessions admitted and a ninth refused; (5) one real coding request end to end with the :tt alias served; (6) rollback is
+# :latest back to the four-seat layer (the operator has its reference), which restores the four-seat default and the cap of four.
+X0B-status-rescan-reset-build pre tp4-serve-10 26
+A1-audited-attach-smoke stop tp4-serve-10 40
+S0-baked-default-smoke stop tp4-serve-10 30
+H1-hang-shape-ship-full stop tp4-serve-10 15
+H2-hang-shape-ship-full stop tp4-serve-10 15
+P1-prefix-exactness-lifecycle stop tp4-serve-10 110
+F1-levern-final-hold-fault stop tp4-serve-10 20
+L8-ladder8-past-131k stop tp4-serve-10 45
+C16-churn16 stop tp4-serve-10 45
+M1-cold262k-stall-soft soft tp4-serve-10 20
+SR10-platform-replay stop tp4-serve-10 60
+Z-reset soft tp4-serve-10 4
