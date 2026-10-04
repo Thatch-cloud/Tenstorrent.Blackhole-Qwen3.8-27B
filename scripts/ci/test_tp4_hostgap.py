@@ -1043,9 +1043,18 @@ class SmokeRuleTests(unittest.TestCase):
         # a verify of fewer live users is not a 4+4 round
         self.assertEqual(self.judge(ARM_ENV, text(*base, verify_lines(40), verify_lines(30, 'AB', 'full', 'no-snapshot', live=3))), [])
 
-    def test_the_share_cannot_be_judged_without_the_log_flag(self):
+    def test_without_the_log_flag_the_share_is_unread_not_a_problem(self):
+        # A traffic profile drops the diagnostic log (v578): the lever is still judged engaged and on the diff path, the share is unread.
         env = {name: value for name, value in ARM_ENV.items() if name != 'QWEN_FAST_TP4_HOSTGAP_LOG'}
-        self.assertTrue(any('HOSTGAP_LOG' in item for item in self.judge(env, text(engaged(), prestage_lines(40)))))
+        problems, facts = c2_smoke_check.hostgap_problems(env, text(engaged(), prestage_lines(40)), True)
+        self.assertFalse(any('HOSTGAP_LOG' in item for item in problems), problems)
+        self.assertEqual(facts['hostgap_share'], 'unread (QWEN_FAST_TP4_HOSTGAP_LOG off)')
+
+    def test_the_ramp_threshold_is_not_applied_to_an_audited_verify(self):
+        self.assertTrue(c2_smoke_check.audited_verify({'QWEN_FAST_VERIFY_T1_AUDIT': '1'}))
+        self.assertTrue(c2_smoke_check.audited_verify({'QWEN_FAST_VERIFY_T2_AUDIT': '1'}))
+        self.assertFalse(c2_smoke_check.audited_verify({'QWEN_FAST_VERIFY_T1_AUDIT': '0', 'QWEN_FAST_VERIFY_T2_AUDIT': '0'}))
+        self.assertFalse(c2_smoke_check.audited_verify(None))
 
     def test_the_lever_is_not_judged_without_the_eight_user_steady_smoke(self):
         self.assertTrue(any('concurrent8_steady' in item for item in self.judge(ARM_ENV, text(engaged()), steady=False)))

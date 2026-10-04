@@ -859,8 +859,10 @@ def hostgap_problems(env, container_text, steady_eight):
     if env.get(HOSTGAP_LOG_FLAG) == '1':
         problems.extend(hostgap_share_problems(facts['hostgap_verify_live4'], per_block))
     elif per_block:
-        problems.append('%s=1 is not set: the per-block epochs arm cannot be judged on the share of verifies that took the diff path'
-                        % HOSTGAP_LOG_FLAG)
+        # The share of diff-path verifies is a measurement (W1's timing arms carry the log). A traffic profile drops the diagnostic
+        # log; the lever's function is still judged above (epochs engaged once, 4-live verifies on the diff path) and its
+        # exactness by the verify audits. Unread, not a problem (v578, 2026-10-05).
+        facts['hostgap_share'] = 'unread (%s off)' % HOSTGAP_LOG_FLAG
     if env.get(HOSTGAP_AUDIT_FLAG) == '1':
         wanted = ['A', 'B'] if per_block else ['A']
         if facts['hostgap_audit_mismatches_diff']:
@@ -1037,6 +1039,12 @@ def u1_problems(env, container_text):
     return problems
 
 
+def audited_verify(env):
+    """True when either verify audit is on in the served profile's env (they inflate the ramp's prepare_history)."""
+    env = env or {}
+    return env.get('QWEN_FAST_VERIFY_T1_AUDIT') == '1' or env.get('QWEN_FAST_VERIFY_T2_AUDIT') == '1'
+
+
 def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=None):
     """(problems, facts) for a smoke log and a container log. `env` (the served profile's) adds the batched-draft
     stop conditions, `entry` (its whole record) the traffic profile's admission and parser conditions."""
@@ -1107,6 +1115,10 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     if slide:
         if median is None:
             problems.append('no [PACKED-PUBLISH] round with a commit: the ramp commit time is unread (QWEN_FAST_PACKED_AUDIT?)')
+        elif median > max_ramp_ms and audited_verify(env):
+            # The verify audits inflate prepare_history (v423, v578: 51.7 ms with zero mismatches); the threshold is judged on the
+            # audits-off arms of the same stack.
+            facts['ramp_over_threshold_audited'] = round(median, 2)
         elif median > max_ramp_ms:
             problems.append('ramp commit: median of the largest prepare_history per round is %.1f ms, above %.0f ms '
                             '(the slide is not taking effect)' % (median, max_ramp_ms))
