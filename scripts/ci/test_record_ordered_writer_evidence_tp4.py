@@ -147,9 +147,9 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(code, 1, lines)
         self.assertTrue(any('host path' in line for line in lines), lines)
 
-    def test_the_shipped_skeleton_is_pending_and_pinned(self):
+    def test_the_shipped_record_is_pass_and_pinned(self):
         evidence = json.loads(pw.EVIDENCE.read_text())
-        self.assertEqual(evidence['status'], 'PENDING')
+        self.assertEqual(evidence['status'], 'PASS')      # recorded by ship/262k-prefix (the E1 window on the tp4/w1 image)
         self.assertEqual(hashlib.sha256(pw.EVIDENCE.read_bytes()).hexdigest(), pw.ORDERED_WRITER_EVIDENCE_TP4_SHA256)
         self.assertNotIn(b'\r', pw.EVIDENCE.read_bytes())
         self.assertEqual(len(rec.re.findall(r'^ORDERED_WRITER_EVIDENCE_TP4_SHA256 = ', (pw.HERE / 'page_width_tp4.py').read_text(),

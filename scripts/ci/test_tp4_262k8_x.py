@@ -143,7 +143,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(PROFILES['c2-packed-tp4']['env'][HANG], '1', 'production keeps the hang fix')
         for flag in sd.ALL_FLAGS + (BF16, LOOKUP, 'QWEN_FAST_GDN_SPLIT_V'):
             for name, profile in PROFILES.items():
-                if flag in profile['env']:
+                if flag in profile['env'] and name != 'c2-packed-tp4-8x262k-ship-prefix':     # the one traffic profile carrying the W1 levers (ship/262k-prefix)
                     self.assertTrue(profile.get('gate_only'), (name, flag))
         # the v5 split is merged and inert: no arm of this window sets it
         for name in ARMS:

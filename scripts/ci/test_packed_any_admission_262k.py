@@ -116,6 +116,11 @@ class DesignTests(unittest.TestCase):
 
 
 class RecordTests(unittest.TestCase):
+    def setUp(self):
+        import test_262k_evidence_waiver as waiver
+
+        waiver.pending_records(self)       # these tests describe the unrecorded state; test_ship_262k_prefix reads the real files
+
     def test_the_262k_skeleton_is_pinned_pending_lf_and_the_131k_pin_did_not_move(self):
         data = admission.EVIDENCE_TP4_262K.read_bytes()
         self.assertEqual(sha(data), admission.EVIDENCE_TP4_262K_SHA256)
@@ -208,6 +213,9 @@ class RecordTests(unittest.TestCase):
 
 class AdmitTests(unittest.TestCase):
     def setUp(self):
+        import test_262k_evidence_waiver as waiver
+
+        waiver.pending_records(self)
         patcher = mock.patch.dict(admission._STATE, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -372,6 +380,11 @@ class PoolTests(unittest.TestCase):
 
 
 class GuardTests(unittest.TestCase):
+    def setUp(self):
+        import test_262k_evidence_waiver as waiver
+
+        waiver.pending_records(self)
+
     def test_tp_guard_at_262k_needs_both_records_in_a_gate_run_too(self):
         lines = Lines()
         with mock.patch.object(page_width_tp4, 'evidence_state', return_value=E1_OK):

@@ -267,8 +267,10 @@ class AdmissionOnFakeRecordsTests(unittest.TestCase):
         from unittest import mock
 
         import page_width_tp4
+        import test_262k_evidence_waiver as waiver
         import test_packed_any_admission_262k as wide
 
+        waiver.pending_records(self)     # the 'refused on one record' half reads the unrecorded state
         for name in ALL:
             waiver_environ = self.environment(name)
             environ = {key: value for key, value in waiver_environ.items() if key != 'QWEN_FAST_262K_EVIDENCE_WAIVER'}

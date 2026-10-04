@@ -694,7 +694,8 @@ class ProfileTests(unittest.TestCase):
     def test_only_the_sticky_profiles_set_the_switch(self):
         names = sorted(name for name, data in load_profiles()['profiles'].items() if STICKY in data['env'])
         self.assertEqual(names, ['c2-packed-prefix', 'c2-packed-prefix-gate', 'c2-packed-tp4-8x262k-prefix-gate',
-                                 'c2-packed-tp4-8x262k-prefix-time-gate'])
+                                 'c2-packed-tp4-8x262k-prefix-time-gate',
+                                 'c2-packed-tp4-8x262k-ship-prefix', 'c2-packed-tp4-8x262k-ship-prefix-audit'])
 
     def test_the_argv_turns_prefix_caching_on_beside_dflash(self):
         argv = contract.engine_arguments(profile('c2-packed-prefix'), '/snap')

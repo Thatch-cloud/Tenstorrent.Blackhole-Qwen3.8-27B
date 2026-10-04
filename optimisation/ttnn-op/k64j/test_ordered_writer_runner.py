@@ -115,7 +115,10 @@ class OrderedWriterRunnerTests(unittest.TestCase):
             argv = self.helper.argv(self.run_runner(K64J_HARNESS=harness))
             inner = argv[argv.index('--entrypoint') + 4]
             self.assertNotIn('ordered_writer', inner)
-            self.assertNotIn('QWEN_C2_SERVING=0', self.environment(argv)) if harness == 'card' else None
+            if harness == 'card':
+                # ship/evidence-262k: the one-card card mode switches the C2 boot hook off and drops the four-card mesh descriptor
+                self.assertIn('QWEN_C2_SERVING=0', self.environment(argv))
+                self.assertIn('unset TT_MESH_GRAPH_DESC_PATH', inner)
 
     def test_an_unknown_harness_still_names_the_new_one(self):
         result = self.run_runner(K64J_HARNESS='k2')

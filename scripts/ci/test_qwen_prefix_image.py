@@ -71,8 +71,8 @@ GATE_ONLY_OTHERS = ('c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit', 
                     'c2-packed-tp4-warm4-even-diag', 'c2-packed-tp4-warm4-gate', 'c2-packed-tp4-speed-warm4')
 # The fast path's prefix-reuse profiles (sticky sessions): test_sticky_sessions holds them.
 # tp4/packed-prefix: the eight-seat 262k twins, gate-only (test_tp4_packed_prefix_profiles holds them).
-STICKY_GATE_ONLY = ('c2-packed-tp4-8x262k-prefix-gate', 'c2-packed-tp4-8x262k-prefix-time-gate')
-STICKY_PROFILES = ('c2-packed-prefix', 'c2-packed-prefix-gate') + STICKY_GATE_ONLY
+STICKY_GATE_ONLY = ('c2-packed-tp4-8x262k-prefix-gate', 'c2-packed-tp4-8x262k-prefix-time-gate', 'c2-packed-tp4-8x262k-ship-prefix-audit')
+STICKY_PROFILES = ('c2-packed-prefix', 'c2-packed-prefix-gate') + STICKY_GATE_ONLY + ('c2-packed-tp4-8x262k-ship-prefix',)    # + ship/262k-prefix: the both-levers pair
 JOB = Path('C:/Users/liamb/.claude/jobs/8376c877/tmp')
 PLUGIN_CHECKOUT = Path(os.environ.get('QWEN_TT_PLUGIN_CHECKOUT') or JOB / 'risks' / 'vllm-tt-plugin')
 IMG_TREE = Path(os.environ.get('QWEN_IMG_TREE') or JOB / 'matmul-attr' / 'img')

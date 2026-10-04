@@ -132,7 +132,10 @@ class ProfileTests(unittest.TestCase):
                        'c2-packed-tp4-8x262k-w1': (sd.DRAFT_CONV, sd.DRAFT_HEADS),
                        'c2-packed-tp4-8x262k-w1-audit': (sd.DRAFT_CONV, sd.DRAFT_HEADS, sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT),
                        'c2-packed-tp4-8x262k-w1-lite': (sd.DRAFT_CONV, sd.DRAFT_HEADS), 'c2-packed-tp4-8x262k-w1-nod1': (sd.DRAFT_CONV, sd.DRAFT_HEADS),
-                       'c2-packed-tp4-8x262k-w1-audit-nod1': (sd.DRAFT_CONV, sd.DRAFT_HEADS, sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT)}
+                       'c2-packed-tp4-8x262k-w1-audit-nod1': (sd.DRAFT_CONV, sd.DRAFT_HEADS, sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT),
+                       # ship/262k-prefix: the both-levers ship profile (the W1 pair) and its audited twin
+                       'c2-packed-tp4-8x262k-ship-prefix': (sd.DRAFT_CONV, sd.DRAFT_HEADS),
+                       'c2-packed-tp4-8x262k-ship-prefix-audit': (sd.DRAFT_CONV, sd.DRAFT_HEADS, sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT)}
         for name, profile in PROFILES.items():
             for flag in sd.ALL_FLAGS:
                 wanted = (name in DELTAS and flag in DELTAS[name][1]) or flag in X262K_FLAGS.get(name, ())

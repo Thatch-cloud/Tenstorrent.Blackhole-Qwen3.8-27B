@@ -61,7 +61,9 @@ class Workspace262:
         self.evidence = self.dir / 'packed_any_evidence_tp4_262144.json'
         self.evidence131 = self.dir / 'packed_any_evidence_tp4.json'
         self.admission = self.dir / 'packed_any_admission.py'
-        shutil.copyfile(admission.EVIDENCE_TP4_262K, self.evidence)
+        import test_262k_evidence_waiver as waiver
+
+        self.evidence.write_bytes((json.dumps(waiver.PENDING_PACKED_ANY_262K, indent=1) + chr(10)).encode())   # the unrecorded state
         shutil.copyfile(admission.EVIDENCE_TP4, self.evidence131)
         source = (HERE / 'packed_any_admission.py').read_text(encoding='utf-8')
         pin = hashlib.sha256(self.evidence.read_bytes()).hexdigest()
