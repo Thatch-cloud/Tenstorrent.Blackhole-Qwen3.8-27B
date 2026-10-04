@@ -1087,7 +1087,8 @@ class StickyReservationOnRealVllmTests(unittest.TestCase):
         lines = []
         with mock.patch.dict(os.environ, {kv.FLAG: '1' if reservation else '0'}):
             admission.install(SimpleNamespace(scheduler_config=SimpleNamespace(scheduler_cls=scheduler_type)),
-                              log=lambda message, *values: lines.append(message % values if values else message))
+                              log=lambda message, *values: lines.append(
+                                  (message.format(*values) if '{}' in message else message % values) if values else message))
         scheduler, state = self.env.make_sticky(scheduler_cls=scheduler_type, num_blocks=blocks)
         return scheduler, state, lines
 
