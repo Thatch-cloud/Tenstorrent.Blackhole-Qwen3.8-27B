@@ -28,7 +28,8 @@ EXPECTED = {
     'X0-status-rescan-reset': ('status rescan reset', 'stop'), 'B0-build': ('build', 'stop'),
     'A0-control-attach-smoke': ('reset smoke', 'stop'), 'A1-audited-attach-smoke': ('reset smoke', 'stop'),
     'A2-bringup': ('reset prefix', 'stop'), 'E1-exactness-eager': ('reset prefix', 'stop'),
-    'E2-exactness-shared8': ('reset prefix', 'stop'), 'R0-agent-turns-both': ('reset prefix', 'soft'),
+    'E2-exactness-shared8': ('reset prefix', 'stop'), 'L1-lifecycle': ('reset prefix', 'stop'),
+    'R0-agent-turns-both': ('reset prefix', 'soft'),
     'R1-turns-A-control': ('reset prefix', 'soft'), 'R2-turns-B-prefix': ('reset prefix', 'soft'),
     'R3-turns-A-control': ('reset prefix', 'soft'), 'R4-turns-B-prefix': ('reset prefix', 'soft'),
     'Z-reset': ('status reset', 'soft'),
@@ -110,8 +111,8 @@ class JobPackTests(unittest.TestCase):
 
     def test_the_prefix_jobs_name_a_sticky_profile_and_its_no_reuse_control(self):
         found = profiles()
-        for name in ('A2-bringup', 'E1-exactness-eager', 'E2-exactness-shared8', 'R0-agent-turns-both', 'R1-turns-A-control',
-                     'R2-turns-B-prefix', 'R3-turns-A-control', 'R4-turns-B-prefix'):
+        for name in ('A2-bringup', 'E1-exactness-eager', 'E2-exactness-shared8', 'L1-lifecycle', 'R0-agent-turns-both',
+                     'R1-turns-A-control', 'R2-turns-B-prefix', 'R3-turns-A-control', 'R4-turns-B-prefix'):
             with self.subTest(name):
                 result = parsed(name)
                 mine = found['profiles'][result['prefix_profile']]
@@ -126,7 +127,7 @@ class JobPackTests(unittest.TestCase):
                     self.assertTrue(arms, plan)
 
     def test_the_audited_jobs_use_the_audited_pair_and_the_timed_jobs_the_timed_pair(self):
-        for name in ('A2-bringup', 'E1-exactness-eager', 'E2-exactness-shared8'):
+        for name in ('A2-bringup', 'E1-exactness-eager', 'E2-exactness-shared8', 'L1-lifecycle'):
             result = parsed(name)
             self.assertEqual((result['prefix_profile'], result['prefix_baseline']), (TWIN, CONTROL), name)
         for name in ('R0-agent-turns-both', 'R1-turns-A-control', 'R2-turns-B-prefix', 'R3-turns-A-control', 'R4-turns-B-prefix'):
@@ -142,6 +143,7 @@ class JobPackTests(unittest.TestCase):
         self.assertEqual(parsed('A2-bringup')['prefix_plan'], 'bringup')
         self.assertEqual(parsed('E1-exactness-eager')['prefix_plan'], 'exactness-eager')
         self.assertEqual(parsed('E2-exactness-shared8')['prefix_plan'], 'exactness-shared')
+        self.assertEqual(parsed('L1-lifecycle')['prefix_plan'], 'lifecycle')
         self.assertEqual(parsed('R0-agent-turns-both')['prefix_plan'], 'agent-turns')
 
     def test_the_replay_pairs_alternate_abab_with_the_control_first(self):
@@ -153,12 +155,14 @@ class JobPackTests(unittest.TestCase):
             self.assertEqual(needs[name], {'A1', 'A2'})
         for name in ('A2', 'E1', 'E2'):
             self.assertEqual(needs[name], {'A1'})
+        self.assertEqual(needs['L1'], {'A1', 'A2'})
         self.assertIn('prefix_agent_turns.py', text_of('R2-turns-B-prefix'))
 
     def test_the_pack_runs_its_plans_inside_the_job_budget(self):
         minutes = {line[0]: int(line[3]) for line in order_lines()}
         found = profiles()
-        for name in ('A2-bringup', 'E1-exactness-eager', 'E2-exactness-shared8', 'R0-agent-turns-both', 'R1-turns-A-control'):
+        for name in ('A2-bringup', 'E1-exactness-eager', 'E2-exactness-shared8', 'L1-lifecycle', 'R0-agent-turns-both',
+                     'R1-turns-A-control'):
             result = parsed(name)
             arms = []
             for plan in result['prefix_plan'].split(','):

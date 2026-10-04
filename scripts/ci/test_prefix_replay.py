@@ -1323,6 +1323,21 @@ class StreamStateTests(unittest.TestCase):
         self.assertTrue(state.feed('data: {"error": {"message": "boom"}}'))
         self.assertIn('boom', state.result()['error'])
 
+    def test_each_streamed_chunk_is_timed_from_the_send_and_the_list_is_bounded(self):
+        now = [100.0]
+        state = replay.StreamState(clock=lambda: now[0])
+        for payload in ('{"choices": [{"delta": {"content": "a"}, "token_ids": [5]}]}',
+                        '{"choices": [{"delta": {}}]}',
+                        '{"choices": [{"delta": {"content": "b"}, "token_ids": [6, 7]}]}'):
+            now[0] += 0.5
+            state.feed('data: ' + payload)
+        self.assertEqual(state.result()['chunk_times'], [0.5, 1.5], 'an empty delta is not a chunk')
+        with mock.patch.object(replay, 'CHUNK_TIMES_LIMIT', 1):
+            capped = replay.StreamState(clock=lambda: now[0])
+            for _ in range(3):
+                capped.feed('data: {"choices": [{"delta": {"content": "x"}, "token_ids": [1]}]}')
+            self.assertEqual(len(capped.result()['chunk_times']), 1)
+
     def test_comments_and_bad_json_are_skipped(self):
         state = replay.StreamState()
         self.assertFalse(state.feed(': keep-alive'))

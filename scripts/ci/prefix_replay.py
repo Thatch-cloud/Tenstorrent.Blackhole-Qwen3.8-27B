@@ -220,6 +220,9 @@ def input_indexes(messages):
 
 # -- the streamed chat completion ----------------------------------------------------------------
 
+CHUNK_TIMES_LIMIT = 2048
+
+
 class StreamState(object):
     """A streamed chat completion, fed line by line (server-sent events): text, reasoning, tool
     calls, output and prompt token ids, usage, finish reason, and when the first token came."""
@@ -229,6 +232,7 @@ class StreamState(object):
         self.started = clock()
         self.first_token_at = None
         self.content, self.reasoning, self.token_ids = [], [], []
+        self.chunk_times = []       # each streamed chunk's offset from the send: the other seats' gaps while a turn prefills
         self.prompt_token_ids = None
         self.calls = {}
         self.usage = None
@@ -264,6 +268,8 @@ class StreamState(object):
             thought = delta.get('reasoning') or delta.get('reasoning_content') or ''
             if (ids or text or thought or delta.get('tool_calls')) and self.first_token_at is None:
                 self.first_token_at = self.clock()
+            if (ids or text or thought) and len(self.chunk_times) < CHUNK_TIMES_LIMIT:
+                self.chunk_times.append(round(self.clock() - self.started, 3))
             self.token_ids.extend(ids)
             if text:
                 self.content.append(text)
@@ -296,7 +302,7 @@ class StreamState(object):
                     prompt_ids=prompt_ids, prompt_sha=judge.token_sha(prompt_ids) if prompt_ids is not None else None,
                     prompt_tokens=len(prompt_ids) if prompt_ids is not None else usage.get('prompt_tokens'),
                     completion_tokens=usage.get('completion_tokens', len(self.token_ids)), finish=self.finish,
-                    error=self.error,
+                    error=self.error, chunk_times=list(self.chunk_times),
                     ttft_s=round(self.first_token_at - self.started, 3) if self.first_token_at else None,
                     wall_s=round(ended - self.started, 3))
 
@@ -1733,7 +1739,7 @@ def scenario_timing(driver, agents=TIMING_AGENTS, turns=TIMING_TURNS, max_tokens
 # the agent, never by the arm) and their transcripts can be compared turn by turn (prefix_agent_turns).
 AGENT_TURNS_AGENTS = (8,)
 AGENT_TURNS = 8
-AGENT_TURN_MAX_TOKENS = 192      # the metered answers' p50 is 76-176 tokens
+AGENT_TURN_MAX_TOKENS = 192      # short coding-agent answers
 
 
 def scenario_agent_turns(driver, agents=None, turns=AGENT_TURNS, max_tokens=AGENT_TURN_MAX_TOKENS, gap_mean_s=None):

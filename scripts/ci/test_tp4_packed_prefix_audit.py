@@ -9,6 +9,12 @@ the pair's audit never saw. This module holds what can run on the CPU:
              pool: the ordered K/V writers are the pool's only writers, and a lever that grows one must be audited first;
   frontier   a verify round at a 262k position writes only pages at or above the frontier, through a 4,096-wide table, with
              the shared prefix [0, R) below it;
+  census     every device-write call site of those modules (a copy of any kind, a host-to-device copy, a generic_op DMA kernel), found
+             by the syntax tree and not by a name pattern, is on an audited table of what it writes; a new site fails until audited;
+             and no write-site module names the K/V pool at all;
+  null       page 0, vLLM's null block, is what an idle segment of a padded round maps to and is refused anywhere in a live table;
+  width      at attach a model whose chunk-input page table is not at the warmed width is refused under sticky sessions (a hit would
+             compile at a new shape after the traces are parked), and nothing changes with the switches off;
   guard      two same-tenant blocks of four seats share their first block: every seat of both blocks crossing a 64-token
              boundary together is not a K/V conflict under sticky sessions, a real conflict across a block's seats still is,
              and the sentinel pad keeps its meaning at width 4,096.
@@ -16,6 +22,7 @@ the pair's audit never saw. This module holds what can run on the CPU:
 The hardware half is the exactness-shared arm on eight agents (E2 of references/tp4-packed-prefix-jobs): per-window KV digests
 of every window two requests share must agree across the decode."""
 
+import ast
 import os
 import re
 import sys
@@ -30,7 +37,9 @@ import torch
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import packed_verifier  # noqa: E402
 import serving_packed_step  # noqa: E402
+import serving_runtime  # noqa: E402
 import serving_page_binding  # noqa: E402
 import verify_trace_t2  # noqa: E402
 
@@ -189,6 +198,143 @@ class TwoBlockGuardTests(unittest.TestCase):
         # the sentinel is per segment, so equal segments of the two blocks map their pads alike and nothing crosses blocks
         self.assertEqual(serving_packed_step.pad_sentinel_table(first[2].pages, 2),
                          serving_packed_step.pad_sentinel_table(second[2].pages, 2))
+
+
+WRITE_CALLS = ('copy', 'copy_host_to_device_tensor', 'generic_op')
+# Every device-write call site of the lever modules, by (module, enclosing function, call): what it writes. A generic_op takes the
+# tensors its caller built (the GDN state lanes, the drafter banks, the query and result staging), so its census row fixes the SITE;
+# which tensors a caller passes is the hardware half (E2's window digests).
+AUDITED_WRITE_SITES = {
+    ('fused_commit_tp.py', 'project', 'copy'): 'the drafter K/V banks (the fused commit)',
+    ('draft_kv_slide_tp.py', 'prepare', 'generic_op'): 'the drafter K/V history (the slide DMA)',
+    ('draft_kv_history_tp.py', '__init__', 'copy'): 'the drafter history banks',
+    ('draft_kv_history_tp.py', 'prepare', 'copy'): 'the drafter history spare banks',
+    ('quad_draft_tp.py', 'quad_fused_convolution', 'generic_op'): 'a fresh convolution output of the quad draft',
+    ('quad_draft_tp.py', '_update', 'copy_host_to_device_tensor'): 'the quad draft\'s staged host payload',
+    ('quad_draft_tp.py', '_update.copy_cache', 'copy'): 'the quad draft\'s own cache',
+    ('gdn_commit_dma_tp.py', 'prepare.execute', 'generic_op'): 'the GDN state commit lanes',
+    ('gdn_rows_dma_tp.py', 'launch', 'generic_op'): 'the GDN rows glue',
+    ('attention_block_fold_tp.py', '_launch', 'generic_op'): 'the attention fold\'s query and result staging',
+    ('extent_attention_replay_tp.py', 'stage', 'copy_host_to_device_tensor'): 'the extent reader\'s staged positions and page tables',
+}
+POOL_NAMES = re.compile(r'_paged_kv|kv_cache|k_cache|v_cache|paged_cache|kv_pool', re.IGNORECASE)
+
+
+def write_sites(path):
+    """[(enclosing function path, call name)] of every call to a write-capable ttnn entry in a module, from its syntax tree."""
+    class Visitor(ast.NodeVisitor):
+        def __init__(self):
+            self.stack, self.found = [], []
+
+        def visit_FunctionDef(self, node):
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Call(self, node):
+            function = node.func
+            name = function.attr if isinstance(function, ast.Attribute) else getattr(function, 'id', None)
+            if name in WRITE_CALLS:
+                self.found.append(('.'.join(self.stack), name))
+            self.generic_visit(node)
+
+    visitor = Visitor()
+    visitor.visit(ast.parse(Path(path).read_text(encoding='utf-8')))
+    return visitor.found
+
+
+class WriterCensusTests(unittest.TestCase):
+    def test_every_device_write_site_of_the_levers_is_audited_and_none_is_new(self):
+        found = {}
+        for name in LEVER_MODULES:
+            for function, call in write_sites(HERE / name):
+                found.setdefault((name, function, call), 0)
+                found[(name, function, call)] += 1
+        self.assertEqual(sorted(found), sorted(AUDITED_WRITE_SITES),
+                         'a TP4 lever gained or lost a device write: audit it (docs/tp4-packed-prefix.md) before it joins a sticky '
+                         'profile, then update AUDITED_WRITE_SITES')
+        self.assertTrue(all(count == 1 for count in found.values()), found)
+
+    def test_no_write_site_module_names_the_kv_pool(self):
+        for name in sorted({site[0] for site in AUDITED_WRITE_SITES}):
+            with self.subTest(module=name):
+                text = (HERE / name).read_text(encoding='utf-8')
+                self.assertEqual(POOL_NAMES.findall(text), [], '%s writes to the device and names the K/V pool' % name)
+
+    def test_the_census_sees_a_generic_copy_the_name_pattern_misses(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            probe = Path(folder) / 'lever.py'
+            probe.write_text('def commit(ttnn, source, cache):\n    ttnn.copy(source, cache)\n', encoding='utf-8')
+            self.assertEqual(write_sites(probe), [('commit', 'copy')])
+            self.assertEqual(POOL_WRITE.findall(probe.read_text(encoding='utf-8')), [], 'the old pattern is blind to it')
+
+
+class NullBlockTests(unittest.TestCase):
+    """vLLM's block 0 is never handed to a request (serving_kv_reservation.NULL_BLOCKS), so page 0 is the one page nothing owns:
+    an idle segment of a padded round is mapped to it and a live table must never name it."""
+
+    def engine(self, extent):
+        return SimpleNamespace(users=4, rows_per_user=16, replay_capacity=4096, extent=extent, MAX_IDLE_SEGMENTS=2,
+                               shape=SimpleNamespace(page_width=4096))
+
+    def test_an_idle_segment_maps_to_page_zero_at_width_4096(self):
+        for extent in (False, True):
+            with self.subTest(extent=extent):
+                idle = packed_verifier.PackedVerifierEngine.idle_inputs(self.engine(extent), (0, 1))
+                self.assertEqual(sorted(idle), [2, 3])
+                for tokens, start, pages in idle.values():
+                    self.assertEqual(tuple(pages.shape), (1, 4096))
+                    self.assertEqual(int(pages.abs().sum()), 0)
+                    self.assertEqual(packed_verifier.page_zero_index(pages, start, 16), 0)
+
+    def test_a_live_table_naming_page_zero_inside_its_used_range_is_found(self):
+        table = engine_with(blocks_of(5000, 63), 4096).pages
+        self.assertIsNone(packed_verifier.page_zero_index(table, 4000, 16))
+        table[0, 10] = 0
+        self.assertEqual(packed_verifier.page_zero_index(table, 4000, 16), 10)
+
+    def test_the_reservation_never_hands_out_page_zero(self):
+        import serving_kv_reservation as reservation
+
+        self.assertEqual(reservation.NULL_BLOCKS, 1)
+        self.assertEqual(reservation.pool_blocks(SimpleNamespace(kv_cache_manager=SimpleNamespace(
+            block_pool=SimpleNamespace(num_gpu_blocks=19968)))), 19967)
+
+
+class PageWidthTests(unittest.TestCase):
+    """The attach-time width check (serving_runtime.prefill_warm_before_traces): under sticky sessions a model whose chunk-input
+    page table is not at the width the eager prefill was warmed at (runner.max_num_blocks_per_req) is refused."""
+
+    FOUR = {'QWEN_FAST_TP': '4'}
+    STICKY_ON = {'QWEN_FAST_TP': '4', 'QWEN_PREFIX_REUSE': '1', STICKY: '1'}
+
+    def warm(self, environ, buffer_width=None, width=4096):
+        import test_tp4_prefill_scratch as scratch
+
+        model = scratch.Model()
+        if buffer_width is not None:
+            model._chunk_full_page_table_buf = SimpleNamespace(shape=(1, 1, 1, buffer_width))
+        with mock.patch.object(serving_runtime, 'pindiag'):
+            return serving_runtime.prefill_warm_before_traces(SimpleNamespace(max_num_blocks_per_req=width), model, 2, environ)
+
+    def test_no_buffer_or_a_buffer_at_the_warmed_width_is_admitted(self):
+        self.assertTrue(self.warm(self.STICKY_ON))
+        self.assertTrue(self.warm(self.STICKY_ON, buffer_width=4096))
+
+    def test_a_buffer_at_another_width_is_refused_at_attach(self):
+        for buffer_width in (2048, 4128, 4097):
+            with self.subTest(buffer_width=buffer_width):
+                with self.assertRaisesRegex(ValueError, 'absent or the width 4096'):
+                    self.warm(self.STICKY_ON, buffer_width=buffer_width)
+
+    def test_with_either_switch_off_nothing_is_checked(self):
+        for environ in (self.FOUR, dict(self.FOUR, QWEN_PREFIX_REUSE='1'), dict(self.FOUR, **{STICKY: '1'})):
+            with self.subTest(environ=sorted(environ)):
+                self.assertTrue(self.warm(environ, buffer_width=2048))
 
 
 if __name__ == '__main__':

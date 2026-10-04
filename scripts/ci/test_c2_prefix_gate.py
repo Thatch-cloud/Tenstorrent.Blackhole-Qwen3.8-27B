@@ -1157,6 +1157,29 @@ class StickyRunnerTests(unittest.TestCase):
         self.assertNotIn('build_ms_p50', result['arms']['timing-baseline']['phases']['agents-2'])
 
 
+class LifecycleReservationTests(unittest.TestCase):
+    """A sticky lifecycle arm reads the KV reservation: a re-admitted request is a FAIL, the holds and hits are reported."""
+
+    @staticmethod
+    def record(tag, q=None, admissions=1):
+        return dict(tag=tag, ok=True, markers=dict(q=q, admissions=admissions))
+
+    def test_a_request_vllm_resumed_fails_and_holds_and_hits_are_counted(self):
+        log = '\n'.join(['2026-10-04 [PINDIAG] kv reservation hold request=r1 reserved=4100 running=19000 pool=19967 decodes=3',
+                         'unrelated', '[PINDIAG] kv reservation released request=r1 reserved=4100 running=15000 pool=19967',
+                         '[PINDIAG] kv reservation hold request=r2 reserved=4100 running=19000 pool=19967 decodes=3'])
+        problems, lines = gate.lifecycle_reservation_findings(
+            [self.record('a', q=2048), self.record('b', q=0), self.record('c', q=4096, admissions=2)], log)
+        self.assertEqual(len(problems), 1)
+        self.assertIn('c (2 admissions)', problems[0])
+        self.assertEqual(lines, ['KV reservation: 2 hold lines, 2 hits restored, 1 requests re-admitted (preempted)'])
+
+    def test_no_holds_and_no_resumes_is_reported_and_passes(self):
+        problems, lines = gate.lifecycle_reservation_findings([self.record('a', q=2048)], None)
+        self.assertEqual(problems, [])
+        self.assertIn('0 hold lines', lines[0])
+
+
 class RequiredTestsTests(unittest.TestCase):
     """required_tests.py, the probe step's runner for tests that must RUN in the image: a skip, a failure, a
     target that loads nothing or too few tests fails it."""

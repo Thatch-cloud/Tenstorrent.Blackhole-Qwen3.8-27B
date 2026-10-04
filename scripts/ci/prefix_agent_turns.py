@@ -14,8 +14,15 @@ It reads the replay's records (after prefix_judge.resolve for the markers; the o
                  row Q; 0 on a control), the tokens NEW (prompt - reused), TTFT, the decode rate after the first token
                  (completion tokens - 1 over wall - TTFT), and the engine build the sticky line timed;
   render_row     that row as one log line per turn (the per-turn logging);
-  reuse_findings the prefix arm's smoke rules: every agent that continued reused tokens on at least one continuation (an
-                 engaged marker alone is not reuse), and the turns that restored nothing counted;
+  reuse_findings the prefix arm's smoke rules: EVERY continuation's reused tokens are judged against the sticky oracle
+                 (prefix_judge.Oracle, fed in the record's own admission order: the record's `expected` Q). At eight agents under
+                 about 60k tokens each against a pool of over a million tokens nothing is evicted, so a continuation whose Q is not
+                 the oracle's is a FAIL unless the registry's stats show an eviction (evicted_coupled / evicted_lru), which excuses
+                 a shortfall only (and it is reported); a Q above the oracle's is always a FAIL. An engaged marker alone is not
+                 reuse, and a conversation that never reused on any continuation is not exercised;
+  stall_rows     the per-arrival stall: while a turn prefills (sent .. first token), the longest gap between two streamed chunks of
+                 each OTHER seat that was decoding across that window - what an arrival costs the seats beside it (records carry
+                 `chunk_times`: each streamed chunk's offset from its own send, so a gap is read with no log);
   compare        two arms' transcripts, paired by (case, conversation, turn): IDENTICAL, DIVERGED (the first one per
                  conversation), NOT_COMPARABLE (downstream of a divergence: a different prompt), ERROR, and the turns only one
                  arm ran; plus the paired continuation TTFT and decode rate.
@@ -88,8 +95,14 @@ def render_row(arm, row):
         row['ttft_s'], row['decode_tps'], row['build_ms'], '' if row['ok'] else ' FAILED'))
 
 
-def reuse_findings(records):
-    """The prefix arm's reuse smoke rule. -> (problems, not exercised, lines)."""
+def _evictions(stats):
+    stats = stats if isinstance(stats, dict) else {}
+    return sum(int(stats.get(key) or 0) for key in ('evicted_coupled', 'evicted_lru'))
+
+
+def reuse_findings(records, stats=None):
+    """The prefix arm's reuse smoke rules. -> (problems, not exercised, lines). `stats` is the registry's stats export (the
+    eviction counters that may excuse a shortfall)."""
     problems, missing, lines = [], [], []
     served = [r for r in agent_records(records) if r.get('ok')]
     by_conv = {}
@@ -117,7 +130,86 @@ def reuse_findings(records):
     unmarked = [r for r in continued if (r.get('markers') or {}).get('q') is None]
     if unmarked:
         lines.append('%d continuations carry no [PREFIX] row (an unsalted or unresolved turn)' % len(unmarked))
+    evicted = _evictions(stats)
+    judged, short, unjudged = 0, 0, []
+    for record in continued:
+        expected = record.get('expected')
+        q = (record.get('markers') or {}).get('q')
+        label = '%s turn %s' % (record.get('conv'), record.get('turn'))
+        if not isinstance(expected, dict) or expected.get('q') is None:
+            unjudged.append(label)
+            continue
+        want = int(expected['q'])
+        if q is None:
+            if want:
+                missing.append('%s: the oracle says Q=%d but the turn has no [PREFIX] row to judge' % (label, want))
+            continue
+        judged += 1
+        if q == want:
+            continue
+        if q > want:
+            problems.append('%s restored Q=%d, more than the oracle\'s %d: reuse past what was published' % (label, q, want))
+        elif evicted:
+            short += 1
+        else:
+            problems.append('%s restored Q=%d where the oracle says %d and no eviction is on record (evicted_coupled and '
+                            'evicted_lru are 0): a continuation missed the conversation it continues' % (label, q, want))
+    lines.append('continuations judged against the oracle: %d of %d (%d short of it, excused by %d evictions on record)' % (
+        judged, len(continued), short, evicted))
+    if unjudged:
+        lines.append('%d continuations carry no oracle expectation (%s ...)' % (len(unjudged), ', '.join(unjudged[:4])))
+    if not judged:
+        missing.append('no continuation could be judged against the oracle (no record carries `expected`): reuse is not '
+                       'measured per turn')
     return problems, missing, lines
+
+
+def stall_rows(records):
+    """[row] one per served turn that prefilled while at least one OTHER seat was streaming across its window: the other seats'
+    longest gap between two chunks inside [sent, first token]. A seat counts only when it streamed before the window ended and
+    after it began (its own chunk offsets plus its send time, the replay clock)."""
+    served = [r for r in agent_records(records) if r.get('ok') and r.get('chunk_times') and r.get('sent_s') is not None]
+    rows = []
+    for turn in served:
+        ttft = turn.get('ttft_s')
+        if ttft is None:
+            continue
+        begin = turn['sent_s']
+        end = begin + ttft
+        worst = []
+        for other in served:
+            if other is turn:
+                continue
+            times = [other['sent_s'] + offset for offset in other['chunk_times']]
+            if len(times) < 2 or times[0] >= end or times[-1] <= begin:
+                continue
+            gaps = [b - a for a, b in zip(times, times[1:]) if b > begin and a < end]
+            if gaps:
+                worst.append(max(gaps))
+        if not worst:
+            continue
+        prompt, reused = turn.get('prompt_tokens'), (turn.get('markers') or {}).get('q')
+        rows.append(dict(tag=turn.get('tag'), conv=turn.get('conv'), turn=turn.get('turn'), prompt_tokens=prompt,
+                         new=(prompt - reused) if isinstance(prompt, int) and isinstance(reused, int) else None,
+                         ttft_s=ttft, others=len(worst), worst_gap_s=_round(max(worst), 3),
+                         p50_gap_s=_round(percentile(worst, 0.5), 3)))
+    return rows
+
+
+def render_stall(arm, row):
+    return '[STALL] %s %s turn=%s prompt=%s new=%s ttft=%s s others=%d worst_gap=%s s p50_gap=%s s' % (
+        arm, row['conv'], row['turn'], row['prompt_tokens'], row['new'], row['ttft_s'], row['others'], row['worst_gap_s'],
+        row['p50_gap_s'])
+
+
+def stall_summary(label, rows):
+    if not rows:
+        return '%s: no turn prefilled while another seat was streaming (or the records carry no chunk times)' % label
+    worst = max(rows, key=lambda row: row['worst_gap_s'])
+    return ('%s: %d turns prefilled beside streaming seats; the others\' longest gap p50/p90/max %s/%s/%s s (max at %s turn %s, '
+            'prompt %s, new %s)' % (label, len(rows), _round(percentile([r['worst_gap_s'] for r in rows], 0.5), 3),
+                                   _round(percentile([r['worst_gap_s'] for r in rows], 0.9), 3), worst['worst_gap_s'],
+                                   worst['conv'], worst['turn'], worst['prompt_tokens'], worst['new']))
 
 
 def _keyed(records):
@@ -132,21 +224,22 @@ def _compare_pair(a, b):
     if a.get('prompt_sha') != b.get('prompt_sha') or a.get('prompt_tokens') != b.get('prompt_tokens'):
         return 'NOT_COMPARABLE', 'different prompts (an earlier turn of this conversation diverged)'
     ids_a, ids_b = a.get('token_ids'), b.get('token_ids')
-    if ids_a is not None and ids_b is not None:
-        at = None
-        for index in range(min(len(ids_a), len(ids_b))):
-            if ids_a[index] != ids_b[index]:
-                at = index
-                break
-        if at is None and len(ids_a) != len(ids_b):
-            at = min(len(ids_a), len(ids_b))
-        if at is None and a.get('finish') == b.get('finish'):
-            return 'IDENTICAL', None
-        return 'DIVERGED', 'first differing output token %s (A %d tokens %s, B %d tokens %s)' % (
-            at, len(ids_a), a.get('finish'), len(ids_b), b.get('finish'))
-    same = (a.get('content') == b.get('content') and a.get('reasoning') == b.get('reasoning')
-            and a.get('finish') == b.get('finish'))
-    return ('IDENTICAL', None) if same else ('DIVERGED', 'texts differ (no token ids)')
+    if ids_a is None or ids_b is None:
+        # The replay asks for return_token_ids on every request: an answered turn without them is a harness fault, and a text
+        # comparison would hide a one-token difference the tokenizer folds away. The check is per token or it is not made.
+        return 'ERROR', 'no output token ids recorded (%s): the comparison is per token' % (
+            ', '.join(label for label, ids in (('A', ids_a), ('B', ids_b)) if ids is None))
+    at = None
+    for index in range(min(len(ids_a), len(ids_b))):
+        if ids_a[index] != ids_b[index]:
+            at = index
+            break
+    if at is None and len(ids_a) != len(ids_b):
+        at = min(len(ids_a), len(ids_b))
+    if at is None and a.get('finish') == b.get('finish'):
+        return 'IDENTICAL', None
+    return 'DIVERGED', 'first differing output token %s (A %d tokens %s, B %d tokens %s)' % (
+        at, len(ids_a), a.get('finish'), len(ids_b), b.get('finish'))
 
 
 def compare(records_a, records_b, label_a='A', label_b='B'):
@@ -182,6 +275,7 @@ def compare(records_a, records_b, label_a='A', label_b='B'):
     for label, keyed in ((label_a, keyed_a), (label_b, keyed_b)):
         served = [r for r in keyed.values() if r.get('ok')]
         cont = [r for r in served if r.get('continuation')]
+        lines.append(stall_summary('%s stall' % label, stall_rows(list(keyed.values()))))
         lines.append('%s: %d turns served; TTFT p50/p90 %s/%s s (continuations %s/%s); decode p50 %s tok/s; turn p50 %s s' % (
             label, len(served), _round(percentile([r.get('ttft_s') for r in served], 0.5)),
             _round(percentile([r.get('ttft_s') for r in served], 0.9)),

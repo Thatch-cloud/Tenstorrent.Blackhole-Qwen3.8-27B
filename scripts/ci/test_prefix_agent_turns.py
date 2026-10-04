@@ -13,12 +13,15 @@ import prefix_agent_turns as turns  # noqa: E402
 
 
 def record(conv, turn, ids, q=None, prompt=1000, ttft=1.0, wall=3.0, out=None, ok=True, sha=None, role='agent', sent=0.0,
-           finish='stop', build=None):
+           finish='stop', build=None, want=None, chunks=None):
     markers = {} if q is None else dict(q=q, l=prompt, sticky_builds=[dict(ms=build)] if build else [])
-    return dict(tag='%s-%s' % (conv, turn), case='agents-8', conv=conv, turn=turn, role=role, ok=ok, continuation=turn > 0,
+    extra = {} if want is None else dict(expected=dict(q=want, h=want))
+    if chunks is not None:
+        extra['chunk_times'] = list(chunks)
+    return dict(extra, **dict(tag='%s-%s' % (conv, turn), case='agents-8', conv=conv, turn=turn, role=role, ok=ok, continuation=turn > 0,
                 prompt_tokens=prompt, prompt_sha=sha or ('sha-%s-%s' % (conv, turn)), token_ids=list(ids), finish=finish,
                 completion_tokens=len(ids) if out is None else out, ttft_s=ttft, wall_s=wall, sent_s=sent, markers=markers,
-                content='', reasoning=None)
+                content='', reasoning=None))
 
 
 class RowTests(unittest.TestCase):
@@ -46,19 +49,82 @@ class RowTests(unittest.TestCase):
 
 class ReuseTests(unittest.TestCase):
     def test_every_continuing_agent_reusing_passes_and_a_cold_agent_is_not_exercised(self):
-        good = [record('a', 0, [1]), record('a', 1, [1], q=2048), record('b', 0, [1]), record('b', 1, [1], q=4096)]
+        good = [record('a', 0, [1]), record('a', 1, [1], q=2048, want=2048), record('b', 0, [1]),
+                record('b', 1, [1], q=4096, want=4096)]
         problems, missing, lines = turns.reuse_findings(good)
         self.assertEqual((problems, missing), ([], []))
         self.assertIn('2 of 2', lines[0])
-        bad = good[:3] + [record('b', 1, [1], q=0)]
+        self.assertTrue(any('judged against the oracle: 2 of 2' in line for line in lines), lines)
+        bad = good[:3] + [record('b', 1, [1], q=0, want=4096)]
         problems, missing, _ = turns.reuse_findings(bad)
+        self.assertEqual(len(problems), 1, 'a miss the oracle did not expect is a problem now')
+        self.assertTrue(any('b' in entry for entry in missing), 'and the conversation that never reused is still reported')
+
+    def test_a_later_cold_continuation_fails_when_the_oracle_says_it_reuses_and_nothing_was_evicted(self):
+        rows = [record('a', 0, [1]), record('a', 1, [1], q=4096, want=4096), record('a', 2, [1], q=0, want=6144)]
+        problems, missing, lines = turns.reuse_findings(rows)
+        self.assertEqual(missing, [], 'the conversation did reuse once: the old rule was satisfied')
+        self.assertEqual(len(problems), 1)
+        self.assertIn('a turn 2 restored Q=0 where the oracle says 6144', problems[0])
+        self.assertIn('no eviction is on record', problems[0])
+
+    def test_an_eviction_on_record_excuses_a_shortfall_but_never_an_excess(self):
+        rows = [record('a', 0, [1]), record('a', 1, [1], q=2048, want=4096)]
+        problems, _, lines = turns.reuse_findings(rows, dict(evicted_coupled=3))
         self.assertEqual(problems, [])
-        self.assertEqual(len(missing), 1)
-        self.assertIn('b', missing[0])
+        self.assertTrue(any('1 short of it, excused by 3 evictions' in line for line in lines), lines)
+        problems, _, _ = turns.reuse_findings(rows, dict(evicted_lru=0, evicted_coupled=0))
+        self.assertEqual(len(problems), 1)
+        excess = [record('a', 0, [1]), record('a', 1, [1], q=8192, want=4096)]
+        problems, _, _ = turns.reuse_findings(excess, dict(evicted_coupled=9))
+        self.assertIn('more than the oracle', problems[0])
+
+    def test_without_an_oracle_expectation_nothing_is_judged_and_that_is_not_exercised(self):
+        rows = [record('a', 0, [1]), record('a', 1, [1], q=2048)]
+        problems, missing, lines = turns.reuse_findings(rows)
+        self.assertEqual(problems, [])
+        self.assertTrue(any('no continuation could be judged against the oracle' in entry for entry in missing), missing)
+        self.assertTrue(any('carry no oracle expectation' in line for line in lines))
+
+    def test_a_turn_the_oracle_expects_to_reuse_with_no_row_is_not_exercised(self):
+        rows = [record('a', 0, [1]), record('a', 1, [1], q=2048, want=2048), record('a', 2, [1], want=4096)]
+        problems, missing, _ = turns.reuse_findings(rows)
+        self.assertEqual(problems, [])
+        self.assertTrue(any('a turn 2: the oracle says Q=4096 but the turn has no [PREFIX] row' in entry for entry in missing))
 
     def test_no_continuation_and_no_served_turn_are_not_exercised(self):
         self.assertTrue(turns.reuse_findings([])[1])
         self.assertIn('no agent continued', turns.reuse_findings([record('a', 0, [1])])[1][0])
+
+
+class StallTests(unittest.TestCase):
+    """The per-arrival stall: the other seats' longest chunk gap while a turn prefills (sent .. first token)."""
+
+    def test_the_others_longest_gap_inside_the_prefill_window_is_read_per_arrival(self):
+        # seat b streams every 0.1 s from t=0 and then stops for 4 s while seat a's turn prefills from t=5 to t=11
+        steady = [round(0.1 * i, 3) for i in range(50)]                   # chunks at 0 .. 4.9 s
+        resumed = [9.0 + 0.1 * i for i in range(30)]                       # the next chunk comes at 9.0 s, a 4.1 s gap
+        victim = record('b', 1, range(80), q=1, sent=0.0, ttft=0.2, wall=12.0, chunks=steady + resumed)
+        arrival = record('a', 1, range(5), q=2048, prompt=6000, sent=5.0, ttft=6.0, wall=8.0, chunks=[6.0, 6.1])
+        rows = turns.stall_rows([victim, arrival])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]['conv'], rows[0]['others'], rows[0]['new']), ('a', 1, 3952))
+        self.assertAlmostEqual(rows[0]['worst_gap_s'], 4.1, places=2)
+        self.assertIn('worst_gap=4.1', turns.render_stall('arm', rows[0]))
+        self.assertIn('max at a turn 1', turns.stall_summary('x', rows))
+
+    def test_a_seat_that_was_not_streaming_across_the_window_is_not_counted(self):
+        done = record('b', 1, range(10), sent=0.0, ttft=0.2, wall=1.0, chunks=[0.2, 0.3, 0.4])
+        later = record('c', 1, range(10), sent=20.0, ttft=0.2, wall=1.0, chunks=[0.2, 0.3])
+        arrival = record('a', 1, range(5), sent=5.0, ttft=6.0, wall=8.0, chunks=[6.0, 6.1])
+        self.assertEqual(turns.stall_rows([done, later, arrival]), [])
+        self.assertIn('no turn prefilled', turns.stall_summary('x', []))
+
+    def test_records_without_chunk_times_give_no_rows_and_compare_says_so(self):
+        arm = [record('a', 0, [1, 2]), record('b', 0, [1, 2])]
+        self.assertEqual(turns.stall_rows(arm), [])
+        result = turns.compare(arm, arm, 'control', 'prefix')
+        self.assertTrue(any('control stall: no turn prefilled' in line for line in result['lines']), result['lines'])
 
 
 class CompareTests(unittest.TestCase):
@@ -107,6 +173,14 @@ class CompareTests(unittest.TestCase):
         failed = self.arm()
         failed[0]['ok'] = False
         self.assertEqual(turns.compare(self.arm(), failed)['verdict'], 'FAIL')
+
+    def test_an_answered_turn_without_output_token_ids_is_an_error_not_a_text_comparison(self):
+        other = self.arm()
+        other[0]['token_ids'] = None
+        result = turns.compare(self.arm(), other, 'control', 'prefix')
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertEqual(result['counts']['ERROR'], 1)
+        self.assertIn('per token', result['problems'][0])
 
     def test_nothing_in_common_fails(self):
         self.assertEqual(turns.compare([], [])['verdict'], 'FAIL')

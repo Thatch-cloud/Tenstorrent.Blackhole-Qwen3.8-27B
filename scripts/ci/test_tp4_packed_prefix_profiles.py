@@ -181,10 +181,13 @@ class PlanTests(unittest.TestCase):
 
 
 class ReservationArithmeticTests(unittest.TestCase):
-    """The KV reservation under prefix caching (design 3.3 item 2, the arithmetic half; the real-scheduler proof is the
-    hardware ladder's PH4 and test_serving_kv_reservation_vllm where vLLM is installed): a request's reservation r counts
+    """The KV reservation under prefix caching (design 3.3 item 2, the arithmetic half; the real-scheduler proof is named below):
+    a request's reservation r counts
     every block of its life, the blocks it shares with another conversation included, and a shared block is one physical
-    block, so the pool's physical use is at most the sum of the running reservations."""
+    block, so the pool's physical use is at most the sum of the running reservations. This class is the arithmetic only; the
+    real-scheduler proof with the prefix cache on is test_qwen_prefix_scheduler_vllm.StickyReservationOnRealVllmTests (the
+    graft's sticky scheduler, DFlash lookahead 16, hits and siblings, a pool smaller than the traffic, a negative control; run by
+    qwen-fast-vllm-cpu.yml) and the cards' half is the lifecycle job L1 of references/tp4-packed-prefix-jobs."""
 
     POOL = 19967
 

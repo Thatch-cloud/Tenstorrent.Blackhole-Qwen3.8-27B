@@ -27,7 +27,8 @@ Until now it existed for the pair only (`c2-packed-prefix`) and never ran on har
 | Profiles | `c2-packed-tp4-8x262k-prefix-gate` (audited; the twin of `...-best`) and `c2-packed-tp4-8x262k-prefix-time-gate` (audits off; the twin of `...-best-time-gate`). Each is its parent plus exactly `QWEN_PREFIX_REUSE=1`, `QWEN_PREFIX_STORE_GIB=8`, `QWEN_FAST_STICKY_SESSIONS=1` and the argv's `enable-prefix-caching`, `enable-chunked-prefill`, `prefix-caching-hash-algo sha256` in place of the two `no-` flags. Gate-only, the 262k evidence waiver, every result UNQUALIFIED. The parents are the controls. |
 | Harness | `prefix_replay.scenario_agent_turns` (the agent-turn replay), `SHARED_AGENT_TARGETS_8` (eight same-tenant agents across both packed blocks, chosen by `Driver.seats`), `CHAIN_HITS_262K` (the exactness chain on to 150k and 200k and the 262k prompt limit), plans `agent-turns`, `agent-turns-prefix`, `agent-turns-baseline` in `c2_prefix_gate.py` and `c2_serving_job.py`. |
 | Per-turn logging | a `[TURN]` line per served turn: tokens reused (the model's own `[PREFIX]` row Q), tokens new, TTFT, decode tokens/s after the first token, the engine build. The server already logs `sticky admit` (Q, P, tail) and `sticky engine built` per request. |
-| Smoke rules | engaged marker (`install sticky=1 lookahead=16 drop_last=True`, the model warm line), reused tokens above zero on a returning conversation (the prefix arm is NOT_EXERCISED when an agent that continued reused nothing), continuations byte-identical to a cold full prefill (the bring-up's reference, `exactness-eager`'s strict pairs, and the agent-turn transcripts compared with the control's). |
+| Per-arrival stall | a `[STALL]` line per turn that prefilled beside streaming seats: the other seats' longest gap between two streamed chunks while it prefilled (`prefix_agent_turns.stall_rows`, from the records' `chunk_times`), and a summary per arm in the comparator. |
+| Smoke rules | engaged marker (`install sticky=1 lookahead=16 drop_last=True`, the model warm line), every continuation's reused tokens equal to the sticky oracle's Q (a miss with no eviction on record is a FAIL; a conversation that never reused is NOT_EXERCISED), continuations byte-identical to a cold full prefill (the bring-up's reference, `exactness-eager`'s strict pairs, and the agent-turn transcripts compared with the control's). |
 | Comparator | `scripts/ci/prefix_agent_turns.py A B`: two arms' transcripts turn by turn (output token ids; one divergence is reported once, at its first turn, and later turns of that conversation have another prompt) and the paired continuation TTFT. |
 | Audit | the TP4 section below and `test_tp4_packed_prefix_audit.py`. |
 | Job pack | `scripts/ci/references/tp4-packed-prefix-jobs` (image `tp4-packed-prefix-1`), see its `ORDER.txt`. |
@@ -77,21 +78,40 @@ KV pool. The four-card eight-seat levers add these writers; none of them writes 
 | Idle segments of a padded round | page 0 | vLLM's null block | never in a request's table |
 | Prefill route's chunks and tail | positions `[R, P)` | the request's table | every block is at or above `R / 64`, allocated fresh |
 
-`test_tp4_packed_prefix_audit.py` holds the inventory (no lever module names a K/V pool write call: a lever that
-grows one fails there and must be audited before it joins a sticky profile), a verify round at a 262k position
+`test_tp4_packed_prefix_audit.py` holds the inventory (no lever module names a K/V pool write call, and a census read
+from the syntax tree, not a name pattern, lists every device-write call site of the lever modules - a copy of any
+kind, a host-to-device copy, a generic_op DMA kernel - against an audited table: a lever that grows a write fails
+there and must be audited before it joins a sticky profile; a generic_op takes the tensors its caller built, so the
+census fixes the site and E2's window digests are the check of which tensors a caller passes), page 0 as the idle
+segment's page and refused in a live table, the attach-time page-table width check (below), a verify round at a 262k position
 through a 4,096-wide table, and the guard across two packed blocks (every seat of both blocks crossing a 64-token
 boundary together is not a conflict under sticky sessions; a real conflict inside a block still is). Across the
 two blocks the guard runs per block and cross-block sharing is read-only. The hardware half is the
 `exactness-shared` arm on eight agents (`E2`).
+
+### The page-table width of a hit
+
+A hit's prefill fits its page table to the model's chunk-input buffer (`_chunk_full_page_table_buf`) when one exists
+and keeps the runner's width otherwise. The fast path never captures the chunked trace, so the buffer should not
+exist and a hit replays the width the attach-time eager warm compiled (`runner.max_num_blocks_per_req`, 4,096 at 262k).
+A buffer of another width would compile every hit at a new shape after the traces are parked (the second-request hang).
+`serving_runtime.prefill_warm_before_traces` therefore refuses the attach, under `QWEN_PREFIX_REUSE=1` with sticky
+sessions, when the buffer exists at any other width (nothing is checked with either switch off).
 
 ## The KV reservation with caching
 
 The reservation rule is `r = ceil((P + max_tokens + 32) / 64) + 1` blocks over a request's life. A hit's shared
 blocks are counted inside its own `r`, a shared block is one physical block, and cached-free blocks are evicted
 on allocation, so sharing can only over-reserve. `test_tp4_packed_prefix_profiles.py` holds the arithmetic and
-that the pair of profiles keeps the parent's pool and the rule's flag. The real-scheduler proof with prefix
-caching on (`test_serving_kv_reservation_vllm` extended) is not written yet; PH4-style lifecycle arms on the
-hardware are the other half.
+that the pair of profiles keeps the parent's pool and the rule's flag. The real-scheduler proof with prefix caching
+on is `test_qwen_prefix_scheduler_vllm.StickyReservationOnRealVllmTests` (run by `qwen-fast-vllm-cpu.yml`): the reservation
+wrapper installed over the plugin scheduler the graft is staged on, the graft's sticky sessions (DFlash lookahead 16, the
+dropped block), a pool smaller than the traffic, conversations that continue (hits), two agents of one tenant sharing a
+system block (siblings) and four arrivals at once; every step's preempted ids stay empty, no request holds more blocks
+than it reserved, every block is free again at the end, holds and hits are both exercised, and a pool packed to two
+requests preempts when the rule is off (the negative control). The cards' half is the lifecycle job `L1` (coupled eviction
+under a flood, the kill switch, an abort during a hit's prefill, the restart): a re-admitted request is a FAIL there, and
+the hold lines and hits restored are printed.
 
 ## What stage 1 does not cover (left)
 
@@ -105,7 +125,7 @@ hardware are the other half.
   overflows vLLM evicts the tail first and the next turn takes a partial hit at an older boundary.
 - **The Lever N merge**: chunked prefill (`prefill/decode interleave`) and the sticky route both own the meaning
   of `start_pos > 0`; one route with three call kinds (cold-first, hit-first, continue) is the merge contract.
-- The stall metric (every other stream's longest gap while a turn prefills) and a real-vLLM proof of the
-  reservation with caching.
+- **The host-warm job (PH2)** and the 8 x 131k ship-candidate family: the first belongs to the host tier above, which
+  stage 1 does not build, and the second to a ship decision this branch does not make (the target is the 262k window).
 - A traffic profile: the twins are gate-only; shipping needs the hardware ladder, the 262k evidence records
   (every result in the pack is UNQUALIFIED under the waiver), and the owner's decision on the node's session cap.

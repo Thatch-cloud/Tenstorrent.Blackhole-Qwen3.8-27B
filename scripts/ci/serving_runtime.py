@@ -251,6 +251,17 @@ def prefill_warm_before_traces(runner, model, scheduler_requests, environ=None, 
                                   valid_lens=[WARM_SLOT_TOKENS])
     for length in WARM_LONG_PROMPTS:
         model.prefill_paged_slots([torch.zeros((1, length), dtype=torch.int64)], page_table, [0], valid_lens=[length])
+    if environ.get('QWEN_PREFIX_REUSE', '0') == '1' and sticky_sessions_enabled(environ):
+        # Sticky sessions (G1's model graft on the fast path): a hit's prefill fits its page table to the model's chunk-input buffer
+        # when one exists (qwen_prefix_model_patch._qwen_prefix_fit_page_table) and keeps the runner's width otherwise. The fast path
+        # never captures the chunked trace, so the buffer should not exist and a hit replays the width warmed above; a buffer of any
+        # other width would make every hit compile at a new shape after the traces are parked (#48536). Refused at attach, not found
+        # by the first hit.
+        buffer = getattr(model, '_chunk_full_page_table_buf', None)
+        if buffer is not None and int(buffer.shape[-1]) != width:
+            raise ValueError('Sticky sessions need the chunk-input page table (%d blocks) to be absent or the width %d the '
+                             'prefill was warmed at (runner.max_num_blocks_per_req): a hit would compile after the traces'
+                             % (int(buffer.shape[-1]), width))
     if operations is not None:
         operations.synchronize_device(model.mesh_device)
     pindiag(WARM_MARKER + ': page_table_blocks={} slots={} long_prompts={} programs={}->{} ms={:.0f}', width, len(slots),

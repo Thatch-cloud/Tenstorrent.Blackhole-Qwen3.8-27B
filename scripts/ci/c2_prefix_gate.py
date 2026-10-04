@@ -952,6 +952,27 @@ def tiny_findings(records, events, stats):
     return problems, missing, lines
 
 
+HOLD_MARKER = '[PINDIAG] kv reservation hold request='
+
+
+def lifecycle_reservation_findings(records, log_text):
+    """A sticky lifecycle arm's reading of the KV reservation (QWEN_FAST_KV_RESERVATION=1, which the eight-seat profiles run
+    under): the fast path cannot preempt, so a request vLLM re-admitted (a second [PREFIX] row) is a FAIL and not an excuse,
+    and the holds the reservation made while the arrivals, the flood and the aborts ran are reported, with the number of
+    hits among the requests (a hold with hits in flight is the shape the CPU proof, test_qwen_prefix_scheduler_vllm
+    StickyReservationOnRealVllmTests, covers). Zero holds is reported, not failed: a pool of over a million tokens may never
+    be outrun by this arm's traffic. -> (problems, lines)."""
+    problems, lines = [], []
+    resumed = sorted('%s (%d admissions)' % (r['tag'], judge.admissions(r)) for r in records if judge.admissions(r) > 1)
+    if resumed:
+        problems.append('vLLM preempted and resumed %s: the fast path has no preemption, so the KV reservation did not hold'
+                        % ', '.join(resumed[:6]))
+    holds = len([line for line in (log_text or '').splitlines() if HOLD_MARKER in line])
+    hits = len([r for r in records if r.get('ok') and q_of(r)])
+    lines.append('KV reservation: %d hold lines, %d hits restored, %d requests re-admitted (preempted)' % (holds, hits, len(resumed)))
+    return problems, lines
+
+
 def lifecycle_findings(arm, records, events, scanned, stats):
     """The lifecycle events against what each must leave. -> (problems, not exercised, lines)."""
     problems, missing, lines = [], [], []
@@ -1208,11 +1229,15 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None):
         problems += more_problems
         missing += more_missing
         lines += more_lines
+        if arm.get('sticky'):
+            more_problems, more_lines = lifecycle_reservation_findings(records, log_text)
+            problems += more_problems
+            lines += more_lines
     elif arm['scenario'] in TIMED_SCENARIOS and arm['prefix']:
         # The timing arm is not strict (a lost hit is a note), so without this it could pass with every
         # continuation cold and report TTFTs that measure no reuse at all.
         if arm['scenario'] == 'agent_turns':
-            more_problems, more_missing, more_lines = agent_turns.reuse_findings(records)
+            more_problems, more_missing, more_lines = agent_turns.reuse_findings(records, stats)
             problems += more_problems
             missing += more_missing
             lines += more_lines
@@ -1495,6 +1520,11 @@ class Runner(object):
             result['turns'] = agent_turns.turn_rows(driver.records)
             for row in result['turns']:
                 result['lines'].append(agent_turns.render_row(arm['arm'], row))
+            # The per-arrival stall: the other seats' longest gap while each turn prefilled (the lever-N question).
+            result['stalls'] = agent_turns.stall_rows(driver.records)
+            for row in result['stalls']:
+                result['lines'].append(agent_turns.render_stall(arm['arm'], row))
+            result['lines'].append(agent_turns.stall_summary(arm['arm'] + ' stall', result['stalls']))
         if any(markers.WEDGE in (entry.get('line') or '') for entry in scanned.get('failures') or ()):
             self.infra = ('arm %s hit tt-metal\'s ethernet-core wedge (llrt.cpp:594): reset M+A before the next run'
                           % arm['arm'])
