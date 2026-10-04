@@ -30,7 +30,7 @@ HERE = Path(__file__).resolve().parent
 EVIDENCE = HERE / 'ordered_writer_evidence_tp4.json'
 EVIDENCE_SCHEMA = 'qwen-c2-ordered-writer-evidence/1'
 # The sha256 of ordered_writer_evidence_tp4.json as reviewed (record_ordered_writer_evidence_tp4.py rewrites it with the file).
-ORDERED_WRITER_EVIDENCE_TP4_SHA256 = 'eb8e3a699cbef31b11a4cc58fa9e31ae115e523cdf5bbcac05cde8f67f3e844c'
+ORDERED_WRITER_EVIDENCE_TP4_SHA256 = '4e36e8ffe0cf261773d716157652bfbfefd0af98f52216e79b725c3f2c9464b2'
 WIDE_WIDTH_TP4 = 4096
 CONTROL_WIDTH = 2052
 WIDTHS_RECORDED = (CONTROL_WIDTH, WIDE_WIDTH_TP4)

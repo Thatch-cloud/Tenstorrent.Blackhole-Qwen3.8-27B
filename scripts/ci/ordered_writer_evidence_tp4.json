@@ -1,7 +1,78 @@
 {
  "schema": "qwen-c2-ordered-writer-evidence/1",
- "what": "The four-card record of page_width_tp4: the packed block's chained K/V write and the engines' 32-row-tile write at page-table width 4,096 (a 262,144-token window), on one chip of four. Until status is PASS, width 4,096 is refused. record_ordered_writer_evidence_tp4.py writes this file and its pin (ORDERED_WRITER_EVIDENCE_TP4_SHA256 in page_width_tp4.py) in one go.",
- "status": "PENDING",
- "provenance": "No run recorded yet. Produced by the E1 window: K64J_HARNESS=ordered_writer through run_card_b.sh (scripts/ci/ordered_writer_tp4_card_test.py).",
- "sources": {}
+ "what": "The four-card record of page_width_tp4: the packed block's chained K/V write (chained64) and the engines' 32-row-tile write (tiles32) at page-table widths 2,052 (control) and 4,096 on one chip of four, eager and under trace replay (table rewritten in place, and untouched), the COMPLETE cache read back and compared with the host prediction after every step. page_width_tp4.admitted reads it at its pin (ORDERED_WRITER_EVIDENCE_TP4_SHA256).",
+ "status": "PASS",
+ "provenance": "Recorded by scripts/ci/record_ordered_writer_evidence_tp4.py from run 37229520669 (experiment/c2-serving-v571), report cardm/e1.json (sha256 945010ed594a6952). The watcher pass before it is run 37226144863 (experiment/c2-serving-v570).",
+ "run": 37229520669,
+ "tag": "experiment/c2-serving-v571",
+ "commit": "7cc989807a486d01fc77448dcc1cf91725d641cd",
+ "card": "M",
+ "image": "tp4-w1-1",
+ "harness": "scripts/ci/ordered_writer_tp4_card_test.py through run_card_b.sh (K64J_HARNESS=ordered_writer), --widths 2052,4096 --writers chained64,tiles32 --seeds 0,1,2 (the cardm action)",
+ "report": "cardm/e1.json",
+ "report_sha256": "945010ed594a695208dca94aa2c0b4d691df32b0682229e3cccad3525a5905f6",
+ "verdict_line": "ORDERED_WRITER verdict=PASS scope=full width=4096 chips=1of4 checks=594 exact=594 writers=chained64,tiles32 widths=2052,4096 seeds=0,1,2",
+ "scope": "full",
+ "chips": "1of4",
+ "kv_heads": 1,
+ "failures": 0,
+ "widths": [
+  2052,
+  4096
+ ],
+ "writers": [
+  "chained64",
+  "tiles32"
+ ],
+ "seeds": [
+  0,
+  1,
+  2
+ ],
+ "sections": [
+  "eager",
+  "replay_changed",
+  "replay_unchanged",
+  "complete_cache"
+ ],
+ "entries": [
+  0,
+  1,
+  511,
+  512,
+  1023,
+  1024,
+  1025,
+  2047,
+  2048,
+  2049,
+  2050,
+  2051,
+  2052,
+  3071,
+  4094,
+  4095
+ ],
+ "anchor_positions": [
+  262080,
+  262111
+ ],
+ "blocks": 4112,
+ "counts": {
+  "checks": 594,
+  "exact": 594
+ },
+ "admission_patch": {
+  "module": "page_width_tp4.admitted",
+  "width": 4096,
+  "scope": "the run only; restored on exit"
+ },
+ "sources": {
+  "ordered_cache.py": "c74799afc92fda20234f6ada6aa84fa122dcde8ec75ab87a3cb477d6611cbcac"
+ },
+ "watcher_pass": {
+  "run": 37226144863,
+  "tag": "experiment/c2-serving-v570",
+  "status": "PASS"
+ }
 }

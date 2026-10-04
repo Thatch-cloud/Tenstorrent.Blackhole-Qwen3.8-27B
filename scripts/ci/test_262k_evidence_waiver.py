@@ -34,6 +34,44 @@ E1_PENDING = (False, ['status PENDING, not PASS'])
 PROFILES = HERE / 'qwen_c2_profiles.json'
 
 
+PENDING_ORDERED_WRITER = {
+    'schema': 'qwen-c2-ordered-writer-evidence/1', 'what': 'PENDING skeleton (the test fixture of the unrecorded state)',
+    'status': 'PENDING', 'provenance': 'No run recorded yet.', 'sources': {}}
+PENDING_PACKED_ANY_262K = {
+    'schema': 'qwen-c2-packed-any-evidence/1', 'capacity': 262144, 'what': 'PENDING skeleton (the test fixture of the unrecorded state)',
+    'provenance': 'Nothing here has run on a card.',
+    'binary': {'ttnncpp_sha256': '152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7'},
+    'kernels': {'dataflow/reader_decode_qwen.cpp': 'adb6091878ba3f0a0805846ff56f05352610d7fe779b5ae96320c437c095db49',
+                'dataflow/reader_decode_qwen_slice.cpp': '518d8096e3cceb160eaef8ab4f0ae976ccbffd3904d31176b7f9d02828c37f8a',
+                'compute/sdpa_flash_decode_qwen.cpp': '409a1aafc3ffaaca2c6afba0e999525b7d141491f0a52e5583efa70447ee5c0e',
+                'dataflow/writer_decode_qwen_slice.cpp': '642c36f809be0f1ad1664deb405dc310dabaa32d5628710320a118eb37a6cc7a'},
+    'sources': {},
+    'sections': {'CB1': {'status': 'PENDING', 'what': 'E2a'}, 'CB2a': {'status': 'PENDING', 'what': 'E2b'},
+                 'CB2b': {'status': 'PENDING', 'what': 'E2c'}}}
+
+
+def pending_records(case):
+    """Point the two 262k evidence readers at PENDING skeletons for the length of `case` (the state these tests describe: the waiver exists
+    for the window before the records are recorded; ship/262k-prefix recorded them, and test_ship_262k_prefix reads the real files)."""
+    import hashlib
+    import tempfile
+
+    folder = tempfile.TemporaryDirectory()
+    case.addCleanup(folder.cleanup)
+    paths = {}
+    for name, record in (('ordered', PENDING_ORDERED_WRITER), ('packed', PENDING_PACKED_ANY_262K)):
+        path = Path(folder.name) / (name + '.json')
+        payload = (json.dumps(record, indent=1) + chr(10)).encode()
+        path.write_bytes(payload)
+        paths[name] = (path, hashlib.sha256(payload).hexdigest())
+    for target, name, value in ((pw, 'EVIDENCE', paths['ordered'][0]), (pw, 'ORDERED_WRITER_EVIDENCE_TP4_SHA256', paths['ordered'][1]),
+                                (admission, 'EVIDENCE_TP4_262K', paths['packed'][0]),
+                                (admission, 'EVIDENCE_TP4_262K_SHA256', paths['packed'][1])):
+        patcher = mock.patch.object(target, name, value)
+        patcher.start()
+        case.addCleanup(patcher.stop)
+
+
 class Lines(list):
     def __call__(self, template, *values):
         self.append(template.format(*values))
@@ -45,6 +83,7 @@ def profiles():
 
 class Fresh(unittest.TestCase):
     def setUp(self):
+        pending_records(self)
         patcher = mock.patch.dict(admission._STATE, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -226,7 +265,7 @@ class ProfileContractTests(unittest.TestCase):
     def test_exactly_the_gate_only_262k_profiles_carry_the_flag_and_never_a_traffic_profile(self):
         self.assertEqual(self.carrying(), ['c2-packed-tp4-262k-gate', 'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-nosamp-audit', 'c2-packed-tp4-8x262k-best-stack-audit',
                                            'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-best-time-gate-d2', 'c2-packed-tp4-8x262k-best-time-gate-dbf16', 'c2-packed-tp4-8x262k-best-time-gate-lookup', 'c2-packed-tp4-8x262k-best-time-gate-nosamp', 'c2-packed-tp4-8x262k-best-time-gate-s1', 'c2-packed-tp4-8x262k-best-time-gate-stack', 'c2-packed-tp4-8x262k-best-time-gate-u1', 'c2-packed-tp4-8x262k-best-u1-audit', 'c2-packed-tp4-8x262k-diag-strace',
-                                           'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-hostgap-1', 'c2-packed-tp4-8x262k-hostgap-1-audit', 'c2-packed-tp4-8x262k-hostgap-2', 'c2-packed-tp4-8x262k-hostgap-2-audit', 'c2-packed-tp4-8x262k-time-gate', 'c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit', 'c2-packed-tp4-8x262k-w1-audit-nod1', 'c2-packed-tp4-8x262k-w1-lite', 'c2-packed-tp4-8x262k-w1-nod1'])  # the best arms: tp4/262k8
+                                           'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-hostgap-1', 'c2-packed-tp4-8x262k-hostgap-1-audit', 'c2-packed-tp4-8x262k-hostgap-2', 'c2-packed-tp4-8x262k-hostgap-2-audit', 'c2-packed-tp4-8x262k-prefix-gate', 'c2-packed-tp4-8x262k-prefix-time-gate', 'c2-packed-tp4-8x262k-time-gate', 'c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit', 'c2-packed-tp4-8x262k-w1-audit-nod1', 'c2-packed-tp4-8x262k-w1-lite', 'c2-packed-tp4-8x262k-w1-nod1'])  # the best arms: tp4/262k8
         self.assertNotIn(FLAG, profiles()['c2-packed-tp4-8x262k-ship']['env'])
         for name, entry in profiles().items():
             if entry.get('gate_only') is not True:

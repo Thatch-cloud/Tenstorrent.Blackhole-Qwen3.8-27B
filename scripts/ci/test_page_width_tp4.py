@@ -53,12 +53,14 @@ class PinnedAnswerTests(unittest.TestCase):
         self.assertFalse(ordered_cache.page_width_admitted(4096), 'the pinned file must not admit 4,096')
         self.assertEqual(ordered_cache.WIDE_PAGE_WIDTHS, frozenset({2052}))
 
-    def test_the_shipped_record_is_pending_and_4096_is_refused_everywhere(self):
+    def test_the_shipped_record_is_pass_and_4096_is_admitted_at_four_cards_only(self):
+        """Recorded by ship/262k-prefix (the E1 window on the tp4/w1 image): four cards admit 4,096, the pair never does."""
         ok, problems = pw.evidence_state()
-        self.assertFalse(ok)
-        self.assertIn('PENDING', ' '.join(problems) + json.loads(pw.EVIDENCE.read_text())['status'])
-        for environ in (PAIR, TP4):
-            self.assertFalse(pw.admitted(4096, environ))
+        self.assertEqual(problems, [])
+        self.assertTrue(ok)
+        self.assertEqual(json.loads(pw.EVIDENCE.read_text())['status'], 'PASS')
+        self.assertTrue(pw.admitted(4096, TP4))
+        self.assertFalse(pw.admitted(4096, PAIR))
         self.assertEqual(hashlib.sha256(pw.EVIDENCE.read_bytes()).hexdigest(), pw.ORDERED_WRITER_EVIDENCE_TP4_SHA256)
 
 
@@ -128,6 +130,9 @@ class CallersTests(unittest.TestCase):
     """The writers ask page_width_tp4 through the module, so one patch moves them all (the harness's scoped patch)."""
 
     def setUp(self):
+        import test_262k_evidence_waiver as waiver
+
+        waiver.pending_records(self)                     # the unrecorded state: "refused: no record yet"
         patcher = unittest.mock.patch.dict(os.environ, {tp_shapes.TP_SWITCH: '4'})
         patcher.start()
         self.addCleanup(patcher.stop)

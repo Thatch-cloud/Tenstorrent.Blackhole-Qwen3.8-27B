@@ -203,7 +203,7 @@ CB2A_K2_TICKETS_262K = len(SEEDS) * len(CB2A_VARIANTS) * (K2_SWEEP_TICKETS + len
 X7_FLOOR_262K = len(CB2_EXTENTS_262K) * len(CB2_STARTS) * len(SEEDS) * len(CB2A_VARIANTS) * 2                          # 600
 # The 262,144 record and its own pin, a skeleton until E2 records its sections (a name the 131k recorder's repin never matches).
 EVIDENCE_TP4_262K = HERE / 'packed_any_evidence_tp4_262144.json'
-EVIDENCE_TP4_262K_SHA256 = 'a244df64be5566bab75aa64530ce5283b57d1ec0590a83dc5eb595aeb5bac3b7'
+EVIDENCE_TP4_262K_SHA256 = '422bfbaa03d1615b1a42d22ca566138b2c1929fc2ed917ba8adc7cd58d68a3d8'
 
 _STATE = {}
 
