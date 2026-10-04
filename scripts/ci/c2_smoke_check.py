@@ -972,6 +972,71 @@ def lookup_problems(env, container_text):
     return problems
 
 
+# tp4/u1 (tile_collective_tp): the packed verify's all-reduces as one reduce-scatter on the unit-major view. A profile that sets the flag must log the
+# engaged line with at least one unit-major call, no fall-back line (every served call is in the census, so a fall-back is a lever that saved nothing) and
+# no audit mismatch; under the audit flag an exact=True audit line must exist for every served shape.
+U1_FLAG = 'QWEN_FAST_TP4_RS_UNIT_MAJOR'
+U1_AUDIT_FLAG = 'QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT'
+U1_ENGAGED = '[PINDIAG] tp4 u1 engaged'
+U1_FELL_BACK = '[PINDIAG] tp4 u1 fell back'
+U1_AUDIT = '[PINDIAG] tp4 u1 audit '
+U1_MISMATCH = '[PINDIAG] tp4 u1 audit mismatch'
+U1_SERVED_SHAPES = ('64x5120',)
+U1_CHIPS = 4
+
+
+def u1_audit_problems(env, lines, engaged):
+    """The audit must have compared something: every audit line names four chips and some elements; each served shape (the rows= of
+    the engaged lines that ran the lever, else U1_SERVED_SHAPES) has an exact line from a replay (round >= 1, not only the warm
+    forward's round 0), and at least one block owner per QWEN_FAST_M3_BLOCKS has one."""
+    problems = []
+    parsed = []
+    for line in lines:
+        if U1_AUDIT not in line or U1_MISMATCH in line:
+            continue
+        match = re.search(r' shape=(\d+x\d+) (?:owner=(\S+) )?round=(\d+) calls=(\d+) chips=(\d+) elements=(\d+) exact=True', line)
+        if match is None:
+            problems.append('an audit line of an unknown form: %s' % line.strip()[:200])
+            continue
+        shape, owner, round_number, calls, chips, elements = match.groups()
+        if int(chips) != U1_CHIPS or int(elements) < 1 or int(calls) < 1:
+            problems.append('an audit line compared nothing (need chips=%d, calls and elements above 0): %s' % (U1_CHIPS, line.strip()[:200]))
+            continue
+        parsed.append((shape, owner, int(round_number)))
+    served = sorted({'%sx5120' % match.group(1) for match in (re.search(r' rows=(\d+) .* unit_major=[1-9]', line) for line in engaged) if match})         or list(U1_SERVED_SHAPES)
+    for shape in served:
+        replays = [owner for found, owner, round_number in parsed if found == shape and round_number >= 1]
+        if not replays:
+            problems.append('%s is set and no replay audit line (%sshape=%s ... round>=1 ... exact=True) was logged: no replay was compared'
+                            % (U1_AUDIT_FLAG, U1_AUDIT, shape))
+            continue
+        blocks = env.get('QWEN_FAST_M3_BLOCKS', '1')
+        wanted = int(blocks) if blocks.isdigit() and int(blocks) > 0 else 1
+        if len(set(replays)) < wanted:
+            problems.append('%s: shape %s replay audits came from %d block owner(s), %d blocks are served'
+                            % (U1_AUDIT_FLAG, shape, len(set(replays)), wanted))
+    return problems
+
+
+def u1_problems(env, container_text):
+    lines = container_text.splitlines()
+    problems = ['the unit-major all-reduce audit found a difference: %s' % line.strip()[:200] for line in lines if U1_MISMATCH in line][:4]
+    problems += ['the unit-major all-reduce fell back (the split ran, it saved nothing): %s' % line.strip()[:200]
+                 for line in lines if U1_FELL_BACK in line][:4]
+    if env is None or env.get(U1_FLAG) != '1':
+        if any(U1_ENGAGED in line or U1_AUDIT in line for line in lines):
+            problems.append('unit-major all-reduce lines on a profile without %s' % U1_FLAG)
+        return problems
+    engaged = [line for line in lines if U1_ENGAGED in line]
+    if not engaged:
+        problems.append('%s is set and no engaged line (%s) was logged: the unit-major all-reduce never ran' % (U1_FLAG, U1_ENGAGED))
+    elif not any(re.search(r' unit_major=[1-9]\d*( |$)', line) for line in engaged):
+        problems.append('%s engaged lines report no unit-major call: %s' % (U1_FLAG, engaged[0].strip()[:200]))
+    if env.get(U1_AUDIT_FLAG) == '1':
+        problems += u1_audit_problems(env, lines, engaged)
+    return problems
+
+
 def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=None):
     """(problems, facts) for a smoke log and a container log. `env` (the served profile's) adds the batched-draft
     stop conditions, `entry` (its whole record) the traffic profile's admission and parser conditions."""
@@ -998,6 +1063,7 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     if env is not None and env.get(GDN_SPLIT_FLAG) == '2' and GDN_SPLIT_ENGAGED not in container_text:
         problems.append('%s=2 is set and no engaged line (%s) was logged: the split recurrence never ran' % (GDN_SPLIT_FLAG, GDN_SPLIT_ENGAGED))
     problems += sampdraft_problems(container_text, env)
+    problems += u1_problems(env, container_text)
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
     if env is not None and env.get('QWEN_FAST_TP', '2') != '2':

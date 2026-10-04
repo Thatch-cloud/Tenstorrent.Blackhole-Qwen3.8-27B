@@ -44,6 +44,12 @@ defer_capture=True only allocates (initial snapshot, checkpoints, taps) in its c
 then `capture_traces` of every block, then `finish_construction` of every block (publication warm, reseed, binding
 check). Built whole (the default), the construction is those phases in that order inside one call, as it always was.
 
+ONE KNOWN EXCEPTION (QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT, a gate-only audit): its clones of the unit-major and split results are
+persistent buffers allocated inside each block's capture, so the second block's can sit in holes the first block's capture
+freed, and the first block's replay overwrites them. Served data is untouched. The audit is therefore read only right after
+its own block's replay (tile_collective_tp.audit_replayed / audit_round, which refuses any other order): never overlap two
+blocks' replays while it is on.
+
 WHICH ROWS ARE WHOSE. Segment u of the block is rows [rows_per_user * u,
 rows_per_user * (u + 1)). The verify trace restores segment u's GDN state from the
 pool's slot-u carry (serving_buffer_pool.VerifierSlot.carry) inside the trace, before
@@ -195,6 +201,7 @@ import gdn_seq_block
 import verify_prestage
 import capture_plug
 import tp_shapes
+import tile_collective_tp
 import tp4_vglue
 import verify_trace_t1
 import verify_trace_t2
@@ -1130,7 +1137,13 @@ class PackedVerifierEngine:
             result = self.operation(warm, warm=True)
             self.stage = 'warm forward fence'
             operations.synchronize_device(self.mesh)
+            # QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT: this eager forward's unit-major reductions against the split's, now (nothing
+            # held when the audit is off).
+            tile_collective_tp.audit_claim(warm, 'warm')
+            tile_collective_tp.audit_round(operations, warm, 0)
         finally:
+            tile_collective_tp.audit_claim(warm, 'warm')
+            tile_collective_tp.audit_release(operations, warm)
             if result is not None:
                 release_sampdraft_audit(operations, result[2] if len(result) > 2 else None)
                 release_vglue_audit(operations, warm, result[2] if len(result) > 2 else None)
@@ -1152,7 +1165,11 @@ class PackedVerifierEngine:
         if self.verify_t2:
             verify_trace_t2.take()
         tp4_vglue.take()
-        self.trace, self.output = capture_operation(operations, self.mesh, lambda: self.operation(self.fixture))
+        try:
+            self.trace, self.output = capture_operation(operations, self.mesh, lambda: self.operation(self.fixture))
+        finally:
+            # also after a failed capture: its audited clones belong to the fixture, released when it closes
+            tile_collective_tp.audit_claim(self.fixture, 'capture')
         if self.verify_t1:
             self.note_verify_t1(verify_trace_t1.take())
         if self.verify_t2:
@@ -1879,6 +1896,7 @@ class PackedVerifierEngine:
                 # QWEN_FAST_ROUND_FENCES: the replay validated every native binding right before
                 # this trace, and nothing moves one between here and the round's commits.
                 self.validated_this_round = self.round_fences
+            tile_collective_tp.audit_replayed(self.fixture)
             replayed = time.perf_counter()
             cpu_replayed = verify_prestage.thread_ms() if hostgap else 0.0
             if self.shard_argmax:
@@ -1904,6 +1922,8 @@ class PackedVerifierEngine:
             if tp4_vglue.audit_enabled():
                 # QWEN_FAST_TP4_VGLUE_AUDIT: each engaged GDN lever's output against the served path's, held beside it.
                 tp4_vglue.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)
+            # QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT: this replay's unit-major reductions against the split's held beside them.
+            tile_collective_tp.audit_round(self.operations, self.fixture, self.rounds + 1)
             predictions = [host[slice(*segment_rows(self.shape, segment))] for segment in segments]
             finished = time.perf_counter()
             if hostgap:
@@ -2245,6 +2265,7 @@ class PackedVerifierEngine:
             self.sampdraft_reserved = False
         if self.fixture is not None:
             release_vglue_audit(operations, self.fixture, shard_values)
+            tile_collective_tp.audit_release(operations, self.fixture)
             self.fixture.close()
             self.fixture = None
         if self.plug is not None:

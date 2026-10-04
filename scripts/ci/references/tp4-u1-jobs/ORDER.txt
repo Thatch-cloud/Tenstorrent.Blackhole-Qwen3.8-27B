@@ -1,0 +1,32 @@
+# The order of the tp4/u1 four-card DEVELOPMENT window: lever U1 (QWEN_FAST_TP4_RS_UNIT_MAJOR), the packed verify's all-reduces as one reduce-scatter on the unit-major view, one image, tp4-u1-1, built from the pushed tp4/u1 commit.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# THE CARDS ARE UNDER DEVELOPMENT: NO agentstart, NO agentstop (the node agent is already stopped), NO hand-back, NO deploy, NO :latest move. Z ends with a reset and no agentstart. qwen_c2_profiles.json's default stays c2-packed-tp4.
+# P0. NO OTHER WINDOW DRIVER MAY BE ALIVE and no privileged builder container may be up. The CPU suite green on this branch first. Every result is UNQUALIFIED (the 262k evidence waiver of the gate-only arms). B0 never runs during a timing job.
+# Judge every ABAB PAIRED per round, never by unpaired medians; check the load average.
+# ORDER: X0 (status, RESCAN, reset), B0, S0c (the control attach: the reference for hashes, accepted tokens, verify rounds), A1 (the audited attach: the exactness proof on the serving image), H1-H3 (the hang shapes on the -u1 arm), T1-T4 (ABAB), Z.
+# NEEDS A1 <- S0c
+# NEEDS H1 H2 H3 <- A1
+# NEEDS T1 T2 T3 T4 <- A1 H1 H2 H3
+# READ RULES (each also needs c2_smoke_check clean and no stall):
+#   X0 the status prints, the rescan finds every board, the reset completes on all four.   B0 provenance report with no problem line, the image id printed.
+#   S0c the control attach: admission passed at capacity 262144, every answer completes (concurrent8_code_32k included), hashes, accepted tokens and verify rounds RECORDED per request.
+#   A1 the engaged line, zero audit mismatches, an exact=True replay audit line (round>=1, chips=4) for the 64x5120 shape from each block, hashes equal S0c's (accepted tokens and verify rounds recorded, not compared: S0c has no quad blocks).
+#   H1-H3 three consecutive completions, every user at budget, concurrent8_code_equal hashes equal in every run and to S0c's. One stall stops the window.
+#   T1-T4 paired ABAB, control (best-time-gate) against the -u1 arm: round time at eight live users, per seat tok/s at 32k and about 120k, texts equal.
+#   Z the reset completes; the agent stays stopped.
+# HANG QUALIFICATION: H1-H3 run on the in-trace-sampler base (the served base of tp4/262k8), which masks the nosamp hang class; U1 is hang-qualified for adopting on that base only. Re-gate with five runs (H1-H5) on the nosamp base from tp4/262k8-x before any move there. The audit's clones are gate-only (A1): the T and H arms run without the audit.
+# NO-GO for adopting U1: any stall, any hash difference between arms that must be identical, any audit mismatch, any fall-back line.
+# Time (estimate): X0 and B0 about 80 min, S0c 1.5 h, A1 1.7 h, H1-H3 4.5 h, T 6.7 h, Z 10 min: about 15 h.
+X0-status-rescan-reset stop tp4-u1-1 20
+B0-build stop tp4-u1-1 60
+S0c-control-attach-smoke stop tp4-u1-1 90
+A1-audited-attach-smoke stop tp4-u1-1 100
+H1-hang-shapes-u1 stop tp4-u1-1 90
+H2-hang-shapes-u1 stop tp4-u1-1 90
+H3-hang-shapes-u1 stop tp4-u1-1 90
+T1-timed-A-control-8x262k-best-time-gate soft tp4-u1-1 100
+T2-timed-B-u1-8x262k-best-time-gate soft tp4-u1-1 100
+T3-timed-A-control-8x262k-best-time-gate soft tp4-u1-1 100
+T4-timed-B-u1-8x262k-best-time-gate soft tp4-u1-1 100
+Z-reset soft tp4-u1-1 10
