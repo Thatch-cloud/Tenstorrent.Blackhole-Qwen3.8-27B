@@ -37,6 +37,7 @@ IMAGE = 'tp4-w2-1'
 CONTROL = 'c2-packed-tp4-8x262k-best-time-gate'
 W1, W1_AUDIT = w1_tests.W1, w1_tests.W1_AUDIT
 W2, W2_AUDIT = 'c2-packed-tp4-8x262k-w2', 'c2-packed-tp4-8x262k-w2-audit'
+NOF1, NOF1_AUDIT = 'c2-packed-tp4-8x262k-w2-nof1', 'c2-packed-tp4-8x262k-w2-nof1-audit'
 SDPA_TIMED, SDPA_AUDITED = 'c2-packed-tp4-8x262k-best-sdpamulti', 'c2-packed-tp4-8x262k-best-sdpamulti-audit'
 V5_FLAG = 'QWEN_FAST_GDN_SPLIT_V'
 SDPA = {sdpa_long_tp.FLAG: 'multi'}
@@ -89,9 +90,52 @@ class ProfileTests(unittest.TestCase):
             for flag in (*NEW_LEVERS, *NEW_AUDITS) if name in (CONTROL, W1, W1_AUDIT) else (spread.FLAG, spread.AUDIT_FLAG):
                 self.assertNotIn(flag, data['profiles'][name]['env'], (name, flag))
 
+    def test_the_fallback_arms_are_wave_2_without_f1(self):
+        found = load()['profiles']
+        expected = flat(found[W1])
+        expected['env'].update(SDPA)
+        self.assertEqual(flat(found[NOF1]), expected)
+        expected = flat(found[W1_AUDIT])
+        expected['env'].update(SDPA)
+        expected['env'].update(SDPA_AUDIT)
+        self.assertEqual(flat(found[NOF1_AUDIT]), expected)
+        # and they are the w2 arms minus exactly the two F1 keys
+        for fallback, full, gone in ((NOF1, W2, [spread.FLAG]), (NOF1_AUDIT, W2_AUDIT, [spread.FLAG, spread.AUDIT_FLAG])):
+            with self.subTest(fallback=fallback):
+                left, right = dict(found[fallback]['env']), dict(found[full]['env'])
+                for key in gone:
+                    right.pop(key)
+                self.assertEqual(left, right)
+                for key in ('engine', 'mesh_device', 'mesh_graph_descriptor', 'gate_only', 'min_answer_tokens', 'default_max_tokens'):
+                    self.assertEqual(found[fallback].get(key), found[full].get(key), key)
+                self.assertEqual(found[fallback]['env']['QWEN_FAST_262K_EVIDENCE_WAIVER'], '1')
+                self.assertNotIn(V5_FLAG, found[fallback]['env'])
+
+    def test_the_fallback_arms_read_clean_and_leave_f1_off(self):
+        for name in (NOF1, NOF1_AUDIT):
+            env = dict(load()['profiles'][name]['env'], QWEN_FAST_PRESTAGE='1')
+            with self.subTest(name=name), patch.dict(os.environ, env, clear=True):
+                self.assertFalse(spread.enabled())
+                self.assertFalse(spread.audit_enabled())
+                self.assertTrue(sdpa_long_tp.enabled(env))
+                self.assertEqual(sdpa_multi_tp.audit_enabled(env), name == NOF1_AUDIT)
+
+    def test_the_stack_reads_back_on_the_shard_path_so_the_mr_decision_has_its_reads_ms(self):
+        # reads_ms is filled only by PackedVerifierEngine.shard_predictions: the baked QWEN_FAST_VERIFY_T1=1 and no QWEN_FAST_VERIFY_T1_SKIP
+        dockerfile = (ROOT / 'docker' / 'qwen-c2-serving.Dockerfile').read_text(encoding='utf-8')
+        self.assertIn('QWEN_FAST_VERIFY_T1=1', dockerfile)
+        found = load()['profiles']
+        for name in (W1, W2, W2_AUDIT, NOF1, NOF1_AUDIT):
+            with self.subTest(name=name):
+                self.assertNotIn('QWEN_FAST_VERIFY_T1_SKIP', found[name]['env'])
+                self.assertEqual(found[name]['env']['QWEN_FAST_TP4_HOSTGAP_LOG'], '1')
+        source = (HERE / 'packed_verifier.py').read_text(encoding='utf-8')
+        self.assertIn('self.readback_split = (reads_ms,', source)
+        self.assertIn('host = self.shard_predictions()', source)
+
     def test_the_v5_split_is_in_no_w2_profile(self):
         found = load()['profiles']
-        for name in (W2, W2_AUDIT):
+        for name in (W2, W2_AUDIT, NOF1, NOF1_AUDIT):
             self.assertNotIn(V5_FLAG, found[name]['env'])
 
     def test_the_levers_new_flags_are_in_no_traffic_profile_and_in_no_other_gate_arm(self):
@@ -103,7 +147,7 @@ class ProfileTests(unittest.TestCase):
         carriers = sorted(name for name, profile in load()['profiles'].items() if spread.FLAG in profile.get('env', {}))
         self.assertEqual(carriers, [W2, W2_AUDIT])
         multi = sorted(name for name, profile in load()['profiles'].items() if profile.get('env', {}).get(sdpa_long_tp.FLAG) == 'multi')
-        self.assertEqual(multi, sorted([SDPA_TIMED, SDPA_AUDITED, W2, W2_AUDIT]))
+        self.assertEqual(multi, sorted([SDPA_TIMED, SDPA_AUDITED, W2, W2_AUDIT, NOF1, NOF1_AUDIT]))
 
     def test_sdpa_multi_s_own_arms_are_untouched_by_the_merge(self):
         found = load()['profiles']
@@ -283,20 +327,23 @@ class SmokeUnionTests(unittest.TestCase):
 CARD_M = {'F1-cardm-conv-gates-spread': ('cardm', 'soft', 'optimisation/ttnn-op/gdn_conv_gates_spread/run_card_m.sh'),
           'V1a-cardm-watcher': ('cardm', 'soft', 'optimisation/ttnn-op/v5split/run_card_m.sh'),
           'V1b-cardm-full': ('cardm', 'soft', 'optimisation/ttnn-op/v5split/run_card_m.sh'),
-          'MR-cardm-mesh-read-probe': ('cardm', 'soft', 'optimisation/ttnn-op/mr_probe/run_card_m.sh')}
+          'MR-cardm-mesh-read-probe': ('cardm', 'soft', 'optimisation/ttnn-op/mr_probe/run_card_m.sh'),
+          'U2-cardm-canon-rule': ('cardm', 'soft', 'optimisation/ttnn-op/canon_probe/run_card_m.sh')}
 EXPECTED = {
     'B0-build': ('build', 'c2-packed-tp4', 'stop'),
     **{name: (value[0], None, value[1]) for name, value in CARD_M.items()},
     'X0-status-rescan-reset': ('status rescan reset', None, 'stop'),
+    'MR4-quad-mesh-read-probe': ('reset fabric', 'general-tp4', 'soft'),
     'S0c-control-attach-smoke': ('reset smoke', CONTROL, 'stop'),
     'A1-audited-attach-smoke': ('reset smoke', W2_AUDIT, 'stop'),
     'H1-hang-shapes-w2': ('reset smoke', W2, 'stop'), 'H2-hang-shapes-w2': ('reset smoke', W2, 'stop'),
     'H3-hang-shapes-w2': ('reset smoke', W2, 'stop'), 'H4-hang-shapes-w2': ('reset smoke', W2, 'stop'),
     'H5-hang-shapes-w2': ('reset smoke', W2, 'stop'),
     'T1-timed-A-control': ('reset smoke', CONTROL, 'soft'), 'T2-timed-B-w2': ('reset smoke', W2, 'soft'),
-    'T3-timed-A-control': ('reset smoke', CONTROL, 'soft'), 'T4-timed-B-w2': ('reset smoke', W2, 'soft'),
-    'T5-timed-A-control': ('reset smoke', CONTROL, 'soft'), 'T6-timed-B-w2': ('reset smoke', W2, 'soft'),
-    'T7-timed-C-w1-alone': ('reset smoke', W1, 'soft'),
+    'T3-timed-C-w1-alone': ('reset smoke', W1, 'soft'),
+    'T4-timed-A-control': ('reset smoke', CONTROL, 'soft'), 'T5-timed-B-w2': ('reset smoke', W2, 'soft'),
+    'T6-timed-C-w1-alone': ('reset smoke', W1, 'soft'),
+    'T7-timed-A-control': ('reset smoke', CONTROL, 'soft'), 'T8-timed-B-w2': ('reset smoke', W2, 'soft'),
     'P1-w2-8-user-profile': ('status reset gate', W2, 'soft'),
     'Z-reset': ('status reset', None, 'soft'),
 }
@@ -344,12 +391,13 @@ class PackTests(unittest.TestCase):
     def test_the_build_comes_first_then_card_m_then_the_quad_jobs_and_x0_is_the_first_quad_job(self):
         names = [line[0] for line in order_lines()]
         self.assertEqual(names[0], 'B0-build')
-        self.assertEqual(names[1:5], list(CARD_M))
-        self.assertEqual(names[5], 'X0-status-rescan-reset')
+        self.assertEqual(names[1:6], list(CARD_M))
+        self.assertEqual(names[6], 'X0-status-rescan-reset')
+        self.assertEqual(names[7], 'MR4-quad-mesh-read-probe')           # right after X0: the cards are freshly reset
         self.assertEqual(pack_job('X0-status-rescan-reset')['actions'], 'status rescan reset')
         self.assertEqual(names[-1], 'Z-reset')
-        quad = [name for name in names[5:] if pack_job(name)['cards'] == 'quad']
-        self.assertEqual(quad, names[5:])
+        quad = [name for name in names[6:] if pack_job(name)['cards'] == 'quad']
+        self.assertEqual(quad, names[6:])
 
     def test_the_card_m_jobs_run_card_m_harnesses_that_turn_the_serving_hook_off_and_unset_the_mesh_descriptor(self):
         for name, (_actions, _mode, harness) in CARD_M.items():
@@ -388,7 +436,7 @@ class PackTests(unittest.TestCase):
 
     def test_the_control_and_the_audited_attaches_run_the_same_tests_and_the_32k_and_equal_hashes_are_recorded(self):
         self.assertEqual(tests_of('S0c-control-attach-smoke'), tests_of('A1-audited-attach-smoke'))
-        self.assertTrue({'concurrent8_steady', 'concurrent8_code_32k', 'concurrent8_code_equal'} <= set(tests_of('A1-audited-attach-smoke')))
+        self.assertTrue({'concurrent8_steady', 'concurrent8_code_32k', 'concurrent8_code_equal', 'concurrent8_skew'} <= set(tests_of('A1-audited-attach-smoke')))
 
     def test_five_hang_shape_runs_on_the_audits_off_stack_carry_the_eight_seat_shapes(self):
         names = [name for name in EXPECTED if name.startswith('H')]
@@ -400,9 +448,25 @@ class PackTests(unittest.TestCase):
 
     def test_the_timing_jobs_alternate_abab_then_wave_1_alone_on_the_same_tests_at_32k_and_128k(self):
         timed = [name for name in EXPECTED if name.startswith('T')]
-        self.assertEqual([pack_job(name)['profile'] for name in timed], [CONTROL, W2, CONTROL, W2, CONTROL, W2, W1])
+        # A B C A B C A B: three control-against-stack pairs and two wave-1 runs, each right after a stack run (the increment is read against a
+        # neighbour in time, not against one run hours later)
+        self.assertEqual([pack_job(name)['profile'] for name in timed], [CONTROL, W2, W1, CONTROL, W2, W1, CONTROL, W2])
         self.assertEqual(len({pack_job(name)['tests'] for name in timed}), 1)
-        self.assertTrue({'warmup', 'coding', 'concurrent8_steady', 'concurrent8_code_32k', 'concurrent8_code_128k'} <= set(tests_of(timed[0])))
+        self.assertTrue({'warmup', 'coding', 'concurrent8_steady', 'concurrent8_code_32k', 'concurrent8_code_128k', 'concurrent8_skew'} <= set(tests_of(timed[0])))
+        for index, name in enumerate(timed):
+            if pack_job(name)['profile'] == W1:
+                self.assertEqual(pack_job(timed[index - 1])['profile'], W2, name)
+
+    def test_the_skewed_eight_is_a_smoke_test_judged_as_an_eight_user_text_test_in_the_attach_and_every_timed_job(self):
+        smoke = (HERE / 'c2_serving_smoke.py').read_text(encoding='utf-8')
+        self.assertIn('def concurrent8_skew():', smoke)
+        self.assertIn("record('concurrent8_skew', concurrent8_skew)", smoke)
+        self.assertIn('concurrent8_skew', c2_smoke_check.EIGHT_TESTS)
+        for name, (actions, profile, _mode) in EXPECTED.items():
+            if profile and 'smoke' in actions and not name.startswith('H'):
+                with self.subTest(name=name):
+                    self.assertIn('concurrent8_skew', tests_of(name))
+
 
     def test_the_device_profile_copies_the_w1_packs_conventions_on_the_wave_2_profile(self):
         mine = job.parse_env(pack_text('P1-w2-8-user-profile'))
@@ -413,12 +477,34 @@ class PackTests(unittest.TestCase):
 
     def test_the_dependencies_and_the_read_rules(self):
         order = order_text()
-        for line in ('# NEEDS F1 V1a V1b MR X0 <- B0', '# NEEDS V1b <- V1a', '# NEEDS S0c <- X0', '# NEEDS A1 <- S0c', '# NEEDS H1 H2 H3 H4 H5 <- A1',
-                     '# NEEDS T1 T2 T3 T4 T5 T6 T7 <- A1 H1 H2 H3 H4 H5', '# NEEDS P1 <- A1 H1'):
+        for line in ('# NEEDS F1 V1a V1b MR U2 X0 <- B0', '# NEEDS V1b <- V1a', '# NEEDS MR4 <- X0', '# NEEDS S0c <- X0', '# NEEDS A1 <- S0c',
+                     '# NEEDS H1 H2 H3 H4 H5 <- A1', '# NEEDS T1 T2 T3 T4 T5 T6 T7 T8 <- A1 H1 H2 H3 H4 H5', '# NEEDS P1 <- A1 H1'):
             self.assertIn(line, order)
-        for text in ('about 159 ms', 'PAIRED', 'ZERO audit mismatches', 'five consecutive', 'KILL LINE',
-                     'U2', 'NO HARNESS EXISTS', 'GDN_CG_SPREAD verdict=PASS', 'INCONCLUSIVE-SINGLE-CHIP', 'conv gates spread engaged', 'tp4 sdpa multi call', 'T7'):
+        for text in ('about 159 ms', 'PAIRED', 'ZERO audit mismatches', 'five consecutive', 'KILL LINE', 'F1 FALLBACK',
+                     'U2_CANON verdict=PASS', 'MR_PROBE verdict', 'GDN_CG_SPREAD verdict=PASS', 'INCONCLUSIVE-SINGLE-CHIP', 'conv gates spread engaged', 'tp4 sdpa multi call',
+                     'skewed eight', 'multiple of 3 entries'):
             self.assertIn(text, order)
+        self.assertNotIn('NO HARNESS EXISTS', order)
+        self.assertNotIn('multiple of 7', order)
+
+    def test_the_f1_fallback_is_a_profile_swap_in_the_later_jobs_and_every_swapped_template_still_parses(self):
+        order = order_text()
+        for text in (NOF1, NOF1_AUDIT):
+            self.assertIn(text, order)
+        swapped = 0
+        for name, (actions, profile, _mode) in EXPECTED.items():
+            if profile not in (W2, W2_AUDIT):
+                continue
+            swapped += 1
+            replacement = NOF1 if profile == W2 else NOF1_AUDIT
+            text = pack_text(name).replace('C2_PROFILE=%s\n' % profile, 'C2_PROFILE=%s\n' % replacement)
+            self.assertIn('C2_PROFILE=' + replacement, text, name)
+            result = job.read_job(job.parse_env(text), sorted(load()['profiles']), root=ROOT)
+            self.assertEqual((result['profile'], result['actions'], result['tag']), (replacement, actions, IMAGE), name)
+        self.assertEqual(swapped, 1 + 5 + 3 + 1)               # A1, H1-H5, T2 T5 T8, P1: nothing else names a w2 profile
+        # the F1 job names the fallback in its own text, and the swap list in ORDER.txt is the swapped jobs
+        self.assertIn('c2-packed-tp4-8x262k-w2-nof1', pack_text('F1-cardm-conv-gates-spread'))
+        self.assertIn('A1, H1-H5, T2, T5, T8 and P1', order)
 
     def test_every_job_named_by_a_needs_line_exists(self):
         names = {line[0].split('-')[0] for line in order_lines()}
@@ -452,15 +538,17 @@ class ShippingTests(unittest.TestCase):
 
     def test_the_suites_run_in_the_cpu_workflow(self):
         workflow = (ROOT / '.github' / 'workflows' / 'qwen-integration-cpu.yml').read_text(encoding='utf-8')
-        for suite in ('test_tp4_w2', 'test_gdn_conv_gates_spread', 'test_sdpa_multi_tp', 'test_tp4_sdpa_multi_window', 'test_tp4_w1'):
+        for suite in ('test_tp4_w2', 'test_gdn_conv_gates_spread', 'test_sdpa_multi_tp', 'test_tp4_sdpa_multi_window', 'test_tp4_w1', 'test_tp4_mr_probe'):
             self.assertRegex(workflow, r'python -B -m unittest [^\n]*\b%s\b' % suite)
         self.assertIn("discover -s optimisation/ttnn-op/mr_probe -p 'test_*.py'", workflow)
         self.assertIn("discover -s optimisation/ttnn-op/gdn_conv_gates_spread -p 'test_*.py'", workflow)
+        self.assertIn("discover -s optimisation/ttnn-op/canon_probe -p 'test_*.py'", workflow)
 
     def test_the_mr_probe_harness_is_on_the_qual_card_lists(self):
         text = (HERE / 'test_qual_card.py').read_text(encoding='utf-8')
         self.assertEqual(text.count("OPS / 'mr_probe' / 'run_card_m.sh'"), 2)
         self.assertEqual(text.count("OPS / 'gdn_conv_gates_spread' / 'run_card_m.sh'"), 2)
+        self.assertEqual(text.count("OPS / 'canon_probe' / 'run_card_m.sh'"), 2)
 
 
 if __name__ == '__main__':

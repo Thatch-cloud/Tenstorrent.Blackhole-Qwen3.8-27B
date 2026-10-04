@@ -756,6 +756,21 @@ class ReaderTests(unittest.TestCase):
         self.assertFalse(reader.failed)
         self.assertEqual(self.rig.refreshed, [])
 
+    def test_a_segment_rebound_after_attach_fails_the_scope_loudly_and_poisons(self):
+        reader = self.build(**{FLAG: 'multi'})
+        self.assertIsNone(reader.multi.rebound())
+        with reader.shared_masks(1):                       # unchanged: fine
+            self.call(reader)
+        segment = reader.readers[2]
+        original = segment.cur_pos
+        segment.cur_pos = [self.device.device_tensor((1,), 'int32', 'row_major', 'dram', name='other')]
+        self.assertIn('cur_pos', reader.multi.rebound())
+        with self.assertRaisesRegex(RuntimeError, 'rebound after attach'):
+            with reader.shared_masks(1):
+                pass
+        self.assertTrue(all(r.failed for r in reader.readers))
+        segment.cur_pos = original
+
     def test_the_call_budget_is_enforced_both_ways(self):
         reader = self.build(**{FLAG: 'multi'})
         with self.assertRaisesRegex(AssertionError, 'exact attention call budget'):
@@ -1110,7 +1125,7 @@ class ProfileTests(unittest.TestCase):
 
     def test_no_other_profile_carries_the_audit_flag_and_the_default_is_untouched(self):
         for name, body in PROFILES.items():
-            if name not in (AUDITED, 'c2-packed-tp4-8x262k-w2-audit'):       # tp4/w2: the audited wave-2 arm carries it too (test_tp4_w2)
+            if name not in (AUDITED, 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1-audit'):       # tp4/w2: the audited wave-2 arm carries it too (test_tp4_w2)
                 self.assertNotIn(AUDIT, body.get('env', {}), name)
         self.assertEqual(json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))['default'], 'c2-packed-tp4')
 

@@ -51,7 +51,8 @@ class FakeTTNN(object):
     def MeshShape(self, *shape):
         return shape
 
-    def open_mesh_device(self, shape):
+    def open_mesh_device(self, shape, **keywords):
+        self.open_keywords = keywords
         return SimpleNamespace(compute_with_storage_grid_size=lambda: SimpleNamespace(x=11, y=10))
 
     def close_mesh_device(self, mesh):
@@ -71,6 +72,31 @@ class FakeTTNN(object):
 
     def synchronize_device(self, mesh):
         self.synchronized += 1
+
+    def deallocate(self, tensor):
+        self.deallocated = getattr(self, 'deallocated', 0) + 1
+
+    # a trace is a recorded list of costs (the test's wrappers add one per captured launch); a replay adds the sum to the test clock
+    capturing = None
+    costs = None
+    clock = None
+
+    def begin_trace_capture(self, mesh, cq_id=0):
+        self.capturing = []
+        return len(getattr(self, 'traces', {}))
+
+    def end_trace_capture(self, mesh, handle, cq_id=0):
+        self.traces = getattr(self, 'traces', {})
+        self.traces[handle] = self.capturing
+        self.capturing = None
+
+    def execute_trace(self, mesh, handle, cq_id=0, blocking=True):
+        self.replays = getattr(self, 'replays', []) + [handle]
+        if self.clock is not None:
+            self.clock['time'] += sum(self.traces[handle])
+
+    def release_trace(self, mesh, handle):
+        self.released = getattr(self, 'released', []) + [handle]
 
     def op(self, x, windows, taps, a, b, dt, neg, batch, memory_config, channels, a_col, b_col):
         return serve(x, windows, batch)
@@ -168,22 +194,25 @@ class VerdictTests(unittest.TestCase):
 
 
 class TimingTests(unittest.TestCase):
-    def test_per_launch_microseconds_by_arm_in_serpentine_order(self):
+    def test_per_launch_microseconds_by_arm_from_captured_traces_in_serpentine_order(self):
         ttnn = FakeTTNN()
         spread = fake_spread('same')
         rig = probe.Rig(ttnn, 'mesh', torch, FOUND, spread)
         ticks = {'time': 0.0}
+        ttnn.clock = ticks
         calls = []
         real_served, real_spread_launch = rig.served, rig.spreaded
 
         def served(tensors, rows):
             calls.append('served')
-            ticks['time'] += 0.00002
+            if ttnn.capturing is not None:
+                ttnn.capturing.append(0.00002)
             return real_served(tensors, rows)
 
         def spreaded(tensors, rows):
             calls.append('spread')
-            ticks['time'] += 0.00001
+            if ttnn.capturing is not None:
+                ttnn.capturing.append(0.00001)
             return real_spread_launch(tensors, rows)
 
         rig.served, rig.spreaded = served, spreaded
@@ -191,10 +220,26 @@ class TimingTests(unittest.TestCase):
         self.assertAlmostEqual(result['served']['median_us'], 20.0, places=3)
         self.assertAlmostEqual(result['spread']['median_us'], 10.0, places=3)
         self.assertAlmostEqual(result['spread_minus_served_us'], -10.0, places=3)
-        self.assertEqual(result['served']['n'], 6)
-        body = calls[2:]            # after the two warm-up calls
-        blocks = [body[index:index + 4] for index in range(0, len(body), 4)]
-        self.assertEqual([block[0] for block in blocks], ['served', 'spread', 'spread', 'served', 'served', 'spread', 'spread', 'served', 'served', 'spread', 'spread', 'served'])
+        self.assertEqual((result['served']['n'], result['mode']), (6, 'trace'))
+        # a warm call then a four-launch capture per arm, then NO eager launch while timing: the replays carry the timing
+        self.assertEqual(calls, ['served'] * 5 + ['spread'] * 5)
+        self.assertEqual(ttnn.replays[:2], [0, 1])                      # the untimed replay of each arm
+        timed = ttnn.replays[2:]
+        self.assertEqual(timed, [0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0])   # serpentine
+        self.assertEqual(sorted(ttnn.released), [0, 1])
+
+    def test_every_device_tensor_is_released_after_a_case(self):
+        ttnn = FakeTTNN()
+        rig = probe.Rig(ttnn, 'mesh', torch, FOUND, fake_spread('same'))
+        probe.compare_case(rig, probe.host_data(torch, 16, 'random', 1, QKV, WIDTH, HEADS), 16)
+        self.assertGreater(ttnn.deallocated, 10)
+
+    def test_the_mesh_is_opened_with_a_trace_region(self):
+        ttnn = FakeTTNN()
+        with patch.dict(os.environ, {'QWEN_FAST_TP': '4'}), patch('builtins.print'), tempfile.TemporaryDirectory() as directory:
+            probe.main(['--out', str(Path(directory) / 'x.json'), '--cases', '16', '--regimes', 'random', '--seeds', '1', '--timing', 'off'],
+                       torch=torch, ttnn=ttnn, spread=fake_spread('same'), tp_shapes=SimpleNamespace(active=lambda: FOUND))
+        self.assertGreater(ttnn.open_keywords['trace_region_size'], 0)
 
     def test_summary(self):
         found = probe.summarize([4.0, 1.0, 3.0, 2.0])

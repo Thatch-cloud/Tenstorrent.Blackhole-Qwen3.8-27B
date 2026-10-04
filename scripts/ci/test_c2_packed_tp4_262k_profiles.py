@@ -40,7 +40,7 @@ BEST262K = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-
             'c2-packed-tp4-8x262k-best-time-gate-u1', 'c2-packed-tp4-8x262k-best-u1-audit',
             'c2-packed-tp4-8x262k-hostgap-1', 'c2-packed-tp4-8x262k-hostgap-1-audit', 'c2-packed-tp4-8x262k-hostgap-2', 'c2-packed-tp4-8x262k-hostgap-2-audit',
             # tp4/w1: the built levers gated together (test_tp4_w1 holds each as the control minus the in-trace sampler plus the stack)
-            'c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit', 'c2-packed-tp4-8x262k-w1-audit-nod1', 'c2-packed-tp4-8x262k-w1-lite', 'c2-packed-tp4-8x262k-w1-nod1', 'c2-packed-tp4-8x262k-w2', 'c2-packed-tp4-8x262k-w2-audit',
+            'c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit', 'c2-packed-tp4-8x262k-w1-audit-nod1', 'c2-packed-tp4-8x262k-w1-lite', 'c2-packed-tp4-8x262k-w1-nod1', 'c2-packed-tp4-8x262k-w2', 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1', 'c2-packed-tp4-8x262k-w2-nof1-audit',
             # tp4/sdpa-multi: the timed twin and its audited twin are the best-time-gate arm plus the SDPA flag(s) (test_sdpa_multi_tp holds them)
             'c2-packed-tp4-8x262k-best-sdpamulti', 'c2-packed-tp4-8x262k-best-sdpamulti-audit')
 # tp4/262k8-x (test_tp4_262k8_x holds each as the best-time-gate or best-audit twin plus/minus exactly one lever): the experiments image's arms; 262k knobs by inheritance.

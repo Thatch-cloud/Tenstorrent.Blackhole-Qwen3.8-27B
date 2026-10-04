@@ -7,8 +7,9 @@ kernels compile, run and move the same bytes; whether four chips of a mesh agree
 For each case (rows = state rows = x rows = batch) and regime (random finite bf16; edge values: +-0, the smallest normal, denormals, the largest
 finite, +-1) the SAME host data is uploaded twice. The served op runs on one copy, the spread launch (gdn_conv_gates_spread.launch, chips=1) on the
 other; conv, beta, g and the four advanced windows are read back and compared as int16 bit patterns, the in-trace audit's rule (the runtime's bf16
-upload and readback may flush denormals and turn NaN into Inf, but they do so for both arms alike). Timing: per case, eager, 24 launches then one
-synchronise, 25 rounds in serpentine order (served, spread, spread, served, ...); the per-launch median and IQR of each arm. The timing also settles
+upload and readback may flush denormals and turn NaN into Inf, but they do so for both arms alike). Timing: per case and arm, a captured trace of 24 launches
+(eager timing would measure the host's program-descriptor build, not the card), 25 rounds of replays in serpentine order (served, spread, spread,
+served, ...); the per-launch median and IQR of each arm. The timing also settles
 how long a conv core takes: the spread launch's floor is the slower of its conv cores and its gate cores.
 
 Exit: 0 PASS (every compare exact); 1 FAIL (any differing element, a launch that fell back); 3 the watchdog; 4 NOT-RUN (a section raised). The
@@ -29,6 +30,7 @@ REGIMES = ('random', 'edge')
 LAUNCHES = 24
 ROUNDS = 25
 WATCHDOG_S = 2400
+TRACE_REGION = 64 * 1024 * 1024
 EDGE_BITS = (0x0000, 0x8000, 0x0080, 0x8080, 0x0001, 0x8001, 0x007F, 0x7F7F, 0xFF7F, 0x3F80, 0xBF80)
 
 
@@ -109,37 +111,100 @@ class Rig(object):
         return ttnn.to_torch(ttnn.get_device_tensors(tensor)[0]).contiguous().view(torch.int16)
 
 
+def release_all(rig, *groups):
+    """Deallocate every device tensor in the (nested) groups once, so a long run does not grow the card's DRAM case over case."""
+    seen = set()
+
+    def walk(value):
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif value is not None and id(value) not in seen:
+            seen.add(id(value))
+            try:
+                rig.ttnn.deallocate(value)
+            except BaseException:  # noqa: BLE001
+                pass
+
+    walk(list(groups))
+
+
 def compare_case(rig, host, rows):
     """One compare section: the served op on one upload, the spread launch on another, seven tensors each, bit for bit."""
     served_in, spread_in = rig.upload(host), rig.upload(host)
-    served = rig.served(served_in, rows)
-    spread = rig.spreaded(spread_in, rows)
-    if spread is None:
-        return dict(rows=rows, differing=-1, fell_back=True)
-    labels = ('conv', 'beta', 'g', 'window0', 'window1', 'window2', 'window3')
-    pairs = list(zip(labels, [*served, *served_in['windows']], [*spread, *spread_in['windows']]))
-    counts = {label: differing(rig.torch, rig.read(left), rig.read(right)) for label, left, right in pairs}
-    return dict(rows=rows, differing=sum(counts.values()), by_tensor=counts, fell_back=False)
+    served = spread = ()
+    try:
+        served = rig.served(served_in, rows)
+        spread = rig.spreaded(spread_in, rows)
+        if spread is None:
+            return dict(rows=rows, differing=-1, fell_back=True)
+        labels = ('conv', 'beta', 'g', 'window0', 'window1', 'window2', 'window3')
+        pairs = list(zip(labels, [*served, *served_in['windows']], [*spread, *spread_in['windows']]))
+        counts = {label: differing(rig.torch, rig.read(left), rig.read(right)) for label, left, right in pairs}
+        return dict(rows=rows, differing=sum(counts.values()), by_tensor=counts, fell_back=False)
+    finally:
+        release_all(rig, served_in, spread_in, served, spread)
+
+
+def capture(rig, run, launches):
+    """Capture `launches` back-to-back launches of one arm in one trace (the program is compiled and the descriptor built by a warm call
+    beforehand, as the served stack does before its capture); returns (trace handle, the outputs the capture allocated, which stay alive
+    until the trace is released)."""
+    ttnn, mesh = rig.ttnn, rig.mesh
+    handle = ttnn.begin_trace_capture(mesh, cq_id=0)
+    kept = []
+    try:
+        try:
+            for _ in range(launches):
+                kept.append(run())
+        finally:
+            ttnn.end_trace_capture(mesh, handle, cq_id=0)
+    except BaseException:
+        ttnn.release_trace(mesh, handle)
+        release_all(rig, kept)
+        raise
+    return handle, kept
 
 
 def time_case(rig, host, rows, launches=LAUNCHES, rounds=ROUNDS, clock=time.perf_counter):
-    """Per-launch microseconds of the served op and the spread launch over serpentine rounds."""
+    """Per-launch microseconds of the served op and the spread launch, each arm under a captured trace of `launches` launches (the host
+    cost of building a program descriptor in Python is paid at the capture, not in the timed replay: eager timing would measure the host,
+    about 1 to 3 ms a spread call against some tens of microseconds on the card), over serpentine rounds of replays."""
+    ttnn, mesh = rig.ttnn, rig.mesh
     served_in, spread_in = rig.upload(host), rig.upload(host)
-    arms = dict(served=lambda: rig.served(served_in, rows), spread=lambda: rig.spreaded(spread_in, rows))
+    runs = dict(served=lambda: rig.served(served_in, rows), spread=lambda: rig.spreaded(spread_in, rows))
     samples = dict(served=[], spread=[])
-    for name in arms:
-        arms[name]()
-    rig.ttnn.synchronize_device(rig.mesh)
-    for index in range(rounds):
-        order = ('served', 'spread') if index % 2 == 0 else ('spread', 'served')
-        for name in order:
-            started = clock()
-            for _ in range(launches):
-                arms[name]()
-            rig.ttnn.synchronize_device(rig.mesh)
-            samples[name].append((clock() - started) / launches * 1e6)
+    traces, kept = {}, []
+    try:
+        for name in runs:
+            release_all(rig, runs[name]())          # the warm call: compile outside the capture
+            ttnn.synchronize_device(mesh)
+            traces[name], outputs = capture(rig, runs[name], launches)
+            kept.append(outputs)
+            ttnn.synchronize_device(mesh)
+        for name in runs:                           # one untimed replay each
+            ttnn.execute_trace(mesh, traces[name], cq_id=0, blocking=False)
+        ttnn.synchronize_device(mesh)
+        for index in range(rounds):
+            order = ('served', 'spread') if index % 2 == 0 else ('spread', 'served')
+            for name in order:
+                started = clock()
+                ttnn.execute_trace(mesh, traces[name], cq_id=0, blocking=False)
+                ttnn.synchronize_device(mesh)
+                samples[name].append((clock() - started) / launches * 1e6)
+    finally:
+        for handle in traces.values():
+            try:
+                ttnn.release_trace(mesh, handle)
+            except BaseException:  # noqa: BLE001
+                pass
+        release_all(rig, served_in, spread_in, kept)
     served, spread = summarize(samples['served']), summarize(samples['spread'])
-    return dict(rows=rows, served=served, spread=spread, spread_minus_served_us=round(spread['median_us'] - served['median_us'], 2))
+    return dict(rows=rows, mode='trace', served=served, spread=spread,
+                spread_minus_served_us=round(spread['median_us'] - served['median_us'], 2))
 
 
 def main(argv=None, torch=None, ttnn=None, spread=None, tp_shapes=None):
@@ -172,7 +237,7 @@ def main(argv=None, torch=None, ttnn=None, spread=None, tp_shapes=None):
         found = tp_shapes.active()
         report['geometry'] = dict(channels=found.gdn_qkv, heads=found.gdn_nv, a_col=found.gdn_a_col, b_col=found.gdn_b_col, width=found.gdn_qkvzab)
         grid = None
-        mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 1))
+        mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 1), trace_region_size=TRACE_REGION)
         grid = mesh.compute_with_storage_grid_size()
         report['grid'] = [grid.x, grid.y]
         report['plans'] = {str(rows): {key: value for key, value in spread.plan(grid.x, grid.y, rows, rows, found.gdn_qkv, found.gdn_nv).items()

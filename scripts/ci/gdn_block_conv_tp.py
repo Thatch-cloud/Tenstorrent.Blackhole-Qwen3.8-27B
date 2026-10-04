@@ -153,7 +153,7 @@ def stage(mesh, projected, groups, packed_windows, taps, dt_bias, neg_exp_A, ope
             entries = hold_served(mesh, groups, packed_windows, conv_users, beta_users, g_users, z_users, taps, dt_bias,
                                   neg_exp_A, operations, held)
             if spread_entries:
-                # F1's seven entries (block conv, beta, g and the four advanced block windows against the served op's on clones) ride
+                # F1's three entries (block conv, beta and g against the served op's on shared scratch windows) ride
                 # the first user's list: the layer's retained record frees them with the rest.
                 entries[0].extend(spread_entries)
     except rows_dma.Unsupported as error:

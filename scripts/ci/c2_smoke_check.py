@@ -78,7 +78,7 @@ SOLO_TEST = 'concurrent4_solo'
 REPLAY_TEST = 'replay_concurrent4'
 # The eight-seat tests (tp4/seats8: QWEN_FAST_M3_BLOCKS=2), judged as the four-user ones are: every user a stream that ends in tokens,
 # the code ones code answers too; the eight-user replay is judged as the four-user one.
-EIGHT_TESTS = ('concurrent8_code_equal', 'concurrent8_code_32k', 'concurrent8_code_128k', 'concurrent5_split', 'concurrent8_drain',
+EIGHT_TESTS = ('concurrent8_code_equal', 'concurrent8_code_32k', 'concurrent8_code_128k', 'concurrent8_skew', 'concurrent5_split', 'concurrent8_drain',
                'concurrent8_steady')
 # The 262k stall shape (tp4/seats262k): seven decoding users and one cold 253,920-token arrival; its numbers are recorded, not gated, but
 # every stream must end in tokens (the arrival's too) and the arrival's time to first token must exist.

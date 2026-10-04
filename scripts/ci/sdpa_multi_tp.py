@@ -561,6 +561,9 @@ class MultiBlock(object):
             for tensors in (positions, lent_tables, lent_positions):
                 if len({id(tensor) for tensor in tensors}) != len(tensors):
                     raise ValueError('Every user must own its own positions word, table and cur_pos')
+            # The gather and mask programs bake THESE buffers (the attach-time positions words, tables and cur_pos): a reader that is rebound to
+            # others later would leave the multi launch reading stale ones, and nothing but the SDPA audit would see it (scope() checks).
+            self.bound = (positions, lent_tables, lent_positions)
             self.mask_program, self.mask_io = build_mask_program(operations, self.mesh, positions, self.mask, self.users)
             self.gather_program, self.gather_io = build_gather_program(operations, self.mesh, lent_tables, lent_positions,
                                                                        self.table, self.cur_pos)
@@ -594,6 +597,18 @@ class MultiBlock(object):
             for segment in self.reader.readers:
                 segment.refresh_calls += len(segment.metadata)
 
+    def rebound(self):
+        """None while every segment still holds the buffers the programs were built on; else why the multi launch must not run (by identity: the
+        timed arms run no SDPA audit, so this is the only thing that fails loudly there)."""
+        readers = self.reader.readers
+        now = ([segment.positions for segment in readers], [segment.metadata[0][1] for segment in readers],
+               [segment.cur_pos[0] for segment in readers])
+        for name, was, current in zip(('positions word', 'page table', 'cur_pos'), self.bound, now):
+            if len(was) != len(current) or any(old is not new for old, new in zip(was, current)):
+                return ('The multi launch was built on other %ss than the segments hold now (rebound after attach): its gather and mask '
+                        'programs would read stale buffers' % name)
+        return None
+
     @contextmanager
     def scope(self, expected_calls):
         """The shared-mask forward (PackedExtentReplayReader.shared_masks, for the multi launch): refresh once on entry, exactly
@@ -602,6 +617,11 @@ class MultiBlock(object):
             raise RuntimeError('Shared-mask forwards cannot nest')
         if type(expected_calls) is not int or not 1 <= expected_calls <= SLOTS:
             raise ValueError('Explicit one-to-%d attention call budget required' % SLOTS)
+        rebound = self.rebound()
+        if rebound:
+            for segment in self.reader.readers:
+                segment.failed = True
+            raise RuntimeError(rebound)
         for segment in self.reader.readers:
             segment.validate(segment.start)
         self.scope_expected, self.scope_used = expected_calls, 0

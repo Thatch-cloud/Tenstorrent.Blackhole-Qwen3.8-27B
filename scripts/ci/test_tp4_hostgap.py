@@ -1151,7 +1151,7 @@ class ProfileTests(unittest.TestCase):
 
     def test_no_traffic_profile_carries_a_host_gap_flag(self):
         for name, profile in load_profiles().items():
-            if name in ADDED or name in ('c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit', 'c2-packed-tp4-8x262k-w1-audit-nod1', 'c2-packed-tp4-8x262k-w1-lite', 'c2-packed-tp4-8x262k-w1-nod1', 'c2-packed-tp4-8x262k-w2', 'c2-packed-tp4-8x262k-w2-audit'):  # tp4/w1's stack arms carry the epochs arm's flags
+            if name in ADDED or name in ('c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit', 'c2-packed-tp4-8x262k-w1-audit-nod1', 'c2-packed-tp4-8x262k-w1-lite', 'c2-packed-tp4-8x262k-w1-nod1', 'c2-packed-tp4-8x262k-w2', 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1', 'c2-packed-tp4-8x262k-w2-nof1-audit'):  # tp4/w1's stack arms carry the epochs arm's flags
                 continue
             with self.subTest(name=name):
                 self.assertFalse(set(FLAGS) & set(profile.get('env', {})))

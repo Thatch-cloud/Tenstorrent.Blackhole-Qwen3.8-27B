@@ -189,6 +189,24 @@ class DeepArmTests(SmokeRuns):
         self.assertEqual(8 * kv.request_blocks(120000, 800), 15112)
 
 
+class SkewArmTests(SmokeRuns):
+    def test_two_long_prompts_one_per_block_and_six_short_ones_as_the_server_counts_them(self):
+        results, requests, tokenized = self.ran('concurrent8_skew')
+        entry = results['concurrent8_skew']
+        self.assertNotIn('error', entry, {key: value for key, value in entry.items() if key != 'users'})
+        fit = entry['fit']
+        self.assertEqual(fit['targets'], [253920, 4096, 4096, 4096, 253920, 4096, 4096, 4096])
+        self.assertTrue(fit['calibrated'])
+        for count, target in zip(fit['counts'], fit['targets']):
+            self.assertLessEqual(count, target)
+            self.assertGreaterEqual(count, target * 0.99)
+        self.assertEqual(len(requests), 8)
+        self.assertEqual({request['body']['max_tokens'] for request in requests}, {800})
+        self.assertEqual(len({request['body']['messages'][0]['content'] for request in requests}), 8)
+        self.assertIn('concurrent8_skew', check.EIGHT_TESTS)
+        self.assertEqual(check.smoke_problems(results), [])
+
+
 class StallArmTests(SmokeRuns):
     def test_seven_decoders_then_one_cold_arrival_is_recorded(self):
         results, requests, tokenized = self.ran('stall8_cold262k')

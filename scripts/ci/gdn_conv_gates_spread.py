@@ -6,8 +6,10 @@ extra core when the grid has one spare"), whose reader gathers a and b one bfloa
 block launch has two gate tiles, so that core runs two tiles one after the other: 42.3 us a launch against 20.6 us for the same
 launch with one gate tile (the 4-row trace's), 48 launches a verify, two blocks a round.
 
-WHAT. One generic_op per launch (a K-jit twin, no graft build, no change to the served .so) that runs the SERVED compute kernel
-unchanged (read from the image tree and checked against its sha256) with two new data-movement kernels, generated from the served
+WHAT. One generic_op per launch (a K-jit twin, no graft build, no change to the served .so) that runs the SERVED compute kernel's
+SOURCE unchanged (read from the image tree and checked against its sha256, then JIT-compiled here with the served factory's compile
+arguments and compute config: the same source, not the served .so's binary, which this twin does not byte-compare, the fusion
+plan's U4 being open) with two new data-movement kernels, generated from the served
 reader and writer by two changes only (gdn_conv_gates_spread_reader.cpp / _writer.cpp):
 
   F1a  a gate-start runtime word. Gate tile k sits on core conv_cores + k, alone. The served compute loops `g_n` gate tiles after
@@ -19,8 +21,8 @@ reader and writer by two changes only (gdn_conv_gates_spread_reader.cpp / _write
        barrier. The same bytes land in the same positions of the same zeroed tile.
 
 Neither touches arithmetic: the conv instances are the served ones (the instance partition over cores is the served one whenever
-the gate cores fit beside it, which they do at 64 rows: 160 conv instances, 80 cores of two, and 2 gate cores), every kernel instruction that
-computes is the served binary's, and the data movement copies the same bytes to the same addresses. The audit (below) is the proof
+the gate cores fit beside it, which they do at 64 rows: 160 conv instances, 80 cores of two, and 2 gate cores), every kernel source line that
+computes is the served file's, and the data movement copies the same bytes to the same addresses. The audit (below) is the proof
 on the card; exactness is "by construction", the audit is how a wrong construction is caught.
 
 BINDING. gdn_block_conv_tp.stage (V1, QWEN_FAST_TP4_GDN_BLOCK_CONV) calls launch() in place of its one conv_gates(...) call when the
@@ -29,18 +31,23 @@ flag is set; with the flag unset nothing here is imported and the call is the se
 from the projection itself, a tree whose conv-gates sources are not the pinned ones, a grid that cannot hold the gate cores. The
 caller then makes the served call.
 
-AUDIT (QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT=1, needs QWEN_FAST_TP4_VGLUE_AUDIT=1). Before the launch, the block windows are cloned
-and the SERVED op runs on the same projection and the clones; after it, the launch's conv, beta, g and four advanced windows are
-cloned and every pair is held on the layer's audit entries (labels 'spread conv gates ...', seven per launch). The replay's audit
-(tp4_vglue.compare_entry, which gdn_conv_gates_spread.audit_round calls on exactly these entries) compares them on every chip as
-int16 bit patterns (-0 and +0 differ). A launch that fell back leaves an audited layer without its seven entries and fails the
-audit rather than passing on what is left.
+AUDIT (QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT=1, needs QWEN_FAST_TP4_VGLUE_AUDIT=1). Before the launch, the block windows are copied
+into four scratch windows and the SERVED op runs on the same projection and the scratch (it advances the scratch, never the real
+windows); after the launch, its conv, beta and g are cloned and each pair is held on the layer's audit entries (labels 'spread conv
+gates ...', THREE per launch). The replay's audit (tp4_vglue.compare_entry, which gdn_conv_gates_spread.audit_round calls on exactly
+these entries) compares them on every chip as int16 bit patterns (-0 and +0 differ). A launch that fell back leaves an audited layer
+without its three entries and fails the audit rather than passing on what is left. The four ADVANCED WINDOWS are not audited here:
+the verify-glue audit this one rides compares every user's advanced windows (unstacked from the launch's block windows) with the
+per-user served path's, so a wrong window is caught there, and holding a clone per window per launch would cost about 190 MB a chip
+on top of the other audits at 48 layers and two blocks. The scratch windows are ONE set per mesh and shape, shared by every launch
+(the served op is serial on the queue, and their contents are not read after the launch): about 1.3 MB a chip in all.
 
-TRACE. No buffer is allocated before the first capture for this launch: its outputs are allocated where the served op's are, inside
-the capture, and it needs no scratch. Runtime argument lengths are fixed per role (reader 17, writer 11, compute 2): generic_op does
-not hash them (f945486e).
+TRACE. Without the audit no buffer is allocated before the first capture for this launch: its outputs are allocated where the
+served op's are, inside the capture, and it needs no scratch. With the audit the scratch windows are allocated inside the first
+capture that reaches the launch and are never freed (a buffer freed inside a capture can be handed to a later op of the same
+capture). Runtime argument lengths are fixed per role (reader 17, writer 11, compute 2): generic_op does not hash them (f945486e).
 
-Stdlib only at import (ttnn-free until launch), py 3.7.
+Stdlib only at import (ttnn-free until launch), py 3.7 (nothing here needs a later syntax).
 """
 
 import hashlib
@@ -88,7 +95,7 @@ FELL_BACK = '[PINDIAG] tp4 conv gates spread fell back'
 AUDIT_MARKER = '[PINDIAG] tp4 conv gates spread audit'
 AUDIT_MISMATCH = '[PINDIAG] tp4 conv gates spread audit mismatch'
 LABEL = 'spread conv gates '
-ENTRIES_PER_LAUNCH = 3 + K     # conv, beta, g and the four advanced windows
+ENTRIES_PER_LAUNCH = 3         # conv, beta, g (the advanced windows ride the verify-glue audit's per-user window entries)
 RUNTIME_FILES = ('gdn_conv_gates_spread.py', 'gdn_conv_gates_spread_reader.cpp', 'gdn_conv_gates_spread_writer.cpp')
 
 
@@ -382,10 +389,25 @@ def build_program(operations, mesh, tensors, outputs, work_plan, geometry, texts
     return program
 
 
+_SCRATCH = {}
+
+
+def scratch_windows(operations, mesh, windows, dram):
+    """The audit's reference windows: one set per mesh and window shape, allocated by the first audited launch (inside its capture) and kept for
+    the process's life. Every launch re-copies the live windows into them and the served op advances them; nothing reads them afterwards."""
+    key = (id(mesh), tuple(int(extent) for extent in windows[0].shape), len(windows))
+    found = _SCRATCH.get(key)
+    if found is None:
+        found = [operations.empty(tuple(window.shape), dtype=operations.bfloat16, layout=operations.TILE_LAYOUT, device=mesh, memory_config=dram)
+                 for window in windows]
+        _SCRATCH[key] = found
+    return found
+
+
 def launch(operations, mesh, x, windows, taps, dt_bias, neg_exp_A, rows, channels, a_col, b_col, held=None, entries=None, chips=None):
     """(conv, beta, g) by the F1 launch, the block windows advanced in place as the served op advances them; or None after one
     logged line when this call cannot take it (the caller makes the served call; nothing is left allocated and nothing advanced).
-    Under the audit it also runs the served op on cloned windows first and appends the seven audit entries to `entries` (and
+    Under the audit it also runs the served op on shared scratch copies of the windows first and appends the three audit entries to `entries` (and
     every tensor it holds to `held`). `chips` is the mesh's chip count when it is not the configured width (the one-card probe)."""
     reason = problem(operations, x, windows, taps, dt_bias, neg_exp_A, rows, channels, a_col, b_col)
     if reason is not None:
@@ -403,14 +425,16 @@ def launch(operations, mesh, x, windows, taps, dt_bias, neg_exp_A, rows, channel
         return fall_back(str(error))
     audit = audit_enabled()
     dram = operations.DRAM_MEMORY_CONFIG
-    reference_windows, reference, mine = [], (), []
+    reference, mine = (), []
     produced = []
     try:
         if audit:
             from gdn_user_batch_conv import conv_gates
 
-            # The served op on the same projection and clones of the not-yet-advanced windows, before the launch advances them.
-            reference_windows = [operations.clone(window, memory_config=dram) for window in windows]
+            # The served op on the same projection and a copy of the not-yet-advanced windows (shared scratch), before the launch advances them.
+            reference_windows = scratch_windows(operations, mesh, windows, dram)
+            for window, copy in zip(windows, reference_windows):
+                operations.copy(window, copy)
             reference = conv_gates(operations, x, reference_windows, taps, dt_bias, neg_exp_A, rows)
         geometry = dict(channels=channels, heads=heads, rows=rows, x_rows=int(x.shape[1]), x_width=int(x.shape[2]),
                         a_col=a_col, b_col=b_col)
@@ -427,17 +451,19 @@ def launch(operations, mesh, x, windows, taps, dt_bias, neg_exp_A, rows, channel
                 io.append(value)
         operations.generic_op(io, program)
         if audit:
-            mine = [operations.clone(value, memory_config=dram) for value in (*produced, *windows)]
-            theirs = [*reference, *reference_windows]
-            labels = ['conv', 'beta', 'g'] + ['window %d' % slot for slot in range(K)]
-            for label, copy, served in zip(labels, mine, theirs, strict=True):
+            mine = [operations.clone(value, memory_config=dram) for value in produced]
+            theirs = list(reference)
+            labels = ['conv', 'beta', 'g']
+            if not len(mine) == len(theirs) == len(labels):
+                raise RuntimeError('the served op returned %d outputs, %d expected' % (len(theirs), len(labels)))
+            for label, copy, served in zip(labels, mine, theirs):
                 if entries is not None:
                     entries.append(dict(label=LABEL + label, mine=copy, served=served))
                 if held is not None:
                     held.extend([copy, served])
     except BaseException:
         # nothing reached `entries` or `held` yet (they are appended last): free what this call made, the served op's outputs too
-        for value in (*produced, *mine, *reference, *reference_windows):
+        for value in (*produced, *mine, *reference):
             try:
                 operations.deallocate(value)
             except BaseException:
@@ -453,7 +479,7 @@ _AUDIT = dict(rounds=0)
 
 
 def audit_round(operations, records, round_number):
-    """After a replay: every audited layer (verify_trace_t2.audit_layers, as the vglue audit) must carry the seven F1 entries and each
+    """After a replay: every audited layer (verify_trace_t2.audit_layers, as the vglue audit) must carry the three F1 entries and each
     must match its served twin on every chip, as int16 bits. Logs AUDIT_MARKER '<n> exact=True layers=<L> entries=<k>' or
     AUDIT_MISMATCH and raises. Returns the entries compared."""
     import verify_trace_t2

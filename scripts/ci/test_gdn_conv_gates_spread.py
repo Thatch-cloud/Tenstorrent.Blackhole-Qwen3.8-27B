@@ -27,6 +27,7 @@ import hashlib
 import os
 from pathlib import Path
 import random
+import shutil
 import re
 import sys
 import tempfile
@@ -408,13 +409,29 @@ class KernelTextTests(unittest.TestCase):
             self.assertIn(b'QWEN_FAST_TP4_CONV_GATES_SPREAD', data)
         self.assertEqual(set(spread.source_sha256()), {'reader', 'writer'})
 
-    def test_the_served_files_the_new_ones_derive_from(self):
-        root = os.environ.get('GDN_CONV_ROOT') or os.environ.get('TT_METAL_HOME')
-        base = Path(root) / spread.DIRECTORY if root else None
-        if base is None or not (base / 'kernels/dataflow/reader_gdn_conv_gates.cpp').exists():
-            self.skipTest('no tree with the served conv-gates sources (set GDN_CONV_ROOT to a tree root)')
+    FIXTURE = HERE / 'fixtures' / 'gdn_conv_gates_served'
+
+    def test_the_vendored_served_files_are_the_pinned_ones(self):
         for name, expected in spread.SERVED.items():
-            self.assertEqual(hashlib.sha256((base / name).read_bytes()).hexdigest(), expected, name)
+            self.assertEqual(hashlib.sha256((self.FIXTURE / name).read_bytes()).hexdigest(), expected, name)
+        # and sources() accepts a tree laid out as the image's: the pin check the launch makes before it trusts a tree
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / spread.DIRECTORY
+            shutil.copytree(self.FIXTURE, target, ignore=shutil.ignore_patterns('README.md'))
+            found = spread.sources(directory)
+            self.assertEqual(set(found), {'compute', 'reader', 'writer'})
+
+    def test_a_tree_with_one_changed_served_file_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / spread.DIRECTORY
+            shutil.copytree(self.FIXTURE, target, ignore=shutil.ignore_patterns('README.md'))
+            changed = target / 'kernels/dataflow/reader_gdn_conv_gates.cpp'
+            changed.write_bytes(changed.read_bytes() + b'\n// x\n')
+            with self.assertRaises(spread.SourceMismatch):
+                spread.sources(directory)
+
+    def test_the_served_files_the_new_ones_derive_from(self):
+        base = self.FIXTURE
         served_reader = (base / 'kernels/dataflow/reader_gdn_conv_gates.cpp').read_text()
         new_reader = text('gdn_conv_gates_spread_reader.cpp')
         loop_start = served_reader.index('    for (uint32_t inst = inst_start; inst < inst_start + n_inst; ++inst) {')
@@ -435,6 +452,42 @@ class KernelTextTests(unittest.TestCase):
                    if op[0] != 'equal']
         self.assertEqual(len(changes), 2, changes)
         self.assertTrue(all(op[0] == 'insert' for op in changes))
+
+    def test_the_circular_buffer_plan_is_the_served_factorys_but_for_the_gather_scratch(self):
+        factory = (self.FIXTURE / 'gdn_conv_gates_program_factory.cpp').read_text()
+        found = re.findall(r'add_cb\(cbcg::(\w+), (\w+), (\d+), (tt::DataFormat::Float32|df_io)\);', factory)
+        self.assertEqual([name for name, _n, _b, _f in found],
+                         ['win', 'tap', 'prod', 'acc', 'out', 'shift', 'a', 'b', 'dtb', 'nega', 'sp', 'beta', 'g', 'gsrc'])
+        served = {}
+        for index, (_name, tiles, buffers, kind) in enumerate(found):
+            served[index] = ((spread.K if tiles == 'K' else int(tiles)) * int(buffers), 'fp32' if kind.endswith('Float32') else 'bf16')
+        self.assertEqual({index: plan for index, plan in spread.CB_PLAN.items() if index != 13}, {index: plan for index, plan in served.items() if index != 13})
+        self.assertEqual(served[13], (2, 'bf16'))
+        self.assertEqual(spread.CB_PLAN[13], (4, 'bf16'))              # the one change: four pages so one barrier covers a's and b's two source tiles each
+
+    def test_the_compute_config_and_the_data_movement_processors_are_the_served_factorys(self):
+        factory = (self.FIXTURE / 'gdn_conv_gates_program_factory.cpp').read_text()
+        self.assertIn('.math_fidelity = MathFidelity::HiFi4, .fp32_dest_acc_en = true, .math_approx_mode = false', factory)
+        module = (HERE / 'gdn_conv_gates_spread.py').read_text()
+        self.assertIn('math_fidelity=operations.MathFidelity.HiFi4, fp32_dest_acc_en=True', module)
+        self.assertIn('math_approx_mode=False', module)
+        # the served kernels take the default reader and writer configs (reader: RISCV_1 on its default NOC, writer: RISCV_0), which the twin spells out
+        self.assertIn('reader.config = ReaderConfigDescriptor{};', factory)
+        self.assertIn('writer.config = WriterConfigDescriptor{};', factory)
+        self.assertIn('DataMovementProcessor.RISCV_1,' + chr(10) + '                                                       noc=operations.NOC.RISCV_1_default', module)
+        self.assertIn('DataMovementProcessor.RISCV_0,' + chr(10) + '                                                       noc=operations.NOC.RISCV_0_default', module)
+
+    def test_the_vendored_files_are_lf_only(self):
+        for name in spread.SERVED:
+            self.assertNotIn(b'\r', (self.FIXTURE / name).read_bytes(), name)
+
+    def test_a_tree_named_by_the_environment_holds_the_pins_too(self):
+        root = os.environ.get('GDN_CONV_ROOT') or os.environ.get('TT_METAL_HOME')
+        base = Path(root) / spread.DIRECTORY if root else None
+        if base is None or not (base / 'kernels/dataflow/reader_gdn_conv_gates.cpp').exists():
+            self.skipTest('no tree with the served conv-gates sources (set GDN_CONV_ROOT to a tree root)')
+        for name, expected in spread.SERVED.items():
+            self.assertEqual(hashlib.sha256((base / name).read_bytes()).hexdigest(), expected, name)
 
 
 # --- the launch, on a fake ttnn ---------------------------------------------------------------------------------------------------
@@ -487,8 +540,11 @@ class FakeTTNN(object):
     NOC = SimpleNamespace(RISCV_0_default='noc0', RISCV_1_default='noc1')
 
     def __init__(self):
-        self.allocated, self.freed, self.launches, self.clones = [], [], [], []
+        self.allocated, self.freed, self.launches, self.clones, self.copies = [], [], [], [], []
         self.address = 100000
+
+    def copy(self, source, destination):
+        self.copies.append((source.name, destination.name))
 
     def empty(self, shape, dtype=None, layout=None, device=None, memory_config=None):
         tensor = Tensor('out%d' % len(self.allocated), shape, self.address, memory_config, dtype, layout)
@@ -542,6 +598,7 @@ class LaunchBase(object):
     def setUp(self):
         spread._NOTED.clear()
         spread._SOURCES.clear()
+        spread._SCRATCH.clear()
         self.lines = []
         patcher = patch.object(spread, 'log_line', side_effect=self.lines.append)
         patcher.start()
@@ -792,23 +849,37 @@ class AuditLaunchTests(LaunchBase, unittest.TestCase):
         with patch('gdn_user_batch_conv.conv_gates', side_effect=conv_gates):
             return super().call(flags=flags, **overrides)
 
-    def test_the_served_op_runs_first_on_clones_and_seven_entries_are_held(self):
+    def test_the_served_op_runs_first_on_shared_scratch_and_three_entries_are_held(self):
         held, entries = [], []
         outputs = self.call(held=held, entries=entries)
-        self.assertEqual(self.served_calls, [('canon', ['copy:window%d' % slot for slot in range(4)], 64)])
-        self.assertEqual([entry['label'] for entry in entries], [spread.LABEL + name for name in (
-            'conv', 'beta', 'g', 'window 0', 'window 1', 'window 2', 'window 3')])
+        scratch = ['out%d' % index for index in range(4)]          # the first allocations: the audit's scratch windows, then the launch's outputs
+        self.assertEqual(self.served_calls, [('canon', scratch, 64)])
+        self.assertEqual(self.operations.copies, [('window%d' % slot, scratch[slot]) for slot in range(4)])
+        self.assertEqual([entry['label'] for entry in entries], [spread.LABEL + name for name in ('conv', 'beta', 'g')])
         self.assertEqual(len(entries), spread.ENTRIES_PER_LAUNCH)
-        self.assertEqual([entry['mine'].name for entry in entries[:3]], ['copy:out0', 'copy:out1', 'copy:out2'])
-        self.assertEqual([entry['mine'].name for entry in entries[3:]], ['copy:window%d' % slot for slot in range(4)])
-        self.assertEqual([entry['served'].name for entry in entries[:3]], ['served-conv', 'served-beta', 'served-g'])
-        self.assertEqual([entry['served'].name for entry in entries[3:]], ['copy:window%d' % slot for slot in range(4)])
+        self.assertEqual([entry['mine'].name for entry in entries], ['copy:out4', 'copy:out5', 'copy:out6'])
+        self.assertEqual([entry['served'].name for entry in entries], ['served-conv', 'served-beta', 'served-g'])
         self.assertEqual(len(held), 2 * len(entries))
         self.assertTrue(all(entry['mine'] is not entry['served'] for entry in entries))
-        # the served op ran on windows cloned BEFORE the launch (the clones are the first allocations), and the launch advanced the real ones
-        self.assertEqual([copy.name for copy in self.operations.clones[:4]], ['copy:window%d' % slot for slot in range(4)])
+        # no clone of a window: the advanced windows ride the verify-glue audit's per-user entries
+        self.assertEqual([copy.name for copy in self.operations.clones], ['copy:out4', 'copy:out5', 'copy:out6'])
+        # the real windows are the launch's operands (it advances them), never the served op's
         self.assertEqual(self.operations.launches[0][0][1:5], ['window0', 'window1', 'window2', 'window3'])
         self.assertIn('audit=1', [line for line in self.lines if line.startswith(spread.ENGAGED)][0])
+
+    def test_the_scratch_windows_are_one_set_shared_by_every_launch_and_never_freed(self):
+        spread._SCRATCH.clear()
+        mesh = fake_mesh()
+        self.call(held=[], entries=[], mesh=mesh)
+        first = self.served_calls[0][1]
+        self.call(held=[], entries=[], mesh=mesh)
+        second = self.served_calls[0][1]
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 4)
+        self.assertEqual(sum(1 for tensor in self.operations.allocated if tensor.shape == (1, 64, 2560)), 4 + 2)   # 4 scratch + 1 conv a launch
+        for name in first:
+            self.assertNotIn(name, self.operations.freed)
+        spread._SCRATCH.clear()
 
     def test_a_failure_after_the_served_op_frees_everything_made(self):
         def refuse(tensors, program):
@@ -820,7 +891,9 @@ class AuditLaunchTests(LaunchBase, unittest.TestCase):
             self.call(held=held, entries=entries)
         self.assertEqual((held, entries), ([], []))
         made = {tensor.name for tensor in self.operations.allocated} | {copy.name for copy in self.operations.clones}
-        self.assertTrue(made <= set(self.operations.freed), (made, self.operations.freed))
+        scratch = {tensor.name for tensor in spread._SCRATCH.get(next(iter(spread._SCRATCH), None), [])}
+        self.assertTrue((made - scratch) <= set(self.operations.freed), (made, self.operations.freed))
+        self.assertFalse(scratch & set(self.operations.freed))
         self.assertIn('served-conv', self.operations.freed)
 
     def test_a_fall_back_runs_no_served_op_and_makes_no_entries(self):
@@ -850,7 +923,7 @@ class RoundAuditTests(unittest.TestCase):
         with patch('tp4_vglue.compare_entry', side_effect=compare or (lambda operations, entry: [])):
             return spread.audit_round('ops', self.records(per_layer), 1)
 
-    def test_every_audited_layer_must_carry_the_seven_and_they_compare(self):
+    def test_every_audited_layer_must_carry_the_three_and_they_compare(self):
         import verify_trace_t2
 
         layers = verify_trace_t2.audit_layers(1, 48)

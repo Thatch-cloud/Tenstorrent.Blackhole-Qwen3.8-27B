@@ -211,7 +211,7 @@ class SmokeAndProfileTests(unittest.TestCase):
         # tp4/sdpa-multi's two gate-only twins carry it too (test_sdpa_multi_tp holds them to their control plus exactly the flags).
         # tp4/w2's two gate-only arms carry multi too (test_tp4_w2).
         allowed = {self.TWIN, 'c2-packed-tp4-8x262k-best-sdpamulti', 'c2-packed-tp4-8x262k-best-sdpamulti-audit',
-                   'c2-packed-tp4-8x262k-w2', 'c2-packed-tp4-8x262k-w2-audit'}
+                   'c2-packed-tp4-8x262k-w2', 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1', 'c2-packed-tp4-8x262k-w2-nof1-audit'}
         for name, body in self.PROFILES.items():
             if name not in allowed:
                 self.assertNotIn(FLAG, body.get('env', {}), name)

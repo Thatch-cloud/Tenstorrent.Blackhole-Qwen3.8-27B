@@ -1923,7 +1923,7 @@ class PackedVerifierEngine:
                 # QWEN_FAST_TP4_VGLUE_AUDIT: each engaged GDN lever's output against the served path's, held beside it.
                 tp4_vglue.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)
                 if os.environ.get('QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT', '0') != '0':
-                    # QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT (gdn_conv_gates_spread): the F1 launch's seven outputs per audited layer, every chip.
+                    # QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT (gdn_conv_gates_spread): the F1 launch's three outputs (conv, beta, g) per audited layer, every chip.
                     import gdn_conv_gates_spread
 
                     gdn_conv_gates_spread.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)
