@@ -127,7 +127,10 @@ class ProfileTests(unittest.TestCase):
         timed = 'c2-packed-tp4-8x262k-best-time-gate-'
         X262K_FLAGS = {timed + 's1': (sd.SHARD_ARGMAX,), timed + 'd2': (sd.DRAFT_CONV, sd.DRAFT_HEADS),
                        timed + 'stack': (sd.SHARD_ARGMAX, sd.DRAFT_CONV, sd.DRAFT_HEADS),
-                       'c2-packed-tp4-8x262k-best-stack-audit': sd.ALL_FLAGS}
+                       'c2-packed-tp4-8x262k-best-stack-audit': sd.ALL_FLAGS,
+                       # tp4/w1: the D2 pair (conv, heads) without S1, and the D2 audits on the audited twin (test_tp4_w1)
+                       'c2-packed-tp4-8x262k-w1': (sd.DRAFT_CONV, sd.DRAFT_HEADS),
+                       'c2-packed-tp4-8x262k-w1-audit': (sd.DRAFT_CONV, sd.DRAFT_HEADS, sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT)}
         for name, profile in PROFILES.items():
             for flag in sd.ALL_FLAGS:
                 wanted = (name in DELTAS and flag in DELTAS[name][1]) or flag in X262K_FLAGS.get(name, ())

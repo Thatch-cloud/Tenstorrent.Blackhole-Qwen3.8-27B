@@ -11117,6 +11117,227 @@
       "drafter_headroom_tokens": 32,
       "parser_rechunk": true,
       "gate_only": true
+    },
+    "c2-packed-tp4-8x262k-w1": {
+      "description": "GATE ONLY (tp4/w1, the fusion audit's wave 1: the built levers gated together; timed twin of the stack). c2-packed-tp4-8x262k-best-time-gate with: (1) nosamp: QWEN_FAST_PACKED_SAMPLER_IN_TRACE removed (the dead in-trace reference sampler, about 4.35 ms a 64-row verify; the request-width warm QWEN_FAST_M3_REQUEST_WARM=1 the control also carries is the hang fix that stays); (2) D2a and D2c, QWEN_FAST_TP4_DRAFT_CONV=1 and QWEN_FAST_TP4_DRAFT_HEADS=1 (the drafter convolution input and the head split and merge as single launches; byte-identical tiles); (3) the host-gap stage 1 of tp4/hostgap, the epochs arm: QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE, QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS, QWEN_FAST_TP4_WINDOW_VALIDATE, QWEN_FAST_TP4_ENTRY_DIET and the stage 0 log QWEN_FAST_TP4_HOSTGAP_LOG (the same five flags as c2-packed-tp4-8x262k-hostgap-2); (4) U1, QWEN_FAST_TP4_RS_UNIT_MAJOR=1 (one reduce-scatter per all-reduce on the unit-major view of the 64-row blocks). The levers are exact (same ids, same tiles, same sums), so the texts must equal the control's. Pair it with c2-packed-tp4-8x262k-best-time-gate on the same image, ABAB, judged per round; the delivered gain of each lever is read from the eight-user device profile, not from the pair. Gate only, never traffic: it carries QWEN_FAST_262K_EVIDENCE_WAIVER=1 as the control does (every result UNQUALIFIED). The pool, the levers, the engine block and every other key are the control's. QWEN_FAST_CCL_TOPOLOGY=ring (D1, the drafter gathers on the ring) is NOT in this profile: the ring arms also set the engine block's fabric_config to FABRIC_1D_RING, a fabric the whole process runs on, which also changes the verify's collectives (the mesh descriptor is already the ring one in the control). QWEN_FAST_TP4_SHARD_ARGMAX (S1, no measured gain) is out as well. UNVERIFIED on hardware: an attach refusal here is a finding.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "262144",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "1",
+        "QWEN_FAST_FUSED_COMMIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "1",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "1",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_M3_BLOCKS": "2",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_262K_EVIDENCE_WAIVER": "1",
+        "QWEN_FAST_M3_REQUEST_WARM": "1",
+        "QWEN_FAST_KV_RESERVATION": "1",
+        "QWEN36_MAX_TOKENS_ALL_USERS": "1277440",
+        "QWEN_FAST_DRAM_ENGINE_BUILD_MB": "800",
+        "QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB": "600",
+        "QWEN_FAST_DRAM_LARGEST_BUFFER_MB": "256",
+        "QWEN_FAST_TP4_COMMIT_LANES": "1",
+        "QWEN_FAST_TP4_SHARD_VALUES": "1",
+        "QWEN_FAST_TP4_GDN_GLUE": "1",
+        "QWEN_FAST_TP4_GDN_BLOCK_CONV": "1",
+        "QWEN_FAST_TP4_ATTN_FOLD": "1",
+        "QWEN_FAST_QUAD_DRAFT_BLOCKS": "2",
+        "QWEN_FAST_TP4_DRAFT_CONV": "1",
+        "QWEN_FAST_TP4_DRAFT_HEADS": "1",
+        "QWEN_FAST_TP4_HOSTGAP_LOG": "1",
+        "QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE": "1",
+        "QWEN_FAST_TP4_WINDOW_VALIDATE": "1",
+        "QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS": "1",
+        "QWEN_FAST_TP4_ENTRY_DIET": "1",
+        "QWEN_FAST_TP4_RS_UNIT_MAJOR": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 262144,
+        "max-num-seqs": 8,
+        "max-num-batched-tokens": 262144,
+        "block-size": 64,
+        "num-gpu-blocks-override": 19968,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 536870912,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "drafter_headroom_tokens": 32,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-8x262k-w1-audit": {
+      "description": "GATE ONLY (tp4/w1, the audited twin of c2-packed-tp4-8x262k-w1; never a timed arm). c2-packed-tp4-8x262k-w1 plus every audit of its levers: QWEN_FAST_TP4_DRAFT_CONV_AUDIT and QWEN_FAST_TP4_DRAFT_HEADS_AUDIT (the drafter ops against the served ones, compared right after their own bucket's replay), QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT (the host-gap full read-back of every staging destination, then the round staged in full anyway; the 1c shadow check runs), QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT (the unit-major reduce-scatter against the per-tile split, read right after its own block's replay), and the audits of c2-packed-tp4-8x262k-best-audit: QWEN_FAST_FUSED_COMMIT_AUDIT=1, QWEN_FAST_TP4_VGLUE_AUDIT=1, QWEN_FAST_DRAFT_SINGLES_AUDIT=all. The verify T1 and T2 audits stay 0 (as in the host-gap audited arms): the shard audit would put the reference sampler back into the verify trace, and this arm must carry the trace of the timed arm. Gate only, never traffic: it carries QWEN_FAST_262K_EVIDENCE_WAIVER=1 as the control does (every result UNQUALIFIED). The pool, the levers, the engine block and every other key are the control's. QWEN_FAST_CCL_TOPOLOGY=ring (D1, the drafter gathers on the ring) is NOT in this profile: the ring arms also set the engine block's fabric_config to FABRIC_1D_RING, a fabric the whole process runs on, which also changes the verify's collectives (the mesh descriptor is already the ring one in the control). QWEN_FAST_TP4_SHARD_ARGMAX (S1, no measured gain) is out as well. UNVERIFIED on hardware: an attach refusal here is a finding.",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "262144",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "1",
+        "QWEN_FAST_FUSED_COMMIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "1",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "1",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_M3_BLOCKS": "2",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_262K_EVIDENCE_WAIVER": "1",
+        "QWEN_FAST_M3_REQUEST_WARM": "1",
+        "QWEN_FAST_KV_RESERVATION": "1",
+        "QWEN36_MAX_TOKENS_ALL_USERS": "1277440",
+        "QWEN_FAST_DRAM_ENGINE_BUILD_MB": "800",
+        "QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB": "600",
+        "QWEN_FAST_DRAM_LARGEST_BUFFER_MB": "256",
+        "QWEN_FAST_TP4_COMMIT_LANES": "1",
+        "QWEN_FAST_TP4_SHARD_VALUES": "1",
+        "QWEN_FAST_TP4_GDN_GLUE": "1",
+        "QWEN_FAST_TP4_GDN_BLOCK_CONV": "1",
+        "QWEN_FAST_TP4_ATTN_FOLD": "1",
+        "QWEN_FAST_QUAD_DRAFT_BLOCKS": "2",
+        "QWEN_FAST_TP4_DRAFT_CONV": "1",
+        "QWEN_FAST_TP4_DRAFT_HEADS": "1",
+        "QWEN_FAST_TP4_HOSTGAP_LOG": "1",
+        "QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE": "1",
+        "QWEN_FAST_TP4_WINDOW_VALIDATE": "1",
+        "QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS": "1",
+        "QWEN_FAST_TP4_ENTRY_DIET": "1",
+        "QWEN_FAST_TP4_RS_UNIT_MAJOR": "1",
+        "QWEN_FAST_TP4_DRAFT_CONV_AUDIT": "1",
+        "QWEN_FAST_TP4_DRAFT_HEADS_AUDIT": "1",
+        "QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT": "1",
+        "QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_AUDIT": "1",
+        "QWEN_FAST_TP4_VGLUE_AUDIT": "1",
+        "QWEN_FAST_DRAFT_SINGLES_AUDIT": "all"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 262144,
+        "max-num-seqs": 8,
+        "max-num-batched-tokens": 262144,
+        "block-size": 64,
+        "num-gpu-blocks-override": 19968,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 536870912,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "drafter_headroom_tokens": 32,
+      "parser_rechunk": true,
+      "gate_only": true
     }
   }
 }

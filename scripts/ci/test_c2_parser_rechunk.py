@@ -918,7 +918,7 @@ class ProfileGatingTests(unittest.TestCase):
                                  'c2-packed-tp4-8x262k-diag-strace': True,
                                  'c2-packed-tp4-8x262k-best': True, 'c2-packed-tp4-8x262k-best-audit': True, 'c2-packed-tp4-8x262k-best-nosamp-audit': True, 'c2-packed-tp4-8x262k-best-stack-audit': True, 'c2-packed-tp4-8x262k-best-time-gate': True, 'c2-packed-tp4-8x262k-best-time-gate-nosamp': True, 'c2-packed-tp4-8x262k-best-time-gate-s1': True, 'c2-packed-tp4-8x262k-best-time-gate-d2': True, 'c2-packed-tp4-8x262k-best-time-gate-dbf16': True, 'c2-packed-tp4-8x262k-best-time-gate-lookup': True, 'c2-packed-tp4-8x262k-best-time-gate-stack': True, 'c2-packed-tp4-8x262k-best-time-gate-u1': True, 'c2-packed-tp4-8x262k-best-u1-audit': True,
                                  'c2-packed-tp4-8x262k-ship': True,
-                                 'c2-packed-tp4-8x262k-hostgap-1': True, 'c2-packed-tp4-8x262k-hostgap-1-audit': True, 'c2-packed-tp4-8x262k-hostgap-2': True, 'c2-packed-tp4-8x262k-hostgap-2-audit': True,
+                                 'c2-packed-tp4-8x262k-hostgap-1': True, 'c2-packed-tp4-8x262k-hostgap-1-audit': True, 'c2-packed-tp4-8x262k-hostgap-2': True, 'c2-packed-tp4-8x262k-hostgap-2-audit': True, 'c2-packed-tp4-8x262k-w1': True, 'c2-packed-tp4-8x262k-w1-audit': True,
                                  'coding': None, 'general': None, 'general-prefix': None,
                                  'general-prefix-eager': None,
                                  # the four-card (TP4) G1 family decodes one token per step, as general does
@@ -950,7 +950,7 @@ class ProfileGatingTests(unittest.TestCase):
                                       'c2-packed-tp4-8-diag-strace-rshard', 'c2-packed-tp4-262k-gate', 'c2-packed-tp4-8x262k',
                                       'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate',
                                       'c2-packed-tp4-8x262k-best-time-gate-u1', 'c2-packed-tp4-8x262k-best-u1-audit', 'c2-packed-tp4-8x262k-diag-strace', 'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-nosamp-audit', 'c2-packed-tp4-8x262k-best-stack-audit',
-                                      'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-best-time-gate-nosamp', 'c2-packed-tp4-8x262k-best-time-gate-s1', 'c2-packed-tp4-8x262k-best-time-gate-d2', 'c2-packed-tp4-8x262k-best-time-gate-dbf16', 'c2-packed-tp4-8x262k-best-time-gate-lookup', 'c2-packed-tp4-8x262k-best-time-gate-stack', 'c2-packed-tp4-8x262k-ship', 'c2-packed-tp4-8x262k-hostgap-1', 'c2-packed-tp4-8x262k-hostgap-1-audit', 'c2-packed-tp4-8x262k-hostgap-2', 'c2-packed-tp4-8x262k-hostgap-2-audit'), name)
+                                      'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-best-time-gate-nosamp', 'c2-packed-tp4-8x262k-best-time-gate-s1', 'c2-packed-tp4-8x262k-best-time-gate-d2', 'c2-packed-tp4-8x262k-best-time-gate-dbf16', 'c2-packed-tp4-8x262k-best-time-gate-lookup', 'c2-packed-tp4-8x262k-best-time-gate-stack', 'c2-packed-tp4-8x262k-ship', 'c2-packed-tp4-8x262k-hostgap-1', 'c2-packed-tp4-8x262k-hostgap-1-audit', 'c2-packed-tp4-8x262k-hostgap-2', 'c2-packed-tp4-8x262k-hostgap-2-audit', 'c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit'), name)
         with self.assertRaisesRegex(ValueError, 'parser_rechunk must be true or false'):
             contract.parser_rechunk({'parser_rechunk': 'yes'})
 
