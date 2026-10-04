@@ -736,6 +736,13 @@ else
   inner+='exec python3 -B /bench/k64j_card_b.py "$@"'
 fi
 
+if [ "$MAIN" = card ] || [ "$MAIN" = nkv1_spike ]; then
+  # A served S2 image as IMAGE (the pinned default digest is gone from the rig, 2026-10-05): its ENV turns on the C2 boot
+  # hook, which applies the four-card mesh descriptor, and this ONE-card open then dies in the topology mapper (run
+  # 37229789253). Off, as the ordered-writer and four-card extent-reader modes already do; harmless on an image without it.
+  XE=(${XE[@]+"${XE[@]}"} -e QWEN_C2_SERVING=0)
+  inner="unset TT_MESH_GRAPH_DESC_PATH; $inner"
+fi
 argv=(docker run --rm --name "$name" --network none
   --cap-drop ALL --cap-add SYS_NICE --security-opt no-new-privileges
   --pids-limit 1024 --memory 48g --cpus 8 --shm-size 4g
