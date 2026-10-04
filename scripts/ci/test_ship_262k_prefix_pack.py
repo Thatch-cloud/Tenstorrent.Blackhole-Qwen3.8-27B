@@ -1,9 +1,9 @@
-"""The ship/262k-full pack (scripts/ci/references/tp4-ship-262k-full-jobs): every template parses with c2_serving_job.py, the order file is consistent, and
+"""The ship/262k-prefix pack (scripts/ci/references/tp4-ship-262k-prefix-jobs): every template parses with c2_serving_job.py, the order file is consistent, and
 the public templates name no rig, card, host, registry or digest.
 
-The three profiles (c2-packed-tp4-8x262k-ship-full, -ship-full-audit, -ship-full-final-hold-gate) land with the integration merge. While one is absent the
-test parses against a temporary profiles file in which the missing profile is cloned from a stand-in that exists (the shipping profile for ship-full, the
-best-time gate profile for the two gate twins), so the template's own keys, actions and plans are still checked."""
+The two profiles (c2-packed-tp4-8x262k-ship-prefix, -ship-prefix-audit) land with the integration merge. While one is absent the
+test parses against a temporary profiles file in which the missing profile is cloned from a stand-in that exists (the shipping profile for ship-prefix, the
+best-time gate profile for the audit twin), so the template's own keys, actions and plans are still checked."""
 
 import copy
 import json
@@ -18,19 +18,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import c2_serving_job as job  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FOLDER = os.path.join(HERE, 'references', 'tp4-ship-262k-full-jobs')
+FOLDER = os.path.join(HERE, 'references', 'tp4-ship-262k-prefix-jobs')
 PROFILES_PATH = os.path.join(HERE, 'qwen_c2_profiles.json')
 IMAGE = 'tp4-serve-10'
-FULL = 'c2-packed-tp4-8x262k-ship-full'
+FULL = 'c2-packed-tp4-8x262k-ship-prefix'
 AUDIT = FULL + '-audit'
-FAULT = FULL + '-final-hold-gate'
-STAND_IN = {FULL: 'c2-packed-tp4-8x262k-ship', AUDIT: 'c2-packed-tp4-8x262k-best-time-gate', FAULT: 'c2-packed-tp4-8x262k-best-time-gate'}
+STAND_IN = {FULL: 'c2-packed-tp4-8x262k-ship', AUDIT: 'c2-packed-tp4-8x262k-best-time-gate'}
 PLACEHOLDERS = {'@THIN_LAYER_IMAGE@': 'thin-layer-image-ref'}
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|/dev/tenstorrent|home/|zot\.')
-ORDERED = ('X0B-status-rescan-reset-build', 'A1-audited-attach-smoke', 'S0-baked-default-smoke', 'H1-hang-shape-ship-full', 'H2-hang-shape-ship-full',
-           'P1-prefix-exactness-lifecycle', 'F1-levern-final-hold-fault', 'L8-ladder8-past-131k', 'C16-churn16', 'M1-cold262k-stall-soft',
-           'SR10-platform-replay', 'Z-reset')
-SOFT = ('M1-cold262k-stall-soft', 'Z-reset')
+ORDERED = ('X0B-status-rescan-reset-build', 'A1-audited-attach-smoke', 'S0-baked-default-smoke', 'H1-hang-shape-ship-prefix', 'H2-hang-shape-ship-prefix',
+           'H3-hang-shape-ship-prefix', 'P1-prefix-exactness-lifecycle', 'L8-ladder8-past-131k', 'C16-churn16', 'SR10-platform-replay', 'Z-reset')
+SOFT = ('Z-reset',)
 ACTIONS = {'X0B-status-rescan-reset-build': 'status rescan reset build', 'P1-prefix-exactness-lifecycle': 'reset prefix', 'L8-ladder8-past-131k': 'reset gate',
            'C16-churn16': 'reset gate', 'SR10-platform-replay': 'reset replay', 'Z-reset': 'status reset'}
 SMOKE_TESTS = 'warmup,coding,concurrent8_steady,concurrent8_code_32k,concurrent8_code_equal'
@@ -98,15 +96,15 @@ class Pack(unittest.TestCase):
             self.assertFalse({'agentstop', 'platform', 'unserve'} & set(actions), name)
             self.assertEqual('build' in actions, name == ORDERED[0], name)
 
-    def test_the_build_bakes_ship_full_and_s0_serves_it(self):
+    def test_the_build_bakes_ship_prefix_and_s0_serves_it(self):
         self.assertEqual(self.parsed(ORDERED[0])['bake_default_profile'], FULL)
         self.assertEqual(self.parsed('S0-baked-default-smoke')['profile'], FULL)
 
-    def test_a1_and_s0_run_the_same_five_tests_and_h_runs_use_ship_full(self):
+    def test_a1_and_s0_run_the_same_five_tests_and_h_runs_use_ship_prefix(self):
         for name in ('A1-audited-attach-smoke', 'S0-baked-default-smoke'):
             self.assertEqual(self.parsed(name)['tests'], SMOKE_TESTS)
         self.assertEqual(self.parsed('A1-audited-attach-smoke')['profile'], AUDIT)
-        for name in ('H1-hang-shape-ship-full', 'H2-hang-shape-ship-full'):
+        for name in ('H1-hang-shape-ship-prefix', 'H2-hang-shape-ship-prefix', 'H3-hang-shape-ship-prefix'):
             self.assertEqual(self.parsed(name)['profile'], FULL)
             self.assertIn('concurrent8_drain', self.parsed(name)['tests'])
 
@@ -119,18 +117,28 @@ class Pack(unittest.TestCase):
         out = self.parsed('C16-churn16')
         self.assertEqual((out['profile'], out['gate_plan']), (AUDIT, 'churn'))
         self.assertEqual(len(out['gate_lengths'].split(',')), 16)
-        self.assertEqual(self.parsed('F1-levern-final-hold-fault')['profile'], FAULT)
-        self.assertEqual(self.parsed('M1-cold262k-stall-soft')['profile'], FULL)
+        for name in ('L8-ladder8-past-131k', 'C16-churn16'):
+            self.assertEqual(self.parsed(name)['gate_salt'], 'fresh')
 
     def test_the_prefix_job(self):
         out = self.parsed('P1-prefix-exactness-lifecycle')
         self.assertEqual(out['prefix_plan'], 'exactness-shared,lifecycle-evict')
         self.assertEqual(out['prefix_profile'], AUDIT)
+        self.assertIn('EIGHT', text_of('P1-prefix-exactness-lifecycle'))
 
     def test_the_replay_names_the_thin_layer_placeholder_and_the_budget_smoke(self):
         self.assertIn('@THIN_LAYER_IMAGE@', text_of('SR10-platform-replay'))
         out = self.parsed('SR10-platform-replay')
         self.assertEqual((out['replay_profile'], out['replay_budget_smoke']), (FULL, '1'))
+
+    def test_no_lever_n_anywhere_in_the_pack(self):
+        self.assertFalse(any(n.startswith(('F1', 'M1')) for n in os.listdir(FOLDER)))
+        for name in os.listdir(FOLDER):
+            with open(os.path.join(FOLDER, name), encoding='utf-8') as handle:
+                text = handle.read()
+            self.assertNotIn('ship-full', text, name)
+            if name != 'ORDER.txt':
+                self.assertNotIn('Lever N', text, name)
 
     def test_templates_are_lf_and_name_nothing_private(self):
         for name in os.listdir(FOLDER):
@@ -144,7 +152,7 @@ class Pack(unittest.TestCase):
             self.skipTest('profiles not merged yet: %s (parsed against stand-ins)' % ', '.join(self.missing))
         with open(PROFILES_PATH, encoding='utf-8') as handle:
             profiles = json.load(handle)['profiles']
-        self.assertTrue(profiles[FAULT].get('gate_only') and profiles[AUDIT].get('gate_only'))
+        self.assertTrue(profiles[AUDIT].get('gate_only'))
         self.assertFalse(profiles[FULL].get('gate_only'))
 
 
