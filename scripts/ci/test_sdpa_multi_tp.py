@@ -1110,7 +1110,7 @@ class ProfileTests(unittest.TestCase):
 
     def test_no_other_profile_carries_the_audit_flag_and_the_default_is_untouched(self):
         for name, body in PROFILES.items():
-            if name != AUDITED:
+            if name not in (AUDITED, 'c2-packed-tp4-8x262k-w2-audit'):       # tp4/w2: the audited wave-2 arm carries it too (test_tp4_w2)
                 self.assertNotIn(AUDIT, body.get('env', {}), name)
         self.assertEqual(json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))['default'], 'c2-packed-tp4')
 
