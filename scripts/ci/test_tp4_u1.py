@@ -85,6 +85,8 @@ def reduce_scatter(chips, units_major):
 
 
 class Mesh:
+    shape = (1, CHIPS)
+
     def get_num_devices(self):
         return CHIPS
 
@@ -190,6 +192,8 @@ class Fixture(unittest.TestCase):
     def setUp(self):
         collective._HELD.clear()
         collective._STATE['reasons'].clear()
+        collective._STATE['owners'] = 0
+        collective._STATE['replayed'] = None
         self.operations = Operations()
         self.model = ModelAllReduce(self.operations)
         self.wrapper = collective.TileSplitAllReduce(self.model, self.operations)
@@ -232,7 +236,7 @@ class SettingsTests(unittest.TestCase):
                 collective.unit_major_settings(env)
 
     def test_the_census_is_what_the_x1_spike_measured(self):
-        self.assertEqual(collective.CENSUS_ROWS, (64, 128))
+        self.assertEqual(collective.CENSUS_ROWS, (64,))        # 128 has one X1 seed and no audit line: it falls back
         self.assertEqual((collective.CENSUS_WIDTH, collective.CENSUS_CHIPS, collective.CENSUS_LINKS), (5120, 4, 2))
 
 
@@ -248,11 +252,9 @@ class ViewArithmeticTests(Fixture):
         self.assertEqual(out.shape, (1, 1, 64, SHARD))
         self.assertEqual(self.model.calls, [])
 
-    def test_a_128_row_call_is_the_four_unit_view(self):
-        with self.scope(128):
-            out = self.call(Tensor(partials(128)))
-        self.assertEqual(self.operations.calls[0][2], (1, 4, 32, 5120))
-        self.assertEqual(out.shape, (1, 1, 128, SHARD))
+    def test_a_128_row_call_is_not_proven_and_falls_back_by_name(self):
+        tensor = Tensor(partials(128))
+        self.assertIn('rows 128', self.wrapper.refusal(tensor, tensor.shape, (self.mesh, self.collective), self.options))
 
     def test_the_reduce_scatter_is_the_spikes_call(self):
         with self.scope():
@@ -358,14 +360,22 @@ class RefusalTests(Fixture):
         self.assertIn('4 chips', self.wrapper.refusal(tensor, tensor.shape, (wrong_mesh, self.collective), self.options))
         self.assertIn('2 links', self.wrapper.refusal(tensor, tensor.shape, (self.mesh, Collective(links=1)), self.options))
         self.assertIsNone(self.wrapper.refusal(tensor, tensor.shape, (self.mesh, self.collective), self.options))
+        for shape in ((2, 2), (4, 1), None):
+            odd_mesh = types.SimpleNamespace(get_num_devices=lambda: 4, shape=shape)
+            self.assertIn('mesh shape', self.wrapper.refusal(tensor, tensor.shape, (odd_mesh, self.collective), self.options))
         broken = types.SimpleNamespace(get_num_links=lambda axis: 1 / 0)
         self.assertIn('could not say', self.wrapper.refusal(tensor, tensor.shape, (self.mesh, broken), self.options))
+
+    def test_an_omitted_dim_is_refused_because_the_model_defaults_it_to_zero(self):
+        tensor = Tensor(partials(64))
+        options = dict(cluster_axis=0, topology='Ring', memory_config=DRAM)
+        self.assertIn('dim None', self.wrapper.refusal(tensor, tensor.shape, (self.mesh, self.collective), options))
 
     def test_the_census_shapes_are_the_only_unit_major_ones(self):
         for rows in (32, 64, 96, 128, 160):
             tensor = Tensor(partials(rows)) if rows >= 32 else None
             reason = self.wrapper.refusal(tensor, tensor.shape, (self.mesh, self.collective), self.options)
-            self.assertEqual(reason is None, rows in (64, 128), (rows, reason))
+            self.assertEqual(reason is None, rows in (64,), (rows, reason))
 
     def test_a_reason_is_logged_once_per_scope_family_and_every_call_counts(self):
         with patch.object(collective, '_log') as log:
@@ -438,6 +448,20 @@ class GuardTests(Fixture):
             with collective.block_scope(64, audit_calls=4):
                 pass
 
+    def test_an_odd_reduce_scatter_count_is_refused_when_the_scope_states_its_expectation(self):
+        with patch.object(collective, '_log'):
+            with self.assertRaises(AssertionError) as raised:
+                with collective.block_scope(64, expected=127 + 1, unit_major=True):
+                    for _ in range(127):
+                        self.call(Tensor(partials(64)))
+                    self.call(Tensor(partials(64)), topology='Linear')       # one fallback: 127 + 2 reduce-scatters
+            self.assertIn('odd', str(raised.exception))
+            with collective.block_scope(64, expected=4, unit_major=True):
+                for _ in range(2):
+                    self.call(Tensor(partials(64)))
+                for _ in range(2):
+                    self.call(Tensor(partials(64)), topology='Linear')       # two fallbacks: 2 + 4, even
+
     def test_the_state_is_clean_after_a_scope(self):
         with self.scope():
             self.call(Tensor(partials(64)))
@@ -467,19 +491,20 @@ class AuditTests(Fixture):
     def test_the_marker_counts_the_audited_calls(self):
         lines = []
         with patch.object(collective, '_log'), collective.block_scope(
-                64, expected=3, unit_major=True, audit_calls=2, log=lambda template, *values: lines.append(template.format(*values))):
-            for seed in range(3):
+                64, expected=4, unit_major=True, audit_calls=2, log=lambda template, *values: lines.append(template.format(*values))):
+            for seed in range(4):
                 self.call(Tensor(partials(64, seed=seed)))
-        self.assertIn('[PINDIAG] tp4 u1 engaged rows=64 calls=3 unit_major=3 fallbacks=0 audited=2', lines)
+        self.assertIn('[PINDIAG] tp4 u1 engaged rows=64 calls=4 unit_major=4 fallbacks=0 audited=2', lines)
 
     def test_a_pair_is_claimed_compared_and_released(self):
         self.hold(3)
         owner = object()
-        self.assertEqual(collective.audit_claim(owner), 2)
+        self.assertEqual(collective.audit_claim(owner, 'capture'), 2)
         self.assertEqual(collective.audit_claim(object()), 0)
+        collective.audit_replayed(owner)
         lines = []
         self.assertEqual(collective.audit_round(self.operations, owner, 1, log=lines.append), 2)
-        self.assertEqual(lines, ['[PINDIAG] tp4 u1 audit shape=64x5120 round=1 calls=2 chips=4 elements=%d exact=True'
+        self.assertEqual(lines, ['[PINDIAG] tp4 u1 audit shape=64x5120 owner=capture1 round=1 calls=2 chips=4 elements=%d exact=True'
                                  % (2 * CHIPS * 64 * SHARD)])
         lines.clear()
         collective.audit_round(self.operations, owner, 7, log=lines.append)
@@ -490,6 +515,25 @@ class AuditTests(Fixture):
         self.assertEqual(collective.audit_release(self.operations, owner), 2)
         self.assertTrue(all(tensor.freed for tensor in held))
         self.assertEqual(collective._HELD, [])
+
+    def test_two_blocks_are_labelled_apart_and_each_is_read_only_after_its_own_replay(self):
+        self.hold(1)
+        first, second = object(), object()
+        collective.audit_claim(first, 'capture')
+        self.hold(1)
+        collective.audit_claim(second, 'capture')
+        lines = []
+        collective.audit_replayed(first)
+        collective.audit_replayed(second)                                # the second block replayed after the first
+        with self.assertRaises(AssertionError) as raised:
+            collective.audit_round(self.operations, first, 1, log=lines.append)
+        self.assertIn('another block replayed', str(raised.exception))
+        collective.audit_replayed(first)
+        collective.audit_round(self.operations, first, 1, log=lines.append)
+        collective.audit_replayed(second)
+        collective.audit_round(self.operations, second, 1, log=lines.append)
+        self.assertEqual([line.split(' owner=')[1].split(' ')[0] for line in lines], ['capture1', 'capture2'])
+        collective.audit_round(self.operations, first, 0, log=lines.append)      # the warm forward is not a replay
 
     def test_an_owner_with_nothing_held_compares_nothing(self):
         self.assertEqual(collective.audit_round(self.operations, object(), 1), 0)
@@ -502,6 +546,7 @@ class AuditTests(Fixture):
         self.hold(1)
         owner = object()
         collective.audit_claim(owner)
+        collective.audit_replayed(owner)
         lines = []
         with self.assertRaises(AssertionError) as raised:
             collective.audit_round(self.operations, owner, 1, log=lines.append)
@@ -513,6 +558,7 @@ class AuditTests(Fixture):
         self.hold(1)
         owner = object()
         collective.audit_claim(owner)
+        collective.audit_replayed(owner)
         pair = collective._HELD[0]
         pair['mine'].chips[0][0, 0, 0, 0] = 0.0
         pair['served'].chips[0][0, 0, 0, 0] = -0.0
@@ -523,6 +569,7 @@ class AuditTests(Fixture):
         self.hold(1)
         owner = object()
         collective.audit_claim(owner)
+        collective.audit_replayed(owner)
         collective._HELD[0]['layout'] = 'memory DRAM against L1'
         with self.assertRaises(AssertionError) as raised:
             collective.audit_round(self.operations, owner, 1, log=lambda text: None)
@@ -562,7 +609,7 @@ class AuditTests(Fixture):
 
 class SmokeRuleTests(unittest.TestCase):
     ENGAGED = '[PINDIAG] tp4 u1 engaged rows=64 calls=128 unit_major=128 fallbacks=0 audited=0'
-    AUDIT = '[PINDIAG] tp4 u1 audit shape=64x5120 round=1 calls=32 chips=4 elements=1 exact=True'
+    AUDIT = '[PINDIAG] tp4 u1 audit shape=64x5120 owner=capture3 round=1 calls=32 chips=4 elements=1 exact=True'
 
     def problems(self, env, *lines):
         return c2_smoke_check.u1_problems(env, '\n'.join(lines))
@@ -588,12 +635,35 @@ class SmokeRuleTests(unittest.TestCase):
         self.assertTrue(self.problems(env, self.ENGAGED))
         self.assertTrue(self.problems(env, self.ENGAGED, self.AUDIT.replace('64x5120', '128x5120')))
 
+    def test_a_warm_forward_line_alone_does_not_pass(self):
+        env = {c2_smoke_check.U1_FLAG: '1', c2_smoke_check.U1_AUDIT_FLAG: '1'}
+        warm = self.AUDIT.replace('round=1', 'round=0').replace('capture3', 'warm1')
+        found = self.problems(env, self.ENGAGED, warm)
+        self.assertTrue(any('no replay was compared' in text for text in found), found)
+
+    def test_an_audit_line_that_compared_nothing_fails(self):
+        env = {c2_smoke_check.U1_FLAG: '1', c2_smoke_check.U1_AUDIT_FLAG: '1'}
+        for change in (('chips=4', 'chips=0'), ('elements=1', 'elements=0'), ('chips=4', 'chips=2')):
+            with self.subTest(change):
+                self.assertTrue(any('compared nothing' in text for text in
+                                    self.problems(env, self.ENGAGED, self.AUDIT.replace(*change))))
+
+    def test_every_block_needs_its_own_replay_audit(self):
+        env = {c2_smoke_check.U1_FLAG: '1', c2_smoke_check.U1_AUDIT_FLAG: '1', 'QWEN_FAST_M3_BLOCKS': '2'}
+        self.assertTrue(any('1 block owner' in text for text in self.problems(env, self.ENGAGED, self.AUDIT)))
+        self.assertEqual(self.problems(env, self.ENGAGED, self.AUDIT, self.AUDIT.replace('capture3', 'capture4')), [])
+
+    def test_the_served_shape_follows_the_engaged_rows(self):
+        env = {c2_smoke_check.U1_FLAG: '1', c2_smoke_check.U1_AUDIT_FLAG: '1'}
+        engaged = self.ENGAGED.replace('rows=64', 'rows=128')
+        self.assertTrue(any('128x5120' in text for text in self.problems(env, engaged, self.AUDIT)))
+
     def test_a_mismatch_line_fails_and_is_not_an_audit_line(self):
         env = {c2_smoke_check.U1_FLAG: '1', c2_smoke_check.U1_AUDIT_FLAG: '1'}
         mismatch = '[PINDIAG] tp4 u1 audit mismatch round=1 shape=64x5120 call=0 chip 1: 1 of 2 elements differ exact=True'
         found = self.problems(env, self.ENGAGED, mismatch)
         self.assertTrue(any('difference' in text for text in found))
-        self.assertTrue(any('nothing was compared' in text for text in found))
+        self.assertTrue(any('no replay was compared' in text for text in found))
 
     def test_check_wires_the_rule_in(self):
         problems, _ = c2_smoke_check.check('', 'nothing', True, env={c2_smoke_check.U1_FLAG: '1', 'QWEN_FAST_TP': '4'})

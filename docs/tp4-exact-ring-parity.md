@@ -103,9 +103,13 @@ with timings, `X4` (optional) the permuted matrix. X1 stops the window on FAIL a
 parity restarts for every 32-row unit and each unit is reduced in the order of its one-tile call; the flattened call is the one that starts the
 second tile at an odd chunk. X1 measured the unit-major call bit-exact against the one-tile calls (rows 64 and 128, `FABRIC_1D`, Ring, two links:
 0 of 163,840 elements differing in 6 of 6 comparisons, one seed). The lever therefore engages only for that census (`tile_collective_tp.CENSUS_*`:
-rows 64 and 128, width 5120, bfloat16, tile layout, interleaved, four chips, Ring, two links, the keyword arguments the layers pass); any other call is
-refused by name (a `[PINDIAG] tp4 u1 fell back reason=...` line, once per reason) and served by the split. The reshape both ways is a view; the model's
-own TT_CCL supplies the semaphores and the call's arguments are the spike's. Because X1 ran one seed on an older image, the audit arm
+rows 64 only (128 rows has one X1 seed and no audit line, so it falls back until re-proven), width 5120, bfloat16, tile layout, interleaved, a 1x4 mesh,
+Ring, two links, the keyword arguments the layers pass with `dim=3` stated: an omitted `dim` is refused because `tt_all_reduce` defaults it to 0); any
+other call is refused by name (a `[PINDIAG] tp4 u1 fell back reason=...` line, once per reason) and served by the split. A forward whose reduce-scatter
+count would be odd (an odd number of fallbacks) is refused: the ring semaphore parity is a hang factor. The reshape both ways is a view; the model's
+own TT_CCL supplies the semaphores and the call's arguments are the spike's. Because X1 ran one seed, the audit arm
 (`QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT=1`, profile `c2-packed-tp4-8x262k-best-u1-audit`) runs the split beside the first 32 calls of each shape of every
-forward, serves the split's result, and compares both on every chip as int16 bit patterns after each replay (`[PINDIAG] tp4 u1 audit shape=64x5120 ...
-exact=True`, or `audit mismatch` and an exception). Job pack: `scripts/ci/references/tp4-u1-jobs`.
+forward, serves the split's result, and compares both on every chip as int16 bit patterns after each replay (`[PINDIAG] tp4 u1 audit shape=64x5120
+owner=<warm|capture><n> round=<r> ... chips=4 elements=<n> exact=True`, or `audit mismatch` and an exception). The smoke rule needs a replay line (round 1 or
+later, four chips, elements above 0) from each served block. The audit's clones are persistent buffers made inside each block's capture, so they are read
+only right after their own block's replay (`audit_replayed`; any other order raises). Job pack: `scripts/ci/references/tp4-u1-jobs`.

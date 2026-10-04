@@ -749,6 +749,40 @@ U1_FELL_BACK = '[PINDIAG] tp4 u1 fell back'
 U1_AUDIT = '[PINDIAG] tp4 u1 audit '
 U1_MISMATCH = '[PINDIAG] tp4 u1 audit mismatch'
 U1_SERVED_SHAPES = ('64x5120',)
+U1_CHIPS = 4
+
+
+def u1_audit_problems(env, lines, engaged):
+    """The audit must have compared something: every audit line names four chips and some elements; each served shape (the rows= of
+    the engaged lines that ran the lever, else U1_SERVED_SHAPES) has an exact line from a replay (round >= 1, not only the warm
+    forward's round 0), and at least one block owner per QWEN_FAST_M3_BLOCKS has one."""
+    problems = []
+    parsed = []
+    for line in lines:
+        if U1_AUDIT not in line or U1_MISMATCH in line:
+            continue
+        match = re.search(r' shape=(\d+x\d+) (?:owner=(\S+) )?round=(\d+) calls=(\d+) chips=(\d+) elements=(\d+) exact=True', line)
+        if match is None:
+            problems.append('an audit line of an unknown form: %s' % line.strip()[:200])
+            continue
+        shape, owner, round_number, calls, chips, elements = match.groups()
+        if int(chips) != U1_CHIPS or int(elements) < 1 or int(calls) < 1:
+            problems.append('an audit line compared nothing (need chips=%d, calls and elements above 0): %s' % (U1_CHIPS, line.strip()[:200]))
+            continue
+        parsed.append((shape, owner, int(round_number)))
+    served = sorted({'%sx5120' % match.group(1) for match in (re.search(r' rows=(\d+) .* unit_major=[1-9]', line) for line in engaged) if match})         or list(U1_SERVED_SHAPES)
+    for shape in served:
+        replays = [owner for found, owner, round_number in parsed if found == shape and round_number >= 1]
+        if not replays:
+            problems.append('%s is set and no replay audit line (%sshape=%s ... round>=1 ... exact=True) was logged: no replay was compared'
+                            % (U1_AUDIT_FLAG, U1_AUDIT, shape))
+            continue
+        blocks = env.get('QWEN_FAST_M3_BLOCKS', '1')
+        wanted = int(blocks) if blocks.isdigit() and int(blocks) > 0 else 1
+        if len(set(replays)) < wanted:
+            problems.append('%s: shape %s replay audits came from %d block owner(s), %d blocks are served'
+                            % (U1_AUDIT_FLAG, shape, len(set(replays)), wanted))
+    return problems
 
 
 def u1_problems(env, container_text):
@@ -766,10 +800,7 @@ def u1_problems(env, container_text):
     elif not any(re.search(r' unit_major=[1-9]\d*( |$)', line) for line in engaged):
         problems.append('%s engaged lines report no unit-major call: %s' % (U1_FLAG, engaged[0].strip()[:200]))
     if env.get(U1_AUDIT_FLAG) == '1':
-        for shape in U1_SERVED_SHAPES:
-            if not any(U1_AUDIT in line and ' shape=%s ' % shape in line and 'exact=True' in line and U1_MISMATCH not in line for line in lines):
-                problems.append('%s is set and no passing audit line (%sshape=%s ... exact=True) was logged: nothing was compared'
-                                % (U1_AUDIT_FLAG, U1_AUDIT, shape))
+        problems += u1_audit_problems(env, lines, engaged)
     return problems
 
 

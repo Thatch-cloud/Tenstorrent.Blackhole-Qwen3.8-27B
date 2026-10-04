@@ -10,11 +10,12 @@
 # NEEDS T1 T2 T3 T4 <- A1 H1 H2 H3
 # READ RULES (each also needs c2_smoke_check clean and no stall):
 #   X0 the status prints, the rescan finds every board, the reset completes on all four.   B0 provenance report with no problem line, the image id printed.
-#   S0c the control attach: admission passed at capacity 262144, every answer completes, hashes, accepted tokens and verify rounds RECORDED per request.
-#   A1 the engaged line, zero audit mismatches, an exact=True audit line for the 64x5120 shape, hashes, accepted tokens and verify rounds equal S0c's.
+#   S0c the control attach: admission passed at capacity 262144, every answer completes (concurrent8_code_32k included), hashes, accepted tokens and verify rounds RECORDED per request.
+#   A1 the engaged line, zero audit mismatches, an exact=True replay audit line (round>=1, chips=4) for the 64x5120 shape from each block, hashes equal S0c's (accepted tokens and verify rounds recorded, not compared: S0c has no quad blocks).
 #   H1-H3 three consecutive completions, every user at budget, concurrent8_code_equal hashes equal in every run and to S0c's. One stall stops the window.
 #   T1-T4 paired ABAB, control (best-time-gate) against the -u1 arm: round time at eight live users, per seat tok/s at 32k and about 120k, texts equal.
 #   Z the reset completes; the agent stays stopped.
+# HANG QUALIFICATION: H1-H3 run on the in-trace-sampler base (the served base of tp4/262k8), which masks the nosamp hang class; U1 is hang-qualified for adopting on that base only. Re-gate with five runs (H1-H5) on the nosamp base from tp4/262k8-x before any move there. The audit's clones are gate-only (A1): the T and H arms run without the audit.
 # NO-GO for adopting U1: any stall, any hash difference between arms that must be identical, any audit mismatch, any fall-back line.
 # Time (estimate): X0 and B0 about 80 min, S0c 1.5 h, A1 1.7 h, H1-H3 4.5 h, T 6.7 h, Z 10 min: about 15 h.
 X0-status-rescan-reset stop tp4-u1-1 20

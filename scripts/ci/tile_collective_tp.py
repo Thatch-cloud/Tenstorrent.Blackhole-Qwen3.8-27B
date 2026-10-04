@@ -52,8 +52,10 @@ UNIT_MAJOR_FLAG = 'QWEN_FAST_TP4_RS_UNIT_MAJOR'
 UNIT_MAJOR_AUDIT_FLAG = 'QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT'
 AUDIT_CALLS_FLAG = 'QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT_CALLS'
 DEFAULT_AUDIT_CALLS = 32
-# What the X1 spike (run v157) measured exact: block heights, feature width, chips, links.
-CENSUS_ROWS = (64, 128)
+# What the X1 spike (run v157) measured exact, and what the A1 audit re-proves on the serving image: the 64-row block. 128 rows has
+# one X1 seed behind it and no audit line in the smoke rule, so it falls back to the split (named) until it is re-proven.
+CENSUS_ROWS = (64,)
+CENSUS_MESH_SHAPE = (1, 4)
 CENSUS_WIDTH = 5120
 CENSUS_CHIPS = 4
 CENSUS_LINKS = 2
@@ -199,7 +201,8 @@ class TileSplitAllReduce:
             return 'keyword %s is not in the census %r' % (','.join(extra), CENSUS_KEYWORDS)
         if kwargs.get('cluster_axis', 0) != 0:
             return 'cluster_axis %r is not 0' % (kwargs.get('cluster_axis'),)
-        if kwargs.get('dim', 3) != 3:
+        # tt_all_reduce defaults dim to 0, so an omitted dim is not the census's dim 3.
+        if kwargs.get('dim') != 3:
             return 'dim %r is not 3' % (kwargs.get('dim'),)
         if 'topology' not in kwargs or kwargs['topology'] != operations.Topology.Ring:
             return 'topology %r is not Ring' % (kwargs.get('topology'),)
@@ -218,6 +221,12 @@ class TileSplitAllReduce:
         chips = getattr(mesh, 'get_num_devices', None)
         if not callable(chips) or chips() != CENSUS_CHIPS:
             return 'the mesh is not %d chips' % CENSUS_CHIPS
+        try:
+            mesh_shape = tuple(mesh.shape)
+        except Exception:
+            mesh_shape = None
+        if mesh_shape != CENSUS_MESH_SHAPE:
+            return 'the mesh shape %r is not %r' % (mesh_shape, CENSUS_MESH_SHAPE)
         links = getattr(collective, 'get_num_links', None)
         try:
             said = links(kwargs.get('cluster_axis', 0)) if callable(links) else None
@@ -237,7 +246,7 @@ class TileSplitAllReduce:
             return self.split(tensor, shape, args, kwargs)
         key = (shape[2], shape[3])
         audited = _STATE['audited']
-        if audited is not None and _STATE['audit_calls'] and audited.get(key, 0) < _STATE['audit_calls']:
+        if _STATE['audit_calls'] and audited.get(key, 0) < _STATE['audit_calls']:
             audited[key] = audited.get(key, 0) + 1
             return self.audited(tensor, shape, args, kwargs)
         output = self.reduce_unit_major(tensor, shape, args, kwargs, consume=True)
@@ -363,6 +372,13 @@ def block_scope(rows, expected=None, log=None, unit_major=False, audit_calls=0):
     if unit_major and engaged_unit_major + fallbacks != engaged:
         raise AssertionError('The unit-major all-reduce counted %d engaged and %d fallbacks against %d reductions'
                              % (engaged_unit_major, fallbacks, engaged))
+    if unit_major and expected is not None:
+        # The ring's semaphore parity is a hang factor (request_width_warm.py): the forward's reduce-scatter count must stay even.
+        # A unit-major call is one, an audited call three (one, then the split's two), a fallback rows/32.
+        scatters = (engaged_unit_major - audited) + 3 * audited + fallbacks * (rows // TILE)
+        if scatters % 2:
+            raise AssertionError('The unit-major forward issued %d reduce-scatters (%d engaged, %d audited, %d fallbacks): an odd '
+                                 'count flips the ring semaphore parity' % (scatters, engaged_unit_major, audited, fallbacks))
     if log is not None:
         log('[PINDIAG] tile-split all-reduce: {} of {} rows in {} tiles each', engaged, rows, rows // TILE)
         if unit_major:
@@ -373,14 +389,30 @@ def block_scope(rows, expected=None, log=None, unit_major=False, audit_calls=0):
 # --- the U1 audit: compared after the replay -----------------------------------------------------------------------------
 
 
-def audit_claim(owner):
-    """Give every audited pair not yet owned to `owner` (the fixture whose forward just ran: the warm forward or the capture)."""
+def audit_claim(owner, kind='audit'):
+    """Give every audited pair not yet owned to `owner` (the fixture whose forward just ran: the warm forward or the capture).
+    The pairs claimed together share a label, kind + a process-wide ordinal ('capture3'), so the log tells one block's audit
+    from the other's."""
     claimed = 0
+    label = None
     for pair in _HELD:
         if pair['owner'] is None:
+            if label is None:
+                _STATE['owners'] = _STATE.get('owners', 0) + 1
+                label = '%s%d' % (kind, _STATE['owners'])
             pair['owner'] = owner
+            pair['label'] = label
             claimed += 1
     return claimed
+
+
+def audit_replayed(owner):
+    """Note that `owner`'s trace replayed just now (a no-op while nothing is held). The audited clones are persistent buffers
+    allocated while the second block's capture ran, after the first block's traces existed, so they may sit in holes the first
+    block's replay overwrites: they are only valid to read right after their own block's replay, and audit_round refuses
+    otherwise (a false mismatch would stop the window)."""
+    if _HELD:
+        _STATE['replayed'] = owner
 
 
 def audit_pairs(owner):
@@ -394,6 +426,9 @@ def audit_round(operations, owner, round_number, log=None):
     pairs = audit_pairs(owner)
     if not pairs:
         return 0
+    if round_number > 0 and _STATE.get('replayed') is not owner:
+        raise AssertionError('%s round=%d: the audit was read after another block replayed, which may have overwritten these '
+                             'clones (they are valid only right after their own replay)' % (AUDIT_MISMATCH_MARKER, round_number))
     import torch
 
     log = log or _log
@@ -407,7 +442,7 @@ def audit_round(operations, owner, round_number, log=None):
         if len(lefts) != len(rights):
             mismatches.append('%s chips %d against %d' % (label, len(lefts), len(rights)))
             continue
-        tally = tallies.setdefault(pair['shape'], dict(calls=0, chips=len(lefts), elements=0))
+        tally = tallies.setdefault((pair.get('label'), pair['shape']), dict(calls=0, chips=len(lefts), elements=0))
         tally['calls'] += 1
         for chip, (left, right) in enumerate(zip(lefts, rights)):
             a = operations.to_torch(left).contiguous().view(torch.int16)
@@ -423,16 +458,18 @@ def audit_round(operations, owner, round_number, log=None):
         log(message)
         raise AssertionError(message)
     if round_number <= 3 or round_number % 50 == 0:
-        for shape in sorted(tallies):
-            tally = tallies[shape]
-            log('%s shape=%dx%d round=%d calls=%d chips=%d elements=%d exact=True'
-                % (AUDIT_MARKER, shape[0], shape[1], round_number, tally['calls'], tally['chips'], tally['elements']))
+        for label, shape in sorted(tallies, key=lambda key: (str(key[0]), key[1])):
+            tally = tallies[(label, shape)]
+            log('%s shape=%dx%d owner=%s round=%d calls=%d chips=%d elements=%d exact=True'
+                % (AUDIT_MARKER, shape[0], shape[1], label, round_number, tally['calls'], tally['chips'], tally['elements']))
     return len(pairs)
 
 
 def audit_release(operations, owner):
     """Free every clone `owner` holds (before its fixture closes). Returns how many pairs."""
     pairs = audit_pairs(owner)
+    if _STATE.get('replayed') is owner:
+        _STATE['replayed'] = None
     for pair in pairs:
         _HELD.remove(pair)
         for name in ('mine', 'served'):
