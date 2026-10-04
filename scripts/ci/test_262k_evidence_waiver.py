@@ -225,7 +225,7 @@ class ProfileContractTests(unittest.TestCase):
 
     def test_exactly_the_gate_only_262k_profiles_carry_the_flag_and_never_a_traffic_profile(self):
         self.assertEqual(self.carrying(), ['c2-packed-tp4-262k-gate', 'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit',
-                                           'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-diag-strace',
+                                           'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-best-time-gate-u1', 'c2-packed-tp4-8x262k-best-u1-audit', 'c2-packed-tp4-8x262k-diag-strace',
                                            'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate'])  # the best arms: tp4/262k8
         self.assertNotIn(FLAG, profiles()['c2-packed-tp4-8x262k-ship']['env'])
         for name, entry in profiles().items():

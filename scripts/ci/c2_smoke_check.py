@@ -739,6 +739,40 @@ def tpub_problems(env, container_text):
     return problems
 
 
+# tp4/u1 (tile_collective_tp): the packed verify's all-reduces as one reduce-scatter on the unit-major view. A profile that sets the flag must log the
+# engaged line with at least one unit-major call, no fall-back line (every served call is in the census, so a fall-back is a lever that saved nothing) and
+# no audit mismatch; under the audit flag an exact=True audit line must exist for every served shape.
+U1_FLAG = 'QWEN_FAST_TP4_RS_UNIT_MAJOR'
+U1_AUDIT_FLAG = 'QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT'
+U1_ENGAGED = '[PINDIAG] tp4 u1 engaged'
+U1_FELL_BACK = '[PINDIAG] tp4 u1 fell back'
+U1_AUDIT = '[PINDIAG] tp4 u1 audit '
+U1_MISMATCH = '[PINDIAG] tp4 u1 audit mismatch'
+U1_SERVED_SHAPES = ('64x5120',)
+
+
+def u1_problems(env, container_text):
+    lines = container_text.splitlines()
+    problems = ['the unit-major all-reduce audit found a difference: %s' % line.strip()[:200] for line in lines if U1_MISMATCH in line][:4]
+    problems += ['the unit-major all-reduce fell back (the split ran, it saved nothing): %s' % line.strip()[:200]
+                 for line in lines if U1_FELL_BACK in line][:4]
+    if env is None or env.get(U1_FLAG) != '1':
+        if any(U1_ENGAGED in line or U1_AUDIT in line for line in lines):
+            problems.append('unit-major all-reduce lines on a profile without %s' % U1_FLAG)
+        return problems
+    engaged = [line for line in lines if U1_ENGAGED in line]
+    if not engaged:
+        problems.append('%s is set and no engaged line (%s) was logged: the unit-major all-reduce never ran' % (U1_FLAG, U1_ENGAGED))
+    elif not any(re.search(r' unit_major=[1-9]\d*( |$)', line) for line in engaged):
+        problems.append('%s engaged lines report no unit-major call: %s' % (U1_FLAG, engaged[0].strip()[:200]))
+    if env.get(U1_AUDIT_FLAG) == '1':
+        for shape in U1_SERVED_SHAPES:
+            if not any(U1_AUDIT in line and ' shape=%s ' % shape in line and 'exact=True' in line and U1_MISMATCH not in line for line in lines):
+                problems.append('%s is set and no passing audit line (%sshape=%s ... exact=True) was logged: nothing was compared'
+                                % (U1_AUDIT_FLAG, U1_AUDIT, shape))
+    return problems
+
+
 def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=None):
     """(problems, facts) for a smoke log and a container log. `env` (the served profile's) adds the batched-draft
     stop conditions, `entry` (its whole record) the traffic profile's admission and parser conditions."""
@@ -762,6 +796,7 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         problems.append('%s and %s are set and no passing audit line (%s<n> exact=True) was logged: nothing was compared' % (PAIR_SLICE_FLAG, VGLUE_AUDIT_FLAG, VGLUE_AUDIT_PASSED))
     if env is not None and env.get(DISPATCH_DIAG_FLAG) == '1' and DISPATCH_DIAG_LINE not in container_text:
         problems.append('%s is set and no diagnostic line (%s) was logged' % (DISPATCH_DIAG_FLAG, DISPATCH_DIAG_LINE))
+    problems += u1_problems(env, container_text)
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
     if env is not None and env.get('QWEN_FAST_TP', '2') != '2':

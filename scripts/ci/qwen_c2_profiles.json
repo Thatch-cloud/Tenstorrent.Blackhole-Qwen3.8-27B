@@ -8281,6 +8281,111 @@
       "parser_rechunk": true,
       "gate_only": true
     },
+    "c2-packed-tp4-8x262k-best-u1-audit": {
+      "description": "GATE ONLY (the U1 audited arm; tp4/u1): c2-packed-tp4-8x262k-best-audit (the lever audits, 19968 blocks) plus QWEN_FAST_TP4_RS_UNIT_MAJOR=1 and QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT=1: for the first 32 calls of each shape in every forward the split also runs on the same input, the split's result is served, and both results are cloned and compared on every chip, element for element as int16 bit patterns, after each replay (rounds 0 to 3 and every 50th log an audit line per shape; any difference raises). The smoke requires the engaged marker, zero audit mismatches and an exact audit line for the 64x5120 shape. The audit adds clones and blocking readbacks: never a timed arm. It carries QWEN_FAST_262K_EVIDENCE_WAIVER=1 (every result UNQUALIFIED).",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "262144",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "1",
+        "QWEN_FAST_FUSED_COMMIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "1",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "1",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "1",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "1",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_PACKED_SAMPLER_IN_TRACE": "1",
+        "QWEN_FAST_M3_BLOCKS": "2",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_262K_EVIDENCE_WAIVER": "1",
+        "QWEN_FAST_M3_REQUEST_WARM": "1",
+        "QWEN_FAST_KV_RESERVATION": "1",
+        "QWEN36_MAX_TOKENS_ALL_USERS": "1277440",
+        "QWEN_FAST_DRAM_ENGINE_BUILD_MB": "800",
+        "QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB": "600",
+        "QWEN_FAST_DRAM_LARGEST_BUFFER_MB": "256",
+        "QWEN_FAST_TP4_COMMIT_LANES": "1",
+        "QWEN_FAST_TP4_SHARD_VALUES": "1",
+        "QWEN_FAST_TP4_GDN_GLUE": "1",
+        "QWEN_FAST_TP4_GDN_BLOCK_CONV": "1",
+        "QWEN_FAST_TP4_ATTN_FOLD": "1",
+        "QWEN_FAST_QUAD_DRAFT_BLOCKS": "2",
+        "QWEN_FAST_FUSED_COMMIT_AUDIT": "1",
+        "QWEN_FAST_DRAFT_SINGLES_AUDIT": "all",
+        "QWEN_FAST_TP4_VGLUE_AUDIT": "1",
+        "QWEN_FAST_TP4_RS_UNIT_MAJOR": "1",
+        "QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT": "1"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 262144,
+        "max-num-seqs": 8,
+        "max-num-batched-tokens": 262144,
+        "block-size": 64,
+        "num-gpu-blocks-override": 19968,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 536870912,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "drafter_headroom_tokens": 32,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
     "c2-packed-tp4-8x262k-best-time-gate": {
       "description": "GATE ONLY (the timed twin; tp4/262k8): c2-packed-tp4-8x262k-time-gate (eight seats, every seat a 262,144-token window, a pooled KV cache under the reservation admission, the verify audits OFF, the sampler in the verify trace as the hang fix, the waiver marker, the gate limits) plus the nine best levers of c2-packed-tp4-best-strace that two 64-row blocks serve (the quad draft, the fused commit in place on live banks, the five verify-glue levers: QWEN_FAST_QUAD_DRAFT, QWEN_FAST_FUSED_COMMIT, QWEN_FAST_FUSED_COMMIT_INPLACE, QWEN_FAST_FUSED_COMMIT_LIVE_BANKS, QWEN_FAST_TP4_COMMIT_LANES, QWEN_FAST_TP4_SHARD_VALUES, QWEN_FAST_TP4_GDN_GLUE, QWEN_FAST_TP4_GDN_BLOCK_CONV, QWEN_FAST_TP4_ATTN_FOLD) and QWEN_FAST_QUAD_DRAFT_BLOCKS=2 (each block of four seats drafts as its own 64-row quad, instead of the pair passes). Every lever of c2-packed-tp4-best-strace is in; none refuses at two blocks (nothing is left out): the verify-glue levers refuse only at the pair (QWEN_FAST_TP below 4), the fused commit is built per block over that block's own pool slots and a block that cannot build it logs its refusal and serves today's publication, and the quad blocks refuse (by name, at the attach) only a pool that is not eight slots, a process without QWEN_FAST_EXTENT_REPLAY=1 and QWEN_FAST_PACKED_PROPOSAL=1 (the image sets the second; the profile the first), the quad audit flag and a non-four-card width. The request warm (QWEN_FAST_M3_REQUEST_WARM=1) and the in-trace sampler hang fix are the eight-seat family's own. KV POOL: 19968 blocks (num-gpu-blocks-override and QWEN36_MAX_TOKENS_ALL_USERS=1277440 = (19968 - 8) x 64, the pair the contract holds equal), 1,792 blocks (0.998 GB per chip, 114,688 tokens) fewer than c2-packed-tp4-8x262k's 21,760, because the levers add about 0.96 GB per chip that the 21,760-block pool's margin does not have at the design's high non-KV band: two quad captures at 450 MiB (943,718,400 bytes; quad_draft.QUAD_CAPTURE_BYTES_EST x 2, captured at the first round of each block and kept beside the pair traces) and the fused commit's tables and deltas for eight segments (8 x 344,064 bytes = 2,752,512; its T_proj temporaries are bounded at 16 MiB in all); the pool formula 16,416 + floor((F8 - 1.0 GB - 0.07 GB RoPE and transient growth) / 557,056 B), with F8 the free DRAM at eight live seats less the levers' 0.96 GB, gives 19,979 at the high band, 19,968 is the 64-aligned value below it. Five full 262,144-token windows no longer fit at once (5 x 4,097 reserved blocks = 20,485 > 19,967): four do (4.87 windows of tokens); the reservation admission holds the rest. PROVISIONAL: the first card job that reads F8 with the levers on (the P1 profile job, the S0 smoke's memory ledger) re-sets it; 21,760 needs F8 of at least 4.05 GB with the levers in. It carries QWEN_FAST_262K_EVIDENCE_WAIVER=1 as the 8x262k gate-only profiles do (width 4,096 and the capacity-262,144 admission proceed without the pending evidence records only in a gate run of a gate-only profile: every result is UNQUALIFIED), the traffic twin never does. Untested on hardware: an attach refusal here is a finding, not a defect of the arm. The paired control for timing is c2-packed-tp4-8x262k-time-gate (the levers, the quad blocks and the 19968-block pool are the only differences).",
       "eos_ids": [
@@ -8335,6 +8440,107 @@
         "QWEN_FAST_TP4_GDN_BLOCK_CONV": "1",
         "QWEN_FAST_TP4_ATTN_FOLD": "1",
         "QWEN_FAST_QUAD_DRAFT_BLOCKS": "2"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 262144,
+        "max-num-seqs": 8,
+        "max-num-batched-tokens": 262144,
+        "block-size": 64,
+        "num-gpu-blocks-override": 19968,
+        "no-enable-prefix-caching": true,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "no-enable-chunked-prefill": true,
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 536870912,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        }
+      },
+      "min_answer_tokens": 256,
+      "default_max_tokens": 8192,
+      "drafter_headroom_tokens": 32,
+      "parser_rechunk": true,
+      "gate_only": true
+    },
+    "c2-packed-tp4-8x262k-best-time-gate-u1": {
+      "description": "GATE ONLY (the U1 timed arm; tp4/u1): c2-packed-tp4-8x262k-best-time-gate (the control of the paired timing: every best lever, the quad blocks, 19968 blocks, audits OFF, the in-trace sampler) plus QWEN_FAST_TP4_RS_UNIT_MAJOR=1: every 64-row all-reduce of the packed verify (128 per forward: 16 wo + 48 GDN out + 64 w2) is ONE reduce_scatter_minimal_async on the unit-major view (1, 2, 32, 5120) instead of two slices, two reduce-scatters and a concat. The view restarts the ring's chunk parity per 32-row unit, so each unit is reduced in its one-tile call's order (X1 spike, 0 of 163,840 elements differing in 6 of 6; docs/tp4-exact-ring-parity.md). Calls outside the measured census (rows 64 and 128, width 5120, bfloat16, tile layout, interleaved, four chips, Ring, two links) fall back to the split and log the reason. Nothing else differs from the control: the pair differs in this flag alone, so a round-time difference is the lever's and every text must be equal. It carries QWEN_FAST_262K_EVIDENCE_WAIVER=1 as the 8x262k gate-only profiles do (every result UNQUALIFIED).",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "262144",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "1",
+        "QWEN_FAST_FUSED_COMMIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "1",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "1",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_PACKED_SAMPLER_IN_TRACE": "1",
+        "QWEN_FAST_M3_BLOCKS": "2",
+        "QWEN_C2_GATE_PROFILE": "1",
+        "QWEN_FAST_262K_EVIDENCE_WAIVER": "1",
+        "QWEN_FAST_M3_REQUEST_WARM": "1",
+        "QWEN_FAST_KV_RESERVATION": "1",
+        "QWEN36_MAX_TOKENS_ALL_USERS": "1277440",
+        "QWEN_FAST_DRAM_ENGINE_BUILD_MB": "800",
+        "QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB": "600",
+        "QWEN_FAST_DRAM_LARGEST_BUFFER_MB": "256",
+        "QWEN_FAST_TP4_COMMIT_LANES": "1",
+        "QWEN_FAST_TP4_SHARD_VALUES": "1",
+        "QWEN_FAST_TP4_GDN_GLUE": "1",
+        "QWEN_FAST_TP4_GDN_BLOCK_CONV": "1",
+        "QWEN_FAST_TP4_ATTN_FOLD": "1",
+        "QWEN_FAST_QUAD_DRAFT_BLOCKS": "2",
+        "QWEN_FAST_TP4_RS_UNIT_MAJOR": "1"
       },
       "engine": {
         "model": "@SNAPSHOT@",

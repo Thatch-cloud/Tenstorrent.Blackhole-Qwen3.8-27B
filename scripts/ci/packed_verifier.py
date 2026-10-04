@@ -195,6 +195,7 @@ import gdn_seq_block
 import verify_prestage
 import capture_plug
 import tp_shapes
+import tile_collective_tp
 import tp4_vglue
 import verify_trace_t1
 import verify_trace_t2
@@ -1073,7 +1074,13 @@ class PackedVerifierEngine:
             result = self.operation(warm, warm=True)
             self.stage = 'warm forward fence'
             operations.synchronize_device(self.mesh)
+            # QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT: this eager forward's unit-major reductions against the split's, now (nothing
+            # held when the audit is off).
+            tile_collective_tp.audit_claim(warm)
+            tile_collective_tp.audit_round(operations, warm, 0)
         finally:
+            tile_collective_tp.audit_claim(warm)
+            tile_collective_tp.audit_release(operations, warm)
             if result is not None:
                 release_vglue_audit(operations, warm, result[2] if len(result) > 2 else None)
                 release_owned(operations, [value for value in result if value is not None])
@@ -1095,6 +1102,7 @@ class PackedVerifierEngine:
             verify_trace_t2.take()
         tp4_vglue.take()
         self.trace, self.output = capture_operation(operations, self.mesh, lambda: self.operation(self.fixture))
+        tile_collective_tp.audit_claim(self.fixture)
         if self.verify_t1:
             self.note_verify_t1(verify_trace_t1.take())
         if self.verify_t2:
@@ -1803,6 +1811,8 @@ class PackedVerifierEngine:
             if tp4_vglue.audit_enabled():
                 # QWEN_FAST_TP4_VGLUE_AUDIT: each engaged GDN lever's output against the served path's, held beside it.
                 tp4_vglue.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)
+            # QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT: this replay's unit-major reductions against the split's held beside them.
+            tile_collective_tp.audit_round(self.operations, self.fixture, self.rounds + 1)
             predictions = [host[slice(*segment_rows(self.shape, segment))] for segment in segments]
             finished = time.perf_counter()
             if extent_users is not None:
@@ -2134,6 +2144,7 @@ class PackedVerifierEngine:
             self.output = None
         if self.fixture is not None:
             release_vglue_audit(operations, self.fixture, shard_values)
+            tile_collective_tp.audit_release(operations, self.fixture)
             self.fixture.close()
             self.fixture = None
         if self.plug is not None:

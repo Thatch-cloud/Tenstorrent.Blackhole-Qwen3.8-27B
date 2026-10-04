@@ -916,7 +916,8 @@ class ProfileGatingTests(unittest.TestCase):
                                  'c2-packed-tp4-262k-gate': True, 'c2-packed-tp4-8x262k': True,
                                  'c2-packed-tp4-8x262k-gate': True, 'c2-packed-tp4-8x262k-time-gate': True,
                                  'c2-packed-tp4-8x262k-diag-strace': True,
-                                 'c2-packed-tp4-8x262k-best': True, 'c2-packed-tp4-8x262k-best-audit': True, 'c2-packed-tp4-8x262k-best-time-gate': True,
+                                 'c2-packed-tp4-8x262k-best': True, 'c2-packed-tp4-8x262k-best-audit': True, 'c2-packed-tp4-8x262k-best-time-gate': True, 'c2-packed-tp4-8x262k-best-time-gate-u1': True,
+                                 'c2-packed-tp4-8x262k-best-u1-audit': True,
                                  'c2-packed-tp4-8x262k-ship': True,
                                  'coding': None, 'general': None, 'general-prefix': None,
                                  'general-prefix-eager': None,
@@ -949,7 +950,7 @@ class ProfileGatingTests(unittest.TestCase):
                                       'c2-packed-tp4-8-diag-strace-rshard', 'c2-packed-tp4-262k-gate', 'c2-packed-tp4-8x262k',
                                       'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-time-gate',
                                       'c2-packed-tp4-8x262k-diag-strace', 'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit',
-                                      'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-ship'), name)
+                                      'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-best-time-gate-u1', 'c2-packed-tp4-8x262k-best-u1-audit', 'c2-packed-tp4-8x262k-ship'), name)
         with self.assertRaisesRegex(ValueError, 'parser_rechunk must be true or false'):
             contract.parser_rechunk({'parser_rechunk': 'yes'})
 
