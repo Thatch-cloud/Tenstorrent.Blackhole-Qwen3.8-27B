@@ -55,7 +55,7 @@ class LevernVllmCase(reservation.VllmCase):
 
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        GPT2Config(n_positions=8192, n_embd=256, n_layer=1, n_head=4).save_pretrained(temporary.name)
+        GPT2Config(n_positions=max(8192, window), n_embd=256, n_layer=1, n_head=4).save_pretrained(temporary.name)
         model = ModelConfig(model=temporary.name, dtype='float32', max_model_len=window, skip_tokenizer_init=True, seed=0)
         speculative = SpeculativeConfig(model='ngram', num_speculative_tokens=15)
         speculative.method = 'dflash'
