@@ -286,7 +286,8 @@ class ProfileTests(unittest.TestCase):
         for name, profile in PROFILES['profiles'].items():
             with self.subTest(profile=name):
                 self.assertEqual(WIDE_FLAG in profile['env'], name in (WIDE, AUDITED_WIDE))
-                self.assertEqual(profile['env'].get(RING_FLAG) == 'ring', name in (RING, AUDITED_RING))
+                # tp4/w1 carries D1 (the topology flag alone, the fabric stays FABRIC_1D): test_tp4_w1
+                self.assertEqual(profile['env'].get(RING_FLAG) == 'ring', name in (RING, AUDITED_RING) + ('c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-lite', 'c2-packed-tp4-8x262k-w1-audit'))
                 self.assertEqual(profile['engine']['additional-config']['tt'].get('fabric_config') == 'FABRIC_1D_RING',
                                  name in (RING, AUDITED_RING, 'general-tp4-ring-mmrs'))
 

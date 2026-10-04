@@ -228,7 +228,7 @@ class WindowProfileTests(unittest.TestCase):
     def test_the_topology_switch_and_the_drafter_dtype_are_set_by_their_arms_only(self):
         for name, body in PROFILES['profiles'].items():
             env = body['env']
-            self.assertEqual(env.get('QWEN_FAST_CCL_TOPOLOGY'), 'ring' if name in ('c2-packed-tp4-gate-ring', 'c2-packed-tp4-speed-strace-ring') else None, name)
+            self.assertEqual(env.get('QWEN_FAST_CCL_TOPOLOGY'), 'ring' if name in ('c2-packed-tp4-gate-ring', 'c2-packed-tp4-speed-strace-ring', 'c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-lite', 'c2-packed-tp4-8x262k-w1-audit') else None, name)
             self.assertEqual(env.get('QWEN_FAST_DRAFT_BF8'), '0' if name == 'c2-packed-tp4-gate-bf16' else None, name)
 
 
