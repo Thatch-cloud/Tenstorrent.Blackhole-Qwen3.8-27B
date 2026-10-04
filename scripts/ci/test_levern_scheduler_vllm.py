@@ -103,6 +103,9 @@ class LevernVllmCase(reservation.VllmCase):
             if all(name in seeded for name in decoders):
                 break
             self.advance(scheduler, seeded, records)
+        if decoders:
+            # one more engine step with nothing waiting, as the loop runs it: the alternator then drops what the seeding prefills owed the decoders
+            self.advance(scheduler, seeded, records)
         records.clear()
         scheduler.add_request(Request(cold[0], [7] * cold[1], SamplingParams(temperature=0, max_tokens=20), None))
         for _ in range(limit):
@@ -170,9 +173,10 @@ class CapOnTheRealSchedulerTests(LevernVllmCase):
             with self.subTest(label):
                 self.installed(scheduler_type, dict(LEVERN, QWEN_FAST_LEVERN_ROUNDS='2'))
                 scheduler = self.build_chunked(scheduler_type)
-                records = self.step_records(scheduler, ('cold', 40000), [])
+                # a prompt shorter than the window: vLLM clamps a prefill step to max_model_len - 1 - computed, which no real prompt reaches
+                records = self.step_records(scheduler, ('cold', 30000), [])
                 prefill = [(row['start'], row['start'] + row['tokens']) for row in records if row['kind'] == 'prefill']
-                self.assertEqual(prefill, levern_policy.plan(40000, decoding=False))
+                self.assertEqual(prefill, levern_policy.plan(30000, decoding=False))
                 self.assertEqual({row['kind'] for row in records}, {'prefill'})
 
     def test_with_the_flag_off_the_same_prompt_is_one_step(self):
