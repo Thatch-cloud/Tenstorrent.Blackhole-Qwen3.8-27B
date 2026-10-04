@@ -149,6 +149,9 @@ FAILURES = (TRACEBACK, 'EngineDeadError', 'EngineCore encountered a fatal error'
             'AssertionError', WEDGE, MMIO_TIMEOUT)
 # qwen_prefix_model_patch.MARKER_EAGER_WARM begins with it.
 EAGER_WARM = '[PINDIAG] prefix: eager prefill warmed'
+# The four-card packed path warms its eager prefill before the packed traces in serving_runtime.prefill_warm_before_traces
+# (serving_runtime.WARM_MARKER); on that path the prefix model graft's own warm line is not written.
+FOUR_CARD_WARM = '[PINDIAG] four-card eager prefill warmed before the packed traces'
 FIELD = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)=(\[[^\]]*\]|\S+)')
 ENGINE_SUFFIX = re.compile(r'^(.*)-([0-9A-Za-z]{8})$')
 
@@ -267,7 +270,7 @@ def scan(lines):
     entry keeps its line index and timestamp so the driver can window it against a request."""
     out = dict(installs=[], grants=[], rows=[], audits=[], refused=[], capture_skipped=[], kill_switch=[],
                stats=None, launches=[], apc=[], chunking_off=0, chunk_replay=0, dram=[], dram_readings=[],
-               kv_tokens=None, failures=[], eager_warm=[], sticky_installs=[], sticky_admits=[], sticky_builds=[],
+               kv_tokens=None, failures=[], eager_warm=[], four_card_warm=[], sticky_installs=[], sticky_admits=[], sticky_builds=[],
                model_warm=[], model_warm_skipped=[], kv_shared=[], audit_windows=[])
     for index, raw in enumerate(lines):
         stamp, line = split_timestamp(raw.rstrip('\n'))
@@ -328,6 +331,8 @@ def scan(lines):
             entry = fields(line.split(EAGER_WARM, 1)[1])
             entry.update(where)
             out['eager_warm'].append(entry)
+        if FOUR_CARD_WARM in line:
+            out['four_card_warm'].append(dict(where, line=line.strip()[:300]))
         match = STATS.search(line)
         if match:
             try:

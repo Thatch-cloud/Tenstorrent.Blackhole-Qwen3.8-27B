@@ -319,6 +319,15 @@ class StickyLineTests(unittest.TestCase):
         scanned = pm.scan(['WARNING %s site=proposal_rows rows 0,1 page 7 row 0' % verify_trace_t2.KV_SHARED, 'other'])
         self.assertEqual(len(scanned['kv_shared']), 1)
 
+class FourCardWarmTests(unittest.TestCase):
+    def test_the_four_card_pre_trace_warm_is_scanned(self):
+        # v580: on the four-card packed path the eager prefill is warmed by serving_runtime before the packed traces.
+        lines = ["2026-10-04T22:41:02.1Z (EngineCore pid=66) [PINDIAG] four-card eager prefill warmed before the packed traces: programs 120->158"]
+        scanned = pm.scan(lines)
+        self.assertEqual(len(scanned["four_card_warm"]), 1)
+        self.assertEqual(scanned["eager_warm"], [])
+
+
 
 if __name__ == '__main__':
     unittest.main()

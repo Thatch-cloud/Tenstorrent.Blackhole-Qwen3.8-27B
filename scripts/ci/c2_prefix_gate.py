@@ -650,7 +650,12 @@ def generic_problems(arm, scanned, records, error, expect_profile, store_gib=jud
     path = arm.get('path') or ('eager' if arm.get('kind') == 'eager' else 'traced')
     if path == 'eager' and installs:
         warm = scanned.get('eager_warm') or []
-        if not warm:
+        four_card = scanned.get('four_card_warm') or []
+        if not warm and four_card:
+            # The four-card packed path compiles its eager prefill before the packed traces (serving_runtime's warm, v580):
+            # the hazard this line guards is covered there, and the graft's own warm line is not written on that path.
+            notes.append('eager warm: the four-card pre-trace warm (%d line(s))' % len(four_card))
+        elif not warm:
             problems.append('no "%s" line: the model graft did not compile the eager prefill before the decode trace '
                             'was parked, so the first request compiles it after the park and a later prefill can hang '
                             'the device (G1 v47, run 36246961161): an image built before the eager warm' % markers.EAGER_WARM)
