@@ -1,19 +1,19 @@
 # ship/262k-prefix pack: the lean qualification of EIGHT SEATS x 262,144-token windows on W1 + packed prefix reuse (chunked prefill, sticky sessions), ONE image. Lever N is DEFERRED
 # (owner 2026-10-05: it and prefix reuse refuse each other in five places): no Lever N profile, test, fault job or rule is in this pack.
 # One line per job: <template name without .env> <stop|soft|pre> <image tag> <real minutes>. stop: a failure ends the pack (Z still runs). soft: data, a failure
-# or skip does not stop. pre: X0B, run first (it resets the cards, builds, and leaves them idle). Production is DOWN (node agent stopped): no agentstop, agentstart
+# or skip does not stop. pre: X0B, run first (it resets the cards, builds, and leaves them idle). The cards are under development: no agentstop, agentstart
 # or hand-back job exists and none may run; no job starts the node agent or places a model.
 # MINUTES are the REAL W1-window job times (status+rescan+reset 4, image build 22, audited attach 17-19, control attach smoke 12, one eight-user hang shape 13-15,
 # timed smoke 15); a job's tests add to its attach. P1's 110 is an ESTIMATE (no measured time exists for the prefix arms on these cards).
-# TOTAL: 405 min = 6.75 h for all lines, 401 min = 6.7 h through the stop and pre lines (Z left out). Cut list, in order, if the owner wants less: H3 (-15; H1 and H2 keep
-# the shape), C16 to soft (-45; the churn shape Seats8 already ran, but then the reservation under prefix caching stays unproven), P1 to lifecycle-evict only (about -50;
-# loses the isolation arm, so do not cut it without the owner). Never cut A1, S0, H1, L8, P1 or SR10.
+# TOTAL: 430 min = 7.2 h for all lines, 426 min = 7.1 h through the stop and pre lines (Z left out). H3's 40 and P1's 110 are ESTIMATES. Cut list, in order, if the owner wants less: H2 (-15; H1 keeps
+# the unsalted shape; never cut H3, the only traffic-profile prefix run), C16 to soft (-45; the churn shape Seats8 already ran, but then the reservation under prefix caching stays unproven), P1 to lifecycle-evict only (about -50;
+# loses the isolation arm, so do not cut it without the owner). Never cut A1, S0, H1, H3, L8, P1 or SR10.
 # READ A1 and S0 hashes against W1's reference hashes FIRST (the whole exactness claim); a mismatch ends the pack.
 # NEEDS (before X0B; the operator on the integration branch, which this pack does not touch; merge tp4/w1 efb0ddcf, tp4/packed-prefix 08166e4d and ship/evidence-262k f7dfa53b):
 #   N1 profiles c2-packed-tp4-8x262k-ship-prefix (traffic, not gate_only, mesh P150x4, max-num-seqs 8: c2-packed-tp4-8x262k-ship + the W1 deltas, WITHOUT
 #      QWEN_FAST_PACKED_SAMPLER_IN_TRACE, KEEPING QWEN_FAST_M3_REQUEST_WARM=1, no waiver, no QWEN_C2_GATE_PROFILE, no HOSTGAP_LOG, plus enable-chunked-prefill true,
 #      enable-prefix-caching true, prefix-caching-hash-algo sha256, QWEN_FAST_STICKY_SESSIONS=1, QWEN_PREFIX_REUSE=1, QWEN_PREFIX_STORE_GIB=8) and
-#      c2-packed-tp4-8x262k-ship-prefix-audit (gate_only: audits and gate marker, NO evidence waiver) must exist in qwen_c2_profiles.json. The merged smoke check must
+#      c2-packed-tp4-8x262k-ship-prefix-audit (gate_only: the 7 W1 audits and the two verify audits, NO evidence waiver; its attach sets QWEN_C2_GATE=1) must exist in qwen_c2_profiles.json. The merged smoke check must
 #      keep every lever's engaged-marker rule (W1's and prefix's).
 #   N2 scripts/ci/ordered_writer_evidence_tp4.json (record_ordered_writer_evidence_tp4.py from E1) and scripts/ci/packed_any_evidence_tp4_262144.json
 #      (record_packed_any_evidence_tp4.py --capacity 262144 --cb1 E2a --cb2a E2b --cb2b E2c), each COMMITTED with its re-pinned constant, on the integration branch right
@@ -25,9 +25,10 @@
 #   N5 SALT (gap b): the gateway mints qps1 salts for the served model name (Thatch.Server rollout.yaml) AND the rig's prefix salt key file named in serving_c2_contract.py
 #      holds the same key bytes; otherwise reuse is silently off. Neither is provable by this pack (the gate mints its own salts under a key it mounts).
 #   N6 the CPU suite and qwen-fast-vllm-cpu.yml (StickyReservationOnRealVllmTests) run green on the merged ref before X0B.
+#   N8 before X0B: <hub>/.qwen-c2/prefix-reuse.off must be ABSENT on the rig (its presence turns reuse off with no other sign), and the tag tp4-serve-10 must not exist (X0B exits early if it does).
 #   N7 every tag in these templates is tp4-serve-10: a changed commit needs a new tag in every template. @THIN_LAYER_IMAGE@ is filled in SR10 only.
-# GO RULE for moving :latest to the thin layer built on tp4-serve-10: every stop line passed; A1 zero mismatches, no waiver line, prefix engaged, hashes equal W1's; S0 equal
-# A1's; H1, H2 and H3 clean; P1 no FAIL (eight agents every pair identical with a packed round of 2+ live users, returning turns byte-equal to cold, eviction clean, kill switch
+# GO RULE for moving :latest to the thin layer built on tp4-serve-10: every stop line passed; A1 zero mismatches, no waiver line, prefix installed (A1 and S0 are unsalted: no hit, no sticky admit), hashes equal W1's; S0 equal
+# A1's; H1 and H2 clean (unsalted shape); H3 clean with reuse engaged (Q>0, not NOT_EXERCISED); P1 no FAIL (eight agents every pair identical with a packed round of 2+ live users, returning turns byte-equal to cold, eviction clean, kill switch
 # latched, abort during a hit prefill clean); L8 concurrent equal to solo at ~140k and ~253k with two or more seats past 131k together; C16 16 of 16, reservation hold exercised
 # and released with prefix caching on; SR10 'PLATFORM_REPLAY passed=True' with the budget smoke passed.
 # POST-GO (the operator, never this pack): (1) push the base tp4-serve-10 through the platform publish lane; build and pre-pull the thin layer BEFORE SR10 from the
@@ -42,7 +43,7 @@ A1-audited-attach-smoke stop tp4-serve-10 40
 S0-baked-default-smoke stop tp4-serve-10 30
 H1-hang-shape-ship-prefix stop tp4-serve-10 15
 H2-hang-shape-ship-prefix stop tp4-serve-10 15
-H3-hang-shape-ship-prefix stop tp4-serve-10 15
+H3-prefix-agent-turns-ship-prefix stop tp4-serve-10 40
 P1-prefix-exactness-lifecycle stop tp4-serve-10 110
 L8-ladder8-past-131k stop tp4-serve-10 45
 C16-churn16 stop tp4-serve-10 45

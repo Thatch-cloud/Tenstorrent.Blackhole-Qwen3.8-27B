@@ -447,13 +447,13 @@ def write_salt_key(path, urandom=os.urandom):
 
 
 def server_run(image, name, served, devices, port=PORT, hub=gate.HUB, derived_path=None, digests=False,
-               salt_key_path=None, stats_now=False, env=()):
+               salt_key_path=None, stats_now=False, env=(), gate_only=False):
     """`docker run -d` of one serving container: the S1 gate's agent shape (its --rm dropped: the
     reload drill stops and starts the same container), the API on 127.0.0.1:port, a derived
     profiles file when the arm has one, the row digests when asked, the arm's salt key when it has
     one, the gate-only knobs an S2 arm adds (`env`: the extent audit, c2_serving_gate.ARM_ENV_NAMES),
     and the platform's vLLM argv."""
-    arguments = [token for token in gate.agent_shape(image, name, served, devices, hub, env) if token != '--rm']
+    arguments = [token for token in gate.agent_shape(image, name, served, devices, hub, env, gate_only=gate_only) if token != '--rm']
     arguments[2:2] = ['-d']
     arguments += ['-p', '127.0.0.1:%d:8000' % port]
     if digests:
@@ -1437,7 +1437,8 @@ class Runner(object):
             salt_key = write_salt_key(salt_key_path)
         arguments = server_run(self.image, name, arm['served'], self.devices, self.port, self.hub, derived_path,
                                digests=wants_digests(arm), salt_key_path=salt_key_path,
-                               stats_now=bool(arm.get('prefix')), env=arm.get('env') or ())
+                               stats_now=bool(arm.get('prefix')), env=arm.get('env') or (),
+                               gate_only=bool(arm.get('gate_only')))
         with open(os.path.join(arm_dir, 'docker-run.json'), 'w') as handle:
             json.dump(arguments, handle, indent=1)
         started = self.clock()
@@ -1713,6 +1714,8 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
                     % (arm['arm'], ran[arm['arm']], plan))
                 return 2
             ran[arm['arm']] = plan
+            # the arm's served profile may be gate only (an audit twin): the contract boots it only with QWEN_C2_GATE=1
+            arm['gate_only'] = ((arm.get('derived') or profiles)['profiles'].get(arm['served']) or {}).get('gate_only') is True
     worst_case = worst_case_seconds(arms_of)
     if options.budget_seconds is not None and worst_case > options.budget_seconds:
         log('refused: plans %s may take %d s (every arm to its limit), past the %d s this step and job leave: run '
@@ -1737,7 +1740,8 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
                                                       else None, digests=wants_digests(arm),
                                                       salt_key_path='<results>/%s/salt.key' % arm['arm']
                                                       if arm.get('prefix') else None,
-                                                      stats_now=bool(arm.get('prefix')), env=arm.get('env') or ()))))
+                                                      stats_now=bool(arm.get('prefix')), env=arm.get('env') or (),
+                                                      gate_only=bool(arm.get('gate_only'))))))
         return 0
     log_not_applicable(skipped, options.profile, log)
     runner = (runner_factory or Runner)(options.image, options.results, options.checkout,

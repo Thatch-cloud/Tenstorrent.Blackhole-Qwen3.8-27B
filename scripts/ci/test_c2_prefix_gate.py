@@ -1436,5 +1436,29 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn(module, modules, '%s is not run by qwen-integration-cpu.yml' % module)
 
 
+class GateOnlyServedProfileTests(unittest.TestCase):
+    """A gate-only served profile (an audit twin) boots only with QWEN_C2_GATE=1; the prefix gate must send it."""
+
+    def dockers(self, profile, plan, *extra):
+        results = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, results, True)
+        lines = []
+        code = gate.main(['--image', 'img', '--profiles', os.path.join(HERE, 'qwen_c2_profiles.json'), '--results', results,
+                          '--profile', profile, '--plan', plan, '--dry-run', '--cards', 'quad'] + list(extra),
+                         devices=['/a', '/b', '/c', '/d'], log=lines.append)
+        self.assertEqual(code, 0, lines)
+        return [json.loads(line)['docker'] for line in lines if line.startswith('{') and '"docker"' in line]
+
+    def test_the_gate_only_audit_twin_gets_the_gate_switch_and_the_traffic_profile_does_not(self):
+        audit = self.dockers('c2-packed-tp4-8x262k-ship-prefix-audit', 'exactness-shared,lifecycle-evict', '--baseline', 'none')
+        self.assertTrue(audit)
+        for docker in audit:
+            self.assertIn('QWEN_C2_GATE=1', docker)
+        traffic = self.dockers('c2-packed-tp4-8x262k-ship-prefix', 'agent-turns-prefix', '--baseline', 'none', '--agents', '8')
+        self.assertTrue(traffic)
+        for docker in traffic:
+            self.assertNotIn('QWEN_C2_GATE=1', docker)
+
+
 if __name__ == '__main__':
     unittest.main()

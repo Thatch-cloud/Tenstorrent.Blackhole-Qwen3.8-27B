@@ -27,9 +27,9 @@ STAND_IN = {FULL: 'c2-packed-tp4-8x262k-ship', AUDIT: 'c2-packed-tp4-8x262k-best
 PLACEHOLDERS = {'@THIN_LAYER_IMAGE@': 'thin-layer-image-ref'}
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|/dev/tenstorrent|home/|zot\.')
 ORDERED = ('X0B-status-rescan-reset-build', 'A1-audited-attach-smoke', 'S0-baked-default-smoke', 'H1-hang-shape-ship-prefix', 'H2-hang-shape-ship-prefix',
-           'H3-hang-shape-ship-prefix', 'P1-prefix-exactness-lifecycle', 'L8-ladder8-past-131k', 'C16-churn16', 'SR10-platform-replay', 'Z-reset')
+           'H3-prefix-agent-turns-ship-prefix', 'P1-prefix-exactness-lifecycle', 'L8-ladder8-past-131k', 'C16-churn16', 'SR10-platform-replay', 'Z-reset')
 SOFT = ('Z-reset',)
-ACTIONS = {'X0B-status-rescan-reset-build': 'status rescan reset build', 'P1-prefix-exactness-lifecycle': 'reset prefix', 'L8-ladder8-past-131k': 'reset gate',
+ACTIONS = {'X0B-status-rescan-reset-build': 'status rescan reset build', 'P1-prefix-exactness-lifecycle': 'reset prefix', 'H3-prefix-agent-turns-ship-prefix': 'reset prefix', 'L8-ladder8-past-131k': 'reset gate',
            'C16-churn16': 'reset gate', 'SR10-platform-replay': 'reset replay', 'Z-reset': 'status reset'}
 SMOKE_TESTS = 'warmup,coding,concurrent8_steady,concurrent8_code_32k,concurrent8_code_equal'
 
@@ -104,7 +104,7 @@ class Pack(unittest.TestCase):
         for name in ('A1-audited-attach-smoke', 'S0-baked-default-smoke'):
             self.assertEqual(self.parsed(name)['tests'], SMOKE_TESTS)
         self.assertEqual(self.parsed('A1-audited-attach-smoke')['profile'], AUDIT)
-        for name in ('H1-hang-shape-ship-prefix', 'H2-hang-shape-ship-prefix', 'H3-hang-shape-ship-prefix'):
+        for name in ('H1-hang-shape-ship-prefix', 'H2-hang-shape-ship-prefix'):
             self.assertEqual(self.parsed(name)['profile'], FULL)
             self.assertIn('concurrent8_drain', self.parsed(name)['tests'])
 
@@ -119,6 +119,13 @@ class Pack(unittest.TestCase):
         self.assertEqual(len(out['gate_lengths'].split(',')), 16)
         for name in ('L8-ladder8-past-131k', 'C16-churn16'):
             self.assertEqual(self.parsed(name)['gate_salt'], 'fresh')
+
+    def test_h3_runs_prefix_reuse_on_the_traffic_profile_and_a1_names_no_sticky_admit(self):
+        out = self.parsed('H3-prefix-agent-turns-ship-prefix')
+        self.assertEqual((out['prefix_plan'], out['prefix_profile'], out['prefix_agents']), ('agent-turns', FULL, '8'))
+        self.assertEqual(out['prefix_baseline'], 'none')
+        self.assertNotIn('sticky admit', text_of('A1-audited-attach-smoke').split('C2_CARDS')[0].split('A1 and S0 run UNSALTED')[0])
+        self.assertIn('UNSALTED', text_of('A1-audited-attach-smoke'))
 
     def test_the_prefix_job(self):
         out = self.parsed('P1-prefix-exactness-lifecycle')
