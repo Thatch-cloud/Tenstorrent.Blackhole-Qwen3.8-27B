@@ -470,8 +470,10 @@ def build_audit_program(ttnn, mesh, served, multi, counters, slot):
 
     def per_chip(chip):
         left, right, count = left_shards[chip], right_shards[chip], counter_shards[chip]
-        compile_args = [*_layouts(ttnn, [left, right], 'audit tensor'), *ttnn.TensorAccessorArgs(count).get_compile_time_args(),
-                        aligned_page_bytes(count)]
+        # The audit kernel declares two input accessors (served, then multi) before the counters', so both layouts are passed
+        # even though they must be equal (_layouts checks that): one copy shifted the counter args (v444: 'Index out of range').
+        layout = _layouts(ttnn, [left, right], 'audit tensor')
+        compile_args = [*layout, *layout, *ttnn.TensorAccessorArgs(count).get_compile_time_args(), aligned_page_bytes(count)]
         runtime = [[left.buffer_address(), right.buffer_address(), count.buffer_address(), slot * AUDIT_CORES + core, first, amount]
                    for core, (first, amount) in enumerate(ranges[:len(points)])]
         return compile_args, runtime

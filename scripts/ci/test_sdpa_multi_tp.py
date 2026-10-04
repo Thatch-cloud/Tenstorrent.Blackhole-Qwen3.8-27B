@@ -552,6 +552,11 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(io, [served, built, counters])
         for chip, kernel in enumerate(kernels_of(program).values()):
             self.assertEqual(kernel.compile_time_args[-1], 64)
+            # One accessor layout per accessor the kernel declares (served, multi, counters), then the page bytes (v444: a single
+            # shared layout for served + multi shifted the counter args past the end, 'Index out of range').
+            accessors = (HERE / multi.KERNEL_AUDIT).read_text(encoding='utf-8').count('TensorAccessorArgs<')
+            self.assertEqual(accessors, 3)
+            self.assertEqual(kernel.compile_time_args[:-1].count('accessor'), accessors)
             arguments = core_lists(kernel)
             self.assertEqual(len(arguments), 64)
             self.assertEqual(sorted(core[3] for core in arguments), list(range(5 * 64, 6 * 64)))
