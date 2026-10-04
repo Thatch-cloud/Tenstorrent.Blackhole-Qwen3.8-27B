@@ -8,8 +8,9 @@ stage 1, the epochs arm) and tp4/u1 (the unit-major reduce-scatter) merged in, a
   c2-packed-tp4-8x262k-w1-audit  that plus the audit of every one of those levers and the fused-commit, verify-glue and draft-singles
                                  audits of the best-audit profile
 
-Left out on purpose: S1 (no measured gain) and D1 (QWEN_FAST_CCL_TOPOLOGY=ring: the ring arms also set the engine's fabric_config to
-FABRIC_1D_RING, a process-wide change that also moves the verify's collectives; the mesh descriptor is already the ring one in the control). This module pins the two profiles' exact deltas, that the levers' own
+D1 (QWEN_FAST_CCL_TOPOLOGY=ring) is in: only the drafter-side collectives read it and the engine's fabric stays FABRIC_1D as in the control
+(the older ring arms that also set FABRIC_1D_RING are other profiles). S1 is left out (no measured gain). Three fallback twins exist:
+-w1-lite (no block epochs), -w1-nod1 and -w1-audit-nod1 (no D1). This module pins the two profiles' exact deltas, that the levers' own
 flag readers and smoke rules accept the stack together (the union of their engaged and audit rules), the job pack, and the shipping lists."""
 
 import json
@@ -31,8 +32,10 @@ PROFILES_PATH = HERE / 'qwen_c2_profiles.json'
 FOLDER = HERE / 'references' / 'tp4-w1-jobs'
 IMAGE = 'tp4-w1-1'
 CONTROL = 'c2-packed-tp4-8x262k-best-time-gate'
+U1_ALONE = 'c2-packed-tp4-8x262k-best-u1-audit'
 BEST_AUDIT = 'c2-packed-tp4-8x262k-best-audit'
 W1, W1_AUDIT = 'c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit'
+W1_LITE, W1_NOD1, W1_AUDIT_NOD1 = W1 + '-lite', W1 + '-nod1', W1_AUDIT + '-nod1'
 SAMPLER = 'QWEN_FAST_PACKED_SAMPLER_IN_TRACE'
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|/dev/tenstorrent|home/|zot\.')
 
@@ -40,12 +43,13 @@ D2 = {tp4_sampdraft.DRAFT_CONV: '1', tp4_sampdraft.DRAFT_HEADS: '1'}
 HOSTGAP = {'QWEN_FAST_TP4_HOSTGAP_LOG': '1', 'QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE': '1', 'QWEN_FAST_TP4_WINDOW_VALIDATE': '1',
            'QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS': '1', 'QWEN_FAST_TP4_ENTRY_DIET': '1'}
 U1 = {tile_collective_tp.UNIT_MAJOR_FLAG: '1'}
-STACK = dict(D2, **HOSTGAP, **U1)
+D1 = {mesh_link_policy.TOPOLOGY_SWITCH: 'ring'}
+STACK = dict(D2, **HOSTGAP, **U1, **D1)
 AUDITS = {tp4_sampdraft.DRAFT_CONV_AUDIT: '1', tp4_sampdraft.DRAFT_HEADS_AUDIT: '1', vp.FULL_AUDIT_FLAG: '1',
           tile_collective_tp.UNIT_MAJOR_AUDIT_FLAG: '1', 'QWEN_FAST_FUSED_COMMIT_AUDIT': '1', 'QWEN_FAST_TP4_VGLUE_AUDIT': '1',
           'QWEN_FAST_DRAFT_SINGLES_AUDIT': 'all'}
-# The levers deliberately not in the stack, by flag.
-LEFT_OUT = (tp4_sampdraft.SHARD_ARGMAX, tp4_sampdraft.SHARD_ARGMAX_AUDIT, mesh_link_policy.TOPOLOGY_SWITCH)
+# The lever deliberately not in the stack, by flag.
+LEFT_OUT = (tp4_sampdraft.SHARD_ARGMAX, tp4_sampdraft.SHARD_ARGMAX_AUDIT)
 
 
 def load():
@@ -97,9 +101,22 @@ class ProfileTests(unittest.TestCase):
         control = data['profiles'][CONTROL]['env']
         self.assertFalse((set(STACK) | set(AUDITS)) & set(control))
 
-    def test_the_two_levers_left_out_are_in_neither_profile_and_the_fabric_is_the_controls(self):
+    def test_the_fallback_twins_are_the_timed_and_audited_arms_minus_one_thing_each(self):
         found = load()['profiles']
-        for name in (W1, W1_AUDIT):
+        for name, base, dropped in ((W1_LITE, W1, 'QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS'), (W1_NOD1, W1, mesh_link_policy.TOPOLOGY_SWITCH),
+                                    (W1_AUDIT_NOD1, W1_AUDIT, mesh_link_policy.TOPOLOGY_SWITCH)):
+            with self.subTest(name=name):
+                expected = flat(found[base])
+                del expected['env'][dropped]
+                self.assertEqual(flat(found[name]), expected)
+                self.assertTrue(found[name]['gate_only'])
+                self.assertNotEqual(found[name]['description'], found[base]['description'])
+
+    def test_s1_is_in_no_w1_profile_d1_is_ring_in_the_stack_arms_and_the_fabric_is_the_controls(self):
+        found = load()['profiles']
+        self.assertEqual({found[name]['env'].get(mesh_link_policy.TOPOLOGY_SWITCH) for name in (W1, W1_AUDIT, W1_LITE)}, {'ring'})
+        self.assertNotIn(mesh_link_policy.TOPOLOGY_SWITCH, found[CONTROL]['env'])
+        for name in (W1, W1_AUDIT, W1_LITE, W1_NOD1, W1_AUDIT_NOD1):
             with self.subTest(name=name):
                 for flag in LEFT_OUT:
                     self.assertNotIn(flag, found[name]['env'])
@@ -113,7 +130,7 @@ class ProfileTests(unittest.TestCase):
             if not profile.get('gate_only'):
                 with self.subTest(name=name):
                     self.assertFalse((set(STACK) | set(AUDITS)) & set(env))
-            if set(STACK) <= set(env):
+            if set(STACK) <= set(env) and name.startswith(W1):
                 self.assertIn(name, (W1, W1_AUDIT))
 
     def test_the_flag_names_the_profiles_use_are_the_ones_the_runtime_reads(self):
@@ -153,13 +170,22 @@ class CompositionTests(unittest.TestCase):
         control = self.env(CONTROL)
         self.assertEqual({key: env[key] for key in env if key.endswith('_AUDIT')}, {key: control[key] for key in control if key.endswith('_AUDIT')})
 
-    def test_the_drafter_gathers_stay_linear_so_the_ring_topology_is_not_in_play(self):
-        # D1 is out: with QWEN_FAST_CCL_TOPOLOGY unset a four-card process runs the drafter's gathers on Linear, as the control does
+    def test_the_drafter_gathers_run_ring_on_the_stack_arms_and_linear_on_the_control_and_the_nod1_twins(self):
+        # D1 is in: QWEN_FAST_CCL_TOPOLOGY=ring is read only by the drafter-side collectives (fast_ccl_topology); the engine fabric is the control's
         class Operations:
             class Topology:
                 Linear, Ring = 'linear', 'ring'
-        for name in (CONTROL, W1, W1_AUDIT):
-            self.assertEqual(mesh_link_policy.fast_ccl_topology(Operations, self.env(name)), 'linear', name)
+        for name, wanted in ((CONTROL, 'linear'), (W1, 'ring'), (W1_AUDIT, 'ring'), (W1_LITE, 'ring'), (W1_NOD1, 'linear'), (W1_AUDIT_NOD1, 'linear')):
+            self.assertEqual(mesh_link_policy.fast_ccl_topology(Operations, self.env(name)), wanted, name)
+
+    def test_only_the_drafter_side_modules_read_the_topology_flag(self):
+        readers = []
+        for path in sorted(HERE.glob('*.py')):
+            text_found = path.read_text(encoding='utf-8')
+            if (not path.name.startswith('test_') and path.name != 'mesh_link_policy.py'
+                    and ('fast_ccl_topology' in text_found or mesh_link_policy.TOPOLOGY_SWITCH in text_found)):
+                readers.append(path.name)
+        self.assertEqual(readers, ['dflash_device.py', 'feature_collective_tp.py', 'quad_draft.py'])
 
     def test_without_the_in_trace_sampler_the_request_width_warm_the_control_carries_is_still_on(self):
         for name in (CONTROL, W1, W1_AUDIT):
@@ -240,13 +266,16 @@ class SmokeUnionTests(unittest.TestCase):
 EXPECTED = {
     'X0-status-rescan-reset': ('status rescan reset', None, 'stop'), 'B0-build': ('build', 'c2-packed-tp4', 'stop'),
     'S0c-control-attach-smoke': ('reset smoke', CONTROL, 'stop'),
+    'U1a-u1-alone-audited-attach': ('reset smoke', U1_ALONE, 'soft'),
     'A1-audited-attach-smoke': ('reset smoke', W1_AUDIT, 'stop'),
     'H1-hang-shapes-w1': ('reset smoke', W1, 'stop'), 'H2-hang-shapes-w1': ('reset smoke', W1, 'stop'),
     'H3-hang-shapes-w1': ('reset smoke', W1, 'stop'), 'H4-hang-shapes-w1': ('reset smoke', W1, 'stop'),
-    'H5-hang-shapes-w1': ('reset smoke', W1, 'stop'),
+    'H5-hang-shapes-w1': ('reset smoke', W1, 'stop'), 'H6-stall8-cold262k-w1': ('reset smoke', W1, 'soft'),
     'T1-timed-A-control': ('reset smoke', CONTROL, 'soft'), 'T2-timed-B-w1': ('reset smoke', W1, 'soft'),
     'T3-timed-A-control': ('reset smoke', CONTROL, 'soft'), 'T4-timed-B-w1': ('reset smoke', W1, 'soft'),
-    'P1-w1-8-user-profile': ('status reset gate', W1, 'soft'),
+    'T5-timed-A-control': ('reset smoke', CONTROL, 'soft'), 'T6-timed-B-w1': ('reset smoke', W1, 'soft'),
+    'T7-timed-C-w1-lite': ('reset smoke', W1_LITE, 'soft'),
+    'P1-w1-8-user-profile': ('status reset gate', W1, 'soft'), 'P1c-control-8-user-profile': ('status reset gate', CONTROL, 'soft'),
     'Z-reset': ('status reset', None, 'soft'),
 }
 AGENT_ACTIONS = {'agentstop', 'agentstart', 'unserve', 'platform', 'replay', 'priority', 'cardm'}
@@ -305,12 +334,13 @@ class PackTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn('concurrent8_steady', tests_of(name))
 
-    def test_the_control_and_the_audited_attach_run_the_same_tests_and_both_32k_and_equal_hashes_are_recorded(self):
+    def test_the_control_and_the_audited_attaches_run_the_same_tests_and_both_32k_and_equal_hashes_are_recorded(self):
         self.assertEqual(tests_of('S0c-control-attach-smoke'), tests_of('A1-audited-attach-smoke'))
+        self.assertEqual(tests_of('S0c-control-attach-smoke'), tests_of('U1a-u1-alone-audited-attach'))
         self.assertTrue({'concurrent8_steady', 'concurrent8_code_32k', 'concurrent8_code_equal'} <= set(tests_of('A1-audited-attach-smoke')))
 
     def test_five_hang_shape_runs_on_the_audits_off_stack_carry_the_eight_seat_shapes(self):
-        names = [name for name in EXPECTED if name.startswith('H')]
+        names = [name for name in EXPECTED if name.startswith('H') and not name.startswith('H6')]
         self.assertEqual(len(names), 5)
         self.assertEqual(len({pack_job(name)['tests'] for name in names}), 1)
         for shape in ('concurrent8_steady', 'steady_resend', 'replay_concurrent8', 'replay_concurrent4', 'concurrent8_code_equal',
@@ -319,9 +349,21 @@ class PackTests(unittest.TestCase):
 
     def test_the_timing_jobs_alternate_abab_on_the_same_tests_at_32k_and_128k(self):
         timed = [name for name in EXPECTED if name.startswith('T')]
-        self.assertEqual([pack_job(name)['profile'] for name in timed], [CONTROL, W1, CONTROL, W1])
+        self.assertEqual([pack_job(name)['profile'] for name in timed], [CONTROL, W1, CONTROL, W1, CONTROL, W1, W1_LITE])
         self.assertEqual(len({pack_job(name)['tests'] for name in timed}), 1)
         self.assertTrue({'warmup', 'coding', 'concurrent8_steady', 'concurrent8_code_32k', 'concurrent8_code_128k'} <= set(tests_of(timed[0])))
+
+    def test_the_stall_shape_runs_the_steady_mix_first_and_the_control_device_profile_is_the_stacks_twin(self):
+        self.assertEqual(tests_of('H6-stall8-cold262k-w1'), ['warmup', 'concurrent8_steady', 'stall8_cold262k'])
+        mine, control = job.parse_env(pack_text('P1-w1-8-user-profile')), job.parse_env(pack_text('P1c-control-8-user-profile'))
+        self.assertEqual(control['C2_PROFILE'], CONTROL)
+        for key in ('C2_CARDS', 'C2_ACTIONS', 'C2_GATE_PLAN', 'C2_GATE_JIT', 'C2_IMAGE_TAG'):
+            self.assertEqual(mine[key], control[key], key)
+
+    def test_the_read_rules_carry_the_host_gap_precondition_the_lite_rule_the_kill_line_and_the_nosamp_read(self):
+        order = (FOLDER / 'ORDER.txt').read_text(encoding='utf-8')
+        for text_found in ('P0. HOST-GAP PRECONDITION', 'HOST-GAP LITE RULE', 'KILL LINE', 'packed sampler arm', 'P1 against P1c', 'ABABAB'):
+            self.assertIn(text_found, order)
 
     def test_the_device_profile_copies_the_best_packs_conventions_on_the_stack_profile(self):
         best = job.parse_env((HERE / 'references' / 'tp4-262k8-best-jobs' / 'P1-best-8-user-profile.env').read_text(encoding='utf-8'))
@@ -332,7 +374,7 @@ class PackTests(unittest.TestCase):
 
     def test_the_dependencies_and_the_read_rules(self):
         order = (FOLDER / 'ORDER.txt').read_text(encoding='utf-8')
-        for line in ('# NEEDS A1 <- S0c', '# NEEDS H1 H2 H3 H4 H5 <- A1', '# NEEDS T1 T2 T3 T4 <- A1 H1 H2 H3 H4 H5', '# NEEDS P1 <- A1 H1'):
+        for line in ('# NEEDS A1 <- S0c', '# NEEDS H1 H2 H3 H4 H5 H6 <- A1', '# NEEDS T1 T2 T3 T4 T5 T6 T7 <- A1 H1 H2 H3 H4 H5', '# NEEDS P1 P1c <- A1 H1'):
             self.assertIn(line, order)
         for text_found in ('five consecutive completions', 'PAIRED', 'ZERO audit mismatches', '182 ms against 222 ms', 'P1', 'S1', 'D1'):
             self.assertIn(text_found, order)

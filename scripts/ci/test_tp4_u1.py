@@ -702,7 +702,7 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(found[name]['env']['QWEN_FAST_262K_EVIDENCE_WAIVER'], '1')
             self.assertEqual(found[name]['env']['QWEN_C2_GATE_PROFILE'], '1')
         self.assertEqual(sorted(name for name, entry in found.items() if 'QWEN_FAST_TP4_RS_UNIT_MAJOR' in entry['env']),
-                         sorted((self.U1_TIMED, self.U1_AUDIT, 'c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit')))  # + tp4/w1's stack arms
+                         sorted((self.U1_TIMED, self.U1_AUDIT, 'c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit', 'c2-packed-tp4-8x262k-w1-audit-nod1', 'c2-packed-tp4-8x262k-w1-lite', 'c2-packed-tp4-8x262k-w1-nod1')))  # + tp4/w1's stack arms
         self.assertNotIn('QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT', found[self.U1_TIMED]['env'])
         self.assertEqual(json.loads(PROFILES.read_text(encoding='utf-8'))['default'], 'c2-packed-tp4')
 
