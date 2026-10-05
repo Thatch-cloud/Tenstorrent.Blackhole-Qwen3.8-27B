@@ -2063,6 +2063,11 @@ class AgentTurnsScenarioTests(unittest.TestCase):
                 self.assertEqual(kinds, ['sequential'] * count + ['concurrent'] * count)
                 self.assertEqual(len(set(r['conv'] for r in driver.records if r['role'] == 'hit')), count)
 
+    def test_the_eight_agent_arm_runs_three_rounds_at_its_own_token_budget(self):
+        self.assertEqual(replay.SHARED_AGENT_ROUNDS_8, 3)
+        self.assertEqual(replay.SHARED_AGENT_MAX_TOKENS_8, 128)
+        self.assertTrue(all(len(series) >= 3 for series in replay.SHARED_AGENT_TARGETS_8))
+
     def test_the_chain_runs_through_the_262k_targets_only_where_the_prompt_limit_reaches_them(self):
         self.assertEqual(replay.CHAIN_HITS_262K, (150000, 200000))
         engine = sticky_engine(context=262144)

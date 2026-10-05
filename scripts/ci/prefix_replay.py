@@ -121,6 +121,12 @@ SHARED_AGENT_TARGETS_8 = SHARED_AGENT_TARGETS + ((6400, 16000, 32000, 60000, 100
                                                  (4600, 7000, 11000, 18000, 28000),
                                                  (5400, 10000, 20000, 40000, 90000))
 SHARED_AGENT_MAX_TOKENS = 512
+# Eight seats: the audited arm cost ~5 min a request at 512 tokens (v581: 15 requests in 80 min of a 2 h budget, four
+# more rounds to 120k ahead). The eight-agent arm keeps all eight agents, the shared system block, both packed blocks,
+# the strict cold/hit pairs and the window digests, over its first SHARED_AGENT_ROUNDS_8 rounds (two concurrent hit
+# rounds) at SHARED_AGENT_MAX_TOKENS_8 tokens.
+SHARED_AGENT_ROUNDS_8 = 3
+SHARED_AGENT_MAX_TOKENS_8 = 128
 BOUNDARY_FIRST_MAX_TOKENS = 256  # so turn 2 stays inside the next chunk: a tail-only hit
 BOUNDARY_FOLLOWUP_TOKENS = 120
 SHARED_CONVERSATIONS = 3
@@ -1630,9 +1636,12 @@ def scenario_exactness_shared(driver, targets=None, max_tokens=None):
     compared across rows that share those tokens (prefix_judge.window_findings): the shared blocks a hit
     reads after other agents decoded beside them must be the bytes their first writer left. targets and
     max_tokens default to SHARED_AGENT_TARGETS and SHARED_AGENT_MAX_TOKENS, read when it runs."""
+    eight = getattr(driver, 'seats', 4) >= 8
     if targets is None:
-        targets = SHARED_AGENT_TARGETS_8 if getattr(driver, 'seats', 4) >= 8 else SHARED_AGENT_TARGETS
-    max_tokens = SHARED_AGENT_MAX_TOKENS if max_tokens is None else max_tokens
+        targets = (tuple(series[:SHARED_AGENT_ROUNDS_8] for series in SHARED_AGENT_TARGETS_8) if eight
+                   else SHARED_AGENT_TARGETS)
+    if max_tokens is None:
+        max_tokens = SHARED_AGENT_MAX_TOKENS_8 if eight else SHARED_AGENT_MAX_TOKENS
     tenant = driver.salt('agents')
     agents = []
     for index, series in enumerate(targets):
