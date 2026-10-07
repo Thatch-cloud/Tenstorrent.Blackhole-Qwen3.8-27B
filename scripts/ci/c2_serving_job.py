@@ -48,10 +48,10 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_DRAFTER_CANDIDATES  build only: the pinned drafter candidate ids (scripts/ci/drafter_checkpoints.json) whose bytes the image build stages beside the default
                       checkpoint (build-c2-serving-image.sh). Space- or comma-separated; every id must be a candidate of the table (the default is never staged);
                       needs the build action. Default, rendered empty: only the placeholder (drafter_checkpoint.py, docs/tp4-combined-window.md)
-  C2_BOX_MINUTES      the job's BOX in minutes (1..540; default, rendered empty: none): what the job may take when it runs to its limit, the number a
+  C2_BOX_MINUTES      the job's BOX in minutes (1..540, at most the longest step's own timeout; default, rendered empty: none): what the job may take when it runs to its limit, the number a
                       window driver admits the job on. The workflow enforces it from inside, never by cancelling the run: the four-card smoke step
                       stops waiting for the API at the box and runs its smoke client under `timeout` for what the box has left (the container
-                      is removed by the step's own trap); the gate step hands the gate driver min(step, job, box) as --budget-seconds, which refuses before
+                      is removed by the step's own trap), and the replay step runs under `timeout --signal=INT`, so its own finally removes its container; the gate step hands the gate driver min(step, job, box) as --budget-seconds, which refuses before
                       any container starts a plan list whose worst case (every arm to its docker timeout) does not fit; the prefix step hands the prefix gate
                       --box-seconds, which clips every arm's docker timeout to what the box has left and starts no arm with under five minutes left (no plan is refused)
   C2_GATE_PLAN        GATE_PLANS, comma- or space-separated, run in order (default: bringup)
@@ -505,7 +505,7 @@ def read_drafter_candidates(values, actions, table=None):
 
 BOX_MAX_MINUTES = 540
 # timeout-minutes of the workflow's smoke, gate and prefix steps (pinned by test_c2_serving_job against the workflow file).
-STEP_MINUTES = {'smoke': 210, 'gate': 380, 'prefix': 380}
+STEP_MINUTES = {'smoke': 210, 'gate': 380, 'prefix': 380, 'replay': 180}
 
 
 def read_box(values, actions):
@@ -517,8 +517,8 @@ def read_box(values, actions):
     minutes = positive_int('C2_BOX_MINUTES', text)
     if minutes > BOX_MAX_MINUTES:
         raise JobError('C2_BOX_MINUTES must be at most %d (the 9 h cap of a window), got %d' % (BOX_MAX_MINUTES, minutes))
-    if not set(actions) & set(('smoke', 'gate', 'prefix')):
-        raise JobError('C2_BOX_MINUTES is enforced by the smoke, gate and prefix steps: C2_ACTIONS has none of them')
+    if not set(actions) & set(STEP_MINUTES):
+        raise JobError('C2_BOX_MINUTES is enforced by the smoke, gate, prefix and replay steps: C2_ACTIONS has none of them')
     # The workflow's own step timeouts (smoke 210 min, gate and prefix 380) are the hard ceiling the box sits under: a larger box would be cut by the step, not by the box.
     ceiling = max(STEP_MINUTES[action] for action in actions if action in STEP_MINUTES)
     if minutes > ceiling:

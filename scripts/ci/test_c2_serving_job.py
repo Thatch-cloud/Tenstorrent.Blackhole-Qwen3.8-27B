@@ -780,7 +780,7 @@ class BoxTests(unittest.TestCase):
 
     def test_the_step_ceilings_are_the_workflows_own_timeouts(self):
         for action, name in (('smoke', 'Smoke on the four-card set'), ('gate', "Run the gate in the agent's container shape"),
-                             ('prefix', "Prefix-reuse gates in the agent's container shape")):
+                             ('prefix', "Prefix-reuse gates in the agent's container shape"), ('replay', "Replay the node agent's serving sequence")):
             found = re.search(r'timeout-minutes: (\d+)', step_text(name))
             self.assertEqual(job.STEP_MINUTES[action], int(found.group(1)), name)
 
@@ -822,6 +822,13 @@ class BoxWorkflowTests(unittest.TestCase):
         script = step_script(name)
         self.assertIn('${BOX_MINUTES:+--box-seconds "$(( BOX_MINUTES * 60 ))"}', script)
         self.assertNotIn('budget=$(( BOX_MINUTES * 60 ))', script, 'the prefix box clips arms; it never refuses a plan')
+
+    def test_the_replay_step_runs_under_an_interrupt_timeout_so_its_own_cleanup_runs(self):
+        name = "Replay the node agent's serving sequence"
+        self.assertIn('BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}', step_text(name))
+        script = step_script(name)
+        self.assertIn('replay_wrap=(timeout --signal=INT -k 120 "$(( BOX_MINUTES * 60 ))")', script)
+        self.assertIn('${replay_wrap[@]+"${replay_wrap[@]}"} python3 scripts/ci/c2_platform_replay.py', script)
 
     def test_the_four_card_reset_waits_ten_seconds_for_the_links(self):
         script = step_script('Reset all four cards')

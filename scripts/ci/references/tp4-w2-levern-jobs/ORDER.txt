@@ -1,0 +1,69 @@
+# W-2 'Lever N robustness, then the cutover': the second short window. On the window image tp4-serve-11 the Lever N hang shapes (three fresh boots), the fault drills, the past-131k ladder, churn, the timed ABABA pair,
+# the stall and agent-turn pairs and the platform replay run, and the window ENDS IN THE CUTOVER (the thin layer on tp4-serve-11 becomes :latest, the engine loads, the live checks pass) when every cutover rule below holds,
+# else in the hand-back to the pre-cutover production image (the cutover then slides to the next window). TARGET about 7.4 h, HARD CAP 9 h (540 min).
+# ADMIT-ON-BOX (the 9 h cap): with E the elapsed minutes since the first job's start, HB the hand-back below, a job STARTS only if E + its BOX + HB <= 540; a job that does not fit is SKIPPED-TIME and moves to the HEAD of the next window.
+# A job with no box (a short step) uses its estimate. NOTHING IS EVER CANCELLED (cancelling v329 lost card B's by-id link): the box of every smoke, gate, prefix and replay job is its own TIMEOUT, enforced inside the step (C2_BOX_MINUTES:
+# the smoke waits for the API at most the box and runs its client under `timeout`, the prefix gate clips every arm's docker timeout to what the box has left, the serving gate refuses a plan its box cannot hold, the replay runs under an
+# interrupt timeout). A box is 1.5 times the high end of the job's measured or estimated range, up to 5 minutes (a smoke or a clipped prefix job), or the gate's own worst case (the plans below: P1ab-LN 336, E1-LN 153, L8-LN 186, C16-LN 153).
+# CLASSES. stop: the window halts at its first failure (the hand-back still runs). soft: data; a failure or a skip does not stop the window. pre: before the outage, no card. hand: the hand-back, always runs. drv: a DRIVER or OPERATOR step with no
+# template and no tag (LM: the links re-measure workflow; TICK: the wait for the topology to publish the new links; DEPLOY-and-engine-load: the operator's release step and the engine load, in the outage; CUT-release-and-live-checks).
+# One line per job: <template name without .env> <class> <image tag> <estimated minutes> <tag> <box minutes>. The estimates are measured-basis central figures (E: never run, estimated from the code and the pack's own tables).
+# OUTAGE ESTIMATE (the test pins these numbers): PLANNED = 445 min = 7.4 h from A0X0 to the engine load: the jobs 400 min (A0X0 4, S0b 11, HL-LN x3 84, HF-LN 45, L8-LN 33, C16-LN 28, the timed block T0s TA1 TL1 TA2 TL2 TA3 60,
+# S1 S2 54, GG1 GG2 56, SR10 25) plus the CUTOVER 45 min (ZR 8, LM 6, TICK 6, Z 12, CUT-release-and-live-checks 13). The HAND-BACK instead of the cutover is 40 min (the last step DEPLOY-and-engine-load 8). Range 5.7 to 8.8 h.
+# The ARC runner sets are at ZERO only for the timed block, S and GG (T0s to GG2: 170 minutes); the hardware host runner that runs these jobs is NOT scaled down. Scale them back up at GG2's end.
+# TAGS: this pack takes the 21 tags after W-1's twelve (W-1's eight and its four reserve tags): v583 ... v609 (file order: v583 to v609, skipping the tags W-1 holds and the gaps of the free set); its RESERVE is v610, v611, v612, v613; v614-v620 stay unused. See W-1's ORDER for the free set and the number of tags Stage 2 needs.
+# NO OTHER WINDOW DRIVER MAY BE ALIVE and no privileged builder container may be up (B0 never runs during a timing job). Every job that opens a gate, prefix, smoke or replay step refuses to start while prefix-reuse.off or levern.off exists on the hub mount.
+#
+# PRECONDITIONS: W-1 PASSED in full (A1-LN, S0-CTL, P1ab-LN, E1-LN; a job W-1 skipped for its box opens this window FIRST, after A0X0); the thin layer on tp4-serve-11 is built and pre-pulled by manifest-list digest (the operator, before the window; the
+# image name fills @THIN_LAYER_IMAGE@ in SR10 only); the owner pre-registered X4 (Lever N on a traffic profile: the profile c2-packed-tp4-8x262k-ship-prefix-levern-traffic IS the traffic profile) and the multi qualification record is not involved (W2 is out of this image's
+# profile); W-0's P1a-CTL and P1b-CTL are neither FAIL nor NO-VERDICT (a P1a-CTL TIMEBOX blocks every cutover); the owner and a fresh admin key are available at the end.
+#
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every item on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS S0b <- A0X0
+# NEEDS HL-LN HF-LN L8-LN C16-LN <- S0b
+# NEEDS HL-LN2 <- HL-LN
+# NEEDS HL-LN3 <- HL-LN2
+# NEEDS T0s TA1 TL1 TA2 TL2 TA3 S1 S2 GG1 GG2 <- S0b HL-LN3 HF-LN
+# NEEDS SR10 <- S0b
+# A stop-class failure (A0X0, S0b, HL-LN, HL-LN2, HL-LN3, SR10) skips the cutover: the window hands back. A failure of a soft job is read at the cutover rule.
+#
+# CUTOVER RULES (all of them, else the hand-back): S0b, HL-LN, HL-LN2, HL-LN3 and SR10 PASS; HF-LN, L8-LN and C16-LN PASS; the timed block reads Lever N's steady cost INSIDE the A-to-A floor at steady AND 32k and T0s inside the floor of TA1; S1/S2 pass the
+# stall and TTFT lines (no kill); GG1/GG2 pass the G and GH lines (no kill); W-1 and W-0's controls as above; no stall anywhere; the owner present. The cutover is ONE pair of S, G and GH: the second G pair, W2's reads and the later tracks are LATER windows,
+# and the production telemetry below catches what one pair cannot. THE CUTOVER ITSELF: ZR, LM, TICK as in the hand-back, then the agent start Z, and the operator's CUT-release-and-live-checks: the platform's release step moves :latest to the thin layer
+# on tp4-serve-11 with the owner's admin key (never in a script), the engine loads, and the live checks read: /v1/models answers, one coding request completes, a gateway-salted two-turn conversation shows reused tokens > 0 on turn two, the session cap
+# (eight admitted, a ninth refused), a >128k request answers with a TTFT under 240 s, and no 'lever N' quarantine line. The ROLLBACK image is the pre-cutover :latest (its digest stays outside this repository).
+#
+# POST-CUTOVER ROLLBACK RULE (owner-approved 2026-10-07; the monitoring rules live in the private platform repository, the runbook in docs/tp4-short-windows.md):
+#  Tier 0 (image rollback to the pre-cutover :latest, then the release step: 15-25 min plus the owner's key): one engine death or container restart; a HANG = no [PHASE] execute line for 300 s with a request live; server errors
+#   >= 3 in an hour, or more than max(1%, baseline + 3 sigma) over 24 h.
+#  Tier 1 (kill switch, no restart, no key): levern.off when any request over 128k has a TTFT above 240 s or any Lever N quarantine line is logged; prefix-reuse.off when the prefix grant ratio drops more than 25% below its baseline over 24 h.
+#  Tier 2 (statistical, read at 72 h and finally at 7 days): round time per (32k or 128k window, live count 5-8) with at least 100 load-matched rounds a side, worse by more than max(3%, floor); TTFT p90 for prompts up to 32k with at least 500 requests,
+#   worse by more than max(20%, twice the day-to-day spread).
+#
+# READ RULES. S0b, HL-LN x3, HF-LN, L8-LN, C16-LN, T, S, GG, SR10: see the templates (each carries its own READ line); the T block is read with scripts/ci/w2ln_timing_compare.py (pair and floor, per length, never pooled).
+# A run that ends green is read in its log (HANG SUSPECTED, audit mismatches, refused rounds); the attach-time argv of every arm is read from its artifact before any number is trusted.
+#
+A0X0-agentstop-unserve-rescan-reset stop tp4-serve-11 4 v583 -
+S0b-baked-default-smoke stop tp4-serve-11 11 v584 20
+HL-LN-hang-shapes-levern stop tp4-serve-11 28 v585 55
+HL-LN2-hang-shapes-levern stop tp4-serve-11 28 v589 55
+HL-LN3-hang-shapes-levern stop tp4-serve-11 28 v590 55
+HF-LN-levern-faults soft tp4-serve-11 45 v591 90
+L8-LN-ladder8-past-131k soft tp4-serve-11 33 v592 186
+C16-LN-churn16 soft tp4-serve-11 28 v595 153
+T0s-timed-production-bytes soft tp4-serve-10 10 v596 20
+TA1-timed-control-A soft tp4-serve-11 10 v597 20
+TL1-timed-levern-L soft tp4-serve-11 10 v598 20
+TA2-timed-control-A soft tp4-serve-11 10 v599 20
+TL2-timed-levern-L soft tp4-serve-11 10 v601 20
+TA3-timed-control-A soft tp4-serve-11 10 v602 20
+S1-stall-control-A soft tp4-serve-11 27 v603 50
+S2-stall-levern-B soft tp4-serve-11 27 v604 50
+GG1-turns-hit-control-A soft tp4-serve-11 28 v605 55
+GG2-turns-hit-levern-B soft tp4-serve-11 28 v606 55
+SR10-platform-replay stop tp4-serve-11 25 v607 60
+ZR-reset-all-four hand tp4-serve-11 8 v608 -
+LM-links-remeasure drv - 6 - -
+TICK-topology-wait drv - 6 - -
+Z-handback hand tp4-serve-11 12 v609 -
+CUT-release-and-live-checks drv - 13 - -

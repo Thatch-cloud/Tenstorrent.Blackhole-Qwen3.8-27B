@@ -1040,6 +1040,7 @@ jobs:
         env:
           IMAGE: ${{ steps.job.outputs.platform_image }}
           REPLAY_BUDGET_SMOKE: ${{ steps.job.outputs.replay_budget_smoke }}
+          BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}
           REPLAY_PROFILE: ${{ steps.job.outputs.replay_profile }}
           REPLAY_SERVED_MODEL: ${{ steps.job.outputs.replay_served_model }}
           CARDS: ${{ steps.job.outputs.cards }}
@@ -1068,7 +1069,10 @@ jobs:
               echo 'a card of the set is held; refusing the replay' >&2; cat "$RUNNER_TEMP/c2-results/replay-holders.txt" >&2; exit 1
             fi
           fi
-          python3 scripts/ci/c2_platform_replay.py --source "$source" --image "$IMAGE" --cards "$CARDS" \
+          # The job's box (C2_BOX_MINUTES): the replay runs under `timeout --signal=INT`, so its own try/finally removes its container when the box ends (a TERM would leave it up).
+          replay_wrap=()
+          if [ -n "$BOX_MINUTES" ]; then replay_wrap=(timeout --signal=INT -k 120 "$(( BOX_MINUTES * 60 ))"); fi
+          ${replay_wrap[@]+"${replay_wrap[@]}"} python3 scripts/ci/c2_platform_replay.py --source "$source" --image "$IMAGE" --cards "$CARDS" \
             ${REPLAY_PROFILE:+--profile "$REPLAY_PROFILE"} ${REPLAY_SERVED_MODEL:+--served-model "$REPLAY_SERVED_MODEL"} \
             ${REPLAY_BUDGET_SMOKE:+--budget-smoke} \
             --results "$RUNNER_TEMP/c2-results/replay"
