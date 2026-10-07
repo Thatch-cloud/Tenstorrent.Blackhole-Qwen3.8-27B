@@ -2,19 +2,18 @@
 
 The block-16 candidate differs from the served drafter's hub config.json in ONE value, dflash_config.block_size (8 against 16). The
 serving profile gives vLLM 15 speculative tokens either way, and no TT source reads dflash_config (the card gates would be the first to
-find out). This test builds vLLM's own dflash SpeculativeConfig from each committed config, with the profile's speculative-config
-arguments, and holds the scheduler-side values equal: the number of speculative tokens and what follows from it. A difference is not
-a failure of the drafter, it is a thing the owner must read before the card window, so the assertion message prints both sides.
+find out). This test loads each committed config through the installed vLLM's own config loader, holds the two equal but for that key, and
+scans the installed vLLM for any read of it.
 
 The committed-config tests run in the CPU suite; the installed-vLLM tests need vLLM (qwen-fast-vllm-cpu.yml) and are skipped without it. Not an in-image test.
 """
 import hashlib
+from importlib.util import find_spec
 import json
 import os
 from pathlib import Path
 import shutil
 import tempfile
-from importlib.util import find_spec
 import unittest
 
 import drafter_manifest as manifests
@@ -22,11 +21,6 @@ import drafter_manifest as manifests
 HERE = Path(__file__).resolve().parent
 CONFIGS = HERE / 'references' / 'drafter-configs'
 NAMES = ('dedf8df6', 'b16-98759a49')
-
-
-def profile_speculative_config():
-    document = json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))
-    return dict(document['profiles']['c2-packed-tp4']['engine']['speculative-config'])
 
 
 def config_path(name):
@@ -49,29 +43,42 @@ class CommittedConfigTests(unittest.TestCase):
 
 @unittest.skipUnless(find_spec('vllm'), 'needs the installed vLLM (qwen-fast-vllm-cpu.yml)')
 class InstalledVllmReadsTheSameValuesTests(unittest.TestCase):
-    def build(self, name):
-        from vllm.config import SpeculativeConfig
+    """SpeculativeConfig itself needs a target ModelConfig and the draft architecture in the model registry, which a CPU job without
+    weights does not have; what matters is which keys of the draft config the installed vLLM reads, and what its own config loader
+    returns for the two files."""
+
+    def load(self, name):
+        from vllm.transformers_utils.config import get_config
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory, True)
         shutil.copyfile(str(config_path(name)), os.path.join(directory, 'config.json'))
-        arguments = profile_speculative_config()
-        arguments['model'] = directory
-        return SpeculativeConfig(**arguments)
+        return get_config(directory, trust_remote_code=False)
 
-    def values(self, name):
-        built = self.build(name)
-        draft = built.draft_model_config.hf_config
-        return dict(method=built.method, num_speculative_tokens=built.num_speculative_tokens,
-                    draft_layers=getattr(draft, 'num_hidden_layers', None),
-                    draft_hidden=getattr(draft, 'hidden_size', None),
-                    draft_block_size=(getattr(draft, 'dflash_config', None) or {}).get('block_size'))
+    def test_vllms_own_loader_returns_the_same_config_but_the_block_size(self):
+        served, candidate = self.load('dedf8df6'), self.load('b16-98759a49')
+        print('[DRAFTER-CONFIG] served block_size=%s candidate block_size=%s' % (
+            served.dflash_config.get('block_size'), candidate.dflash_config.get('block_size')))
+        self.assertEqual((served.dflash_config['block_size'], candidate.dflash_config['block_size']), (8, 16))
+        left, right = served.to_dict(), candidate.to_dict()
+        for document in (left, right):
+            document['dflash_config'] = dict((key, value) for key, value in document['dflash_config'].items() if key != 'block_size')
+            for key in ('transformers_version', '_name_or_path'):
+                document.pop(key, None)
+        self.assertEqual(left, right)
 
-    def test_the_scheduler_side_values_are_the_same_for_both_drafters(self):
-        served, candidate = self.values('dedf8df6'), self.values('b16-98759a49')
-        print('[DRAFTER-CONFIG] served=%s candidate=%s' % (json.dumps(served, sort_keys=True), json.dumps(candidate, sort_keys=True)))
-        self.assertEqual(served['num_speculative_tokens'], 15)
-        for key in ('method', 'num_speculative_tokens', 'draft_layers', 'draft_hidden'):
-            self.assertEqual(served[key], candidate[key], 'vLLM reads %s differently: served=%s candidate=%s' % (key, served, candidate))
+    def test_no_installed_vllm_module_reads_block_size_from_the_draft_config(self):
+        """The installed (pinned) vLLM reads dflash_config's causal, use_swa, swa_window_size, mask_token_id, target_layer_ids,
+        use_aux_hidden_state and sink-bias keys; none of its modules asks it for block_size, so the candidate's 16 against the served 8
+        reaches neither the scheduler nor the proposer. A vLLM bump that starts reading it fails here before a card is involved."""
+        import re
+        import vllm
+        root = Path(vllm.__file__).resolve().parent
+        readers, asked = [], re.compile(r"dflash_config[^\n]{0,80}block_size|block_size[^\n]{0,80}dflash_config")
+        for path in root.rglob('*.py'):
+            text = path.read_text(encoding='utf-8', errors='replace')
+            if 'dflash_config' in text and asked.search(text):
+                readers.append(str(path.relative_to(root)))
+        self.assertEqual(readers, [], 'vLLM now reads the draft config block_size: the b16 arm changes what it does')
 
 
 if __name__ == '__main__':

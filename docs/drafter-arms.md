@@ -111,8 +111,11 @@ and an audit twin first; ORDER says so.
 
 ## Open items
 
-- **Does vLLM's DFlash path read `block_size` from the draft config?** The served drafter's config says 8 and runs at 15 proposals; the candidate's says 16. No TT source reads
-  `dflash_config`. `test_drafter_config_vllm` builds the installed vLLM's own config from both and prints what it reads; the first b16 attach on a card still settles the runtime side.
+- **Does vLLM's DFlash path read `block_size` from the draft config?** Read from the pinned vLLM's source: no.
+  Its DFlash code reads `dflash_config`'s `causal`, `use_swa`, `swa_window_size`, `mask_token_id`, `target_layer_ids`, `use_aux_hidden_state` and the sink-bias flag, and nothing asks it
+  for `block_size` (the `block_size` its proposer uses is the KV page size). No TT source reads `dflash_config` either (only `dspark_intake.py` mentions it). `test_drafter_config_vllm`
+  holds that against the installed vLLM on every run: the two configs load equal but for the key, and no vLLM module reads it. What a card could still show is the candidate's
+  acceptance at T16, which is the tau lab's question.
 - **The lab's statistic counts rounds with all four seats live**, so the drafter arms run the four-seat serving profile (`c2-packed-tp4`), as the lab was validated. An eight-seat
   statistic needs the report's live rule generalised; tau per round per seat does not depend on the seat count, so this does not bias the ratio.
 - **A3's reference** is from the earlier stack; the control arm re-calibrates against it on the current image. If it fails by a stack effect rather than a drafter effect, re-derive the reference from a control run first.
