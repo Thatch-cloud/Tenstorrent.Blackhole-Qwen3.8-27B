@@ -59,25 +59,28 @@ It is the same conclusion the repo already recorded: "WY-form GDN is faster but 
 
 **What the CPU numerics can show about causality.** Rows `0..t` of the window form are bit-identical when the later rows are real, zero or other finite data (the triangular masks multiply them by exact zeros, and adding exact zeros changes no partial sum), but **NaN or Inf in a later row leaks into the committed rows** (0 times NaN is NaN in the `A V` and `QK^T` products). A kernel that reads padded or stale tile rows must keep them finite. The harness's `nan` variant is informational for that reason; the three finite variants are gated.
 
-## 4. Results (CI run of tag `experiment/gdn-wy-numerics-v1`, 8 users, 1,000 cycles per cell, synthetic regimes)
+## 4. Results (CI run of tag `experiment/gdn-wy-numerics-v2`, commit `f3ca163b`, 8 users, 1,000 cycles per cell, synthetic regimes)
 
-Max over the run of the error against fp64 (state, then gated-output core), bf16 class; the last column is the fraction of the window form's gated bf16 outputs that differ from the served chain's. All values finite, `repo_reference_crosscheck` zero differing elements in every cell (m, CPU, synthetic inputs).
+Max over every cycle of the run of the error against fp64 (state, then gated-output core), `bf16+tf32` class (the plan's E1); the next column is the worst E1 ratio (window error over served error, state and output, lower is better for the window form), then the same ratio in the bf16-only class; the last column is the fraction of the window form's gated bf16 outputs that differ from the served chain's. All values finite, `repo_reference_crosscheck` zero differing elements in every cell, every report strict JSON with `completed: true` (m, CPU, synthetic inputs).
 
-| Cell | Served chain vs fp64 (state / output) | Window form vs fp64 (state / output) | E1 | WY vs served, gated bytes differing |
-|---|---|---|---|---:|
-| model, 16 rows, tau | 0.053 / 0.024 | 0.024 / 0.012 | pass | 62% |
-| R1, 16 rows, tau | 0.00500 / 0.00464 | 0.00504 / 0.00330 | **fail by 1.0% on the state** (ratio 1.01) | 51% |
-| R2, 16 rows, tau | 0.0033 / 0.0050 | 0.0032 / 0.0023 | pass | 43% |
-| model, 32 rows, tau | 0.048 / 0.026 | 0.022 / 0.013 | pass | 62% |
-| model, 32 rows, long acceptance (two windows in 60% of rounds) | 0.053 / 0.028 | 0.014 / 0.0076 | pass | 62% |
-| R1, 32 rows, long acceptance | 0.0069 / 0.0048 | 0.0038 / 0.0023 | pass | 51% |
+| Cell | Served chain vs fp64 (state / output) | Window form vs fp64 (state / output) | E1 worst ratio, TF32 (plan) | bf16-only worst ratio | WY vs served, gated bytes differing |
+|---|---|---|---:|---:|---:|
+| model, 16 rows, tau | 0.0534 / 0.0266 | 0.0248 / 0.0137 | 0.52 | 0.46 | 62% |
+| R1, 16 rows, tau | 0.00726 / 0.00475 | 0.00569 / 0.00291 | 0.78 | 0.71 | 51% |
+| R2, 16 rows, tau | 0.00478 / 0.00469 | 0.00441 / 0.00297 | 0.92 | 0.83 | 43% |
+| model, 32 rows as 2 x 16, tau | 0.0596 / 0.0259 | 0.0238 / 0.0112 | 0.43 | 0.50 | 62% |
+| model, 32 rows as 2 x 16, long acceptance (two windows in 60% of rounds) | 0.0567 / 0.0289 | 0.0156 / 0.00728 | 0.28 | 0.27 | 62% |
+| R1, 32 rows as 2 x 16, long acceptance | 0.00746 / 0.00471 | 0.00551 / 0.00274 | 0.74 | 0.80 | 51% |
+| model, one W = 32 window, tau | 0.0596 / 0.0259 | 0.0232 / 0.0122 | 0.47 | 0.48 | 62% |
+| R1, one W = 32 window, long acceptance | 0.00746 / 0.00471 | 0.00551 / 0.00274 | 0.74 | 0.80 | 51% |
 
-- **E1 (error no worse than the served chain's): five of six cells pass, R1 at 16 rows misses by one percent on one metric** while its output error is 29% lower. The criterion is strict and was not loosened after the fact; read it as a tie on the state and a win on the output there. The window form is as good as or better than the chain in every cell, because it rounds the state once per window and the chain sixteen times. That is the form's one numerical advantage and it is not a reason to serve it.
+- **E1, the plan's criterion (TF32 operands, error no worse than the served chain's): 8 of 8 cells pass; the worst ratio is 0.92 (R2, 16 rows).** The bf16-only class, reported as a second ungated row, also passes 8 of 8 (worst 0.83). The window form's error against fp64 is lower than the chain's in every cell, because it rounds the state to bf16 once per window instead of once per token.
+- **Correction to the first CI run (`experiment/gdn-wy-numerics-v1`).** That run read the state maximum at the checkpoints and every 25th cycle only (about 45 of the 1,000 cycles) and judged the bf16-only pair: R1 at 16 rows came out as a one percent miss on the state (0.00504 against 0.00500), and the doc reported "five of six cells pass". That miss was a comparison of two sampled maxima. With the state error taken at every cycle and the plan's TF32 pair gated, the same cell has a ratio of 0.78 (TF32) and 0.71 (bf16-only). The v1 numbers are superseded.
 - **Byte identity: not met anywhere** (43% to 62% of gated bf16 outputs differ). `contract.byte_identical_to_served` is false in every cell, as section 2 requires.
-- **Segmentation: the served chain is bitwise invariant in every cell (fp32 and bf16, all common commit points); the window form is not** (0 of 68 common commit points identical at 16 rows in model and R1; 10 to 21 of 68 in R2, where strong decay makes later rows matter little).
-- **Causality (CPU model):** rows `0..t` and the committed state are bit-identical across real, zero and other later rows for both forms; with a shorter block (absent rows) the window form is *not* bit-identical (different matmul shapes: a CPU-library effect, reported, not gated); NaN or Inf in later rows leaks into the committed rows for the window form only (section 3).
-- **Packed equals solo (CPU model):** true for all forms in every cell. A CPU matmul library chose the same blocking for 8 users and 1; this says nothing about the kernel. The card harness checks the kernel's own bytes.
-- **Drift:** no divergence over 1,000 cycles; the errors above are the run maxima and the per-checkpoint series are in each report (`drift.*.pairs.*.state`).
+- **Segmentation: the served chain is bitwise invariant in every cell (fp32 and bf16, all common commit points); the window form is not**: 0 of 68 common commit points identical at 16 rows in model and R1, 21 of 68 in R2 (strong decay makes later rows matter little), 0 of 65 for model at 32 rows, and 0 to 3 of 18 in the long-acceptance cells.
+- **Causality (CPU model):** at 16 rows (n = 1, 4, 8, 15) and at 32 rows including the chained commits n = 17, 24, 31 (second window through the first's committed bf16 state), in both the two-window and the W = 32 form, rows `0..n-1` and the committed state are bit-identical across real, zero and other later rows for both forms. With a shorter block (absent rows) the window form is *not* bit-identical (different matmul shapes: a CPU-library effect, reported, not gated). NaN or Inf in later rows leaks into the committed rows for the window form only (section 3).
+- **Packed equals solo (CPU model):** true for all forms in every cell, including the 32-row cells with committed lengths 17, 31, 8, 9, 30, 24, 4 and 32 across the eight users (so past the first window). A CPU matmul library chose the same blocking for 8 users and 1; this says nothing about the kernel. The card harness checks the kernel's own bytes.
+- **Drift:** no divergence over 1,000 cycles; the per-checkpoint series are in each report (`drift.*.pairs.*.state`).
 - **Not measured:** real layer 0 / 23 / 47 activations (section 3), the device-class numerics of a real kernel, and anything on a card.
 
 These are CPU-model statements about a form that does not exist on the device. The reports are the artifacts of the run named above; section 6 says what remains.
