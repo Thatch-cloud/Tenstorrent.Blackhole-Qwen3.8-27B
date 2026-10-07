@@ -370,12 +370,13 @@ class MergedOnRealVllmTests(unittest.TestCase):
             prompt = list(prompt) + [100000 + turn] * 64 + tokens(2600, 'chain-%d' % (turn + 1))
         self.assertTrue(all(hit > 0 for hit in hits[1:]), hits)
         self.assertGreater(sum(1 for turn in range(1, 5) if len(drive.prefill_steps('turn%d' % turn)) > 1), 0, 'some hit arrived split')
+        merged_recorded = len(recorded)         # before the reference run below, which records on the same class
         # the registry equals a run with Lever N off
         reference = reference_registry(self.env, prompts)
         self.assertEqual(registry_keys(state.registry), registry_keys(reference))
         # the peek recorded nothing: vLLM's statistics hold one attempt per in-pass trim, which the registry counts too
-        self.assertEqual(len(recorded), state.registry.stats['attempts'])
-        self.assertGreater(len(recorded), 5)
+        self.assertEqual(merged_recorded, state.registry.stats['attempts'])
+        self.assertGreater(merged_recorded, 5)
         self.assertEqual(drive.preempted, set())
         self.assertLessEqual(drive.over, 0)
         self.assertEqual(drive.unwritten, [])
