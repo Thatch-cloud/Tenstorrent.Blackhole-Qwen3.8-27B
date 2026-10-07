@@ -339,5 +339,287 @@ class AlternatorTests(unittest.TestCase):
         self.assertEqual(decision.owed_rounds, 1)
 
 
+# ---------------------------------------------------------------------------------------------------------------------------------------
+# The merged route (docs/lever-n-prefix-merged-route.md): steps from a prefix hit, the flags, the deadline governor, the kill switch
+# ---------------------------------------------------------------------------------------------------------------------------------------
+
+MERGED_PROMPTS = (2047, 2048, 2049, 4095, 4096, 4097, 6143, 6144, 6145, 8191, 10241, 32785, 253920)
+
+
+def aligned_hits(prompt):
+    """Every Q a trim can land on for a prompt: 0 and each 2,048 boundary up to S_last (the sticky ceiling floor2048(P - 2048))."""
+    return list(range(0, max(policy.final_start(prompt), 0) + 1, CHUNK))
+
+
+class ValidStepTests(unittest.TestCase):
+    def test_every_step_of_every_plan_from_every_hit_is_valid_and_ends_inside_s_last(self):
+        for prompt in MERGED_PROMPTS:
+            s_last = policy.final_start(prompt)
+            for start in aligned_hits(prompt) if prompt < 40000 else (0, 2048, s_last - 2048, s_last):
+                for decoding in (True, False):
+                    for step in (CHUNK, 4 * CHUNK):
+                        with self.subTest(prompt=prompt, start=start, decoding=decoding, step=step):
+                            steps = policy.plan_from(prompt, start, decoding=decoding, step=step, solo=max(step, 8 * CHUNK))
+                            self.assertEqual(steps[0][0], start)
+                            self.assertEqual(steps[-1][1], prompt)
+                            for (first_start, first_end), (second_start, _) in zip(steps, steps[1:]):
+                                self.assertEqual(first_end, second_start)
+                            for begin, end in steps:
+                                self.assertTrue(policy.valid_step(prompt, begin, end - begin), (prompt, begin, end))
+                                if end < prompt:
+                                    self.assertEqual(end % CHUNK, 0)
+                                    self.assertLessEqual(end, s_last)
+                            # the drafter window [P - 2048, P) lies inside the final step
+                            self.assertLessEqual(steps[-1][0], max(prompt - CHUNK, 0))
+
+    def test_a_hit_at_s_last_takes_the_whole_rest_in_one_step(self):
+        for prompt in (4096, 4097, 6145, 10241, 253920):
+            s_last = policy.final_start(prompt)
+            self.assertEqual(policy.plan_from(prompt, s_last), [(s_last, prompt)])
+
+    def test_plan_from_zero_is_plan(self):
+        for prompt in MERGED_PROMPTS:
+            self.assertEqual(policy.plan_from(prompt, 0), policy.plan(prompt))
+
+    def test_a_hit_above_s_last_or_off_the_boundary_has_no_plan(self):
+        for prompt, start in ((4096, 4096 - 1), (4096, 2048 + 2048), (6145, 6144), (10241, 1000), (5000, 5000)):
+            with self.subTest(prompt=prompt, start=start), self.assertRaises(ValueError):
+                policy.plan_from(prompt, start)
+
+    def test_valid_step_refuses_what_splits_the_window_or_leaves_the_boundary(self):
+        # a non-final end past S_last: the window [P - 2048, P) would straddle two steps (defect D1)
+        self.assertFalse(policy.valid_step(10241, 8192, 2048))      # S_last = 8192: [8192, 10240) leaves a 1-token final step
+        self.assertFalse(policy.valid_step(6145, 4096, 2048))
+        self.assertTrue(policy.valid_step(6145, 4096, 2049))
+        # a start off the boundary, a step past the prompt, an empty step, a final step starting above P - 2048
+        self.assertFalse(policy.valid_step(10241, 1000, 2048))
+        self.assertFalse(policy.valid_step(4096, 2048, 4096))
+        self.assertFalse(policy.valid_step(4096, 2048, 0))
+        self.assertFalse(policy.valid_step(10241, 10240, 1))
+        # a prompt below two chunks is never split
+        self.assertFalse(policy.valid_step(3000, 0, 2048))
+        self.assertTrue(policy.valid_step(3000, 0, 3000))
+        # not integers
+        self.assertFalse(policy.valid_step(6144, 0, 2048.0))
+        self.assertFalse(policy.valid_step(6144, True, 2048))
+
+    def test_the_old_cap_computed_from_zero_splits_the_window_for_a_hit_at_s_last(self):
+        """The negative control of defect D1: the budget of a cap computed from (P, 0) for a request whose hit is Q = S_last, run from Q, ends past
+        S_last and splits the drafter window; the budget computed from (P, Q) is the whole rest."""
+        for prompt in (6145, 10241, 253920):
+            s_last = policy.final_start(prompt)
+            old_budget = policy.step_budget(prompt, 0, decoding=True, step=s_last, solo=s_last)
+            self.assertEqual(old_budget, s_last)
+            self.assertLess(s_last + old_budget, prompt * 2)
+            self.assertFalse(policy.valid_step(prompt, s_last, old_budget) and s_last + old_budget < prompt)
+            self.assertEqual(policy.step_budget(prompt, s_last, decoding=True), prompt - s_last)
+            self.assertTrue(policy.valid_step(prompt, s_last, prompt - s_last))
+
+
+class MergedConfigTests(unittest.TestCase):
+    def test_the_defaults(self):
+        self.assertEqual(policy.merged_config({}), policy.Merged(180, 16384, '0', 1, 30, 'global'))
+
+    def test_every_flag_parses(self):
+        env = {'QWEN_FAST_LEVERN_TTFT_TARGET_S': '120', 'QWEN_FAST_LEVERN_SHORT_TOKENS': '8192', 'QWEN_FAST_LEVERN_PARK': 'host',
+               'QWEN_FAST_LEVERN_PARK_SLOTS': '2', 'QWEN_FAST_LEVERN_MAX_PARK_S': '10', 'QWEN_FAST_LEVERN_EPOCH_SCOPE': 'route'}
+        self.assertEqual(policy.merged_config(env), policy.Merged(120, 8192, 'host', 2, 10, 'route'))
+        self.assertEqual(policy.merged_config({'QWEN_FAST_LEVERN_TTFT_TARGET_S': '0'}).ttft_s, 0)
+
+    def test_a_bad_value_is_refused_by_name_never_defaulted(self):
+        bad = {'QWEN_FAST_LEVERN_TTFT_TARGET_S': ('-1', '1.5', 'x', '3601', ''), 'QWEN_FAST_LEVERN_SHORT_TOKENS': ('-5', 'a', '262145'),
+               'QWEN_FAST_LEVERN_PARK': ('1', 'device', 'HOST', ''), 'QWEN_FAST_LEVERN_PARK_SLOTS': ('0', '5', '1.0'),
+               'QWEN_FAST_LEVERN_MAX_PARK_S': ('0', '3601', 'x'), 'QWEN_FAST_LEVERN_EPOCH_SCOPE': ('local', 'ROUTE', '1', '')}
+        for name, values in bad.items():
+            for value in values:
+                with self.subTest(name=name, value=value):
+                    with self.assertRaises(ValueError) as caught:
+                        policy.merged_config({name: value})
+                    self.assertIn(name, str(caught.exception))
+                    problems = policy.config_problems({'QWEN_FAST_LEVER_N': '1', name: value})
+                    self.assertTrue(problems and name in problems[0])
+
+    def test_every_merged_flag_is_a_sibling_and_a_flag(self):
+        for name in policy.MERGED_FLAGS:
+            self.assertIn(name, policy.SIBLING_FLAGS)
+            self.assertIn(name, policy.ALL_FLAGS)
+
+
+class StepTimesTests(unittest.TestCase):
+    def test_the_seed_is_the_timing_model_and_a_lone_cold_254k_is_about_96_seconds(self):
+        times = policy.StepTimes()
+        self.assertAlmostEqual(times.predict(0), 420.0)
+        self.assertAlmostEqual(times.predict(100000), 420.0 + 250.0)
+        total = times.remaining_ms(253920, 0)
+        self.assertGreater(total, 90000)
+        self.assertLess(total, 100000)
+
+    def test_the_remaining_time_shrinks_as_the_prefill_advances_and_is_zero_when_done(self):
+        times = policy.StepTimes()
+        values = [times.remaining_ms(40000, computed) for computed in (0, 8192, 20480, 36864, 38000)]
+        self.assertEqual(values, sorted(values, reverse=True))
+        self.assertEqual(times.remaining_ms(40000, 40000), 0.0)
+        self.assertGreater(times.remaining_ms(40000, 38000), 0.0)
+
+    def test_measured_steps_move_the_scale_and_stay_inside_the_clamp(self):
+        times = policy.StepTimes()
+        for _ in range(20):
+            times.observe(100000, CHUNK, 2 * times.seed(100000))
+        self.assertAlmostEqual(times.scale, 2.0, places=2)
+        for _ in range(60):
+            times.observe(0, CHUNK, 100000.0)
+        self.assertEqual(times.scale, policy.SCALE_MAX)
+        times.observe(0, CHUNK, -5.0)
+        times.observe(0, 0, 5.0)
+        self.assertEqual(times.scale, policy.SCALE_MAX)
+
+    def test_a_step_of_several_chunks_is_timed_per_chunk(self):
+        times = policy.StepTimes()
+        times.observe(0, 8 * CHUNK, 8 * times.seed(0))
+        self.assertAlmostEqual(times.scale, 1.0, places=6)
+
+
+class GovernorTests(unittest.TestCase):
+    def test_a_lone_cold_254k_runs_at_about_point_54_to_meet_180_seconds(self):
+        times = policy.StepTimes()
+        share = policy.effective_share(0.5, 180, [(0.0, times.remaining_ms(253920, 0))], 0.0)
+        self.assertGreater(share, 0.52)
+        self.assertLess(share, 0.58)
+
+    def test_a_prompt_whose_deadline_is_far_never_raises_the_share(self):
+        times = policy.StepTimes()
+        self.assertEqual(policy.effective_share(0.5, 180, [(0.0, times.remaining_ms(229376, 0))], 0.0), 0.5)
+        self.assertEqual(policy.effective_share(0.5, 180, [(0.0, 1000.0)], 0.0), 0.5)
+
+    def test_it_never_goes_below_the_base_and_never_above_one(self):
+        for base in (0.25, 0.5, 0.9):
+            for remaining in (0.0, 50000.0, 500000.0):
+                for now in (0.0, 100.0, 500.0):
+                    share = policy.effective_share(base, 180, [(0.0, remaining)], now)
+                    self.assertGreaterEqual(share, base)
+                    self.assertLessEqual(share, 1.0)
+
+    def test_a_prefill_already_past_its_target_gets_no_yield(self):
+        self.assertEqual(policy.effective_share(0.5, 180, [(0.0, 10.0)], 181.0), 1.0)
+
+    def test_the_second_cold_254k_in_the_queue_is_governed_by_the_sum_of_both(self):
+        times = policy.StepTimes()
+        one = times.remaining_ms(253920, 0)
+        alone = policy.effective_share(0.5, 180, [(0.0, one)], 0.0)
+        queued = policy.effective_share(0.5, 180, [(0.0, one), (0.0, one)], 0.0)
+        self.assertGreater(queued, alone)
+        self.assertEqual(queued, 1.0)
+
+    def test_off_target_zero_or_full_base_share_or_nothing_pending_changes_nothing(self):
+        self.assertEqual(policy.effective_share(0.5, 0, [(0.0, 1e9)], 0.0), 0.5)
+        self.assertEqual(policy.effective_share(1.0, 180, [(0.0, 1e9)], 0.0), 1.0)
+        self.assertEqual(policy.effective_share(0.5, 180, [], 0.0), 0.5)
+
+    def test_the_alternator_runs_at_the_governed_share_and_off_it_runs_at_the_base(self):
+        clock, wall = Clock(), Clock()
+        wall.now = 1000.0
+        cfg = policy.config({})
+        merged = policy.merged_config({'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180'})
+        alternator = policy.Alternator(cfg, clock=clock, merged=merged, wall=wall)
+        # a cold prompt that arrived 150 s ago and still needs 15 s of device time (plus the 2.5 s build) inside the 30 s it has left: about 0.58
+        alternator.pending_hint = [(wall.now - 150.0, 15000.0)]
+        alternator.begin(7, True)
+        self.assertGreater(alternator.share, 0.55)
+        self.assertLess(alternator.share, 0.65)
+        alternator.end('prefill')
+        clock.advance_ms(1000)
+        decision = alternator.begin(7, True)
+        # one second of prefill at share f owes (1 - f) / f seconds of decode: less than the 1000 ms owed at 0.5
+        self.assertLess(decision.owed_ms, 1000.0)
+        plain = policy.Alternator(cfg, clock=clock, merged=policy.merged_config({'QWEN_FAST_LEVERN_TTFT_TARGET_S': '0'}), wall=wall)
+        plain.pending_hint = [(wall.now - 150.0, 15000.0)]
+        plain.begin(7, True)
+        self.assertEqual(plain.share, 0.5)
+        stage_one = policy.Alternator(cfg, clock=clock)
+        stage_one.pending_hint = [(wall.now - 150.0, 15000.0)]
+        stage_one.begin(7, True)
+        self.assertEqual(stage_one.share, 0.5)
+
+    def test_a_short_prefill_is_paced_at_one_round_whatever_the_share(self):
+        clock = Clock()
+        alternator = policy.Alternator(policy.config({'QWEN_FAST_LEVERN_PREFILL_SHARE': '0.9'}), clock=clock)
+        alternator.begin(7, True)
+        alternator.end('prefill', short=True)
+        clock.advance_ms(2000)
+        decision = alternator.begin(7, True)
+        self.assertEqual(decision.kind, 'decode')
+        self.assertAlmostEqual(decision.owed_ms, policy.INITIAL_ROUND_MS, places=3)
+        # a long prefill at 0.9 owes 2000 x 0.1 / 0.9 ms
+        other = policy.Alternator(policy.config({'QWEN_FAST_LEVERN_PREFILL_SHARE': '0.9'}), clock=clock)
+        other.begin(7, True)
+        other.end('prefill')
+        clock.advance_ms(2000)
+        self.assertAlmostEqual(other.begin(7, True).owed_ms, 2000 * 0.1 / 0.9, places=3)
+
+    def test_a_short_step_with_a_static_round_count_owes_one_round(self):
+        clock = Clock()
+        alternator = policy.Alternator(policy.config({'QWEN_FAST_LEVERN_ROUNDS': '4'}), clock=clock)
+        alternator.begin(7, True)
+        alternator.end('prefill', short=True)
+        clock.advance_ms(500)
+        self.assertEqual(alternator.begin(7, True).owed_rounds, 1)
+
+
+class OffSwitchTests(unittest.TestCase):
+    def test_it_latches_once_and_polls_at_most_once_a_second(self):
+        clock, present, calls = Clock(), [False], []
+
+        def exists(path):
+            calls.append(path)
+            return present[0]
+
+        switch = policy.OffSwitch('/x/levern.off', clock=clock, exists=exists)
+        self.assertFalse(switch.poll())
+        self.assertFalse(switch.poll())
+        self.assertEqual(len(calls), 1)
+        present[0] = True
+        clock.advance_ms(1500)
+        self.assertTrue(switch.poll())
+        self.assertTrue(switch.engaged)
+        present[0] = False
+        clock.advance_ms(5000)
+        self.assertFalse(switch.poll())
+        self.assertTrue(switch.engaged)
+        self.assertEqual(len(calls), 2)
+
+    def test_no_path_means_never(self):
+        self.assertFalse(policy.OffSwitch('', clock=Clock()).poll())
+
+    def test_the_path_sits_next_to_the_prefix_kill_switch(self):
+        import os
+
+        import qwen_prefix_registry as registry
+
+        self.assertEqual(os.path.dirname(policy.OFF_PATH), os.path.dirname(registry.KILL_SWITCH_PATH))
+        self.assertEqual(os.path.basename(policy.OFF_PATH), policy.OFF_FILE)
+
+
+class SharedStateTests(unittest.TestCase):
+    def test_the_scheduler_reads_what_the_route_publishes(self):
+        policy.reset_state()
+        try:
+            self.assertTrue(policy.state_has('a', 2048), 'with no route installed there is nothing to check against')
+            holder = policy.state_holder()
+            holder.route = True
+            holder.owner, holder.parks = ('a', 4096), {'b': 6144}
+            self.assertTrue(policy.state_has('a', 4096))
+            self.assertFalse(policy.state_has('a', 2048))
+            self.assertTrue(policy.state_has('b', 6144))
+            self.assertFalse(policy.state_has('b', 4096))
+            self.assertFalse(policy.state_has('c', 4096))
+        finally:
+            policy.reset_state()
+
+    def test_the_park_state_costs_what_a_checkpoint_costs(self):
+        import qwen_prefix_registry as registry
+
+        self.assertEqual(policy.PARK_NBYTES, registry.CHECKPOINT_NBYTES)
+
+
 if __name__ == '__main__':
     unittest.main()

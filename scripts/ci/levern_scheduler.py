@@ -363,6 +363,7 @@ class LevernRuntime(object):
         if self.last_prefill is None or decision.prev_kind != 'prefill' or decision.prev_ms is None:
             return
         start, tokens = self.last_prefill
+        self.last_prefill = None
         self.step_times.observe(start, tokens, decision.prev_ms)
 
     # ------------------------------------------------------------------ the cap
@@ -447,7 +448,6 @@ class LevernRuntime(object):
         if budget is None:
             return None, request, fresh, None
         self.computed = getattr(request, 'num_computed_tokens', None)
-        self.last_prefill = (request.request_id, self.computed or (self.peek(scheduler, request) if fresh else 0), budget)
         return self.apply_cap(scheduler, budget), request, fresh, budget
 
     # ------------------------------------------------------------ what the cap actually scheduled
@@ -553,6 +553,20 @@ def _scheduled_prefill(result, partial_ids):
     return any(request_id in partial_ids for request_id in cached)
 
 
+def _prefill_step(result, partial_ids, before):
+    """(request id, start, tokens) of the one prefill step `result` scheduled (a new request at its trimmed start, or a partial from where it was), or None."""
+    counts = getattr(result, 'num_scheduled_tokens', None)
+    if not isinstance(counts, dict):
+        return None
+    for value in getattr(result, 'scheduled_new_reqs', None) or ():
+        start = getattr(value, 'num_computed_tokens', 0)
+        return value.req_id, start if type(start) is int else 0, counts.get(value.req_id, 0)
+    for request_id in getattr(getattr(result, 'scheduled_cached_reqs', None), 'req_ids', None) or ():
+        if request_id in partial_ids and type(before.get(request_id)) is int:
+            return request_id, before[request_id], counts.get(request_id, 0)
+    return None
+
+
 def wrap_schedule(original, runtime):
     """The wrapper installed as <class>.schedule under QWEN_FAST_LEVER_N=1 (the module docstring)."""
 
@@ -583,6 +597,9 @@ def wrap_schedule(original, runtime):
         else:
             result = original(self, *args, **kwargs)
         prefill = _scheduled_prefill(result, partial_ids)
+        if merged and prefill:
+            step = _prefill_step(result, partial_ids, before)
+            runtime.last_prefill = None if step is None else step[1:]
         runtime.alternator.end('prefill' if prefill else 'decode', short=runtime.pass_short and prefill)
         # One line per decision that is part of a prefill's life: a prefill step, a yield, a step while a partial is in flight. A plain decode step
         # beside a prompt that is merely waiting for a seat (every seat busy) is not, or the log would grow a line a round for as long as it waits.
