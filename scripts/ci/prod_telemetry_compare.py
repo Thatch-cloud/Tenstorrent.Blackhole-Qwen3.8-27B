@@ -30,14 +30,21 @@ How each statistic is read (the rule names the thresholds, not the estimator, so
     they are summed. The day-to-day spread is the range of the baseline days' p90 over the pooled baseline p90, over days with at least
     MIN_DAY_REQUESTS requests. With no request file the TTFT half is VOID ("TTFT not read") and the overall verdict cannot be a full PASS.
 
-Verdicts. Per stratum: WORSE (beyond the threshold: ROLLBACK), BETTER, INSIDE, VOID. Overall: ROLLBACK when any stratum is WORSE; PASS when none is WORSE and
-every wanted stratum was measured; PASS-PARTIAL when none is WORSE but some stratum was VOID (listed); INSUFFICIENT when nothing was measured.
-Exit code: 0 PASS or PASS-PARTIAL, 1 ROLLBACK, 3 INSUFFICIENT, 64 no cutover time.
+Verdicts. Per stratum: WORSE (beyond the threshold: ROLLBACK), BETTER, INSIDE, VOID. Overall (two halves: round time, TTFT):
+  ROLLBACK       any stratum WORSE (a half that measured a loss is evidence whatever the other half did)
+  PASS           none WORSE and every wanted stratum of both halves measured
+  PASS-PARTIAL   none WORSE, each half measured at least one stratum, but some stratum was VOID (listed)
+  UNMEASURED     none WORSE and one half measured NOTHING (every stratum VOID, or no request file for TTFT): the watch is NOT closed, take no action on it
+  INSUFFICIENT   nothing measured in either half
+Exit code: 0 PASS or PASS-PARTIAL, 1 ROLLBACK, 2 UNMEASURED, 3 INSUFFICIENT, 64 no cutover time, 65 the capture's image records contradict the cutover.
 
-    prod_telemetry_compare.py --dir <capture dir> [--cutover '2026-10-09 12:00:00'] --stage 72h --requests ttft.csv [--floor-w 32k=0.04,128k=0.06]
+    prod_telemetry_compare.py --dir <capture dir> --cutover '2026-10-09 12:00:00' --stage 72h --requests ttft.csv [--floor-w 32k=0.04,128k=0.06]
 
-Timestamps are the container's log clock (UTC in the serving container); give --cutover in the same clock. Without --cutover it is the first
-`levern_installed` event in the capture directory (the first boot of an image with Lever N). Stdlib only.
+Timestamps are the container's log clock (UTC in the serving container); give --cutover in the same clock. --cutover is REQUIRED: the capture follows the
+log with `tail -n 0`, so a capture started or restarted after the cutover boot never saw the boot line, and "the first levern_installed event" would be a
+later restart (a hand-back) with post-cutover rounds in the baseline. The capture's `follow` events carry the image id each log came from, and the
+comparator checks them against the cutover: an image id on both sides of it refuses the read (exit 65) and the report lists the image ids behind each
+side. --cutover-from-first-event keeps the old default for a replay where the capture is known to span the cutover boot. Stdlib only.
 """
 
 import argparse
@@ -288,7 +295,43 @@ def overall(strata):
     return 'PASS' if len(measured) == len(verdicts) else 'PASS-PARTIAL'
 
 
-def judge(rounds, requests, cutover, stage, windows=('32k', '128k'), live_counts=LIVE_COUNTS, baseline_days=BASELINE_DAYS, **options):
+IMAGE = re.compile(r'\bimage=(\S+)')
+
+
+def image_timeline(directories):
+    """[(time, image id)] of the capture's `follow` events, oldest first: the image each engine log came from (the wrapper prints the marker on every attach)."""
+    found = []
+    for directory in directories:
+        for path in sorted(glob.glob(os.path.join(directory, 'events-*.jsonl*'))):
+            with open_any(path) as handle:
+                for line in handle:
+                    if 'follow' not in line:
+                        continue
+                    record = json.loads(line)
+                    match = IMAGE.search(record.get('detail') or '')
+                    if record.get('code') == 'follow' and match and record.get('t') and match.group(1) != 'unknown':
+                        found.append((parse_time('%s %s' % (record['day'], record['t'])), match.group(1)))
+    return sorted(found)
+
+
+def sides_images(timeline, base, cand):
+    """The image ids behind each side's rounds (the last follow event at or before each round), and the ids on BOTH sides. A round before the first
+    follow event has no known image and is counted as `unknown`."""
+    import bisect
+    times = [at for at, _ in timeline]
+    out = dict(baseline=set(), candidate=set(), unknown=dict(baseline=0, candidate=0))
+    for name, items in (('baseline', base), ('candidate', cand)):
+        for item in items:
+            index = bisect.bisect_right(times, item['at']) - 1
+            if index < 0:
+                out['unknown'][name] += 1
+            else:
+                out[name].add(timeline[index][1])
+    return dict(baseline_images=sorted(out['baseline']), candidate_images=sorted(out['candidate']),
+                images_on_both_sides=sorted(out['baseline'] & out['candidate']), rounds_with_unknown_image=out['unknown'])
+
+
+def judge(rounds, requests, cutover, stage, windows=('32k', '128k'), live_counts=LIVE_COUNTS, baseline_days=BASELINE_DAYS, timeline=None, **options):
     """The full read. `requests` None = no request file: the TTFT half is VOID ('TTFT not read'), so the overall verdict is at best PASS-PARTIAL."""
     until = cutover + timedelta(hours=STAGE_HOURS[stage])
     since = cutover - timedelta(days=baseline_days)
@@ -298,6 +341,15 @@ def judge(rounds, requests, cutover, stage, windows=('32k', '128k'), live_counts
                                                                'floor_w')}) if rounds else []
     report = dict(stage=stage, cutover=str(cutover), candidate_until=str(until), baseline_since=str(since), round_strata=strata,
                   rounds_verdict=overall(strata) if strata else 'INSUFFICIENT')
+    if timeline:
+        report['images'] = sides_images(timeline, base, cand)
+        if report['images']['images_on_both_sides']:
+            report['verdict'] = 'CUTOVER-INCONSISTENT'
+            report['reason'] = ('the image id(s) %s produced rounds on BOTH sides of the cutover %s: the cutover time is wrong or the capture mixed images; '
+                                'the comparison is refused' % (', '.join(report['images']['images_on_both_sides']), cutover))
+            return report
+    else:
+        report['images'] = dict(note='no follow events with an image id in the capture: the cutover time could not be checked against the images')
     ttft = None
     if requests is not None:
         base_r, cand_r = split_at(requests, cutover, until, since)
@@ -310,7 +362,10 @@ def judge(rounds, requests, cutover, stage, windows=('32k', '128k'), live_counts
         report['verdict'] = 'ROLLBACK'
     elif all(v == 'INSUFFICIENT' for v in verdicts):
         report['verdict'] = 'INSUFFICIENT'
-    elif 'INSUFFICIENT' in verdicts or 'PASS-PARTIAL' in verdicts:
+    elif 'INSUFFICIENT' in verdicts:
+        report['verdict'] = 'UNMEASURED'      # one half measured nothing: it reads as a pass only if it is not named one
+        report['unmeasured'] = [name for name, v in zip(('round time', 'ttft'), verdicts) if v == 'INSUFFICIENT']
+    elif 'PASS-PARTIAL' in verdicts:
         report['verdict'] = 'PASS-PARTIAL'
     else:
         report['verdict'] = 'PASS'
@@ -347,7 +402,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--dir', action='append', default=[], help='a capture directory (rounds-DAY.jsonl); repeat for several')
     parser.add_argument('--requests', action='append', default=[], help='per-request CSV or JSONL: a time, prompt_tokens, ttft_ms or ttft_s')
-    parser.add_argument('--cutover', help="the cutover time, 'YYYY-MM-DD HH:MM:SS' on the container clock (UTC); default: the first levern_installed event in --dir")
+    parser.add_argument('--cutover', help="the cutover time, 'YYYY-MM-DD HH:MM:SS' on the container clock (UTC); required")
+    parser.add_argument('--cutover-from-first-event', action='store_true',
+                        help='a replay only: the cutover is the first levern_installed event in --dir (wrong when the capture started after the cutover boot)')
     parser.add_argument('--floor-w', default='', help="the cross-boot floor per window as fractions, '32k=0.04,128k=0.06' (design item C9); default: none given")
     parser.add_argument('--load-margin', type=float, default=LOAD_MARGIN, help='a round counts when its load is at most the baseline median plus this')
     parser.add_argument('--load-gap', type=float, default=LOAD_GAP, help="a stratum is void when the two sides' median loads differ by more than this")
@@ -361,17 +418,24 @@ def main(argv=None):
     args = parser.parse_args(argv)
     rounds, skipped = load_rounds(args.dir)
     requests = load_requests(args.requests) if args.requests else None
-    cutover = parse_time(args.cutover) if args.cutover else first_event(args.dir, 'levern_installed')
+    if args.cutover:
+        cutover = parse_time(args.cutover)
+    elif args.cutover_from_first_event:
+        cutover = first_event(args.dir, 'levern_installed')
+    else:
+        print('--cutover is required (the time the cutover image started serving, on the container clock): the capture may have started after the cutover boot, '
+              'and a guessed time would put post-cutover rounds in the baseline', file=sys.stderr)
+        return 64
     if cutover is None:
-        print('no --cutover given and no levern_installed event in the capture directory', file=sys.stderr)
+        print('no levern_installed event in the capture directory', file=sys.stderr)
         return 64
     report = judge(rounds, requests, cutover, args.stage, tuple(args.windows.split(',')), tuple(int(v) for v in args.live.split(',')),
                    args.baseline_days, min_matched=args.min_matched, margin=args.margin, floor_mult=args.floor_mult, load_margin=args.load_margin,
-                   load_gap=args.load_gap, floor_w=parse_floor_w(args.floor_w))
+                   load_gap=args.load_gap, floor_w=parse_floor_w(args.floor_w), timeline=image_timeline(args.dir))
     report['rounds_read'] = len(rounds)
     report['rounds_skipped_unusable'] = skipped
     print(json.dumps(report, indent=1, sort_keys=True))
-    return {'PASS': 0, 'PASS-PARTIAL': 0, 'ROLLBACK': 1, 'INSUFFICIENT': 3}[report['verdict']]
+    return {'PASS': 0, 'PASS-PARTIAL': 0, 'ROLLBACK': 1, 'UNMEASURED': 2, 'INSUFFICIENT': 3, 'CUTOVER-INCONSISTENT': 65}[report['verdict']]
 
 
 if __name__ == '__main__':

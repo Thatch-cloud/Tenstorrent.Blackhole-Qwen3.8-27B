@@ -816,13 +816,14 @@ class ComparatorTests(unittest.TestCase):
         self.assertEqual(cmp.parse_floor_w('32k=0.04,128k=0.06'), {'32k': 0.04, '128k': 0.06})
         self.assertIn('not given', cmp.read_stratum(base, cand, '32k', 8)['floor_w_basis'])
 
-    def test_no_request_file_is_ttft_not_read_and_never_a_full_pass(self):
+    def test_no_request_file_is_ttft_unmeasured_not_a_pass(self):
         base, cand = self.two_sides(250.0, 250.0)
         report = cmp.judge(base + cand, None, self.cutover, '72h', windows=('32k',), live_counts=(8,))
         self.assertEqual(report['rounds_verdict'], 'PASS')
         self.assertEqual(report['ttft']['verdict'], 'VOID')
         self.assertIn('TTFT not read', report['ttft']['reason'])
-        self.assertEqual(report['verdict'], 'PASS-PARTIAL')
+        self.assertEqual(report['verdict'], 'UNMEASURED')       # one half measured nothing: not named a pass
+        self.assertEqual(report['unmeasured'], ['ttft'])
 
     def test_the_prompt_length_is_the_total_with_the_cached_tokens(self):
         directory = tempfile.mkdtemp()
@@ -836,7 +837,7 @@ class ComparatorTests(unittest.TestCase):
         finally:
             shutil.rmtree(directory)
 
-    def test_the_cutover_defaults_to_the_first_levern_installed_event(self):
+    def test_the_cutover_is_required_and_the_first_event_default_is_opt_in(self):
         directory = tempfile.mkdtemp()
         try:
             self.assertIsNone(cmp.first_event([directory], 'levern_installed'))
@@ -846,15 +847,68 @@ class ComparatorTests(unittest.TestCase):
                 json.dumps(dict(k='event', code='levern_installed', day='2026-10-10', t='01:00:00.0000')) + '\n', encoding='utf-8')
             self.assertEqual(cmp.first_event([directory], 'levern_installed'), datetime(2026, 10, 9, 12, 30, 0))
             with redirect_stdout(io.StringIO()), redirect_stderr_to_null():
-                self.assertEqual(cmp.main(['--dir', directory, '--stage', '72h']), 3)          # a cutover found, no rounds: INSUFFICIENT
+                self.assertEqual(cmp.main(['--dir', directory, '--stage', '72h']), 64)                 # no --cutover: refused, not guessed
+                self.assertEqual(cmp.main(['--dir', directory, '--stage', '72h', '--cutover-from-first-event']), 3)   # a replay: found, no rounds
         finally:
             shutil.rmtree(directory)
         empty = tempfile.mkdtemp()
         try:
             with redirect_stdout(io.StringIO()), redirect_stderr_to_null():
-                self.assertEqual(cmp.main(['--dir', empty]), 64)
+                self.assertEqual(cmp.main(['--dir', empty, '--cutover-from-first-event']), 64)
         finally:
             shutil.rmtree(empty)
+
+    def follow_event(self, at, image):
+        return json.dumps(dict(k='event', code='follow', day=at.strftime('%Y-%m-%d'), t=at.strftime('%H:%M:%S.000'),
+                               detail='engine_1.log image=%s container=cafe' % image))
+
+    def test_an_image_on_both_sides_of_the_cutover_refuses_the_comparison(self):
+        """A capture started after the cutover boot: its 'baseline' days were captured under the cutover image. The cutover time given is wrong."""
+        directory = tempfile.mkdtemp()
+        try:
+            base, cand = self.two_sides(250.0, 250.0)
+            Path(directory, 'events-2026-10-08.jsonl').write_text(self.follow_event(self.cutover - timedelta(days=4), 'sha256:newimage') + '\n', encoding='utf-8')
+            timeline = cmp.image_timeline([directory])
+            report = cmp.judge(base + cand, None, self.cutover, '72h', windows=('32k',), live_counts=(8,), timeline=timeline)
+            self.assertEqual(report['verdict'], 'CUTOVER-INCONSISTENT')
+            self.assertEqual(report['images']['images_on_both_sides'], ['sha256:newimage'])
+            self.assertIn('BOTH sides', report['reason'])
+        finally:
+            shutil.rmtree(directory)
+
+    def test_distinct_images_either_side_are_reported_and_the_read_goes_ahead(self):
+        directory = tempfile.mkdtemp()
+        try:
+            base, cand = self.two_sides(250.0, 250.0)
+            Path(directory, 'events-2026-10-08.jsonl').write_text(
+                self.follow_event(self.cutover - timedelta(days=4), 'sha256:oldimage') + '\n' + self.follow_event(self.cutover, 'sha256:newimage') + '\n',
+                encoding='utf-8')
+            report = cmp.judge(base + cand, None, self.cutover, '72h', windows=('32k',), live_counts=(8,), timeline=cmp.image_timeline([directory]))
+            self.assertEqual(report['images']['baseline_images'], ['sha256:oldimage'])
+            self.assertEqual(report['images']['candidate_images'], ['sha256:newimage'])
+            self.assertEqual(report['rounds_verdict'], 'PASS')
+        finally:
+            shutil.rmtree(directory)
+
+    def test_a_rounds_half_with_every_stratum_void_is_unmeasured_whatever_ttft_says(self):
+        base, cand = self.two_sides(250.0, 250.0, count=30)         # too few rounds: every stratum is VOID
+        requests = [dict(at=self.cutover - timedelta(hours=1 + i % 50), prompt=1000, ttft_s=1.0) for i in range(600)]
+        requests += [dict(at=self.cutover + timedelta(hours=1 + i % 50), prompt=1000, ttft_s=1.0) for i in range(600)]
+        report = cmp.judge(base + cand, requests, self.cutover, '72h', windows=('32k',), live_counts=(8,))
+        self.assertEqual(report['rounds_verdict'], 'INSUFFICIENT')
+        self.assertEqual(report['ttft']['verdict'], 'INSIDE')
+        self.assertEqual((report['verdict'], report['unmeasured']), ('UNMEASURED', ['round time']))
+        directory = tempfile.mkdtemp()
+        try:
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(cmp.main(['--dir', directory, '--cutover', '2026-10-09 00:00:00']), 3)    # nothing in either half: INSUFFICIENT
+        finally:
+            shutil.rmtree(directory)
+
+    def test_a_measured_loss_in_one_half_is_a_rollback_even_when_the_other_is_unmeasured(self):
+        base, cand = self.two_sides(250.0, 400.0)
+        report = cmp.judge(base + cand, None, self.cutover, '72h', windows=('32k',), live_counts=(8,))
+        self.assertEqual(report['verdict'], 'ROLLBACK')
 
     def test_overall_verdicts(self):
         self.assertEqual(cmp.overall([dict(verdict='INSIDE'), dict(verdict='WORSE')]), 'ROLLBACK')
@@ -958,6 +1012,211 @@ class ComparatorTests(unittest.TestCase):
             report = json.loads(out.getvalue())
             self.assertEqual(code, 3, report)
             self.assertEqual(report['round_strata'][0]['verdict'], 'VOID')
+        finally:
+            shutil.rmtree(directory)
+
+
+class DeathRuleTests(unittest.TestCase):
+    """The engine-death rule must not fire on a recoverable warning that carries a ttnn error text."""
+
+    def watcher(self, **kwargs):
+        return pt.Watcher(start=0.0, **kwargs)
+
+    def prefix_warning(self, error='TT_THROW @ /tt-metal/tt_metal/impl/buffers/buffer.cpp:123: tt::exception'):
+        """The prefix patch's own format for a recoverable capture failure (qwen_prefix_model_patch.py: logger.warning(f"[PREFIX] capture not stored req=... pos=...: {error!r}"))."""
+        return loguru(T0, "[PREFIX] capture not stored req=cmpl-1 pos=4096: RuntimeError(%r)" % error).replace('| INFO     |', '| WARNING  |')
+
+    def live(self, w, count, until):
+        for at in range(0, int(until) + 1, 10):
+            w.set_live(count, float(at))
+
+    def test_a_recoverable_prefix_capture_failure_is_not_a_death_even_with_a_request_live(self):
+        w = self.watcher()
+        self.live(w, 3, 400)
+        w.feed(execute(T0, 24, 0, 3), 1.0)
+        self.assertEqual(w.feed(self.prefix_warning(), 5.0), [])
+        for now in (10.0, 60.0, 120.0, 200.0):
+            w.feed(execute(T0 + timedelta(seconds=now), 24, 0, 3), now)
+            self.assertEqual(w.tick(now), [])
+        self.assertEqual(w.extractor.counts['engine_death'], 0)
+        self.assertEqual(w.extractor.counts['native_error'], 0)
+
+    def test_a_prefix_or_pindiag_line_is_never_a_death_whatever_its_level(self):
+        for line in (loguru(T0, '[PREFIX] capture skipped: TT_FATAL @ x'), loguru(T0, '[PINDIAG] prefix: capture skipped req=r pos=1: TT_THROW @ y'),
+                     '(EngineCore pid=66) WARNING 10-04 17:04:44 [x.py:1] TT_THROW @ somewhere recoverable'):
+            self.assertIsNone(pt.death_marker(line), line)
+
+    def test_a_native_error_text_is_a_death_only_when_confirmed_by_silence_with_a_request_live(self):
+        w = self.watcher()
+        self.live(w, 2, 400)
+        w.feed(execute(T0, 16, 0, 2), 1.0)
+        self.assertEqual(w.feed('(EngineCore pid=66) ERROR TT_THROW @ /tt-metal/x.cpp:1: device timeout', 5.0), [])    # a suspicion, not a trigger
+        self.assertEqual(w.tick(20.0), [])
+        fired = w.tick(60.0)                                         # 55 s on, no [PHASE] execute since, a request live
+        self.assertEqual([t['code'] for t in fired], ['T0-ENGINE-DEATH'])
+        self.assertEqual(fired[0]['detail'], 'TT_THROW')
+        self.assertEqual(fired[0]['confirmed'], 'no-step')
+
+    def test_a_native_error_text_followed_by_steps_is_dropped(self):
+        w = self.watcher()
+        self.live(w, 2, 400)
+        w.feed('(EngineCore pid=66) ERROR TT_FATAL @ /tt-metal/x.cpp:1: recovered', 5.0)
+        w.feed(execute(T0, 16, 0, 2), 20.0)
+        self.assertEqual(w.tick(80.0), [])
+        self.assertIsNone(w.native)
+
+    def test_a_native_error_text_with_the_api_gone_is_confirmed_at_once(self):
+        w = self.watcher()
+        w.set_api(True, 0.0)
+        w.feed('(EngineCore pid=66) ERROR TT_THROW @ /tt-metal/x.cpp:1: device', 5.0)
+        w.set_api(False, 6.0)
+        fired = w.tick(7.0)
+        self.assertEqual([(t['code'], t['confirmed']) for t in fired], [('T0-ENGINE-DEATH', 'api-down')])
+
+    def test_a_native_error_on_an_idle_engine_is_not_a_death(self):
+        w = self.watcher()
+        self.live(w, 0, 400)
+        w.feed('(EngineCore pid=66) ERROR TT_THROW @ /tt-metal/x.cpp:1: while idle', 5.0)
+        self.assertEqual(w.tick(100.0), [])
+        self.assertEqual(w.extractor.counts['native_unconfirmed'], 1)
+
+    def test_engine_level_markers_fire_at_once(self):
+        for line in ('(EngineCore pid=66) ERROR vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue',
+                     'ERROR Engine core proc EngineCore_0 died unexpectedly, shutting down client.', 'Fatal Python error: Aborted',
+                     'Segmentation fault (core dumped)', '(EngineCore pid=66) Segmentation fault', 'Aborted (core dumped)'):
+            fired = self.watcher().feed(line, 5.0)
+            self.assertEqual([t['code'] for t in fired], ['T0-ENGINE-DEATH'], line)
+
+    def test_a_trigger_and_an_event_carry_the_marker_name_not_the_line(self):
+        directory = tempfile.mkdtemp()
+        try:
+            secret = 'EngineDeadError while serving the user prompt: my secret plan 172.17.0.1'
+            with redirect_stdout(io.StringIO()) as out:
+                pt.run([secret], directory, clock=lambda: 1000.0)
+            text = out.getvalue() + ''.join(Path(directory, name).read_text(encoding='utf-8') for name in os.listdir(directory))
+            self.assertIn('EngineDeadError', text)
+            self.assertNotIn('secret plan', text)
+            self.assertNotIn('172.17', text)
+        finally:
+            shutil.rmtree(directory)
+
+
+class ChunkedPrefillTests(unittest.TestCase):
+    def test_a_chunk_continuation_step_between_decode_steps_is_not_a_decode_step_on_either_image(self):
+        """vLLM's chunk-continuation step logs total=<chunk> new=0 cached=1: it is prefill work, so the rounds beside it are dropped on both sides."""
+        chunk = execute(T0 + timedelta(seconds=0.9), 8192, 0, 1)
+        ex = pt.Extractor()
+        records = []
+        for line in decode_rounds(2, live=8) + [chunk] + decode_rounds(2, live=8, start=T0 + timedelta(seconds=1.0)):
+            records += ex.feed(line)
+        rounds = [r for k, r in records if k == 'round']
+        # without the chunk rule the chunk step counts as a decode step and a 0.4 s "round" is formed from the step before it
+        self.assertEqual([r['after_prefill'] for r in rounds], [False, False, True, False])
+        self.assertEqual(ex.counts['decode'], 6)
+
+
+    def test_the_decode_step_rows_rule(self):
+        ex = pt.Extractor()
+        ex.feed(execute(T0, 8 * 16, 0, 8))              # 16 rows a user: the widest draft step is still a decode step
+        ex.feed(execute(T0 + timedelta(seconds=0.3), 8 * 17, 0, 8))      # more rows than a draft step carries: a chunk
+        self.assertEqual(ex.counts['decode'], 1)
+
+
+class SanitiseKeepAllTests(unittest.TestCase):
+    def test_a_single_id_list_in_vllms_request_log_shape_is_reduced(self):
+        self.assertEqual(pt.sanitise_line('prompt_token_ids: [5]'), 'prompt_token_ids=<1 ids dropped>')
+        self.assertEqual(pt.sanitise_line("x prompt_token_ids: [1, 2, 3], y"), 'x prompt_token_ids=<3 ids dropped>, y')
+        self.assertEqual(pt.sanitise_line('x group=[7] y'), 'x group=[7] y')
+
+    def test_keep_all_drops_every_line_that_can_carry_prompt_text(self):
+        lines = ["INFO Received request cmpl-1: prompt: 'my private text', params: SamplingParams(), prompt_token_ids: [5, 6, 7], lora_request: None",
+                 'prompt_token_ids: [9]', execute(T0, 64, 0, 8), stats(1, 0), 'plain line']
+        out = list(pt.sanitise_stream(lines, keep_all=True))
+        self.assertEqual(len(out), 3)
+        self.assertTrue(all('private' not in line and '[9]' not in line for line in out))
+
+
+class NotificationTests(unittest.TestCase):
+    """The capture publishes a heartbeat and a counter per trigger code (a node_exporter textfile): the log-only rules must reach the alert rules."""
+
+    def run_capture(self, lines, **kwargs):
+        directory = tempfile.mkdtemp()
+        prom = os.path.join(directory, 'tt.prom')
+        try:
+            with redirect_stdout(io.StringIO()):
+                pt.run(lines, directory, clock=lambda: 1000.0, prom_file=prom, **kwargs)
+            return Path(prom).read_text(encoding='utf-8'), directory
+        except Exception:
+            shutil.rmtree(directory)
+            raise
+
+    def sample(self, text, name, label=''):
+        for line in text.splitlines():
+            if line.startswith(name + label + ' ') or (not label and line.startswith(name + ' ')):
+                return float(line.rsplit(' ', 1)[1])
+        raise AssertionError('no %s%s in\n%s' % (name, label, text))
+
+    def test_the_heartbeat_and_a_zero_counter_per_code_exist_from_the_start(self):
+        text, directory = self.run_capture(decode_rounds(2))
+        try:
+            self.assertGreater(self.sample(text, 'tt_prod_telemetry_heartbeat_timestamp_seconds'), 1.0e9)
+            for code in pt.TRIGGER_CODES:
+                self.assertEqual(self.sample(text, 'tt_prod_telemetry_trigger_total', '{code="%s"}' % code), 0.0)
+            self.assertEqual(self.sample(text, 'tt_prod_telemetry_maintenance'), 0.0)
+        finally:
+            shutil.rmtree(directory)
+
+    def test_a_quarantine_line_moves_its_counter_before_the_file_is_next_written(self):
+        text, directory = self.run_capture([loguru(T0, levern_policy.QUARANTINE_LINE.format('cmpl-z', 'lost'))])
+        try:
+            self.assertEqual(self.sample(text, 'tt_prod_telemetry_trigger_total', '{code="T1-LEVERN-QUARANTINE"}'), 1.0)
+            self.assertEqual(self.sample(text, 'tt_prod_telemetry_trigger_total', '{code="T0-ENGINE-DEATH"}'), 0.0)
+        finally:
+            shutil.rmtree(directory)
+
+    def test_a_maintenance_marker_suppresses_tier_0_but_not_tier_1(self):
+        directory = tempfile.mkdtemp()
+        try:
+            marker = os.path.join(directory, 'maintenance')
+            Path(marker).write_text('window\n', encoding='utf-8')
+            prom = os.path.join(directory, 'tt.prom')
+            lines = ['(EngineCore pid=66) ERROR vllm.v1.engine.exceptions.EngineDeadError: x', loguru(T0, levern_policy.QUARANTINE_LINE.format('cmpl-z', 'lost'))]
+            with redirect_stdout(io.StringIO()) as out:
+                pt.run(lines, directory, clock=lambda: 1000.0, prom_file=prom, maintenance_file=marker)
+            text = Path(prom).read_text(encoding='utf-8')
+            self.assertEqual(self.sample(text, 'tt_prod_telemetry_trigger_total', '{code="T0-ENGINE-DEATH"}'), 0.0)
+            self.assertEqual(self.sample(text, 'tt_prod_telemetry_trigger_suppressed_total', '{code="T0-ENGINE-DEATH"}'), 1.0)
+            self.assertEqual(self.sample(text, 'tt_prod_telemetry_trigger_total', '{code="T1-LEVERN-QUARANTINE"}'), 1.0)
+            self.assertEqual(self.sample(text, 'tt_prod_telemetry_maintenance'), 1.0)
+            triggers = [json.loads(line) for line in Path(directory, 'triggers.jsonl').read_text(encoding='utf-8').splitlines()]
+            self.assertEqual([t.get('suppressed') for t in triggers], ['maintenance', None])
+        finally:
+            shutil.rmtree(directory)
+
+    def test_a_forgotten_marker_expires(self):
+        directory = tempfile.mkdtemp()
+        try:
+            marker = os.path.join(directory, 'maintenance')
+            Path(marker).write_text('x', encoding='utf-8')
+            self.assertTrue(pt.maintenance_active(marker))
+            old = os.path.getmtime(marker) - pt.MAINT_MAX_S - 60
+            os.utime(marker, (old, old))
+            self.assertFalse(pt.maintenance_active(marker))
+            self.assertFalse(pt.maintenance_active(os.path.join(directory, 'absent')))
+            self.assertFalse(pt.maintenance_active(None))
+        finally:
+            shutil.rmtree(directory)
+
+    def test_the_poller_follows_the_url_file(self):
+        directory = tempfile.mkdtemp()
+        try:
+            urlfile = os.path.join(directory, 'metrics.url')
+            self.assertEqual(pt.current_url('http://127.0.0.1:8000/metrics', urlfile), 'http://127.0.0.1:8000/metrics')
+            Path(urlfile).write_text('http://127.0.0.1:8123/metrics\n', encoding='utf-8')
+            self.assertEqual(pt.current_url('http://127.0.0.1:8000/metrics', urlfile), 'http://127.0.0.1:8123/metrics')
+            Path(urlfile).write_text('', encoding='utf-8')
+            self.assertEqual(pt.current_url('http://127.0.0.1:8000/metrics', urlfile), 'http://127.0.0.1:8000/metrics')
+            self.assertEqual(pt.current_url('u', None), 'u')
         finally:
             shutil.rmtree(directory)
 
@@ -1185,6 +1444,39 @@ class WrapperTests(unittest.TestCase):
         self.assertNotIn('20139', text)
         self.assertNotIn('cmpl-', text)
         self.assertEqual(subprocess.run(['pgrep', '-f', 'tail -n 0 -F ' + self.dir], capture_output=True).returncode, 1, 'a tail was left running')
+
+    def test_capture_follows_the_published_port_when_a_redeploy_moves_it(self):
+        import time
+        out = os.path.join(self.dir, 'out')
+        self.logfile('engine_1.log', [stats(0, 0)])
+        proc = self.start_capture(out)
+        self.procs.append(proc)
+        url_file = os.path.join(out, 'metrics.url')
+        self.assertTrue(self.wait_for(lambda: os.path.exists(url_file)), 'the follower never published the metrics URL')
+        self.assertIn(':%d/' % self.server.server_port, open(url_file).read())
+        proc.terminate()
+        proc.wait(timeout=30)
+        # --port fixes the port: the follower publishes nothing
+        fixed = os.path.join(self.dir, 'out2')
+        proc = subprocess.Popen(['sh', str(HERE / 'prod_telemetry_rig_capture.sh'), 'c1', fixed, '--log-glob', self.glob, '--port', '9'], env=self.env(),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        self.procs.append(proc)
+        self.assertTrue(self.wait_for(lambda: self.tails_started() >= 2), 'the second capture never attached')
+        time.sleep(0.5)
+        self.assertFalse(os.path.exists(os.path.join(fixed, 'metrics.url')))
+
+    def test_capture_writes_the_heartbeat_file_it_is_given(self):
+        import signal
+        out = os.path.join(self.dir, 'out')
+        prom = os.path.join(self.dir, 'tt.prom')
+        self.logfile('engine_1.log', [stats(0, 0)])
+        proc = subprocess.Popen(['sh', str(HERE / 'prod_telemetry_rig_capture.sh'), 'c1', out, '--log-glob', self.glob, '--prom-file', prom], env=self.env(),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        self.procs.append(proc)
+        self.assertTrue(self.wait_for(lambda: os.path.exists(prom)), 'no heartbeat file')
+        self.assertIn('tt_prod_telemetry_heartbeat_timestamp_seconds', open(prom).read())
+        os.kill(int(open(os.path.join(out, 'capture.pid')).read()), signal.SIGTERM)
+        proc.wait(timeout=30)
 
     def test_capture_needs_a_log_glob(self):
         done = subprocess.run(['sh', str(HERE / 'prod_telemetry_rig_capture.sh'), 'c1', os.path.join(self.dir, 'out')], env=self.env(), capture_output=True, text=True,

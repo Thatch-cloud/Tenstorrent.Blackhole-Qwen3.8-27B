@@ -26,6 +26,11 @@ Subcommands.
             a prompt, a client address, a raw request id (ids are hashed) or free text from the log. Each round carries the host's 1-minute load
             average (`load1`, sampled every 10 s on the host the capture runs on): the Tier 2 comparator reads rounds LOAD-MATCHED. It never
             writes a raw log line.
+            --prom-file F publishes the capture's own health to F as Prometheus text (point F into the host's node_exporter textfile directory): a
+            heartbeat timestamp and one counter per trigger code, so the log-only rules reach the alert rules and a dead capture shows as a stale heartbeat.
+            --maintenance-file F: while F exists (and is under 12 h old) the Tier 0 triggers are written to triggers.jsonl as suppressed and counted apart,
+            not raised (planned window work restarts the engine; the Tier 1 triggers still fire). --metrics-url-file F: the wrapper keeps the /metrics URL
+            there, so a published port that changes with a redeploy is followed.
   watch     Capture's trigger half alone (prints the triggers, writes no records).
   sanitise  A log filter for the rare case a log excerpt must be shared: keeps only known telemetry lines, drops every token-id list
             (`predictions=[...]` and any list of integers) and client addresses. Unknown lines are dropped, not passed through.
@@ -39,7 +44,10 @@ Triggers (the approved rule; the watcher only REPORTS, it never writes a kill-sw
   T0-LOG-STALLED      the same silence, but tokens ARE still being generated (the generation-token counter advanced in the last minute, or the
                       last stats line shows generation throughput): the engine is alive and its LOG is not advancing (a full log filesystem,
                       the phase log switched off). Not a rollback trigger: free the log's space and read the capture gap as a gap
-  T0-ENGINE-DEATH     an engine-death or native-crash line
+  T0-ENGINE-DEATH     an engine-level death marker (EngineDeadError, 'EngineCore ... died', Fatal Python error, a shell 'Segmentation fault' line) at
+                      once; a ttnn/runtime error text (TT_THROW, TT_FATAL, terminate called) only when CONFIRMED: no '[PHASE] execute' line for
+                      NATIVE_CONFIRM_S (45 s) with a request live, or the API unreachable. A line tagged [PREFIX] or [PINDIAG], or logged at WARNING level,
+                      is never a death (a recoverable prefix capture failure carries a TT_THROW text). Only the marker's name is recorded, no log text
   T0-API-UNREACHABLE  the engine's /metrics stopped answering for API_DOWN_S (120 s) after having answered: the API server or the container is gone
                       (a hung API server counts; a capture started while the API was already down does not alarm)
   T0-SERVER-ERRORS    ERROR_COUNT (3) or more HTTP 5xx answers on /v1/ inside ERROR_WINDOW_S (1 h)
@@ -93,10 +101,39 @@ MARKERS = dict(
     quarantine_consumer='[PINDIAG] request quarantine consumer live in',
     request_quarantined='[PINDIAG] request quarantined',
 )
-# A native death leaves no Python traceback: these are the only record (lever_n_m3native_gate.CRASH_TEXT, narrowed to what a serving container
-# prints when the engine or the runtime is gone).
-ENGINE_DEATH = ('EngineDeadError', 'EngineCore died', 'Engine core died', 'engine core process', 'TT_FATAL', 'TT_THROW', 'terminate called',
-                'Segmentation fault', 'core dumped', 'Bus error', 'Illegal instruction')
+# What counts as the engine being gone. Two classes, because a ttnn error text is not a death by itself: the prefix patch logs a RECOVERABLE capture failure
+# as `[PREFIX] capture not stored req=... pos=...: TT_THROW @ ...` and serves the request on.
+#   * ENGINE markers are engine-level: the engine core reports itself dead, Python aborts, or the shell reports the process killed by a signal. They fire
+#     T0-ENGINE-DEATH at once.
+#   * NATIVE markers (a ttnn/runtime error text) are only a SUSPICION: they fire T0-ENGINE-DEATH when confirmed (no '[PHASE] execute' line for
+#     NATIVE_CONFIRM_S afterwards with a request live, or the API stopped answering).
+# A line that carries a [PREFIX] or [PINDIAG] tag, or is logged at WARNING level, is never a death line. Only the matched marker's NAME is recorded, never text
+# from the line (a line can carry prompt text when request logging is on).
+ENGINE_DEATH_RE = (
+    ('EngineDeadError', re.compile(r'EngineDeadError')),
+    ('EngineCore-died', re.compile(r'Engine ?[Cc]ore(?: proc\w*)?\b[^\n]{0,80}\b(?:died|is dead|has died)\b')),
+    ('Fatal-Python-error', re.compile(r'Fatal Python error')),
+    ('process-signal', re.compile(r'^(?:\([^)]*\)\s*)?(?:Segmentation fault|Aborted \(core dumped\)|Bus error|Illegal instruction)')),
+)
+NATIVE_ERROR_RE = (
+    ('TT_FATAL', re.compile(r'\bTT_FATAL\b')),
+    ('TT_THROW', re.compile(r'\bTT_THROW\b')),
+    ('terminate-called', re.compile(r'terminate called')),
+)
+NOT_A_DEATH = re.compile(r'\[PREFIX\]|\[PINDIAG\]|\|\s*WARNING\s*\||\bWARNING\s+[0-9]{2}-[0-9]{2}\b|^\s*(?:\([^)]*\)\s*)?WARNING\b')
+
+
+def death_marker(line):
+    """('engine'|'native', marker name) when the line is an engine-death or an unconfirmed native-error line, else None (module comment above)."""
+    if NOT_A_DEATH.search(line):
+        return None
+    for name, pattern in ENGINE_DEATH_RE:
+        if pattern.search(line):
+            return 'engine', name
+    for name, pattern in NATIVE_ERROR_RE:
+        if pattern.search(line):
+            return 'native', name
+    return None
 
 # ---- thresholds (the approved rule) -----------------------------------------------------------------------------------------------------------------
 HANG_S = 300.0
@@ -111,6 +148,10 @@ STALE_S = 60.0               # a Lever N prefill with no step line for this long
 FORGET_S = 3600.0            # ... and is forgotten altogether after this long
 LOAD_EVERY_S = 10.0          # the host load average is sampled this often and stamped on every round
 FOLLOW_MARKER = '[prod-telemetry] follow'   # printed by the capture wrapper when it (re)attaches to an engine log: the old stats line is forgotten
+NATIVE_CONFIRM_S = 45.0      # a native error text is a death only when no '[PHASE] execute' line follows for this long with a request live (or the API is gone)
+ROWS_PER_USER_MAX = 16       # a decode step carries at most (draft tokens + 1) rows per live user (dflash 15 + 1); a step with more rows per user is a prefill chunk
+MAINT_MAX_S = 12 * 3600.0    # a maintenance marker older than this is ignored: a forgotten marker must not switch Tier 0 off for good
+TRIGGER_CODES = ('T0-HANG', 'T0-LOG-STALLED', 'T0-ENGINE-DEATH', 'T0-API-UNREACHABLE', 'T0-SERVER-ERRORS', 'T1-LEVERN-QUARANTINE', 'T1-LEVERN-LONG-TTFT')
 MAX_ROUND_S = 5.0          # a gap between two decode steps longer than this is idle time, not a round
 WINDOW_EDGES = ((0, 8192, 'steady'), (28672, 40960, '32k'), (106496, 139264, '128k'))   # w2ln_timing_compare.WINDOWS: mean position, low <= x < high
 
@@ -126,7 +167,10 @@ TIER_ACTION = {
 
 # ---- sanitising ---------------------------------------------------------------------------------------------------------------------------------------
 PREDICTIONS = re.compile(r'predictions=\[([^\]\n]*)\]')
-INT_LIST = re.compile(r'(\w+)=\[\s*-?[0-9]+(?:\s*,\s*-?[0-9]+)+\s*\]')
+# a list of integers after `name=` or `name:` (two or more of them, any name; ONE of them when the name says ids or tokens: `prompt_token_ids: [5]`)
+INT_LIST = re.compile(r'(\w+)\s*[=:]\s*\[\s*-?[0-9]+(?:\s*,\s*-?[0-9]+)+\s*\]')
+ID_LIST = re.compile(r'(\w*(?:ids?|tokens?)\w*)\s*[=:]\s*\[\s*-?[0-9]+\s*\]', re.IGNORECASE)
+PROMPT_TEXT = re.compile(r'prompt(?!\s+throughput|_tokens_total)', re.IGNORECASE)
 ADDRESS = re.compile(r'\b[0-9]{1,3}(?:\.[0-9]{1,3}){3}(?::[0-9]+)?\b')
 KEEP = ('[PHASE]', '[PACKED', '[PINDIAG]', '[GDN-SEQ-BLOCK', '[SEQ-PUBLISH]', '[CARRY]', 'Engine 0', 'HTTP/1.1"')
 
@@ -135,13 +179,19 @@ def sanitise_line(line):
     """The line with every token-id list reduced to its length and every address removed (the line's other text is untouched)."""
     line = PREDICTIONS.sub(lambda m: 'predictions=<%d ids dropped>' % (len([v for v in m.group(1).split(',') if v.strip()])), line)
     line = INT_LIST.sub(lambda m: '%s=<%d ids dropped>' % (m.group(1), m.group(0).count(',') + 1), line)
+    line = ID_LIST.sub(lambda m: '%s=<1 ids dropped>' % m.group(1), line)
     return ADDRESS.sub('<addr>', line)
 
 
 def sanitise_stream(lines, keep_all=False):
     for line in lines:
         line = line.rstrip('\n')
-        if keep_all or any(marker in line for marker in KEEP) or any(code in line for code in ENGINE_DEATH):
+        if keep_all:
+            # every line, EXCEPT one that can carry prompt text: a request log line, a `prompt: ...` echo
+            if PROMPT_TEXT.search(line) and not STATS.search(line):
+                continue
+            yield sanitise_line(line)
+        elif any(marker in line for marker in KEEP) or death_marker(line):
             yield sanitise_line(line)
 
 
@@ -260,9 +310,13 @@ class Extractor(object):
                                                   detail='reason in the engine log; decoding=%s' % (decoding.group(1) if decoding else '?'))))
                     break
             else:
-                if any(code in line for code in ENGINE_DEATH):
+                death = death_marker(line)
+                if death and death[0] == 'engine':
                     self.counts['engine_death'] += 1
-                    out.append(('event', dict(code='engine_death', detail=scrub(line.strip()[-200:]))))
+                    out.append(('event', dict(code='engine_death', detail=death[1])))
+                elif death:
+                    self.counts['native_error'] += 1
+                    out.append(('event', dict(code='native_error', detail=death[1])))
         for kind, record in out:
             if kind == 'event':
                 record.setdefault('day', self.last[0] if self.last else utc_day())
@@ -290,7 +344,10 @@ class Extractor(object):
         if match.group(8):
             self.forget_ids(ids_in(match.group(8)))
         self.counts['execute'] += 1
-        decode = new == 0 and cached > 0
+        # a chunk-continuation step of a chunked prefill logs `total=<chunk> new=0 cached=1`: it is a prefill step, not a decode step, whichever image
+        # runs (the baseline has no Lever N lines to mark it). More rows per live user than a draft step can carry means a prefill chunk.
+        chunk = cached > 0 and total > cached * ROWS_PER_USER_MAX
+        decode = new == 0 and cached > 0 and not chunk
         if decode:
             self.counts['decode'] += 1
         previous = self.current
@@ -308,7 +365,7 @@ class Extractor(object):
                                           mean_pos=round(sum(step['positions']) / float(live), 1) if packed else None)))
             else:
                 self.counts['gaps'] += 1
-        self.current = dict(new=new, prefill=False)
+        self.current = dict(new=new, prefill=chunk)
         if decode:
             self.pending = dict(day=day, clock=clock, moment=moment, live=cached, rows=total, positions=[], after_prefill=after_prefill,
                                 prefill=False)
@@ -371,7 +428,9 @@ class Watcher(object):
     trigger fires once per episode (a hang until the next execute line; the error rule until the count falls below the threshold; a request once)."""
 
     def __init__(self, hang_s=HANG_S, error_count=ERROR_COUNT, error_window_s=ERROR_WINDOW_S, ttft_s=TTFT_S, long_prompt=LONG_PROMPT, start=None,
-                 on_record=None, live_fresh_s=LIVE_FRESH_S, api_down_s=API_DOWN_S, stale_s=STALE_S, forget_s=FORGET_S):
+                 on_record=None, live_fresh_s=LIVE_FRESH_S, api_down_s=API_DOWN_S, stale_s=STALE_S, forget_s=FORGET_S,
+                 native_confirm_s=NATIVE_CONFIRM_S):
+        self.native_confirm_s = native_confirm_s
         self.api_down_s = api_down_s
         self.api_ever_ok = False
         self.api_fail_since = None
@@ -394,6 +453,7 @@ class Watcher(object):
         self.first_wall = {}
         self.seen = {}                # request -> (steps, wall time the step count last changed)
         self.fired = set()
+        self.native = None            # (wall time, marker name) of an unconfirmed native error text (death_marker)
 
     def set_live(self, count, now=None):
         """The metrics poll's reading: requests running plus waiting, as of `now`."""
@@ -441,13 +501,14 @@ class Watcher(object):
                 self.on_record(kind, record)
         out = []
         if line.startswith(FOLLOW_MARKER):
-            self.stats, self.silence, self.last_execute, self.flow = None, None, now, None
+            self.stats, self.silence, self.last_execute, self.flow, self.native = None, None, now, None, None
             return out
         if self.last_execute is None:
             self.last_execute = now
         if '[PHASE] execute' in line:
             self.last_execute = now
             self.silence = None
+            self.native = None        # the engine stepped after the error text: it was recoverable
         elif 'Running:' in line and self.extractor.running is not None:
             self.stats = (bool(self.extractor.running or self.extractor.waiting), now)
             if self.extractor.gen_tps and now - self.last_execute > FLOW_AFTER_S:
@@ -457,6 +518,9 @@ class Watcher(object):
                 code = record['code']
                 if code == 'engine_death':
                     out.append(self._trigger('T0-ENGINE-DEATH', now, detail=record['detail']))
+                elif code == 'native_error':
+                    if self.native is None:
+                        self.native = (now, record['detail'])
                 elif code == 'http5xx':
                     self.errors.append(now)
                     while self.errors and now - self.errors[0] > self.error_window_s:
@@ -491,6 +555,14 @@ class Watcher(object):
             self.api_fired = True
             out.append(self._trigger('T0-API-UNREACHABLE', now, down_s=round(now - self.api_fail_since, 1)))
         busy = self.busy(now)
+        if self.native is not None:
+            since, marker = self.native
+            if self.api_fail_since is not None or (now - since >= self.native_confirm_s and busy):
+                self.native = None
+                out.append(self._trigger('T0-ENGINE-DEATH', now, detail=marker, confirmed='api-down' if self.api_fail_since is not None else 'no-step'))
+            elif now - since >= self.native_confirm_s:
+                self.native = None      # idle and answering: the error text did not stop the engine
+                self.extractor.counts['native_unconfirmed'] += 1
         if busy and self.last_execute is not None and now - self.last_execute > self.hang_s:
             code = 'T0-LOG-STALLED' if self.tokens_flowing(now) else 'T0-HANG'
             if self.silence != code and self.silence != 'T0-HANG':
@@ -549,13 +621,27 @@ def parse_live(text, platform_prefix=None):
     return parse_metrics(text, platform_prefix)[0]
 
 
-def poll_live(url, watcher, every, stop, clock=time.time, state=None, platform_prefix=None):
+def current_url(url, url_file):
+    """The /metrics URL to read now: the first line of `url_file` when it exists and is not empty (the capture wrapper rewrites it each time it attaches to
+    the container, so a published port that changes with a redeploy is followed), else `url`."""
+    if url_file:
+        try:
+            with open(url_file, 'r', encoding='utf-8') as handle:
+                text = handle.readline().strip()
+            if text:
+                return text
+        except OSError:
+            pass
+    return url
+
+
+def poll_live(url, watcher, every, stop, clock=time.time, state=None, platform_prefix=None, url_file=None):
     """Thread body: read the engine's /metrics every `every` seconds into watcher.set_live. A failed read leaves the last reading to age out."""
     from urllib.request import urlopen
     state = state if state is not None else {}
     while not stop.is_set():
         try:
-            with urlopen(url, timeout=5) as handle:
+            with urlopen(current_url(url, url_file), timeout=5) as handle:
                 count, tokens = parse_metrics(handle.read().decode('utf-8', 'replace'), platform_prefix)
             watcher.set_api(True, clock())
             if tokens is not None:
@@ -623,6 +709,51 @@ def open_text(path):
     return open(path, 'r', encoding='utf-8', errors='replace')
 
 
+def maintenance_active(path, now=None):
+    """Is the maintenance marker present and fresh (younger than MAINT_MAX_S)? While it is, the Tier 0 triggers are recorded as suppressed, not raised."""
+    if not path:
+        return False
+    try:
+        age = (time.time() if now is None else now) - os.stat(path).st_mtime
+    except OSError:
+        return False
+    return age <= MAINT_MAX_S
+
+
+def write_prom(path, watcher, by_code, suppressed, maintenance, started, now=None):
+    """The capture's own health as Prometheus text (a node_exporter textfile): a heartbeat, a counter per trigger code and the maintenance state.
+    Prometheus alerts on a new trigger and on a stale heartbeat, so a log-only rule reaches a person and a dead capture is seen. Atomic replace."""
+    if not path:
+        return
+    now = time.time() if now is None else now
+    source = 'metrics' if watcher.live and now - watcher.live[1] <= watcher.live_fresh_s else ('stats-line' if watcher.stats is not None else 'none')
+    rows = ['# HELP tt_prod_telemetry_heartbeat_timestamp_seconds Unix time the production telemetry capture last wrote this file (stale = the capture is down).',
+            '# TYPE tt_prod_telemetry_heartbeat_timestamp_seconds gauge',
+            'tt_prod_telemetry_heartbeat_timestamp_seconds %d' % now,
+            '# TYPE tt_prod_telemetry_start_timestamp_seconds gauge',
+            'tt_prod_telemetry_start_timestamp_seconds %d' % started,
+            '# HELP tt_prod_telemetry_trigger_total Rollback-rule triggers the log watcher raised since this capture started.',
+            '# TYPE tt_prod_telemetry_trigger_total counter']
+    rows += ['tt_prod_telemetry_trigger_total{code="%s"} %d' % (code, by_code.get(code, 0)) for code in TRIGGER_CODES]
+    rows += ['# HELP tt_prod_telemetry_trigger_suppressed_total Tier 0 triggers recorded but not raised because a maintenance marker was present.',
+             '# TYPE tt_prod_telemetry_trigger_suppressed_total counter']
+    rows += ['tt_prod_telemetry_trigger_suppressed_total{code="%s"} %d' % (code, suppressed.get(code, 0)) for code in TRIGGER_CODES if code.startswith('T0-')]
+    rows += ['# HELP tt_prod_telemetry_maintenance 1 while a fresh maintenance marker suppresses the Tier 0 log triggers (planned window work).',
+             '# TYPE tt_prod_telemetry_maintenance gauge',
+             'tt_prod_telemetry_maintenance %d' % (1 if maintenance else 0),
+             '# HELP tt_prod_telemetry_hang_rule_source Where the hang rule reads whether a request is live: metrics gauges, the stats log line, or none.',
+             '# TYPE tt_prod_telemetry_hang_rule_source gauge']
+    rows += ['tt_prod_telemetry_hang_rule_source{source="%s"} %d' % (name, 1 if name == source else 0) for name in ('metrics', 'stats-line', 'none')]
+    rows += ['# TYPE tt_prod_telemetry_api_up gauge', 'tt_prod_telemetry_api_up %d' % (0 if watcher.api_fail_since is not None else (1 if watcher.api_ever_ok else 0))]
+    tmp = path + '.tmp'
+    try:
+        with open(tmp, 'w', encoding='utf-8', newline=chr(10)) as handle:
+            handle.write(chr(10).join(rows) + chr(10))
+        os.replace(tmp, path)
+    except OSError as error:
+        print('[prod-telemetry] cannot write %s (%s): no notification path' % (path, type(error).__name__), file=sys.stderr, flush=True)
+
+
 def write_status(path, watcher, sink, fired, load=None):
     if not path:
         return
@@ -638,7 +769,7 @@ def write_status(path, watcher, sink, fired, load=None):
 
 
 def run(lines, out_dir=None, watch=True, clock=time.time, idle_tick=None, hang_s=HANG_S, metrics_url=None, metrics_every=10.0, platform_prefix=None,
-        load_fn=None, load_every=LOAD_EVERY_S):
+        load_fn=None, load_every=LOAD_EVERY_S, metrics_url_file=None, prom_file=None, maintenance_file=None):
     """Feeds `lines` through the extractor and the watcher. With `out_dir` the extractor's records go to daily files there and the triggers also
     to triggers.jsonl; the triggers always print to stdout. Returns the extractor's counters.
 
@@ -646,7 +777,11 @@ def run(lines, out_dir=None, watch=True, clock=time.time, idle_tick=None, hang_s
     queue and the loop calls tick() every `idle_tick` seconds without one. None = tick only when a line arrives (a finite file).
 
     `load_fn` returns the host's 1-minute load average; it is sampled at most every `load_every` seconds (of `clock`) and stamped on every round record
-    as `load1`. Leave it None when the stream is a replay of an old log (the current load says nothing about then)."""
+    as `load1`. Leave it None when the stream is a replay of an old log (the current load says nothing about then).
+
+    `prom_file`: a Prometheus text file (a node_exporter textfile) rewritten every ~30 s and at every trigger, with a heartbeat and a counter per trigger
+    code. `maintenance_file`: while this file exists and is younger than MAINT_MAX_S the Tier 0 triggers are written to triggers.jsonl with
+    suppressed='maintenance' and counted apart, not raised (planned window work restarts the engine). `metrics_url_file`: see current_url."""
     sink = Sink(out_dir) if out_dir else None
     load_state = dict(value=None, at=None)
 
@@ -666,21 +801,34 @@ def run(lines, out_dir=None, watch=True, clock=time.time, idle_tick=None, hang_s
     watcher = Watcher(start=clock(), on_record=on_record if sink else None, hang_s=hang_s)
     import threading
     stop, poll_state = threading.Event(), {}
-    if metrics_url:
-        threading.Thread(target=poll_live, args=(metrics_url, watcher, metrics_every, stop, clock, poll_state, platform_prefix), daemon=True).start()
+    if metrics_url or metrics_url_file:
+        threading.Thread(target=poll_live, args=(metrics_url, watcher, metrics_every, stop, clock, poll_state, platform_prefix, metrics_url_file),
+                         daemon=True).start()
     triggers_path = os.path.join(out_dir, 'triggers.jsonl') if out_dir else None
     state_path = os.path.join(out_dir, 'capture-state.json') if out_dir else None
     fired, last_status = 0, clock()
+    by_code, suppressed = collections.Counter(), collections.Counter()
+    started = int(time.time())
+
+    def publish():
+        write_prom(prom_file, watcher, by_code, suppressed, maintenance_active(maintenance_file), started)
 
     def emit(triggers):
         nonlocal fired
         for trigger in triggers:
+            if trigger['code'].startswith('T0-') and maintenance_active(maintenance_file):
+                trigger['suppressed'] = 'maintenance'
+                suppressed[trigger['code']] += 1
+            else:
+                by_code[trigger['code']] += 1
             fired += 1
             text = json.dumps(trigger, sort_keys=True)
             print(text, flush=True)
             if triggers_path:
                 with open(triggers_path, 'a', encoding='utf-8', newline='\n') as handle:
                     handle.write(text + '\n')
+        if triggers:
+            publish()
 
     def step(line):
         nonlocal last_status
@@ -690,7 +838,9 @@ def run(lines, out_dir=None, watch=True, clock=time.time, idle_tick=None, hang_s
             last_status = now
             sink.flush()          # a record waits at most ~30 s in a buffer: a kill loses seconds, not hundreds of records
             write_status(state_path, watcher, sink, fired, load_state['value'])
+            publish()
 
+    publish()      # the heartbeat starts with the capture
     try:
         if idle_tick:
             import queue
@@ -713,6 +863,7 @@ def run(lines, out_dir=None, watch=True, clock=time.time, idle_tick=None, hang_s
                         last_status = clock()
                         sink.flush()
                         write_status(state_path, watcher, sink, fired, load_state['value'])
+                        publish()
                     continue
                 if line is done:
                     break
@@ -844,6 +995,9 @@ def main(argv=None):
     cap.add_argument('--no-watch', action='store_true')
     cap.add_argument('--metrics-url', help="the engine's /metrics URL: the hang rule's 'a request is live' (without it the hang rule rests on the stats line)")
     cap.add_argument('--metrics-every', type=float, default=10.0)
+    cap.add_argument('--metrics-url-file', help="a file whose first line is the /metrics URL, re-read on every poll (the wrapper rewrites it when the published port changes)")
+    cap.add_argument('--prom-file', help='write the capture heartbeat and trigger counters here as Prometheus text (a node_exporter textfile): the notification path')
+    cap.add_argument('--maintenance-file', help='while this file exists (and is under 12 h old) the Tier 0 triggers are recorded as suppressed, not raised')
     cap.add_argument('--platform-prefix', default=os.environ.get('PROD_TELEMETRY_PLATFORM_PREFIX') or None, help=prefix_help)
     cap.add_argument('--stamp-load', action='store_true', help='stamp the host load on rounds even when reading a file (a replay: the stamp is the load NOW)')
     watch = sub.add_parser('watch', help='the watcher alone')
@@ -890,7 +1044,8 @@ def dispatch(args, stream):
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))    # a stop closes the files (the sink's flush) instead of dropping the last records
     if args.command == 'capture':
         run(stream, args.out, watch=not args.no_watch, idle_tick=None if args.log != '-' else 5.0, metrics_url=args.metrics_url,
-            metrics_every=args.metrics_every, platform_prefix=args.platform_prefix, load_fn=host_load if (args.log == '-' or args.stamp_load) else None)
+            metrics_every=args.metrics_every, platform_prefix=args.platform_prefix, load_fn=host_load if (args.log == '-' or args.stamp_load) else None,
+            metrics_url_file=args.metrics_url_file, prom_file=args.prom_file, maintenance_file=args.maintenance_file)
         return 0
     if args.command == 'watch':
         run(stream, None, watch=True, idle_tick=None if args.log != '-' else 5.0, metrics_url=args.metrics_url, metrics_every=args.metrics_every,

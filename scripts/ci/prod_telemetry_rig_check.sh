@@ -14,6 +14,9 @@
 # traffic in the window (an idle window answers IDLE, exit 3). prod_telemetry.py is found next to this script, at $PROD_TELEMETRY_PY, or (when the host
 # has no checkout) as base64 in $PROD_TELEMETRY_B64; $PROD_TELEMETRY_PYBIN names the interpreter (default python3).
 #
+# The kill-switch section prints which switch files exist and the path QWEN_FAST_LEVERN_OFF_PATH names (when it is set, levern.off is read THERE, not
+# in /models/.qwen-c2): the file a runbook writes must be the one the engine reads.
+#
 # Besides the log lines it checks the LOG FILESYSTEM'S HEADROOM: a log in a small in-memory filesystem fills it, the phase lines stop while the
 # engine still works, and every rule that reads them goes blind. It prints the free space, the log's size, its growth over --growth-s seconds
 # (0 skips the sample) and the hours to full at that rate. FAIL (exit 2) at 80 % used or under 100 MiB free; a WARN line under 48 h to full.
@@ -88,6 +91,13 @@ echo "v1_models_http=${code:-none}"
 
 echo "== kill-switch directory inside the container (names only; absent files are the healthy state)"
 docker exec "$container" ls -la /models/.qwen-c2 2>&1 | sed -n '1,20p'
+echo "== kill-switch paths the engine reads (names and paths only)"
+levern_path=$(docker exec "$container" printenv QWEN_FAST_LEVERN_OFF_PATH 2>/dev/null || true)
+echo "QWEN_FAST_LEVERN_OFF_PATH=${levern_path:-<unset: the default /models/.qwen-c2/levern.off>}"
+echo "prefix kill switch: /models/.qwen-c2/prefix-reuse.off (fixed in the image; no environment override)"
+for name in levern.off prefix-reuse.off; do
+  if docker exec "$container" test -e "/models/.qwen-c2/$name" 2>/dev/null; then echo "kill switch PRESENT: $name"; else echo "kill switch absent: $name"; fi
+done
 
 echo "== engine log files inside the container (names and sizes)"
 newest=$(docker exec "$container" sh -c "ls -t $glob 2>/dev/null | head -1" 2>/dev/null || true)
