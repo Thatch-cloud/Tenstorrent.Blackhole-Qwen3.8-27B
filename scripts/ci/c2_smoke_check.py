@@ -168,6 +168,7 @@ def sdpa_long_problems(env, container_text):
 # launch's block output with the per-user launches' word for word, so a mismatch line (or an exact=False one) fails the arm.
 SDPA_MULTI_NAME = 'multi'
 SDPA_MULTI_CALL = '[PINDIAG] tp4 sdpa multi call'
+SDPA_MULTI_UNQUALIFIED = '[PINDIAG] tp4 sdpa multi UNQUALIFIED'
 SDPA_AUDIT_FLAG = 'QWEN_FAST_TP4_SDPA_AUDIT'
 SDPA_AUDIT_LINE = '[PINDIAG] tp4 sdpa audit'
 SDPA_AUDIT_MISMATCH = '[PINDIAG] tp4 sdpa audit MISMATCH'
@@ -187,6 +188,9 @@ def sdpa_multi_problems(env, container_text):
                         % SDPA_LONG_FLAG)
     if SDPA_MULTI_CALL not in container_text:
         problems.append('%s=multi is set and no call line (%s) was logged: the launch was built and never called' % (SDPA_LONG_FLAG, SDPA_MULTI_CALL))
+    if env.get('QWEN_FAST_MAX_POSITION') == '262144' and SDPA_MULTI_UNQUALIFIED not in container_text:
+        problems.append('%s=multi is set at 262,144 and no UNQUALIFIED line (%s) was logged: the attach no longer says the G16 launch is outside the 262k '
+                        'evidence' % (SDPA_LONG_FLAG, SDPA_MULTI_UNQUALIFIED))
     audits = [line for line in lines if SDPA_AUDIT_LINE in line]
     mismatched = [line.strip()[:200] for line in audits if SDPA_AUDIT_MISMATCH in line or 'exact=False' in line]
     problems += ['the multi SDPA audit found a difference: %s' % line for line in mismatched[:4]]
@@ -1407,6 +1411,47 @@ def spread_problems(env, container_text):
     return problems
 
 
+LEVERN_KILL_PREFIX = '[PINDIAG] lever N kill switch'
+DRAFTER_CHECKPOINT_FLAG = 'QWEN_FAST_DRAFTER_CHECKPOINT'
+DRAFTER_CHECKPOINT_MARKER = '[PINDIAG] drafter checkpoint'
+
+
+def drafter_checkpoint_problems(env, container_text):
+    """[problem] for a profile that names a drafter checkpoint (drafter_checkpoint): the boot's verified line must name that id with verified=1. A profile
+    that names none needs no line (the production log is unchanged)."""
+    env = env or {}
+    name = str(env.get(DRAFTER_CHECKPOINT_FLAG, '')).strip()
+    if not name:
+        return []
+    lines = [line for line in container_text.splitlines() if DRAFTER_CHECKPOINT_MARKER in line]
+    if not any(('id=%s ' % name) in line and 'verified=1' in line for line in lines):
+        return ['%s=%s is set and no "%s id=%s ... verified=1" line was logged: the pinned bytes of the candidate were never checked' % (
+            DRAFTER_CHECKPOINT_FLAG, name, DRAFTER_CHECKPOINT_MARKER, name)]
+    return []
+
+
+def lever_engagement_problems(env, container_text, smoke=None, drill=False):
+    """[problem] for the levers a served profile's `env` asks for, read from a gate arm's server log: the smoke's own per-lever rules (the
+    engaged markers, no fall-back line, the audit lines exact, Lever N's install, warm and route ledger), applied by the prefix and serving gates
+    too. A gate arm's texts can match with a lever silently not engaged (a graft mounted and never executed), and neither gate read the
+    levers' markers before. Lever N's kill switch line is a problem outside the drill arm (`drill` True): a leftover levern.off would
+    otherwise turn the lever off for every later arm and read as a clean run."""
+    env = env or {}
+    problems = []
+    problems += sampdraft_problems(container_text, env)
+    problems += u1_problems(env, container_text)
+    problems += sdpa_long_problems(env, container_text)
+    problems += sdpa_multi_problems(env, container_text)
+    problems += spread_problems(env, container_text)
+    problems += drafter_checkpoint_problems(env, container_text)
+    lever, _ = levern_problems(env, container_text, smoke)
+    problems += lever
+    if env.get(LEVERN_FLAG) == '1' and not drill and LEVERN_KILL_PREFIX in container_text:
+        problems.append('Lever N logged its kill switch line outside the drill arm: a levern.off file was present, so this arm did not run the lever '
+                        '(a leftover file from an earlier arm?)')
+    return problems
+
+
 def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=None):
     """(problems, facts) for a smoke log and a container log. `env` (the served profile's) adds the batched-draft
     stop conditions, `entry` (its whole record) the traffic profile's admission and parser conditions."""
@@ -1437,6 +1482,7 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     problems += sdpa_long_problems(env, container_text)
     problems += sdpa_multi_problems(env, container_text)
     problems += spread_problems(env, container_text)
+    problems += drafter_checkpoint_problems(env, container_text)
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
     if env is not None and env.get('QWEN_FAST_TP', '2') != '2':

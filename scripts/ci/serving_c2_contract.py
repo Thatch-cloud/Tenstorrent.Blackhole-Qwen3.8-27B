@@ -314,6 +314,9 @@ def apply_environment(profile, environ=None):
     for name in LEVERN_ENV_FLAGS:
         if name not in profile['env']:
             environ.pop(name, None)
+    # The drafter checkpoint likewise: an inherited id under a profile that names none would pin a candidate the profile's argv does not point at.
+    if DRAFTER_CHECKPOINT_FLAG not in profile['env']:
+        environ.pop(DRAFTER_CHECKPOINT_FLAG, None)
     return environ
 
 
@@ -407,6 +410,46 @@ def prefix_reuse_problems(profile):
 def levern_on(profile):
     """Whether the profile turns Lever N (interleaved chunked prefill) on."""
     return str((profile.get('env') or {}).get(LEVERN_SWITCH, '')) == '1'
+
+
+DRAFTER_CHECKPOINT_FLAG = 'QWEN_FAST_DRAFTER_CHECKPOINT'
+
+
+def drafter_problems(profile):
+    """The profile's drafter selection (drafter_checkpoint): a candidate id must be pinned and the engine's draft paths must be its baked copy's; a profile that
+    names no id must point at the default's (today's) paths. A candidate is a gate-only profile: nothing serves traffic on a drafter that has not been judged."""
+    import drafter_checkpoint
+
+    problems = list(drafter_checkpoint.profile_problems(profile))
+    if DRAFTER_CHECKPOINT_FLAG in (profile.get('env') or {}) and profile.get('gate_only') is not True:
+        problems.append('%s needs a gate-only profile (nothing serves traffic on a drafter that has not been judged)' % DRAFTER_CHECKPOINT_FLAG)
+    return problems
+
+
+MULTI_SWITCH = 'QWEN_FAST_TP4_SDPA'
+MULTI_AUDIT = 'QWEN_FAST_TP4_SDPA_AUDIT'
+F1_SWITCH = 'QWEN_FAST_TP4_CONV_GATES_SPREAD'
+F1_AUDIT = 'QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT'
+SDPA_OFF_VALUES = ('', '0', 'off')
+
+
+def multi_problems(profile):
+    """The wave-2 levers (docs/tp4-w2.md, docs/tp4-combined-window.md) on a traffic profile: refused. The multi-user SDPA launch (QWEN_FAST_TP4_SDPA
+    set to anything but off, one G16 flags 0x21 program) is outside the baked 262k evidence (packed_any_evidence_tp4_262144.json covers the served
+    0x23 programs), the F1 conv-gates spread has never compiled on a card, and both audits are gate instruments. A traffic profile that names any of
+    the four needs a pinned qualification record for its capacity, which does not exist yet: the refusal names what is missing."""
+    env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
+    if profile.get('gate_only') is True:
+        return []
+    problems = []
+    if env.get(MULTI_SWITCH, '').strip().lower() not in SDPA_OFF_VALUES:
+        problems.append('%s=%s needs a gate-only profile: the multi-user SDPA launch is outside the 262k evidence and has no pinned multi '
+                        'qualification record' % (MULTI_SWITCH, env[MULTI_SWITCH]))
+    for key in (MULTI_AUDIT, F1_SWITCH, F1_AUDIT):
+        if env.get(key, '0') not in ('', '0'):
+            problems.append('%s=%s needs a gate-only profile (it has never served traffic and has no pinned qualification record)'
+                            % (key, env[key]))
+    return problems
 
 
 def levern_problems(profile):
@@ -1094,10 +1137,21 @@ def boot(environ=None, orig_argv=None):
     problems = levern_problems(profile)
     if problems:
         raise ValueError('profile %s cannot serve Lever N exactly: %s' % (profile['name'], '; '.join(problems)))
+    problems = multi_problems(profile)
+    if problems:
+        raise ValueError('profile %s cannot serve the wave-2 levers: %s' % (profile['name'], '; '.join(problems)))
+    problems = drafter_problems(profile)
+    if problems:
+        raise ValueError('profile %s cannot serve its drafter checkpoint: %s' % (profile['name'], '; '.join(problems)))
     problems = mesh_problems(profile)
     if problems:
         raise ValueError('profile %s cannot open its mesh: %s' % (profile['name'], '; '.join(problems)))
     apply_environment(profile, environ)
+    if DRAFTER_CHECKPOINT_FLAG in profile['env']:
+        # A candidate drafter: its baked bytes must be the pinned ones (docs/tp4-combined-window.md), or the attach is refused before an engine starts.
+        import drafter_checkpoint
+
+        drafter_checkpoint.attach_check(environ, log=lambda line: log('%s', line))
     if levern_on(profile):
         install_levern_platform()
         log('profile %s: Lever N armed (%s=1): the platform keeps chunked prefill, the scheduler caps and alternates', profile['name'],

@@ -714,6 +714,23 @@ jobs:
             scripts/ci/build-c2-serving-image.sh 2>&1 | tee "$results/smoke.log"
           docker stats --no-stream "$name" | tee "$results/stats.txt" || true
           grep -F '[PINDIAG] dram after' <(docker logs "$name" 2>&1) | tail -8 || true
+      - name: Kill-switch files must be absent
+        # A prefix-reuse.off or levern.off file left on the hub mount turns a lever off for every later arm and the arm still reads clean
+        # (the attach markers print with the switch on). Refuse to start any gate, prefix or smoke job while either exists; the drills write them
+        # with their owner token and remove them in their own cleanup, and an operator's file is never removed here.
+        if: contains(steps.job.outputs.actions, 'gate') || contains(steps.job.outputs.actions, 'prefix') || contains(steps.job.outputs.actions, 'smoke')
+        shell: bash
+        run: |
+          set -euo pipefail
+          left=0
+          for name in prefix-reuse.off levern.off; do
+            flag=/home/thatch/hf-cache/hub/.qwen-c2/$name
+            if sudo -n test -e "$flag"; then
+              echo "kill-switch file present: $name (content: $(sudo -n cat "$flag" 2>/dev/null | head -c 80)); remove it or hand it to its owner before this job" >&2
+              left=1
+            fi
+          done
+          exit "$left"
       - name: Run the gate in the agent's container shape
         if: contains(steps.job.outputs.actions, 'gate')
         working-directory: c2
@@ -854,6 +871,8 @@ jobs:
           cleanup_prefix() {
             docker ps -a --format '{{.Names}}' | grep '^qwen-c2-prefix-' | xargs -r docker rm -f || true
             if [ "$(sudo -n cat "$flag" 2>/dev/null)" = qwen-c2-prefix-gate ]; then sudo -n rm -f "$flag" || true; fi
+            lflag="$(dirname "$flag")/levern.off"
+            if [ "$(sudo -n cat "$lflag" 2>/dev/null)" = qwen-c2-prefix-gate ]; then sudo -n rm -f "$lflag" || true; fi
           }
           stale=$(docker ps -a --format '{{.Names}}' | grep '^qwen-c2-prefix-' || true)
           if [ -n "$stale" ]; then
@@ -931,7 +950,11 @@ jobs:
           fi
           devices=()
           for node in $(card_set_devices); do devices+=(--device "$node"); done
-          trap 'docker logs "$name" > "$results/container.log" 2>&1 || true; docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          # The host's load average once a minute into the job log and $results/load.log: the timed pairs are voided by it (the rig hosts CI and builds;
+          # scripts/ci/w2ln_timing_compare.py --max-load).
+          ( while :; do echo "[LOAD] $(date +%s) $(cut -d' ' -f1 /proc/loadavg)" | tee -a "$results/load.log"; sleep 60; done ) &
+          load_pid=$!
+          trap 'kill "$load_pid" 2>/dev/null || true; docker logs "$name" > "$results/container.log" 2>&1 || true; docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
           docker run -d --name "$name" --read-only \
             --tmpfs /tmp:rw,size=512m --tmpfs /opt/tt-metal/generated:rw,size=1g \
             --tmpfs /root/.cache/ttnn:rw,size=1g --tmpfs /root/.cache/tt-metal-cache:rw,size=8g \

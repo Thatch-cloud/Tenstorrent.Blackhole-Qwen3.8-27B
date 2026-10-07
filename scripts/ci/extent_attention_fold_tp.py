@@ -92,6 +92,14 @@ class PackedExtentReplayReader(_pinned_class()):
             with multi.scope(expected_calls):
                 yield
 
+    def rebound_reason(self):
+        """None, or why the multi launch must not run: a segment now holds other positions, table or cur_pos buffers than the launch's programs
+        were built on. packed_verifier.verify asks on the host before EVERY replay (a replay re-issues the device program and never comes back to
+        Python, so this is the only place a rebinding after the attach can be seen outside the scope entry; the timed arms run no SDPA audit).
+        A few identity comparisons. None when the flag is off."""
+        multi = self.multi
+        return None if multi is None else multi.rebound()
+
     def sdpa_audit_round(self, round_number):
         """QWEN_FAST_TP4_SDPA_AUDIT: after a replay, the multi launch's counters (packed_verifier calls this beside the other audits).
         0 and no effect unless the multi audit is on."""

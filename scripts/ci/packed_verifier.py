@@ -1854,6 +1854,13 @@ class PackedVerifierEngine:
                 snapshot, reason = self.prestaged.usable()
             if snapshot is None:
                 self.validate_bindings()
+            # QWEN_FAST_TP4_SDPA=multi bakes the readers' positions, table and cur_pos buffers into its programs at the attach; a replay never comes
+            # back to Python, so a rebinding after the attach is only visible here, on the host, before the replay (a few identity comparisons).
+            rebound_reason = getattr(getattr(self.fixture, 'replay_reader', None), 'rebound_reason', None)
+            if rebound_reason is not None:
+                rebound = rebound_reason()
+                if rebound:
+                    raise RuntimeError(rebound)
             started = time.perf_counter()
             hostgap = verify_prestage.hostgap_log_enabled()
             cpu_started = verify_prestage.thread_ms() if hostgap else 0.0

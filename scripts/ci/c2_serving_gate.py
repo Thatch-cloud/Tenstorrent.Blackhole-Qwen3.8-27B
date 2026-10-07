@@ -802,12 +802,35 @@ def base_plan_arms(plan, profile, profiles, lengths=None, max_tokens=c2_serving_
 G4_PLANS = ('mixed', 'short', 'boundaries', 'staggered')
 
 
+MULTI_FLAG = 'QWEN_FAST_TP4_SDPA'
+MULTI_AUDIT_FLAG = 'QWEN_FAST_TP4_SDPA_AUDIT'
+
+
+def multi_audit_refusal(profiles, name, env=None):
+    """The refusal (a sentence naming the twin to use) for an arm that the gate gives QWEN_FAST_EXTENT_AUDIT=1 on a profile whose env has the
+    multi-user SDPA launch (QWEN_FAST_TP4_SDPA=multi) without its own audit (QWEN_FAST_TP4_SDPA_AUDIT=1): sdpa_multi_tp.attach raises on that
+    pair (the extent audit reads back every user's narrow masks, which the multi launch does not refresh), so the arm would die at its
+    attach, 18 minutes in. None when the arm is fine. `env` is the served profile's env (a derived profile's, when the arm derives one)."""
+    env = env if env is not None else ((profiles.get('profiles') or {}).get(name) or {}).get('env') or {}
+    if str(env.get(MULTI_FLAG, '')) != 'multi' or str(env.get(MULTI_AUDIT_FLAG, '')) == '1':
+        return None
+    twins = sorted(other for other, body in (profiles.get('profiles') or {}).items()
+                   if other.startswith(name.split('+')[0] + '-audit') and str((body.get('env') or {}).get(MULTI_AUDIT_FLAG, '')) == '1')
+    return ('profile %s runs %s=multi without %s=1, and this arm adds %s=1: the multi launch refuses that pair at its attach; '
+            'name an audit twin that carries the SDPA audit%s' % (
+                name, MULTI_FLAG, MULTI_AUDIT_FLAG, harness.EXTENT_AUDIT_FLAG,
+                ' (%s)' % ', '.join(twins[:4]) if twins else ''))
+
+
 def s2_env(profiles, profile, audits=None, g4=False):
     """What an arm on `profile` adds: the extent audit where the profile has the flag (every packed round of
     every S2 gate arm is audited, s2-design 6.1, but the control plan's timing arms, which s2_plan_arms builds
     without it), and on a G4 arm under audits 'all' the other three audits."""
     if profile not in profiles['profiles'] or not s2_profile(profiles, profile):
         return ()
+    refusal = multi_audit_refusal(profiles, profile)
+    if refusal:
+        raise PlanError(refusal)
     return AUDIT_ENV + (G4_ALL_AUDITS if g4 and audits == 'all' else ())
 
 
@@ -1372,6 +1395,13 @@ def four_card_profile(profiles, name):
     return entry.get('mesh_device') == c2_serving_job.TP4_MESH_DEVICE
 
 
+def lever_engagement_problems(env, log_text):
+    """c2_smoke_check.lever_engagement_problems on an arm's server log (the smoke's per-lever rules, applied to every four-card gate arm)."""
+    import c2_smoke_check
+
+    return c2_smoke_check.lever_engagement_problems(env, log_text or '')
+
+
 def prefill_tripwire_check(log_text):
     """(problems, facts) of an S2 arm's server log at four cards: c2_smoke_check.late_program_problems, the rule the smoke and
     the replay apply - the eager prefill warmed before the packed traces (serving_runtime.prefill_warm_before_traces) and no
@@ -1627,6 +1657,10 @@ class Runner(object):
                 # Four cards: the prefill-after-replay defect's tripwire, on every arm (not only the smoke's shapes).
                 tripwire, report['c2_gate_prefill_tripwire'] = prefill_tripwire_check(log_text)
                 problems += ['prefill tripwire: %s' % text for text in tripwire]
+                # Every lever the arm's profile asks for must have ENGAGED (the smoke's rules; a gate arm's texts can match with one silently off).
+                served_env = dict(((self.profiles['profiles'].get(profile) or {}).get('env')) or {})
+                served_env.update(dict(env or ()))
+                problems += ['lever: %s' % text for text in lever_engagement_problems(served_env, log_text)]
             if judged and cache['added']:
                 problems.append('the kernel cache grew by %d entries during this arm: it compiled what M1 (warm) did '
                                 'not (s2-design B6)' % cache['added'])

@@ -48,6 +48,19 @@ ENGAGED = '[PINDIAG] tp4 sdpa engaged'
 CALL_MARKER = '[PINDIAG] tp4 sdpa multi call'
 AUDIT_MARKER = '[PINDIAG] tp4 sdpa audit'
 AUDIT_MISMATCH = '[PINDIAG] tp4 sdpa audit MISMATCH'
+# The 262k evidence (packed_any_evidence_tp4_262144.json) covers the served G4B1 / G4B3 / G8B2 flags 0x23 programs, never multi's one-launch G16
+# flags 0x21: at that capacity every multi attach says so, and the smoke and the gates require the line on a multi profile (gate only).
+UNQUALIFIED = '[PINDIAG] tp4 sdpa multi UNQUALIFIED'
+EVIDENCE_CAPACITY = 262144
+BLOCK_TOKENS = 64                              # every four-card profile's block size
+
+
+def unqualified_line(page_width):
+    """The UNQUALIFIED line for a reader of `page_width` pages (64 tokens each), or None below the 262k evidence's capacity."""
+    capacity = int(page_width or 0) * BLOCK_TOKENS
+    if capacity < EVIDENCE_CAPACITY:
+        return None
+    return '%s capacity=%d (G16 flags 0x21 is outside the 262k evidence: gate only, never traffic)' % (UNQUALIFIED, capacity)
 
 QWEN_DECODE_MAGIC = 0x51DEC000                 # pooled_attention_replay.QWEN_DECODE_MAGIC (a test holds the two equal)
 TAIL, EXTENT = 0x1, 0x20
@@ -525,6 +538,9 @@ def attach(reader, environ=None):
         block.close()
         raise
     _log(marker(block.plan, grid, audit))
+    unqualified = unqualified_line(getattr(reader, 'page_width', 0))
+    if unqualified:
+        _log(unqualified)
     return block
 
 
