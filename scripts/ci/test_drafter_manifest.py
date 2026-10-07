@@ -5,8 +5,10 @@ production drafter's identity cannot drift through the manifest; a candidate is 
 checkpoint (describe, stage, load) and refused when its fixtures belong to another revision.
 """
 
+import contextlib
 import copy
 import hashlib
+import io
 import json
 from pathlib import Path
 import shutil
@@ -239,9 +241,17 @@ class CandidateRoundTripTests(unittest.TestCase):
         (fixture / manifests.MARKER).write_text('synthetic\n')
         def refuse(root):
             raise AssertionError('the default loader must not run for a candidate')
-        with patch.object(drafter_fixtures.manifests, 'select', lambda root, environ=None: 'synthetic'):
+        with patch.object(drafter_fixtures.manifests, 'select', lambda root, environ=None: 'synthetic'),                 contextlib.redirect_stdout(io.StringIO()) as printed:
             found = drafter_fixtures.load(fixture, refuse)
         self.assertEqual(len(found[1]), 5)
+        self.assertIn('[DRAFTER_MANIFEST] synthetic in force', printed.getvalue())
+        self.assertIn('81 tensors verified', printed.getvalue())
+
+    def test_the_default_prints_nothing_new(self):
+        with TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()) as printed:
+            with patch.object(drafter_fixtures.manifests, 'select', lambda root, environ=None: manifests.DEFAULT):
+                drafter_fixtures.load(directory, lambda root: 'default')
+        self.assertEqual(printed.getvalue(), '')
 
     def test_default_goes_through_the_unedited_loader(self):
         calls = []

@@ -925,11 +925,13 @@ class LabRunTests(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(public, 'tau-lab-summary.json')))
         self.assertTrue(any(line.startswith('[TAULAB-REPORT]') for line in lines))
 
-    def test_a_non_production_label_when_the_verify_audits_are_off(self):
+    def test_a_non_production_label_when_the_verify_audits_differ_from_the_images_own(self):
+        # The image under test (tp4-serve-10) ran its production profile with the verify audits OFF: a profile that turns them on is not it.
         profiles = copy.deepcopy(PROFILES)
-        del profiles['profiles']['c2-packed-tp4']['env']['QWEN_FAST_VERIFY_T2_AUDIT']
-        self.assertFalse(lab.audits_on(profiles, 'c2-packed-tp4'))
-        self.assertTrue(lab.audits_on(PROFILES, 'c2-packed-tp4'))
+        profiles['profiles']['c2-packed-tp4']['env']['QWEN_FAST_VERIFY_T1_AUDIT'] = '1'
+        profiles['profiles']['c2-packed-tp4']['env']['QWEN_FAST_VERIFY_T2_AUDIT'] = '1'
+        self.assertTrue(lab.audits_on(profiles, 'c2-packed-tp4'))
+        self.assertFalse(lab.audits_on(PROFILES, 'c2-packed-tp4'))
         path = os.path.join(tempfile.mkdtemp(), 'profiles.json')
         self.addCleanup(shutil.rmtree, os.path.dirname(path), True)
         with open(path, 'w') as handle:
