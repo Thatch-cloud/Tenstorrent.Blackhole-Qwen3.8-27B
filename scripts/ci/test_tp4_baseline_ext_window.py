@@ -21,7 +21,7 @@ FOLDER = os.path.join(HERE, 'references', 'tp4-baseline-ext-jobs')
 PRODUCTION = 'tp4-serve-10'
 BANNED = base.BANNED
 HAND_BACK = ('ZR-reset-all-four', 'LM-links-remeasure', 'TICK-topology-wait', 'Z-handback', 'DEPLOY-and-engine-load')
-CORE = ('A0X0-agentstop-unserve-rescan-reset', 'H1-hang-shape-ship-prefix', 'H2-hang-shape-ship-prefix', 'SR10-platform-replay', 'C16-CTL-churn16', 'E1-CTL-exactness-eager', 'T0-timed-production-bytes', 'G0-turns-A-production-bytes')
+CORE = ('A0X0-agentstop-unserve-rescan-reset', 'H1-hang-shape-ship-prefix', 'H2-hang-shape-ship-prefix', 'SR10-platform-replay', 'C16-CTL-churn16', 'E1-CTL-exactness-eager', 'G0-turns-A-production-bytes', 'T0-timed-production-bytes')
 EXPECTED = CORE + HAND_BACK
 FIRST_TAG, RESERVE = 601, (611, 612)
 ALLOWLISTED_UNUSED = base.ALLOWLISTED_UNUSED
@@ -87,13 +87,14 @@ class OrderTests(unittest.TestCase):
             else:
                 self.assertEqual(line[2], PRODUCTION, line)
 
-    def test_the_value_order_puts_the_hang_shapes_first_and_t0_before_g0_and_after_e1(self):
+    def test_the_value_order_puts_the_hang_shapes_first_and_t0_last_after_the_gate_jobs(self):
         names = [line[0] for line in order()]
         self.assertEqual(names[:8], list(CORE))
         self.assertEqual(names[-5:], list(HAND_BACK))
         self.assertEqual(len(names), 13)
+        self.assertLess(names.index('G0-turns-A-production-bytes'), names.index('T0-timed-production-bytes'))
         self.assertLess(names.index('E1-CTL-exactness-eager'), names.index('T0-timed-production-bytes'))
-        self.assertLess(names.index('T0-timed-production-bytes'), names.index('G0-turns-A-production-bytes'))
+        self.assertEqual(names[7], 'T0-timed-production-bytes')
 
     def test_the_v5_block_is_not_part_of_the_extension(self):
         for name in ('R4-reset-all-four', 'V1a-cardm-watcher', 'V1b-cardm-full'):
