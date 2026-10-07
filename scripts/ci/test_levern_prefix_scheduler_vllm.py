@@ -328,12 +328,19 @@ class MergedOnRealVllmTests(unittest.TestCase):
     def test_a_conversation_splits_every_turn_exactly_and_matches_the_sticky_oracle_and_the_unchunked_run(self):
         import prefix_judge
 
+        from vllm.v1.metrics.stats import PrefixCacheStats
+
+        # vLLM replaces the manager's PrefixCacheStats object every time it collects the step's stats, so the count is taken on the class
+        recorded, original_record = [], PrefixCacheStats.record
+
+        def counting(this, *args, **kwargs):
+            recorded.append(1)
+            return original_record(this, *args, **kwargs)
+
+        patcher = mock.patch.object(PrefixCacheStats, 'record', counting)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         scheduler, state, lines, drive = self.build()
-        statistics = scheduler.kv_cache_manager.prefix_cache_stats
-        recorded = []
-        original_record = getattr(statistics, 'record', None)
-        if callable(original_record):
-            statistics.record = lambda *args, **kwargs: (recorded.append(1), original_record(*args, **kwargs))[1]
         oracle = prefix_judge.Oracle(sticky=True)
         self.decoder(drive)
         drive.run_until(lambda: 'd0' in drive.model.final)
@@ -366,10 +373,9 @@ class MergedOnRealVllmTests(unittest.TestCase):
         # the registry equals a run with Lever N off
         reference = reference_registry(self.env, prompts)
         self.assertEqual(registry_keys(state.registry), registry_keys(reference))
-        # the peek recorded nothing: vLLM's statistics hold one attempt per admission (where this vLLM's PrefixCacheStats records through record())
-        if callable(original_record):
-            self.assertEqual(len(recorded), state.registry.stats['attempts'])
-            self.assertGreater(len(recorded), 5)
+        # the peek recorded nothing: vLLM's statistics hold one attempt per in-pass trim, which the registry counts too
+        self.assertEqual(len(recorded), state.registry.stats['attempts'])
+        self.assertGreater(len(recorded), 5)
         self.assertEqual(drive.preempted, set())
         self.assertLessEqual(drive.over, 0)
         self.assertEqual(drive.unwritten, [])
