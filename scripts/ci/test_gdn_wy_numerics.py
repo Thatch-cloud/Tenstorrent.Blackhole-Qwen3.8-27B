@@ -173,6 +173,7 @@ class ReportAndVerdict(unittest.TestCase):
                                                        wybf_vs_seqbf=pair(0.01, 0.01)))))
         acc = N.acceptance(report)
         self.assertFalse(acc['e1_pass'])
+        self.assertAlmostEqual(acc['e1_worst_ratio'], 2.0)
         self.assertEqual(len(acc['problems']), 1)
         report['drift']['model']['pairs']['wybf_vs_fp64'] = pair(0.005, 0.005)
         self.assertTrue(N.acceptance(report)['e1_pass'])

@@ -58,9 +58,28 @@ It is the same conclusion the repo already recorded: "WY-form GDN is faster but 
 
 **What the CPU numerics can show about causality.** Rows `0..t` of the window form are bit-identical when the later rows are real, zero or other finite data (the triangular masks multiply them by exact zeros, and adding exact zeros changes no partial sum), but **NaN or Inf in a later row leaks into the committed rows** (0 times NaN is NaN in the `A V` and `QK^T` products). A kernel that reads padded or stale tile rows must keep them finite. The harness's `nan` variant is informational for that reason; the three finite variants are gated.
 
-## 4. Results
+## 4. Results (CI run of tag `experiment/gdn-wy-numerics-v1`, 8 users, 1,000 cycles per cell, synthetic regimes)
 
-**The numbers that count come from the CI cells; none are in this document yet.** A laptop smoke run (not a result) agrees with the earlier laptop research in direction: the window form's error against fp64 is *smaller* than the sequential chain's (it rounds once, the chain rounds sixteen times), so E1 holds, while the form differs from the served bytes in about half of the gated outputs and is not segmentation-invariant. Those are CPU-model statements about a form that does not exist on the device. The CI report replaces this paragraph when it exists (`docs/gdn-wy-probe.md` section 4 is updated from the artifacts of the run named in the commit that edits it).
+Max over the run of the error against fp64 (state, then gated-output core), bf16 class; the last column is the fraction of the window form's gated bf16 outputs that differ from the served chain's. All values finite, `repo_reference_crosscheck` zero differing elements in every cell (m, CPU, synthetic inputs).
+
+| Cell | Served chain vs fp64 (state / output) | Window form vs fp64 (state / output) | E1 | WY vs served, gated bytes differing |
+|---|---|---|---|---:|
+| model, 16 rows, tau | 0.053 / 0.024 | 0.024 / 0.012 | pass | 62% |
+| R1, 16 rows, tau | 0.00500 / 0.00464 | 0.00504 / 0.00330 | **fail by 1.0% on the state** (ratio 1.01) | 51% |
+| R2, 16 rows, tau | 0.0033 / 0.0050 | 0.0032 / 0.0023 | pass | 43% |
+| model, 32 rows, tau | 0.048 / 0.026 | 0.022 / 0.013 | pass | 62% |
+| model, 32 rows, long acceptance (two windows in 60% of rounds) | 0.053 / 0.028 | 0.014 / 0.0076 | pass | 62% |
+| R1, 32 rows, long acceptance | 0.0069 / 0.0048 | 0.0038 / 0.0023 | pass | 51% |
+
+- **E1 (error no worse than the served chain's): five of six cells pass, R1 at 16 rows misses by one percent on one metric** while its output error is 29% lower. The criterion is strict and was not loosened after the fact; read it as a tie on the state and a win on the output there. The window form is as good as or better than the chain in every cell, because it rounds the state once per window and the chain sixteen times. That is the form's one numerical advantage and it is not a reason to serve it.
+- **Byte identity: not met anywhere** (43% to 62% of gated bf16 outputs differ). `contract.byte_identical_to_served` is false in every cell, as section 2 requires.
+- **Segmentation: the served chain is bitwise invariant in every cell (fp32 and bf16, all common commit points); the window form is not** (0 of 68 common commit points identical at 16 rows in model and R1; 10 to 21 of 68 in R2, where strong decay makes later rows matter little).
+- **Causality (CPU model):** rows `0..t` and the committed state are bit-identical across real, zero and other later rows for both forms; with a shorter block (absent rows) the window form is *not* bit-identical (different matmul shapes: a CPU-library effect, reported, not gated); NaN or Inf in later rows leaks into the committed rows for the window form only (section 3).
+- **Packed equals solo (CPU model):** true for all forms in every cell. A CPU matmul library chose the same blocking for 8 users and 1; this says nothing about the kernel. The card harness checks the kernel's own bytes.
+- **Drift:** no divergence over 1,000 cycles; the errors above are the run maxima and the per-checkpoint series are in each report (`drift.*.pairs.*.state`).
+- **Not measured:** real layer 0 / 23 / 47 activations (section 3), the device-class numerics of a real kernel, and anything on a card.
+
+These are CPU-model statements about a form that does not exist on the device. The reports are the artifacts of the run named above; section 6 says what remains.
 
 ## 5. Cost model (cm)
 

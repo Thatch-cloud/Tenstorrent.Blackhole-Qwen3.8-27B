@@ -30,8 +30,8 @@ the second window of a 32-row block is exercised.
 
 The report is one JSON object (kind gdn-wy-numerics); the last stdout line is a one-line summary, then the same object's `acceptance`.
 Exit code 0 when the E1 criterion holds, 1 when it does not, 2 on a usage error. The criterion (E1): the window form's error against
-fp64 is no worse than the served chain's, in the bf16 class, for the state and the output, over every drift case, and nothing is
-non-finite. It is a research criterion: `contract.byte_identical_to_served` is false whenever any byte differs, and that is what
+fp64 is no worse than the served chain's (ratio <= 1.00, strict: a tie a hair over fails and `e1_worst_ratio` says by how much), in the
+bf16 class, for the state and the output, over every drift case, and nothing is non-finite. It is a research criterion: `contract.byte_identical_to_served` is false whenever any byte differs, and that is what
 rules the form out of serving.
 """
 
@@ -476,7 +476,7 @@ def acceptance(report):
     seg = {key: case['wy_bf16']['outputs_bitwise_identical'] for key, case in report.get('segmentation', {}).items()}
     return dict(
         criterion='E1: window error vs fp64 <= %.2f x served-chain error (bf16 class), state and output, every drift case, all finite' % E1_RATIO_MAX,
-        e1_pass=not problems and bool(rows), e1_rows=rows, problems=problems,
+        e1_pass=not problems and bool(rows), e1_worst_ratio=max((r['ratio'] for r in rows), default=None), e1_rows=rows, problems=problems,
         contract=dict(byte_identical_to_served=bool(contract_differing) and all(f == 0.0 for _, f in contract_differing),
                       gated_bf16_differing_fraction_wybf_vs_seqbf=dict(contract_differing),
                       packed_equals_solo=packed_ok, segmentation_invariant_wy_bf16=seg,
@@ -579,7 +579,8 @@ def main(argv=None):
         'PASS' if acc['e1_pass'] else 'FAIL', args.rows, ','.join(args.regimes), acc['contract']['byte_identical_to_served'], args.smoke))
     for problem in acc['problems']:
         print('  problem: ' + problem)
-    print(json.dumps(dict(kind=KIND, e1_pass=acc['e1_pass'], rows=args.rows, out=os.path.basename(args.out)), sort_keys=True))
+    print(json.dumps(dict(kind=KIND, e1_pass=acc['e1_pass'], e1_worst_ratio=acc['e1_worst_ratio'], rows=args.rows,
+                          out=os.path.basename(args.out)), sort_keys=True))
     return 0 if acc['e1_pass'] else 1
 
 
