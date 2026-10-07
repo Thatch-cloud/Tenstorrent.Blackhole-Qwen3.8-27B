@@ -33,7 +33,8 @@ LOAD_LINE = re.compile(r'\[LOAD\] (\d+) (\d+(?:\.\d+)?)')
 DEFAULT_BUCKET = 1024
 DEFAULT_MIN_MATCHED = 200
 DEFAULT_LIVE = 8
-GO_PAIRS = 3
+GO_PAIRS = 3          # the window's three A/B pairs: GO needs all three measured and negative
+NO_GO_PAIRS = 2       # NO-GO: at least two of the three positive
 GO_MIN_FRACTION = 0.01
 
 
@@ -135,22 +136,25 @@ def load_void(log_text, max_load):
     return (True, 'load average %.2f above %.2f' % (worst, max_load)) if worst > max_load else (False, None)
 
 
-def judge(pairs, floor_ms, a_median_ms, go_pairs=GO_PAIRS):
+def judge(pairs, floor_ms, a_median_ms, go_pairs=GO_PAIRS, no_go_pairs=NO_GO_PAIRS):
     """GO / NO-GO / INCONCLUSIVE for one length from its paired readings (compare()'s dicts, VOID pairs included).
-    GO: at least `go_pairs` measured pairs have a negative delta and the pooled (median) gain exceeds max(floor, 1% of A's median).
-    NO-GO: at least `go_pairs` measured pairs have a positive delta.
-    Fewer than `go_pairs` measured pairs: INCONCLUSIVE (a VOID pair is never a vote)."""
+    GO: at least `go_pairs` measured pairs (all three of the window's) have a negative delta and the pooled (median) gain exceeds max(floor, 1% of A's median).
+    NO-GO: at least `no_go_pairs` measured pairs have a positive delta.
+    Fewer than `go_pairs` measured pairs: INCONCLUSIVE unless the positive ones already reach `no_go_pairs` (a VOID pair is never a vote)."""
     measured = [pair for pair in pairs if pair.get('verdict') == 'MEASURED']
+    deltas = [pair['delta_ms'] for pair in measured]
+    if sum(1 for value in deltas if value > 0) >= no_go_pairs:
+        return dict(verdict='NO-GO', pooled_gain_ms=round(-statistics.median(deltas), 2), faster=sum(1 for value in deltas if value < 0),
+                    slower=sum(1 for value in deltas if value > 0))
     if len(measured) < go_pairs:
         return dict(verdict='INCONCLUSIVE', reason='%d measured pairs of %d, %d needed' % (len(measured), len(pairs), go_pairs))
-    deltas = [pair['delta_ms'] for pair in measured]
     gain = -statistics.median(deltas)
     need = max(floor_ms or 0.0, GO_MIN_FRACTION * a_median_ms)
     faster = sum(1 for value in deltas if value < 0)
     slower = sum(1 for value in deltas if value > 0)
     if faster >= go_pairs and gain > need:
         return dict(verdict='GO', pooled_gain_ms=round(gain, 2), needed_ms=round(need, 2), faster=faster, slower=slower)
-    if slower >= go_pairs:
+    if slower >= no_go_pairs:
         return dict(verdict='NO-GO', pooled_gain_ms=round(gain, 2), needed_ms=round(need, 2), faster=faster, slower=slower)
     return dict(verdict='INCONCLUSIVE', pooled_gain_ms=round(gain, 2), needed_ms=round(need, 2), faster=faster, slower=slower,
                 reason='no majority beyond the floor')

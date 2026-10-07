@@ -249,6 +249,7 @@ class MergeSeamTests(unittest.TestCase):
 
 
 SDPA_ENGAGED = '[PINDIAG] tp4 sdpa engaged config=multi flags=0x21 users=4 cores=64'
+SDPA_UNQUALIFIED = sdpa_multi_tp.unqualified_line(4096)      # the combined window's marker: multi at 262,144 says the G16 program is outside the evidence
 SDPA_CALL = '[PINDIAG] tp4 sdpa multi call layer=3 users=4'
 SDPA_AUDIT_LINE = '[PINDIAG] tp4 sdpa audit 7 exact=True'
 SPREAD_ENGAGED = spread.ENGAGED + ' rows=64 conv_cores=80 gate_cores=2 per_core=2 served_per_core=2 audit=1'
@@ -259,6 +260,7 @@ def wave_2_log(*, sdpa=True, sdpa_call=True, sdpa_audit=True, f1=True, f1_audit=
     lines = [w1_tests.stack_log(**wave_1)]
     if sdpa:
         lines.append(SDPA_ENGAGED)
+        lines.append(SDPA_UNQUALIFIED)
     if sdpa_call:
         lines.append(SDPA_CALL)
     if sdpa_audit:
@@ -298,6 +300,15 @@ class SmokeUnionTests(unittest.TestCase):
             with self.subTest(missing=what):
                 self.assertTrue(self.judge(env, log), what)
 
+    def test_multi_at_262144_without_its_unqualified_line_is_caught_and_the_line_is_the_attach_s(self):
+        env = self.env()
+        log = wave_2_log().replace(SDPA_UNQUALIFIED, '')
+        self.assertTrue([problem for problem in self.judge(env, log) if 'UNQUALIFIED' in problem])
+        self.assertEqual(SDPA_UNQUALIFIED, sdpa_multi_tp.unqualified_line(4096))
+        self.assertIsNone(sdpa_multi_tp.unqualified_line(2048), 'below the 262k evidence the attach says nothing')
+        self.assertIn('capacity=262144', SDPA_UNQUALIFIED)
+        self.assertEqual(c2_smoke_check.SDPA_MULTI_UNQUALIFIED, sdpa_multi_tp.UNQUALIFIED)
+
     def test_each_wave_1_lever_missing_is_still_caught_beside_wave_2(self):
         env = self.env()
         for what in ('hostgap', 'u1', 'd2'):
@@ -314,7 +325,7 @@ class SmokeUnionTests(unittest.TestCase):
     def test_the_timed_arm_needs_the_engaged_lines_alone(self):
         env = self.env(W2)
         timed = '\n'.join([w1_tests.stack_log(u1=True).replace(w1_tests.AUDIT_U1 % 'capture3', '').replace(w1_tests.AUDIT_U1 % 'capture4', ''),
-                           SDPA_ENGAGED, SDPA_CALL, SPREAD_ENGAGED.replace('audit=1', 'audit=0')])
+                           SDPA_ENGAGED, SDPA_UNQUALIFIED, SDPA_CALL, SPREAD_ENGAGED.replace('audit=1', 'audit=0')])
         found = [problem for problem in self.judge(env, timed) if 'audit' not in problem.lower()]
         self.assertEqual(found, [])
         self.assertTrue(self.judge(env, w1_tests.stack_log() + '\n' + SDPA_ENGAGED + '\n' + SDPA_CALL))

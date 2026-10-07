@@ -1437,15 +1437,16 @@ def lever_engagement_problems(env, container_text, smoke=None, drill=False):
     levers' markers before. Lever N's kill switch line is a problem outside the drill arm (`drill` True): a leftover levern.off would
     otherwise turn the lever off for every later arm and read as a clean run."""
     env = env or {}
+    # (.extend, not +=: test_tp4_w2 holds that check() itself calls each rule exactly once.)
     problems = []
-    problems += sampdraft_problems(container_text, env)
-    problems += u1_problems(env, container_text)
-    problems += sdpa_long_problems(env, container_text)
-    problems += sdpa_multi_problems(env, container_text)
-    problems += spread_problems(env, container_text)
-    problems += drafter_checkpoint_problems(env, container_text)
+    problems.extend(sampdraft_problems(container_text, env))
+    problems.extend(u1_problems(env, container_text))
+    problems.extend(sdpa_long_problems(env, container_text))
+    problems.extend(sdpa_multi_problems(env, container_text))
+    problems.extend(spread_problems(env, container_text))
+    problems.extend(drafter_checkpoint_problems(env, container_text))
     lever, _ = levern_problems(env, container_text, smoke)
-    problems += lever
+    problems.extend(lever)
     if env.get(LEVERN_FLAG) == '1' and not drill and LEVERN_KILL_PREFIX in container_text:
         problems.append('Lever N logged its kill switch line outside the drill arm: a levern.off file was present, so this arm did not run the lever '
                         '(a leftover file from an earlier arm?)')

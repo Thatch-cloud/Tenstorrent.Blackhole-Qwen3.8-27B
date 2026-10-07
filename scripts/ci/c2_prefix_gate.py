@@ -203,7 +203,9 @@ STICKY_FLAG = 'QWEN_FAST_STICKY_SESSIONS'
 STICKY_LOOKAHEAD = 16          # DFlash with 15 proposals (qwen_prefix_scheduler_patch.STICKY_LOOKAHEAD)
 # The arms a sticky (decode_only) profile runs longer than their G1 limits: the eager arm carries the whole
 # traced set to 123k, and the audit reads a pool twice general's per row.
-S2_TIMEOUTS = {'exactness-eager': 9000, 'exactness-audit': 7200}
+# exactness-shared (eight same-tenant agents, about 48 requests of which most are under 32,785 tokens, each hit read against a cold twin and the pool read twice under the
+# audits) has never produced a verdict on cards inside 7,200 s (cancelled at 84 minutes once, at go-live once): 10,800 s, the window's raise (docs/tp4-combined-window.md).
+S2_TIMEOUTS = {'exactness-eager': 9000, 'exactness-audit': 7200, 'exactness-shared': 10800}
 PORT = 8021
 CONTAINER_PREFIX = 'qwen-c2-prefix-'
 DERIVED_MOUNT = '/prefix-gate/profiles.json'

@@ -100,20 +100,22 @@ class JudgeTests(unittest.TestCase):
     def pair(self, delta, verdict='MEASURED'):
         return dict(verdict=verdict, delta_ms=delta)
 
-    def test_go_needs_three_negative_pairs_and_a_gain_past_the_floor_and_one_percent(self):
-        self.assertEqual(t.judge([self.pair(-10), self.pair(-9), self.pair(-12), self.pair(-8)], 3.0, 200.0)['verdict'], 'GO')
-        small = t.judge([self.pair(-1.5)] * 4, 1.0, 200.0)
+    def test_go_needs_all_three_pairs_negative_and_a_gain_past_the_floor_and_one_percent(self):
+        self.assertEqual(t.judge([self.pair(-10), self.pair(-9), self.pair(-12)], 3.0, 200.0)['verdict'], 'GO')
+        small = t.judge([self.pair(-1.5)] * 3, 1.0, 200.0)
         self.assertEqual(small['verdict'], 'INCONCLUSIVE', 'a gain under 1% of the round is inside the noise')
-        floor = t.judge([self.pair(-5)] * 4, 6.0, 200.0)
+        floor = t.judge([self.pair(-5)] * 3, 6.0, 200.0)
         self.assertEqual(floor['verdict'], 'INCONCLUSIVE', 'a gain under the A-to-A drift is inside the noise')
+        self.assertEqual(t.judge([self.pair(-10), self.pair(-9), self.pair(2)], 3.0, 200.0)['verdict'], 'INCONCLUSIVE', 'one slower pair is no GO and not yet a NO-GO')
 
-    def test_no_go_needs_three_positive_pairs(self):
-        self.assertEqual(t.judge([self.pair(4), self.pair(5), self.pair(-1), self.pair(6)], 1.0, 200.0)['verdict'], 'NO-GO')
+    def test_no_go_needs_two_positive_pairs_of_the_three(self):
+        self.assertEqual(t.judge([self.pair(4), self.pair(5), self.pair(-1)], 1.0, 200.0)['verdict'], 'NO-GO')
 
     def test_a_void_pair_is_never_a_vote(self):
-        pairs = [self.pair(-10), self.pair(-10), self.pair(0, 'VOID'), self.pair(0, 'VOID')]
+        pairs = [self.pair(-10), self.pair(-10), self.pair(0, 'VOID')]
         self.assertEqual(t.judge(pairs, 1.0, 200.0)['verdict'], 'INCONCLUSIVE')
-        self.assertEqual(t.judge(pairs + [self.pair(-10)], 1.0, 200.0)['verdict'], 'GO')
+        self.assertEqual(t.judge(pairs[:2] + [self.pair(-10)], 1.0, 200.0)['verdict'], 'GO')
+        self.assertEqual(t.judge([self.pair(4), self.pair(5), self.pair(0, 'VOID')], 1.0, 200.0)['verdict'], 'NO-GO', 'two measured slower pairs already decide')
 
     def test_load_above_the_maximum_voids_and_no_samples_cannot_be_called_clean(self):
         self.assertEqual(t.load_void('[LOAD] 1 1.5\n[LOAD] 61 2.5', 4.0), (False, None))

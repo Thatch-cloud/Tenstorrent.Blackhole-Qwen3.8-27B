@@ -322,7 +322,7 @@ class ShapeTests(unittest.TestCase):
             for arm in gate.plan_arms(plan, 'general-prefix', 'general', document):
                 wanted[arm['arm']] = gate.wants_digests(arm)
         self.assertEqual(sorted(name for name, on in wanted.items() if not on),
-                         ['agent-turns-baseline', 'agent-turns-prefix', 'bringup-reference', 'timing-baseline',
+                         ['agent-turns-baseline', 'agent-turns-prefix', 'bringup-reference', 'levern-hit', 'timing-baseline',
                           'timing-prefix'])
 
     def test_the_contract_reads_the_derived_file(self):
@@ -944,7 +944,7 @@ class StickyArmTests(unittest.TestCase):
         audit, eager, shared = exactness
         self.assertEqual((eager['full'], eager['path'], eager['sticky'], eager['s2'], eager['derived']),
                          (True, 'eager', True, True, None))
-        self.assertEqual((eager['timeout'], audit['timeout'], shared['timeout']), (9000, 7200, 7200))
+        self.assertEqual((eager['timeout'], audit['timeout'], shared['timeout']), (9000, 7200, 10800))      # exactness-shared: the combined window's raise
         self.assertEqual((audit['full'], shared['full']), (False, False))
         for arm in exactness:
             self.assertEqual((arm['env'], arm['prompt_limit'], arm['strict']), (c2_serving_gate.AUDIT_ENV, 32768, True))
