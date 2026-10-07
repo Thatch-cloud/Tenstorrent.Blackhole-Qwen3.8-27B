@@ -1901,7 +1901,9 @@ def without_levern(lines):
     start = [index for index, value in enumerate(lines) if value.strip().startswith("if os.environ.get('QWEN_FAST_LEVER_N', '0') != '0'")]
     if len(start) != 1:
         raise AssertionError('Lever N attach block is not in serving_runtime.py exactly once')
-    end = next(index for index in range(start[0], len(lines)) if lines[index].strip() == 'levern_route.warm(runner, model, log=pindiag)')
+    # ... through the merged route's epoch-scope registration (tp4/levern-prefix), the last statement of the same block
+    end = next(index for index in range(start[0], len(lines))
+               if lines[index].strip() == 'levern_route.engage_epoch_scope(model, lambda tensor: device_addresses(operations, tensor), log=pindiag)')
     return lines[:start[0]] + lines[end + 1:]
 
 

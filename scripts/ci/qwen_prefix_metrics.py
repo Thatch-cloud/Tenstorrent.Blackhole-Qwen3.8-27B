@@ -75,6 +75,7 @@ GAUGES = {
     'staged_now': 'grants staged in the current schedule() call',
     'committed_now': 'grants committed for the current step',
     'orphans_now': 'resident checkpoints whose KV chain is broken below them',
+    'inflight_now': 'split prefills (Lever N) whose capture plan is still held for their later steps',
     'mid_loop_capture': '1 once the model graft declared captures inside its chunk loop (gap boundaries planned)',
     'disabled': '1 once the kill switch latched the registry off for the life of the engine',
 }
@@ -109,6 +110,9 @@ COUNTERS = {
     'dropped_hits': 'staged hits (Q > 0) dropped because the step did not admit the request (F2)',
     'program_growth': 'prefill rows whose program cache grew after warmup (F3: a compile after parking)',
     'capture_wrong_position': 'captures refused because the state was not taken after exactly pos tokens',
+    'inflight_started': 'split prefills (Lever N) that left their capture plan for the steps after the first',
+    'inflight_captures': 'checkpoints stored from the in-flight plan of a split prefill (a step after its first)',
+    'inflight_dropped': 'in-flight capture plans ended (the final step ran, the request was freed)',
     'restores': 'checkpoints restored into the prefill scratch',
     'token_checks': 'token-id checks the trim ran (remembered per request and checkpoint)',
     'session_denied': 'hits denied to streaming-input sessions (their prompt holds decode-written tokens)',
