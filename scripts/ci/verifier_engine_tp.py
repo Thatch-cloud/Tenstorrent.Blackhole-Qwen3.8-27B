@@ -199,7 +199,7 @@ class VerifierEngine(PairVerifierEngine):
         self.replay_mark = None
         super().__init__(*args, sampler=sampler, **options)
         # What the captures hold. `widths` is what the request may ask: the same, until a rebind narrows it to a cold engine's (R4).
-        self.captured_widths = tuple(self.widths)
+        self.captured_widths = tuple(getattr(self, 'widths', None) or ())
 
     def operation(self, fixture, *, hidden_capture=None, feature_capture=None):
         """The inherited (logits, pinned ids); under the arm (logits, shard ids, shard maxima) or, audited, (logits, shard ids, shard

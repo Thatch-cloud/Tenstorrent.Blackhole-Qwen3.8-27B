@@ -77,6 +77,16 @@ PINNED = {
 
 # ------------------------------------------------------------------ the corpus (harness.py CASES)
 
+class _ParkedTwins(object):
+    """The generated engine-reuse gate twins by name (this file ships in the image, where make_parked_profiles does not; test_parked_tp4_profiles holds the list)."""
+
+    def __contains__(self, name):
+        return '-ship-prefix-levern-parked' in name or name.endswith('-ship-prefix-levern-audit-r2')
+
+
+PARKED_TWINS = _ParkedTwins()
+
+
 def fn(name, props, required=()):
     params = {'type': 'object', 'properties': props}
     if required:
@@ -871,7 +881,7 @@ class ProfileGatingTests(unittest.TestCase):
     def test_only_c2_and_c2_gate_ask_for_m(self):
         # ...and their S2 twins, c2-packed and c2-packed-gate (design W8: c2's and c2-gate's limits and parser),
         # and those twins' sticky-session profiles, c2-packed-prefix and c2-packed-prefix-gate (the same parser).
-        asked = {name: profile.get('parser_rechunk') for name, profile in self.profiles().items()}
+        asked = {name: profile.get('parser_rechunk') for name, profile in self.profiles().items() if name not in PARKED_TWINS}
         self.assertEqual(asked, {'exact': None, 'c2': True, 'c2-gate': True, 'c2-packed': True, 'c2-packed-gate': True,
                                  'c2-packed-prefix': True, 'c2-packed-prefix-gate': True,
                                  # the four-card S2 twins of c2-packed and c2-packed-gate (plan S2-TP4)
@@ -929,6 +939,8 @@ class ProfileGatingTests(unittest.TestCase):
                                  # the pair at two links is general under another descriptor
                                  'general-2link': None})
         for name, profile in self.profiles().items():
+            if name in PARKED_TWINS:
+                continue
             self.assertEqual(contract.parser_rechunk(profile),
                              name in ('c2', 'c2-gate', 'c2-packed', 'c2-packed-gate', 'c2-packed-prefix',
                                       'c2-packed-prefix-gate', 'c2-packed-tp4', 'c2-packed-tp4-gate',

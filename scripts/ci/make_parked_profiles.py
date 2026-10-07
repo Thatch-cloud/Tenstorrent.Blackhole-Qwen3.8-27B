@@ -87,6 +87,11 @@ def specs():
     return out
 
 
+def twin_names():
+    """The generated twins' names (the profile-enumerating tests of the other lever branches exempt them: test_parked_tp4_profiles holds each)."""
+    return tuple(name for name, _parent, _env, _why in specs())
+
+
 def parent_problems(name, profile):
     """Why this parent cannot be twinned, [] when it can."""
     problems = []

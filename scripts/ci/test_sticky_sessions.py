@@ -33,6 +33,7 @@ block). What is held here:
   writers    every device write of a resumed request lands in its own blocks at or above R.
 """
 
+import make_parked_profiles
 import contextlib
 import os
 import subprocess
@@ -693,6 +694,7 @@ class ProfileTests(unittest.TestCase):
 
     def test_only_the_sticky_profiles_set_the_switch(self):
         names = sorted(name for name, data in load_profiles()['profiles'].items() if STICKY in data['env'])
+        names = [name for name in names if name not in make_parked_profiles.twin_names()]
         self.assertEqual(names, ['c2-packed-prefix', 'c2-packed-prefix-gate', 'c2-packed-tp4-8x262k-prefix-gate',
                                  'c2-packed-tp4-8x262k-prefix-time-gate',
                                  'c2-packed-tp4-8x262k-ship-prefix', 'c2-packed-tp4-8x262k-ship-prefix-audit', 'c2-packed-tp4-8x262k-ship-prefix-levern', 'c2-packed-tp4-8x262k-ship-prefix-levern-audit'])

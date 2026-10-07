@@ -12,6 +12,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import make_parked_profiles
 import os
 from pathlib import Path
 import re
@@ -73,7 +74,7 @@ GATE_ONLY_OTHERS = ('c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit', 
 # tp4/packed-prefix: the eight-seat 262k twins, gate-only (test_tp4_packed_prefix_profiles holds them).
 STICKY_GATE_ONLY = ('c2-packed-tp4-8x262k-prefix-gate', 'c2-packed-tp4-8x262k-prefix-time-gate', 'c2-packed-tp4-8x262k-ship-prefix-audit',
                     # tp4/levern-prefix: the merged route's gate-only pair (test_levern_prefix_contract holds them)
-                    'c2-packed-tp4-8x262k-ship-prefix-levern', 'c2-packed-tp4-8x262k-ship-prefix-levern-audit')
+                    'c2-packed-tp4-8x262k-ship-prefix-levern', 'c2-packed-tp4-8x262k-ship-prefix-levern-audit') + make_parked_profiles.twin_names()
 STICKY_PROFILES = ('c2-packed-prefix', 'c2-packed-prefix-gate') + STICKY_GATE_ONLY + ('c2-packed-tp4-8x262k-ship-prefix',)    # + ship/262k-prefix: the both-levers pair
 JOB = Path('C:/Users/liamb/.claude/jobs/8376c877/tmp')
 PLUGIN_CHECKOUT = Path(os.environ.get('QWEN_TT_PLUGIN_CHECKOUT') or JOB / 'risks' / 'vllm-tt-plugin')

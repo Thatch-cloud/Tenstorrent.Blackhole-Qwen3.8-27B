@@ -12,8 +12,15 @@ import serving_c2_contract as contract
 PROFILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'qwen_c2_profiles.json')
 
 
-import make_parked_profiles as _parked_twins  # noqa: E402
-PARKED_TWINS = frozenset(name for name, parent, env, why in _parked_twins.specs())
+class _ParkedTwins(object):
+    """The generated engine-reuse gate twins by name (this file ships in the image, where make_parked_profiles does not: test_parked_tp4_profiles holds the list)."""
+
+    def __contains__(self, name):
+        return '-ship-prefix-levern-parked' in name or name.endswith('-ship-prefix-levern-audit-r2')
+
+
+PARKED_TWINS = _ParkedTwins()
+
 
 class Params(object):
     def __init__(self, **values):

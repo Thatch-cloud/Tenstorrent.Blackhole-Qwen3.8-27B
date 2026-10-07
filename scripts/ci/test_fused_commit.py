@@ -1566,7 +1566,7 @@ class ParentTests(unittest.TestCase):
             self.skipTest('no git history for %s' % PARENT)
         before = result.stdout.decode('utf-8').splitlines()
         after = without_trace_census(without_levern(without_diag_trim(without_prefill_scratch(without_any_request(without_sticky(
-            without_solo_and_lanes(without_m3_blocks(without_request_warm((HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines())))))))))
+            without_solo_and_lanes(without_m3_blocks(without_request_warm(without_parked_engines((HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines()))))))))))
         changed = [line for line in difflib.unified_diff(before, after, lineterm='', n=0)
                    if line[:1] in '+-' and not line.startswith(('+++', '---'))]
         added = [line[1:].strip() for line in changed if line.startswith('+')]
@@ -1873,6 +1873,45 @@ def without_sticky(lines):
                      "pindiag(STICKY_ENGINE_MARKER + '{} ms={:.1f} frontier={} prompt={}', str(state.req_id)[:48],",
                      '(time.perf_counter() - began) * 1000.0, state.num_computed_tokens,',
                      'len(state.prompt_token_ids))'))
+
+
+# The engine-reuse hunks of serving_runtime.py against the tp4/levern-prefix head (QWEN_FAST_PARKED_ENGINES, default off), each as (what the file holds
+# now, what it held before), in file order. without_parked_engines puts each back, found exactly once, so nothing else is hidden.
+PARKED_ENGINES_HUNKS = [
+    ("    return blocks\n\n\n# Engine reuse (serving_parked_engines; default off): one engine per pool slot, parked at attach.\nPARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'\nPARKED_AUDIT_FLAG = 'QWEN_FAST_PARKED_AUDIT'\nPARKED_DRAFTS_FLAG = 'QWEN_FAST_PARKED_DRAFTS'\n\n",
+     '    return blocks\n\n'),
+    ("\n        # Engine reuse (QWEN_FAST_PARKED_ENGINES; default off, strictly '0' or '1'): one engine per pool slot, built here on a synthetic request and\n        # parked (serving_parked_engines.ParkedEngineSet) - after the blocks, which refuse to build once a slot is lent, and before the DRAM\n        # admission and the lifecycle. Registered after the blocks, so it closes before them, the weights and the pool, which refuse to close\n        # while a slot or a weight is still lent. R2's replay ledger (QWEN_FAST_PARKED_AUDIT=1, gate only) installs with or without the parked\n        # engines, so the flag-off control arm of the audit twin runs the same check. Off (unset or '0'), nothing is imported or built.\n        parked_engines = None\n        if (os.environ.get(PARKED_ENGINES_FLAG, '0') != '0' or os.environ.get(PARKED_AUDIT_FLAG, '0') != '0'\n                or os.environ.get(PARKED_DRAFTS_FLAG, '0') != '0'):\n            import serving_parked_engines\n\n            replay_ledger = serving_parked_engines.install_replay_ledger(operations)\n            if replay_ledger is not None:\n                scopes.callback(replay_ledger.uninstall)\n            if os.environ.get(PARKED_ENGINES_FLAG, '0') != '0':\n                serving_parked_engines.parked_engines_enabled()   # strictly '1' from here: any other value is refused\n                parked_engines = serving_parked_engines.ParkedEngineSet(operations=operations, model=model,\n                    sampler=sampler, helpers=helpers, pool=pool, weights=weights, fixtures=fixtures,\n                    collectives=collectives, blocks=packed_blocks if packed_shapes else (),\n                    capture_rows=capture_rows if trimmed else None)\n                scopes.callback(parked_engines.close)\n                parked_engines.build()\n                import levern_policy\n\n                if levern_policy.build_ms_mode() == 'learned':\n                    # The deadline governor charges each pending prefill the cost of the slot it will take: a rebind while parked engines remain.\n                    levern_policy.admission_cost().parked_free = parked_engines.parked_count\n\n        # Sticky sessions (QWEN_FAST_STICKY_SESSIONS, read once at attach; default off). On, every\n",
+     '\n        # Sticky sessions (QWEN_FAST_STICKY_SESSIONS, read once at attach; default off). On, every\n'),
+    ("        sticky = sticky_sessions_enabled()\n        cost_learning = False\n        if parked_engines is not None:\n            import levern_policy\n\n            cost_learning = levern_policy.build_ms_mode() == 'learned'\n        lanes = None\n",
+     '        sticky = sticky_sessions_enabled()\n        lanes = None\n'),
+    ('                    collectives=collectives, buffer_pool=pool, shared_weights=weights,\n                    **(dict(capture_rows=capture_rows) if trimmed else {}),\n                    **(dict(parked=parked_engines) if parked_engines is not None else {}))\n\n',
+     '                    collectives=collectives, buffer_pool=pool, shared_weights=weights,\n                    **(dict(capture_rows=capture_rows) if trimmed else {}))\n\n'),
+    ('                grant = lanes.admit(state.req_id, state.sampling_params, slot0_free=not pool.slots[0].lent)\n            learning = parked_engines is not None and cost_learning\n            if sticky or learning:\n                began = time.perf_counter()\n',
+     '                grant = lanes.admit(state.req_id, state.sampling_params, slot0_free=not pool.slots[0].lent)\n            if sticky:\n                began = time.perf_counter()\n'),
+    ("                raise\n            if learning:\n                # QWEN_FAST_LEVERN_BUILD_MS=learned: what this admission cost, by kind (the governor's per-pending charge).\n                import levern_policy\n\n                levern_policy.observe_admission_cost('rebind' if getattr(request, 'parked_slot', None) is not None else 'build',\n                                                     (time.perf_counter() - began) * 1000.0, log=pindiag)\n            # Engine reuse: a request rebound onto a parked engine did not build one; its engine's ledger walk ran at attach (P7p) and its census\n            # at attach too. The sticky line below stays for every request, with kind= naming which it was (the prefix gate's A8 reads the line).\n            rebound = parked_engines is not None and getattr(request, 'parked_slot', None) is not None\n            if sticky:\n",
+     '                raise\n            if sticky:\n'),
+    ("                # its tail prefill and the build phase 1 still pays (STICKY_ENGINE_MARKER).\n                pindiag(STICKY_ENGINE_MARKER + '{} ms={:.1f} frontier={} prompt={}' + ('' if parked_engines is None else ' kind={}'),\n                        str(state.req_id)[:48], (time.perf_counter() - began) * 1000.0, state.num_computed_tokens,\n                        len(state.prompt_token_ids), *(() if parked_engines is None else ('rebind' if rebound else 'build',)))\n            # The allocator after this request's engine and its captures: one line per\n",
+     "                # its tail prefill and the build phase 1 still pays (STICKY_ENGINE_MARKER).\n                pindiag(STICKY_ENGINE_MARKER + '{} ms={:.1f} frontier={} prompt={}', str(state.req_id)[:48],\n                        (time.perf_counter() - began) * 1000.0, state.num_computed_tokens,\n                        len(state.prompt_token_ids))\n            # The allocator after this request's engine and its captures: one line per\n"),
+    ("                pindiag('[PINDIAG] dram after engine {}: {}', str(state.req_id)[:48], dram_line(pool))\n            if not rebound and memory_ledger.admission_diag('engine'):\n                memory_ledger.engine_admitted(str(state.req_id), engine_request=request)\n",
+     "                pindiag('[PINDIAG] dram after engine {}: {}', str(state.req_id)[:48], dram_line(pool))\n            if memory_ledger.admission_diag('engine'):\n                memory_ledger.engine_admitted(str(state.req_id), engine_request=request)\n"),
+    ('                memory_ledger.engine_admitted(str(state.req_id), engine_request=request)\n            if not rebound:\n                trace_census.census_engine(str(state.req_id), request, operations)\n            try:\n',
+     '                memory_ledger.engine_admitted(str(state.req_id), engine_request=request)\n            trace_census.census_engine(str(state.req_id), request, operations)\n            try:\n'),
+    ("                    lanes.release(state.req_id)\n                if rebound:\n                    # A failed binding leaves the slot unfit to park; its close unparks it.\n                    request.parked_slot.unfit = 'page binding failed'\n                request.close(state.req_id)\n",
+     '                    lanes.release(state.req_id)\n                request.close(state.req_id)\n'),
+    ('        if extent_replay_enabled():\n            scopes.callback(register_dram_admission(pool, **({} if parked_engines is None else dict(parked=parked_engines))))\n        capture_factory, bridge_factory = prefill_tripwire(model, capture_factory, bridge_factory)\n',
+     '        if extent_replay_enabled():\n            scopes.callback(register_dram_admission(pool))\n        capture_factory, bridge_factory = prefill_tripwire(model, capture_factory, bridge_factory)\n'),
+    ("            cancelled=cancelled, packed_step=packed_step,\n            **({'lanes': lanes} if lanes is not None else {}),\n            **({} if parked_engines is None else dict(idle=parked_engines.idle, parked_poll=parked_engines.poll_off)))\n    except BaseException as failure:\n",
+     "            cancelled=cancelled, packed_step=packed_step,\n            **({'lanes': lanes} if lanes is not None else {}))\n    except BaseException as failure:\n"),
+]
+
+
+def without_parked_engines(lines):
+    text = '\n'.join(lines) + '\n'
+    for now, before in PARKED_ENGINES_HUNKS:
+        if text.count(now) != 1:
+            raise AssertionError('The engine-reuse hunk %r is not in serving_runtime.py exactly once' % now[:60])
+        text = text.replace(now, before)
+    return text.splitlines()
 
 
 def without_request_warm(lines):

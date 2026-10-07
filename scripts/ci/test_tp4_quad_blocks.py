@@ -12,6 +12,7 @@ What is held, on the CPU, with the coordinator's own tests' fakes (the quad trac
   - the smoke check expects two engaged markers (one per block) and a round both quads served, in concurrent8_steady.
 """
 
+import make_parked_profiles
 import os
 import sys
 import unittest
@@ -626,7 +627,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(found['default'], 'c2-packed-tp4')
 
     def test_the_flag_is_in_no_other_profile(self):
-        self.assertEqual(sorted(name for name, body in self.profiles()['profiles'].items() if BLOCKS in body.get('env', {})),
+        self.assertEqual(sorted(name for name, body in self.profiles()['profiles'].items() if BLOCKS in body.get('env', {}) and name not in make_parked_profiles.twin_names()),
                          ['c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-best-quad-dbf16', 'c2-packed-tp4-8-best-quad-gate', 'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-levern-audit', 'c2-packed-tp4-8x262k-best-levern-control-audit', 'c2-packed-tp4-8x262k-best-levern-final-hold-time-gate', 'c2-packed-tp4-8x262k-best-levern-foreign-time-gate', 'c2-packed-tp4-8x262k-best-levern-hang-gate', 'c2-packed-tp4-8x262k-best-levern-r1-time-gate', 'c2-packed-tp4-8x262k-best-levern-time-gate', 'c2-packed-tp4-8x262k-best-nosamp-audit', 'c2-packed-tp4-8x262k-best-stack-audit',
                           'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-best-time-gate-d2', 'c2-packed-tp4-8x262k-best-time-gate-dbf16', 'c2-packed-tp4-8x262k-best-time-gate-lookup', 'c2-packed-tp4-8x262k-best-time-gate-nosamp', 'c2-packed-tp4-8x262k-best-time-gate-s1', 'c2-packed-tp4-8x262k-best-time-gate-stack', 'c2-packed-tp4-8x262k-best-time-gate-u1', 'c2-packed-tp4-8x262k-best-u1-audit', 'c2-packed-tp4-8x262k-hostgap-1', 'c2-packed-tp4-8x262k-hostgap-1-audit', 'c2-packed-tp4-8x262k-hostgap-2', 'c2-packed-tp4-8x262k-hostgap-2-audit', 'c2-packed-tp4-8x262k-prefix-gate', 'c2-packed-tp4-8x262k-prefix-time-gate', 'c2-packed-tp4-8x262k-ship', 'c2-packed-tp4-8x262k-ship-prefix', 'c2-packed-tp4-8x262k-ship-prefix-audit', 'c2-packed-tp4-8x262k-ship-prefix-levern', 'c2-packed-tp4-8x262k-ship-prefix-levern-audit', 'c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit', 'c2-packed-tp4-8x262k-w1-audit-nod1', 'c2-packed-tp4-8x262k-w1-lite', 'c2-packed-tp4-8x262k-w1-nod1'])
 

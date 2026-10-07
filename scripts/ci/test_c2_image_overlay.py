@@ -19,6 +19,7 @@ and test_the_layer_commits_are_reachable fails loudly on a shallow clone.
 import ast
 import hashlib
 import json
+import make_parked_profiles
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -1276,7 +1277,7 @@ class ProvenanceTests(unittest.TestCase):
                'c2-packed-tp4-8x262k-hostgap-1', 'c2-packed-tp4-8x262k-hostgap-1-audit', 'c2-packed-tp4-8x262k-hostgap-2', 'c2-packed-tp4-8x262k-hostgap-2-audit',
                'c2-packed-tp4-8x262k-prefix-gate', 'c2-packed-tp4-8x262k-prefix-time-gate', 'c2-packed-tp4-8x262k-ship-prefix-audit', 'c2-packed-tp4-8x262k-ship-prefix-levern', 'c2-packed-tp4-8x262k-ship-prefix-levern-audit',
                'general-tp4-mmrs', 'general-tp4-ring-mmrs']
-        self.assertEqual(gated, sorted("('%s', '%s')" % (step, name) for step in ('boot', 'environment') for name in tp4))
+        self.assertEqual(gated, sorted("('%s', '%s')" % (step, name) for step in ('boot', 'environment') for name in tp4 + list(make_parked_profiles.twin_names())))
         runs = []
         real = provenance.Docker()
         real.run = lambda arguments, timeout=None: runs.append(list(arguments)) or (0, 'C2ENV {}\n', '')
