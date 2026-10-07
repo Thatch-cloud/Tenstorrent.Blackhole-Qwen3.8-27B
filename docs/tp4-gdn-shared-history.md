@@ -85,3 +85,46 @@ cut shows the hazard is real); the capture plumbing through the real `gdn_user_b
 release; the ledger arithmetic through the real `MemoryLedger`; the refusal paths; the grown-profile arithmetic and
 the production profiles unchanged. Card window: audited attach, exactness against the control, the ledger before and
 after, the five-reservation admission test and the hang shapes (`scripts/ci/references/tp4-gdn4e-jobs/ORDER.txt`).
+
+## What was built
+
+| Piece | Where |
+|---|---|
+| The pool, the guard, the accounting, the refusals, the growth-marker check | `scripts/ci/gdn_shared_history.py` (overlay list) |
+| The launch takes its states from the pool inside a verify capture | `scripts/ci/gdn_user_batch_tp.py` (`execute`) |
+| The pool's tensors are never freed by a block's `owned` release | `scripts/ci/tp_addresses.py` (`release_owned`) |
+| Join at construction, capture window, claim in `verify`, detach in `close`, marker, `describe` | `scripts/ci/packed_verifier.py` |
+| Boot check of the growth marker | `scripts/ci/serving_c2_contract.py` (`shared_history_problem`) |
+| Four gate-only profiles | `scripts/ci/qwen_c2_profiles.json`: `c2-packed-tp4-8x262k-ship-prefix-4e-control-audit`, `-4e-audit`, `-4e`, `-4e-grow` |
+| Card-window pack | `scripts/ci/references/tp4-gdn4e-jobs/` |
+
+The ledger attributes a block's buffers by walking the objects reachable from it. The pool is reachable from both blocks, so its
+references to the blocks live in a slots-only holder the walker cannot enter; otherwise the first block's line would absorb the second's.
+In a read of the P6 lines, the second block drops by exactly the shared bytes and the first is unchanged.
+
+## What the CPU tests prove, and the limit of that
+
+- `test_gdn_shared_history_schedule`: two real `PackedVerifierEngine` blocks built through `complete_blocks_two_phase`, a device model that
+  keeps values, twelve random rounds of mixed accepted prefixes (0 to 16, including blocks that sit out). Private and shared histories give
+  identical carries after every schedule (blocking, pipelined, deferred), equal to a pure-Python recurrence. The deferred schedule shows the
+  commit order the lever needs (each block's commits run before the other block's verify) and, without the guard, wrong carries for block A's
+  users only. Refusals: a verify while the other block has undecided segments, deferred commits that cannot be enqueued, a failed or closed
+  writer, a flag the environment cannot honour. Ownership: nothing is freed until the last block closes, each tensor once; a failed second
+  capture frees none of the first block's tensors.
+- `test_gdn_shared_history`: the real four-card launch inside and outside a capture (192 tensors built once and reused, a wrong count or width
+  refused, a failing launch never frees a pooled tensor), `release_owned`, the real memory ledger, the accounting, the profile arithmetic
+  and its negative cases, and that no production profile names either flag.
+- What it cannot prove: that the second capture's trace, which allocates no history, still replays correctly on the device (its intermediates sit
+  in different holes), that the freed bytes reach the KV pool the way the arithmetic says, and the commit's behaviour on real buffers. Those are
+  the card window.
+
+## Open items
+
+- K5-A (`QWEN_FAST_GDN_SEQ_BLOCK`, and its split twin) allocates its own states inside sources whose bytes are pinned; sharing there needs its own
+  plumbing and re-qualification. The flag is refused with it.
+- Round time under the deferred schedule (0 to +2.2 ms) is estimated, not measured; the shipped profile does not defer, so its cost is 0 by
+  construction. No timing arm is in the pack.
+- Whether the worker's KV pool really grows into the freed bytes (the pool is sized from `QWEN36_MAX_TOKENS_ALL_USERS` before or after the packed blocks
+  are built) is what A5 reads; if the attach fails at 22,144 blocks the ledger's free DRAM at P7 says how many fit.
+- Under one 128-row block (M8) the lever disappears; this is a memory bridge for the two-block shape.
+
