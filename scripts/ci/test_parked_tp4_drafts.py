@@ -114,6 +114,30 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual((plain.pairs, plain.quad_blocks), ({}, {}))
 
 
+class NoBookCloseOrderTests(unittest.TestCase):
+    """Without a book the coordinator closes a trace and then unlists it, as the code always did: a close that raises leaves the entry listed."""
+
+    def test_a_raising_close_leaves_the_entry_listed(self):
+        coordinator = coordinator_module.PackedProposalCoordinator()
+        self.assertIsNone(coordinator.book)
+        trace = Mock()
+        trace.close.side_effect = RuntimeError('close failed')
+        coordinator.pairs[(0, 1)] = (object(), object(), trace, False)
+        with self.assertRaises(RuntimeError):
+            coordinator._close_pair((0, 1))
+        self.assertIn((0, 1), coordinator.pairs)
+        quad = Mock()
+        quad.close.side_effect = RuntimeError('close failed')
+        coordinator.quad_blocks[(0, 1, 2, 3)] = ((), quad, False)
+        with self.assertRaises(RuntimeError):
+            coordinator._close_quad_block((0, 1, 2, 3))
+        self.assertIn((0, 1, 2, 3), coordinator.quad_blocks)
+        trace.close.side_effect = quad.close.side_effect = None
+        coordinator._close_pair((0, 1))
+        coordinator._close_quad_block((0, 1, 2, 3))
+        self.assertEqual((coordinator.pairs, coordinator.quad_blocks), ({}, {}))
+
+
 class BookTests(unittest.TestCase):
     def setUp(self):
         FakeTrace.instances = []
@@ -235,8 +259,8 @@ class SourceTests(unittest.TestCase):
         ('PackedProposalCoordinator.close', 'trace'),
         ('PackedProposalCoordinator.close', 'self.quad[1]'),
         ('PackedProposalCoordinator.close', 'state[1]'),
-        ('PackedProposalCoordinator._close_pair', "self.pairs.pop(group)[2]"),
-        ('PackedProposalCoordinator._close_quad_block', 'self.quad_blocks.pop(slots)[1]'),
+        ('PackedProposalCoordinator._close_pair', "self.pairs[group][2]"),
+        ('PackedProposalCoordinator._close_quad_block', 'self.quad_blocks[slots][1]'),
         ('PackedProposalCoordinator.release_closed', 'self.quad[1]'),
         ('PackedProposalCoordinator.release_parked', 'self.quad[1]'),
         ('PackedProposalCoordinator._retire_quad', 'trace'),
@@ -352,6 +376,46 @@ class EndToEndTests(unittest.TestCase):
             engines.close()
             self.assertTrue(all(trace.closes == 1 for trace in CountingPair.instances),
                             'each trace closed exactly once: %r' % [trace.closes for trace in CountingPair.instances])
+
+    def test_cold_built_devices_leave_no_book_trace_behind_at_hook_close(self):
+        CountingPair.instances = []
+        with World(environment=DRAFTS) as world, patch('dflash_proposal_trace.PreparedPackedDFlashProposal', CountingPair):
+            engines = make_set(world, environ={'QWEN_FAST_PARKED_DRAFTS': '1'})
+            engines.build()
+            for entry in list(engines.slots):
+                engines.unpark(entry, 'test')
+            serving = Serving(world, engines)
+            for _ in range(4):
+                serving.arrive(2049, 40)
+            for _ in range(4):
+                serving.round()
+            self.assertTrue(engines.book.pairs, 'a pair of cold-built devices was captured into the book')
+            serving.hook.close()
+            self.assertEqual(engines.book.pairs, {}, 'their devices closed with the hook: the traces go with them')
+            self.assertTrue(CountingPair.instances and all(trace.closes == 1 for trace in CountingPair.instances))
+            engines.close()
+
+    def test_the_kill_switch_restores_the_per_request_path_for_the_coordinators_that_outlive_it(self):
+        CountingPair.instances = []
+        with World(environment=DRAFTS) as world, patch('dflash_proposal_trace.PreparedPackedDFlashProposal', CountingPair):
+            engines = make_set(world, environ={'QWEN_FAST_PARKED_DRAFTS': '1'})
+            engines.build()
+            serving = Serving(world, engines)
+            for _ in range(4):
+                serving.arrive(2049, 40)
+            for _ in range(4):
+                serving.round()
+            coordinator = serving.coordinator
+            self.assertIs(coordinator.book, engines.book)
+            engines.switch_off('test')
+            self.assertIsNone(coordinator.book, 'the live coordinator reads the registration at every call')
+            self.assertIsNone(coordinator_module.draft_book())
+            self.assertEqual((engines.book.pairs, coordinator.pairs), ({}, {}))
+            self.assertTrue(CountingPair.instances and all(trace.closes == 1 for trace in CountingPair.instances))
+            self.assertIsNone(coordinator_module.PackedProposalCoordinator().book)
+            serving.drain()
+            self.assertEqual(world.ops.violations, [])
+            engines.close()
 
     def test_the_flag_off_control_retires_and_recaptures_the_pairs(self):
         world, engines, serving, attached = self.run_churn(False, 12, 29)

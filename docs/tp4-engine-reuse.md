@@ -13,7 +13,8 @@ audits off, and 2.3 to 2.9 s audited. The build is device-exclusive, so every li
 Engine reuse (`QWEN_FAST_PARKED_ENGINES=1`) builds one engine per pool slot at attach, on a synthetic request (one prompt token, budget 16, every page table
 entry on page 0), and PARKS it. A request then REBINDS the parked engine of the slot it takes: rezero the slot's state, a windowed projection, K/V reseed, the
 page table rewrite and the carry save, in place of a build. A rebind is estimated at 0.2 to 0.4 s. Closing a request returns the engine to its slot parked, not
-destroyed.
+destroyed. With engine reuse alone (no 2c) the detach also retires the departing slot's pair, quad and single traces and rebuilds its single when the DRAM
+split allows: a 0.2 to 0.28 s stall of every seat that decodes, which is what the E1 arm measures against 2c.
 
 Slot-bound drafter traces (`QWEN_FAST_PARKED_DRAFTS=1`, "2c") go further: the pair and quad drafter traces are bound to their slots for the process, so a
 block re-formation at admission or departure no longer recaptures them. Single-user traces are kept per slot.
@@ -52,26 +53,35 @@ The admission terms change with the parked engine. When the slot the next reques
 before the prefill is the prefill transient, the rebind's peak R (100 MB with the windowed projection), a released single's rebuild S, and the reserve; the
 post-prefill backstop asks R, S and the reserve. The trace term asks the single's trace only when S applies. The free term also counts a CREDIT: what the
 release ladder could free (the book's pairs, other slots' singles, and one other idle parked slot), so that a departing decoder freeing little does not hold an
-arrival until the server drains. An arrival that is short at its backstop runs the ladder before it is refused. A held arrival logs how long the hold lasted.
+arrival until the server drains. An arrival that is short at its backstop runs the ladder before it is refused (an arrival on a slot with no parked engine, after a
+fault, too: on today's terms, with the same ladder). A held arrival logs how long the hold lasted, counted from the start of that request's own hold.
 
 ## 4. Lifecycle and the kill switch
 
 - Faults: `QWEN_FAST_PARKED_FAULT=park` refuses the first park once and `=rebind` refuses the first rebind on the host; both are gate only. The slot unparks,
-  a cold build serves, and the slot re-parks at the next idle moment.
-- Kill switch: a file named `parked.off` under the serving image's state directory, read at every admission, unparks every idle slot and restores today's
-  per-request path for every later request, mid-traffic, with a log line naming the count.
+  a cold build serves, and the slot re-parks at the next idle moment (no decoder, no prefill, a step that schedules nothing), never at a detach: a detach
+  happens while other seats decode, and a re-park is a full synthetic build with its captures, a stall of every one of them.
+- Kill switch: a file named `parked.off` under the serving image's state directory, polled at the top of every execute (at most once a second), unparks every
+  idle slot, and every serving slot at its close, and restores today's per-request path for every later request, mid-traffic, with a log line naming the
+  count. The draft book (2c) is unregistered with it, so singles are released and traces closed with their members as today. For the gate there is also
+  a trigger of its own, `QWEN_FAST_PARKED_OFF_AFTER=<n>`, which latches the switch after the nth rebind (job K1).
 - Instance state: a parked device or engine that gains per-request instance attributes (which would shadow methods and leak a request's state into the next)
   is detected and logged; the audit treats it as a failure.
 - Gate-only knobs: `QWEN_FAST_PARKED_AUDIT` (digest every rebind against a cold twin's reference and null tables), `QWEN_FAST_PARKED_NEGATIVE`
   (`carry`, `pages`, `widths`, `drafter`: deliberately break one rule so the exactness gate can be shown to fail), `QWEN_FAST_GATE_DRAM_BALLAST` (hold bytes
-  per chip from after attach to close, in whole tiles in replicated buffers of at most 32 MiB).
+  per chip from after attach to close, in whole tiles in replicated buffers of at most 32 MiB), `QWEN_FAST_PARKED_OFF_AFTER` and `QWEN_FAST_PARKED_OFF_PATH`
+  (the kill switch's trigger and its file). Under the audit with no parked engines (the control arm) a replay between a verify and its publication is a log line
+  (`R2 violation`) the gate counts, not a raise.
 
 ## 5. Flags and profiles
 
-Every flag is refused outside a gate-only profile except the three that are meant to ship once the owner decides (`QWEN_FAST_PARKED_ENGINES`,
-`QWEN_FAST_PARKED_DRAFTS`, `QWEN_FAST_LEVERN_BUILD_MS`); the production profile is unchanged. The gate profiles are generated twins of the ship-prefix-levern
+`QWEN_FAST_PARKED_ENGINES` and `QWEN_FAST_PARKED_DRAFTS` are refused outside a gate-only profile until the owner decides to ship them (the contract's
+`parked_problems`), and the gate instruments (the audit, the negative controls, the faults, the ballast, the kill switch's trigger and file) outside a gate's
+profile and in the process environment of any profile that does not name them; `QWEN_FAST_LEVERN_BUILD_MS` is the governor's own flag and is not parked-specific.
+The production profile is unchanged. The gate profiles are generated twins of the ship-prefix-levern
 profiles (`make_parked_profiles.py`), never hand edited: the arms control, `-parked-e1` (engine reuse alone), `-parked` (with 2c and the learned governor
-cost), `-parked-audit`, the negative controls, the two fault profiles and a four-level ballast ladder (512, 1024, 1536 and 2048 MB).
+cost), `-parked-audit`, the negative controls, the two fault profiles, `-parked-kill` and a four-level ballast ladder (512, 1024, 1536 and 2048 MB). `-parked`
+against `-parked-e1` is 2c and the learned governor together; neither alone is isolated.
 
 ## 6. CPU proof
 
@@ -85,7 +95,7 @@ test runs from the `experiment/fast-vllm-cpu-v*` tag workflow only.
 
 Templates for the combined development window; no tag is pushed from this branch. Order: X0 status, rescan and reset; B0 build; A0 (audited control) and A1
 (audited parked arm), compared by `parked_compare.py`; C0 and C1 (churn, abort and reuse); N0 to N4 (the negative controls must FAIL their own judges); F1 and
-F2 (injected faults, the kill switch); M1 to M5 (more than 200 admissions with the ledger on, the 253,920-token worst corner, the ballast ladder); H1 to H3
+F2 (injected faults); K1 (the kill switch, latched by the server); M1 to M5 (more than 200 admissions with the ledger on, the 253,920-token worst corner, the ballast ladder); H1 to H3
 (hang shapes, arrivals after at least 100 block rounds, three clean runs in a row); R1 to R6 (ER5: closed-loop coding turns on eight seats, control and arms
 alternated ABAB, paired per turn by index, never by unpaired medians); Z reset. The cards are never handed back and the node agent is untouched.
 

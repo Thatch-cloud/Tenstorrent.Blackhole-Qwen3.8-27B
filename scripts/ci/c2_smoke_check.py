@@ -1448,6 +1448,10 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
             facts['levern'] = dict((key, value) for key, value in levern_facts_found.items() if not isinstance(value, list))
         parked_found, parked_facts = parked_container_problems(env, container_text)
         problems += parked_found
+        if parked_facts and smoke and 'parked_churn_long' in smoke:
+            import parked_judge
+
+            problems += parked_judge.memory_problems(container_text)
         if parked_facts:
             facts['parked'] = parked_facts
     if entry is not None:

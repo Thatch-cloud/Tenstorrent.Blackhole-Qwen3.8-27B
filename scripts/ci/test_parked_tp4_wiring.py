@@ -377,6 +377,23 @@ class ParkedFactoryTests(unittest.TestCase):
             self.assertEqual(world.ops.violations, [])
             self.assertEqual(engines.repark_idle(), [0])
 
+    def test_the_slot_pin_is_released_by_from_prefill_on_every_path(self):
+        with World(environment=PARKED) as world:
+            engines = make_set(world)
+            engines.build()
+            rebound = admit(world, engines, 'rebound', 300, 8)
+            self.assertIsNotNone(rebound.parked_slot)
+            self.assertIsNone(world.pool._slot_order, 'a rebind pins nothing and leaves nothing pinned')
+            engines.unpark(engines.slots[1], 'test')
+            cold = admit(world, engines, 'cold', 300, 8)
+            self.assertIsNone(world.pool._slot_order, 'a pinned cold build released its pin by its own exit')
+            self.assertIsNone(getattr(cold, 'parked_slot', None))
+            run_to_end(rebound)
+            rebound.close('rebound')
+            run_to_end(cold)
+            cold.close('cold')
+            self.assertIsNone(world.pool._slot_order)
+
     def test_a_rebind_refused_on_the_host_unparks_before_any_write_and_a_cold_build_serves_the_slot(self):
         with World(environment=PARKED) as world:
             engines = make_set(world, environ={parked.FAULT_FLAG: 'rebind'})
@@ -393,8 +410,13 @@ class ParkedFactoryTests(unittest.TestCase):
             self.assertFalse([line for line in world.lines if line.startswith(parked.REBIND_MARKER + 'req=')], 'nothing was rebound')
             run_to_end(request)
             request.close('refused')
-            # the hook's detach for a request a cold build served re-parks the free slot, so the next arrival is rebound, not built again
-            self.assertEqual(parked.release_parked(None, request), dict(reparked=0))
+            # the hook's detach for a request a cold build served does nothing (other seats decode: a re-park is a full build); the idle
+            # moment re-parks the free slot, so the next arrival is rebound, not built again
+            builds = len(world.lines)
+            self.assertIsNone(parked.release_parked(None, request))
+            self.assertEqual(engines.slots[0].state, 'unparked')
+            self.assertFalse([line for line in world.lines[builds:] if ' re-parked ms=' in line])
+            self.assertEqual(engines.idle()['reparked'], [0])
             self.assertEqual(engines.slots[0].state, 'parked')
             again = admit(world, engines, 'again', 300, 16)
             self.assertIs(again.parked_slot, engines.slots[0])
@@ -421,7 +443,9 @@ class ParkedFactoryTests(unittest.TestCase):
             self.assertEqual(world.last_capture.closes, 1, 'the capture is closed on the refusal too')
             self.assertEqual(engines.slots[0].state, 'unparked')
             self.assertFalse(world.pool.slots[0].lent)
-            self.assertEqual([entry.state for entry in engines.slots[1:]], ['parked'] * 3, 'the engine and the other slots live')
+            # the cold arrival's backstop ran the release ladder once before it refused (rung 2 released the others' singles, rung 3 unparked the last idle parked slot); the rest live
+            self.assertEqual([entry.state for entry in engines.slots[1:]], ['parked', 'parked', 'unparked'], 'the engine and the other slots live')
+            self.assertTrue([line for line in world.lines if line.startswith(parked.LADDER_MARKER.split('{')[0])], 'the ladder ran')
             # and the server serves the next arrival: slot 0 is the lowest free slot, so by today's build pinned to it; then the parked ones
             request = admit(world, engines, 'next', 300, 16)
             self.assertIsNone(getattr(request, 'parked_slot', None))
@@ -526,7 +550,7 @@ class AfterParkTests(unittest.TestCase):
             coordinator = SimpleNamespace(release_parked=Mock(return_value=dict(quad=0, pairs=[])))
             result = engines.after_park(entry, coordinator)
             coordinator.release_parked.assert_called_once_with(entry.device)
-            self.assertEqual(result, dict(released=dict(quad=0, pairs=[]), single=True, reparked=None))
+            self.assertEqual(result, dict(released=dict(quad=0, pairs=[]), single=True))
             self.assertEqual(tuple(entry.device.proposal_capture.buckets), (2048,))
             self.assertFalse(entry.device._packed_capture_released)
             self.assertEqual(engines.arrival_terms()['single'], 0)
@@ -543,7 +567,7 @@ class AfterParkTests(unittest.TestCase):
             entry = self.released_and_parked(world, engines)
             short = dict(free=10 ** 9, largest_free=4 * 10 ** 9, trace_largest_free=None, trace_unread='n/a')
             with patch('serving_prefill_admission.dram_reading', return_value=(short, None)):
-                self.assertEqual(engines.after_park(entry, None), dict(released=None, single=False, reparked=None))
+                self.assertEqual(engines.after_park(entry, None), dict(released=None, single=False))
             kept = [line for line in world.lines if line.startswith('[PINDIAG] parked slot 0 single kept released at park')]
             self.assertEqual(len(kept), 1)
             self.assertIn('short of free', kept[0])
@@ -562,7 +586,7 @@ class AfterParkTests(unittest.TestCase):
             engines.build()
             entry = self.released_and_parked(world, engines)
             coordinator = SimpleNamespace(release_parked=Mock(side_effect=RuntimeError('trace fault')))
-            self.assertEqual(engines.after_park(entry, coordinator), dict(released=None, single=True, reparked=None))
+            self.assertEqual(engines.after_park(entry, coordinator), dict(released=None, single=True))
             self.assertTrue(any('release parked slot=0 failed (RuntimeError: trace fault)' in line
                                 for line in world.lines))
 
@@ -574,10 +598,10 @@ class AfterParkTests(unittest.TestCase):
             engines.unpark(entry, 'test')
             coordinator = SimpleNamespace(release_parked=Mock(side_effect=AssertionError('released')))
             self.assertIsNone(engines.after_park(entry, coordinator))
-            # a request today's build served: nothing of the coordinator's, and the free slot is re-parked
-            self.assertEqual(parked.release_parked(coordinator, SimpleNamespace()), dict(reparked=0))
-            self.assertEqual(entry.state, 'parked')
-            self.assertEqual(parked.release_parked(coordinator, None), dict(reparked=None))
+            # a request today's build served: nothing of the coordinator's, and no re-park at a detach (the idle moment's)
+            self.assertIsNone(parked.release_parked(coordinator, SimpleNamespace()))
+            self.assertEqual(entry.state, 'unparked')
+            self.assertIsNone(parked.release_parked(coordinator, None))
             engines.close()
             self.assertIsNone(parked.release_parked(coordinator, SimpleNamespace()), 'no set: nothing')
 
@@ -597,6 +621,24 @@ class AfterParkTests(unittest.TestCase):
                                 for line in world.lines))
             self.assertTrue(any(line.startswith('[PINDIAG] parked slot 3 idle re-park failed') for line in world.lines))
             self.assertEqual(engines.idle(), dict(singles=[1], reparked=[3]), 'tried again at the next idle moment')
+            self.assertEqual(world.ops.violations, [])
+
+    def test_a_failed_repark_still_ends_the_resident_engines_residency(self):
+        import verifier_engine
+
+        with World(environment=PARKED) as world:
+            engines = make_set(world)
+            engines.build()
+            engines.unpark(engines.slots[3], 'test')
+            sentinel = object()
+            verifier_engine._resident = sentinel
+            try:
+                with patch.object(engines.components, 'device', Mock(side_effect=RuntimeError('no room'))):
+                    self.assertEqual(engines.repark_idle(), [])
+                self.assertIsNone(verifier_engine._resident, 'native slot 0 was overwritten before the build failed')
+            finally:
+                verifier_engine._resident = None
+            self.assertEqual(engines.slots[3].state, 'unparked')
             self.assertEqual(world.ops.violations, [])
 
     def test_the_idle_moment_rebuilds_released_singles_and_reparks(self):

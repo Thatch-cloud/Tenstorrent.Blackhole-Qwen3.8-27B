@@ -1129,6 +1129,70 @@ class ReplayLedgerTests(unittest.TestCase):
                 request.close('request-a')
             self.assertIsNone(verifier_engine_tp._replay_count)
 
+    def test_the_flag_off_control_logs_a_violation_instead_of_raising_and_the_judge_counts_it(self):
+        import parked_judge
+
+        with World() as world:
+            request = world.admit('request-a', 4096, 32)
+            ledger = parked.ReplayLedger(world.ops, strict=False).install()
+            try:
+                world.step(request)
+                session, engine = request.session, request.engine
+                ticket = session.propose(session.request_id, max_rows=engine.proposal_rows(), selected=request.runtime.drafter_name)
+                predictions, _ = engine.verify(ticket)
+                world.replay_block()
+                with patch.object(verifier_engine_tp.verify_trace_t1, 'log_line') as line:
+                    session.commit(session.request_id, ticket, predictions, request.runtime.publish)
+                self.assertEqual(line.call_count, 1)
+                self.assertTrue(line.call_args.args[0].startswith(verifier_engine_tp.R2_MARKER + 'R2: 1 other trace replay'))
+                self.assertEqual(parked_judge.r2_violations(line.call_args.args[0] + chr(10)), 1)
+            finally:
+                ledger.uninstall()
+                request.close('request-a')
+            self.assertIsNone(verifier_engine_tp._replay_count)
+            self.assertTrue(verifier_engine_tp._replay_strict)
+        self.assertEqual(parked_judge.r2_violations(''), 0)
+        beside = parked.install_replay_ledger(CensusOps(), {parked.AUDIT_FLAG: '1', parked.FLAG: '1'})
+        self.assertTrue(beside.strict)
+        beside.uninstall()
+        control = parked.install_replay_ledger(CensusOps(), {parked.AUDIT_FLAG: '1'})
+        self.assertFalse(control.strict)
+        control.uninstall()
+
+    def test_a_mesh_trace_id_that_cannot_be_hashed_neither_raises_nor_grows_the_log_unbounded(self):
+        class TraceId:
+            def __init__(self, value):
+                self.value = value
+
+            def __eq__(self, other):
+                return isinstance(other, TraceId) and other.value == self.value
+
+            __hash__ = None
+
+            def __int__(self):
+                return self.value
+
+        ops = CensusOps()
+        handles = iter(range(7, 100))
+        ops.begin_trace_capture = lambda *arguments, **keywords: TraceId(next(handles))
+        ops.execute_trace = lambda mesh, trace, *arguments, **keywords: None
+        ledger = parked.ReplayLedger(ops).install()
+        try:
+            ops.execute_trace(object(), TraceId(3))
+            self.assertEqual((ledger.count, ledger.log), (1, []), 'nothing is recorded while no window is open')
+            mark = ledger.mark()
+            built = ops.begin_trace_capture(object())
+            ops.execute_trace(object(), built)
+            ops.execute_trace(object(), TraceId(3))
+            self.assertEqual(ledger.foreign_since(mark), [3], 'a trace the window did not capture, reported by its key')
+            ledger.end_mark()
+            self.assertEqual(ledger.log, [])
+            for _ in range(50):
+                ops.execute_trace(object(), built)
+            self.assertEqual(ledger.log, [])
+        finally:
+            ledger.uninstall()
+
     def test_without_the_ledger_nothing_is_noted_or_checked(self):
         with World() as world:
             request, _ = self.build(world, False)

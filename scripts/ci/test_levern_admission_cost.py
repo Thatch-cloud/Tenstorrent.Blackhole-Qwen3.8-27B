@@ -121,6 +121,19 @@ class CostTests(unittest.TestCase):
         cost.parked_free = lambda: 1 / 0
         self.assertEqual(cost.per_pending(1), [2500.0], 'a failing reader never fails a schedule')
 
+    def test_the_first_pending_prefill_is_charged_by_the_slot_it_is_placed_on(self):
+        cost = policy.AdmissionCost()
+        cost.parked_free = lambda: 2
+        cost.next_parked = lambda: False
+        self.assertEqual(cost.per_pending(4), [2500.0, 400.0, 400.0, 2500.0], 'placement picked a free unparked slot ahead of the parked ones')
+        cost.next_parked = lambda: True
+        self.assertEqual(cost.per_pending(4), [400.0, 400.0, 2500.0, 2500.0])
+        cost.next_parked = lambda: 1 / 0
+        self.assertEqual(cost.per_pending(3), [400.0, 400.0, 2500.0], 'a failing reader falls back to the count')
+        cost.parked_free = lambda: 0
+        cost.next_parked = lambda: True
+        self.assertEqual(cost.per_pending(2), [2500.0, 2500.0])
+
     def test_the_registry_is_one_object_per_process_and_observing_needs_the_learned_mode(self):
         with patch.dict(sys.modules):
             sys.modules.pop(policy.COST_KEY, None)

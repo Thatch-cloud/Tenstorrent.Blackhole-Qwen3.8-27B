@@ -116,7 +116,8 @@ def judge(env, text, smoke=None):
     drafts = str(env.get('QWEN_FAST_PARKED_DRAFTS', '0')) == '1'
     negative = env.get('QWEN_FAST_PARKED_NEGATIVE') or None
     fault = env.get('QWEN_FAST_PARKED_FAULT') or None
-    off_expected = bool(facts['off'])
+    off_after = str(env.get('QWEN_FAST_PARKED_OFF_AFTER') or '') or None
+    off_expected = bool(facts['off']) or off_after is not None
     summary.update(seats=count, audit=audit, drafts=drafts, negative=negative, fault=fault)
 
     # attach
@@ -149,8 +150,16 @@ def judge(env, text, smoke=None):
     summary['width_mismatches'] = sum(1 for entry in facts['rebinds'] if entry['widths'] != capture_widths(
         entry['prompt'], entry['capacity'], VERIFIER_ROWS, entry['budget'] - 1))
     seen_programs = [row for row in facts['programs'] if row['before'] is not None and row['after'] is not None]
+    # A rebind below the 2048-row window compiles programs specific to its row count (the pad, concat and slice of the seed), which a cold build
+    # compiles inside its own build, where no tripwire stands: the first rebind of each short prompt length is not held to it. From 2048 on the
+    # attach warm covers every program, so the rule stays strict there (and wherever the line does not say the length).
+    rebound_rows = set()
     for row in seen_programs[1:]:
-        if row['after'] != row['before']:
+        rows = None if row.get('prompt') is None or row['prompt'] >= 2048 else row['prompt']
+        first_of_length = rows is not None and rows not in rebound_rows
+        if rows is not None:
+            rebound_rows.add(rows)
+        if row['after'] != row['before'] and not first_of_length:
             problems.append('a rebind compiled %d program(s) (slot %d, %d to %d): the S8 hang class (a program first compiled after a block\'s first '
                             'replay)' % (row['after'] - row['before'], row['slot'], row['before'], row['after']))
 
@@ -177,6 +186,18 @@ def judge(env, text, smoke=None):
         elif not any(row['slot'] == injected[0]['slot'] for row in facts['reparked']):
             problems.append('the faulted slot %d was never re-parked: it serves cold builds for good' % injected[0]['slot'])
 
+    # the kill switch's own trigger (QWEN_FAST_PARKED_OFF_AFTER=n): latched exactly once, after exactly n rebinds, and every later request built cold
+    if off_after is not None:
+        wanted = int(off_after)
+        if len(facts['off']) != 1:
+            problems.append('%d kill-switch lines under QWEN_FAST_PARKED_OFF_AFTER=%d: the switch latches exactly once' % (len(facts['off']), wanted))
+        if len(facts['rebinds']) != wanted:
+            problems.append('%d rebinds under QWEN_FAST_PARKED_OFF_AFTER=%d: none may follow the latch, and all %d must precede it' % (
+                len(facts['rebinds']), wanted, wanted))
+        later = [row['request'] for row in facts['sticky'] if row['kind'] == 'rebind']
+        if len(later) != wanted:
+            problems.append('%d sticky lines say kind=rebind under QWEN_FAST_PARKED_OFF_AFTER=%d: every request after the latch must build' % (
+                len(later), wanted))
     # audit
     if audit and negative not in ('carry', 'pages') and facts['rebinds']:
         if len(facts['digests']) < len(facts['rebinds']):
@@ -222,10 +243,58 @@ def judge(env, text, smoke=None):
 
 # -- two arms --------------------------------------------------------------------------------------------------------------------
 
-def accepted_sequences(text):
-    """[(request id, [(path, prefix, emitted), ...])] in order of first appearance: every [PACKED], [SEQUENTIAL] and [SEQ-PUBLISH] round of every request."""
-    order, rounds = [], {}
-    for match in PATH_LINE.finditer(text or ''):
+# M1's READ rules that the container log can show (the memory churn job, smoke test parked_churn_long; c2_smoke_check applies them when that test ran):
+# the before-point floor of every chip stays at least BEFORE_FLOOR_MB; the trace region does not move once the draft book's last quad is captured;
+# and no `dram hold` line names no short term (a hold whose logged reading the predicate would not have held). "Idle free DRAM back within 16 MB after
+# each drain" has no drain marker in the log to read it against, so it stays the operator's read.
+BEFORE_FLOOR_MB = 250.0
+TRACE_STEADY_MB = 1.0
+BEFORE_LINE = re.compile(r'\[MEMLEDGER\] before op=[^\n]*? chip([0-9]+) largest_free=[0-9.]+MB free=[0-9.]+GB estimate=[0-9.]+MB margin=-?[0-9.]+MB floor=(-?[0-9.]+)MB')
+TRACE_LINE = re.compile(r'\[MEMLEDGER\] (?:before|after) op=[^\n]*? chip([0-9]+) [^\n]*?trace_used=([0-9.]+)MB')
+HOLD_LINE = re.compile(r'\[PINDIAG\] dram hold prompt=([0-9]+) [^\n]*?request=(\S+) decodes=([0-9]+) [^\n]*?short=(\S+)')
+
+
+def memory_problems(text):
+    """The M1 rules above over a container log; [] when it carries no ledger line to read them from."""
+    problems, floor, trace, after_book = [], {}, {}, {}
+    lines = lines_of(text)
+    last_book = max([number for number, line in enumerate(lines) if markers.BOOK_QUAD in line] or [-1])
+    for number, line in enumerate(lines):
+        match = BEFORE_LINE.search(line)
+        if match:
+            chip = int(match.group(1))
+            floor[chip] = float(match.group(2))
+        match = TRACE_LINE.search(line)
+        if match and number > last_book >= 0:
+            after_book.setdefault(int(match.group(1)), []).append(float(match.group(2)))
+        match = HOLD_LINE.search(line)
+        if match and match.group(4) in ('none', 'unread'):
+            problems.append('a dram hold of %s names short=%s: the predicate would not have held on its own logged reading' % (match.group(2), match.group(4)))
+    for chip in sorted(floor):
+        if floor[chip] < BEFORE_FLOOR_MB:
+            problems.append('chip %d: the before-point floor fell to %.1f MB, under %.0f MB' % (chip, floor[chip], BEFORE_FLOOR_MB))
+    for chip in sorted(after_book):
+        spread = max(after_book[chip]) - min(after_book[chip])
+        if spread > TRACE_STEADY_MB:
+            problems.append('chip %d: the trace region moved %.1f MB after the draft book formed (limit %.1f)' % (chip, spread, TRACE_STEADY_MB))
+    return problems
+
+
+
+R2_VIOLATION = re.compile(r'\[PINDIAG\] R2 violation: ')
+
+
+def r2_violations(text):
+    """How many R2 violation lines (verifier_engine_tp.R2_MARKER) a container log carries."""
+    return len(R2_VIOLATION.findall(text or ''))
+
+
+def accepted_sequences(text, only=None):
+    """[(request id, [(path, prefix, emitted), ...])] in order of first appearance: every [PACKED], [SEQUENTIAL] and [SEQ-PUBLISH] round of every request.
+    `only` keeps one kind: 'solo' the requests whose round lines are not interleaved with any other request's (a seat that ran alone: its paths do
+    not depend on admission timing), 'concurrent' the rest. The split is read off the log itself, so it needs no per-test marker."""
+    order, rounds, span = [], {}, {}
+    for position, match in enumerate(PATH_LINE.finditer(text or '')):
         kind, request, rest = match.groups()
         if kind == 'SEQ-PUBLISH' and not rest.startswith('rows='):
             continue
@@ -235,23 +304,33 @@ def accepted_sequences(text):
         if request not in rounds:
             order.append(request)
             rounds[request] = []
+            span[request] = [position, position]
+        span[request][1] = position
         rounds[request].append(('P' if kind == 'PACKED' else 'S', fields.get('prefix'), fields.get('emitted')))
+    if only is not None:
+        if only not in ('solo', 'concurrent'):
+            raise ValueError('only is solo or concurrent, not %r' % (only,))
+        alone = set(request for request in order if not any(
+            other != request and span[other][0] < span[request][1] and span[request][0] < span[other][1] for other in order))
+        order = [request for request in order if (request in alone) == (only == 'solo')]
     return [(request, rounds[request]) for request in order]
 
 
-def acceptance(text):
-    """(acceptance, rounds): (mean emitted per round - 1) / 15 over every round of every request, or (None, 0)."""
-    emitted = [row[2] for _, sequence in accepted_sequences(text) for row in sequence if row[2] is not None]
+def acceptance(text, only=None):
+    """(acceptance, rounds): (mean emitted per round - 1) / 15 over every round of every request (of one kind with `only`), or (None, 0)."""
+    emitted = [row[2] for _, sequence in accepted_sequences(text, only) for row in sequence if row[2] is not None]
     if not emitted:
         return None, 0
     return (sum(emitted) / float(len(emitted)) - 1.0) / PROPOSALS, len(emitted)
 
 
-def equivalence(control_text, other_text, solo=True):
+def equivalence(control_text, other_text, solo=True, only=None):
     """(problems, shortfalls, facts): solo, the two arms' requests (matched by order of first appearance) draft identical accepted-prefix sequences;
-    concurrent (solo False), the mean acceptance is within ACCEPTANCE_TOLERANCE, absolute."""
+    concurrent (solo False), the mean acceptance is within ACCEPTANCE_TOLERANCE, absolute. `only` restricts both arms to their solo or their
+    concurrent requests (accepted_sequences): the exact judge belongs to the solo ones, since which draft path (single, pair, quad) a concurrent
+    round takes follows admission timing, which engine reuse changes on purpose."""
     problems, shortfalls = [], []
-    left, right = accepted_sequences(control_text), accepted_sequences(other_text)
+    left, right = accepted_sequences(control_text, only), accepted_sequences(other_text, only)
     facts = dict(requests=(len(left), len(right)))
     if not left or not right:
         shortfalls.append('an arm carries no round lines ([SEQ-PUBLISH] or [PACKED]): its drafting is unseen')
@@ -266,8 +345,8 @@ def equivalence(control_text, other_text, solo=True):
                     index, first, a[first] if first < len(a) else None, b[first] if first < len(b) else None))
         facts['identical'] = not problems
         return problems, shortfalls, facts
-    one, rounds_one = acceptance(control_text)
-    two, rounds_two = acceptance(other_text)
+    one, rounds_one = acceptance(control_text, only)
+    two, rounds_two = acceptance(other_text, only)
     facts.update(control=None if one is None else round(one, 4), other=None if two is None else round(two, 4), rounds=(rounds_one, rounds_two))
     if one is None or two is None:
         shortfalls.append('an arm has no full-draft acceptance: the concurrent drafting is unjudged')
@@ -291,7 +370,7 @@ def negative_verdict(kind, token_mismatches, control_text, negative_text, negati
         if token_mismatches:
             problems.append('the drafter control changed tokens (%s): greedy verification should keep them, so the control is not the drafter-only '
                             'break it is meant to be' % token_mismatches[0])
-        judged, shortfalls, detail = equivalence(control_text, negative_text)
+        judged, shortfalls, detail = equivalence(control_text, negative_text, only='solo')
         facts['equivalence'] = detail
         if shortfalls:
             problems.append('the drafter control could not be judged for equivalence: %s' % '; '.join(shortfalls))

@@ -21,7 +21,12 @@ FOLDER = os.path.join(HERE, 'references', 'tp4-engine-reuse-jobs')
 PROFILES_PATH = os.path.join(HERE, 'qwen_c2_profiles.json')
 SMOKE = os.path.join(HERE, 'c2_serving_smoke.py')
 IMAGE = 'tp4-engine-reuse-1'
-BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|/dev/tenstorrent|home/|zot\.')
+# The guard names only SHAPES (an address, a digest, a device path, a home directory). The private names a public repository must never carry
+# (a host, a registry, a domain) are not written here: a maintainer's CI supplies them as a regular expression in QWEN_PUBLIC_GUARD_EXTRA, and the
+# test applies them when the variable is set.
+BANNED = re.compile(r'\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|/dev/tenstorrent|home/|[A-Za-z]:[/\\]Users[/\\]')
+EXTRA = os.environ.get('QWEN_PUBLIC_GUARD_EXTRA')
+BANNED_PRIVATE = re.compile(EXTRA) if EXTRA else None
 AGENT_ACTIONS = {'agentstop', 'agentstart', 'unserve', 'platform', 'replay', 'priority', 'cardm'}
 P = 'c2-packed-tp4-8x262k-ship-prefix-levern'
 
@@ -154,7 +159,10 @@ class JobPackTests(unittest.TestCase):
         found = profiles()
         self.assertEqual(found[parsed('F1-fault-park')['profile']]['env']['QWEN_FAST_PARKED_FAULT'], 'park')
         self.assertEqual(found[parsed('F2-fault-rebind')['profile']]['env']['QWEN_FAST_PARKED_FAULT'], 'rebind')
-        self.assertIn('parked.off', text_of('F2-fault-rebind'))
+        self.assertNotIn('parked.off', text_of('F2-fault-rebind'), 'no manual step: the kill switch is the K1 job, latched by the server')
+        self.assertEqual(found[parsed('K1-kill-switch')['profile']]['env']['QWEN_FAST_PARKED_OFF_AFTER'], '3')
+        self.assertNotIn('QWEN_FAST_PARKED_FAULT', found[parsed('K1-kill-switch')['profile']]['env'])
+        self.assertIn('exactly one', text_of('K1-kill-switch'))
         self.assertIn('parked_abort_reuse', tests_of('F1-fault-park'))
 
     def test_the_ballast_ladder_is_the_four_levels(self):
@@ -189,12 +197,38 @@ class JobPackTests(unittest.TestCase):
                 self.assertIn(other, short)
                 self.assertLess(order.index(short[other]), order.index(short[waiting]), (waiting, other))
 
+    def test_a_job_judged_against_a_reference_job_needs_it(self):
+        needs = needs_lines()
+
+        def closure(name, seen=None):
+            seen = set() if seen is None else seen
+            for other in needs.get(name, ()):
+                if other not in seen:
+                    seen.add(other)
+                    closure(other, seen)
+            return seen
+
+        short = {name.split('-')[0]: name for name in names()}
+        checked = 0
+        for name in names():
+            own = name.split('-')[0]
+            for reference in sorted(set(re.findall(r'(?:from|against|equal to) ([A-Z][0-9])(?![0-9A-Za-z])', text_of(name)))):
+                if reference == own or reference not in short or own.startswith('R'):    # the R arms pair each other: each is a timing of its own
+                    continue
+                checked += 1
+                with self.subTest(name=name, reference=reference):
+                    self.assertIn(reference, closure(own), '%s is judged against %s, so it must depend on it' % (own, reference))
+        self.assertGreater(checked, 3)
+
     def test_the_templates_are_public_safe(self):
         for name in names() + ['ORDER']:
             path = os.path.join(FOLDER, name + ('' if name == 'ORDER' else '') + ('.txt' if name == 'ORDER' else '.env'))
             with open(path, encoding='utf-8') as handle:
                 found = BANNED.search(handle.read())
             self.assertIsNone(found, (name, found and found.group(0)))
+            if BANNED_PRIVATE is not None:
+                with open(path, encoding='utf-8') as handle:
+                    self.assertIsNone(BANNED_PRIVATE.search(handle.read()), name)
         with open(os.path.join(FOLDER, 'ORDER.txt'), 'rb') as handle:
             self.assertNotIn(b'\r', handle.read())
 

@@ -1,7 +1,7 @@
 """What an engine-reuse server logs (QWEN_FAST_PARKED_ENGINES), parsed: the evidence the parked gates judge. Stdlib only, Python 3.7 syntax: the gate
 reads this on the rig host.
 
-Every line format below is its producer's own (each constant names its source; test_parked_tp4_markers renders the producers' real lines - the set on
+Every line format below is its producer's own (each constant names its source; test_parked_tp4_judge renders the producers' real lines - the set on
 the four-chip census world, the coordinator, the prewarm - and parses them here), and every field is read by name, so a field a producer adds never
 hides a line. A missing marker is reported, never guessed around.
 
@@ -18,7 +18,7 @@ hides a line. A missing marker is reported, never guessed around.
     [PINDIAG] parked rebind failed req=<id> slot=<k> reason=<text> fallback=build         (after the first device write; the slot is unparked)
     [PINDIAG] parked rebind peak slot=<k> P=<n> free_before=<b> free_at_peak=<b> held=<b>  (QWEN_FAST_PARKED_AUDIT)
     [PINDIAG] parked rebind digest slot=<k> snapshots=<n> tables=<n> slot0=<0|1> zeroed=<0|1> equal=1        (QWEN_FAST_PARKED_AUDIT)
-    [PINDIAG] parked programs rebind slot=<k> programs=<a>-><b>      (the S8 tripwire: a rebind compiles nothing after the block's first replay)
+    [PINDIAG] parked programs rebind slot=<k> programs=<a>-><b> P=<n>      (the S8 tripwire: a rebind compiles nothing after the block's first replay)
     [PINDIAG] parked slot <k> unparked: <reason>
     [PINDIAG] parked slot <k> re-parked ms=<f>
     [PINDIAG] parked slot <k> single rebuilt at <park|idle> ms=<f> trace_delta=<bytes|n/a> dram_delta=<bytes|n/a>
@@ -82,7 +82,7 @@ REFUSED_LINE = re.compile(r'\[PINDIAG\] parked rebind refused req=(\S+) slot=([0
 FAILED_LINE = re.compile(r'\[PINDIAG\] parked rebind failed req=(\S+) slot=([0-9]+) reason=(.*) fallback=build')
 PEAK_LINE = re.compile(r'\[PINDIAG\] parked rebind peak slot=([0-9]+) P=([0-9]+) free_before=([0-9]+) free_at_peak=([0-9]+) held=([0-9]+)')
 DIGEST_LINE = re.compile(r'\[PINDIAG\] parked rebind digest slot=([0-9]+) snapshots=([0-9]+) tables=([0-9]+) slot0=([01]) zeroed=([01]) equal=([01])')
-PROGRAMS_LINE = re.compile(r'\[PINDIAG\] parked programs rebind slot=([0-9]+) programs=(\d+|None)->(\d+|None)')
+PROGRAMS_LINE = re.compile(r'\[PINDIAG\] parked programs rebind slot=([0-9]+) programs=(\d+|None)->(\d+|None)(?: P=(\d+))?')
 UNPARKED_LINE = re.compile(r'\[PINDIAG\] parked slot ([0-9]+) unparked: (.*)$')
 REPARKED_LINE = re.compile(r'\[PINDIAG\] parked slot ([0-9]+) re-parked ms=([0-9.]+)')
 REBUILT_LINE = re.compile(r'\[PINDIAG\] parked slot ([0-9]+) single rebuilt at (\S+) ms=([0-9.]+)(?: trace_delta=(\S+) dram_delta=(\S+))?')
@@ -171,7 +171,8 @@ def scan(lines):
         match = PROGRAMS_LINE.search(line)
         if match:
             before, after = [None if part == 'None' else int(part) for part in (match.group(2), match.group(3))]
-            facts['programs'].append(dict(slot=int(match.group(1)), before=before, after=after))
+            facts['programs'].append(dict(slot=int(match.group(1)), before=before, after=after,
+                                          prompt=None if match.group(4) is None else int(match.group(4))))
             found = True
         match = UNPARKED_LINE.search(line)
         if match:

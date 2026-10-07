@@ -55,7 +55,7 @@ class RuntimeAttachmentTests(unittest.TestCase):
             self.parked_sets.append(built)
             return built
 
-        # (The policy's own parked checks - serving_fast_policy.parked_engine_problems, held by test_parked_tp4_policy - read
+        # (The policy's own parked checks - serving_fast_policy.parked_engine_problems, held by test_parked_tp4_profiles - read
         # the whole S2 environment, which this harness does not build; the attach logic is what is under test here.)
         parked_patch = (patch('serving_parked_engines.ParkedEngineSet', side_effect=build_parked)
                         if parked is not None else nullcontext())

@@ -67,6 +67,14 @@ class TermTests(FourCards):
                                                                                     single=0), 900 * MB)
         self.assertEqual(round(admission.parked_backstop_need(RESERVE, rebind=rebind, single=0) / MB, 1), 368.4)
 
+    def test_the_longest_arrival_is_priced_at_the_long_prefill_tier_when_one_is_set(self):
+        flat = parked.parked_arrival_need(RESERVE, 256)
+        self.assertEqual(flat, admission.parked_need(None, RESERVE, rebind=parked.rebind_peak_bytes(256), single=0))
+        with patch.dict(os.environ, {admission.LONG_FROM_FLAG: '65536', admission.LONG_MB_FLAG: '1500'}):
+            tiered = parked.parked_arrival_need(RESERVE, 256)
+        self.assertEqual(tiered - flat, 1500 * MB - admission.prefill_transient_bytes())
+        self.assertGreater(tiered, flat)
+
     def test_the_constants_are_the_designs(self):
         self.assertEqual(admission.PARKED_REBIND_BYTES, 100 * MB)
         self.assertEqual(admission.PARKED_REBIND_WHOLE_BYTES, 350 * MB)

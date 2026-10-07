@@ -145,6 +145,20 @@ class JudgeTests(unittest.TestCase):
         self.assertEqual(self.verdict(self.park_fault, QWEN_FAST_PARKED_FAULT='park'), [])
         self.assertEqual(self.verdict(self.rebind_fault, QWEN_FAST_PARKED_FAULT='rebind'), [])
 
+    def test_the_kill_switch_trigger_latches_once_after_n_rebinds_and_nothing_rebinds_after(self):
+        off = '[PINDIAG] parked engines off (kill switch): unparked=4\n'
+        rebinds = len(markers.scan(self.plain.splitlines())['rebinds'])
+        self.assertEqual(rebinds, 4)
+        sticky = ''.join('[PINDIAG] sticky engine built req=req-%d ms=300.0 frontier=0 prompt=300 kind=rebind' % index + chr(10) for index in range(4))
+        sticky += '[PINDIAG] sticky engine built req=cold-9 ms=2400.0 frontier=0 prompt=300 kind=build' + chr(10)
+        self.assertEqual(self.verdict(self.plain + sticky + off, QWEN_FAST_PARKED_OFF_AFTER='4'), [])
+        found = self.verdict(self.plain + sticky, QWEN_FAST_PARKED_OFF_AFTER='4')
+        self.assertTrue(any('0 kill-switch lines' in text for text in found), found)
+        found = self.verdict(self.plain + sticky + off + off, QWEN_FAST_PARKED_OFF_AFTER='4')
+        self.assertTrue(any('2 kill-switch lines' in text for text in found), found)
+        found = self.verdict(self.plain + sticky + off, QWEN_FAST_PARKED_OFF_AFTER='3')
+        self.assertTrue(any('4 rebinds under QWEN_FAST_PARKED_OFF_AFTER=3' in text for text in found), found)
+
     def test_a_fault_the_profile_did_not_inject_is_a_finding(self):
         found = self.verdict(self.park_fault)
         self.assertTrue(any('slots unparked' in text for text in found), found)
@@ -186,6 +200,33 @@ class JudgeTests(unittest.TestCase):
         self.assertTrue(any('compiled 3 program' in text for text in found), found)
         clean = '\n'.join(['[PINDIAG] parked programs rebind slot=0 programs=849->900', '[PINDIAG] parked programs rebind slot=1 programs=900->900'])
         self.assertEqual(self.verdict(self.plain + clean + '\n'), [], 'the first rebind may compile (the warm of its shapes); later ones may not')
+
+    def test_a_first_rebind_of_a_short_prompt_length_may_compile_but_a_long_or_repeated_one_may_not(self):
+        line = '[PINDIAG] parked programs rebind slot=%d programs=%d->%d P=%d'
+        first = line % (0, 849, 849, 2048)
+        short = '\n'.join([first, line % (1, 849, 855, 63), line % (0, 855, 855, 63), line % (1, 855, 861, 129)])
+        self.assertEqual(self.verdict(self.plain + short + '\n'), [], 'the first rebind of each short length compiles what a cold build compiles')
+        again = '\n'.join([first, line % (1, 849, 855, 63), line % (0, 855, 858, 63)])
+        self.assertTrue(any('compiled 3 program' in text for text in self.verdict(self.plain + again + '\n')))
+        long = '\n'.join([first, line % (1, 849, 855, 2048)])
+        self.assertTrue(any('compiled 6 program' in text for text in self.verdict(self.plain + long + '\n')), 'from 2048 on the attach warm covers every program')
+        self.assertEqual(markers.scan(['[PINDIAG] parked programs rebind slot=0 programs=1->2'])['programs'][0]['prompt'], None)
+
+    def test_the_memory_churn_rules_the_log_can_show(self):
+        def before(chip, floor, trace):
+            return ('[MEMLEDGER] before op=engine point=req=r chip%d largest_free=900.0MB free=4.000GB estimate=500.0MB margin=900.0MB floor=%.1fMB '
+                    'contiguous=300.0MB trace_used=%.1fMB trace_largest_free=80.0MB' % (chip, floor, trace))
+        book = '[PINDIAG] parked draft book quad slots=0,1,2,3 captured_at_round=9'
+        good = chr(10).join([before(0, 600.0, 400.0), book, before(0, 480.0, 440.0), before(1, 520.0, 440.2)]) + chr(10)
+        self.assertEqual(judge.memory_problems(good), [])
+        low = chr(10).join([before(0, 600.0, 400.0), before(0, 120.0, 400.0)]) + chr(10)
+        self.assertTrue(any('floor fell to 120.0 MB' in text for text in judge.memory_problems(low)))
+        moved = chr(10).join([before(0, 600.0, 400.0), book, before(0, 600.0, 440.0), before(0, 600.0, 447.5)]) + chr(10)
+        self.assertTrue(any('trace region moved 7.5 MB' in text for text in judge.memory_problems(moved)))
+        hold = '[PINDIAG] dram hold prompt=253920 largest_free=900.0MB need=1300.0MB request=r1 decodes=7 free=4000.0MB trace_largest_free=80.0MB short=%s'
+        self.assertEqual(judge.memory_problems(hold % 'free+contiguous'), [])
+        self.assertTrue(any('names short=none' in text for text in judge.memory_problems(hold % 'none')))
+        self.assertEqual(judge.memory_problems(''), [])
 
     def test_failures_and_the_audit(self):
         failed = self.plain + '[PINDIAG] parked rebind failed req=r slot=1 reason=RuntimeError: x fallback=build\n'
@@ -285,6 +326,30 @@ class CompareTests(unittest.TestCase):
         self.assertTrue(judge.equivalence('', sequence)[1])
         live, _, detail = judge.equivalence(rounds([[(3, 4)] * 30]), rounds([[(3, 4)] * 20 + [(1, 1)] * 10]), solo=False)
         self.assertTrue(live and 'concurrent acceptance' in live[0], live)
+
+    def test_exact_equivalence_binds_the_solo_requests_and_concurrent_ones_only_by_acceptance(self):
+        def lines(entries):
+            return '\n'.join('[%s] request=%s prefix=%d emitted=%d' % entry for entry in entries) + '\n'
+        solo = [('SEQUENTIAL', 'solo-a', 5, 3), ('SEQUENTIAL', 'solo-a', 8, 2)]
+        busy_one = [('PACKED', 'x', 1, 4), ('SEQUENTIAL', 'y', 1, 4), ('PACKED', 'x', 5, 4), ('SEQUENTIAL', 'y', 5, 4)]
+        busy_two = [('SEQUENTIAL', 'x', 1, 4), ('PACKED', 'y', 1, 4), ('SEQUENTIAL', 'x', 5, 4), ('PACKED', 'y', 5, 4)]
+        control, other = lines(solo + busy_one), lines(solo + busy_two)
+        self.assertEqual([name for name, _ in judge.accepted_sequences(control, 'solo')], ['solo-a'])
+        self.assertEqual([name for name, _ in judge.accepted_sequences(control, 'concurrent')], ['x', 'y'])
+        self.assertTrue(judge.equivalence(control, other)[0], 'over the whole log the path letters differ')
+        self.assertEqual(judge.equivalence(control, other, only='solo')[0], [])
+        self.assertEqual(judge.equivalence(control, other, solo=False, only='concurrent')[0], [])
+        a, b = parked_compare.compare(*self.arms(), control, other)[:2]
+        self.assertEqual([text for text in a if 'drafter equivalence' in text or 'concurrent drafting' in text], [])
+        changed = lines([('SEQUENTIAL', 'solo-a', 5, 3), ('SEQUENTIAL', 'solo-a', 8, 1)] + busy_two)
+        self.assertTrue(any('drafter equivalence' in text for text in parked_compare.compare(*self.arms(), control, changed)[0]))
+        # the drafter negative control is judged on the solo requests: identical solo sequences fail it however the busy ones differ
+        problems, _ = judge.negative_verdict('drafter', [], control, other)
+        self.assertTrue(any('drafted exactly like the flag-off arm' in text for text in problems), problems)
+        problems, _ = judge.negative_verdict('drafter', [], control, changed)
+        self.assertEqual(problems, [])
+        with self.assertRaises(ValueError):
+            judge.accepted_sequences(control, 'both')
 
     def test_a_comparison_with_nothing_in_common_is_not_a_pass(self):
         self.assertEqual(parked_compare.main(['--control', '/nonexistent-a', '--parked', '/nonexistent-b']), 2)

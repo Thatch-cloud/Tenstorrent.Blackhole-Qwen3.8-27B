@@ -650,8 +650,8 @@ class PackedProposalCoordinator:
 
     def __init__(self):
         # The draft book (2c): when one is registered its dicts ARE this coordinator's, so a trace is listed once and closed once.
-        self.book = draft_book()
-        self.pairs = {} if self.book is None else self.book.pairs
+        self._book = draft_book()
+        self.pairs = {} if self._book is None else self._book.pairs
         self.rounds = 0
         # QWEN_FAST_QUAD_DRAFT (quad_draft.py): (devices, trace, released) of the quad over slots 0-3, its
         # consecutive failures, whether it gave up, and how many rounds it served. Read only with the flag on.
@@ -661,7 +661,7 @@ class PackedProposalCoordinator:
         self.quad_rounds = 0
         # QWEN_FAST_QUAD_DRAFT_BLOCKS: the per-block quads' own state, keyed by slot tuple - (devices, trace, released) as self.quad, the
         # consecutive failures, and the blocks given up (slots -> reason). Empty, and nothing reads them, with the flag off.
-        self.quad_blocks = {} if self.book is None else self.book.quad_blocks
+        self.quad_blocks = {} if self._book is None else self._book.quad_blocks
         self.quad_block_failures = {}
         self.quad_blocked = {}
         # Engine reuse (QWEN_FAST_PARKED_ENGINES=1, no book; empty otherwise): {pair group, 'quad' or the block's slots: the members' rebind_generation
@@ -669,6 +669,12 @@ class PackedProposalCoordinator:
         self.generations = {}
         # QWEN_FAST_DRAFT_SINGLES_AUDIT: the rounds that ran a batched group (the audit's own count).
         self.singles_audit_candidates = 0
+
+    @property
+    def book(self):
+        """The draft book while it is still registered, else None: the kill switch unregisters it, and from then on this coordinator is today's (its
+        dicts, which were the book's, are empty and its own)."""
+        return self._book if self._book is not None and self._book in _DRAFT_BOOKS else None
 
     def close(self):
         if self.book is not None:
@@ -698,14 +704,17 @@ class PackedProposalCoordinator:
         if self.book is not None:
             self.book.retire('pair', group)
         else:
-            self.pairs.pop(group)[2].close()
+            # Close first, then unlist: a close that raises leaves the entry listed, as the code always did.
+            self.pairs[group][2].close()
+            del self.pairs[group]
         self.generations.pop(group, None)
 
     def _close_quad_block(self, slots):
         if self.book is not None:
             self.book.retire('quad', slots)
         else:
-            self.quad_blocks.pop(slots)[1].close()
+            self.quad_blocks[slots][1].close()
+            del self.quad_blocks[slots]
         self.generations.pop(slots, None)
 
     def _rebound(self, key, devices):

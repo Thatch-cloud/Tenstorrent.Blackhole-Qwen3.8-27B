@@ -136,14 +136,19 @@ def logits_problem(operations, logits, rows):
 # the audit - runs neither check. The ledger installs from serving_runtime whenever the audit is on, with or without parked engines, so
 # the flag-off control arm of the audit twin measures the same ordering (design K2).
 _replay_count = None
+# Strict (the default): a violation raises. Not strict (the flag-off control arm of the audit twin, which runs the ledger with no parked engines):
+# a violation is a log line, R2_MARKER, read by the gate's judge, so today's ordering cannot stop a window on its own.
+_replay_strict = True
+R2_MARKER = '[PINDIAG] R2 violation: '
 
 
-def set_replay_count(counter):
+def set_replay_count(counter, strict=True):
     """Install (a zero-argument callable) or remove (None) the replay ledger; returns the previous one."""
-    global _replay_count
+    global _replay_count, _replay_strict
     if counter is not None and not callable(counter):
         raise ValueError('The replay ledger must be a zero-argument callable or None')
     previous, _replay_count = _replay_count, counter
+    _replay_strict = bool(strict) if counter is not None else True
     return previous
 
 
@@ -154,8 +159,12 @@ def check_replay_mark(engine):
         return
     count = _replay_count()
     if count != mark:
-        raise AssertionError('R2: %d other trace replay(s) ran between the verify of request %s and its publication'
-                             % (count - mark, str(engine.session.request_id)[:48]))
+        message = 'R2: %d other trace replay(s) ran between the verify of request %s and its publication' % (
+            count - mark, str(engine.session.request_id)[:48])
+        if not _replay_strict:
+            verify_trace_t1.log_line(R2_MARKER + message)
+            return
+        raise AssertionError(message)
 
 
 def reset_retained(retained):

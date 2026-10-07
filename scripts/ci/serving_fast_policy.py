@@ -137,7 +137,7 @@ PARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'
 PARKED_DRAFTS_FLAG = 'QWEN_FAST_PARKED_DRAFTS'
 PARKED_PREFIX = 'QWEN_FAST_PARKED_'
 PARKED_NAMES = ('QWEN_FAST_PARKED_ENGINES', 'QWEN_FAST_PARKED_DRAFTS', 'QWEN_FAST_PARKED_PROJECT_ROWS', 'QWEN_FAST_PARKED_AUDIT',
-                'QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT')
+                'QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT', 'QWEN_FAST_PARKED_OFF_AFTER', 'QWEN_FAST_PARKED_OFF_PATH')
 # Gate-only knobs (serving_c2_contract.parked_problems refuses them outside a gate profile).
 PARKED_NEGATIVE_FLAG = 'QWEN_FAST_PARKED_NEGATIVE'
 PARKED_NEGATIVES = ('carry', 'drafter', 'pages', 'widths')
@@ -157,7 +157,8 @@ def parked_engines_enabled(environ=None):
 
 def parked_engine_problems(environ, users):
     """Every way the parked engines' environment is wrong, [] when none. Unknown QWEN_FAST_PARKED_ names are refused whether the flag is on or
-    not; every other check runs only with QWEN_FAST_PARKED_ENGINES=1 (the DRAFTS, AUDIT, NEGATIVE and FAULT values are checked whenever set)."""
+    not; every other check runs only with QWEN_FAST_PARKED_ENGINES=1 (only the DRAFTS and AUDIT values are checked whenever set; NEGATIVE, FAULT
+    and OFF_AFTER are checked with the flag on)."""
     problems = ['%s is not a parked-engines setting (the names are %s)' % (name, ', '.join(PARKED_NAMES))
                 for name in sorted(environ) if name.startswith(PARKED_PREFIX) and name not in PARKED_NAMES]
     for name in (PARKED_DRAFTS_FLAG, 'QWEN_FAST_PARKED_AUDIT'):
@@ -209,6 +210,9 @@ def parked_engine_problems(environ, users):
     fault = environ.get(PARKED_FAULT_FLAG)
     if fault is not None and fault != '' and fault not in PARKED_FAULTS:
         problems.append('%s must be one of %s, got %r' % (PARKED_FAULT_FLAG, ', '.join(PARKED_FAULTS), fault))
+    after = environ.get('QWEN_FAST_PARKED_OFF_AFTER')
+    if after not in (None, '') and not (after.isdigit() and after == str(int(after)) and int(after) > 0):
+        problems.append('QWEN_FAST_PARKED_OFF_AFTER must be a positive whole number of rebinds, got %r' % (after,))
     if environ.get(PARKED_DRAFTS_FLAG, '0') == '1':
         for name, wanted, why in (('QWEN_FAST_QUAD_DRAFT', '1', 'the bound traces are the pair and block-quad ones'),
                                   ('QWEN_FAST_QUAD_DRAFT_BLOCKS', '2', 'the book holds the eight-seat per-block quads'),

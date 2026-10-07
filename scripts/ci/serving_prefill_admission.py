@@ -738,6 +738,7 @@ def dram_hold(scheduler, decodes, state, log, modules=None, candidates=None):
             log(DRAM_RELEASED_LINE, prompt, _megabytes(largest), _megabytes(need), request_id, _megabytes(free),
                 _megabytes(trace))
             since = state.pop('dram_held_at', None)
+            since = since[1] if since is not None and since[0] == request_id else None
             if since is not None:
                 # Engine reuse only (the parked terms were asked when the hold began): how long the hold lasted, so a gate can bound it.
                 log(DRAM_AGE_LINE, request_id, (time.monotonic() - since) * 1000.0, held[1])
@@ -756,13 +757,17 @@ def dram_hold(scheduler, decodes, state, log, modules=None, candidates=None):
         return True
     if not decodes:
         state['dram_held'] = None
+        state.pop('dram_held_at', None)
         _note(state, log, ('lifted', request_id), DRAM_LIFTED_LINE, prompt, _megabytes(largest), _megabytes(need),
               request_id, _megabytes(free), _terms(short))
         return False
     if held != (request_id, decodes):
         state['dram_held'] = (request_id, decodes)
-        if parked_terms is not None and 'dram_held_at' not in state:
-            state['dram_held_at'] = time.monotonic()
+        held_at = state.get('dram_held_at')
+        if parked_terms is not None and (held_at is None or held_at[0] != request_id):
+            # (request id, start): the age is the hold of THIS request, never one inherited from an earlier hold that was lifted.
+            state['dram_held_at'] = (request_id, time.monotonic())
+
         log(DRAM_HOLD_LINE, prompt, _megabytes(largest), _megabytes(need), request_id, decodes, _megabytes(free),
             _megabytes(trace), _terms(short))
     return True

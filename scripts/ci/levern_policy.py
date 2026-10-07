@@ -456,6 +456,8 @@ class AdmissionCost(object):
         self.observed = dict(build=0, rebind=0)
         # a zero-argument callable answering how many parked engines are free right now (ParkedEngineSet.parked_count), or None
         self.parked_free = None
+        # a zero-argument callable answering whether the slot the NEXT arrival is placed on holds a parked engine (ParkedEngineSet.peek), or None
+        self.next_parked = None
 
     def observe(self, kind, ms):
         if kind not in self.ewma:
@@ -471,12 +473,24 @@ class AdmissionCost(object):
 
     def per_pending(self, count):
         """The predicted cost of each of `count` pending prefills in service order: a rebind while parked slots remain free (the first
-        ones take them), else a build."""
+        ones take them), else a build. When the set can say whether the slot the next arrival is placed on is parked (after a fault or a ladder
+        rung, placement can pick a free unparked slot ahead of the parked ones), the first pending prefill is charged by that, and the rest by the
+        parked slots left."""
         try:
             free = int(self.parked_free()) if callable(self.parked_free) else 0
         except Exception:
             free = 0
-        return [self.ewma['rebind'] if index < free else self.ewma['build'] for index in range(count)]
+        first = None
+        if callable(self.next_parked) and count and free:
+            try:
+                first = bool(self.next_parked())
+            except Exception:
+                first = None
+        if first is None:
+            return [self.ewma['rebind'] if index < free else self.ewma['build'] for index in range(count)]
+        left = free - (1 if first else 0)
+        return [self.ewma['rebind'] if first else self.ewma['build']] + [
+            self.ewma['rebind'] if index < left else self.ewma['build'] for index in range(count - 1)]
 
 
 def admission_cost(create=True):

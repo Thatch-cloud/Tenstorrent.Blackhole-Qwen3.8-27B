@@ -45,6 +45,7 @@ edited here: the full page-table rewrite is write_page_tables, held to VerifierP
 import os
 import re
 import time
+import trace_census
 from types import SimpleNamespace
 
 
@@ -71,6 +72,8 @@ REBIND_FAULT_REASON = 'injected rebind fault (gate only)'
 OFF_FILE = 'parked.off'
 OFF_PATH = '/models/.qwen-c2/parked.off'
 OFF_PATH_ENV = 'QWEN_FAST_PARKED_OFF_PATH'
+# GATE ONLY: latch the kill switch by itself once this many rebinds have succeeded (the F2 job's automatic trigger; the file above is the operator's).
+OFF_AFTER_FLAG = 'QWEN_FAST_PARKED_OFF_AFTER'
 OFF_MARKER = '[PINDIAG] parked engines off (kill switch): unparked={}'
 
 # The windowed drafter projection at a rebind (rebind_device): rows per project_features call. 0 is one call over the whole window.
@@ -159,6 +162,16 @@ def drafts_enabled(environ=None):
 def audit_enabled(environ=None):
     """QWEN_FAST_PARKED_AUDIT (gate): unset or '0' off, '1' on, anything else refused."""
     return _strict_bool(AUDIT_FLAG, environ)
+
+
+def off_after(environ=None):
+    """QWEN_FAST_PARKED_OFF_AFTER (gate only): None when unset or empty, else a positive whole number of rebinds; anything else is refused."""
+    value = (os.environ if environ is None else environ).get(OFF_AFTER_FLAG)
+    if value in (None, ''):
+        return None
+    if type(value) is not str or re.fullmatch('[1-9][0-9]*', value) is None:
+        raise ValueError('%s must be a positive whole number of rebinds, got %r' % (OFF_AFTER_FLAG, value))
+    return int(value)
 
 
 def negative_mode(environ=None):
@@ -347,10 +360,12 @@ class ReplayLedger:
     proposal trace it has just captured and no other. Installed by the serving runtime whenever the audit is on, with or without parked engines,
     so the flag-off control arm of the audit twin runs the same check (design K2)."""
 
-    def __init__(self, operations):
+    def __init__(self, operations, strict=True):
         self.operations = operations
+        self.strict = strict
         self.count = 0
         self.log = []
+        self.open_marks = 0
         self.original = self.original_begin = self.previous = None
         self.installed = False
 
@@ -358,10 +373,19 @@ class ReplayLedger:
         return self.count
 
     def mark(self):
+        """Opens a window of the log (it records only while one is open) and returns its start; end_mark closes it."""
+        self.open_marks += 1
         return len(self.log)
 
+    def end_mark(self):
+        """Closes one window; the log is dropped when none is left open, so it never outlives the build that asked for it."""
+        self.open_marks = max(0, self.open_marks - 1)
+        if not self.open_marks:
+            del self.log[:]
+
     def foreign_since(self, mark):
-        """The handles replayed since `mark` that were not captured since it, in order."""
+        """The keys of the traces replayed since `mark` that were not captured since it, in order. The log holds trace_census.trace_key
+        values, never the raw handles: a mesh trace id is an unhashable wrapper (__eq__ without __hash__), so a set of handles raises."""
         captured = {entry[1] for entry in self.log[mark:] if entry[0] == 'capture'}
         return [entry[1] for entry in self.log[mark:] if entry[0] == 'replay' and entry[1] not in captured]
 
@@ -374,18 +398,20 @@ class ReplayLedger:
 
         def execute_trace(mesh, trace, *args, **kwargs):
             self.count += 1
-            self.log.append(('replay', trace))
+            if self.open_marks:
+                self.log.append(('replay', trace_census.trace_key(trace)))
             return original(mesh, trace, *args, **kwargs)
 
         def begin_trace_capture(*args, **kwargs):
             trace = original_begin(*args, **kwargs)
-            self.log.append(('capture', trace))
+            if self.open_marks:
+                self.log.append(('capture', trace_census.trace_key(trace)))
             return trace
 
         self.original, self.original_begin = original, original_begin
         self.operations.execute_trace = execute_trace
         self.operations.begin_trace_capture = begin_trace_capture
-        self.previous = verifier_engine_tp.set_replay_count(self.read)
+        self.previous = verifier_engine_tp.set_replay_count(self.read, strict=self.strict)
         self.installed = True
         return self
 
@@ -404,7 +430,8 @@ def install_replay_ledger(operations, environ=None):
     """The ledger installed, or None: only under QWEN_FAST_PARKED_AUDIT=1 (any other value but '0' is refused)."""
     if not audit_enabled(environ):
         return None
-    return ReplayLedger(operations).install()
+    # Strict only beside parked engines: the flag-off control logs a violation (verifier_engine_tp.R2_MARKER) for the judge instead of dying on it.
+    return ReplayLedger(operations, strict=_strict_bool(FLAG, environ)).install()
 
 
 # -- the device side ---------------------------------------------------------------------------------------------------------------
@@ -654,11 +681,12 @@ def single_capture_bytes():
 
 
 def parked_arrival_need(reserve, window, *, single_released=False):
-    """What a parked arrival at the longest prompt needs free per chip, the reserve in it (serving_prefill_admission.parked_need): the
+    """What a parked arrival at the longest prompt (a length of None counts as the longest: the long-prefill tier's bytes when one is set, else the
+    flat transient) needs free per chip, the reserve in it (serving_prefill_admission.parked_need): the
     prefill's transient, the rebind's peak, a single-capture rebuild when that slot's single is released."""
     import serving_prefill_admission as admission
 
-    return admission.parked_need(admission.PREFILL_TRANSIENT_FROM, reserve, rebind=rebind_peak_bytes(window),
+    return admission.parked_need(None, reserve, rebind=rebind_peak_bytes(window),
                                  single=single_capture_bytes() if single_released else 0)
 
 
@@ -860,7 +888,7 @@ class ParkedEngineSet:
 
     The worker hook's detach then retires the device's pair and quad traces (E1: after_park -> the coordinator's release_parked) and rebuilds
     its released single when the split allows (rebuild_single); the lifecycle's idle moment does the same for every parked slot and re-parks
-    the unparked ones (idle). arrival_terms are the parked terms of the slot the next request will take, asked by the scheduler's predicate
+    the unparked ones (idle; never at a detach, which has other seats decoding). arrival_terms are the parked terms of the slot the next request will take, asked by the scheduler's predicate
     and the backstop; make_room is the release ladder an arrival short of them runs before it is refused."""
 
     def __init__(self, *, operations, model, sampler, helpers, pool, weights, fixtures, collectives, blocks,
@@ -906,6 +934,7 @@ class ParkedEngineSet:
         self.attach_ms = None
         self.off = False
         self.off_file = environ.get(OFF_PATH_ENV, OFF_PATH) or None
+        self.off_after = off_after(environ)
         self.clock = time.monotonic
         self.polled = float('-inf')
         self.book = None
@@ -936,7 +965,7 @@ class ParkedEngineSet:
             return None
         need = admission.engine_build_peak() + parked_arrival_need(reserve, self.window)
         short = admission.split_short(reading['free'], reading['largest_free'], need, reserve, reading['trace_largest_free'],
-                                      contiguous=admission.admission_contiguous_need(admission.PREFILL_TRANSIENT_FROM, reserve))
+                                      contiguous=admission.admission_contiguous_need(None, reserve))
         return (short, reading, need) if short else None
 
     def ledger(self):
@@ -955,20 +984,24 @@ class ParkedEngineSet:
         built = 0
         ledger = self.ledger()
         mark = None if ledger is None else ledger.mark()
-        for entry in self.slots:
-            stop = self.dram_short()
-            if stop is not None:
-                short, reading, need = stop
-                self.log(STOPPED_MARKER, entry.index, len(self.slots), '+'.join(short), reading['free'], reading['largest_free'], need)
-                break
-            self.build_slot(entry, warm=entry.index == 0)
-            built += 1
-        verifier_engine.note_prefill()
+        try:
+            for entry in self.slots:
+                stop = self.dram_short()
+                if stop is not None:
+                    short, reading, need = stop
+                    self.log(STOPPED_MARKER, entry.index, len(self.slots), '+'.join(short), reading['free'], reading['largest_free'], need)
+                    break
+                self.build_slot(entry, warm=entry.index == 0)
+                built += 1
+            verifier_engine.note_prefill()
+            foreign = [] if ledger is None else ledger.foreign_since(mark)
+        finally:
+            if ledger is not None:
+                ledger.end_mark()
         if ledger is not None:
             # The attach ordering the S8 hang class leans on (the audit arm only: the ledger that sees them is the audit's): the builds replay
             # nothing but the single proposal trace each has just captured. A replay of a block's trace here is a block that ran before
             # the engines were built.
-            foreign = ledger.foreign_since(mark)
             if foreign:
                 raise AssertionError('The parked engine builds replayed %d trace(s) they had not captured: the attach ordering (all builds '
                                      'before any block replay) does not hold' % len(foreign))
@@ -1008,7 +1041,12 @@ class ParkedEngineSet:
             raise ValueError('Pool slot %d must be free to park an engine on it' % entry.index)
         pages = torch.zeros((1, self.pool.page_width), dtype=torch.int32)
         validate_initial_capture_pages(pages, (0,), position=SYNTHETIC_POSITION, output_budget=SYNTHETIC_BUDGET)
-        # Native slot 0 from the slot's zeroed carry: the synthetic warm forwards write page 0's K/V from it.
+        # Native slot 0 from the slot's zeroed carry: the synthetic warm forwards write page 0's K/V from it. That write overwrites whatever
+        # a resident sequential engine left there, so its residency ends BEFORE the first write: a build that then fails (an OOM, say) must
+        # not leave an engine that skips its carry restore and verifies on the zeroed state.
+        import verifier_engine
+
+        verifier_engine.note_prefill()
         self.pool.rezero(slot)
         for helper, snapshot in zip(self.helpers, slot.verifier.carry, strict=True):
             helper.restore(snapshot)
@@ -1145,18 +1183,28 @@ class ParkedEngineSet:
         entry = self.peek()
         return None if entry is None else self.slot_terms(entry)
 
-    def rebind_refusal(self, entry, *, position, budget, pages_shape):
+    def rebind_refusal(self, entry, *, position, budget, pages_shape, taps=None):
         """Why `entry`'s parked engine cannot be rebound to this request, or None - HOST ONLY, before take() and before any device write
         (design 5.9): the engine's own request-geometry checks, the device being open with its pooled cache, the single being present or
-        legitimately released, and the injected rebind fault (once)."""
+        legitimately released, the injected rebind fault (once) and, with `taps`, the cold constructor's own geometry check on them (five 4-D taps
+        of prefill_window(position)['rows'] rows: a wider capture would have project_window read the wrong rows, changing the drafter, not the
+        tokens)."""
         if entry.state != 'parked' or entry.engine is None or entry.device is None:
             return 'the slot holds no parked engine'
         if self.fault == 'rebind' and not self.faulted:
             self.faulted = True
             return REBIND_FAULT_REASON
-        reason = entry.engine.rebind_refusal(position, budget, tuple(pages_shape))
+        # `budget` counts the seed the session emits at construction: the engine's rebind and a cold engine decode budget - 1 tokens.
+        reason = entry.engine.rebind_refusal(position, budget - 1, tuple(pages_shape))
         if reason is not None:
             return reason
+        if taps is not None:
+            from dflash_prefill_window import prefill_window
+
+            rows = prefill_window(position)['rows']
+            taps = tuple(taps)
+            if len(taps) != 5 or any(len(getattr(value, 'shape', ())) != 4 or value.shape[2] != rows for value in taps):
+                return 'the prefill taps are not five 4-D tensors of %d rows (a cold constructor refuses them)' % rows
         device = entry.device
         if device.closed or device.pool_slot is None or device.kv_history is None or not device.cache_history:
             return 'the parked device is not an open pooled device with a committed K/V cache'
@@ -1224,7 +1272,7 @@ class ParkedEngineSet:
         entry.rebinds += 1
         after = self.program_count()
         if programs is not None and after is not None:
-            self.log(PROGRAMS_MARKER + 'rebind slot={} programs={}->{}', entry.index, programs, after)
+            self.log(PROGRAMS_MARKER + 'rebind slot={} programs={}->{} P={}', entry.index, programs, after, position)
         self.log(REBIND_MARKER + 'req={} slot={} gen={} P={} budget={} ms={:.1f} single_rebuilt={} window={} widths={} capacity={}',
                  str(request_id if request_id is not None else session.request_id)[:48], entry.index, device.rebind_generation,
                  position, budget if budget is not None else session.max_new_tokens, (time.perf_counter() - started) * 1000,
@@ -1271,7 +1319,7 @@ class ParkedEngineSet:
         """FastRequest's release_drafter for a rebound slot, after park_engine: the device parks (park_device: a fence, its pending proposal
         dropped, its pooled slot verified), its page tables nulled and its instance state checked, and the slot is parked; or, when the engine
         or the device cannot park - or the park itself raises - the slot is unparked: both closed as today's close closes them, the slot back
-        to the pool, until a detach or an idle moment re-parks it. Returns None when parked, else why it was unparked. Idempotent past the
+        to the pool, until an idle moment re-parks it. Returns None when parked, else why it was unparked. Idempotent past the
         first outcome."""
         if entry not in self.slots:
             raise ValueError('Only a slot of this set can park')
@@ -1309,10 +1357,11 @@ class ParkedEngineSet:
         """The worker hook's release when a request on `entry` detaches, after its close parked the slot (release_parked, from
         FastWorkerHook.detach). E1: the device's pair and quad traces retired now by the coordinator's release_parked - a parked device never
         closes, so release_closed never sees them dead - then its released single rebuilt when the split allows. 2c: nothing is retired (the
-        traces are the book's, bound to the slot), the single is never released. Then ONE unparked free slot is re-parked when the split
-        allows, so a faulted slot does not stay on cold builds until a whole-server idle moment. A failed retirement is logged and left to
+        traces are the book's, bound to the slot), the single is never released. No slot is re-parked here: the hook detaches only while other seats
+        decode, and a re-park is a full synthetic build (captures included) that would stall every one of them, so an unparked slot waits for
+        the idle moment (idle, repark_idle). A failed retirement is logged and left to
         the coordinator's own checks; a failed single rebuild leaves it released with its S in the slot's terms, as idle() does. Returns
-        dict(released=, single=, reparked=) or None."""
+        dict(released=, single=) or None."""
         if self.closed or entry.state != 'parked' or entry.device is None:
             return None
         released = None
@@ -1329,7 +1378,7 @@ class ParkedEngineSet:
             # The park already succeeded; the single stays released and the slot's terms carry S until its next rebind rebuilds it.
             entry.device.proposal_capture = None if single_capture(entry.device) is None else entry.device.proposal_capture
             self.log(IDLE_FAILED_MARKER, entry.index, 'single rebuild at park', '%s: %s' % (type(failure).__name__, failure))
-        return dict(released=released, single=single, reparked=self.repark_one())
+        return dict(released=released, single=single)
 
     def single_short(self):
         """THE SPLIT's terms a single-capture rebuild now would leave short for the longest parked arrival - its need counted with S, which
@@ -1342,7 +1391,7 @@ class ParkedEngineSet:
             return None
         need = parked_arrival_need(reserve, self.window, single_released=True)
         short = admission.split_short(reading['free'], reading['largest_free'], need, reserve, reading['trace_largest_free'],
-                                      contiguous=admission.admission_contiguous_need(admission.PREFILL_TRANSIENT_FROM, reserve),
+                                      contiguous=admission.admission_contiguous_need(None, reserve),
                                       trace_need=admission.parked_trace_need(True))
         return (short, reading, need) if short else None
 
@@ -1431,29 +1480,8 @@ class ParkedEngineSet:
             verifier_engine.note_prefill()
         return reparked
 
-    def after_cold_detach(self):
-        """The worker hook's release when a request that a cold build served detaches (its device closed, its slot free): one unparked free slot
-        re-parked now, when the split allows, so a faulted slot does not serve the next arrival's cold build too. dict(reparked=slot or None)."""
-        if self.closed or self.off:
-            return None
-        return dict(reparked=self.repark_one())
-
     def repark_candidate(self, entry):
         return entry.state == 'unparked' and not entry.slot.lent
-
-    def repark_one(self):
-        """One unparked free slot re-parked now (at a detach), when the split allows; the slot's index, or None."""
-        import verifier_engine
-
-        if self.off or self.closed:
-            return None
-        for entry in self.slots:
-            if self.repark_candidate(entry):
-                if self.repark(entry):
-                    verifier_engine.note_prefill()
-                    return entry.index
-                return None
-        return None
 
     def repark(self, entry):
         """Build the synthetic engine on an unparked free slot and park it; False when the DRAM split is short or the build failed (the slot
@@ -1483,7 +1511,11 @@ class ParkedEngineSet:
         """The lifecycle calls this at the TOP of every execute (once a second at most, latched): when parked.off exists the set switches off - every
         parked idle slot unparks now (fence, close), every serving slot unparks at its close, arrival_terms and place answer None, re-parking
         stops, and the book is retired with its devices. The latch is applied only here, never between a request's backstop and its take()."""
-        if self.off or self.closed or self.off_file is None:
+        if self.off or self.closed:
+            return self.off
+        if self.off_after is not None and sum(entry.rebinds for entry in self.slots) >= self.off_after:
+            return self.switch_off('after %d rebinds' % self.off_after)
+        if self.off_file is None:
             return self.off
         now = self.clock()
         if now - self.polled < 1.0:
@@ -1504,6 +1536,11 @@ class ParkedEngineSet:
                 unparked += 1
         if self.book is not None:
             self.book.retire_all()
+        if self.unregister_book is not None:
+            # The book leaves with the switch: a coordinator reads the registration at every call, so from here singles are released and traces
+            # closed with their members as today's per-request path does.
+            self.unregister_book()
+            self.unregister_book = None
         self.log(OFF_MARKER, unparked)
         return True
 
@@ -1604,10 +1641,10 @@ class ParkedEngineSet:
 def release_parked(coordinator, request):
     """The release at a detach (serving_worker_hook.release_parked, QWEN_FAST_PARKED_ENGINES=1 only): for a request that ran on a parked slot
     (serving_request_factory.rebind_parked sets its `parked_slot`), its set's after_park with the hook's proposal coordinator (None when the hook
-    never packed a proposal). None for a request today's per-request build served, whose closed device release_closed already covered."""
+    never packed a proposal). None for a request today's per-request build served, whose closed device release_closed already covered: an
+    unparked slot is re-parked at the idle moment only, never at a detach (the seats still decoding would stall behind the build)."""
     entry = getattr(request, 'parked_slot', None)
     owner = getattr(entry, 'owner', None)
     if owner is None:
-        cold = active_set()
-        return None if cold is None else cold.after_cold_detach()
+        return None
     return owner.after_park(entry, coordinator)

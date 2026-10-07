@@ -7,7 +7,7 @@ image - the control (the profile's parent, or its -audit-r2 twin for the audited
   - every test both arms ran: every stream's content hash, reasoning hash, completion token count and finish reason equal, user by user, and every exact-length
     or budget row equal in content hash, token count, finish reason and prompt token count (levern_compare's own comparison);
   - with the container logs: the Lever N digest lines (GDN slot, logits, KV pages of a finished prefill) equal per prompt, the parked arm's log clean under
-    parked_judge.judge (its widths, programs, fallbacks, digests), and the drafter-equivalence judge (the solo requests' accepted-prefix sequences identical);
+    parked_judge.judge (its widths, programs, fallbacks, digests), and the drafter-equivalence judge (the solo requests' accepted-prefix sequences identical, the overlapping requests' mean acceptance within tolerance);
   - and that it compared SOMETHING: no common test and no common digest is a failure (exit 2), not a pass.
 
 The other modes judge a negative-control arm against the control (parked_judge.negative_verdict): carry and pages must CHANGE tokens, drafter must keep
@@ -38,11 +38,24 @@ def compare(control_smoke, parked_smoke, control_container=None, parked_containe
         if parked_container is not None:
             found, facts = parked_judge.judge(env or dict(QWEN_FAST_PARKED_ENGINES='1'), parked_container)
             problems += ['parked arm: ' + text for text in found]
+            # R2 (the replay ledger): the parked arm's verifier raises on a replay between a verify and its publication, so its log carries none; the
+            # flag-off control logs one instead of raising, so today's ordering is a number in the report and cannot stop the window by itself.
+            control_r2, parked_r2 = parked_judge.r2_violations(control_container), parked_judge.r2_violations(parked_container)
+            lines.append('PARKED_COMPARE R2 violations control=%d parked=%d' % (control_r2, parked_r2))
+            if parked_r2:
+                problems.append('parked arm: %d R2 violation line(s): a trace replayed between a verify and its publication' % parked_r2)
             lines.append('PARKED_COMPARE judge %s' % json.dumps(facts))
-            solo, shortfalls, detail = parked_judge.equivalence(control_container, parked_container)
+            # The exact judge over the requests that ran alone; the requests that overlapped (levern_equal_busy, churn) by acceptance, because their
+            # draft paths follow admission timing.
+            solo, shortfalls, detail = parked_judge.equivalence(control_container, parked_container, only='solo')
             problems += ['drafter equivalence: ' + text for text in solo]
             lines += ['PARKED_COMPARE drafter equivalence shortfall: %s' % text for text in shortfalls]
             lines.append('PARKED_COMPARE drafter equivalence %s' % json.dumps(detail))
+            if parked_judge.accepted_sequences(control_container, 'concurrent') and parked_judge.accepted_sequences(parked_container, 'concurrent'):
+                busy, busy_shortfalls, busy_detail = parked_judge.equivalence(control_container, parked_container, solo=False, only='concurrent')
+                problems += ['concurrent drafting: ' + text for text in busy]
+                lines += ['PARKED_COMPARE concurrent drafting shortfall: %s' % text for text in busy_shortfalls]
+                lines.append('PARKED_COMPARE concurrent drafting %s' % json.dumps(busy_detail))
     else:
         found, facts = parked_judge.negative_verdict(mode, mismatches, control_container or '', parked_container or '')
         problems += ['negative control %s: %s' % (mode, text) for text in found]

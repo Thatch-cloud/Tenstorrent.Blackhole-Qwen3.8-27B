@@ -985,6 +985,34 @@ class DramTimingTests(DramFreeCase):
         self.assertEqual(logged(log, admission.DRAM_RELEASED_LINE),
                          [(4096, '900.0MB', '1300.0MB', 'E', 'unread', 'unread')])
 
+    def test_the_hold_age_is_that_of_the_request_released_never_an_earlier_lifted_hold(self):
+        """Engine reuse's hold age (the parked terms asked): a hold that was lifted leaves no start behind for the next request's hold."""
+        log, fits, clock = Mock(), [False], [1000.0]
+        detail = dict(largest_free=900 * MB, need=1_300 * MB, parked=object())
+        scheduler, state = SimpleNamespace(waiting=Queue([DramRequest('A', 4096)])), {}
+        with dram(lambda prompt: (fits[0], dict(detail))), patch.object(admission.time, 'monotonic', lambda: clock[0]):
+            self.assertTrue(admission.dram_hold(scheduler, 1, state, log))
+            clock[0] = 1010.0
+            self.assertFalse(admission.dram_hold(scheduler, 0, state, log), 'no decode is left: lifted')
+            self.assertNotIn('dram_held_at', state)
+            clock[0] = 1610.0
+            scheduler = SimpleNamespace(waiting=Queue([DramRequest('B', 4096)]))
+            self.assertTrue(admission.dram_hold(scheduler, 2, state, log))
+            clock[0] = 1615.0
+            fits[0] = True
+            self.assertFalse(admission.dram_hold(scheduler, 2, state, log))
+            # a hold that moves to another request without a lift restarts too
+            fits[0] = False
+            self.assertTrue(admission.dram_hold(scheduler, 2, state, log))
+            clock[0] = 1700.0
+            scheduler = SimpleNamespace(waiting=Queue([DramRequest('C', 4096)]))
+            self.assertTrue(admission.dram_hold(scheduler, 2, state, log))
+            clock[0] = 1702.0
+            fits[0] = True
+            self.assertFalse(admission.dram_hold(scheduler, 2, state, log))
+        ages = [(call.args[1], round(call.args[2])) for call in log.call_args_list if call.args and call.args[0] == admission.DRAM_AGE_LINE]
+        self.assertEqual(ages, [('B', 5000), ('C', 2000)])
+
     def test_the_state_stays_bounded_however_many_requests_pass(self):
         """Defect 5: one line per distinct state, from state that does not grow with the traffic."""
         log, state = Mock(), {}

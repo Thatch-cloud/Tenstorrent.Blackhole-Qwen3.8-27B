@@ -1,6 +1,6 @@
 """Build a request from completed serving prefill, without reference generation."""
 
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -209,8 +209,9 @@ def dram_backstop(pool, *, request_id, reserve=None, log=None, parked=None, make
 
     `parked` (engine reuse, QWEN_FAST_PARKED_ENGINES=1 only): the parked set's arrival terms for the slot this request will take,
     dict(rebind=, single=, credit=), and then the need is the rebind's (serving_prefill_admission.parked_backstop_need) and the trace region
-    is asked only for a released single's rebuild (parked_trace_need). `make_room` (with them): the set's release ladder, run ONCE when the
-    reading is short, after which the reading is taken again; the credit it stood for is only a promise until it has run. None: today's terms."""
+    is asked only for a released single's rebuild (parked_trace_need). `make_room`: the set's release ladder, run ONCE when the reading is short,
+    after which the reading is taken again; the credit it stood for is only a promise until it has run. Given without `parked`, an arrival on a
+    slot with no parked engine (after a fault, or a refused rebind) is backstopped on today's terms but may still be made room for. None: today's terms."""
     import serving_prefill_admission as admission
 
     if reserve is None:
@@ -232,7 +233,7 @@ def dram_backstop(pool, *, request_id, reserve=None, log=None, parked=None, make
             short = admission.split_short(free, largest, need, reserve, trace)
         else:
             short = admission.split_short(free, largest, need, reserve, trace, trace_need=admission.parked_trace_need(parked['single']))
-        if short and attempt == 0 and parked is not None and make_room is not None:
+        if short and attempt == 0 and make_room is not None:
             make_room(max(0, need + admission.STRANDED_BYTES - free))
             continue
         break
@@ -538,8 +539,9 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
             from functools import partial
 
             priced = parked.peek()
+            # A slot with no parked engine (after a fault) is backstopped on today's terms; the ladder may still free an idle parked engine for it.
             dram_backstop(buffer_pool, request_id=state.req_id, parked=None if priced is None else parked.slot_terms(priced),
-                          make_room=None if priced is None else partial(parked.make_room, target=priced))
+                          make_room=partial_room(parked, priced))
     # After the host-side refusals, so a rejected request touches no device state, and
     # before the drafter, the engine and every other reader of slot 0.
     adopt_prefill_slot(helpers, capture, state.req_id)
@@ -548,7 +550,7 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
     if parked is not None:
         placed = parked.place()
         if placed is not None and placed.state == 'parked':
-            refusal = parked.rebind_refusal(placed, position=len(prompt), budget=budget, pages_shape=pages.shape)
+            refusal = parked.rebind_refusal(placed, position=len(prompt), budget=budget, pages_shape=pages.shape, taps=capture.outputs())
             if refusal is not None:
                 # Host only, before any device write and before take(): the slot's engine is unparked and today's build runs on it.
                 parked.refuse(placed, refusal, state.req_id)
@@ -575,9 +577,6 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
 
     with ExitStack() as owned:
         owned.callback(release_capture)
-        if pinned is not None:
-            # R5: the slot the set placed, whatever the pool's own count of lent slots says (a parked slot is lent).
-            owned.enter_context(buffer_pool.slot_order((pinned,)))
         if entry is not None:
             request = rebind_parked(parked, entry, model=model, pages=pages, state=state, capture=capture, prompt=prompt, seed=seed,
                                     budget=budget, eos_ids=() if any_request and ignore_eos else eos_ids, extent_memory=extent_memory,
@@ -590,7 +589,8 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
             # The cold build after a refused or failed rebind runs on TODAY's terms, not the parked ones: the slot's engine and device were
             # unparked (freeing about 0.5 GB), which is short of an engine build's 1,000 MB by construction. A short reading refuses THIS
             # request (quarantined, the engine lives).
-            dram_backstop(buffer_pool, request_id=state.req_id)
+            dram_backstop(buffer_pool, request_id=state.req_id,
+                          make_room=None if parked is None else partial_room(parked, None))
         # T1 diagnostic. dflash_device's pin raises one message for fourteen or-ed
         # terms and names none of them, and run 35433428038 hit it on the FIRST
         # request once two users were admitted. Report what is about to be passed,
@@ -629,14 +629,17 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
                 memory_ledger.before('engine', estimate=serving_prefill_admission.engine_build_peak(),
                                      point='req=%s' % memory_ledger.short_id(state.req_id), request=str(state.req_id))
         shared_ccl = os.environ.get('QWEN_FAST_SHARED_CCL', '1') == '1'
-        device = components.device(operations, model,
-            collectives if collectives is not None and shared_ccl else components.collectives(model.mesh_device),
-            layers, projection, selector, _qwen_outputs, position=len(prompt),
-            block_rows=16, proposal_capture=True, max_new_tokens=budget,
-            fused_convolution=True, feature_start=max(0, len(prompt) - 2048),
-            cache_history=True, cache_projection_capture=False, live_query_qk=False,
-            native_proposal_attention=True, defer_proposal_capture=True, buffer_pool=buffer_pool,
-            shared_weights=shared_weights)
+        # R5: the slot the set placed, whatever the pool's own count of lent slots says (a parked slot is lent). The pin is held for the
+        # device's acquire alone, by a with block: it is released here, never by the garbage collection of a stack pop_all discarded.
+        with nullcontext() if pinned is None else buffer_pool.slot_order((pinned,)):
+            device = components.device(operations, model,
+                collectives if collectives is not None and shared_ccl else components.collectives(model.mesh_device),
+                layers, projection, selector, _qwen_outputs, position=len(prompt),
+                block_rows=16, proposal_capture=True, max_new_tokens=budget,
+                fused_convolution=True, feature_start=max(0, len(prompt) - 2048),
+                cache_history=True, cache_projection_capture=False, live_query_qk=False,
+                native_proposal_attention=True, defer_proposal_capture=True, buffer_pool=buffer_pool,
+                shared_weights=shared_weights)
         owned.callback(device.close)
         release_capture()
         runtime = components.runtime(device, position=len(prompt))

@@ -913,6 +913,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                 if levern_policy.build_ms_mode() == 'learned':
                     # The deadline governor charges each pending prefill the cost of the slot it will take: a rebind while parked engines remain.
                     levern_policy.admission_cost().parked_free = parked_engines.parked_count
+                    levern_policy.admission_cost().next_parked = lambda: parked_engines.peek() is not None
 
         # Sticky sessions (QWEN_FAST_STICKY_SESSIONS, read once at attach; default off). On, every
         # prefill capture wraps the prefix-reuse route (QWEN_PREFIX_REUSE=1 sends every prefill,
@@ -969,6 +970,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             if lanes is not None:
                 grant = lanes.admit(state.req_id, state.sampling_params, slot0_free=not pool.slots[0].lent)
             learning = parked_engines is not None and cost_learning
+            fallbacks_before = parked_engines.fallbacks if learning else 0
             if sticky or learning:
                 began = time.perf_counter()
             trace_census.engine_begin()
@@ -983,7 +985,8 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                 if lanes is not None:
                     lanes.release(state.req_id)
                 raise
-            if learning:
+            if learning and parked_engines.fallbacks == fallbacks_before:
+                # An admission whose rebind was refused or failed is not observed: its build time includes the attempt.
                 # QWEN_FAST_LEVERN_BUILD_MS=learned: what this admission cost, by kind (the governor's per-pending charge).
                 import levern_policy
 

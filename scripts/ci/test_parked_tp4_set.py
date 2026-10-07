@@ -791,6 +791,34 @@ class NegativeControlTests(unittest.TestCase):
             self.assertEqual(ops.trail[start:], [], 'a host refusal touches nothing')
             self.assertIsNone(engines.rebind_refusal(entry, position=300, budget=16, pages_shape=(1, PAGE_WIDTH)), 'once')
 
+    def test_the_host_refusal_counts_the_decode_budget_after_the_seed_as_the_rebind_does(self):
+        with World() as world:
+            engines = make_set(world)
+            engines.build()
+            entry = engines.place()
+            capacity = PAGE_WIDTH * 64
+            ask = lambda position, budget: engines.rebind_refusal(entry, position=position, budget=budget, pages_shape=(1, PAGE_WIDTH))
+            self.assertIsNone(ask(capacity - 16, 17), 'position + budget - 1 == capacity fits, as the cold engine decides')
+            self.assertIn('fit the request page capacity', ask(capacity - 16, 18))
+
+    def test_the_taps_are_held_to_the_cold_constructors_geometry_on_the_host(self):
+        from types import SimpleNamespace
+
+        with World() as world:
+            engines = make_set(world)
+            engines.build()
+            entry = engines.place()
+            from dflash_prefill_window import prefill_window
+
+            rows = prefill_window(300)['rows']
+            tap = lambda height: SimpleNamespace(shape=(1, 1, height, 8))
+            ask = lambda taps: engines.rebind_refusal(entry, position=300, budget=16, pages_shape=(1, PAGE_WIDTH), taps=taps)
+            self.assertIsNone(ask((tap(rows),) * 5))
+            self.assertIsNone(ask(None))
+            self.assertIn('cold constructor refuses', ask((tap(rows),) * 4))
+            self.assertIn('cold constructor refuses', ask((tap(rows + 32),) * 5), 'a wider capture would be read from its first rows')
+            self.assertIn('cold constructor refuses', ask((SimpleNamespace(shape=(rows, 8)),) * 5))
+
     def test_an_unknown_fault_is_refused(self):
         self.assertIsNone(parked.fault_mode({}))
         self.assertIsNone(parked.fault_mode({parked.FAULT_FLAG: ''}))
@@ -844,6 +872,33 @@ class KillSwitchTests(unittest.TestCase):
             engines.close()
 
 
+class KillSwitchAutomaticTests(unittest.TestCase):
+    def test_the_gate_trigger_latches_the_switch_after_n_rebinds_and_never_before(self):
+        with World() as world:
+            engines = make_set(world, environ={parked.OFF_AFTER_FLAG: '2'})
+            engines.build()
+            engines.watch(None)
+            self.assertEqual(engines.off_after, 2)
+            for index in range(2):
+                self.assertFalse(engines.poll_off(), 'after %d rebinds' % index)
+                request = ParkedRequest(world, engines, engines.take(), 'request-%d' % index, 300, 16)
+                while request.step():
+                    pass
+                request.finish()
+            self.assertEqual(sum(entry.rebinds for entry in engines.slots), 2)
+            self.assertTrue(engines.poll_off())
+            self.assertEqual([line for line in world.lines if line.startswith('[PINDIAG] parked engines off (kill switch)')], [parked.OFF_MARKER.format(4)])
+            self.assertTrue(engines.poll_off() and engines.off, 'latched')
+            self.assertEqual(len([line for line in world.lines if line.startswith('[PINDIAG] parked engines off')]), 1)
+            engines.close()
+
+    def test_unset_the_trigger_is_off(self):
+        with World() as world:
+            engines = make_set(world)
+            self.assertIsNone(engines.off_after)
+            engines.close()
+
+
 class LadderTests(unittest.TestCase):
     def test_the_credit_counts_the_other_parked_slots_and_the_ladder_frees_them_in_order(self):
         import serving_prefill_admission as admission
@@ -862,6 +917,27 @@ class LadderTests(unittest.TestCase):
             self.assertEqual([engines.single_released(entry) for entry in engines.slots[:3]], [False, True, True])
             self.assertIsInstance(freed, int)
             self.assertEqual(world.ops.violations, [])
+
+    def test_a_cold_arrival_is_backstopped_on_todays_terms_but_the_ladder_runs_once_for_it(self):
+        import serving_prefill_admission as admission
+        from serving_request_factory import RequestRefused, dram_backstop
+
+        with World() as world:
+            engines = make_set(world)
+            engines.build()
+            reserve = engines.reserve()
+            need = admission.backstop_need(reserve)
+            short = dict(free=need + admission.STRANDED_BYTES - 1, largest_free=10 ** 10, trace_largest_free=None, trace_unread='n/a')
+            fits = dict(short, free=short['free'] + 10)
+            readings, rooms = [short, fits], []
+            with patch('serving_prefill_admission.dram_reading', side_effect=lambda pool: (readings.pop(0), None)):
+                dram_backstop(world.pool, request_id='cold', reserve=reserve, make_room=lambda needed: rooms.append(needed))
+            self.assertEqual(rooms, [1])
+            readings[:] = [short, short]
+            with patch('serving_prefill_admission.dram_reading', side_effect=lambda pool: (readings.pop(0), None)):
+                with self.assertRaises(RequestRefused):
+                    dram_backstop(world.pool, request_id='cold', reserve=reserve, make_room=lambda needed: rooms.append(needed))
+            self.assertEqual(len(rooms), 2, 'once per backstop, never twice')
 
     def test_the_predicate_counts_the_credit_and_the_backstop_runs_the_ladder_once_before_it_refuses(self):
         import serving_prefill_admission as admission

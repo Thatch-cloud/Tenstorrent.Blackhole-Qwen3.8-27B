@@ -76,7 +76,7 @@ STICKY_GATE_ONLY = ('c2-packed-tp4-8x262k-prefix-gate', 'c2-packed-tp4-8x262k-pr
                     # tp4/levern-prefix: the merged route's gate-only pair (test_levern_prefix_contract holds them)
                     'c2-packed-tp4-8x262k-ship-prefix-levern', 'c2-packed-tp4-8x262k-ship-prefix-levern-audit') + make_parked_profiles.twin_names()
 STICKY_PROFILES = ('c2-packed-prefix', 'c2-packed-prefix-gate') + STICKY_GATE_ONLY + ('c2-packed-tp4-8x262k-ship-prefix',)    # + ship/262k-prefix: the both-levers pair
-JOB = Path('C:/Users/liamb/.claude/jobs/8376c877/tmp')
+JOB = Path(os.environ.get('QWEN_JOB_SCRATCH') or 'job-scratch')
 PLUGIN_CHECKOUT = Path(os.environ.get('QWEN_TT_PLUGIN_CHECKOUT') or JOB / 'risks' / 'vllm-tt-plugin')
 IMG_TREE = Path(os.environ.get('QWEN_IMG_TREE') or JOB / 'matmul-attr' / 'img')
 PLUGIN_COMMIT = 'bf77cd63756fc891b8fb7f7cb3f5c1420f0e044c'

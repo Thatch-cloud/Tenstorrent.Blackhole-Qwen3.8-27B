@@ -108,8 +108,9 @@ PARKED_SWITCH = 'QWEN_FAST_PARKED_ENGINES'
 PARKED_DRAFTS = 'QWEN_FAST_PARKED_DRAFTS'
 PARKED_PREFIX = 'QWEN_FAST_PARKED_'
 PARKED_NAMES = ('QWEN_FAST_PARKED_ENGINES', 'QWEN_FAST_PARKED_DRAFTS', 'QWEN_FAST_PARKED_PROJECT_ROWS', 'QWEN_FAST_PARKED_AUDIT',
-                'QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT')
-PARKED_GATE_ONLY = ('QWEN_FAST_PARKED_AUDIT', 'QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT', 'QWEN_FAST_GATE_DRAM_BALLAST')
+                'QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT', 'QWEN_FAST_PARKED_OFF_AFTER', 'QWEN_FAST_PARKED_OFF_PATH')
+PARKED_GATE_ONLY = ('QWEN_FAST_PARKED_AUDIT', 'QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT', 'QWEN_FAST_GATE_DRAM_BALLAST',
+                    'QWEN_FAST_PARKED_OFF_AFTER', 'QWEN_FAST_PARKED_OFF_PATH')
 # The sources the merged route must carry (levern_route.SOURCES, pinned equal by test_levern_prefix_contract).
 MERGED_SOURCES = ('COLD', 'CHECKPOINT', 'SCRATCH', 'PARKED')
 
@@ -326,8 +327,9 @@ def apply_environment(profile, environ=None):
     for name in LEVERN_ENV_FLAGS:
         if name not in profile['env']:
             environ.pop(name, None)
-    # ...and engine reuse: an inherited value must not turn the parked engines (or their bound drafter traces) on under a profile that never asked.
-    for name in (PARKED_SWITCH, PARKED_DRAFTS):
+    # ...and engine reuse: an inherited value must not turn the parked engines (or their bound drafter traces) on under a profile that never asked,
+    # nor a gate instrument (the audit, a negative control, a fault, the ballast, the kill switch's trigger) into an arm that did not name it.
+    for name in sorted(set(PARKED_NAMES) | set(PARKED_GATE_ONLY) | set((PARKED_SWITCH, PARKED_DRAFTS))):
         if name not in profile['env']:
             environ.pop(name, None)
     return environ

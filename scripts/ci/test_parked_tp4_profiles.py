@@ -137,8 +137,9 @@ class PolicyMatrixTests(unittest.TestCase):
         self.assertEqual(policy.GATE_DRAM_BALLAST_FLAG, engines.BALLAST_FLAG)
         self.assertEqual(tuple(policy.PARKED_NAMES), tuple(contract.PARKED_NAMES))
         self.assertEqual(set(policy.PARKED_NAMES), {engines.FLAG, engines.DRAFTS_FLAG, engines.PROJECT_ROWS_FLAG, engines.AUDIT_FLAG,
-                                                    engines.NEGATIVE_FLAG, engines.FAULT_FLAG})
-        self.assertEqual(set(contract.PARKED_GATE_ONLY), {engines.AUDIT_FLAG, engines.NEGATIVE_FLAG, engines.FAULT_FLAG, engines.BALLAST_FLAG})
+                                                    engines.NEGATIVE_FLAG, engines.FAULT_FLAG, engines.OFF_AFTER_FLAG, engines.OFF_PATH_ENV})
+        self.assertEqual(set(contract.PARKED_GATE_ONLY), {engines.AUDIT_FLAG, engines.NEGATIVE_FLAG, engines.FAULT_FLAG, engines.BALLAST_FLAG,
+                                                          engines.OFF_AFTER_FLAG, engines.OFF_PATH_ENV})
         self.assertEqual((contract.PARKED_SWITCH, contract.PARKED_DRAFTS), (engines.FLAG, engines.DRAFTS_FLAG))
         import serving_runtime
         import serving_worker_hook
@@ -347,6 +348,23 @@ class ContractTests(unittest.TestCase):
                 self.assertEqual(environ.get(FLAG), expected)
         e1 = contract.apply_environment(load(twins.CANDIDATE_PARENT + '-parked-e1'), {'QWEN_FAST_PARKED_DRAFTS': '1'})
         self.assertNotIn('QWEN_FAST_PARKED_DRAFTS', e1, 'an inherited drafts switch never reaches an engines-only arm')
+        # every other name of the family, and the ballast, is the profile's too: a stray process value never turns an arm into a negative or a fault
+        stray = {name: '1' for name in set(contract.PARKED_NAMES) | set(contract.PARKED_GATE_ONLY)}
+        for name in (twins.CANDIDATE_PARENT + '-parked', PRODUCTION):
+            with self.subTest(profile=name, what='stray gate knobs'):
+                environ = contract.apply_environment(load(name), dict(stray))
+                profile_env = load(name)['env']
+                self.assertEqual(sorted(key for key in stray if key in environ and key not in profile_env), [])
+
+    def test_the_kill_switch_trigger_is_a_gate_instrument_with_a_strict_value(self):
+        import serving_parked_engines as engines
+
+        self.assertIsNone(engines.off_after({}))
+        self.assertIsNone(engines.off_after({engines.OFF_AFTER_FLAG: ''}))
+        self.assertEqual(engines.off_after({engines.OFF_AFTER_FLAG: '3'}), 3)
+        for bad in ('0', '-1', '03', 'soon', '1.5'):
+            with self.assertRaises(ValueError):
+                engines.off_after({engines.OFF_AFTER_FLAG: bad})
 
     def test_the_governor_switch_is_a_lever_n_flag_the_contract_owns(self):
         import levern_policy
