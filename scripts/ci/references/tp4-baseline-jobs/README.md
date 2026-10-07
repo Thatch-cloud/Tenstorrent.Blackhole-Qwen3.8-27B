@@ -16,16 +16,19 @@ minutes, boxes, tags, dependencies and read rules are in `ORDER.txt`; `test_tp4_
 
 ## What does not fit
 
-The four groups together are 11.1 h by estimate: more than the 9 h cap. The window PLANS the first three (8.9 h, PROF-CTL last) and keeps the V5 block (R4, V1a, V1b: 135 min) OPTIONAL, run only if the
-clock allows (the driver's clock rule). To run V5 instead of the profile set `SKIP_JOBS=PROF-CTL-ops-profile-8x4k`: that is 9.0 h by estimate (2 minutes inside the cap). The owner picks before the window.
+The four groups together are 11.1 h of jobs by estimate, and with the real hand-back (95 min: reset 15, links re-measure 15, topology publish up to 18, agent start 32, release and engine load 15) none of the combinations
+with the profile or the V5 block fits the 9 h cap. The PLANNED window is the CORE (A0, X0, P1a, P1b, L8, C16 and the hand-back): 440 min = 7.3 h. CORE plus PROF-CTL is 570 min and CORE plus the V5 block (R4, V1a, V1b: 135 min)
+is 575 min, so both run only when the jobs before them ran short (the driver's clock rule: a job past the 8 h target starts only if its BOX fits the cap). The owner can instead pick, before the window, `SKIP_JOBS=C16-CTL-churn16 TARGET_MIN=540`
+for the profile (525 min) or `SKIP_JOBS="L8-CTL-ladder8-past-131k C16-CTL-churn16" TARGET_MIN=540` for the V5 block (485 min); `TARGET_MIN=540` makes the clock trust the estimates up to the cap, and a job that runs to its box can still pass it.
+PROF-CTL profiles the UNSALTED path (no `C2_GATE_SALT`): production's salted capture and publish work is not in the profile.
 The 32k shape of the device profile is NOT in `PROF-CTL`: `ops_profile_plan` has only the 4k shape (docs/tp4-profile.md: the exactness divergence at 32k and above is unresolved) and op-support 20000 loses the
 packed rounds at 32k (v133); a 32k profile needs a plan change and its own review.
 
 ## Rules
 
-- The control jobs name the production BASE image, not the thin layer: the platform plugin the thin layer adds is not exercised by a gate (the engine bytes are production's).
-- Every reset renumbers `/dev/tenstorrent`. The agent refuses a TT load unless the links were measured after the newest entry, so the hand-back is: reset (ZR), links re-measure (LM, a Thatch.Server workflow
-  the driver dispatches), one topology tick (TICK), agent start (Z). Then the OPERATOR runs the platform release step with the owner's admin key. No script holds the key.
+- The control jobs test the production ENGINE bytes, not the production image: they serve the base image under production's thin layer, so the layer's request path (the Thatch wrapper, idle admission, prefix metrics, its entrypoint) is not exercised by a gate. The operator's salted two-turn reuse post-check after the release is the thin-layer check.
+- Every reset renumbers `/dev/tenstorrent`. The agent refuses a TT load unless the links were measured after the newest entry, so the hand-back is: reset with a rescan (ZR), links re-measure (LM, a Thatch.Server workflow
+  the driver dispatches), wait until the topology file shows the new links (TICK, polled; the timer has no fixed clock grid), agent start (Z, which waits up to 30 min for the release). Then the OPERATOR runs the platform release step with the owner's admin key. No script holds the key.
 - One-card jobs (V1a, V1b) need an all-four reset first after the quad runs (R4). Their harness mounts this checkout's scripts into the production base image; nothing is built.
 - Never cancel a profile job: the cancel skips the hand-back step and leaves root-owned logs under the runner's work directory (the next checkout dies with EACCES). op-support is 20000; 200000 segfaults the dispatch thread
   and `ops_profile_plan` refuses it.

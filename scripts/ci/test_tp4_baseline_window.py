@@ -28,7 +28,9 @@ R = 'c2-packed-tp4-8x262k-'
 PLAIN, AUDIT = R + 'ship-prefix', R + 'ship-prefix-audit'
 HARD_CAP = 540
 TARGET_MAX = 480
-HANDBACK = ('ZR-reset-all-four', 'LM-links-remeasure', 'TICK-topology-wait', 'Z-handback')
+HANDBACK_MINUTES = 95
+CARDM_SETUP_MINUTES = 5
+HANDBACK = ('ZR-reset-all-four', 'LM-links-remeasure', 'TICK-topology-wait', 'Z-handback', 'DEPLOY-and-engine-load')
 V5_BLOCK = ('R4-reset-all-four', 'V1a-cardm-watcher', 'V1b-cardm-full')
 PROFILE_JOB = 'PROF-CTL-ops-profile-8x4k'
 EXPECTED = ('A0-agentstop-unserve', 'X0-status-rescan-reset', 'P1a-CTL-exactness-shared', 'P1b-CTL-lifecycle-evict', 'L8-CTL-ladder8-past-131k', 'C16-CTL-churn16', PROFILE_JOB) + V5_BLOCK + HANDBACK
@@ -88,8 +90,11 @@ def box_minutes(name):
         return min(STEP_CAP_MINUTES, -(-seconds // 60))
     if 'cardm' in actions:
         with open(os.path.join(ROOT, *entry['C2_CARDM_HARNESS'].split('/')), encoding='utf-8') as handle:
-            seconds = int(re.search(r'^timeout_s=(\d+)$', handle.read(), re.M).group(1))
-        return -(-seconds // 60)
+            harness = -(-int(re.search(r'^timeout_s=(\d+)$', handle.read(), re.M).group(1)) // 60)
+        # the workflow kills the cardm step at its own timeout-minutes, which is shorter than the harness's
+        with open(os.path.join(ROOT, '.github', 'workflows', 'qwen-c2-serving.yml'), encoding='utf-8') as handle:
+            step = re.search(r'name: Run a qualification harness on card M.*?timeout-minutes: (\d+)', handle.read(), re.S)
+        return min(harness, int(step.group(1))) + CARDM_SETUP_MINUTES
     return None
 
 
@@ -122,7 +127,7 @@ class OrderTests(unittest.TestCase):
         self.assertLess(names.index('C16-CTL-churn16'), names.index(PROFILE_JOB))
         self.assertLess(names.index(PROFILE_JOB), names.index('R4-reset-all-four'))
         self.assertEqual([line[0] for line in order() if line[1] == 'opt'], list(V5_BLOCK))
-        self.assertEqual([line[0] for line in order()][-4:], list(HANDBACK))
+        self.assertEqual([line[0] for line in order()][-5:], list(HANDBACK))
         self.assertEqual(row('A0-agentstop-unserve')[1], 'stop')
         self.assertEqual(row('X0-status-rescan-reset')[1], 'stop')
 
@@ -133,20 +138,28 @@ class OrderTests(unittest.TestCase):
 
 
 class NumbersTests(unittest.TestCase):
-    def test_the_planned_window_fits_the_hard_cap_and_the_header_quotes_its_numbers(self):
-        planned = sum(int(line[3]) for line in order() if line[1] != 'opt')
-        core = minutes('A0-agentstop-unserve', 'X0-status-rescan-reset', 'P1a-CTL-exactness-shared', 'P1b-CTL-lifecycle-evict', 'L8-CTL-ladder8-past-131k', 'C16-CTL-churn16') + minutes(*HANDBACK)
-        v5 = minutes(*V5_BLOCK)
+    def test_the_hand_back_is_95_minutes_and_the_planned_window_is_the_core(self):
+        handback = minutes(*HANDBACK)
+        self.assertEqual(handback, HANDBACK_MINUTES)
+        self.assertEqual([int(row(name)[3]) for name in HANDBACK], [15, 15, 18, 32, 15])
+        jobs = ('A0-agentstop-unserve', 'X0-status-rescan-reset', 'P1a-CTL-exactness-shared', 'P1b-CTL-lifecycle-evict', 'L8-CTL-ladder8-past-131k', 'C16-CTL-churn16')
+        core = minutes(*jobs) + handback
+        profile, v5 = int(row(PROFILE_JOB)[3]), minutes(*V5_BLOCK)
         text = read_text('ORDER.txt')
-        self.assertEqual((planned, v5, core), (533, 135, 403))
-        self.assertLessEqual(planned, HARD_CAP)
-        self.assertGreater(planned + v5, HARD_CAP, 'the V5 block never fits beside the profile: it must stay optional')
-        self.assertLessEqual(planned - int(row(PROFILE_JOB)[3]) + v5, HARD_CAP, 'the alternative (V5 instead of the profile) fits the cap')
-        self.assertIn('PLANNED %d min = %.1f h' % (planned, planned / 60.0), text)
-        self.assertIn('PLANNED + V5 = %d min = %.1f h' % (planned + v5, (planned + v5) / 60.0), text)
-        alternative = planned - int(row(PROFILE_JOB)[3]) + v5
-        self.assertIn('= %d min = %.1f h, inside the cap by %d minutes' % (alternative, alternative / 60.0, HARD_CAP - alternative), text)
-        self.assertIn('CORE (stop after C16, no PROF, no V5) = %d min = %.1f h' % (core, core / 60.0), text)
+        self.assertEqual((core, v5), (440, 135))
+        self.assertLessEqual(core, TARGET_MAX)
+        self.assertGreater(core + profile, HARD_CAP, 'the profile does not fit beside the core: it must stay clock-gated')
+        self.assertGreater(core + v5, HARD_CAP, 'the V5 block does not fit beside the core: it must stay clock-gated')
+        self.assertIn('PLANNED = CORE = %d min = %.1f h' % (core, core / 60.0), text)
+        self.assertIn('CORE + PROF-CTL = %d min = %.1f h' % (core + profile, (core + profile) / 60.0), text)
+        self.assertIn('CORE + the V5 block (R4 V1a V1b, %d min) = %d min = %.1f h' % (v5, core + v5, (core + v5) / 60.0), text)
+        instead_of_c16 = core - int(row('C16-CTL-churn16')[3]) + profile
+        v5_instead = core - int(row('L8-CTL-ladder8-past-131k')[3]) - int(row('C16-CTL-churn16')[3]) + v5
+        self.assertLessEqual(instead_of_c16, HARD_CAP)
+        self.assertLessEqual(v5_instead, HARD_CAP)
+        self.assertIn('SKIP_JOBS=C16-CTL-churn16) = %d min = %.1f h, inside the cap by %d minutes' % (instead_of_c16, instead_of_c16 / 60.0, HARD_CAP - instead_of_c16), text)
+        self.assertIn('L8-CTL-ladder8-past-131k C16-CTL-churn16") = %d min = %.1f h' % (v5_instead, v5_instead / 60.0), text)
+        self.assertIn('TARGET_MIN=540', text)
 
     def test_the_stop_early_points_are_the_running_sums(self):
         text = read_text('ORDER.txt')
@@ -158,24 +171,36 @@ class NumbersTests(unittest.TestCase):
         self.assertIn('after PROF-CTL (%d min = %.1f h)' % (after_prof, after_prof / 60.0), text)
         self.assertLessEqual(after_prof, TARGET_MAX)
 
-    def test_the_clock_rule_lets_every_planned_job_start_at_its_estimated_start(self):
-        reserve = minutes('ZR-reset-all-four', 'LM-links-remeasure', 'TICK-topology-wait', 'Z-handback')
-        self.assertEqual(reserve, 58)
-        self.assertIn('the hand-back estimate (58)', read_text('ORDER.txt'))
+    def test_the_clock_rule_lets_every_core_job_start_on_time_and_gates_the_rest_by_box(self):
+        text = read_text('ORDER.txt')
+        self.assertIn('HB the hand-back (95)', text)
+        self.assertIn('E + its estimate + HB <= 480', text)
+        self.assertIn('E + its BOX + HB <= 540', text)
         clock = 0
         for line in order():
-            if line[1] in ('opt', 'hand', 'drv'):
+            if line[1] in ('opt', 'hand', 'drv') or line[0] == PROFILE_JOB:
                 continue
-            self.assertLessEqual(clock + int(line[3]) + reserve, HARD_CAP, line[0])
+            self.assertLessEqual(clock + int(line[3]) + HANDBACK_MINUTES, TARGET_MAX, line[0])
             clock += int(line[3])
+        # the profile after the core: neither the estimate rule nor the box rule lets it start
+        profile = row(PROFILE_JOB)
+        self.assertGreater(clock + int(profile[3]) + HANDBACK_MINUTES, HARD_CAP)
+        self.assertGreater(clock + int(profile[5]) + HANDBACK_MINUTES, HARD_CAP)
+        self.assertIn('E <= 255 (target) or E <= 269 (box)', text)
+        self.assertEqual(TARGET_MAX - HANDBACK_MINUTES - int(profile[3]), 255)
+        self.assertEqual(HARD_CAP - HANDBACK_MINUTES - int(profile[5]), 269)
+        # the V5 block must fit whole, by estimate 135 and by box R4 + V1a + V1b
+        box = int(row('R4-reset-all-four')[3]) + int(row('V1a-cardm-watcher')[5]) + int(row('V1b-cardm-full')[5])
+        self.assertEqual(box, 15 + 145 + 145)
+        self.assertIn('135 min by estimate, 295 by box', text)
 
     def test_every_box_is_computed_from_the_gates_own_timeouts(self):
         self.assertEqual(box_minutes('P1a-CTL-exactness-shared'), -(-(10800 + 180) // 60))
         self.assertEqual(box_minutes('P1b-CTL-lifecycle-evict'), -(-(9000 + 180) // 60))
         self.assertEqual(box_minutes('L8-CTL-ladder8-past-131k'), -(-(2 * (5400 + 180)) // 60))
         self.assertEqual(box_minutes('C16-CTL-churn16'), -(-(9000 + 180) // 60))
-        self.assertEqual(box_minutes('V1a-cardm-watcher'), 180)
-        self.assertEqual(box_minutes('V1b-cardm-full'), 180)
+        self.assertEqual(box_minutes('V1a-cardm-watcher'), 145)
+        self.assertEqual(box_minutes('V1b-cardm-full'), 145)
         for line in order():
             if line[1] == 'drv':
                 continue
@@ -279,6 +304,24 @@ class TemplateTests(unittest.TestCase):
             harness = handle.read()
         self.assertIn('-e QWEN_C2_SERVING=0', harness)
         self.assertTrue(os.path.isfile(os.path.join(ROOT, 'optimisation', 'ttnn-op', 'v5split', 'gdn_v5_card_m.py')))
+
+    def test_the_hand_back_reset_rescans_and_z_is_read_by_its_agent_line(self):
+        self.assertEqual(raw('ZR-reset-all-four')['C2_ACTIONS'].split(), ['status', 'rescan', 'reset'])
+        self.assertEqual(raw('X0-status-rescan-reset')['C2_ACTIONS'].split(), ['status', 'rescan', 'reset'])
+        self.assertIn("node agent after start: active", read_text('Z-handback.env'))
+        self.assertIn('WAITS UP TO 30 MIN', read_text('Z-handback.env'))
+        text = read_text('ORDER.txt')
+        for phrase in ('Z READS PASS when its log has', 'READY FOR /deploy', 'ZR passed', 'NO-VERDICT RERUN', 'scope=reduced', 'bytes=0', 'reduced scope: ...'):
+            self.assertIn(phrase, text)
+
+    def test_the_profile_template_says_it_profiles_the_unsalted_path(self):
+        self.assertNotIn('C2_GATE_SALT', raw(PROFILE_JOB))
+        self.assertIn('UNSALTED', read_text(PROFILE_JOB + '.env'))
+
+    def test_the_pack_says_production_engine_not_production_image(self):
+        for name in templates():
+            self.assertIn('production ENGINE', read_text(name + '.env'), name)
+        self.assertIn('production ENGINE bytes, not the production image', read_text('README.md'))
 
     def test_the_resets_are_all_four_and_the_hand_back_orders_reset_before_start(self):
         for name in ('R4-reset-all-four', 'ZR-reset-all-four', 'X0-status-rescan-reset'):
