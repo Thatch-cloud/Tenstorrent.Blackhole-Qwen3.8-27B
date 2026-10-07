@@ -293,3 +293,5 @@ jobs:
           python -B -m unittest test_levern_policy test_levern_scheduler test_levern_platform test_levern_contract
           python -B -m unittest test_levern_route test_levern_lifecycle test_levern_capture test_levern_check test_tp4_lever_n_jobs
           python -B -m unittest test_levern_smoke
+          python -B -m unittest test_levern_prefix_route test_levern_prefix_graft test_levern_prefix_scheduler test_levern_prefix_lifecycle
+          python -B -m unittest test_levern_prefix_contract test_levern_prefix_prestage

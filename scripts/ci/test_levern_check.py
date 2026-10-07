@@ -457,5 +457,87 @@ class CompareTests(unittest.TestCase):
                                            '--control-container', str(root / 'a.log')]), 2)
 
 
+# ---------------------------------------------------------------------------------------------------------------------------------------
+# The merged route (Lever N beside prefix reuse, docs/lever-n-prefix-merged-route.md): the same rules with a hit's first step, a four-step warm, parking
+# ---------------------------------------------------------------------------------------------------------------------------------------
+
+MERGED_ENV = dict(ENV, QWEN_PREFIX_REUSE='1', QWEN_FAST_STICKY_SESSIONS='1', QWEN_FAST_LEVERN_PARK='host')
+
+
+def merged_route(req, start, end, prompt, source, captured='-', programs='900->900'):
+    final = int(end == prompt)
+    return policy.ROUTE_LINE_MERGED.format(req, start, end, prompt, final, final, 812.4, *programs.split('->'), 0, source, captured)
+
+
+def merged_route_lines(req, prompt, hit=0, captured=None):
+    steps = policy.plan_from(prompt, hit)
+    return [merged_route(req, start, end, prompt, ('CHECKPOINT' if hit else 'COLD') if index == 0 else 'SCRATCH',
+                         (captured or {}).get(end, '-')) for index, (start, end) in enumerate(steps)]
+
+
+def merged_log(extra=()):
+    return '\n'.join(['install sticky=1 lookahead=16 drop_last=True ceiling=floor2048(P-2048)', 'install chunked=levern: chunked prefill beside the Lever N cap',
+                      policy.INSTALLED_LINE.format('vllm_tt_plugin.scheduler.TTScheduler', 2048, 16384, 0.5, '-', 8),
+                      policy.PLATFORM_LINE.format(262144, 0),
+                      policy.ROUTE_INSTALLED_LINE.format('route=1 audit=0 merged=COLD,CHECKPOINT,SCRATCH,PARKED'),
+                      policy.ROUTE_WARM_LINE.format(4, 880, 900, 4100.0),
+                      *extra])
+
+
+class MergedRouteTests(unittest.TestCase):
+    def problems(self, log, env=MERGED_ENV, smoke=None):
+        return check.levern_problems(env, log, smoke)[0]
+
+    def test_a_clean_merged_log_has_no_problem(self):
+        log = merged_log(merged_route_lines('first', 9000) + merged_route_lines('second', 13000, hit=6144) + interleaved_steps('first', 9000))
+        self.assertEqual(self.problems(log), [])
+
+    def test_the_merged_warm_has_four_steps_and_the_stage_one_warm_three(self):
+        self.assertTrue(any('route warm line with 4 steps' in problem for problem in self.problems(merged_log().replace('steps=4', 'steps=3'))))
+        self.assertEqual(self.problems(merged_log()), [])
+        self.assertEqual(check.levern_problems(ENV, engaged_log(), None)[0], [])
+
+    def test_the_graft_must_say_it_runs_chunked_beside_the_cap(self):
+        log = '\n'.join(line for line in merged_log().splitlines() if 'chunked=levern' not in line)
+        self.assertTrue(any('chunked=levern' in problem and 'did not engage' in problem for problem in self.problems(log)))
+
+    def test_a_hits_first_step_starts_at_its_q_and_the_ledger_continues_from_there(self):
+        log = merged_log(merged_route_lines('second', 13000, hit=6144) + interleaved_steps('second', 13000))
+        self.assertEqual(self.problems(log), [])
+        lines = merged_route_lines('second', 13000, hit=6144)
+        del lines[1]
+        self.assertTrue(any('starts at 10240, the previous ended at 8192' in problem for problem in self.problems(merged_log(lines + interleaved_steps('second', 13000)))))
+
+    def test_a_continuation_must_come_from_the_scratch_or_a_park_and_a_first_step_from_neither(self):
+        wrong = chr(10).join([merged_route('r', 0, 2048, 8000, 'COLD'), merged_route('r', 2048, 4096, 8000, 'COLD')])
+        self.assertTrue(any('step 2 came from source COLD' in problem for problem in check.levern_route_problems(check.levern_facts(wrong)['routes'])))
+        first = merged_route('r', 0, 2048, 8000, 'SCRATCH')
+        self.assertTrue(any('step 1 came from source SCRATCH' in problem for problem in check.levern_route_problems(check.levern_facts(first)['routes'])))
+        resumed = '\n'.join([merged_route('r', 0, 2048, 8000, 'COLD'), merged_route('r', 2048, 4096, 8000, 'PARKED'), merged_route('r', 4096, 8000, 8000, 'SCRATCH')])
+        self.assertEqual(check.levern_route_problems(check.levern_facts(resumed)['routes']), [])
+
+    def test_a_park_restore_with_no_park_is_a_problem_and_a_pair_is_not(self):
+        out = '[PINDIAG] lever N park out req=a at=6144 ms=90.0 bytes=154000000 parked_now=1'
+        back = '[PINDIAG] lever N park in req=a at=6144 ms=95.0 bytes=154000000 parked_now=0'
+        self.assertEqual(self.problems(merged_log([out, back])), [])
+        self.assertTrue(any('park at 6144 that was never taken' in problem for problem in self.problems(merged_log([back]))))
+        problems, facts = check.levern_problems(MERGED_ENV, merged_log([out, back]), None)
+        self.assertEqual((facts['parks'], facts['unparks']), (1, 1))
+
+    def test_the_warm_requests_park_is_not_counted(self):
+        warm_out = '[PINDIAG] lever N park out req=__levern_warm__ at=4096 ms=90.0 bytes=154000000 parked_now=1'
+        self.assertEqual(check.levern_problems(MERGED_ENV, merged_log([warm_out]), None)[1]['parks'], 0)
+
+    def test_the_route_line_carries_the_source_and_the_captures_and_stage_one_lines_still_parse(self):
+        facts = check.levern_facts(merged_route('a', 6144, 8192, 13000, 'CHECKPOINT', '8192:stored:80ms') + '\n' + route('b', 0, 2048, 6000))
+        self.assertEqual([(row['source'], row['captured']) for row in facts['routes']], [('CHECKPOINT', '8192:stored:80ms'), (None, None)])
+        self.assertEqual(check.levern_problems(ENV, engaged_log(route_lines('a', 6000) + interleaved_steps('a', 6000)), None)[0], [])
+
+    def test_a_step_line_with_the_governed_share_still_parses(self):
+        line = policy.STEP_LINE_MERGED.format(1, 'prefill', 7, 'a', 0, 2048, 2048, 10000, 0, 'paid', 'prefill', '700.0', '350', 0, 0.54)
+        facts = check.levern_facts(line)
+        self.assertEqual((facts['steps'][0]['req'], facts['steps'][0]['tokens']), ('a', 2048))
+
+
 if __name__ == '__main__':
     unittest.main()

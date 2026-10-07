@@ -114,7 +114,8 @@ class ProfileTests(unittest.TestCase):
 
     def test_no_other_profile_names_a_lever_n_flag(self):
         for name, profile in profiles().items():
-            if name in NEW:
+            # the two merged profiles (Lever N beside prefix reuse) are held by test_levern_prefix_contract
+            if name in NEW or name.startswith('c2-packed-tp4-8x262k-ship-prefix-levern'):
                 continue
             with self.subTest(name=name):
                 self.assertEqual([key for key in profile['env'] if key in levern_policy.ALL_FLAGS], [])

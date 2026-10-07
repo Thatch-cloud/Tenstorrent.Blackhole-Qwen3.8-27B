@@ -2,10 +2,9 @@
 
 **Date:** 2026-10-07. **Branch:** `tp4/levern-prefix`. Its base is merge commit `0cab164f`, which is `origin/ship/262k-prefix` (b8041cf4, the production recipe: W1 plus packed prefix reuse, eight seats x 262k, profile `c2-packed-tp4-8x262k-ship-prefix`) merged with `origin/tp4/lever-n` (0be1dfda).
 
-**Status: design only.**
-- The merge is committed and is the builder's starting point. In it, both levers still refuse each other at boot, so no profile changes behaviour.
-- No serving code is changed here.
-- Nothing ran on a card.
+**Status: implemented on CPU (sections 2-11), proved on real vLLM 0.25.1 by `test_levern_prefix_scheduler_vllm`; nothing has run on a card.** Section 15 records where the build departs from the text below and what it left open.
+- The merge is committed and was the builder's starting point. Both levers refuse each other at boot only where they are not both on: the two new gate-only profiles (`c2-packed-tp4-8x262k-ship-prefix-levern` and its `-audit` twin) turn both on; every other profile behaves as before.
+- Nothing ran on a card. The card gates (12.3) are listed, not run.
 
 **Labels:**
 - **m**: measured (the source is named).
@@ -424,8 +423,8 @@ These run on vLLM 0.25.1 in `qwen-fast-vllm-cpu.yml`, through experiment/fast-vl
 ### 12.3 Card gates (listed, not run)
 
 **Image:** one image (B0) built from the phase-B head. **New gate-only profiles:**
-- `c2-packed-tp4-8x262k-ship-prefix-levern-gate` = `ship-prefix` plus `QWEN_FAST_LEVER_N=1`, step 2048, solo 16384, share 0.5, T* 180, short 16384, `PARK=host`, `PARK_SLOTS=1`, `MAX_PARK_S=30`, `EPOCH_SCOPE=route`, gate_only;
-- its audited twin, which adds `QWEN_FAST_LEVERN_AUDIT`, `QWEN_PREFIX_DIGESTS`, `QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT` and the verify audits;
+- `c2-packed-tp4-8x262k-ship-prefix-levern` = `ship-prefix` plus `QWEN_FAST_LEVER_N=1`, step 2048, solo 16384, share 0.5, T* 180, short 16384, `PARK=host`, `PARK_SLOTS=1`, `MAX_PARK_S=30`, `EPOCH_SCOPE=route`, gate_only;
+- its audited twin (`...-levern-audit`), which adds `QWEN_FAST_LEVERN_AUDIT`, `QWEN_PREFIX_DIGESTS`, `QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT` and the verify audits;
 - the controls are `ship-prefix` and `ship-prefix-audit`.
 
 | Gate | Shape | READ |
@@ -460,3 +459,34 @@ A traffic twin comes only after the ladder, and only on the owner's ship decisio
 3. **The 254k chunk time is fitted, not measured.** The governor measures online, but its seed and T* margin assume the fit is within about 25%.
 4. **The peek must reproduce vLLM's own hit length exactly.** It uses `find_longest_cache_hit` with the same max length. V1 pins it against `get_computed_blocks` on 0.25.1.
 5. **The disjoint-writer class depends on the census staying complete.** A future route write site must fail the census, not pass silently.
+
+## 15. What was built, where it departs from the text above, what is open
+
+Built on `tp4/levern-prefix` (CPU only; no card, no tag but the CI proof tag). File by file:
+
+| File | Change |
+| --- | --- |
+| `levern_policy.py` | `valid_step`, `plan_from`, `merged_config` and the six merged flags, `StepTimes`, `effective_share` (the governor), `Alternator` share and short pacing, `OffSwitch`, the shared route state (`state_holder`, `state_has`), the merged line formats |
+| `levern_route.py` | `SOURCES`; the merged route (`_resolve`, `_merged_route`, `_park`, `_aggregate`, `_warm_merged`); `persistent_writes` and `engage_epoch_scope`; the write census list |
+| `levern_scheduler.py` | `PassPlan`, `plan_pass` (peek, single candidate, quarantine, short lane), the governor input, the kill switch, `verify` with the window rule |
+| `serving_prefill_admission.py` | the wrapper applies the plan: hidden prefills, the single-candidate queue, the holds asked before anything is hidden |
+| `qwen_prefix_scheduler_patch.py` | R2 (`levern_chunking_problems`), `peek`/`select`, the in-pass trim capped at the peek, in-flight notes in `commit`, the `install chunked=levern` line |
+| `qwen_prefix_registry.py` | the in-flight plan (`Inflight`, `note_scheduled`, `planned`), counters |
+| `serving_lifecycle.py`, `serving_worker_hook.py`, `dflash_prefill_window.py` | R3, source announcements, parking, the epoch scope, the capture ledger's first call through the range entry |
+| `verify_prestage.py`, `serving_runtime.py` | the disjoint external-writer class and its registration at attach |
+| `serving_c2_contract.py`, `qwen_c2_profiles.json`, `c2_smoke_check.py` | R1, R4, the two profiles, the merged smoke rules |
+
+Departures from the design text:
+1. **Profile names.** `c2-packed-tp4-8x262k-ship-prefix-levern` and `c2-packed-tp4-8x262k-ship-prefix-levern-audit`, not `-levern-gate`. They carry no waiver marker: their base is the production profile, which has none.
+2. **The peek does not ask vLLM twice for the in-pass answer.** The peek calls vLLM's own `get_computed_blocks` once (with `prefix_cache_stats` swapped for a null object) and memoizes only Q; the in-pass call is vLLM's authoritative answer, capped at the peek (`select(..., ceiling=Q_peek)`). A hit that moved between the two can only lower Q, so the step's end stays aligned and at or below S_last, and nothing depends on a block object that may have been evicted in between.
+3. **The install line.** The graft's sticky install line is byte for byte what it was (other tests and tools read it); `install chunked=levern: ...` is its own line, logged only where the merged route accepts chunking.
+4. **Scheduler-side state reaches the route and back through one holder** (`_qwen_levern_state`: the scratch owner and the parks), read before any allocation. A partial whose `(request, computed)` is in neither is quarantined through the D2 consumer; with no consumer installed the refusal stays fatal.
+5. **The warm** runs four steps and logs one warm line (`steps=4`) and no per-step route lines; the smoke rule counts the steps from the warm line under the merged profile.
+6. **Whole prompts under the merged profile** go through the merged route too (one step, COLD or CHECKPOINT) but keep the lifecycle's `note_prefill` (global bump and displacement) exactly as today: the epoch scope changes only intermediate steps.
+7. **Kill switch.** `levern.off` next to `prefix-reuse.off`, polled once a second and latched; new prompts then take their whole rest in one step and the short lane closes.
+
+Open, not done here:
+- **Card gates G-NP0 to G-NP7** (12.3). The new serving image (B0) is not built.
+- **The host-memory check for a park** reads `MemAvailable` before a short may preempt; a park that still fails inside the route (an allocation error) fails the engine, because the short has been admitted by then. A device park slot (design 3.8) is the alternative if the check proves too weak.
+- **The runner with two partial prefills in its persistent batch** is untested off-card (risk 1 of section 14); the CPU proof covers the scheduler, the lifecycle and the route, not the plugin runner's row handling.
+- **The disjoint-writer class** is gated on the audited prestage arm (G-NP4); until then `QWEN_FAST_LEVERN_EPOCH_SCOPE=global` is the safe A/B arm.

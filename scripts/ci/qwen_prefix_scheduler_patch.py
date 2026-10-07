@@ -467,6 +467,7 @@ def install(scheduler, registry=None, kill_switch_path=KILL_SWITCH_PATH, poll_s=
         stats = StatsExport(clock=clock, logger=logger)
     graft = SchedulerGraft(scheduler, registry, KillSwitch(kill_switch_path, poll_s, clock), logger, stats,
                            sticky=sticky_enabled(environ))
+    graft.environ = environ
     graft.wrap()
     scheduler._qwen_prefix = graft
     return graft
@@ -507,6 +508,8 @@ class SchedulerGraft(object):
         self.sticky = sticky is True
         self.drop_last = self.sticky and drops_last_block(self.coordinator)
         self.peeked = {}
+        # Where the merged route's switches are read (install's environ; None: os.environ).
+        self.environ = None
 
     # -- kill switch -----------------------------------------------------------------------------
     @property
@@ -809,9 +812,13 @@ class SchedulerGraft(object):
                  registry.budget_bytes / float(1 << 30), self.kill_switch_path,
                  getattr(self.stats_export, 'path', None), vllm_version)
         if self.sticky:
-            self.log('install sticky=1 lookahead=%d drop_last=%s ceiling=floor2048(P-%d) chunked=%s',
-                     getattr(scheduler, 'num_lookahead_tokens', 0), self.drop_last, CHUNK,
-                     'levern' if levern_chunked(scheduler) else 'off')
+            self.log('install sticky=1 lookahead=%d drop_last=%s ceiling=floor2048(P-%d)',
+                     getattr(scheduler, 'num_lookahead_tokens', 0), self.drop_last, CHUNK)
+            if levern_chunked(scheduler, self.environ):
+                # The merged route (Lever N beside prefix reuse): chunked prefill is on, and the Lever N cap installed on the class is the only thing
+                # that splits a prefill (its own line, so the sticky line above is what it always was).
+                self.log('install chunked=levern: chunked prefill beside the Lever N cap (max_num_scheduled_tokens=%s)',
+                         getattr(scheduler, 'max_num_scheduled_tokens', None))
         self.export(force=True)
 
     def original_get_computed_blocks(self, request):
