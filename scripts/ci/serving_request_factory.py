@@ -409,7 +409,7 @@ def rebind_parked(parked, entry, *, model, pages, state, capture, prompt, seed, 
     PROPOSAL_BUCKETS_BUILT names the capture's buckets, as for a build. The request carries `parked_slot`, which serving_runtime and the worker
     hook read."""
     from functools import partial
-    from serving_parked_engines import RebindFailed
+    import serving_parked_engines
 
     components = parked.components
     token = None
@@ -429,7 +429,7 @@ def rebind_parked(parked, entry, *, model, pages, state, capture, prompt, seed, 
     try:
         bound = parked.rebind_slot(entry, capture.outputs(), pages, position=len(prompt), make_session=make_session,
                                    request_id=state.req_id, budget=budget)
-    except RebindFailed as failure:
+    except serving_parked_engines.RebindFailed as failure:
         if token is not None:
             memory_ledger.after(token)
         parked.fallbacks += 1

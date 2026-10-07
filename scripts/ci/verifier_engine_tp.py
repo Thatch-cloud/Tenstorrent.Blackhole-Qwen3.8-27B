@@ -426,7 +426,7 @@ class VerifierEngine(PairVerifierEngine):
         the initial snapshot saved from native slot 0 - which holds the request's prefilled state, adopted before this - and the carry
         seeded from it (_resident = self). The widths become a cold engine's for this request (R4): the captures keep (1, 2, 4), the
         engine asks and serves only what the request's own constructor would have captured."""
-        from serving_parked_engines import page_table_bindings, write_page_tables
+        import serving_parked_engines as reuse
 
         if self.phase != 'parked':
             raise ValueError('Only a parked engine can be rebound; this one is %s' % self.phase)
@@ -441,7 +441,7 @@ class VerifierEngine(PairVerifierEngine):
                                 session.max_new_tokens - len(session.emitted), self.capture_rows)
         if not set(widths) <= set(self.captured_widths):
             raise ValueError('The request needs widths %r; the parked engine captured %r' % (widths, self.captured_widths))
-        bindings = page_table_bindings(self)
+        bindings = reuse.page_table_bindings(self)
         started = time.perf_counter()
         session.begin_preparation(session.request_id)
         self.session, self.position = session, session.position
@@ -450,7 +450,7 @@ class VerifierEngine(PairVerifierEngine):
         pair_module.note_prefill()
         try:
             # The gate's 'pages' negative control swaps the writer for a no-op, for this call only (an instance attribute, popped by its owner).
-            self.__dict__.get('page_table_writer', write_page_tables)(self.operations, self.mesh, bindings, self.pages)
+            self.__dict__.get('page_table_writer', reuse.write_page_tables)(self.operations, self.mesh, bindings, self.pages)
             for key in [key for key in self.buckets if isinstance(key, tuple) and key[:1] == ('packed',)]:
                 del self.buckets[key]
             for bucket in self.buckets.values():

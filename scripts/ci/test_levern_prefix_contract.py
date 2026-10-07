@@ -53,6 +53,9 @@ def flat(profile):
     return out
 
 
+import make_parked_profiles as _parked_twins  # noqa: E402
+PARKED_TWINS = frozenset(name for name, parent, env, why in _parked_twins.specs())
+
 class ProfileTests(unittest.TestCase):
     def test_each_profile_is_its_twin_plus_exactly_its_flags(self):
         found = profiles()
@@ -111,8 +114,8 @@ class ProfileTests(unittest.TestCase):
 
     def test_no_other_profile_gained_a_merged_flag(self):
         for name, profile in profiles().items():
-            if name in (PLAIN, AUDITED):
-                continue
+            if name in (PLAIN, AUDITED) or name in PARKED_TWINS:
+                continue       # (the generated engine-reuse twins carry their Lever N parent's merged flags: test_parked_tp4_profiles)
             with self.subTest(name=name):
                 self.assertEqual([key for key in profile['env'] if key in levern_policy.MERGED_FLAGS], [])
 

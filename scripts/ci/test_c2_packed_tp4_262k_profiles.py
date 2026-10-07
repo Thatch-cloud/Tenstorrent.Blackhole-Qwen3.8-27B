@@ -17,6 +17,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+import make_parked_profiles as parked_twins  # noqa: E402
 import packed_any_admission as admission  # noqa: E402
 import serving_c2_contract as contract  # noqa: E402
 import serving_runtime  # noqa: E402
@@ -43,6 +44,8 @@ BEST262K = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-
             'c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit', 'c2-packed-tp4-8x262k-w1-audit-nod1', 'c2-packed-tp4-8x262k-w1-lite', 'c2-packed-tp4-8x262k-w1-nod1',
             # tp4/packed-prefix + ship/262k-prefix: the sticky-session twins and the both-levers ship profile
             'c2-packed-tp4-8x262k-prefix-gate', 'c2-packed-tp4-8x262k-prefix-time-gate', 'c2-packed-tp4-8x262k-ship-prefix', 'c2-packed-tp4-8x262k-ship-prefix-audit', 'c2-packed-tp4-8x262k-ship-prefix-levern', 'c2-packed-tp4-8x262k-ship-prefix-levern-audit')
+# engine reuse (tp4/engine-reuse): the generated gate-only twins of the two levern profiles (test_parked_tp4_profiles holds each as its parent plus its flags)
+BEST262K = BEST262K + tuple(name for name, parent, env, why in parked_twins.specs())
 # tp4/262k8-x (test_tp4_262k8_x holds each as the best-time-gate or best-audit twin plus/minus exactly one lever): the experiments image's arms; 262k knobs by inheritance.
 X262K = tuple('c2-packed-tp4-8x262k-best-time-gate-' + lever for lever in ('nosamp', 's1', 'd2', 'dbf16', 'lookup', 'stack')) + (
     'c2-packed-tp4-8x262k-best-nosamp-audit', 'c2-packed-tp4-8x262k-best-stack-audit')

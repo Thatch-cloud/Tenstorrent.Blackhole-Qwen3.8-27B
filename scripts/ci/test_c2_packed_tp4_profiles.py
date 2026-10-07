@@ -132,6 +132,10 @@ X262K_TIMED = tuple('c2-packed-tp4-8x262k-best-time-gate-' + lever for lever in 
 X262K_AUDITED = ('c2-packed-tp4-8x262k-best-nosamp-audit', 'c2-packed-tp4-8x262k-best-stack-audit')
 X262K_PROFILES = X262K_TIMED + X262K_AUDITED
 NEXT5_PROFILES = NEXT5_PROFILES + X262K_PROFILES
+# engine reuse (tp4/engine-reuse, test_parked_tp4_profiles holds each as its levern parent plus exactly its flags): the generated gate-only twins
+import make_parked_profiles as parked_twins  # noqa: E402
+PARKED_PROFILES = tuple(name for name, parent, env, why in parked_twins.specs())
+NEXT5_PROFILES = NEXT5_PROFILES + PARKED_PROFILES
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 
 
@@ -506,7 +510,7 @@ class FixProfileTests(unittest.TestCase):
             with self.subTest(profile=name):
                 self.assertNotIn('QWEN_FAST_CAPTURE_PLUG', env if name != 'c2-packed-tp4-speed-fix' else {})
                 self.assertNotIn('QWEN_FAST_CAPTURE_PLUG_ENGINES', env if name != 'c2-packed-tp4-speed-fix' else {})
-                if name not in DIAG_PROFILES and name != 'c2-packed-tp4-speed-fix' and name != 'c2-packed-tp4-8x262k-best-levern-hang-gate' and not name.startswith('c2-packed-tp4-diag-s') and name not in ('c2-packed-tp4-diag-rshard', 'c2-packed-tp4-diag-t1-rshard-audit') and name not in WARM4_PROFILES + SEATS8_PROFILES:
+                if name not in DIAG_PROFILES and name != 'c2-packed-tp4-speed-fix' and name != 'c2-packed-tp4-8x262k-best-levern-hang-gate' and not name.startswith('c2-packed-tp4-diag-s') and name not in ('c2-packed-tp4-diag-rshard', 'c2-packed-tp4-diag-t1-rshard-audit') and name not in WARM4_PROFILES + SEATS8_PROFILES and name not in PARKED_PROFILES:
                     for flag in ('QWEN_FAST_STALL_DEADLINE_S', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_TRACE_CENSUS_GRAPH'):
                         self.assertNotIn(flag, env)
 

@@ -101,15 +101,15 @@ LEVERN_PLATFORM_MODULE = 'vllm_tt_plugin.platform'
 # Engine reuse, parked per-slot engines (serving_fast_policy.PARKED_ENGINES_FLAG; default off). A gate-only profile's own switches: the fast
 # path's engine is rebound to each request instead of built (serving_parked_engines), and with PARKED_DRAFTS the pair and quad drafter traces are
 # bound to the slots too. Only a profile sets them, and only on the four-card S2 shape they need (parked_problems). The audit knob may be a gate
-# profile's own (the audit twin sets it, and its flag-off control carries it too); the negative controls, the injected faults and the ballast are
-# the gate's alone: no profile carries them, and outside a gate profile the boot refuses them in the process environment.
+# profile's own (the audit twin sets it, and its flag-off control carries it too), as are the negative controls, the injected faults and the ballast
+# (each its own gate-only twin, as QWEN_FAST_LEVERN_FAULT is): a profile that is not a gate's carries none of them, and outside a gate profile the boot
+# refuses them in the process environment.
 PARKED_SWITCH = 'QWEN_FAST_PARKED_ENGINES'
 PARKED_DRAFTS = 'QWEN_FAST_PARKED_DRAFTS'
 PARKED_PREFIX = 'QWEN_FAST_PARKED_'
 PARKED_NAMES = ('QWEN_FAST_PARKED_ENGINES', 'QWEN_FAST_PARKED_DRAFTS', 'QWEN_FAST_PARKED_PROJECT_ROWS', 'QWEN_FAST_PARKED_AUDIT',
                 'QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT')
 PARKED_GATE_ONLY = ('QWEN_FAST_PARKED_AUDIT', 'QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT', 'QWEN_FAST_GATE_DRAM_BALLAST')
-PARKED_WINDOW_KNOBS = ('QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT', 'QWEN_FAST_GATE_DRAM_BALLAST')
 # The sources the merged route must carry (levern_route.SOURCES, pinned equal by test_levern_prefix_contract).
 MERGED_SOURCES = ('COLD', 'CHECKPOINT', 'SCRATCH', 'PARKED')
 
@@ -433,9 +433,8 @@ def gate_profile(profile):
 def parked_problems(profile, environ=None):
     """Every way engine reuse is set without what it needs, [] when none: the switch is the fast path's (qwen_fast_t16), the four-card mesh's
     and a gate-only profile's (nothing serves traffic on it until its exactness, lifecycle, memory and hang gates have run), and needs the S2
-    shape beside it - C2-any, the extent readers, four or eight scheduler requests. The window knobs (negative controls, injected faults, the
-    ballast) are refused in a profile's own env, the audit knob in a profile that is not a gate's, and all four in the process environment outside
-    a gate profile. Any other QWEN_FAST_PARKED_ name is refused. The drafts switch (the bound pair and quad traces) needs the engines."""
+    shape beside it - C2-any, the extent readers, four or eight scheduler requests. The gate instruments (the audit, the negative controls, the injected
+    faults, the ballast) are refused in the env of a profile that is not a gate's, and in the process environment outside a gate profile. Any other QWEN_FAST_PARKED_ name is refused. The drafts switch (the bound pair and quad traces) needs the engines."""
     environ = {} if environ is None else environ
     env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
     engine = profile.get('engine') or {}
@@ -443,9 +442,10 @@ def parked_problems(profile, environ=None):
     value = env.get(PARKED_SWITCH)
     if value is not None and value not in ('0', '1'):
         problems.append('%s=%r is neither 1 nor 0' % (PARKED_SWITCH, value))
-    problems += ['%s is a gate window knob: no profile sets it' % name for name in PARKED_WINDOW_KNOBS if name in env]
-    if 'QWEN_FAST_PARKED_AUDIT' in env and not gate_profile(profile):
-        problems.append('QWEN_FAST_PARKED_AUDIT is a gate instrument: only a gate profile sets it')
+    # The negative controls, the injected faults and the ballast, and the audit, are a gate-only profile's own env (as QWEN_FAST_LEVERN_FAULT is): a
+    # profile that is not a gate's must carry none of them.
+    problems += ['%s is a gate instrument: only a gate-only profile sets it' % name for name in PARKED_GATE_ONLY
+                 if name in env and not gate_profile(profile)]
     if not gate_profile(profile):
         problems += ['%s is set outside a gate profile: it exists for a gate and must never reach traffic' % name
                      for name in PARKED_GATE_ONLY if name in environ]

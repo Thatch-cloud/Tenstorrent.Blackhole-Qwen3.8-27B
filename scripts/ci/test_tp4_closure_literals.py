@@ -57,6 +57,7 @@ serving_kv_reservation serving_one_in_flight serving_packed_bridge serving_prefi
 target_packed_pages target_t16_attention_8k_gate target_t16_attention_gate tile_collective_tp two_tile_decode two_tile_norm
 verifier_engine_tp verifier_position_policy c2_parser_rechunk qwen_prefix_metrics prompt_lookup levern_policy levern_scheduler levern_platform levern_route
 tp4_sampdraft tp4_shard_argmax tp4_draft_conv tp4_draft_heads
+serving_parked_engines
 '''.split())
 
 # Modules the four-card profiles never run their pair code from, and why. The closure does not follow into them.
@@ -491,7 +492,8 @@ class ClosureTests(unittest.TestCase):
         self.assertTrue(report['ok'], 'test_tp4_attach_profile fails, so its import set means nothing')
         known = module_names()
         loaded = {name for name in report['modules'] if name in known and not name.startswith('test_')}
-        loaded -= {'tp_test_support'}
+        # (make_parked_profiles is the generator of the engine-reuse profile twins: the profile tests that the attach test imports name them; it serves nothing)
+        loaded -= {'tp_test_support', 'make_parked_profiles'}
         extra = loaded - self.seen
         # What the attach loads outside the closure is a NOT_SERVED module it enters inert (each named in ATTACH_ENTERS_INERT,
         # exactly) and what those import at module level - not everything any NOT_SERVED module could ever reach.

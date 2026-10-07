@@ -12,6 +12,9 @@ import serving_c2_contract as contract
 PROFILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'qwen_c2_profiles.json')
 
 
+import make_parked_profiles as _parked_twins  # noqa: E402
+PARKED_TWINS = frozenset(name for name, parent, env, why in _parked_twins.specs())
+
 class Params(object):
     def __init__(self, **values):
         self.n, self.logprobs, self.prompt_logprobs = 1, None, None
@@ -214,7 +217,8 @@ class PackedAnyProfileTest(unittest.TestCase):
         # ...and the sticky-session profiles, c2-packed and c2-packed-gate with prefix reuse.
         # ...and the four-card twins, c2-packed-tp4 and its gate profile (plan S2-TP4), and the two gate arms of the S2 window
         # (the ring fabric, the bfloat16 drafter), and the four batched-draft profiles (tp4/draft).
-        self.assertEqual([name for name in names if EXTENT_FLAG in self.load(name)['env']],
+        # ...and the generated engine-reuse twins of the Lever N profiles (tp4/engine-reuse; test_parked_tp4_profiles holds each as its parent plus its flags).
+        self.assertEqual([name for name in names if EXTENT_FLAG in self.load(name)['env'] and name not in PARKED_TWINS],
                          ['c2-packed', 'c2-packed-gate', 'c2-packed-prefix', 'c2-packed-prefix-gate', 'c2-packed-tp4',
                           'c2-packed-tp4-262k-gate', 'c2-packed-tp4-8', 'c2-packed-tp4-8-best', 'c2-packed-tp4-8-best-quad', 'c2-packed-tp4-8-best-quad-dbf16', 'c2-packed-tp4-8-best-quad-gate', 'c2-packed-tp4-8-diag-strace', 'c2-packed-tp4-8-diag-strace-nowarm', 'c2-packed-tp4-8-diag-strace-rshard', 'c2-packed-tp4-8-gate', 'c2-packed-tp4-8-time-gate', 'c2-packed-tp4-8x262k', 'c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-packed-tp4-8x262k-best-levern-audit', 'c2-packed-tp4-8x262k-best-levern-control-audit', 'c2-packed-tp4-8x262k-best-levern-final-hold-time-gate', 'c2-packed-tp4-8x262k-best-levern-foreign-time-gate', 'c2-packed-tp4-8x262k-best-levern-hang-gate', 'c2-packed-tp4-8x262k-best-levern-r1-time-gate', 'c2-packed-tp4-8x262k-best-levern-time-gate', 'c2-packed-tp4-8x262k-best-nosamp-audit', 'c2-packed-tp4-8x262k-best-stack-audit', 'c2-packed-tp4-8x262k-best-time-gate', 'c2-packed-tp4-8x262k-best-time-gate-d2', 'c2-packed-tp4-8x262k-best-time-gate-dbf16', 'c2-packed-tp4-8x262k-best-time-gate-lookup', 'c2-packed-tp4-8x262k-best-time-gate-nosamp', 'c2-packed-tp4-8x262k-best-time-gate-s1', 'c2-packed-tp4-8x262k-best-time-gate-stack', 'c2-packed-tp4-8x262k-best-time-gate-u1', 'c2-packed-tp4-8x262k-best-u1-audit', 'c2-packed-tp4-8x262k-diag-strace', 'c2-packed-tp4-8x262k-gate', 'c2-packed-tp4-8x262k-hostgap-1', 'c2-packed-tp4-8x262k-hostgap-1-audit', 'c2-packed-tp4-8x262k-hostgap-2', 'c2-packed-tp4-8x262k-hostgap-2-audit', 'c2-packed-tp4-8x262k-prefix-gate', 'c2-packed-tp4-8x262k-prefix-time-gate', 'c2-packed-tp4-8x262k-ship', 'c2-packed-tp4-8x262k-ship-prefix', 'c2-packed-tp4-8x262k-ship-prefix-audit', 'c2-packed-tp4-8x262k-ship-prefix-levern', 'c2-packed-tp4-8x262k-ship-prefix-levern-audit', 'c2-packed-tp4-8x262k-time-gate', 'c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit', 'c2-packed-tp4-8x262k-w1-audit-nod1', 'c2-packed-tp4-8x262k-w1-lite', 'c2-packed-tp4-8x262k-w1-nod1', 'c2-packed-tp4-best', 'c2-packed-tp4-best-d2', 'c2-packed-tp4-best-dbf16', 'c2-packed-tp4-best-gate', 'c2-packed-tp4-best-gate-d2', 'c2-packed-tp4-best-gate-dbf16', 'c2-packed-tp4-best-gate-glue', 'c2-packed-tp4-best-gate-lookup', 'c2-packed-tp4-best-gate-samp', 'c2-packed-tp4-best-gate-tpub', 'c2-packed-tp4-best-lookup', 'c2-packed-tp4-best-rshard', 'c2-packed-tp4-best-samp', 'c2-packed-tp4-best-ship', 'c2-packed-tp4-best-ship-glue', 'c2-packed-tp4-best-ship-tpub', 'c2-packed-tp4-best-ship-warm4', 'c2-packed-tp4-best-strace', 'c2-packed-tp4-best-strace-glue', 'c2-packed-tp4-best-strace-tpub', 'c2-packed-tp4-best-v5', 'c2-packed-tp4-best-v5-gate', 'c2-packed-tp4-diag', 'c2-packed-tp4-diag-rshard', 'c2-packed-tp4-diag-sprewarm',
                           'c2-packed-tp4-diag-strace', 'c2-packed-tp4-diag-t1', 'c2-packed-tp4-diag-t1-rshard-audit', 'c2-packed-tp4-diag-t2', 'c2-packed-tp4-f12',
@@ -577,7 +581,7 @@ class MeshTest(unittest.TestCase):
 
     def test_the_pairs_profiles_are_untouched(self):
         for name, profile in document()['profiles'].items():
-            if name in TP4_PROFILES or name in FAST_TP4_PROFILES or name == 'general-2link':
+            if name in TP4_PROFILES or name in FAST_TP4_PROFILES or name == 'general-2link' or name in PARKED_TWINS:
                 continue
             self.assertNotIn('mesh_device', profile, name)
             self.assertEqual(profile['mesh_graph_descriptor'], contract.PAIR_DESCRIPTOR, name)
