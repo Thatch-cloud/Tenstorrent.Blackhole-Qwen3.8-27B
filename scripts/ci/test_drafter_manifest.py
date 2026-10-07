@@ -340,16 +340,12 @@ class WiringTests(unittest.TestCase):
         source = (HERE / 'serving_startup.py').read_text(encoding='utf-8')
         self.assertIn("drafter_fixtures.load(paths['fixtures'], load_dflash_fixtures)", source)
 
-    @unittest.skipUnless((HERE / 'build-c2-serving-image.sh').is_file() and (HERE / 'dflash-fixtures.sh').is_file(),
-                         'the build tools belong to a checkout, not the image')
-    def test_build_script_and_fixture_helper_select_by_manifest(self):
+    @unittest.skipUnless((HERE / 'build-c2-serving-image.sh').is_file(), 'the build tools belong to a checkout, not the image')
+    def test_build_script_selects_by_manifest(self):
         build = (HERE / 'build-c2-serving-image.sh').read_text(encoding='utf-8')
         self.assertIn('C2_DRAFTER_MANIFEST', build)
         self.assertIn('DRAFTER_MANIFEST', build)
         self.assertIn('dedf8df68adfb1afeaf7b7480c0a0243108177b4', build)
-        helper = (HERE / 'dflash-fixtures.sh').read_text(encoding='utf-8')
-        self.assertIn('C2_DRAFTER_MANIFEST', helper)
-        self.assertIn('dedf8df68adfb1afeaf7b7480c0a0243108177b4', helper)
 
     def test_the_default_stays_out_of_every_edited_pin_file(self):
         # The loaders and evidence that name the served drafter are not edited by candidates.

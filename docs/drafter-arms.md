@@ -84,7 +84,8 @@ Kill rules are in each template and `ORDER.txt` (machine-greppable `# NEEDS` lin
 - `scripts/ci/drafter_manifest.py`, `drafter_fixtures.py`, `drafter_stage.py`, `references/drafter-manifests/{dedf8df6,b16-98759a49}.json`, `test_drafter_manifest.py`
 - `scripts/ci/c2_tau_lab.py`, `tau_lab_report.py`, `drafter_pair_report.py`, `test_tau_lab.py` (ported), `test_drafter_arms.py`, `references/tau-lab/`, `references/tp4-taulab-jobs/`
 - `scripts/ci/references/tp4-drafter-jobs/` (the card-gate pack)
-- changed: `serving_startup.py` (one call), `build-c2-serving-image.sh`, `dflash-fixtures.sh`, `c2_serving_job.py`, `qwen-c2-serving.yml`, `qwen-integration-cpu.yml`, `docker/qwen-c2-overlay.txt`
+- not changed on purpose: `dflash-fixtures.sh`, the helper the older lever-N gate arms use to fetch the served drafter's fixtures (a bundle file; the image build and the tau lab take a candidate through `build-c2-serving-image.sh` instead).
+- changed: `serving_startup.py` (one call), `build-c2-serving-image.sh`, `c2_serving_job.py`, `qwen-c2-serving.yml`, `qwen-integration-cpu.yml`, `docker/qwen-c2-overlay.txt`
 
 ## Open items
 
