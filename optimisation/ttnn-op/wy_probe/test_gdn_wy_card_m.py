@@ -245,18 +245,28 @@ class ScriptTests(unittest.TestCase):
         text = self.text()
         self.assertIn('-e QWEN_FAST_TP=4 -e QWEN_FAST_VERIFY_T1=1', text)
         self.assertIn('--network none', text)
-        self.assertIn('. "$REPO/scripts/ci/qual_card.sh"', text)
+        self.assertIn('# >>> qual_card.sh', text)
         self.assertEqual(len(re.findall(r'^timeout -k 30 "\$timeout_s" docker run', text, flags=re.M)), 1)
         self.assertLess(text.index('qual_card_select'), text.index('docker images'))
         self.assertLess(text.index('qual_refuse_holders'), text.index('docker images'))
         self.assertLess(text.index('qual_card_recheck'), text.index('timeout -k 30 "$timeout_s" docker run'))
         self.assertIn('3|124|137)', text)
 
-    def test_no_registry_host_serial_or_address_is_named(self):
-        for path in (SCRIPT, HERE / 'gdn_wy_card_m.py'):
-            text = path.read_text(encoding='utf-8')
-            for needle in ('zot.', '.local:', 'blackhole-', 'thatch', '192.168.', '10.0.', '/home/', 'C:\\'):
-                self.assertNotIn(needle, text, '%s in %s' % (needle, path.name))
+    def test_no_registry_host_serial_or_address_is_named_beyond_the_embedded_block(self):
+        text = self.text()
+        start, end = text.index('# >>> qual_card.sh'), text.index('# <<< qual_card.sh')
+        for path_text in (text[:start] + text[end:], (HERE / 'gdn_wy_card_m.py').read_text(encoding='utf-8')):
+            for needle in ('zot.', '.local:', 'blackhole-', 'thatch', '192.168.', '10.0.', '/home/', 'C:' + chr(92)):
+                self.assertNotIn(needle, path_text)
+
+    def test_the_embedded_card_library_is_the_canonical_one(self):
+        library = (CI / 'qual_card.sh').read_text(encoding='utf-8')
+        text = self.text()
+        start = text.index('# >>> qual_card.sh')
+        nl = chr(10)
+        end = text.index(nl, text.index('# <<< qual_card.sh')) + 1
+        self.assertEqual(text[start:end], library)
+        self.assertTrue(text[end:].startswith('qual_card_select' + nl))
 
     @unittest.skipUnless(BASH, 'needs bash')
     def test_the_script_parses(self):
