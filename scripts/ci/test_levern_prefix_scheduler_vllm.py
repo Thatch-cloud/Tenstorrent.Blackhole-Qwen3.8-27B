@@ -29,8 +29,6 @@ What is proved:
 Run with VLLM_USE_V2_MODEL_RUNNER=0 (as the other installed-vLLM suites)."""
 
 import collections
-import contextlib
-import dataclasses
 import os
 import random
 import sys
@@ -48,8 +46,9 @@ import serving_prefill_admission as admission  # noqa: E402
 import serving_request_quarantine as quarantine  # noqa: E402
 import test_qwen_prefix_scheduler_vllm as proof  # noqa: E402
 from test_qwen_prefix_scheduler_patch import INITIAL_STATE, ModelAssertion, chunk_state, cold_state  # noqa: E402
-from test_qwen_prefix_scheduler_vllm import (BLOCK, CHUNK, DEFAULT_BLOCKS, MAX_MODEL_LEN, SALT, STATE, VLLM_ERROR, StickyEnv, attach_ledger,  # noqa: E402,F401
-                                            setUpModule, tearDownModule, tokens)
+from test_qwen_prefix_scheduler_vllm import (BLOCK, CHUNK, DEFAULT_BLOCKS, MAX_MODEL_LEN, SALT, VLLM_ERROR, StickyEnv, attach_ledger,  # noqa: E402
+                                            tokens)
+from test_qwen_prefix_scheduler_vllm import setUpModule, tearDownModule  # noqa: E402,F401  (the module-level fixtures stage the graft package)
 
 if VLLM_ERROR is None:
     from vllm.config import SchedulerConfig, VllmConfig
@@ -280,7 +279,9 @@ def reference_registry(env, prompts):
 
 
 def registry_keys(registry):
-    return {key: (checkpoint.pos, checkpoint.rec) for key, checkpoint in registry.entries.items()}
+    """What a registry holds, independent of the block-hash bytes (vLLM seeds the first block's parent hash per initialisation, so two environments
+    key the same prefix differently): every checkpoint's position, the token ids it was captured from and its state, sorted."""
+    return sorted((checkpoint.pos, bytes(checkpoint.token_ids), checkpoint.rec) for checkpoint in registry.entries.values())
 
 
 @unittest.skipIf(VLLM_ERROR is not None, 'vLLM is not importable here (%s)' % VLLM_ERROR)
