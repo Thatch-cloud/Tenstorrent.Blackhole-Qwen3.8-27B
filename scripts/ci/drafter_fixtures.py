@@ -21,7 +21,12 @@ def load(root, default_loader, environ=None):
     name = manifests.select(root, environ)
     if name == manifests.DEFAULT:
         return default_loader(root)
-    return load_candidate(root, manifests.load(name))
+    manifest = manifests.load(name)
+    found = load_candidate(root, manifest)
+    # The marker the tau lab's launched-argv check and the smoke read; only a candidate prints it (the default's logs are as before).
+    print('[DRAFTER_MANIFEST] %s in force: %s at %s, %d tensors verified' % (
+        name, manifest['model'], manifest['revision'][:12], len(manifest['tensors'])), flush=True)
+    return found
 
 
 def _read_manifest(output, manifest):
