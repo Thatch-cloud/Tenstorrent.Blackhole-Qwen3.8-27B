@@ -261,6 +261,24 @@ class SanitiseTests(unittest.TestCase):
         self.assertEqual(len(out), 2)
         self.assertTrue(all('secret' not in line for line in out))
 
+    def test_records_reach_the_disk_within_the_status_interval_not_only_at_the_end(self):
+        directory = tempfile.mkdtemp()
+        try:
+            seen = []
+
+            def lines():
+                for index, line in enumerate(decode_rounds(5)):
+                    if index == 30:
+                        seen.append(sum(os.path.getsize(os.path.join(directory, n)) for n in os.listdir(directory) if n.startswith('rounds-')))
+                    yield line
+
+            clock = iter(range(0, 10 ** 6, 40))
+            with redirect_stdout(io.StringIO()):
+                pt.run(lines(), directory, clock=lambda: float(next(clock)))
+            self.assertGreater(seen[0], 0)
+        finally:
+            shutil.rmtree(directory)
+
     def test_every_round_carries_the_host_load(self):
         directory = tempfile.mkdtemp()
         try:

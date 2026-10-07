@@ -688,6 +688,7 @@ def run(lines, out_dir=None, watch=True, clock=time.time, idle_tick=None, hang_s
         emit(watcher.feed(line, now) + (watcher.tick(now) if watch else []))
         if state_path and now - last_status > 30:
             last_status = now
+            sink.flush()          # a record waits at most ~30 s in a buffer: a kill loses seconds, not hundreds of records
             write_status(state_path, watcher, sink, fired, load_state['value'])
 
     try:
@@ -710,6 +711,7 @@ def run(lines, out_dir=None, watch=True, clock=time.time, idle_tick=None, hang_s
                         emit(watcher.tick(clock()))
                     if state_path and clock() - last_status > 30:
                         last_status = clock()
+                        sink.flush()
                         write_status(state_path, watcher, sink, fired, load_state['value'])
                     continue
                 if line is done:
