@@ -190,6 +190,8 @@ class TemplateTests(unittest.TestCase):
             if name == 'SR10-platform-replay':
                 self.assertEqual(entry['C2_ACTIONS'].split(), ['reset', 'replay'])
                 self.assertEqual(entry['C2_PLATFORM_IMAGE'], '@THIN_LAYER_IMAGE@')
+                # the placeholder appears once, in the value: the driver's sed must not write the image reference into a comment of the pushed commit
+                self.assertEqual(read_text(name + '.env').count('@THIN_LAYER_IMAGE@'), 1)
                 self.assertEqual(entry['C2_REPLAY_PROFILE'], base.PLAIN)
                 self.assertEqual(entry['C2_REPLAY_BUDGET_SMOKE'], '1')
             else:
