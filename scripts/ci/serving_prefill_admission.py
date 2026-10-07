@@ -108,6 +108,13 @@ the same terms, with the contiguous term that carries no prefill transient: the 
 so a long prompt keeps the 300 MB gap between its admission and its backstop that it had before the split
 (1568.4 against 1268.4 MB then). No predicate, an unreadable one, or a reading that is unavailable holds nothing:
 the rule above, call for call.
+ENGINE REUSE, THE PARKED TERMS (QWEN_FAST_PARKED_ENGINES=1 only; serving_parked_engines, design 3.3): when the slot the next request will take
+holds a parked engine, nothing is built at its admission, so the predicate and the backstop ask parked_need and parked_backstop_need (the
+prefill transient, the rebind's peak R, a released single's rebuild S, the reserve) and a trace-region block only for S (parked_trace_need).
+The free term also counts the release ladder's CREDIT (serving_parked_engines.ParkedEngineSet.make_room: the book's pairs, other slots'
+singles, one other idle parked slot), so a departing decoder freeing almost nothing does not hold an arrival until the whole server drains; the
+arrival that is short at its backstop runs the ladder before it is refused. The predicate asks the parked set which terms apply at every call;
+with the flag off it is built without one and every call is today's.
     [PINDIAG] dram hold prompt=<n> largest_free=<MB> need=<MB> request=<id> decodes=<d> free=<MB>
         trace_largest_free=<MB> short=<terms>                                         once per (request, decodes)
     [PINDIAG] dram hold released prompt=<n> ...                                        once, when it fits
@@ -147,6 +154,7 @@ every call is what it was. A bad value of the flag is refused (logged as REFUSED
 import importlib
 import os
 import sys
+import time
 import types
 
 from serving_request_quarantine import scheduler_class
@@ -170,6 +178,7 @@ DRAM_RELEASED_LINE = ('[PINDIAG] dram hold released prompt={} largest_free={} ne
                       'trace_largest_free={}')
 DRAM_LIFTED_LINE = ('[PINDIAG] dram hold lifted prompt={} largest_free={} need={} request={} free={} short={}: no '
                     'decode is left to free DRAM, so the prompt is admitted and the bridge backstop decides')
+DRAM_AGE_LINE = '[PINDIAG] dram hold age request={} ms={:.0f} decodes={}'
 DRAM_UNAVAILABLE_LINE = '[PINDIAG] dram hold unavailable request={}: {} (not held)'
 DRAM_DEFERRED_LINE = ('[PINDIAG] dram admission deferred one step prompt={} largest_free={} need={} request={} '
                       'finished={} free={} short={}: the reading still counts their engines, which this step '
@@ -221,6 +230,56 @@ LARGEST_BUFFER_BYTES = 128 * MEGABYTE
 # 48 MB would leave 1 MB of v79's reading, so a slightly worse layout would hold again.
 TRACE_CONTIGUOUS_BYTES = 44 * MEGABYTE
 SPLIT_TERMS = ('free', 'contiguous', 'trace')
+
+# Engine reuse (QWEN_FAST_PARKED_ENGINES=1, serving_parked_engines): THE PARKED TERMS, per chip. An arrival whose slot holds a parked engine
+# builds nothing: its engine, drafter and captures were built at attach and are rebound (the pool slot re-zeroed, the history projected, the
+# page tables rewritten). So the engine's resident bytes and its margin leave its need, and what is left is the prefill's transient, the
+# rebind's peak (R) and, when a pair or the quad released that slot's single-user proposal capture, the capture's rebuild (S), which the
+# rebind makes before the request's first proposal. The contiguous term is today's; the trace term asks only the single's trace, and only with
+# S. Every other slot keeps today's terms.
+PARKED_REBIND_BYTES = 100 * MEGABYTE         # (e) R: the rebind with the windowed projection (256 rows per call); the card gate measures it
+PARKED_REBIND_WHOLE_BYTES = 350 * MEGABYTE   # (e) R with the projection in one call (QWEN_FAST_PARKED_PROJECT_ROWS=0)
+# (m) Each capture's allocator growth per chip, read either side of it. The TP2 line's (gates v61, v70, v79) and the four-card mesh's
+# (run v579: the single 206.3, the pair 187.6-188.2 and the quad 374.2-375.3 MB per chip, a parked engine 0.468-0.495 GB with 40.4 MB of
+# trace region). Under the flag the coordinator's capture headroom and the ledger's readings ask these, by chip count, in place of the source
+# estimates (which sit below the measurements for the single and pair and above it for the quad).
+MEASURED_SINGLE_CAPTURE_BYTES_TP2 = 227 * MEGABYTE
+MEASURED_PAIR_CAPTURE_BYTES_TP2 = 212_800_000
+MEASURED_QUAD_CAPTURE_BYTES_TP2 = 428_300_000
+MEASURED_SINGLE_CAPTURE_BYTES_TP4 = 206_300_000
+MEASURED_PAIR_CAPTURE_BYTES_TP4 = 188_200_000
+MEASURED_QUAD_CAPTURE_BYTES_TP4 = 375_300_000
+PARKED_ENGINE_BYTES_TP4 = 490_000_000        # (m) one parked engine's allocator growth per chip, the high end of 0.468-0.495 GB
+PARKED_ENGINE_BYTES_TP2 = 470_000_000        # (e) the pair's, for the ladder's credit only
+# (e, the card gate records it) The trace region a single-capture rebuild takes: its one 2048 bucket's trace (m, four cards: 2.5 MB).
+SINGLE_TRACE_BYTES_TP2 = 4 * MEGABYTE
+SINGLE_TRACE_BYTES_TP4 = 2_500_000
+
+
+def _by_chips(pair, four):
+    import tp_shapes
+
+    return pair if tp_shapes.chip_count() == tp_shapes.PAIR else four
+
+
+def measured_single_capture_bytes():
+    return _by_chips(MEASURED_SINGLE_CAPTURE_BYTES_TP2, MEASURED_SINGLE_CAPTURE_BYTES_TP4)
+
+
+def measured_pair_capture_bytes():
+    return _by_chips(MEASURED_PAIR_CAPTURE_BYTES_TP2, MEASURED_PAIR_CAPTURE_BYTES_TP4)
+
+
+def measured_quad_capture_bytes():
+    return _by_chips(MEASURED_QUAD_CAPTURE_BYTES_TP2, MEASURED_QUAD_CAPTURE_BYTES_TP4)
+
+
+def parked_engine_bytes():
+    return _by_chips(PARKED_ENGINE_BYTES_TP2, PARKED_ENGINE_BYTES_TP4)
+
+
+def single_trace_bytes():
+    return _by_chips(SINGLE_TRACE_BYTES_TP2, SINGLE_TRACE_BYTES_TP4)
 
 # EIGHT SEATS (tp4/seats8, review 3): the three bounds that were never measured at eight engines beside two 64-row blocks
 # (PREFILL_TRANSIENT_BYTES, LARGEST_BUFFER_BYTES, ENGINE_BUILD_BYTES) are tunable from the profile's env, in whole
@@ -366,6 +425,28 @@ def backstop_need(reserve):
     return engine_build_peak() + _reserve(reserve)
 
 
+def _parked_bytes(rebind, single):
+    if any(type(value) is not int or value < 0 for value in (rebind, single)):
+        raise ValueError('Non-negative integer rebind and single-capture bytes are required, got %r and %r' % (rebind, single))
+    return rebind + single
+
+
+def parked_need(prompt_tokens, reserve, *, rebind, single):
+    """THE PARKED TERMS' free term before the prefill: the prefill's transient, the rebind's peak (R, `rebind`), the single-capture rebuild
+    (S, `single`: 0 unless that slot's capture was released) and the reserve."""
+    return prefill_transient(prompt_tokens) + _parked_bytes(rebind, single) + _reserve(reserve)
+
+
+def parked_backstop_need(reserve, *, rebind, single):
+    """What the post-prefill backstop requires of a parked arrival: the prefill has run, so R, S and the reserve."""
+    return _parked_bytes(rebind, single) + _reserve(reserve)
+
+
+def parked_trace_need(single):
+    """THE PARKED TERMS' trace term: the single's trace when that slot rebuilds it (S applies), else nothing (0)."""
+    return single_trace_bytes() if single else 0
+
+
 def contiguous_need(reserve):
     """THE SPLIT's contiguous term: the largest free block must hold the largest single buffer and leave the
     reserve beside it (396.4 MB at the 256 MiB default). What the backstop and the coordinator's captures ask."""
@@ -387,14 +468,16 @@ def admission_contiguous_need(prompt_tokens, reserve):
     return contiguous_need(reserve) + prefill_residue(prompt_tokens)
 
 
-def split_short(free, largest, need, reserve, trace_largest=None, contiguous=None):
+def split_short(free, largest, need, reserve, trace_largest=None, contiguous=None, trace_need=None, credit=0):
     """The terms of THE SPLIT (the module docstring) a reading is short of, in SPLIT_TERMS order; () when it fits.
 
     free and largest are the smallest chip's total free and largest free DRAM block; need what the operation needs
     with the reserve in it (dram_need, backstop_need, or a capture's estimate plus the reserve); trace_largest the
     smallest chip's largest free trace-region block, None where it cannot be read (that term then holds nothing);
     contiguous the block the operation needs (the admission's admission_contiguous_need), contiguous_need(reserve)
-    when None. Gate v79 (run 36368363993) held 2.319 GB free beside a 1079.7 MB largest block against a 1568.4 MB
+    when None; trace_need the trace-region block it needs, TRACE_CONTIGUOUS_BYTES (an engine's traces) when None - THE PARKED TERMS pass
+    parked_trace_need; credit the bytes the engine-reuse release ladder could free (added to the free term only). Gate v79 (run
+    36368363993) held 2.319 GB free beside a 1079.7 MB largest block against a 1568.4 MB
     need: free less STRANDED_BYTES is 2019 MB, the block holds a 120000-token prompt's 696.4 MB contiguous need, so
     it fits."""
     short = []
@@ -402,11 +485,17 @@ def split_short(free, largest, need, reserve, trace_largest=None, contiguous=Non
         contiguous = contiguous_need(reserve)
     elif type(contiguous) is not int or contiguous < 0:
         raise ValueError('A non-negative integer contiguous need in bytes is required, got %r' % (contiguous,))
-    if free - STRANDED_BYTES < need:
+    if trace_need is None:
+        trace_need = TRACE_CONTIGUOUS_BYTES
+    elif type(trace_need) is not int or trace_need < 0:
+        raise ValueError('A non-negative integer trace-region need in bytes is required, got %r' % (trace_need,))
+    if type(credit) is not int or credit < 0:
+        raise ValueError('A non-negative integer ladder credit in bytes is required, got %r' % (credit,))
+    if free + credit - STRANDED_BYTES < need:
         short.append('free')
     if largest < contiguous:
         short.append('contiguous')
-    if trace_largest is not None and trace_largest < TRACE_CONTIGUOUS_BYTES:
+    if trace_largest is not None and trace_largest < trace_need:
         short.append('trace')
     return tuple(short)
 
@@ -462,23 +551,37 @@ def dram_reading(pool):
     return reading, None
 
 
-def dram_predicate(pool, reserve):
+def dram_predicate(pool, reserve, parked=None):
     """The predicate the worker registers, admits(prompt_tokens) -> (ok, detail): ok is False only when the
     pool's reading exists and is short of a term of THE SPLIT for dram_need, its contiguous term the admission's
     (admission_contiguous_need: the prefill transient in the block for a long prompt), detail['short'] naming them.
     An unavailable reading admits, and detail['unavailable'] says why (the attach refuses a pool without statistics
-    under the flag, W7)."""
+    under the flag, W7).
+
+    `parked` (engine reuse, QWEN_FAST_PARKED_ENGINES=1 only; None otherwise, and then every call is today's): a zero-argument callable asked at
+    each call - serving_parked_engines.ParkedEngineSet.arrival_terms - answering None when the next request's slot is served by today's
+    per-request build (today's terms), else dict(rebind=, single=, credit=) for its parked engine: THE PARKED TERMS (parked_need,
+    parked_trace_need) with the ladder's credit on the free term, detail['parked'] then carrying them."""
     _reserve(reserve)
+    if parked is not None and not callable(parked):
+        raise ValueError('The parked arrival terms must be a zero-argument callable or None')
 
     def admits(prompt_tokens):
-        need = dram_need(prompt_tokens, reserve)
+        terms = None if parked is None else parked()
+        if terms is None:
+            need = dram_need(prompt_tokens, reserve)
+        else:
+            need = parked_need(prompt_tokens, reserve, rebind=terms['rebind'], single=terms['single'])
         reading, reason = dram_reading(pool)
         if reading is None:
-            return True, dict(largest_free=None, need=need, unavailable=reason)
+            return True, dict(largest_free=None, need=need, unavailable=reason, **({} if terms is None else dict(parked=terms)))
         short = split_short(reading['free'], reading['largest_free'], need, reserve, reading['trace_largest_free'],
-                            contiguous=admission_contiguous_need(prompt_tokens, reserve))
+                            contiguous=admission_contiguous_need(prompt_tokens, reserve),
+                            **({} if terms is None else dict(trace_need=parked_trace_need(terms['single']),
+                                                             credit=terms.get('credit', 0))))
         return not short, dict(largest_free=reading['largest_free'], need=need, free=reading['free'],
-                               trace_largest_free=reading['trace_largest_free'], short=short)
+                               trace_largest_free=reading['trace_largest_free'], short=short,
+                               **({} if terms is None else dict(parked=terms)))
 
     return admits
 
@@ -618,12 +721,13 @@ def dram_hold(scheduler, decodes, state, log, modules=None, candidates=None):
     prompt = prompt_tokens(request)
     try:
         ok, detail = admits(prompt)
+        parked_terms = detail.get('parked')
         largest, need, unavailable = detail['largest_free'], detail['need'], detail.get('unavailable')
         # THE SPLIT's readings (dram_predicate); a predicate that names none logs them 'unread'.
         free, trace, short = detail.get('free'), detail.get('trace_largest_free'), detail.get('short')
     except Exception as failure:
         ok, largest, need, unavailable = True, None, None, '%s: %s' % (type(failure).__name__, str(failure)[:120])
-        free = trace = short = None
+        free = trace = short = parked_terms = None
     if largest is None:
         _note(state, log, ('unavailable', request_id), DRAM_UNAVAILABLE_LINE, request_id, unavailable or 'no reading')
         return False
@@ -633,6 +737,10 @@ def dram_hold(scheduler, decodes, state, log, modules=None, candidates=None):
             state['dram_held'] = None
             log(DRAM_RELEASED_LINE, prompt, _megabytes(largest), _megabytes(need), request_id, _megabytes(free),
                 _megabytes(trace))
+            since = state.pop('dram_held_at', None)
+            if since is not None:
+                # Engine reuse only (the parked terms were asked when the hold began): how long the hold lasted, so a gate can bound it.
+                log(DRAM_AGE_LINE, request_id, (time.monotonic() - since) * 1000.0, held[1])
         else:
             # The reading a prompt was admitted on without a hold, once per request: under churn (M11) the heap and
             # the trace region no longer drain between cycles, so each admission's reading is what shows a ratchet.
@@ -653,6 +761,8 @@ def dram_hold(scheduler, decodes, state, log, modules=None, candidates=None):
         return False
     if held != (request_id, decodes):
         state['dram_held'] = (request_id, decodes)
+        if parked_terms is not None and 'dram_held_at' not in state:
+            state['dram_held_at'] = time.monotonic()
         log(DRAM_HOLD_LINE, prompt, _megabytes(largest), _megabytes(need), request_id, decodes, _megabytes(free),
             _megabytes(trace), _terms(short))
     return True

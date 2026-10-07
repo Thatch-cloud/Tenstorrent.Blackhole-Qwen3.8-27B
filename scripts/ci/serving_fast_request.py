@@ -26,14 +26,18 @@ class CommittedOutput:
 
 
 class FastRequest:
-    def __init__(self, session, engine, runtime, *, release_drafter, collect_timings=False):
+    def __init__(self, session, engine, runtime, *, release_drafter, collect_timings=False, release_engine=None):
+        # release_engine (engine reuse, QWEN_FAST_PARKED_ENGINES; serving_request_factory.rebind_parked): what close() calls in place of
+        # engine.close() - a parked engine's park. None, the default and the only value without the flag, keeps close() exactly as it was.
         if (session.phase != 'idle' or engine.phase != 'idle' or engine.session is not session
                 or session.verifier_rows != 16 or not callable(release_drafter)
+                or (release_engine is not None and not callable(release_engine))
                 or runtime.drafter_name not in ('dflash2', 'dspark') or type(collect_timings) is not bool):
             raise ValueError('Prepared request-owned greedy T16 engine and explicit cleanup required')
         runtime.bind(session, engine)
         self.session, self.engine, self.runtime = session, engine, runtime
         self.release_drafter = release_drafter
+        self.release_engine = release_engine
         self.closed = self.cancelled = False
         self.busy = False
         self.collect_timings = collect_timings
@@ -132,7 +136,10 @@ class FastRequest:
             self.session.fail_verification(request_id, self.session.pending)
         if self.lookup is not None:
             self.lookup.finish(len(self.session.emitted))
-        self.engine.close()
+        if self.release_engine is None:
+            self.engine.close()
+        else:
+            self.release_engine()
         self.release_drafter()
         self.session.close(request_id)
         self.closed = True

@@ -6,6 +6,14 @@ requires exactly two chip-local outputs. So the four-card engine is a subclass w
 chip count from tp_shapes (the pair's message is unchanged: 'Two chip-local outputs required'), and proposal_rows, which
 QWEN_FAST_BUDGET_CAP widens (below); every other method is inherited. publish is inherited too, with QWEN_FAST_SEQ_STAGE_LOG's begin and end lines around it.
 serving_request_factory.device_components builds this class at four cards and the pair's at the pair.
+
+ENGINE REUSE (QWEN_FAST_PARKED_ENGINES, serving_parked_engines; default off): the parked phase of the engine lives HERE, not in the
+pair's file. park_refusal, park, rebind_refusal and rebind are Stage E's (the TP2 line's verifier_engine.py carries them), restated for this
+class; the module functions set_replay_count, check_replay_mark and reset_retained are Stage E's too. close() releases a parked engine's
+carry traces (D2: the inherited close takes only idle, preparing and failed engines' carry traces), verify() notes R2's replay mark (D1:
+this class restates the whole verify, so the pair's mark is never set), publish() checks it, and proposal_rows() is restricted to the
+widths a cold engine of the same request would capture (R4). Without the flag nothing here runs: an engine is never parked, request_widths
+stays None and every answer is what it was.
 """
 
 import os
@@ -18,7 +26,8 @@ from gdn_multitoken_conv import release_owned
 from serving_fast_request import budget_cap_enabled
 import trace_census
 import verify_trace_t1
-from verifier_engine import VERIFY_WIDTHS, VerifierEngine as PairVerifierEngine
+import verifier_engine as pair_module
+from verifier_engine import VERIFY_WIDTHS, VerifierEngine as PairVerifierEngine, capture_widths
 from verifier_inputs import stage_inputs
 import tp_shapes
 
@@ -121,6 +130,45 @@ def logits_problem(operations, logits, rows):
     return None
 
 
+# Engine reuse: R2's replay ledger (QWEN_FAST_PARKED_AUDIT=1, serving_parked_engines.ReplayLedger): a zero-argument callable giving the
+# process's trace-replay count, or None. With it, verify notes the count right after its own replay and publish asserts that no other
+# trace replayed before its commit trace reads what that verify wrote (check_replay_mark). None - the default, and the only value without
+# the audit - runs neither check. The ledger installs from serving_runtime whenever the audit is on, with or without parked engines, so
+# the flag-off control arm of the audit twin measures the same ordering (design K2).
+_replay_count = None
+
+
+def set_replay_count(counter):
+    """Install (a zero-argument callable) or remove (None) the replay ledger; returns the previous one."""
+    global _replay_count
+    if counter is not None and not callable(counter):
+        raise ValueError('The replay ledger must be a zero-argument callable or None')
+    previous, _replay_count = _replay_count, counter
+    return previous
+
+
+def check_replay_mark(engine):
+    """R2: no trace replayed between this engine's verify and now. Clears the mark."""
+    mark, engine.replay_mark = getattr(engine, 'replay_mark', None), None
+    if mark is None or _replay_count is None:
+        return
+    count = _replay_count()
+    if count != mark:
+        raise AssertionError('R2: %d other trace replay(s) ran between the verify of request %s and its publication'
+                             % (count - mark, str(engine.session.request_id)[:48]))
+
+
+def reset_retained(retained):
+    """A retained GDN block's decision flags back to the values a fresh engine's hold after its capture (gdn_records.
+    RetainedGDNBlock.__init__; the capture appends records and decides nothing), so the rebound engine's first verify and commit take
+    a fresh engine's path. The records stay: they are the trace's. replay_epoch is a counter and stays."""
+    retained.selected_prefix = None
+    retained.decisions = {}
+    retained.replay_ready = retained.poisoned = retained.fence_owed = False
+    retained.commit_serial = 0
+    retained.replay_fence, retained.replay_fence_ms = None, 0.0
+
+
 class VerifierEngine(PairVerifierEngine):
     def __init__(self, *args, sampler=None, **options):
         # read before the base constructor: it captures every width's trace (operation) from inside __init__
@@ -145,7 +193,13 @@ class VerifierEngine(PairVerifierEngine):
         self.carry_traces = None if self.carry_trace_arm else False
         self.carry_trace_audit = traced_audit_enabled()
         self.carry_audit_checked = self.carry_audit_mismatches = 0
+        # Engine reuse (R4): the widths a COLD engine of the request this engine is rebound to would have captured. None - every engine
+        # that was built for its request - is `widths`. Read by proposal_rows, serves and bucket_key.
+        self.request_widths = None
+        self.replay_mark = None
         super().__init__(*args, sampler=sampler, **options)
+        # What the captures hold. `widths` is what the request may ask: the same, until a rebind narrows it to a cold engine's (R4).
+        self.captured_widths = tuple(self.widths)
 
     def operation(self, fixture, *, hidden_capture=None, feature_capture=None):
         """The inherited (logits, pinned ids); under the arm (logits, shard ids, shard maxima) or, audited, (logits, shard ids, shard
@@ -296,6 +350,10 @@ class VerifierEngine(PairVerifierEngine):
         verify_trace_t1.log_line('%s op=%s checked=%d mismatches=%d' % (TRACED_AUDIT, operation, total, differing))
 
     def close(self):
+        if getattr(self, 'phase', None) == 'parked':
+            # D2: a parked engine is idle by construction (park refuses anything else), so it closes as an idle one: the carry traces below
+            # are released with it, and the inherited close, which refuses 'parked', takes it from there.
+            self.phase = 'idle'
         traces = getattr(self, 'carry_traces', False)
         if isinstance(traces, dict) and getattr(self, 'phase', None) in ('idle', 'preparing', 'failed'):
             self.operations.synchronize_device(self.mesh)
@@ -303,6 +361,117 @@ class VerifierEngine(PairVerifierEngine):
                 self.operations.release_trace(self.mesh, trace)
             self.carry_traces = False
         super().close()
+
+    # -- engine reuse: the parked phase (serving_parked_engines; QWEN_FAST_PARKED_ENGINES) -----------------------------------------
+    def park_refusal(self):
+        """Why this engine cannot park, or None. A parked engine keeps its captures for the process, so only an idle one with no ticket,
+        sequential captures and sound retained blocks may."""
+        if self.phase != 'idle':
+            return 'engine phase %s' % self.phase
+        if self.pending is not None or self.pending_key is not None:
+            return 'a pending ticket'
+        if getattr(self, 'replay_plan', None) is not None or getattr(self, 'target_attention_t16', False):
+            return 'captures that are not sequential'
+        for key, bucket in self.buckets.items():
+            retained = getattr(bucket.get('fixture'), 'retained', None)
+            if retained is not None and retained.poisoned:
+                return 'the retained block of bucket %r is poisoned' % (key,)
+        return None
+
+    def park(self):
+        """Fence, then park this engine for its next rebind - phase 'parked', no session, not resident - and return None; or return why it
+        cannot park (park_refusal), changing nothing, and its owner closes it as today. The fence is close()'s. A block in flight is refused
+        as close() refuses it; an engine that is already parked or closed raises (the owner guards that: ParkedEngineSet.park_engine)."""
+        if self.phase in ('parked', 'closed'):
+            raise ValueError('Only a live engine can park; this one is %s' % self.phase)
+        if self.phase not in ('idle', 'preparing', 'failed'):
+            raise ValueError('Finish or abort the pending verifier block before closing')
+        self.operations.synchronize_device(self.mesh)
+        reason = self.park_refusal()
+        if reason is not None:
+            return reason
+        self.phase, self.pending, self.pending_key = 'parked', None, None
+        self.session = None
+        self.replay_mark = None
+        if pair_module._resident is self:
+            pair_module._resident = None
+        return None
+
+    def rebind_refusal(self, position, remaining, pages_shape):
+        """Why this engine cannot be rebound to a request at `position` with `remaining` tokens to decode over a page table of
+        `pages_shape`, or None - HOST ONLY: nothing is read from or written to the device, so the caller asks it BEFORE it takes a slot or
+        writes anything, and a refusal costs a cold build and nothing else. The constructor's own checks on the request geometry, in its
+        order, and the capture subset (design 5.9)."""
+        if self.phase != 'parked':
+            return 'engine phase %s, not parked' % self.phase
+        if len(pages_shape) != 2 or pages_shape[0] != 1:
+            return 'one request page table required'
+        if tuple(pages_shape) != tuple(self.pages.shape):
+            return 'the parked engine was captured over a %r page table; the request brings %r' % (tuple(self.pages.shape),
+                                                                                                   tuple(pages_shape))
+        try:
+            widths = capture_widths(position, pages_shape[1] * 64, 16, remaining, self.capture_rows)
+        except ValueError as failure:
+            return str(failure)
+        if not set(widths) <= set(self.captured_widths):
+            return 'the request needs widths %r; the parked engine captured %r' % (widths, self.captured_widths)
+        return None
+
+    def rebind(self, session, pages):
+        """Bind this parked engine to a request at its prefilled frontier, as the constructor binds a fresh one but capturing nothing
+        (design 3.4). The constructor's host checks run first, in its order and with its messages, and a refusal leaves the engine parked
+        with nothing written (rebind_refusal is the same checks before a session exists). Then: every fixture's page tables rewritten in
+        full with the request's table (serving_parked_engines.write_page_tables, VerifierPageBinding.refresh's write), a stale packed
+        adoption dropped, every bucket's first verify back on the unreplayed path with its retained block's flags reset (reset_retained),
+        the initial snapshot saved from native slot 0 - which holds the request's prefilled state, adopted before this - and the carry
+        seeded from it (_resident = self). The widths become a cold engine's for this request (R4): the captures keep (1, 2, 4), the
+        engine asks and serves only what the request's own constructor would have captured."""
+        from serving_parked_engines import page_table_bindings, write_page_tables
+
+        if self.phase != 'parked':
+            raise ValueError('Only a parked engine can be rebound; this one is %s' % self.phase)
+        if session.phase != 'idle' or session.pending is not None or session.finished or len(self.helpers) != 48:
+            raise ValueError('An unfinished prefilled request and all native GDN helpers are required')
+        if len(pages.shape) != 2 or pages.shape[0] != 1:
+            raise ValueError('One request page table required')
+        if tuple(pages.shape) != tuple(self.pages.shape):
+            raise ValueError('The parked engine was captured over a %r page table; the request brings %r'
+                             % (tuple(self.pages.shape), tuple(pages.shape)))
+        widths = capture_widths(session.position, pages.shape[1] * 64, session.verifier_rows,
+                                session.max_new_tokens - len(session.emitted), self.capture_rows)
+        if not set(widths) <= set(self.captured_widths):
+            raise ValueError('The request needs widths %r; the parked engine captured %r' % (widths, self.captured_widths))
+        bindings = page_table_bindings(self)
+        started = time.perf_counter()
+        session.begin_preparation(session.request_id)
+        self.session, self.position = session, session.position
+        self.pages.copy_(pages)
+        self.phase = 'preparing'
+        pair_module.note_prefill()
+        try:
+            # The gate's 'pages' negative control swaps the writer for a no-op, for this call only (an instance attribute, popped by its owner).
+            self.__dict__.get('page_table_writer', write_page_tables)(self.operations, self.mesh, bindings, self.pages)
+            for key in [key for key in self.buckets if isinstance(key, tuple) and key[:1] == ('packed',)]:
+                del self.buckets[key]
+            for bucket in self.buckets.values():
+                bucket['first'] = True
+                if bucket['fixture'].retained is not None:
+                    reset_retained(bucket['fixture'].retained)
+            if not self.__dict__.get('keep_captured_widths'):
+                # R4. (The gate's 'widths' negative control keeps the captured widths, for this call only.)
+                self.widths = self.request_widths = tuple(widths)
+            self.replay_mark = None
+            for helper, snapshot in zip(self.helpers, self.initial, strict=True):
+                helper.save(snapshot)
+            self.validate_bindings()
+            self.save_carry()
+            self.rebind_ms = (time.perf_counter() - started) * 1000
+            session.finish_preparation(session.request_id)
+            self.phase = 'idle'
+        except BaseException:
+            self.phase = 'failed'
+            session.fail_preparation(session.request_id)
+            raise
 
     def proposal_rows(self, packed_rows=None):
         """QWEN_FAST_BUDGET_CAP: while any budget is left the engine answers its widest capture the
@@ -328,7 +497,20 @@ class VerifierEngine(PairVerifierEngine):
         fits = [rows for rows in self.widths if rows <= schedulable]
         return max(fits) if fits else super().proposal_rows()
 
+    def bucket_key(self, ticket):
+        """The inherited key; a rebound engine (request_widths set) refuses a ticket whose width a cold engine of this request would not have
+        captured (R4: it would replay a different, wider trace than the control's). serves() reports False for it."""
+        key = super().bucket_key(ticket)
+        if self.request_widths is not None and len(ticket.tokens) not in self.request_widths:
+            raise ValueError('A rebound engine serves the widths %r of its request, not %d rows' % (self.request_widths, len(ticket.tokens)))
+        return key
+
     def publish(self, prefix):
+        if _replay_count is not None:
+            bucket = self.buckets.get(self.pending_key)
+            if bucket is not None and bucket.get('packed') is None:
+                # R2: a sequential commit trace reads what this engine's own verify wrote; nothing may have replayed in between.
+                check_replay_mark(self)
         if not trace_census.stage_log_enabled():
             return super().publish(prefix)
         request, rows = self.session.request_id, len(self.pending.tokens) if self.pending is not None else 'n/a'
@@ -383,6 +565,9 @@ class VerifierEngine(PairVerifierEngine):
             else:
                 bucket['fixture'].retained.replay(operation)
                 mark('sync')
+            if _replay_count is not None:
+                # D1: the pair's verify notes R2's mark right after its replay; this class restates the whole verify, so it notes it here.
+                self.replay_mark = _replay_count()
             if getattr(self, 'attention_audit', False) and bucket['fixture'].replay_reader is not None:
                 bucket['fixture'].replay_reader.audit.check(ticket.position, ticket.tokens)
             replay_finished = time.perf_counter()

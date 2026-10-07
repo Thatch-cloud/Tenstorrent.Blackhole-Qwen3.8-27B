@@ -890,18 +890,28 @@ class ServingBufferPool:
             raise ValueError('The placement blocks are already set')
         self._blocks = blocks
 
-    def placement_slot(self):
+    def placement_slot(self, live=None):
         """The free slot a new request takes under place_blocks: in the block with exactly ONE live request first (it
         would otherwise run alone, narrowed to the sequential step), else in the fuller of the blocks that are not full
-        (the first, on a tie), the lowest free slot of that block. None when every block is full."""
+        (the first, on a tie), the lowest free slot of that block. None when every block is full.
+
+        `live` (engine reuse, QWEN_FAST_PARKED_ENGINES=1 only; serving_parked_engines): a predicate over a slot INDEX that
+        says whether that slot holds a live request, in place of `lent`. A parked slot is always lent (its parked device
+        holds it), so under engine reuse `lent` would count every parked slot as live and every block as full; the set
+        asks this one function with the serving slots as the live ones, so the pool and the set place the same arrivals
+        on the same slots (design 5.8, R5). None, the default and the only value without the flag, is `lent`: the rule
+        byte for byte."""
         blocks = self._blocks
-        live = [sum(1 for index in block if self.slots[index].lent) for block in blocks]
-        open_blocks = [position for position, block in enumerate(blocks) if live[position] < len(block)]
+        if live is None:
+            def live(index):
+                return self.slots[index].lent
+        counts = [sum(1 for index in block if live(index)) for block in blocks]
+        open_blocks = [position for position, block in enumerate(blocks) if counts[position] < len(block)]
         if not open_blocks:
             return None
-        lone = [position for position in open_blocks if live[position] == 1]
-        chosen = lone[0] if lone else max(open_blocks, key=lambda position: (live[position], -position))
-        return next(self.slots[index] for index in blocks[chosen] if not self.slots[index].lent)
+        lone = [position for position in open_blocks if counts[position] == 1]
+        chosen = lone[0] if lone else max(open_blocks, key=lambda position: (counts[position], -position))
+        return next(self.slots[index] for index in blocks[chosen] if not live(index))
 
     @contextmanager
     def slot_order(self, order):
@@ -948,6 +958,20 @@ class ServingBufferPool:
         pindiag('[PINDIAG] pool slot {} acquired for {}: history at {}, {} K/V banks from {}',
                 slot.index, owner, slot.addresses[:2], 4 * len(slot.kv), slot.addresses[2])
         return slot
+
+    def rezero(self, slot):
+        """Engine reuse (QWEN_FAST_PARKED_ENGINES, serving_parked_engines): acquire's zeroing of one of this pool's
+        slots - every tensor in slot.zeroed through full_like, in the same order - without its loan and
+        without verifier.reset(): a parked engine keeps its buckets taken, and whoever holds the slot keeps
+        it. A parked slot is re-zeroed at every rebind, as acquire zeroes a slot on every loan; an unlent one
+        before the attach's synthetic build restores native slot 0 from its carry."""
+        if self.closed:
+            raise ValueError('Closed serving buffer pool cannot zero a slot')
+        if slot.pool is not self or not any(slot is candidate for candidate in self.slots):
+            raise ValueError('Only a slot of this pool may be zeroed by it')
+        slot.verify()
+        for value in slot.zeroed:
+            self.operations.full_like(value, 0.0, optional_tensor=value)
 
     def release(self, slot):
         if self.closed:

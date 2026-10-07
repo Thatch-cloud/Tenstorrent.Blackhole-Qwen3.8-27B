@@ -151,9 +151,10 @@ def l1_enabled(environ=None):
 
 
 def l1_phase(name):
-    """The phases that carry the L1 view: the packed blocks (P6), after attach (P7) and each engine build (P8..P11, engineN)."""
-    return name in ('P6', 'P7') or name.startswith('engine') or (name[:1] == 'P' and name[1:].isdigit()
-                                                                 and 8 <= int(name[1:]) <= 11)
+    """The phases that carry the L1 view: the packed blocks (P6), after attach (P7), the parked engines built at attach (P7p, engine reuse:
+    parked drafter traces bound for the process must not sit on L1 a later buffer takes) and each engine build (P8..P11, engineN)."""
+    return name in ('P6', 'P7', 'P7p') or name.startswith('engine') or (name[:1] == 'P' and name[1:].isdigit()
+                                                                       and 8 <= int(name[1:]) <= 11)
 
 
 def log_line(message):
