@@ -162,7 +162,7 @@ class PeekTests(unittest.TestCase):
         self.addCleanup(environment.stop)
         self.logs = []
 
-    def make(self):
+    def make(self, kill_switch_path=None):
         scheduler = FakeScheduler()
         manager = scheduler.kv_cache_manager
         manager.prefix_cache_stats = Stats()
@@ -178,7 +178,7 @@ class PeekTests(unittest.TestCase):
         registry = PrefixRegistry(budget_bytes=1 << 40)
         with Quiet():
             registry.enable_mid_loop_capture()
-        graft = graft_module.install(scheduler, registry=registry, kill_switch_path=None, logger=lambda *a: self.logs.append(a),
+        graft = graft_module.install(scheduler, registry=registry, kill_switch_path=kill_switch_path, logger=lambda *a: self.logs.append(a),
                                      stats=graft_module.StatsExport(path='', logger=lambda *a: None))
         return scheduler, graft
 
@@ -253,6 +253,26 @@ class PeekTests(unittest.TestCase):
         self.assertEqual(graft.peek(Request('unsalted', text + tokens(100, 18), salt=None)), 0)
         graft.registry.disable('test')
         self.assertEqual(graft.peek(Request('after-kill', text + tokens(100, 19))), 0)
+
+    def test_the_prefix_kill_switch_engaging_before_the_peek_makes_the_peek_and_the_trim_agree(self):
+        # B1: peek read the latched flag but never polled the file; the in-pass trim polled it. A switch that appeared between the two left the cap
+        # computed from the hit while the trim landed on 0.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, 'prefix.off')
+            scheduler, graft = self.make(kill_switch_path=path)
+            text = tokens(5000, 21)
+            self.conversation(scheduler, text)
+            graft.registry.begin_step()
+            request = Request('after-the-file', text + tokens(500, 22))
+            scheduler.requests['after-the-file'] = request
+            with open(path, 'w') as handle:
+                handle.write('1')
+            graft.kill_switch._last_poll = None          # the once-a-second poll is due
+            self.assertEqual(graft.peek(request), 0, 'the peek polls the switch itself')
+            blocks, start = scheduler.kv_cache_manager.get_computed_blocks(request)
+            self.assertEqual(start, 0, 'and the trim lands where it said')
 
     def test_a_request_with_no_hit_peeks_zero(self):
         scheduler, graft = self.make()

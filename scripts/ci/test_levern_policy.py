@@ -463,7 +463,7 @@ class StepTimesTests(unittest.TestCase):
 
     def test_measured_steps_move_the_scale_and_stay_inside_the_clamp(self):
         times = policy.StepTimes()
-        for _ in range(20):
+        for _ in range(40):
             times.observe(100000, CHUNK, 2 * times.seed(100000))
         self.assertAlmostEqual(times.scale, 2.0, places=2)
         for _ in range(60):
@@ -472,6 +472,11 @@ class StepTimesTests(unittest.TestCase):
         times.observe(0, CHUNK, -5.0)
         times.observe(0, 0, 5.0)
         self.assertEqual(times.scale, policy.SCALE_MAX)
+
+    def test_one_odd_first_sample_does_not_move_the_scale_to_the_clamp(self):
+        times = policy.StepTimes()
+        times.observe(0, CHUNK, 3 * times.seed(0))
+        self.assertAlmostEqual(times.scale, 1.4, places=6, msg='the first sample has the EWMA weight, not 1.0')
 
     def test_a_step_of_several_chunks_is_timed_per_chunk(self):
         times = policy.StepTimes()

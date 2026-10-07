@@ -633,7 +633,7 @@ class SchedulerGraft(object):
         if known is not None:
             return known
         q = 0
-        if not self.excluded(request) and not self.killed:
+        if not self.excluded(request) and not self.kill_switch_engaged():
             manager = self.manager
             statistics = getattr(manager, 'prefix_cache_stats', None)
             if statistics is not None:

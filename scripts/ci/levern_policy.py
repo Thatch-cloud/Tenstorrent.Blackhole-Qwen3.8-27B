@@ -49,8 +49,8 @@ THE FLAGS (all default off or default value; every malformed value is a ValueErr
 
 THE MERGED ROUTE (Lever N with prefix reuse, docs/lever-n-prefix-merged-route.md; every flag below is read by merged_config and is
 meaningful only beside QWEN_FAST_LEVER_N=1):
-    QWEN_FAST_LEVERN_TTFT_TARGET_S      180         the deadline governor's target T* in whole seconds (the gateway's large-model
-                                                    budget minus margin); 0 turns the governor off
+    QWEN_FAST_LEVERN_TTFT_TARGET_S      180         the deadline governor's target T* in whole seconds (a client deadline for a large
+                                                    prompt, minus margin); 0 turns the governor off
     QWEN_FAST_LEVERN_SHORT_TOKENS       16384       a waiting request whose remaining tokens after its peeked hit are at most this is
                                                     SHORT (admission v2: it may preempt a long prefill at a step boundary)
     QWEN_FAST_LEVERN_PARK               0 | host    host: a short may park a long prefill's scratch to host (admission v2); 0: one prefill
@@ -393,7 +393,7 @@ class StepTimes(object):
             return
         chunks = max(1, -(-tokens // CHUNK))
         ratio = (ms / chunks) / self.seed(start)
-        weight = 1.0 if not self.observed else 0.2
+        weight = 0.2     # also for the first sample: one odd step (a restore, a park) must not move the scale to the clamp
         self.scale = min(SCALE_MAX, max(SCALE_MIN, (1.0 - weight) * self.scale + weight * ratio))
         self.observed += 1
 

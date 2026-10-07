@@ -343,6 +343,7 @@ class Handle(object):
         self.parked_total = 0
         self.unparked_total = 0
         self.source_refusals = 0
+        self.park_failures = 0
 
     def uninstall(self):
         if self.wrapper.__dict__.get('prefill_forward') is not None:
@@ -513,13 +514,39 @@ def _gdn_layers(model):
     return [layer.attention for layer in model.layers if not layer.is_full_attention]
 
 
+_MISSING = object()
+_BOUND = ('B', 'rec_state', 'conv_states', 'conv_carry', '_zero_conv0', '_stable_state')
+
+
 def _binding(layers):
-    """The batched decode buffers every GDN layer is bound to, by identity: what a step must leave exactly as it found them (hazard H3)."""
-    return [(dn, dn.rec_state, dn.conv_states, dn.conv_carry) for dn in layers]
+    """The batched decode buffers every GDN layer is bound to, by identity: what a step must leave exactly as it found them (hazard H3). Every
+    attribute _bind_gdn_prefill_scratch rebinds (B, rec_state, conv_states, conv_carry, _zero_conv0, _stable_state) and each ELEMENT of conv_states."""
+    found = []
+    for dn in layers:
+        values = tuple(getattr(dn, name, _MISSING) for name in _BOUND)
+        convs = getattr(dn, 'conv_states', None)
+        try:
+            elements = tuple(convs) if convs is not None else ()
+        except TypeError:
+            elements = ()
+        found.append((dn, values, elements))
+    return found
 
 
 def _binding_holds(before):
-    return all(dn.rec_state is rec and dn.conv_states is convs and dn.conv_carry is carry for dn, rec, convs, carry in before)
+    for dn, values, elements in before:
+        for name, was in zip(_BOUND, values):
+            now = getattr(dn, name, _MISSING)
+            if now is not was and not (type(was) in (int, bool) and type(now) is type(was) and now == was):
+                return False
+        convs = getattr(dn, 'conv_states', None)
+        try:
+            now_elements = tuple(convs) if convs is not None else ()
+        except TypeError:
+            now_elements = ()
+        if len(now_elements) != len(elements) or any(a is not b for a, b in zip(now_elements, elements)):
+            return False
+    return True
 
 
 def route(model, token_ids_list, page_table, empty_slots, starts, ends, valid_lens=None, *, step=None, handle=None, fault=None,
@@ -669,6 +696,27 @@ def _resolve(model, handle, step, tokens, registry, module, chunk_size):
     return Resolved(source, restore, plan, grant)
 
 
+class ParkFailed(Exception):
+    """The scratch of a suspended prefill could not be read to the host: nothing was parked, the scratch is untouched."""
+
+
+def _quarantine_unparkable(model, handle, held, failure, log):
+    """End the suspended prefill `held` = (request id, position) that could not be parked, per request; False when no quarantine consumer is installed."""
+    request_id = held[0]
+    try:
+        import serving_request_quarantine
+
+        serving_request_quarantine.register(request_id, 'its suspended state could not be parked to the host: %s' % failure)
+    except (ImportError, ValueError):
+        return False
+    handle.parks.pop(request_id, None)
+    handle.rows.pop(request_id, None)
+    _clear_owner(model)
+    handle.park_failures += 1
+    log(levern_policy.QUARANTINE_LINE, request_id, 'park failed: %s' % failure)
+    return True
+
+
 def _park(model, handle, held, log):
     """Take the scratch's suspended state to the host (the G1 capture path) and give the scratch up: the owner `held` = (request id, position)
     continues later through source PARKED. The slot cap is the contract's; a park the host cannot hold is never started."""
@@ -680,6 +728,8 @@ def _park(model, handle, held, log):
     previous = model._bind_gdn_prefill_scratch()
     try:
         rec, carry, nbytes = model._qwen_prefix_read_scratch()
+    except Exception as failure:
+        raise ParkFailed('the host read of the suspended scratch failed (%s: %s)' % (type(failure).__name__, str(failure)[:200])) from failure
     finally:
         model._unbind_gdn_prefill_scratch(previous)
     handle.parks[request_id] = Park(at, rec, carry, nbytes, time.monotonic())
@@ -720,7 +770,14 @@ def _merged_route(model, tokens, page_table, slot, step, handle, fault, audit, l
     began, programs_before, window_before = time.perf_counter(), program_count(model), window_programs()
     before = _binding(layers)
     if held is not None and held[0] != request_id:
-        _park(model, handle, held, log)
+        try:
+            _park(model, handle, held, log)
+        except ParkFailed as failure:
+            # The long prefill's blocks were all written by earlier steps and the short's step is already allocated, so the short must run: end the
+            # LONG one request-shaped (the D2 consumer finishes it at this step's update_from_output; the lifecycle and the route release it on the
+            # finished id) instead of failing the engine. Without a consumer the failure stays fatal.
+            if not _quarantine_unparkable(model, handle, held, failure, log):
+                raise
     final_step = final(step)
     parked_bytes = handle.parks[request_id].nbytes if source == 'PARKED' else 0
     captured = []

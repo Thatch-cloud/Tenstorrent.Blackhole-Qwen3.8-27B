@@ -140,6 +140,8 @@ class LevernRuntime(object):
         self.wall = wall if wall is not None else time.time
         # request id -> 'short' | 'long' (fixed when the request is first seen), when it was hidden (monotonic) and how long it has been parked in all
         self.klass = {}
+        self.pending_class = {}
+        self.unmeasured = set()
         self.parked_since = {}
         self.parked_for = {}
         self.pass_short = False
@@ -184,6 +186,12 @@ class LevernRuntime(object):
         known = self.klass.get(request_id)
         if known is not None:
             return known
+        running = getattr(scheduler, 'running', None) or ()
+        admitted = any(value is request for value in running) or (getattr(request, 'num_computed_tokens', 0) or 0) > 0
+        if admitted and request_id in self.pending_class:
+            # The class the admitting pass decided from the hit it was trimmed to (commit_plan): fixed from here on.
+            self.klass[request_id] = self.pending_class.pop(request_id)
+            return self.klass[request_id]
         value = 'long'
         merged = self.merged
         if merged is not None and merged.park == 'host' and merged.short_tokens:
@@ -193,7 +201,10 @@ class LevernRuntime(object):
                 start = computed if computed else self.peek(scheduler, request)
                 if prompt - start <= merged.short_tokens:
                     value = 'short'
-        self.klass[request_id] = value
+        if admitted:
+            self.klass[request_id] = value
+        # A request still WAITING is classified afresh on every call (its hit may be evicted before it is admitted, or may appear): the class is
+        # fixed at its admission (commit_plan), from the peek of that same call, so a cold 200k+ prompt whose checkpoint went never runs as short.
         return value
 
     def remaining(self, scheduler, request):
@@ -218,7 +229,7 @@ class LevernRuntime(object):
         known = getattr(scheduler, 'requests', None)
         if not isinstance(known, dict):
             return
-        for table in (self.klass, self.parked_since, self.parked_for):
+        for table in (self.klass, self.parked_since, self.parked_for, self.pending_class):
             for request_id in [value for value in table if value not in known]:
                 del table[request_id]
 
@@ -266,6 +277,22 @@ class LevernRuntime(object):
             pass
         return True
 
+    def starved_long(self, scheduler):
+        """The oldest waiting long prompt that must be admitted before the waiting shorts, or None: the governor needs it (f_eff >= 1 with a deadline
+        set, as may_preempt reads it) or it has waited longer than QWEN_FAST_LEVERN_MAX_PARK_S."""
+        merged = self.merged
+        for request in self.waiting_in_order(scheduler):
+            if self.klass_of(scheduler, request) != 'long':
+                continue
+            arrival = getattr(request, 'arrival_time', None)
+            waited = self.wall() - arrival if type(arrival) in (int, float) else 0.0
+            if waited >= merged.max_park_s:
+                return request
+            if merged.ttft_s and self.alternator.govern() >= 1.0 and self.cfg.share < 1.0 and self.cfg.rounds is None:
+                return request
+            return None
+        return None
+
     def plan_pass(self, scheduler, decodes, held):
         """The merged route's decision for one prefill pass (PassPlan): which prefill advances, which are hidden, which are ended. Reads the
         scheduler, registers quarantines, and mutates nothing else; serving_prefill_admission's wrapper applies it."""
@@ -309,6 +336,11 @@ class LevernRuntime(object):
                 plan.reason = 'short-lane'
         elif shorts:
             plan.fresh, plan.reason = shorts[0][2], 'short-first'
+            starved = self.starved_long(scheduler)
+            if starved is not None:
+                # A waiting long that never ran must not starve behind shorts that keep arriving (parking only ages a long that is already parked):
+                # the oldest one goes first when the deadline governor needs it, or when it has waited longer than the park bound.
+                plan.fresh, plan.reason = starved, 'long-aged'
         else:
             candidates = admission.admission_candidates(scheduler)
             plan.fresh = candidates[-1] if candidates else None
@@ -327,10 +359,14 @@ class LevernRuntime(object):
         active = getattr(plan.active, 'request_id', None)
         if active is not None and active in self.parked_since:
             self.parked_for[active] = self.parked_for.get(active, 0.0) + now - self.parked_since.pop(active)
+            # The step that resumes a parked prefill also restores it from the host: not a measure of a chunk's device time.
+            self.unmeasured.add(active)
         if plan.preempted is not None and plan.fresh is not None:
             self.preemptions += 1
             self.log(levern_policy.SHORT_LINE, plan.fresh.request_id, self.remaining_noted(plan.fresh), sorted(hidden),
                      getattr(plan.preempted, 'request_id', None))
+        if plan.fresh is not None and plan.active is None:
+            self.pending_class[plan.fresh.request_id] = 'short' if plan.short else 'long'
         self.pass_short = plan.short
 
     def remaining_noted(self, request):
@@ -346,7 +382,20 @@ class LevernRuntime(object):
             return []
         hint, now = [], self.wall()
         running = [request for request in scheduler.running if getattr(request, 'is_prefill_chunk', False)]
+        seats = getattr(scheduler, 'max_num_running_reqs', None)
+        free = seats - len(scheduler.running) if type(seats) is int else None
         for request in running + self.waiting_in_order(scheduler):
+            if request not in running:
+                # A waiting prompt counts only if a seat would be free when it reaches the front (a prompt queued for a seat is not waiting for the
+                # prefill), and not once it is already past the deadline: it cannot be helped, and pinning the share at 1.0 for it only stalls the
+                # decoders behind the prefill in flight (the in-flight one past its deadline still gets 1.0, effective_share).
+                if free is not None:
+                    if free <= 0:
+                        continue
+                    free -= 1
+                arrival = getattr(request, 'arrival_time', None)
+                if type(arrival) in (int, float) and merged.ttft_s - (now - arrival) <= 0:
+                    continue
             if self.klass_of(scheduler, request) != 'long':
                 continue
             prompt = admission.prompt_tokens(request)
@@ -398,9 +447,14 @@ class LevernRuntime(object):
             # computed from the hit the trim will land on (SchedulerGraft.peek), or a hit at Q = S_last would run [Q, floor2048(P)) as a non-final step
             # and split the drafter window across two steps (docs/lever-n-prefix-merged-route.md, D1). Without a graft the peek is 0.
             computed = self.peek(scheduler, request)
+            if computed and computed >= levern_policy.final_start(prompt):
+                # The peeked step is the whole rest. The trim may still land LOWER (the prefix kill switch latching between the peek and the pass, an
+                # eviction): a budget of exactly prompt - Q_peek would then end at an unaligned, non-final point. The budget that takes the whole rest
+                # from ANY Q' <= Q_peek is the whole prompt (the step takes min(budget, prompt - Q')), which valid_step accepts.
+                return prompt
         if self.merged is not None and self.killed():
             # The kill switch: no new prompt is split; the whole rest in one step (the final step's own window rule holds: Q <= S_last).
-            return prompt - computed if computed else None
+            return prompt if fresh else (prompt - computed if computed else None)
         return levern_policy.step_budget(prompt, computed, decoding=decodes > 0, others_waiting=others,
                                          step=self.cfg.step, solo=self.cfg.solo)
 
@@ -580,7 +634,8 @@ def wrap_schedule(original, runtime):
         merged = runtime.merged is not None
         if merged:
             runtime.pass_short = False
-            runtime.alternator.pending_hint = runtime.pending_hint(self)
+            # Only a call that can start or continue a prefill needs the governor's input (a decode round would peek every waiting long for nothing).
+            runtime.alternator.pending_hint = runtime.pending_hint(self) if pending else []
         decision = runtime.alternator.begin(decodes, pending)
         if merged:
             runtime.observe(decision)
@@ -600,6 +655,15 @@ def wrap_schedule(original, runtime):
         if merged and prefill:
             step = _prefill_step(result, partial_ids, before)
             runtime.last_prefill = None if step is None else step[1:]
+            if step is not None:
+                # The step-time model learns only from an INTERMEDIATE step that continued its own scratch: a final step carries the engine
+                # build (effective_share adds BUILD_MS itself), a first step may carry a checkpoint restore or a park, a resumed one an unpark.
+                known = getattr(self, 'requests', None) or {}
+                total = admission.prompt_tokens(known.get(step[0])) if known.get(step[0]) is not None else None
+                skip = step[0] in runtime.unmeasured
+                runtime.unmeasured.discard(step[0])
+                if skip or step[0] not in partial_ids or type(total) is not int or step[1] + step[2] >= total:
+                    runtime.last_prefill = None
         runtime.alternator.end('prefill' if prefill else 'decode', short=runtime.pass_short and prefill)
         # One line per decision that is part of a prefill's life: a prefill step, a yield, a step while a partial is in flight. A plain decode step
         # beside a prompt that is merely waiting for a seat (every seat busy) is not, or the log would grow a line a round for as long as it waits.

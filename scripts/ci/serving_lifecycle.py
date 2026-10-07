@@ -443,9 +443,12 @@ class FastServingLifecycle:
             # the hook refuses.
             if self.decoding_id in finished and not self.decoding_ids:
                 self._release_decoders()
-            if self.request_id is not None and self.request_id in finished:
+            # A prefill vLLM PREEMPTED (its blocks freed, it re-enters WAITING from zero) is gone as a finished one is: the scratch, the park and the
+            # capture are nobody's, so its re-admission starts clean (COLD or CHECKPOINT) instead of arriving announced as SCRATCH or PARKED.
+            gone = finished | set(getattr(scheduled, 'preempted_req_ids', None) or ())
+            if self.request_id is not None and self.request_id in gone:
                 self._release_prefill()
-            for request_id in [value for value in (self.parked or ()) if value in finished]:
+            for request_id in [value for value in (self.parked or ()) if value in gone]:
                 self._release_parked(request_id)
             # ADMISSION V2: the step continues a prefill this lifecycle parked while a short one ran.
             if self._is_parked_continuation(scheduled):

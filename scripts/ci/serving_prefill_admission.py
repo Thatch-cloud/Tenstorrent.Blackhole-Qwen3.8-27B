@@ -856,8 +856,10 @@ def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None, lever
                     single = plan.fresh
             if restore_cap is not None:
                 capped = (target, levern.computed)
+        hidden_at = []
         if hidden_running:
             # The pass must not see the prefills it parks or ends: they leave `running` for the call and come back after it.
+            hidden_at = [(index, request) for index, request in enumerate(self.running) if any(request is other for other in hidden_running)]
             self.running = [request for request in self.running if all(request is not other for other in hidden_running)]
         # The plugin writes max(0, value - len(pure_decodes)) before calling the base scheduler, so
         # the value written here carries the decodes it is about to remove.
@@ -872,8 +874,11 @@ def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None, lever
         try:
             result = original(self)
             if single is not None:
-                admitted_single = any(getattr(value, 'req_id', None) == getattr(single, 'request_id', None)
-                                      for value in getattr(result, 'scheduled_new_reqs', None) or ())
+                # Admission is read from the result's new requests AND from `running`: a single vLLM had preempted and now resumes arrives as a cached
+                # request, and would otherwise stay in the saved waiting queue as a second entry.
+                admitted_single = (any(getattr(value, 'req_id', None) == getattr(single, 'request_id', None)
+                                       for value in getattr(result, 'scheduled_new_reqs', None) or ())
+                                   or any(value is single for value in self.running))
         finally:
             if restore_cap is not None:
                 restore_cap()
@@ -900,7 +905,12 @@ def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None, lever
                         self.skipped_waiting = saved_skipped
                 self.waiting = saved_waiting
             if hidden_running:
-                self.running.extend(hidden_running)
+                # Back at the positions they held: appended at the tail a parked long would be the FCFS victim of the first decode pass that
+                # preempts (vLLM pops the last running request).
+                placed = {id(request) for _, request in hidden_at}
+                for index, request in hidden_at:
+                    self.running.insert(min(index, len(self.running)), request)
+                self.running.extend(request for request in hidden_running if id(request) not in placed)
             self.max_num_running_reqs = saved_max
         if capped is not None and not (dram_held or kv_held or credit_held):
             # The pass is about to run: it must be the one the cap was computed for (levern_scheduler.verify), or the engine stops here.

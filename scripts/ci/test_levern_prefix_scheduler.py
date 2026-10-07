@@ -386,8 +386,9 @@ class ShortLaneTests(GateFreeCase):
         rig.add('plain', 20000)                         # 20,000 left: long
         rig.prefill_step()
         self.assertEqual(rig.events[-1][:2], ('prefill', 'big-hit'))
-        self.assertEqual(rig.runtime.klass['big-hit'], 'short')
-        self.assertEqual(rig.runtime.klass['plain'], 'long')
+        self.assertEqual(rig.runtime.pending_class['big-hit'], 'short', 'fixed from the peek of the admitting call')
+        self.assertEqual(rig.runtime.klass_of(rig.scheduler, rig.scheduler.requests['plain']), 'long')
+        self.assertNotIn('plain', rig.runtime.klass, 'a request still waiting is not frozen')
 
     def test_a_short_never_parks_a_short(self):
         rig = Rig()
@@ -627,12 +628,14 @@ class GovernorIntegrationTests(GateFreeCase):
 
     def test_the_pending_hint_lists_the_longs_in_service_order_and_leaves_the_shorts_out(self):
         rig = Rig(environ={'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180'})
-        rig.add('long', 100000, arrival=10.0)
+        now = rig.wall.now
+        rig.add('long', 100000, arrival=now - 30.0)
         rig.prefill_step()
-        rig.add('short', 5000, arrival=20.0)
-        rig.add('long2', 80000, arrival=30.0)
+        rig.add('short', 5000, arrival=now - 20.0)
+        rig.add('long2', 80000, arrival=now - 10.0)
         hint = rig.runtime.pending_hint(rig.scheduler)
-        self.assertEqual([arrival for arrival, _ in hint], [10.0, 30.0])
+        self.assertEqual([round(now - arrival) for arrival, _ in hint], [round(now - rig.scheduler.requests[name].arrival_time) for name in ('long', 'long2')])
+        self.assertEqual(len(hint), 2)
         self.assertGreater(hint[0][1], 0)
 
     def test_the_governor_off_gives_no_hint(self):
@@ -645,8 +648,96 @@ class GovernorIntegrationTests(GateFreeCase):
         rig.add('cold', 100000)
         rig.step(prefill_ms=1400.0)
         rig.prefill_step()
+        rig.prefill_step()
+        rig.prefill_step()
         self.assertEqual(rig.runtime.step_times.observed >= 1, True)
         self.assertGreater(rig.runtime.step_times.scale, 1.0)
+
+
+class ReviewFixTests(GateFreeCase):
+    """The review of 5b6c0448: B1 and S1 to S4."""
+
+    def test_b1_a_hit_that_moved_down_from_a_whole_rest_peek_still_runs_a_valid_step(self):
+        rig = Rig()
+        graft = rig.scheduler.__dict__['_qwen_prefix']
+        graft.peek = lambda request: 2048          # P=4500, S_last=2048: the peeked step is the whole rest ...
+        rig.add('x', 4500, hit=0)                   # ... but the in-pass trim lands on 0 (the prefix kill switch latched, an eviction)
+        event = rig.prefill_step()
+        self.assertEqual(event, ('prefill', 'x', 0, 4500), 'the whole prompt in one step, not [0, 2452)')
+
+    def test_b1_the_levern_kill_switch_with_a_peeked_hit_also_takes_the_whole_prompt_from_any_start(self):
+        present = [True]
+        rig = Rig(off_exists=lambda path: present[0])
+        graft = rig.scheduler.__dict__['_qwen_prefix']
+        graft.peek = lambda request: 8192
+        rig.add('y', 20000, hit=0)
+        rig.clock.advance_ms(2000)
+        self.assertEqual(rig.prefill_step(), ('prefill', 'y', 0, 20000))
+
+    def test_s1_a_waiting_long_with_no_seat_to_take_is_not_a_governed_prefill(self):
+        rig = Rig(environ={'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180'}, seats=2)
+        now = rig.wall.now
+        rig.add('inflight', 100000, arrival=now - 10.0)
+        rig.prefill_step()
+        rig.add('queued', 100000, arrival=now - 10.0)
+        self.assertEqual(len(rig.runtime.pending_hint(rig.scheduler)), 1, 'one decoder and the prefill in flight hold both seats')
+        roomy = Rig(environ={'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180'}, seats=8)
+        roomy.add('inflight', 100000, arrival=roomy.wall.now - 10.0)
+        roomy.prefill_step()
+        roomy.add('queued', 100000, arrival=roomy.wall.now - 10.0)
+        self.assertEqual(len(roomy.runtime.pending_hint(roomy.scheduler)), 2)
+
+    def test_s1_a_waiting_long_already_past_the_deadline_does_not_pin_the_share_at_one(self):
+        rig = Rig(environ={'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180', 'QWEN_FAST_LEVERN_ROUNDS': None})
+        now = rig.wall.now
+        rig.add('inflight', 100000, arrival=now - 10.0)
+        rig.prefill_step()
+        rig.add('late', 100000, arrival=now - 400.0)
+        hint = rig.runtime.pending_hint(rig.scheduler)
+        self.assertEqual(len(hint), 1)
+        self.assertLess(levern_policy.effective_share(0.5, 180, hint, rig.wall()), 1.0)
+
+    def test_s2_only_intermediate_steps_that_continued_their_scratch_teach_the_model(self):
+        rig = Rig()
+        rig.add('whole', 5000)                 # never split: one final step
+        for _ in range(4):
+            rig.step(prefill_ms=2900.0)
+        self.assertEqual(rig.runtime.step_times.observed, 0, 'a final step carries the build; a new admission may carry a restore')
+        rig = Rig()
+        rig.add('cold', 100000)
+        for _ in range(8):
+            rig.step(prefill_ms=700.0)
+        self.assertGreaterEqual(rig.runtime.step_times.observed, 1)
+        self.assertAlmostEqual(rig.runtime.step_times.scale, 1.0, delta=0.5)
+
+    def test_s3_a_long_that_waited_past_the_park_bound_goes_before_a_newly_arrived_short(self):
+        rig = Rig(environ={'QWEN_FAST_LEVERN_MAX_PARK_S': '30'})
+        now = rig.wall.now
+        rig.add('old-long', 50000, arrival=now - 100.0)
+        rig.add('short', 5000, arrival=now)
+        self.assertEqual(rig.prefill_step()[1], 'old-long')
+        fresh = Rig(environ={'QWEN_FAST_LEVERN_MAX_PARK_S': '30'})
+        fresh.add('new-long', 50000, arrival=fresh.wall.now - 5.0)
+        fresh.add('short', 5000, arrival=fresh.wall.now)
+        self.assertEqual(fresh.prefill_step()[1], 'short', 'inside the bound the short still goes first')
+
+    def test_s6_a_parked_long_keeps_its_place_in_running_so_it_is_not_the_first_preemption_victim(self):
+        rig = Rig()
+        rig.add('long', 100000)
+        rig.prefill_step()
+        rig.add('short', 5000)
+        rig.prefill_step()
+        names = [request.request_id for request in rig.scheduler.running]
+        self.assertLess(names.index('long'), names.index('d0'), 'vLLM preempts the LAST running request: the parked long one is not appended behind the decoder')
+
+    def test_s4_a_waiting_request_is_classified_again_until_it_is_admitted(self):
+        rig = Rig()
+        request = rig.add('x', 100000, hit=95000)
+        graft = rig.scheduler.__dict__['_qwen_prefix']
+        self.assertEqual(rig.runtime.klass_of(rig.scheduler, request), 'short')
+        request.hit = 0                          # the checkpoint was evicted before the request was admitted
+        graft.memo.clear()
+        self.assertEqual(rig.runtime.klass_of(rig.scheduler, request), 'long', 'a cold 100k prompt does not run as short')
 
 
 class InstallTests(GateFreeCase):

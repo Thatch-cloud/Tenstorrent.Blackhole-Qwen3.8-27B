@@ -205,6 +205,19 @@ class ContinuationTests(unittest.TestCase):
         built.capture.close.assert_called()
 
 
+class PreemptionTests(unittest.TestCase):
+    def test_s6_a_prefill_in_flight_that_vllm_preempted_releases_its_owner(self):
+        built = Built(self, prompt=8192, computed=4096, chunk=2048, grant=4096)
+        built.execute()
+        vars(built.model)[route.OWNER_ATTR] = ('request', 6144)
+        gone = built.continuation('request', 2048, 6144)
+        gone.finished_req_ids, gone.preempted_req_ids, gone.total_num_scheduled_tokens = set(), {'request'}, 0
+        built.execute(gone)
+        self.assertNotIn(route.OWNER_ATTR, vars(built.model))
+        self.assertIsNone(built.lifecycle.request_id)
+        built.capture.close.assert_called()
+
+
 class EpochTests(unittest.TestCase):
     """Section 8: the writer class an intermediate step takes."""
 
@@ -339,6 +352,18 @@ class ParkTests(unittest.TestCase):
         built.captures[0].close.assert_called()
         self.assertEqual(built.lifecycle.parked, {})
         self.assertEqual(built.lifecycle.request_id, 'short')
+
+    def test_s6_a_parked_prefill_vllm_preempted_is_released_like_a_finished_one(self):
+        built = self.long_in_flight()
+        built.captures[1].position = 5000
+        built.execute(built.new_request('short', 5000, 2048))
+        vars(built.model)[route.HANDLE_ATTR] = None
+        preempted = SimpleNamespace(finished_req_ids=set(), preempted_req_ids={'request'}, scheduled_new_reqs=[],
+                                    scheduled_cached_reqs=SimpleNamespace(req_ids=['short'], num_computed_tokens=[2048]),
+                                    scheduled_spec_decode_tokens={}, num_scheduled_tokens={'short': 2048}, total_num_scheduled_tokens=2048)
+        built.execute(preempted)
+        built.captures[0].close.assert_called()
+        self.assertEqual(built.lifecycle.parked, {}, 'its re-admission starts clean, not announced as PARKED')
 
     def test_close_releases_every_parked_prefill(self):
         built = self.long_in_flight()

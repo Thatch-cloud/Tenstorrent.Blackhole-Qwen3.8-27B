@@ -362,16 +362,17 @@ class ParkTests(unittest.TestCase):
         steps_a = policy.plan(total_a)
         merged.run('A', tokens_a, row_a, 0, 1, stop=stop)
         steps_b = policy.plan(total_b)
+        merged.final = {}
         for index, (start, end) in enumerate(steps_b):
             if index == 0:
                 merged.admit('B', tokens_b, 0, end)
-                merged.step('B', tokens_b, row_b, start, end, total_b, 2, 'COLD', park_owner=True)
+                merged.final['B'] = merged.step('B', tokens_b, row_b, start, end, total_b, 2, 'COLD', park_owner=True)
             else:
                 merged.next_step('B', start, end)
-                merged.step('B', tokens_b, row_b, start, end, total_b, 2, 'SCRATCH')
+                merged.final['B'] = merged.step('B', tokens_b, row_b, start, end, total_b, 2, 'SCRATCH')
         for index, (start, end) in enumerate(steps_a[stop:]):
             merged.next_step('A', start, end)
-            merged.step('A', tokens_a, row_a, start, end, total_a, 1, 'PARKED' if index == 0 else 'SCRATCH')
+            merged.final['A'] = merged.step('A', tokens_a, row_a, start, end, total_a, 1, 'PARKED' if index == 0 else 'SCRATCH')
         return merged, tokens_a, tokens_b, row_a, row_b
 
     def test_a_parked_long_prefill_and_the_short_one_each_equal_their_solo_runs(self):
@@ -395,12 +396,11 @@ class ParkTests(unittest.TestCase):
         cold = reference()
         logits_a, _, _ = cold.cold(tokens_a, slot=3, req='cold-a')
         logits_b, _, _ = cold.cold(tokens_b, slot=3, req='cold-b')
-        last_a = merged.marker('lever N route req=A start=10240')
-        self.assertEqual(len(last_a), 1)
-        # the logits of the last step of A equal the cold whole prompt's: re-run the solo comparison through the digests the route would log
-        solo = MergedEngine()
-        self.assertTrue(torch.equal(solo.run('A', tokens_a, solo.pool.row(len(tokens_a)), 0, 1), logits_a))
-        self.assertTrue(torch.equal(solo.run('B', tokens_b, solo.pool.row(len(tokens_b)), 0, 2), logits_b))
+        self.assertEqual(len(merged.marker('lever N route req=A start=10240')), 1)
+        # the parked long prompt's own final logits (resumed from the host) and the short one's equal the cold whole prompts' (S7: the parked run's
+        # logits, not only a solo run's, are compared)
+        self.assertTrue(torch.equal(merged.final['A'], logits_a), 'the resumed long prompt logits differ from its cold twin')
+        self.assertTrue(torch.equal(merged.final['B'], logits_b), 'the short prompt logits differ from its cold twin')
 
     def test_the_plan_of_a_parked_prompt_still_takes_its_checkpoint_after_it_resumes(self):
         merged, tokens_a, tokens_b, row_a, row_b = self.parked_run()
@@ -652,6 +652,102 @@ class WidthAndAttachTests(unittest.TestCase):
         with merged.scope(), self.assertRaisesRegex(AssertionError, 'without a lifecycle announcement'):
             merged.wrapper.prefill_forward(F.prompt(4100, seed=1).reshape(1, -1), merged.pool.row(4100), None, [4100],
                                            empty_slots=[3], start_pos=[2048])
+
+
+class ReviewFixRouteTests(unittest.TestCase):
+    """The review of 5b6c0448: S5, S7 and S8."""
+
+    def setUp(self):
+        import serving_request_quarantine as quarantine
+
+        shared = quarantine.holder()
+        saved = (shared.installed, dict(shared.pending))
+        shared.installed = 'test-consumer'
+        shared.pending.clear()
+
+        def restore():
+            shared.installed, pending = saved
+            shared.pending.clear()
+            shared.pending.update(pending)
+        self.addCleanup(restore)
+        self.quarantine = quarantine
+
+    def test_s7_a_checkpoint_short_prompt_parks_a_long_one_and_both_equal_their_cold_twins(self):
+        merged = MergedEngine(PARK)
+        base = F.prompt(20000, seed=211)
+        first, tokens_b, tokens_a = base[:9000], base[:13000], F.prompt(20000, seed=212)
+        row_first = merged.pool.row(9000)
+        merged.run('first', first, row_first, 0, 1)
+        row_a = merged.pool.row(20000)
+        steps_a = policy.plan(20000)
+        merged.run('A', tokens_a, row_a, 0, 3, stop=2)
+        row_b = merged.pool.row(13000, row_first[0, :6144 // BLOCK].tolist())
+        steps_b = policy.plan_from(13000, 6144)
+        for index, (start, end) in enumerate(steps_b):
+            if index == 0:
+                merged.admit('B', tokens_b, 6144, end, h=floor_chunk(9000) - BLOCK)
+                logits_b = merged.step('B', tokens_b, row_b, start, end, 13000, 2, 'CHECKPOINT', park_owner=True)
+            else:
+                merged.next_step('B', start, end)
+                logits_b = merged.step('B', tokens_b, row_b, start, end, 13000, 2, 'SCRATCH')
+        self.assertEqual(merged.handle.parked_total, 1, 'the checkpoint short prompt parked the long one')
+        for index, (start, end) in enumerate(steps_a[2:]):
+            merged.next_step('A', start, end)
+            logits_a = merged.step('A', tokens_a, row_a, start, end, 20000, 3, 'PARKED' if index == 0 else 'SCRATCH')
+        cold = reference()
+        cold_logits_b, cold_row_b, cold_slot_b = cold.cold(tokens_b, slot=3, req='cold-b')
+        cold_logits_a, cold_row_a, cold_slot_a = cold.cold(tokens_a, slot=1, req='cold-a')
+        self.assertTrue(torch.equal(logits_b, cold_logits_b), 'the checkpoint short prompt differs from its cold twin')
+        self.assertTrue(torch.equal(logits_a, cold_logits_a), 'the resumed long prompt differs from its cold twin')
+        assert_same_state(self, merged.state(row_b, 13000, 2), state_of(cold, cold_row_b, 13000, cold_slot_b), 'B')
+        assert_same_state(self, merged.state(row_a, 20000, 3), state_of(cold, cold_row_a, 20000, cold_slot_a), 'A')
+
+    def test_s5_a_host_park_failure_ends_the_long_prefill_per_request_and_the_short_one_runs(self):
+        merged = MergedEngine(PARK)
+        tokens_a, tokens_b = F.prompt(12289, seed=221), F.prompt(5000, seed=222)
+        row_a, row_b = merged.pool.row(12289), merged.pool.row(5000)
+        merged.run('A', tokens_a, row_a, 0, 1, stop=2)
+        merged.admit('B', tokens_b, 0, 2048)
+        with mock.patch.object(merged.model, '_qwen_prefix_read_scratch', side_effect=RuntimeError('host allocation failed')):
+            logits = merged.step('B', tokens_b, row_b, 0, 2048, 5000, 2, 'COLD', park_owner=True)
+        self.assertIsNotNone(logits)
+        self.assertIn('A', self.quarantine.holder().pending, 'the long prefill is quarantined, not the engine failed')
+        self.assertEqual(merged.handle.parks, {})
+        self.assertEqual(merged.handle.park_failures, 1)
+        self.assertEqual(route.owner(merged.model), ('B', 2048), 'the short prompt runs and owns the scratch')
+        self.assertEqual(policy.state_holder().owner, ('B', 2048))
+        self.assertFalse(policy.state_has('A', 4096))
+        self.assertEqual(len(merged.marker('lever N quarantine req=A')), 1)
+
+    def test_s5_without_a_quarantine_consumer_a_host_park_failure_stays_fatal(self):
+        self.quarantine.holder().installed = None
+        merged = MergedEngine(PARK)
+        tokens_a, tokens_b = F.prompt(12289, seed=223), F.prompt(5000, seed=224)
+        merged.run('A', tokens_a, merged.pool.row(12289), 0, 1, stop=2)
+        merged.admit('B', tokens_b, 0, 2048)
+        with mock.patch.object(merged.model, '_qwen_prefix_read_scratch', side_effect=RuntimeError('host allocation failed')):
+            with self.assertRaises(route.ParkFailed):
+                merged.step('B', tokens_b, merged.pool.row(5000), 0, 2048, 5000, 2, 'COLD', park_owner=True)
+
+    def test_s8_the_identity_check_sees_every_attribute_the_bind_rebinds_and_each_conv_state(self):
+        def layer():
+            return SimpleNamespace(B=8, rec_state=object(), conv_states=[object(), object(), object()], conv_carry=object(), _zero_conv0=object(),
+                                   _stable_state=False)
+        layers = [layer(), layer()]
+        before = route._binding(layers)
+        self.assertTrue(route._binding_holds(before))
+        for name, value in (('_zero_conv0', object()), ('_stable_state', True), ('B', 1), ('conv_carry', object()), ('rec_state', object())):
+            saved = getattr(layers[1], name)
+            setattr(layers[1], name, value)
+            self.assertFalse(route._binding_holds(before), '%s rebound and not seen' % name)
+            setattr(layers[1], name, saved)
+        self.assertTrue(route._binding_holds(before))
+        saved = layers[0].conv_states[1]
+        layers[0].conv_states[1] = object()
+        self.assertFalse(route._binding_holds(before), 'an element of conv_states replaced and not seen')
+        layers[0].conv_states[1] = saved
+        layers[0].conv_states = list(layers[0].conv_states)
+        self.assertFalse(route._binding_holds(before), 'the conv_states list rebound and not seen')
 
 
 class ReleaseTests(unittest.TestCase):

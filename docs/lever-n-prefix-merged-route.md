@@ -71,11 +71,11 @@
      Both stay fatal if they are ever reached.
    - A Lever N kill switch file stops splitting new prompts without a restart.
 10. **TTFT at 262k: base share f = 0.5 plus a deadline governor.**
-    - The gateway's large-model budget is 240 s, and the target is T* = 180 s.
+    - The client deadline for a large prompt is 240 s, and the target is T* = 180 s.
     - Whenever any pending prefill would miss T*, the governor raises the in-flight prefill's share, up to 1.0 (no yields, which is today's stall, chunked).
     - A lone cold 253,920-token arrival: 192 s at f = 0.5 becomes about 180 s at f ≈ 0.54 (e).
     - Two simultaneous cold 254k arrivals: the second gets about 197 s with the governor, against about 187 s today and about 291 s at a fixed f = 0.5 (e).
-    - f_base is still chosen by the agent-turn sweep. T* is not swept: the gateway fixes it.
+    - f_base is still chosen by the agent-turn sweep. T* is not swept: the client deadline fixes it.
 11. **Exactness is proved CPU-first:**
     - unit tests on the real staged `model.py` with the recording fake ttnn and the toy hybrid model: hit equals cold twin byte for byte, the boundary matrix, the capture and restore round trip, park and unpark;
     - two real-vLLM 0.25.1 proofs, one per phase, on experiment tags v19 and v20 (both unused today);
@@ -306,7 +306,7 @@ Every program the four sources touch then exists before the packed traces. The r
 | Classes | For each waiting request, `remaining = P - peek(Q)`. **Short** means `remaining <= QWEN_FAST_LEVERN_SHORT_TOKENS` (16,384, 8 steps); **long** is everything else. A cold prompt that is short is in the short class too. |
 | In flight | At most one long and one short at a time (`1 + QWEN_FAST_LEVERN_PARK_SLOTS`, slots = 1). A short never parks another short. |
 | Preemption | A short may be admitted while a long is in flight if all of these hold: a park slot is free, a seat is free, the KV reservation holds, the DRAM admits it, the long's park age is below `QWEN_FAST_LEVERN_MAX_PARK_S` (30 s), and the deadline governor (11) does not need the long. The short is admitted at the long's next step boundary. The long is hidden from `running` for the short's steps. |
-| Park | The route captures the long's scratch to host (`_qwen_prefix_read_scratch`: about 154 MB of host RAM; e: 50-150 ms) when the short's first step runs, and restores it (`_qwen_prefix_restore`; e: 50-150 ms) at the long's next step (`source=PARKED`). If the park's host allocation fails, the short is not admitted at that boundary: no error, the long continues. |
+| Park | The route captures the long's scratch to host (`_qwen_prefix_read_scratch`: about 154 MB of host RAM; e: 50-150 ms) when the short's first step runs, and restores it (`_qwen_prefix_restore`; e: 50-150 ms) at the long's next step (`source=PARKED`). The scheduler checks free host memory before it lets a short preempt. If the host read still fails inside the route, the short has been allocated already and must run: the long prefill is ended per request (D2 quarantine, `park_failures` counted, released on the finished id by the route and the lifecycle) and the engine stays up; with no quarantine consumer installed the failure stays fatal. |
 | Order | Shortest remaining first among shorts, FIFO on ties. The long resumes when no short can be admitted. Longs run FIFO, one at a time, as in v1. |
 | Short pacing | A short's steps alternate at R = 1, so decoder gaps stay at about one step and the short's TTFT rises about 15% (e). |
 | Lifecycle | `request_id`/`capture` becomes `prefills[req_id]`, a dict of capture, refusal and ignore_eos per in-flight prefill. The gate holds a set. `_is_continuation` is keyed on the scheduled cached id. `_release_prefill(req_id)` also frees that request's park slot. |
@@ -336,7 +336,7 @@ Nothing is allocated or published for the step that would have run it, so no unw
 | `serving_lifecycle.py:301-304`: sticky | engine dies | The whole-rest clause becomes the plan (R3). The grant clauses stay fatal (graft invariants). |
 | `levern_scheduler.py:102`: no cap path | attach fails | Unchanged: boot-time refusal is correct. |
 | Capture failure | counted, never fails | Unchanged (S7). |
-| Park failure (new) | none | No preemption at that boundary. No error. |
+| Park failure (new) | none | The long prefill is quarantined (FINISHED_ABORTED) at that step; the short runs. No engine failure with the consumer installed. |
 
 **A Lever N kill switch (new).** The file `levern.off` sits next to `prefix-reuse.off` under the image's `.qwen-c2` directory and is polled like the prefix kill switch.
 - Once present, new admissions get a whole-prompt cap (no splitting) and the short lane closes.
@@ -363,12 +363,12 @@ Nothing is allocated or published for the step that would have run it, so no unw
 With agent decoders that have 176-543 tokens left, the arrival's TTFT is 108-129 s at any f < 1 (e).
 
 **A fixed 0.5 is not acceptable at 262k:**
-- a lone cold maximum prompt has 48 s of margin to 240 s, on a chunk time never measured at 250k;
+- a lone cold maximum prompt has 48 s of margin to the 240 s client deadline, on a chunk time never measured at 250k;
 - a second cold 254k queued behind it gets about 291 s (e). Today that is 187 s.
 
 **Decision: `f_base = 0.5` with a deadline governor in `levern_policy.Alternator`.**
 
-- **Flag:** `QWEN_FAST_LEVERN_TTFT_TARGET_S` (default 180, the 240 s gateway budget minus 60 s of margin; 0 turns the governor off).
+- **Flag:** `QWEN_FAST_LEVERN_TTFT_TARGET_S` (default 180, the 240 s client deadline minus 60 s of margin; 0 turns the governor off).
 - **The input:** each pending prefill j (in flight, parked or queued), with its arrival time (vLLM `Request.arrival_time`), its remaining device time D_j and a build B (2.5 s).
 - **D_j is measured online:** an EWMA of the route's per-step ms against its context, seeded with t(p). Constants are not trusted at 254k.
 - **The rule:** `f_eff = clamp(max(f_base, max_j (sum_{i<=j} D_i + B) / (T* - (now - arrival_j))), f_base, 1.0)`, with i running in service order. At `f_eff = 1.0` nothing is owed, so there are no yields.
@@ -380,7 +380,7 @@ With agent decoders that have 176-543 tokens left, the arrival's TTFT is 108-129
 - **Two simultaneous cold 254k:** about 98.6 s and 197 s, against today's 93.6 s and 187 s.
 - **The bound:** the governor never makes a cold arrival slower than today plus about 40 ms per step of transition. Three or more simultaneous cold maximum prompts breach 240 s today as well.
 
-**What the sweep decides and what it doesn't.** f_base is still chosen by the agent-turn sweep (G-NP6: 0.33 / 0.5 / R = 1 at T* = 180). T* is fixed by the gateway, not swept. Shorts (9) are paced at R = 1 and are never governed.
+**What the sweep decides and what it doesn't.** f_base is still chosen by the agent-turn sweep (G-NP6: 0.33 / 0.5 / R = 1 at T* = 180). T* is fixed by the client deadline, not swept. Shorts (9) are paced at R = 1 and are never governed.
 
 ---
 
@@ -478,7 +478,7 @@ Built on `tp4/levern-prefix` (CPU only; no card, no tag but the CI proof tag). F
 
 Departures from the design text:
 1. **Profile names.** `c2-packed-tp4-8x262k-ship-prefix-levern` and `c2-packed-tp4-8x262k-ship-prefix-levern-audit`, not `-levern-gate`. They carry no waiver marker: their base is the production profile, which has none.
-2. **The peek does not ask vLLM twice for the in-pass answer.** The peek calls vLLM's own `get_computed_blocks` once (with `prefix_cache_stats` swapped for a null object) and memoizes only Q; the in-pass call is vLLM's authoritative answer, capped at the peek (`select(..., ceiling=Q_peek)`). A hit that moved between the two can only lower Q, so the step's end stays aligned and at or below S_last, and nothing depends on a block object that may have been evicted in between.
+2. **The peek does not ask vLLM twice for the in-pass answer.** The peek calls vLLM's own `get_computed_blocks` once (with `prefix_cache_stats` swapped for a null object) and memoizes only Q; the in-pass call is vLLM's authoritative answer, capped at the peek (`select(..., ceiling=Q_peek)`). A hit that moved between the two can only lower Q. That keeps the end aligned for an intermediate step, but NOT when the peeked step was the whole rest (a lowered Q with the budget P - Q_peek ends unaligned and non-final): the budget for a peeked whole rest is therefore the whole prompt, valid from any Q' <= Q_peek (review B1, section 16). Nothing depends on a block object that may have been evicted in between.
 3. **The install line.** The graft's sticky install line is byte for byte what it was (other tests and tools read it); `install chunked=levern: ...` is its own line, logged only where the merged route accepts chunking.
 4. **Scheduler-side state reaches the route and back through one holder** (`_qwen_levern_state`: the scratch owner and the parks), read before any allocation. A partial whose `(request, computed)` is in neither is quarantined through the D2 consumer; with no consumer installed the refusal stays fatal.
 5. **The warm** runs four steps and logs one warm line (`steps=4`) and no per-step route lines; the smoke rule counts the steps from the warm line under the merged profile.
@@ -490,3 +490,16 @@ Open, not done here:
 - **The host-memory check for a park** reads `MemAvailable` before a short may preempt; a park that still fails inside the route (an allocation error) fails the engine, because the short has been admitted by then. A device park slot (design 3.8) is the alternative if the check proves too weak.
 - **The runner with two partial prefills in its persistent batch** is untested off-card (risk 1 of section 14); the CPU proof covers the scheduler, the lifecycle and the route, not the plugin runner's row handling.
 - **The disjoint-writer class** is gated on the audited prestage arm (G-NP4); until then `QWEN_FAST_LEVERN_EPOCH_SCOPE=global` is the safe A/B arm.
+
+## 16. Review of 5b6c0448 and what changed
+
+- **B1 (blocking).** `peek` now polls the prefix kill switch through `kill_switch_engaged()`, as the trim does, so the two agree inside one `schedule()` call; and `LevernRuntime.budget` returns the whole prompt when the peeked step is the whole rest (`Q_peek >= S_last`) or `levern.off` is engaged for a fresh admission, so any lowered Q' still takes the whole rest, which `valid_step` accepts.
+- **S1.** `pending_hint` counts a waiting long only if a seat would be free when it reaches the front, and not once it is already past T* (it cannot be helped, and 1.0 for it only stalls the decoders). An in-flight prefill past T* still gets 1.0.
+- **S2.** The step-time model learns only from an intermediate step that continued its own scratch (no new admission, no final step, not the step that resumed a park); the EWMA weight is 0.2 from the first sample.
+- **S3.** With no prefill in flight, the oldest waiting long goes before the waiting shorts when the governor needs it or it has waited `QWEN_FAST_LEVERN_MAX_PARK_S`.
+- **S4.** A waiting request is classified afresh on every call; its class is fixed from the peek of the admitting call (`pending_class`, promoted once it runs).
+- **S5.** A host park failure quarantines the long prefill per request (section 9 and 10 rows corrected).
+- **S6.** The lifecycle releases a parked or in-flight prefill that vLLM preempted, as for a finished one; the admission wrapper detects a resumed single through `running` as well as `scheduled_new_reqs`, and hidden prefills return to their original positions in `running` instead of the tail.
+- **S7.** Tests: the parked run's logits against the cold twins, a CHECKPOINT short that parks a long, the kill-switch race at the graft and at the budget, the governor inputs, aging, the class, the park failure, the preemption release.
+- **S8.** The H3 identity check snapshots `B`, `rec_state`, `conv_states` (and each element), `conv_carry`, `_zero_conv0` and `_stable_state`.
+- **Declined (minor).** The route's `request_ids[0]` cross-check: `run_chunk` receives the step's announcement and the runner's `start_pos`/`prompt_lens`, which it already compares; the runner's request ids are not among the arguments the wrapper receives at that entry. The peek is not cached across calls (it is memoized per call; the hint is now only computed when something is pending).
