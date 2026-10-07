@@ -144,6 +144,11 @@ class ProfileTests(unittest.TestCase):
                        'c2-packed-tp4-8x262k-w2-audit': (sd.DRAFT_CONV, sd.DRAFT_HEADS, sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT),
                        'c2-packed-tp4-8x262k-w2-nof1': (sd.DRAFT_CONV, sd.DRAFT_HEADS),
                        'c2-packed-tp4-8x262k-w2-nof1-audit': (sd.DRAFT_CONV, sd.DRAFT_HEADS, sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT)}
+        # the combined window (test_tp4_w2ln_profiles): the production pair of D2 flags, and the D2 audits on the audit twins that carry them
+        from test_tp4_w2ln_profiles import ALL as WINDOW
+        for name in WINDOW:
+            audited = '-audit' in name and not name.endswith(('-audit-sdpa', '-audit-f1', '-audit-ln'))
+            X262K_FLAGS[name] = (sd.DRAFT_CONV, sd.DRAFT_HEADS) + ((sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT) if audited else ())
         for name, profile in PROFILES.items():
             for flag in sd.ALL_FLAGS:
                 wanted = (name in DELTAS and flag in DELTAS[name][1]) or flag in X262K_FLAGS.get(name, ())

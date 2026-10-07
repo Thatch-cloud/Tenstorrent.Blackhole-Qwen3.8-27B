@@ -145,9 +145,10 @@ class ProfileTests(unittest.TestCase):
                 with self.subTest(name=name):
                     self.assertFalse((set(NEW_LEVERS) | set(NEW_AUDITS)) & set(env))
         carriers = sorted(name for name, profile in load()['profiles'].items() if spread.FLAG in profile.get('env', {}))
-        self.assertEqual(carriers, [W2, W2_AUDIT])
+        from test_tp4_w2ln_profiles import F1 as WINDOW_F1, MULTI as WINDOW_MULTI      # the combined window's carriers (test_tp4_w2ln_profiles)
+        self.assertEqual(carriers, sorted([W2, W2_AUDIT] + list(WINDOW_F1)))
         multi = sorted(name for name, profile in load()['profiles'].items() if profile.get('env', {}).get(sdpa_long_tp.FLAG) == 'multi')
-        self.assertEqual(multi, sorted([SDPA_TIMED, SDPA_AUDITED, W2, W2_AUDIT, NOF1, NOF1_AUDIT]))
+        self.assertEqual(multi, sorted([SDPA_TIMED, SDPA_AUDITED, W2, W2_AUDIT, NOF1, NOF1_AUDIT] + list(WINDOW_MULTI)))
 
     def test_sdpa_multi_s_own_arms_are_untouched_by_the_merge(self):
         found = load()['profiles']

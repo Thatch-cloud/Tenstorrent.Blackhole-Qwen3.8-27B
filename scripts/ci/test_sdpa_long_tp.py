@@ -210,8 +210,10 @@ class SmokeAndProfileTests(unittest.TestCase):
     def test_no_traffic_profile_carries_the_flag(self):
         # tp4/sdpa-multi's two gate-only twins carry it too (test_sdpa_multi_tp holds them to their control plus exactly the flags).
         # tp4/w2's two gate-only arms carry multi too (test_tp4_w2).
+        # the combined window's multi carriers are gate only too (test_tp4_w2ln_profiles)
+        from test_tp4_w2ln_profiles import MULTI as WINDOW_MULTI
         allowed = {self.TWIN, 'c2-packed-tp4-8x262k-best-sdpamulti', 'c2-packed-tp4-8x262k-best-sdpamulti-audit',
-                   'c2-packed-tp4-8x262k-w2', 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1', 'c2-packed-tp4-8x262k-w2-nof1-audit'}
+                   'c2-packed-tp4-8x262k-w2', 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1', 'c2-packed-tp4-8x262k-w2-nof1-audit'} | set(WINDOW_MULTI)
         for name, body in self.PROFILES.items():
             if name not in allowed:
                 self.assertNotIn(FLAG, body.get('env', {}), name)

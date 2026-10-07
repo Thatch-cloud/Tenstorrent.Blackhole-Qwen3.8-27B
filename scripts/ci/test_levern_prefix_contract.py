@@ -111,7 +111,7 @@ class ProfileTests(unittest.TestCase):
 
     def test_no_other_profile_gained_a_merged_flag(self):
         for name, profile in profiles().items():
-            if name in (PLAIN, AUDITED):
+            if name in (PLAIN, AUDITED) or name.startswith(PLAIN):      # the window's Lever N carriers are held by test_tp4_w2ln_profiles
                 continue
             with self.subTest(name=name):
                 self.assertEqual([key for key in profile['env'] if key in levern_policy.MERGED_FLAGS], [])
