@@ -55,3 +55,7 @@ owner present with a fresh admin key. After it (owner-approved 2026-10-07):
 
 The free allowlisted tags after the baseline window's `v538-v557` are `v558-v568`, `v582-v585`, `v589-v592`, `v595-v599` and `v601-v620` (44). W-1 takes 8 and keeps 4 in reserve, W-2 takes 21 and keeps 4, and 7 stay
 unused. The combined pack's own tag list (`tp4-w2ln-jobs`, v538 to v640) overlaps these and is superseded for the windows covered here. Stage 2 (W-3 to W-6) needs 59, so at least 52 more must be allowlisted before it (68 with the same reserve of four a window). Adding tags is a runbook step in the private platform repository.
+
+## Judge dry run on archived runs
+
+`scripts/ci/stage1_judge_dry_run.py` re-judges archived artifacts with the committed rules. Result on the four runs the plan names plus the older v476: v536 and v579 agree (pass), v578 and v580 failed on rules alone and now pass, and v476 still fails the same way (its engine died before the API answered, a real failure and not a rule one). No rule regression.
