@@ -702,7 +702,7 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(found[name]['env']['QWEN_FAST_262K_EVIDENCE_WAIVER'], '1')
             self.assertEqual(found[name]['env']['QWEN_C2_GATE_PROFILE'], '1')
         self.assertEqual(sorted(name for name, entry in found.items() if 'QWEN_FAST_TP4_RS_UNIT_MAJOR' in entry['env']),
-                         sorted((self.U1_TIMED, self.U1_AUDIT, 'c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit', 'c2-packed-tp4-8x262k-w1-audit-nod1', 'c2-packed-tp4-8x262k-w1-lite', 'c2-packed-tp4-8x262k-w1-nod1', 'c2-packed-tp4-8x262k-ship-prefix', 'c2-packed-tp4-8x262k-ship-prefix-audit', 'c2-packed-tp4-8x262k-ship-prefix-levern', 'c2-packed-tp4-8x262k-ship-prefix-levern-audit')))  # + tp4/w1's stack, + the ship-prefix pair arms
+                         sorted((self.U1_TIMED, self.U1_AUDIT, 'c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit', 'c2-packed-tp4-8x262k-w1-audit-nod1', 'c2-packed-tp4-8x262k-w1-lite', 'c2-packed-tp4-8x262k-w1-nod1', 'c2-packed-tp4-8x262k-ship-prefix', 'c2-packed-tp4-8x262k-ship-prefix-4e', 'c2-packed-tp4-8x262k-ship-prefix-4e-audit', 'c2-packed-tp4-8x262k-ship-prefix-4e-control-audit', 'c2-packed-tp4-8x262k-ship-prefix-4e-grow', 'c2-packed-tp4-8x262k-ship-prefix-audit', 'c2-packed-tp4-8x262k-ship-prefix-levern', 'c2-packed-tp4-8x262k-ship-prefix-levern-audit')))  # + tp4/w1's stack, + the ship-prefix pair arms
         self.assertNotIn('QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT', found[self.U1_TIMED]['env'])
         self.assertEqual(json.loads(PROFILES.read_text(encoding='utf-8'))['default'], 'c2-packed-tp4')
 

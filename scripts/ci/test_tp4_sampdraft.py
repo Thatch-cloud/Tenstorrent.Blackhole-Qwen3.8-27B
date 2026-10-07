@@ -138,6 +138,10 @@ class ProfileTests(unittest.TestCase):
                        'c2-packed-tp4-8x262k-ship-prefix-audit': (sd.DRAFT_CONV, sd.DRAFT_HEADS, sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT),
                        # tp4/levern-prefix: those two plus exactly the Lever N flags (test_levern_prefix_contract)
                        'c2-packed-tp4-8x262k-ship-prefix-levern': (sd.DRAFT_CONV, sd.DRAFT_HEADS),
+                       # tp4/gdn-shared-history: the production pair and its audited twin, each with the shared history (test_gdn_shared_history)
+                       'c2-packed-tp4-8x262k-ship-prefix-4e': (sd.DRAFT_CONV, sd.DRAFT_HEADS), 'c2-packed-tp4-8x262k-ship-prefix-4e-grow': (sd.DRAFT_CONV, sd.DRAFT_HEADS),
+                       'c2-packed-tp4-8x262k-ship-prefix-4e-audit': (sd.DRAFT_CONV, sd.DRAFT_HEADS, sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT),
+                       'c2-packed-tp4-8x262k-ship-prefix-4e-control-audit': (sd.DRAFT_CONV, sd.DRAFT_HEADS, sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT),
                        'c2-packed-tp4-8x262k-ship-prefix-levern-audit': (sd.DRAFT_CONV, sd.DRAFT_HEADS, sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT)}
         for name, profile in PROFILES.items():
             for flag in sd.ALL_FLAGS:
