@@ -1031,17 +1031,17 @@ class PackedVerifierEngine:
         self.commit_block_ms = [0.0] * shape.users
         # QWEN_FAST_GDN_SHARED_HISTORY (gdn_shared_history; default off, gate profiles only): the one per-token GDN state history
         # both 64-row blocks write, which makes this block's verify wait for the other block's commits (claim, in verify).
-        # Read once here, like the flags above; unset, the module is never imported and `shared_history` stays None. Refused
-        # here, at attach, when the environment cannot honour it; from here on a failed construction closes the block, which
-        # detaches it.
-        if os.environ.get('QWEN_FAST_GDN_SHARED_HISTORY', '0') != '0' or os.environ.get(
-                'QWEN_FAST_GDN_SHARED_HISTORY_KV_GROW', '0') != '0':
-            import gdn_shared_history
-
-            self.shared_history = gdn_shared_history.join(self, log=diagnostic)
+        # Read once here, like the flags above; unset, the module is never imported and `shared_history` stays None. Joined as
+        # the first statement of the try below, so a refusal at attach goes through report_failure and close like every other
+        # construction failure (what __init__ has already taken from the pool and the replay watchdog are released).
         self.stage = 'allocating'
         started = time.perf_counter()
         try:
+            if os.environ.get('QWEN_FAST_GDN_SHARED_HISTORY', '0') != '0' or os.environ.get(
+                    'QWEN_FAST_GDN_SHARED_HISTORY_KV_GROW', '0') != '0':
+                import gdn_shared_history
+
+                self.shared_history = gdn_shared_history.join(self, log=diagnostic)
             # Allocated before ANY capture, like everything a trace may see. The initial
             # snapshot is slot 0 as attach found it, put back once the captures are done.
             self.initial = [helper.allocate() for helper in helpers]

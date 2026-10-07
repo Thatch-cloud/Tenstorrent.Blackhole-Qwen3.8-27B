@@ -27,6 +27,9 @@ own SMOKE_JSON line and the container log and exits non-zero on:
     cards), and - in a smoke that ran `concurrent4_steady` - that a round of four fused publications happened and, under
     QWEN_FAST_FUSED_COMMIT_LIVE_BANKS, that the live-bank marker was logged. A profile with the flag off must log no fused line.
 
+  - the shared GDN history (QWEN_FAST_GDN_SHARED_HISTORY=1, shared_history_problems): exactly two '[PINDIAG] gdn shared history engaged'
+    lines, one role=owner and one role=sharer, each with tensors=192, and no 'gdn shared history refused' line; a profile without the
+    flag must log none of these lines;
   - the eight-seat host-gap levers (tp4/hostgap, hostgap_problems): QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE=1 must log its engaged line once
     for each M3 block and no refusal line; QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS=1 its block-epochs line and, in a smoke that ran
     concurrent8_steady (and QWEN_FAST_TP4_HOSTGAP_LOG=1), at least 95% of the 4-live verifies of the pre-staged blocks (A and B under the
@@ -1081,6 +1084,34 @@ def u1_audit_problems(env, lines, engaged):
     return problems
 
 
+SHARED_HISTORY_FLAG = 'QWEN_FAST_GDN_SHARED_HISTORY'
+SHARED_HISTORY_ENGAGED = '[PINDIAG] gdn shared history engaged'
+SHARED_HISTORY_REFUSED = '[PINDIAG] gdn shared history refused'
+SHARED_HISTORY_TENSORS = 192   # gdn_shared_history.TENSORS: 4 users x 48 GDN layers
+
+
+def shared_history_problems(env, container_text):
+    """The shared GDN history's attach evidence (gdn_shared_history.engaged_line, once per block): both roles engaged with the full
+    tensor set and no refusal; and no line at all on a profile that does not set the flag. A runtime refusal (claim) is logged with
+    the same refused marker, so it fails here too."""
+    lines = container_text.splitlines()
+    engaged = [line for line in lines if SHARED_HISTORY_ENGAGED in line]
+    refused = [line.strip()[:200] for line in lines if SHARED_HISTORY_REFUSED in line]
+    if env is None or env.get(SHARED_HISTORY_FLAG) != '1':
+        if engaged or refused:
+            return ['gdn shared history lines on a profile without %s' % SHARED_HISTORY_FLAG]
+        return []
+    problems = ['the shared GDN history refused: %s' % line for line in refused[:4]]
+    for role in ('owner', 'sharer'):
+        mine = [line for line in engaged if ' role=%s ' % role in line]
+        if len(mine) != 1:
+            problems.append('%s=1 and %d engaged line(s) with role=%s (%s): expected exactly one' % (
+                SHARED_HISTORY_FLAG, len(mine), role, SHARED_HISTORY_ENGAGED))
+        elif ' tensors=%d ' % SHARED_HISTORY_TENSORS not in mine[0]:
+            problems.append('the %s engaged line does not report tensors=%d: %s' % (role, SHARED_HISTORY_TENSORS, mine[0].strip()[:200]))
+    return problems
+
+
 def u1_problems(env, container_text):
     lines = container_text.splitlines()
     problems = ['the unit-major all-reduce audit found a difference: %s' % line.strip()[:200] for line in lines if U1_MISMATCH in line][:4]
@@ -1351,6 +1382,7 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         problems.append('%s=2 is set and no engaged line (%s) was logged: the split recurrence never ran' % (GDN_SPLIT_FLAG, GDN_SPLIT_ENGAGED))
     problems += sampdraft_problems(container_text, env)
     problems += u1_problems(env, container_text)
+    problems += shared_history_problems(env, container_text)
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
     if env is not None and env.get('QWEN_FAST_TP', '2') != '2':

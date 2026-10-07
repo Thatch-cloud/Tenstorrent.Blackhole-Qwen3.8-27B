@@ -18,6 +18,7 @@ import memory_ledger
 from memory_ledger import MemoryLedger
 import serving_c2_contract as contract
 import tp_addresses
+import tp_shapes
 import test_gdn_user_batch_tp as quad_tests
 from test_gdn_user_batch import KERNELS
 
@@ -74,8 +75,10 @@ class FlagTests(Clean):
         self.assertIn('QWEN_FAST_TP=4', shared.refusal({**on, 'QWEN_FAST_TP': '2', 'QWEN_FAST_M3_BLOCKS': '2'}))
         self.assertIn('QWEN_FAST_M3_BLOCKS=2', shared.refusal({**on, 'QWEN_FAST_TP': '4'}))
         self.assertIn('QWEN_FAST_M3_BLOCKS=2', shared.refusal({**on, 'QWEN_FAST_TP': '4', 'QWEN_FAST_M3_BLOCKS': '1'}))
-        self.assertIn('K5-A', shared.refusal({**on, **FOUR, 'QWEN_FAST_GDN_SEQ_BLOCK': '1'}))
+        # K5-A is the served launch (the image bakes it): the lever rides on it, so it is not a refusal
+        self.assertIsNone(shared.refusal({**on, **FOUR, 'QWEN_FAST_GDN_SEQ_BLOCK': '1'}))
         self.assertIsNone(shared.refusal({**on, **FOUR, 'QWEN_FAST_GDN_SEQ_BLOCK': '0'}))
+        self.assertIn('QWEN_FAST_GDN_SPLIT_V', shared.refusal({**on, **FOUR, 'QWEN_FAST_GDN_SPLIT_V': '2'}))
         self.assertIn('needs %s=1' % shared.FLAG, shared.refusal({shared.GROW_FLAG: '1', **FOUR}))
         with self.assertRaises(ValueError):
             shared.refusal({shared.FLAG: 'maybe'})
@@ -174,7 +177,7 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(PROFILES[name]['engine']['num-gpu-blocks-override'], 19968)
             self.assertEqual(PROFILES[name]['env']['QWEN36_MAX_TOKENS_ALL_USERS'], '1277440')
 
-    def test_the_arm_differs_from_its_control_by_the_flag_alone_and_the_control_from_the_audited_ship_by_the_ledger_alone(self):
+    def test_the_arm_differs_from_its_control_by_the_flag_alone_and_the_control_from_the_audited_ship_by_the_ledger_line_alone(self):
         arm, control, ship = PROFILES[ARM], PROFILES[CONTROL], PROFILES[SHIP_AUDIT]
         self.assertEqual({key for key in arm['env'] if arm['env'].get(key) != control['env'].get(key)} |
                          {key for key in control['env'] if arm['env'].get(key) != control['env'].get(key)}, {shared.FLAG})
@@ -549,6 +552,297 @@ class LedgerAttributionTests(unittest.TestCase):
             vars(pool._held)
 
 
+ENVIRONMENT = json.loads((Path(__file__).parents[2] / 'docker' / 'qwen-c2-v235-environment.json').read_text(encoding='utf-8'))
+
+
+def effective_environment(profile_name):
+    """What the card runs: the image's baked ENV (qwen_configuration) with the profile's env laid over it, exactly as
+    serving_c2_contract.apply_environment does."""
+    environ = dict(ENVIRONMENT['qwen_configuration'])
+    contract.apply_environment(dict(PROFILES[profile_name], name=profile_name), environ)
+    return environ
+
+
+class EffectiveEnvironmentTests(Clean):
+    """Every earlier test built its blocks from {QWEN_FAST_TP, QWEN_FAST_M3_BLOCKS}; the cards run the image's environment plus the
+    profile's, which bakes K5-A and the deferred GDN commits."""
+
+    def test_the_image_serves_k5a_and_defers_the_gdn_commits(self):
+        image = ENVIRONMENT['qwen_configuration']
+        for flag in ('QWEN_FAST_GDN_SEQ_BLOCK', 'QWEN_FAST_GDN_USER_BATCH', 'QWEN_FAST_EARLY_DRAFT', 'QWEN_FAST_GDN_AFTER_PAIRS',
+                     'QWEN_FAST_ROUND_FENCES', 'QWEN_FAST_PIPELINED_COMMITS', 'QWEN_FAST_MEMORY_LEDGER'):
+            self.assertEqual(image.get(flag), '1', flag)
+
+    def test_no_four_e_profile_is_refused_in_the_environment_it_runs_in(self):
+        for name in (ARM, PLAIN, GROW):
+            with self.subTest(profile=name):
+                environ = effective_environment(name)
+                self.assertEqual(environ[shared.FLAG], '1')
+                self.assertEqual(environ['QWEN_FAST_GDN_SEQ_BLOCK'], '1', 'the lever rides on the served K5-A launch')
+                self.assertIsNone(shared.refusal(environ))
+
+    def test_the_schedule_in_that_environment_defers_the_commits_and_flushes_at_the_shared_history_site(self):
+        import early_draft
+
+        for name in (ARM, PLAIN, GROW, CONTROL):
+            with self.subTest(profile=name):
+                environ = effective_environment(name)
+                self.assertTrue(early_draft.gdn_after_pairs_enabled(environ))
+        self.assertIn(shared.FLUSH_SITE, early_draft.IN_STEP_SITES)
+
+    def test_the_ledger_is_already_on_in_the_image_so_the_control_and_the_audited_ship_differ_by_nothing_at_run_time(self):
+        control, ship = effective_environment(CONTROL), effective_environment(SHIP_AUDIT)
+        self.assertEqual(control, ship)
+        arm = effective_environment(ARM)
+        self.assertEqual({key for key in {*arm, *control} if arm.get(key) != control.get(key)}, {shared.FLAG})
+
+    def test_split_v_is_still_refused_because_its_twin_is_not_plumbed(self):
+        environ = effective_environment(ARM)
+        for value in ('', '0', '1'):
+            self.assertIsNone(shared.refusal(dict(environ, QWEN_FAST_GDN_SPLIT_V=value)))
+        self.assertIn('QWEN_FAST_GDN_SPLIT_V', shared.refusal(dict(environ, QWEN_FAST_GDN_SPLIT_V='2')))
+
+
+class TwinBindingTests(Clean):
+    def test_the_k5a_execute_twin_is_bound_only_when_the_flag_is_on(self):
+        production = tp_addresses.bound_twins(effective_environment(SHIP))
+        self.assertNotIn(('gdn_seq_block', 'execute', 'gdn_shared_history', 'seq_block_execute'), production[0])
+        self.assertEqual(production, tp_addresses.bound_twins(effective_environment(CONTROL)),
+                         'production binds exactly what it did before the lever existed (the control is its twin)')
+        for name in (ARM, PLAIN, GROW):
+            rows = tp_addresses.bound_twins(effective_environment(name))[0]
+            self.assertEqual([row for row in rows if row[:2] == ('gdn_seq_block', 'execute')],
+                             [('gdn_seq_block', 'execute', 'gdn_shared_history', 'seq_block_execute')])
+            self.assertEqual([row for row in rows if row[:2] != ('gdn_seq_block', 'execute')],
+                             [row for row in production[0] if row[:2] != ('gdn_seq_block', 'execute')])
+
+    def test_installing_rebinds_the_pinned_execute_to_the_twin_and_uninstalling_puts_it_back(self):
+        import gdn_seq_block
+
+        pinned = gdn_seq_block.execute
+        environ = effective_environment(ARM)
+        with patch.dict(os.environ, environ):
+            tp_addresses.install()
+            self.addCleanup(tp_addresses.uninstall)
+            self.assertIs(gdn_seq_block.execute, shared.seq_block_execute)
+            self.assertIs(shared._PINNED, pinned)
+            tp_addresses.uninstall()
+        self.assertIs(gdn_seq_block.execute, pinned)
+
+    def test_outside_a_capture_the_twin_is_the_pinned_function(self):
+        calls = []
+        with patch.object(shared, '_PINNED', lambda *args, **kwargs: calls.append((args, kwargs)) or 'pinned'):
+            self.assertIsNone(shared.active())
+            self.assertEqual(shared.seq_block_execute('mesh', ['users'], 'ops', output_memory='dram', kernels='build'), 'pinned')
+        self.assertEqual(calls, [(('mesh', ['users'], 'ops'), dict(output_memory='dram', kernels='build'))])
+
+
+class ServedPathFake(quad_tests.FourChipTTNN):
+    """The four-chip launch fake plus the few ttnn calls gdn_user_batch_conv makes around the recurrence."""
+
+    def __init__(self):
+        super().__init__()
+        self.made = 0
+        self.freed_objects = []
+        self.transformer = SimpleNamespace(gdn_decode_conv_gates=self.conv_gates)
+
+    def make(self, name, shape):
+        self.made += 1
+        return quad_tests.FakeTensor(name, shape, 10 ** 6 + 16 * self.made)
+
+    def to_memory_config(self, value, memory):
+        return value
+
+    def clone(self, value, memory_config=None):
+        return self.make('clone:' + value.name, value.shape)
+
+    def slice(self, value, start, stop, memory_config=None):
+        return self.make('z:' + value.name, (1, stop[1] - start[1], stop[2] - start[2]))
+
+    def conv_gates(self, projected, windows, taps, a, b, dt_bias, neg_exp_A, batch=None, memory_config=None, channels=None,
+                   a_col=None, b_col=None):
+        found = tp_shapes.active()
+        return [self.make('conv', (1, batch, channels)), self.make('beta', (1, batch, found.gdn_nv)),
+                self.make('gate', (1, batch, found.gdn_nv))]
+
+    def deallocate(self, value):
+        super().deallocate(value)
+        self.freed_objects.append(value)
+
+
+class ServedPathTests(Clean):
+    """The served launch itself: gdn_user_batch_conv.run_user_batched_projected under the K5-A flag (the image's), the K5-A audit on one
+    layer, and the shared history, with the twins installed as the card process installs them. The pool must hand out exactly 192
+    tensors a block capture, nothing to the warm forward or to the audit's served launch, and free none of its own."""
+
+    LAYERS = 48
+    AUDIT_LAYER = 23
+
+    def setUp(self):
+        super().setUp()
+        from test_gdn_seq_block import build as seq_build
+
+        environ = {'QWEN_FAST_TP': '4', 'QWEN_FAST_M3_BLOCKS': '2', 'QWEN_FAST_GDN_USER_BATCH': '1',
+                   'QWEN_FAST_GDN_SEQ_BLOCK': '1', 'QWEN_FAST_GDN_SEQ_BLOCK_AUDIT': str(self.AUDIT_LAYER),
+                   shared.FLAG: '1'}
+        patcher = patch.dict(os.environ, environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        tp_addresses.install()
+        self.addCleanup(tp_addresses.uninstall)
+        for name, value in (('gdn_multitoken.validate_handoff_runtime', None),
+                            ('gdn_seq_block.served_kernels', seq_build())):
+            patched = patch(name, return_value=value)
+            patched.start()
+            self.addCleanup(patched.stop)
+        self.fake = ServedPathFake()
+        self.first, self.second = block(), block()
+        self.pool = shared.join(self.first, environ=os.environ)
+        shared.join(self.second, environ=os.environ)
+
+    def layer(self, index):
+        import gdn_seq_block
+        import gdn_user_batch_conv
+
+        fake, found = self.fake, tp_shapes.active()
+        groups = [(fake.make('projected', (1, 16, found.gdn_qkvzab)), fake.make('initial', (1, found.gdn_nv, 128, 128)),
+                   [fake.make('conv', (1, 1, found.gdn_qkv)) for tap in range(4)]) for user in range(4)]
+        taps = [fake.make('tap', (1, 1, found.gdn_qkv)) for tap in range(4)]
+        extras = (fake.make('dt', (1, 1, found.gdn_nv)), fake.make('nega', (1, 1, found.gdn_nv)), fake.make('norm_w', (1, 1, 128)))
+
+        def windows(mesh, projected, history):
+            return [fake.make('window', (1, projected.shape[1], found.gdn_qkv)) for slot in range(4)]
+
+        with patch('gdn_conv_windows.build_windows', side_effect=windows), gdn_seq_block.audit_scope(index):
+            results = gdn_user_batch_conv.run_user_batched_projected(
+                quad_tests.four_mesh(), groups, taps, *extras, KERNELS, fake)
+        owned = [value for result in results for value in result['owned']]
+        held = gdn_seq_block.audit_held_of(dict(results[0], segment_results=tuple(results)))
+        tp_addresses.release_owned(fake, owned + held)
+        return results
+
+    def capture(self, block_):
+        results = []
+        with self.pool.capture(block_, self.fake):
+            for index in range(self.LAYERS):
+                results.append(self.layer(index))
+        return results
+
+    def private_histories(self):
+        return [value for value in self.fake.allocated if tuple(value.shape) == (16, 12, 128, 128)]
+
+    def test_each_block_capture_takes_exactly_192_tensors_and_the_second_is_handed_the_first_ones(self):
+        warm = self.layer(0)
+        self.assertEqual((self.pool.cursor, len(self.pool.tensors)), (0, 0), 'the warm forward takes nothing from the pool')
+        self.assertTrue(all(result.get('seq_block') for result in warm), 'the launch is the served K5-A one')
+        before = len(self.private_histories())
+        first = self.capture(self.first)
+        self.assertEqual((self.pool.cursor, len(self.pool.tensors), self.pool.expected), (192, 192, 192))
+        self.assertEqual(len(self.private_histories()) - before, 192 + 4,
+                         'the pool built 192; the audited layer\'s served launch allocated its own 4 privately')
+        states = [result['states'] for layer in first for result in layer]
+        self.assertTrue(all(shared.holds(value) for value in states))
+        self.assertEqual(len({id(value) for value in states}), 192)
+        self.assertTrue(all(result.get('seq_block') for layer in first for result in layer))
+        before = len(self.private_histories())
+        second = self.capture(self.second)
+        self.assertEqual(len(self.private_histories()) - before, 4, 'only the audit\'s served launch allocates a history')
+        self.assertEqual(self.pool.counts['reused'], 192)
+        self.assertTrue(all(a is b for a, b in zip(states, [result['states'] for layer in second for result in layer], strict=True)))
+
+    def test_nothing_the_pool_owns_is_ever_freed_by_the_layers_own_cleanup_and_everything_else_is(self):
+        results = self.capture(self.first)
+        pooled = {id(value) for value in self.pool.tensors}
+        self.assertFalse(pooled & {id(value) for value in self.fake.freed_objects})
+        freed = {id(value) for value in self.fake.freed_objects}
+        for layer in results:
+            for result in layer:
+                self.assertIn(id(result['output']), freed, 'the private K5-A output is released with the layer')
+
+    def test_the_audits_served_launch_inside_a_capture_allocates_privately(self):
+        with self.pool.capture(self.first, self.fake):
+            for index in range(self.LAYERS):
+                self.layer(index)
+            self.assertEqual(self.pool.cursor, 192)
+            self.assertIsNone(shared.active_batched(), 'under K5-A the batched launch never takes from the pool')
+            self.assertIs(shared.active(), self.pool)
+
+    def test_a_k5a_launch_that_fails_leaves_the_pooled_tensors_alone(self):
+        self.capture(self.first)
+        freed = len(self.fake.freed_objects)
+        self.fake.generic_op = lambda tensors, program: (_ for _ in ()).throw(RuntimeError('device'))
+        with self.assertRaisesRegex(RuntimeError, 'device'):
+            with self.pool.capture(self.second, self.fake):
+                self.layer(0)
+        pooled = {id(value) for value in self.pool.tensors}
+        self.assertFalse(pooled & {id(value) for value in self.fake.freed_objects[freed:]})
+        self.assertGreater(len(self.fake.freed_objects), freed, 'the launch\'s own private tensors were released')
+
+    def test_an_aliasing_wrapper_of_a_pooled_buffer_is_still_the_pools(self):
+        first = self.capture(self.first)
+        states = first[0][0]['states']
+        alias = quad_tests.FakeTensor('alias', states.shape, states.address)
+        self.assertFalse(shared.holds(alias))
+        self.fake.freed_objects.clear()
+        tp_addresses.release_owned(self.fake, [alias])
+        self.assertEqual(self.fake.freed_objects, [], 'released by address: the pool still owns that buffer')
+        stranger = quad_tests.FakeTensor('stranger', states.shape, 777777)
+        tp_addresses.release_owned(self.fake, [stranger])
+        self.assertEqual(self.fake.freed_objects, [stranger])
+
+
+class RefusalLoggingTests(Clean):
+    def test_a_runtime_refusal_in_claim_is_logged_with_the_refused_marker_before_it_raises(self):
+        lines = []
+        env = {shared.FLAG: '1', **FOUR}
+        a, b = block(), block()
+        pool = shared.join(a, log=lines.append, environ=env)
+        shared.join(b, environ=env)
+        pool.claim(a)
+        a.phase = 'verified'
+        with self.assertRaisesRegex(ValueError, 'Commit-before-reuse refused'):
+            pool.claim(b)
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith(shared.REFUSED_MARKER + ' site=claim reason=Commit-before-reuse refused'))
+
+    def test_the_flush_is_logged_with_its_site_and_count(self):
+        lines = []
+        env = {shared.FLAG: '1', **FOUR}
+        a, b = block(), block()
+        pool = shared.join(a, log=lines.append, environ=env)
+        shared.join(b, environ=env)
+        a.deferred_commits = [(0, 1), (1, 2), (2, 3), (3, 4)]
+        a.flush_commits = lambda site: a.deferred_commits.clear()
+        pool.claim(a)
+        pool.claim(b)
+        self.assertEqual(lines, ['%s site=shared-history commits=4' % shared.FLUSH_MARKER])
+
+    def test_the_smoke_check_demands_both_roles_and_no_refusal(self):
+        import c2_smoke_check as smoke
+
+        engaged = [('%s role=%s blocks=2 users=4 layers=48 tensors=192 tensor_bytes=6291456 freed_per_chip=1207959552 '
+                    'kv_blocks_gained=2168') % (shared.ENGAGED_MARKER, role) for role in ('owner', 'sharer')]
+        env = {shared.FLAG: '1'}
+        self.assertEqual(smoke.shared_history_problems(env, '\n'.join(engaged)), [])
+        self.assertEqual(smoke.shared_history_problems({}, 'nothing'), [])
+        self.assertTrue(smoke.shared_history_problems({}, engaged[0]), 'lines on a profile without the flag')
+        self.assertTrue(smoke.shared_history_problems(env, engaged[0]), 'one role missing')
+        self.assertTrue(smoke.shared_history_problems(env, '\n'.join(engaged + engaged[:1])), 'an owner twice')
+        self.assertTrue(smoke.shared_history_problems(env, '\n'.join(engaged).replace('tensors=192', 'tensors=191')))
+        refused = '%s site=claim reason=Commit-before-reuse refused' % shared.REFUSED_MARKER
+        self.assertTrue(any('refused' in problem for problem in smoke.shared_history_problems(env, '\n'.join(engaged + [refused]))))
+
+
+class ConstructionFailureTests(unittest.TestCase):
+    def test_the_join_is_inside_the_constructors_try_so_a_refusal_closes_the_block(self):
+        text = (Path(__file__).with_name('packed_verifier.py')).read_text(encoding='utf-8')
+        marker = 'self.shared_history = gdn_shared_history.join(self, log=diagnostic)'
+        self.assertEqual(text.count(marker), 1)
+        before = text[:text.index(marker)]
+        self.assertGreater(before.rindex('        try:\n'), before.rindex("        started = time.perf_counter()\n"),
+                           'the join comes after the try that closes the block on a failure')
+
+
 class OffByDefaultTests(unittest.TestCase):
     def test_nothing_in_the_serving_path_imports_the_module_unless_a_flag_is_set(self):
         import re
@@ -570,7 +864,13 @@ class OffByDefaultTests(unittest.TestCase):
         tree = ast.parse((Path(__file__).with_name('gdn_shared_history.py')).read_text(encoding='utf-8'))
         modules = {alias.name.split('.')[0] for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
         modules |= {node.module.split('.')[0] for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
-        self.assertEqual(modules, {'contextlib', 'os'})
+        # gdn_seq_block (the pinned execute the K5-A twin wraps) and ttnn (the default `operations`) are imported inside functions
+        # only, which the K5-A twin needs; nothing else leaves the standard library.
+        self.assertEqual(modules, {'contextlib', 'os', 'gdn_seq_block', 'ttnn'})
+        for node in tree.body:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = {alias.name for alias in node.names} | ({node.module} if isinstance(node, ast.ImportFrom) else set())
+                self.assertFalse(names & {'ttnn', 'gdn_seq_block'}, 'imported at module level')
 
 
 if __name__ == '__main__':

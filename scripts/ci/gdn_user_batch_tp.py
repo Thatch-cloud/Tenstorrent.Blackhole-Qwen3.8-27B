@@ -238,9 +238,10 @@ def execute(mesh, users, kernels, operations=None, *, output_memory=None):
 
     # QWEN_FAST_GDN_SHARED_HISTORY (gdn_shared_history, gate profiles only): inside a packed block's verify capture the states
     # are the pool's one history set, not a private allocation. sys.modules, not an import: nothing loads the module unless the
-    # flag is on, and `active()` is None outside a capture.
+    # flag is on, and `active_batched()` is None outside a capture and under K5-A (whose served launch takes from the pool through
+    # gdn_shared_history.seq_block_execute; this launch is then only the K5-A audit's served second launch, which allocates privately).
     shared_module = sys.modules.get('gdn_shared_history')
-    shared = shared_module.active() if shared_module is not None else None
+    shared = shared_module.active_batched() if shared_module is not None else None
     produced, outputs, histories = [], [], []
     try:
         for user, rows in zip(groups, widths, strict=True):

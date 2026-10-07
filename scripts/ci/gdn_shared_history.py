@@ -19,8 +19,14 @@ What this module does and does not touch:
   wrote the history are flushed first (same `flush_commits` the engine already has, site `shared-history`); a block with
   undecided segments refuses the round.
 
+The served GDN launch is K5-A (QWEN_FAST_GDN_SEQ_BLOCK=1, baked into the serving image), whose states are allocated inside the pinned
+gdn_seq_block.execute. `seq_block_execute` is the twin tp_addresses.bound_twins binds in its place when the flag is on: it calls the
+pinned execute with an operations proxy that hands the one (16, 12, 128, 128) DRAM history of each user out of the pool and never
+frees a pooled tensor. The batched launch (gdn_user_batch_tp.execute) takes from the pool only when K5-A is off; under K5-A its only
+caller is QWEN_FAST_GDN_SEQ_BLOCK_AUDIT's served audit launch, which allocates privately.
+
 QWEN_FAST_GDN_SHARED_HISTORY unset or '0': off, '1': on, anything else is refused (never read as off). Refused at attach unless
-serving is four cards with two M3 blocks and the K5-A launch is off. QWEN_FAST_GDN_SHARED_HISTORY_KV_GROW is a separate,
+serving is four cards with two M3 blocks and the split-V launch (QWEN_FAST_GDN_SPLIT_V=2, not plumbed) is off. QWEN_FAST_GDN_SHARED_HISTORY_KV_GROW is a separate,
 gate-only marker for a profile whose KV pool was sized with the freed bytes (`pool_problem`); it never changes a pool by itself.
 
 Stdlib only; overlay only.
@@ -61,6 +67,9 @@ ENGAGED_MARKER = '[PINDIAG] gdn shared history engaged'
 FLUSH_MARKER = '[PINDIAG] gdn shared history flush'
 CLOSED_MARKER = '[PINDIAG] gdn shared history closed'
 REFUSED_MARKER = '[PINDIAG] gdn shared history refused'
+# The flush site claim() logs (packed_verifier.flush_commits site=...): inside the execute_model that decided the commits, so R1
+# holds; early_draft.IN_STEP_SITES, lever_n_m3native_gate.GDN_IN_STEP_SITES and c2_serving_gate.FLUSH_SITES name it.
+FLUSH_SITE = 'shared-history'
 
 
 def _strict(flag, environ=None):
@@ -177,9 +186,9 @@ def refusal(environ=None):
         return '%s needs four-card serving (QWEN_FAST_TP=4)' % FLAG
     if source.get('QWEN_FAST_M3_BLOCKS', '1') != '2':
         return '%s needs two M3 blocks (QWEN_FAST_M3_BLOCKS=2): one block has nothing to share with' % FLAG
-    if source.get('QWEN_FAST_GDN_SEQ_BLOCK', '0') not in ('', '0'):
-        return ('%s is refused with the K5-A launch (QWEN_FAST_GDN_SEQ_BLOCK): its states are allocated inside pinned sources '
-                'and are not plumbed' % FLAG)
+    if source.get('QWEN_FAST_GDN_SPLIT_V', '') not in ('', '0', '1'):
+        return ('%s is refused with the split-V launch (QWEN_FAST_GDN_SPLIT_V=%s): its twin is not plumbed to the pool'
+                % (FLAG, source.get('QWEN_FAST_GDN_SPLIT_V')))
     return None
 
 
@@ -188,6 +197,7 @@ def refusal(environ=None):
 _POOL = None
 _ACTIVE = None
 _HELD = {}
+_HELD_ADDRESSES = set()
 
 
 def active():
@@ -195,9 +205,27 @@ def active():
     return _ACTIVE
 
 
+def kernel_launch_is_seq_block(environ=None):
+    """Whether the served GDN launch is K5-A (the image bakes QWEN_FAST_GDN_SEQ_BLOCK=1)."""
+    return (os.environ if environ is None else environ).get('QWEN_FAST_GDN_SEQ_BLOCK', '0') not in ('', '0')
+
+
+def active_batched(environ=None):
+    """The pool the BATCHED launch (gdn_user_batch_tp.execute) takes from: the active one, except under K5-A, where the served
+    launch is gdn_seq_block.execute (see seq_block_execute) and the batched launch is only the audit's served second launch, which
+    must allocate privately."""
+    return None if kernel_launch_is_seq_block(environ) else _ACTIVE
+
+
 def holds(tensor):
     """Whether the pool owns `tensor` (tp_addresses.release_owned leaves such tensors to it)."""
     return id(tensor) in _HELD
+
+
+def holds_addresses(key):
+    """Whether `key` (a tuple of per-chip buffer addresses) is one of the pool's buffers, whatever wrapper object names it: ttnn may
+    return a new wrapper for a no-op conversion, and release_owned identifies buffers by address."""
+    return key in _HELD_ADDRESSES
 
 
 def current():
@@ -209,6 +237,7 @@ def reset():
     global _POOL, _ACTIVE
     _POOL, _ACTIVE = None, None
     _HELD.clear()
+    _HELD_ADDRESSES.clear()
 
 
 def join(block, *, log=None, environ=None):
@@ -307,6 +336,7 @@ class SharedHistory:
             if operations is not None:
                 operations.deallocate(tensor)
         self.tensors, self.closed = [], True
+        _HELD_ADDRESSES.clear()
         if _ACTIVE is self:
             _ACTIVE = None
         self.say('%s tensors=%d bytes_per_chip=%d' % (CLOSED_MARKER, count, freed))
@@ -367,6 +397,9 @@ class SharedHistory:
                                       memory_config=operations.DRAM_MEMORY_CONFIG)
             self.tensors.append(states)
             _HELD[id(states)] = states
+            key = _address_key(operations, states)
+            if key is not None:
+                _HELD_ADDRESSES.add(key)
             return states
         if index >= len(self.tensors):
             raise ValueError('The second capture asked for more history tensors than the first built (%d)' % len(self.tensors))
@@ -389,11 +422,13 @@ class SharedHistory:
             if held:
                 self.counts['flushes'] += 1
                 self.counts['flushed_commits'] += held
-                other.flush_commits('shared-history')
+                other.flush_commits(FLUSH_SITE)
+                self.say('%s site=%s commits=%d' % (FLUSH_MARKER, FLUSH_SITE, held))
             pending = history_pending(other)
             if pending:
-                raise ValueError('Commit-before-reuse refused: the block that last wrote the shared history has %s'
-                                 % pending)
+                problem = 'Commit-before-reuse refused: the block that last wrote the shared history has %s' % pending
+                self.say('%s site=claim reason=%s' % (REFUSED_MARKER, problem))
+                raise ValueError(problem)
         self.writer = block
         self.counts['claims'] += 1
 
@@ -421,3 +456,68 @@ def history_pending(block):
     if getattr(block, 'deferred_commits', None):
         return '%d deferred commit traces not enqueued' % len(block.deferred_commits)
     return ''
+
+
+def _address_key(operations, tensor):
+    """The per-chip buffer addresses of `tensor` (tp_addresses.addresses), or None when `operations` cannot say."""
+    try:
+        return tuple(shard.buffer_address() for shard in operations.get_device_tensors(tensor))
+    except AttributeError:
+        return None
+
+
+# ---- the K5-A twin ----------------------------------------------------------------------------------------------------------
+
+class PooledOperations:
+    """`operations` as the pinned gdn_seq_block.execute sees it inside a pool capture: the one (16, 12, 128, 128) bf16 DRAM tensor it
+    allocates per user comes from the pool, a pooled tensor is never deallocated (not even by its failure path), everything else is
+    the real operations."""
+
+    def __init__(self, operations, pool):
+        object.__setattr__(self, '_operations', operations)
+        object.__setattr__(self, '_pool', pool)
+
+    def __getattr__(self, name):
+        return getattr(self._operations, name)
+
+    def __setattr__(self, name, value):
+        raise AttributeError('PooledOperations is read-only')
+
+    def empty(self, shape, *args, **kwargs):
+        operations = self._operations
+        if (tuple(shape) == (ROWS_PER_USER, HEADS, STATE_SIDE, STATE_SIDE) and not args
+                and kwargs.get('dtype') == operations.bfloat16 and kwargs.get('memory_config') == operations.DRAM_MEMORY_CONFIG):
+            return self._pool.take(operations, kwargs.get('device'), shape[0], shape[1])
+        return operations.empty(shape, *args, **kwargs)
+
+    def deallocate(self, tensor, *args, **kwargs):
+        if holds(tensor):
+            return None
+        return self._operations.deallocate(tensor, *args, **kwargs)
+
+
+def _pinned_seq_block_execute():
+    import gdn_seq_block
+
+    return gdn_seq_block.execute
+
+
+# Captured when this module is first imported, which tp_addresses.install() does BEFORE it rebinds gdn_seq_block.execute (it imports
+# every twin module first), so it is the pinned function; the check after the twin refuses a late import that would capture a twin.
+_PINNED = _pinned_seq_block_execute()
+
+
+def seq_block_execute(mesh, users, operations=None, *, output_memory=None, kernels=None):
+    """gdn_seq_block.execute (the K5-A launch) with its history states taken from the pool inside a verify capture; every other call
+    (the warm forward, a sequential engine, the pool closed) is the pinned function's, with the real operations."""
+    pool = active()
+    if pool is None or isinstance(operations, dict):
+        # (A dict in the operations slot is the pinned function's own drop-in refusal, before the proxy could hide it.)
+        return _PINNED(mesh, users, operations, output_memory=output_memory, kernels=kernels)
+    if operations is None:
+        import ttnn as operations
+    return _PINNED(mesh, users, PooledOperations(operations, pool), output_memory=output_memory, kernels=kernels)
+
+
+if getattr(_PINNED, '__module__', None) == __name__:
+    raise ImportError('gdn_shared_history was imported after the K5-A twin was bound; the pinned execute is not recoverable')

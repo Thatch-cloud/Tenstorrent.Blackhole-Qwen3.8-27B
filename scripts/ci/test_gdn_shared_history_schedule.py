@@ -329,7 +329,7 @@ class ConstructionTests(Rig):
 
     def test_a_flag_the_environment_cannot_honour_stops_the_attach_with_the_reason_logged(self):
         for environ, message in (({shared.FLAG: '1', 'QWEN_FAST_TP': '2'}, 'QWEN_FAST_TP=4'),
-                                 ({shared.FLAG: '1', 'QWEN_FAST_GDN_SEQ_BLOCK': '1', 'QWEN_FAST_GDN_USER_BATCH': '1'}, 'K5-A'),
+                                 ({shared.FLAG: '1', 'QWEN_FAST_GDN_SPLIT_V': '2'}, 'QWEN_FAST_GDN_SPLIT_V'),
                                  ({shared.GROW_FLAG: '1'}, 'needs ' + shared.FLAG)):
             with self.subTest(environ=environ):
                 self.setUp()
@@ -338,6 +338,17 @@ class ConstructionTests(Rig):
                         self.block((0, 1, 2, 3))
                 self.assertTrue(any(line.startswith(shared.REFUSED_MARKER) for line in self.lines))
                 self.assertIsNone(shared.current())
+
+    def test_a_refusal_at_attach_closes_the_block_and_returns_what_the_constructor_took(self):
+        # join() runs inside the constructor's try: the refusal goes through close(), which returns the replay tables and stops the
+        # deadline watchdog, instead of leaking them with a half-built block.
+        with patch.dict(os.environ, {**BASE_ENV, shared.FLAG: '1', 'QWEN_FAST_GDN_SPLIT_V': '2'}):
+            with self.assertRaisesRegex(ValueError, 'QWEN_FAST_GDN_SPLIT_V'):
+                self.block((0, 1, 2, 3))
+        self.assertFalse([tables for tables in self.sets if tables.taken], 'the packed replay tables were handed back')
+        self.assertTrue(any('failed' in line.lower() or 'construction' in line.lower() or 'refused' in line.lower()
+                            for line in self.lines))
+        self.assertIsNone(shared.current())
 
     def test_a_malformed_flag_is_not_read_as_off(self):
         with patch.dict(os.environ, {**BASE_ENV, shared.FLAG: 'on'}):
@@ -356,7 +367,7 @@ class ExactnessTests(Rig):
             self.step(number, prefixes, deferred=deferred)
         return self.carries(), rounds
 
-    def test_blocking_commits_share_and_stay_exact_at_no_cost(self):
+    def test_blocking_commits_share_and_stay_exact_with_nothing_to_flush(self):
         private, rounds = self.run_schedule({})
         sharing, unused = self.run_schedule({shared.FLAG: '1'})
         self.assertEqual(sharing, private)
@@ -432,6 +443,66 @@ class ExactnessTests(Rig):
         self.assertEqual((pool.counts['flushes'], pool.counts['claims']), (0, 2))
         rounds = [[[3, 3, 3, 3], [0, 0, 0, 0]], [[1, 2, 3, 4], [0, 0, 0, 0]]]
         self.assertEqual(self.carries(), reference(rounds))
+
+
+class ImageEnvironmentTests(Rig):
+    """The schedule under the environment the cards run: the image's baked ENV (K5-A, deferred GDN commits after the pairs, round
+    fences, pipelined commits, the ledger) with the arm's profile env over it."""
+
+    def effective(self, flag=True):
+        from test_gdn_shared_history import ARM, CONTROL, effective_environment
+
+        environ = effective_environment(ARM if flag else CONTROL)
+        # the sim builds its own mesh and fixture: only the flags the packed block itself reads are applied
+        keep = ('QWEN_FAST_GDN', 'QWEN_FAST_PIPELINED_COMMITS', 'QWEN_FAST_ROUND_FENCES', 'QWEN_FAST_EARLY_DRAFT',
+                'QWEN_FAST_MEMORY_LEDGER', 'QWEN_FAST_M3_BLOCKS', 'QWEN_FAST_TP')
+        return {key: value for key, value in environ.items() if key.startswith(keep)}
+
+    def run_rounds(self, flag, rounds):
+        self.setUp()
+        self.build(self.effective(flag))
+        for number, prefixes in enumerate(rounds, 1):
+            self.step(number, prefixes, deferred=True)
+        return self.carries()
+
+    def test_the_environment_the_cards_run_defers_the_commits_and_engages_the_pool(self):
+        environ = self.effective()
+        self.assertEqual(environ[shared.FLAG], '1')
+        self.assertEqual(environ['QWEN_FAST_GDN_SEQ_BLOCK'], '1')
+        self.assertEqual(environ['QWEN_FAST_GDN_AFTER_PAIRS'], '1')
+        blocks = self.build(environ)
+        self.assertIsNotNone(blocks[0].shared_history)
+        self.assertTrue(all(block.round_fences for block in blocks))
+
+    def test_the_deferred_schedule_is_exact_under_the_image_environment_and_the_order_holds(self):
+        rounds = random_rounds(ExactnessTests.ROUNDS, 7)
+        control = self.run_rounds(False, rounds)
+        sharing = self.run_rounds(True, rounds)
+        self.assertEqual(sharing, control)
+        self.assertEqual(sharing, reference(rounds))
+        self.assertEqual(ExactnessTests.commit_groups_are_the_verifying_blocks(self, self.device.events, rounds), [])
+
+    def test_one_shared_history_flush_a_round_for_block_a_and_blocks_own_at_the_window_site_and_nothing_dropped(self):
+        rounds = [[[1, 2, 3, 4], [5, 6, 7, 8]] for number in range(6)]
+        self.run_rounds(True, rounds)
+        flushes = [line for line in self.lines if line.startswith(packed_flush_marker())]
+        sites = [line.split(' site=')[1].split(' ')[0] for line in flushes]
+        # block A's four commits are flushed by block B's claim every round; block B's own go at the end of the step
+        self.assertEqual(sites.count('shared-history'), len(rounds))
+        self.assertEqual(sites.count('end'), 2 * len(rounds) - len(rounds))
+        self.assertFalse([line for line in flushes if 'dropped=' in line])
+        self.assertFalse([site for site in sites if site not in ('shared-history', 'end')])
+        pool = self.blocks[0].shared_history
+        self.assertEqual((pool.counts['flushes'], pool.counts['flushed_commits']), (len(rounds), 4 * len(rounds)))
+        import early_draft
+
+        self.assertTrue(all(site in early_draft.IN_STEP_SITES for site in sites))
+
+
+def packed_flush_marker():
+    import early_draft
+
+    return early_draft.GDN_MARKER
 
 
 class RefusalTests(Rig):

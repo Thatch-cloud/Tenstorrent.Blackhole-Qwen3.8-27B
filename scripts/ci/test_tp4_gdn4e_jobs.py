@@ -21,8 +21,11 @@ BASE = 'c2-packed-tp4-8x262k-ship-prefix-4e'
 CONTROL, ARM, PLAIN, GROW = BASE + '-control-audit', BASE + '-audit', BASE, BASE + '-grow'
 BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|/dev/tenstorrent|home/|zot\.')
 ORDERED = ('X0-status-rescan-reset', 'B0-build', 'S0c-control-attach-smoke', 'S0-audited-attach-smoke', 'H1-hang-shapes-4e', 'H2-hang-shapes-4e',
-           'A5-admission5-grow', 'A5c-admission5-control', 'E1-ladder8-exactness', 'Z-reset')
-SOFT = ('A5c-admission5-control', 'E1-ladder8-exactness', 'Z-reset')
+           'T1-control-timed', 'T2-4e-timed', 'T3-control-timed', 'T4-4e-timed', 'E1-ladder8-exactness', 'A5-admission5-grow',
+           'A5c-admission5-control', 'Z-reset')
+TIMED = ('T1-control-timed', 'T2-4e-timed', 'T3-control-timed', 'T4-4e-timed')
+SOFT = TIMED + ('A5c-admission5-control', 'E1-ladder8-exactness', 'Z-reset')
+SHIP = 'c2-packed-tp4-8x262k-ship-prefix'
 SMOKE = 'warmup,coding,concurrent8_steady,concurrent8_code_32k,concurrent8_code_equal'
 
 
@@ -65,18 +68,117 @@ class Pack(unittest.TestCase):
 
     def test_the_total_in_the_order_header_is_the_sum_of_its_lines(self):
         total = sum(int(row[3]) for row in read_order())
-        self.assertEqual(total, 369)
-        self.assertIn('20+60+40+40+15+15+65+65+45+4 = 369 min = 6.2 h', order_text())
-        self.assertEqual(round(total / 60, 1), 6.2)
+        self.assertEqual(total, 505)
+        self.assertIn('4+22+40+40+15+15+35+35+35+35+45+90+90+4 = 505 min = 8.4 h', order_text())
+        self.assertEqual(round(total / 60, 1), 8.4)
+        rows = read_order()
+        hard = sum(int(row[3]) for row in rows if row[1] in ('stop', 'pre'))
+        self.assertEqual(hard, 226)
+        self.assertEqual(hard - 22, 204)
+        self.assertIn('226 min = 3.8 h, 204 min = 3.4 h without B0', order_text())
+        self.assertEqual(sum(int(row[3]) for row in rows if row[1] == 'soft'), 279)
+        self.assertEqual((round(226 / 60, 1), round(204 / 60, 1)), (3.8, 3.4))
+
+    def test_the_minutes_cite_the_measured_times_and_budget_two_attaches_for_the_two_arm_plans(self):
+        with open(os.path.join(HERE, 'references', 'tp4-ship-262k-prefix-jobs', 'ORDER.txt'), encoding='utf-8') as handle:
+            measured = handle.read()
+        self.assertIn('status+rescan+reset 4, image build 22', measured)
+        rows = {row[0]: int(row[3]) for row in read_order()}
+        self.assertEqual((rows['X0-status-rescan-reset'], rows['B0-build']), (4, 22))
+        for name in ('A5-admission5-grow', 'A5c-admission5-control'):
+            arms = [arm[0] for arm in self.plan_arms(name)]
+            self.assertEqual(arms, ['memory-concurrent', 'memory-short'], name)
+            self.assertGreaterEqual(rows[name], len(arms) * 18 + 45, 'one attach per arm and the five cold prefills')
+        for name in TIMED:
+            self.assertGreaterEqual(rows[name], 18 + 15, name)
 
     def test_the_dependencies_name_real_jobs(self):
         names = set(ORDERED)
         needs = [line for line in order_text().splitlines() if line.startswith('# NEEDS ') and '<-' in line]
-        self.assertEqual(len(needs), 3)
+        self.assertEqual(len(needs), 4)
         for line in needs:
             left, right = line[len('# NEEDS '):].split('<-')
             for word in left.split() + right.split():
                 self.assertTrue(any(name == word or name.startswith(word + '-') for name in names), (line, word))
+
+    def test_the_kill_rules_name_this_pack_not_the_window(self):
+        order = order_text()
+        self.assertIn('a failure ends THIS pack (Z still runs)', order)
+        self.assertIn('only job whose failure may end the whole window', order)
+        for name in ORDERED:
+            text = text_of(name)
+            self.assertNotRegex(text, r'(stops|ends) the window', name)
+            if name != 'X0-status-rescan-reset' and 'Stop rule' in text:
+                self.assertIn('ends THIS pack (Z still runs', text, name)
+        self.assertIn('WHOLE combined window', text_of('X0-status-rescan-reset'))
+
+    def test_the_stop_line_that_can_fail_on_the_growth_runs_after_the_exactness_ladder_and_the_contrast_needs_it(self):
+        names = [row[0] for row in read_order()]
+        self.assertLess(names.index('E1-ladder8-exactness'), names.index('A5-admission5-grow'))
+        self.assertLess(names.index('A5-admission5-grow'), names.index('A5c-admission5-control'))
+        self.assertIn('# NEEDS A5c <- A5', order_text())
+        self.assertIn('cutting A5c forfeits the growth proposal', text_of('A5c-admission5-control'))
+        self.assertIn('forfeits the growth proposal', order_text())
+
+    def plan_arms(self, name):
+        import c2_serving_gate as gate
+
+        out = self.parsed(name)
+        lengths = [int(part) for part in out['gate_lengths'].split(',')] if out['gate_lengths'] else None
+        tokens = int(out['gate_max_tokens']) if out['gate_max_tokens'] else job.DEFAULT_MAX_TOKENS
+        prompt = int(out['gate_memory_prompt']) if out['gate_memory_prompt'] else None
+        users = int(out['gate_memory_users']) if out['gate_memory_users'] else None
+        return gate.plan_arms(out['gate_plan'], out['profile'], self.data, lengths, tokens, prompt, memory_users=users)
+
+    def test_every_gate_template_passes_the_gates_own_plan_validation(self):
+        gates = [name for name in ORDERED if 'gate' in self.parsed(name)['actions'].split()]
+        self.assertEqual(gates, ['E1-ladder8-exactness', 'A5-admission5-grow', 'A5c-admission5-control'])
+        for name in gates:
+            with self.subTest(job=name):
+                self.assertTrue(self.plan_arms(name))
+
+    def test_the_ladder_has_four_rungs_above_131072_and_none_over_what_the_profile_admits(self):
+        import serving_c2_contract as contract
+
+        out = self.parsed('E1-ladder8-exactness')
+        lengths = [int(part) for part in out['gate_lengths'].split(',')]
+        self.assertEqual(len(lengths), 8)
+        self.assertEqual(len([length for length in lengths if length > 131072]), 4)
+        room = contract.request_limits(dict(self.data['profiles'][ARM], name=ARM))['max_prompt_tokens']
+        self.assertEqual(room, 253920)
+        self.assertLessEqual(max(lengths), room)
+        self.assertIn('four rungs above 131,072', text_of('E1-ladder8-exactness'))
+
+    def test_the_timing_arms_are_paired_abab_and_differ_by_the_flag_alone_at_run_time(self):
+        import test_gdn_shared_history as flags
+
+        profiles = [self.parsed(name)['profile'] for name in TIMED]
+        self.assertEqual(profiles, [SHIP, PLAIN, SHIP, PLAIN])
+        for name in TIMED:
+            out = self.parsed(name)
+            self.assertEqual(out['tests'], 'warmup,coding,concurrent8_steady,concurrent8_code_equal')
+            self.assertNotIn('gate', out['actions'].split())
+            text = text_of(name)
+            self.assertIn('PAIRED per round', text)
+            self.assertIn('1.5 ms', text)
+        arm, control = flags.effective_environment(PLAIN), flags.effective_environment(SHIP)
+        self.assertEqual({key for key in {*arm, *control} if arm.get(key) != control.get(key)}, {shared.FLAG})
+        self.assertIn('1.5 ms', order_text())
+        self.assertIn('memory-only', order_text())
+
+    def test_the_read_rules_expect_the_flush_the_image_schedule_produces(self):
+        import early_draft
+
+        order = order_text()
+        self.assertIn('site=shared-history', order)
+        for name in ('S0-audited-attach-smoke', 'H1-hang-shapes-4e', 'H2-hang-shapes-4e'):
+            text = text_of(name)
+            self.assertNotIn("NO 'flush' line", text, name)
+            self.assertNotIn('no refused or flush line', text, name)
+            self.assertIn('shared-history', text, name)
+        self.assertIn(shared.FLUSH_SITE, early_draft.IN_STEP_SITES)
+        self.assertNotIn('costs 0 ms', order)
+        self.assertNotIn('no profile in this pack does that', order)
 
     def test_every_env_parses_with_the_job_reader(self):
         for name in ORDERED:

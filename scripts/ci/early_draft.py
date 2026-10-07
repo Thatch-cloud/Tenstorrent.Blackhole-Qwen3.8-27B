@@ -60,8 +60,10 @@ MARKER = '[PACKED-EARLY-DRAFT]'
 GDN_ENGAGED_MARKER = '[PINDIAG] gdn after pairs engaged'
 GDN_REFUSED_MARKER = '[PINDIAG] gdn after pairs refused'
 GDN_MARKER = '[PACKED-GDN-AFTER-PAIRS]'
-# The flush sites that keep R1 (inside the execute_model that decided the commits).
-IN_STEP_SITES = ('window', 'end')
+# The flush sites that keep R1 (inside the execute_model that decided the commits). 'shared-history' is the commit-before-reuse flush
+# of QWEN_FAST_GDN_SHARED_HISTORY (gdn_shared_history.FLUSH_SITE): block B's verify, in the same execute_model, flushes block A's
+# deferred commits first.
+IN_STEP_SITES = ('window', 'end', 'shared-history')
 
 MISSING = object()
 

@@ -1073,7 +1073,7 @@ EARLY_LINE = re.compile(r'\[PACKED-EARLY-DRAFT\] round=([0-9]+) path=(reuse|redo
                         r'draft_ms=([0-9.]+) reason=(\S+)')
 GDN_LINE = re.compile(r'\[PACKED-GDN-AFTER-PAIRS\] round=([0-9]+) commits=([0-9]+) site=(\S+) enqueue_ms=([0-9.]+) '
                       r'segments=(\S+)(?: dropped=([0-9]+) reason=(\S+))?')
-GDN_IN_STEP_SITES = ('window', 'end')
+GDN_IN_STEP_SITES = ('window', 'end', 'shared-history')
 EARLY_REUSE_FLOOR = 0.95
 EARLY_FLOOR_ROUNDS = 10
 

@@ -1870,7 +1870,7 @@ def live_n_of(report, n=4):
 #                extent's accept_limit cap among them), plus the round's deferred-commit flush: '[PACKED-GDN-AFTER-PAIRS]
 #                round=N commits=K site=S enqueue_ms=Q ...' Q (packed_verifier.flush_commits: the commit traces enqueued
 #                inside the flag's replay deadline, replay_deadline('flush'), which exists only under the flag). One
-#                per four-live round at site window or end (early_draft.IN_STEP_SITES) - in every four-live round of
+#                per four-live round at site window or end (early_draft.IN_STEP_SITES, which adds shared-history) - in every four-live round of
 #                all 13 arms of runs 36270917139, 36272682217 and 36276533585, site=window; absent, repeated, at
 #                another site (R1's backstops, the next step's) or a 'dropped=' line, the round's commit is missing
 #   window       '[PACKED-PRESTAGE-WINDOW] round=N buffers=B ms=X' (verify_prestage's window pre-stage of the next
@@ -1890,12 +1890,12 @@ STAGING_FIELDS = re.compile(r'\[PACKED-FENCES\] round=[0-9]+ [^\n]*?(?<![A-Za-z_
 WINDOW_FIELDS = re.compile(r'\[PACKED-PRESTAGE-WINDOW\] round=[0-9]+ buffers=[0-9]+ ms=(-?[0-9.]+)')
 FLUSH_FIELDS = re.compile(r'\[PACKED-GDN-AFTER-PAIRS\] round=[0-9]+ commits=[0-9]+ site=(\S+) enqueue_ms=(-?[0-9.]+) '
                           r'segments=\S+( dropped=)?')
-FLUSH_SITES = ('window', 'end')   # early_draft.IN_STEP_SITES: inside the step that decided the commits
+FLUSH_SITES = ('window', 'end', 'shared-history')   # early_draft.IN_STEP_SITES: inside the step that decided the commits
 PACKED_KEY_FIELDS = re.compile(r'\[PACKED\] request=\S+ segment=([0-9]+) position=([0-9]+) prefix=[0-9]+ '
                                r'emitted=([0-9]+)')
 FLAG_PHASE_LINES = (('verify', "'[PHASE] packed_verify ... end'", 1), ('split', '[PACKED-PHASE]', 1),
                     ('staging', '[PACKED-FENCES]', 1), ('commit', "'[PHASE] packed_commit ... end'", 4),
-                    ('flush', "'[PACKED-GDN-AFTER-PAIRS] ... site=window|end enqueue_ms=' (not dropped)", 1))
+                    ('flush', "'[PACKED-GDN-AFTER-PAIRS] ... site=window|end|shared-history enqueue_ms=' (not dropped)", 1))
 WINDOW_LINE_NAME = '[PACKED-PRESTAGE-WINDOW] ... ms='
 
 

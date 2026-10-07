@@ -13089,7 +13089,7 @@
       "gate_only": true
     },
     "c2-packed-tp4-8x262k-ship-prefix-4e-control-audit": {
-      "description": "GATE ONLY (the CONTROL of the exact-GDN-memory arm; never a timed or traffic arm, no waiver marker): c2-packed-tp4-8x262k-ship-prefix-audit plus the read-only memory ledger (QWEN_FAST_MEMORY_LEDGER=1), and nothing else. Its twin c2-packed-tp4-8x262k-ship-prefix-4e-audit differs by QWEN_FAST_GDN_SHARED_HISTORY=1 alone, so the ledger's packed_block lines and every answer can be read against it. Docs: docs/tp4-gdn-shared-history.md.",
+      "description": "GATE ONLY (the CONTROL of the exact-GDN-memory arm; never a timed or traffic arm, no waiver marker): c2-packed-tp4-8x262k-ship-prefix-audit plus a named read-only memory ledger (QWEN_FAST_MEMORY_LEDGER=1, which the serving image already bakes on, so at run time this IS the audited production profile), and nothing else. Its twin c2-packed-tp4-8x262k-ship-prefix-4e-audit differs by QWEN_FAST_GDN_SHARED_HISTORY=1 alone, so the ledger's packed_block lines and every answer can be read against it. Docs: docs/tp4-gdn-shared-history.md.",
       "eos_ids": [
         248046,
         248044

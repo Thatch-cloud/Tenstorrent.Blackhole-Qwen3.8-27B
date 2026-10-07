@@ -37,8 +37,10 @@ def release_owned(operations, tensors):
     # when the last block closes. Looked up in sys.modules so that nothing imports the module unless the flag loaded it.
     shared = sys.modules.get('gdn_shared_history')
     held = shared.holds if shared is not None else None
-    for tensor in unique.values():
-        if held is not None and held(tensor):
+    held_addresses = shared.holds_addresses if shared is not None else None
+    for key, tensor in unique.items():
+        # By object and by buffer address: another wrapper aliasing a pooled buffer must not free it under the other block.
+        if held is not None and (held(tensor) or held_addresses(key)):
             continue
         operations.deallocate(tensor)
 
@@ -117,6 +119,11 @@ TWINS = (
     ('draft_kv_slide_scope', 'scoped_publication', 'attach_scopes_tp', 'scoped_publication'),
 )
 
+# Bound INSTEAD of the ('gdn_seq_block', 'execute') row, by bound_twins, only when QWEN_FAST_GDN_SHARED_HISTORY=1 (gate profiles).
+SHARED_HISTORY_TWINS = (
+    ('gdn_seq_block', 'execute', 'gdn_shared_history', 'seq_block_execute'),
+)
+
 # (module, twin module): whole modules whose lazy `import name` sites must reach the four-card twin. The pinned original
 # is imported first (the twin borrows its geometry-free helpers from it), then sys.modules[name] and every module global
 # that IS the original module object are pointed at the twin.
@@ -180,6 +187,11 @@ FLAGGED_MODULE_TWINS = {
 def bound_twins(environ=None):
     """-> (TWINS rows, MODULE_TWINS rows) install() binds under `environ`: every row but the flagged ones whose flag is unset."""
     rows = tuple(row for row in TWINS if row[:2] not in FLAGGED_TWINS or FLAGGED_TWINS[row[:2]][1](environ))
+    if (os.environ if environ is None else environ).get('QWEN_FAST_GDN_SHARED_HISTORY', '0') == '1':
+        # The shared GDN history (gate profiles only): the K5-A launch's states come from the pool, so its execute is the pool's twin
+        # (gdn_shared_history.seq_block_execute, which calls the pinned execute with an operations proxy). Read from the environment
+        # only, so production binds exactly what it did before; the split-V twin it would replace is refused at attach.
+        rows = tuple(row for row in rows if row[:2] != ('gdn_seq_block', 'execute')) + SHARED_HISTORY_TWINS
     modules = tuple(row for row in MODULE_TWINS
                     if row[0] not in FLAGGED_MODULE_TWINS or FLAGGED_MODULE_TWINS[row[0]][1](environ))
     return rows, modules
