@@ -396,3 +396,13 @@ scripts/ci/prompt_lookup.py
 # tp4/hostgap (the eight-seat host gap, every flag default off): the packed bridge's step entry carries the entry diet and the stage 0 timing. It is in the P8 copy lists, so without this
 # line the image would run the P8 base's copy.
 scripts/ci/serving_packed_bridge.py
+# Drafter manifests (tp4/drafter-arms): serving_startup loads the DFlash2 fixtures through drafter_fixtures.load, which sends the default
+# manifest (the served drafter, whose unedited pinned loaders stay in the P8 base) down the old path and a named candidate down a
+# parallel path under that candidate's pins (QWEN_DRAFTER_MANIFEST, or the DRAFTER_MANIFEST marker the build lays beside the fixtures).
+# The manifests are data the module reads from references/drafter-manifests beside it. The test runs in the image: it holds the default
+# manifest equal to the base's own pin tables. Not a frozen-recipe pin: no pinned loader or evidence file is edited.
+scripts/ci/drafter_manifest.py
+scripts/ci/drafter_fixtures.py
+scripts/ci/references/drafter-manifests/dedf8df6.json
+scripts/ci/references/drafter-manifests/b16-98759a49.json
+scripts/ci/test_drafter_manifest.py

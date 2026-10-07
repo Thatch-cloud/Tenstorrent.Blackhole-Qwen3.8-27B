@@ -150,6 +150,7 @@ jobs:
           python -B -m unittest test_dflash_prefill_window test_gdn_snapshot
           python -B -m unittest test_serving_buffer_pool
           python -B -m unittest test_serving_startup
+          python -B -m unittest test_drafter_manifest
           python -B -m unittest test_tp4_seats8_census test_seats8_whole_stack test_seats8_profiles_meet_attach test_tp4_next4 test_tp4_next5 test_tp4_next5_jobs test_tp4_quad_blocks test_tp4_dbf16 test_draft_projection_bf8 test_prompt_lookup test_tp4_lookup_window test_lookup_sim
           python -B -m unittest test_memory_ledger test_draft_projection_bf8
           python -B -m unittest test_serving_bundle

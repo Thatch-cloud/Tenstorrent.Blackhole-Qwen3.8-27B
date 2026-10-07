@@ -18,6 +18,9 @@
 #   the build tags it <image>-unverified itself (--tag), because the rig's other CI runs `docker image
 #   prune` on the shared daemon and a dangling image id vanished between the build and provenance
 #   ('No such image: sha256:...'). The provisional tag is removed on success and on failure.
+#   Optional env: C2_DRAFTER_MANIFEST (the drafter checkpoint the image serves: a name under
+#   scripts/ci/references/drafter-manifests, default dedf8df6 = the served drafter; any other name needs its fixtures staged by
+#   drafter_stage.py under $fixtures and lays a DRAFTER_MANIFEST marker beside them),
 #   Optional env: C2_CHECKOUT (a checkout to compare the image's trees with, informational),
 #   C2_PROVENANCE_REPORT (where to write the provenance JSON).
 #   The graft is K64j (S2, design W9): its _ttnncpp.so must be $graft_sha, and G1 holds every
@@ -72,6 +75,25 @@ if [ "$(sha256sum < "$previous_graft/_ttnncpp.so" | cut -c1-64)" != "$previous_g
   echo "$previous_graft/_ttnncpp.so is not the K64i binary $previous_graft_sha" >&2
   exit 2
 fi
+# The drafter: the default is the served checkpoint (the revision above, config checked below); a named candidate comes from its
+# manifest in the staged overlay (model, full revision, config sha256) and is marked for the loader beside its fixtures.
+drafter=${C2_DRAFTER_MANIFEST:-dedf8df6}
+drafter_model=incoai/Qwen3.8-27B-DFlash2
+drafter_config_sha256=873e3556509b0da06e29654ba00d4944888d4b5e8a33afde25f7eb27d321e980
+if [ "$drafter" != dedf8df6 ]; then
+  case "$drafter" in *[!a-z0-9._-]*|'') echo "C2_DRAFTER_MANIFEST $drafter is not a plain manifest name" >&2; exit 2 ;; esac
+  drafter_fields=$(python3 -B - "$ctx/overlay/scripts/ci/references/drafter-manifests/$drafter.json" "$drafter" <<'PY'
+import json, sys
+entry = json.load(open(sys.argv[1], encoding='utf-8'))
+if entry.get('name') != sys.argv[2] or len(entry.get('revision', '')) != 40 or len(entry.get('config_sha256', '')) != 64:
+    sys.exit('drafter manifest %s is incomplete' % sys.argv[2])
+print(entry['model'], entry['revision'], entry['config_sha256'])
+PY
+  )
+  read -r drafter_model revision drafter_config_sha256 <<< "$drafter_fields"
+  echo "drafter manifest $drafter: $drafter_model @ $revision"
+  printf '%s\n' "$drafter" > "$ctx/fixture/DRAFTER_MANIFEST"
+fi
 cp -al "$graft" "$ctx/$graft_name"
 for component in attention convolution mlp projection selector; do
   cp -al "$fixtures/dflash2-$component-$revision" "$ctx/fixture/$component"
@@ -79,8 +101,12 @@ done
 for layer in 1 2 3 4; do
   cp -al "$fixtures/dflash2-stack-$revision/layer-$layer" "$ctx/fixture/layer-$layer"
 done
-curl -fsSL --max-time 30 "https://huggingface.co/incoai/Qwen3.8-27B-DFlash2/resolve/$revision/config.json" \
+curl -fsSL --max-time 30 "https://huggingface.co/$drafter_model/resolve/$revision/config.json" \
   > "$ctx/draft-config/config.json"
+if [ "$(sha256sum < "$ctx/draft-config/config.json" | cut -c1-64)" != "$drafter_config_sha256" ]; then
+  echo "the draft config at $drafter_model@$revision is not the manifest's config.json" >&2
+  exit 2
+fi
 
 # The gate arm's kernel cache key (lever_n_m3native_run_arm.sh), so the served process reads
 # the same warm JIT cache the gate built.
