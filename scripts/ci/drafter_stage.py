@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import struct
 
 import drafter_manifest as manifests
@@ -101,30 +102,51 @@ def stage(path, name, cache):
             parts['projection']: dict(manifests.PROJECTION), parts['selector']: dict(manifests.SELECTOR)}
     for layer, directory in stack.items():
         plan[directory] = {manifests.layer_name(layer, s): f for s, f in manifests.LAYER.items()}
-    written = []
-    with open(str(path), 'rb') as handle:
-        for directory, files in plan.items():
-            if directory.exists() and any(directory.iterdir()):
-                raise ValueError('Empty fixture directory required; existing data is never overwritten: %s' % directory)
-            directory.mkdir(parents=True, exist_ok=True)
-            entries = {}
-            for tensor, filename in files.items():
-                _, shape, first, last = geometry[tensor]
-                digest = hashlib.sha256()
-                with open(str(directory / filename), 'xb') as destination:
-                    for block in tensor_bytes(handle, start, first, last):
-                        digest.update(block)
-                        destination.write(block)
-                if digest.hexdigest() != manifest['tensors'][tensor]['sha256']:
-                    raise ValueError('Content differs from the manifest: %s' % tensor)
-                entries[tensor] = dict(file=filename, bytes=last - first, sha256=digest.hexdigest(),
-                                       shape=shape, dtype='BF16')
-            document = dict(model=manifest['model'], revision=manifest['revision'],
-                header_sha256=header_sha, checkpoint_bytes=total, tensors=entries, scope=SCOPE)
-            with open(str(directory / 'manifest.json'), 'x') as destination:
-                json.dump(document, destination, indent=2)
-            written.append(str(directory))
-    return written
+    for directory in plan:
+        if directory.exists() and any(directory.iterdir()):
+            raise ValueError('Empty fixture directory required; existing data is never overwritten: %s' % directory)
+    written, created = [], []
+    try:
+        with open(str(path), 'rb') as handle:
+            for directory, files in plan.items():
+                if not directory.exists():
+                    created.append(directory)
+                directory.mkdir(parents=True, exist_ok=True)
+                written.append(directory)
+                entries = {}
+                for tensor, filename in files.items():
+                    _, shape, first, last = geometry[tensor]
+                    digest = hashlib.sha256()
+                    # The tensor lands under its final name only after its hash matches: a mismatch leaves no file a loader
+                    # could pick up.
+                    partial = directory / (filename + '.partial')
+                    with open(str(partial), 'xb') as destination:
+                        for block in tensor_bytes(handle, start, first, last):
+                            digest.update(block)
+                            destination.write(block)
+                    if digest.hexdigest() != manifest['tensors'][tensor]['sha256']:
+                        raise ValueError('Content differs from the manifest: %s' % tensor)
+                    os.replace(str(partial), str(directory / filename))
+                    entries[tensor] = dict(file=filename, bytes=last - first, sha256=digest.hexdigest(),
+                                           shape=shape, dtype='BF16')
+                document = dict(model=manifest['model'], revision=manifest['revision'],
+                    header_sha256=header_sha, checkpoint_bytes=total, tensors=entries, scope=SCOPE)
+                # manifest.json is last: a directory without it was never completed.
+                with open(str(directory / 'manifest.json'), 'x') as destination:
+                    json.dump(document, destination, indent=2)
+    except BaseException:
+        # Nothing this call wrote stays behind, so the same cache can be staged again.
+        for directory in written:
+            if directory in created:
+                shutil.rmtree(str(directory), ignore_errors=True)
+            else:
+                for leftover in directory.iterdir():
+                    leftover.unlink()
+        for directory in created:
+            if directory.parent.exists() and not any(directory.parent.iterdir()):
+                directory.parent.rmdir()
+        raise
+    return [str(directory) for directory in written]
 
 
 def main(argv=None):

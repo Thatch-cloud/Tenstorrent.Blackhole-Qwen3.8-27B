@@ -296,6 +296,20 @@ class CandidateRoundTripTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'differs from the manifest'):
                 drafter_stage.stage(self.checkpoint, 'synthetic', self.root / 'cache2')
 
+    def test_a_failed_stage_leaves_nothing_and_the_same_cache_stages_again(self):
+        other = copy.deepcopy(self.manifest)
+        other['tensors']['norm.weight']['sha256'] = hashlib.sha256(b'other').hexdigest()
+        cache = self.root / 'cache3'
+        with patch.object(manifests, 'load', lambda name: other):
+            with self.assertRaisesRegex(ValueError, 'differs from the manifest'):
+                drafter_stage.stage(self.checkpoint, 'synthetic', cache)
+        self.assertEqual([path for path in cache.rglob('*') if path.is_file()], [], 'no tensor file, partial or manifest remains')
+        written = drafter_stage.stage(self.checkpoint, 'synthetic', cache)
+        self.assertTrue(written)
+        for directory in written:
+            self.assertTrue((Path(directory) / 'manifest.json').is_file())
+            self.assertEqual([path for path in Path(directory).iterdir() if path.name.endswith('.partial')], [])
+
     def test_stage_never_overwrites(self):
         self.stage()
         with self.assertRaisesRegex(ValueError, 'never overwritten'):
@@ -346,6 +360,22 @@ class WiringTests(unittest.TestCase):
         self.assertIn('C2_DRAFTER_MANIFEST', build)
         self.assertIn('DRAFTER_MANIFEST', build)
         self.assertIn('dedf8df68adfb1afeaf7b7480c0a0243108177b4', build)
+
+    @unittest.skipUnless((HERE / 'build-c2-serving-image.sh').is_file(), 'the build tools belong to a checkout, not the image')
+    def test_the_build_script_repeats_the_default_manifest_exactly(self):
+        # The script cannot read the manifest before it has staged the context, so it repeats the default's identity: held equal here.
+        build = (HERE / 'build-c2-serving-image.sh').read_text(encoding='utf-8')
+        default = manifests.load('dedf8df6')
+        self.assertIn('revision=%s\n' % default['revision'], build)
+        self.assertIn('drafter_model=%s\n' % default['model'], build)
+        self.assertIn('drafter_config_sha256=%s\n' % default['config_sha256'], build)
+
+    @unittest.skipUnless((HERE / 'build-c2-serving-image.sh').is_file(), 'the build tools belong to a checkout, not the image')
+    def test_a_candidate_build_names_the_staging_command_when_its_fixtures_are_missing(self):
+        build = (HERE / 'build-c2-serving-image.sh').read_text(encoding='utf-8')
+        self.assertIn('drafter_stage.py stage', build)
+        self.assertIn('C2_DRAFTER_FIXTURES', build)
+        self.assertLess(build.index('C2_DRAFTER_FIXTURES'), build.index('cp -al "$fixtures/dflash2-$component-$revision"'))
 
     def test_the_default_stays_out_of_every_edited_pin_file(self):
         # The loaders and evidence that name the served drafter are not edited by candidates.

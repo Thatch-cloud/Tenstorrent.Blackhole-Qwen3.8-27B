@@ -1207,7 +1207,7 @@ class PrivacyGuardTests(unittest.TestCase):
         rep.assert_public(dict(arms=dict(A1=dict(tau=5.5, turns=3, seats=dict(seat_0=5.0))), label='production',
                                image_tag='tp4-serve-2', bar_5_95='PASS', ok=True, none=None))
         for bad in (dict(text='a string of the data'), dict(ids=list(range(65))), dict(nested=[[1, 2]]), dict(x=float('nan')),
-                    {'bad key with spaces': 1}, dict(image_tag='Has Spaces'), dict(obj=object()), dict(token='thatch_sess_abc')):
+                    {'bad key with spaces': 1}, dict(image_tag='Has Spaces'), dict(obj=object()), dict(token='sess_abc')):
             with self.assertRaises(rep.PrivacyError, msg=str(bad)):
                 rep.assert_public(bad)
 
@@ -1602,7 +1602,7 @@ class PublicRepoTests(unittest.TestCase):
     def test_the_tests_and_the_scripts_carry_no_secret_literals(self):
         for name in ('c2_tau_lab.py', 'tau_lab_report.py', 'test_tau_lab.py'):
             text = read_text(os.path.join(HERE, name))
-            self.assertIsNone(re.search(r'gh[pous]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|thatch_(?:sess|sk)_[A-Za-z0-9]{6,}', text), name)
+            self.assertIsNone(re.search(r'gh[pous]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|(?:sess|key)_[A-Za-z0-9]{6,}', text), name)
 
 
 class WorkflowTests(unittest.TestCase):

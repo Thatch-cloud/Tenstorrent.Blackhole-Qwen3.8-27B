@@ -10,11 +10,13 @@ import random
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 import c2_serving_job as job
 import c2_tau_lab as lab
 import drafter_pair_report as pair_report
 import tau_lab_report as report
+import test_tau_lab as harness
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(HERE, 'qwen_c2_profiles.json'), encoding='utf-8') as _handle:
@@ -105,7 +107,8 @@ class LabRuleTests(unittest.TestCase):
     def test_a3_is_the_control_arms_calibration(self):
         every = ' '.join(lab.ARMS)
         self.assertEqual(lab.select_arms(every, None), list(lab.ARMS))
-        self.assertEqual(lab.select_arms(every, 'control'), list(lab.ARMS))
+        self.assertEqual(lab.select_arms(every, 'control'), ['A3', 'A1', 'A2', 'A4', 'A5'], 'the calibration runs first')
+        self.assertEqual(lab.select_arms('A1 A2 A3', 'control'), ['A3', 'A1', 'A2'])
         for arm in ('b16-bf8', 'dedf-bf16'):
             self.assertEqual(lab.select_arms(every, arm), ['A1', 'A2', 'A4', 'A5'])
             self.assertEqual(lab.select_arms('A1 A2', arm), ['A1', 'A2'])
@@ -157,6 +160,14 @@ def write_run(directory, tapes, info, public=None):
             json.dump(dict(public=public), handle)
 
 
+def run_info(arm, image, **extra):
+    """The run.json a lab run of this arm leaves: what the pair report holds both runs to."""
+    info = dict(drafter_arm=arm, image_tag=image, launched_problems=[], profile='c2-packed-tp4', seed=1, max_tokens=2400,
+                data_counts=dict(A1=10, A2=5))
+    info.update(extra)
+    return info
+
+
 def synthetic(gain=1.10, long_gain=None, p10_gain=None, diverge=0, clusters=40, seed=3):
     """A control and a candidate over the same turns: per-turn taus around 4.5 (long contexts around 3.5); the candidate's rounds
     are the control's with a deterministic uplift of `gain` (a list of emitted counts scaled and rounded)."""
@@ -185,12 +196,14 @@ class PairReportTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.root, True)
         self.count = 0
 
-    def run_pair(self, control, candidate, arm='b16-bf8', calibration='PASS', resamples=400, control_arm='control'):
+    def run_pair(self, control, candidate, arm='b16-bf8', calibration='PASS', resamples=400, control_arm='control',
+                 control_extra=None, candidate_extra=None):
         self.count += 1
         base = os.path.join(self.root, 'run%d' % self.count)
-        write_run(os.path.join(base, 'control'), control, dict(drafter_arm=control_arm),
+        images = ('tp4-drafter-1', 'tp4-drafter-1' if arm == 'dedf-bf16' else 'tp4-drafter-b16-1')
+        write_run(os.path.join(base, 'control'), control, run_info(control_arm, images[0], **(control_extra or {})),
                   public=dict(calibration=dict(verdict=calibration)) if calibration else None)
-        write_run(os.path.join(base, 'candidate'), candidate, dict(drafter_arm=arm))
+        write_run(os.path.join(base, 'candidate'), candidate, run_info(arm, images[1], **(candidate_extra or {})))
         controls, control_info, summary = pair_report.read_run(os.path.join(base, 'control'))
         candidates, candidate_info, _ = pair_report.read_run(os.path.join(base, 'candidate'))
         public = pair_report.build(controls, candidates, arm, control_info, candidate_info, summary, seed=1, resamples=resamples)
@@ -222,17 +235,52 @@ class PairReportTests(unittest.TestCase):
         self.assertEqual(public['gates']['text'], 'FAIL')
         self.assertEqual(public['verdict'], 'NO-GO')
 
-    def test_an_uncalibrated_control_cannot_be_a_go(self):
-        public = self.run_pair(*synthetic(gain=1.2), calibration=None)
-        self.assertEqual(public['gates']['control'], 'NOT_ESTABLISHED')
-        self.assertEqual(public['verdict'], 'NOT_ESTABLISHED')
-        failed = self.run_pair(*synthetic(gain=1.2), calibration='FAIL')
-        self.assertEqual(failed['verdict'], 'NO-GO')
+    def test_the_a3_verdict_is_an_annotation_not_a_go_precondition(self):
+        for calibration in (None, 'FAIL', 'PASS'):
+            public = self.run_pair(*synthetic(gain=1.2), calibration=calibration)
+            self.assertEqual(public['verdict'], 'GO', calibration)
+            self.assertNotIn('control', public['gates'])
+            self.assertEqual(public['control_calibration'], calibration)
 
     def test_the_wrong_arm_labels_fail(self):
         public = self.run_pair(*synthetic(gain=1.2), control_arm='b16-bf8')
         self.assertEqual(public['gates']['arms'], 'FAIL')
         self.assertEqual(public['verdict'], 'NO-GO')
+
+    def test_a_control_with_no_arm_is_not_a_control(self):
+        public = self.run_pair(*synthetic(gain=1.2), control_arm=None)
+        self.assertEqual(public['gates']['arms'], 'FAIL')
+        self.assertEqual(public['verdict'], 'NO-GO')
+
+    def test_a_run_with_a_launch_problem_or_an_error_is_refused(self):
+        for side in ('control_extra', 'candidate_extra'):
+            problem = self.run_pair(*synthetic(gain=1.2), **{side: dict(launched_problems=['the log never names x'])})
+            self.assertEqual((problem['gates']['launch'], problem['verdict']), ('FAIL', 'NO-GO'), side)
+            errored = self.run_pair(*synthetic(gain=1.2), **{side: dict(error='ArmMismatch')})
+            self.assertEqual(errored['gates']['launch'], 'FAIL', side)
+            unrecorded = self.run_pair(*synthetic(gain=1.2), **{side: dict(launched_problems=None)})
+            self.assertEqual(unrecorded['gates']['launch'], 'FAIL', side)
+
+    def test_the_two_runs_must_have_been_asked_the_same_questions(self):
+        for key, value in (('seed', 2), ('max_tokens', 4096), ('profile', 'c2-packed-tp4-gate'), ('data_counts', dict(A1=9, A2=5))):
+            public = self.run_pair(*synthetic(gain=1.2), candidate_extra={key: value})
+            self.assertEqual((public['gates']['matched'], public['verdict']), ('FAIL', 'NO-GO'), key)
+
+    def test_the_image_tags_follow_the_arm(self):
+        # b16 is a different drafter image; bf16 is the control image with a switch: a mistaken tag fails the pair
+        same = self.run_pair(*synthetic(gain=1.2), arm='b16-bf8', candidate_extra=dict(image_tag='tp4-drafter-1'))
+        self.assertEqual(same['gates']['matched'], 'FAIL')
+        other = self.run_pair(*synthetic(gain=1.2), arm='dedf-bf16', candidate_extra=dict(image_tag='tp4-drafter-b16-1'))
+        self.assertEqual(other['gates']['matched'], 'FAIL')
+        self.assertEqual(self.run_pair(*synthetic(gain=1.2), arm='dedf-bf16')['gates']['matched'], 'PASS')
+
+    def test_a_diverged_turn_is_not_scored(self):
+        control, candidate = synthetic(gain=1.2, diverge=3)
+        public = self.run_pair(control, candidate)
+        self.assertEqual((public['pairs']['turns'], public['scored_turns'], public['pairs']['different_text']), (40, 37, 3))
+        rest = self.run_pair(control[3:], candidate[3:])
+        self.assertEqual(public['pooled']['ratio'], rest['pooled']['ratio'])
+        self.assertEqual(public['pooled']['control_tau'], rest['pooled']['control_tau'])
 
     def test_a_thin_pairing_fails_coverage(self):
         control, candidate = synthetic(gain=1.2)
@@ -255,9 +303,9 @@ class PairReportTests(unittest.TestCase):
 
     def test_the_command_line_writes_the_summary_and_exits_by_the_verdict(self):
         control, candidate = synthetic(gain=1.15, clusters=12)
-        write_run(os.path.join(self.root, 'control'), control, dict(drafter_arm='control'),
+        write_run(os.path.join(self.root, 'control'), control, run_info('control', 'tp4-drafter-1'),
                   public=dict(calibration=dict(verdict='PASS')))
-        write_run(os.path.join(self.root, 'candidate'), candidate, dict(drafter_arm='b16-bf8'))
+        write_run(os.path.join(self.root, 'candidate'), candidate, run_info('b16-bf8', 'tp4-drafter-b16-1'))
         out, lines = os.path.join(self.root, 'out'), []
         code = pair_report.main(['--control', os.path.join(self.root, 'control'), '--candidate', os.path.join(self.root, 'candidate'),
                                  '--arm', 'b16-bf8', '--out', out], say=lines.append)
@@ -272,6 +320,89 @@ class PairReportTests(unittest.TestCase):
             pair_report.build({}, {}, 'nonsense')
 
 
+class OrderTests(unittest.TestCase):
+    def test_the_long_turns_come_forward_in_both_arms_and_the_default_order_is_untouched(self):
+        records = [dict(id='t%02d' % n, bucket='80k+' if n % 7 == 0 else '16k') for n in range(40)]
+        plain = lab.order_records(records, 5, 'A1')
+        self.assertEqual(plain, lab.order_records(records, 5, 'A1', False), 'the lab as it was')
+        first = lab.order_records(records, 5, 'A1', True)
+        self.assertEqual(sorted(record['id'] for record in first), sorted(record['id'] for record in records))
+        self.assertEqual(first, lab.order_records(list(reversed(records)), 5, 'A1', True), 'the same order for both arms')
+        longs = [at for at, record in enumerate(first) if record['bucket'] == '80k+']
+        self.assertEqual(longs, [0, 3, 6, 9, 12, 15])
+        self.assertEqual([record['id'] for record in first if record['bucket'] != '80k+'],
+                         [record['id'] for record in plain if record['bucket'] != '80k+'], 'the others keep their shuffled order')
+
+
+class LabMainTests(unittest.TestCase):
+    """main() against the lab's fakes (test_tau_lab.run_lab): what a drafter arm does when its container log does not show the arm,
+    and the order and the stop of the control arm's calibration."""
+
+    def run_arm(self, arm, log_for, arguments=(), **options):
+        def start(follower, since=None):
+            follower.engine.path = follower.path
+            follower.engine.emit(log_for)
+        with mock.patch.object(harness.FakeLog, 'start', start):
+            return harness.run_lab(self, arguments=['--drafter-arm', arm] + list(arguments), **options)
+
+    def derived(self, arm):
+        return lab.derive_profile(PROFILES, BASE, arm)[0]
+
+    def test_a_log_that_shows_another_arm_refuses_before_anything_is_sent(self):
+        # the b16 image's marker on a run asked to be the control: the whole arm would be labelled control
+        log = ['[QWEN-C2] profile %s' % self.derived('control'), '[DRAFTER_MANIFEST] b16-98759a49 in force: x/y']
+        code, out, results, public, engine, _ = self.run_arm('control', log, ['--arms', 'A1'])
+        self.assertEqual(code, 2)
+        self.assertEqual(engine.requests, [], 'not one request is sent to a container that is not the arm')
+        with open(os.path.join(results, 'run.json'), encoding='utf-8') as handle:
+            info = json.load(handle)
+        self.assertEqual(info['error'], 'ArmMismatch')
+        self.assertTrue(info['launched_problems'])
+        self.assertTrue(any('REFUSED' in line for line in out), out)
+        self.assertTrue(any(call[:3] == ['docker', 'stop', '-t'] for call in self.docker_calls), 'the container is stopped')
+
+    def test_a_bf16_arm_whose_switch_never_engaged_refuses(self):
+        code, out, _, _, engine, _ = self.run_arm('dedf-bf16', ['[QWEN-C2] profile %s' % self.derived('dedf-bf16')], ['--arms', 'A1'])
+        self.assertEqual((code, engine.requests), (2, []))
+
+    def test_a_log_that_shows_the_arm_runs_it_and_the_run_records_what_the_pair_checks(self):
+        code, out, results, public, engine, _ = self.run_arm('control', ['[QWEN-C2] profile %s' % self.derived('control')],
+                                                             ['--arms', 'A1'])
+        self.assertNotEqual(code, 2)
+        self.assertTrue(engine.requests)
+        with open(os.path.join(results, 'run.json'), encoding='utf-8') as handle:
+            info = json.load(handle)
+        self.assertEqual(info['launched_problems'], [])
+        self.assertNotIn('error', info)
+        self.assertEqual((info['drafter_arm'], info['seed'], info['max_tokens']), ('control', lab.SEED, None))
+        self.assertIn('A1', info['data_counts'])
+
+    def test_the_control_calibrates_first_and_a_failed_calibration_stops_the_arms(self):
+        log = ['[QWEN-C2] profile %s' % self.derived('control')]
+        real = lab.analyze
+        calls = []
+
+        def failing(options, say, info=None):
+            calls.append(1)
+            return dict(calibration=dict(verdict='FAIL'), complete=False)
+        with mock.patch.object(lab, 'analyze', failing):
+            code, out, results, public, engine, _ = self.run_arm('control', log, ['--arms', 'A1 A3'])
+        self.assertEqual(code, 1)
+        sent = [body for _, body in engine.requests]
+        self.assertTrue(sent)
+        arms_run = [line for line in out if line.startswith('[TAULAB] arm ')]
+        self.assertEqual([line.split()[2].rstrip(':') for line in arms_run], ['A3'], arms_run)
+        self.assertTrue(any('failed its A3 calibration' in line for line in out))
+        self.assertEqual(real, lab.analyze)
+
+    def test_a_passed_calibration_goes_on_to_the_turns(self):
+        log = ['[QWEN-C2] profile %s' % self.derived('control')]
+        with mock.patch.object(lab, 'analyze', lambda options, say, info=None: dict(calibration=dict(verdict='PASS'), complete=False)):
+            code, out, _, _, engine, _ = self.run_arm('control', log, ['--arms', 'A1 A3'])
+        arms_run = [line.split()[2].rstrip(':') for line in out if line.startswith('[TAULAB] arm ')]
+        self.assertEqual(arms_run, ['A3', 'A1'])
+
+
 class JobKeyTests(unittest.TestCase):
     base = dict(C2_IMAGE_TAG='tp4-drafter-1', C2_CARDS='quad', C2_ACTIONS='reset taulab')
 
@@ -284,11 +415,16 @@ class JobKeyTests(unittest.TestCase):
         self.assertEqual(outputs['taulab_arms'], 'A1 A2 A3 A4 A5')
 
     def test_a_candidate_arm_leaves_a3_out_and_refuses_it_by_name(self):
-        outputs = self.read(C2_TAULAB_DRAFTER_ARM='b16-bf8')
+        outputs = self.read(C2_TAULAB_DRAFTER_ARM='b16-bf8', C2_TAULAB_PAIR_CONTROL='123')
         self.assertEqual(outputs['taulab_arms'], 'A1 A2 A4 A5')
         self.assertEqual(self.read(C2_TAULAB_DRAFTER_ARM='control')['taulab_arms'], 'A1 A2 A3 A4 A5')
         with self.assertRaisesRegex(job.JobError, 'A3'):
-            self.read(C2_TAULAB_DRAFTER_ARM='b16-bf8', C2_TAULAB_ARMS='A1 A3')
+            self.read(C2_TAULAB_DRAFTER_ARM='b16-bf8', C2_TAULAB_ARMS='A1 A3', C2_TAULAB_PAIR_CONTROL='123')
+
+    def test_a_candidate_arm_without_its_control_run_is_refused(self):
+        for arm in ('b16-bf8', 'dedf-bf16'):
+            with self.assertRaisesRegex(job.JobError, 'PAIR_CONTROL'):
+                self.read(C2_TAULAB_DRAFTER_ARM=arm)
 
     def test_the_pair_control_is_a_run_id_for_a_candidate_only(self):
         outputs = self.read(C2_TAULAB_DRAFTER_ARM='dedf-bf16', C2_TAULAB_PAIR_CONTROL='12345678901', C2_TAULAB_ARMS='A1 A2')
@@ -299,6 +435,20 @@ class JobKeyTests(unittest.TestCase):
                     {'C2_TAULAB_DRAFTER_ARM': 'control', 'C2_TAULAB_PAIR_CONTROL': '123'}):
             with self.assertRaises(job.JobError, msg=bad):
                 self.read(**bad)
+
+    def test_a_candidate_drafter_image_is_built_but_never_pushed(self):
+        build = dict(self.base, C2_ACTIONS='build', C2_DRAFTER_MANIFEST='b16-98759a49')
+        self.assertEqual(job.read_job(build, NAMES, meshes=job.profile_meshes())['drafter_manifest'], 'b16-98759a49')
+        self.assertEqual(job.read_job(dict(build, C2_DRAFTER_MANIFEST='dedf8df6', C2_ACTIONS='build push'), NAMES,
+                                      meshes=job.profile_meshes())['drafter_manifest'], '')
+        with self.assertRaisesRegex(job.JobError, 'not pushed'):
+            job.read_job(dict(build, C2_ACTIONS='build push'), NAMES, meshes=job.profile_meshes())
+        with self.assertRaisesRegex(job.JobError, 'build'):
+            job.read_job(dict(build, C2_ACTIONS='reset smoke', C2_PROFILE=BASE), NAMES, meshes=job.profile_meshes())
+        with open(os.path.join(HERE, '..', '..', '.github', 'workflows', 'qwen-c2-serving.yml'), encoding='utf-8') as handle:
+            text = handle.read()
+        step = text[text.index('- name: Push'):text.index('- name: Start the node agent')]
+        self.assertLess(step.index('DRAFTER_MANIFEST'), step.index('docker push'), 'an image carrying a candidate marker is refused first')
 
     def test_the_workflow_passes_the_arm_and_the_pair(self):
         with open(os.path.join(HERE, '..', '..', '.github', 'workflows', 'qwen-c2-serving.yml'), encoding='utf-8') as handle:
@@ -318,21 +468,29 @@ class TemplateTests(unittest.TestCase):
         with open(os.path.join(FOLDER, name), encoding='utf-8') as handle:
             return job.parse_env(handle.read())
 
+    def pushable(self, name):
+        """The template with the one edit it asks for before a push: a candidate arm names the control run (a placeholder id)."""
+        values = self.parse(name + '.env')
+        if values.get('C2_TAULAB_DRAFTER_ARM') not in (None, '', 'control'):
+            with self.assertRaises(job.JobError, msg='%s must be refused until it names its control run' % name):
+                job.read_job(values, NAMES, meshes=job.profile_meshes())
+            values = dict(values, C2_TAULAB_PAIR_CONTROL='123456789')
+        return values
+
     def test_every_listed_template_exists_and_every_template_is_listed(self):
         listed = [row[0] + '.env' for row in self.rows()]
         self.assertEqual(sorted(listed), sorted(name for name in os.listdir(FOLDER) if name.endswith('.env')))
 
     def test_every_template_parses_with_the_job_reader(self):
         for row in self.rows():
-            values = self.parse(row[0] + '.env')
-            outputs = job.read_job(values, NAMES, meshes=job.profile_meshes())
+            outputs = job.read_job(self.pushable(row[0]), NAMES, meshes=job.profile_meshes())
             self.assertEqual(outputs['cards'], 'quad', row[0])
 
     def test_the_three_tau_arms(self):
         arms = {}
         for row in self.rows():
             if row[0].startswith('D-T'):
-                outputs = job.read_job(self.parse(row[0] + '.env'), NAMES, meshes=job.profile_meshes())
+                outputs = job.read_job(self.pushable(row[0]), NAMES, meshes=job.profile_meshes())
                 arms[row[0]] = outputs
         self.assertEqual(sorted(entry['taulab_drafter_arm'] for entry in arms.values()), ['b16-bf8', 'control', 'dedf-bf16'])
         for name, outputs in arms.items():
@@ -341,7 +499,7 @@ class TemplateTests(unittest.TestCase):
                 self.assertIn('A3', outputs['taulab_arms'].split())
             else:
                 self.assertNotIn('A3', outputs['taulab_arms'].split())
-                self.assertTrue(outputs['taulab_pair_control'] or True)
+                self.assertTrue(outputs['taulab_pair_control'])
             self.assertLessEqual(int(outputs['taulab_deadline']), 150, name)
 
     def test_the_order_runs_the_control_first_and_qualifies_only_a_go_arm(self):
@@ -352,6 +510,25 @@ class TemplateTests(unittest.TestCase):
         self.assertTrue(qualification)
         for row in qualification:
             self.assertEqual(row[1], 'go-arm-only', row)
+
+    def test_the_order_states_the_budget_it_sums_to(self):
+        rows = dict((row[0], int(row[3])) for row in self.rows())
+        text = open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8').read()
+        qualification = sum(minutes for name, minutes in rows.items() if name.startswith('D-Q'))
+        taus = sum(minutes for name, minutes in rows.items() if name.startswith('D-T'))
+        self.assertEqual((qualification, taus), (290, 260))
+        self.assertIn('290 min = 4.8 h', text)
+        self.assertIn('90 + 85 + 85 = 260 min = 4.3 h', text)
+        for name in ('D-T1-control', 'D-T2-b16-bf8', 'D-T3-dedf-bf16'):
+            deadline = int(self.parse(name + '.env')['C2_TAULAB_DEADLINE'])
+            self.assertGreater(rows[name], deadline, 'the job estimate holds the deadline and the reset')
+            self.assertLessEqual(deadline, 85)
+
+    def test_a_bf16_go_is_not_routed_to_a_pack_that_cannot_qualify_it(self):
+        text = open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8').read()
+        self.assertNotIn('run the tp4-dbf16-jobs qualification', text)
+        self.assertIn('CANNOT be qualified in this window', text)
+        self.assertIn('b16 arm lost', text)
 
     def test_the_pack_is_public(self):
         banned = __import__('re').compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|(?!127\.0\.0\.1)\b\d{1,3}(\.\d{1,3}){3}\b|'

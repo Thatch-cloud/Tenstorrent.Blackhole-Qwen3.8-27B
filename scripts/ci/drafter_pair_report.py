@@ -17,12 +17,16 @@ THE GO RULE (pre-registered; docs/drafter-arms.md). All of:
   p10       no regression at the per-turn p10 (inverse-probability weighted, turns with at least 8 counted rounds in both arms):
             the same two conditions on the ratio of the arms' p10
   text      every paired turn has the same output token ids in both arms (the exactness contract: a drafter moves speed only; a
-            difference is a NO-GO until explained, and the paired tau of turns whose text diverged is not paired)
+            difference is a NO-GO until explained, and the ratios above are computed over the same-text turns only)
   coverage  the paired turns are at least 90% of the control's turns with counted rounds
-  control   the control arm's A3 calibration passed (its own report in the control directory, or --control-summary); without
-            it the verdict cannot be GO
+  arms      the control run's drafter arm is exactly 'control' and the candidate run's is the arm named here
+  launch    neither run recorded a launched-container problem (the log did not show the arm's own markers) or an error
+  matched   the two runs agree on profile, seed, max_tokens and per-arm data counts; the control and candidate image tags differ
+            for b16-bf8 (a different drafter image) and are equal for dedf-bf16 (the same image, the bf16 switch only)
 Any FAIL is NO-GO; no FAIL with something not established is NOT_ESTABLISHED; otherwise GO. The control arm is the one arm that
-calibrates A3 (c2_tau_lab: a candidate that moves tau would fail it by construction).
+calibrates A3 (c2_tau_lab: a candidate that moves tau would fail it by construction). The A3 verdict (against an old-stack
+reference, on 8 turns) is reported beside the verdict as `control_calibration` and is an annotation, not a GO precondition: the
+paired ratio is a within-run comparison and does not need the stack to match an older one.
 
 Python 3.7 syntax, stdlib only: it runs on the rig host and in CI.
 """
@@ -188,31 +192,37 @@ def build(control, candidate, arm, control_info=None, candidate_info=None, contr
     items = pair(control, candidate)
     controlled = [key for key, stat in control.items() if stat['rounds']]
     paired_text = [item for item in items if item['same_text']]
-    point, low, high, draws = interval(items, lambda rows, side: pooled(rows, side), seed, resamples)
-    long_items = [item for item in items if item['bucket'] == report.LONG_BUCKET]
+    # The ratios are over the turns whose text is the same in both arms; a turn that diverged is counted by the text gate only.
+    point, low, high, draws = interval(paired_text, lambda rows, side: pooled(rows, side), seed, resamples)
+    long_items = [item for item in paired_text if item['bucket'] == report.LONG_BUCKET]
     long_point, long_low, long_high, long_draws = interval(long_items, lambda rows, side: pooled(rows, side), seed + 1, resamples)
-    p10_point, p10_low, p10_high, p10_draws = interval(items, p10_of, seed + 2, resamples)
+    p10_point, p10_low, p10_high, p10_draws = interval(paired_text, p10_of, seed + 2, resamples)
     share = len(items) / float(len(controlled)) if controlled else None
     calibration = ((control_summary or {}).get('calibration') or {}).get('verdict') if control_summary else None
-    arms_ok = control_info.get('drafter_arm') in (None, 'control') and candidate_info.get('drafter_arm') == arm
+    arms_ok = control_info.get('drafter_arm') == 'control' and candidate_info.get('drafter_arm') == arm
+    launch_ok = all(info.get('launched_problems') == [] and 'error' not in info for info in (control_info, candidate_info))
+    same_image = control_info.get('image_tag') == candidate_info.get('image_tag')
+    matched_ok = (all(control_info.get(key) is not None and control_info.get(key) == candidate_info.get(key)
+                      for key in ('profile', 'seed', 'max_tokens', 'data_counts'))
+                  and control_info.get('image_tag') is not None
+                  and same_image == (arm == 'dedf-bf16'))
     gates = dict(
         pooled=gate_above(low),
         long=gate_no_regression(long_point, long_high) if len(long_items) >= 3 else 'NOT_ESTABLISHED',
         p10=gate_no_regression(p10_point, p10_high),
         text=('NOT_ESTABLISHED' if not items else 'PASS' if len(paired_text) == len(items) else 'FAIL'),
         coverage=('NOT_ESTABLISHED' if share is None else 'PASS' if share >= MIN_PAIRED_SHARE else 'FAIL'),
-        control=('NOT_ESTABLISHED' if calibration is None else 'PASS' if calibration == 'PASS' else 'FAIL'),
-        arms=('PASS' if arms_ok else 'FAIL'))
+        arms=('PASS' if arms_ok else 'FAIL'), launch=('PASS' if launch_ok else 'FAIL'), matched=('PASS' if matched_ok else 'FAIL'))
     verdict = ('NO-GO' if 'FAIL' in gates.values() else 'GO' if all(value == 'PASS' for value in gates.values())
                else 'NOT_ESTABLISHED')
     buckets = {}
     for label in [label for _, label in report.BUCKETS]:
-        rows = [item for item in items if item['bucket'] == label]
+        rows = [item for item in paired_text if item['bucket'] == label]
         if rows:
             buckets[label] = dict(turns=len(rows), ratio=rounded(ratio_of(lambda r, s: pooled(r, s), rows)))
     sets = {}
     for name in report.SET_ORDER:
-        rows = [item for item in items if item['set'] == name]
+        rows = [item for item in paired_text if item['set'] == name]
         if rows:
             sets[name] = dict(turns=len(rows), ratio=rounded(ratio_of(lambda r, s: pooled(r, s), rows)),
                               control_tau=rounded(pooled(rows, 'b')), candidate_tau=rounded(pooled(rows, 'c')))
@@ -220,11 +230,12 @@ def build(control, candidate, arm, control_info=None, candidate_info=None, contr
         arm=arm, verdict=verdict, gates=gates,
         pairs=dict(turns=len(items), control_turns=len(controlled), share=rounded(share), same_text=len(paired_text),
                    different_text=len(items) - len(paired_text)),
-        pooled=dict(control_tau=rounded(pooled(items, 'b')), candidate_tau=rounded(pooled(items, 'c')), ratio=rounded(point),
+        scored_turns=len(paired_text),
+        pooled=dict(control_tau=rounded(pooled(paired_text, 'b')), candidate_tau=rounded(pooled(paired_text, 'c')), ratio=rounded(point),
                     ci95_low=rounded(low), ci95_high=rounded(high), resamples=draws),
         long_bucket=dict(turns=len(long_items), ratio=rounded(long_point), ci95_low=rounded(long_low), ci95_high=rounded(long_high),
                          resamples=long_draws),
-        p10=dict(control=rounded(p10_of(items, 'b')), candidate=rounded(p10_of(items, 'c')), ratio=rounded(p10_point),
+        p10=dict(control=rounded(p10_of(paired_text, 'b')), candidate=rounded(p10_of(paired_text, 'c')), ratio=rounded(p10_point),
                  ci95_low=rounded(p10_low), ci95_high=rounded(p10_high), resamples=p10_draws),
         buckets=buckets, sets=sets, control_calibration=calibration if calibration in ('PASS', 'FAIL', 'NOT_RUN',
                                                                                     'NOT_ESTABLISHED') else None,

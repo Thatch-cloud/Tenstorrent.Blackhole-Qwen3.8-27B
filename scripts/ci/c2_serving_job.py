@@ -472,6 +472,8 @@ def read_job(values, profiles, root=ROOT, meshes=None):
     cards = read_cards(values, actions, meshes, named)
     bake_profile = read_bake(values, actions, cards, root)
     drafter_manifest = read_drafter_manifest(values, actions, root)
+    if drafter_manifest and 'push' in actions:
+        raise JobError('C2_DRAFTER_MANIFEST names a candidate drafter that is not qualified: its image is not pushed')
     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root)
     outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), rmi_tags=rmi_tags, tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
                    platform_image=platform_image, gate_plan=','.join(plans),
@@ -635,6 +637,9 @@ def read_taulab(values, profiles, running):
     if pair_control and drafter_arm in ('', 'control'):
         raise JobError('C2_TAULAB_PAIR_CONTROL pairs a candidate arm with the control run: set C2_TAULAB_DRAFTER_ARM to a candidate')
     candidate = drafter_arm not in ('', 'control')
+    if candidate and not pair_control:
+        raise JobError('C2_TAULAB_DRAFTER_ARM %s is judged against the control arm run: set C2_TAULAB_PAIR_CONTROL to the '
+                       'run id (digits) of the control arm job, or no verdict is produced' % drafter_arm)
     arms = split_list(values.get('C2_TAULAB_ARMS', '')) or [arm for arm in TAULAB_ARMS if not (candidate and arm == 'A3')]
     if candidate and 'A3' in arms:
         raise JobError('C2_TAULAB_ARMS names A3 for the candidate arm %s: A3 is the control arm\'s calibration' % drafter_arm)

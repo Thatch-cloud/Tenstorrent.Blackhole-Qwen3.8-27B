@@ -93,6 +93,16 @@ PY
   read -r drafter_model revision drafter_config_sha256 <<< "$drafter_fields"
   echo "drafter manifest $drafter: $drafter_model @ $revision"
   printf '%s\n' "$drafter" > "$ctx/fixture/DRAFTER_MANIFEST"
+  # A candidate's fixtures are staged by drafter_stage.py (stage --manifest $drafter) into its own cache, never into the served
+  # drafter's: that cache (C2_DRAFTER_FIXTURES, a directory under /home/thatch) is where the build looks, and a missing
+  # directory names the staging command instead of failing in the middle of the copies.
+  fixtures=${C2_DRAFTER_FIXTURES:-/home/thatch/qwen-drafter-candidates/cache}
+  case "$fixtures" in /home/thatch/*) ;; *) echo "C2_DRAFTER_FIXTURES $fixtures is not a directory under /home/thatch" >&2; exit 2 ;; esac
+  case "$fixtures" in *..*|*[!A-Za-z0-9._/-]*) echo "C2_DRAFTER_FIXTURES $fixtures is not a plain path" >&2; exit 2 ;; esac
+  if [ ! -d "$fixtures/dflash2-projection-$revision" ] || [ ! -d "$fixtures/dflash2-stack-$revision/layer-4" ]; then
+    echo "the fixtures of drafter $drafter are not staged under $fixtures: run scripts/ci/drafter_stage.py stage --checkpoint <model.safetensors> --manifest $drafter --cache $fixtures (this arm is lost until then)" >&2
+    exit 2
+  fi
 fi
 cp -al "$graft" "$ctx/$graft_name"
 for component in attention convolution mlp projection selector; do

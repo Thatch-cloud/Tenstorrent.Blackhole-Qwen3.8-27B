@@ -1,3 +1,5 @@
+# SUPERSEDED (2026-10-07): this pack is the earlier W-T1 window (image tp4-serve-2, the verify audits ON, 'tonight's window jobs' around it). It is kept as the reference
+# the lab's first measurement came from and is not run again. The production arithmetic now runs the verify audits OFF: use ../tp4-drafter-jobs (D-T1-control and the candidate arms).
 # The order of the W-T1 tau lab's window, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
 # stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window. Image: the tag of the
 # tt-vllm image the job serves. Minutes: runner time for the job, a quad reset (1-3 min) included.

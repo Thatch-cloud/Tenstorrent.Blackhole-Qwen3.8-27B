@@ -414,10 +414,25 @@ def read_a3_reference(path=None):
     return reference
 
 
-def order_records(records, seed, arm):
-    """The pre-registered random order: a seeded shuffle of the ids sorted, so the order depends on the ids and the seed only."""
+LONG_BUCKET = '80k+'
+
+
+def order_records(records, seed, arm, long_first=False):
+    """The pre-registered random order: a seeded shuffle of the ids sorted, so the order depends on the ids and the seed only.
+    long_first (the drafter arms) moves the 80k+ turns forward to every third place, in their shuffled order: the paired report
+    needs three of them in both arms, and a short arm would otherwise reach them last or never. Both arms use the same seed, so
+    they send the same turns in the same order."""
     ordered = sorted(records, key=lambda record: record['id'])
     random.Random('%s:%s' % (seed, arm)).shuffle(ordered)
+    if long_first:
+        longs = [record for record in ordered if record.get('bucket') == LONG_BUCKET]
+        rest = [record for record in ordered if record.get('bucket') != LONG_BUCKET]
+        ordered = []
+        while longs or rest:
+            if longs and (len(ordered) % 3 == 0 or not rest):
+                ordered.append(longs.pop(0))
+            else:
+                ordered.append(rest.pop(0))
     return ordered
 
 
@@ -793,6 +808,8 @@ class Lab(object):
         self.lock = threading.Lock()
         self.stop = threading.Event()
         self.tripped = None
+        self.long_first = False       # the drafter arms: the 80k+ turns forward (order_records)
+        self.after_arm = None         # (arm) -> True to stop the lab after that arm (the control arm's A3 FAIL)
         self.failures = 0
         self.ok_total = 0
         self.canary_done = False
@@ -1028,7 +1045,7 @@ class Lab(object):
             self.counts.setdefault(arm, new_counts())
             kind = ARM_SPEC[arm]['kind']
             if kind == 'turns':
-                self.run_turns(arm, order_records(records, self.seed, arm), ARM_SPEC[arm]['thinking'], entry, ends)
+                self.run_turns(arm, order_records(records, self.seed, arm, self.long_first), ARM_SPEC[arm]['thinking'], entry, ends)
             elif kind == 'calib':
                 self.run_calibration(arm, records, entry, ends)
             else:
@@ -1037,6 +1054,8 @@ class Lab(object):
                 self.counts[arm].items())), self.clock() - started, ends - started))
             self.sleep(SETTLE_SECONDS)
             if self.stop.is_set():
+                break
+            if self.after_arm is not None and self.after_arm(arm):
                 break
         return self.counts
 
@@ -1153,11 +1172,17 @@ def parse_arms(text):
     return [arm for arm in ARMS if arm in arms]
 
 
+class ArmMismatch(RuntimeError):
+    """The container's own log does not show the drafter arm that was asked for: nothing it measures would be that arm."""
+
+
 def select_arms(text, drafter_arm=None):
     """The arms to run: parse_arms, less A3 for a candidate drafter arm. A3 is the control arm's calibration (it must reproduce
     the served drafter's own reference), so the DEFAULT arm list leaves it out of a candidate and an explicit list that names it
     is refused: a candidate that moves tau would fail it by construction."""
     arms = parse_arms(text)
+    if drafter_arm == 'control' and 'A3' in arms:
+        arms = ['A3'] + [arm for arm in arms if arm != 'A3']     # the calibration first: a FAIL then stops the lab at once
     if drafter_arm not in (None, 'control') and 'A3' in arms:
         if text == ' '.join(ARMS):
             return [arm for arm in arms if arm != 'A3']
@@ -1295,10 +1320,11 @@ def main(argv=None, say=print, make_stream=None, make_client=None, make_containe
     info = dict(image_tag=image_tag(options.image), production=production, audits_on=audits, profile=options.profile,
                 drafter_arm=options.drafter_arm, drafter_bf16=dict(DRAFTER_ARMS.get(options.drafter_arm, {}).get('env', ())).get(
                     'QWEN_FAST_DRAFTER_BF16') == '1',
-                derived=derived, seed=options.seed, arms=arms, arithmetic_extra=extra, scrub=scrub, data_counts=plan_counts(data, arms),
+                derived=derived, seed=options.seed, max_tokens=options.max_tokens, arms=arms, arithmetic_extra=extra, scrub=scrub, data_counts=plan_counts(data, arms),
                 calibration_corpus=calibration, started=started, counts={})
     status = 1
     lab = None
+    refused = False
     try:
         docker(['docker', 'rm', '-f', CONTAINER], 120)
         code, output = docker(arguments, 300)
@@ -1315,16 +1341,40 @@ def main(argv=None, say=print, make_stream=None, make_client=None, make_containe
         problems = launched_problems(follower.lines(), derived, options.drafter_arm)
         info['launched_problems'] = problems
         for problem in problems:
-            say('[TAULAB] WARNING: %s' % problem)
+            say('[TAULAB] %s: %s' % ('REFUSED' if options.drafter_arm else 'WARNING', problem))
+        if options.drafter_arm and problems:
+            # A drafter arm is only that arm when the container's own log says so: a wrong image tag or a bf16 switch that
+            # never engaged would otherwise spend the whole arm measuring something else under the arm's name.
+            raise ArmMismatch(problems[0])
         stream = (make_stream or (lambda: lambda path, body, timeout, keep: http_stream(
             options.port, path, body, timeout, keep_content=keep)))()
         lab = Lab(results, stream, limits, seed=options.seed, in_flight=options.in_flight, max_tokens=options.max_tokens,
                   clock=clock, sleep=sleep, say=say, corpus=corpus, alive=container.running, think_end=think_end,
                   tool_call=tool_call)
         lab.canary = (make_canary_check or make_canary)(log_path, results)
+        lab.long_first = options.drafter_arm is not None
+        if options.drafter_arm == 'control' and arms[0] == 'A3':
+            def stop_on_failed_calibration(arm):
+                if arm != 'A3':
+                    return False
+                try:
+                    verdict = ((analyze(options, lambda text: None, dict(info)) or {}).get('calibration') or {}).get('verdict')
+                except Exception:  # noqa: BLE001 - a report that cannot be built mid-run is not a reason to stop the arms
+                    return False
+                info['a3_verdict'] = verdict
+                if verdict == 'FAIL':
+                    say('[TAULAB] the control arm failed its A3 calibration: stopping before A1 and A2 (the stack, not the '
+                        'drafter, moved tau)')
+                    return True
+                return False
+            lab.after_arm = stop_on_failed_calibration
         send_ends = started + options.deadline_seconds - RESERVE_SECONDS
         lab.run(arms, data, manifest, send_ends)
         status = 1 if lab.tripped else 0
+    except ArmMismatch:
+        info['error'] = 'ArmMismatch'
+        refused = True
+        say('[TAULAB] stopped: the container does not serve the asked drafter arm; nothing was sent')
     except Exception as error:  # noqa: BLE001 - the container must still be stopped and the report still written
         info['error'] = type(error).__name__
         say('[TAULAB] stopped: %s' % type(error).__name__)
@@ -1340,6 +1390,9 @@ def main(argv=None, say=print, make_stream=None, make_client=None, make_containe
         info['finished'] = clock()
         with open(os.path.join(results_dir, 'run.json'), 'w', encoding='utf-8') as handle:
             json.dump(info, handle, indent=1, sort_keys=True, default=str)
+    if refused:
+        say('C2_TAULAB profile=%s complete=False refused=drafter-arm-marker' % options.profile)
+        return 2
     summary = analyze(options, say, info)
     complete = bool(summary and summary.get('complete')) and status == 0
     say('C2_TAULAB profile=%s complete=%s' % (options.profile, complete))

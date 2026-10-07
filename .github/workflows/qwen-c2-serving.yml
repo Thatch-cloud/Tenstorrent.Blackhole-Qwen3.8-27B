@@ -1117,6 +1117,11 @@ jobs:
         run: |
           set -euo pipefail
           image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
+          # An image that carries a candidate drafter (the build lays a DRAFTER_MANIFEST marker beside the fixtures) serves it under every
+          # profile and is unqualified: it is never pushed, whatever built it.
+          marker=$(docker run --rm --entrypoint cat "$image" /experiment-dflash-fixture/DRAFTER_MANIFEST 2>/dev/null || true)
+          if [ -n "$marker" ]; then echo "the image carries the candidate drafter manifest $marker; refusing to push it" >&2; exit 1; fi
+          echo "drafter manifest: default (no candidate marker)"
           docker push "$image" | tail -3
           echo "pushed $(docker image inspect "$image" --format '{{index .RepoDigests 0}}')"
       - name: Start the node agent

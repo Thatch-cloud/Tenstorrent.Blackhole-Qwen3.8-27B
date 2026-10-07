@@ -160,6 +160,39 @@ def unsatisfiable_imports():
     return missing
 
 
+# Modules the P8 modules plain-import that exist only in the C2 image (its overlay manifest lays them over the base):
+# the baseline as of the drafter-manifest change. A plain import of anything else the bundle lacks is flagged.
+C2_ONLY_PLAIN_IMPORTS = frozenset(['capture_plug.py', 'extent_attention_replay.py', 'extent_attention_replay_tp.py', 'levern_policy.py', 'levern_route.py', 'packed_any_admission.py', 'serving_c2_contract.py', 'serving_fast_lane.py', 'serving_fast_lane_scheduler.py', 'serving_kv_reservation.py', 'serving_prefill_admission.py', 'serving_request_quarantine.py', 'stall_watch.py', 'trace_census.py'])
+
+
+def unsatisfiable_plain_imports():
+    """{module: {importer}} for a copied module that does a plain `import X` (at any depth) of a repo module
+    that did not exist at the bundle and reaches the image by neither list. unsatisfiable_imports only walks
+    `from X import y`, so serving_startup's `import drafter_fixtures` was invisible to it."""
+    copied = copied_modules(dockerfile_text())
+    local = {p.name for p in HERE.glob('*.py')}
+    cache, missing = {}, {}
+    for name in sorted(copied):
+        if not name.endswith('.py') or name.startswith('test_'):  # tests: see uncopied_test_imports
+            continue
+        try:
+            tree = ast.parse((HERE / name).read_text(encoding='utf-8'))
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Import):
+                continue
+            for alias in node.names:
+                dep = alias.name.split('.')[0] + '.py'
+                if dep in copied or dep in C2_ONLY_PLAIN_IMPORTS or dep not in local or dep.startswith('test_'):
+                    continue
+                if dep not in cache:
+                    cache[dep] = source_at_bundle(dep) is not None
+                if not cache[dep]:
+                    missing.setdefault(dep, set()).add(name)
+    return missing
+
+
 def uncopied_test_imports():
     """{importer: {test module}} for copied modules importing a test module neither list copies.
 
@@ -300,6 +333,26 @@ class CopyClosureTests(unittest.TestCase):
             report, [],
             'these arrive from the frozen bundle, which cannot supply the symbol - add '
             'the module to the Dockerfile COPY list: ' + '; '.join(report))
+
+    def test_a_copied_module_plain_imports_only_modules_the_image_holds(self):
+        report = ['%s imported by %s' % (dep[:-3], importer)
+                  for dep, importers in sorted(unsatisfiable_plain_imports().items())
+                  for importer in sorted(importers)]
+        self.assertEqual(
+            report, [],
+            'a plain import of a module that is not in the bundle and in neither copy list dies with '
+            'ModuleNotFoundError at worker start: add it to BOTH lists: ' + '; '.join(report))
+
+    def test_the_plain_import_check_sees_the_drafter_loader(self):
+        """serving_startup imports drafter_fixtures; both it and its manifest module are copied by both lists,
+        and the manifests directory too."""
+        copied = copied_modules(dockerfile_text())
+        for name in ('drafter_fixtures.py', 'drafter_manifest.py'):
+            self.assertIn(name, copied)
+        self.assertIn('COPY scripts/ci/references/drafter-manifests/ /experiment-scripts/ci/references/drafter-manifests/',
+                      dockerfile_text())
+        self.assertIn('references/drafter-manifests/*.json', WORKFLOW.read_text(encoding='utf-8'))
+        self.assertIsNone(source_at_bundle('drafter_fixtures.py'))
 
     def test_a_copied_test_module_imports_only_copied_test_modules(self):
         """The in-image unittest step imports every test_serving_* module, so a test
