@@ -1691,6 +1691,22 @@ class ScenarioTests(unittest.TestCase):
         self.assertGreater(raw[1], 0, 'turn 2 found what turn 1 published')
         self.assertEqual([r['expected_raw_h'] for r in unsalted], [0, 0, 0])
 
+    def test_lifecycle_evict_holds_every_seat_of_an_eight_seat_profile(self):
+        """W-0, P1b-CTL: the unit-major replay audit came from 1 block owner of 2, because the abort-while-waiting case held four
+        seats and the traffic never had more than four users decoding. At eight seats it holds eight, so both packed blocks decode
+        and the queued turn really waits; at four seats nothing changes."""
+        for seats in (4, 8):
+            profile = dict(served_profile(), env=dict(served_profile()['env'], VLLM_SERVER_DEV_MODE='1'))
+            profile['engine'] = dict(profile['engine'], **{'max-num-seqs': seats})
+            self.engine = engine = FakeEngine(profile=profile)
+            driver = driver_for(engine, 'lifecycle-evict', strict=False)
+            driver.seats = seats
+            with mock.patch.object(replay, 'EVICT_LENGTHS', (12000, 24000)):
+                replay.scenario_lifecycle_evict(driver, pool_tokens=engine.num_blocks * BLOCK, restart=None)
+            self.assertEqual(len([r for r in driver.records if r.get('role') == 'seat']), seats, 'one long request per seat')
+            waiting = driver.events['abort-waiting']
+            self.assertEqual((waiting['phase'], waiting['seats_busy']), ('waiting', True), seats)
+
     def test_lifecycle_evict_drives_every_event(self):
         self.engine = engine = FakeEngine(profile=dict(served_profile(), env=dict(
             served_profile()['env'], VLLM_SERVER_DEV_MODE='1')))

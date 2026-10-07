@@ -190,16 +190,16 @@ class OrderTests(unittest.TestCase):
 
 
 class NumbersTests(unittest.TestCase):
-    def test_w1_is_471_minutes_with_a_40_minute_hand_back(self):
+    def test_w1_is_401_minutes_with_a_40_minute_hand_back(self):
         self.assertEqual(minutes('w1', *HANDBACK, 'DEPLOY-and-engine-load'), 40)
         core = minutes('w1', 'A0X0-agentstop-unserve-rescan-reset', 'A1-LN-levern-audited-attach', 'S0-CTL-control-attach-smoke', 'P1ab-LN-exactness-shared-lifecycle-evict',
                        'E1-LN-exactness-eager')
         self.assertEqual((core, [int(row('w1', n)[3]) for n in ('A0X0-agentstop-unserve-rescan-reset', 'A1-LN-levern-audited-attach', 'S0-CTL-control-attach-smoke',
-                                                                'P1ab-LN-exactness-shared-lifecycle-evict', 'E1-LN-exactness-eager')]), (431, [4, 80, 57, 190, 100]))
+                                                                'P1ab-LN-exactness-shared-lifecycle-evict', 'E1-LN-exactness-eager')]), (361, [4, 80, 57, 120, 100]))
         text = read_text('w1', 'ORDER.txt')
-        self.assertIn('PLANNED = 471 min = 7.9 h', text)
+        self.assertIn('PLANNED = 401 min = 6.7 h', text)
         self.assertIn('HAND-BACK (40 min, always)', text)
-        self.assertLessEqual(471, HARD_CAP)
+        self.assertLessEqual(401, HARD_CAP)
 
     def test_w2_is_445_minutes_with_a_45_minute_cutover_and_a_40_minute_hand_back(self):
         jobs = [name for name in W2 if name not in HANDBACK + ('CUT-release-and-live-checks',)]
@@ -230,16 +230,20 @@ class NumbersTests(unittest.TestCase):
         self.assertIn('E + box + HB <= 540', read_text('w1', 'README.md'))
         self.assertIn('E + box + HB <= 540', read_text('w2', 'README.md'))
 
-    def test_w2_is_admitted_whole_at_the_estimates_and_w1_carries_e1_over(self):
+    def test_w2_and_w1_are_admitted_whole_at_the_estimates_and_a_slow_p1ab_carries_e1_over(self):
         self.assertEqual(admit('w2'), [])
-        # W-1 at HB 60: P1ab-LN fits with 3 minutes to spare, E1-LN does not (331 > 327): the carry-over the ORDER names
-        self.assertEqual(admit('w1'), ['E1-LN-exactness-eager'])
+        # W-1 at HB 60: P1ab-LN (box 240, the audit reads only a request's blocks) fits with 99 minutes to spare and E1-LN (central E 261 <= 327) with 66
+        self.assertEqual(admit('w1'), [])
         self.assertEqual(admit('w1', 40), [])
         text = read_text('w1', 'ORDER.txt')
-        for phrase in ('P1ab-LN if E <= 144', 'E1-LN if E <= 327', 'CARRY-OVER', 'THE CUTOVER MOVES TO A THIRD WINDOW', 'v610 for the first, v611 for a second'):
+        for phrase in ('P1ab-LN if E <= 240', 'E1-LN if E <= 327', 'CARRY-OVER', 'THE CUTOVER MOVES TO A THIRD WINDOW', 'v610 for the first, v611 for a second'):
             self.assertIn(phrase, text)
-        self.assertEqual(HARD_CAP - 336 - HB_ADMIT['w1'], 144)
+        self.assertEqual(HARD_CAP - 240 - HB_ADMIT['w1'], 240)
         self.assertEqual(HARD_CAP - 153 - HB_ADMIT['w1'], 327)
+        central_e = 4 + 80 + 57
+        self.assertEqual((240 - central_e, 327 - (central_e + int(row('w1', 'P1ab-LN-exactness-shared-lifecycle-evict')[3]))), (99, 66))
+        # ... and a P1ab-LN that runs past its estimate by more than 66 minutes (up to its box) leaves E1-LN to W-2, as the ORDER says
+        self.assertGreater(central_e + 240, 327)
 
     def test_a_carried_over_job_leaves_w2_without_its_tail_so_the_cutover_slides(self):
         # E1-LN (100) opens W-2 after A0X0: the tail of the window no longer fits the cap at the estimates
@@ -282,10 +286,10 @@ class NumbersTests(unittest.TestCase):
 
     def test_w1_keeps_e1_only_if_its_box_fits(self):
         clock = minutes('w1', 'A0X0-agentstop-unserve-rescan-reset', 'A1-LN-levern-audited-attach', 'S0-CTL-control-attach-smoke', 'P1ab-LN-exactness-shared-lifecycle-evict')
-        self.assertEqual(clock + int(row('w1', 'E1-LN-exactness-eager')[5]) + 40, 524, 'with the central hand-back it fits')
-        self.assertGreater(clock + int(row('w1', 'E1-LN-exactness-eager')[5]) + HB_ADMIT['w1'], HARD_CAP, 'with the upper-bound hand-back it does not')
-        # one hour over at the P1ab box and E1 no longer fits: it moves to the head of W-2
-        self.assertGreater(clock + 60 + int(row('w1', 'E1-LN-exactness-eager')[5]) + 40, HARD_CAP)
+        self.assertEqual(clock + int(row('w1', 'E1-LN-exactness-eager')[5]) + 40, 454, 'with the central hand-back it fits')
+        self.assertLessEqual(clock + int(row('w1', 'E1-LN-exactness-eager')[5]) + HB_ADMIT['w1'], HARD_CAP, 'with the upper-bound hand-back it fits too')
+        # P1ab-LN at its box (240) instead of its estimate (120): E1 no longer fits, it moves to the head of W-2
+        self.assertGreater(clock + (240 - 120) + int(row('w1', 'E1-LN-exactness-eager')[5]) + HB_ADMIT['w1'], HARD_CAP)
         self.assertIn('E1-LN opens W-2 when its box does not fit here', read_text('w1', 'ORDER.txt'))
         self.assertIn('ADMIT-ON-BOX', read_text('w1', 'ORDER.txt'))
 
@@ -311,12 +315,19 @@ class BoxTests(unittest.TestCase):
 
     def test_the_long_plans_boxes_are_the_gates_own_worst_cases(self):
         """Computed by the gates' own helpers (re-runs and per-arm overhead included), never by a copy of their tables."""
-        self.assertEqual(table_box('w1', 'P1ab-LN-exactness-shared-lifecycle-evict'), 336)
+        self.assertEqual(table_box('w1', 'P1ab-LN-exactness-shared-lifecycle-evict'), 336, 'the gate worst case, unchanged')
         self.assertEqual(table_box('w1', 'E1-LN-exactness-eager'), 153)
         self.assertEqual(table_box('w2', 'L8-LN-ladder8-past-131k'), 368)
         self.assertEqual(table_box('w2', 'C16-LN-churn16'), 152)
-        for pack, name in (('w1', 'P1ab-LN-exactness-shared-lifecycle-evict'), ('w1', 'E1-LN-exactness-eager'), ('w2', 'L8-LN-ladder8-past-131k')):
+        for pack, name in (('w1', 'E1-LN-exactness-eager'), ('w2', 'L8-LN-ladder8-past-131k')):
             self.assertEqual(int(row(pack, name)[5]), table_box(pack, name), name)
+        # P1ab-LN is the one prefix job boxed under its gate worst case: 1.5 times its 160-minute high end. The prefix gate clips each arm's
+        # docker timeout to what the box has left (no plan is refused), and the audit it rests on reads only a request's blocks.
+        p1ab = row('w1', 'P1ab-LN-exactness-shared-lifecycle-evict')
+        self.assertEqual((int(p1ab[3]), int(p1ab[5])), (120, 240))
+        self.assertEqual(int(p1ab[5]), int(1.5 * 160))
+        self.assertLess(int(p1ab[5]), table_box('w1', 'P1ab-LN-exactness-shared-lifecycle-evict'))
+        self.assertIn('C2_BOX_MINUTES=240', read_text('w1', 'P1ab-LN-exactness-shared-lifecycle-evict.env'))
         self.assertGreaterEqual(int(row('w2', 'C16-LN-churn16')[5]), table_box('w2', 'C16-LN-churn16'))
         arms = prefix_gate.plan_arms('exactness-shared', LN_AUDIT_NOLNA, None, profiles()) + prefix_gate.plan_arms('lifecycle-evict', LN_AUDIT_NOLNA, None, profiles())
         self.assertEqual([arm['timeout'] for arm in arms], [10800, 9000])
@@ -346,7 +357,7 @@ class BoxTests(unittest.TestCase):
     def test_every_gate_and_prefix_box_is_at_least_its_worst_case_or_a_clipped_prefix_box(self):
         for pack in PACKS:
             for line in order(pack):
-                if line[5] == '-' or line[0] in CLIPPED_BOXES:
+                if line[5] == '-' or line[0] in CLIPPED_BOXES or line[0].startswith('P1ab-LN'):  # P1ab-LN: clipped, asserted in test_the_long_plans_boxes_are_the_gates_own_worst_cases
                     continue
                 worst = table_box(pack, line[0])
                 if worst is not None:
@@ -709,7 +720,7 @@ class HygieneTests(unittest.TestCase):
     def test_the_public_doc_exists_and_quotes_the_numbers(self):
         with open(os.path.join(ROOT, 'docs', 'tp4-short-windows.md'), encoding='utf-8') as handle:
             doc = handle.read()
-        for phrase in ('471 min = 7.9 h', '445 min = 7.4 h', 'c2-packed-tp4-8x262k-ship-prefix-levern-traffic', 'C2_BOX_MINUTES', '10 s', '2 s'):
+        for phrase in ('401 min = 6.7 h', '445 min = 7.4 h', 'c2-packed-tp4-8x262k-ship-prefix-levern-traffic', 'C2_BOX_MINUTES', '10 s', '2 s'):
             self.assertIn(phrase, doc)
         self.assertIsNone(BANNED.search(doc))
 

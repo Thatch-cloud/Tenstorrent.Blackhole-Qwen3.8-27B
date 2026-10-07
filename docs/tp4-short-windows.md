@@ -15,7 +15,7 @@ W-0 the baseline on today's production bytes, W-1 Lever N exactness, W-2 Lever N
 |---|---|---|
 | Image | `tp4-serve-11` (the combined branch's engine, the Lever N traffic profile baked in) | the same |
 | Jobs | A0X0, A1-LN (attach, the kill signal), S0-CTL (flags off equals production), P1ab-LN (exactness-shared and lifecycle-evict in one job), E1-LN (eager exactness, only if its box fits), hand-back | A0X0, S0b, L8-LN, HL-LN x3 on fresh boots, HF-LN, C16-LN, the timed block (T0s, TA1, TL1, TA2, TL2, TA3), S1/S2, GG1/GG2, SR10, then the cutover or the hand-back |
-| Outage | 471 min = 7.9 h | 445 min = 7.4 h |
+| Outage | 401 min = 6.7 h | 445 min = 7.4 h |
 | Ends | restoring production | in the cutover, or restoring the pre-cutover production |
 
 Rules for every window: the first job is `A0X0` (agentstop, unserve, rescan, reset, no `status`: production's container would read as stale); a job starts only if `elapsed + its box + the hand-back's upper bound <= 540` (60 min in W-1, 75 in W-2; the central figures are 40, 40 and 45), else it moves to

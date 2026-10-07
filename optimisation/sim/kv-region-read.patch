@@ -1,0 +1,137 @@
+diff --git a/tt_metal/api/tt-metalium/experimental/byte_based_tensor_transfers.hpp b/tt_metal/api/tt-metalium/experimental/byte_based_tensor_transfers.hpp
+index 3fe20bc..f103d13 100644
+--- a/tt_metal/api/tt-metalium/experimental/byte_based_tensor_transfers.hpp
++++ b/tt_metal/api/tt-metalium/experimental/byte_based_tensor_transfers.hpp
+@@ -5,9 +5,12 @@
+ #pragma once
+ 
+ #include <cstddef>
++#include <cstdint>
+ #include <optional>
++#include <vector>
+ 
+ #include <tt-metalium/buffer.hpp>
++#include <tt-metalium/tensor/host_tensor.hpp>
+ #include <tt-metalium/tensor/mesh_tensor.hpp>
+ #include <tt-metalium/mesh_command_queue.hpp>
+ 
+@@ -35,4 +38,15 @@ void enqueue_write_tensor(
+     MeshTensor& device_tensor,
+     const std::optional<BufferRegion>& region = std::nullopt);
+ 
++// Reads whole slices along dimension 0 of a mesh tensor (for a paged KV cache: whole blocks) into the front of a
++// host tensor's shards, every device's shard of the mesh, slice indices[i] to host slice i. host_tensor must have
++// the device tensor's dtype and page config and a dimension 0 of indices.size() (ttnn.allocate_tensor_on_host).
++// Runs of consecutive indices are one region read each; the call returns when every read has landed. Reads only:
++// no program is compiled and no device memory is allocated.
++void enqueue_read_tensor_dim0_slices(
++    distributed::MeshCommandQueue& queue,
++    const MeshTensor& device_tensor,
++    HostTensor& host_tensor,
++    const std::vector<uint32_t>& indices);
++
+ }  // namespace tt::tt_metal
+diff --git a/tt_metal/impl/tensor/byte_based_data_transfer_apis.cpp b/tt_metal/impl/tensor/byte_based_data_transfer_apis.cpp
+index 035253a..6273d0a 100644
+--- a/tt_metal/impl/tensor/byte_based_data_transfer_apis.cpp
++++ b/tt_metal/impl/tensor/byte_based_data_transfer_apis.cpp
+@@ -35,4 +35,59 @@ void enqueue_write_tensor(
+     queue.enqueue_write_shards(device_tensor.impl().raw_mesh_buffer(), shard_data_transfers, false);
+ }
+ 
++void enqueue_read_tensor_dim0_slices(
++    distributed::MeshCommandQueue& queue,
++    const MeshTensor& device_tensor,
++    HostTensor& host_tensor,
++    const std::vector<uint32_t>& indices) {
++    const auto& spec = device_tensor.tensor_spec();
++    const uint64_t slices = spec.logical_shape()[0];
++    const uint64_t total_bytes = spec.compute_packed_buffer_size_bytes();
++    TT_FATAL(slices > 0 && total_bytes % slices == 0, "A dim-0 slice read needs a whole number of bytes per slice");
++    const uint64_t slice_bytes = total_bytes / slices;
++    TT_FATAL(host_tensor.dtype() == device_tensor.dtype(), "Host tensor has different dtype");
++    TT_FATAL(
++        host_tensor.tensor_spec().page_config() == device_tensor.tensor_spec().page_config(),
++        "Host tensor has different page config");
++    TT_FATAL(host_tensor.logical_shape()[0] == indices.size(), "Host tensor holds a different number of slices");
++    for (uint32_t index : indices) {
++        TT_FATAL(index < slices, "Slice {} is outside the {} slices of the device tensor", index, slices);
++    }
++
++    // (first index, count) of each run of consecutive indices; its bytes land back to back in the host shard.
++    std::vector<std::pair<uint64_t, uint64_t>> runs;
++    for (uint32_t index : indices) {
++        if (!runs.empty() && runs.back().first + runs.back().second == index) {
++            ++runs.back().second;
++        } else {
++            runs.emplace_back(index, 1);
++        }
++    }
++
++    distributed::MeshCoordinateRange all_coords(queue.device()->shape());
++    std::vector<distributed::MeshCoordinate> coords(all_coords.begin(), all_coords.end());
++    std::vector<distributed::ShardDataTransfer> transfers;
++    transfers.reserve(coords.size() * runs.size());
++    for (const auto& coord : coords) {
++        auto host_buffer = host_tensor.buffer().get_shard(coord);
++        TT_FATAL(host_buffer.has_value(), "Host shard for device shard {} is not populated.", coord);
++        auto bytes = host_buffer->view_bytes();
++        TT_FATAL(
++            bytes.size() >= indices.size() * slice_bytes,
++            "Host shard for device shard {} is too small: {} < {}",
++            coord,
++            bytes.size(),
++            indices.size() * slice_bytes);
++        std::byte* base = const_cast<std::byte*>(bytes.data());
++        uint64_t host_offset = 0;
++        for (const auto& [first, count] : runs) {
++            transfers.push_back(distributed::ShardDataTransfer{coord}
++                                    .host_data(base + host_offset)
++                                    .region(BufferRegion(first * slice_bytes, count * slice_bytes)));
++            host_offset += count * slice_bytes;
++        }
++    }
++    queue.enqueue_read_shards(transfers, device_tensor.impl().raw_mesh_buffer(), /*blocking=*/true);
++}
++
+ }  // namespace tt::tt_metal
+diff --git a/ttnn/cpp/ttnn-nanobind/operations/core.cpp b/ttnn/cpp/ttnn-nanobind/operations/core.cpp
+index 4c9fb6c..5a6bff9 100644
+--- a/ttnn/cpp/ttnn-nanobind/operations/core.cpp
++++ b/ttnn/cpp/ttnn-nanobind/operations/core.cpp
+@@ -18,6 +18,7 @@
+ #include "ttnn/common/queue_id.hpp"
+ #include "ttnn/tensor/tensor_ops.hpp"
+ #include "ttnn/operations/experimental/core_subset_write/copy_to_device_filtered.hpp"
++#include <tt-metalium/experimental/byte_based_tensor_transfers.hpp>
+ #include <tt-metalium/work_split.hpp>
+ #include <tt-metalium/base_types.hpp>
+ #include <tt-metalium/core_coord.hpp>
+@@ -425,6 +426,27 @@ void py_module(nb::module_& mod) {
+                 -  Host and Device tensors must be the same shape, have the same datatype, and have the same data layout (ROW_MAJOR or TILE).
+         )doc");
+ 
++    mod.def(
++        "qwen_read_blocks",
++        [](const ttnn::Tensor& device_tensor, ttnn::Tensor& host_tensor, const std::vector<uint32_t>& blocks) {
++            auto& cq = device_tensor.device()->mesh_command_queue();
++            tt::tt_metal::enqueue_read_tensor_dim0_slices(
++                cq, device_tensor.mesh_tensor(), host_tensor.host_storage().host_tensor(), blocks);
++        },
++        nb::arg("device_tensor"),
++        nb::arg("host_tensor"),
++        nb::arg("blocks"),
++        R"doc(
++        Reads the named dimension-0 slices (for a paged KV cache: blocks) of a device tensor into a host tensor of
++        just those slices, on every device of the mesh. Only those pages move; no program is compiled.
++
++        Args:
++            device_tensor (ttnn.Tensor): the paged cache, [num_blocks, ...] per device.
++            host_tensor (ttnn.Tensor): from ttnn.allocate_tensor_on_host with shape [len(blocks), ...] and the
++                device tensor's dtype and layout; block blocks[i] lands in slice i.
++            blocks (list[int]): block ids; runs of consecutive ids are one read each.
++        )doc");
++
+     ttnn::bind_function<"to_layout">(
+         mod,
+         R"doc(

@@ -1484,7 +1484,10 @@ def scenario_lifecycle_evict(driver, pool_tokens=None, restart=None):
         conv.extend(1200)
     lifecycle_arrivals(driver, convs)
     convs[0].extend(1200)
-    lifecycle_abort_waiting(driver, convs[0])
+    # Every seat of the served profile (eight on the 8x262k profiles): four holders at eight seats leave four free, so the
+    # turn would be admitted instead of waiting, and only the first packed block (seats 0-3) would ever decode - the
+    # unit-major replay audit then comes from one block owner of two (W-0, P1b-CTL: 'came from 1 block owner(s), 2 blocks are served').
+    lifecycle_abort_waiting(driver, convs[0], seats=int(getattr(driver, 'seats', 4)))
     lifecycle_abort_prefill(driver, convs[1])
     evicted = lifecycle_flood(driver, pool_tokens)
     lifecycle_reset(driver, evicted[-1])

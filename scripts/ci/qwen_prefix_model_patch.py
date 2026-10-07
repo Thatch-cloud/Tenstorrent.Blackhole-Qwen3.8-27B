@@ -110,7 +110,7 @@ SOURCE_SHA256 = {
 # edit below, or to lever_n_model_patch.patch_tp_replay, changes these on purpose
 # (test_qwen_prefix_model_patch prints the new values).
 PATCHED_SHA256 = {
-    MODEL_FILE: 'ff1e72b0bf8c4b1cb355e8d974a1a1976fb5f02ff996d721cd265be785ca37ca',
+    MODEL_FILE: 'b42d9700ffe04f4a36e0b5cb249278b1ca77675959df84abb13b5c4333f256ad',
     VLLM_FILE: 'bd742abe2ebb67bbcc14cb58301c1ec27ac5810983d9521d52bf6e344e3ef189',
 }
 
@@ -124,6 +124,8 @@ MARKER_WARM = '[PINDIAG] prefix: model warm restore_mode='
 # qwen36_vllm's eager warm (trace_mode decode_only), before the decode trace is parked; prefix_markers.EAGER_WARM.
 MARKER_EAGER_WARM = '[PINDIAG] prefix: eager prefill warmed before the decode trace'
 MARKER_AUDIT = '[PREFIX-AUDIT]'
+# One line per audited step: which read ran and what it read (the window's evidence of the audit's cost).
+MARKER_AUDIT_COST = '[PREFIX-AUDIT-COST]'
 # G2's DRAM reading, '<MARKER_DRAM><point>: <per-chip figures>' (prefix_markers.DRAM_READING parses it; the
 # bring-up gate requires the DRAM_REGISTRY point, and DRAM_FIRST_CAPTURE once the arm stored a checkpoint).
 MARKER_DRAM = '[PINDIAG] dram after '
@@ -507,6 +509,7 @@ MODEL_METHODS = r'''
         host_logits = []
         per_user_rec = []
         per_user_conv = []
+        audited = []
         try:
             for row in rows:
                 u, actual = row.index, row.actual
@@ -541,7 +544,7 @@ MODEL_METHODS = r'''
                     [[ttnn.to_torch(c, mesh_composer=comp) for c in dn.conv_states] for dn in dn_states]
                 )
                 if audit:
-                    self._qwen_prefix_audit(row, pt[u : u + 1], per_user_rec[-1], per_user_conv[-1], host_logits[-1])
+                    audited.append((row, pt[u : u + 1], per_user_rec[-1], per_user_conv[-1], host_logits[-1]))
                 shas = ""
                 if digests:
                     slot_sha, logits_sha = _qwen_prefix_digests(per_user_rec[-1], per_user_conv[-1], host_logits[-1])
@@ -567,6 +570,10 @@ MODEL_METHODS = r'''
                     # G2's second reading, once per process: after the first row that stored a
                     # checkpoint (host tensors: any change is device memory the capture path kept).
                     _qwen_prefix_dram("first capture", dn_states[0].rec_state if dn_states else None)
+            if audited:
+                # QWEN_PREFIX_AUDIT: one audit for the whole step (the rows' KV blocks are written by now and
+                # no later row of the step touches another row's blocks), so a step reads each cache once.
+                self._qwen_prefix_audit_rows(audited)
         finally:
             # Always rebind the batched decode buffers; the scratch persists (see prefill_paged_slots).
             self._unbind_gdn_prefill_scratch(prev)
@@ -749,49 +756,138 @@ MODEL_METHODS = r'''
         )
 
     def _qwen_prefix_audit(self, row, page_row, rec_snap, conv_snap, logits):
-        """QWEN_PREFIX_AUDIT=1: digests the exactness gate compares between a hit and a salted cold
-        run of the same prompt (F3).
+        """QWEN_PREFIX_AUDIT=1 for one row (the Lever N route's call); see _qwen_prefix_audit_rows."""
+        self._qwen_prefix_audit_rows([(row, page_row, rec_snap, conv_snap, logits)])
 
-        Program-free: each paged KV cache is read to host with to_torch, ONE tensor at a time (all
-        of them at once would need ~34 GB of host RAM), and the row's blocks are selected on host -
-        a device-side slice would compile after the traces are parked. The digests are per
-        2048-token window of the row's logical sequence, over the unpacked values every reader
-        sees, so a hit (new windows from Q/2048) lines up with a cold run (windows from 0). The GDN
-        slot snapshot and the logits get one digest each."""
+    def _qwen_prefix_audit_rows(self, entries):
+        """QWEN_PREFIX_AUDIT=1: digests the exactness gate compares between a hit and a salted cold
+        run of the same prompt (F3), for every row of one prefill step.
+
+        entries: (row, page_row, rec_snap, conv_snap, logits) per row. Program-free: the KV is read
+        to host and the rows' blocks are selected there - a device-side slice would compile after the
+        traces are parked. The digests are per 2048-token window of the row's logical sequence, over
+        the unpacked values every reader sees, so a hit (new windows from Q/2048) lines up with a
+        cold run (windows from 0). The GDN slot snapshot and the logits get one digest each.
+
+        What is read (this was the cost: every request read the WHOLE pool of every full-attention
+        layer, ~8.4 minutes at eight seats x 262k, whatever the prompt's length):
+          * region (QWEN_PREFIX_AUDIT_READ=region, or auto when the image has the ttnn.qwen_read_blocks
+            graft): only the blocks each row's block table names are read from the device, as raw
+            page ranges into a host tensor of just those blocks, and ttnn's own to_torch unpacks that
+            tensor - the same unpack as the whole-cache read, so the digests are byte-identical. The
+            cost follows the rows' lengths, not the pool.
+          * full (QWEN_PREFIX_AUDIT_READ=full, or auto without the graft, or after a region read
+            fails): each cache is read whole with to_torch, ONE tensor at a time (all of them at
+            once would need ~34 GB of host RAM) - but ONCE for all the rows of the step, not once
+            per row.
+        A '[PREFIX-AUDIT-COST]' line per step says which path ran and what it read."""
         import hashlib as _qwen_hashlib
 
-        actual = row.actual
+        began = _qwen_time.perf_counter()
         chunk = _QWEN_PREFIX_CHUNK
         block_size = get_block_size(self._paged_kv_caches)
-        n_blocks = -(-actual // block_size)
-        blocks = torch.as_tensor(page_row[0, :n_blocks], dtype=torch.long)
-        windows = [_qwen_hashlib.sha256() for _ in range(-(-actual // chunk))]
+        plans = []
+        for row, page_row, _rec, _conv, _logits in entries:
+            n_blocks = -(-row.actual // block_size)
+            blocks = torch.as_tensor(page_row[0, :n_blocks], dtype=torch.long)
+            plans.append((blocks, n_blocks, [_qwen_hashlib.sha256() for _ in range(-(-row.actual // chunk))]))
         heads = ttnn.ConcatMeshToTensor(self.mesh_device, dim=1)
+        read = {"mode": self._qwen_prefix_audit_read_mode(), "reads": 0, "blocks": 0, "fallback": None, "ms": 0.0}
         for k_cache, v_cache in self._paged_kv_caches:
             for cache in (k_cache, v_cache):
-                host = ttnn.to_torch(cache, mesh_composer=heads)
-                sel = host.index_select(0, blocks)
-                del host
-                seq = sel.permute(1, 0, 2, 3).reshape(sel.shape[1], n_blocks * block_size, sel.shape[3])
-                for w, digest in enumerate(windows):
-                    digest.update(_qwen_prefix_bytes(seq[:, w * chunk : min((w + 1) * chunk, actual)]))
-                del sel, seq
-        whole = _qwen_hashlib.sha256()
-        for w, digest in enumerate(windows):
-            window_sha = digest.hexdigest()[:32]
-            whole.update(window_sha.encode("ascii"))
+                for index, sel in self._qwen_prefix_audit_selections(cache, [plan[0] for plan in plans], heads, read):
+                    _blocks, n_blocks, windows = plans[index]
+                    actual = entries[index][0].actual
+                    seq = sel.permute(1, 0, 2, 3).reshape(sel.shape[1], n_blocks * block_size, sel.shape[3])
+                    for w, digest in enumerate(windows):
+                        digest.update(_qwen_prefix_bytes(seq[:, w * chunk : min((w + 1) * chunk, actual)]))
+                    del sel, seq
+        for (row, _page, rec_snap, conv_snap, logits), (_blocks, _n, windows) in zip(entries, plans):
+            actual = row.actual
+            whole = _qwen_hashlib.sha256()
+            for w, digest in enumerate(windows):
+                window_sha = digest.hexdigest()[:32]
+                whole.update(window_sha.encode("ascii"))
+                logger.info(
+                    f"[PREFIX-AUDIT] req={row.req_id} Q={row.start} L={actual} window={w} "
+                    f"tokens=[{w * chunk},{min((w + 1) * chunk, actual)}) new={int(w * chunk >= row.start)} "
+                    f"kv={window_sha}"
+                )
+            # The summary the gate compares (prefix_markers.audit_row): KV over [0, L) as the chain of the
+            # window digests above, the GDN slot and the last-position logits.
+            slot_sha, logits_sha = _qwen_prefix_digests(rec_snap, conv_snap, logits)
             logger.info(
-                f"[PREFIX-AUDIT] req={row.req_id} Q={row.start} L={actual} window={w} "
-                f"tokens=[{w * chunk},{min((w + 1) * chunk, actual)}) new={int(w * chunk >= row.start)} "
-                f"kv={window_sha}"
+                f"[PREFIX-AUDIT] req={row.req_id} Q={row.start} L={actual} kv_range=0:{actual} "
+                f"kv_sha={whole.hexdigest()[:32]} slot_sha={slot_sha} logits_sha={logits_sha}"
             )
-        # The summary the gate compares (prefix_markers.audit_row): KV over [0, L) as the chain of the
-        # window digests above, the GDN slot and the last-position logits.
-        slot_sha, logits_sha = _qwen_prefix_digests(rec_snap, conv_snap, logits)
+        fallback = "" if read["fallback"] is None else f" fallback={read['fallback']!r}"
         logger.info(
-            f"[PREFIX-AUDIT] req={row.req_id} Q={row.start} L={actual} kv_range=0:{actual} "
-            f"kv_sha={whole.hexdigest()[:32]} slot_sha={slot_sha} logits_sha={logits_sha}"
+            f"[PREFIX-AUDIT-COST] rows={len(entries)} reqs={','.join(str(item[0].req_id) for item in entries)} "
+            f"tokens={sum(int(item[0].actual) for item in entries)} mode={read['mode']} reads={read['reads']} "
+            f"blocks_read={read['blocks']} read_ms={read['ms']:.1f} "
+            f"total_ms={(_qwen_time.perf_counter() - began) * 1000.0:.1f}{fallback}"
         )
+
+    def _qwen_prefix_audit_read_mode(self):
+        """'region' or 'full' (QWEN_PREFIX_AUDIT_READ: auto, region or full)."""
+        want = os.environ.get("QWEN_PREFIX_AUDIT_READ", "auto")
+        if want not in ("auto", "region", "full"):
+            raise AssertionError(f"QWEN_PREFIX_AUDIT_READ must be auto, region or full, got {want!r}")
+        have = callable(getattr(ttnn, "qwen_read_blocks", None)) and hasattr(ttnn, "allocate_tensor_on_host")
+        if want == "region" and not have:
+            raise AssertionError(
+                "QWEN_PREFIX_AUDIT_READ=region but this ttnn has no qwen_read_blocks (the region-read graft): "
+                "the audit would silently read whole caches (~8 minutes a request at eight seats x 262k)"
+            )
+        return "full" if want == "full" or not have else "region"
+
+    def _qwen_prefix_audit_selections(self, cache, blocks_per_row, heads, read):
+        """(row index, that row's blocks of one KV cache as host values [n_blocks, heads, block, dim])
+        for every row, one selection alive at a time. read is the step's counters; a region read that
+        raises switches the step to the whole-cache read (logged, and named in the cost line)."""
+        start = 0
+        if read["mode"] == "region":
+            for index, blocks in enumerate(blocks_per_row):
+                tick = _qwen_time.perf_counter()
+                try:
+                    sel = self._qwen_prefix_read_blocks(cache, blocks, heads)
+                except Exception as exc:  # the audit must still answer: fall back, loudly
+                    read["mode"] = "full"
+                    read["fallback"] = f"{type(exc).__name__}: {exc}"
+                    logger.warning(
+                        f"[PREFIX-AUDIT-COST] the region read failed ({read['fallback']}); reading whole caches for this step"
+                    )
+                    break
+                read["ms"] += (_qwen_time.perf_counter() - tick) * 1000.0
+                read["reads"] += 1
+                read["blocks"] += int(blocks.numel())
+                yield index, sel
+                start = index + 1
+            else:
+                return
+        tick = _qwen_time.perf_counter()
+        host = ttnn.to_torch(cache, mesh_composer=heads)
+        read["ms"] += (_qwen_time.perf_counter() - tick) * 1000.0
+        read["reads"] += 1
+        read["blocks"] += int(host.shape[0])
+        try:
+            for index in range(start, len(blocks_per_row)):
+                yield index, host.index_select(0, blocks_per_row[index])
+        finally:
+            del host
+
+    def _qwen_prefix_read_blocks(self, cache, blocks, heads):
+        """The blocks of one paged KV cache, read from the device as raw page ranges (the
+        ttnn.qwen_read_blocks graft: one non-blocking read per run of consecutive block ids, one
+        wait) into a host tensor of the cache's dtype and layout holding just those blocks, then
+        unpacked by ttnn.to_torch exactly as the whole-cache read unpacks the cache. Nothing is
+        compiled and no device memory is allocated."""
+        count = int(blocks.numel())
+        host = ttnn.allocate_tensor_on_host(
+            ttnn.Shape([count] + [int(dim) for dim in cache.shape[1:]]), cache.dtype, cache.layout, self.mesh_device
+        )
+        ttnn.qwen_read_blocks(cache, host, [int(block) for block in blocks.tolist()])
+        return ttnn.to_torch(host, mesh_composer=heads)
 '''
 
 LOOP_SIGNATURE_OLD = 'chunk_from=0, chunk_to=None, do_reset=True, do_tail=True'

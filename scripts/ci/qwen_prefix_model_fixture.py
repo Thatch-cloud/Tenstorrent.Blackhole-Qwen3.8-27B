@@ -129,6 +129,8 @@ class FakeTTNN(object):
         self.memory_view_refuse = False
         self.memory_views = []
         self.dram_views = {}
+        self.region_reads = False
+        self.region_refuse = False
         self.bfloat16 = FakeDType('bfloat16', torch.bfloat16)
         self.float32 = FakeDType('float32', torch.float32)
         self.bfloat8_b = FakeDType('bfloat8_b', torch.float32)
@@ -149,7 +151,18 @@ class FakeTTNN(object):
                      'deallocate', 'synchronize_device', 'execute_trace', 'ConcatMeshToTensor',
                      'ShardTensorToMesh', 'ReplicateTensorToMesh', 'get_device_tensors', 'get_memory_view'):
             setattr(module, name, getattr(self, name))
-        module.__getattr__ = Unfaked
+        region = ('qwen_read_blocks', 'allocate_tensor_on_host', 'Shape')
+        if self.region_reads:
+            module.allocate_tensor_on_host = self.allocate_tensor_on_host
+            module.qwen_read_blocks = self.qwen_read_blocks
+            module.Shape = lambda dims: tuple(dims)
+
+        def unfaked(name):
+            # The region-read graft is a capability the image may lack: hasattr must say so.
+            if name in region:
+                raise AttributeError(name)
+            return Unfaked(name)
+        module.__getattr__ = unfaked
         return module
 
     # -- tensors ---------------------------------------------------------------------------------
@@ -174,6 +187,22 @@ class FakeTTNN(object):
         if self.to_torch_hook is not None:
             self.to_torch_hook(tensor)
         return tensor.data.clone()
+
+    def allocate_tensor_on_host(self, shape, dtype, layout, mesh_device, memory_config=None):
+        """The host tensor of the region-read graft's path: nothing on the device."""
+        self.log.append(('allocate_host', tuple(shape)))
+        return FakeTensor(torch.zeros(tuple(shape), dtype=dtype.torch), dtype, layout, False)
+
+    def qwen_read_blocks(self, cache, host, blocks):
+        """The graft: the named blocks of a device cache into the front of a host tensor of just those blocks."""
+        if cache is None or cache.deallocated or not cache.on_device:
+            raise RuntimeError('qwen_read_blocks needs a live device cache')
+        if host.on_device or host.shape[0] != len(blocks) or host.shape[1:] != cache.shape[1:]:
+            raise RuntimeError('qwen_read_blocks: host %s for %d blocks of %s' % (host.shape, len(blocks), cache.shape))
+        if self.region_refuse:
+            raise RuntimeError('qwen_read_blocks: region read refused')
+        self.log.append(('read_blocks', len(blocks), cache.shape))
+        host.data.copy_(cache.data.index_select(0, torch.as_tensor(blocks, dtype=torch.long)))
 
     def copy(self, src, dst):
         for tensor in (src, dst):
