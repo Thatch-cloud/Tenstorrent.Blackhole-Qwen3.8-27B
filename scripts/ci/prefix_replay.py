@@ -1760,13 +1760,137 @@ def scenario_agent_turns(driver, agents=None, turns=AGENT_TURNS, max_tokens=AGEN
                     gap_mean_s=gap_mean_s)
 
 
+# Lever N on the merged route (docs/lever-n-prefix-merged-route.md 12.3, G-NP3 and G-NP5; docs/tp4-combined-window.md). One unsalted cold prompt of
+# about 254k tokens is split by the scheduler into steps that alternate with decode rounds; a salted hit turn (a few thousand tokens of a conversation the
+# registry has) that arrives during it takes the short lane, parks the long prefill on the host and must wait at most one step. The kill-switch drill
+# writes its flag INSIDE the container (the derived profile 'leverndrill' points QWEN_FAST_LEVERN_OFF_PATH at LEVERN_DRILL_OFF_PATH), never on the
+# hub mount the next arm would read, and it removes the flag in a finally (content-guarded, as kill_switch_off does).
+LEVERN_COLD_TOKENS = 253920
+LEVERN_COLD_MAX_TOKENS = 64
+LEVERN_HIT_AFTER_S = 8.0          # the cold prompt is split and running (its first step is 2,048 tokens, a few seconds)
+LEVERN_HIT_INPUT_TOKENS = 1500
+LEVERN_ABORT_AFTER_S = 40.0
+LEVERN_OFF_AFTER_S = 10.0
+LEVERN_WHOLE_TOKENS = 40000        # past the short class (16,384) so a split prompt would show, small enough to be quick when whole
+LEVERN_DRILL_OFF_PATH = '/tmp/qwen-levern.off'
+LEVERN_OFF_POLL_S = 1.0           # levern_policy.OFF_POLL_S
+
+
+def levern_cold(driver, label, tokens=None):
+    """An unsalted long conversation sized to `tokens` (default LEVERN_COLD_TOKENS, less what the served context cannot hold)."""
+    conv = driver.conversation(label)
+    length = min(tokens or LEVERN_COLD_TOKENS, driver.context() - LEVERN_COLD_MAX_TOKENS - FIT_MARGIN_TOKENS)
+    if driver.prompt_limit is not None:
+        length = min(length, driver.prompt_limit - FIT_MARGIN_TOKENS)
+    sized_message(driver, conv, 1, length)
+    driver.fit(conv, LEVERN_COLD_MAX_TOKENS)
+    return conv
+
+
+def levern_start_cold(driver, conv, **options):
+    """The unsalted long prompt on a thread (a fail-closed tenant: no grant, no hit); _join returns its record."""
+    return _spawn([lambda: driver.send(conv.body(), 'unsalted', None, 'levern-cold', conv, LEVERN_COLD_MAX_TOKENS, **options)])
+
+
+def levern_primed(driver, name):
+    """A salted conversation with its first turn done (a pair: cold twin, then the salted request), so its next turn hits."""
+    conv = driver.conversation(name, first_tokens=LIFE_FIRST_TOKENS)
+    first = driver.pair(conv, '%s-first' % name)
+    driver.answer(conv, first)
+    return conv
+
+
+def levern_hit_alone(driver, conv, case):
+    """The conversation's next turn, as a salted hit and nothing else (no cold twin: a timed read)."""
+    conv.extend(LEVERN_HIT_INPUT_TOKENS)
+    driver.fit(conv)
+    record = driver.send(conv.body(), 'hit', conv.salt, case, conv, continuation=True)
+    driver.answer(conv, record)
+    return record
+
+
+def scenario_levern_hit(driver):
+    """TIMED (G-NP5). A salted hit turn arrives while an unsalted cold ~254k prompt is being split: its TTFT against the same kind of turn alone,
+    the long prompt's own TTFT and the answer the long prompt gave. Judged by the pack's ABAB reading (hit TTFT at most its solo + one step), not here."""
+    conv = levern_primed(driver, 'levern-hit')
+    solo = levern_hit_alone(driver, conv, 'levern-hit-solo')
+    cold = levern_cold(driver, 'levern-cold')
+    job = levern_start_cold(driver, cold)
+    driver.sleep(LEVERN_HIT_AFTER_S)
+    mid = levern_hit_alone(driver, conv, 'levern-hit-mid-cold')
+    record = _join(job)[0]
+    driver.event('levern-hit', solo_ttft_s=solo.get('ttft_s'), mid_ttft_s=mid.get('ttft_s'), cold_ttft_s=record.get('ttft_s'),
+                 cold_prompt_tokens=record.get('prompt_tokens'), mid_prompt_tokens=mid.get('prompt_tokens'),
+                 solo_prompt_tokens=solo.get('prompt_tokens'), hit_after_s=LEVERN_HIT_AFTER_S)
+
+
+def levern_drill_on(driver):
+    code, out = kill_switch_on(driver.container, path=LEVERN_DRILL_OFF_PATH)
+    return code == 0
+
+
+def levern_drill_off(driver):
+    return kill_switch_off(driver.container, path=LEVERN_DRILL_OFF_PATH)[0] == 0
+
+
+def scenario_levern_faults(driver):
+    """The merged route's faults, against cold twins (the arm is audited: digests and the extent audit on). (a) a salted hit mid-cold: park out, the hit
+    exact against its cold twin, park in; (b) the long prompt aborted while the short lane parked it: the engine lives, the next turn is exact;
+    (c) levern.off written mid-split: the in-flight prompt finishes through the route, the next long prompt is whole, the switch latches.
+    Each is a driver event; the engagement rule allows this scenario's arm the kill line."""
+    conv = levern_primed(driver, 'levern-fault')
+    # (a) hit mid cold
+    cold = levern_cold(driver, 'levern-cold-a')
+    job = levern_start_cold(driver, cold)
+    driver.sleep(LEVERN_HIT_AFTER_S)
+    conv.extend(LEVERN_HIT_INPUT_TOKENS)
+    mid = driver.pair(conv, 'levern-hit-mid-cold')
+    driver.answer(conv, mid)
+    first = _join(job)[0]
+    driver.event('levern-hit-mid-cold', hit_ttft_s=mid.get('ttft_s'), cold_ttft_s=first.get('ttft_s'), cold_ok=bool(first.get('ok')))
+    # (b) abort of a long prompt that a short arrival parked
+    cold = levern_cold(driver, 'levern-cold-b')
+    job = levern_start_cold(driver, cold, abort_after_s=LEVERN_ABORT_AFTER_S)
+    driver.sleep(LEVERN_HIT_AFTER_S)
+    conv.extend(LEVERN_HIT_INPUT_TOKENS)
+    during = driver.pair(conv, 'levern-hit-before-abort')
+    driver.answer(conv, during)
+    aborted = _join(job)[0]
+    driver.event('levern-park-abort', aborted=aborted.get('aborted'), first_token_before_abort=aborted.get('ttft_s') is not None,
+                 abort_after_s=LEVERN_ABORT_AFTER_S)
+    conv.extend(LEVERN_HIT_INPUT_TOKENS)
+    after = driver.pair(conv, 'levern-hit-after-abort')
+    driver.answer(conv, after)
+    # (c) the kill switch mid-prefill
+    cold = levern_cold(driver, 'levern-cold-c')
+    job = levern_start_cold(driver, cold)
+    driver.sleep(LEVERN_OFF_AFTER_S)
+    written, removed, inflight, record = False, None, {}, {}
+    try:
+        written = levern_drill_on(driver)
+        driver.sleep(LEVERN_OFF_POLL_S * 2 + 0.5)
+        inflight = _join(job)[0] or {}
+        whole = levern_cold(driver, 'levern-cold-d', tokens=LEVERN_WHOLE_TOKENS)
+        record = driver.send(whole.body(), 'unsalted', None, 'levern-off-whole', whole, LEVERN_COLD_MAX_TOKENS)
+    finally:
+        removed = levern_drill_off(driver) if driver.container is not None else None
+    driver.event('levern-off', written=written, removed=removed, inflight_ok=bool(inflight.get('ok')),
+                 inflight_ttft_s=inflight.get('ttft_s'), whole_ok=bool(record.get('ok')), whole_ttft_s=record.get('ttft_s'),
+                 whole_prompt_tokens=record.get('prompt_tokens'))
+    conv.extend(LEVERN_HIT_INPUT_TOKENS)
+    latched = driver.pair(conv, 'levern-hit-latched')
+    driver.answer(conv, latched)
+
+
 SCENARIOS = dict(bringup_reference=scenario_bringup_reference, bringup_prefix=scenario_bringup_prefix,
                  exactness_traced=lambda driver, **_: scenario_exactness(driver, 'traced'),
                  exactness_audit=lambda driver, **_: scenario_exactness(driver, 'audit'),
                  exactness_eager=lambda driver, full=None, **_: scenario_exactness(driver, 'eager', full=full),
                  exactness_shared=lambda driver, **_: scenario_exactness_shared(driver),
                  lifecycle_evict=scenario_lifecycle_evict, lifecycle_store=scenario_lifecycle_store,
-                 lifecycle_tiny=scenario_lifecycle_tiny, timing=scenario_timing, agent_turns=scenario_agent_turns)
+                 lifecycle_tiny=scenario_lifecycle_tiny, timing=scenario_timing, agent_turns=scenario_agent_turns,
+                 levern_hit=lambda driver, **_: scenario_levern_hit(driver),
+                 levern_faults=lambda driver, **_: scenario_levern_faults(driver))
 
 
 def records_jsonl(records):

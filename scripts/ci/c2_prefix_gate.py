@@ -186,6 +186,7 @@ import traceback
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import c2_serving_gate as gate  # noqa: E402
+import c2_smoke_check  # noqa: E402
 import c2_serving_job  # noqa: E402
 import prefix_agent_corpus as corpus_module  # noqa: E402
 import prefix_agent_turns as agent_turns  # noqa: E402
@@ -247,6 +248,8 @@ DERIVED = dict(
     store=dict(env=dict(QWEN_PREFIX_STORE_GIB=str(SMALL_STORE_GIB))),
     tiny=lambda profile: dict(env=dict(QWEN36_MAX_TOKENS_ALL_USERS=str(tiny_pool_env(profile)),
                                        VLLM_SERVER_DEV_MODE='1')),
+    # The Lever N kill-switch drill: the flag lives INSIDE the container (never on the hub mount a later arm reads).
+    leverndrill=dict(env=dict(QWEN_FAST_LEVERN_OFF_PATH=replay.LEVERN_DRILL_OFF_PATH)),
 )
 # (arm, scenario, which profile, derived changes, docker timeout seconds, strict oracle)
 PLAN_ARMS = dict(
@@ -264,10 +267,16 @@ PLAN_ARMS = dict(
     # The agent-turn replay (prefix_replay.scenario_agent_turns): the same conversations on the prefix profile and on its
     # no-reuse control, every turn's reuse, TTFT and decode rate logged, the transcripts compared across the two arms.
     **{'agent-turns': (('agent-turns-prefix', 'agent_turns', 'prefix', None, 9000, False),
-                       ('agent-turns-baseline', 'agent_turns', 'baseline', None, 9000, False))}
+                       ('agent-turns-baseline', 'agent_turns', 'baseline', None, 9000, False)),
+       # The merged route's drills (docs/tp4-combined-window.md): the faults (audited, against cold twins, with the kill-switch drill) and the timed
+       # hit-mid-cold arrival (a TIMED scenario: no extent audit, no digests; the pack runs it ABAB against the production profile).
+       'levern-faults': (('levern-faults', 'levern_faults', 'prefix', 'leverndrill', 9000, False),),
+       'levern-hit': (('levern-hit', 'levern_hit', 'prefix', None, 9000, False),)}
 )
 # The scenarios that measure rather than judge exactness: no extent audit, no row digests (they would time the audit).
-TIMED_SCENARIOS = ('timing', 'agent_turns')
+TIMED_SCENARIOS = ('timing', 'agent_turns', 'levern_hit')
+# The scenarios that write the Lever N kill switch on purpose (the engagement rule allows its kill line there).
+LEVERN_DRILL_SCENARIOS = ('levern_faults',)
 # The single-arm plans (c2_serving_job.PREFIX_ARM_PLANS): the arm exactly as its plan runs it.
 PLAN_ARMS.update([(arm, tuple(entry for entry in PLAN_ARMS[plan] if entry[0] == arm))
                   for arm, plan in c2_serving_job.PREFIX_ARM_PLANS])
@@ -396,6 +405,11 @@ def plan_arms(plan, profile, baseline, profiles):
                      seats=int(((chosen.get('engine') or {}).get('max-num-seqs')) or 4))
         s2 = is_s2_profile(chosen)
         sticky = which == 'prefix' and sticky_profile
+        if s2 and scenario not in TIMED_SCENARIOS:
+            # The extent audit goes on this arm: the multi-user SDPA launch refuses it without its own audit (read the DERIVED profile's env).
+            refusal = gate.multi_audit_refusal(profiles, served.split('+')[0], chosen.get('env') or {})
+            if refusal:
+                raise PlanError('%s: %s' % (arm, refusal))
         if sticky_profile and scenario.startswith('bringup'):
             # Both bring-up arms send the same turns: on the sticky profile the second is past 4096 tokens, so it
             # captures C0 = 2048 and the third resumes there (a 4,200-token second turn may capture nothing).
@@ -1100,6 +1114,10 @@ def s2_findings(arm, log_text, scanned, records):
     problems += ['S2: %s' % problem for problem in report.get('problems') or ()]
     any_request = str(environ.get(gate.ANY_REQUEST_FLAG, '0')) == '1'
     problems += gate.any_request_check(log_text, any_request)[0]
+    # Every lever the arm's profile asks for must have ENGAGED (the smoke's own rules: markers, no fall-back, audit lines exact, Lever N's route
+    # ledger); the levern.off drill arm is the one arm allowed Lever N's kill switch line.
+    problems += ['lever: %s' % text for text in c2_smoke_check.lever_engagement_problems(
+        environ, text, drill=arm.get('scenario') in LEVERN_DRILL_SCENARIOS)]
     rounds = report.get('rounds') or {}
     audit = report.get('extent_audit') or {}
     lines.append('S2: %s packed extent rounds (by live users %s), %s audit lines, %s mismatches' % (
@@ -1176,6 +1194,46 @@ def shared_findings(records, events, report):
     return problems, missing, lines
 
 
+def levern_findings(events, log_text):
+    """The merged route's drills (prefix_replay.scenario_levern_faults), read from the events and the server log: the three drills ran (else
+    NOT_EXERCISED), the kill-switch file was written inside the container and removed, the in-flight long prompt finished through the route and
+    the next one ran whole, the server logged its kill-switch line, and the short lane parked a long prefill at least once. The texts are judged
+    by the pair verdicts; this is the rest. -> (problems, not exercised, lines)."""
+    problems, missing, lines = [], [], []
+    text = log_text or ''
+    for name in ('levern-hit-mid-cold', 'levern-park-abort', 'levern-off'):
+        if name not in events:
+            missing.append('the %s drill never ran (NOT_EXERCISED)' % name)
+    hit = events.get('levern-hit-mid-cold') or {}
+    if hit and not hit.get('cold_ok'):
+        problems.append('the long cold prompt that a hit turn arrived during did not complete (its record is not ok)')
+    park = events.get('levern-park-abort') or {}
+    if park and not park.get('aborted'):
+        missing.append('the long prompt of the park-abort drill finished before its abort at %ss: the abort of a parked or split prefill was not '
+                       'exercised' % park.get('abort_after_s'))
+    off = events.get('levern-off') or {}
+    if off:
+        if not off.get('written'):
+            problems.append('the levern.off drill could not write its flag in the container')
+        if off.get('removed') is False:
+            problems.append('the levern.off drill flag was not removed from the container')
+        if not off.get('inflight_ok'):
+            problems.append('the prompt in flight when levern.off appeared did not finish (it must finish through the route)')
+        if not off.get('whole_ok'):
+            problems.append('the prompt that arrived after levern.off failed')
+        if levern_kill_prefix() not in text:
+            problems.append('the server never logged its Lever N kill-switch line after the drill wrote the flag (%s)' % replay.LEVERN_DRILL_OFF_PATH)
+    if hit and 'lever N park ' not in text:
+        missing.append('no "lever N park" line: the short lane never parked a long prefill (the hit arrived outside a split prefill: NOT_EXERCISED)')
+    lines.append('levern drills: %s' % json.dumps(dict((name, events.get(name)) for name in ('levern-hit-mid-cold', 'levern-park-abort', 'levern-off')),
+                                                   sort_keys=True)[:600])
+    return problems, missing, lines
+
+
+def levern_kill_prefix():
+    return c2_smoke_check.LEVERN_KILL_PREFIX
+
+
 def judge_arm(arm, driver, scanned, stats, error, log_text=None):
     """One arm's verdict dict (the plan's cross-arm checks come after, in judge_plan)."""
     records = driver.records
@@ -1203,6 +1261,11 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None):
     report = {}
     if arm.get('s2') or arm.get('sticky'):
         more_problems, more_missing, more_lines, report = s2_findings(arm, log_text, scanned, records)
+        problems += more_problems
+        missing += more_missing
+        lines += more_lines
+    if arm['scenario'] in LEVERN_DRILL_SCENARIOS:
+        more_problems, more_missing, more_lines = levern_findings(driver.events, log_text)
         problems += more_problems
         missing += more_missing
         lines += more_lines

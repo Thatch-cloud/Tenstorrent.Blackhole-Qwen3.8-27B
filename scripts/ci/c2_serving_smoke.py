@@ -661,6 +661,53 @@ def stall8_cold(label, cold_tokens):
                 seat_gaps=gaps, longest_gap_s=worst, seat_windows=windows, window=aggregate)
 
 
+COLD2_DECODERS = 6                    # six decoders + two cold arrivals = the eight seats of the profile (never a ninth request: it would queue)
+COLD2_ARRIVALS = 2
+COLD2_BUDGET = 6000                  # ignore_eos, so the decoders outlast both prefills
+
+# Every shape's concurrent request count, held at or under the eight seats of the 262k profiles by test_w2ln_smoke_shapes (a request past max-num-seqs
+# waits for a seat, and its time to first token then measures somebody else's budget).
+SHAPE_SEATS = {'concurrent8_skew': 8, 'concurrent8_code_32k': 8, 'concurrent8_code_128k': 8,
+               'stall8_cold262k': STALL_SHORT_SEATS + 1, 'stall8_cold128k': STALL_SHORT_SEATS + 1,
+               'cold2_254k': COLD2_DECODERS + COLD2_ARRIVALS, 'levern_equal_busy': 7 + 1, 'levern_decoder_finishes': 7 + 1}
+
+
+def cold2_254k():
+    # Opt-in (the combined window). Two SIMULTANEOUS cold arrivals of about 253,920 tokens (as the server counts them) while six seats decode 4k prompts
+    # (ignore_eos, 6,000-token budgets): the arrival burst of the merged route (the governor runs at f = 1.0 when two long prompts are owed, so the
+    # decoders' gaps are not the single-arrival shape's). Recorded, not gated: each arrival's TTFT, every decoder's longest gap from the arrival on, and
+    # each decoder's chunks inside the first arrival's window.
+    out, events, threads, corpus = start_decoders([COLD2_BUDGET] * COLD2_DECODERS)
+    for event in events:
+        event.wait(3600)
+    cold, cold_corpus, fit = fitted_code_prompts((STALL_COLD_TOKENS,) * COLD2_ARRIVALS)
+    newcomers = [None] * COLD2_ARRIVALS
+    arrival = time.time()
+    colds = [threading.Thread(target=run_cold, args=(index, newcomers, cold[index], 200)) for index in range(COLD2_ARRIVALS)]
+    [thread.start() for thread in colds]
+    [thread.join() for thread in threads + colds]
+    firsts = [item.get('first_at') for item in newcomers if isinstance(item, dict) and item.get('first_at')]
+    window_end = min(firsts) if firsts else None
+    gaps, windows = [], []
+    for index in range(COLD2_DECODERS):
+        user = out[index] if isinstance(out[index], dict) else {}
+        stamps = user.pop('delta_stamps', None) or []
+        gap, began = longest_gap(stamps, after=arrival)
+        gaps.append(dict(seat=index, longest_gap_s=gap, began_at=began, tokens=user.get('tokens'), error=user.get('error')))
+        windows.append(dict(seat=index, **window_stats(stamps, user.get('tokens'), user.get('chunks_streamed'), arrival, window_end)))
+    arrivals = []
+    for item in newcomers:
+        item = item if isinstance(item, dict) else {}
+        item.pop('delta_stamps', None)
+        arrivals.append(dict(ttft_s=arrival_ttft(item), prompt_tokens=item.get('prompt_tokens'), error=item.get('error'),
+                             first_at=item.get('first_at')))
+    known = [gap['longest_gap_s'] for gap in gaps if gap['longest_gap_s'] is not None]
+    worst = max(known) if known else None
+    print('cold2_254k arrivals', json.dumps(arrivals), 'worst_gap_s', worst, 'window', json.dumps(window_aggregate(windows)), flush=True)
+    return dict(users=out + newcomers, corpus=corpus, fit=fit, arrival_started_at=round(arrival, 3), arrivals=arrivals, seat_gaps=gaps,
+                longest_gap_s=worst, seat_windows=windows, window=window_aggregate(windows))
+
+
 def arrival_ttft(newcomer):
     return newcomer.get('ttft') if isinstance(newcomer, dict) else None
 
@@ -1026,6 +1073,8 @@ if ONLY and 'stall8_cold262k' in ONLY:
     record('stall8_cold262k', stall8_cold262k)
 if ONLY and 'stall8_cold128k' in ONLY:
     record('stall8_cold128k', stall8_cold128k)
+if ONLY and 'cold2_254k' in ONLY:
+    record('cold2_254k', cold2_254k)
 if ONLY and 'replay_concurrent8' in ONLY:
     record('replay_concurrent8', replay_concurrent8)
 for _levern_name in ('levern_equal', 'levern_equal_long', 'levern_equal_busy', 'levern_decoder_finishes', 'levern_all_decoders_finish',
