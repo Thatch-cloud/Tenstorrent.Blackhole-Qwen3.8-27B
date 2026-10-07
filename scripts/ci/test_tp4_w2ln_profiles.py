@@ -62,6 +62,8 @@ SPEC = {
                                                   'QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT': '1'}, (), {}),
     S('-pool'): (SHIP, POOL_KEYS, (), POOL_ENGINE),
     S('-dbf16'): (S('-pool'), {'QWEN_FAST_DRAFTER_BF16': '1'}, (), {}),
+    S('-audit-digests'): (S('-audit'), {'QWEN_PREFIX_DIGESTS': '1'}, (), {}),
+    S('-dckdefault'): (SHIP, {'QWEN_FAST_DRAFTER_CHECKPOINT': 'dflash2-dedf8df6'}, (), {}),
 }
 
 ALL = tuple(SPEC)

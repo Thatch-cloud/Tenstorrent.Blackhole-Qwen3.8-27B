@@ -95,7 +95,11 @@ class ProfileTests(unittest.TestCase):
     def test_every_committed_profile_selects_the_default_and_passes(self):
         for name, profile in PROFILES.items():
             with self.subTest(name=name):
-                self.assertNotIn(dc.FLAG, profile.get('env') or {})
+                if name.endswith('-dckdefault'):
+                    self.assertEqual(profile['env'][dc.FLAG], 'dflash2-dedf8df6')      # the plumbing control names the default itself
+                    self.assertIs(profile['gate_only'], True)
+                else:
+                    self.assertNotIn(dc.FLAG, profile.get('env') or {})
                 self.assertEqual(dc.profile_problems(profile), [])
 
     def test_the_production_profile_points_at_the_default_paths(self):
