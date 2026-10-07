@@ -1,0 +1,151 @@
+"""The exact-GDN-memory card-window pack (scripts/ci/references/tp4-gdn4e-jobs): every template parses with c2_serving_job.py against the real
+profiles, the order file is consistent (one image, four columns, the dependencies name real jobs), the arithmetic the READ rules quote is the
+module's, and the public templates name no rig, card, host, registry or digest."""
+
+import json
+import os
+import re
+import sys
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import c2_serving_job as job  # noqa: E402
+import gdn_shared_history as shared  # noqa: E402
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+FOLDER = os.path.join(HERE, 'references', 'tp4-gdn4e-jobs')
+PROFILES_PATH = os.path.join(HERE, 'qwen_c2_profiles.json')
+IMAGE = 'tp4-gdn4e-1'
+BASE = 'c2-packed-tp4-8x262k-ship-prefix-4e'
+CONTROL, ARM, PLAIN, GROW = BASE + '-control-audit', BASE + '-audit', BASE, BASE + '-grow'
+BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|/dev/tenstorrent|home/|zot\.')
+ORDERED = ('X0-status-rescan-reset', 'B0-build', 'S0c-control-attach-smoke', 'S0-audited-attach-smoke', 'H1-hang-shapes-4e', 'H2-hang-shapes-4e',
+           'A5-admission5-grow', 'A5c-admission5-control', 'E1-ladder8-exactness', 'Z-reset')
+SOFT = ('A5c-admission5-control', 'E1-ladder8-exactness', 'Z-reset')
+SMOKE = 'warmup,coding,concurrent8_steady,concurrent8_code_32k,concurrent8_code_equal'
+
+
+def text_of(name):
+    with open(os.path.join(FOLDER, name + '.env'), encoding='utf-8') as handle:
+        return handle.read()
+
+
+def order_text():
+    with open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8') as handle:
+        return handle.read()
+
+
+def read_order():
+    return [line.split() for line in order_text().splitlines() if line.strip() and not line.startswith('#')]
+
+
+class Pack(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with open(PROFILES_PATH, encoding='utf-8') as handle:
+            cls.data = json.load(handle)
+        cls.profiles = sorted(cls.data['profiles'])
+        cls.meshes = job.profile_meshes(PROFILES_PATH)
+        cls.root = os.path.dirname(os.path.dirname(HERE))
+
+    def parsed(self, name):
+        return job.read_job(job.parse_env(text_of(name)), self.profiles, root=self.root, meshes=self.meshes)
+
+    def test_every_template_is_in_the_order_once_with_four_columns_and_the_one_image(self):
+        rows = read_order()
+        self.assertTrue(all(len(row) == 4 for row in rows))
+        self.assertEqual([row[0] for row in rows], list(ORDERED))
+        self.assertEqual(sorted(row[0] for row in rows), sorted(n[:-4] for n in os.listdir(FOLDER) if n.endswith('.env')))
+        for name, mode, image, minutes in rows:
+            self.assertEqual(image, IMAGE)
+            self.assertTrue(minutes.isdigit() and 4 <= int(minutes) <= 180, minutes)
+            want = 'pre' if name == ORDERED[0] else 'soft' if name in SOFT else 'stop'
+            self.assertEqual(mode, want, name)
+
+    def test_the_total_in_the_order_header_is_the_sum_of_its_lines(self):
+        total = sum(int(row[3]) for row in read_order())
+        self.assertEqual(total, 369)
+        self.assertIn('20+60+40+40+15+15+65+65+45+4 = 369 min = 6.2 h', order_text())
+        self.assertEqual(round(total / 60, 1), 6.2)
+
+    def test_the_dependencies_name_real_jobs(self):
+        names = set(ORDERED)
+        needs = [line for line in order_text().splitlines() if line.startswith('# NEEDS ') and '<-' in line]
+        self.assertEqual(len(needs), 3)
+        for line in needs:
+            left, right = line[len('# NEEDS '):].split('<-')
+            for word in left.split() + right.split():
+                self.assertTrue(any(name == word or name.startswith(word + '-') for name in names), (line, word))
+
+    def test_every_env_parses_with_the_job_reader(self):
+        for name in ORDERED:
+            with self.subTest(job=name):
+                out = self.parsed(name)
+                self.assertEqual(out['tag'], IMAGE)
+                self.assertEqual(out['cards'], 'quad')
+
+    def test_no_agent_actions_and_only_the_build_builds(self):
+        for name in ORDERED:
+            actions = self.parsed(name)['actions'].split()
+            self.assertFalse({'agentstop', 'agentstart', 'platform', 'unserve', 'push', 'replay'} & set(actions), name)
+            self.assertEqual('build' in actions, name == 'B0-build', name)
+            if name not in ('X0-status-rescan-reset', 'B0-build', 'Z-reset'):
+                self.assertIn('reset', actions, 'each job follows its own all-four reset: ' + name)
+
+    def test_the_four_profiles_exist_gate_only_and_differ_as_the_read_rules_say(self):
+        profiles = self.data['profiles']
+        for name in (CONTROL, ARM, PLAIN, GROW):
+            self.assertTrue(profiles[name].get('gate_only'), name)
+            self.assertEqual(profiles[name]['mesh_device'], 'P150x4')
+            self.assertEqual(profiles[name]['engine']['max-num-seqs'], 8)
+        self.assertNotIn(shared.FLAG, profiles[CONTROL]['env'])
+        for name in (ARM, PLAIN, GROW):
+            self.assertEqual(profiles[name]['env'][shared.FLAG], '1')
+        self.assertEqual(profiles[GROW]['env'][shared.GROW_FLAG], '1')
+        for name in (CONTROL, ARM, PLAIN):
+            self.assertNotIn(shared.GROW_FLAG, profiles[name]['env'])
+            self.assertEqual(profiles[name]['engine']['num-gpu-blocks-override'], 19968)
+        self.assertEqual(profiles[GROW]['engine']['num-gpu-blocks-override'], 22144)
+
+    def test_the_attach_and_hang_jobs_use_the_profiles_their_comments_name(self):
+        self.assertEqual(self.parsed('S0c-control-attach-smoke')['profile'], CONTROL)
+        self.assertEqual(self.parsed('S0-audited-attach-smoke')['profile'], ARM)
+        for name in ('S0c-control-attach-smoke', 'S0-audited-attach-smoke'):
+            self.assertEqual(self.parsed(name)['tests'], SMOKE)
+        for name in ('H1-hang-shapes-4e', 'H2-hang-shapes-4e'):
+            out = self.parsed(name)
+            self.assertEqual(out['profile'], PLAIN)
+            self.assertIn('concurrent8_drain', out['tests'])
+            self.assertIn('concurrent8_code_equal', out['tests'])
+        self.assertEqual(self.parsed('E1-ladder8-exactness')['profile'], ARM)
+
+    def test_the_admission_jobs_ask_for_five_full_windows_and_the_numbers_in_the_comments_are_the_modules(self):
+        for name, profile in (('A5-admission5-grow', GROW), ('A5c-admission5-control', CONTROL)):
+            out = self.parsed(name)
+            self.assertEqual((out['profile'], out['gate_plan'], out['gate_memory_prompt'], out['gate_memory_users']),
+                             (profile, 'memory', '253920', '5'), name)
+        text = text_of('A5-admission5-grow')
+        self.assertIn('5 x 4,097 = 20,485', text)
+        self.assertEqual(5 * shared.FULL_WINDOW_BLOCKS, 20485)
+        self.assertIn('22,144', text)
+        self.assertEqual(shared.grown_pool_edge(), 22144)
+        self.assertIn('1416704', text)
+        self.assertEqual(shared.pool_tokens_for(22144), 1416704)
+        self.assertIn('running=16388 and reserved=4097', text_of('A5c-admission5-control'))
+        self.assertEqual(4 * shared.FULL_WINDOW_BLOCKS, 16388)
+        s0 = text_of('S0-audited-attach-smoke')
+        self.assertIn('freed_per_chip=%d kv_blocks_gained=%d' % (shared.freed_bytes(), shared.kv_blocks_gained()), s0)
+        self.assertIn('tensors=%d tensor_bytes=%d' % (shared.TENSORS, 6 * 2 ** 20), s0)
+        self.assertIn('1,207,959,552', s0)
+
+    def test_templates_are_lf_and_name_nothing_private(self):
+        for name in os.listdir(FOLDER):
+            with open(os.path.join(FOLDER, name), 'rb') as handle:
+                raw = handle.read()
+            self.assertNotIn(b'\r', raw, name)
+            self.assertIsNone(BANNED.search(raw.decode('utf-8')), name)
+
+
+if __name__ == '__main__':
+    unittest.main()

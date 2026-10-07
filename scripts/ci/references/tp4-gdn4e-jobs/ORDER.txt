@@ -1,0 +1,38 @@
+# exact GDN memory pack (tp4/gdn-shared-history, QWEN_FAST_GDN_SHARED_HISTORY): one per-token GDN state history shared by the two 64-row blocks, exact by construction (a schedule change), freeing
+# 1,207,959,552 B per chip (2,168 KV blocks) that only the -grow profile spends. Docs: docs/tp4-gdn-shared-history.md.
+# One line per job: <template name without .env> <stop|soft|pre> <image tag> <real minutes>. stop: a failure ends the pack (Z still runs). soft: data, a failure or skip does not stop.
+# pre: X0, run first. The cards are under development: no agentstop, agentstart or hand-back job exists and none may run; no job starts the node agent or places a model.
+# NOTHING HERE SERVES TRAFFIC: the four profiles are gate only (c2-packed-tp4-8x262k-ship-prefix-4e-control-audit, -4e-audit, -4e, -4e-grow). The production profile is untouched.
+# MINUTES are estimates from the W1 and ship-prefix windows' measured job times (status+rescan+reset 20, image build 60, audited attach 17-19 plus tests, one hang shape 13-15); A5 and A5c add five
+# cold 254k prefills (about 9 min each) to an attach.
+# TOTAL: 20+60+40+40+15+15+65+65+45+4 = 369 min = 6.2 h for all lines; 4.3 h through the stop lines without B0 (drop B0 and its 60 min when the combined window builds one image). Cut list, in order,
+# if the owner wants less: E1 (-45), A5c (-65: then A5 cannot show it ever reaches the edge, so A5's no-hold line is weaker), H2 (-15). Never cut S0c, S0, H1 or A5.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule.
+# NEEDS S0 <- S0c
+# NEEDS H1 H2 <- S0
+# NEEDS A5 A5c E1 <- S0 H1 H2
+# NEEDS (before X0): the CPU suite green on the integration branch; the combined window's merge of the other tracks; qwen_c2_profiles.json carrying the four profiles above;
+#   docker/qwen-c2-overlay.txt listing scripts/ci/gdn_shared_history.py. NO OTHER WINDOW DRIVER MAY BE ALIVE.
+# SCHEDULE NOTE: the shipped profile commits every user before the other block verifies, so the shared history costs 0 ms. If the integration enables QWEN_FAST_GDN_AFTER_PAIRS (deferred
+# commits) in a profile that also sets the flag, block A's four commit traces are enqueued by block B's verify (site shared-history, logged): 0 to +2.2 ms a round, to be read from the round
+# timeline; no profile in this pack does that.
+# READ RULES (each also needs c2_smoke_check clean and no stall):
+#   X0 the status prints, the rescan finds every board, the reset completes on all four.   B0 provenance report with no problem line, the image id printed.
+#   S0c the reference attach; hashes, accepted tokens, verify rounds and the P6 ledger readings recorded.
+#   S0  engaged markers owner/sharer, zero audit mismatches, every hash/accepted-token/verify-round count equal to S0c's and to solo's, the ledger's block2 reading 1,207,959,552 B per chip
+#       below S0c's and the free DRAM about 1.2 GB higher.
+#   H1 H2 two consecutive completions, concurrent8_code_equal hashes equal to S0's, no stall, no refused or flush line.
+#   A5  the attach reaches admission at a pool of 22,144 blocks; five 253,920-token sessions admitted with no hold; the floor at least 1.0 GB per chip.
+#   A5c the contrast: the fifth session held at running=16388 and released.   E1 strict equality to solo over the ladder, zero audit mismatches.   Z the reset completes.
+# GO RULE for taking the sharing (and, separately, the growth) to the owner: S0 and H1-H2 pass with the freed bytes visible in the ledger (that alone makes the sharing worth keeping); A5 passes
+# with A5c showing the hold (that alone makes the growth worth proposing: five full 262k seats instead of four). NO-GO for either: any stall, any hash difference, any audit mismatch.
+X0-status-rescan-reset pre tp4-gdn4e-1 20
+B0-build stop tp4-gdn4e-1 60
+S0c-control-attach-smoke stop tp4-gdn4e-1 40
+S0-audited-attach-smoke stop tp4-gdn4e-1 40
+H1-hang-shapes-4e stop tp4-gdn4e-1 15
+H2-hang-shapes-4e stop tp4-gdn4e-1 15
+A5-admission5-grow stop tp4-gdn4e-1 65
+A5c-admission5-control soft tp4-gdn4e-1 65
+E1-ladder8-exactness soft tp4-gdn4e-1 45
+Z-reset soft tp4-gdn4e-1 4
