@@ -57,7 +57,24 @@ fi
 printf '%s\n' "$stamp" > "$ctx/build-stamp"
 source_revision=$(cat "$ctx/source-revision")
 echo "context staged from $source_revision"
-mkdir -p "$ctx/fixture" "$ctx/draft-config"
+mkdir -p "$ctx/fixture" "$ctx/draft-config" "$ctx/fixtures" "$ctx/draft-configs"
+# Drafter candidates (docs/tp4-combined-window.md): C2_DRAFTER_CANDIDATES="<id> <id>" stages each pinned id from the cache (drafter-candidates/<id>/fixture and
+# config.json) beside the default checkpoint. Both directories always exist (the Dockerfile copies them), holding a placeholder when no candidate is listed; a
+# candidate's bytes are checked against scripts/ci/drafter_checkpoints.json at every boot (drafter_checkpoint.attach_check), so nothing is trusted here.
+touch "$ctx/fixtures/.placeholder" "$ctx/draft-configs/.placeholder"
+for candidate in ${C2_DRAFTER_CANDIDATES:-}; do
+  case "$candidate" in
+    [a-z0-9]*) ;;
+    *) echo "drafter candidate id $candidate is not a plain lowercase id" >&2; exit 2 ;;
+  esac
+  case "$candidate" in *[!a-z0-9.-]*) echo "drafter candidate id $candidate is not a plain lowercase id" >&2; exit 2 ;; esac
+  test -d "$fixtures/drafter-candidates/$candidate/fixture" || { echo "no staged fixture for drafter candidate $candidate" >&2; exit 2; }
+  test -s "$fixtures/drafter-candidates/$candidate/config.json" || { echo "no staged config for drafter candidate $candidate" >&2; exit 2; }
+  cp -al "$fixtures/drafter-candidates/$candidate/fixture" "$ctx/fixtures/$candidate"
+  mkdir -p "$ctx/draft-configs/$candidate"
+  cp "$fixtures/drafter-candidates/$candidate/config.json" "$ctx/draft-configs/$candidate/config.json"
+done
+echo "${C2_DRAFTER_CANDIDATES:-}" > "$ctx/drafter-candidates.txt"
 (cd "$graft" && sha256sum -c --quiet MANIFEST.sha256) || { echo "$graft does not verify against its MANIFEST.sha256" >&2; exit 2; }
 if [ "$(sha256sum < "$graft/_ttnncpp.so" | cut -c1-64)" != "$graft_sha" ]; then
   echo "$graft/_ttnncpp.so is not the K64j binary $graft_sha" >&2

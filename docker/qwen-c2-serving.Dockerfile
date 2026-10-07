@@ -105,6 +105,10 @@ RUN set -eu; cd /experiment-scripts/ci && VLLM_PLUGINS='' python3 -B /opt/qwen-c
 # The DFlash2 draft: its config (the speculative model path) and the fixture weights.
 COPY draft-config/ /draft-config/
 COPY fixture/ /experiment-dflash-fixture/
+# Drafter candidates (docs/tp4-combined-window.md, scripts/ci/drafter_checkpoint.py): each pinned id staged by the build (C2_DRAFTER_CANDIDATES) under its own directory. With no
+# candidate listed both directories hold only a placeholder, and the image's drafter bytes are the default's, above.
+COPY fixtures/ /experiment-dflash-fixtures/
+COPY draft-configs/ /draft-configs/
 # Caches live on the platform's one persistent mount (/models = the host's hf-cache/hub); the
 # paths stay the gate's, so TT_CACHE_PATH and TT_METAL_CACHE read exactly as they did there.
 RUN rm -rf /experiment-cache && ln -s /models/.qwen-c2 /experiment-cache

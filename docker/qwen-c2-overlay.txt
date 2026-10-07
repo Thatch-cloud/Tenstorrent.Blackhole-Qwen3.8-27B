@@ -407,3 +407,7 @@ scripts/ci/prompt_lookup.py
 # tp4/hostgap (the eight-seat host gap, every flag default off): the packed bridge's step entry carries the entry diet and the stage 0 timing. It is in the P8 copy lists, so without this
 # line the image would run the P8 base's copy.
 scripts/ci/serving_packed_bridge.py
+# The drafter checkpoint selector (docs/tp4-combined-window.md; QWEN_FAST_DRAFTER_CHECKPOINT, default unset = the baked checkpoint): serving_c2_contract imports it at boot to check a
+# profile's draft paths and, for a candidate id, the baked bytes against the table's pins. New: no older layer holds either file, and nothing else names them.
+scripts/ci/drafter_checkpoint.py
+scripts/ci/drafter_checkpoints.json

@@ -1,0 +1,17 @@
+{
+  "default": "dflash2-dedf8df6",
+  "checkpoints": {
+    "dflash2-dedf8df6": {
+      "revision": "dedf8df68adfb1afeaf7b7480c0a0243108177b4",
+      "dtype": "bf8",
+      "geometry": {
+        "window": 2048,
+        "num_speculative_tokens": 15,
+        "rows_per_user": 16,
+        "target_taps": 5,
+        "hidden": 5120,
+        "layers": 5
+      }
+    }
+  }
+}
