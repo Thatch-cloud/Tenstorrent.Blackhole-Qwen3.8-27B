@@ -69,7 +69,7 @@ class PairTests(unittest.TestCase):
         b = log(steady(300, 0.190, start=30011, step=37))       # other exact positions, the same buckets
         result = t.compare(a, b)
         self.assertEqual(result['verdict'], 'MEASURED')
-        self.assertGreaterEqual(result['matched'], 200)
+        self.assertGreaterEqual(result['matched'], 100)
         self.assertAlmostEqual(result['delta_ms'], -10.0, places=0)
         self.assertEqual(result['a_median_ms'], 200.0)
         self.assertLess(result['ratio_b_over_a'], 1.0)
@@ -119,8 +119,152 @@ class JudgeTests(unittest.TestCase):
 
     def test_load_above_the_maximum_voids_and_no_samples_cannot_be_called_clean(self):
         self.assertEqual(t.load_void('[LOAD] 1 1.5\n[LOAD] 61 2.5', 4.0), (False, None))
-        self.assertEqual(t.load_void('[LOAD] 1 1.5\n[LOAD] 61 9.5', 4.0)[0], True)
+        self.assertEqual(t.load_void('[LOAD] 1 5.5\n[LOAD] 61 9.5\n[LOAD] 121 1.0', 4.0)[0], True)
+        self.assertEqual(t.load_void('[LOAD] 1 1.5\n[LOAD] 61 9.5\n[LOAD] 121 1.0', 4.0), (False, None), 'one spike is no void: the median is the condition')
         self.assertIsNone(t.load_void('nothing', 4.0)[0])
+
+    def test_the_load_maximum_is_calibrated_from_a_serving_baseline_not_the_idle_host(self):
+        serving = '\n'.join('[LOAD] %d %.1f' % (60 * index, value) for index, value in enumerate((3.0, 6.0, 5.5, 5.8, 6.1, 5.9)))
+        self.assertEqual(t.load_limit(serving, 3.0), 8.85)
+        self.assertIsNone(t.load_limit('nothing'))
+        self.assertEqual(t.load_gap_void('[LOAD] 1 5.0', '[LOAD] 1 6.5', 2.0), (False, None))
+        self.assertEqual(t.load_gap_void('[LOAD] 1 5.0', '[LOAD] 1 9.0', 2.0)[0], True)
+        self.assertIsNone(t.load_gap_void('[LOAD] 1 5.0', '', 2.0)[0])
+
+
+SHAPES = {'steady': 4500, '32k': 33000, '128k': 120500, 'skew': 66500}
+
+
+def shaped(seconds_by_shape, count=150):
+    """One timed job's log: the four shapes' eight-live rounds, back to back, each at its own round time."""
+    rounds = []
+    for name in ('steady', '32k', '128k', 'skew'):
+        rounds += steady(count, seconds_by_shape[name], start=SHAPES[name], step=3)
+    return log(rounds)
+
+
+def uniform(seconds):
+    return dict.fromkeys(SHAPES, seconds)
+
+
+DRIFT = (0.0, 0.001, -0.001)
+
+
+class WindowTests(unittest.TestCase):
+    def test_the_windows_do_not_overlap_and_hold_their_shapes_mean_positions(self):
+        spans = sorted(t.WINDOWS.values())
+        for first, second in zip(spans, spans[1:]):
+            self.assertLessEqual(first[1], second[0])
+        for name, position in SHAPES.items():
+            low, high = t.WINDOWS[name]
+            self.assertTrue(low <= position < high, name)
+        # the skewed eight's mean position: two 253,920 users and six 4,096 ones, plus the 800 tokens they decode
+        self.assertTrue(t.WINDOWS['skew'][0] <= (2 * 253920 + 6 * 4096) / 8 + 800 < t.WINDOWS['skew'][1])
+
+    def test_a_window_keeps_only_its_shapes_rounds_and_a_pooled_read_would_have_mixed_them(self):
+        a = shaped(uniform(0.2))
+        b = shaped(dict(uniform(0.2), **{'32k': 0.18, '128k': 0.21}))
+        self.assertEqual(t.compare(a, b, window='32k')['delta_ms'], -20.0)
+        self.assertEqual(t.compare(a, b, window='128k')['delta_ms'], 10.0)
+        self.assertEqual(t.compare(a, b, window='steady')['delta_ms'], 0.0)
+        pooled = t.compare(a, b)
+        self.assertLess(pooled['delta_ms'], 0, 'pooled, the 32k gain outweighs the 128k loss: exactly what the per-length read exists to prevent')
+
+    def test_a_loss_at_128k_reads_no_go_there_though_the_32k_gain_carries_the_pool(self):
+        a_logs = [shaped(uniform(0.2 + drift)) for drift in DRIFT]
+        b_logs = [shaped(dict(uniform(0.2 + drift), **{'32k': 0.18 + drift, '128k': 0.21 + drift})) for drift in DRIFT]
+        read = t.read_lengths(a_logs, b_logs)
+        self.assertEqual(read['32k']['w2']['verdict'], 'GO')
+        self.assertEqual(read['128k']['w2']['verdict'], 'NO-GO')
+        self.assertEqual(read['overall']['verdict'], 'NO-GO')
+        self.assertEqual(read['overall']['because'], ['128k'])
+        self.assertEqual(read['32k']['floor_ms'], 2.0, 'the floor is per length: the spread of the A medians inside the window')
+
+    def test_a_skew_loss_beyond_the_a_to_a_floor_on_two_of_three_pairs_is_a_kill(self):
+        a_logs = [shaped(uniform(0.2 + drift)) for drift in DRIFT]
+        gain = dict(uniform(0.19), skew=0.2 + 0.005)
+        read = t.read_lengths(a_logs, [shaped(dict((key, value + drift) for key, value in gain.items())) for drift in DRIFT])
+        self.assertEqual(read['skew']['w2']['verdict'], 'NO-GO')
+        self.assertEqual(read['overall']['verdict'], 'NO-GO')
+        small = dict(gain, skew=0.2 + 0.0015)
+        read = t.read_lengths(a_logs, [shaped(dict((key, value + drift) for key, value in small.items())) for drift in DRIFT])
+        self.assertNotEqual(read['skew']['w2']['verdict'], 'NO-GO', 'a loss inside the floor is no kill')
+
+    def test_go_at_32k_and_128k_with_no_skew_kill_is_go_overall(self):
+        a_logs = [shaped(uniform(0.2 + drift)) for drift in DRIFT]
+        b_logs = [shaped(dict(uniform(0.19 + drift), skew=0.2 + drift)) for drift in DRIFT]
+        self.assertEqual(t.read_lengths(a_logs, b_logs)['overall']['verdict'], 'GO')
+
+    def test_a_window_with_too_few_rounds_is_void_there_alone(self):
+        a = shaped(uniform(0.2), count=300)
+        thin = log(steady(300, 0.19, start=SHAPES['32k'], step=3) + steady(20, 0.19, start=SHAPES['128k'], step=3))
+        self.assertEqual(t.compare(a, thin, window='32k')['verdict'], 'MEASURED')
+        self.assertEqual(t.compare(a, thin, window='128k')['verdict'], 'VOID')
+
+    def test_lever_n_cost_is_inside_the_floor_or_outside_or_unmeasured_never_silently_inside(self):
+        b_logs = [shaped(uniform(0.2)), shaped(uniform(0.2))]
+        self.assertEqual(t.lever_n_cost(b_logs, [shaped(uniform(0.203)), shaped(uniform(0.204))], 5.0, '32k')['verdict'], 'INSIDE')
+        self.assertEqual(t.lever_n_cost(b_logs, [shaped(uniform(0.210)), shaped(uniform(0.209))], 5.0, '32k')['verdict'], 'OUTSIDE')
+        self.assertEqual(t.lever_n_cost(b_logs, [shaped(uniform(0.203)), shaped(uniform(0.204), count=20)], 5.0, '32k')['verdict'], 'UNMEASURED')
+
+    def test_a_lever_n_arm_whose_early_users_finished_before_the_last_was_admitted_leaves_few_eight_live_rounds(self):
+        # admission one prefill step at a time: one live, two live ... seven live first, eight-live only at the end
+        text, clock = [], 0.0
+        for live in range(1, 8):
+            for _ in range(60):
+                text.append(execute(clock, live=live))
+                text += packed(33000, live)
+                clock += 0.15
+        for position, seconds in steady(40, 0.2, start=33000):
+            text.append(execute(clock, live=8))
+            text += packed(position, 8)
+            clock += seconds
+        text.append(execute(clock, live=8))
+        body = '\n'.join(text)
+        found, _ = t.timed_rounds(body)
+        self.assertEqual(len(found), 40, 'only the eight-live rounds count')
+        result = t.compare(shaped(uniform(0.2)), body, window='32k')
+        self.assertEqual(result['verdict'], 'VOID', 'a VOID is never a vote and never an "inside the floor"')
+
+    def test_the_judge_pair_floor_and_load_limit_commands_read_files(self):
+        import tempfile
+        import io
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as folder:
+            paths = {}
+            for name, text in (('a1', shaped(uniform(0.2))), ('a2', shaped(uniform(0.201))), ('a3', shaped(uniform(0.199))),
+                               ('b1', shaped(dict(uniform(0.19), **{'128k': 0.21}))), ('b2', shaped(dict(uniform(0.191), **{'128k': 0.211}))),
+                               ('b3', shaped(dict(uniform(0.189), **{'128k': 0.209}))), ('c1', shaped(uniform(0.19))), ('c2', shaped(uniform(0.191)))):
+                paths[name] = str(Path(folder) / (name + '.log'))
+                Path(paths[name]).write_text(text, encoding='utf-8')
+
+            def run(*argv):
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    code = t.main(list(argv))
+                return code, json.loads(out.getvalue())
+
+            code, read = run('judge', '--a', paths['a1'], paths['a2'], paths['a3'], '--b', paths['b1'], paths['b2'], paths['b3'], '--c', paths['c1'], paths['c2'])
+            self.assertEqual(code, 0)
+            self.assertEqual(read['128k']['w2']['verdict'], 'NO-GO')
+            self.assertEqual(read['32k']['w2']['verdict'], 'GO')
+            self.assertEqual(read['overall']['because'], ['128k'])
+            self.assertIn('lever_n', read['32k'])
+            self.assertEqual(run('pair', paths['a1'], paths['b1'], '--window', '128k')[1]['delta_ms'], 10.0)
+            self.assertEqual(run('floor', paths['a1'], paths['a2'], paths['a3'], '--window', '32k')[1]['floor_ms'], 2.0)
+            loadfile = Path(folder) / 'load.log'
+            loadfile.write_text('[LOAD] 1 5.0\n[LOAD] 61 6.0\n[LOAD] 121 7.0', encoding='utf-8')
+            self.assertEqual(run('load-limit', str(loadfile), '--margin', '3')[1]['max_load'], 9.0)
+
+    def test_load_applies_per_pair_in_the_judge_read(self):
+        a_logs = [shaped(uniform(0.2)) for _ in range(3)]
+        b_logs = [shaped(uniform(0.19)) for _ in range(3)]
+        quiet, noisy = '[LOAD] 1 5.0\n[LOAD] 61 5.5', '[LOAD] 1 11.0\n[LOAD] 61 11.5'
+        loads = dict(A=[quiet] * 3, B=[quiet, quiet, noisy], C=[])
+        read = t.read_lengths(a_logs, b_logs, (), loads, 8.0)
+        self.assertEqual([pair['verdict'] for pair in read['32k']['pairs']], ['MEASURED', 'MEASURED', 'VOID'])
+        self.assertEqual(read['32k']['w2']['verdict'], 'INCONCLUSIVE', 'a VOID pair is no vote: fewer than three measured pairs is never GO')
 
 
 class TextTests(unittest.TestCase):

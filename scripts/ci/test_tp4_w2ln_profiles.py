@@ -23,6 +23,8 @@ F1_KEY = {'QWEN_FAST_TP4_CONV_GATES_SPREAD': '1'}
 MA_KEY = {'QWEN_FAST_TP4_SDPA_AUDIT': '1'}
 FA_KEY = {'QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT': '1'}
 LEAN_KEYS = {'QWEN_FAST_VERIFY_T1_AUDIT': '0', 'QWEN_FAST_VERIFY_T2_AUDIT': '0'}
+W1_AUDIT_KEYS = {'QWEN_FAST_VERIFY_T1_AUDIT': '1', 'QWEN_FAST_VERIFY_T2_AUDIT': '1', 'QWEN_FAST_TP4_DRAFT_CONV_AUDIT': '1', 'QWEN_FAST_TP4_DRAFT_HEADS_AUDIT': '1',
+                 'QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT': '1', 'QWEN_FAST_FUSED_COMMIT_AUDIT': '1', 'QWEN_FAST_DRAFT_SINGLES_AUDIT': 'all'}
 POOL_KEYS = {'QWEN36_MAX_TOKENS_ALL_USERS': '1228288'}
 POOL_ENGINE = {'num-gpu-blocks-override': 19200}
 
@@ -60,11 +62,65 @@ SPEC = {
     S('-levern-w2-audit-f1'): (S('-levern-w2'), dict(FA_KEY, QWEN_FAST_TP4_VGLUE_AUDIT='1'), (), {}),
     S('-levern-w2-audit-ln'): (S('-levern-w2'), {'QWEN_FAST_LEVERN_AUDIT': '1', 'QWEN_PREFIX_DIGESTS': '1',
                                                   'QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT': '1'}, (), {}),
+    # the fourth slice: the W1 audits (the shard audits of the verify trace and the draft, reduce-scatter, fused-commit and singles audits) that the other three leave out
+    S('-levern-w2-audit-w1'): (S('-levern-w2'), W1_AUDIT_KEYS, (), {}),
     S('-pool'): (SHIP, POOL_KEYS, (), POOL_ENGINE),
     S('-dbf16'): (S('-pool'), {'QWEN_FAST_DRAFTER_BF16': '1'}, (), {}),
     S('-audit-digests'): (S('-audit'), {'QWEN_PREFIX_DIGESTS': '1'}, (), {}),
     S('-dckdefault'): (SHIP, {'QWEN_FAST_DRAFTER_CHECKPOINT': 'dflash2-dedf8df6'}, (), {}),
 }
+
+# ---- the swap closure --------------------------------------------------------------------------------------------------------------------------------------------------
+# A swap is a one-line C2_PROFILE or C2_PREFIX_PROFILE change in the same image (ORDER.txt, SWAP rules). Every profile a candidate job names must have a committed target
+# under every swap that applies to it and under every PAIR of swaps the window allows (F1 with LEAN, POOL or EPOCH; EPOCH with LEAN or POOL; LEAN and POOL never both: two
+# fit failures end the candidate for the owner), so a second failure never finds the pack without a target. Names are canonical whatever the order the swaps are applied in:
+#   <base> [-nof1 after -w2] [-audit] [-nolna] [-lean | -pool] [-epochglobal]
+# and a generated profile is its parent (its name less its last swap token) plus that token's delta, exactly as the hand-written ones are.
+EPOCH_KEY = {'QWEN_FAST_LEVERN_EPOCH_SCOPE': 'global'}
+SWAP_COMBINATIONS = (('F1',), ('LEAN',), ('POOL',), ('EPOCH',), ('F1', 'LEAN'), ('F1', 'POOL'), ('F1', 'EPOCH'), ('LEAN', 'EPOCH'), ('POOL', 'EPOCH'))
+SWAP_BASES = tuple(S(suffix) for suffix in ('-w2', '-w2-audit', '-levern', '-levern-audit', '-levern-audit-nolna', '-levern-w2', '-levern-w2-audit', '-levern-w2-audit-nolna'))
+
+
+def swap(name, kind):
+    """The profile a swap moves `name` to, or None when the swap does not apply to it (F1: W2 profiles that still carry F1; LEAN and POOL: audit twins; EPOCH: Lever N profiles)."""
+    if kind == 'F1':
+        return name.replace('-w2', '-w2-nof1', 1) if '-w2' in name and '-nof1' not in name else None
+    if kind == 'EPOCH':
+        return name + '-epochglobal' if '-levern' in name and not name.endswith('-epochglobal') else None
+    if kind in ('LEAN', 'POOL') and '-audit' in name and not any(token in name for token in ('-lean', '-pool')):
+        token = '-' + kind.lower()
+        return name[:-len('-epochglobal')] + token + '-epochglobal' if name.endswith('-epochglobal') else name + token
+    return None
+
+
+def swapped(name, kinds):
+    for kind in kinds:
+        name = name and swap(name, kind)
+    return name
+
+
+def swap_closure(bases=SWAP_BASES, combinations=SWAP_COMBINATIONS):
+    """Every profile reachable from `bases` by one swap or an allowed pair of swaps (the bases themselves excluded)."""
+    found = set()
+    for base in bases:
+        for kinds in combinations:
+            target = swapped(base, kinds)
+            if target:
+                found.add(target)
+    return found
+
+
+def generated(name):
+    """(parent, env keys set, env keys removed, engine keys set) of a swap-closure profile that is not hand-written."""
+    for token, keys, engine in (('-epochglobal', EPOCH_KEY, {}), ('-lean', LEAN_KEYS, {}), ('-pool', POOL_KEYS, POOL_ENGINE)):
+        if name.endswith(token):
+            return name[:-len(token)], keys, (), engine
+    raise ValueError('%s ends in no swap token' % name)
+
+
+for _name in sorted(swap_closure(), key=lambda value: (len(value), value)):
+    if _name not in SPEC:
+        SPEC[_name] = generated(_name)
 
 ALL = tuple(SPEC)
 # Carriers of each flag, derived from the spec (a name carries a flag when its own keys, or its parent's, set it).
@@ -160,7 +216,7 @@ class ProfileTests(unittest.TestCase):
     def test_the_window_profiles_keep_the_production_engine_but_the_pool_twins(self):
         found = load()['profiles']
         for name, (parent, sets, drops, engine) in SPEC.items():
-            if name in (S('-pool'), S('-dbf16')) or name.endswith('-pool'):
+            if name in (S('-pool'), S('-dbf16')) or '-pool' in name:
                 self.assertEqual(found[name]['engine']['num-gpu-blocks-override'], 19200, name)
                 self.assertEqual(found[name]['env']['QWEN36_MAX_TOKENS_ALL_USERS'], '1228288', name)
             else:
@@ -182,6 +238,34 @@ class ProfileTests(unittest.TestCase):
                 if lever_audit(name):
                     want['QWEN_FAST_LEVERN_AUDIT'] = '1'
                 self.assertEqual(got, want)
+
+    def test_the_swap_closure_is_committed_and_every_generated_profile_says_what_it_swaps(self):
+        found = load()['profiles']
+        closure = swap_closure()
+        self.assertGreaterEqual(len(closure), 38)
+        for name in sorted(closure):
+            with self.subTest(name=name):
+                self.assertIn(name, found)
+                self.assertIn(name, SPEC)
+                self.assertIs(found[name]['gate_only'], True)
+        # canonical names: the order of the swaps never matters
+        self.assertEqual(swapped(S('-levern-w2-audit-nolna'), ('LEAN', 'EPOCH', 'F1')), swapped(S('-levern-w2-audit-nolna'), ('F1', 'EPOCH', 'LEAN')))
+        self.assertEqual(swapped(S('-levern-w2-audit-nolna'), ('F1', 'LEAN', 'EPOCH')), S('-levern-w2-nof1-audit-nolna-lean-epochglobal'))
+        self.assertIsNone(swap(S('-w2-audit'), 'EPOCH'), 'no Lever N in a W2-only twin')
+        self.assertIsNone(swap(S('-levern-audit'), 'F1'), 'no F1 in a Lever N-only twin')
+        self.assertIsNone(swap(S('-levern-w2-audit-lean'), 'POOL'), 'LEAN and POOL are never both applied')
+        self.assertIsNone(swap(S('-levern-w2'), 'LEAN'), 'a timed arm carries no audits to drop')
+
+    def test_the_four_split_slices_together_are_exactly_the_whole_audit_set(self):
+        # SWAP SPLIT stands in for the combined audited attach only if nothing is left out: the union of the slices' keys is the audit twin's whole delta
+        found = load()['profiles']
+        whole = {key: value for key, value in found[S('-levern-w2-audit')]['env'].items() if found[S('-levern-w2')]['env'].get(key) != value}
+        union = {}
+        for suffix in ('-sdpa', '-f1', '-ln', '-w1'):
+            parent = found[S('-levern-w2')]['env']
+            slice_ = found[S('-levern-w2-audit' + suffix)]['env']
+            union.update({key: value for key, value in slice_.items() if parent.get(key) != value})
+        self.assertEqual(union, whole)
 
     def test_the_f1_audit_rides_the_verify_glue_audit_and_multi_audit_rides_multi(self):
         found = load()['profiles']

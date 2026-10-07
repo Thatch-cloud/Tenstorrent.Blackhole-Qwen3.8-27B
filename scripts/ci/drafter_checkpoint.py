@@ -12,8 +12,10 @@ default, whose bytes and paths are today's, and the production profile is unchan
     and the candidate's geometry equals the default's. The geometry is load-bearing: Lever N keeps the final 2,048-token window inside its last step,
     the sticky plan boundary is floor2048(P) - 2048, the proposals are 15 (the scheduler graft's lookahead), a T16 block is 16 rows a user, the five
     target tap layers feed the draft and its hidden size and depth are fixed by the kernels.
-  - `attach_check(environ, root)`: hash the baked config.json and manifests against the table and log
-    `[PINDIAG] drafter checkpoint id=<id> revision=<12> verified=1 dtype=<bf8|bf16>`, or raise (the attach is refused).
+  - `attach_check(environ, root)`: hash the baked config.json, the manifests AND every file of the candidate's fixture directory (the weights: one digest over the
+    sorted relative paths and file hashes, pinned as weights_sha256; `python drafter_checkpoint.py --digest <fixture dir>` computes it) against the table and log
+    `[PINDIAG] drafter checkpoint id=<id> revision=<12> verified=1 dtype=<bf8|bf16>`, or raise (the attach is refused). The DEFAULT carries no pins (its bytes are the
+    image's own): it logs `verified=default`, which proves the selector path ran and nothing about the bytes.
 
 The QWEN_FAST_DRAFTER_BF16 arm (draft_mlp_branch) is unchanged and independent: it changes the projection dtype of whatever checkpoint is served.
 
@@ -147,6 +149,20 @@ def sha256_of(path):
     return digest.hexdigest()
 
 
+def combine(pairs):
+    """The weights digest of (relative path, file sha256) pairs: sha256 over path, a NUL byte, the file hash and a newline, in sorted path order."""
+    digest = hashlib.sha256()
+    for relative, file_hash in sorted(pairs):
+        digest.update(('%s' % relative + chr(0) + '%s' % file_hash + chr(10)).encode('utf-8'))
+    return digest.hexdigest()
+
+
+def weights_digest(directory):
+    """The digest of every file under a fixture directory (the manifests and the weight files they list; a file added or removed changes it too)."""
+    base = Path(directory)
+    return combine((path.relative_to(base).as_posix(), sha256_of(path)) for path in sorted(base.rglob('*')) if path.is_file())
+
+
 def attach_problems(name, document=None, root='/'):
     """[problem] for the baked bytes of checkpoint `name` (under `root`, so a test can lay them in a temporary directory). The default has no pins to
     check (its bytes are the image's own): only a candidate is hashed."""
@@ -175,6 +191,10 @@ def attach_problems(name, document=None, root='/'):
             problems.append('%s is missing' % file)
         elif sha256_of(file) != want:
             problems.append('%s does not hash to its pinned manifest sha256' % file)
+    if not fixture_dir.is_dir():
+        problems.append('%s is missing' % fixture_dir)
+    elif weights_digest(fixture_dir) != entry['weights_sha256']:
+        problems.append('the files under %s (the manifests and the weights they list) do not hash to the pinned weights_sha256' % fixture_dir)
     return problems
 
 
@@ -190,6 +210,16 @@ def attach_check(environ=None, document=None, root='/', log=print):
     if problems:
         raise ValueError('drafter checkpoint %s is not the pinned one: %s' % (name, '; '.join(problems)))
     entry = document['checkpoints'][name]
-    line = '%s id=%s revision=%s verified=1 dtype=%s' % (MARKER, name, entry['revision'][:12], entry['dtype'])
+    verified = 'default' if name == document['default'] else '1'
+    line = '%s id=%s revision=%s verified=%s dtype=%s' % (MARKER, name, entry['revision'][:12], verified, entry['dtype'])
     log(line)
     return line
+
+
+if __name__ == '__main__':
+    import sys
+    if len(sys.argv) == 3 and sys.argv[1] == '--digest':
+        print(weights_digest(sys.argv[2]))
+    else:
+        print('usage: drafter_checkpoint.py --digest <fixture directory>: the weights_sha256 to pin for a candidate', file=sys.stderr)
+        sys.exit(2)

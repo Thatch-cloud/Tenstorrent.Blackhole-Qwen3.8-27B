@@ -1457,6 +1457,8 @@ class Runner(object):
         self.corpus = corpus
         self.seed, self.agents, self.turns = seed, agents, turns
         self.infra = None
+        self.waived = False                 # an arm's log showed the 262k waiver
+        self.multi_unqualified = False      # ... or the multi-user SDPA launch (G16 0x21), outside the 262k evidence
         self.arms = {}
         self.drivers = {}
 
@@ -1578,6 +1580,12 @@ class Runner(object):
         stats = stats if stats is not None else scanned.get('stats')
         judge.resolve(driver.records, scanned)
         result = judge_arm(arm, driver, scanned, stats, error, log_text='\n'.join(lines))
+        stamp = c2_smoke_check.unqualified_stamp('\n'.join(lines))
+        if stamp:
+            result['unqualified'] = stamp
+            self.waived = self.waived or gate.WAIVER_STAMP in stamp
+            self.multi_unqualified = self.multi_unqualified or gate.MULTI_STAMP in stamp
+            self.log('[PREFIX-GATE] %s %s: a measurement, never evidence' % (arm['arm'], stamp))
         result.update(seconds=round(self.clock() - started, 1), metrics=dict(
             (key, value) for key, value in metrics.items() if key in (
                 'vllm:num_preemptions', 'vllm:prefix_cache_queries', 'vllm:prefix_cache_hits',
@@ -1832,10 +1840,13 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
         summary['passed'] = bool(summary['results']) and len(summary['results']) == len(plans) and all(
             result['verdict'] == 'PASS' for result in summary['results'].values())
         summary['infra'] = runner.infra
+        if getattr(runner, 'waived', False) or getattr(runner, 'multi_unqualified', False):
+            summary['unqualified'] = gate.unqualified_stamp(runner)
         with open(os.path.join(options.results, 'c2-prefix-summary.json'), 'w', encoding='utf-8') as handle:
             json.dump(summary, handle, indent=2, default=str)
-    log('C2_PREFIX profile=%s plans=%s passed=%s%s' % (options.profile, ','.join(plans), summary['passed'],
-                                                       ' infra=%s' % runner.infra if runner.infra else ''))
+    log('C2_PREFIX profile=%s plans=%s passed=%s%s%s' % (options.profile, ','.join(plans), summary['passed'],
+                                                         ' infra=%s' % runner.infra if runner.infra else '',
+                                                         ' %s' % summary['unqualified'] if summary.get('unqualified') else ''))
     return 0 if summary['passed'] else 1
 
 

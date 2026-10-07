@@ -1,3 +1,6 @@
+# SUPERSEDED by the combined window pack (scripts/ci/references/tp4-w2ln-jobs, docs/tp4-combined-window.md): W2 is gated there together with Lever N and prefix reuse, as paired ABAB rounds against the PRODUCTION profile
+# (c2-packed-tp4-8x262k-ship-prefix) judged per length. The KILL LINE below (a paired 32k gain under 10 ms of a projected 63 ms against the old pre-W1 control best-time-gate) and this pack's CONTROL are VOID, and the job parser refuses every template of this folder
+# (C2_SUPERSEDED_BY). The folder stays as the record of the earlier design.
 # The order of the tp4/w2 four-card DEVELOPMENT window: the fusion audit's wave 2 gated on the eight-seat 262k stack, one image, tp4-w2-1, built from the pushed tp4/w2 commit.
 # One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
 # stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.

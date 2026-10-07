@@ -935,6 +935,7 @@ class PackedVerifierEngine:
         self.initial, self.checkpoints, self.taps, self.owned = [], [], [], []
         self.feature_capture = self.fixture = None
         self.trace = self.output = None
+        self.captured_reader = None       # (the fixture's replay reader, its multi launch) the verify trace was captured on
         self.commits = [{} for user in range(shape.users)]
         self.phase, self.first, self.rounds = 'preparing', True, 0
         self.pending_segments = set()
@@ -1167,6 +1168,8 @@ class PackedVerifierEngine:
         tp4_vglue.take()
         try:
             self.trace, self.output = capture_operation(operations, self.mesh, lambda: self.operation(self.fixture))
+            captured = getattr(self.fixture, 'replay_reader', None)
+            self.captured_reader = None if captured is None else (captured, getattr(captured, 'multi', None))
         finally:
             # also after a failed capture: its audited clones belong to the fixture, released when it closes
             tile_collective_tp.audit_claim(self.fixture, 'capture')
@@ -1856,7 +1859,14 @@ class PackedVerifierEngine:
                 self.validate_bindings()
             # QWEN_FAST_TP4_SDPA=multi bakes the readers' positions, table and cur_pos buffers into its programs at the attach; a replay never comes
             # back to Python, so a rebinding after the attach is only visible here, on the host, before the replay (a few identity comparisons).
-            rebound_reason = getattr(getattr(self.fixture, 'replay_reader', None), 'rebound_reason', None)
+            # A reader (or multi launch) REPLACED after the capture would answer None to rebound_reason (its own multi is None, or its own buffers are
+            # the ones it was built on) while the trace replays programs built on the old one's buffers: the objects themselves are compared first.
+            reader = getattr(self.fixture, 'replay_reader', None)
+            captured = self.captured_reader
+            if captured is not None and (reader is not captured[0] or getattr(reader, 'multi', None) is not captured[1]):
+                raise RuntimeError('The fixture replay reader (or its multi launch) was replaced after the verify trace was captured: the trace replays programs '
+                                   'built on the buffers of the old reader')
+            rebound_reason = getattr(reader, 'rebound_reason', None)
             if rebound_reason is not None:
                 rebound = rebound_reason()
                 if rebound:

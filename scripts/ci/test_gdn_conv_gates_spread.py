@@ -1069,13 +1069,14 @@ class SmokeRuleTests(unittest.TestCase):
 # --- shipment -------------------------------------------------------------------------------------------------------------------
 
 class ShipmentTests(unittest.TestCase):
-    def test_the_module_and_its_kernels_are_in_all_three_copy_lists(self):
+    def test_the_module_and_its_kernels_ship_in_the_overlay_only(self):
+        # New C2 modules go in docker/qwen-c2-overlay.txt ONLY: the P8 base lists are the production base's and stay as shipped.
         workflow = text('../../.github/workflows/qwen-fast-serving-image.yml')
         dockerfile = text('../../docker/qwen-fast-serving.Dockerfile')
         overlay = text('../../docker/qwen-c2-overlay.txt')
         for name in spread.RUNTIME_FILES:
-            self.assertIn(name, workflow, name)
-            self.assertIn(' scripts/ci/' + name, dockerfile, name)
+            self.assertNotIn(name, workflow, name)
+            self.assertNotIn(' scripts/ci/' + name, dockerfile, name)
             self.assertIn('scripts/ci/' + name, overlay.splitlines(), name)
         self.assertEqual(spread.RUNTIME_FILES, ('gdn_conv_gates_spread.py', 'gdn_conv_gates_spread_reader.cpp', 'gdn_conv_gates_spread_writer.cpp'))
 

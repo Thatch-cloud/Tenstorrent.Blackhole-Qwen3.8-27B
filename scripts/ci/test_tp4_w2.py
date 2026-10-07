@@ -367,7 +367,9 @@ def pack_text(name):
 
 
 def pack_job(name):
-    return job.read_job(job.parse_env(pack_text(name)), sorted(load()['profiles']), root=ROOT)
+    values = job.parse_env(pack_text(name))
+    values.pop('C2_SUPERSEDED_BY', None)      # the folder is superseded (the parser refuses it as written: test_tp4_w2ln_window); its design is still what these tests hold
+    return job.read_job(values, sorted(load()['profiles']), root=ROOT)
 
 
 def order_text():
@@ -511,7 +513,9 @@ class PackTests(unittest.TestCase):
             replacement = NOF1 if profile == W2 else NOF1_AUDIT
             text = pack_text(name).replace('C2_PROFILE=%s\n' % profile, 'C2_PROFILE=%s\n' % replacement)
             self.assertIn('C2_PROFILE=' + replacement, text, name)
-            result = job.read_job(job.parse_env(text), sorted(load()['profiles']), root=ROOT)
+            values = job.parse_env(text)
+            values.pop('C2_SUPERSEDED_BY', None)
+            result = job.read_job(values, sorted(load()['profiles']), root=ROOT)
             self.assertEqual((result['profile'], result['actions'], result['tag']), (replacement, actions, IMAGE), name)
         self.assertEqual(swapped, 1 + 5 + 3 + 1)               # A1, H1-H5, T2 T5 T8, P1: nothing else names a w2 profile
         # the F1 job names the fallback in its own text, and the swap list in ORDER.txt is the swapped jobs
@@ -538,14 +542,14 @@ class ShippingTests(unittest.TestCase):
     RUNTIME = spread.RUNTIME_FILES + ('sdpa_long_tp.py', 'sdpa_multi_tp.py', 'sdpa_multi_mask_tp.cpp', 'sdpa_multi_gather_tp.cpp', 'sdpa_multi_audit_tp.cpp',
                                       'gdn_block_conv_tp.py', 'tp4_vglue.py', 'packed_verifier.py', 'c2_smoke_check.py')
 
-    def test_every_new_served_file_is_in_both_image_copy_lists_and_the_overlay(self):
+    def test_every_new_served_file_is_in_the_overlay_and_in_neither_p8_base_list(self):
         workflow = (ROOT / '.github' / 'workflows' / 'qwen-fast-serving-image.yml').read_text(encoding='utf-8')
         dockerfile = (ROOT / 'docker' / 'qwen-fast-serving.Dockerfile').read_text(encoding='utf-8')
         overlay = (ROOT / 'docker' / 'qwen-c2-overlay.txt').read_text(encoding='utf-8').splitlines()
         for name in spread.RUNTIME_FILES + ('sdpa_multi_tp.py', 'sdpa_multi_mask_tp.cpp', 'sdpa_multi_gather_tp.cpp', 'sdpa_multi_audit_tp.cpp'):
             with self.subTest(name=name):
-                self.assertIn(name, workflow)
-                self.assertIn(' scripts/ci/' + name, dockerfile)
+                self.assertNotIn(name, workflow)
+                self.assertNotIn(' scripts/ci/' + name, dockerfile)
                 self.assertIn('scripts/ci/' + name, overlay)
 
     def test_the_suites_run_in_the_cpu_workflow(self):

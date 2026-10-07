@@ -1143,15 +1143,16 @@ class ShipmentTests(unittest.TestCase):
     def read(self, path):
         return (ROOT / path).read_text(encoding='utf-8')
 
-    def test_every_runtime_file_is_in_the_three_copy_lists(self):
+    def test_every_runtime_file_ships_in_the_overlay_only(self):
+        # New C2 modules go in docker/qwen-c2-overlay.txt ONLY: the P8 base lists are the production base's and stay as shipped.
         dockerfile = self.read('docker/qwen-fast-serving.Dockerfile')
         workflow = self.read('.github/workflows/qwen-fast-serving-image.yml')
         overlay = self.read('docker/qwen-c2-overlay.txt').splitlines()
         self.assertEqual(sdpa_long_tp.RUNTIME_FILES[1:], multi.RUNTIME_FILES)
         for name in multi.RUNTIME_FILES:
             self.assertTrue((HERE / name).is_file(), name)
-            self.assertIn('scripts/ci/%s ' % name, dockerfile)
-            self.assertRegex(workflow, r'for name in [^\n]*\b%s\b' % re.escape(name))
+            self.assertNotIn('scripts/ci/%s ' % name, dockerfile)
+            self.assertNotRegex(workflow, r'for name in [^\n]*\b%s\b' % re.escape(name))
             self.assertIn('scripts/ci/%s' % name, overlay)
 
     def test_the_cpu_allowlist_names_the_tests(self):

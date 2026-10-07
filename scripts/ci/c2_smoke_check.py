@@ -80,6 +80,7 @@ own SMOKE_JSON line and the container log and exits non-zero on:
 
 import argparse
 import json
+import os
 import re
 import statistics
 import sys
@@ -97,6 +98,9 @@ EIGHT_TESTS = ('concurrent8_code_equal', 'concurrent8_code_32k', 'concurrent8_co
 # every stream must end in tokens (the arrival's too) and the arrival's time to first token must exist.
 STALL_TEST = 'stall8_cold262k'
 STALL_TESTS = (STALL_TEST, 'stall8_cold128k')
+# The two-arrival shape (the combined window): six decoders and TWO simultaneous cold arrivals. Recorded, not gated, but every stream (the arrivals' too) must end
+# in tokens, each arrival must have a time to first token and no error, and the seat gaps must exist (HX-C's and S's reads depend on them).
+COLD2_TEST = 'cold2_254k'
 # Lever N (tp4/lever-n): the hang shapes are streams of several users (the arrival and the follow-ups included); the equal tests are rows of exact-length completions.
 LEVERN_USER_TESTS = ('levern_equal_busy', 'levern_decoder_finishes', 'levern_all_decoders_finish', 'levern_cancel_mid_prefill',
                      'levern_arrival_during_prefill', 'levern_seed_stops')
@@ -263,6 +267,20 @@ WAIVER_FLAG = 'QWEN_FAST_262K_EVIDENCE_WAIVER'
 WAIVER_MARKER = '[PINDIAG] 262k evidence WAIVED (gate-only)'   # page_width_tp4.WAIVER_MARKER
 WAIVER_CAPACITY = 'capacity=262144'
 WAIVER_STAMP = 'UNQUALIFIED (262k waiver)'
+# The multi-user SDPA launch (G16 flags 0x21) is outside packed_any_evidence_tp4_262144.json (G4B1/G4B3/G8B2, 0x23): an arm that runs it is a measurement at 262k, never
+# qualified evidence, with or without the waiver. The attach logs SDPA_MULTI_UNQUALIFIED at 262,144; every summary the gates and the smoke write carries this stamp then.
+MULTI_STAMP = 'UNQUALIFIED (multi G16, gate only)'
+
+
+def unqualified_stamp(container_text):
+    """The stamp a result carries for what its server log shows: the 262k waiver's, the multi launch's, both joined by ' + ', or '' when neither."""
+    text = container_text or ''
+    stamps = []
+    if waiver_active_in_log(text):
+        stamps.append(WAIVER_STAMP)
+    if SDPA_MULTI_UNQUALIFIED in text:
+        stamps.append(MULTI_STAMP)
+    return ' + '.join(stamps)
 ADMISSION_REFUSED = '[PINDIAG] packed-any admission refused'
 PARSER_ARMED = 'parser M armed'
 FOREIGN_SHARE = 0.3
@@ -398,6 +416,39 @@ def solo_problems(results, container_text=''):
     return problems
 
 
+def cold2_problems(entry):
+    """[problem] for the cold2_254k result (two simultaneous cold arrivals beside six decoders): every user a stream that ends in tokens, an arrival record with
+    a numeric time to first token and no error for each of the two arrivals, and a recorded gap for every decoder; [] for no such test."""
+    if entry is None:
+        return []
+    if not isinstance(entry, dict):
+        return ['%s: no result' % COLD2_TEST]
+    if 'error' in entry:
+        return ['%s: %s' % (COLD2_TEST, entry['error'])]
+    problems = []
+    for index, user in enumerate(entry.get('users') or []):
+        problems += stream_problems('%s user %d' % (COLD2_TEST, index), user)
+    arrivals = entry.get('arrivals')
+    if not isinstance(arrivals, list) or len(arrivals) != 2:
+        problems.append('%s: %s arrival records, two were asked for' % (COLD2_TEST, len(arrivals) if isinstance(arrivals, list) else 'no'))
+        arrivals = arrivals if isinstance(arrivals, list) else []
+    for index, arrival in enumerate(arrivals):
+        arrival = arrival if isinstance(arrival, dict) else {}
+        if arrival.get('error'):
+            problems.append('%s arrival %d: %s' % (COLD2_TEST, index, arrival['error']))
+        if not isinstance(arrival.get('ttft_s'), (int, float)):
+            problems.append('%s arrival %d: no time to first token' % (COLD2_TEST, index))
+    gaps = entry.get('seat_gaps')
+    if not gaps:
+        problems.append('%s: no seat gap was recorded' % COLD2_TEST)
+    for gap in gaps or ():
+        if isinstance(gap, dict) and gap.get('error'):
+            problems.append('%s seat %s: %s' % (COLD2_TEST, gap.get('seat'), gap['error']))
+        elif isinstance(gap, dict) and gap.get('longest_gap_s') is None:
+            problems.append('%s seat %s: no gap could be read (the decoder streamed fewer than two chunks)' % (COLD2_TEST, gap.get('seat')))
+    return problems
+
+
 def smoke_problems(results, container_text=''):
     problems = []
     if results is None:
@@ -431,6 +482,7 @@ def smoke_problems(results, container_text=''):
                 problems.append('%s: no seat gap was recorded' % stall_name)
         elif isinstance(stall, dict):
             problems.append('%s: %s' % (stall_name, stall['error']))
+    problems += cold2_problems(results.get(COLD2_TEST))
     problems += levern_smoke_problems(results)
     for replay in REPLAY_TESTS:
         if replay in results and 'error' not in results[replay]:
@@ -1424,9 +1476,16 @@ def drafter_checkpoint_problems(env, container_text):
     if not name:
         return []
     lines = [line for line in container_text.splitlines() if DRAFTER_CHECKPOINT_MARKER in line]
-    if not any(('id=%s ' % name) in line and 'verified=1' in line for line in lines):
-        return ['%s=%s is set and no "%s id=%s ... verified=1" line was logged: the pinned bytes of the candidate were never checked' % (
-            DRAFTER_CHECKPOINT_FLAG, name, DRAFTER_CHECKPOINT_MARKER, name)]
+    # A candidate's line says verified=1 (its config, manifests and weights hashed to the pins); the default has no pins and says verified=default.
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'drafter_checkpoints.json'), encoding='utf-8') as handle:
+            default = json.load(handle).get('default')
+    except (OSError, ValueError):
+        default = None
+    want = 'verified=default' if name == default else 'verified=1'
+    if not any(('id=%s ' % name) in line and (want + ' ') in (line + ' ') for line in lines):
+        return ['%s=%s is set and no "%s id=%s ... %s" line was logged: the pinned bytes of the candidate were never checked' % (
+            DRAFTER_CHECKPOINT_FLAG, name, DRAFTER_CHECKPOINT_MARKER, name, want)]
     return []
 
 
@@ -1526,8 +1585,9 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     if entry is not None:
         problems += traffic_problems(container_text, entry)
         problems += waiver_problems(container_text, entry)
-    if waiver_active_in_log(container_text):
-        facts['unqualified'] = WAIVER_STAMP
+    stamp = unqualified_stamp(container_text)
+    if stamp:
+        facts['unqualified'] = stamp
     if slide:
         if median is None:
             problems.append('no [PACKED-PUBLISH] round with a commit: the ramp commit time is unread (QWEN_FAST_PACKED_AUDIT?)')
@@ -1561,7 +1621,7 @@ def main(argv=None):
     problems, facts = check(smoke, container, slide, options.max_ramp_kv_ms, env, entry)
     print('SMOKE_CHECK profile=%s slide=%s %s' % (options.profile, 'on' if slide else 'off', json.dumps(facts)))
     if facts.get('unqualified'):
-        print('SMOKE_CHECK %s: the 262k evidence records were waived; this result is a measurement, never evidence' % WAIVER_STAMP)
+        print('SMOKE_CHECK %s: the 262k evidence records were waived or a launch outside them ran; this result is a measurement, never evidence' % facts['unqualified'])
     for problem in problems:
         print('SMOKE_CHECK FAILED: %s' % problem)
     return 1 if problems else 0

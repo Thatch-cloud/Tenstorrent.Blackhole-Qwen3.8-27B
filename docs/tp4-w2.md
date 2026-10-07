@@ -1,5 +1,7 @@
 # tp4/w2: wave 2 of the fusion plan on the eight-seat 262k stack
 
+> **Status: SUPERSEDED for the window.** W2 is gated together with Lever N and prefix reuse in the combined window (`docs/tp4-combined-window.md`, pack `scripts/ci/references/tp4-w2ln-jobs`), as paired ABAB rounds against the production profile judged per length. The job pack below (`tp4-w2-jobs`), its CONTROL (`best-time-gate`) and its kill line (a 32k gain under 10 ms of a projected 63 ms against the pre-W1 control) are void, and the job parser refuses its templates. The design and the profile description in this document still stand.
+
 Wave 2 is wave 1 (`tp4/w1`: nosamp, the drafter ops D2a and D2c, the host-gap stage 1, U1, the drafter ring gathers) plus the multi-user SDPA launch
 (`tp4/sdpa-multi`, `QWEN_FAST_TP4_SDPA=multi`) plus F1, the conv-gates spread (`QWEN_FAST_TP4_CONV_GATES_SPREAD`). Every flag is default off and byte-identical off.
 Two gate-only profiles switch the stack on (and two fallback twins without F1); a job pack drives the window.

@@ -1767,7 +1767,13 @@ def scenario_agent_turns(driver, agents=None, turns=AGENT_TURNS, max_tokens=AGEN
 # hub mount the next arm would read, and it removes the flag in a finally (content-guarded, as kill_switch_off does).
 LEVERN_COLD_TOKENS = 253920
 LEVERN_COLD_MAX_TOKENS = 64
-LEVERN_HIT_AFTER_S = 8.0          # the cold prompt is split and running (its first step is 2,048 tokens, a few seconds)
+LEVERN_HIT_AFTER_S = 8.0          # the cold prompt is split and running (with decoders its steps are 2,048 tokens, about a second each)
+# The timed hit shape runs beside six decoding seats (ignore_eos): only then is a step 2,048 tokens. With no decoder and nothing waiting the policy takes its
+# 16,384-token SOLO step (levern_policy QWEN_FAST_LEVERN_SOLO_STEP_TOKENS), and a hit that arrives mid-step would wait a whole one: the "solo + 1.5 s" bound
+# is the 2,048-token step's, so the shape must be the one that the bound describes (docs/lever-n-prefix-merged-route.md: six decoders, the cold arrival, the hit).
+LEVERN_HIT_DECODERS = 6
+LEVERN_HIT_DECODER_TOKENS = 4097
+LEVERN_HIT_DECODER_BUDGET = 6000
 LEVERN_HIT_INPUT_TOKENS = 1500
 LEVERN_ABORT_AFTER_S = 40.0
 LEVERN_OFF_AFTER_S = 10.0
@@ -1809,19 +1815,50 @@ def levern_hit_alone(driver, conv, case):
     return record
 
 
+def levern_start_decoders(driver, count, signal):
+    """`count` decoding seats (about 4k-token prompts, ignore_eos, a long budget) on threads until `signal` is set: the busy server the hit shape needs, so that
+    a Lever N step is the 2,048-token one. -> (jobs, an Event set once every decoder has streamed its first token, the conversations)."""
+    holders = [driver.conversation('levern-decoder-%d' % index) for index in range(count)]
+    for holder in holders:
+        sized_message(driver, holder, 1, LEVERN_HIT_DECODER_TOKENS)
+        driver.fit(holder, LEVERN_HIT_DECODER_BUDGET)
+    busy, firsts, lock = threading.Event(), [], threading.Lock()
+
+    def first_token():
+        with lock:
+            firsts.append(1)
+            if len(firsts) >= count:
+                busy.set()
+
+    jobs = _spawn([lambda holder=holder: driver.send(holder.body(), 'seat', driver.fresh_salt(), 'levern-decoder', holder, LEVERN_HIT_DECODER_BUDGET,
+                                                      extra=dict(ignore_eos=True), on_first=first_token, abort_signal=signal) for holder in holders])
+    return jobs, busy, holders
+
+
 def scenario_levern_hit(driver):
-    """TIMED (G-NP5). A salted hit turn arrives while an unsalted cold ~254k prompt is being split: its TTFT against the same kind of turn alone,
-    the long prompt's own TTFT and the answer the long prompt gave. Judged by the pack's ABAB reading (hit TTFT at most its solo + one step), not here."""
+    """TIMED (G-NP5). Six decoders run; a salted hit turn arrives while an unsalted cold ~254k prompt is being split: its TTFT against the same kind of turn
+    alone (measured beside the same decoders), the long prompt's own TTFT and the answer the long prompt gave. The decoders keep every step at 2,048 tokens
+    (without them the policy takes its 16,384-token solo step and the hit would wait a whole one). Judged by the pack's ABAB reading (hit TTFT at most its solo
+    + one step), not here."""
     conv = levern_primed(driver, 'levern-hit')
-    solo = levern_hit_alone(driver, conv, 'levern-hit-solo')
-    cold = levern_cold(driver, 'levern-cold')
-    job = levern_start_cold(driver, cold)
-    driver.sleep(LEVERN_HIT_AFTER_S)
-    mid = levern_hit_alone(driver, conv, 'levern-hit-mid-cold')
-    record = _join(job)[0]
+    stop = threading.Event()
+    decoders, busy, _ = levern_start_decoders(driver, LEVERN_HIT_DECODERS, stop)
+    try:
+        left = driver.remaining()
+        busy.wait(900 if left is None else max(1, min(900, left)))
+        solo = levern_hit_alone(driver, conv, 'levern-hit-solo')
+        cold = levern_cold(driver, 'levern-cold')
+        job = levern_start_cold(driver, cold)
+        driver.sleep(LEVERN_HIT_AFTER_S)
+        mid = levern_hit_alone(driver, conv, 'levern-hit-mid-cold')
+        record = _join(job)[0]
+    finally:
+        stop.set()
+        _join(decoders)
     driver.event('levern-hit', solo_ttft_s=solo.get('ttft_s'), mid_ttft_s=mid.get('ttft_s'), cold_ttft_s=record.get('ttft_s'),
                  cold_prompt_tokens=record.get('prompt_tokens'), mid_prompt_tokens=mid.get('prompt_tokens'),
-                 solo_prompt_tokens=solo.get('prompt_tokens'), hit_after_s=LEVERN_HIT_AFTER_S)
+                 solo_prompt_tokens=solo.get('prompt_tokens'), hit_after_s=LEVERN_HIT_AFTER_S, decoders=LEVERN_HIT_DECODERS,
+                 decoders_running=busy.is_set())
 
 
 def levern_drill_on(driver):

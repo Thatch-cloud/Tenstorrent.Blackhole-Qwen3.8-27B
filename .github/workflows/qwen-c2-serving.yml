@@ -579,6 +579,7 @@ jobs:
         env:
           TAG: ${{ steps.job.outputs.tag }}
           C2_BAKE_DEFAULT_PROFILE: ${{ steps.job.outputs.bake_default_profile }}
+          C2_DRAFTER_CANDIDATES: ${{ steps.job.outputs.drafter_candidates }}
         run: |
           set -euo pipefail
           image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
@@ -722,11 +723,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The hub directory the arms mount at /models: C2_HUB_DIR when the runner sets it, else the runner user's own hub cache. A missing directory fails the
+          # step (a check that cannot look must not pass), and the content of a flag file is never printed (the logs are public).
+          hub="${C2_HUB_DIR:-$HOME/hf-cache/hub}"
+          if ! sudo -n test -d "$hub"; then
+            echo "the hub directory is not where this runner keeps it: set C2_HUB_DIR on the runner" >&2
+            exit 1
+          fi
           left=0
           for name in prefix-reuse.off levern.off; do
-            flag=/home/thatch/hf-cache/hub/.qwen-c2/$name
-            if sudo -n test -e "$flag"; then
-              echo "kill-switch file present: $name (content: $(sudo -n cat "$flag" 2>/dev/null | head -c 80)); remove it or hand it to its owner before this job" >&2
+            if sudo -n test -e "$hub/.qwen-c2/$name"; then
+              echo "kill-switch file present: $name (remove it or hand it to its owner before this job)" >&2
               left=1
             fi
           done
@@ -869,6 +876,7 @@ jobs:
           # does this trap - only when its content says the gate wrote it (an operator's flag stays).
           flag=/home/thatch/hf-cache/hub/.qwen-c2/prefix-reuse.off
           cleanup_prefix() {
+            if [ -n "${load_pid:-}" ]; then kill "$load_pid" 2>/dev/null || true; fi
             docker ps -a --format '{{.Names}}' | grep '^qwen-c2-prefix-' | xargs -r docker rm -f || true
             if [ "$(sudo -n cat "$flag" 2>/dev/null)" = qwen-c2-prefix-gate ]; then sudo -n rm -f "$flag" || true; fi
             lflag="$(dirname "$flag")/levern.off"
@@ -880,6 +888,10 @@ jobs:
             cleanup_prefix
           fi
           trap cleanup_prefix EXIT
+          # The host's load average once a minute into load.log beside the results (the timed prefix arms, G and GH, are read against it like the smoke's:
+          # scripts/ci/w2ln_timing_compare.py); never into the public job log.
+          ( while :; do echo "[LOAD] $(date +%s) $(cut -d' ' -f1 /proc/loadavg)" >> "$RUNNER_TEMP/c2-results/load.log"; sleep 60; done ) &
+          load_pid=$!
           m=$(readlink -f /dev/tenstorrent/by-id/blackhole-CEF5729692C19E6D)
           a=$(readlink -f /dev/tenstorrent/by-id/blackhole-3707293C249A5E67)
           echo "card M $m, card A $a"
@@ -950,9 +962,9 @@ jobs:
           fi
           devices=()
           for node in $(card_set_devices); do devices+=(--device "$node"); done
-          # The host's load average once a minute into the job log and $results/load.log: the timed pairs are voided by it (the rig hosts CI and builds;
+          # The host's load average once a minute into $results/load.log only (never the public job log): the timed pairs are voided by it (the rig hosts CI and builds;
           # scripts/ci/w2ln_timing_compare.py --max-load).
-          ( while :; do echo "[LOAD] $(date +%s) $(cut -d' ' -f1 /proc/loadavg)" | tee -a "$results/load.log"; sleep 60; done ) &
+          ( while :; do echo "[LOAD] $(date +%s) $(cut -d' ' -f1 /proc/loadavg)" >> "$results/load.log"; sleep 60; done ) &
           load_pid=$!
           trap 'kill "$load_pid" 2>/dev/null || true; docker logs "$name" > "$results/container.log" 2>&1 || true; docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
           docker run -d --name "$name" --read-only \

@@ -200,6 +200,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import c2_lanes_plans  # noqa: E402  (stdlib only; the lanes window's plans)
 import c2_serving_job  # noqa: E402
+import c2_smoke_check  # noqa: E402  (the unqualified stamp: stdlib and levern_policy only)
 import lever_n_m3native_gate as harness  # noqa: E402  (stdlib only; real_text_compare imports it too)
 import ops_profile_plan  # noqa: E402  (stdlib only: the TP4 op-profile plans, docs/tp4-profile.md)
 import real_text_compare  # noqa: E402
@@ -1514,6 +1515,7 @@ class Runner(object):
     ethernet-core wedge) every later arm is skipped."""
 
     waived = False   # an arm's server log showed the 262k evidence waiver: the summary is stamped UNQUALIFIED (262k waiver)
+    multi_unqualified = False   # ... or the multi-user SDPA launch (G16 0x21, outside the 262k evidence): UNQUALIFIED (multi G16, gate only)
 
     def __init__(self, image, profile, results, checkout, devices, hub=HUB, execute=None, log=print,
                  containers=None, corpus=None, any_request=False, profiles=None, cache_entries=None, jit='auto',
@@ -1649,6 +1651,8 @@ class Runner(object):
             log_text = server_log(arm_dir)
             if log_text and any(text in log_text for text in WAIVER_STAMP_TEXTS):
                 self.waived = True
+            if log_text and c2_smoke_check.SDPA_MULTI_UNQUALIFIED in log_text:
+                self.multi_unqualified = True
             problems, engines, consumers = any_request_check(log_text, self.any_request_for(profile))
             # S2: the harness's S2 problems, the S2 lines off the flag, the knobs reaching the container, the
             # kernel cache, and the four-live rate from the whole server log.
@@ -2417,7 +2421,13 @@ def g4_checks(plan, concurrent, solo, rerun=None, probe=None, seats=MEMORY_USERS
 
 
 WAIVER_STAMP = 'UNQUALIFIED (262k waiver)'
+MULTI_STAMP = c2_smoke_check.MULTI_STAMP
 WAIVER_STAMP_TEXTS = ('[PINDIAG] 262k evidence WAIVED (gate-only)', '(262k waiver, gate only)')   # page_width_tp4 / packed_any_admission
+
+
+def unqualified_stamp(runner):
+    """The stamp of a gate summary: what its arms' server logs showed (the 262k waiver, the multi launch, or both joined by ' + ')."""
+    return ' + '.join(stamp for stamp, shown in ((WAIVER_STAMP, runner.waived), (MULTI_STAMP, runner.multi_unqualified)) if shown)
 DEEP_FAMILY_FLOOR = 131328   # the 131k window's largest extent family: a round past it ran a user in the extra 262k half
 
 
@@ -3325,8 +3335,8 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
                     log('[C2-GATE] S2 EXIT BLOCKED: %(plan)s %(arm)s user %(user)s is %(verdict)s - its record is '
                         '%(record)s' % blocker)
     finally:
-        if runner.waived:
-            summary['unqualified'] = WAIVER_STAMP
+        if runner.waived or runner.multi_unqualified:
+            summary['unqualified'] = unqualified_stamp(runner)
         summary['passed'] = bool(summary['results']) and len(summary['results']) == len(plans) and all(
             result['verdict'] == 'PASS' for result in summary['results'].values())
         summary['infra'] = runner.infra
@@ -3334,7 +3344,7 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
             json.dump(summary, handle, indent=2)
     log('C2_GATE profile=%s plans=%s passed=%s%s%s' % (options.profile, ','.join(plans), summary['passed'],
                                                        ' infra=%s' % runner.infra if runner.infra else '',
-                                                       ' %s' % WAIVER_STAMP if runner.waived else ''))
+                                                       ' %s' % unqualified_stamp(runner) if (runner.waived or runner.multi_unqualified) else ''))
     return 0 if summary['passed'] else 1
 
 

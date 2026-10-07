@@ -12,7 +12,9 @@ The census reads every non-test module the C2 overlay names (docker/qwen-c2-over
     `<x>.metadata[:] = ...`, `<x>.cur_pos[i] = ...`);
   - `setattr(<x>, 'positions' | 'cur_pos' | 'metadata', ...)`;
   - a mutating call on one of them (append, extend, insert, pop, clear, remove);
-  - a construction of PackedVerifierEngine, PackedExtentReplayReader or ExtentSegmentReader.
+  - a construction of PackedVerifierEngine, PackedExtentReplayReader or ExtentSegmentReader;
+  - the same forms on `<x>.replay_reader` (the fixture's reader object: a replaced one has multi None and answers "not rebound" while the trace replays programs built on
+    the old reader's buffers) and on `<x>.multi` (the launch the reader holds); packed_verifier.verify compares both objects with the ones the trace was captured on.
 """
 
 import ast
@@ -22,7 +24,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
-NAMES = ('positions', 'cur_pos', 'metadata')
+NAMES = ('positions', 'cur_pos', 'metadata', 'replay_reader', 'multi')
 MUTATING = ('append', 'extend', 'insert', 'pop', 'clear', 'remove', '__setitem__')
 CONSTRUCTED = ('PackedVerifierEngine', 'PackedExtentReplayReader', 'ExtentSegmentReader')
 
@@ -50,6 +52,9 @@ AUDITED = {
     ('packed_ordered_cache.py', 'ChainedOrderedCacheWriter.__init__', 'assign', 'positions'): 'the writer\'s own positions, built at construction',
     ('sdpa_long_tp.py', 'apply', 'subscript-assign', 'metadata'): 'the grid configurations rewrite the program config entries in place at the attach; never for multi',
     ('sdpa_multi_tp.py', 'MultiBlock.__init__', 'assign', 'cur_pos'): 'multi\'s OWN stacked cur_pos buffer (not a reader attribute)',
+    ('model_batch.py', 'ModelBatch.__init__', 'assign', 'replay_reader'): 'the batch constructor: five alternative constructions (the packed extent reader, its pair twins), each assigned once '
+                                                                          'before any trace is captured; nothing else in the image assigns the attribute',
+    ('sdpa_long_tp.py', 'apply', 'assign', 'multi'): 'the attach: the multi launch is bound to the reader once, from the reader constructor, before any trace',
 }
 # The modules that run between two replays or around a prefill step: none of them may name a binding at all.
 GUARDED = ('levern_policy.py', 'levern_scheduler.py', 'levern_platform.py', 'levern_route.py', 'serving_lifecycle.py',
@@ -182,9 +187,37 @@ class ReboundGuardTests(unittest.TestCase):
     def test_the_verify_asks_before_every_replay_and_before_the_trace_runs(self):
         source = (HERE / 'packed_verifier.py').read_text(encoding='utf-8')
         verify = source[source.index('    def verify(self, entries):'):]
-        ask = verify.index('rebound_reason')
+        ask = verify.index('rebound_reason = getattr(reader')
         self.assertLess(ask, verify.index('execute_trace(self.mesh, self.trace'))
         self.assertIn('raise RuntimeError(rebound)', verify[ask:ask + 600])
+
+    def test_a_replaced_reader_or_multi_launch_is_refused_before_the_replay(self):
+        # the object identities are recorded where the verify trace is captured and compared on the host before every replay
+        source = (HERE / 'packed_verifier.py').read_text(encoding='utf-8')
+        capture = source[source.index('    def _capture_traces(self):'):]
+        self.assertIn("self.captured_reader = None if captured is None else (captured, getattr(captured, 'multi', None))", capture[:1400])
+        verify = source[source.index('    def verify(self, entries):'):]
+        guard = verify.index("reader is not captured[0] or getattr(reader, 'multi', None) is not captured[1]")
+        self.assertLess(guard, verify.index('rebound_reason = getattr(reader'))
+        self.assertLess(guard, verify.index('execute_trace(self.mesh, self.trace'))
+        self.assertIn('was replaced after the verify trace was captured', verify[guard:guard + 400])
+
+    def test_a_reader_constructed_after_the_capture_is_seen_only_by_the_identity_comparison(self):
+        class Reader(object):
+            multi = None
+
+            def rebound_reason(self):
+                return None
+
+        first, second = Reader(), Reader()
+        captured = (first, None)
+
+        def replaced(reader):
+            return reader is not captured[0] or getattr(reader, 'multi', None) is not captured[1]
+
+        self.assertFalse(replaced(first))
+        self.assertTrue(replaced(second))
+        self.assertIsNone(second.rebound_reason(), 'the old guard asked the new reader, which answers None')
 
 
 if __name__ == '__main__':

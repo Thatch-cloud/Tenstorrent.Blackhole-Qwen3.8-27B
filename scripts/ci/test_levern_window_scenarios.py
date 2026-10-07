@@ -72,6 +72,18 @@ class DrillTests(unittest.TestCase):
         self.assertEqual(driver.pairs[0]['case'], 'levern-hit-first')       # the priming pair only: the timed reads are single requests
         self.assertEqual(len(driver.pairs), 1)
 
+    def test_the_timed_hit_runs_beside_decoders_so_the_policys_step_is_the_2048_one_the_bound_describes(self):
+        # without a decoder the policy takes its 16,384-token solo step and a hit arriving mid-step waits a whole one: the "solo + 1.5 s" pass line is the
+        # 2,048-token step's, so the shape must carry the decoders (and its solo read is taken beside them)
+        driver, _ = self.driver('levern-hit')
+        replay.scenario_levern_hit(driver)
+        decoders = [record for record in driver.records if record['case'] == 'levern-decoder']
+        self.assertEqual(len(decoders), replay.LEVERN_HIT_DECODERS)
+        self.assertEqual(replay.LEVERN_HIT_DECODERS, 6, 'six decoders, the cold arrival and the hit are the eight seats')
+        self.assertEqual(driver.events['levern-hit']['decoders'], 6)
+        source = Path(replay.__file__).read_text(encoding='utf-8')
+        self.assertNotIn('its first step is 2,048 tokens, a few seconds', source, 'the comment that described the decoder-free shape as 2,048-token steps is gone')
+
     def test_the_fault_scenario_runs_the_three_drills_and_removes_its_flag_inside_the_container(self):
         driver, container = self.driver('levern-faults')
         replay.scenario_levern_faults(driver)

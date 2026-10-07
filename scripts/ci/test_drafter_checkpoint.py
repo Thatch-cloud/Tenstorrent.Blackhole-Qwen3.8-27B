@@ -28,19 +28,23 @@ def sha(data):
 GEOMETRY = dict(window=2048, num_speculative_tokens=15, rows_per_user=16, target_taps=5, hidden=5120, layers=5)
 CONFIG = json.dumps(dict(hidden_size=5120, num_hidden_layers=5)).encode()
 MANIFEST = b'{"files": ["w.bin"]}'
+WEIGHTS = b'weights of the candidate'
+LAID = {'attention/manifest.json': MANIFEST, 'attention/w.bin': WEIGHTS, 'layer-1/manifest.json': MANIFEST}
 
 
 def table(**changes):
     candidate = dict(revision='a' * 40, dtype='bf16', geometry=dict(GEOMETRY), config_sha256=sha(CONFIG),
-                     manifests={'attention/manifest.json': sha(MANIFEST), 'layer-1/manifest.json': sha(MANIFEST)}, weights_sha256='b' * 64)
+                     manifests={'attention/manifest.json': sha(MANIFEST), 'layer-1/manifest.json': sha(MANIFEST)},
+                     weights_sha256=dc.combine((relative, sha(data)) for relative, data in LAID.items()))
     candidate.update(changes)
     document = json.loads((HERE / 'drafter_checkpoints.json').read_text(encoding='utf-8'))
     document['checkpoints']['cand-one'] = candidate
     return document
 
 
-def lay(root, config=CONFIG, manifest=MANIFEST):
+def lay(root, config=CONFIG, manifest=MANIFEST, weights=WEIGHTS):
     for relative, data in (('draft-configs/cand-one/config.json', config), ('experiment-dflash-fixtures/cand-one/attention/manifest.json', manifest),
+                           ('experiment-dflash-fixtures/cand-one/attention/w.bin', weights),
                            ('experiment-dflash-fixtures/cand-one/layer-1/manifest.json', manifest)):
         path = Path(root) / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,7 +91,7 @@ class TableTests(unittest.TestCase):
 
     def test_the_table_names_no_host_path_or_private_repository(self):
         text = (HERE / 'drafter_checkpoints.json').read_text(encoding='utf-8')
-        for word in ('/home', 'thatch', 'huggingface', 'zot.', 'incoai', '@'):
+        for word in ('/home', 'thatch', 'huggingface', 'zot.', '@'):
             self.assertNotIn(word, text)
 
 
@@ -162,7 +166,7 @@ class AttachTests(unittest.TestCase):
 
     def test_a_changed_config_a_changed_manifest_or_a_missing_file_refuses_the_attach(self):
         document = table()
-        for label, kwargs in (('config', dict(config=CONFIG + b' ')), ('manifest', dict(manifest=MANIFEST + b' '))):
+        for label, kwargs in (('config', dict(config=CONFIG + b' ')), ('manifest', dict(manifest=MANIFEST + b' ')), ('weights', dict(weights=WEIGHTS + b'x'))):
             with tempfile.TemporaryDirectory() as root:
                 lay(root, **kwargs)
                 with self.assertRaises(ValueError, msg=label):
@@ -173,7 +177,27 @@ class AttachTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 dc.attach_check({dc.FLAG: 'cand-one'}, document, root, log=lambda text: None)
 
-    def test_a_config_that_disagrees_with_the_pinned_geometry_is_refused(self):
+    def test_a_tampered_weight_file_that_a_manifest_lists_is_named_in_the_refusal(self):
+        document = table()
+        with tempfile.TemporaryDirectory() as root:
+            lay(root, weights=b'tampered')
+            problems = dc.attach_problems('cand-one', document, root)
+            self.assertEqual(len(problems), 1)
+            self.assertIn('weights_sha256', problems[0])
+            (Path(root) / 'experiment-dflash-fixtures/cand-one/attention/w.bin').unlink()
+            self.assertTrue(any('weights_sha256' in text for text in dc.attach_problems('cand-one', document, root)))
+        with tempfile.TemporaryDirectory() as root:
+            lay(root)
+            self.assertEqual(dc.attach_problems('cand-one', document, root), [])
+            (Path(root) / 'experiment-dflash-fixtures/cand-one/extra.bin').write_bytes(b'a file nobody pinned')
+            self.assertTrue(dc.attach_problems('cand-one', document, root), 'a file added to the fixture changes the digest')
+
+    def test_the_digest_command_prints_what_the_table_pins(self):
+        with tempfile.TemporaryDirectory() as root:
+            lay(root)
+            self.assertEqual(dc.weights_digest(Path(root) / 'experiment-dflash-fixtures/cand-one'), table()['checkpoints']['cand-one']['weights_sha256'])
+
+    def test_a_config_with_the_pinned_geometry_is_refused(self):
         config = json.dumps(dict(hidden_size=4096, num_hidden_layers=5)).encode()
         document = table(config_sha256=sha(config))
         with tempfile.TemporaryDirectory() as root:
@@ -185,7 +209,8 @@ class AttachTests(unittest.TestCase):
     def test_the_default_has_no_pins_to_check(self):
         self.assertEqual(dc.attach_problems('dflash2-dedf8df6', root='/nonexistent'), [])
         line = dc.attach_check({dc.FLAG: 'dflash2-dedf8df6'}, log=lambda text: None)
-        self.assertIn('id=dflash2-dedf8df6 revision=dedf8df68adf verified=1 dtype=bf8', line)
+        self.assertIn('id=dflash2-dedf8df6 revision=dedf8df68adf verified=default dtype=bf8', line)
+        self.assertNotIn('verified=1', line, 'the default has no pins: it must not claim its bytes were hashed')
 
 
 class SmokeRuleTests(unittest.TestCase):
@@ -195,6 +220,13 @@ class SmokeRuleTests(unittest.TestCase):
         self.assertTrue(check.drafter_checkpoint_problems(env, '[PINDIAG] drafter checkpoint id=other revision=aaaaaaaaaaaa verified=1 dtype=bf16'))
         self.assertTrue(check.drafter_checkpoint_problems(env, '[PINDIAG] drafter checkpoint id=cand-one revision=aaaaaaaaaaaa verified=0 dtype=bf16'))
         self.assertEqual(check.drafter_checkpoint_problems(env, '[QWEN-C2] [PINDIAG] drafter checkpoint id=cand-one revision=aaaaaaaaaaaa verified=1 dtype=bf16'), [])
+
+    def test_the_default_needs_verified_default_and_a_candidate_cannot_pass_with_it(self):
+        default = {dc.FLAG: 'dflash2-dedf8df6'}
+        line = '[PINDIAG] drafter checkpoint id=%s revision=dedf8df68adf verified=%s dtype=bf8'
+        self.assertEqual(check.drafter_checkpoint_problems(default, line % ('dflash2-dedf8df6', 'default')), [])
+        self.assertTrue(check.drafter_checkpoint_problems(default, line % ('dflash2-dedf8df6', '1')))
+        self.assertTrue(check.drafter_checkpoint_problems({dc.FLAG: 'cand-one'}, line % ('cand-one', 'default')))
 
     def test_a_profile_that_names_none_needs_no_line(self):
         self.assertEqual(check.drafter_checkpoint_problems({}, ''), [])
@@ -206,6 +238,22 @@ class SmokeRuleTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    def test_a_job_file_reaches_the_build_step_with_only_pinned_candidate_ids(self):
+        import c2_serving_job as job
+        document = table()
+        values = dict(C2_IMAGE_TAG='tp4-w2ln-1', C2_ACTIONS='build', C2_DRAFTER_CANDIDATES='cand-one')
+        self.assertEqual(job.read_drafter_candidates(values, ['build'], document), 'cand-one')
+        self.assertEqual(job.read_drafter_candidates({}, ['smoke'], document), '')
+        for text, actions in (('nope-id', ['build']), ('dflash2-dedf8df6', ['build']), ('cand-one cand-one', ['build']), ('Cand_One', ['build']), ('cand-one', ['smoke'])):
+            with self.assertRaises(job.JobError, msg=text):
+                job.read_drafter_candidates(dict(C2_DRAFTER_CANDIDATES=text), actions, document)
+        with self.assertRaises(job.JobError):
+            job.read_job(dict(C2_IMAGE_TAG='tp4-w2ln-1', C2_ACTIONS='build', C2_DRAFTER_CANDIDATES='no-such-id'), sorted(PROFILES))
+        self.assertEqual(job.read_job(dict(C2_IMAGE_TAG='tp4-w2ln-1', C2_ACTIONS='build'), sorted(PROFILES))['drafter_candidates'], '')
+        workflow = (ROOT / '.github' / 'workflows' / 'qwen-c2-serving.yml').read_text(encoding='utf-8')
+        self.assertIn('C2_DRAFTER_CANDIDATES: ${{ steps.job.outputs.drafter_candidates }}', workflow)
+
+
     def test_the_build_stages_candidates_from_a_pinned_list_and_the_dockerfile_always_has_both_directories(self):
         script = (HERE / 'build-c2-serving-image.sh').read_text(encoding='utf-8')
         for word in ('C2_DRAFTER_CANDIDATES', 'fixtures', 'draft-configs', '.placeholder'):

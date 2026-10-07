@@ -237,14 +237,15 @@ class ShipmentTests(unittest.TestCase):
     def read(self, path):
         return (REPO / path).read_text(encoding='utf-8')
 
-    def test_the_runtime_files_are_in_all_three_copy_lists_and_the_cpu_allowlist_names_the_tests(self):
+    def test_the_runtime_files_ship_in_the_overlay_only_and_the_cpu_allowlist_names_the_tests(self):
+        # New C2 modules go in docker/qwen-c2-overlay.txt ONLY: the P8 base lists (the Dockerfile and the base workflow) are the production base's and stay as shipped.
         dockerfile = self.read('docker/qwen-fast-serving.Dockerfile')
         workflow = self.read('.github/workflows/qwen-fast-serving-image.yml')
         overlay = self.read('docker/qwen-c2-overlay.txt').splitlines()
         for name in sdpa_long_tp.RUNTIME_FILES:
             self.assertTrue((HERE / name).is_file())
-            self.assertIn('scripts/ci/%s ' % name, dockerfile)
-            self.assertRegex(workflow, r'for name in [^\n]*\b%s\b' % re.escape(name))
+            self.assertNotIn('scripts/ci/%s ' % name, dockerfile)
+            self.assertNotRegex(workflow, r'for name in [^\n]*\b%s\b' % re.escape(name))
             self.assertIn('scripts/ci/%s' % name, overlay)
         cpu = self.read('.github/workflows/qwen-integration-cpu.yml')
         for module in ('test_sdpa_long_tp', 'test_sdpa_tp4_long', 'test_tp4_sdpa_long_window'):

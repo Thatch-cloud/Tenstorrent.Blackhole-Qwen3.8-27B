@@ -27,6 +27,7 @@ Keys (every one optional but C2_IMAGE_TAG):
                       64-row block against its one-tile calls, bit for bit, then the tile-split wrapper; the verdict line
                       TP4_RS_TILE) or mr (tp4_mr_probe.py: the verify readback's mesh-read arms at four chips, optimisation/ttnn-op/mr_probe's
                       arms and verdict, MR_PROBE verdict=GO|MESH-ONLY|NO-GO); needs the fabric action
+  C2_SUPERSEDED_BY    set on every template of a pack that a later pack replaced (references/tp4-w2-jobs); read_job REFUSES such a template
   C2_PROFILE          the C2 profile smoke and gate serve (default: general)
   C2_CARDS            the card set the hardware steps open: pair (cards M and A, the default) or quad (every
                       Blackhole board present, the four-card (1, 4) mesh the TP4 profiles open). quad takes
@@ -44,6 +45,9 @@ Keys (every one optional but C2_IMAGE_TAG):
                       THATCH_SERVING_SESSION_CAP as its max-num-seqs (the node agent forwards neither, so the image is what a platform launch
                       serves and what a rollback moves). Default, rendered empty: nothing is baked, the default is qwen_c2_profiles.json's
                       (production's four seats). Needs the build action, C2_CARDS=quad and a four-card (P150x4), not gate_only, profile
+  C2_DRAFTER_CANDIDATES  build only: the pinned drafter candidate ids (scripts/ci/drafter_checkpoints.json) whose bytes the image build stages beside the default
+                      checkpoint (build-c2-serving-image.sh). Space- or comma-separated; every id must be a candidate of the table (the default is never staged);
+                      needs the build action. Default, rendered empty: only the placeholder (drafter_checkpoint.py, docs/tp4-combined-window.md)
   C2_GATE_PLAN        GATE_PLANS, comma- or space-separated, run in order (default: bringup)
   C2_GATE_LENGTHS     the matrix's prompt lengths, one per user (default, rendered empty: the S1 G4
                       ladder, whose top rung the gate lowers to what the image's profile admits)
@@ -125,6 +129,7 @@ TP4_MESH_DEVICE = 'P150x4'
 PAIR_MESH_DEVICES = (None, 'P300')
 FABRIC_CONFIGS = ('FABRIC_1D', 'FABRIC_1D_RING')
 FABRIC_PROBES = ('fabric', 'rs-tile', 'mr')
+DRAFTER_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,63}')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
 # each runs. warm and warm-off are M1 (never judged for kernel-cache growth); control and forced-cap M3-M4 (G3);
@@ -383,6 +388,8 @@ def read_rmi_tags(values, actions):
 
 def read_job(values, profiles, root=ROOT, meshes=None):
     """The workflow outputs for a parsed job file, or JobError. `meshes`: profile_meshes() (the checkout's when not given)."""
+    if values.get('C2_SUPERSEDED_BY'):
+        raise JobError('this template belongs to a superseded pack (C2_SUPERSEDED_BY=%s): its rules are void, use that pack' % values['C2_SUPERSEDED_BY'])
     actions = split_list(values.get('C2_ACTIONS', 'status')) or ['status']
     unknown = sorted(set(actions) - set(ACTIONS))
     if unknown:
@@ -434,12 +441,13 @@ def read_job(values, profiles, root=ROOT, meshes=None):
     cards = read_cards(values, actions, meshes, named)
     bake_profile = read_bake(values, actions, cards, root)
     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root)
+    drafter_candidates = read_drafter_candidates(values, actions)
     outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), rmi_tags=rmi_tags, tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
                    gate_memory_prompt=str(memory_prompt), gate_memory_users=str(memory_users), replay_profile=replay_profile,
                    replay_served_model=replay_served_model, replay_budget_smoke=budget_smoke, cardm_harness=cardm_harness, cardm_args=cardm_args,
-                   cardm_env=cardm_env, bake_default_profile=bake_profile)
+                   cardm_env=cardm_env, bake_default_profile=bake_profile, drafter_candidates=drafter_candidates)
     outputs.update(s2)
     outputs.update(prefix)
     return outputs
@@ -461,6 +469,31 @@ def check_ops_order(plans):
     if 'ops-trace' in named and named[0] != 'ops-twin':
         raise JobError('C2_GATE_PLAN: ops-trace needs ops-twin before it (its texts are held against the twin texts)')
     return plans
+
+
+def read_drafter_candidates(values, actions, table=None):
+    """C2_DRAFTER_CANDIDATES (module docstring) as a space-separated string of pinned candidate ids, '' when unset, or JobError: an id the table does not pin,
+    the default (its bytes are the image's own), a malformed or repeated id, or no build action."""
+    text = values.get('C2_DRAFTER_CANDIDATES', '').strip()
+    if not text:
+        return ''
+    if 'build' not in actions:
+        raise JobError('C2_DRAFTER_CANDIDATES is staged at build time: C2_ACTIONS has no build')
+    if table is None:
+        import drafter_checkpoint
+        table = drafter_checkpoint.load()
+    ids = split_list(text)
+    for name in ids:
+        if not DRAFTER_ID.fullmatch(name):
+            raise JobError('C2_DRAFTER_CANDIDATES: %r is not a plain lowercase id (%s)' % (name, DRAFTER_ID.pattern))
+        if name == table['default']:
+            raise JobError('C2_DRAFTER_CANDIDATES: %s is the default checkpoint, baked already' % name)
+        if name not in table['checkpoints']:
+            raise JobError('C2_DRAFTER_CANDIDATES: %s is not a pinned candidate of drafter_checkpoints.json (%s)' % (
+                name, ', '.join(sorted(set(table['checkpoints']) - {table['default']})) or 'none yet'))
+    if len(set(ids)) != len(ids):
+        raise JobError('C2_DRAFTER_CANDIDATES names an id twice')
+    return ' '.join(ids)
 
 
 def read_bake(values, actions, cards, root=ROOT):
