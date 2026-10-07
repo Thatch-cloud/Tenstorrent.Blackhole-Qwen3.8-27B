@@ -117,6 +117,42 @@ class ProfileTests(unittest.TestCase):
                 self.assertEqual([key for key in profile['env'] if key in levern_policy.MERGED_FLAGS], [])
 
 
+TRAFFIC = 'c2-packed-tp4-8x262k-ship-prefix-levern-traffic'
+
+
+class TrafficProfileTests(unittest.TestCase):
+    """The Lever N + prefix reuse traffic profile (short-window plan, stage 1): the gate arm's engine environment with no gate marker."""
+
+    def test_it_is_the_gate_arm_without_gate_only_and_nothing_else(self):
+        found = profiles()
+        self.assertNotIn('gate_only', found[TRAFFIC])
+        self.assertEqual({key for key in set(found[TRAFFIC]) | set(found[PLAIN]) if found[TRAFFIC].get(key) != found[PLAIN].get(key)}, {'description', 'gate_only'})
+        self.assertFalse(found[TRAFFIC]['description'].startswith('GATE ONLY'))
+
+    def test_it_carries_no_gate_instrument_no_waiver_and_no_gate_marker(self):
+        env = profiles()[TRAFFIC]['env']
+        for key in ('QWEN_FAST_LEVERN_AUDIT', 'QWEN_FAST_LEVERN_FAULT', 'QWEN_PREFIX_DIGESTS', 'QWEN_FAST_262K_EVIDENCE_WAIVER', 'QWEN_C2_GATE_PROFILE',
+                    'QWEN_FAST_TP4_HOSTGAP_LOG'):
+            self.assertNotIn(key, env)
+        self.assertEqual(env['QWEN_FAST_LEVER_N'], '1')
+        self.assertEqual((env['QWEN_PREFIX_REUSE'], env['QWEN_FAST_STICKY_SESSIONS']), ('1', '1'))
+
+    def test_the_contract_accepts_it_and_it_boots_without_the_gate_switch(self):
+        profile = named(TRAFFIC)
+        self.assertTrue(contract.levern_on(profile))
+        self.assertEqual(contract.levern_problems(profile), [])
+        self.assertEqual(contract.gate_problems(profile, {}), [])
+
+    def test_it_is_a_baked_default_candidate(self):
+        import c2_serving_job as job
+
+        values = {'C2_ACTIONS': 'build', 'C2_CARDS': 'quad', 'C2_IMAGE_TAG': 'tp4-serve-11', 'C2_BAKE_DEFAULT_PROFILE': TRAFFIC}
+        self.assertEqual(job.read_job(values, sorted(profiles()), root=str(HERE.parent.parent))['bake_default_profile'], TRAFFIC)
+        values['C2_BAKE_DEFAULT_PROFILE'] = PLAIN
+        with self.assertRaises(job.JobError):
+            job.read_job(values, sorted(profiles()), root=str(HERE.parent.parent))
+
+
 class PinTests(unittest.TestCase):
     def test_the_contract_names_the_routes_sources(self):
         self.assertEqual(contract.MERGED_SOURCES, levern_route.SOURCES)
@@ -210,7 +246,12 @@ class RefusalTests(unittest.TestCase):
                 self.refused(self.mutated(env={name: value}), name)
 
     def test_the_stage_one_requirements_still_hold_for_the_merged_profile(self):
-        self.refused(self.mutated(gate_only=False), 'gate-only')
+        # the merged route on a traffic profile is allowed (the short-window plan's stage 1); the stage-1 shape and the gate instruments are not
+        self.assertEqual(contract.levern_problems(self.mutated(gate_only=False)), [])
+        self.refused(self.mutated(gate_only=False, env={'QWEN_FAST_LEVERN_AUDIT': '1'}), 'gate-only')
+        self.refused(self.mutated(gate_only=False, env={'QWEN_FAST_LEVERN_FAULT': 'foreign'}), 'gate-only')
+        self.refused(self.mutated(gate_only=False, env={'QWEN_PREFIX_REUSE': '0', 'QWEN_FAST_STICKY_SESSIONS': '0', 'QWEN_FAST_LEVERN_PARK': '0',
+                                                        'QWEN_FAST_LEVERN_EPOCH_SCOPE': 'global'}), 'gate-only')
         self.refused(self.mutated(env={'QWEN_FAST_KV_RESERVATION': '0'}), 'KV_RESERVATION')
         self.refused(self.mutated(env={'QWEN_FAST_ANY_REQUEST': '0'}), 'QWEN_FAST_ANY_REQUEST=1')
         self.refused(self.mutated(engine={'no-enable-chunked-prefill': True}), 'enable-chunked-prefill')

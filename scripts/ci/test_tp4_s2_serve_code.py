@@ -381,7 +381,7 @@ class JobAndWorkflowTests(unittest.TestCase):
     def test_the_workflow_replay_step_resolves_the_four_cards_and_passes_the_card_set(self):
         with open(os.path.join(HERE, '..', '..', '.github', 'workflows', 'qwen-c2-serving.yml'), encoding='utf-8') as handle:
             text = handle.read()
-        step = text[text.index('python3 scripts/ci/c2_platform_replay.py') - 2200: text.index('python3 scripts/ci/c2_platform_replay.py') + 400]
+        step = text[text.index("- name: Replay the node agent's serving sequence"): text.index('python3 scripts/ci/c2_platform_replay.py') + 400]
         self.assertIn('CARDS: ${{ steps.job.outputs.cards }}', step)
         self.assertIn('. scripts/ci/card_set.sh', step)
         self.assertIn('card_set_nodes 60', step)

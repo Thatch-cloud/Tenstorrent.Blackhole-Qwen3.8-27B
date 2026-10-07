@@ -457,7 +457,8 @@ def levern_problems(profile):
 
     The flags parse (levern_policy: a step that is not a multiple of 2,048 is refused, a sibling without the master switch is a typo). The
     audit switch alone is the non-interleaved control and needs only a gate-only profile. The master switch needs, beside it:
-    - a gate-only profile (stage 1: nothing serves traffic until the exactness, hang and timing gates have run);
+    - a gate-only profile for the gate instruments (QWEN_FAST_LEVERN_AUDIT, QWEN_FAST_LEVERN_FAULT) and for the stage-1 shape (no prefix reuse); the
+      master switch on the merged route alone, with neither instrument, is a TRAFFIC profile's (its gates ran in the windows that precede its cutover);
     - QWEN_FAST_ANY_REQUEST=1 (the one-fresh-prefill cap and the lifecycle's continuation routing live under it) and the fast path;
     - enable-chunked-prefill in place of no-enable-chunked-prefill, max-num-batched-tokens equal to max-model-len (nothing splits except
       through the cap), no-async-scheduling (the engine is synchronous: a step's wall time is the interval between two schedule() calls),
@@ -480,7 +481,15 @@ def levern_problems(profile):
             problems.append('Lever N: %s=1 is a gate instrument and needs a gate-only profile' % LEVERN_AUDIT)
         return problems
     if profile.get('gate_only') is not True:
-        problems.append('Lever N: %s=1 needs a gate-only profile (nothing serves traffic until its gates have run)' % LEVERN_SWITCH)
+        # The traffic arm (stage 1 of the short-window plan): the master switch alone, with its sibling flags and the merged route, may serve traffic
+        # (the kill switch levern.off stops it with no restart); the gate instruments never may (they are the gates' own, and a fault is a negative control).
+        for name in (LEVERN_AUDIT, 'QWEN_FAST_LEVERN_FAULT'):
+            if str(env.get(name, '0')) not in ('0', ''):
+                problems.append('Lever N: %s is a gate instrument and needs a gate-only profile (a traffic profile carries the master switch and the '
+                                'policy flags only)' % name)
+        if env.get(PREFIX_SWITCH, '0') != '1' or env.get(STICKY_SWITCH, '0') != '1':
+            problems.append('Lever N: a traffic profile runs the merged route only (%s=1 and %s=1 beside %s=1): the stage-1 shape without prefix reuse '
+                            'is a gate arm and needs a gate-only profile' % (PREFIX_SWITCH, STICKY_SWITCH, LEVERN_SWITCH))
     if env.get('QWEN_FAST_ANY_REQUEST') != '1':
         problems.append('Lever N: %s=1 needs QWEN_FAST_ANY_REQUEST=1' % LEVERN_SWITCH)
     if env.get(FAST_TP_ENV) != '4':

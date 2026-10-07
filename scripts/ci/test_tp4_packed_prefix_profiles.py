@@ -121,7 +121,7 @@ class ControlTests(unittest.TestCase):
                    if body.get('gate_only') is not True and body.get('mesh_device') == 'P150x4'
                    and contract.sticky_sessions(dict(body, name=name))]
         # ship/262k-prefix (the owner's choice to ship W1 + packed prefix reuse at eight seats x 262k): the one traffic profile with the switches on
-        self.assertEqual(traffic, ['c2-packed-tp4-8x262k-ship-prefix'], 'only the both-levers ship profile turns sticky sessions on for traffic')
+        self.assertEqual(traffic, ['c2-packed-tp4-8x262k-ship-prefix', 'c2-packed-tp4-8x262k-ship-prefix-levern-traffic'], 'only the both-levers ship profile and its Lever N twin turn sticky sessions on for traffic')
 
     def test_the_twins_and_their_parents_are_on_the_same_four_card_mesh(self):
         for name, parent in PAIRS:

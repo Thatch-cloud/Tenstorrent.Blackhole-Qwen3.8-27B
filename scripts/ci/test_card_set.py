@@ -209,6 +209,10 @@ class CardSetTests(unittest.TestCase):
         self.assertIn('REFUSED', unresolved.stdout)
         self.assertIn('not resolved', unresolved.stderr)
 
+    def test_the_heal_waits_ten_seconds_for_the_links_by_default(self):
+        result = self.run_set(self.fake(), 'echo "wait=$CARD_SET_HEAL_WAIT"')
+        self.assertIn('wait=10', result.stdout, result.stderr)
+
     def test_the_library_names_no_board_and_no_address(self):
         text = CARD_SET.read_text(encoding='utf-8')
         import re

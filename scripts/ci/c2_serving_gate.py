@@ -3264,6 +3264,8 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
             return 2
     worst_case = worst_case_seconds(plans, arms_of)
     if options.budget_seconds is not None and worst_case > options.budget_seconds:
+        # A greppable verdict for the window driver (never a free-text search for "timeout"): the plan was refused before any container started.
+        log('C2_BOX verdict=REFUSED step=gate worst_s=%d budget_s=%d' % (worst_case, options.budget_seconds))
         log('refused: plans %s may take %d s (every arm to its limit, every re-run), past the %d s this step and job '
             'leave: run fewer plans per tag' % (','.join(plans), worst_case, options.budget_seconds))
         return 2

@@ -693,7 +693,7 @@ class NumbersTests(unittest.TestCase):
         self.assertIn('%d planned and %d conditional' % (n['planned'], n['conditional']), doc)
         self.assertIn('%d tags' % (ALLOWLISTED_TAGS + REQUESTED_TAGS), doc)
         self.assertIn('checkpoint', doc)
-        names = len([name for name in profiles()['profiles'] if name.startswith(SHIP)]) - 4        # less the four production-family profiles of the ship and levern packs
+        names = len([name for name in profiles()['profiles'] if name.startswith(SHIP)]) - 5        # less the five production-family profiles of the ship and levern packs and the Lever N traffic profile
         self.assertIn('%d gate-only profiles' % names, doc)
         self.assertIsNone(BANNED.search(doc))
 
@@ -769,7 +769,7 @@ class RuleTests(unittest.TestCase):
     def test_the_readme_carries_the_profile_table(self):
         text = read_text('README.md')
         for name in sorted(profiles()['profiles']):
-            if name.startswith(SHIP) and name != SHIP and not name.endswith(('-audit', '-levern', '-levern-audit')):
+            if name.startswith(SHIP) and name != SHIP and not name.endswith(('-audit', '-levern', '-levern-audit', '-levern-traffic')):
                 self.assertIn(name, text, name)
 
     def test_the_old_w2_pack_is_marked_superseded_and_its_jobs_are_refused(self):

@@ -1,5 +1,6 @@
 # The order of the COMBINED development window: W2 (SDPA multi + F1) + Lever N merged with prefix reuse + the drafter hooks + the production P1 control, ONE outage, ONE image, tp4-w2ln-1,
 # built from the pushed tp4/w2-levern-prefix commit (docs/tp4-combined-window.md). One line per job: <template name without .env> <class> <image tag> <estimated minutes>.
+# SUPERSEDED by the short-window packs (references/tp4-w1-levern-jobs, references/tp4-w2-levern-jobs; docs/tp4-short-windows.md) for the work they cover: this pack's tag list (v538 to v640) OVERLAPS theirs and the baseline window's. Never run it on those tags.
 # CLASSES. stop: the window halts at its first failure (Z still runs). soft: data; a failure or skip does not stop the window. branch: soft, but its failure PRUNES the candidate's later jobs through the NEEDS graph
 # below (the window goes on with the others). cond: a CONDITIONAL job that runs only when its trigger (named in its template and in a NEEDS line) fires; it is not in the planned count.
 # THE CARDS COME OFF PRODUCTION for this window (the owner approved ONE combined window): A0 stops the node agent, Z hands the cards back. Nothing here moves :latest or places a model.

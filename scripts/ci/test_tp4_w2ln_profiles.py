@@ -175,7 +175,7 @@ class ProfileTests(unittest.TestCase):
         family = sorted(name for name in found if name.startswith(SHIP))
         known = sorted(name for name in family if name in SPEC)
         self.assertEqual(known, sorted(SPEC))
-        older = ['ship-prefix', 'ship-prefix-audit', 'ship-prefix-levern', 'ship-prefix-levern-audit']
+        older = ['ship-prefix', 'ship-prefix-audit', 'ship-prefix-levern', 'ship-prefix-levern-audit', 'ship-prefix-levern-traffic']
         self.assertEqual(sorted(name for name in family if name not in SPEC), sorted(R + name for name in older))
 
     def test_each_is_its_parent_plus_exactly_its_keys(self):
