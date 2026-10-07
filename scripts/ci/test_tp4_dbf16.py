@@ -119,7 +119,7 @@ class ProfileTests(unittest.TestCase):
 
     def test_the_flag_sits_only_in_those_two_profiles(self):
         found = profiles()['profiles']
-        self.assertEqual(sorted(n for n, body in found.items() if DRAFTER_BF16_FLAG in body['env']), sorted([BEST_DBF16, GATE_DBF16, EIGHT_DBF16, 'c2-packed-tp4-8x262k-best-time-gate-dbf16']))  # the last: tp4/262k8-x's 262k eight-seat twin (test_tp4_262k8_x)
+        self.assertEqual(sorted(n for n, body in found.items() if DRAFTER_BF16_FLAG in body['env']), sorted([BEST_DBF16, GATE_DBF16, EIGHT_DBF16, 'c2-packed-tp4-8x262k-best-time-gate-dbf16', 'c2-packed-tp4-8x262k-ship-prefix-dbf16']))  # the last two: tp4/262k8-x's 262k eight-seat twin (test_tp4_262k8_x) and the combined window's pool-matched pair B (test_tp4_w2ln_profiles)
         self.assertNotIn(DRAFTER_BF16_FLAG, found['c2-packed-tp4']['env'])
 
     def test_the_timed_pair_keeps_the_audits_off_and_the_audited_one_keeps_them(self):
