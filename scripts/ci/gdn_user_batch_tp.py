@@ -15,6 +15,7 @@ H = 12 on a device; gdn_user_batch_device_test with a geometry argument is the s
 
 import hashlib
 import os
+import sys
 from pathlib import Path
 
 import gdn_multitoken as native
@@ -235,17 +236,27 @@ def execute(mesh, users, kernels, operations=None, *, output_memory=None):
     grid = mesh.compute_with_storage_grid_size()
     core_shares(grid.x, grid.y, len(groups))
 
-    produced = []
+    # QWEN_FAST_GDN_SHARED_HISTORY (gdn_shared_history, gate profiles only): inside a packed block's verify capture the states
+    # are the pool's one history set, not a private allocation. sys.modules, not an import: nothing loads the module unless the
+    # flag is on, and `active()` is None outside a capture.
+    shared_module = sys.modules.get('gdn_shared_history')
+    shared = shared_module.active() if shared_module is not None else None
+    produced, outputs, histories = [], [], []
     try:
         for user, rows in zip(groups, widths, strict=True):
             output = operations.empty((1, rows, geometry().gdn_value), device=mesh, dtype=operations.bfloat16,
                                       layout=operations.TILE_LAYOUT, memory_config=output_memory)
             produced.append(output)
-            states = operations.empty((rows, heads(), 128, 128), device=mesh, dtype=operations.bfloat16,
-                                      layout=operations.TILE_LAYOUT, memory_config=operations.DRAM_MEMORY_CONFIG)
-            produced.append(states)
-        tensor_groups = [[*user[:4], produced[2 * index], produced[2 * index + 1], *user[4:]]
-                         for index, user in enumerate(groups)]
+            outputs.append(output)
+            if shared is not None:
+                # Owned by the pool: never freed here, not even when this launch fails.
+                states = shared.take(operations, mesh, rows, heads())
+            else:
+                states = operations.empty((rows, heads(), 128, 128), device=mesh, dtype=operations.bfloat16,
+                                          layout=operations.TILE_LAYOUT, memory_config=operations.DRAM_MEMORY_CONFIG)
+                produced.append(states)
+            histories.append(states)
+        tensor_groups = [[*user[:4], outputs[index], histories[index], *user[4:]] for index, user in enumerate(groups)]
         flat = []
         for group in tensor_groups:
             for value in group:
@@ -257,7 +268,7 @@ def execute(mesh, users, kernels, operations=None, *, output_memory=None):
         program = build_program(operations, mesh, [[shards[id(value)] for value in group]
                                                    for group in tensor_groups], kernels, widths)
         operations.generic_op(flat, program)
-        return [(produced[2 * index], produced[2 * index + 1]) for index in range(len(groups))]
+        return list(zip(outputs, histories))
     except BaseException:
         for value in produced:
             operations.deallocate(value)

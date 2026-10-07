@@ -831,6 +831,7 @@ class PackedVerifierEngine:
         # the last capture (capture_plug); None otherwise.
         self.plug = None
         self.rows_per_user, self.block_rows, self.users = shape.rows_per_user, shape.block_rows, shape.users
+        self.shared_history = None
         # QWEN_FAST_PADDED_BLOCK (variable-user rounds M2): the fewest live users a round of this
         # block may serve, the rest of its segments idle; None, the default, serves exactly
         # `users`, as always. Passed by serving_runtime only where it admits the flag. At most
@@ -1028,6 +1029,16 @@ class PackedVerifierEngine:
         # run_verified_block, alongside commit_entry's own adopt/session/other split, as
         # '[PACKED-COMMIT-HOST]'.
         self.commit_block_ms = [0.0] * shape.users
+        # QWEN_FAST_GDN_SHARED_HISTORY (gdn_shared_history; default off, gate profiles only): the one per-token GDN state history
+        # both 64-row blocks write, which makes this block's verify wait for the other block's commits (claim, in verify).
+        # Read once here, like the flags above; unset, the module is never imported and `shared_history` stays None. Refused
+        # here, at attach, when the environment cannot honour it; from here on a failed construction closes the block, which
+        # detaches it.
+        if os.environ.get('QWEN_FAST_GDN_SHARED_HISTORY', '0') != '0' or os.environ.get(
+                'QWEN_FAST_GDN_SHARED_HISTORY_KV_GROW', '0') != '0':
+            import gdn_shared_history
+
+            self.shared_history = gdn_shared_history.join(self, log=diagnostic)
         self.stage = 'allocating'
         started = time.perf_counter()
         try:
@@ -1166,7 +1177,10 @@ class PackedVerifierEngine:
             verify_trace_t2.take()
         tp4_vglue.take()
         try:
-            self.trace, self.output = capture_operation(operations, self.mesh, lambda: self.operation(self.fixture))
+            # The verify capture alone is opened on the shared history (the warm forward and every other launch allocate
+            # privately); the block that captures first builds the set, the other is handed it.
+            with (nullcontext() if self.shared_history is None else self.shared_history.capture(self, operations)):
+                self.trace, self.output = capture_operation(operations, self.mesh, lambda: self.operation(self.fixture))
         finally:
             # also after a failed capture: its audited clones belong to the fixture, released when it closes
             tile_collective_tp.audit_claim(self.fixture, 'capture')
@@ -1231,6 +1245,8 @@ class PackedVerifierEngine:
             diagnostic('%s min_users=%d users=%d max_idle=%d carries_in_place=%d'
                        % (PADDED_ADMITTED_MARKER, self.padded_min_users, self.users, self.MAX_IDLE_SEGMENTS,
                           int(self.carries_in_place)))
+        if self.shared_history is not None:
+            diagnostic(self.shared_history.engaged_line(self))
         if self.round_fences:
             # Only this block's retained records: a sequential engine's never take the diet.
             self.fixture.retained.use_round_fences()
@@ -1799,6 +1815,10 @@ class PackedVerifierEngine:
             self.flush_commits('verify')
         if self.phase != 'idle':
             raise ValueError('An idle packed block is required: every segment of the last round must be committed')
+        if self.shared_history is not None:
+            # Commit before reuse: the other block's history is fully read (its deferred commits enqueued ahead of this
+            # trace on the one queue) before this block's replay overwrites it. A refusal leaves this block idle.
+            self.shared_history.claim(self)
         segments = self.segments(entries)
         for entry, segment in zip(entries, segments):
             request, ticket = entry['request'], entry['ticket']
@@ -2213,7 +2233,8 @@ class PackedVerifierEngine:
             **({} if self.fused is None else dict(fused_commit=self.fused.describe())),
             **({} if getattr(self, 'publication_warm', None) is None else dict(publication_warm=dict(
                 self.publication_warm, program_cache=list(self.publication_warm['program_cache'])))),
-            **({} if not getattr(self, 'gdn_after_pairs', False) else dict(gdn_after_pairs=True)))
+            **({} if not getattr(self, 'gdn_after_pairs', False) else dict(gdn_after_pairs=True)),
+            **({} if getattr(self, 'shared_history', None) is None else dict(shared_history=self.shared_history.describe())))
 
     def close(self, *, wait=True):
         """Release the block. `wait=False` is the failed construction: the device may still be
@@ -2268,6 +2289,10 @@ class PackedVerifierEngine:
             tile_collective_tp.audit_release(operations, self.fixture)
             self.fixture.close()
             self.fixture = None
+        if getattr(self, 'shared_history', None) is not None:
+            # After the traces and the fixture: the last block out frees the one history set the pool owns.
+            self.shared_history.detach(self, operations)
+            self.shared_history = None
         if self.plug is not None:
             # After the traces and the captured buffers: the plugs sat under them. A block closed without the device fence
             # (a failed attach: the device may still run work above these blocks) frees nothing, ever.

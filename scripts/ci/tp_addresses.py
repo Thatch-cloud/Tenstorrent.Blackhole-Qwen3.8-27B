@@ -33,7 +33,13 @@ def addresses(operations, tensor):
 def release_owned(operations, tensors):
     """gdn_multitoken_conv.release_owned: deallocate each distinct tensor (by its per-chip addresses) once."""
     unique = {addresses(operations, tensor): tensor for tensor in tensors}
+    # QWEN_FAST_GDN_SHARED_HISTORY (gdn_shared_history, gate profiles only): the one history set belongs to the pool, which frees it
+    # when the last block closes. Looked up in sys.modules so that nothing imports the module unless the flag loaded it.
+    shared = sys.modules.get('gdn_shared_history')
+    held = shared.holds if shared is not None else None
     for tensor in unique.values():
+        if held is not None and held(tensor):
+            continue
         operations.deallocate(tensor)
 
 

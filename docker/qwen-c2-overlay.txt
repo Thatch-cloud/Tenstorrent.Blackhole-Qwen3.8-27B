@@ -257,6 +257,9 @@ scripts/ci/force_argmax.py
 # pair and the four-card sibling otherwise.
 scripts/ci/gdn_seq_block.py
 scripts/ci/gdn_user_batch_tp.py
+# Exact GDN memory (tp4/gdn-shared-history, QWEN_FAST_GDN_SHARED_HISTORY, default off, gate profiles only): one per-token state history shared by the two
+# 64-row blocks. packed_verifier, gdn_user_batch_tp, tp_addresses and serving_c2_contract reach it only when the flag (or its growth marker) is set.
+scripts/ci/gdn_shared_history.py
 # The K5-A recurrence launch with each head's value columns split over two cores (tp4/v5split, QWEN_FAST_GDN_SPLIT_V=2, default off): the
 # sibling module generates its kernels from the three sibling sources, and tp_addresses.install() binds its execute twin only under the flag.
 scripts/ci/gdn_seq_block_split.py
