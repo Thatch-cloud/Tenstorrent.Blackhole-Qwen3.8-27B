@@ -51,6 +51,7 @@ Grants carry the scheduler graft's own capture plan (SchedulerGraft.plan) unless
 
 import contextlib
 import os
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -1019,12 +1020,41 @@ class AuditCost(ExactTestBase):
         engine = self.engine(environ=self.AUDIT)
         engine.turn({'id': 'nog'}, F.prompt(3000, seed=99), 0)
         self.assertIn('mode=full', engine.log.lines(patcher.MARKER_AUDIT_COST)[-1])
-        strict = self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='region'))
         with self.assertRaisesRegex(AssertionError, 'no qwen_read_blocks'):
-            strict.turn({'id': 'nog2'}, F.prompt(3000, seed=99), 0)
-        odd = self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='sometimes'))
+            self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='region'))
         with self.assertRaisesRegex(AssertionError, 'must be auto, region or full'):
-            odd.turn({'id': 'nog3'}, F.prompt(3000, seed=99), 0)
+            self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='sometimes'))
+
+    def test_a_region_read_that_loses_a_chip_shard_falls_back_instead_of_digesting_a_subset(self):
+        engine = self.engine(environ=self.AUDIT, region_reads=True)
+        engine.fake.region_lose_shard = True
+        base = F.prompt(5000, seed=101)
+        engine.turn({'id': 'shard'}, base, 0)
+        windows, _ = self.windows(engine)
+        reference = self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='full'))
+        reference.turn({'id': 'shard'}, base, 0)
+        self.assertEqual(windows, self.windows(reference)[0], 'the digests cover every head')
+        cost = engine.log.lines(patcher.MARKER_AUDIT_COST)[-1]
+        self.assertIn('mode=full', cost)
+        self.assertIn('region read composed shape', cost)
+
+    def test_a_program_compiled_by_the_audit_is_counted_and_logged(self):
+        engine = self.engine(environ=self.AUDIT, region_reads=True)
+        engine.turn({'id': 'warm'}, F.prompt(3000, seed=102), 0)
+        steady = re.search('programs=([0-9]+)->([0-9]+)', engine.log.lines(patcher.MARKER_AUDIT_COST)[-1]).groups()
+        self.assertEqual(steady[0], steady[1])
+        engine.fake.region_compile = True
+        engine.turn({'id': 'grow'}, F.prompt(3000, seed=103), 0)
+        cost = engine.log.lines(patcher.MARKER_AUDIT_COST)[-1]
+        before, after = re.search('programs=([0-9]+)->([0-9]+)', cost).groups()
+        self.assertGreater(int(after), int(before), cost)
+        self.assertTrue([line for line in engine.log.lines('[PREFIX] program growth: audit')], 'the F3 warning')
+
+    def test_a_region_audit_without_the_graft_refuses_at_attach(self):
+        with self.assertRaisesRegex(AssertionError, 'no qwen_read_blocks'):
+            self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='region'))
+        engine = self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='region'), region_reads=True)
+        self.assertTrue(engine.log.lines('[PINDIAG] prefix: audit read mode=region'))
 
     def test_the_route_audit_entry_still_takes_one_row(self):
         """levern_route calls model._qwen_prefix_audit(row, page_row, rec, conv, logits) once per request."""

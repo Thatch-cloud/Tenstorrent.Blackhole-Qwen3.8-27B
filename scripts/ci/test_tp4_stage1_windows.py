@@ -325,7 +325,11 @@ class BoxTests(unittest.TestCase):
         # docker timeout to what the box has left (no plan is refused), and the audit it rests on reads only a request's blocks.
         p1ab = row('w1', 'P1ab-LN-exactness-shared-lifecycle-evict')
         self.assertEqual((int(p1ab[3]), int(p1ab[5])), (120, 240))
+        self.assertIn("HIGH END (the box's basis): 160 minutes", read_text("w1", "ORDER.txt"))
         self.assertEqual(int(p1ab[5]), int(1.5 * 160))
+        self.assertIn('608,400 audited tokens', read_text('w1', 'ORDER.txt'))
+        for phrase in ('kv_region_read_card.py PASSED', 'C2_PREFIX_ALLOW_FULL_AUDIT', 'audit_image_problems'):
+            self.assertIn(phrase, read_text('w1', 'ORDER.txt'))
         self.assertLess(int(p1ab[5]), table_box('w1', 'P1ab-LN-exactness-shared-lifecycle-evict'))
         self.assertIn('C2_BOX_MINUTES=240', read_text('w1', 'P1ab-LN-exactness-shared-lifecycle-evict.env'))
         self.assertGreaterEqual(int(row('w2', 'C16-LN-churn16')[5]), table_box('w2', 'C16-LN-churn16'))

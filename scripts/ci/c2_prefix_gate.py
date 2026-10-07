@@ -287,6 +287,35 @@ PLAN_ARMS.update([(arm, tuple(entry for entry in PLAN_ARMS[plan] if entry[0] == 
                   for arm, plan in c2_serving_job.PREFIX_ARM_PLANS])
 
 
+# The one arm that cannot finish without the narrowed audit: every request of exactness-shared audits (W-0 measured
+# ~8.4 minutes a request when the audit read whole caches; the arm sends 48). QWEN_PREFIX_AUDIT_READ is auto in the
+# image, so the narrowed read runs only when the ttnn.qwen_read_blocks graft is in it.
+AUDIT_COST_ARMS = ('exactness-shared',)
+ALLOW_FULL_AUDIT_ENV = 'C2_PREFIX_ALLOW_FULL_AUDIT'
+
+
+def audit_image_problems(arms, anchor):
+    """Why the image cannot run the audit-cost arms in any box, or []: refused before any container boots, so an
+    image that predates the narrowed audit (the build skips a tag that exists) or lacks the region-read graft
+    does not spend the window on an arm that ends as a TIMEBOX with no verdict."""
+    names = [arm['arm'] for arm in arms if arm['arm'] in AUDIT_COST_ARMS and arm.get('kind') == 'audit']
+    if not names:
+        return []
+    if anchor.get('error'):
+        return ['%s: the anchor probe could not read the image: %s' % (', '.join(names), anchor['error'])]
+    out = []
+    if anchor.get('stage_mismatched'):
+        out.append('%s: the served %s not the prefix model graft of this checkout (qwen_prefix_model_patch.PATCHED_SHA256): '
+                   'the image predates the narrowed audit' % (', '.join(names), ' and '.join(anchor['stage_mismatched'])))
+    if anchor.get('region_read') is not True:
+        out.append('%s: this image has no ttnn.qwen_read_blocks (the region-read graft; probe says %s): the audit would '
+                   'read whole caches, ~8 minutes a request, and the arm cannot finish in its box. Build the graft into '
+                   'the image and pass optimisation/ttnn-op/kv_region_read/kv_region_read_card.py on a card first '
+                   '(docs/prefix-audit-cost.md); %s=1 overrides, for a run that wants the slow audit' % (
+                       ', '.join(names), anchor.get('region_read'), ALLOW_FULL_AUDIT_ENV))
+    return out
+
+
 class PlanError(ValueError):
     """A plan the image's profiles cannot run as asked; refused before any container starts."""
 
@@ -495,7 +524,9 @@ def anchor_script(root=MODEL_ROOT, pins=GRAFT_PINS, files=ANCHOR_FILES):
     listed = "awk '{p=$2; sub(/^[*]/, \"\", p); if (p ~ /^graft[/]/ && p !~ /[.]orig$/) print substr(p, 7)}' " + pins
     return ('cd ' + root + ' && sha256sum ' + ' '.join(files) + '; echo ==pins; cat ' + pins + '; echo ==pinned; '
             + listed + ' | while read -r p; do sha256sum "$p" 2>/dev/null || echo "missing  $p"; done; '
-            'echo ==markers; grep -rlF "[PREFIX]" . || true')
+            'echo ==markers; grep -rlF "[PREFIX]" . || true; '
+            'echo ==region; python3 -c "import ttnn; print(\'region\', int(callable(getattr(ttnn, \'qwen_read_blocks\', None))))" '
+            '2>/dev/null | tail -n 1 || true')
 
 
 def anchor_probe(image, run=subprocess.run):
@@ -517,7 +548,7 @@ def parse_anchor(text):
     stage_mismatched: those whose served sha is not it, marker_files, prefix_marker_in: marker files
     the probe can vouch for (the two anchor files or a pinned one), unpinned: anchor files pinned by
     neither)."""
-    files, pins, actual, marked, section = {}, {}, {}, [], 'files'
+    files, pins, actual, marked, section, region_read = {}, {}, {}, [], 'files', None
     for line in text.splitlines():
         if line.startswith('==pins'):
             section = 'pins'
@@ -527,6 +558,13 @@ def parse_anchor(text):
             continue
         if line.startswith('==markers'):
             section = 'markers'
+            continue
+        if line.startswith('==region'):
+            section = 'region'
+            continue
+        if section == 'region':
+            if line.split()[:1] == ['region'] and len(line.split()) == 2:
+                region_read = line.split()[1] == '1'
             continue
         if section == 'markers':
             path = line.strip()
@@ -553,7 +591,7 @@ def parse_anchor(text):
     stage_mismatched = sorted(path for path in stage_pins if files.get(path) != stage_pins[path])
     vouched = set(ANCHOR_FILES) | set(pins)
     return dict(files=files, pins=pins, actual=actual, mismatched=mismatched, stage_pins=stage_pins,
-                stage_mismatched=stage_mismatched, marker_files=marked,
+                stage_mismatched=stage_mismatched, marker_files=marked, region_read=region_read,
                 prefix_marker_in=sorted(path for path in marked if path in vouched),
                 unpinned=sorted(path for path in ANCHOR_FILES if path not in pins and path not in stage_pins))
 
@@ -1282,6 +1320,10 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None):
         audit_fail, audit_missing = audit_findings(records, driver.pairs)
         problems += audit_fail
         missing += audit_missing
+        cost_fail, cost_missing, cost_lines = judge.audit_cost_findings(scanned)
+        problems += cost_fail
+        missing += cost_missing
+        lines += cost_lines
     elif arm['scenario'].startswith('exactness'):
         if not arm.get('sticky'):
             problems += row_growth_problems(scanned.get('rows') or [])
@@ -1293,6 +1335,10 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None):
             audit_fail, audit_missing = audit_findings(records, driver.pairs)
             problems += audit_fail
             missing += audit_missing
+            cost_fail, cost_missing, cost_lines = judge.audit_cost_findings(scanned)
+            problems += cost_fail
+            missing += cost_missing
+            lines += cost_lines
             if arm.get('sticky'):
                 window_problems, window_lines, _ = judge.window_findings(records)
                 problems += window_problems
@@ -1855,6 +1901,15 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
                                                       stats_now=bool(arm.get('prefix')), env=arm.get('env') or (),
                                                       gate_only=bool(arm.get('gate_only'))))))
         return 0
+    if os.environ.get(ALLOW_FULL_AUDIT_ENV) != '1' and any(
+            arm['arm'] in AUDIT_COST_ARMS and arm.get('kind') == 'audit' for plan in plans for arm in arms_of[plan]):
+        if anchor is None:
+            anchor = anchor_probe(options.image)
+        problems = audit_image_problems([arm for plan in plans for arm in arms_of[plan]], anchor)
+        if problems:
+            for problem in problems:
+                log('refused: %s' % problem)
+            return 2
     log_not_applicable(skipped, options.profile, log)
     runner = (runner_factory or Runner)(options.image, options.results, options.checkout,
                                         devices if devices is not None else gate.devices_for(options.cards),

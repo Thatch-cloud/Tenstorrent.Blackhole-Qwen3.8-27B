@@ -110,7 +110,7 @@ SOURCE_SHA256 = {
 # edit below, or to lever_n_model_patch.patch_tp_replay, changes these on purpose
 # (test_qwen_prefix_model_patch prints the new values).
 PATCHED_SHA256 = {
-    MODEL_FILE: 'b42d9700ffe04f4a36e0b5cb249278b1ca77675959df84abb13b5c4333f256ad',
+    MODEL_FILE: 'e05427560e0e6ad3512e2f29b3e8bdf1aee636856ae2033c80f85bdb5218faed',
     VLLM_FILE: 'bd742abe2ebb67bbcc14cb58301c1ec27ac5810983d9521d52bf6e344e3ef189',
 }
 
@@ -748,6 +748,10 @@ MODEL_METHODS = r'''
                 "(mesh_device.num_program_cache_entries); the per-row F3 no-compile check is blind"
             )
         kv = self._paged_kv_caches[0][0].dtype if self._paged_kv_caches else None
+        if os.environ.get("QWEN_PREFIX_AUDIT") == "1":
+            # A missing region-read graft under QWEN_PREFIX_AUDIT_READ=region refuses HERE (at attach), not in
+            # the first audited prefill; the gate reads this line.
+            logger.info(f"[PINDIAG] prefix: audit read mode={self._qwen_prefix_audit_read_mode()}")
         logger.info(
             f"[PINDIAG] prefix: model warm restore_mode={chosen} results={results} "
             f"gdn_layers={len(rec_now)} checkpoint_bytes={nbytes} "
@@ -784,6 +788,9 @@ MODEL_METHODS = r'''
         import hashlib as _qwen_hashlib
 
         began = _qwen_time.perf_counter()
+        # F3 across the audit: the reads must compile nothing (a compile after the traces are parked is the
+        # #48536 hang). The audit runs outside every row's own program window, so it is measured here.
+        programs_before = self._qwen_prefix_program_cache_entries()
         chunk = _QWEN_PREFIX_CHUNK
         block_size = get_block_size(self._paged_kv_caches)
         plans = []
@@ -820,13 +827,22 @@ MODEL_METHODS = r'''
                 f"[PREFIX-AUDIT] req={row.req_id} Q={row.start} L={actual} kv_range=0:{actual} "
                 f"kv_sha={whole.hexdigest()[:32]} slot_sha={slot_sha} logits_sha={logits_sha}"
             )
+        programs_after = self._qwen_prefix_program_cache_entries()
         fallback = "" if read["fallback"] is None else f" fallback={read['fallback']!r}"
         logger.info(
             f"[PREFIX-AUDIT-COST] rows={len(entries)} reqs={','.join(str(item[0].req_id) for item in entries)} "
             f"tokens={sum(int(item[0].actual) for item in entries)} mode={read['mode']} reads={read['reads']} "
             f"blocks_read={read['blocks']} read_ms={read['ms']:.1f} "
-            f"total_ms={(_qwen_time.perf_counter() - began) * 1000.0:.1f}{fallback}"
+            f"total_ms={(_qwen_time.perf_counter() - began) * 1000.0:.1f} "
+            f"programs={programs_before}->{programs_after}{fallback}"
         )
+        if programs_before is not None and programs_after is not None and programs_after > programs_before:
+            _qwen_prefix_note(_qwen_prefix_registry(), "program_growth", 1)
+            logger.warning(
+                f"[PREFIX] program growth: audit reqs={','.join(str(item[0].req_id) for item in entries)} compiled "
+                f"{programs_after - programs_before} program(s) after warmup (F3): a compile after the "
+                "traces are parked is the second-request hang (#48536)"
+            )
 
     def _qwen_prefix_audit_read_mode(self):
         """'region' or 'full' (QWEN_PREFIX_AUDIT_READ: auto, region or full)."""
@@ -878,16 +894,29 @@ MODEL_METHODS = r'''
 
     def _qwen_prefix_read_blocks(self, cache, blocks, heads):
         """The blocks of one paged KV cache, read from the device as raw page ranges (the
-        ttnn.qwen_read_blocks graft: one non-blocking read per run of consecutive block ids, one
-        wait) into a host tensor of the cache's dtype and layout holding just those blocks, then
-        unpacked by ttnn.to_torch exactly as the whole-cache read unpacks the cache. Nothing is
-        compiled and no device memory is allocated."""
+        ttnn.qwen_read_blocks graft: one blocking read per run of consecutive block ids) into a host
+        tensor of the cache's dtype and layout holding just those blocks, then unpacked by
+        ttnn.to_torch exactly as the whole-cache read unpacks the cache. Nothing is compiled and no
+        device memory is allocated. The host tensor takes the cache's device topology (so the mesh
+        composer sees every chip's shard), and the unpacked shape must be the whole-cache read's shape
+        with the block count of this selection: a shard lost by the composer would otherwise digest a
+        subset of the heads and agree with itself, so a wrong shape raises (the step then reads whole
+        caches and says so in the cost line)."""
         count = int(blocks.numel())
         host = ttnn.allocate_tensor_on_host(
             ttnn.Shape([count] + [int(dim) for dim in cache.shape[1:]]), cache.dtype, cache.layout, self.mesh_device
         )
+        topology = getattr(cache, "tensor_topology", None)
+        if callable(topology) and hasattr(host, "update_tensor_topology"):
+            host.update_tensor_topology(topology())
         ttnn.qwen_read_blocks(cache, host, [int(block) for block in blocks.tolist()])
-        return ttnn.to_torch(host, mesh_composer=heads)
+        sel = ttnn.to_torch(host, mesh_composer=heads)
+        want = (count, int(cache.shape[1]) * int(self.num_devices)) + tuple(
+            int(dim) for dim in cache.shape[2:]
+        )
+        if tuple(sel.shape) != want:
+            raise AssertionError(f"region read composed shape {tuple(sel.shape)}, the whole-cache read gives {want}")
+        return sel
 '''
 
 LOOP_SIGNATURE_OLD = 'chunk_from=0, chunk_to=None, do_reset=True, do_tail=True'

@@ -12,7 +12,16 @@ Prints one JSON object and exits 1 on any mismatch. What it settles (the questio
   * several region reads of one shard in a single enqueue_read_shards land where the host offsets say;
   * the unpacked values equal the whole-cache read's, for runs, singletons and a shuffled order;
   * the program cache does not grow (the read compiles nothing) - the property the audit exists to keep;
-  * the cost per block and per read call, which the W-1 minutes are based on (docs/prefix-audit-cost.md).
+  * the cost per block and per read call, which the W-1 minutes are based on (docs/prefix-audit-cost.md);
+  * the split of the whole-cache read into the device read (ttnn.from_device: the packed bytes) and the host unpack
+    (ttnn.to_torch of the host tensor), the measurement the cost model still lacks (it says whether a packed read
+    plus a host-side block select, with no C++, would be enough).
+
+The cache is allocated as production allocates its KV (qwen36_model._allocate_kv_caches_tp: zeros of the PER-CHIP
+shape through ReplicateTensorToMesh), then filled with different values on every chip (a copy from a sharded tensor,
+which keeps the destination's replicated topology), so the topology the region read and the composer see is the served
+one. Every region read must also unpack to the whole-cache read's shape (heads per chip x chips), never a subset of
+the chips.
 """
 
 import argparse
@@ -56,12 +65,25 @@ def main(argv=None):
         heads = options.heads_per_chip * options.devices
         torch.manual_seed(1)
         values = (torch.randn(options.blocks, heads, BLOCK, HEAD_DIM) * 3).to(torch.bfloat16)
-        cache = ttnn.from_torch(values, dtype=ttnn.bfloat8_b, layout=ttnn.TILE_LAYOUT, device=mesh,
-                                mesh_mapper=ttnn.ShardTensorToMesh(mesh, dim=1), memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        cache = ttnn.as_tensor(torch.zeros(options.blocks, options.heads_per_chip, BLOCK, HEAD_DIM, dtype=torch.bfloat16),
+                               device=mesh, dtype=ttnn.bfloat8_b, layout=ttnn.TILE_LAYOUT,
+                               memory_config=ttnn.DRAM_MEMORY_CONFIG, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
+        source = ttnn.from_torch(values, dtype=ttnn.bfloat8_b, layout=ttnn.TILE_LAYOUT, device=mesh,
+                                 mesh_mapper=ttnn.ShardTensorToMesh(mesh, dim=1), memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        ttnn.copy(source, cache)
+        ttnn.deallocate(source)
         composer = ttnn.ConcatMeshToTensor(mesh, dim=1)
+        want_shape = (options.blocks, heads, BLOCK, HEAD_DIM)
         begin = time.perf_counter()
-        whole = ttnn.to_torch(cache, mesh_composer=composer)
-        report['whole_read_s'] = round(time.perf_counter() - begin, 3)
+        packed = ttnn.from_device(cache)
+        report['whole_device_read_s'] = round(time.perf_counter() - begin, 3)
+        begin = time.perf_counter()
+        whole = ttnn.to_torch(packed, mesh_composer=composer)
+        report['whole_unpack_s'] = round(time.perf_counter() - begin, 3)
+        report['whole_read_s'] = round(report['whole_device_read_s'] + report['whole_unpack_s'], 3)
+        if tuple(whole.shape) != want_shape:
+            problems.append('the whole-cache read has shape %s, not %s: the cache was not allocated like production' % (
+                tuple(whole.shape), want_shape))
         report['whole_bytes_fp32'] = whole.numel() * whole.element_size()
         programs = mesh.num_program_cache_entries()
         for name, blocks in block_sets(options.blocks).items():
@@ -74,6 +96,9 @@ def main(argv=None):
             got = ttnn.to_torch(host, mesh_composer=composer)
             unpack_s = time.perf_counter() - begin
             want = whole.index_select(0, torch.as_tensor(blocks, dtype=torch.long))
+            if tuple(got.shape) != (len(blocks),) + want_shape[1:]:
+                problems.append('%s: the region read unpacked to %s, not %s (a chip shard was lost)' % (
+                    name, tuple(got.shape), (len(blocks),) + want_shape[1:]))
             same = got.shape == want.shape and bool((got.contiguous().view(torch.uint8) == want.contiguous().view(torch.uint8)).all())
             report[name] = dict(blocks=len(blocks), read_ms=round(read_s * 1000, 2), unpack_ms=round(unpack_s * 1000, 2), equal=same)
             if not same:

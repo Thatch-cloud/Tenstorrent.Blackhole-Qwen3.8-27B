@@ -349,6 +349,8 @@ class FakeEngine(object):
               # A hit's engine build line naming another frontier than its Q (wrong_build_frontier), and audit
               # window lines that never mark a window restored (no_restored_windows: every new=1).
               'wrong_build_frontier', 'no_restored_windows',
+              # The audit's own cost line: absent (the image predates the narrowed audit), or its read compiled a program.
+              'no_audit_cost', 'audit_compiles',
               # vLLM finds nothing cached for any request, so every continuation runs cold (lose_every_hit).
               'lose_every_hit')
     piece = 3
@@ -760,6 +762,11 @@ class FakeEngine(object):
             digest = judge.token_sha(ids)[:16]
             self.say('[PREFIX-AUDIT] req=%s Q=%d L=%d kv_range=0:%d kv_sha=%s slot_sha=%s' % (
                 request.request_id, q, len(ids), len(ids), digest, digest))
+            if 'no_audit_cost' not in self.faults:
+                grown = 1 if 'audit_compiles' in self.faults else 0
+                self.say('[PREFIX-AUDIT-COST] rows=1 reqs=%s tokens=%d mode=region reads=4 blocks_read=%d read_ms=1.0 '
+                         'total_ms=2.0 programs=%d->%d' % (request.request_id, len(ids), -(-len(ids) // 64) * 4,
+                                                          self.programs, self.programs + grown))
         if len(ids) >= judge.CHUNK and self.path == 'traced':
             self.say('INFO [TP chunk-replay] %d/%d chunks' % (len(ids) // judge.CHUNK, len(ids) // judge.CHUNK))
 
