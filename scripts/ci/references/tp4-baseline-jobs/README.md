@@ -19,7 +19,7 @@ minutes, boxes, tags, dependencies and read rules are in `ORDER.txt`; `test_tp4_
 The four groups together are 11.1 h of jobs by estimate, and with the real hand-back (95 min: reset 15, links re-measure 15, topology publish up to 18, agent start 32, release and engine load 15) none of the combinations
 with the profile or the V5 block fits the 9 h cap. The PLANNED window is the CORE (A0, X0, P1a, P1b, L8, C16 and the hand-back): 440 min = 7.3 h. CORE plus PROF-CTL is 570 min and CORE plus the V5 block (R4, V1a, V1b: 135 min)
 is 575 min, so both run only when the jobs before them ran short (the driver's clock rule: a job past the 8 h target starts only if its BOX fits the cap). The owner can instead pick, before the window, `SKIP_JOBS=C16-CTL-churn16 TARGET_MIN=540`
-for the profile (525 min) or `SKIP_JOBS="L8-CTL-ladder8-past-131k C16-CTL-churn16" TARGET_MIN=540` for the V5 block (485 min); `TARGET_MIN=540` makes the clock trust the estimates up to the cap, and a job that runs to its box can still pass it.
+for the profile (525 min) or `SKIP_JOBS="L8-CTL-ladder8-past-131k C16-CTL-churn16 PROF-CTL-ops-profile-8x4k" TARGET_MIN=540` for the V5 block (485 min); `TARGET_MIN=540` makes the clock trust the estimates up to the cap, and a job that runs to its box can still pass it.
 PROF-CTL profiles the UNSALTED path (no `C2_GATE_SALT`): production's salted capture and publish work is not in the profile.
 The 32k shape of the device profile is NOT in `PROF-CTL`: `ops_profile_plan` has only the 4k shape (docs/tp4-profile.md: the exactness divergence at 32k and above is unresolved) and op-support 20000 loses the
 packed rounds at 32k (v133); a 32k profile needs a plan change and its own review.

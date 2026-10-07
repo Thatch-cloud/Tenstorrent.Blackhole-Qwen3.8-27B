@@ -158,7 +158,7 @@ class NumbersTests(unittest.TestCase):
         self.assertLessEqual(instead_of_c16, HARD_CAP)
         self.assertLessEqual(v5_instead, HARD_CAP)
         self.assertIn('SKIP_JOBS=C16-CTL-churn16) = %d min = %.1f h, inside the cap by %d minutes' % (instead_of_c16, instead_of_c16 / 60.0, HARD_CAP - instead_of_c16), text)
-        self.assertIn('L8-CTL-ladder8-past-131k C16-CTL-churn16") = %d min = %.1f h' % (v5_instead, v5_instead / 60.0), text)
+        self.assertIn('L8-CTL-ladder8-past-131k C16-CTL-churn16 PROF-CTL-ops-profile-8x4k") = %d min = %.1f h' % (v5_instead, v5_instead / 60.0), text)
         self.assertIn('TARGET_MIN=540', text)
 
     def test_the_stop_early_points_are_the_running_sums(self):
