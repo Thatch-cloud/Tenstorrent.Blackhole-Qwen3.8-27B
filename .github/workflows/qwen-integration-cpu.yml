@@ -107,6 +107,7 @@ jobs:
           python -B -m unittest test_tp4_sampdraft test_tp4_shard_argmax test_tp4_draft_conv test_tp4_draft_heads test_tp4_samp_draft_report test_tp4_samp_draft_window
           python -B -m unittest test_sdpa_long_tp test_sdpa_tp4_long test_tp4_sdpa_long_window test_sdpa_multi_tp test_tp4_sdpa_multi_window
           python -B -m unittest test_gdn_conv_gates_spread test_tp4_w2 test_tp4_mr_probe
+          python -B -m unittest test_tp4_w2ln_profiles test_w2ln_identity_census test_tp4_w2ln_window test_drafter_checkpoint test_w2ln_timing_compare
           python -B -m unittest test_request_width_warm test_tp4_warm4 test_tp4_warm4_window
           python -B -m unittest test_gdn_pair_slice
           python -B -m unittest test_real_text_prompts test_acceptance_report test_real_text_compare test_real_text_gate
@@ -114,6 +115,7 @@ jobs:
           python -B -m unittest test_qwen_prefix_registry test_qwen_prefix_scheduler_patch test_qwen_prefix_runner_patch test_qwen_prefix_scheduler_vllm test_qwen_prefix_image_closure
           python -B -m unittest test_prefix_agent_corpus test_prefix_markers test_prefix_judge test_prefix_report test_prefix_oracle_check
           python -B -m unittest test_prefix_replay test_c2_prefix_gate
+          python -B -m unittest test_levern_window_scenarios
           python -B -m unittest test_prefix_p0a_probe
           python -B -m unittest test_sticky_sessions
           python -B -m unittest test_prefix_agent_turns test_tp4_packed_prefix_profiles test_tp4_packed_prefix_jobs test_tp4_packed_prefix_audit
@@ -298,5 +300,6 @@ jobs:
           python -B -m unittest test_levern_policy test_levern_scheduler test_levern_platform test_levern_contract
           python -B -m unittest test_levern_route test_levern_lifecycle test_levern_capture test_levern_check test_tp4_lever_n_jobs
           python -B -m unittest test_levern_smoke
+          python -B -m unittest test_w2ln_smoke_shapes
           python -B -m unittest test_levern_prefix_route test_levern_prefix_graft test_levern_prefix_scheduler test_levern_prefix_lifecycle
           python -B -m unittest test_levern_prefix_contract test_levern_prefix_prestage

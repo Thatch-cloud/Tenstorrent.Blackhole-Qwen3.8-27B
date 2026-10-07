@@ -1,0 +1,153 @@
+# The order of the COMBINED development window: W2 (SDPA multi + F1) + Lever N merged with prefix reuse + the drafter hooks + the production P1 control, ONE outage, ONE image, tp4-w2ln-1,
+# built from the pushed tp4/w2-levern-prefix commit (docs/tp4-combined-window.md). One line per job: <template name without .env> <class> <image tag> <estimated minutes>.
+# CLASSES. stop: the window halts at its first failure (Z still runs). soft: data; a failure or skip does not stop the window. branch: soft, but its failure PRUNES the candidate's later jobs through the NEEDS graph
+# below (the window goes on with the others). cond: a CONDITIONAL job that runs only when its trigger (named in its template) fires; it is not in the planned count.
+# THE CARDS COME OFF PRODUCTION for this window (the owner approved ONE combined window): A0 stops the node agent, Z hands the cards back. Nothing here moves :latest or places a model.
+# MINUTES are ESTIMATES built per job as attach (smoke 15, audited 18-19, measured on W1/ship windows) plus its tests (a 254k prefill about 2 min, 128k about 1 min, an eight-user 32k shape 5-6, the skew 12, a hang shape 7-10, a stall shape 12-18);
+# the prefix arms' boxes are their docker timeouts. B0 runs BEFORE the outage (production serving) and is not counted in it.
+# OUTAGE ESTIMATE (computed from the lines below; test_tp4_w2ln_window pins these numbers): FULL 2449 min = 40.8 h from A0 to Z, no conditional job and no box overrun. CORE 2029 min = 33.8 h: it drops D1-D4, GH3-GH4, G3-G4 and S3-S4, keeps all three
+# T A/B pairs and both C runs (the GO and NO-GO rules need all three pairs) and one S, G and GH pair, and decides what a single pair can decide (below). WORST CASE: 3934 min = 65.6 h: the full plan, every conditional job (1225 min) and every box hit (P1a-CTL +25, P1b-CTL +85, A1-C +50, P1a-C +20, P1b-C +80 = 260 min).
+# OWNER CHECKPOINT at about 20 hours into the outage (after the T block): the owner is shown the verdicts so far and decides whether to continue (S, G, GH, D), cut to core, or hand back.
+# TAGS: 47 planned jobs + 15 conditional = 62 against the 64 hardware-allowlisted, never-pushed tags (v538-v568, v582-585, v589-592, v595-599, v601-620): 2 spare. A re-run after a swap uses a tag: request more tags from the owner BEFORE the window if swaps are likely.
+# NO OTHER WINDOW DRIVER MAY BE ALIVE and no privileged builder container may be up. B0 never runs during a timing job. Every job refuses to start while prefix-reuse.off or levern.off exists on the hub mount (the workflow's preflight step).
+#
+# P0. PRECONDITIONS (all before B0; none is a card job):
+#   - the CPU suite (qwen-cpu-suite.yml) and the real-vLLM CPU proof (qwen-fast-vllm-cpu.yml) green on the pushed branch; disk headroom for one image (never delete the P8 base); tp4-serve-10 present on the rig;
+#   - prefix-reuse.off and levern.off ABSENT; no platform serving container other than production's;
+#   - the one-line S2_TIMEOUTS change ('exactness-shared': 10800, c2_prefix_gate.py) applied on the throwaway commit of ship/262k-prefix that drives P1a-CTL (the window branch carries it);
+#   - the tau-lab data manifest and the drafter candidate pins: NO candidate id exists yet, so no Dk job; engine reuse and the GDN prototype are NOT in this pack (descoped until the owner says otherwise: the owner's condition
+#     for the combined window was "all paths built and CPU-tested"; the drafter candidates are verified separately and join through drafter_checkpoints.json and a rebuild, never mid-window);
+#   - the production thin layer on tp4-serve-10 changes no engine file or env the prefix gate uses (else run the P1 CONTROL jobs on the current :latest image instead);
+#   - the owner agrees to scale the rig's ARC runner sets to zero for the T, S, G and D blocks (CI shares the host and skews round times) and sets the load maximum for w2ln_timing_compare.py --max-load
+#     (the idle load average measured in P0 plus 2);
+#   - the owner is available at the planned hour of Z (the hand-back needs the platform /deploy release_first step and an admin token supplied inline).
+#
+# SWAP RULES (one-line C2_PROFILE or C2_PREFIX_PROFILE swaps in the same image; no new commit, no new image; machine-greppable). A swapped profile replaces the named one in EVERY later job that names it and, in this pack, in its audited twin too:
+# SWAP F1: c2-packed-tp4-8x262k-ship-prefix-w2 -> c2-packed-tp4-8x262k-ship-prefix-w2-nof1; c2-packed-tp4-8x262k-ship-prefix-w2-audit -> c2-packed-tp4-8x262k-ship-prefix-w2-nof1-audit; c2-packed-tp4-8x262k-ship-prefix-levern-w2 -> c2-packed-tp4-8x262k-ship-prefix-levern-w2-nof1; c2-packed-tp4-8x262k-ship-prefix-levern-w2-audit -> c2-packed-tp4-8x262k-ship-prefix-levern-w2-nof1-audit; c2-packed-tp4-8x262k-ship-prefix-levern-w2-audit-nolna -> c2-packed-tp4-8x262k-ship-prefix-levern-w2-nof1-audit-nolna   (F1 reads FAIL or NOT-RUN, an F1 audit mismatch, or any "spread fell back" line)
+# SWAP LEAN: c2-packed-tp4-8x262k-ship-prefix-w2-audit -> c2-packed-tp4-8x262k-ship-prefix-w2-audit-lean; c2-packed-tp4-8x262k-ship-prefix-w2-nof1-audit -> c2-packed-tp4-8x262k-ship-prefix-w2-nof1-audit-lean; c2-packed-tp4-8x262k-ship-prefix-levern-w2-audit -> c2-packed-tp4-8x262k-ship-prefix-levern-w2-audit-lean; c2-packed-tp4-8x262k-ship-prefix-levern-w2-nof1-audit -> c2-packed-tp4-8x262k-ship-prefix-levern-w2-nof1-audit-lean   (an audit-twin attach dies on L1 or trace-region allocation; once per twin; a lean pass means "fits only without the T1/T2 audits": a finding for the owner)
+# SWAP POOL: c2-packed-tp4-8x262k-ship-prefix-w2-audit -> c2-packed-tp4-8x262k-ship-prefix-w2-audit-pool; c2-packed-tp4-8x262k-ship-prefix-w2-nof1-audit -> c2-packed-tp4-8x262k-ship-prefix-w2-nof1-audit-pool; c2-packed-tp4-8x262k-ship-prefix-levern-w2-audit -> c2-packed-tp4-8x262k-ship-prefix-levern-w2-audit-pool; c2-packed-tp4-8x262k-ship-prefix-levern-w2-nof1-audit -> c2-packed-tp4-8x262k-ship-prefix-levern-w2-nof1-audit-pool   (an attach or a 254k arrival dies on DRAM; outputs do not depend on page placement, so hashes still compare)
+# SWAP EPOCH: c2-packed-tp4-8x262k-ship-prefix-levern -> c2-packed-tp4-8x262k-ship-prefix-levern-epochglobal; c2-packed-tp4-8x262k-ship-prefix-levern-audit -> c2-packed-tp4-8x262k-ship-prefix-levern-audit-epochglobal; c2-packed-tp4-8x262k-ship-prefix-levern-w2 -> c2-packed-tp4-8x262k-ship-prefix-levern-w2-epochglobal; c2-packed-tp4-8x262k-ship-prefix-levern-w2-audit -> c2-packed-tp4-8x262k-ship-prefix-levern-w2-audit-epochglobal   (a G-NP4 failure on the route epoch scope: Lever N goes on with the global scope, every round staged in full)
+# SWAP SPLIT: A1-C stands in for by three attaches when no whole-set audit twin fits: c2-packed-tp4-8x262k-ship-prefix-levern-w2-audit-sdpa (SDPA audit), c2-packed-tp4-8x262k-ship-prefix-levern-w2-audit-f1 (F1 audit), c2-packed-tp4-8x262k-ship-prefix-levern-w2-audit-ln (Lever N digests and the prestage full audit); passing all three stands in for A1-C
+# SWAP LN-OUT: c2-packed-tp4-8x262k-ship-prefix-levern-w2 -> c2-packed-tp4-8x262k-ship-prefix-w2 and its audited twins likewise (W2 alone); S, G, GH and HL/HF are skipped
+# SWAP W2-OUT: c2-packed-tp4-8x262k-ship-prefix-levern-w2 -> c2-packed-tp4-8x262k-ship-prefix-levern and its audited twins likewise (Lever N alone); T shrinks to T0..T2 and T4, T5 (the steady 8-live rounds are an identity check)
+# Failure classes of A1-C: an F1 audit failure -> SWAP F1; an SDPA audit failure -> W2-OUT; a Lever N rule or digest -> LN-OUT; an attach death -> SWAP LEAN (L1, trace region) or SWAP POOL (DRAM, or the free-DRAM read after attach short of the prefill transient plus a margin). Before declaring an
+# interaction, rerun the failing test set on the single-lever twin (A1-W2, A1-LN, or the bisect jobs P1a/P1b/L8/C16-W2/LN); the lever whose twin also fails is the culprit, a failure only on the combined arm is an interaction (-> LN-OUT, recorded as such).
+# Both out: skip to D and Z.
+#
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS A0 <- B0
+# NEEDS F1 X0 <- A0
+# NEEDS P1a-CTL P1b-CTL S0-CTL <- X0
+# NEEDS DK0 L8-CTL C16-CTL <- S0-CTL
+# NEEDS A1-C <- S0-CTL
+# NEEDS HW-C HL-C HX-C HF-C <- A1-C
+# NEEDS P1a-C P1b-C L8-C C16-C E1-C <- A1-C
+# NEEDS T0 T1 T2 T3 T4 T5 T6 T7 T8 <- S0-CTL A1-C
+# NEEDS S1 S2 S3 S4 G1 G2 G3 G4 GH1 GH2 GH3 GH4 <- T1 T2 T3 T4 T5 T6 T7 T8 HW-C HL-C HX-C HF-C
+# NEEDS G0 <- S0-CTL
+# NEEDS D1 D2 D3 D4 <- S0-CTL
+# NEEDS A1-W2 A1-LN <- A1-C(FAIL)
+# NEEDS HW-W2 <- HW-C(FAIL)
+# NEEDS HL-LN <- HL-C(FAIL) HX-C(FAIL)
+# NEEDS HF-LN <- HF-C(FAIL)
+# NEEDS P1a-W2 P1a-LN <- P1a-C(FAIL)
+# NEEDS P1b-W2 P1b-LN <- P1b-C(FAIL)
+# NEEDS L8-W2 L8-LN <- L8-C(FAIL)
+# NEEDS C16-W2 C16-LN <- C16-C(FAIL)
+# NEEDS P1a-CTL2 <- P1a-CTL(NO-VERDICT)
+# NEEDS P1b-CTL2 <- P1b-CTL(NO-VERDICT)
+# Z always runs. T0 follows S0-CTL on the production image; the T block runs A B C A B C A B (T1 T4 T7 = A control, T2 T5 T8 = B W2 alone, T3 T6 = C combined) with T0 right before T1.
+#
+# READ RULES (each also needs c2_smoke_check clean, the lever engagement rules of both gates clean, and no stall).
+#  HARD, any arm of a candidate (NO-GO for that candidate): any audit mismatch; any hash difference on a test that must be identical (S0-CTL's set, levern_equal*, concurrent against solo, drafter texts); any stall or engine death outside planned quarantines
+#   (C16-C included); any lever without its engaged marker (and no Lever N kill-switch line outside HF-C); any program compiled after the warm. A prefix-gate arm needs verdict PASS: NO-VERDICT is NOT QUALIFIED.
+#  S0-CTL: admission passed at 262,144 with no waiver and no UNQUALIFIED line; hashes equal to production's reference; RECORD all hashes and digests. A mismatch with production ends the window.
+#  P1 CONTROL (P1a-CTL, P1b-CTL; L8-CTL and C16-CTL likewise): the verdict scheme of their templates. A FAIL is a production finding: ask the owner AT ONCE whether the window continues or hands back early with prefix-reuse.off. A check a CONTROL failed is not blamed on the levers.
+#   NO-VERDICT counts as FAIL when gating any candidate's cutover (all candidates share the prefix code) and queues the CTL2 job on the window image. Nothing cuts over while a CONTROL shares a failed check.
+#  A1-C: see its template (G-NP0, G-NP1, G-NP4 and W2's markers and audits; the memory ledger read after attach).
+#  HW-C HL-C HX-C HF-C: every stream completes, no refusal, no hang; one stall prunes the candidate.
+#  P1a-C, P1b-C: P1a-CTL's / P1b-CTL's reads and G-NP2 (checkpoint positions, token ids, slot_sha equal P1a-CTL's by position). L8-C: concurrent equal to solo, zero audit mismatches. C16-C: 16 of 16, zero engine deaths. E1-C: every strict pair identical.
+#  T (the W2 read, per length L in {steady, 32k, 128k, skew}): scripts/ci/w2ln_timing_compare.py reads the eight-live rounds of each job's server log (paired by mean-context bucket, VOID under 200 matched rounds or over the load maximum, rounds beside a Lever N prefill step dropped).
+#   Floor: the A-to-A drift d_L = the spread of the medians of T1, T4 and T7 (T0 against T1 gives the production-bytes offset of the window image: it must sit inside the floor, else every gain is reported relative to production with that offset).
+#   Delta_L is B (W2 alone, no Lever N on either side) against A, per pair: (T1,T2) (T4,T5) (T7,T8). GO at L: all three pairs measured and negative and the pooled median gain above max(d_L, 1% of A's median). NO-GO for W2: at least 2 of the 3 pairs positive at 32k or at 128k, or the skew loss beyond d_skew on at least 2 of 3.
+#   A VOID pair is no vote (fewer than three measured pairs is INCONCLUSIVE, never GO). C (COMBINED) against B is Lever N's steady-state cost on top of W2 (T3 against T2, T6 against T5; the two must agree in sign and sit inside the floor, else a Lever N finding); C against A is reported.
+#   Texts by smoke JSON hashes (must be identical); burst wall time and the last TTFT report-only (Lever N predictably lowers the whole-burst time of eight simultaneous long arrivals); per-seat tok/s against today's 23.4-23.7 at 32k and 19.4-20.3 at about 120k as a reference, never a pass line.
+#  S (stall/TTFT, ABAB): the SINGLE-ARRIVAL shapes (stall8_cold128k, stall8_cold262k): pass = the worst seat gap at most 10 s (100.29 s today), every decoding seat progressed inside the window, arrival TTFT at most 200 s (T* = 180 plus a stated tolerance, f_eff lines showing the governor binding);
+#   kill = any TTFT over 240 s, or any seat gap at least CONTROL's. cold2_254k (two simultaneous arrivals: the governor runs at f = 1.0, so the gaps equal CONTROL's by design): pass = both TTFTs at most 240 s and the second at most CONTROL's second plus 15 s; the gaps are reported, not judged.
+#  G (agent turns, ABAB): pass = p90 turn latency B <= A and p50 B <= 1.05 x A, reuse engaged (Q > 0), transcripts equal; kill = p90 B > 1.10 x A in BOTH pairs. G0 (production bytes) against G1/G3 shows the window image's CONTROL runs at production's latency.
+#  GH (hit mid-cold, ABAB): pass = the hit's TTFT during the cold arrival at most its solo plus 1.5 s on B (about 94 s on A today); report the parked long prompt's added TTFT and the decoders' gaps.
+#  D (drafter BF16, ABAB, pool-matched): per-turn tau is primary (greedy: deterministic once the texts are identical), the paired 8-live round-time ratio beside it, wall tok/s secondary; both pairs must agree in sign beyond the A-to-A drift; a text difference is a finding (rerun coding solo on both
+#   arms); evidence for a later profile change, never a cutover gate. A candidate arm is compared against the arm that shares its dtype and pool, and only after DK0 passes.
+#  CORE (what a single pair can decide): T keeps its three pairs and two C runs; S, G and GH have one pair, which can FAIL a pass line but never kill a candidate; D is dropped.
+#
+# CUTOVER CANDIDATES, in order (a cutover is a separate pack: S0 baked-default smoke, SR10 platform replay, the thin layer, :latest; this pack only chooses what to build):
+#   1. COMBINED (or COMBINED-nof1): every HARD gate on its path (A1-C, HW-C, HL-C, HX-C, HF-C, P1a-C, P1b-C, L8-C, C16-C, E1-C all PASS), T GO at 32k and 128k with no skew kill and Lever N's steady cost inside the floor, S, G and GH pass.
+#   2. LN-only: the Lever N hard gates PASSED ON ITS OWN PROFILE (A1-LN, HL-LN, HF-LN, P1a-LN, P1b-LN, L8-LN, C16-LN run and PASS), S, G, GH pass, Lever N's steady cost inside the floor.
+#   3. W2-only: the W2 hard gates PASSED ON ITS OWN PROFILE (A1-W2, HW-W2, P1a-W2, P1b-W2, L8-W2, C16-W2 run and PASS) and T GO.
+#   4. None.
+#   A fallback reaches cutover only after PASS on P1a, P1b, L8 and C16 on its exact profile. Nothing cuts over while P1a-CTL or P1b-CTL is FAIL or NO-VERDICT on a check the candidate shares, nor without the owner's decisions on the multi qualification record (X3b) and Lever N on a traffic profile (X4).
+#   The would-be traffic profile (c2-packed-tp4-8x262k-ship-prefix-levern-w2-traffic or a fallback's) is committed only after the window, on the owner's decision, and becomes the baked default of the next base image.
+#
+# Z AND THE HAND-BACK: see Z-handback.env. B0 and every job below are templates only.
+B0-build stop tp4-w2ln-1 22
+A0-agentstop-unserve stop tp4-w2ln-1 10
+F1-cardm-conv-gates-spread soft tp4-w2ln-1 30
+X0-status-rescan-reset stop tp4-w2ln-1 4
+P1a-CTL-exactness-shared soft tp4-serve-10 100
+P1b-CTL-lifecycle-evict soft tp4-serve-10 75
+S0-CTL-control-attach-smoke stop tp4-w2ln-1 80
+DK0-selector-plumbing soft tp4-w2ln-1 35
+L8-CTL-ladder8-past-131k soft tp4-serve-10 45
+C16-CTL-churn16 soft tp4-serve-10 45
+A1-C-combined-audited-attach branch tp4-w2ln-1 100
+HW-C-hang-shapes-w2-on-combined branch tp4-w2ln-1 90
+HL-C-hang-shapes-levern-on-combined branch tp4-w2ln-1 90
+HX-C-cold2-skew-on-combined branch tp4-w2ln-1 50
+HF-C-levern-faults-on-combined branch tp4-w2ln-1 70
+P1a-C-exactness-shared branch tp4-w2ln-1 110
+P1b-C-lifecycle-evict branch tp4-w2ln-1 80
+L8-C-ladder8-past-131k branch tp4-w2ln-1 60
+C16-C-churn16 branch tp4-w2ln-1 50
+E1-C-exactness-eager branch tp4-w2ln-1 120
+T0-timed-production-bytes soft tp4-serve-10 50
+T1-timed-control-A soft tp4-w2ln-1 50
+T2-timed-w2-B soft tp4-w2ln-1 50
+T3-timed-combined-C soft tp4-w2ln-1 50
+T4-timed-control-A soft tp4-w2ln-1 50
+T5-timed-w2-B soft tp4-w2ln-1 50
+T6-timed-combined-C soft tp4-w2ln-1 50
+T7-timed-control-A soft tp4-w2ln-1 50
+T8-timed-w2-B soft tp4-w2ln-1 50
+S1-stall-control-A soft tp4-w2ln-1 65
+S2-stall-combined-B soft tp4-w2ln-1 65
+S3-stall-control-A soft tp4-w2ln-1 65
+S4-stall-combined-B soft tp4-w2ln-1 65
+G0-turns-A-production-bytes soft tp4-serve-10 40
+G1-turns-control-A soft tp4-w2ln-1 40
+G2-turns-combined-B soft tp4-w2ln-1 40
+G3-turns-control-A soft tp4-w2ln-1 40
+G4-turns-combined-B soft tp4-w2ln-1 40
+GH1-hit-mid-cold-control-A soft tp4-w2ln-1 35
+GH2-hit-mid-cold-combined-B soft tp4-w2ln-1 35
+GH3-hit-mid-cold-control-A soft tp4-w2ln-1 35
+GH4-hit-mid-cold-combined-B soft tp4-w2ln-1 35
+D1-drafter-bf16-pool-control-A soft tp4-w2ln-1 35
+D2-drafter-bf16-bf16-B soft tp4-w2ln-1 35
+D3-drafter-bf16-pool-control-A soft tp4-w2ln-1 35
+D4-drafter-bf16-bf16-B soft tp4-w2ln-1 35
+Z-handback soft tp4-w2ln-1 15
+A1-W2-w2-audited-attach cond tp4-w2ln-1 100
+A1-LN-levern-audited-attach cond tp4-w2ln-1 100
+HW-W2-hang-shapes-w2 cond tp4-w2ln-1 90
+HL-LN-hang-shapes-levern cond tp4-w2ln-1 90
+HF-LN-levern-faults cond tp4-w2ln-1 70
+P1a-W2-exactness-shared cond tp4-w2ln-1 110
+P1b-W2-lifecycle-evict cond tp4-w2ln-1 80
+L8-W2-ladder8-past-131k cond tp4-w2ln-1 60
+C16-W2-churn16 cond tp4-w2ln-1 50
+P1a-LN-exactness-shared cond tp4-w2ln-1 110
+P1b-LN-lifecycle-evict cond tp4-w2ln-1 80
+L8-LN-ladder8-past-131k cond tp4-w2ln-1 60
+C16-LN-churn16 cond tp4-w2ln-1 50
+P1a-CTL2-exactness-shared-window-image cond tp4-w2ln-1 100
+P1b-CTL2-lifecycle-evict-window-image cond tp4-w2ln-1 75
