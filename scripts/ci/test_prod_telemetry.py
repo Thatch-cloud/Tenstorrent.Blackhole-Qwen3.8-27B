@@ -611,6 +611,16 @@ class CheckTests(unittest.TestCase):
         self.assertIn('packed_audit', report['absent'])
         self.assertIn('rounds_packed', report['absent'])
 
+    def test_a_single_user_window_cannot_show_the_packed_audit_and_is_inconclusive_not_a_failure(self):
+        """One user decoding on the single path logs no per-user audit line: the live check on the running image saw exactly this and must not call it a failure."""
+        lines = [line for line in decode_rounds(20, live=1) if '[PACKED]' not in line] + [stats(1, 0)]
+        report = pt.check_log(lines)
+        self.assertEqual((report['verdict'], report['max_live']), ('IDLE', 1))
+        self.assertIn('two or more concurrent requests', report['note'])
+        self.assertIn('packed_audit', report['absent'])
+        broken = pt.check_log([line for line in decode_rounds(20, live=1) if '[PHASE]' not in line] + [stats(1, 0)])    # a missing phase line is still a failure
+        self.assertEqual(broken['verdict'], 'FAIL')
+
     def test_the_stats_line_is_informational(self):
         report = pt.check_log([line for line in self.good() if 'Running:' not in line], live_gauges=True)    # the gauges carry the hang rule's 'live' reading
         self.assertEqual(report['absent'], [])
@@ -1464,6 +1474,8 @@ class WrapperTests(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: self.tails_started() >= 2), 'the second capture never attached')
         time.sleep(0.5)
         self.assertFalse(os.path.exists(os.path.join(fixed, 'metrics.url')))
+        proc.terminate()                  # the wrapper stops what it started (kill() would leave its follower behind)
+        proc.wait(timeout=30)
 
     def test_capture_writes_the_heartbeat_file_it_is_given(self):
         import signal

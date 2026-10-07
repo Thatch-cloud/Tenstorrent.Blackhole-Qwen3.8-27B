@@ -19,7 +19,8 @@ engine's metrics gives the name prefix with --platform-prefix.
 Subcommands.
   check     Reads a log window (and optionally a /metrics scrape) and says which of the lines the rollback rule needs are present. It prints
             counts, never log text. Exit 0 = every required signal present, 2 = a required signal absent while requests ran, 3 = no
-            traffic in the window (inconclusive: send a request and rerun), 4 = the metrics URL did not answer. The one-off boot lines
+            traffic in the window, or only single-user decode steps when the missing signals are the per-user audit lines of a packed round (inconclusive:
+            send two or more concurrent requests and rerun), 4 = the metrics URL did not answer. The one-off boot lines
             (`lever N installed`) scroll out of a tail window: the wrapper counts them over the whole file and passes --boot-count.
   capture   Reads a log stream and appends one JSON line per decode round, per Lever N request and per event to daily files in --out
             (rounds-DAY.jsonl, requests-DAY.jsonl, events-DAY.jsonl) and runs the watcher below. Nothing in those files carries a token id,
@@ -254,6 +255,7 @@ class Extractor(object):
         self.first = self.last = None
         self.running = self.waiting = None
         self.gen_tps = None
+        self.max_live = 0          # the most live users any decode step of the stream carried
 
     def feed(self, line):
         """[(kind, record)] the line completes. kind is 'round', 'request' or 'event'."""
@@ -350,6 +352,7 @@ class Extractor(object):
         decode = new == 0 and cached > 0 and not chunk
         if decode:
             self.counts['decode'] += 1
+            self.max_live = max(self.max_live, cached)
         previous = self.current
         after_prefill = bool(previous and (previous['prefill'] or previous['new'] > 0))
         if self.pending is not None and decode:
@@ -965,7 +968,13 @@ def check_log(lines, expect_levern=False, boot=None, live_gauges=None):
         absent.append('hang_live_source')
     traffic = counts['execute'] > 0 or counts['stats_busy'] > 0
     verdict = 'PASS' if not absent else ('FAIL' if traffic else 'IDLE')
-    return dict(verdict=verdict, absent=absent, window=dict(first=extractor.first, last=extractor.last), counts=dict(counts), signals=rows)
+    note = None
+    if verdict == 'FAIL' and set(absent) <= {'packed_audit', 'rounds_packed'} and extractor.max_live < 2:
+        # a packed round (one audit line per live user) exists only with two or more users live: a window with one user decoding on the single path cannot show it
+        verdict = 'IDLE'
+        note = 'only single-user decode steps in the window (at most %d live): the per-user audit lines exist only for packed rounds with two or more users; send two or more concurrent requests and rerun' % extractor.max_live
+    return dict(verdict=verdict, absent=absent, note=note, max_live=extractor.max_live, window=dict(first=extractor.first, last=extractor.last), counts=dict(counts),
+                signals=rows)
 
 
 def parse_boot(values):
