@@ -511,6 +511,44 @@ class LedgerTests(unittest.TestCase):
         self.assertIn('P6', walked)
 
 
+class WalkedBlock:
+    """A block as the ledger's walker sees one: an instance dict reaching its records, its taps and the pool."""
+
+    users, rows_per_user, block_rows = 4, 16, 64
+    phase, pending_segments, deferred_commits = 'idle', (), ()
+
+    def __init__(self):
+        self.records, self.taps, self.shared_history = [], [], None
+
+
+class LedgerAttributionTests(unittest.TestCase):
+    def test_the_pool_does_not_lead_the_walk_from_one_block_into_the_other(self):
+        import test_memory_ledger as ledger_tests
+
+        shared.reset()
+        self.addCleanup(shared.reset)
+        operations = ledger_tests.FakeOperations()
+        ledger, lines, reports = ledger_tests.ledger_for(operations)
+        env = {shared.FLAG: '1', **FOUR}
+        first, second = WalkedBlock(), WalkedBlock()
+        pool = shared.join(first, environ=env)
+        shared.join(second, environ=env)
+        pooled = [operations.tensor((16, 12, 128, 128)) for tensor in range(shared.TENSORS)]
+        pool.tensors = pooled
+        for block_ in (first, second):
+            block_.shared_history = pool
+            block_.records = [SimpleNamespace(states=value) for value in pooled]
+            block_.taps = [operations.tensor((1, 1, 64, 5120)) for tap in range(5)]
+        taps = 5 * 64 * 5120 * 2
+        added_first = ledger.claim('packed_block', first, 'P6')[0]
+        added_second = ledger.claim('packed_block', second, 'P6')[0]
+        self.assertEqual(added_first[0], 1152 * MIB + taps, 'the first block carries the shared set and its own taps')
+        self.assertEqual(added_second[0], taps, 'the second carries only its own: the pool did not lead the walk into the first block')
+        self.assertFalse(hasattr(pool._held, '__dict__'))
+        with self.assertRaises(TypeError):
+            vars(pool._held)
+
+
 class OffByDefaultTests(unittest.TestCase):
     def test_nothing_in_the_serving_path_imports_the_module_unless_a_flag_is_set(self):
         import re

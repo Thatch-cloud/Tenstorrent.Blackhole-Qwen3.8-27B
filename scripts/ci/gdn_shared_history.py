@@ -231,9 +231,24 @@ def join(block, *, log=None, environ=None):
     return _POOL
 
 
+class _Held:
+    """The pool's references to the blocks and the device operations. Slots only, so `vars()` fails on it: the memory ledger walks
+    every instance dict reachable from a block it itemises, and the pool (reachable from each block) must not lead it into the OTHER
+    block's buffers, which would shift one block's bytes onto the other's line."""
+
+    __slots__ = ('blocks', 'writer', 'builder', 'capturing', 'operations')
+
+
+def _held(name):
+    return property(lambda self: getattr(self._held, name), lambda self, value: setattr(self._held, name, value))
+
+
 class SharedHistory:
+    blocks, writer, builder, capturing, operations = (_held(name) for name in _Held.__slots__)
+
     def __init__(self, *, log=None):
         self.log = log
+        self._held = _Held()
         self.blocks = []
         self.tensors = []
         self.shape = None
