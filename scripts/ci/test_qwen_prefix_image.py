@@ -71,7 +71,7 @@ GATE_ONLY_OTHERS = ('c2-packed-tp4-8x262k-w1', 'c2-packed-tp4-8x262k-w1-audit', 
                     'c2-packed-tp4-warm4-even-diag', 'c2-packed-tp4-warm4-gate', 'c2-packed-tp4-speed-warm4')
 # The fast path's prefix-reuse profiles (sticky sessions): test_sticky_sessions holds them.
 # tp4/packed-prefix: the eight-seat 262k twins, gate-only (test_tp4_packed_prefix_profiles holds them).
-STICKY_GATE_ONLY = ('c2-packed-tp4-8x262k-prefix-gate', 'c2-packed-tp4-8x262k-prefix-time-gate', 'c2-packed-tp4-8x262k-ship-prefix-audit',
+STICKY_GATE_ONLY = ('c2-packed-tp4-8x262k-prefix-gate', 'c2-packed-tp4-8x262k-prefix-time-gate', 'c2-packed-tp4-8x262k-ship-prefix-4e', 'c2-packed-tp4-8x262k-ship-prefix-4e-audit', 'c2-packed-tp4-8x262k-ship-prefix-4e-control-audit', 'c2-packed-tp4-8x262k-ship-prefix-4e-grow', 'c2-packed-tp4-8x262k-ship-prefix-audit',
                     # tp4/levern-prefix: the merged route's gate-only pair (test_levern_prefix_contract holds them)
                     'c2-packed-tp4-8x262k-ship-prefix-levern', 'c2-packed-tp4-8x262k-ship-prefix-levern-audit')
 STICKY_PROFILES = ('c2-packed-prefix', 'c2-packed-prefix-gate') + STICKY_GATE_ONLY + ('c2-packed-tp4-8x262k-ship-prefix',)    # + ship/262k-prefix: the both-levers pair

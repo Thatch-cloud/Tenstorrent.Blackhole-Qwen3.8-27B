@@ -922,6 +922,17 @@ def kv_pool_blocks(profile):
     return real_pool_blocks(profile) - KV_NULL_BLOCKS
 
 
+def shared_history_problem(profile):
+    """What is wrong with how a profile uses QWEN_FAST_GDN_SHARED_HISTORY or its KV growth marker (gdn_shared_history.pool_problem);
+    None when nothing, and for every profile that names neither flag (the module is then not imported)."""
+    env = profile.get('env', {})
+    if env.get('QWEN_FAST_GDN_SHARED_HISTORY', '0') == '0' and env.get('QWEN_FAST_GDN_SHARED_HISTORY_KV_GROW', '0') == '0':
+        return None
+    import gdn_shared_history
+
+    return gdn_shared_history.pool_problem(profile)
+
+
 def request_limits(profile):
     """The request contract's numbers from a profile, checked once at boot: the output budget,
     and the optional max_prompt_tokens, min_answer_tokens and default_max_tokens."""
@@ -941,7 +952,7 @@ def request_limits(profile):
             raise ValueError('drafter_headroom_tokens must be an integer from 0 to 4096, got %r' % (headroom,))
         limits['drafter_headroom_tokens'] = headroom
     headroom = headroom or 0
-    problem = kv_reservation_problem(profile) or kv_pool_problem(profile)
+    problem = kv_reservation_problem(profile) or kv_pool_problem(profile) or shared_history_problem(profile)
     if problem:
         raise ValueError(problem)
     pool = kv_pool_blocks(profile)
