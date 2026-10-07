@@ -1,0 +1,15 @@
+# The window-WY probe's card jobs, one template per line: <template name without .env> <stop|optional> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. optional: a failure or a skip does not stop the window (its product is data).
+# NON-EXACT RESEARCH ONLY (docs/gdn-wy-probe.md): nothing here is a serving or traffic profile, nothing is deployed, and no verdict licenses serving.
+# These are the probe's slice of the owner's one combined card window; the integration step merges them into that window's ORDER. The numerics (E1) are NOT a card job: they run on CPU in
+# the qwen-gdn-wy-numerics workflow (tag experiment/gdn-wy-numerics-vN) and must be read BEFORE any of these: a numerics result that fails E1 ends the probe without a card.
+# Card use: one card at a time through the cardm step (C2_CARDS=pair, harness run_card_m.sh, which refuses the reserved board and a serving card without the override); no reset between
+# jobs, no agent stop or start here (the combined window's own steps do that).
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <condition>' means the jobs on the left run only if the condition holds, otherwise the driver skips them.
+# NEEDS W1-cardm-watcher W2-cardm-full <- scripts/ci/gdn_wy_block.py exists in the integration commit (the kernel is NOT built on this branch: docs/gdn-wy-probe.md, what remains)
+# NEEDS W2-cardm-full <- W1-cardm-watcher
+# READ RULES: W0 the controls causal and not blind, a_us and a2_us measured. W1 no watcher error or hang, no KILL. W2 the GDN_WY verdict line (CONTINUE only at full scope with a kernel).
+# Time (estimate): W0 45 min; W1 40 min and W2 120 min once the kernel exists.
+W0-cardm-baseline optional tp4-wy-probe-1 45
+W1-cardm-watcher stop tp4-wy-probe-1 40
+W2-cardm-full stop tp4-wy-probe-1 120
