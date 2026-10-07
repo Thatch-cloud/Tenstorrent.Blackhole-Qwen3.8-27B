@@ -114,6 +114,113 @@ def prefix_cache_admitted(cache, environ=None):
     return (sticky_sessions_enabled(environ) and environ.get(PREFIX_REUSE_FLAG) == '1'
             and getattr(cache, 'prefix_caching_hash_algo', None) == PREFIX_HASH_ALGO)
 
+# Engine reuse, parked per-slot engines (default off; the gate-only parked twins of the four-card profiles set it). One engine per pool slot is
+# built at attach on a synthetic request and REBOUND to each request instead of built per request (serving_parked_engines). On, and only on the
+# four-card shape it was ported to:
+# - QWEN_FAST_TP=4 (the pair's Stage E is the TP2 line's own, never merged here), C2-any and the extent readers
+#   (QWEN_FAST_ANY_REQUEST=1, QWEN_FAST_EXTENT_REPLAY=1);
+# - the packed step beside the sequential captures 1, 2 and 4 (QWEN_FAST_PACKED_STEP=1; capture_rows 4, which the attach itself checks), with
+#   four scheduler requests and one block, or eight and QWEN_FAST_M3_BLOCKS=2;
+# - captured proposals (no QWEN_FAST_EAGER_PROPOSAL) and the shared collectives (QWEN_FAST_SHARED_CCL=1);
+# - the verify trace reading every carry in place (QWEN_FAST_VERIFY_T1=1; the attach checks the block's own carries_in_place too), because a
+#   padded round would otherwise overwrite an idle parked slot's carry;
+# - QWEN_FAST_M3_REQUEST_WARM=1: the S8 hang class (a program first compiled after a block's first replay) is covered by that warm, not by the
+#   attach ordering alone;
+# - no lane or solo lane (they drive their own slot orders), no prompt-lookup draft (a rebind attaches none), no gather experiment.
+# QWEN_FAST_PARKED_DRAFTS=1 ("2c": the pair and quad traces bound to the slots) additionally needs the engines, the quad over both blocks
+# (QWEN_FAST_QUAD_DRAFT=1, QWEN_FAST_QUAD_DRAFT_BLOCKS=2), the live K/V banks (QWEN_FAST_FUSED_COMMIT_LIVE_BANKS=1), and no wide-drafter candidate
+# (QWEN_FAST_TP4_DRAFT_WIDE: a persistent L1 buffer allocated after a drafter capture could land on freed shard addresses a bound trace
+# overwrites on every replay) until an audited arm passes.
+# The names below are the whole QWEN_FAST_PARKED_ family: any other is refused, so a typo never reads as "off". Unset or '0', every path is
+# exactly what it was.
+PARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'
+PARKED_DRAFTS_FLAG = 'QWEN_FAST_PARKED_DRAFTS'
+PARKED_PREFIX = 'QWEN_FAST_PARKED_'
+PARKED_NAMES = ('QWEN_FAST_PARKED_ENGINES', 'QWEN_FAST_PARKED_DRAFTS', 'QWEN_FAST_PARKED_PROJECT_ROWS', 'QWEN_FAST_PARKED_AUDIT',
+                'QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT')
+# Gate-only knobs (serving_c2_contract.parked_problems refuses them outside a gate profile).
+PARKED_NEGATIVE_FLAG = 'QWEN_FAST_PARKED_NEGATIVE'
+PARKED_NEGATIVES = ('carry', 'drafter', 'pages', 'widths')
+PARKED_FAULT_FLAG = 'QWEN_FAST_PARKED_FAULT'
+PARKED_FAULTS = ('park', 'rebind')
+GATE_DRAM_BALLAST_FLAG = 'QWEN_FAST_GATE_DRAM_BALLAST'
+
+
+def parked_engines_enabled(environ=None):
+    """Whether QWEN_FAST_PARKED_ENGINES=1. Read per call; anything but unset, '0' or '1' is a configuration error, never a silent off."""
+    environ = os.environ if environ is None else environ
+    value = environ.get(PARKED_ENGINES_FLAG, '0')
+    if value not in ('0', '1'):
+        raise ValueError('%s must be 0 or 1, got %r' % (PARKED_ENGINES_FLAG, value))
+    return value == '1'
+
+
+def parked_engine_problems(environ, users):
+    """Every way the parked engines' environment is wrong, [] when none. Unknown QWEN_FAST_PARKED_ names are refused whether the flag is on or
+    not; every other check runs only with QWEN_FAST_PARKED_ENGINES=1 (the DRAFTS, AUDIT, NEGATIVE and FAULT values are checked whenever set)."""
+    problems = ['%s is not a parked-engines setting (the names are %s)' % (name, ', '.join(PARKED_NAMES))
+                for name in sorted(environ) if name.startswith(PARKED_PREFIX) and name not in PARKED_NAMES]
+    for name in (PARKED_DRAFTS_FLAG, 'QWEN_FAST_PARKED_AUDIT'):
+        if environ.get(name, '0') not in ('0', '1'):
+            problems.append('%s must be 0 or 1, got %r' % (name, environ.get(name)))
+    try:
+        enabled = parked_engines_enabled(environ)
+    except ValueError as error:
+        return problems + [str(error)]
+    if not enabled:
+        if environ.get(PARKED_DRAFTS_FLAG, '0') == '1':
+            problems.append('%s=1 needs %s=1' % (PARKED_DRAFTS_FLAG, PARKED_ENGINES_FLAG))
+        return problems
+    for name, wanted, why in (
+            (ANY_REQUEST_FLAG, '1', 'the parked engines serve C2-any requests'),
+            ('QWEN_FAST_EXTENT_REPLAY', '1', 'the packed blocks beside the parked engines are the S2 extent blocks'),
+            ('QWEN_FAST_PACKED_STEP', '1', 'the packed step is the four-user block'),
+            ('QWEN_FAST_SHARED_CCL', '1', 'a parked device keeps its collectives for the process'),
+            ('QWEN_FAST_TP', '4', 'this port serves the four-card mesh; the pair\'s Stage E is the other line\'s'),
+            ('QWEN_FAST_M3_REQUEST_WARM', '1', 'the S8 hang class (an engine program first compiled after a block\'s first replay) is covered '
+                                                 'by the request-width warm, not by the attach ordering alone'),
+            ('QWEN_FAST_VERIFY_T1', '1', 'a padded round writes the idle slot carry unless the trace reads every '
+                                         'carry in place, and parked slots are always lent')):
+        if environ.get(name) != wanted:
+            problems.append('%s=1 needs %s=%s (%s), not %s' % (PARKED_ENGINES_FLAG, name, wanted, why, environ.get(name, '(unset)')))
+    blocks = environ.get('QWEN_FAST_M3_BLOCKS', '')
+    if users == 4 and blocks not in ('', '1'):
+        problems.append('%s=1 at four scheduler requests needs one block (QWEN_FAST_M3_BLOCKS unset or 1), not %r' % (PARKED_ENGINES_FLAG, blocks))
+    elif users == 8 and blocks != '2':
+        problems.append('%s=1 at eight scheduler requests needs QWEN_FAST_M3_BLOCKS=2, not %r' % (PARKED_ENGINES_FLAG, blocks or '(unset)'))
+    elif users not in (4, 8):
+        problems.append('%s=1 needs four or eight scheduler requests (one or two packed blocks), not %r' % (PARKED_ENGINES_FLAG, users))
+    if environ.get('QWEN_FAST_EAGER_PROPOSAL') == '1':
+        problems.append('%s=1 needs captured proposals: QWEN_FAST_EAGER_PROPOSAL=1 has no trace to keep' % PARKED_ENGINES_FLAG)
+    for name in ('QWEN_FAST_LANE', 'QWEN_FAST_SOLO_LANE'):
+        if environ.get(name, '0') not in ('', '0'):
+            problems.append('%s=1 does not run beside %s: the lanes drive their own slot orders' % (PARKED_ENGINES_FLAG, name))
+    if environ.get('QWEN_FAST_LOOKUP_DRAFT', '').strip().lower() not in ('', '0', 'off'):
+        problems.append('%s=1 does not run beside QWEN_FAST_LOOKUP_DRAFT: a rebind attaches no prompt lookup' % PARKED_ENGINES_FLAG)
+    for name in ('QWEN_GDN_GROUPED_GATHER_ABBA', 'QWEN_GDN_GATE_EXP_ABBA'):
+        if environ.get(name, '0') != '0':
+            problems.append('%s=1 does not run beside a gather experiment (%s=%s)' % (PARKED_ENGINES_FLAG, name, environ.get(name)))
+    rows = environ.get('QWEN_FAST_PARKED_PROJECT_ROWS', '256')
+    if not (rows.isdigit() and rows == str(int(rows)) and (int(rows) == 0 or (int(rows) % 32 == 0 and int(rows) <= 2048))):
+        problems.append('QWEN_FAST_PARKED_PROJECT_ROWS must be 0 or a multiple of 32 up to 2048, got %r' % (rows,))
+    negative = environ.get(PARKED_NEGATIVE_FLAG)
+    if negative is not None and negative != '' and negative not in PARKED_NEGATIVES:
+        problems.append('%s must be one of %s, got %r' % (PARKED_NEGATIVE_FLAG, ', '.join(PARKED_NEGATIVES), negative))
+    fault = environ.get(PARKED_FAULT_FLAG)
+    if fault is not None and fault != '' and fault not in PARKED_FAULTS:
+        problems.append('%s must be one of %s, got %r' % (PARKED_FAULT_FLAG, ', '.join(PARKED_FAULTS), fault))
+    if environ.get(PARKED_DRAFTS_FLAG, '0') == '1':
+        for name, wanted, why in (('QWEN_FAST_QUAD_DRAFT', '1', 'the bound traces are the pair and block-quad ones'),
+                                  ('QWEN_FAST_QUAD_DRAFT_BLOCKS', '2', 'the book holds the eight-seat per-block quads'),
+                                  ('QWEN_FAST_FUSED_COMMIT_LIVE_BANKS', '1', 'a bound trace reads the pool slots\' active K/V banks, which '
+                                                                              'never move; its own placeholders would be per request')):
+            if environ.get(name) != wanted:
+                problems.append('%s=1 needs %s=%s (%s), not %s' % (PARKED_DRAFTS_FLAG, name, wanted, why, environ.get(name, '(unset)')))
+        if environ.get('QWEN_FAST_TP4_DRAFT_WIDE', '0') not in ('', '0'):
+            problems.append('%s=1 does not run beside QWEN_FAST_TP4_DRAFT_WIDE: an L1 buffer allocated after a drafter capture could land on '
+                            'freed shard addresses a bound trace overwrites on every replay (until an audited arm passes)' % PARKED_DRAFTS_FLAG)
+    return problems
+
 
 NATIVE_GDN_SLOTS = 8
 # The proposal block is 32 rows and the verify block is 32 or 64. capture_widths caps a
@@ -199,6 +306,11 @@ def validate_fast_config(config):
 
         if getattr(scheduler, 'scheduler_cls', None) in (None, ''):
             _install_one_in_flight(config)
+    # Engine reuse: only names and values the parked engines define, and only on the shape they were built for. Nothing is read from the
+    # environment beyond the QWEN_FAST_PARKED_ names unless the flag is on.
+    parked = parked_engine_problems(os.environ, _seqs)
+    if parked:
+        raise ValueError('Parked engines (QWEN_FAST_PARKED_ENGINES): %s' % '; '.join(parked))
     return dict(scheduler_requests=_seqs, native_gdn_slots=NATIVE_GDN_SLOTS, verifier_rows=16,
         physical_devices=2, context_tokens=model_len - OUTPUT_BUDGET,
         output_budget=OUTPUT_BUDGET, max_model_len=model_len,

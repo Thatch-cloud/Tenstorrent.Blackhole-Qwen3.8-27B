@@ -835,6 +835,14 @@ def unwrap_view(device):
         device.proposal_capture = capture._original
 
 
+_ACTIVE = []
+
+
+def active_set():
+    """The process's parked set, or None: how the worker hook's detach finds it for a request that a cold build served."""
+    return _ACTIVE[0] if _ACTIVE else None
+
+
 class ParkedEngineSet:
     """Parked engines, one per pool slot, built at attach after the packed blocks and closed before them (the attach registers it after
     them).
@@ -909,6 +917,7 @@ class ParkedEngineSet:
             import dflash_packed_proposal_coordinator as coordinator
 
             self.unregister_book = coordinator.register_draft_book(self.book)
+        _ACTIVE.append(self)
 
     # -- building ------------------------------------------------------------------------------------------------------------------
     def reserve(self):
@@ -1422,6 +1431,13 @@ class ParkedEngineSet:
             verifier_engine.note_prefill()
         return reparked
 
+    def after_cold_detach(self):
+        """The worker hook's release when a request that a cold build served detaches (its device closed, its slot free): one unparked free slot
+        re-parked now, when the split allows, so a faulted slot does not serve the next arrival's cold build too. dict(reparked=slot or None)."""
+        if self.closed or self.off:
+            return None
+        return dict(reparked=self.repark_one())
+
     def repark_candidate(self, entry):
         return entry.state == 'unparked' and not entry.slot.lent
 
@@ -1555,6 +1571,8 @@ class ParkedEngineSet:
         if self.closed:
             return
         self.closed = True
+        if self in _ACTIVE:
+            _ACTIVE.remove(self)
         if self.ballast is not None:
             self.ballast.close()
             self.ballast = None
@@ -1590,5 +1608,6 @@ def release_parked(coordinator, request):
     entry = getattr(request, 'parked_slot', None)
     owner = getattr(entry, 'owner', None)
     if owner is None:
-        return None
+        cold = active_set()
+        return None if cold is None else cold.after_cold_detach()
     return owner.after_park(entry, coordinator)

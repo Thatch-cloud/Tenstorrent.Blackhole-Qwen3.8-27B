@@ -93,11 +93,23 @@ GATE_SWITCH = 'QWEN_C2_GATE'
 # model route continues its own suspended scratch. LEVERN_AUDIT is the digest instrument and also stands alone, as the NON-interleaved control.
 LEVERN_SWITCH = 'QWEN_FAST_LEVER_N'
 LEVERN_AUDIT = 'QWEN_FAST_LEVERN_AUDIT'
-LEVERN_ENV_FLAGS = ('QWEN_FAST_LEVER_N', 'QWEN_FAST_LEVERN_AUDIT', 'QWEN_FAST_LEVERN_STEP_TOKENS', 'QWEN_FAST_LEVERN_SOLO_STEP_TOKENS',
+LEVERN_ENV_FLAGS = ('QWEN_FAST_LEVER_N', 'QWEN_FAST_LEVERN_AUDIT', 'QWEN_FAST_LEVERN_BUILD_MS', 'QWEN_FAST_LEVERN_STEP_TOKENS', 'QWEN_FAST_LEVERN_SOLO_STEP_TOKENS',
                     'QWEN_FAST_LEVERN_PREFILL_SHARE', 'QWEN_FAST_LEVERN_ROUNDS', 'QWEN_FAST_LEVERN_MAX_ROUNDS', 'QWEN_FAST_LEVERN_FAULT',
                     'QWEN_FAST_LEVERN_TTFT_TARGET_S', 'QWEN_FAST_LEVERN_SHORT_TOKENS', 'QWEN_FAST_LEVERN_PARK', 'QWEN_FAST_LEVERN_PARK_SLOTS',
                     'QWEN_FAST_LEVERN_MAX_PARK_S', 'QWEN_FAST_LEVERN_EPOCH_SCOPE')
 LEVERN_PLATFORM_MODULE = 'vllm_tt_plugin.platform'
+# Engine reuse, parked per-slot engines (serving_fast_policy.PARKED_ENGINES_FLAG; default off). A gate-only profile's own switches: the fast
+# path's engine is rebound to each request instead of built (serving_parked_engines), and with PARKED_DRAFTS the pair and quad drafter traces are
+# bound to the slots too. Only a profile sets them, and only on the four-card S2 shape they need (parked_problems). The audit knob may be a gate
+# profile's own (the audit twin sets it, and its flag-off control carries it too); the negative controls, the injected faults and the ballast are
+# the gate's alone: no profile carries them, and outside a gate profile the boot refuses them in the process environment.
+PARKED_SWITCH = 'QWEN_FAST_PARKED_ENGINES'
+PARKED_DRAFTS = 'QWEN_FAST_PARKED_DRAFTS'
+PARKED_PREFIX = 'QWEN_FAST_PARKED_'
+PARKED_NAMES = ('QWEN_FAST_PARKED_ENGINES', 'QWEN_FAST_PARKED_DRAFTS', 'QWEN_FAST_PARKED_PROJECT_ROWS', 'QWEN_FAST_PARKED_AUDIT',
+                'QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT')
+PARKED_GATE_ONLY = ('QWEN_FAST_PARKED_AUDIT', 'QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT', 'QWEN_FAST_GATE_DRAM_BALLAST')
+PARKED_WINDOW_KNOBS = ('QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT', 'QWEN_FAST_GATE_DRAM_BALLAST')
 # The sources the merged route must carry (levern_route.SOURCES, pinned equal by test_levern_prefix_contract).
 MERGED_SOURCES = ('COLD', 'CHECKPOINT', 'SCRATCH', 'PARKED')
 
@@ -314,6 +326,10 @@ def apply_environment(profile, environ=None):
     for name in LEVERN_ENV_FLAGS:
         if name not in profile['env']:
             environ.pop(name, None)
+    # ...and engine reuse: an inherited value must not turn the parked engines (or their bound drafter traces) on under a profile that never asked.
+    for name in (PARKED_SWITCH, PARKED_DRAFTS):
+        if name not in profile['env']:
+            environ.pop(name, None)
     return environ
 
 
@@ -401,6 +417,54 @@ def prefix_reuse_problems(profile):
     if engine.get('prefix-caching-hash-algo') != PREFIX_HASH_ALGO:
         problems.append('prefix-caching-hash-algo must be %s (the block-hash chain a hit\'s exactness leans on), '
                         'not %r' % (PREFIX_HASH_ALGO, engine.get('prefix-caching-hash-algo')))
+    return problems
+
+
+def parked_engines(profile):
+    """Whether the profile turns engine reuse on (the gate-only ...-parked profiles)."""
+    return str((profile.get('env') or {}).get(PARKED_SWITCH, '')) == '1'
+
+
+def gate_profile(profile):
+    """Whether the profile is a gate's: its name ends in -gate, or it is gate_only."""
+    return str(profile.get('name', '')).endswith('-gate') or profile.get('gate_only') is True
+
+
+def parked_problems(profile, environ=None):
+    """Every way engine reuse is set without what it needs, [] when none: the switch is the fast path's (qwen_fast_t16), the four-card mesh's
+    and a gate-only profile's (nothing serves traffic on it until its exactness, lifecycle, memory and hang gates have run), and needs the S2
+    shape beside it - C2-any, the extent readers, four or eight scheduler requests. The window knobs (negative controls, injected faults, the
+    ballast) are refused in a profile's own env, the audit knob in a profile that is not a gate's, and all four in the process environment outside
+    a gate profile. Any other QWEN_FAST_PARKED_ name is refused. The drafts switch (the bound pair and quad traces) needs the engines."""
+    environ = {} if environ is None else environ
+    env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
+    engine = profile.get('engine') or {}
+    problems = ['%s is not a parked-engines setting' % name for name in sorted(env) if name.startswith(PARKED_PREFIX) and name not in PARKED_NAMES]
+    value = env.get(PARKED_SWITCH)
+    if value is not None and value not in ('0', '1'):
+        problems.append('%s=%r is neither 1 nor 0' % (PARKED_SWITCH, value))
+    problems += ['%s is a gate window knob: no profile sets it' % name for name in PARKED_WINDOW_KNOBS if name in env]
+    if 'QWEN_FAST_PARKED_AUDIT' in env and not gate_profile(profile):
+        problems.append('QWEN_FAST_PARKED_AUDIT is a gate instrument: only a gate profile sets it')
+    if not gate_profile(profile):
+        problems += ['%s is set outside a gate profile: it exists for a gate and must never reach traffic' % name
+                     for name in PARKED_GATE_ONLY if name in environ]
+    if env.get(PARKED_DRAFTS) not in (None, '0', '1'):
+        problems.append('%s=%r is neither 1 nor 0' % (PARKED_DRAFTS, env.get(PARKED_DRAFTS)))
+    if env.get(PARKED_DRAFTS) == '1' and not parked_engines(profile):
+        problems.append('%s=1 needs %s=1' % (PARKED_DRAFTS, PARKED_SWITCH))
+    if not parked_engines(profile):
+        return problems
+    if profile.get('gate_only') is not True:
+        problems.append('%s=1 needs a gate-only profile (nothing serves traffic on engine reuse until its gates have run)' % PARKED_SWITCH)
+    if not (engine.get('additional-config') or {}).get('qwen_fast_t16'):
+        problems.append('%s=1 is a fast path switch, but the profile does not run the fast path (qwen_fast_t16)' % PARKED_SWITCH)
+    for name, wanted in (('QWEN_FAST_ANY_REQUEST', '1'), ('QWEN_FAST_EXTENT_REPLAY', '1'), (FAST_TP_ENV, '4')):
+        if env.get(name) != wanted:
+            problems.append('%s=1 needs %s=%s in the profile (the four-card S2 shape the parked engines serve)' % (PARKED_SWITCH, name, wanted))
+    seats = engine.get('max-num-seqs')
+    if seats not in (4, 8):
+        problems.append('%s=1 needs max-num-seqs 4 or 8 (one parked engine per packed-block user), not %r' % (PARKED_SWITCH, seats))
     return problems
 
 
@@ -1094,6 +1158,9 @@ def boot(environ=None, orig_argv=None):
     problems = levern_problems(profile)
     if problems:
         raise ValueError('profile %s cannot serve Lever N exactly: %s' % (profile['name'], '; '.join(problems)))
+    problems = parked_problems(profile, environ)
+    if problems:
+        raise ValueError('profile %s cannot serve parked engines: %s' % (profile['name'], '; '.join(problems)))
     problems = mesh_problems(profile)
     if problems:
         raise ValueError('profile %s cannot open its mesh: %s' % (profile['name'], '; '.join(problems)))

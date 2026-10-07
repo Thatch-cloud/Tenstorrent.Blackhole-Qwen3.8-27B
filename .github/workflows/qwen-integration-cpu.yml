@@ -295,3 +295,7 @@ jobs:
           python -B -m unittest test_levern_smoke
           python -B -m unittest test_levern_prefix_route test_levern_prefix_graft test_levern_prefix_scheduler test_levern_prefix_lifecycle
           python -B -m unittest test_levern_prefix_contract test_levern_prefix_prestage
+      - name: Engine reuse at TP4 (parked per-slot engines, flag off by default)
+        run: |
+          python -B -m unittest test_parked_tp4_census test_parked_tp4_engine test_parked_tp4_device test_parked_tp4_set
+          python -B -m unittest test_parked_tp4_wiring

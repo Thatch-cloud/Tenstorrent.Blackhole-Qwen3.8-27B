@@ -33,11 +33,36 @@ class RuntimeAttachmentTests(unittest.TestCase):
                  replay_group_rows=None, block_stream=STREAM, extra_env=None, refused=False, padded=None,
                  capture_position=None, block_extent=None, refused_in_attach=None, refused_after_blocks=None,
                  admission=None, pool_refused=None, blocks_refused=None, real_admission=(), pool_extra=None,
-                 m3_blocks=None, carries_in_place=True, phase_failure=None):
+                 m3_blocks=None, carries_in_place=True, phase_failure=None, parked=None):
         # QWEN_FAST_M3_BLOCKS (`m3_blocks`, 2 at eight requests): two 64-row M3 blocks built in two phases (A1c), each
         # fake block recording 'block_warm', 'block_capture' and 'block_finish' among the events, and reporting
         # `carries_in_place` as given. `phase_failure` is the (phase method name, exception) a fake block fails with.
         events = []
+        # Engine reuse (QWEN_FAST_PARKED_ENGINES): `parked`, a dict, sets the flag and stands a recording fake in for
+        # serving_parked_engines.ParkedEngineSet ('parked_build' at its build, 'parked_close' at its close; the
+        # constructor's keywords in self.parked_calls). None leaves both alone.
+        self.parked_calls = []
+        # The fake set's idle and poll_off (the lifecycle's idle moment and kill switch), arrival_terms and arrival_rebind_bytes (the DRAM
+        # registration's parked terms), one fake per attach in self.parked_sets.
+        self.parked_sets = []
+
+        def build_parked(**options):
+            self.parked_calls.append(options)
+            built = SimpleNamespace(build=lambda: events.append('parked_build'),
+                                    close=lambda: events.append('parked_close'), idle=Mock(), poll_off=Mock(),
+                                    parked_count=Mock(return_value=0),
+                                    arrival_terms=Mock(return_value=None), arrival_rebind_bytes=Mock(return_value=100))
+            self.parked_sets.append(built)
+            return built
+
+        # (The policy's own parked checks - serving_fast_policy.parked_engine_problems, held by test_parked_tp4_policy - read
+        # the whole S2 environment, which this harness does not build; the attach logic is what is under test here.)
+        parked_patch = (patch('serving_parked_engines.ParkedEngineSet', side_effect=build_parked)
+                        if parked is not None else nullcontext())
+        policy_patch = (patch('serving_fast_policy.parked_engine_problems', return_value=[])
+                        if parked is not None else nullcontext())
+        parked_built = ['parked_build'] if parked is not None else []
+        parked_closed = ['parked_close'] if parked is not None else []
         # S2 (QWEN_FAST_EXTENT_REPLAY): the flag in the final environment is what the pool must be told and
         # what every fake block reports as its `extent`, as PackedVerifierEngine does over that pool;
         # `block_extent` makes the blocks report something else ('missing': no attribute at all).
@@ -159,6 +184,8 @@ class RuntimeAttachmentTests(unittest.TestCase):
             env['QWEN_FAST_EXTENT_REPLAY'] = '1'
         if m3_blocks is not None:
             env['QWEN_FAST_M3_BLOCKS'] = str(m3_blocks)
+        if parked is not None:
+            env['QWEN_FAST_PARKED_ENGINES'] = '1'
         env.update(extra_env or {})
         extent = env.get('QWEN_FAST_EXTENT_REPLAY') == '1'
         if block_extent != 'missing':
@@ -176,6 +203,7 @@ class RuntimeAttachmentTests(unittest.TestCase):
                 patch.object(serving_runtime, 'PreparedDraftWeights', side_effect=build_weights) as prepared, \
                 patch.object(serving_runtime, 'pindiag', side_effect=diag) as diagnostic, \
                 patch('packed_verifier.PackedVerifierEngine', side_effect=build_block) as packed_engine, \
+                parked_patch, policy_patch, \
                 patch('sampling_link_policy.sampler_links', side_effect=lambda *args: nullcontext()) as links, \
                 patch.object(serving_runtime, 'FastServingLifecycle', return_value=lifecycle,
                              side_effect=RuntimeError('attach failed') if attach_fail else None) as install, \
@@ -403,13 +431,13 @@ class RuntimeAttachmentTests(unittest.TestCase):
                                               'weights_close', 'runtime_exit', 'pool_close'])
                 elif attach_fail:
                     self.assertEqual(events, [*admitted, 'pool_build', *pool_checked, 'runtime_enter', 'weights_build',
-                                              *block_built, *blocks_checked, ('diag', self.ATTACH_FAILED),
-                                              *block_closed, 'weights_close', 'runtime_exit',
+                                              *block_built, *blocks_checked, *parked_built, ('diag', self.ATTACH_FAILED),
+                                              *parked_closed, *block_closed, 'weights_close', 'runtime_exit',
                                               'pool_close'])
                 else:
                     self.assertEqual(events, [*admitted, 'pool_build', *pool_checked, 'runtime_enter', 'weights_build',
-                                              *block_built, *blocks_checked, 'request', 'lifecycle_close',
-                                              *block_closed, 'weights_close', 'runtime_exit',
+                                              *block_built, *blocks_checked, *parked_built, 'request', 'lifecycle_close',
+                                              *parked_closed, *block_closed, 'weights_close', 'runtime_exit',
                                               'pool_close'])
 
     def test_combined_recipe_lives_until_request_traces_are_closed(self):

@@ -47,6 +47,13 @@ THE FLAGS (all default off or default value; every malformed value is a ValueErr
                                                     interleaved arm is compared with)
     QWEN_FAST_LEVERN_FAULT              unset       gate only negative control: foreign | final-hold
 
+ENGINE REUSE (serving_parked_engines; meaningful only beside QWEN_FAST_LEVER_N=1):
+    QWEN_FAST_LEVERN_BUILD_MS           unset       the deadline governor's cost of one admission's engine: unset is today's single fixed
+                                                    BUILD_MS = 2500 per governed prefill queue; a number of ms replaces that constant (the
+                                                    A/B); 'learned' charges EACH pending prefill the cost of the slot it will take - a rebind
+                                                    while parked engines remain free, else a build - from an EWMA of what the bridge factory
+                                                    measured (AdmissionCost; seeds 2500 ms a build, 400 ms a rebind)
+
 THE MERGED ROUTE (Lever N with prefix reuse, docs/lever-n-prefix-merged-route.md; every flag below is read by merged_config and is
 meaningful only beside QWEN_FAST_LEVER_N=1):
     QWEN_FAST_LEVERN_TTFT_TARGET_S      180         the deadline governor's target T* in whole seconds (a client deadline for a large
@@ -83,12 +90,13 @@ PARK_FLAG = 'QWEN_FAST_LEVERN_PARK'
 PARK_SLOTS_FLAG = 'QWEN_FAST_LEVERN_PARK_SLOTS'
 MAX_PARK_FLAG = 'QWEN_FAST_LEVERN_MAX_PARK_S'
 EPOCH_FLAG = 'QWEN_FAST_LEVERN_EPOCH_SCOPE'
+BUILD_MS_FLAG = 'QWEN_FAST_LEVERN_BUILD_MS'
 PARK_MODES = ('0', 'host')
 EPOCH_SCOPES = ('global', 'route')
 MERGED_FLAGS = (TTFT_FLAG, SHORT_FLAG, PARK_FLAG, PARK_SLOTS_FLAG, MAX_PARK_FLAG, EPOCH_FLAG)
 # Every flag of this module: a sibling set while the master switch is off is a configuration error the contract names
 # (a typo must not leave an arm silently running the control).
-SIBLING_FLAGS = (STEP_FLAG, SOLO_FLAG, SHARE_FLAG, ROUNDS_FLAG, MAX_ROUNDS_FLAG, FAULT_FLAG) + MERGED_FLAGS
+SIBLING_FLAGS = (STEP_FLAG, SOLO_FLAG, SHARE_FLAG, ROUNDS_FLAG, MAX_ROUNDS_FLAG, FAULT_FLAG, BUILD_MS_FLAG) + MERGED_FLAGS
 ALL_FLAGS = (FLAG, AUDIT_FLAG) + SIBLING_FLAGS
 
 DEFAULT_STEP = CHUNK
@@ -262,6 +270,23 @@ def merged_config(environ=None):
                   _whole(environ, MAX_PARK_FLAG, DEFAULT_MAX_PARK_S, 1, 3600), scope)
 
 
+def build_ms_mode(environ=None):
+    """QWEN_FAST_LEVERN_BUILD_MS: None when unset (today's fixed BUILD_MS, charged once), 'learned', or a number of ms (> 0) that replaces
+    BUILD_MS. Strict: anything else is a ValueError."""
+    value = (os.environ if environ is None else environ).get(BUILD_MS_FLAG)
+    if value is None:
+        return None
+    if value == 'learned':
+        return value
+    try:
+        ms = float(value)
+    except ValueError:
+        ms = None
+    if ms is None or not math.isfinite(ms) or ms <= 0 or ms > 60000:
+        raise ValueError('%s must be "learned" or a number of milliseconds in (0, 60000], got %r' % (BUILD_MS_FLAG, value))
+    return ms
+
+
 def fault(environ=None):
     """The negative control QWEN_FAST_LEVERN_FAULT names, or None."""
     value = (os.environ if environ is None else environ).get(FAULT_FLAG)
@@ -277,6 +302,7 @@ def config_problems(environ=None):
         audit_enabled(environ)
         config(environ)
         merged_config(environ)
+        build_ms_mode(environ)
     except ValueError as failure:
         problems.append(str(failure))
         on = environ.get(FLAG) == '1'
@@ -411,20 +437,96 @@ class StepTimes(object):
         return total + TRANSITION_MS * (steps + 1)
 
 
-def effective_share(base, target_s, pending, now, build_ms=BUILD_MS):
+# ENGINE REUSE: what one admission costs, learned (QWEN_FAST_LEVERN_BUILD_MS=learned). A per-request build is 2.1-2.7 s device-exclusive; a rebind of
+# a parked engine is an estimated 0.2-0.4 s. The bridge factory observes the measured time of each admission's request creation; the governor
+# charges each pending prefill the cost of the slot it will take. Shared with the scheduler the way the DRAM predicate and the lifecycle's prefill
+# gate are: parked under a fixed sys.modules key, so neither imports the other.
+COST_KEY = '_qwen_admission_cost'
+COST_SEED_MS = dict(build=BUILD_MS, rebind=400.0)
+COST_MIN_MS, COST_MAX_MS = 100.0, 6000.0
+COST_WEIGHT = 0.2
+COST_LINE = '[LEVERN] admission cost kind={} ms={:.1f} ewma={:.1f}'
+
+
+class AdmissionCost(object):
+    """EWMA (weight 0.2, clamp 100-6000 ms) of the measured admission cost per kind ('build' or 'rebind'), seeded 2500 and 400 ms."""
+
+    def __init__(self):
+        self.ewma = dict(COST_SEED_MS)
+        self.observed = dict(build=0, rebind=0)
+        # a zero-argument callable answering how many parked engines are free right now (ParkedEngineSet.parked_count), or None
+        self.parked_free = None
+
+    def observe(self, kind, ms):
+        if kind not in self.ewma:
+            raise ValueError('an admission is a build or a rebind, got %r' % (kind,))
+        if not ms > 0:
+            return self.ewma[kind]
+        self.ewma[kind] = min(COST_MAX_MS, max(COST_MIN_MS, (1.0 - COST_WEIGHT) * self.ewma[kind] + COST_WEIGHT * ms))
+        self.observed[kind] += 1
+        return self.ewma[kind]
+
+    def predict(self, kind):
+        return self.ewma[kind]
+
+    def per_pending(self, count):
+        """The predicted cost of each of `count` pending prefills in service order: a rebind while parked slots remain free (the first
+        ones take them), else a build."""
+        try:
+            free = int(self.parked_free()) if callable(self.parked_free) else 0
+        except Exception:
+            free = 0
+        return [self.ewma['rebind'] if index < free else self.ewma['build'] for index in range(count)]
+
+
+def admission_cost(create=True):
+    """The process's AdmissionCost (registered under COST_KEY), created on first use; None when absent and not `create`."""
+    import sys
+    import types
+
+    holder = sys.modules.get(COST_KEY)
+    if holder is None:
+        if not create:
+            return None
+        holder = types.ModuleType(COST_KEY)
+        holder.cost = AdmissionCost()
+        sys.modules[COST_KEY] = holder
+    return holder.cost
+
+
+def observe_admission_cost(kind, ms, log=None):
+    """The bridge factory's report of one admission's measured cost; a no-op unless QWEN_FAST_LEVERN_BUILD_MS=learned."""
+    if build_ms_mode() != 'learned':
+        return None
+    cost = admission_cost()
+    value = cost.observe(kind, ms)
+    if log is not None:
+        log(COST_LINE, kind, ms, value)
+    return value
+
+
+def effective_share(base, target_s, pending, now, build_ms=BUILD_MS, builds=None):
     """f_eff = clamp(max(f_base, max_j (sum_{i<=j} D_i + B) / (T* - (now - arrival_j))), f_base, 1): the prefill's share of the wall time
     that still lets every pending prefill j (in service order, the in-flight one first) finish by T* seconds after its arrival.
     `pending` is [(arrival_s, remaining_device_ms)]. target 0 turns the governor off; a pending prefill already past T* gets 1.0 (nothing
-    is owed to the decoders: the prefill finishes as fast as it can, today's stall, chunked). Never below `base`."""
+    is owed to the decoders: the prefill finishes as fast as it can, today's stall, chunked). Never below `base`.
+
+    `builds` (engine reuse, QWEN_FAST_LEVERN_BUILD_MS=learned only; None otherwise, and then every value is today's): the predicted admission
+    cost of each pending prefill in service order, charged per prefill - f_eff uses (sum_{i<=j} D_i + sum_{i<=j} B_i) / slack_j - where today's
+    formula charges `build_ms` once, whatever the queue (it undercounts the builds of the prefills ahead of j)."""
     if not target_s or base >= 1.0 or not pending:
         return base
-    needed, cumulative = base, 0.0
-    for arrival, remaining in pending:
+    needed, cumulative, charged = base, 0.0, 0.0
+    for index, (arrival, remaining) in enumerate(pending):
         cumulative += remaining
         slack = target_s - (now - arrival)
         if slack <= 0:
             return 1.0
-        needed = max(needed, (cumulative + build_ms) / (slack * 1000.0))
+        if builds is not None:
+            charged += builds[index] if index < len(builds) else builds[-1] if builds else build_ms
+            needed = max(needed, (cumulative + charged) / (slack * 1000.0))
+        else:
+            needed = max(needed, (cumulative + build_ms) / (slack * 1000.0))
         if needed >= 1.0:
             return 1.0
     return min(1.0, max(base, needed))
@@ -475,6 +577,8 @@ class Alternator(object):
         # The deadline governor's input, set by the scheduler before every begin(): [(arrival_s, remaining_device_ms)] in service order.
         self.pending_hint = []
         self.share = cfg.share
+        # QWEN_FAST_LEVERN_BUILD_MS (engine reuse): None (unset: BUILD_MS once), 'learned', or a fixed number of ms. Read once, like cfg.
+        self.build_mode = build_ms_mode()
         self.reset()
         self.round_ms = INITIAL_ROUND_MS
 
@@ -528,7 +632,14 @@ class Alternator(object):
         if merged is None or not merged.ttft_s or self.cfg.rounds is not None:
             self.share = self.cfg.share
         else:
-            self.share = effective_share(self.cfg.share, merged.ttft_s, self.pending_hint, self.wall())
+            mode = getattr(self, 'build_mode', None)
+            if mode is None:
+                self.share = effective_share(self.cfg.share, merged.ttft_s, self.pending_hint, self.wall())
+            elif mode == 'learned':
+                self.share = effective_share(self.cfg.share, merged.ttft_s, self.pending_hint, self.wall(),
+                                             builds=admission_cost().per_pending(len(self.pending_hint)))
+            else:
+                self.share = effective_share(self.cfg.share, merged.ttft_s, self.pending_hint, self.wall(), build_ms=mode)
         return self.share
 
     def begin(self, decodes, pending):

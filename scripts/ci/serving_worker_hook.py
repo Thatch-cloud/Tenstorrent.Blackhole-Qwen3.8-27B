@@ -211,6 +211,25 @@ def release_dead_proposals(hook):
         return None
 
 
+# Engine reuse's flag (serving_parked_engines.FLAG; the test pins the two equal). Read here from the environment, so a detach with the flag off
+# imports nothing.
+PARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'
+
+
+def release_parked(hook, bridge):
+    """Engine reuse (QWEN_FAST_PARKED_ENGINES=1 only; unset, nothing is read, imported or called): after a detached request closed - which
+    parked its slot's engine and device instead of closing them (serving_request_factory.rebind_parked) - its device's pair and quad traces go
+    at once (E1: the coordinator's release_parked; release_closed cannot see a device that never closed; with the draft book they stay), and its
+    released single-user capture is rebuilt when the DRAM split allows, and one unparked slot is re-parked (serving_parked_engines.release_parked
+    -> ParkedEngineSet.after_park). A request today's build served (an unparked slot) has nothing here. A failed retirement is logged there and
+    left to the coordinator's generation check; a failed rebuild is logged and leaves the single released."""
+    if os.environ.get(PARKED_ENGINES_FLAG) != '1':
+        return None
+    import serving_parked_engines
+
+    return serving_parked_engines.release_parked(getattr(hook, '_packed_coordinator', None), getattr(bridge, 'request', None))
+
+
 def prepare_pipelined_drafts(bridges):
     """QWEN_FAST_PIPELINED_PROPOSALS phase A: enqueue every eligible bridge's
     proposal device work (DFlashDevice.prepare_device -> dflash_proposal_trace.
@@ -314,6 +333,7 @@ class FastWorkerHook:
         if getattr(self, 'lanes', None) is not None:
             self.lanes.release(request_id)
         release_dead_proposals(self)
+        release_parked(self, bridge)
         note_fixture_writer('detach')
         return self.bridges
 
