@@ -19,8 +19,8 @@ engine's metrics gives the name prefix with --platform-prefix.
 Subcommands.
   check     Reads a log window (and optionally a /metrics scrape) and says which of the lines the rollback rule needs are present. It prints
             counts, never log text. Exit 0 = every required signal present, 2 = a required signal absent while requests ran, 3 = no
-            traffic in the window, or only single-user decode steps when the missing signals are the per-user audit lines of a packed round (inconclusive:
-            send two or more concurrent requests and rerun), 4 = the metrics URL did not answer. The one-off boot lines
+            traffic in the window, or fewer than 5 decode steps with two or more users when the missing signals are the per-user audit lines of a packed round
+            (inconclusive: send two or more concurrent requests and rerun), 4 = the metrics URL did not answer. The one-off boot lines
             (`lever N installed`) scroll out of a tail window: the wrapper counts them over the whole file and passes --boot-count.
   capture   Reads a log stream and appends one JSON line per decode round, per Lever N request and per event to daily files in --out
             (rounds-DAY.jsonl, requests-DAY.jsonl, events-DAY.jsonl) and runs the watcher below. Nothing in those files carries a token id,
@@ -149,6 +149,7 @@ STALE_S = 60.0               # a Lever N prefill with no step line for this long
 FORGET_S = 3600.0            # ... and is forgotten altogether after this long
 LOAD_EVERY_S = 10.0          # the host load average is sampled this often and stamped on every round
 FOLLOW_MARKER = '[prod-telemetry] follow'   # printed by the capture wrapper when it (re)attaches to an engine log: the old stats line is forgotten
+MIN_MULTI_STEPS = 5          # the check calls a window packed-capable only with this many decode steps carrying two or more users
 NATIVE_CONFIRM_S = 45.0      # a native error text is a death only when no '[PHASE] execute' line follows for this long with a request live (or the API is gone)
 ROWS_PER_USER_MAX = 16       # a decode step carries at most (draft tokens + 1) rows per live user (dflash 15 + 1); a step with more rows per user is a prefill chunk
 MAINT_MAX_S = 12 * 3600.0    # a maintenance marker older than this is ignored: a forgotten marker must not switch Tier 0 off for good
@@ -353,6 +354,8 @@ class Extractor(object):
         if decode:
             self.counts['decode'] += 1
             self.max_live = max(self.max_live, cached)
+            if cached >= 2:
+                self.counts['decode_multi'] += 1
         previous = self.current
         after_prefill = bool(previous and (previous['prefill'] or previous['new'] > 0))
         if self.pending is not None and decode:
@@ -969,10 +972,12 @@ def check_log(lines, expect_levern=False, boot=None, live_gauges=None):
     traffic = counts['execute'] > 0 or counts['stats_busy'] > 0
     verdict = 'PASS' if not absent else ('FAIL' if traffic else 'IDLE')
     note = None
-    if verdict == 'FAIL' and set(absent) <= {'packed_audit', 'rounds_packed'} and extractor.max_live < 2:
-        # a packed round (one audit line per live user) exists only with two or more users live: a window with one user decoding on the single path cannot show it
+    if verdict == 'FAIL' and set(absent) <= {'packed_audit', 'rounds_packed'} and counts['decode_multi'] < MIN_MULTI_STEPS:
+        # a packed round (one audit line per live user) exists only with two or more users live: a window in which one user decodes on the single path (a step or two of ramp
+        # between users does not make a packed round) cannot show it
         verdict = 'IDLE'
-        note = 'only single-user decode steps in the window (at most %d live): the per-user audit lines exist only for packed rounds with two or more users; send two or more concurrent requests and rerun' % extractor.max_live
+        note = ('%d decode steps with two or more users live in the window (under %d, at most %d live at once): the per-user audit lines exist only for packed rounds; '
+                'send two or more concurrent requests and rerun' % (counts['decode_multi'], MIN_MULTI_STEPS, extractor.max_live))
     return dict(verdict=verdict, absent=absent, note=note, max_live=extractor.max_live, window=dict(first=extractor.first, last=extractor.last), counts=dict(counts),
                 signals=rows)
 

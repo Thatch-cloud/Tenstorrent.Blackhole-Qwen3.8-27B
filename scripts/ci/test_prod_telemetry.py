@@ -618,6 +618,8 @@ class CheckTests(unittest.TestCase):
         self.assertEqual((report['verdict'], report['max_live']), ('IDLE', 1))
         self.assertIn('two or more concurrent requests', report['note'])
         self.assertIn('packed_audit', report['absent'])
+        ramp = [line for line in decode_rounds(20, live=1) if '[PACKED]' not in line] + [execute(T0 + timedelta(seconds=9), 16, 0, 2)] + [stats(2, 0)]
+        self.assertEqual(pt.check_log(ramp)['verdict'], 'IDLE')          # one step of ramp to two users is not a packed window (seen on the running image)
         broken = pt.check_log([line for line in decode_rounds(20, live=1) if '[PHASE]' not in line] + [stats(1, 0)])    # a missing phase line is still a failure
         self.assertEqual(broken['verdict'], 'FAIL')
 
