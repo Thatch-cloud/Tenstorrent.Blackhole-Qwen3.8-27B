@@ -29,10 +29,13 @@ per-round histogram is private; `--commit-hist FILE` takes it as {"n": count}) o
 the second window of a 32-row block is exercised.
 
 The report is one JSON object (kind gdn-wy-numerics); the last stdout line is a one-line summary, then the same object's `acceptance`.
-Exit code 0 when the E1 criterion holds, 1 when it does not, 2 on a usage error. The criterion (E1): the window form's error against
-fp64 is no worse than the served chain's (ratio <= 1.00, strict: a tie a hair over fails and `e1_worst_ratio` says by how much), in the
-bf16 class, for the state and the output, over every drift case, and nothing is non-finite. It is a research criterion: `contract.byte_identical_to_served` is false whenever any byte differs, and that is what
-rules the form out of serving.
+Exit code 0 when the E1 criterion holds, 1 when it does not (a RESULT), 2 on a usage error, 3 when the run crashed (a partial report may
+exist, without `acceptance`: a crash is never a result). The criterion (E1, the plan's: TF32 operands, fp32 accumulation, bf16 state at the
+window boundaries): the window form's error against fp64 is no worse than the served chain's (ratio <= 1.00, strict: a tie a hair over
+fails and `e1_worst_ratio` says by how much), for the state and the output, over every drift case, with the state error taken at EVERY
+cycle, and nothing is non-finite. The bf16-only class (no TF32 rounding of operands) is reported as a second row (`e1_bf16_*`), not
+gated. It is a research criterion: `contract.byte_identical_to_served` is false whenever any byte differs, and that is what rules the form
+out of serving.
 """
 
 import argparse
@@ -43,6 +46,7 @@ import platform
 import re
 import sys
 import time
+import traceback
 
 import torch
 
@@ -50,8 +54,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import gdn_wy_model as M  # noqa: E402
 from gdn_wy_model import (DK, DV, F32, F64, MODELS, NK, NV, T, TAU, USERS, bf16, bits_equal, cat_rows, cmp, draw_commits,  # noqa: E402
-                          draw_rows, gate_constants, gated, geometric_p, prep, rows_of, seq_round, short, take_rows, wy_commit,
-                          wy_verify, wy_window)
+                          draw_rows, gate_constants, gated, geometric_p, json_safe, prep, rows_of, seq_round, short, state_gap,
+                          take_rows, wy_commit, wy_verify, wy_window)
 
 KIND = 'gdn-wy-numerics'
 SCHEMA = 1
@@ -60,12 +64,20 @@ CHECKPOINTS = (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000)
 E1_RATIO_MAX = 1.0       # window error / served-chain error against fp64 must not exceed this
 STRESS_P = 0.97
 HERE = os.path.dirname(os.path.abspath(__file__))
+EXIT_CRASH = 3
+WARM_UP_ROWS = 256       # the initial state of a source without a fixture S0 is warmed up on this many rows of lane 0
+
+
+class UsageError(Exception):
+    """A request the inputs cannot honour (a fixture too short for the run): exit 2, not a crash."""
 
 
 # ---------------------------------------------------------------- input sources
 
 class Source:
-    """Rows of one layer's raw inputs: synthetic (a regime) or a fixture file (cursor over its rows, wrapping)."""
+    """Rows of one layer's raw inputs: synthetic (a regime) or a fixture file. A fixture has two DISJOINT lanes: lane 0 (the first half of the
+    file) is the committed stream, lane 1 (the second half) the rejected-draft rows; each lane's cursor wraps inside its own half, and
+    the rows drawn and wraps are counted so a report says how much of a short file was reused."""
 
     def __init__(self, regime, seed, users, nk, nv, fixture_dir=None):
         self.regime, self.users, self.nk, self.nv = regime, users, nk, nv
@@ -79,18 +91,33 @@ class Source:
             self.s0 = torch.from_numpy(data['S0'].astype('float32')) if 'S0' in data.files else None
             self.norm_w = torch.from_numpy(data['norm_w'].astype('float32')) if 'norm_w' in data.files else None
             self.length = self.fixture['g'].shape[1]
-            self.cursor = {}
+            if self.length < 2:
+                raise UsageError('fixture %s has %d rows; two lanes need at least 2' % (path, self.length))
+            half = self.length // 2
+            self.lanes = {0: (0, half), 1: (half, self.length)}   # [lo, hi) of each lane
+            self.cursor = {0: 0, 1: 0}
+            self.drawn = {0: 0, 1: 0}
             if self.fixture['g'].shape[0] != users or self.fixture['v'].shape[2] != nv or self.fixture['q'].shape[2] != nk:
                 raise ValueError('fixture %s: users/heads %s do not match the run (%d, %d, %d)' % (
                     path, tuple(self.fixture['v'].shape), users, nk, nv))
 
+    def lane_rows(self, lane):
+        lo, hi = self.lanes[lane]
+        return hi - lo
+
+    def usage(self):
+        """Rows drawn and wraps per lane (a wrap is a lane's cursor passing the end of its half of the file)."""
+        return {('lane%d' % lane): dict(rows_in_lane=self.lane_rows(lane), rows_drawn=self.drawn[lane],
+                                        wraps=self.drawn[lane] // self.lane_rows(lane)) for lane in (0, 1)} if self.fixture is not None else None
+
     def draw(self, gen, rows, lane=0):
         if self.fixture is None:
             return draw_rows(gen, rows, self.regime, self.consts, self.users, self.nk, self.nv)
-        # two lanes: lane 0 the stream, lane 1 the rejected-draft rows (drawn from the second half of the file)
-        start = self.cursor.get(lane, (self.length // 2) * lane)
-        idx = [(start + i) % self.length for i in range(rows)]
-        self.cursor[lane] = (start + rows) % self.length
+        lo, hi = self.lanes[lane]
+        span = hi - lo
+        idx = [lo + (self.cursor[lane] + i) % span for i in range(rows)]
+        self.cursor[lane] = (self.cursor[lane] + rows) % span
+        self.drawn[lane] += rows
         return {key: bf16(val[:, idx].float()) for key, val in self.fixture.items()}
 
     def initial_state(self, seed, users, norm_w_default):
@@ -99,8 +126,8 @@ class Source:
             return bf16(self.s0.float()), (self.norm_w if self.norm_w is not None else norm_w_default)
         gen = torch.Generator().manual_seed(seed)
         S = torch.zeros(users, self.nv, DK, DV, dtype=F64)
-        raw = self.draw(gen, 256)
-        _, _, S = seq_round(S, prep(raw, torch.ones(DV), F64), 256, MODELS['fp64'])
+        raw = self.draw(gen, WARM_UP_ROWS)
+        _, _, S = seq_round(S, prep(raw, torch.ones(DV), F64), WARM_UP_ROWS, MODELS['fp64'])
         return bf16(S.float()), norm_w_default
 
 
@@ -168,7 +195,7 @@ def single_round(regime, args, seed=1):
     p64 = prep(raw, norm_w, F64)
     o64, snaps64, _ = seq_round(S0.double(), p64, rows, MODELS['fp64'])
     y64 = gated(o64, p64, rows)
-    wy_o64, wy_s64, _ = wy_verify(S0.double(), p64, rows, MODELS['fp64'])
+    wy_o64, wy_s64, _ = wy_verify(S0.double(), p64, rows, MODELS['fp64'], window=args.window)
     res['fp64_wy_vs_seq'] = dict(output=short(cmp(wy_o64, o64)), state_after_n=short(cmp(wy_s64, snaps64[-1])))
     for name in ('fp32', 'bf16', 'bf16+tf32', 'bf16mid'):
         m = MODELS[name]
@@ -177,9 +204,9 @@ def single_round(regime, args, seed=1):
         pre = []
         o_s, snaps, _ = seq_round(S0.to(m.dtype), p, rows, seq_m, pre_out=pre)
         o_pre = torch.stack(pre, 2)
-        o_w, s_w, windows = wy_verify(S0.to(m.dtype), p, rows, m)
-        # the state after each committed n (a = 1..rows), not only after all rows: one commit per a from the first window's context where a <= 16
-        states_w = torch.stack([wy_verify(S0.to(m.dtype), p, a, m)[1] for a in range(1, rows + 1)])
+        o_w, s_w, windows = wy_verify(S0.to(m.dtype), p, rows, m, window=args.window)
+        # the state after each committed n (a = 1..rows), not only after all rows: one commit per a from the first window's context where a <= window
+        states_w = torch.stack([wy_verify(S0.to(m.dtype), p, a, m, window=args.window)[1] for a in range(1, rows + 1)])
         states_s = torch.stack(snaps)
         y_s, y_w = gated(o_s, p, rows), gated(o_w, p, rows)
         per_row = [cmp(o_w[:, :, r], o_s[:, :, r])['rel_to_max'] for r in range(rows)]
@@ -200,8 +227,8 @@ def single_round(regime, args, seed=1):
         o1w, S1w, _ = wy_verify(S0.to(m.dtype), p1, 1, m, window=1)
         res[name]['t1_wy_vs_seq'] = dict(core_output=short(cmp(o1w, o1s)), state=short(cmp(S1w, S1s)))
         # TreeWY eq. (2) literal ratio form: non-finite values under strong decay
-        o_r, ctx_r = wy_window(S0.to(m.dtype), rows_of(p, min(rows, T)), m, ratio=True)
-        s_r = wy_commit(S0.to(m.dtype), ctx_r, min(rows, T), m)
+        o_r, ctx_r = wy_window(S0.to(m.dtype), rows_of(p, args.window), m, ratio=True)
+        s_r = wy_commit(S0.to(m.dtype), ctx_r, args.window, m)
         res[name]['ratio_form'] = dict(nonfinite_outputs=int((~torch.isfinite(o_r)).sum()), outputs=o_r.numel(),
                                        nonfinite_state_last=int((~torch.isfinite(s_r)).sum()),
                                        min_cum_log_decay=float(ctx_r['G'].min()))
@@ -235,7 +262,8 @@ def causality(regime, args, seed=5):
     for form, mname in (('seq', 'bf16'), ('wy', 'bf16'), ('wy', 'fp32')):
         m = MODELS[mname]
         cases = []
-        for t in sorted({0, 3, 7, min(14, rows - 2)}):
+        # at 32 rows also commit past the first 16: n = 17, 24, 31 chain the second window through the first's committed bf16 state
+        for t in sorted({0, 3, 7, min(14, rows - 2)} | ({16, 23, 30} if rows > T else set())):
             n = t + 1
             variants = {}
             for label in ('real', 'zeros', 'random', 'poison_nan', 'poison_inf'):
@@ -254,17 +282,18 @@ def causality(regime, args, seed=5):
                     o, snaps, _ = seq_round(S0.to(m.dtype), p, rows, m)
                     variants[label] = (o[:, :, :n], snaps[n - 1])
                 else:
-                    # the whole window is computed (rows after n are part of the fixed-shape launch), then n rows are committed
-                    o_all, ctx = wy_window(S0.to(m.dtype), rows_of(p, min(rows, T)), m)
-                    variants[label] = (o_all[:, :, :n], wy_commit(S0.to(m.dtype), ctx, n, m))
+                    # every window that holds a committed row is computed whole (rows after n inside it are part of the fixed-shape
+                    # launch), chained through the committed bf16 boundary state; then n rows are committed
+                    o_all, S_n, _ = wy_verify(S0.to(m.dtype), p, n, m, window=args.window)
+                    variants[label] = (o_all, S_n)
             # absent: a shorter block of exactly n rows
             p_short = prep(take_rows(raw, 0, n), norm_w, m.dtype)
             if form == 'seq':
                 o, snaps, _ = seq_round(S0.to(m.dtype), p_short, n, m)
                 variants['absent'] = (o, snaps[-1])
             else:
-                o_all, ctx = wy_window(S0.to(m.dtype), rows_of(p_short, n), m)
-                variants['absent'] = (o_all[:, :, :n], wy_commit(S0.to(m.dtype), ctx, n, m))
+                o_all, S_n, _ = wy_verify(S0.to(m.dtype), p_short, n, m, window=args.window)
+                variants['absent'] = (o_all, S_n)
             ref = variants['real']
             case = dict(t=t, rows_committed=n)
             for label, (o, S) in variants.items():
@@ -283,6 +312,29 @@ def causality(regime, args, seed=5):
     return out
 
 
+def chained_batch(S, p, commits, m, window):
+    """A batch of users through aligned windows, each user committing its own n rows: per window the whole batch is computed (the launch's
+    fixed shape), a user commits `min(window, n - pos)` rows while it still has committed rows, and a finished user keeps its final state.
+    Returns [(outputs [1, H, n_u, DV], state after n_u rows [1, H, dk, dv])] per user, the same bytes wy_verify gives that user alone
+    when the batch computes the same way."""
+    total = p['g'].shape[-1]
+    S = S.clone()
+    outs = [[] for _ in commits]
+    pos = 0
+    while pos < max(commits):
+        stop = min(pos + window, total)
+        o, ctx = wy_window(S, rows_of(p, pos, stop), m)
+        new = S.clone()
+        for u, n in enumerate(commits):
+            if n > pos:
+                take = min(stop - pos, n - pos)
+                outs[u].append(o[u:u + 1, :, :take])
+                ci = dict(G=ctx['G'][u:u + 1], kn=ctx['kn'][u:u + 1], vnew=ctx['vnew'][u:u + 1])
+                new[u:u + 1] = wy_commit(S[u:u + 1], ci, take, m)
+        S, pos = new, stop
+    return [(torch.cat(outs[u], 2), S[u:u + 1]) for u in range(len(commits))]
+
+
 def packed_solo(regime, args, seed=6):
     """A batch of users against each user alone, bit for bit, with a different committed length per user, and the batch in a second
     order: the property a 4-user launch must have against four 1-user launches. A CPU matmul library may pick different blocking for
@@ -293,7 +345,13 @@ def packed_solo(regime, args, seed=6):
     norm_w = bf16(1 + 0.1 * torch.randn(DV, generator=gen))
     S0, norm_w = src.initial_state(seed + 7, users, norm_w)
     raw = src.draw(gen, rows)
-    commits = draw_commits(torch.Generator().manual_seed(seed + 3), users, geometric_p(TAU, T), min(rows, T))
+    if rows > T:   # two windows: lengths past the first window, and a mix, so the chained commit is packed against solo too
+        commits = draw_commits(torch.Generator().manual_seed(seed + 3), users, STRESS_P, rows)
+        for index, forced in enumerate((17, 31, 8)):
+            if index < users:
+                commits[index] = forced
+    else:
+        commits = draw_commits(torch.Generator().manual_seed(seed + 3), users, geometric_p(TAU, T), rows)
     out = dict(regime=regime, rows=rows, users=users, commits=commits, forms={})
 
     def run(kind, m, sel):
@@ -307,10 +365,7 @@ def packed_solo(regime, args, seed=6):
             for i, u in enumerate(sel):
                 results.append((o[i:i + 1, :, :commits[u]], snaps[commits[u] - 1][i:i + 1]))
         else:
-            o, ctx = wy_window(S, rows_of(p, min(rows, T)), m)
-            for i, u in enumerate(sel):
-                ci = dict(G=ctx['G'][i:i + 1], kn=ctx['kn'][i:i + 1], vnew=ctx['vnew'][i:i + 1])
-                results.append((o[i:i + 1, :, :commits[u]], wy_commit(S[i:i + 1], ci, commits[u], m)))
+            results = chained_batch(S, p, [commits[u] for u in sel], m, args.window)
         return results
 
     for kind, mname in (('seq', 'bf16'), ('wy', 'bf16'), ('wy', 'bf16+tf32')):
@@ -336,8 +391,15 @@ def drift(regime, args, seed=2):
     """Accept / reject cycles: each method carries its own state; inputs identical; committed n from the tau distribution."""
     rows, cycles = args.rows, args.cycles
     src = make_source(regime, seed, args)
-    S0, norm_w = draw_stream_and_state(src, args, seed, rows)
     commits, commit_meta = commit_draw(args, seed + 11, cycles, rows)
+    if src.fixture is not None:
+        # the stream is lane 0 of the file, drawn once (the warm-up first when the file has no S0): refuse a file that would repeat tokens
+        need = sum(commits) + (0 if src.s0 is not None else WARM_UP_ROWS)
+        if need > src.lane_rows(0):
+            raise UsageError('fixture %s: lane 0 (the first half of the file) holds %d rows, but %d cycles of committed lengths need %d '
+                             '(%d of them the warm-up): the "stream" would repeat; use a longer file or fewer --cycles' % (
+                                 regime, src.lane_rows(0), cycles, need, 0 if src.s0 is not None else WARM_UP_ROWS))
+    S0, norm_w = draw_stream_and_state(src, args, seed, rows)
     stream_gen = torch.Generator().manual_seed(seed + 13)
     reject_gen = torch.Generator().manual_seed(seed + 17)
     methods = dict(seq64=('seq', 'fp64'), wy64=('wy', 'fp64'), seq32=('seq', 'fp32'), wy32=('wy', 'fp32'),
@@ -370,7 +432,7 @@ def drift(regime, args, seed=2):
                     outs['seqbf_o32'] = torch.stack(pre, 2)
                     gouts['seqbf_o32'] = gated(outs['seqbf_o32'], p, n)
             else:
-                o, new[k], w = wy_verify(state[k], p, n, m)
+                o, new[k], w = wy_verify(state[k], p, n, m, window=args.window)
                 if k == 'wybf':
                     windows_used[w - 1] += 1
             outs[k], gouts[k] = o, gated(o, p, n)
@@ -383,20 +445,23 @@ def drift(regime, args, seed=2):
             tr['gated_total'] += sg['elements']
             tr['nonfinite_cycles'] += 0 if (so['finite'] and sg['finite']) else 1
             tr['out_max_rel'] = max(tr['out_max_rel'], so['rel_to_max'])
-            if (c + 1) in CHECKPOINTS or (c + 1) % 25 == 0:
+            # the state error at EVERY cycle (the max the E1 criterion reads is the max over all of them), the full comparison at checkpoints
+            gap, state_finite = state_gap(state[a], state[b if b != 'seqbf_o32' else 'seqbf'])
+            if gap == gap:   # not NaN (a zero-scale reference)
+                tr['state_max_rel'] = max(tr['state_max_rel'], gap)
+            if not state_finite:
+                tr['nonfinite_cycles'] += 1
+            if (c + 1) in CHECKPOINTS and (c + 1) <= cycles:
                 ss = cmp(state[a], state[b if b != 'seqbf_o32' else 'seqbf'])
-                tr['state_max_rel'] = max(tr['state_max_rel'], ss['rel_to_max'])
-                if not ss['finite']:
-                    tr['nonfinite_cycles'] += 1
-                if (c + 1) in CHECKPOINTS and (c + 1) <= cycles:
-                    tr['state'].append(dict(cycle=c + 1, **short(ss)))
-                    tr['out_rel'].append(dict(cycle=c + 1, core_rel_to_max=float('%.4g' % so['rel_to_max']),
-                                              gated_bf16_differing_frac=float('%.4g' % (sg['differing'] / sg['elements']))))
+                tr['state'].append(dict(cycle=c + 1, **short(ss)))
+                tr['out_rel'].append(dict(cycle=c + 1, core_rel_to_max=float('%.4g' % so['rel_to_max']),
+                                          gated_bf16_differing_frac=float('%.4g' % (sg['differing'] / sg['elements']))))
         if (c + 1) % 100 == 0:
             print('  drift %s cycle %d (%.0fs)' % (regime, c + 1, time.time() - t0), flush=True)
     for tr in track.values():
         tr['gated_differing_frac_all_cycles'] = tr.pop('gated_diff') / tr.pop('gated_total')
-    return dict(regime=regime, rows=rows, cycles=cycles, commit_distribution=commit_meta, mean_commit=sum(commits) / len(commits),
+    return dict(regime=regime, rows=rows, window=args.window, cycles=cycles, commit_distribution=commit_meta, mean_commit=sum(commits) / len(commits),
+                fixture_usage=src.usage(), state_error_sampled='every cycle',
                 commit_hist={str(i): commits.count(i) for i in range(1, rows + 1)}, tokens=sum(commits),
                 rounds_with_window_one_only=windows_used[0], rounds_with_two_windows=windows_used[1],
                 seconds=time.time() - t0, pairs=track), dict(stream=stream, S0=S0, norm_w=norm_w, src=src, commits=commits[:args.seg_cycles])
@@ -431,7 +496,7 @@ def segmentation(regime, ctx, args, seed=3):
             if kind == 'seq':
                 o, _, S = seq_round(S, p, n, m)
             else:
-                o, S, _ = wy_verify(S, p, n, m)
+                o, S, _ = wy_verify(S, p, n, m, window=args.window)
             outs.append(o)
             pos += n
             states[pos] = S
@@ -454,19 +519,28 @@ def segmentation(regime, ctx, args, seed=3):
 
 # ---------------------------------------------------------------- the verdict
 
-def acceptance(report):
-    """E1: the window form's error against fp64 no worse than the served chain's (bf16 class), state and output, in every drift case,
-    nothing non-finite. Also the contract fields: what rules the form out of serving, whatever E1 says."""
+def e1_rows(report, served, windowed):
+    """The E1 comparison for one rounding class: per drift case and metric, the window form's error against fp64 over the served chain's."""
     problems, rows = [], []
     for key, drift_case in report.get('drift', {}).items():
         pairs = drift_case['pairs']
         for what in ('state_max_rel', 'out_max_rel'):
-            seq_err, wy_err = pairs['seqbf_vs_fp64'][what], pairs['wybf_vs_fp64'][what]
+            seq_err, wy_err = pairs[served][what], pairs[windowed][what]
             ratio = wy_err / seq_err if seq_err else float('inf') if wy_err else 1.0
             rows.append(dict(case=key, metric=what, seq_vs_fp64=seq_err, wy_vs_fp64=wy_err, ratio=ratio, ok=ratio <= E1_RATIO_MAX))
             if ratio > E1_RATIO_MAX:
                 problems.append('%s %s: window error %.4g vs served %.4g (ratio %.3g > %.2f)' % (key, what, wy_err, seq_err, ratio, E1_RATIO_MAX))
-        for name, tr in pairs.items():
+    return rows, problems
+
+
+def acceptance(report):
+    """E1 (the plan's: TF32 operands, fp32 accumulation, bf16 state at the window boundaries): the window form's error against fp64 no worse
+    than the served chain's, state and output, in every drift case (state sampled at every cycle), nothing non-finite. The bf16-only class
+    is a second row, reported and not gated. Also the contract fields: what rules the form out of serving, whatever E1 says."""
+    rows, problems = e1_rows(report, 'seqtf_vs_fp64', 'wytf_vs_fp64')
+    bf_rows, bf_problems = e1_rows(report, 'seqbf_vs_fp64', 'wybf_vs_fp64')
+    for key, drift_case in report.get('drift', {}).items():
+        for name, tr in drift_case['pairs'].items():
             if tr['nonfinite_cycles']:
                 problems.append('%s %s: %d cycles with non-finite values' % (key, name, tr['nonfinite_cycles']))
     contract_differing = [(key, case['pairs']['wybf_vs_seqbf']['gated_differing_frac_all_cycles'])
@@ -475,8 +549,11 @@ def acceptance(report):
         if report.get('packed_solo') else None
     seg = {key: case['wy_bf16']['outputs_bitwise_identical'] for key, case in report.get('segmentation', {}).items()}
     return dict(
-        criterion='E1: window error vs fp64 <= %.2f x served-chain error (bf16 class), state and output, every drift case, all finite' % E1_RATIO_MAX,
+        criterion='E1 (plan): window error vs fp64 <= %.2f x served-chain error, TF32 operands (bf16+tf32 class), state and output, every drift '
+                  'case, state sampled every cycle, all finite; the bf16-only class is reported beside it' % E1_RATIO_MAX,
         e1_pass=not problems and bool(rows), e1_worst_ratio=max((r['ratio'] for r in rows), default=None), e1_rows=rows, problems=problems,
+        e1_bf16_class=dict(pass_=not bf_problems and bool(bf_rows), worst_ratio=max((r['ratio'] for r in bf_rows), default=None),
+                           rows=bf_rows, problems=bf_problems, gated=False),
         contract=dict(byte_identical_to_served=bool(contract_differing) and all(f == 0.0 for _, f in contract_differing),
                       gated_bf16_differing_fraction_wybf_vs_seqbf=dict(contract_differing),
                       packed_equals_solo=packed_ok, segmentation_invariant_wy_bf16=seg,
@@ -497,7 +574,8 @@ def parse(argv=None):
     ap.add_argument('--out', required=True)
     ap.add_argument('--sections', default=','.join(SECTIONS))
     ap.add_argument('--regimes', default='model,R1', help='comma list of model, R1, R2, fixture:<name>')
-    ap.add_argument('--rows', type=int, default=T, help='rows of the verify block: 16 (one window) or 32 (two chained windows)')
+    ap.add_argument('--rows', type=int, default=T, help='rows of the verify block: 16 or 32')
+    ap.add_argument('--window', type=int, default=T, help='rows of one WY window: 16 (a 32-row block is two chained windows) or 32 (one window, the plan\'s W=32)')
     ap.add_argument('--commit-dist', choices=('tau', 'stress'), default='tau')
     ap.add_argument('--commit-hist', default='', help='JSON {"n": count} of committed lengths (the lab histogram) instead of the fit')
     ap.add_argument('--cycles', type=int, default=1000)
@@ -517,6 +595,8 @@ def parse(argv=None):
         ap.error('--sections names only %s' % (SECTIONS,))
     if a.rows not in (16, 32):
         ap.error('--rows is 16 or 32')
+    if a.window not in (16, 32) or a.window > a.rows:
+        ap.error('--window is 16 or 32 and at most --rows')
     if a.smoke:
         a.users, a.nk, a.nv, a.cycles, a.seg_cycles = 2, 1, 3, 12, 8
     if a.nv % a.nk or a.users < 1 or a.cycles < 1:
@@ -528,19 +608,38 @@ def main(argv=None):
     args = parse(argv)
     torch.set_num_threads(args.threads or os.cpu_count() or 2)
     t0 = time.time()
-    report = dict(kind=KIND, schema=SCHEMA, label=args.label, smoke=args.smoke,
+    report = dict(kind=KIND, schema=SCHEMA, label=args.label, smoke=args.smoke, completed=False,
                   scope='NON-EXACT research probe: the aligned-window WY form against the served sequential chain; never serves',
-                  geometry=dict(nk_tp=args.nk, nv_tp=args.nv, dk=DK, dv=DV, T=T, rows=args.rows, window_rows=T, users=args.users,
+                  geometry=dict(nk_tp=args.nk, nv_tp=args.nv, dk=DK, dv=DV, T=T, rows=args.rows, window_rows=args.window, users=args.users,
                                 gdn_layers=M.GDN_LAYERS, tau=TAU),
                   argv=sys.argv[1:] if argv is None else list(argv), torch=torch.__version__, python=platform.python_version(),
                   source_sha=os.environ.get('GITHUB_SHA', ''), regimes=args.regimes, commit_dist=args.commit_dist,
                   inputs=dict(real_layers=bool(args.fixture), fixture=os.path.basename(args.fixture) if args.fixture else None,
                               note='synthetic regimes unless fixtures are given: the weights are not in CI'))
-    todo = args.sections
 
     def save():
         with open(args.out, 'w', newline='\n') as handle:
-            json.dump(report, handle, indent=1)
+            json.dump(json_safe(report), handle, indent=1, allow_nan=False)
+
+    try:
+        code = run(args, report, save, t0)
+    except UsageError as error:
+        report['error'] = 'usage: %s' % error
+        save()
+        print('GDN_WY_NUMERICS usage error: %s' % error)
+        return 2
+    except Exception as error:  # noqa: BLE001 - a crash is its own exit code: a partial report is not a result
+        report['error'] = '%s: %s' % (type(error).__name__, error)
+        report['traceback'] = traceback.format_exc()
+        save()
+        print(report['traceback'])
+        print('GDN_WY_NUMERICS crashed: %s' % report['error'])
+        return EXIT_CRASH
+    return code
+
+
+def run(args, report, save, t0):
+    todo = args.sections
 
     if 'crosscheck' in todo:
         report['repo_reference_crosscheck'] = crosscheck_repo_reference()
@@ -573,14 +672,19 @@ def main(argv=None):
         report.pop('segmentation')
     report['acceptance'] = acceptance(report)
     report['seconds'] = time.time() - t0
+    report['completed'] = True
     save()
     acc = report['acceptance']
-    print('GDN_WY_NUMERICS e1=%s rows=%d regimes=%s byte_identical_to_served=%s serving_eligible=false smoke=%s' % (
-        'PASS' if acc['e1_pass'] else 'FAIL', args.rows, ','.join(args.regimes), acc['contract']['byte_identical_to_served'], args.smoke))
+    print('GDN_WY_NUMERICS e1=%s rows=%d window=%d regimes=%s e1_bf16_only=%s byte_identical_to_served=%s serving_eligible=false smoke=%s' % (
+        'PASS' if acc['e1_pass'] else 'FAIL', args.rows, args.window, ','.join(args.regimes),
+        'PASS' if acc['e1_bf16_class']['pass_'] else 'FAIL', acc['contract']['byte_identical_to_served'], args.smoke))
     for problem in acc['problems']:
         print('  problem: ' + problem)
-    print(json.dumps(dict(kind=KIND, e1_pass=acc['e1_pass'], e1_worst_ratio=acc['e1_worst_ratio'], rows=args.rows,
-                          out=os.path.basename(args.out)), sort_keys=True))
+    for problem in acc['e1_bf16_class']['problems']:
+        print('  bf16-only row: ' + problem)
+    print(json.dumps(json_safe(dict(kind=KIND, e1_pass=acc['e1_pass'], e1_worst_ratio=acc['e1_worst_ratio'],
+                                    e1_bf16_only_pass=acc['e1_bf16_class']['pass_'], e1_bf16_only_worst_ratio=acc['e1_bf16_class']['worst_ratio'],
+                                    rows=args.rows, window=args.window, out=os.path.basename(args.out))), sort_keys=True, allow_nan=False))
     return 0 if acc['e1_pass'] else 1
 
 

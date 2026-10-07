@@ -5,11 +5,13 @@
 # the qwen-gdn-wy-numerics workflow (tag experiment/gdn-wy-numerics-vN) and must be read BEFORE any of these: a numerics result that fails E1 ends the probe without a card.
 # Card use: one card at a time through the cardm step (C2_CARDS=pair, harness run_card_m.sh, which refuses the reserved board and a serving card without the override); no reset between
 # jobs, no agent stop or start here (the combined window's own steps do that).
-# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <condition>' means the jobs on the left run only if the condition holds, otherwise the driver skips them.
-# NEEDS W1-cardm-watcher W2-cardm-full <- scripts/ci/gdn_wy_block.py exists in the integration commit (the kernel is NOT built on this branch: docs/gdn-wy-probe.md, what remains)
+# DEPENDENCIES (machine-greppable, two keys so each parses one way):
+#   '# NEEDS <jobs> <- <jobs>'          the jobs on the left run only if every job on the right completed and passed its READ rule (job names only).
+#   '# REQUIRES-FILE <jobs> <- <path>'  the jobs on the left run only if <path> exists in the integration commit (a file condition, never a job name).
+# REQUIRES-FILE W1-cardm-watcher W2-cardm-full W0-cardm-baseline <- scripts/ci/gdn_wy_block.py (the kernel is NOT built on this branch: docs/gdn-wy-probe.md, what remains; without it the probe uses NO card time)
 # NEEDS W2-cardm-full <- W1-cardm-watcher
-# READ RULES: W0 the controls causal and not blind, a_us and a2_us measured. W1 no watcher error or hang, no KILL. W2 the GDN_WY verdict line (CONTINUE only at full scope with a kernel).
-# Time (estimate): W0 45 min; W1 40 min and W2 120 min once the kernel exists.
-W0-cardm-baseline optional tp4-wy-probe-1 45
+# READ RULES: W1 no watcher error or hang, no KILL (exit 10). W2 the GDN_WY verdict line (CONTINUE only at full scope with a kernel); KILL is exit 10, NO-DECISION exit 4. W0 (filler, last) selftest and timing only: a_us and a2_us measured, never a verdict.
+# Time (estimate, e): W1 40 min; W2 60 min (a fake-runtime dry run of the full plan makes 219 launches and 220 input read-backs, about 3 s each on a card = 11 min, plus kernel compile, the 48-launch x 25-round timing and the watchdog headroom; the container timeout is 120 min, twice the estimate); W0 10 min.
 W1-cardm-watcher stop tp4-wy-probe-1 40
-W2-cardm-full stop tp4-wy-probe-1 120
+W2-cardm-full stop tp4-wy-probe-1 60
+W0-cardm-baseline optional tp4-wy-probe-1 10

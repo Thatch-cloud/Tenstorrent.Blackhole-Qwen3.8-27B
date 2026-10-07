@@ -238,6 +238,25 @@ def short(c):
     return {k: (float('%.4g' % v) if isinstance(v, float) else v) for k, v in c.items()}
 
 
+def json_safe(value):
+    """NaN and Infinity are not JSON: every non-finite float becomes null, so a strict consumer (jq, JSON.parse) can read a report."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    return value
+
+
+def state_gap(a, b):
+    """(max abs difference over the reference's largest magnitude, finite) of two states: the cheap form of cmp() for every cycle."""
+    a64, b64 = a.double(), b.double()
+    scale = float(b64.abs().max())
+    gap = float((a64 - b64).abs().max())
+    return (gap / scale if scale else float('nan')), bool(torch.isfinite(a64).all())
+
+
 def bits_equal(a, b):
     """Bit-for-bit equality of two tensors of the same dtype (NaN payloads and -0 included)."""
     if a.shape != b.shape or a.dtype != b.dtype:

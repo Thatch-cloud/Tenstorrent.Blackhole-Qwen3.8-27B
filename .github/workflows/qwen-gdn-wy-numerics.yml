@@ -3,7 +3,9 @@ run-name: GDN window-WY numerics ${{ github.ref_name }}
 # NON-EXACT RESEARCH PROBE (docs/gdn-wy-probe.md): E1 of the window WY / UT form of the gated delta rule against the served sequential
 # recurrence and fp64, on CPU, at the TP4 per-card shard. A laptop may flip bits at rest, so the numbers that count are produced here.
 # Trigger: push a tag experiment/gdn-wy-numerics-vN (a tag runs the workflow file AT the tag, so a branch needs no dispatchable copy).
-# Each matrix cell writes one machine-readable report (kind gdn-wy-numerics, schema 1) as an artifact; nothing here touches a card or a serving image.
+# Each matrix cell writes one machine-readable report (kind gdn-wy-numerics, schema 1, strict JSON) as an artifact; nothing here touches a card or a serving image.
+# Exit codes of the script: 0 E1 holds, 1 E1 does not hold (a RESULT, annotated as a warning, the job stays green), 2 usage error, 3 the run crashed.
+# A crash, a missing GDN_WY_NUMERICS result line or a report without `acceptance` fails the job: a partial report is never a result.
 on:
   push:
     tags: ['experiment/gdn-wy-numerics-v*']
@@ -20,12 +22,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {cell: model-t16, regimes: 'model', rows: '16', dist: tau}
-          - {cell: r1-t16, regimes: 'R1', rows: '16', dist: tau}
-          - {cell: r2-t16, regimes: 'R2', rows: '16', dist: tau}
-          - {cell: model-t32, regimes: 'model', rows: '32', dist: tau}
-          - {cell: r1-t32-stress, regimes: 'R1', rows: '32', dist: stress}
-          - {cell: model-t32-stress, regimes: 'model', rows: '32', dist: stress}
+          - {cell: model-t16, regimes: 'model', rows: '16', window: '16', dist: tau}
+          - {cell: r1-t16, regimes: 'R1', rows: '16', window: '16', dist: tau}
+          - {cell: r2-t16, regimes: 'R2', rows: '16', window: '16', dist: tau}
+          - {cell: model-t32, regimes: 'model', rows: '32', window: '16', dist: tau}
+          - {cell: r1-t32-stress, regimes: 'R1', rows: '32', window: '16', dist: stress}
+          - {cell: model-t32-stress, regimes: 'model', rows: '32', window: '16', dist: stress}
+          - {cell: model-w32, regimes: 'model', rows: '32', window: '32', dist: tau}
+          - {cell: r1-w32-stress, regimes: 'R1', rows: '32', window: '32', dist: stress}
     env:
       OMP_NUM_THREADS: '2'
       MKL_NUM_THREADS: '2'
@@ -44,14 +48,27 @@ jobs:
       - name: E1 numerics, cell ${{ matrix.cell }}
         env:
           GITHUB_SHA: ${{ github.sha }}
+          CELL: ${{ matrix.cell }}
         run: |
           set +e
-          python -B scripts/ci/gdn_wy_numerics.py --regimes "${{ matrix.regimes }}" --rows ${{ matrix.rows }}             --commit-dist ${{ matrix.dist }} --cycles 1000 --seg-cycles 300 --repeat 3 --label "${{ matrix.cell }}"             --out "gdn-wy-numerics-${{ matrix.cell }}.json" > "gdn-wy-numerics-${{ matrix.cell }}.log" 2>&1
+          python -B scripts/ci/gdn_wy_numerics.py --regimes "${{ matrix.regimes }}" --rows ${{ matrix.rows }} \
+            --window ${{ matrix.window }} --commit-dist ${{ matrix.dist }} --cycles 1000 --seg-cycles 300 --repeat 3 \
+            --label "${{ matrix.cell }}" --out "gdn-wy-numerics-${{ matrix.cell }}.json" > "gdn-wy-numerics-${{ matrix.cell }}.log" 2>&1
           code=$?
-          tail -n 8 "gdn-wy-numerics-${{ matrix.cell }}.log"
-          # exit 1 is the E1 criterion not holding: a RESULT, kept in the report. Anything else is a broken run.
-          if [ "$code" != 0 ] && [ "$code" != 1 ]; then exit "$code"; fi
-          test -s "gdn-wy-numerics-${{ matrix.cell }}.json"
+          tail -n 12 "gdn-wy-numerics-${{ matrix.cell }}.log"
+          # exit 1 is the E1 criterion not holding: a RESULT, kept in the report. Anything else (2 usage, 3 crash, a signal) is a broken run.
+          if [ "$code" != 0 ] && [ "$code" != 1 ]; then echo "::error title=numerics run broke (${CELL})::exit code $code"; exit "$code"; fi
+          # a result needs its result line and a report that carries `acceptance`; a partial JSON from a crash has neither
+          grep -q '^GDN_WY_NUMERICS e1=' "gdn-wy-numerics-${{ matrix.cell }}.log" || { echo "::error title=no result line (${CELL})::GDN_WY_NUMERICS line missing"; exit 1; }
+          jq -e '.acceptance and .completed' "gdn-wy-numerics-${{ matrix.cell }}.json" > /dev/null || { echo "::error title=incomplete report (${CELL})::no acceptance in the report"; exit 1; }
+          line=$(grep '^GDN_WY_NUMERICS e1=' "gdn-wy-numerics-${{ matrix.cell }}.log" | tail -n 1)
+          echo "$line" >> "$GITHUB_STEP_SUMMARY"
+          case "$line" in
+            *'e1=FAIL'*) echo "::warning title=E1 FAIL (${CELL})::the window form is worse than the served chain by the plan's criterion; see the report. $line" ;;
+          esac
+          case "$line" in
+            *'e1_bf16_only=FAIL'*) echo "::notice title=bf16-only class misses (${CELL})::the second, ungated row: $line" ;;
+          esac
       - uses: actions/upload-artifact@v4
         if: always()
         with:

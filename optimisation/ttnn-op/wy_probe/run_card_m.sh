@@ -363,9 +363,11 @@ timeout_s=7200
 WATCHER=${WATCHER:-0}
 case $WATCHER in 0|1) ;; *) echo "refusing: WATCHER=$WATCHER is not 0 or 1" >&2; exit 1 ;; esac
 
-qual_card_resolve
+# The library echoes the board id, node and PCI address on stdout; this repo is public and the step tees stdout into a public log, so those lines go to
+# /dev/null here (its refusals are on stderr and stay). Nothing below prints a board id, node, PCI address or image reference.
+qual_card_resolve >/dev/null
 node=$QUAL_NODE
-qual_refuse_holders
+qual_refuse_holders >/dev/null
 
 IMAGE=${IMAGE:-}
 if [ -z "$IMAGE" ]; then
@@ -407,8 +409,8 @@ if [ "$WATCHER" = 1 ]; then
   watch=(-e TT_METAL_WATCHER=10 -e TT_METAL_WATCHER_APPEND=1)
 fi
 
-echo "### wy-probe $stamp card=$QUAL_CARD ($QUAL_TAG) node=$node image=$IMAGE watcher=$WATCHER"
-qual_card_recheck   # the board is still on the node the holder check cleared
+echo "### wy-probe $stamp card=$QUAL_TAG image-tag=${IMAGE##*:} watcher=$WATCHER"   # the tag only: never the resolved reference, board id, node or address (public log)
+qual_card_recheck >/dev/null   # the board is still on the node the holder check cleared
 trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
 set +e   # keep the exit status of the run itself, below
 timeout -k 30 "$timeout_s" docker run --rm --name "$name" --network none \
@@ -427,11 +429,12 @@ timeout -k 30 "$timeout_s" docker run --rm --name "$name" --network none \
   --out "/results/gdn-wy-$stamp.json" "${extra[@]}" \
   2>&1 | tee "$R/gdn-wy-$stamp.log"
 status=${PIPESTATUS[0]}
-echo "### exit $status (0 CONTINUE, 1 KILL, 3 watchdog, 4 NO-DECISION); report $R/gdn-wy-$stamp.json"
+echo "### exit $status (0 CONTINUE, 10 KILL, 3 watchdog, 4 NO-DECISION; 1 is a launcher refusal or a crash, never a finding); report gdn-wy-$stamp.json in the results directory"
 case "$status" in
   3|124|137)
     echo "HANG SUSPECTED (exit $status): the container is removed on exit." >&2
-    qual_reset_hint >&2
+    qual_reset_hint > "$R/reset-hint-$stamp.txt" 2>&1   # names the board: kept on the rig, not printed into the public log
+    echo "recovery commands for the target card are in reset-hint-$stamp.txt in the results directory on the rig" >&2
     ;;
 esac
 exit "$status"

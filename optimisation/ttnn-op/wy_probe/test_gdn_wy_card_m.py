@@ -6,9 +6,13 @@
   - run_card_m.sh: it parses, sources the card library, mounts every module from this checkout, pins the launched environment and
     names no host or serial; it refuses without a card;
   - the BASELINE flow on the fake ttnn of test_gdn_v5_card_m (the page-level memory model drives the real K5-A builder): with no
-    window kernel the probe runs selftest, the controls and the timing of A and A2, and ends NO-DECISION (exit 4) saying so.
-    The W arms are not run on a fake: the kernel does not exist, and a stub would test the stub.
-The device half runs on the rig only.
+    window kernel the probe runs selftest, the controls and the timing of A and A2, and ends NO-DECISION (exit 4) saying so;
+  - the WINDOW flow on the same fake, with K5-A and a fake gdn_wy_block that COMPUTE (gdn_wy_model, bf16 class) instead of writing
+    recipes: this tests the harness, not a kernel. A correct fake reaches CONTINUE at full scope; each broken fake is caught by the
+    section that must catch it: a later row that leaks into an earlier one, a packed launch that differs from a solo one, a state page never
+    written, an input page overwritten (in a causality launch and in a timing replay), an output that is causal and exact but wrong (zeros, a
+    wrong decay sign), a timing over 90 us (a KILL only at the full timing scope), and a kernel module that raises on import.
+The device half (a real kernel, a real card) runs on the rig only; no kernel exists yet.
 """
 
 import contextlib
@@ -21,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -46,6 +51,30 @@ FOUR = {'QWEN_FAST_TP': '4', 'QWEN_FAST_VERIFY_T1': '1'}
 def found():
     with mock.patch.dict(os.environ, FOUR):
         return tp_shapes.geometry(4)
+
+
+class KernelLoading(unittest.TestCase):
+    def test_an_absent_kernel_module_is_none(self):
+        with mock.patch.dict(sys.modules, {'gdn_wy_block': None}):
+            self.assertIsNone(probe.load_window_kernel())
+
+    def test_a_present_kernel_module_that_cannot_import_is_an_error_not_absent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, 'gdn_wy_block.py').write_text('import a_module_that_does_not_exist_for_this_test\n', encoding='utf-8')
+            sys.path.insert(0, directory)
+            sys.modules.pop('gdn_wy_block', None)
+            try:
+                with self.assertRaises(ModuleNotFoundError) as caught:
+                    probe.load_window_kernel()
+                self.assertEqual(caught.exception.name, 'a_module_that_does_not_exist_for_this_test')
+            finally:
+                sys.path.remove(directory)
+                sys.modules.pop('gdn_wy_block', None)
+
+    def test_json_never_holds_nan_or_infinity(self):
+        text = probe.dump_report(dict(a=float('nan'), b=[float('inf'), 1.5, dict(c=float('-inf'))], d=(1, float('nan'))))
+        self.assertEqual(json.loads(text), dict(a=None, b=[None, 1.5, dict(c=None)], d=[1, None]))
+        json.loads(text, parse_constant=lambda name: self.fail(name))
 
 
 class PureHelpers(unittest.TestCase):
@@ -144,7 +173,7 @@ class PureHelpers(unittest.TestCase):
 class VerdictTests(unittest.TestCase):
     def arguments(self, **overrides):
         values = dict(sections=list(probe.SECTIONS), regimes=list(probe.REGIMES), seeds=list(probe.PLAN_SEEDS),
-                      commits=list(probe.PLAN_COMMITS), users=4, timing_launches=48, timing_rounds=25)
+                      commits=list(probe.PLAN_COMMITS), users=4, timing_launches=48, timing_rounds=25, timing_arms=list(probe.TIMING_ARMS))
         values.update(overrides)
         return type('Arguments', (), values)()
 
@@ -152,7 +181,8 @@ class VerdictTests(unittest.TestCase):
         return dict(a_qualified=True, kernel_present=True, unwritten=[], inputs_moved=[], missing_scope=[],
                     sections=dict(causality=dict(error=None, w_failures=[], control_a_causal=True, control_blind=False),
                                   packing=dict(error=None, w_exact=True), timing=dict(error=None, label='continue', w2_us=70.0),
-                                  sram=dict(error=None, label='ok', cb_bytes={2: 1}, l1_bytes=2), accuracy=dict(error=None, nonfinite=False)))
+                                  sram=dict(error=None, label='ok', cb_bytes={2: 1}, l1_bytes=2),
+                                  accuracy=dict(error=None, nonfinite=False, correct=True, correctness_failures=[], reference_failed=None)))
 
     def test_the_plan_is_full_scope(self):
         self.assertEqual(probe.scope_missing(self.arguments()), [])
@@ -162,6 +192,22 @@ class VerdictTests(unittest.TestCase):
         self.assertIn('section timing', probe.scope_missing(self.arguments(sections=['selftest', 'sram', 'causality', 'packing', 'accuracy'])))
         self.assertIn('users 2 of 4', probe.scope_missing(self.arguments(users=2)))
         self.assertTrue(any(item.startswith('timing 2 launches') for item in probe.scope_missing(self.arguments(timing_launches=2))))
+
+    def test_a_run_without_the_w2_arm_is_reduced_scope_and_never_continues(self):
+        arguments = self.arguments(timing_arms=['A', 'A2', 'W1'])
+        self.assertEqual(probe.scope_missing(arguments), ['timing arm W2'])
+        report = self.good()
+        report['missing_scope'] = probe.scope_missing(arguments)
+        report['sections']['timing'].update(label='not-run', w2_us=None)
+        verdict, problems = probe.decide(report)
+        self.assertEqual(verdict, 'NO-DECISION')
+        self.assertTrue(any('W2 arm was not measured' in problem for problem in problems))
+        # the same holds when the scope accounting is bypassed: a kernel present and a timing label of not-run is never CONTINUE
+        report['missing_scope'] = []
+        self.assertEqual(probe.decide(report)[0], 'NO-DECISION')
+        # without the timing section the arms are not asked for (the section itself is the missing item)
+        self.assertEqual(probe.scope_missing(self.arguments(sections=['selftest'], timing_arms=['A'])),
+                         ['section %s' % name for name in probe.SECTIONS if name != 'selftest'] )
 
     def test_continue_only_with_a_kernel_at_full_scope(self):
         self.assertEqual(probe.decide(self.good()), ('CONTINUE', []))
@@ -175,7 +221,7 @@ class VerdictTests(unittest.TestCase):
     def test_each_kill_rule_kills_even_at_reduced_scope_or_with_an_error(self):
         for mutate in (lambda r: r['sections']['causality'].update(w_failures=['x']),
                        lambda r: r['sections']['packing'].update(w_exact=False, first_failure='u1'),
-                       lambda r: r['sections']['timing'].update(label='kill', w2_us=91.0),
+                       lambda r: r['sections']['accuracy'].update(correct=False, correctness_failures=['R1 seed 17 user 0: output W 1 > 1.5 x K5-A 0.1']),
                        lambda r: r['sections']['sram'].update(label='kill'),
                        lambda r: r.update(unwritten=[dict(arm='W2')]),
                        lambda r: r.update(inputs_moved=[dict(tensor='qkv')]),
@@ -186,6 +232,33 @@ class VerdictTests(unittest.TestCase):
             report['sections']['sram']['error'] = report['sections']['sram']['error'] or None
             verdict, problems = probe.decide(report)
             self.assertEqual(verdict, 'KILL', problems)
+
+    def test_a_timing_kill_needs_the_full_timing_scope(self):
+        report = self.good()
+        report['sections']['timing'].update(label='kill', w2_us=91.0)
+        self.assertEqual(probe.decide(report)[0], 'KILL')
+        report['missing_scope'] = ['regime R2']   # another reduction does not excuse a measured kill at the plan's timing scope
+        self.assertEqual(probe.decide(report)[0], 'KILL')
+        report['missing_scope'] = ['timing 2 launches x 2 rounds (plan 48 x 25)']
+        verdict, problems = probe.decide(report)
+        self.assertEqual(verdict, 'NO-DECISION')
+        self.assertTrue(any('reduced timing scope' in problem for problem in problems))
+
+    def test_a_kernel_module_that_raised_on_import_is_no_decision_with_its_error(self):
+        report = self.good()
+        report.update(kernel_present=False, kernel_import_error='ModuleNotFoundError: No module named \'x\'')
+        verdict, problems = probe.decide(report)
+        self.assertEqual(verdict, 'NO-DECISION')
+        self.assertTrue(any('raised on import' in problem for problem in problems))
+        self.assertFalse(any('is not built' in problem for problem in problems))
+
+    def test_a_reference_that_fails_is_no_decision_and_a_wrong_answer_is_a_kill(self):
+        report = self.good()
+        report['sections']['accuracy'].update(correct=None, reference_failed='K5-A output error against fp64 is 0.9')
+        self.assertEqual(probe.decide(report)[0], 'NO-DECISION')
+        report['sections']['accuracy'].update(correct=False, reference_failed=None, correctness_failures=['wrong'])
+        verdict, problems = probe.decide(report)
+        self.assertEqual((verdict, problems[0]), ('KILL', 'correctness: wrong'))
 
     def test_a_harness_control_that_fails_is_no_decision_not_a_finding(self):
         report = self.good()
@@ -202,11 +275,13 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(probe.decide(report)[0], 'NO-DECISION')
 
     def test_exit_codes_and_the_verdict_line(self):
-        self.assertEqual([probe.exit_code(v) for v in ('CONTINUE', 'KILL', 'NO-DECISION')], [0, 1, 4])
+        self.assertEqual([probe.exit_code(v) for v in ('CONTINUE', 'KILL', 'NO-DECISION')], [0, 10, 4])
+        self.assertEqual(probe.EXIT_KILL, 10)   # 1 is what a launcher refusal and an import-time crash return
         report = self.good()
         report['verdict'] = 'CONTINUE'
         line = probe.verdict_line(report)
         self.assertTrue(line.startswith('GDN_WY verdict=CONTINUE scope=full kernel=present'))
+        self.assertIn('correctness=within-bound', line)
         self.assertIn('never a serving licence', line)
         report['kernel_present'] = False
         self.assertIn('kernel=absent causality=control-only', probe.verdict_line(report))
@@ -281,8 +356,16 @@ class ScriptTests(unittest.TestCase):
         self.assertEqual(done.returncode, 1)
         self.assertIn('QUAL_CARD is not set', done.stderr)
 
-    def test_the_probe_has_no_kernel_yet(self):
-        self.assertIsNone(probe.load_window_kernel())
+    def test_the_serials_and_the_image_reference_stay_out_of_the_log(self):
+        text = self.text()
+        tail = text[text.index('# <<< qual_card.sh'):]
+        self.assertIn('qual_card_resolve >/dev/null', tail)
+        self.assertIn('qual_refuse_holders >/dev/null', tail)
+        self.assertIn('qual_card_recheck >/dev/null', tail)
+        for needle in ('card=$QUAL_CARD', 'node=$node', 'image=$IMAGE', 'qual_reset_hint >&2', '$R/gdn-wy-$stamp.json"'):
+            self.assertNotIn(needle, tail)
+        self.assertIn('image-tag=${IMAGE##*:}', tail)
+        self.assertIn('10 KILL', tail)
 
 
 class BaselineFlow(unittest.TestCase):
@@ -323,6 +406,264 @@ class BaselineFlow(unittest.TestCase):
                 with contextlib.redirect_stdout(stdout):
                     code = probe.main(['--out', str(Path(directory) / 'r.json'), '--root', str(root), '--sections', 'selftest'])
             self.assertEqual(code, 4)
+
+
+# ---- the WINDOW flow: K5-A and a fake gdn_wy_block that compute (gdn_wy_model, bf16 class) on the page-level fake ----
+
+def _logical(tensor):
+    """A fake device tensor's logical bf16 values, from its pages."""
+    image = dev.untile_image(torch, tensor.pages, dev.padded_shape(tensor.shape))
+    return image[tuple(slice(0, size) for size in tensor.shape)]
+
+
+def _store(tensor, value, at=None):
+    """Write `value` (bf16, logical) into the tensor's pages; `at` = (first page, count) of a window of a stacked tensor."""
+    pages = dev.tile_image(torch, dev.pad_image(torch, value))
+    if at is None:
+        tensor.pages = pages
+    else:
+        merged = tensor.pages.clone() if tensor.pages is not None else torch.full(
+            (dev.page_count(tensor.shape), 512), dev.SENTINEL_WORD, dtype=torch.int32)
+        merged[at[0]:at[0] + at[1]] = pages
+        tensor.pages = merged
+
+
+def _user_tensors(flat, user):
+    start = 0 if user == 0 else 7 * user + 1
+    return flat[start:start + 7]   # qkv, beta, gate, initial, output, states, z (the shared norm_w is flat[7])
+
+
+class ModelBench(v5_tests.FakeBench):
+    """The V5 fake, except that K5-A's launch computes the sequential recurrence (bf16 class: causal, per-token snapshots) instead of
+    writing a recipe, so the harness' controls and its correctness yardstick have something true to measure."""
+
+    def launch(self, tensors, chip_program):
+        text = next((re.search(r'// gdn_seq_block(_split)? generated build: (.*)\n', kernel.kernel_source)
+                     for kernel in chip_program.kernels if re.search(r'// gdn_seq_block(_split)? generated build: (.*)\n', kernel.kernel_source)),
+                    None)
+        if text is None or ('variant=' in text.group(2) and 'level=' not in text.group(2)):
+            return super().launch(tensors, chip_program)
+        flat = list(tensors)
+        weight = _logical(flat[7])[0, 0].float()
+        bf = probe.model.MODELS['bf16']
+        for user in range((len(flat) - 1) // 7):
+            qkv, beta, gate, initial, output, states, z = _user_tensors(flat, user)
+            raw = probe.to_raw(torch, _logical(qkv), _logical(beta), _logical(gate), _logical(z), probe.ROWS)
+            p = probe.model.prep(raw, weight, bf.dtype)
+            o, snaps, _ = probe.model.seq_round(_logical(initial).float(), p, probe.ROWS, bf)
+            y = probe.model.gated(o, p, probe.ROWS).transpose(1, 2).reshape(1, probe.ROWS, 1536)
+            _store(output, y.bfloat16())
+            _store(states, torch.stack([snap[0] for snap in snaps]).bfloat16())
+
+
+class FakeBuild:
+    def __init__(self, flags):
+        self.flags = flags
+
+    def cb_bytes(self, windows):
+        return 100000 * windows
+
+    def dram_bytes(self, windows):
+        return 400000 * windows
+
+    def sha256(self):
+        return '0' * 64
+
+
+class FakeWindowKernel:
+    """The planned gdn_wy_block interface, computing with gdn_wy_model. `flags` break it in one way each."""
+
+    def __init__(self, **flags):
+        self.flags = flags
+        self.launches = 0
+
+    def load_kernels(self, root, unqualified=True):
+        return FakeBuild(self.flags)
+
+    def execute(self, device, groups, operations, output_memory=None, kernels=None, windows=2, commit_rows=None):
+        self.launches += 1
+        flags, bf = self.flags, probe.model.MODELS['bf16']
+        rows = probe.ROWS * windows
+        produced = []
+        for user, (qkv, beta, gate, initial, z, norm_w) in enumerate(groups):
+            output = operations.empty((1, rows, 1536), device=device, dtype=operations.bfloat16, layout=operations.TILE_LAYOUT,
+                                      memory_config=output_memory)
+            states = operations.empty((windows, 12, 128, 128), device=device, dtype=operations.bfloat16, layout=operations.TILE_LAYOUT,
+                                      memory_config=operations.DRAM_MEMORY_CONFIG)
+            produced.append((output, states))
+            host = dict(qkv=_logical(qkv), beta=_logical(beta), gate=_logical(gate), z=_logical(z))
+            gate_values = -host['gate'].float() if flags.get('wrong_decay_sign') else host['gate']
+            raw = probe.to_raw(torch, host['qkv'], host['beta'], gate_values, host['z'], rows)
+            p = probe.model.prep(raw, _logical(norm_w)[0, 0].float(), bf.dtype)
+            state, outputs = _logical(initial).float(), []
+            for window in range(windows):
+                window_rows = probe.model.rows_of(p, probe.ROWS * window, probe.ROWS * (window + 1))
+                o, context = probe.model.wy_window(state, window_rows, bf)
+                outputs.append(probe.model.gated(o, window_rows, probe.ROWS).transpose(1, 2).reshape(1, probe.ROWS, 1536))
+                take = probe.ROWS if commit_rows is None else commit_rows[window]
+                if take > 0:
+                    state = probe.model.wy_commit(state, context, take, bf)
+                    if not (flags.get('unwritten_state') and window == 0):
+                        _store(states, state.bfloat16(), at=(192 * window, 192))
+            y = torch.cat(outputs, dim=1).bfloat16()
+            if flags.get('zero_output'):
+                y = torch.zeros_like(y)
+            if flags.get('leak_later_row'):   # row 0 depends on the block's last row: a kernel that reads rows it must not
+                y[:, 0] = (y[:, 0].float() + 0.5 * host['qkv'][:, rows - 1, :1536].float()).bfloat16()
+            if flags.get('depends_on_batch') and len(groups) > 1:   # packed differs from solo by one ulp
+                y[0, 0, 0] = (y[0, 0, 0].float() * 1.01 + 0.01).bfloat16()
+            _store(output, y)
+            if flags.get('move_input') and user == 0:
+                pages = qkv.pages.clone()
+                pages[0, 0] = 0x12345678   # a fixed word: idempotent, so a warm-up launch and a captured one cannot cancel
+                qkv.pages = pages
+        return produced
+
+
+@contextlib.contextmanager
+def window_runtime(kernel_flags=None, kernel=True):
+    fake = ModelBench()
+    synthetic = v5_tests.SyntheticRoot()
+    root = synthetic.__enter__()
+    modules = {'ttnn': fake}
+    if kernel:
+        modules['gdn_wy_block'] = FakeWindowKernel(**(kernel_flags or {}))
+    patches = [mock.patch.dict(sys.modules, modules), mock.patch.dict(os.environ, FOUR),
+               mock.patch('gdn_multitoken.validate_handoff_runtime'),
+               mock.patch.dict(v5_tests.seq.QUALIFIED, {0: v5_tests.seq.sha256(v5_tests.seq.generate(root, 0))})]
+    for patch in patches:
+        patch.start()
+    v5_tests.split._ENGAGED.clear()
+    v5_tests.verify_trace_t1.take()
+    try:
+        yield fake, root, modules.get('gdn_wy_block')
+    finally:
+        for patch in reversed(patches):
+            patch.stop()
+        synthetic.__exit__(None, None, None)
+        v5_tests.verify_trace_t1.take()
+
+
+# the whole plan, shrunk to what a fake can run in seconds: scope=full then means this
+SMALL_PLAN = dict(PLAN_USERS=1, PLAN_SEEDS=(17,), PLAN_COMMITS=(4, 16, 17), PLAN_TIMING_LAUNCHES=2, PLAN_TIMING_ROUNDS=2, REGIMES=('R1',))
+
+
+class WindowFlow(unittest.TestCase):
+    def run_window(self, flags=None, extra=(), plan=None, kernel=True, kill_us=None):
+        patches = [mock.patch.multiple(probe, **dict(SMALL_PLAN, **(plan or {})))]
+        if kill_us is not None:
+            patches.append(mock.patch.object(probe, 'KILL_TWO_WINDOWS_US', kill_us))
+        with contextlib.ExitStack() as stack, tempfile.TemporaryDirectory() as directory, \
+                window_runtime(flags, kernel) as (fake, root, module):
+            for patch in patches:
+                stack.enter_context(patch)
+            out = Path(directory) / 'report.json'
+            argv = ['--out', str(out), '--root', str(root), '--call-timeout', '60', *extra]
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = probe.main(argv)
+            text = out.read_text()
+            json.loads(text, parse_constant=lambda name: self.fail('%s in the report' % name))
+            return code, json.loads(text), stdout.getvalue().strip().splitlines(), module
+
+    def test_a_correct_fake_kernel_reaches_continue_at_full_scope(self):
+        code, report, lines, module = self.run_window(kill_us=1e9)
+        self.assertEqual(report['problems'], [])
+        self.assertEqual((code, report['verdict']), (0, 'CONTINUE'))
+        self.assertEqual((report['unwritten'], report['inputs_moved']), ([], []))
+        self.assertTrue(report['kernel_present'])
+        sections = report['sections']
+        self.assertEqual({name: section['error'] for name, section in sections.items()}, {name: None for name in sections})
+        self.assertEqual(sections['causality']['w_failures'], [])
+        self.assertTrue(sections['causality']['control_a_causal'])
+        self.assertFalse(sections['causality']['control_blind'])
+        self.assertTrue(sections['packing']['w_exact'])
+        self.assertTrue(sections['accuracy']['correct'])
+        self.assertEqual(sections['accuracy']['correctness_failures'], [])
+        for case in sections['accuracy']['cases']:
+            for name, metric in case['gate']['metrics'].items():
+                self.assertTrue(metric['ok'], (name, metric))
+                self.assertLessEqual(metric['w_vs_fp64'], 1.5 * metric['a_vs_fp64'])
+                self.assertLess(metric['w_vs_bf16_model'], 1e-6)   # the fake computes exactly the bf16 model
+        self.assertEqual(sections['sram']['label'], 'ok')
+        self.assertEqual(sections['sram']['dram_kernel'], {'1': 400000, '2': 800000})
+        self.assertIn('dram_plan_note', sections['sram'])
+        self.assertEqual(sorted(sections['timing']['per_launch']), ['A', 'A2', 'W1', 'W2'])
+        self.assertGreater(module.launches, 0)
+        self.assertGreater(report['launches']['input_checks'], report['launches']['run_arm'])   # the inputs were read back after every launch and the replays
+        self.assertTrue(lines[-2].startswith('GDN_WY verdict=CONTINUE scope=full kernel=present causality=clean packing=exact correctness=within-bound'))
+
+    def test_a_later_row_that_leaks_into_an_earlier_one_is_a_kill(self):
+        code, report, lines, _ = self.run_window(dict(leak_later_row=True), extra=('--sections', 'selftest,causality'))
+        self.assertEqual((code, report['verdict']), (10, 'KILL'))
+        self.assertTrue(report['sections']['causality']['w_failures'])
+        self.assertTrue(report['sections']['causality']['control_a_causal'])
+        self.assertIn('causality=MISMATCH', lines[-2])
+
+    def test_a_packed_launch_that_differs_from_a_solo_launch_is_a_kill(self):
+        code, report, lines, _ = self.run_window(dict(depends_on_batch=True), extra=('--sections', 'selftest,packing', '--users', '2'),
+                                                 plan=dict(PLAN_USERS=2))
+        self.assertEqual((code, report['verdict']), (10, 'KILL'))
+        self.assertFalse(report['sections']['packing']['w_exact'])
+        self.assertIn('packing=DIFFERS', lines[-2])
+
+    def test_a_state_page_the_kernel_never_wrote_is_a_kill(self):
+        code, report, _, _ = self.run_window(dict(unwritten_state=True), extra=('--sections', 'selftest,causality', '--commits', '4'))
+        self.assertEqual((code, report['verdict']), (10, 'KILL'))
+        self.assertTrue(any(item['tensor'] == 'states0' and item['arm'] == 'W2' for item in report['unwritten']))
+
+    def test_a_launch_that_overwrites_an_input_is_a_kill(self):
+        code, report, _, _ = self.run_window(dict(move_input=True), extra=('--sections', 'selftest,causality', '--commits', '4'))
+        self.assertEqual((code, report['verdict']), (10, 'KILL'))
+        self.assertTrue(report['inputs_moved'])
+        self.assertTrue(all(item['arm'] == 'W2' and item['tensor'] == 'qkv' for item in report['inputs_moved']))
+        self.assertTrue(any('an input moved' in problem for problem in report['problems']))
+        self.assertEqual(report['sections']['causality']['w_failures'], [])   # only the input read-back sees it
+
+    def test_a_kernel_that_moves_an_input_during_the_timing_replays_is_a_kill(self):
+        code, report, _, _ = self.run_window(dict(move_input=True), extra=('--sections', 'selftest,timing'))
+        self.assertEqual((code, report['verdict']), (10, 'KILL'))
+        self.assertTrue(any(item['case'] == 'timing' and item['arm'] == 'timing replays' for item in report['inputs_moved']))
+
+    def test_a_fast_causal_exact_but_wrong_kernel_is_a_kill_by_the_correctness_gate_alone(self):
+        for flags in (dict(zero_output=True), dict(wrong_decay_sign=True)):
+            with self.subTest(flags=flags):
+                code, report, lines, _ = self.run_window(flags, extra=('--sections', 'selftest,causality,packing,accuracy', '--commits', '4'))
+                self.assertEqual((code, report['verdict']), (10, 'KILL'))
+                self.assertEqual(report['sections']['causality']['w_failures'], [])
+                self.assertTrue(report['sections']['packing']['w_exact'])
+                self.assertFalse(report['sections']['accuracy']['correct'])
+                self.assertTrue(any(problem.startswith('correctness:') for problem in report['problems']))
+                self.assertIn('correctness=WRONG', lines[-2])
+
+    def test_a_timing_over_the_rule_kills_only_at_the_full_timing_scope(self):
+        code, report, _, _ = self.run_window(extra=('--sections', 'selftest,timing'), kill_us=-1.0)
+        self.assertEqual((code, report['verdict']), (10, 'KILL'))
+        self.assertEqual(report['sections']['timing']['label'], 'kill')
+        # the same measurement at a quarter of the plan's launches is reported, never a KILL
+        code, report, _, _ = self.run_window(extra=('--sections', 'selftest,timing', '--timing-launches', '1'), kill_us=-1.0)
+        self.assertEqual((code, report['verdict']), (4, 'NO-DECISION'))
+        self.assertTrue(any('reduced timing scope' in problem for problem in report['problems']))
+
+    def test_a_run_without_the_w2_arm_never_reaches_continue(self):
+        code, report, _, _ = self.run_window(extra=('--sections', 'selftest,timing', '--timing-arms', 'A,A2,W1'), kill_us=1e9)
+        self.assertEqual((code, report['verdict']), (4, 'NO-DECISION'))
+        self.assertIn('timing arm W2', report['missing_scope'])
+
+    def test_a_kernel_module_that_cannot_import_is_recorded_not_read_as_not_built(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, 'gdn_wy_block.py').write_text('import a_module_that_does_not_exist_for_this_test\n', encoding='utf-8')
+            sys.path.insert(0, directory)
+            try:
+                code, report, _, _ = self.run_window(kernel=False, extra=('--sections', 'selftest'))
+            finally:
+                sys.path.remove(directory)
+                sys.modules.pop('gdn_wy_block', None)
+        self.assertEqual((code, report['verdict']), (4, 'NO-DECISION'))
+        self.assertFalse(report['kernel_present'])
+        self.assertIn('a_module_that_does_not_exist_for_this_test', report['kernel_import_error'])
+        self.assertTrue(any('raised on import' in problem for problem in report['problems']))
+        self.assertFalse(any('is not built' in problem for problem in report['problems']))
 
 
 if __name__ == '__main__':

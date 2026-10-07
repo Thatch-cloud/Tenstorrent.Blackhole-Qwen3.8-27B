@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 import torch
 
@@ -167,23 +168,111 @@ class ReportAndVerdict(unittest.TestCase):
         self.assertEqual(drift['rows'], 32)
         self.assertGreater(drift['rounds_with_two_windows'], 0)
 
-    def test_acceptance_flags_a_worse_window_form(self):
+    def test_acceptance_gates_the_plan_tf32_pair_and_reports_the_bf16_pair_beside_it(self):
         pair = lambda state, out: dict(state_max_rel=state, out_max_rel=out, nonfinite_cycles=0, gated_differing_frac_all_cycles=0.5)
-        report = dict(drift=dict(model=dict(pairs=dict(seqbf_vs_fp64=pair(0.01, 0.01), wybf_vs_fp64=pair(0.02, 0.005),
-                                                       wybf_vs_seqbf=pair(0.01, 0.01)))))
-        acc = N.acceptance(report)
+
+        def report(tf_served, tf_window, bf_served, bf_window):
+            return dict(drift=dict(model=dict(pairs=dict(
+                seqtf_vs_fp64=pair(*tf_served), wytf_vs_fp64=pair(*tf_window), seqbf_vs_fp64=pair(*bf_served), wybf_vs_fp64=pair(*bf_window),
+                wybf_vs_seqbf=pair(0.01, 0.01)))))
+
+        acc = N.acceptance(report((0.01, 0.01), (0.009, 0.005), (0.01, 0.01), (0.0101, 0.005)))   # TF32 passes, bf16-only misses by 1%
+        self.assertTrue(acc['e1_pass'])
+        self.assertAlmostEqual(acc['e1_worst_ratio'], 0.9)
+        self.assertFalse(acc['e1_bf16_class']['pass_'])
+        self.assertAlmostEqual(acc['e1_bf16_class']['worst_ratio'], 1.01)
+        self.assertFalse(acc['e1_bf16_class']['gated'])
+        self.assertEqual(acc['problems'], [])
+        acc = N.acceptance(report((0.01, 0.01), (0.02, 0.005), (0.01, 0.01), (0.005, 0.005)))   # TF32 fails
         self.assertFalse(acc['e1_pass'])
         self.assertAlmostEqual(acc['e1_worst_ratio'], 2.0)
         self.assertEqual(len(acc['problems']), 1)
-        report['drift']['model']['pairs']['wybf_vs_fp64'] = pair(0.005, 0.005)
-        self.assertTrue(N.acceptance(report)['e1_pass'])
-        report['drift']['model']['pairs']['wybf_vs_fp64']['nonfinite_cycles'] = 1
-        self.assertFalse(N.acceptance(report)['e1_pass'])
+        self.assertTrue(acc['e1_bf16_class']['pass_'])
+        bad = report((0.01, 0.01), (0.005, 0.005), (0.01, 0.01), (0.005, 0.005))
+        bad['drift']['model']['pairs']['wytf_vs_fp64']['nonfinite_cycles'] = 1
+        self.assertFalse(N.acceptance(bad)['e1_pass'])
+        zero = report((0.0, 0.01), (0.001, 0.005), (0.0, 0.01), (0.0, 0.005))   # a served error of exactly 0 against a window error above it
+        self.assertEqual(N.acceptance(zero)['e1_worst_ratio'], float('inf'))
 
-    def test_fixture_layer_inputs_are_read_and_drawn_from(self):
+    def test_the_state_error_is_taken_at_every_cycle(self):
+        calls = []
+        real = N.state_gap
+
+        def counting(a, b):
+            calls.append(1)
+            return real(a, b)
+
+        with unittest.mock.patch.object(N, 'state_gap', counting):
+            code, report = self.smoke('--sections', 'drift', '--seg-cycles', '2')
+        drift = report['drift']['model']   # --smoke fixes the cycle count at 12
+        self.assertEqual(len(calls), drift['cycles'] * len(drift['pairs']))
+        self.assertEqual(report['drift']['model']['state_error_sampled'], 'every cycle')
+
+    def test_a_report_is_strict_json_even_when_a_ratio_is_infinite(self):
+        code, report = self.smoke('--sections', 'single')
+        # the on-disk file was already parsed by json.load; the strict re-check is on the text
+        with tempfile.TemporaryDirectory() as folder:
+            out = os.path.join(folder, 'report.json')
+            N.main(['--smoke', '--regimes', 'model', '--sections', 'single,drift', '--cycles', '3', '--seg-cycles', '2', '--out', out])
+            with open(out, encoding='utf-8') as handle:
+                json.loads(handle.read(), parse_constant=lambda name: self.fail('%s in the report' % name))
+        self.assertEqual(M.json_safe(dict(a=float('inf'), b=[float('nan'), 1.0])), dict(a=None, b=[None, 1.0]))
+
+    def test_a_crash_is_exit_3_and_never_an_e1_result(self):
+        with tempfile.TemporaryDirectory() as folder:
+            out = os.path.join(folder, 'report.json')
+            with unittest.mock.patch.object(N, 'segmentation', side_effect=RuntimeError('boom')):
+                code = N.main(['--smoke', '--regimes', 'model', '--sections', 'drift,segmentation', '--cycles', '3', '--seg-cycles', '2', '--out', out])
+            with open(out, encoding='utf-8') as handle:
+                report = json.load(handle)
+        self.assertEqual(code, 3)
+        self.assertNotIn('acceptance', report)
+        self.assertFalse(report['completed'])
+        self.assertIn('boom', report['error'])
+        self.assertIn('drift', report)   # the partial report keeps what had run
+        code, report = self.smoke('--sections', 'single')
+        self.assertTrue(report['completed'])
+        self.assertIn(code, (0, 1))
+
+    def test_window_32_is_one_window_and_16_two_chained_windows(self):
+        _, two = self.smoke('--sections', 'drift', '--rows', '32', '--window', '16', '--commit-dist', 'stress', '--cycles', '8', '--seg-cycles', '2')
+        _, one = self.smoke('--sections', 'drift', '--rows', '32', '--window', '32', '--commit-dist', 'stress', '--cycles', '8', '--seg-cycles', '2')
+        self.assertEqual((two['geometry']['window_rows'], one['geometry']['window_rows']), (16, 32))
+        self.assertGreater(two['drift']['model']['rounds_with_two_windows'], 0)
+        self.assertEqual(one['drift']['model']['rounds_with_two_windows'], 0)
+        self.assertEqual(one['drift']['model']['window'], 32)
+        for bad in (['--window', '24'], ['--rows', '16', '--window', '32']):
+            with self.assertRaises(SystemExit):
+                N.parse(bad + ['--out', 'x.json'])
+
+    def test_causality_and_packed_solo_commit_past_the_first_window_at_32_rows(self):
+        _, report = self.smoke('--sections', 'causality,packed_solo', '--rows', '32')
+        for form in report['causality']['model']['forms'].values():
+            self.assertEqual([case['rows_committed'] for case in form['cases']], [1, 4, 8, 15, 17, 24, 31])
+        self.assertTrue(report['causality']['model']['forms']['wy_bf16']['causal_for_real_zero_random'])
+        self.assertTrue(report['causality']['model']['forms']['seq_bf16']['causal_for_real_zero_random'])
+        packed = report['packed_solo']['model']
+        self.assertGreater(max(packed['commits']), 16)
+        self.assertEqual(packed['commits'][:2], [17, 31])
+        self.assertEqual(sorted(packed['forms']), ['seq_bf16', 'wy_bf16', 'wy_bf16+tf32'])
+
+    def test_the_chained_batch_commits_each_user_its_own_length_like_a_solo_chain(self):
+        raw, norm_w, S0 = block(4, rows=32)
+        m = M.MODELS['bf16']
+        p = M.prep(raw, norm_w, m.dtype)
+        commits = [17, 31]
+        batch = N.chained_batch(S0.to(m.dtype), p, commits, m, 16)
+        for user, n in enumerate(commits):
+            solo_p = M.prep({k: v[user:user + 1] for k, v in raw.items()}, norm_w, m.dtype)
+            o, S, _ = M.wy_verify(S0[user:user + 1].to(m.dtype), solo_p, n, m, window=16)
+            self.assertEqual(tuple(batch[user][0].shape), (1, NV, n, M.DV))
+            self.assertLess(float((batch[user][0].double() - o.double()).abs().max()), 1e-4)
+            self.assertLess(float((batch[user][1].double() - S.double()).abs().max()), 1e-4)
+
+    def test_fixture_layer_inputs_are_read_and_drawn_from_two_disjoint_lanes(self):
         import numpy as np
         gen = torch.Generator().manual_seed(9)
-        raw = M.draw_rows(gen, 48, 'model', M.gate_constants(7, NV), USERS, NK, NV)
+        raw = M.draw_rows(gen, 800, 'model', M.gate_constants(7, NV), USERS, NK, NV)
         with tempfile.TemporaryDirectory() as folder:
             np.savez(os.path.join(folder, 'layer0.npz'), **{key: val.numpy() for key, val in raw.items()})
             out = os.path.join(folder, 'report.json')
@@ -191,8 +280,32 @@ class ReportAndVerdict(unittest.TestCase):
                     '--seg-cycles', '2', '--out', out])
             with open(out, encoding='utf-8') as handle:
                 report = json.load(handle)
+            src = N.Source('fixture:layer0', 1, USERS, NK, NV, folder)
+            lane0 = src.draw(gen, 400, lane=0)
+            lane1 = src.draw(gen, 400, lane=1)
         self.assertTrue(report['inputs']['real_layers'])
-        self.assertIn('fixture:layer0', report['drift'])
+        usage = report['drift']['fixture:layer0']['fixture_usage']
+        self.assertEqual(usage['lane0']['rows_in_lane'], 400)
+        self.assertEqual(usage['lane0']['wraps'], 0)
+        self.assertTrue(torch.equal(lane0['g'], M.bf16(raw['g'][:, :400])))     # the stream is the first half of the file ...
+        self.assertTrue(torch.equal(lane1['g'], M.bf16(raw['g'][:, 400:])))     # ... the rejected rows the second half: disjoint
+        src.draw(gen, 1, lane=1)
+        self.assertEqual(src.usage()['lane1']['wraps'], 1)
+
+    def test_a_fixture_too_short_for_the_run_is_refused_not_repeated(self):
+        import numpy as np
+        gen = torch.Generator().manual_seed(9)
+        raw = M.draw_rows(gen, 48, 'model', M.gate_constants(7, NV), USERS, NK, NV)
+        with tempfile.TemporaryDirectory() as folder:
+            np.savez(os.path.join(folder, 'layer0.npz'), **{key: val.numpy() for key, val in raw.items()})
+            out = os.path.join(folder, 'report.json')
+            code = N.main(['--smoke', '--regimes', 'fixture:layer0', '--fixture', folder, '--sections', 'drift', '--cycles', '6',
+                           '--seg-cycles', '2', '--out', out])
+            with open(out, encoding='utf-8') as handle:
+                report = json.load(handle)
+        self.assertEqual(code, 2)
+        self.assertIn('would repeat', report['error'])
+        self.assertNotIn('acceptance', report)
 
     def test_a_bad_row_count_is_a_usage_error(self):
         with self.assertRaises(SystemExit):

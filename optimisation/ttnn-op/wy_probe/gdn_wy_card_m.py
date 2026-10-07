@@ -16,22 +16,30 @@ four-card geometry, no model, no collective, run with QWEN_FAST_TP=4 and QWEN_FA
              must differ for both arms (a blind compare is NO-DECISION).
   packing    the four-user launch against four one-user launches, byte for byte, outputs and committed states. KILL on any mismatch.
   sram       the kernel's circular-buffer bytes a core against the CPU plan (gdn_wy_model.sram_plan) and the core's L1 size; KILL over L1.
-  accuracy   informational: W against K5-A on R1 inputs (differing fraction, max abs, ulp histogram). Never gated, except non-finite.
+  accuracy   a CORRECTNESS GATE: the W arm's outputs and committed states for BOTH windows, in every regime and seed, against the fp64 sequential
+             reference of the same host inputs (gdn_wy_model), with K5-A (run twice, chained through its own committed state) as the yardstick:
+             the W error against fp64 must stay within 1.5x K5-A's error against fp64 for the output rows and each committed state. KILL above
+             it, or on non-finite output. A reference that fails (non-finite, or K5-A itself far from fp64) is NO-DECISION. The differing
+             fraction against K5-A, max abs and the ulp histogram of window one are reported beside it, informational.
+  inputs     after every launch the inputs are read back and compared with what was uploaded; a changed input page is a KILL.
 
 THE KERNEL DOES NOT EXIST YET. The W arms need scripts/ci/gdn_wy_block.py (the planned interface below). Without it this harness runs the
-baseline half only (selftest, the K5-A controls, timing of A and A2: the sequential cost the kill rule is anchored to), prints the verdict
-NO-DECISION (exit 4), and says why. That baseline run is useful on its own.
+baseline half only (selftest, the K5-A controls, timing of A and A2), prints the verdict NO-DECISION (exit 4), and says why. The baseline
+half and every W path are CPU-tested on a fake runtime (test_gdn_wy_card_m.py, with a fake kernel that computes with gdn_wy_model); neither
+has run on a card.
 
 Planned kernel interface (gdn_wy_block):
-  load_kernels(root, unqualified=True)                -> a build object with .cb_bytes(windows) (bytes of CBs a core), .sha256()
+  load_kernels(root, unqualified=True)                -> a build object with .cb_bytes(windows) (bytes of CBs a core), .dram_bytes(windows)
+                                                         (the reader and writer byte totals a core moves, as the generator emits them), .sha256()
   execute(device, groups, operations, output_memory, kernels, windows, commit_rows=None)
         groups: one tuple per user (qkv, beta, gate, initial, z, norm_w) with 16 * windows rows (qkv [1, R, 2560], beta and gate [1, R, 12],
         z [1, R, 1536]); returns [(output, states)] per user, output [1, R, 1536], states [windows, 12, 128, 128]: states[w] is the bf16
         state after commit_rows[w] rows of window w (commit_rows defaults to all rows; 0 leaves states[w] unwritten and the harness does
         not read it). Window w + 1 starts from window w's committed state, in the launch, in L1.
 
-Exit codes: 0 CONTINUE (every kill rule held at full scope: the owner decides the next step); 1 KILL; 2 usage error; 3 the per-call
-watchdog fired (the partial report is written first; reset the target card only); 4 NO-DECISION. The last stdout line is one JSON object.
+Exit codes: 0 CONTINUE (every kill rule held at full scope: the owner decides the next step); 10 KILL (not 1: exit 1 is what the launcher's
+refusals and an import-time crash return); 2 usage error; 3 the per-call watchdog fired (the partial report is written first; reset the
+target card only); 4 NO-DECISION. The last stdout line is one JSON object.
 
   QWEN_FAST_TP=4 QWEN_FAST_VERIFY_T1=1 python3 gdn_wy_card_m.py --out report.json
 """
@@ -39,6 +47,7 @@ watchdog fired (the partial report is written first; reset the target card only)
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -69,6 +78,9 @@ PLAN_TIMING_LAUNCHES = 48
 PLAN_TIMING_ROUNDS = 25
 PLAN_COMMITS = (1, 4, 8, 15, 16, 17, 24, 31)   # committed rows n of a 32-row block (n = 32 has no later row)
 KILL_TWO_WINDOWS_US = 90.0                     # two windows in one launch, per layer
+ACCURACY_FACTOR = 1.5                          # W error vs fp64 may be at most this times K5-A's error vs fp64 (E1 measured ratios <= 1.01)
+A_SANITY_REL = 0.25                            # K5-A's own error vs fp64 above this: the reference or the layout is wrong, not the kernel
+EXIT_KILL = 10
 SEQUENTIAL_WINDOW_US = 193.4                   # K5-A, measured (anchor only; the run measures its own)
 L1_BYTES = 1572864                             # Blackhole Tensix L1
 TIMING_ARMS = ('A', 'A2', 'W1', 'W2')
@@ -164,6 +176,8 @@ def scope_missing(arguments):
     missing += ['regime %s' % name for name in REGIMES if name not in arguments.regimes]
     missing += ['seed %d' % seed for seed in PLAN_SEEDS if seed not in arguments.seeds]
     missing += ['commit n=%d' % n for n in PLAN_COMMITS if n not in arguments.commits]
+    if 'timing' in arguments.sections:
+        missing += ['timing arm %s' % arm for arm in TIMING_ARMS if arm not in arguments.timing_arms]
     if arguments.users != PLAN_USERS:
         missing.append('users %d of %d' % (arguments.users, PLAN_USERS))
     if 'timing' in arguments.sections and (arguments.timing_launches < PLAN_TIMING_LAUNCHES
@@ -183,7 +197,9 @@ def decide(report):
             undecided.append('section %s raised: %s' % (name, section['error']))
     if not report.get('a_qualified', False):
         undecided.append('control A is not the qualified K5-A build')
-    if not report.get('kernel_present', False):
+    if report.get('kernel_import_error'):
+        undecided.append('the window kernel module (gdn_wy_block) is present but raised on import: %s' % report['kernel_import_error'])
+    elif not report.get('kernel_present', False):
         undecided.append('the window kernel (gdn_wy_block) is not built: baseline only, no W arm ran')
     causality = sections.get('causality', {})
     if causality and not causality.get('error'):
@@ -197,8 +213,16 @@ def decide(report):
     if packing and not packing.get('error') and packing.get('w_exact') is False:
         kill.append('packing: the four-user launch differs from the one-user launches (%s)' % packing.get('first_failure'))
     timing = sections.get('timing', {})
+    timing_scope_full = not any(item.startswith('timing ') for item in report.get('missing_scope', []))
     if timing and not timing.get('error') and timing.get('label') == 'kill':
-        kill.append('timing: two windows take %.1f us a layer (> %.0f)' % (timing['w2_us'], KILL_TWO_WINDOWS_US))
+        if timing_scope_full:
+            kill.append('timing: two windows take %.1f us a layer (> %.0f)' % (timing['w2_us'], KILL_TWO_WINDOWS_US))
+        else:
+            undecided.append('timing: two windows take %.1f us a layer (> %.0f) at a reduced timing scope, where the per-launch overhead is '
+                             'not amortised: not a KILL until %d launches x %d rounds have run' % (
+                                 timing['w2_us'], KILL_TWO_WINDOWS_US, PLAN_TIMING_LAUNCHES, PLAN_TIMING_ROUNDS))
+    if timing and not timing.get('error') and report.get('kernel_present') and timing.get('label') == 'not-run':
+        undecided.append('timing: the W2 arm was not measured, so the main kill rule was not tested')
     sram = sections.get('sram', {})
     if sram and not sram.get('error') and sram.get('label') == 'kill':
         kill.append('sram: two windows need %d B of circular buffers, L1 is %d' % (sram['cb_bytes'][2], sram['l1_bytes']))
@@ -209,6 +233,11 @@ def decide(report):
     accuracy = sections.get('accuracy', {})
     if accuracy and not accuracy.get('error') and accuracy.get('nonfinite'):
         kill.append('accuracy: non-finite values in the window arm\'s outputs')
+    if accuracy and not accuracy.get('error'):
+        for failure in accuracy.get('correctness_failures', [])[:3]:
+            kill.append('correctness: %s' % failure)
+        if accuracy.get('reference_failed'):
+            undecided.append('control: the fp64 reference or K5-A\'s own error against it is not usable (%s)' % accuracy['reference_failed'])
     if report.get('missing_scope'):
         undecided.append('reduced scope: %s' % '; '.join(report['missing_scope'][:6]))
     if kill:
@@ -219,20 +248,22 @@ def decide(report):
 
 
 def exit_code(verdict):
-    return {'CONTINUE': 0, 'KILL': 1, 'NO-DECISION': 4}[verdict]
+    return {'CONTINUE': 0, 'KILL': EXIT_KILL, 'NO-DECISION': 4}[verdict]
 
 
 def verdict_line(report):
     timing = report.get('sections', {}).get('timing', {})
     causality = report.get('sections', {}).get('causality', {})
     packing = report.get('sections', {}).get('packing', {})
-    return '%s verdict=%s scope=%s kernel=%s causality=%s packing=%s timing=%s a_us=%s a2_us=%s w2_us=%s NON-EXACT research probe, never a serving licence' % (
+    accuracy = report.get('sections', {}).get('accuracy', {})
+    return '%s verdict=%s scope=%s kernel=%s causality=%s packing=%s correctness=%s timing=%s a_us=%s a2_us=%s w2_us=%s NON-EXACT research probe, never a serving licence' % (
         VERDICT, report['verdict'], 'reduced' if report.get('missing_scope') else 'full',
         'present' if report.get('kernel_present') else 'absent',
         'not-run' if not causality or causality.get('error') else ('clean' if not causality.get('w_failures') else 'MISMATCH')
         if report.get('kernel_present') else 'control-only',
         'not-run' if not packing or packing.get('error') or packing.get('w_exact') is None else
         ('exact' if packing['w_exact'] else 'DIFFERS'),
+        'not-run' if not accuracy or accuracy.get('error') or accuracy.get('correct') is None else ('within-bound' if accuracy['correct'] else 'WRONG'),
         timing.get('label', 'not-run'), _us(timing.get('a_us')), _us(timing.get('a2_us')), _us(timing.get('w2_us')))
 
 
@@ -274,12 +305,83 @@ def parse(argv=None):
 
 
 def load_window_kernel():
-    """The planned kernel module, or None while it is not built."""
+    """The planned kernel module, or None while it is not built. Only the absence of gdn_wy_block ITSELF reads as 'not built': any other
+    import error (a module the kernel needs, a syntax error, a failing import-time check) propagates so it is recorded as an error."""
     try:
         import gdn_wy_block
-        return gdn_wy_block
-    except ImportError:
-        return None
+    except ModuleNotFoundError as error:
+        if error.name == 'gdn_wy_block':
+            return None
+        raise
+    return gdn_wy_block
+
+
+def json_safe(value):
+    """NaN and Infinity are not JSON: map every non-finite float to null so a strict consumer (jq, JSON.parse) reads the report."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    return value
+
+
+def dump_report(report):
+    return json.dumps(json_safe(report), indent=2, default=str, allow_nan=False)
+
+
+def to_raw(torch, qkv, beta, gate, z, rows):
+    """One user's host inputs as the model's raw dict (q, k, v, z, beta, g), batch 1, at the four-card shard (4 key heads, 12 value heads)."""
+    key = model.NK * model.DK
+    flat = qkv.float()
+    return dict(q=flat[:, :rows, 0:key].reshape(1, rows, model.NK, model.DK), k=flat[:, :rows, key:2 * key].reshape(1, rows, model.NK, model.DK),
+                v=flat[:, :rows, 2 * key:].reshape(1, rows, model.NV, model.DV), z=z.float()[:, :rows].reshape(1, rows, model.NV, model.DV),
+                beta=beta.float()[:, :rows], g=gate.float()[:, :rows])
+
+
+def host_reference(torch, user, norm_w, rows):
+    """The fp64 sequential reference of one user's `rows` rows from the bf16 host inputs, in the harness' layouts: (output [1, rows, 1536]
+    gated and unrounded, snapshots [rows, 12, 128, 128]) and the bf16 window model's committed states and output for the chained windows."""
+    raw = to_raw(torch, user['qkv'], user['beta'], user['gate'], user['z'], rows)
+    weight = norm_w[0, 0].float()
+    initial = user['initial'].float()
+    p64 = model.prep(raw, weight, model.F64)
+    o64, snaps, _ = model.seq_round(initial.double().clone(), p64, rows, model.MODELS['fp64'])
+    layout = lambda y: y.transpose(1, 2).reshape(1, rows, model.NV * model.DV)
+    reference = dict(output=layout(model.gated(o64, p64, rows, round_bf16=False)), states=torch.stack([snap[0] for snap in snaps]))
+    bf = model.MODELS['bf16']
+    pbf = model.prep(raw, weight, bf.dtype)
+    out_bf, state_bf, _ = model.wy_verify(initial.to(bf.dtype), pbf, rows, bf)
+    out_16, state_16, _ = model.wy_verify(initial.to(bf.dtype), pbf, ROWS, bf)
+    reference['model_output'] = layout(model.gated(out_bf, pbf, rows))
+    reference['model_states'] = [state_16[0], state_bf[0]]
+    return reference
+
+
+def accuracy_case(torch, user, norm_w, a_output, a_states, w_output, w_states, rows=ROWS * WINDOWS, factor=ACCURACY_FACTOR):
+    """The correctness gate for one user. a_output / w_output: [1, rows, 1536] images (K5-A's two windows joined, W's two windows); a_states
+    / w_states: the committed states after 16 and after `rows` rows ([12, 128, 128] each). Error is max abs over the fp64 reference's largest
+    magnitude (gdn_wy_model.cmp rel_to_max). ok: W's error within `factor` x K5-A's on the output rows and on each committed state."""
+    truth = host_reference(torch, user, norm_w, rows)
+    items = (('output', a_output, w_output, truth['output'], truth['model_output']),
+             ('state_after_%d' % ROWS, a_states[0], w_states[0], truth['states'][ROWS - 1], truth['model_states'][0]),
+             ('state_after_%d' % rows, a_states[1], w_states[1], truth['states'][rows - 1], truth['model_states'][1]))
+    metrics, ok, reference_failed = {}, True, None
+    for name, a_value, w_value, expected, modelled in items:
+        a_error = model.cmp(a_value.float(), expected)
+        w_error = model.cmp(w_value.float(), expected)
+        a_rel, w_rel = a_error['rel_to_max'], w_error['rel_to_max']
+        if not bool(torch.isfinite(expected).all()):
+            reference_failed = 'non-finite fp64 reference (%s)' % name
+        elif not (math.isfinite(a_rel) and a_rel <= A_SANITY_REL):
+            reference_failed = 'K5-A %s error against fp64 is %s (bound %.2f)' % (name, a_rel, A_SANITY_REL)
+        within = bool(w_error['finite']) and w_rel <= factor * a_rel
+        ok = ok and within
+        metrics[name] = dict(a_vs_fp64=a_rel, w_vs_fp64=w_rel, limit=factor * a_rel, ok=within, w_finite=bool(w_error['finite']),
+                             w_vs_bf16_model=model.cmp(w_value.float(), modelled.float())['rel_to_max'],
+                             bf16_model_vs_fp64=model.cmp(modelled.float(), expected)['rel_to_max'])
+    return dict(ok=ok, reference_failed=reference_failed, metrics=metrics)
 
 
 # ---- the device part ----
@@ -288,11 +390,15 @@ def main(argv=None):
     arguments = parse(argv)
     here = Path(__file__).resolve().parent
     ci = Path(dev.__file__).resolve().parent
-    wy = load_window_kernel()
+    kernel_import_error = None
+    try:
+        wy = load_window_kernel()
+    except Exception as error:  # noqa: BLE001 - a present but broken kernel is a recorded error, never 'not built'
+        wy, kernel_import_error = None, '%s: %s' % (type(error).__name__, error)
     report = dict(scope='window WY (gdn_wy_block) against K5-A on one card, four-card geometry; NON-EXACT research probe; no model, no '
                         'collective', argv=sys.argv[1:], users=arguments.users, rows=ROWS, windows=WINDOWS, sections={},
                   stages=[], unwritten=[], inputs_moved=[], a_qualified=False, kernel_present=wy is not None,
-                  verdict='NO-DECISION', missing_scope=scope_missing(arguments),
+                  kernel_import_error=kernel_import_error, launches=dict(run_arm=0, input_checks=0), verdict='NO-DECISION', missing_scope=scope_missing(arguments),
                   env_read={name: os.environ.get(name) for name in ENV_READ},
                   module_sha256={name: hashlib.sha256(path.read_bytes()).hexdigest()
                                  for name in MODULES for path in (here / name, ci / name) if path.exists()})
@@ -301,7 +407,7 @@ def main(argv=None):
 
     def write(extra=None):
         report.update(extra or {})
-        arguments.out.write_text(json.dumps(report, indent=2, default=str))
+        arguments.out.write_text(dump_report(report))
 
     watchdog = base.Watchdog(lambda label: write(dict(error='watchdog: %r' % (label,), watchdog=label)))
     watchdog.seconds = arguments.call_timeout
@@ -470,6 +576,7 @@ def main(argv=None):
 
         def run_arm(arm, case, label, where, commit_rows=None):
             """(per-user [(output_image, states_image)]) read as raw bytes; unwritten pages recorded (an uncommitted state window excepted)."""
+            report['launches']['run_arm'] += 1
             produced = launch(arm, case.groups, sentinel_operations, commit_rows)
             try:
                 sync('synchronize %s' % arm)
@@ -489,6 +596,10 @@ def main(argv=None):
                         if count:
                             report['unwritten'].append(dict(arm=arm, case=label, user=user, tensor=name, pages=count))
                     images.append((out_image, states_image))
+                # a kernel that writes into its own inputs must not pass: read them back after the launch (V5's gate does the same)
+                report['launches']['input_checks'] += 1
+                for item in case.moved():
+                    report['inputs_moved'].append(dict(item, arm=arm, case=label))
                 return images
             finally:
                 release(produced)
@@ -533,6 +644,7 @@ def main(argv=None):
             plan = model.sram_plan(windows=2) if model else None
             entry['plan'] = plan
             entry['dram_plan'] = model.dram_bytes_per_core(windows=2) if model else None
+            entry['dram_plan_note'] = 'PLAN (gdn_wy_model.dram_bytes_per_core), not a measurement; the kernel own dram_bytes(windows) is reported as dram_kernel when it has one'
             entry['a_cb_bytes'] = seq.cb_bytes()
             if wy is None:
                 entry.update(label='not-run', l1_bytes=L1_BYTES)
@@ -540,6 +652,8 @@ def main(argv=None):
             entry.update(sram_verdict({1: builds['W'].cb_bytes(1), 2: builds['W'].cb_bytes(2)}))
             if plan:
                 entry['plan_delta_two_windows'] = entry['cb_bytes'][2] - plan['chained_total_bytes']
+            if hasattr(builds['W'], 'dram_bytes'):
+                entry['dram_kernel'] = {1: builds['W'].dram_bytes(1), 2: builds['W'].dram_bytes(2)}
 
         # ---------------- causality ----------------
         def causality(entry):
@@ -611,29 +725,51 @@ def main(argv=None):
                         entry['w_exact'] = False
                         entry['first_failure'] = dict(regime=regime, seed=seed, user=user, parts=same['parts'])
 
-        # ---------------- accuracy (informational) ----------------
+        # ---------------- accuracy: the correctness gate ----------------
         def accuracy(entry):
             if wy is None:
-                entry.update(note='no window kernel', nonfinite=False)
+                entry.update(note='no window kernel', nonfinite=False, correct=None, correctness_failures=[], reference_failed=None)
                 return
-            entry.update(cases=[], nonfinite=False)
-            for regime, seed in regimes_seeds[:2]:
+            entry.update(cases=[], nonfinite=False, correct=True, correctness_failures=[], reference_failed=None,
+                         factor=ACCURACY_FACTOR, rule='W error vs fp64 <= %.1f x K5-A error vs fp64 (output rows and each committed state, both windows)' % ACCURACY_FACTOR)
+            for regime, seed in regimes_seeds:
                 host32 = window_inputs(torch, regime, seed, arguments.users, found, 2)
                 host16 = (host32[0], [{k: (v[:, :ROWS] if k != 'initial' else v) for k, v in u.items()} for u in host32[1]], host32[2])
                 a_case, w_case = Case(host16), Case(host32)
                 try:
-                    a = run_arm('A', a_case, 'accuracy/A', entry)
-                    w = run_arm('W2', w_case, 'accuracy/W', entry, commit_plan(ROWS * WINDOWS))
+                    a = run_arm('A', a_case, 'accuracy/A1/%s/%d' % (regime, seed), entry)
+                    w = run_arm('W2', w_case, 'accuracy/W/%s/%d' % (regime, seed), entry, commit_plan(ROWS * WINDOWS))
                 finally:
                     a_case.free()
                     w_case.free()
+                # K5-A's second window starts from its OWN committed state (snapshot 15), the chain the sequential baseline A2 runs
+                second = (host32[0], [{k: (v[:, ROWS:] if k != 'initial' else a[u][1][ROWS - 1].reshape(1, HEADS_PER_CHIP, 128, 128))
+                                       for k, v in user.items()} for u, user in enumerate(host32[1])], host32[2])
+                a2_case = Case(second)
+                try:
+                    a2 = run_arm('A', a2_case, 'accuracy/A2/%s/%d' % (regime, seed), entry)
+                finally:
+                    a2_case.free()
                 for user in range(arguments.users):
                     result = dev.compare(torch, a[user][0][0, :ROWS], w[user][0][0, :ROWS], base.locate_output)
                     finite = bool(torch.isfinite(w[user][0].float()).all())
                     entry['nonfinite'] = entry['nonfinite'] or not finite
+                    a_output = torch.cat([a[user][0][:, :ROWS], a2[user][0][:, :ROWS]], dim=1)
+                    verdict = accuracy_case(torch, host32[1][user], host32[0], a_output, [a[user][1][ROWS - 1], a2[user][1][ROWS - 1]],
+                                            w[user][0][:, :ROWS * WINDOWS], [w[user][1][0], w[user][1][1]])
+                    label = '%s seed %d user %d' % (regime, seed, user)
+                    if not verdict['ok']:
+                        entry['correct'] = False
+                        entry['correctness_failures'].append('%s: %s' % (label, '; '.join(
+                            '%s W %.3g > %.1f x K5-A %.3g' % (name, m['w_vs_fp64'], ACCURACY_FACTOR, m['a_vs_fp64'])
+                            for name, m in verdict['metrics'].items() if not m['ok'])))
+                    if verdict['reference_failed'] and not entry['reference_failed']:
+                        entry['reference_failed'] = '%s: %s' % (label, verdict['reference_failed'])
                     entry['cases'].append(dict(regime=regime, seed=seed, user=user, window_one_rows_vs_k5a=dict(
                         exact=result['exact'], differing=result.get('differing'), of=result.get('of'), max_abs=result.get('max_abs'),
-                        ulp_histogram=result.get('ulp_histogram')), finite=finite))
+                        ulp_histogram=result.get('ulp_histogram')), finite=finite, gate=verdict))
+            if entry['reference_failed']:
+                entry['correct'] = None
 
         # ---------------- timing ----------------
         def timing(entry):
@@ -644,15 +780,32 @@ def main(argv=None):
                          orders=[','.join(order) for order in orders], per_launch={}, verify_t1_counts={},
                          sequential_window_anchor_us=SEQUENTIAL_WINDOW_US, unit='one launch set: A one window, A2 two windows, W1 one, W2 two')
 
-            def upload_host(host):
+            checks = {}   # set index -> [(label, device tensor, host value)], compared on the LOGICAL region only (padding is ttnn's)
+
+            def upload_host(host, index, tag):
                 norm_w_device = upload(host[0])
                 owned.append(norm_w_device)
+                kept = checks.setdefault(index, [])
+                kept.append((dict(user=None, tensor='norm_w', set=index, uploaded_for=tag), norm_w_device, host[0]))
                 groups = []
-                for values in host[1]:
+                for user, values in enumerate(host[1]):
                     tensors = tuple(upload(values[name]) for name in ('qkv', 'beta', 'gate', 'initial', 'z'))
                     owned.extend(tensors)
+                    kept.extend((dict(user=user, tensor=name, set=index, uploaded_for=tag), tensor, values[name])
+                                for name, tensor in zip(('qkv', 'beta', 'gate', 'initial', 'z'), tensors))
                     groups.append(tensors + (norm_w_device,))
                 return groups
+
+            def inputs_after_replays():
+                """A launch that writes into its inputs would pass every other check: read a sample of the sets back (every sixth and the last)."""
+                moved = []
+                for index in sorted(set(range(0, len(sets), 6)) | {len(sets) - 1}):
+                    for label, tensor, value in checks.get(index, ()):
+                        shown = dev.bits16(torch, raw_host(tensor)[0])[tuple(slice(0, size) for size in value.shape)]
+                        if not torch.equal(shown, dev.bits16(torch, value.bfloat16())):
+                            moved.append(label)
+                report['launches']['input_checks'] += 1
+                return moved
 
             def run_unit(arm, item):
                 if arm == 'A':
@@ -669,10 +822,10 @@ def main(argv=None):
                     second = window_inputs(torch, 'R1', 3000 + index + 977, arguments.users, found, 1)
                     first16 = (host32[0], [{k: (v[:, :ROWS] if k != 'initial' else v) for k, v in u.items()} for u in host32[1]], host32[2])
                     second16 = (second[0], second[1], second[2])
-                    item = dict(a=[upload_host(first16), upload_host(second16)])
+                    item = dict(a=[upload_host(first16, index, 'A first window'), upload_host(second16, index, 'A second window')])
                     if wy is not None:
-                        item['w2'] = upload_host(host32)
-                        item['w1'] = upload_host(first16)
+                        item['w2'] = upload_host(host32, index, 'W2')
+                        item['w1'] = upload_host(first16, index, 'W1')
                     sets.append(item)
                 for arm in arms:
                     stage('timing-capture', arm=arm)
@@ -704,6 +857,8 @@ def main(argv=None):
                 for arm in arms:
                     entry['per_launch'][arm] = dev.summarize_timing(samples[arm])
                 entry['samples_us'] = samples
+                for label in inputs_after_replays():
+                    report['inputs_moved'].append(dict(label, arm='timing replays', case='timing'))
                 medians = {arm: entry['per_launch'][arm]['median_us'] for arm in arms}
                 entry.update(timing_verdict(medians.get('A'), medians.get('A2'), medians.get('W1'), medians.get('W2')))
             finally:
