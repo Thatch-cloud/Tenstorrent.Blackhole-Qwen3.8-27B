@@ -88,6 +88,14 @@ PREFIX_HASH_ALGO = 'sha256'
 MODEL_ENTRY = 'models.demos.blackhole.qwen36.tt.qwen36_vllm'
 # A profile with gate_only: true boots only with this set to 1.
 GATE_SWITCH = 'QWEN_C2_GATE'
+# Lever N at TP4 (levern_policy.FLAG and ALL_FLAGS, pinned equal by test_levern_contract): chunked prefill interleaved with the packed
+# decode rounds. A gate-only profile's own switch; the platform's chunking policy is wrapped, the scheduler caps and alternates, and the
+# model route continues its own suspended scratch. LEVERN_AUDIT is the digest instrument and also stands alone, as the NON-interleaved control.
+LEVERN_SWITCH = 'QWEN_FAST_LEVER_N'
+LEVERN_AUDIT = 'QWEN_FAST_LEVERN_AUDIT'
+LEVERN_ENV_FLAGS = ('QWEN_FAST_LEVER_N', 'QWEN_FAST_LEVERN_AUDIT', 'QWEN_FAST_LEVERN_STEP_TOKENS', 'QWEN_FAST_LEVERN_SOLO_STEP_TOKENS',
+                    'QWEN_FAST_LEVERN_PREFILL_SHARE', 'QWEN_FAST_LEVERN_ROUNDS', 'QWEN_FAST_LEVERN_MAX_ROUNDS', 'QWEN_FAST_LEVERN_FAULT')
+LEVERN_PLATFORM_MODULE = 'vllm_tt_plugin.platform'
 
 # The meshes a profile may open (item 8), keyed by its mesh_device: None is every profile that names none (the
 # pair, under the image's own MESH_DEVICE=P300), P150x4 the four-card (1, 4) ring (tp4_mesh.DESCRIPTOR_PATH,
@@ -298,6 +306,10 @@ def apply_environment(profile, environ=None):
     # The same for the fast path's side of it (sticky sessions).
     if STICKY_SWITCH not in profile['env']:
         environ.pop(STICKY_SWITCH, None)
+    # Lever N is the profile's to switch on: an inherited flag under any other profile would chunk a prefill the profile's argv keeps whole.
+    for name in LEVERN_ENV_FLAGS:
+        if name not in profile['env']:
+            environ.pop(name, None)
     return environ
 
 
@@ -386,6 +398,88 @@ def prefix_reuse_problems(profile):
         problems.append('prefix-caching-hash-algo must be %s (the block-hash chain a hit\'s exactness leans on), '
                         'not %r' % (PREFIX_HASH_ALGO, engine.get('prefix-caching-hash-algo')))
     return problems
+
+
+def levern_on(profile):
+    """Whether the profile turns Lever N (interleaved chunked prefill) on."""
+    return str((profile.get('env') or {}).get(LEVERN_SWITCH, '')) == '1'
+
+
+def levern_problems(profile):
+    """Every way the profile's Lever N flags break what the lever needs, [] when none (docs/lever-n-tp4-design-2026-10-04.md section 4).
+
+    The flags parse (levern_policy: a step that is not a multiple of 2,048 is refused, a sibling without the master switch is a typo). The
+    audit switch alone is the non-interleaved control and needs only a gate-only profile. The master switch needs, beside it:
+    - a gate-only profile (stage 1: nothing serves traffic until the exactness, hang and timing gates have run);
+    - QWEN_FAST_ANY_REQUEST=1 (the one-fresh-prefill cap and the lifecycle's continuation routing live under it) and the fast path;
+    - enable-chunked-prefill in place of no-enable-chunked-prefill, max-num-batched-tokens equal to max-model-len (nothing splits except
+      through the cap), no-async-scheduling (the engine is synchronous: a step's wall time is the interval between two schedule() calls),
+      64-token blocks and text only;
+    - QWEN_FAST_KV_RESERVATION=1: a partial prefill is never preempted only under the reservation's worst-case admission;
+    - no per-admission decode credit (the alternation subsumes it), no fast lane (its gate does not know prefill chunks) and no prefix
+      reuse or sticky sessions (a hit's first step and a continuation of its own scratch both arrive at start_pos > 0 until packed-prefix
+      lands its checkpoint source)."""
+    import levern_policy
+
+    env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
+    engine = profile.get('engine') or {}
+    problems = ['Lever N: ' + problem for problem in levern_policy.config_problems(env)]
+    audit = env.get(LEVERN_AUDIT, '0') == '1'
+    if not levern_on(profile):
+        if audit and profile.get('gate_only') is not True:
+            problems.append('Lever N: %s=1 is a gate instrument and needs a gate-only profile' % LEVERN_AUDIT)
+        return problems
+    if profile.get('gate_only') is not True:
+        problems.append('Lever N: %s=1 needs a gate-only profile (nothing serves traffic until its gates have run)' % LEVERN_SWITCH)
+    if env.get('QWEN_FAST_ANY_REQUEST') != '1':
+        problems.append('Lever N: %s=1 needs QWEN_FAST_ANY_REQUEST=1' % LEVERN_SWITCH)
+    if env.get(FAST_TP_ENV) != '4':
+        problems.append('Lever N: %s=1 is the four-card path (%s=4, whose attach warms the eager prefill before the packed traces)'
+                        % (LEVERN_SWITCH, FAST_TP_ENV))
+    if (engine.get('additional-config') or {}).get('qwen_fast_t16') is not True:
+        problems.append('Lever N: %s=1 is the fast path\'s switch, but the profile does not run the fast path (qwen_fast_t16)' % LEVERN_SWITCH)
+    if engine.get('enable-chunked-prefill') is not True or engine.get('no-enable-chunked-prefill'):
+        problems.append('Lever N: enable-chunked-prefill is required in place of no-enable-chunked-prefill')
+    if engine.get('no-async-scheduling') is not True or engine.get('async-scheduling'):
+        problems.append('Lever N: no-async-scheduling is required (a step\'s wall time is the interval between two schedule() calls)')
+    budget, context = engine.get('max-num-batched-tokens'), engine.get('max-model-len')
+    if type(budget) is not int or type(context) is not int or budget != context:
+        problems.append('Lever N: max-num-batched-tokens %r must equal max-model-len %r (nothing splits except through the cap)'
+                        % (budget, context))
+    if engine.get('block-size') != 64:
+        problems.append('Lever N: block-size must be 64, not %r' % (engine.get('block-size'),))
+    mm = engine.get('limit-mm-per-prompt')
+    if not isinstance(mm, dict) or mm.get('image') != 0 or mm.get('video') != 0:
+        problems.append('Lever N: text only is required (limit-mm-per-prompt image 0 and video 0), not %r' % (mm,))
+    if env.get('QWEN_FAST_KV_RESERVATION') != '1':
+        problems.append('Lever N: QWEN_FAST_KV_RESERVATION=1 is required (a partial prefill is never preempted only under the '
+                        'reservation\'s worst-case admission)')
+    if env.get('QWEN_FAST_DECODE_STEPS_PER_ADMISSION', '0') != '0':
+        problems.append('Lever N: QWEN_FAST_DECODE_STEPS_PER_ADMISSION must be unset or 0 (the alternation subsumes the credit)')
+    if env.get('QWEN_FAST_LANE', '0') != '0':
+        problems.append('Lever N: QWEN_FAST_LANE must be unset or 0 (the lane gate does not know prefill chunks)')
+    for name in (PREFIX_SWITCH, STICKY_SWITCH):
+        if env.get(name, '0') != '0':
+            problems.append('Lever N: %s must be unset or 0 (prefix reuse and Lever N share the start_pos > 0 route; not combined yet)' % name)
+    return problems
+
+
+def install_levern_platform(on_import=None, environ=None):
+    """Under a Lever N profile, in every process: wrap the TT platform's chunked-prefill policy when the plugin imports it
+    (levern_platform.install), so the profile's enable-chunked-prefill survives check_and_update_config. -> whether it was armed."""
+    environ = os.environ if environ is None else environ
+    import levern_platform
+
+    if on_import is None:
+        def on_import(name, callback):
+            loaded = sys.modules.get(name)
+            if loaded is not None:
+                # Already imported (an earlier hook or the launcher pulled the platform in): a post-import hook would never fire.
+                callback(loaded)
+                return
+            sys.meta_path.insert(0, PostImportHook(name, callback))
+    on_import(LEVERN_PLATFORM_MODULE, levern_platform.install)
+    return True
 
 
 def gate_problems(profile, environ):
@@ -958,10 +1052,17 @@ def boot(environ=None, orig_argv=None):
     problems = prefix_reuse_problems(profile)
     if problems:
         raise ValueError('profile %s cannot serve prefix reuse exactly: %s' % (profile['name'], '; '.join(problems)))
+    problems = levern_problems(profile)
+    if problems:
+        raise ValueError('profile %s cannot serve Lever N exactly: %s' % (profile['name'], '; '.join(problems)))
     problems = mesh_problems(profile)
     if problems:
         raise ValueError('profile %s cannot open its mesh: %s' % (profile['name'], '; '.join(problems)))
     apply_environment(profile, environ)
+    if levern_on(profile):
+        install_levern_platform()
+        log('profile %s: Lever N armed (%s=1): the platform keeps chunked prefill, the scheduler caps and alternates', profile['name'],
+            LEVERN_SWITCH)
     if ring_mesh(profile):
         install_ring_check(environ)
     if profile.get('skip_device_teardown', True):

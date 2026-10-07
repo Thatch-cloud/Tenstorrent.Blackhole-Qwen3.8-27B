@@ -721,6 +721,17 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         scopes.callback(weights.close)
         memory_ledger.record('P5', draft_weights=weights)
         prefill_warm_before_traces(runner, model, policy['scheduler_requests'], operations=operations)
+        if os.environ.get('QWEN_FAST_LEVER_N', '0') != '0' or os.environ.get('QWEN_FAST_LEVERN_AUDIT', '0') != '0':
+            # Lever N at TP4 (QWEN_FAST_LEVER_N=1 / QWEN_FAST_LEVERN_AUDIT=1; never imported otherwise): the model route that continues a suspended
+            # prefill scratch and the digest instrument, installed here, and the route warmed over a three-step prompt BEFORE any trace is
+            # captured, so every program and buffer it touches exists before the packed traces (the #48536 sequence). A model tree that
+            # lacks the G1 stage's resumable loops fails the attach by name.
+            import levern_route
+
+            levern_handle = levern_route.install(runner, model, log=pindiag)
+            if levern_handle is not None:
+                scopes.callback(levern_handle.uninstall)
+                levern_route.warm(runner, model, log=pindiag)
         if request_widths and not m3_blocks_two:
             if not packed_shapes:
                 raise ValueError('%s warms the request widths before the packed block, and this attach builds none'

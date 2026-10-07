@@ -670,6 +670,18 @@ def kv_reservation_requested(environ=None):
     return value == '1'
 
 
+LEVERN_FLAG = 'QWEN_FAST_LEVER_N'
+
+
+def levern_requested(environ=None):
+    """QWEN_FAST_LEVER_N, strictly (levern_policy.enabled's rule, read here so that an image without that module still
+    schedules as before while the flag is off): unset or '0' off, '1' on, anything else refused (ValueError)."""
+    value = (os.environ if environ is None else environ).get(LEVERN_FLAG, '0')
+    if value not in ('0', '1'):
+        raise ValueError('%s must be 0 or 1, got %r' % (LEVERN_FLAG, value))
+    return value == '1'
+
+
 def decode_steps_per_admission(environ=None):
     """R, the decode-only steps owed after an admission (STEPS_FLAG): a whole number from 0 to MAX_STEPS in plain
     digits, 0 when unset. Anything else is a configuration error, not a silent 0."""
@@ -722,11 +734,13 @@ def new_state():
     return dict(live=False, seen=set(), dram_held=None, dram_noted=None, credit=0, asked=False)
 
 
-def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None):
+def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None, levern=None):
     """The wrapper installed as <class>._schedule_prefill_only around `original`. `steps` is R, the decode credit
     (decode_steps_per_admission() when None); `state` is shared with the schedule() wrapper (wrap_schedule); `kv` is
     serving_kv_reservation (QWEN_FAST_KV_RESERVATION=1: install() passes it), None for every profile that does not turn the
-    reservation on, whose steps are then exactly what they were."""
+    reservation on, whose steps are then exactly what they were. `levern` is levern_scheduler.LevernRuntime
+    (QWEN_FAST_LEVER_N=1: install() passes it): this step's request is capped at levern_policy.step_budget tokens, so vLLM
+    splits a long prefill at the model's own 2,048-token boundaries; None (every profile without the flag) caps nothing."""
     steps = decode_steps_per_admission() if steps is None else steps
     if type(steps) is not int or steps < 0:
         raise ValueError('A non-negative integer decode credit is required, got %r' % (steps,))
@@ -775,6 +789,13 @@ def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None):
         saved_max = self.max_num_running_reqs
         saved_waiting = self.waiting
         saved_skipped = getattr(self, 'skipped_waiting', None)
+        # LEVER N (QWEN_FAST_LEVER_N=1): this step advances one request, the partial in flight or the one fresh prompt the
+        # waiting loop admits, by at most its step budget (a multiple of 2,048 ending before the final step, levern_policy).
+        restore_cap = capped = None
+        if levern is not None:
+            restore_cap, target, _fresh, budget = levern.plan_cap(self, partials, allowed, hide, decodes)
+            if restore_cap is not None:
+                capped = (target, levern.computed)
         # The plugin writes max(0, value - len(pure_decodes)) before calling the base scheduler, so
         # the value written here carries the decodes it is about to remove.
         self.max_num_running_reqs = min(saved_max, allowed + decodes)
@@ -785,6 +806,8 @@ def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None):
         try:
             result = original(self)
         finally:
+            if restore_cap is not None:
+                restore_cap()
             if hide:
                 # Anything the base scheduler put back (a preemption) is merged ahead of what
                 # was hidden, exactly as _schedule_decode_only and the graft merge it.
@@ -796,6 +819,9 @@ def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None):
                     self.skipped_waiting = saved_skipped
                 self.waiting = saved_waiting
             self.max_num_running_reqs = saved_max
+        if capped is not None and not (dram_held or kv_held or credit_held):
+            # The pass is about to run: it must be the one the cap was computed for (levern_scheduler.verify), or the engine stops here.
+            levern.verify(result, capped)
         if dram_held:
             # S2 W6b: the pass the plugin is about to discard took the finished ids; its decode-only pass carries them.
             carry_finished(self, result, decodes, log)
@@ -864,12 +890,33 @@ def install(config, *, importer=importlib.import_module, log=None, queue_factory
         problems = kv.install_check()
         if problems:
             raise ValueError('%s=1 cannot be installed on %s: %s' % (kv.FLAG, name, '; '.join(problems)))
+    levern = None
+    if levern_requested():
+        # QWEN_FAST_LEVER_N=1: the cap and the alternation (levern_scheduler). Never optional: a class that cannot take
+        # them fails the install by name, and the lifecycle refuses to attach without them, rather than serve a chunked
+        # profile that never chunks. The per-admission decode credit is the same idea per admission and the two are
+        # mutually exclusive.
+        import levern_policy
+        import levern_scheduler
+
+        if steps:
+            raise ValueError('%s and %s=1 are mutually exclusive: the Lever N alternation subsumes the per-admission '
+                             'decode credit' % (STEPS_FLAG, levern_policy.FLAG))
+        if not callable(schedule) or not callable(getattr(cls, '_schedule_decode_only', None)):
+            raise ValueError('%s has no schedule or no _schedule_decode_only: Lever N cannot yield a step to the decoders'
+                             % name)
+        levern = levern_scheduler.LevernRuntime(log=log)
     state = new_state()
-    setattr(cls, METHOD, wrap(original, queue_factory=queue_factory, log=log, steps=steps, state=state, kv=kv))
+    setattr(cls, METHOD, wrap(original, queue_factory=queue_factory, log=log, steps=steps, state=state, kv=kv, levern=levern))
     log(INSTALLED + '{}', name)
     if kv is not None:
         log(kv.INSTALLED_LINE, name)
     if steps:
         setattr(cls, 'schedule', wrap_schedule(schedule, state))
         log(CREDIT_INSTALLED_LINE, name, steps)
+    if levern is not None:
+        setattr(cls, 'schedule', levern_scheduler.wrap_schedule(schedule, levern))
+        cfg = levern.cfg
+        log(levern_policy.INSTALLED_LINE, name, cfg.step, cfg.solo, cfg.share, cfg.rounds if cfg.rounds else '-',
+            cfg.max_rounds)
     return name

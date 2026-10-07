@@ -70,6 +70,9 @@ class FastServingLifecycle:
     # class for the same reason: off, a new request with num_computed_tokens != 0 is refused as
     # it always was.
     sticky = False
+    # Lever N at TP4 (QWEN_FAST_LEVER_N=1, or the digest instrument QWEN_FAST_LEVERN_AUDIT=1; set per instance in __init__): levern_route, or None.
+    # Defaulted on the class so a lifecycle built without __init__, and every profile without the flags, behaves exactly as before.
+    levern = None
 
     # request_id is assigned at five sites - construction, reset, the
     # EOS-at-first-token release, the prefill-to-decode handoff, and admission.
@@ -159,6 +162,13 @@ class FastServingLifecycle:
         if self.any_request:
             self.quarantine = self._install_quarantine(config)
             self.admission = self._install_admission(config)
+        # Lever N (QWEN_FAST_LEVER_N=1 / QWEN_FAST_LEVERN_AUDIT=1; default off, None): the lifecycle announces each prefill step to the model route
+        # (levern_route) and keeps the displacement and the release of a split prompt. The cap and the alternation live in the scheduler class's
+        # install above: a chunked profile that never chunks is refused here, not served.
+        self.levern = self._levern_module()
+        if self.levern is not None and self.levern.mode()[0] and self.admission is None:
+            raise ValueError('Lever N needs the one-fresh-prefill cap and its chunk cap installed on the scheduler the engine runs '
+                             '(serving_prefill_admission.install); it could not be')
         if self.lanes is not None:
             if self.quarantine is None or self.packed_step is None:
                 raise ValueError('The fast lane needs the C2-any request quarantine and a packed step')
@@ -171,6 +181,28 @@ class FastServingLifecycle:
                 ('take_draft_token_ids', MethodType(self._drafts, worker))):
             self.saved.append((name, name in vars(worker), vars(worker).get(name)))
             setattr(worker, name, value)
+
+    @staticmethod
+    def _levern_module():
+        """levern_route when QWEN_FAST_LEVER_N or QWEN_FAST_LEVERN_AUDIT is set (strictly 0 or 1: anything else is refused), else None. The
+        module is imported only then, so an image or a profile without the flags never loads it."""
+        import os
+
+        if os.environ.get('QWEN_FAST_LEVER_N', '0') == '0' and os.environ.get('QWEN_FAST_LEVERN_AUDIT', '0') == '0':
+            return None
+        import levern_route
+
+        route, audit = levern_route.mode()
+        return levern_route if route or audit else None
+
+    def _levern_announce(self, request_id, start, end, total):
+        """Tell the model route which step the next execute_model call carries (levern_route.announce); a step it will not split is announced
+        too, so the control arm's digests and the owner token know the request."""
+        self.levern.announce(self.runner.model.model[0], self.levern.Step(request_id, start, end, total))
+
+    def _levern_withdraw(self):
+        if self.levern is not None:
+            self.levern.withdraw(self.runner.model.model[0])
 
     def _check(self):
         if self.failed or self.closed:
@@ -351,6 +383,9 @@ class FastServingLifecycle:
         if self.capture is not None:
             self.capture.close()
             self.capture = None
+        if self.levern is not None and self.request_id is not None:
+            # Lever N: a prompt finished or aborted between two of its steps leaves a scratch nobody continues (levern_route.release).
+            self.levern.release(self.runner.model.model[0], self.request_id)
         self.request_id = None
 
     def _execute(self, worker, scheduled):
@@ -532,17 +567,27 @@ class FastServingLifecycle:
             # request's last one.
             self.chunk_deferred = []
             self.chunk_in_flight = False
-            # A native prefill rewrites GDN slot 0, so whichever engine's state it
-            # held is gone; the next verify must restore its own carry.
-            note_prefill()
             # A step that carries the whole prompt keeps using capture(), whose contract
             # is the stricter one - a single segment must cover the prompt - so the
             # unchunked path behaves exactly as it did and needs no capture that knows
             # about suspension. segment() is only for a step that does NOT finish the
             # prompt, which cannot happen until chunked prefill is enabled.
             whole = resume + chunk == len(new.prompt_token_ids)
-            with (self.capture.capture() if whole else self.capture.segment()):
-                result = self.original_execute(scheduled)
+            if self.levern is not None and not whole:
+                # Lever N: the first step of a split prompt writes no decode slot (the route's last step does), so the resident engine stays
+                # resident; the packed fixture write epoch still advances, as for every prefill chunk.
+                note_fixture_writer('prefill')
+            else:
+                # A native prefill rewrites GDN slot 0, so whichever engine's state it
+                # held is gone; the next verify must restore its own carry.
+                note_prefill()
+            if self.levern is not None:
+                self._levern_announce(new.req_id, resume, resume + chunk, len(new.prompt_token_ids))
+            try:
+                with (self.capture.capture() if whole else self.capture.segment()):
+                    result = self.original_execute(scheduled)
+            finally:
+                self._levern_withdraw()
             return self._after_prefill_chunk(result, whole)
         except BaseException:
             self.failed = True
@@ -600,8 +645,18 @@ class FastServingLifecycle:
         # Round-fence plan H1a: every Lever N chunk, whichever GDN slot it writes, bumps the
         # packed fixture write epoch (a pre-staged verify then restages in full).
         note_fixture_writer('prefill-chunk')
-        with self.capture.segment():
-            result = self.original_execute(scheduled)
+        levern = getattr(self, 'levern', None)
+        if levern is not None:
+            cached = scheduled.scheduled_cached_reqs
+            begun = int(list(cached.num_computed_tokens)[0])
+            self._levern_announce(self.request_id, begun, begun + int(scheduled.num_scheduled_tokens[self.request_id]),
+                                  self.capture.position)
+        try:
+            with self.capture.segment():
+                result = self.original_execute(scheduled)
+        finally:
+            if levern is not None:
+                self._levern_withdraw()
         self._displace_after_continuation()
         return self._after_prefill_chunk(result, False)
 
@@ -624,6 +679,9 @@ class FastServingLifecycle:
         not report one) displaces: a spurious restore costs one carry copy, a missed
         one costs the stream.
         """
+        if getattr(self.capture, 'segment_wrote_slot', None) is False:
+            # Lever N: an intermediate step of a split prompt wrote no decode slot (levern_route), so no resident engine's state was overwritten.
+            return
         slot = getattr(self.capture, 'segment_slot', None)
         if type(slot) is int and slot > 0:
             return

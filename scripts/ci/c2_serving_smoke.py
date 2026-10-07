@@ -542,6 +542,7 @@ STALL_SHORT_SEATS = 7
 STALL_SHORT_TOKENS = 4096
 STALL_SHORT_BUDGET = 6000
 STALL_COLD_TOKENS = 253920
+STALL_COLD_128K_TOKENS = 120000
 STALL_WARM_CHUNKS = 12              # each decoding seat streams this many chunks before the cold prompt arrives
 
 
@@ -557,13 +558,45 @@ def longest_gap(stamps, after=None):
     return (round(best, 3), round(at, 3)) if best is not None else (None, None)
 
 
+def window_stats(stamps, tokens, chunks, begin, end):
+    """One seat's progress inside [begin, end], the cold arrival's prefill window (Lever N, tp4/lever-n): the stream chunks it received there,
+    chunks a second, and an ESTIMATE of its tokens a second (the stream carries one stamp per chunk, not per token, so the seat's own
+    tokens-per-chunk over the whole stream scales the chunk rate: a speculative round commits a few tokens at once). None where the window is empty."""
+    if not (isinstance(begin, (int, float)) and isinstance(end, (int, float))) or end <= begin:
+        return dict(window_s=None, chunks=None, chunk_rate=None, est_tok_s=None)
+    inside = len([stamp for stamp in stamps or () if begin < stamp <= end])
+    span = end - begin
+    per_chunk = (tokens / chunks) if tokens and chunks else None
+    return dict(window_s=round(span, 3), chunks=inside, chunk_rate=round(inside / span, 3),
+                est_tok_s=round(inside / span * per_chunk, 2) if per_chunk else None)
+
+
+def window_aggregate(seat_windows):
+    """The seats' in-window progress together: how many progressed at all, the slowest chunk rate, and the summed estimated tokens a second."""
+    known = [window for window in seat_windows if window.get('chunks') is not None]
+    return dict(seats=len(known), seats_progressing=len([window for window in known if window['chunks'] > 0]),
+                min_chunk_rate=min([window['chunk_rate'] for window in known] or [None]) if known else None,
+                total_est_tok_s=round(sum(window['est_tok_s'] or 0.0 for window in known), 2) if known else None)
+
+
 def stall8_cold262k():
-    # Opt-in (tp4/seats262k). The stall shape of a cold 262k arrival: seven users decode 4k prompts (ignore_eos, 6,000-token budgets,
+    return stall8_cold('stall8_cold262k', STALL_COLD_TOKENS)
+
+
+def stall8_cold128k():
+    # Opt-in (tp4/lever-n). The same shape with a cold arrival of about 120,000 tokens (as the server counts them): half the freeze of the 254k one.
+    return stall8_cold('stall8_cold128k', STALL_COLD_128K_TOKENS)
+
+
+def stall8_cold(label, cold_tokens):
+    # Opt-in (tp4/seats262k). The stall shape of a cold long arrival: seven users decode 4k prompts (ignore_eos, 6,000-token budgets,
     # so they outlast the arrival's prefill), and once each has streamed STALL_WARM_CHUNKS chunks an eighth user arrives with a
-    # 253,920-token prompt. Recorded, not gated: the arrival's time to first token, and every decoding seat's longest inter-token gap
-    # from the arrival on (the prefill's admission freeze: a long prefill holds the gate and no live user decodes).
+    # cold_tokens-token prompt. Recorded, not gated: the arrival's time to first token, every decoding seat's longest inter-token gap
+    # from the arrival on (the prefill's admission freeze: a long prefill holds the gate and no live user decodes), and (Lever N,
+    # tp4/lever-n) each seat's chunks and estimated tokens a second INSIDE the arrival's prefill window (arrival to the newcomer's first
+    # token): zero on the control arm, which freezes every decoder, and the interleaved arm's whole point.
     prompts, corpus = code_prompts((STALL_SHORT_TOKENS,) * STALL_SHORT_SEATS)
-    cold, cold_corpus, fit = fitted_code_prompts((STALL_COLD_TOKENS,))
+    cold, cold_corpus, fit = fitted_code_prompts((cold_tokens,))
     out = [None] * (STALL_SHORT_SEATS + 1)
     streaming = [threading.Event() for _ in range(STALL_SHORT_SEATS)]
     arrival = dict(at=None)
@@ -594,23 +627,308 @@ def stall8_cold262k():
     cold_thread = threading.Thread(target=run, args=(STALL_SHORT_SEATS, cold[0], 200))
     cold_thread.start()
     [thread.join() for thread in threads + [cold_thread]]
-    gaps = []
+    newcomer = out[STALL_SHORT_SEATS] if isinstance(out[STALL_SHORT_SEATS], dict) else {}
+    window_end = newcomer.get('first_at')
+    gaps, windows = [], []
     for index in range(STALL_SHORT_SEATS):
         user = out[index] if isinstance(out[index], dict) else {}
-        gap, began = longest_gap(user.pop('delta_stamps', None) or [], after=arrival['at'])
+        stamps = user.pop('delta_stamps', None) or []
+        gap, began = longest_gap(stamps, after=arrival['at'])
         gaps.append(dict(seat=index, longest_gap_s=gap, began_at=began, tokens=user.get('tokens'), error=user.get('error')))
-    newcomer = out[STALL_SHORT_SEATS] if isinstance(out[STALL_SHORT_SEATS], dict) else {}
+        windows.append(dict(seat=index, **window_stats(stamps, user.get('tokens'), user.get('chunks_streamed'), arrival['at'], window_end)))
     newcomer.pop('delta_stamps', None)
     worst = max([gap['longest_gap_s'] for gap in gaps if gap['longest_gap_s'] is not None] or [None]) if any(
         gap['longest_gap_s'] is not None for gap in gaps) else None
-    print('stall8_cold262k arrival_ttft_s', arrival_ttft(newcomer), 'worst_gap_s', worst, flush=True)
+    aggregate = window_aggregate(windows)
+    print(label, 'arrival_ttft_s', arrival_ttft(newcomer), 'worst_gap_s', worst, 'window', json.dumps(aggregate), flush=True)
     return dict(users=out, corpus=corpus, fit=fit, arrival_started_at=round(arrival['at'], 3),
                 arrival_ttft_s=arrival_ttft(newcomer), arrival_prompt_tokens=newcomer.get('prompt_tokens'),
-                seat_gaps=gaps, longest_gap_s=worst)
+                seat_gaps=gaps, longest_gap_s=worst, seat_windows=windows, window=aggregate)
 
 
 def arrival_ttft(newcomer):
     return newcomer.get('ttft') if isinstance(newcomer, dict) else None
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Lever N (tp4/lever-n): exactness of a split prefill against the whole one, and the hang shapes of an interleaved prefill.
+# ---------------------------------------------------------------------------------------------------------------------
+
+LEVERN_EQUAL_LENGTHS = (2047, 2048, 2049, 4095, 4096, 4097, 6143, 6145, 32785)
+LEVERN_EQUAL_LONG_LENGTHS = (131077, 253920)
+LEVERN_BUSY_LENGTHS = (4097, 6145, 32785)
+LEVERN_EQUAL_TOKENS = 256
+LEVERN_BUSY_SEATS = 7
+LEVERN_BUSY_BUDGET = 4000
+LEVERN_COLD_TOKENS = 64000
+
+
+def server_token_ids(text):
+    """The server's own token ids of `text` (POST /tokenize with a raw prompt, vLLM's OpenAI server), or None where it cannot say."""
+    try:
+        status, body = post('/tokenize', dict(model=MODEL, prompt=text, add_special_tokens=False), timeout=1200)
+    except Exception:
+        return None
+    if status == 200 and isinstance(body, dict) and isinstance(body.get('tokens'), list):
+        return body['tokens']
+    return None
+
+
+def exact_token_prompts(lengths, margin=1.3):
+    """One prompt of EXACTLY each length in tokens, as token ids: real code text tokenized by the server (the rig host has no tokenizer),
+    cut at the token. Each prompt reads its own window of the corpus. Returns (ids per length, corpus info); a length the corpus cannot
+    reach, or a server that cannot tokenize, is an error naming it (a boundary test that ran at another length would test nothing)."""
+    (corpus, info), _ = code_corpus()
+    prompts = []
+    for index, length in enumerate(lengths):
+        chars = int(length * CODE_CHARS_PER_TOKEN * margin) + 4000
+        for _ in range(6):
+            chars = min(chars, len(corpus))
+            start = (index * len(corpus) // len(lengths)) % max(len(corpus) - chars, 1)
+            ids = server_token_ids(corpus[start:start + chars])
+            if ids is None:
+                raise RuntimeError('the server cannot tokenize (POST /tokenize with a prompt): no exact-length prompt for %d tokens' % length)
+            if len(ids) >= length:
+                prompts.append(ids[:length])
+                break
+            if chars >= len(corpus):
+                raise RuntimeError('the corpus holds %d tokens of text at most: no prompt of %d tokens' % (len(ids), length))
+            chars = int(chars * 1.4)
+        else:
+            raise RuntimeError('no prompt of %d tokens in the corpus' % length)
+    return prompts, dict(files=info['files'], characters=info['characters'])
+
+
+def complete_ids(ids, max_tokens, timeout=3600):
+    """One non-streamed completion of a prompt given as token ids (POST /v1/completions): the answer's hashes, token count, finish reason and
+    the server's own prompt token count, which must be len(ids)."""
+    started = time.time()
+    status, body = post('/v1/completions', dict(model=MODEL, prompt=ids, max_tokens=max_tokens), timeout=timeout)
+    if status != 200:
+        return dict(status=status, error=str(body)[:300], prompt_tokens_sent=len(ids))
+    choice = body['choices'][0]
+    text = choice.get('text') or ''
+    usage = body.get('usage') or {}
+    return dict(status=status, prompt_tokens_sent=len(ids), prompt_tokens=usage.get('prompt_tokens'), tokens=usage.get('completion_tokens'),
+                finish=choice.get('finish_reason'), content_sha256=hashlib.sha256(text.encode('utf-8')).hexdigest(), content_chars=len(text),
+                text=text[:200], wall_s=round(time.time() - started, 1))
+
+
+def levern_equal_run(label, lengths):
+    prompts, corpus = exact_token_prompts(lengths)
+    rows = {}
+    for length, ids in zip(lengths, prompts):
+        row = complete_ids(ids, LEVERN_EQUAL_TOKENS)
+        rows[str(length)] = row
+        print(label, 'prompt', length, json.dumps(dict((key, row.get(key)) for key in (
+            'prompt_tokens', 'tokens', 'finish', 'content_sha256', 'wall_s', 'error'))), flush=True)
+    return dict(prompts=rows, lengths=list(lengths), corpus=corpus, max_tokens=LEVERN_EQUAL_TOKENS)
+
+
+def levern_equal():
+    # Opt-in (tp4/lever-n, G-N1 part i). One user alone: prompts of EXACTLY 2047, 2048, 2049, 4095, 4096, 4097, 6143, 6145 and 32,785 tokens (the
+    # boundaries of the model's 2,048-token chunk and the final-step coalescing) through /v1/completions as token ids, 256 tokens out. Every row's
+    # answer hashes are compared between the arms by levern_compare.py (the interleaved arm must equal the control), and on the audit profiles
+    # each prefill logs its digests (slot, logits, KV): the audited pair's digests are compared the same way. A prompt under 4,096 tokens
+    # is not split (a control inside the interleaved arm).
+    return levern_equal_run('levern_equal', LEVERN_EQUAL_LENGTHS)
+
+
+def levern_equal_long():
+    # Opt-in (tp4/lever-n). The same for the two long boundary prompts: 131,077 and 253,920 tokens (123 chunks and a 2,016-token tail).
+    return levern_equal_run('levern_equal_long', LEVERN_EQUAL_LONG_LENGTHS)
+
+
+def start_decoders(budgets, prompt_tokens=STALL_SHORT_TOKENS, warm_chunks=STALL_WARM_CHUNKS):
+    """Decoding seats (4k real-code prompts, ignore_eos, one budget each) started together; returns (out, events, threads, corpus) where
+    events[i] is set once seat i has streamed warm_chunks chunks (or ended)."""
+    prompts, corpus = code_prompts((prompt_tokens,) * len(budgets))
+    out = [None] * len(budgets)
+    events = [threading.Event() for _ in budgets]
+
+    def run(index):
+        def seen(count):
+            if count >= warm_chunks:
+                events[index].set()
+
+        try:
+            out[index] = stream([{'role': 'user', 'content': prompts[index]}], budgets[index], timeout=3600, keep_stamps=True,
+                                on_token=seen, ignore_eos=True)
+        except Exception as error:
+            out[index] = dict(error=repr(error)[:300])
+        finally:
+            events[index].set()
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(len(budgets))]
+    [thread.start() for thread in threads]
+    return out, events, threads, corpus
+
+
+def drop_stamps(users):
+    for user in users:
+        if isinstance(user, dict):
+            user.pop('delta_stamps', None)
+    return users
+
+
+def levern_equal_busy():
+    # Opt-in (tp4/lever-n, G-N1 part ii). Seven seats decode 4k prompts (ignore_eos) while the boundary prompts of LEVERN_BUSY_LENGTHS arrive one
+    # at a time, so decode rounds run BETWEEN the chunks of each split prefill (pause, decode, resume): the interleaved arm's texts must equal the
+    # control's and the solo run's. The seven decoders' own answers are compared between the arms too.
+    out, events, threads, corpus = start_decoders([LEVERN_BUSY_BUDGET] * LEVERN_BUSY_SEATS)
+    for event in events:
+        event.wait(3600)
+    prompts, exact_corpus = exact_token_prompts(LEVERN_BUSY_LENGTHS)
+    rows = {}
+    for length, ids in zip(LEVERN_BUSY_LENGTHS, prompts):
+        row = complete_ids(ids, LEVERN_EQUAL_TOKENS)
+        rows[str(length)] = row
+        print('levern_equal_busy prompt', length, json.dumps(dict((key, row.get(key)) for key in (
+            'prompt_tokens', 'tokens', 'finish', 'content_sha256', 'wall_s', 'error'))), flush=True)
+    [thread.join() for thread in threads]
+    return dict(users=drop_stamps(out), prompts=rows, lengths=list(LEVERN_BUSY_LENGTHS), corpus=corpus, max_tokens=LEVERN_EQUAL_TOKENS)
+
+
+def run_cold(index, out, prompt, budget, **extra):
+    try:
+        out[index] = stream([{'role': 'user', 'content': prompt}], budget, timeout=3600, keep_stamps=True, **extra)
+    except Exception as error:
+        out[index] = dict(error=repr(error)[:300])
+
+
+def levern_decoder_finishes():
+    # Opt-in (tp4/lever-n, G-N2 a). One of seven decoders finishes MID-prefill of a cold arrival (budget 150): its plugin slot frees and the
+    # partial's row can move between two chunks (v121), and the batch condenses. Every stream must complete and the arrival must be exact.
+    budgets = [150] + [LEVERN_BUSY_BUDGET] * (LEVERN_BUSY_SEATS - 1)
+    out, events, threads, corpus = start_decoders(budgets)
+    for event in events:
+        event.wait(3600)
+    cold, _, fit = fitted_code_prompts((LEVERN_COLD_TOKENS,))
+    newcomer = [None]
+    thread = threading.Thread(target=run_cold, args=(0, newcomer, cold[0], 300))
+    thread.start()
+    [item.join() for item in threads + [thread]]
+    return dict(users=drop_stamps(out + newcomer), corpus=corpus, fit=fit, budgets=budgets)
+
+
+def levern_all_decoders_finish():
+    # Opt-in (tp4/lever-n, G-N2 b). Every decoder finishes mid-prefill of the cold arrival (budgets 120, 150 and 180): the hook closes between two
+    # chunks and the final step builds a fresh one. The arrival must complete exact.
+    budgets = [120, 150, 180]
+    out, events, threads, corpus = start_decoders(budgets)
+    for event in events:
+        event.wait(3600)
+    cold, _, fit = fitted_code_prompts((LEVERN_COLD_TOKENS,))
+    newcomer = [None]
+    thread = threading.Thread(target=run_cold, args=(0, newcomer, cold[0], 300))
+    thread.start()
+    [item.join() for item in threads + [thread]]
+    return dict(users=drop_stamps(out + newcomer), corpus=corpus, fit=fit, budgets=budgets)
+
+
+def abort_stream(messages, max_tokens, after_s, timeout=3600):
+    """A streamed request the CLIENT drops `after_s` seconds in, by shutting the socket from another thread (the server sees a disconnect while
+    the request is still prefilling, before its first token: urllib would still be waiting for the response headers)."""
+    import http.client
+    import socket
+    from urllib.parse import urlparse
+
+    target = urlparse(BASE)
+    body = json.dumps({'model': MODEL, 'messages': messages, 'max_tokens': max_tokens, 'str' + 'eam': True}).encode()
+    connection = http.client.HTTPConnection(target.hostname, target.port, timeout=timeout)
+    started = time.time()
+
+    fired = threading.Event()
+
+    def drop():
+        fired.set()
+        try:
+            connection.sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+    timer = threading.Timer(after_s, drop)
+    timer.start()
+    first_byte = None
+    try:
+        connection.request('POST', '/v1/chat/completions', body, {'content-type': 'application/json'})
+        response = connection.getresponse()
+        first_byte = round(time.time() - started, 2)
+        tail = b''
+        while True:
+            chunk = response.read(4096)
+            if not chunk:
+                break
+            tail = (tail + chunk)[-64:]
+        # the stream ended by itself only if the server sent its [DONE]; an end after the drop (EOF on the shut socket) is the drop
+        outcome = 'completed' if b'[DONE]' in tail and not fired.is_set() else 'dropped'
+    except Exception as error:
+        outcome = 'dropped' if fired.is_set() else 'failed: %r' % (error,)
+    finally:
+        timer.cancel()
+        drop()
+    return dict(outcome=outcome, after_s=after_s, elapsed_s=round(time.time() - started, 2), first_byte_s=first_byte)
+
+
+def levern_cancel_mid_prefill():
+    # Opt-in (tp4/lever-n, G-N2 c). Three seats decode; a cold arrival of about 120,000 tokens is DROPPED by its client 20 s into its prefill (mid-chunk
+    # sequence: the abort frees the gate, the scratch owner and the KV reservation), then a 8k request arrives and must complete as if nothing had
+    # happened, and every decoder must complete.
+    budgets = [LEVERN_BUSY_BUDGET] * 3
+    out, events, threads, corpus = start_decoders(budgets)
+    for event in events:
+        event.wait(3600)
+    cold, _, fit = fitted_code_prompts((STALL_COLD_128K_TOKENS,))
+    import os
+    dropped = abort_stream([{'role': 'user', 'content': cold[0]}], 200, float(os.environ.get('SMOKE_LEVERN_CANCEL_AFTER_S', '20')))
+    print('levern_cancel_mid_prefill dropped', json.dumps(dropped), flush=True)
+    followup_prompt, _ = code_prompts((8192,))
+    follow = [None]
+    run_cold(0, follow, followup_prompt[0], 300)
+    [item.join() for item in threads]
+    return dict(users=drop_stamps(out + follow), dropped=dropped, corpus=corpus, fit=fit, budgets=budgets)
+
+
+def levern_arrival_during_prefill():
+    # Opt-in (tp4/lever-n, G-N2 d). Three seats decode; a cold arrival of about 64,000 tokens starts its (interleaved) prefill and, 6 s in, a 5,000-token
+    # prompt arrives: it queues behind the in-flight prefill (v1 runs one prefill at a time) and is admitted when the first completes. Both
+    # complete exact; the second's time to first token is recorded.
+    budgets = [LEVERN_BUSY_BUDGET] * 3
+    out, events, threads, corpus = start_decoders(budgets)
+    for event in events:
+        event.wait(3600)
+    cold, _, fit = fitted_code_prompts((LEVERN_COLD_TOKENS,))
+    short, _ = code_prompts((5000,))
+    pair = [None, None]
+    first = threading.Thread(target=run_cold, args=(0, pair, cold[0], 300))
+    first.start()
+    import os
+    time.sleep(float(os.environ.get('SMOKE_LEVERN_ARRIVAL_AFTER_S', '6')))
+    second = threading.Thread(target=run_cold, args=(1, pair, short[0], 300))
+    second.start()
+    [item.join() for item in threads + [first, second]]
+    return dict(users=drop_stamps(out + pair), corpus=corpus, fit=fit, budgets=budgets)
+
+
+def levern_seed_stops():
+    # Opt-in (tp4/lever-n, G-N2 e and f). Two seats decode while a chunked prompt of about 36,000 tokens is asked for ONE token (max_tokens=1: the request ends at
+    # its seed after 17 chunks, no engine is built for it), then an ordinary 4k request completes: nothing was left held by the terminal seed.
+    budgets = [LEVERN_BUSY_BUDGET] * 2
+    out, events, threads, corpus = start_decoders(budgets)
+    for event in events:
+        event.wait(3600)
+    long_prompt, _, fit = fitted_code_prompts((36000,))
+    one = [None]
+    run_cold(0, one, long_prompt[0], 1)
+    after, _ = code_prompts((4096,))
+    follow = [None]
+    run_cold(0, follow, after[0], 300)
+    [item.join() for item in threads]
+    return dict(users=drop_stamps(out + one + follow), corpus=corpus, fit=fit, budgets=budgets)
 
 
 DRAIN_BUDGETS = (200, 400, 600, 800, 1000, 1200, 1400, 1600)
@@ -689,8 +1007,14 @@ if ONLY and 'concurrent8_code_128k' in ONLY:
     record('concurrent8_code_128k', concurrent8_code_128k)
 if ONLY and 'stall8_cold262k' in ONLY:
     record('stall8_cold262k', stall8_cold262k)
+if ONLY and 'stall8_cold128k' in ONLY:
+    record('stall8_cold128k', stall8_cold128k)
 if ONLY and 'replay_concurrent8' in ONLY:
     record('replay_concurrent8', replay_concurrent8)
+for _levern_name in ('levern_equal', 'levern_equal_long', 'levern_equal_busy', 'levern_decoder_finishes', 'levern_all_decoders_finish',
+                     'levern_cancel_mid_prefill', 'levern_arrival_during_prefill', 'levern_seed_stops'):
+    if ONLY and _levern_name in ONLY:
+        record(_levern_name, globals()[_levern_name])
 if ONLY and 'concurrent5_split' in ONLY:
     record('concurrent5_split', concurrent5_split)
 if ONLY and 'concurrent8_drain' in ONLY:
