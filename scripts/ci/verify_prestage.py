@@ -112,6 +112,10 @@ TWO_BLOCK_ENGAGED_MARKER = '[PINDIAG] verify prestage two-block engaged'
 TWO_BLOCK_REFUSED_MARKER = '[PINDIAG] verify prestage two-block refused'
 BLOCK_EPOCHS_ENGAGED_MARKER = '[PINDIAG] verify prestage block epochs engaged'
 BLOCK_EPOCHS_REFUSED_MARKER = '[PINDIAG] verify prestage block epochs refused'
+# Lever N merged route (docs/lever-n-prefix-merged-route.md section 8): the external-writer class. A step of a split prefill that wrote no decode
+# slot is a DISJOINT writer: it bumps no epoch while every persistent address it writes is disjoint from every block's staging destinations.
+EXTERNAL_WRITER_ENGAGED_MARKER = '[PINDIAG] verify prestage external writer engaged'
+EXTERNAL_WRITER_REFUSED_MARKER = '[PINDIAG] verify prestage external writer refused'
 FULL_AUDIT_MARKER = '[PACKED-PRESTAGE-FULLAUDIT]'
 ENTRY_MARKER = '[PACKED-ENTRY]'
 HOSTGAP_VERIFY_MARKER = '[PACKED-HOSTGAP-VERIFY]'
@@ -358,6 +362,58 @@ def engage_two_block(blocks, environ=None):
     return mode
 
 
+# The external writers (register_external_writer): {name: frozenset of (chip, address)}, and whether the disjoint class is live: engaged by the
+# first registration, and dropped for the process (the safe direction: every step bumps the global epoch again) by an address overlap with a block's
+# staging destinations. `disjoint` counts the steps that took the class (what a gate reads beside the audited arm).
+_EXTERNAL = {}
+_SCOPE = dict(route=False, refused=None, disjoint=0, global_bumps=0)
+
+
+def register_external_writer(name, addresses):
+    """The chip-local (chip, address) pairs of the persistent device buffers an external writer writes between rounds (the Lever N route's B=1
+    scratch: rec_state, conv_states and conv_carry of every GDN layer). Returns 'engaged', or 'overlap' when they intersect the staging destinations
+    of a block that already registered them (the class is then off for the process). Blocks that register later are checked in
+    register_destinations."""
+    pairs = frozenset(addresses)
+    if not pairs:
+        _SCOPE.update(route=False, refused='no addresses')
+        log_line('%s name=%s reason=no_addresses' % (EXTERNAL_WRITER_REFUSED_MARKER, name))
+        return 'overlap'
+    for key, other in _ADDRESSES.items():
+        if not pairs.isdisjoint(other):
+            _EXTERNAL.pop(name, None)
+            _SCOPE.update(route=False, refused='overlap')
+            log_line('%s name=%s reason=overlap' % (EXTERNAL_WRITER_REFUSED_MARKER, name))
+            return 'overlap'
+    _EXTERNAL[name] = pairs
+    _SCOPE.update(route=True, refused=None)
+    log_line('%s name=%s addresses=%d' % (EXTERNAL_WRITER_ENGAGED_MARKER, name, len(pairs)))
+    return 'engaged'
+
+
+def disjoint_engaged():
+    """Whether a step that wrote no decode slot may skip the global epoch bump: an external writer registered, no overlap seen, and the per-block
+    epochs engaged (the staging destinations the writer was checked against are only known then; with one global epoch every writer bumps)."""
+    return bool(_SCOPE['route'] and _EXTERNAL and _MODE['blocks'])
+
+
+def note_disjoint(reason):
+    """A disjoint writer ran: no epoch moves; counted, so the host-gap lines and a gate still see it. Host only, never raises."""
+    _SCOPE['disjoint'] += 1
+    _SCOPE['last_disjoint'] = str(reason)
+
+
+def disjoint_count():
+    return _SCOPE['disjoint']
+
+
+def reset_external_writers():
+    """Forget every external writer (a new attach, a test)."""
+    _EXTERNAL.clear()
+    _SCOPE.update(route=False, refused=None, disjoint=0, global_bumps=0)
+    _SCOPE.pop('last_disjoint', None)
+
+
 def register_destinations(block, destinations, addresses):
     """Per-block epochs only, once per block (its first pre-stage, before any bump or copy): the chip-local addresses of the
     staging destinations against every other registered block's. A shared address means one block's write could change what the
@@ -371,6 +427,14 @@ def register_destinations(block, destinations, addresses):
             _MODE['blocks'] = False
             log_line('%s reason=%s' % (BLOCK_EPOCHS_REFUSED_MARKER, 'staging_destinations_overlap_between_blocks'))
             return 'overlap'
+    for name, writes in _EXTERNAL.items():
+        if not mine.isdisjoint(writes):
+            # An external writer's persistent buffers share an address with this block's staging destinations: a step of it could change what the
+            # block's snapshot holds, so the disjoint class is off for the process and every such step bumps the global epoch again.
+            _EXTERNAL.clear()
+            _SCOPE.update(route=False, refused='overlap')
+            log_line('%s name=%s reason=overlap' % (EXTERNAL_WRITER_REFUSED_MARKER, name))
+            break
     _ADDRESSES[id(block.fixture)] = mine
     return None
 

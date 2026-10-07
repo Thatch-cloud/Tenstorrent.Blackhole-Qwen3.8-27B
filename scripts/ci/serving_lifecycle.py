@@ -73,6 +73,11 @@ class FastServingLifecycle:
     # Lever N at TP4 (QWEN_FAST_LEVER_N=1, or the digest instrument QWEN_FAST_LEVERN_AUDIT=1; set per instance in __init__): levern_route, or None.
     # Defaulted on the class so a lifecycle built without __init__, and every profile without the flags, behaves exactly as before.
     levern = None
+    # The merged route (QWEN_FAST_LEVER_N=1 beside QWEN_PREFIX_REUSE=1 and sticky sessions, levern_route.merged_requested), its flags (levern_policy.merged_config)
+    # and the prefills ADMISSION V2 parked to the host while a short one ran ({request id: its state}); None / empty on every other lifecycle.
+    merged = False
+    merged_cfg = None
+    parked = None
 
     # request_id is assigned at five sites - construction, reset, the
     # EOS-at-first-token release, the prefill-to-decode handoff, and admission.
@@ -169,6 +174,12 @@ class FastServingLifecycle:
         if self.levern is not None and self.levern.mode()[0] and self.admission is None:
             raise ValueError('Lever N needs the one-fresh-prefill cap and its chunk cap installed on the scheduler the engine runs '
                              '(serving_prefill_admission.install); it could not be')
+        self.merged = self.levern is not None and self.levern.mode()[0] and self.levern.merged_requested()
+        if self.merged:
+            import levern_policy
+
+            self.merged_cfg = levern_policy.merged_config()
+            self.parked = {}
         if self.lanes is not None:
             if self.quarantine is None or self.packed_step is None:
                 raise ValueError('The fast lane needs the C2-any request quarantine and a packed step')
@@ -195,10 +206,11 @@ class FastServingLifecycle:
         route, audit = levern_route.mode()
         return levern_route if route or audit else None
 
-    def _levern_announce(self, request_id, start, end, total):
+    def _levern_announce(self, request_id, start, end, total, source=None, park_owner=False):
         """Tell the model route which step the next execute_model call carries (levern_route.announce); a step it will not split is announced
-        too, so the control arm's digests and the owner token know the request."""
-        self.levern.announce(self.runner.model.model[0], self.levern.Step(request_id, start, end, total))
+        too, so the control arm's digests and the owner token know the request. Under the merged route every step also names where its starting
+        state comes from (levern_route.SOURCES) and whether it takes the scratch from a suspended prefill that must be parked first."""
+        self.levern.announce(self.runner.model.model[0], self.levern.Step(request_id, start, end, total, source, park_owner))
 
     def _levern_withdraw(self):
         if self.levern is not None:
@@ -282,7 +294,9 @@ class FastServingLifecycle:
         - R is a whole number of 2048-token chunks;
         - R <= P - 2048, so the draft window [P - 2048, P) is this prefill's own chunks;
         - the step carries the whole rest of the prompt, P - R tokens (prefix reuse never
-          splits a prefill)."""
+          splits a prefill) - or, under the merged route (Lever N beside prefix reuse), it is a
+          step of the plan from R (levern_policy.valid_step): the whole rest, or a boundary at or
+          below S_last."""
         computed = getattr(new, 'num_computed_tokens', None)
         if type(computed) is not int or computed <= 0 or new.prompt_token_ids is None:
             return 0
@@ -298,7 +312,13 @@ class FastServingLifecycle:
             problems.append('R is not a %d-token boundary' % RESUME_CHUNK)
         if computed > prompt - RESUME_CHUNK:
             problems.append('R is above the prompt minus %d (the draft window)' % RESUME_CHUNK)
-        if chunk != prompt - computed:
+        if self.merged:
+            import levern_policy
+
+            if not levern_policy.valid_step(prompt, computed, chunk):
+                problems.append('the step carries %r of the %d tokens after R, which is not a step of the plan (the whole rest, or a '
+                                '2048 boundary at or below S_last=%d)' % (chunk, prompt - computed, levern_policy.final_start(prompt)))
+        elif chunk != prompt - computed:
             problems.append('the step carries %r of the %d tokens after R' % (chunk, prompt - computed))
         if problems:
             raise ValueError('Sticky admission refused: req=%r R=%d P=%d: %s'
@@ -425,6 +445,11 @@ class FastServingLifecycle:
                 self._release_decoders()
             if self.request_id is not None and self.request_id in finished:
                 self._release_prefill()
+            for request_id in [value for value in (self.parked or ()) if value in finished]:
+                self._release_parked(request_id)
+            # ADMISSION V2: the step continues a prefill this lifecycle parked while a short one ran.
+            if self._is_parked_continuation(scheduled):
+                return self._resume_parked(scheduled)
             # A continuation of the prefill already in flight. It arrives as a CACHED
             # request, so without this it would either be handed to the hook (which
             # refuses a request it is not decoding) or fall into the fresh-prefill
@@ -489,6 +514,10 @@ class FastServingLifecycle:
                     except BaseException:
                         pass
                 return self.original_execute(scheduled)
+            # ADMISSION V2 (merged route, QWEN_FAST_LEVERN_PARK=host): a short prompt takes the scratch from the long prefill suspended on it. The long
+            # one is parked (its capture, sampler bookkeeping and gate move aside, and the route takes its state to the host when this step runs); it
+            # resumes through _resume_parked once the short one is bridged. Only a clean new-request step may do it.
+            park_owner = self._park_current(scheduled)
             if (self.request_id is not None or len(scheduled.scheduled_new_reqs) != 1
                     or scheduled.scheduled_cached_reqs.req_ids
                     or scheduled.scheduled_spec_decode_tokens
@@ -573,21 +602,28 @@ class FastServingLifecycle:
             # about suspension. segment() is only for a step that does NOT finish the
             # prompt, which cannot happen until chunked prefill is enabled.
             whole = resume + chunk == len(new.prompt_token_ids)
+            scoped = False
             if self.levern is not None and not whole:
                 # Lever N: the first step of a split prompt writes no decode slot (the route's last step does), so the resident engine stays
-                # resident; the packed fixture write epoch still advances, as for every prefill chunk.
-                note_fixture_writer('prefill')
+                # resident; the packed fixture write epoch still advances, as for every prefill chunk - unless the epoch scope is the route's
+                # (_epoch_scoped), in which case what the route measured decides it after the step (_epoch_after).
+                scoped = self._route_scope()
+                if not scoped:
+                    note_fixture_writer('prefill')
             else:
                 # A native prefill rewrites GDN slot 0, so whichever engine's state it
                 # held is gone; the next verify must restore its own carry.
                 note_prefill()
             if self.levern is not None:
-                self._levern_announce(new.req_id, resume, resume + chunk, len(new.prompt_token_ids))
+                self._levern_announce(new.req_id, resume, resume + chunk, len(new.prompt_token_ids),
+                                      ('CHECKPOINT' if resume else 'COLD') if self.merged else None, park_owner)
             try:
                 with (self.capture.capture() if whole else self.capture.segment()):
                     result = self.original_execute(scheduled)
             finally:
                 self._levern_withdraw()
+            if scoped:
+                self._epoch_after('prefill')
             return self._after_prefill_chunk(result, whole)
         except BaseException:
             self.failed = True
@@ -621,7 +657,88 @@ class FastServingLifecycle:
                 and list(scheduled.scheduled_cached_reqs.req_ids) == [self.request_id]
                 and bool(getattr(scheduled, 'total_num_scheduled_tokens', 1)))
 
-    def _continue_prefill(self, scheduled):
+    def _route_scope(self):
+        """Whether the fixture epoch of a Lever N step is decided by what the route measured (QWEN_FAST_LEVERN_EPOCH_SCOPE=route on the merged
+        route, with the disjoint-writer class engaged: verify_prestage.disjoint_engaged) instead of bumped before the step."""
+        if not self.merged or getattr(self.merged_cfg, 'epoch_scope', 'global') != 'route':
+            return False
+        try:
+            from verify_prestage import disjoint_engaged
+        except ImportError:
+            return False
+        return disjoint_engaged()
+
+    def _epoch_after(self, reason):
+        """The epoch decision of a scoped step, after it ran: an intermediate step that wrote no decode slot, with the batched buffers bound exactly
+        as before it (levern_route.IDENTITY_ATTR), is a disjoint writer and moves no epoch; any other step - the final one, one that wrote a slot,
+        one the route did not vouch for - bumps the global epoch as before."""
+        capture = self.capture
+        model = self.runner.model.model[0]
+        final_step = capture is None or capture.complete
+        wrote = getattr(capture, 'segment_wrote_slot', None)
+        identity = vars(model).get(self.levern.IDENTITY_ATTR)
+        if final_step or wrote is not False or identity is not True:
+            note_fixture_writer(reason)
+            return
+        from verify_prestage import note_disjoint
+
+        note_disjoint(reason)
+
+    def _is_parked_continuation(self, scheduled):
+        """The step is the next chunk of a prefill this lifecycle parked (admission v2): no new request, exactly that one cached id, tokens
+        scheduled, and no other prefill active."""
+        if not self.parked or scheduled.scheduled_new_reqs or not getattr(scheduled, 'total_num_scheduled_tokens', 1):
+            return False
+        ids = list(scheduled.scheduled_cached_reqs.req_ids)
+        return len(ids) == 1 and ids[0] in self.parked
+
+    def _park_current(self, scheduled):
+        """Admission v2: the step admits a new request while a prefill is suspended on the scratch - move that prefill's lifecycle state aside and
+        return True so the new request's first step is announced as the one that takes the scratch from it (levern_route parks the state on the
+        host). Returns False, changing nothing, in every other case: the flag is off, nothing is suspended, the step is not a clean single new
+        request, or every park slot is taken (the step is then refused by the one-fresh-prefill check as it always was)."""
+        if (not self.merged or self.merged_cfg.park != 'host' or self.request_id is None or self.capture is None or self.capture.complete
+                or self.prefill_pending or len(scheduled.scheduled_new_reqs) != 1 or scheduled.scheduled_cached_reqs.req_ids
+                or len(self.parked) >= self.merged_cfg.park_slots):
+            return False
+        suspended = self.request_id
+        self.parked[suspended] = dict(capture=self.capture, ignore_eos=self.ignore_eos, refused=self.refused,
+                                      chunk_deferred=self.chunk_deferred, chunk_in_flight=self.chunk_in_flight)
+        self.capture = None
+        self.request_id = None
+        self.chunk_deferred = []
+        self.chunk_in_flight = False
+        try:
+            from loguru import logger
+            logger.info(f"[PINDIAG] prefill parked: req={suspended!r} at={self.parked[suspended]['capture'].cursor} "
+                        f"parked={sorted(self.parked)} for req={scheduled.scheduled_new_reqs[0].req_id!r}")
+        except BaseException:
+            pass
+        return True
+
+    def _resume_parked(self, scheduled):
+        """Admission v2: the scheduler resumed a parked prefill. Its lifecycle state comes back and the step runs as a continuation whose state the
+        route restores from the host (source PARKED)."""
+        if self.request_id is not None:
+            raise ValueError('A parked prefill %r resumes while %r is still in its prefill phase: one prefill at a time owns the scratch'
+                             % (list(scheduled.scheduled_cached_reqs.req_ids), self.request_id))
+        request_id = list(scheduled.scheduled_cached_reqs.req_ids)[0]
+        state = self.parked.pop(request_id)
+        self.request_id = request_id
+        self.capture = state['capture']
+        self.ignore_eos, self.refused = state['ignore_eos'], state['refused']
+        self.chunk_deferred, self.chunk_in_flight = state['chunk_deferred'], state['chunk_in_flight']
+        return self._continue_prefill(scheduled, source='PARKED')
+
+    def _release_parked(self, request_id):
+        """A parked prefill that finished or was aborted: its capture and its parked state are nobody's any more."""
+        state = self.parked.pop(request_id, None)
+        if state is not None and state['capture'] is not None:
+            state['capture'].close()
+        if self.levern is not None:
+            self.levern.release(self.runner.model.model[0], request_id)
+
+    def _continue_prefill(self, scheduled, source=None):
         """One more chunk of the prefill already in flight.
 
         The capture stays open across the suspension (dflash_prefill_window.segment),
@@ -644,19 +761,24 @@ class FastServingLifecycle:
             pass
         # Round-fence plan H1a: every Lever N chunk, whichever GDN slot it writes, bumps the
         # packed fixture write epoch (a pre-staged verify then restages in full).
-        note_fixture_writer('prefill-chunk')
+        # Under the merged route's epoch scope (_route_scope) the bump is decided after the step from what the route measured instead (_epoch_after).
         levern = getattr(self, 'levern', None)
+        scoped = levern is not None and self._route_scope()
+        if not scoped:
+            note_fixture_writer('prefill-chunk')
         if levern is not None:
             cached = scheduled.scheduled_cached_reqs
             begun = int(list(cached.num_computed_tokens)[0])
             self._levern_announce(self.request_id, begun, begun + int(scheduled.num_scheduled_tokens[self.request_id]),
-                                  self.capture.position)
+                                  self.capture.position, (source or 'SCRATCH') if self.merged else None)
         try:
             with self.capture.segment():
                 result = self.original_execute(scheduled)
         finally:
             if levern is not None:
                 self._levern_withdraw()
+        if scoped:
+            self._epoch_after('prefill-chunk')
         self._displace_after_continuation()
         return self._after_prefill_chunk(result, False)
 
@@ -810,6 +932,8 @@ class FastServingLifecycle:
     def close(self):
         if self.closed:
             return
+        for request_id in list(self.parked or ()):
+            self._release_parked(request_id)
         self._release_request()
         if self.lanes is not None:
             self.lanes.publish(None)

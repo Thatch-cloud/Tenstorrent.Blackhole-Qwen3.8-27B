@@ -148,6 +148,12 @@ STICKY_LOOKAHEAD = STICKY_PROPOSALS + 1
 # Lever N's scheduler edits (lever_n_scheduler_patch, lever_n_model_patch.patch_scheduler) turn
 # vLLM chunking on; prefix reuse is not exact beside them (design F5).
 LEVER_N_TAGS = ('Lever N M2', '[PINDIAG] m2 one-in-flight:', '_qwen_saved_waiting')
+# The merged route (Lever N with prefix reuse): the markers the runtime wraps carry, which this module reads as plain attribute names
+# because it runs inside the plugin package, where the overlay modules are not importable (test_levern_prefix_graft pins each equal to
+# levern_scheduler.WRAPPED, serving_prefill_admission.WRAPPED and levern_policy.FLAG).
+LEVERN_ENV = 'QWEN_FAST_LEVER_N'
+LEVERN_SCHEDULE_WRAPPED = '_qwen_levern_schedule'
+ADMISSION_WRAPPED = '_qwen_one_fresh_prefill'
 
 INIT_ANCHOR = (
     '    def __init__(self, *args, **kwargs):\n'
@@ -298,6 +304,36 @@ def drops_last_block(coordinator):
     return bool(singles and getattr(singles[0], 'use_eagle', False))
 
 
+def levern_chunking_problems(scheduler, environ=None):
+    """What stands between this scheduler and the merged route's chunked prefill (docs/lever-n-prefix-merged-route.md, R2), [] when
+    it may run chunked, else the list of missing pieces. Chunked prefill is accepted only where Lever N's cap is the only thing that can
+    split a prefill, and the cap itself is installed: sticky sessions (the plan and the in-flight capture plan are the sticky ones),
+    QWEN_FAST_LEVER_N=1, the class's schedule carrying Lever N's wrapper and _schedule_prefill_only the one-fresh-prefill cap's (the
+    graft binds scheduler.schedule at construction, so the order matters: Lever N is installed on the class first), an integer
+    max_num_scheduled_tokens (the cap's own path: the threshold fallback would let vLLM split without the cap's alignment). The
+    threshold and whole-prompt budget refusals stay absolute (install_problems)."""
+    environ = os.environ if environ is None else environ
+    missing = []
+    if not sticky_enabled(environ):
+        missing.append('QWEN_FAST_STICKY_SESSIONS=1')
+    if environ.get(LEVERN_ENV) != '1':
+        missing.append('%s=1' % LEVERN_ENV)
+    cls = type(scheduler)
+    if not getattr(getattr(cls, 'schedule', None), LEVERN_SCHEDULE_WRAPPED, False):
+        missing.append("Lever N's schedule wrapper installed on the class before the graft")
+    if not getattr(getattr(cls, '_schedule_prefill_only', None), ADMISSION_WRAPPED, False):
+        missing.append("the one-fresh-prefill cap on _schedule_prefill_only")
+    if type(getattr(scheduler, 'max_num_scheduled_tokens', None)) is not int:
+        missing.append('an integer max_num_scheduled_tokens (the cap would fall back to long_prefill_token_threshold)')
+    return missing
+
+
+def levern_chunked(scheduler, environ=None):
+    """Whether this scheduler runs chunked prefill under the merged route (levern_chunking_problems is empty with chunking on)."""
+    config = getattr(scheduler, 'scheduler_config', None)
+    return bool(getattr(config, 'enable_chunked_prefill', False)) and not levern_chunking_problems(scheduler, environ)
+
+
 def install_problems(scheduler, environ=None):
     """Every reason prefix reuse would not be exact on this scheduler (F5, F6, F7). All of them are
     reported, so the refusal names the root cause (a hybrid coordinator, say) and not only the
@@ -334,8 +370,11 @@ def install_problems(scheduler, environ=None):
         problems.append('async scheduling is on: blocks hashed at allocation in step t are unwritten '
                         'when step t+1 reads them')
     if getattr(config, 'enable_chunked_prefill', False):
-        problems.append('chunked prefill is on: start_pos > 0 would also mean "continue my own '
-                        'suspended scratch" (Lever N)')
+        beside = levern_chunking_problems(scheduler, environ)
+        if beside:
+            problems.append('chunked prefill is on: start_pos > 0 would also mean "continue my own '
+                            'suspended scratch" (Lever N)'
+                            + ' [the merged route accepts it only beside: %s]' % '; '.join(beside))
     batched = getattr(config, 'max_num_batched_tokens', None)
     if batched is not None and max_model_len is not None and batched < max_model_len:
         problems.append('max_num_batched_tokens %d < max_model_len %d: a prefill could be split'
@@ -433,11 +472,24 @@ def install(scheduler, registry=None, kill_switch_path=KILL_SWITCH_PATH, poll_s=
     return graft
 
 
+class _NoStatistics(object):
+    """Stands in for KVCacheManager.prefix_cache_stats for the length of one peek, so that asking what a hit would be leaves no trace in
+    vLLM's prefix-cache metrics: the in-pass get_computed_blocks records the request's real attempt, once."""
+
+    def record(self, *args, **kwargs):
+        return None
+
+    def __getattr__(self, name):
+        return 0
+
+
 class SchedulerGraft(object):
     # Sticky sessions (the module docstring); off on the class, so a graft built without them - or
     # a stand-in carrying only a registry (the model fixture calls plan() that way) - plans as G1.
     sticky = False
     drop_last = False
+    # Lever N's peek memo (request id -> the Q the trim would land on), cleared at the start of every schedule() call.
+    peeked = {}
 
     def __init__(self, scheduler, registry, kill_switch, logger, stats=None, sticky=False):
         self.scheduler = scheduler
@@ -454,6 +506,7 @@ class SchedulerGraft(object):
         self.get_block_hash = None
         self.sticky = sticky is True
         self.drop_last = self.sticky and drops_last_block(self.coordinator)
+        self.peeked = {}
 
     # -- kill switch -----------------------------------------------------------------------------
     @property
@@ -523,22 +576,11 @@ class SchedulerGraft(object):
             planned.append((pos, hashes[pos // BLOCK - 1]))
         return planned, unplanned, drain
 
-    def trim(self, request, blocks, h):
+    def select(self, request, blocks, h, ceiling=None):
+        """(Q, key, checkpoint, rejected_same_step): the trim's choice for vLLM's raw hit h, with no side effect beyond the registry's
+        own idempotent token-check memo. `ceiling` (the Lever N peek's answer for this request in this schedule() call) caps Q, so the
+        in-pass trim can never land above the Q the step's cap was computed from."""
         registry = self.registry
-        stats = registry.stats
-        stats['attempts'] += 1
-        empty = self.manager.empty_kv_cache_blocks
-        excluded = self.excluded(request)
-        if excluded:
-            registry.unstage(request.request_id)
-            if h:
-                stats[excluded] += 1
-            return empty, 0
-        if self.kill_switch_engaged():
-            registry.unstage(request.request_id)
-            if h:
-                stats['killed_denied'] += 1
-            return empty, 0
         group = blocks.blocks[0] if h else ()
         limit = h // BLOCK
         same_step = registry.same_step_blocks
@@ -556,6 +598,8 @@ class SchedulerGraft(object):
         if self.sticky:
             # The fast path's drafter window [P - 2048, P) must be this prefill's own chunks.
             k = min(k, max(0, request.num_prompt_tokens - CHUNK) // CHUNK)
+        if ceiling is not None:
+            k = min(k, ceiling // CHUNK)
         while k > 0:
             candidate = k * CHUNK
             count = candidate // BLOCK
@@ -570,6 +614,56 @@ class SchedulerGraft(object):
                 continue
             q, key, checkpoint = candidate, hashes[count - 1], entry
             break
+        return q, key, checkpoint, rejected_same_step
+
+    def peek(self, request):
+        """The Q this waiting request's admission would be trimmed to (0: no hit), asked BEFORE the pass that would admit it, memoized
+        per request for the current schedule() call (begin_step clears it), and without a trace in vLLM's prefix-cache stats or the
+        registry's counters beyond the idempotent token-check memo. Lever N's cap needs it: the step budget of a fresh admission
+        must be computed from (P, Q), not (P, 0), or a hit at Q = S_last would run [Q, floor2048(P)) as a non-final step and split
+        the drafter window across two steps (docs/lever-n-prefix-merged-route.md, D1).
+
+        The in-pass trim (get_computed_blocks) still makes the authoritative call, capped at this answer, so a hit that moved between
+        the peek and the pass can only lower Q."""
+        request_id = request.request_id
+        known = self.peeked.get(request_id)
+        if known is not None:
+            return known
+        q = 0
+        if not self.excluded(request) and not self.killed:
+            manager = self.manager
+            statistics = getattr(manager, 'prefix_cache_stats', None)
+            if statistics is not None:
+                manager.prefix_cache_stats = _NoStatistics()
+            try:
+                blocks, h = self.original['get_computed_blocks'](request)
+            finally:
+                if statistics is not None:
+                    manager.prefix_cache_stats = statistics
+            q = self.select(request, blocks, h)[0]
+        self.peeked[request_id] = q
+        return q
+
+    def trim(self, request, blocks, h):
+        registry = self.registry
+        stats = registry.stats
+        stats['attempts'] += 1
+        empty = self.manager.empty_kv_cache_blocks
+        excluded = self.excluded(request)
+        if excluded:
+            registry.unstage(request.request_id)
+            if h:
+                stats[excluded] += 1
+            return empty, 0
+        if self.kill_switch_engaged():
+            registry.unstage(request.request_id)
+            if h:
+                stats['killed_denied'] += 1
+            return empty, 0
+        group = blocks.blocks[0] if h else ()
+        hashes = request.block_hashes
+        request_id = request.request_id
+        q, key, checkpoint, rejected_same_step = self.select(request, blocks, h, self.peeked.get(request_id))
         if rejected_same_step:
             stats['same_step_rejects'] += 1
         if registry.entries:
@@ -609,11 +703,20 @@ class SchedulerGraft(object):
             admitted[data.req_id] = data.num_computed_tokens
         cached = output.scheduled_cached_reqs
         resumed = cached.resumed_req_ids
+        counts = getattr(output, 'num_scheduled_tokens', None)
+        counts = counts if isinstance(counts, dict) else None
         if resumed:
             for index, req_id in enumerate(cached.req_ids):
                 if req_id in resumed:
                     admitted[req_id] = cached.num_computed_tokens[index]
-        for grant in self.registry.commit(admitted):
+        registry = self.registry
+        # A request the cap is splitting (Lever N): the steps after its first are CACHED requests this wrapper sees commit nothing for;
+        # the registry learns from them when the request's final step is scheduled (its in-flight plan then ends with that step).
+        if counts is not None and registry.inflight:
+            for index, req_id in enumerate(cached.req_ids):
+                if req_id in registry.inflight and req_id not in admitted and req_id in counts:
+                    registry.note_scheduled(req_id, int(cached.num_computed_tokens[index]), int(counts[req_id]))
+        for grant in registry.commit(admitted, counts):
             self.log('grant %s', grant.describe())
         self.export()
 
@@ -652,11 +755,15 @@ class SchedulerGraft(object):
             blocks, h = original['get_computed_blocks'](request)
             return self.trim(request, blocks, h)
 
+        def begin_step():
+            registry.begin_step()
+            self.peeked.clear()
+
         def cache_blocks(request, num_computed_tokens):
             return self.cap(request, num_computed_tokens)
 
         def schedule(*args, **kwargs):
-            registry.begin_step()
+            begin_step()
             output = original['schedule'](*args, **kwargs)
             self.commit(output)
             return output
@@ -702,8 +809,9 @@ class SchedulerGraft(object):
                  registry.budget_bytes / float(1 << 30), self.kill_switch_path,
                  getattr(self.stats_export, 'path', None), vllm_version)
         if self.sticky:
-            self.log('install sticky=1 lookahead=%d drop_last=%s ceiling=floor2048(P-%d)',
-                     getattr(scheduler, 'num_lookahead_tokens', 0), self.drop_last, CHUNK)
+            self.log('install sticky=1 lookahead=%d drop_last=%s ceiling=floor2048(P-%d) chunked=%s',
+                     getattr(scheduler, 'num_lookahead_tokens', 0), self.drop_last, CHUNK,
+                     'levern' if levern_chunked(scheduler) else 'off')
         self.export(force=True)
 
     def original_get_computed_blocks(self, request):

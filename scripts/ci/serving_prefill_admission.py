@@ -601,7 +601,7 @@ def _note(state, log, key, template, *values):
         log(template, *values)
 
 
-def dram_hold(scheduler, decodes, state, log, modules=None):
+def dram_hold(scheduler, decodes, state, log, modules=None, candidates=None):
     """Whether the fresh prompt this step would admit waits (S2 W6b, the module docstring). The wrapper asks only
     when a seat is free and nothing else holds the step. False when no predicate is registered, nothing waits,
     the predicate raises or reads nothing, the prompt fits, or no decode is left to wait for. True when it does
@@ -611,7 +611,7 @@ def dram_hold(scheduler, decodes, state, log, modules=None):
     admits = dram_admits(modules)
     if admits is None:
         return False
-    request = binding_request(admission_candidates(scheduler))
+    request = binding_request(admission_candidates(scheduler) if candidates is None else candidates)
     if request is None:
         return False
     request_id = getattr(request, 'request_id', None)
@@ -730,6 +730,27 @@ def _module_queue_factory(original):
     return lambda scheduler: create(scheduler.policy)
 
 
+def _enqueue(queue, request):
+    """Put `request` in a request queue (vLLM's RequestQueue.add_request; the test fakes are lists)."""
+    add = getattr(queue, 'add_request', None)
+    if callable(add):
+        add(request)
+    else:
+        queue.append(request)
+
+
+def _dequeue_request(queue, request):
+    """Take `request` out of a request queue (vLLM's RequestQueue.remove_request; the test fakes are lists). Absent is fine."""
+    remover = getattr(queue, 'remove_request', None)
+    try:
+        if callable(remover):
+            remover(request)
+        else:
+            queue.remove(request)
+    except (ValueError, KeyError):
+        pass
+
+
 def new_state():
     return dict(live=False, seen=set(), dram_held=None, dram_noted=None, credit=0, asked=False)
 
@@ -750,6 +771,14 @@ def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None, lever
         decodes = sum(1 for request in self.running if not request.is_prefill_chunk)
         partials = len(self.running) - decodes
         held = gate_held()
+        # LEVER N, THE MERGED ROUTE (levern_scheduler.LevernRuntime.merged): which prefill this pass advances, which are hidden from it and which are
+        # ended before it allocates anything. The pass then sees ONE prefill: the active partial, or the one fresh prompt as the only waiting request.
+        plan = None
+        if levern is not None and levern.merged is not None:
+            plan = levern.plan_pass(self, decodes, held)
+            partials = 1 if plan.active is not None else 0
+            if plan.override_gate:
+                held = None
         allowed, hide = admission(partials, held)
         state['asked'] = True
         # DECODE CREDIT: with a decode running and a credit owed, this call is a decode step, not an admission.
@@ -759,18 +788,38 @@ def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None, lever
                 state['credit'] = 0
             elif state['credit'] and not hide:
                 allowed, hide, credit_held = 0, True, True
-        # KV RESERVATION (QWEN_FAST_KV_RESERVATION=1, serving_kv_reservation): asked first, when this step would admit a fresh
-        # prompt, so a prompt whose worst-case blocks do not fit what is unreserved waits as behind a held gate - before the
-        # DRAM is even read. Never lifted: with nothing running the pool is empty and any request the contract admitted fits.
-        kv_held = (kv is not None and not hide and waiting_capacity(self.max_num_running_reqs, decodes, allowed) > 0
-                   and kv.hold(self, admission_candidates(self), decodes, state, log))
+        # Seats a fresh prompt may not take: the decoders and, under admission v2, every prefill the pass hides (parked and quarantined ones still hold one).
+        seats_held = decodes + (len(plan.hidden) if plan is not None else 0)
+
+        def candidates():
+            if plan is not None and plan.fresh is not None:
+                return [plan.fresh]
+            return admission_candidates(self)
+
+        def holds():
+            # KV RESERVATION (QWEN_FAST_KV_RESERVATION=1, serving_kv_reservation): asked first, when this step would admit a fresh
+            # prompt, so a prompt whose worst-case blocks do not fit what is unreserved waits as behind a held gate - before the
+            # DRAM is even read. Never lifted: with nothing running the pool is empty and any request the contract admitted fits.
+            # It reads `running` WHOLE (a hidden prefill still holds its worst-case blocks), so it is asked before the pass hides anything.
+            kv_flag = (kv is not None and not hide and waiting_capacity(self.max_num_running_reqs, seats_held, allowed) > 0
+                       and kv.hold(self, candidates(), decodes, state, log))
+            # S2 W6b: asked only when this step would admit a fresh prompt - nothing in flight, the gate free and a
+            # seat free (with every seat decoding the waiting loop admits nobody, and nothing is asked or logged).
+            # When the prompt does not fit the DRAM left, it waits as behind a held gate.
+            dram_flag = (not kv_flag and not hide and waiting_capacity(self.max_num_running_reqs, seats_held, allowed) > 0
+                         and dram_hold(self, decodes, state, log, candidates=candidates()))
+            return kv_flag, dram_flag
+
+        kv_held, dram_held = holds()
+        if (kv_held or dram_held) and plan is not None and plan.preempted is not None:
+            # The short prompt would not fit: the long prefill it would have parked simply continues (no decode-only pass in its place).
+            plan.demote()
+            partials, held = 1, gate_held()
+            allowed, hide = admission(partials, held)
+            seats_held = decodes + len(plan.hidden)
+            kv_held = dram_held = False
         if kv_held:
             allowed, hide = 0, True
-        # S2 W6b: asked only when this step would admit a fresh prompt - nothing in flight, the gate free and a
-        # seat free (with every seat decoding the waiting loop admits nobody, and nothing is asked or logged).
-        # When the prompt does not fit the DRAM left, it waits as behind a held gate.
-        dram_held = (not hide and waiting_capacity(self.max_num_running_reqs, decodes, allowed) > 0
-                     and dram_hold(self, decodes, state, log))
         if dram_held:
             allowed, hide = 0, True
         if steps and state['credit'] and hide and decodes and not partials:
@@ -792,32 +841,66 @@ def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None, lever
         # LEVER N (QWEN_FAST_LEVER_N=1): this step advances one request, the partial in flight or the one fresh prompt the
         # waiting loop admits, by at most its step budget (a multiple of 2,048 ending before the final step, levern_policy).
         restore_cap = capped = None
+        hidden_running = []
+        single = None
         if levern is not None:
-            restore_cap, target, _fresh, budget = levern.plan_cap(self, partials, allowed, hide, decodes)
+            if plan is None:
+                restore_cap, target, _fresh, budget = levern.plan_cap(self, partials, allowed, hide, decodes)
+            else:
+                levern.commit_plan(plan)
+                hidden_running = list(plan.hidden)
+                target = plan.active if partials else (plan.fresh if allowed > 0 and not hide else None)
+                if target is not None:
+                    restore_cap, _target, _fresh, budget = levern.cap_for(self, target, target is plan.fresh, decodes)
+                if target is not None and target is plan.fresh:
+                    single = plan.fresh
             if restore_cap is not None:
                 capped = (target, levern.computed)
+        if hidden_running:
+            # The pass must not see the prefills it parks or ends: they leave `running` for the call and come back after it.
+            self.running = [request for request in self.running if all(request is not other for other in hidden_running)]
         # The plugin writes max(0, value - len(pure_decodes)) before calling the base scheduler, so
         # the value written here carries the decodes it is about to remove.
         self.max_num_running_reqs = min(saved_max, allowed + decodes)
-        if hide:
+        if hide or single is not None:
             self.waiting = queue_factory(self)
             if saved_skipped is not None:
                 self.skipped_waiting = queue_factory(self)
+            if single is not None:
+                _enqueue(self.waiting, single)
+        admitted_single = False
         try:
             result = original(self)
+            if single is not None:
+                admitted_single = any(getattr(value, 'req_id', None) == getattr(single, 'request_id', None)
+                                      for value in getattr(result, 'scheduled_new_reqs', None) or ())
         finally:
             if restore_cap is not None:
                 restore_cap()
-            if hide:
+            if hide or single is not None:
                 # Anything the base scheduler put back (a preemption) is merged ahead of what
                 # was hidden, exactly as _schedule_decode_only and the graft merge it.
-                if self.waiting:
-                    saved_waiting.prepend_requests(self.waiting)
-                if saved_skipped is not None:
-                    if self.skipped_waiting:
-                        saved_skipped.prepend_requests(self.skipped_waiting)
-                    self.skipped_waiting = saved_skipped
+                if single is not None:
+                    left = [request for request in list(self.waiting) + list(getattr(self, 'skipped_waiting', None) or ())
+                            if request is not single]
+                    if left:
+                        saved_waiting.prepend_requests(left)
+                    if admitted_single:
+                        for queue in (saved_waiting, saved_skipped):
+                            if queue is not None:
+                                _dequeue_request(queue, single)
+                    if saved_skipped is not None:
+                        self.skipped_waiting = saved_skipped
+                else:
+                    if self.waiting:
+                        saved_waiting.prepend_requests(self.waiting)
+                    if saved_skipped is not None:
+                        if self.skipped_waiting:
+                            saved_skipped.prepend_requests(self.skipped_waiting)
+                        self.skipped_waiting = saved_skipped
                 self.waiting = saved_waiting
+            if hidden_running:
+                self.running.extend(hidden_running)
             self.max_num_running_reqs = saved_max
         if capped is not None and not (dram_held or kv_held or credit_held):
             # The pass is about to run: it must be the one the cap was computed for (levern_scheduler.verify), or the engine stops here.
@@ -905,7 +988,10 @@ def install(config, *, importer=importlib.import_module, log=None, queue_factory
         if not callable(schedule) or not callable(getattr(cls, '_schedule_decode_only', None)):
             raise ValueError('%s has no schedule or no _schedule_decode_only: Lever N cannot yield a step to the decoders'
                              % name)
-        levern = levern_scheduler.LevernRuntime(log=log)
+        # Beside prefix reuse (QWEN_PREFIX_REUSE=1) it is the MERGED route's runtime: the peeked cap, the single-candidate pass, the pre-pass
+        # quarantine, the short lane, the governor and the kill switch (levern_scheduler).
+        merged = levern_policy.merged_config() if os.environ.get('QWEN_PREFIX_REUSE') == '1' else None
+        levern = levern_scheduler.LevernRuntime(log=log, merged=merged)
     state = new_state()
     setattr(cls, METHOD, wrap(original, queue_factory=queue_factory, log=log, steps=steps, state=state, kv=kv, levern=levern))
     log(INSTALLED + '{}', name)

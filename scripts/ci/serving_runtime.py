@@ -732,6 +732,12 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             if levern_handle is not None:
                 scopes.callback(levern_handle.uninstall)
                 levern_route.warm(runner, model, log=pindiag)
+                if levern_handle.merged:
+                    # The merged route's epoch scope (QWEN_FAST_LEVERN_EPOCH_SCOPE=route): its persistent writes are registered with the pre-stage as a
+                    # disjoint external writer, checked against every block's staging destinations (here, and again at each block's first pre-stage).
+                    from gdn_multitoken_conv import addresses as device_addresses
+
+                    levern_route.engage_epoch_scope(model, lambda tensor: device_addresses(operations, tensor), log=pindiag)
         if request_widths and not m3_blocks_two:
             if not packed_shapes:
                 raise ValueError('%s warms the request widths before the packed block, and this attach builds none'

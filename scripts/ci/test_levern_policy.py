@@ -178,7 +178,8 @@ class FlagTests(unittest.TestCase):
 
     def test_a_sibling_without_the_master_switch_is_a_problem(self):
         for name in policy.SIBLING_FLAGS:
-            value = {'QWEN_FAST_LEVERN_FAULT': 'foreign'}.get(name, '2048' if 'TOKENS' in name else '1')
+            value = {'QWEN_FAST_LEVERN_FAULT': 'foreign', 'QWEN_FAST_LEVERN_PARK': 'host',
+                     'QWEN_FAST_LEVERN_EPOCH_SCOPE': 'route'}.get(name, '2048' if 'TOKENS' in name else '1')
             with self.subTest(name=name):
                 problems = policy.config_problems({name: value})
                 self.assertTrue(problems, name)

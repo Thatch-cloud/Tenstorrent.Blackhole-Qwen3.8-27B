@@ -94,8 +94,12 @@ GATE_SWITCH = 'QWEN_C2_GATE'
 LEVERN_SWITCH = 'QWEN_FAST_LEVER_N'
 LEVERN_AUDIT = 'QWEN_FAST_LEVERN_AUDIT'
 LEVERN_ENV_FLAGS = ('QWEN_FAST_LEVER_N', 'QWEN_FAST_LEVERN_AUDIT', 'QWEN_FAST_LEVERN_STEP_TOKENS', 'QWEN_FAST_LEVERN_SOLO_STEP_TOKENS',
-                    'QWEN_FAST_LEVERN_PREFILL_SHARE', 'QWEN_FAST_LEVERN_ROUNDS', 'QWEN_FAST_LEVERN_MAX_ROUNDS', 'QWEN_FAST_LEVERN_FAULT')
+                    'QWEN_FAST_LEVERN_PREFILL_SHARE', 'QWEN_FAST_LEVERN_ROUNDS', 'QWEN_FAST_LEVERN_MAX_ROUNDS', 'QWEN_FAST_LEVERN_FAULT',
+                    'QWEN_FAST_LEVERN_TTFT_TARGET_S', 'QWEN_FAST_LEVERN_SHORT_TOKENS', 'QWEN_FAST_LEVERN_PARK', 'QWEN_FAST_LEVERN_PARK_SLOTS',
+                    'QWEN_FAST_LEVERN_MAX_PARK_S', 'QWEN_FAST_LEVERN_EPOCH_SCOPE')
 LEVERN_PLATFORM_MODULE = 'vllm_tt_plugin.platform'
+# The sources the merged route must carry (levern_route.SOURCES, pinned equal by test_levern_prefix_contract).
+MERGED_SOURCES = ('COLD', 'CHECKPOINT', 'SCRATCH', 'PARKED')
 
 # The meshes a profile may open (item 8), keyed by its mesh_device: None is every profile that names none (the
 # pair, under the image's own MESH_DEVICE=P300), P150x4 the four-card (1, 4) ring (tp4_mesh.DESCRIPTOR_PATH,
@@ -379,8 +383,8 @@ def prefix_reuse_problems(profile):
                         % engine.get('block-size'))
     budget, context = engine.get('max-num-batched-tokens'), engine.get('max-model-len')
     if type(budget) is not int or type(context) is not int or budget < context:
-        problems.append('max-num-batched-tokens %r must cover max-model-len %r: a prefill must never split'
-                        % (budget, context))
+        problems.append('max-num-batched-tokens %r must cover max-model-len %r: the vLLM budget must never split a prefill; only the Lever N '
+                        'cap may, at 2,048-token boundaries with the drafter window inside the final step' % (budget, context))
     sticky = sticky_sessions(profile)
     if (engine.get('additional-config') or {}).get('qwen_fast_t16') and not sticky:
         problems.append('the fast path (qwen_fast_t16) cannot admit a prefix hit without %s=1 (sticky sessions)'
@@ -416,9 +420,12 @@ def levern_problems(profile):
       through the cap), no-async-scheduling (the engine is synchronous: a step's wall time is the interval between two schedule() calls),
       64-token blocks and text only;
     - QWEN_FAST_KV_RESERVATION=1: a partial prefill is never preempted only under the reservation's worst-case admission;
-    - no per-admission decode credit (the alternation subsumes it), no fast lane (its gate does not know prefill chunks) and no prefix
-      reuse or sticky sessions (a hit's first step and a continuation of its own scratch both arrive at start_pos > 0 until packed-prefix
-      lands its checkpoint source)."""
+    - no per-admission decode credit (the alternation subsumes it) and no fast lane (its gate does not know prefill chunks);
+    - prefix reuse and sticky sessions BOTH on or BOTH off (the merged route, docs/lever-n-prefix-merged-route.md: start_pos > 0 then means one
+      thing, and every step names where its state comes from). Both on, the profile must also pass prefix_reuse_problems and the image must carry
+      the merged route (levern_route.SOURCES names all four sources: a capability, not a flag, so a stage-1 image cannot boot such a profile). The
+      merged flags (TTFT target, short class, host parking, park slots, park age, epoch scope) are refused where they would do nothing: parking and
+      the route epoch scope without the merged route, the route epoch scope without the two-block pre-stage and its per-block epochs."""
     import levern_policy
 
     env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
@@ -458,9 +465,41 @@ def levern_problems(profile):
         problems.append('Lever N: QWEN_FAST_DECODE_STEPS_PER_ADMISSION must be unset or 0 (the alternation subsumes the credit)')
     if env.get('QWEN_FAST_LANE', '0') != '0':
         problems.append('Lever N: QWEN_FAST_LANE must be unset or 0 (the lane gate does not know prefill chunks)')
-    for name in (PREFIX_SWITCH, STICKY_SWITCH):
-        if env.get(name, '0') != '0':
-            problems.append('Lever N: %s must be unset or 0 (prefix reuse and Lever N share the start_pos > 0 route; not combined yet)' % name)
+    problems += merged_route_problems(profile, env)
+    return problems
+
+
+def merged_route_problems(profile, env):
+    """The merged route's requirements on a profile whose master switch is on (see levern_problems): prefix reuse and sticky sessions both on or both
+    off, and with both on everything prefix reuse needs plus an image that carries all four sources. [] when the profile is the stage-1 shape
+    (both off) and sets no merged-only flag."""
+    problems = []
+    prefix, sticky = env.get(PREFIX_SWITCH, '0'), env.get(STICKY_SWITCH, '0')
+    for name, value in ((PREFIX_SWITCH, prefix), (STICKY_SWITCH, sticky)):
+        if value not in ('0', '1'):
+            problems.append('Lever N: %s=%r is neither 1 nor 0' % (name, value))
+    merged = prefix == '1' and sticky == '1'
+    if (prefix == '1') != (sticky == '1'):
+        problems.append('Lever N: %s and %s are both on or both off beside %s=1 (the merged route is the sticky-session route; one of them alone '
+                        'is a hit with no fast-path admission, or sticky admission with no checkpoint)' % (PREFIX_SWITCH, STICKY_SWITCH, LEVERN_SWITCH))
+    if merged:
+        problems += ['Lever N (merged route): ' + problem for problem in prefix_reuse_problems(profile)]
+        import levern_route
+
+        have = tuple(getattr(levern_route, 'SOURCES', ()))
+        missing = [source for source in MERGED_SOURCES if source not in have]
+        if missing:
+            problems.append('Lever N (merged route): the route this image carries carries %s, not %s (missing %s): a stage-1 image cannot boot prefix reuse '
+                            'beside Lever N' % (list(have), list(MERGED_SOURCES), ', '.join(missing)))
+    else:
+        for name in ('QWEN_FAST_LEVERN_PARK', 'QWEN_FAST_LEVERN_EPOCH_SCOPE'):
+            if env.get(name, '0' if name.endswith('PARK') else 'global') not in ('0', 'global'):
+                problems.append('Lever N: %s=%s needs the merged route (%s=1 and %s=1): it would do nothing' % (name, env[name], PREFIX_SWITCH, STICKY_SWITCH))
+    if env.get('QWEN_FAST_LEVERN_EPOCH_SCOPE', 'global') == 'route':
+        for name in ('QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE', 'QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS'):
+            if env.get(name) != '1':
+                problems.append('Lever N: QWEN_FAST_LEVERN_EPOCH_SCOPE=route needs %s=1 (the disjoint-writer class engages only with the per-block '
+                                'epochs, whose staging destinations it is checked against)' % name)
     return problems
 
 

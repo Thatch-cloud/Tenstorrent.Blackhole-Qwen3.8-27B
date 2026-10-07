@@ -42,6 +42,10 @@ RESUME_CHUNK = 2048
 # says so through this model attribute (levern_route.WROTE_ATTR, pinned equal by test_levern_route). wrap_slots reads and clears it after every call;
 # a model that never sets it (every profile without the flag) gives True, the stock behaviour.
 LEVERN_WROTE_ATTR = '_qwen_levern_wrote_slot'
+# The merged route (Lever N with prefix reuse, levern_route.MERGED_ATTR, pinned equal by test_levern_prefix_route): installed on the model, EVERY step of a
+# prompt, a granted hit's first one included, arrives through prefill_paged_slots_range, so a capture resumed at R takes its first call through that
+# entry instead of the prefix-reuse route's own.
+LEVERN_MERGED_ATTR = '_qwen_levern_merged'
 
 
 def _log(message, *values):
@@ -365,7 +369,7 @@ class PrefillWindowCapture:
                      're-allocated the resumed prompt\'s GDN slot, the last slot written is adopted',
                      self.prefill_slot, slot, self.cursor, self.position, self.segments)
             return
-        if self.start and self.cursor == self.start:
+        if self.start and self.cursor == self.start and getattr(self.model, LEVERN_MERGED_ATTR, False) is not True:
             raise ValueError('A prefill resumed at %d takes its first call only through %s, not %r'
                              % (self.start, PREFIX_ROUTE_ENTRY, entry))
         if self.cursor <= 0 and not moved:

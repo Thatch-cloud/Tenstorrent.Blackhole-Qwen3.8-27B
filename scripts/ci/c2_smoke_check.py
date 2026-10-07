@@ -1115,7 +1115,13 @@ LEVERN_ROUTE_INSTALLED = '[PINDIAG] lever N route installed: route=1'
 LEVERN_WARMED = '[PINDIAG] lever N route warmed before the packed traces: steps=%d' % LEVERN_WARM_STEPS
 LEVERN_REFUSED = '[PINDIAG] lever N REFUSED'
 LEVERN_ROUTE = re.compile(r'\[PINDIAG\] lever N route req=(\S+) start=(\d+) end=(\d+) prompt=(\d+) final=([01]) wrote_slot=([01]) '
-                          r'ms=([0-9.]+) programs=(\d+|None)->(\d+|None) window=(\d+)')
+                          r'ms=([0-9.]+) programs=(\d+|None)->(\d+|None) window=(\d+)(?: source=(COLD|CHECKPOINT|SCRATCH|PARKED) captured=(\S+))?')
+# The merged route (Lever N beside prefix reuse, docs/lever-n-prefix-merged-route.md): its warm runs the four sources (four steps, no route lines), the
+# graft says it runs chunked beside the cap, and a step that is not the first of its request continues a scratch or a parked state.
+LEVERN_MERGED_WARM_STEPS = 4
+LEVERN_GRAFT_CHUNKED = 'chunked=levern'
+LEVERN_PARK_OUT = re.compile(r'\[PINDIAG\] lever N park out req=(\S+) at=(\d+)')
+LEVERN_PARK_IN = re.compile(r'\[PINDIAG\] lever N park in req=(\S+) at=(\d+)')
 LEVERN_STEP = re.compile(r'\[PINDIAG\] lever N step n=(\d+) kind=(prefill|decode) seats=(\d+) req=(\S+) start=(\S+) tokens=(\d+) '
                          r'end=(\S+) prompt=(\S+) final=(\S+) reason=(\S+) prev=(\S+):(\S+)ms owed_ms=(\S+) owed_rounds=(\d+)')
 LEVERN_DIGEST = re.compile(r'\[PINDIAG\] lever N digest req=(\S+) prompt=(\d+) tokens_sha=([0-9a-f]{32}) slot_sha=([0-9a-f]{32}) '
@@ -1125,7 +1131,8 @@ LEVERN_DIGEST = re.compile(r'\[PINDIAG\] lever N digest req=(\S+) prompt=(\d+) t
 def levern_facts(container_text):
     """The Lever N lines of a container log, parsed in order: route steps, scheduler steps and digests."""
     routes = [dict(req=m.group(1), start=int(m.group(2)), end=int(m.group(3)), prompt=int(m.group(4)), final=m.group(5) == '1',
-                   wrote=m.group(6) == '1', programs=(m.group(8), m.group(9)), window=int(m.group(10))) for m in LEVERN_ROUTE.finditer(container_text)]
+                   wrote=m.group(6) == '1', programs=(m.group(8), m.group(9)), window=int(m.group(10)), source=m.group(11), captured=m.group(12))
+              for m in LEVERN_ROUTE.finditer(container_text)]
     steps = [dict(n=int(m.group(1)), kind=m.group(2), seats=int(m.group(3)), req=m.group(4), start=m.group(5), tokens=int(m.group(6)),
                   end=m.group(7), prompt=m.group(8), final=m.group(9), reason=m.group(10)) for m in LEVERN_STEP.finditer(container_text)]
     digests = [dict(req=m.group(1), prompt=int(m.group(2)), tokens=m.group(3), slot=m.group(4), logits=m.group(5), kv=m.group(6))
@@ -1142,7 +1149,13 @@ def levern_route_problems(routes):
     for row in routes:
         by_request.setdefault(row['req'], []).append(row)
     for request, rows in by_request.items():
-        cursor, label = 0, 'prefill of %s' % request
+        # A prefix hit's first step starts at its Q (source CHECKPOINT, the merged route); every other first step starts at 0.
+        cursor, label = (rows[0]['start'] if rows[0].get('source') == 'CHECKPOINT' else 0), 'prefill of %s' % request
+        for index, row in enumerate(rows):
+            source = row.get('source')
+            if source is not None and (source in ('SCRATCH', 'PARKED')) != (index > 0):
+                problems.append('%s: step %d came from source %s (a continuation is SCRATCH or PARKED, a first step COLD or CHECKPOINT)'
+                                % (label, index + 1, source))
         for index, row in enumerate(rows):
             last = index == len(rows) - 1
             if row['start'] != cursor:
@@ -1250,20 +1263,26 @@ def levern_problems(env, container_text, smoke):
     problems, facts = [], levern_facts(container_text)
     results = smoke or {}
     if on:
-        for marker, what in ((LEVERN_INSTALLED, 'the scheduler install line'), (LEVERN_PLATFORM, 'the platform wrap line (the policy that turns chunking off ran '
-                                                                                               'unwrapped)'),
-                             (LEVERN_ROUTE_INSTALLED, 'the route install line'), (LEVERN_WARMED, 'the route warm line with %d steps' % LEVERN_WARM_STEPS)):
+        merged = env.get('QWEN_PREFIX_REUSE') == '1'
+        warmed = LEVERN_WARMED if not merged else LEVERN_WARMED.replace('steps=%d' % LEVERN_WARM_STEPS, 'steps=%d' % LEVERN_MERGED_WARM_STEPS)
+        expected_markers = [(LEVERN_INSTALLED, 'the scheduler install line'), (LEVERN_PLATFORM, 'the platform wrap line (the policy that turns chunking '
+                                                                                                 'off ran unwrapped)'),
+                            (LEVERN_ROUTE_INSTALLED, 'the route install line'), (warmed, 'the route warm line with %d steps' % (
+                                LEVERN_MERGED_WARM_STEPS if merged else LEVERN_WARM_STEPS))]
+        if merged:
+            expected_markers.append((LEVERN_GRAFT_CHUNKED, 'the install line of the prefix graft saying it runs chunked beside the cap'))
+        for marker, what in expected_markers:
             if marker not in container_text:
                 problems.append('Lever N is on and %s ("%s") was never logged: the lever did not engage' % (what, marker))
         lines = container_text.splitlines()
-        warm = next((i for i, line in enumerate(lines) if LEVERN_WARMED in line), None)
+        warm = next((i for i, line in enumerate(lines) if warmed in line), None)
         unsafe = next((i for i, line in enumerate(lines) if UNSAFE_ALLOCATION in line), None)
         if warm is not None and unsafe is not None and unsafe < warm:
             problems.append('the Lever N route warm (log line %d) came after the first allocation made with a trace live (line %d)' % (warm + 1, unsafe + 1))
         refused = [line.strip()[:200] for line in lines if LEVERN_REFUSED in line]
         problems += ['a Lever N REFUSED line: %s' % line for line in refused[:4]]
         warm_steps = [row for row in facts['routes'] if row['req'] == LEVERN_WARM_REQUEST]
-        if warm is not None and len(warm_steps) != LEVERN_WARM_STEPS:
+        if warm is not None and not merged and len(warm_steps) != LEVERN_WARM_STEPS:
             problems.append('the route warm logged %d step line(s), not %d' % (len(warm_steps), LEVERN_WARM_STEPS))
         problems += levern_route_problems(facts['routes'])
         served = [row for row in facts['routes'] if row['req'] != LEVERN_WARM_REQUEST]
@@ -1278,6 +1297,14 @@ def levern_problems(env, container_text, smoke):
             if not any(step['kind'] == 'decode' and step['seats'] >= 1 for step in facts['steps']) and any(
                     step['kind'] == 'prefill' and step['seats'] >= 1 for step in facts['steps']):
                 problems.append('decoders ran beside split prefills and no decode step was ever yielded between them')
+        if merged:
+            outs = [(m.group(1), int(m.group(2))) for m in LEVERN_PARK_OUT.finditer(container_text) if m.group(1) != LEVERN_WARM_REQUEST]
+            ins = [(m.group(1), int(m.group(2))) for m in LEVERN_PARK_IN.finditer(container_text) if m.group(1) != LEVERN_WARM_REQUEST]
+            facts['parks'] = len(outs)
+            facts['unparks'] = len(ins)
+            for request, at in ins:
+                if (request, at) not in outs:
+                    problems.append('prefill of %s was restored from a park at %d that was never taken (no matching "lever N park out" line)' % (request, at))
         for stall_name in STALL_TESTS:
             stall = results.get(stall_name)
             if isinstance(stall, dict) and 'error' not in stall:

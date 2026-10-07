@@ -168,6 +168,19 @@ def note_fixture_writer(reason):
     bump(reason)
 
 
+def note_prefill_pass_through(reason):
+    """The hook's pass-through of a prefill step to the lifecycle (a new request, or a cached one this hook holds no bridge for). Today it bumps
+    like any other prefill. Under the Lever N epoch scope (verify_prestage.disjoint_engaged: the merged route's persistent writes are checked
+    disjoint from every block's staging destinations) the lifecycle runs inside this call and decides AFTER the step, from what the route measured
+    (serving_lifecycle._epoch_after), so a step that wrote no decode slot is not charged twice and not charged at all."""
+    try:
+        from verify_prestage import disjoint_engaged
+    except ImportError:
+        return note_fixture_writer(reason)
+    if not disjoint_engaged():
+        note_fixture_writer(reason)
+
+
 # S2's flag (dflash_packed_proposal_coordinator.EXTENT_REPLAY_FLAG; the test pins the two equal). Read here from the
 # environment, so a detach imports nothing.
 EXTENT_REPLAY_FLAG = 'QWEN_FAST_EXTENT_REPLAY'
@@ -333,7 +346,7 @@ class FastWorkerHook:
                         sorted(getattr(scheduled, 'finished_req_ids', None) or (), key=str),
                         sorted(getattr(scheduled, 'preempted_req_ids', None) or (), key=str))
         if getattr(scheduled, 'scheduled_new_reqs', None):
-            note_fixture_writer('prefill')
+            note_prefill_pass_through('prefill')
             return self.original_execute(scheduled)
         # ... and under CHUNKED prefill only the first chunk is new. Every later
         # chunk of someone else's prompt is a CACHED request, so the guard above
@@ -353,7 +366,7 @@ class FastWorkerHook:
             bridged = set(cached_ids) & set(self.bridges)
             if bridged and self._carries_tokens(scheduled, unbridged):
                 self._refuse_mixed_step(scheduled, bridged, unbridged)
-            note_fixture_writer('prefill-chunk')
+            note_prefill_pass_through('prefill-chunk')
             return self.original_execute(scheduled)
         # A step that schedules no tokens is a bookkeeping step - a request
         # finishing, for instance - not this hook's decode. With one bridge the

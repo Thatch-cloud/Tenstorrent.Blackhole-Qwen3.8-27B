@@ -584,7 +584,7 @@ class MeasuredLineTests(unittest.TestCase):
         counter = iter(range(0, 100, 3))
         with mock.patch.object(route, 'window_programs', lambda: next(counter)):
             rig.split('req', tokens, rig.pool.row(total), 1)
-        windows = [line.rsplit('window=', 1)[1] for line in rig.marker('lever N route req=')]
+        windows = [line.rsplit('window=', 1)[1].split()[0] for line in rig.marker('lever N route req=')]
         self.assertEqual(windows, ['3', '3', '3'])
 
     def test_a_digest_names_its_prompt_and_a_long_prompt_skips_the_kv_read(self):

@@ -47,6 +47,11 @@ and DRAINS at floor2048(L), then the tail runs.
     warms up before vLLM builds the scheduler (and so before any registry exists), so it may declare
     on the holder instead: sys.modules[REGISTRY_KEY].mid_loop_capture = True (creating the holder
     as a bare module when absent); shared_registry() honours that when it creates the registry.
+  - A SPLIT prefill (Lever N, docs/lever-n-prefix-merged-route.md): a grant lives for one step, but a prompt the cap splits runs
+    over several. commit() records such a request's capture plan as an IN-FLIGHT PLAN (inflight[req_id]) and capture() accepts a
+    planned position from it in every later step, until the request's final step has run (note_scheduled marks it; begin_step drops
+    it) or it is freed, killed or disabled. A grant that covers the rest of the prompt in one step never creates one, so a profile
+    without Lever N behaves exactly as it did.
   - The model also counts program_growth (a row whose program cache grew after warmup, F3) in
     registry.stats, and reports restore time through note_restore(ms).
 Pure python; imports nothing outside the standard library.
@@ -93,6 +98,7 @@ STAT_NAMES = (
     'capture_failures', 'capture_wrong_position', 'capture_skipped_budget', 'capture_disabled',
     'mid_loop_unplanned', 'evicted_lru', 'evicted_coupled', 'dropped', 'clears', 'reset_kept',
     'freed_requests', 'restores', 'restore_ms', 'capture_ms', 'dropped_hits', 'program_growth',
+    'inflight_started', 'inflight_captures', 'inflight_dropped',
 )
 
 
@@ -160,9 +166,11 @@ class Grant(object):
     should capture. Staged on every admission attempt; committed only when the step's output admits
     the request at start_pos == Q. The model reads the committed one."""
 
-    __slots__ = ('req_id', 'q', 'h', 'key', 'checkpoint', 'plan', 'request', 'tokens', 'drain', 'unplanned')
+    __slots__ = ('req_id', 'q', 'h', 'key', 'checkpoint', 'plan', 'request', 'tokens', 'drain', 'unplanned', 'prompt')
 
     def __init__(self, req_id, q, h, key, checkpoint, plan, request, drain=None, unplanned=()):
+        # The prompt length, kept past commit (which drops the request): the in-flight plan needs it.
+        self.prompt = getattr(request, 'num_prompt_tokens', None)
         self.req_id = req_id
         self.q = q
         self.h = h
@@ -184,6 +192,20 @@ class Grant(object):
     def describe(self):
         return 'req=%s h=%d Q=%d drain=%d plan=[%s]' % (self.req_id, self.h, self.q, self.drain,
                                                         ','.join(str(pos) for pos in self.capture_positions()))
+
+
+class Inflight(object):
+    """The capture plan of a request the cap splits across steps: {position: block hash key}, the token ids the captures are
+    filed under (the grant's, taken when it committed), the prompt length and whether the request's final step has been
+    scheduled (then begin_step drops it: that step's captures have run by the next schedule())."""
+
+    __slots__ = ('plan', 'tokens', 'prompt', 'final')
+
+    def __init__(self, plan, tokens, prompt):
+        self.plan = dict(plan)
+        self.tokens = tokens
+        self.prompt = prompt
+        self.final = False
 
 
 class KillSwitch(object):
@@ -229,6 +251,8 @@ class PrefixRegistry(object):
         self.bytes = 0
         self.staged = {}
         self.committed = {}
+        # req_id -> Inflight: the plans of the requests the cap is splitting (see the module docstring).
+        self.inflight = {}
         self.same_step_blocks = set()
         self.disabled = None
         # Off until the model graft declares it takes captures inside its chunk loop.
@@ -265,6 +289,7 @@ class PrefixRegistry(object):
             self.clear()
             self.staged.clear()
             self.committed.clear()
+            self.inflight.clear()
             self.same_step_blocks.clear()
         self._owner = weakref.ref(owner)
 
@@ -351,6 +376,7 @@ class PrefixRegistry(object):
         """Latch off for the life of the process: no new grants, captures or publishing."""
         if self.disabled is None:
             self.disabled = str(reason)
+        self.inflight.clear()
         self.clear()
 
     # -- the trim's helpers ---------------------------------------------------------------------
@@ -386,6 +412,9 @@ class PrefixRegistry(object):
         self.committed.clear()
         self.staged.clear()
         self.same_step_blocks.clear()
+        for req_id in [req_id for req_id, plan in self.inflight.items() if plan.final]:
+            del self.inflight[req_id]
+            self.stats['inflight_dropped'] += 1
         self._enforce_budget()
 
     def stage(self, grant):
@@ -395,9 +424,13 @@ class PrefixRegistry(object):
     def unstage(self, req_id):
         self.staged.pop(req_id, None)
 
-    def commit(self, admitted):
+    def commit(self, admitted, scheduled=None):
         """admitted: request id -> start_pos for every request the step's output admits (new or
-        resumed). Returns the grants committed; every other staged grant is dropped."""
+        resumed). Returns the grants committed; every other staged grant is dropped.
+
+        scheduled (optional): request id -> the tokens the step schedules for it. With it, an admitted request whose step stops short
+        of its prompt (the Lever N cap split it) leaves its capture plan as an in-flight plan for the steps that follow; without it
+        no plan outlives its step, exactly as before."""
         done = []
         for req_id, grant in self.staged.items():
             if req_id not in admitted:
@@ -426,9 +459,36 @@ class PrefixRegistry(object):
                 self.stats['kv_hit_without_checkpoint'] += 1
             grant.request = None
             self.committed[req_id] = grant
+            self._note_split(grant, admitted[req_id], scheduled)
             done.append(grant)
         self.staged.clear()
         return done
+
+    def _note_split(self, grant, start, scheduled):
+        """A grant admitted for fewer tokens than the rest of its prompt: keep its plan for the later steps."""
+        if scheduled is None or not grant.plan or grant.prompt is None or grant.tokens is None:
+            return
+        tokens = scheduled.get(grant.req_id)
+        if type(tokens) is not int or start + tokens >= grant.prompt:
+            return
+        self.inflight[grant.req_id] = Inflight(grant.plan, grant.tokens, grant.prompt)
+        self.stats['inflight_started'] += 1
+
+    def note_scheduled(self, req_id, start, tokens):
+        """The scheduler's report that it scheduled `tokens` more tokens of a request already in flight from `start`. The step that
+        reaches the prompt's end is the request's last: its plan is dropped at the next begin_step, after that step's captures ran."""
+        plan = self.inflight.get(req_id)
+        if plan is not None and start + tokens >= plan.prompt:
+            plan.final = True
+        return plan is not None
+
+    def planned(self, req_id):
+        """The positions this request may still capture, from its committed grant or its in-flight plan: sorted, [] when none."""
+        grant = self.committed.get(req_id)
+        if grant is not None:
+            return grant.capture_positions()
+        plan = self.inflight.get(req_id)
+        return sorted(plan.plan) if plan is not None else []
 
     def grant_for(self, req_id):
         return self.committed.get(req_id)
@@ -440,9 +500,14 @@ class PrefixRegistry(object):
         skips the checkpoint and is counted; it never fails the request (S7)."""
         try:
             grant = self.committed.get(req_id)
-            if grant is None:
-                raise KeyError('no committed grant for %s' % req_id)
-            keys = dict(grant.plan)
+            carried = None
+            if grant is not None:
+                keys, tokens = dict(grant.plan), grant.tokens
+            else:
+                carried = self.inflight.get(req_id)
+                if carried is None:
+                    raise KeyError('no committed grant for %s' % req_id)
+                keys, tokens = carried.plan, carried.tokens
             if pos not in keys:
                 raise KeyError('boundary %d is not planned for %s' % (pos, req_id))
             if loop_pos != pos:
@@ -451,8 +516,11 @@ class PrefixRegistry(object):
                                  'restored as the state at %d)' % (loop_pos, pos, pos))
             if ms is not None:
                 self.stats['capture_ms'] += float(ms)
-            return self.put(keys[pos], pos, grant.tokens[0:pos], rec, carry,
-                            CHECKPOINT_NBYTES if nbytes is None else nbytes)
+            stored = self.put(keys[pos], pos, tokens[0:pos], rec, carry,
+                              CHECKPOINT_NBYTES if nbytes is None else nbytes)
+            if carried is not None and stored is not None:
+                self.stats['inflight_captures'] += 1
+            return stored
         except Exception as error:
             self.stats['capture_failures'] += 1
             log('capture skipped req=%s pos=%s: %s', req_id, pos, error)
@@ -465,6 +533,9 @@ class PrefixRegistry(object):
     def forget_request(self, req_id):
         self.token_checks.pop(req_id, None)
         found = self.staged.pop(req_id, None) is not None
+        if self.inflight.pop(req_id, None) is not None:
+            found = True
+            self.stats['inflight_dropped'] += 1
         grant = self.committed.pop(req_id, None)
         if grant is not None:
             found = True
@@ -481,7 +552,8 @@ class PrefixRegistry(object):
         values = dict(self.stats)
         values.update(entries=len(self.entries), bytes=self.bytes, budget_bytes=self.budget_bytes,
                       pins=self.pins(), staged_now=len(self.staged), committed_now=len(self.committed),
-                      orphans_now=len(self.orphan_keys), mid_loop_capture=self.mid_loop_capture,
+                      orphans_now=len(self.orphan_keys), inflight_now=len(self.inflight),
+                      mid_loop_capture=self.mid_loop_capture,
                       disabled=self.disabled)
         return values
 
