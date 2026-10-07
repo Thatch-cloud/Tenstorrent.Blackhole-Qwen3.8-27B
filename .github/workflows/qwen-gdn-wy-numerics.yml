@@ -1,0 +1,61 @@
+name: Qwen GDN window-WY numerics
+run-name: GDN window-WY numerics ${{ github.ref_name }}
+# NON-EXACT RESEARCH PROBE (docs/gdn-wy-probe.md): E1 of the window WY / UT form of the gated delta rule against the served sequential
+# recurrence and fp64, on CPU, at the TP4 per-card shard. A laptop may flip bits at rest, so the numbers that count are produced here.
+# Trigger: push a tag experiment/gdn-wy-numerics-vN (a tag runs the workflow file AT the tag, so a branch needs no dispatchable copy).
+# Each matrix cell writes one machine-readable report (kind gdn-wy-numerics, schema 1) as an artifact; nothing here touches a card or a serving image.
+on:
+  push:
+    tags: ['experiment/gdn-wy-numerics-v*']
+permissions:
+  contents: read
+concurrency:
+  group: qwen-gdn-wy-numerics-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  numerics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 170
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {cell: model-t16, regimes: 'model', rows: '16', dist: tau}
+          - {cell: r1-t16, regimes: 'R1', rows: '16', dist: tau}
+          - {cell: r2-t16, regimes: 'R2', rows: '16', dist: tau}
+          - {cell: model-t32, regimes: 'model', rows: '32', dist: tau}
+          - {cell: r1-t32-stress, regimes: 'R1', rows: '32', dist: stress}
+          - {cell: model-t32-stress, regimes: 'model', rows: '32', dist: stress}
+    env:
+      OMP_NUM_THREADS: '2'
+      MKL_NUM_THREADS: '2'
+      PYTHONPATH: scripts/ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CPU dependencies
+        run: |
+          python -m pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.4.6
+      - name: Smoke (seconds; a broken script must not burn the full run)
+        run: python -B scripts/ci/gdn_wy_numerics.py --smoke --regimes model --out smoke.json
+      - name: E1 numerics, cell ${{ matrix.cell }}
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set +e
+          python -B scripts/ci/gdn_wy_numerics.py --regimes "${{ matrix.regimes }}" --rows ${{ matrix.rows }}             --commit-dist ${{ matrix.dist }} --cycles 1000 --seg-cycles 300 --repeat 3 --label "${{ matrix.cell }}"             --out "gdn-wy-numerics-${{ matrix.cell }}.json" > "gdn-wy-numerics-${{ matrix.cell }}.log" 2>&1
+          code=$?
+          tail -n 8 "gdn-wy-numerics-${{ matrix.cell }}.log"
+          # exit 1 is the E1 criterion not holding: a RESULT, kept in the report. Anything else is a broken run.
+          if [ "$code" != 0 ] && [ "$code" != 1 ]; then exit "$code"; fi
+          test -s "gdn-wy-numerics-${{ matrix.cell }}.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gdn-wy-numerics-${{ matrix.cell }}
+          path: |
+            gdn-wy-numerics-${{ matrix.cell }}.json
+            gdn-wy-numerics-${{ matrix.cell }}.log
