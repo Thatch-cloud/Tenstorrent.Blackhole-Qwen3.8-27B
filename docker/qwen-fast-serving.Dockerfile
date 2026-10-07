@@ -85,6 +85,12 @@ COPY scripts/ci/verify_trace_t1.py /experiment-scripts/ci/
 COPY scripts/ci/verify_trace_t2.py scripts/ci/gdn_conv_windows_packed.py scripts/ci/gdn_conv_windows_packed.cpp scripts/ci/packed_ordered_cache.py scripts/ci/page_width_tp4.py /experiment-scripts/ci/
 # TP4 verify-glue levers (tp4/vglue; QWEN_FAST_TP4_*, default off): tp4_vglue.RUNTIME_FILES, the one table.
 COPY scripts/ci/tp4_vglue.py scripts/ci/gdn_commit_lanes_tp.cpp scripts/ci/gdn_rows_dma_tp.py scripts/ci/gdn_rows_dma_tp.cpp scripts/ci/gdn_device_loop_state_tp.py scripts/ci/gdn_block_conv_tp.py scripts/ci/attention_block_fold_tp.py scripts/ci/attention_block_fold_tp.cpp scripts/ci/extent_attention_fold_tp.py scripts/ci/gdn_pair_slice_tp.py /experiment-scripts/ci/
+# The long-context SDPA configuration (tp4/sdpa-long, QWEN_FAST_TP4_SDPA, default off): sdpa_long_tp.RUNTIME_FILES, imported by extent_attention_fold_tp
+# (sdpa_multi_tp and its three JIT kernels are tp4/sdpa-multi, QWEN_FAST_TP4_SDPA=multi, imported by sdpa_long_tp when that value is set).
+COPY scripts/ci/sdpa_long_tp.py scripts/ci/sdpa_multi_tp.py scripts/ci/sdpa_multi_mask_tp.cpp scripts/ci/sdpa_multi_gather_tp.cpp scripts/ci/sdpa_multi_audit_tp.cpp /experiment-scripts/ci/
+# The block conv-gates launch with its gate tiles on cores of their own (tp4/w2, QWEN_FAST_TP4_CONV_GATES_SPREAD, default off): gdn_conv_gates_spread.RUNTIME_FILES,
+# imported by gdn_block_conv_tp only when the flag is set; the two kernels are its JIT sources.
+COPY scripts/ci/gdn_conv_gates_spread.py scripts/ci/gdn_conv_gates_spread_reader.cpp scripts/ci/gdn_conv_gates_spread_writer.cpp /experiment-scripts/ci/
 # The drafter's hidden-width RMS norms on a wide grid (tp4/next-3-cheap; QWEN_FAST_TP4_DRAFT_WIDE, default off): dflash_device,
 # draft_attention_branch and draft_mlp_branch import draft_wide_tp, so it must reach the image beside them.
 COPY scripts/ci/draft_wide_tp.py /experiment-scripts/ci/

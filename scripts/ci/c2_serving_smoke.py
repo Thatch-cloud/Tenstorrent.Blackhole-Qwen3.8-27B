@@ -537,6 +537,21 @@ def concurrent8_code_128k():
     return dict(run_users('concurrent8_code_128k', prompts), corpus=corpus, fit=fit)
 
 
+SKEW_LONG_TOKENS = 253920           # the stall arm's cold prompt: known to fit the 262k profile's room with a short answer
+SKEW_SHORT_TOKENS = 4096
+SKEW_TARGETS = (SKEW_LONG_TOKENS, SKEW_SHORT_TOKENS, SKEW_SHORT_TOKENS, SKEW_SHORT_TOKENS,
+                SKEW_LONG_TOKENS, SKEW_SHORT_TOKENS, SKEW_SHORT_TOKENS, SKEW_SHORT_TOKENS)
+
+
+def concurrent8_skew():
+    # Opt-in (tp4/w2). The skewed eight: two real-code prompts of about 253,920 tokens (users 0 and 4, one in each four-seat block) and six of about
+    # 4,096, as the server counts them (fitted_code_prompts), a code task each, 800 out, started together. A multi-user SDPA launch on a fixed block
+    # geometry is paid at its longest user, so this is the shape where it can lose against per-user launches (the plan's row 7s: up to 9 ms a round at
+    # heavy skew); the equal-length arms cannot show it.
+    prompts, corpus, fit = fitted_code_prompts(SKEW_TARGETS)
+    return dict(run_users('concurrent8_skew', prompts), corpus=corpus, fit=fit)
+
+
 DEEP_PROMPT_TOKENS = 120000
 STALL_SHORT_SEATS = 7
 STALL_SHORT_TOKENS = 4096
@@ -1005,6 +1020,8 @@ if ONLY and 'concurrent8_code_32k' in ONLY:
     record('concurrent8_code_32k', concurrent8_code_32k)
 if ONLY and 'concurrent8_code_128k' in ONLY:
     record('concurrent8_code_128k', concurrent8_code_128k)
+if ONLY and 'concurrent8_skew' in ONLY:
+    record('concurrent8_skew', concurrent8_skew)
 if ONLY and 'stall8_cold262k' in ONLY:
     record('stall8_cold262k', stall8_cold262k)
 if ONLY and 'stall8_cold128k' in ONLY:

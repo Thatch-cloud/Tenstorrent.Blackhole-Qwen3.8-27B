@@ -25,7 +25,8 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_FABRIC_PROBE     what the fabric action runs on the (1, 4) mesh: fabric (the default: tp4_fabric_probe.py, the ring, the
                       link count and the collectives timed) or rs-tile (tp4_rs_tile_spike.py: the model's own all-reduce on a
                       64-row block against its one-tile calls, bit for bit, then the tile-split wrapper; the verdict line
-                      TP4_RS_TILE); needs the fabric action
+                      TP4_RS_TILE) or mr (tp4_mr_probe.py: the verify readback's mesh-read arms at four chips, optimisation/ttnn-op/mr_probe's
+                      arms and verdict, MR_PROBE verdict=GO|MESH-ONLY|NO-GO); needs the fabric action
   C2_PROFILE          the C2 profile smoke and gate serve (default: general)
   C2_CARDS            the card set the hardware steps open: pair (cards M and A, the default) or quad (every
                       Blackhole board present, the four-card (1, 4) mesh the TP4 profiles open). quad takes
@@ -123,7 +124,7 @@ TP4_MESH_DEVICE = 'P150x4'
 # (general-2link: the same pair under the two-channel descriptor this cabling needs).
 PAIR_MESH_DEVICES = (None, 'P300')
 FABRIC_CONFIGS = ('FABRIC_1D', 'FABRIC_1D_RING')
-FABRIC_PROBES = ('fabric', 'rs-tile')
+FABRIC_PROBES = ('fabric', 'rs-tile', 'mr')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
 # each runs. warm and warm-off are M1 (never judged for kernel-cache growth); control and forced-cap M3-M4 (G3);

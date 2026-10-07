@@ -138,7 +138,12 @@ class ProfileTests(unittest.TestCase):
                        'c2-packed-tp4-8x262k-ship-prefix-audit': (sd.DRAFT_CONV, sd.DRAFT_HEADS, sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT),
                        # tp4/levern-prefix: those two plus exactly the Lever N flags (test_levern_prefix_contract)
                        'c2-packed-tp4-8x262k-ship-prefix-levern': (sd.DRAFT_CONV, sd.DRAFT_HEADS),
-                       'c2-packed-tp4-8x262k-ship-prefix-levern-audit': (sd.DRAFT_CONV, sd.DRAFT_HEADS, sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT)}
+                       'c2-packed-tp4-8x262k-ship-prefix-levern-audit': (sd.DRAFT_CONV, sd.DRAFT_HEADS, sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT),
+                       # tp4/w2: wave 1's D2 flags, plus its audits on the audited twin
+                       'c2-packed-tp4-8x262k-w2': (sd.DRAFT_CONV, sd.DRAFT_HEADS),
+                       'c2-packed-tp4-8x262k-w2-audit': (sd.DRAFT_CONV, sd.DRAFT_HEADS, sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT),
+                       'c2-packed-tp4-8x262k-w2-nof1': (sd.DRAFT_CONV, sd.DRAFT_HEADS),
+                       'c2-packed-tp4-8x262k-w2-nof1-audit': (sd.DRAFT_CONV, sd.DRAFT_HEADS, sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT)}
         for name, profile in PROFILES.items():
             for flag in sd.ALL_FLAGS:
                 wanted = (name in DELTAS and flag in DELTAS[name][1]) or flag in X262K_FLAGS.get(name, ())

@@ -1,0 +1,72 @@
+# The order of the tp4/w2 four-card DEVELOPMENT window: the fusion audit's wave 2 gated on the eight-seat 262k stack, one image, tp4-w2-1, built from the pushed tp4/w2 commit.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# THE CARDS ARE UNDER DEVELOPMENT: NO agentstart, NO agentstop (the node agent is already stopped), NO hand-back, NO deploy, NO :latest move. Z ends with a reset and no agentstart.
+# P0. PRECONDITIONS: the W1 window (tp4-w1-jobs) has run and its host-gap arm is SELECTED (epochs or lite). If W1 selected lite, replace c2-packed-tp4-8x262k-w2 by a lite twin of it (c2-packed-tp4-8x262k-w2 minus QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS: not committed; add it first) and run T3 and T6 (wave 1 alone) on the lite arm W1 selected.
+# NO OTHER WINDOW DRIVER MAY BE ALIVE and no privileged builder container may be up. The CPU suite green on this branch first (gh workflow run qwen-cpu-suite.yml -f ref=tp4/w2). Every result is UNQUALIFIED (the 262k evidence waiver on the gate-only arms). B0 never runs during a timing job.
+# Judge every ABAB PAIRED per round, never by unpaired medians; check the load average.
+# BASE: origin/tp4/w1 (efb0ddcf: nosamp, D2a, D2c, host-gap stage 1, U1, the drafter ring gathers; its fabric stays FABRIC_1D) merged with origin/tp4/sdpa-multi (3db8c611: QWEN_FAST_TP4_SDPA=multi), plus F1 (QWEN_FAST_TP4_CONV_GATES_SPREAD, new on this branch). The V5 recurrence split (tp4/v5split) is
+# already in tp4/w1; it stays OFF here (its flag refuses: the qualified sha256 triple is empty until the card-M byte gate V1b passes at full scope). CONTROL for every pair: c2-packed-tp4-8x262k-best-time-gate.
+# WHAT IS IN c2-packed-tp4-8x262k-w2: c2-packed-tp4-8x262k-w1 PLUS exactly QWEN_FAST_TP4_SDPA=multi and QWEN_FAST_TP4_CONV_GATES_SPREAD=1. c2-packed-tp4-8x262k-w2-audit is c2-packed-tp4-8x262k-w1-audit PLUS QWEN_FAST_TP4_SDPA=multi, QWEN_FAST_TP4_SDPA_AUDIT=1, QWEN_FAST_TP4_CONV_GATES_SPREAD=1 and QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT=1.
+# THE TWO WAVE-2 LEVERS. SDPA multi: one K64j SDPA decode launch a layer for every user of a 64-row block (one G16 entry per user, 16 cores each, KV read once); measured on its own: bit-exact in 1,690 audits, hang-clean 5 of 5, +2 to 4% at short context and +6 to 17% at 128k. F1: the block conv-gates launch as a generic_op twin with the served compute kernel
+# unchanged, the two gate tiles on cores of their own and a and b gathered by words (the served factory runs both on one extra core, one bfloat16 at a time): data movement only, no graft build, about -2 to -3 ms a round. Neither was ever run beside wave 1.
+# ORDER. B0 FIRST: the card-M harnesses run in the window's image and building opens no card, so no quad job holds the cards while card M is used. Then the card-M jobs (F1 first: the first compile of its kernels; no quad job may hold the cards), then the quad jobs, cheapest kill signals first: X0 (status, RESCAN, reset), S0c (the control attach: the reference for every hash READ below), A1 (the audited attach of the whole stack:
+# zero mismatches, every engaged marker), H1-H5 (five hang shapes on the stack, audits off), the timing jobs T1-T8 in the order A B C A B C A B (control, stack, wave 1 alone: three control-against-stack pairs and two interleaved wave-1 runs, 32k, 128k and the skewed eight), P1 (the eight-user device profile of the stack), then Z.
+# U2, the 65,536-pattern canonical-rule probe (every one of the bf16 patterns through the row mover's canonical modes against the served path, on card M; it decides X-obs versus X-construct for V2, V1, WC and K5-B, and is a prerequisite of WC in W3), runs after MR (optimisation/ttnn-op/canon_probe).
+# F1 FALLBACK. F1 is the one lever of this window never compiled before it runs (the F1 job is its first compile). If F1 reads FAIL or NOT-RUN, the window does NOT end and wave 1 plus multi is not left unrun: run A1, H1-H5, T2, T5, T8 and P1 with C2_PROFILE swapped, c2-packed-tp4-8x262k-w2 -> c2-packed-tp4-8x262k-w2-nof1 and c2-packed-tp4-8x262k-w2-audit -> c2-packed-tp4-8x262k-w2-nof1-audit (both committed in this image: wave 1 plus exactly QWEN_FAST_TP4_SDPA=multi, and its audited twin; every other line of the template unchanged,
+# no new commit, no new image). On the swapped arms the 'conv gates spread engaged' marker, its audit lines and its gate_cores check are NOT expected (the flag is off), every other read rule stands, and the increment read against the C runs is multi alone, not multi plus F1. A fell-back line of F1 on an engaged attach (not a failed F1 job) is read on its own: it is a finding, and the stack that ran is wave 1 plus multi.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS F1 V1a V1b MR U2 X0 <- B0
+# NEEDS V1b <- V1a
+# NEEDS MR4 <- X0
+# NEEDS S0c <- X0
+# NEEDS A1 <- S0c
+# NEEDS H1 H2 H3 H4 H5 <- A1
+# NEEDS T1 T2 T3 T4 T5 T6 T7 T8 <- A1 H1 H2 H3 H4 H5
+# NEEDS P1 <- A1 H1
+# READ RULES (each also needs c2_smoke_check clean and no stall):
+#   B0  provenance report with no problem line, the image id printed (the three new served files and the sdpa-multi modules are in both copy lists and the overlay).
+#   F1  'GDN_CG_SPREAD verdict=PASS' (every compare of 16, 64 and 128 rows, random and edge, differing=0 and no fall-back, on ONE chip); then the timing lines (each arm under a captured trace of 24 launches, so the host is not in them): spread_us against served_us per case (about -18 to -21 us at 64 rows). FAIL names the tensor; NOT-RUN carries the compile or runtime error. Soft, but read before A1: a differing byte or a compile error takes F1 out of the stack by the committed fallback profiles (F1 FALLBACK above), not by a new commit and image. On the gather branches: at TP4 the probe only exercises the even, single-tile gather; the odd-offset and two-tile branches are modelled on the CPU only, so a PASS here is not a certification of other geometries.
+#   V1a  no watcher error or assert line; the GDN_V5 verdict line (reduced scope: never PASS). A watcher error, a hang or a FAIL skips V1b. Soft.
+#   V1b  'GDN_V5 verdict=PASS scope=full' prints the sha256 triple that gdn_seq_block_split.QUALIFIED takes. FAIL with bytes>0 is a real difference. A PASS licenses V5 on four cards in a LATER window; it changes nothing in this one. Soft.
+#   MR  the 'MR_PROBE verdict=...' line of the card-M probe: on ONE card INCONCLUSIVE-SINGLE-CHIP by construction (the floor of one read and the mesh composer's overhead); it does not decide. Soft.
+#   MR4 the 'MR_PROBE verdict=...' line of the four-chip probe (right after X0): GO / MESH-ONLY / NO-GO decides MR and 2a; put serial_us beside the reads_ms of the [PACKED-HOSTGAP-VERIFY] lines of T2, T5 or P1 (the w2 profiles read back on the shard path: QWEN_FAST_VERIFY_T1=1 is baked in the image and no QWEN_FAST_VERIFY_T1_SKIP is set). NOT-MEASURED carries the error. Soft.
+#   U2  'U2_CANON verdict=PASS' (every comparison of the row mover's canonical modes against the served round trip and the served slice differing=0 over all 65,536 patterns, rule_vs_served differing=0); PASS-PARTIAL names how many patterns the runtime's upload altered (not exercised); FAIL names the first 64 differing patterns. Soft.
+#   X0  the status prints, the rescan finds every board, the reset completes on all four.
+#   S0c  admission passed at capacity 262144, every answer completes; RECORD the concurrent8_code_32k and concurrent8_code_equal answer hashes (the reference of A1 and H1-H5) and the in_trace=1 sampler line.
+#   A1  every lever engaged: all of wave 1 (prestage mode=blocks on both blocks, block epochs, tp4 u1 unit_major above 0, draft conv, draft heads), NO "[PINDIAG] packed sampler arm" line (nosamp took effect), '[PINDIAG] tp4 sdpa engaged' with config=multi flags=0x21 AND the '[PINDIAG] tp4 sdpa multi call' line,
+#       '[PINDIAG] tp4 conv gates spread engaged' with gate_cores=2 and per_core equal to served_per_core, no refusal or fell-back line of any lever; ZERO audit mismatches of every kind: the wave-1 audits, '[PINDIAG] tp4 sdpa audit' lines exact=True with no MISMATCH, '[PINDIAG] tp4 conv gates spread audit <n> exact=True' (a multiple of 3 entries a layer: conv, beta, g, every chip, int16 bits; the advanced windows are held by the verify-glue audit's per-user window entries) and no 'spread audit mismatch' line;
+#       answers' hashes equal to S0c's, concurrent8_skew's included. A fell-back line (a source that is not the pinned one, an operand, a grid without room) is a finding: F1 then comes out of the stack by the F1 FALLBACK above (the committed -nof1 profiles), and the reason is read before anything else, not guessed.
+#   H1-H5  five consecutive completions, every user at budget, concurrent8_code_equal hashes equal in every run and equal to S0c's. One stall stops the window.
+#   T1-T8  A B C A B C A B (T1 T4 T7 the control, T2 T5 T8 the stack, T3 T6 wave 1 alone): three control-against-stack pairs (T1 against T2, T4 against T5, T7 against T8) and two interleaved wave-1 runs, each right after a stack run: the round time at eight live users and per seat tok/s at 32k, about 120k and on the skewed eight (two 253,920-token users, one per block, six 4,096-token ones), PAIRED per round, texts equal. THE PROJECTION is the fusion plan's wave 2: a 32k round of about 159 ms (27.6 tok/s per seat) and about 192 ms at 128k (23.0), against 222 / 279 ms today and 182 / 236 ms for wave 1;
+#       the ladder's wave 2 INCLUDES V5, which this arm leaves out: read a few ms above 159 at 32k, and say so. The gain of each lever is NOT read from this pair: it is read from P1's per-op rows, lever by lever. THE SKEWED EIGHT is where the multi-user SDPA launch (paid at the longest user of a block) can lose: a stack run slower than the control on the skewed eight's rounds is a finding about multi on fixed blocks (the plan's row 7s: up to 9 ms a round), judged per round like the others.
+#   T3 T6  wave 1 alone, in this image, each right after a stack run. Wave 2's own increment is the stack (T2, T5, T8) against the C runs, per round, at 32k, at 128k and on the skewed eight (expected from the levers measured alone: the SDPA +2 to 4% at 32k and +6 to 17% at 128k, F1 about -2 to -3 ms a round): T3 against T2 and T6 against T5, one job apart in time, and the two C runs must agree in sign (a C that disagrees with its twin is drift). If the stack is not faster than the C runs on a majority of paired rounds, wave 2 adds nothing to wave 1 and the levers are read one at a time from P1.
+#   KILL LINE for the stack: the stack slower than the control on a majority of paired rounds, or a paired 32k round gain below 10 ms of the projected 63 ms (222 to 159), is NO-GO for the stack as one switch; the levers are then judged one at a time from P1.
+#   P1  ops-trace texts equal ops-twin's; the SDPA rows (one launch a layer against the per-user launches), the conv-gates rows (F1: the 64-row launch against its served 42 us), and the wave-1 rows against the W1 window's P1 (op rows only; host gaps do not compare across images).
+# NO-GO for adopting the stack: any stall, any hash difference between arms that must be identical, any audit mismatch. This window decides nothing about production: it is evidence for the owner.
+# Time (estimate): B0 about 60 min, F1 30 min, V1a and V1b about 2.5 h, MR 1 h, X0 20 min, S0c 2 h, A1 3.7 h, H1-H5 7.5 h, T1-T8 17 h, MR4 and U2 40 min, P1 2.5 h, Z 10 min: about 39 h.
+B0-build stop tp4-w2-1 60
+F1-cardm-conv-gates-spread soft tp4-w2-1 30
+V1a-cardm-watcher soft tp4-w2-1 40
+V1b-cardm-full soft tp4-w2-1 120
+MR-cardm-mesh-read-probe soft tp4-w2-1 60
+U2-cardm-canon-rule soft tp4-w2-1 20
+X0-status-rescan-reset stop tp4-w2-1 20
+MR4-quad-mesh-read-probe soft tp4-w2-1 20
+S0c-control-attach-smoke stop tp4-w2-1 120
+A1-audited-attach-smoke stop tp4-w2-1 220
+H1-hang-shapes-w2 stop tp4-w2-1 90
+H2-hang-shapes-w2 stop tp4-w2-1 90
+H3-hang-shapes-w2 stop tp4-w2-1 90
+H4-hang-shapes-w2 stop tp4-w2-1 90
+H5-hang-shapes-w2 stop tp4-w2-1 90
+T1-timed-A-control soft tp4-w2-1 130
+T2-timed-B-w2 soft tp4-w2-1 130
+T3-timed-C-w1-alone soft tp4-w2-1 130
+T4-timed-A-control soft tp4-w2-1 130
+T5-timed-B-w2 soft tp4-w2-1 130
+T6-timed-C-w1-alone soft tp4-w2-1 130
+T7-timed-A-control soft tp4-w2-1 130
+T8-timed-B-w2 soft tp4-w2-1 130
+P1-w2-8-user-profile soft tp4-w2-1 150
+Z-reset soft tp4-w2-1 10
