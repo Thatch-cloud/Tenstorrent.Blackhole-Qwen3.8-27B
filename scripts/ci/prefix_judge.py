@@ -876,6 +876,29 @@ def window_findings(records):
     return problems[:16], lines, restored
 
 
+def audit_cost_findings(scanned):
+    """The model's [PREFIX-AUDIT-COST] lines of an arm that audits (QWEN_PREFIX_AUDIT=1): F3 across the
+    audit (the audit runs outside every row's own program window, so its own lines carry the count) and
+    which read ran. -> (problems, not exercised, lines). No line at all is an image whose model graft
+    predates the narrowed audit (it prints none)."""
+    costs = scanned.get('audit_costs') or []
+    if not costs:
+        return [], ['no [PREFIX-AUDIT-COST] line: the served model graft predates the narrowed audit (the old audit '
+                    'reads every full-attention cache whole, ~8 minutes a request at eight seats x 262k)'], []
+    problems = []
+    grown = [entry for entry in costs if entry.get('programs_before') is not None and entry.get('programs') is not None
+             and entry['programs'] > entry['programs_before']]
+    if grown:
+        problems.append('the audit compiled programs in %d of %d audited steps (first: %s->%s): a compile after the '
+                        'traces were parked (F3, the second-request hang)' % (
+                            len(grown), len(costs), grown[0]['programs_before'], grown[0]['programs']))
+    unmeasured = [entry for entry in costs if entry.get('programs') is None or entry.get('programs_before') is None]
+    modes = sorted(set(str(entry.get('mode')) for entry in costs))
+    lines = ['audit steps: %d, read mode %s, %d with a fallback to whole caches, %d without a program count' % (
+        len(costs), '/'.join(modes), sum(1 for entry in costs if entry.get('fallback')), len(unmeasured))]
+    return problems, [], lines
+
+
 def audit_problems(cold, hit):
     """The program-free audit's digests of a hit against its cold twin over the same KV range.
     -> list of (severity, text): FAIL for differing bytes, NOT_EXERCISED for a missing or

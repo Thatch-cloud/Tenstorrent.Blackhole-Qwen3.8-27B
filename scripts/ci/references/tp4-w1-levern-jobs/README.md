@@ -11,13 +11,13 @@ restoring the pre-cutover production image; the cutover is the last step of the 
 |---|---|---|
 | `A1-LN` | Does Lever N + prefix reuse attach, audited, and are its install lines, digests and epoch scope right (G-NP0, G-NP1, G-NP4)? | It is the kill signal, so it runs first: an attach death shows within minutes. |
 | `S0-CTL` | With every Lever N flag off, is the window image byte-identical to production? | Production's hashes are the smoke JSON of tag v579 (run 37240205944); a mismatch ends the window, and no T0 job is needed. |
-| `P1ab-LN` | Do exactness-shared and lifecycle-evict hold with Lever N on? | The two arms are ONE job (box 336 min, inside the prefix step's 380): one boot fewer and one reset fewer than two jobs. |
+| `P1ab-LN` | Do exactness-shared and lifecycle-evict hold with Lever N on? | The two arms are ONE job (box 240 min, under its gate worst case of 336): one boot fewer and one reset fewer than two jobs. The estimate (120 min) assumes the prefix audit's region read (`docs/prefix-audit-cost.md`). |
 | `E1-LN` | Is a hit restored at a large Q and followed by many scratch steps equal to its cold twin at 262k? | The eager exactness arm has never run at 262k; admitted only if its box fits the cap, else it opens W-2. |
 
 ## Rules
 
 - The first job is `A0X0`: agentstop, unserve, rescan, reset, in the workflow's fixed order and with NO `status` (production's container is still up and a status read would find it stale).
-- A job starts only if `E + box + HB <= 540` with HB the hand-back's UPPER BOUND (60 min here; the central figure is 40); a job that does not fit moves to the head of the next window; nothing is cancelled. A box is the job's own timeout and counts from the job's own start (see `ORDER.txt`). At the central estimates `P1ab-LN` is admitted with 3 minutes to spare and `E1-LN` is not (it needs E <= 327, the central E is 331), so a carry-over into W-2, and with it a third window for the cutover, is the likely outcome (the carry-over plan is in `ORDER.txt`).
+- A job starts only if `E + box + HB <= 540` with HB the hand-back's UPPER BOUND (60 min here; the central figure is 40); a job that does not fit moves to the head of the next window; nothing is cancelled. A box is the job's own timeout and counts from the job's own start (see `ORDER.txt`). At the central estimates `P1ab-LN` is admitted with 99 minutes to spare and `E1-LN` with 66 (it needs E <= 327, the central E is 261); if `P1ab-LN` runs more than 66 minutes over its estimate, `E1-LN` is carried over into W-2 and with it the cutover moves to a third window (the carry-over plan is in `ORDER.txt`).
 - The hand-back is ZR (all-four reset), LM (links re-measure), TICK (the topology publish), Z (agent start) and the operator's release step with the owner's admin key. The key is never in a script.
 - `prefix-reuse.off` and `levern.off` must be ABSENT on the hub mount before every job that opens a gate, prefix, smoke or replay step. Before A0X0 the operator records which of them exist (a production Tier 1 switch may); the hand-back restores that recorded state before the agent start.
 - No CI dispatch or PR push while a window runs.

@@ -51,6 +51,7 @@ Grants carry the scheduler graft's own capture plan (SchedulerGraft.plan) unless
 
 import contextlib
 import os
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -92,15 +93,17 @@ def registry_scope(registry):
 class Engine(object):
     """One engine process: a model (stock or staged), its vLLM wrapper, a registry and a block pool."""
 
-    def __init__(self, traced=False, environ=ON, sources=None, registry=True, h2d_refuse=False, h2d_mode='exact'):
+    def __init__(self, traced=False, environ=ON, sources=None, registry=True, h2d_refuse=False, h2d_mode='exact',
+                 region_reads=False, num_blocks=4096):
         self.fake = F.FakeTTNN()
+        self.fake.region_reads = region_reads
         self.fake.h2d_refuse = h2d_refuse
         self.fake.h2d_mode = h2d_mode
         self.log = F.FakeLogger()
         model_source, vllm_source = sources or F.staged_sources()
         self.module = F.load_source(model_source, 'qwen36_model_under_test', F.model_stubs(self.fake, self.log))
         self.vllm = F.load_source(vllm_source, 'qwen36_vllm_under_test', F.vllm_stubs(self.fake, self.log), environ)
-        self.toy = F.Toy(self.module, self.fake, traced=traced)
+        self.toy = F.Toy(self.module, self.fake, traced=traced, num_blocks=num_blocks)
         self.model = self.toy.model
         self.wrapper = F.build_wrapper(self.vllm, self.toy)
         self.registry = prefix_registry.PrefixRegistry(budget_bytes=1 << 30) if registry else None
@@ -892,6 +895,180 @@ class Audit(ExactTestBase):
             self.assertEqual(len(span), 2 * len(engine.model._paged_kv_caches))
         self.assertTrue(any('new=1' in line and 'window=2' in line and 'Q=4096' in line
                             for line in engine.log.lines(patcher.MARKER_AUDIT)))
+
+
+class AuditCost(ExactTestBase):
+    """QWEN_PREFIX_AUDIT=1 reads the blocks a row names, not the pool (the W-0 finding: ~8.4 minutes a request at
+    eight seats x 262k, whatever the prompt). The fake cache holds toy values, so the digests are held against the
+    audit's previous algorithm re-run here on the same caches, window by window."""
+
+    AUDIT = dict(ON, QWEN_PREFIX_AUDIT='1')
+
+    def windows(self, engine):
+        """req -> {window: kv digest} and req -> summary, from the model's [PREFIX-AUDIT] lines."""
+        out, summary = {}, {}
+        for line in engine.log.lines(patcher.MARKER_AUDIT + ' '):
+            fields = dict(part.split('=', 1) for part in line.split() if '=' in part)
+            if 'window' in fields:
+                out.setdefault(fields['req'], {})[int(fields['window'])] = fields['kv']
+            else:
+                summary[fields['req']] = (fields['kv_range'], fields['kv_sha'], fields['slot_sha'], fields['logits_sha'])
+        return out, summary
+
+    def previous_digests(self, engine, row, length):
+        """The audit as it was before the narrowing: the whole cache to host, the row's blocks selected, sha256 per
+        2048-token window over each cache in layer order, then the chain of the window digests."""
+        import hashlib
+        chunk = patcher.CHUNK
+        n_blocks = -(-length // F.BLOCK)
+        blocks = row[0, :n_blocks].to(torch.long)
+        windows = [hashlib.sha256() for _ in range(-(-length // chunk))]
+        for k_cache, v_cache in engine.model._paged_kv_caches:
+            for cache in (k_cache, v_cache):
+                sel = cache.data.index_select(0, blocks)
+                seq = sel.permute(1, 0, 2, 3).reshape(sel.shape[1], n_blocks * F.BLOCK, sel.shape[3])
+                for w, digest in enumerate(windows):
+                    digest.update(seq[:, w * chunk:min((w + 1) * chunk, length)].contiguous().view(torch.uint8).numpy().tobytes())
+        shas = [digest.hexdigest()[:32] for digest in windows]
+        chain = hashlib.sha256()
+        for sha in shas:
+            chain.update(sha.encode('ascii'))
+        return dict(enumerate(shas)), chain.hexdigest()[:32]
+
+    def scenario(self, engine):
+        base = F.prompt(7000, seed=95)
+        conv = {'id': 'cost'}
+        engine.turn(conv, base[:4500], 0, [4096])
+        hit = engine.turn(conv, base[:7000], 4096, [6144])
+        cold = engine.cold(base[:7000], req='cost-cold')
+        return hit, cold
+
+    def test_the_region_digests_equal_the_previous_whole_cache_digests(self):
+        engine = self.engine(environ=self.AUDIT, region_reads=True)
+        (_, hit_row, _), (_, cold_row, _) = self.scenario(engine)
+        windows, summary = self.windows(engine)
+        for req, row in (('cost', hit_row), ('cost-cold', cold_row)):
+            expected, chain = self.previous_digests(engine, row, 7000)
+            self.assertEqual(windows[req], expected, req)
+            self.assertEqual(summary[req][1], chain, req)
+        self.assertEqual(windows['cost'], windows['cost-cold'])
+        costs = engine.log.lines(patcher.MARKER_AUDIT_COST)
+        self.assertTrue(costs and all('mode=region' in line and 'fallback' not in line for line in costs), costs)
+
+    def test_region_and_whole_cache_reads_log_the_same_audit_lines(self):
+        lines = {}
+        for mode in ('region', 'full'):
+            engine = self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ=mode), region_reads=True)
+            self.scenario(engine)
+            lines[mode] = engine.log.lines(patcher.MARKER_AUDIT + ' ')
+            self.assertEqual(len(engine.log.lines(patcher.MARKER_AUDIT_COST)), 3)
+        self.assertEqual(lines['region'], lines['full'])
+        self.assertTrue(lines['region'])
+
+    def test_the_read_volume_follows_the_row_not_the_pool(self):
+        for pool in (4096, 8192):
+            engine = self.engine(environ=self.AUDIT, region_reads=True, num_blocks=pool)
+            base = F.prompt(7000, seed=96)
+            engine.turn({'id': 'vol'}, base[:4500], 0)
+            caches = len(engine.model._paged_kv_caches)
+            start = len(engine.fake.log)
+            engine.turn({'id': 'vol2'}, base[:7000], 0)
+            reads = [op for op in engine.fake.log[start:] if op[0] == 'read_blocks']
+            n_blocks = -(-7000 // F.BLOCK)
+            self.assertEqual([op[1] for op in reads], [n_blocks] * (2 * caches), 'pool %d' % pool)
+            audit_to_torch = [op for op in engine.fake.log[start:] if op[0] == 'to_torch' and op[1][0] == n_blocks]
+            self.assertEqual(len(audit_to_torch), 2 * caches)
+            self.assertFalse([op for op in engine.fake.log[start:] if op[0] == 'to_torch' and op[1][0] == pool],
+                             'a whole cache was read at pool %d' % pool)
+            self.assertIn('blocks_read=%d' % (n_blocks * 2 * caches), engine.log.lines(patcher.MARKER_AUDIT_COST)[-1])
+
+    def test_a_step_reads_each_whole_cache_once_for_all_its_rows(self):
+        engine = self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='full'))
+        caches = len(engine.model._paged_kv_caches)
+        rows = []
+        for index, req in enumerate(('step-a', 'step-b')):
+            tokens = F.prompt(3000 + 500 * index, seed=97 + index)
+            rows.append((req, tokens, engine.pool.row(len(tokens)), 0, index))
+        engine.registry.begin_step()
+        start = len(engine.fake.log)
+        engine.prefill(rows)
+        to_torch = [op for op in engine.fake.log[start:] if op[0] == 'to_torch' and op[1][0] == 4096]
+        self.assertEqual(len(to_torch), 2 * caches, 'one whole read per cache, not per row')
+        windows, summary = self.windows(engine)
+        self.assertEqual(sorted(summary), ['step-a', 'step-b'])
+        for req, row, length in (('step-a', rows[0][2], 3000), ('step-b', rows[1][2], 3500)):
+            self.assertEqual(windows[req], self.previous_digests(engine, row, length)[0], req)
+        cost, = engine.log.lines(patcher.MARKER_AUDIT_COST)
+        self.assertIn('rows=2 reqs=step-a,step-b', cost)
+        self.assertIn('mode=full', cost)
+
+    def test_a_refused_region_read_falls_back_to_the_whole_cache_and_says_so(self):
+        engine = self.engine(environ=self.AUDIT, region_reads=True)
+        engine.fake.region_refuse = True
+        base = F.prompt(5000, seed=98)
+        engine.turn({'id': 'fb'}, base, 0)
+        windows, _ = self.windows(engine)
+        reference = self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='full'))
+        reference.turn({'id': 'fb'}, base, 0)
+        self.assertEqual(windows, self.windows(reference)[0])
+        cost = engine.log.lines(patcher.MARKER_AUDIT_COST)
+        self.assertTrue(any('the region read failed' in line for line in cost))
+        self.assertIn('mode=full', cost[-1])
+        self.assertIn("fallback='RuntimeError: qwen_read_blocks: region read refused'", cost[-1])
+
+    def test_without_the_graft_auto_reads_whole_caches_and_region_refuses(self):
+        engine = self.engine(environ=self.AUDIT)
+        engine.turn({'id': 'nog'}, F.prompt(3000, seed=99), 0)
+        self.assertIn('mode=full', engine.log.lines(patcher.MARKER_AUDIT_COST)[-1])
+        with self.assertRaisesRegex(AssertionError, 'no qwen_read_blocks'):
+            self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='region'))
+        with self.assertRaisesRegex(AssertionError, 'must be auto, region or full'):
+            self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='sometimes'))
+
+    def test_a_region_read_that_loses_a_chip_shard_falls_back_instead_of_digesting_a_subset(self):
+        engine = self.engine(environ=self.AUDIT, region_reads=True)
+        engine.fake.region_lose_shard = True
+        base = F.prompt(5000, seed=101)
+        engine.turn({'id': 'shard'}, base, 0)
+        windows, _ = self.windows(engine)
+        reference = self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='full'))
+        reference.turn({'id': 'shard'}, base, 0)
+        self.assertEqual(windows, self.windows(reference)[0], 'the digests cover every head')
+        cost = engine.log.lines(patcher.MARKER_AUDIT_COST)[-1]
+        self.assertIn('mode=full', cost)
+        self.assertIn('region read composed shape', cost)
+
+    def test_a_program_compiled_by_the_audit_is_counted_and_logged(self):
+        engine = self.engine(environ=self.AUDIT, region_reads=True)
+        engine.turn({'id': 'warm'}, F.prompt(3000, seed=102), 0)
+        steady = re.search('programs=([0-9]+)->([0-9]+)', engine.log.lines(patcher.MARKER_AUDIT_COST)[-1]).groups()
+        self.assertEqual(steady[0], steady[1])
+        engine.fake.region_compile = True
+        engine.turn({'id': 'grow'}, F.prompt(3000, seed=103), 0)
+        cost = engine.log.lines(patcher.MARKER_AUDIT_COST)[-1]
+        before, after = re.search('programs=([0-9]+)->([0-9]+)', cost).groups()
+        self.assertGreater(int(after), int(before), cost)
+        self.assertTrue([line for line in engine.log.lines('[PREFIX] program growth: audit')], 'the F3 warning')
+
+    def test_a_region_audit_without_the_graft_refuses_at_attach(self):
+        with self.assertRaisesRegex(AssertionError, 'no qwen_read_blocks'):
+            self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='region'))
+        engine = self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='region'), region_reads=True)
+        self.assertTrue(engine.log.lines('[PINDIAG] prefix: audit read mode=region'))
+
+    def test_the_route_audit_entry_still_takes_one_row(self):
+        """levern_route calls model._qwen_prefix_audit(row, page_row, rec, conv, logits) once per request."""
+        engine = self.engine(environ=self.AUDIT, region_reads=True)
+        row = engine.pool.row(3000)
+        tokens = F.prompt(3000, seed=100)
+        engine.registry.begin_step()
+        engine.prefill([('route', tokens, row, 0, 0)])
+        before = len(engine.log.lines(patcher.MARKER_AUDIT + ' '))
+        engine.model._qwen_prefix_audit(SimpleNamespace(actual=3000, req_id='route2', start=0), row[0:1],
+                                        [torch.zeros(1)], [[torch.zeros(1)]], torch.zeros(1, 1, 16))
+        self.assertGreater(len(engine.log.lines(patcher.MARKER_AUDIT + ' ')), before)
+        windows, _ = self.windows(engine)
+        self.assertEqual(windows['route2'], self.previous_digests(engine, row, 3000)[0])
 
 
 class RegistryContract(ExactTestBase):

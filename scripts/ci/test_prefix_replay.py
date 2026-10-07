@@ -349,6 +349,8 @@ class FakeEngine(object):
               # A hit's engine build line naming another frontier than its Q (wrong_build_frontier), and audit
               # window lines that never mark a window restored (no_restored_windows: every new=1).
               'wrong_build_frontier', 'no_restored_windows',
+              # The audit's own cost line: absent (the image predates the narrowed audit), or its read compiled a program.
+              'no_audit_cost', 'audit_compiles',
               # vLLM finds nothing cached for any request, so every continuation runs cold (lose_every_hit).
               'lose_every_hit')
     piece = 3
@@ -760,6 +762,11 @@ class FakeEngine(object):
             digest = judge.token_sha(ids)[:16]
             self.say('[PREFIX-AUDIT] req=%s Q=%d L=%d kv_range=0:%d kv_sha=%s slot_sha=%s' % (
                 request.request_id, q, len(ids), len(ids), digest, digest))
+            if 'no_audit_cost' not in self.faults:
+                grown = 1 if 'audit_compiles' in self.faults else 0
+                self.say('[PREFIX-AUDIT-COST] rows=1 reqs=%s tokens=%d mode=region reads=4 blocks_read=%d read_ms=1.0 '
+                         'total_ms=2.0 programs=%d->%d' % (request.request_id, len(ids), -(-len(ids) // 64) * 4,
+                                                          self.programs, self.programs + grown))
         if len(ids) >= judge.CHUNK and self.path == 'traced':
             self.say('INFO [TP chunk-replay] %d/%d chunks' % (len(ids) // judge.CHUNK, len(ids) // judge.CHUNK))
 
@@ -1690,6 +1697,22 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(raw[0], 0)
         self.assertGreater(raw[1], 0, 'turn 2 found what turn 1 published')
         self.assertEqual([r['expected_raw_h'] for r in unsalted], [0, 0, 0])
+
+    def test_lifecycle_evict_holds_every_seat_of_an_eight_seat_profile(self):
+        """W-0, P1b-CTL: the unit-major replay audit came from 1 block owner of 2, because the abort-while-waiting case held four
+        seats and the traffic never had more than four users decoding. At eight seats it holds eight, so both packed blocks decode
+        and the queued turn really waits; at four seats nothing changes."""
+        for seats in (4, 8):
+            profile = dict(served_profile(), env=dict(served_profile()['env'], VLLM_SERVER_DEV_MODE='1'))
+            profile['engine'] = dict(profile['engine'], **{'max-num-seqs': seats})
+            self.engine = engine = FakeEngine(profile=profile)
+            driver = driver_for(engine, 'lifecycle-evict', strict=False)
+            driver.seats = seats
+            with mock.patch.object(replay, 'EVICT_LENGTHS', (12000, 24000)):
+                replay.scenario_lifecycle_evict(driver, pool_tokens=engine.num_blocks * BLOCK, restart=None)
+            self.assertEqual(len([r for r in driver.records if r.get('role') == 'seat']), seats, 'one long request per seat')
+            waiting = driver.events['abort-waiting']
+            self.assertEqual((waiting['phase'], waiting['seats_busy']), ('waiting', True), seats)
 
     def test_lifecycle_evict_drives_every_event(self):
         self.engine = engine = FakeEngine(profile=dict(served_profile(), env=dict(

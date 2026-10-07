@@ -62,7 +62,7 @@ def sticky_profiles():
 SHA = dict(a='a' * 64, b='b' * 64)
 GOOD_ANCHOR = dict(files=dict(gate.STAGE_PINS), pins={'mlp.py': SHA['a']}, actual={'mlp.py': SHA['a']}, mismatched=[],
                    stage_pins=dict(gate.STAGE_PINS), stage_mismatched=[], marker_files=['model.py'],
-                   prefix_marker_in=['model.py'], unpinned=[])
+                   prefix_marker_in=['model.py'], unpinned=[], region_read=True)
 
 
 class Harness(object):
@@ -356,6 +356,13 @@ class ShapeTests(unittest.TestCase):
                      '--max-num-seqs 2', '--no-enable-prefix-caching', '--served-model-name Qwen/Qwen3.8-27B'):
             self.assertIn(flag, smoke)
             self.assertIn(flag, ' '.join(gate.PLATFORM_ARGS))
+
+    def test_the_anchor_probe_reads_the_region_read_graft(self):
+        self.assertIn('qwen_read_blocks', gate.anchor_script())
+        self.assertIs(gate.parse_anchor('==region' + chr(10) + 'region 1').get('region_read'), True)
+        self.assertIs(gate.parse_anchor('==region' + chr(10) + 'region 0').get('region_read'), False)
+        self.assertIsNone(gate.parse_anchor('==markers' + chr(10) + './model.py').get('region_read'), 'a probe that printed nothing')
+        self.assertIsNone(gate.parse_anchor('==region' + chr(10) + 'ImportError: no ttnn').get('region_read'))
 
     def test_the_anchor_probe_holds_every_pinned_file(self):
         with open(os.path.join(ROOT, 'docker', 'qwen-c2-graft', 'graft.sha256'), encoding='utf-8') as handle:
@@ -689,6 +696,17 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(traced['verdict'], 'NOT_EXERCISED')
         self.assertTrue(any('no [PREFIX] row carries slot_sha and logits_sha' in m for m in traced['not_exercised']))
 
+    def test_the_short_audit_arm_fails_on_a_program_the_audit_compiled(self):
+        result, _, _ = self.plan('exactness', 'costgrow', all=dict(audit_compiles=True))
+        self.assertEqual(result['arms']['exactness-audit']['verdict'], 'FAIL')
+
+    def test_the_cost_line_parses(self):
+        entry = pm.audit_cost('rows=2 reqs=a,b tokens=7000 mode=full reads=4 blocks_read=16384 read_ms=1.5 '
+                              "total_ms=3.0 programs=7->9 fallback='RuntimeError: x'")
+        self.assertEqual((entry['mode'], entry['programs_before'], entry['programs'], entry['fallback']),
+                         ('full', 7, 9, True))
+        self.assertIsNone(pm.audit_cost('rows=1 programs=None->None')['programs'])
+
     def test_the_eager_arm_alone_passes_and_names_the_eager_warm(self):
         result, harness, _ = self.plan('exactness-eager')
         self.assertEqual(result['verdict'], 'PASS', result['lines'])
@@ -980,6 +998,38 @@ class StickyArmTests(unittest.TestCase):
         self.assertEqual(gate.prompt_limit(real, 'c2-packed-prefix'), 123136)
         self.assertIsNone(gate.prompt_limit(document, 'general-prefix'), 'request_contract false')
 
+    def test_the_shared_audit_arm_is_refused_before_any_container_on_an_image_without_the_cheap_audit(self):
+        results = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, results, True)
+        path = os.path.join(results, 'profiles.json')
+        with open(path, 'w', encoding='utf-8') as handle:
+            json.dump(sticky_profiles(), handle)
+        started = []
+
+        def main(anchor, plan='exactness-shared'):
+            lines = []
+            code = gate.main(['--image', 'img', '--profiles', path, '--results', os.path.join(results, 'out'),
+                              '--profile', 'c2-packed-prefix', '--baseline', 'c2-packed', '--plan', plan],
+                             devices=['/a', '/b'], log=lines.append, anchor=anchor,
+                             runner_factory=lambda *args, **kwargs: started.append(args) or self.fail('a runner was built'))
+            return code, lines
+
+        for anchor, text in ((dict(GOOD_ANCHOR, region_read=False), 'no ttnn.qwen_read_blocks'),
+                             (dict(GOOD_ANCHOR, region_read=None), 'probe says None'),
+                             (dict(GOOD_ANCHOR, stage_mismatched=['model.py']), 'predates the narrowed audit'),
+                             (dict(error='docker failed'), 'could not read the image')):
+            with self.subTest(text=text):
+                code, lines = main(anchor)
+                self.assertEqual(code, 2)
+                self.assertTrue(any(text in line for line in lines), lines)
+        self.assertFalse(started)
+        with mock.patch.dict(os.environ, {gate.ALLOW_FULL_AUDIT_ENV: '1'}):
+            with self.assertRaises(AssertionError):
+                main(dict(GOOD_ANCHOR, region_read=False))     # the override reaches the runner (the factory fails the test)
+        # The short-chain audit arm reads little and is not gated; nor is a plan with no audit-cost arm.
+        self.assertEqual(gate.audit_image_problems([dict(arm='exactness-audit', kind='audit')], dict(GOOD_ANCHOR, region_read=False)), [])
+        self.assertEqual(gate.audit_image_problems([dict(arm='exactness-shared', kind='audit')], GOOD_ANCHOR), [])
+
     def test_main_refuses_a_plan_with_no_applicable_arm_and_lists_them_otherwise(self):
         results = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, results, True)
@@ -1078,6 +1128,20 @@ class StickyRunnerTests(unittest.TestCase):
                 arm = result['arms']['exactness-shared']
                 self.assertEqual(arm['verdict'], 'FAIL')
                 self.assertTrue(any(text in problem for problem in arm['problems']), arm['problems'][:6])
+
+    def test_the_shared_audit_arm_needs_the_cost_line_and_fails_on_a_program_the_audit_compiled(self):
+        result, _, _ = self.plan('exactness-shared', 'costok')
+        self.assertEqual(result['verdict'], 'PASS', result['lines'])
+        self.assertTrue(any(line.startswith('audit steps: ') and 'read mode region' in line
+                            for line in result['arms']['exactness-shared']['lines']))
+        result, _, _ = self.plan('exactness-shared', 'costabsent', all=dict(no_audit_cost=True))
+        arm = result['arms']['exactness-shared']
+        self.assertEqual(arm['verdict'], 'NOT_EXERCISED')
+        self.assertTrue(any('predates the narrowed audit' in m for m in arm['not_exercised']), arm['not_exercised'])
+        result, _, _ = self.plan('exactness-shared', 'costgrow', all=dict(audit_compiles=True))
+        arm = result['arms']['exactness-shared']
+        self.assertEqual(arm['verdict'], 'FAIL')
+        self.assertTrue(any('the audit compiled programs' in p for p in arm['problems']), arm['problems'][:4])
 
     def test_each_missing_sticky_marker_fails(self):
         for fault, text in (('no_sticky_install', 'install sticky=1'), ('no_model_warm', 'model warm'),
