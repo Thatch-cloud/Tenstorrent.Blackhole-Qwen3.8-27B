@@ -24,7 +24,9 @@ and `docs/tp4-short-windows.md`: Tier 0 image rollback, Tier 1 kill switches tha
 
 ## Rules
 
-- The first job is `A0X0` (no `status` step). A job starts only if `E + box + 45 <= 540` (the cutover is the longer exit); a job that does not fit moves to the head of the next window; nothing is cancelled.
+- The first job is `A0X0` (no `status` step). A job starts only if `E + box + HB <= 540` with HB the cutover's upper bound, 75 min (the central figures are 45 for the cutover and 40 for the hand-back; a gate job adds the 30 min its reset may take); a job that does not fit moves to the head of the next window; nothing is cancelled.
 - The ARC runner sets are at zero for the timed block, `S1`/`S2` and `GG1`/`GG2` only (170 minutes).
-- Tags: this pack takes 21 tags after W-1's twelve and keeps four in reserve; seven allowlisted tags stay unused, and at least 52 more are needed before Stage 2 (see W-1's `ORDER.txt`).
-- `SR10` carries a placeholder for the thin layer's image name, filled by the operator at run time and never committed.
+- Tags: this pack takes 21 tags after W-1's twelve and keeps four in reserve; seven allowlisted tags stay unused, and at least 52 more are needed before Stage 2 (68 with the same reserve of four a window) (see W-1's `ORDER.txt`).
+- `SR10` reads the thin layer's image name from a file the operator writes on the runner (`C2_PLATFORM_IMAGE=local:thin-layer`); no registry name or digest is committed.
+- `L8-LN` runs right after `S0b`: its box is the gate's own worst case, 368 min, which does not fit later in the window.
+- No CI dispatch or PR push while a window runs.

@@ -387,6 +387,9 @@ jobs:
           prefix=()
           if [ "$(id -u)" != 0 ]; then prefix=(sudo -n); fi
           smi=$(command -v tt-smi || echo /home/thatch/.local/bin/tt-smi)
+          # A container a previous job's box left behind (a replay killed before its cleanup, a smoke or prefix arm) holds the cards and would refuse every job after it: the
+          # job-owned names are removed first (a platform serving container is never touched here).
+          docker ps -a --format '{{.Names}}' | grep -E '^(qwen-c2-platform|qwen-c2-smoke|qwen-c2-prefix-.*)$' | xargs -r docker rm -f || true
           . scripts/ci/card_set.sh
           card_set_resolve 60
           if ! card_set_unheld "$results/holders.txt"; then
@@ -721,7 +724,7 @@ jobs:
         # A prefix-reuse.off or levern.off file left on the hub mount turns a lever off for every later arm and the arm still reads clean
         # (the attach markers print with the switch on). Refuse to start any gate, prefix or smoke job while either exists; the drills write them
         # with their owner token and remove them in their own cleanup, and an operator's file is never removed here.
-        if: contains(steps.job.outputs.actions, 'gate') || contains(steps.job.outputs.actions, 'prefix') || contains(steps.job.outputs.actions, 'smoke')
+        if: contains(steps.job.outputs.actions, 'gate') || contains(steps.job.outputs.actions, 'prefix') || contains(steps.job.outputs.actions, 'smoke') || contains(steps.job.outputs.actions, 'replay')
         shell: bash
         run: |
           set -euo pipefail
@@ -925,9 +928,12 @@ jobs:
           # arm with under five minutes left is not started; no plan is refused for the box and no run is cancelled.
           echo "prefix gate budget: $budget s (step $step_left s, job $job_left s, box ${BOX_MINUTES:-none} min)"
           echo "busy ARC runner pods: $(sudo -n k3s kubectl -n arc-runners get pods --no-headers 2>/dev/null | grep -c Running || true)"
+          # The box counts from the job's start (C2_JOB_STARTED): what the reset before this step took is already inside it.
+          box_left=
+          if [ -n "$BOX_MINUTES" ]; then box_left=$(( BOX_MINUTES * 60 - ($(date +%s) - C2_JOB_STARTED) )); if [ "$box_left" -lt 1 ]; then box_left=1; fi; fi
           status=0
           python3 scripts/ci/c2_prefix_gate.py --image "$image" --profile "$PREFIX_PROFILE" --plan "$PREFIX_PLAN" \
-            --baseline "$PREFIX_BASELINE" --agents "$PREFIX_AGENTS" --budget-seconds "$budget" ${BOX_MINUTES:+--box-seconds "$(( BOX_MINUTES * 60 ))"} \
+            --baseline "$PREFIX_BASELINE" --agents "$PREFIX_AGENTS" --budget-seconds "$budget" ${box_left:+--box-seconds "$box_left"} \
             --results "$results" --cards "$CARDS" 2>&1 | tee "$RUNNER_TEMP/c2-results/prefix.log" || status=$?
           # Read the launched argv (memory read-the-launched-argv) and the graft's install line, per arm.
           for log in "$results"/*/server.log; do
@@ -973,8 +979,9 @@ jobs:
           for node in $(card_set_devices); do devices+=(--device "$node"); done
           # The job's BOX (C2_BOX_MINUTES, c2_serving_job.py), enforced from inside and never by cancelling the run: the wait for the API ends at the box,
           # and the smoke client runs under `timeout` for what the box has left; the trap below still removes the container and saves its log.
+          # The box counts from the job's start (C2_JOB_STARTED), so the reset before this step is inside it.
           box_end=
-          if [ -n "$BOX_MINUTES" ]; then box_end=$(( $(date +%s) + BOX_MINUTES * 60 )); fi
+          if [ -n "$BOX_MINUTES" ]; then box_end=$(( ${C2_JOB_STARTED:?} + BOX_MINUTES * 60 )); fi
           # The host's load average once a minute into $results/load.log only (never the public job log): the timed pairs are voided by it (the rig hosts CI and builds;
           # scripts/ci/w2ln_timing_compare.py --max-load).
           ( while :; do echo "[LOAD] $(date +%s) $(cut -d' ' -f1 /proc/loadavg)" >> "$results/load.log"; sleep 60; done ) &
@@ -996,14 +1003,16 @@ jobs:
             --additional-config '{"tt": {"l1_small_size": 24576, "fabric_config": "FABRIC_1D", "trace_region_size": 1073741824}}'
           started=$(date +%s); ready=0
           # The readiness poll is 2 s (the container is up in 2-5 minutes, and a 15 s poll added up to 15 s to every job); the wait is 80 minutes as before.
+          # The loop runs on a DEADLINE (started + 4800 s), not a count of polls: a stalled curl (-m 5) cannot stretch the 80 minutes.
           ready_poll=2
-          for i in $(seq 1 $(( 4800 / ready_poll ))); do
+          ready_deadline=$(( started + 4800 ))
+          while [ "$(date +%s)" -lt "$ready_deadline" ]; do
             if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" != true ]; then
               echo "container exited: $(docker inspect -f '{{.State.ExitCode}} {{.State.OOMKilled}}' "$name")" >&2
               docker logs --tail 80 "$name" >&2 || true; exit 1
             fi
             if curl -fsS -m 5 http://127.0.0.1:8010/v1/models > "$results/models.json" 2>/dev/null; then ready=1; break; fi
-            if [ -n "$box_end" ] && [ "$(date +%s)" -ge "$box_end" ]; then echo "[BOX] the job's box of $BOX_MINUTES min ended before the API answered" >&2; break; fi
+            if [ -n "$box_end" ] && [ "$(date +%s)" -ge "$box_end" ]; then echo "[BOX] the job's box of $BOX_MINUTES min ended before the API answered" >&2; echo "C2_BOX verdict=TIMEBOX step=smoke phase=ready box_min=$BOX_MINUTES" >&2; break; fi
             sleep "$ready_poll"
           done
           echo "ready=$ready after $(( $(date +%s) - started )) s"; cat "$results/models.json" || true
@@ -1023,6 +1032,7 @@ jobs:
           if [ "$smoke_status" != 0 ]; then
             docker logs "$name" > "$results/container.log" 2>&1 || true
             echo "[BOX] the smoke client ended with status $smoke_status (124 or 137: the job's box of ${BOX_MINUTES:-none} min ran out); the box is enforced here, the run is not cancelled" >&2
+            if [ "$smoke_status" = 124 ] || [ "$smoke_status" = 137 ]; then echo "C2_BOX verdict=TIMEBOX step=smoke phase=client status=$smoke_status box_min=${BOX_MINUTES:-none}" >&2; fi
             exit "$smoke_status"
           fi
           # The smoke exits 0 whatever its tests recorded: enforce the stop conditions (an errored or empty stream, garbage
@@ -1047,6 +1057,13 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$IMAGE"
+          # C2_PLATFORM_IMAGE=local:thin-layer: the image name is read from a file the operator wrote on this runner (never committed: a registry host and a digest must not
+          # reach a public commit); any other value is the image itself.
+          if [ "$IMAGE" = local:thin-layer ]; then
+            thin_file="${C2_LOCAL_DIR:-/home/thatch/.qwen-c2-local}/thin-layer-image"
+            if [ ! -s "$thin_file" ]; then echo "C2_PLATFORM_IMAGE=local:thin-layer needs $thin_file (the operator writes the thin layer's image name there before the window)" >&2; exit 1; fi
+            IMAGE=$(head -n1 "$thin_file")
+          fi
           if docker ps --format '{{.Names}}' | grep -q '^thatch-inference-'; then
             echo "a platform serving container is running; refusing to open the cards under it" >&2; exit 1
           fi
@@ -1069,13 +1086,24 @@ jobs:
               echo 'a card of the set is held; refusing the replay' >&2; cat "$RUNNER_TEMP/c2-results/replay-holders.txt" >&2; exit 1
             fi
           fi
-          # The job's box (C2_BOX_MINUTES): the replay runs under `timeout --signal=INT`, so its own try/finally removes its container when the box ends (a TERM would leave it up).
+          # The container holds the cards: however this step ends (the replay's own cleanup, the box's SIGKILL after the interrupt grace, a failed command), it is removed here.
+          trap 'docker rm -f qwen-c2-platform >/dev/null 2>&1 || true' EXIT
+          # The job's box (C2_BOX_MINUTES) counts from the job's start (C2_JOB_STARTED): the replay runs under `timeout --signal=INT`, so its own try/finally removes its container when the
+          # box ends (a TERM would leave it up); the grace after the interrupt is 300 s (its final capture alone can take 120 s), and the trap above removes the container if the KILL lands first.
           replay_wrap=()
-          if [ -n "$BOX_MINUTES" ]; then replay_wrap=(timeout --signal=INT -k 120 "$(( BOX_MINUTES * 60 ))"); fi
+          if [ -n "$BOX_MINUTES" ]; then
+            left=$(( BOX_MINUTES * 60 - ($(date +%s) - ${C2_JOB_STARTED:?}) )); if [ "$left" -lt 60 ]; then left=60; fi
+            replay_wrap=(timeout --signal=INT -k 300 "$left")
+          fi
+          replay_status=0
           ${replay_wrap[@]+"${replay_wrap[@]}"} python3 scripts/ci/c2_platform_replay.py --source "$source" --image "$IMAGE" --cards "$CARDS" \
             ${REPLAY_PROFILE:+--profile "$REPLAY_PROFILE"} ${REPLAY_SERVED_MODEL:+--served-model "$REPLAY_SERVED_MODEL"} \
             ${REPLAY_BUDGET_SMOKE:+--budget-smoke} \
-            --results "$RUNNER_TEMP/c2-results/replay"
+            --results "$RUNNER_TEMP/c2-results/replay" || replay_status=$?
+          if [ "$replay_status" = 124 ] || [ "$replay_status" = 137 ]; then
+            echo "C2_BOX verdict=TIMEBOX step=replay status=$replay_status box_min=${BOX_MINUTES:-none}" >&2
+          fi
+          exit "$replay_status"
       - name: Push
         if: contains(steps.job.outputs.actions, 'push')
         shell: bash

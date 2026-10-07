@@ -1342,6 +1342,41 @@ class BoxTests(unittest.TestCase):
                 shown = [line for line in lines if 'profile %s, scenario' % arm['served'] in line][0]
                 self.assertTrue(shown.endswith('%d s' % arm['timeout']), shown)
 
+    def test_a_clipped_arm_that_runs_out_of_time_is_a_timebox_never_a_fail(self):
+        """The job box cut the arm short: the scenario's OutOfTime must not read as a FAIL of the engine (a false NO-GO for the cutover)."""
+        harness = Harness()
+        runner = harness.runner(os.path.join(self.results, 'overrun'))
+        lines = []
+        runner.log = lines.append
+        ticks = [0.0]
+
+        def clock():
+            ticks[0] += 200.0
+            return ticks[0]
+        runner.clock = clock
+        runner.box_deadline = clock() + 700
+        arm = arm_of('exactness', 'exactness-eager')
+        _, result = runner.run(arm)
+        self.assertTrue(any('the job box clips its' in line for line in lines), lines)
+        self.assertTrue(result.get('boxed'), result)
+        self.assertEqual(result['verdict'], 'NOT_EXERCISED', result)
+        self.assertIn('job box', result['reason'])
+        self.assertTrue(any(line.startswith('C2_BOX verdict=TIMEBOX step=prefix arm=') for line in lines), lines)
+
+    def test_an_unclipped_arm_that_runs_out_of_time_still_fails(self):
+        harness = Harness()
+        runner = harness.runner(os.path.join(self.results, 'overrun2'))
+        ticks = [0.0]
+
+        def clock():
+            ticks[0] += 4000.0
+            return ticks[0]
+        runner.clock = clock
+        arm = arm_of('exactness', 'exactness-eager')
+        _, result = runner.run(arm)
+        self.assertNotEqual(result['verdict'], 'PASS')
+        self.assertFalse(result.get('boxed'))
+
     def test_main_takes_box_seconds_and_refuses_no_plan_for_it(self):
         with open(os.path.join(self.results, 'profiles.json'), 'w', encoding='utf-8') as handle:
             json.dump(profiles(), handle)

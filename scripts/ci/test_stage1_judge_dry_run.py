@@ -171,6 +171,81 @@ class PrefixTests(Case):
         self.assertEqual([spec['served'] for spec in specs.values()], [PLAIN, PLAIN])
 
 
+class RealChainTests(Case):
+    """The prefix path with NOTHING patched: a fake-engine gate run writes its arm directories, and the dry run re-judges them with the real scan, resolve and judge_arm."""
+
+    def gate_run(self):
+        import test_c2_prefix_gate as tpg
+        root = os.path.join(self.tmp, 'real')
+        profile_file = os.path.join(self.tmp, 'profiles.json')
+        write(profile_file, json.dumps(tpg.profiles()))
+        harness = tpg.Harness()
+
+        def factory(*args, **kwargs):
+            runner = harness.runner(args[1])
+            runner.log = kwargs.get('log', runner.log)
+            return runner
+
+        with tpg.fakes.burst_aware(lambda: tpg.CURRENT['engine']):
+            code = prefix_gate.main(['--image', 'img', '--profiles', profile_file, '--results', os.path.join(root, 'prefix'), '--plan', 'bringup'],
+                                    devices=['/a', '/b'], log=lambda text: None, runner_factory=factory, anchor=tpg.GOOD_ANCHOR)
+        self.assertEqual(code, 0)
+        return root, profile_file
+
+    def test_the_real_scan_resolve_and_judge_chain_agrees_with_the_run_it_judges(self):
+        root, profile_file = self.gate_run()
+        result = dry.judge_prefix(root, profiles_path=profile_file)
+        self.assertEqual(sorted(result['arms']), ['bringup-prefix', 'bringup-reference'])
+        for name, arm in result['arms'].items():
+            self.assertEqual(arm['rejudged'], arm['recorded'], name)
+            self.assertEqual(arm['recorded_problems'], [], name)
+        self.assertEqual(result['rejudged'], 'PASS')
+
+    def test_a_recorded_failure_is_shown_with_its_recorded_problems(self):
+        root, profile_file = self.gate_run()
+        path = os.path.join(root, 'prefix', 'c2-prefix-summary.json')
+        with open(path, encoding='utf-8') as handle:
+            summary = json.load(handle)
+        summary['results']['bringup']['arms']['bringup-prefix'].update(verdict='FAIL', problems=['an old rule that is gone'])
+        write(path, json.dumps(summary))
+        result = dry.judge_run('v580', root, profiles_path=profile_file)
+        self.assertEqual(result['arms']['bringup-prefix']['recorded_problems'], ['an old rule that is gone'])
+        self.assertEqual((result['recorded'], result['rejudged'], result['outcome']), ('FAIL', 'PASS', 'rule_only_failure'))
+
+
+class RecordedAndPairTests(Case):
+    def test_the_smoke_check_failed_lines_of_the_run_log_are_the_recorded_problems(self):
+        log = '2026-10-07T01:02:03Z SMOKE_CHECK FAILED: ramp commit 51.7 ms, above 50 ms\n2026-10-07T01:02:04Z other line\n2026-10-07T01:02:05Z SMOKE_CHECK FAILED: HOSTGAP_LOG is not set\n'
+        self.assertEqual(dry.recorded_problems_of(log), ['ramp commit 51.7 ms, above 50 ms', 'HOSTGAP_LOG is not set'])
+        root = self.smoke_run()
+        write(os.path.join(root, 'run.log'), log)
+        with mock.patch.object(c2_smoke_check, 'main', lambda argv: 0):
+            result = dry.judge_smoke(root)
+        self.assertEqual(result['recorded_problems'], ['ramp commit 51.7 ms, above 50 ms', 'HOSTGAP_LOG is not set'])
+        other = self.smoke_run('nolog')
+        with mock.patch.object(c2_smoke_check, 'main', lambda argv: 0):
+            self.assertIsNone(dry.judge_smoke(other)['recorded_problems'])
+
+    def test_one_arm_of_a_pair_is_never_re_judged_alone(self):
+        a, b = self.smoke_run('a'), self.smoke_run('b')
+        lines = []
+        with mock.patch.object(c2_smoke_check, 'main', lambda argv: 0):
+            self.assertEqual(dry.main(['--run', 'A=%s:FAIL' % a, '--pair', 'A,B'], out=lines.append), 2)
+            self.assertIn('one arm of an A/B pair is never re-judged alone', lines[-1])
+            lines.clear()
+            self.assertEqual(dry.main(['--run', 'A=%s:FAIL' % a, '--run', 'B=%s:FAIL' % b, '--pair', 'A,B'], out=lines.append), 0)
+        pair = [line for line in lines if line.startswith('STAGE1_JUDGE_PAIR')]
+        self.assertEqual(len(pair), 1)
+        document = json.loads(pair[0][len('STAGE1_JUDGE_PAIR '):])
+        self.assertEqual(document['outcomes'], ['rule_only_failure', 'rule_only_failure'])
+        self.assertIn('commit', document['rules'])
+
+    def test_the_rules_state_names_the_commit_and_the_judge_files_with_uncommitted_changes(self):
+        state = dry.rules_state()
+        self.assertEqual(set(state), {'commit', 'dirty'})
+        self.assertIsNone(dry.rules_state(self.tmp)['commit'], 'a folder that is no repository is reported as unknown')
+
+
 class MainTests(Case):
     def run_main(self, *argv):
         lines = []

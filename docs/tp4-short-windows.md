@@ -14,11 +14,11 @@ W-0 the baseline on today's production bytes, W-1 Lever N exactness, W-2 Lever N
 | | W-1 "Lever N exactness" | W-2 "Lever N robustness, then the cutover" |
 |---|---|---|
 | Image | `tp4-serve-11` (the combined branch's engine, the Lever N traffic profile baked in) | the same |
-| Jobs | A0X0, A1-LN (attach, the kill signal), S0-CTL (flags off equals production), P1ab-LN (exactness-shared and lifecycle-evict in one job), E1-LN (eager exactness, only if its box fits), hand-back | A0X0, S0b, HL-LN x3 on fresh boots, HF-LN, L8-LN, C16-LN, the timed block (T0s, TA1, TL1, TA2, TL2, TA3), S1/S2, GG1/GG2, SR10, then the cutover or the hand-back |
+| Jobs | A0X0, A1-LN (attach, the kill signal), S0-CTL (flags off equals production), P1ab-LN (exactness-shared and lifecycle-evict in one job), E1-LN (eager exactness, only if its box fits), hand-back | A0X0, S0b, L8-LN, HL-LN x3 on fresh boots, HF-LN, C16-LN, the timed block (T0s, TA1, TL1, TA2, TL2, TA3), S1/S2, GG1/GG2, SR10, then the cutover or the hand-back |
 | Outage | 471 min = 7.9 h | 445 min = 7.4 h |
 | Ends | restoring production | in the cutover, or restoring the pre-cutover production |
 
-Rules for every window: the first job is `A0X0` (agentstop, unserve, rescan, reset, no `status`: production's container would read as stale); a job starts only if `elapsed + its box + the hand-back <= 540`, else it moves to
+Rules for every window: the first job is `A0X0` (agentstop, unserve, rescan, reset, no `status`: production's container would read as stale); a job starts only if `elapsed + its box + the hand-back's upper bound <= 540` (60 min in W-1, 75 in W-2; the central figures are 40, 40 and 45), else it moves to
 the head of the next window; nothing is ever cancelled (cancelling lost a board's by-id link once).
 
 ## The traffic profile
@@ -32,10 +32,11 @@ stage-1 shape and the instruments stay gate-only. The image `tp4-serve-11` bakes
 
 - **Job boxes (`C2_BOX_MINUTES`).** A template names its box; the workflow enforces it from inside the step and never cancels a run: the smoke step stops waiting for the API at the box and runs its client under `timeout`,
   the prefix gate takes `--box-seconds` (every arm's docker timeout is clipped to what the box has left, an arm with under five minutes left is not started), the serving gate refuses before any container a plan its box cannot
-  hold, and the replay runs under an interrupt timeout so its own cleanup removes its container. Without a per-job box the admit-on-box rule would skip S2, GG1 and two timed jobs late in a window, because the smoke step's
+  hold (its worst case counts every re-run: L8-LN is 368 min, not 186), and the replay runs under an interrupt timeout so its own cleanup removes its container. Without a per-job box the admit-on-box rule would skip S2, GG1 and two timed jobs late in a window, because the smoke step's
   box is 210 minutes and a G plus GH job's is 306.
 - **Heal wait 10 s.** In 117 resets the by-id links were back at 0 s (74) or still missing at 90 s (43), never in between; the reset step now waits 10 s before it re-probes.
 - **Readiness poll 2 s.** The smoke step polls the API every 2 s instead of 15 s (the wait stays 80 minutes).
+- **Box outcomes are greppable.** A box that cuts a job short prints `C2_BOX verdict=TIMEBOX step=...` (a prefix arm it cuts short is NOT_EXERCISED with `boxed`, never FAIL); a refused serving-gate plan prints `C2_BOX verdict=REFUSED step=gate`.
 - **Judge dry-run.** `scripts/ci/stage1_judge_dry_run.py` re-judges archived artifacts (the smoke check and the prefix gate's arm judge) with the committed rules and reports any rule-only failure.
 
 ## The cutover and the rollback rule
@@ -53,4 +54,4 @@ owner present with a fresh admin key. After it (owner-approved 2026-10-07):
 ## Tags
 
 The free allowlisted tags after the baseline window's `v538-v557` are `v558-v568`, `v582-v585`, `v589-v592`, `v595-v599` and `v601-v620` (44). W-1 takes 8 and keeps 4 in reserve, W-2 takes 21 and keeps 4, and 7 stay
-unused. The combined pack's own tag list (`tp4-w2ln-jobs`, v538 to v640) overlaps these and is superseded for the windows covered here. Stage 2 (W-3 to W-6) needs 59, so at least 52 more must be allowlisted before it (60 with a reserve of eight). The runner group's repository access is wiped by a careless PATCH to it: add tags with care.
+unused. The combined pack's own tag list (`tp4-w2ln-jobs`, v538 to v640) overlaps these and is superseded for the windows covered here. Stage 2 (W-3 to W-6) needs 59, so at least 52 more must be allowlisted before it (68 with the same reserve of four a window). Adding tags is a runbook step in the private platform repository.

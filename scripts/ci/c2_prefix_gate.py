@@ -1519,17 +1519,20 @@ class Runner(object):
             json.dump(arguments, handle, indent=1)
         started = self.clock()
         limit = arm['timeout']
+        clipped = False
         if self.box_deadline is not None:
             left = int(self.box_deadline - started)
             if left < BOX_MIN_ARM_SECONDS:
                 reason = 'the job box has %d s left, under the %d s an arm needs to start' % (max(left, 0), BOX_MIN_ARM_SECONDS)
                 self.log('[PREFIX-GATE] arm %s: not started - %s' % (arm['arm'], reason))
+                self.log('C2_BOX verdict=TIMEBOX step=prefix arm=%s limit_s=0' % arm['arm'])
                 result = dict(verdict='NOT_EXERCISED', reason=reason, lines=[], not_exercised=[reason], boxed=True)
                 self.arms[arm['arm']] = result
                 return None, result
             if left < limit:
                 self.log('[PREFIX-GATE] arm %s: the job box clips its %d s timeout to %d s' % (arm['arm'], limit, left))
                 limit = left
+                clipped = True
         deadline = started + limit - 60
         self.log('[PREFIX-GATE] arm %s: profile %s, scenario %s, %d s' % (arm['arm'], arm['served'], arm['scenario'],
                                                                          limit))
@@ -1545,6 +1548,7 @@ class Runner(object):
                                batch_invariant=bool(arm.get('s2')), prompt_limit=arm.get('prompt_limit'),
                                seats=arm.get('seats') or 4)
         error, stats, metrics, output = None, None, {}, ''
+        boxed_out = False
         try:
             code, output = self.docker(arguments, 300)
             if code != 0:
@@ -1568,6 +1572,10 @@ class Runner(object):
             replay.SCENARIOS[arm['scenario']](driver, **kwargs)
         except Exception as failure:   # noqa: BLE001 - any failure ends the arm, recorded and judged
             error = '%s: %s' % (type(failure).__name__, failure)
+            # An arm whose own limit the job box clipped and that ran out of time is a TIMEBOX, never a verdict on the engine (judged below).
+            # (An engine that was still not answering when the clipped deadline passed is the same thing: the box ran out while it booted.)
+            boxed_out = boxed_out or (clipped and (isinstance(failure, replay.OutOfTime) or (
+                isinstance(failure, replay.EngineDead) and self.clock() >= deadline)))
             if not isinstance(failure, (replay.EngineDead, replay.OutOfTime)):
                 error += ' | ' + traceback.format_exc()[-1500:].replace('\n', ' | ')
             self.log('[PREFIX-GATE] arm %s: %s' % (arm['arm'], error))
@@ -1595,7 +1603,15 @@ class Runner(object):
         scanned = markers.scan(lines)
         stats = stats if stats is not None else scanned.get('stats')
         judge.resolve(driver.records, scanned)
-        result = judge_arm(arm, driver, scanned, stats, error, log_text='\n'.join(lines))
+        result = judge_arm(arm, driver, scanned, stats, None if boxed_out else error, log_text='\n'.join(lines))
+        if boxed_out:
+            # Everything else the arm found still counts (a FAIL or an INFRA stays); a run the box cut short is NOT_EXERCISED with boxed set, whatever the partial checks
+            # said: it did not finish, so it cannot pass, and it is never a FAIL of the engine.
+            reason = 'job box: the arm ran out of time at the box-clipped limit of %d s (%s)' % (limit, error)
+            if result['verdict'] not in ('FAIL', 'INFRA'):
+                result.update(verdict='NOT_EXERCISED', not_exercised=list(result.get('not_exercised') or []) + [reason])
+            result.update(boxed=True, reason=reason)
+            self.log('C2_BOX verdict=TIMEBOX step=prefix arm=%s limit_s=%d' % (arm['arm'], limit))
         stamp = c2_smoke_check.unqualified_stamp('\n'.join(lines))
         if stamp:
             result['unqualified'] = stamp
@@ -1860,12 +1876,15 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
         summary['passed'] = bool(summary['results']) and len(summary['results']) == len(plans) and all(
             result['verdict'] == 'PASS' for result in summary['results'].values())
         summary['infra'] = runner.infra
+        # The box cut an arm short or kept it from starting: a TIMEBOX no-verdict for the driver (item 3), never a FAIL.
+        summary['boxed'] = any(arm.get('boxed') for result in summary['results'].values() for arm in (result.get('arms') or {}).values())
         if getattr(runner, 'waived', False) or getattr(runner, 'multi_unqualified', False):
             summary['unqualified'] = gate.unqualified_stamp(runner)
         with open(os.path.join(options.results, 'c2-prefix-summary.json'), 'w', encoding='utf-8') as handle:
             json.dump(summary, handle, indent=2, default=str)
-    log('C2_PREFIX profile=%s plans=%s passed=%s%s%s' % (options.profile, ','.join(plans), summary['passed'],
-                                                         ' infra=%s' % runner.infra if runner.infra else '',
+    log('C2_PREFIX profile=%s plans=%s passed=%s%s%s%s' % (options.profile, ','.join(plans), summary['passed'],
+                                                           ' infra=%s' % runner.infra if runner.infra else '',
+                                                           ' boxed=True' if summary.get('boxed') else '',
                                                          ' %s' % summary['unqualified'] if summary.get('unqualified') else ''))
     return 0 if summary['passed'] else 1
 

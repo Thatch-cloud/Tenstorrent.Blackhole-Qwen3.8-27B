@@ -10,7 +10,12 @@ or order line names a rig, card, address, registry, digest or credential.
 import json
 import os
 import re
+import shutil
+import stat
+import subprocess
 import sys
+import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -29,7 +34,7 @@ R = 'c2-packed-tp4-8x262k-'
 PLAIN, TRAFFIC = R + 'ship-prefix', R + 'ship-prefix-levern-traffic'
 LN_AUDIT, LN_AUDIT_NOLNA, DIGESTS = R + 'ship-prefix-levern-audit', R + 'ship-prefix-levern-audit-nolna', R + 'ship-prefix-audit-digests'
 HARD_CAP = 540
-THIN = '@THIN_LAYER_IMAGE@'
+THIN = 'local:thin-layer'
 # The tags the baseline window holds (v538-v549 planned, v550-v557 reserve): never used here.
 BASELINE_TAGS = set(range(538, 558))
 # The allowlisted tags never pushed, in order: the baseline window's block, then the free set this pack draws from.
@@ -39,8 +44,8 @@ STEP_CAP_MINUTES, SMOKE_STEP_MINUTES, REPLAY_STEP_MINUTES = 380, 210, 180
 HANDBACK = ('ZR-reset-all-four', 'LM-links-remeasure', 'TICK-topology-wait', 'Z-handback')
 W1 = ('B0-build-serve-11', 'A0X0-agentstop-unserve-rescan-reset', 'A1-LN-levern-audited-attach', 'S0-CTL-control-attach-smoke', 'P1ab-LN-exactness-shared-lifecycle-evict',
       'E1-LN-exactness-eager') + HANDBACK + ('DEPLOY-and-engine-load',)
-W2 = ('A0X0-agentstop-unserve-rescan-reset', 'S0b-baked-default-smoke', 'HL-LN-hang-shapes-levern', 'HL-LN2-hang-shapes-levern', 'HL-LN3-hang-shapes-levern',
-      'HF-LN-levern-faults', 'L8-LN-ladder8-past-131k', 'C16-LN-churn16', 'T0s-timed-production-bytes', 'TA1-timed-control-A', 'TL1-timed-levern-L', 'TA2-timed-control-A',
+W2 = ('A0X0-agentstop-unserve-rescan-reset', 'S0b-baked-default-smoke', 'L8-LN-ladder8-past-131k', 'HL-LN-hang-shapes-levern', 'HL-LN2-hang-shapes-levern', 'HL-LN3-hang-shapes-levern',
+      'HF-LN-levern-faults', 'C16-LN-churn16', 'T0s-timed-production-bytes', 'TA1-timed-control-A', 'TL1-timed-levern-L', 'TA2-timed-control-A',
       'TL2-timed-levern-L', 'TA3-timed-control-A', 'S1-stall-control-A', 'S2-stall-levern-B', 'GG1-turns-hit-control-A', 'GG2-turns-hit-levern-B', 'SR10-platform-replay') \
     + HANDBACK + ('CUT-release-and-live-checks',)
 EXPECTED = {'w1': W1, 'w2': W2}
@@ -89,34 +94,44 @@ def minutes(pack, *names):
 
 
 def table_box(pack, name):
-    """The docker-timeout box of a gate or prefix job from the gates' own tables, or None."""
+    """The worst case of a gate or prefix job in minutes, from the gates' OWN helpers (the serving gate's re-runs and 120 s overhead, the prefix gate's 180 s), or None."""
     entry = raw(pack, name)
     actions = entry.get('C2_ACTIONS', '').split()
-    overhead = prefix_gate.ARM_OVERHEAD_SECONDS
     if 'prefix' in actions:
-        seconds = 0
-        for plan in entry['C2_PREFIX_PLAN'].split(','):
-            for arm in prefix_gate.plan_arms(plan.strip(), entry['C2_PREFIX_PROFILE'], None, profiles()):
-                seconds += arm['timeout'] + overhead
+        arms_of = dict((plan.strip(), prefix_gate.plan_arms(plan.strip(), entry['C2_PREFIX_PROFILE'], None, profiles())) for plan in entry['C2_PREFIX_PLAN'].split(','))
+        seconds = prefix_gate.worst_case_seconds(arms_of)
         return min(STEP_CAP_MINUTES, -(-seconds // 60))
     if 'gate' in actions:
-        lengths = [int(item) for item in entry['C2_GATE_LENGTHS'].split(',')] if entry.get('C2_GATE_LENGTHS') else None
-        seconds = 0
-        for plan in entry['C2_GATE_PLAN'].split(','):
-            for arm in serving_gate.plan_arms(plan.strip(), entry['C2_PROFILE'], profiles(), lengths=lengths, max_tokens=int(entry.get('C2_GATE_MAX_TOKENS') or 4096)):
-                seconds += arm[2] + overhead
-        return min(STEP_CAP_MINUTES, -(-seconds // 60))
+        return -(-gate_worst_seconds(entry) // 60)
     return None
 
 
-def admit(pack, hand_back):
+def gate_worst_seconds(entry):
+    lengths = [int(item) for item in entry['C2_GATE_LENGTHS'].split(',')] if entry.get('C2_GATE_LENGTHS') else None
+    plans = [plan.strip() for plan in entry['C2_GATE_PLAN'].split(',')]
+    arms_of = dict((plan, serving_gate.plan_arms(plan, entry['C2_PROFILE'], profiles(), lengths=lengths, max_tokens=int(entry.get('C2_GATE_MAX_TOKENS') or 4096))) for plan in plans)
+    return serving_gate.worst_case_seconds(plans, arms_of)
+
+
+HB_ADMIT = {'w1': 60, 'w2': 75}   # the hand-back's UPPER BOUND each window admits with (the central figures are 40 and 45)
+GATE_RESET_ALLOWANCE = 30            # a serving-gate job's reset step is outside the box the gate refuses against
+
+
+def admit_cost(pack, line):
+    box = int(line[5]) if line[5] != '-' else int(line[3])
+    if 'gate' in raw(pack, line[0]).get('C2_ACTIONS', '').split():
+        box += GATE_RESET_ALLOWANCE
+    return box
+
+
+def admit(pack, hand_back=None, skip=()):
     """The admit-on-box rule walked at the estimates: -> the planned jobs the rule refuses (none when every box fits the cap)."""
+    hand_back = HB_ADMIT[pack] if hand_back is None else hand_back
     refused, clock = [], 0
     for line in order(pack):
-        if line[1] in ('drv', 'hand', 'pre'):
+        if line[1] in ('drv', 'hand', 'pre') or line[0] in skip:
             continue
-        box = int(line[5]) if line[5] != '-' else int(line[3])
-        if clock + box + hand_back > HARD_CAP:
+        if clock + admit_cost(pack, line) + hand_back > HARD_CAP:
             refused.append(line[0])
             continue
         clock += int(line[3])
@@ -207,9 +222,44 @@ class NumbersTests(unittest.TestCase):
                             'S1-stall-control-A', 'S2-stall-levern-B', 'GG1-turns-hit-control-A', 'GG2-turns-hit-levern-B'), 170, 'the ARC runners are at zero for 170 minutes')
         self.assertIn('T0s to GG2: 170 minutes', read_text('w2', 'ORDER.txt'))
 
-    def test_every_planned_job_is_admitted_on_its_box_at_the_estimates(self):
+    def test_the_admit_rule_uses_the_hand_backs_upper_bound_and_both_orders_say_so(self):
+        self.assertEqual(HB_ADMIT, {'w1': 60, 'w2': 75})
+        self.assertIn("HB the hand-back's UPPER BOUND (W-1: 60 min;", read_text('w1', 'ORDER.txt'))
+        self.assertIn("HB the hand-back's UPPER BOUND (W-2: 75 min,", read_text('w2', 'ORDER.txt'))
+        self.assertNotIn('HB the hand-back below', read_text('w2', 'ORDER.txt'))
+        self.assertIn('E + box + HB <= 540', read_text('w1', 'README.md'))
+        self.assertIn('E + box + HB <= 540', read_text('w2', 'README.md'))
+
+    def test_w2_is_admitted_whole_at_the_estimates_and_w1_carries_e1_over(self):
+        self.assertEqual(admit('w2'), [])
+        # W-1 at HB 60: P1ab-LN fits with 3 minutes to spare, E1-LN does not (331 > 327): the carry-over the ORDER names
+        self.assertEqual(admit('w1'), ['E1-LN-exactness-eager'])
         self.assertEqual(admit('w1', 40), [])
-        self.assertEqual(admit('w2', 45), [])
+        text = read_text('w1', 'ORDER.txt')
+        for phrase in ('P1ab-LN if E <= 144', 'E1-LN if E <= 327', 'CARRY-OVER', 'THE CUTOVER MOVES TO A THIRD WINDOW', 'v610 for the first, v611 for a second'):
+            self.assertIn(phrase, text)
+        self.assertEqual(HARD_CAP - 336 - HB_ADMIT['w1'], 144)
+        self.assertEqual(HARD_CAP - 153 - HB_ADMIT['w1'], 327)
+
+    def test_a_carried_over_job_leaves_w2_without_its_tail_so_the_cutover_slides(self):
+        # E1-LN (100) opens W-2 after A0X0: the tail of the window no longer fits the cap at the estimates
+        clock, skipped = 100, []
+        for line in order('w2'):
+            if line[1] in ('drv', 'hand', 'pre'):
+                continue
+            if clock + admit_cost('w2', line) + HB_ADMIT['w2'] > HARD_CAP:
+                skipped.append(line[0])
+                continue
+            clock += int(line[3])
+        self.assertIn('SR10-platform-replay', skipped, 'the carry-over must displace the tail, and the ORDER says the cutover slides')
+
+    def test_l8_runs_right_after_s0b_because_its_box_does_not_fit_later(self):
+        names = [line[0] for line in order('w2')]
+        self.assertEqual(names.index('L8-LN-ladder8-past-131k'), names.index('S0b-baked-default-smoke') + 1)
+        l8 = row('w2', 'L8-LN-ladder8-past-131k')
+        later = sum(int(row('w2', n)[3]) for n in W2[:W2.index('HF-LN-levern-faults') + 1] if n != l8[0])
+        self.assertGreater(later + int(l8[5]) + GATE_RESET_ALLOWANCE + HB_ADMIT['w2'], HARD_CAP, 'at the old place (after HF-LN) the job would be skipped')
+        self.assertLessEqual(15 + int(l8[5]) + GATE_RESET_ALLOWANCE + HB_ADMIT['w2'], HARD_CAP)
 
     def test_the_fixed_workflow_boxes_would_have_skipped_s2_and_gg1(self):
         """Why the box is a template key: the smoke step's 210 minutes and the G+GH docker timeouts (306) do not fit the cap late in W-2."""
@@ -232,8 +282,8 @@ class NumbersTests(unittest.TestCase):
 
     def test_w1_keeps_e1_only_if_its_box_fits(self):
         clock = minutes('w1', 'A0X0-agentstop-unserve-rescan-reset', 'A1-LN-levern-audited-attach', 'S0-CTL-control-attach-smoke', 'P1ab-LN-exactness-shared-lifecycle-evict')
-        self.assertEqual(clock + int(row('w1', 'E1-LN-exactness-eager')[5]) + 40, 524)
-        self.assertLessEqual(524, HARD_CAP)
+        self.assertEqual(clock + int(row('w1', 'E1-LN-exactness-eager')[5]) + 40, 524, 'with the central hand-back it fits')
+        self.assertGreater(clock + int(row('w1', 'E1-LN-exactness-eager')[5]) + HB_ADMIT['w1'], HARD_CAP, 'with the upper-bound hand-back it does not')
         # one hour over at the P1ab box and E1 no longer fits: it moves to the head of W-2
         self.assertGreater(clock + 60 + int(row('w1', 'E1-LN-exactness-eager')[5]) + 40, HARD_CAP)
         self.assertIn('E1-LN opens W-2 when its box does not fit here', read_text('w1', 'ORDER.txt'))
@@ -241,6 +291,11 @@ class NumbersTests(unittest.TestCase):
 
 
 class BoxTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.scratch = tempfile.mkdtemp()
+        self.addCleanup(__import__('shutil').rmtree, self.scratch, True)
+
     def test_every_order_box_is_its_templates_box_and_at_least_its_estimate(self):
         for pack in PACKS:
             for line in order(pack):
@@ -255,20 +310,47 @@ class BoxTests(unittest.TestCase):
                 self.assertGreaterEqual(int(line[5]), int(line[3]), '%s: a box under its own estimate' % line[0])
 
     def test_the_long_plans_boxes_are_the_gates_own_worst_cases(self):
+        """Computed by the gates' own helpers (re-runs and per-arm overhead included), never by a copy of their tables."""
         self.assertEqual(table_box('w1', 'P1ab-LN-exactness-shared-lifecycle-evict'), 336)
         self.assertEqual(table_box('w1', 'E1-LN-exactness-eager'), 153)
-        self.assertEqual(table_box('w2', 'L8-LN-ladder8-past-131k'), 186)
-        self.assertEqual(table_box('w2', 'C16-LN-churn16'), 153)
-        for pack, name in (('w1', 'P1ab-LN-exactness-shared-lifecycle-evict'), ('w1', 'E1-LN-exactness-eager'), ('w2', 'L8-LN-ladder8-past-131k'), ('w2', 'C16-LN-churn16')):
+        self.assertEqual(table_box('w2', 'L8-LN-ladder8-past-131k'), 368)
+        self.assertEqual(table_box('w2', 'C16-LN-churn16'), 152)
+        for pack, name in (('w1', 'P1ab-LN-exactness-shared-lifecycle-evict'), ('w1', 'E1-LN-exactness-eager'), ('w2', 'L8-LN-ladder8-past-131k')):
             self.assertEqual(int(row(pack, name)[5]), table_box(pack, name), name)
+        self.assertGreaterEqual(int(row('w2', 'C16-LN-churn16')[5]), table_box('w2', 'C16-LN-churn16'))
         arms = prefix_gate.plan_arms('exactness-shared', LN_AUDIT_NOLNA, None, profiles()) + prefix_gate.plan_arms('lifecycle-evict', LN_AUDIT_NOLNA, None, profiles())
         self.assertEqual([arm['timeout'] for arm in arms], [10800, 9000])
-        self.assertLessEqual(336, STEP_CAP_MINUTES)
-
-    def test_the_serving_gates_box_equals_the_plan_it_refuses_a_smaller_one_for(self):
-        """L8 and C16 are serving-gate jobs: --budget-seconds refuses a plan whose worst case exceeds the box, so their box is that worst case exactly."""
         for name in ('L8-LN-ladder8-past-131k', 'C16-LN-churn16'):
-            self.assertEqual(int(row('w2', name)[5]) * 60 - table_box('w2', name) * 60, 0)
+            self.assertLessEqual(int(row('w2', name)[5]), STEP_CAP_MINUTES)
+
+    def test_the_serving_gate_accepts_its_box_and_refuses_one_minute_less_in_its_own_dry_run(self):
+        """L8 and C16 are serving-gate jobs: --budget-seconds refuses a plan whose worst case (every re-run) exceeds the box. Run the real driver, dry, with the template's own arguments."""
+        for name in ('L8-LN-ladder8-past-131k', 'C16-LN-churn16'):
+            entry = parsed('w2', name)
+            box = int(row('w2', name)[5])
+            for budget, expected in ((box * 60, 0), ((table_box('w2', name) - 1) * 60, 2)):
+                lines = []
+                argv = ['--image', 'img', '--profile', entry['profile'], '--plan', entry['gate_plan'], '--lengths', entry['gate_lengths'], '--max-tokens', str(entry['gate_max_tokens']),
+                        '--budget-seconds', str(budget), '--results', os.path.join(self.scratch, name), '--profiles', os.path.join(HERE, 'qwen_c2_profiles.json'), '--cards', 'quad', '--dry-run']
+                if entry.get('gate_jit'):
+                    argv += ['--jit', entry['gate_jit']]
+                if entry.get('gate_audits'):
+                    argv += ['--audits', entry['gate_audits']]
+                if entry.get('gate_salt'):
+                    argv += ['--salt', entry['gate_salt']]
+                code = serving_gate.main(argv, devices=['/a', '/b', '/c', '/d'], log=lines.append)
+                self.assertEqual(code, expected, '%s at %d s: %s' % (name, budget, lines[-3:]))
+                if expected == 2:
+                    self.assertTrue(any(line.startswith('C2_BOX verdict=REFUSED step=gate') for line in lines), lines)
+
+    def test_every_gate_and_prefix_box_is_at_least_its_worst_case_or_a_clipped_prefix_box(self):
+        for pack in PACKS:
+            for line in order(pack):
+                if line[5] == '-' or line[0] in CLIPPED_BOXES:
+                    continue
+                worst = table_box(pack, line[0])
+                if worst is not None:
+                    self.assertGreaterEqual(int(line[5]), worst, line[0])
 
     def test_the_clipped_prefix_jobs_boxes_are_under_their_worst_case_and_the_smoke_boxes_are_pinned(self):
         for name, box in CLIPPED_BOXES.items():
@@ -319,8 +401,9 @@ class TagTests(unittest.TestCase):
         self.assertEqual(STAGE2_TAGS, 59)
         left = len(FREE) - 37
         self.assertIn('STAGE 2 (W-3 to W-6, research) needs %d tags' % STAGE2_TAGS, text)
-        self.assertIn('at least %d MORE tags must be allowlisted before Stage 2 (%d with a reserve of eight)' % (STAGE2_TAGS - left, STAGE2_TAGS + 8 - left), text)
-        self.assertEqual(STAGE2_TAGS - left, 52)
+        reserve = 4 * 4   # the same reserve of four a window as Stage 1, for W-3 to W-6
+        self.assertIn('at least %d MORE tags must be allowlisted before Stage 2 (%d with the same reserve of four a window' % (STAGE2_TAGS - left, STAGE2_TAGS + reserve - left), text)
+        self.assertEqual((STAGE2_TAGS - left, STAGE2_TAGS + reserve - left), (52, 68))
 
 
 class TemplateTests(unittest.TestCase):
@@ -512,6 +595,86 @@ class RuleTests(unittest.TestCase):
             self.assertIn("'%s'" % window, source)
         self.assertIn("add_parser('floor'", source)
         self.assertIn("add_parser('pair'", source)
+
+
+def workflow_text():
+    with open(os.path.join(ROOT, '.github', 'workflows', 'qwen-c2-serving.yml'), encoding='utf-8') as handle:
+        return handle.read()
+
+
+def step(name_prefix):
+    """The text of one workflow step (from its name line to the next step's)."""
+    text = workflow_text()
+    start = text.index('      - name: ' + name_prefix)
+    end = text.find('\n      - name: ', start + 10)
+    return text[start:end if end > 0 else len(text)]
+
+
+def source(name):
+    with open(os.path.join(HERE, name), encoding='utf-8') as handle:
+        return handle.read()
+
+
+class WorkflowTests(unittest.TestCase):
+    HUB = '/home/thatch/hf-cache/hub'
+
+    def test_the_kill_switch_check_reads_the_hub_the_arms_mount_and_covers_the_replay(self):
+        text = step('Kill-switch files must be absent')
+        self.assertIn('hub="${C2_HUB_DIR:-%s}"' % self.HUB, text)
+        self.assertNotIn('$HOME/', text)
+        self.assertIn('%s:/models' % self.HUB, step('Smoke on the four-card set'))
+        self.assertIn('flag=%s/.qwen-c2/prefix-reuse.off' % self.HUB, step('Prefix-reuse gates in the agent'))
+        condition = text.split('shell: bash')[0]
+        for action in ('gate', 'prefix', 'smoke', 'replay'):
+            self.assertIn("contains(steps.job.outputs.actions, '%s')" % action, condition, action)
+
+    def test_the_replay_step_removes_its_container_on_every_exit_and_gives_the_interrupt_a_long_grace(self):
+        text = step('Replay the node agent')
+        self.assertIn("trap 'docker rm -f qwen-c2-platform >/dev/null 2>&1 || true' EXIT", text)
+        self.assertIn("default='qwen-c2-platform'", source('c2_platform_replay.py'))
+        self.assertIn('timeout --signal=INT -k 300', text)
+        self.assertNotIn('-k 120', text)
+        self.assertIn('C2_JOB_STARTED', text)
+        self.assertIn('C2_BOX verdict=TIMEBOX step=replay', text)
+        self.assertIn('local:thin-layer', text)
+
+    def test_the_reset_removes_job_owned_containers_before_it_checks_the_cards(self):
+        text = step('Reset all four cards')
+        removal, check = text.index('qwen-c2-platform|qwen-c2-smoke|qwen-c2-prefix-'), text.index('card_set_unheld')
+        self.assertLess(removal, check)
+
+    def test_every_box_counts_from_the_jobs_start_and_prints_a_verdict_line(self):
+        smoke, prefix = step('Smoke on the four-card set'), step('Prefix-reuse gates in the agent')
+        self.assertIn('box_end=$(( ${C2_JOB_STARTED:?} + BOX_MINUTES * 60 ))', smoke)
+        self.assertIn('C2_BOX verdict=TIMEBOX step=smoke phase=ready', smoke)
+        self.assertIn('C2_BOX verdict=TIMEBOX step=smoke phase=client', smoke)
+        self.assertIn('BOX_MINUTES * 60 - ($(date +%s) - C2_JOB_STARTED)', prefix)
+        self.assertIn('--box-seconds "$box_left"', prefix)
+        self.assertIn('C2_BOX verdict=REFUSED step=gate', source('c2_serving_gate.py'))
+        self.assertIn('C2_BOX verdict=TIMEBOX step=prefix', source('c2_prefix_gate.py'))
+
+    @unittest.skipUnless(shutil.which('bash'), 'bash is needed to execute the readiness loop')
+    def test_the_readiness_wait_is_a_deadline_not_a_count_of_polls(self):
+        """Execute the smoke step's own loop with a fake docker and a curl that stalls: it must end at the deadline (here 3 s, not 4800 s)."""
+        text = step('Smoke on the four-card set')
+        start = text.index('          started=$(date +%s); ready=0')
+        end = text.index('          echo "ready=$ready after')
+        loop = text[start:end].replace('started + 4800', 'started + 3')
+        self.assertIn('started + 3', loop)
+        with tempfile.TemporaryDirectory() as folder:
+            for name, body in (('docker', 'echo true'), ('curl', 'sleep 1; exit 22')):
+                path = os.path.join(folder, name)
+                with open(path, 'w', newline='\n') as handle:
+                    handle.write('#!/bin/sh\n' + body + '\n')
+                os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+            where = folder.replace(os.sep, '/')
+            script = 'name=x; results=%s; BOX_MINUTES=; box_end=\n%s\necho "ready=$ready"\n' % (where, loop)
+            began = time.time()
+            done = subprocess.run(['bash', '-c', script], env=dict(os.environ, PATH=where + os.pathsep + os.environ['PATH']), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  universal_newlines=True, timeout=120)
+            took = time.time() - began
+        self.assertIn('ready=0', done.stdout, done.stderr)
+        self.assertLess(took, 60, 'a count-based loop would run 2400 polls')
 
 
 class HygieneTests(unittest.TestCase):

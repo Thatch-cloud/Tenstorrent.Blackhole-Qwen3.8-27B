@@ -17,9 +17,10 @@ restoring the pre-cutover production image; the cutover is the last step of the 
 ## Rules
 
 - The first job is `A0X0`: agentstop, unserve, rescan, reset, in the workflow's fixed order and with NO `status` (production's container is still up and a status read would find it stale).
-- A job starts only if `E + box + hand-back <= 540`; a job that does not fit moves to the head of the next window; nothing is cancelled. A box is the job's own timeout (see `ORDER.txt`).
-- The hand-back is ZR (all-four reset), LM (links re-measure), TICK (the topology publish), Z (agent start) and the operator's release step with the owner's admin key. The key is never in a script and expires about two hours after issue.
-- `prefix-reuse.off` and `levern.off` must be ABSENT on the hub mount before every job that opens a gate, prefix or smoke step.
+- A job starts only if `E + box + HB <= 540` with HB the hand-back's UPPER BOUND (60 min here; the central figure is 40); a job that does not fit moves to the head of the next window; nothing is cancelled. A box is the job's own timeout and counts from the job's own start (see `ORDER.txt`). At the central estimates `P1ab-LN` is admitted with 3 minutes to spare and `E1-LN` is not (it needs E <= 327, the central E is 331), so a carry-over into W-2, and with it a third window for the cutover, is the likely outcome (the carry-over plan is in `ORDER.txt`).
+- The hand-back is ZR (all-four reset), LM (links re-measure), TICK (the topology publish), Z (agent start) and the operator's release step with the owner's admin key. The key is never in a script.
+- `prefix-reuse.off` and `levern.off` must be ABSENT on the hub mount before every job that opens a gate, prefix, smoke or replay step. Before A0X0 the operator records which of them exist (a production Tier 1 switch may); the hand-back restores that recorded state before the agent start.
+- No CI dispatch or PR push while a window runs.
 - Tags are `experiment/c2-serving-vN`, hardware-allowlisted and never pushed; the map is in `ORDER.txt`. This pack takes `v558-v565` and keeps `v566-v568, v582` in reserve. Do not modify the runner group.
 - One A1-LN re-run is allowed under a reserve tag with a swapped profile (lean, pool or epoch-global twin); a pass on a swap is a finding for the owner.
 

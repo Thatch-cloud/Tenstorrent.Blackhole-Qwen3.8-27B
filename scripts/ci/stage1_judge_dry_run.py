@@ -15,6 +15,9 @@ and its problems, and
   rule_regression     the run was recorded as a pass and the committed rules judge it a failure: the rules are stricter than when it passed (a reference run must be
                       re-read before a window relies on it);
   still_failing       recorded and re-judged failures agree (a real failure, or a rule not yet fixed).
+Every report also names the RECORDED problems next to the re-judged ones (a prefix run's from its own summary; a smoke run's SMOKE_CHECK FAILED lines from the run log, `run.log` in the artifact folder,
+which `--download` saves with `gh run view --log`), so "the rule-only failure is cleared" can be audited rule by rule, and the rules' own state (`STAGE1_JUDGE_RULES`: the commit and any uncommitted
+change to a judge file): a rule fix counts only when it is COMMITTED. `--pair A,B` (repeatable) names the two arms of an A/B pair and refuses to re-judge one of them alone: a rule fix must apply to both.
 It exits 0 unless `--strict` is given: with it, a rule regression or a failure the run recorded as a pass exits 1, so a gate of rule changes can use it.
 
     python3 stage1_judge_dry_run.py --run v536=DIR[:recorded] --run v578=DIR:FAIL ... [--profile P] [--strict] [--json OUT]
@@ -39,6 +42,8 @@ import c2_smoke_check  # noqa: E402
 
 PROFILE_LINE = re.compile(r'\[QWEN-C2\] profile (\S+?):')
 PASS, FAIL = 'PASS', 'FAIL'
+RECORDED_LINE = 'SMOKE_CHECK FAILED: '
+RULE_FILES = ('c2_smoke_check.py', 'c2_prefix_gate.py', 'prefix_judge.py', 'prefix_markers.py', 'qwen_c2_profiles.json')
 
 
 class DryRunError(ValueError):
@@ -74,6 +79,32 @@ def profile_of_container_log(text):
     return found.group(1) if found else None
 
 
+def recorded_problems_of(log_text):
+    """The SMOKE_CHECK FAILED lines of a run log (a timestamp prefix and all): -> [text]. """
+    return [line.split(RECORDED_LINE, 1)[1].strip() for line in (log_text or '').splitlines() if RECORDED_LINE in line]
+
+
+def recorded_log_of(root):
+    """The run log kept beside the artifact (`run.log`, in the folder or its parent), or None. """
+    for folder in (root, os.path.dirname(os.path.abspath(root))):
+        path = os.path.join(folder, 'run.log')
+        if os.path.isfile(path):
+            return read_text(path)
+    return None
+
+
+def rules_state(repo=None):
+    """-> dict(commit, dirty): the checkout's HEAD and the judge files with an uncommitted change (None when git cannot be asked). """
+    repo = repo or os.path.dirname(os.path.dirname(HERE))
+    try:
+        commit = subprocess.run(['git', '-C', repo, 'rev-parse', '--short', 'HEAD'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True).stdout.decode().strip()
+        names = ['scripts/ci/' + name for name in RULE_FILES]
+        porcelain = subprocess.run(['git', '-C', repo, 'status', '--porcelain', '--'] + names, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True).stdout.decode()
+    except (OSError, subprocess.CalledProcessError):
+        return dict(commit=None, dirty=None)
+    return dict(commit=commit, dirty=[line[3:].strip() for line in porcelain.splitlines() if line.strip()])
+
+
 def judge_smoke(root, profile=None, profiles_path=None, recorded=None):
     container = read_text(os.path.join(root, 'container.log'))
     name = profile or profile_of_container_log(container)
@@ -89,7 +120,9 @@ def judge_smoke(root, profile=None, profiles_path=None, recorded=None):
     problems = [line.split('SMOKE_CHECK FAILED: ', 1)[1] for line in lines if line.startswith('SMOKE_CHECK FAILED: ')]
     if code == 2:
         raise DryRunError('%s: the smoke check could not read its inputs: %s' % (root, err.getvalue().strip()))
+    log = recorded_log_of(root)
     return dict(kind='smoke', profile=name, rejudged=PASS if code == 0 else FAIL, problems=problems,
+                recorded_problems=recorded_problems_of(log) if log is not None else None,
                 unqualified=any(line.startswith('SMOKE_CHECK UNQUALIFIED') for line in lines))
 
 
@@ -131,10 +164,11 @@ def judge_prefix(root, profiles_path=None):
     with open(profiles_path or os.path.join(HERE, 'qwen_c2_profiles.json'), encoding='utf-8') as handle:
         profiles = json.load(handle)
     specs = arm_specs(summary, profiles)
-    arms, recorded, problems = {}, {}, []
+    arms, recorded, recorded_problems, problems = {}, {}, {}, []
     for plan, result in (summary.get('results') or {}).items():
         for name, verdict in (result.get('arms') or {}).items():
             recorded[name] = verdict.get('verdict')
+            recorded_problems[name] = verdict.get('problems') or []
     for name in sorted(os.listdir(prefix_dir)):
         directory = os.path.join(prefix_dir, name)
         if not os.path.isfile(os.path.join(directory, 'arm.json')):
@@ -154,7 +188,7 @@ def judge_prefix(root, profiles_path=None):
         spec['gate_only'] = ((spec.get('derived') or profiles)['profiles'].get(spec['served']) or {}).get('gate_only') is True
         verdict = gate.judge_arm(spec, driver, scanned, stats, result.get('error'), log_text='\n'.join(lines))
         arms[name] = dict(recorded=recorded.get(name) or result.get('verdict'), rejudged=verdict['verdict'], problems=verdict.get('problems') or [],
-                          not_exercised=verdict.get('not_exercised') or [])
+                          not_exercised=verdict.get('not_exercised') or [], recorded_problems=recorded_problems.get(name) or result.get('problems') or [])
         problems += ['%s: %s' % (name, text) for text in arms[name]['problems']]
     if not arms:
         raise DryRunError('%s: no arm directory with an arm.json under prefix/' % root)
@@ -192,7 +226,12 @@ def download(run_id, out):
     os.makedirs(target, exist_ok=True)
     done = subprocess.run(['gh', 'run', 'download', str(run_id), '-D', target], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if done.returncode != 0:
-        raise DryRunError('gh run download %s failed: %s' % (run_id, done.stderr.decode('utf-8', 'replace').strip()[:300]))
+        raise DryRunError('gh run download %s failed (an artifact older than the retention period is gone): %s' % (run_id, done.stderr.decode('utf-8', 'replace').strip()[:300]))
+    # The run log carries the SMOKE_CHECK FAILED lines the artifact does not: best effort (a failed fetch leaves recorded_problems None).
+    log = subprocess.run(['gh', 'run', 'view', str(run_id), '--log'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if log.returncode == 0:
+        with open(os.path.join(target, 'run.log'), 'wb') as handle:
+            handle.write(log.stdout)
     return target
 
 
@@ -215,6 +254,7 @@ def main(argv=None, out=print):
     parser.add_argument('--out', default='.', help='where --download puts the artifacts')
     parser.add_argument('--profile', default=None, help='the profile a smoke run served, when its container log does not name it')
     parser.add_argument('--profiles', default=None, help='a profiles JSON instead of the checkout\'s')
+    parser.add_argument('--pair', action='append', default=[], help='LABEL_A,LABEL_B: the two arms of an A/B pair; both must be re-judged together (a rule fix applies to both)')
     parser.add_argument('--strict', action='store_true', help='exit 1 on a rule regression')
     parser.add_argument('--json', default=None, help='write the whole report here')
     options = parser.parse_args(argv)
@@ -231,6 +271,17 @@ def main(argv=None, out=print):
     if not specs:
         out('refused: no --run and no --download')
         return 2
+    labels = [label for label, _, _ in specs]
+    for pair in options.pair:
+        names = pair.split(',')
+        if len(names) != 2 or not all(names) or names[0] == names[1]:
+            out('refused: --pair %r is not LABEL_A,LABEL_B' % pair)
+            return 2
+        missing = [name for name in names if name not in labels]
+        if missing:
+            out('refused: --pair %s: %s is not among the runs to re-judge; one arm of an A/B pair is never re-judged alone (a rule fix must apply to both)' % (pair, ','.join(missing)))
+            return 2
+    rules = rules_state()
     results, failures = [], 0
     for label, path, recorded in specs:
         try:
@@ -243,10 +294,18 @@ def main(argv=None, out=print):
         out('STAGE1_JUDGE %s' % json.dumps(result, sort_keys=True))
     rule_only = [item['label'] for item in results if item['outcome'] == 'rule_only_failure']
     regression = [item['label'] for item in results if item['outcome'] == 'rule_regression']
+    out('STAGE1_JUDGE_RULES %s' % json.dumps(rules, sort_keys=True))
+    for pair in options.pair:
+        names = pair.split(',')
+        outcomes = dict((item['label'], item['outcome']) for item in results)
+        committed = (rules['dirty'] == []) if rules['dirty'] is not None else None
+        out('STAGE1_JUDGE_PAIR %s' % json.dumps(dict(pair=names, outcomes=[outcomes.get(name) for name in names], rules=rules, committed=committed), sort_keys=True))
+        if rules['dirty']:
+            out('note: the judge files %s have uncommitted changes: a rule fix counts only when committed and reviewed' % ', '.join(rules['dirty']))
     out('STAGE1_JUDGE_SUMMARY runs=%d rule_only_failure=%s rule_regression=%s unreadable=%d' % (len(specs), ','.join(rule_only) or 'none', ','.join(regression) or 'none', failures))
     if options.json:
         with open(options.json, 'w', encoding='utf-8') as handle:
-            json.dump(dict(results=results, rule_only_failure=rule_only, rule_regression=regression), handle, indent=1, sort_keys=True)
+            json.dump(dict(results=results, rule_only_failure=rule_only, rule_regression=regression, rules=rules), handle, indent=1, sort_keys=True)
     if failures:
         return 2
     return 1 if options.strict and regression else 0

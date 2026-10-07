@@ -797,7 +797,7 @@ class BoxWorkflowTests(unittest.TestCase):
     def test_the_smoke_step_stops_waiting_at_the_box_and_runs_the_client_under_timeout(self):
         script = step_script('Smoke on the four-card set')
         self.assertIn('BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}', step_text('Smoke on the four-card set'))
-        self.assertIn('box_end=$(( $(date +%s) + BOX_MINUTES * 60 ))', script)
+        self.assertIn('box_end=$(( ${C2_JOB_STARTED:?} + BOX_MINUTES * 60 ))', script)
         self.assertIn('smoke_wrap=(timeout -k 30 "$left")', script)
         self.assertIn('[ "$(date +%s)" -ge "$box_end" ]', script)
         self.assertIn('|| smoke_status=$?', script)
@@ -805,7 +805,9 @@ class BoxWorkflowTests(unittest.TestCase):
     def test_the_readiness_poll_is_two_seconds(self):
         script = step_script('Smoke on the four-card set')
         self.assertIn('ready_poll=2', script)
-        self.assertIn('seq 1 $(( 4800 / ready_poll ))', script)
+        self.assertIn('ready_deadline=$(( started + 4800 ))', script)
+        self.assertIn('while [ "$(date +%s)" -lt "$ready_deadline" ]; do', script)
+        self.assertNotIn('seq 1 $(( 4800 / ready_poll ))', script, 'a count of polls lets a stalled curl stretch the wait')
         self.assertIn('sleep "$ready_poll"', script)
         self.assertNotIn('sleep 15', script)
 
@@ -820,14 +822,16 @@ class BoxWorkflowTests(unittest.TestCase):
         name = "Prefix-reuse gates in the agent's container shape"
         self.assertIn('BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}', step_text(name))
         script = step_script(name)
-        self.assertIn('${BOX_MINUTES:+--box-seconds "$(( BOX_MINUTES * 60 ))"}', script)
+        self.assertIn('${box_left:+--box-seconds "$box_left"}', script)
+        self.assertIn('box_left=$(( BOX_MINUTES * 60 - ($(date +%s) - C2_JOB_STARTED) ))', script)
         self.assertNotIn('budget=$(( BOX_MINUTES * 60 ))', script, 'the prefix box clips arms; it never refuses a plan')
 
     def test_the_replay_step_runs_under_an_interrupt_timeout_so_its_own_cleanup_runs(self):
         name = "Replay the node agent's serving sequence"
         self.assertIn('BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}', step_text(name))
         script = step_script(name)
-        self.assertIn('replay_wrap=(timeout --signal=INT -k 120 "$(( BOX_MINUTES * 60 ))")', script)
+        self.assertIn('replay_wrap=(timeout --signal=INT -k 300 "$left")', script)
+        self.assertIn("trap 'docker rm -f qwen-c2-platform >/dev/null 2>&1 || true' EXIT", script)
         self.assertIn('${replay_wrap[@]+"${replay_wrap[@]}"} python3 scripts/ci/c2_platform_replay.py', script)
 
     def test_the_four_card_reset_waits_ten_seconds_for_the_links(self):
