@@ -21,14 +21,14 @@ FOLDER = os.path.join(HERE, 'references', 'tp4-baseline-ext-jobs')
 PRODUCTION = 'tp4-serve-10'
 BANNED = base.BANNED
 HAND_BACK = ('ZR-reset-all-four', 'LM-links-remeasure', 'TICK-topology-wait', 'Z-handback', 'DEPLOY-and-engine-load')
-V5_BLOCK = ('R4-reset-all-four', 'V1a-cardm-watcher', 'V1b-cardm-full')
-CORE = ('A0X0-agentstop-unserve-rescan-reset', 'H1-hang-shape-ship-prefix', 'H2-hang-shape-ship-prefix', 'SR10-platform-replay', 'C16-CTL-churn16', 'E1-CTL-exactness-eager', 'G0-turns-A-production-bytes', 'T0-timed-production-bytes')
-EXPECTED = CORE + V5_BLOCK + HAND_BACK
-FIRST_TAG, RESERVE = 601, (614, 615)
+CORE = ('A0X0-agentstop-unserve-rescan-reset', 'H1-hang-shape-ship-prefix', 'H2-hang-shape-ship-prefix', 'SR10-platform-replay', 'C16-CTL-churn16', 'E1-CTL-exactness-eager', 'T0-timed-production-bytes', 'G0-turns-A-production-bytes')
+EXPECTED = CORE + HAND_BACK
+FIRST_TAG, RESERVE = 601, (611, 612)
 ALLOWLISTED_UNUSED = base.ALLOWLISTED_UNUSED
-GATE_BOXES = {'C16-CTL-churn16': 153, 'E1-CTL-exactness-eager': 153, 'G0-turns-A-production-bytes': 153, 'V1a-cardm-watcher': 145, 'V1b-cardm-full': 145}
+GATE_TIMEOUTS = {'C16-CTL-churn16': 153, 'E1-CTL-exactness-eager': 153, 'G0-turns-A-production-bytes': 153}   # the gates' own timeouts (computed)
+GATE_BOXES = {'C16-CTL-churn16': 70, 'E1-CTL-exactness-eager': 153, 'G0-turns-A-production-bytes': 40}     # the admission worst case: twice the measured worst, E1 its real timeout
 SMOKE_BOXES = {'H1-hang-shape-ship-prefix': 35, 'H2-hang-shape-ship-prefix': 35, 'T0-timed-production-bytes': 65, 'SR10-platform-replay': 120}
-MEASURED_WORST = {'H1-hang-shape-ship-prefix': 16.1, 'H2-hang-shape-ship-prefix': 16.1, 'T0-timed-production-bytes': 31}
+MEASURED_WORST = {'H1-hang-shape-ship-prefix': 16.1, 'H2-hang-shape-ship-prefix': 16.1, 'T0-timed-production-bytes': 31, 'C16-CTL-churn16': 35, 'G0-turns-A-production-bytes': 20}
 
 
 def read_text(name):
@@ -72,7 +72,7 @@ class OrderTests(unittest.TestCase):
     def test_every_line_has_six_columns_and_every_template_is_in_the_order_once(self):
         for line in order():
             self.assertEqual(len(line), 6, line)
-            self.assertIn(line[1], ('stop', 'soft', 'opt', 'hand', 'drv'), line)
+            self.assertIn(line[1], ('stop', 'soft', 'hand', 'drv'), line)
         self.assertEqual(sorted(line[0] for line in order() if line[1] != 'drv'), templates())
         self.assertEqual(len(set(line[0] for line in order())), len(order()))
 
@@ -80,8 +80,6 @@ class OrderTests(unittest.TestCase):
         self.assertEqual(row(CORE[0])[1], 'stop')
         for name in CORE[1:]:
             self.assertEqual(row(name)[1], 'soft', name)
-        for name in V5_BLOCK:
-            self.assertEqual(row(name)[1], 'opt', name)
         for line in order():
             if line[1] == 'drv':
                 self.assertEqual((line[2], line[4], line[5]), ('-', '-', '-'), line)
@@ -89,11 +87,18 @@ class OrderTests(unittest.TestCase):
             else:
                 self.assertEqual(line[2], PRODUCTION, line)
 
-    def test_the_value_order_puts_the_hang_shapes_first_and_the_v5_block_last_before_the_hand_back(self):
+    def test_the_value_order_puts_the_hang_shapes_first_and_t0_before_g0_and_after_e1(self):
         names = [line[0] for line in order()]
         self.assertEqual(names[:8], list(CORE))
         self.assertEqual(names[-5:], list(HAND_BACK))
-        self.assertEqual(names[8:-5], list(V5_BLOCK))
+        self.assertEqual(len(names), 13)
+        self.assertLess(names.index('E1-CTL-exactness-eager'), names.index('T0-timed-production-bytes'))
+        self.assertLess(names.index('T0-timed-production-bytes'), names.index('G0-turns-A-production-bytes'))
+
+    def test_the_v5_block_is_not_part_of_the_extension(self):
+        for name in ('R4-reset-all-four', 'V1a-cardm-watcher', 'V1b-cardm-full'):
+            self.assertNotIn(name, templates())
+            self.assertNotIn(name, read_text('ORDER.txt').replace('(R4 V1a V1b)', ''))
 
 
 class NumbersTests(unittest.TestCase):
@@ -107,8 +112,6 @@ class NumbersTests(unittest.TestCase):
         text = read_text('ORDER.txt')
         self.assertEqual(core, 257)
         self.assertIn('= %d min = %.1f h of jobs and %d min = %.1f h with the hand-back' % (core, core / 60.0, core + 95, (core + 95) / 60.0), text)
-        self.assertIn('adds %d min by estimate' % minutes(*V5_BLOCK), text)
-        self.assertEqual(minutes(*V5_BLOCK), 135)
 
     def test_the_measured_basis_estimates(self):
         for name in ('H1-hang-shape-ship-prefix', 'H2-hang-shape-ship-prefix'):
@@ -119,7 +122,7 @@ class NumbersTests(unittest.TestCase):
         self.assertTrue(16 <= int(row('G0-turns-A-production-bytes')[3]) <= 20)
 
     def test_every_box_is_computed_or_twice_the_measured_worst(self):
-        for name, expected in GATE_BOXES.items():
+        for name, expected in GATE_TIMEOUTS.items():
             self.assertEqual(box_minutes(name), expected, name)
         self.assertEqual(box_minutes('C16-CTL-churn16'), -(-(9000 + 180) // 60))
         for line in order():
@@ -128,6 +131,9 @@ class NumbersTests(unittest.TestCase):
             name = line[0]
             if name in GATE_BOXES:
                 self.assertEqual(line[5], str(GATE_BOXES[name]), name)
+                self.assertLessEqual(GATE_BOXES[name], GATE_TIMEOUTS[name], name)
+                if name in MEASURED_WORST:
+                    self.assertGreaterEqual(int(line[5]), 2 * MEASURED_WORST[name] - 1, name)
             elif name in SMOKE_BOXES:
                 self.assertEqual(line[5], str(SMOKE_BOXES[name]), name)
                 if name in MEASURED_WORST:
@@ -139,24 +145,29 @@ class NumbersTests(unittest.TestCase):
 
     def test_the_clock_rule_and_target_are_stated(self):
         text = read_text('ORDER.txt')
-        for phrase in ('WALL-CLOCK TARGET', '19:45Z', 'NOW + its BOX + HB <= 19:45Z', 'ADMIT_BASIS=est', 'START GATE', 'Nothing is ever cancelled', 'R4 15 + V1a 145 + V1b 145 = 305 by box'):
-            self.assertIn(phrase, text)
-        self.assertEqual(15 + 145 + 145, 305)
+        for phrase in ('WALL-CLOCK rule against READY FOR /deploy', '19:45Z', 'HARD CAP (20:00Z', 'NOW + its ESTIMATE + HA <= the READY TARGET', 'NOW + its BOX + HA <= the HARD CAP', 'ZR + LM + TICK = 48', 'START GATE', 'Nothing is ever cancelled', 'the 95 is for reporting only'):
+            self.assertIn(phrase, text.replace('The 95 is', 'the 95 is'))
+        self.assertEqual(minutes('ZR-reset-all-four', 'LM-links-remeasure', 'TICK-topology-wait'), 48)
+
+    def test_the_read_rules_carry_the_sr10_caveat(self):
+        for text in (read_text('ORDER.txt'), read_text('README.md')):
+            self.assertIn('2026-09-26', text)
+            self.assertIn('pair-era argv', text)
 
 
 class TagTests(unittest.TestCase):
     def test_tags_are_v601_upward_one_a_job_allowlisted_with_two_reserve(self):
         tagged = [line for line in order() if line[4] != '-']
         self.assertEqual([line[4] for line in tagged], ['v%d' % (FIRST_TAG + index) for index in range(len(tagged))])
-        self.assertEqual(len(tagged), 13)
+        self.assertEqual(len(tagged), 10)
         for line in tagged:
             self.assertIn(int(line[4][1:]), ALLOWLISTED_UNUSED, line)
         used = set(int(line[4][1:]) for line in tagged)
         self.assertTrue(used.isdisjoint(RESERVE))
         self.assertTrue(set(RESERVE) <= ALLOWLISTED_UNUSED)
-        self.assertEqual(max(used | set(RESERVE)), 615)
+        self.assertEqual(max(used | set(RESERVE)), 612)
         self.assertIn('v601 to v615', read_text('ORDER.txt'))
-        self.assertIn('reserve v614-v615', read_text('ORDER.txt'))
+        self.assertIn('reserve v611-v615', read_text('ORDER.txt'))
 
     def test_the_block_does_not_touch_the_first_windows_tags_or_the_gap_another_plan_may_use(self):
         for line in order():
@@ -227,16 +238,8 @@ class TemplateTests(unittest.TestCase):
         self.assertEqual(t0['C2_PROFILE'], base.PLAIN)
         self.assertIn('concurrent8_steady', t0['C2_SMOKE_TESTS'].split(','))
 
-    def test_the_card_m_jobs_name_the_v5_harness_with_the_one_card_fix(self):
-        for name in ('V1a-cardm-watcher', 'V1b-cardm-full'):
-            entry = raw(name)
-            self.assertEqual((entry['C2_CARDS'], entry['C2_ACTIONS'], entry['C2_CARDM_HARNESS']), ('pair', 'cardm', 'optimisation/ttnn-op/v5split/run_card_m.sh'))
-            self.assertIn('IMAGE_TAG=' + PRODUCTION, entry['C2_CARDM_ENV'].split())
-        self.assertIn('WATCHER=1', raw('V1a-cardm-watcher')['C2_CARDM_ENV'].split())
-        self.assertNotIn('C2_CARDM_ARGS', raw('V1b-cardm-full'))
-
     def test_the_resets_are_all_four_and_the_hand_back_orders_reset_before_start(self):
-        for name in ('R4-reset-all-four', 'ZR-reset-all-four', CORE[0]):
+        for name in ('ZR-reset-all-four', CORE[0]):
             self.assertEqual(raw(name)['C2_CARDS'], 'quad')
             self.assertIn('reset', raw(name)['C2_ACTIONS'].split())
         self.assertEqual(raw('ZR-reset-all-four')['C2_ACTIONS'].split(), ['status', 'rescan', 'reset'])
@@ -261,10 +264,9 @@ class NeedsTests(unittest.TestCase):
                 for name in match.group(1).split():
                     self.assertNotIn(name, edges)
                     edges[name] = match.group(2).split()
-        self.assertEqual(sorted(edges), sorted(['H1', 'H2', 'SR10', 'C16-CTL', 'E1-CTL', 'G0', 'T0', 'R4', 'V1a', 'V1b']))
-        self.assertEqual(edges['V1b'], ['V1a'])
-        self.assertEqual(edges['V1a'], ['R4'])
-        self.assertEqual(edges['R4'], ['A0X0'])
+        self.assertEqual(sorted(edges), sorted(['H1', 'H2', 'SR10', 'C16-CTL', 'E1-CTL', 'G0', 'T0']))
+        for name in edges:
+            self.assertEqual(edges[name], ['A0X0'])
 
 
 class WorkflowTests(unittest.TestCase):
