@@ -723,9 +723,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The hub directory the arms mount at /models: C2_HUB_DIR when the runner sets it, else the runner user's own hub cache. A missing directory fails the
+          # The hub directory the arms mount at /models: C2_HUB_DIR when the runner sets it, else /home/thatch/hf-cache/hub (HOME is a temp dir under Actions). A missing directory fails the
           # step (a check that cannot look must not pass), and the content of a flag file is never printed (the logs are public).
-          hub="${C2_HUB_DIR:-$HOME/hf-cache/hub}"
+          hub="${C2_HUB_DIR:-/home/thatch/hf-cache/hub}"
           if ! sudo -n test -d "$hub"; then
             echo "the hub directory is not where this runner keeps it: set C2_HUB_DIR on the runner" >&2
             exit 1
