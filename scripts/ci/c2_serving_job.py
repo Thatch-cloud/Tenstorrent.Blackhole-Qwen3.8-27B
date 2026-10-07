@@ -48,6 +48,12 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_DRAFTER_CANDIDATES  build only: the pinned drafter candidate ids (scripts/ci/drafter_checkpoints.json) whose bytes the image build stages beside the default
                       checkpoint (build-c2-serving-image.sh). Space- or comma-separated; every id must be a candidate of the table (the default is never staged);
                       needs the build action. Default, rendered empty: only the placeholder (drafter_checkpoint.py, docs/tp4-combined-window.md)
+  C2_BOX_MINUTES      the job's BOX in minutes (1..540; default, rendered empty: none): what the job may take when it runs to its limit, the number a
+                      window driver admits the job on. The workflow enforces it from inside, never by cancelling the run: the four-card smoke step
+                      stops waiting for the API at the box and runs its smoke client under `timeout` for what the box has left (the container
+                      is removed by the step's own trap); the gate step hands the gate driver min(step, job, box) as --budget-seconds, which refuses before
+                      any container starts a plan list whose worst case (every arm to its docker timeout) does not fit; the prefix step hands the prefix gate
+                      --box-seconds, which clips every arm's docker timeout to what the box has left and starts no arm with under five minutes left (no plan is refused)
   C2_GATE_PLAN        GATE_PLANS, comma- or space-separated, run in order (default: bringup)
   C2_GATE_LENGTHS     the matrix's prompt lengths, one per user (default, rendered empty: the S1 G4
                       ladder, whose top rung the gate lowers to what the image's profile admits)
@@ -177,7 +183,7 @@ DEFAULT_MAX_TOKENS = 4096
 PROFILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'qwen_c2_profiles.json')
 TAG = re.compile(r'[0-9a-z.-]{3,40}')
 PLATFORM_IMAGE = re.compile(r'[0-9a-z.:/@_-]{10,200}')
-PROFILE_NAME = re.compile(r'[a-z0-9_-]{1,40}')
+PROFILE_NAME = re.compile(r'[a-z0-9_-]{1,64}')
 # A Hugging Face style id, org/name, and an optional deployment tag: Qwen/Qwen3.8-27B, Qwen/Qwen3.8-27B:tt.
 MODEL_ID = re.compile(r'[0-9A-Za-z._-]{1,96}/[0-9A-Za-z._-]{1,96}(?::[0-9A-Za-z._-]{1,40})?')
 
@@ -442,12 +448,13 @@ def read_job(values, profiles, root=ROOT, meshes=None):
     bake_profile = read_bake(values, actions, cards, root)
     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root)
     drafter_candidates = read_drafter_candidates(values, actions)
+    box_minutes = read_box(values, actions)
     outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), rmi_tags=rmi_tags, tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
                    gate_memory_prompt=str(memory_prompt), gate_memory_users=str(memory_users), replay_profile=replay_profile,
                    replay_served_model=replay_served_model, replay_budget_smoke=budget_smoke, cardm_harness=cardm_harness, cardm_args=cardm_args,
-                   cardm_env=cardm_env, bake_default_profile=bake_profile, drafter_candidates=drafter_candidates)
+                   cardm_env=cardm_env, bake_default_profile=bake_profile, drafter_candidates=drafter_candidates, box_minutes=box_minutes)
     outputs.update(s2)
     outputs.update(prefix)
     return outputs
@@ -494,6 +501,30 @@ def read_drafter_candidates(values, actions, table=None):
     if len(set(ids)) != len(ids):
         raise JobError('C2_DRAFTER_CANDIDATES names an id twice')
     return ' '.join(ids)
+
+
+BOX_MAX_MINUTES = 540
+# timeout-minutes of the workflow's smoke, gate and prefix steps (pinned by test_c2_serving_job against the workflow file).
+STEP_MINUTES = {'smoke': 210, 'gate': 380, 'prefix': 380}
+
+
+def read_box(values, actions):
+    """C2_BOX_MINUTES (module docstring) as a string of whole minutes, '' when unset, or JobError. Only the steps that run for a while take a
+    box: a job with none of smoke, gate, prefix is refused one (a status or a reset has no box to enforce)."""
+    text = values.get('C2_BOX_MINUTES', '').strip()
+    if not text:
+        return ''
+    minutes = positive_int('C2_BOX_MINUTES', text)
+    if minutes > BOX_MAX_MINUTES:
+        raise JobError('C2_BOX_MINUTES must be at most %d (the 9 h cap of a window), got %d' % (BOX_MAX_MINUTES, minutes))
+    if not set(actions) & set(('smoke', 'gate', 'prefix')):
+        raise JobError('C2_BOX_MINUTES is enforced by the smoke, gate and prefix steps: C2_ACTIONS has none of them')
+    # The workflow's own step timeouts (smoke 210 min, gate and prefix 380) are the hard ceiling the box sits under: a larger box would be cut by the step, not by the box.
+    ceiling = max(STEP_MINUTES[action] for action in actions if action in STEP_MINUTES)
+    if minutes > ceiling:
+        raise JobError('C2_BOX_MINUTES %d is above the %d min step timeout of the job longest step (%s)' % (
+            minutes, ceiling, ', '.join('%s %d' % (action, STEP_MINUTES[action]) for action in actions if action in STEP_MINUTES)))
+    return str(minutes)
 
 
 def read_bake(values, actions, cards, root=ROOT):

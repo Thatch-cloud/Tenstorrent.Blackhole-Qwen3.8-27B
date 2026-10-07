@@ -211,6 +211,9 @@ CONTAINER_PREFIX = 'qwen-c2-prefix-'
 DERIVED_MOUNT = '/prefix-gate/profiles.json'
 READINESS_SECONDS = 1800
 ARM_OVERHEAD_SECONDS = 180
+# --box-seconds (the job's box, C2_BOX_MINUTES): an arm that starts with less than this left in the box is not started (NOT_EXERCISED); one that starts runs with
+# its docker timeout clipped to what the box has left, so the box is enforced by the arm's own deadline and no run is ever cancelled.
+BOX_MIN_ARM_SECONDS = 300
 SETTLE_SECONDS = 3.0
 MAX_LISTED = 16
 # 1280 blocks: above one 65,536-token request, small enough to build a failed allocation and a preemption.
@@ -1457,6 +1460,7 @@ class Runner(object):
         self.corpus = corpus
         self.seed, self.agents, self.turns = seed, agents, turns
         self.infra = None
+        self.box_deadline = None            # clock time the job's box ends (--box-seconds), or None
         self.waived = False                 # an arm's log showed the 262k waiver
         self.multi_unqualified = False      # ... or the multi-user SDPA launch (G16 0x21), outside the 262k evidence
         self.arms = {}
@@ -1514,9 +1518,21 @@ class Runner(object):
         with open(os.path.join(arm_dir, 'docker-run.json'), 'w') as handle:
             json.dump(arguments, handle, indent=1)
         started = self.clock()
-        deadline = started + arm['timeout'] - 60
+        limit = arm['timeout']
+        if self.box_deadline is not None:
+            left = int(self.box_deadline - started)
+            if left < BOX_MIN_ARM_SECONDS:
+                reason = 'the job box has %d s left, under the %d s an arm needs to start' % (max(left, 0), BOX_MIN_ARM_SECONDS)
+                self.log('[PREFIX-GATE] arm %s: not started - %s' % (arm['arm'], reason))
+                result = dict(verdict='NOT_EXERCISED', reason=reason, lines=[], not_exercised=[reason], boxed=True)
+                self.arms[arm['arm']] = result
+                return None, result
+            if left < limit:
+                self.log('[PREFIX-GATE] arm %s: the job box clips its %d s timeout to %d s' % (arm['arm'], limit, left))
+                limit = left
+        deadline = started + limit - 60
         self.log('[PREFIX-GATE] arm %s: profile %s, scenario %s, %d s' % (arm['arm'], arm['served'], arm['scenario'],
-                                                                         arm['timeout']))
+                                                                         limit))
         self.docker(['docker', 'rm', '-f', name], 120)
         client = self.make_client()
         container = self.make_container(name)
@@ -1741,6 +1757,8 @@ def build_parser():
     parser.add_argument('--turns', type=int, default=replay.TIMING_TURNS)
     parser.add_argument('--results', required=True)
     parser.add_argument('--budget-seconds', type=int, default=None)
+    parser.add_argument('--box-seconds', type=int, default=None,
+                        help='the job box (C2_BOX_MINUTES): arms run with their docker timeouts clipped to what it has left; no plan is refused for it')
     parser.add_argument('--checkout', default=os.path.dirname(os.path.dirname(HERE)))
     parser.add_argument('--profiles', default=None, help='a profiles JSON instead of the image\'s own')
     parser.add_argument('--hub', default=gate.HUB)
@@ -1802,7 +1820,7 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
     os.makedirs(options.results, exist_ok=True)
     if options.dry_run:
         # One JSON line of totals (the arms the profile makes NOT_APPLICABLE among them), then one per arm.
-        totals = dict(worst_case_seconds=worst_case, budget_seconds=options.budget_seconds)
+        totals = dict(worst_case_seconds=worst_case, budget_seconds=options.budget_seconds, box_seconds=options.box_seconds)
         if any(skipped.values()):
             totals['not_applicable'] = dict((plan, [arm for arm, _ in entries]) for plan, entries in skipped.items()
                                             if entries)
@@ -1826,8 +1844,10 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
                                         devices if devices is not None else gate.devices_for(options.cards),
                                         options.hub,
                                         options.port, log=log, seed=options.seed, agents=agents, turns=options.turns)
+    if options.box_seconds is not None:
+        runner.box_deadline = runner.clock() + options.box_seconds
     summary = dict(image=options.image, profile=options.profile, baseline=options.baseline, plans=plans,
-                   worst_case_seconds=worst_case, budget_seconds=options.budget_seconds, results={},
+                   worst_case_seconds=worst_case, budget_seconds=options.budget_seconds, box_seconds=options.box_seconds, results={},
                    not_applicable=dict((plan, [dict(arm=arm, why=why) for arm, why in entries])
                                        for plan, entries in skipped.items() if entries))
     try:

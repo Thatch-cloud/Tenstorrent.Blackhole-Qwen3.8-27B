@@ -1295,6 +1295,64 @@ class MainTests(unittest.TestCase):
             self.assertEqual(code, 1)
 
 
+class BoxTests(unittest.TestCase):
+    """--box-seconds (the short-window plan, tooling item 4): the job's box is enforced by the arm's own deadline, never by cancelling."""
+
+    def setUp(self):
+        self.results = tempfile.mkdtemp()
+        patcher = fakes.burst_aware(lambda: CURRENT['engine'])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        shutil.rmtree(self.results, ignore_errors=True)
+
+    def run_arm(self, left):
+        harness = Harness()
+        runner = harness.runner(os.path.join(self.results, 'box'))
+        lines = []
+        runner.log = lines.append
+        runner.box_deadline = runner.clock() + left if left is not None else None
+        arm = arm_of('exactness', 'exactness-eager')
+        driver, result = runner.run(arm)
+        return driver, result, lines, harness, arm
+
+    def test_an_arm_with_under_five_minutes_left_is_not_started_and_opens_no_container(self):
+        driver, result, lines, harness, _ = self.run_arm(120)
+        self.assertIsNone(driver)
+        self.assertEqual(result['verdict'], 'NOT_EXERCISED')
+        self.assertTrue(result['boxed'])
+        self.assertTrue(any('not started - the job box has' in line for line in lines), lines)
+        self.assertEqual([call for call in harness.calls if call[:3] == ['docker', 'run', '-d']], [])
+
+    def test_an_arm_that_starts_runs_with_its_timeout_clipped_to_what_the_box_has_left(self):
+        _, _, lines, _, arm = self.run_arm(1000)
+        self.assertGreater(arm['timeout'], 1000)
+        clipped = [line for line in lines if 'the job box clips its %d s timeout to' % arm['timeout'] in line]
+        self.assertEqual(len(clipped), 1, lines)
+        shown = [line for line in lines if 'profile %s, scenario' % arm['served'] in line][0]
+        limit = int(shown.rsplit(', ', 1)[1].split()[0])
+        self.assertTrue(995 <= limit <= 1000, shown)
+
+    def test_a_box_larger_than_the_timeout_clips_nothing_and_no_box_is_the_old_behaviour(self):
+        for left in (None, 10 ** 6):
+            with self.subTest(left=left):
+                _, _, lines, _, arm = self.run_arm(left)
+                self.assertFalse([line for line in lines if 'box clips' in line])
+                shown = [line for line in lines if 'profile %s, scenario' % arm['served'] in line][0]
+                self.assertTrue(shown.endswith('%d s' % arm['timeout']), shown)
+
+    def test_main_takes_box_seconds_and_refuses_no_plan_for_it(self):
+        with open(os.path.join(self.results, 'profiles.json'), 'w', encoding='utf-8') as handle:
+            json.dump(profiles(), handle)
+        lines = []
+        code = gate.main(['--image', 'img', '--profiles', os.path.join(self.results, 'profiles.json'), '--results', os.path.join(self.results, 'out'),
+                          '--plan', 'exactness,lifecycle', '--box-seconds', '600', '--dry-run'], devices=['/a', '/b'], log=lines.append)
+        self.assertEqual(code, 0, lines[-1:])
+        self.assertEqual(json.loads(lines[0])['box_seconds'], 600)
+        self.assertGreater(json.loads(lines[0])['worst_case_seconds'], 600)
+
+
 class JobTests(unittest.TestCase):
     PROFILES = ['coding', 'exact', 'general', 'general-prefix']
 

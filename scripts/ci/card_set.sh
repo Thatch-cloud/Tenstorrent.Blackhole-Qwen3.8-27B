@@ -30,6 +30,9 @@ card_set_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CARD_SET_EXPECT=${CARD_SET_EXPECT:-4}
 CARD_SET_DRIVER=tenstorrent
 CARD_SET_REPROBES=2
+# How long the reset step waits for the by-id links before it heals (card_set_heal's first argument): in 117 resets the links were back at 0 s (74) or still
+# missing at 90 s (43), never in between, so a wait beyond a few seconds heals nothing; the re-probe that follows does. The workflow passes this.
+CARD_SET_HEAL_WAIT=${CARD_SET_HEAL_WAIT:-10}
 CARD_SET_REPROBE_WAIT=60
 CARD_SET_RESCANS=2
 CARD_SET_RESCAN_WAIT=30

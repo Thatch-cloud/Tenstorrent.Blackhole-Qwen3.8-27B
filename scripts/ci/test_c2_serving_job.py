@@ -746,5 +746,99 @@ class CardBTests(unittest.TestCase):
                 self.assertNotIn(banned, result.stdout + result.stderr)
 
 
+def box(**values):
+    base = dict(C2_IMAGE_TAG='tp4-serve-11', C2_PROFILE='c2-packed-tp4-8x262k-ship-prefix', C2_PREFIX_PROFILE='c2-packed-tp4-8x262k-ship-prefix',
+                C2_PREFIX_PLAN='exactness-shared', C2_PREFIX_BASELINE='none')
+    base.update(values)
+    return job.read_job(base, job.profile_names())
+
+
+class BoxTests(unittest.TestCase):
+    """C2_BOX_MINUTES (the short-window plan, tooling item 4): the job's box, enforced from inside the steps and never by cancelling the run."""
+
+    def test_unset_is_empty_and_a_number_is_passed_through(self):
+        self.assertEqual(box(C2_ACTIONS='smoke', C2_CARDS='quad')['box_minutes'], '')
+        self.assertEqual(box(C2_ACTIONS='reset smoke', C2_CARDS='quad', C2_BOX_MINUTES='45')['box_minutes'], '45')
+        self.assertEqual(box(C2_ACTIONS='reset prefix', C2_CARDS='quad', C2_BOX_MINUTES=' 340 ')['box_minutes'], '340')
+
+    def test_a_malformed_or_out_of_range_box_is_refused(self):
+        for bad in ('0', '-5', 'x', '4.5', '541'):
+            with self.subTest(box=bad), self.assertRaises(job.JobError):
+                box(C2_ACTIONS='reset smoke', C2_CARDS='quad', C2_BOX_MINUTES=bad)
+
+    def test_a_job_with_no_long_step_takes_no_box(self):
+        with self.assertRaises(job.JobError):
+            box(C2_ACTIONS='status rescan reset', C2_CARDS='quad', C2_BOX_MINUTES='10')
+
+    def test_a_box_above_its_steps_timeout_is_refused(self):
+        self.assertEqual(box(C2_ACTIONS='reset smoke', C2_CARDS='quad', C2_BOX_MINUTES='210')['box_minutes'], '210')
+        with self.assertRaises(job.JobError):
+            box(C2_ACTIONS='reset smoke', C2_CARDS='quad', C2_BOX_MINUTES='211')
+        self.assertEqual(box(C2_ACTIONS='reset prefix', C2_CARDS='quad', C2_BOX_MINUTES='380')['box_minutes'], '380')
+        with self.assertRaises(job.JobError):
+            box(C2_ACTIONS='reset prefix', C2_CARDS='quad', C2_BOX_MINUTES='381')
+
+    def test_the_step_ceilings_are_the_workflows_own_timeouts(self):
+        for action, name in (('smoke', 'Smoke on the four-card set'), ('gate', "Run the gate in the agent's container shape"),
+                             ('prefix', "Prefix-reuse gates in the agent's container shape")):
+            found = re.search(r'timeout-minutes: (\d+)', step_text(name))
+            self.assertEqual(job.STEP_MINUTES[action], int(found.group(1)), name)
+
+    def test_a_profile_name_of_the_long_family_can_be_baked(self):
+        name = 'c2-packed-tp4-8x262k-ship-prefix-levern-traffic'
+        self.assertGreater(len(name), 40)
+        self.assertTrue(job.PROFILE_NAME.fullmatch(name))
+        self.assertIsNone(job.PROFILE_NAME.fullmatch('c2' * 40))
+
+
+class BoxWorkflowTests(unittest.TestCase):
+    """The workflow's side of the box, the heal wait and the readiness poll."""
+
+    def test_the_smoke_step_stops_waiting_at_the_box_and_runs_the_client_under_timeout(self):
+        script = step_script('Smoke on the four-card set')
+        self.assertIn('BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}', step_text('Smoke on the four-card set'))
+        self.assertIn('box_end=$(( $(date +%s) + BOX_MINUTES * 60 ))', script)
+        self.assertIn('smoke_wrap=(timeout -k 30 "$left")', script)
+        self.assertIn('[ "$(date +%s)" -ge "$box_end" ]', script)
+        self.assertIn('|| smoke_status=$?', script)
+
+    def test_the_readiness_poll_is_two_seconds(self):
+        script = step_script('Smoke on the four-card set')
+        self.assertIn('ready_poll=2', script)
+        self.assertIn('seq 1 $(( 4800 / ready_poll ))', script)
+        self.assertIn('sleep "$ready_poll"', script)
+        self.assertNotIn('sleep 15', script)
+
+    def test_the_gate_step_hands_the_gate_the_smaller_of_step_job_and_box(self):
+        name = "Run the gate in the agent's container shape"
+        self.assertIn('BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}', step_text(name))
+        script = step_script(name)
+        self.assertIn('if [ -n "$BOX_MINUTES" ] && [ $(( BOX_MINUTES * 60 )) -lt "$budget" ]; then budget=$(( BOX_MINUTES * 60 )); fi', script)
+        self.assertLess(script.index('BOX_MINUTES * 60'), script.index('--budget-seconds "$budget"'))
+
+    def test_the_prefix_step_hands_the_prefix_gate_its_box_to_clip_every_arm_with(self):
+        name = "Prefix-reuse gates in the agent's container shape"
+        self.assertIn('BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}', step_text(name))
+        script = step_script(name)
+        self.assertIn('${BOX_MINUTES:+--box-seconds "$(( BOX_MINUTES * 60 ))"}', script)
+        self.assertNotIn('budget=$(( BOX_MINUTES * 60 ))', script, 'the prefix box clips arms; it never refuses a plan')
+
+    def test_the_four_card_reset_waits_ten_seconds_for_the_links(self):
+        script = step_script('Reset all four cards')
+        self.assertIn('card_set_heal "$CARD_SET_HEAL_WAIT" 1000', script)
+        self.assertNotIn('card_set_heal 90', script)
+        with open(os.path.join(HERE, 'card_set.sh'), encoding='utf-8') as handle:
+            self.assertIn('CARD_SET_HEAL_WAIT=${CARD_SET_HEAL_WAIT:-10}', handle.read())
+
+    def test_the_workflow_text_is_valid_yaml_and_has_no_carriage_return(self):
+        text = workflow_text()
+        self.assertNotIn(chr(13), text)
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest('no PyYAML')
+        self.assertIn('jobs', yaml.safe_load(text))
+
+
 if __name__ == '__main__':
     unittest.main()
