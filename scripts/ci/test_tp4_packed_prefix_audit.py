@@ -68,6 +68,11 @@ LEVER_MODULES = (
     'dflash_proposal_trace.py',        # the drafter's proposal trace: its masks, history and cache are the drafter's own
     'serving_page_binding.py',         # the verifier's page-table refresh: the table the ordered writers address through
     'packed_verifier.py',              # write_packed: the verifier's staged inputs (tokens, positions, page tables)
+    # tp4/w2: the wave-2 attention and conv-gates levers (QWEN_FAST_TP4_SDPA=multi, QWEN_FAST_TP4_CONV_GATES_SPREAD); write sites classified below
+    'sdpa_multi_tp.py',                # the one-launch block attention: its own stacked table, cur_pos and mask (+ the SDPA audit's counters)
+    'sdpa_long_tp.py',                 # the SDPA mode selector and the grid configurations: no write site
+    'gdn_conv_gates_spread.py',        # QWEN_FAST_TP4_CONV_GATES_SPREAD: the block conv-gates launch on spread gate cores
+    'gdn_block_conv_tp.py',            # QWEN_FAST_TP4_GDN_BLOCK_CONV: the block conv stage that calls the spread launch (no write site)
 )
 # A call that writes the target K/V pool: the ordered writers and the stock cache updates.
 POOL_WRITE = re.compile(r'paged_update_cache|paged_fill_cache|fill_cache\(|ordered_cache\.update|ordered_cache_tp\.update'
@@ -242,10 +247,20 @@ AUDITED_WRITE_SITES = {
     ('dflash_proposal_trace.py', '_update.copy_cache', 'copy'): 'the drafter\'s own cache',
     ('serving_page_binding.py', 'refresh', 'copy_host_to_device_tensor'): 'the verifier\'s page table (the address the ordered writers use)',
     ('packed_verifier.py', 'write_packed', 'copy_host_to_device_tensor'): 'the verifier\'s staged tokens, positions and page tables',
+    # tp4/w2. Classified: multi gathers each user's lent table row into its own stacked table in-trace and reads the pool through it (the
+    # pool is never a write destination: its programs are readers, exactness item 3 of sdpa_multi_tp); the two refresh launches write the
+    # stacked table, cur_pos and the mask; the audit's counter pages are its own. F1's launch writes fresh conv, beta and g outputs and
+    # advances the BLOCK windows in place exactly as the served op does (the block windows are copies of the users' windows made by
+    # rows_dma), and the audit copies the same windows into shared scratch. Neither module names the pool.
+    ('sdpa_multi_tp.py', 'refresh', 'generic_op'): 'multi\'s own stacked table, cur_pos and mask (the gather and mask launches)',
+    ('sdpa_multi_tp.py', 'call', 'generic_op'): 'the SDPA audit\'s own counter pages',
+    ('gdn_conv_gates_spread.py', 'launch', 'generic_op'): 'fresh conv, beta and g outputs and the block windows advanced in place as the served op does',
+    ('gdn_conv_gates_spread.py', 'launch', 'copy'): 'the audit\'s shared scratch windows',
 }
 # Sites that make more than one write call (the drafter proposal trace publishes two outputs and copies history and cache together).
 SITES_WITH_SEVERAL_CALLS = {('dflash_proposal_trace.py', 'publish_outputs', 'copy'): 2,
-                            ('dflash_proposal_trace.py', 'update.copy_history_and_cache', 'copy'): 2}
+                            ('dflash_proposal_trace.py', 'update.copy_history_and_cache', 'copy'): 2,
+                            ('sdpa_multi_tp.py', 'refresh', 'generic_op'): 2}
 POOL_NAMES = re.compile(r'_paged_kv|kv_cache|k_cache|v_cache|paged_cache|kv_pool', re.IGNORECASE)
 
 
