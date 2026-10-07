@@ -363,11 +363,13 @@ timeout_s=7200
 WATCHER=${WATCHER:-0}
 case $WATCHER in 0|1) ;; *) echo "refusing: WATCHER=$WATCHER is not 0 or 1" >&2; exit 1 ;; esac
 
-# The library echoes the board id, node and PCI address on stdout; this repo is public and the step tees stdout into a public log, so those lines go to
-# /dev/null here (its refusals are on stderr and stay). Nothing below prints a board id, node, PCI address or image reference.
-qual_card_resolve >/dev/null
+# The library echoes the board id, node and PCI address on stdout; this repo is public and the step tees stdout into a public log, so stdout goes to
+# /dev/null around those calls (its refusals are on stderr and stay; the calls stay bare lines, which test_qual_card matches). Nothing below prints a board id, node, PCI address or image reference.
+exec 3>&1 1>/dev/null   # stdout is quiet through the checks below (refusals are on stderr and stay)
+qual_card_resolve
 node=$QUAL_NODE
-qual_refuse_holders >/dev/null
+qual_refuse_holders
+exec 1>&3 3>&-
 
 IMAGE=${IMAGE:-}
 if [ -z "$IMAGE" ]; then

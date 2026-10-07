@@ -359,8 +359,10 @@ class ScriptTests(unittest.TestCase):
     def test_the_serials_and_the_image_reference_stay_out_of_the_log(self):
         text = self.text()
         tail = text[text.index('# <<< qual_card.sh'):]
-        self.assertIn('qual_card_resolve >/dev/null', tail)
-        self.assertIn('qual_refuse_holders >/dev/null', tail)
+        self.assertIn('exec 3>&1 1>/dev/null', tail)
+        self.assertLess(tail.index('exec 3>&1 1>/dev/null'), tail.index('\nqual_card_resolve\n'))
+        self.assertLess(tail.index('\nqual_refuse_holders\n'), tail.index('exec 1>&3 3>&-'))
+        self.assertLess(tail.index('exec 1>&3 3>&-'), tail.index('docker images'))
         self.assertIn('qual_card_recheck >/dev/null', tail)
         for needle in ('card=$QUAL_CARD', 'node=$node', 'image=$IMAGE', 'qual_reset_hint >&2', '$R/gdn-wy-$stamp.json"'):
             self.assertNotIn(needle, tail)
