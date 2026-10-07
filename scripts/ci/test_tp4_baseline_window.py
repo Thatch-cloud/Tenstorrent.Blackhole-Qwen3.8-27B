@@ -211,7 +211,7 @@ class TemplateTests(unittest.TestCase):
         for name in templates():
             actions = set(raw(name)['C2_ACTIONS'].split())
             if name == 'A0-agentstop-unserve':
-                self.assertEqual(actions, {'status', 'agentstop', 'unserve'})
+                self.assertEqual(actions, {'agentstop', 'unserve'})
             elif name == 'Z-handback':
                 self.assertEqual(actions, {'status', 'agentstart'})
             else:
