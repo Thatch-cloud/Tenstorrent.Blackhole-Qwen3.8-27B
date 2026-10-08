@@ -187,8 +187,9 @@ class Rig(object):
             tokens = result.num_scheduled_tokens[who]
             self.emulate_route(who, start, start + tokens, scheduler.requests[who].prompt_tokens)
             event = ('prefill', who, start, tokens)
-            self.clock.advance_ms(prefill_ms)
-            self.wall.advance_ms(prefill_ms)
+            took = prefill_ms(who, start, tokens) if callable(prefill_ms) else prefill_ms
+            self.clock.advance_ms(took)
+            self.wall.advance_ms(took)
         else:
             event = ('decode', None, None, sum(1 for value in result.num_scheduled_tokens.values() if value == 1))
             self.clock.advance_ms(decode_ms)
@@ -616,15 +617,15 @@ class GovernorIntegrationTests(GateFreeCase):
         rig.prefill_step()
         lines = [call.args for call in rig.log.call_args_list if call.args and call.args[0] == levern_policy.STEP_LINE_MERGED]
         self.assertTrue(lines)
-        f_eff = lines[-1][-1]
+        f_eff = lines[-1][-3]
         self.assertGreater(f_eff, 0.5, 'a prompt that arrived 120 s ago with 90 s of work left has 60 s: the share is raised')
         self.assertLessEqual(f_eff, 1.0)
         calm = Rig(environ={'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180', 'QWEN_FAST_LEVERN_ROUNDS': None})
         calm.add('cold', 253920, arrival=calm.wall.now)
         calm.prefill_step()
         calm_lines = [call.args for call in calm.log.call_args_list if call.args and call.args[0] == levern_policy.STEP_LINE_MERGED]
-        self.assertGreater(calm_lines[-1][-1], 0.5)
-        self.assertLess(calm_lines[-1][-1], f_eff, 'a fresh arrival is governed less than one 120 s old')
+        self.assertGreater(calm_lines[-1][-3], 0.5)
+        self.assertLess(calm_lines[-1][-3], f_eff, 'a fresh arrival is governed less than one 120 s old')
 
     def test_the_pending_hint_lists_the_longs_in_service_order_and_leaves_the_shorts_out(self):
         rig = Rig(environ={'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180'})
@@ -778,6 +779,56 @@ class InstallTests(GateFreeCase):
         self.assertEqual(graft.ADMISSION_WRAPPED, admission.WRAPPED)
         self.assertEqual(graft.LEVERN_ENV, levern_policy.FLAG)
         self.assertEqual(levern_scheduler.GRAFT_ATTR, '_qwen_prefix')
+
+
+class SkewTests(GateFreeCase):
+    """concurrent8_skew (v584 / v620): two cold prompts of 251,727 and 253,238 tokens arrive together beside four decoders. Their 180 s targets cannot
+    both be met even at share 1.0, so the governor pins 1.0; the decoders must still get a round every QWEN_FAST_LEVERN_MAX_DECODE_GAP_S seconds (they
+    got none for 92-98 s), and the second long must still land inside the 240 s client deadline."""
+    LONGS = (('long1', 251727), ('long2', 253238))
+    ROUND_MS = 167.0
+
+    @staticmethod
+    def step_ms(who, start, tokens):
+        """0.31-1.23 s per 2,048-token chunk over the context, plus the engine build on the final step."""
+        ms = (300.0 + 3.7 * start / 1000.0) * max(1, -(-tokens // CHUNK))
+        return ms + (5000.0 if start + tokens >= dict(SkewTests.LONGS)[who] else 0.0)
+
+    def simulate(self, gap):
+        rig = Rig(environ={'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180', 'QWEN_FAST_LEVERN_ROUNDS': None, 'QWEN_FAST_LEVERN_PREFILL_SHARE': '0.5',
+                           'QWEN_FAST_LEVERN_PARK': '0', 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': str(gap)}, seats=8, decoders=4)
+        t0 = rig.clock.now
+        for name, prompt in self.LONGS:
+            rig.add(name, prompt)
+        finished, rounds, guard, longest = {}, [], 0, 0.0
+        while len(finished) < 2:
+            guard += 1
+            self.assertLess(guard, 5000)
+            event = rig.step(prefill_ms=self.step_ms, decode_ms=self.ROUND_MS)
+            if event[0] == 'decode':
+                rounds.append(rig.clock.now - t0)
+            else:
+                longest = max(longest, self.step_ms(event[1], event[2], event[3]) / 1000.0)
+                if event[2] + event[3] >= dict(self.LONGS)[event[1]]:
+                    finished[event[1]] = rig.clock.now - t0
+        lines = [call.args for call in rig.log.call_args_list if call.args and call.args[0] == levern_policy.STEP_LINE_MERGED]
+        f_effs = [line[15] for line in lines]
+        edges = [0.0] + rounds + [max(finished.values())]
+        worst = max(b - a for a, b in zip(edges, edges[1:]))
+        return dict(finished=finished, worst=worst, longest=longest, f_effs=f_effs, decode_s=len(rounds) * self.ROUND_MS / 1000.0, wall=rig.clock.now - t0)
+
+    def test_the_decoders_get_a_round_every_g_seconds_through_a_pinned_one(self):
+        run = self.simulate(8)
+        self.assertIn(1.0, run['f_effs'], 'the shape cannot meet T*: the governor pins 1.0')
+        self.assertLessEqual(run['worst'], 8.0 + run['longest'] + 2 * self.ROUND_MS / 1000.0, 'G + the longest step (an atomic final step with the build); today about 90 s')
+        self.assertLess(max(run['finished'].values()), 240.0, 'the second long still lands inside the client deadline')
+        off = self.simulate(0)
+        self.assertLessEqual((run['decode_s'] - off['decode_s']) / run['wall'], 0.03, 'the floor itself costs at most 3% of the wall time')
+        self.assertLessEqual(run['wall'] - off['wall'], 0.03 * off['wall'])
+
+    def test_without_the_floor_the_decoders_stall_for_a_whole_long(self):
+        run = self.simulate(0)
+        self.assertGreater(run['worst'], 60.0, 'v584 / v620: 92-98 s without a decode round')
 
 
 if __name__ == '__main__':

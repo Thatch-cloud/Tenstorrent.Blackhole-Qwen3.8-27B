@@ -1229,9 +1229,17 @@ LEVERN_GRAFT_CHUNKED = 'chunked=levern'
 LEVERN_PARK_OUT = re.compile(r'\[PINDIAG\] lever N park out req=(\S+) at=(\d+)')
 LEVERN_PARK_IN = re.compile(r'\[PINDIAG\] lever N park in req=(\S+) at=(\d+)')
 LEVERN_STEP = re.compile(r'\[PINDIAG\] lever N step n=(\d+) kind=(prefill|decode) seats=(\d+) req=(\S+) start=(\S+) tokens=(\d+) '
-                         r'end=(\S+) prompt=(\S+) final=(\S+) reason=(\S+) prev=(\S+):(\S+)ms owed_ms=(\S+) owed_rounds=(\d+)')
+                         r'end=(\S+) prompt=(\S+) final=(\S+) reason=(\S+) prev=(\S+):(\S+)ms owed_ms=(\S+) owed_rounds=(\d+)'
+                         r'(?: f_eff=(\S+))?(?: need=(\S+))?(?: gap_ms=(\S+))?')
 LEVERN_DIGEST = re.compile(r'\[PINDIAG\] lever N digest req=(\S+) prompt=(\d+) tokens_sha=([0-9a-f]{32}) slot_sha=([0-9a-f]{32}) '
                            r'logits_sha=([0-9a-f]{32}) kv_sha=([0-9a-f]{32})')
+
+
+def _float_or(text, default):
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return default
 
 
 def levern_facts(container_text):
@@ -1240,7 +1248,8 @@ def levern_facts(container_text):
                    wrote=m.group(6) == '1', programs=(m.group(8), m.group(9)), window=int(m.group(10)), source=m.group(11), captured=m.group(12))
               for m in LEVERN_ROUTE.finditer(container_text)]
     steps = [dict(n=int(m.group(1)), kind=m.group(2), seats=int(m.group(3)), req=m.group(4), start=m.group(5), tokens=int(m.group(6)),
-                  end=m.group(7), prompt=m.group(8), final=m.group(9), reason=m.group(10)) for m in LEVERN_STEP.finditer(container_text)]
+                  end=m.group(7), prompt=m.group(8), final=m.group(9), reason=m.group(10), prev_kind=m.group(11), prev_ms=_float_or(m.group(12), 0.0),
+                  f_eff=_float_or(m.group(15), None)) for m in LEVERN_STEP.finditer(container_text)]
     digests = [dict(req=m.group(1), prompt=int(m.group(2)), tokens=m.group(3), slot=m.group(4), logits=m.group(5), kv=m.group(6))
                for m in LEVERN_DIGEST.finditer(container_text)]
     return dict(routes=routes, steps=steps, digests=digests)
@@ -1286,22 +1295,51 @@ def levern_route_problems(routes):
     return problems
 
 
+LEVERN_GAP_SLACK_MS = 1000.0
+LEVERN_PINNED_SHARE = 0.9995
+
+
 def levern_alternation_problems(steps, env):
-    """Whenever a prefill step ran with decoders (seats > 0) and its request has another prefill step later, a decode step that served at least
-    one seat must lie between them, unless the share is 1.0 (back-to-back chunks, today's stall chunked)."""
+    """Two rules over the scheduler's step lines.
+    (1) Whenever a prefill step ran with decoders (seats > 0) and its request has another prefill step later, a decode step that served at least
+    one seat must lie between them, unless the step ran at an effective share of 1.0 (f_eff on the merged step line: the deadline governor pinned the
+    prefill at all the device, so nothing is owed) or the STATIC share is 1.0 (back-to-back chunks, today's stall chunked).
+    (2) The decode-gap floor (QWEN_FAST_LEVERN_MAX_DECODE_GAP_S G, default 8, 0 off): the prefill steps that ran with decoders between two decode rounds
+    that served a seat must not add up to more than G seconds + the longest single step of the stretch (a step cannot be split) + 1 s. A step's own
+    duration is the NEXT line's prev_ms, so it is charged when the next line arrives. Pre-governor lines (no f_eff) carry no floor."""
     share_one = str(env.get('QWEN_FAST_LEVERN_PREFILL_SHARE', '')) in ('1', '1.0') and not env.get('QWEN_FAST_LEVERN_ROUNDS')
     if share_one:
         return []
+    try:
+        gap_s = float(env.get('QWEN_FAST_LEVERN_MAX_DECODE_GAP_S', 8))
+    except (TypeError, ValueError):
+        gap_s = 8.0
     problems, last_prefill, decoded = [], None, False
+    previous, stretch_ms, longest_ms, flagged = None, 0.0, 0.0, False
     for step in steps:
+        if previous is not None and previous['kind'] == 'prefill' and previous['seats'] > 0 and step.get('prev_kind') == 'prefill':
+            took = step.get('prev_ms') or 0.0
+            stretch_ms += took
+            longest_ms = max(longest_ms, took)
+            if gap_s and previous.get('f_eff') is not None and not flagged and stretch_ms > gap_s * 1000.0 + longest_ms + LEVERN_GAP_SLACK_MS:
+                problems.append('decoders went %.1f s without a decode round that served a seat (n=%d..%d, the floor is %g s + the longest step %.1f s + %.0f s): '
+                                'the decode-gap floor did not hold' % (stretch_ms / 1000.0, step['n'] - 1, step['n'], gap_s, longest_ms / 1000.0,
+                                                                        LEVERN_GAP_SLACK_MS / 1000.0))
+                flagged = True
         if step['kind'] == 'decode':
             if step['seats'] >= 1:
                 decoded = True
+                stretch_ms, longest_ms, flagged = 0.0, 0.0, False
+            previous = step
             continue
-        if last_prefill is not None and last_prefill['req'] == step['req'] and last_prefill['seats'] > 0 and not decoded:
+        if step['seats'] == 0:
+            stretch_ms, longest_ms, flagged = 0.0, 0.0, False
+        pinned = last_prefill is not None and (last_prefill.get('f_eff') or 0.0) >= LEVERN_PINNED_SHARE
+        if last_prefill is not None and last_prefill['req'] == step['req'] and last_prefill['seats'] > 0 and not decoded and not pinned:
             problems.append('two prefill steps of %s (n=%d and n=%d) ran back to back with %d decoder(s) running: the alternation did not yield'
                             % (step['req'], last_prefill['n'], step['n'], last_prefill['seats']))
         last_prefill, decoded = step, False
+        previous = step
     return problems
 
 

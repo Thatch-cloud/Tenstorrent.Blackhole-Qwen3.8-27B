@@ -418,12 +418,14 @@ class ValidStepTests(unittest.TestCase):
 
 class MergedConfigTests(unittest.TestCase):
     def test_the_defaults(self):
-        self.assertEqual(policy.merged_config({}), policy.Merged(180, 16384, '0', 1, 30, 'global'))
+        self.assertEqual(policy.merged_config({}), policy.Merged(180, 16384, '0', 1, 30, 'global', 8))
 
     def test_every_flag_parses(self):
         env = {'QWEN_FAST_LEVERN_TTFT_TARGET_S': '120', 'QWEN_FAST_LEVERN_SHORT_TOKENS': '8192', 'QWEN_FAST_LEVERN_PARK': 'host',
-               'QWEN_FAST_LEVERN_PARK_SLOTS': '2', 'QWEN_FAST_LEVERN_MAX_PARK_S': '10', 'QWEN_FAST_LEVERN_EPOCH_SCOPE': 'route'}
-        self.assertEqual(policy.merged_config(env), policy.Merged(120, 8192, 'host', 2, 10, 'route'))
+               'QWEN_FAST_LEVERN_PARK_SLOTS': '2', 'QWEN_FAST_LEVERN_MAX_PARK_S': '10', 'QWEN_FAST_LEVERN_EPOCH_SCOPE': 'route',
+               'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': '5'}
+        self.assertEqual(policy.merged_config(env), policy.Merged(120, 8192, 'host', 2, 10, 'route', 5))
+        self.assertEqual(policy.merged_config({'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': '0'}).max_gap_s, 0)
         self.assertEqual(policy.merged_config({'QWEN_FAST_LEVERN_TTFT_TARGET_S': '0'}).ttft_s, 0)
 
     def test_a_bad_value_is_refused_by_name_never_defaulted(self):
@@ -568,6 +570,92 @@ class GovernorTests(unittest.TestCase):
         alternator.end('prefill', short=True)
         clock.advance_ms(500)
         self.assertEqual(alternator.begin(7, True).owed_rounds, 1)
+
+
+class DecodeGapFloorTests(unittest.TestCase):
+    """The governor pins the prefill at 1.0 when two cold 254k prompts cannot both meet T*; the decoders then still get a round every G seconds
+    (QWEN_FAST_LEVERN_MAX_DECODE_GAP_S), and a short still gets its one round per step. v584 / v620: 92-98 s without one."""
+
+    def make(self, gap, share='0.5'):
+        clock = Clock()
+        cfg = policy.config({'QWEN_FAST_LEVERN_PREFILL_SHARE': share})
+        merged = policy.merged_config({'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180', 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': str(gap)})
+        alternator = policy.Alternator(cfg, clock=clock, merged=merged, wall=clock)
+        one = policy.StepTimes().remaining_ms(253920, 0)
+        alternator.pending_hint = [(clock.now, one), (clock.now, one)]
+        return alternator, clock
+
+    def drive(self, alternator, clock, steps=100, step_ms=1000.0, round_ms=167.0, decodes=4):
+        """(decision kinds in order, the longest wall gap in seconds between decode rounds, the seconds spent in decode rounds)."""
+        kinds, last_decode, worst, decode_s = [], clock.now, 0.0, 0.0
+        done = 0
+        while done < steps:
+            decision = alternator.begin(decodes, True)
+            kinds.append((decision.kind, decision.reason))
+            alternator.end(decision.kind)
+            if decision.kind == 'decode':
+                worst = max(worst, clock.now - last_decode)
+                clock.advance_ms(round_ms)
+                last_decode = clock.now
+                decode_s += round_ms / 1000.0
+            else:
+                clock.advance_ms(step_ms)
+                done += 1
+        worst = max(worst, clock.now - last_decode)
+        return kinds, worst, decode_s
+
+    def test_two_cold_prompts_pin_the_governor_above_one(self):
+        alternator, clock = self.make(8)
+        alternator.begin(4, True)
+        self.assertEqual(alternator.share, 1.0)
+        self.assertGreater(alternator.need, 1.0)
+        self.assertEqual(alternator.cfg.share, 0.5)
+
+    def test_a_decode_round_runs_at_least_every_g_seconds_at_a_pinned_one(self):
+        alternator, clock = self.make(8)
+        kinds, worst, decode_s = self.drive(alternator, clock)
+        self.assertIn(('decode', 'owed'), kinds)
+        self.assertLessEqual(worst, 8.0 + 1.0, 'one step of 1 s may straddle the floor')
+        self.assertLessEqual(decode_s / (clock.now - 1000.0), 0.03, 'the floor costs about 2% of the wall time')
+
+    def test_floor_off_gives_the_pinned_one_no_yields(self):
+        alternator, clock = self.make(0)
+        kinds, worst, decode_s = self.drive(alternator, clock)
+        self.assertEqual([kind for kind, _ in kinds], ['prefill'] * 100)
+        self.assertEqual(decode_s, 0.0)
+
+    def test_the_static_share_one_control_arm_is_unchanged(self):
+        alternator, clock = self.make(8, share='1')
+        kinds, worst, decode_s = self.drive(alternator, clock)
+        self.assertEqual([kind for kind, _ in kinds], ['prefill'] * 100)
+
+    def test_a_short_step_is_followed_by_its_round_at_a_pinned_one(self):
+        alternator, clock = self.make(8)
+        alternator.begin(4, True)
+        alternator.end('prefill', short=True)
+        clock.advance_ms(4400)
+        decision = alternator.begin(4, True)
+        self.assertEqual((decision.kind, decision.reason), ('decode', 'owed'), 'v584 n=40: the long ran straight on')
+        alternator.end('decode')
+        clock.advance_ms(167)
+        self.assertEqual(alternator.begin(4, True).kind, 'prefill')
+
+    def test_below_one_the_alternation_is_what_it_was(self):
+        alternator, clock = self.make(8)
+        alternator.pending_hint = [(clock.now, 1000.0)]
+        kinds, worst, decode_s = self.drive(alternator, clock, steps=20)
+        self.assertEqual(alternator.share, 0.5)
+        off, off_clock = self.make(0)
+        off.pending_hint = [(off_clock.now, 1000.0)]
+        self.assertEqual(kinds, self.drive(off, off_clock, steps=20)[0], 'the floor changes nothing below a pinned 1.0')
+        self.assertGreaterEqual([kind for kind, _ in kinds].count('decode'), 19, 'f = 0.5 yields after every step')
+
+    def test_nothing_owed_without_decoders_and_the_clock_restarts_when_they_arrive(self):
+        alternator, clock = self.make(8)
+        kinds, worst, decode_s = self.drive(alternator, clock, steps=30, decodes=0)
+        self.assertEqual(decode_s, 0.0)
+        clock.advance_ms(50000)
+        self.assertEqual(alternator.begin(4, True).kind, 'prefill', 'decoders seen now: the floor counts from here')
 
 
 class OffSwitchTests(unittest.TestCase):

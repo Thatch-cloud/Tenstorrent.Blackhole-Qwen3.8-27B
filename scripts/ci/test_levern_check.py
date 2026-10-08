@@ -33,6 +33,15 @@ def step(n, kind, seats, req='-', start='-', tokens=0, end='-', prompt='-', fina
     return policy.STEP_LINE.format(n, kind, seats, req, start, tokens, end, prompt, final, reason, prev.split(':')[0], prev.split(':')[1], owed, rounds)
 
 
+def merged_step(n, kind, seats, req='a', f_eff=1.0, prev_ms=1000.0, prev_kind='prefill', need=1.3, gap_ms=0):
+    """A merged-route step line (STEP_LINE_MERGED: the prefix of STEP_LINE plus f_eff, need and gap_ms)."""
+    if kind == 'decode':
+        return policy.STEP_LINE_MERGED.format(n, 'decode', seats, '-', '-', seats, '-', '-', '-', 'owed', prev_kind, '%.1f' % prev_ms, '0', 0, f_eff, need, gap_ms)
+    start = n * 2048
+    return policy.STEP_LINE_MERGED.format(n, 'prefill', seats, req, start, 2048, start + 2048, 400000, 0, 'paid', prev_kind, '%.1f' % prev_ms,
+                                          '0', 0, f_eff, need, gap_ms)
+
+
 def interleaved_steps(req, prompt, seats=7, first=1):
     """The scheduler's lines for a prefill split by the plan with one decode step between each pair of prefill steps."""
     lines, n = [], first
@@ -534,9 +543,64 @@ class MergedRouteTests(unittest.TestCase):
         self.assertEqual(check.levern_problems(ENV, engaged_log(route_lines('a', 6000) + interleaved_steps('a', 6000)), None)[0], [])
 
     def test_a_step_line_with_the_governed_share_still_parses(self):
-        line = policy.STEP_LINE_MERGED.format(1, 'prefill', 7, 'a', 0, 2048, 2048, 10000, 0, 'paid', 'prefill', '700.0', '350', 0, 0.54)
+        line = policy.STEP_LINE_MERGED.format(1, 'prefill', 7, 'a', 0, 2048, 2048, 10000, 0, 'paid', 'prefill', '700.0', '350', 0, 0.54, 0.61, 1200)
         facts = check.levern_facts(line)
         self.assertEqual((facts['steps'][0]['req'], facts['steps'][0]['tokens']), ('a', 2048))
+        self.assertEqual((facts['steps'][0]['f_eff'], facts['steps'][0]['prev_ms']), (0.54, 700.0))
+
+
+class GovernedShareTests(unittest.TestCase):
+    """v584 / v620: every flagged pair followed a step logged f_eff=1.000 (the governor pinned the prefill at all the device). That is not a missed
+    yield; the decode-gap floor is the rule for it."""
+
+    def problems(self, lines, env=ENV):
+        return check.levern_alternation_problems(check.levern_facts(chr(10).join(lines))['steps'], env)
+
+    def pinned(self, count=20, seats=4, f_eff=1.0, decode_every=None, step_ms=1000.0):
+        lines, n = [], 1
+        for index in range(count):
+            lines.append(merged_step(n, 'prefill', seats, f_eff=f_eff, prev_ms=step_ms, prev_kind='prefill' if index else '-'))
+            n += 1
+            if decode_every and (index + 1) % decode_every == 0:
+                lines.append(merged_step(n, 'decode', seats, f_eff=f_eff, prev_ms=step_ms))
+                n += 1
+        return lines
+
+    def test_back_to_back_steps_at_a_pinned_one_are_not_an_alternation_problem(self):
+        found = self.problems(self.pinned(), dict(ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='0'))
+        self.assertEqual(found, [], 'today this reports 19 pairs')
+
+    def test_the_same_steps_trip_the_gap_floor_exactly_once(self):
+        found = self.problems(self.pinned(), dict(ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='8'))
+        self.assertEqual(len(found), 1)
+        self.assertIn('decode-gap floor', found[0])
+
+    def test_the_default_floor_is_eight_seconds(self):
+        self.assertEqual(len(self.problems(self.pinned())), 1)
+
+    def test_a_decode_round_every_seven_steps_holds_the_floor(self):
+        self.assertEqual(self.problems(self.pinned(decode_every=7), dict(ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='8')), [])
+
+    def test_one_long_atomic_step_is_allowed_on_top_of_the_floor(self):
+        lines = self.pinned(count=8, decode_every=None, step_ms=1000.0)
+        lines.append(merged_step(9, 'prefill', 4, f_eff=1.0, prev_ms=1000.0, prev_kind='prefill'))
+        lines.append(merged_step(10, 'decode', 4, f_eff=1.0, prev_ms=6200.0))     # the final step with the build took 6.2 s
+        self.assertEqual(self.problems(lines), [])
+
+    def test_below_a_pinned_one_back_to_back_is_still_flagged(self):
+        found = self.problems(self.pinned(count=3, f_eff=0.99), dict(ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='0'))
+        self.assertEqual(len(found), 2)
+        self.assertIn('did not yield', found[0])
+
+    def test_the_static_share_one_still_exempts_both_rules(self):
+        self.assertEqual(self.problems(self.pinned(), dict(ENV, QWEN_FAST_LEVERN_PREFILL_SHARE='1.0')), [])
+
+    def test_steps_with_no_decoder_do_not_count_toward_the_gap(self):
+        self.assertEqual(self.problems(self.pinned(seats=0)), [])
+
+    def test_a_pre_governor_line_carries_no_floor(self):
+        lines = [step(n, 'prefill', 4, 'a', n * 2048, 2048, n * 2048 + 2048, 400000, 0, prev='prefill:1000.0') for n in range(1, 30)]
+        self.assertEqual(len(self.problems(lines)), 28, 'the old alternation rule is unchanged for lines without f_eff')
 
 
 if __name__ == '__main__':

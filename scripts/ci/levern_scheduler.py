@@ -703,6 +703,7 @@ def _log_step(scheduler, runtime, decision, wanted, reason, prefill, result, par
     values = (runtime.steps, 'prefill' if prefill else 'decode', seats, request_id, start, tokens, end, prompt, final, reason,
               decision.prev_kind or '-', prev_ms, '%.0f' % decision.owed_ms, decision.owed_rounds)
     if runtime.merged is not None:
-        runtime.log(levern_policy.STEP_LINE_MERGED, *(values + (runtime.alternator.share,)))
+        alternator = runtime.alternator
+        runtime.log(levern_policy.STEP_LINE_MERGED, *(values + (alternator.share, alternator.need, alternator.gap_ms())))
     else:
         runtime.log(levern_policy.STEP_LINE, *values)

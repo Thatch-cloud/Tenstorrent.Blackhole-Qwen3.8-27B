@@ -83,9 +83,10 @@ PARK_FLAG = 'QWEN_FAST_LEVERN_PARK'
 PARK_SLOTS_FLAG = 'QWEN_FAST_LEVERN_PARK_SLOTS'
 MAX_PARK_FLAG = 'QWEN_FAST_LEVERN_MAX_PARK_S'
 EPOCH_FLAG = 'QWEN_FAST_LEVERN_EPOCH_SCOPE'
+GAP_FLAG = 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S'
 PARK_MODES = ('0', 'host')
 EPOCH_SCOPES = ('global', 'route')
-MERGED_FLAGS = (TTFT_FLAG, SHORT_FLAG, PARK_FLAG, PARK_SLOTS_FLAG, MAX_PARK_FLAG, EPOCH_FLAG)
+MERGED_FLAGS = (TTFT_FLAG, SHORT_FLAG, PARK_FLAG, PARK_SLOTS_FLAG, MAX_PARK_FLAG, EPOCH_FLAG, GAP_FLAG)
 # Every flag of this module: a sibling set while the master switch is off is a configuration error the contract names
 # (a typo must not leave an arm silently running the control).
 SIBLING_FLAGS = (STEP_FLAG, SOLO_FLAG, SHARE_FLAG, ROUNDS_FLAG, MAX_ROUNDS_FLAG, FAULT_FLAG) + MERGED_FLAGS
@@ -108,7 +109,10 @@ PLATFORM_LINE = '[PINDIAG] lever N: chunked prefill kept for qwen3_5 (budget={} 
 STEP_LINE = ('[PINDIAG] lever N step n={} kind={} seats={} req={} start={} tokens={} end={} prompt={} final={} reason={} '
              'prev={}:{}ms owed_ms={} owed_rounds={}')
 # The merged route's step line: STEP_LINE and the share the deadline governor ran the alternation at (c2_smoke_check's STEP regex reads the prefix).
-STEP_LINE_MERGED = STEP_LINE + ' f_eff={:.3f}'
+STEP_LINE_MERGED = STEP_LINE + ' f_eff={:.3f} need={:.3f} gap_ms={:.0f}'
+# need is the governor's unclamped demand (above 1.0 the deadline cannot be met even at full share) and gap_ms the wall time since the last decode round
+# (the decode-gap floor, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S, reads it). Logged once at install: the governor's target and the floor.
+GOVERNOR_LINE = '[PINDIAG] lever N governor: ttft={} gap_floor={}'
 # wrote_slot is MEASURED (the number of _write_gdn_slot calls the step made, not a function of the step's position) and window is the
 # program-cache entries the drafter-window snapshot compiled inside the step (dflash_prefill_window.window_programs): they cannot be warmed
 # (keyed on the prompt's geometry), and the four-card tripwire excludes them the same way (B-A-W).
@@ -238,11 +242,14 @@ def config(environ=None):
     return Config(step, solo, _share(environ), rounds, max_rounds)
 
 
-Merged = namedtuple('Merged', 'ttft_s short_tokens park park_slots max_park_s epoch_scope')
+Merged = namedtuple('Merged', 'ttft_s short_tokens park park_slots max_park_s epoch_scope max_gap_s')
 DEFAULT_TTFT_S = 180
 DEFAULT_SHORT_TOKENS = 16384
 DEFAULT_PARK_SLOTS = 1
 DEFAULT_MAX_PARK_S = 30
+# The decode-gap floor: while the governor holds the prefill at share 1.0 (the deadline needs all the device) the decoders still get one decode round at least
+# every this many seconds. 0 turns the floor off (the governed 1.0 then yields nothing, as before). Costs about 2% of a long prefill at 8 s (one 167 ms round).
+DEFAULT_MAX_GAP_S = 8
 # A long prefill's hit lives for the whole parked time on the host: 154 MB per parked scratch at 262k (design 3.8), so the slot count is small.
 MAX_PARK_SLOTS = 4
 
@@ -259,7 +266,8 @@ def merged_config(environ=None):
         raise ValueError('%s must be one of %s, got %r' % (EPOCH_FLAG, ', '.join(EPOCH_SCOPES), scope))
     return Merged(_whole(environ, TTFT_FLAG, DEFAULT_TTFT_S, 0, 3600), _whole(environ, SHORT_FLAG, DEFAULT_SHORT_TOKENS, 0, 262144), park,
                   _whole(environ, PARK_SLOTS_FLAG, DEFAULT_PARK_SLOTS, 1, MAX_PARK_SLOTS),
-                  _whole(environ, MAX_PARK_FLAG, DEFAULT_MAX_PARK_S, 1, 3600), scope)
+                  _whole(environ, MAX_PARK_FLAG, DEFAULT_MAX_PARK_S, 1, 3600), scope,
+                  _whole(environ, GAP_FLAG, DEFAULT_MAX_GAP_S, 0, 600))
 
 
 def fault(environ=None):
@@ -370,6 +378,7 @@ SEED_PER_1K_MS = 2.5
 TRANSITION_MS = 40.0
 BUILD_MS = 2500.0
 SCALE_MIN, SCALE_MAX = 0.25, 4.0
+NEED_PAST = 99.0
 
 
 class StepTimes(object):
@@ -409,6 +418,21 @@ class StepTimes(object):
         final_tokens = prompt - start if start >= s_last else prompt - s_last
         total += max(1, -(-final_tokens // CHUNK)) * self.predict(s_last)
         return total + TRANSITION_MS * (steps + 1)
+
+
+def governor_need(base, target_s, pending, now, build_ms=BUILD_MS):
+    """The governor's UNCLAMPED demand: max(f_base, max_j (sum_{i<=j} D_i + B) / (T* - (now - arrival_j))). Above 1.0 the deadline cannot be met even at
+    full share (effective_share clamps to 1.0); a prefill already past T* reads NEED_PAST. Logged beside f_eff so a pinned 1.0 can be told from a met one."""
+    if not target_s or base >= 1.0 or not pending:
+        return base
+    needed, cumulative = base, 0.0
+    for arrival, remaining in pending:
+        cumulative += remaining
+        slack = target_s - (now - arrival)
+        if slack <= 0:
+            return NEED_PAST
+        needed = max(needed, (cumulative + build_ms) / (slack * 1000.0))
+    return min(needed, NEED_PAST)
 
 
 def effective_share(base, target_s, pending, now, build_ms=BUILD_MS):
@@ -475,6 +499,7 @@ class Alternator(object):
         # The deadline governor's input, set by the scheduler before every begin(): [(arrival_s, remaining_device_ms)] in service order.
         self.pending_hint = []
         self.share = cfg.share
+        self.need = cfg.share
         self.reset()
         self.round_ms = INITIAL_ROUND_MS
 
@@ -486,6 +511,10 @@ class Alternator(object):
         self.owed_ms = 0.0
         self.owed_rounds = 0
         self.since_prefill = RMIN
+        # The decode-gap floor's state: when the last decode round ended (None until decoders are first seen beside a prefill) and whether a short
+        # prefill step is still owed its one round.
+        self.decoded_at = None
+        self.short_owed = False
 
     def _account(self, kind, decodes, dt_ms):
         cfg = self.cfg
@@ -493,6 +522,7 @@ class Alternator(object):
             if decodes > 0:
                 self.since_prefill = 0
                 if self.last_short:
+                    self.short_owed = True
                     # Admission v2: a SHORT prefill (its remaining tokens fit QWEN_FAST_LEVERN_SHORT_TOKENS) is paced at R = 1 whatever the share is:
                     # one decode round after each of its steps, so the decoders' gap stays about one step and the short's own latency is the
                     # cheapest one that still serves them (design section 9). The deadline governor never governs it.
@@ -507,6 +537,8 @@ class Alternator(object):
                     self.owed_ms = min(cap, self.owed_ms + dt_ms * (1.0 - self.share) / self.share)
             return
         self.since_prefill += 1
+        self.short_owed = False
+        self.decoded_at = self.clock()
         # A decode step's wall time is the round time the owed cap is expressed in (a slow first step cannot move it far).
         self.round_ms = 0.8 * self.round_ms + 0.2 * dt_ms if dt_ms > 0 else self.round_ms
         if cfg.rounds is not None:
@@ -518,9 +550,22 @@ class Alternator(object):
         cfg = self.cfg
         if cfg.rounds is not None:
             return self.owed_rounds > 0
+        if self.cfg.share >= 1.0:
+            return False          # the static share 1.0 control arm: back-to-back chunks, today's stall chunked
         if self.share >= 1.0:
-            return False
+            # The governor holds the prefill at all the device. A short is still paced at R = 1 (never governed), and the decoders get a round at
+            # least every max_gap_s seconds (the floor); the floor off (0) gives the governed 1.0 no yields, as before.
+            return self.short_owed or self.gap_exceeded()
         return self.owed_ms > 0.0 or self.since_prefill < RMIN
+
+    def gap_ms(self):
+        """Wall ms since the last decode round ended; 0 when decoders have not been waiting."""
+        return 0.0 if self.decoded_at is None else max(0.0, (self.clock() - self.decoded_at) * 1000.0)
+
+    def gap_exceeded(self):
+        merged = self.merged
+        return bool(merged is not None and merged.max_gap_s and self.decoded_at is not None
+                    and self.clock() - self.decoded_at >= merged.max_gap_s)
 
     def govern(self):
         """Recompute the share from the pending prefills the scheduler handed in (pending_hint); the base share when the governor is off."""
@@ -528,7 +573,11 @@ class Alternator(object):
         if merged is None or not merged.ttft_s or self.cfg.rounds is not None:
             self.share = self.cfg.share
         else:
-            self.share = effective_share(self.cfg.share, merged.ttft_s, self.pending_hint, self.wall())
+            now = self.wall()
+            self.share = effective_share(self.cfg.share, merged.ttft_s, self.pending_hint, now)
+            self.need = governor_need(self.cfg.share, merged.ttft_s, self.pending_hint, now)
+            return self.share
+        self.need = self.share
         return self.share
 
     def begin(self, decodes, pending):
@@ -541,15 +590,19 @@ class Alternator(object):
                 self._account(prev_kind, self.last_decodes, prev_ms)
         self.last_at = now
         self.last_decodes = decodes
+        if decodes and self.decoded_at is None:
+            self.decoded_at = now         # the floor counts from when decoders were first seen waiting
         if not decodes:
             # Nothing to yield to: nothing is owed, so the device is never idled for a decoder that is not there.
             self.owed_ms, self.owed_rounds, self.since_prefill = 0.0, 0, RMIN
+            self.decoded_at, self.short_owed = None, False
         if not pending:
             # No prefill work in the system: the next prefill starts a fresh account and is never delayed.
             self.last_kind = None
             self.last_at = None
             self.last_short = False
             self.owed_ms, self.owed_rounds, self.since_prefill = 0.0, 0, RMIN
+            self.decoded_at, self.short_owed = None, False
             return Decision('prefill', 'none-pending', prev_kind, prev_ms, 0.0, 0)
         if decodes and self.owes():
             return Decision('decode', 'owed', prev_kind, prev_ms, self.owed_ms, self.owed_rounds)

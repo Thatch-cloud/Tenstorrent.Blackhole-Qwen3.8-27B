@@ -1015,4 +1015,6 @@ def install(config, *, importer=importlib.import_module, log=None, queue_factory
         cfg = levern.cfg
         log(levern_policy.INSTALLED_LINE, name, cfg.step, cfg.solo, cfg.share, cfg.rounds if cfg.rounds else '-',
             cfg.max_rounds)
+        if merged is not None:
+            log(levern_policy.GOVERNOR_LINE, merged.ttft_s, merged.max_gap_s)
     return name

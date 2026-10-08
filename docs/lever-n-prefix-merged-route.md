@@ -371,8 +371,8 @@ With agent decoders that have 176-543 tokens left, the arrival's TTFT is 108-129
 - **Flag:** `QWEN_FAST_LEVERN_TTFT_TARGET_S` (default 180, the 240 s client deadline minus 60 s of margin; 0 turns the governor off).
 - **The input:** each pending prefill j (in flight, parked or queued), with its arrival time (vLLM `Request.arrival_time`), its remaining device time D_j and a build B (2.5 s).
 - **D_j is measured online:** an EWMA of the route's per-step ms against its context, seeded with t(p). Constants are not trusted at 254k.
-- **The rule:** `f_eff = clamp(max(f_base, max_j (sum_{i<=j} D_i + B) / (T* - (now - arrival_j))), f_base, 1.0)`, with i running in service order. At `f_eff = 1.0` nothing is owed, so there are no yields.
-- **Logging:** the step line gains `f_eff=`.
+- **The rule:** `f_eff = clamp(max(f_base, max_j (sum_{i<=j} D_i + B) / (T* - (now - arrival_j))), f_base, 1.0)`, with i running in service order. At `f_eff = 1.0` the share owes nothing, but the **decode-gap floor** still runs: `QWEN_FAST_LEVERN_MAX_DECODE_GAP_S` (G, default 8, 0 = off) gives the decoders one decode round at least every G seconds, and a short prefill step is still followed by its one round. The static share 1.0 control arm keeps no yields. (The first design said "no yields at 1.0"; v584 and v620 showed two cold 254k prompts pin the governor at 1.0 for the whole second prompt, and the decoders stalled 92-98 s.) The floor costs one 167 ms round per G seconds: about 2% of a 97 s long, about +4 s on the second long's TTFT.
+- **Logging:** the step line gains `f_eff=`, `need=` (the unclamped demand; above 1.0 the deadline cannot be met) and `gap_ms=` (wall time since the last decode round); the install logs `lever N governor: ttft= gap_floor=`.
 
 **Effect (e):**
 - **A lone cold 253,920:** the governor runs it at about f = 0.54, about 180 s.
@@ -380,7 +380,7 @@ With agent decoders that have 176-543 tokens left, the arrival's TTFT is 108-129
 - **Two simultaneous cold 254k:** about 98.6 s and 197 s, against today's 93.6 s and 187 s.
 - **The bound:** the governor never makes a cold arrival slower than today plus about 40 ms per step of transition. Three or more simultaneous cold maximum prompts breach 240 s today as well.
 
-**What the sweep decides and what it doesn't.** f_base is still chosen by the agent-turn sweep (G-NP6: 0.33 / 0.5 / R = 1 at T* = 180). T* is fixed by the client deadline, not swept. Shorts (9) are paced at R = 1 and are never governed.
+**What the sweep decides and what it doesn't.** f_base is still chosen by the agent-turn sweep (G-NP6: 0.33 / 0.5 / R = 1 at T* = 180). T* is fixed by the client deadline, not swept. Shorts (9) are paced at R = 1 and are never governed (also while the governor holds 1.0: `short_owed` forces their round).
 
 ---
 
@@ -434,7 +434,7 @@ These run on vLLM 0.25.1 in `qwen-fast-vllm-cpu.yml`, through experiment/fast-vl
 | G-NP2 registry equality | the same conversations, with Lever N on and off | per turn: checkpoint keys, positions and `slot_sha` identical |
 | G-NP3 hang shapes (x3) | H1-H3 of tp4/lever-n, plus a hit arriving mid-cold (park), an abort during a parked long, the kill switch mid-prefill, and a flood-eviction of checkpoints (L1-style) | every stream completes; quarantines only where planned; no stall-watch exit |
 | G-NP4 pre-stage | the audited arm while interleaving | zero full-audit mismatches; at least 95% `path=diff` after intermediate steps |
-| G-NP5 stall/TTFT ABAB | `stall8_cold262k` (control `ship-prefix`); a hit arriving mid-cold; two simultaneous cold 254k arrivals | worst seat gap; seat tok/s inside the window; cold TTFT at most 180 s; hit TTFT at most its solo + 1.5 s; second cold under 240 s |
+| G-NP5 stall/TTFT ABAB | `stall8_cold262k` (control `ship-prefix`); a hit arriving mid-cold; two simultaneous cold 254k arrivals | worst seat gap; seat tok/s inside the window; cold TTFT at most 180 s; hit TTFT at most its solo + 1.5 s; second cold under 240 s; worst seat gap at most G + one atomic step (the final step with its build) |
 | G-NP6 `agent8_turns-prefix` | f_base in {0.33, 0.5}, R = 1, and the control | p50/p90 turn latency; choose f_base |
 | G-NP7 churn16 | merged arm | zero engine deaths; quarantines counted and attributed |
 
