@@ -821,7 +821,7 @@ class SkewTests(GateFreeCase):
     def test_the_decoders_get_a_round_every_g_seconds_through_a_pinned_one(self):
         run = self.simulate(8)
         self.assertIn(1.0, run['f_effs'], 'the shape cannot meet T*: the governor pins 1.0')
-        self.assertLessEqual(run['worst'], 8.0 + run['longest'] + 2 * self.ROUND_MS / 1000.0, 'G + the longest step (an atomic final step with the build); today about 90 s')
+        self.assertLessEqual(run['worst'], 8.0 + run['longest'] + 1.0, 'G + the longest step + 1 s, the smoke-rule bound (a step cannot be split); without the floor the stall is a whole long')
         self.assertLess(max(run['finished'].values()), 240.0, 'the second long still lands inside the client deadline')
         off = self.simulate(0)
         self.assertLessEqual((run['decode_s'] - off['decode_s']) / run['wall'], 0.03, 'the floor itself costs at most 3% of the wall time')
@@ -888,7 +888,7 @@ class SkewWithShortsTests(GateFreeCase):
     def test_the_floor_bounds_the_stall_and_the_slowest_user_stays_inside_the_deadline(self):
         on, off = self.replay(8), self.replay(0)
         self.assertEqual(self.rule(on, 8), [], 'the smoke rule is clean over the scheduler\'s own lines with the floor on')
-        self.assertLess(on['worst'], 17.0)
+        self.assertLess(on['worst'], 8.0 + 8.0 + 1.0, 'the smoke rule above is the one bound (G + longest step + 1 s); this is its sanity ceiling')
         self.assertGreater(off['worst'], 150.0)
         self.assertLess(max(on['ttft'].values()), 240.0 - 3.0, 'the slowest user keeps at least 3 s inside the client deadline')
         self.assertLessEqual(on['ttft']['long2'] - off['ttft']['long2'], 6.0, 'the floor costs the second long at most 6 s')

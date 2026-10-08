@@ -665,6 +665,27 @@ class StallStretchTests(unittest.TestCase):
                  request_step(2, 'next', 3, 0, 63969, prev_kind='decode', prev_ms=0.0)]
         self.assertEqual(self.problems(lines, dict(ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='0')), [])
 
+    def test_an_unlogged_decode_round_closes_the_open_stretch_under_the_floor(self):
+        """Case A: 7 s pinned, an unlogged decode (prev=decode) in the idle pass, then 9 s of another request: the floor held, two short stretches."""
+        lines = [request_step(n, 'a', 4, (n - 1) * 2048, 400000, prev_kind='prefill' if n > 1 else '-', prev_ms=1000.0) for n in range(1, 9)]
+        lines += [request_step(n, 'b', 4, (n - 9) * 2048, 400000, prev_kind='decode' if n == 9 else 'prefill', prev_ms=30000.0 if n == 9 else 1000.0)
+                  for n in range(9, 18)]
+        lines.append(merged_step(18, 'decode', 4, prev_ms=1000.0))
+        self.assertEqual(self.problems(lines, dict(ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='8')), [])
+
+    def test_the_pinned_exemption_reads_the_later_step(self):
+        """Case B: step k at f=0.99, step k+1 at f=1.000 need=1.01: the yield before k+1 was decided at the pinned share, nothing is owed."""
+        lines = [request_step(1, 'a', 4, 0, 400000, prev_kind='decode', f_eff=0.99, need=0.99),
+                 request_step(2, 'a', 4, 2048, 400000, prev_kind='prefill', prev_ms=900.0, f_eff=1.0, need=1.01)]
+        self.assertEqual(self.problems(lines, dict(ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='0')), [])
+
+    def test_the_reverse_crossing_is_a_missed_yield(self):
+        lines = [request_step(1, 'a', 4, 0, 400000, prev_kind='decode', f_eff=1.0, need=1.01),
+                 request_step(2, 'a', 4, 2048, 400000, prev_kind='prefill', prev_ms=900.0, f_eff=0.99, need=0.99)]
+        found = self.problems(lines, dict(ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='0'))
+        self.assertEqual(len(found), 1)
+        self.assertIn('did not yield', found[0])
+
     def test_a_long_first_step_is_not_a_short(self):
         lines = [request_step(1, 'long-a', 3, 0, 250000, prev_kind='decode'), request_step(2, 'long-b', 3, 0, 250000, prev_kind='prefill')]
         self.assertEqual(self.problems(lines, dict(ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='0')), [])
@@ -680,6 +701,23 @@ class StallStretchTests(unittest.TestCase):
         self.assertTrue(any('governor' in problem for problem in missing), missing)
         present = check.levern_problems(env, log + chr(10) + policy.GOVERNOR_LINE.format(180, 8.0), None)[0]
         self.assertEqual(present, [])
+
+
+class SkewDeadlineTests(unittest.TestCase):
+    """The owner accepted the skew shape's slowest user landing under the 240 s client limit; the smoke fails above 240 s minus a 2 s margin."""
+
+    def run_check(self, ttft):
+        log = merged_log(merged_route_lines('first', 9000) + interleaved_steps('first', 9000)) + chr(10) + policy.GOVERNOR_LINE.format(180, 8.0)
+        env = dict(MERGED_ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='8')
+        return check.levern_problems(env, log, dict(concurrent8_skew=dict(ttft_max_s=ttft, last_first_token_s=ttft - 1.0)))[0]
+
+    def test_inside_the_margin_is_clean(self):
+        self.assertFalse([p for p in self.run_check(237.9) if 'concurrent8_skew' in p])
+
+    def test_over_the_margin_fails(self):
+        found = [p for p in self.run_check(238.5) if 'concurrent8_skew' in p]
+        self.assertEqual(len(found), 1)
+        self.assertIn('240', found[0])
 
 
 if __name__ == '__main__':

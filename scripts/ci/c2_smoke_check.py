@@ -1297,6 +1297,8 @@ def levern_route_problems(routes):
 
 
 LEVERN_GAP_SLACK_MS = 1000.0
+LEVERN_CLIENT_DEADLINE_S = 240.0     # the client limit the owner accepted for the skew shape's slowest user
+LEVERN_DEADLINE_MARGIN_S = 2.0
 LEVERN_PINNED_SHARE = 0.9995
 LEVERN_GOVERNOR = re.compile(r'\[PINDIAG\] lever N governor: ttft=(\S+) gap_floor=(\S+)')
 
@@ -1312,7 +1314,7 @@ def _pinned(step):
     """Whether the deadline governor held the step at all the device: its unclamped need is at least 1.0 (logged beside f_eff since the floor
     landed); a pre-floor line has only the clamped f_eff, which reads 1.000 for a pinned share."""
     if step.get('need') is not None:
-        return step['need'] >= 1.0
+        return step['need'] >= LEVERN_PINNED_SHARE     # need prints with three decimals: 1.000 stands for [0.9995, 1.0005)
     return (step.get('f_eff') or 0.0) >= LEVERN_PINNED_SHARE
 
 
@@ -1355,6 +1357,10 @@ def levern_alternation_problems(steps, env, launched_gap_s=None):
                                LEVERN_GAP_SLACK_MS / 1000.0))
 
     for step in steps:
+        if stretch is not None and step.get('prev_kind') == 'decode':
+            # an unlogged decode round (a pass with no prefill pending) served the seats between the two lines: the stretch ended there
+            close('an unlogged decode round before n=%d' % step['n'])
+            stretch = None
         if previous is not None and previous['kind'] == 'prefill' and previous['seats'] > 0 and step.get('prev_kind') == 'prefill':
             took = step.get('prev_ms') or 0.0
             if stretch is None:
@@ -1380,7 +1386,7 @@ def levern_alternation_problems(steps, env, launched_gap_s=None):
             problems.append('the short prefill step n=%d (%s) ran with %d decoder(s) and the next prefill step n=%d came with no decode round '
                             'between them: a short is owed its one round whatever the share' % (short_owed['n'], short_owed['req'], short_owed['seats'], step['n']))
         short_owed = None
-        pinned = last_prefill is not None and _pinned(last_prefill)
+        pinned = _pinned(step)      # the yield decision before this step used THIS line's share (govern() runs before the step is logged)
         if last_prefill is not None and last_prefill['req'] == step['req'] and last_prefill['seats'] > 0 and not decoded and not pinned:
             problems.append('two prefill steps of %s (n=%d and n=%d) ran back to back with %d decoder(s) running: the alternation did not yield'
                             % (step['req'], last_prefill['n'], step['n'], last_prefill['seats']))
@@ -1506,6 +1512,12 @@ def levern_problems(env, container_text, smoke):
                     step['kind'] == 'prefill' and step['seats'] >= 1 for step in facts['steps']):
                 problems.append('decoders ran beside split prefills and no decode step was ever yielded between them')
         if merged:
+            skew = results.get('concurrent8_skew')
+            if isinstance(skew, dict) and 'error' not in skew:
+                worst = max(skew.get('ttft_max_s') or 0.0, skew.get('last_first_token_s') or 0.0)
+                if worst > LEVERN_CLIENT_DEADLINE_S - LEVERN_DEADLINE_MARGIN_S:
+                    problems.append('concurrent8_skew: the slowest user waited %.1f s for a first token, over the %.0f s client deadline minus a %.0f s margin'
+                                    % (worst, LEVERN_CLIENT_DEADLINE_S, LEVERN_DEADLINE_MARGIN_S))
             outs = [(m.group(1), int(m.group(2))) for m in LEVERN_PARK_OUT.finditer(container_text) if m.group(1) != LEVERN_WARM_REQUEST]
             ins = [(m.group(1), int(m.group(2))) for m in LEVERN_PARK_IN.finditer(container_text) if m.group(1) != LEVERN_WARM_REQUEST]
             facts['parks'] = len(outs)
