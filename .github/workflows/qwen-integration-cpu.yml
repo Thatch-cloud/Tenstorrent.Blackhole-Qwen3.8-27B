@@ -109,7 +109,7 @@ jobs:
           python -B -m unittest test_gdn_conv_gates_spread test_tp4_w2 test_tp4_mr_probe
           python -B -m unittest test_tp4_w2ln_profiles test_w2ln_identity_census test_tp4_w2ln_window test_drafter_checkpoint test_w2ln_timing_compare
           python -B -m unittest test_tp4_stage1_windows test_stage1_judge_dry_run
-          python -B -m unittest test_tp4_session_0808 test_session_cutover_judge test_tp4_kvread_probe
+          python -B -m unittest test_tp4_session_0808 test_session_cutover_judge test_tp4_kv_read_probe
           python -B -m unittest test_request_width_warm test_tp4_warm4 test_tp4_warm4_window
           python -B -m unittest test_gdn_pair_slice
           python -B -m unittest test_real_text_prompts test_acceptance_report test_real_text_compare test_real_text_gate

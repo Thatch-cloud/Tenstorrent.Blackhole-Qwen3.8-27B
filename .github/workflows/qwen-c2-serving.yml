@@ -10,8 +10,8 @@ name: Qwen C2 serving image
 #            trained and the model's own all-gather / reduce-scatter timed at 1 and 2 links; fabric-probe.json.
 #            C2_FABRIC_PROBE=rs-tile runs scripts/ci/tp4_rs_tile_spike.py instead (the model's own all-reduce on a
 #            64-row block against its one-tile calls, bit for bit, then the tile-split wrapper): rs-tile-spike.json
-#            C2_FABRIC_PROBE=kvread runs scripts/ci/tp4_kvread_probe.py (the prefix audit's region read, ttnn.qwen_read_blocks, against the
-#            whole-cache read byte for byte on the pool-sized cache; KVREAD_PROBE verdict=PASS|FAIL): kvread-probe.json
+#            C2_FABRIC_PROBE=kvread runs scripts/ci/tp4_kv_read_probe.py (the prefix audit's region read, ttnn.qwen_read_blocks, against the
+#            whole-cache read byte for byte on the pool-sized cache; KV_READ_PROBE verdict=PASS|FAIL): kv-read-probe.json
 #   cardm  - a single-card qualification harness (C2_CARDM_HARNESS, e.g. optimisation/ttnn-op/k64j/run_card_b.sh)
 #            on card M alone, card B being reserved for another project: QUAL_CARD=card M, ALLOW_SERVING_CARD=1, after
 #            the same refusals as the gate (anything holding M or A, a platform serving container); never card
@@ -432,7 +432,7 @@ jobs:
             fabric) script=tp4_fabric_probe.py; report=fabric-probe.json ;;
             rs-tile) script=tp4_rs_tile_spike.py; report=rs-tile-spike.json ;;
             mr) script=tp4_mr_probe.py; report=mr-probe.json ;;
-            kvread) script=tp4_kvread_probe.py; report=kvread-probe.json ;;
+            kvread) script=tp4_kv_read_probe.py; report=kv-read-probe.json ;;
             *) echo "unknown fabric probe: $PROBE" >&2; exit 1 ;;
           esac
           results="$RUNNER_TEMP/c2-results/fabric"
@@ -467,7 +467,7 @@ jobs:
             --entrypoint python3 "$image" -B "/c2/scripts/ci/$script" --fabric "$FABRIC" \
             --output "/probe-results/$report" 2>&1 | tee "$RUNNER_TEMP/c2-results/fabric-probe.log" || status=$?
           sudo -n chown -R "$(id -u):$(id -g)" "$results" 2>/dev/null || true
-          grep -E 'FABRIC_PROBE|TP4_RS_TILE|MR_PROBE|KVREAD_PROBE' "$RUNNER_TEMP/c2-results/fabric-probe.log" | tail -60 || true
+          grep -E 'FABRIC_PROBE|TP4_RS_TILE|MR_PROBE|KV_READ_PROBE' "$RUNNER_TEMP/c2-results/fabric-probe.log" | tail -60 || true
           exit "$status"
       - name: Run a qualification harness on card M
         if: contains(steps.job.outputs.actions, 'cardm')

@@ -30,7 +30,7 @@ Ways to reach the cutover in one session, each an owner decision and none applie
 
 ## The audit op, the controls, the judge
 
-- `KVQ` runs `optimisation/ttnn-op/kv_region_read/kv_region_read_card.py` on the four-card mesh inside `tp4-serve-11` (the fabric step's `kvread` probe, `scripts/ci/tp4_kvread_probe.py`). `P1ab-LN`, `E1-LN` and `P1a-CTL2` NEED it.
+- `KVQ` runs `optimisation/ttnn-op/kv_region_read/kv_region_read_card.py` on the four-card mesh inside `tp4-serve-11` (the fabric step's `kvread` probe, `scripts/ci/tp4_kv_read_probe.py`). `P1ab-LN`, `E1-LN` and `P1a-CTL2` NEED it.
   The op is not compiled yet (docs/prefix-audit-cost.md, "Delivery"): `tp4-serve-11` must be rebuilt with it before the session (B0), or the **fallback** pack conf (`packs/tp4-session-0808-fallback.conf`, private) skips `KVQ` and the three audited jobs.
 - `P1a-CTL2` is W-0's P1a-CTL re-run on the window image with Lever N off (the production base has no region read); `P1b-CTL` is W-0's P1b-CTL on `tp4-serve-10` with the fixed lifecycle traffic. Both are `CUTOVER-WAIVABLE`: when they did not
   PASS, the cutover needs the line `WAIVE P1CTL` in the `CUTOVER_OWNER_GO` file, which the owner writes with the evidence in front of them. A FAIL is a production finding either way.

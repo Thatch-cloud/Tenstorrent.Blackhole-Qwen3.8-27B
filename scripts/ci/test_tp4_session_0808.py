@@ -386,7 +386,7 @@ class Allowlist(unittest.TestCase):
     def test_the_cpu_workflow_names_this_test_and_the_new_probe_and_judge_tests(self):
         with open(WORKFLOW, encoding='utf-8') as handle:
             text = handle.read()
-        for module in ('test_tp4_session_0808', 'test_session_cutover_judge', 'test_tp4_kvread_probe'):
+        for module in ('test_tp4_session_0808', 'test_session_cutover_judge', 'test_tp4_kv_read_probe'):
             self.assertIn(module, text, module)
 
     def test_the_readme_names_the_owners_decisions_and_the_ready_clock(self):

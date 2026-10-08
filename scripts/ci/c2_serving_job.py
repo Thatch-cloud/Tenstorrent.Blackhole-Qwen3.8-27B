@@ -26,8 +26,8 @@ Keys (every one optional but C2_IMAGE_TAG):
                       link count and the collectives timed) or rs-tile (tp4_rs_tile_spike.py: the model's own all-reduce on a
                       64-row block against its one-tile calls, bit for bit, then the tile-split wrapper; the verdict line
                       TP4_RS_TILE) or mr (tp4_mr_probe.py: the verify readback's mesh-read arms at four chips, optimisation/ttnn-op/mr_probe's
-                      arms and verdict, MR_PROBE verdict=GO|MESH-ONLY|NO-GO) or kvread (tp4_kvread_probe.py: the prefix audit's region read,
-                      ttnn.qwen_read_blocks, against the whole-cache read byte for byte on the pool-sized cache; KVREAD_PROBE verdict=PASS|FAIL, the exit
+                      arms and verdict, MR_PROBE verdict=GO|MESH-ONLY|NO-GO) or kvread (tp4_kv_read_probe.py: the prefix audit's region read,
+                      ttnn.qwen_read_blocks, against the whole-cache read byte for byte on the pool-sized cache; KV_READ_PROBE verdict=PASS|FAIL, the exit
                       status is the verdict); needs the fabric action
   C2_SUPERSEDED_BY    set on every template of a pack that a later pack replaced (references/tp4-w2-jobs); read_job REFUSES such a template
   C2_PROFILE          the C2 profile smoke and gate serve (default: general)

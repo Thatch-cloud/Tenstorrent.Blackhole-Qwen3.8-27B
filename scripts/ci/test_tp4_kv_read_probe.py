@@ -1,6 +1,6 @@
-"""tp4_kvread_probe on the CPU: the quad wrapper of the region-read card check, on a fake card module and a fake ttnn.
+"""tp4_kv_read_probe on the CPU: the quad wrapper of the region-read card check, on a fake card module and a fake ttnn.
 
-Run at py 3.11: `py -3.11 -B -m unittest test_tp4_kvread_probe` from scripts/ci."""
+Run at py 3.11: `py -3.11 -B -m unittest test_tp4_kv_read_probe` from scripts/ci."""
 
 import json
 from pathlib import Path
@@ -13,7 +13,7 @@ ROOT = HERE.parent.parent
 sys.path.insert(0, str(HERE))
 
 import c2_serving_job as job  # noqa: E402
-import tp4_kvread_probe as probe  # noqa: E402
+import tp4_kv_read_probe as probe  # noqa: E402
 
 WORKFLOW = (ROOT / '.github' / 'workflows' / 'qwen-c2-serving.yml').read_text(encoding='utf-8')
 CARD_FILE = ROOT / 'optimisation' / 'ttnn-op' / 'kv_region_read' / 'kv_region_read_card.py'
@@ -53,7 +53,7 @@ def run_main(report, code, extra=()):
     card = FakeCard(report, code)
     ttnn = FakeTTNN()
     with tempfile.TemporaryDirectory() as tmp:
-        output = str(Path(tmp) / 'kvread-probe.json')
+        output = str(Path(tmp) / 'kv-read-probe.json')
         status = probe.main(['--output', output] + list(extra), card=card, ttnn=ttnn, log=lines.append)
         written = json.loads(Path(output).read_text())
     return status, lines, written, card, ttnn
@@ -63,7 +63,7 @@ class KvreadProbeTests(unittest.TestCase):
     def test_a_passing_check_is_a_pass_line_and_exit_zero(self):
         status, lines, written, card, ttnn = run_main(GOOD, 0)
         self.assertEqual(status, 0)
-        self.assertTrue(lines[0].startswith('KVREAD_PROBE verdict=PASS whole_read_s=21.5 whole_unpack_s=14.0 program_cache_growth=0'))
+        self.assertTrue(lines[0].startswith('KV_READ_PROBE verdict=PASS whole_read_s=21.5 whole_unpack_s=14.0 program_cache_growth=0'))
         self.assertIn('problems=0', lines[0])
         self.assertEqual(written['verdict'], 'PASS')
         self.assertEqual(written['check'], GOOD)
@@ -142,8 +142,8 @@ class KvreadJobTests(unittest.TestCase):
             self.read(C2_ACTIONS='reset')
 
     def test_the_workflow_runs_the_wrapper_and_bounds_it_by_the_box(self):
-        self.assertIn('kvread) script=tp4_kvread_probe.py; report=kvread-probe.json', WORKFLOW)
-        self.assertIn('FABRIC_PROBE|TP4_RS_TILE|MR_PROBE|KVREAD_PROBE', WORKFLOW)
+        self.assertIn('kvread) script=tp4_kv_read_probe.py; report=kv-read-probe.json', WORKFLOW)
+        self.assertIn('FABRIC_PROBE|TP4_RS_TILE|MR_PROBE|KV_READ_PROBE', WORKFLOW)
         self.assertIn('BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}', WORKFLOW)
         self.assertIn('timeout -k 30 "$limit" docker run', WORKFLOW)
 
