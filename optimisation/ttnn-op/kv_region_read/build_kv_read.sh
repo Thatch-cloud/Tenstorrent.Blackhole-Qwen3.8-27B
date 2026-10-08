@@ -15,7 +15,7 @@
 #                     three pinned binaries, which must equal the recorded ones
 #   KVR_DRY_RUN=1     print every docker command and run none of them
 #   KVR_KEEP_WORK=1   leave /tmp/kvr in ttbuild
-# Writes <out>: qwen_kv_read.so, qwen_kv_read.o, compile-flags.txt, qwen_kv_read.cpp, build_kv_read.sh, MANIFEST.sha256,
+# Writes <out> (an existing <out>/prod-audit is carried over): qwen_kv_read.so, qwen_kv_read.o, compile-flags.txt, qwen_kv_read.cpp, build_kv_read.sh, MANIFEST.sha256,
 # qwen-strings-*.txt, build.log. Built in <out>.partial and moved into place only after every check passed.
 set -euo pipefail
 export LC_ALL=C
@@ -97,6 +97,8 @@ for image in $images; do
   grep -q IMPORT-OK "$work/import-$tagname.txt" || { echo "FAIL $image: the module does not import" >&2; fail=1; }
 done
 test "$fail" = 0 || { echo "build_kv_read: a check failed; $work left for reading" >&2; exit 1; }
+# prod-audit/ (stage_prod_audit.py: the production model.py with the narrowed audit) survives a rebuild of the module; its pin is the checkout's, not this build's
+[ -d "$out/prod-audit" ] && cp -a "$out/prod-audit" "$work/prod-audit"
 (cd "$work" && find . -type f ! -name MANIFEST.sha256 ! -name build.log | LC_ALL=C sort | xargs sha256sum > MANIFEST.sha256)
 rm -rf "$out"; mv "$work" "$out"
 echo "build_kv_read: OK $out qwen_kv_read.so $sha"

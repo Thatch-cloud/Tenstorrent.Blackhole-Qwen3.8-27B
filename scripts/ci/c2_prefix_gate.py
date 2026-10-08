@@ -315,9 +315,10 @@ def audit_image_problems(arms, anchor):
                    'the image predates the narrowed audit' % (', '.join(names), ' and '.join(anchor['stage_mismatched'])))
     if anchor.get('region_read') is not True:
         out.append('%s: this image has no ttnn.qwen_read_blocks (the region-read graft; probe says %s): the audit would '
-                   'read whole caches, ~8 minutes a request, and the arm cannot finish in its box. Build the graft into '
-                   'the image and pass optimisation/ttnn-op/kv_region_read/kv_region_read_card.py on a card first '
-                   '(docs/prefix-audit-cost.md); %s=1 overrides, for a run that wants the slow audit' % (
+                   'read whole caches, ~8 minutes a request, and the arm cannot finish in its box. Use an image that bakes the '
+                   'qwen_kv_read extension (tp4-serve-11), or mount the rig graft over the production base '
+                   '(--kvread-mount, C2_PREFIX_KVREAD_MOUNT=1); qualify it on the cards first (Q1, '
+                   'references/tp4-kvread-jobs; docs/prefix-audit-cost.md); %s=1 overrides, for a run that wants the slow audit' % (
                        ', '.join(names), anchor.get('region_read'), ALLOW_FULL_AUDIT_ENV))
     return out
 
