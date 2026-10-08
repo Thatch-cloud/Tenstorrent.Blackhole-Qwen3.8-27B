@@ -59,3 +59,10 @@ unused. The combined pack's own tag list (`tp4-w2ln-jobs`, v538 to v640) overlap
 ## Judge dry run on archived runs
 
 `scripts/ci/stage1_judge_dry_run.py` re-judges archived artifacts with the committed rules. Result on the four runs the plan names plus the older v476: v536 and v579 agree (pass), v578 and v580 failed on rules alone and now pass, and v476 still fails the same way (its engine died before the API answered, a real failure and not a rule one). No rule regression.
+
+## The chained session of 2026-10-08
+
+The owner asked for 12 or more hours of card testing (2026-10-08 03:40Z), so W-1 and W-2 are chained into ONE outage: `scripts/ci/references/tp4-session-0808-jobs` (one `A0X0`, the audit op's qualification `KVQ` first, the exactness core, the
+robustness core, the two P1 controls, the cutover tail in whole blocks), start 07:30Z, READY for `/deploy` by 19:30Z, hard cap 20:30Z, admit-on-box against that clock. At the central estimates the cutover battery (777 job-minutes) does not fit
+the 690 minutes the clock leaves, so the session is planned to end in the hand-back to the production image with the cutover in a short window after it; the pack's README and the test `test_tp4_session_0808` say which jobs run and which are refused for time.
+The two-window route above is unchanged and must not run beside the session (the tags overlap).

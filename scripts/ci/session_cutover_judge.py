@@ -10,12 +10,13 @@ VOID, and a VOID pair is never 'inside'.
 
 Each DIR is a job's artifact directory (the driver's {DIR:<job>}); the container log is `container.log` (else `server.log`) and the host load log `load.log`,
 found at any depth. `--baseline-load` names the serving baseline whose load.log calibrates the load limit (S0-CTL: the engine's own threads raise the load average, so
-the idle host is no baseline); without it, or with a baseline that has no samples, the judge refuses (exit 2) unless `--no-load-check` says the load is not to be read.
+the idle host is no baseline); without it, or with a baseline that has no samples, the judge refuses (exit 1, an `error` in the JSON) unless `--no-load-check` says the load is not to be read.
 
 'Inside' for Lever N is one-sided: the pair's delta (TL minus TA, milliseconds a round) must not exceed the floor; a Lever N arm that is FASTER is no cost. For the
 production bytes it is two-sided (|T0s - TA1| <= floor): the window image must run at production's speed with Lever N off.
 
-Exit 0 only when every window holds; 1 when a window does not (the JSON says which pair and why); 2 when a log is missing or the load cannot be read.
+Exit 0 only when every window holds; 1 when a window does not, or when a log is missing or the load cannot be calibrated (the JSON says which pair and why, or carries an
+`error`: a judge that cannot read its input fails closed, and the driver's dry run, which runs it on fixtures, tells a crash (exit 2: bad arguments, a traceback) from a 'no' by the exit status).
 """
 
 import argparse
@@ -125,7 +126,7 @@ def main(argv=None, out=print):
                 raise Missing('the serving baseline %s has no [LOAD] samples: the load limit cannot be calibrated' % options.baseline_load)
     except Missing as error:
         out(json.dumps(dict(holds=False, error=str(error))))
-        return 2
+        return 1
     holds, report = judge(t0s, a_runs, l_runs, max_load, options.load_gap, options.min_matched)
     out(json.dumps(dict(holds=holds, max_load=max_load, windows=report), sort_keys=True))
     return 0 if holds else 1

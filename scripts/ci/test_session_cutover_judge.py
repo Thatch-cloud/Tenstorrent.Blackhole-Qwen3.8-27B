@@ -83,19 +83,20 @@ class JudgeTests(unittest.TestCase):
     def test_no_baseline_refuses_unless_the_load_rule_is_waived(self):
         with tempfile.TemporaryDirectory() as tmp:
             status, report = run(tmp, baseline_load=None)
-        self.assertEqual(status, 2)
+        self.assertEqual(status, 1)
+        self.assertFalse(report['holds'])
         self.assertIn('--baseline-load', report['error'])
         with tempfile.TemporaryDirectory() as tmp:
             status, report = run(tmp, baseline_load=None, extra=['--no-load-check'])
         self.assertEqual(status, 0, report)
 
-    def test_a_missing_log_is_exit_two_not_a_pass(self):
+    def test_a_missing_log_fails_closed_with_an_error_not_a_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = ['--t0s', make_dir(tmp, 'T0s', 0.2, log_name='other.txt'), '--a'] + [make_dir(tmp, 'TA%d' % i, 0.2) for i in (1, 2, 3)]
             args += ['--l', make_dir(tmp, 'TL1', 0.2), make_dir(tmp, 'TL2', 0.2), '--no-load-check']
             lines = []
             status = judge.main(args, out=lines.append)
-        self.assertEqual(status, 2)
+        self.assertEqual(status, 1)
         self.assertIn('T0s', json.loads(lines[0])['error'])
 
     def test_server_log_is_read_when_there_is_no_container_log(self):
