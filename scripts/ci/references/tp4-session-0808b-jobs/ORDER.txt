@@ -1,0 +1,73 @@
+# SESSION 0808b 'performance and robustness, no digests': a SECOND chained card session of 2026-10-08, launched after the first session (tp4-session-0808) has handed the cards back. The first session's audited arms
+# (QWEN_PREFIX_DIGESTS and the lever audits) are followed after every request by a 5 to 8 minute whole-pool host digest at 8 x 262k, so they cannot finish (docs/prefix-audit-cost.md). THIS pack runs NONE of them: every profile
+# it names is a traffic or production profile (no digest, no audit, no gate_only marker; test_tp4_session_0808b pins that), so a request costs what production's costs (eight-live rounds in about 175 ms, a plain smoke in minutes).
+# It reuses the first pack's templates (tp4-session-0808-jobs, same window image tp4-serve-11 and the production base tp4-serve-10), adds three cheap robustness jobs and a deep-context pair, and drops the audited arms
+# (A1-LN, S0-CTL, KVQ, P1ab-LN, P1-CTLR, E1-LN, L8-LN, C16-LN, HF-LN, P1b-CTL) and the cutover. The end is ALWAYS the hand-back to the production image; the cutover is a later window.
+# NEVER run this pack beside tp4-session-0808 (or the two-window packs): they share the cards. Launch it only after that session's driver has ended and its hand-back has put the agent back.
+#
+# CLOCK (UTC): the launch wrapper turns the owner's absolute times into minutes from the driver's own start (A0X0 = minute 0): READY for /deploy 19:30Z, hard cap 20:30Z, the last job must end 60 minutes before 20:00Z.
+# The numbers below (CAP 495, TARGET 465) are those of a 11:45Z start and are only the default; the wrapper overrides them at launch, so a late start shrinks the admitted work instead of overrunning. The owner's admin key is
+# needed at READY only, never before and never in a script.
+# ADMIT-ON-BOX: with E the elapsed minutes since A0X0 and HB the end-sequence reserve (RESERVE-MIN, 60), a job STARTS only if E + its BOX (+ 30 for a serving-gate job; none here) + HB <= CAP; an opt block is admitted or refused
+# WHOLE on the sum of its boxes. A job that does not fit is SKIPPED-TIME and listed in results/CARRYOVER.txt; nothing is ever cancelled.
+#
+# One line per job: <template name without .env> <class> <image tag> <estimated minutes> <tag> <box minutes>. Estimates are the measured-basis central figures of the first pack (the W-2 pack's): an attach takes 2 to 5 minutes,
+# a five-shape timed job 9 to 18, a plain smoke 9 to 12 (v579 8.9, v524 11.6), stall8_cold262k 7.3 (v532), an agent-turns arm 16.5 (v580). A box is 1.5 times the high end of that range. The new jobs: SM about 14 (attach 4, seven short
+# tests), S0b2 11 (the S0b test list again), DA1/DL1 18 each (attach 4, warmup 1, 8 x 32k about 4, 8 x 120k about 9 at the measured cold prefill rate), boxes 30, 20 and 40.
+# CLASSES. stop: the window halts at its first failure (the hand-back still runs). soft: data; a failure or a skip does not stop the window. opt: a contiguous opt run is admitted whole (the timed block; the stall pair; the agent-turn pair;
+# the deep pair); soft jobs (SM, SR10, S0b2) sit between the pairs so each pair is its own block. hand: the hand-back, always runs. drv: a DRIVER or OPERATOR step with no template and no tag (LM: the links re-measure; TICK: the wait
+# for the new links to be published; DEPLOY-and-engine-load: the operator's release step and the engine load, outside this pack).
+# Priority order = the kill signals first (A0X0, S0b, the three hang runs), the performance block next (production bytes, then the ABABA of the control and Lever N), the stall pair, the agent-turn pair, a late re-attach and the deep pair last.
+# PERFORMANCE READ: scripts/ci/w2ln_timing_compare.py (`floor TA1 TA2 TA3` is the A-to-A drift, `pair TAn TLn` each pair, load-voided pairs are never "inside"); T0s against TA1 is the offset of the window image against production.
+# ARC-ZERO: the timed jobs, the stall, agent-turn and deep pairs are read against the rig's CI load, so the driver asks the operator to scale the ARC runner sets to ZERO before T0s and waits for the file runs/<id>/ARC_ZERO_ACK; without it
+# the block is SKIPPED-ARC and carried over. The hardware host runner that runs these jobs is NOT an ARC runner and stays up.
+# SR10 (the platform replay) needs the thin layer on the window image, which the operator writes on the runner as a local file before the window; with no such file it fails after its reset, so the launch config lists SR10 in SKIP_JOBS
+# until that layer exists. It stays in the ORDER as a block separator (the driver reads the class of the row before a block, whether or not that row runs).
+#
+# KILL-SWITCH STATE, TELEMETRY, WATCHDOG: as the first session (the operator records the kill-switch files and holds them aside if production's Tier 1 set one; the hand-back restores them before Z). No CI dispatch, PR push or other
+# rig workload while the session runs; no privileged builder container may be up.
+#
+# TAGS: experiment/c2-serving-vN, hardware-allowlisted and never pushed at the time of writing (git ls-remote, read-only allowlist check 2026-10-08). This pack takes the 16 tags that the first session's tail would have used
+# (v582-v585, v589-v592, v595-v599, v601-v603) and v612-v617 (22 in all, one per job with a tag); its RESERVE is v618-v620 (a re-run of A0X0, ZR or Z). The first session's own tags (v558-v561, the audited jobs v562-v568, its hand-back v604-v611) are NOT used.
+# The driver refuses a tag that exists on the remote, so a tag the first session pushed before it ended is caught at launch.
+#
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every item on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS S0b <- A0X0
+# NEEDS HL-LN <- S0b
+# NEEDS HL-LN2 <- HL-LN
+# NEEDS HL-LN3 <- HL-LN2
+# NEEDS SM SR10 S0b2 <- S0b
+# NEEDS T0s TA1 TL1 TA2 TL2 TA3 S1 S2 GG1 GG2 DA1 DL1 <- S0b HL-LN3
+# A stop-class failure (A0X0, S0b, HL-LN, HL-LN2, HL-LN3) skips everything but the hand-back.
+#
+# WINDOW END handback
+# WINDOW CAP 495
+# WINDOW TARGET 465
+# WINDOW RESERVE-MIN 60
+# WINDOW RESERVE v618 v619 v620
+# ARC-ZERO T0s DL1
+A0X0-agentstop-unserve-rescan-reset stop tp4-serve-11 4 v582 -
+S0b-baked-default-smoke stop tp4-serve-11 11 v583 20
+HL-LN-hang-shapes-levern stop tp4-serve-11 28 v584 55
+HL-LN2-hang-shapes-levern stop tp4-serve-11 28 v585 55
+HL-LN3-hang-shapes-levern stop tp4-serve-11 28 v589 55
+T0s-timed-production-bytes opt tp4-serve-10 10 v590 20
+TA1-timed-control-A opt tp4-serve-11 10 v591 20
+TL1-timed-levern-L opt tp4-serve-11 10 v592 20
+TA2-timed-control-A opt tp4-serve-11 10 v595 20
+TL2-timed-levern-L opt tp4-serve-11 10 v596 20
+TA3-timed-control-A opt tp4-serve-11 10 v597 20
+SM-streams-agent-shapes soft tp4-serve-11 14 v598 30
+S1-stall-control-A opt tp4-serve-11 27 v599 50
+S2-stall-levern-B opt tp4-serve-11 27 v601 50
+SR10-platform-replay soft tp4-serve-11 25 v602 60
+GG1-turns-hit-control-A opt tp4-serve-11 28 v603 55
+GG2-turns-hit-levern-B opt tp4-serve-11 28 v612 55
+S0b2-late-reattach-smoke soft tp4-serve-11 11 v613 20
+DA1-deep128k-control-A opt tp4-serve-11 18 v614 40
+DL1-deep128k-levern-L opt tp4-serve-11 18 v615 40
+ZR-reset-all-four hand tp4-serve-11 8 v616 -
+LM-links-remeasure drv - 6 - -
+TICK-topology-wait drv - 6 - -
+Z-handback hand tp4-serve-11 12 v617 -
+DEPLOY-and-engine-load drv - 8 - -
