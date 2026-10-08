@@ -528,11 +528,11 @@ class GovernorTests(unittest.TestCase):
         cfg = policy.config({})
         merged = policy.merged_config({'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180'})
         alternator = policy.Alternator(cfg, clock=clock, merged=merged, wall=wall)
-        # a cold prompt that arrived 150 s ago and still needs 15 s of device time (plus the 2.5 s build) inside the 30 s it has left: about 0.58
+        # a cold prompt that arrived 150 s ago and still needs 15 s of device time (plus the 5 s build measured on the cards) inside the 30 s it has left: about 0.67
         alternator.pending_hint = [(wall.now - 150.0, 15000.0)]
         alternator.begin(7, True)
-        self.assertGreater(alternator.share, 0.55)
-        self.assertLess(alternator.share, 0.65)
+        self.assertGreater(alternator.share, 0.62)
+        self.assertLess(alternator.share, 0.72)
         alternator.end('prefill')
         clock.advance_ms(1000)
         decision = alternator.begin(7, True)
