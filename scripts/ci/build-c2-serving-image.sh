@@ -34,6 +34,9 @@ revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
 graft=/home/thatch/opgraft-K64j
 graft_name=opgraft-K64j
 graft_sha=152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7
+kvread=/home/thatch/opgraft-KVR
+kvread_name=opgraft-KVR
+kvread_sha=5b2ad8d72bf134f1ef6413994d2b75511779660555cf0251d2b132773dcbdd8a
 previous_graft=/home/thatch/opgraft-K64i
 previous_graft_sha=cf54d716669be6b71f1d627e74892c90f562495dc9500589408a72b4ddccf4a4
 fixtures=/home/thatch/.cache/qwen-experiments
@@ -90,6 +93,14 @@ if [ "$(sha256sum < "$previous_graft/_ttnncpp.so" | cut -c1-64)" != "$previous_g
   exit 2
 fi
 cp -al "$graft" "$ctx/$graft_name"
+# The region-read extension (optimisation/ttnn-op/kv_region_read/build_kv_read.sh): replaces no binary, so it needs no strings superset, only its own
+# manifest and pin. The prefix audit reads the blocks a request names through it (docs/prefix-audit-cost.md); an image without it audits at 8 minutes a request.
+(cd "$kvread" && sha256sum -c --quiet MANIFEST.sha256) || { echo "$kvread does not verify against its MANIFEST.sha256" >&2; exit 2; }
+if [ "$(sha256sum < "$kvread/qwen_kv_read.so" | cut -c1-64)" != "$kvread_sha" ]; then
+  echo "$kvread/qwen_kv_read.so is not the pinned build $kvread_sha" >&2
+  exit 2
+fi
+cp -al "$kvread" "$ctx/$kvread_name"
 for component in attention convolution mlp projection selector; do
   cp -al "$fixtures/dflash2-$component-$revision" "$ctx/fixture/$component"
 done

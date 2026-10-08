@@ -329,5 +329,16 @@ class FourCardWarmTests(unittest.TestCase):
 
 
 
+class AuditCrossLineTests(unittest.TestCase):
+    def test_the_cross_check_line_is_scanned(self):
+        ok = '[PREFIX-AUDIT-CROSS] tensors=32 mismatched=0 region_ms=812.5 whole_read_ms=503211.0 blocks_read=2304'
+        bad = '[PREFIX-AUDIT-CROSS] tensors=32 mismatched=2 region_ms=1.0 whole_read_ms=2.0 blocks_read=64 fallback=' + chr(39) + 'x' + chr(39)
+        scanned = pm.scan([ok, bad, '[PREFIX-AUDIT-COST] rows=1 reqs=a tokens=4600 mode=region reads=32 blocks_read=2304 read_ms=1 total_ms=2 programs=5->5'])
+        first, second = scanned['audit_crosses']
+        self.assertEqual((first['tensors'], first['mismatched'], first['blocks_read'], first['fallback']), (32, 0, 2304, False))
+        self.assertEqual((second['mismatched'], second['fallback']), (2, True))
+        self.assertEqual(len(scanned['audit_costs']), 1)
+
+
 if __name__ == '__main__':
     unittest.main()

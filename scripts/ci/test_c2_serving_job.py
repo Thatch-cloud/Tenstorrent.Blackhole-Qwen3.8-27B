@@ -780,7 +780,8 @@ class BoxTests(unittest.TestCase):
 
     def test_the_step_ceilings_are_the_workflows_own_timeouts(self):
         for action, name in (('smoke', 'Smoke on the four-card set'), ('gate', "Run the gate in the agent's container shape"),
-                             ('prefix', "Prefix-reuse gates in the agent's container shape"), ('replay', "Replay the node agent's serving sequence")):
+                             ('prefix', "Prefix-reuse gates in the agent's container shape"), ('replay', "Replay the node agent's serving sequence"),
+                             ('fabric', 'Four-card fabric probe (all four cards, inside the image)')):
             found = re.search(r'timeout-minutes: (\d+)', step_text(name))
             self.assertEqual(job.STEP_MINUTES[action], int(found.group(1)), name)
 
@@ -825,6 +826,20 @@ class BoxWorkflowTests(unittest.TestCase):
         self.assertIn('${box_left:+--box-seconds "$box_left"}', script)
         self.assertIn('box_left=$(( BOX_MINUTES * 60 - ($(date +%s) - C2_JOB_STARTED) ))', script)
         self.assertNotIn('budget=$(( BOX_MINUTES * 60 ))', script, 'the prefix box clips arms; it never refuses a plan')
+
+    def test_the_prefix_step_can_mount_the_region_read_graft_over_the_production_base(self):
+        name = "Prefix-reuse gates in the agent's container shape"
+        self.assertIn('PREFIX_KVREAD_MOUNT: ${{ steps.job.outputs.prefix_kvread_mount }}', step_text(name))
+        self.assertIn('${PREFIX_KVREAD_MOUNT:+--kvread-mount /home/thatch/opgraft-KVR}', step_script(name))
+
+    def test_c2_prefix_kvread_mount_is_a_flag_of_the_prefix_action(self):
+        self.assertEqual(read()['prefix_kvread_mount'], '')
+        self.assertEqual(read(C2_ACTIONS='prefix', C2_PREFIX_PROFILE='general')['prefix_kvread_mount'], '')
+        self.assertEqual(read(C2_ACTIONS='prefix', C2_PREFIX_PROFILE='general', C2_PREFIX_KVREAD_MOUNT='1')['prefix_kvread_mount'], '1')
+        with self.assertRaisesRegex(job.JobError, 'empty or 1'):
+            read(C2_ACTIONS='prefix', C2_PREFIX_PROFILE='general', C2_PREFIX_KVREAD_MOUNT='yes')
+        with self.assertRaisesRegex(job.JobError, 'no prefix'):
+            read(C2_ACTIONS='status', C2_PREFIX_KVREAD_MOUNT='1')
 
     def test_the_replay_step_runs_under_an_interrupt_timeout_so_its_own_cleanup_runs(self):
         name = "Replay the node agent's serving sequence"

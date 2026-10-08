@@ -26,7 +26,9 @@ Keys (every one optional but C2_IMAGE_TAG):
                       link count and the collectives timed) or rs-tile (tp4_rs_tile_spike.py: the model's own all-reduce on a
                       64-row block against its one-tile calls, bit for bit, then the tile-split wrapper; the verdict line
                       TP4_RS_TILE) or mr (tp4_mr_probe.py: the verify readback's mesh-read arms at four chips, optimisation/ttnn-op/mr_probe's
-                      arms and verdict, MR_PROBE verdict=GO|MESH-ONLY|NO-GO); needs the fabric action
+                      arms and verdict, MR_PROBE verdict=GO|MESH-ONLY|NO-GO) or kvread (tp4_kv_read_probe.py: the prefix audit's region read,
+                      ttnn.qwen_read_blocks, against the whole-cache read byte for byte on the pool-sized cache; KV_READ_PROBE verdict=PASS|FAIL, the exit
+                      status is the verdict); needs the fabric action
   C2_SUPERSEDED_BY    set on every template of a pack that a later pack replaced (references/tp4-w2-jobs); read_job REFUSES such a template
   C2_PROFILE          the C2 profile smoke and gate serve (default: general)
   C2_CARDS            the card set the hardware steps open: pair (cards M and A, the default) or quad (every
@@ -113,6 +115,10 @@ Keys (every one optional but C2_IMAGE_TAG):
                       the baseline arm)
   C2_PREFIX_AGENTS    the timing and agent-turns plans' busy-agent counts, one phase each (default 1,4,5,6;
                       the agent-turn replay on eight seats: 8)
+  C2_PREFIX_KVREAD_MOUNT  '' (default) or 1: the prefix gate's containers (and its anchor probe) mount the rig's opgraft-KVR (the region-read
+                      extension qwen_kv_read.so and prod-audit/model.py, the production model.py staged with the narrowed audit) over an
+                      image that lacks them, namely the production base tp4-serve-10: the P1-CTL re-run on production bytes with the cheap audit.
+                      Leave it empty for tp4-serve-11, which bakes both. Refused unless the prefix action runs.
   The C2_PREFIX_* keys are read only when C2_ACTIONS has prefix; otherwise their defaults are output.
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
@@ -134,7 +140,7 @@ TP4_MESH_DEVICE = 'P150x4'
 # (general-2link: the same pair under the two-channel descriptor this cabling needs).
 PAIR_MESH_DEVICES = (None, 'P300')
 FABRIC_CONFIGS = ('FABRIC_1D', 'FABRIC_1D_RING')
-FABRIC_PROBES = ('fabric', 'rs-tile', 'mr')
+FABRIC_PROBES = ('fabric', 'rs-tile', 'mr', 'kvread')
 DRAFTER_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,63}')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
@@ -162,7 +168,7 @@ AUDIT_SETS = ('extent', 'all')
 SALT_MODES = ('none', 'fresh')
 DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
 # The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
-PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit')
+PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify')
 # (arm, its plan): each exactness and lifecycle arm is a plan of its own, named as the arm, that runs
 # only it, judged as inside its plan (neither plan has a cross-arm check; c2_prefix_gate.PLAN_ARMS).
 # G1 v47 (run 36246961161) needed the eager arm again without the traced and audit arms' hour.
@@ -505,7 +511,7 @@ def read_drafter_candidates(values, actions, table=None):
 
 BOX_MAX_MINUTES = 540
 # timeout-minutes of the workflow's smoke, gate and prefix steps (pinned by test_c2_serving_job against the workflow file).
-STEP_MINUTES = {'smoke': 210, 'gate': 380, 'prefix': 380, 'replay': 180}
+STEP_MINUTES = {'smoke': 210, 'gate': 380, 'prefix': 380, 'replay': 180, 'fabric': 45}
 
 
 def read_box(values, actions):
@@ -518,7 +524,7 @@ def read_box(values, actions):
     if minutes > BOX_MAX_MINUTES:
         raise JobError('C2_BOX_MINUTES must be at most %d (the 9 h cap of a window), got %d' % (BOX_MAX_MINUTES, minutes))
     if not set(actions) & set(STEP_MINUTES):
-        raise JobError('C2_BOX_MINUTES is enforced by the smoke, gate, prefix and replay steps: C2_ACTIONS has none of them')
+        raise JobError('C2_BOX_MINUTES is enforced by the smoke, gate, prefix, replay and fabric steps: C2_ACTIONS has none of them')
     # The workflow's own step timeouts (smoke 210 min, gate and prefix 380) are the hard ceiling the box sits under: a larger box would be cut by the step, not by the box.
     ceiling = max(STEP_MINUTES[action] for action in actions if action in STEP_MINUTES)
     if minutes > ceiling:
@@ -598,8 +604,10 @@ def read_prefix(values, profiles, running):
     must then be one the checkout defines (general-prefix lands in qwen_c2_profiles.json on another
     track, and the image's own profiles are what c2_prefix_gate.py finally checks)."""
     if not running:
+        if values.get('C2_PREFIX_KVREAD_MOUNT'):
+            raise JobError('C2_PREFIX_KVREAD_MOUNT mounts the region-read graft into the prefix gate: C2_ACTIONS has no prefix')
         return dict(prefix_plan='bringup', prefix_profile=PREFIX_PROFILE, prefix_baseline=PREFIX_BASELINE,
-                    prefix_agents=','.join(str(count) for count in PREFIX_AGENTS))
+                    prefix_agents=','.join(str(count) for count in PREFIX_AGENTS), prefix_kvread_mount='')
     plans = split_list(values.get('C2_PREFIX_PLAN', 'bringup')) or ['bringup']
     known = PREFIX_PLANS + tuple(arm for arm, _ in PREFIX_ARM_PLANS)
     unknown = sorted(set(plans) - set(known))
@@ -620,8 +628,11 @@ def read_prefix(values, profiles, running):
         raise JobError('C2_PREFIX_BASELINE none: the bringup plan compares against a baseline profile')
     agents_text = values.get('C2_PREFIX_AGENTS', '')
     agents = [positive_int('C2_PREFIX_AGENTS', part) for part in split_list(agents_text)] or list(PREFIX_AGENTS)
+    mount = values.get('C2_PREFIX_KVREAD_MOUNT', '')
+    if mount not in ('', '1'):
+        raise JobError('C2_PREFIX_KVREAD_MOUNT must be empty or 1, got %r' % mount)
     return dict(prefix_plan=','.join(plans), prefix_profile=profile, prefix_baseline=baseline,
-                prefix_agents=','.join(str(count) for count in agents))
+                prefix_agents=','.join(str(count) for count in agents), prefix_kvread_mount=mount)
 
 
 def render(outputs):

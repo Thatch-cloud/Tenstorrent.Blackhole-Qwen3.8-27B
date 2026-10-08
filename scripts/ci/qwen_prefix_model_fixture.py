@@ -139,6 +139,7 @@ class FakeTTNN(object):
         self.region_reads = False
         self.region_refuse = False
         self.region_lose_shard = False
+        self.region_corrupt = False
         self.region_compile = False
         self.bfloat16 = FakeDType('bfloat16', torch.bfloat16)
         self.float32 = FakeDType('float32', torch.float32)
@@ -221,6 +222,8 @@ class FakeTTNN(object):
         if self.region_compile:
             self.programs.add(('region_read', len(self.log)))
         host.data.copy_(cache.data.index_select(0, torch.as_tensor(blocks, dtype=torch.long)))
+        if self.region_corrupt:  # a wrong-bytes read bug: one value of the first block
+            host.data.view(-1)[0] += 1
 
     def copy(self, src, dst):
         for tensor in (src, dst):

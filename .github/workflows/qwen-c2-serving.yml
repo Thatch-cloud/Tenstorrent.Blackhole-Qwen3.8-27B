@@ -10,6 +10,8 @@ name: Qwen C2 serving image
 #            trained and the model's own all-gather / reduce-scatter timed at 1 and 2 links; fabric-probe.json.
 #            C2_FABRIC_PROBE=rs-tile runs scripts/ci/tp4_rs_tile_spike.py instead (the model's own all-reduce on a
 #            64-row block against its one-tile calls, bit for bit, then the tile-split wrapper): rs-tile-spike.json
+#            C2_FABRIC_PROBE=kvread runs scripts/ci/tp4_kv_read_probe.py (the prefix audit's region read, ttnn.qwen_read_blocks, against the
+#            whole-cache read byte for byte on the pool-sized cache; KV_READ_PROBE verdict=PASS|FAIL): kv-read-probe.json
 #   cardm  - a single-card qualification harness (C2_CARDM_HARNESS, e.g. optimisation/ttnn-op/k64j/run_card_b.sh)
 #            on card M alone, card B being reserved for another project: QUAL_CARD=card M, ALLOW_SERVING_CARD=1, after
 #            the same refusals as the gate (anything holding M or A, a platform serving container); never card
@@ -415,6 +417,7 @@ jobs:
           TAG: ${{ steps.job.outputs.tag }}
           FABRIC: ${{ steps.job.outputs.fabric }}
           PROBE: ${{ steps.job.outputs.fabric_probe }}
+          BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}
         run: |
           set -euo pipefail
           # The (1, 4) mesh under the ring descriptor, opened once (one fabric config, one open: a second open in a
@@ -429,6 +432,7 @@ jobs:
             fabric) script=tp4_fabric_probe.py; report=fabric-probe.json ;;
             rs-tile) script=tp4_rs_tile_spike.py; report=rs-tile-spike.json ;;
             mr) script=tp4_mr_probe.py; report=mr-probe.json ;;
+            kvread) script=tp4_kv_read_probe.py; report=kv-read-probe.json ;;
             *) echo "unknown fabric probe: $PROBE" >&2; exit 1 ;;
           esac
           results="$RUNNER_TEMP/c2-results/fabric"
@@ -447,20 +451,30 @@ jobs:
           fi
           devices=()
           for node in $(card_set_devices); do devices+=(--device "$node"); done
+          # kvread qualifies the BAKED extension (qwen_kv_read, optimisation/ttnn-op/kv_region_read). The rig's graft directory is mounted read-only
+          # beside it and is NOT on the path: the probe imports the baked module first and falls back to the mount only for an image built before
+          # B0 baked the graft, and its report says which ran ('extension_source'), so a mount can never shadow the baked bytes.
+          kvmount=()
+          if [ "${PROBE:-fabric}" = kvread ] && [ -s /home/thatch/opgraft-KVR/qwen_kv_read.so ]; then
+            kvmount=(-v /home/thatch/opgraft-KVR:/opt/qwen-c2/kvr-mount:ro -e QWEN_KVREAD_DIR=/opt/qwen-c2/kvr-mount)
+          fi
           status=0
-          timeout -k 30 1800 docker run --rm --name "$name" --read-only \
+          # the job's box (C2_BOX_MINUTES, at most this step's 45) bounds the probe; without one it keeps its 30 minutes
+          limit=1800
+          if [ -n "${BOX_MINUTES:-}" ]; then limit=$(( BOX_MINUTES * 60 )); fi
+          timeout -k 30 "$limit" docker run --rm --name "$name" --read-only \
             --tmpfs /tmp:rw,exec,nosuid,size=512m --tmpfs /opt/tt-metal/generated:rw,exec,nosuid,size=1g \
             --tmpfs /root/.cache/ttnn:rw,exec,nosuid,size=1g --tmpfs /root/.cache/tt-metal-cache:rw,exec,nosuid,size=8g \
             --shm-size 4g --memory 80g --cpus 8 "${devices[@]}" \
             -v /dev/hugepages-1G:/dev/hugepages-1G --cap-add SYS_NICE \
-            -v "$PWD:/c2:ro" -v "$results:/probe-results" \
+            -v "$PWD:/c2:ro" -v "$results:/probe-results" ${kvmount[@]+"${kvmount[@]}"} \
             -e MESH_DEVICE=P150x4 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_C2_SERVING=0 \
             -e TT_METAL_CACHE=/root/.cache/tt-metal-cache -e TT_CACHE_PATH=/tmp/tt-weights \
             -e TT_MESH_GRAPH_DESC_PATH=/c2/scripts/ci/qwen_p150x4_ring_mesh_graph_descriptor.textproto \
             --entrypoint python3 "$image" -B "/c2/scripts/ci/$script" --fabric "$FABRIC" \
             --output "/probe-results/$report" 2>&1 | tee "$RUNNER_TEMP/c2-results/fabric-probe.log" || status=$?
           sudo -n chown -R "$(id -u):$(id -g)" "$results" 2>/dev/null || true
-          grep -E 'FABRIC_PROBE|TP4_RS_TILE|MR_PROBE' "$RUNNER_TEMP/c2-results/fabric-probe.log" | tail -60 || true
+          grep -E 'FABRIC_PROBE|TP4_RS_TILE|MR_PROBE|KV_READ_PROBE' "$RUNNER_TEMP/c2-results/fabric-probe.log" | tail -60 || true
           exit "$status"
       - name: Run a qualification harness on card M
         if: contains(steps.job.outputs.actions, 'cardm')
@@ -868,6 +882,7 @@ jobs:
           PREFIX_PLAN: ${{ steps.job.outputs.prefix_plan }}
           PREFIX_BASELINE: ${{ steps.job.outputs.prefix_baseline }}
           PREFIX_AGENTS: ${{ steps.job.outputs.prefix_agents }}
+          PREFIX_KVREAD_MOUNT: ${{ steps.job.outputs.prefix_kvread_mount }}
           BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}
           CARDS: ${{ steps.job.outputs.cards }}
         run: |
@@ -934,6 +949,7 @@ jobs:
           status=0
           python3 scripts/ci/c2_prefix_gate.py --image "$image" --profile "$PREFIX_PROFILE" --plan "$PREFIX_PLAN" \
             --baseline "$PREFIX_BASELINE" --agents "$PREFIX_AGENTS" --budget-seconds "$budget" ${box_left:+--box-seconds "$box_left"} \
+            ${PREFIX_KVREAD_MOUNT:+--kvread-mount /home/thatch/opgraft-KVR} \
             --results "$results" --cards "$CARDS" 2>&1 | tee "$RUNNER_TEMP/c2-results/prefix.log" || status=$?
           # Read the launched argv (memory read-the-launched-argv) and the graft's install line, per arm.
           for log in "$results"/*/server.log; do

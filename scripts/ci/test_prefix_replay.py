@@ -350,7 +350,7 @@ class FakeEngine(object):
               # window lines that never mark a window restored (no_restored_windows: every new=1).
               'wrong_build_frontier', 'no_restored_windows',
               # The audit's own cost line: absent (the image predates the narrowed audit), or its read compiled a program.
-              'no_audit_cost', 'audit_compiles',
+              'no_audit_cost', 'audit_compiles', 'no_audit_cross', 'audit_cross_mismatch',
               # vLLM finds nothing cached for any request, so every continuation runs cold (lose_every_hit).
               'lose_every_hit')
     piece = 3
@@ -375,6 +375,7 @@ class FakeEngine(object):
         self.rounds = 0
         self.path = path or ('eager' if tt.get('trace_mode') == 'decode_only' else 'traced')
         self.audit = str(env.get('QWEN_PREFIX_AUDIT')) == '1'
+        self.cross_left = 1 if str(env.get('QWEN_PREFIX_AUDIT_READ')) == 'cross' else 0
         self.dev_mode = str(env.get('VLLM_SERVER_DEV_MODE')) == '1'
         self.store_gib = float(env.get('QWEN_PREFIX_STORE_GIB', prefix_registry.DEFAULT_STORE_GIB))
         self.max_num_seqs = int(engine.get('max-num-seqs', 4))
@@ -767,6 +768,10 @@ class FakeEngine(object):
                 self.say('[PREFIX-AUDIT-COST] rows=1 reqs=%s tokens=%d mode=region reads=4 blocks_read=%d read_ms=1.0 '
                          'total_ms=2.0 programs=%d->%d' % (request.request_id, len(ids), -(-len(ids) // 64) * 4,
                                                           self.programs, self.programs + grown))
+                if self.cross_left and 'no_audit_cross' not in self.faults:
+                    self.cross_left -= 1
+                    self.say('[PREFIX-AUDIT-CROSS] tensors=4 mismatched=%d region_ms=1.0 whole_read_ms=500.0 blocks_read=%d' % (
+                        4 if 'audit_cross_mismatch' in self.faults else 0, -(-len(ids) // 64) * 4))
         if len(ids) >= judge.CHUNK and self.path == 'traced':
             self.say('INFO [TP chunk-replay] %d/%d chunks' % (len(ids) // judge.CHUNK, len(ids) // judge.CHUNK))
 
