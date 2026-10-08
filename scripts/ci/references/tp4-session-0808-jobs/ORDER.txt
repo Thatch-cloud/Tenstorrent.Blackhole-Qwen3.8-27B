@@ -33,7 +33,7 @@
 # the driver sets the maintenance marker at the start (the production telemetry capture records Tier 0 triggers as suppressed) and the operator clears it after the hand-back deploy's post-checks (maint-off). The watchdog is registered
 # once at 07:30Z (RUNBOOK-SESSION-0808.md has the commands). The ARC runner sets are not scaled down by the driver; no CI is dispatched while the session runs.
 #
-# RE-PIN 2026-10-08: KVQ (v560) failed on cards (ttnn.Shape takes no slice: cache.shape[1:] in the probe and in the audit's region read). KVQ2 is KVQ re-run on tp4-serve-11b = serve-11 plus the fix (qwen_prefix_model_patch
+# RE-PIN 2026-10-08: KVQ (v560) failed on cards (ttnn.Shape takes no slice: cache.shape[1:] in the probe and in the audit's region read). KVQ2 is KVQ re-run (placed right before the audited arms, so a driver relaunched while an earlier job is in flight can still adopt that job: the in-flight job must be the first one left to run) on tp4-serve-11b = serve-11 plus the fix (qwen_prefix_model_patch
 # PATCHED_SHA256[model.py] dd1c89a8 -> 05f30d7c). Every job that runs the prefix gate's anchor probe (P1ab-LN, E1-LN, HF-LN, GG1, GG2, and P1-CTLR on the mounted prod-audit/model.py) is held to THIS pin, so they take serve-11b;
 # the smoke, gate, replay and fabric jobs do not hash model.py and stay on serve-11. KVQ stays in the window's verdicts.txt as FAIL (history); the ORDER no longer lists it.
 # TAGS: experiment/c2-serving-vN, hardware-allowlisted and never pushed (git ls-remote, read-only allowlist check 2026-10-08): this pack takes v558-v559, v561-v568, v582-v585, v589-v592, v595-v599, v601-v605 (29 jobs with a tag, B0 included), its RESERVE is
@@ -61,12 +61,12 @@
 #
 B0-build-serve-11 pre tp4-serve-11 25 v558 -
 A0X0-agentstop-unserve-rescan-reset stop tp4-serve-11 4 v559 -
-KVQ2-qualify-region-read soft tp4-serve-11b 20 v606 30
 A1-LN-levern-audited-attach stop tp4-serve-11 80 v561 165
 S0-CTL-control-attach-smoke stop tp4-serve-11 57 v562 100
 S0b-baked-default-smoke stop tp4-serve-11 11 v563 20
 L8-LN-ladder8-past-131k soft tp4-serve-11 33 v564 368
 C16-LN-churn16 soft tp4-serve-11 28 v565 153
+KVQ2-qualify-region-read soft tp4-serve-11b 20 v606 30
 P1ab-LN-exactness-shared-lifecycle-evict soft tp4-serve-11b 120 v566 240
 P1-CTLR-prod-bytes-exactness-shared-lifecycle-evict soft tp4-serve-10 125 v567 240
 E1-LN-exactness-eager soft tp4-serve-11b 100 v568 153

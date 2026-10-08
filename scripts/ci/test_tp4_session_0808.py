@@ -36,12 +36,12 @@ CUTOVER_EXTRA = 30         # the driver's thin-layer check (20) and the publish 
 JOBS = [
     ('B0-build-serve-11', 'pre', WINDOW, 25, 'v558', None),
     ('A0X0-agentstop-unserve-rescan-reset', 'stop', WINDOW, 4, 'v559', None),
-    ('KVQ2-qualify-region-read', 'soft', FIXED, 20, 'v606', 30),
     ('A1-LN-levern-audited-attach', 'stop', WINDOW, 80, 'v561', 165),
     ('S0-CTL-control-attach-smoke', 'stop', WINDOW, 57, 'v562', 100),
     ('S0b-baked-default-smoke', 'stop', WINDOW, 11, 'v563', 20),
     ('L8-LN-ladder8-past-131k', 'soft', WINDOW, 33, 'v564', 368),
     ('C16-LN-churn16', 'soft', WINDOW, 28, 'v565', 153),
+    ('KVQ2-qualify-region-read', 'soft', FIXED, 20, 'v606', 30),
     ('P1ab-LN-exactness-shared-lifecycle-evict', 'soft', FIXED, 120, 'v566', 240),
     ('P1-CTLR-prod-bytes-exactness-shared-lifecycle-evict', 'soft', PRODUCTION, 125, 'v567', 240),
     ('E1-LN-exactness-eager', 'soft', FIXED, 100, 'v568', 153),
