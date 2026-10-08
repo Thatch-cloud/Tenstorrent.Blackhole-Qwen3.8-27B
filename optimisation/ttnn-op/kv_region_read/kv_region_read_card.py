@@ -112,7 +112,9 @@ def run(ttnn, mesh, devices, blocks, heads_per_chip):
     programs = mesh.num_program_cache_entries()
     sets = block_sets(blocks)
     for name, selected in sets.items():
-        host = ttnn.allocate_tensor_on_host(ttnn.Shape([len(selected)] + [int(d) for d in cache.shape[1:]]),
+        # ttnn.Shape supports only __getitem__(int), __len__ and __iter__: no slice (KVQ v560 died on cache.shape[1:]).
+        cache_dims = [int(cache.shape[i]) for i in range(len(cache.shape))]
+        host = ttnn.allocate_tensor_on_host(ttnn.Shape([len(selected)] + cache_dims[1:]),
                                             cache.dtype, cache.layout, mesh)
         begin = time.perf_counter()
         ttnn.qwen_read_blocks(cache, host, selected)

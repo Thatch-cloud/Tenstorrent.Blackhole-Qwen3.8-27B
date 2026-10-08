@@ -63,6 +63,23 @@ class FakeDType(object):
         return 'DataType.' + self.name.upper()
 
 
+class StrictShape(tuple):
+    """What ttnn.Shape really supports: __getitem__(int) with an int index (negative ones work: the stock model uses shape[-1]), __len__ and __iter__, equality with a tuple.
+    No slice, no tuple concatenation: KVQ (v560) died on cache.shape[1:] with 'TypeError: __getitem__():
+    incompatible function arguments ... Invoked with types: ttnn._ttnn.types.Shape, slice'. Code under test copies it to ints first."""
+
+    def __getitem__(self, index):
+        if type(index) is not int:
+            raise TypeError('__getitem__(): incompatible function arguments. Invoked with types: ttnn._ttnn.types.Shape, %s' %
+                            type(index).__name__)
+        return tuple.__getitem__(self, index)
+
+    def __add__(self, other):
+        raise TypeError('unsupported operand type(s) for +: ttnn._ttnn.types.Shape')
+
+    __radd__ = __add__
+
+
 class FakeTensor(object):
     def __init__(self, data, dtype, layout, on_device):
         self.data = data
@@ -80,7 +97,7 @@ class FakeTensor(object):
         shape = tuple(self.data.shape)
         if self.chips > 1:
             shape = (shape[0], shape[1] // self.chips) + shape[2:]
-        return shape
+        return StrictShape(shape)
 
 
 class FakeMesh(object):
@@ -165,7 +182,7 @@ class FakeTTNN(object):
         if self.region_reads:
             module.allocate_tensor_on_host = self.allocate_tensor_on_host
             module.qwen_read_blocks = self.qwen_read_blocks
-            module.Shape = lambda dims: tuple(dims)
+            module.Shape = lambda dims: StrictShape(dims)
 
         def unfaked(name):
             # The region-read graft is a capability the image may lack: hasattr must say so.
@@ -214,7 +231,7 @@ class FakeTTNN(object):
         """The graft: the named blocks of a device cache into the front of a host tensor of just those blocks."""
         if cache is None or cache.deallocated or not cache.on_device:
             raise RuntimeError('qwen_read_blocks needs a live device cache')
-        if host.on_device or host.shape[0] != len(blocks) or host.shape[1:] != cache.shape[1:]:
+        if host.on_device or host.shape[0] != len(blocks) or tuple(host.shape)[1:] != tuple(cache.shape)[1:]:
             raise RuntimeError('qwen_read_blocks: host %s for %d blocks of %s' % (host.shape, len(blocks), cache.shape))
         if self.region_refuse:
             raise RuntimeError('qwen_read_blocks: region read refused')

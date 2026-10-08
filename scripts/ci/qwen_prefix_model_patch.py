@@ -110,7 +110,7 @@ SOURCE_SHA256 = {
 # edit below, or to lever_n_model_patch.patch_tp_replay, changes these on purpose
 # (test_qwen_prefix_model_patch prints the new values).
 PATCHED_SHA256 = {
-    MODEL_FILE: 'dd1c89a85aa273f8275a61d0a074989ade94371aba1af53de9f761639a72efc3',
+    MODEL_FILE: '05f30d7c107d7c721d0d23ad7b88a2e37a23c5a64c1ed17733c5d81d8a332585',
     VLLM_FILE: 'bd742abe2ebb67bbcc14cb58301c1ec27ac5810983d9521d52bf6e344e3ef189',
 }
 
@@ -957,17 +957,15 @@ MODEL_METHODS = r'''
         subset of the heads and agree with itself, so a wrong shape raises (the step then reads whole
         caches and says so in the cost line)."""
         count = int(blocks.numel())
-        host = ttnn.allocate_tensor_on_host(
-            ttnn.Shape([count] + [int(dim) for dim in cache.shape[1:]]), cache.dtype, cache.layout, self.mesh_device
-        )
+        # ttnn.Shape supports only __getitem__(int), __len__ and __iter__ (no slice, no tuple operators): copy it to ints first.
+        dims = tuple(int(cache.shape[i]) for i in range(len(cache.shape)))
+        host = ttnn.allocate_tensor_on_host(ttnn.Shape([count] + list(dims[1:])), cache.dtype, cache.layout, self.mesh_device)
         topology = getattr(cache, "tensor_topology", None)
         if callable(topology) and hasattr(host, "update_tensor_topology"):
             host.update_tensor_topology(topology())
         ttnn.qwen_read_blocks(cache, host, [int(block) for block in blocks.tolist()])
         sel = ttnn.to_torch(host, mesh_composer=heads)
-        want = (count, int(cache.shape[1]) * int(self.num_devices)) + tuple(
-            int(dim) for dim in cache.shape[2:]
-        )
+        want = (count, dims[1] * int(self.num_devices)) + dims[2:]
         if tuple(sel.shape) != want:
             raise AssertionError(f"region read composed shape {tuple(sel.shape)}, the whole-cache read gives {want}")
         return sel

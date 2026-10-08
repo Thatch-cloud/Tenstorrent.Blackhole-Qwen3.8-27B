@@ -20,10 +20,25 @@ import kv_region_read_card as card  # noqa: E402
 import tp4_kv_read_probe as probe  # noqa: E402
 
 
+class StrictShape(tuple):
+    """What ttnn.Shape really supports: __getitem__(int) (negative ints work too), __len__, __iter__; no slice, no tuple concatenation (KVQ v560)."""
+
+    def __getitem__(self, index):
+        if type(index) is not int:
+            raise TypeError('__getitem__(): incompatible function arguments. Invoked with types: ttnn._ttnn.types.Shape, %s' %
+                            type(index).__name__)
+        return tuple.__getitem__(self, index)
+
+    def __add__(self, other):
+        raise TypeError('unsupported operand type(s) for +: ttnn._ttnn.types.Shape')
+
+    __radd__ = __add__
+
+
 class FakeTensor(object):
     def __init__(self, data, per_chip_heads, dtype='bfloat8_b', layout='TILE'):
         self.data = data                      # the values of every chip's heads together: [blocks, chips x heads, 64, 256]
-        self.shape = (data.shape[0], per_chip_heads) + tuple(data.shape[2:])
+        self.shape = StrictShape((data.shape[0], per_chip_heads) + tuple(data.shape[2:]))
         self.dtype, self.layout = dtype, layout
 
 
@@ -72,7 +87,7 @@ class FakeTTNN(object):
 
     @staticmethod
     def Shape(dims):
-        return tuple(dims)
+        return StrictShape(dims)
 
     def as_tensor(self, tensor, device=None, dtype=None, layout=None, memory_config=None, mesh_mapper=None):
         return FakeTensor(torch.zeros(tensor.shape[0], tensor.shape[1] * self.chips, *tensor.shape[2:], dtype=tensor.dtype), tensor.shape[1])
@@ -94,6 +109,7 @@ class FakeTTNN(object):
         return data[:, : data.shape[1] // self.chips].clone() if self.lose_shard and getattr(tensor, 'host', False) else data
 
     def allocate_tensor_on_host(self, shape, dtype, layout, mesh):
+        shape = tuple(shape)
         host = FakeTensor(torch.zeros(shape[0], shape[1] * self.chips, *shape[2:], dtype=torch.bfloat16), shape[1])
         host.host = True
         return host
@@ -111,6 +127,15 @@ def parse(*extra):
 
 
 class CardCheckTests(unittest.TestCase):
+    def test_the_fake_shape_refuses_what_ttnn_shape_refuses(self):
+        """The strict fake is the guard: ttnn.Shape has no slice and no tuple concatenation (KVQ v560)."""
+        shape = StrictShape((4, 1, 64, 256))
+        self.assertEqual((len(shape), shape[0], tuple(shape)), (4, 4, (4, 1, 64, 256)))
+        self.assertEqual(shape, (4, 1, 64, 256))
+        for bad in (lambda: shape[1:], lambda: shape[:2], lambda: shape + (1,), lambda: (1,) + shape):
+            with self.assertRaises(TypeError):
+                bad()
+
     def test_a_correct_read_passes_every_check(self):
         ttnn = FakeTTNN()
         report = card.run(ttnn, ttnn.mesh, 4, 256, 1)
