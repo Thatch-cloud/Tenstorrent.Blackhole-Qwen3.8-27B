@@ -130,6 +130,8 @@ PROGRAMS_ARROW = re.compile(r'^(\d+|None)->(\d+|None)$')
 AUDIT_ROW = '[PREFIX-AUDIT] '
 # One per audited step: rows= reqs= tokens= mode=<region|full> reads= blocks_read= read_ms= total_ms= programs=<a>-><b> [fallback='...'].
 AUDIT_COST = '[PREFIX-AUDIT-COST] rows='
+# One per cross-checked audited step (QWEN_PREFIX_AUDIT_READ=cross): tensors= mismatched= region_ms= whole_read_ms= blocks_read= [fallback='...'].
+AUDIT_CROSS = '[PREFIX-AUDIT-CROSS] tensors='
 QWEN_C2_ARGV = re.compile(r'\[QWEN-C2\] profile (\S+): vLLM argv (\[.*\])[ \t]*$')
 APC = re.compile(r'Automatic prefix caching is (enabled|disabled)')
 CHUNKING_OFF = 'Chunked prefill is not supported for'
@@ -261,6 +263,13 @@ def audit_cost(text):
                 programs=count(match.group(2)) if match else None, fallback='fallback=' in text)
 
 
+def audit_cross(text):
+    """A [PREFIX-AUDIT-CROSS] line: how many region selections were compared with the whole-cache read, and how many differed."""
+    values = fields(text)
+    return dict(tensors=values.get('tensors'), mismatched=values.get('mismatched'), region_ms=values.get('region_ms'),
+                whole_read_ms=values.get('whole_read_ms'), blocks_read=values.get('blocks_read'), fallback='fallback=' in text)
+
+
 def dram_reading(line):
     """A '[PINDIAG] dram after <point>: <reading>' line -> dict(point, chips: [dict(chip, allocated_gb,
     free_gb, largest_free_mb, total_gb)], unavailable: the reason when there are no per-chip figures
@@ -284,7 +293,7 @@ def scan(lines):
     entry keeps its line index and timestamp so the driver can window it against a request."""
     out = dict(installs=[], grants=[], rows=[], audits=[], refused=[], capture_skipped=[], kill_switch=[],
                stats=None, launches=[], apc=[], chunking_off=0, chunk_replay=0, dram=[], dram_readings=[],
-               kv_tokens=None, failures=[], audit_costs=[], eager_warm=[], four_card_warm=[], sticky_installs=[], sticky_admits=[], sticky_builds=[],
+               kv_tokens=None, failures=[], audit_costs=[], audit_crosses=[], eager_warm=[], four_card_warm=[], sticky_installs=[], sticky_admits=[], sticky_builds=[],
                model_warm=[], model_warm_skipped=[], kv_shared=[], audit_windows=[])
     for index, raw in enumerate(lines):
         stamp, line = split_timestamp(raw.rstrip('\n'))
@@ -331,6 +340,10 @@ def scan(lines):
             entry = audit_cost(line.split('[PREFIX-AUDIT-COST] ', 1)[1])
             entry.update(where)
             out['audit_costs'].append(entry)
+        if AUDIT_CROSS in line:
+            entry = audit_cross(line.split('[PREFIX-AUDIT-CROSS] ', 1)[1])
+            entry.update(where)
+            out['audit_crosses'].append(entry)
         if AUDIT_ROW in line and 'kv_range=' in line:
             entry = audit_row(line)
             entry.update(where)

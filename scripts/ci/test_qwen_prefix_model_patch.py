@@ -164,7 +164,8 @@ class Scope(unittest.TestCase):
                                  '_qwen_prefix_program_cache_entries', '_qwen_prefix_read_scratch',
                                  '_qwen_prefix_capture', '_qwen_prefix_restore', '_qwen_prefix_warm_restore',
                                  '_qwen_prefix_audit', '_qwen_prefix_fit_page_table', '_qwen_prefix_audit_rows',
-                                 '_qwen_prefix_audit_read_mode', '_qwen_prefix_audit_selections', '_qwen_prefix_read_blocks'})
+                                 '_qwen_prefix_audit_read_mode', '_qwen_prefix_audit_selections', '_qwen_prefix_read_blocks',
+                                 '_qwen_prefix_region_read_ready', '_qwen_prefix_audit_cross_wanted'})
         self.assertEqual(before['prefill_paged_slots'], after['prefill_paged_slots'])
 
     def test_the_batched_prefill_entries_are_the_stock_ones(self):

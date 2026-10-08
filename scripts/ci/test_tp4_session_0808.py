@@ -40,10 +40,10 @@ JOBS = [
     ('S0-CTL-control-attach-smoke', 'stop', WINDOW, 57, 'v562', 100),
     ('S0b-baked-default-smoke', 'stop', WINDOW, 11, 'v563', 20),
     ('L8-LN-ladder8-past-131k', 'soft', WINDOW, 33, 'v564', 368),
-    ('P1ab-LN-exactness-shared-lifecycle-evict', 'soft', WINDOW, 120, 'v565', 240),
-    ('E1-LN-exactness-eager', 'soft', WINDOW, 100, 'v566', 153),
-    ('P1a-CTL2-exactness-shared-window-image', 'soft', WINDOW, 60, 'v567', 120),
-    ('C16-LN-churn16', 'soft', WINDOW, 28, 'v568', 153),
+    ('C16-LN-churn16', 'soft', WINDOW, 28, 'v565', 153),
+    ('P1ab-LN-exactness-shared-lifecycle-evict', 'soft', WINDOW, 120, 'v566', 240),
+    ('P1-CTLR-prod-bytes-exactness-shared-lifecycle-evict', 'soft', PRODUCTION, 125, 'v567', 240),
+    ('E1-LN-exactness-eager', 'soft', WINDOW, 100, 'v568', 153),
     ('HL-LN-hang-shapes-levern', 'stop', WINDOW, 28, 'v582', 55),
     ('HL-LN2-hang-shapes-levern', 'stop', WINDOW, 28, 'v583', 55),
     ('HL-LN3-hang-shapes-levern', 'stop', WINDOW, 28, 'v584', 55),
@@ -71,14 +71,14 @@ BY_NAME = dict((entry[0], entry) for entry in JOBS)
 RESERVE_TAGS = ['v%d' % n for n in range(606, 612)]
 NEEDS = {
     'KVQ': ['A0X0'], 'A1-LN': ['A0X0'], 'S0-CTL': ['A0X0'], 'S0b': ['A0X0'],
-    'P1ab-LN': ['S0-CTL', 'KVQ'], 'E1-LN': ['S0-CTL', 'KVQ'], 'P1a-CTL2': ['KVQ'],
+    'P1ab-LN': ['S0-CTL', 'KVQ'], 'E1-LN': ['S0-CTL', 'KVQ'], 'P1-CTLR': ['KVQ'],
     'L8-LN': ['S0b'], 'C16-LN': ['S0b'], 'HL-LN': ['S0b'], 'HF-LN': ['S0b'], 'HL-LN2': ['HL-LN'], 'HL-LN3': ['HL-LN2'],
     'T0s': ['S0b', 'HL-LN3', 'HF-LN'], 'TA1': ['S0b', 'HL-LN3', 'HF-LN'], 'TL1': ['S0b', 'HL-LN3', 'HF-LN'], 'TA2': ['S0b', 'HL-LN3', 'HF-LN'],
     'TL2': ['S0b', 'HL-LN3', 'HF-LN'], 'TA3': ['S0b', 'HL-LN3', 'HF-LN'], 'S1': ['S0b', 'HL-LN3', 'HF-LN'], 'S2': ['S0b', 'HL-LN3', 'HF-LN'],
     'GG1': ['S0b', 'HL-LN3', 'HF-LN'], 'GG2': ['S0b', 'HL-LN3', 'HF-LN'], 'SR10': ['S0b'],
 }
 CUTOVER_NEEDS = ('KVQ A1-LN S0-CTL P1ab-LN E1-LN S0b L8-LN C16-LN HL-LN HL-LN2 HL-LN3 HF-LN T0s TA1 TL1 TA2 TL2 TA3 S1 S2 GG1 GG2 SR10').split()
-WAIVABLE = ['P1a-CTL2', 'P1b-CTL']
+WAIVABLE = ['P1-CTLR|P1b-CTL']
 FREE = stage1.FREE        # the allowlisted tags never pushed, after the baseline window's v538-v557
 UNUSED_AFTER = ['v%d' % n for n in range(612, 621)]
 
@@ -107,8 +107,11 @@ def parsed(name):
 
 def token_names(token):
     """The job names a driver token means: the exact name, else every job whose name starts with token + '-'."""
-    exact = [entry[0] for entry in JOBS if entry[0] == token]
-    return exact or [entry[0] for entry in JOBS if entry[0].startswith(token + '-')]
+    names = []
+    for alternative in token.split('|'):
+        exact = [entry[0] for entry in JOBS if entry[0] == alternative]
+        names += exact or [entry[0] for entry in JOBS if entry[0].startswith(alternative + '-')]
+    return names
 
 
 def needs_key(name):
@@ -210,7 +213,7 @@ class PackFiles(unittest.TestCase):
                             for plan in entry['C2_PREFIX_PLAN'].split(','))
                 worst = min(stage1.STEP_CAP_MINUTES, -(-prefix_gate.worst_case_seconds(arms) // 60))
             self.assertIn(BY_NAME[name][5] - worst, (0, 1), name)   # the pack rounds C16-LN's 152 up to 153
-        for name in ('P1ab-LN-exactness-shared-lifecycle-evict', 'P1a-CTL2-exactness-shared-window-image'):
+        for name in ('P1ab-LN-exactness-shared-lifecycle-evict', 'P1-CTLR-prod-bytes-exactness-shared-lifecycle-evict'):
             entry = raw(name)
             arms = dict((plan.strip(), prefix_gate.plan_arms(plan.strip(), entry['C2_PREFIX_PROFILE'], None, stage1.profiles()))
                         for plan in entry['C2_PREFIX_PLAN'].split(','))
@@ -231,12 +234,12 @@ class PackFiles(unittest.TestCase):
         self.assertNotIn('rescan', z)
         self.assertNotIn('status', raw('A0X0-agentstop-unserve-rescan-reset')['C2_ACTIONS'].split())
 
-    def test_the_two_controls_are_the_prefix_gate_on_the_production_audited_profile(self):
-        for name, plan, image in (('P1a-CTL2-exactness-shared-window-image', 'exactness-shared', WINDOW),
-                                  ('P1b-CTL-lifecycle-evict-production-bytes', 'lifecycle-evict', PRODUCTION)):
+    def test_the_controls_are_the_prefix_gate_on_the_production_audited_profile_and_the_production_base(self):
+        for name, plan, mount in (('P1-CTLR-prod-bytes-exactness-shared-lifecycle-evict', 'exactness-shared,lifecycle-evict', '1'), ('P1b-CTL-lifecycle-evict-production-bytes', 'lifecycle-evict', None)):
             entry = raw(name)
-            self.assertEqual((entry['C2_PREFIX_PLAN'], entry['C2_PREFIX_PROFILE'], entry['C2_IMAGE_TAG']), (plan, stage1.R + 'ship-prefix-audit', image))
+            self.assertEqual((entry['C2_PREFIX_PLAN'], entry['C2_PREFIX_PROFILE'], entry['C2_IMAGE_TAG']), (plan, stage1.R + 'ship-prefix-audit', PRODUCTION))
             self.assertEqual(entry['C2_PREFIX_BASELINE'], 'none')
+            self.assertEqual(entry.get('C2_PREFIX_KVREAD_MOUNT'), mount)
 
     def test_no_template_or_order_line_names_a_rig_card_address_registry_digest_or_credential(self):
         for name in [entry[0] for entry in JOBS if entry[1] != 'drv'] + ['ORDER']:
@@ -311,7 +314,7 @@ class Directives(unittest.TestCase):
         self.assertEqual(planned - covered, set())
 
     def test_the_audited_prefix_arms_need_the_qualification(self):
-        for name in ('P1ab-LN', 'E1-LN', 'P1a-CTL2'):
+        for name in ('P1ab-LN', 'E1-LN', 'P1-CTLR'):
             self.assertIn('KVQ', NEEDS[name])
         self.assertNotIn('KVQ', NEEDS['A1-LN'])
         self.assertNotIn('KVQ', NEEDS['P1b-CTL'] if 'P1b-CTL' in NEEDS else [])
@@ -328,31 +331,31 @@ class Directives(unittest.TestCase):
 class Schedule(unittest.TestCase):
     def test_the_planned_jobs_total_at_the_central_estimates(self):
         planned = [entry for entry in JOBS if entry[1] not in ('drv', 'hand', 'pre')]
-        self.assertEqual(sum(entry[3] for entry in planned), 912)
-        self.assertIn('912 minutes', read_text('ORDER.txt'))
+        self.assertEqual(sum(entry[3] for entry in planned), 977)
+        self.assertIn('977 minutes', read_text('ORDER.txt'))
 
     def test_at_the_central_estimates_the_cores_and_the_controls_run_and_the_tail_is_refused_for_time(self):
         ran, skipped, clock = walk()
-        self.assertEqual(clock, 642)
-        refused = ['S1-stall-control-A', 'S2-stall-levern-B', 'P1b-CTL-lifecycle-evict-production-bytes', 'GG1-turns-hit-control-A', 'GG2-turns-hit-levern-B',
+        self.assertEqual(clock, 662)
+        refused = ['HF-LN-levern-faults', 'S1-stall-control-A', 'S2-stall-levern-B', 'P1b-CTL-lifecycle-evict-production-bytes', 'GG1-turns-hit-control-A', 'GG2-turns-hit-levern-B',
                    'SR10-platform-replay', 'T0s-timed-production-bytes', 'TA1-timed-control-A', 'TL1-timed-levern-L', 'TA2-timed-control-A', 'TL2-timed-levern-L',
                    'TA3-timed-control-A']
         self.assertEqual(ran, [entry[0] for entry in JOBS if entry[1] not in ('drv', 'hand', 'pre') and entry[0] not in refused])
-        self.assertEqual(set(skipped.values()), {'TIME', 'BLOCK'})
         self.assertEqual(sorted(skipped), sorted(refused))
-        # a block is refused whole: its first member for time, the rest after it
-        self.assertEqual([skipped[name] for name in ('S1-stall-control-A', 'S2-stall-levern-B', 'T0s-timed-production-bytes', 'TA3-timed-control-A')], ['TIME', 'BLOCK', 'TIME', 'BLOCK'])
+        # HF-LN is refused for time and every timed, stall and agent-turn job NEEDS it (the W-2 pack's own NEEDS), so the tail is skipped for its dependency
+        self.assertEqual(skipped['HF-LN-levern-faults'], 'TIME')
+        self.assertEqual(set(skipped[name] for name in refused if name.startswith(('S1', 'S2', 'GG', 'T0s', 'TA', 'TL'))), {'NEEDS'})
         self.assertLessEqual(clock + READY_AFTER_LAST_JOB, TARGET)
 
     def test_the_cutover_is_not_reachable_at_the_central_estimates_and_the_ready_line_lands_before_the_target(self):
         ran, skipped, clock = walk()
         needed = set(name for token in CUTOVER_NEEDS for name in token_names(token))
         self.assertTrue(needed & set(skipped))
-        self.assertEqual(7 * 60 + 30 + clock + READY_AFTER_LAST_JOB, 18 * 60 + 32)   # 18:32Z
+        self.assertEqual(7 * 60 + 30 + clock + READY_AFTER_LAST_JOB, 18 * 60 + 52)   # 18:52Z
 
     def test_a_failed_qualification_skips_the_three_audited_arms_and_the_freed_time_goes_to_the_tail(self):
         ran, skipped, clock = walk(failed=('KVQ',))
-        for name in ('P1ab-LN-exactness-shared-lifecycle-evict', 'P1a-CTL2-exactness-shared-window-image', 'E1-LN-exactness-eager'):
+        for name in ('P1ab-LN-exactness-shared-lifecycle-evict', 'P1-CTLR-prod-bytes-exactness-shared-lifecycle-evict', 'E1-LN-exactness-eager'):
             self.assertEqual(skipped[name], 'NEEDS')
         for name in ('S1-stall-control-A', 'S2-stall-levern-B', 'P1b-CTL-lifecycle-evict-production-bytes', 'GG1-turns-hit-control-A', 'GG2-turns-hit-levern-B'):
             self.assertIn(name, ran)

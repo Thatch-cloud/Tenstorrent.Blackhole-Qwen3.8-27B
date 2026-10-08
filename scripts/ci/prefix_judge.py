@@ -876,11 +876,12 @@ def window_findings(records):
     return problems[:16], lines, restored
 
 
-def audit_cost_findings(scanned):
+def audit_cost_findings(scanned, cross_wanted=False):
     """The model's [PREFIX-AUDIT-COST] lines of an arm that audits (QWEN_PREFIX_AUDIT=1): F3 across the
     audit (the audit runs outside every row's own program window, so its own lines carry the count) and
     which read ran. -> (problems, not exercised, lines). No line at all is an image whose model graft
-    predates the narrowed audit (it prints none)."""
+    predates the narrowed audit (it prints none). cross_wanted (the read-qualify arm, QWEN_PREFIX_AUDIT_READ=cross): the
+    region read must also have been compared with the whole-cache read, byte for byte, with no mismatch."""
     costs = scanned.get('audit_costs') or []
     if not costs:
         return [], ['no [PREFIX-AUDIT-COST] line: the served model graft predates the narrowed audit (the old audit '
@@ -896,7 +897,44 @@ def audit_cost_findings(scanned):
     modes = sorted(set(str(entry.get('mode')) for entry in costs))
     lines = ['audit steps: %d, read mode %s, %d with a fallback to whole caches, %d without a program count' % (
         len(costs), '/'.join(modes), sum(1 for entry in costs if entry.get('fallback')), len(unmeasured))]
-    return problems, [], lines
+    missing = []
+    if cross_wanted:
+        crosses = scanned.get('audit_crosses') or []
+        if not crosses:
+            missing.append('no [PREFIX-AUDIT-CROSS] line: the region read was never compared with the whole-cache read '
+                           '(QWEN_PREFIX_AUDIT_READ=cross did not take effect)')
+        for entry in crosses:
+            if entry.get('mismatched') is None or entry.get('tensors') is None:
+                problems.append('a [PREFIX-AUDIT-CROSS] line carries no tensors/mismatched count')
+            elif entry['mismatched'] > 0:
+                problems.append('the region read differs from the whole-cache read in %d of %d tensors: its digests are not '
+                                'the audit%ss' % (entry['mismatched'], entry['tensors'], chr(39)))
+            elif entry['tensors'] == 0 or entry.get('fallback'):
+                problems.append('the cross-check compared %s tensors%s: the region read did not run' % (
+                    entry['tensors'], ' (it fell back to whole caches)' if entry.get('fallback') else ''))
+        if crosses:
+            lines.append('cross-checks: %d steps, %s tensors compared, %s mismatched, whole read %s ms' % (
+                len(crosses), sum(e.get('tensors') or 0 for e in crosses), sum(e.get('mismatched') or 0 for e in crosses),
+                '/'.join(str(e.get('whole_read_ms')) for e in crosses)))
+        scaling = region_scaling(costs)
+        if scaling is not None:
+            lines.append(scaling[1])
+            if not scaling[0]:
+                problems.append(scaling[1])
+    return problems, missing, lines
+
+
+def region_scaling(costs):
+    """Does the region read's volume follow the rows? (False, text) when blocks read per audited token differ by more than
+    1.3x between steps (a read that follows the pool, not the row, is flat in the tokens), None with fewer than two region
+    steps. The cross-checked step is compared like any other: it reads the same blocks in region mode."""
+    steps = [e for e in costs if e.get('mode') == 'region' and not e.get('fallback') and e.get('tokens') and e.get('blocks_read')]
+    if len(steps) < 2:
+        return None
+    ratios = [float(e['blocks_read']) / float(e['tokens']) for e in steps]
+    low, high = min(ratios), max(ratios)
+    text = 'region read volume: %d steps, %.3f to %.3f blocks per audited token' % (len(steps), low, high)
+    return high <= 1.3 * low, text + ('' if high <= 1.3 * low else ' (more than 1.3x apart: the read does not follow the rows)')
 
 
 def audit_problems(cold, hit):

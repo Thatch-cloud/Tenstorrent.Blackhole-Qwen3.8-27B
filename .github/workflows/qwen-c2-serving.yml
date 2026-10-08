@@ -451,6 +451,13 @@ jobs:
           fi
           devices=()
           for node in $(card_set_devices); do devices+=(--device "$node"); done
+          # kvread qualifies the BAKED extension (qwen_kv_read, optimisation/ttnn-op/kv_region_read). The rig's graft directory is mounted read-only
+          # beside it and is NOT on the path: the probe imports the baked module first and falls back to the mount only for an image built before
+          # B0 baked the graft, and its report says which ran ('extension_source'), so a mount can never shadow the baked bytes.
+          kvmount=()
+          if [ "${PROBE:-fabric}" = kvread ] && [ -s /home/thatch/opgraft-KVR/qwen_kv_read.so ]; then
+            kvmount=(-v /home/thatch/opgraft-KVR:/opt/qwen-c2/kvr-mount:ro -e QWEN_KVREAD_DIR=/opt/qwen-c2/kvr-mount)
+          fi
           status=0
           # the job's box (C2_BOX_MINUTES, at most this step's 45) bounds the probe; without one it keeps its 30 minutes
           limit=1800
@@ -460,7 +467,7 @@ jobs:
             --tmpfs /root/.cache/ttnn:rw,exec,nosuid,size=1g --tmpfs /root/.cache/tt-metal-cache:rw,exec,nosuid,size=8g \
             --shm-size 4g --memory 80g --cpus 8 "${devices[@]}" \
             -v /dev/hugepages-1G:/dev/hugepages-1G --cap-add SYS_NICE \
-            -v "$PWD:/c2:ro" -v "$results:/probe-results" \
+            -v "$PWD:/c2:ro" -v "$results:/probe-results" ${kvmount[@]+"${kvmount[@]}"} \
             -e MESH_DEVICE=P150x4 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_C2_SERVING=0 \
             -e TT_METAL_CACHE=/root/.cache/tt-metal-cache -e TT_CACHE_PATH=/tmp/tt-weights \
             -e TT_MESH_GRAPH_DESC_PATH=/c2/scripts/ci/qwen_p150x4_ring_mesh_graph_descriptor.textproto \
@@ -875,6 +882,7 @@ jobs:
           PREFIX_PLAN: ${{ steps.job.outputs.prefix_plan }}
           PREFIX_BASELINE: ${{ steps.job.outputs.prefix_baseline }}
           PREFIX_AGENTS: ${{ steps.job.outputs.prefix_agents }}
+          PREFIX_KVREAD_MOUNT: ${{ steps.job.outputs.prefix_kvread_mount }}
           BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}
           CARDS: ${{ steps.job.outputs.cards }}
         run: |
@@ -941,6 +949,7 @@ jobs:
           status=0
           python3 scripts/ci/c2_prefix_gate.py --image "$image" --profile "$PREFIX_PROFILE" --plan "$PREFIX_PLAN" \
             --baseline "$PREFIX_BASELINE" --agents "$PREFIX_AGENTS" --budget-seconds "$budget" ${box_left:+--box-seconds "$box_left"} \
+            ${PREFIX_KVREAD_MOUNT:+--kvread-mount /home/thatch/opgraft-KVR} \
             --results "$results" --cards "$CARDS" 2>&1 | tee "$RUNNER_TEMP/c2-results/prefix.log" || status=$?
           # Read the launched argv (memory read-the-launched-argv) and the graft's install line, per arm.
           for log in "$results"/*/server.log; do

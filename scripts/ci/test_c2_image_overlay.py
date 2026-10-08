@@ -1045,6 +1045,10 @@ def fake_image(context, entries, tampered=None, dropped=None, record=True, ttnn_
     for binary, path in provenance.GRAFT_BINARIES:
         files[path] = dict(exists=True, path=path, realpath=path, sha256=graft[binary], qwen=list(strings[binary]))
         files[provenance.GRAFT_IN_IMAGE + '/' + binary] = dict(files[path])
+    kvread = context / provenance.KVREAD_NAME / provenance.KVREAD_FILE
+    if kvread.is_file():
+        path = provenance.KVREAD_IN_IMAGE + '/' + provenance.KVREAD_FILE
+        files[path] = dict(exists=True, path=path, realpath=path, sha256=c2_overlay.sha256(kvread))
     if ttnn_strings is not None:
         files['/opt/tt-metal/ttnn/ttnn/_ttnn.so']['qwen'] = ttnn_strings
     rows = []
@@ -1091,6 +1095,7 @@ def fake_image(context, entries, tampered=None, dropped=None, record=True, ttnn_
 K64I_SO = (b'\x7fELF..QWEN_SDPA_TREE_SCRATCH_ROUNDS\x00QWEN_FAST_X\x00QWEN_A\x00[QWEN-SDPA] flags=0x%x B=%d\x00'
            b'[QWEN-SDPA] KV-share twin bands\x00[QWEN-SDPA] q-slice rows_per_kv=%d\x00')
 K64J_SO = K64I_SO + b'[QWEN-SDPA] runtime-extent entries=%d kv_share=%s\x00'
+KVREAD_SO = b'\x7fELF qwen_kv_read QWEN_KV_READ_VERSION\x00'
 
 
 def previous_graft(directory, ttnncpp=K64I_SO, ttnn=b'\x7fELF ttnn QWEN_TTNN_ONLY\x00'):
@@ -1161,6 +1166,9 @@ class ProvenanceTests(unittest.TestCase):
         for op, _ in provenance.GRAFT_OP_DIRS:
             (graft / op / 'device').mkdir(parents=True)
             (graft / op / 'device' / (op + '.cpp')).write_text('// %s\n' % op)
+        kvread = cls.staged / provenance.KVREAD_NAME
+        kvread.mkdir()
+        (kvread / provenance.KVREAD_FILE).write_bytes(KVREAD_SO)
         script = cls.staged / 'build-c2-serving-image.sh'
         (cls.staged / provenance.STAMP_FILE).write_text(c2_overlay.sha256(script) + '\n')
 
@@ -1178,6 +1186,10 @@ class ProvenanceTests(unittest.TestCase):
         pin = mock.patch.object(provenance, 'PREVIOUS_GRAFT_TTNNCPP_SHA256', hashlib.sha256(K64I_SO).hexdigest())
         pin.start()
         self.addCleanup(pin.stop)
+        # The fixture's extension stands for the real build (5b2ad8d7): the pin (g) holds the context's copy and the image's to.
+        kvread_pin = mock.patch.object(provenance, 'KVREAD_SHA256', hashlib.sha256(KVREAD_SO).hexdigest())
+        kvread_pin.start()
+        self.addCleanup(kvread_pin.stop)
 
     def tearDown(self):
         shutil.rmtree(str(self.tmp), ignore_errors=True)
@@ -1192,6 +1204,37 @@ class ProvenanceTests(unittest.TestCase):
         problems, report = provenance.verify('sha256:built', self.context, '/models', docker=docker,
                                              log=self.log.append, previous_graft=previous)
         return problems, docker
+
+    def test_the_region_read_extension_is_held_to_its_pin_and_to_the_context(self):
+        built, _ = fake_image(self.context, self.entries)
+        key = provenance.KVREAD_IN_IMAGE + '/' + provenance.KVREAD_FILE
+        problems, lines = provenance.check_kvread(self.context, built['files'])
+        self.assertEqual(problems, [])
+        self.assertTrue(lines and 'in the image' in lines[0], lines)
+        built['files'][key] = dict(built['files'][key], sha256='0' * 64)
+        self.assertTrue('image\'s qwen_kv_read.so is' in provenance.check_kvread(self.context, built['files'])[0][0])
+        built['files'][key] = dict(exists=False)
+        self.assertIn('the image has no', provenance.check_kvread(self.context, built['files'])[0][0])
+        with mock.patch.object(provenance, 'KVREAD_SHA256', '1' * 64):
+            self.assertIn('not the pinned build', provenance.check_kvread(self.context, built['files'])[0][0])
+        shutil.rmtree(str(self.context / provenance.KVREAD_NAME))
+        self.assertIn('the context has no opgraft-KVR', provenance.check_kvread(self.context, built['files'])[0][0])
+
+    def test_the_extension_pin_is_one_value_in_the_dockerfile_the_build_script_and_g1(self):
+        dockerfile = (ROOT / 'docker' / 'qwen-c2-serving.Dockerfile').read_text(encoding='utf-8')
+        script = (ROOT / 'scripts' / 'ci' / 'build-c2-serving-image.sh').read_text(encoding='utf-8')
+        sha = '5b2ad8d72bf134f1ef6413994d2b75511779660555cf0251d2b132773dcbdd8a'
+        self.assertEqual(provenance.KVREAD_IN_IMAGE, '/opt/qwen-c2/opgraft-KVR')
+        self.assertIn('COPY opgraft-KVR/ /opt/qwen-c2/opgraft-KVR/', dockerfile)
+        self.assertIn('= %s' % sha, dockerfile)
+        self.assertIn('import ttnn, qwen_kv_read; assert callable(ttnn.qwen_read_blocks)', dockerfile)
+        self.assertIn('kvread_sha=%s' % sha, script)
+        self.assertIn('cp -al "$kvread" "$ctx/$kvread_name"', script)
+        self.assertIn('kvread_name=%s' % provenance.KVREAD_NAME, script)
+        # the layer replaces nothing: the pinned libraries are re-checked after it
+        layer = dockerfile[dockerfile.index('COPY opgraft-KVR/'):]
+        for pinned in ('152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7', '3f5a3d585b46b2bef7d7d2c6c34b88d7f4efb679ec051fb4da615f6ec9ccc9ce'):
+            self.assertIn(pinned, layer.split('\n\n', 1)[0])
 
     def test_a_faithful_image_passes(self):
         problems, docker = self.verify()

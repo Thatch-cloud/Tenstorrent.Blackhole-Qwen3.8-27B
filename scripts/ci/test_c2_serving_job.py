@@ -827,6 +827,20 @@ class BoxWorkflowTests(unittest.TestCase):
         self.assertIn('box_left=$(( BOX_MINUTES * 60 - ($(date +%s) - C2_JOB_STARTED) ))', script)
         self.assertNotIn('budget=$(( BOX_MINUTES * 60 ))', script, 'the prefix box clips arms; it never refuses a plan')
 
+    def test_the_prefix_step_can_mount_the_region_read_graft_over_the_production_base(self):
+        name = "Prefix-reuse gates in the agent's container shape"
+        self.assertIn('PREFIX_KVREAD_MOUNT: ${{ steps.job.outputs.prefix_kvread_mount }}', step_text(name))
+        self.assertIn('${PREFIX_KVREAD_MOUNT:+--kvread-mount /home/thatch/opgraft-KVR}', step_script(name))
+
+    def test_c2_prefix_kvread_mount_is_a_flag_of_the_prefix_action(self):
+        self.assertEqual(read()['prefix_kvread_mount'], '')
+        self.assertEqual(read(C2_ACTIONS='prefix', C2_PREFIX_PROFILE='general')['prefix_kvread_mount'], '')
+        self.assertEqual(read(C2_ACTIONS='prefix', C2_PREFIX_PROFILE='general', C2_PREFIX_KVREAD_MOUNT='1')['prefix_kvread_mount'], '1')
+        with self.assertRaisesRegex(job.JobError, 'empty or 1'):
+            read(C2_ACTIONS='prefix', C2_PREFIX_PROFILE='general', C2_PREFIX_KVREAD_MOUNT='yes')
+        with self.assertRaisesRegex(job.JobError, 'no prefix'):
+            read(C2_ACTIONS='status', C2_PREFIX_KVREAD_MOUNT='1')
+
     def test_the_replay_step_runs_under_an_interrupt_timeout_so_its_own_cleanup_runs(self):
         name = "Replay the node agent's serving sequence"
         self.assertIn('BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}', step_text(name))
