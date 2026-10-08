@@ -1022,7 +1022,7 @@ class AuditCost(ExactTestBase):
         self.assertIn('mode=full', engine.log.lines(patcher.MARKER_AUDIT_COST)[-1])
         with self.assertRaisesRegex(AssertionError, 'no qwen_read_blocks'):
             self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='region'))
-        with self.assertRaisesRegex(AssertionError, 'must be auto, region or full'):
+        with self.assertRaisesRegex(AssertionError, 'must be auto, region, full or cross'):
             self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='sometimes'))
 
     def test_a_region_read_that_loses_a_chip_shard_falls_back_instead_of_digesting_a_subset(self):
@@ -1037,6 +1037,38 @@ class AuditCost(ExactTestBase):
         cost = engine.log.lines(patcher.MARKER_AUDIT_COST)[-1]
         self.assertIn('mode=full', cost)
         self.assertIn('region read composed shape', cost)
+
+    def test_cross_mode_compares_the_first_step_with_the_whole_cache_read_and_then_stops(self):
+        """QWEN_PREFIX_AUDIT_READ=cross is the region read plus, for the first QWEN_PREFIX_AUDIT_CROSS_STEPS audited steps, a byte
+        comparison of every selection with the whole-cache read of the same blocks (the qualification on a real prompt)."""
+        engine = self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='cross'), region_reads=True)
+        (_, hit_row, _), (_, cold_row, _) = self.scenario(engine)
+        cross = engine.log.lines(patcher.MARKER_AUDIT_CROSS)
+        self.assertEqual(len(cross), 1, cross)
+        caches = 2 * len(engine.model._paged_kv_caches)
+        self.assertIn('tensors=%d mismatched=0' % caches, cross[0])
+        costs = engine.log.lines(patcher.MARKER_AUDIT_COST)
+        self.assertEqual(len(costs), 3)
+        self.assertTrue(all('mode=region' in line and 'fallback' not in line for line in costs), costs)
+        windows, summary = self.windows(engine)
+        for req, row in (('cost', hit_row), ('cost-cold', cold_row)):
+            self.assertEqual(windows[req], self.previous_digests(engine, row, 7000)[0], req)
+
+    def test_cross_mode_steps_are_counted_and_a_wrong_read_is_a_mismatch(self):
+        engine = self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='cross', QWEN_PREFIX_AUDIT_CROSS_STEPS='2'), region_reads=True)
+        engine.fake.region_corrupt = True
+        self.scenario(engine)
+        cross = engine.log.lines(patcher.MARKER_AUDIT_CROSS)
+        self.assertEqual(len(cross), 2, cross)
+        caches = 2 * len(engine.model._paged_kv_caches)
+        self.assertTrue(all('mismatched=%d' % caches in line for line in cross), cross)
+        clean = self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='cross', QWEN_PREFIX_AUDIT_CROSS_STEPS='0'), region_reads=True)
+        self.scenario(clean)
+        self.assertEqual(clean.log.lines(patcher.MARKER_AUDIT_CROSS), [])
+
+    def test_cross_mode_without_the_extension_refuses_at_attach(self):
+        with self.assertRaisesRegex(AssertionError, 'QWEN_PREFIX_AUDIT_READ=cross but this ttnn has no qwen_read_blocks'):
+            self.engine(environ=dict(self.AUDIT, QWEN_PREFIX_AUDIT_READ='cross'))
 
     def test_a_program_compiled_by_the_audit_is_counted_and_logged(self):
         engine = self.engine(environ=self.AUDIT, region_reads=True)
