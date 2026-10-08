@@ -21,7 +21,7 @@ A job starts only if `E + box (+30 for a serving-gate job) + 60 <= 750` (`CAP`, 
 
 - 14 of 26 planned jobs run, 642 minutes: `KVQ`, `A1-LN`, `S0-CTL`, `S0b`, `L8-LN`, `P1ab-LN`, `E1-LN`, `P1a-CTL2`, `C16-LN`, `HL-LN` x3, `HF-LN` (and `A0X0`). READY at about 18:32Z.
 - 12 jobs are refused for time: `S1`/`S2`, `P1b-CTL`, `GG1`/`GG2`, `SR10` and the six timed jobs (270 minutes). The cutover rule (`CUTOVER-NEEDS`, owner-approved) needs those, so **the session ends in the hand-back
-  to `f1dfcc99`, and the cutover goes to a short window** (about 4 to 5.5 h with its own `A0X0`; `results/CARRYOVER.txt` lists the jobs). The full cutover battery is 777 minutes of jobs against 690 available.
+  to the production image, and the cutover goes to a short window** (about 4 to 5.5 h with its own `A0X0`; `results/CARRYOVER.txt` lists the jobs). The full cutover battery is 777 minutes of jobs against 690 available.
 - If every job runs to 1.5 times its estimate the exactness core (`P1ab-LN`, `E1-LN`) still runs and the robustness core is cut short at `HL-LN`; READY then lands about 19:06Z.
 - If `KVQ` fails, `P1ab-LN`, `E1-LN` and `P1a-CTL2` are skipped (their NEEDS), and the freed time runs `S1`/`S2`, `P1b-CTL`, `GG1`/`GG2` and `SR10`; the timed block misses by two minutes. No cutover (`P1ab-LN` and `E1-LN` are in `CUTOVER-NEEDS`).
 

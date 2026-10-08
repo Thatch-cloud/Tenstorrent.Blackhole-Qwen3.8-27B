@@ -6,7 +6,7 @@
 # against) + HB <= CAP (750). So the last job ends by T=690, READY follows its ZR, LM and TICK (about 20 min: T=710 on a hand-back, 10 minutes under the 19:30Z target) and a cutover adds the thin-layer check and the publish
 # (about 30 min more: T=740, under the hard cap). A job that does not fit is SKIPPED-TIME and listed in results/CARRYOVER.txt; nothing is ever cancelled.
 # THE END IS DECIDED BY THE CUTOVER RULE (END cutover below): every CUTOVER-NEEDS job PASS (a plain PASS), P1a-CTL2 and P1b-CTL PASS or WAIVED by the owner (CUTOVER-WAIVABLE), the CUTOVER-JUDGE exits 0, the owner's recorded go
-# (CUTOVER_OWNER_GO), the thin layer verified on the rig. Anything else is the hand-back to the production image f1dfcc99, which is the expected end: see ESTIMATE below.
+# (CUTOVER_OWNER_GO), the thin layer verified on the rig. Anything else is the hand-back to the production image, which is the expected end: see ESTIMATE below.
 # CLASSES, tags, READ rules, kill switches, the rollback rule and the cutover's live checks are those of the W-1 and W-2 ORDERs (docs/tp4-short-windows.md); the readers are the private driver's (verdict.py).
 # One line per job: <template name without .env> <class> <image tag> <estimated minutes> <tag> <box minutes>. Estimates are the measured-basis central figures of the two packs; KVQ's 20 is an estimate (never run), P1a-CTL2 60 / P1b-CTL 75 are
 # docs/prefix-audit-cost.md's. A box is 1.5 times the high end of the range, or the gate's own worst case (L8-LN 368, C16-LN 153, P1b-CTL 153, E1-LN 153; P1ab-LN 240 and P1a-CTL2 120 are clipped by the prefix gate).
@@ -14,7 +14,7 @@
 # ESTIMATE (the test pins these numbers): the planned jobs total 912 minutes at the central estimates (A0X0 4, KVQ 20, A1-LN 80, S0-CTL 57, S0b 11, L8-LN 33, P1ab-LN 120, E1-LN 100, P1a-CTL2 60, C16-LN 28, HL-LN x3 84, HF-LN 45,
 # S1 S2 54, P1b-CTL 75, GG1 GG2 56, SR10 25, the timed block 60) against the 690 minutes the clock rule leaves them. The admission walk (the test, and the driver's dry run) at the central estimates: 14 jobs run, 642 minutes (the exactness core
 # A1-LN, S0-CTL, P1ab-LN, E1-LN; the robustness core S0b, L8-LN, C16-LN, HL-LN x3, HF-LN; and P1a-CTL2), READY at about 18:32Z; 12 jobs are SKIPPED-TIME (S1/S2, P1b-CTL, GG1/GG2, SR10 and the timed block, 270 minutes). The CUTOVER-NEEDS jobs alone
-# are 777 minutes, so the cutover is NOT reachable at the central estimates even if the owner waives both controls: the session ends in the HAND-BACK to f1dfcc99 and the cutover goes to a short window (A0X0, the skipped tail and the cutover:
+# are 777 minutes, so the cutover is NOT reachable at the central estimates even if the owner waives both controls: the session ends in the HAND-BACK to the production image and the cutover goes to a short window (A0X0, the skipped tail and the cutover:
 # about 4 to 5.5 h, the carry-over list names the jobs). That is a plan fact, not a surprise; the owner-approved rule is not weakened here, and the README lists the trims that would make the cutover reachable.
 # Priority order = the kill signals first (A1-LN, S0-CTL, S0b), L8-LN next (its 368-minute box only fits while E is small), the audited exactness jobs (P1ab-LN, E1-LN, P1a-CTL2), C16-LN, the Lever N hang shapes, the fault drills, then the cutover tail
 # in blocks that are admitted or refused WHOLE (class opt: S1/S2, GG1/GG2, the six timed jobs; a block member follows its first member's decision).
