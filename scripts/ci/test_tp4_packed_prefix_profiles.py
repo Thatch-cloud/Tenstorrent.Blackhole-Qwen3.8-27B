@@ -167,7 +167,7 @@ class PlanTests(unittest.TestCase):
         self.assertTrue(arms[0]['env'], 'the extent audit is on')
         self.assertEqual(arms[0]['seats'], 8)
         shared = self.arms('exactness-shared', PAIRS[0][0], PAIRS[0][1])
-        self.assertEqual([arm['kind'] for arm in shared], ['audit'])
+        self.assertEqual([arm['kind'] for arm in shared], ['auditcross'], 'audited, and the first audited step cross-checked against the whole-cache read')
         self.assertEqual(shared[0]['seats'], 8)
 
     def test_the_traced_arm_and_the_tiny_pool_do_not_apply(self):
