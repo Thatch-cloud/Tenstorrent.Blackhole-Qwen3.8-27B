@@ -19,7 +19,7 @@
 # for the new links to be published; DEPLOY-and-engine-load: the operator's release step and the engine load, outside this pack).
 # Priority order = the kill signals first (A0X0, S0b, the three hang runs), the performance block next (production bytes, then the ABABA of the control and Lever N), the stall pair, the agent-turn pair, a late re-attach and the deep pair last.
 # PERFORMANCE READ: scripts/ci/w2ln_timing_compare.py (`floor TA1 TA2 TA3` is the A-to-A drift, `pair TAn TLn` each pair, load-voided pairs are never "inside"); T0s against TA1 is the offset of the window image against production.
-# ARC-ZERO: the timed jobs, the stall, agent-turn and deep pairs are read against the rig's CI load, so the driver asks the operator to scale the ARC runner sets to ZERO before T0s and waits for the file runs/<id>/ARC_ZERO_ACK; without it
+# ARC RUNNERS AT ZERO (the range is the last directive line below): the timed jobs, the stall, agent-turn and deep pairs are read against the rig's CI load, so the driver asks the operator to scale the ARC runner sets to ZERO before T0s and waits for the file runs/<id>/ARC_ZERO_ACK; without it
 # the block is SKIPPED-ARC and carried over. The hardware host runner that runs these jobs is NOT an ARC runner and stays up.
 # SR10 (the platform replay) needs the thin layer on the window image, which the operator writes on the runner as a local file before the window; with no such file it fails after its reset, so the launch config lists SR10 in SKIP_JOBS
 # until that layer exists. It stays in the ORDER as a block separator (the driver reads the class of the row before a block, whether or not that row runs).
