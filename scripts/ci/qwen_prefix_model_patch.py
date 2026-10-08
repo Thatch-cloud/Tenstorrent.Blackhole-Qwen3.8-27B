@@ -110,7 +110,7 @@ SOURCE_SHA256 = {
 # edit below, or to lever_n_model_patch.patch_tp_replay, changes these on purpose
 # (test_qwen_prefix_model_patch prints the new values).
 PATCHED_SHA256 = {
-    MODEL_FILE: 'e05427560e0e6ad3512e2f29b3e8bdf1aee636856ae2033c80f85bdb5218faed',
+    MODEL_FILE: 'dd1c89a85aa273f8275a61d0a074989ade94371aba1af53de9f761639a72efc3',
     VLLM_FILE: 'bd742abe2ebb67bbcc14cb58301c1ec27ac5810983d9521d52bf6e344e3ef189',
 }
 
@@ -126,6 +126,7 @@ MARKER_EAGER_WARM = '[PINDIAG] prefix: eager prefill warmed before the decode tr
 MARKER_AUDIT = '[PREFIX-AUDIT]'
 # One line per audited step: which read ran and what it read (the window's evidence of the audit's cost).
 MARKER_AUDIT_COST = '[PREFIX-AUDIT-COST]'
+MARKER_AUDIT_CROSS = '[PREFIX-AUDIT-CROSS]'
 # G2's DRAM reading, '<MARKER_DRAM><point>: <per-chip figures>' (prefix_markers.DRAM_READING parses it; the
 # bring-up gate requires the DRAM_REGISTRY point, and DRAM_FIRST_CAPTURE once the arm stored a checkpoint).
 MARKER_DRAM = '[PINDIAG] dram after '
@@ -799,7 +800,9 @@ MODEL_METHODS = r'''
             blocks = torch.as_tensor(page_row[0, :n_blocks], dtype=torch.long)
             plans.append((blocks, n_blocks, [_qwen_hashlib.sha256() for _ in range(-(-row.actual // chunk))]))
         heads = ttnn.ConcatMeshToTensor(self.mesh_device, dim=1)
-        read = {"mode": self._qwen_prefix_audit_read_mode(), "reads": 0, "blocks": 0, "fallback": None, "ms": 0.0}
+        read = {"mode": self._qwen_prefix_audit_read_mode(), "reads": 0, "blocks": 0, "fallback": None, "ms": 0.0,
+                "cross": False, "cross_tensors": 0, "cross_bad": 0, "cross_ms": 0.0}
+        read["cross"] = read["mode"] == "region" and self._qwen_prefix_audit_cross_wanted()
         for k_cache, v_cache in self._paged_kv_caches:
             for cache in (k_cache, v_cache):
                 for index, sel in self._qwen_prefix_audit_selections(cache, [plan[0] for plan in plans], heads, read):
@@ -829,6 +832,13 @@ MODEL_METHODS = r'''
             )
         programs_after = self._qwen_prefix_program_cache_entries()
         fallback = "" if read["fallback"] is None else f" fallback={read['fallback']!r}"
+        if read["cross"]:
+            # The qualification line (prefix_markers.CROSS_RE): every region selection of this step against the whole read.
+            (logger.error if read["cross_bad"] or read["fallback"] else logger.info)(
+                f"[PREFIX-AUDIT-CROSS] tensors={read['cross_tensors']} mismatched={read['cross_bad']} "
+                f"region_ms={read['ms']:.1f} whole_read_ms={read['cross_ms']:.1f} blocks_read={read['blocks']}"
+                f"{fallback}"
+            )
         logger.info(
             f"[PREFIX-AUDIT-COST] rows={len(entries)} reqs={','.join(str(item[0].req_id) for item in entries)} "
             f"tokens={sum(int(item[0].actual) for item in entries)} mode={read['mode']} reads={read['reads']} "
@@ -844,43 +854,87 @@ MODEL_METHODS = r'''
                 "traces are parked is the second-request hang (#48536)"
             )
 
+    def _qwen_prefix_region_read_ready(self):
+        """True when ttnn.qwen_read_blocks (and ttnn.allocate_tensor_on_host) exist. The image carries the read as the
+        standalone extension qwen_kv_read (optimisation/ttnn-op/kv_region_read, on sys.path through opgraft-KVR); importing
+        it sets ttnn.qwen_read_blocks, and an image without it simply has no region read."""
+        if not callable(getattr(ttnn, "qwen_read_blocks", None)):
+            try:
+                import qwen_kv_read  # noqa: F401
+            except Exception:  # absent or unloadable: the audit reads whole caches (or refuses, under region/cross)
+                pass
+        return callable(getattr(ttnn, "qwen_read_blocks", None)) and hasattr(ttnn, "allocate_tensor_on_host")
+
     def _qwen_prefix_audit_read_mode(self):
-        """'region' or 'full' (QWEN_PREFIX_AUDIT_READ: auto, region or full)."""
+        """'region' or 'full' (QWEN_PREFIX_AUDIT_READ: auto, region, full or cross). cross is region, and for the first
+        QWEN_PREFIX_AUDIT_CROSS_STEPS audited steps (default 1) every selection is also compared byte for byte with the
+        whole-cache read of the same blocks (the qualification of the region read on a real prompt; it pays one
+        whole-pool read, ~8 minutes at eight seats x 262k)."""
         want = os.environ.get("QWEN_PREFIX_AUDIT_READ", "auto")
-        if want not in ("auto", "region", "full"):
-            raise AssertionError(f"QWEN_PREFIX_AUDIT_READ must be auto, region or full, got {want!r}")
-        have = callable(getattr(ttnn, "qwen_read_blocks", None)) and hasattr(ttnn, "allocate_tensor_on_host")
-        if want == "region" and not have:
+        if want not in ("auto", "region", "full", "cross"):
+            raise AssertionError(f"QWEN_PREFIX_AUDIT_READ must be auto, region, full or cross, got {want!r}")
+        have = self._qwen_prefix_region_read_ready()
+        if want in ("region", "cross") and not have:
             raise AssertionError(
-                "QWEN_PREFIX_AUDIT_READ=region but this ttnn has no qwen_read_blocks (the region-read graft): "
-                "the audit would silently read whole caches (~8 minutes a request at eight seats x 262k)"
+                f"QWEN_PREFIX_AUDIT_READ={want} but this ttnn has no qwen_read_blocks (the region-read extension "
+                "qwen_kv_read): the audit would silently read whole caches (~8 minutes a request at eight seats x 262k)"
             )
         return "full" if want == "full" or not have else "region"
+
+    def _qwen_prefix_audit_cross_wanted(self):
+        """True for an audited step that must also be cross-checked against the whole-cache read (QWEN_PREFIX_AUDIT_READ=cross,
+        the first QWEN_PREFIX_AUDIT_CROSS_STEPS steps)."""
+        if os.environ.get("QWEN_PREFIX_AUDIT_READ", "auto") != "cross":
+            return False
+        left = getattr(self, "_qwen_prefix_cross_left", None)
+        if left is None:
+            left = int(os.environ.get("QWEN_PREFIX_AUDIT_CROSS_STEPS", "1"))
+        self._qwen_prefix_cross_left = max(0, left - 1)
+        return left > 0
 
     def _qwen_prefix_audit_selections(self, cache, blocks_per_row, heads, read):
         """(row index, that row's blocks of one KV cache as host values [n_blocks, heads, block, dim])
         for every row, one selection alive at a time. read is the step's counters; a region read that
-        raises switches the step to the whole-cache read (logged, and named in the cost line)."""
+        raises switches the step to the whole-cache read (logged, and named in the cost line). When read["cross"] is
+        set each region selection is compared byte for byte with the same blocks of the whole-cache read of this cache
+        (one whole cache alive at a time, as in full mode) and the counts go to read["cross_tensors"/"cross_bad"]."""
         start = 0
         if read["mode"] == "region":
-            for index, blocks in enumerate(blocks_per_row):
+            whole = None
+            if read.get("cross"):
                 tick = _qwen_time.perf_counter()
-                try:
-                    sel = self._qwen_prefix_read_blocks(cache, blocks, heads)
-                except Exception as exc:  # the audit must still answer: fall back, loudly
-                    read["mode"] = "full"
-                    read["fallback"] = f"{type(exc).__name__}: {exc}"
-                    logger.warning(
-                        f"[PREFIX-AUDIT-COST] the region read failed ({read['fallback']}); reading whole caches for this step"
-                    )
-                    break
-                read["ms"] += (_qwen_time.perf_counter() - tick) * 1000.0
-                read["reads"] += 1
-                read["blocks"] += int(blocks.numel())
-                yield index, sel
-                start = index + 1
-            else:
-                return
+                whole = ttnn.to_torch(cache, mesh_composer=heads)
+                read["cross_ms"] += (_qwen_time.perf_counter() - tick) * 1000.0
+            try:
+                for index, blocks in enumerate(blocks_per_row):
+                    tick = _qwen_time.perf_counter()
+                    try:
+                        sel = self._qwen_prefix_read_blocks(cache, blocks, heads)
+                    except Exception as exc:  # the audit must still answer: fall back, loudly
+                        read["mode"] = "full"
+                        read["fallback"] = f"{type(exc).__name__}: {exc}"
+                        logger.warning(
+                            f"[PREFIX-AUDIT-COST] the region read failed ({read['fallback']}); reading whole caches for this step"
+                        )
+                        break
+                    read["ms"] += (_qwen_time.perf_counter() - tick) * 1000.0
+                    read["reads"] += 1
+                    read["blocks"] += int(blocks.numel())
+                    if whole is not None:
+                        want_sel = whole.index_select(0, blocks)
+                        same = tuple(sel.shape) == tuple(want_sel.shape) and bool(
+                            (sel.contiguous().view(torch.uint8) == want_sel.contiguous().view(torch.uint8)).all()
+                        )
+                        del want_sel
+                        read["cross_tensors"] += 1
+                        if not same:
+                            read["cross_bad"] += 1
+                    yield index, sel
+                    start = index + 1
+                else:
+                    return
+            finally:
+                del whole
         tick = _qwen_time.perf_counter()
         host = ttnn.to_torch(cache, mesh_composer=heads)
         read["ms"] += (_qwen_time.perf_counter() - tick) * 1000.0

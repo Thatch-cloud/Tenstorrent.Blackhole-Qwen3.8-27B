@@ -958,7 +958,7 @@ class StickyArmTests(unittest.TestCase):
         exactness = self.arms('exactness')
         self.assertEqual([(a['arm'], a['served']) for a in exactness],
                          [('exactness-audit', 'c2-packed-prefix+audit'), ('exactness-eager', 'c2-packed-prefix'),
-                          ('exactness-shared', 'c2-packed-prefix+audit')])
+                          ('exactness-shared', 'c2-packed-prefix+auditcross')])
         audit, eager, shared = exactness
         self.assertEqual((eager['full'], eager['path'], eager['sticky'], eager['s2'], eager['derived']),
                          (True, 'eager', True, True, None))
@@ -967,7 +967,8 @@ class StickyArmTests(unittest.TestCase):
         for arm in exactness:
             self.assertEqual((arm['env'], arm['prompt_limit'], arm['strict']), (c2_serving_gate.AUDIT_ENV, 32768, True))
             self.assertEqual(arm['served_env']['QWEN_FAST_STICKY_SESSIONS'], '1')
-        self.assertEqual(shared['derived']['profiles']['c2-packed-prefix+audit']['env']['QWEN_PREFIX_AUDIT'], '1')
+        self.assertEqual(shared['derived']['profiles']['c2-packed-prefix+auditcross']['env']['QWEN_PREFIX_AUDIT'], '1')
+        self.assertEqual(shared['derived']['profiles']['c2-packed-prefix+auditcross']['env']['QWEN_PREFIX_AUDIT_READ'], 'cross')
         self.assertEqual([a['arm'] for a in self.arms('lifecycle')], ['lifecycle-evict', 'lifecycle-store'])
         reference, prefix = self.arms('bringup')
         self.assertEqual((reference['served'], reference['s2'], reference['sticky'], reference['prompt_limit']),
@@ -1029,6 +1030,64 @@ class StickyArmTests(unittest.TestCase):
         # The short-chain audit arm reads little and is not gated; nor is a plan with no audit-cost arm.
         self.assertEqual(gate.audit_image_problems([dict(arm='exactness-audit', kind='audit')], dict(GOOD_ANCHOR, region_read=False)), [])
         self.assertEqual(gate.audit_image_problems([dict(arm='exactness-shared', kind='audit')], GOOD_ANCHOR), [])
+
+    def test_kvread_mount_puts_the_extension_and_the_audit_staged_model_over_the_production_base(self):
+        """--kvread-mount: the anchor probe and every arm mount qwen_kv_read.so and prod-audit/model.py, and PYTHONPATH keeps the image's own."""
+        calls = []
+
+        def inspect(arguments, **kwargs):
+            calls.append(arguments)
+            return SimpleNamespace(stdout=b'PATH=/usr/bin\nPYTHONPATH=/experiment-scripts/ci:/opt/tt-metal\n')
+
+        gate._IMAGE_PYTHONPATH.clear()
+        self.assertEqual(gate.kvread_mount_arguments('img', None, run=inspect), [], 'no mount, nothing mounted and no docker call')
+        self.assertEqual(calls, [])
+        arguments = gate.kvread_mount_arguments('img', '/rig/opgraft-KVR', run=inspect)
+        self.assertEqual(arguments[:4], ['-v', '/rig/opgraft-KVR/qwen_kv_read.so:/opt/qwen-c2/kvr-mount/qwen_kv_read.so:ro',
+                                         '-v', '/rig/opgraft-KVR/prod-audit/model.py:%s/model.py:ro' % gate.MODEL_ROOT])
+        self.assertEqual(arguments[4:], ['-e', 'PYTHONPATH=/experiment-scripts/ci:/opt/tt-metal:/opt/qwen-c2/kvr-mount'])
+        gate.kvread_mount_arguments('img', '/rig/opgraft-KVR', run=inspect)
+        self.assertEqual(len(calls), 1, 'one inspect per image')
+        with mock.patch.object(gate, 'KVREAD_MOUNT', '/rig/opgraft-KVR'), mock.patch.object(gate, 'kvread_mount_arguments', return_value=['-e', 'X=1']):
+            run = gate.server_run('img', 'name', 'served', ['/dev/a'])
+        self.assertLess(run.index('X=1'), run.index('--entrypoint'), 'before the entrypoint, so docker reads it as an option')
+        with mock.patch.object(gate, 'KVREAD_MOUNT', None):
+            self.assertNotIn('X=1', gate.server_run('img', 'name', 'served', ['/dev/a']))
+        probed = []
+        with mock.patch.object(gate, 'kvread_mount_arguments', return_value=['-e', 'X=1']):
+            gate.anchor_probe('img', run=lambda command, **kwargs: probed.append(command) or SimpleNamespace(stdout=b''))
+        self.assertEqual(probed[0][:5], ['docker', 'run', '--rm', '--network', 'none'])
+        self.assertIn('X=1', probed[0])
+        self.assertLess(probed[0].index('X=1'), probed[0].index('--entrypoint'))
+
+    def test_kvread_mount_is_refused_when_the_directory_lacks_the_files(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        self.assertIn('qwen_kv_read.so', gate.kvread_mount_problem(directory))
+        open(os.path.join(directory, 'qwen_kv_read.so'), 'w').close()
+        self.assertIn('prod-audit/model.py', gate.kvread_mount_problem(directory))
+        os.makedirs(os.path.join(directory, 'prod-audit'))
+        open(os.path.join(directory, 'prod-audit', 'model.py'), 'w').close()
+        self.assertIsNone(gate.kvread_mount_problem(directory))
+        lines = []
+        code = gate.main(['--image', 'img', '--results', os.path.join(directory, 'out'), '--kvread-mount', '/nowhere'],
+                         devices=['/a'], log=lines.append)
+        self.assertEqual(code, 2)
+        self.assertTrue(any('--kvread-mount' in line for line in lines), lines)
+        gate.KVREAD_MOUNT = None
+
+    def test_the_read_qualify_arm_needs_the_extension_and_is_judged_on_its_cross_check(self):
+        """read-qualify (QWEN_PREFIX_AUDIT_READ=cross) is the qualification of the region read: it is refused on an image without the
+        extension (it would die at attach), and it is the one audit arm that must carry a [PREFIX-AUDIT-CROSS] line."""
+        self.assertIn('read-qualify', job.PREFIX_PLANS)
+        (arm,) = gate.PLAN_ARMS['read-qualify']
+        self.assertEqual((arm[0], arm[1], arm[3]), ('read-qualify', 'exactness_audit', 'auditcross'))
+        self.assertEqual(gate.DERIVED['auditcross']['env'], dict(QWEN_PREFIX_AUDIT='1', QWEN_PREFIX_AUDIT_READ='cross'))
+        problems = gate.audit_image_problems([dict(arm='read-qualify', kind='auditcross')], dict(GOOD_ANCHOR, region_read=False))
+        self.assertTrue(problems and 'no ttnn.qwen_read_blocks' in problems[0], problems)
+        self.assertEqual(gate.audit_image_problems([dict(arm='read-qualify', kind='auditcross')], GOOD_ANCHOR), [])
+        script = gate.anchor_script()
+        self.assertIn('import qwen_kv_read', script, 'the probe imports the extension before it asks for the name')
 
     def test_main_refuses_a_plan_with_no_applicable_arm_and_lists_them_otherwise(self):
         results = tempfile.mkdtemp()
@@ -1142,6 +1201,24 @@ class StickyRunnerTests(unittest.TestCase):
         arm = result['arms']['exactness-shared']
         self.assertEqual(arm['verdict'], 'FAIL')
         self.assertTrue(any('the audit compiled programs' in p for p in arm['problems']), arm['problems'][:4])
+
+    def test_the_shared_arm_is_cross_checked_against_the_whole_cache_read(self):
+        result, _, _ = self.plan('exactness-shared', 'crossok')
+        self.assertEqual(result['verdict'], 'PASS', result['lines'])
+        self.assertTrue(any(line.startswith('cross-checks: 1 steps, 4 tensors compared, 0 mismatched')
+                            for line in result['arms']['exactness-shared']['lines']), result['arms']['exactness-shared']['lines'])
+        result, _, _ = self.plan('exactness-shared', 'crossbad', all=dict(audit_cross_mismatch=True))
+        arm = result['arms']['exactness-shared']
+        self.assertEqual(arm['verdict'], 'FAIL')
+        self.assertTrue(any('differs from the whole-cache read in 4 of 4 tensors' in p for p in arm['problems']), arm['problems'][:4])
+        result, _, _ = self.plan('exactness-shared', 'crossabsent', all=dict(no_audit_cross=True))
+        arm = result['arms']['exactness-shared']
+        self.assertEqual(arm['verdict'], 'NOT_EXERCISED')
+        self.assertTrue(any('never compared' in m for m in arm['not_exercised']), arm['not_exercised'])
+        # the override runs the slow audit on an image without the extension: no cross-check is asked for
+        with mock.patch.dict(os.environ, {gate.ALLOW_FULL_AUDIT_ENV: '1'}):
+            kinds = {arm['arm']: arm['kind'] for arm in gate.plan_arms('exactness-shared', 'c2-packed-prefix', 'c2-packed', sticky_profiles())}
+        self.assertEqual(kinds, {'exactness-shared': 'audit'})
 
     def test_each_missing_sticky_marker_fails(self):
         for fault, text in (('no_sticky_install', 'install sticky=1'), ('no_model_warm', 'model warm'),

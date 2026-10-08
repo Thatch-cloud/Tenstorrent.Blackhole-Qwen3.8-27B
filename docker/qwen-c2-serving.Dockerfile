@@ -49,6 +49,19 @@ RUN set -eu; g=/opt/qwen-c2/opgraft-K64j; \
     test "$(sha256sum < /opt/tt-metal/build_Release/lib/_ttnncpp.so | cut -c1-64)" = 152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7; \
     test "$(sha256sum < "$(readlink -f /opt/tt-metal/ttnn/ttnn/_ttnn.so)" | cut -c1-64)" = "$(sha256sum < $g/_ttnn.so | cut -c1-64)"
 
+# The prefix audit's region read (docs/prefix-audit-cost.md, optimisation/ttnn-op/kv_region_read/build_kv_read.sh): qwen_kv_read.so, a
+# standalone nanobind extension that adds ttnn.qwen_read_blocks and REPLACES NOTHING (the three pinned binaries above keep their hashes
+# and their QWEN_ strings; this layer sits after their sha checks, which are repeated below). Its directory goes on sys.path through a
+# .pth file, and the audit imports it (qwen_prefix_model_patch). The build fails unless the module imports with no device and sets the name.
+COPY opgraft-KVR/ /opt/qwen-c2/opgraft-KVR/
+RUN set -eu; k=/opt/qwen-c2/opgraft-KVR; \
+    test "$(sha256sum < $k/qwen_kv_read.so | cut -c1-64)" = 5b2ad8d72bf134f1ef6413994d2b75511779660555cf0251d2b132773dcbdd8a; \
+    site=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])'); \
+    echo "$k" > "$site/qwen_kv_read_path.pth"; \
+    python3 -c "import ttnn, qwen_kv_read; assert callable(ttnn.qwen_read_blocks); print('[KVREAD] qwen_kv_read', qwen_kv_read.QWEN_KV_READ_VERSION, qwen_kv_read.__file__)"; \
+    test "$(sha256sum < /opt/tt-metal/build_Release/lib/_ttnncpp.so | cut -c1-64)" = 152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7; \
+    test "$(sha256sum < /opt/tt-metal/build_Release/lib/libtt_metal.so | cut -c1-64)" = 3f5a3d585b46b2bef7d7d2c6c34b88d7f4efb679ec051fb4da615f6ec9ccc9ce
+
 # The v235 model-tree graft (artifact m3native-graft-sha-36087022223): the five wired model
 # files, the GDN prefill conv op (lever #2) and the C1e gate/up packing, one file each.
 # source.sha256 pins the originals the graft was cut from; graft.sha256 the grafted bytes.

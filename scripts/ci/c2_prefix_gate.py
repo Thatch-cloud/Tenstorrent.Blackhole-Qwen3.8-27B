@@ -248,6 +248,8 @@ def tiny_pool_env(profile, pool=replay.TINY_POOL_TOKENS):
 # kind -> the profile's changes: env, engine flags, additional-config tt keys (or a function of the profile).
 DERIVED = dict(
     audit=dict(env=dict(QWEN_PREFIX_AUDIT='1')),
+    # The qualification of the region read (read-qualify): audited, and the first audited step also reads whole caches and compares.
+    auditcross=dict(env=dict(QWEN_PREFIX_AUDIT='1', QWEN_PREFIX_AUDIT_READ='cross')),
     eager=dict(tt=dict(trace_mode='decode_only')),
     dev=dict(env=dict(VLLM_SERVER_DEV_MODE='1')),
     store=dict(env=dict(QWEN_PREFIX_STORE_GIB=str(SMALL_STORE_GIB))),
@@ -263,7 +265,7 @@ PLAN_ARMS = dict(
     exactness=(('exactness-traced', 'exactness_traced', 'prefix', None, 9000, True),
                ('exactness-audit', 'exactness_audit', 'prefix', 'audit', 5400, True),
                ('exactness-eager', 'exactness_eager', 'prefix', 'eager', 5400, True),
-               ('exactness-shared', 'exactness_shared', 'prefix', 'audit', 7200, True)),
+               ('exactness-shared', 'exactness_shared', 'prefix', 'auditcross', 7200, True)),
     lifecycle=(('lifecycle-evict', 'lifecycle_evict', 'prefix', 'dev', 9000, False),
                ('lifecycle-store', 'lifecycle_store', 'prefix', 'store', 3600, False),
                ('lifecycle-tiny', 'lifecycle_tiny', 'prefix', 'tiny', 4800, False)),
@@ -276,7 +278,10 @@ PLAN_ARMS = dict(
        # The merged route's drills (docs/tp4-combined-window.md): the faults (audited, against cold twins, with the kill-switch drill) and the timed
        # hit-mid-cold arrival (a TIMED scenario: no extent audit, no digests; the pack runs it ABAB against the production profile).
        'levern-faults': (('levern-faults', 'levern_faults', 'prefix', 'leverndrill', 9000, False),),
-       'levern-hit': (('levern-hit', 'levern_hit', 'prefix', None, 9000, False),)}
+       'levern-hit': (('levern-hit', 'levern_hit', 'prefix', None, 9000, False),),
+       # The qualification of the region read on a real prompt (docs/prefix-audit-cost.md): the short exactness chain, audited, the first
+       # audited step cross-checked against the whole-cache read (~8 minutes at the production pool), the rest at the region read's cost.
+       'read-qualify': (('read-qualify', 'exactness_audit', 'prefix', 'auditcross', 3600, True),)}
 )
 # The scenarios that measure rather than judge exactness: no extent audit, no row digests (they would time the audit).
 TIMED_SCENARIOS = ('timing', 'agent_turns', 'levern_hit')
@@ -290,7 +295,8 @@ PLAN_ARMS.update([(arm, tuple(entry for entry in PLAN_ARMS[plan] if entry[0] == 
 # The one arm that cannot finish without the narrowed audit: every request of exactness-shared audits (W-0 measured
 # ~8.4 minutes a request when the audit read whole caches; the arm sends 48). QWEN_PREFIX_AUDIT_READ is auto in the
 # image, so the narrowed read runs only when the ttnn.qwen_read_blocks graft is in it.
-AUDIT_COST_ARMS = ('exactness-shared',)
+AUDIT_COST_ARMS = ('exactness-shared', 'read-qualify')
+AUDIT_KINDS = ('audit', 'auditcross')
 ALLOW_FULL_AUDIT_ENV = 'C2_PREFIX_ALLOW_FULL_AUDIT'
 
 
@@ -298,7 +304,7 @@ def audit_image_problems(arms, anchor):
     """Why the image cannot run the audit-cost arms in any box, or []: refused before any container boots, so an
     image that predates the narrowed audit (the build skips a tag that exists) or lacks the region-read graft
     does not spend the window on an arm that ends as a TIMEBOX with no verdict."""
-    names = [arm['arm'] for arm in arms if arm['arm'] in AUDIT_COST_ARMS and arm.get('kind') == 'audit']
+    names = [arm['arm'] for arm in arms if arm['arm'] in AUDIT_COST_ARMS and arm.get('kind') in AUDIT_KINDS]
     if not names:
         return []
     if anchor.get('error'):
@@ -412,6 +418,8 @@ def plan_arms(plan, profile, baseline, profiles):
     for arm, scenario, which, kind, timeout, strict in PLAN_ARMS[plan]:
         if arm in skipped:
             continue
+        if kind == 'auditcross' and arm == 'exactness-shared' and os.environ.get(ALLOW_FULL_AUDIT_ENV) == '1':
+            kind = 'audit'    # the override runs the slow audit on an image without the extension: cross (region + whole) would die at attach
         if which == 'baseline':
             if not baseline or baseline == 'none':
                 if plan == 'bringup':
@@ -494,6 +502,44 @@ def write_salt_key(path, urandom=os.urandom):
     return key
 
 
+# The rig's region-read graft directory (optimisation/ttnn-op/kv_region_read/build_kv_read.sh and stage_prod_audit.py): qwen_kv_read.so and
+# prod-audit/model.py, the production model.py staged with the narrowed audit. --kvread-mount mounts both over an image that lacks them (the
+# production base tp4-serve-10), so the P1-CTL re-run reads the production engine with the cheap audit. None: nothing is mounted (tp4-serve-11
+# bakes both). Set by main from the option; the mount is the same for the anchor probe and every arm.
+KVREAD_MOUNT = None
+KVREAD_IN_CONTAINER = '/opt/qwen-c2/kvr-mount'
+_IMAGE_PYTHONPATH = {}
+
+
+def image_pythonpath(image, run=subprocess.run):
+    """The PYTHONPATH the image's own ENV sets ('' when none): a -e PYTHONPATH replaces it, so the mount appends to it."""
+    if image not in _IMAGE_PYTHONPATH:
+        result = run(['docker', 'image', 'inspect', '--format', '{{range .Config.Env}}{{println .}}{{end}}', image],
+                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+        text = (result.stdout or b'').decode('utf-8', 'replace')
+        _IMAGE_PYTHONPATH[image] = next((line.split('=', 1)[1] for line in text.splitlines() if line.startswith('PYTHONPATH=')), '')
+    return _IMAGE_PYTHONPATH[image]
+
+
+def kvread_mount_problem(mount):
+    """Why the mount directory cannot be used (the files the mount names), or None."""
+    for relative in ('qwen_kv_read.so', 'prod-audit/model.py'):
+        if not os.path.isfile(os.path.join(mount, relative)):
+            return '%s has no %s: build it (build_kv_read.sh, stage_prod_audit.py)' % (mount, relative)
+    return None
+
+
+def kvread_mount_arguments(image, mount=None, run=subprocess.run):
+    """The docker arguments that mount the region-read extension and the audit-staged model.py: [] without a mount."""
+    mount = KVREAD_MOUNT if mount is None else mount
+    if not mount:
+        return []
+    path = ':'.join(part for part in (image_pythonpath(image, run), KVREAD_IN_CONTAINER) if part)
+    return ['-v', '%s/qwen_kv_read.so:%s/qwen_kv_read.so:ro' % (mount, KVREAD_IN_CONTAINER),
+            '-v', '%s/prod-audit/model.py:%s/model.py:ro' % (mount, MODEL_ROOT),
+            '-e', 'PYTHONPATH=' + path]
+
+
 def server_run(image, name, served, devices, port=PORT, hub=gate.HUB, derived_path=None, digests=False,
                salt_key_path=None, stats_now=False, env=(), gate_only=False):
     """`docker run -d` of one serving container: the S1 gate's agent shape (its --rm dropped: the
@@ -514,7 +560,8 @@ def server_run(image, name, served, devices, port=PORT, hub=gate.HUB, derived_pa
     if derived_path:
         arguments += ['--mount', 'type=bind,src=%s,dst=%s,readonly' % (derived_path, DERIVED_MOUNT),
                       '-e', 'QWEN_C2_PROFILES=%s' % DERIVED_MOUNT]
-    return arguments + ['--entrypoint', 'python3', image, '-m', 'vllm.entrypoints.openai.api_server'] + PLATFORM_ARGS
+    return (arguments + kvread_mount_arguments(image)
+            + ['--entrypoint', 'python3', image, '-m', 'vllm.entrypoints.openai.api_server'] + PLATFORM_ARGS)
 
 
 def anchor_script(root=MODEL_ROOT, pins=GRAFT_PINS, files=ANCHOR_FILES):
@@ -525,7 +572,7 @@ def anchor_script(root=MODEL_ROOT, pins=GRAFT_PINS, files=ANCHOR_FILES):
     return ('cd ' + root + ' && sha256sum ' + ' '.join(files) + '; echo ==pins; cat ' + pins + '; echo ==pinned; '
             + listed + ' | while read -r p; do sha256sum "$p" 2>/dev/null || echo "missing  $p"; done; '
             'echo ==markers; grep -rlF "[PREFIX]" . || true; '
-            'echo ==region; python3 -c "import ttnn; print(\'region\', int(callable(getattr(ttnn, \'qwen_read_blocks\', None))))" '
+            'echo ==region; python3 -c "import ttnn\ntry:\n import qwen_kv_read\nexcept Exception:\n pass\nprint(\'region\', int(callable(getattr(ttnn, \'qwen_read_blocks\', None))))" '
             '2>/dev/null | tail -n 1 || true')
 
 
@@ -533,7 +580,8 @@ def anchor_probe(image, run=subprocess.run):
     """The image's model tree, read in a throwaway container (no devices, no network): see
     anchor_script and parse_anchor."""
     try:
-        result = run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', 'sh', image, '-c', anchor_script()],
+        result = run(['docker', 'run', '--rm', '--network', 'none'] + kvread_mount_arguments(image)
+                     + ['--entrypoint', 'sh', image, '-c', anchor_script()],
                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=300)
         text = (result.stdout or b'').decode('utf-8', 'replace')
     except (OSError, subprocess.SubprocessError) as error:
@@ -1320,7 +1368,7 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None):
         audit_fail, audit_missing = audit_findings(records, driver.pairs)
         problems += audit_fail
         missing += audit_missing
-        cost_fail, cost_missing, cost_lines = judge.audit_cost_findings(scanned)
+        cost_fail, cost_missing, cost_lines = judge.audit_cost_findings(scanned, cross_wanted=arm.get('kind') == 'auditcross')
         problems += cost_fail
         missing += cost_missing
         lines += cost_lines
@@ -1331,11 +1379,11 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None):
         missing += more_missing
         problems += more_problems
         lines += more_lines
-        if arm.get('kind') == 'audit':
+        if arm.get('kind') in AUDIT_KINDS:
             audit_fail, audit_missing = audit_findings(records, driver.pairs)
             problems += audit_fail
             missing += audit_missing
-            cost_fail, cost_missing, cost_lines = judge.audit_cost_findings(scanned)
+            cost_fail, cost_missing, cost_lines = judge.audit_cost_findings(scanned, cross_wanted=arm.get('kind') == 'auditcross')
             problems += cost_fail
             missing += cost_missing
             lines += cost_lines
@@ -1827,6 +1875,8 @@ def build_parser():
     parser.add_argument('--port', type=int, default=PORT)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--dry-run', action='store_true', help='print every arm\'s docker argv and run nothing')
+    parser.add_argument('--kvread-mount', default=None, help='the rig directory holding qwen_kv_read.so and prod-audit/model.py: mounted '
+                        'over an image that lacks them (the production base), for the anchor probe and every arm')
     parser.add_argument('--cards', choices=gate.CARD_SETS, default='pair',
                         help='pair: cards M and A (the default); quad: every Blackhole board present, the four-card '
                              '(1, 4) mesh the TP4 profiles open (qwen-c2-serving.yml C2_CARDS)')
@@ -1834,7 +1884,14 @@ def build_parser():
 
 
 def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
+    global KVREAD_MOUNT
     options = build_parser().parse_args(argv)
+    KVREAD_MOUNT = options.kvread_mount or None
+    if KVREAD_MOUNT and not options.dry_run:
+        problem = kvread_mount_problem(KVREAD_MOUNT)
+        if problem:
+            log('refused: --kvread-mount: %s' % problem)
+            return 2
     plans = c2_serving_job.split_list(options.plan)
     unknown = sorted(set(plans) - set(PLANS))
     if not plans or unknown:
@@ -1902,7 +1959,7 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
                                                       gate_only=bool(arm.get('gate_only'))))))
         return 0
     if os.environ.get(ALLOW_FULL_AUDIT_ENV) != '1' and any(
-            arm['arm'] in AUDIT_COST_ARMS and arm.get('kind') == 'audit' for plan in plans for arm in arms_of[plan]):
+            arm['arm'] in AUDIT_COST_ARMS and arm.get('kind') in AUDIT_KINDS for plan in plans for arm in arms_of[plan]):
         if anchor is None:
             anchor = anchor_probe(options.image)
         problems = audit_image_problems([arm for plan in plans for arm in arms_of[plan]], anchor)

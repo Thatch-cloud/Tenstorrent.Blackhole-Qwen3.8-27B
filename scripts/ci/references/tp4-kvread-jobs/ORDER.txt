@@ -1,0 +1,29 @@
+# tp4-kvread-jobs: the QUALIFY of the prefix audit's region read, and the P1 control re-run on production bytes (docs/prefix-audit-cost.md). A SUPPLEMENT to the W-1 pack (tp4-w1-levern-jobs): it adds rows to its ORDER, and replaces none of its
+# templates. Nothing here builds an image or moves :latest. The graft itself is ~/opgraft-KVR on the rig (build_kv_read.sh; qwen_kv_read.so sha256 5b2ad8d72bf134f1ef6413994d2b75511779660555cf0251d2b132773dcbdd8a) and tp4-serve-11 BAKES it (B0, build-c2-serving-image.sh).
+# One line per job: <template name without .env> <class> <image tag> <estimated minutes> <tag> <box minutes>. Classes as W-1's ORDER: soft = data, a failure does not stop the window.
+# TAGS: from W-1's RESERVE (v566, v567, v568, v582). The rows below are ALTERNATIVES where marked: the pack uses at most v566 and v567, and the replacement P1b-LN takes P1ab-LN's own tag v562 (P1ab-LN is not run then), so the reserve keeps v568 and v582 for re-runs.
+Q1-kvread-qualify soft tp4-serve-11 12 v566 -
+P1-CTLR-prod-bytes-exactness-shared-lifecycle-evict soft tp4-serve-10 125 v567 240
+# ALTERNATIVES, used only when Q1 did not PASS (FAIL or NOT-MEASURED: the region read is NOT QUALIFIED):
+P1b-CTLR-lifecycle-evict-prod-bytes soft tp4-serve-10 75 v567 153
+P1b-LN-lifecycle-only soft tp4-serve-11 75 v562 153
+#
+# WHERE THEY RUN. Q1 is the FIRST card job after A0X0 (the stop, the unserve and the reset): the fabric action refuses to run beside a platform serving container, and the probe opens the mesh once. It needs only A0X0; a Q1 verdict is on screen within ~12 minutes,
+# before A1-LN's 80. P1-CTLR runs EARLY (after S0-CTL, before P1ab-LN) when the owner wants W-2's baselines; it is OPTIONAL (see COST).
+# NEEDS Q1 <- A0X0
+# NEEDS P1-CTLR <- Q1
+# QUALIFY RULE (the fallback the session takes). Q1 PASS = the region read is byte-identical to the whole-cache read on the served mesh at the production pool's size, compiles nothing and follows the row. Then P1ab-LN, E1-LN and P1-CTLR run as planned, and the first audited
+# step of EVERY exactness-shared arm (P1ab-LN, P1-CTLR) is also cross-checked on a real prompt against the whole-cache read (QWEN_PREFIX_AUDIT_READ=cross, ~9 minutes of the 20 the P1ab-LN estimate already reserved for the read's cost; the gate judges the '[PREFIX-AUDIT-CROSS]' line:
+# a mismatch is a FAIL, an absent line NOT_EXERCISED). Q1 FAIL or NOT-MEASURED = NOT QUALIFIED: P1ab-LN is REPLACED by P1b-LN-lifecycle-only (the lifecycle arm reads no KV), P1-CTLR by P1b-CTLR (production bytes, no audit), and exactness-shared is the owner's decision
+# (the old audit reads the whole pool, ~8.4 minutes a request: 48 requests are ~6.7 h, a window of their own; C2_PREFIX_ALLOW_FULL_AUDIT=1 in the gate's environment is the override, the extension absent). A Q1 FAIL is also a finding to read before anything else: the first suspects are the
+# host tensor's shape (the binding fails loud with a TT_FATAL), several region reads of one shard in one enqueue (the 'two_runs' set), and the program cache (the 'program_cache_growth' field).
+# NOT-MEASURED with 'extension source: ...' absent means the image lacks the module: the image was built before the graft was baked (B0 skips a tag that exists): the rig's ~/opgraft-KVR is then used and the line says 'mount'.
+#
+# COST (central estimates). Q1 adds 12 minutes to W-1 (401 -> 413 at the planned figures). P1-CTLR adds ~125 minutes: at W-1's cap (540, HB 60) the admit rule then skips E1-LN (needs E <= 327: E at E1-LN would be 261 + 12 + 125 = 398) and E1-LN moves to W-2's head, so a
+# third window for the cutover (W-1's CARRY-OVER paragraph). The owner chooses between: (a) P1-CTLR in the session (the cutover rule's baselines on production bytes with the cheap audit), (b) no P1-CTLR and the rule re-scoped to the window image's own S0-CTL plus the 8/8 byte-exact partial read of W-0's
+# P1a (docs/prefix-audit-cost.md), E1-LN stays in W-1. With the owner's chained session (W-1 then W-2, no hand-back between) the 540-minute cap is not the constraint, the READY target is: every job is admitted only if its BOX fits before it.
+#
+# THE MOUNT (P1-CTLR). The production base image has the old whole-pool audit, and no extension. C2_PREFIX_KVREAD_MOUNT=1 makes the prefix gate mount (read-only) over it, for the anchor probe and every arm: opgraft-KVR/qwen_kv_read.so (on PYTHONPATH, appended to the image's own) and
+# opgraft-KVR/prod-audit/model.py (over the model tree's model.py). prod-audit/model.py is the P8 original model.py run through this checkout's prefix stage (stage_prod_audit.py; the original and the output both held to their pins): it differs from the model.py tp4-serve-10 serves in the audit
+# methods and in the prefill loop's collect-then-audit-once-per-step edit, all inert without QWEN_PREFIX_AUDIT=1. The gate refuses the plan before any container boots if the staged file is off this checkout's PATCHED_SHA256 (re-run stage_prod_audit.py after ANY change to qwen_prefix_model_patch).
+# PRECONDITIONS: ~/opgraft-KVR exists with prod-audit/model.py (the mount refuses otherwise), the prefix kill switches absent on the hub mount (as every prefix job), and W-1's own.

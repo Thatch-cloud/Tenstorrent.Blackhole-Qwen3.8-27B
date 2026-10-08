@@ -911,5 +911,40 @@ class FastPathGrowthTests(unittest.TestCase):
         self.assertEqual(pj.fast_path_growth([]), ([], []))
 
 
+class AuditCrossTests(unittest.TestCase):
+    """The read-qualify arm (QWEN_PREFIX_AUDIT_READ=cross): the region read compared with the whole-cache read."""
+
+    def cost(self, tokens, blocks_read, mode='region', fallback=False):
+        return dict(mode=mode, tokens=tokens, blocks_read=blocks_read, programs_before=600, programs=600, fallback=fallback)
+
+    def scanned(self, crosses, costs=None):
+        steps = costs if costs is not None else [self.cost(4600, 2300), self.cost(6400, 3200)]
+        return dict(audit_costs=steps, audit_crosses=crosses)
+
+    def test_a_clean_cross_check_passes_and_is_reported(self):
+        problems, missing, lines = pj.audit_cost_findings(
+            self.scanned([dict(tensors=32, mismatched=0, whole_read_ms='480000.0', fallback=False)]), cross_wanted=True)
+        self.assertEqual((problems, missing), ([], []))
+        self.assertTrue(any('cross-checks: 1 steps, 32 tensors compared, 0 mismatched' in line for line in lines), lines)
+
+    def test_a_mismatch_fails_a_fallback_fails_and_no_line_is_not_exercised(self):
+        problems, _, _ = pj.audit_cost_findings(self.scanned([dict(tensors=32, mismatched=3, fallback=False)]), cross_wanted=True)
+        self.assertTrue(problems and '3 of 32 tensors' in problems[0], problems)
+        problems, _, _ = pj.audit_cost_findings(self.scanned([dict(tensors=0, mismatched=0, fallback=True)]), cross_wanted=True)
+        self.assertTrue(problems and 'did not run' in problems[0], problems)
+        problems, missing, _ = pj.audit_cost_findings(self.scanned([]), cross_wanted=True)
+        self.assertEqual(problems, [])
+        self.assertTrue(missing and 'never compared' in missing[0], missing)
+        # an arm that did not ask for the cross-check is not judged on it
+        self.assertEqual(pj.audit_cost_findings(self.scanned([]))[1], [])
+
+    def test_the_read_volume_must_follow_the_rows(self):
+        flat = [self.cost(4600, 20000), self.cost(64000, 20000)]
+        problems, _, lines = pj.audit_cost_findings(self.scanned([dict(tensors=32, mismatched=0, fallback=False)], flat), cross_wanted=True)
+        self.assertTrue(problems and 'does not follow the rows' in problems[0], problems)
+        self.assertIsNone(pj.region_scaling([self.cost(4600, 2300)]), 'one step says nothing')
+        self.assertIsNone(pj.region_scaling([self.cost(4600, 2300), self.cost(5000, 2500, mode='full')]))
+
+
 if __name__ == '__main__':
     unittest.main()
