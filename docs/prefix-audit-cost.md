@@ -94,3 +94,10 @@ P1b-CTL passed 19/19 concurrent pairs and 15/15 solo pairs and failed only `QWEN
 ## Does the baked image need the change?
 
 Yes. The audit is code in the model graft that the image build stages (`qwen_prefix_stage` runs `qwen_prefix_model_patch` against the pinned originals and holds the result to `PATCHED_SHA256`, which changed for `model.py` on this branch). `qwen_prefix_model_patch.py` is already in both bundle copy lists (`docker/qwen-c2-overlay.txt` and the evidence tree), and no new `scripts/ci` file was added, so the provenance check needs no list change; but a `tp4-serve-11` built before this commit holds the old audit, so B0 must be rebuilt from a commit that contains it. The graft's binaries are a second artifact (above) and the one that matters for the cost. `prefix_replay.py` (the P1b fix) and the pack numbers are read from the checkout by the workflow, not from the image.
+
+## The qualification job (session 2026-10-08)
+
+`scripts/ci/references/tp4-session-0808-jobs/KVQ-qualify-region-read.env` is the card check for the region read, as a job: the fabric step's `kvread` probe (`C2_FABRIC_PROBE=kvread`, `scripts/ci/tp4_kvread_probe.py`) runs
+`optimisation/ttnn-op/kv_region_read/kv_region_read_card.py` on the four-card mesh inside `tp4-serve-11` over the pool-sized cache (19,968 blocks) and exits 0 only when every read equals the whole-cache read byte for byte and the
+program cache did not grow. It prints `KVREAD_PROBE verdict=PASS|FAIL|NOT-MEASURED` with the whole read's device and unpack times and the region read's time per block set (the figures P1ab-LN's 120 minutes assume). In the chained session
+the three audited jobs (`P1ab-LN`, `E1-LN`, `P1a-CTL2`) NEED it, so a failed or missing graft costs the qualification (about 20 minutes) and not an audit arm. It is still true that nothing here builds the graft: the image must carry it before the session.

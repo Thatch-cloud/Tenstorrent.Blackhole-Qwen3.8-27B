@@ -1,0 +1,89 @@
+# SESSION 0808 'Lever N exactness, then robustness, then the cutover or the hand-back': ONE chained card session (owner 2026-10-08 03:40Z: 'prep now ready for 12+ hours of testing'). It chains the two short windows
+# of docs/tp4-short-windows.md (W-1 exactness, W-2 robustness + cutover) into one outage with ONE A0X0, no intermediate hand-back and no second reset-to-serve cycle, and puts the audit op's qualification first.
+# The packs tp4-w1-levern-jobs and tp4-w2-levern-jobs stay as they are (the two-window route); NEVER run either beside this one (their tags overlap this pack's).
+# CLOCK (UTC): target start 07:30Z (T=0 is A0X0), READY for /deploy 19:30Z (T=720), HARD CAP 20:30Z (T=780). Go/no-go at 07:00Z. The owner's admin key is needed at READY only, never before and never in a script.
+# ADMIT-ON-BOX: with E the elapsed minutes since A0X0 and HB the end-sequence reserve (60, the RESERVE-MIN line), a job STARTS only if E + its BOX (+ 30 for a serving-gate job, whose reset step is outside the box the gate refuses
+# against) + HB <= CAP (750). So the last job ends by T=690, READY follows its ZR, LM and TICK (about 20 min: T=710 on a hand-back, 10 minutes under the 19:30Z target) and a cutover adds the thin-layer check and the publish
+# (about 30 min more: T=740, under the hard cap). A job that does not fit is SKIPPED-TIME and listed in results/CARRYOVER.txt; nothing is ever cancelled.
+# THE END IS DECIDED BY THE CUTOVER RULE (END cutover below): every CUTOVER-NEEDS job PASS (a plain PASS), P1a-CTL2 and P1b-CTL PASS or WAIVED by the owner (CUTOVER-WAIVABLE), the CUTOVER-JUDGE exits 0, the owner's recorded go
+# (CUTOVER_OWNER_GO), the thin layer verified on the rig. Anything else is the hand-back to the production image f1dfcc99, which is the expected end: see ESTIMATE below.
+# CLASSES, tags, READ rules, kill switches, the rollback rule and the cutover's live checks are those of the W-1 and W-2 ORDERs (docs/tp4-short-windows.md); the readers are the private driver's (verdict.py).
+# One line per job: <template name without .env> <class> <image tag> <estimated minutes> <tag> <box minutes>. Estimates are the measured-basis central figures of the two packs; KVQ's 20 is an estimate (never run), P1a-CTL2 60 / P1b-CTL 75 are
+# docs/prefix-audit-cost.md's. A box is 1.5 times the high end of the range, or the gate's own worst case (L8-LN 368, C16-LN 153, P1b-CTL 153, E1-LN 153; P1ab-LN 240 and P1a-CTL2 120 are clipped by the prefix gate).
+#
+# ESTIMATE (the test pins these numbers): the planned jobs total 912 minutes at the central estimates (A0X0 4, KVQ 20, A1-LN 80, S0-CTL 57, S0b 11, L8-LN 33, P1ab-LN 120, E1-LN 100, P1a-CTL2 60, C16-LN 28, HL-LN x3 84, HF-LN 45,
+# S1 S2 54, P1b-CTL 75, GG1 GG2 56, SR10 25, the timed block 60) against the 690 minutes the clock rule leaves them. The admission walk (the test, and the driver's dry run) at the central estimates: 14 jobs run, 642 minutes (the exactness core
+# A1-LN, S0-CTL, P1ab-LN, E1-LN; the robustness core S0b, L8-LN, C16-LN, HL-LN x3, HF-LN; and P1a-CTL2), READY at about 18:32Z; 12 jobs are SKIPPED-TIME (S1/S2, P1b-CTL, GG1/GG2, SR10 and the timed block, 270 minutes). The CUTOVER-NEEDS jobs alone
+# are 777 minutes, so the cutover is NOT reachable at the central estimates even if the owner waives both controls: the session ends in the HAND-BACK to f1dfcc99 and the cutover goes to a short window (A0X0, the skipped tail and the cutover:
+# about 4 to 5.5 h, the carry-over list names the jobs). That is a plan fact, not a surprise; the owner-approved rule is not weakened here, and the README lists the trims that would make the cutover reachable.
+# Priority order = the kill signals first (A1-LN, S0-CTL, S0b), L8-LN next (its 368-minute box only fits while E is small), the audited exactness jobs (P1ab-LN, E1-LN, P1a-CTL2), C16-LN, the Lever N hang shapes, the fault drills, then the cutover tail
+# in blocks that are admitted or refused WHOLE (class opt: S1/S2, GG1/GG2, the six timed jobs; a block member follows its first member's decision).
+#
+# QUALIFY FIRST (KVQ, second job): the region-read op (ttnn.qwen_read_blocks) against the whole-cache read on the four-card mesh inside tp4-serve-11. P1ab-LN, E1-LN and P1a-CTL2 NEED it: they audit, and an unchecked region read can digest a
+# subset of the heads and agree with itself. If KVQ fails they are SKIPPED-NEEDS (no cutover: P1ab-LN and E1-LN are in CUTOVER-NEEDS), and the time they free goes to the tail by the clock rule. Before the session, if the op is not built into
+# tp4-serve-11 at all, launch the FALLBACK pack (packs/tp4-session-0808-fallback.conf: SKIP_JOBS names KVQ and the three audited jobs, END handback) instead.
+#
+# P1-CTL (the W-2 cutover rule's baselines): W-0's P1a-CTL timed out (partial 8/8 hits byte-exact at 4.6-6.4k tokens) and its P1b-CTL passed 19/19 + 15/15 and failed one coverage rule. Here: P1a-CTL2 (exactness-shared on the production audited
+# profile, served by the window image tp4-serve-11 with Lever N off: the production base has no region read) and P1b-CTL (lifecycle-evict on tp4-serve-10 with the fixed traffic) re-run them. They are CUTOVER-WAIVABLE: a FAIL or a skip of either
+# blocks the cutover unless the owner writes 'WAIVE P1CTL' into the CUTOVER_OWNER_GO file with the evidence in front of them (the 8/8 partial, the 19/19 and 15/15, and the S0-CTL byte-identity to production). A FAIL is a PRODUCTION FINDING either way.
+#
+# KILL-SWITCH STATE, TELEMETRY, WATCHDOG, ARC RUNNERS: before A0X0 the operator records the kill-switch files (rig_telemetry.sh ks-status) and HOLDS them aside if production's Tier 1 set one (ks-hold; the hand-back restores them before Z);
+# the driver sets the maintenance marker at the start (the production telemetry capture records Tier 0 triggers as suppressed) and the operator clears it after the hand-back deploy's post-checks (maint-off). The watchdog is registered
+# once at 07:30Z (RUNBOOK-SESSION-0808.md has the commands). The ARC runner sets are not scaled down by the driver; no CI is dispatched while the session runs.
+#
+# TAGS: experiment/c2-serving-vN, hardware-allowlisted and never pushed (git ls-remote, read-only allowlist check 2026-10-08): this pack takes v558-v568, v582-v585, v589-v592, v595-v599, v601-v605 (29 jobs with a tag, B0 included), its RESERVE is
+# v606-v611 (re-runs: a swap re-run, an INFRA or RERUN no-verdict of A0X0, ZR or Z, a retried build), v612-v620 stay unused (9). No tag needs allowlisting for this session. Stage 2 (W-3 to W-6) still needs about 59 tags that nobody has allowlisted.
+#
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every item on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS KVQ A1-LN S0-CTL S0b <- A0X0
+# NEEDS P1ab-LN E1-LN <- S0-CTL KVQ
+# NEEDS P1a-CTL2 <- KVQ
+# NEEDS L8-LN C16-LN HL-LN HF-LN <- S0b
+# NEEDS HL-LN2 <- HL-LN
+# NEEDS HL-LN3 <- HL-LN2
+# NEEDS T0s TA1 TL1 TA2 TL2 TA3 S1 S2 GG1 GG2 <- S0b HL-LN3 HF-LN
+# NEEDS SR10 <- S0b
+# A stop-class failure (A0X0, A1-LN, S0-CTL, S0b, HL-LN x3, SR10) skips everything but the hand-back. KVQ and every soft job: a failure is read at the cutover rule.
+#
+# WINDOW END cutover
+# WINDOW CAP 750
+# WINDOW TARGET 720
+# WINDOW RESERVE-MIN 60
+# WINDOW RESERVE v606 v607 v608 v609 v610 v611
+# WINDOW CUTOVER-NEEDS KVQ A1-LN S0-CTL P1ab-LN E1-LN S0b L8-LN C16-LN HL-LN HL-LN2 HL-LN3 HF-LN T0s TA1 TL1 TA2 TL2 TA3 S1 S2 GG1 GG2 SR10
+# WINDOW CUTOVER-WAIVABLE P1a-CTL2 P1b-CTL
+# WINDOW CUTOVER-JUDGE scripts/ci/session_cutover_judge.py --t0s {DIR:T0s} --a {DIR:TA1} {DIR:TA2} {DIR:TA3} --l {DIR:TL1} {DIR:TL2} --baseline-load {DIR:S0-CTL}
+#
+B0-build-serve-11 pre tp4-serve-11 25 v558 -
+A0X0-agentstop-unserve-rescan-reset stop tp4-serve-11 4 v559 -
+KVQ-qualify-region-read soft tp4-serve-11 20 v560 30
+A1-LN-levern-audited-attach stop tp4-serve-11 80 v561 165
+S0-CTL-control-attach-smoke stop tp4-serve-11 57 v562 100
+S0b-baked-default-smoke stop tp4-serve-11 11 v563 20
+L8-LN-ladder8-past-131k soft tp4-serve-11 33 v564 368
+P1ab-LN-exactness-shared-lifecycle-evict soft tp4-serve-11 120 v565 240
+E1-LN-exactness-eager soft tp4-serve-11 100 v566 153
+P1a-CTL2-exactness-shared-window-image soft tp4-serve-11 60 v567 120
+C16-LN-churn16 soft tp4-serve-11 28 v568 153
+HL-LN-hang-shapes-levern stop tp4-serve-11 28 v582 55
+HL-LN2-hang-shapes-levern stop tp4-serve-11 28 v583 55
+HL-LN3-hang-shapes-levern stop tp4-serve-11 28 v584 55
+HF-LN-levern-faults soft tp4-serve-11 45 v585 90
+S1-stall-control-A opt tp4-serve-11 27 v589 50
+S2-stall-levern-B opt tp4-serve-11 27 v590 50
+P1b-CTL-lifecycle-evict-production-bytes soft tp4-serve-10 75 v591 153
+GG1-turns-hit-control-A opt tp4-serve-11 28 v592 55
+GG2-turns-hit-levern-B opt tp4-serve-11 28 v595 55
+SR10-platform-replay stop tp4-serve-11 25 v596 60
+T0s-timed-production-bytes opt tp4-serve-10 10 v597 20
+TA1-timed-control-A opt tp4-serve-11 10 v598 20
+TL1-timed-levern-L opt tp4-serve-11 10 v599 20
+TA2-timed-control-A opt tp4-serve-11 10 v601 20
+TL2-timed-levern-L opt tp4-serve-11 10 v602 20
+TA3-timed-control-A opt tp4-serve-11 10 v603 20
+ZR-reset-all-four hand tp4-serve-11 8 v604 -
+LM-links-remeasure drv - 6 - -
+TICK-topology-wait drv - 6 - -
+Z-handback hand tp4-serve-11 12 v605 -
+DEPLOY-and-engine-load drv - 8 - -
+CUT-release-and-live-checks drv - 13 - -

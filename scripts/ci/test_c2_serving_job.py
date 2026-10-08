@@ -780,7 +780,8 @@ class BoxTests(unittest.TestCase):
 
     def test_the_step_ceilings_are_the_workflows_own_timeouts(self):
         for action, name in (('smoke', 'Smoke on the four-card set'), ('gate', "Run the gate in the agent's container shape"),
-                             ('prefix', "Prefix-reuse gates in the agent's container shape"), ('replay', "Replay the node agent's serving sequence")):
+                             ('prefix', "Prefix-reuse gates in the agent's container shape"), ('replay', "Replay the node agent's serving sequence"),
+                             ('fabric', 'Four-card fabric probe (all four cards, inside the image)')):
             found = re.search(r'timeout-minutes: (\d+)', step_text(name))
             self.assertEqual(job.STEP_MINUTES[action], int(found.group(1)), name)
 
