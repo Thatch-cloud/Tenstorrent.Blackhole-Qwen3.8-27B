@@ -970,6 +970,7 @@ jobs:
           TESTS: ${{ steps.job.outputs.tests }}
           BENCH_SHAPES: ${{ steps.job.outputs.bench_shapes }}
           BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}
+          SMOKE_ENV: ${{ steps.job.outputs.smoke_env }}
         run: |
           set -euo pipefail
           # The pair smoke's shape on every Blackhole board present (a general-tp4 profile: the contract sets
@@ -991,6 +992,8 @@ jobs:
           if ! card_set_unheld "$results/smoke-holders.txt"; then
             echo 'a card of the set is held; refusing the smoke' >&2; cat "$results/smoke-holders.txt" >&2; exit 1
           fi
+          # C2_SMOKE_ENV (c2_serving_job.py allows diagnostic log switches only): each NAME=value becomes one docker -e; the profile's own environment still wins.
+          smoke_env_args=(); for pair in ${SMOKE_ENV:-}; do smoke_env_args+=(-e "$pair"); done
           devices=()
           for node in $(card_set_devices); do devices+=(--device "$node"); done
           # The job's BOX (C2_BOX_MINUTES, c2_serving_job.py), enforced from inside and never by cancelling the run: the wait for the API ends at the box,
@@ -1011,7 +1014,7 @@ jobs:
             -v /home/thatch/hf-cache/hub:/models -e HF_HOME=/models -e HF_HUB_CACHE=/models \
             -e MESH_DEVICE=P300 -e QWEN36_BATCHED_DECODE_MODE=host -e VLLM_RPC_TIMEOUT=100000 \
             -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p300_mesh_graph_descriptor.textproto \
-            -e QWEN_C2_GATE=1 -e QWEN_C2_PROFILE="$PROFILE" -p 127.0.0.1:8010:8000 \
+            -e QWEN_C2_GATE=1 -e QWEN_C2_PROFILE="$PROFILE" ${smoke_env_args[@]+"${smoke_env_args[@]}"} -p 127.0.0.1:8010:8000 \
             --entrypoint python3 "$image" -m vllm.entrypoints.openai.api_server \
             --model Qwen/Qwen3.8-27B --served-model-name Qwen/Qwen3.8-27B --host 0.0.0.0 --port 8000 \
             --reasoning-parser qwen3 --tool-call-parser qwen3_xml --enable-auto-tool-choice \

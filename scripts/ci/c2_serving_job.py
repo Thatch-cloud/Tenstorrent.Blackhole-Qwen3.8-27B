@@ -41,6 +41,9 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_SMOKE_TESTS      comma-separated c2_serving_smoke.py tests, empty for all (agreement and bench are opt-in: only
                       when named - tp_agreement.py collect and tp_decode_bench.py, results in agreement-<profile>.json
                       and bench-<profile>.json)
+  C2_SMOKE_ENV        DIAGNOSTIC log switches for the four-card smoke container, space-separated NAME=value, ONLY these (SMOKE_ENV_ALLOWED): QWEN_FAST_SEQ_STAGE_LOG=1 (trace_census.py: a '[SEQ-STAGE]' begin line before each stage),
+                      VLLM_LOGGING_LEVEL=DEBUG|INFO, QWEN_PREFIX_STATS_S=<seconds> (the prefix scheduler's stats line). Handed to docker run as -e; the profile's own environment still wins. Never a digest or an audit
+                      (QWEN_PREFIX_DIGESTS, QWEN_PREFIX_AUDIT, the QWEN_FAST_LEVERN_* flags are the profile's). Needs the smoke action and C2_CARDS=quad. Default: none
   C2_BENCH_SHAPES     the bench test's shapes, comma-separated STREAMSxPROMPT (default: tp_decode_bench's ladder)
   C2_PLATFORM_IMAGE   the thatch-serving-tt image the replay runs
   C2_BAKE_DEFAULT_PROFILE  build only: bake this profile as the image's serving default (the image ENV QWEN_C2_PROFILE) and
@@ -211,6 +214,8 @@ CARDM_STEP_ENV = ('QUAL_CARD', 'ALLOW_SERVING_CARD', 'RESULTS', 'CARD_B_ARGS')
 # containers: the harness's holder check would look at the wrong one), or its default paths.
 CARDM_REFUSED_ENV = CARDM_STEP_ENV + ('PATH', 'HOME', 'ENV', 'SHELLOPTS', 'IFS', 'PS4', 'CDPATH', 'GLOBIGNORE')
 CARDM_REFUSED_PREFIXES = ('QUAL_', 'BASH', 'LD_', 'DOCKER_', 'SUDO_')
+# C2_SMOKE_ENV: the diagnostic LOG switches a four-card smoke may add to its container, each with the pattern its value must match. Nothing here changes what the engine computes.
+SMOKE_ENV_ALLOWED = {'QWEN_FAST_SEQ_STAGE_LOG': re.compile(r'1'), 'VLLM_LOGGING_LEVEL': re.compile(r'DEBUG|INFO'), 'QWEN_PREFIX_STATS_S': re.compile(r'[1-9][0-9]{0,3}')}
 
 
 # Tags rmi must never delete. Production's base is tt-vllm:qwen38-c2-tp4-serve-7; the P8 base (qwen-fast-serving:ci-*) is a
@@ -455,12 +460,13 @@ def read_job(values, profiles, root=ROOT, meshes=None):
     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root)
     drafter_candidates = read_drafter_candidates(values, actions)
     box_minutes = read_box(values, actions)
+    smoke_env = read_smoke_env(values, actions, cards)
     outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), rmi_tags=rmi_tags, tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
                    gate_memory_prompt=str(memory_prompt), gate_memory_users=str(memory_users), replay_profile=replay_profile,
                    replay_served_model=replay_served_model, replay_budget_smoke=budget_smoke, cardm_harness=cardm_harness, cardm_args=cardm_args,
-                   cardm_env=cardm_env, bake_default_profile=bake_profile, drafter_candidates=drafter_candidates, box_minutes=box_minutes)
+                   cardm_env=cardm_env, bake_default_profile=bake_profile, drafter_candidates=drafter_candidates, box_minutes=box_minutes, smoke_env=smoke_env)
     outputs.update(s2)
     outputs.update(prefix)
     return outputs
@@ -512,6 +518,24 @@ def read_drafter_candidates(values, actions, table=None):
 BOX_MAX_MINUTES = 540
 # timeout-minutes of the workflow's smoke, gate and prefix steps (pinned by test_c2_serving_job against the workflow file).
 STEP_MINUTES = {'smoke': 210, 'gate': 380, 'prefix': 380, 'replay': 180, 'fabric': 45}
+
+
+def read_smoke_env(values, actions, cards):
+    """C2_SMOKE_ENV (module docstring) as a space-joined NAME=value string, or JobError: only SMOKE_ENV_ALLOWED names and values, each once, on a quad smoke."""
+    pairs = values.get('C2_SMOKE_ENV', '').split()
+    if not pairs:
+        return ''
+    if 'smoke' not in actions or cards != 'quad':
+        raise JobError('C2_SMOKE_ENV is read by the four-card smoke step: it needs the smoke action and C2_CARDS=quad')
+    names = []
+    for pair in pairs:
+        name, sep, value = pair.partition('=')
+        if not sep or name not in SMOKE_ENV_ALLOWED or not SMOKE_ENV_ALLOWED[name].fullmatch(value):
+            raise JobError('C2_SMOKE_ENV entries are NAME=value from %s with the value each allows, got %r' % (', '.join(sorted(SMOKE_ENV_ALLOWED)), pair))
+        if name in names:
+            raise JobError('C2_SMOKE_ENV sets %s twice' % name)
+        names.append(name)
+    return ' '.join(pairs)
 
 
 def read_box(values, actions):
