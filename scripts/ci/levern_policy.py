@@ -371,12 +371,12 @@ def plan_from(prompt, start, *, decoding=True, step=DEFAULT_STEP, solo=DEFAULT_S
 
 
 # THE DEADLINE GOVERNOR (design section 11). The timing model docs/lever-n-tp4-timing-model.py fits a chunk of 2,048 tokens at context p
-# to 420 ms + 2.5 ms per 1,000 tokens of p (T3/T4), 40 ms of transition per step and the engine build (2.5 s in the model, 5 s measured on the cards at v584/v620). The seeds are NOT trusted at
+# to 420 ms + 2.5 ms per 1,000 tokens of p (T3/T4), 40 ms of transition per step and 2.5 s for the engine build. The seeds are NOT trusted at
 # 254k (never measured there): StepTimes scales them by an EWMA of what the route measures.
 SEED_BASE_MS = 420.0
 SEED_PER_1K_MS = 2.5
 TRANSITION_MS = 40.0
-BUILD_MS = 5000.0
+BUILD_MS = 2500.0
 SCALE_MIN, SCALE_MAX = 0.25, 4.0
 NEED_PAST = 99.0
 
