@@ -225,10 +225,10 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(found[name]['engine']['max-model-len'], 262144)
             self.assertEqual(found[name]['engine']['max-num-seqs'], 8)
 
-    def test_the_lever_n_profiles_carry_exactly_the_ten_lever_n_keys_beside_the_parent_family(self):
+    def test_the_lever_n_profiles_carry_exactly_the_eleven_lever_n_keys_beside_the_parent_family(self):
         found = load()['profiles']
         plain = {key: value for key, value in found[S('-levern')]['env'].items() if key.startswith('QWEN_FAST_LEVER')}
-        self.assertEqual(len(plain), 10)
+        self.assertEqual(len(plain), 11)
         for name in LEVERN:
             with self.subTest(name=name):
                 got = {key: value for key, value in found[name]['env'].items() if key.startswith('QWEN_FAST_LEVER')}
