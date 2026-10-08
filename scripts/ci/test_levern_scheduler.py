@@ -122,8 +122,10 @@ class Clock(object):
 
 def install_levern(environ=None, clock=None, runtime_log=None, fault=None, cls=None):
     """The plugin's TTScheduler over the chunking fake, with the two wrappers applied the way install() applies them, over a runtime
-    on `clock`. Returns (class, runtime, log mock)."""
+    on `clock` (a fake one by default: on the real clock a step that took a few microseconds is owed that long again, and a runner that is slow
+    between two calls adds decode steps a test counting steps does not expect; run 37856694214 failed on exactly that). Returns (class, runtime, log mock)."""
     cls = plugin_class(ChunkingVllmScheduler) if cls is None else cls
+    clock = Clock() if clock is None else clock
     log = Mock() if runtime_log is None else runtime_log
     cfg = levern_policy.config(environ or {})
     runtime = levern_scheduler.LevernRuntime(cfg, log=log, clock=clock, fault=fault)
