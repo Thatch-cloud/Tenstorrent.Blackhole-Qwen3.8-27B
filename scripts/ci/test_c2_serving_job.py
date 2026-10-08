@@ -830,7 +830,7 @@ class BoxWorkflowTests(unittest.TestCase):
     def test_the_prefix_step_can_mount_the_region_read_graft_over_the_production_base(self):
         name = "Prefix-reuse gates in the agent's container shape"
         self.assertIn('PREFIX_KVREAD_MOUNT: ${{ steps.job.outputs.prefix_kvread_mount }}', step_text(name))
-        self.assertIn('${PREFIX_KVREAD_MOUNT:+--kvread-mount /home/thatch/opgraft-KVR}', step_script(name))
+        self.assertIn('${PREFIX_KVREAD_MOUNT:+--kvread-mount /home/thatch/opgraft-KVR-s0808fix}', step_script(name))
 
     def test_c2_prefix_kvread_mount_is_a_flag_of_the_prefix_action(self):
         self.assertEqual(read()['prefix_kvread_mount'], '')

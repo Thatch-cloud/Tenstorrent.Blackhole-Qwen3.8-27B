@@ -949,7 +949,7 @@ jobs:
           status=0
           python3 scripts/ci/c2_prefix_gate.py --image "$image" --profile "$PREFIX_PROFILE" --plan "$PREFIX_PLAN" \
             --baseline "$PREFIX_BASELINE" --agents "$PREFIX_AGENTS" --budget-seconds "$budget" ${box_left:+--box-seconds "$box_left"} \
-            ${PREFIX_KVREAD_MOUNT:+--kvread-mount /home/thatch/opgraft-KVR} \
+            ${PREFIX_KVREAD_MOUNT:+--kvread-mount /home/thatch/opgraft-KVR-s0808fix} \
             --results "$results" --cards "$CARDS" 2>&1 | tee "$RUNNER_TEMP/c2-results/prefix.log" || status=$?
           # Read the launched argv (memory read-the-launched-argv) and the graft's install line, per arm.
           for log in "$results"/*/server.log; do

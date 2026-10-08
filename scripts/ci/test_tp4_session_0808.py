@@ -25,6 +25,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 PACK = os.path.join(HERE, 'references', 'tp4-session-0808-jobs')
 WORKFLOW = os.path.join(ROOT, '.github', 'workflows', 'qwen-integration-cpu.yml')
 PRODUCTION, WINDOW = 'tp4-serve-10', 'tp4-serve-11'
+FIXED = 'tp4-serve-11b'   # serve-11 plus the region-read Shape fix (KVQ v560): the image of every job that runs the prefix gate's anchor probe, which holds the served model.py to PATCHED_SHA256
 
 CAP, TARGET, RESERVE_MIN, GATE_RESET_ALLOWANCE = 750, 720, 60, 30
 HARD_CAP_MINUTE = 780      # 20:30Z with the start at 07:30Z
@@ -35,24 +36,24 @@ CUTOVER_EXTRA = 30         # the driver's thin-layer check (20) and the publish 
 JOBS = [
     ('B0-build-serve-11', 'pre', WINDOW, 25, 'v558', None),
     ('A0X0-agentstop-unserve-rescan-reset', 'stop', WINDOW, 4, 'v559', None),
-    ('KVQ-qualify-region-read', 'soft', WINDOW, 20, 'v560', 30),
+    ('KVQ2-qualify-region-read', 'soft', FIXED, 20, 'v606', 30),
     ('A1-LN-levern-audited-attach', 'stop', WINDOW, 80, 'v561', 165),
     ('S0-CTL-control-attach-smoke', 'stop', WINDOW, 57, 'v562', 100),
     ('S0b-baked-default-smoke', 'stop', WINDOW, 11, 'v563', 20),
     ('L8-LN-ladder8-past-131k', 'soft', WINDOW, 33, 'v564', 368),
     ('C16-LN-churn16', 'soft', WINDOW, 28, 'v565', 153),
-    ('P1ab-LN-exactness-shared-lifecycle-evict', 'soft', WINDOW, 120, 'v566', 240),
+    ('P1ab-LN-exactness-shared-lifecycle-evict', 'soft', FIXED, 120, 'v566', 240),
     ('P1-CTLR-prod-bytes-exactness-shared-lifecycle-evict', 'soft', PRODUCTION, 125, 'v567', 240),
-    ('E1-LN-exactness-eager', 'soft', WINDOW, 100, 'v568', 153),
+    ('E1-LN-exactness-eager', 'soft', FIXED, 100, 'v568', 153),
     ('HL-LN-hang-shapes-levern', 'stop', WINDOW, 28, 'v582', 55),
     ('HL-LN2-hang-shapes-levern', 'stop', WINDOW, 28, 'v583', 55),
     ('HL-LN3-hang-shapes-levern', 'stop', WINDOW, 28, 'v584', 55),
-    ('HF-LN-levern-faults', 'soft', WINDOW, 45, 'v585', 90),
+    ('HF-LN-levern-faults', 'soft', FIXED, 45, 'v585', 90),
     ('S1-stall-control-A', 'opt', WINDOW, 27, 'v589', 50),
     ('S2-stall-levern-B', 'opt', WINDOW, 27, 'v590', 50),
     ('P1b-CTL-lifecycle-evict-production-bytes', 'soft', PRODUCTION, 75, 'v591', 153),
-    ('GG1-turns-hit-control-A', 'opt', WINDOW, 28, 'v592', 55),
-    ('GG2-turns-hit-levern-B', 'opt', WINDOW, 28, 'v595', 55),
+    ('GG1-turns-hit-control-A', 'opt', FIXED, 28, 'v592', 55),
+    ('GG2-turns-hit-levern-B', 'opt', FIXED, 28, 'v595', 55),
     ('SR10-platform-replay', 'stop', WINDOW, 25, 'v596', 60),
     ('T0s-timed-production-bytes', 'opt', PRODUCTION, 10, 'v597', 20),
     ('TA1-timed-control-A', 'opt', WINDOW, 10, 'v598', 20),
@@ -68,16 +69,16 @@ JOBS = [
     ('CUT-release-and-live-checks', 'drv', '-', 13, None, None),
 ]
 BY_NAME = dict((entry[0], entry) for entry in JOBS)
-RESERVE_TAGS = ['v%d' % n for n in range(606, 612)]
+RESERVE_TAGS = ['v%d' % n for n in range(607, 612)]   # v606 went to KVQ2 (the KVQ re-run)
 NEEDS = {
-    'KVQ': ['A0X0'], 'A1-LN': ['A0X0'], 'S0-CTL': ['A0X0'], 'S0b': ['A0X0'],
-    'P1ab-LN': ['S0-CTL', 'KVQ'], 'E1-LN': ['S0-CTL', 'KVQ'], 'P1-CTLR': ['KVQ'],
+    'KVQ2': ['A0X0'], 'A1-LN': ['A0X0'], 'S0-CTL': ['A0X0'], 'S0b': ['A0X0'],
+    'P1ab-LN': ['S0-CTL', 'KVQ2'], 'E1-LN': ['S0-CTL', 'KVQ2'], 'P1-CTLR': ['KVQ2'],
     'L8-LN': ['S0b'], 'C16-LN': ['S0b'], 'HL-LN': ['S0b'], 'HF-LN': ['S0b'], 'HL-LN2': ['HL-LN'], 'HL-LN3': ['HL-LN2'],
     'T0s': ['S0b', 'HL-LN3', 'HF-LN'], 'TA1': ['S0b', 'HL-LN3', 'HF-LN'], 'TL1': ['S0b', 'HL-LN3', 'HF-LN'], 'TA2': ['S0b', 'HL-LN3', 'HF-LN'],
     'TL2': ['S0b', 'HL-LN3', 'HF-LN'], 'TA3': ['S0b', 'HL-LN3', 'HF-LN'], 'S1': ['S0b', 'HL-LN3', 'HF-LN'], 'S2': ['S0b', 'HL-LN3', 'HF-LN'],
     'GG1': ['S0b', 'HL-LN3', 'HF-LN'], 'GG2': ['S0b', 'HL-LN3', 'HF-LN'], 'SR10': ['S0b'],
 }
-CUTOVER_NEEDS = ('KVQ A1-LN S0-CTL P1ab-LN E1-LN S0b L8-LN C16-LN HL-LN HL-LN2 HL-LN3 HF-LN T0s TA1 TL1 TA2 TL2 TA3 S1 S2 GG1 GG2 SR10').split()
+CUTOVER_NEEDS = ('KVQ2 A1-LN S0-CTL P1ab-LN E1-LN S0b L8-LN C16-LN HL-LN HL-LN2 HL-LN3 HF-LN T0s TA1 TL1 TA2 TL2 TA3 S1 S2 GG1 GG2 SR10').split()
 WAIVABLE = ['P1-CTLR|P1b-CTL']
 FREE = stage1.FREE        # the allowlisted tags never pushed, after the baseline window's v538-v557
 UNUSED_AFTER = ['v%d' % n for n in range(612, 621)]
@@ -220,10 +221,10 @@ class PackFiles(unittest.TestCase):
             self.assertLess(BY_NAME[name][5], -(-prefix_gate.worst_case_seconds(arms) // 60), name)
 
     def test_the_kvq_job_is_the_region_read_probe_inside_the_fabric_steps_ceiling(self):
-        entry = raw('KVQ-qualify-region-read')
+        entry = raw('KVQ2-qualify-region-read')
         self.assertEqual((entry['C2_ACTIONS'], entry['C2_FABRIC_PROBE'], entry['C2_CARDS']), ('reset fabric', 'kvread', 'quad'))
-        self.assertEqual(parsed('KVQ-qualify-region-read')['fabric_probe'], 'kvread')
-        self.assertEqual(parsed('KVQ-qualify-region-read')['box_minutes'], '30')
+        self.assertEqual(parsed('KVQ2-qualify-region-read')['fabric_probe'], 'kvread')
+        self.assertEqual(parsed('KVQ2-qualify-region-read')['box_minutes'], '30')
         self.assertLessEqual(30, job.STEP_MINUTES['fabric'])
 
     def test_the_hand_back_templates_hold_the_end_sequence_contracts(self):
@@ -261,12 +262,12 @@ class Tags(unittest.TestCase):
         self.assertEqual(len(tags), len(set(tags)))
         self.assertEqual(len(tags), 29)
         numbers = [int(tag[1:]) for tag in tags]
-        self.assertEqual(numbers, FREE[:29])
+        self.assertEqual(sorted(numbers), sorted([n for n in FREE[:29] if n != 560] + [606]))   # KVQ2 took v606 from the reserve; v560 was KVQ's, run and failed
         self.assertTrue(all(number in stage1.ALLOWLISTED_UNUSED for number in numbers))
         self.assertFalse(set(numbers) & stage1.BASELINE_TAGS)
 
     def test_the_reserve_follows_and_nine_allowlisted_tags_stay_unused(self):
-        self.assertEqual(['v%d' % n for n in FREE[29:35]], RESERVE_TAGS)
+        self.assertEqual(['v%d' % n for n in FREE[30:35]], RESERVE_TAGS)
         self.assertEqual(['v%d' % n for n in FREE[35:]], UNUSED_AFTER)
         self.assertEqual(directive('RESERVE'), [' '.join(RESERVE_TAGS)])
 
@@ -315,9 +316,9 @@ class Directives(unittest.TestCase):
 
     def test_the_audited_prefix_arms_need_the_qualification(self):
         for name in ('P1ab-LN', 'E1-LN', 'P1-CTLR'):
-            self.assertIn('KVQ', NEEDS[name])
-        self.assertNotIn('KVQ', NEEDS['A1-LN'])
-        self.assertNotIn('KVQ', NEEDS['P1b-CTL'] if 'P1b-CTL' in NEEDS else [])
+            self.assertIn('KVQ2', NEEDS[name])
+        self.assertNotIn('KVQ2', NEEDS['A1-LN'])
+        self.assertNotIn('KVQ2', NEEDS['P1b-CTL'] if 'P1b-CTL' in NEEDS else [])
 
     def test_the_judge_line_names_jobs_of_the_order_and_a_script_that_exists(self):
         line = directive('CUTOVER-JUDGE')[0]
@@ -354,7 +355,7 @@ class Schedule(unittest.TestCase):
         self.assertEqual(7 * 60 + 30 + clock + READY_AFTER_LAST_JOB, 18 * 60 + 52)   # 18:52Z
 
     def test_a_failed_qualification_skips_the_three_audited_arms_and_the_freed_time_goes_to_the_tail(self):
-        ran, skipped, clock = walk(failed=('KVQ',))
+        ran, skipped, clock = walk(failed=('KVQ2',))
         for name in ('P1ab-LN-exactness-shared-lifecycle-evict', 'P1-CTLR-prod-bytes-exactness-shared-lifecycle-evict', 'E1-LN-exactness-eager'):
             self.assertEqual(skipped[name], 'NEEDS')
         for name in ('S1-stall-control-A', 'S2-stall-levern-B', 'P1b-CTL-lifecycle-evict-production-bytes', 'GG1-turns-hit-control-A', 'GG2-turns-hit-levern-B'):
@@ -394,7 +395,7 @@ class Allowlist(unittest.TestCase):
 
     def test_the_readme_names_the_owners_decisions_and_the_ready_clock(self):
         text = read_text('README.md')
-        for needle in ('07:30Z', '19:30Z', '20:30Z', 'WAIVE P1CTL', 'CUTOVER_OWNER_GO', 'KVQ', 'fallback'):
+        for needle in ('07:30Z', '19:30Z', '20:30Z', 'WAIVE P1CTL', 'CUTOVER_OWNER_GO', 'KVQ2', 'fallback'):
             self.assertIn(needle, text, needle)
 
 

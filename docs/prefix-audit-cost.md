@@ -105,7 +105,7 @@ Yes. The audit is code in the model graft that the image build stages (`qwen_pre
 
 ## The qualification job (session 2026-10-08)
 
-`scripts/ci/references/tp4-session-0808-jobs/KVQ-qualify-region-read.env` is the card check for the region read, as a job: the fabric step's `kvread` probe (`C2_FABRIC_PROBE=kvread`, `scripts/ci/tp4_kv_read_probe.py`) runs
+`scripts/ci/references/tp4-session-0808-jobs/KVQ2-qualify-region-read.env` is the card check for the region read, as a job: the fabric step's `kvread` probe (`C2_FABRIC_PROBE=kvread`, `scripts/ci/tp4_kv_read_probe.py`) runs
 `optimisation/ttnn-op/kv_region_read/kv_region_read_card.py` on the four-card mesh inside `tp4-serve-11` over the pool-sized cache (19,968 blocks) and exits 0 only when every read equals the whole-cache read byte for byte and the
 program cache did not grow. It prints `KV_READ_PROBE verdict=PASS|FAIL|NOT-MEASURED` with the whole read's device and unpack times and the region read's time per block set (the figures P1ab-LN's 120 minutes assume). In the chained session
 the three audited jobs (`P1ab-LN`, `E1-LN`, `P1-CTLR`) NEED it, so a failed or missing graft costs the qualification (about 20 minutes) and not an audit arm. The extension itself is the audit-op track's (built and baked into `tp4-serve-11`, mounted over `tp4-serve-10` for `P1-CTLR`); the session pack only checks it.
