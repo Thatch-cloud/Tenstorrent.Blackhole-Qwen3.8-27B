@@ -47,7 +47,7 @@
 # WINDOW RESERVE v618 v619 v620
 # ARC-ZERO T0s DL1
 A0X0-agentstop-unserve-rescan-reset stop tp4-serve-11 4 v582 -
-S0b-baked-default-smoke stop tp4-serve-11 11 v583 20
+S0b-baked-default-smoke stop tp4-serve-11 11 v583 30
 HL-LN-hang-shapes-levern stop tp4-serve-11 28 v584 55
 HL-LN2-hang-shapes-levern stop tp4-serve-11 28 v585 55
 HL-LN3-hang-shapes-levern stop tp4-serve-11 28 v589 55
@@ -63,7 +63,7 @@ S2-stall-levern-B opt tp4-serve-11 27 v601 50
 SR10-platform-replay soft tp4-serve-11 25 v602 60
 GG1-turns-hit-control-A opt tp4-serve-11 28 v603 55
 GG2-turns-hit-levern-B opt tp4-serve-11 28 v612 55
-S0b2-late-reattach-smoke soft tp4-serve-11 11 v613 20
+S0b2-late-reattach-smoke soft tp4-serve-11 11 v613 30
 DA1-deep128k-control-A opt tp4-serve-11 18 v614 40
 DL1-deep128k-levern-L opt tp4-serve-11 18 v615 40
 ZR-reset-all-four hand tp4-serve-11 8 v616 -

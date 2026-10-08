@@ -34,7 +34,7 @@ START_UTC = 11 * 60 + 45
 # name -> (class, image, estimate, tag, box); the order is the ORDER's
 JOBS = [
     ('A0X0-agentstop-unserve-rescan-reset', 'stop', WINDOW, 4, 'v582', None),
-    ('S0b-baked-default-smoke', 'stop', WINDOW, 11, 'v583', 20),
+    ('S0b-baked-default-smoke', 'stop', WINDOW, 11, 'v583', 30),
     ('HL-LN-hang-shapes-levern', 'stop', WINDOW, 28, 'v584', 55),
     ('HL-LN2-hang-shapes-levern', 'stop', WINDOW, 28, 'v585', 55),
     ('HL-LN3-hang-shapes-levern', 'stop', WINDOW, 28, 'v589', 55),
@@ -50,7 +50,7 @@ JOBS = [
     ('SR10-platform-replay', 'soft', WINDOW, 25, 'v602', 60),
     ('GG1-turns-hit-control-A', 'opt', WINDOW, 28, 'v603', 55),
     ('GG2-turns-hit-levern-B', 'opt', WINDOW, 28, 'v612', 55),
-    ('S0b2-late-reattach-smoke', 'soft', WINDOW, 11, 'v613', 20),
+    ('S0b2-late-reattach-smoke', 'soft', WINDOW, 11, 'v613', 30),
     ('DA1-deep128k-control-A', 'opt', WINDOW, 18, 'v614', 40),
     ('DL1-deep128k-levern-L', 'opt', WINDOW, 18, 'v615', 40),
     ('ZR-reset-all-four', 'hand', WINDOW, 8, 'v616', None),
@@ -195,7 +195,8 @@ class PackFiles(unittest.TestCase):
 
     def test_the_templates_the_new_jobs_share_with_the_first_pack_are_its_bytes_apart_from_the_comment_header(self):
         def body(text):
-            return [line for line in text.splitlines() if line and not line.startswith('#')]
+            # the box of S0b is this pack's own (30: the first serve-11 boot of the Lever N profile compiles extra warm-up programs); every other byte is the first pack's
+            return [line for line in text.splitlines() if line and not line.startswith('#') and not line.startswith('C2_BOX_MINUTES=')]
         for name in [entry[0] for entry in JOBS if entry[1] != 'drv' and os.path.exists(os.path.join(FIRST_PACK, entry[0] + '.env'))]:
             with self.subTest(name=name):
                 self.assertEqual(body(read_text(name + '.env')), body(read_text(name + '.env', FIRST_PACK)))

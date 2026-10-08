@@ -1,7 +1,7 @@
 # tp4-session-0808b-jobs: the second chained card session of 2026-10-08 (performance and robustness, no digests)
 
 The first session of the day (`tp4-session-0808-jobs`) chains Lever N exactness and robustness, and its audited arms (`QWEN_PREFIX_DIGESTS`, the lever audits, the prefix audit) are followed after every request by a whole-pool host digest
-of 5 to 8 minutes at 8 x 262k (`docs/prefix-audit-cost.md`), so they cannot finish inside their boxes and the session hands the cards back early. This pack uses the idle cards from that hand-back to READY with the work that needs
+of 5 to 8 minutes at 8 x 262k (`docs/prefix-audit-cost.md`), so they cannot finish inside their boxes and that session hands the cards back early. This pack uses the idle cards from that hand-back to READY with the work that needs
 **no digest and no audit**: every profile it names is the production profile (`c2-packed-tp4-8x262k-ship-prefix`) or the Lever N traffic profile the image bakes in (`c2-packed-tp4-8x262k-ship-prefix-levern-traffic`), so a request costs what
 production's costs. The order, classes, minutes, boxes, tags and dependencies are in `ORDER.txt`; `test_tp4_session_0808b` pins them. Never run it beside the first session: they share the cards and the first pack's tags.
 
@@ -30,6 +30,6 @@ the stall pair from about 3 h (the test pins the walk).
 
 ## Rules
 
-- ARC runner sets at zero for the timed block (`T0s` to `DL1`, about four hours): the operator scales them before `T0s` and creates `runs/<id>/ARC_ZERO_ACK`; without the file the block is SKIPPED-ARC after the wait and the session hands back early.
+- ARC runner sets at zero for the timed block (`T0s` to `DL1`, about four hours): the operator scales them before `T0s` and creates `runs/<id>/ARC_ZERO_ACK`; the launch wrapper refuses `--start` without the file, because a missed ack is NOT remembered: every row from `T0s` to `DL1` would alert and wait the full ack wait again (about 30 minutes each), idling the cards for hours. The operator restores the sets at the driver's 'timing block is over' alert.
 - No CI dispatch, PR push or other rig workload while the session runs. `prefix-reuse.off` and `levern.off` must be absent on the hub mount (the operator holds a production switch aside and the hand-back restores it).
 - The tags are `experiment/c2-serving-v582` to `v617` as listed in `ORDER.txt`, the reserve `v618`-`v620`. All are allowlisted; do not modify the runner group.
