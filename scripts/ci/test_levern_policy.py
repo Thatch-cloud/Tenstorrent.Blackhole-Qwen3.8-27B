@@ -574,7 +574,7 @@ class GovernorTests(unittest.TestCase):
 
 class DecodeGapFloorTests(unittest.TestCase):
     """The governor pins the prefill at 1.0 when two cold 254k prompts cannot both meet T*; the decoders then still get a round every G seconds
-    (QWEN_FAST_LEVERN_MAX_DECODE_GAP_S), and a short still gets its one round per step. v584 / v620: 92-98 s without one."""
+    (QWEN_FAST_LEVERN_MAX_DECODE_GAP_S), and a short still gets its one round per step. v584 / v620: one continuous stretch of about 199 s / 207 s without one."""
 
     def make(self, gap, share='0.5'):
         clock = Clock()

@@ -25,6 +25,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import c2_smoke_check
 import levern_policy
 import levern_scheduler
 import serving_prefill_admission as admission
@@ -784,7 +785,7 @@ class InstallTests(GateFreeCase):
 class SkewTests(GateFreeCase):
     """concurrent8_skew (v584 / v620): two cold prompts of 251,727 and 253,238 tokens arrive together beside four decoders. Their 180 s targets cannot
     both be met even at share 1.0, so the governor pins 1.0; the decoders must still get a round every QWEN_FAST_LEVERN_MAX_DECODE_GAP_S seconds (they
-    got none for 92-98 s), and the second long must still land inside the 240 s client deadline."""
+    got none for one continuous 199-207 s stretch spanning both longs), and the second long must still land inside the 240 s client deadline."""
     LONGS = (('long1', 251727), ('long2', 253238))
     ROUND_MS = 167.0
 
@@ -828,7 +829,88 @@ class SkewTests(GateFreeCase):
 
     def test_without_the_floor_the_decoders_stall_for_a_whole_long(self):
         run = self.simulate(0)
-        self.assertGreater(run['worst'], 60.0, 'v584 / v620: 92-98 s without a decode round')
+        self.assertGreater(run['worst'], 150.0, 'v584 / v620: one stretch of 199 / 207 s without a decode round, across both longs')
+
+
+class SkewWithShortsTests(GateFreeCase):
+    """The whole concurrent8_skew shape (v620): two cold longs and six 4k shorts, the short lane on, the measured step times (a short step 4.4 s with its
+    engine build, a long's final step 5 s of build, the first decode round after a seat joins 0.93 s). The smoke rule runs over the scheduler's own step
+    lines. The numbers in docs/lever-n-prefix-merged-route.md section 11 come from this replay."""
+    LONGS = {'long1': 251727, 'long2': 253238}
+    SHORTS = {'s1': 4088, 's2': 4083, 's3': 4062, 's5': 4087, 's6': 4082, 's7': 4087}
+    ORDER = ('s1', 'long1', 's3', 's6', 's2', 'long2', 's5', 's7')
+    ROUND_MS, FIRST_ROUND_MS = 167.0, 930.0
+
+    def step_ms(self, who, start, tokens):
+        if who in self.SHORTS:
+            return 4400.0
+        prompt = self.LONGS[who]
+        return (300.0 + 3.7 * start / 1000.0) * max(1, -(-tokens // CHUNK)) + (5000.0 if start + tokens >= prompt else 0.0)
+
+    def replay(self, gap, build_ms=2500.0):
+        prompts = dict(self.LONGS, **self.SHORTS)
+        saved = levern_policy.effective_share.__defaults__, levern_policy.governor_need.__defaults__
+        levern_policy.effective_share.__defaults__ = levern_policy.governor_need.__defaults__ = (build_ms,)
+        try:
+            rig = Rig(environ={'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180', 'QWEN_FAST_LEVERN_ROUNDS': None, 'QWEN_FAST_LEVERN_PREFILL_SHARE': '0.5',
+                               'QWEN_FAST_LEVERN_PARK': 'host', 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': str(gap)}, seats=8, decoders=0)
+            t0 = rig.clock.now
+            for index, name in enumerate(self.ORDER):
+                rig.add(name, prompts[name], arrival=rig.wall.now + 0.05 * index)
+            ttft, rounds, joined = {}, [], False
+            for _ in range(20000):
+                if len(ttft) == len(self.ORDER):
+                    break
+                event = rig.step(prefill_ms=self.step_ms, decode_ms=self.ROUND_MS)
+                if event[0] == 'decode':
+                    if joined:
+                        rig.clock.advance_ms(self.FIRST_ROUND_MS - self.ROUND_MS)
+                        rig.wall.advance_ms(self.FIRST_ROUND_MS - self.ROUND_MS)
+                        joined = False
+                    rounds.append(rig.clock.now - t0)
+                elif event[2] + event[3] >= prompts[event[1]]:
+                    ttft[event[1]] = rig.clock.now - t0
+                    joined = True
+            else:
+                self.fail('the replay made no progress')
+        finally:
+            levern_policy.effective_share.__defaults__, levern_policy.governor_need.__defaults__ = saved
+        end = max(ttft.values())
+        edges = [0.0] + [r for r in rounds if r <= end] + [end]
+        lines = [levern_policy.STEP_LINE_MERGED.format(*call.args[1:]) for call in rig.log.call_args_list
+                 if call.args and call.args[0] == levern_policy.STEP_LINE_MERGED]
+        return dict(ttft=ttft, worst=max(b - a for a, b in zip(edges, edges[1:])), lines=lines)
+
+    def rule(self, run, gap):
+        steps = c2_smoke_check.levern_facts(chr(10).join(run['lines']))['steps']
+        return c2_smoke_check.levern_alternation_problems(steps, {'QWEN_FAST_LEVERN_PREFILL_SHARE': '0.5', 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': str(gap)})
+
+    def test_the_floor_bounds_the_stall_and_the_slowest_user_stays_inside_the_deadline(self):
+        on, off = self.replay(8), self.replay(0)
+        self.assertEqual(self.rule(on, 8), [], 'the smoke rule is clean over the scheduler\'s own lines with the floor on')
+        self.assertLess(on['worst'], 17.0)
+        self.assertGreater(off['worst'], 150.0)
+        self.assertLess(max(on['ttft'].values()), 240.0 - 3.0, 'the slowest user keeps at least 3 s inside the client deadline')
+        self.assertLessEqual(on['ttft']['long2'] - off['ttft']['long2'], 6.0, 'the floor costs the second long at most 6 s')
+        self.assertLessEqual(max(on['ttft'].values()) - max(off['ttft'].values()), 3.0, 'and the slowest user at most 3 s')
+
+    def test_the_smoke_rule_reads_the_floorless_run_as_one_stall_of_about_two_hundred_seconds(self):
+        off = self.replay(0)
+        found = self.rule(off, 8)
+        gaps = [problem for problem in found if 'decode-gap floor' in problem]
+        self.assertEqual(len(gaps), 1, found)
+        stall = float(gaps[0].split('decoders went ')[1].split(' s')[0])
+        self.assertGreater(stall, 150.0)
+        self.assertEqual(len(found), 1, 'the shorts keep their round with the floor off: the stall is the only problem')
+
+    def test_the_shorts_of_the_skew_are_admitted_early_at_the_modelled_build(self):
+        on = self.replay(8)
+        self.assertEqual(sum(1 for name in self.SHORTS if on['ttft'][name] < 60.0), 5)
+
+    def test_a_five_second_build_closes_the_short_lane_for_one_more_short(self):
+        """Why BUILD_MS stays 2500: at 5000 the governor pins f_eff at 1.0 earlier and a short waits behind both longs."""
+        late = [name for name in self.SHORTS if self.replay(8, build_ms=5000.0)['ttft'][name] > 200.0]
+        self.assertEqual(len(late), 2)
 
 
 if __name__ == '__main__':

@@ -1249,7 +1249,8 @@ def levern_facts(container_text):
               for m in LEVERN_ROUTE.finditer(container_text)]
     steps = [dict(n=int(m.group(1)), kind=m.group(2), seats=int(m.group(3)), req=m.group(4), start=m.group(5), tokens=int(m.group(6)),
                   end=m.group(7), prompt=m.group(8), final=m.group(9), reason=m.group(10), prev_kind=m.group(11), prev_ms=_float_or(m.group(12), 0.0),
-                  f_eff=_float_or(m.group(15), None)) for m in LEVERN_STEP.finditer(container_text)]
+                  f_eff=_float_or(m.group(15), None), need=_float_or(m.group(16), None), gap_ms=_float_or(m.group(17), None))
+             for m in LEVERN_STEP.finditer(container_text)]
     digests = [dict(req=m.group(1), prompt=int(m.group(2)), tokens=m.group(3), slot=m.group(4), logits=m.group(5), kv=m.group(6))
                for m in LEVERN_DIGEST.finditer(container_text)]
     return dict(routes=routes, steps=steps, digests=digests)
@@ -1297,50 +1298,109 @@ def levern_route_problems(routes):
 
 LEVERN_GAP_SLACK_MS = 1000.0
 LEVERN_PINNED_SHARE = 0.9995
+LEVERN_GOVERNOR = re.compile(r'\[PINDIAG\] lever N governor: ttft=(\S+) gap_floor=(\S+)')
 
 
-def levern_alternation_problems(steps, env):
-    """Two rules over the scheduler's step lines.
+def _step_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pinned(step):
+    """Whether the deadline governor held the step at all the device: its unclamped need is at least 1.0 (logged beside f_eff since the floor
+    landed); a pre-floor line has only the clamped f_eff, which reads 1.000 for a pinned share."""
+    if step.get('need') is not None:
+        return step['need'] >= 1.0
+    return (step.get('f_eff') or 0.0) >= LEVERN_PINNED_SHARE
+
+
+def levern_alternation_problems(steps, env, launched_gap_s=None):
+    """Three rules over the scheduler's step lines.
     (1) Whenever a prefill step ran with decoders (seats > 0) and its request has another prefill step later, a decode step that served at least
-    one seat must lie between them, unless the step ran at an effective share of 1.0 (f_eff on the merged step line: the deadline governor pinned the
-    prefill at all the device, so nothing is owed) or the STATIC share is 1.0 (back-to-back chunks, today's stall chunked).
-    (2) The decode-gap floor (QWEN_FAST_LEVERN_MAX_DECODE_GAP_S G, default 8, 0 off): the prefill steps that ran with decoders between two decode rounds
-    that served a seat must not add up to more than G seconds + the longest single step of the stretch (a step cannot be split) + 1 s. A step's own
-    duration is the NEXT line's prev_ms, so it is charged when the next line arrives. Pre-governor lines (no f_eff) carry no floor."""
+    one seat must lie between them, unless the governor pinned the earlier step at all the device (need >= 1.0, or f_eff >= 0.9995 on a line
+    that predates `need`: nothing is owed to the decoders there except the floor, rule 2) or the STATIC share is 1.0 (back-to-back chunks,
+    today's stall chunked).
+    (2) The decode-gap floor (G = QWEN_FAST_LEVERN_MAX_DECODE_GAP_S, default 8, 0 off; `launched_gap_s` is the value the container logged on its
+    governor line and wins over the profile's): ONE stretch is every consecutive step, across requests, in which decoders were running and no
+    decode round served a seat. Its length is the sum of its prefill steps' durations (a step's own duration is the NEXT line's prev_ms). It must
+    not exceed G + the longest single step of the stretch (a step cannot be split) + 1 s. The problem is written when the stretch ENDS (a decode
+    that served a seat, a step with no decoder, or the end of the log) so it states the whole stall and its n range, not the moment it crossed.
+    Pre-governor lines (no f_eff) carry no floor.
+    (3) A SHORT prefill (its request's first step had at most QWEN_FAST_LEVERN_SHORT_TOKENS, default 16384, left to compute) that ran with
+    decoders must be followed by a decode round that served a seat before the next prefill step of any request (shorts are paced at one round
+    whatever the share is, pinned or not). The decode round of a pass with no prefill pending is not logged as a step line; it shows as the next
+    prefill line's prev=decode, which counts as the round."""
     share_one = str(env.get('QWEN_FAST_LEVERN_PREFILL_SHARE', '')) in ('1', '1.0') and not env.get('QWEN_FAST_LEVERN_ROUNDS')
     if share_one:
         return []
     try:
-        gap_s = float(env.get('QWEN_FAST_LEVERN_MAX_DECODE_GAP_S', 8))
+        gap_s = float(env.get('QWEN_FAST_LEVERN_MAX_DECODE_GAP_S', 8)) if launched_gap_s is None else float(launched_gap_s)
     except (TypeError, ValueError):
         gap_s = 8.0
+    try:
+        short_tokens = int(env.get('QWEN_FAST_LEVERN_SHORT_TOKENS', 16384))
+    except (TypeError, ValueError):
+        short_tokens = 16384
     problems, last_prefill, decoded = [], None, False
-    previous, stretch_ms, longest_ms, flagged = None, 0.0, 0.0, False
+    previous, classes, short_owed = None, {}, None
+    stretch = None      # dict(ms, longest, first_n, last_n, floor) while a decode-less stretch with decoders is open
+
+    def close(end_label):
+        if stretch is not None and gap_s and stretch['floor'] and stretch['ms'] > gap_s * 1000.0 + stretch['longest'] + LEVERN_GAP_SLACK_MS:
+            problems.append('decoders went %.1f s without a decode round that served a seat (n=%d..%d, ended by %s; the floor is %g s + the longest '
+                            'step %.1f s + %.0f s): the decode-gap floor did not hold'
+                            % (stretch['ms'] / 1000.0, stretch['first_n'], stretch['last_n'], end_label, gap_s, stretch['longest'] / 1000.0,
+                               LEVERN_GAP_SLACK_MS / 1000.0))
+
     for step in steps:
         if previous is not None and previous['kind'] == 'prefill' and previous['seats'] > 0 and step.get('prev_kind') == 'prefill':
             took = step.get('prev_ms') or 0.0
-            stretch_ms += took
-            longest_ms = max(longest_ms, took)
-            if gap_s and previous.get('f_eff') is not None and not flagged and stretch_ms > gap_s * 1000.0 + longest_ms + LEVERN_GAP_SLACK_MS:
-                problems.append('decoders went %.1f s without a decode round that served a seat (n=%d..%d, the floor is %g s + the longest step %.1f s + %.0f s): '
-                                'the decode-gap floor did not hold' % (stretch_ms / 1000.0, step['n'] - 1, step['n'], gap_s, longest_ms / 1000.0,
-                                                                        LEVERN_GAP_SLACK_MS / 1000.0))
-                flagged = True
+            if stretch is None:
+                stretch = dict(ms=0.0, longest=0.0, first_n=previous['n'], last_n=previous['n'], floor=False)
+            stretch['ms'] += took
+            stretch['longest'] = max(stretch['longest'], took)
+            stretch['last_n'] = step['n']
+            stretch['floor'] = stretch['floor'] or previous.get('f_eff') is not None
         if step['kind'] == 'decode':
             if step['seats'] >= 1:
-                decoded = True
-                stretch_ms, longest_ms, flagged = 0.0, 0.0, False
+                decoded, short_owed = True, None
+                close('the decode round at n=%d' % step['n'])
+                stretch = None
             previous = step
             continue
         if step['seats'] == 0:
-            stretch_ms, longest_ms, flagged = 0.0, 0.0, False
-        pinned = last_prefill is not None and (last_prefill.get('f_eff') or 0.0) >= LEVERN_PINNED_SHARE
+            close('a step with no decoder at n=%d' % step['n'])
+            stretch, short_owed = None, None
+        prompt, start = _step_int(step.get('prompt')), _step_int(step.get('start'))
+        if step['req'] not in classes and prompt is not None and start is not None:
+            classes[step['req']] = prompt - start <= short_tokens
+        if step['seats'] > 0 and short_owed is not None and not decoded and step.get('prev_kind') == 'prefill':
+            problems.append('the short prefill step n=%d (%s) ran with %d decoder(s) and the next prefill step n=%d came with no decode round '
+                            'between them: a short is owed its one round whatever the share' % (short_owed['n'], short_owed['req'], short_owed['seats'], step['n']))
+        short_owed = None
+        pinned = last_prefill is not None and _pinned(last_prefill)
         if last_prefill is not None and last_prefill['req'] == step['req'] and last_prefill['seats'] > 0 and not decoded and not pinned:
             problems.append('two prefill steps of %s (n=%d and n=%d) ran back to back with %d decoder(s) running: the alternation did not yield'
                             % (step['req'], last_prefill['n'], step['n'], last_prefill['seats']))
+        if step['seats'] > 0 and classes.get(step['req']):
+            short_owed = step
         last_prefill, decoded = step, False
         previous = step
+    close('the end of the log')
     return problems
+
+
+def levern_governor_floor(container_text):
+    """The decode-gap floor (seconds) the container logged on its governor line, or None when the line is missing (an image without the floor)."""
+    found = LEVERN_GOVERNOR.findall(container_text)
+    if not found:
+        return None
+    try:
+        return float(found[-1][1])
+    except ValueError:
+        return None
 
 
 LEVERN_SPLIT_FLOOR = 4096
@@ -1437,7 +1497,11 @@ def levern_problems(env, container_text, smoke):
             if not facts['steps']:
                 problems.append('prompts were split (%d route lines) and no "lever N step" line was logged: the scheduler\'s alternation never ran'
                                 % len(served))
-            problems += levern_alternation_problems(facts['steps'], env)
+            launched = levern_governor_floor(container_text) if merged else None
+            if merged and env.get('QWEN_FAST_LEVERN_MAX_DECODE_GAP_S') is not None and launched is None:
+                problems.append('the profile sets QWEN_FAST_LEVERN_MAX_DECODE_GAP_S and no "lever N governor: ttft= gap_floor=" line was logged: the image '
+                                'does not carry the decode-gap floor, or the flag never reached the container')
+            problems += levern_alternation_problems(facts['steps'], env, launched)
             if not any(step['kind'] == 'decode' and step['seats'] >= 1 for step in facts['steps']) and any(
                     step['kind'] == 'prefill' and step['seats'] >= 1 for step in facts['steps']):
                 problems.append('decoders ran beside split prefills and no decode step was ever yielded between them')

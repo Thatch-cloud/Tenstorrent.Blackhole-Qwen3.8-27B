@@ -558,11 +558,12 @@ class GovernedShareTests(unittest.TestCase):
 
     def pinned(self, count=20, seats=4, f_eff=1.0, decode_every=None, step_ms=1000.0):
         lines, n = [], 1
+        need = 1.3 if f_eff >= 0.9995 else f_eff
         for index in range(count):
-            lines.append(merged_step(n, 'prefill', seats, f_eff=f_eff, prev_ms=step_ms, prev_kind='prefill' if index else '-'))
+            lines.append(merged_step(n, 'prefill', seats, f_eff=f_eff, need=need, prev_ms=step_ms, prev_kind='prefill' if index else '-'))
             n += 1
             if decode_every and (index + 1) % decode_every == 0:
-                lines.append(merged_step(n, 'decode', seats, f_eff=f_eff, prev_ms=step_ms))
+                lines.append(merged_step(n, 'decode', seats, f_eff=f_eff, need=need, prev_ms=step_ms))
                 n += 1
         return lines
 
@@ -601,6 +602,84 @@ class GovernedShareTests(unittest.TestCase):
     def test_a_pre_governor_line_carries_no_floor(self):
         lines = [step(n, 'prefill', 4, 'a', n * 2048, 2048, n * 2048 + 2048, 400000, 0, prev='prefill:1000.0') for n in range(1, 30)]
         self.assertEqual(len(self.problems(lines)), 28, 'the old alternation rule is unchanged for lines without f_eff')
+
+
+def request_step(n, req, seats, start, prompt, prev_kind='prefill', prev_ms=1000.0, f_eff=1.0, need=1.3, tokens=2048):
+    """A prefill step line of a chosen request and prompt (the helper above fixes the prompt at 400000)."""
+    return policy.STEP_LINE_MERGED.format(n, 'prefill', seats, req, start, tokens, start + tokens, prompt, int(start + tokens >= prompt), 'paid', prev_kind,
+                                          '%.1f' % prev_ms, '0', 0, f_eff, need, 0)
+
+
+class StallStretchTests(unittest.TestCase):
+    """The v584 / v620 stall was ONE decode-less stretch across two long prompts (199 s / 207 s), not one stall per prompt."""
+
+    def problems(self, lines, env=ENV, launched=None):
+        return check.levern_alternation_problems(check.levern_facts(chr(10).join(lines))['steps'], env, launched)
+
+    def two_longs(self, each=10, seats=4, end_with_decode=True):
+        lines, n = [], 1
+        for req in ('long-a', 'long-b'):
+            for index in range(each):
+                lines.append(request_step(n, req, seats, index * 2048, 400000, prev_kind='prefill' if n > 1 else '-'))
+                n += 1
+        if end_with_decode:
+            lines.append(merged_step(n, 'decode', seats, prev_ms=1000.0))
+        return lines
+
+    def test_two_long_prompts_with_no_decode_between_them_are_one_stall_of_the_whole_stretch(self):
+        found = self.problems(self.two_longs(each=10))
+        self.assertEqual(len(found), 1, found)
+        self.assertIn('20.0 s', found[0])
+        self.assertIn('n=1..21', found[0])
+        self.assertIn('ended by the decode round at n=21', found[0])
+
+    def test_a_decode_round_between_the_two_prompts_splits_it_into_two_stretches_that_hold(self):
+        lines = self.two_longs(each=7, end_with_decode=False)
+        lines.insert(7, merged_step(8, 'decode', 4, prev_ms=1000.0))
+        self.assertEqual(self.problems(lines), [])
+
+    def test_a_stall_still_open_at_the_end_of_the_log_is_reported(self):
+        found = self.problems(self.two_longs(each=10, end_with_decode=False))
+        self.assertEqual(len(found), 1)
+        self.assertIn('the end of the log', found[0])
+
+    def test_the_launched_floor_wins_over_the_profile(self):
+        lines = self.two_longs(each=10)
+        self.assertEqual(self.problems(lines, dict(ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='8'), launched=0), [])
+        self.assertEqual(len(self.problems(lines, dict(ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='0'), launched=8)), 1)
+
+    def test_a_short_step_at_a_pinned_share_owes_its_one_round(self):
+        lines = [request_step(1, 'short', 3, 0, 4000, tokens=4000, prev_kind='decode'),
+                 request_step(2, 'long', 3, 30720, 250000, prev_kind='prefill', prev_ms=800.0)]
+        found = self.problems(lines, dict(ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='0'))
+        self.assertEqual(len(found), 1)
+        self.assertIn('short prefill step n=1', found[0])
+
+    def test_a_decode_round_after_the_short_step_is_clean(self):
+        lines = [request_step(1, 'short', 3, 0, 4000, tokens=4000, prev_kind='decode'), merged_step(2, 'decode', 3, prev_ms=800.0),
+                 request_step(3, 'long', 3, 30720, 250000, prev_kind='decode', prev_ms=150.0)]
+        self.assertEqual(self.problems(lines, dict(ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='0')), [])
+
+    def test_an_unlogged_idle_decode_round_after_a_final_short_step_counts(self):
+        lines = [request_step(1, 'short', 3, 0, 4000, tokens=4000, prev_kind='decode'),
+                 request_step(2, 'next', 3, 0, 63969, prev_kind='decode', prev_ms=0.0)]
+        self.assertEqual(self.problems(lines, dict(ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='0')), [])
+
+    def test_a_long_first_step_is_not_a_short(self):
+        lines = [request_step(1, 'long-a', 3, 0, 250000, prev_kind='decode'), request_step(2, 'long-b', 3, 0, 250000, prev_kind='prefill')]
+        self.assertEqual(self.problems(lines, dict(ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='0')), [])
+
+    def test_the_governed_line_is_read_from_the_container_log(self):
+        self.assertEqual(check.levern_governor_floor(policy.GOVERNOR_LINE.format(180, 8.0)), 8.0)
+        self.assertIsNone(check.levern_governor_floor('nothing'))
+
+    def test_a_merged_profile_that_sets_the_floor_needs_the_governor_line(self):
+        env = dict(MERGED_ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='8')
+        log = merged_log(merged_route_lines('first', 9000) + interleaved_steps('first', 9000))
+        missing = check.levern_problems(env, log, None)[0]
+        self.assertTrue(any('governor' in problem for problem in missing), missing)
+        present = check.levern_problems(env, log + chr(10) + policy.GOVERNOR_LINE.format(180, 8.0), None)[0]
+        self.assertEqual(present, [])
 
 
 if __name__ == '__main__':

@@ -34,7 +34,7 @@ BASE = {PLAIN: SHIP, AUDITED: SHIP_AUDIT}
 FLAGS = {'QWEN_FAST_LEVER_N': '1', 'QWEN_FAST_LEVERN_STEP_TOKENS': '2048', 'QWEN_FAST_LEVERN_SOLO_STEP_TOKENS': '16384',
          'QWEN_FAST_LEVERN_PREFILL_SHARE': '0.5', 'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180', 'QWEN_FAST_LEVERN_SHORT_TOKENS': '16384',
          'QWEN_FAST_LEVERN_PARK': 'host', 'QWEN_FAST_LEVERN_PARK_SLOTS': '1', 'QWEN_FAST_LEVERN_MAX_PARK_S': '30',
-         'QWEN_FAST_LEVERN_EPOCH_SCOPE': 'route'}
+         'QWEN_FAST_LEVERN_EPOCH_SCOPE': 'route', 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': '8'}
 EXTRA = {PLAIN: FLAGS, AUDITED: dict(FLAGS, QWEN_FAST_LEVERN_AUDIT='1', QWEN_PREFIX_DIGESTS='1')}
 
 
@@ -93,7 +93,7 @@ class ProfileTests(unittest.TestCase):
         env = profiles()[PLAIN]['env']
         cfg, merged = levern_policy.config(env), levern_policy.merged_config(env)
         self.assertEqual((cfg.step, cfg.solo, cfg.share, cfg.rounds), (2048, 16384, 0.5, None))
-        self.assertEqual(merged, levern_policy.Merged(180, 16384, 'host', 1, 30, 'route'))
+        self.assertEqual(merged, levern_policy.Merged(180, 16384, 'host', 1, 30, 'route', 8))
         self.assertEqual(levern_policy.config_problems(env), [])
 
     def test_the_production_profiles_are_untouched_and_name_no_lever_n_flag(self):
