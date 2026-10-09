@@ -188,16 +188,23 @@ def median(values):
     return ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2.0
 
 
+GAP_OUTLIER_FACTOR = 4.0
+GAP_OUTLIER_FLOOR_MS = 50.0
+
+
 def pairs_of(rounds, live=8):
-    """[(octo round, m3 round)] of consecutive counted rounds, each at `live` live seats: an octo round and the m3 round right after it. A round with no gap read
-    (the first of a boot has no step before it) cannot be timed: its pair is left out."""
-    counted = [item for item in rounds if item['counted']]
+    """[(octo round, m3 round)]: an octo round and the m3 round that is the very NEXT round of the log (an uncounted round between them is no pair), both counted and at
+    `live` live seats. A round with no gap read (the first of a boot has no step before it) cannot be timed: its pair is left out. A pair whose gap is an outlier (more than
+    GAP_OUTLIER_FACTOR times the median gap of the candidates, plus GAP_OUTLIER_FLOOR_MS: a prefill, an admission or an idle stretch sat before the round, and that is not
+    the shape's cost) is left out too."""
     found = []
-    for first, second in zip(counted, counted[1:]):
-        if (first['shape'] == 'octo' and second['shape'] == 'm3' and first['live'] == live and second['live'] == live
-                and first['gap_ms'] > 0 and second['gap_ms'] > 0):
+    for first, second in zip(rounds, rounds[1:]):
+        if (first['counted'] and second['counted'] and first['shape'] == 'octo' and second['shape'] == 'm3' and second['round'] == first['round'] + 1
+                and first['live'] == live and second['live'] == live and first['gap_ms'] > 0 and second['gap_ms'] > 0):
             found.append((first, second))
-    return found
+    gaps = [item['gap_ms'] for pair in found for item in pair]
+    ceiling = GAP_OUTLIER_FACTOR * (median(gaps) or 0.0) + GAP_OUTLIER_FLOOR_MS
+    return [pair for pair in found if max(pair[0]['gap_ms'], pair[1]['gap_ms']) <= ceiling]
 
 
 def seat_rate(item):
@@ -262,10 +269,12 @@ def main(argv=None):
     if options.verdict:
         verdict = pair_verdict(text, live=options.live)
         print('OCTO_VERDICT %s' % json.dumps(verdict, sort_keys=True))
+        if problems:
+            return 1                 # an arm that failed its rules has no verdict worth reading (and an arm whose octo shape never ran has no pairs: that is a 1, not an "unread")
         if verdict['go'] is None:
             return 2
         print('OCTO_VERDICT %s: %s' % ('GO' if verdict['go'] else 'NO-GO', verdict['reason']))
-        return (1 if problems else 0) if verdict['go'] else 1
+        return 0 if verdict['go'] else 1
     return 1 if problems else 0
 
 

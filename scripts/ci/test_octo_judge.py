@@ -259,6 +259,26 @@ class PairedTimingTests(unittest.TestCase):
         self.assertIsNone(verdict['go'], 'only rounds at eight live seats are paired')
         self.assertEqual(octo_judge.pair_verdict('')['pairs'], 0)
 
+    def test_a_prefill_gap_before_one_round_does_not_turn_a_clean_run_into_no_go(self):
+        boot = Boot(programs=lambda: 5000)
+        for number in range(21):
+            boot.round('octo', committed=32, gap=6000.0 if number == 7 else 20.0)      # a staggered arrival's prefill sat before one octo round
+            boot.round('m3', committed=42)
+        verdict = octo_judge.pair_verdict(boot.text())
+        self.assertTrue(verdict['go'], verdict)
+        self.assertEqual(verdict['pairs'], 19, 'the first round has no gap and the prefill pair is an outlier')
+        self.assertGreater(verdict['ratio'], 1.25)
+
+    def test_an_uncounted_round_between_the_two_is_no_pair(self):
+        boot = Boot(programs=lambda: 5000)
+        for _ in range(21):
+            boot.round('octo', committed=32)
+            boot.round('m3', eligible=False, live=3, committed=12)          # an uncounted round
+            boot.round('m3', committed=42)
+        rounds = octo_markers.rounds(boot.text())
+        self.assertEqual(octo_judge.pairs_of(rounds), [])
+        self.assertIsNone(octo_judge.pair_verdict(boot.text())['go'])
+
     def test_a_seat_rate_is_committed_per_live_seat_over_the_cycle(self):
         item = dict(step_ms=50.0, gap_ms=20.0, committed=32, live=8)
         self.assertAlmostEqual(octo_judge.seat_rate(item), 57.142857, places=3)
@@ -332,6 +352,14 @@ class SmokeCheckTests(unittest.TestCase):
             self.assertIn('OCTO_VERDICT GO:', printed)
             with patch('sys.stdout', new_callable=io.StringIO):
                 self.assertEqual(octo_judge.main(['--container-log', os.path.join(folder, 'missing.log')]), 2)
+            # an arm whose octo shape never ran has no pairs and fails its rules: exit 1, never the 2 that reads as 'unread'
+            nothing = Boot(programs=lambda: 5000)
+            for _ in range(30):
+                nothing.round('m3', eligible=False, live=3)
+            with open(path, 'w', encoding='utf-8') as handle:
+                handle.write(nothing.text())
+            with patch('sys.stdout', new_callable=io.StringIO):
+                self.assertEqual(octo_judge.main(arguments + ['--verdict']), 1)
             slow = Boot(programs=lambda: 5000)
             for _ in range(21):
                 slow.round('octo', committed=32, step=80.0)
