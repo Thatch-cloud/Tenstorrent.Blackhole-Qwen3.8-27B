@@ -41,6 +41,7 @@ from test_gdn_conv_gates_spread import FakeTTNN, Kernel, Tensor, fake_mesh
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 FOUR = {'QWEN_FAST_TP': '4'}
+PARENT_COMMIT = '1cfc8412'     # tp4/er-drafters, the base of this branch
 T2 = {'QWEN_FAST_VERIFY_T2': '1'}
 LEVER = dict(FOUR, **T2, **{gdn_wc.FLAG: '1', 'QWEN_FAST_TP4_GDN_GLUE': '1', 'QWEN_FAST_TP4_GDN_BLOCK_CONV': '1'})
 AUDITED = dict(LEVER, **{gdn_wc.AUDIT_FLAG: '1', 'QWEN_FAST_TP4_VGLUE_AUDIT': '1'})
@@ -763,13 +764,14 @@ class BindingTests(unittest.TestCase):
         self.addCleanup(self.base.doCleanups)
         tp4_vglue.take()
 
-    def decode(self, flags, stage_result=None, decline=False):
+    def decode(self, flags, stage_result=None, decline=False, module=None):
         import gdn_device_loop_state_tp as twin
         import verify_trace_t2
 
+        module = module or twin
         verify_trace_t2.take()
         base = self.base
-        state, operations, layer, active, calls = base.build_state(twin.DeviceLoopState)
+        state, operations, layer, active, calls = base.build_state(module.DeviceLoopState)
         stage_calls, batched = [], []
 
         def launch(mesh, sources, destinations, tasks, **keywords):
@@ -798,10 +800,10 @@ class BindingTests(unittest.TestCase):
         with env(**flags), patch('gdn_rows_dma_tp.launch', side_effect=launch), patch('gdn_rows_dma_tp.problem', return_value=None), \
                 patch('gdn_wc.stage', side_effect=fake_stage), \
                 patch('gdn_device_loop_state.run_user_batched_projected', side_effect=runner), \
-                patch('gdn_device_loop_state_tp.run_user_batched_projected', side_effect=runner), \
+                patch.object(module, 'run_user_batched_projected', side_effect=runner), \
                 patch('gdn_device_loop_state.restore_prefix'), patch('gdn_device_loop_state.release_owned'), \
-                patch('gdn_device_loop_state_tp.release_owned'), \
-                patch('gdn_device_loop_state.copy_compact', side_effect=move), patch('gdn_device_loop_state_tp.copy_compact', side_effect=move):
+                patch.object(module, 'release_owned'), \
+                patch('gdn_device_loop_state.copy_compact', side_effect=move), patch.object(module, 'copy_compact', side_effect=move):
             packed = SimpleNamespace(shape=(1, 64, 5120), name='packed', memory_config=lambda: 'l1')
             result = state.decode(packed, base.checkpoints, [0] * 4, segments=base.spans, slots=base.slots, deferred=True)
         return result, calls, stage_calls, batched
@@ -852,6 +854,27 @@ class BindingTests(unittest.TestCase):
         self.assertEqual(len(stage_calls[0]['groups']), 4)
         self.assertEqual([len(group) for group in stage_calls[0]['groups']], [3, 3, 3, 3])
         self.assertLess([entry[0] for entry in calls].index('launch'), [entry[0] for entry in calls].index('wc_stage'))
+
+    def test_flag_off_is_the_parents_twin_call_for_call_with_the_v1_levers_on(self):
+        """The control: the same fixture through the twin as it was before this branch (git show of its base commit), the V2 glue, the V1 block conv and the T2
+        windows on and WC unset. Every recorded op, split launch, hand-off to the batched loop and note is equal."""
+        from test_dflash_proposal_trace import pinned_module
+
+        parent = pinned_module('gdn_device_loop_state_tp.py', 'gdn_device_loop_state_tp_parent', commit=PARENT_COMMIT)
+        if parent is None:
+            raise unittest.SkipTest('no git history for %s' % PARENT_COMMIT)
+        flags = dict(FOUR, **T2, QWEN_FAST_TP4_GDN_GLUE='1', QWEN_FAST_TP4_GDN_BLOCK_CONV='1')
+        self.base.launches.clear()
+        old_result, old_calls, old_stage, old_batched = self.decode(flags, module=parent)
+        old_launches, old_notes = list(self.base.launches), tp4_vglue.take()
+        self.base.launches.clear()
+        new_result, new_calls, new_stage, new_batched = self.decode(flags)
+        self.assertEqual(new_calls, old_calls)
+        self.assertEqual(list(self.base.launches), old_launches)
+        self.assertEqual(new_batched, old_batched)
+        self.assertEqual(tp4_vglue.take(), old_notes)
+        self.assertEqual(sorted(new_result), sorted(old_result))
+        self.assertEqual((new_stage, old_stage), ([], []))
 
     def test_flag_off_the_stage_is_never_asked_and_the_split_runs(self):
         flags = dict(FOUR, **T2, QWEN_FAST_TP4_GDN_GLUE='1', QWEN_FAST_TP4_GDN_BLOCK_CONV='1')

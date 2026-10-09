@@ -1,6 +1,6 @@
 # tp4/w3 WC: the GDN layer's windows, convolution and gates in one launch
 
-Status: **built on `tp4/w3-wc`, behind `QWEN_FAST_TP4_GDN_WC` (off by default), CPU-tested, never compiled or run on a card.** The estimate is the fusion
+Status: **built on `tp4/w3-wc`, behind `QWEN_FAST_TP4_GDN_WC` (off by default), CPU-tested, never compiled or run on a card.** The kernels have never been through a compiler: the attempt to compile them in a throwaway toolchain container on the rig was refused by the session's permission classifier and not retried, so the first compile is the card-M byte gate. Their API surface is the production kernels' (a test holds every `noc_`/`cb_`/`get_` call to one a production kernel already makes); the one exception is `invalidate_l1_cache()`, which only the non-default branch of the T2 windows kernel calls (its settings matrix ran on a card). The estimate is the fusion
 audit's (ESTIMATED, not measured): WC replaces G3-G8 of a GDN layer (the V2 split, the T2 windows, the canon block, the window stack, the conv-gates
 launch, the unstack: 139.3 us a layer of kernels and gaps, 6.69 ms a verify) with one launch of 25-40 us, which the audit's review haircuts to
 **-4.5 to -5.5 ms a verify, about -9 to -11 ms a two-block round** (the audit's own figure with F1 inside is -6 to -8.5 ms a round at 8 live, after
@@ -90,3 +90,18 @@ ones, a grid without room); the caller then makes the pieces and runs the V1 cha
    X-obs vs X-construct for V1, V2 and WC alike.
 4. The hang matrix: WC removes about 24 transient tensors per layer from the capture, which changes the allocation pattern the unexplained audits-off hang is
    sensitive to; five hang-shape completions on the WC profile are part of the gate.
+
+## Tests (CPU)
+
+| Module | What it holds |
+|---|---|
+| `test_gdn_wc` (28) | the core plan (80 conv + 2 gate + 28 z cores at 64 rows, 80 + 1 + 29 at 32), every output page written once, the face-order emulation of the kernels' loops against the four SERVED per-user calls and, tile for tile, the V1 chain's unstack, on edge values (-0, denormals, infinities, NaN payloads), with negative controls (no canonical rule, a wrong history row) |
+| `test_tp4_w3_wc` (77) | flag grammar and prerequisites, the kernels' text (argument indices, common-word layout, CB indices, the transcribed window formulas, no new API surface, LF), the launch on a fake ttnn (programs, words, buffers, every fall-back), the stage and audit labels, `run_user_batched_projected(prebuilt=)`, the V2 twin binding (split skipped, stage after the state moves, real pieces on a decline or under the audits) and the flag-off identity against the twin at its base commit, the replay audit, the smoke rule, the overlay lists |
+| `optimisation/ttnn-op/gdn_wc` (30) | the card-M probe: host data, compare, sections, verdict, timing arithmetic, whole run on a fake ttnn, the run script |
+
+## Card jobs WC needs (templates are the parent's pack; minutes ESTIMATED from this window's measured jobs)
+
+1. **Card-M byte gate** (`optimisation/ttnn-op/gdn_wc/run_card_m.sh`, cardm step, one card, no quad job running): first JIT compile of the two kernels, then the compare matrix, replay, cache, control and timing. 45-90 min (container timeout 90 min). STOP on a compile error (exit 4) or any difference.
+2. **Audited attach** on the WC audit twin (`QWEN_FAST_TP4_GDN_WC=1`, `_AUDIT=1`, the vglue audit): every audited layer's WC entries equal the served path's. Keep it to the short exactness list (audited 8x262k requests cost about 8.4 min each): about 25-50 min.
+3. **Hang shapes** five consecutive completions with the audits off on the WC profile (the capture's allocation pattern changes): about 25-40 min each.
+4. **Paired ABAB timing** at 4 and 8 live with CI paused: about 10 min a job (this window's timed jobs ran 9-10 min).
