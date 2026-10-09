@@ -234,7 +234,7 @@ class MergeSeamTests(unittest.TestCase):
     def test_the_packed_verifier_runs_both_audits_after_the_replay(self):
         source = (HERE / 'packed_verifier.py').read_text(encoding='utf-8')
         for marker in ('tile_collective_tp.audit_round(self.operations, self.fixture, self.rounds + 1)', 'sdpa_audit(self.rounds + 1)',
-                       'tp4_vglue.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)',
+                       'tp4_vglue.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1,',
                        'gdn_conv_gates_spread.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)'):
             self.assertEqual(source.count(marker), 1, marker)
         self.assertLess(source.index('tp4_vglue.audit_round('), source.index('gdn_conv_gates_spread.audit_round('))
