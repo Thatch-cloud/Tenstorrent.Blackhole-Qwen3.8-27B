@@ -398,6 +398,63 @@ class CompareTests(unittest.TestCase):
         rows, summary = judge.paired_turns([], [])
         self.assertEqual(summary['turns'], 0)
 
+    @staticmethod
+    def real_turns(walls, gaps, makespan):
+        """parked_turns as the smoke writes it into SMOKE_JSON (c2_serving_smoke.parked_turns, read back from a real run's log): the stream's fields
+        without the prompt text, and longest_gap_s the PAIR [longest gap in seconds, the stamp it began at] that longest_gap() returns, not a number."""
+        users = []
+        for index, (wall, gap) in enumerate(zip(walls, gaps)):
+            began = 1791543000.0 + 40.0 * index
+            users.append(dict(ttft=3.92, tokens=256, chunks_streamed=43, prompt_tokens=4241, finish='length', decode_tok_s=7.93, completion_tokens=256,
+                              content_sha256='c%d' % index, content_chars=900, reasoning_sha256='r%d' % index, reasoning_chars=700,
+                              started_at=began, first_at=began + 3.92, ended_at=round(began + wall, 3), longest_gap_s=[gap, began + 7.5]))
+        return dict(users=users, corpus='sha', seats=2, turns=2, makespan_s=makespan, completion_tokens=256 * len(users),
+                    tokens_per_s=round(256 * len(users) / makespan, 2), wall_s=makespan + 2.5)
+
+    def test_er5_pairs_the_smoke_json_as_it_is_written_the_gap_is_a_pair(self):
+        """v611 against v612 (2026-10-10): parked_judge.paired_turns divided the two lists and raised TypeError on every real pair of logs."""
+        control = smoke_log({'warmup': dict(value=200, wall_s=0.6), 'parked_turns': self.real_turns([36.0, 50.0, 40.0, 30.0], [4.5, 5.0, 5.2, 4.0], 372.33)})
+        other = smoke_log({'warmup': dict(value=200, wall_s=0.6), 'parked_turns': self.real_turns([26.0, 30.0, 40.0, 33.0], [2.8, 2.5, 5.2, 1.0], 244.53)})
+        problems, compared, lines = parked_compare.compare(control, other)
+        self.assertEqual((problems, compared), ([], 4), 'the same answers in both arms: nothing to mismatch')
+        text = '\n'.join(lines)
+        summary = json.loads(next(line for line in lines if line.startswith('PARKED_COMPARE turns {'))[len('PARKED_COMPARE turns '):])
+        # walls 36/26, 50/30, 40/40, 30/33 -> ratios .722 .6 1.0 1.1 (median of four: index 2 of the sorted); gaps 2.8/4.5, 2.5/5, 5.2/5.2, 1/4
+        self.assertEqual(summary, dict(turns=4, wall_ratio_median=1.0, gap_ratio_median=0.622, parked_faster=2, total=4))
+        first = json.loads(next(line for line in lines if line.startswith('PARKED_COMPARE turn {'))[len('PARKED_COMPARE turn '):])
+        self.assertEqual((first['control_gap_s'], first['parked_gap_s']), (4.5, 2.8), 'the rows carry seconds, not the [gap, began_at] pairs')
+        self.assertIn('PARKED_COMPARE turns control makespan_s=372.33 tokens_per_s=2.75 completion_tokens=1024', text)
+        self.assertIn('PARKED_COMPARE turns parked makespan_s=244.53 tokens_per_s=4.19 completion_tokens=1024', text)
+
+    def test_er5_reads_through_the_cli_and_through_either_gap_shape(self):
+        import contextlib
+        import io
+        import tempfile
+        pair = self.real_turns([30.0, 32.0], [4.0, 4.0], 100.0)
+        number = json.loads(json.dumps(pair))
+        number['users'] = [dict(user, longest_gap_s=user['longest_gap_s'][0]) for user in number['users']]
+        with tempfile.TemporaryDirectory() as directory:
+            paths = {}
+            for name, turns in (('control', pair), ('parked', number)):
+                paths[name] = Path(directory) / ('%s.log' % name)
+                paths[name].write_text(smoke_log({'parked_turns': turns}), encoding='utf-8')
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = parked_compare.main(['--control', str(paths['control']), '--parked', str(paths['parked'])])
+        self.assertEqual((code, err.getvalue()), (0, ''))
+        self.assertIn('"gap_ratio_median": 1.0', out.getvalue())
+        self.assertIn('"ok": true', out.getvalue())
+
+    def test_a_gap_is_seconds_whatever_shape_the_row_has_it_in(self):
+        for value, seconds in ((4.552, 4.552), (3, 3), ([4.552, 1791543293.443], 4.552), ((2.5, 7.0), 2.5), ([6.0], 6.0),
+                               (None, None), ([], None), ([None, None], None), ((None, None), None), ('4.5', None), (True, None), ({}, None)):
+            with self.subTest(value=value):
+                self.assertEqual(judge.gap_seconds(value), seconds)
+        # a turn with no gap (fewer than two stamps) pairs on its walls only
+        rows, summary = judge.paired_turns([dict(started_at=0, ended_at=10, longest_gap_s=[None, None])],
+                                           [dict(started_at=0, ended_at=5, longest_gap_s=[None, None])])
+        self.assertEqual((summary['turns'], summary['wall_ratio_median'], summary['gap_ratio_median']), (1, 0.5, None))
+
 
 class SmokeChecksTests(unittest.TestCase):
     def test_the_row_checks(self):

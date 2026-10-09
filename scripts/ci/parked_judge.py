@@ -389,6 +389,14 @@ def negative_verdict(kind, token_mismatches, control_text, negative_text, negati
     raise ValueError('unknown negative control %r' % (kind,))
 
 
+def gap_seconds(value):
+    """A parked_turns row's longest gap in seconds, or None. The smoke stores longest_gap's whole return, the PAIR [gap_s, began_at] (a JSON list in
+    SMOKE_JSON); a bare number is read as it stands."""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
 def paired_turns(control_users, parked_users):
     """The ER5 report: [(index, control turn, parked turn)] and its summary - per turn the wall time and the longest gap of each arm, paired by index.
     Never a verdict: the adoption rule is the owner's (docs/tp4-engine-reuse.md)."""
@@ -397,12 +405,13 @@ def paired_turns(control_users, parked_users):
         if not isinstance(a, dict) or not isinstance(b, dict) or 'error' in a or 'error' in b:
             continue
         wall_a, wall_b = (a.get('ended_at') or 0) - (a.get('started_at') or 0), (b.get('ended_at') or 0) - (b.get('started_at') or 0)
-        rows.append(dict(turn=index, control_wall_s=round(wall_a, 2), parked_wall_s=round(wall_b, 2), control_gap_s=a.get('longest_gap_s'),
-                         parked_gap_s=b.get('longest_gap_s'), control_ttft_s=a.get('ttft'), parked_ttft_s=b.get('ttft')))
+        gap_a, gap_b = gap_seconds(a.get('longest_gap_s')), gap_seconds(b.get('longest_gap_s'))
+        rows.append(dict(turn=index, control_wall_s=round(wall_a, 2), parked_wall_s=round(wall_b, 2), control_gap_s=gap_a,
+                         parked_gap_s=gap_b, control_ttft_s=a.get('ttft'), parked_ttft_s=b.get('ttft')))
         if wall_a > 0 and wall_b > 0:
             ratios.append(wall_b / wall_a)
-        if a.get('longest_gap_s') and b.get('longest_gap_s'):
-            gaps.append(b['longest_gap_s'] / a['longest_gap_s'])
+        if gap_a and gap_b:
+            gaps.append(gap_b / gap_a)
     ratios.sort()
     gaps.sort()
     summary = dict(turns=len(rows), wall_ratio_median=round(ratios[len(ratios) // 2], 3) if ratios else None,
