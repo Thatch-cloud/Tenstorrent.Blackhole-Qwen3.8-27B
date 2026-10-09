@@ -64,6 +64,12 @@ own SMOKE_JSON line and the container log and exits non-zero on:
     'refused' admission line (the record qualified these bytes, no waiver), and a parser_rechunk profile must log the
     contract's 'parser M armed' line (the parser fix is live in the server that took the requests);
 
+  - the round-host levers (tp4/round-host, round_host_problems): any QWEN_FAST_TP4_ROUND_HOST_* flag must log its engaged line once, with
+    the flags it names equal to the profile's, no refusal and no declined line; the ledger (LOG or LEAN) must log a [PACKED-ROUND-HOST] line a
+    step with every field; each lever must have RUN, from the ledger's own counters (SELECT and READ on 95% of the eight-live steps that drafted, KEYED on
+    half of the verifies of a block that can be keyed, READ's feature guard skipped on some steps once 64 reads have passed); LEAN must have
+    written none of the lines it drops; the audit must have logged an equal=1 line for each audited lever and no equal=0; a profile without
+    the flags logs none of these lines;
   - Lever N (QWEN_FAST_LEVER_N=1, tp4/lever-n; levern_problems): the lever must have ENGAGED, not merely been installed. The scheduler's install line, the
     platform wrap's "chunked prefill kept" line, the route's install line and its warm line (before Metal's unsafe-allocation warning, the packed
     traces' first allocation, and with exactly the plan's three steps) must each be logged; no "lever N REFUSED" line; and every prompt that was
@@ -87,6 +93,7 @@ import sys
 from pathlib import Path
 
 import levern_policy
+import round_host
 
 SOLO_TEST = 'concurrent4_solo'
 REPLAY_TEST = 'replay_concurrent4'
@@ -1116,6 +1123,120 @@ def hostgap_problems(env, container_text, steady_eight):
     return problems, facts
 
 
+# tp4/round-host: the host work inside a verified round (round_host.py), judged on the ledger the arm writes.
+ROUND_HOST_LEDGER = re.compile(r'\[PACKED-ROUND-HOST\] round=(\d+) live=(\S+) pos=(\S+) ((?:\w+=\S+ )+)sel=(\d+) read=(\d+) keyed=(\d+) guard=(\d+)')
+ROUND_HOST_AUDIT_LINE = re.compile(r'\[ROUND-HOST-AUDIT\] kind=(\w+) equal=(\d)')
+ROUND_HOST_ENGAGED_LINE = re.compile(r'\[PINDIAG\] round host engaged ((?:\w+=\d ?)+)')
+# The lines LEAN drops (round_host.LEAN_PHASES and the three audit lines behind the commits): none may appear.
+ROUND_HOST_LEAN_ABSENT = (re.compile(r'\[PHASE\] (?:propose|prepare_proposals|propose_quad|early_draft|packed_commit) '),
+                          re.compile(r'\[PACKED-PUBLISH-SPLIT\] '), re.compile(r'\[PACKED-COMMIT-HOST\] '),
+                          re.compile(r'\[PACKED-COMMIT\] '))
+ROUND_HOST_MIN_STEPS = 50
+ROUND_HOST_FAST_SHARE = 0.95
+ROUND_HOST_KEYED_SHARE = 0.5
+ROUND_HOST_GUARD_AFTER = 64
+ROUND_HOST_AUDIT_KINDS = {round_host.SELECT_FLAG: 'select', round_host.READ_FLAG: 'merge', round_host.KEYED_FLAG: 'keyed'}
+
+
+def round_host_facts(container_text):
+    """The ledger's steps ({field: value or None, live, sel, read, keyed, guard}), the audit lines [(kind, equal)] and the engaged line's flags."""
+    steps = []
+    for number, live, position, fields, sel, read, keyed, guard in ROUND_HOST_LEDGER.findall(container_text):
+        values = {}
+        for item in fields.split():
+            name, _, value = item.partition('=')
+            values[name] = None if value == '-' else float(value)
+        steps.append(dict(round=int(number), live=None if live == '-' else int(live), position=None if position == '-' else int(position),
+                          fields=values, sel=int(sel), read=int(read), keyed=int(keyed), guard=int(guard)))
+    engaged = ROUND_HOST_ENGAGED_LINE.findall(container_text)
+    return dict(steps=steps, audits=[(kind, int(equal)) for kind, equal in ROUND_HOST_AUDIT_LINE.findall(container_text)],
+                engaged=engaged)
+
+
+def round_host_problems(env, container_text, steady_eight):
+    """(problems, facts) for the round-host levers: see the module docstring. Judged only where the profile set a flag; a profile with none
+    logs none of the lever's lines. Where the eight-seat steady mix did not run, the run-length rules are not judged (the lines still are)."""
+    env = env or {}
+    found = round_host_facts(container_text)
+    set_flags = {name: env.get(name, '0') for name in round_host.FLAGS if env.get(name, '0') != '0'}
+    steps, audits = found['steps'], found['audits']
+    problems = []
+    marked = (container_text.count(round_host.ENGAGED_MARKER) or container_text.count(round_host.REFUSED_MARKER) or steps or audits
+              or container_text.count(round_host.DECLINED_MARKER))
+    if not set_flags:
+        if marked:
+            problems.append('no QWEN_FAST_TP4_ROUND_HOST_* flag is set and the log holds round-host lines: the lever ran on a profile without it')
+        return problems, found
+    for name, value in set_flags.items():
+        if value != '1':
+            problems.append('%s=%s: the flag is 0 or 1' % (name, value))
+    if container_text.count(round_host.REFUSED_MARKER):
+        problems.append('a round-host refusal line (%s) was logged' % round_host.REFUSED_MARKER)
+    if container_text.count(round_host.DECLINED_MARKER):
+        problems.append('a round-host fast path declined to the reference (%s): %s' % (
+            round_host.DECLINED_MARKER, next(line.strip()[:160] for line in container_text.splitlines() if round_host.DECLINED_MARKER in line)))
+    if len(found['engaged']) != 1:
+        problems.append('%d "%s" lines were logged for one attach (one needed)' % (len(found['engaged']), round_host.ENGAGED_MARKER))
+    else:
+        engaged = dict(item.split('=') for item in found['engaged'][0].split())
+        for name in round_host.FLAGS:
+            wanted = '1' if set_flags.get(name) == '1' else '0'
+            if engaged.get(name.rsplit('_', 1)[-1].lower()) != wanted:
+                problems.append('the engaged line says %s=%s and the profile has %s=%s' % (
+                    name.rsplit('_', 1)[-1].lower(), engaged.get(name.rsplit('_', 1)[-1].lower()), name, wanted))
+    ledger_on = '1' in (set_flags.get(round_host.LOG_FLAG), set_flags.get(round_host.LEAN_FLAG))
+    if ledger_on and not steps:
+        problems.append('%s or %s is set and no %s line was logged: the ledger never ran' % (
+            round_host.LOG_FLAG, round_host.LEAN_FLAG, round_host.LEDGER_MARKER))
+    if not ledger_on and steps:
+        problems.append('neither %s nor %s is set and the ledger wrote lines' % (round_host.LOG_FLAG, round_host.LEAN_FLAG))
+    for step in steps:
+        absent = [name for name in round_host.Ledger.FIELDS if name not in step['fields']]
+        if absent:
+            problems.append('a %s line lacks the fields %s' % (round_host.LEDGER_MARKER, ','.join(absent)))
+            break
+    judged = [step for step in steps if step['live'] is not None and step['fields'].get('step') is not None]
+    facts = dict(round_host_steps=len(steps), round_host_judged=len(judged))
+    found.update(facts)
+    # The run-length rules need a long enough run of eight-live steps that drafted (a ledger step with a draft has an `ed` field): both quads
+    # serve exactly those, so the quad readback (READ) and the batched selection (SELECT) run on every one of them; a ramp-up or a tail step
+    # with fewer live users drafts through the pairs and says nothing about the lever.
+    drafted = [step for step in judged if step['fields'].get('ed') is not None and step['live'] == 8]
+    if steady_eight and len(drafted) >= ROUND_HOST_MIN_STEPS:
+        for flag, field, label in ((round_host.SELECT_FLAG, 'sel', 'selection'), (round_host.READ_FLAG, 'read', 'quad merge')):
+            if set_flags.get(flag) == '1':
+                taken = sum(1 for step in drafted if step[field] >= 1)
+                if taken < ROUND_HOST_FAST_SHARE * len(drafted):
+                    problems.append('%s is set and only %d of %d eight-live drafting steps took the fast %s (%d%% needed)' % (
+                        flag, taken, len(drafted), label, int(ROUND_HOST_FAST_SHARE * 100)))
+        if set_flags.get(round_host.READ_FLAG) == '1' and len(drafted) > ROUND_HOST_GUARD_AFTER:
+            if not any(step['guard'] for step in drafted):
+                problems.append('%s is set and the replicated-feature guard was never skipped over %d steps' % (round_host.READ_FLAG, len(drafted)))
+        if set_flags.get(round_host.KEYED_FLAG) == '1':
+            possible = sum(2 if step['live'] == 8 else 1 for step in judged if step['live'] in (4, 8))
+            taken = sum(step['keyed'] for step in judged if step['live'] in (4, 8))
+            facts['round_host_keyed_share'] = round(taken / possible, 3) if possible else None
+            if possible >= ROUND_HOST_MIN_STEPS and taken < ROUND_HOST_KEYED_SHARE * possible:
+                problems.append('%s is set and only %d of %d verifies took the keyed write (%d%% needed)' % (
+                    round_host.KEYED_FLAG, taken, possible, int(ROUND_HOST_KEYED_SHARE * 100)))
+    if set_flags.get(round_host.LEAN_FLAG) == '1':
+        for pattern in ROUND_HOST_LEAN_ABSENT:
+            match = pattern.search(container_text)
+            if match:
+                problems.append('%s is set and the log holds a line it drops: %s' % (round_host.LEAN_FLAG, match.group(0).strip()))
+    unequal = [kind for kind, equal in audits if not equal]
+    if unequal:
+        problems.append('%d round-host audit line(s) read equal=0 (%s): a fast path and its reference differ' % (len(unequal), ','.join(sorted(set(unequal)))))
+    if set_flags.get(round_host.AUDIT_FLAG) == '1':
+        for flag, kind in ROUND_HOST_AUDIT_KINDS.items():
+            if set_flags.get(flag) == '1' and not any(item == (kind, 1) for item in audits) and (steady_eight or kind != 'keyed'):
+                problems.append('%s and %s are set and no [ROUND-HOST-AUDIT] kind=%s equal=1 line was logged: nothing was compared' % (
+                    round_host.AUDIT_FLAG, flag, kind))
+    elif audits:
+        problems.append('%s is not set and the log holds [ROUND-HOST-AUDIT] lines' % round_host.AUDIT_FLAG)
+    return problems, found
+
+
 def tpub_problems(env, container_text):
     """The problems the profile's traced-carry settings leave: with the flag off no [TPUB line at all; on, at least one engaged line, no
     declined line, and (audited) at least one audit line, every one with mismatches=0 and the item count the width implies."""
@@ -1748,6 +1869,13 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         problems += hostgap
         if any(hostgap_found[key] for key in ('hostgap_engaged', 'hostgap_refused', 'hostgap_live4_diff', 'hostgap_full_audits')):
             facts['hostgap'] = hostgap_found
+        round_host_found, round_host_facts_found = round_host_problems(
+            env, container_text, STEADY_EIGHT_TEST in (smoke or {}) and 'error' not in smoke[STEADY_EIGHT_TEST])
+        problems += round_host_found
+        if round_host_facts_found.get('engaged') or round_host_facts_found.get('steps'):
+            facts['round_host'] = dict(steps=len(round_host_facts_found['steps']), audits=len(round_host_facts_found['audits']),
+                                       judged=round_host_facts_found.get('round_host_judged'),
+                                       keyed_share=round_host_facts_found.get('round_host_keyed_share'))
         levern, levern_facts_found = levern_problems(env, container_text, smoke)
         problems += levern
         if levern_facts_found:

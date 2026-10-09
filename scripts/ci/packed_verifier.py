@@ -198,6 +198,7 @@ import verifier_engine
 from verifier_inputs import host_inputs, validate_tokens
 from verifier_pack import GDN_LAYERS, build_pack, participant
 import gdn_seq_block
+import round_host
 import verify_prestage
 import capture_plug
 import tp_shapes
@@ -362,6 +363,21 @@ def packed_host_inputs(users, shape, rope_dim, theta, vocab_size):
         pages.append(table.repeat(shape.rows_per_user, 1))
     return (torch.cat(tokens), torch.cat(positions), torch.cat(cos, dim=1), torch.cat(sin, dim=1),
             torch.cat(pages))
+
+
+def packed_host_tokens(users, shape, vocab_size):
+    """packed_host_inputs' tokens alone (block_rows, 1), int32: the same refusals in the same order (the segment count, then each user's
+    validate_tokens), the same per-user tensors concatenated. tp4/round-host KEYED stages nothing else when the key stands."""
+    import torch
+
+    if len(users) != shape.users or any(user is None for user in users):
+        raise ValueError('One (tokens, start, pages) per segment required')
+    tokens = []
+    for user_tokens, start, table in users:
+        user_tokens = list(user_tokens)
+        validate_tokens(user_tokens, shape.rows_per_user, start, vocab_size, shape.capacity)
+        tokens.append(torch.tensor(user_tokens, dtype=torch.int32).reshape(len(user_tokens), 1))
+    return torch.cat(tokens)
 
 
 def stage_packed(operations, model, fixture, shape, users):
@@ -2185,7 +2201,7 @@ class PackedVerifierEngine:
             self.pending_segments.discard(segment)
             if not self.pending_segments:
                 self.phase = 'idle'
-                if os.environ.get('QWEN_FAST_PACKED_AUDIT') == '1':
+                if os.environ.get('QWEN_FAST_PACKED_AUDIT') == '1' and not round_host.lean_enabled():
                     # sync_ms is what the LAST segment's own call spent beyond its own
                     # commit_ms: bookkeeping plus (when pipelined) the trailing fence that
                     # drains the whole round's four enqueued traces; near zero when blocking,

@@ -24,7 +24,12 @@ def execute_packed_decode(bridges, scheduled, *, cancelled, packed_step):
     were matched to.
     """
     from serving_vllm_state import apply_committed_output, validate_runner_reservation
+    import round_host
     import verify_prestage
+
+    # tp4/round-host (QWEN_FAST_TP4_ROUND_HOST_LOG or _LEAN): the step's ledger opens here; the flags unset, every call on it returns at once.
+    ledger = round_host.ledger
+    ledger.begin()
 
     # tp4/hostgap: QWEN_FAST_TP4_HOSTGAP_LOG times the step entry's parts (stage 0: one [PACKED-ENTRY] line a step, written by the
     # packed step once it has its own checks' time); QWEN_FAST_TP4_ENTRY_DIET runs each distinct storage validator once (1d).
@@ -85,7 +90,10 @@ def execute_packed_decode(bridges, scheduled, *, cancelled, packed_step):
                 admit_ms=(stamps[1] - stamps[0]) * 1000, storage_ms=(stamps[2] - stamps[1]) * 1000,
                 update_states_ms=(stamps[3] - stamps[2]) * 1000, reservation_ms=reservation_ms,
                 refresh_ms=refresh_ms, refresh_writes=writes, started=stamps[0]))
+        ledger.mark('step')
+        ledger.set_live(len(ordered), sum(entry['ticket'].position for entry in ordered) / len(ordered))
         outputs = packed_step(ordered, cancelled=cancelled)
+        ledger.mark('stepped')
         if len(outputs) != len(ordered):
             raise ValueError('The packed step must commit one output per packed request')
         for entry, output in zip(ordered, outputs):

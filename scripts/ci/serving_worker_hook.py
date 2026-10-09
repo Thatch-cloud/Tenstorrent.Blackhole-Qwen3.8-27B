@@ -5,6 +5,7 @@ import os
 from types import MethodType
 
 from serving_fast_request import budget_cap_enabled
+import round_host
 
 
 PHASE_LOG = os.environ.get('QWEN_FAST_PHASE_LOG') == '1'
@@ -13,6 +14,9 @@ PHASE_LOG = os.environ.get('QWEN_FAST_PHASE_LOG') == '1'
 def phase(name, request_id, call):
     """Run `call` between a begin and an end line so a hang names its phase."""
     if not PHASE_LOG:
+        return call()
+    if round_host.lean_enabled() and name in round_host.LEAN_PHASES:
+        # tp4/round-host LEAN (QWEN_FAST_TP4_ROUND_HOST_LEAN): the phases nothing parses are not written; the ledger line carries their time.
         return call()
     import time
     from loguru import logger

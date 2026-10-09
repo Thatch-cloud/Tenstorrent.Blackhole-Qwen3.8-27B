@@ -920,7 +920,10 @@ class PackedProposalCoordinator:
         flushes at its end."""
         from dflash_packed_proposal import pair_slots
         from serving_worker_hook import phase, pipelined_device
+        import round_host
 
+        # tp4/round-host (ledger): where the draft's host time goes - the quads' launch, the window, the fence. Flags unset, no-ops.
+        ledger = round_host.ledger
         self.rounds += 1
         round_number = self.rounds
         entries = []
@@ -967,9 +970,11 @@ class PackedProposalCoordinator:
             return False
 
         try:
+            ledger.mark('quads0')
             if os.environ.get(QUAD_DRAFT_FLAG, '0') != '0' and quad_blocks_requested():
                 # One quad per block of four slots; the pairs of a block that did not form stay with `groups`.
                 block_quads, groups = self._prepare_quad_blocks(groups, by_slot, round_number, batched, prepared)
+                ledger.mark('quads1')
                 if block_quads:
                     fence = block_quads[0]['fence']
             elif os.environ.get(QUAD_DRAFT_FLAG, '0') != '0':
@@ -1105,9 +1110,13 @@ class PackedProposalCoordinator:
             if singles_module.selected(self.singles_audit_candidates):
                 singles_audit = singles_module.start(batched, by_slot, round_number, self._ensure_single_user)
         if fence is not None and while_waiting is not None:
+            ledger.mark('window0')
             run_while_waiting(while_waiting)
+            ledger.mark('window1')
         if fence is not None:
+            ledger.mark('fence0')
             fence[0].synchronize_device(fence[1])
+            ledger.mark('fence1')
             if while_waiting is not None:
                 note_fenced(while_waiting)
         if singles_audit is not None:
@@ -1462,7 +1471,11 @@ def select_round(batched, prepared, round_number, after_collect=None):
 
     audit = round_b1_audit_enabled()
     started = time.perf_counter()
+    import round_host
     import verify_prestage
+
+    ledger = round_host.ledger
+    ledger.mark('collect0', started)
 
     hostgap = verify_prestage.hostgap_log_enabled()
     cpu_started = verify_prestage.thread_ms() if hostgap else 0.0
@@ -1471,10 +1484,12 @@ def select_round(batched, prepared, round_number, after_collect=None):
     try:
         collected = [(labels, trace, trace.collect()) for labels, trace in batched]
         collected_at = select_started = time.perf_counter()
+        ledger.mark('collect1', collected_at)
         cpu_collected = verify_prestage.thread_ms() if hostgap else 0.0
         if after_collect is not None:
             after_collect()
             select_started = time.perf_counter()
+        ledger.mark('flush1', select_started)
         groups = []
         for labels, trace, result in collected:
             device = trace.device_a
@@ -1500,6 +1515,7 @@ def select_round(batched, prepared, round_number, after_collect=None):
     except BaseException:
         _discard_round(prepared)
         raise
+    ledger.mark('select1')
     note_round_b1('batched-select')
     if audit:
         from dflash_packed_proposal import note_round_b1_audit

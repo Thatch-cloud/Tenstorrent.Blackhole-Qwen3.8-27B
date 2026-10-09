@@ -105,6 +105,10 @@ COPY scripts/ci/padded_probe.py /experiment-scripts/ci/
 # off): packed_verifier imports verify_prestage at module level, serving_packed_step, serving_worker_hook
 # and serving_lifecycle reach it too, so it must reach the image beside them.
 COPY scripts/ci/verify_prestage.py /experiment-scripts/ci/
+# tp4/round-host (QWEN_FAST_TP4_ROUND_HOST_LOG, _SELECT, _READ, _KEYED, _LEAN, _AUDIT; every flag default off): the host work inside a verified round.
+# verify_prestage, packed_verifier, serving_packed_step, serving_packed_bridge, serving_worker_hook, early_draft, dflash_packed_proposal, the coordinator and quad_draft_tp
+# import it at module level or on first use, so it must reach the image beside them. Host only: no kernel, no trace, no allocation.
+COPY scripts/ci/round_host.py /experiment-scripts/ci/
 # Round-fence plan H1b (QWEN_FAST_FUSED_COMMIT, _INPLACE, _LIVE_BANKS, _AUDIT; every flag default off):
 # packed_verifier, serving_packed_step and dflash_proposal_trace import fused_commit when a flag is set,
 # so it must reach the image beside them. It drives the bundle's own slide kernel (the served driver's .cpp).

@@ -528,15 +528,24 @@ class QuadPass(_pinned.QuadPass):
 # The readback.
 # ---------------------------------------------------------------------------------------------
 
-def read_quad_outputs(device, outputs):
+def read_quad_outputs(device, outputs, reference=False):
     """read_device_outputs for the quad at this width: the reads (chunks x chips x values and indices, plus the replicated
     features), each half merged by the four-card merge_chunk_candidates(block_rows=32) exactly as its pair merges,
     stitched [half 0 | a dummy row | half 1] (the dummy is merged index 31 - block row 32, user 2's anchor - which no user
-    slice reads) and split with split_selection(block_width=64): four users' (features, candidates, scores)."""
+    slice reads) and split with split_selection(block_width=64): four users' (features, candidates, scores).
+
+    tp4/round-host READ (QWEN_FAST_TP4_ROUND_HOST_READ): the merge as one batch over the stacked chunks (round_host.merge_chunk_candidates:
+    the same bytes, or the reference's own call) and the replicated-feature guard on the first reads of the process and every 64th (chip 0's
+    copy is what the selection uses either way). `reference=True` (the audit's flag-off selection, select_quad_outputs) is always today's."""
     import torch
 
     from dflash_packed_proposal import report_rejected_outputs, split_selection
     from draft_shared_head_tp import merge_chunk_candidates
+    import round_host
+
+    fast = not reference and round_host.read_enabled()
+    if fast:
+        merge_chunk_candidates = round_host.merge_chunk_candidates
 
     operations = device.operations
     chips = tp_shapes.chip_count()
@@ -573,10 +582,12 @@ def read_quad_outputs(device, outputs):
         stamps.append(time.perf_counter())
     candidates = torch.cat([merged_halves[0][0], torch.zeros_like(merged_halves[0][0][:, :1]), merged_halves[1][0]], dim=1)
     unary = torch.cat([merged_halves[0][1], torch.zeros_like(merged_halves[0][1][:, :1]), merged_halves[1][1]], dim=1)
-    parts = [operations.to_torch(value) for value in operations.get_device_tensors(outputs.projected)]
+    shards = operations.get_device_tensors(outputs.projected)
+    guard = round_host.guard_full() if fast else True
+    parts = [operations.to_torch(value) for value in (shards if guard else shards[:1])]
     if stamps is not None:
         stamps.append(time.perf_counter())
-    if len(parts) != chips or any(not torch.equal(parts[0], other) for other in parts[1:]):
+    if len(shards) != chips or (guard and any(not torch.equal(parts[0], other) for other in parts[1:])):
         raise AssertionError('Replicated learned selector features differ')
     hidden = parts[0].reshape(1, ROWS, 256)
     selection = split_selection(hidden, candidates, unary, USERS, BLOCK, block_width=ROWS)
@@ -591,7 +602,7 @@ def select_quad_outputs(device, outputs, seeds, counts):
     """read_quad_outputs, then today's per-user selector (select_packed): the flag-off selection."""
     from dflash_packed_proposal import select_packed
 
-    return select_packed(read_quad_outputs(device, outputs), seeds, counts, device.predecessors, device.successors)
+    return select_packed(read_quad_outputs(device, outputs, reference=True), seeds, counts, device.predecessors, device.successors)
 
 
 # ---------------------------------------------------------------------------------------------

@@ -86,6 +86,8 @@ import os
 import sys
 import time
 
+import round_host
+
 PRESTAGE_FLAG = 'QWEN_FAST_PRESTAGE'
 PRESTAGE_AUDIT_FLAG = 'QWEN_FAST_PRESTAGE_AUDIT'
 ROUND_FENCES_FLAG = 'QWEN_FAST_ROUND_FENCES'
@@ -582,13 +584,28 @@ class Snapshot:
     """What one pre-stage wrote: every destination of the fixture's staging list, in order, and
     the raw host value written into each - None for the tokens, never pre-staged."""
 
-    __slots__ = ('epoch', 'destinations', 'values', 'buffers', 'ms', 'round', 'local', 'cpu_ms')
+    __slots__ = ('epoch', 'destinations', 'values', 'buffers', 'ms', 'round', 'local', 'cpu_ms', 'key')
 
-    def __init__(self, epoch_value, destinations, values, buffers, ms, round_number, local=0, cpu_ms=0.0):
+    def __init__(self, epoch_value, destinations, values, buffers, ms, round_number, local=0, cpu_ms=0.0, key=None):
         self.epoch, self.destinations, self.values = epoch_value, tuple(destinations), list(values)
         self.buffers, self.ms, self.round = buffers, ms, round_number
         # tp4/hostgap: the fixture's own epoch when the block epochs are engaged (always 0 otherwise, so `usable` is today's check).
         self.local, self.cpu_ms = local, cpu_ms
+        # tp4/round-host KEYED (round_host.KEYED_FLAG): what the values were computed from (KeyedInputs), None otherwise.
+        self.key = key
+
+
+class KeyedInputs:
+    """tp4/round-host KEYED: the inputs every staged value but the tokens is a pure function of, as the pre-stage computed them: per segment
+    the start and a COPY of the page table (engine.pages is rewritten in place by the entry's page refresh), the reader objects whose words and
+    tables are among the values, the index of the tokens destination, and whether the T2 K/V guard (a function of positions and tables alone)
+    would pass. Built only under the flag."""
+
+    __slots__ = ('starts', 'tables', 'readers', 'token_index', 'kv_ok')
+
+    def __init__(self, starts, tables, readers, token_index, kv_ok):
+        self.starts, self.tables, self.readers = tuple(starts), tuple(tables), tuple(readers)
+        self.token_index, self.kv_ok = token_index, kv_ok
 
 
 class BlockPrestage:
@@ -675,11 +692,12 @@ class BlockPrestage:
         indices = [index for index, value in enumerate(values) if value[0] is not tokens]
         self.inflight = write_packed(block.operations, block.model, values, readers, indices=indices, fence=False,
                                      poison=False)
+        key = self.keyed_inputs(users, values, readers) if round_host.keyed_enabled() else None
         ms = (time.perf_counter() - started) * 1000
         self.snapshot = Snapshot(epoch(), [value[0] for value in values],
                                  [None if value[0] is tokens else value[1:] for value in values],
                                  len(indices), ms, round_number, local=local_epoch(block.fixture),
-                                 cpu_ms=thread_ms() - cpu_started)
+                                 cpu_ms=thread_ms() - cpu_started, key=key)
         self.dropped = None
         self.counts['prestaged'] += 1
         log_line('%s round=%d buffers=%d ms=%.2f live=%s' % (WINDOW_MARKER, round_number, len(indices), ms,
@@ -697,6 +715,91 @@ class BlockPrestage:
             return None, 'epoch:%s' % last_local_bump(self.block.fixture)
         return snapshot, None
 
+    def keyed_inputs(self, users, values, readers):
+        """tp4/round-host KEYED, at the pre-stage: what its values were computed from (KeyedInputs), or None when this block's values hold no
+        tokens destination to key on. `users` are the pre-stage's (placeholder tokens, start, table) per segment; the tables are copied."""
+        block = self.block
+        fixture = block.fixture
+        token_index = next((index for index, value in enumerate(values) if value[0] is fixture.tokens), None)
+        if token_index is None:
+            return None
+        kv_ok = True
+        if getattr(fixture, 'kv_chains', False):
+            # The T2 K/V guard (packed_values keeps it for every verify-time call) is a function of the positions and the tables alone: its
+            # verdict for this key is taken now, without raising (a conflict declines the key; the diff then raises exactly as today).
+            import verify_trace_t2
+
+            positions = next(value[1] for value in values if value[0] is fixture.positions)
+            pages = next(value[1] for value in values if value[0] is fixture.pages)
+            guarded = verify_trace_t2.block_users(positions, pages, block.shape.rows_per_user, block.shape.users)
+            kv_ok = verify_trace_t2.kv_conflict(guarded) is None
+        return KeyedInputs([user[1] for user in users], [user[2].clone() for user in users], readers, token_index, kv_ok)
+
+    def key_matches(self, snapshot, users):
+        """tp4/round-host KEYED, at the verify: whether every staged value but the tokens is still the snapshot's - the key (start and page
+        table per segment, the readers) is what the values are a pure function of, and it is compared as VALUES against the verify-time
+        tickets and tables. Host only; False declines to today's value diff."""
+        key = snapshot.key
+        block = self.block
+        if key is None or not key.kv_ok or len(users) != len(key.starts):
+            return False
+        fixture = block.fixture
+        if snapshot.destinations[key.token_index] is not fixture.tokens:
+            return False
+        reader = getattr(fixture, 'replay_reader', None)
+        readers = () if reader is None else tuple(reader.readers)
+        if len(readers) != len(key.readers) or any(own is not kept for own, kept in zip(readers, key.readers)):
+            return False
+        if tuple(user[1] for user in users) != key.starts:
+            return False
+        if any(not same_value(kept, user[2]) for kept, user in zip(key.tables, users)):
+            return False
+        import verify_trace_t2
+
+        # The T2 audit's diagnostic lines come from packed_values: an audited verify takes the diff that writes them.
+        return not verify_trace_t2.audit_enabled()
+
+    def keyed_write(self, snapshot, users):
+        """tp4/round-host KEYED: write the tokens buffer alone (the one value the key does not hold), exactly the write the value diff would
+        have made when only the tokens differ. The tokens are validated and built by packed_verifier.packed_host_tokens (packed_host_inputs'
+        own calls), each reader validates its start before any copy as packed_values has them do. Returns (written, readers)."""
+        from packed_verifier import packed_host_tokens, write_packed
+
+        block = self.block
+        operations = block.operations
+        tokens = packed_host_tokens(users, block.shape, block.model.args.vocab_size)
+        readers = snapshot.key.readers
+        for own, user in zip(readers, users, strict=True):
+            own.validate(user[1])
+        value = (block.fixture.tokens, tokens, operations.uint32, operations.ROW_MAJOR_LAYOUT)
+        try:
+            self.inflight = write_packed(operations, block.model, [value], readers, indices=[0], fence=False)
+        except BaseException:
+            bump('verify-failed')
+            raise
+        return 1, readers
+
+    def audit_keyed(self, snapshot, values, changed, users):
+        """tp4/round-host AUDIT, on a round whose key stood: the claim KEYED rests on, checked against the diff that ran (and whose write
+        stands) - the tokens destination is the only one that differs from the snapshot, and the tokens KEYED would have written are the
+        diff's own. Logs [ROUND-HOST-AUDIT] kind=keyed; the smoke check fails the arm on equal=0."""
+        from packed_verifier import packed_host_tokens
+
+        block = self.block
+        key = snapshot.key
+        equal = changed == [key.token_index]
+        if equal:
+            import torch
+
+            keyed = packed_host_tokens(users, block.shape, block.model.args.vocab_size)
+            kept = values[key.token_index][1]
+            equal = keyed.dtype == kept.dtype and tuple(keyed.shape) == tuple(kept.shape) and bool(torch.equal(keyed, kept))
+        round_host.count('audit_equal' if equal else 'audit_unequal')
+        if equal:
+            round_host.note_path('keyed')       # the audited arm's ledger counts the rounds whose key stood and was confirmed
+        round_host.log_line('%s kind=keyed equal=%d checked=%d changed=%s' % (
+            round_host.AUDIT_MARKER, int(equal), len(values), ','.join(str(index) for index in changed[:8])))
+
     def stage(self, entries, segments, snapshot, reason):
         """The verify-time write: the diff against `snapshot` when there is one, else today's
         full stage_packed. Returns the buffers written; logs MARKER; audits."""
@@ -713,12 +816,31 @@ class BlockPrestage:
         started = time.perf_counter()
         cpu_started = thread_ms()
         values = None
-        if snapshot is not None:
+        # tp4/round-host KEYED: the key still holds, so the tokens are the only value that moved (audited, the diff below runs and the
+        # claim is checked against it instead).
+        would_key = snapshot is not None and round_host.keyed_enabled() and self.key_matches(snapshot, users)
+        keyed = would_key and not round_host.audit_enabled()
+        if keyed:
+            diffed = time.perf_counter()
+            written, readers = self.keyed_write(snapshot, users)
+            for own, user in zip(readers, users, strict=True):
+                own.start = user[1]
+            bump_fixture(block.fixture, 'verify')
+            path, reason = 'diff', '-'
+            self.counts['diff'] += 1
+            self.counts['keyed'] = self.counts.get('keyed', 0) + 1
+            round_host.count('keyed')
+            round_host.note_path('keyed')
+        elif snapshot is not None:
+            if round_host.keyed_enabled() and snapshot.key is not None and not would_key:
+                round_host.count('keyed_declined')
             values, readers = packed_values(block.operations, block.model, block.fixture, block.shape, users)
             if len(values) != len(snapshot.destinations) or any(
                     value[0] is not destination for value, destination in zip(values, snapshot.destinations)):
                 snapshot, reason = None, 'destinations'
-        if snapshot is None:
+        if keyed:
+            pass
+        elif snapshot is None:
             diffed = started
             written = block.stage_packed_inputs(entries)
             path = 'full'
@@ -726,6 +848,8 @@ class BlockPrestage:
         else:
             changed = [index for index, (value, kept) in enumerate(zip(values, snapshot.values))
                        if kept is None or kept[1:] != value[2:] or not same_value(kept[0], value[1])]
+            if would_key:
+                self.audit_keyed(snapshot, values, changed, users)
             diffed = time.perf_counter()
             try:
                 self.inflight = write_packed(block.operations, block.model, values, readers, indices=changed,

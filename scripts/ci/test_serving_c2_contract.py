@@ -16,7 +16,9 @@ class _ParkedTwins(object):
     """The generated engine-reuse gate twins by name (this file ships in the image, where make_parked_profiles does not: test_parked_tp4_profiles holds the list)."""
 
     def __contains__(self, name):
-        return '-ship-prefix-levern-parked' in name or name.endswith('-ship-prefix-levern-audit-r2')
+        # (and the round-host gate twins of the Lever N traffic profile: test_tp4_round_host holds the list)
+        return ('-ship-prefix-levern-parked' in name or name.endswith('-ship-prefix-levern-audit-r2')
+                or '-ship-prefix-levern-traffic-roundhost' in name)
 
 
 PARKED_TWINS = _ParkedTwins()
