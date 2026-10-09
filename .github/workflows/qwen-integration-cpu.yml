@@ -276,6 +276,7 @@ jobs:
           python -B -m unittest test_mlp_block_stream_pipeline test_mlp_block_stream_pipeline_gate test_mlp_weight_pipeline test_mlp_block_stream_pipeline_hardware_stage
           python -B -m unittest discover -s scripts/ci -p 'test_gdn_direct_window*.py'
           python -B -m unittest discover -s scripts/ci -p 'test_compact_score*.py'
+          python -B -m unittest test_octo test_octo_block test_octo_judge test_octo_profiles test_tp4_octo_jobs
           bash -n scripts/ci/run-simulator.sh
           bash -n scripts/ci/simulator-suite.sh
           bash -n scripts/ci/mlp-clock-hardware-suite.sh
@@ -335,26 +336,3 @@ jobs:
           python -B -m unittest test_parked_tp4_wiring test_parked_tp4_admission test_parked_tp4_profiles test_parked_tp4_drafts
           python -B -m unittest test_parked_tp4_judge test_levern_admission_cost test_tp4_engine_reuse_jobs
           python -B -m unittest test_parked_tp4_smoke
-  octo-t8:
-    # tp4/octo-t8: the eight-seat adaptive round shape and the lone-user padded round (docs/tp4-octo.md), both default off and gate only. Its own job: test_octo_block builds the REAL
-    # packed block at 8 users x 8 rows on the fake device, and test_octo_profiles reads the whole profiles file.
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      OMP_NUM_THREADS: '2'
-      MKL_NUM_THREADS: '2'
-      PYTHONPATH: scripts/ci
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install CPU test dependencies
-        run: |
-          python -m pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install numpy==2.4.6 PyYAML==6.0.2
-      - name: Octo-T8 at TP4 (flags off by default, refused until the device pieces exist)
-        run: |
-          python -B -m unittest test_octo test_octo_block test_octo_judge test_octo_profiles test_tp4_octo_jobs
