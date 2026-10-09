@@ -328,6 +328,76 @@ class SmokeCheckTests(unittest.TestCase):
             self.assertIn('OCTO_VERDICT NO-GO', out.getvalue())
 
 
+def smoke_log(users_by_test):
+    results = {}
+    for test, users in users_by_test.items():
+        results[test] = dict(users=[dict(content_sha256='c%d' % index if hash_ is None else hash_, reasoning_sha256='r%d' % index, tokens=800, finish='length',
+                                         decode_tok_s=rate) for index, (hash_, rate) in enumerate(users)])
+    return 'noise\nSMOKE_JSON ' + json.dumps(results) + '\n'
+
+
+class CompareTests(unittest.TestCase):
+    """octo_compare: an octo arm against its flag-off control, answer for answer."""
+
+    def logs(self, control_rate=25.0, arm_rate=33.0, arm_hash=None):
+        control = smoke_log({'concurrent8_code_equal': [(None, control_rate)] * 8, 'concurrent8_code': [(None, control_rate)] * 8})
+        users = [(None, arm_rate)] * 8
+        if arm_hash is not None:
+            users[3] = (arm_hash, arm_rate)
+        return control, smoke_log({'concurrent8_code_equal': users, 'concurrent8_code': [(None, arm_rate)] * 8})
+
+    def test_identical_answers_pass_and_the_rates_are_reported_never_gated(self):
+        import octo_compare
+
+        control, arm = self.logs()
+        problems, compared, lines = octo_compare.compare(control, arm)
+        self.assertEqual(problems, [])
+        self.assertEqual(compared, 16)
+        rate = [line for line in lines if line.startswith('OCTO_COMPARE rate concurrent8_code_equal')][0]
+        self.assertEqual(rate, 'OCTO_COMPARE rate concurrent8_code_equal control=25.0 octo=33.0 ratio=1.32')
+        slower = octo_compare.compare(*self.logs(arm_rate=20.0))
+        self.assertEqual(slower[0], [], 'a slower arm is a number, not a mismatch')
+
+    def test_one_differing_hash_is_a_mismatch_naming_the_user(self):
+        import octo_compare
+
+        control, arm = self.logs(arm_hash='deadbeef')
+        problems, compared, lines = octo_compare.compare(control, arm)
+        self.assertEqual(len(problems), 1)
+        self.assertIn('concurrent8_code_equal user 3: content hash differs (control \'c3\', interleaved \'deadbeef\')', problems[0])
+
+    def test_the_arms_container_log_is_judged_too(self):
+        import octo_compare
+
+        control, arm = self.logs()
+        boot = Boot(programs=lambda: 5000)
+        boot.alternate(20)
+        self.assertEqual(octo_compare.compare(control, arm, boot.text(), env_of())[0], [])
+        problems, compared, lines = octo_compare.compare(control, arm, 'a log with no octo line at all\n', env_of())
+        self.assertTrue(any(problem.startswith('octo arm: ') and 'octo block' in problem for problem in problems), problems)
+
+    def test_the_command_line_exits_zero_one_and_two(self):
+        import octo_compare
+
+        control, arm = self.logs()
+        _, bad = self.logs(arm_hash='deadbeef')
+        with tempfile.TemporaryDirectory() as folder:
+            paths = {}
+            for name, text in (('control', control), ('arm', arm), ('bad', bad), ('empty', 'no smoke json here\n')):
+                paths[name] = os.path.join(folder, name + '.log')
+                with open(paths[name], 'w', encoding='utf-8') as handle:
+                    handle.write(text)
+            with patch('sys.stdout', new_callable=io.StringIO) as out:
+                self.assertEqual(octo_compare.main(['--control', paths['control'], '--octo', paths['arm']]), 0)
+            self.assertIn('OCTO_COMPARE {"ok": true, "compared": 16, "problems": 0}', out.getvalue())
+            with patch('sys.stdout', new_callable=io.StringIO) as out:
+                self.assertEqual(octo_compare.main(['--control', paths['control'], '--octo', paths['bad']]), 1)
+            self.assertIn('OCTO_COMPARE MISMATCH', out.getvalue())
+            with patch('sys.stdout', new_callable=io.StringIO), patch('sys.stderr', new_callable=io.StringIO):
+                self.assertEqual(octo_compare.main(['--control', paths['control'], '--octo', paths['empty']]), 1, 'an arm with no smoke json is a mismatch')
+                self.assertEqual(octo_compare.main(['--control', paths['control'], '--octo', os.path.join(folder, 'missing.log')]), 2)
+
+
 class MarkersTests(unittest.TestCase):
     def test_the_producers_lines_parse_and_a_foreign_line_does_not(self):
         boot = Boot(programs=lambda: 5000)

@@ -293,6 +293,21 @@ class EightRowDevicePiecesTests(OctoFixture):
         self.assertEqual((gdn_user_batch.MAX_USERS, gdn_user_batch_tp.MAX_USERS), (4, 4))
         with self.assertRaisesRegex(ValueError, 'One to 4 packed users per batched GDN launch'):
             gdn_user_batch.core_shares(11, 10, 8)
+        with self.assertRaisesRegex(ValueError, 'One to 4 packed users per batched GDN launch'):
+            gdn_user_batch_tp.core_shares(11, 10, 8, workers=12)
+
+    def test_eight_users_of_twelve_heads_would_fit_the_grid_in_one_wave_if_the_limit_were_eight(self):
+        # the cores are not the obstacle at four cards (12 value heads a chip): 8 x 12 = 96 of the 110 cores of the 11 x 10 grid, disjoint shares. The limit is the pinned
+        # module's, and qualifying the launch at eight users is a card question; this is only the arithmetic the design rests on.
+        import gdn_user_batch_tp
+
+        with patch.object(gdn_user_batch_tp, 'MAX_USERS', 8):
+            shares = gdn_user_batch_tp.core_shares(11, 10, 8, workers=12)
+        self.assertEqual(len(shares), 8)
+        cores = [point for share in shares for point in share]
+        self.assertEqual((len(cores), len(set(cores))), (96, 96), 'disjoint')
+        self.assertLessEqual(len(cores), 11 * 10)
+        self.assertTrue(all(len(share) == 12 for share in shares))
 
     def test_the_second_and_later_blocks_skip_the_publication_warm_in_the_two_phase_build(self):
         import serving_runtime
