@@ -493,8 +493,8 @@ class ClosureTests(unittest.TestCase):
         self.assertTrue(report['ok'], 'test_tp4_attach_profile fails, so its import set means nothing')
         known = module_names()
         loaded = {name for name in report['modules'] if name in known and not name.startswith('test_')}
-        # (make_parked_profiles is the generator of the engine-reuse profile twins: the profile tests that the attach test imports name them; it serves nothing)
-        loaded -= {'tp_test_support', 'make_parked_profiles'}
+        # (make_parked_profiles and make_octo_profiles are the generators of the engine-reuse and octo-T8 profile twins: the profile tests that the attach test imports name them; they serve nothing)
+        loaded -= {'tp_test_support', 'make_parked_profiles', 'make_octo_profiles'}
         extra = loaded - self.seen
         # What the attach loads outside the closure is a NOT_SERVED module it enters inert (each named in ATTACH_ENTERS_INERT,
         # exactly) and what those import at module level - not everything any NOT_SERVED module could ever reach.

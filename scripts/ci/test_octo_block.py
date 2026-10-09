@@ -317,5 +317,51 @@ class EightRowDevicePiecesTests(OctoFixture):
         self.assertIn('block.warm_publication = False      # block A\'s warm covered the same plan on the shared program cache', source)
 
 
+class FusedThirdBlockTests(unittest.TestCase):
+    """The fused commit (fused_commit_tp.FusedCommit) built over a fake four-card block of eight T8 users, on test_fused_commit_tp4's fixture: the design's 8 projection traces and
+    64 slide traces. Host path only - the T_proj / slide programs are the fixture's stand-ins; what runs for real is the twin's own geometry code."""
+
+    def setUp(self):
+        from types import SimpleNamespace
+
+        import test_fused_commit_tp4 as fused_tests
+
+        class Fixture(fused_tests.TwinFixture):
+            def runTest(self):                      # (a fixture, not a test)
+                pass
+
+        self.fixture = Fixture()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        fixture = self.fixture
+        fixture.slots = [fused_tests.pooled_slot(fixture.ops, index) for index in range(8)]
+        fixture.block = SimpleNamespace(rows_per_user=8, users=8, shape=octo_shape(fused_tests.PAGE_WIDTH), segment_slots=fixture.slots, taps=fixture.taps, rounds=3,
+                                        segment_of=lambda engine: engine.segment)
+
+    def test_eight_projection_traces_and_sixty_four_slide_traces_each_warmed_first(self):
+        fused = self.fixture.build()
+        fused.capture(self.fixture.capture)
+        self.assertEqual(fused.trace_count(), 8 + 64)
+        for storage in fused.segments:
+            self.assertEqual(sorted(storage.slides), list(range(1, 9)), 'one slide per accepted prefix 1..8')
+        self.assertEqual(len(fused.segments), 8)
+        captures = [entry for entry in self.fixture.ops.log if entry[0] == 'capture']
+        self.assertEqual(len(captures), 72)
+        self.assertEqual(sum(1 for entry in self.fixture.ops.log if entry[0] == 'generic_op'), 8 * 8 * 2)
+
+    def test_each_segments_feature_projection_reads_its_own_eight_rows(self):
+        fused = self.fixture.build()
+        fused.capture(self.fixture.capture)
+        offsets = [call[3:] for call in self.fixture.calls if call[0] == 'project_features']
+        self.assertEqual(offsets[::2], [(8, 8 * segment) for segment in range(8)])
+
+    def test_the_engaged_line_is_the_one_the_smoke_rule_expects_of_a_third_block(self):
+        fused = self.fixture.build()
+        fused.capture(self.fixture.capture)
+        line = fused.engaged_line()
+        self.assertTrue(line.startswith('[PINDIAG] fused commit engaged users=8 rows=8 inplace=1 live_banks=0 audit=0 kernel='), line)
+        self.assertRegex(line, r' traces=72 layout=1x80 tp=4 workers=8 ')
+
+
 if __name__ == '__main__':
     unittest.main()

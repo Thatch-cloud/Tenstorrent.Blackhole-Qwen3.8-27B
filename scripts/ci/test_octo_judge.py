@@ -302,6 +302,21 @@ class SmokeCheckTests(unittest.TestCase):
                 complaint = [problem for problem in problems if 'not once per M3 block' in problem]
                 self.assertEqual(not complaint, clean, problems)
 
+    def test_the_fused_commit_rule_counts_the_octo_blocks_engaged_line_and_its_72_traces(self):
+        line = ('[PINDIAG] fused commit engaged users=%d rows=%d inplace=1 live_banks=0 audit=0 kernel=scalar traces=%d layout=1x80 tp=4 workers=8 '
+                'tproj_ms=0.01 slide_ms=0.002')
+        both = '\n'.join([line % (4, 16, 68), line % (4, 16, 68)])
+        env = dict(env_of(), QWEN_FAST_FUSED_COMMIT='1', QWEN_FAST_FUSED_COMMIT_INPLACE='1', QWEN_FAST_M3_BLOCKS='2')
+        third = both + '\n' + line % (8, 8, 72)
+        self.assertEqual(c2_smoke_check.fused_problems(env, third, False), [])
+        # without the octo flag a third engaged line is the old complaint, and a wrong octo trace count is named
+        plain = {key: value for key, value in env.items() if key != octo.OCTO_FLAG}
+        self.assertTrue(any('appears 3 times, not once per M3 block (2 blocks)' in problem for problem in c2_smoke_check.fused_problems(plain, third, False)))
+        self.assertTrue(any('appears 2 times, not once per packed block (3 blocks)' in problem for problem in c2_smoke_check.fused_problems(env, both, False)))
+        wrong = both + '\n' + line % (8, 8, 68)
+        self.assertTrue(any('captured 68 traces, not 72 (8 users)' in problem for problem in c2_smoke_check.fused_problems(env, wrong, False)))
+        self.assertEqual(c2_smoke_check.fused_problems({key: value for key, value in plain.items()}, both, False), [], 'the two-block profile is judged as before')
+
     def test_the_command_line_prints_the_facts_the_problems_and_the_verdict(self):
         boot = Boot(programs=lambda: 5000)
         boot.alternate(20)

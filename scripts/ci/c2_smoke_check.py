@@ -955,14 +955,15 @@ def fused_problems(env, container_text, steady, facts=None):
     facts = report if facts is None else facts
     engaged_lines = container_text.count(gate.FUSED_ENGAGED_MARKER)
     # Every 64-row M3 block builds its own fused commit and logs its own engaged line (packed_verifier, once per block): one line a block.
-    blocks = m3_blocks(env)
+    # (and the octo-T8 block, a third packed block with its own fused commit: users x (1 + rows) traces in place, 8 x 9 = 72)
+    blocks = m3_blocks(env) + octo_blocks(env)
     if engaged_lines != blocks:
         problems.append('the fused commit engaged line (%s) appears %d times, not %s' % (
-            gate.FUSED_ENGAGED_MARKER, engaged_lines, 'once' if blocks == 1 else 'once per M3 block (%d blocks)' % blocks))
+            gate.FUSED_ENGAGED_MARKER, engaged_lines, 'once' if blocks == 1 else 'once per %s block (%d blocks)' % ('packed' if octo_blocks(env) else 'M3', blocks)))
     engaged = facts.get('engaged')
     inplace = env.get(FUSED_INPLACE_FLAG) == '1'
     for later in list(gate.FUSED_ENGAGED_LINE.finditer(container_text))[1:]:
-        wanted = int(later.group(1)) * (1 + FUSED_PREFIXES) if inplace else int(later.group(1))
+        wanted = int(later.group(1)) * (1 + int(later.group(2))) if inplace else int(later.group(1))     # (one slide per accepted prefix 1..rows: 16 at M3, 8 at octo)
         if int(later.group(7)) != wanted:
             problems.append('a further fused-commit block captured %d traces, not %d (%s users)' % (int(later.group(7)), wanted, later.group(1)))
     if engaged is not None:
@@ -988,7 +989,9 @@ def fused_problems(env, container_text, steady, facts=None):
             rounds = {}
             for match in gate.FUSED_LINE.finditer(container_text):
                 rounds.setdefault(match.group(1), []).append(match.group(4))
-            both_blocks = sum(1 for paths in rounds.values() if len(paths) == 4 * blocks and all(path == 'fused' for path in paths))
+            both_blocks = sum(1 for paths in rounds.values()
+                              if (len(paths) == 4 * m3_blocks(env) or (octo_blocks(env) and len(paths) % 4 == 0 and len(paths) >= 4 * m3_blocks(env)))
+                              and all(path == 'fused' for path in paths))
         if not (facts.get('four_fused_rounds') or both_blocks):
             problems.append('no round had all four users on the fused path (%d fused publications, %d today; reasons %s)' % (
                 facts.get('fused', 0), facts.get('today', 0), facts.get('today_reasons')))

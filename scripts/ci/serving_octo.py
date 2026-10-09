@@ -240,7 +240,8 @@ def octo_admission(m3, environ=None, *, log=None):
         raise ValueError('%s=%s is refused: %s' % (OCTO_FLAG, mode, '; '.join(problems)))
     unqualified = ['octo rounds == M3 rounds == the per-request engines\' text (strict greedy exactness, every concurrent8 and drain user)',
                    'the 64-row block at 8 users x 8 rows: matmul rows identical to the 4 x 16 block\'s',
-                   'a shape switch compiles nothing after warmup (publication warm at 8-row offsets)']
+                   'a shape switch compiles nothing after warmup (publication warm at 8-row offsets)',
+                   'the extent evidence record for an 8-row bundle (packed_any_evidence_tp4): a gate arm waves it through as UNQUALIFIED, a traffic profile needs it']
     for index, piece in enumerate(unqualified, 1):
         log('{} ({}/{}): {}', UNQUALIFIED_MARKER, index, len(unqualified), piece)
     log('{} mode={} rows={} users={} min_live={} (gate only)', ADMITTED_MARKER, mode, ROWS, USERS, minimum)

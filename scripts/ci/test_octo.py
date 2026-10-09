@@ -660,7 +660,7 @@ class HookTests(unittest.TestCase):
 
         self.helper = PerBlockDraftTests()
         self.helper.setUp()
-        self.addCleanup(self.helper.tearDown)
+        self.addCleanup(self.helper.doCleanups)       # (PerBlockDraftTests registers its sys.modules patch as a cleanup, not in tearDown)
 
     def hook(self, groups, octo_block=object(), asked=None):
         import test_serving_worker_hook as hooks

@@ -95,6 +95,12 @@ on the parent): free DRAM at 8 live at least 3 GB per chip, the floor at least 1
    which 32 no M3 warm ran (segment offsets 8, 24, 40, 56 x prefixes 1..8): its warm must run at attach or the first octo round compiles them (the smoke judge refuses a program compiled on a shape switch).
 5. **fused-third-block.** The fused commit of a third block (8 projection and 64 slide traces) and the pre-stage state of a third fixture: the host wiring is built, the device behaviour is unqualified.
 
+### The attach evidence
+
+The extent path is admitted by `packed_any_admission` against a pinned four-card evidence record (CB1, CB2a, CB2b at G8B2). The octo block is a new bundle geometry (G8B1) that no record covers. A **gate** arm
+needs no new record: the profiles carry the gate marker (`QWEN_C2_GATE_PROFILE=1`), which turns a missing record into a logged UNQUALIFIED line (and the octo admission logs its own, `[OCTO] UNQUALIFIED`).
+A **traffic** profile would need a new record for the 8-row bundle, taken on a card, before anything else.
+
 ## 6. The lone-user padded round (`QWEN_FAST_SOLO_PACKED=1`)
 
 The idea: a lone live user (and two or three in a block) take the padded 64-row T16 block instead of the 1/2/4-row engines. Two or three live users are the padded rounds the image already serves
