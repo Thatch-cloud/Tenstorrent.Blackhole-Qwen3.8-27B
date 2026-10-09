@@ -28,6 +28,7 @@ KERNEL = 'attention_block_fold_tp.cpp'
 TILE_COLUMNS = 8                # 256 / 32 tile columns per token
 TASK_WORDS = 6                  # source address, destination address, rows, source base, destination base, task
 GROUP_ROWS = 8                  # the extent replay's qualified group width
+BUNDLE_BATCHES = (1, 2)         # groups per bundle: the M3 block's two, the octo block's one
 
 
 def head_rows():
@@ -153,8 +154,10 @@ def problem(query, chunks, memory_config, ttnn):
         return 'query is not interleaved DRAM or L1'
     if memory_config not in interleaved:
         return 'output memory config is not interleaved DRAM or L1'
-    if any(chunk.rows != GROUP_ROWS or chunk.batches != 2 for chunk in chunks):
-        return 'bundles are not two eight-row groups'
+    # Two eight-row groups per bundle (the M3 block's G8B2) or ONE (the octo block's G8B1): the planners and the kernel's task list are indexed by the
+    # group's batch slot, so a bundle of one is the batch-0 case of the same index map.
+    if any(chunk.rows != GROUP_ROWS or chunk.batches not in BUNDLE_BATCHES for chunk in chunks):
+        return 'bundles are not one or two eight-row groups'
     return None
 
 

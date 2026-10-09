@@ -363,7 +363,7 @@ def extent_replay_requested(environ=None):
     return value == '1'
 
 
-def complete_blocks_two_phase(blocks, model=None, log=None, before_captures=None):
+def complete_blocks_two_phase(blocks, model=None, log=None, before_captures=None, warm_publication=()):
     """QWEN_FAST_M3_BLOCKS=2 (A1c): finish the construction of blocks built with defer_capture=True. Each block has
     already allocated its persistent state (the initial snapshot, checkpoints, taps) and the first phase here runs
     every block's warm forward and builds every fixture (extent words, masks, retained storage); only then does any
@@ -376,7 +376,12 @@ def complete_blocks_two_phase(blocks, model=None, log=None, before_captures=None
     after block A's capture (the probe window reads it).
 
     `before_captures` (QWEN_FAST_M3_REQUEST_WARM on at two blocks; request_width_warm): called once, after every block's warm_and_fixture and
-    before the first capture, inside the same guard - a failure closes both blocks without the fence and propagates."""
+    before the first capture, inside the same guard - a failure closes both blocks without the fence and propagates.
+
+    `warm_publication` (octo-T8): the blocks that keep their OWN publication warm although they are not the first. Block A's warm covers the M3 plan
+    on the shared program cache, so every later block skips it - except a block whose plan has shapes no earlier warm ran: the octo block's packed plan adds
+    32 (segment offsets 8, 24, 40 and 56 x prefixes 1..8, publication_warm.plan), which must compile at attach and not in the first round after a shape switch.
+    Its warm runs in finish_construction, after the LAST block's capture, like the first block's."""
     log = pindiag if log is None else log
     try:
         for block in blocks:
@@ -388,7 +393,7 @@ def complete_blocks_two_phase(blocks, model=None, log=None, before_captures=None
             block.capture_traces()
             log(CAPTURE_PROGRAMS_MARKER, index, before, program_count(model) if model is not None else None)
         for index, block in enumerate(blocks):
-            if index:
+            if index and not any(block is keeper for keeper in warm_publication):
                 block.warm_publication = False      # block A's warm covered the same plan on the shared program cache
             block.finish_construction()
     except BaseException:
@@ -473,9 +478,8 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
 
         solo_packed = serving_octo.solo_packed_admission(m3_shape(policy), log=pindiag)
         padded_min_users = solo_packed['min_users']
-    if octo_record is not None:
-        # Unreachable while serving_octo.DEVICE_PIECES names 'attach-build': an admitted flag with no block built would be a mounted change that never executes.
-        raise ValueError('QWEN_FAST_OCTO=%s was admitted but this attach builds no octo block (serving_octo.DEVICE_PIECES: attach-build)' % octo_record['mode'])
+    # An admitted octo flag BUILDS the third block below (octo_shape over pool slots 0..7, captured with the two M3 blocks in complete_blocks_two_phase) and the
+    # attach proves it did (`octo_block` is not None, in the packed step): an admitted flag with no block built would be a mounted change that never executes.
     # QWEN_FAST_PACKED_CAPTURE_POSITION (S2 G3b, gate only, default unset): parsed here, before
     # anything is built; each block refuses a position its capacity cannot capture at.
     capture_position = packed_capture_position()
@@ -657,6 +661,16 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         # so its multiplicity is named separately, and the pool lends each block asking for
         # it its OWN independent replay table set (ServingBufferPool.packed_replay).
         distinct_shapes = tuple(dict.fromkeys((shape.users, shape.rows_per_user) for shape in packed_shapes))
+        # Octo-T8: the pool also lends the third block its own extent storage, a (8, 8) set (one bundle of one group per user) beside M3's (4, 16) x 2.
+        octo_shape_value = None
+        if octo_record is not None:
+            if not m3_blocks_two or not extent_replay:
+                raise ValueError('QWEN_FAST_OCTO=%s builds the third block beside two M3 blocks over the extent storage (QWEN_FAST_M3_BLOCKS=2 and QWEN_FAST_EXTENT_REPLAY=1)'
+                                 % octo_record['mode'])
+            from packed_shapes import octo_shape
+
+            octo_shape_value = octo_shape(page_width)
+            distinct_shapes = distinct_shapes + ((octo_shape_value.users, octo_shape_value.rows_per_user),)
         solo_shape_value = None
         if solo_lane is not None:
             # D0: the pool also lends the solo block its own one-user extent storage (a (1, 16) set, beside M3's (4, 16)).
@@ -796,16 +810,20 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             packed_blocks, slot = [], 0
             if capture_position is not None:
                 pindiag('{}{} (gate only)', CAPTURE_POSITION_MARKER, capture_position)
-            for shape in packed_shapes:
+            # Octo-T8 (QWEN_FAST_OCTO): the third block, built last and captured with the two M3 blocks (complete_blocks_two_phase), over ALL eight pool slots - its
+            # segment u is the pool slot u, sharing slot u's carries with M3 segment u % 4 of block u // 4 by identity. It pads from `min_live` seats (6: page 0's two idle segments).
+            built_shapes = packed_shapes + ((octo_shape_value,) if octo_shape_value is not None else ())
+            for shape in built_shapes:
+                is_octo = octo_shape_value is not None and shape is octo_shape_value
                 packed_block = PackedVerifierEngine(operations, model, helpers, sampler, pool=pool, shared_weights=weights,
                                                     shape=shape, feature_taps=TARGET_TAPS,
-                                                    **({'pool_slots': tuple(range(slot, slot + shape.users))}
+                                                    **({'pool_slots': tuple(range(shape.users)) if is_octo else tuple(range(slot, slot + shape.users))}
                                                        if four_as_two or m3_blocks_two else {}),
                                                     # QWEN_FAST_M3_BLOCKS=2 (A1c): every block allocates and warms
                                                     # first, then every block captures (complete_blocks_two_phase above).
                                                     **({'defer_capture': True} if m3_blocks_two else {}),
-                                                    **({'padded_min_users': padded_min_users}
-                                                       if padded_min_users is not None else {}),
+                                                    **({'padded_min_users': octo_record['min_live']} if is_octo
+                                                       else {'padded_min_users': padded_min_users} if padded_min_users is not None else {}),
                                                     # S2 G3b's gate-only knob; unset, no keyword at all.
                                                     **({'capture_position': capture_position}
                                                        if capture_position is not None else {}),
@@ -822,17 +840,21 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                 packed_blocks.append(packed_block)
                 if not m3_blocks_two:
                     memory_ledger.record('P6', point='block%d' % len(packed_blocks), packed_block=packed_block)
-                slot += shape.users
+                if not is_octo:
+                    slot += shape.users
+            # The octo block leaves the list the M3 pairing code reads (place_blocks, per-block widths): it is a separate third block of the PackedStep.
+            octo_block = packed_blocks.pop() if octo_shape_value is not None else None
             if m3_blocks_two:
+                every_block = packed_blocks + ([octo_block] if octo_block is not None else [])
                 if request_widths:
                     from request_width_warm import warm_request_widths
 
-                    complete_blocks_two_phase(packed_blocks, model, before_captures=lambda: warm_request_widths(
-                        operations, model, helpers, sampler, page_width, widths=request_widths))
+                    complete_blocks_two_phase(every_block, model, before_captures=lambda: warm_request_widths(
+                        operations, model, helpers, sampler, page_width, widths=request_widths), warm_publication=(octo_block,))
                 else:
-                    complete_blocks_two_phase(packed_blocks, model)
-                for index, packed_block in enumerate(packed_blocks, 1):
-                    memory_ledger.record('P6', point='block%d' % index, packed_block=packed_block)
+                    complete_blocks_two_phase(every_block, model, warm_publication=(octo_block,))
+                for index, packed_block in enumerate(every_block, 1):
+                    memory_ledger.record('P6', point='block%d' % index if packed_block is not octo_block else 'octo', packed_block=packed_block)
             # D0: the one-user block, after M3 (a block is built before any request exists, and the pool's slot 0 is
             # bound by carry identity to M3's segment 0 AND to this block's only segment), over slot 0 alone.
             solo_block = None
@@ -855,7 +877,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             # place (QWEN_FAST_VERIFY_T1 #3). Every block's commit DMA writes the model's native slot 0, so a block whose
             # trace read slot 0 instead of its own carries would be fed another block's state: the attach is refused.
             if m3_blocks_two:
-                refused_blocks = [index for index, packed_block in enumerate(packed_blocks)
+                refused_blocks = [index for index, packed_block in enumerate(packed_blocks + ([octo_block] if octo_block is not None else []))
                                   if getattr(packed_block, 'carries_in_place', False) is not True]
                 if refused_blocks:
                     raise ValueError('%s=2 needs every M3 block to read its carries in place (QWEN_FAST_VERIFY_T1 #3); '
@@ -865,16 +887,24 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             # attach-time proof that the flag reached the storage and the storage the block (design W2,
             # W3); refused before the lifecycle admits a request, and the scopes close what was built.
             extents = [getattr(packed_block, 'extent', False)
-                       for packed_block in packed_blocks + ([solo_block] if solo_block is not None else [])]
+                       for packed_block in packed_blocks + ([octo_block] if octo_block is not None else []) + ([solo_block] if solo_block is not None else [])]
             if any(value is not extent_replay for value in extents):
                 raise ValueError('%s=%d, but the packed blocks built are extent=%r'
                                  % (EXTENT_REPLAY_FLAG, int(extent_replay), extents))
             # The step bound to its block (or blocks), carrying the per-round ticket-width
             # policy the worker hook asks before drafting.
+            octo_state = None
+            if octo_block is not None:
+                # The policy state of QWEN_FAST_OCTO: the mode, the alternation, the per-shape counters and the [OCTO] lines. Its program-count reader is the mesh's
+                # program-cache entry count (the smoke judge refuses a program compiled on the first round of a shape after a switch).
+                import serving_octo
+
+                octo_state = serving_octo.OctoState(octo_record['mode'], octo_record['min_live'], programs=lambda: program_count(model))
             packed_step = PackedStep(packed_blocks if four_as_two or m3_blocks_two else packed_blocks[0],
                                      **({'solo': solo_block} if solo_block is not None else {}),
                                      # QWEN_FAST_M3_BLOCKS=2: each block's ticket width is its own (PackedStep.proposal_groups).
-                                     **({'per_block_widths': True} if m3_blocks_two else {}))
+                                     **({'per_block_widths': True} if m3_blocks_two else {}),
+                                     **({'octo': octo_block, 'octo_state': octo_state} if octo_block is not None else {}))
             if m3_blocks_two:
                 # New arrivals fill a block that has exactly one live user first, else the fuller block that is not full
                 # (ServingBufferPool.place_blocks), so a lone user is rare and a block runs packed whenever it can.
@@ -882,7 +912,8 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             step_description = dict(describe_packed_step(),
                 **(dict(blocks=[packed_block.describe() for packed_block in packed_blocks])
                    if four_as_two or m3_blocks_two else dict(block=packed_blocks[0].describe())),
-                **(dict(solo=solo_block.describe()) if solo_block is not None else {}))
+                **(dict(solo=solo_block.describe()) if solo_block is not None else {}),
+                **(dict(octo=octo_block.describe()) if octo_block is not None else {}))
         elif packed_requested:
             step_description = dict(step_description,
                 packed_block_skipped='no packed block shape for %d scheduler requests' % policy['scheduler_requests'])
@@ -890,8 +921,8 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             # The executed path is the admitted one (memory graft-mounted-is-not-graft-executed): every block
             # is the extent block and every segment reader reports runtime_extent, or the attach fails here,
             # before the lifecycle admits a request (the scopes close the block, the weights and the pool).
-            packed_any_admission.admit_blocks(packed_blocks + ([solo_block] if solo_block is not None else []),
-                                              log=pindiag)
+            packed_any_admission.admit_blocks(packed_blocks + ([octo_block] if octo_block is not None else [])
+                                              + ([solo_block] if solo_block is not None else []), log=pindiag)
         # One line with every pre-trace address - the pooled history pairs, each named
         # shared weight and, when built, the packed block's taps, checkpoints and carries -
         # so a diverged address from the shard check can be placed against what was
@@ -921,7 +952,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                 serving_parked_engines.parked_engines_enabled()   # strictly '1' from here: any other value is refused
                 parked_engines = serving_parked_engines.ParkedEngineSet(operations=operations, model=model,
                     sampler=sampler, helpers=helpers, pool=pool, weights=weights, fixtures=fixtures,
-                    collectives=collectives, blocks=packed_blocks if packed_shapes else (),
+                    collectives=collectives, blocks=(packed_blocks + ([octo_block] if octo_block is not None else [])) if packed_shapes else (),
                     capture_rows=capture_rows if trimmed else None)
                 scopes.callback(parked_engines.close)
                 parked_engines.build()

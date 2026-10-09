@@ -31,13 +31,31 @@ def _pinned_class():
     return base
 
 
+def eight_row_segments(segments):
+    """Whether these (first, last) packed segments are all eight rows: the octo block's (extent_attention_octo_tp.is_octo_block says the same; this copy
+    exists so the M3 path never imports that module)."""
+    try:
+        return len(segments) > 0 and all(last - first == 8 for first, last in segments)
+    except (TypeError, ValueError):
+        return False
+
+
 class PackedExtentReplayReader(_pinned_class()):
     # QWEN_FAST_TP4_SDPA=multi (sdpa_multi_tp.MultiBlock, set by sdpa_long_tp.apply in the constructor): None unless that
     # configuration is on, and then every path below that reads it is the pinned reader's.
     multi = None
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        # Octo-T8 (QWEN_FAST_OCTO; extent_attention_octo_tp): a block of eight-row segments, one group per bundle, takes the octo segment
+        # readers (flags 0x21). Every other block - the M3 blocks' sixteen-row segments - is the pinned constructor, untouched, and does not
+        # even import the octo module (an image whose copy lists lack it still attaches a flag-off M3 block).
+        segments = args[2] if len(args) > 2 else kwargs.get('segments')
+        if eight_row_segments(segments):
+            import extent_attention_octo_tp as octo
+
+            octo.build_packed(self, *args, **kwargs)
+        else:
+            super().__init__(*args, **kwargs)
         # QWEN_FAST_TP4_SDPA (sdpa_long_tp): flag unset or off, this returns at once and nothing is touched.
         try:
             sdpa_long_tp.apply(self)

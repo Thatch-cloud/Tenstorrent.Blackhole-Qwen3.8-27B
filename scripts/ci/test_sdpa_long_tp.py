@@ -188,7 +188,7 @@ class BindingTests(unittest.TestCase):
 
     def test_the_flagged_row_names_both_flags(self):
         self.assertEqual(tp_addresses.FLAGGED_TWINS[('extent_attention_replay_tp', 'PackedExtentReplayReader')][0],
-                         'QWEN_FAST_TP4_ATTN_FOLD or QWEN_FAST_TP4_SDPA')
+                         'QWEN_FAST_TP4_ATTN_FOLD or QWEN_FAST_TP4_SDPA or QWEN_FAST_OCTO')
 
 
 class SmokeAndProfileTests(unittest.TestCase):

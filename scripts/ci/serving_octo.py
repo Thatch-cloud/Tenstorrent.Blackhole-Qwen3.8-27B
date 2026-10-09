@@ -28,11 +28,12 @@ FLAGS (default off; strict values):
                               per-request engines.
 Lines (server log): octo_markers.py.
 
-WHAT IS HOST-COMPLETE AND WHAT IS NOT (the flag REFUSES to engage until the device pieces exist: `device_gaps`, DEVICE_PIECES below). Host side, tested on CPU:
-the shape, the flags, the admission, the policy (PackedStep.proposal_groups: which block a round's tickets are drafted for), the routing and epoch bump
-(PackedStep.route_octo), the per-shape counters and markers, the judge (octo_judge), the profiles and the job templates. NOT built, and therefore refused by
-name at attach: each DEVICE_PIECES entry (a card question or a pinned-source change that nothing on CPU can qualify), and a minimum live count below
-IDLE_CAPACITY_NOTE's limit.
+WHAT IS BUILT AND WHAT IS NOT QUALIFIED. Every DEVICE_PIECES entry is built on the host and tested on CPU (the flag no longer refuses by name): the attach builds the
+third block (serving_runtime), the batched GDN launch of the TP4 sibling takes eight users, the octo extent readers and the pool's (8, 8) extent storage serve
+one eight-row group per bundle (flags 0x21), the octo block keeps its own publication warm and the fused commit counts it. NOTHING of it has run on a card. The K64j kernels and
+factory are UNCHANGED (0x21 is an existing flag set; what no card has run is a bundle of one eight-row group), so there is no new graft binary. What each card job must establish is
+UNQUALIFIED_ITEMS, logged one per line at every admission; the order of the jobs is references/tp4-octo-jobs/ORDER.txt (Q1 first). The admission still REFUSES by name when any
+piece is unbuilt (device_gaps), a minimum live count below IDLE_CAPACITY_NOTE's limit, and any run that is not a gate run of a gate-only profile.
 """
 
 import os
@@ -81,34 +82,46 @@ EXCLUDED_FLAGS = (
     ('QWEN_FAST_SOLO_LANE', 'the D0 one-user block is built beside ONE M3 block over slot 0 (serving_solo_lane refuses two)'),
     ('QWEN_FAST_LANE', 'the fast lane rides on the D0 block'),
 )
+# Flags whose OFF values are more than '0' (sdpa_long_tp.OFF_VALUES): refused when set to anything else. The long-context SDPA configurations are qualified at flags 0x23 (G8B2)
+# only, and sdpa_multi_tp tiles 16-row users: neither takes an octo (0x21, eight-row) segment.
+EXCLUDED_OFF_VALUES = (
+    ('QWEN_FAST_TP4_SDPA', ('', '0', 'off'), 'the long-context SDPA configurations (sdpa_long_tp, sdpa_multi_tp) are qualified at 0x23 and 16-row users, not the octo 0x21 eight-row segment'),
+)
 
-# The device pieces nothing on CPU can build or qualify. key -> what remains. `device_gaps` lists every key not built; the admission refuses while any is.
+# The device pieces the octo block needs, by key -> what must exist (a requirement, so a refusal reads right when a piece is missing). `device_gaps` lists every key not built;
+# the admission refuses while any is. BUILT (below) declares them; the tests (test_octo, test_octo_block, test_extent_attention_octo_tp, test_octo_attach) are what make each claim true.
 DEVICE_PIECES = (
-    ('attach-build', 'serving_runtime builds no third packed block: PackedVerifierEngine(shape=octo_shape, pool_slots=0..7) with defer_capture, captured after '
-                     'blocks A and B inside complete_blocks_two_phase (its fixture, taps, checkpoints and extent words allocated and warmed BEFORE any capture), '
-                     'over extent storage the pool lends for a (8, 8) shape (ServingBufferPool packed_shapes / packed_replicas), carries_in_place proven'),
-    ('gdn-batch', 'gdn_user_batch.MAX_USERS is 4 (a hash-pinned source, test_tp2_pins; the TP4 sibling gdn_user_batch_tp imports it): the block\'s batched GDN '
-                  'launch carries four users, eight segments need a TP4 sibling batch of eight (96 cores at 12 heads) or two launches of four, qualified on cards'),
-    ('attention-8row', 'K64j is qualified at G8B2 only (flags 0x27: bundles of two eight-row groups): an 8-row segment bundles as one group, so '
-                       'extent_attention_replay.ExtentSegmentReader refuses it ("qualified at G8B2 only") and ServingBufferPool refuses extent storage for any other '
-                       'shape (extent_bundle_batches(8, 8) is (1,), M3\'s (2,)); one group per bundle runs flags 0x25 without KV share. The REAL block host path at 8 users x 8 rows '
-                       'holds on the fake device (test_octo_block, the qualification patched in); the K64j kernel at G8B1, the masks and the T2 K/V chains at 8-row granularity '
-                       'are card questions'),
-    ('publication-8row', 'complete_blocks_two_phase sets warm_publication False on every block after the first (the M3 plan is the same 71 shapes); the octo '
-                         'block\'s plan (publication_warm.plan) is 64 packed shapes of which 32 no M3 warm ran (segment offsets 8/24/40/56 x prefixes 1..8), so its '
-                         'warm must run at attach or the first octo round compiles them (the smoke judge refuses a program compiled on a shape switch)'),
-    ('fused-third-block', 'the fused commit of a third block: 8 T_proj traces and 64 slide traces (fused_commit_tp), and the pre-stage state of a third fixture '
-                          '(PackedStep includes the block in verify_prestage.engage_two_block; the device behaviour is unqualified)'),
+    ('attach-build', 'serving_runtime must build the third packed block: PackedVerifierEngine(shape=octo_shape, pool_slots=0..7, defer_capture) built after blocks A and B and '
+                     'captured with them in complete_blocks_two_phase (its fixture, taps, checkpoints and extent words allocated and warmed BEFORE any capture), over extent '
+                     'storage the pool lends for a (8, 8) shape (ServingBufferPool packed_shapes / packed_replicas), carries_in_place proven, bound into the PackedStep with its OctoState'),
+    ('gdn-batch', 'the batched GDN launch must carry eight users: gdn_user_batch_tp.MAX_USERS (the unpinned TP4 sibling; the pair\'s gdn_user_batch is hash-pinned at 4) is 8, so '
+                  'one launch is 8 users x 12 heads = 96 of the 110 cores, one wave'),
+    ('attention-8row', 'the extent readers and the pool must take an eight-row segment as ONE group per bundle (K64j G8B1, flags 0x21: tail | extent, no KV share): '
+                       'extent_attention_octo_tp.OctoSegmentReader / build_packed behind the fold twin, ServingBufferPool extent storage for the (8, 8) shape (extent_bundle_batches(8, 8) is (1,)), '
+                       'the block fold taking bundles of one; the K64j binary and kernels are unchanged and the pinned four-card reader untouched'),
+    ('publication-8row', 'the octo block must keep its own publication warm: complete_blocks_two_phase skips it for every block after the first except the octo block, whose plan '
+                         '(publication_warm.plan) is 64 packed shapes of which 32 no M3 warm ran (segment offsets 8/24/40/56 x prefixes 1..8), so the first octo round compiles nothing'),
+    ('fused-third-block', 'the fused commit must be built over a third block: 8 T_proj traces and 64 slide traces (fused_commit_tp) and the pre-stage state of a third fixture '
+                          '(PackedStep includes the block in verify_prestage.engage_two_block)'),
+)
+
+# Built pieces, by key: the declaration the admission reads (and 'gdn-batch' is also read from the module's own limit, so it cannot be claimed while the code says otherwise).
+BUILT = {'attach-build', 'gdn-batch', 'attention-8row', 'publication-8row', 'fused-third-block'}
+
+# What no card has qualified, one line each at every admission: (what must hold, the card job that establishes it). The first four are the strict-exactness ones.
+UNQUALIFIED_ITEMS = (
+    ("octo rounds == M3 rounds == the per-request text (strict greedy exactness)", 'A1 E1 E2'),
+    ("K64j one eight-row group per bundle (0x21, G8B1) == the native one-row decode", 'Q1'),
+    ("the 64-row block at 8 users x 8 rows: matmul rows == the 4 x 16 block's", 'E1'),
+    ("a shape switch compiles nothing (publication warm at 8-row offsets)", 'A1 H1'),
+    ("the batched GDN launch at 8 users (96 cores, one wave) == four users", 'Q2'),
+    ("the fused commit of a third block, and its pre-stage", 'A1 E1'),
 )
 
 # An idle segment writes its K/V to page 0 and page 0 has two 32-row tile rows (PackedVerifierEngine.MAX_IDLE_SEGMENTS = 2; the T2 chained K/V write allows one
 # writer per (page, tile row)): octo serves 6 or 7 live seats, not the design's 5, and a lone user cannot pad the 4-user block. A third idle target (a reserved
 # scratch page) is a card question; both rules below read the block's own constant, so they lift the day it changes.
 IDLE_CAPACITY_NOTE = 'page 0 has two tile rows (PackedVerifierEngine.MAX_IDLE_SEGMENTS)'
-
-# Built pieces, by key. Empty: nothing on the device path exists. A test (or the session that builds a piece) adds its key here, which is also the one place
-# the admission reads.
-BUILT = set()
 
 
 def gate_run(environ=None):
@@ -156,11 +169,12 @@ def idle_capacity():
 
 
 def gdn_batch_users():
-    """The users one batched GDN launch carries (gdn_user_batch.MAX_USERS, which the TP4 sibling takes), or 0 when the module cannot be read."""
+    """The users one batched GDN launch carries at four cards (gdn_user_batch_tp.MAX_USERS, the unpinned TP4 sibling: 8 users x 12 heads = 96 of the 110 cores; the pair's
+    hash-pinned gdn_user_batch keeps 4), or 0 when the module cannot be read."""
     try:
-        import gdn_user_batch
+        import gdn_user_batch_tp
 
-        return int(gdn_user_batch.MAX_USERS)
+        return int(gdn_user_batch_tp.MAX_USERS)
     except ImportError:
         return 0
 
@@ -224,6 +238,9 @@ def octo_admission(m3, environ=None, *, log=None):
     for name, why in EXCLUDED_FLAGS:
         if environ.get(name, '0') not in ('0', ''):
             problems.append('%s=%s: octo cannot sit beside it (%s)' % (name, environ.get(name), why))
+    for name, off_values, why in EXCLUDED_OFF_VALUES:
+        if environ.get(name, '').strip().lower() not in off_values:
+            problems.append('%s=%s: octo cannot sit beside it (%s)' % (name, environ.get(name), why))
     idle = USERS - minimum
     capacity = idle_capacity()
     if idle > capacity:
@@ -238,10 +255,7 @@ def octo_admission(m3, environ=None, *, log=None):
         for problem in problems:
             log('{}: {}', REFUSED_MARKER, problem)
         raise ValueError('%s=%s is refused: %s' % (OCTO_FLAG, mode, '; '.join(problems)))
-    unqualified = ['octo rounds == M3 rounds == the per-request engines\' text (strict greedy exactness, every concurrent8 and drain user)',
-                   'the 64-row block at 8 users x 8 rows: matmul rows identical to the 4 x 16 block\'s',
-                   'a shape switch compiles nothing after warmup (publication warm at 8-row offsets)',
-                   'the extent evidence record for an 8-row bundle (a gate arm waves it through; a traffic profile needs it)']
+    unqualified = ['%s [job %s]' % item for item in UNQUALIFIED_ITEMS]
     for index, piece in enumerate(unqualified, 1):
         log('{} ({}/{}): {}', UNQUALIFIED_MARKER, index, len(unqualified), piece)
     log('{} mode={} rows={} users={} min_live={} (gate only)', ADMITTED_MARKER, mode, ROWS, USERS, minimum)

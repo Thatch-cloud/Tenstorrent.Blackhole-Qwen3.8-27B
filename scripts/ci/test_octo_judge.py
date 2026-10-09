@@ -28,13 +28,19 @@ def env_of(mode='alternate', min_live=6, **extra):
 class Boot:
     """A container log written by the real producers: the admission, then rounds through OctoState."""
 
-    def __init__(self, mode='alternate', min_live=6, programs=None, admit=True):
+    ENGAGED = '[PINDIAG] extent replay engaged segments=8 flags=' + ','.join(['0x21'] * 8) + ' mask=narrow capacity=262144 geometry=G8B1'
+    FACTORY = '[QWEN-SDPA] runtime-extent entries=1 kv_share=false q_slice=false writer=writer_decode_qwen_slice.cpp cur_pos_stick_bytes=32'
+
+    def __init__(self, mode='alternate', min_live=6, programs=None, admit=True, programs_ran=True):
         self.lines, self.now = [], [1000.0]
         self.mode, self.min_live = mode, min_live
         self.state = octo.OctoState(mode, min_live, clock=lambda: self.now[0], programs=programs, log=self.lines.append)
         if admit:
             with patch.multiple(octo, BUILT=set(ALL_PIECES), gdn_batch_users=Mock(return_value=8)):
                 octo.octo_admission(M3_TWO, env_of(mode, min_live), log=lambda template, *values: self.lines.append(template.format(*values)))
+        if programs_ran:
+            # what the octo block's readers and the factory write when the 0x21 program is built (extent_attention_octo_tp.build_packed, the K64j F22 line)
+            self.lines.extend([self.ENGAGED, self.FACTORY])
 
     def round(self, ran, *, eligible=True, live=8, rows=None, committed=None, step=None, gap=20.0):
         rows = rows or (8 if ran == 'octo' else 16)
@@ -97,6 +103,30 @@ class JudgeTests(unittest.TestCase):
         boot.round('octo', live=5)
         problems, facts = octo_judge.judge(env_of('live'), boot.text())
         self.assertTrue(any('ran as octo at rows=8 live=5' in problem for problem in problems), problems)
+
+    def test_octo_rounds_with_no_octo_program_lines_are_the_m3_programs_under_an_octo_flag(self):
+        for name, kept in (('no engaged line', lambda line: not line.startswith('[PINDIAG] extent replay engaged')),
+                           ('no factory line', lambda line: not line.startswith('[QWEN-SDPA] runtime-extent')),
+                           ('the M3 blocks\' engaged line', None)):
+            boot = Boot('live', programs=lambda: 5000)
+            for _ in range(20):
+                boot.round('octo')
+            if kept is not None:
+                boot.lines[:] = [line for line in boot.lines if kept(line)]
+            else:
+                boot.lines[:] = [line.replace('segments=8 flags=' + ','.join(['0x21'] * 8) + ' mask=narrow capacity=262144 geometry=G8B1',
+                                              'segments=4 flags=0x23,0x23,0x23,0x23 mask=narrow capacity=262144') for line in boot.lines]
+            problems, facts = octo_judge.judge(env_of('live'), boot.text())
+            with self.subTest(name):
+                self.assertTrue(any('extent replay engaged segments=8 flags=0x21' in problem or 'runtime-extent entries=1 kv_share=false' in problem
+                                    for problem in problems), problems)
+
+    def test_the_producers_lines_are_the_ones_the_judge_reads(self):
+        import extent_attention_replay as pinned
+        self.assertTrue(octo_judge.ENGAGED_OCTO.search(Boot.ENGAGED))
+        self.assertTrue(Boot.ENGAGED.startswith(pinned.ENGAGED_MARKER))
+        self.assertTrue(octo_judge.FACTORY_OCTO.search(Boot.FACTORY))
+        self.assertFalse(octo_judge.FACTORY_OCTO.search('[QWEN-SDPA] runtime-extent entries=2 kv_share=true q_slice=false'))
 
     def test_the_counted_rounds_must_alternate(self):
         boot = Boot(programs=lambda: 5000)

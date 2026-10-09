@@ -81,9 +81,19 @@ class QuadArgumentTests(Four):
         self.assertEqual(len(set(flat)), 48)
         self.assertEqual(shares[0], [(head // 10, head % 10) for head in range(12)])
         with self.assertRaises(ValueError):
-            quad.core_shares(11, 10, 5)
-        with self.assertRaises(ValueError):
             quad.core_shares(4, 10, 4)
+        # the four-card limit is the octo block's eight users (96 cores, one wave); the pair's pinned module still stops at four
+        self.assertEqual((quad.MAX_USERS, quad.PAIR_MAX_USERS, pair.MAX_USERS), (8, 4, 4))
+        eight = quad.core_shares(11, 10, 8)
+        flat = [point for share in eight for point in share]
+        self.assertEqual((len(eight), len(flat), len(set(flat))), (8, 96, 96))
+        self.assertEqual(eight[:4], shares, 'the first four users sit on the very cores a four-user launch uses')
+        self.assertTrue(all(0 <= x < 11 and 0 <= y < 10 for x, y in flat))
+        for users in (0, 9):
+            with self.assertRaisesRegex(ValueError, 'One to 8 packed users per batched GDN launch'):
+                quad.core_shares(11, 10, users)
+        with self.assertRaisesRegex(ValueError, 'One to 4 packed users per batched GDN launch'):
+            pair.core_shares(11, 10, 8)
 
     def test_compile_args_carry_the_four_card_geometry(self):
         reader = quad.compile_args('reader', 16)
@@ -128,8 +138,12 @@ class QuadArgumentTests(Four):
             broken[0][index] = shape
             with self.assertRaises(ValueError):
                 quad.validate_users(broken)
-        with self.assertRaises(ValueError):
-            quad.validate_users(good + [good[0]])
+        # eight users of eight rows (the octo block) validate; a ninth is one past the 96-core launch
+        octo = [[tuple(value.shape) for value in user_inputs(index, rows=8)] for index in range(8)]
+        self.assertEqual(quad.validate_users(octo), [8] * 8)
+        self.assertEqual(seq.batch.validate_users(octo), [8] * 8)
+        with self.assertRaisesRegex(ValueError, 'One to 8 packed users'):
+            quad.validate_users(octo + [octo[0]])
 
     def test_the_mesh_is_one_by_four_or_a_single_card_rig(self):
         self.assertEqual(quad.mesh_chips(four_mesh()), 4)
@@ -185,10 +199,13 @@ class QuadLaunchTests(Four):
                 quad.execute(four_mesh(), [user_inputs(0)], KERNELS, fake)
         self.assertEqual(len(fake.freed), len(fake.allocated))
 
-    def test_the_audit_describes_forty_eight_workers(self):
+    def test_the_audit_describes_ninety_six_workers_for_eight_users_and_forty_eight_for_four(self):
         with patch('gdn_user_batch_tp.load_kernels', return_value=KERNELS):
             found = quad.audit('/root')
-        self.assertEqual((found['users'], found['workers_per_user'], found['workers'], found['tp']), (4, 12, 48, 4))
+        self.assertEqual((found['users'], found['workers_per_user'], found['workers'], found['tp']), (8, 12, 96, 4))
+        with patch('gdn_user_batch_tp.load_kernels', return_value=KERNELS):
+            four = quad.audit('/root', users=4)
+        self.assertEqual((four['users'], four['workers']), (4, 48), 'the M3 block\'s launch is the one it always was')
 
 
 class KernelsAreTheServedOnesTests(unittest.TestCase):

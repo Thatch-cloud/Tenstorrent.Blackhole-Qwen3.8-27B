@@ -13,6 +13,9 @@ THE RULES OF AN OCTO ARM (judge). Read from the arm's profile env and its contai
              (octo_rounds, m3_rounds) are the lines' own count, so a dropped line is seen.
   alternate  (b) under `alternate`: at least MIN_ROUNDS counted rounds of EACH shape, and the counted rounds strictly alternate octo, m3, octo, m3 (a counted
              round is an eligible one that ran as planned). Rounds counted per shape are reported as facts. Under `live` no counted round is an m3 one.
+  geometry   (a2) the K64j program the octo block ran: the readers' engaged line `[PINDIAG] extent replay engaged segments=8 flags=0x21,...,0x21 ... geometry=G8B1` (eight
+             segments of one group, no KV share) and the factory's own `[QWEN-SDPA] runtime-extent entries=1 kv_share=false` line. The M3 blocks' 0x23 programs satisfy
+             every older rule of the log, so without these a log of M3 programs under an octo flag would pass: a mounted reader is not an executed one.
   fall-backs an eligible round that ran as something else than planned is a fall-back: more than MAX_FALLBACK_SHARE of the eligible rounds fails the arm (the
              shape the arm was built to measure did not run).
   programs   (c) no program compiled on a shape switch: every `[OCTO] programs` line (the first round of each shape after a switch, and of the process) must
@@ -42,6 +45,8 @@ MIN_ROUNDS = 16
 MAX_FALLBACK_SHARE = 0.10
 MIN_GAIN = 1.10
 MIN_PAIRS = 16
+ENGAGED_OCTO = re.compile(r'\[PINDIAG\] extent replay engaged segments=8 flags=((?:0x21,){7}0x21) mask=narrow capacity=\d+ geometry=G8B1')
+FACTORY_OCTO = re.compile(r'\[QWEN-SDPA\] runtime-extent entries=1 kv_share=false')
 PADDED_LIVE1 = re.compile(r'\[PINDIAG\] packed padded round live=1 ')
 PADDED_SKIPPED_LIVE1 = re.compile(r'\[PINDIAG\] packed padded skipped live=1 eligible=1 ')
 
@@ -98,13 +103,13 @@ def judge(env, container_text):
     elif asked not in ('live', 'alternate'):
         problems.append('%s=%r is neither off, live nor alternate' % (OCTO_FLAG, asked))
     else:
-        problems.extend(octo_problems(env, asked, found, facts))
+        problems.extend(octo_problems(env, asked, found, facts, text))
     if solo:
         problems.extend(solo_problems(text, facts))
     return problems, facts
 
 
-def octo_problems(env, asked, found, facts):
+def octo_problems(env, asked, found, facts, text=''):
     problems = []
     minimum = min_live(env)
     admitted = found['admitted']
@@ -132,6 +137,15 @@ def octo_problems(env, asked, found, facts):
         if item['rows'] != 8 or item['live'] < minimum:
             problems.append('log round %d ran as octo at rows=%d live=%d (rows 8 and live at least %d wanted)' % (item['round'], item['rows'], item['live'], minimum))
             break
+    # (a2) the program the octo block ran: eight segment readers at 0x21 (G8B1), and the factory's own one-entry, no-share line
+    engaged = len(ENGAGED_OCTO.findall(text))
+    factory = len(FACTORY_OCTO.findall(text))
+    facts.update(octo_engaged_lines=engaged, octo_factory_lines=factory)
+    if octo_rounds and not engaged:
+        problems.append('octo rounds ran and no "extent replay engaged segments=8 flags=0x21,...,0x21 ... geometry=G8B1" line was logged: the octo block\'s readers '
+                        'were not the eight-row group-per-bundle ones (a log of the M3 blocks\' 0x23 programs would pass every other rule)')
+    if octo_rounds and not factory:
+        problems.append('octo rounds ran and no "[QWEN-SDPA] runtime-extent entries=1 kv_share=false" factory line was logged: no K64j program of one entry and no KV share was built')
     if rounds:
         last = rounds[-1]
         if last['octo_rounds'] != counts['octo'] or last['m3_rounds'] != counts['m3']:

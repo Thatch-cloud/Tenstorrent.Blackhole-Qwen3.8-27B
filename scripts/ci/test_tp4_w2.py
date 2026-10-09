@@ -219,7 +219,7 @@ class MergeSeamTests(unittest.TestCase):
 
     def test_the_flagged_twin_table_holds_both_branches_rows(self):
         found = tp_addresses.FLAGGED_TWINS
-        self.assertEqual(found[('extent_attention_replay_tp', 'PackedExtentReplayReader')][0], 'QWEN_FAST_TP4_ATTN_FOLD or QWEN_FAST_TP4_SDPA')
+        self.assertEqual(found[('extent_attention_replay_tp', 'PackedExtentReplayReader')][0], 'QWEN_FAST_TP4_ATTN_FOLD or QWEN_FAST_TP4_SDPA or QWEN_FAST_OCTO')
         self.assertEqual(found[('gdn_seq_block', 'execute')][0], V5_FLAG)
         self.assertEqual(found[('gdn_device_loop_state', 'DeviceLoopState')][0], 'QWEN_FAST_TP4_GDN_GLUE')
 

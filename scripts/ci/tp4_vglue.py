@@ -41,6 +41,10 @@ ALL_FLAGS = LEVERS + (PAIR_SLICE, DISPATCH_DIAG, AUDIT)
 
 ENGAGED = '[PINDIAG] tp4 vglue engaged'
 FALLBACK = '[PINDIAG] tp4 vglue fell back'
+# Octo-T8 (QWEN_FAST_OCTO): the half-tile glue kernels (gdn_rows_dma_tp, gdn_block_conv_tp) move 16-row users; an 8-row user is a quarter tile no kernel here moves yet. A block of
+# eight-row segments therefore takes the SERVED (pinned) path at those sites - exact, a few launches slower - and says so with this line, which is NOT the FALLBACK marker (a gated
+# arm fails on FALLBACK because there it means a lever saved nothing by accident; here it is the known state of the octo block, and the timing arms measure it).
+EIGHT_ROW_SERVED = '[PINDIAG] tp4 vglue octo 8-row served path'
 AUDIT_MARKER = '[PINDIAG] tp4 vglue audit'
 AUDIT_MISMATCH = '[PINDIAG] tp4 vglue audit mismatch'
 
@@ -48,7 +52,7 @@ AUDIT_MISMATCH = '[PINDIAG] tp4 vglue audit mismatch'
 # (test_tp4_vglue checks it), so what the CPU tests proved is what ships.
 RUNTIME_FILES = ('tp4_vglue.py', 'gdn_commit_lanes_tp.cpp', 'gdn_rows_dma_tp.py', 'gdn_rows_dma_tp.cpp',
                  'gdn_device_loop_state_tp.py', 'gdn_block_conv_tp.py', 'attention_block_fold_tp.py',
-                 'attention_block_fold_tp.cpp', 'extent_attention_fold_tp.py', 'gdn_pair_slice_tp.py')
+                 'attention_block_fold_tp.cpp', 'extent_attention_fold_tp.py', 'extent_attention_octo_tp.py', 'gdn_pair_slice_tp.py')
 
 
 def _read(name, environ):
