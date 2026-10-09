@@ -56,6 +56,10 @@ Keys (every one optional but C2_IMAGE_TAG):
                       is removed by the step's own trap), and the replay step runs under `timeout --signal=INT`, so its own finally removes its container; the gate step hands the gate driver min(step, job, box) as --budget-seconds, which refuses before
                       any container starts a plan list whose worst case (every arm to its docker timeout) does not fit; the prefix step hands the prefix gate
                       --box-seconds, which clips every arm's docker timeout to what the box has left and starts no arm with under five minutes left (no plan is refused)
+  C2_DRAFTER_MANIFEST build only: the drafter checkpoint the image serves, a manifest under scripts/ci/references/drafter-manifests (default,
+                      rendered empty: the served drafter, dedf8df6). A candidate's fixtures must be staged on the build host first
+                      (drafter_stage.py); the build lays a DRAFTER_MANIFEST marker beside them and the loader refuses any other revision.
+                      Needs the build action
   C2_GATE_PLAN        GATE_PLANS, comma- or space-separated, run in order (default: bringup)
   C2_GATE_LENGTHS     the matrix's prompt lengths, one per user (default, rendered empty: the S1 G4
                       ladder, whose top rung the gate lowers to what the image's profile admits)
@@ -120,6 +124,24 @@ Keys (every one optional but C2_IMAGE_TAG):
                       image that lacks them, namely the production base tp4-serve-10: the P1-CTL re-run on production bytes with the cheap audit.
                       Leave it empty for tp4-serve-11, which bakes both. Refused unless the prefix action runs.
   The C2_PREFIX_* keys are read only when C2_ACTIONS has prefix; otherwise their defaults are output.
+  C2_TAULAB_*         the taulab action (the W-T1 tau lab, scripts/ci/c2_tau_lab.py; C2_CARDS=quad only): ONE container of
+                      the image on all four cards serving C2_TAULAB_PROFILE plus two log flags, the arms sent over its API.
+                      Read only when C2_ACTIONS has taulab (otherwise defaults are output).
+  C2_TAULAB_PROFILE   the production profile it serves (default c2-packed-tp4; a P150x4 profile of the checkout)
+  C2_TAULAB_DATA      the rig-local data directory (default, rendered empty: kwork64/taulab/data under the runner's home);
+                      relative paths are under the home, no '..'; the driver READS it and never writes it
+  C2_TAULAB_ARMS      the arms, space or comma separated, run in their own order (default: A1 A2 A3 A4 A5)
+  C2_TAULAB_DEADLINE  the whole run in minutes, container load included (default 270, at most 540)
+  C2_TAULAB_IN_FLIGHT requests in flight per independent-turn arm (default 8: the four seats and four queued; 1..16)
+  C2_TAULAB_MAX_TOKENS  the answer budget of A1, A2, A4 and A5 (default, rendered empty: 2048; A3 always keeps the lanes' 2400)
+  C2_TAULAB_DRAFTER_ARM  which drafter the run serves (default, rendered empty: the lab as it was): control (the served drafter),
+                      b16-bf8 (the block-16 candidate) or dedf-bf16 (the served drafter with bfloat16 projection weights). The
+                      image (C2_IMAGE_TAG) carries the drafter's fixtures; a candidate arm leaves A3 out of the default arms (A3 is
+                      the control arm's calibration) and refuses a list that names it
+  C2_TAULAB_PAIR_CONTROL  the run id of the control arm's taulab run (digits): after the lab, drafter_pair_report.py pairs this
+                      run's turns with that run's, on the runner, and holds the verdict to the pre-registered GO rule
+  C2_TAULAB_COUNTERS  production's spec-decode counters, a rig-local JSON of aggregates (default: none; positions 1-3 are then
+                      NOT_ESTABLISHED in the report)
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
@@ -129,12 +151,12 @@ import re
 import sys
 
 ACTIONS = ('status', 'rmi', 'agentstop', 'platform', 'unserve', 'priority', 'rescan', 'reset', 'fabric', 'cardm', 'drift', 'build', 'probe', 'smoke', 'gate',
-           'prefix', 'replay', 'push', 'agentstart')
+           'prefix', 'taulab', 'replay', 'push', 'agentstart')
 CARD_SETS = ('pair', 'quad')
 # What a four-card job may run: the pair-shaped steps (a single-card harness on card M, the M+A smoke and replay, the
 # CPU-priority measurement of the M+A container) do not apply to it, and fabric applies to nothing else.
 QUAD_ACTIONS = ('status', 'rmi', 'agentstop', 'platform', 'unserve', 'rescan', 'reset', 'fabric', 'drift', 'build', 'probe', 'smoke', 'gate', 'prefix',
-                'replay', 'push', 'agentstart')
+                'taulab', 'replay', 'push', 'agentstart')
 TP4_MESH_DEVICE = 'P150x4'
 # The mesh_device values of a pair profile: none (the image's P300 under upstream's four-channel p150_x2) and P300
 # (general-2link: the same pair under the two-channel descriptor this cabling needs).
@@ -178,6 +200,18 @@ PREFIX_ARM_PLANS = (('exactness-traced', 'exactness'), ('exactness-audit', 'exac
                     ('lifecycle-tiny', 'lifecycle'),
                     # tp4/packed-prefix: the agent-turn replay's two arms, each as a job of its own (the ABAB pairs)
                     ('agent-turns-prefix', 'agent-turns'), ('agent-turns-baseline', 'agent-turns'))
+# The W-T1 tau lab (c2_tau_lab.py): its arms, the production profile it serves and its time box.
+TAULAB_ARMS = ('A1', 'A2', 'A3', 'A4', 'A5')
+TAULAB_PROFILE = 'c2-packed-tp4'
+TAULAB_DRAFTER_ARMS = ('control', 'b16-bf8', 'dedf-bf16')
+DEFAULT_DRAFTER_MANIFEST = 'dedf8df6'
+DRAFTER_MANIFEST_NAME = re.compile(r'[a-z0-9][a-z0-9._-]{0,63}')
+TAULAB_DEADLINE_MINUTES = 270
+MAX_TAULAB_DEADLINE_MINUTES = 540
+TAULAB_IN_FLIGHT = 8
+MAX_TAULAB_IN_FLIGHT = 16
+# A rig-local path: plain characters, relative to the runner's home or absolute, never a '..' component or a leading '-'.
+PLAIN_PATH = re.compile(r'(?!-)[A-Za-z0-9_./-]{1,200}')
 PREFIX_PROFILE = 'general-prefix'
 PREFIX_BASELINE = 'general'
 PREFIX_AGENTS = (1, 4, 5, 6)
@@ -251,7 +285,7 @@ def profile_meshes(path=PROFILES):
 def refuse_fabric_with_serving(actions):
     """The fabric probe closes the mesh it opened, and a second open in one job is what the ethernet-core teardown
     wedge punishes: it runs in a job of its own, never beside a step that serves or gates."""
-    beside = sorted(set(actions) & set(('smoke', 'gate', 'prefix')))
+    beside = sorted(set(actions) & set(('smoke', 'gate', 'prefix', 'taulab')))
     if 'fabric' in actions and beside:
         raise JobError('C2_ACTIONS has fabric with %s: the probe closes the mesh and a second open in one job wedges '
                        'the ethernet cores; run the probe in its own job, reset first' % ', '.join(beside))
@@ -444,14 +478,22 @@ def read_job(values, profiles, root=ROOT, meshes=None):
     if budget_smoke and 'replay' not in actions:
         raise JobError('C2_REPLAY_BUDGET_SMOKE runs inside the replay\'s container; C2_ACTIONS has no replay')
     prefix = read_prefix(values, profiles, 'prefix' in actions)
+    taulab = read_taulab(values, profiles, 'taulab' in actions)
     if meshes is None:
         meshes = profile_meshes()
     named = [('C2_PROFILE', profile if set(actions) & set(('smoke', 'gate')) else ''),
              ('C2_REPLAY_PROFILE', replay_profile if 'replay' in actions else '')]
     if 'prefix' in actions:
         named += [('C2_PREFIX_PROFILE', prefix['prefix_profile']), ('C2_PREFIX_BASELINE', prefix['prefix_baseline'])]
+    if 'taulab' in actions:
+        named += [('C2_TAULAB_PROFILE', taulab['taulab_profile'])]
+        if (values.get('C2_CARDS') or 'pair') != 'quad':
+            raise JobError('C2_ACTIONS has taulab: the tau lab serves the four-card (1, 4) mesh and needs C2_CARDS=quad')
     cards = read_cards(values, actions, meshes, named)
     bake_profile = read_bake(values, actions, cards, root)
+    drafter_manifest = read_drafter_manifest(values, actions, root)
+    if drafter_manifest and 'push' in actions:
+        raise JobError('C2_DRAFTER_MANIFEST names a candidate drafter that is not qualified: its image is not pushed')
     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root)
     drafter_candidates = read_drafter_candidates(values, actions)
     box_minutes = read_box(values, actions)
@@ -460,9 +502,10 @@ def read_job(values, profiles, root=ROOT, meshes=None):
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
                    gate_memory_prompt=str(memory_prompt), gate_memory_users=str(memory_users), replay_profile=replay_profile,
                    replay_served_model=replay_served_model, replay_budget_smoke=budget_smoke, cardm_harness=cardm_harness, cardm_args=cardm_args,
-                   cardm_env=cardm_env, bake_default_profile=bake_profile, drafter_candidates=drafter_candidates, box_minutes=box_minutes)
+                   cardm_env=cardm_env, bake_default_profile=bake_profile, drafter_candidates=drafter_candidates, box_minutes=box_minutes, drafter_manifest=drafter_manifest)
     outputs.update(s2)
     outputs.update(prefix)
+    outputs.update(taulab)
     return outputs
 
 
@@ -531,6 +574,22 @@ def read_box(values, actions):
         raise JobError('C2_BOX_MINUTES %d is above the %d min step timeout of the job longest step (%s)' % (
             minutes, ceiling, ', '.join('%s %d' % (action, STEP_MINUTES[action]) for action in actions if action in STEP_MINUTES)))
     return str(minutes)
+
+
+def read_drafter_manifest(values, actions, root=ROOT):
+    """C2_DRAFTER_MANIFEST (module docstring), '' when unset or the default, or JobError: a name that is a committed manifest."""
+    name = values.get('C2_DRAFTER_MANIFEST', '')
+    if not name or name == DEFAULT_DRAFTER_MANIFEST:
+        if name and 'build' not in actions:
+            raise JobError('C2_DRAFTER_MANIFEST is applied at build time: C2_ACTIONS has no build')
+        return ''
+    if not DRAFTER_MANIFEST_NAME.fullmatch(name):
+        raise JobError('C2_DRAFTER_MANIFEST must match %s, got %r' % (DRAFTER_MANIFEST_NAME.pattern, name))
+    if 'build' not in actions:
+        raise JobError('C2_DRAFTER_MANIFEST is applied at build time: C2_ACTIONS has no build')
+    if not os.path.isfile(os.path.join(root, 'scripts', 'ci', 'references', 'drafter-manifests', name + '.json')):
+        raise JobError('C2_DRAFTER_MANIFEST %r is not a manifest under scripts/ci/references/drafter-manifests' % name)
+    return name
 
 
 def read_bake(values, actions, cards, root=ROOT):
@@ -633,6 +692,55 @@ def read_prefix(values, profiles, running):
         raise JobError('C2_PREFIX_KVREAD_MOUNT must be empty or 1, got %r' % mount)
     return dict(prefix_plan=','.join(plans), prefix_profile=profile, prefix_baseline=baseline,
                 prefix_agents=','.join(str(count) for count in agents), prefix_kvread_mount=mount)
+
+
+def read_taulab(values, profiles, running):
+    """The taulab action's outputs (module docstring, C2_TAULAB_*), each rendered empty or defaulted when unset. Its keys are
+    checked only when the action runs: a job that does not run it is never refused over them."""
+    if not running:
+        return dict(taulab_profile=TAULAB_PROFILE, taulab_data='', taulab_arms=' '.join(TAULAB_ARMS),
+                    taulab_deadline=str(TAULAB_DEADLINE_MINUTES), taulab_in_flight=str(TAULAB_IN_FLIGHT),
+                    taulab_max_tokens='', taulab_counters='', taulab_drafter_arm='', taulab_pair_control='')
+    profile = values.get('C2_TAULAB_PROFILE') or TAULAB_PROFILE
+    if profile not in profiles:
+        raise JobError('C2_TAULAB_PROFILE %r is not a profile of qwen_c2_profiles.json (%s)' % (profile, ', '.join(profiles)))
+    drafter_arm = values.get('C2_TAULAB_DRAFTER_ARM', '')
+    if drafter_arm and drafter_arm not in TAULAB_DRAFTER_ARMS:
+        raise JobError('C2_TAULAB_DRAFTER_ARM %r is not one of %s' % (drafter_arm, ', '.join(TAULAB_DRAFTER_ARMS)))
+    pair_control = values.get('C2_TAULAB_PAIR_CONTROL', '')
+    if pair_control and (not pair_control.isdigit() or len(pair_control) > 20):
+        raise JobError('C2_TAULAB_PAIR_CONTROL must be the digits of a workflow run id, got %r' % pair_control)
+    if pair_control and drafter_arm in ('', 'control'):
+        raise JobError('C2_TAULAB_PAIR_CONTROL pairs a candidate arm with the control run: set C2_TAULAB_DRAFTER_ARM to a candidate')
+    candidate = drafter_arm not in ('', 'control')
+    if candidate and not pair_control:
+        raise JobError('C2_TAULAB_DRAFTER_ARM %s is judged against the control arm run: set C2_TAULAB_PAIR_CONTROL to the '
+                       'run id (digits) of the control arm job, or no verdict is produced' % drafter_arm)
+    arms = split_list(values.get('C2_TAULAB_ARMS', '')) or [arm for arm in TAULAB_ARMS if not (candidate and arm == 'A3')]
+    if candidate and 'A3' in arms:
+        raise JobError('C2_TAULAB_ARMS names A3 for the candidate arm %s: A3 is the control arm\'s calibration' % drafter_arm)
+    unknown = sorted(set(arms) - set(TAULAB_ARMS))
+    if unknown or len(set(arms)) != len(arms):
+        raise JobError('C2_TAULAB_ARMS: %s (known: %s, each once)' % (
+            ('unknown ' + ', '.join(unknown)) if unknown else 'an arm named twice', ' '.join(TAULAB_ARMS)))
+    paths = {}
+    for key in ('C2_TAULAB_DATA', 'C2_TAULAB_COUNTERS'):
+        path = values.get(key, '')
+        if path and (not PLAIN_PATH.fullmatch(path) or '..' in path.split('/')):
+            raise JobError('%s must be a plain path (%s) with no .. component, got %r' % (key, PLAIN_PATH.pattern, path))
+        paths[key] = path
+    minutes = (positive_int('C2_TAULAB_DEADLINE', values['C2_TAULAB_DEADLINE']) if values.get('C2_TAULAB_DEADLINE')
+               else TAULAB_DEADLINE_MINUTES)
+    if minutes > MAX_TAULAB_DEADLINE_MINUTES:
+        raise JobError('C2_TAULAB_DEADLINE: at most %d minutes, got %d' % (MAX_TAULAB_DEADLINE_MINUTES, minutes))
+    in_flight = (positive_int('C2_TAULAB_IN_FLIGHT', values['C2_TAULAB_IN_FLIGHT']) if values.get('C2_TAULAB_IN_FLIGHT')
+                 else TAULAB_IN_FLIGHT)
+    if in_flight > MAX_TAULAB_IN_FLIGHT:
+        raise JobError('C2_TAULAB_IN_FLIGHT: at most %d, got %d' % (MAX_TAULAB_IN_FLIGHT, in_flight))
+    max_tokens = positive_int('C2_TAULAB_MAX_TOKENS', values['C2_TAULAB_MAX_TOKENS']) if values.get('C2_TAULAB_MAX_TOKENS') else ''
+    return dict(taulab_profile=profile, taulab_data=paths['C2_TAULAB_DATA'], taulab_arms=' '.join(arms),
+                taulab_deadline=str(minutes), taulab_in_flight=str(in_flight), taulab_max_tokens=str(max_tokens),
+                taulab_counters=paths['C2_TAULAB_COUNTERS'], taulab_drafter_arm=drafter_arm, taulab_pair_control=pair_control)
 
 
 def render(outputs):

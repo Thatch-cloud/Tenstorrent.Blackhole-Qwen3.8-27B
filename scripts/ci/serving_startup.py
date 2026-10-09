@@ -141,6 +141,7 @@ def start(worker):
         raise ValueError('Four-link serving descriptor or sampling sources changed')
     import ttnn
     from full_dflash_request import load_dflash_fixtures
+    import drafter_fixtures
     from mlp_block_stream_pool import owned_streams
     from serving_runtime import attach_combined_runtime
 
@@ -150,7 +151,9 @@ def start(worker):
     eos_ids = (eos_ids,) if type(eos_ids) is int else tuple(eos_ids) if isinstance(eos_ids, list) else ()
     if not eos_ids or any(type(token) is not int or not 0 <= token < model.args.vocab_size for token in eos_ids):
         raise ValueError('Target snapshot must provide valid EOS identifiers')
-    fixtures = load_dflash_fixtures(paths['fixtures'])
+    # The default drafter manifest goes through the unedited loader; a candidate manifest (QWEN_DRAFTER_MANIFEST or the
+    # image's DRAFTER_MANIFEST marker) loads through its own pins and refuses fixtures staged for another revision.
+    fixtures = drafter_fixtures.load(paths['fixtures'], load_dflash_fixtures)
     resources = ExitStack()
     try:
         # QWEN_FAST_MEMORY_LEDGER=1 only: P0 (model, KV and plugin state, nothing of the

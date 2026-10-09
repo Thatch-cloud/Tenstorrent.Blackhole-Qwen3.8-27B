@@ -148,7 +148,15 @@ class FileTests(unittest.TestCase):
     def test_the_workflow_steps_run_in_the_parses_order(self):
         with open(WORKFLOW, encoding='utf-8') as handle:
             text = handle.read()
-        positions = [text.index("contains(steps.job.outputs.actions, '%s')" % action) for action in job.ACTIONS]
+        positions = []
+        for action in job.ACTIONS:
+            # A step's own guard names its action alone (or with `&&`); a guard that ORs several actions (the kill-switch check before the
+            # gate, prefix, smoke and replay steps) is shared and says nothing of where the action's own step sits.
+            needle = "contains(steps.job.outputs.actions, '%s')" % action
+            at = text.index(needle)
+            while ' || ' in text[text.rfind('\n', 0, at) + 1:text.find('\n', at)]:
+                at = text.index(needle, at + 1)
+            positions.append(at)
         self.assertEqual(positions, sorted(positions))
 
     def test_the_agent_actions_bracket_the_job(self):

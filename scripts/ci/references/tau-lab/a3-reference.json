@@ -1,0 +1,31 @@
+{
+ "estimator": "four-live packed rounds, emitted per round, terminal round and sequential steps excluded",
+ "pooled_tau": 5.9014,
+ "rounds": {
+  "32k": 596,
+  "4k": 1139
+ },
+ "runs": {
+  "32k_v162": {
+   "rounds": 300,
+   "tau": 6.153
+  },
+  "32k_v179": {
+   "rounds": 296,
+   "tau": 6.071
+  },
+  "4k_v162": {
+   "rounds": 580,
+   "tau": 5.89
+  },
+  "4k_v179": {
+   "rounds": 559,
+   "tau": 5.689
+  }
+ },
+ "sets": {
+  "32k": 6.1124,
+  "4k": 5.791
+ },
+ "source": "the padded four-user real-text runs (4k and 32k) of the lanes gates, their server logs"
+}

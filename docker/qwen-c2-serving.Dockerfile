@@ -87,9 +87,11 @@ RUN set -eu; root=/opt/tt-metal/models/demos/blackhole/qwen36/tt; cd /opt/qwen-c
 COPY qwen-c2-overlay.txt c2_overlay.py /opt/qwen-c2/
 COPY overlay/ /opt/qwen-c2/overlay/
 # /opt/qwen-c2/mesh holds the checked-in mesh graph descriptors the TP4 and 2-link profiles name; the installer
-# refuses a destination whose directory the image lacks, so the directory is made first.
+# refuses a destination whose directory the image lacks, so the directory is made first. The drafter manifests are
+# the first overlay files below /experiment-scripts/ci: the P8 base's tree has no references/ directory.
 RUN set -eu; \
     install -d -m 0755 /opt/qwen-c2/mesh; \
+    install -d -m 0755 /experiment-scripts/ci/references/drafter-manifests; \
     python3 -B /opt/qwen-c2/c2_overlay.py install --manifest /opt/qwen-c2/qwen-c2-overlay.txt \
       --root /opt/qwen-c2/overlay --record /opt/qwen-c2/overlay-install.json; \
     site=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])'); \

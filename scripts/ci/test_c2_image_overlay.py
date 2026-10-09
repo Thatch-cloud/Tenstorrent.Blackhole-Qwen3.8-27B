@@ -1839,14 +1839,45 @@ class OverlayDirectoriesExistTests(unittest.TestCase):
         dockerfile = (ROOT / 'docker' / 'qwen-c2-serving.Dockerfile').read_text(encoding='utf-8')
         install_at = dockerfile.index('c2_overlay.py install')
         needed = set()
-        for line in manifest.splitlines():
-            words = line.split('#', 1)[0].split()
-            for destination in words[1:]:
+        for entry in c2_overlay.parse_manifest(manifest):
+            for destination in entry.destinations:
                 parent = str(PurePosixPath(destination).parent)
                 if parent.startswith('/opt/qwen-c2/') and parent != '/opt/qwen-c2':
                     needed.add(parent)
+                # A subdirectory of the base's script trees is not in the base either (the drafter manifests).
+                for tree in ('/experiment-scripts/ci/', '/speculative-decoding/harness/'):
+                    if parent.startswith(tree):
+                        needed.add(parent)
         self.assertIn('/opt/qwen-c2/mesh', needed)
+        self.assertIn('/experiment-scripts/ci/references/drafter-manifests', needed)
         for parent in sorted(needed):
             made = dockerfile.find('install -d -m 0755 ' + parent)
             self.assertNotEqual(made, -1, '%s is written by the overlay but never made' % parent)
             self.assertLess(made, install_at, '%s is made after the overlay install' % parent)
+
+    def test_the_real_overlay_installs_into_a_base_shaped_tree(self):
+        """Stage the real manifest and install it into a tree holding only what the base image has (the script
+        roots, the plugin trees) plus the directories the Dockerfile makes before the install."""
+        dockerfile = (ROOT / 'docker' / 'qwen-c2-serving.Dockerfile').read_text(encoding='utf-8')
+        install_at = dockerfile.index('c2_overlay.py install')
+        made = re.findall(r'install -d -m 0755 (\S+?);?\s', dockerfile[:install_at])
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(tmp), True)
+        out = tmp / 'ctx'
+        entries = c2_overlay.stage(ROOT, out, require_clean=False, layers=False)
+        image = tmp / 'image'
+        for entry in entries:
+            for destination in entry.destinations:
+                parent = str(PurePosixPath(c2_overlay.resolve(destination, '/site')).parent)
+                if any(parent.startswith(tree + '/') for tree in
+                       ('/experiment-scripts/ci', '/speculative-decoding/harness', '/opt/qwen-c2')):
+                    continue
+                (image / parent.lstrip('/')).mkdir(parents=True, exist_ok=True)
+        for tree in ('/experiment-scripts/ci', '/speculative-decoding/harness', '/opt/qwen-c2'):
+            (image / tree.lstrip('/')).mkdir(parents=True, exist_ok=True)
+        for directory in made:
+            (image / directory.lstrip('/')).mkdir(parents=True, exist_ok=True)
+        rows = c2_overlay.install(out / 'qwen-c2-overlay.txt', out / 'overlay', None, purelib='/site',
+                                  log=lambda _: None, image_root=image)
+        self.assertTrue(any(row['destination'].endswith('references/drafter-manifests/dedf8df6.json')
+                            for row in rows))

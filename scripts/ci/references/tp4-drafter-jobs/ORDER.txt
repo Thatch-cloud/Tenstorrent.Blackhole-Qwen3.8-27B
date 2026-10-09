@@ -1,0 +1,46 @@
+# The order of the drafter-arms card jobs (they ride the owner's combined window): which drafter checkpoint serves, judged on real coding text with thinking ON.
+# One template per line: <template name without .env> <stop|soft|go-arm-only> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window. go-arm-only: runs only for the arm whose D-T job passed the pair report's GO rule.
+# THE CARDS ARE UNDER DEVELOPMENT: NO agentstop, NO agentstart, NO hand-back, NO deploy, NO :latest move. Z ends with a reset. qwen_c2_profiles.json's default stays c2-packed-tp4.
+# P0. NO OTHER WINDOW DRIVER MAY BE ALIVE. The CPU suite green on the integrated branch first. B0 and B1 never run during a timing or tau job. Every run is UNQUALIFIED until D-Q passes.
+# Production bytes: the default manifest is today's served drafter; the control arm and the production image are unchanged by anything in this pack.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS B0-build-control B1-build-b16 <- X0-status-rescan
+# NEEDS (before B1, by hand or by the integration step; the build fails fast and names the command if it is missing): the candidate's fixtures staged by drafter_stage.py stage --manifest b16-98759a49 into the candidate fixture cache
+#   (the build's C2_DRAFTER_FIXTURES, default a directory of its own, never the served drafter's cache); the checkpoint (3.85 GB) is downloaded on the build host, never a laptop.
+# READ RULE: a failed or skipped B1 means 'b16 arm lost': D-T2 and every D-Q job are skipped by their NEEDS lines and the window reports it in one line; D-T1 and D-T3 still run.
+# NEEDS D-T1-control <- B0-build-control X0-status-rescan
+# NEEDS D-T2-b16-bf8 <- B1-build-b16 D-T1-control
+# NEEDS D-T3-dedf-bf16 <- B0-build-control D-T1-control
+# D-Q (the qualification of the b16 arm) runs only when D-T2 returns GO from drafter_pair_report.py.
+# A bf16 GO (D-T3) CANNOT be qualified in this window: no gate profile pairs bf16 with the production 8 x 262k prefix shape (tp4-dbf16-jobs holds 131k-window profiles and a timing twin only, and the bf16 weights
+# need the 19,200-block pool instead of the production 19,968). It needs c2-packed-tp4-8x262k-ship-prefix-dbf16 and its -audit twin (QWEN_FAST_DRAFTER_BF16=1, num-gpu-blocks-override 19200,
+# QWEN36_MAX_TOKENS_ALL_USERS 1228288), with their census and attach tests, and these D-Q templates on image tp4-drafter-1: a follow-on, not part of this pack. A bf16 GO is a finding for the owner, nothing more.
+# NEEDS D-Q1-s1-audited-smoke D-Q2-bringup-matrix D-Q3-singles-quad-audits-4live D-Q4-hang-shapes-1 D-Q4-hang-shapes-2 D-Q4-hang-shapes-3 D-Q4-hang-shapes-4 D-Q4-hang-shapes-5 D-Q5-attach-8x262k D-Q6-abab-1-A D-Q6-abab-2-B D-Q6-abab-3-A D-Q6-abab-4-B <- D-T2-b16-bf8
+# GO RULE (pre-registered, drafter_pair_report.py): paired tau ratio candidate / control (over the turns whose text is identical), 95 percent cluster-bootstrap lower bound > 1.00; no regression in the 80k+ bucket or at the per-turn p10; identical text on every paired turn; paired turns at least 90 percent of the control's;
+# both runs launched clean (the container log showed the arm's own markers; the lab refuses otherwise), asked the same questions (profile, seed, max_tokens, data) and carried the right image tags. The control's A3 PASS/FAIL is reported beside the verdict as an annotation (it compares with an older stack); a control A3 FAIL still stops the control arm after A3 and voids that window's tau arms.
+# NO-GO for adopting an arm: any stall, any text difference between arms, any audit mismatch, or a pooled lower bound not above 1.00. A GO moves nothing by itself: production requalification (3-6 window-hours), a new base image and the owner's decision follow.
+# TIME (sized from the measured W1-window job times: status+rescan+reset 4, image build 22, audited attach 17-19, one eight-user hang shape 13-15, timed smoke 15; a job's tests add to its attach; Q2 is an ESTIMATE, nothing like it was measured):
+#   X0 6, B0 and B1 30 each on the build host (no card), tau arms 90 + 85 + 85 = 260 min = 4.3 h (each arm's deadline 80-85 min, about 1.3-1.4 h with the container load), Z 5.
+#   A GO arm's qualification 290 min = 4.8 h (Q1 40, Q2 45, Q3 25, Q4 5 x 15, Q5 25, Q6 4 x 20). Cards: tau only 4.5 h; with a qualification 9.4 h; add 1 h of build-host time.
+#   If the qualification does not fit what is left of the combined window, it moves to a follow-on window: the tau verdict is the first deliverable.
+X0-status-rescan stop tp4-drafter-1 6
+B0-build-control stop tp4-drafter-1 30
+B1-build-b16 soft tp4-drafter-b16-1 30
+D-T1-control soft tp4-drafter-1 90
+D-T2-b16-bf8 soft tp4-drafter-b16-1 85
+D-T3-dedf-bf16 soft tp4-drafter-1 85
+D-Q1-s1-audited-smoke go-arm-only tp4-drafter-b16-1 40
+D-Q2-bringup-matrix go-arm-only tp4-drafter-b16-1 45
+D-Q3-singles-quad-audits-4live go-arm-only tp4-drafter-b16-1 25
+D-Q4-hang-shapes-1 go-arm-only tp4-drafter-b16-1 15
+D-Q4-hang-shapes-2 go-arm-only tp4-drafter-b16-1 15
+D-Q4-hang-shapes-3 go-arm-only tp4-drafter-b16-1 15
+D-Q4-hang-shapes-4 go-arm-only tp4-drafter-b16-1 15
+D-Q4-hang-shapes-5 go-arm-only tp4-drafter-b16-1 15
+D-Q5-attach-8x262k go-arm-only tp4-drafter-b16-1 25
+D-Q6-abab-1-A go-arm-only tp4-drafter-1 20
+D-Q6-abab-2-B go-arm-only tp4-drafter-b16-1 20
+D-Q6-abab-3-A go-arm-only tp4-drafter-1 20
+D-Q6-abab-4-B go-arm-only tp4-drafter-b16-1 20
+Z-reset soft tp4-drafter-1 5
