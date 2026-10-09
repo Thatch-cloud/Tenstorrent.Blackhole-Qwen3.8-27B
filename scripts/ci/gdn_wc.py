@@ -133,6 +133,9 @@ def enabled(environ=None):
             raise ValueError('%s needs %s=1 (it replaces the V1 block conv chain)' % (FLAG, lever))
     if not t2_windows_cut(source):
         raise ValueError('%s needs %s=1 with the windows cut (the T2 packed windows are what it writes)' % (FLAG, T2_FLAG))
+    if _read(spread.AUDIT_FLAG, source):
+        # F1's audit demands its three entries on every audited layer; a layer WC serves never calls F1's launch, so that audit would fail it.
+        raise ValueError('%s=1 cannot be set beside %s=1 (F1 is only the fall-back launch; %s audits WC)' % (spread.AUDIT_FLAG, FLAG, AUDIT_FLAG))
     if tp4_vglue.audit_enabled(source) and not _read(AUDIT_FLAG, source):
         # The V1 audit expects eight 'block conv user' entries per user and layer; a layer WC served has none unless WC's audit makes them.
         raise ValueError('%s=1 with %s=1 needs %s=1 (a layer WC serves has no V1 block entries to audit)' % (tp4_vglue.AUDIT, FLAG, AUDIT_FLAG))

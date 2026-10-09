@@ -127,9 +127,13 @@ class FlagTests(unittest.TestCase):
         with clean(**dict(LEVER, QWEN_FAST_TP4_VGLUE_AUDIT='1')), self.assertRaisesRegex(ValueError, 'no V1 block entries'):
             gdn_wc.enabled()
 
-    def test_f1_may_be_set_beside_it(self):
+    def test_f1_may_be_set_beside_it_but_not_its_audit(self):
         with clean(**dict(LEVER, **{spread.FLAG: '1'})):
             self.assertTrue(gdn_wc.enabled())
+        with clean(**dict(AUDITED, **{spread.FLAG: '1'})):
+            self.assertTrue(gdn_wc.audit_enabled())
+        with clean(**dict(AUDITED, **{spread.FLAG: '1', spread.AUDIT_FLAG: '1'})), self.assertRaisesRegex(ValueError, 'fall-back launch'):
+            gdn_wc.enabled()
 
     def test_the_literals_in_the_twin_and_the_smoke_rule_are_the_modules(self):
         import gdn_device_loop_state_tp as twin

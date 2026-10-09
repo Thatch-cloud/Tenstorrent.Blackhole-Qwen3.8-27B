@@ -12,7 +12,7 @@ Labels: (src) read from the code, (cm) computed, (e) estimate, (U) unknown until
 
 | Flag | Effect |
 |---|---|
-| `QWEN_FAST_TP4_GDN_WC=1` | One `generic_op` per GDN layer and packed block in place of the split/T2/canon/stack/conv-gates/unstack chain. Needs `QWEN_FAST_TP=4`, `QWEN_FAST_TP4_GDN_GLUE=1`, `QWEN_FAST_TP4_GDN_BLOCK_CONV=1` and `QWEN_FAST_VERIFY_T2=1` with the windows cut; strict 0/1, anything else raises. `QWEN_FAST_TP4_CONV_GATES_SPREAD=1` may be set beside it: F1 stays the launch for a layer WC declines. |
+| `QWEN_FAST_TP4_GDN_WC=1` | One `generic_op` per GDN layer and packed block in place of the split/T2/canon/stack/conv-gates/unstack chain. Needs `QWEN_FAST_TP=4`, `QWEN_FAST_TP4_GDN_GLUE=1`, `QWEN_FAST_TP4_GDN_BLOCK_CONV=1` and `QWEN_FAST_VERIFY_T2=1` with the windows cut; strict 0/1, anything else raises. `QWEN_FAST_TP4_CONV_GATES_SPREAD=1` may be set beside it: F1 stays the launch for a layer WC declines (but `QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT=1` may not: a layer WC serves never calls F1's launch, so F1's audit would fail it). `QWEN_FAST_TP4_VGLUE_AUDIT=1` with the lever needs the WC audit flag (a layer WC serves has no V1 block entries). The profile env is the W2 profile's (glue, block conv, F1) plus the flag; `QWEN_FAST_VERIFY_T2=1` comes from the serving image's own environment. |
 | `QWEN_FAST_TP4_GDN_WC_AUDIT=1` | Needs the lever and `QWEN_FAST_TP4_VGLUE_AUDIT=1`. WC's per-user conv, beta, g, z and all sixteen advanced windows are held against the SERVED per-user path in the replay (the V1 audit's `hold_served`), every user, every chip, as int16 bits. |
 
 With the flag unset `gdn_wc` is not imported and the code path is the V1 path byte for byte (`test_tp4_w3_wc.FlagOffIdentityTests`).
