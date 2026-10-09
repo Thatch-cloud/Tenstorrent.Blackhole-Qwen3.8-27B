@@ -1,0 +1,30 @@
+# LEVERN-FLOOR 'the decode-gap floor test': ONE short card window (about 70 minutes) that tests the fix on tp4/levern-alternation-fix (the 8 s decode-gap floor, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S) against the hang shapes
+# that failed twice on 2026-10-08 (HL-LN, v584: a 199 s decode-less stretch; v620: 241 back-to-back prefill step pairs). One attach (A0X0), ONE fresh-boot hang-shape smoke (HLF, soft class so that its result never strands the
+# hand-back), then the hand-back exactly as the session 0808b pack ends: ZR, LM, TICK, Z, and the operator's release step. Nothing else runs: no digest, no audit, no timed block (so no ARC-ZERO range), no hash comparison.
+# NEVER run this pack beside tp4-session-0808 or tp4-session-0808b: they share the cards and some tags. Launch it only when no driver holds the cards (production TT goes down at A0X0).
+#
+# CLOCK: the launch wrapper turns offsets into minutes from the driver's own start (A0X0 = minute 0). The numbers below (CAP 100, TARGET 70) are the defaults and the wrapper restates them at launch; the hard cap is minute 120.
+# ADMIT-ON-BOX: with E the elapsed minutes since A0X0 and HB the end-sequence reserve (RESERVE-MIN, 40), a job STARTS only if E + its BOX + HB <= CAP: HLF starts at E = 4 and 4 + 55 + 40 = 99 <= 100.
+# One line per job: <template name without .env> <class> <image tag> <estimated minutes> <tag> <box minutes>. The estimates are those of the session 0808b pack: an attach takes 2 to 5 minutes, a Lever N hang-shape
+# smoke 28 (HL-LN), ZR 8, LM 6, TICK 6, Z 12, the operator's release step 8. A box is the high end of the range (55 for the smoke).
+# CLASSES. stop: the window halts at its first failure (the hand-back still runs). soft: data; a failure or a skip does not stop the window. hand: the hand-back, always runs. drv: a DRIVER or OPERATOR step with no template and no tag.
+#
+# TAGS: experiment/c2-serving-vN, hardware-allowlisted (runner group 3) and unpushed at the time of writing (git ls-remote, read-only check 2026-10-09). All come from the unused top of the allowlist; the RESERVE
+# (a re-run of A0X0, ZR or Z) is v602, v603, v606. The driver refuses a tag that exists on the remote.
+#
+# DEPENDENCIES: '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every item on the right completed and passed its READ rule.
+# NEEDS HLF <- A0X0
+# A stop-class failure (A0X0) skips everything but the hand-back.
+#
+# WINDOW END handback
+# WINDOW CAP 100
+# WINDOW TARGET 70
+# WINDOW RESERVE-MIN 40
+# WINDOW RESERVE v602 v603 v606
+A0X0-agentstop-unserve-rescan-reset stop tp4-serve-12b 4 v597 -
+HLF-hang-shapes-levern-floor soft tp4-serve-12b 28 v598 55
+ZR-reset-all-four hand tp4-serve-12b 8 v599 -
+LM-links-remeasure drv - 6 - -
+TICK-topology-wait drv - 6 - -
+Z-handback hand tp4-serve-12b 12 v601 -
+DEPLOY-and-engine-load drv - 8 - -
