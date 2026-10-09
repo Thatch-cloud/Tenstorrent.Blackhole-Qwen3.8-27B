@@ -18,6 +18,7 @@ COPY scripts/ci/serving_fast_request.py /experiment-scripts/ci/
 COPY scripts/ci/serving_worker_hook.py /experiment-scripts/ci/
 COPY scripts/ci/serving_one_in_flight.py /experiment-scripts/ci/
 COPY scripts/ci/serving_solo_lane.py /experiment-scripts/ci/
+COPY scripts/ci/serving_octo.py /experiment-scripts/ci/
 COPY scripts/ci/request_width_warm.py /experiment-scripts/ci/
 COPY scripts/ci/runtime_binary_override.py /experiment-scripts/ci/
 COPY scripts/ci/dflash_proposal_trace.py /experiment-scripts/ci/
