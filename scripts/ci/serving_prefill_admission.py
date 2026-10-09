@@ -183,6 +183,7 @@ STEPS_FLAG = 'QWEN_FAST_DECODE_STEPS_PER_ADMISSION'
 MAX_STEPS = 64
 CREDIT_ARMED_LINE = '[PINDIAG] decode credit armed steps={} decodes={} waiting={}'
 CREDIT_HOLD_LINE = '[PINDIAG] decode credit hold left={} decodes={}'
+GATE_CARRIED_LINE = ('[PINDIAG] gate-held pass carried finished={} past the discarded prefill pass into the decode-only step')
 CREDIT_CARRIED_LINE = ('[PINDIAG] decode credit carried finished={} past the discarded prefill pass into the '
                        'decode-only step')
 CREDIT_REFUSED_LINE = '[PINDIAG] decode credit REFUSED {!r}: {}; the one-fresh-prefill cap is installed with the credit off'
@@ -922,6 +923,11 @@ def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None, lever
             carry_finished(self, result, decodes, log, kv.CARRIED_LINE)
         elif credit_held:
             carry_finished(self, result, decodes, log, CREDIT_CARRIED_LINE)
+        elif hide:
+            # Any other hidden pass (the prefill gate held, with or without a partial in flight): when it schedules nothing the plugin discards it for a
+            # decode-only pass, which must name the finished ids this pass took. Without it a prompt aborted mid-prefill leaves the gate held for good and
+            # the next decoder to finish leaves a bridge vLLM no longer schedules (HLF v589, run 37868643564: 'Live prepared request ticket required').
+            carry_finished(self, result, decodes, log, GATE_CARRIED_LINE)
         elif steps and not hide and allowed and getattr(result, 'total_num_scheduled_tokens', 0):
             # An admission: the decodes it paused are owed R steps before the next prompt (the module docstring).
             state['credit'] = steps
