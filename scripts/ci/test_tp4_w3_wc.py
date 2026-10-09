@@ -985,6 +985,7 @@ class ShipmentTests(unittest.TestCase):
         workflow = text('../../.github/workflows/qwen-integration-cpu.yml')
         for name in ('test_gdn_wc', 'test_tp4_w3_wc'):
             self.assertRegex(workflow, r'python -B -m unittest [^\n]*\b%s\b' % name)
+        self.assertIn("python -B -m unittest discover -s optimisation/ttnn-op/gdn_wc -p 'test_*.py'", workflow)
 
 
 if __name__ == '__main__':
