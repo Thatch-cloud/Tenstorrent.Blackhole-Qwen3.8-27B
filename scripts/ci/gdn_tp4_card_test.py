@@ -175,10 +175,12 @@ def scope_of(report):
 def verdict_line(report):
     decision = report['decision']
     tallies = report.get('tally', {})
-    return '%s verdict=%s scope=%s tp=%s chips=1of%s comparisons=%d differing=%d sections=%s geometry=%s' % (
+    line = '%s verdict=%s scope=%s tp=%s chips=1of%s comparisons=%d differing=%d sections=%s' % (
         VERDICT, decision['verdict'], scope_of(report), report.get('tp'), report.get('tp'),
-        tallies.get('comparisons', 0), tallies.get('differing', 0), ','.join(report.get('requested', [])),
-        report.get('geometry', '%dx%d' % (USERS, ROWS)))
+        tallies.get('comparisons', 0), tallies.get('differing', 0), ','.join(report.get('requested', [])))
+    geometry = report.get('geometry')
+    # only a block other than the default 4 x 16 names itself: every earlier verdict line is byte for byte what it was
+    return line if geometry in (None, '%dx%d' % (USERS, ROWS)) else '%s geometry=%s' % (line, geometry)
 
 
 def tally(comparisons):

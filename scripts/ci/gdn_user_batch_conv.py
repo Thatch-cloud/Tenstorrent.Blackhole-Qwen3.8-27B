@@ -78,6 +78,14 @@ def conv_gates(operations, projected, windows, taps, dt_bias, neg_exp_A, rows):
         channels=found.gdn_qkv, a_col=found.gdn_a_col, b_col=found.gdn_b_col)
 
 
+def eight_row_block(groups):
+    """Whether these (projected, initial, conv_states) users are the octo block's: eight users of eight rows each."""
+    try:
+        return len(groups) == 8 and all(len(user[0].shape) == 3 and tuple(user[0].shape)[1] == 8 for user in groups)
+    except (TypeError, IndexError, AttributeError):
+        return False
+
+
 def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, kernels, operations=None, *,
                                dma_windows=True, packed_checkpoints=True, defer_conv_publication=True,
                                prefix_zero_reuse=False, output_memory=None, block_stage=None):
@@ -123,7 +131,14 @@ def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, ke
                                                       operations=operations)
             except Unsupported as reason:
                 t2_note('windows_fallback')
-                t2_fell_back('windows', reason)
+                if eight_row_block(groups):
+                    # Octo-T8: eight users of eight rows are a quarter tile each, which the packed windows kernel (16-row users) does not move; the served per-user
+                    # windows run (exact). Its own marker, not the FALLBACK a gated arm fails on: the block's known state (docs/tp4-octo.md).
+                    import tp4_vglue
+
+                    tp4_vglue.log_once_line('%s site=windows reason=%s' % (tp4_vglue.EIGHT_ROW_SERVED, reason), 'windows')
+                else:
+                    t2_fell_back('windows', reason)
             else:
                 owned.extend(window for user in packed_windows for window in user)
                 t2_note('windows')

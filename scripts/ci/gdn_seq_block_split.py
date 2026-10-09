@@ -454,7 +454,7 @@ def execute(mesh, users, operations=None, *, output_memory=None, kernels=None):
         raise
 
 
-def audit(root=DEFAULT_ROOT, users=quad_batch.MAX_USERS, variant='A', diag=None, depth=DEPTH):
+def audit(root=DEFAULT_ROOT, users=quad_batch.PAIR_MAX_USERS, variant='A', diag=None, depth=DEPTH):
     """Host-only description of what one split launch would build; never opens a device."""
     kernels = load_kernels(root, variant=variant, diag=diag, depth=depth, unqualified=True)
     io, fp32 = cb_plan(depth)
@@ -477,7 +477,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Read-only host audit; never opens a device')
     parser.add_argument('--root', type=Path, required=True)
-    parser.add_argument('--users', type=int, default=quad_batch.MAX_USERS)
+    parser.add_argument("--users", type=int, default=quad_batch.PAIR_MAX_USERS)
     parser.add_argument('--variant', choices=VARIANTS, default='A')
     parser.add_argument('--diag', choices=[value for value in DIAGNOSTICS if value], default=None)
     parser.add_argument('--depth', type=int, choices=DEPTHS, default=DEPTH)

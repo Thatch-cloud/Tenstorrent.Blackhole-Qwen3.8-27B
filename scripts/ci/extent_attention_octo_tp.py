@@ -11,8 +11,7 @@ segment reader and replaces its constructor's two G8B2 refusals (the bundle coun
 line for line: the same word, the same cur_pos, the same narrow masks from the same pinned mask kernel (prepare_narrow at one batch), the same
 staging and the same call (execute_extent, which already takes bundles of one to three groups). The K64j binary and its four kernels are
 UNCHANGED: 0x21 is an existing K64j flag set (K1/K3 qualified it at G8B2 and G4B3, and the harness skip section ran a one-entry bundle); what no card has
-run is a bundle of one eight-row group, which is the qualification job Q1 (optimisation/ttnn-op/k64j: k64j_card_b.py combo G8B1:0x21, extent_reader_card_b.py
---octo). Until Q1 passes the geometry is UNQUALIFIED and gate only (serving_octo logs it).
+run is a bundle of one eight-row group, which is the qualification job Q1 (optimisation/ttnn-op/k64j: k64j_card_b.py --kv-heads 1 --octo, combo G8B1:0x21). Until Q1 passes the geometry is UNQUALIFIED and gate only (serving_octo logs it).
 
 WHAT STAYS THE SAME PER ROW. The accumulation order of a row's online softmax is fixed by the 256-key chunk boundaries, the per-core chunk ranges and
 the reduction tree (cores per entry, 16 for any bundle of one to three entries) and the per-op arithmetic. A bundle of one entry has the same

@@ -728,6 +728,40 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(t2.take(), {'windows_fallback': 2})
         self.assertEqual(logged, ['[PINDIAG] verify t2 fell back site=windows reason=rows 8 != 16'])
 
+    def test_the_octo_blocks_declined_windows_are_logged_under_the_octo_marker_not_the_gated_fallback(self):
+        # Octo-T8: eight users of eight rows are a quarter tile each; the packed windows kernel moves 16-row users, so the served windows run (exact). A gated arm fails on
+        # '[PINDIAG] verify t2 fell back' (lever_n_m3native_gate.verify_t2_problems), so the block's known state has its own marker.
+        import gdn_conv_windows_packed
+        import gdn_user_batch_conv
+        import tp4_vglue
+
+        def refuse(mesh_, group, operations=None):
+            raise gdn_conv_windows_packed.Unsupported('8 users outside 1..4')
+
+        logged, notices = [], []
+        with patch.object(t2, 'log_line', side_effect=logged.append), patch.object(tp4_vglue, 'log_line', side_effect=notices.append), \
+                patch.object(gdn_user_batch_conv, 'eight_row_block', return_value=True), patch.object(tp4_vglue, '_LOGGED_ONCE', set()):
+            self.run_block(ON, packed=refuse)
+            self.run_block(ON, packed=refuse)
+        self.assertEqual(logged, [], 'no verify t2 fell back line')
+        self.assertEqual(notices, ['%s site=windows reason=8 users outside 1..4' % tp4_vglue.EIGHT_ROW_SERVED], 'once per process')
+        self.assertEqual(self.order().count('windows'), 8, 'the served windows ran')
+        self.assertEqual(t2.take(), {'windows_fallback': 2}, 'still counted')
+
+    def test_the_eight_row_block_predicate_is_exactly_eight_users_of_eight_rows(self):
+        from types import SimpleNamespace
+
+        import gdn_user_batch_conv as conv
+
+        def groups(users, rows):
+            return [(SimpleNamespace(shape=(1, rows, 5120)), None, None) for _ in range(users)]
+
+        self.assertTrue(conv.eight_row_block(groups(8, 8)))
+        for users, rows in ((4, 16), (4, 8), (8, 16), (2, 8), (7, 8), (9, 8)):
+            self.assertFalse(conv.eight_row_block(groups(users, rows)), (users, rows))
+        self.assertFalse(conv.eight_row_block([]))
+        self.assertFalse(conv.eight_row_block(None))
+
     def test_skipping_the_cut_is_todays_path(self):
         self.run_block(dict(ON, QWEN_FAST_VERIFY_T2_SKIP='windows'))
         self.assertEqual(self.order(), ['windows', 'conv_gates', 'slice'] * 4 + ['batched'])

@@ -1610,10 +1610,57 @@ def replace_run(lines, run, replacement):
 
 
 def without_octo(lines):
-    """serving_runtime.py less the octo-T8 hunk (QWEN_FAST_OCTO and QWEN_FAST_SOLO_PACKED, tp4/octo-t8; default off), which landed after every parent this test compares with:
-    the two lazy admissions and the tripwire after them. Nothing else of the attach changed for it."""
-    return cut_once(lines, '# QWEN_FAST_OCTO (octo-T8; default off, strictly off|live|alternate) and QWEN_FAST_SOLO_PACKED (the lone-user padded round; default off, strictly \'0\' or',
-                    "raise ValueError('QWEN_FAST_OCTO=%s was admitted but this attach builds no octo block (serving_octo.DEVICE_PIECES: attach-build)' % octo_record['mode'])")
+    """serving_runtime.py less the octo-T8 hunks (QWEN_FAST_OCTO and QWEN_FAST_SOLO_PACKED, tp4/octo-t8; default off), which landed after every parent this test compares with:
+    the two lazy admissions and the comment after them, the octo shape in the pool's shapes, the third block's construction in the block loop, its completion and checks
+    beside the two M3 blocks, its binding into the step and the admission, and the one-line widening of complete_blocks_two_phase for the block that keeps its own publication
+    warm. Every statement they add or widen is put back to the line it was, each found exactly once, so nothing else is hidden."""
+    lines = cut_once(lines, '# QWEN_FAST_OCTO (octo-T8; default off, strictly off|live|alternate) and QWEN_FAST_SOLO_PACKED (the lone-user padded round; default off, strictly \'0\' or',
+                     "# attach proves it did (`octo_block` is not None, in the packed step): an admitted flag with no block built would be a mounted change that never executes.")
+    lines = cut_once(lines, 'before the first capture, inside the same guard - a failure closes both blocks without the fence and propagates.',
+                     'Its warm runs in finish_construction, after the LAST block\'s capture, like the first block\'s."""',
+                     [' ' * 4 + 'before the first capture, inside the same guard - a failure closes both blocks without the fence and propagates."""'])
+    lines = replace_run(lines, ("if index and getattr(block, 'keep_publication_warm', False) is not True:",), [' ' * 12 + 'if index:'])
+    lines = cut_once(lines, '# Octo-T8: the pool also lends the third block its own extent storage, a (8, 8) set (one bundle of one group per user) beside M3\'s (4, 16) x 2.',
+                     'distinct_shapes = distinct_shapes + ((octo_shape_value.users, octo_shape_value.rows_per_user),)')
+    lines = cut_once(lines, '# Octo-T8 (QWEN_FAST_OCTO): the third block, built last and captured with the two M3 blocks (complete_blocks_two_phase), over ALL eight pool slots - its',
+                     'is_octo = octo_shape_value is not None and shape is octo_shape_value', [' ' * 12 + 'for shape in packed_shapes:'])
+    lines = replace_run(lines, ("**({'pool_slots': tuple(range(shape.users)) if is_octo else tuple(range(slot, slot + shape.users))}", 'if four_as_two or m3_blocks_two else {}),'),
+                        [' ' * 52 + "**({'pool_slots': tuple(range(slot, slot + shape.users))}", ' ' * 55 + 'if four_as_two or m3_blocks_two else {}),'])
+    lines = replace_run(lines, ("**({'padded_min_users': octo_record['min_live']} if is_octo",
+                                "else {'padded_min_users': padded_min_users} if padded_min_users is not None else {}),"),
+                        [' ' * 52 + "**({'padded_min_users': padded_min_users}", ' ' * 55 + 'if padded_min_users is not None else {}),'])
+    lines = replace_run(lines, ('if not is_octo:', 'slot += shape.users',
+                                '# The octo block leaves the list the M3 pairing code reads (place_blocks, per-block widths): it is a separate third block of the PackedStep.',
+                                'octo_block = packed_blocks.pop() if octo_shape_value is not None else None', 'if octo_block is not None:',
+                                'octo_block.keep_publication_warm = True       # (complete_blocks_two_phase: its plan has 32 shapes no M3 warm ran)'),
+                        [' ' * 16 + 'slot += shape.users'])
+    lines = replace_run(lines, ('every_block = packed_blocks + ([octo_block] if octo_block is not None else [])',), [])
+    lines = replace_run(lines, ('complete_blocks_two_phase(every_block, model, before_captures=lambda: warm_request_widths(',),
+                        [' ' * 20 + 'complete_blocks_two_phase(packed_blocks, model, before_captures=lambda: warm_request_widths('])
+    lines = replace_run(lines, ('complete_blocks_two_phase(every_block, model)',), [' ' * 20 + 'complete_blocks_two_phase(packed_blocks, model)'])
+    lines = replace_run(lines, ('for index, packed_block in enumerate(every_block, 1):',
+                                "memory_ledger.record('P6', point='block%d' % index if packed_block is not octo_block else 'octo', packed_block=packed_block)"),
+                        [' ' * 16 + 'for index, packed_block in enumerate(packed_blocks, 1):',
+                         ' ' * 20 + "memory_ledger.record('P6', point='block%d' % index, packed_block=packed_block)"])
+    lines = replace_run(lines, ('refused_blocks = [index for index, packed_block in enumerate(packed_blocks + ([octo_block] if octo_block is not None else []))',),
+                        [' ' * 16 + 'refused_blocks = [index for index, packed_block in enumerate(packed_blocks)'])
+    lines = replace_run(lines, ("extents = [getattr(packed_block, 'extent', False)",
+                                'for packed_block in packed_blocks + ([octo_block] if octo_block is not None else []) + ([solo_block] if solo_block is not None else [])]'),
+                        [' ' * 12 + "extents = [getattr(packed_block, 'extent', False)",
+                         ' ' * 23 + 'for packed_block in packed_blocks + ([solo_block] if solo_block is not None else [])]'])
+    lines = cut_once(lines, 'octo_state = None', "octo_state = serving_octo.OctoState(octo_record['mode'], octo_record['min_live'], programs=lambda: program_count(model))")
+    lines = replace_run(lines, ("**({'per_block_widths': True} if m3_blocks_two else {}),",
+                                "**({'octo': octo_block, 'octo_state': octo_state} if octo_block is not None else {}))"),
+                        [' ' * 37 + "**({'per_block_widths': True} if m3_blocks_two else {}))"])
+    lines = replace_run(lines, ('**(dict(solo=solo_block.describe()) if solo_block is not None else {}),',
+                                '**(dict(octo=octo_block.describe()) if octo_block is not None else {}))'),
+                        [' ' * 16 + '**(dict(solo=solo_block.describe()) if solo_block is not None else {}))'])
+    lines = replace_run(lines, ('packed_any_admission.admit_blocks(packed_blocks + ([octo_block] if octo_block is not None else [])',
+                                '+ ([solo_block] if solo_block is not None else []), log=pindiag)'),
+                        [' ' * 12 + 'packed_any_admission.admit_blocks(packed_blocks + ([solo_block] if solo_block is not None else []),',
+                         ' ' * 46 + 'log=pindiag)'])
+    return replace_run(lines, ('collectives=collectives, blocks=(packed_blocks + ([octo_block] if octo_block is not None else [])) if packed_shapes else (),',),
+                       [' ' * 20 + 'collectives=collectives, blocks=packed_blocks if packed_shapes else (),'])
 
 
 def without_solo_and_lanes(lines):

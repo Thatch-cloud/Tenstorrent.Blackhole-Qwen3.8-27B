@@ -113,6 +113,18 @@ def marker(site, **counts):
     return ' '.join([ENGAGED, 'site=%s' % site] + ['%s=%s' % pair for pair in counts.items()])
 
 
+_LOGGED_ONCE = set()
+
+
+def log_once_line(message, key):
+    """log_line, once per process per `key` (the octo block's served-path notices repeat on every layer of every capture)."""
+    if key in _LOGGED_ONCE:
+        return False
+    _LOGGED_ONCE.add(key)
+    log_line(message)
+    return True
+
+
 def log_line(message):
     """One line into the server log: loguru where it exists, stdout otherwise. Never raises."""
     try:
@@ -225,15 +237,16 @@ def missing_entries(result, environ=None):
     return found
 
 
-def audit_round(operations, records, round_number):
+def audit_round(operations, records, round_number, served_only=False):
     """Compare the layers verify_trace_t2.audit_layers names for this round (every layer on round 1, then two per round in
     rotation). Every audited layer must carry the entries the engaged GDN levers imply (a lever that declined on a layer is
     a failure, not a pass on what is left) and something must have been compared. Logs AUDIT_MARKER
     '<n> exact=True layers=<L> entries=<k>' or AUDIT_MISMATCH and raises. With neither GDN lever on there is nothing for
-    this audit to read (V4a has its own in packed_verifier) and it returns 0 without a line."""
+    this audit to read (V4a has its own in packed_verifier) and it returns 0 without a line. `served_only` (the octo block's eight-row users, which run the
+    SERVED path under EIGHT_ROW_SERVED: no lever engaged, so no entry exists and the served path is its own reference) returns 0 the same way."""
     import verify_trace_t2
 
-    if not (enabled(GDN_GLUE) or pair_slice_enabled()):
+    if served_only or not (enabled(GDN_GLUE) or pair_slice_enabled()):
         return 0
     layers = verify_trace_t2.audit_layers(round_number, len(records) or verify_trace_t2.GDN_LAYERS)
     compared, mismatches = 0, []

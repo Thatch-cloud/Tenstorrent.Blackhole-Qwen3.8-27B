@@ -247,6 +247,17 @@ class TwinTests(PackedFixture):
         self.assertFalse(tp4_vglue.EIGHT_ROW_SERVED.startswith(tp4_vglue.FALLBACK))
         self.assertEqual(tp4_vglue.take(), {'gdn_split_eight_row_served': 1, 'gdn_merge_eight_row_served': 1})
 
+    def test_the_audit_has_nothing_to_read_at_the_octo_blocks_served_path_and_still_fails_a_lever_that_declined_elsewhere(self):
+        # QWEN_FAST_TP4_VGLUE_AUDIT demands an entry per lever per user for the audited layers; the octo block's glue sites run the served path, so it holds none, and
+        # served_only (packed_verifier passes it for 8 users x 8 rows) says so instead of raising 'nothing compared' on the first octo replay.
+        records = [(0, {'segment_results': [{} for _ in range(8)]})]
+        with four(), env(QWEN_FAST_TP4_GDN_GLUE='1', QWEN_FAST_TP4_GDN_BLOCK_CONV='1', QWEN_FAST_TP4_VGLUE_AUDIT='1'):
+            self.assertEqual(tp4_vglue.audit_round(None, records, 1, served_only=True), 0)
+            with self.assertRaises(AssertionError):
+                tp4_vglue.audit_round(None, records, 1)           # the same records on an M3 block: a declined lever is a failure
+        text = (HERE / 'packed_verifier.py').read_text(encoding='utf-8')
+        self.assertIn('served_only=(self.users, self.rows_per_user) == (8, 8)', text)
+
     def test_a_launch_the_kernel_cannot_carry_falls_back_before_any_state_move(self):
         with four():
             expected, expected_calls, unused = self.run_decode(pinned_state.DeviceLoopState)

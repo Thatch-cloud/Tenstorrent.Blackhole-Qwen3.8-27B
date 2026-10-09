@@ -90,7 +90,9 @@ All five are built on the host; each has CPU tests, and none has run on a card.
    arrival placement is still by M3 block (`place_blocks`). Tests: `test_serving_runtime` (the attach on its fakes with a third block), `test_octo_block` (the real block at 8 x 8 on the fake device).
 2. **gdn-batch.** `gdn_user_batch_tp.MAX_USERS` is 8 (the unpinned TP4 sibling; the pair's `gdn_user_batch` is hash-pinned at 4 and untouched): one launch is 8 users x 12 heads = 96 of the 110 cores, disjoint
    contiguous shares, one wave, the same kernels per worker. The first four users sit on the cores a four-user launch uses. Card question: job Q2 (`gdn_tp4_card_test.py --users 8 --rows 8`: one launch == eight per-user
-   launches bit for bit, the head-slice equivalence against the pinned pair launch, the native twin), watcher pass first.
+   launches bit for bit, the head-slice equivalence against the pinned pair launch, the native twin), watcher pass first. Note which launch it is: K5-A (`gdn_seq_block`, what the M3 blocks run under
+   `QWEN_FAST_GDN_SEQ_BLOCK=1`) needs every user at 16 rows, so the octo block runs the SERVED batched launch (`gdn_user_batch_tp.execute`, rows as a runtime argument); the octo and M3 recurrences are
+   the same arithmetic only through K5-A's qualification against that served launch (the K5 evidence) and E1/E2, not through Q2, whose K5 section is refused at 8 x 8.
 3. **attention-8row.** **No kernel and no graft change.** K64j's flag sets are per call: 0x23 (tail | share | extent) is the M3 bundle of two eight-row groups, and 0x21 (tail | extent) is the same program at ONE
    entry (`pooled_attention_replay.mode_flags` drops the share bit when a bundle has one entry; the q-slice is illegal at one KV head). CB1 qualified 0x21 at G8B2 and G4B3 on one KV head and the harness ran a
    one-entry bundle's skip; what no card has run is the bundle of ONE eight-row group (G8B1), and at one entry the cores per entry (16), the chunk split and the reduction tree are each G8B2 entry's, so an octo row is
@@ -111,6 +113,8 @@ All five are built on the host; each has CPU tests, and none has run on a card.
   sites take the pinned (served) path - exact, the same arithmetic as before the levers - and say so with `[PINDIAG] tp4 vglue octo 8-row served path` (a distinct marker: a gated arm fails on `FALLBACK`, and
   this is the block's known state). The octo pass therefore pays those launches (V2 saved 4.7 ms and V1 3.8 ms per M3 pass in `docs/tp4-vglue.md`; the packed windows an unmeasured amount) that the estimate in
   section 1 did not include. A quarter-tile glue is the follow-up if the exactness jobs pass and the gain is short; it is a new kernel mode and a new qualification, not built here.
+* **The audits at the octo block.** `QWEN_FAST_TP4_VGLUE_AUDIT` and the T2 windows audit read lever entries the octo block does not have (its glue sites run the served path); the vglue audit is told (`served_only`) and the
+  windows audit is off because no packed window engaged. The M3 blocks keep both. Every other audit of the audited twin (T1 sampler, extent, fused commit, unit-major reduction, prestage) is generic in users and rows.
 * **Attention is eight launches of one entry per layer.** The two M3 blocks make four launches of two shared entries each; the per-user KV bytes are the same, so the octo pass's attention equals the two M3 passes' total.
   The estimate "the second trace disappears" holds for the dense weights, the collectives and the sampler; it does not for the attention, which grows with context. P1 at 32k and above reads it.
 * **Memory is the named risk.** The plan sizes the third block as one more M3 block. The octo block holds eight per-user state sets (checkpoints, retained entries) where an M3 block holds four. A reading of the

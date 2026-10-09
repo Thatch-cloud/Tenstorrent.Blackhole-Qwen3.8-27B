@@ -73,6 +73,21 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(card_b.SERVED_GEOMETRIES['G8B1'], dict(ticket_rows=8, rows=8, batch=1, offsets=(0,)))
         self.assertEqual(card_b.SHAPES['G8B1'], (card_b.SERVED_GEOMETRIES['G8B1']['rows'], card_b.SERVED_GEOMETRIES['G8B1']['batch']))
 
+    def test_one_entry_splits_every_family_exactly_as_each_entry_of_the_m3_bundle_does(self):
+        # The argument that an octo row is the M3 row at another launch geometry: the factory's cores per head depend on B (16 for B <= 3), and at 16 cores the chunk split, the
+        # per-core ranges and the reduction tree are functions of the family alone. B = 1 and B = 2 therefore run the same partition; share only changes who reads the keys.
+        self.assertEqual((model.cores_per_head(1), model.cores_per_head(2), model.cores_per_head(3)), (16, 16, 16))
+        for capacity in (131328, 262144):
+            for extent in model.families(capacity):
+                for position in (extent - 256, extent - 1):
+                    if position >= card_b.MIN_LIVE_START:
+                        self.assertEqual(model.split(position, model.cores_per_head(1)), model.split(position, model.cores_per_head(2)), position)
+        self.assertEqual([model.tree_params(core, 16) for core in range(16)], [model.tree_params(core, model.cores_per_head(1)) for core in range(16)])
+        # the stale-writer zone (a writer on the compile-time word hangs where E / 256 < cores per head) is the same 15 families for both bundles, which Z replays at G8B1
+        zone = [extent for extent in model.families(4352) if model.stale_writer_hangs(extent - 1, 4352, model.cores_per_head(1))]
+        self.assertEqual(zone, [extent for extent in model.families(4352) if model.stale_writer_hangs(extent - 1, 4352, model.cores_per_head(2))])
+        self.assertEqual(sorted(set(card_b.Z_FAMILIES) & set(zone)), sorted(set(zone) & set(card_b.Z_FAMILIES)))
+
     def test_the_flags_of_the_served_ticket(self):
         self.assertEqual(card_b.served_flags_for(card_b.ONE_KV_HEAD, 'G8B1'), (0x21, 0x1))
         self.assertEqual(card_b.served_flags_for(card_b.ONE_KV_HEAD), (0x23, 0x3), 'the M3 ticket, unchanged')

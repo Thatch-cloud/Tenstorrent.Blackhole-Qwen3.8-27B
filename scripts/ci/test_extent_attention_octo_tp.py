@@ -4,7 +4,7 @@ What this proves, and what it cannot. The pinned twin (extent_attention_replay_t
 reader accepts exactly that and nothing else, runs the SAME word / cur_pos / narrow-mask / staging / call code as the pinned segment reader, and asks the SDPA op for a
 bundle of one entry at flags 0x21. The block fold (QWEN_FAST_TP4_ATTN_FOLD) is shown byte for byte equal to the served composition at eight segments of one group, by
 the kernel-emulating oracle of test_tp4_vglue_attention. Nothing here is a kernel result: whether K64j's 0x21 program at a bundle of ONE eight-row group equals the native
-row-by-row decode is the qualification job Q1 (k64j_card_b.py combo G8B1:0x21, extent_reader_card_b.py --octo)."""
+row-by-row decode is the qualification job Q1 (k64j_card_b.py --kv-heads 1 --octo, combo G8B1:0x21)."""
 
 import os
 import sys

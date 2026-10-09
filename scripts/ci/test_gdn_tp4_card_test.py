@@ -193,7 +193,9 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(card.scope_of(self.report(['UB', 'NT'], [self.equal('UB'), self.equal('NT')], geometry='8x8', reduced=True)), 'reduced')
         default = card.parse(['--out', 'x.json'])
         self.assertEqual((default.users, default.rows), (4, 16), 'the M3 block, as it always ran')
-        self.assertTrue(card.verdict_line(self.report(card.FOUR_SECTIONS, [self.equal(name) for name in card.FOUR_SECTIONS])).endswith('geometry=4x16'))
+        plain = card.verdict_line(self.report(card.FOUR_SECTIONS, [self.equal(name) for name in card.FOUR_SECTIONS], geometry='4x16'))
+        self.assertNotIn('geometry', plain, 'the default block\'s verdict line is what it always was')
+        self.assertNotIn('geometry', card.verdict_line(self.report(card.FOUR_SECTIONS, [self.equal(name) for name in card.FOUR_SECTIONS])))
         for options in (['--users', '8'], ['--rows', '8'], ['--users', '9', '--rows', '8'], ['--users', '8', '--rows', '8', '--sections', 'UB,K5'],
                         ['--users', '8', '--rows', '8', '--sections', 'DMA']):
             with self.subTest(options=options), self.assertRaises(SystemExit):
