@@ -65,5 +65,45 @@ class M3ShapeTests(unittest.TestCase):
                 m3_shape(page_width)
 
 
+class OctoShapeTests(unittest.TestCase):
+    """Octo-T8 (QWEN_FAST_OCTO): eight users of eight rows in the SAME 64-row block geometry, never a serving count."""
+
+    def test_octo_is_eight_t8_users_in_one_sixty_four_row_block(self):
+        from packed_shapes import OCTO_BLOCK_ROWS, OCTO_ROWS_PER_USER, OCTO_USERS, octo_shape
+
+        self.assertEqual((OCTO_USERS, OCTO_ROWS_PER_USER, OCTO_BLOCK_ROWS), (8, 8, 64))
+        shape = octo_shape(1024)
+        self.assertEqual(shape, PackedShape(8, 8, 64, 1024, 65536))
+        self.assertEqual(validate_shape(shape), shape)
+        self.assertEqual([segment_rows(shape, user) for user in range(8)],
+                         [(0, 8), (8, 16), (16, 24), (24, 32), (32, 40), (40, 48), (48, 56), (56, 64)])
+        self.assertEqual(commit_traces(shape), 64, 'eight nonzero prefixes per user')
+        self.assertEqual(shape.block_rows, m3_shape(1024).block_rows, 'the rows per pass are M3 : the same matmul, norm and sampler programs')
+        for segment in (8, -1, True, None):
+            with self.subTest(segment=segment), self.assertRaises(ValueError):
+                segment_rows(shape, segment)
+        for page_width in (67, 0, '1024', 1024.0):
+            with self.subTest(page_width=page_width), self.assertRaises(ValueError):
+                octo_shape(page_width)
+
+    def test_octo_is_not_a_serving_count_and_changes_no_other_shape(self):
+        import packed_shapes
+        from packed_shapes import m1_shape, sequential_capture_rows
+
+        self.assertEqual(sorted(packed_shapes.SERVING_SHAPES), [2, 4])
+        self.assertIsNone(packed_shapes.serving_shape(8, 68), 'eight requests build no block of their own from the count')
+        self.assertEqual(packed_shapes.serving_shape(4, 68), m3_shape(68))
+        self.assertEqual(packed_shapes.serving_shape(2, 68), m1_shape(68))
+        # the per-request engines beside a 64-row block keep the sequential widths, whatever its geometry
+        self.assertEqual(sequential_capture_rows(packed_shapes.octo_shape(68)), 4)
+
+    def test_the_engines_own_shape_class_passes(self):
+        from packed_shapes import octo_shape
+        from packed_verifier import PackedShape as BlockShape
+
+        self.assertIs(validate_shape(BlockShape(8, 8, 64, 1024, 65536)).rows_per_user, 8)
+        self.assertEqual(tuple(octo_shape(1024)), tuple(BlockShape(8, 8, 64, 1024, 65536)))
+
+
 if __name__ == '__main__':
     unittest.main()

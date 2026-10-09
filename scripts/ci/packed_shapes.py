@@ -1,5 +1,6 @@
 """The packed verify geometries: two T16 users in one 32-row block (M1), four in one
-64-row block (M3).
+64-row block (M3); and, beside two M3 blocks only (QWEN_FAST_OCTO, gate only), eight T8 users
+in one 64-row block (octo).
 
 `PackedShape` keys every shape-dependent choice of the packed block
 (packed_verifier.PackedVerifierEngine) on (users, rows_per_user, block_rows, page_width,
@@ -31,6 +32,10 @@ M3_USERS, M3_ROWS_PER_USER, M3_BLOCK_ROWS = 4, 16, 64
 # a lone user's rounds run on beside the M3 block. It is not a serving count of `serving_shape` - the solo block
 # is built beside M3 over pool slot 0, never in its place.
 SOLO_USERS, SOLO_ROWS_PER_USER, SOLO_BLOCK_ROWS = 1, 16, 16
+# Octo-T8 (QWEN_FAST_OCTO, gate only; serving_octo): EIGHT users x EIGHT rows (7 proposals + the seed) in the same 64-row block. The rows per
+# pass stay 64, so the matmul, norm, collective and sampler programs are M3's; only the segment geometry differs. Like the solo block it is not a
+# serving count of `serving_shape`: it is built beside the two M3 blocks over pool slots 0..7, sharing their carries, never in their place.
+OCTO_USERS, OCTO_ROWS_PER_USER, OCTO_BLOCK_ROWS = 8, 8, 64
 
 
 class PackedShape(NamedTuple):
@@ -68,6 +73,12 @@ def m3_shape(page_width):
 def solo_shape(page_width):
     """One T16 user in one 16-row block over the serving page-table width (the D0 lane)."""
     return validate_shape(PackedShape(SOLO_USERS, SOLO_ROWS_PER_USER, SOLO_BLOCK_ROWS,
+                                      page_width, page_width * PAGE_TOKENS))
+
+
+def octo_shape(page_width):
+    """Eight T8 users in one 64-row block over the serving page-table width (the octo-T8 block, serving_octo)."""
+    return validate_shape(PackedShape(OCTO_USERS, OCTO_ROWS_PER_USER, OCTO_BLOCK_ROWS,
                                       page_width, page_width * PAGE_TOKENS))
 
 
