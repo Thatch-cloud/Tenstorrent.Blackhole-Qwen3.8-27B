@@ -545,18 +545,33 @@ def read_quad_outputs(device, outputs):
 
     stamps = [time.perf_counter()] if verify_prestage.hostgap_log_enabled() else None
     halves = ([], [])
-    for chunk in outputs.chunks:
-        values = operations.get_device_tensors(chunk['values'])
-        indices = operations.get_device_tensors(chunk['indices'])
-        if len(values) != chips or len(indices) != chips:
-            raise AssertionError('%s learned head shards required' % tp_shapes.all_chips())
-        for chip in range(chips):
-            host_values = operations.to_torch(values[chip]).float().reshape(ROWS, 16)
-            host_indices = operations.to_torch(indices[chip]).long().reshape(ROWS, 16)
+    # tp4/w3-mr: QWEN_FAST_TP4_QUAD_OUTPUTS_JOINED (the joined top-16 tensors) and / or QWEN_FAST_TP4_VERIFY_MESH_READ (one mesh-level read a tensor).
+    # With neither set `levers` is None and the loop below is the one that always ran.
+    levers = None
+    if os.environ.get('QWEN_FAST_TP4_QUAD_OUTPUTS_JOINED', '0') != '0' or os.environ.get('QWEN_FAST_TP4_VERIFY_MESH_READ', '0') != '0':
+        import tp4_mesh_read
+
+        levers = tp4_mesh_read.quad_levers(outputs)
+    if levers is not None:
+        mesh = getattr(device, 'mesh', None)
+        for chunk, chip, host_values, host_indices in tp4_mesh_read.quad_chunk_hosts(operations, mesh, outputs, chips, ROWS, levers):
             for half in range(GROUP_USERS):
                 rows = slice(32 * half, 32 * (half + 1))
                 halves[half].append(dict(chip=chip, start=chunk['start'], stop=chunk['stop'],
                                          values=host_values[rows], indices=host_indices[rows]))
+    else:
+        for chunk in outputs.chunks:
+            values = operations.get_device_tensors(chunk['values'])
+            indices = operations.get_device_tensors(chunk['indices'])
+            if len(values) != chips or len(indices) != chips:
+                raise AssertionError('%s learned head shards required' % tp_shapes.all_chips())
+            for chip in range(chips):
+                host_values = operations.to_torch(values[chip]).float().reshape(ROWS, 16)
+                host_indices = operations.to_torch(indices[chip]).long().reshape(ROWS, 16)
+                for half in range(GROUP_USERS):
+                    rows = slice(32 * half, 32 * (half + 1))
+                    halves[half].append(dict(chip=chip, start=chunk['start'], stop=chunk['stop'],
+                                             values=host_values[rows], indices=host_indices[rows]))
 
     def merged(host_chunks):
         # S2 v86: a refused half is reported per chip (dflash_packed_proposal.REJECTED_OUTPUTS_LINE) and raised unchanged.
@@ -573,10 +588,15 @@ def read_quad_outputs(device, outputs):
         stamps.append(time.perf_counter())
     candidates = torch.cat([merged_halves[0][0], torch.zeros_like(merged_halves[0][0][:, :1]), merged_halves[1][0]], dim=1)
     unary = torch.cat([merged_halves[0][1], torch.zeros_like(merged_halves[0][1][:, :1]), merged_halves[1][1]], dim=1)
-    parts = [operations.to_torch(value) for value in operations.get_device_tensors(outputs.projected)]
+    if levers is None:
+        parts = [operations.to_torch(value) for value in operations.get_device_tensors(outputs.projected)]
+        expected = chips
+    else:
+        # tp4/w3-mr: every chip's features (one mesh read under the mesh lever), but chip 0's alone under the joined lever without its audit.
+        parts, expected = tp4_mesh_read.feature_parts(operations, getattr(device, 'mesh', None), outputs.projected, chips, levers)
     if stamps is not None:
         stamps.append(time.perf_counter())
-    if len(parts) != chips or any(not torch.equal(parts[0], other) for other in parts[1:]):
+    if len(parts) != expected or any(not torch.equal(parts[0], other) for other in parts[1:]):
         raise AssertionError('Replicated learned selector features differ')
     hidden = parts[0].reshape(1, ROWS, 256)
     selection = split_selection(hidden, candidates, unary, USERS, BLOCK, block_width=ROWS)
@@ -666,6 +686,13 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
                 # S2 v86: the pool's output set for slots 0-3 (dflash_proposal_trace.POOLED_OUTPUTS_LINE), which
                 # every pass then ends by copying into; None without one, and the quad reads its own as before.
                 pooled_outputs = pool_outputs(device, self.pair_label(), warm, operations, log=log_line)
+                if os.environ.get('QWEN_FAST_TP4_QUAD_OUTPUTS_JOINED', '0') != '0':
+                    # tp4/w3-mr: the join of the chunks into the pooled joined tensors, tried once here, eagerly (its refusal costs this build
+                    # the joined set only: the quad then reads its chunks); the pass's last copies record it in the capture below.
+                    import tp4_mesh_read
+
+                    if tp4_mesh_read.joined_enabled():
+                        pooled_outputs = tp4_mesh_read.settle(operations, warm, pooled_outputs, self.pair_label(), log=log_line)
                 operations.synchronize_device(self.mesh)
             finally:
                 release_owned(operations, transient)

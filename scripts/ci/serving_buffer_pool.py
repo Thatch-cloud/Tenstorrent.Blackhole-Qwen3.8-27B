@@ -143,6 +143,12 @@ every other integer buffer here and int16 if that conversion is refused), the po
 logs DRAFT_OUTPUTS_REFUSED_LINE, names the reason in describe(), and every draft reads its own outputs
 as before; the attach goes on. The gate fails an arm on that line (lever_n_m3native_gate
 DRAFT_OUTPUTS_REFUSED_MARKER), since such an arm serves the unprotected path.
+
+tp4/w3-mr (QWEN_FAST_TP4_QUAD_OUTPUTS_JOINED, default off): a quad group's spec may carry an optional `joined` shape,
+(1, 1, rows, 16 x chunks), and the group's set then also holds one joined values and one joined indices buffer
+(`held.joined`), allocated here, after the group's chunks and projection, so before any trace; the quad's traced pass ends
+by joining its chunks into them (dflash_proposal_trace.publish_outputs) and its readback reads them (tp4_mesh_read). No
+other group's spec has the key, and a spec without it is allocated, counted and described exactly as before.
 """
 
 from contextlib import contextmanager
@@ -235,6 +241,9 @@ def validate_draft_masks(draft_masks, users):
 
 
 DRAFT_OUTPUT_KEYS = ('chunks', 'head', 'projected')
+# tp4/w3-mr (QWEN_FAST_TP4_QUAD_OUTPUTS_JOINED, tp4_mesh_read): an OPTIONAL fourth key, the shape of ONE joined values tensor and ONE joined indices
+# tensor (the chunks' top-16 columns side by side), present only in the quad groups' specs while the flag is set. A spec without it is today's.
+DRAFT_OUTPUT_JOINED_KEY = 'joined'
 # The pool could not make the drafts' output sets (the docstring's last section): one line at attach, then every
 # draft reads its own outputs. It starts as dflash_proposal_trace.POOLED_OUTPUTS_REFUSED_LINE does, so one prefix
 # finds both.
@@ -244,7 +253,7 @@ DRAFT_OUTPUTS_REFUSED_LINE = '[PINDIAG] draft outputs pooled refused at attach g
 def validate_draft_outputs(draft_outputs, users):
     """`draft_outputs` as {slot group: dict(chunks=((start, stop), ...), head=shape, projected=shape)}: each group
     one or more distinct pool slots in increasing order, the chunks a non-empty run of integer ranges, each shape
-    four positive integers. None or empty: {} (no output is pooled)."""
+    four positive integers, plus (tp4/w3-mr) an optional `joined` shape of the same kind. None or empty: {} (no output is pooled)."""
     if not draft_outputs:
         return {}
     try:
@@ -256,19 +265,21 @@ def validate_draft_outputs(draft_outputs, users):
         try:
             chunks = tuple((start, stop) for start, stop in spec['chunks'])
             head, projected = tuple(spec['head']), tuple(spec['projected'])
+            joined = tuple(spec[DRAFT_OUTPUT_JOINED_KEY]) if DRAFT_OUTPUT_JOINED_KEY in spec else None
         except (KeyError, TypeError, ValueError):
-            chunks = head = projected = None
-        if (chunks is None or set(spec) != set(DRAFT_OUTPUT_KEYS) or not group
+            chunks = head = projected = joined = None
+        if (chunks is None or set(spec) - {DRAFT_OUTPUT_JOINED_KEY} != set(DRAFT_OUTPUT_KEYS) or not group
                 or any(type(slot) is not int or not 0 <= slot < users for slot in group)
                 or list(group) != sorted(set(group)) or not chunks
                 or any(type(start) is not int or type(stop) is not int or not 0 <= start < stop
                        for start, stop in chunks)
                 or any(len(shape) != 4 or any(type(size) is not int or size < 1 for size in shape)
-                       for shape in (head, projected))):
+                       for shape in (head, projected, *(() if joined is None else (joined,))))):
             raise ValueError('Draft outputs need groups of one or more distinct increasing pool slots below %d, '
                              'integer candidate chunks and 4-D head and projection shapes: %r -> %r'
                              % (users, group, spec))
-        checked[group] = dict(chunks=chunks, head=head, projected=projected)
+        checked[group] = dict(chunks=chunks, head=head, projected=projected,
+                              **({} if joined is None else {DRAFT_OUTPUT_JOINED_KEY: joined}))
     return checked
 
 
@@ -806,6 +817,11 @@ class ServingBufferPool:
                     self.draft_outputs[group] = SimpleNamespace(projected=allocate(spec['projected']), chunks=chunks)
                     self.draft_output_bytes += (2 * len(chunks) * tile_bytes(spec['head'])
                                                 + tile_bytes(spec['projected']))
+                    if DRAFT_OUTPUT_JOINED_KEY in spec:
+                        # tp4/w3-mr: the quad groups' joined top-16 tensors (values, then indices), after everything of the group above.
+                        self.draft_outputs[group].joined = dict(values=allocate(spec[DRAFT_OUTPUT_JOINED_KEY]),
+                                                                indices=allocate_indices(spec[DRAFT_OUTPUT_JOINED_KEY]))
+                        self.draft_output_bytes += 2 * tile_bytes(spec[DRAFT_OUTPUT_JOINED_KEY])
             except Exception as failure:  # noqa: BLE001 - a protection, not a precondition: refused, never the attach
                 # What was made stays in self.owned (freed at close, never lent); no draft is handed a set, so each
                 # reads its own outputs, as before this section existed.
@@ -1020,7 +1036,11 @@ class ServingBufferPool:
                      projected=list(held.projected.shape),
                      addresses=[list(addresses(self.operations, tensor)) for tensor in
                                 (*(chunk[name] for chunk in held.chunks for name in ('values', 'indices')),
-                                 held.projected)])
+                                 held.projected)],
+                     # Only a group that pools the joined tensors (tp4/w3-mr): every other group's entry reads as before.
+                     **({} if getattr(held, 'joined', None) is None else dict(
+                         joined=list(held.joined['values'].shape),
+                         joined_addresses=[list(addresses(self.operations, held.joined[name])) for name in ('values', 'indices')])))
                 for group, held in sorted(self.draft_outputs.items())])
         if self.draft_outputs_refused:
             report.update(draft_outputs_refused=self.draft_outputs_refused)

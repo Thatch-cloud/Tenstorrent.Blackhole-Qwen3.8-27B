@@ -399,6 +399,8 @@ scripts/ci/sdpa_multi_audit_tp.cpp
 scripts/ci/gdn_conv_gates_spread.py
 scripts/ci/gdn_conv_gates_spread_reader.cpp
 scripts/ci/gdn_conv_gates_spread_writer.cpp
+# tp4/w3-mr (QWEN_FAST_TP4_VERIFY_MESH_READ, QWEN_FAST_TP4_QUAD_OUTPUTS_JOINED, default off): packed_verifier, quad_draft_tp, dflash_proposal_trace and the pool's output specs import tp4_mesh_read only when a flag is set.
+scripts/ci/tp4_mesh_read.py
 # Traced publication K/V fusion head-count fix (tp4/next-3-scope): its TP4 sibling cache slices the per-chip KV head count.
 scripts/ci/dflash_traced_publish.py
 # Prompt-lookup drafting (tp4/lookup, QWEN_FAST_LOOKUP_DRAFT, default off): serving_request_factory imports it when the flag names a policy and

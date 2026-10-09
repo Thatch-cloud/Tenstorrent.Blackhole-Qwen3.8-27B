@@ -222,7 +222,14 @@ def publish_outputs(operations, outputs, held):
         for key in OUTPUT_TENSOR_KEYS:
             operations.copy(chunk[key], pooled[key])
     operations.copy(outputs.projected, held.projected)
-    return SimpleNamespace(projected=held.projected, chunks=[dict(chunk) for chunk in held.chunks])
+    fresh = SimpleNamespace(projected=held.projected, chunks=[dict(chunk) for chunk in held.chunks])
+    if getattr(held, 'joined', None) is not None:
+        # tp4/w3-mr (QWEN_FAST_TP4_QUAD_OUTPUTS_JOINED): the quad's pooled set also holds the joined top-16 tensors, and this pass's last copies join
+        # its chunks into them. Only a set tp4_mesh_read.settle returned with `joined` still on it gets here; every other set is today's.
+        import tp4_mesh_read
+
+        fresh.joined = dict(held.joined, temporaries=tp4_mesh_read.publish_joined(operations, outputs, held))
+    return fresh
 
 
 def pool_outputs(device, group, warm, operations, *, log=None):

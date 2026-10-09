@@ -960,6 +960,18 @@ class PackedVerifierEngine:
         self.shard_problem = verify_trace_t1.shard_sampling_problem(sampler) if shard_cut else None
         self.shard_argmax = shard_cut and self.shard_problem is None
         self.shard_audit = self.shard_argmax and verify_trace_t1.audit_enabled()
+        # tp4/w3-mr (QWEN_FAST_TP4_VERIFY_MESH_READ, default off): shard_predictions reads the sampler's ids and values with one mesh-level read
+        # each, not one read a chip; read once here, strictly (tp4_mesh_read raises on a value but 0 or 1, at the pair, and on the audit alone).
+        # Unset, tp4_mesh_read is not imported and the readback below is today's.
+        self.mesh_read = self.mesh_read_audit = False
+        if os.environ.get('QWEN_FAST_TP4_VERIFY_MESH_READ', '0') != '0' or os.environ.get('QWEN_FAST_TP4_VERIFY_MESH_READ_AUDIT', '0') != '0':
+            import tp4_mesh_read
+
+            self.mesh_read = tp4_mesh_read.mesh_read_enabled() and self.shard_argmax
+            self.mesh_read_audit = self.mesh_read and tp4_mesh_read.mesh_read_audit_enabled()
+            if tp4_mesh_read.mesh_read_enabled() and not self.shard_argmax:
+                tp4_mesh_read.note_mesh_read_fell_back('the verify does not read back through the shard argmax (QWEN_FAST_VERIFY_T1=1 and '
+                                                       'its shard_argmax cut required): %s' % (self.shard_problem or 'cut off'))
         # QWEN_FAST_PACKED_SAMPLER_PREWARM / QWEN_FAST_PACKED_SAMPLER_IN_TRACE (the audits-off hang's
         # isolation arms, default OFF): what the T1 audit's pinned sampler protects, without its per-round
         # readback and compare. Both reuse the audit's sampler call (sample_shards below) and engage only
@@ -1557,8 +1569,16 @@ class PackedVerifierEngine:
         if len(id_parts) != tp_shapes.chip_count() or len(value_parts) != tp_shapes.chip_count():
             raise AssertionError('%s chip-local outputs required' % tp_shapes.count_word())
         reads_started = time.perf_counter()
-        chip_ids = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in id_parts]
-        chip_values = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in value_parts]
+        if getattr(self, 'mesh_read', False):
+            # tp4/w3-mr: the same per-chip host tensors from two mesh-level reads (audited: and from the loop, held bit for bit).
+            import tp4_mesh_read
+
+            chip_ids, chip_values = tp4_mesh_read.read_predictions(
+                self.operations, self.mesh, ids, values, self.block_rows, tp_shapes.chip_count(), audit=self.mesh_read_audit,
+                round_number=self.rounds + 1)
+        else:
+            chip_ids = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in id_parts]
+            chip_values = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in value_parts]
         reads_ms = (time.perf_counter() - reads_started) * 1000
         if any(len(value) != self.block_rows for value in (*chip_ids, *chip_values)):
             raise AssertionError('Missing packed prediction rows')
@@ -1585,10 +1605,10 @@ class PackedVerifierEngine:
             reason = '-' if prestaged is None else str(prestaged.last['reason']).replace(' ', '_')[:120]
             reads_ms, checks_ms = getattr(self, 'readback_split', (0.0, 0.0))
             diagnostic('%s block=%s round=%d live=%d path=%s reason=%s bind_ms=%.2f input_ms=%.2f stage_cpu_ms=%.2f reads_ms=%.2f '
-                       'checks_ms=%.2f readback_ms=%.2f after_stage_cpu_ms=%.2f readback_cpu_ms=%.2f'
+                       'checks_ms=%.2f readback_ms=%.2f after_stage_cpu_ms=%.2f readback_cpu_ms=%.2f%s'
                        % (verify_prestage.HOSTGAP_VERIFY_MARKER, verify_prestage.block_label(self), self.rounds + 1,
                           len(segments), path, reason, bind_ms, input_ms, stage_cpu_ms, reads_ms, checks_ms, readback_ms,
-                          rest_cpu_ms, readback_cpu_ms))
+                          rest_cpu_ms, readback_cpu_ms, ' mr=1' if getattr(self, 'mesh_read', False) else ''))
         except Exception:
             pass
 
@@ -1603,6 +1623,11 @@ class PackedVerifierEngine:
                       coalesced=counts.get('coalesced', 0),
                       coalesce_fallback=counts.get('coalesce_fallback', 0))
         diagnostic(verify_trace_t1.engaged_line('packed_verify', **fields))
+        if getattr(self, 'mesh_read', False):
+            # tp4/w3-mr: once per captured verify trace (one a block), which read the verify's predictions come from.
+            import tp4_mesh_read
+
+            tp4_mesh_read.note_mesh_read_engaged(tp_shapes.chip_count())
         if self.shard_problem is not None:
             diagnostic('%s: %s' % (verify_trace_t1.KEPT_SAMPLER, self.shard_problem))
         if self.sampler_prewarm or self.sampler_in_trace or sampler_arm_requested():

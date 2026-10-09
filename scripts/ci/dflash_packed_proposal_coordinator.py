@@ -137,6 +137,17 @@ def pooled_draft_output_shapes(users, block_rows):
         return dict(chunks=chunks, head=(1, 1, head_rows, TOP_CANDIDATES),
                     projected=(1, 1, projected_rows, SELECTOR_WIDTH))
 
+    def quad_spec():
+        found = spec(quad_draft.ROWS, quad_draft.ROWS)
+        if os.environ.get('QWEN_FAST_TP4_QUAD_OUTPUTS_JOINED', '0') != '0':
+            # tp4/w3-mr: the quad groups (and only they) also pool the joined top-16 tensors, so the traced pass can end by joining its chunks
+            # (tp4_mesh_read; strict 0/1, TP4 only). Unset, the spec is the one it always was.
+            import tp4_mesh_read
+
+            if tp4_mesh_read.joined_enabled():
+                found[tp4_mesh_read.JOINED_KEY] = tp4_mesh_read.joined_shape(chunks, quad_draft.ROWS)
+        return found
+
     refuse_quad_blocks(users)
     shapes = {(slot,): spec(block_rows, max(block_rows, PASS_ROWS)) for slot in range(users)}
     if os.environ.get('QWEN_FAST_PACKED_PROPOSAL') != '1':
@@ -150,10 +161,10 @@ def pooled_draft_output_shapes(users, block_rows):
         import quad_draft
 
         if max(quad_draft.SLOTS) < users and block_rows == quad_draft.BLOCK:
-            shapes[tuple(quad_draft.SLOTS)] = spec(quad_draft.ROWS, quad_draft.ROWS)
+            shapes[tuple(quad_draft.SLOTS)] = quad_spec()
         if quad_blocks_requested():
             for slots, _ in _pooled_quad_blocks(quad_draft, users, block_rows):
-                shapes.setdefault(slots, spec(quad_draft.ROWS, quad_draft.ROWS))
+                shapes.setdefault(slots, quad_spec())
     return shapes
 
 
