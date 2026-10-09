@@ -13223,7 +13223,7 @@
           "engine reuse hang shapes: v610 run 37918498075, 58 rebinds clean, the 8 s decode floor holds",
           "engine reuse paired turns ABAB: v611 to v614, runs 37920201149, 37921182714, 37922000099, 37923133145: x1.52 agent-turn throughput, text identical"
         ],
-        "decision": "PENDING OWNER DECISION (requested 2026-10-10): serve W2 and engine reuse on traffic at eight seats x 262k on this evidence, without the records named in waives. No image bakes this profile as its default until this sentence starts with APPROVED in the commit that is built."
+        "decision": "APPROVED by the owner 2026-10-09 20:36Z (remote control): Approve, ship all three (Lever N + W2 + engine reuse); gates: full (GX + G1 + G2 + SR)"
       }
     },
     "c2-packed-tp4-8x262k-ship-prefix-levern-audit": {
