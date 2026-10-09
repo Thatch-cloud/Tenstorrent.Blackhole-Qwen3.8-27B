@@ -80,6 +80,17 @@ is one counter, so a second block's pre-stage or the first block's verify would 
                             page-allocation validation (serving_packed_bridge, serving_page_binding).
   QWEN_FAST_TP4_HOSTGAP_LOG=1          stage 0: [PACKED-ENTRY], [PACKED-HOSTGAP-VERIFY], [PACKED-HOSTGAP-SELECT],
                             [PACKED-HOSTGAP-WINDOW] and [PINDIAG] gc lines; new lines only, no existing line changes.
+
+THE KEYED DIFF (tp4/w3, 1b; QWEN_FAST_TP4_PRESTAGE_KEYED=1, default off, byte-identical off, needs QWEN_FAST_PRESTAGE=1). The value diff
+above still rebuilds every one of the ~150 staging values on the host at verify time (packed_values: rotary tables, per-row page tables,
+the readers' words and tables) only to find that all but the tokens equal the snapshot's. Every one of those values is a pure function of
+each segment's (start, page table) and of the block's fixed structure (rotary constants, the destinations, the readers): so the snapshot also
+keeps its KEY - per segment the start and a clone of the (1, page_width) table, and the identities of every destination holder - and a
+verify whose key equals it builds the tokens alone (packed_verifier.packed_host_tokens, the helper packed_host_inputs itself calls), runs the
+checks the full build runs (the tokens and tables, each reader's validate(start), the fixture checks, the T2 K/V guard on the snapshot's own
+positions and tables) and writes the tokens buffer alone. A key that differs in anything takes the value diff, unchanged. Under
+QWEN_FAST_PRESTAGE_AUDIT a keyed round also builds the full values and holds every non-token one against the snapshot's
+([PACKED-PRESTAGE-KEYED-AUDIT] ... keyed_mismatches=N); a difference restages the round in full before the trace.
 """
 
 import os
@@ -95,6 +106,7 @@ FULL_AUDIT_FLAG = 'QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT'
 WINDOW_VALIDATE_FLAG = 'QWEN_FAST_TP4_WINDOW_VALIDATE'
 ENTRY_DIET_FLAG = 'QWEN_FAST_TP4_ENTRY_DIET'
 HOSTGAP_LOG_FLAG = 'QWEN_FAST_TP4_HOSTGAP_LOG'
+KEYED_FLAG = 'QWEN_FAST_TP4_PRESTAGE_KEYED'
 HOSTGAP_FLAGS = (TWO_BLOCK_FLAG, BLOCK_EPOCHS_FLAG, FULL_AUDIT_FLAG, WINDOW_VALIDATE_FLAG, ENTRY_DIET_FLAG,
                  HOSTGAP_LOG_FLAG)
 
@@ -117,6 +129,9 @@ BLOCK_EPOCHS_REFUSED_MARKER = '[PINDIAG] verify prestage block epochs refused'
 EXTERNAL_WRITER_ENGAGED_MARKER = '[PINDIAG] verify prestage external writer engaged'
 EXTERNAL_WRITER_REFUSED_MARKER = '[PINDIAG] verify prestage external writer refused'
 FULL_AUDIT_MARKER = '[PACKED-PRESTAGE-FULLAUDIT]'
+# tp4/w3 1b (QWEN_FAST_TP4_PRESTAGE_KEYED): once per block at attach (packed_verifier), and per audited keyed verify the host comparison.
+KEYED_ENGAGED_MARKER = '[PINDIAG] verify prestage keyed engaged'
+KEYED_AUDIT_MARKER = '[PACKED-PRESTAGE-KEYED-AUDIT]'
 ENTRY_MARKER = '[PACKED-ENTRY]'
 HOSTGAP_VERIFY_MARKER = '[PACKED-HOSTGAP-VERIFY]'
 HOSTGAP_SELECT_MARKER = '[PACKED-HOSTGAP-SELECT]'
@@ -168,6 +183,12 @@ def block_epochs_enabled(environ=None):
 def full_audit_enabled(environ=None):
     """QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT=1 under QWEN_FAST_PRESTAGE=1 (alone it audits nothing)."""
     return _flag(FULL_AUDIT_FLAG, environ) and enabled(environ)
+
+
+def keyed_enabled(environ=None):
+    """QWEN_FAST_TP4_PRESTAGE_KEYED=1 under QWEN_FAST_PRESTAGE=1 (1b: the verify-time diff writes the tokens alone when the snapshot's key
+    equals the verify's; alone it keys nothing, the gate and the smoke refuse it)."""
+    return _flag(KEYED_FLAG, environ) and enabled(environ)
 
 
 def window_validate_enabled(environ=None):
@@ -336,6 +357,7 @@ def engage_two_block(blocks, environ=None):
     # Every host-gap flag is read once here: a value but 0 or 1 raises at the attach, not at the first step that reads it.
     for name in HOSTGAP_FLAGS:
         _flag(name, environ)
+    _flag(KEYED_FLAG, environ)
     asked, per_block = two_block_enabled(environ), block_epochs_enabled(environ)
     if per_block and not asked:
         log_line('%s reason=%s' % (BLOCK_EPOCHS_REFUSED_MARKER, '%s_needs_%s=1' % (BLOCK_EPOCHS_FLAG, TWO_BLOCK_FLAG)))
@@ -582,13 +604,64 @@ class Snapshot:
     """What one pre-stage wrote: every destination of the fixture's staging list, in order, and
     the raw host value written into each - None for the tokens, never pre-staged."""
 
-    __slots__ = ('epoch', 'destinations', 'values', 'buffers', 'ms', 'round', 'local', 'cpu_ms')
+    __slots__ = ('epoch', 'destinations', 'values', 'buffers', 'ms', 'round', 'local', 'cpu_ms', 'key')
 
-    def __init__(self, epoch_value, destinations, values, buffers, ms, round_number, local=0, cpu_ms=0.0):
+    def __init__(self, epoch_value, destinations, values, buffers, ms, round_number, local=0, cpu_ms=0.0, key=None):
         self.epoch, self.destinations, self.values = epoch_value, tuple(destinations), list(values)
         self.buffers, self.ms, self.round = buffers, ms, round_number
         # tp4/hostgap: the fixture's own epoch when the block epochs are engaged (always 0 otherwise, so `usable` is today's check).
         self.local, self.cpu_ms = local, cpu_ms
+        # tp4/w3 1b (QWEN_FAST_TP4_PRESTAGE_KEYED): what every value but the tokens was computed from (`snapshot_key`); None off.
+        self.key = key
+
+
+def structure_of(fixture):
+    """(holders, numbers): every object a staging value is written INTO or computed through besides the users - the fixture's own
+    destinations, its cache tiles, its replay reader and each segment reader with the reader's position buffer, table buffers and
+    current-position buffers - and the plain numbers the values are sliced by (each reader's capacity and page width, how many
+    bundles it has). A key built from it equal at verify time means the destination list, its order and its geometry are what the
+    snapshot was computed for. Host only; objects are compared by identity (`same_structure`), numbers by value."""
+    reader = getattr(fixture, 'replay_reader', None)
+    readers = () if reader is None else tuple(reader.readers)
+    holders = [fixture, getattr(fixture, 'tokens', None), getattr(fixture, 'positions', None), getattr(fixture, 'cos', None),
+               getattr(fixture, 'sin', None), getattr(fixture, 'pages', None), reader]
+    holders.extend(fixture.singleton_positions)
+    holders.extend(fixture.row_pages)
+    for tile in tuple(getattr(fixture, 'cache_tiles', None) or ()):
+        holders.extend((tile, tile.positions, tile.pages))
+    numbers = [len(fixture.singleton_positions), len(fixture.row_pages), len(readers)]
+    for own in readers:
+        metadata, current = getattr(own, 'metadata', None), getattr(own, 'cur_pos', None)
+        metadata, current = (() if metadata is None else tuple(metadata)), (() if current is None else tuple(current))
+        holders.extend((own, getattr(own, 'positions', None), *[entry[1] for entry in metadata], *current))
+        numbers.extend((len(metadata), len(current), getattr(own, 'capacity', None), getattr(own, 'page_width', None)))
+    return tuple(holders), tuple(numbers)
+
+
+def same_structure(left, right):
+    """Whether two `structure_of` results name the same objects (identity) and numbers (equality), in the same order."""
+    return (len(left[0]) == len(right[0]) and left[1] == right[1]
+            and all(one is other for one, other in zip(left[0], right[0])))
+
+
+def snapshot_key(fixture, users):
+    """The key of a snapshot: the fixture structure and, per segment, the start and a CLONE of the host page table (the engine's own
+    table is refreshed in place at execute time, after the window; the key must keep what the values were computed from)."""
+    return structure_of(fixture), tuple((user[1], user[2].clone()) for user in users)
+
+
+def key_matches(key, fixture, users):
+    """Whether the values `users` would give are the snapshot's but for the tokens: same structure, same segment count, and per
+    segment an equal start and a table equal in value, dtype and shape. False for anything doubtful (a missing user included)."""
+    if key is None or any(user is None for user in users):
+        return False
+    structure, segments = key
+    if len(segments) != len(users) or not same_structure(structure, structure_of(fixture)):
+        return False
+    for (start, table), user in zip(segments, users):
+        if type(user[1]) is not type(start) or user[1] != start or not same_value(table, user[2]):
+            return False
+    return True
 
 
 class BlockPrestage:
@@ -611,6 +684,11 @@ class BlockPrestage:
         self.last_cpu_ms = 0.0
         if self.full_audit:
             self.counts.update(full_audited=0, full_mismatches=0)
+        # tp4/w3 1b: the keyed diff. Off, none of its state, counts or keys exists, so a block's counts and `last` are today's.
+        self.keyed = keyed_enabled()
+        if self.keyed:
+            self.counts.update(keyed=0, keyed_audited=0, keyed_mismatches=0)
+            self.last['keyed'] = 0
 
     # -- the window ---------------------------------------------------------------------------
     def drop(self, reason):
@@ -679,7 +757,8 @@ class BlockPrestage:
         self.snapshot = Snapshot(epoch(), [value[0] for value in values],
                                  [None if value[0] is tokens else value[1:] for value in values],
                                  len(indices), ms, round_number, local=local_epoch(block.fixture),
-                                 cpu_ms=thread_ms() - cpu_started)
+                                 cpu_ms=thread_ms() - cpu_started,
+                                 key=snapshot_key(block.fixture, users) if self.keyed else None)
         self.dropped = None
         self.counts['prestaged'] += 1
         log_line('%s round=%d buffers=%d ms=%.2f live=%s' % (WINDOW_MARKER, round_number, len(indices), ms,
@@ -697,6 +776,63 @@ class BlockPrestage:
             return None, 'epoch:%s' % last_local_bump(self.block.fixture)
         return snapshot, None
 
+    def keyed_values(self, users, snapshot):
+        """tp4/w3 1b. ([the tokens' (destination, value, dtype, layout)], readers) for a verify whose key is the snapshot's, or None
+        (the caller takes the value diff). The snapshot holds every other value and the key says they are what the verify-time
+        build would give, so only the tokens are built - by packed_host_tokens, which packed_host_inputs itself calls and which
+        makes the same per-user checks - after the checks packed_values makes before its first copy: the fixture's, the T2 K/V
+        guard (a pure function of the snapshot's positions and tables, which the key makes the verify-time ones) and each reader's
+        validate(start); then the tokens buffer's signature. Host only, nothing written. Raises where the full build would."""
+        from packed_verifier import kv_guard, packed_context, packed_host_tokens
+
+        block = self.block
+        if not key_matches(snapshot.key, block.fixture, users):
+            return None
+        fixture, operations = block.fixture, block.operations
+        if (len(snapshot.destinations) < 5 or snapshot.destinations[0] is not fixture.tokens
+                or snapshot.destinations[1] is not fixture.positions or snapshot.destinations[4] is not fixture.pages
+                or snapshot.values[1] is None or snapshot.values[4] is None):
+            return None
+        readers, tiles = packed_context(fixture, block.shape)
+        tokens = packed_host_tokens(users, block.shape, block.model.args.vocab_size)
+        kv_guard(fixture, snapshot.values[1][0], snapshot.values[4][0], block.shape)
+        for own, user in zip(readers, users, strict=True):
+            own.validate(user[1])
+        value = (fixture.tokens, tokens, operations.uint32, operations.ROW_MAJOR_LAYOUT)
+        if tuple(value[0].shape) != tuple(tokens.shape) or value[0].dtype != value[2] or value[0].layout != value[3]:
+            raise ValueError('Staged packed inputs must preserve every captured tensor signature')
+        return [value], readers
+
+    def keyed_audit_round(self, users, snapshot, round_number):
+        """QWEN_FAST_PRESTAGE_AUDIT on a keyed round: the full verify-time build (packed_values, as the value diff makes it) and
+        EVERY value but the tokens against the snapshot's - the values the keyed round left on the device. A difference is logged
+        (keyed_mismatches=N) and the round restaged in full before the trace, so it stays exact; the gate fails the arm on it.
+        The destinations are held the same way (identity and order)."""
+        from packed_verifier import packed_values, stage_packed
+
+        block = self.block
+        values, unused = packed_values(block.operations, block.model, block.fixture, block.shape, users, guard=False)
+        tokens = block.fixture.tokens
+        mismatched, checked = [], 0
+        if len(values) != len(snapshot.destinations):
+            mismatched.append('count')
+        for index, (value, destination, kept) in enumerate(zip(values, snapshot.destinations, snapshot.values)):
+            if value[0] is not destination:
+                mismatched.append('%d:destination' % index)
+            elif value[0] is tokens:
+                continue
+            else:
+                checked += 1
+                if kept is None or kept[1:] != value[2:] or not same_value(kept[0], value[1]):
+                    mismatched.append(str(index))
+        self.counts['keyed_audited'] += checked
+        self.counts['keyed_mismatches'] += len(mismatched)
+        log_line('%s round=%d checked=%d keyed_mismatches=%d%s' % (
+            KEYED_AUDIT_MARKER, round_number, checked, len(mismatched),
+            (' at=%s' % ','.join(mismatched[:8])) if mismatched else ''))
+        if mismatched:
+            stage_packed(block.operations, block.model, block.fixture, block.shape, users)
+
     def stage(self, entries, segments, snapshot, reason):
         """The verify-time write: the diff against `snapshot` when there is one, else today's
         full stage_packed. Returns the buffers written; logs MARKER; audits."""
@@ -713,7 +849,12 @@ class BlockPrestage:
         started = time.perf_counter()
         cpu_started = thread_ms()
         values = None
-        if snapshot is not None:
+        keyed = None
+        if snapshot is not None and self.keyed:
+            # tp4/w3 1b: a key equal to the snapshot's writes the tokens alone, without the ~150-value build below; any other key,
+            # and any doubt, is the value diff, unchanged.
+            keyed = self.keyed_values(users, snapshot)
+        if snapshot is not None and keyed is None:
             values, readers = packed_values(block.operations, block.model, block.fixture, block.shape, users)
             if len(values) != len(snapshot.destinations) or any(
                     value[0] is not destination for value, destination in zip(values, snapshot.destinations)):
@@ -724,11 +865,16 @@ class BlockPrestage:
             path = 'full'
             self.counts['full'] += 1
         else:
-            changed = [index for index, (value, kept) in enumerate(zip(values, snapshot.values))
-                       if kept is None or kept[1:] != value[2:] or not same_value(kept[0], value[1])]
+            if keyed is None:
+                changed = [index for index, (value, kept) in enumerate(zip(values, snapshot.values))
+                           if kept is None or kept[1:] != value[2:] or not same_value(kept[0], value[1])]
+                chosen, indices = values, changed
+            else:
+                chosen, readers = keyed
+                indices = None
             diffed = time.perf_counter()
             try:
-                self.inflight = write_packed(block.operations, block.model, values, readers, indices=changed,
+                self.inflight = write_packed(block.operations, block.model, chosen, readers, indices=indices,
                                              fence=False)
             except BaseException:
                 bump('verify-failed')
@@ -736,27 +882,37 @@ class BlockPrestage:
             for own, user in zip(readers, users, strict=True):
                 own.start = user[1]
             bump_fixture(block.fixture, 'verify')
-            written, path, reason = len(changed), 'diff', '-'
+            written, path, reason = len(chosen) if indices is None else len(indices), 'diff', '-'
             self.counts['diff'] += 1
+            if keyed is not None:
+                self.counts['keyed'] += 1
         finished = time.perf_counter()
         self.last_cpu_ms = thread_ms() - cpu_started
         self.last = dict(path=path, buffers=written, reason=reason, prestage_ms=prestage_ms,
                          diff_ms=(diffed - started) * 1000, write_ms=(finished - diffed) * 1000)
-        log_line('%s round=%d path=%s buffers=%d reason=%s live=%d' % (
-            MARKER, round_number, path, written, str(reason).replace(' ', '_')[:120], len(segments)))
+        if self.keyed:
+            self.last['keyed'] = int(keyed is not None)
+        log_line('%s round=%d path=%s buffers=%d reason=%s live=%d%s' % (
+            MARKER, round_number, path, written, str(reason).replace(' ', '_')[:120], len(segments),
+            ' keyed=1' if keyed is not None else ''))
         if self.audit:
             self.audit_round(users, round_number, path)
+        if keyed is not None and (self.audit or self.full_audit):
+            # Either audit arm: the host comparison of every key-derived value (a keyed round has no `values` of its own).
+            self.keyed_audit_round(users, snapshot, round_number)
         if self.full_audit:
-            self.full_audit_round(values, users, round_number, path)
+            self.full_audit_round(values, users, round_number, path, keyed=keyed is not None)
         return written
 
-    def full_audit_round(self, values, users, round_number, path='diff'):
+    def full_audit_round(self, values, users, round_number, path='diff', keyed=False):
         """QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT, after a verify-time write: EVERY destination read back from every chip
         and compared with the verify-time (full-stage) value. After a DIFF write the round is then staged in full anyway, so
         the trace sees what today's verify sees whatever the audit found; a mismatch is logged and fails the arm at the gate.
         After a FULL write (path=full, `values` is None: the full stage is the reference itself) the same read-back runs
         against the values the verify computes now: a mismatch there is an artifact of the comparator (layout, padding, dtype),
-        never of the lever, and the smoke judges the two paths separately. Nothing is restaged after a full write."""
+        never of the lever, and the smoke judges the two paths separately. Nothing is restaged after a full write.
+        After a KEYED write (tp4/w3 1b; `values` is None too, `keyed` True, path=diff) the read-back runs against the
+        verify-time values built here, the line ends ` keyed=1`, and the round is restaged in full after it like any diff."""
         from packed_verifier import packed_values, stage_packed
 
         block = self.block
@@ -771,9 +927,9 @@ class BlockPrestage:
                     mismatched.append('%d.%d' % (index, chip))
         self.counts['full_audited'] += checked
         self.counts['full_mismatches'] += len(mismatched)
-        log_line('%s block=%s round=%d path=%s buffers=%d checked=%d mismatches=%d%s' % (
+        log_line('%s block=%s round=%d path=%s buffers=%d checked=%d mismatches=%d%s%s' % (
             FULL_AUDIT_MARKER, block_label(block), round_number, path, len(values), checked, len(mismatched),
-            (' at=%s' % ','.join(mismatched[:8])) if mismatched else ''))
+            (' at=%s' % ','.join(mismatched[:8])) if mismatched else '', ' keyed=1' if keyed else ''))
         if path == 'diff':
             stage_packed(operations, block.model, block.fixture, block.shape, users)
 

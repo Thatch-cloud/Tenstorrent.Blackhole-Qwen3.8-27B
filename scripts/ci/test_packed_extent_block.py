@@ -433,8 +433,9 @@ class ExtentRoundTests(ExtentFixture):
                 # tp4/hostgap's attach guard names the extent storage it must see disjoint; that is not staging code
                 self.assertNotIn('extent', source.replace('extent storage', '').replace('extent_storage', ''))
         prestage = (HERE / 'verify_prestage.py').read_text(encoding='utf-8')
-        # 3 staging uses plus the audit twin's reference values after a full stage (tp4/hostgap full-path comparator check)
-        self.assertEqual(prestage.count('packed_values('), 4)
+        # 3 staging uses plus the audit twin's reference values after a full stage (tp4/hostgap full-path comparator check) plus the
+        # keyed diff's audit reference (tp4/w3 1b, QWEN_FAST_PRESTAGE_AUDIT on a keyed round)
+        self.assertEqual(prestage.count('packed_values('), 5)
 
 
 class ExtentAuditTests(ExtentFixture):

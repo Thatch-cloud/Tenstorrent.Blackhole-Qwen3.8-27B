@@ -340,27 +340,41 @@ def validate_commit_layers(layers, carry):
     return layers
 
 
-def packed_host_inputs(users, shape, rope_dim, theta, vocab_size):
-    """Host tokens (block_rows, 1), positions (block_rows,), cos/sin (1, block_rows, 1, rope)
-    and per-row page tables (block_rows, page_width), segment by segment."""
+def packed_host_tokens(users, shape, vocab_size):
+    """The host tokens (block_rows, 1) of a packed block, segment by segment, and every per-user check packed_host_inputs makes before it
+    builds anything else: one (tokens, start, pages) per segment, the tokens valid for the block's row count and vocabulary, the page table
+    a (1, page_width) int32. The ONE place the tokens are built: packed_host_inputs (the full stage, the pre-stage, the value diff) and the
+    keyed staging diff (verify_prestage, QWEN_FAST_TP4_PRESTAGE_KEYED) both call it, so the keyed path cannot drift from the full one."""
     import torch
 
     if len(users) != shape.users or any(user is None for user in users):
         raise ValueError('One (tokens, start, pages) per segment required')
-    tokens, positions, cos, sin, pages = [], [], [], [], []
+    tokens = []
     for user_tokens, start, table in users:
         user_tokens = list(user_tokens)
         validate_tokens(user_tokens, shape.rows_per_user, start, vocab_size, shape.capacity)
         if (getattr(table, 'ndim', None) != 2 or tuple(table.shape) != (1, shape.page_width)
                 or table.dtype != torch.int32):
             raise ValueError('Each packed user stages its own (1, page_width) int32 page table')
+        tokens.append(torch.tensor(user_tokens, dtype=torch.int32).reshape(len(user_tokens), 1))
+    return torch.cat(tokens)
+
+
+def packed_host_inputs(users, shape, rope_dim, theta, vocab_size):
+    """Host tokens (block_rows, 1), positions (block_rows,), cos/sin (1, block_rows, 1, rope)
+    and per-row page tables (block_rows, page_width), segment by segment."""
+    import torch
+
+    tokens = packed_host_tokens(users, shape, vocab_size)
+    positions, cos, sin, pages = [], [], [], []
+    for user_tokens, start, table in users:
+        user_tokens = list(user_tokens)
         token_values, user_positions, user_cos, user_sin = host_inputs(user_tokens, start, rope_dim, theta)
-        tokens.append(token_values)
         positions.append(user_positions)
         cos.append(user_cos)
         sin.append(user_sin)
         pages.append(table.repeat(shape.rows_per_user, 1))
-    return (torch.cat(tokens), torch.cat(positions), torch.cat(cos, dim=1), torch.cat(sin, dim=1),
+    return (tokens, torch.cat(positions), torch.cat(cos, dim=1), torch.cat(sin, dim=1),
             torch.cat(pages))
 
 
@@ -394,14 +408,9 @@ def stage_packed(operations, model, fixture, shape, users):
     return len(values)
 
 
-def packed_values(operations, model, fixture, shape, users, *, guard=True):
-    """stage_packed's host half: every check it makes before its first copy, and the
-    (destination, value, dtype, layout) list it writes, in its order, with the readers whose
-    words and tables are in it. `guard=False` (the pre-stage only: its tokens are placeholders
-    and its tables may predate the execute-time refresh) leaves out the T2 K/V guard, which
-    every verify-time call keeps."""
-    import torch
-
+def packed_context(fixture, shape):
+    """packed_values' fixture checks, host only: (readers, tiles) - the replay reader's per-user readers (empty without one) and the cache
+    tiles (empty without any) - or ValueError. The keyed staging diff (verify_prestage) runs the same checks."""
     if fixture.rows != shape.block_rows or len(fixture.singleton_positions) != shape.block_rows \
             or len(fixture.row_pages) != shape.block_rows:
         raise ValueError('Every per-row attention position and page table of the block must be retained')
@@ -412,9 +421,14 @@ def packed_values(operations, model, fixture, shape, users, *, guard=True):
     tiles = tuple(getattr(fixture, 'cache_tiles', None) or ())
     if tiles and tuple(tile.rows for tile in tiles) != tile_rows(shape.block_rows):
         raise ValueError('The cache tiles must cover the block in 32-row tiles')
-    tokens, positions, cos, sin, pages = packed_host_inputs(users, shape, model.args.rope_head_dim,
-                                                            model.args.rope_theta, model.args.vocab_size)
-    if guard and getattr(fixture, 'kv_chains', False):
+    return readers, tiles
+
+
+def kv_guard(fixture, positions, pages, shape):
+    """The T2 K/V guard of the verify-time staging (QWEN_FAST_VERIFY_T2 #2): a no-op unless the fixture chains the K/V write; otherwise
+    ValueError for a round in which two users write one (page, tile row), and the audit's kv_rows_per_user line. Pure in (positions,
+    pages), which is why the keyed staging diff runs it on the snapshot's own values."""
+    if getattr(fixture, 'kv_chains', False):
         # QWEN_FAST_VERIFY_T2 (#2): the chained K/V write is exact only while no two users write
         # one (page, tile row). serving_packed_step.proposal_rows drafts such a round for the
         # sequential step and ineligible refuses one first seen at the step, so neither reaches
@@ -429,6 +443,21 @@ def packed_values(operations, model, fixture, shape, users, *, guard=True):
         if verify_trace_t2.audit_enabled():
             verify_trace_t2.log_line('%s kv_rows_per_user=%s' % (verify_trace_t2.AUDIT_MARKER, ','.join(
                 str(len(verify_trace_t2.kv_tile_rows(user_positions, table))) for user_positions, table in guarded)))
+
+
+def packed_values(operations, model, fixture, shape, users, *, guard=True):
+    """stage_packed's host half: every check it makes before its first copy, and the
+    (destination, value, dtype, layout) list it writes, in its order, with the readers whose
+    words and tables are in it. `guard=False` (the pre-stage only: its tokens are placeholders
+    and its tables may predate the execute-time refresh) leaves out the T2 K/V guard, which
+    every verify-time call keeps."""
+    import torch
+
+    readers, tiles = packed_context(fixture, shape)
+    tokens, positions, cos, sin, pages = packed_host_inputs(users, shape, model.args.rope_head_dim,
+                                                            model.args.rope_theta, model.args.vocab_size)
+    if guard:
+        kv_guard(fixture, positions, pages, shape)
     values = [(fixture.tokens, tokens, operations.uint32, operations.ROW_MAJOR_LAYOUT),
               (fixture.positions, positions, operations.int32, operations.ROW_MAJOR_LAYOUT),
               (fixture.cos, cos, operations.bfloat16, operations.TILE_LAYOUT),
@@ -1241,6 +1270,9 @@ class PackedVerifierEngine:
         if self.prestaged is not None:
             diagnostic('%s users=%d audit=%d' % (verify_prestage.ENGAGED_MARKER, self.users,
                                                  int(self.prestaged.audit)))
+            if self.prestaged.keyed:
+                # tp4/w3 1b (QWEN_FAST_TP4_PRESTAGE_KEYED): once per block; the verify lines carry keyed=1 on the rounds that took it.
+                diagnostic('%s users=%d audit=%d' % (verify_prestage.KEYED_ENGAGED_MARKER, self.users, int(self.prestaged.audit)))
         if verify_prestage.hostgap_log_enabled():
             # tp4/hostgap stage 0: the gen-2 collection log, once per process (idempotent).
             verify_prestage.install_gc_log()
@@ -1584,11 +1616,13 @@ class PackedVerifierEngine:
             path = 'off' if prestaged is None else prestaged.last['path']
             reason = '-' if prestaged is None else str(prestaged.last['reason']).replace(' ', '_')[:120]
             reads_ms, checks_ms = getattr(self, 'readback_split', (0.0, 0.0))
+            # tp4/w3 1b: ` keyed=0|1` closes the line only under QWEN_FAST_TP4_PRESTAGE_KEYED (the line is today's otherwise).
+            keyed = '' if prestaged is None or not prestaged.keyed else ' keyed=%d' % prestaged.last.get('keyed', 0)
             diagnostic('%s block=%s round=%d live=%d path=%s reason=%s bind_ms=%.2f input_ms=%.2f stage_cpu_ms=%.2f reads_ms=%.2f '
-                       'checks_ms=%.2f readback_ms=%.2f after_stage_cpu_ms=%.2f readback_cpu_ms=%.2f'
+                       'checks_ms=%.2f readback_ms=%.2f after_stage_cpu_ms=%.2f readback_cpu_ms=%.2f%s'
                        % (verify_prestage.HOSTGAP_VERIFY_MARKER, verify_prestage.block_label(self), self.rounds + 1,
                           len(segments), path, reason, bind_ms, input_ms, stage_cpu_ms, reads_ms, checks_ms, readback_ms,
-                          rest_cpu_ms, readback_cpu_ms))
+                          rest_cpu_ms, readback_cpu_ms, keyed))
         except Exception:
             pass
 
