@@ -24,10 +24,13 @@ section (the native one-row decode against the extent path, bit for bit) is the 
 import os
 
 import extent_attention_replay_tp as quad
-from extent_attention_replay import ENGAGED_MARKER, EXTENT_GROUP_ROWS, K, LAYOUT, TREE_SCRATCH_ENV, check_start
 import pooled_attention_replay as pooled
 from pooled_attention_replay import apply_sdpa_modes, sdpa_modes, validate_segments
 
+# The geometry-free helpers are the pinned objects, read through the four-card twin (which imports them from the pair's module): the fast-serving image's frozen bundle has no
+# extent_attention_replay, so nothing here may `from` it (test_serving_image_copy_closure).
+ENGAGED_MARKER, EXTENT_GROUP_ROWS, K, LAYOUT, TREE_SCRATCH_ENV, check_start = (quad.ENGAGED_MARKER, quad.EXTENT_GROUP_ROWS, quad.K, quad.LAYOUT, quad.TREE_SCRATCH_ENV,
+                                                                                 quad.check_start)
 OCTO_ROWS = 8                                                    # rows per segment: ONE group
 OCTO_ENTRIES = 1                                                 # groups per bundle (G8B1)
 OCTO_FLAGS = pooled.QWEN_MASK_TAIL | pooled.QWEN_RUNTIME_EXTENT  # 0x21: tail | extent (no KV share at one entry)

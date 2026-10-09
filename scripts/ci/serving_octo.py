@@ -111,10 +111,10 @@ BUILT = {'attach-build', 'gdn-batch', 'attention-8row', 'publication-8row', 'fus
 # What no card has qualified, one line each at every admission: (what must hold, the card job that establishes it). The first four are the strict-exactness ones.
 UNQUALIFIED_ITEMS = (
     ("octo rounds == M3 rounds == the per-request text (strict greedy exactness)", 'A1 E1 E2'),
-    ("K64j one eight-row group per bundle (0x21, G8B1) == the native one-row decode", 'Q1'),
+    ("K64j one eight-row group per bundle (0x21, G8B1) == the native one-row decode", 'Q1w Q1a Q1b'),
     ("the 64-row block at 8 users x 8 rows: matmul rows == the 4 x 16 block's", 'E1'),
     ("a shape switch compiles nothing (publication warm at 8-row offsets)", 'A1 H1'),
-    ("the batched GDN launch at 8 users (96 cores, one wave) == four users", 'Q2'),
+    ("the batched GDN launch at 8 users (96 cores, one wave) == four users", 'Q2w Q2'),
     ("the fused commit of a third block, and its pre-stage", 'A1 E1'),
 )
 

@@ -143,6 +143,17 @@ class JobPackTests(unittest.TestCase):
         self.assertIn('Q1b', needs['A1'])
         self.assertIn('Q2', needs['A1'])
 
+    def test_the_graft_the_order_names_is_the_served_one_and_no_new_graft_is_claimed(self):
+        import packed_any_admission
+
+        text = order_text()
+        self.assertNotIn(packed_any_admission.K64J_TTNNCPP_SHA256, text, 'a public pack names no digest')
+        self.assertIn('packed_any_admission.K64J_TTNNCPP_SHA256', text)
+        with open(os.path.join(ROOT, 'docker', 'qwen-c2-serving.Dockerfile'), encoding='utf-8') as handle:
+            self.assertIn(packed_any_admission.K64J_TTNNCPP_SHA256, handle.read(), 'the image checks the very digest the order tells the driver to pin')
+        self.assertIn('GRAFT (none new)', text)
+        self.assertIn('No kernel, factory or library changed for octo-T8', text)
+
     def test_every_eight_seat_smoke_runs_the_steady_eight_the_quad_blocks_rule_judges(self):
         # c2_smoke_check.blocks_problems: a profile that asks for the eight-seat quad (QWEN_FAST_QUAD_DRAFT_BLOCKS=2) fails its job unless the smoke ran concurrent8_steady
         for name in card_jobs():
