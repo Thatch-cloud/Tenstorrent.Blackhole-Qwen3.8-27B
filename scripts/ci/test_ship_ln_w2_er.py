@@ -31,6 +31,7 @@ W2 = {'QWEN_FAST_TP4_SDPA': 'multi', 'QWEN_FAST_TP4_CONV_GATES_SPREAD': '1'}
 ER = {'QWEN_FAST_PARKED_ENGINES': '1', 'QWEN_FAST_PARKED_DRAFTS': '1', 'QWEN_FAST_LEVERN_BUILD_MS': 'learned'}
 PACK = HERE / 'references' / 'tp4-ship-ln-w2-er-jobs'
 APPROVED = 'APPROVED by the owner (test fixture): serve W2 and engine reuse on traffic.'
+PENDING = 'PENDING OWNER DECISION (test fixture)'
 
 
 def raw():
@@ -84,13 +85,14 @@ class ProfileTests(unittest.TestCase):
     def test_it_is_the_only_profile_that_carries_an_owner_traffic_waiver(self):
         self.assertEqual(sorted(name for name, body in raw()['profiles'].items() if contract.TRAFFIC_WAIVER in body), [SHIP])
 
-    def test_the_waiver_names_exactly_the_four_levers_cites_the_evidence_and_is_pending(self):
+    def test_the_waiver_names_exactly_the_four_levers_cites_the_evidence_and_records_a_decision(self):
         waiver = load()[contract.TRAFFIC_WAIVER]
         self.assertEqual(waiver['levers'], contract.WAIVABLE_LEVERS)
         self.assertEqual(sorted(waiver), sorted(contract.TRAFFIC_WAIVER_FIELDS))
         self.assertTrue(any('37878277301' in item for item in waiver['evidence']), 'the SDPA multi exactness run')
         self.assertTrue(any('37918498075' in item for item in waiver['evidence']), 'the engine-reuse hang shapes')
-        self.assertTrue(waiver['decision'].startswith('PENDING'), 'the owner decides; this commit only requests')
+        # PENDING when the branch requests the decision; the owner's approval commit changes only this sentence to start with APPROVED
+        self.assertIn(waiver['decision'].split(None, 1)[0].rstrip(':'), contract.TRAFFIC_WAIVER_DECISIONS)
 
 
 class ContractTests(unittest.TestCase):
@@ -150,6 +152,8 @@ class ContractTests(unittest.TestCase):
 
     def test_the_decision_word_sets_pending(self):
         profile = load()
+        profile[contract.TRAFFIC_WAIVER] = dict(profile[contract.TRAFFIC_WAIVER], decision=PENDING)
+        self.assertEqual(contract.traffic_waiver_problems(profile), [])
         self.assertTrue(contract.traffic_waiver_pending(profile))
         profile[contract.TRAFFIC_WAIVER] = dict(profile[contract.TRAFFIC_WAIVER], decision=APPROVED)
         self.assertEqual(contract.traffic_waiver_problems(profile), [])
@@ -198,7 +202,7 @@ class BootTests(unittest.TestCase):
         self.assertEqual(len(waived), 1, lines)
         for flag, value in contract.WAIVABLE_LEVERS.items():
             self.assertIn('%s=%s' % (flag, value), waived[0])
-        self.assertIn('[decision: PENDING', waived[0])
+        self.assertIn('[decision: %s' % load()[contract.TRAFFIC_WAIVER]['decision'].split(None, 1)[0], waived[0])
         self.assertTrue(waived[0].startswith('profile %s: ' % SHIP))
 
     def test_a_profile_without_a_waiver_logs_none(self):
@@ -241,12 +245,21 @@ class BakeTests(unittest.TestCase):
     def test_the_job_reader_refuses_to_bake_it_while_pending_and_bakes_it_once_approved(self):
         values = {'C2_BAKE_DEFAULT_PROFILE': SHIP}
         with self.assertRaises(job.JobError) as refused:
-            job.read_bake(values, ['build'], 'quad')
+            job.read_bake(values, ['build'], 'quad', root=self.root_with(PENDING))
         self.assertIn('not APPROVED', str(refused.exception))
+        self.check_the_checkout(values)
         self.assertEqual(job.read_bake(values, ['build'], 'quad', root=self.root_with(APPROVED)), SHIP)
         with self.assertRaises(job.JobError):
             job.read_bake(values, ['build'], 'quad', root=self.root_with('APPROVEDISH but not really'))
         self.assertEqual(job.read_bake({'C2_BAKE_DEFAULT_PROFILE': PARENT}, ['build'], 'quad'), PARENT, 'a profile without a waiver bakes as before')
+
+    def check_the_checkout(self, values):
+        """read_bake on the checkout's own file refuses exactly when the checked-in decision is pending, and bakes the profile otherwise."""
+        if contract.traffic_waiver_pending(load()):
+            with self.assertRaises(job.JobError):
+                job.read_bake(values, ['build'], 'quad')
+        else:
+            self.assertEqual(job.read_bake(values, ['build'], 'quad'), SHIP)
 
     def test_the_job_reader_and_the_contract_agree_on_pending(self):
         self.assertEqual(job.BAKE_WAIVER_FIELD, contract.TRAFFIC_WAIVER)
@@ -285,14 +298,13 @@ class PackTests(unittest.TestCase):
         values = self.read('B0-build')
         profiles = job.profile_names(PROFILES)
         self.assertEqual(values['C2_BAKE_DEFAULT_PROFILE'], SHIP)
-        with self.assertRaises(job.JobError):
-            job.read_job(values, profiles)
-        approved = BakeTests('test_the_job_reader_refuses_to_bake_it_while_pending_and_bakes_it_once_approved')
-        root = approved.root_with(APPROVED)
+        helper = BakeTests('test_the_job_reader_refuses_to_bake_it_while_pending_and_bakes_it_once_approved')
         try:
-            outputs = job.read_job(values, profiles, root=root)
+            with self.assertRaises(job.JobError):
+                job.read_job(values, profiles, root=helper.root_with(PENDING))
+            outputs = job.read_job(values, profiles, root=helper.root_with(APPROVED))
         finally:
-            approved.doCleanups()
+            helper.doCleanups()
         self.assertEqual(outputs['bake_default_profile'], SHIP)
         self.assertEqual(outputs['actions'], 'build')
 
