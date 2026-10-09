@@ -139,16 +139,24 @@ class ProfileTests(unittest.TestCase):
             self.assertNotIn(V5_FLAG, found[name]['env'])
 
     def test_the_levers_new_flags_are_in_no_traffic_profile_and_in_no_other_gate_arm(self):
+        # the combined window's carriers and the ship candidate (test_tp4_w2ln_profiles; the ship candidate carries the two levers on TRAFFIC only
+        # under its owner traffic waiver, which names each at its value, and never an audit: test_ship_ln_w2_er)
+        from test_tp4_w2ln_profiles import F1 as WINDOW_F1, MULTI as WINDOW_MULTI, SHIPPED
         for name, profile in load()['profiles'].items():
             env = profile.get('env', {})
             if not profile.get('gate_only'):
                 with self.subTest(name=name):
-                    self.assertFalse((set(NEW_LEVERS) | set(NEW_AUDITS)) & set(env))
+                    carried = (set(NEW_LEVERS) | set(NEW_AUDITS)) & set(env)
+                    if name in SHIPPED:
+                        self.assertEqual({flag: env[flag] for flag in carried},
+                                         {flag: value for flag, value in profile['owner_traffic_waiver']['levers'].items() if flag in carried})
+                        self.assertFalse(set(NEW_AUDITS) & set(env))
+                    else:
+                        self.assertFalse(carried)
         carriers = sorted(name for name, profile in load()['profiles'].items() if spread.FLAG in profile.get('env', {}))
-        from test_tp4_w2ln_profiles import F1 as WINDOW_F1, MULTI as WINDOW_MULTI      # the combined window's carriers (test_tp4_w2ln_profiles)
-        self.assertEqual(carriers, sorted([W2, W2_AUDIT] + list(WINDOW_F1)))
+        self.assertEqual(carriers, sorted([W2, W2_AUDIT] + list(WINDOW_F1) + sorted(SHIPPED)))
         multi = sorted(name for name, profile in load()['profiles'].items() if profile.get('env', {}).get(sdpa_long_tp.FLAG) == 'multi')
-        self.assertEqual(multi, sorted([SDPA_TIMED, SDPA_AUDITED, W2, W2_AUDIT, NOF1, NOF1_AUDIT] + list(WINDOW_MULTI)))
+        self.assertEqual(multi, sorted([SDPA_TIMED, SDPA_AUDITED, W2, W2_AUDIT, NOF1, NOF1_AUDIT] + list(WINDOW_MULTI) + sorted(SHIPPED)))
 
     def test_sdpa_multi_s_own_arms_are_untouched_by_the_merge(self):
         found = load()['profiles']

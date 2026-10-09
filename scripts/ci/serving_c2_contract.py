@@ -36,7 +36,11 @@ process match it:
    alone owns that switch too, it needs QWEN_PREFIX_REUSE=1 and the fast path beside it, and the
    one speculative shape reuse then accepts is DFlash with 15 proposals.
 6. gate-only profiles (gate_only: true) boot only with QWEN_C2_GATE=1: they exist for a gate and
-   must never take traffic.
+   must never take traffic. A TRAFFIC profile may carry a lever whose traffic refusal rests on a missing
+   pinned qualification record (the W2 levers, engine reuse) only through its OWNER TRAFFIC WAIVER
+   (owner_traffic_waiver, traffic_waiver_problems): a named record of the owner's decision that lists each
+   waived lever with its exact value, what is waived and the card evidence; the boot logs it. A gate
+   instrument (an audit, a fault, a negative control) is never waivable.
 7. streaming parsers: C2 commits 3-16 tokens per engine step, so the API server's reasoning and
    tool-call parsers see multi-token deltas, which they parse differently from one token per step
    (R21: a real </think> or <tool_call> bound to a later lookalike, whitespace after a tool call).
@@ -462,7 +466,12 @@ def parked_problems(profile, environ=None):
     if not parked_engines(profile):
         return problems
     if profile.get('gate_only') is not True:
-        problems.append('%s=1 needs a gate-only profile (nothing serves traffic on engine reuse until its gates have run)' % PARKED_SWITCH)
+        # A traffic profile serves engine reuse only under the owner's waiver (TRAFFIC_WAIVER), which must name the engines and, when the profile
+        # binds the drafter traces too, the drafts switch: each at its exact value.
+        for name in (PARKED_SWITCH, PARKED_DRAFTS):
+            if env.get(name) == '1' and not waived(profile, name, env):
+                problems.append('%s=1 needs a gate-only profile (nothing serves traffic on engine reuse until its gates have run and the owner\'s '
+                                '%s names it)' % (name, TRAFFIC_WAIVER))
     if not (engine.get('additional-config') or {}).get('qwen_fast_t16'):
         problems.append('%s=1 is a fast path switch, but the profile does not run the fast path (qwen_fast_t16)' % PARKED_SWITCH)
     for name, wanted in (('QWEN_FAST_ANY_REQUEST', '1'), ('QWEN_FAST_EXTENT_REPLAY', '1'), (FAST_TP_ENV, '4')):
@@ -500,20 +509,109 @@ F1_AUDIT = 'QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT'
 SDPA_OFF_VALUES = ('', '0', 'off')
 
 
+# The OWNER TRAFFIC WAIVER (docs/tp4-ship-ln-w2-er.md): the one way a TRAFFIC profile (not gate_only) carries a lever that multi_problems or
+# parked_problems refuses on traffic for want of a pinned qualification record. It is a profile field, never an environment variable, so it
+# travels with the profile into the image that bakes it (the image is the unit of rollback) and no process environment can grant it. It
+# names every lever it waives WITH its exact value (a lever set and not listed is still refused; a lever listed and not set is a stale
+# waiver, refused too), says in words what is waived, cites the card evidence and records the owner's decision. Only the four levers below
+# are waivable: the audits, the faults, the negative controls, the ballast and the kill-switch trigger stay a gate's own.
+TRAFFIC_WAIVER = 'owner_traffic_waiver'
+TRAFFIC_WAIVER_FIELDS = ('id', 'levers', 'waives', 'evidence', 'decision')
+TRAFFIC_WAIVER_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,62}')
+WAIVABLE_LEVERS = {'QWEN_FAST_TP4_SDPA': 'multi', 'QWEN_FAST_TP4_CONV_GATES_SPREAD': '1', 'QWEN_FAST_PARKED_ENGINES': '1',
+                   'QWEN_FAST_PARKED_DRAFTS': '1'}
+TRAFFIC_WAIVER_MARKER = 'OWNER TRAFFIC WAIVER'
+# The decision is a sentence that starts with one of these words. PENDING is a REQUEST: the profile boots (gates and G1 provenance boot every
+# profile) and logs the word, but no build may bake it as an image default (c2_serving_job.read_bake, build-c2-serving-image.sh) until the commit
+# that is built records the owner's APPROVED decision.
+TRAFFIC_WAIVER_DECISIONS = ('PENDING', 'APPROVED')
+
+
+def traffic_waiver_problems(profile):
+    """Every way the profile's owner traffic waiver is malformed or misplaced, [] when it has none or it is well formed."""
+    waiver = profile.get(TRAFFIC_WAIVER)
+    if waiver is None:
+        return []
+    label = '%s of %s' % (TRAFFIC_WAIVER, profile.get('name', 'the profile'))
+    if not isinstance(waiver, dict):
+        return ['%s must be an object with %s' % (label, ', '.join(TRAFFIC_WAIVER_FIELDS))]
+    problems = []
+    if profile.get('gate_only') is True:
+        problems.append('%s: a gate-only profile needs no waiver (the gate refusals do not apply to it); only a traffic profile carries one' % label)
+    missing = [field for field in TRAFFIC_WAIVER_FIELDS if field not in waiver]
+    unknown = sorted(field for field in waiver if field not in TRAFFIC_WAIVER_FIELDS)
+    if missing:
+        problems.append('%s lacks %s' % (label, ', '.join(missing)))
+    if unknown:
+        problems.append('%s has unknown field(s) %s' % (label, ', '.join(unknown)))
+    if 'id' in waiver and not (isinstance(waiver['id'], str) and TRAFFIC_WAIVER_ID.fullmatch(waiver['id'])):
+        problems.append('%s: id must match %s, got %r' % (label, TRAFFIC_WAIVER_ID.pattern, waiver['id']))
+    for field in ('waives', 'decision'):
+        if field in waiver and not (isinstance(waiver[field], str) and waiver[field].strip()):
+            problems.append('%s: %s must be a non-empty sentence' % (label, field))
+    decision = waiver.get('decision')
+    if isinstance(decision, str) and decision.strip() and decision.split(None, 1)[0].rstrip(':') not in TRAFFIC_WAIVER_DECISIONS:
+        problems.append('%s: decision must start with %s, got %r' % (label, ' or '.join(TRAFFIC_WAIVER_DECISIONS), decision[:40]))
+    evidence = waiver.get('evidence')
+    if 'evidence' in waiver and not (isinstance(evidence, list) and evidence and all(isinstance(item, str) and item.strip() for item in evidence)):
+        problems.append('%s: evidence must be a non-empty list of non-empty strings (the card runs the decision rests on)' % label)
+    levers = waiver.get('levers')
+    if 'levers' in waiver:
+        if not (isinstance(levers, dict) and levers):
+            problems.append('%s: levers must be a non-empty object {flag: exact value}' % label)
+        else:
+            env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
+            for flag in sorted(levers):
+                value = levers[flag]
+                if flag not in WAIVABLE_LEVERS:
+                    problems.append('%s: %s is not waivable (only %s; a gate instrument never is)' % (label, flag, ', '.join(sorted(WAIVABLE_LEVERS))))
+                elif value != WAIVABLE_LEVERS[flag]:
+                    problems.append('%s: %s is waivable only at %s, not %r' % (label, flag, WAIVABLE_LEVERS[flag], value))
+                elif env.get(flag) != value:
+                    problems.append('%s names %s=%s and the profile env has %r: a waiver names exactly the levers the profile sets'
+                                    % (label, flag, value, env.get(flag)))
+    return problems
+
+
+def waived_levers(profile):
+    """{flag: value} of the profile's owner traffic waiver; {} when it has none or the waiver is malformed (a malformed waiver waives nothing)."""
+    waiver = profile.get(TRAFFIC_WAIVER)
+    if waiver is None or traffic_waiver_problems(profile):
+        return {}
+    return dict(waiver['levers'])
+
+
+def traffic_waiver_pending(profile):
+    """Whether the profile carries an owner traffic waiver the owner has not approved (malformed counts as not approved)."""
+    waiver = profile.get(TRAFFIC_WAIVER)
+    if waiver is None:
+        return False
+    if traffic_waiver_problems(profile):
+        return True
+    return waiver['decision'].split(None, 1)[0].rstrip(':') != 'APPROVED'
+
+
+def waived(profile, flag, env):
+    """Whether the profile's owner traffic waiver names `flag` at the value the env sets it to."""
+    value = waived_levers(profile).get(flag)
+    return value is not None and env.get(flag) == value
+
+
 def multi_problems(profile):
-    """The wave-2 levers (docs/tp4-w2.md, docs/tp4-combined-window.md) on a traffic profile: refused. The multi-user SDPA launch (QWEN_FAST_TP4_SDPA
-    set to anything but off, one G16 flags 0x21 program) is outside the baked 262k evidence (packed_any_evidence_tp4_262144.json covers the served
-    0x23 programs), the F1 conv-gates spread has never compiled on a card, and both audits are gate instruments. A traffic profile that names any of
-    the four needs a pinned qualification record for its capacity, which does not exist yet: the refusal names what is missing."""
+    """The wave-2 levers (docs/tp4-w2.md, docs/tp4-combined-window.md) on a traffic profile: refused unless the profile's owner traffic waiver
+    names them. The multi-user SDPA launch (QWEN_FAST_TP4_SDPA set to anything but off, one G16 flags 0x21 program) is outside the baked 262k
+    evidence (packed_any_evidence_tp4_262144.json covers the served 0x23 programs), the F1 conv-gates spread has no pinned qualification record,
+    and both audits are gate instruments. A traffic profile that names the launch or F1 needs a pinned qualification record for its capacity,
+    which does not exist, or the owner's waiver of it (TRAFFIC_WAIVER); the audits are never waivable. The refusal names what is missing."""
     env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
     if profile.get('gate_only') is True:
         return []
     problems = []
-    if env.get(MULTI_SWITCH, '').strip().lower() not in SDPA_OFF_VALUES:
+    if env.get(MULTI_SWITCH, '').strip().lower() not in SDPA_OFF_VALUES and not waived(profile, MULTI_SWITCH, env):
         problems.append('%s=%s needs a gate-only profile: the multi-user SDPA launch is outside the 262k evidence and has no pinned multi '
-                        'qualification record' % (MULTI_SWITCH, env[MULTI_SWITCH]))
+                        'qualification record (or the owner\'s %s naming it)' % (MULTI_SWITCH, env[MULTI_SWITCH], TRAFFIC_WAIVER))
     for key in (MULTI_AUDIT, F1_SWITCH, F1_AUDIT):
-        if env.get(key, '0') not in ('', '0'):
+        if env.get(key, '0') not in ('', '0') and not waived(profile, key, env):
             problems.append('%s=%s needs a gate-only profile (it has never served traffic and has no pinned qualification record)'
                             % (key, env[key]))
     return problems
@@ -1204,7 +1302,7 @@ def boot(environ=None, orig_argv=None):
         return None
     fix_sys_path()
     profile = load_profile(environ.get('QWEN_C2_PROFILES', PROFILES))
-    problems = gate_problems(profile, environ) + waiver_problems(profile, environ)
+    problems = gate_problems(profile, environ) + waiver_problems(profile, environ) + traffic_waiver_problems(profile)
     if problems:
         raise ValueError('; '.join(problems))
     problems = prefix_reuse_problems(profile)
@@ -1225,6 +1323,11 @@ def boot(environ=None, orig_argv=None):
     problems = mesh_problems(profile)
     if problems:
         raise ValueError('profile %s cannot open its mesh: %s' % (profile['name'], '; '.join(problems)))
+    levers = waived_levers(profile)
+    if levers:
+        waiver = profile[TRAFFIC_WAIVER]
+        log('profile %s: %s %s: %s serve traffic with no pinned qualification record (%s) [decision: %s]', profile['name'], TRAFFIC_WAIVER_MARKER,
+            waiver['id'], ' '.join('%s=%s' % (flag, levers[flag]) for flag in sorted(levers)), waiver['waives'], waiver['decision'])
     apply_environment(profile, environ)
     if DRAFTER_CHECKPOINT_FLAG in profile['env']:
         # A candidate drafter: its baked bytes must be the pinned ones (docs/tp4-combined-window.md), or the attach is refused before an engine starts.

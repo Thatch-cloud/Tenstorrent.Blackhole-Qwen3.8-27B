@@ -1,0 +1,13 @@
+# The SHIP pack of the Lever N + W2 + engine reuse cutover (docs/tp4-ship-ln-w2-er.md). ONE image: tp4-ship-1, built by B0 from the approved commit of tp4/ship-ln-w2-er.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: nothing later runs, and nothing ships, after a failure of this job.
+# P0. The owner's decision on the profile's owner_traffic_waiver is APPROVED in the commit B0 builds (B0 is refused otherwise). The CPU suite is green on that commit.
+#     Push ONE tag at a time and wait for its run to finish (the workflow keeps one pending run; a queued tag is cancelled). No other window driver is alive.
+# B0 builds; the operator builds the production thin layer on the B0 image between B0 and G1 (no card job may run during that build); G1 and G2 gate the base on the cards; SR
+# replays the agent's serving sequence on the thin layer itself (the bytes production will run). Production stays down throughout (the owner-approved window).
+# PASS (all needed before any publish or :latest move): B0 built and its provenance clean; G1 every smoke rule clean, skew under 238 s, 0 crashes, parked judge 0 problems;
+# G2 PASS; SR 'PLATFORM_REPLAY passed=True'. Any failure: production is restored from the rollback image instead (no retry on the cards without the owner).
+# Time (estimate): B0 35, thin layer 10, G1 50, G2 35, SR 30: about 2 h 40 min of card and build time, plus about 3 minutes of queue per tag.
+B0-build stop tp4-ship-1 35
+G1-ship-gate stop tp4-ship-1 50
+G2-prefix-hit stop tp4-ship-1 35
+SR-platform-replay stop tp4-ship-1 30

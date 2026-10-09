@@ -204,6 +204,9 @@ import json, sys
 entry = json.load(open(sys.argv[1], encoding='utf-8'))['profiles'].get(sys.argv[2])
 if entry is None or entry.get('gate_only') is True or entry.get('mesh_device') != 'P150x4':
     sys.exit('C2_BAKE_DEFAULT_PROFILE %s is not a four-card serving profile of this context' % sys.argv[2])
+waiver = entry.get('owner_traffic_waiver')
+if waiver is not None and not str((waiver if isinstance(waiver, dict) else {}).get('decision') or '').startswith('APPROVED'):
+    sys.exit('C2_BAKE_DEFAULT_PROFILE %s carries an owner_traffic_waiver whose decision is not APPROVED' % sys.argv[2])
 print(entry['engine']['max-num-seqs'])
 PY
   )

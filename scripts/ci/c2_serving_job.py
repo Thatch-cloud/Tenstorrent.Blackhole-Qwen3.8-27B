@@ -46,7 +46,8 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_BAKE_DEFAULT_PROFILE  build only: bake this profile as the image's serving default (the image ENV QWEN_C2_PROFILE) and
                       THATCH_SERVING_SESSION_CAP as its max-num-seqs (the node agent forwards neither, so the image is what a platform launch
                       serves and what a rollback moves). Default, rendered empty: nothing is baked, the default is qwen_c2_profiles.json's
-                      (production's four seats). Needs the build action, C2_CARDS=quad and a four-card (P150x4), not gate_only, profile
+                      (production's four seats). Needs the build action, C2_CARDS=quad and a four-card (P150x4), not gate_only, profile; a
+                      profile with an owner_traffic_waiver (serving_c2_contract.TRAFFIC_WAIVER) is baked only once its decision reads APPROVED
   C2_DRAFTER_CANDIDATES  build only: the pinned drafter candidate ids (scripts/ci/drafter_checkpoints.json) whose bytes the image build stages beside the default
                       checkpoint (build-c2-serving-image.sh). Space- or comma-separated; every id must be a candidate of the table (the default is never staged);
                       needs the build action. Default, rendered empty: only the placeholder (drafter_checkpoint.py, docs/tp4-combined-window.md)
@@ -612,7 +613,25 @@ def read_bake(values, actions, cards, root=ROOT):
     if entry.get('gate_only') is True or entry.get('mesh_device') != TP4_MESH_DEVICE:
         raise JobError('C2_BAKE_DEFAULT_PROFILE %s is not a four-card serving profile (%s, not gate_only): a gate arm is never '
                        'an image default' % (name, TP4_MESH_DEVICE))
+    if bake_waiver_pending(entry):
+        raise JobError('C2_BAKE_DEFAULT_PROFILE %s carries an %s whose decision is not APPROVED: the waiver is a request until the commit that is '
+                       'built records the owner\'s approval (docs/tp4-ship-ln-w2-er.md)' % (name, BAKE_WAIVER_FIELD))
     return name
+
+
+# serving_c2_contract.TRAFFIC_WAIVER and its decision words (this module stays stdlib only and does not import the contract; a test holds the two equal).
+BAKE_WAIVER_FIELD = 'owner_traffic_waiver'
+
+
+def bake_waiver_pending(entry):
+    """Whether a profile entry carries an owner traffic waiver whose decision does not start with APPROVED (absent: False)."""
+    waiver = entry.get(BAKE_WAIVER_FIELD)
+    if waiver is None:
+        return False
+    decision = waiver.get('decision') if isinstance(waiver, dict) else None
+    if not isinstance(decision, str) or not decision.strip():
+        return True
+    return decision.split(None, 1)[0].rstrip(':') != 'APPROVED'
 
 
 def below_family(name, text):

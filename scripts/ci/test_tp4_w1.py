@@ -127,7 +127,7 @@ class ProfileTests(unittest.TestCase):
     def test_no_traffic_profile_carries_a_stack_flag_and_only_the_two_w1_arms_carry_all_of_them(self):
         for name, profile in load()['profiles'].items():
             env = profile.get('env', {})
-            if not profile.get('gate_only') and name not in ('c2-packed-tp4-8x262k-ship-prefix', 'c2-packed-tp4-8x262k-ship-prefix-levern-traffic'):     # ship/262k-prefix and its Lever N twin: the traffic profiles that carry the stack (test_ship_262k_prefix)
+            if not profile.get('gate_only') and name not in ('c2-packed-tp4-8x262k-ship-prefix', 'c2-packed-tp4-8x262k-ship-prefix-levern-traffic', 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic'):     # ship/262k-prefix and its Lever N twin: the traffic profiles that carry the stack (test_ship_262k_prefix)
                 with self.subTest(name=name):
                     self.assertFalse((set(STACK) | set(AUDITS)) & set(env))
             if set(STACK) <= set(env) and name.startswith(W1):

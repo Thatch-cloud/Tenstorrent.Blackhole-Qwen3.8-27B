@@ -76,7 +76,7 @@ fault, too: on today's terms, with the same ladder). A held arrival logs how lon
 ## 5. Flags and profiles
 
 `QWEN_FAST_PARKED_ENGINES` and `QWEN_FAST_PARKED_DRAFTS` are refused outside a gate-only profile until the owner decides to ship them (the contract's
-`parked_problems`), and the gate instruments (the audit, the negative controls, the faults, the ballast, the kill switch's trigger and file) outside a gate's
+`parked_problems`; a traffic profile carries them only under its owner traffic waiver, docs/tp4-ship-ln-w2-er.md), and the gate instruments (the audit, the negative controls, the faults, the ballast, the kill switch's trigger and file) outside a gate's
 profile and in the process environment of any profile that does not name them; `QWEN_FAST_LEVERN_BUILD_MS` is the governor's own flag and is not parked-specific.
 The production profile is unchanged. The gate profiles are generated twins of the ship-prefix-levern
 profiles (`make_parked_profiles.py`), never hand edited: the arms control, `-parked-e1` (engine reuse alone), `-parked` (with 2c and the learned governor

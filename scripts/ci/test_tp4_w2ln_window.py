@@ -693,7 +693,7 @@ class NumbersTests(unittest.TestCase):
         self.assertIn('%d planned and %d conditional' % (n['planned'], n['conditional']), doc)
         self.assertIn('%d tags' % (ALLOWLISTED_TAGS + REQUESTED_TAGS), doc)
         self.assertIn('checkpoint', doc)
-        names = len([name for name in profiles()['profiles'] if name.startswith(SHIP) and name not in profile_table.PARKED]) - 5        # less the five production-family profiles of the ship and levern packs and the Lever N traffic profile
+        names = len([name for name in profiles()['profiles'] if name.startswith(SHIP) and name not in profile_table.PARKED and name not in profile_table.SHIPPED]) - 5        # less the five production-family profiles of the ship and levern packs and the Lever N traffic profile
         self.assertIn('%d gate-only profiles' % names, doc)
         self.assertIsNone(BANNED.search(doc))
 
@@ -769,7 +769,7 @@ class RuleTests(unittest.TestCase):
     def test_the_readme_carries_the_profile_table(self):
         text = read_text('README.md')
         for name in sorted(profiles()['profiles']):
-            if (name.startswith(SHIP) and name != SHIP and name not in profile_table.PARKED
+            if (name.startswith(SHIP) and name != SHIP and name not in profile_table.PARKED and name not in profile_table.SHIPPED
                     and not name.endswith(('-audit', '-levern', '-levern-audit', '-levern-traffic'))):
                 self.assertIn(name, text, name)
 

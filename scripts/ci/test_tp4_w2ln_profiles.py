@@ -167,6 +167,11 @@ def load():
     return json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))
 
 
+# The TRAFFIC profiles under an owner traffic waiver (serving_c2_contract.TRAFFIC_WAIVER: the 2026-10-10 ship candidate, test_ship_ln_w2_er holds each): they
+# carry W2 by the owner's decision, not as this window's arms, so the window's census exempts them as it does the engine-reuse twins.
+SHIPPED = frozenset(name for name, body in load()['profiles'].items() if 'owner_traffic_waiver' in body)
+
+
 def flat(profile):
     body = dict(profile)
     body.pop('description', None)
@@ -176,7 +181,7 @@ def flat(profile):
 class ProfileTests(unittest.TestCase):
     def test_every_new_profile_is_in_the_file_and_nothing_else_is_new_in_the_family(self):
         found = load()['profiles']
-        family = sorted(name for name in found if name.startswith(SHIP) and name not in PARKED)
+        family = sorted(name for name in found if name.startswith(SHIP) and name not in PARKED and name not in SHIPPED)
         known = sorted(name for name in family if name in SPEC)
         self.assertEqual(known, sorted(SPEC))
         older = ['ship-prefix', 'ship-prefix-audit', 'ship-prefix-levern', 'ship-prefix-levern-audit', 'ship-prefix-levern-traffic']

@@ -13080,6 +13080,152 @@
       "drafter_headroom_tokens": 32,
       "parser_rechunk": true
     },
+    "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic": {
+      "description": "The SHIP candidate of 2026-10-10 (Lever N + W2 + engine reuse), eight seats x 262k, a TRAFFIC profile (NOT gate_only): c2-packed-tp4-8x262k-ship-prefix-levern-traffic plus exactly the W2 levers (QWEN_FAST_TP4_SDPA=multi, QWEN_FAST_TP4_CONV_GATES_SPREAD=1; docs/tp4-w2.md) and engine reuse (QWEN_FAST_PARKED_ENGINES=1, QWEN_FAST_PARKED_DRAFTS=1, QWEN_FAST_LEVERN_BUILD_MS=learned; docs/tp4-engine-reuse.md): the env of the gate arms -levern-w2 and -levern-parked together, with no gate instrument, no evidence waiver and no gate marker. The W2 levers and engine reuse serve traffic only under its owner_traffic_waiver (serving_c2_contract.TRAFFIC_WAIVER): the multi launch is outside the 262k evidence (every attach logs the UNQUALIFIED line) and neither lever has a pinned qualification record. Not the file default: the served default only of an image built with C2_BAKE_DEFAULT_PROFILE, and only once the waiver decision reads APPROVED (docs/tp4-ship-ln-w2-er.md). Kill switches with no restart: levern.off, prefix-reuse.off and parked.off on the hub mount; W2 has none (an image rollback turns it off).",
+      "eos_ids": [
+        248046,
+        248044
+      ],
+      "snapshots": [
+        "/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "/models/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+      ],
+      "mesh_device": "P150x4",
+      "mesh_graph_descriptor": "/opt/qwen-c2/mesh/qwen_p150x4_ring_mesh_graph_descriptor.textproto",
+      "env": {
+        "QWEN_FAST_OUTPUT_BUDGET": "16384",
+        "QWEN_FAST_MAX_POSITION": "262144",
+        "QWEN_DSPARK_REQUEST_CONTEXT": "131072",
+        "QWEN_FAST_ANY_REQUEST": "1",
+        "QWEN_FAST_FAULTHANDLER": "0",
+        "QWEN_FAST_EXTENT_REPLAY": "1",
+        "QWEN_FAST_TP": "4",
+        "QWEN_FAST_SDPA_MODES": "tail,share",
+        "QWEN_PROJECTION_LINKS": "2",
+        "QWEN_GDN_PREFILL_MMRS": "0",
+        "QWEN_FAST_GDN_PREFILL_CONV_AUDIT": "4",
+        "QWEN_FAST_TP_KV_SLIDE": "1",
+        "QWEN_FAST_QUAD_DRAFT": "1",
+        "QWEN_FAST_FUSED_COMMIT": "1",
+        "QWEN_FAST_FUSED_COMMIT_INPLACE": "1",
+        "QWEN_FAST_FUSED_COMMIT_LIVE_BANKS": "1",
+        "QWEN_DRAFT_KV_SLIDE_EXPERIMENT": "0",
+        "QWEN_FAST_TRACED_PUBLISH": "0",
+        "QWEN_MLP_BLOCK_STREAM_EXPERIMENT": "0",
+        "QWEN_GDN_DIRECT_WINDOW": "0",
+        "QWEN_GDN_SHARED_QK_EXPERIMENT": "0",
+        "QWEN_FAST_VERIFY_T1_AUDIT": "0",
+        "QWEN_FAST_VERIFY_T2_AUDIT": "0",
+        "QWEN_FAST_BUDGET_CAP": "1",
+        "QWEN_FAST_SEQ_DEADLINE_S": "120",
+        "QWEN_FAST_M3_BLOCKS": "2",
+        "QWEN_FAST_M3_REQUEST_WARM": "1",
+        "QWEN_FAST_KV_RESERVATION": "1",
+        "QWEN36_MAX_TOKENS_ALL_USERS": "1277440",
+        "QWEN_FAST_DRAM_ENGINE_BUILD_MB": "800",
+        "QWEN_FAST_DRAM_PREFILL_TRANSIENT_MB": "600",
+        "QWEN_FAST_DRAM_LARGEST_BUFFER_MB": "256",
+        "QWEN_FAST_TP4_COMMIT_LANES": "1",
+        "QWEN_FAST_TP4_SHARD_VALUES": "1",
+        "QWEN_FAST_TP4_GDN_GLUE": "1",
+        "QWEN_FAST_TP4_GDN_BLOCK_CONV": "1",
+        "QWEN_FAST_TP4_ATTN_FOLD": "1",
+        "QWEN_FAST_QUAD_DRAFT_BLOCKS": "2",
+        "QWEN_FAST_CCL_TOPOLOGY": "ring",
+        "QWEN_FAST_TP4_DRAFT_CONV": "1",
+        "QWEN_FAST_TP4_DRAFT_HEADS": "1",
+        "QWEN_FAST_TP4_ENTRY_DIET": "1",
+        "QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS": "1",
+        "QWEN_FAST_TP4_RS_UNIT_MAJOR": "1",
+        "QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE": "1",
+        "QWEN_FAST_TP4_WINDOW_VALIDATE": "1",
+        "QWEN_PREFIX_REUSE": "1",
+        "QWEN_PREFIX_STORE_GIB": "8",
+        "QWEN_FAST_STICKY_SESSIONS": "1",
+        "QWEN_FAST_LEVER_N": "1",
+        "QWEN_FAST_LEVERN_STEP_TOKENS": "2048",
+        "QWEN_FAST_LEVERN_SOLO_STEP_TOKENS": "16384",
+        "QWEN_FAST_LEVERN_PREFILL_SHARE": "0.5",
+        "QWEN_FAST_LEVERN_TTFT_TARGET_S": "180",
+        "QWEN_FAST_LEVERN_MAX_DECODE_GAP_S": "8",
+        "QWEN_FAST_LEVERN_SHORT_TOKENS": "16384",
+        "QWEN_FAST_LEVERN_PARK": "host",
+        "QWEN_FAST_LEVERN_PARK_SLOTS": "1",
+        "QWEN_FAST_LEVERN_MAX_PARK_S": "30",
+        "QWEN_FAST_LEVERN_EPOCH_SCOPE": "route",
+        "QWEN_FAST_TP4_SDPA": "multi",
+        "QWEN_FAST_TP4_CONV_GATES_SPREAD": "1",
+        "QWEN_FAST_PARKED_ENGINES": "1",
+        "QWEN_FAST_PARKED_DRAFTS": "1",
+        "QWEN_FAST_LEVERN_BUILD_MS": "learned"
+      },
+      "engine": {
+        "model": "@SNAPSHOT@",
+        "dtype": "bfloat16",
+        "max-model-len": 262144,
+        "max-num-seqs": 8,
+        "max-num-batched-tokens": 262144,
+        "block-size": 64,
+        "num-gpu-blocks-override": 19968,
+        "no-async-scheduling": true,
+        "limit-mm-per-prompt": {
+          "image": 0,
+          "video": 0
+        },
+        "shutdown-timeout": 30,
+        "additional-config": {
+          "tt": {
+            "trace_mode": "decode_only",
+            "trace_region_size": 536870912,
+            "l1_small_size": 24576,
+            "fabric_config": "FABRIC_1D"
+          },
+          "qwen_fast_t16": true,
+          "qwen_fast_runtime": {
+            "directory": "/experiment-scripts/ci",
+            "runtime_root": "/opt/tt-metal",
+            "fixtures": "/experiment-dflash-fixture",
+            "target_snapshot": "@SNAPSHOT@"
+          }
+        },
+        "speculative-config": {
+          "model": "/draft-config",
+          "method": "dflash",
+          "num_speculative_tokens": 15,
+          "draft_sample_method": "greedy",
+          "rejection_sample_method": "standard"
+        },
+        "enable-prefix-caching": true,
+        "enable-chunked-prefill": true,
+        "prefix-caching-hash-algo": "sha256"
+      },
+      "max_prompt_tokens": 253920,
+      "min_answer_tokens": 8192,
+      "default_max_tokens": 8192,
+      "drafter_headroom_tokens": 32,
+      "parser_rechunk": true,
+      "owner_traffic_waiver": {
+        "id": "w2-er-262k-2026-10-10",
+        "levers": {
+          "QWEN_FAST_TP4_SDPA": "multi",
+          "QWEN_FAST_TP4_CONV_GATES_SPREAD": "1",
+          "QWEN_FAST_PARKED_ENGINES": "1",
+          "QWEN_FAST_PARKED_DRAFTS": "1"
+        },
+        "waives": "the pinned qualification records: the multi-user SDPA launch (G16, flags 0x21) at 262,144 is outside packed_any_evidence_tp4_262144.json; F1 (the conv-gates spread) has no record; engine reuse ran its exactness, hang and paired-turn gates but not its memory ballast ladder (M1-M5), kill-switch drill (K1), fault (F1, F2) or negative-control (N1-N4) jobs; and W2 with engine reuse in one process has not run on a card before the ship image's own re-test",
+        "evidence": [
+          "W2 SDPA multi exactness: v568 run 37878277301, 3,433 of 3,433 tp4 SDPA audits exact, levern_equal 2k-33k, levern_equal_long 131k and 254k",
+          "W2 F1 exactness: v595 run 37879766552, 3,478 conv-gates spread audits exact",
+          "W2 timed A/B/A: v596, v597, v598 (32k and below, +3 to +7 %) and v599, v601, v602 (about 120k, four-live +18.5 %)",
+          "W2 hang shapes v603 run 37889444605 correct; paired skew v592 run 37923960331 and v542 run 37924960659: slowest first token 236.6 s Lever N, 232.0 s W2 (limit 238)",
+          "engine reuse exactness unaudited: v545 run 37916094776 and v546 run 37917350076, 37 answers equal, 36 rebinds, 0 refused or failed",
+          "engine reuse exactness audited: v609 run 37906486464, 9 rebinds, every rebind digest equal",
+          "engine reuse hang shapes: v610 run 37918498075, 58 rebinds clean, the 8 s decode floor holds",
+          "engine reuse paired turns ABAB: v611 to v614, runs 37920201149, 37921182714, 37922000099, 37923133145: x1.52 agent-turn throughput, text identical"
+        ],
+        "decision": "PENDING OWNER DECISION (requested 2026-10-10): serve W2 and engine reuse on traffic at eight seats x 262k on this evidence, without the records named in waives. No image bakes this profile as its default until this sentence starts with APPROVED in the commit that is built."
+      }
+    },
     "c2-packed-tp4-8x262k-ship-prefix-levern-audit": {
       "description": "GATE ONLY (the audited twin of c2-packed-tp4-8x262k-ship-prefix-levern; never a timed or traffic arm): Lever N (docs/lever-n-tp4-design-2026-10-04.md) merged with prefix reuse (docs/lever-n-prefix-merged-route.md): a long prefill is split into steps that each end on the model's own 2,048-token chunk boundary and decode rounds run between them, a prefix hit resumes through the same route (its first step restores the registry's checkpoint at Q, its later steps continue its own scratch), a split prompt publishes the same checkpoints as a whole one, a short prompt (at most 16,384 tokens left after its hit) preempts a long prefill at a step boundary and parks its scratch on the host, the prefill share is raised by a deadline governor so a cold 254k prompt still finishes inside 180 s of a 240 s client deadline, and an intermediate step that wrote no decode slot moves no fixture epoch. The engine keeps enable-chunked-prefill with max-num-batched-tokens equal to max-model-len, so nothing splits except through the scheduler cap. THE EXACTNESS ARM: c2-packed-tp4-8x262k-ship-prefix-audit (the W1 lever audits and the verify audits) plus the Lever N flags, the Lever N digest instrument and the prefix route's slot and logits digests, so a hit that arrives split and its salted cold twin can be compared. The control is c2-packed-tp4-8x262k-ship-prefix-audit.",
       "eos_ids": [

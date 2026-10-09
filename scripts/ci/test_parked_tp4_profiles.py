@@ -244,6 +244,11 @@ class ProfileTests(unittest.TestCase):
             with self.subTest(profile=name):
                 if name in generated:
                     self.assertTrue(named or name.endswith('-r2'))
+                elif 'owner_traffic_waiver' in profile:
+                    # the ship candidate (test_ship_ln_w2_er): the -parked twin's three flags on TRAFFIC, the two parked switches named by its owner waiver
+                    self.assertEqual(sorted(named), sorted(['QWEN_FAST_PARKED_ENGINES', 'QWEN_FAST_PARKED_DRAFTS', 'QWEN_FAST_LEVERN_BUILD_MS']))
+                    self.assertEqual({flag: env[flag] for flag in named if flag.startswith('QWEN_FAST_PARKED_')},
+                                     {flag: value for flag, value in profile['owner_traffic_waiver']['levers'].items() if flag.startswith('QWEN_FAST_PARKED_')})
                 else:
                     self.assertEqual(named, [], 'a profile that is not a generated twin names no engine-reuse flag')
         for name in (PRODUCTION, PRODUCTION + '-audit', PRODUCTION + '-levern', PRODUCTION + '-levern-audit'):

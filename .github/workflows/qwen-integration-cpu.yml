@@ -333,5 +333,5 @@ jobs:
         run: |
           python -B -m unittest test_parked_tp4_census test_parked_tp4_engine test_parked_tp4_device test_parked_tp4_set
           python -B -m unittest test_parked_tp4_wiring test_parked_tp4_admission test_parked_tp4_profiles test_parked_tp4_drafts
-          python -B -m unittest test_parked_tp4_judge test_levern_admission_cost test_tp4_engine_reuse_jobs
+          python -B -m unittest test_parked_tp4_judge test_levern_admission_cost test_tp4_engine_reuse_jobs test_ship_ln_w2_er
           python -B -m unittest test_parked_tp4_smoke

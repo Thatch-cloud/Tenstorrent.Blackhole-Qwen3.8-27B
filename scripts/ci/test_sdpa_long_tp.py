@@ -211,11 +211,14 @@ class SmokeAndProfileTests(unittest.TestCase):
         # tp4/sdpa-multi's two gate-only twins carry it too (test_sdpa_multi_tp holds them to their control plus exactly the flags).
         # tp4/w2's two gate-only arms carry multi too (test_tp4_w2).
         # the combined window's multi carriers are gate only too (test_tp4_w2ln_profiles)
-        from test_tp4_w2ln_profiles import MULTI as WINDOW_MULTI
+        # the ship candidate carries multi on TRAFFIC only under its owner traffic waiver, which must name the flag (test_ship_ln_w2_er)
+        from test_tp4_w2ln_profiles import MULTI as WINDOW_MULTI, SHIPPED
         allowed = {self.TWIN, 'c2-packed-tp4-8x262k-best-sdpamulti', 'c2-packed-tp4-8x262k-best-sdpamulti-audit',
                    'c2-packed-tp4-8x262k-w2', 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1', 'c2-packed-tp4-8x262k-w2-nof1-audit'} | set(WINDOW_MULTI)
         for name, body in self.PROFILES.items():
-            if name not in allowed:
+            if name in SHIPPED:
+                self.assertEqual(body['owner_traffic_waiver']['levers'].get(FLAG), body['env'].get(FLAG), name)
+            elif name not in allowed:
                 self.assertNotIn(FLAG, body.get('env', {}), name)
             else:
                 self.assertIs(body['gate_only'], True, name)
