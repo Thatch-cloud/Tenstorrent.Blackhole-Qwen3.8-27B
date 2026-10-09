@@ -1566,7 +1566,7 @@ class ParentTests(unittest.TestCase):
             self.skipTest('no git history for %s' % PARENT)
         before = result.stdout.decode('utf-8').splitlines()
         after = without_trace_census(without_levern(without_diag_trim(without_prefill_scratch(without_any_request(without_sticky(
-            without_solo_and_lanes(without_m3_blocks(without_request_warm(without_parked_engines((HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines()))))))))))
+            without_solo_and_lanes(without_m3_blocks(without_request_warm(without_parked_engines(without_octo((HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines())))))))))))
         changed = [line for line in difflib.unified_diff(before, after, lineterm='', n=0)
                    if line[:1] in '+-' and not line.startswith(('+++', '---'))]
         added = [line[1:].strip() for line in changed if line.startswith('+')]
@@ -1607,6 +1607,13 @@ def replace_run(lines, run, replacement):
     if len(starts) != 1:
         raise AssertionError('%r is not in serving_runtime.py exactly once' % (run,))
     return lines[:starts[0]] + list(replacement) + lines[starts[0] + len(run):]
+
+
+def without_octo(lines):
+    """serving_runtime.py less the octo-T8 hunk (QWEN_FAST_OCTO and QWEN_FAST_SOLO_PACKED, tp4/octo-t8; default off), which landed after every parent this test compares with:
+    the two lazy admissions and the tripwire after them. Nothing else of the attach changed for it."""
+    return cut_once(lines, '# QWEN_FAST_OCTO (octo-T8; default off, strictly off|live|alternate) and QWEN_FAST_SOLO_PACKED (the lone-user padded round; default off, strictly \'0\' or',
+                    "raise ValueError('QWEN_FAST_OCTO=%s was admitted but this attach builds no octo block (serving_octo.DEVICE_PIECES: attach-build)' % octo_record['mode'])")
 
 
 def without_solo_and_lanes(lines):
