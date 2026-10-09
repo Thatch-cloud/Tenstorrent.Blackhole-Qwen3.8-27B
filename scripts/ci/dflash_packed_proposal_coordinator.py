@@ -288,6 +288,93 @@ def extent_memory_points(environ=None):
     return (os.environ if environ is None else environ).get(EXTENT_REPLAY_FLAG) == '1'
 
 
+# Engine reuse (QWEN_FAST_PARKED_ENGINES=1, serving_parked_engines; read at each use, and only '1' turns it on - the attach refuses any other
+# value). A parked device is not closed when its request ends: its slot's next request rebinds it, and every rebind advances its
+# rebind_generation. So under the flag
+#   - PARKED_RELEASED_LINE is logged when a departing request's parked device has its drafter traces retired (release_parked, which the worker
+#     hook reaches through serving_parked_engines.after_park) - E1, without the draft book;
+#   - a pair or quad trace records its members' generations when it is captured, and _cached_trace, _retire_quad and release_closed treat a
+#     member whose generation moved on like a closed one: a rebound device never replays a trace captured for its previous request, even when
+#     release_parked did not run (the backstop). The quads of the eight-seat path live in quad_blocks, and are keyed here with the pairs;
+#   - _ensure_single_user rebuilds under the single 2048 bucket (serving_request_factory.single_proposal_bucket), whatever the device's
+#     position: a device rebound below 2048 would otherwise get one narrower bucket, and the first round its history outgrew it would raise
+#     'Committed history exceeds prepared request contexts';
+#   - the capture headroom and the ledger's readings ask the captures' measured bytes (serving_prefill_admission.measured_*), by chip count.
+# With the DRAFT BOOK registered (QWEN_FAST_PARKED_DRAFTS=1, "2c"; serving_parked_engines.DraftTraceBook) the pair and block-quad traces are
+# bound to the pool slots for the process: the coordinator's `pairs` and `quad_blocks` ARE the book's dicts, every close of a trace routes
+# through the book (retire), no generation is recorded or checked, no single-user capture is ever released, and hook close drops views and
+# counters only. Off, none of this runs and every call is today's.
+PARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'
+PARKED_RELEASED_LINE = '[PACKED-PROPOSE] released parked slot={slot} quad={quad} pairs={pairs}'
+BOOK_QUAD_LINE = '[PINDIAG] parked draft book quad slots={slots} captured_at_round={round}'
+
+_DRAFT_BOOKS = []
+
+
+def register_draft_book(book):
+    """Register the process's draft trace book (2c). Returns the callable that removes it. One at a time."""
+    if _DRAFT_BOOKS:
+        raise ValueError('A draft trace book is already registered')
+    _DRAFT_BOOKS.append(book)
+
+    def unregister():
+        if book in _DRAFT_BOOKS:
+            _DRAFT_BOOKS.remove(book)
+
+    return unregister
+
+
+def draft_book():
+    """The registered draft trace book, or None (every process without QWEN_FAST_PARKED_DRAFTS=1)."""
+    return _DRAFT_BOOKS[0] if _DRAFT_BOOKS else None
+
+
+def parked_engines_on(environ=None):
+    """QWEN_FAST_PARKED_ENGINES=1."""
+    return (os.environ if environ is None else environ).get(PARKED_ENGINES_FLAG) == '1'
+
+
+def generation(device):
+    """A device's rebind_generation (serving_parked_engines.rebind_device advances it); 0 for one never rebound."""
+    return getattr(device, 'rebind_generation', 0)
+
+
+def generations(devices):
+    return tuple(generation(device) for device in devices)
+
+
+def single_capture_bytes():
+    """What a single-capture rebuild's ledger reading counts on: under QWEN_FAST_PARKED_ENGINES=1 the measured
+    serving_prefill_admission.measured_single_capture_bytes (by chip count), else estimated_single_capture_bytes(), as always."""
+    if parked_engines_on():
+        import serving_prefill_admission
+
+        return serving_prefill_admission.measured_single_capture_bytes()
+    return estimated_single_capture_bytes()
+
+
+def pair_capture_bytes():
+    """What a fresh pair capture's headroom (and its ledger reading) asks: under QWEN_FAST_PARKED_ENGINES=1 the measured bytes, else
+    estimated_pair_capture_bytes(), as always."""
+    if parked_engines_on():
+        import serving_prefill_admission
+
+        return serving_prefill_admission.measured_pair_capture_bytes()
+    return estimated_pair_capture_bytes()
+
+
+def quad_capture_bytes():
+    """What a fresh quad capture's headroom (and its ledger reading) asks: under QWEN_FAST_PARKED_ENGINES=1 the measured bytes, else
+    quad_draft.QUAD_CAPTURE_BYTES_EST, as always."""
+    if parked_engines_on():
+        import serving_prefill_admission
+
+        return serving_prefill_admission.measured_quad_capture_bytes()
+    import quad_draft
+
+    return quad_draft.QUAD_CAPTURE_BYTES_EST
+
+
 def ledger_before(op, estimate, point):
     """S2 W6d: memory_ledger.before ahead of a capture, only under QWEN_FAST_EXTENT_REPLAY=1 (and a no-op there
     unless QWEN_FAST_MEMORY_LEDGER=1). Unset, nothing is imported or read."""
@@ -562,7 +649,9 @@ class PackedProposalCoordinator:
     capture failing, or the pair breaking up when a partner finishes)."""
 
     def __init__(self):
-        self.pairs = {}
+        # The draft book (2c): when one is registered its dicts ARE this coordinator's, so a trace is listed once and closed once.
+        self._book = draft_book()
+        self.pairs = {} if self._book is None else self._book.pairs
         self.rounds = 0
         # QWEN_FAST_QUAD_DRAFT (quad_draft.py): (devices, trace, released) of the quad over slots 0-3, its
         # consecutive failures, whether it gave up, and how many rounds it served. Read only with the flag on.
@@ -572,13 +661,32 @@ class PackedProposalCoordinator:
         self.quad_rounds = 0
         # QWEN_FAST_QUAD_DRAFT_BLOCKS: the per-block quads' own state, keyed by slot tuple - (devices, trace, released) as self.quad, the
         # consecutive failures, and the blocks given up (slots -> reason). Empty, and nothing reads them, with the flag off.
-        self.quad_blocks = {}
+        self.quad_blocks = {} if self._book is None else self._book.quad_blocks
         self.quad_block_failures = {}
         self.quad_blocked = {}
+        # Engine reuse (QWEN_FAST_PARKED_ENGINES=1, no book; empty otherwise): {pair group, 'quad' or the block's slots: the members' rebind_generation
+        # when the trace was captured}.
+        self.generations = {}
         # QWEN_FAST_DRAFT_SINGLES_AUDIT: the rounds that ran a batched group (the audit's own count).
         self.singles_audit_candidates = 0
 
+    @property
+    def book(self):
+        """The draft book while it is still registered, else None: the kill switch unregisters it, and from then on this coordinator is today's (its
+        dicts, which were the book's, are empty and its own)."""
+        return self._book if self._book is not None and self._book in _DRAFT_BOOKS else None
+
     def close(self):
+        if self.book is not None:
+            # 2c: the traces are the book's, bound to the slots for the process. A hook's close drops the views its devices wear and resets the
+            # per-hook give-up state (a drain gives a blocked quad another chance); the traces stay.
+            self.book.drop_views()
+            self.quad_failures = 0
+            self.quad_disabled = False
+            self.quad_block_failures.clear()
+            self.quad_blocked.clear()
+            self.generations.clear()
+            return
         for _, _, trace, _ in self.pairs.values():
             trace.close()
         self.pairs.clear()
@@ -588,6 +696,35 @@ class PackedProposalCoordinator:
         for state in self.quad_blocks.values():
             state[1].close()
         self.quad_blocks.clear()
+        self.generations.clear()
+
+    # -- every close of a pair or block-quad trace goes through these two: with the draft book registered they retire through it (closed once,
+    # -- unlisted, the surviving members' views unwrapped), without it they close the trace as the code always did.
+    def _close_pair(self, group):
+        if self.book is not None:
+            self.book.retire('pair', group)
+        else:
+            # Close first, then unlist: a close that raises leaves the entry listed, as the code always did.
+            self.pairs[group][2].close()
+            del self.pairs[group]
+        self.generations.pop(group, None)
+
+    def _close_quad_block(self, slots):
+        if self.book is not None:
+            self.book.retire('quad', slots)
+        else:
+            self.quad_blocks[slots][1].close()
+            del self.quad_blocks[slots]
+        self.generations.pop(slots, None)
+
+    def _rebound(self, key, devices):
+        """Engine reuse, E1: whether a trace recorded under `key` was captured for an earlier request of one of `devices` - its generation has
+        moved on since. Always False with QWEN_FAST_PARKED_ENGINES off, and with the draft book (whose traces outlive requests by design)."""
+        return self.book is None and parked_engines_on() and self.generations.get(key) != generations(devices)
+
+    def _note_generations(self, key, devices):
+        if self.book is None and parked_engines_on():
+            self.generations[key] = generations(devices)
 
     def release_closed(self):
         """S2 W6c: close, now, every proposal trace a closed device was captured for - the quad if any of its
@@ -597,24 +734,53 @@ class PackedProposalCoordinator:
         only in the next draft round's _prepare_quad and a stale pair only when its slots re-form, and a
         replacement's prefill and engine build, which run first, see about 0.5 GB less (s2-design.md section 3.1).
         Live traces are kept, and so is each surviving device's released single-user capture: _ensure_single_user
-        rebuilds it the first round it is needed. Logs RELEASED_LINE every time it runs."""
+        rebuilds it the first round it is needed. Logs RELEASED_LINE every time it runs. Under QWEN_FAST_PARKED_ENGINES=1 (no book) a member
+        rebound since the capture counts as closed (_rebound); with the book, a closed member's traces are retired through it."""
         quad = 0
-        if self.quad is not None and any(getattr(device, 'closed', False) for device in self.quad[0]):
+        if self.quad is not None and (any(getattr(device, 'closed', False) for device in self.quad[0])
+                                      or self._rebound('quad', self.quad[0])):
             self.quad[1].close()
             self.quad = None
+            self.generations.pop('quad', None)
             quad = 1
         for slots, state in list(self.quad_blocks.items()):
-            if any(getattr(device, 'closed', False) for device in state[0]):
-                state[1].close()
-                del self.quad_blocks[slots]
+            if any(getattr(device, 'closed', False) for device in state[0]) or self._rebound(slots, state[0]):
+                self._close_quad_block(slots)
                 quad += 1
         pairs = []
         for group, (device_a, device_b, trace, _) in list(self.pairs.items()):
-            if getattr(device_a, 'closed', False) or getattr(device_b, 'closed', False):
-                trace.close()
-                del self.pairs[group]
+            if (getattr(device_a, 'closed', False) or getattr(device_b, 'closed', False)
+                    or self._rebound(group, (device_a, device_b))):
+                self._close_pair(group)
                 pairs.append(list(group))
         audit_log(RELEASED_LINE, quad=quad, pairs=pairs)
+        return dict(quad=quad, pairs=pairs)
+
+    def release_parked(self, device):
+        """Engine reuse, E1 (QWEN_FAST_PARKED_ENGINES=1, no book; serving_parked_engines.after_park, from FastWorkerHook.detach): close, now,
+        every proposal trace `device` was captured into - the quad when it is one of the four, each block quad it is in, and each pair it is
+        half of - as release_closed closes a closed device's. A parked device stays open for its slot's next request, so `closed` never marks
+        these dead; left alone they would hold their DRAM until the slots re-form (and a rebound member's generation retires them then). The
+        partners keep their released singles, which _ensure_single_user rebuilds the first round each drafts alone. Logs PARKED_RELEASED_LINE.
+        With the book nothing is released: the traces are the slots' for the process."""
+        if self.book is not None:
+            return dict(quad=0, pairs=[])
+        quad = 0
+        if self.quad is not None and any(member is device for member in self.quad[0]):
+            self.quad[1].close()
+            self.quad = None
+            self.generations.pop('quad', None)
+            quad = 1
+        for slots, state in list(self.quad_blocks.items()):
+            if any(member is device for member in state[0]):
+                self._close_quad_block(slots)
+                quad += 1
+        pairs = []
+        for group, (device_a, device_b, trace, _) in list(self.pairs.items()):
+            if device_a is device or device_b is device:
+                self._close_pair(group)
+                pairs.append(list(group))
+        audit_log(PARKED_RELEASED_LINE, slot=getattr(getattr(device, 'pool_slot', None), 'index', None), quad=quad, pairs=pairs)
         return dict(quad=quad, pairs=pairs)
 
     def _cached_trace(self, pair, device_a, device_b):
@@ -626,6 +792,8 @@ class PackedProposalCoordinator:
             return None
         old_a, old_b, trace, released = cached
         if old_a is device_a and old_b is device_b and not device_a.closed and not device_b.closed:
+            if self._rebound(pair, (device_a, device_b)):
+                return None
             return trace
         return None
 
@@ -634,12 +802,12 @@ class PackedProposalCoordinator:
         if trace is not None:
             return trace
         if pair in self.pairs:
-            self.pairs[pair][2].close()
-            del self.pairs[pair]
+            self._close_pair(pair)
         from dflash_proposal_trace import PreparedPackedDFlashProposal
 
         trace = PreparedPackedDFlashProposal(device_a, device_b)
         self.pairs[pair] = (device_a, device_b, trace, False)
+        self._note_generations(pair, (device_a, device_b))
         return trace
 
     def _release_single_user(self, device):
@@ -653,8 +821,9 @@ class PackedProposalCoordinator:
         touched at all) must never be treated as needing a rebuild. Idempotent: a
         device whose capture is already released is left alone.
 
-        Under QWEN_FAST_DRAFT_SINGLES_AUDIT nothing is released: the audit replays every member's own single-user capture."""
-        if _singles_audit_on():
+        Under QWEN_FAST_DRAFT_SINGLES_AUDIT nothing is released: the audit replays every member's own single-user capture. With the draft book
+        (2c) nothing is released either: the singles are kept for the process, so no rebind and no admission ever rebuilds one."""
+        if _singles_audit_on() or self.book is not None:
             return
         capture = device.proposal_capture
         if isinstance(capture, _PackedCaptureView):
@@ -693,10 +862,18 @@ class PackedProposalCoordinator:
         from dflash_proposal_trace import PreparedDFlashProposal
 
         # S2 W6d: this rebuild checks no headroom, so the ledger reads the allocator either side of it.
-        ledger_token = ledger_before('single', estimated_single_capture_bytes(),
+        ledger_token = ledger_before('single', single_capture_bytes(),
                                      'slot=%s' % getattr(getattr(device, 'pool_slot', None), 'index', None))
         try:
-            rebuilt = PreparedDFlashProposal(device, max_new_tokens=1)
+            if parked_engines_on():
+                # Engine reuse: a parked device is rebound at any position, so the one 2048 bucket its builds capture, never the narrower one the
+                # position alone would give below 2048.
+                from serving_request_factory import single_proposal_bucket
+
+                with single_proposal_bucket():
+                    rebuilt = PreparedDFlashProposal(device, max_new_tokens=1)
+            else:
+                rebuilt = PreparedDFlashProposal(device, max_new_tokens=1)
         finally:
             ledger_after(ledger_token)
         if view is not None:
@@ -819,7 +996,7 @@ class PackedProposalCoordinator:
                             # forms, never every round after (run 35585107688). Under
                             # the S2 flag the check is the admission's split
                             # (capture_headroom, gate v79).
-                            short, _ = capture_headroom(device_a, estimated_pair_capture_bytes())
+                            short, _ = capture_headroom(device_a, pair_capture_bytes())
                             if short:
                                 headroom_ok = False
                                 single_reason = 'dram_reserve'
@@ -837,7 +1014,7 @@ class PackedProposalCoordinator:
                             ids = '%s,%s' % (entry_a['bridge'].request.session.request_id,
                                              entry_b['bridge'].request.session.request_id)
                             # S2 W6d: a fresh pair capture allocates; the ledger reads either side of it.
-                            ledger_token = (ledger_before('pair', estimated_pair_capture_bytes(),
+                            ledger_token = (ledger_before('pair', pair_capture_bytes(),
                                                           'slots=%s,%s' % (slot_a, slot_b)) if fresh_build else None)
                             try:
                                 ready = phase('propose_pair', ids,
@@ -976,12 +1153,14 @@ class PackedProposalCoordinator:
         devices, trace, _ = state
         if any(device.closed for device in devices) or any(
                 slot in by_slot and by_slot[slot]['device'] is not device
-                for slot, device in zip(quad_draft.SLOTS if slots is None else slots, devices)):
-            trace.close()
+                for slot, device in zip(quad_draft.SLOTS if slots is None else slots, devices)) or self._rebound(
+                    'quad' if slots is None else slots, devices):
             if slots is None:
+                trace.close()
                 self.quad = None
+                self.generations.pop('quad', None)
             else:
-                del self.quad_blocks[slots]
+                self._close_quad_block(slots)
 
     def _disable_quad(self, round_number, reason):
         """Give up on the quad for the process: close its trace and log DISABLED_MARKER (the gate fails on it)."""
@@ -1059,9 +1238,8 @@ class PackedProposalCoordinator:
         if slots in self.quad_blocked:
             return
         self.quad_blocked[slots] = reason
-        state = self.quad_blocks.pop(slots, None)
-        if state is not None:
-            state[1].close()
+        if slots in self.quad_blocks:
+            self._close_quad_block(slots)
         audit_log('{marker} round={round} failures={failures} reason={reason} slots={slots}', marker=quad_draft.DISABLED_MARKER,
                   round=round_number, failures=self.quad_block_failures.get(slots, 0),
                   reason=str(reason).replace(' ', '_')[:160], slots=','.join(str(slot) for slot in slots))
@@ -1114,7 +1292,7 @@ class PackedProposalCoordinator:
             # the S2 flag the headroom is the admission's split (capture_headroom, gate v79).
             # Per quad: a second block's check reads the free DRAM after the first block's capture landed, so each needs one
             # quad's bytes (quad_draft_tp.blocks_capture_need adds the two up; the attach itself makes no DRAM check).
-            short, reading = capture_headroom(devices[0], quad_draft.QUAD_CAPTURE_BYTES_EST)
+            short, reading = capture_headroom(devices[0], quad_capture_bytes())
             if short:
                 reason = 'dram_reserve:headroom=%d' % reading['largest_free']
                 if 'free' in reading:
@@ -1123,12 +1301,17 @@ class PackedProposalCoordinator:
                 return None
         if trace is None:
             if state is not None:
-                state[1].close()
+                if block:
+                    self._close_quad_block(slots)
+                else:
+                    state[1].close()
             trace = quad_draft.PreparedQuadDFlashProposal(devices)
             if block:
                 self.quad_blocks[slots] = (tuple(devices), trace, False)
+                self._note_generations(slots, devices)
             else:
                 self.quad = (tuple(devices), trace, False)
+                self._note_generations('quad', devices)
         from dflash_proposal_trace import pair_mask_audit_enabled
 
         if pair_mask_audit_enabled():
@@ -1136,7 +1319,7 @@ class PackedProposalCoordinator:
         seeds = [entry['seed'] for entry in entries]
         ids = ','.join(str(entry['bridge'].request.session.request_id) for entry in entries)
         # S2 W6d: a fresh quad capture allocates; the ledger reads either side of it.
-        ledger_token = ledger_before('quad', quad_draft.QUAD_CAPTURE_BYTES_EST,
+        ledger_token = ledger_before('quad', quad_capture_bytes(),
                                      'slots=' + ','.join(str(slot) for slot in slots)) if fresh else None
         started = time.perf_counter()
         try:
@@ -1189,7 +1372,7 @@ class PackedProposalCoordinator:
                     released = [list(group) for group in pairs if group in self.pairs]
                     for group in pairs:
                         if group in self.pairs:
-                            self.pairs.pop(group)[2].close()
+                            self._close_pair(group)
                     if released and 'free' in reading:
                         audit_log(quad_draft.RELEASE_SPLIT_LINE, pairs=released, headroom=reading['largest_free'],
                                   free=reading['free'], short='+'.join(short))
@@ -1211,6 +1394,8 @@ class PackedProposalCoordinator:
             trace.discard_pending()
             raise
         batched.append((list(slots), trace))
+        if block and self.book is not None and trace.last_built:
+            audit_log(BOOK_QUAD_LINE, slots=','.join(str(slot) for slot in slots), round=round_number)
         if audit_enabled():
             audit_log(quad_draft.ROUND_LINE, round=round_number, built=int(trace.last_built), ms=built_ms)
         return dict(devices=devices, fence=(devices[0].operations, devices[0].mesh), trace=trace)

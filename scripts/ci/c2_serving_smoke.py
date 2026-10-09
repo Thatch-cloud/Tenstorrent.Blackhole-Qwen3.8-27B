@@ -993,6 +993,140 @@ def levern_seed_stops():
     return dict(users=drop_stamps(out + one + follow), corpus=corpus, fit=fit, budgets=budgets)
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# Engine reuse (tp4/engine-reuse, QWEN_FAST_PARKED_ENGINES): exactness of a REBOUND engine against a cold build, and the lifecycle shapes that park it.
+# Two arms run these on one image (the flag-off control and the parked arm); parked_compare.py compares every row and every user hash. Opt-in.
+# ---------------------------------------------------------------------------------------------------------------------
+
+PARKED_EQUAL_LENGTHS = (63, 64, 65, 127, 128, 129, 2047, 2048, 2049, 4096, 32768)
+PARKED_BUDGET_LENGTH = 4097
+PARKED_BUDGETS = (1, 2, 3, 4, 5, 16, 256)
+PARKED_CHURN_USERS = 16
+PARKED_CHURN_LENGTHS = (60, 255, 1536, 2047, 2048, 2049, 4096, 4096, 8192, 8192, 16384, 30000)
+PARKED_CHURN_BUDGETS = (16, 64, 128, 256)
+PARKED_TURN_SEATS = 8
+PARKED_TURN_TURNS = 5
+PARKED_TURN_LENGTHS = (4096, 8192, 12288, 16384, 24576)
+PARKED_TURN_TOKENS = 256
+PARKED_ABORT_ROUNDS = 6
+
+
+def parked_equal():
+    # One user alone, the exact-length ladder (the boundaries of the 64-token page, the 2,048-token chunk and the history window), 256 tokens out,
+    # each request rebinding the parked slot the previous one left: the arms' answers must be bit-identical.
+    return levern_equal_run('parked_equal', PARKED_EQUAL_LENGTHS)
+
+
+def parked_budgets():
+    # One user alone, one prompt, budgets 1, 2, 3, 4, 5, 16 and 256: a cold engine captures only the verify widths its budget holds, so a rebound engine
+    # must ask and serve exactly those (R4). The rows are keyed by budget; every row's tokens, finish reason and hash are compared between the arms.
+    prompts, corpus = exact_token_prompts((PARKED_BUDGET_LENGTH,))
+    rows = {}
+    for budget in PARKED_BUDGETS:
+        row = complete_ids(prompts[0], budget)
+        rows[str(budget)] = row
+        print('parked_budgets budget', budget, json.dumps(dict((key, row.get(key)) for key in (
+            'prompt_tokens', 'tokens', 'finish', 'content_sha256', 'wall_s', 'error'))), flush=True)
+    return dict(prompts=rows, lengths=list(PARKED_BUDGETS), corpus=corpus, prompt_tokens=PARKED_BUDGET_LENGTH)
+
+
+def churn_script(wave, users, seed=20261007):
+    """The deterministic lengths and budgets of one churn wave: a fixed linear congruential generator (no random module: the same draws on every run
+    and Python), every user ignore_eos."""
+    state = (seed + 7919 * (wave + 1)) & 0x7fffffff
+
+    def draw(limit):
+        nonlocal state
+        state = (state * 1103515245 + 12345) & 0x7fffffff
+        return (state >> 8) % limit
+
+    lengths = [PARKED_CHURN_LENGTHS[draw(len(PARKED_CHURN_LENGTHS))] for _ in range(users)]
+    budgets = [PARKED_CHURN_BUDGETS[draw(len(PARKED_CHURN_BUDGETS))] for _ in range(users)]
+    return lengths, budgets
+
+
+def parked_churn_run(label, waves):
+    # Sixteen users on the eight seats, `waves` times: each wave's users arrive together and are admitted as seats free, so every seat is rebound over
+    # and over by prompts of mixed length and budget. Every stream's hashes are compared between the arms (concurrent == the control's).
+    users, corpus = [], None
+    for wave in range(waves):
+        lengths, budgets = churn_script(wave, PARKED_CHURN_USERS)
+        prompts, corpus = code_prompts(tuple(lengths))
+        result = run_users('%s wave %d' % (label, wave), prompts, max_tokens=budgets, ignore_eos=True)
+        users += drop_stamps(result['users'])
+    return dict(users=users, corpus=corpus, waves=waves, admissions=len(users))
+
+
+def parked_churn():
+    return parked_churn_run('parked_churn', 4)
+
+
+def parked_churn_long():
+    # ER3: at least 200 admissions on the eight seats (14 waves of 16).
+    return parked_churn_run('parked_churn_long', 14)
+
+
+def parked_abort_reuse():
+    # Aborts then reuse (design 5.9): a request is DROPPED by its client mid-decode, and the next request (on the slot it freed, parked again) must
+    # complete as if nothing had happened; interleaved with a max_tokens=1 request (no engine is bound) and an ignore_eos one. The full requests' hashes
+    # are compared between the arms.
+    prompts, corpus = code_prompts((2000,) * PARKED_ABORT_ROUNDS)
+    users = []
+    for index in range(PARKED_ABORT_ROUNDS):
+        import os
+        dropped = abort_stream([{'role': 'user', 'content': prompts[index]}], 600, float(os.environ.get('SMOKE_PARKED_ABORT_AFTER_S', '5')))
+        print('parked_abort_reuse dropped', index, json.dumps(dropped), flush=True)
+        follow = [None]
+        run_cold(0, follow, prompts[index], 128)
+        users += drop_stamps(follow)
+        one = [None]
+        run_cold(0, one, prompts[index], 1)
+        users += drop_stamps(one)
+        ignoring = [None]
+        run_cold(0, ignoring, prompts[index], 64, ignore_eos=True)
+        users += drop_stamps(ignoring)
+    return dict(users=users, corpus=corpus, rounds=PARKED_ABORT_ROUNDS)
+
+
+def parked_turns():
+    # ER5 (the admission stall): eight seats, each a closed loop of PARKED_TURN_TURNS turns on the same deterministic script (a coding prompt of 4k
+    # to 24k tokens, 256 tokens out, ignore_eos, two seconds of think time), the seats staggered half a second. Per turn: time to first token, wall
+    # time, the longest gap between two of its tokens (the stall every admission puts on the seats that decode) and the answer's hashes. parked_compare.py
+    # pairs the turns by index across the arms and prints the paired ratios; the answers must be identical.
+    seats, turns = PARKED_TURN_SEATS, PARKED_TURN_TURNS
+    lengths = [PARKED_TURN_LENGTHS[(seat + turn) % len(PARKED_TURN_LENGTHS)] for seat in range(seats) for turn in range(turns)]
+    prompts, corpus = code_prompts(tuple(lengths))
+    rows = [None] * (seats * turns)
+
+    import os
+    think = float(os.environ.get('SMOKE_PARKED_THINK_S', '2'))
+    stagger = float(os.environ.get('SMOKE_PARKED_STAGGER_S', '0.5'))
+
+    def seat_loop(seat):
+        time.sleep(stagger * seat)
+        for turn in range(turns):
+            index = seat * turns + turn
+            try:
+                answer = stream([{'role': 'user', 'content': prompts[index]}], PARKED_TURN_TOKENS, timeout=3600, keep_stamps=True, ignore_eos=True)
+                answer['longest_gap_s'] = longest_gap(answer.get('delta_stamps') or [])
+                answer.pop('delta_stamps', None)
+                rows[index] = answer
+            except Exception as error:
+                rows[index] = dict(error=repr(error)[:300])
+            time.sleep(think)
+
+    threads = [threading.Thread(target=seat_loop, args=(seat,)) for seat in range(seats)]
+    started = time.time()
+    [thread.start() for thread in threads]
+    [thread.join() for thread in threads]
+    makespan = round(time.time() - started, 2)
+    done = [row for row in rows if isinstance(row, dict) and 'error' not in row]
+    tokens = sum(row.get('tokens') or 0 for row in done)
+    print('parked_turns makespan_s', makespan, 'turns', len(done), 'tokens', tokens, flush=True)
+    return dict(users=rows, corpus=corpus, seats=seats, turns=turns, makespan_s=makespan, completion_tokens=tokens,
+                tokens_per_s=round(tokens / makespan, 2) if makespan else None)
+
+
 DRAIN_BUDGETS = (200, 400, 600, 800, 1000, 1200, 1400, 1600)
 SPLIT_BUDGETS = (1600, 1600, 1600, 1600, 1200, 400)
 SPLIT_CHUNKS = 60           # user 4's streamed chunks (about one per engine step, so rounds, NOT tokens: a lone user drafts 4 rows and
@@ -1078,7 +1212,8 @@ if ONLY and 'cold2_254k' in ONLY:
 if ONLY and 'replay_concurrent8' in ONLY:
     record('replay_concurrent8', replay_concurrent8)
 for _levern_name in ('levern_equal', 'levern_equal_long', 'levern_equal_busy', 'levern_decoder_finishes', 'levern_all_decoders_finish',
-                     'levern_cancel_mid_prefill', 'levern_arrival_during_prefill', 'levern_seed_stops'):
+                     'levern_cancel_mid_prefill', 'levern_arrival_during_prefill', 'levern_seed_stops',
+                     'parked_equal', 'parked_budgets', 'parked_churn', 'parked_churn_long', 'parked_abort_reuse', 'parked_turns'):
     if ONLY and _levern_name in ONLY:
         record(_levern_name, globals()[_levern_name])
 if ONLY and 'concurrent5_split' in ONLY:

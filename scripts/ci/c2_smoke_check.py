@@ -105,6 +105,11 @@ COLD2_TEST = 'cold2_254k'
 LEVERN_USER_TESTS = ('levern_equal_busy', 'levern_decoder_finishes', 'levern_all_decoders_finish', 'levern_cancel_mid_prefill',
                      'levern_arrival_during_prefill', 'levern_seed_stops')
 LEVERN_ROW_TESTS = ('levern_equal', 'levern_equal_long', 'levern_equal_busy')
+# Engine reuse (tp4/engine-reuse): the exact-length ladder and the budget ladder are rows (keyed by prompt length, by budget); the churn, the abort-and-reuse
+# and the turn loop are streams of users.
+PARKED_ROW_TESTS = ('parked_equal', 'parked_budgets')
+PARKED_USER_TESTS = ('parked_churn', 'parked_churn_long', 'parked_abort_reuse', 'parked_turns')
+PARKED_TESTS = PARKED_ROW_TESTS + PARKED_USER_TESTS
 REPLAY_TESTS = (REPLAY_TEST, 'replay_concurrent8')
 # Four-user streamed tests: their users get the stream rules; the code ones are code answers too (TEXT_TESTS).
 CONCURRENT_TESTS = ('concurrent4', 'concurrent4_v164order', 'concurrent4_steady', 'concurrent4_code', 'concurrent4_code_equal',
@@ -484,6 +489,7 @@ def smoke_problems(results, container_text=''):
             problems.append('%s: %s' % (stall_name, stall['error']))
     problems += cold2_problems(results.get(COLD2_TEST))
     problems += levern_smoke_problems(results)
+    problems += parked_smoke_problems(results)
     for replay in REPLAY_TESTS:
         if replay in results and 'error' not in results[replay]:
             for index, user in enumerate(results[replay].get('users') or []):
@@ -554,6 +560,56 @@ def levern_smoke_problems(results):
             if dropped.get('outcome') != 'dropped':
                 problems.append('%s: the cold prefill was not dropped by the client (%r): the abort shape never ran' % (name, dropped.get('outcome')))
     return problems
+
+
+def parked_smoke_problems(results):
+    """The engine-reuse tests' own results (parked_* in c2_serving_smoke): the ladder rows and the streams of the churn, the abort-and-reuse and the turns."""
+    problems = []
+    for name in PARKED_TESTS:
+        entry = results.get(name)
+        if entry is None:
+            continue
+        if 'error' in entry:
+            problems.append('%s: %s' % (name, entry['error']))
+            continue
+        for key, row in sorted((entry.get('prompts') or {}).items(), key=lambda item: int(item[0])):
+            label = '%s %s %s' % (name, 'budget' if name == 'parked_budgets' else 'prompt', key)
+            if 'error' in row:
+                problems.append('%s: %s' % (label, row['error']))
+                continue
+            if row.get('prompt_tokens') != row.get('prompt_tokens_sent'):
+                problems.append('%s: the server counted %r tokens of the %r it was sent' % (label, row.get('prompt_tokens'), row.get('prompt_tokens_sent')))
+            if not row.get('tokens'):
+                problems.append('%s: no tokens' % label)
+            elif name == 'parked_budgets' and row['tokens'] > int(key):
+                problems.append('%s: %d tokens past the budget' % (label, row['tokens']))
+            elif name == 'parked_budgets' and int(key) == 1 and row['tokens'] != 1:
+                problems.append('%s: a one-token budget produced %r tokens' % (label, row['tokens']))
+            if row.get('finish') is None:
+                problems.append('%s: no finish reason' % label)
+            if not row.get('content_sha256'):
+                problems.append('%s: no answer hash' % label)
+        users = entry.get('users') or []
+        for index, user in enumerate(users):
+            if name == 'parked_abort_reuse' and index % 3 == 1:
+                # the max_tokens=1 request of each round: it ends at its seed, with exactly that token
+                if isinstance(user, dict) and 'error' not in user and user.get('tokens') != 1:
+                    problems.append('%s user %d: the one-token request produced %r tokens' % (name, index, user.get('tokens')))
+                elif isinstance(user, dict) and 'error' in user:
+                    problems.append('%s user %d: %s' % (name, index, user['error']))
+                continue
+            problems += stream_problems('%s user %d' % (name, index), user)
+    return problems
+
+
+def parked_container_problems(env, container_text):
+    """(problems, facts) of the engine-reuse markers in the container log (parked_judge.judge): what a parked profile must show, and that any other
+    profile shows none."""
+    if env is None:
+        return [], {}
+    import parked_judge
+
+    return parked_judge.judge(env, container_text)
 
 
 def ramp_kv_median(log_text):
@@ -1696,6 +1752,14 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         problems += levern
         if levern_facts_found:
             facts['levern'] = dict((key, value) for key, value in levern_facts_found.items() if not isinstance(value, list))
+        parked_found, parked_facts = parked_container_problems(env, container_text)
+        problems += parked_found
+        if parked_facts and smoke and 'parked_churn_long' in smoke:
+            import parked_judge
+
+            problems += parked_judge.memory_problems(container_text)
+        if parked_facts:
+            facts['parked'] = parked_facts
     if entry is not None:
         problems += traffic_problems(container_text, entry)
         problems += waiver_problems(container_text, entry)

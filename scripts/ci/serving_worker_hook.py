@@ -211,6 +211,25 @@ def release_dead_proposals(hook):
         return None
 
 
+# Engine reuse's flag (serving_parked_engines.FLAG; the test pins the two equal). Read here from the environment, so a detach with the flag off
+# imports nothing.
+PARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'
+
+
+def release_parked(hook, bridge):
+    """Engine reuse (QWEN_FAST_PARKED_ENGINES=1 only; unset, nothing is read, imported or called): after a detached request closed - which
+    parked its slot's engine and device instead of closing them (serving_request_factory.rebind_parked) - its device's pair and quad traces go
+    at once (E1: the coordinator's release_parked; release_closed cannot see a device that never closed; with the draft book they stay), and its
+    released single-user capture is rebuilt when the DRAM split allows (serving_parked_engines.release_parked -> ParkedEngineSet.after_park); no
+    slot is re-parked here, as the other seats still decode: that is the idle moment's. A request today's build served (an unparked slot) has nothing here. A failed retirement is logged there and
+    left to the coordinator's generation check; a failed rebuild is logged and leaves the single released."""
+    if os.environ.get(PARKED_ENGINES_FLAG) != '1':
+        return None
+    import serving_parked_engines
+
+    return serving_parked_engines.release_parked(getattr(hook, '_packed_coordinator', None), getattr(bridge, 'request', None))
+
+
 def prepare_pipelined_drafts(bridges):
     """QWEN_FAST_PIPELINED_PROPOSALS phase A: enqueue every eligible bridge's
     proposal device work (DFlashDevice.prepare_device -> dflash_proposal_trace.
@@ -314,6 +333,7 @@ class FastWorkerHook:
         if getattr(self, 'lanes', None) is not None:
             self.lanes.release(request_id)
         release_dead_proposals(self)
+        release_parked(self, bridge)
         note_fixture_writer('detach')
         return self.bridges
 
@@ -833,6 +853,17 @@ class FastWorkerHook:
         for bridge in list(self.bridges.values()):
             bridge.close()
         self.bridges.clear()
+        if coordinator is not None and getattr(coordinator, 'book', None) is not None:
+            # The draft book keeps its traces past this close, which is right for a member that parks and wrong for one that closes with its
+            # bridge (a cold-built device): its pair and quad traces would stay allocated until some later hook's detach.
+            try:
+                coordinator.release_closed()
+            except Exception as failure:
+                try:
+                    from loguru import logger
+                    logger.warning('[PACKED-PROPOSE] release closed at hook close failed ({}: {})', type(failure).__name__, str(failure)[:160])
+                except BaseException:
+                    pass
         if getattr(self, 'lanes', None) is not None:
             self.lanes.publish(None)    # a stale plan must never hide a request the next hook serves
         for owner, name, existed, value in reversed(self.saved):

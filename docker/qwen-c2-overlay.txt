@@ -411,3 +411,8 @@ scripts/ci/serving_packed_bridge.py
 # profile's draft paths and, for a candidate id, the baked bytes against the table's pins. New: no older layer holds either file, and nothing else names them.
 scripts/ci/drafter_checkpoint.py
 scripts/ci/drafter_checkpoints.json
+# Engine reuse (QWEN_FAST_PARKED_ENGINES, QWEN_FAST_PARKED_DRAFTS; gate-only profiles, default off): one engine per pool slot parked at attach and rebound to
+# each request, the draft trace book (2c), the kill switch and the release ladder. serving_runtime, serving_request_factory, serving_worker_hook,
+# serving_lifecycle, serving_fast_request, dflash_packed_proposal_coordinator, serving_prefill_admission, serving_buffer_pool, verifier_engine_tp,
+# levern_policy, memory_ledger, serving_fast_policy and serving_c2_contract are named above; this module is new and imported by them only under the flags.
+scripts/ci/serving_parked_engines.py

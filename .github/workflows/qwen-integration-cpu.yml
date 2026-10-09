@@ -305,3 +305,29 @@ jobs:
           python -B -m unittest test_w2ln_smoke_shapes
           python -B -m unittest test_levern_prefix_route test_levern_prefix_graft test_levern_prefix_scheduler test_levern_prefix_lifecycle
           python -B -m unittest test_levern_prefix_contract test_levern_prefix_prestage
+  engine-reuse:
+    # tp4/engine-reuse: parked per-slot engines at four cards (docs/tp4-engine-reuse.md). Its own job: the census world builds eight slots of fake
+    # allocations, and the whole-stack and wiring suites churn them for many rebinds, which would crowd the lever-n job's 20 minutes.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OMP_NUM_THREADS: '2'
+      MKL_NUM_THREADS: '2'
+      PYTHONPATH: scripts/ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CPU test dependencies
+        run: |
+          python -m pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==2.4.6 PyYAML==6.0.2
+      - name: Engine reuse at TP4 (flag off by default)
+        run: |
+          python -B -m unittest test_parked_tp4_census test_parked_tp4_engine test_parked_tp4_device test_parked_tp4_set
+          python -B -m unittest test_parked_tp4_wiring test_parked_tp4_admission test_parked_tp4_profiles test_parked_tp4_drafts
+          python -B -m unittest test_parked_tp4_judge test_levern_admission_cost test_tp4_engine_reuse_jobs
+          python -B -m unittest test_parked_tp4_smoke

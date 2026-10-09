@@ -49,6 +49,7 @@ jobs:
           VLLM_USE_V2_MODEL_RUNNER=0 python -B -m unittest -v test_serving_kv_reservation_vllm
           VLLM_USE_V2_MODEL_RUNNER=0 python -B -m unittest -v test_levern_scheduler_vllm
           VLLM_USE_V2_MODEL_RUNNER=0 python -B -m unittest -v test_levern_prefix_scheduler_vllm
+          VLLM_USE_V2_MODEL_RUNNER=0 python -B -m unittest -v test_parked_scheduler_vllm
           VLLM_USE_V2_MODEL_RUNNER=0 python -B -m unittest test_serving_survivor_narrowing.InstalledVllmNarrowingTests test_serving_survivor_narrowing.InstalledVllmTailCapTests
           VLLM_USE_V2_MODEL_RUNNER=0 python -B -m unittest test_qwen_prefix_scheduler_vllm test_qwen_prefix_scheduler_patch test_qwen_prefix_registry test_qwen_prefix_runner_patch
           python -B -m unittest test_serving_cache_owner test_serving_runtime test_serving_startup

@@ -81,9 +81,10 @@ never guessed around):
         the scheduler graft's second install line; read into sticky_installs, never installs.
     [PINDIAG] sticky admit req='<engine request id>' Q=<n> P=<n> tail=<n>
         serving_lifecycle, once per request admitted at a granted boundary; read into sticky_admits.
-    [PINDIAG] sticky engine built req=<engine request id, first 48 characters> ms=<f> frontier=<R, 0 cold>
-        prompt=<P>   serving_runtime.STICKY_ENGINE_MARKER, once per admitted request's engine build; read
-        into sticky_builds (the TTFT split: the tail prefill, then this build).
+    [PINDIAG] sticky engine built req=<engine request id, first 48 characters> ms=<f> frontier=<R, 0 cold> [kind=<build|rebind>: engine reuse only]
+        prompt=<P> [kind=<build|rebind>]   serving_runtime.STICKY_ENGINE_MARKER, once per admitted request's engine build; read
+        into sticky_builds (the TTFT split: the tail prefill, then this build). Under engine reuse (QWEN_FAST_PARKED_ENGINES=1) every
+        request logs it and `kind` says whether its engine was built or a parked one rebound (the A8 rule reads the line either way).
     [PINDIAG] verify t2 kv shared ...   verify_trace_t2.KV_SHARED, a packed round's K/V conflict (the proposal
         guard's or the stage's); read into kv_shared, which a fast-path prefix arm needs empty.
 
@@ -110,7 +111,7 @@ INSTALL = '[PINDIAG] prefix: install '
 # The scheduler graft's sticky-session install line begins 'install sticky=' (qwen_prefix_scheduler_patch).
 STICKY_INSTALL = 'sticky='
 STICKY_ADMIT = re.compile(r"\[PINDIAG\] sticky admit req=(?:'([^']*)'|\"([^\"]*)\"|(\S+)) Q=(\d+) P=(\d+) tail=(\d+)")
-STICKY_BUILT = re.compile(r'\[PINDIAG\] sticky engine built req=(\S+) ms=([0-9.]+) frontier=(\d+) prompt=(\d+)')
+STICKY_BUILT = re.compile(r'\[PINDIAG\] sticky engine built req=(\S+) ms=([0-9.]+) frontier=(\d+) prompt=(\d+)(?: kind=(build|rebind))?')
 # qwen_prefix_model_patch.MARKER_WARM: the warm that chose a restore path. Its skip line (off the batched TP path,
 # 'model warm skipped - ... a resumed row will assert') is MODEL_WARM_SKIPPED, never a warm.
 MODEL_WARM = '[PINDIAG] prefix: model warm restore_mode='
@@ -311,7 +312,8 @@ def scan(lines):
         match = STICKY_BUILT.search(line)
         if match:
             out['sticky_builds'].append(dict(where, req=match.group(1), ms=float(match.group(2)),
-                                             frontier=int(match.group(3)), prompt=int(match.group(4))))
+                                             frontier=int(match.group(3)), prompt=int(match.group(4)),
+                                             **({'kind': match.group(5)} if match.group(5) else {})))
         if MODEL_WARM in line:
             entry = fields('restore_mode=' + line.split(MODEL_WARM, 1)[1])
             entry.update(where)

@@ -78,6 +78,12 @@ class FastServingLifecycle:
     merged = False
     merged_cfg = None
     parked = None
+    # Engine reuse (QWEN_FAST_PARKED_ENGINES=1; serving_runtime passes the parked set's idle and poll_off): `idle` is called at an idle moment - no
+    # request decoding, none in its prefill, none host-parked by admission v2, a step that schedules nothing - to rebuild released drafter captures
+    # and re-park unparked slots (serving_parked_engines.ParkedEngineSet.idle); `parked_poll` is called at the TOP of every execute and latches
+    # the runtime kill switch (the parked.off file). None, the default and the only value without the flag, calls nothing.
+    idle = None
+    parked_poll = None
 
     # request_id is assigned at five sites - construction, reset, the
     # EOS-at-first-token release, the prefill-to-decode handoff, and admission.
@@ -103,13 +109,18 @@ class FastServingLifecycle:
                 pass
 
     def __init__(self, worker, *, config, capture_factory, bridge_factory, eos_ids, cancelled,
-                 packed_step=None, lanes=None):
+                 packed_step=None, lanes=None, idle=None, parked_poll=None):
         validate_fast_config(config)
         runner = worker.model_runner
         if (not worker.is_driver_worker or runner._pending_samples
                 or getattr(worker, '_qwen_fast_lifecycle', None) is not None
-                or not all(callable(value) for value in (capture_factory, bridge_factory, cancelled))):
+                or not all(callable(value) for value in (capture_factory, bridge_factory, cancelled))
+                or any(value is not None and not callable(value) for value in (idle, parked_poll))):
             raise ValueError('Idle exclusive driver and explicit serving factories required')
+        if idle is not None:
+            self.idle = idle
+        if parked_poll is not None:
+            self.parked_poll = parked_poll
         self.worker, self.runner = worker, runner
         self.capture_factory, self.bridge_factory = capture_factory, bridge_factory
         self.eos_ids, self.cancelled = tuple(eos_ids), cancelled
@@ -411,6 +422,9 @@ class FastServingLifecycle:
     def _execute(self, worker, scheduled):
         self._check()
         try:
+            if self.parked_poll is not None:
+                # The parked set's kill switch is read here and nowhere else: never between a request's DRAM backstop and its slot being taken.
+                self.parked_poll()
             if self.prefill_pending:
                 raise ValueError('Prefill must be sampled before another execution')
             if self.quarantine is not None:
@@ -450,6 +464,12 @@ class FastServingLifecycle:
                 self._release_prefill()
             for request_id in [value for value in (self.parked or ()) if value in gone]:
                 self._release_parked(request_id)
+            if (self.idle is not None and self.hook is None and self.request_id is None and not self.parked
+                    and not getattr(scheduled, 'total_num_scheduled_tokens', 1)):
+                # Engine reuse: nothing decodes, nothing is in its prefill (or parked on the host), and this step schedules nothing - the one
+                # moment the parked set may capture (the class attribute's comment). Before the step reaches the runner, which has nothing of
+                # the fast path's to run in it.
+                self.idle()
             # ADMISSION V2: the step continues a prefill this lifecycle parked while a short one ran.
             if self._is_parked_continuation(scheduled):
                 return self._resume_parked(scheduled)
