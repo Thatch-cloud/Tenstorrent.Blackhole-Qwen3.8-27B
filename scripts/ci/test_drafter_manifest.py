@@ -130,9 +130,17 @@ class DefaultManifestTests(unittest.TestCase):
             self.assertEqual(manifest['header_sha256'], manifests.HEADER_SHA256)
             self.assertEqual(len(manifest['tensors']), 81)
 
-    def test_b32_is_not_a_candidate(self):
-        # Its licence is not a file in the repository; excluded until legal confirms (docs/drafter-arms.md).
-        self.assertFalse([name for name in manifests.names() if 'b32' in name])
+    def test_b32_is_a_measurement_only_candidate(self):
+        # Its licence is a hub metadata field and no file in the repository: it may be measured in the tau lab, never served,
+        # until the owner decides the licence (docs/drafter-arms.md).
+        self.assertIn('b32-fc65843b', manifests.names())
+        manifest = manifests.load('b32-fc65843b')
+        self.assertEqual(manifest['revision'], 'fc65843ba218eeaa8e0dbcc922034184acadd100')
+        self.assertTrue(manifest['name'].endswith(manifest['revision'][:8]))
+        self.assertIn('measurement only', manifest['role'])
+        self.assertIn('owner licence decision', manifest['role'])
+        self.assertNotIn('license_file_sha256', manifest)
+        self.assertEqual([name for name in manifests.names() if 'b32' in name], ['b32-fc65843b'])
 
 
 class ValidationTests(unittest.TestCase):
@@ -341,6 +349,32 @@ class CandidateManifestTests(unittest.TestCase):
         self.assertNotEqual(candidate['fc_first32_sha256'], default['fc_first32_sha256'])
         self.assertNotEqual(candidate['revision'], default['revision'])
         self.assertNotEqual(candidate['config_sha256'], default['config_sha256'])
+
+    def test_b32_is_pinned_to_one_full_revision_without_a_licence_file(self):
+        manifest = manifests.load('b32-fc65843b')
+        self.assertEqual(manifest['model'], 'JonasLoos/Qwen3.8-27B-DFlash2-b32')
+        self.assertEqual(manifest['revision'], 'fc65843ba218eeaa8e0dbcc922034184acadd100')
+        self.assertEqual(manifest['license'], 'Apache-2.0')
+        self.assertNotIn('license_file_sha256', manifest)
+        self.assertEqual(manifest['trained_block_size'], 32)
+        self.assertEqual(manifest['weights_lfs_sha256'],
+                         '01e8c919665f563339ff41ac788497f483da5418c860c051b5fee17b801b7423')
+        self.assertEqual(manifest['config_sha256'], '6d211c63896c3d5b777a86e7386840af6d982d5b4ee3887a773ab7f34b48420d')
+
+    def test_b32_is_the_default_layout_with_other_weights(self):
+        default, candidate = manifests.load('dedf8df6'), manifests.load('b32-fc65843b')
+        self.assertEqual(candidate['header_sha256'], default['header_sha256'])
+        self.assertEqual(candidate['checkpoint_bytes'], default['checkpoint_bytes'])
+        for name, entry in candidate['tensors'].items():
+            self.assertEqual(entry['shape'], default['tensors'][name]['shape'], name)
+        # Unlike b16, this fine-tune moved every tensor, the candidate selector and the norms included.
+        changed = [name for name, entry in candidate['tensors'].items() if entry != default['tensors'][name]]
+        self.assertEqual(len(changed), 81)
+        self.assertTrue([name for name in changed if name.startswith('candidate_selector')])
+        self.assertNotEqual(candidate['fc_first32_sha256'], default['fc_first32_sha256'])
+        self.assertNotEqual(candidate['revision'], default['revision'])
+        self.assertNotEqual(candidate['config_sha256'], default['config_sha256'])
+        self.assertNotEqual(candidate['weights_lfs_sha256'], default['weights_lfs_sha256'])
 
     def test_no_private_detail_in_a_committed_manifest(self):
         for path in manifests.DIRECTORY.glob('*.json'):

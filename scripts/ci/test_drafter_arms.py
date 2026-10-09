@@ -24,6 +24,7 @@ with open(os.path.join(HERE, 'qwen_c2_profiles.json'), encoding='utf-8') as _han
 NAMES = sorted(PROFILES['profiles'])
 FOLDER = os.path.join(HERE, 'references', 'tp4-drafter-jobs')
 BASE = 'c2-packed-tp4'
+CANDIDATE_IMAGES = {'b16-bf8': 'tp4-drafter-b16-1', 'b32-bf8': 'tp4-drafter-b32-1', 'dedf-bf16': 'tp4-drafter-1'}
 
 
 class ArmProfileTests(unittest.TestCase):
@@ -45,6 +46,13 @@ class ArmProfileTests(unittest.TestCase):
         self.assertEqual(added, dict(QWEN_FAST_PACKED_AUDIT='1', QWEN_FAST_PHASE_TIMING='1', QWEN_DRAFTER_MANIFEST='b16-98759a49'))
         self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document, 'b16-bf8'), [])
 
+    def test_the_b32_arm_adds_its_own_manifest_flag(self):
+        name, document, added = self.added('b32-bf8')
+        self.assertEqual(name, BASE + '+taulab+b32-bf8')
+        self.assertEqual(added, dict(QWEN_FAST_PACKED_AUDIT='1', QWEN_FAST_PHASE_TIMING='1', QWEN_DRAFTER_MANIFEST='b32-fc65843b'))
+        self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document, 'b32-bf8'), [])
+        self.assertEqual(lab.DRAFTER_ARMS['b32-bf8']['manifest'], 'b32-fc65843b')
+
     def test_the_bf16_arm_adds_the_drafter_bf16_flag_to_the_serving_profile(self):
         name, document, added = self.added('dedf-bf16')
         self.assertEqual(added['QWEN_FAST_DRAFTER_BF16'], '1')
@@ -58,6 +66,7 @@ class ArmProfileTests(unittest.TestCase):
         # Judged without the arm (the lab as it was), the same derived profile is an arithmetic change; so is another arm's flag.
         self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document), ['QWEN_FAST_DRAFTER_BF16'])
         self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document, 'b16-bf8'), ['QWEN_FAST_DRAFTER_BF16'])
+        self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document, 'b32-bf8'), ['QWEN_FAST_DRAFTER_BF16'])
         document['profiles'][name]['env']['QWEN_FAST_QUAD_DRAFT'] = '1' if PROFILES['profiles'][BASE]['env'].get('QWEN_FAST_QUAD_DRAFT') != '1' else '0'
         self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document, 'dedf-bf16'), ['QWEN_FAST_QUAD_DRAFT'])
 
@@ -95,6 +104,7 @@ class LabRuleTests(unittest.TestCase):
         self.assertTrue(lab.is_production_run('r/tt-vllm:qwen38-c2-tp4-serve-2', True))
         self.assertFalse(lab.is_production_run('r/tt-vllm:qwen38-c2-tp4-serve-2', False), 'serve-2 ran the audits on')
         self.assertFalse(lab.is_production_run('r/tt-vllm:qwen38-c2-tp4-serve-10', False, 'b16-bf8'))
+        self.assertFalse(lab.is_production_run('r/tt-vllm:qwen38-c2-tp4-serve-10', False, 'b32-bf8'))
         self.assertFalse(lab.is_production_run('r/tt-vllm:qwen38-c2-tp4-serve-10', False, 'dedf-bf16'))
         self.assertFalse(lab.is_production_run('r/tt-vllm:qwen38-c2-tp4-cand-1', False))
         self.assertIsNone(lab.production_audits('r/tt-vllm:qwen38-c2-tp4-cand-1'))
@@ -109,7 +119,7 @@ class LabRuleTests(unittest.TestCase):
         self.assertEqual(lab.select_arms(every, None), list(lab.ARMS))
         self.assertEqual(lab.select_arms(every, 'control'), ['A3', 'A1', 'A2', 'A4', 'A5'], 'the calibration runs first')
         self.assertEqual(lab.select_arms('A1 A2 A3', 'control'), ['A3', 'A1', 'A2'])
-        for arm in ('b16-bf8', 'dedf-bf16'):
+        for arm in ('b16-bf8', 'b32-bf8', 'dedf-bf16'):
             self.assertEqual(lab.select_arms(every, arm), ['A1', 'A2', 'A4', 'A5'])
             self.assertEqual(lab.select_arms('A1 A2', arm), ['A1', 'A2'])
             with self.assertRaisesRegex(lab.LabError, 'control arm'):
@@ -120,6 +130,11 @@ class LabRuleTests(unittest.TestCase):
         good = ['[QWEN-C2] profile %s' % derived, '[DRAFTER_MANIFEST] b16-98759a49 in force: x/y at 98759a4995e4, 81 tensors verified']
         self.assertEqual(lab.launched_problems(good, derived, 'b16-bf8'), [])
         self.assertTrue(lab.launched_problems(good[:1], derived, 'b16-bf8'))
+        derived32 = BASE + '+taulab+b32-bf8'
+        good32 = ['[QWEN-C2] profile %s' % derived32, '[DRAFTER_MANIFEST] b32-fc65843b in force: x/y at fc65843ba218, 81 tensors verified']
+        self.assertEqual(lab.launched_problems(good32, derived32, 'b32-bf8'), [])
+        self.assertTrue(lab.launched_problems(good32[:1], derived32, 'b32-bf8'))
+        self.assertTrue(lab.launched_problems(good[:1] + good32[1:], derived, 'b16-bf8'), 'another candidate manifest is not this arm')
         bf16 = BASE + '+taulab+dedf-bf16'
         engaged = ['[QWEN-C2] profile %s' % bf16, '[DRAFTER_BF16] engaged']
         self.assertEqual(lab.launched_problems(engaged, bf16, 'dedf-bf16'), [])
@@ -133,6 +148,7 @@ class LabRuleTests(unittest.TestCase):
     def test_the_report_names_the_arm_and_stays_public(self):
         public = dict(drafter=dict(arm='b16-bf8', bf16=False), label='non-production', verdict='NO-GO')
         report.assert_public(public)
+        report.assert_public(dict(drafter=dict(arm='b32-bf8', bf16=False), label='non-production', verdict='NO-GO'))
         with self.assertRaises(report.PrivacyError):
             report.assert_public(dict(drafter=dict(arm='0xSomeone/private-name')))
 
@@ -200,7 +216,7 @@ class PairReportTests(unittest.TestCase):
                  control_extra=None, candidate_extra=None):
         self.count += 1
         base = os.path.join(self.root, 'run%d' % self.count)
-        images = ('tp4-drafter-1', 'tp4-drafter-1' if arm == 'dedf-bf16' else 'tp4-drafter-b16-1')
+        images = ('tp4-drafter-1', CANDIDATE_IMAGES[arm])
         write_run(os.path.join(base, 'control'), control, run_info(control_arm, images[0], **(control_extra or {})),
                   public=dict(calibration=dict(verdict=calibration)) if calibration else None)
         write_run(os.path.join(base, 'candidate'), candidate, run_info(arm, images[1], **(candidate_extra or {})))
@@ -273,6 +289,18 @@ class PairReportTests(unittest.TestCase):
         other = self.run_pair(*synthetic(gain=1.2), arm='dedf-bf16', candidate_extra=dict(image_tag='tp4-drafter-b16-1'))
         self.assertEqual(other['gates']['matched'], 'FAIL')
         self.assertEqual(self.run_pair(*synthetic(gain=1.2), arm='dedf-bf16')['gates']['matched'], 'PASS')
+        # b32 is its own drafter image too: the control's image, or another candidate's, fails the pair
+        for image in ('tp4-drafter-1',):
+            self.assertEqual(self.run_pair(*synthetic(gain=1.2), arm='b32-bf8', candidate_extra=dict(image_tag=image))['gates']['matched'],
+                             'FAIL')
+        self.assertEqual(self.run_pair(*synthetic(gain=1.2), arm='b32-bf8')['gates']['matched'], 'PASS')
+
+    def test_every_candidate_arm_is_judged_by_the_same_rule(self):
+        for arm in pair_report.CANDIDATE_ARMS:
+            public = self.run_pair(*synthetic(gain=1.15), arm=arm)
+            self.assertEqual((public['verdict'], set(public['gates'].values())), ('GO', {'PASS'}), arm)
+            self.assertEqual(self.run_pair(*synthetic(gain=1.0), arm=arm)['verdict'], 'NO-GO', arm)
+        self.assertEqual(pair_report.CANDIDATE_ARMS, ('b16-bf8', 'b32-bf8', 'dedf-bf16'))
 
     def test_a_diverged_turn_is_not_scored(self):
         control, candidate = synthetic(gain=1.2, diverge=3)
@@ -417,12 +445,15 @@ class JobKeyTests(unittest.TestCase):
     def test_a_candidate_arm_leaves_a3_out_and_refuses_it_by_name(self):
         outputs = self.read(C2_TAULAB_DRAFTER_ARM='b16-bf8', C2_TAULAB_PAIR_CONTROL='123')
         self.assertEqual(outputs['taulab_arms'], 'A1 A2 A4 A5')
+        self.assertEqual(self.read(C2_TAULAB_DRAFTER_ARM='b32-bf8', C2_TAULAB_PAIR_CONTROL='123')['taulab_arms'], 'A1 A2 A4 A5')
+        with self.assertRaisesRegex(job.JobError, 'A3'):
+            self.read(C2_TAULAB_DRAFTER_ARM='b32-bf8', C2_TAULAB_ARMS='A1 A3', C2_TAULAB_PAIR_CONTROL='123')
         self.assertEqual(self.read(C2_TAULAB_DRAFTER_ARM='control')['taulab_arms'], 'A1 A2 A3 A4 A5')
         with self.assertRaisesRegex(job.JobError, 'A3'):
             self.read(C2_TAULAB_DRAFTER_ARM='b16-bf8', C2_TAULAB_ARMS='A1 A3', C2_TAULAB_PAIR_CONTROL='123')
 
     def test_a_candidate_arm_without_its_control_run_is_refused(self):
-        for arm in ('b16-bf8', 'dedf-bf16'):
+        for arm in ('b16-bf8', 'b32-bf8', 'dedf-bf16'):
             with self.assertRaisesRegex(job.JobError, 'PAIR_CONTROL'):
                 self.read(C2_TAULAB_DRAFTER_ARM=arm)
 
@@ -445,6 +476,11 @@ class JobKeyTests(unittest.TestCase):
             job.read_job(dict(build, C2_ACTIONS='build push'), NAMES, meshes=job.profile_meshes())
         with self.assertRaisesRegex(job.JobError, 'build'):
             job.read_job(dict(build, C2_ACTIONS='reset smoke', C2_PROFILE=BASE), NAMES, meshes=job.profile_meshes())
+        # the measurement-only b32 candidate is built the same way and is never pushed either
+        build32 = dict(self.base, C2_ACTIONS='build', C2_DRAFTER_MANIFEST='b32-fc65843b')
+        self.assertEqual(job.read_job(build32, NAMES, meshes=job.profile_meshes())['drafter_manifest'], 'b32-fc65843b')
+        with self.assertRaisesRegex(job.JobError, 'not pushed'):
+            job.read_job(dict(build32, C2_ACTIONS='build push'), NAMES, meshes=job.profile_meshes())
         with open(os.path.join(HERE, '..', '..', '.github', 'workflows', 'qwen-c2-serving.yml'), encoding='utf-8') as handle:
             text = handle.read()
         step = text[text.index('- name: Push'):text.index('- name: Start the node agent')]
@@ -486,13 +522,13 @@ class TemplateTests(unittest.TestCase):
             outputs = job.read_job(self.pushable(row[0]), NAMES, meshes=job.profile_meshes())
             self.assertEqual(outputs['cards'], 'quad', row[0])
 
-    def test_the_three_tau_arms(self):
+    def test_the_four_tau_arms(self):
         arms = {}
         for row in self.rows():
             if row[0].startswith('D-T'):
                 outputs = job.read_job(self.pushable(row[0]), NAMES, meshes=job.profile_meshes())
                 arms[row[0]] = outputs
-        self.assertEqual(sorted(entry['taulab_drafter_arm'] for entry in arms.values()), ['b16-bf8', 'control', 'dedf-bf16'])
+        self.assertEqual(sorted(entry['taulab_drafter_arm'] for entry in arms.values()), ['b16-bf8', 'b32-bf8', 'control', 'dedf-bf16'])
         for name, outputs in arms.items():
             self.assertIn('taulab', outputs['actions'].split(), name)
             if outputs['taulab_drafter_arm'] == 'control':
@@ -506,23 +542,44 @@ class TemplateTests(unittest.TestCase):
         names = [row[0] for row in self.rows()]
         self.assertEqual(names[0], 'X0-status-rescan')
         self.assertLess(names.index('D-T1-control'), names.index('D-T2-b16-bf8'))
+        self.assertLess(names.index('D-T1-control'), names.index('D-T4-b32-bf8'))
+        self.assertLess(names.index('B1-build-b16'), names.index('B2-build-b32'))
+        self.assertLess(names.index('B2-build-b32'), names.index('D-T1-control'))
         qualification = [row for row in self.rows() if row[0].startswith('D-Q')]
         self.assertTrue(qualification)
         for row in qualification:
             self.assertEqual(row[1], 'go-arm-only', row)
+            self.assertNotEqual(row[2], 'tp4-drafter-b32-1', 'b32 is measurement only: nothing qualifies it')
 
     def test_the_order_states_the_budget_it_sums_to(self):
         rows = dict((row[0], int(row[3])) for row in self.rows())
         text = open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8').read()
         qualification = sum(minutes for name, minutes in rows.items() if name.startswith('D-Q'))
         taus = sum(minutes for name, minutes in rows.items() if name.startswith('D-T'))
-        self.assertEqual((qualification, taus), (290, 260))
+        self.assertEqual((qualification, taus), (290, 345))
         self.assertIn('290 min = 4.8 h', text)
-        self.assertIn('90 + 85 + 85 = 260 min = 4.3 h', text)
-        for name in ('D-T1-control', 'D-T2-b16-bf8', 'D-T3-dedf-bf16'):
+        self.assertIn('90 + 85 + 85 + 85 = 345 min = 5.8 h', text)
+        for name in ('D-T1-control', 'D-T2-b16-bf8', 'D-T3-dedf-bf16', 'D-T4-b32-bf8'):
             deadline = int(self.parse(name + '.env')['C2_TAULAB_DEADLINE'])
             self.assertGreater(rows[name], deadline, 'the job estimate holds the deadline and the reset')
             self.assertLessEqual(deadline, 85)
+
+    def test_the_b32_arm_is_wired_to_its_own_image_and_manifest_and_is_measurement_only(self):
+        build, tau = self.parse('B2-build-b32.env'), self.parse('D-T4-b32-bf8.env')
+        self.assertEqual((build['C2_IMAGE_TAG'], build['C2_DRAFTER_MANIFEST'], build['C2_ACTIONS']),
+                         ('tp4-drafter-b32-1', 'b32-fc65843b', 'build'))
+        self.assertEqual((tau['C2_IMAGE_TAG'], tau['C2_TAULAB_DRAFTER_ARM']), ('tp4-drafter-b32-1', 'b32-bf8'))
+        rows = dict((row[0], row) for row in self.rows())
+        self.assertEqual((rows['B2-build-b32'][1:3], rows['D-T4-b32-bf8'][1:3]),
+                         (['soft', 'tp4-drafter-b32-1'], ['soft', 'tp4-drafter-b32-1']))
+        text = open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8').read()
+        self.assertIn('# NEEDS D-T4-b32-bf8 <- B2-build-b32 D-T1-control', text)
+        self.assertIn('B2-build-b32 <- X0-status-rescan', text)
+        self.assertIn("'b32 arm lost'", text)
+        self.assertIn('MEASUREMENT ONLY', text)
+        self.assertIn('owner licence decision', text)
+        # the manifest a template names is the one the arm uses
+        self.assertEqual(lab.DRAFTER_ARMS['b32-bf8']['manifest'], build['C2_DRAFTER_MANIFEST'])
 
     def test_a_bf16_go_is_not_routed_to_a_pack_that_cannot_qualify_it(self):
         text = open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8').read()

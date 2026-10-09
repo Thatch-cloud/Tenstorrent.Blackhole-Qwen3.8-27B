@@ -15,8 +15,11 @@ by us at T16 (15 proposals). Two cheap weights-only candidates exist, and neithe
   three candidate-selector tensors and eleven norm vectors do not. The LFS object hash of the file matches the hub's. Its published results are
   thinking-off, 256-token chat, one request at a time; nothing it reports says what it does to tau on thinking-on coding-agent turns at 25-66k
   prompts. That is what the tau lab measures.
-- `JonasLoos/Qwen3.8-27B-DFlash2-b32`: **excluded**. Its licence is a metadata field only (no LICENSE file), part of its training prompts have
-  an unstated licence, and serving refuses anything but 15 proposals, so its positions 16-31 could not be used anyway.
+- `JonasLoos/Qwen3.8-27B-DFlash2-b32` (revision short form `fc65843b`): a block-32 fine-tune of the DFlash2 base, a **MEASUREMENT-ONLY** arm. Its licence is
+  a hub metadata field only (Apache-2.0, no LICENSE file in the repository) and part of its training prompts have an unstated licence, so the owner approved it for
+  the tau lab alone: serving it needs a separate owner licence decision, its image is never pushed, and no qualification job follows it. Serving uses T16
+  (15 proposals), so only positions 1-15 of its 32-block are used. Its safetensors header is byte-identical to the served drafter's and its config differs only in
+  `block_size` (8 against 32); all 81 tensors differ from the served drafter's (the candidate selector and the norms included).
 
 A third arm needs no new weights: the served drafter with `QWEN_FAST_DRAFTER_BF16=1` (all 36 projection uploads in bfloat16 instead of the
 image-baked bfloat8_b; +405 MB per chip). That flag has never run on hardware.
@@ -43,11 +46,11 @@ suite. Instead:
   build user's home; never the served drafter's cache), and a missing cache stops the build at once with the `drafter_stage.py stage` command to run: that arm is then lost,
   and the pack's ORDER says so. A candidate image is built and smoked but **never pushed**: the job reader refuses `build push` with a candidate manifest, and the push
   step refuses any image that carries the `DRAFTER_MANIFEST` marker.
-- The two overlay manifests are the first overlay files below `/experiment-scripts/ci`, a directory the P8 base lacks, so the Dockerfile makes
+- The overlay manifests are the first overlay files below `/experiment-scripts/ci`, a directory the P8 base lacks, so the Dockerfile makes
   `/experiment-scripts/ci/references/drafter-manifests` before the overlay installs (the installer refuses a destination whose directory is missing). A test stages the real
   overlay and installs it into a base-shaped tree. The fast-serving (P8) image copies `serving_startup.py`, which imports `drafter_fixtures`, so both fast-serving copy
   lists carry `drafter_fixtures.py`, `drafter_manifest.py` and the manifests directory; the copy-closure test now also reads plain `import` statements.
-- Both hub `config.json` files are committed (`references/drafter-configs/`, hashes equal to the manifests') with a test that they differ in `dflash_config.block_size`
+- The three hub `config.json` files are committed (`references/drafter-configs/`, hashes equal to the manifests') with a test that they differ in `dflash_config.block_size`
   only, and a real-vLLM test (`test_drafter_config_vllm`, run by `qwen-fast-vllm-cpu.yml`) that builds vLLM's dflash `SpeculativeConfig` from each with the profile's
   arguments and holds the scheduler-side values equal.
 - `drafter_stage.py` hashes and splits a downloaded checkpoint into the fixture layout (`describe` prints a manifest draft; `stage` writes the
@@ -55,13 +58,14 @@ suite. Instead:
   laptop. The b16 manifest in this branch was produced that way.
 
 **Tau lab, drafter mode.** The W-T1 tau lab (`c2_tau_lab.py`, `tau_lab_report.py`, the `taulab` action of `qwen-c2-serving.yml`) is ported from
-`tp4/tau-lab`. New: `--drafter-arm` (job key `C2_TAULAB_DRAFTER_ARM`) with three arms, selected by the image (its tag carries the manifest's fixtures) and by the derived
+`tp4/tau-lab`. New: `--drafter-arm` (job key `C2_TAULAB_DRAFTER_ARM`) with four arms, selected by the image (its tag carries the manifest's fixtures) and by the derived
 profile, which adds only that arm's drafter-only flags on top of the production profile and the lab's two log flags:
 
 | arm | image | flags added | log marker the lab requires (it refuses and exits 2 before sending anything without it) |
 |---|---|---|---|
 | `control` | default manifest | none | none |
 | `b16-bf8` | candidate manifest | `QWEN_DRAFTER_MANIFEST` | `[DRAFTER_MANIFEST] ... in force` |
+| `b32-bf8` | candidate manifest (measurement only) | `QWEN_DRAFTER_MANIFEST` | `[DRAFTER_MANIFEST] ... in force` |
 | `dedf-bf16` | default manifest | `QWEN_FAST_DRAFTER_BF16=1` | `[DRAFTER_BF16] engaged` |
 
 The drafter flags move the proposals and never the text, so they are the one arithmetic difference an arm may add (the lab's check refuses any
@@ -87,15 +91,15 @@ Every ratio below is over the paired turns whose text was the same in both arms;
 5. **coverage**: paired turns are at least 90% of the control's.
 6. **arms**: the control run's drafter arm is exactly `control` and the candidate's is the arm asked for.
 7. **launch**: neither run recorded a launched-container problem or an error.
-8. **matched**: the two runs agree on profile, seed, max_tokens and per-arm data counts, and their image tags differ for `b16-bf8` and are equal for `dedf-bf16`.
+8. **matched**: the two runs agree on profile, seed, max_tokens and per-arm data counts, and their image tags differ for `b16-bf8` and `b32-bf8` and are equal for `dedf-bf16`.
 
 Any FAIL is NO-GO; no FAIL with something unestablished is NOT_ESTABLISHED; otherwise GO. The control's A3 verdict is reported beside the verdict
 (`control_calibration`) and is **not** a GO precondition: it compares eight turns with an older stack's reference, and the paired ratio is a within-run comparison.
 The job reader also refuses a candidate arm that names no `C2_TAULAB_PAIR_CONTROL`, so a forgotten edit cannot leave a window without a verdict. The summary holds aggregates only (the report's public-words check).
 
-**Card gates** (`scripts/ci/references/tp4-drafter-jobs/`, parameterised templates; no private detail): X0 status/rescan, B0 and B1 builds (control image and
-the candidate image from the same commit), the three tau arms D-T1 (control, with A3 first), D-T2 (b16-bf8), D-T3 (dedf-bf16), 80-85 min deadlines each (about 4.3 h for the three),
-and, **for a GO arm only**, the qualification (about 4.8 h, sized from the W1 window's measured job times; if it does not fit the combined window it moves to a follow-on): S1 audited smoke (8 x 262k, every audit incl. the draft singles and quad audits), bringup + matrix against the tracked
+**Card gates** (`scripts/ci/references/tp4-drafter-jobs/`, parameterised templates; no private detail): X0 status/rescan, B0, B1 and B2 builds (control image and
+the two candidate images from the same commit), the four tau arms D-T1 (control, with A3 first), D-T2 (b16-bf8), D-T3 (dedf-bf16), D-T4 (b32-bf8, measurement only), 80-85 min deadlines each (about 5.8 h for the four),
+and, **for the b16 arm if it is a GO only** (b32 has none), the qualification (about 4.8 h, sized from the W1 window's measured job times; if it does not fit the combined window it moves to a follow-on): S1 audited smoke (8 x 262k, every audit incl. the draft singles and quad audits), bringup + matrix against the tracked
 v235 texts, the singles/quad audits on the four-live paths, five consecutive hang-shape completions, the 8 x 262k attach, a short ABAB against the control image, and Z.
 Kill rules are in each template and `ORDER.txt` (machine-greppable `# NEEDS` lines). **A bf16 GO has no qualification path in this pack**: no gate profile
 pairs the bf16 weights with the production 8 x 262k prefix shape (the bf16 pool is 19,200 blocks, not 19,968), so the follow-on needs `c2-packed-tp4-8x262k-ship-prefix-dbf16`
@@ -103,7 +107,7 @@ and an audit twin first; ORDER says so.
 
 ## Files
 
-- `scripts/ci/drafter_manifest.py`, `drafter_fixtures.py`, `drafter_stage.py`, `references/drafter-manifests/{dedf8df6,b16-98759a49}.json`, `references/drafter-configs/`, `test_drafter_manifest.py`, `test_drafter_config_vllm.py`
+- `scripts/ci/drafter_manifest.py`, `drafter_fixtures.py`, `drafter_stage.py`, `references/drafter-manifests/{dedf8df6,b16-98759a49,b32-fc65843b}.json`, `references/drafter-configs/`, `test_drafter_manifest.py`, `test_drafter_config_vllm.py`
 - `scripts/ci/c2_tau_lab.py`, `tau_lab_report.py`, `drafter_pair_report.py`, `test_tau_lab.py` (ported), `test_drafter_arms.py`, `references/tau-lab/`, `references/tp4-taulab-jobs/`
 - `scripts/ci/references/tp4-drafter-jobs/` (the card-gate pack); `references/tp4-taulab-jobs/` is the earlier W-T1 pack, marked superseded and not run again
 - not changed on purpose: `dflash-fixtures.sh`, the helper the older lever-N gate arms use to fetch the served drafter's fixtures (a bundle file; the image build and the tau lab take a candidate through `build-c2-serving-image.sh` instead).
@@ -114,7 +118,7 @@ and an audit twin first; ORDER says so.
 - **Does vLLM's DFlash path read `block_size` from the draft config?** Read from the pinned vLLM's source: no.
   Its DFlash code reads `dflash_config`'s `causal`, `use_swa`, `swa_window_size`, `mask_token_id`, `target_layer_ids`, `use_aux_hidden_state` and the sink-bias flag, and nothing asks it
   for `block_size` (the `block_size` its proposer uses is the KV page size). No TT source reads `dflash_config` either (only `dspark_intake.py` mentions it). `test_drafter_config_vllm`
-  holds that against the installed vLLM on every run: the two configs load equal but for the key, and no vLLM module reads it. What a card could still show is the candidate's
+  holds that against the installed vLLM on every run: the three configs load equal but for the key, and no vLLM module reads it. What a card could still show is the candidate's
   acceptance at T16, which is the tau lab's question.
 - **The lab's statistic counts rounds with all four seats live**, so the drafter arms run the four-seat serving profile (`c2-packed-tp4`), as the lab was validated. An eight-seat
   statistic needs the report's live rule generalised; tau per round per seat does not depend on the seat count, so this does not bias the ratio.

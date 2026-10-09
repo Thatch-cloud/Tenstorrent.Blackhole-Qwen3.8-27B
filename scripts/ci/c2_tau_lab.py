@@ -95,6 +95,7 @@ PRODUCTION_IMAGES = (('tp4-serve-2', True), ('tp4-serve-10', False))
 DRAFTER_ARMS = {
     'control': dict(manifest='dedf8df6', env=()),
     'b16-bf8': dict(manifest='b16-98759a49', env=(('QWEN_DRAFTER_MANIFEST', 'b16-98759a49'),)),
+    'b32-bf8': dict(manifest='b32-fc65843b', env=(('QWEN_DRAFTER_MANIFEST', 'b32-fc65843b'),)),
     'dedf-bf16': dict(manifest='dedf8df6', env=(('QWEN_FAST_DRAFTER_BF16', '1'),)),
 }
 DRAFTER_BF16_ENGAGED = '[DRAFTER_BF16] engaged'
@@ -1151,7 +1152,8 @@ def build_parser():
     parser.add_argument('--profiles', default=None, help='a profiles JSON instead of the image\'s own')
     parser.add_argument('--drafter-arm', choices=sorted(DRAFTER_ARMS), default=None,
                         help='which drafter this run serves (the image carries its fixtures): control (the served drafter), '
-                        'b16-bf8 (the block-16 candidate) or dedf-bf16 (the served drafter with bfloat16 projection weights). '
+                        'b16-bf8 (the block-16 candidate), b32-bf8 (the block-32 candidate, measurement only: used at T16, so positions 1-15) '
+                        'or dedf-bf16 (the served drafter with bfloat16 projection weights). '
                         'A3 runs on the control arm only. Default: none, the lab as it was')
     parser.add_argument('--cards', choices=('quad',), default='quad')
     parser.add_argument('--hub', default=gate.HUB)
