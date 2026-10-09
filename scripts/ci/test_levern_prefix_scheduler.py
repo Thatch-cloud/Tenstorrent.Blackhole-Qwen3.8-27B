@@ -850,7 +850,9 @@ class SkewWithShortsTests(GateFreeCase):
     def replay(self, gap, build_ms=2500.0):
         prompts = dict(self.LONGS, **self.SHORTS)
         saved = levern_policy.effective_share.__defaults__, levern_policy.governor_need.__defaults__
-        levern_policy.effective_share.__defaults__ = levern_policy.governor_need.__defaults__ = (build_ms,)
+        # build_ms is the first defaulted parameter; the trailing ones (builds, engine reuse's per-prefill costs) keep theirs.
+        levern_policy.effective_share.__defaults__ = (build_ms,) + saved[0][1:]
+        levern_policy.governor_need.__defaults__ = (build_ms,) + saved[1][1:]
         try:
             rig = Rig(environ={'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180', 'QWEN_FAST_LEVERN_ROUNDS': None, 'QWEN_FAST_LEVERN_PREFILL_SHARE': '0.5',
                                'QWEN_FAST_LEVERN_PARK': 'host', 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': str(gap)}, seats=8, decoders=0)
