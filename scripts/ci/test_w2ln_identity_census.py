@@ -46,6 +46,12 @@ AUDITED = {
     ('extent_attention_replay_tp.py', 'ExtentSegmentReader.__init__', 'assign', 'positions'): 'the segment reader constructor: the identities multi binds',
     ('extent_attention_replay_tp.py', 'ExtentSegmentReader.__init__', 'call-append', 'metadata'): 'the segment reader constructor: the identities multi binds',
     ('extent_attention_replay_tp.py', 'PackedExtentReplayReader.__init__', 'construct', 'ExtentSegmentReader'): 'the packed reader constructor',
+    # Octo-T8 (QWEN_FAST_OCTO, gate only): the eight-row segment reader is the pinned twin's constructor at another bundle count, built once per segment by
+    # extent_attention_octo_tp.build_packed from the fold twin's constructor at the attach; multi (QWEN_FAST_TP4_SDPA) is refused beside the octo flag (serving_octo.EXCLUDED_OFF_VALUES).
+    ('extent_attention_octo_tp.py', 'OctoSegmentReader.__init__', 'assign', 'cur_pos'): 'the octo segment reader constructor (the pinned twin\'s at one entry); multi is refused beside octo',
+    ('extent_attention_octo_tp.py', 'OctoSegmentReader.__init__', 'assign', 'metadata'): 'the octo segment reader constructor (the pinned twin\'s at one entry); multi is refused beside octo',
+    ('extent_attention_octo_tp.py', 'OctoSegmentReader.__init__', 'assign', 'positions'): 'the octo segment reader constructor (the pinned twin\'s at one entry); multi is refused beside octo',
+    ('extent_attention_octo_tp.py', 'OctoSegmentReader.__init__', 'call-append', 'metadata'): 'the octo segment reader constructor (the pinned twin\'s at one entry); multi is refused beside octo',
     ('attention_replay_tp.py', 'ReplayAttentionReader.__init__', 'assign', 'metadata'): 'the pair path\'s reader constructor',
     ('attention_replay_tp.py', 'ReplayAttentionReader.__init__', 'assign', 'positions'): 'the pair path\'s reader constructor',
     ('attention_replay_tp.py', 'ReplayAttentionReader.__init__', 'call-append', 'metadata'): 'the pair path\'s reader constructor',

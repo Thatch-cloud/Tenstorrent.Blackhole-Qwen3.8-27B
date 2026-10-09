@@ -3,22 +3,32 @@
 # stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
 # THE CARDS ARE UNDER DEVELOPMENT, PRODUCTION IS DOWN BY THE OWNER'S CHOICE: NO agentstart, NO agentstop (the node agent is already stopped), NO hand-back, NO deploy, NO :latest move. Z ends with a reset and no agentstart. qwen_c2_profiles.json's default stays c2-packed-tp4; nothing is baked as the image default.
 # P0. NO OTHER WINDOW DRIVER MAY BE ALIVE and no privileged builder container may be up. The CPU suite green on the branch first (gh workflow run qwen-cpu-suite.yml -f ref=<branch>). Every result is UNQUALIFIED. B0 never runs during a timing job. Judge every pair PAIRED per round, never by unpaired medians; check the load average.
-# PRECONDITION: the device pieces of serving_octo.DEVICE_PIECES are built (the attach builds the octo block, the batched GDN launch carries eight users, K64j is qualified at one group per bundle, the publication warm covers the block, the fused commit its third block). Until they are, every octo arm below fails at the attach with
-# the refusal that names the piece, which is the intended behaviour of a flag that cannot yet engage; A0, P3, R2, M0 and L0 (the controls) run today.
+# PRECONDITION: the device pieces of serving_octo.DEVICE_PIECES are BUILT on the host and tested on CPU (the attach builds the octo block, the TP4 GDN launch carries eight users, the octo extent readers take one eight-row group per bundle at flags 0x21, the publication warm covers the block, the fused commit its third block) and NONE of them has run on a card: every result is UNQUALIFIED, and the admission says so line by line. A piece that is not built makes the arm fail at the attach, naming it (the admission's refusal). K64j is NOT rebuilt: 0x21 is an existing flag set, the octo block's bundle of ONE eight-row group is that program at one entry, and the served graft (the C2 image's _ttnncpp.so) is the one every Q job pins. Q1 and Q2 are the cheapest kill signals and run first; A1 needs them.
+# KNOWN COST, MEASURED BY P1..P4 NOT ASSUMED: the half-tile GDN glue kernels (V1 block conv, V2 split and merge, the T2 packed conv windows) move 16-row users; an 8-row user is a quarter tile, so at the octo block those sites take the SERVED path (exact; logged '[PINDIAG] tp4 vglue octo 8-row served path', not a FALLBACK) and the octo pass pays their launches. The design's 84-104 ms estimate did not include them, and the attention is eight launches of one entry per layer (the two M3 blocks' total). A GO needs the +10% to survive that; a quarter-tile glue is the follow-up if the exactness jobs pass and the gain is short.
 # WHAT THIS PACK DECIDES: nothing about production. It is evidence for the owner on four things: (1) EXACTNESS - every text under the octo shape, alternating with the M3 shape, equals the text of the same user on the control and on its solo run (A1, E1, E2); (2) NO HANG, NO COMPILE ON A SWITCH (A1, H1-H3: three consecutive completions, no stall,
 # no program compiled on a shape switch); (3) MEMORY - the third block fits when the pool gives back 3,468 blocks (M1 against M0); (4) THE TRADE - committed tokens per second per seat at 8 live, paired on one boot (P1, P4) and across boots (P2, P3), GO at >= +10%, every text exact; and the lone-user round (L0, L1).
 # DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
-# NEEDS A1 <- A0
+# NEEDS Q1a <- Q1w
+# NEEDS Q1b <- Q1a
+# NEEDS Q2 <- Q2w
+# NEEDS A1 <- A0 Q1b Q2
 # NEEDS E1 E2 <- A1
 # NEEDS H1 H2 H3 <- A1
 # NEEDS M1 <- M0 A1
 # NEEDS P1 P2 P4 <- P3 E1 E2 H1 H2 H3 M1
 # NEEDS R1 R3 <- R2 P1
 # NEEDS L1 <- L0
-# NO-GO for adopting any arm: any stall, any hash difference between arms that must be identical, any program compiled on a shape switch, any audit mismatch, a verdict under +10%, a free-DRAM reading under the bars.
-# Time (estimate): X0 and B0 80 min, A0 and A1 5 h, E1 and E2 6 h, H1-H3 4.5 h, M0 and M1 2.5 h, P1-P4 4.5 h, R1-R3 3.5 h, L0 and L1 2.3 h, Z 10 min: about 30 h (lean: A0, A1, E1, H1, M1, P3, P1, P4: about 14 h).
+# NO-GO for adopting any arm: any Q job that is not a PASS at full scope, any stall, any hash difference between arms that must be identical, any program compiled on a shape switch, any audit mismatch, a verdict under +10%, a free-DRAM reading under the bars.
+# Time (estimate): X0 and B0 80 min, Q1 and Q2 1 h, A0 and A1 5 h, E1 and E2 6 h, H1-H3 4.5 h, M0 and M1 2.5 h, P1-P4 4.5 h, R1-R3 3.5 h, L0 and L1 2.3 h, Z 10 min: about 31 h (lean: Q1, Q2, A0, A1, E1, H1, M1, P3, P1, P4: about 15 h).
+# FIRST CARD JOB (Q1w): K64j at ONE eight-row group per bundle (G8B1, flags 0x21) must run under the NoC sanitiser and equal its compile-time twin and the native one-row decode. If it does not, nothing else in this pack is worth running: the octo shape does not run on K64j and the owner decides between a kernel change (a new graft, a new qualification) and dropping the shape.
+# THE MEMORY RISK, NAMED: the plan (make_octo_profiles.MEMORY) sized the third block as one more M3 block (224 MB a bank). The octo block keeps eight per-user state sets where an M3 block keeps four, which a reading of the allocations (an estimate, not a measurement) puts near 0.4 GB a chip above the plan, whose margin is 5 MB: A1 may fail at the block's construction on an allocation. That is a stop with a number (M1 reads the ledger; regenerate the twins with the measured need, make_octo_profiles.py, and tag again).
 X0-status-rescan-reset stop tp4-octo-1 20
 B0-build stop tp4-octo-1 60
+Q1w-k64j-g8b1-watcher stop tp4-octo-1 10
+Q1a-k64j-g8b1-cb1 stop tp4-octo-1 10
+Q1b-k64j-g8b1-cb2a stop tp4-octo-1 15
+Q2w-gdn-eight-users-watcher stop tp4-octo-1 10
+Q2-gdn-eight-users stop tp4-octo-1 15
 A0-control-audit-attach stop tp4-octo-1 150
 A1-octo-audit-attach stop tp4-octo-1 150
 E1-exact-matrix-alternate stop tp4-octo-1 180

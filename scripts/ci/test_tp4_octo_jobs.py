@@ -80,8 +80,14 @@ def names():
     return [line[0] for line in order_lines()]
 
 
+def q_jobs():
+    """The one-card qualification jobs (Q1w, Q1a, Q1b, Q2w, Q2): the cardm action on a pair-shaped step, the quad boards untouched."""
+    return [name for name in names() if re.match(r'Q\d', name)]
+
+
 def card_jobs():
-    return [name for name in names() if name not in ('X0-status-rescan-reset', 'B0-build', 'Z-reset')]
+    """The quad jobs that serve a profile (everything but the status, build, reset and one-card qualification jobs)."""
+    return [name for name in names() if name not in ('X0-status-rescan-reset', 'B0-build', 'Z-reset') and name not in q_jobs()]
 
 
 class JobPackTests(unittest.TestCase):
@@ -101,10 +107,51 @@ class JobPackTests(unittest.TestCase):
         for name in names():
             with self.subTest(name):
                 result = parsed(name)
-                self.assertEqual(result['cards'], 'quad')
                 self.assertEqual(result['tag'], IMAGE)
-                self.assertFalse(AGENT_ACTIONS & set(result['actions'].split()))
                 self.assertEqual(result['bake_default_profile'] or '', '')
+                if name in q_jobs():
+                    # a one-card evidence job: cardm is a pair-shaped step (card M alone, no reset, no agent), the only action that may name 'cardm' here
+                    self.assertEqual((result['cards'], result['actions']), ('pair', 'cardm'))
+                    self.assertFalse((AGENT_ACTIONS - {'cardm'}) & set(result['actions'].split()))
+                    continue
+                self.assertEqual(result['cards'], 'quad')
+                self.assertFalse(AGENT_ACTIONS & set(result['actions'].split()))
+
+    def test_the_qualification_jobs_are_one_card_evidence_on_the_served_graft_and_run_before_any_octo_arm(self):
+        self.assertEqual(q_jobs(), ['Q1w-k64j-g8b1-watcher', 'Q1a-k64j-g8b1-cb1', 'Q1b-k64j-g8b1-cb2a', 'Q2w-gdn-eight-users-watcher', 'Q2-gdn-eight-users'])
+        order = names()
+        for name in q_jobs():
+            self.assertLess(order.index(name), order.index('A0-control-audit-attach'), name)
+            result = parsed(name)
+            self.assertEqual(result['cardm_harness'], 'optimisation/ttnn-op/k64j/run_card_b.sh')
+            env = result['cardm_env']
+            self.assertIn('EXPECT_TTNNCPP_SHA256=@K64J_TTNNCPP_SHA256@', env, 'the graft binary is pinned: a graft mounted is not a graft executed')
+            self.assertIn('KOPGRAFT64=@K64J_GRAFT_DIR@', env)
+            self.assertIn('NO NEW GRAFT', text_of(name))
+        for name in ('Q1w-k64j-g8b1-watcher', 'Q2w-gdn-eight-users-watcher'):
+            self.assertIn('WATCHER=1', parsed(name)['cardm_env'])
+        for name in ('Q1a-k64j-g8b1-cb1', 'Q1b-k64j-g8b1-cb2a', 'Q2-gdn-eight-users'):
+            self.assertNotIn('WATCHER', parsed(name)['cardm_env'])
+        for name in q_jobs()[:3]:
+            self.assertIn('K64J_HARNESS=card', parsed(name)['cardm_env'])
+            self.assertIn('--kv-heads 1 --octo', parsed(name)['cardm_args'])
+        for name in q_jobs()[3:]:
+            self.assertIn('K64J_HARNESS=gdn_tp4', parsed(name)['cardm_env'])
+            self.assertIn('--users 8 --rows 8', parsed(name)['cardm_args'])
+        needs = needs_lines()
+        self.assertEqual((needs['Q1a'], needs['Q1b'], needs['Q2']), ({'Q1w'}, {'Q1a'}, {'Q2w'}))
+        self.assertIn('Q1b', needs['A1'])
+        self.assertIn('Q2', needs['A1'])
+
+    def test_every_eight_seat_smoke_runs_the_steady_eight_the_quad_blocks_rule_judges(self):
+        # c2_smoke_check.blocks_problems: a profile that asks for the eight-seat quad (QWEN_FAST_QUAD_DRAFT_BLOCKS=2) fails its job unless the smoke ran concurrent8_steady
+        for name in card_jobs():
+            result = parsed(name)
+            if result['actions'] != 'reset smoke':
+                continue
+            if profiles()[result['profile']]['env'].get('QWEN_FAST_QUAD_DRAFT_BLOCKS') == '2':
+                with self.subTest(name):
+                    self.assertIn('concurrent8_steady', tests_of(name))
 
     def test_the_first_job_rescans_before_it_resets_and_the_build_names_the_default_profile(self):
         actions = parsed('X0-status-rescan-reset')['actions'].split()
@@ -141,7 +188,7 @@ class JobPackTests(unittest.TestCase):
         self.assertEqual(parsed('A0-control-audit-attach')['tests'], parsed('A1-octo-audit-attach')['tests'])
         self.assertEqual(parsed('A0-control-audit-attach')['profile'], P + '-audit')
         self.assertEqual(parsed('A1-octo-audit-attach')['profile'], P + '-octo-audit')
-        self.assertEqual(needs_lines()['A1'], {'A0'})
+        self.assertEqual(needs_lines()['A1'], {'A0', 'Q1b', 'Q2'})
         self.assertIn('octo_compare.py', text_of('A1-octo-audit-attach'))
         found = profiles()
         control, arm = found[P + '-audit'], found[P + '-octo-audit']
@@ -228,8 +275,8 @@ class JobPackTests(unittest.TestCase):
 
     def test_the_order_says_what_it_decides_and_what_it_needs_before_it_can_run(self):
         text = order_text()
-        for phrase in ('NO agentstart, NO agentstop', 'NO :latest move', 'serving_octo.DEVICE_PIECES', 'fails at the attach', 'UNQUALIFIED', 'GO', 'NO-GO',
-                       'qwen-cpu-suite.yml', 'every text exact'):
+        for phrase in ('NO agentstart, NO agentstop', 'NO :latest move', 'serving_octo.DEVICE_PIECES', 'fail at the attach', 'UNQUALIFIED', 'GO', 'NO-GO',
+                       'qwen-cpu-suite.yml', 'every text exact', 'K64j is NOT rebuilt', 'KNOWN COST', 'THE MEMORY RISK', 'FIRST CARD JOB'):
             self.assertIn(phrase, text)
 
     def test_the_dependencies_name_jobs_that_exist_and_run_earlier(self):
@@ -266,8 +313,8 @@ class JobPackTests(unittest.TestCase):
 
     def test_the_stop_and_soft_modes_follow_what_each_job_is(self):
         modes = {line[0]: line[1] for line in order_lines()}
-        for name in ('X0-status-rescan-reset', 'B0-build', 'A0-control-audit-attach', 'A1-octo-audit-attach', 'E1-exact-matrix-alternate', 'E2-exact-staggered-alternate',
-                     'H1-hang-shapes-octo', 'H2-hang-shapes-octo', 'H3-hang-shapes-octo', 'M1-memory-ledger', 'Z-reset'):
+        for name in q_jobs() + ['X0-status-rescan-reset', 'B0-build', 'A0-control-audit-attach', 'A1-octo-audit-attach', 'E1-exact-matrix-alternate', 'E2-exact-staggered-alternate',
+                     'H1-hang-shapes-octo', 'H2-hang-shapes-octo', 'H3-hang-shapes-octo', 'M1-memory-ledger', 'Z-reset']:
             self.assertEqual(modes[name], 'stop', name)
         for name in ('P1-timing-alternate', 'P2-timing-live', 'P3-timing-control', 'P4-timing-alternate-repeat', 'R1-parked-timing-alternate', 'L1-lone-user-packed'):
             self.assertEqual(modes[name], 'soft', name)

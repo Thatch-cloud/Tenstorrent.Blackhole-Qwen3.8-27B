@@ -249,18 +249,24 @@ class AdmissionOverTheImageTests(unittest.TestCase):
             octo.octo_admission(self.M3, container_env(name), log=log)
         return [line[len(octo.REFUSED_MARKER) + 2:] for line in log.lines]
 
-    def test_the_octo_twins_are_refused_today_for_the_device_pieces_alone(self):
+    def test_the_octo_twins_are_admitted_today_over_the_images_env_with_the_device_pieces_built(self):
+        # nothing patched: serving_octo.BUILT as the tree has it, the TP4 GDN sibling's own limit
+        self.assertEqual(octo.device_gaps(), [])
         for name in OCTO:
             with self.subTest(profile=name):
-                reasons = self.reasons(name)
-                self.assertEqual([reason.split(' is not built')[0] for reason in reasons], ['device piece ' + key for key, text in octo.DEVICE_PIECES])
+                log = host_tests.Lines()
+                record = octo.octo_admission(self.M3, container_env(name), log=log)
+                self.assertEqual((record['mode'], record['min_live'], record['rows'], record['users']), (profiles()[name]['env']['QWEN_FAST_OCTO'], 6, 8, 8))
+                unqualified = [line for line in log.lines if line.startswith(octo.UNQUALIFIED_MARKER)]
+                self.assertEqual(len(unqualified), len(octo.UNQUALIFIED_ITEMS), 'every card question is a line, one each')
+                self.assertTrue(any(line.startswith(octo.ADMITTED_MARKER) for line in log.lines))
+                self.assertFalse(any(line.startswith(octo.REFUSED_MARKER) for line in log.lines))
 
-    def test_the_octo_twins_are_admitted_once_the_pieces_are_built(self):
-        for name in OCTO:
-            with self.subTest(profile=name), host_tests.built():
-                record = octo.octo_admission(self.M3, container_env(name), log=host_tests.Lines())
-                self.assertEqual(record['mode'], profiles()[name]['env']['QWEN_FAST_OCTO'])
-                self.assertEqual(record['min_live'], 6)
+    def test_a_piece_that_is_not_built_refuses_every_octo_twin_by_name(self):
+        for key, text in octo.DEVICE_PIECES:
+            for name in OCTO[:2]:
+                with self.subTest(profile=name, piece=key), patch.object(octo, 'BUILT', octo.BUILT - {key}):
+                    self.assertEqual([reason.split(' is not built')[0] for reason in self.reasons(name)], ['device piece ' + key])
 
     def test_a_traffic_profile_with_the_flag_is_refused_whatever_else_holds(self):
         environ = container_env(P + '-traffic')

@@ -109,9 +109,9 @@ class SeatCountSites(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'within the 8 native GDN slots'):
             serving_buffer_pool.ServingBufferPool(SimpleNamespace(), 'mesh', users=9)
 
-    def test_the_gdn_batched_launch_stays_four_users_per_block(self):
-        # UNCHANGED, per block: the batched GDN launch carries at most MAX_USERS users, and a block's users are its own
-        # four - eight users in one launch would be 96 of 110 cores (a 128-row block, not this build).
+    def test_the_gdn_batched_launch_stays_four_users_per_m3_block_and_carries_eight_for_the_octo_block(self):
+        # UNCHANGED, per M3 block: the pinned pair launch carries at most four users and a block's users are its own four. The unpinned TP4 sibling carries EIGHT: the octo-T8
+        # block (8 users x 8 rows, QWEN_FAST_OCTO) is 8 x 12 heads = 96 of 110 cores, one wave. A 128-row block (I3) is still not built.
         self.assertEqual(gdn_user_batch.MAX_USERS, 4)
         self.assertEqual(packed_shapes.m3_shape(68).users, gdn_user_batch.MAX_USERS)
         gdn_user_batch.core_shares(11, 10, 4)
@@ -119,9 +119,11 @@ class SeatCountSites(unittest.TestCase):
             gdn_user_batch.core_shares(11, 10, 5)
         import gdn_user_batch_tp
 
-        self.assertEqual(gdn_user_batch_tp.MAX_USERS, gdn_user_batch.MAX_USERS)
-        with self.assertRaisesRegex(ValueError, 'One to 4 packed users per batched GDN launch'):
-            gdn_user_batch_tp.core_shares(11, 10, 8)
+        self.assertEqual((gdn_user_batch_tp.MAX_USERS, gdn_user_batch_tp.PAIR_MAX_USERS), (8, gdn_user_batch.MAX_USERS))
+        self.assertEqual(packed_shapes.octo_shape(68).users, gdn_user_batch_tp.MAX_USERS)
+        self.assertEqual(len(gdn_user_batch_tp.core_shares(11, 10, 8, workers=12)), 8)
+        with self.assertRaisesRegex(ValueError, 'One to 8 packed users per batched GDN launch'):
+            gdn_user_batch_tp.core_shares(11, 10, 9, workers=12)
 
     def test_a_padded_round_idles_at_most_two_segments_of_a_block(self):
         # UNCHANGED, per block: page 0 holds two 32-row tile rows, so a 4-user block pads from two live users. Under two

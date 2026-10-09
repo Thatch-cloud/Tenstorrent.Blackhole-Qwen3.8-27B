@@ -46,6 +46,8 @@ FOUR_SECTIONS = ('UB', 'K5', 'NT', 'DMA')
 SECTIONS = FOUR_SECTIONS + ('PARITY',)
 ROWS = 16
 USERS = 4
+OCTO_ROWS = 8
+OCTO_USERS = 8                      # octo-T8: 8 users x 12 heads = 96 of the 110 cores, one wave
 TILE = 32
 PAGE = 2048
 
@@ -164,15 +166,19 @@ def decide(report):
 def scope_of(report):
     if report.get('requested') == ['PARITY']:
         return 'parity'
+    if report.get('geometry') == '%dx%d' % (OCTO_USERS, OCTO_ROWS):
+        # the octo block: UB and NT at 8 users x 8 rows, three seeds
+        return 'octo' if set(report.get('requested', [])) == {'UB', 'NT'} and not report.get('reduced') else 'reduced'
     return 'full' if set(report.get('requested', [])) == set(FOUR_SECTIONS) and not report.get('reduced') else 'reduced'
 
 
 def verdict_line(report):
     decision = report['decision']
     tallies = report.get('tally', {})
-    return '%s verdict=%s scope=%s tp=%s chips=1of%s comparisons=%d differing=%d sections=%s' % (
+    return '%s verdict=%s scope=%s tp=%s chips=1of%s comparisons=%d differing=%d sections=%s geometry=%s' % (
         VERDICT, decision['verdict'], scope_of(report), report.get('tp'), report.get('tp'),
-        tallies.get('comparisons', 0), tallies.get('differing', 0), ','.join(report.get('requested', [])))
+        tallies.get('comparisons', 0), tallies.get('differing', 0), ','.join(report.get('requested', [])),
+        report.get('geometry', '%dx%d' % (USERS, ROWS)))
 
 
 def tally(comparisons):
@@ -186,6 +192,8 @@ def parse(argv=None):
                         % ','.join(FOUR_SECTIONS))
     parser.add_argument('--seeds', default='17,18,19', help='UB / K5 / NT seeds')
     parser.add_argument('--prefixes', default='0,1,7,16', help='DMA prefixes (rows = 16)')
+    parser.add_argument('--users', type=int, default=USERS, help='UB / NT users in the batched launch (default 4: the M3 block; 8 with --rows 8 is the octo-T8 block, 96 cores)')
+    parser.add_argument('--rows', type=int, default=ROWS, help='UB / NT rows per user (default 16; 8 is the octo-T8 block)')
     parser.add_argument('--iterations', type=int, default=20, help='timing launches (0: no timing)')
     parser.add_argument('--root', type=Path, default=Path(os.environ.get('TT_METAL_HOME', '/opt/tt-metal')))
     # accepted for run_card_b.sh, which passes them to every harness (the container timeout and the graft's sha are its own)
@@ -201,6 +209,12 @@ def parse(argv=None):
         parser.error('unknown sections %s' % unknown)
     if any(not 0 <= value <= ROWS for value in arguments.prefixes):
         parser.error('--prefixes within 0..%d' % ROWS)
+    if not 1 <= arguments.users <= OCTO_USERS or arguments.rows not in (8, 16):
+        parser.error('--users within 1..%d and --rows 8 or 16' % OCTO_USERS)
+    if (arguments.users, arguments.rows) not in ((USERS, ROWS), (OCTO_USERS, OCTO_ROWS)):
+        parser.error('--users/--rows name a block this harness qualifies: 4 x 16 (M3) or 8 x 8 (octo-T8)')
+    if (arguments.users, arguments.rows) != (USERS, ROWS) and set(arguments.sections) - {'UB', 'NT'}:
+        parser.error('the octo geometry (8 x 8) is qualified by sections UB and NT only: K5-A is a 16-row launch and DMA/PARITY are the 16-row kernels')
     if 'PARITY' in arguments.sections and arguments.sections != ['PARITY']:
         parser.error('PARITY runs at the pair\'s widths (QWEN_FAST_TP unset), alone')
     return arguments
@@ -281,8 +295,8 @@ def run_ub_k5(rig, arguments, found4, found2, kernels, section):
     timings = {}
     for seed in arguments.seeds:
         generator = torch.Generator().manual_seed(seed)
-        four = [user_inputs(torch, found4, generator) for _ in range(USERS)]
-        spare = [user_inputs(torch, found4, generator) for _ in range(USERS)]
+        four = [user_inputs(torch, found4, generator, rows=arguments.rows) for _ in range(arguments.users)]
+        spare = [user_inputs(torch, found4, generator, rows=arguments.rows) for _ in range(arguments.users)]
         norm = (1 + torch.randn(1, 1, 128, generator=generator) * 0.1).bfloat16()
         norm_weight = rig.upload(norm)
         groups = upload_users(rig, four, norm_weight)
@@ -317,7 +331,7 @@ def run_ub_k5(rig, arguments, found4, found2, kernels, section):
             rig.ttnn.synchronize_device(rig.mesh)
             candidate_host = read_launch(rig, candidate)
             release(rig, candidate)
-            for index in range(USERS):
+            for index in range(arguments.users):
                 for name, position in (('output', 0), ('states', 1)):
                     rig.compare(section, '%s_vs_per_user' % ('batched' if section == 'UB' else 'k5'),
                                 'seed%d/user%d/%s' % (seed, index, name), control_host[index][position],
@@ -349,7 +363,7 @@ def run_nt(rig, arguments, found4, kernels):
     torch = rig.torch
     for seed in arguments.seeds[:1]:
         generator = torch.Generator().manual_seed(seed)
-        four = [user_inputs(torch, found4, generator) for _ in range(USERS)]
+        four = [user_inputs(torch, found4, generator, rows=arguments.rows) for _ in range(arguments.users)]
         norm_weight = rig.upload((1 + torch.randn(1, 1, 128, generator=generator) * 0.1).bfloat16())
         groups = upload_users(rig, four, norm_weight)
         try:
@@ -576,8 +590,10 @@ def main(argv=None):
     arguments = parse(argv)
     report = dict(scope='single-card four-card-geometry GDN qualification (S2T-01 / S2T-10)', argv=list(sys.argv[1:]),
                   requested=list(arguments.sections), seeds=arguments.seeds, prefixes=arguments.prefixes,
+                  geometry='%dx%d' % (arguments.users, arguments.rows),
                   reduced=len(arguments.seeds) < 3 or (set(arguments.sections) != set(FOUR_SECTIONS)
-                                                       and arguments.sections != ['PARITY']),
+                                                       and arguments.sections != ['PARITY']
+                                                       and not (set(arguments.sections) == {'UB', 'NT'} and arguments.users == OCTO_USERS)),
                   sections={}, comparisons=[], env={name: os.environ.get(name) for name in ('QWEN_FAST_TP',)})
 
     def write():

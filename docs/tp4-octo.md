@@ -1,7 +1,9 @@
 # tp4/octo-t8: adaptive drafting rounds at eight seats, and the lone-user padded round
 
-Status: the host side is built and tested on CPU; the flag **refuses to engage** (by name) until the device pieces below exist. Nothing here has run on a card. Every
-card result this document asks for is UNQUALIFIED until it has run. Default off, gate only, byte-identical off.
+Status: the host side AND the device pieces are built and tested on CPU (the attach builds the third block, the batched GDN launch carries eight users, the octo extent readers take one
+eight-row group per bundle, the publication warm and the fused commit cover the block); the flag still engages in a **gate run of a gate-only profile only**. Nothing here has run on a card: the
+admission logs every card question as an `[OCTO] UNQUALIFIED` line naming the job that settles it (`serving_octo.UNQUALIFIED_ITEMS`), and the first card job (Q1w) is the one that can kill the shape. Every
+card result this document asks for is UNQUALIFIED until it has run. Default off, gate only, byte-identical off. No kernel and no K64j graft changed: see section 5.
 
 Owner rule: **strict exactness**. Greedy output must stay byte-identical to the target's own greedy decode. Speculation may only change how many tokens a round
 commits, never which.
@@ -77,29 +79,52 @@ path would no longer be the control the octo arm is measured against.
 `scripts/ci/make_octo_profiles.py` generates the twins and refuses a parent whose pool or trace region differs from what this plan was derived under. M1 reads the ledger against M0 (the same plan
 on the parent): free DRAM at 8 live at least 3 GB per chip, the floor at least 1 GB, the trace region's largest free block at least 44 MB, and not more than 0.2 GB below the parent's.
 
-## 5. What remains: the device pieces
+## 5. The device pieces: built, and what each card job must establish
 
-`serving_octo.DEVICE_PIECES` is the list; `octo_admission` refuses while any piece is unbuilt, naming each. What the CPU work already established about them:
+`serving_octo.DEVICE_PIECES` lists them and `octo_admission` refuses by name while one is unbuilt (`device_gaps`; `BUILT` declares them, and the GDN piece is also read from the module's own limit).
+All five are built on the host; each has CPU tests, and none has run on a card.
 
-1. **attach-build.** No attach builds the third block: `PackedVerifierEngine(shape=octo_shape, pool_slots=0..7)` captured after blocks A and B inside `complete_blocks_two_phase`, over extent
-   storage the pool lends for a (8, 8) shape, with `carries_in_place` proven. The REAL block runs at 8 x 8 on the fake device (`test_octo_block`): construction, 8 live rounds, 6- and 7-live padded
-   rounds, per-segment commits at prefixes 1..8, the taps' row offsets, the shared carries beside a real M3 block, the boundary cap. That is host-path evidence only, with the reader's
-   qualification patched in.
-2. **gdn-batch.** `gdn_user_batch.MAX_USERS` is 4 (a hash-pinned source, `test_tp2_pins`; the TP4 sibling takes it): the batched GDN launch carries four users. Eight segments need a TP4 batch of
-   eight (96 cores at 12 heads) or two launches of four. A card question.
-3. **attention-8row.** K64j is qualified at G8B2 only (flags 0x27, bundles of two eight-row groups). An 8-row segment bundles as one group: `ExtentSegmentReader` refuses it ("qualified at G8B2 only"),
-   and `ServingBufferPool` refuses extent storage for any other shape (`extent_bundle_batches(8, 8)` is `(1,)`; M3's is `(2,)`). One group per bundle runs flags 0x25 (no KV share). Qualifying K64j
-   at G8B1, and the masks and the T2 K/V chains at 8-row granularity, is the riskiest part and a card question. The executed refusals are pinned in `test_octo_block`; when K64j is qualified those
-   tests fail and this piece's text must change with them.
-4. **publication-8row.** `complete_blocks_two_phase` sets `warm_publication = False` on every block after the first (the M3 plan is the same 71 shapes). The octo block's plan is 64 packed shapes of
-   which 32 no M3 warm ran (segment offsets 8, 24, 40, 56 x prefixes 1..8): its warm must run at attach or the first octo round compiles them (the smoke judge refuses a program compiled on a shape switch).
-5. **fused-third-block.** The fused commit of a third block (8 projection and 64 slide traces) and the pre-stage state of a third fixture: the host wiring is built, the device behaviour is unqualified.
+1. **attach-build.** `serving_runtime.attach_combined_runtime` builds `PackedVerifierEngine(shape=octo_shape, pool_slots=0..7, defer_capture=True, padded_min_users=min_live)` last, over extent storage the pool lends
+   for the (8, 8) shape (`packed_shapes` gains it; `packed_replicas` stays the M3 pair's), and captures it with the two M3 blocks in `complete_blocks_two_phase` (every block's warm and fixture, then every capture, then
+   every finish: the construction order the pool's holes require). `carries_in_place` is proven for it too, the step is bound to it with its `OctoState`, `admit_blocks` and the extent check include it, and the
+   arrival placement is still by M3 block (`place_blocks`). Tests: `test_serving_runtime` (the attach on its fakes with a third block), `test_octo_block` (the real block at 8 x 8 on the fake device).
+2. **gdn-batch.** `gdn_user_batch_tp.MAX_USERS` is 8 (the unpinned TP4 sibling; the pair's `gdn_user_batch` is hash-pinned at 4 and untouched): one launch is 8 users x 12 heads = 96 of the 110 cores, disjoint
+   contiguous shares, one wave, the same kernels per worker. The first four users sit on the cores a four-user launch uses. Card question: job Q2 (`gdn_tp4_card_test.py --users 8 --rows 8`: one launch == eight per-user
+   launches bit for bit, the head-slice equivalence against the pinned pair launch, the native twin), watcher pass first.
+3. **attention-8row.** **No kernel and no graft change.** K64j's flag sets are per call: 0x23 (tail | share | extent) is the M3 bundle of two eight-row groups, and 0x21 (tail | extent) is the same program at ONE
+   entry (`pooled_attention_replay.mode_flags` drops the share bit when a bundle has one entry; the q-slice is illegal at one KV head). CB1 qualified 0x21 at G8B2 and G4B3 on one KV head and the harness ran a
+   one-entry bundle's skip; what no card has run is the bundle of ONE eight-row group (G8B1), and at one entry the cores per entry (16), the chunk split and the reduction tree are each G8B2 entry's, so an octo row is
+   the M3 row at another launch geometry, not another sum - an argument, which Q1 measures. The code: `extent_attention_octo_tp.py` (the octo segment reader and the packed constructor, an unpinned twin: the four-card
+   reader's bytes are held by the evidence record and stay unedited), dispatched by the fold twin for a block of eight-row segments only (so an M3 attach never imports it), bound whenever `QWEN_FAST_OCTO` is set
+   (`tp_addresses._octo`); `ServingBufferPool` lends the (8, 8) storage (`extent_bundle_entries`), `attention_block_fold_tp` accepts bundles of one (a data-movement index map, shown byte for byte equal to the served
+   composition at eight one-group segments); `QWEN_FAST_TP4_SDPA` is refused beside the flag. The four-card flag set is 0x23 / 0x21, not the pair's 0x27 / 0x25. Card questions: **Q1w, Q1a, Q1b** (`k64j_card_b.py
+   --kv-heads 1 --octo`: G8B1 0x21 == its compile-time twin 0x1 at every family and start, one trace over more than 50 families, the stale-writer zone, and K2, the native one-row decode against the one-entry call,
+   row by row), and the extent audit of the audited attach (A1) for the mask and staging at eight segments. The reader-harness `--octo` (CB2b's R1/S/R2/R4 through the real reader class) is NOT built; the audit and the
+   strict text gates stand in for it.
+4. **publication-8row.** `complete_blocks_two_phase` skips the publication warm for every block after the first except one marked `keep_publication_warm` (the octo block): its plan is 64 packed shapes of which 32 no M3
+   warm ran, and they compile at attach, not in the first round after a shape switch. Card question: A1/H1 (no program compiled on a switch, `octo_judge`).
+5. **fused-third-block.** The fused commit builds over the third block (8 projection and 64 slide traces; `test_octo_block.FusedThirdBlockTests`) and the pre-stage includes it. Card question: A1/E1.
+
+### What the audit of the verify path found beyond the five pieces
+
+* **GDN glue at eight-row users runs the served path.** The half-tile kernels (V2 split/merge, V1 block conv) and the T2 packed conv windows move 16-row users; an 8-row user is a quarter tile. At the octo block those
+  sites take the pinned (served) path - exact, the same arithmetic as before the levers - and say so with `[PINDIAG] tp4 vglue octo 8-row served path` (a distinct marker: a gated arm fails on `FALLBACK`, and
+  this is the block's known state). The octo pass therefore pays those launches (V2 saved 4.7 ms and V1 3.8 ms per M3 pass in `docs/tp4-vglue.md`; the packed windows an unmeasured amount) that the estimate in
+  section 1 did not include. A quarter-tile glue is the follow-up if the exactness jobs pass and the gain is short; it is a new kernel mode and a new qualification, not built here.
+* **Attention is eight launches of one entry per layer.** The two M3 blocks make four launches of two shared entries each; the per-user KV bytes are the same, so the octo pass's attention equals the two M3 passes' total.
+  The estimate "the second trace disappears" holds for the dense weights, the collectives and the sampler; it does not for the attention, which grows with context. P1 at 32k and above reads it.
+* **Memory is the named risk.** The plan sizes the third block as one more M3 block. The octo block holds eight per-user state sets (checkpoints, retained entries) where an M3 block holds four. A reading of the
+  allocations (not a measurement) puts the difference near 0.4 GB a chip, against a plan margin of 5 MB. A1 may fail at the block's construction on an allocation; M1 reads the ledger and the twins are regenerated
+  from the measured need (`make_octo_profiles.MEMORY`).
+* **Exactness of the K/V write.** An eight-row user straddling a 32-row tile row (start % 32 > 24) is the same chain of single-row read-modify-writes as a 16-row user; the T2 chained writer, `kv_conflict` and the idle
+  cap of two are generic in users and rows. The reduction order of the 4-way ring depends on the tile column, not on which user sits in a tile (`tile_collective_tp`).
 
 ### The attach evidence
 
 The extent path is admitted by `packed_any_admission` against a pinned four-card evidence record (CB1, CB2a, CB2b at G8B2). The octo block is a new bundle geometry (G8B1) that no record covers. A **gate** arm
-needs no new record: the profiles carry the gate marker (`QWEN_C2_GATE_PROFILE=1`), which turns a missing record into a logged UNQUALIFIED line (and the octo admission logs its own, `[OCTO] UNQUALIFIED`).
-A **traffic** profile would need a new record for the 8-row bundle, taken on a card, before anything else.
+needs no new record: the profiles carry the gate marker (`QWEN_C2_GATE_PROFILE=1`), which turns a missing record into a logged UNQUALIFIED line (and the octo admission logs its own, `[OCTO] UNQUALIFIED`, six lines).
+A **traffic** profile would need a new record for the 8-row bundle, taken on a card (Q1a, Q1b), before anything else; `admit_blocks` checks only `extent` and `runtime_extent`, so it would not notice an octo block - the
+octo judge reads the flags (`extent replay engaged segments=8 flags=0x21,...`, the factory's `runtime-extent entries=1 kv_share=false`) and refuses a log of M3 programs under an octo flag.
 
 ## 6. The lone-user padded round (`QWEN_FAST_SOLO_PACKED=1`)
 
@@ -111,7 +136,7 @@ tests (L0, L1).
 
 ## 7. Gates (references/tp4-octo-jobs)
 
-Templates only; no tag is pushed from this branch. ORDER.txt carries the order, the dependencies and the NO-GO rule. In short: A0/A1 the audited attach (the control against the arm,
+Templates only; no tag is pushed from this branch. ORDER.txt carries the order, the dependencies and the NO-GO rule. In short: Q1w/Q1a/Q1b the K64j qualification at one eight-row group per bundle and Q2w/Q2 the GDN launch at eight users (one card each, first), A0/A1 the audited attach (the control against the arm,
 `octo_compare.py`), E1/E2 exactness while alternating (every concurrent8 and staggered user equal to its solo run), H1-H3 hang shapes (three consecutive completions), M0/M1 the memory ledger,
 P1-P4 the paired timing (`octo_judge.py --verdict`: GO at >= +10% committed tokens per second per seat at 8 live, aggregate and median pair, every text exact), R1-R3 on engine reuse, L0/L1 the lone user.
 
@@ -121,6 +146,6 @@ mounted change is not an executed change); (b) under `alternate`, at least 16 co
 
 ## 8. Files
 
-`packed_shapes.octo_shape`; `serving_octo` (flags, admission, policy state, device pieces); `octo_markers`, `octo_judge`, `octo_compare` (the log, the judgement, the arm against its control);
+`packed_shapes.octo_shape`; `serving_octo` (flags, admission, policy state, device pieces); `extent_attention_octo_tp` (the octo extent readers); `k64j_card_b.py --octo` and `gdn_tp4_card_test.py --users 8 --rows 8` (the qualification harnesses); `octo_markers`, `octo_judge`, `octo_compare` (the log, the judgement, the arm against its control);
 `serving_packed_step` (octo routing), `serving_worker_hook` (the blocked set), `serving_runtime` (the admission and the tripwire); `make_octo_profiles` (the gate-only twins); tests `test_octo`, `test_octo_block`,
 `test_octo_judge`, `test_octo_profiles`, `test_tp4_octo_jobs`.

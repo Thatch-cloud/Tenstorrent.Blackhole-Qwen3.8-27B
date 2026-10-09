@@ -131,17 +131,37 @@ class OctoAdmissionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'QWEN_FAST_OCTO_MIN_LIVE must be a decimal integer'):
             octo.octo_admission(M3_TWO, gate_environment(**{octo.MIN_LIVE_FLAG: '9'}))
 
-    def test_today_the_flag_is_refused_by_name_for_every_device_piece_and_logged_line_by_line(self):
+    def test_a_missing_piece_refuses_the_flag_by_name_for_every_device_piece_and_logs_line_by_line(self):
         log = Lines()
-        with self.assertRaises(ValueError) as caught:
+        with patch.object(octo, 'BUILT', set()), patch.object(octo, 'gdn_batch_users', Mock(return_value=4)), self.assertRaises(ValueError) as caught:
             octo.octo_admission(M3_TWO, gate_environment(), log=log)
         message = str(caught.exception)
-        self.assertEqual(sorted(key for key, text in octo.device_gaps()), sorted(key for key, text in octo.DEVICE_PIECES))
+        with patch.object(octo, 'BUILT', set()), patch.object(octo, 'gdn_batch_users', Mock(return_value=4)):
+            self.assertEqual(sorted(key for key, text in octo.device_gaps()), sorted(key for key, text in octo.DEVICE_PIECES))
         for key, text in octo.DEVICE_PIECES:
             self.assertIn('device piece %s is not built' % key, message)
         self.assertTrue(log.lines and all(line.startswith(octo.REFUSED_MARKER + ':') for line in log.lines))
         self.assertEqual(len(log.lines), len(octo.DEVICE_PIECES), 'the environment itself was fine: only the pieces are reasons')
         self.assertFalse(any(line.startswith(octo.ADMITTED_MARKER) for line in log.lines))
+
+    def test_every_piece_is_built_today_and_the_admission_needs_nothing_patched(self):
+        self.assertEqual(octo.BUILT, set(key for key, text in octo.DEVICE_PIECES))
+        self.assertEqual(octo.device_gaps(), [])
+        log = Lines()
+        record = octo.octo_admission(M3_TWO, gate_environment(), log=log)
+        self.assertEqual((record['mode'], record['min_live']), ('alternate', 6))
+        self.assertEqual(len([line for line in log.lines if line.startswith(octo.UNQUALIFIED_MARKER)]), len(octo.UNQUALIFIED_ITEMS))
+
+    def test_every_unqualified_item_names_the_card_job_that_settles_it(self):
+        import os as _os
+        from pathlib import Path as _Path
+
+        pack = _Path(__file__).resolve().parent / 'references' / 'tp4-octo-jobs'
+        jobs = {line.split()[0].split('-')[0] for line in (pack / 'ORDER.txt').read_text().splitlines() if line.strip() and not line.startswith('#')}
+        for text, named in octo.UNQUALIFIED_ITEMS:
+            self.assertGreater(len(text), 30, text)
+            for job in named.split():
+                self.assertIn(job, jobs, 'the unqualified item %r names job %s, which is not in the pack' % (text, job))
 
     def test_the_device_pieces_are_the_named_ones_and_each_says_what_remains(self):
         self.assertEqual([key for key, text in octo.DEVICE_PIECES],
@@ -162,16 +182,17 @@ class OctoAdmissionTests(unittest.TestCase):
         self.assertEqual(octo_markers.admissions(admitted[0]), [dict(mode='alternate', rows=8, users=8, min_live=6)])
         self.assertTrue(all(len(line) < 200 for line in log.lines))
 
-    def test_the_gdn_piece_cannot_be_claimed_while_the_pinned_module_says_four(self):
+    def test_the_gdn_piece_is_claimed_only_while_the_tp4_sibling_says_eight_and_the_pair_module_stays_four(self):
         import gdn_user_batch
+        import gdn_user_batch_tp
 
         self.assertEqual(gdn_user_batch.MAX_USERS, 4, 'the hash-pinned pair launch: test_tp2_pins')
-        with patch.object(octo, 'BUILT', set(ALL_PIECES)):
+        self.assertEqual((gdn_user_batch_tp.MAX_USERS, octo.gdn_batch_users()), (8, 8))
+        self.assertEqual(octo.device_gaps(), [])
+        with patch.object(octo, 'gdn_batch_users', Mock(return_value=4)):
             self.assertEqual([key for key, text in octo.device_gaps()], ['gdn-batch'])
-        with built(gdn=8):
-            self.assertEqual(octo.device_gaps(), [])
-        with patch.object(octo, 'BUILT', ALL_PIECES - {'gdn-batch'}), patch.object(octo, 'gdn_batch_users', Mock(return_value=8)):
-            self.assertEqual([key for key, text in octo.device_gaps()], ['gdn-batch'])
+        with patch.object(octo, 'BUILT', ALL_PIECES - {'gdn-batch'}):
+            self.assertEqual([key for key, text in octo.device_gaps()], ['gdn-batch'], 'a limit of eight is not a claim')
 
     def test_every_refusal_is_named_at_once_and_logged_line_by_line(self):
         cases = {
@@ -754,18 +775,23 @@ class AttachTests(unittest.TestCase):
             harness.exercise(refused=True, extra_env=extra_env, **self.EIGHT)
         return harness
 
-    def test_the_flag_on_is_refused_before_anything_is_built_naming_the_pieces_nothing_has_built(self):
+    def test_the_flag_on_is_refused_before_anything_is_built_when_the_run_is_not_a_gate_run_of_the_octo_environment(self):
         for flags in ({octo.OCTO_FLAG: 'live'}, {octo.OCTO_FLAG: 'alternate', octo.GATE_ENV: '1', octo.GATE_PROFILE_ENV: '1'}):
             with self.subTest(flags=flags):
-                self.refused('QWEN_FAST_OCTO=.* is refused: .*device piece attach-build is not built', flags)
+                self.refused('QWEN_FAST_OCTO=.* is refused: ', flags)
+
+    def test_a_missing_device_piece_is_refused_by_name_before_anything_is_built(self):
+        flags = {octo.OCTO_FLAG: 'live', octo.GATE_ENV: '1', octo.GATE_PROFILE_ENV: '1'}
+        with patch.object(octo, 'BUILT', octo.BUILT - {'attach-build'}):
+            self.refused('QWEN_FAST_OCTO=.* is refused: .*device piece attach-build is not built', flags)
 
     def test_the_refusal_names_every_reason_at_once(self):
         with self.assertRaises(ValueError) as caught:
             self.harness().exercise(refused=True, extra_env={octo.OCTO_FLAG: 'live'}, **self.EIGHT)
         message = str(caught.exception)
-        for text in ('gate run of a gate-only', 'QWEN_FAST_EXTENT_REPLAY=(unset), not 1', 'QWEN_FAST_KV_RESERVATION', 'device piece gdn-batch is not built',
-                     'device piece attention-8row is not built', 'device piece fused-third-block is not built'):
+        for text in ('gate run of a gate-only', 'QWEN_FAST_EXTENT_REPLAY=(unset), not 1', 'QWEN_FAST_KV_RESERVATION'):
             self.assertIn(text, message)
+        self.assertNotIn('is not built', message, 'every device piece is built')
 
     def test_solo_packed_on_is_refused_before_anything_is_built(self):
         self.refused('QWEN_FAST_SOLO_PACKED=1 is refused',
@@ -777,10 +803,12 @@ class AttachTests(unittest.TestCase):
             with self.subTest(flags=flags):
                 self.refused(text, flags)
 
-    def test_an_admitted_flag_with_no_block_built_is_a_tripwire_not_a_silent_no_op(self):
-        record = dict(mode='live', rows=8, users=8, min_live=6, unqualified=[])
-        with patch.object(octo, 'octo_admission', Mock(return_value=record)):
-            self.refused('was admitted but this attach builds no octo block', {octo.OCTO_FLAG: 'live'})
+    def test_an_admitted_flag_builds_the_block_and_the_step_proves_it(self):
+        # the old tripwire (an admitted flag with no block built) is gone: the attach builds the third block, and the step is bound to it with its state
+        harness = self.harness()
+        harness.exercise(admission={}, octo=dict(mode='live', min_live=6), **self.EIGHT)
+        self.assertEqual(len(harness.engine_calls), 3)
+        self.assertEqual(harness.engine_calls[2].kwargs['pool_slots'], tuple(range(8)))
 
     def test_the_flags_off_builds_exactly_the_two_blocks_it_always_did_and_never_imports_serving_octo(self):
         for extra_env in ({}, {octo.OCTO_FLAG: 'off', octo.SOLO_PACKED_FLAG: '0'}):

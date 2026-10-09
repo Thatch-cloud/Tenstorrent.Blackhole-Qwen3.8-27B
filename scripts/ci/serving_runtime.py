@@ -363,7 +363,7 @@ def extent_replay_requested(environ=None):
     return value == '1'
 
 
-def complete_blocks_two_phase(blocks, model=None, log=None, before_captures=None, warm_publication=()):
+def complete_blocks_two_phase(blocks, model=None, log=None, before_captures=None):
     """QWEN_FAST_M3_BLOCKS=2 (A1c): finish the construction of blocks built with defer_capture=True. Each block has
     already allocated its persistent state (the initial snapshot, checkpoints, taps) and the first phase here runs
     every block's warm forward and builds every fixture (extent words, masks, retained storage); only then does any
@@ -378,9 +378,9 @@ def complete_blocks_two_phase(blocks, model=None, log=None, before_captures=None
     `before_captures` (QWEN_FAST_M3_REQUEST_WARM on at two blocks; request_width_warm): called once, after every block's warm_and_fixture and
     before the first capture, inside the same guard - a failure closes both blocks without the fence and propagates.
 
-    `warm_publication` (octo-T8): the blocks that keep their OWN publication warm although they are not the first. Block A's warm covers the M3 plan
-    on the shared program cache, so every later block skips it - except a block whose plan has shapes no earlier warm ran: the octo block's packed plan adds
-    32 (segment offsets 8, 24, 40 and 56 x prefixes 1..8, publication_warm.plan), which must compile at attach and not in the first round after a shape switch.
+    A block with `keep_publication_warm` True (octo-T8) keeps its OWN publication warm although it is not the first. Block A's warm covers the M3 plan on the shared
+    program cache, so every later block skips it - except a block whose plan has shapes no earlier warm ran: the octo block's packed plan adds 32 (segment offsets 8, 24,
+    40 and 56 x prefixes 1..8, publication_warm.plan), which must compile at attach and not in the first round after a shape switch.
     Its warm runs in finish_construction, after the LAST block's capture, like the first block's."""
     log = pindiag if log is None else log
     try:
@@ -393,7 +393,7 @@ def complete_blocks_two_phase(blocks, model=None, log=None, before_captures=None
             block.capture_traces()
             log(CAPTURE_PROGRAMS_MARKER, index, before, program_count(model) if model is not None else None)
         for index, block in enumerate(blocks):
-            if index and not any(block is keeper for keeper in warm_publication):
+            if index and getattr(block, 'keep_publication_warm', False) is not True:
                 block.warm_publication = False      # block A's warm covered the same plan on the shared program cache
             block.finish_construction()
     except BaseException:
@@ -844,15 +844,17 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                     slot += shape.users
             # The octo block leaves the list the M3 pairing code reads (place_blocks, per-block widths): it is a separate third block of the PackedStep.
             octo_block = packed_blocks.pop() if octo_shape_value is not None else None
+            if octo_block is not None:
+                octo_block.keep_publication_warm = True       # (complete_blocks_two_phase: its plan has 32 shapes no M3 warm ran)
             if m3_blocks_two:
                 every_block = packed_blocks + ([octo_block] if octo_block is not None else [])
                 if request_widths:
                     from request_width_warm import warm_request_widths
 
                     complete_blocks_two_phase(every_block, model, before_captures=lambda: warm_request_widths(
-                        operations, model, helpers, sampler, page_width, widths=request_widths), warm_publication=(octo_block,))
+                        operations, model, helpers, sampler, page_width, widths=request_widths))
                 else:
-                    complete_blocks_two_phase(every_block, model, warm_publication=(octo_block,))
+                    complete_blocks_two_phase(every_block, model)
                 for index, packed_block in enumerate(every_block, 1):
                     memory_ledger.record('P6', point='block%d' % index if packed_block is not octo_block else 'octo', packed_block=packed_block)
             # D0: the one-user block, after M3 (a block is built before any request exists, and the pool's slot 0 is

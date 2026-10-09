@@ -40,6 +40,11 @@
 #   EV-F1  --kv-heads 1 --seeds 0,1,2,3,4    (CB1-TP4: the default sections N,X,M,K,L,T at K1's six extents and starts)
 #   EV-F2  --kv-heads 1 --sections K2,X7,Z --seeds 0,1,2,3,4 --variants normal,peaky --no-timing   (CB2a-TP4: 1980 tickets)
 #
+# THE OCTO-T8 GEOMETRY (K64J_HARNESS=card, --kv-heads 1 --octo; scripts/ci/references/tp4-octo-jobs Q1w, Q1a, Q1b): ONE eight-row group per bundle, G8B1 at flags 0x21
+# (tail | extent, no KV share). K64j is not rebuilt: 0x21 is an existing flag set; what no card has run is a bundle of ONE eight-row group. The harness takes G8B1:0x21 as
+# its combo and trace combo, CB2a's served ticket becomes the 8-row one-entry call (K2 against the native one-row decode, X7, Z), and sections M and K (the G4B3 families)
+# are refused with it. The WATCHER=1 pass runs G8B1:0x21 in place of the M3 combos.
+#
 # ON CARD M (card B is reserved for another project): the same runner, by hand on the rig or through the cardm
 # action, which sets both variables itself. Two variables select card M, both required:
 #   QUAL_CARD=blackhole-CEF5729692C19E6D   card M's board id (the target is resolved by board id, never a node number)
@@ -655,11 +660,13 @@ fi
 # One KV head per chip: --kv-heads 1 in CARD_B_ARGS (the last --kv-heads wins, as argparse reads it). The watcher pass below
 # then runs the one-head combos: G8B2 0x27 (the q-slice) needs a second KV head and the harness refuses it as a combo.
 ONE_HEAD=0
+OCTO=0
 prev=
 for word in ${CARD_B_ARGS:-}; do
   case $word in
     --kv-heads=1) ONE_HEAD=1 ;;
     --kv-heads=*) ONE_HEAD=0 ;;
+    --octo) OCTO=1 ;;
   esac
   if [ "$prev" = --kv-heads ]; then
     if [ "$word" = 1 ]; then ONE_HEAD=1; else ONE_HEAD=0; fi
@@ -688,7 +695,10 @@ if [ "${WATCHER:-}" = "1" ]; then
   elif [ "$MAIN" = ordered_writer ]; then
     args+=(--seeds 0 --modes eager,replay_changed --watchdog "${WATCHDOG_S:-120}")
   else
-    if [ "$ONE_HEAD" = 1 ] && [ "$MAIN" = card ]; then
+    if [ "$OCTO" = 1 ] && [ "$ONE_HEAD" = 1 ] && [ "$MAIN" = card ]; then
+      # octo-T8 (--octo, docs/tp4-octo.md): the one-entry eight-row bundle at 0x21; the G4B3 / G8B2 combos are the M3 block's and already qualified
+      watcher_combos=(--combos G8B1:0x21 --trace-combos G8B1:0x21)
+    elif [ "$ONE_HEAD" = 1 ] && [ "$MAIN" = card ]; then
       watcher_combos=(--combos G4B3:0x21,G4B3:0x23,G8B2:0x23 --trace-combos G4B3:0x21,G8B2:0x23)
     else
       watcher_combos=(--combos G4B3:0x21,G4B3:0x23,G8B2:0x27 --trace-combos G4B3:0x21,G8B2:0x27)

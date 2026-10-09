@@ -258,7 +258,8 @@ class OctoBlockTests(OctoFixture):
 
 
 class EightRowDevicePiecesTests(OctoFixture):
-    """The 'attention-8row' and 'publication-8row' pieces as they stand: the executed refusals the admission's text quotes."""
+    """The device pieces as they stand: the PINNED readers still refuse an eight-row segment (the octo twin, extent_attention_octo_tp, takes it: test_extent_attention_octo_tp), the pool
+    lends the (8, 8) storage, the TP4 GDN sibling carries eight users, and the publication warm is kept for the octo block."""
 
     def test_the_extent_reader_refuses_an_eight_row_segment_today_it_bundles_as_one_group_not_two(self):
         with self.assertRaisesRegex(ValueError, r'Extent replay is qualified at G8B2 only \(0x27, K64j CB1\): a 8-row segment bundles as \[\[8\]\]'):
@@ -277,31 +278,41 @@ class EightRowDevicePiecesTests(OctoFixture):
         self.assertEqual(extent_bundle_batches(8, 8), (1,))
         self.assertEqual(extent_bundle_batches(32, 8), (3, 1))
 
-    def test_the_pool_refuses_an_octo_extent_shape_at_construction(self):
+    def test_the_pool_lends_extent_storage_for_the_octo_shape_and_still_refuses_every_other_one_group_shape(self):
         import serving_buffer_pool as pool_module
+        from test_serving_buffer_pool import FakeOperations, extent_pool
 
-        with open(pool_module.__file__, encoding='utf-8') as handle:
-            source = handle.read()
-        self.assertIn('set(extent_bundle_batches(rows, EXTENT_GROUP_ROWS)) != {EXTENT_BUNDLE_ENTRIES}', source)
-        self.assertIn('Extent replay storage is qualified at G8B2 only', source)
         self.assertEqual((pool_module.EXTENT_GROUP_ROWS, pool_module.EXTENT_BUNDLE_ENTRIES), (8, 2))
+        self.assertEqual((pool_module.EXTENT_OCTO_SHAPE, pool_module.EXTENT_OCTO_BUNDLE_ENTRIES), ((8, 8), 1))
+        self.assertEqual([pool_module.extent_bundle_entries(*shape) for shape in ((4, 16), (2, 16), (8, 8), (4, 8))], [2, 2, 1, 2])
+        pool = extent_pool(FakeOperations(), users=8, packed_shapes=((4, 16), (8, 8)), packed_replicas={(4, 16): 2})
+        storage = pool.packed_extent(8, 8)
+        self.assertEqual((storage.users, storage.rows), (8, 8))
+        for user in range(8):
+            ((table,), (positions,)) = storage.tables[user], storage.cur_pos[user]
+            self.assertEqual((table.shape, positions.shape), ((1, 68), (1,)), 'one bundle of one group per eight-row user')
+        self.assertEqual(len(pool.extent[(4, 16)]), 2, 'two M3 sets beside the one octo set')
+        # a four-user eight-row block (the old M2 shape) is still the refused one: one group per bundle is the octo block's alone
+        with self.assertRaisesRegex(ValueError, 'qualified at G8B2 only'):
+            extent_pool(FakeOperations(), packed_shapes=((4, 8),))
 
-    def test_the_gdn_launch_carries_four_users_in_the_pinned_module(self):
+    def test_the_gdn_launch_carries_four_users_in_the_pinned_module_and_eight_in_the_tp4_sibling(self):
         import gdn_user_batch
         import gdn_user_batch_tp
 
-        self.assertEqual((gdn_user_batch.MAX_USERS, gdn_user_batch_tp.MAX_USERS), (4, 4))
+        self.assertEqual((gdn_user_batch.MAX_USERS, gdn_user_batch_tp.MAX_USERS), (4, 8))
         with self.assertRaisesRegex(ValueError, 'One to 4 packed users per batched GDN launch'):
             gdn_user_batch.core_shares(11, 10, 8)
-        with self.assertRaisesRegex(ValueError, 'One to 4 packed users per batched GDN launch'):
-            gdn_user_batch_tp.core_shares(11, 10, 8, workers=12)
+        self.assertEqual(len(gdn_user_batch_tp.core_shares(11, 10, 8, workers=12)), 8)
+        with self.assertRaisesRegex(ValueError, 'One to 8 packed users per batched GDN launch'):
+            gdn_user_batch_tp.core_shares(11, 10, 9, workers=12)
 
     def test_eight_users_of_twelve_heads_would_fit_the_grid_in_one_wave_if_the_limit_were_eight(self):
         # the cores are not the obstacle at four cards (12 value heads a chip): 8 x 12 = 96 of the 110 cores of the 11 x 10 grid, disjoint shares. The limit is the pinned
         # module's, and qualifying the launch at eight users is a card question; this is only the arithmetic the design rests on.
         import gdn_user_batch_tp
 
-        with patch.object(gdn_user_batch_tp, 'MAX_USERS', 8):
+        if True:
             shares = gdn_user_batch_tp.core_shares(11, 10, 8, workers=12)
         self.assertEqual(len(shares), 8)
         cores = [point for share in shares for point in share]
@@ -315,6 +326,8 @@ class EightRowDevicePiecesTests(OctoFixture):
         with open(serving_runtime.__file__, encoding='utf-8') as handle:
             source = handle.read()
         self.assertIn('block.warm_publication = False      # block A\'s warm covered the same plan on the shared program cache', source)
+        self.assertIn("getattr(block, 'keep_publication_warm', False) is not True", source, 'except a block whose plan has shapes no earlier warm ran: the octo block\'s')
+        self.assertIn('octo_block.keep_publication_warm = True', source)
 
 
 class FusedThirdBlockTests(unittest.TestCase):
