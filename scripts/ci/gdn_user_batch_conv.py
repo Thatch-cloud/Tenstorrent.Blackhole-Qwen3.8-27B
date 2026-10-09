@@ -80,7 +80,7 @@ def conv_gates(operations, projected, windows, taps, dt_bias, neg_exp_A, rows):
 
 def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, kernels, operations=None, *,
                                dma_windows=True, packed_checkpoints=True, defer_conv_publication=True,
-                               prefix_zero_reuse=False, output_memory=None, block_stage=None):
+                               prefix_zero_reuse=False, output_memory=None, block_stage=None, prebuilt=None):
     """`users` is one `(projected, initial, conv_states)` triple per packed user.
 
     Returns one result dictionary per user, in user order, each shaped exactly like
@@ -91,6 +91,10 @@ def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, ke
     have made with one conv_gates call and one slice each, made instead by one launch for the whole block, and the
     temporaries it owns. The windows the loop hands on are the same tensors, already advanced. It needs the T2 packed
     windows and may decline (return None, nothing left allocated): then, like without it, the loop is the served one.
+
+    `prebuilt` (QWEN_FAST_TP4_GDN_WC, gdn_wc.stage): a BlockStage that already carries the sixteen advanced packed windows (`.windows`, four per user) as
+    well as the per-user (conv, beta, g) and z, made by ONE launch that replaced the T2 window build and the block stage both; the loop then builds neither
+    and hands on the same tensors. None (the default) is the loop as it was.
     """
     if operations is None:
         import ttnn as operations
@@ -115,7 +119,11 @@ def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, ke
         weights = operations.to_memory_config(norm_w, operations.DRAM_MEMORY_CONFIG)
         if addresses(operations, weights) != addresses(operations, norm_w):
             shared.append(weights)
-        if t2_cut('windows'):
+        if prebuilt is not None:
+            packed_windows = [list(user) for user in prebuilt.windows]
+            owned.extend(window for user in packed_windows for window in user)
+            t2_note('windows')
+        elif t2_cut('windows'):
             from gdn_conv_windows_packed import Unsupported, build_windows_packed
             try:
                 packed_windows = build_windows_packed(mesh, [(projected, conv_states)
@@ -128,13 +136,15 @@ def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, ke
                 owned.extend(window for user in packed_windows for window in user)
                 t2_note('windows')
         staged = None
-        if block_stage is not None and packed_windows is not None:
+        if prebuilt is not None:
+            staged = prebuilt
+        elif block_stage is not None and packed_windows is not None:
             staged = block_stage(groups, packed_windows)
-            if staged is not None:
-                # Owned before anything below can raise: the loop's failure path frees `owned` and the audit's copies.
-                audit_owned.extend(staged.held)
-                owned.extend(staged.owned)
-                owned.extend(tensor for packed, z in staged.users for tensor in (*packed, z))
+        if staged is not None:
+            # Owned before anything below can raise: the loop's failure path frees `owned` and the audit's copies.
+            audit_owned.extend(staged.held)
+            owned.extend(staged.owned)
+            owned.extend(tensor for packed, z in staged.users for tensor in (*packed, z))
         for index, (projected, initial, conv_states) in enumerate(groups):
             rows = validate_projected(tuple(projected.shape), conv_states)
             if rows < 2:

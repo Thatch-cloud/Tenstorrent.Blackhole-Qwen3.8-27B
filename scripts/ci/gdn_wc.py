@@ -42,6 +42,7 @@ import hashlib
 import os
 from pathlib import Path
 
+import gdn_block_conv_tp as block
 import gdn_conv_gates_spread as spread
 import tp4_vglue
 import tp_shapes
@@ -132,6 +133,9 @@ def enabled(environ=None):
             raise ValueError('%s needs %s=1 (it replaces the V1 block conv chain)' % (FLAG, lever))
     if not t2_windows_cut(source):
         raise ValueError('%s needs %s=1 with the windows cut (the T2 packed windows are what it writes)' % (FLAG, T2_FLAG))
+    if tp4_vglue.audit_enabled(source) and not _read(AUDIT_FLAG, source):
+        # The V1 audit expects eight 'block conv user' entries per user and layer; a layer WC served has none unless WC's audit makes them.
+        raise ValueError('%s=1 with %s=1 needs %s=1 (a layer WC serves has no V1 block entries to audit)' % (tp4_vglue.AUDIT, FLAG, AUDIT_FLAG))
     return True
 
 
@@ -587,8 +591,6 @@ def stage(mesh, projected, histories, taps, dt_bias, neg_exp_A, operations, grou
     """A gdn_block_conv_tp.BlockStage (with `.windows`, one list of four per user) from ONE launch, or None (one logged line; nothing allocated, nothing
     advanced) when the launch cannot serve this layer: the caller then runs the V2 split and the V1 chain. `groups` is the (piece, initial, history)
     triple per user the audit needs (QWEN_FAST_TP4_GDN_WC_AUDIT: gdn_block_conv_tp.hold_served builds the served per-user path from the pieces)."""
-    import gdn_block_conv_tp as block
-
     made = launch(operations, mesh, projected, histories, taps, dt_bias, neg_exp_A, chips)
     if made is None:
         if note_fallback is not None:
