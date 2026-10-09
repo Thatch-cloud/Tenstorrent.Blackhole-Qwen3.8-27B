@@ -459,6 +459,23 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         import serving_fast_lane
 
         lane_config = serving_fast_lane.lane_admission(solo_lane, seats=policy['scheduler_requests'], log=pindiag)
+    # QWEN_FAST_OCTO (octo-T8; default off, strictly off|live|alternate) and QWEN_FAST_SOLO_PACKED (the lone-user padded round; default off, strictly '0' or
+    # '1'): both gate only, both admitted by serving_octo or refused HERE, before anything is built, naming every reason - the shape, the environment, the
+    # run, the idle segments page 0 can hold and every device piece nothing has built yet (serving_octo.DEVICE_PIECES). Off (unset, 'off' or '0'), nothing in this
+    # attach differs from before they existed (not even the import).
+    octo_record = solo_packed = None
+    if os.environ.get('QWEN_FAST_OCTO', 'off') != 'off':
+        import serving_octo
+
+        octo_record = serving_octo.octo_admission(m3_shape(policy), log=pindiag)
+    if os.environ.get('QWEN_FAST_SOLO_PACKED', '0') != '0':
+        import serving_octo
+
+        solo_packed = serving_octo.solo_packed_admission(m3_shape(policy), log=pindiag)
+        padded_min_users = solo_packed['min_users']
+    if octo_record is not None:
+        # Unreachable while serving_octo.DEVICE_PIECES names 'attach-build': an admitted flag with no block built would be a mounted change that never executes.
+        raise ValueError('QWEN_FAST_OCTO=%s was admitted but this attach builds no octo block (serving_octo.DEVICE_PIECES: attach-build)' % octo_record['mode'])
     # QWEN_FAST_PACKED_CAPTURE_POSITION (S2 G3b, gate only, default unset): parsed here, before
     # anything is built; each block refuses a position its capacity cannot capture at.
     capture_position = packed_capture_position()

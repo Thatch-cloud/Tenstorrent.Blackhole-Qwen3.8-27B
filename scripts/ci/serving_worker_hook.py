@@ -759,8 +759,32 @@ class FastWorkerHook:
         ask = getattr(self.packed_step, 'proposal_groups', None)
         if not callable(ask):
             return None
-        groups = ask([bridge.request for bridge in bridges])
+        if getattr(self.packed_step, 'octo', None) is None:
+            groups = ask([bridge.request for bridge in bridges])
+        else:
+            # QWEN_FAST_OCTO: the octo shape drafts EVERY live request at its 8 rows, so one member this hook's budget narrowing would cut at that width (below)
+            # keeps the round on the two M3 blocks, where only that member's block narrows. Without the octo block the call above is the one it always was.
+            groups = ask([bridge.request for bridge in bridges], blocked=self.octo_blocked(bridges))
         return groups if isinstance(groups, list) else None
+
+    def octo_blocked(self, bridges):
+        """The ids of the requests whose budget narrowing (`_drafts_by_block`) would cut a round at the octo block's rows: a member vLLM no longer owes a token, or one too
+        near the context end for the scheduler to offer the rows (a request finished or at the end of its budget leaves the shape for the round)."""
+        rows = self.packed_step.octo.shape.rows_per_user
+        capped = budget_cap_enabled()
+        blocked = set()
+        for bridge in bridges:
+            if getattr(bridge.request.session, 'finished', False):
+                continue
+            remaining = real_remaining_budget(bridge)
+            if capped:
+                room = schedulable_rows(bridge)
+                narrows = (remaining is not None and remaining < 1) or (room is not None and room < rows)
+            else:
+                narrows = remaining is not None and remaining < rows
+            if narrows:
+                blocked.add(id(bridge.request))
+        return blocked
 
     def _drafts_by_block(self, bridges, groups, early):
         """`_drafts`' body for a step that decides its width per block (QWEN_FAST_M3_BLOCKS=2). Per block: the budget
