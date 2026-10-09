@@ -15,12 +15,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import make_octo_profiles  # noqa: E402
 import make_parked_profiles  # noqa: E402
 
 R = 'c2-packed-tp4-8x262k-'
 SHIP = R + 'ship-prefix'
-# The engine-reuse twins (make_parked_profiles) share the ship-prefix prefix; test_parked_tp4_profiles holds each, so this census exempts them.
-PARKED = frozenset(make_parked_profiles.twin_names())
+# The engine-reuse twins (make_parked_profiles) and the octo-T8 twins (make_octo_profiles) share the ship-prefix prefix; test_parked_tp4_profiles and test_octo_profiles hold each, so this census exempts them.
+PARKED = frozenset(make_parked_profiles.twin_names()) | frozenset(make_octo_profiles.twin_names())
 
 MULTI_KEY = {'QWEN_FAST_TP4_SDPA': 'multi'}
 F1_KEY = {'QWEN_FAST_TP4_CONV_GATES_SPREAD': '1'}

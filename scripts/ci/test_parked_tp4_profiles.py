@@ -19,6 +19,7 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import make_octo_profiles as octo_twins  # noqa: E402
 import make_parked_profiles as twins  # noqa: E402
 import serving_c2_contract as contract  # noqa: E402
 import serving_fast_policy as policy  # noqa: E402
@@ -238,6 +239,8 @@ class ProfileTests(unittest.TestCase):
     def test_only_the_generated_twins_name_any_parked_flag(self):
         profiles = raw()['profiles']
         generated = {name for name, parent, env, why in twins.specs()}
+        # the octo-T8 twins of the engine-reuse parent carry its flags by inheritance (test_octo_profiles holds each as that parent plus its own flags)
+        generated |= {name for name, parent, env, third, why in octo_twins.specs() if parent == octo_twins.PARKED_PARENT}
         for name, profile in profiles.items():
             env = profile['env']
             named = [flag for flag in env if flag.startswith('QWEN_FAST_PARKED_') or flag in ('QWEN_FAST_GATE_DRAM_BALLAST', 'QWEN_FAST_LEVERN_BUILD_MS')]

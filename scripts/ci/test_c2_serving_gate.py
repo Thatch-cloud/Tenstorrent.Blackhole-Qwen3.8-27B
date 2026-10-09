@@ -115,8 +115,9 @@ def smoke_run_flags():
 AGENT = os.path.join(HERE, 'references', 'c2-serving', 'agent-container-36104200953.json')
 
 
+import make_octo_profiles as _octo_twins  # noqa: E402
 import make_parked_profiles as _parked_twins  # noqa: E402
-PARKED_TWINS = frozenset(name for name, parent, env, why in _parked_twins.specs())
+PARKED_TWINS = frozenset(name for name, parent, env, why in _parked_twins.specs()) | frozenset(_octo_twins.twin_names())     # (and the octo-T8 twins, test_octo_profiles)
 
 class ShapeTests(unittest.TestCase):
     @classmethod
