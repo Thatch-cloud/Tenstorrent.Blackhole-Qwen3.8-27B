@@ -57,12 +57,18 @@ def image_environment():
     """The serving image's own ENV: every ENV instruction of its Dockerfile, continuations joined."""
     with open(DOCKERFILE, encoding='utf-8') as handle:
         text = handle.read().replace(chr(13) + chr(10), chr(10)).replace(chr(92) + chr(10), ' ')
+    # a ${NAME} in an ENV value is a build arg of the Dockerfile (QWEN_FAST_RUNTIME_BINARY_SHA256=${GRAFT_SHA}): read with the arg's DEFAULT, what a build with no --build-arg bakes
+    defaults = {}
+    for line in text.split(chr(10)):
+        if line.startswith('ARG ') and '=' in line:
+            name, _, value = line[4:].strip().partition('=')
+            defaults[name] = value
     environ = {}
     for line in text.split(chr(10)):
         if line.startswith('ENV '):
             for token in line[4:].split():
                 name, _, value = token.partition('=')
-                environ[name] = value
+                environ[name] = re.sub(r'[$][{](\w+)[}]', lambda match: defaults.get(match.group(1), match.group(0)), value)
     return environ
 
 
