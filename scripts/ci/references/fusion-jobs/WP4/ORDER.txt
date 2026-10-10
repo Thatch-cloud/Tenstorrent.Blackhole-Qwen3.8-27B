@@ -17,10 +17,14 @@
 # C6 after C5 (its probe: READ-GRANULARITY, bank-contiguous 4-tile requests 403 GB/s against the stock pattern's 294, every probe arm exact): the bank-strided fused gate|up op (tp4_mlp_bank,
 #     QWEN_FAST_MLP_GATEUP_BANK=1) against the served pair and the full chain with the tuned d3 down. READ: MLP_GATEUP bank verdict. BANK-GO (exact on every row and chain, and the chain beats
 #     the g3u4d3 chain by >= 0.35 ms a pass) is the condition for the lever to join the combined fx-all twin (WP4.json notes); BANK-INEXACT (exit 1) means it must not ship.
-# Durations (estimate, minutes): C1 40, C2 40, C3 30, C4 40, C5 40, C6 30. C1 and C3 are the short form.
+# C7 after C6 (BANK-MARGINAL: 156.84 us a layer against the g3u4d3 chain's 162.28, 0.348 ms a pass, threshold 0.35; the pair 94.8 us at 3 tiles a request): the tuning arm of the bank op. Buffer depth 3
+#     and 4, a 2-tile output subblock at 4 tiles a request, and two timing-only cuts (the matmul math left out; the SiLU left out) that attribute the gap to the read-only floors. READ: MLP_GATEUP
+#     bankopt rows and verdict; the verdict prints the flags of the fastest exact variant.
+# Durations (estimate, minutes): C1 40, C2 40, C3 30, C4 40, C5 40, C6 30, C7 40. C1 and C3 are the short form.
 C1-mlp-sweep stop tp4-fusion-1 40
 C2-mlp-sweep-grid11 soft tp4-fusion-1 40
 C3-mlp-fused soft tp4-fusion-1 30
 C4-mlp-other-projections soft tp4-fusion-1 40
 C5-mlp-diagnostics soft tp4-fusion-1 40
 C6-mlp-bank soft tp4-fusion-1 30
+C7-mlp-bank-tune soft tp4-fusion-1 40

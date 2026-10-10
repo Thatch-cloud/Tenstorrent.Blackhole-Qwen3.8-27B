@@ -993,9 +993,64 @@ class BankLeverTests(unittest.TestCase):
         self.assertEqual(len(built), 2)
         self.assertIs(built[0][1], model.layers[0].feed_forward.weights.w1)
         self.assertIs(built[1][2], model.layers[1].feed_forward.weights.w3)
-        self.assertEqual(built[0][3], dict(chunk=3, grid=(13, 10), width=12, math_approx_mode=True))
+        self.assertEqual(built[0][3], dict(chunk=3, grid=(13, 10), width=12, math_approx_mode=True, depth=2, sub=None))
         self.assertEqual((binder.plan.chunk, binder.plan.down.per_core_N), (3, 3))
         self.assertEqual(binder.expected_calls, 2)
+
+    def test_the_depth_and_the_subblock_reach_the_ops_and_the_name(self):
+        model = model_of(self.fake, layers=2)
+        built = []
+
+        class Op(object):
+            def __init__(self, operations, mesh, w1, w3, **options):
+                built.append(options)
+
+        module = types.ModuleType('tp4_mlp_bank')
+        module.BankGateUp = Op
+        with mock.patch.dict(sys.modules, {'tp4_mlp_bank': module}), env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP_BANK_DEPTH='3',
+                                                                       QWEN_FAST_MLP_GATEUP_BANK_SUB='2'):
+            (binder,) = lever.bindings(model, 64, self.fake.ttnn)
+        self.assertEqual((built[0]['chunk'], built[0]['depth'], built[0]['sub']), (4, 3, 2))
+        self.assertEqual((binder.plan.name, binder.plan.depth, binder.plan.sub), ('b4k3s2', 3, 2))
+        self.assertIn('gate=bank/c4k3s2 up=bank/c4k3s2', binder.plan.describe())
+
+    def test_the_depth_and_subblock_flags_are_strict_and_need_the_bank_lever(self):
+        with env(QWEN_FAST_MLP_GATEUP_BANK='1'):
+            selection = lever.resolve()
+            self.assertEqual((selection.depth, selection.sub, selection.name), (2, None, 'b4'))
+        for depth in (2, 3, 4):
+            with env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP_BANK_DEPTH=str(depth)):
+                self.assertEqual(lever.resolve().depth, depth)
+        with env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP_BANK_DEPTH='3'):
+            self.assertEqual(lever.resolve().name, 'b4k3')
+        for bad in ('1', '5', '0', '03', 'x', '', '3.0', '-3'):
+            with self.subTest(depth=bad), env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP_BANK_DEPTH=bad), self.assertRaises(ValueError):
+                lever.resolve()
+        with env(QWEN_FAST_MLP_GATEUP_BANK_DEPTH='3'), self.assertRaises(ValueError):
+            lever.resolve()
+        with env(QWEN_FAST_MLP_GATEUP_BANK_SUB='2'), self.assertRaises(ValueError):
+            lever.resolve()
+        with env(QWEN_FAST_MLP_GATEUP='1', QWEN_FAST_MLP_GATEUP_BANK_SUB='2'), self.assertRaises(ValueError):
+            lever.resolve()
+        with env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP_BANK_SUB='2'):
+            self.assertEqual((lever.resolve().sub, lever.resolve().name), (2, 'b4s2'))
+        with env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP_BANK_SUB='4'):
+            self.assertEqual((lever.resolve().sub, lever.resolve().name), (None, 'b4'), 'the chunk wide subblock is the default: one spelling per configuration')
+        for bad in ('3', '5', '0', '02', 'x', ''):
+            with self.subTest(sub=bad), env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP_BANK_SUB=bad), self.assertRaises(ValueError):
+                lever.resolve()
+        with env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP_BANK_CHUNK='3', QWEN_FAST_MLP_GATEUP_BANK_SUB='1', QWEN_FAST_MLP_GATEUP_BANK_DEPTH='4',
+                 QWEN_FAST_MLP_CFG='d3w12'):
+            self.assertEqual(lever.resolve().name, 'b3k4s1d3w12')
+        with env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP_BANK_CHUNK='3', QWEN_FAST_MLP_GATEUP_BANK_SUB='2'), self.assertRaises(ValueError):
+            lever.resolve()
+        self.assertIn(lever.BANK_DEPTH, lever.ALL_FLAGS)
+        self.assertIn(lever.BANK_SUB, lever.ALL_FLAGS)
+
+    def test_the_smoke_rule_asks_for_the_depth_and_subblock_in_the_name(self):
+        env_ = {'QWEN_FAST_TP': '4', 'QWEN_FAST_MLP_GATEUP_BANK': '1', 'QWEN_FAST_MLP_GATEUP_BANK_DEPTH': '3', 'QWEN_FAST_MLP_GATEUP_BANK_SUB': '2', 'QWEN_FAST_MLP_CFG': 'd3'}
+        self.assertEqual(self.check(env_, engaged_line('bank', 'b4k3s2d3')), [])
+        self.assertIn('route=bank name=b4k3s2d3', self.check(env_, engaged_line('bank', 'b4d3'))[0])
 
     def test_a_bank_launch_that_cannot_be_built_binds_nothing(self):
         model = model_of(self.fake, layers=2)
@@ -1275,6 +1330,16 @@ class FileTests(unittest.TestCase):
         self.assertIn('C2_CARDM_ARGS=--arms bank\n', text)
         self.assertNotIn('MLP_GRID_CLAMP', text, 'the served 13x10 grid')
         for word in ('BANK-GO', 'BANK-INEXACT', 'MLP_GATEUP bank verdict', 'd3'):
+            self.assertIn(word, text)
+
+    def test_the_tuning_job_runs_the_bankopt_arm_after_the_verdict_job(self):
+        order = [line.split() for line in (FOLDER / 'ORDER.txt').read_text(encoding='utf-8').splitlines() if line.strip() and not line.startswith('#')]
+        names = [row[0] for row in order]
+        self.assertLess(names.index('C6-mlp-bank'), names.index('C7-mlp-bank-tune'))
+        text = (FOLDER / 'C7-mlp-bank-tune.env').read_text(encoding='utf-8')
+        self.assertIn('C2_CARDM_ARGS=--arms bankopt\n', text)
+        self.assertNotIn('MLP_GRID_CLAMP', text)
+        for word in ('MLP_GATEUP bankopt verdict', 'xskip', 'xsilu', 'k3', 's2', '_DEPTH'):
             self.assertIn(word, text)
 
     def test_new_source_files_name_no_rig_address_registry_or_digest(self):

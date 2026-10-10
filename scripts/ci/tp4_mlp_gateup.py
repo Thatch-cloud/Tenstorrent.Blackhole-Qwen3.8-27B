@@ -19,8 +19,10 @@ the lever's binder the MLP binder's place, as the two-tile binders are bound) an
   QWEN_FAST_MLP_GATEUP_BANK=1  F-D3: the fused gate|up launch with a BANK-STRIDED multi-tile weight reader (tp4_mlp_bank): each worker owns `chunk` columns of ONE DRAM bank and reads
                               a tile row's run as one request (the card-M read probe: 403 GB/s at 4 tiles against 294 for the stock one-request-per-tile pattern), two compute subblocks
                               (the gate run, the up run) and a paired epilogue. The served w1 and w3 are read in place. Excludes QWEN_FAST_MLP_GATEUP (both replace the gate and up).
-  QWEN_FAST_MLP_GATEUP_BANK_CHUNK=<2|3|4>   tiles per request = columns per worker = the output subblock width (default 4; needs QWEN_FAST_MLP_GATEUP_BANK=1). With the bank lever
+  QWEN_FAST_MLP_GATEUP_BANK_CHUNK=<2|3|4>   tiles per request = columns per worker (default 4; needs QWEN_FAST_MLP_GATEUP_BANK=1). With the bank lever
                               QWEN_FAST_MLP_CFG may name only d (the down's per_core_N) and w (the rectangle's width): `d3` is the C1 sweep's best down.
+  QWEN_FAST_MLP_GATEUP_BANK_DEPTH=<2|3|4>   K blocks the bank op's activation and weight circular buffers hold (default 2); SUB=<n> the output subblock width, a divisor of the
+                              chunk (default the chunk). Both change only buffering and the DST granularity, never an output tile's reduction over K.
   QWEN_FAST_MLP_GATEUP_AUDIT / QWEN_FAST_MLP_CFG_AUDIT / QWEN_FAST_MLP_GATEUP_BANK_AUDIT=1   (gate arms only) beside the lever, every QWEN_FAST_MLP_AUDIT_STRIDE-th
                               layer (default 4) also runs the served composition and compares the SwiGLU product and the down
                               projection's output on every chip as int16 bit patterns after the replay; the SERVED partial is the one
@@ -61,6 +63,8 @@ DEFAULT_PAIRS = 3
 DEFAULT_STRIDE = 4
 BANK_CHUNKS = (2, 3, 4)
 DEFAULT_BANK_CHUNK = 4
+BANK_DEPTHS = (2, 3, 4)
+DEFAULT_BANK_DEPTH = 2
 
 GATEUP = 'QWEN_FAST_MLP_GATEUP'
 GATEUP_AUDIT = 'QWEN_FAST_MLP_GATEUP_AUDIT'
@@ -69,8 +73,10 @@ CFG_AUDIT = 'QWEN_FAST_MLP_CFG_AUDIT'
 BANK = 'QWEN_FAST_MLP_GATEUP_BANK'
 BANK_AUDIT = 'QWEN_FAST_MLP_GATEUP_BANK_AUDIT'
 BANK_CHUNK = 'QWEN_FAST_MLP_GATEUP_BANK_CHUNK'
+BANK_DEPTH = 'QWEN_FAST_MLP_GATEUP_BANK_DEPTH'
+BANK_SUB = 'QWEN_FAST_MLP_GATEUP_BANK_SUB'
 AUDIT_STRIDE = 'QWEN_FAST_MLP_AUDIT_STRIDE'
-ALL_FLAGS = (GATEUP, GATEUP_AUDIT, CFG, CFG_AUDIT, BANK, BANK_AUDIT, BANK_CHUNK, AUDIT_STRIDE)
+ALL_FLAGS = (GATEUP, GATEUP_AUDIT, CFG, CFG_AUDIT, BANK, BANK_AUDIT, BANK_CHUNK, BANK_DEPTH, BANK_SUB, AUDIT_STRIDE)
 
 ENGAGED = '[PINDIAG] tp4 mlp gateup engaged'
 FALLBACK = '[PINDIAG] tp4 mlp gateup fell back'
@@ -141,14 +147,20 @@ def canonical_name(g=None, u=None, d=None, p=None, w=None):
     return ''.join(tokens) or 'l1'
 
 
-class Selection(namedtuple('Selection', ('route', 'name', 'cfg', 'audit', 'stride', 'pairs', 'chunk'))):
+class Selection(namedtuple('Selection', ('route', 'name', 'cfg', 'audit', 'stride', 'pairs', 'chunk', 'depth', 'sub'))):
     """What the environment asks: route 'fused' (QWEN_FAST_MLP_GATEUP=1), 'bank' (QWEN_FAST_MLP_GATEUP_BANK=1, `chunk` tiles per request), 'cfg' (QWEN_FAST_MLP_CFG), or None."""
 
 
-def bank_name(chunk, cfg=None):
-    """The one spelling of a bank configuration: `b<chunk>` then the down and width tokens the cfg names (`b4d3`)."""
-    return 'b%d' % chunk + ''.join(letter + str(value) for letter, value in (('d', None if cfg is None else cfg.d), ('w', None if cfg is None else cfg.w))
-                                   if value is not None)
+def bank_spec(chunk, depth=DEFAULT_BANK_DEPTH, sub=None):
+    """The one spelling of a bank op's own settings: `c<chunk>`, then `k<depth>` when the buffers are not the default two blocks deep, then `s<sub>` when the output subblock is not
+    the chunk wide (`c4`, `c4k3`, `c4k3s2`)."""
+    return 'c%d' % chunk + ('' if depth == DEFAULT_BANK_DEPTH else 'k%d' % depth) + ('' if sub in (None, chunk) else 's%d' % sub)
+
+
+def bank_name(chunk, cfg=None, depth=DEFAULT_BANK_DEPTH, sub=None):
+    """The one spelling of a bank configuration: `b<chunk>` (then k<depth> and s<sub> when they are not the defaults), then the down and width tokens the cfg names (`b4d3`, `b4k3s2d3`)."""
+    return 'b' + bank_spec(chunk, depth, sub)[1:] + ''.join(
+        letter + str(value) for letter, value in (('d', None if cfg is None else cfg.d), ('w', None if cfg is None else cfg.w)) if value is not None)
 
 
 def resolve(environ=None):
@@ -180,6 +192,22 @@ def resolve(environ=None):
         chunk = int(text)
     if bank and chunk is None:
         chunk = DEFAULT_BANK_CHUNK
+    depth, sub = DEFAULT_BANK_DEPTH, None
+    if source.get(BANK_DEPTH) is not None:
+        text = source[BANK_DEPTH]
+        if not bank:
+            raise ValueError('%s=%s needs %s=1' % (BANK_DEPTH, text, BANK))
+        if not re.match(r'^[1-9][0-9]?$', text) or int(text) not in BANK_DEPTHS:
+            raise ValueError('%s must be one of %s (K blocks the circular buffers hold), got %r' % (BANK_DEPTH, ', '.join(map(str, BANK_DEPTHS)), text))
+        depth = int(text)
+    if source.get(BANK_SUB) is not None:
+        text = source[BANK_SUB]
+        if not bank:
+            raise ValueError('%s=%s needs %s=1' % (BANK_SUB, text, BANK))
+        if not re.match(r'^[1-9][0-9]?$', text) or chunk % int(text):
+            raise ValueError('%s must be a divisor of the chunk %d (the output subblock width), got %r' % (BANK_SUB, chunk, text))
+        sub = int(text)
+        sub = None if sub == chunk else sub
     if fused_audit and not fused:
         raise ValueError('%s=1 needs %s=1 (an audit of a lever that is off)' % (GATEUP_AUDIT, GATEUP))
     if cfg_audit and cfg is None:
@@ -201,13 +229,13 @@ def resolve(environ=None):
     pairs = (cfg.p if cfg is not None and cfg.p is not None else DEFAULT_PAIRS) if fused else None
     if bank:
         # the bank route's name always spells its chunk: one spelling per configuration
-        name = bank_name(chunk, cfg)
+        name = bank_name(chunk, cfg, depth, sub)
     elif fused:
         # the fused route's name always spells its pairs per worker: one spelling per configuration
         name = canonical_name(d=None if cfg is None else cfg.d, p=pairs, w=None if cfg is None else cfg.w)
     else:
         name = cfg.name if cfg is not None else None
-    return Selection(route, name, cfg, fused_audit or cfg_audit or bank_audit, stride, pairs, chunk)
+    return Selection(route, name, cfg, fused_audit or cfg_audit or bank_audit, stride, pairs, chunk, depth if bank else None, sub)
 
 
 def requested(environ=None):
@@ -401,18 +429,18 @@ def forget_logged():
 class Plan(object):
     """The program configs and route of one bound block, built once and shared by its 64 layers."""
 
-    def __init__(self, selection, gate, up, down, grid, shape_table, fused_pairs=None, chunk=None):
+    def __init__(self, selection, gate, up, down, grid, shape_table, fused_pairs=None, chunk=None, depth=None, sub=None):
         self.selection, self.gate, self.up, self.down = selection, gate, up, down
         self.grid, self.shapes = grid, shape_table
         self.route, self.name = selection.route, selection.name
         self.fused_pairs = fused_pairs
-        self.chunk = chunk
+        self.chunk, self.depth, self.sub = chunk, depth, sub
 
     def describe(self):
         parts = []
         for label, config in (('gate', self.gate), ('up', self.up), ('down', self.down)):
             if config is None:
-                parts.append('%s=%s' % (label, 'bank/c%d' % self.chunk if self.route == 'bank' else 'fused'))
+                parts.append('%s=%s' % (label, 'bank/' + bank_spec(self.chunk, self.depth or DEFAULT_BANK_DEPTH, self.sub) if self.route == 'bank' else 'fused'))
             else:
                 parts.append('%s=%s' % (label, config_label(config)))
         return ' '.join(parts)
@@ -466,7 +494,7 @@ def build_plan(selection, args, operations, grid_x, grid_y):
                 key, ', '.join('%s %r -> %r' % item for item in moved)))
         chosen.append(built)
     gate, up, down = chosen
-    return Plan(selection, gate, up, down, (grid_x, grid_y), table, fused_pairs=selection.pairs, chunk=selection.chunk)
+    return Plan(selection, gate, up, down, (grid_x, grid_y), table, fused_pairs=selection.pairs, chunk=selection.chunk, depth=selection.depth, sub=selection.sub)
 
 
 # ---------------------------------------------------------------------------------------------------------------------------
@@ -687,7 +715,8 @@ def bindings(model, rows, operations, native_m3=True, environ=None):
             width = selection.cfg.w if selection.cfg is not None and selection.cfg.w is not None else None
             fused = [tp4_mlp_bank.BankGateUp(operations, layer.feed_forward.device, layer.feed_forward.weights.w1,
                                              layer.feed_forward.weights.w3, chunk=plan.chunk, grid=(int(grid.x), int(grid.y)), width=width,
-                                             math_approx_mode=bool(getattr(layer.feed_forward.compute_kernel_config_decode, 'math_approx_mode', True)))
+                                             math_approx_mode=bool(getattr(layer.feed_forward.compute_kernel_config_decode, 'math_approx_mode', True)),
+                                             depth=plan.depth, sub=plan.sub)
                      for layer in model.layers]
     except (ValueError, AttributeError, TypeError, OSError, ImportError) as error:
         log_line(fallback_line((str(error).splitlines() or [type(error).__name__])[0][:200]))

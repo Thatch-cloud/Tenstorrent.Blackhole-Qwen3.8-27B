@@ -69,6 +69,75 @@ class PatchTests(unittest.TestCase):
         self.assertEqual(set(re.findall(r'cb_wait_front\(rounded_cb, (\d+)\)', result)), {'8'})
         self.assertEqual(set(re.findall(r'cb_pop_front\(rounded_cb, (\d+)\)', result)), {'8'})
 
+    C6_EPILOGUE_C4 = """                            if (last_out) {
+                                static_assert(out_subblock_num_tiles == 4 && out_subblock_h == 1 && in1_num_subblocks == 2);
+                                constexpr uint32_t rounded_cb = 30;
+                                tile_regs_commit();
+                                cb_reserve_back(rounded_cb, 4);
+                                if (in1_subblock == 0) {
+                                    apply_activation_from_pack<KernelActivation::SILU>(4);
+                                } else {
+                                    tile_regs_wait();
+                                }
+                                PACK((pack_reconfig_data_format(rounded_cb)));
+                                PACK((llk_pack_reconfig_l1_acc(0)));
+                                uint32_t start_dst_index = 0;
+                                pack_block(start_dst_index, rounded_cb, 4);
+                                tile_regs_release();
+                                cb_push_back(rounded_cb, 4);
+"""
+
+    def test_the_default_epilogue_is_byte_for_byte_the_one_job_c6_ran(self):
+        self.assertEqual(bank.bank_epilogue(4), self.C6_EPILOGUE_C4)
+        self.assertEqual(bank.bank_epilogue(4, 4), self.C6_EPILOGUE_C4)
+        self.assertEqual(bank.bank_epilogue(4, None, None), self.C6_EPILOGUE_C4)
+        self.assertEqual(bank.bank_compute(NATIVE, 4, 2), bank.bank_compute(NATIVE, 4, 2, 4, None))
+        self.assertEqual(bank.compute_arguments(4, 2, 20), bank.compute_arguments(4, 2, 20, 4))
+
+    def test_a_narrower_subblock_applies_the_silu_to_the_first_chunk_over_sub_subblocks(self):
+        for chunk, sub in ((4, 2), (4, 1), (3, 1), (2, 1)):
+            with self.subTest(chunk=chunk, sub=sub):
+                text = bank.bank_epilogue(chunk, sub)
+                self.assertIn('static_assert(out_subblock_num_tiles == %d && out_subblock_h == 1 && in1_num_subblocks == %d);' % (sub, 2 * chunk // sub), text)
+                self.assertIn('if (in1_subblock < %d) {\n                                    apply_activation_from_pack<KernelActivation::SILU>(%d);' % (chunk // sub, sub), text)
+                self.assertIn('pack_block(start_dst_index, rounded_cb, %d)' % sub, text)
+                self.assertIn('cb_push_back(rounded_cb, %d);' % sub, text)
+                result = bank.bank_compute(NATIVE_WITH_HEADER, chunk, 2, sub)
+                self.assertIn('cb_wait_front(rounded_cb, %d);' % (2 * chunk), result, 'the product loop still takes a whole row at a time')
+                self.assertIn('copy_tile(rounded_cb, %d + pair, 1);' % chunk, result)
+
+    def test_the_subblock_must_divide_the_chunk(self):
+        for chunk, sub in ((4, 3), (4, 5), (4, 0), (3, 2), (2, 3), (4, -1), (4, 2.0), (4, '2')):
+            with self.subTest(chunk=chunk, sub=sub), self.assertRaisesRegex(ValueError, 'sub'):
+                bank.bank_epilogue(chunk, sub)
+            with self.assertRaisesRegex(ValueError, 'sub'):
+                bank.compute_arguments(chunk, 2, 20, sub)
+
+    def test_the_ablations_are_timing_only_and_named(self):
+        self.assertEqual(bank.ABLATIONS, ('skip_compute', 'no_silu'))
+        silent = bank.bank_epilogue(4, None, 'no_silu')
+        self.assertNotIn('apply_activation_from_pack', silent)
+        self.assertNotIn('in1_subblock', silent)
+        self.assertIn('tile_regs_wait();', silent)
+        self.assertIn('pack_block(start_dst_index, rounded_cb, 4)', silent)
+        # skipping the matmul is a define, not a text change: the compute source is the default one
+        self.assertEqual(bank.bank_compute(NATIVE, 4, 2, None, 'skip_compute'), bank.bank_compute(NATIVE, 4, 2))
+        for bad in ('skip', 'silu', '', 0):
+            with self.assertRaisesRegex(ValueError, 'ablate'):
+                bank.bank_epilogue(4, None, bad)
+
+    def test_the_compile_arguments_of_every_subblock_width_are_the_native_kernels_formulas(self):
+        for chunk in bank.CHUNKS:
+            for sub in [width for width in range(1, chunk + 1) if chunk % width == 0]:
+                arguments = bank.compute_arguments(chunk, 2, 20, sub)
+                (block_w, in0_subblocks, in0_block_tiles, in0_subblock_tiles, in1_subblocks, in1_block_tiles, in1_block_w, blocks, unused1, unused2,
+                 sub_h, sub_w, sub_tiles, batch, out_block_tiles) = arguments[:15]
+                self.assertEqual((sub_w, sub_tiles, in1_subblocks), (sub, sub, 2 * chunk // sub))
+                self.assertEqual(in1_block_tiles, sub_w * block_w * in1_subblocks)
+                self.assertEqual(in1_block_w, sub_w * in1_subblocks)
+                self.assertEqual(out_block_tiles, in0_subblocks * in1_subblocks * sub_tiles)
+                self.assertEqual(in1_block_tiles, 16 * chunk, 'the block the weights kernel pushes')
+
     def test_it_shares_the_first_ops_anchors_and_fails_closed(self):
         self.assertEqual(bank.fused.LAST_BLOCK, '                            if (last_out) {')
         for source in ('no matching native kernel', NATIVE + NATIVE):
@@ -195,6 +264,33 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(buffers['out']['bytes'], 2 * chunk * 2048)
         self.assertEqual(bank.plan(4, (13, 10))['k_blocks'], 20)
 
+    def test_a_deeper_buffer_holds_that_many_blocks_and_fits_l1_at_every_chunk(self):
+        for chunk in bank.CHUNKS:
+            for depth in bank.DEPTHS:
+                found = bank.plan(chunk, (13, 10), depth=depth)
+                self.assertEqual(found['depth'], depth)
+                self.assertEqual(found['buffers']['in0']['bytes'], depth * 8 * 2 * 2048)
+                self.assertEqual(found['buffers']['in1']['bytes'], depth * 16 * chunk * 576)
+                self.assertEqual(found['buffers']['partial']['bytes'], 2 * 2 * chunk * 4096, 'the partials and the rounded tiles do not grow with the depth')
+                self.assertEqual(found['buffers']['rounded']['bytes'], 2 * 2 * chunk * 2048)
+                self.assertLessEqual(found['worker_bytes'], bank.L1_BUDGET)
+        self.assertEqual(bank.plan(4, (13, 10), depth=4)['worker_bytes'], 4 * 32768 + 4 * 16 * 4 * 576 + 2 * 4 * 2048 + 2 * 2 * 4 * 4096 + 2 * 2 * 4 * 2048)
+        self.assertEqual(bank.plan(4, (13, 10))['buffers'], bank.plan(4, (13, 10), depth=2, sub=4)['buffers'])
+        for bad in (0, 1, 5, 8, '3', None):
+            with self.assertRaisesRegex(ValueError, 'depth'):
+                bank.plan(4, (13, 10), depth=bad)
+
+    def test_the_subblock_changes_the_compile_arguments_and_not_the_workers_or_the_buffers(self):
+        base = bank.plan(4, (13, 10))
+        narrow = bank.plan(4, (13, 10), sub=2)
+        self.assertEqual((narrow['sub'], base['sub']), (2, 4))
+        self.assertEqual(narrow['mapping'], base['mapping'])
+        self.assertEqual(narrow['buffers'], base['buffers'])
+        self.assertEqual(narrow['compile_arguments'], bank.compute_arguments(4, 2, 20, 2))
+        self.assertNotEqual(narrow['compile_arguments'], base['compile_arguments'])
+        with self.assertRaisesRegex(ValueError, 'sub'):
+            bank.plan(4, (13, 10), sub=3)
+
     def test_the_default_bank_count_is_the_device_s_or_eight(self):
         class Mesh(object):
             def dram_grid_size(self):
@@ -214,18 +310,18 @@ BLOCK = 8
 
 def bank_reads(x, w1, w3, plan, row_tiles):
     """The activation and weight circular-buffer contents the kernels leave for each worker, block by block, built by tp4_mlp_bank_weights.cpp's own index arithmetic:
-    returns {worker index: [(in0 block tiles, in1 block tiles)]}. The weight buffer is two halves; the padding slots of a short worker are zeroed once before the K loop in both
-    halves (the buffer starts as NaN tiles so that a slot nobody writes would be seen), block b lands in half b % 2."""
-    chunk, banks, pair_columns, k_blocks = plan['chunk'], plan['banks'], plan['pair_columns'], plan['k_blocks']
+    returns {worker index: [(in0 block tiles, in1 block tiles)]}. The weight buffer is `depth` block slots; the padding slots of a short worker are zeroed once before the K loop in
+    every slot (the buffer starts as NaN tiles so that a slot nobody writes would be seen), block b lands in slot b % depth."""
+    chunk, banks, pair_columns, k_blocks, depth = plan['chunk'], plan['banks'], plan['pair_columns'], plan['k_blocks'], plan['depth']
     row_stride = k_blocks * BLOCK
     zero = torch.zeros(T, T, dtype=torch.bfloat16)
     garbage = torch.full((T, T), float('nan'), dtype=torch.bfloat16)
     row_slots, block_slots = 2 * chunk, BLOCK * 2 * chunk
     out = {}
     for index, worker in enumerate(plan['mapping']):
-        memory = [garbage] * (2 * block_slots)
+        memory = [garbage] * (depth * block_slots)
         if worker.valid < chunk:                           # the one-time zeroing before the K loop
-            for slot_row in range(2 * BLOCK):
+            for slot_row in range(depth * BLOCK):
                 for pair in range(worker.valid, chunk):
                     memory[slot_row * row_slots + pair] = zero
                     memory[slot_row * row_slots + pair + chunk] = zero
@@ -236,37 +332,43 @@ def bank_reads(x, w1, w3, plan, row_tiles):
                 for t in range(BLOCK):
                     page = row * row_stride + block * BLOCK + t
                     in0[row * BLOCK + t] = tile(x, page // row_stride, page % row_stride)
-            half = (block % 2) * block_slots
+            slot = (block % depth) * block_slots
             for inner in range(BLOCK):
                 page = (block * BLOCK + inner) * pair_columns + worker.first       # the first page of the run; `valid` pages follow in the bank
                 for i in range(worker.valid):
                     wanted = page + banks * i
-                    memory[half + inner * row_slots + i] = tile(w1, wanted // pair_columns, wanted % pair_columns)
-                    memory[half + inner * row_slots + chunk + i] = tile(w3, wanted // pair_columns, wanted % pair_columns)
-            blocks.append((in0, list(memory[half:half + block_slots])))
+                    memory[slot + inner * row_slots + i] = tile(w1, wanted // pair_columns, wanted % pair_columns)
+                    memory[slot + inner * row_slots + chunk + i] = tile(w3, wanted // pair_columns, wanted % pair_columns)
+            blocks.append((in0, list(memory[slot:slot + block_slots])))
         out[index] = blocks
     return out
 
 
 def compute_bank_worker(blocks, plan, row_tiles):
-    """The native compute kernel's loops over one worker's blocks with two input subblocks of `chunk` columns (matmul_block over in0 subblock x in1 subblock, partials added block by
-    block in fp32, the last block's gate subblock through SiLU and both subblocks to bf16, then the bf16 product loop): the product tiles in the order they reach the output buffer."""
-    chunk = plan['chunk']
+    """The native compute kernel's loops over one worker's blocks with 2 chunk / sub input subblocks of `sub` columns (matmul_block over in0 subblock x in1 subblock, partials added
+    block by block in fp32, the last block's gate subblocks through SiLU and all subblocks to bf16, then the bf16 product loop): the product tiles in the order they reach the output
+    buffer. The subblock s covers the columns s * sub .. s * sub + sub - 1 of the 2 chunk a K tile row holds, the gate run first."""
+    chunk, sub = plan['chunk'], plan['sub']
+    subblocks = 2 * chunk // sub
     partial = {}
     for in0, in1 in blocks:
-        for sub in range(row_tiles):
-            for s in range(2):
-                dest = [torch.zeros(T, T, dtype=torch.float32) for unused in range(chunk)]
+        for row in range(row_tiles):
+            for s in range(subblocks):
+                dest = [torch.zeros(T, T, dtype=torch.float32) for unused in range(sub)]
                 for inner in range(BLOCK):
-                    a = in0[sub * BLOCK + inner].float()
-                    for i in range(chunk):
-                        dest[i] = dest[i] + a @ in1[inner * 2 * chunk + s * chunk + i].float()
-                key = (sub, s)
+                    a = in0[row * BLOCK + inner].float()
+                    for i in range(sub):
+                        dest[i] = dest[i] + a @ in1[inner * 2 * chunk + s * sub + i].float()
+                key = (row, s)
                 partial[key] = dest if key not in partial else [old + new for old, new in zip(partial[key], dest)]
     products = []
-    for sub in range(row_tiles):
-        gates = [(g * torch.sigmoid(g)).to(torch.bfloat16) for g in partial[(sub, 0)]]
-        ups = [u.to(torch.bfloat16) for u in partial[(sub, 1)]]
+    for row in range(row_tiles):
+        gates, ups = [], []
+        for s in range(subblocks):
+            if s < chunk // sub:
+                gates += [(g * torch.sigmoid(g)).to(torch.bfloat16) for g in partial[(row, s)]]          # the SiLU on the gate subblocks only
+            else:
+                ups += [u.to(torch.bfloat16) for u in partial[(row, s)]]
         for i in range(chunk):
             products.append((gates[i].float() * ups[i].float()).to(torch.bfloat16))
     return products
@@ -282,12 +384,12 @@ class DataflowTests(unittest.TestCase):
         w3 = (torch.randn(self.K_BLOCKS * BLOCK * T, self.PAIR_COLUMNS * T, generator=generator) * 0.1).to(torch.bfloat16)
         return x, w1, w3
 
-    def make_plan(self, chunk, banks=None):
+    def make_plan(self, chunk, banks=None, depth=2, sub=None):
         return bank.plan(chunk, (13, 10), row_tiles=self.ROW_TILES, k_tiles=self.K_BLOCKS * BLOCK, pair_columns=self.PAIR_COLUMNS,
-                         banks=self.BANKS if banks is None else banks)
+                         banks=self.BANKS if banks is None else banks, depth=depth, sub=sub)
 
-    def run_plan(self, chunk, swap=False):
-        plan = self.make_plan(chunk)
+    def run_plan(self, chunk, swap=False, depth=2, sub=None):
+        plan = self.make_plan(chunk, depth=depth, sub=sub)
         x, w1, w3 = self.problem(60 + chunk)
         reads = bank_reads(x, w3 if swap else w1, w1 if swap else w3, plan, self.ROW_TILES)
         out = torch.zeros(self.ROW_TILES * T, self.PAIR_COLUMNS * T, dtype=torch.bfloat16)
@@ -311,6 +413,38 @@ class DataflowTests(unittest.TestCase):
                 self.assertEqual(sorted(written), list(range(self.ROW_TILES * self.PAIR_COLUMNS)), 'every output page written exactly once')
                 expected = reference(x, w1, w3, self.K_BLOCKS, self.ROW_TILES, self.PAIR_COLUMNS)
                 self.assertTrue(torch.equal(out.view(torch.int16), expected.view(torch.int16)))
+
+    def test_the_output_is_the_same_bit_for_bit_at_every_buffer_depth_and_subblock_width(self):
+        # two K blocks only: depth 3 and 4 never wrap in this problem, so the wrap is covered by the next test with four blocks
+        for chunk in bank.CHUNKS:
+            expected = None
+            for depth in bank.DEPTHS:
+                for sub in [width for width in range(1, chunk + 1) if chunk % width == 0]:
+                    with self.subTest(chunk=chunk, depth=depth, sub=sub):
+                        plan, (x, w1, w3), out, written = self.run_plan(chunk, depth=depth, sub=sub)
+                        self.assertEqual(sorted(written), list(range(self.ROW_TILES * self.PAIR_COLUMNS)))
+                        reference_out = reference(x, w1, w3, self.K_BLOCKS, self.ROW_TILES, self.PAIR_COLUMNS)
+                        self.assertTrue(torch.equal(out.view(torch.int16), reference_out.view(torch.int16)))
+                        expected = out if expected is None else expected
+                        self.assertTrue(torch.equal(out.view(torch.int16), expected.view(torch.int16)), 'a subblock width or a depth never changes an output bit')
+
+    def test_blocks_wrap_through_the_slots_of_a_deeper_buffer(self):
+        # four K blocks through 3 slots: block b lands in slot b % 3, so a slot is overwritten by block b + 3 after the compute kernel popped block b
+        chunk, depth = 3, 3
+        plan = bank.plan(chunk, (13, 10), row_tiles=2, k_tiles=4 * BLOCK, pair_columns=self.PAIR_COLUMNS, banks=self.BANKS, depth=depth)
+        generator = torch.Generator().manual_seed(81)
+        x = (torch.randn(2 * T, 4 * BLOCK * T, generator=generator) * 0.4).to(torch.bfloat16)
+        w1 = (torch.randn(4 * BLOCK * T, self.PAIR_COLUMNS * T, generator=generator) * 0.1).to(torch.bfloat16)
+        w3 = (torch.randn(4 * BLOCK * T, self.PAIR_COLUMNS * T, generator=generator) * 0.1).to(torch.bfloat16)
+        reads = bank_reads(x, w1, w3, plan, 2)
+        out = torch.zeros(2 * T, self.PAIR_COLUMNS * T, dtype=torch.bfloat16)
+        for index, worker in enumerate(plan['mapping']):
+            products = compute_bank_worker(reads[index], plan, 2)
+            for row in range(2):
+                for pair in range(worker.valid):
+                    page = row * self.PAIR_COLUMNS + worker.first + self.BANKS * pair
+                    out[(page // self.PAIR_COLUMNS) * T:(page // self.PAIR_COLUMNS + 1) * T, (page % self.PAIR_COLUMNS) * T:(page % self.PAIR_COLUMNS + 1) * T] = products[row * chunk + pair]
+        self.assertTrue(torch.equal(out.view(torch.int16), reference(x, w1, w3, 4, 2, self.PAIR_COLUMNS).view(torch.int16)))
 
     def test_a_short_worker_is_zero_padded_in_both_halves_and_writes_only_its_valid_columns(self):
         plan = self.make_plan(3)                      # 5 columns a bank: groups of 3 and 2
@@ -351,6 +485,7 @@ class DataflowTests(unittest.TestCase):
         self.assertIn('noc_async_write_tile(row * pair_columns + first + banks * pair, output, get_read_ptr(4));', weights)
         self.assertIn('cb_wait_front(4, 1)', weights)
         self.assertIn('cb_reserve_back(1, block_slots)', weights)
+        self.assertIn('constexpr uint32_t depth = get_named_compile_time_arg_val("depth");', weights)
         self.assertIn('words[word] = 0;', weights)
         self.assertIn('word < 144', weights)                 # 576 bytes of zero tile
 
@@ -365,7 +500,7 @@ class DataflowTests(unittest.TestCase):
                 self.assertIn('word < 144', before)
                 self.assertNotIn('= 0;', body.replace('block = 0;', '').replace('inner = 0;', '').replace('pair = 0;', ''), 'no zero store inside the K loop')
                 self.assertIn('get_write_ptr(1)', before, 'the base of the buffer, before the first reservation')
-                self.assertIn('2 * block_tiles', before, 'both halves')
+                self.assertIn('depth * block_tiles' if name.startswith('tp4_mlp_bank') else '2 * block_tiles', before, 'every block slot')
 
     def test_the_first_fused_kernel_still_reads_only_valid_pairs_in_the_k_loop(self):
         text = (HERE / 'tp4_mlp_fused_weights.cpp').read_text(encoding='utf-8')
@@ -474,6 +609,42 @@ class LaunchTests(unittest.TestCase):
             self.assertIn(('PACKER_L1_ACC', '1'), compute.defines)
             self.assertIn(('SFPU_ACTIVATION', '1'), compute.defines)
             self.assertEqual(op.manifest['math_approx_mode'], approx)
+
+    def test_depth_sub_and_ablation_reach_the_descriptors(self):
+        ops, op, (x, w1, w3) = make_op(chunk=4, depth=3, sub=2)
+        input_kernel, writer, compute = self.kernels_of(op, x, ops)
+        program = next(iter(ops.launched[0][1].values()))
+        sizes = dict((cb.format_descriptors[0].buffer_index, cb.total_size) for cb in program.cbs)
+        self.assertEqual((sizes[0], sizes[1]), (3 * 16 * 2048, 3 * 16 * 4 * 576))
+        self.assertEqual(dict(writer.named_compile_time_args)['depth'], 3)
+        self.assertEqual(compute.compile_time_args, bank.compute_arguments(4, 2, 20, 2))
+        self.assertEqual(compute.kernel_source, bank.bank_compute(SOURCE, 4, 2, 2))
+        self.assertNotIn(('SKIP_COMPUTE', '1'), compute.defines)
+        self.assertEqual((op.manifest['depth'], op.manifest['sub'], op.manifest['ablate']), (3, 2, None))
+        self.assertEqual(dict(input_kernel.named_compile_time_args)['row_tiles'], 2)
+        ops, op, (x, w1, w3) = make_op(chunk=3, ablate='skip_compute')
+        compute = self.kernels_of(op, x, ops)[2]
+        self.assertIn(('SKIP_COMPUTE', '1'), compute.defines)
+        self.assertEqual(compute.kernel_source, bank.bank_compute(SOURCE, 3, 2))
+        ops, op, (x, w1, w3) = make_op(chunk=4, ablate='no_silu')
+        compute = self.kernels_of(op, x, ops)[2]
+        self.assertNotIn(('SKIP_COMPUTE', '1'), compute.defines)
+        self.assertNotIn('apply_activation_from_pack', compute.kernel_source)
+
+    def test_the_defaults_launch_what_job_c6_launched(self):
+        ops, op, (x, w1, w3) = make_op(chunk=3)
+        input_kernel, writer, compute = self.kernels_of(op, x, ops)
+        program = next(iter(ops.launched[0][1].values()))
+        sizes = dict((cb.format_descriptors[0].buffer_index, cb.total_size) for cb in program.cbs)
+        self.assertEqual((sizes[0], sizes[1]), (2 * 16 * 2048, 2 * 16 * 3 * 576))
+        self.assertEqual(dict(writer.named_compile_time_args)['depth'], 2)
+        self.assertEqual(compute.compile_time_args, bank.compute_arguments(3, 2, 20))
+        self.assertEqual(compute.defines, [('FP32_DEST_ACC_EN', '1'), ('PACKER_L1_ACC', '1'), ('SFPU_ACTIVATION', '1')])
+
+    def test_depth_sub_and_ablation_are_checked_by_the_constructor(self):
+        for options in (dict(depth=1), dict(depth=5), dict(sub=3), dict(sub=0), dict(ablate='skip'), dict(ablate=1)):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                make_op(**options)
 
     def test_the_output_is_a_fresh_l1_tile_tensor_of_the_products_shape(self):
         ops, op, (x, w1, w3) = make_op()

@@ -37,6 +37,19 @@ EXACT BY CONSTRUCTION (the arguments; a card still has to say so, and the card-M
     both operands packed as bf16 to an intermediate circular buffer, then a bf16 SFPU product of gate tile i with up tile i (BF16_PRODUCT, the first op's) in the order the output writer expects;
   * the padding of a worker with fewer than `chunk` valid columns is zero tiles (zeroed once before the K loop), which multiply to zero and are never written.
 
+WHAT C6 MEASURED, AND THE THREE KNOBS (depth, sub, ablate). The probe's read-only rates at the points the op uses (run = chunk) are 292 (2), 331 (3) and 403 (4) GB/s a tensor, i.e. 85.9, 75.8 and
+62.3 us for the two tensors; the fused op took 97.8, 94.8 and 109.0 us (C6). The excess over the read-only time is 11.9, 19.0 and 46.8 us: the exposed epilogue is about 5.6, 8.4 and 11.2 us (the
+SiLU is 1.1 us a gate tile, 2 chunk tiles a worker, serialized after the last K block), so c2 and c3 sit within 6 to 11 us of read floor + epilogue, and c4 is about 35 us off it. The op has
+three stages per K block that must all keep up (the weight reads, the lock-stepped single-sender activation multicast, the compute kernel), each with a 2-block buffer, and the time does not
+follow the read rate (the stock-reader fused op p4a took 112.8 us at 85 us of read-only, this one 109.0 at 62). Two exact knobs address that, and two timing-only cuts attribute it:
+  depth   the activation and weight circular buffers hold 2 (default), 3 or 4 K blocks. The reader (and so the DRAM queue) and the activation multicast run further ahead of the compute kernel,
+          which decouples the lock-stepped stages; nothing a kernel does per block changes, only how many blocks may be in flight. The activation handshake is safe at any depth: a receiver
+          raises `ready` for block b + 1 only after it has received block b, and the sender zeroes `ready` before it multicasts block b.
+  sub     the output subblock is `sub` tiles wide (a divisor of the chunk) with 2 chunk / sub input subblocks: the request size and the DST granularity are decoupled. The circular-buffer
+          layout is unchanged; the SiLU applies to the first chunk / sub subblocks. Exact for the reason chunk is: a subblock width never changes how one tile accumulates.
+  ablate  skip_compute (the native SKIP_COMPUTE define: the matmul math is left out, every copy, pack, SiLU, product and write stays) and no_silu: timing only, reachable from the card-M
+          harness's `bankopt` arm and from no flag of the lever, never exact, never part of a verdict.
+
 Stdlib only at import (py 3.7); ttnn is the `operations` handle.
 """
 
@@ -59,7 +72,10 @@ ROW_TILES = fused.ROW_TILES
 L1_BUDGET = fused.L1_BUDGET
 BANKS = 8                       # the p150a's DRAM channels (the device is asked; this is the default when it cannot say)
 CHUNKS = lever.BANK_CHUNKS      # tiles per request = columns per worker = the output subblock width (at most the fp32 destination capacity, 4)
-DEFAULT_CHUNK = lever.DEFAULT_BANK_CHUNK    # the probe's best point (402.7 GB/s); 3 read 351 and 2 read 357
+DEFAULT_CHUNK = lever.DEFAULT_BANK_CHUNK    # the probe's best point (402.7 GB/s) at 4 tiles a worker; (3, 3) read 331 and (2, 2) 292
+DEPTHS = lever.BANK_DEPTHS      # K blocks the activation and weight circular buffers hold (2: the reader fills one block while the compute kernel consumes another)
+DEFAULT_DEPTH = lever.DEFAULT_BANK_DEPTH
+ABLATIONS = ('skip_compute', 'no_silu')     # timing-only variants of the card-M tuning arm: never reachable from the lever's flags, never exact
 
 Worker = namedtuple('Worker', ('x', 'y', 'bank', 'first', 'valid'))
 
@@ -77,26 +93,59 @@ def check_chunk(chunk):
         raise ValueError('chunk must be one of %s (tiles per request, at most the fp32 destination capacity), got %r' % (', '.join(map(str, CHUNKS)), chunk))
 
 
-def bank_epilogue(chunk):
-    """The replacement for the native kernel's last-K-block pack: the gate subblock (in1_subblock 0) gets the SiLU on all `chunk` tiles, the up subblock none; both are packed as bf16
-    to circular buffer 30. The static_asserts fail the JIT compile (never the result) if the compile arguments and this text ever disagree."""
-    return """                            if (last_out) {
-                                static_assert(out_subblock_num_tiles == %(c)d && out_subblock_h == 1 && in1_num_subblocks == 2);
-                                constexpr uint32_t rounded_cb = 30;
-                                tile_regs_commit();
-                                cb_reserve_back(rounded_cb, %(c)d);
-                                if (in1_subblock == 0) {
-                                    apply_activation_from_pack<KernelActivation::SILU>(%(c)d);
+def check_depth(depth):
+    if depth not in DEPTHS:
+        raise ValueError('depth must be one of %s (K blocks the circular buffers hold), got %r' % (', '.join(map(str, DEPTHS)), depth))
+
+
+def resolve_sub(chunk, sub):
+    """The output subblock width: `chunk` unless a divisor of it is named (the DST holds four fp32 tiles, so the width is at most 4 either way)."""
+    sub = chunk if sub is None else sub
+    if type(sub) is not int or not 1 <= sub <= chunk or chunk % sub:
+        raise ValueError('sub must be a divisor of chunk %d (the output subblock width), got %r' % (chunk, sub))
+    return sub
+
+
+def check_ablate(ablate):
+    if ablate is not None and ablate not in ABLATIONS:
+        raise ValueError('ablate must be None or one of %s, got %r' % (', '.join(ABLATIONS), ablate))
+
+
+def bank_epilogue(chunk, sub=None, ablate=None):
+    """The replacement for the native kernel's last-K-block pack: the gate subblocks (the first chunk / sub of the 2 chunk / sub input subblocks) get the SiLU on all their tiles, the up
+    subblocks none; every subblock is packed as bf16 to circular buffer 30. With sub = chunk (the default) there are two subblocks and the text is the one the card-M job C6 ran. The
+    static_asserts fail the JIT compile (never the result) if the compile arguments and this text ever disagree. `ablate` = no_silu (timing only, never exact) leaves the SiLU out."""
+    sub = resolve_sub(chunk, sub)
+    check_ablate(ablate)
+    if ablate == 'no_silu':
+        activation = """                                tile_regs_wait();
+"""
+    elif sub == chunk:
+        activation = """                                if (in1_subblock == 0) {
+                                    apply_activation_from_pack<KernelActivation::SILU>(%(s)d);
                                 } else {
                                     tile_regs_wait();
                                 }
-                                PACK((pack_reconfig_data_format(rounded_cb)));
+""" % dict(s=sub)
+    else:
+        activation = """                                if (in1_subblock < %(g)d) {
+                                    apply_activation_from_pack<KernelActivation::SILU>(%(s)d);
+                                } else {
+                                    tile_regs_wait();
+                                }
+""" % dict(g=chunk // sub, s=sub)
+    return """                            if (last_out) {
+                                static_assert(out_subblock_num_tiles == %(s)d && out_subblock_h == 1 && in1_num_subblocks == %(n)d);
+                                constexpr uint32_t rounded_cb = 30;
+                                tile_regs_commit();
+                                cb_reserve_back(rounded_cb, %(s)d);
+""" % dict(s=sub, n=2 * chunk // sub) + activation + """                                PACK((pack_reconfig_data_format(rounded_cb)));
                                 PACK((llk_pack_reconfig_l1_acc(0)));
                                 uint32_t start_dst_index = 0;
-                                pack_block(start_dst_index, rounded_cb, %(c)d);
+                                pack_block(start_dst_index, rounded_cb, %(s)d);
                                 tile_regs_release();
-                                cb_push_back(rounded_cb, %(c)d);
-""" % dict(c=chunk)
+                                cb_push_back(rounded_cb, %(s)d);
+""" % dict(s=sub)
 
 
 def bank_tail(chunk, row_tiles):
@@ -128,7 +177,7 @@ def bank_tail(chunk, row_tiles):
 """ % dict(c=chunk, r=row_tiles, w=2 * chunk)
 
 
-def bank_compute(source, chunk, row_tiles=ROW_TILES):
+def bank_compute(source, chunk, row_tiles=ROW_TILES, sub=None, ablate=None):
     """The native compute kernel with its last K block's pack replaced by bank_epilogue and bank_tail added after the K loop (the anchors and the other two edits are the first fused op's:
     the sfpu binary include, BF16_PRODUCT for the product, the header path). ValueError when the native source no longer has the anchors (fail closed)."""
     check_chunk(chunk)
@@ -138,7 +187,7 @@ def bank_compute(source, chunk, row_tiles=ROW_TILES):
         raise ValueError('Native final-pack anchor changed')
     start = source.index(fused.LAST_BLOCK)
     end = source.index(fused.LAST_BLOCK_END, start)
-    result = source[:start] + bank_epilogue(chunk) + source[end:]
+    result = source[:start] + bank_epilogue(chunk, sub, ablate) + source[end:]
     finish = result.rfind('}')
     result = result[:finish] + bank_tail(chunk, row_tiles) + result[finish:]
     result = '#include "api/compute/eltwise_binary_sfpu.h"\n' + result
@@ -146,12 +195,14 @@ def bank_compute(source, chunk, row_tiles=ROW_TILES):
     return result.replace('"bmm_fused_activation.hpp"', fused.HPP)
 
 
-def compute_arguments(chunk, row_tiles=ROW_TILES, k_blocks=K_TILES // BLOCK_TILES):
-    """The native kernel's compile-time arguments for one worker: in0_block_w, in0_num_subblocks, in0_block_num_tiles, in0_subblock_num_tiles, in1_num_subblocks (2: the gate run and the up
-    run), in1_block_num_tiles, in1_block_w, num_blocks, out blocks x, out blocks y, out_subblock_h (1), out_subblock_w (chunk), out_subblock_num_tiles (chunk), batch, out_block_num_tiles,
-    then three zeros (no untilize, no batch from the reader, no in0 transpose)."""
+def compute_arguments(chunk, row_tiles=ROW_TILES, k_blocks=K_TILES // BLOCK_TILES, sub=None):
+    """The native kernel's compile-time arguments for one worker: in0_block_w, in0_num_subblocks, in0_block_num_tiles, in0_subblock_num_tiles, in1_num_subblocks (2 with the default
+    subblock: the gate run and the up run; 2 chunk / sub otherwise), in1_block_num_tiles, in1_block_w, num_blocks, out blocks x, out blocks y, out_subblock_h (1), out_subblock_w (sub,
+    chunk by default), out_subblock_num_tiles (sub), batch, out_block_num_tiles, then three zeros (no untilize, no batch from the reader, no in0 transpose). The circular-buffer layout
+    [K tile][gate run][up run] is the same for every sub: input subblock s covers the columns s * sub .. s * sub + sub - 1 of the 2 chunk a K tile row holds."""
     check_chunk(chunk)
-    return [BLOCK_TILES, row_tiles, BLOCK_TILES * row_tiles, BLOCK_TILES, 2, 2 * BLOCK_TILES * chunk, 2 * chunk, k_blocks, 1, 1, 1, chunk, chunk, 1,
+    sub = resolve_sub(chunk, sub)
+    return [BLOCK_TILES, row_tiles, BLOCK_TILES * row_tiles, BLOCK_TILES, 2 * chunk // sub, 2 * BLOCK_TILES * chunk, 2 * chunk, k_blocks, 1, 1, 1, sub, sub, 1,
             2 * chunk * row_tiles, 0, 0, 0]
 
 
@@ -160,11 +211,13 @@ def groups_of(chunk, per_bank):
     return [(first, min(chunk, per_bank - first)) for first in range(0, per_bank, chunk)]
 
 
-def plan(chunk, grid, width=None, row_tiles=ROW_TILES, k_tiles=K_TILES, pair_columns=PAIR_COLUMNS, banks=BANKS):
+def plan(chunk, grid, width=None, row_tiles=ROW_TILES, k_tiles=K_TILES, pair_columns=PAIR_COLUMNS, banks=BANKS, depth=DEFAULT_DEPTH, sub=None):
     """The host plan of one chip's program: the workers (core, bank, first tile column, valid columns) bank by bank in row-major order on a rectangle `width` wide (the probe's placement,
     the one its 402.7 GB/s was measured at), the rectangle, the circular buffer sizes and the compile-time arguments. ValueError when the tile columns are not a multiple of the bank
     count (the tiles of a bank would not be a regular stride), the grid cannot hold the workers, or the buffers do not fit L1."""
     check_chunk(chunk)
+    check_depth(depth)
+    sub = resolve_sub(chunk, sub)
     if pair_columns % banks:
         raise ValueError('%d tile columns are not a multiple of the %d DRAM banks: the tiles of one bank are not a regular stride' % (pair_columns, banks))
     grid_x, grid_y = int(grid[0]), int(grid[1])
@@ -180,17 +233,17 @@ def plan(chunk, grid, width=None, row_tiles=ROW_TILES, k_tiles=K_TILES, pair_col
         raise ValueError('%d workers %d wide need %d rows; the device has %d' % (workers, cols, rows, grid_y))
     mapping = [Worker(index % cols, index // cols, bank, first, valid) for index, (bank, first, valid) in enumerate(entries)]
     k_blocks = k_tiles // BLOCK_TILES
-    buffers = dict(in0=dict(index=0, bytes=2 * BLOCK_TILES * row_tiles * 2048, cores='all'),
-                   in1=dict(index=1, bytes=32 * chunk * 576, cores='workers'),
+    buffers = dict(in0=dict(index=0, bytes=depth * BLOCK_TILES * row_tiles * 2048, cores='all'),
+                   in1=dict(index=1, bytes=depth * 16 * chunk * 576, cores='workers'),
                    out=dict(index=4, bytes=row_tiles * chunk * 2048, cores='workers'),
                    partial=dict(index=5, bytes=row_tiles * 2 * chunk * 4096, cores='workers'),
                    rounded=dict(index=30, bytes=row_tiles * 2 * chunk * 2048, cores='workers'))
     worker_bytes = sum(item['bytes'] for item in buffers.values())
     if worker_bytes > L1_BUDGET:
         raise ValueError('%d bytes of circular buffers a worker exceed the %d budget' % (worker_bytes, L1_BUDGET))
-    return dict(chunk=chunk, banks=banks, per_bank=per_bank, workers=workers, cols=cols, rows=rows, cells=cols * rows, mapping=mapping, k_blocks=k_blocks,
+    return dict(chunk=chunk, depth=depth, sub=sub, banks=banks, per_bank=per_bank, workers=workers, cols=cols, rows=rows, cells=cols * rows, mapping=mapping, k_blocks=k_blocks,
                 row_tiles=row_tiles, pair_columns=pair_columns, buffers=buffers, worker_bytes=worker_bytes,
-                request_bytes=chunk * 576, compile_arguments=compute_arguments(chunk, row_tiles, k_blocks))
+                request_bytes=chunk * 576, compile_arguments=compute_arguments(chunk, row_tiles, k_blocks, sub))
 
 
 def owned_columns(worker, banks=BANKS):
@@ -212,25 +265,28 @@ class BankGateUp(object):
     silu(x w1) * (x w3) in L1 interleaved. It does not free x. Same call contract as tp4_mlp_fused.FusedGateUp."""
 
     def __init__(self, operations, mesh, w1, w3, chunk=DEFAULT_CHUNK, grid=(13, 10), width=None, math_approx_mode=None, source_root='/opt/tt-metal',
-                 rows=lever.ROWS, banks=None):
+                 rows=lever.ROWS, banks=None, depth=DEFAULT_DEPTH, sub=None, ablate=None):
         if type(math_approx_mode) is not bool:
             raise ValueError('Explicit boolean math approximation mode required (the served compute config\'s)')
         if rows not in (lever.TILE, lever.ROWS):
             raise ValueError('rows must be 32 or 64, got %r' % (rows,))
         check_chunk(chunk)
+        check_depth(depth)
+        sub = resolve_sub(chunk, sub)
+        check_ablate(ablate)
         self.operations, self.mesh, self.w1, self.w3 = operations, mesh, w1, w3
         self.row_tiles = rows // lever.TILE
         self.math_approx_mode = math_approx_mode
-        self.chunk = chunk
+        self.chunk, self.depth, self.sub, self.ablate = chunk, depth, sub, ablate
         self.banks = dram_banks(mesh) if banks is None else int(banks)
-        self.plan = plan(chunk, grid, width, self.row_tiles, banks=self.banks)
-        key = (str(source_root), chunk, self.row_tiles)
+        self.plan = plan(chunk, grid, width, self.row_tiles, banks=self.banks, depth=depth, sub=sub)
+        key = (str(source_root), chunk, self.row_tiles, sub, ablate)
         if key not in _COMPUTE_CACHE:
             original = fused.native_source(source_root)
-            _COMPUTE_CACHE[key] = (bank_compute(original, chunk, self.row_tiles), hashlib.sha256(original.encode()).hexdigest())
+            _COMPUTE_CACHE[key] = (bank_compute(original, chunk, self.row_tiles, sub, ablate), hashlib.sha256(original.encode()).hexdigest())
         self.compute, native_sha = _COMPUTE_CACHE[key]
         self.manifest = dict(native_compute_sha256=native_sha, bank_compute_sha256=hashlib.sha256(self.compute.encode()).hexdigest(), kernels=kernel_sources(),
-                             workers=self.plan['workers'], rectangle=[self.plan['cols'], self.plan['rows']], chunk=chunk, banks=self.banks,
+                             workers=self.plan['workers'], rectangle=[self.plan['cols'], self.plan['rows']], chunk=chunk, depth=depth, sub=sub, ablate=ablate, banks=self.banks,
                              request_bytes=self.plan['request_bytes'], k_block=BLOCK_TILES, row_tiles=self.row_tiles, math_approx_mode=math_approx_mode,
                              epilogue='BF16(silu(gate)), BF16(up), then the BF16 product by the SFPU')
         self.calls = 0
@@ -267,8 +323,9 @@ class BankGateUp(object):
                                      format_descriptors=[ttnn.CBFormatDescriptor(buffer_index=index, data_format=dtype, page_size=page,
                                                                                  tile=ttnn.TileDescriptor(ttnn.Tile([32, 32])))])
 
-        buffers = [cb(0, ttnn.bfloat16, 2048, 2 * BLOCK_TILES * row_tiles, all_cores),
-                   cb(1, ttnn.bfloat4_b, 576, 32 * chunk, workers),
+        depth = plan['depth']
+        buffers = [cb(0, ttnn.bfloat16, 2048, depth * BLOCK_TILES * row_tiles, all_cores),
+                   cb(1, ttnn.bfloat4_b, 576, depth * 16 * chunk, workers),
                    cb(4, ttnn.bfloat16, 2048, row_tiles * chunk, workers),
                    cb(5, ttnn.float32, 4096, row_tiles * 2 * chunk, workers),
                    cb(30, ttnn.bfloat16, 2048, row_tiles * 2 * chunk, workers)]
@@ -294,7 +351,7 @@ class BankGateUp(object):
                 compile_time_args=(ttnn.TensorAccessorArgs(local_gate).get_compile_time_args()
                                    + ttnn.TensorAccessorArgs(local_up).get_compile_time_args()
                                    + ttnn.TensorAccessorArgs(local_output).get_compile_time_args()),
-                named_compile_time_args=named + [('chunk', chunk), ('pair_columns', PAIR_COLUMNS), ('banks', plan['banks'])],
+                named_compile_time_args=named + [('chunk', chunk), ('pair_columns', PAIR_COLUMNS), ('banks', plan['banks']), ('depth', depth)],
                 config=ttnn.DataMovementConfigDescriptor(processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.RISCV_0_default))
             writer_args = ttnn.RuntimeArgs()
             for worker in plan['mapping']:
@@ -311,7 +368,8 @@ class BankGateUp(object):
                 compile_time_args=list(plan['compile_arguments']),
                 named_compile_time_args=[('cb_in0', 0), ('cb_in1', 1), ('cb_out', 4), ('cb_intermed0', 5), ('cb_in0_transposed', 10),
                                          ('activation_type', 4), ('activation_param0', 0), ('activation_param1', 0), ('activation_param2', 0)],
-                defines=[('FP32_DEST_ACC_EN', '1'), ('PACKER_L1_ACC', '1'), ('SFPU_ACTIVATION', '1')], config=compute_config)
+                defines=[('FP32_DEST_ACC_EN', '1'), ('PACKER_L1_ACC', '1'), ('SFPU_ACTIVATION', '1')] + ([('SKIP_COMPUTE', '1')] if self.ablate == 'skip_compute' else []),
+                config=compute_config)
             program = ttnn.ProgramDescriptor(kernels=[input_kernel, writer, compute], cbs=buffers,
                                              semaphores=[ttnn.SemaphoreDescriptor(id=index, core_ranges=all_cores, initial_value=0) for index in (0, 1)])
             coordinate = ttnn.MeshCoordinate(0, chip)

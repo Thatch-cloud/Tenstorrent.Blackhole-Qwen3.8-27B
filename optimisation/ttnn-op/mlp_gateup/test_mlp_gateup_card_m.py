@@ -716,22 +716,26 @@ class FakeBank(object):
     served one (or for the chunks in `inexact`), as a card might show."""
 
     built = []
+    options = []
     inexact = ()
     cost = staticmethod(lambda chunk: 30.0 - chunk)
 
-    def __init__(self, operations, mesh, w1, w3, chunk=4, grid=(13, 10), width=None, math_approx_mode=None, banks=None, **options):
+    def __init__(self, operations, mesh, w1, w3, chunk=4, grid=(13, 10), width=None, math_approx_mode=None, banks=None, depth=2, sub=None, ablate=None, **options):
         self.ttnn, self.w1, self.w3, self.chunk, self.approx = operations, w1, w3, chunk, math_approx_mode
+        self.depth, self.sub, self.ablate = depth, sub, ablate
         self.plan = dict(workers=-(-136 // 8 // chunk) * 8, request_bytes=chunk * 576)
         FakeBank.built.append((chunk, math_approx_mode, grid, banks))
+        FakeBank.options.append(dict(chunk=chunk, depth=depth, sub=sub, ablate=ablate))
 
     def __call__(self, x):
         gate = x.data.float() @ self.w1.data.float()
         gate = (gate * torch.sigmoid(gate)).to(torch.bfloat16)
         up = (x.data.float() @ self.w3.data.float()).to(torch.bfloat16)
         out = (gate.float() * up.float()).to(torch.bfloat16)
-        if self.approx is not True or self.chunk in FakeBank.inexact:
+        if self.approx is not True or self.chunk in FakeBank.inexact or self.ablate:
             out.view(torch.int16)[0, 0, 0, 0] ^= 1
-        self.ttnn.spend(FakeBank.cost(self.chunk))
+        # deeper buffers save 2 us a step, a narrower subblock costs 1, an ablation drops the math (-12) or the SiLU (-4)
+        self.ttnn.spend(FakeBank.cost(self.chunk) - 2.0 * (self.depth - 2) + (1.0 if self.sub else 0.0) - {None: 0.0, 'skip_compute': 12.0, 'no_silu': 4.0}[self.ablate])
         return Tensor(out)
 
 
@@ -742,6 +746,7 @@ def fake_bank_module():
 class BankArmTests(unittest.TestCase):
     def setUp(self):
         FakeBank.built.clear()
+        FakeBank.options.clear()
         FakeBank.inexact = ()
 
     def run_bank(self, ttnn, extra=()):
@@ -871,6 +876,174 @@ class BankArmTests(unittest.TestCase):
                                   clock=ttnn.clock)
         self.assertNotIn('bank', json.loads(out.read_text()))
         self.assertEqual(FakeBank.built, [])
+
+
+class BankOptTests(unittest.TestCase):
+    """--arms bankopt: the buffer depth, subblock and ablation variants of the bank op, timed beside the verdict arm's rule."""
+
+    def setUp(self):
+        FakeBank.built.clear()
+        FakeBank.options.clear()
+        FakeBank.inexact = ()
+
+    served_cost = staticmethod(BankArmTests.served_cost)
+
+    def run_opt(self, ttnn, variants=None):
+        extra = ['--bank-variants', variants] if variants else []
+        out = Path(tempfile.mkdtemp()) / 'report.json'
+        shapes = small_shapes()
+        with mock.patch.dict(os.environ, dict(QWEN_FAST_TP='4')), mock.patch.object(lever, 'shapes', lambda tp=4: shapes), mock.patch.object(harness, 'WATCHDOG_S', 3600):
+            status = harness.main(['--out', str(out), '--rounds', '3', '--arms', 'bankopt'] + extra, torch=torch, ttnn=ttnn, lever=lever, bank_module=fake_bank_module(),
+                                  clock=ttnn.clock)
+        return status, json.loads(out.read_text())
+
+    def test_the_variant_grammar(self):
+        self.assertEqual(harness.parse_variant('c4'), dict(key='c4', chunk=4, depth=2, sub=None, ablate=None))
+        self.assertEqual(harness.parse_variant('c4k3s2'), dict(key='c4k3s2', chunk=4, depth=3, sub=2, ablate=None))
+        self.assertEqual(harness.parse_variant('c3xskip')['ablate'], 'skip_compute')
+        self.assertEqual(harness.parse_variant('c4xsilu')['ablate'], 'no_silu')
+        self.assertEqual(harness.parse_variant('c4k4xskip'), dict(key='c4k4xskip', chunk=4, depth=4, sub=None, ablate='skip_compute'))
+        for bad in ('', 'c', 'k3', 'c4s', 'c4k', 'c4x', 'c4xfoo', 'c4s2k3', 'C4', 'c44', 'c4 ', None):
+            with self.assertRaises(ValueError):
+                harness.parse_variant(bad)
+
+    def test_the_default_list_holds_the_c6_points_the_depth_and_subblock_variants_and_the_cuts(self):
+        keys = harness.BANKOPT_VARIANTS
+        self.assertEqual(len(set(keys)), len(keys))
+        for key in ('c3', 'c4', 'c4k3', 'c4k4', 'c3k3', 'c3k4', 'c4s2', 'c3xskip', 'c4xskip', 'c4xsilu'):
+            self.assertIn(key, keys)
+        for key in keys:
+            harness.parse_variant(key)
+
+    def test_every_variant_is_built_with_its_options_and_only_the_exact_ones_are_compared(self):
+        ttnn = FakeTTNN(cost=self.served_cost)
+        status, report = self.run_opt(ttnn)
+        self.assertEqual(status, 0, report.get('error'))
+        section = report['bankopt']
+        self.assertNotIn('bank', report)
+        self.assertEqual(section['variants'], list(harness.BANKOPT_VARIANTS))
+        built = dict((tuple(sorted(options.items(), key=lambda item: item[0])), True) for options in FakeBank.options)
+        self.assertIn((('ablate', None), ('chunk', 4), ('depth', 3), ('sub', 2)), built)
+        self.assertIn((('ablate', 'skip_compute'), ('chunk', 3), ('depth', 2), ('sub', None)), built)
+        self.assertIn((('ablate', 'no_silu'), ('chunk', 4), ('depth', 2), ('sub', None)), built)
+        plain = [row for row in section['rows'] if not row['ablate'] and not row['diagnostic']]
+        self.assertTrue(all(row['exact'] for row in plain), plain)
+        self.assertEqual(sorted(set(row['regime'] for row in plain)), ['edge', 'random'])
+        cuts = [row for row in section['rows'] if row['ablate']]
+        self.assertEqual(sorted(row['variant'] for row in cuts), ['c3xskip', 'c4xsilu', 'c4xskip'])
+        for row in cuts:
+            self.assertNotIn('exact', row)
+            self.assertEqual(row['regime'], 'random')
+            self.assertIn('us', row)
+        self.assertEqual(sorted(name for name in section['pair_exact'] if name.startswith('bank_')),
+                         sorted('bank_' + key for key in harness.BANKOPT_VARIANTS if 'x' not in key))
+
+    def test_the_timings_follow_the_variants_and_the_fastest_exact_one_is_chained_with_its_flags(self):
+        ttnn = FakeTTNN(cost=self.served_cost)
+        status, report = self.run_opt(ttnn)
+        section = report['bankopt']
+        us = section['pair_us']
+        self.assertAlmostEqual(us['bank_c4'], 26.0, delta=0.05)
+        self.assertAlmostEqual(us['bank_c4k4'], 22.0, delta=0.05, msg='two more blocks of depth, two microseconds a step')
+        self.assertAlmostEqual(us['bank_c4k3s2'], 26.0 - 2.0 + 1.0, delta=0.05)
+        self.assertAlmostEqual(us['bank_c4xskip'], 14.0, delta=0.05)
+        self.assertAlmostEqual(us['bank_c4xsilu'], 22.0, delta=0.05)
+        chain = section['chain']
+        self.assertEqual((chain['variant'], chain['chunk'], chain['depth'], chain['sub']), ('c4k4', 4, 4, 4), 'the cuts are never the fastest exact variant')
+        decision = section['decision']
+        self.assertEqual(decision['verdict'], 'BANK-GO')
+        self.assertEqual(decision['env'], {'QWEN_FAST_MLP_GATEUP_BANK': '1', 'QWEN_FAST_MLP_GATEUP_BANK_CHUNK': '4', 'QWEN_FAST_MLP_GATEUP_BANK_DEPTH': '4',
+                                           'QWEN_FAST_MLP_CFG': 'd3'})
+        self.assertEqual(decision['variant'], 'c4k4')
+
+    def test_a_subblock_variant_that_wins_prints_its_flag(self):
+        ttnn = FakeTTNN(cost=self.served_cost)
+        FakeBank.cost = staticmethod(lambda chunk: 40.0 if chunk == 4 else 50.0)
+        try:
+            status, report = self.run_opt(ttnn, 'c4,c4s2,c3')
+        finally:
+            FakeBank.cost = staticmethod(lambda chunk: 30.0 - chunk)
+        decision = report['bankopt']['decision']
+        self.assertEqual(decision['variant'], 'c4')
+        self.assertNotIn('QWEN_FAST_MLP_GATEUP_BANK_SUB', decision['env'])
+        FakeBank.cost = staticmethod(lambda chunk: 40.0)
+        try:
+            ttnn = FakeTTNN(cost=self.served_cost)
+            original = FakeBank.__call__
+
+            def cheaper_narrow(self, x):
+                out = original(self, x)
+                if self.sub:
+                    self.ttnn.spend(-5.0)
+                return out
+
+            with mock.patch.object(FakeBank, '__call__', cheaper_narrow):
+                status, report = self.run_opt(ttnn, 'c4,c4s2')
+        finally:
+            FakeBank.cost = staticmethod(lambda chunk: 30.0 - chunk)
+        decision = report['bankopt']['decision']
+        self.assertEqual(decision['variant'], 'c4s2')
+        self.assertEqual(decision['env']['QWEN_FAST_MLP_GATEUP_BANK_SUB'], '2')
+        self.assertNotIn('QWEN_FAST_MLP_GATEUP_BANK_DEPTH', decision['env'])
+
+    def test_an_inexact_variant_is_never_chained_and_the_verdict_is_inexact(self):
+        ttnn = FakeTTNN(cost=self.served_cost)
+        FakeBank.inexact = (3,)
+        status, report = self.run_opt(ttnn, 'c3,c4,c3k3,c3xskip')
+        section = report['bankopt']
+        self.assertEqual(section['decision']['verdict'], 'BANK-INEXACT')
+        self.assertEqual(section['chain']['chunk'], 4)
+        self.assertNotIn('bank_c3', section['pair_us'])
+        self.assertNotIn('bank_c3k3', section['pair_us'])
+        self.assertIn('bank_c3xskip', section['pair_us'], 'the cut is a timing and is taken whatever the exact variants do')
+        self.assertEqual((status, report['verdict']), (1, 'FAIL'))
+
+    def test_a_variant_the_op_refuses_is_a_row_and_the_rest_run(self):
+        ttnn = FakeTTNN(cost=self.served_cost)
+        original = FakeBank.__init__
+
+        def refusing(self, operations, mesh, w1, w3, chunk=4, depth=2, **options):
+            if depth == 3:
+                raise ValueError('depth 3 does not fit L1')
+            original(self, operations, mesh, w1, w3, chunk=chunk, depth=depth, **options)
+
+        with mock.patch.object(FakeBank, '__init__', refusing):
+            status, report = self.run_opt(ttnn, 'c4,c4k3,c4k4')
+        rows = [row for row in report['bankopt']['rows'] if row['variant'] == 'c4k3' and not row['diagnostic']]
+        self.assertTrue(rows and all('does not fit' in row['error'] for row in rows))
+        self.assertNotIn('bank_c4k3', report['bankopt']['pair_us'])
+        self.assertIn('bank_c4k4', report['bankopt']['pair_us'])
+        self.assertEqual(report['bankopt']['decision']['verdict'], 'BANK-GO')
+
+    def test_repeated_variants_are_refused(self):
+        status, report = self.run_opt(FakeTTNN(), 'c4,c4')
+        self.assertEqual((status, report['verdict']), (4, 'NOT-RUN'))
+        self.assertIn('repeat', report['error'])
+
+    def test_a_bad_variant_is_a_not_run(self):
+        status, report = self.run_opt(FakeTTNN(), 'c4,x9')
+        self.assertEqual((status, report['verdict']), (4, 'NOT-RUN'))
+
+    def test_the_verdict_arm_takes_variants_too(self):
+        ttnn = FakeTTNN(cost=self.served_cost)
+        status, report = BankArmTests.run_bank(self, ttnn, ['--bank-variants', 'c4,c4k3'])
+        self.assertEqual(report['bank']['variants'], ['c4', 'c4k3'])
+
+    def test_the_decision_prints_the_depth_and_subblock_flags_only_when_they_are_not_the_defaults(self):
+        base = dict(rows=[dict(regime='random', variant='c4', chunk=4, diagnostic=False, ablate=None, exact=True, differing=0, us=26.0)],
+                    chain=dict(variant='c4', chunk=4, depth=2, sub=4, tuned_down=3, exact={'served': True, 'bank_tuned_down': True},
+                               chain_us={'served': 124.0, 'tuned': 100.0, 'bank_tuned_down': 90.0}))
+        self.assertEqual(sorted(harness.bank_decision(base)['env']), ['QWEN_FAST_MLP_CFG', 'QWEN_FAST_MLP_GATEUP_BANK', 'QWEN_FAST_MLP_GATEUP_BANK_CHUNK'])
+        deep = dict(base, chain=dict(base['chain'], variant='c4k3s2', depth=3, sub=2))
+        env = harness.bank_decision(deep)['env']
+        self.assertEqual((env['QWEN_FAST_MLP_GATEUP_BANK_DEPTH'], env['QWEN_FAST_MLP_GATEUP_BANK_SUB']), ('3', '2'))
+
+    def test_an_ablation_row_is_never_part_of_the_verdict(self):
+        base = dict(rows=[dict(regime='random', variant='c4', chunk=4, diagnostic=False, ablate=None, exact=True, differing=0, us=26.0),
+                          dict(regime='random', variant='c4xskip', chunk=4, diagnostic=False, ablate='skip_compute', us=14.0)],
+                    chain=dict(variant='c4', chunk=4, depth=2, sub=4, tuned_down=3, exact={'served': True, 'bank_tuned_down': True},
+                               chain_us={'served': 124.0, 'tuned': 100.0, 'bank_tuned_down': 90.0}))
+        self.assertEqual(harness.bank_decision(base)['verdict'], 'BANK-GO')
 
 
 class RunScriptTests(unittest.TestCase):

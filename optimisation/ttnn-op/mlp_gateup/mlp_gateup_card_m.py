@@ -36,14 +36,20 @@ chain over four rotating weight sets, with the served down and with the tuned do
   BANK-NO-GAIN   exact, and it does not beat the served chain by 0.35 ms a pass
   NO-RESULT      no exact timed row or no chain
 
+THE BANKOPT ARM (--arms bankopt, --bank-variants c<chunk>[k<depth>][s<sub>][xskip|xsilu],...): the same section and the same rule over more variants of the bank op: circular buffers 3 or 4
+K blocks deep (k), an output subblock narrower than the request (s), and two timing-only cuts that are timed and never compared or counted in the verdict: xskip (the matmul math left out, every
+copy, pack, SiLU, product and write stays) and xsilu (the SiLU left out). The verdict is taken on the fastest EXACT variant and prints its flags. Reading the cuts against the read-only
+probe says which stage is the gap: c4xskip near the probe's 62 us means the compute kernel is, near the fused op's 109 us means the data-movement structure is.
+
 Exit: 0 PASS (the served arm reproduced itself and every shape produced a result); 1 FAIL (the served control differed from itself, a shape had no
-exact result, or the bank arm read BANK-INEXACT); 3 the watchdog; 4 NOT-RUN. The last stdout line is one JSON object (kind mlp-gateup-card-m); the lines above it start MLP_GATEUP.
+exact result, or the bank or bankopt arm read BANK-INEXACT); 3 the watchdog; 4 NOT-RUN. The last stdout line is one JSON object (kind mlp-gateup-card-m); the lines above it start MLP_GATEUP.
 """
 
 import argparse
 import json
 import math
 import os
+import re
 import statistics
 import sys
 import threading
@@ -61,7 +67,7 @@ LAYERS = 64
 THRESHOLD_MS = 0.35
 REGIMES = ('random', 'edge')
 DEFAULT_SHAPES = 'mlp_w1,mlp_w3,mlp_w2'
-ARMS = ('sweep', 'compose', 'fused', 'probe', 'split', 'bank')
+ARMS = ('sweep', 'compose', 'fused', 'probe', 'split', 'bank', 'bankopt')
 WIDTH_CHOICES = (12, 11, 10, 8)
 STAGE2_TOP = 3
 
@@ -662,20 +668,39 @@ def tuned_partition(lever, name):
     return cfg.g, cfg.u, cfg.d
 
 
-def bank_decision(section, threshold_ms=THRESHOLD_MS, layers=LAYERS):
-    """The pre-registered rule of the bank arm. Rows are the per-chunk, per-regime exactness checks with the pair timing (regime random), `chain` the chunk's chains.
+ABLATION_TOKENS = {'skip': 'skip_compute', 'silu': 'no_silu'}
+DEFAULT_BANK_VARIANTS = ('c2', 'c3', 'c4')
+# the tuning arm: why the fused op falls short of the probe's read-only rate. c3 and c4 as C6 ran them, deeper buffers (k), a narrower output subblock (s), and two timing-only
+# cuts: the matmul math left out (xskip: data movement, pack and epilogue remain) and the SiLU left out (xsilu).
+BANKOPT_VARIANTS = ('c3', 'c4', 'c4k3', 'c4k4', 'c3k3', 'c3k4', 'c4s2', 'c4k3s2', 'c3xskip', 'c4xskip', 'c4xsilu')
 
-      BANK-INEXACT   some non-diagnostic row (any chunk, any regime) differs from the served multiply's product, or a chain differs from the served chain's output: the lever must not ship
+
+def parse_variant(text):
+    """One variant of the bank op, from `c<chunk>[k<depth>][s<sub>][x<skip|silu>]`: {key, chunk, depth, sub, ablate}. ValueError on anything else. depth defaults to 2 and sub to
+    the chunk; an ablation is timing only (its product is not the served one)."""
+    found = re.match(r'^c([1-9])(?:k([1-9]))?(?:s([1-9]))?(?:x(skip|silu))?$', text or '')
+    if not found:
+        raise ValueError('a bank variant reads c<chunk>[k<depth>][s<sub>][xskip|xsilu] (c4, c4k3s2, c4xskip), got %r' % (text,))
+    chunk, depth, sub, ablate = found.groups()
+    return dict(key=text, chunk=int(chunk), depth=int(depth) if depth else 2, sub=int(sub) if sub else None,
+                ablate=ABLATION_TOKENS[ablate] if ablate else None)
+
+
+def bank_decision(section, threshold_ms=THRESHOLD_MS, layers=LAYERS):
+    """The pre-registered rule of the bank arms. Rows are the per-variant, per-regime exactness checks with the pair timing (regime random), `chain` the fastest exact variant's chains.
+    Ablations (timing only) and the opposite-math-mode diagnostic are never part of the verdict.
+
+      BANK-INEXACT   some variant (any regime) differs from the served multiply's product, or a chain differs from the served chain's output: the lever must not ship
       BANK-GO        every row exact, and the chain with the bank op and the tuned down beats the tuned (g3u4d3) chain by at least 0.35 ms a pass (layers x the per-layer gain)
       BANK-MARGINAL  exact, and the bank chain beats the SERVED chain by 0.35 ms a pass or more but not the tuned chain: the config alone is as good
       BANK-NO-GAIN   exact, and the bank chain does not beat the served chain by 0.35 ms a pass
       NO-RESULT      no exact timed row or no chain"""
-    rows = [row for row in section.get('rows', []) if not row.get('diagnostic')]
+    rows = [row for row in section.get('rows', []) if not row.get('diagnostic') and not row.get('ablate')]
     inexact = [row for row in rows if row.get('exact') is False]
     chain = section.get('chain') or {}
     chain_inexact = [name for name, value in (chain.get('exact') or {}).items() if value is not True]
     if inexact or chain_inexact:
-        return dict(verdict='BANK-INEXACT', rows=[(row['regime'], row['chunk'], row.get('differing')) for row in inexact], chains=chain_inexact)
+        return dict(verdict='BANK-INEXACT', rows=[(row['regime'], row.get('variant', row['chunk']), row.get('differing')) for row in inexact], chains=chain_inexact)
     timed = [row for row in rows if 'us' in row and row.get('exact') is True]
     us = chain.get('chain_us') or {}
     if not timed or not all(name in us for name in ('served', 'tuned', 'bank_tuned_down')):
@@ -684,17 +709,23 @@ def bank_decision(section, threshold_ms=THRESHOLD_MS, layers=LAYERS):
     gain_tuned = layers * (us['tuned'] - us['bank_tuned_down']) / 1000.0
     word = 'BANK-GO' if gain_tuned >= threshold_ms else 'BANK-MARGINAL' if gain_served >= threshold_ms else 'BANK-NO-GAIN'
     env = {'QWEN_FAST_MLP_GATEUP_BANK': '1', 'QWEN_FAST_MLP_GATEUP_BANK_CHUNK': str(chain['chunk'])}
+    if chain.get('depth', 2) != 2:
+        env['QWEN_FAST_MLP_GATEUP_BANK_DEPTH'] = str(chain['depth'])
+    if chain.get('sub') not in (None, chain['chunk']):
+        env['QWEN_FAST_MLP_GATEUP_BANK_SUB'] = str(chain['sub'])
     if chain.get('tuned_down'):
         env['QWEN_FAST_MLP_CFG'] = 'd%d' % chain['tuned_down']
-    return dict(verdict=word, chunk=chain['chunk'], gain_vs_served_ms_pass=round(gain_served, 3), gain_vs_tuned_ms_pass=round(gain_tuned, 3),
-                bank_chain_us=us['bank_tuned_down'], tuned_chain_us=us['tuned'], served_chain_us=us['served'], threshold_ms=threshold_ms, layers=layers, env=env)
+    return dict(verdict=word, variant=chain.get('variant', 'c%d' % chain['chunk']), chunk=chain['chunk'], gain_vs_served_ms_pass=round(gain_served, 3),
+                gain_vs_tuned_ms_pass=round(gain_tuned, 3), bank_chain_us=us['bank_tuned_down'], tuned_chain_us=us['tuned'], served_chain_us=us['served'],
+                threshold_ms=threshold_ms, layers=layers, env=env)
 
 
-def bank_section(rig, bank_module, rounds=ROUNDS, clock=time.perf_counter, tuned=TUNED_DEFAULT):
-    """Per regime (random, edge) and per chunk: the bank op's product against the served multiply's, bit for bit (the served gate and up configs, the multiply written to DRAM). Then, on
-    random data: the pair (gate, up, multiply) of the served config, with the multiply in L1, of the tuned partition, and of each exact chunk, raced; and, for the fastest exact chunk,
-    the full gate/up/down chain over four rotating weight sets with the served down and with the tuned down (the g3u4d3 down), against the served and the tuned chains, outputs compared
-    with the served chain's. Weight bytes of gate and up: both read once, so GB/s is the pair's bytes over its time."""
+def bank_section(rig, bank_module, rounds=ROUNDS, clock=time.perf_counter, tuned=TUNED_DEFAULT, variants=None):
+    """Per regime (random, edge) and per variant (default: chunk 2, 3 and 4): the bank op's product against the served multiply's, bit for bit (the served gate and up configs, the multiply
+    written to DRAM). Then, on random data: the pair (gate, up, multiply) of the served config, with the multiply in L1, of the tuned partition, and of each exact variant, raced; and, for
+    the fastest exact variant, the full gate/up/down chain over four rotating weight sets with the served down and with the tuned down (the g3u4d3 down), against the served and the tuned
+    chains, outputs compared with the served chain's. Ablation variants (xskip, xsilu) are timed on random data only and never compared. Weight bytes of gate and up: both read once, so
+    GB/s is the pair's bytes over its time."""
     lever, ttnn, torch = rig.lever, rig.ttnn, rig.torch
     table = lever.shapes(4)
     gate_shape, up_shape, down_shape = table['mlp_w1'], table['mlp_w3'], table['mlp_w2']
@@ -704,13 +735,23 @@ def bank_section(rig, bank_module, rounds=ROUNDS, clock=time.perf_counter, tuned
     tuned_cfg = dict(mlp_w1=lever.named_config(gate_shape, tuned_g, rig.grid_x), mlp_w3=lever.named_config(up_shape, tuned_u, rig.grid_x),
                      mlp_w2=lever.named_config(down_shape, tuned_d, rig.grid_x))
     matching = bool(getattr(rig.ckc, 'math_approx_mode', True))
-    chunks = tuple(bank_module.CHUNKS)
+    specs = [parse_variant(text) for text in (variants if variants is not None else DEFAULT_BANK_VARIANTS)]
+    if len(set(spec['key'] for spec in specs)) != len(specs):
+        raise ValueError('the bank variants repeat: %s' % ', '.join(spec['key'] for spec in specs))
     pair_bytes = lever.weight_bytes(gate_shape) + lever.weight_bytes(up_shape)
-    section = dict(banks=banks, tuned=tuned, served_math_approx_mode=matching, chunks=list(chunks), pair_bytes=pair_bytes, rows=[], pair_us={}, chain={})
+    section = dict(banks=banks, tuned=tuned, served_math_approx_mode=matching, variants=[spec['key'] for spec in specs], chunks=sorted(set(spec['chunk'] for spec in specs)),
+                   pair_bytes=pair_bytes, rows=[], pair_us={}, chain={})
     l1, dram = ttnn.L1_MEMORY_CONFIG, ttnn.DRAM_MEMORY_CONFIG
 
-    def make(w1, w3, chunk, approx):
-        return bank_module.BankGateUp(ttnn, rig.mesh, w1, w3, chunk=chunk, grid=(rig.grid_x, rig.grid_y), math_approx_mode=approx, banks=banks)
+    def make(w1, w3, spec, approx):
+        options = dict()
+        if spec['depth'] != 2:
+            options['depth'] = spec['depth']
+        if spec['sub'] is not None:
+            options['sub'] = spec['sub']
+        if spec['ablate'] is not None:
+            options['ablate'] = spec['ablate']
+        return bank_module.BankGateUp(ttnn, rig.mesh, w1, w3, chunk=spec['chunk'], grid=(rig.grid_x, rig.grid_y), math_approx_mode=approx, banks=banks, **options)
 
     def served_pair(x, w1, w3, memory, configs):
         gate = rig.linear(x, w1, gate_shape, configs['mlp_w1'])
@@ -719,7 +760,11 @@ def bank_section(rig, bank_module, rounds=ROUNDS, clock=time.perf_counter, tuned
         rig.free(gate, up)
         return product
 
-    # -- exactness, both regimes, every chunk -----------------------------------------------------------------------------
+    def row_of_spec(spec, regime, approx, diagnostic):
+        return dict(regime=regime, variant=spec['key'], chunk=spec['chunk'], depth=spec['depth'], sub=spec['sub'] or spec['chunk'], ablate=spec['ablate'],
+                    math_approx_mode=approx, diagnostic=diagnostic)
+
+    # -- exactness, both regimes, every variant (ablations only built, to compile them) ----------------------------------
     for regime in REGIMES:
         x = rig.activation(gate_shape.k, regime=regime, seed=1)
         w1, w3 = rig.weight(gate_shape, 20, regime), rig.weight(up_shape, 30, regime)
@@ -727,13 +772,16 @@ def bank_section(rig, bank_module, rounds=ROUNDS, clock=time.perf_counter, tuned
             reference_tensor = served_pair(x, w1, w3, dram, served_cfg)
             reference = rig.read(reference_tensor)
             rig.free(reference_tensor)
-            variants = [(chunk, matching, False) for chunk in chunks]
+            wanted = [(spec, matching, False) for spec in specs if not spec['ablate']]
             if regime == 'random':
-                variants.append((bank_module.DEFAULT_CHUNK, not matching, True))       # the opposite SFPU mode once: the diagnostic if a product differs
-            for chunk, approx, diagnostic in variants:
-                row = dict(regime=regime, chunk=chunk, math_approx_mode=approx, diagnostic=diagnostic)
+                plain = [spec for spec in specs if not spec['ablate']]
+                diag = next((spec for spec in plain if spec['chunk'] == bank_module.DEFAULT_CHUNK and spec['depth'] == 2 and spec['sub'] is None), plain[0] if plain else None)
+                if diag is not None:
+                    wanted.append((diag, not matching, True))       # the opposite SFPU mode once: the diagnostic if a product differs
+            for spec, approx, diagnostic in wanted:
+                row = row_of_spec(spec, regime, approx, diagnostic)
                 try:
-                    op = make(w1, w3, chunk, approx)
+                    op = make(w1, w3, spec, approx)
                     row['workers'] = op.plan['workers']
                     row['request_bytes'] = op.plan.get('request_bytes')
                     product = op(x)
@@ -749,9 +797,12 @@ def bank_section(rig, bank_module, rounds=ROUNDS, clock=time.perf_counter, tuned
     # -- the pair, random data ---------------------------------------------------------------------------------------------
     x = rig.activation(gate_shape.k, seed=1)
     w1, w3 = rig.weight(gate_shape, 20), rig.weight(up_shape, 30)
-    exact_chunks = [chunk for chunk in chunks if all(row.get('exact') is True for row in section['rows']
-                                                       if row['chunk'] == chunk and not row['diagnostic'])
-                    and any(row['chunk'] == chunk and not row['diagnostic'] for row in section['rows'])]
+
+    def exact_everywhere(spec):
+        mine = [row for row in section['rows'] if row['variant'] == spec['key'] and not row['diagnostic']]
+        return bool(mine) and all(row.get('exact') is True for row in mine)
+
+    timed_specs = [spec for spec in specs if spec['ablate'] or exact_everywhere(spec)]
     arms, ops = {}, {}
     try:
         reference_tensor = served_pair(x, w1, w3, dram, served_cfg)
@@ -759,9 +810,13 @@ def bank_section(rig, bank_module, rounds=ROUNDS, clock=time.perf_counter, tuned
         rig.free(reference_tensor)
         runs = dict(served=lambda: served_pair(x, w1, w3, dram, served_cfg), l1_multiply=lambda: served_pair(x, w1, w3, l1, served_cfg),
                     tuned=lambda: served_pair(x, w1, w3, l1, tuned_cfg))
-        for chunk in exact_chunks:
-            ops[chunk] = make(w1, w3, chunk, matching)
-            runs['bank_c%d' % chunk] = lambda op=ops[chunk]: op(x)
+        for spec in timed_specs:
+            try:
+                ops[spec['key']] = make(w1, w3, spec, matching)
+            except BaseException as error:  # noqa: BLE001
+                section['rows'].append(dict(row_of_spec(spec, 'random', matching, False), error='%s: %s' % (type(error).__name__, str(error)[:300])))
+                continue
+            runs['bank_' + spec['key']] = lambda op=ops[spec['key']]: op(x)
         pair_exact = {}
         for name, run in runs.items():
             product = run()
@@ -769,33 +824,44 @@ def bank_section(rig, bank_module, rounds=ROUNDS, clock=time.perf_counter, tuned
             rig.free(product)
             arms[name] = rig.arm(run, SHORT, LONG)
         raced = rig.race(arms, rounds, clock)
-        section['pair_exact'] = pair_exact
+        ablated = set('bank_' + spec['key'] for spec in specs if spec['ablate'])
+        section['pair_exact'] = dict((name, value) for name, value in pair_exact.items() if name not in ablated)       # an ablation is not the served product by design
         for name, value in raced.items():
             section['pair_us'][name] = round(value['us'], 3)
         served_us = raced['served']['us']
+
+        def timing(us):
+            return dict(us=round(us, 3), delta_us=round(us - served_us, 3), gain_ms_pass=round(LAYERS * (served_us - us) / 1000.0, 3),
+                        gbps=round(pair_bytes / us / 1e3, 1), pct_peak=round(100.0 * pair_bytes / us / 1e3 / lever.PEAK_GBPS, 1))
+
+        placed = set()
         for row in section['rows']:
-            key = 'bank_c%d' % row['chunk']
-            if row['regime'] == 'random' and not row['diagnostic'] and key in raced:
-                us = raced[key]['us']
-                row.update(us=round(us, 3), delta_us=round(us - served_us, 3), gain_ms_pass=round(LAYERS * (served_us - us) / 1000.0, 3),
-                           gbps=round(pair_bytes / us / 1e3, 1), pct_peak=round(100.0 * pair_bytes / us / 1e3 / lever.PEAK_GBPS, 1))
+            key = 'bank_' + row['variant']
+            if row['regime'] == 'random' and not row['diagnostic'] and key in raced and key not in placed:
+                row.update(timing(raced[key]['us']))
+                placed.add(key)
+        for spec in specs:
+            key = 'bank_' + spec['key']
+            if spec['ablate'] and key in raced:
+                section['rows'].append(dict(row_of_spec(spec, 'random', matching, False), workers=ops[spec['key']].plan['workers'], **timing(raced[key]['us'])))
         section['served_pair_gbps'] = round(pair_bytes / served_us / 1e3, 1)
     finally:
         for arm in arms.values():
             rig.drop(arm)
         rig.free(x, w1, w3)
-    timed = [(section['pair_us']['bank_c%d' % chunk], chunk) for chunk in exact_chunks if 'bank_c%d' % chunk in section['pair_us']]
+    timed = [(section['pair_us']['bank_' + spec['key']], spec['key']) for spec in specs
+             if not spec['ablate'] and exact_everywhere(spec) and 'bank_' + spec['key'] in section['pair_us']]
     if not timed:
         section['decision'] = bank_decision(section)
         return section
-    best_chunk = min(timed)[1]
+    best = next(spec for spec in specs if spec['key'] == min(timed)[1])
 
-    # -- the chain, the fastest exact chunk --------------------------------------------------------------------------------
+    # -- the chain, the fastest exact variant ------------------------------------------------------------------------------
     sets = []
     for index in range(COMPOSE_SETS):
         sets.append(dict(x=rig.activation(gate_shape.k, seed=10 + index), w1=rig.weight(gate_shape, 20 + index), w3=rig.weight(up_shape, 30 + index),
                          w2=rig.weight(down_shape, 40 + index)))
-    bank_ops = [make(entry['w1'], entry['w3'], best_chunk, matching) for entry in sets]
+    bank_ops = [make(entry['w1'], entry['w3'], best, matching) for entry in sets]
 
     def chain(hidden, down_config):
         state = dict(i=0)
@@ -836,7 +902,8 @@ def bank_section(rig, bank_module, rounds=ROUNDS, clock=time.perf_counter, tuned
             captured[name] = rig.arm(run, COMPOSE_SHORT, COMPOSE_LONG)
         raced = rig.race(captured, rounds, clock)
         base = raced['served']['us']
-        section['chain'] = dict(chunk=best_chunk, tuned_down=tuned_d, sets=COMPOSE_SETS, chain_us=dict((name, round(value['us'], 3)) for name, value in raced.items()),
+        section['chain'] = dict(variant=best['key'], chunk=best['chunk'], depth=best['depth'], sub=best['sub'] or best['chunk'], tuned_down=tuned_d, sets=COMPOSE_SETS,
+                                chain_us=dict((name, round(value['us'], 3)) for name, value in raced.items()),
                                 exact=dict((name, differing(torch, outputs[name], outputs['served']) == 0) for name in outputs),
                                 gain_ms_pass=dict((name, round(LAYERS * (base - value['us']) / 1000.0, 3)) for name, value in raced.items() if name != 'served'))
     finally:
@@ -1068,7 +1135,8 @@ def main(argv=None, torch=None, ttnn=None, lever=None, fused_module=None, probe_
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--out', required=True)
     parser.add_argument('--shapes', default=DEFAULT_SHAPES, help='comma-separated: mlp_w1 mlp_w3 mlp_w2 (gate, up, down), gdn_in attn_in attn_wo gdn_out (R3), gate_bf8 up_bf8 (diagnostic: the same shapes with bfloat8_b weights)')
-    parser.add_argument('--arms', default='sweep,compose', help='comma-separated: sweep, compose, fused, probe (read granularity), split (SiLU out of the matmul), bank (the bank-strided fused op)')
+    parser.add_argument('--arms', default='sweep,compose', help='comma-separated: sweep, compose, fused, probe (read granularity), split (SiLU out of the matmul), bank (the bank-strided fused op), bankopt (its buffer-depth, subblock and ablation variants)')
+    parser.add_argument('--bank-variants', default='', help='comma-separated bank op variants c<chunk>[k<depth>][s<sub>][xskip|xsilu] for the bank and bankopt arms (default: c2,c3,c4 and the tuning list)')
     parser.add_argument('--tuned', default=TUNED_DEFAULT, help='the QWEN_FAST_MLP_CFG partition (g, u and d) the bank arm races the bank op against and takes its down from')
     parser.add_argument('--rounds', type=int, default=ROUNDS)
     parser.add_argument('--budget-s', type=int, default=DEFAULT_BUDGET_S, help='stop adding candidates after this many seconds')
@@ -1143,26 +1211,28 @@ def main(argv=None, torch=None, ttnn=None, lever=None, fused_module=None, probe_
             report['split'] = split_section(rig, options.rounds, clock)
             for row in report['split']['rows']:
                 print('MLP_GATEUP split %s' % json.dumps(row, sort_keys=True), flush=True)
-        if 'bank' in arms:
+        for arm_name, default_variants in (('bank', DEFAULT_BANK_VARIANTS), ('bankopt', BANKOPT_VARIANTS)):
+            if arm_name not in arms:
+                continue
             if bank_module is None:
                 import tp4_mlp_bank as bank_module
-            report['bank'] = bank_section(rig, bank_module, options.rounds, clock, options.tuned)
-            for row in report['bank']['rows']:
-                print('MLP_GATEUP bank %s' % json.dumps(row, sort_keys=True), flush=True)
-            print('MLP_GATEUP bank pair_us=%s exact=%s' % (json.dumps(report['bank']['pair_us'], sort_keys=True),
-                                                           json.dumps(report['bank'].get('pair_exact'), sort_keys=True)), flush=True)
-            if report['bank'].get('chain'):
-                print('MLP_GATEUP bank chain %s' % json.dumps(report['bank']['chain'], sort_keys=True), flush=True)
-            print('MLP_GATEUP bank verdict %s' % json.dumps(report['bank']['decision'], sort_keys=True), flush=True)
-            if report['bank']['decision'].get('env'):
-                print('MLP_GATEUP env %s' % ' '.join('%s=%s' % item for item in sorted(report['bank']['decision']['env'].items())), flush=True)
+            chosen = [text for text in options.bank_variants.split(',') if text] if options.bank_variants else default_variants
+            section = report[arm_name] = bank_section(rig, bank_module, options.rounds, clock, options.tuned, chosen)
+            for row in section['rows']:
+                print('MLP_GATEUP %s %s' % (arm_name, json.dumps(row, sort_keys=True)), flush=True)
+            print('MLP_GATEUP %s pair_us=%s exact=%s' % (arm_name, json.dumps(section['pair_us'], sort_keys=True), json.dumps(section.get('pair_exact'), sort_keys=True)), flush=True)
+            if section.get('chain'):
+                print('MLP_GATEUP %s chain %s' % (arm_name, json.dumps(section['chain'], sort_keys=True)), flush=True)
+            print('MLP_GATEUP %s verdict %s' % (arm_name, json.dumps(section['decision'], sort_keys=True)), flush=True)
+            if section['decision'].get('env'):
+                print('MLP_GATEUP env %s' % ' '.join('%s=%s' % item for item in sorted(section['decision']['env'].items())), flush=True)
         if summaries and all(key in summaries for key in ('mlp_w1', 'mlp_w3')):
             report['decision'] = decide(summaries, lever, (report.get('multiply_us') or {}).get('dram'))
             print('MLP_GATEUP verdict %s %s' % (report['decision']['verdict'], json.dumps(report['decision'], sort_keys=True)), flush=True)
             if report['decision'].get('env'):
                 print('MLP_GATEUP env QWEN_FAST_MLP_CFG=%s' % report['decision']['env']['QWEN_FAST_MLP_CFG'], flush=True)
         failed = [key for key in keys if summaries and not (summaries[key].get('served') and summaries[key].get('best_exact'))]
-        bank_inexact = 'bank' in report and report['bank']['decision']['verdict'] == 'BANK-INEXACT'
+        bank_inexact = any(report[name]['decision']['verdict'] == 'BANK-INEXACT' for name in ('bank', 'bankopt') if name in report)
         report['verdict'] = 'FAIL' if failed or bank_inexact else 'PASS'
         status = 1 if failed or bank_inexact else 0
     except BaseException as error:  # noqa: BLE001

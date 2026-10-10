@@ -26,6 +26,7 @@
 # Read: results/mlp-<stamp>.json (per shape every row with its time, GB/s, active cores, exactness; the summary; the composition; the decision) and the MLP_GATEUP
 # lines in the log: `MLP_GATEUP shape` one line per shape (served against best exact), `MLP_GATEUP compose`, `MLP_GATEUP verdict` (CONFIG-ENOUGH, BUILD-FUSED or
 # NEITHER, the rule in the harness docstring) and `MLP_GATEUP env QWEN_FAST_MLP_CFG=<name>`, the value to put in a profile.
+# The bankopt arm (CARD_B_ARGS="--arms bankopt", optionally --bank-variants c4,c4k3,...) times the bank op's buffer-depth, subblock and timing-only cut variants, with the same verdict rule.
 # The bank arm adds `MLP_GATEUP bank <row>` (chunk, regime, differing, us, GB/s), `MLP_GATEUP bank chain`, `MLP_GATEUP bank verdict` (BANK-GO, BANK-MARGINAL, BANK-NO-GAIN,
 # BANK-INEXACT or NO-RESULT) and `MLP_GATEUP env QWEN_FAST_MLP_GATEUP_BANK=1 ...`.
 #

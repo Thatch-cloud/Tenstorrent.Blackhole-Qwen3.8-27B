@@ -660,7 +660,8 @@ def bind_two_tile_attention(model, rows, operations, native_m3=False, native_att
 
 
 MLP_LEVER_FLAGS = ('QWEN_FAST_MLP_GATEUP', 'QWEN_FAST_MLP_GATEUP_AUDIT', 'QWEN_FAST_MLP_CFG', 'QWEN_FAST_MLP_CFG_AUDIT', 'QWEN_FAST_MLP_GATEUP_BANK',
-                   'QWEN_FAST_MLP_GATEUP_BANK_AUDIT', 'QWEN_FAST_MLP_GATEUP_BANK_CHUNK', 'QWEN_FAST_MLP_AUDIT_STRIDE')
+                   'QWEN_FAST_MLP_GATEUP_BANK_AUDIT', 'QWEN_FAST_MLP_GATEUP_BANK_CHUNK', 'QWEN_FAST_MLP_GATEUP_BANK_DEPTH',
+                   'QWEN_FAST_MLP_GATEUP_BANK_SUB', 'QWEN_FAST_MLP_AUDIT_STRIDE')
 
 
 def bind_two_tile_mlp(model, rows, operations, native_m3=False):
