@@ -9,11 +9,12 @@
 #   CARD_B_ARGS="--arms sweep,compose,fused" bash run_card_m.sh    # and the fused op (needs tp4_mlp_fused, built in the same checkout)
 #   CARD_B_ARGS="--shapes gdn_in,attn_in,attn_wo,gdn_out --arms sweep" bash run_card_m.sh      # R3: the other four 1D decode matmuls
 #   CARD_B_ARGS="--shapes gate_bf8,up_bf8 --arms sweep,probe,split" bash run_card_m.sh          # why the gate streams at half the down's rate: format, request size, SiLU
+#   CARD_B_ARGS="--arms bank" bash run_card_m.sh                                              # the bank-strided fused gate|up against the served pair and chain (BANK-GO / BANK-INEXACT ...)
 #
 # The grid is the device's own (130 workers on 13x10, 110 on 11x10). MLP_GRID_CLAMP (10,9, 11,9 or 12,9; set it in the job's C2_CARDM_ENV) reaches the container as
 # TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE, so one job can run the same sweep on the old 11x10 grid (the other card-M harnesses do not take the step's C2_TT_GRID;
 # this one takes its own variable so that test_c2_tt_grid's registry of clamp-forwarding harnesses stays what it is). Needs no weights and no fixtures. The scripts (tp4_mlp_gateup.py, tp_shapes.py, and for the fused arm tp4_mlp_fused.py with its two kernel
-# sources from scripts/ci; mlp_gateup_card_m.py, readprobe.py and its kernel from this directory) are mounted from THIS checkout, one file each: no image build.
+# sources from scripts/ci, and for the bank arm tp4_mlp_bank.py with its weights kernel; mlp_gateup_card_m.py, readprobe.py and its kernel from this directory) are mounted from THIS checkout, one file each: no image build.
 #
 # The image: IMAGE (a full image reference) if set, else the local image whose tag is qwen38-c2-$IMAGE_TAG (IMAGE_TAG comes from the job's C2_CARDM_ENV, a plain tag),
 # looked up in the local store at run time so no registry name is written here.
@@ -25,6 +26,8 @@
 # Read: results/mlp-<stamp>.json (per shape every row with its time, GB/s, active cores, exactness; the summary; the composition; the decision) and the MLP_GATEUP
 # lines in the log: `MLP_GATEUP shape` one line per shape (served against best exact), `MLP_GATEUP compose`, `MLP_GATEUP verdict` (CONFIG-ENOUGH, BUILD-FUSED or
 # NEITHER, the rule in the harness docstring) and `MLP_GATEUP env QWEN_FAST_MLP_CFG=<name>`, the value to put in a profile.
+# The bank arm adds `MLP_GATEUP bank <row>` (chunk, regime, differing, us, GB/s), `MLP_GATEUP bank chain`, `MLP_GATEUP bank verdict` (BANK-GO, BANK-MARGINAL, BANK-NO-GAIN,
+# BANK-INEXACT or NO-RESULT) and `MLP_GATEUP env QWEN_FAST_MLP_GATEUP_BANK=1 ...`.
 #
 # ON A HANG (the timeout's 124 / 137, or the harness watchdog's 3): the EXIT trap removes the container; then reset THE TARGET CARD ONLY with the hint printed below
 # (a tt-smi -r command that resolves the board id when it is run, and the PCI address that identifies its row in tt-smi -ls; never a bare index). This script never
@@ -384,7 +387,7 @@ fi
 
 # The files the harness runs, each mounted from this checkout.
 SM=()
-for file in tp4_mlp_gateup.py tp4_mlp_fused.py tp4_mlp_fused_input.cpp tp4_mlp_fused_weights.cpp tp_shapes.py; do
+for file in tp4_mlp_gateup.py tp4_mlp_fused.py tp4_mlp_fused_input.cpp tp4_mlp_fused_weights.cpp tp4_mlp_bank.py tp4_mlp_bank_weights.cpp tp_shapes.py; do
   src=$REPO/scripts/ci/$file
   test -s "$src" || { echo "$src missing" >&2; exit 1; }
   SM+=(--mount "type=bind,src=$src,dst=/bench/$file,readonly")

@@ -1,7 +1,7 @@
 {
   "wp": "WP4",
   "branch": "tp4/fx-wp4",
-  "description": "MLP gate/up: F-D2 (the multiply written to L1) with the streaming config, then F-D1 (gate and up as one launch with the SwiGLU epilogue)",
+  "description": "MLP gate/up: F-D2 (the multiply written to L1) with the streaming config, then F-D1 (gate and up as one launch with the SwiGLU epilogue); then F-D3 (the same fused launch with a bank-strided multi-tile weight reader)",
   "levers": [
     {
       "id": "mlpcfg",
@@ -24,6 +24,17 @@
       "fell_back": "[PINDIAG] tp4 mlp gateup fell back",
       "audit": "[PINDIAG] tp4 mlp gateup audit",
       "reason": "F-D1: the gate and up matmuls and their multiply become one launch (tp4_mlp_fused, a port of the TP2 FusedProjection to 64 rows and the TP4 shape, reading the served w1 and w3): the SiLU at the gate's pack, bf16 rounding of gate and up, a bf16 product left in L1 for the down matmul"
+    },
+    {
+      "id": "mlpbank",
+      "name": "MLP fused gate|up with a bank-strided weight reader",
+      "flag": "QWEN_FAST_MLP_GATEUP_BANK",
+      "value": "1",
+      "audit_flag": "QWEN_FAST_MLP_GATEUP_BANK_AUDIT",
+      "engaged": "[PINDIAG] tp4 mlp gateup engaged route=bank",
+      "fell_back": "[PINDIAG] tp4 mlp gateup fell back",
+      "audit": "[PINDIAG] tp4 mlp gateup audit",
+      "reason": "F-D3: the fused gate|up launch of F-D1 with each worker owning 4 columns of ONE DRAM bank and reading a tile row's run as one request (the card-M read probe C5: 403 GB/s at 4 tiles against 294 for the stock one-request-per-tile pattern), two compute subblocks (the gate run, the up run) and a paired SwiGLU epilogue, the served w1 and w3 read in place; QWEN_FAST_MLP_GATEUP_BANK_CHUNK=2|3|4 is the request size (default 4). It excludes QWEN_FAST_MLP_GATEUP, and QWEN_FAST_MLP_CFG may name only d and w beside it"
     }
   ],
   "profiles": [],
@@ -34,12 +45,16 @@
     {
       "arm": "mlpgu",
       "reason": "F-D1's fused kernels have never compiled on a card: run the card-M job C3 (fusion-jobs/WP4, the product against the served multiply, bit for bit) first, and these four-card arms last, so that a compile failure or a differing product costs the least of the window."
+    },
+    {
+      "arm": "mlpbank",
+      "reason": "F-D3's bank-strided kernels have never compiled on a card: run the card-M job C6 (fusion-jobs/WP4: the product against the served multiply bit for bit, the pair and the full chain timed against the served and the g3u4d3 chains) first. These four-card arms run last, and the lever joins the combined fx-all twin only after C6 reads BANK-GO (see the notes)."
     }
   ],
   "image_files": [
     {
       "path": "scripts/ci/two_tile_decode.py",
-      "reason": "this branch edits bind_two_tile_mlp (the lever's binder takes the MLP binder's place when one of the five QWEN_FAST_MLP_* flags is in the environment; with none the function returns what it returned); the image holds it at the P8 commit through the Dockerfile copy list, so an edit reaches it only through the overlay"
+      "reason": "this branch edits bind_two_tile_mlp (the lever's binder takes the MLP binder's place when one of the eight QWEN_FAST_MLP_* flags is in the environment; with none the function returns what it returned); the image holds it at the P8 commit through the Dockerfile copy list, so an edit reaches it only through the overlay"
     },
     {
       "path": "scripts/ci/tp4_mlp_gateup.py",
@@ -55,7 +70,15 @@
     },
     {
       "path": "scripts/ci/tp4_mlp_fused_weights.cpp",
-      "reason": "JIT source of the fused launch's weight reader and output writer"
+      "reason": "JIT source of the fused launch's weight reader and output writer (the padding slots of a short last worker are zeroed once before the K loop, not per K block)"
+    },
+    {
+      "path": "scripts/ci/tp4_mlp_bank.py",
+      "reason": "F-D3: the bank-strided fused gate|up launch (host plan, compute-kernel patch, program descriptors); bindings() imports it on QWEN_FAST_MLP_GATEUP_BANK=1"
+    },
+    {
+      "path": "scripts/ci/tp4_mlp_bank_weights.cpp",
+      "reason": "JIT source of the bank launch's weight reader (one request per tile row and tensor, bank-contiguous) and output writer; its activation multicast is tp4_mlp_fused_input.cpp"
     }
   ],
   "tests": [
@@ -68,11 +91,15 @@
       "reason": "F-D1: the host plan, the compute patch against fused_1d.fused_compute, the kernels' data movement transliterated, the program descriptors"
     },
     {
+      "module": "test_tp4_mlp_bank",
+      "reason": "F-D3: the bank plan on both grids and against the read probe's worker plan, the compute patch, the weights kernel's data movement transliterated over a reduced problem (bank-contiguous reads, two subblocks, paired epilogue, one-time zeroed padding), the program descriptors"
+    },
+    {
       "discover": "optimisation/ttnn-op/mlp_gateup",
       "reason": "the card-M harness's own tests (a new directory; the workflow runs the sibling harness directories the same way)"
     }
   ],
   "tp_addresses": {},
-  "card_jobs": "scripts/ci/references/fusion-jobs/WP4/ (ORDER.txt; C1 the card-M sweep FIRST, C2 the same on the 11x10 clamp (MLP_GRID_CLAMP in the job's C2_CARDM_ENV: the card-M harnesses do not take the step's C2_TT_GRID), C3 the fused op, C4 the other four 1D decode matmuls); the four-card audited attach and ABAB of the two levers come from make_fusion_jobs.py",
-  "notes": "What the integrator wires, in order: (1) packed_verifier, beside tile_collective_tp.audit_claim / audit_replayed / audit_round / audit_release: tp4_mlp_gateup.audit_claim(fixture, 'warm' or 'capture') after the warm forward and after the capture, tp4_mlp_gateup.audit_replayed(fixture) after each replay, tp4_mlp_gateup.audit_round(operations, fixture, round_number) with the other audit rounds, tp4_mlp_gateup.audit_release(operations, fixture) before the fixture closes; with the audit flags off nothing is held and the calls return 0. Without them an audited arm logs no 'audit ... exact=True' line and the fusion smoke rule fails it by name. (2) scripts/ci/two_tile_decode.py is edited by this branch (bind_two_tile_mlp: the lever's binder takes the MLP binder's place, in the same slot of the same four-tuple, only when one of the five QWEN_FAST_MLP_* names is in the environment; the module is not imported otherwise) and is listed under image_files. model_batch.py is NOT edited: test_quad_draft pins it to the serving bundle's text. (3) Two registries this branch cannot update for itself (one line each; every test green in the integrated tree, checked on fusion-1 plus this branch plus those two lines): scripts/ci/test_tp4_closure_literals.py SERVED needs `tp4_mlp_gateup tp4_mlp_fused` (two_tile_decode imports the first lazily and it imports the second; with them listed the test passes, scanned clean of pair literals), scripts/ci/test_serving_image_copy_closure.py C2_ONLY_PLAIN_IMPORTS needs `tp4_mlp_gateup.py` (two_tile_decode, a P8-copied module, plain-imports it under the flags only; it is overlay-only like the other op-fusion modules there), and the stricter smoke rule is named under smoke_rules (tp4_mlp_gateup_smoke.problems(env, container_text), host side, not shipped to the image: it adds the route and configuration name, rows=64, layers=64 and the L1 multiply to the generic fusion rules). (4) Not needed: tp_addresses rows (the lever binds an instance attribute per layer, no pinned module is twinned), profiles beyond the two levers (after card job C1 prints the tuned name, add {\"name\": \"mlpcfg-tuned\", \"env\": {\"QWEN_FAST_MLP_CFG\": \"<name>\"}, \"audit\": false} and its audited twin to profiles[] and regenerate). 13x10: nothing in the lever hard-codes a grid; the harness and the binder read compute_with_storage_grid_size, the sweep covers up to 130 cores, the fused op lays its workers on the device width."
+  "card_jobs": "scripts/ci/references/fusion-jobs/WP4/ (ORDER.txt; C1 the card-M sweep FIRST, C2 the same on the 11x10 clamp (MLP_GRID_CLAMP in the job's C2_CARDM_ENV: the card-M harnesses do not take the step's C2_TT_GRID), C3 the fused op, C4 the other four 1D decode matmuls, C5 the diagnostics (format, request size, SiLU split), C6 the bank-strided fused op against the served pair and chain); the four-card audited attach and ABAB of the three levers come from make_fusion_jobs.py",
+  "notes": "What the integrator wires, in order: (1) packed_verifier, beside tile_collective_tp.audit_claim / audit_replayed / audit_round / audit_release: tp4_mlp_gateup.audit_claim(fixture, 'warm' or 'capture') after the warm forward and after the capture, tp4_mlp_gateup.audit_replayed(fixture) after each replay, tp4_mlp_gateup.audit_round(operations, fixture, round_number) with the other audit rounds, tp4_mlp_gateup.audit_release(operations, fixture) before the fixture closes; with the audit flags off nothing is held and the calls return 0. Without them an audited arm logs no 'audit ... exact=True' line and the fusion smoke rule fails it by name. (2) scripts/ci/two_tile_decode.py is edited by this branch (bind_two_tile_mlp: the lever's binder takes the MLP binder's place, in the same slot of the same four-tuple, only when one of the eight QWEN_FAST_MLP_* names is in the environment; the module is not imported otherwise) and is listed under image_files. model_batch.py is NOT edited: test_quad_draft pins it to the serving bundle's text. (3) Two registries this branch cannot update for itself (one line each; every test green in the integrated tree, checked on fusion-1 plus this branch plus those two lines): scripts/ci/test_tp4_closure_literals.py SERVED needs `tp4_mlp_gateup tp4_mlp_fused tp4_mlp_bank` (two_tile_decode imports the first lazily and it imports the second; with them listed the test passes, scanned clean of pair literals), scripts/ci/test_serving_image_copy_closure.py C2_ONLY_PLAIN_IMPORTS needs `tp4_mlp_gateup.py` (two_tile_decode, a P8-copied module, plain-imports it under the flags only; it is overlay-only like the other op-fusion modules there), and the stricter smoke rule is named under smoke_rules (tp4_mlp_gateup_smoke.problems(env, container_text), host side, not shipped to the image: it adds the route and configuration name, rows=64, layers=64 and the L1 multiply to the generic fusion rules). (4) Not needed: tp_addresses rows (the lever binds an instance attribute per layer, no pinned module is twinned), profiles beyond the two levers (after card job C1 prints the tuned name, add {\"name\": \"mlpcfg-tuned\", \"env\": {\"QWEN_FAST_MLP_CFG\": \"<name>\"}, \"audit\": false} and its audited twin to profiles[] and regenerate). 13x10: nothing in the lever hard-codes a grid; the harness and the binder read compute_with_storage_grid_size, the sweep covers up to 130 cores, the fused op lays its workers on the device width. (5) F-D3 (mlpbank, QWEN_FAST_MLP_GATEUP_BANK=1, audit QWEN_FAST_MLP_GATEUP_BANK_AUDIT, chunk QWEN_FAST_MLP_GATEUP_BANK_CHUNK=2|3|4, default 4): the first registry of (3) also takes tp4_mlp_bank (test_tp4_closure_literals.py SERVED needs `tp4_mlp_gateup tp4_mlp_fused tp4_mlp_bank`: tp4_mlp_gateup.bindings imports it lazily; checked: without it the test names ('tp4_mlp_bank', tp4_mlp_gateup, bindings) unclassified; C2_ONLY_PLAIN_IMPORTS stays `tp4_mlp_gateup.py` alone, since tp4_mlp_bank is imported by an overlay-only module), and the overlay takes the two new image_files. The lever is pack_last and is NOT to be added to the combined fx-all twin until the card-M job C6 (fusion-jobs/WP4) reads BANK-GO (exact on every chunk it keeps, and a gain over the g3u4d3 chain); then fx-all takes lever mlpbank with the mlpcfg value changed from g3u4d3 to d3 (QWEN_FAST_MLP_CFG may not name g or u beside the bank lever: resolve() refuses the profile at warm, and the smoke rule reports it), and WP0's smoke row for QWEN_FAST_MLP_CFG g3u4d3 becomes d3. The same change zeroes the padding slots of F-D1's short last worker once before the K loop (tp4_mlp_fused_weights.cpp): C3 should be rerun for p3/p5/p7 if F-D1 is still wanted."
 }

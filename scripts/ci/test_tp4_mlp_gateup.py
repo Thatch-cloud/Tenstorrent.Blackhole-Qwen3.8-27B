@@ -842,6 +842,212 @@ class BinderTests(unittest.TestCase):
         self.assertEqual(binder.plan.down.per_core_N, 4)
 
 
+class BankLeverTests(unittest.TestCase):
+    """F-D3 (QWEN_FAST_MLP_GATEUP_BANK): the flag grammar, the plan, the forward, the audit, the binder and the smoke rule of the bank-strided fused route."""
+
+    def setUp(self):
+        lever.forget_logged()
+        self.fake = Fake()
+        self.mlp, unused = make_mlp(self.fake)
+        self.x = activation()
+        self.served, self.served_calls = run_served(self.fake, self.mlp, self.x)
+
+    # -- flags --------------------------------------------------------------------------------------------------------------
+    def test_the_flag_is_strict_and_the_default_chunk_is_four(self):
+        with env(QWEN_FAST_MLP_GATEUP_BANK='1'):
+            selection = lever.resolve()
+            self.assertEqual((selection.route, selection.name, selection.chunk, selection.pairs, selection.audit), ('bank', 'b4', 4, None, False))
+            self.assertTrue(lever.requested())
+        with env(QWEN_FAST_MLP_GATEUP_BANK='0'):
+            self.assertIsNone(lever.resolve().route)
+        for bad in ('2', 'true', '', ' 1', 'on'):
+            with env(QWEN_FAST_MLP_GATEUP_BANK=bad), self.assertRaises(ValueError):
+                lever.resolve()
+
+    def test_the_chunk_is_a_knob_with_three_values_and_needs_the_lever(self):
+        for chunk in (2, 3, 4):
+            with env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP_BANK_CHUNK=str(chunk)):
+                selection = lever.resolve()
+                self.assertEqual((selection.chunk, selection.name), (chunk, 'b%d' % chunk))
+        for bad in ('1', '5', '6', '8', '0', '04', 'x', '', '4.0', '-4'):
+            with self.subTest(chunk=bad), env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP_BANK_CHUNK=bad), self.assertRaises(ValueError):
+                lever.resolve()
+        with env(QWEN_FAST_MLP_GATEUP_BANK_CHUNK='4'), self.assertRaises(ValueError):
+            lever.resolve()
+        with env(QWEN_FAST_MLP_GATEUP='1', QWEN_FAST_MLP_GATEUP_BANK_CHUNK='4'), self.assertRaises(ValueError):
+            lever.resolve()
+
+    def test_the_audit_needs_the_bank_lever_and_the_stride_counts_it_as_one(self):
+        with env(QWEN_FAST_MLP_GATEUP_BANK_AUDIT='1'), self.assertRaises(ValueError):
+            lever.resolve()
+        with env(QWEN_FAST_MLP_GATEUP_AUDIT='1', QWEN_FAST_MLP_GATEUP_BANK='1'), self.assertRaises(ValueError):
+            lever.resolve()
+        with env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP_BANK_AUDIT='1'):
+            self.assertTrue(lever.resolve().audit)
+        with env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_AUDIT_STRIDE='2'):
+            self.assertEqual(lever.resolve().stride, 2)
+        with env(QWEN_FAST_MLP_AUDIT_STRIDE='2'), self.assertRaises(ValueError):
+            lever.resolve()
+
+    def test_the_bank_and_fused_ops_exclude_each_other_and_the_cfg_names_only_the_down_and_the_width(self):
+        with env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP='1'), self.assertRaisesRegex(ValueError, 'pick one'):
+            lever.resolve()
+        for name in ('g2', 'u3', 'g3u4d3', 'p4', 'd3p4'):
+            with self.subTest(cfg=name), env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_CFG=name), self.assertRaises(ValueError):
+                lever.resolve()
+        with env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_CFG='d3'):
+            selection = lever.resolve()
+            self.assertEqual((selection.route, selection.name), ('bank', 'b4d3'))
+        with env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP_BANK_CHUNK='3', QWEN_FAST_MLP_CFG='d3w12'):
+            self.assertEqual(lever.resolve().name, 'b3d3w12')
+        with env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_CFG='w12'):
+            self.assertEqual(lever.resolve().name, 'b4w12')
+        with env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_CFG='l1'):
+            self.assertEqual(lever.resolve().name, 'b4')
+
+    def test_the_bank_flags_are_tp4_only_and_part_of_the_hooks_list(self):
+        pair = dict((key, value) for key, value in FOUR.items())
+        pair['QWEN_FAST_TP'] = '2'
+        with env(QWEN_FAST_MLP_GATEUP_BANK='1', **pair), self.assertRaisesRegex(ValueError, 'TP4'):
+            lever.resolve()
+        for name in (lever.BANK, lever.BANK_AUDIT, lever.BANK_CHUNK):
+            self.assertIn(name, lever.ALL_FLAGS)
+
+    # -- the plan -----------------------------------------------------------------------------------------------------------
+    def test_the_plan_replaces_the_gate_and_up_and_carries_the_chunk(self):
+        plan = plan_of(self.fake, self.mlp, QWEN_FAST_MLP_GATEUP_BANK='1')
+        self.assertEqual((plan.route, plan.gate, plan.up, plan.chunk, plan.fused_pairs), ('bank', None, None, 4, None))
+        self.assertIs(plan.down, self.mlp.args.mlp_w2_decode_1d_progcfg_64)
+        plan = plan_of(self.fake, self.mlp, QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP_BANK_CHUNK='3', QWEN_FAST_MLP_CFG='d3')
+        self.assertEqual((plan.chunk, plan.down.per_core_N, plan.name), (3, 3, 'b3d3'))
+        self.assertEqual(lever.same_k_loop(self.mlp.args.mlp_w2_decode_1d_progcfg_64, plan.down), [])
+        self.assertIn('gate=bank/c3 up=bank/c3', plan.describe())
+
+    # -- the forward --------------------------------------------------------------------------------------------------------
+    def test_the_bank_route_is_one_launch_for_the_gate_and_up_then_the_down(self):
+        plan = plan_of(self.fake, self.mlp, QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_CFG='d3')
+        out, calls, forward = run_twin(self.fake, self.mlp, self.x, plan, fused=fake_fused(self.fake, self.mlp))
+        self.assertEqual([call[0] for call in calls], ['to_memory_config', 'fused', 'linear', 'all_reduce'])
+        self.assertEqual(calls[2][2:5], ('w2', ('cfg', (13, 5), 3, 8, None), 'L1'), 'the down at d3: 54 cores on a 13 wide rectangle')
+        self.assertTrue(torch.equal(out.view(torch.int16), self.served.view(torch.int16)))
+
+    def test_the_engaged_line_names_the_route_the_chunk_and_the_down(self):
+        lines = []
+        with mock.patch.object(lever, 'log_line', lines.append):
+            plan = plan_of(self.fake, self.mlp, QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_CFG='d3')
+            lever.Tp4MlpBinding(types.SimpleNamespace(layers=[types.SimpleNamespace(feed_forward=self.mlp)] * 2), ROWS, self.fake.ttnn, plan,
+                                fused=[fake_fused(self.fake, self.mlp)] * 2)
+            run_twin(self.fake, self.mlp, self.x, plan, fused=fake_fused(self.fake, self.mlp))
+        engaged = [line for line in lines if line.startswith(lever.ENGAGED)]
+        self.assertEqual(len(engaged), 1)
+        self.assertIn('route=bank name=b4d3 rows=64 layers=2 gate=bank/c4 up=bank/c4 down=13x5/pcn3/blk8/sub1x3', engaged[0])
+        self.assertIn('l1_multiply=1 audit=0', engaged[0])
+
+    # -- the audit ----------------------------------------------------------------------------------------------------------
+    def test_the_audit_compares_the_bank_product_with_the_served_composition_and_labels_its_route(self):
+        plan = plan_of(self.fake, self.mlp, QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP_BANK_AUDIT='1')
+        out, calls, forward = run_twin(self.fake, self.mlp, self.x, plan, fused=fake_fused(self.fake, self.mlp))
+        self.assertEqual({pair['route'] for pair in lever._HELD}, {'bank'})
+        self.assertEqual({pair['name'] for pair in lever._HELD}, {'b4'})
+        self.assertEqual([call[0] for call in calls].count('all_reduce'), 1, 'one all-reduce a layer, audited or not')
+        self.assertTrue(torch.equal(out.view(torch.int16), self.served.view(torch.int16)), 'the served partial is the one reduced and returned')
+        owner = object()
+        lever.audit_claim(owner)
+        lever.audit_replayed(owner)
+        lines = []
+        lever.audit_round(self.fake.ttnn, owner, 1, log=lines.append)
+        self.assertIn('exact=True route=bank name=b4', lines[0])
+
+    def test_a_differing_bank_product_is_a_mismatch(self):
+        plan = plan_of(self.fake, self.mlp, QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP_BANK_AUDIT='1')
+        good = fake_fused(self.fake, self.mlp)
+
+        def off_by_one_bit(x):
+            product = good(x)
+            product.view(torch.int16).flatten()[3] ^= 1
+            return product
+
+        run_twin(self.fake, self.mlp, self.x, plan, fused=off_by_one_bit)
+        owner = object()
+        lever.audit_claim(owner)
+        lever.audit_replayed(owner)
+        lines = []
+        with self.assertRaisesRegex(AssertionError, 'audit mismatch'):
+            lever.audit_round(self.fake.ttnn, owner, 1, log=lines.append)
+        self.assertIn('route=bank name=b4 exact=False', lines[0])
+
+    # -- the binder ---------------------------------------------------------------------------------------------------------
+    def test_the_binder_builds_one_bank_op_per_layer_with_the_chunk_and_the_served_approximation_mode(self):
+        model = model_of(self.fake, layers=2)
+        built = []
+
+        class Op(object):
+            def __init__(self, operations, mesh, w1, w3, **options):
+                built.append((mesh, w1, w3, options))
+
+        module = types.ModuleType('tp4_mlp_bank')
+        module.BankGateUp = Op
+        with mock.patch.dict(sys.modules, {'tp4_mlp_bank': module}), env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_GATEUP_BANK_CHUNK='3',
+                                                                       QWEN_FAST_MLP_CFG='d3w12'):
+            (binder,) = lever.bindings(model, 64, self.fake.ttnn)
+        self.assertEqual(len(built), 2)
+        self.assertIs(built[0][1], model.layers[0].feed_forward.weights.w1)
+        self.assertIs(built[1][2], model.layers[1].feed_forward.weights.w3)
+        self.assertEqual(built[0][3], dict(chunk=3, grid=(13, 10), width=12, math_approx_mode=True))
+        self.assertEqual((binder.plan.chunk, binder.plan.down.per_core_N), (3, 3))
+        self.assertEqual(binder.expected_calls, 2)
+
+    def test_a_bank_launch_that_cannot_be_built_binds_nothing(self):
+        model = model_of(self.fake, layers=2)
+        lines = []
+
+        class Broken(object):
+            def __init__(self, *args, **options):
+                raise ValueError('136 tile columns are not a multiple of the 7 DRAM banks')
+
+        module = types.ModuleType('tp4_mlp_bank')
+        module.BankGateUp = Broken
+        with mock.patch.dict(sys.modules, {'tp4_mlp_bank': module}), mock.patch.object(lever, 'log_line', lines.append), env(QWEN_FAST_MLP_GATEUP_BANK='1'):
+            self.assertEqual(lever.bindings(model, 64, self.fake.ttnn), ())
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith(lever.FALLBACK + ' reason=') and 'DRAM banks' in lines[0], lines)
+
+    def test_a_bad_bank_flag_combination_still_raises_at_the_warm(self):
+        with env(QWEN_FAST_MLP_GATEUP_BANK='1', QWEN_FAST_MLP_CFG='g3u4d3'), self.assertRaises(ValueError):
+            lever.bindings(model_of(self.fake), 64, self.fake.ttnn)
+
+    def test_the_real_bank_module_imports_where_the_lever_does_and_shares_its_chunks(self):
+        import tp4_mlp_bank
+        self.assertEqual(tp4_mlp_bank.CHUNKS, lever.BANK_CHUNKS)
+        self.assertEqual(tp4_mlp_bank.DEFAULT_CHUNK, lever.DEFAULT_BANK_CHUNK)
+        self.assertIn('tp4_mlp_bank.py', lever.RUNTIME_FILES)
+        self.assertIn('tp4_mlp_bank_weights.cpp', lever.RUNTIME_FILES)
+
+    # -- the smoke rule -----------------------------------------------------------------------------------------------------
+    def check(self, env_, *lines):
+        return smoke.problems(dict(env_), '\n'.join(('2026-10-11 INFO ' + line) for line in lines))
+
+    def test_the_bank_route_and_its_canonical_name_are_what_the_smoke_rule_asks_for(self):
+        env_ = {'QWEN_FAST_TP': '4', 'QWEN_FAST_MLP_GATEUP_BANK': '1', 'QWEN_FAST_MLP_CFG': 'd3'}
+        self.assertEqual(self.check(env_, engaged_line('bank', 'b4d3')), [])
+        found = self.check(env_, engaged_line('bank', 'b4'))
+        self.assertTrue(found and 'route=bank name=b4d3' in found[0], found)
+        found = self.check(env_, engaged_line('fused', 'p3'))
+        self.assertTrue(found and 'route=bank name=b4d3' in found[0], found)
+        audited = dict(env_, QWEN_FAST_MLP_GATEUP_BANK_AUDIT='1')
+        self.assertEqual(self.check(audited, engaged_line('bank', 'b4d3', audit=1), audit_line('bank', 'b4d3')), [])
+        self.assertIn('no passing audit line', self.check(audited, engaged_line('bank', 'b4d3', audit=1), audit_line('bank', 'b4'))[0])
+
+    def test_a_chunk_the_profile_names_is_the_chunk_the_log_must_show(self):
+        env_ = {'QWEN_FAST_TP': '4', 'QWEN_FAST_MLP_GATEUP_BANK': '1', 'QWEN_FAST_MLP_GATEUP_BANK_CHUNK': '3'}
+        self.assertEqual(self.check(env_, engaged_line('bank', 'b3')), [])
+        self.assertIn('route=bank name=b3', self.check(env_, engaged_line('bank', 'b4'))[0])
+
+    def test_a_profile_the_lever_refuses_is_reported_by_the_smoke_rule(self):
+        found = self.check({'QWEN_FAST_TP': '4', 'QWEN_FAST_MLP_GATEUP_BANK': '1', 'QWEN_FAST_MLP_CFG': 'g3u4d3'}, '')
+        self.assertTrue(found and 'not a configuration' in found[0], found)
+
+
 class HookTests(unittest.TestCase):
     """two_tile_decode.bind_two_tile_mlp (reached through model_batch.two_tile_bindings, which is not edited) hands the lever's binder the MLP's place when a flag
     asks and binds nothing new otherwise."""
@@ -1061,8 +1267,18 @@ class FileTests(unittest.TestCase):
         text = (FOLDER / 'C1-mlp-sweep.env').read_text(encoding='utf-8')
         self.assertIn('C2_CARDM_ARGS=--shapes mlp_w1,mlp_w3,mlp_w2 --arms sweep,compose', text)
 
+    def test_the_bank_job_runs_the_bank_arm_alone_after_the_diagnostics(self):
+        order = [line.split() for line in (FOLDER / 'ORDER.txt').read_text(encoding='utf-8').splitlines() if line.strip() and not line.startswith('#')]
+        names = [row[0] for row in order]
+        self.assertLess(names.index('C5-mlp-diagnostics'), names.index('C6-mlp-bank'))
+        text = (FOLDER / 'C6-mlp-bank.env').read_text(encoding='utf-8')
+        self.assertIn('C2_CARDM_ARGS=--arms bank\n', text)
+        self.assertNotIn('MLP_GRID_CLAMP', text, 'the served 13x10 grid')
+        for word in ('BANK-GO', 'BANK-INEXACT', 'MLP_GATEUP bank verdict', 'd3'):
+            self.assertIn(word, text)
+
     def test_new_source_files_name_no_rig_address_registry_or_digest(self):
-        for name in lever.RUNTIME_FILES + ('tp4_mlp_gateup_smoke.py', 'test_tp4_mlp_gateup.py', 'test_tp4_mlp_fused.py'):
+        for name in lever.RUNTIME_FILES + ('tp4_mlp_gateup_smoke.py', 'test_tp4_mlp_gateup.py', 'test_tp4_mlp_fused.py', 'test_tp4_mlp_bank.py'):
             text = (HERE / name).read_text(encoding='utf-8')
             if not name.startswith('test_'):
                 self.assertIsNone(BANNED.search(text), name)

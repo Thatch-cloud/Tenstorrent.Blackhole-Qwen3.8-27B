@@ -21,25 +21,33 @@ void kernel_main() {
     const auto gate = TensorAccessor(gate_args, gate_address, 576);
     const auto up = TensorAccessor(up_args, up_address, 576);
     const auto output = TensorAccessor(output_args, output_address, 2048);
+    // The padding slots of a short last worker (pair >= valid_pairs) are zeroed ONCE, before the K loop, in both halves of the two-block weight circular buffer: this kernel never
+    // writes them again and the compute kernel never writes this buffer, so they stay zero. (Zeroing them per K block cost 20 blocks of 288-word stores per padding pair on the
+    // reader RISC: the p3/p5/p7 pathology the first card run measured, +274 / +630 / +659 microseconds.)
+    if (valid_pairs < pairs_per_worker) {
+        const uint32_t base = get_write_ptr(1);          // nothing is reserved or pushed yet: the base of the buffer
+        for (uint32_t slot_row = 0; slot_row < 2 * block_tiles; ++slot_row) {
+            for (uint32_t pair = valid_pairs; pair < pairs_per_worker; ++pair) {
+                const uint32_t gate_tile = base + (slot_row * 2 * pairs_per_worker + 2 * pair) * 576;
+                volatile tt_l1_ptr uint32_t* gate_zeros = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(gate_tile);
+                volatile tt_l1_ptr uint32_t* up_zeros = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(gate_tile + 576);
+                for (uint32_t word = 0; word < 144; ++word) {
+                    gate_zeros[word] = 0;
+                    up_zeros[word] = 0;
+                }
+            }
+        }
+    }
     for (uint32_t block = 0; block < k_blocks; ++block) {
         cb_reserve_back(1, 2 * block_tiles * pairs_per_worker);
         const uint32_t destination = get_write_ptr(1);
         for (uint32_t inner = 0; inner < block_tiles; ++inner) {
-            for (uint32_t pair = 0; pair < pairs_per_worker; ++pair) {
+            for (uint32_t pair = 0; pair < valid_pairs; ++pair) {
                 const uint32_t gate_tile = destination + (inner * 2 * pairs_per_worker + 2 * pair) * 576;
                 const uint32_t up_tile = gate_tile + 576;
-                if (pair < valid_pairs) {
-                    const uint32_t page = (block * block_tiles + inner) * pair_columns + first_pair + pair;
-                    noc_async_read_tile(page, gate, gate_tile);
-                    noc_async_read_tile(page, up, up_tile);
-                } else {
-                    volatile tt_l1_ptr uint32_t* gate_zeros = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(gate_tile);
-                    volatile tt_l1_ptr uint32_t* up_zeros = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(up_tile);
-                    for (uint32_t word = 0; word < 144; ++word) {
-                        gate_zeros[word] = 0;
-                        up_zeros[word] = 0;
-                    }
-                }
+                const uint32_t page = (block * block_tiles + inner) * pair_columns + first_pair + pair;
+                noc_async_read_tile(page, gate, gate_tile);
+                noc_async_read_tile(page, up, up_tile);
             }
         }
         noc_async_read_barrier();

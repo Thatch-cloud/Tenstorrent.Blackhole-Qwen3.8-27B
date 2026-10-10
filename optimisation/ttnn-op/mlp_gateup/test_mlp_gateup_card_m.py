@@ -711,6 +711,168 @@ class SplitSectionTests(unittest.TestCase):
 # The run script.
 # ---------------------------------------------------------------------------------------------------------------------------
 
+class FakeBank(object):
+    """The bank module's BankGateUp stand-in: the unfused arithmetic in one call, a cost of 30 us less one per chunk, and one flipped bit when the SFPU approximation mode is not the
+    served one (or for the chunks in `inexact`), as a card might show."""
+
+    built = []
+    inexact = ()
+    cost = staticmethod(lambda chunk: 30.0 - chunk)
+
+    def __init__(self, operations, mesh, w1, w3, chunk=4, grid=(13, 10), width=None, math_approx_mode=None, banks=None, **options):
+        self.ttnn, self.w1, self.w3, self.chunk, self.approx = operations, w1, w3, chunk, math_approx_mode
+        self.plan = dict(workers=-(-136 // 8 // chunk) * 8, request_bytes=chunk * 576)
+        FakeBank.built.append((chunk, math_approx_mode, grid, banks))
+
+    def __call__(self, x):
+        gate = x.data.float() @ self.w1.data.float()
+        gate = (gate * torch.sigmoid(gate)).to(torch.bfloat16)
+        up = (x.data.float() @ self.w3.data.float()).to(torch.bfloat16)
+        out = (gate.float() * up.float()).to(torch.bfloat16)
+        if self.approx is not True or self.chunk in FakeBank.inexact:
+            out.view(torch.int16)[0, 0, 0, 0] ^= 1
+        self.ttnn.spend(FakeBank.cost(self.chunk))
+        return Tensor(out)
+
+
+def fake_bank_module():
+    return types.SimpleNamespace(BankGateUp=FakeBank, CHUNKS=(2, 3, 4), DEFAULT_CHUNK=4)
+
+
+class BankArmTests(unittest.TestCase):
+    def setUp(self):
+        FakeBank.built.clear()
+        FakeBank.inexact = ()
+
+    def run_bank(self, ttnn, extra=()):
+        out = Path(tempfile.mkdtemp()) / 'report.json'
+        shapes = small_shapes()
+        with mock.patch.dict(os.environ, dict(QWEN_FAST_TP='4')), mock.patch.object(lever, 'shapes', lambda tp=4: shapes), \
+                mock.patch.object(harness, 'WATCHDOG_S', 3600):
+            status = harness.main(['--out', str(out), '--rounds', '3', '--arms', 'bank'] + list(extra), torch=torch, ttnn=ttnn, lever=lever,
+                                  bank_module=fake_bank_module(), clock=ttnn.clock)
+        return status, json.loads(out.read_text())
+
+    @staticmethod
+    def served_cost(config, shape):
+        return 40.0 if config.per_core_N == 1 else 20.0           # the small shapes' served partition is per_core_N 1; the tuned g3u4d3 is wider and "faster"
+
+    def test_every_chunk_is_built_compared_on_both_regimes_timed_and_chained(self):
+        ttnn = FakeTTNN(cost=self.served_cost)
+        status, report = self.run_bank(ttnn)
+        self.assertEqual(status, 0, report.get('error'))
+        section = report['bank']
+        rows = section['rows']
+        self.assertEqual([(row['regime'], row['chunk'], row['diagnostic']) for row in rows],
+                         [('random', 2, False), ('random', 3, False), ('random', 4, False), ('random', 4, True),
+                          ('edge', 2, False), ('edge', 3, False), ('edge', 4, False)])
+        self.assertTrue(all(row['exact'] for row in rows if not row['diagnostic']), rows)
+        diagnostic = [row for row in rows if row['diagnostic']][0]
+        self.assertEqual((diagnostic['math_approx_mode'], diagnostic['exact'], diagnostic['differing']), (False, False, 1))
+        self.assertEqual(section['banks'], 8)
+        self.assertEqual(FakeBank.built[0], (2, True, (13, 10), 8))
+        # the served pair is two projections of 40 and the multiply of 4; the fake bank op costs 30 - chunk
+        self.assertAlmostEqual(section['pair_us']['served'], 84.0, delta=0.01)
+        self.assertAlmostEqual(section['pair_us']['bank_c4'], 26.0, delta=0.01)
+        self.assertAlmostEqual(section['pair_us']['bank_c2'], 28.0, delta=0.01)
+        timed = dict((row['chunk'], row) for row in rows if row['regime'] == 'random' and not row['diagnostic'])
+        self.assertAlmostEqual(timed[4]['gain_ms_pass'], 64 * (84.0 - 26.0) / 1000.0, delta=0.01)
+        self.assertAlmostEqual(timed[4]['gbps'], section['pair_bytes'] / 26.0 / 1e3, delta=0.1)
+        self.assertNotIn('us', [row for row in rows if row['regime'] == 'edge'][0], 'the edge regime is a comparison, not a timing')
+        chain = section['chain']
+        self.assertEqual((chain['chunk'], chain['tuned_down']), (4, 3))
+        self.assertTrue(all(chain['exact'].values()), chain)
+        self.assertAlmostEqual(chain['chain_us']['served'], 124.0, delta=0.05)
+        self.assertAlmostEqual(chain['chain_us']['bank_served_down'], 26.0 + 40.0, delta=0.05)
+        self.assertAlmostEqual(chain['chain_us']['bank_tuned_down'], 26.0 + 20.0, delta=0.05)
+        decision = section['decision']
+        self.assertEqual(decision['verdict'], 'BANK-GO')
+        self.assertEqual(decision['env'], {'QWEN_FAST_MLP_GATEUP_BANK': '1', 'QWEN_FAST_MLP_GATEUP_BANK_CHUNK': '4', 'QWEN_FAST_MLP_CFG': 'd3'})
+        self.assertAlmostEqual(decision['gain_vs_tuned_ms_pass'], 64 * ((20.0 + 20.0 + 3.0 + 20.0) - (26.0 + 20.0)) / 1000.0, delta=0.01)
+        self.assertEqual(report['verdict'], 'PASS')
+
+    def test_a_chunk_whose_product_differs_is_never_chained_and_the_verdict_is_inexact(self):
+        ttnn = FakeTTNN(cost=self.served_cost)
+        FakeBank.inexact = (4,)
+        status, report = self.run_bank(ttnn)
+        section = report['bank']
+        self.assertEqual(section['decision']['verdict'], 'BANK-INEXACT')
+        self.assertEqual(sorted(set(row['chunk'] for row in section['rows'] if row['exact'] is False and not row['diagnostic'])), [4])
+        self.assertEqual(section['chain']['chunk'], 3, 'the fastest EXACT chunk is chained, never the inexact 4')
+        self.assertNotIn('bank_c4', section['pair_us'])
+        self.assertEqual((status, report['verdict']), (1, 'FAIL'))
+
+    def test_a_build_that_fails_is_a_row_and_the_rest_still_run(self):
+        ttnn = FakeTTNN(cost=self.served_cost)
+        original = FakeBank.__init__
+
+        def refusing(self, operations, mesh, w1, w3, chunk=4, **options):
+            if chunk == 3:
+                raise RuntimeError('TT_FATAL: kernel compile failed')
+            original(self, operations, mesh, w1, w3, chunk=chunk, **options)
+
+        with mock.patch.object(FakeBank, '__init__', refusing):
+            status, report = self.run_bank(ttnn)
+        section = report['bank']
+        failed = [row for row in section['rows'] if row['chunk'] == 3]
+        self.assertTrue(failed and all('kernel compile failed' in row['error'] for row in failed))
+        self.assertNotIn('bank_c3', section['pair_us'])
+        self.assertIn('bank_c4', section['pair_us'])
+        self.assertEqual(section['decision']['verdict'], 'BANK-GO')
+        self.assertEqual(status, 0)
+
+    def test_the_verdict_words(self):
+        base = dict(rows=[dict(regime='random', chunk=4, diagnostic=False, exact=True, differing=0, us=26.0)],
+                    chain=dict(chunk=4, tuned_down=3, exact={'served': True, 'bank_tuned_down': True},
+                               chain_us={'served': 124.0, 'tuned': 100.0, 'bank_tuned_down': 90.0}))
+        self.assertEqual(harness.bank_decision(base)['verdict'], 'BANK-GO')                      # 10 us x 64 = 0.64 ms over the tuned chain
+        marginal = dict(base, chain=dict(base['chain'], chain_us={'served': 124.0, 'tuned': 91.0, 'bank_tuned_down': 90.0}))
+        self.assertEqual(harness.bank_decision(marginal)['verdict'], 'BANK-MARGINAL')            # 34 us over the served chain, 1 us over the tuned
+        flat = dict(base, chain=dict(base['chain'], chain_us={'served': 91.0, 'tuned': 91.0, 'bank_tuned_down': 90.0}))
+        self.assertEqual(harness.bank_decision(flat)['verdict'], 'BANK-NO-GAIN')
+        wrong = dict(base, chain=dict(base['chain'], exact={'served': True, 'bank_tuned_down': False}))
+        self.assertEqual(harness.bank_decision(wrong)['verdict'], 'BANK-INEXACT')
+        bad_row = dict(base, rows=base['rows'] + [dict(regime='edge', chunk=3, diagnostic=False, exact=False, differing=7)])
+        self.assertEqual(harness.bank_decision(bad_row)['rows'], [('edge', 3, 7)])
+        diagnostic_only = dict(base, rows=base['rows'] + [dict(regime='random', chunk=4, diagnostic=True, exact=False, differing=1)])
+        self.assertEqual(harness.bank_decision(diagnostic_only)['verdict'], 'BANK-GO', 'the opposite math mode is a diagnostic, not a verdict')
+        self.assertEqual(harness.bank_decision(dict(rows=[], chain={}))['verdict'], 'NO-RESULT')
+        self.assertEqual(harness.bank_decision(dict(base, chain={}))['verdict'], 'NO-RESULT')
+        self.assertEqual(harness.bank_decision(base)['env']['QWEN_FAST_MLP_CFG'], 'd3')
+        self.assertAlmostEqual(harness.bank_decision(base)['gain_vs_tuned_ms_pass'], 0.64, delta=0.001)
+
+    def test_the_threshold_is_the_plans_low_end_and_the_rule_is_documented(self):
+        self.assertEqual(harness.THRESHOLD_MS, 0.35)
+        for word in ('BANK-GO', 'BANK-MARGINAL', 'BANK-NO-GAIN', 'BANK-INEXACT', 'NO-RESULT'):
+            self.assertIn(word, harness.__doc__)
+
+    def test_the_tuned_partition_must_name_g_u_and_d(self):
+        self.assertEqual(harness.tuned_partition(lever, 'g3u4d3'), (3, 4, 3))
+        for bad in ('g3', 'd3', 'g3u4', 'l1', 'x'):
+            with self.assertRaises(ValueError):
+                harness.tuned_partition(lever, bad)
+        status, report = self.run_bank(FakeTTNN(), ['--tuned', 'g3u4'])
+        self.assertEqual((status, report['verdict']), (4, 'NOT-RUN'))
+        self.assertIn('--tuned', report['error'])
+
+    def test_a_different_tuned_partition_changes_the_down_the_verdict_prints(self):
+        ttnn = FakeTTNN(cost=self.served_cost)
+        status, report = self.run_bank(ttnn, ['--tuned', 'g2u2d2'])
+        self.assertEqual(report['bank']['chain']['tuned_down'], 2)
+        self.assertEqual(report['bank']['decision']['env']['QWEN_FAST_MLP_CFG'], 'd2')
+
+    def test_the_arm_is_registered_and_the_other_arms_do_not_run_it(self):
+        self.assertIn('bank', harness.ARMS)
+        ttnn = FakeTTNN()
+        out = Path(tempfile.mkdtemp()) / 'report.json'
+        shapes = small_shapes()
+        with mock.patch.dict(os.environ, dict(QWEN_FAST_TP='4')), mock.patch.object(lever, 'shapes', lambda tp=4: shapes), mock.patch.object(harness, 'WATCHDOG_S', 3600):
+            status = harness.main(['--out', str(out), '--rounds', '3', '--arms', 'compose'], torch=torch, ttnn=ttnn, lever=lever, bank_module=fake_bank_module(),
+                                  clock=ttnn.clock)
+        self.assertNotIn('bank', json.loads(out.read_text()))
+        self.assertEqual(FakeBank.built, [])
+
+
 class RunScriptTests(unittest.TestCase):
     script = HERE / 'run_card_m.sh'
     text = script.read_text(encoding='utf-8')
@@ -742,6 +904,8 @@ class RunScriptTests(unittest.TestCase):
         for name in names:
             self.assertTrue((CI / name).is_file(), name)
         self.assertIn('mlp_gateup_card_m.py readprobe.py readprobe_reader.cpp', self.text)
+        for name in ('tp4_mlp_bank.py', 'tp4_mlp_bank_weights.cpp'):
+            self.assertIn(name, names)
         for name in ('mlp_gateup_card_m.py', 'readprobe.py', 'readprobe_reader.cpp'):
             self.assertTrue((HERE / name).is_file(), name)
 
@@ -771,7 +935,7 @@ class PublicTextTests(unittest.TestCase):
 
     def test_the_new_files_name_no_rig_address_registry_or_digest(self):
         for path in (HERE / 'mlp_gateup_card_m.py', HERE / 'readprobe.py', HERE / 'readprobe_reader.cpp', HERE / 'run_card_m.sh', CI / 'tp4_mlp_gateup.py', CI / 'tp4_mlp_fused.py',
-                     CI / 'tp4_mlp_fused_input.cpp', CI / 'tp4_mlp_fused_weights.cpp'):
+                     CI / 'tp4_mlp_fused_input.cpp', CI / 'tp4_mlp_fused_weights.cpp', CI / 'tp4_mlp_bank.py', CI / 'tp4_mlp_bank_weights.cpp'):
             text = path.read_text(encoding='utf-8')
             if path.suffix == '.sh':          # the canonical qual_card.sh block is shared and names the cards by board id; the rest is this harness's
                 text = re.sub(r'# >>> qual_card\.sh.*?# <<< qual_card\.sh', '', text, flags=re.S)

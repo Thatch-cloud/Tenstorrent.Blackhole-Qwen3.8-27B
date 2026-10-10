@@ -16,7 +16,12 @@ the lever's binder the MLP binder's place, as the two-tile binders are bound) an
                               partition spelled out; the card-M sweep (optimisation/ttnn-op/mlp_gateup) prints the best name.
   QWEN_FAST_MLP_GATEUP=1      F-D1: gate and up as ONE launch (tp4_mlp_fused: a port of the TP2 fused_1d.FusedProjection) with the SwiGLU
                               epilogue, the product left in L1 for the down matmul. Reads the served w1 and w3 tensors (no packed copy).
-  QWEN_FAST_MLP_GATEUP_AUDIT / QWEN_FAST_MLP_CFG_AUDIT=1   (gate arms only) beside the lever, every QWEN_FAST_MLP_AUDIT_STRIDE-th
+  QWEN_FAST_MLP_GATEUP_BANK=1  F-D3: the fused gate|up launch with a BANK-STRIDED multi-tile weight reader (tp4_mlp_bank): each worker owns `chunk` columns of ONE DRAM bank and reads
+                              a tile row's run as one request (the card-M read probe: 403 GB/s at 4 tiles against 294 for the stock one-request-per-tile pattern), two compute subblocks
+                              (the gate run, the up run) and a paired epilogue. The served w1 and w3 are read in place. Excludes QWEN_FAST_MLP_GATEUP (both replace the gate and up).
+  QWEN_FAST_MLP_GATEUP_BANK_CHUNK=<2|3|4>   tiles per request = columns per worker = the output subblock width (default 4; needs QWEN_FAST_MLP_GATEUP_BANK=1). With the bank lever
+                              QWEN_FAST_MLP_CFG may name only d (the down's per_core_N) and w (the rectangle's width): `d3` is the C1 sweep's best down.
+  QWEN_FAST_MLP_GATEUP_AUDIT / QWEN_FAST_MLP_CFG_AUDIT / QWEN_FAST_MLP_GATEUP_BANK_AUDIT=1   (gate arms only) beside the lever, every QWEN_FAST_MLP_AUDIT_STRIDE-th
                               layer (default 4) also runs the served composition and compares the SwiGLU product and the down
                               projection's output on every chip as int16 bit patterns after the replay; the SERVED partial is the one
                               reduced and returned, and the layer still issues ONE all-reduce (the block counts them, and the ring's
@@ -31,7 +36,7 @@ and their multiply do. Byte equality against the served composition is the card-
 until a card says so.
 
 Markers (the `engaged` line carries the route; a `fell back` line fails any smoke):
-  [PINDIAG] tp4 mlp gateup engaged route=cfg|fused name=<name> rows=64 layers=<n> ...
+  [PINDIAG] tp4 mlp gateup engaged route=cfg|fused|bank name=<name> rows=64 layers=<n> ...
   [PINDIAG] tp4 mlp gateup fell back reason=<why>
   [PINDIAG] tp4 mlp gateup audit <n> exact=True route=<route> ...        [PINDIAG] tp4 mlp gateup audit mismatch ...
 
@@ -54,13 +59,18 @@ MIN_ACTIVE_CORES = 8
 PAIRS_PER_WORKER = (2, 3, 4, 5, 7)
 DEFAULT_PAIRS = 3
 DEFAULT_STRIDE = 4
+BANK_CHUNKS = (2, 3, 4)
+DEFAULT_BANK_CHUNK = 4
 
 GATEUP = 'QWEN_FAST_MLP_GATEUP'
 GATEUP_AUDIT = 'QWEN_FAST_MLP_GATEUP_AUDIT'
 CFG = 'QWEN_FAST_MLP_CFG'
 CFG_AUDIT = 'QWEN_FAST_MLP_CFG_AUDIT'
+BANK = 'QWEN_FAST_MLP_GATEUP_BANK'
+BANK_AUDIT = 'QWEN_FAST_MLP_GATEUP_BANK_AUDIT'
+BANK_CHUNK = 'QWEN_FAST_MLP_GATEUP_BANK_CHUNK'
 AUDIT_STRIDE = 'QWEN_FAST_MLP_AUDIT_STRIDE'
-ALL_FLAGS = (GATEUP, GATEUP_AUDIT, CFG, CFG_AUDIT, AUDIT_STRIDE)
+ALL_FLAGS = (GATEUP, GATEUP_AUDIT, CFG, CFG_AUDIT, BANK, BANK_AUDIT, BANK_CHUNK, AUDIT_STRIDE)
 
 ENGAGED = '[PINDIAG] tp4 mlp gateup engaged'
 FALLBACK = '[PINDIAG] tp4 mlp gateup fell back'
@@ -68,7 +78,7 @@ AUDIT_MARKER = '[PINDIAG] tp4 mlp gateup audit'
 AUDIT_MISMATCH = '[PINDIAG] tp4 mlp gateup audit mismatch'
 
 # What each lever needs at run time, by basename. The overlay list and the CPU allowlist must name every entry (test_tp4_mlp_gateup).
-RUNTIME_FILES = ('tp4_mlp_gateup.py', 'tp4_mlp_fused.py', 'tp4_mlp_fused_input.cpp', 'tp4_mlp_fused_weights.cpp')
+RUNTIME_FILES = ('tp4_mlp_gateup.py', 'tp4_mlp_fused.py', 'tp4_mlp_fused_input.cpp', 'tp4_mlp_fused_weights.cpp', 'tp4_mlp_bank.py', 'tp4_mlp_bank_weights.cpp')
 
 # bfloat4_b: 512 bytes of mantissa plus 64 of exponents per tile; bfloat8_b: 1,024 plus 64; bfloat16: 2,048.
 TILE_BYTES = {'bfp4': 576, 'bfp8': 1088, 'bf16': 2048}
@@ -131,13 +141,20 @@ def canonical_name(g=None, u=None, d=None, p=None, w=None):
     return ''.join(tokens) or 'l1'
 
 
-class Selection(namedtuple('Selection', ('route', 'name', 'cfg', 'audit', 'stride', 'pairs'))):
-    """What the environment asks: route 'fused' (QWEN_FAST_MLP_GATEUP=1), 'cfg' (QWEN_FAST_MLP_CFG), or None."""
+class Selection(namedtuple('Selection', ('route', 'name', 'cfg', 'audit', 'stride', 'pairs', 'chunk'))):
+    """What the environment asks: route 'fused' (QWEN_FAST_MLP_GATEUP=1), 'bank' (QWEN_FAST_MLP_GATEUP_BANK=1, `chunk` tiles per request), 'cfg' (QWEN_FAST_MLP_CFG), or None."""
+
+
+def bank_name(chunk, cfg=None):
+    """The one spelling of a bank configuration: `b<chunk>` then the down and width tokens the cfg names (`b4d3`)."""
+    return 'b%d' % chunk + ''.join(letter + str(value) for letter, value in (('d', None if cfg is None else cfg.d), ('w', None if cfg is None else cfg.w))
+                                   if value is not None)
 
 
 def resolve(environ=None):
     """The Selection of this environment (route None when no lever is on), after every cross-flag rule: an audit flag needs its lever,
-    the pair serves none of this, `g` and `u` cannot be named when the fused op replaces those matmuls, `p` needs the fused op."""
+    the pair serves none of this, `g` and `u` cannot be named when the fused or bank op replaces those matmuls, `p` needs the fused op, the bank
+    op and the fused op exclude each other, the chunk needs the bank op."""
     source = _source(environ)
     named = [name for name in ALL_FLAGS if source.get(name) not in (None, '0')]
     if named and tp_shapes.chip_count(source) == tp_shapes.PAIR:
@@ -147,6 +164,22 @@ def resolve(environ=None):
     raw = source.get(CFG)
     cfg = None if raw in (None, '0') else parse_cfg(raw)
     cfg_audit = _read(CFG_AUDIT, source)
+    bank = _read(BANK, source)
+    bank_audit = _read(BANK_AUDIT, source)
+    if bank and fused:
+        raise ValueError('%s=1 and %s=1 both replace the gate and up matmuls with one launch: pick one' % (BANK, GATEUP))
+    if bank_audit and not bank:
+        raise ValueError('%s=1 needs %s=1 (an audit of a lever that is off)' % (BANK_AUDIT, BANK))
+    chunk = None
+    if source.get(BANK_CHUNK) is not None:
+        text = source[BANK_CHUNK]
+        if not bank:
+            raise ValueError('%s=%s needs %s=1' % (BANK_CHUNK, text, BANK))
+        if not re.match(r'^[1-9][0-9]?$', text) or int(text) not in BANK_CHUNKS:
+            raise ValueError('%s must be one of %s (tiles per request), got %r' % (BANK_CHUNK, ', '.join(map(str, BANK_CHUNKS)), text))
+        chunk = int(text)
+    if bank and chunk is None:
+        chunk = DEFAULT_BANK_CHUNK
     if fused_audit and not fused:
         raise ValueError('%s=1 needs %s=1 (an audit of a lever that is off)' % (GATEUP_AUDIT, GATEUP))
     if cfg_audit and cfg is None:
@@ -156,21 +189,25 @@ def resolve(environ=None):
         text = source[AUDIT_STRIDE]
         if not re.match(r'^[1-9][0-9]{0,2}$', text):
             raise ValueError('%s must be a positive integer (audit every n-th layer), got %r' % (AUDIT_STRIDE, text))
-        if not fused and cfg is None:
-            raise ValueError('%s is set and no lever is on (%s or %s)' % (AUDIT_STRIDE, GATEUP, CFG))
+        if not fused and not bank and cfg is None:
+            raise ValueError('%s is set and no lever is on (%s, %s or %s)' % (AUDIT_STRIDE, GATEUP, BANK, CFG))
         stride = int(text)
-    if cfg is not None and fused and (cfg.g is not None or cfg.u is not None):
-        raise ValueError('%s=%s names g or u, but %s=1 replaces those two matmuls with one launch' % (CFG, cfg.name, GATEUP))
+    if cfg is not None and (fused or bank) and (cfg.g is not None or cfg.u is not None):
+        raise ValueError('%s=%s names g or u, but %s=1 replaces those two matmuls with one launch' % (CFG, cfg.name, BANK if bank else GATEUP))
     if cfg is not None and not fused and cfg.p is not None:
-        raise ValueError('%s=%s names p, the fused op\'s pairs per worker, without %s=1' % (CFG, cfg.name, GATEUP))
-    route = 'fused' if fused else ('cfg' if cfg is not None else None)
+        raise ValueError('%s=%s names p, the fused op\'s pairs per worker, %s' % (
+            CFG, cfg.name, 'but the bank op takes %s (its tiles per request) instead' % BANK_CHUNK if bank else 'without %s=1' % GATEUP))
+    route = 'bank' if bank else ('fused' if fused else ('cfg' if cfg is not None else None))
     pairs = (cfg.p if cfg is not None and cfg.p is not None else DEFAULT_PAIRS) if fused else None
-    if fused:
+    if bank:
+        # the bank route's name always spells its chunk: one spelling per configuration
+        name = bank_name(chunk, cfg)
+    elif fused:
         # the fused route's name always spells its pairs per worker: one spelling per configuration
         name = canonical_name(d=None if cfg is None else cfg.d, p=pairs, w=None if cfg is None else cfg.w)
     else:
         name = cfg.name if cfg is not None else None
-    return Selection(route, name, cfg, fused_audit or cfg_audit, stride, pairs)
+    return Selection(route, name, cfg, fused_audit or cfg_audit or bank_audit, stride, pairs, chunk)
 
 
 def requested(environ=None):
@@ -364,17 +401,18 @@ def forget_logged():
 class Plan(object):
     """The program configs and route of one bound block, built once and shared by its 64 layers."""
 
-    def __init__(self, selection, gate, up, down, grid, shape_table, fused_pairs=None):
+    def __init__(self, selection, gate, up, down, grid, shape_table, fused_pairs=None, chunk=None):
         self.selection, self.gate, self.up, self.down = selection, gate, up, down
         self.grid, self.shapes = grid, shape_table
         self.route, self.name = selection.route, selection.name
         self.fused_pairs = fused_pairs
+        self.chunk = chunk
 
     def describe(self):
         parts = []
         for label, config in (('gate', self.gate), ('up', self.up), ('down', self.down)):
             if config is None:
-                parts.append('%s=fused' % label)
+                parts.append('%s=%s' % (label, 'bank/c%d' % self.chunk if self.route == 'bank' else 'fused'))
             else:
                 parts.append('%s=%s' % (label, config_label(config)))
         return ' '.join(parts)
@@ -407,7 +445,7 @@ def build_plan(selection, args, operations, grid_x, grid_y):
     tokens = dict(mlp_w1=None if cfg is None else cfg.g, mlp_w3=None if cfg is None else cfg.u, mlp_w2=None if cfg is None else cfg.d)
     chosen = []
     for position, key in enumerate(('mlp_w1', 'mlp_w3', 'mlp_w2')):
-        if selection.route == 'fused' and key != 'mlp_w2':
+        if selection.route in ('fused', 'bank') and key != 'mlp_w2':
             chosen.append(None)                       # one launch replaces the gate and the up
             continue
         token = tokens[key]
@@ -428,7 +466,7 @@ def build_plan(selection, args, operations, grid_x, grid_y):
                 key, ', '.join('%s %r -> %r' % item for item in moved)))
         chosen.append(built)
     gate, up, down = chosen
-    return Plan(selection, gate, up, down, (grid_x, grid_y), table, fused_pairs=selection.pairs)
+    return Plan(selection, gate, up, down, (grid_x, grid_y), table, fused_pairs=selection.pairs, chunk=selection.chunk)
 
 
 # ---------------------------------------------------------------------------------------------------------------------------
@@ -505,7 +543,7 @@ class Tp4MlpForward(object):
         """The SwiGLU product: silu(x w1) * (x w3) left in L1. Frees x_il (as the served arm does) and the two projections."""
         operations, weights, plan = self.operations, self.mlp.weights, self.plan
         l1 = operations.L1_MEMORY_CONFIG
-        if plan.route == 'fused':
+        if plan.route in ('fused', 'bank'):
             product = self.fused(x_il)
             operations.deallocate(x_il)
             return product
@@ -642,6 +680,14 @@ def bindings(model, rows, operations, native_m3=True, environ=None):
                                                grid=(int(grid.x), int(grid.y)), width=width,
                                                math_approx_mode=bool(getattr(layer.feed_forward.compute_kernel_config_decode,
                                                                               'math_approx_mode', True)))
+                     for layer in model.layers]
+        elif plan.route == 'bank':
+            import tp4_mlp_bank
+
+            width = selection.cfg.w if selection.cfg is not None and selection.cfg.w is not None else None
+            fused = [tp4_mlp_bank.BankGateUp(operations, layer.feed_forward.device, layer.feed_forward.weights.w1,
+                                             layer.feed_forward.weights.w3, chunk=plan.chunk, grid=(int(grid.x), int(grid.y)), width=width,
+                                             math_approx_mode=bool(getattr(layer.feed_forward.compute_kernel_config_decode, 'math_approx_mode', True)))
                      for layer in model.layers]
     except (ValueError, AttributeError, TypeError, OSError, ImportError) as error:
         log_line(fallback_line((str(error).splitlines() or [type(error).__name__])[0][:200]))

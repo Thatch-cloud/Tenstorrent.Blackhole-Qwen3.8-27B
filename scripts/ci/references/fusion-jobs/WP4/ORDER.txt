@@ -14,9 +14,13 @@
 #     output: that falsifies the exactness argument, and the lever must not ship), the composition's 'exact' map all true.
 # C5 after C1 and C3 (their results: the gate at 47 percent of the peak at every core count, the fused op exact but slower): the diagnostics that say WHY (format against shape, the SiLU epilogue,
 #     request size) and whether bank-contiguous reads move the bf4 plateau. READ: MLP_GATEUP probe verdict, MLP_GATEUP epilogue, MLP_GATEUP split.
-# Durations (estimate, minutes): C1 40, C2 40, C3 30, C4 40, C5 40. C1 and C3 are the short form.
+# C6 after C5 (its probe: READ-GRANULARITY, bank-contiguous 4-tile requests 403 GB/s against the stock pattern's 294, every probe arm exact): the bank-strided fused gate|up op (tp4_mlp_bank,
+#     QWEN_FAST_MLP_GATEUP_BANK=1) against the served pair and the full chain with the tuned d3 down. READ: MLP_GATEUP bank verdict. BANK-GO (exact on every row and chain, and the chain beats
+#     the g3u4d3 chain by >= 0.35 ms a pass) is the condition for the lever to join the combined fx-all twin (WP4.json notes); BANK-INEXACT (exit 1) means it must not ship.
+# Durations (estimate, minutes): C1 40, C2 40, C3 30, C4 40, C5 40, C6 30. C1 and C3 are the short form.
 C1-mlp-sweep stop tp4-fusion-1 40
 C2-mlp-sweep-grid11 soft tp4-fusion-1 40
 C3-mlp-fused soft tp4-fusion-1 30
 C4-mlp-other-projections soft tp4-fusion-1 40
 C5-mlp-diagnostics soft tp4-fusion-1 40
+C6-mlp-bank soft tp4-fusion-1 30
