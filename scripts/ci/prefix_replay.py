@@ -72,6 +72,7 @@ import time
 from collections import Counter
 
 import prefix_agent_corpus as corpus_module
+import prefix_concurrent as concurrent
 import prefix_judge as judge
 import prefix_markers as markers
 
@@ -226,7 +227,7 @@ def input_indexes(messages):
 
 # -- the streamed chat completion ----------------------------------------------------------------
 
-CHUNK_TIMES_LIMIT = 2048
+CHUNK_TIMES_LIMIT = 70000     # (a tier-concurrent seat's whole budget, one chunk a token at the very worst)
 
 
 class StreamState(object):
@@ -1818,13 +1819,16 @@ def levern_hit_alone(driver, conv, case):
     return record
 
 
-def levern_start_decoders(driver, count, signal):
+def levern_start_decoders(driver, count, signal, tokens=None, budget=None, label='levern-decoder'):
     """`count` decoding seats (about 4k-token prompts, ignore_eos, a long budget) on threads until `signal` is set: the busy server the hit shape needs, so that
-    a Lever N step is the 2,048-token one. -> (jobs, an Event set once every decoder has streamed its first token, the conversations)."""
-    holders = [driver.conversation('levern-decoder-%d' % index) for index in range(count)]
+    a Lever N step is the 2,048-token one. `tokens`, `budget` and `label` (the conversations' names and the records' case) default to the hit shape's; the
+    tier-concurrent scenario starts its seats the same way with a longer budget. -> (jobs, an Event set once every decoder has streamed its first token, the
+    conversations)."""
+    tokens, budget = int(tokens or LEVERN_HIT_DECODER_TOKENS), int(budget or LEVERN_HIT_DECODER_BUDGET)
+    holders = [driver.conversation('%s-%d' % (label, index)) for index in range(count)]
     for holder in holders:
-        sized_message(driver, holder, 1, LEVERN_HIT_DECODER_TOKENS)
-        driver.fit(holder, LEVERN_HIT_DECODER_BUDGET)
+        sized_message(driver, holder, 1, tokens)
+        driver.fit(holder, budget)
     busy, firsts, lock = threading.Event(), [], threading.Lock()
 
     def first_token():
@@ -1833,7 +1837,7 @@ def levern_start_decoders(driver, count, signal):
             if len(firsts) >= count:
                 busy.set()
 
-    jobs = _spawn([lambda holder=holder: driver.send(holder.body(), 'seat', driver.fresh_salt(), 'levern-decoder', holder, LEVERN_HIT_DECODER_BUDGET,
+    jobs = _spawn([lambda holder=holder: driver.send(holder.body(), 'seat', driver.fresh_salt(), label, holder, budget,
                                                       extra=dict(ignore_eos=True), on_first=first_token, abort_signal=signal) for holder in holders])
     return jobs, busy, holders
 
@@ -2064,6 +2068,108 @@ def scenario_tier_timed(driver, pool_tokens=None, sizes=None, flood_tokens=None)
             strict_pair(driver, 'tier-timed-%d' % nominal, cold, back, body, conv, TIER_TIMED_MAX_TOKENS, None)
 
 
+# TIER-CONCURRENT (docs/prefix-store-hygiene.md, "Concurrent restore and spill"): what the host tier costs the users who are NOT using it. Seven seats decode steadily
+# (about 4k-token coding prompts, ignore_eos, a budget long enough for the whole scenario) while (1) an eighth session that was pushed out of the device pool into host
+# RAM returns and (2) a long fresh prompt allocates over a full pool, so that the blocks it displaces are read out to host RAM. The seats' streamed chunks (prefix_concurrent)
+# give every window's round-time p50/p99 and the longest wait of any seat; the control window (the seats alone) is the same arm's own baseline. Then the returning turn's
+# cold twin (a fresh salt, the same body) is the exactness read and a timed cold re-prefill beside the same seats. The scenario runs the same on a profile WITHOUT the tier
+# (the ABAB control): the "restore" is then a cold re-prefill of the whole session, the "spill" the same long prompt displacing nothing to the host.
+TIER_CONC_SEAT_TOKENS = LEVERN_HIT_DECODER_TOKENS
+TIER_CONC_SEAT_BUDGET = 60000      # about 800 s of decode at 75 tokens/s: the seats outlast the scenario (a seat that finishes early leaves its later windows NOT_EXERCISED)
+TIER_CONC_SEAT_MIN_BUDGET = 6000
+TIER_CONC_SETTLE_S = 10.0          # after every seat has streamed its first token, before the control window
+TIER_CONC_CONTROL_S = concurrent.DEFAULT_CONTROL_S
+TIER_CONC_BETWEEN_S = 15.0         # between two requests under test: the seats' rounds settle
+TIER_CONC_RETURN_TOKENS = 254000   # the session that returns: the largest one the profile admits (T3's largest size, capped by the context and the prompt limit): the longest restore, so the longest stall
+TIER_CONC_RETURN_MAX_TOKENS = 512  # it decodes beside the seven for a while: an eighth seat
+EIGHTH_SEAT = dict(ignore_eos=True)   # ... for all of them (a short natural answer would leave the restore_decode window empty); its cold twin asks the same
+TIER_CONC_BUILD_MAX_TOKENS = 128
+TIER_CONC_SPILL_TOKENS = TIER_TIMED_FLOOD_TOKENS
+TIER_CONC_SPILL_MAX_TOKENS = 32
+TIER_CONC_POOL_SHARE = 0.9         # the seats, the returning session and the long prompt together stay under this share of the KV pool
+
+
+def concurrent_sizes(driver, pool_tokens, seats, return_tokens=None, spill_tokens=None, seat_budget=None):
+    """The scenario's sizes, fitted to the served context (and the profile's prompt limit) and, when the pool is known, to the pool: the returning session and the long
+    prompt keep their size, the seats' budget gives way (never below TIER_CONC_SEAT_MIN_BUDGET). -> dict(return_tokens, spill_tokens, seat_budget)."""
+    context = driver.context()
+    room = context - TIER_CONC_RETURN_MAX_TOKENS - 2 * FIT_MARGIN_TOKENS - 2 * TIER_RETURN_INPUT_TOKENS - TIER_CONC_BUILD_MAX_TOKENS
+    spill_room = context - TIER_CONC_SPILL_MAX_TOKENS - FIT_MARGIN_TOKENS
+    if driver.prompt_limit is not None:
+        room = min(room, driver.prompt_limit - 2 * TIER_RETURN_INPUT_TOKENS - 2 * FIT_MARGIN_TOKENS)
+        spill_room = min(spill_room, driver.prompt_limit - FIT_MARGIN_TOKENS)
+    back = min(int(return_tokens or TIER_CONC_RETURN_TOKENS), room)
+    spill = min(int(spill_tokens or TIER_CONC_SPILL_TOKENS), spill_room)
+    budget = int(seat_budget or TIER_CONC_SEAT_BUDGET)
+    if pool_tokens:
+        spare = int(int(pool_tokens) * TIER_CONC_POOL_SHARE) - back - spill
+        budget = max(TIER_CONC_SEAT_MIN_BUDGET, min(budget, spare // max(1, int(seats)) - TIER_CONC_SEAT_TOKENS))
+    return dict(return_tokens=back, spill_tokens=spill, seat_budget=budget)
+
+
+def scenario_tier_concurrent(driver, pool_tokens=None, seats=None, return_tokens=None, spill_tokens=None, seat_budget=None, control_s=None):
+    """Build the returning session, push it out of the device pool with floods the size of the pool (no seat is decoding yet), start the seats, wait for every first
+    token and TIER_CONC_SETTLE_S, then: sleep the control window; send the returning turn (restore); wait; send the long fresh prompt (spill); wait; send the returning
+    turn's cold twin and compare. Every request under test is prepared (built, measured, fitted) BEFORE the window that precedes it, so the window times the request and
+    not the tokenizer. The seats are stopped (their sockets closed) at the end; their token ids are what the cross-arm comparison reads."""
+    count = int(seats) if seats else max(1, driver.seats - 1)
+    span = float(control_s or TIER_CONC_CONTROL_S)
+    sizes = concurrent_sizes(driver, pool_tokens, count, return_tokens, spill_tokens, seat_budget)
+    if sizes['return_tokens'] < 4096 or sizes['spill_tokens'] < 4096:
+        driver.event('tier-concurrent', skipped=True, seats=count, **sizes)
+        return
+    conv = driver.conversation('tier-conc-back')
+    sized_message(driver, conv, 1, sizes['return_tokens'])
+    driver.fit(conv, TIER_CONC_BUILD_MAX_TOKENS)
+    built = driver.send(conv.body(), 'hit', conv.salt, 'tier-conc-build', conv, TIER_CONC_BUILD_MAX_TOKENS)
+    driver.answer(conv, built)
+    event = dict(seats=count, control_s=span, settle_s=TIER_CONC_SETTLE_S, built_ok=bool(built.get('ok')), build_tag=built.get('tag'),
+                 build_prompt_tokens=built.get('prompt_tokens'), build_ttft_s=built.get('ttft_s'), pool_tokens=pool_tokens, **sizes)
+    if not built.get('ok'):
+        driver.event('tier-concurrent', **event)
+        return
+    length = min(TIER_TIMED_FLOOD_TOKENS, driver.context() - FLOOD_MAX_TOKENS - FIT_MARGIN_TOKENS)
+    event['flood_sizes'] = tier_floods(driver, pool_tokens, length, 'tier-conc')
+    long_conv = driver.conversation('tier-conc-spill')
+    sized_message(driver, long_conv, 1, sizes['spill_tokens'])
+    driver.fit(long_conv, TIER_CONC_SPILL_MAX_TOKENS)
+    long_body = long_conv.body()
+    driver.measure(long_body)
+    stop = threading.Event()
+    jobs, busy, _ = levern_start_decoders(driver, count, stop, tokens=TIER_CONC_SEAT_TOKENS, budget=sizes['seat_budget'], label=concurrent.SEAT_CASE)
+    back = spill = cold = None
+    try:
+        left = driver.remaining()
+        busy.wait(900 if left is None else max(1, min(900, left)))
+        event['seats_running'] = busy.is_set()
+        if not busy.is_set():
+            return
+        driver.sleep(TIER_CONC_SETTLE_S)
+        conv.extend(TIER_RETURN_INPUT_TOKENS)
+        driver.fit(conv, TIER_CONC_RETURN_MAX_TOKENS)
+        body = conv.body()
+        driver.measure(body)
+        driver.sleep(span)
+        back = driver.send(body, 'hit', conv.salt, concurrent.RETURN_CASE, conv, TIER_CONC_RETURN_MAX_TOKENS, continuation=True, extra=EIGHTH_SEAT)
+        driver.answer(conv, back)
+        driver.sleep(TIER_CONC_BETWEEN_S)
+        spill = driver.send(long_body, 'flood', driver.fresh_salt(), concurrent.SPILL_CASE, long_conv, TIER_CONC_SPILL_MAX_TOKENS)
+        driver.sleep(TIER_CONC_BETWEEN_S)
+        if back.get('ok'):
+            cold = driver.send(body, 'cold', driver.fresh_salt(), concurrent.COLD_CASE, conv, TIER_CONC_RETURN_MAX_TOKENS, continuation=True, extra=EIGHTH_SEAT)
+            strict_pair(driver, 'tier-conc', cold, back, body, conv, TIER_CONC_RETURN_MAX_TOKENS, EIGHTH_SEAT)
+    finally:
+        stop.set()
+        try:
+            _join(jobs)
+        finally:
+            event.update(return_tag=(back or {}).get('tag'), return_ok=bool((back or {}).get('ok')), return_ttft_s=(back or {}).get('ttft_s'),
+                         return_prompt_tokens=(back or {}).get('prompt_tokens'), spill_tag=(spill or {}).get('tag'), spill_ok=bool((spill or {}).get('ok')),
+                         spill_ttft_s=(spill or {}).get('ttft_s'), spill_prompt_tokens=(spill or {}).get('prompt_tokens'), cold_tag=(cold or {}).get('tag'),
+                         cold_ttft_s=(cold or {}).get('ttft_s'), windows=concurrent.windows_from_records(driver.records, span))
+            driver.event('tier-concurrent', **event)
+
+
 SCENARIOS = dict(bringup_reference=scenario_bringup_reference, bringup_prefix=scenario_bringup_prefix,
                  exactness_traced=lambda driver, **_: scenario_exactness(driver, 'traced'),
                  exactness_audit=lambda driver, **_: scenario_exactness(driver, 'audit'),
@@ -2073,7 +2179,8 @@ SCENARIOS = dict(bringup_reference=scenario_bringup_reference, bringup_prefix=sc
                  lifecycle_tiny=scenario_lifecycle_tiny, timing=scenario_timing, agent_turns=scenario_agent_turns,
                  levern_hit=lambda driver, **_: scenario_levern_hit(driver),
                  levern_faults=lambda driver, **_: scenario_levern_faults(driver),
-                 tier_attach=scenario_tier_attach, tier_returning=scenario_tier_returning, tier_timed=scenario_tier_timed)
+                 tier_attach=scenario_tier_attach, tier_returning=scenario_tier_returning, tier_timed=scenario_tier_timed,
+                 tier_concurrent=scenario_tier_concurrent, tier_concurrent_timed=scenario_tier_concurrent)
 
 
 def records_jsonl(records):

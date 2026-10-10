@@ -40,7 +40,7 @@ WORKFLOW = os.path.join(ROOT, '.github', 'workflows', 'qwen-c2-serving.yml')
 CPU_WORKFLOW = os.path.join(ROOT, '.github', 'workflows', 'qwen-integration-cpu.yml')
 JOB_FILE = os.path.join(ROOT, '.github', 'c2-serving-job.env')
 NEW_TESTS = ('test_prefix_agent_corpus', 'test_prefix_markers', 'test_prefix_judge', 'test_prefix_report',
-             'test_prefix_replay', 'test_prefix_oracle_check', 'test_c2_prefix_gate', 'test_prefix_tier_profiles', 'test_prefix_tier_gate', 'test_tp4_prefix_tiers_jobs')
+             'test_prefix_replay', 'test_prefix_oracle_check', 'test_c2_prefix_gate', 'test_prefix_tier_profiles', 'test_prefix_tier_gate', 'test_prefix_tier_concurrent', 'test_tp4_prefix_tiers_jobs')
 CURRENT = dict(engine=None)
 
 
@@ -322,7 +322,7 @@ class ShapeTests(unittest.TestCase):
             for arm in gate.plan_arms(plan, 'general-prefix', 'general', document):
                 wanted[arm['arm']] = gate.wants_digests(arm)
         self.assertEqual(sorted(name for name, on in wanted.items() if not on),
-                         ['agent-turns-baseline', 'agent-turns-prefix', 'bringup-reference', 'levern-hit', 'timing-baseline',
+                         ['agent-turns-baseline', 'agent-turns-prefix', 'bringup-reference', 'levern-hit', 'tier-concurrent-timed', 'timing-baseline',
                           'timing-prefix'])
 
     def test_the_contract_reads_the_derived_file(self):

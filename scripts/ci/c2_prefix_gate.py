@@ -88,6 +88,19 @@ named as the arm - c2_serving_job.PREFIX_ARM_PLANS - that runs only it, judged e
              prints the paired continuation TTFT; each arm is also a plan of its own (the ABAB jobs run one per job, and
              scripts/ci/prefix_agent_turns.py compares two results directories offline).
 
+  tiers      tier-attach, tier-returning, tier-timed (tp4/prefix-tiers: the preconverted checkpoints and the host KV tier on a profile that names
+             QWEN_PREFIX_HOST_TIER_GIB; docs/prefix-store-hygiene.md), each also a plan of its own.
+  tier-concurrent, tier-concurrent-timed  (one arm each; on a tier profile or on its no-tier control): what the host tier costs the users who are not
+             using it (prefix_replay.scenario_tier_concurrent). A session is built and pushed out of the device pool by floods the size of the pool, then
+             seven seats decode (about 4k-token coding prompts, ignore_eos, a budget for the whole scenario) and, after a control window of the seats
+             alone, the session RETURNS (restored from host RAM on a tier profile, re-prefilled cold on the control), then a long fresh prompt displaces
+             blocks (SPILL, read out to host RAM on a tier profile), then the returning turn's cold twin is sent and compared (strict pair). From the
+             seats' streamed chunks (prefix_concurrent) every window prints its round-time p50/p99, the longest wait of any seat, and the round p99
+             against the arm's OWN control window as a percentage. The timed arm FAILS when any seat waited longer than the Lever N decode gap floor
+             (QWEN_FAST_LEVERN_MAX_DECODE_GAP_S, 8 s); the audited arm (the audits are its cost) prints it. NOT_EXERCISED: a window without all the seats
+             decoding across it, no restore line for the returning turn, no spill line inside the long prompt (tier profiles). The seats' text against a
+             control boot is compared offline (scripts/ci/tier_concurrent_compare.py <control results> <tier results>), and the two arms' stalls side by side.
+
 THE FAST PATH'S STICKY SESSIONS (phase 1 on the S2 lineage; --profile c2-packed-prefix --baseline c2-packed,
 the profiles with QWEN_FAST_STICKY_SESSIONS=1 beside QWEN_PREFIX_REUSE=1). The same plans, judged for what
 that path is (sticky design, harness items B1, B2 and B4):
@@ -190,6 +203,7 @@ import c2_smoke_check  # noqa: E402
 import c2_serving_job  # noqa: E402
 import prefix_agent_corpus as corpus_module  # noqa: E402
 import prefix_agent_turns as agent_turns  # noqa: E402
+import prefix_concurrent as concurrent  # noqa: E402
 import prefix_judge as judge  # noqa: E402
 import prefix_markers as markers  # noqa: E402
 import prefix_replay as replay  # noqa: E402
@@ -292,10 +306,16 @@ PLAN_ARMS = dict(
        # returning sessions against their cold twins (audits on, no baseline); tier-timed: the restore's TTFT at ~32k/128k/254k (the audits off).
        'tiers': (('tier-attach', 'tier_attach', 'prefix', None, 3600, True),
                  ('tier-returning', 'tier_returning', 'prefix', None, 9000, False),
-                 ('tier-timed', 'tier_timed', 'prefix', 'tiertime', 7200, False))}
+                 ('tier-timed', 'tier_timed', 'prefix', 'tiertime', 7200, False)),
+       # What the tier costs the users who are not using it (prefix_replay.scenario_tier_concurrent, prefix_concurrent): seven seats decode steadily while an eighth
+       # session that left the device pool returns, and while a long fresh prompt displaces blocks into the tier. One arm each, on a tier profile OR on its no-tier control
+       # (the ABAB pairs run the same plan on both): tier-concurrent is the audited arm (exactness and engagement; the stall is printed, not judged), tier-concurrent-timed
+       # the timed one (no audit instruments: the stall budget is judged).
+       'tier-concurrent': (('tier-concurrent', 'tier_concurrent', 'prefix', None, 7200, False),),
+       'tier-concurrent-timed': (('tier-concurrent-timed', 'tier_concurrent_timed', 'prefix', None, 7200, False),)}
 )
 # The scenarios that measure rather than judge exactness: no extent audit, no row digests (they would time the audit).
-TIMED_SCENARIOS = ('timing', 'agent_turns', 'levern_hit', 'tier_timed')
+TIMED_SCENARIOS = ('timing', 'agent_turns', 'levern_hit', 'tier_timed', 'tier_concurrent_timed')
 # The scenarios that write the Lever N kill switch on purpose (the engagement rule allows its kill line there).
 LEVERN_DRILL_SCENARIOS = ('levern_faults',)
 # The single-arm plans (c2_serving_job.PREFIX_ARM_PLANS): the arm exactly as its plan runs it.
@@ -334,7 +354,12 @@ def audit_image_problems(arms, anchor):
     return out
 
 
-TIER_SCENARIOS = ('tier_attach', 'tier_returning', 'tier_timed')
+CONCURRENT_SCENARIOS = ('tier_concurrent', 'tier_concurrent_timed')
+TIER_SCENARIOS = ('tier_attach', 'tier_returning', 'tier_timed') + CONCURRENT_SCENARIOS
+# The tier scenarios in which a session must be seen to leave the device pool and come back from host RAM (the counters and the restore line are asked of them).
+TIER_RESTORE_SCENARIOS = ('tier_returning', 'tier_timed') + CONCURRENT_SCENARIOS
+# The tier arms that also run on a profile WITHOUT the tier: the control of the concurrent pairs (the stall of a cold re-prefill beside the same seats).
+TIER_OPTIONAL_ARMS = ('tier-concurrent', 'tier-concurrent-timed')
 # The scenarios that send one request at a time and wait for it: a decode is never packed with another user's, so the multi-user SDPA launch (W2) has
 # nothing to compare and its audit (QWEN_FAST_TP4_SDPA_AUDIT) logs no line. T1 (run 38082865675) was three IDENTICAL pairs and failed only on that.
 SEQUENTIAL_SCENARIOS = ('tier_attach', 'tier_returning')
@@ -360,7 +385,7 @@ def tier_image_problems(arms, anchor):
     """Why the image cannot run the tier arms, or []: refused before any container boots. The host KV tier moves blocks with ttnn.qwen_read_blocks_raw /
     qwen_write_blocks_raw / qwen_block_bytes, version 2 of the qwen_kv_read extension; an image whose extension is the first version refuses the attach
     (the model graft asserts), which a whole arm would spend its boot discovering."""
-    names = [arm['arm'] for arm in arms if arm.get('scenario') in TIER_SCENARIOS]
+    names = [arm['arm'] for arm in arms if arm.get('scenario') in TIER_SCENARIOS and arm.get('tier')]
     if not names:
         return []
     if anchor.get('error'):
@@ -449,6 +474,8 @@ def not_applicable(plan, profile, profiles):
                              'no preemption: a tiny pool is not a shape it serves' % profile))
         elif arm.startswith('tier-'):
             tier = tier_profile(chosen)
+            if tier is None and arm in TIER_OPTIONAL_ARMS:
+                continue      # the concurrent plans' control: the same seats and the same returning session on a profile with no tier
             if tier is None:
                 out.append((arm, 'profile %s names no QWEN_PREFIX_HOST_TIER_GIB: the tier arms run on a tier profile (make_prefix_tier_profiles)' % profile))
             elif not tier['preconverted']:
@@ -619,13 +646,14 @@ def kvread_mount_arguments(image, mount=None, run=subprocess.run):
 
 
 def server_run(image, name, served, devices, port=PORT, hub=gate.HUB, derived_path=None, digests=False,
-               salt_key_path=None, stats_now=False, env=(), gate_only=False):
+               salt_key_path=None, stats_now=False, env=(), gate_only=False, tt_grid=None):
     """`docker run -d` of one serving container: the S1 gate's agent shape (its --rm dropped: the
     reload drill stops and starts the same container), the API on 127.0.0.1:port, a derived
     profiles file when the arm has one, the row digests when asked, the arm's salt key when it has
     one, the gate-only knobs an S2 arm adds (`env`: the extent audit, c2_serving_gate.ARM_ENV_NAMES),
-    and the platform's vLLM argv."""
-    arguments = [token for token in gate.agent_shape(image, name, served, devices, hub, env, gate_only=gate_only) if token != '--rm']
+    and the platform's vLLM argv. `tt_grid` (C2_TT_GRID): the compute-grid clamp, c2_serving_gate.agent_shape's."""
+    arguments = [token for token in gate.agent_shape(image, name, served, devices, hub, env, gate_only=gate_only, tt_grid=tt_grid)
+                 if token != '--rm']
     arguments[2:2] = ['-d']
     arguments += ['-p', '127.0.0.1:%d:8000' % port]
     if digests:
@@ -1419,7 +1447,7 @@ def tier_findings(arm, records, events, scanned, stats):
     problems += tier_stat_problems(before if before is not None else stats, 'before the tier kill switch' if before is not None else 'at the end')
     if drilled and before is not None:
         problems += tier_stat_problems(stats, 'at the end')
-    if scenario in ('tier_returning', 'tier_timed'):
+    if scenario in TIER_RESTORE_SCENARIOS:
         evidence = before if before is not None else stats
         wanted = ['tier_spill_blocks', 'tier_restore_requests', 'tier_restore_blocks']
         if tier.get('audit'):
@@ -1435,6 +1463,89 @@ def tier_findings(arm, records, events, scanned, stats):
         problems += more_problems
         missing += more_missing
         lines += more_lines
+    return problems, missing, lines
+
+
+def concurrent_findings(arm, records, events, scanned):
+    """The tier-concurrent arms' reading (prefix_replay.scenario_tier_concurrent; prefix_concurrent): every window the seven seats decoded across, the longest wait of
+    any seat against the stall budget (the Lever N decode gap floor), the round time against the arm's own control window as a percentage, and on a tier profile the
+    restore and the spill that must be on record for the windows to mean anything. The budget is JUDGED on the timed arm and printed on the audited one (the audits are
+    the arm's cost); the seats' text against a control boot is the offline comparator's (tier_concurrent_compare.py). -> (problems, not exercised, lines)."""
+    problems, missing, lines = [], [], []
+    event = events.get('tier-concurrent') or {}
+    timed = arm['scenario'] == 'tier_concurrent_timed'
+    if not event:
+        missing.append('the scenario never reached its measurement (no tier-concurrent event)')
+        return problems, missing, lines
+    lines.append('concurrent: %d seats, returning session %s tokens, long prompt %s tokens, seat budget %s tokens, control window %s s, tier %s' % (
+        event.get('seats') or 0, event.get('return_tokens'), event.get('spill_tokens'), event.get('seat_budget'), event.get('control_s'),
+        'on (%s GiB)' % arm['tier']['gib'] if arm.get('tier') else 'OFF (the control profile)'))
+    if event.get('skipped'):
+        missing.append('the served context cannot hold the returning session and the long prompt (return %s, long prompt %s tokens): nothing was sized' % (
+            event.get('return_tokens'), event.get('spill_tokens')))
+        return problems, missing, lines
+    if not event.get('built_ok'):
+        missing.append('the returning session could not be built (its first request failed)')
+        return problems, missing, lines
+    if not event.get('seats_running'):
+        missing.append('not every seat had streamed a first token 900 s after the seats were sent: the stall is not measured')
+        return problems, missing, lines
+    count = int(event.get('seats') or 0)
+    stats = concurrent.stats_of(records, event.get('control_s'))
+    lines += concurrent.render(arm['arm'], stats)
+    for name in concurrent.JUDGED_WINDOWS:
+        window = stats.get(name)
+        if window is None:
+            missing.append('window %s was not measured: its request streamed no first token (or the window is empty)' % name)
+        elif window['seats'] < count:
+            missing.append('window %s: %d of %d seats decoded across it (one finished its token budget or failed): its round times are not those of a full house' % (
+                name, window['seats'], count))
+        elif not window['intervals']:
+            missing.append('window %s holds no complete round interval' % name)
+    cold = stats.get('cold')
+    if cold is not None and cold['seats'] < count:
+        lines.append('window cold: only %d of %d seats were still decoding: its figures are a note, not a measurement of a full house' % (cold['seats'], count))
+    seats = concurrent.seat_records(records)
+    if len(seats) < count:
+        missing.append('only %d of %d seats left chunk times in the records' % (len(seats), count))
+    budget = concurrent.gap_budget(arm.get('served_env'))
+    breaches = concurrent.budget_problems(stats, budget)
+    gaps = [window['max_gap_s'] for window in stats.values() if window['max_gap_s'] is not None]
+    worst = max(gaps) if gaps else None
+    lines.append('stall budget %.1f s (the Lever N decode gap floor): the longest wait of any seat in any window %s s -> %s' % (
+        budget, worst, ('OVER' if breaches else 'within') if timed else 'printed only on this audited arm (%s)' % ('over' if breaches else 'within')))
+    if timed:
+        problems += breaches
+    else:
+        lines += ['(not judged: audited arm) %s' % text for text in breaches]
+    index = by_tag(records)
+    back = index.get(event.get('return_tag')) or {}
+    if not event.get('return_ok'):
+        missing.append('the returning turn failed (%s)' % (back.get('error') or back.get('aborted') or 'not sent'))
+    if not event.get('spill_ok'):
+        missing.append('the long fresh prompt failed (%s)' % ((index.get(event.get('spill_tag')) or {}).get('error') or 'not sent'))
+    if arm.get('tier'):
+        restores = dict((entry.get('tag'), entry) for entry in scanned.get('tier_restores') or ())
+        restore = restores.get(event.get('return_tag'))
+        if event.get('return_ok') and restore is None:
+            missing.append('no "host tier restore" line for the returning turn %s (Q=%s): it was not restored from host RAM (the floods left its blocks on the device, '
+                           'or the tier did not hold them)' % (event.get('return_tag'), q_of(back)))
+        if restore is not None:
+            rate = (restore.get('bytes') or 0) / (restore.get('ms') * 1e6) if restore.get('ms') else None
+            lines.append('restore: %s blocks %s GB in %s ms (%s GB/s); returning TTFT %s s (Q=%s) against its cold twin\'s %s s' % (
+                restore.get('blocks'), gb(restore.get('bytes')), restore.get('ms'), '%.2f' % rate if rate else '-', event.get('return_ttft_s'), q_of(back),
+                event.get('cold_ttft_s')))
+        spills = in_window(scanned.get('tier_spills') or (), index.get(event.get('spill_tag')))
+        lines.append('spill: the long prompt\'s displaced blocks: %s GB in %s ms over %d flushes' % (
+            gb(sum(e.get('bytes') or 0 for e in spills)), round(sum(e.get('ms') or 0 for e in spills), 1), len(spills)))
+        if event.get('spill_ok') and not spills:
+            missing.append('the long fresh prompt displaced nothing to host RAM (no "host tier spill" line inside its request): the spill window measured an idle tier')
+    else:
+        lines.append('no tier on this profile: the restore window is a cold re-prefill of the returning session and the spill window a prefill that displaces nothing '
+                     'to host RAM (the control of the pair)')
+    lines.append('read the round p99 against the control WINDOW as the stall of an event, not as the tier\'s cost: the seats grow by their own decode (some 20k tokens each by the spill window), so a later window is slower '
+                 'whatever happens beside it; the tier\'s cost is this arm\'s window against the CONTROL PROFILE\'s same window (tier_concurrent_compare.py)')
+    lines.append('seat text against a control boot: python3 scripts/ci/tier_concurrent_compare.py <control results> <this results> (each seat IDENTICAL over its common tokens)')
     return problems, missing, lines
 
 
@@ -1683,8 +1794,13 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None):
         problems += more_problems
         missing += more_missing
         lines += more_lines
-    if arm['scenario'] in TIER_SCENARIOS:
+    if arm['scenario'] in TIER_SCENARIOS and arm.get('tier'):
         more_problems, more_missing, more_lines = tier_findings(arm, records, driver.events, scanned, stats)
+        problems += more_problems
+        missing += more_missing
+        lines += more_lines
+    if arm['scenario'] in CONCURRENT_SCENARIOS:
+        more_problems, more_missing, more_lines = concurrent_findings(arm, records, driver.events, scanned)
         problems += more_problems
         missing += more_missing
         lines += more_lines
@@ -1728,7 +1844,7 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None):
             more_problems, more_lines = lifecycle_reservation_findings(records, log_text)
             problems += more_problems
             lines += more_lines
-    elif arm['scenario'] in TIMED_SCENARIOS and arm['prefix']:
+    elif arm['scenario'] in TIMED_SCENARIOS and arm['prefix'] and arm['scenario'] not in CONCURRENT_SCENARIOS:
         # The timing arm is not strict (a lost hit is a note), so without this it could pass with every
         # continuation cold and report TTFTs that measure no reuse at all.
         if arm['scenario'] == 'agent_turns':
@@ -1883,6 +1999,7 @@ class Runner(object):
         self.containers = containers or gate.platform_containers
         self.corpus = corpus
         self.seed, self.agents, self.turns = seed, agents, turns
+        self.tt_grid = None                 # C2_TT_GRID: the compute-grid clamp every arm's container carries (main sets it after construction)
         self.infra = None
         self.box_deadline = None            # clock time the job's box ends (--box-seconds), or None
         self.waived = False                 # an arm's log showed the 262k waiver
@@ -1938,7 +2055,7 @@ class Runner(object):
         arguments = server_run(self.image, name, arm['served'], self.devices, self.port, self.hub, derived_path,
                                digests=wants_digests(arm), salt_key_path=salt_key_path,
                                stats_now=bool(arm.get('prefix')), env=arm.get('env') or (),
-                               gate_only=bool(arm.get('gate_only')))
+                               gate_only=bool(arm.get('gate_only')), tt_grid=getattr(self, 'tt_grid', None))
         with open(os.path.join(arm_dir, 'docker-run.json'), 'w') as handle:
             json.dump(arguments, handle, indent=1)
         started = self.clock()
@@ -1984,7 +2101,7 @@ class Runner(object):
             self.log('[PREFIX-GATE] arm %s: ready after %.0f s' % (arm['arm'], self.clock() - started))
             driver.context_tokens = self.served_context(client, arm, driver)
             kwargs = {}
-            if arm['scenario'] in ('lifecycle_evict', 'lifecycle_tiny', 'tier_returning', 'tier_timed'):
+            if arm['scenario'] in ('lifecycle_evict', 'lifecycle_tiny', 'tier_returning', 'tier_timed') + CONCURRENT_SCENARIOS:
                 kwargs['pool_tokens'] = markers.scan(follower.lines()).get('kv_tokens')
             if arm['scenario'] == 'lifecycle_evict':
                 kwargs['restart'] = lambda: self.restart(container, client, follower, driver)
@@ -2210,6 +2327,9 @@ def build_parser():
     parser.add_argument('--cards', choices=gate.CARD_SETS, default='pair',
                         help='pair: cards M and A (the default); quad: every Blackhole board present, the four-card '
                              '(1, 4) mesh the TP4 profiles open (qwen-c2-serving.yml C2_CARDS)')
+    parser.add_argument('--tt-grid', choices=c2_serving_job.TT_GRIDS, default=None,
+                        help='clamp the compute grid every arm\'s container opens (%s=...; qwen-c2-serving.yml C2_TT_GRID); '
+                             'default: not passed' % c2_serving_job.TT_GRID_ENV)
     return parser
 
 
@@ -2286,7 +2406,7 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
                                                       salt_key_path='<results>/%s/salt.key' % arm['arm']
                                                       if arm.get('prefix') else None,
                                                       stats_now=bool(arm.get('prefix')), env=arm.get('env') or (),
-                                                      gate_only=bool(arm.get('gate_only'))))))
+                                                      gate_only=bool(arm.get('gate_only')), tt_grid=options.tt_grid))))
         return 0
     if os.environ.get(ALLOW_FULL_AUDIT_ENV) != '1' and any(
             arm['arm'] in AUDIT_COST_ARMS and arm.get('kind') in AUDIT_KINDS for plan in plans for arm in arms_of[plan]):
@@ -2297,7 +2417,7 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
             for problem in problems:
                 log('refused: %s' % problem)
             return 2
-    if any(arm.get('scenario') in TIER_SCENARIOS for plan in plans for arm in arms_of[plan]):
+    if any(arm.get('scenario') in TIER_SCENARIOS and arm.get('tier') for plan in plans for arm in arms_of[plan]):
         if anchor is None:
             anchor = anchor_probe(options.image)
         problems = tier_image_problems([arm for plan in plans for arm in arms_of[plan]], anchor)
@@ -2312,10 +2432,15 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
                                         options.port, log=log, seed=options.seed, agents=agents, turns=options.turns)
     if options.box_seconds is not None:
         runner.box_deadline = runner.clock() + options.box_seconds
+    runner.tt_grid = options.tt_grid
+    if options.tt_grid:
+        log('[PREFIX-GATE] compute-grid clamp: %s=%s in every arm\'s container' % (c2_serving_job.TT_GRID_ENV, options.tt_grid))
     summary = dict(image=options.image, profile=options.profile, baseline=options.baseline, plans=plans,
                    worst_case_seconds=worst_case, budget_seconds=options.budget_seconds, box_seconds=options.box_seconds, results={},
                    not_applicable=dict((plan, [dict(arm=arm, why=why) for arm, why in entries])
                                        for plan, entries in skipped.items() if entries))
+    if options.tt_grid:
+        summary['tt_grid'] = options.tt_grid
     try:
         if 'bringup' in plans and anchor is None:
             anchor = anchor_probe(options.image)

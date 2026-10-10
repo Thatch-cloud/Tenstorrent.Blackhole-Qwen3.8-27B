@@ -28,7 +28,10 @@ Keys (every one optional but C2_IMAGE_TAG):
                       TP4_RS_TILE) or mr (tp4_mr_probe.py: the verify readback's mesh-read arms at four chips, optimisation/ttnn-op/mr_probe's
                       arms and verdict, MR_PROBE verdict=GO|MESH-ONLY|NO-GO) or kvread (tp4_kv_read_probe.py: the prefix audit's region read,
                       ttnn.qwen_read_blocks, against the whole-cache read byte for byte on the pool-sized cache; KV_READ_PROBE verdict=PASS|FAIL, the exit
-                      status is the verdict); needs the fabric action
+                      status is the verdict) or ccl-sweep (tp4_ccl_sweep_probe.py: the verify's reduce-scatter and norm gathers with every value of
+                      ccl_options_tp, bit-compared against the sequential engine's call and timed in-trace, one fabric config per run; CCL_SWEEP
+                      verdict=...; -safe skips the barrier-removal arms, -core also the exotic stage, -p8192 asks the fabric for an 8192 byte packet
+                      payload (core only), -quick is a short grid, a smoke of the harness); needs the fabric action
   C2_SUPERSEDED_BY    set on every template of a pack that a later pack replaced (references/tp4-w2-jobs); read_job REFUSES such a template
   C2_PROFILE          the C2 profile smoke and gate serve (default: general)
   C2_CARDS            the card set the hardware steps open: pair (cards M and A, the default) or quad (every
@@ -128,6 +131,12 @@ Keys (every one optional but C2_IMAGE_TAG):
                       (sessions, a flood the size of the KV pool, every session's return against its cold twin, the tier's
                       kill switch) and tier-timed (TTFT of a cold prefill, a device-resident hit and a host restore at
                       ~32k/128k/254k; a measurement beside its exactness read)
+                      tier-concurrent and tier-concurrent-timed (what the tier costs the users who are not using it: seven
+                      seats decode steadily while an eighth session returns from host RAM, and while a long fresh prompt
+                      displaces blocks into the tier; the longest wait of any seat and the round p50/p99 against the arm's own
+                      control window, the returning turn against its cold twin) are one arm each and run on a tier profile OR
+                      on its no-tier control profile (the ABAB pairs); the audited one prints the stall, the timed one judges it
+                      against the Lever N decode gap floor; scripts/ci/tier_concurrent_compare.py compares two arms' results
   C2_PREFIX_PROFILE   the prefix-reuse profile it serves (default general-prefix; must be a checkout profile)
   C2_PREFIX_BASELINE  the no-reuse profile it compares against (default general; none: timing without
                       the baseline arm)
@@ -158,6 +167,23 @@ Keys (every one optional but C2_IMAGE_TAG):
                       run's turns with that run's, on the runner, and holds the verdict to the pre-registered GO rule
   C2_TAULAB_COUNTERS  production's spec-decode counters, a rig-local JSON of aggregates (default: none; positions 1-3 are then
                       NOT_ESTABLISHED in the report)
+  C2_TT_GRID          clamp the compute grid tt-metal exposes, as insurance for cards whose firmware no longer soft-harvests Tensix
+                      columns (tensix_col_disable_count 2 -> 0, so the unharvested 13x10 core descriptor is selected instead of 11x10):
+                      exactly 10,9 (11x10, today's grid, valid on a harvested and an unharvested card), 11,9 (12x10) or 12,9 (13x10),
+                      or unset (default, rendered empty: the variable is not passed at all, today's behaviour). The value is the
+                      container's TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE (the end coordinate of compute_with_storage; tt-metal is
+                      fatal only when it exceeds the descriptor). Every step that opens a card forwards it: the fabric probe, the pair
+                      and four-card smokes, the gate, prefix and tau lab drivers (--tt-grid), the replay (--tt-grid) and the cardm
+                      harness (QUAL_TT_GRID, a step-owned name). A cardm harness that does not forward QUAL_TT_GRID is refused with the
+                      key set, before any card time. reset and the node agent's own container (agentstart) are not covered
+  C2_TELEMETRY        '' (default) or 1: the smoke and gate steps run the read-only card telemetry sidecar (scripts/ci/card_telemetry.sh, card_telemetry.py) for the
+                      whole step: per-chip ARC telemetry once per interval (AICLK and the limiter holding it, VCORE, power, current, temperatures, kernel NOP counters)
+                      into telemetry-<step>/ of the results (telemetry.csv.gz, telemetry-summary.json and .txt) and one summary line per chip in the step's log. Reads
+                      only (no ARC message, no write), opens each chip for a moment per sample as the host's telemetry collector does, and never fails a step: a host
+                      without pyluwen logs UNAVAILABLE and the step runs without it. Refused unless C2_ACTIONS has smoke or gate (nothing else samples)
+  C2_TELEMETRY_MS     the sample interval in milliseconds, 100..10000 (default, rendered 1000 with C2_TELEMETRY=1: once a second). The firmware refreshes the table every
+                      100 ms; a limiter that engages for less than the interval can fall between two samples (the kernel NOP and thermal trip counters are cumulative and
+                      complete). Refused without C2_TELEMETRY=1
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
@@ -178,7 +204,7 @@ TP4_MESH_DEVICE = 'P150x4'
 # (general-2link: the same pair under the two-channel descriptor this cabling needs).
 PAIR_MESH_DEVICES = (None, 'P300')
 FABRIC_CONFIGS = ('FABRIC_1D', 'FABRIC_1D_RING')
-FABRIC_PROBES = ('fabric', 'rs-tile', 'mr', 'kvread')
+FABRIC_PROBES = ('fabric', 'rs-tile', 'mr', 'kvread', 'ccl-sweep', 'ccl-sweep-safe', 'ccl-sweep-core', 'ccl-sweep-p8192', 'ccl-sweep-quick')
 DRAFTER_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,63}')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
@@ -204,9 +230,19 @@ POLICIES = ('strict', 'dc-i')
 AUDIT_SETS = ('extent', 'all')
 # C2_GATE_SALT (sticky sessions B3): what cache_salt the gate's streams carry; unset sends none, as before.
 SALT_MODES = ('none', 'fresh')
+# C2_TT_GRID: the clamp for the compute grid (tt_metal/llrt/core_descriptor.cpp reads the end coordinate of compute_with_storage from this variable
+# and is fatal only when it exceeds the descriptor, so 10,9 is valid on a harvested 11x10 and an unharvested 13x10 card). Exactly these values or unset.
+TT_GRID_ENV = 'TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE'
+TT_GRIDS = ('10,9', '11,9', '12,9')
+# The name the cardm step hands its harness, which puts it into its container as TT_GRID_ENV (the QUAL_ prefix is the step's: C2_CARDM_ENV refuses it).
+CARDM_TT_GRID_VARIABLE = 'QUAL_TT_GRID'
+# C2_TELEMETRY: the card telemetry sidecar of the smoke and gate steps (card_telemetry.sh). The sample interval in milliseconds: the firmware refreshes its table every 100 ms.
+TELEMETRY_STEPS = ('smoke', 'gate')
+TELEMETRY_MS_RANGE = (100, 10000)
+TELEMETRY_DEFAULT_MS = 1000
 DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
 # The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
-PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify', 'tiers')
+PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify', 'tiers', 'tier-concurrent', 'tier-concurrent-timed')
 # (arm, its plan): each exactness and lifecycle arm is a plan of its own, named as the arm, that runs
 # only it, judged as inside its plan (neither plan has a cross-arm check; c2_prefix_gate.PLAN_ARMS).
 # G1 v47 (run 36246961161) needed the eager arm again without the traced and audit arms' hour.
@@ -433,8 +469,10 @@ def embeds_qual_card(text, library):
     return text[begins[0]:end] == library and text[end:].startswith('qual_card_select\n')
 
 
-def read_cardm(values, requested, root=ROOT, library=QUAL_CARD_LIBRARY):
-    """(harness, args, env) for the cardm step, or JobError. Checked whenever set, required with cardm."""
+def read_cardm(values, requested, root=ROOT, library=QUAL_CARD_LIBRARY, tt_grid=''):
+    """(harness, args, env) for the cardm step, or JobError. Checked whenever set, required with cardm. With a C2_TT_GRID clamp (`tt_grid`) the
+    harness must forward the step's QUAL_TT_GRID into its container: one that does not would run the card at the unclamped grid while the job
+    says it is clamped."""
     harness = values.get('C2_CARDM_HARNESS', '')
     if not harness:
         if requested:
@@ -453,6 +491,9 @@ def read_cardm(values, requested, root=ROOT, library=QUAL_CARD_LIBRARY):
         if not embeds_qual_card(text, canonical):
             raise JobError('C2_CARDM_HARNESS %s does not select its board by the canonical qual_card.sh block; '
                            'refusing to run it on card M' % harness)
+        if tt_grid and CARDM_TT_GRID_VARIABLE not in text:
+            raise JobError('C2_TT_GRID is set but C2_CARDM_HARNESS %s does not forward %s into its container; it would open card M '
+                           'unclamped: unset C2_TT_GRID or use a harness that forwards it' % (harness, CARDM_TT_GRID_VARIABLE))
     args = values.get('C2_CARDM_ARGS', '').split()
     for word in args:
         if not PLAIN_WORD.fullmatch(word):
@@ -470,6 +511,43 @@ def read_cardm(values, requested, root=ROOT, library=QUAL_CARD_LIBRARY):
             raise JobError('C2_CARDM_ENV sets %s twice' % name)
         names.append(name)
     return harness, ' '.join(args), ' '.join(pairs)
+
+
+def read_tt_grid(values):
+    """C2_TT_GRID (module docstring) as the string to hand the container, '' when unset, or JobError for anything but exactly one of TT_GRIDS."""
+    value = values.get('C2_TT_GRID', '')
+    if value and value not in TT_GRIDS:
+        raise JobError('C2_TT_GRID must be one of %s or unset, got %r' % (', '.join(TT_GRIDS), value))
+    return value
+
+
+def tt_grid_arguments(value):
+    """The `docker run` arguments that put the clamp into a container: ['-e', 'TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=10,9'], or [] for
+    None or '' (unset: the container is exactly what it was). A value outside TT_GRIDS is a JobError, never a guess."""
+    if not value:
+        return []
+    if value not in TT_GRIDS:
+        raise JobError('the tt grid must be one of %s or unset, got %r' % (', '.join(TT_GRIDS), value))
+    return ['-e', '%s=%s' % (TT_GRID_ENV, value)]
+
+
+def read_telemetry(values, actions):
+    """(telemetry, interval) for C2_TELEMETRY and C2_TELEMETRY_MS (module docstring): ('', '') when off, ('1', '<ms>') when on, or JobError. Off is the job exactly as it was:
+    no key of the telemetry is read beyond refusing an interval that has nothing to time."""
+    flag = values.get('C2_TELEMETRY', '')
+    if flag not in ('', '1'):
+        raise JobError('C2_TELEMETRY must be empty or 1, got %r' % flag)
+    text = values.get('C2_TELEMETRY_MS', '').strip()
+    if not flag:
+        if text:
+            raise JobError('C2_TELEMETRY_MS is the interval of the telemetry sidecar: set C2_TELEMETRY=1')
+        return '', ''
+    if not set(actions) & set(TELEMETRY_STEPS):
+        raise JobError('C2_TELEMETRY=1 samples during the %s steps: C2_ACTIONS has neither' % ' and '.join(TELEMETRY_STEPS))
+    interval = positive_int('C2_TELEMETRY_MS', text) if text else TELEMETRY_DEFAULT_MS
+    if not TELEMETRY_MS_RANGE[0] <= interval <= TELEMETRY_MS_RANGE[1]:
+        raise JobError('C2_TELEMETRY_MS must be %d..%d milliseconds, got %d' % (TELEMETRY_MS_RANGE + (interval,)))
+    return '1', str(interval)
 
 
 def read_rmi_tags(values, actions):
@@ -559,7 +637,9 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
     drafter_manifest = read_drafter_manifest(values, actions, root)
     if drafter_manifest and 'push' in actions:
         raise JobError('C2_DRAFTER_MANIFEST names a candidate drafter that is not qualified: its image is not pushed')
-    cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root)
+    tt_grid = read_tt_grid(values)
+    telemetry, telemetry_ms = read_telemetry(values, actions)
+    cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root, tt_grid=tt_grid)
     drafter_candidates = read_drafter_candidates(values, actions)
     box_minutes = read_box(values, actions)
     outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), rmi_tags=rmi_tags, tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
@@ -567,7 +647,8 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
                    gate_memory_prompt=str(memory_prompt), gate_memory_users=str(memory_users), replay_profile=replay_profile,
                    replay_served_model=replay_served_model, replay_budget_smoke=budget_smoke, cardm_harness=cardm_harness, cardm_args=cardm_args,
-                   cardm_env=cardm_env, bake_default_profile=bake_profile, drafter_candidates=drafter_candidates, box_minutes=box_minutes, drafter_manifest=drafter_manifest)
+                   cardm_env=cardm_env, bake_default_profile=bake_profile, drafter_candidates=drafter_candidates, box_minutes=box_minutes, drafter_manifest=drafter_manifest, tt_grid=tt_grid,
+                   telemetry=telemetry, telemetry_ms=telemetry_ms)
     outputs.update(s2)
     outputs.update(prefix)
     outputs.update(taulab)

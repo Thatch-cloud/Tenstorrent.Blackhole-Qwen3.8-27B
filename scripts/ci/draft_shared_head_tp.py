@@ -25,13 +25,21 @@ def shared_head_candidates(operations, model, normalized, owned):
     return local_head_candidates(operations, logits, owned)
 
 
-def local_head_candidates(operations, logits, owned):
-    rows = logits.shape[2] if len(logits.shape) == 4 else 0
-    if rows not in (8, 16, 32) or tuple(logits.shape) != (1, 1, rows, tp_shapes.vocab_shard()):
-        raise ValueError('Expected local vocabulary shards, not gathered logits')
+def local_head_candidates(operations, logits, owned, row=0, rows=None):
+    """The 16 best candidates of each 32,768-column chunk of a (1, 1, R, vocabulary shard) logits tensor, for its rows [row, row + rows). Default: all R rows (8, 16 or 32). QWEN_FAST_DRAFT_HEAD64
+    (draft_head64_tp) passes the two 32-row halves of the 64-row head's logits as `row` = 0 and 32: the chunk slice then cuts its rows as well as its columns, so the ops below the matmul are
+    the served ones on the served 32-row blocks."""
+    total = logits.shape[2] if len(logits.shape) == 4 else 0
+    if rows is None:
+        rows = total
+        if rows not in (8, 16, 32) or tuple(logits.shape) != (1, 1, rows, tp_shapes.vocab_shard()):
+            raise ValueError('Expected local vocabulary shards, not gathered logits')
+    elif (rows not in (8, 16, 32) or row < 0 or row % rows or row + rows > total or total % 32
+            or tuple(logits.shape) != (1, 1, total, tp_shapes.vocab_shard())):
+        raise ValueError('Expected local vocabulary shards of whole tile rows, not gathered logits')
     outputs = []
     for start, stop in candidate_chunks():
-        chunk = operations.slice(logits, (0, 0, 0, start), (1, 1, rows, stop), (1, 1, 1, 1))
+        chunk = operations.slice(logits, (0, 0, row, start), (1, 1, row + rows, stop), (1, 1, 1, 1))
         owned.append(chunk)
         if stop - start != 32768:
             chunk = operations.pad(chunk, [(0, 0), (0, 0), (0, 0), (0, 32768 - (stop - start))], float('-inf'))
@@ -40,6 +48,20 @@ def local_head_candidates(operations, logits, owned):
         owned.extend((values, indices))
         outputs.append(dict(start=start, stop=stop, values=values, indices=indices))
     return outputs
+
+
+def block_head_candidates(operations, model, normalized, owned, halves=2):
+    """shared_head_candidates for a block of `halves` 32-row halves in ONE matmul (QWEN_FAST_DRAFT_HEAD64): the 64-row learned-normalized block against the vocabulary shard once, then each
+    half's chunk candidates as the served path takes them. Returns one candidates list a half."""
+    rows = normalized.shape[2] if len(normalized.shape) == 4 else 0
+    if (model.num_devices != tp_shapes.chip_count() or model.vocab_size != 248320 or not model._lmhead_vocab_sharded
+            or rows != 32 * halves or tuple(normalized.shape) != (1, 1, rows, 5120)
+            or normalized.dtype != operations.bfloat16 or normalized.layout != operations.TILE_LAYOUT
+            or normalized.memory_config() != operations.DRAM_MEMORY_CONFIG):
+        raise ValueError('Replicated %d-row learned-normalized input and pinned TP%d vocabulary head required' % (32 * halves, tp_shapes.chip_count()))
+    logits = operations.linear(normalized, model.lm_head_weight)
+    owned.append(logits)
+    return [local_head_candidates(operations, logits, owned, row=32 * half, rows=32) for half in range(halves)]
 
 
 def merge_chunk_candidates(chunks, *, block_rows=8):

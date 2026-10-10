@@ -505,6 +505,7 @@ argv=(docker run --rm --name "$name" --network none
   "${KM[@]}"
   ${WM[@]+"${WM[@]}"}
   -e TT_METAL_HOME=/opt/tt-metal -e TT_METAL_CACHE=/kcache -e OMP_NUM_THREADS=8
+  ${QUAL_TT_GRID:+-e "TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$QUAL_TT_GRID"}
   -e QWEN_SDPA_TREE_SCRATCH_ROUNDS=1
   --entrypoint sh "$IMAGE" -c
   "sha256sum /opt/tt-metal/build_Release/lib/_ttnncpp.so /opt/tt-metal/build_Release/ttnn/_ttnncpp.so $KD/dataflow/reader_decode_qwen.cpp $KD/compute/sdpa_flash_decode_qwen.cpp $KD/dataflow/reader_decode_qwen_slice.cpp $KD/dataflow/writer_decode_qwen_slice.cpp 2>&1; exec python3 -B /bench/sdpa_decode_slice_card_b.py \"\$@\""

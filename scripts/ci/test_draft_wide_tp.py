@@ -261,7 +261,8 @@ class CallSiteTests(unittest.TestCase):
             text = self.read(name)
             self.assertIn('import draft_wide_tp', text, name)
             for marker in markers:
-                self.assertEqual(text.count(marker), 1, (name, marker))
+                # (draft_attention_branch also names site='attention' for the residual tail's launch, draft_tail_tp.residual, under QWEN_FAST_DRAFT_TAIL: two sites, one of them the norm)
+                self.assertEqual(text.count(marker), 2 if (name, marker) == ('draft_attention_branch.py', "site='attention'") else 1, (name, marker))
             self.assertEqual(text.count('draft_wide_tp.rms_norm('), len(markers), name)
 
     def test_the_head_norms_and_every_other_rms_norm_stay_the_plain_call(self):

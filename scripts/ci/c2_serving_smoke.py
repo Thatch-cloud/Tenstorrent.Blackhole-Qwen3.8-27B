@@ -665,11 +665,20 @@ COLD2_DECODERS = 6                    # six decoders + two cold arrivals = the e
 COLD2_ARRIVALS = 2
 COLD2_BUDGET = 6000                  # ignore_eos, so the decoders outlast both prefills
 
+# The prefill ladder (the prefill measurement pack): one request at a time at four prompt sizes, alone and again beside decoders, and the Lever N governor's
+# one-or-two-decoder long-prefill shape. 253,920 is the 262k profile's known-to-fit cold prompt (SKEW_LONG_TOKENS). Recorded, never gated.
+LADDER_TOKENS = (4096, 32768, 131072, 253920)
+LADDER_MAX_TOKENS = 16               # the rung's answer: its time to first token is the measurement, not its text
+LADDER_DECODERS = 7                  # the decoding seats of the busy ladder; the rung is the eighth request
+LADDER_BUSY_BUDGETS = (600, 1500, 4000, 6000)    # one decoder budget per rung: long enough to outlast the rung's prefill, short enough not to run on for minutes after it
+FEWDEC_SHAPES = ((1, 120000, 4000), (2, 253920, 6000))     # (decoders, cold prompt tokens, decoder budget)
+
 # Every shape's concurrent request count, held at or under the eight seats of the 262k profiles by test_w2ln_smoke_shapes (a request past max-num-seqs
 # waits for a seat, and its time to first token then measures somebody else's budget).
 SHAPE_SEATS = {'concurrent8_skew': 8, 'concurrent8_code_32k': 8, 'concurrent8_code_128k': 8,
                'stall8_cold262k': STALL_SHORT_SEATS + 1, 'stall8_cold128k': STALL_SHORT_SEATS + 1,
-               'cold2_254k': COLD2_DECODERS + COLD2_ARRIVALS, 'levern_equal_busy': 7 + 1, 'levern_decoder_finishes': 7 + 1}
+               'cold2_254k': COLD2_DECODERS + COLD2_ARRIVALS, 'levern_equal_busy': 7 + 1, 'levern_decoder_finishes': 7 + 1,
+               'prefill_ladder_solo': 1, 'prefill_ladder_busy': LADDER_DECODERS + 1, 'prefill_few_decoders': 3}
 
 
 def cold2_254k():
@@ -710,6 +719,129 @@ def cold2_254k():
 
 def arrival_ttft(newcomer):
     return newcomer.get('ttft') if isinstance(newcomer, dict) else None
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The prefill ladder (opt-in): what a prompt of 4k, 32k, 128k and 254k tokens costs to prefill alone, beside seven decoders, and beside one or two.
+# ---------------------------------------------------------------------------------------------------------------------
+
+LADDER_SOLO_RESULTS = {}      # this process's solo rows by rung (tokens): prefill_ladder_busy reads its busy-over-solo ratio from them when both ran
+
+
+def ladder_prompts():
+    """(solo prompts, busy prompts, corpus info, fit) as {rung tokens: prompt}: ONE fitted_code_prompts call over the four rungs twice, so the eight prompts start at
+    eight distinct windows of the corpus (a rung sent a second time must never find its blocks in a prefix cache). The long rungs are listed first in each half: a prompt
+    window starts at index * len(corpus) / 8 and the 253,920-token one needs the most corpus after its start (the skew shape puts its long prompts at the same places)."""
+    order = tuple(reversed(LADDER_TOKENS))
+    prompts, corpus, fit = fitted_code_prompts(order * 2)
+    half = len(order)
+    return (dict(zip(order, prompts[:half])), dict(zip(order, prompts[half:])), corpus, fit)
+
+
+def ladder_request(prompt, max_tokens=LADDER_MAX_TOKENS):
+    """One streamed request, its failure recorded and not raised (a failed rung must not stop the next)."""
+    try:
+        return stream([{'role': 'user', 'content': prompt}], max_tokens, timeout=3600)
+    except Exception as error:
+        return dict(error=repr(error)[:300])
+
+
+def ladder_row(item, wall):
+    """The recorded row of one ladder request: the server's own prompt token count, the time to first token (from the stream's own stamps, millisecond
+    resolution), the prefill rate they give (prompt tokens a second up to the first token), and the stream's answer fields the check reads."""
+    if not isinstance(item, dict):
+        return dict(error='no result', wall_s=round(wall, 1))
+    if 'error' in item:
+        return dict(error=item['error'], wall_s=round(wall, 1))
+    ttft, prompt_tokens = item.get('ttft'), item.get('prompt_tokens')
+    if item.get('first_at') is not None and item.get('started_at') is not None:
+        ttft = round(item['first_at'] - item['started_at'], 3)
+    rate = round(prompt_tokens / ttft, 1) if isinstance(ttft, (int, float)) and ttft > 0 and isinstance(prompt_tokens, int) else None
+    return dict(prompt_tokens=prompt_tokens, ttft_s=ttft, prefill_tok_s=rate, tokens=item.get('tokens'), finish=item.get('finish'), text=item.get('text'),
+                content_sha256=item.get('content_sha256'), started_at=item.get('started_at'), first_at=item.get('first_at'), ended_at=item.get('ended_at'),
+                wall_s=round(wall, 1))
+
+
+def ladder_arrival(prompt, budgets):
+    """One rung (or shape) beside decoders: len(budgets) decoding seats (4k prompts, ignore_eos, one budget each) stream until every one has sent STALL_WARM_CHUNKS chunks,
+    then `prompt` arrives as one more request, alone in the queue. The row is ladder_row of the arrival plus: decoders_live_at_first_token (the decoders whose stream ended
+    after the arrival's first token: a rung whose decoders mostly ended early did not run beside them), each decoder's longest gap from the arrival on and its chunks
+    inside the arrival's prefill window, and the window aggregate (arrival to the newcomer's first token)."""
+    out, events, threads, _corpus = start_decoders(list(budgets))
+    for event in events:
+        event.wait(3600)
+    arrival = time.time()
+    item = ladder_request(prompt)
+    row = ladder_row(item, time.time() - arrival)
+    [thread.join() for thread in threads]
+    first = item.get('first_at') if isinstance(item, dict) else None
+    decoders, windows, gaps = [], [], []
+    for seat, user in enumerate(out):
+        user = user if isinstance(user, dict) else dict(error='no result')
+        stamps = user.pop('delta_stamps', None) or []
+        gap, began = longest_gap(stamps, after=arrival)
+        window = window_stats(stamps, user.get('tokens'), user.get('chunks_streamed'), arrival, first)
+        windows.append(window)
+        if gap is not None:
+            gaps.append(gap)
+        # (the error key is present only on a failed decoder: the check reads 'error' in the stream)
+        decoders.append(dict(seat=seat, tokens=user.get('tokens'), finish=user.get('finish'), text=user.get('text'), started_at=user.get('started_at'),
+                             ended_at=user.get('ended_at'), longest_gap_s=gap, gap_began_at=began, **dict(window, **(dict(error=user['error']) if 'error' in user else {}))))
+    live = len([user for user in decoders if first is not None and isinstance(user.get('ended_at'), (int, float)) and user['ended_at'] > first])
+    row.update(arrival_started_at=round(arrival, 3), decoders=decoders, decoders_live_at_first_token=live if first is not None else None,
+               longest_gap_s=max(gaps) if gaps else None, window=window_aggregate(windows))
+    return row
+
+
+def prefill_ladder_solo():
+    # Opt-in (the prefill measurement pack). Four real-code prompts of about 4,096, 32,768, 131,072 and 253,920 tokens (as the server counts them), ascending, ONE
+    # request at a time with nothing else running: no decoder, so the Lever N governor paces nothing and the prefill takes the solo step. Each rung: the server's
+    # prompt token count, the time to first token, the prefill rate (prompt tokens / TTFT) and a 16-token answer. A rung that fails is recorded and the next runs.
+    solo, _busy, corpus, fit = ladder_prompts()
+    rungs = {}
+    for tokens in LADDER_TOKENS:
+        began = time.time()
+        item = ladder_request(solo[tokens])
+        row = ladder_row(item, time.time() - began)
+        rungs[str(tokens)] = row
+        LADDER_SOLO_RESULTS[tokens] = row
+        print('prefill_ladder_solo rung', tokens, json.dumps(dict((key, row.get(key)) for key in (
+            'prompt_tokens', 'ttft_s', 'prefill_tok_s', 'tokens', 'finish', 'wall_s', 'error'))), flush=True)
+    return dict(rungs=rungs, lengths=list(LADDER_TOKENS), max_tokens=LADDER_MAX_TOKENS, corpus=corpus, fit=fit)
+
+
+def prefill_ladder_busy():
+    # Opt-in (the prefill measurement pack). The same four rungs, each arriving beside LADDER_DECODERS (7) decoding seats (today's policy: the Lever N governor paces
+    # the prefill against them): the decoders' budgets grow with the rung (LADDER_BUSY_BUDGETS) so they outlast its prefill. Seven decoders and the rung are the eight
+    # seats: never a ninth request. busy_over_solo is this rung's TTFT over the solo one's when prefill_ladder_solo ran earlier in the same smoke run, else None.
+    _solo, busy, corpus, fit = ladder_prompts()
+    rungs = {}
+    for tokens, budget in zip(LADDER_TOKENS, LADDER_BUSY_BUDGETS):
+        row = ladder_arrival(busy[tokens], [budget] * LADDER_DECODERS)
+        solo_ttft = (LADDER_SOLO_RESULTS.get(tokens) or {}).get('ttft_s')
+        busy_ttft = row.get('ttft_s')
+        both = isinstance(solo_ttft, (int, float)) and solo_ttft > 0 and isinstance(busy_ttft, (int, float))
+        row['busy_over_solo'] = round(busy_ttft / solo_ttft, 3) if both else None
+        rungs[str(tokens)] = row
+        print('prefill_ladder_busy rung', tokens, json.dumps(dict((key, row.get(key)) for key in (
+            'prompt_tokens', 'ttft_s', 'prefill_tok_s', 'busy_over_solo', 'decoders_live_at_first_token', 'longest_gap_s', 'window', 'wall_s', 'error'))), flush=True)
+    return dict(rungs=rungs, lengths=list(LADDER_TOKENS), decoders=LADDER_DECODERS, budgets=list(LADDER_BUSY_BUDGETS), max_tokens=LADDER_MAX_TOKENS,
+                corpus=corpus, fit=fit)
+
+
+def prefill_few_decoders():
+    # Opt-in (the adaptive-governor card test). The Lever N governor's shape: ONE or TWO decoding seats and a long cold arrival, in sequence: (1 decoder, a prompt of about
+    # 120,000 tokens), then (2 decoders, about 253,920). Per shape: the arrival's TTFT and prefill rate, each decoder's longest gap from the arrival on and its progress
+    # inside the arrival's prefill window, and the decoders' tokens. Three requests at most at any time.
+    shapes = []
+    for decoders, cold_tokens, budget in FEWDEC_SHAPES:
+        cold, corpus, fit = fitted_code_prompts((cold_tokens,))
+        row = ladder_arrival(cold[0], [budget] * decoders)
+        row.update(shape_decoders=decoders, target_tokens=cold_tokens, budget=budget, fit=fit)
+        shapes.append(row)
+        print('prefill_few_decoders', decoders, 'decoder(s)', cold_tokens, json.dumps(dict((key, row.get(key)) for key in (
+            'prompt_tokens', 'ttft_s', 'prefill_tok_s', 'decoders_live_at_first_token', 'longest_gap_s', 'window', 'wall_s', 'error'))), flush=True)
+    return dict(shapes=shapes, corpus=corpus)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -1209,6 +1341,9 @@ if ONLY and 'stall8_cold128k' in ONLY:
     record('stall8_cold128k', stall8_cold128k)
 if ONLY and 'cold2_254k' in ONLY:
     record('cold2_254k', cold2_254k)
+for _ladder_name in ('prefill_ladder_solo', 'prefill_ladder_busy', 'prefill_few_decoders'):      # in this order: busy reads the solo rows of the same run
+    if ONLY and _ladder_name in ONLY:
+        record(_ladder_name, globals()[_ladder_name])
 if ONLY and 'replay_concurrent8' in ONLY:
     record('replay_concurrent8', replay_concurrent8)
 for _levern_name in ('levern_equal', 'levern_equal_long', 'levern_equal_busy', 'levern_decoder_finishes', 'levern_all_decoders_finish',

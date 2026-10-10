@@ -36,9 +36,14 @@ DRAFT_CONV_AUDIT = 'QWEN_FAST_TP4_DRAFT_CONV_AUDIT'
 DRAFT_HEADS = 'QWEN_FAST_TP4_DRAFT_HEADS'
 DRAFT_HEADS_AUDIT = 'QWEN_FAST_TP4_DRAFT_HEADS_AUDIT'
 
+# A companion flag chooses HOW a lever runs (it is read by the lever's own module): the two-level tree fold of the shard argmax (WP1 of the op-fusion programme,
+# docs/tp4-fusion.md). Strict like the rest, and an arm that sets one without its lever is misconfigured: validate() refuses it at attach.
+SHARD_ARGMAX_FOLD2 = 'QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2'
+
 LEVERS = (SHARD_ARGMAX, DRAFT_CONV, DRAFT_HEADS)
 AUDITS = {SHARD_ARGMAX_AUDIT: SHARD_ARGMAX, DRAFT_CONV_AUDIT: DRAFT_CONV, DRAFT_HEADS_AUDIT: DRAFT_HEADS}
-ALL_FLAGS = LEVERS + tuple(AUDITS)
+COMPANIONS = {SHARD_ARGMAX_FOLD2: SHARD_ARGMAX}
+ALL_FLAGS = LEVERS + tuple(AUDITS)       # (the levers and their audits: the profile census tests hold who sets each; the companions are checked beside them)
 
 # One (engaged, fell back, audit, audit mismatch) marker prefix per lever; c2_smoke_check and the tests read these.
 SARG_ENGAGED = '[PINDIAG] tp4 shard argmax engaged'
@@ -74,7 +79,7 @@ def _check_width(environ):
     source = os.environ if environ is None else environ
     if tp_shapes.chip_count(source) != tp_shapes.PAIR:
         return
-    on = [name for name in ALL_FLAGS if _read(name, source)]
+    on = [name for name in ALL_FLAGS + tuple(COMPANIONS) if _read(name, source)]
     if on:
         raise ValueError('%s are TP4 levers: they need QWEN_FAST_TP=4, this process serves the pair' % ', '.join(on))
 
@@ -109,10 +114,13 @@ def validate(environ=None):
     """Every flag strict and every audit paired with its lever, checked once at attach: a misconfigured audit arm must fail before
     the first capture, not at its first round's readback after the cards are loaded. Raises ValueError."""
     _check_width(environ)
-    for name in ALL_FLAGS:
+    for name in ALL_FLAGS + tuple(COMPANIONS):
         _read(name, environ)
     for audit in AUDITS:
         audit_enabled(audit, environ)
+    for companion, lever in COMPANIONS.items():
+        if _read(companion, environ) and not _read(lever, environ):
+            raise ValueError('%s needs %s=1: it chooses how the lever runs, and the lever is off' % (companion, lever))
 
 
 def log_line(message):

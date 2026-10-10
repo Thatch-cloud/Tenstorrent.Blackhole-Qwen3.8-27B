@@ -268,6 +268,16 @@ def audit_sampdraft(operations, output, block_rows, chip_ids, chip_values):
         tp4_shard_argmax.audit_round(operations, output[2], block_rows, chip_ids, chip_values)
 
 
+def mlp_audit():
+    """tp4_mlp_gateup (op-fusion WP4) when one of its flags is in the environment (the rule two_tile_decode.bind_two_tile_mlp uses), else None: the module is imported only
+    then, and its audit_claim / audit_replayed / audit_round / audit_release hold nothing (and return 0) with the audit flags off."""
+    if not any(name.startswith('QWEN_FAST_MLP_') for name in os.environ):       # (the five names two_tile_decode.MLP_LEVER_FLAGS lists; no other QWEN_FAST_MLP_ name exists)
+        return None
+    import tp4_mlp_gateup
+
+    return tp4_mlp_gateup
+
+
 def release_sampdraft_audit(operations, values=None):
     """Free what the sampler audit holds for the trace output `values`: today's sampler outputs (and the V4a reference registered
     for them). The drafter audits' pairs belong to their buckets and are freed with the bucket's trace."""
@@ -1158,9 +1168,18 @@ class PackedVerifierEngine:
             # held when the audit is off).
             tile_collective_tp.audit_claim(warm, 'warm')
             tile_collective_tp.audit_round(operations, warm, 0)
+            mlp = mlp_audit()
+            if mlp is not None:
+                # QWEN_FAST_MLP_CFG_AUDIT / QWEN_FAST_MLP_GATEUP_AUDIT (tp4_mlp_gateup, op-fusion WP4): the lever's MLP outputs against the served forward's, held beside them
+                mlp.audit_claim(warm, 'warm')
+                mlp.audit_round(operations, warm, 0)
         finally:
             tile_collective_tp.audit_claim(warm, 'warm')
             tile_collective_tp.audit_release(operations, warm)
+            mlp = mlp_audit()
+            if mlp is not None:
+                mlp.audit_claim(warm, 'warm')
+                mlp.audit_release(operations, warm)
             if result is not None:
                 release_sampdraft_audit(operations, result[2] if len(result) > 2 else None)
                 release_vglue_audit(operations, warm, result[2] if len(result) > 2 else None)
@@ -1189,6 +1208,9 @@ class PackedVerifierEngine:
         finally:
             # also after a failed capture: its audited clones belong to the fixture, released when it closes
             tile_collective_tp.audit_claim(self.fixture, 'capture')
+            mlp = mlp_audit()
+            if mlp is not None:
+                mlp.audit_claim(self.fixture, 'capture')
         if self.verify_t1:
             self.note_verify_t1(verify_trace_t1.take())
         if self.verify_t2:
@@ -1260,6 +1282,14 @@ class PackedVerifierEngine:
         if verify_prestage.hostgap_log_enabled():
             # tp4/hostgap stage 0: the gen-2 collection log, once per process (idempotent).
             verify_prestage.install_gc_log()
+            # tp4/fx-wph: the host-gap instrument's wrappers on the host calls and its collection counter (hostgap_instr), once per process (idempotent); it reads the
+            # probe flags strictly, here.
+            import hostgap_instr
+
+            hostgap_instr.install(self.operations)
+            hostgap_instr.probe_enabled()
+            hostgap_instr.probe_every()
+            hostgap_instr.census_every()
         if self.fused is not None:
             diagnostic(self.fused.engaged_line())
         if self.gdn_after_pairs or self.gdn_after_pairs_refusal is not None:
@@ -1573,8 +1603,15 @@ class PackedVerifierEngine:
         if len(id_parts) != tp_shapes.chip_count() or len(value_parts) != tp_shapes.chip_count():
             raise AssertionError('%s chip-local outputs required' % tp_shapes.count_word())
         reads_started = time.perf_counter()
-        chip_ids = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in id_parts]
-        chip_values = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in value_parts]
+        if os.environ.get('QWEN_FAST_BATCHED_READS', '0') != '0':
+            # tp4/fx-wph QWEN_FAST_BATCHED_READS (batched_reads_tp, imported only with the flag): the same eight shards as two mesh reads (or non-blocking copies and one
+            # fence); the per-chip tensors it hands back are the served reads' bytes, cut the same way.
+            import batched_reads_tp
+
+            chip_ids, chip_values = batched_reads_tp.verify_reads(self.operations, self.mesh, ids, values, self.block_rows)
+        else:
+            chip_ids = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in id_parts]
+            chip_values = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in value_parts]
         reads_ms = (time.perf_counter() - reads_started) * 1000
         if any(len(value) != self.block_rows for value in (*chip_ids, *chip_values)):
             raise AssertionError('Missing packed prediction rows')
@@ -1890,10 +1927,11 @@ class PackedVerifierEngine:
             started = time.perf_counter()
             hostgap = verify_prestage.hostgap_log_enabled()
             cpu_started = verify_prestage.thread_ms() if hostgap else 0.0
-            if self.prestaged is None:
-                staged = self.stage_packed_inputs(entries)
-            else:
-                staged = self.prestaged.stage(entries, segments, snapshot, reason)
+            with verify_prestage.hostgap_span('verify_stage', block=verify_prestage.block_label(self)):
+                if self.prestaged is None:
+                    staged = self.stage_packed_inputs(entries)
+                else:
+                    staged = self.prestaged.stage(entries, segments, snapshot, reason)
             staged_at = time.perf_counter()
             cpu_staged = verify_prestage.thread_ms() if hostgap else 0.0
             # Claimed before the trace: its segment restores rewrite slot 0, so no engine
@@ -1930,10 +1968,14 @@ class PackedVerifierEngine:
                 # this trace, and nothing moves one between here and the round's commits.
                 self.validated_this_round = self.round_fences
             tile_collective_tp.audit_replayed(self.fixture)
+            mlp = mlp_audit()
+            if mlp is not None:
+                mlp.audit_replayed(self.fixture)
             replayed = time.perf_counter()
             cpu_replayed = verify_prestage.thread_ms() if hostgap else 0.0
             if self.shard_argmax:
-                host = self.shard_predictions()
+                with verify_prestage.hostgap_span('readback', block=verify_prestage.block_label(self)):
+                    host = self.shard_predictions()
             else:
                 logits, ids = self.output
                 parts = self.operations.get_device_tensors(ids)
@@ -1965,11 +2007,21 @@ class PackedVerifierEngine:
                     gdn_conv_gates_spread.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)
             # QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT: this replay's unit-major reductions against the split's held beside them.
             tile_collective_tp.audit_round(self.operations, self.fixture, self.rounds + 1)
+            mlp = mlp_audit()
+            if mlp is not None:
+                # QWEN_FAST_MLP_*_AUDIT (tp4_mlp_gateup): this replay's MLP outputs against the served forward's, read right after the block's own replay
+                mlp.audit_round(self.operations, self.fixture, self.rounds + 1)
             sdpa_audit = getattr(getattr(self.fixture, 'replay_reader', None), 'sdpa_audit_round', None)
             if sdpa_audit is not None:
                 # QWEN_FAST_TP4_SDPA_AUDIT (sdpa_multi_tp, gate profiles only): the multi launch's counters against the per-user
                 # launches run beside it in this replay. The reader twin's method returns 0 at once unless the audit is on.
                 sdpa_audit(self.rounds + 1)
+            if os.environ.get('QWEN_FAST_KV_PAGE_WRITER_AUDIT', '0') not in ('', '0'):
+                # QWEN_FAST_KV_PAGE_WRITER_AUDIT (kv_page_writer_tp4, op-fusion WP2, gate profiles only): the page writers' counters after this replay, once per
+                # replay - zero mismatched words and at least one valid unit per chip, or the mismatch line and a raise. Imported only with the flag.
+                import kv_page_writer_tp4
+
+                kv_page_writer_tp4.audit_round(self.operations, self.rounds + 1)
             predictions = [host[slice(*segment_rows(self.shape, segment))] for segment in segments]
             finished = time.perf_counter()
             if hostgap:
@@ -2312,6 +2364,9 @@ class PackedVerifierEngine:
         if self.fixture is not None:
             release_vglue_audit(operations, self.fixture, shard_values)
             tile_collective_tp.audit_release(operations, self.fixture)
+            mlp = mlp_audit()
+            if mlp is not None:
+                mlp.audit_release(operations, self.fixture)
             self.fixture.close()
             self.fixture = None
         if self.plug is not None:

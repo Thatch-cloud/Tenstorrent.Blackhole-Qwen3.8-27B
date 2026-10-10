@@ -149,13 +149,19 @@ import make_w2_kill_profiles as w2_kill_twins  # noqa: E402
 PARKED_PROFILES = PARKED_PROFILES + w2_kill_twins.twin_names()
 # the host KV tier's audited twin of the same profile (make_prefix_tier_profiles; test_prefix_tier_profiles holds it as that parent plus the tier names)
 import make_prefix_tier_profiles as tier_twins  # noqa: E402
-PARKED_PROFILES = PARKED_PROFILES + tier_twins.twin_names()
+PARKED_PROFILES = PARKED_PROFILES + tier_twins.twin_names() + tier_twins.ship_names()
 # octo-T8 and the lone-user round (tp4/octo-t8): the generated gate-only twins of the levern profiles, held by test_octo_profiles
 # ...and tp4/octo-2's levers (make_octo2_profiles: each an octo twin plus exactly its flags, held by test_octo2_profiles)
 OCTO_PROFILES = octo_twins.twin_names() + octo2_twins.twin_names()
 # the region-read audit twins (make_kvread_profiles; test_kvread_profiles holds each as its parent plus one flag): exempt wherever the engine-reuse twins are.
 import make_kvread_profiles as kvread_twins  # noqa: E402
 PARKED_PROFILES = PARKED_PROFILES + kvread_twins.twin_names()
+# the op-fusion programme's twins (make_fusion_profiles, from the manifests in fusion-wp; test_fusion_wp holds each as the production profile plus exactly its flags): exempt wherever the engine-reuse twins are.
+import make_fusion_profiles as fusion_twins  # noqa: E402
+PARKED_PROFILES = PARKED_PROFILES + fusion_twins.twin_names() + fusion_twins.ship_names()
+# the engine-start upload twins of the ship profile (make_upload_profiles; test_upload_p0_profiles holds each as that parent plus its switches)
+import make_upload_profiles as upload_twins  # noqa: E402
+PARKED_PROFILES = PARKED_PROFILES + upload_twins.twin_names()
 NEXT5_PROFILES = NEXT5_PROFILES + PARKED_PROFILES + OCTO_PROFILES
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 

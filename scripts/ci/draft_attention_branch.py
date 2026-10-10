@@ -1,10 +1,12 @@
 """Prepared learned attention branch for device-resident draft-stack execution."""
 
+import os
+
 from draft_attention import composed_draft_attention, draft_sdpa
 from draft_convolution import grouped_causal_convolution
 from feature_collective import gather_add_projection
 from draft_head_layout import split_projected_heads, concatenate_query_heads
-from draft_mlp_branch import draft_projection_dtype
+from draft_mlp_branch import draft_projection_dtype, _levers_checked, REDUCE_FLAG, TAIL_FLAG, MM_GRID_FLAG
 import draft_wide_tp
 import tp_shapes
 
@@ -28,7 +30,6 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
 
     native_kernel = None
     if precise_native:
-        import os
         from native_draft_sdpa import audit_active_kernel
 
         native_kernel = audit_active_kernel(os.environ['TT_METAL_HOME'])
@@ -46,7 +47,7 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
     kernel = operations.WormholeComputeKernelConfig(math_fidelity=operations.MathFidelity.HiFi4,
         math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
     base = convolution['layers.0.attention_conv.base_kernel']
-    return dict(operations=operations, mesh=mesh, source_weights=weights, source_convolution=convolution,
+    prepared = dict(operations=operations, mesh=mesh, source_weights=weights, source_convolution=convolution,
         kernel=kernel, native_kernel=native_kernel, native_head_layout=native_head_layout, block_rows=block_rows,
         live_query_qk=live_query_qk, native_proposal_attention=native_proposal_attention,
         norm=upload(convolution['layers.0.input_layernorm.weight'].reshape(1, 1, 160, 32), row_major=True),
@@ -55,6 +56,33 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
         projections={name: projection(name, 0) for name in ('q', 'k', 'v')},
         head_norms={name: upload(weights[f'layers.0.self_attn.{name}_norm.weight'].reshape(1, 1, 4, 32), row_major=True)
                     for name in ('q', 'k')}, output_projection=projection('o', 1))
+    if os.environ.get('QWEN_FAST_DRAFT_QKV1', '0') != '0':
+        # QWEN_FAST_DRAFT_QKV1 (draft_qkv_tp.py, default off): beside the separate q, k and v weights (the pair, the single-user path and the audits keep running on them), the
+        # per-chip [q | k | v] concatenation the fused projection launch reads. Uploaded last, so the flag changes no other upload.
+        import draft_qkv_tp
+
+        if draft_qkv_tp.enabled():
+            prepared['projections']['qkv'] = upload(draft_qkv_tp.fused_host_weight(torch, weights, tp_shapes.chip_count()), sharded=True,
+                                                    dtype=draft_projection_dtype(operations))
+    return prepared
+
+
+def served_key_value(operations, plan, caches, live, retain, name):
+    """The packed users' K (or V) as the served path assembles it: the plan's pieces joined on the row axis (cached banks, each user's live rows, its pad)."""
+    pieces = []
+    for part in plan:
+        if part['kind'] == 'cached':
+            pieces.append(caches[part['user']][name])
+            continue
+        # 'live' takes this user's own rows out of the shared block. 'pad'
+        # fills the tail of the segment, and any rows do: the mask covers
+        # them, exactly as it already covers the live rows beyond block_rows
+        # at one user today. A pair's pads carry no 'source' (rows 0-15); the
+        # quad's name their pair's rows, so every segment is its pair's bytes.
+        start = part['source'].start if 'source' in part else 0
+        pieces.append(retain(operations.slice(live[name], (0, 0, start, 0),
+            (1, tp_shapes.active().draft_kv_heads, start + part['rows'], 128))))
+    return retain(operations.concat(pieces, dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
 
 
 def execute_attention_branch(operations, mesh, collectives, hidden, history, mask, rope, retain, *,
@@ -161,6 +189,8 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
                            or value.dtype != operations.bfloat16 for value in cache.values())):
                 raise ValueError('Explicit native fixed-bucket historical K/V heads required')
     kernel = parameters['kernel']
+    # The op-fusion programme's drafter levers (tp4/fx-wp6; draft_mlp_branch holds the same three flags): each strict, default off, and a flag-off process imports none of the modules.
+    levers = _levers_checked()
 
     def project(value, weight, grid, rows, columns):
         program = operations.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=grid,
@@ -187,7 +217,20 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
     if cached_history is not None:
         from draft_kv_projection import project_key_value
 
-        query = retain(operations.typecast(project(prepared, parameters['projections']['q'], (8, 8), proposal_rows, 1), operations.bfloat16))
+        # QWEN_FAST_DRAFT_QKV1 (draft_qkv_tp.py, default off): the packed quad / octo pass projects q, k and v as ONE fused matmul and splits the heads in one launch; `fused`
+        # is then the split heads dict(q=, k=, v=) and the q projection below is not run. None (the default, and every call the lever cannot take) changes nothing here.
+        fused = None
+        if quad is not None and spans is not None and os.environ.get('QWEN_FAST_DRAFT_QKV1', '0') != '0':
+            import draft_qkv_tp
+
+            if draft_qkv_tp.hook_enabled():
+                def served_projections():
+                    flat_query = retain(operations.typecast(project(prepared, parameters['projections']['q'], (8, 8), proposal_rows, 1), operations.bfloat16))
+                    return quad.project_key_value(operations, prepared, flat_query, rope['live_k'], retain, parameters=parameters, split_only=True)
+
+                fused = draft_qkv_tp.project(operations, prepared, retain, parameters=parameters, project=project, rows=proposal_rows, served=served_projections,
+                                             site='octo' if getattr(quad, 'users', 4) == 8 else 'quad')
+        query = None if fused is not None else retain(operations.typecast(project(prepared, parameters['projections']['q'], (8, 8), proposal_rows, 1), operations.bfloat16))
         if spans is None:
             valid = retain(operations.slice(prepared, (0, 0, 0, 0), (1, 1, block_rows, 5120)))
             proposal = retain(operations.pad(valid, [(0, 0), (0, 0), (0, 32 - block_rows), (0, 0)], 0.0))
@@ -198,27 +241,28 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
             # already laid out in block order.
             proposal, tables = prepared, rope['live_k']
         live = (project_key_value if quad is None else quad.project_key_value)(operations, proposal, query, tables,
-            retain, parameters=parameters)
+            retain, parameters=parameters, **({} if fused is None else dict(split=fused)))
         heads = dict(q=normalize_head('q', live['q']))
+
+        def assembled(name):
+            return served_key_value(operations, plan, caches, live, retain, name)
+
+        # QWEN_FAST_DRAFT_PERMUTE (draft_permute_tp.py, default off): the packed users' K and V as ONE permutation launch (the cached banks and the
+        # live and pad rows placed by the plan, the served round trip's value rule applied to the pieces it round-trips). None, the default and the
+        # only value with the flag off, changes nothing here.
+        engaged = None
+        if spans is not None and os.environ.get('QWEN_FAST_DRAFT_PERMUTE', '0') != '0':
+            import draft_permute_tp
+
+            if draft_permute_tp.hook_enabled():
+                engaged = draft_permute_tp.assemble_kv(operations, plan, caches, live, retain, served=assembled,
+                    site='pair' if quad is None else ('octo' if getattr(quad, 'users', 4) == 8 else 'quad'))
         for name in ('k', 'v'):
             if spans is None:
                 heads[name] = retain(operations.concat([cached_history[name], live[name]],
                     dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
                 continue
-            pieces = []
-            for part in plan:
-                if part['kind'] == 'cached':
-                    pieces.append(caches[part['user']][name])
-                    continue
-                # 'live' takes this user's own rows out of the shared block. 'pad'
-                # fills the tail of the segment, and any rows do: the mask covers
-                # them, exactly as it already covers the live rows beyond block_rows
-                # at one user today. A pair's pads carry no 'source' (rows 0-15); the
-                # quad's name their pair's rows, so every segment is its pair's bytes.
-                start = part['source'].start if 'source' in part else 0
-                pieces.append(retain(operations.slice(live[name], (0, 0, start, 0),
-                    (1, tp_shapes.active().draft_kv_heads, start + part['rows'], 128))))
-            heads[name] = retain(operations.concat(pieces, dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
+            heads[name] = assembled(name) if engaged is None else engaged[name]
     else:
         context_input = retain(operations.slice(history, (0, 0, 0, 0), (1, 1, context, 5120)))
         proposal_input = retain(operations.slice(prepared, (0, 0, 0, 0), (1, 1, block_rows, 5120)))
@@ -288,13 +332,32 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
     else:
         transposed = retain(operations.transpose(rounded, 1, 2))
         merged = retain(operations.reshape(transposed, (1, 1, 32, tp_shapes.active().draft_query)))
-    partial = project(merged, parameters['output_projection'], (8, 10), proposal_rows, 2)
+    output_grid = (8, 10)
+    if levers[MM_GRID_FLAG]:
+        # QWEN_FAST_DRAFT_MM_GRID (draft_mmgrid_tp.py): the wo projection's program on a grid as wide as the device's (the same cores, per-core columns and in0_block_w)
+        import draft_mmgrid_tp
+
+        draft_mmgrid_tp.enabled()
+        output_grid = draft_mmgrid_tp.grid_for(operations, mesh, merged, parameters['output_projection'], output_grid, 2, proposal_rows, kernel, site='wo')
+    partial = project(merged, parameters['output_projection'], output_grid, proposal_rows, 2)
     gather = gather_add_projection if quad is None else quad.gather_add_projection
+    if levers[REDUCE_FLAG]:
+        # QWEN_FAST_DRAFT_REDUCE (draft_reduce_tp.py): the four slices and three adds after the gather as one launch (the quad's 64-row chains; a branch without a quad
+        # already reaches the dispatcher in feature_collective_tp)
+        import draft_reduce_tp
+
+        gather = draft_reduce_tp.choose(gather, quad, 'attention')
     reduced = watch('reduced', retain(gather(operations, mesh, collectives, partial, retain_temporaries=retain,
         **(dict(observe=observe) if observe is not None else {}))))
     rounded = retain(operations.typecast(reduced, operations.bfloat16))
     finished = watch('conv-out', retain(convolve(operations, mesh, rounded, dynamic[2:], parameters['bases'][2:],
         fp32_intermediates=True, retain_temporaries=retain, **seams)))
+    if levers[TAIL_FLAG]:
+        # QWEN_FAST_DRAFT_TAIL (draft_tail_tp.py): the residual tail (two typecasts, an fp32 add, a typecast) as one launch
+        import draft_tail_tp
+
+        draft_tail_tp.enabled()
+        return watch('output', draft_tail_tp.residual(operations, mesh, finished, hidden, retain, site='attention'))
     wide = [retain(operations.typecast(value, operations.float32)) for value in (finished, hidden)]
     summed = retain(operations.add(*wide, dtype=operations.float32))
     return watch('output', retain(operations.typecast(summed, operations.bfloat16)))

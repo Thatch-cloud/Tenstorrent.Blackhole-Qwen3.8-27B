@@ -659,8 +659,20 @@ def bind_two_tile_attention(model, rows, operations, native_m3=False, native_att
     return TwoTileAttentionBinding(model, rows, operations, native_m3=native_m3, native_attn=native_attn)
 
 
+MLP_LEVER_FLAGS = ('QWEN_FAST_MLP_GATEUP', 'QWEN_FAST_MLP_GATEUP_AUDIT', 'QWEN_FAST_MLP_CFG', 'QWEN_FAST_MLP_CFG_AUDIT', 'QWEN_FAST_MLP_AUDIT_STRIDE')
+
+
 def bind_two_tile_mlp(model, rows, operations, native_m3=False):
-    return TwoTileMLPBinding(model, rows, operations, native_m3=native_m3)
+    binding = TwoTileMLPBinding(model, rows, operations, native_m3=native_m3)
+    # WP4 (op-fusion programme, tp4_mlp_gateup): with one of its flags in the environment the lever's own MLP binder (one twin forward per layer, the 64-row
+    # arm with the multiply in L1 and the named matmul partitions, or the fused gate|up launch) takes this place; a model, block or grid it cannot serve binds
+    # nothing and says so, and this binder stands. With none of the flags the module is not imported and this function returns what it always returned.
+    if any(name in os.environ for name in MLP_LEVER_FLAGS):
+        import tp4_mlp_gateup
+        lever = tp4_mlp_gateup.bindings(model, rows, operations, native_m3=native_m3)
+        if lever:
+            return lever[0]
+    return binding
 
 
 def bind_two_tile_gdn_output(model, rows, operations, native_m3=False):

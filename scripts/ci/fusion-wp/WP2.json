@@ -1,0 +1,39 @@
+{
+ "wp": "WP2",
+ "branch": "tp4/fx-wp2",
+ "description": "F-B1: the page-parallel K/V cache writer for the packed 64-row verify block - one launch for a layer's K and V (the 2 sharded-to-interleaved copies and the 2 chained ordered writers it replaces measured 1.60 ms per verify pass in v676). Exact only if bfloat8_b read-modify-write is idempotent on the hardware packer (plan unknown U1): the lever refuses to engage until ordered_writer_evidence_tp4.json carries a page_writer block recorded from a card-M PASS of ordered_writer_tp4_card_test.py --writers page64 (scripts/ci/references/fusion-jobs/WP2).",
+ "levers": [
+  {
+   "id": "kvpage",
+   "name": "K/V page writer",
+   "flag": "QWEN_FAST_KV_PAGE_WRITER",
+   "value": "1",
+   "audit_flag": "QWEN_FAST_KV_PAGE_WRITER_AUDIT",
+   "marker": "tp4 kv page writer",
+   "env": {},
+   "audit_env": {},
+   "reason": "one launch for a layer's K and V cache writes, one read-modify-write per tile instead of per row, reading the AttnPrep output's L1 shards directly (no copy to interleaved DRAM); falls back to the chained writer without the card record"
+  }
+ ],
+ "image_files": [
+  {
+   "path": "scripts/ci/kv_page_writer_tp4.py",
+   "reason": "the lever: flags, planner, evidence gate, launch, audit (imported lazily by packed_ordered_cache.ChainedOrderedCacheWriter when the flag is set)"
+  },
+  {
+   "path": "scripts/ci/kv_page_writer_tp4.cpp",
+   "reason": "JIT source of the reader, writer and audit kernels (the compute kernel is the served ordered writer's own)"
+  },
+  {
+   "path": "scripts/ci/kv_page_writer_tp4_smoke.py",
+   "reason": "the smoke rules for the lever's markers (adds the ordered=0 rule to the generated fusion table)"
+  }
+ ],
+ "tests": [
+  "test_kv_page_writer_tp4",
+  "test_kv_page_model_tp4",
+  "test_ordered_writer_page_arm_tp4"
+ ],
+ "card_jobs": "scripts/ci/references/fusion-jobs/WP2 (card M alone: W1 watcher, W2 proof, W3/W4 negative controls; ORDER.txt there)",
+ "notes": "WP0 TODO, none of it in WP2's files. (1) scripts/ci/test_tp4_closure_literals.py: add kv_page_writer_tp4 to SERVED (packed_ordered_cache.ChainedOrderedCacheWriter.__init__ imports it lazily; with that one word the closure test passes, checked in a scratch run; without it that test is the only failure of WP2's branch). (2) the audit twin needs kv_page_writer_tp4.audit_round(operations, round_number) called once per audited replay, where packed_verifier calls verify_trace_t2.audit_round: it reads the per-unit counters the audit launches wrote and logs '[PINDIAG] tp4 kv page writer audit <n> exact=True ...' (or the mismatch line and raises); packed_verifier.py is WP0's. (3) QWEN_FAST_VERIFY_T2 is an image default (the chained writer exists only with it); the lever needs no other profile key. (4) optimisation/ttnn-op/k64j/run_card_b.sh, MAIN=ordered_writer file list (a refuse-early check, not a mount: the whole of scripts/ci is mounted): add ordered_writer_page_arm_tp4.py kv_page_writer_tp4.py kv_page_writer_tp4.cpp. (5) kv_page_writer_tp4_smoke.problems(env, text) is the superset of the generated smoke rules (it also requires an engaged line with ordered=0, i.e. the captured forward ran the page launch, not only the warm forward). (6) 13x10: the default layout is the served 8x8 rectangle (64 cores) on either grid; QWEN_FAST_KV_PAGE_WRITER_WT=1 (128 one-tile units) needs a 13x10 grid and is refused on 11x10."
+}

@@ -1,0 +1,26 @@
+# The order of WP1's card jobs (fusion programme, work package WP1: S1, the tile-native shard argmax with the two-level tree fold). One line per job: <template name without .env> <class> <image tag> <estimated minutes>.
+# CLASSES. stop: the pack halts at its first failure. soft: data; a failure or skip does not stop the pack, but the decision rules below read it. Minutes are ESTIMATES (nothing has run on a card).
+# THE POINT OF THE ORDER: C1 runs on ONE card, first, and settles whether S1 is a win and whether the tree fold beats the one-core fold BEFORE any four-card time is spent. S1's only timed ABAB so far
+# (TS1-TS4, four 8-user runs of an earlier stack) measured it at -0.70 and -0.76 ms of trace_ms per 64-row verify against the 1.03 ms of Untilize + ArgMax + Gather it replaces: scan + one-core fold cost about 0.29 ms,
+# not the 0.08 to 0.15 ms designed. TS2's lower aggregate tok/s (135 against 156 and 158 at 32k) was host contention (input_ms +2.3 ms and readback_ms +0.9 ms in the same tests; its trace_ms was lower); the repeat
+# TS4 read parity on tok/s. Judge the ABAB below on trace_ms (trace_ms_abab.py), never on a smoke test's aggregate tok/s.
+#
+# DECISION RULES.
+#   C1 verdict not PASS (FAIL or NOT-RUN): fix the kernel first; no four-card job runs. A NOT-RUN carries the JIT error text verbatim.
+#   C1 timing_verdict s1=S1-NO-WIN: stop WP1 (S1 does not beat the served composition by 600 us at 64 rows on this card/grid); nothing below runs.
+#   C1 timing_verdict fold2=FOLD2-WIN: use A1b, T2 and T4 (profiles ...-fx-s1f2). FOLD2-NEUTRAL or FOLD2-LOSS: use A1a, T2alt and T4alt (profiles ...-fx-s1, the one-core fold).
+#   A1x (the audited attach) is a STOP: a mismatch or a fell-back line ends WP1 until read; run it BEFORE the timed block.
+#   T1..T4 ABAB: trace_ms_abab.py --control <T1 log> <T3 log> --lever <T2 log> <T4 log> must print PASS (every pair saves >= 0.5 ms of trace_ms at live=4 in every third of the run).
+#
+# ONE IMAGE: the integrator's build (placeholder tag tp4-fusion-1). The profiles named below are the gate-only twins make_fusion_profiles.py places from scripts/ci/fusion-wp/WP1.json (lever s1: c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-s1 and
+# -fx-s1-audit; the extra twins s1f2 and s1f2-audit are the tree-fold variants); the control is the production profile c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic itself. The cards are under development: this pack never stops, starts or hands back the node agent. Host load: keep the rig's CI runner sets scaled down
+# for the timed block and record the load average around each arm (trace_ms_abab.py names an arm whose host phases differ by more than 15 percent).
+C1-cardm-shard-argmax soft tp4-fusion-1 30
+A1a-s1-audited-attach stop tp4-fusion-1 90
+A1b-s1f2-audited-attach stop tp4-fusion-1 90
+T1-timed-A-control soft tp4-fusion-1 50
+T2-timed-B-s1f2 soft tp4-fusion-1 50
+T3-timed-A-control soft tp4-fusion-1 50
+T4-timed-B-s1f2 soft tp4-fusion-1 50
+T2alt-timed-B-s1 soft tp4-fusion-1 50
+T4alt-timed-B-s1 soft tp4-fusion-1 50

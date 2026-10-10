@@ -1,0 +1,55 @@
+{
+  "wp": "WP7",
+  "branch": "tp4/fx-wp7",
+  "levers": [
+    {
+      "id": "permute",
+      "name": "F-F2 drafter permutation kernels",
+      "flag": "QWEN_FAST_DRAFT_PERMUTE",
+      "value": "1",
+      "audit_flag": "QWEN_FAST_DRAFT_PERMUTE_AUDIT",
+      "marker": "tp4 draft permute",
+      "env": {},
+      "audit_env": {},
+      "reason": "the quad's K/V assembly (untilize, slice, row-major concat, tilize: about 285 us a tensor and layer), query fold and output unfold as one tile-permutation launch each on one rectangle of the compute grid, with the served round trip's zero-exponent-to-+0 rule applied to exactly the pieces it round-trips"
+    },
+    {
+      "id": "qkv1",
+      "name": "F-F3c fused drafter q|k|v projection",
+      "flag": "QWEN_FAST_DRAFT_QKV1",
+      "value": "1",
+      "audit_flag": "QWEN_FAST_DRAFT_QKV1_AUDIT",
+      "marker": "tp4 draft qkv1",
+      "env": {},
+      "audit_env": {},
+      "reason": "the quad's three drafter projections (q 52 us, k 46.5 us, v 46.6 us, three typecasts, one head split) as one matmul over a load-time [q|k|v] weight, one typecast and one head-split launch; costs 42 MB (bf8) or 79 MB (bf16) of DRAM a chip for the extra weight"
+    },
+    {
+      "id": "head64",
+      "name": "F-F4 one 64-row drafter head",
+      "flag": "QWEN_FAST_DRAFT_HEAD64",
+      "value": "1",
+      "audit_flag": "QWEN_FAST_DRAFT_HEAD64_AUDIT",
+      "marker": "tp4 draft head64",
+      "env": {},
+      "audit_env": {},
+      "reason": "the quad's two 32-row LM-head matmuls (2 x 891 us over the same weight shard) as one 64-row matmul; bit-identical only if the auto matmul config at M = 64 blocks K as at M = 32, which the audit decides (else tau-only)"
+    }
+  ],
+  "image_files": [
+    {"path": "scripts/ci/draft_permute_tp.py", "reason": "the permutation planners, the launch builder and the audit (QWEN_FAST_DRAFT_PERMUTE), imported lazily by draft_attention_branch, quad_draft_tp, pair_row_exact_tp and draft_qkv_tp"},
+    {"path": "scripts/ci/draft_permute_tp.cpp", "reason": "JIT source of the permutation kernel (tiles and quarter tiles, the canonical rule)"},
+    {"path": "scripts/ci/draft_qkv_tp.py", "reason": "the fused q|k|v projection and its head split (QWEN_FAST_DRAFT_QKV1), imported lazily by draft_attention_branch"},
+    {"path": "scripts/ci/draft_head64_tp.py", "reason": "the 64-row drafter head (QWEN_FAST_DRAFT_HEAD64), imported lazily by quad_draft_tp"},
+    {"path": "scripts/ci/draft_permute_smoke.py", "reason": "the WP7 log rule (an engaged line per site and shape, a passing audit line per quad site, no fell-back line)"}
+  ],
+  "tests": [
+    "test_draft_permute_tp",
+    "test_draft_qkv_tp",
+    "test_draft_head64_tp",
+    {"discover": "optimisation/ttnn-op/draft_permute"}
+  ],
+  "tp_addresses": {},
+  "card_jobs": "scripts/ci/references/fusion-wp7-jobs/P7-cardm-permute-bytes.env (card M, first; its own folder because make_fusion_jobs.py owns every file of references/fusion-jobs and test_tp4_fusion_jobs reads each entry of that folder as a file)",
+  "notes": "Hooks are env-gated inside the twins this package owns (quad_draft_tp, pair_row_exact_tp, draft_attention_branch, draft_shared_head_tp), so no tp_addresses row is needed. Needs from the integrator, outside the generated blocks: (1) test_tp4_closure_literals.SERVED must name draft_permute_tp, draft_qkv_tp and draft_head64_tp (they are lazy imports of served modules); (2) the image copy-closure test treats them as plain imports, so the overlay lines above must be in both copy lists or the closure test must read the overlay; (2b) test_serving_image_copy_closure.C2_ONLY_PLAIN_IMPORTS must name draft_permute_tp.py, draft_qkv_tp.py and draft_head64_tp.py (overlay-only modules the P8 modules plain-import); (3) the card-M job scripts/ci/references/fusion-wp7-jobs/P7-cardm-permute-bytes.env needs no dispatch (the cardm action runs optimisation/ttnn-op/draft_permute/run_card_m.sh). The octo fold and unfold are NOT hooked (octo_draft_tp.py is not WP7's file); they are planned and tested (draft_permute_tp.fold_records/unfold_records with halves=2 users=4 block=8) and the hook is six lines in octo_draft_tp.octo_fold_query / octo_unfold_output, the same as quad_draft_tp.quad_fold_query's."
+}

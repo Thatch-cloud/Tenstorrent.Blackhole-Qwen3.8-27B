@@ -155,7 +155,7 @@ class ProfileTests(unittest.TestCase):
             audited = '-audit' in name and not name.endswith(('-audit-sdpa', '-audit-f1', '-audit-ln'))
             X262K_FLAGS[name] = (sd.DRAFT_CONV, sd.DRAFT_HEADS) + ((sd.DRAFT_CONV_AUDIT, sd.DRAFT_HEADS_AUDIT) if audited else ())
         for name, profile in PROFILES.items():
-            if name in profile_twins.twin_names():
+            if name in profile_twins.generated_names():
                 continue        # the generated twins carry their Lever N parent's flags (test_parked_tp4_profiles)
             for flag in sd.ALL_FLAGS:
                 wanted = (name in DELTAS and flag in DELTAS[name][1]) or flag in X262K_FLAGS.get(name, ())

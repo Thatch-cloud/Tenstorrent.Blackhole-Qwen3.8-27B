@@ -56,6 +56,10 @@ AUDITED = {
     ('attention_replay_tp.py', 'ReplayAttentionReader.__init__', 'assign', 'positions'): 'the pair path\'s reader constructor',
     ('attention_replay_tp.py', 'ReplayAttentionReader.__init__', 'call-append', 'metadata'): 'the pair path\'s reader constructor',
     ('packed_ordered_cache.py', 'ChainedOrderedCacheWriter.__init__', 'assign', 'positions'): 'the writer\'s own positions, built at construction',
+    # op-fusion WP2 (kv_page_writer_tp4, QWEN_FAST_KV_PAGE_WRITER, gate only): the page writer's own positions tensor (its units' write targets), built once per layer at the attach
+    # beside the chained writer's; the audit's shadow positions are its own too. Neither is a reader's positions, cur_pos or metadata.
+    ('kv_page_writer_tp4.py', 'KVPageWriter.__init__', 'assign', 'positions'): 'the page writer\'s own positions, built at construction (not a reader attribute)',
+    ('kv_page_writer_tp4.py', 'Audit.__init__', 'assign', 'positions'): 'the audit\'s own shadow positions, allocated at construction (not a reader attribute)',
     ('sdpa_long_tp.py', 'apply', 'subscript-assign', 'metadata'): 'the grid configurations rewrite the program config entries in place at the attach; never for multi',
     ('sdpa_multi_tp.py', 'MultiBlock.__init__', 'assign', 'cur_pos'): 'multi\'s OWN stacked cur_pos buffer (not a reader attribute)',
     # tp4/octo-2 Lever 3 (QWEN_FAST_OCTO_ATTN_BUNDLE, gate only): the octo block's bundled attention is set as the reader's `multi` slot ONCE, from the fold reader's constructor at the attach

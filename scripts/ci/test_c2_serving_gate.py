@@ -126,9 +126,13 @@ PARKED_TWINS = PARKED_TWINS | frozenset(_octo2_twins.twin_names())     # (and tp
 import make_w2_kill_profiles as _w2_kill_twins  # noqa: E402
 PARKED_TWINS = PARKED_TWINS | frozenset(_w2_kill_twins.twin_names())     # (and the W2 kill drill twin, test_w2_switch)
 import make_prefix_tier_profiles as _tier_twins  # noqa: E402
-PARKED_TWINS = PARKED_TWINS | frozenset(_tier_twins.twin_names())     # (and the host KV tier's twin, test_prefix_tier_profiles)
+PARKED_TWINS = PARKED_TWINS | frozenset(_tier_twins.twin_names()) | frozenset(_tier_twins.ship_names())     # (and the host KV tier's twin, test_prefix_tier_profiles)
 import make_kvread_profiles as _kvread_twins  # noqa: E402
 PARKED_TWINS = PARKED_TWINS | frozenset(_kvread_twins.twin_names())     # (and the region-read audit twins, test_kvread_profiles)
+import make_fusion_profiles as _fusion_twins  # noqa: E402
+PARKED_TWINS = PARKED_TWINS | frozenset(_fusion_twins.twin_names()) | frozenset(_fusion_twins.ship_names())     # (and the op-fusion programme's twins, test_fusion_wp)
+import make_upload_profiles as _upload_twins  # noqa: E402
+PARKED_TWINS = PARKED_TWINS | frozenset(_upload_twins.twin_names())     # (and the engine-start upload twins, test_upload_p0_profiles)
 
 class ShapeTests(unittest.TestCase):
     @classmethod

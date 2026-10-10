@@ -40,6 +40,8 @@ The descriptors are rebuilt on every call, exactly as ordered_cache.update does,
 program-cache behaviour is the served one.
 """
 
+import os
+
 import tp_shapes
 
 KV_HEADS, KV_WIDTH = 32, 256
@@ -50,6 +52,9 @@ GRID_WIDTH = 8
 CB16_SERVED = 256
 CACHE_PAGE, INPUT_PAGE = 1088, 2048
 NEGATIVE_CONTROLS = ('nochain', 'index', 'conflict')
+# F-B1 (tp4/fx-wp2, kv_page_writer_tp4.py): QWEN_FAST_KV_PAGE_WRITER[_AUDIT]. Set (to anything) and the writer asks kv_page_writer_tp4 for a page writer;
+# unset, that module is never imported and every path below is what it was.
+PAGE_WRITER_FLAGS = ('QWEN_FAST_KV_PAGE_WRITER', 'QWEN_FAST_KV_PAGE_WRITER_AUDIT')
 COMPUTE_ARGS = (0, 1, 24, 25, 26, 16, 8, 2)     # the pair's; the last is the cache's KV head count (compute_args())
 
 
@@ -308,6 +313,18 @@ class ChainedOrderedCacheWriter:
         self.positions, self.pages, self.rows, self.page_width = positions, pages, rows, pages.shape[1]
         self.launch_rows = launch_rows
         self.calls = 0
+        # F-B1: the page writer (one launch for a layer's K and V), or None - the flag unset, or a block / grid / record it cannot take, in
+        # which case it has logged one FELL_BACK line and this writer is exactly what it was.
+        self.page = None
+        if any(os.environ.get(name) is not None for name in PAGE_WRITER_FLAGS):
+            import kv_page_writer_tp4
+
+            self.page = kv_page_writer_tp4.attach(mesh, operations, kernels, positions=positions, pages=pages, spans=self.spans,
+                                                  launch_rows=launch_rows)
+
+    def serve_shadow(self, cache, packed, positions, pages):
+        """The served chained write of this writer's spans onto another cache: the page writer's audit runs it on its shadow cache."""
+        update_chained(self.mesh, cache, packed, positions, pages, self.kernels, self.spans, operations=self.operations)
 
     def __call__(self, cache, packed, *, update_idxs_tensor, page_table):
         from verify_trace_t2 import note
@@ -320,6 +337,12 @@ class ChainedOrderedCacheWriter:
         # writer was built over - so only the geometry is checked (packed_cache_writer:84-89).
         if tuple(update_idxs_tensor.shape) != (self.rows,) or tuple(page_table.shape) != (self.rows, self.page_width):
             raise ValueError('The block positions and page table must cover every row')
+        if self.page is not None and self.page.call(cache, packed, self.serve_shadow):
+            # F-B1: the first call of a layer (K) is held and the second (V) launches both caches' unit writes; counted as the chained
+            # writer's calls are (two a layer), noted per call.
+            self.calls += 1
+            note('kv_chains')
+            return
         converted = packed.memory_config() != operations.DRAM_MEMORY_CONFIG
         interleaved = operations.to_memory_config(packed, operations.DRAM_MEMORY_CONFIG) if converted else packed
         try:

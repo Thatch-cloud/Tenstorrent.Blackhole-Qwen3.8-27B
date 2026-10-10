@@ -82,6 +82,7 @@ is one counter, so a second block's pre-stage or the first block's verify would 
                             [PACKED-HOSTGAP-WINDOW] and [PINDIAG] gc lines; new lines only, no existing line changes.
 """
 
+import contextlib
 import os
 import sys
 import time
@@ -99,6 +100,10 @@ ENTRY_DIET_FLAG = 'QWEN_FAST_TP4_ENTRY_DIET'
 HOSTGAP_LOG_FLAG = 'QWEN_FAST_TP4_HOSTGAP_LOG'
 HOSTGAP_FLAGS = (TWO_BLOCK_FLAG, BLOCK_EPOCHS_FLAG, FULL_AUDIT_FLAG, WINDOW_VALIDATE_FLAG, ENTRY_DIET_FLAG,
                  HOSTGAP_LOG_FLAG)
+# tp4/fx-wph (op-fusion host-gap package): the pre-stage writes only the destinations whose bytes differ (prestage_diff.py) and the writes skip the
+# per-write mapper and address checks (write_packed_lean.py). Both default off; each module is imported only when its flag is set to anything but 0.
+PRESTAGE_DIFF_FLAG = 'QWEN_FAST_PRESTAGE_DIFF'
+WRITE_LEAN_FLAG = 'QWEN_FAST_WRITE_PACKED_LEAN'
 
 # Once at attach, from the block that engaged the flag (packed_verifier).
 ENGAGED_MARKER = '[PINDIAG] verify prestage engaged'
@@ -217,6 +222,16 @@ def entry_diet_enabled(environ=None):
 def hostgap_log_enabled(environ=None):
     """QWEN_FAST_TP4_HOSTGAP_LOG=1 (stage 0: new log lines only)."""
     return _flag(HOSTGAP_LOG_FLAG, environ)
+
+
+def hostgap_span(name, **tags):
+    """tp4/fx-wph: a SPAN of the host-gap instrument (hostgap_instr: its wall and thread CPU time, context switches, collections and the host calls it made, one
+    `[PACKED-HOSTGAP-SPAN]` line) under QWEN_FAST_TP4_HOSTGAP_LOG=1; a no-op context without it, and the module is not imported."""
+    if hostgap_log_enabled():
+        import hostgap_instr
+
+        return hostgap_instr.span(name, **tags)
+    return contextlib.nullcontext()
 
 
 # The fixture write epoch: one counter per process (every packed block's fixture lives in this
@@ -474,6 +489,11 @@ def entry_line(checks_ms):
                  'checks_ms=%.2f entry_ms=%.2f' % (ENTRY_MARKER, entry['admit_ms'], entry['update_states_ms'], entry['storage_ms'],
                                                   entry['reservation_ms'], entry['refresh_ms'], entry['refresh_writes'], checks_ms,
                                                   (time.perf_counter() - entry['started']) * 1000))
+        if hostgap_log_enabled():
+            # tp4/fx-wph: the step that just ended, in one line (hostgap_instr.note_step): wall and thread CPU, context switches, collections, host calls.
+            import hostgap_instr
+
+            hostgap_instr.note_step()
     except BaseException:
         pass
 
@@ -628,10 +648,32 @@ class BlockPrestage:
         self.last_cpu_ms = 0.0
         if self.full_audit:
             self.counts.update(full_audited=0, full_mismatches=0)
+        # tp4/fx-wph: PRESTAGE_DIFF (what the device holds after this block's last own write, so the next pre-stage writes only what differs) and
+        # WRITE_PACKED_LEAN (the writer). Both None, and every path below today's, unless the flag is set to anything but 0.
+        self.diff = self.lean = self.resident = None
+        if os.environ.get(PRESTAGE_DIFF_FLAG, '0') != '0':
+            import prestage_diff
+
+            self.diff = prestage_diff.engage(block)
+        if os.environ.get(WRITE_LEAN_FLAG, '0') != '0':
+            import write_packed_lean
+
+            self.lean = write_packed_lean.engage(block)
+
+    def writer(self, site):
+        """The function that copies host values into the staging buffers: packed_verifier.write_packed itself, or (QWEN_FAST_WRITE_PACKED_LEAN) its lean twin
+        bound to `site` ('prestage' or 'verify'). Looked up at the call, as the call sites did."""
+        if self.lean is not None:
+            return self.lean.writer(site)
+        import packed_verifier
+
+        return packed_verifier.write_packed
 
     # -- the window ---------------------------------------------------------------------------
     def drop(self, reason):
         self.snapshot = None
+        # tp4/fx-wph: a pre-stage that failed may have written part of its destinations: the device holds an unknown mixture.
+        self.resident = None
         self.dropped = str(reason).replace(' ', '_')[:120]
         self.counts['dropped'] += 1
 
@@ -663,7 +705,7 @@ class BlockPrestage:
     def prestage(self, users, live=None):
         """Write every verify input but the tokens for `users` (segment order), validate the
         bindings, and keep the snapshot. No fence: the window's F9 follows."""
-        from packed_verifier import packed_values, write_packed
+        from packed_verifier import packed_values
 
         block = self.block
         self.snapshot = None
@@ -671,6 +713,13 @@ class BlockPrestage:
         round_number = block.rounds + 1
         if block.phase != 'idle':
             raise ValueError('the block is %s, not idle' % block.phase)
+        # tp4/fx-wph PRESTAGE_DIFF: whether the block's last own write still stands, judged BEFORE this pre-stage's own epoch bump (the block's resident
+        # is forgotten here whatever the answer: while the new write is made the device holds an unknown mixture).
+        resident = why = None
+        if self.diff is not None:
+            import prestage_diff
+
+            resident, why = prestage_diff.take_resident(self)
         # Invalidates any older snapshot before the first copy: a pre-stage that fails part way
         # leaves nothing a verify could diff against.
         # tp4/hostgap, per-block epochs: the bump is this fixture's own and comes after the values (their destinations are
@@ -690,18 +739,30 @@ class BlockPrestage:
             bump_fixture(block.fixture, 'prestage')
         tokens = block.fixture.tokens
         indices = [index for index, value in enumerate(values) if value[0] is not tokens]
-        self.inflight = write_packed(block.operations, block.model, values, readers, indices=indices, fence=False,
-                                     poison=False)
+        written, path, reason = indices, 'full', '-'
+        if self.diff is not None:
+            # tp4/fx-wph PRESTAGE_DIFF: only the destinations whose value is not bit-equal to the one the device holds.
+            written, path, reason = prestage_diff.plan(resident, why, values, indices)
+        write = self.writer('prestage')
+        if written or self.diff is None:
+            self.inflight = write(block.operations, block.model, values, readers, indices=written, fence=False,
+                                  poison=False)
         key = self.keyed_inputs(users, values, readers) if round_host.keyed_enabled() else None
         ms = (time.perf_counter() - started) * 1000
         self.snapshot = Snapshot(epoch(), [value[0] for value in values],
                                  [None if value[0] is tokens else value[1:] for value in values],
-                                 len(indices), ms, round_number, local=local_epoch(block.fixture),
+                                 len(written), ms, round_number, local=local_epoch(block.fixture),
                                  cpu_ms=thread_ms() - cpu_started, key=key)
         self.dropped = None
         self.counts['prestaged'] += 1
-        log_line('%s round=%d buffers=%d ms=%.2f live=%s' % (WINDOW_MARKER, round_number, len(indices), ms,
+        if self.diff is not None:
+            self.resident = prestage_diff.resident_after_prestage(self, self.snapshot)
+        log_line('%s round=%d buffers=%d ms=%.2f live=%s' % (WINDOW_MARKER, round_number, len(written), ms,
                                                             '-' if live is None else live))
+        if self.diff is not None:
+            prestage_diff.note_round(self, round_number, path, reason, len(indices), len(written))
+            if self.diff.audit:
+                prestage_diff.audit_round(self, values, indices, written, write, readers)
 
     # -- the verify ---------------------------------------------------------------------------
     def usable(self):
@@ -763,7 +824,7 @@ class BlockPrestage:
         """tp4/round-host KEYED: write the tokens buffer alone (the one value the key does not hold), exactly the write the value diff would
         have made when only the tokens differ. The tokens are validated and built by packed_verifier.packed_host_tokens (packed_host_inputs'
         own calls), each reader validates its start before any copy as packed_values has them do. Returns (written, readers)."""
-        from packed_verifier import packed_host_tokens, write_packed
+        from packed_verifier import packed_host_tokens
 
         block = self.block
         operations = block.operations
@@ -773,7 +834,7 @@ class BlockPrestage:
             own.validate(user[1])
         value = (block.fixture.tokens, tokens, operations.uint32, operations.ROW_MAJOR_LAYOUT)
         try:
-            self.inflight = write_packed(operations, block.model, [value], readers, indices=[0], fence=False)
+            self.inflight = self.writer('verify')(operations, block.model, [value], readers, indices=[0], fence=False)
         except BaseException:
             bump('verify-failed')
             raise
@@ -803,7 +864,7 @@ class BlockPrestage:
     def stage(self, entries, segments, snapshot, reason):
         """The verify-time write: the diff against `snapshot` when there is one, else today's
         full stage_packed. Returns the buffers written; logs MARKER; audits."""
-        from packed_verifier import packed_values, write_packed
+        from packed_verifier import packed_values
 
         block = self.block
         round_number = block.rounds + 1
@@ -812,10 +873,12 @@ class BlockPrestage:
             users = block.padded_users(users, segments)
         self.snapshot = None
         self.dropped = 'no-snapshot'
+        # tp4/fx-wph PRESTAGE_DIFF: while the verify-time write is made the device holds a mixture; the resident is set again, below, once it stands.
+        self.resident = None
         prestage_ms = 0.0 if snapshot is None else snapshot.ms
         started = time.perf_counter()
         cpu_started = thread_ms()
-        values = None
+        values = changed = None
         # tp4/round-host KEYED: the key still holds, so the tokens are the only value that moved (audited, the diff below runs and the
         # claim is checked against it instead).
         would_key = snapshot is not None and round_host.keyed_enabled() and self.key_matches(snapshot, users)
@@ -852,8 +915,8 @@ class BlockPrestage:
                 self.audit_keyed(snapshot, values, changed, users)
             diffed = time.perf_counter()
             try:
-                self.inflight = write_packed(block.operations, block.model, values, readers, indices=changed,
-                                             fence=False)
+                self.inflight = self.writer('verify')(block.operations, block.model, values, readers, indices=changed,
+                                                      fence=False)
             except BaseException:
                 bump('verify-failed')
                 raise
@@ -872,6 +935,12 @@ class BlockPrestage:
             self.audit_round(users, round_number, path)
         if self.full_audit:
             self.full_audit_round(values, users, round_number, path)
+        if self.diff is not None and path == 'diff':
+            # tp4/fx-wph PRESTAGE_DIFF: the device now holds the snapshot's values with the changed destinations replaced by this verify's (a keyed write
+            # changed the tokens alone); the epochs are read here, after the write's bump and after any audit that restaged the round. A full stage records nothing.
+            import prestage_diff
+
+            self.resident = prestage_diff.resident_after_verify(self, snapshot, values, changed, round_number)
         return written
 
     def full_audit_round(self, values, users, round_number, path='diff'):
@@ -960,12 +1029,14 @@ class WhileWaiting:
             # Round-fence plan H1b (fused_commit.py): the next round's T_proj RoPE tables for each
             # live segment. Never raises (a segment that fails is staged at its commit), so the
             # pre-stage below always runs.
-            fused.stage_window(self.requests)
+            with hostgap_span('stage_window', block=block_label(block)):
+                fused.stage_window(self.requests)
         staged_window = time.perf_counter()
         prestaged = getattr(block, 'prestaged', None)
         try:
             if prestaged is not None and self.prestage:
-                prestaged.prestage_requests(self.requests)
+                with hostgap_span('prestage', block=block_label(block)):
+                    prestaged.prestage_requests(self.requests)
                 self.timing['prestaged'] = 1
         finally:
             self.timing.update(stage_window_ms=(staged_window - started) * 1000,

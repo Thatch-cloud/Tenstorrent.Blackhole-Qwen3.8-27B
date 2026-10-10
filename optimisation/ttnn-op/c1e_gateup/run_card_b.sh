@@ -418,6 +418,7 @@ timeout -k 30 "$timeout_s" docker run --rm --name "$name" --network none \
   --mount "type=bind,src=$R/kcache-$stamp,dst=/kcache" \
   "${WM[@]}" \
   -e TT_METAL_HOME=/opt/tt-metal -e TT_METAL_CACHE=/kcache -e OMP_NUM_THREADS=8 \
+  ${QUAL_TT_GRID:+-e "TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$QUAL_TT_GRID"} \
   --workdir /opt/tt-metal \
   --entrypoint python3 "$IMAGE" -B /bench/c1e_gateup_card_b.py "${args[@]}" "${extra[@]}" \
   2>&1 | tee "$R/c1e-$stamp.log"

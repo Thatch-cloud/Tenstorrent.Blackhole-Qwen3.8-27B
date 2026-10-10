@@ -127,7 +127,7 @@ class ProfileTests(unittest.TestCase):
     def test_no_traffic_profile_carries_a_stack_flag_and_only_the_two_w1_arms_carry_all_of_them(self):
         for name, profile in load()['profiles'].items():
             env = profile.get('env', {})
-            if not profile.get('gate_only') and name not in ('c2-packed-tp4-8x262k-ship-prefix', 'c2-packed-tp4-8x262k-ship-prefix-levern-traffic', 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic'):     # ship/262k-prefix and its Lever N twin: the traffic profiles that carry the stack (test_ship_262k_prefix)
+            if not profile.get('gate_only') and name not in ('c2-packed-tp4-8x262k-ship-prefix', 'c2-packed-tp4-8x262k-ship-prefix-levern-traffic', 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic', 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic'):     # ship/262k-prefix and its Lever N twin: the traffic profiles that carry the stack (test_ship_262k_prefix)
                 with self.subTest(name=name):
                     self.assertFalse((set(STACK) | set(AUDITS)) & set(env))
             if set(STACK) <= set(env) and name.startswith(W1):
@@ -185,7 +185,8 @@ class CompositionTests(unittest.TestCase):
             if (not path.name.startswith('test_') and path.name != 'mesh_link_policy.py'
                     and ('fast_ccl_topology' in text_found or mesh_link_policy.TOPOLOGY_SWITCH in text_found)):
                 readers.append(path.name)
-        self.assertEqual(readers, ['dflash_device.py', 'feature_collective_tp.py', 'quad_draft.py'])
+        # (draft_reduce_tp, op-fusion WP6: its local reduce issues the same all-gather as the served chain, with the served topology)
+        self.assertEqual(readers, ['dflash_device.py', 'draft_reduce_tp.py', 'feature_collective_tp.py', 'quad_draft.py'])
 
     def test_without_the_in_trace_sampler_the_request_width_warm_the_control_carries_is_still_on(self):
         for name in (CONTROL, W1, W1_AUDIT):

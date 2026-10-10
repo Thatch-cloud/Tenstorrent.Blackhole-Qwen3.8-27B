@@ -40,7 +40,33 @@ def reduce_projection(operations, mesh, collectives, value):
             operations.deallocate(reduced)
 
 
+REDUCE_FLAG = 'QWEN_FAST_DRAFT_REDUCE'
+
+
+def _reduce_requested():
+    """QWEN_FAST_DRAFT_REDUCE, read at each call with a plain environment read (strict 0 or 1): draft_reduce_tp is imported only when it is on."""
+    value = os.environ.get(REDUCE_FLAG)
+    if value is None or value == '0':
+        if os.environ.get(REDUCE_FLAG + '_AUDIT', '0') != '0':
+            raise ValueError('%s_AUDIT needs %s=1: the audit would compare nothing' % (REDUCE_FLAG, REDUCE_FLAG))
+        return False
+    if value == '1':
+        return True
+    raise ValueError('%s must be 0 or 1, got %r' % (REDUCE_FLAG, value))
+
+
 def gather_add_projection(operations, mesh, collectives, value, *, retain_temporaries=None, observe=None):
+    """The gather-add chain at four cards: the served ops (served_gather_add_projection), or with QWEN_FAST_DRAFT_REDUCE=1 the same gather followed by
+    ONE launch for the slices and adds (draft_reduce_tp, tp4/fx-wp6 F-F1), which hands back to the served function for a call it cannot take."""
+    if _reduce_requested():
+        import draft_reduce_tp
+
+        return draft_reduce_tp.gather_add(operations, mesh, collectives, value, retain_temporaries=retain_temporaries, observe=observe,
+                                          served=served_gather_add_projection, site='feature')
+    return served_gather_add_projection(operations, mesh, collectives, value, retain_temporaries=retain_temporaries, observe=observe)
+
+
+def served_gather_add_projection(operations, mesh, collectives, value, *, retain_temporaries=None, observe=None):
     links = projection_links()
     shape = tuple(value.shape)
     width = tp_shapes.mesh_width(mesh)

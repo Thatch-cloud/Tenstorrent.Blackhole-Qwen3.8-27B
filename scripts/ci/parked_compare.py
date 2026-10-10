@@ -36,7 +36,9 @@ def compare(control_smoke, parked_smoke, control_container=None, parked_containe
     if mode == 'exact':
         problems += mismatches
         if parked_container is not None:
-            found, facts = parked_judge.judge(env or dict(QWEN_FAST_PARKED_ENGINES='1'), parked_container)
+            # an op-fusion lever arm (its profile's env names levers of the programme) is judged against the lever band for the engines' DRAM, as c2_smoke_check judges it
+            levers, lever_audits = check.fusion_arm_flags(env or {})
+            found, facts = parked_judge.judge(env or dict(QWEN_FAST_PARKED_ENGINES='1'), parked_container, levers=levers, lever_audits=lever_audits)
             problems += ['parked arm: ' + text for text in found]
             # R2 (the replay ledger): the parked arm's verifier raises on a replay between a verify and its publication, so its log carries none; the
             # flag-off control logs one instead of raising, so today's ordering is a number in the report and cannot stop the window by itself.

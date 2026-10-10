@@ -292,8 +292,68 @@ checkpoint store's own eviction counters moved. The job pack, its order and its 
   was the six salted hits (one resident and one returning per size, all restored) and the three cold twins, which are a continuation of the same
   prompt under a fresh salt and miss by design; the line now counts the salted ones only.
 
+### Concurrent restore and spill (`tier-concurrent`, `tier-concurrent-timed`)
+
+T1 to T3 ran the tier with nothing else on the engine. What a shippable tier also owes is what it costs the users who are not using it: the
+spill (a device read of the blocks an allocation displaces) happens at the end of a scheduler step and the restore (a device write of a returning
+session's pages) before the next one, so the seats decoding beside them wait for both. The two plans measure that, each one arm (one job), on a
+tier profile or on its no-tier control (the pairs below run the same plan on both):
+
+* `tier-concurrent` is the audited arm (the audit twin; exactness and engagement; the stall is printed, not judged: the audits are its cost);
+  `tier-concurrent-timed` is the timed one (no audit instrument; the stall budget is judged).
+* The scenario (`prefix_replay.scenario_tier_concurrent`): a session is built to the largest size the profile admits (254k, capped by the context and
+  the prompt limit) and pushed out of the device pool by fresh-salt floods totalling the pool (no seat is decoding yet); then **seven seats** start
+  (about 4k-token real coding prompts, `ignore_eos`, a 60,000-token budget, so they outlast the scenario), and after every first token, a 10 s
+  settle and a 60 s **control** window (the seats alone): the session **returns** (restored from host RAM on a tier profile, re-prefilled cold on
+  the control; it decodes 512 tokens beside the seven as an eighth seat), a long fresh 120k prompt is sent (**spill**: its blocks displace cached
+  ones, which the tier reads out to host RAM; on the control it displaces nothing to the host), and the returning turn's **cold twin** (a fresh
+  salt, the same body) is sent and compared with it (a strict pair). Every request under test is built, fitted and tokenized before the window
+  that precedes it, so a window times the request and not the tokenizer.
+* What is read (`prefix_concurrent`, from the seats' streamed chunks alone: `chunk_times` and `sent_s` are in `records.jsonl`): a seat's interval
+  between two chunks is its round time and the longest interval is the longest it waited for a token. Windows: `control`, `restore` (the returning
+  turn's send to its first token), `restore_decode` (the rest of its answer), `spill` (the long prompt's send to its first token), `cold` (the
+  cold twin's). Per window: how many of the seven seats decoded across all of it, the round time p50/p99/mean over their complete intervals, the
+  longest wait of any seat that overlaps it, and the round p99 against the arm's own control window as a percentage.
+* Judged: a window without all seven seats decoding across it is NOT_EXERCISED (a seat finished its budget or failed), as is a tier arm with no `host
+  tier restore` line for the returning turn or no `host tier spill` line inside the long prompt's request; the tier's counters as in `tier-returning`;
+  the pair (the restored answer against its cold twin) IDENTICAL; and, on the **timed** arm, **no seat waiting longer than the Lever N decode gap
+  floor** (`QWEN_FAST_LEVERN_MAX_DECODE_GAP_S`, 8 s when the profile does not say) in any window, control included. The round p99 regression is
+  printed as a number, with no threshold. It is the stall of an *event*: the seats grow by their own decode (some 20k tokens each by the spill
+  window), so a later window is slower whatever happens beside it. **The tier's cost is this arm's window against the control profile's same
+  window**, which is what the offline comparator prints.
+* `scripts/ci/tier_concurrent_compare.py <A> <B> [<C> <D>]` (A control, B tier, C control repeat, D tier repeat, each a results directory):
+  the seven seats' output token ids compared over the tokens both arms streamed (the seats are stopped when the scenario ends, at different lengths
+  in different arms; `IDENTICAL`, `DIVERGED` at the first differing token, or `SHORT` under 1,000 common tokens, which proves nothing), the returning,
+  long-prompt and cold-twin answers compared whole, each window's round p50/p99 and longest wait side by side with the tier's p99 against the
+  control's in percent, the budget for both arms, and, for the ABAB, the **floor** (the same control profile twice). Exit 0 only when every text is
+  identical and no wait is over the budget. The seven streams of a tier arm are "unchanged" when they equal the control boot's: the prompts are
+  seeded by name, not by arm, and decoding is greedy.
+* **Estimated, not measured** (nothing of this scenario has run on a card; the fakes in `test_prefix_tier_concurrent` run it end to end, with a
+  stall injected into the restore, but their times mean nothing): the seats' wait at the largest size. T3 measured the restore itself at 254k as
+  3,841 blocks, 8.56 GB in 0.96 s (8.9 GB/s) with 0.14 s of displaced blocks spilled in the same request, and the returning turn's first token at
+  6.49 s (a device-resident hit 4.65 s), nothing else running; if the seats wait for the whole of it, the wait is at most about 6.5 s against
+  the 8 s floor, a margin of about 1.5 s, and the 128k session (4.1 s) is well inside. The flood time at the production pool (12 x 120k-token cold
+  prefills) and the audited arm's cost are the unmeasured parts of the job times in the pack.
+
+### The ship candidate (`...-w2-er-tierfx-traffic`) and its job pack
+
+`make_prefix_tier_profiles.py` also writes the **ship candidate**: the op-fusion ship profile (`...-w2-er-fx-traffic`) plus exactly the tier at its
+production setting (`QWEN_PREFIX_HOST_TIER_GIB=32` beside the 8 GiB checkpoint store, `verify=sample`, `audit=0`) and the preconverted checkpoints
+(`QWEN_PREFIX_CKPT_PRECONVERTED=1`, its audit 0): a traffic profile with no gate instrument, carrying **its own owner traffic waiver** (id
+`w2-er-fx-tier-262k-2026-10-11`) whose decision is **PENDING**; and its gate-only audit twin `...-tierfx-audit` (the combined fusion audit arm plus
+the tier with every instrument on). The contract refuses the two tier levers on a traffic profile whose waiver does not name them
+(`serving_c2_contract.TIER_WAIVABLE_LEVERS`); a PENDING profile boots in a gate or a smoke and logs the word, but no build bakes it. The control of
+every pairing is `...-fx-traffic` itself. To approve: replace `SHIP_DECISION` in the generator with a sentence starting `APPROVED`, run `--write`,
+commit, run the CPU suite on that commit. After a merge that moves a parent profile, regenerate, never hand-merge.
+
+The pack is `scripts/ci/references/fusion-jobs/tier` (one image of its own, `tp4-fusion-tier-1`, a placeholder for the tag its B0 builds from the pushed
+head): B0, X0, **TCX0/TCX1** (the GX-style exactness pair: the control and the candidate over the parked and Lever N equal-answer list, compared with
+`parked_compare.py`), **TC1** (the audited concurrent arm on the audit twin), **TC2 to TC5** (the timed ABAB: control, tier, control, tier) and Z.
+`ORDER.txt` has the NEEDS lines, the read rules, the no-go list and the estimated minutes (about 7 h 10 min). The ship gates G1, G2 and SR of
+`fusion-jobs/ship` are run on the candidate afterwards by changing their profile names.
+
 ### Not done
 
-The NVMe tier; the tier on a traffic profile (the contract refuses it until a qualification record exists); the restore through
+The NVMe tier; the tier on a traffic profile beyond the ship candidate's own PENDING waiver (the contract refuses it anywhere else); the restore through
 vLLM's connector API (not needed: the pages are cached before the hit is looked up); a device-side gather that would let the
 spill overlap the step; arming anything on the production profile.

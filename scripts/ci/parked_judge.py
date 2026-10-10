@@ -38,6 +38,19 @@ ACCEPTANCE_TOLERANCE = 0.02
 HOLD_AGE_LIMIT_MS = 180000
 # ER0: what one parked engine takes of a chip's DRAM (measured 0.468-0.495 GB), with a margin for the first build's own programs.
 ENGINE_GB = (0.46, 0.51)
+# THE OP-FUSION LEVER ARMS (docs/tp4-fusion.md): a profile that turns on levers of the fusion programme (the caller names them: c2_smoke_check.fusion_arm_flags) is judged
+# against a band whose FLOOR is lower and whose CEILING is the production ceiling. Derivation. (1) A parked engine's DRAM is the allocator growth of its captured verify
+# graph (design 3: 0.468-0.495 GB per chip, run v579). (2) The levers fuse or remove ops of that graph and write intermediates to L1 instead of DRAM; none of the levers in
+# the combined arm adds a per-engine buffer, so an engine of any subset of them is no larger than the production engine and no smaller than the engine of the whole set.
+# That is why the ceiling does NOT move: a lever that ADDS per-engine DRAM (the fused MLP gate|up op's weights, if it ever joins) must fail the ceiling and be given its
+# own measured number, not be absorbed. The K/V page writer removes a DRAM copy (it reads the prepared K/V from L1; its circular buffers are L1) and adds none.
+# (3) MEASURED, the whole set. The first combined set (eleven lever flags, MLP config l1, CCL served, no page writer) took 3.346 GB for eight engines, 0.418 GB each, on all
+# four chips in two runs (v714, v716). The shipped set (MLP config g3u4d3, CCL rs-c1, the K/V page writer, the four round-host levers, the WP6 capture fix) took the SAME 0.418 GB each on all four chips in
+# the audited attach FXA (run 38063466256, twenty-two flags) and in both timed lever legs (runs 38064674222, 38065338924): 0.050-0.077 GB (10-16 percent) under the production
+# engine, and the audits hold nothing per engine. (4) The floor is that measurement less the production band's own margin (its 0.46 sits 1.7 percent under the 0.468
+# measured): 0.41 GB. An audited lever arm has the same band, and the audited free-DRAM floor below still binds.
+ENGINE_GB_LEVERS = (0.41, 0.51)
+ENGINE_GB_LEVERS_AUDITED = ENGINE_GB_LEVERS
 # ER0: the P7p free reading per chip at eight parked engines (design 3.2: 4.95-5.11 GB audits off, 3.69-3.85 audited, minus a margin).
 LEDGER_FREE_FLOOR_GB = dict(plain=4.7, audited=3.6)
 SEATS_ENV = 'QWEN_FAST_M3_BLOCKS'
@@ -74,9 +87,22 @@ def ledger_phase(facts, phase):
     return found
 
 
-def ledger_problems(facts, engines, audited):
-    """ER0's numeric rules from the memory ledger: per chip, the P7 -> P7p allocation growth is `engines` engines' (0.46 to 0.51 GB each) and the free
-    reading after them is above the floor. [] when the ledger was not on (nothing to read)."""
+def engine_band(levers=(), lever_audits=()):
+    """The per-engine DRAM band (low, high) in GB; high None = no ceiling. Production and every profile without fusion levers: ENGINE_GB, never loosened."""
+    if not levers and not lever_audits:
+        return ENGINE_GB
+    return ENGINE_GB_LEVERS_AUDITED if lever_audits else ENGINE_GB_LEVERS
+
+
+def engine_growth(facts, engines):
+    """{chip: GB per parked engine} from the P7 -> P7p allocation growth ({} when the ledger was not on)."""
+    before, after = ledger_phase(facts, 'P7'), ledger_phase(facts, 'P7p')
+    return dict((chip, round((after[chip][0] - before[chip][0]) / float(engines), 3)) for chip in sorted(set(before) & set(after)))
+
+
+def ledger_problems(facts, engines, audited, band=ENGINE_GB):
+    """ER0's numeric rules from the memory ledger: per chip, the P7 -> P7p allocation growth is `engines` engines' (the band's GB each, ENGINE_GB unless the caller
+    passes a lever arm's engine_band) and the free reading after them is above the floor. [] when the ledger was not on (nothing to read)."""
     before, after = ledger_phase(facts, 'P7'), ledger_phase(facts, 'P7p')
     if not before or not after:
         return []
@@ -84,17 +110,23 @@ def ledger_problems(facts, engines, audited):
     floor = LEDGER_FREE_FLOOR_GB['audited' if audited else 'plain']
     for chip in sorted(set(before) & set(after)):
         grown = after[chip][0] - before[chip][0]
-        low, high = ENGINE_GB[0] * engines, ENGINE_GB[1] * engines
-        if not low <= grown <= high:
-            problems.append('chip %d: the %d parked engines took %.3f GB of DRAM, outside %.2f-%.2f GB (%.2f-%.2f each)'
-                            % (chip, engines, grown, low, high, ENGINE_GB[0], ENGINE_GB[1]))
+        low = band[0] * engines
+        high = None if band[1] is None else band[1] * engines
+        if grown < low or (high is not None and grown > high):
+            if band == ENGINE_GB:
+                problems.append('chip %d: the %d parked engines took %.3f GB of DRAM, outside %.2f-%.2f GB (%.2f-%.2f each)'
+                                % (chip, engines, grown, low, high, ENGINE_GB[0], ENGINE_GB[1]))
+            else:
+                problems.append('chip %d: the %d parked engines took %.3f GB of DRAM, outside the op-fusion lever arm\'s %s (%s each; the production band is %.2f-%.2f)'
+                                % (chip, engines, grown, '%.2f-%.2f GB' % (low, high) if high is not None else 'floor of %.2f GB' % low,
+                                   '%.2f-%.2f' % band if band[1] is not None else 'at least %.2f' % band[0], ENGINE_GB[0], ENGINE_GB[1]))
         if engines == 8 and after[chip][1] < floor:
             problems.append('chip %d: %.3f GB free after the parked engines, under the %.1f GB floor of the %s arm' % (
                 chip, after[chip][1], floor, 'audited' if audited else 'audits-off'))
     return problems
 
 
-def judge(env, text, smoke=None):
+def judge(env, text, smoke=None, levers=(), lever_audits=()):
     """(problems, facts) of one arm's container log against its profile env. `facts` is small (counts) so a smoke check can print it."""
     env = env or {}
     facts = markers.scan(lines_of(text))
@@ -137,7 +169,10 @@ def judge(env, text, smoke=None):
     if facts['warm'] and not any(value > 0 for value in facts['prewarm']):
         problems.append('no publish prewarm with count > 0 (%s): the first request after a restart would compile the publication programs' % (
             'skipped at history_rows=%s' % facts['prewarm_skipped'] if facts['prewarm_skipped'] else 'no prewarm line'))
-    problems += ledger_problems(facts, count, audit)
+    problems += ledger_problems(facts, count, audit or bool(lever_audits), engine_band(levers, lever_audits))
+    if levers or lever_audits:
+        summary['fusion_levers'] = len(levers) + len(lever_audits)
+        summary['engine_gb'] = engine_growth(facts, count)
 
     # rebinds
     for entry in facts['rebinds']:

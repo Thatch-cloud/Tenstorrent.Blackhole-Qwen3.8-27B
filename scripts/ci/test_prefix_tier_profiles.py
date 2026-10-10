@@ -16,7 +16,15 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import c2_prefix_gate as gate  # noqa: E402
+import c2_serving_job  # noqa: E402
+import make_fusion_profiles  # noqa: E402
+import make_kvread_profiles  # noqa: E402
+import make_octo2_profiles  # noqa: E402
+import make_octo_profiles  # noqa: E402
+import make_parked_profiles  # noqa: E402
 import make_prefix_tier_profiles as generator  # noqa: E402
+import make_round_host_profiles  # noqa: E402
+import make_upload_profiles  # noqa: E402
 import make_w2_kill_profiles as kill_generator  # noqa: E402
 import prefix_replay as replay  # noqa: E402
 import profile_twins  # noqa: E402
@@ -43,15 +51,31 @@ class GeneratorTests(unittest.TestCase):
         for name in others:
             self.assertEqual(once['profiles'][name], DATA['profiles'][name], name)
 
-    def test_the_twin_sits_after_the_kill_drill_twin_which_stays_right_after_the_parent(self):
+    def test_the_profiles_sit_after_the_kill_drill_twin_and_the_upload_family_which_stay_where_their_generators_put_them(self):
         names = list(PROFILES)
         self.assertEqual(names.index(kill_generator.TWIN), names.index(generator.PARENT) + 1)
-        self.assertEqual(names.index(generator.TWIN), names.index(kill_generator.TWIN) + 1)
-        self.assertNotEqual(names[-1], generator.TWIN, 'the end of the file is the region-read twins\'')
+        upload = [name for name in names if name.startswith(generator.PARENT + '-')]
+        self.assertTrue(upload, 'the engine-start upload family')
+        self.assertEqual(names.index(upload[0]), names.index(kill_generator.TWIN) + 1, 'make_upload_profiles inserts right after the kill twin')
+        self.assertEqual(names[names.index(upload[-1]) + 1:names.index(upload[-1]) + 4], [generator.TWIN, generator.SHIP, generator.SHIP_AUDIT])
+        self.assertEqual(names[-len(make_kvread_profiles.twin_names()):], list(make_kvread_profiles.twin_names()), 'the end of the file is the region-read twins\'')
+        fusion = [name for name in names if name.startswith(make_fusion_profiles.NAMESPACE)]
+        self.assertGreater(names.index(fusion[0]), names.index(generator.SHIP_AUDIT), 'the op-fusion block is generated after this one')
 
-    def test_the_twin_is_registered_with_the_census_exemptions(self):
-        self.assertIn(generator.TWIN, profile_twins.twin_names())
-        self.assertEqual(generator.twin_names(), (generator.TWIN,))
+    def test_every_generator_agrees_with_the_one_file(self):
+        """The order above is the one every generator\'s own --check reproduces: this file, and the ones it neighbours, are stable under each of them."""
+        for module in (generator, kill_generator, make_kvread_profiles, make_parked_profiles, make_octo_profiles, make_octo2_profiles, make_round_host_profiles,
+                       make_upload_profiles, make_fusion_profiles):
+            with self.subTest(generator=module.__name__):
+                self.assertEqual(module.main(['--check']), 0)
+
+    def test_the_profiles_are_registered_with_the_census_exemptions(self):
+        self.assertEqual(generator.twin_names(), (generator.TWIN, generator.SHIP_AUDIT))
+        self.assertEqual(generator.ship_names(), (generator.SHIP,))
+        for name in generator.twin_names():
+            self.assertIn(name, profile_twins.twin_names())
+        self.assertNotIn(generator.SHIP, profile_twins.twin_names(), 'a traffic profile is not a gate-only twin')
+        self.assertIn(generator.SHIP, profile_twins.generated_names())
 
     def test_a_parent_that_cannot_be_twinned_is_refused_by_name(self):
         cases = (('gate only', lambda p: p.update(gate_only=True), 'is gate_only'),
@@ -146,6 +170,120 @@ class TwinTests(unittest.TestCase):
         self.assertEqual(contract.prefix_policy_problems(dict(derived['profiles'][name], name=name)), [])
 
 
+class ShipCandidateTests(unittest.TestCase):
+    """-tierfx-traffic (the op-fusion ship profile plus the tier, under its own PENDING owner traffic waiver) and -tierfx-audit (its gate-only audit twin)."""
+
+    SHIP = PROFILES[generator.SHIP]
+    AUDIT = PROFILES[generator.SHIP_AUDIT]
+    FX = PROFILES[generator.FX_PARENT]
+    FX_AUDIT = PROFILES[generator.FX_AUDIT_PARENT]
+
+    def named(self, profile):
+        return dict(copy.deepcopy(profile), name='probe')
+
+    def test_the_ship_candidate_is_the_fusion_ship_profile_plus_exactly_the_tier_env(self):
+        mine, theirs = copy.deepcopy(self.SHIP), copy.deepcopy(self.FX)
+        for name, value in generator.SHIP_ENV.items():
+            self.assertEqual(mine['env'].pop(name), value, name)
+        self.assertIn(generator.FX_PARENT, mine.pop('description'))
+        theirs.pop('description')
+        waiver, parent_waiver = mine.pop(generator.WAIVER_FIELD), theirs.pop(generator.WAIVER_FIELD)
+        self.assertEqual(mine, theirs, 'everything but the tier names, the description and the waiver is the fusion ship profile\'s')
+        self.assertNotIn('gate_only', self.SHIP, 'a traffic profile')
+        self.assertEqual(generator.SHIP_ENV['QWEN_PREFIX_HOST_TIER_VERIFY'], 'sample')
+        self.assertEqual((generator.SHIP_ENV['QWEN_PREFIX_HOST_TIER_AUDIT'], generator.SHIP_ENV['QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT']), ('0', '0'))
+        for gate_instrument in ('QWEN_PREFIX_HOST_TIER_OFF_PATH', 'QWEN_FAST_TP4_SDPA_AUDIT'):
+            self.assertNotIn(gate_instrument, self.SHIP['env'])
+        self.assertEqual(waiver['levers'], dict(parent_waiver['levers'], **contract.TIER_WAIVABLE_LEVERS))
+        self.assertNotEqual(waiver['id'], parent_waiver['id'])
+
+    def test_its_waiver_is_well_formed_names_the_tier_and_is_pending(self):
+        waiver = self.SHIP[contract.TRAFFIC_WAIVER]
+        profile = self.named(self.SHIP)
+        self.assertEqual(contract.traffic_waiver_problems(profile), [])
+        self.assertEqual(sorted(waiver), sorted(contract.TRAFFIC_WAIVER_FIELDS))
+        self.assertTrue(waiver['decision'].startswith('PENDING'), waiver['decision'])
+        self.assertTrue(contract.traffic_waiver_pending(profile))
+        self.assertEqual(contract.waived_levers(profile), waiver['levers'])
+        self.assertIn('QWEN_PREFIX_HOST_TIER_GIB', contract.waived_levers(profile))
+        self.assertEqual(waiver['decision'], generator.SHIP_DECISION)
+        self.assertGreaterEqual(len(waiver['evidence']), 5)
+        for run in ('38082194508', '38082317009', '38082865675', '38083229148', '38084230415'):
+            self.assertTrue(any(run in item for item in waiver['evidence']), run)
+        text = json.dumps([self.SHIP['description'], waiver])
+        for word in make_fusion_profiles.SHIP_FORBIDDEN:
+            self.assertNotIn(word, text)
+
+    def test_a_pending_ship_candidate_boots_but_no_build_bakes_it(self):
+        self.assertTrue(c2_serving_job.bake_waiver_pending(self.SHIP))
+        with self.assertRaises(c2_serving_job.JobError) as caught:
+            c2_serving_job.read_bake({'C2_BAKE_DEFAULT_PROFILE': generator.SHIP}, 'build', 'quad')
+        self.assertIn('not APPROVED', str(caught.exception))
+
+    def test_the_contract_accepts_the_tier_on_this_traffic_profile_and_only_under_the_waiver(self):
+        profile = self.named(self.SHIP)
+        self.assertEqual(contract.prefix_policy_problems(profile), [])
+        self.assertEqual(contract.prefix_reuse_problems(profile), [])
+        # the waiver is what lets it: without the tier's levers named, the same env is refused
+        for levers in (dict((k, v) for k, v in self.SHIP[contract.TRAFFIC_WAIVER]['levers'].items() if k != 'QWEN_PREFIX_HOST_TIER_GIB'),
+                       dict((k, v) for k, v in self.SHIP[contract.TRAFFIC_WAIVER]['levers'].items() if k != 'QWEN_PREFIX_CKPT_PRECONVERTED')):
+            broken = self.named(self.SHIP)
+            broken[contract.TRAFFIC_WAIVER]['levers'] = levers
+            problems = contract.prefix_policy_problems(broken)
+            self.assertTrue(any('only a gate-only profile may name them' in problem for problem in problems), problems)
+        stale = self.named(self.SHIP)
+        stale['env'].pop('QWEN_PREFIX_CKPT_PRECONVERTED')
+        self.assertTrue(contract.traffic_waiver_problems(stale), 'a lever the waiver names and the profile does not set is a stale waiver')
+        bare = self.named(self.FX)
+        bare['env'].update(generator.SHIP_ENV)
+        self.assertTrue(any('only a gate-only profile may name them' in problem for problem in contract.prefix_policy_problems(bare)), 'the same env with the fusion waiver is refused')
+
+    def test_the_waiver_never_covers_the_audits_the_kill_path_or_another_value(self):
+        for name, value in (('QWEN_PREFIX_HOST_TIER_AUDIT', '1'), ('QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT', '1'), ('QWEN_PREFIX_HOST_TIER_OFF_PATH', '/tmp/off')):
+            probe = self.named(self.SHIP)
+            probe['env'][name] = value
+            problems = contract.prefix_policy_problems(probe)
+            self.assertTrue(any(name in problem and 'gate-only' in problem for problem in problems), (name, problems))
+        wrong = self.named(self.SHIP)
+        wrong['env']['QWEN_PREFIX_HOST_TIER_GIB'] = '16'
+        self.assertTrue(any('only a gate-only profile may name them' in problem or 'waiver' in problem for problem in contract.prefix_policy_problems(wrong) +
+                            contract.traffic_waiver_problems(wrong)), 'a different size is not what the waiver names')
+        flagged = self.named(self.SHIP)
+        flagged[contract.TRAFFIC_WAIVER]['levers']['QWEN_PREFIX_HOST_TIER_AUDIT'] = '1'
+        self.assertTrue(any('is not waivable' in problem for problem in contract.traffic_waiver_problems(flagged)))
+        other = self.named(self.SHIP)
+        other[contract.TRAFFIC_WAIVER]['levers']['QWEN_PREFIX_HOST_TIER_GIB'] = '16'
+        self.assertTrue(any('waivable only at 32' in problem for problem in contract.traffic_waiver_problems(other)))
+
+    def test_the_audit_twin_is_the_fusion_audit_arm_plus_the_tier_instruments_and_gate_only(self):
+        mine, theirs = copy.deepcopy(self.AUDIT), copy.deepcopy(self.FX_AUDIT)
+        for name, value in generator.ENV.items():
+            self.assertEqual(mine['env'].pop(name), value, name)
+        self.assertIn(generator.FX_AUDIT_PARENT, mine.pop('description'))
+        theirs.pop('description')
+        self.assertEqual(mine, theirs)
+        self.assertIs(self.AUDIT['gate_only'], True)
+        self.assertNotIn(contract.TRAFFIC_WAIVER, self.AUDIT)
+        self.assertEqual(contract.prefix_policy_problems(self.named(self.AUDIT)), [])
+        self.assertEqual(self.AUDIT['env']['QWEN_FAST_TP4_SDPA_AUDIT'], '1', 'the extent audit the gate adds needs the multi launch\'s own audit beside W2')
+        self.assertTrue(self.AUDIT['description'].startswith('GATE ONLY'))
+
+    def test_the_audit_twin_carries_every_fusion_lever_of_the_ship_candidate(self):
+        ship_levers = {k: v for k, v in self.SHIP['env'].items() if k not in generator.SHIP_ENV}
+        for key, value in ship_levers.items():
+            self.assertEqual(self.AUDIT['env'].get(key), value, key)
+
+    def test_both_gates_see_the_candidate_as_a_tier_profile(self):
+        document = {'profiles': PROFILES}
+        arms = gate.plan_arms('tier-concurrent-timed', generator.SHIP, 'none', document)
+        self.assertEqual([arm['arm'] for arm in arms], ['tier-concurrent-timed'])
+        self.assertTrue(arms[0]['tier'] and arms[0]['tier']['preconverted'] and not arms[0]['tier']['audit'])
+        audited = gate.plan_arms('tier-concurrent', generator.SHIP_AUDIT, 'none', document)
+        self.assertTrue(audited[0]['tier']['audit'] and audited[0]['tier']['preconverted_audit'])
+        control = gate.plan_arms('tier-concurrent-timed', generator.FX_PARENT, 'none', document)
+        self.assertIsNone(control[0]['tier'], 'the fusion ship profile is the control: no tier')
+
+
 class ContractTests(unittest.TestCase):
     def traffic(self, **env):
         profile = copy.deepcopy(PARENT)
@@ -169,7 +307,7 @@ class ContractTests(unittest.TestCase):
 
     def test_no_other_profile_names_either_feature(self):
         for name, profile in PROFILES.items():
-            if name != generator.TWIN:
+            if name not in generator.NAMES:
                 self.assertFalse([flag for flag in NAMES if flag in profile['env']], name)
 
     def test_an_inherited_process_environment_never_turns_either_on_under_a_profile_that_does_not_name_it(self):

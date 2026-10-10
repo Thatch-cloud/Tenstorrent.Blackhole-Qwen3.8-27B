@@ -157,6 +157,7 @@ class FakeRequest(object):
         self.prompt_token_ids = list(prompt_ids)
         self.tokens = list(prompt_ids)
         self.output_ids, self.emitted = [], []
+        self.chunks = []        # each emitted token's offset from the request's creation, as StreamState.chunk_times
         self.cache_salt = salt
         self.num_prompt_tokens = len(prompt_ids)
         self.num_preemptions = 0
@@ -867,6 +868,7 @@ class FakeEngine(object):
             token, text = token + 100 * shift, text + 'b%d' % shift
         request.append(token)
         request.emitted.append(text)
+        request.chunks.append(round(time.time() - request.started, 4))
         if index == 0:
             request.first_at = time.time()
             if request.on_first is not None:
@@ -928,7 +930,7 @@ class FakeEngine(object):
                     token_ids=list(request.output_ids) if emitted or finish else None, prompt_ids=prompt,
                     prompt_sha=judge.token_sha(prompt) if prompt is not None else None,
                     prompt_tokens=len(prompt) if prompt is not None else None, completion_tokens=emitted,
-                    finish=finish, error=None,
+                    finish=finish, error=None, chunk_times=list(request.chunks),
                     ttft_s=round(request.first_at - request.started, 4) if request.first_at is not None else None,
                     wall_s=round(time.time() - request.started, 4), status=200, aborted=aborted, ok=aborted is None)
 

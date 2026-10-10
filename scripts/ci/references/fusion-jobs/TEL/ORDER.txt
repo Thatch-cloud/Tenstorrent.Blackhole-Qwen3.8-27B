@@ -1,0 +1,25 @@
+# The order of the card telemetry jobs (scripts/ci/card_telemetry.py, card_telemetry.sh; C2_TELEMETRY=1 in the job file): per-chip ARC telemetry sampled once a second through a smoke or gate step, to say whether
+# a sustained run is held down by AICLK, power, current or thermal throttling. ONE image (tp4-fusion-1, the placeholder for the tag the integrated pack's B0 builds from the pushed head; the sidecar itself is host-side).
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. The minutes are ESTIMATES (nothing has run on a card).
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window. Both are soft: they measure, they gate nothing.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE the first job and restores it after the last (the cutover pack's steps and post-checks; nothing in this folder does either). B0 (the
+#     integrated pack's build) is a build and may run while production serves. No other window driver may be alive and no privileged builder container up.
+# P0. The CPU suite is green on the pushed head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and the tag is pushed on THAT commit. Push ONE tag at a time and wait for its run to finish (the workflow keeps one pending
+#     run; queued tags are cancelled). Never cancel a running card job. No w2.off, levern.off, prefix-reuse.off or parked.off file on the hub mount.
+# P0. CI PAUSED: the ARC runner sets are at ZERO from the first job to the last (CI shares the host and skews round times) and restored after it.
+# P0. GRID: the four cards expose a 13x10 compute grid since the firmware unlock. Read it from the run (AVAILABLE WORKER CORE COUNT), never assume 11x10.
+# P0. TEL1 NEEDS the smoke test prefill_ladder_solo (commit ebfe41ae of tp4/prefill-1: c2_serving_smoke.py, c2_smoke_check.py's ladder rule, prefill_ladder_report.py) in the tagged commit. It is not on tp4/fusion-1; the
+#     smoke client and the smoke check run from the checkout, so merging it needs no image rebuild. Without it the named test does not exist and the job would run only the warm-up.
+# THE SIDECAR (C2_TELEMETRY=1, C2_TELEMETRY_MS default 1000): scripts/ci/card_telemetry.py samples, for the whole smoke or gate step, every chip's ARC telemetry table by AXI reads only (the table the firmware refreshes every
+#     100 ms and publishes in SCRATCH_RAM[13]; luwen's Blackhole get_telemetry(), the read tt-smi makes), opening each chip for a moment per sample as the host's telemetry collector does. No ARC message, no write. Results:
+#     telemetry-smoke/ (or telemetry-gate/) in the results: telemetry.csv.gz (one row per chip per sample: AICLK, the effective min/max arbiter and the limiter holding the clock, VCORE, chip and board power, TDC, ASIC and
+#     GDDR temperature, kernel NOP counters, fan), telemetry-summary.json (per chip, with a per-minute timeline) and .txt; the step log has the `[TELEMETRY]` lines. A host without pyluwen logs UNAVAILABLE and the step runs on.
+# READ the first `[TELEMETRY]` line: `decode check ok` (the raw table equals pyluwen's own decode of the static tags) and `source raw` (a `struct` source has no arbiter columns). Anything else: report it, do not read the rest.
+# LIMITS: a one-second sample can miss a limiter that engages for milliseconds (C2_TELEMETRY_MS=200 samples five times as often); the NOP and thermal-trip counters are cumulative and complete.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule. B0 and X0 are the integrated pack's.
+# NEEDS TEL1 TEL2 <- X0
+# NEEDS TEL2 <- TEL1
+# READ RULES: each job also needs `decode check ok`. TEL1: see its header (loaded AICLK against fmax and the limiter, per rung). TEL2: see its header (the same, then PAIRED against a control without the sidecar).
+# Time (estimate, minutes): 25 + 35 = 60 (1 h) of cards.
+TEL1-prefill-ladder-solo-telemetry soft tp4-fusion-1 25
+TEL2-concurrent8-steady-telemetry soft tp4-fusion-1 35

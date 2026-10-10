@@ -144,6 +144,12 @@ PARKED_GATE_ONLY = ('QWEN_FAST_PARKED_AUDIT', 'QWEN_FAST_PARKED_NEGATIVE', 'QWEN
 W2_PREFIX = 'QWEN_FAST_W2_'
 W2_NAMES = ('QWEN_FAST_W2_OFF_PATH', 'QWEN_FAST_W2_OFF_AFTER')
 W2_GATE_ONLY = ('QWEN_FAST_W2_OFF_AFTER',)
+# The engine-start upload levers (qwen_device_zeros: the KV pool and the buffer pool's zero buffers filled on the device; qwen_lazy_shard: a weight-cache hit
+# without the host transpose). Pinned equal to the modules' NAMES by test_upload_p0. A profile sets them (default off, strict '0'/'1'); the audit twins are a gate
+# profile's own (the audit reads pages back and costs engine-start time); an inherited value never turns a lever on under a profile that did not name it.
+UPLOAD_NAMES = ('QWEN_FAST_DEVICE_ZEROS', 'QWEN_FAST_DEVICE_ZEROS_AUDIT', 'QWEN_FAST_DEVICE_ZEROS_MIN_BYTES', 'QWEN_FAST_DEVICE_ZEROS_AUDIT_TENSORS',
+                'QWEN_FAST_DEVICE_ZEROS_AUDIT_BLOCKS', 'QWEN_FAST_LAZY_SHARD_W', 'QWEN_FAST_LAZY_SHARD_W_AUDIT', 'QWEN_FAST_LAZY_SHARD_W_AUDIT_LOADS')
+UPLOAD_GATE_ONLY = ('QWEN_FAST_DEVICE_ZEROS_AUDIT', 'QWEN_FAST_LAZY_SHARD_W_AUDIT')
 # The sources the merged route must carry (levern_route.SOURCES, pinned equal by test_levern_prefix_contract).
 MERGED_SOURCES = ('COLD', 'CHECKPOINT', 'SCRATCH', 'PARKED')
 
@@ -378,6 +384,10 @@ def apply_environment(profile, environ=None):
     for name in PREFIX_TIER_ENV_NAMES:
         if name not in profile['env']:
             environ.pop(name, None)
+    # ...and the engine-start upload levers: an inherited switch must not move the KV pool's or the weights' load path under a profile that never asked.
+    for name in UPLOAD_NAMES:
+        if name not in profile['env']:
+            environ.pop(name, None)
     return environ
 
 
@@ -445,14 +455,18 @@ def prefix_policy_problems(profile):
     if PREFIX_TIER_OFF_PATH in env and not re.fullmatch(r'(?!-)[A-Za-z0-9_./-]{1,200}', env[PREFIX_TIER_OFF_PATH]):
         problems.append('%s=%r is not a plain path' % (PREFIX_TIER_OFF_PATH, env[PREFIX_TIER_OFF_PATH]))
     if not gate_profile(profile):
-        unqualified = [name for name, value in PREFIX_GATE_ONLY_VALUES if env.get(name) == value]
-        if numbers.get(PREFIX_TIER_GIB):
+        # A traffic profile may name the tier and the preconverted checkpoints only under its owner traffic waiver (TIER_WAIVABLE_LEVERS); the audits and
+        # the kill-switch path are a gate's own.
+        unqualified = [name for name, value in PREFIX_GATE_ONLY_VALUES
+                       if env.get(name) == value and not (name in TIER_WAIVABLE_LEVERS and waived(profile, name, env))]
+        if numbers.get(PREFIX_TIER_GIB) and not waived(profile, PREFIX_TIER_GIB, env):
             unqualified.append(PREFIX_TIER_GIB)
         if PREFIX_TIER_OFF_PATH in env:
             unqualified.append(PREFIX_TIER_OFF_PATH)
         if unqualified:
-            problems.append('%s: no card has run the host KV tier or the preconverted checkpoints, so only a gate-only profile may name them '
-                            'active' % ', '.join(sorted(unqualified)))
+            problems.append('%s: no qualification record exists for the host KV tier or the preconverted checkpoints, so only a gate-only profile may name them '
+                            'active, or a traffic profile whose %s names QWEN_PREFIX_HOST_TIER_GIB and QWEN_PREFIX_CKPT_PRECONVERTED at their values (the audits and '
+                            'the kill-switch path are a gate\'s own)' % (', '.join(sorted(unqualified)), TRAFFIC_WAIVER))
     named = [name for name in sorted(list(PREFIX_POLICY_FLAGS) + [PREFIX_GHOST_FLAG, PREFIX_TIER_OFF_PATH] + list(PREFIX_TIER_NUMBERS))
              if name in env]
     if named and not prefix_reuse(profile):
@@ -608,6 +622,10 @@ TRAFFIC_WAIVER_FIELDS = ('id', 'levers', 'waives', 'evidence', 'decision')
 TRAFFIC_WAIVER_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,62}')
 WAIVABLE_LEVERS = {'QWEN_FAST_TP4_SDPA': 'multi', 'QWEN_FAST_TP4_CONV_GATES_SPREAD': '1', 'QWEN_FAST_PARKED_ENGINES': '1',
                    'QWEN_FAST_PARKED_DRAFTS': '1'}
+# The host KV tier's two levers a waiver may ALSO name (beside WAIVABLE_LEVERS, which stay the four the earlier ship waivers hold equal): a traffic profile serves the tier
+# (QWEN_PREFIX_HOST_TIER_GIB) and the preconverted checkpoints (QWEN_PREFIX_CKPT_PRECONVERTED) only under an owner traffic waiver that names each at this value, as for W2
+# and engine reuse (prefix_policy_problems). The audits, the digest-everything mode of a gate and the kill-switch path of a gate stay a gate's own.
+TIER_WAIVABLE_LEVERS = {'QWEN_PREFIX_HOST_TIER_GIB': '32', 'QWEN_PREFIX_CKPT_PRECONVERTED': '1'}
 TRAFFIC_WAIVER_MARKER = 'OWNER TRAFFIC WAIVER'
 # The decision is a sentence that starts with one of these words. PENDING is a REQUEST: the profile boots (gates and G1 provenance boot every
 # profile) and logs the word, but no build may bake it as an image default (c2_serving_job.read_bake, build-c2-serving-image.sh) until the commit
@@ -649,12 +667,13 @@ def traffic_waiver_problems(profile):
             problems.append('%s: levers must be a non-empty object {flag: exact value}' % label)
         else:
             env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
+            waivable = dict(WAIVABLE_LEVERS, **TIER_WAIVABLE_LEVERS)
             for flag in sorted(levers):
                 value = levers[flag]
-                if flag not in WAIVABLE_LEVERS:
-                    problems.append('%s: %s is not waivable (only %s; a gate instrument never is)' % (label, flag, ', '.join(sorted(WAIVABLE_LEVERS))))
-                elif value != WAIVABLE_LEVERS[flag]:
-                    problems.append('%s: %s is waivable only at %s, not %r' % (label, flag, WAIVABLE_LEVERS[flag], value))
+                if flag not in waivable:
+                    problems.append('%s: %s is not waivable (only %s; a gate instrument never is)' % (label, flag, ', '.join(sorted(waivable))))
+                elif value != waivable[flag]:
+                    problems.append('%s: %s is waivable only at %s, not %r' % (label, flag, waivable[flag], value))
                 elif env.get(flag) != value:
                     problems.append('%s names %s=%s and the profile env has %r: a waiver names exactly the levers the profile sets'
                                     % (label, flag, value, env.get(flag)))
@@ -838,6 +857,60 @@ def merged_route_problems(profile, env):
                 problems.append('Lever N: QWEN_FAST_LEVERN_EPOCH_SCOPE=route needs %s=1 (the disjoint-writer class engages only with the per-block '
                                 'epochs, whose staging destinations it is checked against)' % name)
     return problems
+
+
+def upload_problems(profile):
+    """[problem] when a profile names the engine-start upload levers wrongly: a value that is not '0'/'1', a count out of range, an audit or a knob without its
+    lever, an audit flag on a profile that is not a gate's."""
+    env = profile.get('env') or {}
+    if not any(name.startswith(('QWEN_FAST_DEVICE_ZEROS', 'QWEN_FAST_LAZY_SHARD_W')) for name in env):
+        return []                                       # every profile without these names: nothing imported, nothing checked
+    import qwen_device_zeros
+    import qwen_lazy_shard
+
+    problems = qwen_device_zeros.flag_problems(env) + qwen_lazy_shard.flag_problems(env)
+    if profile.get('gate_only') is not True:
+        problems += ['%s is a gate profile\'s own (it reads pages back at engine start): %s is not gate_only' % (name, profile.get('name'))
+                     for name in UPLOAD_GATE_ONLY if env.get(name) == '1']
+    for name in env:
+        if name.startswith(('QWEN_FAST_DEVICE_ZEROS', 'QWEN_FAST_LAZY_SHARD_W')) and name not in UPLOAD_NAMES:
+            problems.append('%s is not an upload lever name (%s)' % (name, ', '.join(UPLOAD_NAMES)))
+    return problems
+
+
+def install_upload_levers(environ=None, on_import=None):
+    """In every process of a profile that sets QWEN_FAST_DEVICE_ZEROS=1 and/or QWEN_FAST_LAZY_SHARD_W=1: arm the post-import hooks that install the KV-pool twin
+    (on the model module) and the lazy shard_w (on tp_common). Off by default: with neither switch nothing is imported or hooked. -> the names armed."""
+    environ = os.environ if environ is None else environ
+    if all(environ.get(name) in (None, '0') for name in ('QWEN_FAST_DEVICE_ZEROS', 'QWEN_FAST_LAZY_SHARD_W')):
+        return []
+    if on_import is None:
+        def on_import(name, callback):
+            loaded = sys.modules.get(name)
+            if loaded is not None:
+                # Already imported: a post-import hook would never fire.
+                callback(loaded)
+                return
+            sys.meta_path.insert(0, PostImportHook(name, callback))
+    import qwen_device_zeros
+    import qwen_lazy_shard
+
+    armed = []
+    if qwen_device_zeros.arm(environ, on_import, log=log_pindiag):
+        armed.append(qwen_device_zeros.FLAG)
+    if qwen_lazy_shard.arm(environ, on_import, log=log_pindiag):
+        armed.append(qwen_lazy_shard.FLAG)
+    return armed
+
+
+def log_pindiag(template, *values):
+    """The levers' one-line diagnostics (brace-formatted, loguru when the process has it) - the form dflash_device.pindiag has."""
+    try:
+        from loguru import logger
+    except ImportError:
+        print(template.format(*values), flush=True)
+        return
+    logger.info(template, *values)
 
 
 def install_levern_platform(on_import=None, environ=None):
@@ -1437,6 +1510,9 @@ def boot(environ=None, orig_argv=None):
     problems = w2_problems(profile, environ)
     if problems:
         raise ValueError('profile %s misuses the W2 kill switch: %s' % (profile['name'], '; '.join(problems)))
+    problems = upload_problems(profile)
+    if problems:
+        raise ValueError('profile %s misuses the engine-start upload levers: %s' % (profile['name'], '; '.join(problems)))
     problems = drafter_problems(profile)
     if problems:
         raise ValueError('profile %s cannot serve its drafter checkpoint: %s' % (profile['name'], '; '.join(problems)))
@@ -1452,6 +1528,9 @@ def boot(environ=None, orig_argv=None):
         log('profile %s: %s %s: %s serve traffic with no pinned qualification record (%s) [decision: %s]', profile['name'], TRAFFIC_WAIVER_MARKER,
             waiver['id'], ' '.join('%s=%s' % (flag, levers[flag]) for flag in sorted(levers)), waiver['waives'], waiver['decision'])
     apply_environment(profile, environ)
+    armed = install_upload_levers(environ)
+    if armed:
+        log('profile %s: engine-start upload levers armed: %s (default off; each logs engaged or refused at its first use)', profile['name'], ' '.join(armed))
     if DRAFTER_CHECKPOINT_FLAG in profile['env']:
         # A candidate drafter: its baked bytes must be the pinned ones (docs/tp4-combined-window.md), or the attach is refused before an engine starts.
         import drafter_checkpoint

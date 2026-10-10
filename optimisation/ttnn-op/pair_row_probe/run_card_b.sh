@@ -460,6 +460,7 @@ argv=(docker run --rm --name "$name" --network none
   ${KM[@]+"${KM[@]}"}
   ${WM[@]+"${WM[@]}"}
   -e TT_METAL_HOME=/opt/tt-metal -e TT_METAL_CACHE=/kcache -e OMP_NUM_THREADS=8
+  ${QUAL_TT_GRID:+-e "TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$QUAL_TT_GRID"}
   -e QWEN_SDPA_TREE_SCRATCH_ROUNDS=1
   --entrypoint sh "$IMAGE" -c
   "sha256sum /opt/tt-metal/build_Release/lib/_ttnncpp.so /opt/tt-metal/build_Release/ttnn/_ttnncpp.so $OPS/transformer/sdpa/device/kernels/compute/sdpa.cpp $OPS/transformer/sdpa/device/kernels/compute/compute_common.hpp 2>&1; exec python3 -B /bench/probe_pair_row_card_b.py \"\$@\""
