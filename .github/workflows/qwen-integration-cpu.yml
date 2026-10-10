@@ -286,6 +286,9 @@ jobs:
           python -B -m unittest discover -s optimisation/ttnn-op/shard_argmax -p 'test_*.py'
           # WP2
           python -B -m unittest test_kv_page_writer_tp4 test_kv_page_model_tp4 test_ordered_writer_page_arm_tp4
+          # WP4
+          python -B -m unittest test_tp4_mlp_gateup test_tp4_mlp_fused
+          python -B -m unittest discover -s optimisation/ttnn-op/mlp_gateup -p 'test_*.py'
           # WP5
           python -B -m unittest test_ccl_options_tp test_ccl_options_jobs
           python -B -m unittest discover -s optimisation/ttnn-op/ccl_sweep -p 'test_*.py'

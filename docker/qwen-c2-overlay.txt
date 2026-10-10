@@ -465,6 +465,16 @@ scripts/ci/kv_page_writer_tp4.py
 scripts/ci/kv_page_writer_tp4.cpp
 # WP2: the smoke rules for the lever's markers (adds the ordered=0 rule to the generated fusion table)
 scripts/ci/kv_page_writer_tp4_smoke.py
+# WP4: this branch edits bind_two_tile_mlp (the lever's binder takes the MLP binder's place when one of the five QWEN_FAST_MLP_* flags is in the environment; with none the function returns what it returned); the image holds it at the P8 commit through the Dockerfile copy list, so an edit reaches it only through the overlay
+scripts/ci/two_tile_decode.py
+# WP4: the levers' flags, config grammar, plan, twin forward, binder and audit; model_batch.two_tile_bindings imports it only when one of its flags is set
+scripts/ci/tp4_mlp_gateup.py
+# WP4: F-D1: the fused gate|up launch (host plan, compute-kernel patch, program descriptors); bindings() imports it on QWEN_FAST_MLP_GATEUP=1
+scripts/ci/tp4_mlp_fused.py
+# WP4: JIT source of the fused launch's activation multicast; without it the fused arm fails at its first launch
+scripts/ci/tp4_mlp_fused_input.cpp
+# WP4: JIT source of the fused launch's weight reader and output writer
+scripts/ci/tp4_mlp_fused_weights.cpp
 # WP5: the named sets, the strict flags, the plan of a block forward (imported by the overlaid tile_collective_tp.py)
 scripts/ci/ccl_options_tp.py
 # WP5: the shim around DistributedNorm.forward's gather, pinned by the source sha256 (imported by the overlaid tile_collective_tp.py)

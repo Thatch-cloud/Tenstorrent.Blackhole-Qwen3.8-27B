@@ -166,7 +166,7 @@ def unsatisfiable_imports():
 C2_ONLY_PLAIN_IMPORTS = frozenset(['capture_plug.py', 'extent_attention_replay.py', 'extent_attention_replay_tp.py', 'gdn_conv_gates_spread.py', 'levern_policy.py', 'levern_route.py', 'octo_attn_bundle.py', 'packed_any_admission.py', 'qwen_device_zeros.py', 'sdpa_long_tp.py', 'serving_c2_contract.py', 'serving_fast_lane.py', 'serving_fast_lane_scheduler.py', 'serving_kv_reservation.py', 'serving_parked_engines.py', 'serving_prefill_admission.py', 'serving_request_quarantine.py', 'stall_watch.py', 'trace_census.py',
                                    # the op-fusion programme's overlay-only modules (lazy, flag-guarded imports of the copied twins; all in docker/qwen-c2-overlay.txt)
                                    'kv_page_writer_tp4.py', 'draft_reduce_tp.py', 'draft_tail_tp.py', 'draft_gateup_tp.py', 'draft_mmgrid_tp.py',
-                                   'draft_permute_tp.py', 'draft_qkv_tp.py', 'draft_head64_tp.py'])
+                                   'draft_permute_tp.py', 'draft_qkv_tp.py', 'draft_head64_tp.py', 'tp4_mlp_gateup.py'])
 
 
 def unsatisfiable_plain_imports():

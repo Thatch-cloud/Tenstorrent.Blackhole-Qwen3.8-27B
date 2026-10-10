@@ -66,6 +66,7 @@ def clean_environment(**values):
 
 
 def forget_new_modules():
+    """Drop the lever modules from sys.modules for the length of the test that calls it (the caller's patch.dict(sys.modules) puts them back)."""
     for name in NEW_MODULES:
         sys.modules.pop(name, None)
 
@@ -81,6 +82,10 @@ class AttentionOffTests(unittest.TestCase):
         before = load_before('draft_attention_branch.py', '_attention_before_the_hooks')
         if before is None:
             self.skipTest('the history of %s is not here' % BEFORE_THE_HOOKS)
+        with patch.dict(sys.modules):
+            return self.check(before)
+
+    def check(self, before):
         forget_new_modules()
         unset = attention()
         zero = attention(**{name: '0' for name in ATTENTION_FLAGS})
@@ -278,6 +283,41 @@ class OctoHookTests(permute_tests.Quiet):
         guard = "os.environ.get('QWEN_FAST_DRAFT_PERMUTE', '0') != '0'"
         self.assertEqual((HERE / 'octo_draft_tp.py').read_text(encoding='utf-8').count(guard), 2)
         self.assertEqual((HERE / 'quad_draft_tp.py').read_text(encoding='utf-8').count(guard), 2)
+
+
+class MlpAuditHookTests(unittest.TestCase):
+    """packed_verifier's calls to tp4_mlp_gateup's audit_claim / audit_replayed / audit_round / audit_release (op-fusion WP4), beside tile_collective_tp's."""
+
+    def test_the_helper_answers_none_and_imports_nothing_without_a_flag(self):
+        import packed_verifier
+
+        with patch.dict(sys.modules), patch.dict(os.environ, {name: v for name, v in os.environ.items() if not name.startswith('QWEN_FAST_MLP_')}, clear=True):
+            sys.modules.pop('tp4_mlp_gateup', None)
+            self.assertIsNone(packed_verifier.mlp_audit())
+            self.assertNotIn('tp4_mlp_gateup', sys.modules)
+
+    def test_the_helper_answers_the_module_with_any_of_the_five_flags(self):
+        import packed_verifier
+        import two_tile_decode
+
+        for name in two_tile_decode.MLP_LEVER_FLAGS:
+            with self.subTest(flag=name), patch.dict(os.environ, {name: '1'}):
+                self.assertEqual(packed_verifier.mlp_audit().__name__, 'tp4_mlp_gateup')
+        self.assertEqual(sorted(two_tile_decode.MLP_LEVER_FLAGS), sorted(name for name in two_tile_decode.MLP_LEVER_FLAGS if name.startswith('QWEN_FAST_MLP_')))
+
+    def test_the_four_calls_sit_beside_the_collectives_and_the_audit_with_the_flags_off_holds_nothing(self):
+        import tp4_mlp_gateup
+
+        text = (HERE / 'packed_verifier.py').read_text(encoding='utf-8')
+        for call in ('audit_claim(warm, \'warm\')', 'audit_round(operations, warm, 0)', 'audit_release(operations, warm)', 'audit_claim(self.fixture, \'capture\')',
+                     'audit_replayed(self.fixture)', 'audit_round(self.operations, self.fixture, self.rounds + 1)', 'audit_release(operations, self.fixture)'):
+            self.assertGreater(text.count('mlp.' + call), 0, call)
+            self.assertEqual(text.count('tile_collective_tp.' + call), text.count('mlp.' + call), call)
+        owner = object()
+        self.assertEqual(tp4_mlp_gateup.audit_round(None, owner, 3), 0)
+        self.assertEqual(tp4_mlp_gateup.audit_claim(owner, 'warm'), 0)
+        self.assertEqual(tp4_mlp_gateup.audit_release(None, owner), 0)
+        tp4_mlp_gateup.audit_replayed(owner)
 
 
 if __name__ == '__main__':

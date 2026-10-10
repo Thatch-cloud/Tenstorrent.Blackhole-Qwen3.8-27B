@@ -8,7 +8,7 @@
   "draft_wp6_smoke",
   "kv_page_writer_tp4_smoke"
  ],
- "notes": "Wiring the packages asked for in their notes. smoke_rules: each package's stricter smoke module (a host-side module of scripts/ci with problems(env, container_text)) is called once per arm by c2_smoke_check.fusion_problems: WP1 tp4_shard_argmax_smoke (fold, words=1, tasks = 2 x workers, the audit for four chips), WP5 ccl_options_smoke (counts, canonical set name, one audit line per op and block owner), WP6 draft_wp6_smoke (chains, the fused gate|up, the mm grid), WP7 draft_permute_smoke (an engaged line per site and shape, a passing audit line per quad site), WP2 kv_page_writer_tp4_smoke (the generated rules plus an engaged line with ordered=0: the captured forward ran the page launch). pack_order: the integrated pack runs the levers by the plan's estimated saving per 8-live round (section 6.1, central values): permute -6.4 ms, s1 -1.85, head64 -1.78, ccl -2 (unknown), reduce -1.2, qkv1 -1.1, tail -0.8, gateup1, mmgrid; kvpage (-2.75) is last by pack_last. pack_include: the upload-p0 pack's six profile twins come from its own generator (make_upload_profiles.py); its templates A0-A3 and T0-T5 are folded into the integrated ORDER under the prefix UP (UPA0.., UPT0..), on the one image, with their NEEDS lines renamed (its B0 is the pack's X0).",
+ "notes": "Wiring the packages asked for in their notes. smoke_rules: each package's stricter smoke module (a host-side module of scripts/ci with problems(env, container_text)) is called once per arm by c2_smoke_check.fusion_problems: WP1 tp4_shard_argmax_smoke (fold, words=1, tasks = 2 x workers, the audit for four chips), WP5 ccl_options_smoke (counts, canonical set name, one audit line per op and block owner), WP6 draft_wp6_smoke (chains, the fused gate|up, the mm grid), WP7 draft_permute_smoke (an engaged line per site and shape, a passing audit line per quad site), WP2 kv_page_writer_tp4_smoke (the generated rules plus an engaged line with ordered=0: the captured forward ran the page launch). pack_order: the integrated pack runs the levers by the plan's estimated saving per 8-live round (section 6.1, central values): permute -6.4 ms, s1 -1.85, head64 -1.78, ccl -2 (unknown), reduce -1.2, qkv1 -1.1, tail -0.8, gateup1, mmgrid; kvpage (-2.75) is last by pack_last. pack_include: the upload-p0 pack's six profile twins come from its own generator (make_upload_profiles.py); its templates A0-A3 and T0-T5 are folded into the integrated ORDER under the prefix UP (UPA0.., UPT0..), on the one image, with their NEEDS lines renamed (its B0 is the pack's X0). WP4: mlpcfg (the streaming config and the L1 multiply, exact by construction) runs after head64; mlpgu (the fused gate|up, never compiled on a card) is last by WP4's own pack_last.",
  "pack_last": [
   {
    "arm": "kvpage",
@@ -19,6 +19,7 @@
   "permute",
   "s1",
   "head64",
+  "mlpcfg",
   "ccl",
   "reduce",
   "qkv1",
