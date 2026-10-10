@@ -1,0 +1,19 @@
+diff --git a/scripts/ci/tp_addresses.py b/scripts/ci/tp_addresses.py
+index 53bfcde..efd8402 100644
+--- a/scripts/ci/tp_addresses.py
++++ b/scripts/ci/tp_addresses.py
+@@ -277,6 +277,14 @@ def install(environ=None):
+     for namespace, name, old in trace_census.install():
+         _REBOUND.append((namespace, name, old))
+         rebound += 1
++    # The 13 x 10 matmul-grid lever (QWEN_FAST_GRID13, grid13_tp.py): tp_common's prefill all-gather matmuls and 64-row decode matmul, wrapped (they act at the call, so the model
++    # being built already is fine). Imported only when the flag is in the environment (a malformed value raises here, at startup); with it unset nothing is loaded and nothing is wrapped.
++    if (os.environ if environ is None else environ).get('QWEN_FAST_GRID13', '0') not in ('', '0'):
++        import grid13_tp
++
++        for namespace, name, old in grid13_tp.install(environ):
++            _REBOUND.append((namespace, name, old))
++            rebound += 1
+     return rebound
+ 
+ 

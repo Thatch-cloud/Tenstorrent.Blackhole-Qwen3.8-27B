@@ -1,0 +1,44 @@
+# The order of M1's jobs (matmul program grids for the 13x10 compute grid; docs/tp4-fusion-m1.md) in the op-fusion programme's four-card DEVELOPMENT window: ONE image (tp4-fusion-1, built by the pack's B0), run after the pack's X0 (status, rescan, reset).
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# WHAT THE PACKAGE IS. QWEN_FAST_GRID13 (scripts/ci/grid13_tp.py), default off, three sub-switches: PREFILL (the three fused all-gather matmuls of the prefill chunk, 85.7 of 266 ms of non-SDPA kernel time, run on 8x9 cores
+#   by the pinned tp_common helper: 12 columns and M block 6 instead, so the busiest core owns 6 output tile rows instead of 8), VERIFY (the packed block's output projections, 32 cores, on 54), DRAFTER (the fused commit's
+#   feature projection on the device-wide grid; acts only where fusion-wp/M1-dflash-device.patch is applied). Every change moves WHICH core owns an output tile and nothing that is a K reduction; the audit proves it on the card.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE the pack's X0 and restores it after Z; nothing here does either. No other window driver may be alive.
+# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and the tag is pushed on THAT commit. Push ONE tag at a time and wait for its run to finish. Never cancel a running card job.
+# P0. CI PAUSED from M1C1 to M1P4 (CI shares the host and skews round times and prefill times). The cards expose a 13x10 compute grid since the firmware unlock: the lever reads it from the device and keeps the served ops on
+#   anything narrower (one `fell back reason=` line, which fails the smoke on purpose).
+# P0. WIRING: the image's tp_addresses.install must call grid13_tp.install (fusion-wp/M1-tp-addresses.patch); without it every M1 arm runs the served ops and its smoke rule fails by name (no engaged line).
+# PARENT. Every arm is the combined fusion arm c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all (or its audit twin) plus QWEN_FAST_GRID13=1 (and QWEN_FAST_GRID13_AUDIT=1): the arms are generated from fusion-wp/M1.json
+#   (profiles all-grid13 and all-grid13-audit) by make_fusion_profiles.py. Every result is UNQUALIFIED (gate-only twins).
+# EXACTNESS CLASS: bit-identical by construction (grid, M block and N partition move only which core owns an output tile; K_block_size, fidelity, fp32 destination and the K order of the gather are the served ones), and
+#   by audit (the served configuration runs beside the lever on the same operands in the eager warm passes and every chip's bytes are compared). A lever that cannot show exact=True is NO-GO whatever its timing.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS M1A <- X0
+# NEEDS M1C1 <- X0
+# NEEDS M1L1 <- M1A M1C1
+# NEEDS M1C2 <- M1L1
+# NEEDS M1L2 <- M1C2
+# NEEDS M1P1 <- X0
+# NEEDS M1P2 <- M1A M1P1
+# NEEDS M1P3 <- M1P2
+# NEEDS M1P4 <- M1P3
+# DECISION RULES.
+#   M1A is a STOP: a mismatch, a fell-back line, a missing engaged or audit line, a program error or a hang ends the lever until read (see the job header for the two fallbacks to try). Run it BEFORE the timed block.
+#   M1C1 M1L1 M1C2 M1L2 (the decode ABAB, control first): w2ln_timing_compare.py pair (M1C1, M1L1) and (M1C2, M1L2), steady window, plus the floor over (M1C1, M1C2). The expected gain is under the floor (see M1L1's header):
+#     the GO rule is NO LOSS (not positive beyond the floor), the texts and the accepted prefixes equal.
+#   M1P1 M1P2 M1P3 M1P4 (the solo prefill ladder ABAB): prefill_ladder_report.py (M1P1 vs M1P2) and (M1P3 vs M1P4), the control spread (M1P1 vs M1P3) as the floor. GO needs the lever's TTFT below the control's at the 32k, 128k and
+#     254k rungs in both pairs, by more than the spread, and every answer equal. The loaded AICLK of the sidecar must not differ by arm (a throttler on one arm only explains the gain, or the loss).
+# NO-GO: any audit mismatch, any fall-back line, a lever boot without its engaged lines, any text difference against the control, any stall, a prefill pair that is positive.
+# SWEEP (only if M1A passes and the ladder gain is below the estimate): the lever's names are QWEN_FAST_GRID13_CFG=agmm=<cols>[x<M block>] (agmm=12x6 is the default plan, agmm=12x3, agmm=10x7, agmm=12x8), out=<n>, gdn_in=<n>,
+#   attn_in=<n>; each needs a twin profile (an extra entry of fusion-wp/M1.json profiles[] with that env) and one ladder pair. The partition of the verify projections should be swept first on one card with
+#   references/fusion-jobs/WP4/C4-mlp-other-projections.env (--shapes gdn_in,attn_in,attn_wo,gdn_out), which prints the best exact per_core_N of each.
+# Time (estimate, minutes): M1A 80, M1C1 35, M1L1 35, M1C2 35, M1L2 35, M1P1 25, M1P2 25, M1P3 25, M1P4 25: 320 minutes (5 h 20 min) of cards.
+M1A-grid13-audit-attach stop tp4-fusion-1 80
+M1C1-fxall-control-timed soft tp4-fusion-1 35
+M1L1-grid13-lever-timed soft tp4-fusion-1 35
+M1C2-fxall-control-repeat soft tp4-fusion-1 35
+M1L2-grid13-lever-repeat soft tp4-fusion-1 35
+M1P1-ladder-control soft tp4-fusion-1 25
+M1P2-ladder-grid13 soft tp4-fusion-1 25
+M1P3-ladder-control-repeat soft tp4-fusion-1 25
+M1P4-ladder-grid13-repeat soft tp4-fusion-1 25

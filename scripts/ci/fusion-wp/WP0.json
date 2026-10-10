@@ -17,7 +17,7 @@
   "draft_wp6_smoke",
   "kv_page_writer_tp4_smoke"
  ],
- "notes": "Wiring the packages asked for in their notes. smoke_rules: each package's stricter smoke module (a host-side module of scripts/ci with problems(env, container_text)) is called once per arm by c2_smoke_check.fusion_problems: WP1 tp4_shard_argmax_smoke (fold, words=1, tasks = 2 x workers, the audit for four chips), WP5 ccl_options_smoke (counts, canonical set name, one audit line per op and block owner), WP6 draft_wp6_smoke (chains, the fused gate|up, the mm grid), WP7 draft_permute_smoke (an engaged line per site and shape, a passing audit line per quad site), WP2 kv_page_writer_tp4_smoke (the generated rules plus an engaged line with ordered=0: the captured forward ran the page launch). pack_order: the integrated pack runs the levers by the plan's estimated saving per 8-live round (section 6.1, central values): permute -6.4 ms, s1 -1.85, head64 -1.78, ccl -2 (unknown), reduce -1.2, qkv1 -1.1, tail -0.8, gateup1, mmgrid; kvpage (-2.75, its card-M proof now recorded) follows s1. pack_include: the upload-p0 pack's six profile twins come from its own generator (make_upload_profiles.py); its templates A0-A3 and T0-T5 are folded into the integrated ORDER under the prefix UP (UPA0.., UPT0..), on the one image, with their NEEDS lines renamed (its B0 is the pack's X0). WP4: mlpcfg (the streaming config and the L1 multiply, exact by construction) runs after head64; mlpgu (the fused gate|up, never compiled on a card) is last by WP4's own pack_last. combined: the 'all' twins (-fx-all, -fx-all-audit) and the combined mini-pack (references/fusion-jobs/combined). The CCL value is the lever's own (rs-c1, WP5's P0 winner; it needs QWEN_FAST_TP4_RS_UNIT_MAJOR=1, which the production profile already sets); mlpcfg is overridden to g3u4d3, the card-M sweep's winner (the lever's own value is l1); kvpage joins the combined set now that its proof is recorded; the round-host levers SELECT, READ, KEYED and LEAN are in the combined env (the ledger flag LOG is not: LEAN writes the ledger) and ROUND_HOST_AUDIT in its audit env. WPH's three host-gap levers (prestage-diff, lean and reads, the last at its asynchronous value through combined values) join the combined set and so the ship profile; tp4/fx-wph is merged at 3aa15f39 (the memcmp pre-stage comparator and the scheduler-aware instrument, all default off); the card evidence H5/H7/H9 was on 87bc574e and the next image's audited attach re-proves the merged code; its unapplied CPU-placement patch (WPH-cpus.patch: C2_CPUS/C2_CPUSET keys) is NOT applied, a separate decision.",
+ "notes": "Wiring the packages asked for in their notes. smoke_rules: each package's stricter smoke module (a host-side module of scripts/ci with problems(env, container_text)) is called once per arm by c2_smoke_check.fusion_problems: WP1 tp4_shard_argmax_smoke (fold, words=1, tasks = 2 x workers, the audit for four chips), WP5 ccl_options_smoke (counts, canonical set name, one audit line per op and block owner), WP6 draft_wp6_smoke (chains, the fused gate|up, the mm grid), WP7 draft_permute_smoke (an engaged line per site and shape, a passing audit line per quad site), WP2 kv_page_writer_tp4_smoke (the generated rules plus an engaged line with ordered=0: the captured forward ran the page launch). pack_order: the integrated pack runs the levers by the plan's estimated saving per 8-live round (section 6.1, central values): permute -6.4 ms, s1 -1.85, head64 -1.78, ccl -2 (unknown), reduce -1.2, qkv1 -1.1, tail -0.8, gateup1, mmgrid; kvpage (-2.75, its card-M proof now recorded) follows s1. pack_include: the upload-p0 pack's six profile twins come from its own generator (make_upload_profiles.py); its templates A0-A3 and T0-T5 are folded into the integrated ORDER under the prefix UP (UPA0.., UPT0..), on the one image, with their NEEDS lines renamed (its B0 is the pack's X0). WP4: mlpcfg (the streaming config and the L1 multiply, exact by construction) runs after head64; mlpgu (the fused gate|up, never compiled on a card) is last by WP4's own pack_last. combined: the 'all' twins (-fx-all, -fx-all-audit) and the combined mini-pack (references/fusion-jobs/combined). The CCL value is the lever's own (rs-c1, WP5's P0 winner; it needs QWEN_FAST_TP4_RS_UNIT_MAJOR=1, which the production profile already sets); mlpcfg is overridden to g3u4d3, the card-M sweep's winner (the lever's own value is l1); kvpage joins the combined set now that its proof is recorded; the round-host levers SELECT, READ, KEYED and LEAN are in the combined env (the ledger flag LOG is not: LEAN writes the ledger) and ROUND_HOST_AUDIT in its audit env. WPH's three host-gap levers (prestage-diff, lean and reads, the last at its asynchronous value through combined values) join the combined set and so the ship profile; tp4/fx-wph is merged at 3aa15f39 (the memcmp pre-stage comparator and the scheduler-aware instrument, all default off); the card evidence H5/H7/H9 was on 87bc574e and the next image's audited attach re-proves the merged code; its unapplied CPU-placement patch (WPH-cpus.patch: C2_CPUS/C2_CPUSET keys) is NOT applied, a separate decision. tp4/fusion-2 (profiles): -fx-all-oneq-grid13 and -fx-all-oneq-grid13-audit are the integrator's combined gate-only twins of the two prefill levers (WPP oneq, M1 grid13) on the combined arm; their window pack is references/fusion-jobs/F2 (hand-written by the integrator: the generator writes the per-lever and combined packs only). The ship profile and its waiver are untouched.",
  "pack_include": [
   {
    "folder": "upload-p0-jobs",
@@ -100,6 +100,30 @@
     ],
     "decision": "APPROVED by the owner 2026-10-11 (Claude Code session, after the fusion ship gates FXA, G1, GX0/GX1 and G2 passed on tp4-fusion-5): Yeah I approve but want to keep going"
    }
+  }
+ ],
+ "profiles": [
+  {
+   "name": "all-oneq-grid13",
+   "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all",
+   "audit": false,
+   "env": {
+    "QWEN_FAST_SDPA_PF_ONEQ": "1",
+    "QWEN_FAST_GRID13": "1"
+   },
+   "reason": "tp4/fusion-2: both prefill levers on top of the combined arm in one boot, the timed arm of the combined prefill ABAB (the control is -fx-all itself): the prefill SDPA with one q chunk per core (WPP, needs the K64j-OQ image binary) and the matmul grids for the 13x10 compute grid (M1, all three sub-switches). The levers act on different ops of the same prefill chunk (SDPA against the three fused all-gather matmuls), so their gains add only if neither starves the other of cores or bandwidth: that is what the pair measures. Not a ship arm."
+  },
+  {
+   "name": "all-oneq-grid13-audit",
+   "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all-audit",
+   "audit": true,
+   "env": {
+    "QWEN_FAST_SDPA_PF_ONEQ": "1",
+    "QWEN_FAST_SDPA_PF_ONEQ_AUDIT": "1",
+    "QWEN_FAST_GRID13": "1",
+    "QWEN_FAST_GRID13_AUDIT": "1"
+   },
+   "reason": "tp4/fusion-2: the audited twin of -fx-all-oneq-grid13: every combined lever with its audit plus oneq with its audit (the chain program against the one-chunk-per-core program, bit for bit on every chip) plus grid13 with its audit (the pinned prefill matmuls and the served 64-row configs against the lever's, bit for bit on every chip), in one boot. The exactness job of the combination; not a timing arm."
   }
  ]
 }

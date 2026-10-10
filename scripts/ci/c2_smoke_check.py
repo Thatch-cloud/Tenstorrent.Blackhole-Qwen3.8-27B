@@ -187,6 +187,7 @@ FUSION_LEVERS = (
     ('QWEN_FAST_WRITE_PACKED_LEAN', '1', '[PINDIAG] tp4 write packed lean engaged', '[PINDIAG] tp4 write packed lean fell back', 'WPH-2 lean write_packed'),  # WPH
     ('QWEN_FAST_BATCHED_READS', '1', '[PINDIAG] tp4 batched reads engaged', '[PINDIAG] tp4 batched reads fell back', 'WPH-3 batched verify and collect read-backs'),  # WPH
     ('QWEN_FAST_SDPA_PF_ONEQ', '1', '[PINDIAG] sdpa prefill oneq engaged', '[PINDIAG] sdpa prefill oneq fell back', 'S1 prefill SDPA one q chunk per core'),  # WPP
+    ('QWEN_FAST_GRID13', '1', '[PINDIAG] tp4 grid13 engaged', '[PINDIAG] tp4 grid13 fell back', 'M1 matmul grids for the 13x10 compute grid'),  # M1
     ('QWEN_FAST_MLP_CFG', 'g3u4d3', '[PINDIAG] tp4 mlp gateup engaged route=cfg', '[PINDIAG] tp4 mlp gateup fell back', 'MLP streaming config g3u4d3 (the card-M sweep winner)'),  # WP0
     ('QWEN_FAST_CCL_OPTIONS', 'served', '[PINDIAG] tp4 ccl options engaged', '[PINDIAG] tp4 ccl options fell back', 'CCL options (the served set)'),  # WP5
     ('QWEN_FAST_BATCHED_READS', 'async', '[PINDIAG] tp4 batched reads engaged', '[PINDIAG] tp4 batched reads fell back', 'WPH-3 batched read-backs (asynchronous copies)'),  # WPH
@@ -207,8 +208,10 @@ FUSION_AUDITS = (
     ('QWEN_FAST_WRITE_PACKED_LEAN_AUDIT', '[PINDIAG] tp4 write packed lean audit', 'WPH-2 lean write_packed'),  # WPH
     ('QWEN_FAST_BATCHED_READS_AUDIT', '[PINDIAG] tp4 batched reads audit', 'WPH-3 batched verify and collect read-backs'),  # WPH
     ('QWEN_FAST_SDPA_PF_ONEQ_AUDIT', '[PINDIAG] sdpa prefill oneq audit', 'S1 prefill SDPA one q chunk per core'),  # WPP
+    ('QWEN_FAST_GRID13_AUDIT', '[PINDIAG] tp4 grid13 audit', 'M1 matmul grids for the 13x10 compute grid'),  # M1
 )
 FUSION_RULES = (
+    'grid13_smoke',  # M1
     'tp4_shard_argmax_smoke',  # WP0
     'ccl_options_smoke',  # WP0
     'draft_permute_smoke',  # WP0

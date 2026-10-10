@@ -170,7 +170,9 @@ C2_ONLY_PLAIN_IMPORTS = frozenset(['capture_plug.py', 'extent_attention_replay.p
                                    # tp4/prefill-sdpa: imported by tp_addresses.install only when QWEN_FAST_SDPA_PF_ONEQ[_AUDIT] is set (overlay-only, docker/qwen-c2-overlay.txt)
                                    'sdpa_pf_oneq_tp.py',
                                    # the host-gap package WPH (lazy, flag-guarded imports; all in docker/qwen-c2-overlay.txt)
-                                   'prestage_diff.py', 'write_packed_lean.py', 'batched_reads_tp.py', 'hostgap_instr.py'])
+                                   'prestage_diff.py', 'write_packed_lean.py', 'batched_reads_tp.py', 'hostgap_instr.py',
+                                   # M1 (QWEN_FAST_GRID13): imported by tp_addresses.install and dflash_device.project_features only when the flag is set (overlay-only, docker/qwen-c2-overlay.txt)
+                                   'grid13_tp.py'])
 
 
 def unsatisfiable_plain_imports():

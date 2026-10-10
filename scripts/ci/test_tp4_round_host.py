@@ -1186,9 +1186,11 @@ class ProfileTests(unittest.TestCase):
         combined.update((name, {SELECT, READ, KEYED, LEAN}) for name in fusion.ship_names())            # the ship candidate: the timed combined arm as a traffic profile
         # the host-gap package WPH's composition twins (-fx-wph-*) are the combined timed arm plus their own flags, so they carry the four levers (never the audit flag)
         combined.update({name: {SELECT, READ, KEYED, LEAN} for name in data['profiles'] if name.startswith(fusion.NAMESPACE + 'wph-')})
-        # tp4/prefill-sdpa: the oneq twins are the combined arm and the combined audited arm plus the prefill SDPA flags, so they carry what their parents carry
-        combined[fusion.NAMESPACE + 'all-oneq'] = {SELECT, READ, KEYED, LEAN}
-        combined[fusion.NAMESPACE + 'all-oneq-audit'] = {SELECT, READ, KEYED, LEAN, AUDIT}
+        # the single-lever composition twins on top of the combined arm are the combined arm (or the combined audited arm) plus their own flags, so they carry what their parents carry:
+        # tp4/prefill-sdpa (-fx-all-oneq*, the prefill SDPA one q chunk per core), M1 (-fx-all-grid13*, the matmul grids for the 13x10 grid) and the integrator's both-levers twins (-fx-all-oneq-grid13*);
+        # the four levers always, and the audit flag on the audited twin
+        combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in data['profiles']
+                         if name.startswith((fusion.NAMESPACE + 'all-oneq', fusion.NAMESPACE + 'all-grid13'))})
         for name, profile in data['profiles'].items():
             if name in self.ADDED:
                 continue
