@@ -1,0 +1,66 @@
+# The order of the tp4/window-next four-card DEVELOPMENT window: ONE image and ONE window for the levers queued behind the shipped Lever N + W2 + engine reuse profile: octo-T8 (docs/tp4-octo.md), the round-host
+# levers (docs/tp4-round-host.md), the card-tooling job-reader rule, and the prefix gate rerun on the ship profile with its three readers fixed. Branch tp4/window-next = tp4/ship-ln-w2-er + tp4/card-tooling + tp4/round-host + tp4/octo-t8 + the reader fixes.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (a lever's follow-up jobs are skipped by the NEEDS lines below, the other levers still run).
+# P0. PRODUCTION: the cards serve production today (the ship profile, cut over). Every card job below needs them: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z (the cutover pack's
+#     restore steps and post-checks; nothing in this pack does either, and no job here starts or hands back the agent). B0 is a build and may run while production serves. No other window driver may be alive and no privileged builder container up.
+# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and the tag is pushed on THAT commit: G2's readers run on the runner from the checkout. Push ONE tag at a time and wait for its run to finish.
+# P0. CI PAUSED: the owner scales the rig's ARC runner sets to zero from O2 to the last timed job (H5, or O4 when it runs; CI shares the host and skews round times; the hardware host runner that runs these jobs is NOT scaled down) and restores them after it.
+# Every result of O* and H* is UNQUALIFIED (gate-only profiles); judge every pair PAIRED per round, never by unpaired medians; check the load average (the round-host pack's load rule: w2ln_timing_compare.py load-limit of H2's load.log).
+# THE IMAGE: B0 builds tp4-next-1 with c2-packed-tp4 as the build profile and BAKES the SAME default production runs, c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic (C2_BAKE_DEFAULT_PROFILE, session cap 8), so the image could serve; the octo
+#     and round-host twins are in its profiles file and each job selects its own (C2_PROFILE).
+# LINEAGE, READ BEFORE BELIEVING A NUMBER: the octo twins derive from c2-packed-tp4-8x262k-ship-prefix-levern (make_octo_profiles) and the round-host twins from ...-levern-traffic (make_round_host_profiles), the Lever N profiles, NOT from the shipped
+#     W2 + engine reuse profile: no twin carries W2's multi-user SDPA or the conv-gates spread, and the round-host twins carry no engine reuse. Their gains are measured on the Lever N base. A GO for either is a go to rebase its twin onto the ship profile and
+#     confirm there, not to ship; the two levers also never run together in this window (no profile carries both).
+# LEAN PATH (what was cut, and why): audited 8x262k costs about 8.4 minutes PER REQUEST, so the audited jobs are two tests (O1: warmup + concurrent8_steady, nine requests; H1 is host-only and not that costly). Not in this window: the octo pack's A0 control and the
+#     E1/E2 matrix (180 minutes each; the text read is O3 against O2 through octo_compare, unaudited), its hang-shape jobs H1-H3 and memory ledger M0/M1 (O1's attach logs DRAM after attach and fails at the third block's construction if it does not fit), its
+#     live-shape and parked timings P2, R1-R3, and L0/L1 (the lone-user round is refused at the attach today); the round-host pack's four-live pairs T5-T8, its 128k window and its separate E1/E2 (H2/H3 are that pair). Adoption of either lever needs the
+#     cut jobs back (and five consecutive audits-off hang-shape completions on the arm).
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0 <- B0
+# NEEDS Q1w Q2w <- X0
+# NEEDS Q1a <- Q1w
+# NEEDS Q1b <- Q1a
+# NEEDS Q2 <- Q2w
+# NEEDS O1 <- Q1b Q2
+# NEEDS O2 O3 <- O1
+# NEEDS O4 <- O3
+# NEEDS H1 <- X0
+# NEEDS H2 <- H1
+# NEEDS H3 <- H2
+# NEEDS H4 H5 <- H3
+# NEEDS G2 <- X0
+# READ RULES (each also needs c2_smoke_check clean and no stall; the jobs' own templates have the whole text):
+#   B0   'baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic with a session cap of 8', provenance report with no problem line, the image id.   X0   four cards present and healthy, the fabric as measured, no other driver alive.
+#   Q1w  (THE SHAPE KILLER, card M alone, NoC sanitiser, reduced scope) 'K64J_CARD verdict=PASS ... geometry=G8B1' with k2_verdict=REDUCED-PASS and a clean watcher log: K64j at ONE eight-row group per bundle (flags 0x21) equals its compile-time twin and
+#        the native one-row decode. Any FAIL, NO-DECISION or hang: the octo shape does not run on K64j, every octo job is skipped (a hang needs a person to reset the card), the rest of the window goes on.
+#   Q1a  CB1 at the octo geometry, full seeds: 'K64J_CARD verdict=PASS ... extent=<n>/<n> ... trace=<n>/<n> fence=<n>/<n> ... geometry=G8B1', every liveness control moved.
+#   Q1b  CB2a, the one that decides the exactness policy: 'verdict=PASS ... k2_verdict=PASS k2_coverage=<n>/<n> ... x7=<n>/<n> z=<n>/<n> z_families=15'. A REDUCED-PASS is not evidence.
+#   Q2w  the batched GDN launch at eight users of eight rows under the watcher: 'GDN_TP4 verdict=PASS scope=reduced ... geometry=8x8', watcher log clean.   Q2  the same at full scope: 'verdict=PASS scope=octo ... differing=0 ... geometry=8x8' and the timing rows.
+#   O1   octo audited attach: the admission once and no refusal, the readers engaged at G8B1, c2_smoke_check's octo rule clean (>= 16 octo rounds at rows=8, >= 16 counted rounds of each shape alternating strictly, no program compiled on a switch, zero audit mismatch).
+#   O2   the flag-off control: not one [OCTO] line.   O3  octo_judge.py --verdict GO at >= +10% (aggregate AND median pair, >= 16 pairs) and octo_compare.py against O2 with every answer equal.   O4  the repeat of O3.
+#   H1   one engaged line naming all six flags, ZERO '[ROUND-HOST-AUDIT] ... equal=0', an equal=1 line for select, merge and keyed, no 'declined' line, the ledger on every step (round_host_report.py summary --live 8).
+#   H2   the control, RECORD every hash and the load.log.   H3  every user's content hash, reasoning hash, completion tokens and finish reason of every test EQUAL to H2's (w2ln_timing_compare.py pair ... --a-smoke --b-smoke), identical accepted prefixes
+#        (speed_window_compare.py ... --position-keyed --strict-concurrent-prefixes, exit 0).   H4 H5  the second pair; GO at a length: both pairs negative and the pooled median gain above the A-to-A floor (steady and 32k windows, 100 matched rounds each, else VOID).
+#   G2   the plan verdict PASS (INCONCLUSIVE only for the 16,384-token step case the plan names), reused tokens above 0 on the hit, no problem line about the install, the admit tail or the build frontier (the readers' three fixes; offline re-judge of the failed run's artifacts passes).
+# NO-GO for adopting any lever: any stall, any hash or accepted-prefix difference between arms that must be identical, any audit mismatch, any declined line, any program compiled on an octo shape switch, an octo verdict under +10%, a pair positive by more than the floor.
+# Time (estimate): B0 40, X0 20, Q1w 10, Q1a 10, Q1b 15, Q2w 10, Q2 15, O1 90 (nine audited requests at 8.4 minutes plus a boot), O2 55, O3 60, H1 50, H2-H5 55 each, G2 35, O4 60 (soft, last), Z 10: 700 minutes (11 h 40 min), 640 minutes without O4,
+#   about 3 minutes of queue per tag on top. Card time excluding B0: 660 minutes (600 without O4).
+B0-build stop tp4-next-1 40
+X0-status-rescan-reset stop tp4-next-1 20
+Q1w-k64j-g8b1-watcher soft tp4-next-1 10
+Q1a-k64j-g8b1-cb1 soft tp4-next-1 10
+Q1b-k64j-g8b1-cb2a soft tp4-next-1 15
+Q2w-gdn-eight-users-watcher soft tp4-next-1 10
+Q2-gdn-eight-users soft tp4-next-1 15
+O1-octo-audit-attach-lean soft tp4-next-1 90
+O2-octo-control-timed soft tp4-next-1 55
+O3-octo-alternate-timed soft tp4-next-1 60
+H1-roundhost-audit-attach-lean soft tp4-next-1 50
+H2-roundhost-A1-control soft tp4-next-1 55
+H3-roundhost-B1-arm soft tp4-next-1 55
+H4-roundhost-A2-control soft tp4-next-1 55
+H5-roundhost-B2-arm soft tp4-next-1 55
+G2-prefix-hit soft tp4-next-1 35
+O4-octo-alternate-repeat soft tp4-next-1 60
+Z-reset soft tp4-next-1 10

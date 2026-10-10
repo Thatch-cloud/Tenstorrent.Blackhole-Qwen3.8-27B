@@ -276,7 +276,7 @@ jobs:
           python -B -m unittest test_mlp_block_stream_pipeline test_mlp_block_stream_pipeline_gate test_mlp_weight_pipeline test_mlp_block_stream_pipeline_hardware_stage
           python -B -m unittest discover -s scripts/ci -p 'test_gdn_direct_window*.py'
           python -B -m unittest discover -s scripts/ci -p 'test_compact_score*.py'
-          python -B -m unittest test_octo test_octo_block test_octo_judge test_octo_profiles test_tp4_octo_jobs test_extent_attention_octo_tp
+          python -B -m unittest test_octo test_octo_block test_octo_judge test_octo_profiles test_tp4_octo_jobs test_extent_attention_octo_tp test_tp4_window_next
           bash -n scripts/ci/run-simulator.sh
           bash -n scripts/ci/simulator-suite.sh
           bash -n scripts/ci/mlp-clock-hardware-suite.sh
