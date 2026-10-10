@@ -892,6 +892,65 @@ class WriterTests(unittest.TestCase):
                 self.chained(width=2052)
 
 
+def program_signature(program):
+    """What the device's program cache keys on: kernels (source, compile arguments, defines, cores, config), circular buffers, semaphores - not runtime words."""
+    found = []
+    for coordinate, descriptor in sorted(program.items(), key=repr):
+        found.append((repr(coordinate), tuple((kernel.kernel_source, tuple(kernel.compile_time_args), tuple(kernel.defines or ()), repr(kernel.core_ranges),
+                                               repr(kernel.config)) for kernel in descriptor.kernels),
+                      tuple((tuple(f.buffer_index for f in cb.format_descriptors), cb.total_size) for cb in descriptor.cbs),
+                      len(getattr(descriptor, 'semaphores', None) or ())))
+    return tuple(found)
+
+
+class CaptureFake(FakeTTNN):
+    """FakeTTNN with a trace capture that refuses what the device refuses: while one is open, a program (or a device op) that has not run before is
+    'Cannot load new binaries during trace capture ... Warm up before capturing a trace' (mesh_workload.cpp:159, the first card run of the audit twin), and
+    a synchronize or a readback is 'Event Synchronization is not supported during trace capture'. Outside a capture everything is recorded as seen."""
+
+    def __init__(self, chips=1):
+        FakeTTNN.__init__(self, chips)
+        self.capturing, self.seen, self.captured_programs = False, set(), 0
+
+    def begin_trace_capture(self, mesh, cq_id=0):
+        self.capturing = True
+        return 'trace'
+
+    def end_trace_capture(self, mesh, trace, cq_id=0):
+        self.capturing = False
+
+    def _warmed(self, key):
+        if self.capturing and key not in self.seen:
+            raise RuntimeError('TT_FATAL mesh_workload.cpp:159 !is_capturing_trace: Cannot load new binaries during trace capture. This program is not yet in '
+                               'program cache. Warm up before capturing a trace. (%s)' % (key[0],))
+        self.seen.add(key)
+
+    def _no_sync(self, what):
+        if self.capturing:
+            raise RuntimeError('TT_FATAL: Event Synchronization is not supported during trace capture (%s)' % (what,))
+
+    def generic_op(self, tensors, program):
+        self._warmed(('generic_op', program_signature(program)))
+        self.captured_programs += int(self.capturing)
+        return FakeTTNN.generic_op(self, tensors, program)
+
+    def to_memory_config(self, tensor, memory_config):
+        self._warmed(('to_memory_config', tuple(tensor.shape), type(tensor._memory).__name__ + repr(tensor._memory if isinstance(tensor._memory, str) else ''),
+                      repr(memory_config)))
+        return FakeTTNN.to_memory_config(self, tensor, memory_config)
+
+    def synchronize_device(self, mesh):
+        self._no_sync('synchronize_device')
+
+    def to_torch(self, tensor):
+        self._no_sync('to_torch')
+        return FakeTTNN.to_torch(self, tensor)
+
+    def from_torch(self, *args, **kwargs):
+        self._no_sync('from_torch')
+        return FakeTTNN.from_torch(self, *args, **kwargs)
+
+
 class AuditTests(unittest.TestCase):
     def setUp(self):
         self.ttnn = FakeTTNN(chips=1)
@@ -899,7 +958,7 @@ class AuditTests(unittest.TestCase):
         self.lines = []
         self.patches = [mock.patch.dict(os.environ, dict(ON, QWEN_FAST_KV_PAGE_WRITER_AUDIT='1')), mock.patch.object(kvpw, 'log_line', self.lines.append),
                         mock.patch.object(kvpw, 'evidence_problems', return_value=[]), mock.patch.object(kvpw, '_NOTED', set()),
-                        mock.patch.object(kvpw, '_REGISTRY', [])]
+                        mock.patch.object(kvpw, '_REGISTRY', []), mock.patch.object(kvpw, '_WARM_AUDITS', {})]
         for patch in self.patches:
             patch.start()
             self.addCleanup(patch.stop)
@@ -930,16 +989,92 @@ class AuditTests(unittest.TestCase):
         self.assertIn('KVPW_ROLE_AUDIT_PREP', prep_defines)
         self.assertIn('KVPW_ROLE_AUDIT_CHECK', check_defines)
 
-    def test_the_warm_forwards_ordered_writer_carries_no_audit_and_is_not_registered(self):
+    def test_the_warm_forwards_ordered_writer_runs_the_audit_on_shared_state_and_is_not_registered(self):
         tensors = block(self.ttnn)
         writer = poc.ChainedOrderedCacheWriter(self.mesh, self.ttnn, KERNELS, positions=tensors['positions'], pages=tensors['pages'],
                                                spans=((0, 64),), tiles=tiles(self.ttnn), launch_rows=64)
         self.assertTrue(writer.page.ordered)
-        self.assertIsNone(writer.page.audit)
-        self.assertEqual(kvpw._REGISTRY, [])
+        self.assertIsNotNone(writer.page.audit)
+        self.assertEqual(kvpw._REGISTRY, [], 'nobody reads the warm audit')
+        other = poc.ChainedOrderedCacheWriter(self.mesh, self.ttnn, KERNELS, positions=tensors['positions'], pages=tensors['pages'],
+                                              spans=((0, 64),), tiles=tiles(self.ttnn), launch_rows=64)
+        self.assertIs(other.page.audit, writer.page.audit, 'one set of scratch tensors for the whole warm forward')
         for cache, packed in zip(tensors['caches'], tensors['packed']):
             writer(cache, packed, update_idxs_tensor=SimpleNamespace(shape=(64,)), page_table=SimpleNamespace(shape=(64, WIDTH)))
-        self.assertEqual(len([call for call in self.ttnn.calls if call[0] == 'generic_op']), 1, 'the page launch alone')
+        self.assertEqual(len([call for call in self.ttnn.calls if call[0] == 'generic_op']), 5, 'prep, two served on the shadow, the page launch, check')
+
+    def test_the_captured_audit_issues_no_op_the_warm_forward_did_not_run_and_no_sync_or_readback(self):
+        """KVPAGE audit twin, run 38055792581: 'TT_FATAL mesh_workload.cpp:159 !is_capturing_trace: Cannot load new binaries during trace capture' at audit_prep,
+        because the warm forward's writers carried no audit and the capture's audit programs had never run. The warm forward now runs them."""
+        ttnn = CaptureFake(chips=1)
+        mesh_ = mesh(chips=1, grid=(13, 10))
+        layers = [block(ttnn, source='l1') for unused in range(3)]
+        call = SimpleNamespace(update_idxs_tensor=SimpleNamespace(shape=(64,)), page_table=SimpleNamespace(shape=(64, WIDTH)))
+
+        def writers(spans):
+            return [poc.ChainedOrderedCacheWriter(mesh_, ttnn, KERNELS, positions=layer['positions'], pages=layer['pages'], spans=spans,
+                                                  tiles=tiles(ttnn), launch_rows=64) for layer in layers]
+
+        def forward(built):
+            for writer, layer in zip(built, layers):
+                for cache, packed in zip(layer['caches'], layer['packed']):
+                    writer(cache, packed, update_idxs_tensor=call.update_idxs_tensor, page_table=call.page_table)
+
+        warm = writers(((0, 64),))
+        forward(warm)                                   # eager: the warm forward
+        captured = writers(SEGMENTS)                    # the capture fixture, built (its audit tensors uploaded) before the capture
+        self.assertEqual(len(kvpw._REGISTRY), 3)
+        trace = ttnn.begin_trace_capture(mesh_)
+        try:
+            forward(captured)
+        finally:
+            ttnn.end_trace_capture(mesh_, trace)
+        self.assertEqual(ttnn.captured_programs, 3 * 5, 'five programs a layer inside the capture, every one already run')
+        # after the replay: the counters are read outside any capture
+        units = kvpw.unit_count(2)
+        rows = [[0, 1, 7, 0] + [0] * 12 for unused in range(units)]
+        with mock.patch.object(ttnn, 'to_torch', lambda shard: SimpleNamespace(tolist=lambda: rows)):
+            self.assertEqual(kvpw.audit_round(ttnn, 0), 3 * units)
+
+    def test_without_the_warm_audit_the_capture_dies_as_it_did_on_the_card(self):
+        ttnn = CaptureFake(chips=1)
+        mesh_ = mesh(chips=1, grid=(13, 10))
+        layer = block(ttnn, source='l1')
+        args = dict(positions=layer['positions'], pages=layer['pages'], tiles=tiles(ttnn), launch_rows=64)
+        with mock.patch.object(kvpw.Audit, 'warm', classmethod(lambda cls, operations, mesh, wt: None)):      # the writers before this fix
+            warm = poc.ChainedOrderedCacheWriter(mesh_, ttnn, KERNELS, spans=((0, 64),), **args)
+        self.assertIsNone(warm.page.audit)
+        for cache, packed in zip(layer['caches'], layer['packed']):
+            warm(cache, packed, update_idxs_tensor=SimpleNamespace(shape=(64,)), page_table=SimpleNamespace(shape=(64, WIDTH)))
+        captured = poc.ChainedOrderedCacheWriter(mesh_, ttnn, KERNELS, spans=SEGMENTS, **args)
+        trace = ttnn.begin_trace_capture(mesh_)
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'Cannot load new binaries during trace capture'):
+                for cache, packed in zip(layer['caches'], layer['packed']):
+                    captured(cache, packed, update_idxs_tensor=SimpleNamespace(shape=(64,)), page_table=SimpleNamespace(shape=(64, WIDTH)))
+        finally:
+            ttnn.end_trace_capture(mesh_, trace)
+
+    def test_the_fake_refuses_what_the_device_refuses_so_the_test_above_means_something(self):
+        ttnn = CaptureFake(chips=1)
+        mesh_ = mesh(chips=1, grid=(13, 10))
+        layer = block(ttnn, source='l1')
+        tensor = layer['positions']
+        trace = ttnn.begin_trace_capture(mesh_)
+        try:
+            for operation in (lambda: ttnn.synchronize_device(mesh_), lambda: ttnn.to_torch(tensor), lambda: ttnn.from_torch(tensor.shape)):
+                with self.assertRaisesRegex(RuntimeError, 'not supported during trace capture'):
+                    operation()
+            with self.assertRaisesRegex(RuntimeError, 'Cannot load new binaries'):
+                ttnn.to_memory_config(layer['packed'][0], ttnn.DRAM_MEMORY_CONFIG)
+        finally:
+            ttnn.end_trace_capture(mesh_, trace)
+        ttnn.to_memory_config(layer['packed'][0], ttnn.DRAM_MEMORY_CONFIG)          # eager: fine, and now seen
+        trace = ttnn.begin_trace_capture(mesh_)
+        try:
+            ttnn.to_memory_config(layer['packed'][0], ttnn.DRAM_MEMORY_CONFIG)
+        finally:
+            ttnn.end_trace_capture(mesh_, trace)
 
     def test_prep_and_check_runtime_words(self):
         tensors = block(self.ttnn)
