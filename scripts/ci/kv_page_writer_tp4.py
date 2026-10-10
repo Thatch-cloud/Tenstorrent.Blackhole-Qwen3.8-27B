@@ -327,6 +327,7 @@ PROOF_REGIMES = ('exact', 'random', 'edge')
 PROOF_MODES = ('eager', 'replay_changed', 'replay_unchanged')
 PROOF_CACHES = ('k', 'v')
 PROOF_WIDTHS = (2052, 4096)
+PROOF_NEGATIVES = ('drop', 'slot')
 
 
 def _hex64(value):
@@ -363,6 +364,11 @@ def block_problems(block, wt=DEFAULT_WT, width=None, source=None, compute_sha256
         missing = [item for item in wanted if not isinstance(found, list) or item not in found]
         if missing:
             problems.append('page_writer %s lack %s' % (key, missing))
+    negatives = block.get('negatives')
+    kinds = sorted(str(entry.get('kind')) for entry in negatives if isinstance(entry, dict)) if isinstance(negatives, list) else []
+    if kinds != sorted(PROOF_NEGATIVES) or any(not (type(entry.get('failing')) is int and entry['failing'] > 0 and entry.get('verdict') == 'FAIL')
+                                                for entry in negatives if isinstance(entry, dict)):
+        problems.append('page_writer negative controls %s are not one failing drop and one failing slot' % (kinds,))
     for key in ('noop_served', 'noop_page', 'twice_page'):
         entry = (block.get('proofs') or {}).get(key)
         if not isinstance(entry, dict) or type(entry.get('checks')) is not int or entry['checks'] <= 0 or entry.get('checks') != entry.get('exact'):

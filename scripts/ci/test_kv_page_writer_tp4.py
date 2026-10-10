@@ -127,7 +127,9 @@ def passing_block(wt=kvpw.DEFAULT_WT, **changes):
     entry = dict(status='PASS', scope='full', failures=0, design_signature=kvpw.design_signature(wt), wt=wt, units=kvpw.unit_count(wt),
                  widths=[2052, 4096], sources=['dram', 'l1'], regimes=list(kvpw.PROOF_REGIMES), modes=list(kvpw.PROOF_MODES), caches=['k', 'v'],
                  seeds=[0, 1, 2], counts=dict(checks=100, exact=100),
-                 proofs=dict(noop_served=dict(checks=10, exact=10), noop_page=dict(checks=10, exact=10), twice_page=dict(checks=10, exact=10)))
+                 proofs=dict(noop_served=dict(checks=10, exact=10), noop_page=dict(checks=10, exact=10), twice_page=dict(checks=10, exact=10)),
+                 negatives=[dict(kind='drop', verdict='FAIL', run=2, tag='t', failing=8, differing_blocks=80),
+                            dict(kind='slot', verdict='FAIL', run=3, tag='t', failing=2, differing_blocks=20)])
     entry.update(changes)
     return entry
 
@@ -441,6 +443,7 @@ class EvidenceTests(unittest.TestCase):
         """Write the shipped record with `block` as its page_writer (None: no block at all) and the overrides; returns the file's sha256."""
         evidence = json.loads(page_width_tp4.EVIDENCE.read_text())
         evidence.update(overrides)
+        evidence.pop('page_writer', None)                # whatever the shipped record carries, the record under test carries `block` or none
         if block is not None:
             evidence['page_writer'] = block
         payload = (json.dumps(evidence, indent=1) + '\n').encode()
@@ -450,11 +453,19 @@ class EvidenceTests(unittest.TestCase):
     def problems(self, expected, **options):
         return kvpw.evidence_problems(path=self.path, expected=expected, sources_root=self.dir, **options)
 
-    def test_the_shipped_record_has_no_page_block_so_the_lever_refuses(self):
+    def test_the_shipped_record_either_has_no_page_block_and_the_lever_refuses_or_has_one_that_matches_the_live_design(self):
         evidence = json.loads(page_width_tp4.EVIDENCE.read_text())
-        self.assertNotIn('page_writer', evidence)
         problems = kvpw.evidence_problems()
-        self.assertEqual(problems, ['no page_writer record'])
+        if 'page_writer' not in evidence:
+            self.assertEqual(problems, ['no page_writer record'])
+            return
+        self.assertEqual(problems, [], 'the recorded page_writer block does not match the live kernel / pinned compute / geometry: re-record it '
+                                       '(scripts/ci/references/fusion-jobs/WP2) or revert the edit')
+        block = evidence['page_writer']
+        self.assertEqual((block['status'], block['scope'], block['failures']), ('PASS', 'full', 0))
+        for width in (2052, 4096):
+            for source in ('dram', 'l1'):
+                self.assertEqual(kvpw.evidence_problems(block['wt'], width, source), [])
 
     def test_a_missing_or_unpinned_record_refuses_before_the_block_is_read(self):
         self.assertIn('does not stand', self.problems('0' * 64)[0])
@@ -497,6 +508,12 @@ class EvidenceTests(unittest.TestCase):
             'one regime': dict(regimes=['exact']),
             'one mode': dict(modes=['eager']),
             'one cache': dict(caches=['k']),
+            'no negative controls': dict(negatives=[]),
+            'one negative control': dict(negatives=[dict(kind='drop', verdict='FAIL', run=2, tag='t', failing=8)]),
+            'a negative control that did not fail': dict(negatives=[dict(kind='drop', verdict='FAIL', run=2, tag='t', failing=0),
+                                                                    dict(kind='slot', verdict='FAIL', run=3, tag='t', failing=2)]),
+            'a negative control that passed': dict(negatives=[dict(kind='drop', verdict='PASS', run=2, tag='t', failing=8),
+                                                              dict(kind='slot', verdict='FAIL', run=3, tag='t', failing=2)]),
             'no noop for the served writer': dict(proofs=dict(noop_page=dict(checks=1, exact=1), twice_page=dict(checks=1, exact=1))),
             'an inexact noop': dict(proofs=dict(noop_served=dict(checks=2, exact=1), noop_page=dict(checks=1, exact=1), twice_page=dict(checks=1, exact=1))),
         }

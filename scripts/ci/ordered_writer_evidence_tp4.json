@@ -70,6 +70,104 @@
  "sources": {
   "ordered_cache.py": "c74799afc92fda20234f6ada6aa84fa122dcde8ec75ab87a3cb477d6611cbcac"
  },
+ "page_writer": {
+  "status": "PASS",
+  "scope": "full",
+  "failures": 0,
+  "design_signature": "8fe05bde926bbda7cb6621bf7f3d50c736a4eab117627a07b706c33d59e56681",
+  "wt": 2,
+  "units": 64,
+  "kernel_sha256": "a71d801b89ef813f30f27c7facd09ae7b9dfee7013d936d84aa5e1c49c5e163d",
+  "compute_sha256": "6e71c7ecee25271a49ade605e0afa3b78ef68b87d5afb49d7346309a006a0cfb",
+  "widths": [
+   2052,
+   4096
+  ],
+  "sources": [
+   "dram",
+   "l1"
+  ],
+  "regimes": [
+   "edge",
+   "exact",
+   "random"
+  ],
+  "modes": [
+   "eager",
+   "replay_changed",
+   "replay_unchanged"
+  ],
+  "caches": [
+   "k",
+   "v"
+  ],
+  "seeds": [
+   0,
+   1,
+   2
+  ],
+  "counts": {
+   "checks": 1976,
+   "exact": 1976
+  },
+  "proofs": {
+   "noop_served": {
+    "checks": 20,
+    "exact": 20
+   },
+   "noop_page": {
+    "checks": 112,
+    "exact": 112
+   },
+   "twice_page": {
+    "checks": 84,
+    "exact": 84
+   }
+  },
+  "grid": [
+   13,
+   10
+  ],
+  "run": 38048791849,
+  "tag": "experiment/c2-serving-v736",
+  "commit": "2866e56cff87642c16153cfeae92523e2782e700",
+  "image": "tp4-w1-1",
+  "report": "cardm/ordered-20261010T113301.json",
+  "report_sha256": "c22eb4c11376b1c27d4f3ae7a790710d94d7b700b13974ba959dca9ebd9c4b0c",
+  "page_verdict": "page=PASS page_scope=full page_checks=1976 page_exact=1976",
+  "negatives": [
+   {
+    "kind": "drop",
+    "verdict": "FAIL",
+    "run": 38049235214,
+    "tag": "experiment/c2-serving-v737",
+    "report": "cardm/ordered-20261010T114031.json",
+    "report_sha256": "38820a0977a29a50d9d44403a2a587b7e7ee1b249a70853b281624e2282a48dd",
+    "cases": 2,
+    "failing": 36,
+    "differing_blocks": 708,
+    "sources": [
+     "dram",
+     "l1"
+    ]
+   },
+   {
+    "kind": "slot",
+    "verdict": "FAIL",
+    "run": 38049283989,
+    "tag": "experiment/c2-serving-v738",
+    "report": "cardm/ordered-20261010T114120.json",
+    "report_sha256": "7662b3e7426129277b65be41d4613187df2e7a60a564b9126d6cf768718ec831",
+    "cases": 2,
+    "failing": 36,
+    "differing_blocks": 212,
+    "sources": [
+     "dram",
+     "l1"
+    ]
+   }
+  ]
+ },
  "watcher_pass": {
   "run": 37226144863,
   "tag": "experiment/c2-serving-v570",

@@ -47,7 +47,7 @@ TOP_KEYS = ('schema', 'what', 'status', 'provenance', 'run', 'tag', 'commit', 'c
             'report_sha256', 'verdict_line', 'scope', 'chips', 'kv_heads', 'failures', 'widths', 'writers', 'seeds',
             'sections', 'entries', 'anchor_positions', 'blocks', 'counts', 'admission_patch', 'sources', 'page_writer')
 PAGE_KEY = 'page_writer'
-PAGE_BLOCK_KEYS = ('status', 'scope', 'failures', 'design_signature', 'wt', 'units', 'kernel_sha256', 'compute_sha256', 'widths', 'sources',
+PAGE_BLOCK_KEYS = ('negatives', 'status', 'scope', 'failures', 'design_signature', 'wt', 'units', 'kernel_sha256', 'compute_sha256', 'widths', 'sources',
                    'regimes', 'modes', 'caches', 'seeds', 'counts', 'proofs', 'grid', 'run', 'tag', 'commit', 'image', 'report', 'report_sha256',
                    'page_verdict')
 
@@ -90,7 +90,7 @@ def page_problems(report, root=HERE):
         problems.append('%d of %d page checks exact' % (exact, len(checks)))
     names = {check.get('name') for check in checks}
     for wanted in ('served_equal_k', 'served_equal_v', 'host_equal_k', 'host_equal_v', 'twice_equal_k', 'twice_equal_v', 'noop_equal_k',
-                   'noop_equal_v', 'fill_equal'):
+                   'noop_equal_v', 'fill_equal', 'wrote_k', 'wrote_v', 'stored_nonzero_k', 'stored_nonzero_v'):
         if wanted not in names:
             problems.append('no %s check recorded' % wanted)
     seen = {(check.get('regime'), check.get('source'), check.get('mode'), check.get('width')) for check in checks if check.get('kind') == 'page'}
@@ -124,12 +124,107 @@ def page_problems(report, root=HERE):
             problems.append('the run exercised design %s, the live one is %s (run the page arm on these bytes)' % (str(info.get('design_signature'))[:16], live[:16]))
         if (report.get('sources') or {}).get('kv_page_writer_tp4.cpp') != kvpw.source_sha256():
             problems.append('the run loaded kv_page_writer_tp4.cpp at another sha256 than the live file')
+        ran = (report.get('sources') or {}).get('ordered_cache.py')
+        live_path = os.path.join(root, 'ordered_cache.py')
+        live = page_width_tp4.sha256_file(live_path) if os.path.isfile(live_path) else None
+        if ran != live:
+            problems.append('the run loaded ordered_cache.py at %s, but the live file is %s (the pinned writer the page writer is held to)' % (str(ran)[:16], str(live)[:16]))
         if info.get('negative'):
             problems.append('the page design ran with a negative control (%s)' % info['negative'])
     return problems
 
 
-def page_block(report, digest, path, run, tag, commit, image):
+def negative_problems(report, kind, root=HERE):
+    """Why `report` does not count as the page64 negative control `kind` (drop | slot): the kernel with a row left out / the second tile row written as the first
+    must make the SAME harness FAIL, and by bytes. Empty when it does. A control counts only if it
+      - ran with --page-negative <kind> and finished (a FAIL verdict, no error, nothing cut or raised: a hang or a harness fault is not a detection);
+      - ran the live kernel source (the negative is a compile-time define of it, not an edit) and the fixed harness (it records wrote_* checks, and the
+        readback dtype);
+      - failed served_equal by BYTES: every inexact served_equal check names differing_blocks > 0 (a comparison that fails with 0 differing blocks is the
+        comparator defect KVPAGE-W1 found, not a detection), in every case, for both caches (drop: every case; slot: the groups that cross a 32-row tile boundary);
+      - failed host_equal too in the exact-regime cases (a third oracle sees it);
+      - left the harness's own checks standing: input_unchanged, pages_unchanged, fill_equal and every wrote_* exact (the controlled kernel still wrote)."""
+    import kv_page_writer_tp4 as kvpw
+    import ordered_writer_page_arm_tp4 as arm
+
+    problems = []
+    requested = report.get('requested') or {}
+    page = requested.get('page') or {}
+    label = 'negative %s' % kind
+    if kind not in kvpw.PROOF_NEGATIVES:
+        return ['%s: not one of %s' % (label, ', '.join(kvpw.PROOF_NEGATIVES))]
+    if page.get('negative') != kind or (report.get('page') or {}).get('negative') != kind:
+        problems.append('%s: the report ran negative %r' % (label, page.get('negative')))
+    if arm.PAGE_WRITER not in (requested.get('writers') or ()):
+        return problems + ['%s: the report did not run --writers page64' % label]
+    words = base.line_words(report.get('verdict_line'))
+    decision = report.get('page_decision') or {}
+    if decision.get('verdict') != 'FAIL' or words.get('page') != 'FAIL':
+        problems.append('%s: page verdict %s (line %s), not FAIL - a control that passes voids the proof, one that did not finish proves nothing' % (
+            label, decision.get('verdict'), words.get('page')))
+    if report.get('error') or report.get('in_progress'):
+        problems.append('%s: error or checkpoint (%s)' % (label, str(report.get('error') or report.get('in_progress'))[:80]))
+    cases = {name: state for name, state in (report.get('cases') or {}).items() if name.startswith('page64-')}
+    if not cases:
+        problems.append('%s: no page case ran' % label)
+    for name, state in sorted(cases.items()):
+        if state.get('error') or state.get('skipped'):
+            problems.append('%s: case %s %s' % (label, name, 'raised' if state.get('error') else 'was cut'))
+    info = report.get('page') or {}
+    if info.get('design_signature') != kvpw.design_signature(info.get('wt') if info.get('wt') in kvpw.WIDTHS else kvpw.DEFAULT_WT):
+        problems.append('%s: the control ran design %s, not the live one' % (label, str(info.get('design_signature'))[:16]))
+    if (report.get('sources') or {}).get('kv_page_writer_tp4.cpp') != kvpw.source_sha256():
+        problems.append('%s: the control loaded another kv_page_writer_tp4.cpp than the live file' % label)
+    if not info.get('readback_dtype'):
+        problems.append('%s: the report names no readback dtype (the harness before the float32 comparison fix)' % label)
+    checks = [check for check in report.get('checks') or [] if check.get('kind') == 'page']
+    if not any(check['name'].startswith('wrote_') for check in checks):
+        problems.append('%s: no wrote_* check (the harness before the non-vacuity fix)' % label)
+    for name in sorted(cases):
+        mine = [check for check in checks if check['case'] == name]
+        for cache in ('k', 'v'):
+            served = [check for check in mine if check['name'] == 'served_equal_' + cache]
+            failed = [check for check in served if not check['exact']]
+            if not failed:
+                problems.append('%s: case %s never failed served_equal_%s' % (label, name, cache))
+            elif any(not (type(check.get('differing_blocks')) is int and check['differing_blocks'] > 0) for check in failed):
+                problems.append('%s: case %s failed served_equal_%s with 0 differing blocks (a comparison defect, not bytes)' % (label, name, cache))
+            elif kind == 'drop' and len(failed) != len(served):
+                problems.append('%s: case %s failed only %d of %d served_equal_%s steps' % (label, name, len(failed), len(served), cache))
+        if '-exact-' in name:
+            for cache in ('k', 'v'):
+                if not any(check['name'] == 'host_equal_' + cache and not check['exact'] for check in mine):
+                    problems.append('%s: exact-regime case %s never failed host_equal_%s' % (label, name, cache))
+        standing = [check for check in mine if check['name'] in ('input_unchanged', 'pages_unchanged', 'fill_equal') or check['name'].startswith('wrote_')]
+        if any(not check['exact'] for check in standing):
+            problems.append('%s: case %s failed a harness check (input_unchanged, pages_unchanged, fill_equal or wrote_*)' % (label, name))
+    return problems
+
+
+def negative_entry(report, kind, digest, path, run, tag):
+    checks = [check for check in report.get('checks') or [] if check.get('kind') == 'page']
+    served = [check for check in checks if check['name'].startswith('served_equal') and not check['exact']]
+    return dict(kind=kind, verdict='FAIL', run=int(run), tag=tag, report=base.report_name(path), report_sha256=digest,
+                cases=len([name for name in (report.get('cases') or {}) if name.startswith('page64-')]), failing=len(served),
+                differing_blocks=sum(check['differing_blocks'] for check in served), sources=sorted(set(check.get('source') for check in checks)))
+
+
+def gather_negatives(negatives, root=HERE):
+    """(problems, entries) of the (report, digest, path, run, tag) controls: exactly one drop and one slot, each counting."""
+    problems, entries, kinds = [], [], []
+    for report, digest, path, run, tag in negatives:
+        kind = ((report.get('requested') or {}).get('page') or {}).get('negative')
+        kinds.append(kind)
+        found = negative_problems(report, kind, root)
+        problems.extend(found)
+        if not found:
+            entries.append(negative_entry(report, kind, digest, path, run, tag))
+    if sorted(str(kind) for kind in kinds) != sorted(['drop', 'slot']):
+        problems.append('the record needs exactly one drop and one slot negative control (--negative REPORT RUN TAG each); got %s' % (kinds,))
+    return problems, entries
+
+
+def page_block(report, digest, path, run, tag, commit, image, negatives=()):
     """The 'page_writer' record of a qualifying report (page_problems empty)."""
     import ordered_writer_page_arm_tp4 as arm
 
@@ -144,7 +239,8 @@ def page_block(report, digest, path, run, tag, commit, image):
                 proofs=arm.proofs_of(report), grid=list(info.get('grid') or []), run=int(run), tag=tag, commit=commit, image=image,
                 report=base.report_name(path), report_sha256=digest,
                 page_verdict='page=%s page_scope=%s page_checks=%s page_exact=%s' % (
-                    words.get('page'), words.get('page_scope'), words.get('page_checks'), words.get('page_exact')))
+                    words.get('page'), words.get('page_scope'), words.get('page_checks'), words.get('page_exact')),
+                negatives=sorted(list(negatives), key=lambda entry: entry['kind']))
 
 
 def common_ref_problems(commit, image, run, tag):
@@ -158,7 +254,7 @@ def common_ref_problems(commit, image, run, tag):
     return problems
 
 
-def build(report, digest, path, run, tag, commit, image, watcher=None, root=HERE):
+def build(report, digest, path, run, tag, commit, image, watcher=None, root=HERE, negatives=()):
     problems = []
     words = base.line_words(report.get('verdict_line'))
     decision = report.get('decision') or {}
@@ -219,8 +315,11 @@ def build(report, digest, path, run, tag, commit, image, watcher=None, root=HERE
     if run is None or not tag:
         problems.append('--run and --tag are required')
     with_page = PAGE_WRITER in (requested.get('writers') or ())
+    entries = []
     if with_page:
         problems.extend(page_problems(report, root))
+        found, entries = gather_negatives(negatives, root)
+        problems.extend(found)
     if problems:
         raise RecordError(problems)
     evidence = dict(
@@ -248,14 +347,16 @@ def build(report, digest, path, run, tag, commit, image, watcher=None, root=HERE
     if watcher:
         evidence['watcher_pass'] = watcher
     if with_page:
-        evidence[PAGE_KEY] = page_block(report, digest, path, run, tag, commit, image)
+        evidence[PAGE_KEY] = page_block(report, digest, path, run, tag, commit, image, entries)
     return evidence
 
 
-def merge_page(report, digest, path, run, tag, commit, image, evidence_path, sources_root=HERE):
+def merge_page(report, digest, path, run, tag, commit, image, evidence_path, sources_root=HERE, negatives=()):
     """The record on disk with the page64 report's 'page_writer' block added or replaced (the E1 part untouched). The record must still stand: PASS, the
     live ordered_cache.py bytes."""
     problems = common_ref_problems(commit, image, run, tag) + page_problems(report, sources_root)
+    found, entries = gather_negatives(negatives, sources_root)
+    problems.extend(found)
     try:
         with open(evidence_path, 'rb') as handle:
             existing = json.loads(handle.read().decode('utf-8'))
@@ -265,7 +366,7 @@ def merge_page(report, digest, path, run, tag, commit, image, evidence_path, sou
     if problems:
         raise RecordError(problems)
     evidence = dict(existing)
-    evidence[PAGE_KEY] = page_block(report, digest, path, run, tag, commit, image)
+    evidence[PAGE_KEY] = page_block(report, digest, path, run, tag, commit, image, entries)
     return evidence
 
 
@@ -299,6 +400,8 @@ def parse_args(argv=None):
     parser.add_argument('--watcher', help='the watcher pass\'s report (optional)')
     parser.add_argument('--watcher-run', type=int)
     parser.add_argument('--watcher-tag')
+    parser.add_argument('--negative', nargs=3, action='append', metavar=('REPORT', 'RUN', 'TAG'), default=[],
+                        help='a page64 negative-control report (drop, then again for slot) with its run id and experiment tag; required beside a page64 report')
     parser.add_argument('--merge-page', action='store_true',
                         help='the report is a page64-only run: add or replace the page_writer block in the record on disk (the E1 part is kept)')
     parser.add_argument('--dry-run', action='store_true', help='check and print the result; write nothing')
@@ -310,10 +413,14 @@ def main(argv=None, out=print):
     try:
         report, digest = base.read_report(args.report)
         watcher = base.watcher_entry(args.watcher_run, args.watcher_tag, None) if args.watcher_run else None
+        negatives = []
+        for negative_path, negative_run, negative_tag in args.negative:
+            negative_report, negative_digest = base.read_report(negative_path)
+            negatives.append((negative_report, negative_digest, negative_path, int(negative_run), negative_tag))
         if args.merge_page:
-            evidence = merge_page(report, digest, args.report, args.run, args.tag, args.commit, args.image, args.evidence, args.sources_root)
+            evidence = merge_page(report, digest, args.report, args.run, args.tag, args.commit, args.image, args.evidence, args.sources_root, negatives)
         else:
-            evidence = build(report, digest, args.report, args.run, args.tag, args.commit, args.image, watcher, args.sources_root)
+            evidence = build(report, digest, args.report, args.run, args.tag, args.commit, args.image, watcher, args.sources_root, negatives)
     except RecordError as error:
         for problem in error.problems:
             out('REFUSED: ' + problem)
