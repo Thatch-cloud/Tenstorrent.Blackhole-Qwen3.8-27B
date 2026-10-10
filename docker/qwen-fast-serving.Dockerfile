@@ -134,6 +134,9 @@ COPY scripts/ci/quad_draft_tp.py scripts/ci/draft_singles_audit.py /experiment-s
 # The eight-seat, eight-row draft pass for the octo rounds (octo_draft_tp: QWEN_FAST_OCTO_DRAFT, gate only, default off). The coordinator, serving_octo and serving_runtime import it lazily, only with
 # the flag set; it borrows the four-card quad twin above for every helper it does not redefine.
 COPY scripts/ci/octo_draft_tp.py /experiment-scripts/ci/
+# The drafter's coding vocabulary shortlist (draft_vocab_tp: QWEN_FAST_DRAFT_VOCAB, gate only, default off) and the named id list it loads with its statistics. draft_shared_head_tp, round_host,
+# serving_runtime and serving_c2_contract import the module lazily, only with the flag set.
+COPY scripts/ci/draft_vocab_tp.py scripts/ci/draft_vocab_coding_40960.ids scripts/ci/draft_vocab_coding_40960.json /experiment-scripts/ci/
 # The four-card twin of the fused commit (fused_commit_tp: tp_addresses.install() puts it in fused_commit's place at QWEN_FAST_TP=4
 # only, MODULE_TWINS; packed_verifier, serving_packed_step, verify_prestage and dflash_proposal_trace import fused_commit lazily, so
 # they reach it). It borrows the pair's fused_commit (listed above) for every name it does not redefine and drives the bundle's

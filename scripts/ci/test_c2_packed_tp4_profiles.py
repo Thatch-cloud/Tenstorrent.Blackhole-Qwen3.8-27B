@@ -153,6 +153,9 @@ OCTO_PROFILES = octo_twins.twin_names() + octo2_twins.twin_names()
 # the region-read audit twins (make_kvread_profiles; test_kvread_profiles holds each as its parent plus one flag): exempt wherever the engine-reuse twins are.
 import make_kvread_profiles as kvread_twins  # noqa: E402
 PARKED_PROFILES = PARKED_PROFILES + kvread_twins.twin_names()
+# the draft vocabulary timing twins of the engine-reuse stack (make_dvocab_profiles; test_tp4_draft_vocab_jobs holds each as its parent plus the smaller pool and the flag): exempt the same way.
+import make_dvocab_profiles as dvocab_twins  # noqa: E402
+PARKED_PROFILES = PARKED_PROFILES + dvocab_twins.twin_names()
 NEXT5_PROFILES = NEXT5_PROFILES + PARKED_PROFILES + OCTO_PROFILES
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 

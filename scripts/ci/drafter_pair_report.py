@@ -11,7 +11,9 @@ matters is the paired ratio of tau (committed tokens per verify round) on those 
 THE GO RULE (pre-registered; docs/drafter-arms.md). All of:
   pooled    the ratio candidate / control of the equal-weight-per-set pooled tau, thinking-ON arms A1, A2, A4, over the turns both
             arms completed, has a 95% lower bound ABOVE 1.00 (a cluster bootstrap over conversations, resampled within each set,
-            both arms moving together, 10,000 resamples)
+            both arms moving together, 10,000 resamples). For an arm that can only REMOVE proposals (NONINFERIOR_ARMS: dvocab, a
+            restricted draft vocabulary) the bar is NONINFERIORITY: the lower bound above the arm's floor (0.97), the tau cost the
+            round time it saves can pay for; whether it does is the timing pack's (draft_vocab_report.py), never this report's.
   long      no regression in the long-context bucket (80k+): the ratio's point estimate is at least 0.98 and its 95% upper bound
             at least 1.00 (a significant or a material drop fails)
   p10       no regression at the per-turn p10 (inverse-probability weighted, turns with at least 8 counted rounds in both arms):
@@ -22,8 +24,8 @@ THE GO RULE (pre-registered; docs/drafter-arms.md). All of:
   arms      the control run's drafter arm is exactly 'control' and the candidate run's is the arm named here
   launch    neither run recorded a launched-container problem (the log did not show the arm's own markers) or an error
   matched   the two runs agree on profile, seed, max_tokens and per-arm data counts; the control and candidate image tags differ
-            for b16-bf8 and b32-bf8 (a different drafter image each) and are equal for dedf-bf16 and lookup (the same image, a
-            switch only: the bf16 weights, the prompt lookup)
+            for b16-bf8 and b32-bf8 (a different drafter image each) and are equal for dedf-bf16, lookup and dvocab (the same image, a
+            switch only: the bf16 weights, the prompt lookup, the draft vocabulary shortlist)
 Any FAIL is NO-GO; no FAIL with something not established is NOT_ESTABLISHED; otherwise GO. The control arm is the one arm that
 calibrates A3 (c2_tau_lab: a candidate that moves tau would fail it by construction). The A3 verdict (against an old-stack
 reference, on 8 turns) is reported beside the verdict as `control_calibration` and is an annotation, not a GO precondition: the
@@ -41,9 +43,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import tau_lab_report as report  # noqa: E402
 
-CANDIDATE_ARMS = ('b16-bf8', 'b32-bf8', 'dedf-bf16', 'lookup')
+CANDIDATE_ARMS = ('b16-bf8', 'b32-bf8', 'dedf-bf16', 'lookup', 'dvocab')
 # The arms that run on the control's own image (a flag only); every other arm is a different drafter image.
-SAME_IMAGE_ARMS = ('dedf-bf16', 'lookup')
+SAME_IMAGE_ARMS = ('dedf-bf16', 'lookup', 'dvocab')
+# Arms whose lever can only remove what the drafter may propose: their pooled gate is noninferiority above this ratio, not a gain above 1.00. A shortlist cannot raise the accepted
+# length, so a gain bar would fail it by construction and say nothing about the cost; 0.97 is the cost a ~3.5% eight-live round saving (docs/tp4-draft-vocab.md section 5) pays for.
+NONINFERIOR_ARMS = {'dvocab': 0.97}
 MIN_ROUNDS = report.MIN_ROUNDS
 RESAMPLES = 10000
 LEVEL = 0.95
@@ -177,8 +182,8 @@ def rounded(value, digits=4):
     return None if value is None else round(value, digits)
 
 
-def gate_above(low):
-    return 'NOT_ESTABLISHED' if low is None else ('PASS' if low > 1.0 else 'FAIL')
+def gate_above(low, bar=1.0):
+    return 'NOT_ESTABLISHED' if low is None else ('PASS' if low > bar else 'FAIL')
 
 
 def gate_no_regression(point, high):
@@ -210,7 +215,7 @@ def build(control, candidate, arm, control_info=None, candidate_info=None, contr
                   and control_info.get('image_tag') is not None
                   and same_image == (arm in SAME_IMAGE_ARMS))
     gates = dict(
-        pooled=gate_above(low),
+        pooled=gate_above(low, NONINFERIOR_ARMS.get(arm, 1.0)),
         long=gate_no_regression(long_point, long_high) if len(long_items) >= 3 else 'NOT_ESTABLISHED',
         p10=gate_no_regression(p10_point, p10_high),
         text=('NOT_ESTABLISHED' if not items else 'PASS' if len(paired_text) == len(items) else 'FAIL'),
@@ -242,7 +247,8 @@ def build(control, candidate, arm, control_info=None, candidate_info=None, contr
                  ci95_low=rounded(p10_low), ci95_high=rounded(p10_high), resamples=p10_draws),
         buckets=buckets, sets=sets, control_calibration=calibration if calibration in ('PASS', 'FAIL', 'NOT_RUN',
                                                                                     'NOT_ESTABLISHED') else None,
-        rule=dict(long_point_floor=LONG_POINT_FLOOR, min_paired_share=MIN_PAIRED_SHARE, level=LEVEL, min_rounds=MIN_ROUNDS))
+        rule=dict(long_point_floor=LONG_POINT_FLOOR, min_paired_share=MIN_PAIRED_SHARE, level=LEVEL, min_rounds=MIN_ROUNDS,
+                  pooled_bar=NONINFERIOR_ARMS.get(arm, 1.0)))
 
 
 def summary_lines(public):

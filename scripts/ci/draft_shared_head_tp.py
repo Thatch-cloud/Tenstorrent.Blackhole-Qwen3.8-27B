@@ -4,15 +4,31 @@ The pair's module is pinned (recorded evidence hashes its bytes; test_tp2_pins) 
 tp_addresses rebinds the names below to these at four cards only. Each is the pair's function with its literal chip and
 head counts read from tp_shapes; at two chips it would be call for call the pinned one."""
 
+import os
+
 import tp_shapes
 
 
+def vocab_requested():
+    """QWEN_FAST_DRAFT_VOCAB (draft_vocab_tp, gate only, default off): the head runs over a coding shortlist of the vocabulary, not the whole shard. Unset, empty or '0'
+    is off, and then every function below is the body it always was: the module is not even imported."""
+    return os.environ.get('QWEN_FAST_DRAFT_VOCAB', '') not in ('', '0')
+
+
 def candidate_chunks():
+    if vocab_requested():
+        import draft_vocab_tp
+
+        return draft_vocab_tp.candidate_chunks()
     width = tp_shapes.vocab_shard()
     return tuple((start, min(start + 32768, width)) for start in range(0, width, 32768))
 
 
 def shared_head_candidates(operations, model, normalized, owned):
+    if vocab_requested():
+        import draft_vocab_tp
+
+        return draft_vocab_tp.shared_head_candidates(operations, model, normalized, owned)
     rows = normalized.shape[2] if len(normalized.shape) == 4 else 0
     if (model.num_devices != tp_shapes.chip_count() or model.vocab_size != 248320 or not model._lmhead_vocab_sharded
             or rows not in (8, 16, 32) or tuple(normalized.shape) != (1, 1, rows, 5120)
@@ -26,6 +42,10 @@ def shared_head_candidates(operations, model, normalized, owned):
 
 
 def local_head_candidates(operations, logits, owned):
+    if vocab_requested():
+        import draft_vocab_tp
+
+        return draft_vocab_tp.local_head_candidates(operations, logits, owned)
     rows = logits.shape[2] if len(logits.shape) == 4 else 0
     if rows not in (8, 16, 32) or tuple(logits.shape) != (1, 1, rows, tp_shapes.vocab_shard()):
         raise ValueError('Expected local vocabulary shards, not gathered logits')
@@ -43,6 +63,10 @@ def local_head_candidates(operations, logits, owned):
 
 
 def merge_chunk_candidates(chunks, *, block_rows=8):
+    if vocab_requested():
+        import draft_vocab_tp
+
+        return draft_vocab_tp.merge_chunk_candidates(chunks, block_rows=block_rows)
     import torch
 
     if type(block_rows) is not int or block_rows not in (8, 16, 32):

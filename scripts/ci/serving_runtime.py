@@ -497,6 +497,14 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
 
         solo_packed = serving_octo.solo_packed_admission(m3_shape(policy), log=pindiag)
         padded_min_users = solo_packed['min_users']
+    # QWEN_FAST_DRAFT_VOCAB (draft_vocab_tp; gate only, default off): the drafter proposes from a coding shortlist of the vocabulary (the target still verifies all of it).
+    # Admitted here or refused by name, before anything is built; off (unset, '' or '0'), nothing of it is read, not even the import. The sliced head weight is built below, at
+    # the draft weights' point, before any trace is captured.
+    draft_vocab = None
+    if os.environ.get('QWEN_FAST_DRAFT_VOCAB', '') not in ('', '0') or os.environ.get('QWEN_FAST_DRAFT_VOCAB_TOPK') is not None:
+        import draft_vocab_tp
+
+        draft_vocab = draft_vocab_tp.admission(log=pindiag)
     # An admitted octo flag BUILDS the third block below (octo_shape over pool slots 0..7, captured with the two M3 blocks in complete_blocks_two_phase) and the
     # attach proves it did (`octo_block` is not None, in the packed step): an admitted flag with no block built would be a mounted change that never executes.
     # QWEN_FAST_PACKED_CAPTURE_POSITION (S2 G3b, gate only, default unset): parsed here, before
@@ -776,6 +784,12 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             block_rows=16, live_query_qk=False, native_proposal_attention=True)
         scopes.callback(weights.close)
         memory_ledger.record('P5', draft_weights=weights)
+        if draft_vocab is not None:
+            # QWEN_FAST_DRAFT_VOCAB: the shortlist's rows of the target head, cut out and uploaded NOW - a buffer allocated after a trace was captured can sit in that trace's
+            # freed holes, and its replay would write over the weight (the account at PreparedDraftWeights). Freed with the scope, before the model's own weights.
+            scopes.callback(lambda: draft_vocab_tp.release(operations, model))
+            draft_vocab_tp.build_head(operations, model, log=pindiag)
+            memory_ledger.record('P5', point='draft_vocab_head')
         prefill_warm_before_traces(runner, model, policy['scheduler_requests'], operations=operations)
         if os.environ.get('QWEN_FAST_LEVER_N', '0') != '0' or os.environ.get('QWEN_FAST_LEVERN_AUDIT', '0') != '0':
             # Lever N at TP4 (QWEN_FAST_LEVER_N=1 / QWEN_FAST_LEVERN_AUDIT=1; never imported otherwise): the model route that continues a suspended

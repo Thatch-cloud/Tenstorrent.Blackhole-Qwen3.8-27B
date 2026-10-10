@@ -127,6 +127,8 @@ import make_w2_kill_profiles as _w2_kill_twins  # noqa: E402
 PARKED_TWINS = PARKED_TWINS | frozenset(_w2_kill_twins.twin_names())     # (and the W2 kill drill twin, test_w2_switch)
 import make_kvread_profiles as _kvread_twins  # noqa: E402
 PARKED_TWINS = PARKED_TWINS | frozenset(_kvread_twins.twin_names())     # (and the region-read audit twins, test_kvread_profiles)
+import make_dvocab_profiles as _dvocab_twins  # noqa: E402
+PARKED_TWINS = PARKED_TWINS | frozenset(_dvocab_twins.twin_names())     # (and the draft vocabulary timing twins, test_tp4_draft_vocab_jobs)
 
 class ShapeTests(unittest.TestCase):
     @classmethod

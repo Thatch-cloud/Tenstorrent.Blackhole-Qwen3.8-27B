@@ -58,7 +58,7 @@ suite. Instead:
   laptop. The b16 manifest in this branch was produced that way.
 
 **Tau lab, drafter mode.** The W-T1 tau lab (`c2_tau_lab.py`, `tau_lab_report.py`, the `taulab` action of `qwen-c2-serving.yml`) is ported from
-`tp4/tau-lab`. New: `--drafter-arm` (job key `C2_TAULAB_DRAFTER_ARM`) with five arms, selected by the image (its tag carries the manifest's fixtures) and by the derived
+`tp4/tau-lab`. New: `--drafter-arm` (job key `C2_TAULAB_DRAFTER_ARM`) with six arms, selected by the image (its tag carries the manifest's fixtures) and by the derived
 profile, which adds only that arm's drafter-only flags on top of the production profile and the lab's two log flags:
 
 | arm | image | flags added | log marker the lab requires (it refuses and exits 2 before sending anything without it) |
@@ -68,10 +68,17 @@ profile, which adds only that arm's drafter-only flags on top of the production 
 | `b32-bf8` | candidate manifest (measurement only) | `QWEN_DRAFTER_MANIFEST` | `[DRAFTER_MANIFEST] ... in force` |
 | `dedf-bf16` | default manifest | `QWEN_FAST_DRAFTER_BF16=1` | `[DRAFTER_BF16] engaged` |
 | `lookup` | default manifest | `QWEN_FAST_LOOKUP_DRAFT=n3m12` | none at startup (the lookup logs per request); the lab's canary after the first turns requires `[LOOKUP-DRAFT] engaged policy=n3m12` and a `[LOOKUP-ROUND]` line, and stops the lab without them |
+| `dvocab` | default manifest | `QWEN_FAST_DRAFT_VOCAB=coding-40960` | `[PINDIAG] draft vocab admitted` and `... head built` at the attach (the lab refuses and exits 2 before sending anything without both); the canary after the first turns requires `... engaged` |
 
 The `lookup` arm (D-T5, docs/tp4-lookup.md) is the served drafter with a host-side prompt lookup over each user's own token history replacing its proposal rows on the rounds
 the policy picks. It runs on the control image like `dedf-bf16`, is judged by the same GO rule (equal image tags are its `matched` clause), and is measurement only: it cannot run on a profile
 with engine reuse (a rebound engine attaches no lookup; the lab refuses such a base), and what it costs a round is the timing pack's (`tp4-lookup-jobs`).
+
+The `dvocab` arm (D-V2, docs/tp4-draft-vocab.md) is the served drafter proposing from a 40,960-row coding shortlist of the vocabulary: a sliced copy of the target head built at the attach, a top-16 of
+one chunk a chip, the local index mapped back to the global token id on the host. The target still verifies the whole vocabulary, so the text is the control's and only tau can move, **down**: a token outside the
+list can never be proposed. It runs on the control image like `dedf-bf16`, and its pooled gate is therefore **noninferiority** (`drafter_pair_report.NONINFERIOR_ARMS`: the ratio's 95% lower bound above
+0.97, the tau cost an eight-live round saving of about 4% pays for), not a gain above 1.00 that a restricted vocabulary cannot show; the long-bucket, p10, text, coverage, launch and matched gates are unchanged.
+What the round time it buys is worth is the timing pack's (`tp4-draft-vocab-jobs`, TV1 to TV4, `draft_vocab_report.py`).
 
 The drafter flags move the proposals and never the text, so they are the one arithmetic difference an arm may add (the lab's check refuses any
 other). The refusal is real: with a drafter arm, a container log that does not show the arm's own markers (the wrong image tag, a bf16 switch that never engaged) ends the lab before

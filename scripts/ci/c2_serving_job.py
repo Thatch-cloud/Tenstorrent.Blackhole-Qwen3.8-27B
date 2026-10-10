@@ -144,8 +144,9 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_TAULAB_MAX_TOKENS  the answer budget of A1, A2, A4 and A5 (default, rendered empty: 2048; A3 always keeps the lanes' 2400)
   C2_TAULAB_DRAFTER_ARM  which drafter the run serves (default, rendered empty: the lab as it was): control (the served drafter),
                       b16-bf8 (the block-16 candidate), b32-bf8 (the block-32 candidate, measurement only), dedf-bf16 (the
-                      served drafter with bfloat16 projection weights) or lookup (the served drafter with prompt lookup,
-                      QWEN_FAST_LOOKUP_DRAFT=n3m12, on the control image). The image (C2_IMAGE_TAG) carries the drafter's fixtures;
+                      served drafter with bfloat16 projection weights), lookup (the served drafter with prompt lookup,
+                      QWEN_FAST_LOOKUP_DRAFT=n3m12, on the control image) or dvocab (the served drafter proposing from the 40,960-row
+                      coding shortlist, QWEN_FAST_DRAFT_VOCAB=coding-40960, on the control image). The image (C2_IMAGE_TAG) carries the drafter's fixtures;
                       a candidate arm leaves A3 out of the default arms (A3 is
                       the control arm's calibration) and refuses a list that names it
   C2_TAULAB_PAIR_CONTROL  the run id of the control arm's taulab run (digits): after the lab, drafter_pair_report.py pairs this
@@ -213,7 +214,7 @@ PREFIX_ARM_PLANS = (('exactness-traced', 'exactness'), ('exactness-audit', 'exac
 # The W-T1 tau lab (c2_tau_lab.py): its arms, the production profile it serves and its time box.
 TAULAB_ARMS = ('A1', 'A2', 'A3', 'A4', 'A5')
 TAULAB_PROFILE = 'c2-packed-tp4'
-TAULAB_DRAFTER_ARMS = ('control', 'b16-bf8', 'b32-bf8', 'dedf-bf16', 'lookup')
+TAULAB_DRAFTER_ARMS = ('control', 'b16-bf8', 'b32-bf8', 'dedf-bf16', 'lookup', 'dvocab')
 DEFAULT_DRAFTER_MANIFEST = 'dedf8df6'
 DRAFTER_MANIFEST_NAME = re.compile(r'[a-z0-9][a-z0-9._-]{0,63}')
 TAULAB_DEADLINE_MINUTES = 270

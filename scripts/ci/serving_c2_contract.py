@@ -123,6 +123,12 @@ PARKED_GATE_ONLY = ('QWEN_FAST_PARKED_AUDIT', 'QWEN_FAST_PARKED_NEGATIVE', 'QWEN
 W2_PREFIX = 'QWEN_FAST_W2_'
 W2_NAMES = ('QWEN_FAST_W2_OFF_PATH', 'QWEN_FAST_W2_OFF_AFTER')
 W2_GATE_ONLY = ('QWEN_FAST_W2_OFF_AFTER',)
+# The drafter's coding vocabulary shortlist (draft_vocab_tp: QWEN_FAST_DRAFT_VOCAB, gate only, default off). Pinned equal to draft_vocab_tp's by test_draft_vocab_tp. A profile may name
+# the pair only if it is a gate profile or the tau lab's own derived dvocab arm (c2_tau_lab.derive_profile names it <base>+taulab+dvocab): nothing serves traffic on a shortlist whose
+# accepted length has not been judged.
+DRAFT_VOCAB_PREFIX = 'QWEN_FAST_DRAFT_VOCAB'
+DRAFT_VOCAB_NAMES = ('QWEN_FAST_DRAFT_VOCAB', 'QWEN_FAST_DRAFT_VOCAB_TOPK')
+DRAFT_VOCAB_LAB_SUFFIX = '+taulab+dvocab'
 # The sources the merged route must carry (levern_route.SOURCES, pinned equal by test_levern_prefix_contract).
 MERGED_SOURCES = ('COLD', 'CHECKPOINT', 'SCRATCH', 'PARKED')
 
@@ -350,6 +356,10 @@ def apply_environment(profile, environ=None):
     # ...and the W2 kill switch's override and drill trigger (w2_switch): an inherited path would move the switch's file, an inherited trigger would
     # kill W2 by itself after n rounds in an arm that never named it.
     for name in W2_NAMES:
+        if name not in profile['env']:
+            environ.pop(name, None)
+    # ...and the drafter's vocabulary shortlist: an inherited name would restrict what the drafter proposes in an arm that never asked (the text stays the target's, tau moves).
+    for name in DRAFT_VOCAB_NAMES:
         if name not in profile['env']:
             environ.pop(name, None)
     return environ
@@ -654,6 +664,26 @@ def w2_problems(profile, environ=None):
         if path is None or path.startswith('/models/'):
             problems.append('QWEN_FAST_W2_OFF_AFTER writes the flag file itself: QWEN_FAST_W2_OFF_PATH must name a scratch path in the container '
                             '(not the hub mount\'s %s), got %r' % ('/models/.qwen-c2/w2.off', path))
+    return problems
+
+
+def draft_vocab_problems(profile, environ=None):
+    """Every way the drafter's vocabulary shortlist is named wrongly, [] when none (draft_vocab_tp, docs/tp4-draft-vocab.md): an unknown QWEN_FAST_DRAFT_VOCAB name, a list or width
+    the four-card head cannot serve, the flag at the pair, a profile that is neither a gate profile nor the tau lab's dvocab arm, or the flag in the process environment of a profile
+    that does not name it (a value that never crossed into the profile is not what the arm measured)."""
+    env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
+    named = [name for name in env if name.startswith(DRAFT_VOCAB_PREFIX)]
+    problems = []
+    if named:
+        import draft_vocab_tp
+
+        problems += draft_vocab_tp.profile_problems(profile)
+        if not gate_profile(profile) and not str(profile.get('name', '')).endswith(DRAFT_VOCAB_LAB_SUFFIX):
+            problems.append('%s needs a gate-only profile or the tau lab\'s dvocab arm (nothing serves traffic on a shortlist whose accepted length has not been judged)'
+                            % ', '.join(sorted(named)))
+    elif environ is not None and any(name in environ for name in DRAFT_VOCAB_NAMES) and not gate_profile(profile):
+        problems.append('%s is set in the process environment outside a gate profile: it must come from the profile' % ', '.join(
+            name for name in DRAFT_VOCAB_NAMES if name in environ))
     return problems
 
 
@@ -1361,6 +1391,9 @@ def boot(environ=None, orig_argv=None):
     problems = w2_problems(profile, environ)
     if problems:
         raise ValueError('profile %s misuses the W2 kill switch: %s' % (profile['name'], '; '.join(problems)))
+    problems = draft_vocab_problems(profile, environ)
+    if problems:
+        raise ValueError('profile %s cannot serve its draft vocabulary shortlist: %s' % (profile['name'], '; '.join(problems)))
     problems = drafter_problems(profile)
     if problems:
         raise ValueError('profile %s cannot serve its drafter checkpoint: %s' % (profile['name'], '; '.join(problems)))

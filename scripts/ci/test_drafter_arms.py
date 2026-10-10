@@ -24,7 +24,7 @@ with open(os.path.join(HERE, 'qwen_c2_profiles.json'), encoding='utf-8') as _han
 NAMES = sorted(PROFILES['profiles'])
 FOLDER = os.path.join(HERE, 'references', 'tp4-drafter-jobs')
 BASE = 'c2-packed-tp4'
-CANDIDATE_IMAGES = {'b16-bf8': 'tp4-drafter-b16-1', 'b32-bf8': 'tp4-drafter-b32-1', 'dedf-bf16': 'tp4-drafter-1', 'lookup': 'tp4-drafter-1'}
+CANDIDATE_IMAGES = {'b16-bf8': 'tp4-drafter-b16-1', 'b32-bf8': 'tp4-drafter-b32-1', 'dedf-bf16': 'tp4-drafter-1', 'lookup': 'tp4-drafter-1', 'dvocab': 'tp4-drafter-1'}
 
 
 class ArmProfileTests(unittest.TestCase):
@@ -184,7 +184,7 @@ class LabRuleTests(unittest.TestCase):
         self.assertEqual(lab.select_arms(every, None), list(lab.ARMS))
         self.assertEqual(lab.select_arms(every, 'control'), ['A3', 'A1', 'A2', 'A4', 'A5'], 'the calibration runs first')
         self.assertEqual(lab.select_arms('A1 A2 A3', 'control'), ['A3', 'A1', 'A2'])
-        for arm in ('b16-bf8', 'b32-bf8', 'dedf-bf16', 'lookup'):
+        for arm in ('b16-bf8', 'b32-bf8', 'dedf-bf16', 'lookup', 'dvocab'):
             self.assertEqual(lab.select_arms(every, arm), ['A1', 'A2', 'A4', 'A5'])
             self.assertEqual(lab.select_arms('A1 A2', arm), ['A1', 'A2'])
             with self.assertRaisesRegex(lab.LabError, 'control arm'):
@@ -420,9 +420,11 @@ class PairReportTests(unittest.TestCase):
         for arm in pair_report.CANDIDATE_ARMS:
             public = self.run_pair(*synthetic(gain=1.15), arm=arm)
             self.assertEqual((public['verdict'], set(public['gates'].values())), ('GO', {'PASS'}), arm)
-            self.assertEqual(self.run_pair(*synthetic(gain=1.0), arm=arm)['verdict'], 'NO-GO', arm)
-        self.assertEqual(pair_report.CANDIDATE_ARMS, ('b16-bf8', 'b32-bf8', 'dedf-bf16', 'lookup'))
-        self.assertEqual(pair_report.SAME_IMAGE_ARMS, ('dedf-bf16', 'lookup'))
+            # no change in tau is no GO for an arm that must GAIN; dvocab, a restricted vocabulary that can only lose, is held to noninferiority instead
+            # (pair_report.NONINFERIOR_ARMS, test_tp4_draft_vocab_jobs holds its rule)
+            self.assertEqual(self.run_pair(*synthetic(gain=1.0), arm=arm)['verdict'], 'GO' if arm in pair_report.NONINFERIOR_ARMS else 'NO-GO', arm)
+        self.assertEqual(pair_report.CANDIDATE_ARMS, ('b16-bf8', 'b32-bf8', 'dedf-bf16', 'lookup', 'dvocab'))
+        self.assertEqual(pair_report.SAME_IMAGE_ARMS, ('dedf-bf16', 'lookup', 'dvocab'))
         self.assertEqual(sorted(pair_report.CANDIDATE_ARMS + ('control',)), sorted(lab.DRAFTER_ARMS))
         self.assertEqual(sorted(pair_report.CANDIDATE_ARMS + ('control',)), sorted(job.TAULAB_DRAFTER_ARMS))
 

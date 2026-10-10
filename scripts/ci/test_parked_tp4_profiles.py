@@ -246,6 +246,10 @@ class ProfileTests(unittest.TestCase):
         import make_w2_kill_profiles
 
         generated |= set(make_w2_kill_profiles.twin_names())
+        # the draft vocabulary timing twins of the engine-reuse stack carry its flags by inheritance (test_tp4_draft_vocab_jobs holds each as that parent plus the pool and the flag)
+        import make_dvocab_profiles
+
+        generated |= set(make_dvocab_profiles.twin_names())
         # the region-read audit twins (make_kvread_profiles; test_kvread_profiles holds each as its parent plus one flag) carry their parent's flags by inheritance
         region_read = {twin: parent for parent, twin, mode in kvread_twins.TWINS}
         for name, profile in profiles.items():

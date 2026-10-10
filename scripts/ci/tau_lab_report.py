@@ -82,7 +82,7 @@ PUBLIC_WORDS = frozenset((
     'A1', 'A2', 'A3', 'A4', 'A5', 'swe', 'own', 'chained', 'calib', '4k', '8k', '16k', '32k', '64k', '80k', '80k+',
     'reasoning', 'content', 'tool', 'PASS', 'FAIL', 'MAYBE', 'NOT_ESTABLISHED', 'NOT_RUN', 'exact', 'coalesced', 'disagree',
     'none', 'unique', 'ambiguous', 'on', 'off', 'baked', 'production', 'non-production', 'phases', 'spec_lines',
-    'no_production_counters', 'no_lab_positions', 'control', 'b16-bf8', 'b32-bf8', 'dedf-bf16', 'lookup', 'GO', 'NO-GO'))
+    'no_production_counters', 'no_lab_positions', 'control', 'b16-bf8', 'b32-bf8', 'dedf-bf16', 'lookup', 'dvocab', 'GO', 'NO-GO'))
 PUBLIC_KEY = re.compile(r'[A-Za-z0-9_.>+-]{1,48}')
 IMAGE_TAG = re.compile(r'[0-9a-z.-]{3,40}')
 MAX_LIST = 64

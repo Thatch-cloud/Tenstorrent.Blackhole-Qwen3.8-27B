@@ -59,6 +59,9 @@ BEST262K = BEST262K + w2_kill_twins.twin_names()
 # the region-read audit twins of the Lever N audited profiles (make_kvread_profiles; test_kvread_profiles holds each as its parent plus one flag)
 import make_kvread_profiles as kvread_twins  # noqa: E402
 BEST262K = BEST262K + kvread_twins.twin_names()
+# the draft vocabulary timing twins of the engine-reuse stack (make_dvocab_profiles; test_tp4_draft_vocab_jobs holds each as its parent plus the smaller pool and the flag)
+import make_dvocab_profiles as dvocab_twins  # noqa: E402
+BEST262K = BEST262K + dvocab_twins.twin_names()
 # tp4/262k8-x (test_tp4_262k8_x holds each as the best-time-gate or best-audit twin plus/minus exactly one lever): the experiments image's arms; 262k knobs by inheritance.
 X262K = tuple('c2-packed-tp4-8x262k-best-time-gate-' + lever for lever in ('nosamp', 's1', 'd2', 'dbf16', 'lookup', 'stack')) + (
     'c2-packed-tp4-8x262k-best-nosamp-audit', 'c2-packed-tp4-8x262k-best-stack-audit')

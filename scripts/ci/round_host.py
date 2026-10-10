@@ -445,7 +445,7 @@ def audited(kind, fast, expected):
 def _fast_merge(chunks, block_rows):
     import torch
     import tp_shapes
-    from draft_shared_head_tp import candidate_chunks
+    from draft_shared_head_tp import candidate_chunks, vocab_requested
 
     if type(block_rows) is not int or block_rows not in (8, 16, 32):
         raise _Decline()
@@ -479,10 +479,19 @@ def _fast_merge(chunks, block_rows):
     if torch.any(ordered[..., 1:] == ordered[..., :-1]):
         raise _Decline()
     shard = tp_shapes.vocab_shard()
+    plan = None
+    if vocab_requested():
+        # QWEN_FAST_DRAFT_VOCAB (draft_vocab_tp, gate only): a chip's local index names a row of the shortlist, not a column of its vocabulary shard; the
+        # same offsets locate the row in the list and the list gives the global token id. Off, none of this runs and `plan` stays None.
+        import draft_vocab_tp
+
+        plan = draft_vocab_tp.active_plan()
+        shard = plan.per_chip
     offsets = torch.tensor([chunk['start'] + chunk['chip'] * shard for chunk in chunks], dtype=torch.int64).reshape(-1, 1, 1)
     count_chunks = len(chunks)
     values = stacked_values.permute(1, 0, 2).reshape(block_rows, count_chunks * 16)
-    tokens = (stacked_indices.long() + offsets).permute(1, 0, 2).reshape(block_rows, count_chunks * 16)
+    positions = stacked_indices.long() + offsets
+    tokens = (positions if plan is None else plan.tensor()[positions]).permute(1, 0, 2).reshape(block_rows, count_chunks * 16)
     by_token = tokens.argsort(dim=-1, stable=True)
     values, tokens = values.gather(-1, by_token), tokens.gather(-1, by_token)
     selected = values.argsort(dim=-1, descending=True, stable=True)[:, :16]

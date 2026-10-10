@@ -1899,6 +1899,59 @@ def w2_kill_problems(env, container_text):
     return problems
 
 
+# tp4/draft-vocab (draft_vocab_tp.py, docs/tp4-draft-vocab.md): the drafter proposes from a coding shortlist of the vocabulary. A profile without QWEN_FAST_DRAFT_VOCAB must log NO
+# draft-vocab line (flag-off identity: the lever's code did not even load); one with it must log the admission once, the head build once and the engaged line once, all naming the
+# same rows, the build after the admission and the engaged line after the build, the rows a whole 32-row tile on each of four chips, the named list's rows if the flag names one, and
+# the width of QWEN_FAST_DRAFT_VOCAB_TOPK (32768 when unset). There is no fall-back line: a failure raises and the run dies. tests hold these equal to draft_vocab_tp's.
+DRAFT_VOCAB_FLAG = 'QWEN_FAST_DRAFT_VOCAB'
+DRAFT_VOCAB_TOPK_FLAG = 'QWEN_FAST_DRAFT_VOCAB_TOPK'
+DRAFT_VOCAB_PREFIX = '[PINDIAG] draft vocab '
+DRAFT_VOCAB_ADMITTED = '[PINDIAG] draft vocab admitted'
+DRAFT_VOCAB_BUILT = '[PINDIAG] draft vocab head built'
+DRAFT_VOCAB_ENGAGED = '[PINDIAG] draft vocab engaged'
+DRAFT_VOCAB_NAMED_ROWS = {'coding-40960': 40960}
+DRAFT_VOCAB_DEFAULT_TOPK = 32768
+DRAFT_VOCAB_FIELDS = re.compile(r'rows=(\d+) per_chip=(\d+) chips=(\d+) topk_width=(\d+) sha256=([0-9a-f]{12})')
+
+
+def draft_vocab_problems(env, container_text):
+    """[problem] for the draft-vocabulary lines of a server log (see the block comment above): none for a log with no such line and a profile without the flag."""
+    env = env or {}
+    lines = [line for line in container_text.splitlines() if DRAFT_VOCAB_PREFIX in line]
+    value = str(env.get(DRAFT_VOCAB_FLAG) or '')
+    if value in ('', '0'):
+        if lines:
+            return ['%s is not set and the log holds a draft-vocabulary line: the shortlist ran on a profile without it (%s)' % (DRAFT_VOCAB_FLAG, lines[0].strip()[:160])]
+        return []
+    problems = []
+    found = {}
+    for marker in (DRAFT_VOCAB_ADMITTED, DRAFT_VOCAB_BUILT, DRAFT_VOCAB_ENGAGED):
+        marked = [index for index, line in enumerate(container_text.splitlines()) if marker in line]
+        found[marker] = marked
+        if len(marked) != 1:
+            problems.append('%d draft-vocabulary lines (%s) under %s=%s: exactly one is logged' % (len(marked), marker, DRAFT_VOCAB_FLAG, value))
+    if problems:
+        return problems
+    all_lines = container_text.splitlines()
+    parsed = {marker: DRAFT_VOCAB_FIELDS.search(all_lines[found[marker][0]]) for marker in found}
+    if not all(parsed.values()):
+        return ['a draft-vocabulary line does not carry rows, per_chip, chips, topk_width and sha256 (%s)' % ', '.join(marker for marker, hit in parsed.items() if not hit)]
+    fields = {marker: hit.groups() for marker, hit in parsed.items()}
+    if len(set(fields.values())) != 1:
+        problems.append('the admitted, built and engaged lines name different shortlists: %s' % '; '.join('%s -> %s' % (marker[len(DRAFT_VOCAB_PREFIX):], hit) for marker, hit in fields.items()))
+    rows, per_chip, chips, width, unused = (int(item) if item.isdigit() else item for item in fields[DRAFT_VOCAB_ADMITTED])
+    if chips != 4 or rows != 4 * per_chip or per_chip % 32:
+        problems.append('the shortlist is rows=%s per_chip=%s chips=%s: it must be a whole 32-row tile on each of four chips' % (rows, per_chip, chips))
+    if value in DRAFT_VOCAB_NAMED_ROWS and rows != DRAFT_VOCAB_NAMED_ROWS[value]:
+        problems.append('%s=%s names %d rows and the log says %s' % (DRAFT_VOCAB_FLAG, value, DRAFT_VOCAB_NAMED_ROWS[value], rows))
+    wanted = int(env.get(DRAFT_VOCAB_TOPK_FLAG) or DRAFT_VOCAB_DEFAULT_TOPK)
+    if width != wanted:
+        problems.append('the shortlist ran at topk_width=%s, the profile asked for %s' % (width, wanted))
+    if not found[DRAFT_VOCAB_ADMITTED][0] < found[DRAFT_VOCAB_BUILT][0] < found[DRAFT_VOCAB_ENGAGED][0]:
+        problems.append('the draft-vocabulary lines are out of order: admission, head build, then the first launch')
+    return problems
+
+
 LEVERN_KILL_PREFIX = '[PINDIAG] lever N kill switch'
 DRAFTER_CHECKPOINT_FLAG = 'QWEN_FAST_DRAFTER_CHECKPOINT'
 DRAFTER_CHECKPOINT_MARKER = '[PINDIAG] drafter checkpoint'
@@ -1941,6 +1994,7 @@ def lever_engagement_problems(env, container_text, smoke=None, drill=False):
     problems.extend(spread_problems(env, container_text))
     problems.extend(drafter_checkpoint_problems(env, container_text))
     problems.extend(w2_kill_problems(env, container_text))
+    problems.extend(draft_vocab_problems(env, container_text))
     lever, _ = levern_problems(env, container_text, smoke)
     problems.extend(lever)
     if env.get(LEVERN_FLAG) == '1' and not drill and LEVERN_KILL_PREFIX in container_text:
@@ -1981,6 +2035,7 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     problems += spread_problems(env, container_text)
     problems += drafter_checkpoint_problems(env, container_text)
     problems += w2_kill_problems(env, container_text)
+    problems += draft_vocab_problems(env, container_text)
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
     if env is not None and env.get('QWEN_FAST_TP', '2') != '2':

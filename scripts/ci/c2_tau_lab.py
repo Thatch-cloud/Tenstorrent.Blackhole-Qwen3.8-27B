@@ -91,6 +91,8 @@ PRODUCTION_TAG = 'tp4-serve-2'
 PRODUCTION_IMAGES = (('tp4-serve-2', True), ('tp4-serve-10', False))
 LOOKUP_FLAG = 'QWEN_FAST_LOOKUP_DRAFT'
 LOOKUP_POLICY = 'n3m12'            # prompt_lookup's policy string: key length 3, gate 12 (docs/tp4-lookup.md)
+VOCAB_FLAG = 'QWEN_FAST_DRAFT_VOCAB'
+VOCAB_LIST = 'coding-40960'        # draft_vocab_tp.NAMED: the 40,960-row coding shortlist (docs/tp4-draft-vocab.md)
 # DRAFTER ARMS (tp4/drafter-arms): which drafter the container serves. The image carries the drafter's fixtures (its tag selects
 # the manifest, drafter_manifest.py) and the derived profile carries only drafter-only flags, which move the proposals and never
 # the verified text, so they are the one arithmetic difference an arm may add. A3 (the calibration) runs on the control arm only.
@@ -104,10 +106,18 @@ DRAFTER_ARMS = {
     # and only the accepted length moves. No log line at startup shows it: the lookup logs one engaged line per request, so the CANARY
     # (lookup_problem) is where the arm is held to its markers, not launched_problems.
     'lookup': dict(manifest='dedf8df6', env=((LOOKUP_FLAG, LOOKUP_POLICY),)),
+    # The coding draft-vocabulary shortlist (tp4/draft-vocab, docs/tp4-draft-vocab.md): the served drafter on the control image whose head proposes from 40,960 of the 248,320 rows (a
+    # sliced copy of the target head, built at the attach). The target still verifies every row of the whole vocabulary, so the text is the control's and only the accepted length moves
+    # (a token outside the list can never be proposed). The attach logs the admission and the head build (launched_problems holds them); the first head launch logs the engaged line
+    # (the CANARY, vocab_problem, holds it: nothing before the first proposal shows it).
+    'dvocab': dict(manifest='dedf8df6', env=((VOCAB_FLAG, VOCAB_LIST),)),
 }
 DRAFTER_BF16_ENGAGED = '[DRAFTER_BF16] engaged'
 LOOKUP_ENGAGED = '[LOOKUP-DRAFT] engaged'      # prompt_lookup.ENGAGED (a literal here: the lab imports nothing of the serving tree)
 LOOKUP_ROUND = '[LOOKUP-ROUND]'                # prompt_lookup.ROUND_MARKER
+VOCAB_ADMITTED = '[PINDIAG] draft vocab admitted'      # draft_vocab_tp.ADMITTED / BUILT / ENGAGED (literals here, held equal by test_drafter_arms)
+VOCAB_BUILT = '[PINDIAG] draft vocab head built'
+VOCAB_ENGAGED = '[PINDIAG] draft vocab engaged'
 DRAFTER_MANIFEST_LINE = '[DRAFTER_MANIFEST]'
 CONTAINER = 'qwen-c2-taulab'
 PORT = 8022
@@ -1110,6 +1120,12 @@ def launched_problems(log_lines, derived, arm=None):
             problems.append('the drafter arm %s %s but the log %s' % (
                 arm, 'asks for bfloat16 drafter weights' if bf16 else 'does not ask for bfloat16 drafter weights',
                 'never shows them engaged' if bf16 else 'shows them engaged'))
+        vocab = asked.get(VOCAB_FLAG)
+        for marker in (VOCAB_ADMITTED, VOCAB_BUILT):
+            if (vocab is not None) != (marker in text):
+                problems.append('the drafter arm %s %s but the log %s (%s)' % (
+                    arm, 'asks for the draft vocabulary %s' % vocab if vocab is not None else 'does not ask for a draft vocabulary',
+                    'never shows it' if vocab is not None else 'shows it', marker))
         manifest = DRAFTER_ARMS[arm]['manifest']
         marked = [line for line in text.splitlines() if DRAFTER_MANIFEST_LINE in line]
         if manifest != 'dedf8df6' and not any(manifest in line for line in marked):
@@ -1135,25 +1151,48 @@ def lookup_problem(text, arm):
     return None
 
 
-def with_lookup_check(canary, log_path, arm, clock=time.time, sleep=time.sleep, wait=CANARY_WAIT_SECONDS):
-    """The canary of a drafter arm: `canary` (the packed rounds and phases check) and then lookup_problem over the container's log, which for
-    the lookup arm is waited for like the rounds are (the log follower lags the container). -> a callable returning a problem or None."""
+def vocab_problem(text, arm):
+    """None, or why the container's log does not match the drafter arm about the draft vocabulary shortlist at the first head launch. Only the dvocab arm may show the engaged
+    line (logged once, at the first draft pass, so not before the first proposal); any other arm shows none, or its profile carried the flag and the arm is not what it is
+    named. The attach's admission and build lines are launched_problems', the engaged line is the canary's."""
+    asked = dict(DRAFTER_ARMS[arm]['env']).get(VOCAB_FLAG) if arm in DRAFTER_ARMS else None
+    shown = VOCAB_ENGAGED in text
+    if asked is None:
+        return ('the drafter arm %s does not ask for a draft vocabulary but the log shows it engaged' % arm) if shown else None
+    if shown:
+        return None
+    return 'the drafter arm %s asks for the draft vocabulary %s but the log never shows it engaged (%s)' % (arm, asked, VOCAB_ENGAGED)
+
+
+def with_log_check(canary, log_path, arm, problem_of, clock=time.time, sleep=time.sleep, wait=CANARY_WAIT_SECONDS):
+    """The canary of a drafter arm: `canary` (the packed rounds and phases check) and then problem_of(text, arm) over the container's log, which for
+    an arm that needs lines is waited for like the rounds are (the log follower lags the container). -> a callable returning a problem or None."""
     def check():
         problem = canary()
         if problem:
             return problem
         ends = clock() + wait
-        waits = lookup_problem('', arm) is not None      # the lookup arm needs lines to appear; the others need none to
+        waits = problem_of('', arm) is not None      # an arm that needs lines waits for them to appear; the others need none to
         while True:
             text = ''
             if os.path.isfile(log_path):
                 with open(log_path, encoding='utf-8', errors='replace') as handle:
                     text = handle.read()
-            problem = lookup_problem(text, arm)
+            problem = problem_of(text, arm)
             if problem is None or not waits or clock() >= ends:
                 return problem
             sleep(5)
     return check
+
+
+def with_lookup_check(canary, log_path, arm, clock=time.time, sleep=time.sleep, wait=CANARY_WAIT_SECONDS):
+    """with_log_check over lookup_problem (the lookup arm needs its engaged and round lines)."""
+    return with_log_check(canary, log_path, arm, lookup_problem, clock=clock, sleep=sleep, wait=wait)
+
+
+def with_vocab_check(canary, log_path, arm, clock=time.time, sleep=time.sleep, wait=CANARY_WAIT_SECONDS):
+    """with_log_check over vocab_problem (the dvocab arm needs its engaged line)."""
+    return with_log_check(canary, log_path, arm, vocab_problem, clock=clock, sleep=sleep, wait=wait)
 
 
 def make_canary(log_path, results, clock=time.time, sleep=time.sleep, wait=CANARY_WAIT_SECONDS):
@@ -1203,8 +1242,9 @@ def build_parser():
     parser.add_argument('--drafter-arm', choices=sorted(DRAFTER_ARMS), default=None,
                         help='which drafter this run serves (the image carries its fixtures): control (the served drafter), '
                         'b16-bf8 (the block-16 candidate), b32-bf8 (the block-32 candidate, measurement only: used at T16, so positions 1-15) '
-                        'dedf-bf16 (the served drafter with bfloat16 projection weights) or lookup (the served drafter with prompt lookup, '
-                        'QWEN_FAST_LOOKUP_DRAFT=n3m12: the text is the control\'s, only tau moves). '
+                        'dedf-bf16 (the served drafter with bfloat16 projection weights), lookup (the served drafter with prompt lookup, '
+                        'QWEN_FAST_LOOKUP_DRAFT=n3m12) or dvocab (the served drafter proposing from the 40,960-row coding shortlist, '
+                        'QWEN_FAST_DRAFT_VOCAB=coding-40960): the text is the control\'s, only tau moves. '
                         'A3 runs on the control arm only. Default: none, the lab as it was')
     parser.add_argument('--cards', choices=('quad',), default='quad')
     parser.add_argument('--hub', default=gate.HUB)
@@ -1409,6 +1449,8 @@ def main(argv=None, say=print, make_stream=None, make_client=None, make_containe
             # A drafter arm's lookup markers: only the lookup arm may show them (nothing at startup does, so launched_problems cannot).
             lab.canary = with_lookup_check(lab.canary, log_path, options.drafter_arm, clock=clock, sleep=sleep,
                                            wait=CANARY_WAIT_SECONDS)
+            lab.canary = with_vocab_check(lab.canary, log_path, options.drafter_arm, clock=clock, sleep=sleep,
+                                          wait=CANARY_WAIT_SECONDS)
         lab.long_first = options.drafter_arm is not None
         if options.drafter_arm == 'control' and arms[0] == 'A3':
             def stop_on_failed_calibration(arm):
