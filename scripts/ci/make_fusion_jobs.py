@@ -69,7 +69,10 @@ def arms(plan):
             arm['env'] = twin['env']
         elif not arm['env']:
             arm['env'] = twin['env']
-    return out
+    last = dict((arm_id, reason) for _wp, arm_id, reason in plan.get('pack_last', ()))
+    for arm in out:
+        arm['last'] = last.get(arm['id'])
+    return [arm for arm in out if not arm['last']] + [arm for arm in out if arm['last']]
 
 
 def jobs(plan):
@@ -191,6 +194,9 @@ def render_order(rows, plan, folder=FOLDER):
         "# THE PACKAGES' OWN FOLDERS (card-M and detail templates, their read rules and decision rules; under references/): %s." % (', '.join(packs) or 'none yet'),
         "# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.",
     ]
+    for arm in every:
+        if arm['last']:
+            lines.insert(-1, "# LAST: %s (%s) runs after every other arm, audit and ABAB alike: %s" % (arm['prefix'], arm['name'], ' '.join(arm['last'].split())))
     for row in rows:
         lines.extend('# NEEDS ' + need for need in row['needs'])
     lines += [

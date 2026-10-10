@@ -60,7 +60,8 @@ gdn_conv_gates_spread drafter_checkpoint octo_attn_bundle
 tp4_sampdraft tp4_shard_argmax tp4_draft_conv tp4_draft_heads drafter_fixtures drafter_manifest
 serving_parked_engines
 octo_glue8 gdn_rows_dma8_tp gdn_block_conv8_tp gdn_conv_windows_packed8
-'''.split())
+kv_page_writer_tp4 draft_reduce_tp draft_tail_tp draft_gateup_tp draft_mmgrid_tp draft_fusion_tp draft_permute_tp draft_qkv_tp draft_head64_tp
+'''.split())      # (the op-fusion programme's levers, docs/tp4-fusion.md: each imported lazily and flag-guarded by the twin that owns it, so a flags-off process never loads it)
 
 # Modules the four-card profiles never run their pair code from, and why. The closure does not follow into them.
 FLAG_OFF = 'off by the profile env (see the flag)'

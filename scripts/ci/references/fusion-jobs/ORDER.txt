@@ -1,5 +1,5 @@
 # The order of the op-fusion programme's four-card DEVELOPMENT window (docs/tp4-fusion.md): ONE image (tp4-fusion-1, built by B0 from tp4/fusion-1 = tp4/next2-1 + the merged work packages) and ONE window for the
-# fused-op arms of the packages, each behind default-off flags: S1 shard argmax (WP1: QWEN_FAST_TP4_SHARD_ARGMAX=1).
+# fused-op arms of the packages, each behind default-off flags: S1 shard argmax (WP1: QWEN_FAST_TP4_SHARD_ARGMAX=1); CCL options (WP5: QWEN_FAST_CCL_OPTIONS=ag-c1+ag-w1+rs-c1+rs-w1); WP6 F-F1 drafter local reduce (WP6: QWEN_FAST_DRAFT_REDUCE=1); WP6 F-F3a drafter SwiGLU and residual kernels (WP6: QWEN_FAST_DRAFT_TAIL=1); WP6 F-F3c drafter fused gate|up matmul (WP6: QWEN_FAST_DRAFT_GATEUP1=1, QWEN_FAST_DRAFT_TAIL=1); WP6 R2 drafter matmuls on device-width grids (WP6: QWEN_FAST_DRAFT_MM_GRID=1); F-F2 drafter permutation kernels (WP7: QWEN_FAST_DRAFT_PERMUTE=1); F-F3c fused drafter q|k|v projection (WP7: QWEN_FAST_DRAFT_QKV1=1); F-F4 one 64-row drafter head (WP7: QWEN_FAST_DRAFT_HEAD64=1); K/V page writer (WP2: QWEN_FAST_KV_PAGE_WRITER=1).
 # One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. The minutes are generic ESTIMATES (nothing has run on a card): a package's own folder has its own.
 # stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (a lever's timed jobs are skipped by the NEEDS lines below, the other levers still run).
 # P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z (the cutover pack's restore steps and post-checks; nothing in this pack does either, and no job here starts or
@@ -13,14 +13,60 @@
 #     confirm it in the ship profile, not to ship. Each twin is the production profile plus exactly one lever (and, for the audit twin, its _AUDIT flag): make_fusion_profiles.py generated it from the package's manifest.
 # THE JOBS OF A LEVER <ID>: <ID>A the audited attach (exactness: the lever's served-composition comparison in the trace), then the timed ABAB at eight live (concurrent8_steady): <ID>C1 control, <ID>L1 lever, <ID>C2 control, <ID>L2 lever.
 #     The audits of every lever run before any timed pair, so a lever that is not exact costs one short job, not an hour of timing.
-# THE PACKAGES' OWN FOLDERS (card-M and detail templates, their read rules and decision rules; under references/): fusion-jobs/WP1.
+# THE PACKAGES' OWN FOLDERS (card-M and detail templates, their read rules and decision rules; under references/): fusion-jobs-wp5, fusion-jobs/WP1, fusion-jobs/WP2, fusion-jobs/WP6, fusion-wp7-jobs.
+# LAST: KVPAGE (K/V page writer) runs after every other arm, audit and ABAB alike: WP2 lever cannot engage until the card-M proof (KVPAGE-W2 in fusion-jobs/WP2) passes and ordered_writer_evidence_tp4.json carries the page_writer block it records: until then the lever refuses (a fell-back line) and these four-card arms measure nothing, so they run last and only after that record lands.
 # DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
 # NEEDS X0 <- B0
 # NEEDS S1A <- X0
+# NEEDS CCLA <- X0
+# NEEDS REDUCEA <- X0
+# NEEDS TAILA <- X0
+# NEEDS GATEUP1A <- X0
+# NEEDS MMGRIDA <- X0
+# NEEDS PERMUTEA <- X0
+# NEEDS QKV1A <- X0
+# NEEDS HEAD64A <- X0
+# NEEDS KVPAGEA <- X0
 # NEEDS S1C1 <- X0
 # NEEDS S1L1 <- S1A S1C1
 # NEEDS S1C2 <- S1L1
 # NEEDS S1L2 <- S1C2
+# NEEDS CCLC1 <- X0
+# NEEDS CCLL1 <- CCLA CCLC1
+# NEEDS CCLC2 <- CCLL1
+# NEEDS CCLL2 <- CCLC2
+# NEEDS REDUCEC1 <- X0
+# NEEDS REDUCEL1 <- REDUCEA REDUCEC1
+# NEEDS REDUCEC2 <- REDUCEL1
+# NEEDS REDUCEL2 <- REDUCEC2
+# NEEDS TAILC1 <- X0
+# NEEDS TAILL1 <- TAILA TAILC1
+# NEEDS TAILC2 <- TAILL1
+# NEEDS TAILL2 <- TAILC2
+# NEEDS GATEUP1C1 <- X0
+# NEEDS GATEUP1L1 <- GATEUP1A GATEUP1C1
+# NEEDS GATEUP1C2 <- GATEUP1L1
+# NEEDS GATEUP1L2 <- GATEUP1C2
+# NEEDS MMGRIDC1 <- X0
+# NEEDS MMGRIDL1 <- MMGRIDA MMGRIDC1
+# NEEDS MMGRIDC2 <- MMGRIDL1
+# NEEDS MMGRIDL2 <- MMGRIDC2
+# NEEDS PERMUTEC1 <- X0
+# NEEDS PERMUTEL1 <- PERMUTEA PERMUTEC1
+# NEEDS PERMUTEC2 <- PERMUTEL1
+# NEEDS PERMUTEL2 <- PERMUTEC2
+# NEEDS QKV1C1 <- X0
+# NEEDS QKV1L1 <- QKV1A QKV1C1
+# NEEDS QKV1C2 <- QKV1L1
+# NEEDS QKV1L2 <- QKV1C2
+# NEEDS HEAD64C1 <- X0
+# NEEDS HEAD64L1 <- HEAD64A HEAD64C1
+# NEEDS HEAD64C2 <- HEAD64L1
+# NEEDS HEAD64L2 <- HEAD64C2
+# NEEDS KVPAGEC1 <- X0
+# NEEDS KVPAGEL1 <- KVPAGEA KVPAGEC1
+# NEEDS KVPAGEC2 <- KVPAGEL1
+# NEEDS KVPAGEL2 <- KVPAGEC2
 # READ RULES (each also needs c2_smoke_check clean, whose fusion rules read the container log, and no stall):
 #   B0     'baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic with a session cap of 8', the provenance report with no problem line, the image id.
 #   X0     four cards present and healthy, the fabric as measured, no other window driver alive.
@@ -28,12 +74,57 @@
 #   <ID>C1 <ID>L1 <ID>C2 <ID>L2  w2ln_timing_compare.py pair, the steady window, 8 live: per pair the lever's round time against the control's; GO for a lever needs both pairs measured (at least 100 matched rounds, the load rule
 #     applied) and negative beyond the control-to-control floor, the texts equal, the lever's engaged line in both lever boots. A pair with fewer matched rounds is VOID (never GO, never NO-GO).
 # NO-GO for adopting a lever: any stall, any text or accepted-prefix difference against the control, any audit mismatch, any fallback line, a pair that is positive, a lever boot that logs no engaged line.
-# Time (estimate, minutes): B0 40, X0 20, an audit 40, a timed job 35, Z 10: 250 minutes (4 h 10 min) in all, 210 minutes of cards (X0 to Z), 180 minutes without the repeat pairs; about 3 minutes of queue per tag on top.
+# Time (estimate, minutes): B0 40, X0 20, an audit 40, a timed job 35, Z 10: 1870 minutes (31 h 10 min) in all, 1830 minutes of cards (X0 to Z), 1170 minutes without the repeat pairs; about 3 minutes of queue per tag on top.
 B0-build stop tp4-fusion-1 40
 X0-status-rescan-reset stop tp4-fusion-1 20
 S1A-s1-audit-attach soft tp4-fusion-1 40
+CCLA-ccl-audit-attach soft tp4-fusion-1 40
+REDUCEA-reduce-audit-attach soft tp4-fusion-1 40
+TAILA-tail-audit-attach soft tp4-fusion-1 40
+GATEUP1A-gateup1-audit-attach soft tp4-fusion-1 40
+MMGRIDA-mmgrid-audit-attach soft tp4-fusion-1 40
+PERMUTEA-permute-audit-attach soft tp4-fusion-1 40
+QKV1A-qkv1-audit-attach soft tp4-fusion-1 40
+HEAD64A-head64-audit-attach soft tp4-fusion-1 40
+KVPAGEA-kvpage-audit-attach soft tp4-fusion-1 40
 S1C1-s1-control-timed soft tp4-fusion-1 35
 S1L1-s1-lever-timed soft tp4-fusion-1 35
 S1C2-s1-control-repeat soft tp4-fusion-1 35
 S1L2-s1-lever-repeat soft tp4-fusion-1 35
+CCLC1-ccl-control-timed soft tp4-fusion-1 35
+CCLL1-ccl-lever-timed soft tp4-fusion-1 35
+CCLC2-ccl-control-repeat soft tp4-fusion-1 35
+CCLL2-ccl-lever-repeat soft tp4-fusion-1 35
+REDUCEC1-reduce-control-timed soft tp4-fusion-1 35
+REDUCEL1-reduce-lever-timed soft tp4-fusion-1 35
+REDUCEC2-reduce-control-repeat soft tp4-fusion-1 35
+REDUCEL2-reduce-lever-repeat soft tp4-fusion-1 35
+TAILC1-tail-control-timed soft tp4-fusion-1 35
+TAILL1-tail-lever-timed soft tp4-fusion-1 35
+TAILC2-tail-control-repeat soft tp4-fusion-1 35
+TAILL2-tail-lever-repeat soft tp4-fusion-1 35
+GATEUP1C1-gateup1-control-timed soft tp4-fusion-1 35
+GATEUP1L1-gateup1-lever-timed soft tp4-fusion-1 35
+GATEUP1C2-gateup1-control-repeat soft tp4-fusion-1 35
+GATEUP1L2-gateup1-lever-repeat soft tp4-fusion-1 35
+MMGRIDC1-mmgrid-control-timed soft tp4-fusion-1 35
+MMGRIDL1-mmgrid-lever-timed soft tp4-fusion-1 35
+MMGRIDC2-mmgrid-control-repeat soft tp4-fusion-1 35
+MMGRIDL2-mmgrid-lever-repeat soft tp4-fusion-1 35
+PERMUTEC1-permute-control-timed soft tp4-fusion-1 35
+PERMUTEL1-permute-lever-timed soft tp4-fusion-1 35
+PERMUTEC2-permute-control-repeat soft tp4-fusion-1 35
+PERMUTEL2-permute-lever-repeat soft tp4-fusion-1 35
+QKV1C1-qkv1-control-timed soft tp4-fusion-1 35
+QKV1L1-qkv1-lever-timed soft tp4-fusion-1 35
+QKV1C2-qkv1-control-repeat soft tp4-fusion-1 35
+QKV1L2-qkv1-lever-repeat soft tp4-fusion-1 35
+HEAD64C1-head64-control-timed soft tp4-fusion-1 35
+HEAD64L1-head64-lever-timed soft tp4-fusion-1 35
+HEAD64C2-head64-control-repeat soft tp4-fusion-1 35
+HEAD64L2-head64-lever-repeat soft tp4-fusion-1 35
+KVPAGEC1-kvpage-control-timed soft tp4-fusion-1 35
+KVPAGEL1-kvpage-lever-timed soft tp4-fusion-1 35
+KVPAGEC2-kvpage-control-repeat soft tp4-fusion-1 35
+KVPAGEL2-kvpage-lever-repeat soft tp4-fusion-1 35
 Z-reset soft tp4-fusion-1 10

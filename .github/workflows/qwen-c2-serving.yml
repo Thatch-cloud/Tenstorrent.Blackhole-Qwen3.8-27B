@@ -434,11 +434,17 @@ jobs:
           image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
           # C2_FABRIC_PROBE: the fabric probe (the default) or the reduction-order spike; both open the mesh once, from
           # this checkout, under the same descriptor and contract-off environment.
+          probe_args=""
           case "${PROBE:-fabric}" in
             fabric) script=tp4_fabric_probe.py; report=fabric-probe.json ;;
             rs-tile) script=tp4_rs_tile_spike.py; report=rs-tile-spike.json ;;
             mr) script=tp4_mr_probe.py; report=mr-probe.json ;;
             kvread) script=tp4_kv_read_probe.py; report=kv-read-probe.json ;;
+            ccl-sweep) script=tp4_ccl_sweep_probe.py; report=ccl-sweep.json ;;
+            ccl-sweep-safe) script=tp4_ccl_sweep_probe.py; report=ccl-sweep.json; probe_args="--skip-probe-only" ;;
+            ccl-sweep-core) script=tp4_ccl_sweep_probe.py; report=ccl-sweep.json; probe_args="--skip-probe-only --no-exotic" ;;
+            ccl-sweep-p8192) script=tp4_ccl_sweep_probe.py; report=ccl-sweep.json; probe_args="--payload 8192 --skip-probe-only --no-exotic" ;;
+            ccl-sweep-quick) script=tp4_ccl_sweep_probe.py; report=ccl-sweep.json; probe_args="--quick --skip-probe-only" ;;
             *) echo "unknown fabric probe: $PROBE" >&2; exit 1 ;;
           esac
           results="$RUNNER_TEMP/c2-results/fabric"
@@ -478,9 +484,9 @@ jobs:
             -e TT_METAL_CACHE=/root/.cache/tt-metal-cache -e TT_CACHE_PATH=/tmp/tt-weights \
             -e TT_MESH_GRAPH_DESC_PATH=/c2/scripts/ci/qwen_p150x4_ring_mesh_graph_descriptor.textproto \
             --entrypoint python3 "$image" -B "/c2/scripts/ci/$script" --fabric "$FABRIC" \
-            --output "/probe-results/$report" 2>&1 | tee "$RUNNER_TEMP/c2-results/fabric-probe.log" || status=$?
+            --output "/probe-results/$report" ${probe_args} 2>&1 | tee "$RUNNER_TEMP/c2-results/fabric-probe.log" || status=$?
           sudo -n chown -R "$(id -u):$(id -g)" "$results" 2>/dev/null || true
-          grep -E 'FABRIC_PROBE|TP4_RS_TILE|MR_PROBE|KV_READ_PROBE' "$RUNNER_TEMP/c2-results/fabric-probe.log" | tail -60 || true
+          grep -E 'FABRIC_PROBE|TP4_RS_TILE|MR_PROBE|KV_READ_PROBE|CCL_SWEEP' "$RUNNER_TEMP/c2-results/fabric-probe.log" | tail -60 || true
           exit "$status"
       - name: Run a qualification harness on card M
         if: contains(steps.job.outputs.actions, 'cardm')

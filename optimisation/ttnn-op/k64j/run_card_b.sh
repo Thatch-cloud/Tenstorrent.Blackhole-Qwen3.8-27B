@@ -596,7 +596,8 @@ if [ "$MAIN" = ordered_writer ]; then
   # copy is the same bytes, and the report records its sha256 for the recorder to compare with the live file).
   ci=$(cd "$here/../../../scripts/ci" 2>/dev/null && pwd || echo "$here/../../../scripts/ci")
   for file in ordered_writer_tp4_card_test.py ordered_cache_hw_plan.py ordered_cache.py ordered_cache_tp.py packed_ordered_cache.py \
-              page_width_tp4.py ordered_writer_evidence_tp4.json chip_view.py tp_shapes.py verify_trace_t1.py verify_trace_t2.py; do
+              page_width_tp4.py ordered_writer_evidence_tp4.json chip_view.py tp_shapes.py verify_trace_t1.py verify_trace_t2.py \
+              ordered_writer_page_arm_tp4.py kv_page_writer_tp4.py kv_page_writer_tp4.cpp; do
     test -s "$ci/$file" \
       || { echo "refusing: $ci/$file missing (the ordered-writer test runs this checkout's scripts/ci)" >&2; exit 1; }
   done

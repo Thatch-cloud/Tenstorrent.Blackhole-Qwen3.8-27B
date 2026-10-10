@@ -300,6 +300,24 @@ class ArmTests(unittest.TestCase):
             result = subprocess.run([sys.executable, '-s', str(READER), str(path), str(self.profiles)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(HERE.parent.parent))
             self.assertEqual(result.returncode, 0, path.name + ' ' + result.stderr.decode('utf-8', 'replace'))
 
+    def test_an_arm_under_pack_last_runs_after_every_other_arm_audit_and_abab_alike(self):
+        manifests = json.loads(json.dumps(MANIFESTS))
+        manifests['WP0.json'] = {'wp': 'WP0', 'pack_last': [{'arm': 's1', 'reason': 'needs a card-M record first'}]}
+        plan = plan_of(manifests)
+        pack = pack_of(plan)
+        names = [short(line[0]) for line in order_lines(pack)]
+        self.assertEqual(names, ['B0', 'X0', 'DPERMA', 'S1A', 'CCLC1', 'CCLL1', 'CCLC2', 'CCLL2', 'DPERMC1', 'DPERML1', 'DPERMC2', 'DPERML2', 'S1C1', 'S1L1', 'S1C2', 'S1L2', 'Z'],
+                         'audits before timings as ever; the last arm last in each section')
+        text = (pack / 'ORDER.txt').read_text(encoding='utf-8')
+        self.assertIn('# LAST: S1 (S1 shard argmax) runs after every other arm, audit and ABAB alike: needs a card-M record first', text)
+
+    def test_an_arm_under_pack_last_that_is_nothing_is_refused_by_name(self):
+        manifests = json.loads(json.dumps(MANIFESTS))
+        manifests['WP0.json'] = {'wp': 'WP0', 'pack_last': ['nothing']}
+        with self.assertRaises(fusion.ManifestError) as caught:
+            plan_of(manifests)
+        self.assertIn('pack_last arm nothing is neither a lever nor a pack arm', str(caught.exception))
+
     def test_an_extra_twin_is_in_the_pack_only_when_a_manifest_names_it(self):
         manifests = json.loads(json.dumps(ARM_MANIFESTS))
         del manifests['WP1.json']['pack_arms']

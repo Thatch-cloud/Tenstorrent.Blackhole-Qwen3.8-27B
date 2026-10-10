@@ -185,7 +185,8 @@ class CompositionTests(unittest.TestCase):
             if (not path.name.startswith('test_') and path.name != 'mesh_link_policy.py'
                     and ('fast_ccl_topology' in text_found or mesh_link_policy.TOPOLOGY_SWITCH in text_found)):
                 readers.append(path.name)
-        self.assertEqual(readers, ['dflash_device.py', 'feature_collective_tp.py', 'quad_draft.py'])
+        # (draft_reduce_tp, op-fusion WP6: its local reduce issues the same all-gather as the served chain, with the served topology)
+        self.assertEqual(readers, ['dflash_device.py', 'draft_reduce_tp.py', 'feature_collective_tp.py', 'quad_draft.py'])
 
     def test_without_the_in_trace_sampler_the_request_width_warm_the_control_carries_is_still_on(self):
         for name in (CONTROL, W1, W1_AUDIT):

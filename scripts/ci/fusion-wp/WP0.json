@@ -2,7 +2,17 @@
  "wp": "WP0",
  "description": "the integrator's own manifest: wiring a package asked for in its notes, kept out of the package's manifest so that the package's schema test and its file stay as pushed",
  "smoke_rules": [
-  "tp4_shard_argmax_smoke"
+  "tp4_shard_argmax_smoke",
+  "ccl_options_smoke",
+  "draft_permute_smoke",
+  "draft_wp6_smoke",
+  "kv_page_writer_tp4_smoke"
  ],
- "notes": "WP1 (S1 shard argmax): its notes ask for c2_smoke_check.fusion_problems to call scripts/ci/tp4_shard_argmax_smoke.problems(env, container_text) once per arm (fold, words=1, tasks = 2 x workers, the audit for four chips, no lines without the lever)."
+ "notes": "Wiring the packages asked for in their notes. smoke_rules: each package's stricter smoke module (a host-side module of scripts/ci with problems(env, container_text)) is called once per arm by c2_smoke_check.fusion_problems: WP1 tp4_shard_argmax_smoke (fold, words=1, tasks = 2 x workers, the audit for four chips), WP5 ccl_options_smoke (counts, canonical set name, one audit line per op and block owner), WP6 draft_wp6_smoke (chains, the fused gate|up, the mm grid), WP7 draft_permute_smoke (an engaged line per site and shape, a passing audit line per quad site), WP2 kv_page_writer_tp4_smoke (the generated rules plus an engaged line with ordered=0: the captured forward ran the page launch).",
+ "pack_last": [
+  {
+   "arm": "kvpage",
+   "reason": "WP2 lever cannot engage until the card-M proof (KVPAGE-W2 in fusion-jobs/WP2) passes and ordered_writer_evidence_tp4.json carries the page_writer block it records: until then the lever refuses (a fell-back line) and these four-card arms measure nothing, so they run last and only after that record lands."
+  }
+ ]
 }

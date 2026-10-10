@@ -1970,6 +1970,12 @@ class PackedVerifierEngine:
                 # QWEN_FAST_TP4_SDPA_AUDIT (sdpa_multi_tp, gate profiles only): the multi launch's counters against the per-user
                 # launches run beside it in this replay. The reader twin's method returns 0 at once unless the audit is on.
                 sdpa_audit(self.rounds + 1)
+            if os.environ.get('QWEN_FAST_KV_PAGE_WRITER_AUDIT', '0') not in ('', '0'):
+                # QWEN_FAST_KV_PAGE_WRITER_AUDIT (kv_page_writer_tp4, op-fusion WP2, gate profiles only): the page writers' counters after this replay, once per
+                # replay - zero mismatched words and at least one valid unit per chip, or the mismatch line and a raise. Imported only with the flag.
+                import kv_page_writer_tp4
+
+                kv_page_writer_tp4.audit_round(self.operations, self.rounds + 1)
             predictions = [host[slice(*segment_rows(self.shape, segment))] for segment in segments]
             finished = time.perf_counter()
             if hostgap:
