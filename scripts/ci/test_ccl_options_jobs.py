@@ -141,7 +141,7 @@ class ThePack(unittest.TestCase):
         self.assertEqual(sorted(set(fabric for fabric, _ in seen)), ['FABRIC_1D', 'FABRIC_1D_RING'])
         self.assertIn('${probe_args}', workflow)
         self.assertIn('CCL_SWEEP', workflow)
-        for name in ('ccl-sweep', 'ccl-sweep-safe', 'ccl-sweep-p8192', 'ccl-sweep-quick'):
+        for name in ('ccl-sweep', 'ccl-sweep-safe', 'ccl-sweep-core', 'ccl-sweep-p8192', 'ccl-sweep-quick'):
             self.assertIn(name, module.FABRIC_PROBES)
 
     def test_the_lever_jobs_name_the_profiles_of_the_manifest(self):

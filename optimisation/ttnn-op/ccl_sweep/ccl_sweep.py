@@ -28,8 +28,9 @@ config PROMOTES when it is exact on every seed and the median paired gain is at 
 ROUNDS - 1 rounds. The stack's own gate is the ABAB at eight users: this probe only decides what is worth that.
 
 SAFETY. A collective that hangs cannot be recovered in-process. One mesh is opened (one fabric config, one payload, one open: a second open wedges the
-ethernet cores); the order is the exact-class sweeps first (one-factor-at-a-time around the served values, then the best values combined), the probe-only
-arms last; the report is written after every config; a watchdog writes it again and exits 3. Put reset before any rerun.
+ethernet cores); the order is the core sweeps of every scenario first (one-factor-at-a-time around the served values, then the best values combined), then the
+exotic configs (uneven worker splits, the gather's line route and via-broadcast program), then the probe-only arms; the report is written after every config; a
+per-config deadline writes it again, names the config and exits 3. Put reset before any rerun; --no-exotic and --skip-probe-only drop the later stages.
 
 Stdlib at import (plus ccl_options_tp from scripts/ci); ttnn and torch are handed to run().
 """
@@ -67,8 +68,11 @@ JOB_DEADLINE_S = 2400            # inside the fabric step's 45 minutes
 
 SCENARIOS = (('rs/dram', 'rs', 'dram', None), ('rs/l1', 'rs', 'l1', None), ('ag/l1-ws', 'ag', 'l1', 'ws'), ('ag/dram-ws', 'ag', 'dram', 'ws'),
              ('ag/l1-dram', 'ag', 'l1', 'dram'))
-VALUES = {'l': (1,), 'w': (1, 3, 4), 'c': (1, 2, 5, 20, 50), 'b': (1, 3, 4)}
+VALUES = {'l': (1,), 'w': (1, 4), 'c': (1, 2, 5, 20, 50), 'b': (1, 3, 4)}
 QUICK_VALUES = {'l': (1,), 'w': (1,), 'c': (1, 5), 'b': (1,)}
+# The exotic stage runs after the core sweeps of every scenario: an uneven worker split (three workers per direction cut a 40-tile channel at tiles the chunk
+# boundaries do not meet) and the gather's other programs (the line route, the via-broadcast program). A config there that hangs costs the later stages, not the core.
+EXOTIC_VALUES = {'w': (3,)}
 AG_FLAGS = ('ag-linear', 'ag-bcast')
 
 Config = namedtuple('Config', 'name op overrides probe_only')
@@ -94,12 +98,18 @@ def base_config(op):
 
 
 def sweep_grid(op, quick=False):
-    """The one-factor-at-a-time configs around the served values, served first."""
+    """The core one-factor-at-a-time configs around the served values, served first."""
     values = QUICK_VALUES if quick else VALUES
     configs = [base_config(op)]
     for letter in 'lwcb':
         for value in values[letter]:
             configs.append(named(op, '%s-%s%d' % (op, letter, value)))
+    return configs
+
+
+def exotic_grid(op):
+    """The exotic configs (see EXOTIC_VALUES): uneven worker splits and, for the gather, the line route and the via-broadcast program."""
+    configs = [named(op, '%s-%s%d' % (op, letter, value)) for letter in sorted(EXOTIC_VALUES) for value in EXOTIC_VALUES[letter]]
     if op == 'ag':
         configs += [named(op, token) for token in AG_FLAGS]
     return configs
@@ -631,6 +641,7 @@ def run(options, ttnn, torch, mesh, collective, all_reduce, report, save, deadli
     wanted = [scenario for scenario in SCENARIOS if options.only in ('all', scenario[1])]
     sweeps = []
     try:
+        # stage 1, every scenario: the core sweep and the best values combined
         for name, op, source, output in wanted:
             sweep = Sweep(harness, Scenario(name, op, source, output), options, report, save, deadline)
             sweeps.append(sweep)
@@ -642,10 +653,16 @@ def run(options, ttnn, torch, mesh, collective, all_reduce, report, save, deadli
             if promoted:
                 sweep.run(promoted)
             sweep.finish()
+        # stage 2: the exotic configs; stage 3: the probe-only barrier-removal arms. Each begins from a fresh served arm that is still exact.
+        stages = []
+        if not options.no_exotic and not options.quick:
+            stages.append(exotic_grid)
         if not options.skip_probe_only:
+            stages.append(probe_only_grid)
+        for grid in stages:
             for sweep in sweeps:
                 if sweep.rows and sweep.rows[0].get('exact') and sweep.rebuild_base():
-                    sweep.run(probe_only_grid(sweep.scenario.op))
+                    sweep.run(grid(sweep.scenario.op))
                     sweep.finish()
     finally:
         for sweep in sweeps:

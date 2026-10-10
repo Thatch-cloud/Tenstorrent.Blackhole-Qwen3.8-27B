@@ -39,11 +39,11 @@ PROBES = (
      "P0 (STOP): the harness smoke: the short grid (one value of each option, no barrier-removal arms) under FABRIC_1D, the served fabric. It proves the probe opens the mesh, takes the model's TT_CCL and "
      "tt_all_reduce, bit-compares the five scenarios against the sequential engine's call and times them in a trace, before 40 minutes are spent on the full grid. READ: 'CCL_SWEEP verdict=DONE', "
      "every served row EXACT in all five scenarios, a per-call time near 18 us for rs and gathers near 18 us (M676: 18.2 and 18.4 us median). BASE-INEXACT (exit 1) is a finding about the stack, not the "
-     "probe: stop and read the rows. A watchdog exit (3) names the config that hung: reset, then run the same job again with the next probe. Duration (estimate): 12 minutes."),
+     "probe: stop and read the rows. A watchdog exit (3) names the config that hung: reset, then run P1 again as ccl-sweep-safe or ccl-sweep-core (the later stages dropped). Duration (estimate): 12 minutes."),
     ('P1-ccl-sweep-fabric1d', 'soft', 42, '42', 'FABRIC_1D', 'ccl-sweep',
      "P1: THE SWEEP under FABRIC_1D (what the TT plugin sets), the runtime's default payload: every offered value of links, workers, chunks per sync and buffers per channel for the unit-major "
      "reduce-scatter (input in DRAM and in L1) and the norm gather (DRAM and L1 input, the norm's sharded output and DRAM), one at a time around the served values, then the best values together; "
-     "last the PROBE-ONLY barrier-removal arms (barrier_semaphore=None, persistent buffers) that no stack flag can name. READ: 'CCL_SWEEP verdict=DONE', the promote string of each scenario "
+     "then the EXOTIC configs (three workers per direction, which cut a channel at tiles the chunk boundaries do not meet; the gather's line route and via-broadcast program), last the PROBE-ONLY barrier-removal arms (barrier_semaphore=None, persistent buffers) that no stack flag can name. READ: 'CCL_SWEEP verdict=DONE', the promote string of each scenario "
      "(promote=...), the A/A noise of each, every FAIL-BYTES row (an option that changed a bit: it can never be a lever; report it). The promote string with the most gain in the scenario the "
      "stack runs becomes the lever's value. Duration (estimate): 30 minutes."),
     ('P2-ccl-sweep-fabric1d-p8192', 'soft', 32, '42', 'FABRIC_1D', 'ccl-sweep-p8192',
@@ -51,8 +51,8 @@ PROBES = (
      "own readback says 8192 (exit 2, lever_moved false). The payload is a PROCESS option: adopting it needs the serving worker's fabric call patched (scripts/ci/fabric_packet_adopt_patch.py, "
      "authorised 2026-09-19 and never wired into the image), not a per-call flag. Exact by construction: tile_granularity stays 8 for every payload from 4096. READ: the payload line, the served per-call times "
      "against P1's, and 'compare_reports' (the served fingerprints equal P1's). Duration (estimate): 30 minutes."),
-    ('P3-ccl-sweep-ring', 'soft', 32, '42', 'FABRIC_1D_RING', 'ccl-sweep-safe',
-     "P3: the exact-class sweep under FABRIC_1D_RING (the alternative fabric config; a profile choice, additional_config fabric_config), no barrier-removal arms. READ: as P1; the served fingerprints must "
+    ('P3-ccl-sweep-ring', 'soft', 32, '42', 'FABRIC_1D_RING', 'ccl-sweep-core',
+     "P3: the core sweep under FABRIC_1D_RING (the alternative fabric config; a profile choice, additional_config fabric_config), without the exotic stage and the barrier-removal arms. READ: as P1; the served fingerprints must "
      "equal P1's (the fabric config changes routes, not the add order). Duration (estimate): 30 minutes."),
     ('P4-ccl-sweep-ring-p8192', 'soft', 32, '42', 'FABRIC_1D_RING', 'ccl-sweep-p8192',
      "P4: FABRIC_1D_RING with the 8192-byte payload: the two process options together. READ: as P2. Duration (estimate): 30 minutes."),
@@ -125,7 +125,7 @@ def render_order(rows):
     lines += [
         "# READ RULES (each also needs no stall; the probe jobs end with 'CCL_SWEEP verdict=...' and a JSON report, the lever jobs with c2_smoke_check clean):",
         "#   P0     'CCL_SWEEP verdict=DONE' with every served row EXACT. Anything else stops the sweeps.",
-        "#   P1-P4  'CCL_SWEEP verdict=DONE' (INCOMPLETE and BASE-INEXACT are findings, a watchdog exit 3 names the hung config: reset and rerun with -safe). A promote string needs the config EXACT on every seed, in-trace, and a paired",
+        "#   P1-P4  'CCL_SWEEP verdict=DONE' (INCOMPLETE and BASE-INEXACT are findings, a watchdog exit 3 names the hung config: reset and rerun as ccl-sweep-safe or ccl-sweep-core). A promote string needs the config EXACT on every seed, in-trace, and a paired",
         "#          gain of at least max(0.3 us, twice the A/A noise) in at least 4 of 5 rounds; the probe-only arms are never a promote. P2-P4 are read against P1's served per-call times and fingerprints.",
         "#   CCLS   the engaged line with fallbacks=0, replay audit lines for both ops (exact=True), hashes equal to the production profile's.",
         "#   CCLH   five consecutive completions, every user at budget, the concurrent8_code_equal hashes equal in every run and to the control's.",

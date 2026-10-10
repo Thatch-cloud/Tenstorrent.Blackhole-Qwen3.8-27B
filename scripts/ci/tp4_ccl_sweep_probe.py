@@ -43,6 +43,7 @@ def build_parser():
     parser.add_argument('--only', choices=('all', 'rs', 'ag'), default='all')
     parser.add_argument('--quick', action='store_true', help='a short grid (a smoke of the harness, not a sweep)')
     parser.add_argument('--skip-probe-only', action='store_true', help='skip the barrier-removal arms (the ones that can hang)')
+    parser.add_argument('--no-exotic', action='store_true', help='skip the exotic stage (uneven worker splits, the gather\'s line route and via-broadcast program)')
     parser.add_argument('--seeds', type=int, default=ccl_sweep.SEEDS)
     parser.add_argument('--rounds', type=int, default=ccl_sweep.ROUNDS)
     parser.add_argument('--replays', type=int, default=ccl_sweep.REPLAYS)

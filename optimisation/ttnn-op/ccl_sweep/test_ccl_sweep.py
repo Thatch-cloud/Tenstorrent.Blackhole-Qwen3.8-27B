@@ -254,7 +254,7 @@ class Fixture(unittest.TestCase):
         return FakeTTNN(self.clock, **kwargs)
 
     def options(self, **overrides):
-        values = dict(seeds=2, rounds=5, replays=3, quick=True, only='all', skip_probe_only=False)
+        values = dict(seeds=2, rounds=5, replays=3, quick=True, only='all', skip_probe_only=False, no_exotic=False)
         values.update(overrides)
         return types.SimpleNamespace(**values)
 
@@ -275,8 +275,7 @@ class Fixture(unittest.TestCase):
 class TheGrids(unittest.TestCase):
     def test_every_grid_config_is_a_named_set_of_one_op_the_stack_accepts(self):
         for op in ('rs', 'ag'):
-            for quick in (False, True):
-                grid = sweep.sweep_grid(op, quick)
+            for grid in (sweep.sweep_grid(op, False), sweep.sweep_grid(op, True), [sweep.base_config(op)] + sweep.exotic_grid(op)):
                 self.assertEqual(grid[0].name, 'served')
                 self.assertEqual(grid[0].overrides, {})
                 for config in grid[1:]:
@@ -288,14 +287,14 @@ class TheGrids(unittest.TestCase):
 
     def test_the_full_grid_covers_each_axis_and_the_gather_routes(self):
         names = [config.name for config in sweep.sweep_grid('rs')]
-        self.assertEqual(names, ['served', 'rs-l1', 'rs-w1', 'rs-w3', 'rs-w4', 'rs-c1', 'rs-c2', 'rs-c5', 'rs-c20', 'rs-c50', 'rs-b1', 'rs-b3', 'rs-b4'])
-        gather = [config.name for config in sweep.sweep_grid('ag')]
-        self.assertEqual(gather[:-2], names[:1] + ['ag' + name[2:] for name in names[1:]])
-        self.assertEqual(gather[-2:], ['ag-linear', 'ag-bcast'])
+        self.assertEqual(names, ['served', 'rs-l1', 'rs-w1', 'rs-w4', 'rs-c1', 'rs-c2', 'rs-c5', 'rs-c20', 'rs-c50', 'rs-b1', 'rs-b3', 'rs-b4'])
+        self.assertEqual([config.name for config in sweep.sweep_grid('ag')], names[:1] + ['ag' + name[2:] for name in names[1:]])
+        self.assertEqual([config.name for config in sweep.exotic_grid('rs')], ['rs-w3'])
+        self.assertEqual([config.name for config in sweep.exotic_grid('ag')], ['ag-w3', 'ag-linear', 'ag-bcast'])
 
     def test_the_grid_never_offers_what_changes_bytes(self):
         for op in ('rs', 'ag'):
-            for config in sweep.sweep_grid(op):
+            for config in sweep.sweep_grid(op) + sweep.exotic_grid(op):
                 for name in config.overrides:
                     self.assertIn(ccl_options_tp.option_effect(op, name), (ccl_options_tp.EXACT, ccl_options_tp.COPY), (op, name))
 
@@ -390,7 +389,6 @@ class TheSweep(Fixture):
             self.assertTrue(all(row['status'] == 'EXACT' for row in scenario['rows']), name)
         self.assertEqual(sorted(report['fingerprints']), sorted(report['scenarios']))
         self.assertTrue(all(len(value) == 64 for value in report['fingerprints'].values()))
-        self.assertTrue(self.rows(report, 'ag/l1-ws')['ag-bcast']['promote'])
         self.assertFalse(self.rows(report, 'ag/l1-ws')['ag-w1']['promote'])
 
     def test_an_option_that_changes_a_bit_is_never_timed_or_promoted(self):
@@ -422,6 +420,30 @@ class TheSweep(Fixture):
             self.assertEqual(scenario['rows'][0]['status'], 'FAIL-BYTES')
         self.assertEqual(sweep.verdict(dict(report, opened=True)), ('BASE-INEXACT', 1))
         self.assertEqual(report['unfinished'], ['rs/dram', 'rs/l1'])
+
+    def test_the_exotic_stage_runs_after_the_core_of_every_scenario_and_before_the_probe_only_arms(self):
+        ttnn = self.runtime()
+        report, saved = self.sweep(ttnn, quick=False, only='ag', rounds=3, replays=3, seeds=1)
+        order = []
+        for snapshot in saved:
+            for scenario, body in snapshot['scenarios'].items():
+                for row in body['rows']:
+                    if (scenario, row['name']) not in order:
+                        order.append((scenario, row['name']))
+        names = [name for scenario, name in order]
+        self.assertLess(max(i for i, (scenario, name) in enumerate(order) if name == 'ag-b4'), min(i for i, (scenario, name) in enumerate(order) if name == 'ag-w3'))
+        self.assertLess(max(i for i, (scenario, name) in enumerate(order) if name == 'ag-bcast'), min(i for i, (scenario, name) in enumerate(order) if name == 'ag-nobar'))
+        self.assertEqual(names.count('ag-w3'), 3)
+        rows = self.rows(report, 'ag/l1-ws')
+        self.assertTrue(rows['ag-bcast']['promote'])
+        self.assertEqual(rows['ag-w3']['status'], 'EXACT')
+
+    def test_no_exotic_and_quick_leave_the_exotic_stage_out(self):
+        for overrides in (dict(quick=False, no_exotic=True, skip_probe_only=True), dict(quick=True)):
+            report, _ = self.sweep(self.runtime(), only='ag', seeds=1, rounds=3, replays=3, **overrides)
+            names = [row['name'] for body in report['scenarios'].values() for row in body['rows']]
+            self.assertNotIn('ag-w3', names)
+            self.assertNotIn('ag-bcast', names)
 
     def test_the_probe_only_arms_run_last_are_exact_and_never_promoted(self):
         report, _ = self.sweep(self.runtime(), only='rs')

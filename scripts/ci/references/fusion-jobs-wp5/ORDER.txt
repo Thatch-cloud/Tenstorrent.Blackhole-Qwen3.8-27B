@@ -13,7 +13,7 @@
 # NEEDS CCLH1 CCLH2 CCLH3 CCLH4 CCLH5 <- CCLA
 # READ RULES (each also needs no stall; the probe jobs end with 'CCL_SWEEP verdict=...' and a JSON report, the lever jobs with c2_smoke_check clean):
 #   P0     'CCL_SWEEP verdict=DONE' with every served row EXACT. Anything else stops the sweeps.
-#   P1-P4  'CCL_SWEEP verdict=DONE' (INCOMPLETE and BASE-INEXACT are findings, a watchdog exit 3 names the hung config: reset and rerun with -safe). A promote string needs the config EXACT on every seed, in-trace, and a paired
+#   P1-P4  'CCL_SWEEP verdict=DONE' (INCOMPLETE and BASE-INEXACT are findings, a watchdog exit 3 names the hung config: reset and rerun as ccl-sweep-safe or ccl-sweep-core). A promote string needs the config EXACT on every seed, in-trace, and a paired
 #          gain of at least max(0.3 us, twice the A/A noise) in at least 4 of 5 rounds; the probe-only arms are never a promote. P2-P4 are read against P1's served per-call times and fingerprints.
 #   CCLS   the engaged line with fallbacks=0, replay audit lines for both ops (exact=True), hashes equal to the production profile's.
 #   CCLH   five consecutive completions, every user at budget, the concurrent8_code_equal hashes equal in every run and to the control's.
