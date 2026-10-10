@@ -456,14 +456,16 @@ AGENT_ENV = ('HF_HOME=/models', 'HF_HUB_CACHE=/models', 'MESH_DEVICE=P300', 'QWE
              'DO_NOT_TRACK=1', 'VLLM_NO_USAGE_STATS=1', 'PYTHONDONTWRITEBYTECODE=1')
 
 
-def agent_shape(image, name, profile, devices, hub=HUB, env=(), gate_only=False, ops_env=()):
+def agent_shape(image, name, profile, devices, hub=HUB, env=(), gate_only=False, ops_env=(), tt_grid=None):
     """`docker run` of the node agent's container, up to the image: read-only root, the agent's tmpfs
     set, 8 CPUs, 80g, 4g shm, the two cards in the order given, hugepages, SYS_NICE, the hub at
     /models, the environment the platform adds (AGENT_ENV), and QWEN_C2_SERVING=1 with the profile.
     `env` (an S2 arm's gate-only knobs, ARM_ENV_NAMES) follows as more -e pairs; empty, the argv is
     exactly the agent's. `gate_only` (the profile's own gate_only: true) adds QWEN_C2_GATE=1, the switch the contract
     demands to boot a gate-only profile; a profile that is not gate only gets the agent's argv byte for byte.
-    `ops_env` (an ops-trace arm's profiler variables, ops_profile_plan.ARM_ENV_NAMES) follows the same way."""
+    `ops_env` (an ops-trace arm's profiler variables, ops_profile_plan.ARM_ENV_NAMES) follows the same way.
+    `tt_grid` (C2_TT_GRID: 10,9 | 11,9 | 12,9) adds the compute-grid clamp TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE after the profile; None, the
+    argv is exactly what it was."""
     arguments = ['docker', 'run', '--rm', '--name', name, '--read-only']
     for tmpfs in AGENT_TMPFS:
         arguments += ['--tmpfs', tmpfs]
@@ -475,6 +477,7 @@ def agent_shape(image, name, profile, devices, hub=HUB, env=(), gate_only=False,
         arguments += ['-e', variable]
     if gate_only:
         arguments += ['-e', 'QWEN_C2_GATE=1']
+    arguments += c2_serving_job.tt_grid_arguments(tt_grid)
     for name_, value in env:
         if name_ not in ARM_ENV_NAMES:
             raise PlanError('%s is not an environment an arm may add (%s): a profile\'s keys are the profile\'s'
@@ -490,14 +493,14 @@ def agent_shape(image, name, profile, devices, hub=HUB, env=(), gate_only=False,
 
 
 def gate_run(image, name, profile, devices, checkout, arm_dir, gate_args, hub=HUB, env=(), salt=None,
-             salt_key_path=None, gate_only=False, ops=None):
+             salt_key_path=None, gate_only=False, ops=None, tt_grid=None):
     """The whole `docker run` of one arm: the agent's shape, the harness mounted read-only at /bench,
     the arm's results directory, and the harness as the entrypoint. `salt` (the module docstring's SALTED
     ARMS): fresh mounts the gate's salt key and points the contract at it, and both modes tell the harness.
     `ops` (an ops-* arm prepared by ops_profile_plan) adds its profiler variables, its profile mount and, for the profiled
-    arm, the tracy wrapper around the harness; None, the argv is unchanged."""
+    arm, the tracy wrapper around the harness; None, the argv is unchanged. `tt_grid`: agent_shape's compute-grid clamp."""
     ops_env, ops_mounts, entry = ops_profile_plan.docker_additions(ops) if ops else ((), [], None)
-    arguments = agent_shape(image, name, profile, devices, hub, env, gate_only, ops_env=ops_env)
+    arguments = agent_shape(image, name, profile, devices, hub, env, gate_only, ops_env=ops_env, tt_grid=tt_grid)
     for script in BENCH_SCRIPTS:
         arguments += ['--mount', 'type=bind,src=%s,dst=/bench/%s,readonly' % (
             os.path.join(checkout, 'scripts', 'ci', script), script)]
@@ -1519,7 +1522,7 @@ class Runner(object):
 
     def __init__(self, image, profile, results, checkout, devices, hub=HUB, execute=None, log=print,
                  containers=None, corpus=None, any_request=False, profiles=None, cache_entries=None, jit='auto',
-                 policy='strict', decision=None, salt=None, salt_key_path=None):
+                 policy='strict', decision=None, salt=None, salt_key_path=None, tt_grid=None):
         # The ops-* arms (ops_profile_plan): how the profile tree is handed back, and the disk under it; injectable so
         # the CPU tests run no docker.
         self.ops_handback = ops_profile_plan.docker_handback if execute is None else (lambda image, path: 0)
@@ -1539,6 +1542,8 @@ class Runner(object):
         self.policy, self.decision = policy, decision
         # Salted arms (the module docstring's SALTED ARMS): the mode and the gate's key file.
         self.salt, self.salt_key_path = salt, salt_key_path
+        # C2_TT_GRID: the compute-grid clamp every arm's container carries (None: not passed).
+        self.tt_grid = tt_grid
         self.arms = {}
         self.infra = None
         # What an arm could not judge (a judged arm whose kernel cache could not be counted): run_plan turns a
@@ -1619,7 +1624,7 @@ class Runner(object):
         name = CONTAINER_PREFIX + arm
         arguments = gate_run(self.image, name, profile, self.devices, self.checkout, arm_dir, gate_args, self.hub,
                              env=env, salt=self.salt, salt_key_path=self.salt_key_path,
-                             gate_only=is_gate_only(self.profiles, profile), ops=ops)
+                             gate_only=is_gate_only(self.profiles, profile), ops=ops, tt_grid=self.tt_grid)
         with open(os.path.join(arm_dir, 'docker-run.json'), 'w') as handle:
             json.dump(arguments, handle, indent=1)
         self.log('[C2-GATE] arm %s: %s%s%s' % (arm, ' '.join(gate_args),
@@ -3141,6 +3146,9 @@ def build_parser():
     parser.add_argument('--cards', choices=CARD_SETS, default='pair',
                         help='pair: cards M and A (the default); quad: every Blackhole board present, the four-card '
                              '(1, 4) mesh the TP4 profiles open (qwen-c2-serving.yml C2_CARDS)')
+    parser.add_argument('--tt-grid', choices=c2_serving_job.TT_GRIDS, default=None,
+                        help='clamp the compute grid every arm\'s container opens (%s=...; qwen-c2-serving.yml C2_TT_GRID); '
+                             'default: not passed' % c2_serving_job.TT_GRID_ENV)
     # S2 (the module docstring's S2 PLANS; c2_serving_job's C2_GATE_* keys).
     parser.add_argument('--pairs', type=int, default=None, help='control and control-below A/B pairs (default %d; '
                                                                 'control adds one audited arm after them)'
@@ -3290,7 +3298,7 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
                     env=getattr(spec, 'env', ()), salt=options.salt, salt_key_path=salt_key_path,
                     gate_only=is_gate_only(profiles, getattr(spec, 'profile', None) or options.profile),
                     ops=ops_profile_plan.planned(os.path.join(options.results, arm), spec.extra['ops'])
-                    if getattr(spec, 'extra', {}).get('ops') else None))))
+                    if getattr(spec, 'extra', {}).get('ops') else None, tt_grid=options.tt_grid))))
         return 0
     cache_dir = None
     s2_run = any(plan in S2_PLANS for plan in plans) or s2_profile(profiles, options.profile)
@@ -3307,7 +3315,10 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
                     devices if devices is not None else devices_for(options.cards), options.hub, execute, log, containers, corpus,
                     any_request=any_request_profile(profiles, options.profile), profiles=profiles,
                     cache_entries=cache_entries, jit=options.jit, policy=options.policy,
-                    decision=options.policy_decision, salt=options.salt, salt_key_path=salt_key_path)
+                    decision=options.policy_decision, salt=options.salt, salt_key_path=salt_key_path,
+                    tt_grid=options.tt_grid)
+    if options.tt_grid:
+        log('[C2-GATE] compute-grid clamp: %s=%s in every arm\'s container' % (c2_serving_job.TT_GRID_ENV, options.tt_grid))
     context, ceiling, room = profile_limits(profiles, options.profile)
     summary = dict(image=options.image, profile=options.profile, plans=plans, context=context,
                    output_ceiling=ceiling, largest_prompt=room, worst_case_seconds=worst_case,
@@ -3317,6 +3328,8 @@ def main(argv=None, execute=None, devices=None, log=print, containers=None, corp
                        kernel_cache=cache_dir, s2_exit_blockers=[])
     if options.salt is not None:
         summary['salt'] = options.salt
+    if options.tt_grid:
+        summary['tt_grid'] = options.tt_grid
     if 'control' in plans:
         # G3's rule, stated plainly where a reader of the summary looks first: what is judged, and that the flag-phase
         # cost is informational by the user's decision.
