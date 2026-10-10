@@ -1,0 +1,50 @@
+{
+  "wp": "M1",
+  "branch": "tp4/m1-grid13",
+  "description": "Matmul program grids re-tuned for the 13x10 compute grid (docs/tp4-fusion-m1.md): the prefill all-gather matmuls on a 12-wide grid with the M block re-chosen, the 64-row verify block's output projections on 3 output columns a core, the fused commit's feature projection on the device-wide grid",
+  "levers": [],
+  "profiles": [
+    {
+      "name": "all-grid13",
+      "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all",
+      "env": {
+        "QWEN_FAST_GRID13": "1"
+      },
+      "reason": "M1 on the combined fusion arm: prefill, verify and drafter sub-switches (the drafter one acts only where fusion-wp/M1-dflash-device.patch is applied); the control of the paired timing is the combined arm itself"
+    },
+    {
+      "name": "all-grid13-audit",
+      "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all-audit",
+      "audit": true,
+      "env": {
+        "QWEN_FAST_GRID13": "1",
+        "QWEN_FAST_GRID13_AUDIT": "1"
+      },
+      "reason": "M1 audited on the audited combined arm: the pinned prefill all-gather matmuls and the served 64-row projection configs run again beside the lever on the very same operands (eager warm passes only, the first four calls of each site and row count) and every chip's bytes are compared (exact=True or a mismatch)"
+    }
+  ],
+  "smoke": [
+    {
+      "flag": "QWEN_FAST_GRID13",
+      "value": "1",
+      "marker": "tp4 grid13",
+      "audit_flag": "QWEN_FAST_GRID13_AUDIT",
+      "what": "M1 matmul grids for the 13x10 compute grid"
+    }
+  ],
+  "smoke_rules": [
+    "grid13_smoke"
+  ],
+  "image_files": [
+    {
+      "path": "scripts/ci/grid13_tp.py",
+      "reason": "imported by tp_addresses.install under QWEN_FAST_GRID13 (the wrappers of tp_common's prefill all-gather matmuls and 64-row config builder, the sub-switch plans, the eager audit) and by dflash_device.project_features under the same flag (commit_program, only with fusion-wp/M1-dflash-device.patch applied)"
+    }
+  ],
+  "tests": [
+    "test_grid13_tp"
+  ],
+  "tp_addresses": {},
+  "card_jobs": "scripts/ci/references/fusion-jobs/M1/ (ORDER.txt): the audited attach first, then the timed decode ABAB at eight live (control fx-all against fx-all-grid13), then the solo prefill ladder ABAB (the same two arms), telemetry sidecar on throughout",
+  "notes": "WIRING THE INTEGRATOR MUST DO (without the first, the lever is inert and the smoke rule fails the arm by name, no engaged line): (1) apply fusion-wp/M1-tp-addresses.patch (git apply): tp_addresses.install() calls grid13_tp.install() when QWEN_FAST_GRID13 is in the environment, after trace_census.install() (after the model is loaded: the wrappers act at the call, so that is enough); flag unset it imports nothing and wraps nothing. (2) OPTIONAL: apply fusion-wp/M1-dflash-device.patch (DFlashDevice.project_features, the fused commit's 80-core feature projection, +32 us a commit on 13x10) for the drafter sub-switch; without it that sub-switch logs nothing and the smoke rule asks for nothing from it. (3) The profiles are extra twins on the combined arm fx-all and its audit twin, NOT members of the combined set 'all' (do not add M1 to combined: test_fusion_capture_rules asks a scenario for every audit flag of the audited combined twin, and the lever's own capture scenarios are in test_grid13_tp). (4) smoke_rules: grid13_smoke.problems(env, container_text) asks, per sub-switch the flag names, an engaged line for gdn_in, attn_in and the MLP's site (prefill) and for verify.out (verify), no fell-back line, no audit mismatch, and under the audit flag a passing audit line for every required site; with the lever off no grid13 line at all. (5) NOT in the fx-all ship profile: it is a candidate arm. Ship only after the audited attach, both timed pairs and the prefill ladder pair are read. 13x10: the lever reads the grid from the device and keeps the served ops (one 'fell back reason=' line) on anything narrower than 13x10. Exactness is by construction (no K reduction changes: only which core owns an output tile) and by the audit; nothing is exact here until a card says so. (6) REGISTRIES, only with the patches applied (checked on a scratch copy of this branch with both patches and these two lines: test_serving_image_copy_closure and test_tp4_closure_literals pass, the latter but for its torch-dependent attach test, which needs the CI environment): scripts/ci/test_serving_image_copy_closure.py C2_ONLY_PLAIN_IMPORTS needs 'grid13_tp.py' (tp_addresses and dflash_device import it lazily; it is overlay-only like the other op-fusion modules) and scripts/ci/test_tp4_closure_literals.py SERVED needs 'grid13_tp' (scanned clean of pair literals). (7) ORDER of the pack: the M1 templates are in references/fusion-jobs/M1/ with their own ORDER.txt; they are NOT in the integrated ORDER (the profiles are extra twins on fx-all, not levers of it); fold them in after the combined pack's FXL2 if the integrator wants one window. (8) OPTIONAL census (test_fusion_capture_rules): add 'grid13_tp' to LEVER_MODULES and classify its five host calls: _audit_agmm / audit_begin / commit_program / wrap_matmul_1d_decode.matmul_1d_decode synchronize_device (each only after audit_begin said the call is eager: a capture skips the audit with one logged line) and _bits to_torch (the readback of an audit that audit_begin let run). The module's capture scenarios are in test_grid13_tp (capture_rules.guard: nothing synchronized or read back inside a capture, every captured launch warm). (9) TESTS THE TWINS TRIP, found by the CPU suite on this branch: test_tp4_round_host.ProfileTests.test_the_parent_and_every_other_profile_carry_no_round_host_flag... must expect the four round-host levers on the -fx-all-grid13 twins and the audit flag on -fx-all-grid13-audit (they descend from fx-all and fx-all-audit; the same exemption WPH needed for -fx-wph-*; one line, in the last commit of this branch), and test_tp4_fusion_jobs / test_fusion_combined hold the integrated ORDER.txt to make_fusion_jobs.py, which lists the packages' own folders (references/fusion-jobs/M1): regenerate it with make_fusion_jobs.py --write."
+}

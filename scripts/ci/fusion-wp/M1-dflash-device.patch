@@ -1,0 +1,20 @@
+diff --git a/scripts/ci/dflash_device.py b/scripts/ci/dflash_device.py
+index 64f1166..dcfdf66 100644
+--- a/scripts/ci/dflash_device.py
++++ b/scripts/ci/dflash_device.py
+@@ -718,8 +718,14 @@ class DFlashDevice:
+                         sliced = retain(operations.pad(sliced, [(0, 0), (0, 0), (0, 32 - rows), (0, 0)], 0.0))
+                     parts.append(sliced)
+                 joined = retain(concatenate_local_features(operations, parts))
++                chosen = program
++                if os.environ.get('QWEN_FAST_GRID13', '0') != '0':
++                    # QWEN_FAST_GRID13=drafter (grid13_tp.py, default off): the same program on the device-wide grid (same 80 cores, per_core_N, in0_block_w)
++                    import grid13_tp
++
++                    chosen = grid13_tp.commit_program(operations, self.mesh, program, value=joined, weight=self.projection, kernel=self.kernel)
+                 partial = retain(operations.matmul(joined, self.projection, dtype=operations.float32,
+-                    compute_kernel_config=self.kernel, program_config=program, memory_config=operations.DRAM_MEMORY_CONFIG))
++                    compute_kernel_config=self.kernel, program_config=chosen, memory_config=operations.DRAM_MEMORY_CONFIG))
+                 summed = retain(gather_add_projection(operations, self.mesh, self.collectives, partial, retain_temporaries=retain))
+                 rounded = retain(operations.typecast(summed, operations.bfloat16))
+                 normalized = retain(draft_wide_tp.rms_norm(operations, rounded, epsilon=1e-6, weight=self.feature_norm,
