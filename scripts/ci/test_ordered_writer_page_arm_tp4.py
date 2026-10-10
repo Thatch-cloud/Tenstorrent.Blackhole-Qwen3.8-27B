@@ -507,6 +507,35 @@ def synthetic_page_report(base=None, mutate=None):
     return report
 
 
+def negative_report(kind, mutate=None):
+    """A page64 negative-control report as W3 (drop) / W4 (slot) produce it: width 2052, seed 0, eager, exact and random regimes, the kernel built with the control,
+    served_equal failing BY BYTES (differing_blocks > 0) - at every step for drop, at the steps whose groups cross a 32-row tile boundary (here: every third) for
+    slot - and host_equal failing beside it in the exact regime."""
+    specs = arm.build_page_cases(widths=(2052,), seeds=(0,), modes=('eager',), regimes=('exact', 'random'), noop=False)
+    report = dict(checks=[], cases={}, plan=[], samples={}, tp=4, sources={'kv_page_writer_tp4.cpp': kvpw.source_sha256()},
+                  requested=dict(widths=[2052], writers=['page64'], seeds=[0], modes=['eager'],
+                                 page=dict(sources=list(arm.SOURCES), regimes=['exact', 'random'], noop=False, negative=kind, wt=None)),
+                  page=dict(design_signature=kvpw.design_signature(2), wt=2, units=64, negative=kind, readback_dtype='torch.float32', grid=[13, 10]))
+    for spec in specs:
+        required = arm.required_checks(spec)
+        report['plan'].append(dict(name=spec['name'], kind='page', writer='page64', required=[list(item) for item in required]))
+        report['cases'][spec['name']] = dict(exact=False)
+        for name, step in required:
+            fails = name.startswith('served_equal') and (kind == 'drop' or step % 3 == 0)
+            fails = fails or (name.startswith('host_equal') and (kind == 'drop' or step % 3 == 0))
+            check = dict(case=spec['name'], kind='page', writer='page64', width=spec['width'], mode=spec['mode'], seed=0, source=spec['source'],
+                         regime=spec['regime'], name=name, step=step, exact=not fails)
+            if fails and name.startswith('served_equal'):
+                check.update(differing_blocks=6, sample_blocks=[1, 2, 3])
+            report['checks'].append(check)
+    if mutate is not None:
+        mutate(report)
+    report['decision'] = card.decide(report)
+    report['page_decision'] = arm.decide_page(report)
+    report['verdict_line'] = card.verdict_line(report)
+    return report
+
+
 class VerdictTests(unittest.TestCase):
     def test_a_full_pass(self):
         report = synthetic_page_report()
@@ -606,13 +635,21 @@ class RecordTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_recorder(self, report, merge=False, **overrides):
+    def run_recorder(self, report, merge=False, negatives='both', dry_run=False, **overrides):
         path = self.dir / 'ordered-20261010T010203.json'
         path.write_text(json.dumps(report, indent=1))
         argv = ['--evidence', str(self.evidence), '--module', str(self.dir / 'page_width_tp4.py'), '--sources-root', str(self.dir),
                 '--report', str(path), '--run', '36900000009', '--tag', 'v700', '--commit', COMMIT, '--image', 'tp4-fusion-1']
+        if negatives == 'both':
+            negatives = [negative_report('drop'), negative_report('slot')]
+        for number, negative in enumerate(negatives or ()):
+            negative_path = self.dir / ('negative-%d.json' % number)
+            negative_path.write_text(json.dumps(negative, indent=1))
+            argv += ['--negative', str(negative_path), str(36900000100 + number), 'v%d' % (701 + number)]
         if merge:
             argv.append('--merge-page')
+        if dry_run:
+            argv.append('--dry-run')
         for key, value in overrides.items():
             argv += ['--' + key.replace('_', '-'), value]
         lines = []
@@ -627,8 +664,12 @@ class RecordTests(unittest.TestCase):
         report['cases'] = {name: state for name, state in report['cases'].items() if name.startswith(('page64-', 'noop-'))}
         return report
 
-    def test_the_shipped_record_cannot_engage_the_lever_and_a_recorded_page_block_does(self):
-        self.assertEqual(kvpw.evidence_problems(), ['no page_writer record'])
+    def test_the_shipped_record_cannot_engage_the_lever_until_a_page_block_is_recorded_and_a_recorded_block_does(self):
+        shipped = json.loads(pw.EVIDENCE.read_text())
+        if 'page_writer' not in shipped:
+            self.assertEqual(kvpw.evidence_problems(), ['no page_writer record'])
+        else:
+            self.assertEqual(kvpw.evidence_problems(), [], 'the shipped page_writer block must match the live design')
         report = synthetic_page_report(base=e1.make_report(self.dir))
         code, lines = self.run_recorder(report)
         self.assertEqual(code, 0, lines)
@@ -640,6 +681,9 @@ class RecordTests(unittest.TestCase):
         self.assertEqual((block['widths'], block['sources'], block['caches']), ([2052, 4096], ['dram', 'l1'], ['k', 'v']))
         self.assertEqual(block['counts']['checks'], block['counts']['exact'])
         self.assertEqual((block['run'], block['tag'], block['commit'], block['image']), (36900000009, 'v700', COMMIT, 'tp4-fusion-1'))
+        self.assertEqual([(entry['kind'], entry['verdict'], entry['run'], entry['tag']) for entry in block['negatives']],
+                         [('drop', 'FAIL', 36900000100, 'v701'), ('slot', 'FAIL', 36900000101, 'v702')])
+        self.assertTrue(all(entry['failing'] > 0 and entry['differing_blocks'] > 0 for entry in block['negatives']))
         self.assertEqual(rec.dump(evidence), payload)
         digest = hashlib.sha256(payload).hexdigest()
         self.assertIn("ORDERED_WRITER_EVIDENCE_TP4_SHA256 = '%s'" % digest, (self.dir / 'page_width_tp4.py').read_text())
@@ -671,19 +715,10 @@ class RecordTests(unittest.TestCase):
 
     def test_a_dry_run_writes_nothing(self):
         before = {name: (self.dir / name).read_bytes() for name in ('page_width_tp4.py', 'ordered_writer_evidence_tp4.json')}
-        code, lines = self.run_recorder(self.page_only(), merge=True, **{})
-        self.assertEqual(code, 0)
-        dry = {name: (self.dir / name).read_bytes() for name in before}
-        self.assertNotEqual(before, dry)
-        for name, data in before.items():
-            (self.dir / name).write_bytes(data)
-        path = self.dir / 'r.json'
-        path.write_text(json.dumps(self.page_only()))
-        lines = []
-        self.assertEqual(rec.main(['--evidence', str(self.evidence), '--module', str(self.dir / 'page_width_tp4.py'), '--sources-root', str(self.dir),
-                                   '--report', str(path), '--run', '1', '--tag', 't', '--commit', COMMIT, '--image', 'tp4-x', '--merge-page', '--dry-run'],
-                                  out=lines.append), 0, lines)
+        code, lines = self.run_recorder(self.page_only(), merge=True, dry_run=True)
+        self.assertEqual(code, 0, lines)
         self.assertEqual({name: (self.dir / name).read_bytes() for name in before}, before)
+        self.assertTrue(any('0 problems left' in line for line in lines), lines)
 
     def test_reports_that_do_not_qualify_are_refused_and_nothing_is_written(self):
         mutations = {
@@ -700,6 +735,7 @@ class RecordTests(unittest.TestCase):
             'a raised case': lambda r: r['cases'].update({next(n for n in r['cases'] if n.startswith('page64-')): dict(error='x')}),
             'another design': lambda r: r['page'].update(design_signature='0' * 64),
             'another kernel': lambda r: r['sources'].update({'kv_page_writer_tp4.cpp': 'f' * 64}),
+            'another pinned writer': lambda r: r['sources'].update({'ordered_cache.py': 'f' * 64}),
             'no design': lambda r: r.pop('page'),
             'a checkpoint': lambda r: r.update(in_progress='x'),
             'an error': lambda r: r.update(error='boom'),
@@ -732,11 +768,70 @@ class RecordTests(unittest.TestCase):
             self.assertEqual(code, 1, key)
         self.assertEqual(self.run_recorder(self.page_only(), merge=True)[0], 0)
         self.assertEqual(rec.base.hygiene_problems(json.loads(self.evidence.read_text())), [])
+        text = self.evidence.read_text(encoding='utf-8')            # the check test_ship_262k_prefix holds the shipped records to
+        self.assertIsNone(rec.re.search(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|zot\.|sha256:[0-9a-f]{16}|@sha256|/dev/tenstorrent|'
+                                        r'\b\d{1,3}(?:\.\d{1,3}){3}\b|[A-Za-z]:\\\\', text))
         combined = synthetic_page_report(base=e1.make_report(self.dir))
         combined['verdict_line'] += ' /opt/results/x'
         code, lines = self.run_recorder(combined)
         self.assertEqual(code, 1)
         self.assertTrue(any('host path' in line for line in lines), lines)
+
+    def test_the_negative_controls_must_count_or_nothing_is_written(self):
+        """Run 38043860510's lesson: a control counts only if the SAME harness fails it BY BYTES, finished, on the live kernel."""
+        def with_negative(kind, mutate):
+            return negative_report(kind, mutate)
+
+        def first(report, name):
+            return next(check for check in report['checks'] if check['name'] == name)
+
+        mutations = {
+            'a drop that passed': ('drop', lambda r: [c.update(exact=True) for c in r['checks']]),
+            'a drop that failed by 0 differing blocks (the comparator defect)': ('drop', lambda r: [c.update(differing_blocks=0) for c in r['checks']
+                                                                                                    if c['name'].startswith('served_equal')]),
+            'a drop that failed only some steps': ('drop', lambda r: first(r, 'served_equal_k').update(exact=True)),
+            'a slot that never failed served_equal_v': ('slot', lambda r: [c.update(exact=True) for c in r['checks'] if c['name'] == 'served_equal_v']),
+            'a control that did not finish (a raised case)': ('drop', lambda r: r['cases'].update({next(iter(r['cases'])): dict(error='boom')})),
+            'a control that errored': ('slot', lambda r: r.update(error='boom')),
+            'a control on another design': ('drop', lambda r: r['page'].update(design_signature='0' * 64)),
+            'a control on another kernel source': ('slot', lambda r: r['sources'].update({'kv_page_writer_tp4.cpp': 'e' * 64})),
+            'the harness before the fixes': ('drop', lambda r: (r['page'].pop('readback_dtype'), r.update(checks=[c for c in r['checks'] if not c['name'].startswith('wrote_')]))),
+            'a harness check that failed too': ('slot', lambda r: first(r, 'pages_unchanged').update(exact=False)),
+            'a control that was not run as a control': ('drop', lambda r: r['requested']['page'].update(negative=None)),
+            'an exact-regime case host_equal never failed': ('drop', lambda r: [c.update(exact=True) for c in r['checks'] if c['name'] == 'host_equal_k']),
+        }
+        for label, (kind, mutate) in mutations.items():
+            other = 'slot' if kind == 'drop' else 'drop'
+            before = {name: (self.dir / name).read_bytes() for name in ('page_width_tp4.py', 'ordered_writer_evidence_tp4.json')}
+            code, lines = self.run_recorder(self.page_only(), merge=True, negatives=[with_negative(kind, mutate), negative_report(other)])
+            self.assertEqual(code, 1, (label, lines))
+            self.assertTrue(any('negative' in line for line in lines), (label, lines))
+            self.assertEqual(before, {name: (self.dir / name).read_bytes() for name in before}, label)
+
+    def test_both_kinds_exactly_once_and_required(self):
+        for label, negatives in (('none', []), ('only drop', [negative_report('drop')]), ('only slot', [negative_report('slot')]),
+                                 ('two drops', [negative_report('drop'), negative_report('drop')]),
+                                 ('three', [negative_report('drop'), negative_report('slot'), negative_report('slot')])):
+            before = self.evidence.read_bytes()
+            code, lines = self.run_recorder(self.page_only(), merge=True, negatives=negatives)
+            self.assertEqual(code, 1, (label, lines))
+            self.assertEqual(self.evidence.read_bytes(), before, label)
+
+    def test_a_negative_control_is_never_a_record_by_itself(self):
+        report = negative_report('drop')
+        report['requested']['writers'] = ['page64']
+        code, lines = self.run_recorder(report, merge=True)
+        self.assertEqual(code, 1)
+
+    def test_a_recorded_block_without_its_negatives_does_not_engage_the_lever(self):
+        code, lines = self.run_recorder(self.page_only(), merge=True)
+        self.assertEqual(code, 0, lines)
+        evidence = json.loads(self.evidence.read_text())
+        del evidence['page_writer']['negatives']
+        self.evidence.write_text(json.dumps(evidence))
+        digest = hashlib.sha256(self.evidence.read_bytes()).hexdigest()
+        problems = kvpw.evidence_problems(2, 4096, 'l1', path=self.evidence, expected=digest, sources_root=self.dir)
+        self.assertTrue(any('negative controls' in problem for problem in problems), problems)
 
     def test_a_record_without_the_page_arm_is_what_it_was(self):
         report = e1.make_report(self.dir)
