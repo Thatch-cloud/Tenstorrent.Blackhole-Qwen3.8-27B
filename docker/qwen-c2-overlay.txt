@@ -515,6 +515,8 @@ scripts/ci/draft_qkv_tp.py
 scripts/ci/draft_head64_tp.py
 # WP7: the WP7 log rule (an engaged line per site and shape, a passing audit line per quad site, no fell-back line)
 scripts/ci/draft_permute_smoke.py
+# WPP: the lever: strict flags, the wrapper over the graft's _qwen_pf_program_config, the binary check, the audit (imported by tp_addresses.install when the flag is set; its import of tp_shapes is already in the image)
+scripts/ci/sdpa_pf_oneq_tp.py
 # fusion-wp end
 
 # tp4/upload-p0 (docs/tp4-fabric-upload.md section 5, P0 and P1a): the engine-start upload levers. qwen_device_zeros fills the KV pool's and the buffer pool's big zero buffers on the card

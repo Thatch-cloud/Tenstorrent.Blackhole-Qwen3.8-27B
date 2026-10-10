@@ -1,0 +1,39 @@
+{
+ "wp": "WPP",
+ "branch": "tp4/prefill-sdpa",
+ "description": "S1 prefill SDPA: one q chunk per core (no causal pairing) in the chunked prefill SDPA, 96 busy cores in 16 chains of 6 instead of 48 in 8; flag 0x8 of the per-call chain word (factory edit apply_factory_ps.py, graft K64j-OQ), selected at the model by QWEN_FAST_SDPA_PF_ONEQ=1",
+ "levers": [
+  {
+   "id": "oneq",
+   "name": "S1 prefill SDPA one q chunk per core",
+   "flag": "QWEN_FAST_SDPA_PF_ONEQ",
+   "value": "1",
+   "audit_flag": "QWEN_FAST_SDPA_PF_ONEQ_AUDIT",
+   "marker": "sdpa prefill oneq",
+   "env": {},
+   "audit_env": {},
+   "reason": "the chunked prefill SDPA pairs q chunk i with 15-i per core, so 48 of the grid's 130 cores work and the call costs 2K+17 128x128 blocks (K = context/128); one q chunk per core makes it K+16 on 96 cores with the same per-chunk arithmetic and k-chunk order (the only cost that grows with context: est. -7.9 s at a 128k and -29.8 s at a 254k solo prefill)"
+  }
+ ],
+ "pack_last": [
+  {
+   "arm": "oneq",
+   "reason": "the lever cannot engage until the image carries the K64j-OQ _ttnncpp.so (it TT_FATALs with a clear message on K64j's) and the admission accepts that binary; run it after the card-M record (WPP/OQ-Q1-sweep PASS with OQ-WIN or OQ-PARTIAL)"
+  }
+ ],
+ "image_files": [
+  {
+   "path": "scripts/ci/sdpa_pf_oneq_tp.py",
+   "reason": "the lever: strict flags, the wrapper over the graft's _qwen_pf_program_config, the binary check, the audit (imported by tp_addresses.install when the flag is set; its import of tp_shapes is already in the image)"
+  }
+ ],
+ "tests": [
+  "test_sdpa_oneq_factory",
+  "test_sdpa_oneq_build",
+  "test_sdpa_oneq_card",
+  "test_sdpa_oneq_tp"
+ ],
+ "tp_addresses": {},
+ "card_jobs": "scripts/ci/references/fusion-jobs/WPP/ (ORDER.txt: L0 dry build, L1 build of the K64j-OQ graft, W1 watcher pass, Q1 byte sweep + timing, Q2 timing repeat; all card M alone)",
+ "notes": "WP0 TODO, none of it in WPP's files except where stated. (1) tp_addresses.install(): the generator's twin rows cannot name the dotted graft module, so the hook is the lever's own install(): after tile_collective_tp.install() add `import sdpa_pf_oneq_tp` and `for namespace, name, old in sdpa_pf_oneq_tp.install(environ): _REBOUND.append((namespace, name, old)); rebound += 1`; install() returns [] and imports nothing when QWEN_FAST_SDPA_PF_ONEQ is unset or 0, and raises at attach for a malformed value, for a missing QWEN_FAST_SDPA_PF=1 or for a non-production QWEN_FAST_SDPA_PF_FLAGS. (2) THE BINARY: the lever needs _ttnncpp.so = K64j-OQ (optimisation/ttnn-op/sdpa_prefill_oneq/build_k64j_oq.sh prints K64J_OQ_TTNNCPP_SHA256; K64j plus the prefill factory's oneq edits and nothing else, proven by the build). packed_any_admission.check_runtime pins EVERY mapped _ttnncpp.so to K64J_TTNNCPP_SHA256, so with the lever on it must also accept the K64j-OQ sha (add a second constant after L1 and accept it only when QWEN_FAST_SDPA_PF_ONEQ=1), the Dockerfile's `COPY opgraft-K64j/` and build-c2-serving-image.sh's graft pin need the K64j-OQ directory (the oneq edits are inert unless the flag is set, so K64j-OQ may replace K64j in the image for good once Q1 passes), and QWEN_FAST_RUNTIME_BINARY_SHA256 follows. Until then the lever's arms refuse at the first chain call with 'lacks the oneq edits'. (3) test_qual_card.py: add optimisation/ttnn-op/sdpa_prefill_oneq/build_k64j_oq.sh (EMBEDDING only: it launches no container) and run_card_m_oq.sh (EMBEDDING and LAUNCH, the line `timeout -k 30 \"$timeout_s\" \"${argv[@]}\"`); both embed the canonical block byte for byte already and test_sdpa_oneq_card / test_sdpa_oneq_build check that themselves. (4) QWEN_FAST_SDPA_PF=1 and QWEN_FAST_SDPA_PF_FLAGS come from the image environment (docker/qwen-c2-v235-environment.json), not from the profile; the lever's settings() fails at attach if PF is not 1. (5) 13x10: the factory reads the grid from the program config (the mesh's compute grid); 96 q chunks fit both 11x10 and 13x10 (the card-M sweep runs both), only the core ids differ. (6) SMOKE: the generated three-marker rule fits ('[PINDIAG] sdpa prefill oneq engaged ...' once per rows value, '... fell back reason=...' never at TP4, '... audit n=.. exact=True'); the log lines '[QWEN-SDPA-PF] flags=0xb kv_chain=1 chains=16 members=96' and '[QWEN-SDPA-PF] oneq=1 q_chunks=96 cores=<N> chunks_per_core=1 chains=16 members=96' are the factory's own and are not required by the smoke tables."
+}

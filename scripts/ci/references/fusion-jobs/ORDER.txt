@@ -1,5 +1,5 @@
 # The order of the op-fusion programme's four-card DEVELOPMENT window (docs/tp4-fusion.md): ONE image (tp4-fusion-1, built by B0 from tp4/fusion-1 = tp4/next2-1 + the merged work packages) and ONE window for the
-# fused-op arms of the packages, each behind default-off flags: S1 shard argmax (WP1: QWEN_FAST_TP4_SHARD_ARGMAX=1); K/V page writer (WP2: QWEN_FAST_KV_PAGE_WRITER=1); MLP streaming config and L1 multiply (WP4: QWEN_FAST_MLP_CFG=l1); CCL options (WP5: QWEN_FAST_CCL_OPTIONS=rs-c1); WP6 F-F1 drafter local reduce (WP6: QWEN_FAST_DRAFT_REDUCE=1); WP6 F-F3a drafter SwiGLU and residual kernels (WP6: QWEN_FAST_DRAFT_TAIL=1); WP6 F-F3c drafter fused gate|up matmul (WP6: QWEN_FAST_DRAFT_GATEUP1=1, QWEN_FAST_DRAFT_TAIL=1); WP6 R2 drafter matmuls on device-width grids (WP6: QWEN_FAST_DRAFT_MM_GRID=1); F-F2 drafter permutation kernels (WP7: QWEN_FAST_DRAFT_PERMUTE=1); F-F3c fused drafter q|k|v projection (WP7: QWEN_FAST_DRAFT_QKV1=1); F-F4 one 64-row drafter head (WP7: QWEN_FAST_DRAFT_HEAD64=1); MLP fused gate|up with SwiGLU epilogue (WP4: QWEN_FAST_MLP_GATEUP=1).
+# fused-op arms of the packages, each behind default-off flags: S1 shard argmax (WP1: QWEN_FAST_TP4_SHARD_ARGMAX=1); K/V page writer (WP2: QWEN_FAST_KV_PAGE_WRITER=1); MLP streaming config and L1 multiply (WP4: QWEN_FAST_MLP_CFG=l1); CCL options (WP5: QWEN_FAST_CCL_OPTIONS=rs-c1); WP6 F-F1 drafter local reduce (WP6: QWEN_FAST_DRAFT_REDUCE=1); WP6 F-F3a drafter SwiGLU and residual kernels (WP6: QWEN_FAST_DRAFT_TAIL=1); WP6 F-F3c drafter fused gate|up matmul (WP6: QWEN_FAST_DRAFT_GATEUP1=1, QWEN_FAST_DRAFT_TAIL=1); WP6 R2 drafter matmuls on device-width grids (WP6: QWEN_FAST_DRAFT_MM_GRID=1); F-F2 drafter permutation kernels (WP7: QWEN_FAST_DRAFT_PERMUTE=1); F-F3c fused drafter q|k|v projection (WP7: QWEN_FAST_DRAFT_QKV1=1); F-F4 one 64-row drafter head (WP7: QWEN_FAST_DRAFT_HEAD64=1); MLP fused gate|up with SwiGLU epilogue (WP4: QWEN_FAST_MLP_GATEUP=1); S1 prefill SDPA one q chunk per core (WPP: QWEN_FAST_SDPA_PF_ONEQ=1).
 # One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. The minutes are generic ESTIMATES (nothing has run on a card): a package's own folder has its own.
 # stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (a lever's timed jobs are skipped by the NEEDS lines below, the other levers still run).
 # P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z (the cutover pack's restore steps and post-checks; nothing in this pack does either, and no job here starts or
@@ -13,10 +13,11 @@
 #     confirm it in the ship profile, not to ship. Each twin is the production profile plus exactly one lever (and, for the audit twin, its _AUDIT flag): make_fusion_profiles.py generated it from the package's manifest.
 # THE JOBS OF A LEVER <ID>: <ID>A the audited attach (exactness: the lever's served-composition comparison in the trace), then the timed ABAB at eight live (concurrent8_steady): <ID>C1 control, <ID>L1 lever, <ID>C2 control, <ID>L2 lever.
 #     The audits of every lever run before any timed pair, so a lever that is not exact costs one short job, not an hour of timing.
-# THE PACKAGES' OWN FOLDERS (card-M and detail templates, their read rules and decision rules; under references/): fusion-jobs-wp5, fusion-jobs/WP1, fusion-jobs/WP2, fusion-jobs/WP4, fusion-jobs/WP6, fusion-wp7-jobs.
+# THE PACKAGES' OWN FOLDERS (card-M and detail templates, their read rules and decision rules; under references/): fusion-jobs-wp5, fusion-jobs/WP1, fusion-jobs/WP2, fusion-jobs/WP4, fusion-jobs/WP6, fusion-jobs/WPP, fusion-wp7-jobs.
 # THE COMBINED PACK (references/fusion-jobs/combined: c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all, the levers permute, s1, reduce, qkv1, tail, gateup1, mmgrid, head64, ccl, mlpcfg, kvpage on together; its own ORDER.txt) runs FIRST; this ORDER is the ablation, for the levers of a combination that fails.
 # FOLDED IN: UP* are the templates of references/upload-p0-jobs (WP0), renamed and on the one image; their read and decision rules are that folder's ORDER.txt. tp4/upload-p0: the engine-start levers QWEN_FAST_DEVICE_ZEROS and QWEN_FAST_LAZY_SHARD_W (exactness A0-A3, then the engine-start ABAB T0-T5 read with engine_start_phases.py, which can run anywhere in the timed block).
 # LAST: MLPGU (MLP fused gate|up with SwiGLU epilogue) runs after every other arm, audit and ABAB alike: F-D1's fused kernels have never compiled on a card: run the card-M job C3 (fusion-jobs/WP4, the product against the served multiply, bit for bit) first, and these four-card arms last, so that a compile failure or a differing product costs the least of the window.
+# LAST: ONEQ (S1 prefill SDPA one q chunk per core) runs after every other arm, audit and ABAB alike: the lever cannot engage until the image carries the K64j-OQ _ttnncpp.so (it TT_FATALs with a clear message on K64j's) and the admission accepts that binary; run it after the card-M record (WPP/OQ-Q1-sweep PASS with OQ-WIN or OQ-PARTIAL)
 # DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
 # NEEDS X0 <- B0
 # NEEDS S1A <- X0
@@ -34,6 +35,7 @@
 # NEEDS UPA1 UPA2 <- UPA0
 # NEEDS UPA3 <- UPA1 UPA2
 # NEEDS MLPGUA <- X0
+# NEEDS ONEQA <- X0
 # NEEDS S1C1 <- X0
 # NEEDS S1L1 <- S1A S1C1
 # NEEDS S1C2 <- S1L1
@@ -85,6 +87,10 @@
 # NEEDS MLPGUL1 <- MLPGUA MLPGUC1
 # NEEDS MLPGUC2 <- MLPGUL1
 # NEEDS MLPGUL2 <- MLPGUC2
+# NEEDS ONEQC1 <- X0
+# NEEDS ONEQL1 <- ONEQA ONEQC1
+# NEEDS ONEQC2 <- ONEQL1
+# NEEDS ONEQL2 <- ONEQC2
 # READ RULES (each also needs c2_smoke_check clean, whose fusion rules read the container log, and no stall):
 #   B0     'baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic with a session cap of 8', the provenance report with no problem line, the image id.
 #   X0     four cards present and healthy, the fabric as measured, no other window driver alive.
@@ -92,7 +98,7 @@
 #   <ID>C1 <ID>L1 <ID>C2 <ID>L2  w2ln_timing_compare.py pair, the steady window, 8 live: per pair the lever's round time against the control's; GO for a lever needs both pairs measured (at least 100 matched rounds, the load rule
 #     applied) and negative beyond the control-to-control floor, the texts equal, the lever's engaged line in both lever boots. A pair with fewer matched rounds is VOID (never GO, never NO-GO).
 # NO-GO for adopting a lever: any stall, any text or accepted-prefix difference against the control, any audit mismatch, any fallback line, a pair that is positive, a lever boot that logs no engaged line.
-# Time (estimate, minutes): B0 40, X0 20, an audit 40, a timed job 35, Z 10: 2500 minutes (41 h 40 min) in all, 2460 minutes of cards (X0 to Z), 1660 minutes without the repeat pairs; about 3 minutes of queue per tag on top.
+# Time (estimate, minutes): B0 40, X0 20, an audit 40, a timed job 35, Z 10: 2680 minutes (44 h 40 min) in all, 2640 minutes of cards (X0 to Z), 1770 minutes without the repeat pairs; about 3 minutes of queue per tag on top.
 B0-build stop tp4-fusion-1 40
 X0-status-rescan-reset stop tp4-fusion-1 20
 S1A-s1-audit-attach soft tp4-fusion-1 40
@@ -111,6 +117,7 @@ UPA1-dzero-audit-attach soft tp4-fusion-1 30
 UPA2-lazy-audit-attach soft tp4-fusion-1 30
 UPA3-upload-audit-attach soft tp4-fusion-1 30
 MLPGUA-mlpgu-audit-attach soft tp4-fusion-1 40
+ONEQA-oneq-audit-attach soft tp4-fusion-1 40
 S1C1-s1-control-timed soft tp4-fusion-1 35
 S1L1-s1-lever-timed soft tp4-fusion-1 35
 S1C2-s1-control-repeat soft tp4-fusion-1 35
@@ -165,4 +172,8 @@ MLPGUC1-mlpgu-control-timed soft tp4-fusion-1 35
 MLPGUL1-mlpgu-lever-timed soft tp4-fusion-1 35
 MLPGUC2-mlpgu-control-repeat soft tp4-fusion-1 35
 MLPGUL2-mlpgu-lever-repeat soft tp4-fusion-1 35
+ONEQC1-oneq-control-timed soft tp4-fusion-1 35
+ONEQL1-oneq-lever-timed soft tp4-fusion-1 35
+ONEQC2-oneq-control-repeat soft tp4-fusion-1 35
+ONEQL2-oneq-lever-repeat soft tp4-fusion-1 35
 Z-reset soft tp4-fusion-1 10

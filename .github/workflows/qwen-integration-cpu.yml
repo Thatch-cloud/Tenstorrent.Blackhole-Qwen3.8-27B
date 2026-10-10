@@ -297,6 +297,8 @@ jobs:
           # WP7
           python -B -m unittest test_draft_permute_tp test_draft_qkv_tp test_draft_head64_tp
           python -B -m unittest discover -s optimisation/ttnn-op/draft_permute -p 'test_*.py'
+          # WPP
+          python -B -m unittest test_sdpa_oneq_factory test_sdpa_oneq_build test_sdpa_oneq_card test_sdpa_oneq_tp
           # fusion-wp end
           bash -n scripts/ci/run-simulator.sh
           bash -n scripts/ci/simulator-suite.sh
