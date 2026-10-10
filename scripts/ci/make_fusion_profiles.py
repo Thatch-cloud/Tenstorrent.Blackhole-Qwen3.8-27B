@@ -52,7 +52,7 @@ IMAGE_ROOTS = ('scripts/ci/', 'speculative-decoding/harness/')
 
 # What a manifest may hold. Aliases are the spellings a package is likely to use; they mean the canonical key.
 INFO_KEYS = ('wp', 'branch', 'head', 'description', 'reason', 'notes', 'card_jobs', 'docs', 'owner', 'ci_run', 'status')
-KEYS = ('levers', 'profiles', 'smoke', 'smoke_rules', 'pack_arms', 'pack_order', 'pack_last', 'pack_include', 'combined', 'image_files', 'tests', 'tp_addresses')
+KEYS = ('levers', 'profiles', 'smoke', 'smoke_rules', 'pack_arms', 'pack_order', 'pack_last', 'pack_include', 'combined', 'ship', 'image_files', 'tests', 'tp_addresses')
 ALIASES = {
     'twin_profiles': 'profiles', 'profile_twins': 'profiles', 'twins': 'profiles',
     'smoke_dispatch': 'smoke', 'smoke_markers': 'smoke', 'smoke_modules': 'smoke', 'smoke_check': 'smoke',
@@ -315,6 +315,49 @@ def combined_of(wp, raw, where):
                 reason=text_of(raw.get('reason', 'several levers on together'), where, 'reason'))
 
 
+SHIP_FIELDS = ('id', 'waives', 'evidence', 'decision')
+SHIP_DECISIONS = ('PENDING', 'APPROVED')
+SHIP_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,62}')
+SHIP_FORBIDDEN = ('thatch' + '.local', '192' + '.168.', 'sha256' + ':', '/' + 'home' + '/', '@')       # the decision sentence is public text: no host, registry, digest, path or address
+
+
+def decision_problem(decision):
+    """Why `decision` is not a decision sentence the profile contract reads (it starts PENDING or APPROVED and is public-safe), or None."""
+    if not isinstance(decision, str) or not decision.strip():
+        return 'the decision is a non-empty sentence'
+    if decision.split(None, 1)[0].rstrip(':') not in SHIP_DECISIONS:
+        return 'the decision starts with %s, got %r' % (' or '.join(SHIP_DECISIONS), decision[:40])
+    for word in SHIP_FORBIDDEN:
+        if word in decision:
+            return 'the decision text must not contain %r (the repository is public)' % word
+    return None
+
+
+def ship_of(wp, raw, where):
+    """One ship spec: a TRAFFIC profile `<namespace><name>` = the production profile plus exactly the env of the combined twin `from`, carrying an owner traffic waiver of its own
+    (the four waivable levers the production profile's waiver names, and the fields below). The decision is PENDING until the owner's sentence replaces it."""
+    if not isinstance(raw, dict) or set(raw) - {'name', 'from', 'reason', 'waiver'}:
+        raise ManifestError('%s: a ship entry is {"name", "from", "reason", "waiver"}' % where)
+    name = text_of(raw.get('name'), where, 'name')
+    if not ID.match(name):
+        raise ManifestError('%s: ship name %r must be lower-case letters, digits and single dashes' % (where, name))
+    waiver = raw.get('waiver')
+    if not isinstance(waiver, dict) or set(waiver) != set(SHIP_FIELDS):
+        raise ManifestError('%s: ship %s waiver is an object with exactly %s' % (where, name, ', '.join(SHIP_FIELDS)))
+    if not (isinstance(waiver['id'], str) and SHIP_ID.fullmatch(waiver['id'])):
+        raise ManifestError('%s: ship %s waiver id must match %s, got %r' % (where, name, SHIP_ID.pattern, waiver['id']))
+    for field in ('waives',):
+        text_of(waiver[field], where, 'waiver ' + field)
+    evidence = waiver['evidence']
+    if not (isinstance(evidence, list) and evidence and all(isinstance(item, str) and item.strip() for item in evidence)):
+        raise ManifestError('%s: ship %s waiver evidence is a non-empty list of non-empty strings' % (where, name))
+    problem = decision_problem(waiver['decision'])
+    if problem:
+        raise ManifestError('%s: ship %s waiver: %s' % (where, name, problem))
+    return dict(name=name, source=text_of(raw.get('from'), where, 'from'), reason=text_of(raw.get('reason', 'the ship candidate'), where, 'reason'),
+                waiver=dict((field, waiver[field]) for field in SHIP_FIELDS))
+
+
 def tests_of(wp, value, where):
     """[(module or ('discover', dir, pattern), reason)]."""
     out = []
@@ -380,7 +423,7 @@ def tp_of(wp, value, where):
 
 def normalise(manifests):
     """The plan: every manifest's entries in one structure, in file-name then file order. Names collide across packages: refused."""
-    plan = dict(levers=[], profiles=[], smoke=[], smoke_rules=[], pack_arms=[], pack_order=[], pack_last=[], pack_include=[], combined=[], image_files=[], tests=[], tp={key: [] for key in TP_KEYS}, info=[])
+    plan = dict(levers=[], profiles=[], smoke=[], smoke_rules=[], pack_arms=[], pack_order=[], pack_last=[], pack_include=[], combined=[], ship=[], image_files=[], tests=[], tp={key: [] for key in TP_KEYS}, info=[])
     for file_name, raw in manifests:
         where = 'fusion-wp/' + file_name
         wp = text_of(raw.get('wp', Path(file_name).stem.upper()), where, 'wp')
@@ -418,6 +461,8 @@ def normalise(manifests):
             plan['pack_arms'].append((wp, arm))
         for item in listing(canonical.get('combined', (0, None))[1], where, 'combined'):
             plan['combined'].append(dict(combined_of(wp, item, where), wp=wp, file=file_name))
+        for item in listing(canonical.get('ship', (0, None))[1], where, 'ship'):
+            plan['ship'].append(dict(ship_of(wp, item, where), wp=wp, file=file_name))
         for item in listing(canonical.get('pack_include', (0, None))[1], where, 'pack_include'):
             plan['pack_include'].append(dict(include_of(wp, item, where), wp=wp))
         for arm in listing(canonical.get('pack_order', (0, None))[1], where, 'pack_order'):
@@ -472,6 +517,14 @@ def normalise(manifests):
         missing = [lever for lever in spec['levers'] if lever not in lever_ids]
         if missing:
             raise ManifestError('%s: combined %s switches on %s, which is no lever of any manifest' % (spec['wp'], spec['name'], ', '.join(missing)))
+    combined_names = set(spec['name'] for spec in plan['combined'])
+    if len(set(spec['name'] for spec in plan['ship'])) != len(plan['ship']):
+        raise ManifestError('two ship entries use one name')
+    for spec in plan['ship']:
+        if spec['source'] not in combined_names:
+            raise ManifestError('%s: ship %s is the combined %s plus the waiver, and no manifest has a combined entry of that name' % (spec['wp'], spec['name'], spec['source']))
+        if spec['name'] in combined_names or spec['name'] in set(lever['id'] for lever in plan['levers']) or spec['name'].endswith('-audit'):
+            raise ManifestError('%s: ship %s collides with a lever, a combined entry or an audit twin name' % (spec['wp'], spec['name']))
     prefixes = [item['prefix'] for item in plan['pack_include']]
     if len(set(prefixes)) != len(prefixes):
         raise ManifestError('two pack_include entries use one prefix')
@@ -499,6 +552,25 @@ def twin_id(lever, audited):
     return NAMESPACE + lever['id'] + ('-audit' if audited else '')
 
 
+def combined_env(spec, by_id):
+    """(timed env, audit additions) of one combined spec: every selected lever's flag at its value (the spec's override or the lever's own), its env, then the spec's env; the audit
+    flags and their env apart. Two levers disagreeing on a name are refused."""
+    timed, audits = {}, {}
+    for ident in spec['levers']:
+        lever = by_id[ident]
+        additions = dict(lever['env'])
+        additions[lever['flag']] = spec['values'].get(ident, lever['value'])
+        for key, value in additions.items():
+            if timed.get(key, value) != value:
+                raise ManifestError('%s: combined %s: the levers disagree on %s (%s and %s)' % (spec['wp'], spec['name'], key, timed[key], value))
+            timed[key] = value
+        if lever['audit_flag']:
+            audits[lever['audit_flag']] = '1'
+            audits.update(lever['audit_env'])
+    timed.update(spec['env'])
+    return timed, audits
+
+
 def profile_twins(plan):
     """[dict(name, parent, env, why, wp, kind)] in the order they are written: per lever its timed and its audit twin, then the explicit profiles."""
     out = []
@@ -517,19 +589,7 @@ def profile_twins(plan):
                                                                                                      sentence(lever['reason']))))
     by_id = dict((lever['id'], lever) for lever in plan['levers'])
     for spec in plan.get('combined', ()):
-        timed, audits = {}, {}
-        for ident in spec['levers']:
-            lever = by_id[ident]
-            additions = dict(lever['env'])
-            additions[lever['flag']] = spec['values'].get(ident, lever['value'])
-            for key, value in additions.items():
-                if timed.get(key, value) != value:
-                    raise ManifestError('%s: combined %s: the levers disagree on %s (%s and %s)' % (spec['wp'], spec['name'], key, timed[key], value))
-                timed[key] = value
-            if lever['audit_flag']:
-                audits[lever['audit_flag']] = '1'
-                audits.update(lever['audit_env'])
-        timed.update(spec['env'])
+        timed, audits = combined_env(spec, by_id)
         names = ', '.join('%s (%s)' % (by_id[ident]['name'], by_id[ident]['wp']) for ident in spec['levers'])
         out.append(dict(name=NAMESPACE + spec['name'], parent=PARENT, env=dict(timed), wp=spec['wp'], file=spec['file'], kind='timed', lever=None, combined=spec,
                         why='THIS ARM, the combination %s (%s): %s' % (spec['name'], names, sentence(spec['reason']))))
@@ -539,6 +599,12 @@ def profile_twins(plan):
         out.append(dict(name=NAMESPACE + spec['name'] + '-audit', parent=PARENT, env=audit_env, wp=spec['wp'], file=spec['file'], kind='audit', lever=None, combined=spec,
                         why='THIS ARM, the combination %s audited (%s): every lever of it plus its _AUDIT flag, which runs the served composition beside the lever on the device and logs exact=True '
                             'or a mismatch. The exactness job; not a timing arm. %s' % (spec['name'], names, sentence(spec['reason']))))
+    combined_by_name = dict((spec['name'], spec) for spec in plan.get('combined', ()))
+    for ship in plan.get('ship', ()):
+        source = combined_by_name[ship['source']]
+        timed, _audits = combined_env(source, by_id)
+        out.append(dict(name=NAMESPACE + ship['name'], parent=PARENT, env=dict(timed), wp=ship['wp'], file=ship['file'], kind='ship', lever=None, combined=source, ship=ship,
+                        why=sentence(ship['reason'])))
     for item in plan['profiles']:
         out.append(dict(name=item['name'], parent=item['parent'], env=dict(item['env']), wp=item['wp'], file=item['file'],
                         kind='audit' if item['audit'] else 'timed', lever=None, why='THIS ARM (%s): %s' % (item['wp'], sentence(item['reason']))))
@@ -546,8 +612,14 @@ def profile_twins(plan):
 
 
 def twin_names(directory=MANIFESTS):
-    """The generated twins' names (profile_twins.py exempts them from the profile-enumerating tests; test_fusion_wp holds each)."""
-    return tuple(twin['name'] for twin in profile_twins(normalise(read_manifests(directory))))
+    """The generated GATE-ONLY twins' names (profile_twins.py exempts them from the profile-enumerating tests; test_fusion_wp holds each). The ship profile is a traffic profile:
+    ship_names."""
+    return tuple(twin['name'] for twin in profile_twins(normalise(read_manifests(directory))) if twin['kind'] != 'ship')
+
+
+def ship_names(directory=MANIFESTS):
+    """The generated TRAFFIC profiles' names (the ship candidates: not gate-only, so not twins; the census tests that must know them name them)."""
+    return tuple(twin['name'] for twin in profile_twins(normalise(read_manifests(directory))) if twin['kind'] == 'ship')
 
 
 # ---- the profiles file ----
@@ -559,6 +631,15 @@ def description(twin):
             'paired timing is %s itself. Generated by scripts/ci/make_fusion_profiles.py: regenerate, never hand-merge.'
             % (twin['file'], twin['parent'], ', the production profile (Lever N + prefix reuse + W2 + engine reuse)' if twin['parent'] == PARENT else '', env,
                twin['why'], PARENT))
+
+
+def ship_description(twin):
+    env = ', '.join('%s=%s' % pair for pair in sorted(twin['env'].items()))
+    return ('The SHIP CANDIDATE of the op-fusion programme (docs/tp4-fusion.md, scripts/ci/fusion-wp/%s), a TRAFFIC profile (NOT gate_only): %s plus exactly the env of the combined gate arm '
+            '%s%s (%s) and nothing else; no gate instrument, no audit, no telemetry. The W2 and engine-reuse levers it carries serve traffic only under the owner traffic waiver of this '
+            'profile (id %s), whose decision sentence starts PENDING until the owner records the approval as a sentence starting APPROVED (docs/tp4-fusion.md says how): a profile whose decision '
+            'does not start with APPROVED boots in a gate or a smoke and logs the word, but no build bakes it. %s Generated by scripts/ci/make_fusion_profiles.py: regenerate, never hand-merge.'
+            % (twin['file'], PARENT, NAMESPACE, twin['ship']['source'], env, twin['ship']['waiver']['id'], twin['why']))
 
 
 def parent_problems(name, profile, twin):
@@ -592,6 +673,17 @@ def generate_profiles(data, plan):
             raise ManifestError('%s: %s' % (twin['wp'], '; '.join(problems)))
         profile = copy.deepcopy(source)
         profile['env'].update(twin['env'])
+        if twin['kind'] == 'ship':
+            # a traffic profile: the production profile's own waiver fields for the four waivable levers, the ship's id, words, evidence and decision
+            levers = (source.get(WAIVER_FIELD) or {}).get('levers')
+            if not levers:
+                raise ManifestError('%s: %s carries no owner traffic waiver whose levers the ship profile could name' % (twin['wp'], parent))
+            waiver = twin['ship']['waiver']
+            profile['description'] = ship_description(twin)
+            profile[WAIVER_FIELD] = dict(id=waiver['id'], levers=dict(levers), waives=waiver['waives'], evidence=list(waiver['evidence']), decision=waiver['decision'])
+            profile.pop('gate_only', None)
+            generated[twin['name']] = profile
+            continue
         profile['description'] = description(twin)
         profile.pop(WAIVER_FIELD, None)
         profile.pop('gate_only', None)
@@ -901,16 +993,45 @@ def validate(new, root=REPO):
     yaml.safe_load(new['cpu'])
 
 
+def approve_ship(decision, directory=MANIFESTS):
+    """Record the owner's decision on the ship profile's waiver: replace the decision sentence of the one `ship` entry in its manifest (and nothing else), refusing a sentence that does not
+    start APPROVED or PENDING or that names a host, registry, digest or path. The manifest is the source: run the generator after it (main does). Returns the sentence it replaced."""
+    problem = decision_problem(decision)
+    if problem:
+        raise ManifestError(problem)
+    holders = []
+    for path in sorted(Path(directory).glob('*.json')):
+        text = path.read_text(encoding='utf-8')
+        data = json.loads(text)
+        if isinstance(data, dict) and data.get('ship'):
+            holders.append((path, text, data))
+    if len(holders) != 1 or len(holders[0][2]['ship']) != 1:
+        raise ManifestError('exactly one manifest holding exactly one ship entry is expected, found %d manifest(s)' % len(holders))
+    path, text, data = holders[0]
+    if json.dumps(data, indent=1) + '\n' != text:
+        raise ManifestError('%s is not in canonical form (json.dumps(indent=1) and a newline); refusing to rewrite it' % path)
+    was = data['ship'][0]['waiver']['decision']
+    data['ship'][0]['waiver']['decision'] = decision
+    with open(str(path), 'w', encoding='utf-8', newline='\n') as handle:
+        handle.write(json.dumps(data, indent=1) + '\n')
+    return was
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--write', action='store_true')
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--report', action='store_true')
     parser.add_argument('--manifests', default=str(MANIFESTS))
+    parser.add_argument('--approve-ship', metavar='SENTENCE', help='record the owner\'s decision on the ship profile\'s waiver (a sentence starting APPROVED, or PENDING to revert), then regenerate')
     arguments = parser.parse_args(argv)
-    if not (arguments.write or arguments.check or arguments.report):
-        parser.error('--write, --check or --report')
+    if not (arguments.write or arguments.check or arguments.report or arguments.approve_ship):
+        parser.error('--write, --check, --report or --approve-ship')
     try:
+        if arguments.approve_ship:
+            was = approve_ship(arguments.approve_ship, arguments.manifests)
+            sys.stdout.write('ship waiver decision was: %s\nship waiver decision now: %s\n' % (was, arguments.approve_ship))
+            arguments.write = True
         plan = normalise(read_manifests(arguments.manifests))
         current = read_texts()
         new, report = generate(current, plan)

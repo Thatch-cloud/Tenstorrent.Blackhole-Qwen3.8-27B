@@ -1183,6 +1183,7 @@ class ProfileTests(unittest.TestCase):
 
         # the op-fusion programme's two combined twins (gate only) carry the four levers on purpose, and the audit flag on the audited one
         combined = {fusion.NAMESPACE + 'all': {SELECT, READ, KEYED, LEAN}, fusion.NAMESPACE + 'all-audit': {SELECT, READ, KEYED, LEAN, AUDIT}}
+        combined.update((name, {SELECT, READ, KEYED, LEAN}) for name in fusion.ship_names())            # the ship candidate: the timed combined arm as a traffic profile
         for name, profile in data['profiles'].items():
             if name in self.ADDED:
                 continue
@@ -1190,7 +1191,7 @@ class ProfileTests(unittest.TestCase):
                 carried = set(round_host.FLAGS) & set(profile.get('env', {}))
                 self.assertEqual(carried, combined.get(name, set()))
                 if name in combined:
-                    self.assertIs(profile.get('gate_only'), True)
+                    self.assertIs(profile.get('gate_only'), None if name in fusion.ship_names() else True)
 
     def test_the_checked_in_twins_are_what_the_generator_makes_from_the_parent(self):
         self.assertEqual(generator.main(['--check']), 0)

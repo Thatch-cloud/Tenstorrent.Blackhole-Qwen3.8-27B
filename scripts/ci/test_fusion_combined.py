@@ -388,11 +388,13 @@ class ParkedEngineBandTests(unittest.TestCase):
         self.assertEqual(len(failed), 4)
         self.assertTrue(all('3.346' in problem and '3.68-4.08' in problem for problem in failed))
 
-    def test_the_lever_arm_keeps_the_production_ceiling_and_has_a_floor(self):
+    def test_the_lever_arm_keeps_the_production_ceiling_and_has_the_measured_floor(self):
         env = PROFILES[TIMED]['env']
         self.assertEqual(self.took(env, self.ledger(0.495)), [])                      # the production engine is within the lever band
+        self.assertEqual(self.took(env, self.ledger(0.418)), [])                      # the measured engine of the whole set (runs 38063466256, 38064674222, 38065338924)
+        self.assertEqual(self.took(env, self.ledger(0.412)), [])                      # just above the floor (0.41: the measurement less the production band's own 1.7 percent)
+        self.assertEqual(len(self.took(env, self.ledger(0.405))), 4)                  # an engine that is not the whole captured graph is not absorbed
         self.assertEqual(len(self.took(env, self.ledger(0.52))), 4)                   # a lever that ADDS DRAM is not absorbed
-        self.assertEqual(len(self.took(env, self.ledger(0.37))), 4)                   # an engine that is not the whole captured graph is not either
         self.assertTrue(any('op-fusion lever arm' in problem for problem in self.took(env, self.ledger(0.52))))
         self.assertEqual(self.took(PARENT['env'], self.ledger(0.48)), [])
         self.assertEqual(len(self.took(PARENT['env'], self.ledger(0.418))), 4)
@@ -408,14 +410,16 @@ class ParkedEngineBandTests(unittest.TestCase):
                 self.assertEqual(self.took(env, self.ledger(0.418)), [])
                 self.assertEqual(self.took(env, self.ledger(0.48)), [])
 
-    def test_an_audited_lever_arm_has_no_ceiling_but_the_free_dram_floor_binds(self):
+    def test_an_audited_lever_arm_has_the_same_band_and_the_free_dram_floor_binds(self):
         env = PROFILES[AUDITED]['env']
-        self.assertEqual(self.took(env, self.ledger(0.8, free_after=3.7)), [])
-        self.assertEqual(len(self.took(env, self.ledger(0.37, free_after=3.7))), 4)
-        floor = [problem for problem in c2_smoke_check.parked_container_problems(env, self.ledger(0.8, free_after=3.0))[0] if 'floor' in problem]
+        self.assertEqual(c2_smoke_check.fusion_arm_flags(env)[1] != [], True)
+        self.assertEqual(self.took(env, self.ledger(0.418, free_after=3.7)), [])          # FXA measured the same 0.418 GB each: the audits hold nothing per engine
+        self.assertEqual(len(self.took(env, self.ledger(0.8, free_after=3.7))), 4)
+        self.assertEqual(len(self.took(env, self.ledger(0.40, free_after=3.7))), 4)
+        floor = [problem for problem in c2_smoke_check.parked_container_problems(env, self.ledger(0.418, free_after=3.0))[0] if 'floor' in problem]
         self.assertEqual(len(floor), 4)
-        facts = c2_smoke_check.parked_container_problems(env, self.ledger(0.8, free_after=3.7))[1]
-        self.assertEqual(facts['engine_gb'], {0: 0.8, 1: 0.8, 2: 0.8, 3: 0.8})        # the first completed audited run prints the figure that sets its ceiling
+        facts = c2_smoke_check.parked_container_problems(env, self.ledger(0.418, free_after=3.7))[1]
+        self.assertEqual(facts['engine_gb'], {0: 0.418, 1: 0.418, 2: 0.418, 3: 0.418})
 
 
 class CombinedPackTests(unittest.TestCase):

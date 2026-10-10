@@ -41,19 +41,16 @@ ENGINE_GB = (0.46, 0.51)
 # THE OP-FUSION LEVER ARMS (docs/tp4-fusion.md): a profile that turns on levers of the fusion programme (the caller names them: c2_smoke_check.fusion_arm_flags) is judged
 # against a band whose FLOOR is lower and whose CEILING is the production ceiling. Derivation. (1) A parked engine's DRAM is the allocator growth of its captured verify
 # graph (design 3: 0.468-0.495 GB per chip, run v579). (2) The levers fuse or remove ops of that graph and write intermediates to L1 instead of DRAM; none of the levers in
-# the combined arm adds a per-engine buffer, so an engine of any subset of them is no larger than the production engine and no smaller than the engine of the whole set. That
-# is why the ceiling does NOT move: a lever that ADDS per-engine DRAM (the fused MLP gate|up op's weights, if it ever joins) must fail the ceiling and be given its own
-# measured number, not be absorbed. The K/V page writer removes a DRAM copy (it reads the prepared K/V from L1; its circular buffers are L1) and adds none. (3) The set of
-# the first combined run (eleven lever flags, MLP config l1, QWEN_FAST_CCL_OPTIONS=served, no page writer) was measured at 3.346 GB for eight engines, 0.418 GB each,
-# identically on all four chips in two runs (v714, v716): 0.050-0.077 GB (10-16 percent) under the production engine. (4) The floor is that measurement less a margin of
-# 9 percent, 0.38 GB: the set that ships differs from the measured one (MLP config g3u4d3, CCL rs-c1, the page writer, the WP6 capture fix) and none of those is measured
-# yet, though each is expected to change an engine by megabytes. Tighten the floor to the measured value less 2 percent (the production band's own margin) once the final
-# set has run.
-ENGINE_GB_LEVERS = (0.38, 0.51)
-# An AUDITED lever arm (an _AUDIT flag of the programme on) holds the served composition beside each audited lever, which is DRAM no measurement has read yet (the first
-# audited arm died at engine start): no per-engine ceiling, so the capacity rule is the free-DRAM floor below (the audited floor, as for the parked audit). The audited arm's
-# per-engine figure is printed in the facts (engine_gb) so the first run that completes sets its ceiling.
-ENGINE_GB_LEVERS_AUDITED = (0.38, None)
+# the combined arm adds a per-engine buffer, so an engine of any subset of them is no larger than the production engine and no smaller than the engine of the whole set.
+# That is why the ceiling does NOT move: a lever that ADDS per-engine DRAM (the fused MLP gate|up op's weights, if it ever joins) must fail the ceiling and be given its
+# own measured number, not be absorbed. The K/V page writer removes a DRAM copy (it reads the prepared K/V from L1; its circular buffers are L1) and adds none.
+# (3) MEASURED, the whole set. The first combined set (eleven lever flags, MLP config l1, CCL served, no page writer) took 3.346 GB for eight engines, 0.418 GB each, on all
+# four chips in two runs (v714, v716). The shipped set (MLP config g3u4d3, CCL rs-c1, the K/V page writer, the four round-host levers, the WP6 capture fix) took the SAME 0.418 GB each on all four chips in
+# the audited attach FXA (run 38063466256, twenty-two flags) and in both timed lever legs (runs 38064674222, 38065338924): 0.050-0.077 GB (10-16 percent) under the production
+# engine, and the audits hold nothing per engine. (4) The floor is that measurement less the production band's own margin (its 0.46 sits 1.7 percent under the 0.468
+# measured): 0.41 GB. An audited lever arm has the same band, and the audited free-DRAM floor below still binds.
+ENGINE_GB_LEVERS = (0.41, 0.51)
+ENGINE_GB_LEVERS_AUDITED = ENGINE_GB_LEVERS
 # ER0: the P7p free reading per chip at eight parked engines (design 3.2: 4.95-5.11 GB audits off, 3.69-3.85 audited, minus a margin).
 LEDGER_FREE_FLOOR_GB = dict(plain=4.7, audited=3.6)
 SEATS_ENV = 'QWEN_FAST_M3_BLOCKS'
