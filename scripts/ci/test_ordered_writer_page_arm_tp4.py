@@ -130,7 +130,7 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(len([1 for name, step in arm.required_checks(random_) if name == 'served_equal_k']), arm.PAGE_STEPS + 1)
         for spec in arm.build_page_cases():
             if spec['kind'] == 'noop':
-                self.assertEqual(len(arm.required_checks(spec)), 2 * arm.step_count(spec))
+                self.assertEqual(len(arm.required_checks(spec)), 2 * arm.step_count(spec) + 2)
 
     def test_noop_cases_use_distinct_blocks_and_cover_every_offset(self):
         for spec in arm.build_page_cases():
@@ -204,6 +204,11 @@ class PageFake(FakeTtnn):
     def clone(self, tensor, memory_config=None):
         return FakeTensor(tensor.value.clone(), tensor.dtype)
 
+    def to_torch(self, tensor):
+        """ttnn.to_torch of a bfloat8_b tensor is float32 (torch has no block-float type); card run 38043860510 compared such readbacks."""
+        value = tensor.value.clone()
+        return value.to(torch.float32) if tensor.dtype == self.bfloat8_b else value
+
     def begin_trace_capture(self, mesh, cq_id=0):
         self.capturing, self.current = True, []
         return self.current
@@ -274,6 +279,120 @@ def case_of(**selector):
         if all(spec[key] == value for key, value in selector.items()):
             return spec
     raise KeyError(selector)
+
+
+def legacy_bits_equal(torch_, actual, reference):
+    """bits_equal as it was in 5ba171ce: bfloat16 on both sides or not equal."""
+    return (tuple(actual.shape) == tuple(reference.shape) and actual.dtype == torch_.bfloat16 and reference.dtype == torch_.bfloat16
+            and torch_.equal(actual.contiguous().view(torch_.int16), reference.contiguous().view(torch_.int16)))
+
+
+class ReadbackDtypeTests(unittest.TestCase):
+    """KVPAGE-W1 (run 38043860510, image = E1's, graft OK): 'page=FAIL page_checks=172 page_exact=12'. Per case the exact-regime DRAM eager cases kept 2 of 40
+    checks and the random L1 cases 2 of 23 - input_unchanged and pages_unchanged, the two checks that do not compare a cache - while every served_equal check
+    (108 of them, every step of every case, both sources, eager and replay) reported differing_blocks=0: the page cache and the served cache were the SAME
+    bits and the check still failed. The guard in bits_equal wanted bfloat16 on both sides, and a bfloat8_b cache reads back as float32. host_equal, fill_equal and
+    twice_equal fail the same way. An implementation defect of the HARNESS, not of the kernel and not U1. This reproduces the pattern with the legacy comparator and
+    shows the fix."""
+
+    def run_case(self, spec, comparator=None):
+        report = dict(checks=[], cases={spec['name']: {}}, samples={})
+        prig = FakePageRig(report)
+        patch = mock.patch.object(arm, 'bits_equal', comparator) if comparator is not None else mock.patch.object(arm, 'PAGE_STEPS', arm.PAGE_STEPS)
+        with patch:
+            arm.run_page_case(prig, hw, arm.build_page_case(spec), report)
+        return [check for check in report['checks'] if check['case'] == spec['name']]
+
+    def test_the_legacy_comparator_reproduces_the_observed_pattern_on_correct_writers(self):
+        exact = case_of(kind='page', regime='exact', source='dram', mode='eager', width=2052, seed=0)
+        checks = self.run_case(exact, legacy_bits_equal)
+        checks = [check for check in checks if not check['name'].startswith('wrote_')]          # the non-vacuity checks came after the run
+        self.assertEqual((len(checks), sum(1 for check in checks if check['exact'])), (40, 2))
+        self.assertEqual({check['name'] for check in checks if check['exact']}, {'input_unchanged', 'pages_unchanged'})
+        served = [check for check in checks if check['name'].startswith('served_equal')]
+        self.assertEqual(len(served), 2 * (arm.PAGE_STEPS + 1))
+        self.assertTrue(all(not check['exact'] and check['differing_blocks'] == 0 and check['sample_blocks'] == [] for check in served),
+                        'the same bits, reported unequal')
+        self.assertTrue(all(not check['exact'] for check in checks if check['name'].startswith(('host_equal', 'twice_equal'))))
+        random_ = case_of(kind='page', regime='random', source='l1', mode='replay_changed', width=2052, seed=0)
+        checks = [check for check in self.run_case(random_, legacy_bits_equal) if not check['name'].startswith('wrote_')]
+        self.assertEqual((len(checks), sum(1 for check in checks if check['exact'])), (23, 2))
+        self.assertFalse([check for check in checks if check['name'] == 'fill_equal'][0]['exact'])
+
+    def test_the_readback_is_float32_in_the_fake_as_it_is_on_the_card(self):
+        report = dict(checks=[], cases={}, samples={})
+        prig = FakePageRig(report)
+        cache = prig.rig.upload(torch.zeros(4, 1, 64, 256, dtype=torch.bfloat16), prig.ttnn.bfloat8_b)
+        self.assertEqual(prig.rig.host(cache).dtype, torch.float32)
+        packed = prig.rig.upload(torch.zeros(1, 64, 32, 256, dtype=torch.bfloat16), prig.ttnn.bfloat16)
+        self.assertEqual(prig.rig.host(packed).dtype, torch.bfloat16)
+
+    def test_the_comparator_now_compares_bit_patterns_whatever_the_dtype(self):
+        one = torch.tensor([[1.0, -0.0, 3.5]], dtype=torch.float32)
+        self.assertTrue(arm.bits_equal(torch, one, one.clone()))
+        self.assertTrue(arm.bits_equal(torch, one, one.to(torch.bfloat16)), 'float32 against bfloat16, exact values')
+        self.assertTrue(arm.bits_equal(torch, one.to(torch.bfloat16), one.to(torch.bfloat16).clone()))
+        positive = one.clone()
+        positive[0, 1] = 0.0
+        self.assertFalse(arm.bits_equal(torch, one, positive), '-0 against +0')
+        self.assertFalse(arm.bits_equal(torch, one, one[:, :2]), 'shapes')
+        tiny = torch.tensor([[2.0 ** -130]], dtype=torch.float32)
+        self.assertFalse(arm.bits_equal(torch, tiny, torch.zeros_like(tiny)), 'a denormal float32 is not zero')
+
+    def test_with_the_fix_correct_writers_pass_every_check_on_float32_readbacks(self):
+        for selector in (dict(regime='exact', source='dram', mode='eager'), dict(regime='random', source='l1', mode='replay_changed')):
+            spec = case_of(kind='page', width=2052, seed=0, **selector)
+            checks = self.run_case(spec)
+            self.assertTrue(all(check['exact'] for check in checks), (selector, [c for c in checks if not c['exact']][:1]))
+            self.assertEqual({(check['name'], check['step']) for check in checks}, set(arm.required_checks(spec)))
+
+    def test_a_cache_that_the_writers_never_wrote_is_not_a_pass(self):
+        """The same bits on both sides prove nothing if neither writer wrote: every step must change the page cache."""
+        spec = case_of(kind='page', regime='random', source='l1', mode='eager', width=2052, seed=0)
+
+        def writes_nothing(cache, packed, positions, pages):
+            return None
+
+        report = dict(checks=[], cases={spec['name']: {}}, samples={})
+        prig = FakePageRig(report, page_writer=writes_nothing, served_writer=writes_nothing)
+        arm.run_page_case(prig, hw, arm.build_page_case(spec), report)
+        checks = [check for check in report['checks'] if check['case'] == spec['name']]
+        self.assertTrue(all(check['exact'] for check in checks if check['name'].startswith('served_equal')), 'identical, and unwritten')
+        wrote = [check for check in checks if check['name'].startswith('wrote_')]
+        self.assertEqual(len(wrote), 2 * (arm.PAGE_STEPS + 1))
+        self.assertTrue(all(not check['exact'] for check in wrote))
+
+    def test_the_first_report_names_the_readback_dtype_and_a_noop_needs_stored_content(self):
+        spec = case_of(kind='page', regime='exact', source='dram', mode='eager', width=2052, seed=0)
+        report = dict(checks=[], cases={spec['name']: {}}, samples={}, page={})
+        prig = FakePageRig(report)
+        arm.run_page_case(prig, hw, arm.build_page_case(spec), report)
+        self.assertEqual(report['page']['readback_dtype'], 'torch.float32')
+        noop = case_of(kind='noop', writer='page64', regime='random', source='dram', width=2052)
+        report = dict(checks=[], cases={noop['name']: {}}, samples={})
+        prig = FakePageRig(report)
+        arm.run_noop_case(prig, hw, arm.build_noop_case(noop), report)
+        names = {(check['name'], check['step']) for check in report['checks']}
+        self.assertTrue({('stored_nonzero_k', None), ('stored_nonzero_v', None)} <= names)
+        self.assertEqual(names, set(arm.required_checks(noop)))
+
+    def test_both_traces_are_warmed_before_either_is_captured_so_nothing_allocates_beside_a_live_trace(self):
+        spec = case_of(kind='page', regime='random', source='l1', mode='replay_changed', width=2052, seed=0)
+        report = dict(checks=[], cases={spec['name']: {}}, samples={})
+        prig = FakePageRig(report)
+        order = []
+        ttnn = prig.ttnn
+        begin, end = ttnn.begin_trace_capture, ttnn.end_trace_capture
+        original_served, original_page = prig.served, prig.page
+        prig.served = lambda *args: (order.append('served-capture' if ttnn.capturing else 'served-eager'), original_served(*args))[1]
+        prig.page = lambda *args: (order.append('page-capture' if ttnn.capturing else 'page-eager'), original_page(*args))[1]
+        ttnn.begin_trace_capture = lambda *args, **kwargs: (order.append('begin'), begin(*args, **kwargs))[1]
+        arm.run_page_case(prig, hw, arm.build_page_case(spec), report)
+        first_capture = order.index('begin')
+        before = [entry for entry in order[:first_capture] if entry.endswith('eager')]
+        self.assertIn('served-eager', before)
+        self.assertIn('page-eager', before)
+        self.assertEqual(len([entry for entry in order if entry == 'begin']), 2)
 
 
 class Orchestration(unittest.TestCase):

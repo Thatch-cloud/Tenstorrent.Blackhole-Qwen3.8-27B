@@ -17,6 +17,8 @@ identity on every block the packer writes. This arm settles that on the card thr
   NOOP CASES (kind 'noop'). The idempotence itself, without the page writer: a device-packed random cache is read back, and each row of it is
       WRITTEN BACK to where it came from (by the served writer, and by the page writer); the complete cache must not change by one bit
       (noop_equal_k / _v). A packer whose pack(unpack(x)) moved any stored block - including the sign of a zero - fails here first.
+  NON-VACUITY. Equal bits mean nothing if neither writer wrote: every page step must change the page cache (wrote_k / wrote_v) and a noop cache must hold
+      stored content (stored_nonzero_k / _v). A bfloat8_b cache reads back as FLOAT32; every comparison goes through float32 bit patterns (float_bits).
   NEGATIVE CONTROLS (--page-negative drop|slot). The kernel with a row left out, or the second tile row written as the first: the same cases must FAIL.
 
 Everything is pure integer arithmetic and torch on the host; the device part is run_page_case / run_noop_case (card M, one chip of four).
@@ -102,6 +104,7 @@ def required_checks(spec):
     """The (name, step) checks a case must record exact."""
     required = []
     if spec['kind'] == KIND_NOOP:
+        required.extend([('stored_nonzero_k', None), ('stored_nonzero_v', None)])
         for step in range(step_count(spec)):
             required.append(('noop_equal_k', step))
             required.append(('noop_equal_v', step))
@@ -111,6 +114,7 @@ def required_checks(spec):
     for step in range(step_count(spec)):
         for cache in ('k', 'v'):
             required.append(('served_equal_' + cache, step))
+            required.append(('wrote_' + cache, step))
             if spec['regime'] == 'exact':
                 required.append(('host_equal_' + cache, step))
     for cache in ('k', 'v'):
@@ -384,9 +388,23 @@ def shard_config(ttnn):
                                              use_height_and_width_as_shard_shape=True)
 
 
+def float_bits(torch, tensor):
+    """The float32 bit patterns of a readback. A bfloat8_b cache reads back as float32 (torch has no block-float type; KVPAGE-W1, run 38043860510, compared such
+    readbacks and failed all 108 served_equal checks with differing_blocks=0 because the comparison insisted on bfloat16), the host's expected cache and the
+    prepared K/V are bfloat16, and bfloat16 widens to float32 exactly. -0 and +0, and every denormal, stay distinct."""
+    return tensor.to(torch.float32).contiguous().view(torch.int32)
+
+
 def bits_equal(torch, actual, reference):
-    return (tuple(actual.shape) == tuple(reference.shape) and actual.dtype == torch.bfloat16 and reference.dtype == torch.bfloat16
-            and torch.equal(actual.contiguous().view(torch.int16), reference.contiguous().view(torch.int16)))
+    """Same shape and the same float32 bit patterns, whatever the two dtypes (bfloat16, float32)."""
+    return tuple(actual.shape) == tuple(reference.shape) and torch.equal(float_bits(torch, actual), float_bits(torch, reference))
+
+
+def differing_block_count(torch, actual, reference, blocks):
+    """(number of cache blocks with a differing element, the first few), for a readback that is not equal."""
+    differing = float_bits(torch, actual) != float_bits(torch, reference)
+    found = differing.reshape(blocks, -1).any(dim=1).nonzero().flatten().tolist()
+    return len(found), found[:8]
 
 
 class PageRig:
@@ -470,12 +488,15 @@ def run_page_case(prig, hw, case, report):
     cache_s = [rig.upload(zero.clone(), ttnn.bfloat8_b) for unused in range(2)]
     if regime == 'exact':
         cache_p = [rig.upload(zero.clone(), ttnn.bfloat8_b) for unused in range(2)]
+        previous = [rig.host(value) for value in cache_p]
     else:
         # S0: both caches device-packed random content over every block the plan touches (the served writer made it), then a copy.
         run_fill(prig, report, name, cache_s, case['touched'], regime, case['seed'], width)
         cache_p = [ttnn.clone(value, memory_config=ttnn.DRAM_MEMORY_CONFIG) for value in cache_s]
         rig.owned.extend(cache_p)
-        record('fill_equal', None, all(bits_equal(torch, rig.host(a), rig.host(b)) for a, b in zip(cache_s, cache_p)))
+        previous = [rig.host(value) for value in cache_p]
+        record('fill_equal', None, all(bits_equal(torch, rig.host(a), b) for a, b in zip(cache_s, previous)))
+    report.setdefault('page', {}).setdefault('readback_dtype', str(previous[0].dtype))
     tables = [torch.tensor(expand_tables(table), dtype=torch.int32) for table in case['tables']]
     pages = rig.upload(tables[0], ttnn.int32)
     first = case['steps'][0]
@@ -490,21 +511,29 @@ def run_page_case(prig, hw, case, report):
     def page_op():
         prig.page(cache_p, packed, positions, pages, source)
 
-    def execute(operation, key):
+    def prepare():
+        """Replay modes: warm BOTH operations eagerly, then capture both, so that nothing allocates beside a live trace (run 38043860510 logged 'Allocating device
+        buffers is unsafe due to the existence of an active trace' when the page operation's L1 copies were made after the served trace existed)."""
         nonlocal traces
-        if mode == 'eager':
-            operation()
+        if traces is not None:
             return
-        traces = traces or {}
-        if key not in traces:
-            operation()
-            ttnn.synchronize_device(rig.mesh)
+        served_op()
+        page_op()
+        ttnn.synchronize_device(rig.mesh)
+        traces = {}
+        for key, operation in (('served', served_op), ('page', page_op)):
             trace = ttnn.begin_trace_capture(rig.mesh, cq_id=0)
             try:
                 operation()
             finally:
                 ttnn.end_trace_capture(rig.mesh, trace, cq_id=0)
             traces[key] = trace
+
+    def execute(operation, key):
+        if mode == 'eager':
+            operation()
+            return
+        prepare()
         ttnn.execute_trace(rig.mesh, traces[key], cq_id=0, blocking=True)
 
     try:
@@ -524,18 +553,19 @@ def run_page_case(prig, hw, case, report):
                 result = bits_equal(torch, page_host, served_host)
                 extra = {}
                 if not result:
-                    differing = (page_host.contiguous().view(torch.int16) != served_host.contiguous().view(torch.int16))
-                    blocks = differing.reshape(total_blocks(width), -1).any(dim=1).nonzero().flatten().tolist()
-                    extra = dict(differing_blocks=len(blocks), sample_blocks=blocks[:8])
+                    count, sample = differing_block_count(torch, page_host, served_host, total_blocks(width))
+                    extra = dict(differing_blocks=count, sample_blocks=sample)
                 record('served_equal_' + label, step['step'], result, table=step['table'], **extra)
+                # equal bits mean nothing if neither writer wrote: every step must change the page cache
+                record('wrote_' + label, step['step'], not bits_equal(torch, page_host, previous[index]))
+                previous[index] = page_host
                 if expected is not None:
                     expected[index].apply(expand_tables(case['tables'][step['table']]), step['positions'], payloads[index])
                     record('host_equal_' + label, step['step'], bits_equal(torch, page_host, expected[index].values), table=step['table'])
-        before = [rig.host(value) for value in cache_p]
         execute(page_op, 'page')
         ttnn.synchronize_device(rig.mesh)
         for index, label in enumerate(('k', 'v')):
-            record('twice_equal_' + label, None, bits_equal(torch, rig.host(cache_p[index]), before[index]))
+            record('twice_equal_' + label, None, bits_equal(torch, rig.host(cache_p[index]), previous[index]))
         unchanged = all(tuple(rig.host(packed[index]).shape) == (1, BLOCK_ROWS, PADDED_HEADS, HEAD_DIM)
                         and torch.equal(rig.host(packed[index]).contiguous().view(torch.int16),
                                         payloads[index].unsqueeze(0).contiguous().view(torch.int16)) for index in range(2))
@@ -565,6 +595,9 @@ def run_noop_case(prig, hw, case, report):
     blocks = case['blocks']
     run_fill(prig, report, name, caches, blocks, regime, case['seed'], width)
     stored = [rig.host(value) for value in caches]
+    report.setdefault('page', {}).setdefault('readback_dtype', str(stored[0].dtype))
+    for index, label in enumerate(('k', 'v')):
+        record('stored_nonzero_' + label, None, bool((stored[index] != 0).any()))
     tables = torch.zeros(BLOCK_ROWS, width, dtype=torch.int32)
     entry = case['entry']
     positions = rig.upload(torch.zeros(BLOCK_ROWS, dtype=torch.int32), ttnn.int32)
@@ -602,9 +635,8 @@ def run_noop_case(prig, hw, case, report):
                 result = bits_equal(torch, actual, stored[index])
                 extra = {}
                 if not result:
-                    differing = (actual.contiguous().view(torch.int16) != stored[index].contiguous().view(torch.int16))
-                    changed = differing.reshape(total_blocks(width), -1).any(dim=1).nonzero().flatten().tolist()
-                    extra = dict(differing_blocks=len(changed), sample_blocks=changed[:8])
+                    count, sample = differing_block_count(torch, actual, stored[index], total_blocks(width))
+                    extra = dict(differing_blocks=count, sample_blocks=sample)
                 record('noop_equal_' + label, number, result, **extra)
     finally:
         ttnn.synchronize_device(rig.mesh)

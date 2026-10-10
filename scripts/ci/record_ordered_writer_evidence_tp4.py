@@ -90,7 +90,7 @@ def page_problems(report, root=HERE):
         problems.append('%d of %d page checks exact' % (exact, len(checks)))
     names = {check.get('name') for check in checks}
     for wanted in ('served_equal_k', 'served_equal_v', 'host_equal_k', 'host_equal_v', 'twice_equal_k', 'twice_equal_v', 'noop_equal_k',
-                   'noop_equal_v', 'fill_equal'):
+                   'noop_equal_v', 'fill_equal', 'wrote_k', 'wrote_v', 'stored_nonzero_k', 'stored_nonzero_v'):
         if wanted not in names:
             problems.append('no %s check recorded' % wanted)
     seen = {(check.get('regime'), check.get('source'), check.get('mode'), check.get('width')) for check in checks if check.get('kind') == 'page'}
