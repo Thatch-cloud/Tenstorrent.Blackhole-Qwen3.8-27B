@@ -226,7 +226,10 @@ load):
 | store: put / get / put with eviction | 24 us / 0.5 us / 5-9 us per block | | |
 
 At Q1's device rates (4,096 blocks) one 254k session's spill reads in about 0.65 s and its restore writes in about 0.39 s (a 128k one in
-0.34 s and 0.20 s), on top of the host column above and not overlapped with it.
+0.34 s and 0.20 s), on top of the host column above and not overlapped with it. Measured end to end in T2 (below), the spill ran at
+1.28 GB/s (512-block flushes of 1.14 GB in about 0.89 s: the slab's first fill, page-fault bound as the CPU bench predicted, so about 3.6 s for
+a 128k session and 6.9 s for a 254k one while the slab is still filling) and the audited restore at 0.92-0.97 GB/s (about 4.8 s and 9.3 s), most of
+which is the digest of every block (`verify=all`, 1.5 GB/s) and the read-back, not the device; the timed arm's `sample` restore is T3's figure.
 
 So the cost of a returning 254k turn is dominated by two device transfers of about 8.8 GB (the restore, and the spill of the
 blocks it displaces from a full pool, which happens in the same step), the digest check if `all` is on, and then the tail
@@ -257,6 +260,16 @@ checkpoint store's own eviction counters moved. The job pack, its order and its 
   nothing, so the tier spilled and restored nothing (`tier_cap_bytes`, `tier_on` only); the arm failed only on the multi-user SDPA audit's
   passing-line rule, which a one-request-at-a-time arm can never satisfy and is now not asked of one (`c2_prefix_gate.sdpa_audit_optional`: only
   while no packed round of two or more users ran; a logged line is still judged).
+
+* T2, `tier-returning` (audits on): 24 fresh-salt floods (1,341,743 tokens over a 1,277,952-token pool) pushed three ~56k sessions out of the
+  device pool, and all three came back from host RAM at the oracle's Q (53,248, 49,152 and 53,248 of L=58,564, 54,624 and 59,010; 833, 769 and
+  833 blocks, 1.86, 1.71 and 1.86 GB, in 1.96, 1.87 and 1.92 s with every block's digest checked and every block read back and compared); one
+  more turn on a restored session hit at 55,296 of 59,613. All five pairs IDENTICAL (solo 5 of 5), program count unchanged. Counters:
+  8,053 blocks (17.94 GB) spilled in 79 flushes (13.99 s), 2,435 blocks (5.43 GB) restored, 2,435 read-backs and digest checks, and zero spill
+  failures, restore failures, digest failures and read-back mismatches; 8,772 checkpoints kept because their block went to the tier, 3 dropped;
+  719 blocks not spilled for the per-step cap and 715 as useless. The tier's kill switch latched it (`tier_latched` 1) and the next turn was
+  exact. 39 checkpoints stored preconverted, 8 restores compared on the card, all equal. The arm took 823.5 s. Like T1 it failed only on the
+  multi SDPA audit's passing-line rule (the same fix); nothing else was found.
 
 ### Not done
 
