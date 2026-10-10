@@ -1184,6 +1184,8 @@ class ProfileTests(unittest.TestCase):
         # the op-fusion programme's two combined twins (gate only) carry the four levers on purpose, and the audit flag on the audited one
         combined = {fusion.NAMESPACE + 'all': {SELECT, READ, KEYED, LEAN}, fusion.NAMESPACE + 'all-audit': {SELECT, READ, KEYED, LEAN, AUDIT}}
         combined.update((name, {SELECT, READ, KEYED, LEAN}) for name in fusion.ship_names())            # the ship candidate: the timed combined arm as a traffic profile
+        # the host-gap package WPH's composition twins (-fx-wph-*) are the combined timed arm plus their own flags, so they carry the four levers (never the audit flag)
+        combined.update({name: {SELECT, READ, KEYED, LEAN} for name in data['profiles'] if name.startswith(fusion.NAMESPACE + 'wph-')})
         for name, profile in data['profiles'].items():
             if name in self.ADDED:
                 continue

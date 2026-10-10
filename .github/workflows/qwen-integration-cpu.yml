@@ -299,6 +299,9 @@ jobs:
           # WP7
           python -B -m unittest test_draft_permute_tp test_draft_qkv_tp test_draft_head64_tp
           python -B -m unittest discover -s optimisation/ttnn-op/draft_permute -p 'test_*.py'
+          # WPH
+          python -B -m unittest test_prestage_diff test_write_packed_lean test_batched_reads_tp test_hostgap_instr test_hostgap_wph
+          python -B -m unittest discover -s optimisation/ttnn-op/batched_reads -p 'test_*.py'
           # fusion-wp end
           bash -n scripts/ci/run-simulator.sh
           bash -n scripts/ci/simulator-suite.sh
