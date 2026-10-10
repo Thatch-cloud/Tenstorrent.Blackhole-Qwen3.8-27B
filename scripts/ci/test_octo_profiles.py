@@ -13,6 +13,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import make_octo_profiles as twins  # noqa: E402
+import make_octo2_profiles as octo2_twins  # noqa: E402
 import make_parked_profiles as parked  # noqa: E402
 import serving_c2_contract as contract  # noqa: E402
 import serving_octo as octo  # noqa: E402
@@ -149,7 +150,7 @@ class TwinTests(unittest.TestCase):
 class NoOtherProfileTests(unittest.TestCase):
     def test_no_other_profile_and_not_the_image_names_a_flag(self):
         for name, profile in profiles().items():
-            if name in twins.twin_names():
+            if name in twins.twin_names() or name in octo2_twins.twin_names():     # the lever twins of tp4/octo-2 are octo twins plus their own flags
                 continue
             with self.subTest(profile=name):
                 for flag in twins.LEVERS:

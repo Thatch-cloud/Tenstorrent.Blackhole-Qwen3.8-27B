@@ -409,6 +409,8 @@ scripts/ci/sdpa_multi_tp.py
 scripts/ci/sdpa_multi_mask_tp.cpp
 scripts/ci/sdpa_multi_gather_tp.cpp
 scripts/ci/sdpa_multi_audit_tp.cpp
+# tp4/octo-2 Lever 3 (QWEN_FAST_OCTO_ATTN_BUNDLE, gate only): extent_attention_fold_tp imports octo_attn_bundle when the flag is set; it reuses the sdpa_multi files above and attention_block_fold_tp.
+scripts/ci/octo_attn_bundle.py
 # tp4/w2 (QWEN_FAST_TP4_CONV_GATES_SPREAD, default off): gdn_block_conv_tp imports gdn_conv_gates_spread when the flag is set; the two kernels are its JIT sources.
 scripts/ci/gdn_conv_gates_spread.py
 scripts/ci/gdn_conv_gates_spread_reader.cpp

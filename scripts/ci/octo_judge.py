@@ -24,6 +24,13 @@ THE RULES OF AN OCTO ARM (judge). Read from the arm's profile env and its contai
   solo       QWEN_FAST_SOLO_PACKED=1: at least one `packed padded round live=1` line (the lone-user round ran on the padded block) and no `packed padded skipped
              live=1 eligible=1` line (an eligible lone user must not have gone to the per-request engines).
 
+THE TP4/OCTO-2 LEVERS (lever_problems; each default off, gate only, and a leak of its markers on a profile without its flag fails the arm):
+  draft      QWEN_FAST_OCTO_DRAFT=1 (octo_draft_tp, draft_problems): the attach admitted it once and logged its UNQUALIFIED lines; the pass ENGAGED once (slots 0-7, heads 64/16,
+             rows 64, block 8) and served at least MIN_ROUNDS rounds, and at least half of the octo rounds at eight live (a mounted pass is not an executed one: the round lines are
+             written by the coordinator after the pass was enqueued); no fallback line, no disabled marker, no refusal. The cost of the lever is tau, not text: judged by
+             octo2_report (committed tokens per round, the draft's own time), not here.
+  bundle     QWEN_FAST_OCTO_ATTN_BUNDLE (octo_attn_bundle.bundle_problems, Lever 3).
+
 PAIRED TIMING (pair_verdict). Under `alternate` the counted rounds come in pairs (octo, then m3) on ONE boot, the same users at the same positions. A round's
 cycle is its step plus the gap before it (gap_ms: the drafts, the host work and the scheduler between two steps), so the drafts both shapes pay are in it. The
 per-seat rate of a round is committed / live / cycle. GO at MIN_GAIN (+10%) committed tokens per second per seat at 8 live, from the median of the per-pair ratios AND
@@ -106,7 +113,73 @@ def judge(env, container_text):
         problems.extend(octo_problems(env, asked, found, facts, text))
     if solo:
         problems.extend(solo_problems(text, facts))
+    problems.extend(lever_problems(env, text, facts, found))
     return problems, facts
+
+
+DRAFT_FLAG = 'QWEN_FAST_OCTO_DRAFT'
+BUNDLE_FLAGS = ('QWEN_FAST_OCTO_ATTN_BUNDLE', 'QWEN_FAST_OCTO_ATTN_BUNDLE_AUDIT')
+BUNDLE_MARKER = '[OCTO-ATTN-BUNDLE]'
+DRAFT_MIN_SHARE = 0.5
+
+
+def flag_on(env, name):
+    return str((env or {}).get(name, '0')).strip() not in ('', '0')
+
+
+def lever_problems(env, text, facts, found):
+    """The tp4/octo-2 levers' rules (see the module docstring): each lever's own function, called whether its flag is set or not (off means no marker of it may appear)."""
+    problems = draft_problems(env, text, facts, found)
+    if any(flag_on(env, name) for name in BUNDLE_FLAGS) or BUNDLE_MARKER in text:
+        import octo_attn_bundle
+
+        problems.extend(octo_attn_bundle.bundle_problems(text, env))
+    return problems
+
+
+def draft_problems(env, text, facts, found):
+    """QWEN_FAST_OCTO_DRAFT: see the module docstring. Flag off, any of its lines is a leak."""
+    scan = markers.draft_scan(text)
+    wanted = str((env or {}).get(DRAFT_FLAG, '0')).strip()
+    problems = []
+    if wanted not in ('', '0') or scan['lines']:
+        facts.update(draft_rounds=len(scan['rounds']), draft_builds=sum(item['built'] for item in scan['rounds']), draft_fallbacks=len(scan['fallbacks']))
+    if wanted in ('', '0'):
+        if scan['lines']:
+            first = [line for line in text.splitlines() if markers.DRAFT_MARKER in line or markers.DRAFT_ENGAGED_MARKER in line or markers.DRAFT_DISABLED_MARKER in line][0]
+            problems.append('%d octo-draft line(s) on a profile without %s: the pass ran where nobody asked for it (first: %s)' % (scan['lines'], DRAFT_FLAG, first.strip()[:200]))
+        return problems
+    if wanted != '1':
+        return ['%s=%r is neither 0 nor 1' % (DRAFT_FLAG, wanted)]
+    if mode(env) not in ('live', 'alternate'):
+        problems.append('%s=1 needs %s=live or alternate: the pass drafts the octo rounds' % (DRAFT_FLAG, OCTO_FLAG))
+    if scan['refused']:
+        problems.append('%d [OCTO-DRAFT] refused line(s): the attach did not admit the pass' % scan['refused'])
+    if scan['admitted'] != 1:
+        problems.append('%d [OCTO-DRAFT] admitted lines (one wanted): the attach admitted the pass %s' % (scan['admitted'], 'never' if not scan['admitted'] else 'more than once'))
+    if not scan['unqualified']:
+        problems.append('no [OCTO-DRAFT] UNQUALIFIED line: the admission did not say what is unqualified')
+    if scan['disabled']:
+        problems.append('%d "%s" line(s): the pass was given up for the process' % (scan['disabled'], markers.DRAFT_DISABLED_MARKER))
+    if scan['fallbacks']:
+        problems.append('%d [OCTO-DRAFT] fallback round(s) (first: round %d, %s): the quads drafted where the pass was asked for'
+                        % (len(scan['fallbacks']), scan['fallbacks'][0]['round'], scan['fallbacks'][0]['reason']))
+    if scan['engaged_lines'] != 1 or len(scan['engaged']) != 1:
+        problems.append('%d "%s slots=[0,...,7] heads=64/16 rows=64 block=8" line(s) (one wanted): the pass %s'
+                        % (scan['engaged_lines'], markers.DRAFT_ENGAGED_MARKER, 'never captured and replayed' if not scan['engaged_lines'] else 'engaged more than once or at another geometry'))
+    expected_conv = str((env or {}).get('QWEN_FAST_OCTO_DRAFT_CONV') or '110')
+    if scan['engaged'] and scan['engaged'][0] != expected_conv:
+        problems.append('the pass engaged with conv=%s and the profile asks %s' % (scan['engaged'][0], expected_conv))
+    if len(scan['rounds']) < MIN_ROUNDS:
+        problems.append('only %d round(s) were drafted by the pass (%d wanted): the flag is set and the pass did not execute' % (len(scan['rounds']), MIN_ROUNDS))
+    elif not any(item['built'] for item in scan['rounds']):
+        problems.append('no [OCTO-DRAFT] round line says built=1: the pass was never captured in a round')
+    octo_at_8 = [item for item in markers.rounds(text) if item['shape'] == 'octo' and item['live'] == 8]
+    facts['draft_octo_rounds_at_8'] = len(octo_at_8)
+    if len(octo_at_8) >= MIN_ROUNDS and len(scan['rounds']) < DRAFT_MIN_SHARE * len(octo_at_8):
+        problems.append('the pass drafted %d rounds and %d octo rounds ran at 8 live (at least %d%% wanted): most octo rounds were drafted by the quads'
+                        % (len(scan['rounds']), len(octo_at_8), int(DRAFT_MIN_SHARE * 100)))
+    return problems
 
 
 def octo_problems(env, asked, found, facts, text=''):

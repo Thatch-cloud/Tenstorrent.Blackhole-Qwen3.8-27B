@@ -478,6 +478,13 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         import octo_draft_tp
 
         octo_draft_tp.admission(log=pindiag)
+    elif any(os.environ.get(name, '0') not in ('', '0') for name in ('QWEN_FAST_OCTO_ATTN_BUNDLE', 'QWEN_FAST_OCTO_ATTN_BUNDLE_AUDIT')):
+        # ...and so is the octo block's bundled attention (tp4/octo-2 Lever 3) beside no octo block.
+        import octo_attn_bundle
+
+        bundle_problems = octo_attn_bundle.admission_problems()
+        if bundle_problems:
+            raise ValueError('QWEN_FAST_OCTO_ATTN_BUNDLE is refused: %s' % '; '.join(bundle_problems))
     if os.environ.get('QWEN_FAST_SOLO_PACKED', '0') != '0':
         import serving_octo
 

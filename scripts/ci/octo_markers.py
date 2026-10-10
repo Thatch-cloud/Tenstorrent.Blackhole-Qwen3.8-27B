@@ -73,6 +73,39 @@ def admissions(text):
             for mode, rows, users, min_live in ADMITTED_PATTERN.findall(text or '')]
 
 
+# QWEN_FAST_OCTO_DRAFT (octo_draft_tp; gate only): ONE eight-seat, eight-row draft pass for the octo rounds. Its lines are not [OCTO] lines (octo_draft_tp owns them):
+#   [OCTO-DRAFT] admitted rows=64 users=8 block=8 proposals=7 (gate only)                  once, at the attach
+#   [OCTO-DRAFT] UNQUALIFIED (gate only) (<i>/<n>): <a card question> [job <jobs>]          one per question
+#   [OCTO-DRAFT] refused: <reason>                                                           the attach then raises
+#   [PINDIAG] octo draft engaged slots=[0,...,7] heads=64/16 rows=64 block=8 conv=<mode>    once, after the first capture and replay
+#   [OCTO-DRAFT] round=<n> built=<0|1> ms=<f>                                                every round the pass served (ms: the host time to enqueue it)
+#   [OCTO-DRAFT] fallback round=<n> reason=<...>                                             a round the quads drafted instead (short DRAM, a failure)
+#   [PINDIAG] octo draft disabled round=<n> failures=<k> reason=<...>                        the pass given up for the process
+#   [OCTO-DRAFT] released slots=<...>                                                        the trace closed because a member closed
+DRAFT_MARKER = '[OCTO-DRAFT]'
+DRAFT_ENGAGED_MARKER = '[PINDIAG] octo draft engaged'
+DRAFT_DISABLED_MARKER = '[PINDIAG] octo draft disabled'
+DRAFT_ADMITTED_PATTERN = re.compile(r'\[OCTO-DRAFT\] admitted rows=64 users=8 block=8 proposals=7 \(gate only\)')
+DRAFT_ENGAGED_PATTERN = re.compile(r'\[PINDIAG\] octo draft engaged slots=\[0,1,2,3,4,5,6,7\] heads=64/16 rows=64 block=8 conv=(110|80|halves)')
+DRAFT_ROUND_PATTERN = re.compile(r'\[OCTO-DRAFT\] round=(\d+) built=([01]) ms=([0-9.]+)')
+DRAFT_FALLBACK_PATTERN = re.compile(r'\[OCTO-DRAFT\] fallback round=(\d+) reason=(\S+)')
+
+
+def draft_scan(text):
+    """The facts of the octo draft's lines in one container log."""
+    text = text or ''
+    lines = text.splitlines()
+    return dict(admitted=len(DRAFT_ADMITTED_PATTERN.findall(text)),
+                unqualified=sum(1 for line in lines if DRAFT_MARKER + ' UNQUALIFIED (gate only)' in line),
+                refused=sum(1 for line in lines if DRAFT_MARKER + ' refused' in line),
+                engaged=[conv for conv in DRAFT_ENGAGED_PATTERN.findall(text)],
+                engaged_lines=sum(1 for line in lines if DRAFT_ENGAGED_MARKER in line),
+                disabled=sum(1 for line in lines if DRAFT_DISABLED_MARKER in line),
+                rounds=[dict(round=int(number), built=int(built), ms=float(ms)) for number, built, ms in DRAFT_ROUND_PATTERN.findall(text)],
+                fallbacks=[dict(round=int(number), reason=reason) for number, reason in DRAFT_FALLBACK_PATTERN.findall(text)],
+                lines=sum(1 for line in lines if DRAFT_MARKER in line or DRAFT_ENGAGED_MARKER in line or DRAFT_DISABLED_MARKER in line))
+
+
 def marker_lines(text):
     """Every line of the log that carries an [OCTO] marker."""
     return [line for line in (text or '').splitlines() if MARKER in line]

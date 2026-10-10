@@ -944,6 +944,13 @@ class AdmissionTests(unittest.TestCase):
         record = octo.admission(dict(FLAGS), log=lines.append)
         self.assertEqual(record, dict(rows=64, users=8, block=8, proposals=7))
 
+    def test_the_attach_refuses_the_bundle_flag_beside_no_octo_block_too(self):
+        text = (HERE / 'serving_runtime.py').read_text(encoding='utf-8')
+        self.assertIn('octo_attn_bundle.admission_problems()', text)
+        import octo_attn_bundle
+
+        self.assertTrue(octo_attn_bundle.admission_problems(dict(QWEN_FAST_OCTO_ATTN_BUNDLE='4', QWEN_FAST_TP='4')), 'no octo block: refused by name')
+
     def test_the_attach_refuses_the_flag_beside_no_octo_block(self):
         text = (HERE / 'serving_runtime.py').read_text(encoding='utf-8')
         self.assertIn("elif os.environ.get('QWEN_FAST_OCTO_DRAFT', '0') != '0':", text)
@@ -1294,6 +1301,115 @@ class OffIsTodayTests(unittest.TestCase):
             outputs = module.pooled_draft_output_shapes(8, 16)
         self.assertNotIn(tuple(range(8)), masks)
         self.assertNotIn(tuple(range(8)), outputs)
+
+
+# ---------------------------------------------------------------------------------------------
+# The smoke rule (octo_judge.draft_problems), on a log the producers write.
+# ---------------------------------------------------------------------------------------------
+
+class DraftJudgeTests(unittest.TestCase):
+    def env(self, **extra):
+        import test_octo_judge as judged
+
+        return judged.env_of('alternate', 6, QWEN_FAST_OCTO_DRAFT='1', **extra)
+
+    def boot(self, pairs=20, *, draft_rounds=None, admitted=True, engaged=True, fallback=False, disabled=False, refused=False, conv='110'):
+        """An alternate octo boot (test_octo_judge.Boot: the real admission and OctoState lines) with the draft pass's lines in the order the coordinator writes them."""
+        import test_octo_judge as judged
+
+        boot = judged.Boot(programs=lambda: 5000)
+        if admitted:
+            octo.log_admitted(boot.lines.append)
+        if refused:
+            boot.lines.append(octo.REFUSED_LINE + ': because')
+        for index in range(pairs):
+            boot.round('octo')
+            if draft_rounds is None or index < draft_rounds:
+                if engaged and index == 0:
+                    with four_cards():
+                        octo.note(list(range(8)), conv, log=boot.lines.append)
+                boot.lines.append(octo.ROUND_LINE.format(round=index + 1, built=int(index == 0), ms='450.0' if index == 0 else '6.1'))
+            boot.round('m3')
+        if fallback:
+            boot.lines.append(octo.FALLBACK_LINE.format(round=3, reason='dram_reserve:headroom=100'))
+        if disabled:
+            boot.lines.append('%s round=9 failures=2 reason=consecutive_failures=2' % octo.DISABLED_MARKER)
+        return boot.text()
+
+    def judge(self, text, **extra):
+        import octo_judge
+
+        with patch.object(octo, '_NOTED', []):
+            return octo_judge.judge(self.env(**extra), text)
+
+    def test_a_clean_boot_passes_and_reports_the_passs_rounds(self):
+        with patch.object(octo, '_NOTED', []):
+            text = self.boot()
+        problems, facts = self.judge(text)
+        self.assertEqual(problems, [])
+        self.assertEqual((facts['draft_rounds'], facts['draft_builds'], facts['draft_fallbacks'], facts['draft_octo_rounds_at_8']), (20, 1, 0, 20))
+
+    def test_each_missing_piece_is_named(self):
+        cases = (('not admitted', dict(admitted=False), 'admitted lines (one wanted)'), ('refused', dict(refused=True), 'refused line(s)'),
+                 ('never engaged', dict(engaged=False), 'octo draft engaged'), ('too few rounds', dict(draft_rounds=5), '5 round(s) were drafted by the pass'),
+                 ('a fallback', dict(fallback=True), 'fallback round(s)'), ('given up', dict(disabled=True), 'given up for the process'),
+                 ('most octo rounds drafted by the quads', dict(pairs=40, draft_rounds=16), 'most octo rounds were drafted by the quads'))
+        for label, options, fragment in cases:
+            with patch.object(octo, '_NOTED', []):
+                text = self.boot(**options)
+            problems, facts = self.judge(text)
+            with self.subTest(label):
+                self.assertTrue(problems, label)
+                if fragment:
+                    self.assertTrue(any(fragment in problem for problem in problems), problems)
+
+    def test_the_conv_mode_the_profile_asks_is_the_one_that_engaged(self):
+        with patch.object(octo, '_NOTED', []):
+            text = self.boot(conv='80')
+        problems, facts = self.judge(text)
+        self.assertTrue(any('engaged with conv=80 and the profile asks 110' in problem for problem in problems), problems)
+        self.assertEqual(self.judge(text, QWEN_FAST_OCTO_DRAFT_CONV='80')[0], [])
+
+    def test_the_flag_off_arm_passes_with_no_line_and_fails_on_any(self):
+        import octo_judge
+        import test_octo_judge as judged
+
+        boot = judged.Boot(programs=lambda: 5000)
+        boot.alternate(20)
+        env = judged.env_of('alternate', 6)
+        self.assertEqual(octo_judge.judge(env, boot.text())[0], [])
+        with patch.object(octo, '_NOTED', []):
+            leaky = self.boot()
+        problems, facts = octo_judge.judge(env, leaky)
+        self.assertTrue(any('octo-draft line(s) on a profile without QWEN_FAST_OCTO_DRAFT' in problem for problem in problems), problems)
+        problems, facts = octo_judge.judge(dict(env, QWEN_FAST_OCTO_DRAFT='0'), leaky)
+        self.assertTrue(any('octo-draft line(s)' in problem for problem in problems), problems)
+
+    def test_a_bad_value_and_the_flag_beside_no_octo_mode_are_named(self):
+        import octo_judge
+
+        self.assertTrue(any('neither 0 nor 1' in problem for problem in octo_judge.judge(dict(self.env(), QWEN_FAST_OCTO_DRAFT='2'), '')[0]))
+        env = self.env()
+        env['QWEN_FAST_OCTO'] = 'off'
+        self.assertTrue(any('needs QWEN_FAST_OCTO=live or alternate' in problem for problem in octo_judge.judge(env, '')[0]))
+
+    def test_the_producers_lines_are_the_markers_templates(self):
+        import octo_markers
+
+        lines = []
+        octo.log_admitted(lines.append)
+        with patch.object(octo, '_NOTED', []), four_cards():
+            octo.note(list(range(8)), '110', log=lines.append)
+        lines.append(octo.ROUND_LINE.format(round=7, built=1, ms='12.5'))
+        lines.append(octo.FALLBACK_LINE.format(round=8, reason='dram_reserve:headroom=1'))
+        scan = octo_markers.draft_scan('\n'.join(lines))
+        self.assertEqual((scan['admitted'], scan['unqualified'], scan['engaged'], scan['rounds'], scan['fallbacks']),
+                         (1, len(octo.UNQUALIFIED_ITEMS), ['110'], [dict(round=7, built=1, ms=12.5)], [dict(round=8, reason='dram_reserve:headroom=1')]))
+        import test_octo_judge as judged
+
+        # the coordinator renders the disabled marker through audit_log's brace format
+        text = '%s round=9 failures=2 reason=x' % octo.DISABLED_MARKER
+        self.assertEqual(octo_markers.draft_scan(text)['disabled'], 1)
 
 
 # ---------------------------------------------------------------------------------------------
