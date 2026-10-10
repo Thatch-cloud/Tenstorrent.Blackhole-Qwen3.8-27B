@@ -22,6 +22,8 @@ import sys
 
 import make_fusion_profiles as fusion
 
+INCLUDED_NEEDS = re.compile(r'^# NEEDS (.+?) <- (.+)$', re.M)
+
 HERE = Path(__file__).resolve().parent
 FOLDER = HERE / 'references' / 'fusion-jobs'
 
@@ -78,9 +80,52 @@ def arms(plan):
     return middle + [arm for arm in out if arm['last']]
 
 
-def jobs(plan):
-    """[dict(name, mode, minutes, actions, profile, tests, why, needs)] in the order they are run: B0, X0, every audit, every ABAB, Z."""
-    rows = [
+def included(plan, references):
+    """[(section, row)] of the other packs' templates folded in (pack_include): each template's text with the pack's one image tag, its name behind the
+    include's prefix, its minutes and mode from its own ORDER.txt, and its NEEDS lines renamed (its B0 is this pack's X0)."""
+    rows, needs, taken = [], [], set()
+    for item in plan.get('pack_include', ()):
+        source = Path(references) / item['folder']
+        order = source / 'ORDER.txt'
+        if not order.is_file():
+            raise fusion.ManifestError('%s: pack_include folder %s has no ORDER.txt under %s' % (item['wp'], item['folder'], references))
+        text = order.read_text(encoding='utf-8')
+        lines = dict((line.split()[0], line.split()) for line in text.splitlines() if line.strip() and not line.startswith('#'))
+        for section, names in (('audit', item['audits']), ('timed', item['timed'])):
+            for name in names:
+                path = source / (name + '.env')
+                if not path.is_file() or name not in lines:
+                    raise fusion.ManifestError('%s: pack_include template %s is not in %s (a .env and a line of its ORDER.txt)' % (item['wp'], name, item['folder']))
+                body = path.read_text(encoding='utf-8')
+                if not re.search(r'^C2_IMAGE_TAG=\S+$', body, re.M):
+                    raise fusion.ManifestError('%s: %s/%s.env names no C2_IMAGE_TAG' % (item['wp'], item['folder'], name))
+                body = re.sub(r'^C2_IMAGE_TAG=\S+$', 'C2_IMAGE_TAG=%s' % IMAGE, body, flags=re.M)
+                note = '# Folded into the op-fusion pack by make_fusion_jobs.py from references/%s/%s.env (pack_include, %s): the one image, the template otherwise as its package wrote it.\n' % (
+                    item['folder'], name, item['wp'])
+                new_name = item['prefix'] + name
+                if new_name in taken:
+                    raise fusion.ManifestError('%s: the folded template name %s is used twice' % (item['wp'], new_name))
+                taken.add(new_name)
+                rows.append((section, dict(name=new_name, mode='soft', minutes=int(lines[name][3]), text=note + body, needs=(), folded=item)))
+        short = lambda token: item['prefix'] + token       # noqa: E731
+        for left, right in INCLUDED_NEEDS.findall(text):
+            mine = [short(token) for token in left.split() if token not in ('B0', 'Z')]
+            theirs = [('X0' if token == 'B0' else short(token)) for token in right.split()]
+            kept = set(row['name'].split('-')[0] for _s, row in rows)
+            mine = [token for token in mine if token in kept]
+            theirs = [token for token in theirs if token == 'X0' or token in kept]
+            if mine and theirs:
+                needs.append(('%s <- %s' % (' '.join(mine), ' '.join(theirs)), mine[0]))
+    owners = dict((row['name'].split('-')[0], row) for _section, row in rows)
+    for line, first in needs:
+        owners[first]['needs'] = owners[first]['needs'] + (line,)
+    return rows
+
+
+def jobs(plan, references=None):
+    """[dict(name, mode, minutes, actions, profile, tests, why, needs)] in the order they are run: B0, X0, every audit (the arms that wait last), every ABAB (the
+    arms that wait last), Z; the other packs' folded templates (pack_include) after the ordinary arms of their section, before the arms that wait last."""
+    head = [
         dict(name='B0-build', mode='stop', minutes=MINUTES['build'], actions='build', profile='c2-packed-tp4', tests='', bake=SHIP, needs=(),
              why=("B0 (STOP): the window image, built from the pushed branch head with the SHIP profile baked as the image's serving default (ENV QWEN_C2_PROFILE) and THATCH_SERVING_SESSION_CAP baked as its "
                   "max-num-seqs (8): the SAME default production runs (%s), so the image could serve; the gate-only fusion twins are in its profiles file and the window selects them per job. "
@@ -93,28 +138,27 @@ def jobs(plan):
                   % MINUTES['status'])),
     ]
     every = arms(plan)
+    folded = included(plan, references) if references is not None else []
+    audits, timed = {False: [], True: []}, {False: [], True: []}
     for arm in every:
-        if not arm['audit']:
-            continue
         prefix = arm['prefix']
-        rows.append(dict(
-            name='%sA-%s-audit-attach' % (prefix, arm['id']), mode='soft', minutes=MINUTES['audit'], actions='reset smoke', profile=arm['audit'], tests=SMOKE_TESTS,
-            needs=('%sA <- X0' % prefix,),
-            why=("%sA (EXACTNESS, %s): %s = the production profile plus %s; the audit runs the served composition beside the lever on the device and logs exact=True or a mismatch. "
-                 "READ: c2_smoke_check clean with the fusion rules (the engaged line for the lever, no fell-back line, at least one audit line carrying exact=True, no 'audit mismatch'), no stall, every answer complete. "
-                 "ANY mismatch, fallback or missing audit line is NO-GO for the lever and skips its timed jobs. %s Duration (estimate): %d minutes."
-                 % (prefix, arm['wp'], arm['audit'], env_text(arm['env']), fusion.sentence(arm['reason']), MINUTES['audit']))))
-    for arm in every:
+        if arm['audit']:
+            audits[bool(arm['last'])].append(dict(
+                name='%sA-%s-audit-attach' % (prefix, arm['id']), mode='soft', minutes=MINUTES['audit'], actions='reset smoke', profile=arm['audit'], tests=SMOKE_TESTS,
+                needs=('%sA <- X0' % prefix,),
+                why=("%sA (EXACTNESS, %s): %s = the production profile plus %s; the audit runs the served composition beside the lever on the device and logs exact=True or a mismatch. "
+                     "READ: c2_smoke_check clean with the fusion rules (the engaged line for the lever, no fell-back line, at least one audit line carrying exact=True, no 'audit mismatch'), no stall, every answer complete. "
+                     "ANY mismatch, fallback or missing audit line is NO-GO for the lever and skips its timed jobs. %s Duration (estimate): %d minutes."
+                     % (prefix, arm['wp'], arm['audit'], env_text(arm['env']), fusion.sentence(arm['reason']), MINUTES['audit']))))
         if not arm['timed']:
             continue
-        prefix = arm['prefix']
         gate = ['%sA' % prefix] if arm['audit'] else []
         legs = (('C1', 'control-timed', SHIP, 'the CONTROL (A1): the production profile itself, no lever', ['X0']),
                 ('L1', 'lever-timed', arm['timed'], 'the LEVER (B1): the production profile plus %s' % env_text(arm['env']), gate + ['%sC1' % prefix]),
                 ('C2', 'control-repeat', SHIP, 'the CONTROL again (A2)', ['%sL1' % prefix]),
                 ('L2', 'lever-repeat', arm['timed'], 'the LEVER again (B2)', ['%sC2' % prefix]))
         for leg, label, profile, what, needs in legs:
-            rows.append(dict(
+            timed[bool(arm['last'])].append(dict(
                 name='%s%s-%s-%s' % (prefix, leg, arm['id'], label), mode='soft', minutes=MINUTES['timed'], actions='reset smoke', profile=profile, tests=SMOKE_TESTS,
                 needs=('%s%s <- %s' % (prefix, leg, ' '.join(needs)),),
                 why=("%s%s (TIMED, %s, %s): %s; eight live (concurrent8_steady) in the %s pair of the ABAB, every boot a fresh reset. READ: c2_smoke_check clean (a lever arm also has its engaged line "
@@ -123,9 +167,13 @@ def jobs(plan):
                      "(text_mismatches empty). %s Duration (estimate): %d minutes."
                      % (prefix, leg, arm['name'], arm['wp'], what, 'first' if leg in ('C1', 'L1') else 'repeat', prefix, prefix, prefix, prefix,
                         fusion.sentence(arm['reason']), MINUTES['timed']))))
+    rows = (head + audits[False] + [row for section, row in folded if section == 'audit'] + audits[True]
+            + timed[False] + [row for section, row in folded if section == 'timed'] + timed[True])
     rows.append(dict(name='Z-reset', mode='soft', minutes=MINUTES['reset'], actions='status reset', profile=None, tests='', needs=(),
                      why=("Z: the window's end: status and an all-four reset, no agent start (the cards stay under development). (The owner restores production afterwards: card reset, link measurement, "
                           "topology republish, agent restart, deploy and the post-checks.) Duration (estimate): %d minutes." % MINUTES['reset'])))
+    for row in rows:
+        row.setdefault('text', None)
     return rows
 
 
@@ -134,6 +182,8 @@ def env_text(env):
 
 
 def render_env(row):
+    if row.get('text') is not None:
+        return row['text']
     lines = [HEADER % dict(image=IMAGE)]
     lines += ['# ' + piece for piece in wrap(row['why'])]
     lines += ['C2_CARDS=quad', 'C2_ACTIONS=%s' % row['actions'], 'C2_IMAGE_TAG=%s' % IMAGE]
@@ -197,6 +247,9 @@ def render_order(rows, plan, folder=FOLDER):
         "# THE PACKAGES' OWN FOLDERS (card-M and detail templates, their read rules and decision rules; under references/): %s." % (', '.join(packs) or 'none yet'),
         "# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.",
     ]
+    for item in plan.get('pack_include', ()):
+        lines.insert(-1, "# FOLDED IN: %s* are the templates of references/%s (%s), renamed and on the one image; their read and decision rules are that folder's ORDER.txt. %s" % (
+            item['prefix'], item['folder'], item['wp'], ' '.join(item['reason'].split())))
     for arm in every:
         if arm['last']:
             lines.insert(-1, "# LAST: %s (%s) runs after every other arm, audit and ABAB alike: %s" % (arm['prefix'], arm['name'], ' '.join(arm['last'].split())))
@@ -218,8 +271,9 @@ def render_order(rows, plan, folder=FOLDER):
 
 
 def generate(plan, folder=FOLDER):
-    """{file name: text} of the whole pack; `folder` is where the pack lives (the packages' own sub-folders beside it are named in ORDER.txt)."""
-    rows = jobs(plan)
+    """{file name: text} of the whole pack; `folder` is where the pack lives (the packages' own sub-folders beside it are named in ORDER.txt, and the packs named under
+    pack_include are read from beside it)."""
+    rows = jobs(plan, Path(folder).parent)
     out = dict(('%s.env' % row['name'], render_env(row)) for row in rows)
     out['ORDER.txt'] = render_order(rows, plan, folder)
     return out

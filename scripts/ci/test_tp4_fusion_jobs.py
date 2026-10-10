@@ -383,6 +383,116 @@ class ArmTests(unittest.TestCase):
         self.assertIn('under references/): none yet.', jobs_gen.generate(self.plan, Path(tempfile.mkdtemp()) / 'fusion-jobs')['ORDER.txt'])
 
 
+def mini_pack(references, image='tp4-other-1'):
+    """A references/ folder with a small pack of its own, as upload-p0-jobs is: two audits and three timed templates, NEEDS lines, B0 and Z."""
+    folder = Path(references) / 'mini-jobs'
+    folder.mkdir(parents=True)
+    for name, profile in (('A0-control', SHIP), ('A1-lever-audit', fusion.NAMESPACE + 's1-audit'), ('T0-control', SHIP), ('T1-lever', fusion.NAMESPACE + 's1'),
+                          ('T2-lever-only', fusion.NAMESPACE + 's1')):
+        (folder / (name + '.env')).write_text('# a template of the mini pack\nC2_CARDS=quad\nC2_ACTIONS=reset smoke\nC2_IMAGE_TAG=%s\nC2_PROFILE=%s\nC2_SMOKE_TESTS=warmup\n' % (image, profile),
+                                                encoding='utf-8')
+    (folder / 'ORDER.txt').write_text('\n'.join([
+        '# the mini pack', '# NEEDS A0 <- B0', '# NEEDS A1 <- A0', '# NEEDS T0 <- A0', '# NEEDS T1 T2 <- A1 T0', '# NEEDS T2 <- T1',
+        'B0-build stop %s 60' % image, 'A0-control stop %s 30' % image, 'A1-lever-audit stop %s 30' % image, 'T0-control soft %s 25' % image,
+        'T1-lever soft %s 25' % image, 'T2-lever-only soft %s 25' % image, 'Z-reset soft %s 10' % image]) + '\n', encoding='utf-8')
+    return folder
+
+
+INCLUDE = {'wp': 'WP0', 'pack_include': [{'folder': 'mini-jobs', 'prefix': 'MI', 'audits': ['A0-control', 'A1-lever-audit'],
+                                          'timed': ['T0-control', 'T1-lever', 'T2-lever-only'], 'reason': 'a pack of its own'}]}
+
+
+class IncludeTests(unittest.TestCase):
+    """Another pack's templates (upload-p0's) folded into the integrated pack."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.references = Path(tempfile.mkdtemp(prefix='fusion-refs-'))
+        mini_pack(cls.references)
+        cls.folder = cls.references / 'fusion-jobs'
+        cls.folder.mkdir()
+        manifests = json.loads(json.dumps(MANIFESTS))
+        manifests['WP0.json'] = dict(INCLUDE, pack_last=['ccl'])
+        cls.plan = plan_of(manifests)
+        cls.files = jobs_gen.generate(cls.plan, cls.folder)
+        for name, text in cls.files.items():
+            (cls.folder / name).write_text(text, encoding='utf-8')
+
+    def names(self):
+        return [short(line[0]) for line in order_lines(self.folder)]
+
+    def test_the_folded_audits_follow_the_arms_audits_and_the_folded_timed_jobs_the_arms_abab_all_before_the_last_arm(self):
+        names = self.names()
+        self.assertEqual(names, ['B0', 'X0', 'S1A', 'DPERMA', 'MIA0', 'MIA1', 'S1C1', 'S1L1', 'S1C2', 'S1L2', 'DPERMC1', 'DPERML1', 'DPERMC2', 'DPERML2',
+                                 'MIT0', 'MIT1', 'MIT2', 'CCLC1', 'CCLL1', 'CCLC2', 'CCLL2', 'Z'])
+
+    def test_a_folded_template_is_the_packages_own_on_the_one_image(self):
+        text = self.files['MIT1-lever.env']
+        self.assertIn('C2_IMAGE_TAG=%s' % IMAGE, text)
+        self.assertNotIn('tp4-other-1', text)
+        self.assertIn('C2_PROFILE=%ss1\n' % fusion.NAMESPACE, text)
+        self.assertTrue(text.startswith('# Folded into the op-fusion pack by make_fusion_jobs.py from references/mini-jobs/T1-lever.env'))
+        self.assertIn('# a template of the mini pack', text)
+
+    def test_the_folded_needs_lines_are_renamed_and_their_build_is_this_packs_card_state(self):
+        text = (self.folder / 'ORDER.txt').read_text(encoding='utf-8')
+        needs = dict((left, right) for left, right in re.findall(r'^# NEEDS (.+?) <- (.+)$', text, re.M))
+        self.assertEqual(needs['MIA0'], 'X0')
+        self.assertEqual(needs['MIA1'], 'MIA0')
+        self.assertEqual(needs['MIT0'], 'MIA0')
+        self.assertEqual(needs['MIT1 MIT2'], 'MIA1 MIT0')
+        self.assertEqual(needs['MIT2'], 'MIT1')
+        position = dict((short(line[0]), index) for index, line in enumerate(order_lines(self.folder)))
+        for left, right in needs.items():
+            for name in left.split():
+                for needed in right.split():
+                    self.assertLess(position[needed], position[name], '%s needs %s' % (name, needed))
+
+    def test_the_minutes_are_the_source_packs_and_the_header_names_the_folded_folder(self):
+        lines = dict((short(line[0]), line) for line in order_lines(self.folder))
+        self.assertEqual((lines['MIA0'][1], int(lines['MIA0'][3]), int(lines['MIT1'][3])), ('soft', 30, 25))
+        text = (self.folder / 'ORDER.txt').read_text(encoding='utf-8')
+        self.assertIn('# FOLDED IN: MI* are the templates of references/mini-jobs (WP0)', text)
+        total = sum(int(line[3]) for line in order_lines(self.folder))
+        self.assertIn('%d minutes' % total, text)
+
+    def test_a_missing_folder_or_template_or_image_line_is_refused_by_name(self):
+        manifests = json.loads(json.dumps(MANIFESTS))
+        manifests['WP0.json'] = dict(INCLUDE)
+        plan = plan_of(manifests)
+        with self.assertRaises(fusion.ManifestError) as caught:
+            jobs_gen.generate(plan, Path(tempfile.mkdtemp()) / 'fusion-jobs')
+        self.assertIn('has no ORDER.txt', str(caught.exception))
+        references = Path(tempfile.mkdtemp())
+        folder = mini_pack(references)
+        (folder / 'T1-lever.env').unlink()
+        with self.assertRaises(fusion.ManifestError) as caught:
+            jobs_gen.generate(plan, references / 'fusion-jobs')
+        self.assertIn('pack_include template T1-lever is not in mini-jobs', str(caught.exception))
+        (folder / 'T1-lever.env').write_text('C2_CARDS=quad\n', encoding='utf-8')
+        with self.assertRaises(fusion.ManifestError) as caught:
+            jobs_gen.generate(plan, references / 'fusion-jobs')
+        self.assertIn('names no C2_IMAGE_TAG', str(caught.exception))
+
+    def test_a_malformed_include_or_a_repeated_prefix_is_refused(self):
+        for edit, needle in ((lambda m: m['pack_include'][0].update(prefix='lower'), 'capital letters and digits'),
+                             (lambda m: m['pack_include'][0].update(folder='../x'), 'folder under references'),
+                             (lambda m: m['pack_include'][0].update(extra=1), 'pack_include entry is'),
+                             (lambda m: m['pack_include'][0].update(timed=['T0-control', 'T0-control']), 'names a template twice')):
+            manifests = json.loads(json.dumps(MANIFESTS))
+            manifests['WP0.json'] = json.loads(json.dumps(INCLUDE))
+            edit(manifests['WP0.json'])
+            with self.assertRaises(fusion.ManifestError) as caught:
+                plan_of(manifests)
+            self.assertIn(needle, str(caught.exception))
+        manifests = json.loads(json.dumps(MANIFESTS))
+        manifests['WP0.json'] = json.loads(json.dumps(INCLUDE))
+        manifests['WP8.json'] = json.loads(json.dumps(INCLUDE))
+        with self.assertRaises(fusion.ManifestError) as caught:
+            plan_of(manifests)
+        self.assertIn('one prefix', str(caught.exception))
+
+
 class PackageFolderTests(unittest.TestCase):
     """A package's own templates (references/fusion-jobs/<WP>/), written against the profiles the generator places: each exits zero through the reader."""
 

@@ -14,6 +14,7 @@
 # THE JOBS OF A LEVER <ID>: <ID>A the audited attach (exactness: the lever's served-composition comparison in the trace), then the timed ABAB at eight live (concurrent8_steady): <ID>C1 control, <ID>L1 lever, <ID>C2 control, <ID>L2 lever.
 #     The audits of every lever run before any timed pair, so a lever that is not exact costs one short job, not an hour of timing.
 # THE PACKAGES' OWN FOLDERS (card-M and detail templates, their read rules and decision rules; under references/): fusion-jobs-wp5, fusion-jobs/WP1, fusion-jobs/WP2, fusion-jobs/WP6, fusion-wp7-jobs.
+# FOLDED IN: UP* are the templates of references/upload-p0-jobs (WP0), renamed and on the one image; their read and decision rules are that folder's ORDER.txt. tp4/upload-p0: the engine-start levers QWEN_FAST_DEVICE_ZEROS and QWEN_FAST_LAZY_SHARD_W (exactness A0-A3, then the engine-start ABAB T0-T5 read with engine_start_phases.py, which can run anywhere in the timed block).
 # LAST: KVPAGE (K/V page writer) runs after every other arm, audit and ABAB alike: WP2 lever cannot engage until the card-M proof (KVPAGE-W2 in fusion-jobs/WP2) passes and ordered_writer_evidence_tp4.json carries the page_writer block it records: until then the lever refuses (a fell-back line) and these four-card arms measure nothing, so they run last and only after that record lands.
 # DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
 # NEEDS X0 <- B0
@@ -26,6 +27,9 @@
 # NEEDS TAILA <- X0
 # NEEDS GATEUP1A <- X0
 # NEEDS MMGRIDA <- X0
+# NEEDS UPA0 <- X0
+# NEEDS UPA1 UPA2 <- UPA0
+# NEEDS UPA3 <- UPA1 UPA2
 # NEEDS KVPAGEA <- X0
 # NEEDS PERMUTEC1 <- X0
 # NEEDS PERMUTEL1 <- PERMUTEA PERMUTEC1
@@ -63,6 +67,9 @@
 # NEEDS MMGRIDL1 <- MMGRIDA MMGRIDC1
 # NEEDS MMGRIDC2 <- MMGRIDL1
 # NEEDS MMGRIDL2 <- MMGRIDC2
+# NEEDS UPT0 UPT2 <- UPA0
+# NEEDS UPT1 UPT3 UPT4 UPT5 <- UPA3 UPT0
+# NEEDS UPT3 <- UPT2
 # NEEDS KVPAGEC1 <- X0
 # NEEDS KVPAGEL1 <- KVPAGEA KVPAGEC1
 # NEEDS KVPAGEC2 <- KVPAGEL1
@@ -74,7 +81,7 @@
 #   <ID>C1 <ID>L1 <ID>C2 <ID>L2  w2ln_timing_compare.py pair, the steady window, 8 live: per pair the lever's round time against the control's; GO for a lever needs both pairs measured (at least 100 matched rounds, the load rule
 #     applied) and negative beyond the control-to-control floor, the texts equal, the lever's engaged line in both lever boots. A pair with fewer matched rounds is VOID (never GO, never NO-GO).
 # NO-GO for adopting a lever: any stall, any text or accepted-prefix difference against the control, any audit mismatch, any fallback line, a pair that is positive, a lever boot that logs no engaged line.
-# Time (estimate, minutes): B0 40, X0 20, an audit 40, a timed job 35, Z 10: 1870 minutes (31 h 10 min) in all, 1830 minutes of cards (X0 to Z), 1170 minutes without the repeat pairs; about 3 minutes of queue per tag on top.
+# Time (estimate, minutes): B0 40, X0 20, an audit 40, a timed job 35, Z 10: 2140 minutes (35 h 40 min) in all, 2100 minutes of cards (X0 to Z), 1440 minutes without the repeat pairs; about 3 minutes of queue per tag on top.
 B0-build stop tp4-fusion-1 40
 X0-status-rescan-reset stop tp4-fusion-1 20
 PERMUTEA-permute-audit-attach soft tp4-fusion-1 40
@@ -86,6 +93,10 @@ QKV1A-qkv1-audit-attach soft tp4-fusion-1 40
 TAILA-tail-audit-attach soft tp4-fusion-1 40
 GATEUP1A-gateup1-audit-attach soft tp4-fusion-1 40
 MMGRIDA-mmgrid-audit-attach soft tp4-fusion-1 40
+UPA0-control-attach soft tp4-fusion-1 30
+UPA1-dzero-audit-attach soft tp4-fusion-1 30
+UPA2-lazy-audit-attach soft tp4-fusion-1 30
+UPA3-upload-audit-attach soft tp4-fusion-1 30
 KVPAGEA-kvpage-audit-attach soft tp4-fusion-1 40
 PERMUTEC1-permute-control-timed soft tp4-fusion-1 35
 PERMUTEL1-permute-lever-timed soft tp4-fusion-1 35
@@ -123,6 +134,12 @@ MMGRIDC1-mmgrid-control-timed soft tp4-fusion-1 35
 MMGRIDL1-mmgrid-lever-timed soft tp4-fusion-1 35
 MMGRIDC2-mmgrid-control-repeat soft tp4-fusion-1 35
 MMGRIDL2-mmgrid-lever-repeat soft tp4-fusion-1 35
+UPT0-control-a soft tp4-fusion-1 25
+UPT1-upload-a soft tp4-fusion-1 25
+UPT2-control-b soft tp4-fusion-1 25
+UPT3-upload-b soft tp4-fusion-1 25
+UPT4-dzero-only soft tp4-fusion-1 25
+UPT5-lazy-only soft tp4-fusion-1 25
 KVPAGEC1-kvpage-control-timed soft tp4-fusion-1 35
 KVPAGEL1-kvpage-lever-timed soft tp4-fusion-1 35
 KVPAGEC2-kvpage-control-repeat soft tp4-fusion-1 35

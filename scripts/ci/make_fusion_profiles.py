@@ -52,7 +52,7 @@ IMAGE_ROOTS = ('scripts/ci/', 'speculative-decoding/harness/')
 
 # What a manifest may hold. Aliases are the spellings a package is likely to use; they mean the canonical key.
 INFO_KEYS = ('wp', 'branch', 'head', 'description', 'reason', 'notes', 'card_jobs', 'docs', 'owner', 'ci_run', 'status')
-KEYS = ('levers', 'profiles', 'smoke', 'smoke_rules', 'pack_arms', 'pack_order', 'pack_last', 'image_files', 'tests', 'tp_addresses')
+KEYS = ('levers', 'profiles', 'smoke', 'smoke_rules', 'pack_arms', 'pack_order', 'pack_last', 'pack_include', 'image_files', 'tests', 'tp_addresses')
 ALIASES = {
     'twin_profiles': 'profiles', 'profile_twins': 'profiles', 'twins': 'profiles',
     'smoke_dispatch': 'smoke', 'smoke_markers': 'smoke', 'smoke_modules': 'smoke', 'smoke_check': 'smoke',
@@ -274,6 +274,27 @@ def path_entries(wp, value, where, what):
     return out
 
 
+def include_of(wp, raw, where):
+    """One pack_include entry: another pack's templates (references/<folder>) folded into the integrated pack under a name prefix."""
+    if not isinstance(raw, dict) or set(raw) - {'folder', 'prefix', 'audits', 'timed', 'reason'}:
+        raise ManifestError('%s: a pack_include entry is {"folder", "prefix", "audits", "timed", "reason"}' % where)
+    folder = text_of(raw.get('folder'), where, 'folder')
+    prefix = text_of(raw.get('prefix'), where, 'prefix')
+    if not re.match(r'^[a-z0-9][a-z0-9-]*$', folder):
+        raise ManifestError('%s: pack_include folder %r is a folder under references/' % (where, folder))
+    if not re.match(r'^[A-Z][A-Z0-9]*$', prefix):
+        raise ManifestError('%s: pack_include prefix %r is capital letters and digits' % (where, prefix))
+    names = {}
+    for key in ('audits', 'timed'):
+        listed = [text_of(name, where, 'a template name') for name in listing(raw.get(key), where, key)]
+        if any(not re.match(r'^[A-Za-z0-9][A-Za-z0-9_-]*$', name) for name in listed):
+            raise ManifestError('%s: pack_include %s are template names without .env' % (where, key))
+        names[key] = listed
+    if len(set(names['audits'] + names['timed'])) != len(names['audits'] + names['timed']):
+        raise ManifestError('%s: pack_include names a template twice' % where)
+    return dict(folder=folder, prefix=prefix, audits=names['audits'], timed=names['timed'], reason=text_of(raw.get('reason', 'folded in by %s' % wp), where, 'reason'))
+
+
 def tests_of(wp, value, where):
     """[(module or ('discover', dir, pattern), reason)]."""
     out = []
@@ -339,7 +360,7 @@ def tp_of(wp, value, where):
 
 def normalise(manifests):
     """The plan: every manifest's entries in one structure, in file-name then file order. Names collide across packages: refused."""
-    plan = dict(levers=[], profiles=[], smoke=[], smoke_rules=[], pack_arms=[], pack_order=[], pack_last=[], image_files=[], tests=[], tp={key: [] for key in TP_KEYS}, info=[])
+    plan = dict(levers=[], profiles=[], smoke=[], smoke_rules=[], pack_arms=[], pack_order=[], pack_last=[], pack_include=[], image_files=[], tests=[], tp={key: [] for key in TP_KEYS}, info=[])
     for file_name, raw in manifests:
         where = 'fusion-wp/' + file_name
         wp = text_of(raw.get('wp', Path(file_name).stem.upper()), where, 'wp')
@@ -375,6 +396,8 @@ def normalise(manifests):
             if not ID.match(arm):
                 raise ManifestError('%s: pack arm %r is the suffix of an extra profile twin (lower-case letters, digits and single dashes)' % (where, arm))
             plan['pack_arms'].append((wp, arm))
+        for item in listing(canonical.get('pack_include', (0, None))[1], where, 'pack_include'):
+            plan['pack_include'].append(dict(include_of(wp, item, where), wp=wp))
         for arm in listing(canonical.get('pack_order', (0, None))[1], where, 'pack_order'):
             arm = text_of(arm, where, 'a pack_order arm')
             arm = arm[len(NAMESPACE):] if arm.startswith(NAMESPACE) else arm
@@ -422,6 +445,9 @@ def normalise(manifests):
     for wp, arm, _reason in plan['pack_last']:
         if arm not in known:
             raise ManifestError('%s: pack_last arm %s is neither a lever nor a pack arm' % (wp, arm))
+    prefixes = [item['prefix'] for item in plan['pack_include']]
+    if len(set(prefixes)) != len(prefixes):
+        raise ManifestError('two pack_include entries use one prefix')
     listed = [arm for _wp, arm in plan['pack_order']]
     for wp, arm in plan['pack_order']:
         if arm not in known:
