@@ -155,7 +155,8 @@ class Scope(unittest.TestCase):
     def test_model_changes_only_the_three_chunk_prefill_methods(self):
         everything = methods(staged()[0])
         self.assertEqual({name for name in everything if not name.startswith('Qwen36Model.')},
-                         {'_QwenPrefixRow.__init__'})
+                         {'_QwenPrefixRow.__init__', '_QwenPrefixConverted.__init__', '_QwenKvTierIO.__init__',
+                          '_QwenKvTierIO.read_blocks', '_QwenKvTierIO.write_blocks', '_QwenKvTierIO._transfer_buffer'})
         before, after = model_methods(model_text()), model_methods(staged()[0])
         changed = {name for name in before if before[name] != after[name]}
         self.assertEqual(changed, {'prefill_traced_chunked', '_prefill_chunked_eager_tp', '_prefill_traced_chunked_tp'})
@@ -165,7 +166,8 @@ class Scope(unittest.TestCase):
                                  '_qwen_prefix_capture', '_qwen_prefix_restore', '_qwen_prefix_warm_restore',
                                  '_qwen_prefix_audit', '_qwen_prefix_fit_page_table', '_qwen_prefix_audit_rows',
                                  '_qwen_prefix_audit_read_mode', '_qwen_prefix_audit_selections', '_qwen_prefix_read_blocks',
-                                 '_qwen_prefix_region_read_ready', '_qwen_prefix_audit_cross_wanted'})
+                                 '_qwen_prefix_region_read_ready', '_qwen_prefix_audit_cross_wanted',
+                                 '_qwen_prefix_preconvert', '_qwen_prefix_audit_preconverted', '_qwen_prefix_tier_attach'})
         self.assertEqual(before['prefill_paged_slots'], after['prefill_paged_slots'])
 
     def test_the_batched_prefill_entries_are_the_stock_ones(self):

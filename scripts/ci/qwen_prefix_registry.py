@@ -23,6 +23,14 @@ process holds what vLLM cannot know about a hit: the GatedDeltaNet (GDN) state t
   distance (seconds and admitted prompt tokens since its previous turn) goes into two histograms, and
   host gauges (engine RSS, MemAvailable) ride with the stats. It reads the request's hashes and counts;
   it never changes a grant, a trim, a capture or an eviction (test_qwen_prefix_tiers).
+- Host KV tier (QWEN_PREFIX_HOST_TIER_GIB, default 0 = off; the scheduler graft's TierHooks drive it, the model's
+  tier IO moves the bytes): a cached attention-KV block that vLLM evicts from the device pool is first read, raw and
+  packed, into host RAM under its block hash (TierStore), and the GDN checkpoint keyed at it is kept instead of dropped;
+  a returning request whose device hit ends where the tier's consecutive blocks begin has them written back into free
+  device blocks, hashed as cached-free blocks, before vLLM's own hit logic runs. The GiB is the whole prefix state's host
+  budget: checkpoints (QWEN_PREFIX_STORE_GIB) plus KV pages take the rest. Blocks are keyed by vLLM's chained block hash,
+  which carries the salt, so tenants never meet. A restored block is the evicted block's bytes (a digest checked on
+  restore, a read-back compared under QWEN_PREFIX_HOST_TIER_AUDIT=1); any failure is a miss.
 - Grants: staged on every admission attempt inside one schedule() call, committed only for the
   requests the step's SchedulerOutput admits at start_pos == Q (F2, S6), pinned for that one step.
   The model reads grant_for(request_id) per prefill row.
@@ -78,6 +86,7 @@ Pure python; imports nothing outside the standard library.
 
 import bisect
 import gc
+import hashlib
 import itertools
 import json
 import os
@@ -170,6 +179,31 @@ CLASS_HIT = ('first_turn', 'rewritten', 'kv_evicted', 'ckpt_evicted', 'ckpt_miss
 # a registry clear, or anything else.
 GONE_REASONS = ('budget', 'coupled', 'superseded', 'cleared', 'other')
 
+# The host KV tier (the module docstring). Each knob is strict.
+ENV_TIER_GIB = 'QWEN_PREFIX_HOST_TIER_GIB'                  # 0 or unset: off
+ENV_TIER_AUDIT = 'QWEN_PREFIX_HOST_TIER_AUDIT'              # gate instrument: read back every restore and compare
+ENV_TIER_SPILL_MAX = 'QWEN_PREFIX_HOST_TIER_SPILL_MAX_BLOCKS'   # most blocks one allocation's evictions may spill
+ENV_TIER_MIN_TOKENS = 'QWEN_PREFIX_HOST_TIER_MIN_TOKENS'    # sessions whose checkpoints stop below this are not worth a restore
+ENV_TIER_MIN_AVAILABLE = 'QWEN_PREFIX_HOST_TIER_MIN_AVAILABLE_GIB'   # no spill while the host's MemAvailable is under this
+ENV_TIER_VERIFY = 'QWEN_PREFIX_HOST_TIER_VERIFY'            # sample | all | off: digest checks at restore
+ENV_TIER_OFF_PATH = 'QWEN_PREFIX_HOST_TIER_OFF_PATH'        # the tier's own kill-switch file (gate containers)
+TIER_KILL_SWITCH_PATH = '/models/.qwen-c2/kv-tier.off'
+DEFAULT_TIER_SPILL_MAX_BLOCKS = 512
+DEFAULT_TIER_MIN_TOKENS = 8192
+DEFAULT_TIER_MIN_AVAILABLE_GIB = 16.0
+TIER_VERIFY_MODES = ('sample', 'all', 'off')
+TIER_VERIFY_EVERY = 16
+# A scan for dead records stops after this many of the oldest.
+TIER_DEAD_SCAN = 256
+TIER_STAT_NAMES = (
+    'tier_spill_flushes', 'tier_spill_blocks', 'tier_spill_bytes', 'tier_spill_ms', 'tier_spill_known',
+    'tier_spill_dropped_useless', 'tier_spill_dropped_cap', 'tier_spill_dropped_governor', 'tier_spill_dropped_full',
+    'tier_spill_failures', 'tier_restore_requests', 'tier_restore_blocks', 'tier_restore_bytes', 'tier_restore_ms',
+    'tier_restore_refused_room', 'tier_restore_refused_digest', 'tier_restore_failures', 'tier_digest_checks',
+    'tier_digest_failures', 'tier_evicted', 'tier_ckpt_kept', 'tier_ckpt_dropped', 'tier_audit_reads',
+    'tier_audit_mismatches', 'tier_latched',
+)
+
 # The counters the registry kept before the store policies and the telemetry; a graft that does not feed those (an older one) leaves the
 # rest at zero, so a parity check against it compares these.
 LEGACY_STAT_NAMES = (
@@ -188,7 +222,7 @@ STAT_NAMES = LEGACY_STAT_NAMES + (
     'supersede_kept_branch',
     # telemetry: admission classes, their losses, the reuse distance's population
     'admitted_prompt_tokens', 'returning_sessions', 'class_failures',
-) + tuple('class_' + name for name in CLASSES) + tuple('class_%s_hit' % name for name in CLASS_HIT) + (
+) + TIER_STAT_NAMES + tuple('class_' + name for name in CLASSES) + tuple('class_%s_hit' % name for name in CLASS_HIT) + (
     'class_refused_mismatch',
 ) + tuple('class_ckpt_evicted_' + reason for reason in GONE_REASONS) + (
     'lost_tokens_kv_evicted', 'lost_tokens_ckpt_evicted', 'lost_tokens_ckpt_missing', 'lost_tokens_refused',
@@ -447,6 +481,332 @@ class KillSwitch(object):
         return present
 
 
+class TierConfig(object):
+    """The host KV tier's settings (tier_config): total (the whole prefix state's host budget, bytes), kv_bytes (what the KV pages
+    get: the total less the checkpoint store's budget), and the knobs."""
+
+    __slots__ = ('total', 'kv_bytes', 'audit', 'spill_max', 'min_tokens', 'min_available', 'verify', 'off_path')
+
+
+def _tier_float(environ, name, default, minimum=0.0):
+    raw = environ.get(name)
+    if raw is None or raw == '':
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError('%s=%r is not a number' % (name, raw))
+    if not value >= minimum:
+        raise ValueError('%s=%r must be >= %s' % (name, raw, minimum))
+    return value
+
+
+def tier_config(environ, store_budget_bytes):
+    """The host KV tier's configuration from the environment, None when QWEN_PREFIX_HOST_TIER_GIB is 0 or unset. The GiB is the whole prefix
+    state's host budget (checkpoints plus KV pages), so it must exceed the checkpoint store's own budget; every knob is strict."""
+    gib = _tier_float(environ, ENV_TIER_GIB, 0.0)
+    if gib == 0.0:
+        return None
+    config = TierConfig()
+    config.total = int(gib * (1 << 30))
+    if config.total <= int(store_budget_bytes):
+        raise ValueError('%s=%s leaves nothing for KV pages: it is the whole prefix state\'s host budget and must exceed the checkpoint '
+                         'store\'s (%s)' % (ENV_TIER_GIB, environ.get(ENV_TIER_GIB), ENV_STORE_GIB))
+    config.kv_bytes = config.total - int(store_budget_bytes)
+    config.audit = strict_flag(environ, ENV_TIER_AUDIT, False)
+    spill_max = _tier_float(environ, ENV_TIER_SPILL_MAX, float(DEFAULT_TIER_SPILL_MAX_BLOCKS))
+    if spill_max != int(spill_max):
+        raise ValueError('%s=%r is not a whole number of blocks' % (ENV_TIER_SPILL_MAX, environ.get(ENV_TIER_SPILL_MAX)))
+    config.spill_max = int(spill_max)
+    min_tokens = _tier_float(environ, ENV_TIER_MIN_TOKENS, float(DEFAULT_TIER_MIN_TOKENS))
+    config.min_tokens = int(min_tokens)
+    config.min_available = int(_tier_float(environ, ENV_TIER_MIN_AVAILABLE, DEFAULT_TIER_MIN_AVAILABLE_GIB) * (1 << 30))
+    verify = environ.get(ENV_TIER_VERIFY) or 'sample'
+    if verify not in TIER_VERIFY_MODES:
+        raise ValueError('%s=%r must be one of %s' % (ENV_TIER_VERIFY, verify, ', '.join(TIER_VERIFY_MODES)))
+    config.verify = 'all' if config.audit and verify != 'off' else verify
+    config.off_path = environ.get(ENV_TIER_OFF_PATH) or TIER_KILL_SWITCH_PATH
+    return config
+
+
+class TierRecord(object):
+    """One evicted attention-KV block held in host RAM: its raw packed bytes (payload), the chain it belongs to (the first block's hash),
+    its position in it (index) and its tenant, and the sha256 of the bytes once the digest worker has computed it."""
+
+    __slots__ = ('key', 'payload', 'nbytes', 'tenant', 'chain', 'index', 'digest', 'serial', 'slot')
+
+    def __init__(self, key, payload, tenant, chain, index, serial, slot=None):
+        self.key = key
+        self.payload = payload
+        self.slot = slot
+        self.nbytes = len(payload)
+        self.tenant = tenant
+        self.chain = chain
+        self.index = index
+        self.digest = None
+        self.serial = serial
+
+
+class Slot(object):
+    """One slot of the tier's slab, reserved for a block about to be read into it (view is writable); commit files it under a key, abort frees it."""
+
+    __slots__ = ('index', 'view')
+
+    def __init__(self, index, view):
+        self.index = index
+        self.view = view
+
+
+class TierStore(object):
+    """The host KV tier's records: block hash -> TierRecord, bounded by bytes. The key is vLLM's chained block hash (it carries the salt,
+    so a tenant cannot form another's key); a record is the bytes the device held for that block, read raw and packed. Eviction is the
+    registry's policy: dead records first (those `dead` calls useless: no checkpoint of the chain reaches them), then the least recently
+    used (lru) or the oldest record of the tenant holding the most bytes (fair), sparing the record just stored. Digests are computed
+    off the scheduler thread (hashlib releases the GIL), or inline with digest_inline (tests, the audit).
+
+    Two ways to hold the bytes. Heap mode (the default, and what the unit tests use): a record keeps the payload object it was given. Slab mode
+    (configure(slot_bytes), which attach_tier_io calls with the model's block size): one anonymous mapping, cap // slot_bytes slots, kept out of core
+    dumps; a record is a slot, an eviction returns the slot, and the device read is made straight into a reserved slot - so the host does one copy
+    of a block, into memory that is already resident after the first fill, instead of a fresh allocation and page faults per block."""
+
+    def __init__(self, cap_bytes, policy='lru', fingerprint='', digest_inline=False, on_evict=None, dead=None):
+        self.cap = int(cap_bytes)
+        self.policy = policy
+        self.fingerprint = fingerprint
+        self.records = OrderedDict()
+        self.by_tenant = {}
+        self.tenant_bytes = {}
+        self.bytes = 0
+        self.on_evict = on_evict
+        self.dead = dead
+        self.digest_inline = digest_inline
+        self._executor = None
+        self._serials = itertools.count(1)
+        self.slot_bytes = 0
+        self.pinned = set()
+        self._map = None
+        self._view = None
+        self._free = []
+        self.stats = {'puts': 0, 'duplicates': 0, 'refused_size': 0, 'refused_full': 0, 'evicted': 0, 'hits': 0, 'misses': 0,
+                      'digested': 0}
+
+    # -- the slab ----------------------------------------------------------------------------------
+    def configure(self, slot_bytes):
+        """Switch to slab mode for blocks of slot_bytes. The cap becomes a whole number of slots. Only on an empty store, once."""
+        import mmap
+
+        slot_bytes = int(slot_bytes)
+        if self.slot_bytes == slot_bytes:
+            return
+        if self.slot_bytes or self.records:
+            raise ValueError('the tier store is already holding data in another layout')
+        slots = self.cap // slot_bytes
+        if slots < 1:
+            raise ValueError('the tier cap (%d bytes) does not hold one block of %d bytes' % (self.cap, slot_bytes))
+        self.slot_bytes = slot_bytes
+        self.cap = slots * slot_bytes
+        self._map = mmap.mmap(-1, self.cap)
+        try:
+            self._map.madvise(mmap.MADV_DONTDUMP)
+        except (AttributeError, OSError):
+            pass
+        self._view = memoryview(self._map)
+        self._free = list(range(slots - 1, -1, -1))
+
+    def _slot_view(self, index):
+        return self._view[index * self.slot_bytes:(index + 1) * self.slot_bytes]
+
+    def _take_slot(self):
+        if not self._free:
+            victim = self._victim()
+            if victim is None:
+                return None
+            self.remove(victim, evicted=True)
+        return Slot(self._free.pop(), None) if self._free else None
+
+    def reserve(self, count):
+        """Up to `count` slots to read blocks into, evicting by policy to make them (fewer when the store cannot: every slot is a
+        reservation). Each must be committed or aborted."""
+        slots = []
+        for _ in range(count):
+            slot = self._take_slot()
+            if slot is None:
+                break
+            slot.view = self._slot_view(slot.index)
+            slots.append(slot)
+        return slots
+
+    def abort(self, slots):
+        for slot in slots:
+            self._free.append(slot.index)
+
+    def commit(self, slot, key, tenant=None, chain=None, index=0):
+        """File a reserved slot, now holding a block's bytes, under key. A key already held keeps its record and the slot goes back."""
+        existing = self.records.get(key)
+        if existing is not None:
+            self.records.move_to_end(key)
+            self.by_tenant[existing.tenant].move_to_end(key)
+            self.stats['duplicates'] += 1
+            self._free.append(slot.index)
+            return True
+        return self._file(TierRecord(key, slot.view, tenant, chain, int(index), next(self._serials), slot.index))
+
+    def _file(self, record):
+        self.records[record.key] = record
+        self.by_tenant.setdefault(record.tenant, OrderedDict())[record.key] = record
+        self.tenant_bytes[record.tenant] = self.tenant_bytes.get(record.tenant, 0) + record.nbytes
+        self.bytes += record.nbytes
+        self.stats['puts'] += 1
+        self._digest(record)
+        return True
+
+    # -- reads -------------------------------------------------------------------------------------
+    def has(self, key):
+        return key in self.records
+
+    def get(self, key, touch=True):
+        record = self.records.get(key)
+        if record is None:
+            self.stats['misses'] += 1
+            return None
+        self.stats['hits'] += 1
+        if touch:
+            self.records.move_to_end(key)
+            self.by_tenant[record.tenant].move_to_end(key)
+        return record
+
+    # -- writes ------------------------------------------------------------------------------------
+    def put(self, key, payload, tenant=None, chain=None, index=0):
+        """Store payload under key. False (and nothing stored) when the payload alone exceeds the cap or no eviction can make room. A key
+        already held keeps its record (the bytes of one hash are one block) and is touched."""
+        size = len(payload)
+        existing = self.records.get(key)
+        if existing is not None:
+            self.records.move_to_end(key)
+            self.by_tenant[existing.tenant].move_to_end(key)
+            self.stats['duplicates'] += 1
+            return True
+        if size > self.cap or (self.slot_bytes and size != self.slot_bytes):
+            self.stats['refused_size'] += 1
+            return False
+        if self.slot_bytes:
+            slot = self._take_slot()
+            if slot is None:
+                self.stats['refused_full'] += 1
+                return False
+            view = self._slot_view(slot.index)
+            view[:] = memoryview(payload).cast('B')
+            return self._file(TierRecord(key, view, tenant, chain, int(index), next(self._serials), slot.index))
+        if not self._make_room(size):
+            self.stats['refused_full'] += 1
+            return False
+        return self._file(TierRecord(key, payload, tenant, chain, int(index), next(self._serials)))
+
+    def _make_room(self, need):
+        while self.bytes + need > self.cap:
+            victim = self._victim()
+            if victim is None:
+                return False
+            self.remove(victim, evicted=True)
+        return True
+
+    def pin(self, keys):
+        """Keep these records through any eviction until unpin (a restore is about to write their bytes to the device: in slab mode an eviction
+        would let a spill reuse the very slot being read)."""
+        self.pinned.update(keys)
+
+    def unpin(self, keys):
+        self.pinned.difference_update(keys)
+
+    def _victim(self):
+        pinned = self.pinned
+        if self.dead is not None:
+            for position, (key, record) in enumerate(self.records.items()):
+                if position >= TIER_DEAD_SCAN:
+                    break
+                if key not in pinned and self.dead(record):
+                    return key
+        if self.policy == 'fair' and self.tenant_bytes:
+            # The tenants holding the most bytes first: the oldest unpinned record of the first that has one.
+            for tenant in sorted(self.tenant_bytes, key=lambda name: -self.tenant_bytes[name]):
+                for key in self.by_tenant[tenant]:
+                    if key not in pinned:
+                        return key
+            return None
+        for key in self.records:
+            if key not in pinned:
+                return key
+        return None
+
+    def remove(self, key, evicted=False):
+        record = self.records.pop(key, None)
+        if record is None:
+            return None
+        group = self.by_tenant.get(record.tenant)
+        if group is not None:
+            group.pop(key, None)
+            if not group:
+                del self.by_tenant[record.tenant]
+        left = self.tenant_bytes.get(record.tenant, 0) - record.nbytes
+        if left > 0:
+            self.tenant_bytes[record.tenant] = left
+        else:
+            self.tenant_bytes.pop(record.tenant, None)
+        self.bytes -= record.nbytes
+        if record.slot is not None:
+            self._free.append(record.slot)
+        if evicted:
+            self.stats['evicted'] += 1
+            if self.on_evict is not None:
+                self.on_evict(record)
+        return record
+
+    def clear(self):
+        for record in self.records.values():
+            if record.slot is not None:
+                self._free.append(record.slot)
+        self.records.clear()
+        self.by_tenant.clear()
+        self.tenant_bytes.clear()
+        self.bytes = 0
+
+    # -- digests -----------------------------------------------------------------------------------
+    def _digest(self, record):
+        if self.digest_inline:
+            record.digest = hashlib.sha256(record.payload).hexdigest()
+            self.stats['digested'] += 1
+            return
+        if self._executor is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='qwen-tier-digest')
+        self._executor.submit(self._compute_digest, record)
+
+    def _compute_digest(self, record):
+        try:
+            record.digest = hashlib.sha256(record.payload).hexdigest()
+            self.stats['digested'] += 1
+        except Exception:
+            pass
+
+    def verify(self, record):
+        """True when the record's bytes still hash to the digest taken when it was stored, None when the digest is not ready yet (nothing
+        is claimed), False on a difference."""
+        digest = record.digest
+        if digest is None:
+            return None
+        return hashlib.sha256(record.payload).hexdigest() == digest
+
+    def close(self):
+        executor, self._executor = self._executor, None
+        if executor is not None:
+            executor.shutdown(wait=True)
+
+    def snapshot(self):
+        return dict(bytes=self.bytes, entries=len(self.records), cap=self.cap, tenants=len(self.tenant_bytes),
+                    slots=(self.cap // self.slot_bytes) if self.slot_bytes else 0, free_slots=len(self._free))
+
+
 class PrefixRegistry(object):
     """The checkpoint LRU (bounded by bytes, pinned entries never evicted) and the grant ledger."""
 
@@ -462,6 +822,17 @@ class PrefixRegistry(object):
         # What a capture is charged when the model does not say (the state dtype's checkpoint).
         self.checkpoint_nbytes = checkpoint_nbytes(flags)
         self.clock = clock
+        # The host KV tier (the module docstring): off unless QWEN_PREFIX_HOST_TIER_GIB names a budget. tier_io is the model's side
+        # (read_blocks / write_blocks), attached by the model graft; the scheduler graft's TierHooks refuse to install without it.
+        self.tier_config = tier_config(flags, self.budget_bytes)
+        self.tier = None
+        self.tier_io = None
+        self.device_holds = None
+        # Blocks past a checkpoint's boundary a restore must still have: 1 when vLLM drops a hit's last block (sticky sessions), else 0.
+        self.tier_slack = 0
+        if self.tier_config is not None:
+            self.tier = TierStore(self.tier_config.kv_bytes, self.evict_policy, digest_inline=self.tier_config.audit,
+                                  on_evict=self._tier_evicted, dead=self._tier_dead)
         self.entries = OrderedDict()
         self.bytes = 0
         # chain (first block hash) -> checkpoint keys, and tenant -> bytes held: the hygiene's indexes.
@@ -529,6 +900,51 @@ class PrefixRegistry(object):
         if not self.mid_loop_capture:
             self.mid_loop_capture = True
             log('model declares mid-loop captures: gap and resumed-prompt boundaries are planned')
+
+    # -- the host KV tier ----------------------------------------------------------------------
+    def attach_tier_io(self, io):
+        """The model graft's side of the tier: io.read_blocks(block ids) -> one payload per block, io.write_blocks(block ids, payloads),
+        io.block_bytes and io.fingerprint. Without it (or without QWEN_PREFIX_HOST_TIER_GIB) the tier does nothing."""
+        self.tier_io = io
+        if self.tier is not None:
+            self.tier.fingerprint = str(getattr(io, 'fingerprint', ''))
+            block_bytes = int(getattr(io, 'block_bytes', 0) or 0)
+            if block_bytes:
+                self.tier.configure(block_bytes)
+
+    @property
+    def tier_on(self):
+        return self.tier is not None and self.tier_io is not None and not self.stats['tier_latched'] and self.disabled is None
+
+    def tier_latch(self, reason):
+        """Turn the tier off for the life of the process (a failing device read or write, its kill switch): the records go."""
+        if not self.stats['tier_latched']:
+            self.stats['tier_latched'] = 1
+            log('host tier latched off: %s', reason)
+        if self.tier is not None:
+            self.tier.clear()
+
+    def _tier_dead(self, record):
+        """Whether no checkpoint reaches the block (the tier's eviction takes such records first, and the spill never stores them): a KV
+        block is useful only with a checkpoint of its chain at or above it, and above the smallest session worth a restore."""
+        keys = self.by_chain.get(record.chain)
+        if not keys:
+            return True
+        need = max((record.index + 1 - self.tier_slack) * BLOCK, self.tier_config.min_tokens if self.tier_config is not None else 0)
+        for key in keys:
+            entry = self.entries.get(key)
+            if entry is not None and entry.pos >= need:
+                return False
+        return True
+
+    def _tier_evicted(self, record):
+        """The tier gave a record up: the checkpoint at its key (the boundary block) has no KV left in the tier, so unless the device
+        still holds the block it can never be granted - drop it."""
+        holds = self.device_holds
+        if self.entries.get(record.key) is not None and (holds is None or not holds(record.key)):
+            self.drop(record.key, 'coupled')
+            self.stats['tier_ckpt_dropped'] += 1
+        self.stats['tier_evicted'] += 1
 
     # -- checkpoints ---------------------------------------------------------------------------
     def get(self, key):
@@ -697,6 +1113,8 @@ class PrefixRegistry(object):
         self.tenant_bytes.clear()
         self.orphan_keys.clear()
         self.token_checks.clear()
+        if self.tier is not None:
+            self.tier.clear()
         self.stats['clears'] += 1
 
     def disable(self, reason):
@@ -1054,6 +1472,11 @@ class PrefixRegistry(object):
             ('returning', 'returning_sessions')))
         head.append('evict=%s' % self.evict_policy)
         head.append('supersede=%d' % int(self.supersede))
+        if self.tier is not None:
+            head.extend('%s=%d' % (name, values[key]) for name, key in (
+                ('kv_bytes', 'tier_bytes'), ('kv_entries', 'tier_entries'), ('kv_spilled', 'tier_spill_blocks'),
+                ('kv_restored', 'tier_restore_blocks'), ('kv_restore_reqs', 'tier_restore_requests'),
+                ('kv_digest_fail', 'tier_digest_failures'), ('kv_on', 'tier_on')))
         head.extend('%s=%d' % (name, values['class_' + name]) for name in CLASSES)
         head.extend('%s=%d' % (name, values[key]) for name, key in (
             ('lost_kv', 'lost_tokens_kv_evicted'), ('lost_ckpt', 'lost_tokens_ckpt_evicted'),
@@ -1087,6 +1510,8 @@ class PrefixRegistry(object):
                       mid_loop_capture=self.mid_loop_capture,
                       disabled=self.disabled, ghost_now=len(self.ghost), evict_fair=int(self.evict_policy == 'fair'),
                       supersede=int(self.supersede), telemetry=int(self.telemetry))
+        tier = self.tier.snapshot() if self.tier is not None else dict(bytes=0, entries=0, cap=0)
+        values.update(tier_bytes=tier['bytes'], tier_entries=tier['entries'], tier_cap_bytes=tier['cap'], tier_on=int(self.tier_on))
         return values
 
 
@@ -1182,6 +1607,9 @@ def shared_registry(environ=None):
         # captures on the holder (see the module's contract) before this registry exists.
         if getattr(holder, 'mid_loop_capture', False) is True:
             registry.enable_mid_loop_capture()
+        # ... and its tier IO the same way (the model attaches it at warmup, before any registry exists).
+        if getattr(holder, 'tier_io', None) is not None:
+            registry.attach_tier_io(holder.tier_io)
         holder.registry = registry
     return registry
 

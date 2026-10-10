@@ -41,7 +41,7 @@ from qwen_prefix_registry import (  # noqa: E402
     BLOCK, CHUNK, CHECKPOINT_NBYTES, CHECKPOINT_NBYTES_BF16, CHECKPOINT_NBYTES_FP32, CLASSES, Grant, PrefixRegistry,
     StatsExport, checkpoint_nbytes, host_gauges, tenant_of_salt)
 from test_qwen_prefix_scheduler_patch import (  # noqa: E402
-    FakeGdnModel, FakeScheduler, Quiet, Request, fake_vllm_modules, tokens as make_tokens)
+    FakeGdnModel, FakeKvIO, FakeScheduler, Quiet, Request, fake_vllm_modules, kv_content, tokens as make_tokens)
 
 BF16 = {'QWEN35_GDN_STATE_BF16': '1'}
 LEGACY_STATS = list(registry_module.LEGACY_STAT_NAMES)
@@ -219,10 +219,54 @@ class FlagTests(unittest.TestCase):
             {'env': {'QWEN_PREFIX_EVICT': 'fair'}})))
 
     def test_the_policy_names_are_the_registry_s(self):
+        import qwen_prefix_model_patch
+
         self.assertEqual(sorted(contract.PREFIX_POLICY_FLAGS),
-                         sorted([registry_module.ENV_EVICT, registry_module.ENV_SUPERSEDE, registry_module.ENV_TELEMETRY]))
+                         sorted([registry_module.ENV_EVICT, registry_module.ENV_SUPERSEDE, registry_module.ENV_TELEMETRY,
+                                 registry_module.ENV_TIER_AUDIT, registry_module.ENV_TIER_VERIFY, 'QWEN_PREFIX_CKPT_PRECONVERTED',
+                                 'QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT']))
         self.assertEqual(contract.PREFIX_GHOST_FLAG, registry_module.ENV_GHOST)
         self.assertEqual(contract.PREFIX_POLICY_FLAGS[registry_module.ENV_EVICT], registry_module.EVICT_POLICIES)
+        self.assertEqual(contract.PREFIX_POLICY_FLAGS[registry_module.ENV_TIER_VERIFY], registry_module.TIER_VERIFY_MODES)
+        self.assertEqual(contract.PREFIX_TIER_GIB, registry_module.ENV_TIER_GIB)
+        self.assertEqual(contract.PREFIX_TIER_OFF_PATH, registry_module.ENV_TIER_OFF_PATH)
+        self.assertEqual(set(contract.PREFIX_TIER_NUMBERS), {registry_module.ENV_TIER_GIB, registry_module.ENV_TIER_SPILL_MAX,
+                                                             registry_module.ENV_TIER_MIN_TOKENS, registry_module.ENV_TIER_MIN_AVAILABLE})
+        for name in ('QWEN_PREFIX_CKPT_PRECONVERTED', 'QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT', registry_module.ENV_TIER_GIB):
+            self.assertIn(name, qwen_prefix_model_patch.MODEL_ADAPTER)
+
+    def test_the_tier_and_the_preconverted_checkpoints_are_a_gate_only_profile_s(self):
+        def problems(gate=False, **env):
+            profile = {'name': 'x-gate' if gate else 'x', 'env': dict({'QWEN_PREFIX_REUSE': '1'}, **env)}
+            return contract.prefix_policy_problems(profile)
+
+        self.assertEqual(problems(QWEN_PREFIX_HOST_TIER_GIB='0'), [], 'off is nobody\'s business')
+        self.assertEqual(problems(QWEN_PREFIX_CKPT_PRECONVERTED='0'), [])
+        for env in ({'QWEN_PREFIX_HOST_TIER_GIB': '32'}, {'QWEN_PREFIX_CKPT_PRECONVERTED': '1'},
+                    {'QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT': '1'}, {'QWEN_PREFIX_HOST_TIER_AUDIT': '1'},
+                    {'QWEN_PREFIX_HOST_TIER_OFF_PATH': '/tmp/off'}):
+            with self.subTest(env=env):
+                self.assertTrue(any('only a gate-only profile' in p for p in problems(**env)), problems(**env))
+                self.assertEqual(problems(gate=True, **env), [])
+        gate_only = contract.prefix_policy_problems({'name': 'anything', 'gate_only': True, 'env': {'QWEN_PREFIX_REUSE': '1',
+                                                                                              'QWEN_PREFIX_HOST_TIER_GIB': '32'}})
+        self.assertEqual(gate_only, [])
+
+    def test_the_tier_s_numbers_are_checked(self):
+        def problems(**env):
+            return contract.prefix_policy_problems({'name': 'x-gate', 'env': dict({'QWEN_PREFIX_REUSE': '1'}, **env)})
+
+        self.assertTrue(any('whole prefix state' in p for p in problems(QWEN_PREFIX_HOST_TIER_GIB='8')), 'not more than the default store')
+        self.assertEqual(problems(QWEN_PREFIX_HOST_TIER_GIB='8', QWEN_PREFIX_STORE_GIB='2'), [])
+        self.assertTrue(any('whole prefix state' in p for p in problems(QWEN_PREFIX_HOST_TIER_GIB='4', QWEN_PREFIX_STORE_GIB='4')))
+        for name in contract.PREFIX_TIER_NUMBERS:
+            for bad in ('lots', '-1', 'nan', 'inf'):
+                with self.subTest(name=name, bad=bad):
+                    self.assertTrue(any('non-negative number' in p for p in problems(**{name: bad})), problems(**{name: bad}))
+        self.assertTrue(any('QWEN_PREFIX_HOST_TIER_VERIFY' in p for p in problems(QWEN_PREFIX_HOST_TIER_VERIFY='sometimes')))
+        self.assertTrue(any('plain path' in p for p in problems(QWEN_PREFIX_HOST_TIER_OFF_PATH='-rf /')))
+        self.assertTrue(any('inert' in p for p in contract.prefix_policy_problems(
+            {'name': 'x-gate', 'env': {'QWEN_PREFIX_HOST_TIER_GIB': '32'}})))
 
     def test_the_tenant_is_the_salt_s(self):
         self.assertEqual(tenant_of_salt('qps1.tenantTAG1.' + 'a' * 64), 'tenantTAG1')
@@ -664,10 +708,21 @@ class SupersessionTests(unittest.TestCase):
 # ------------------------------------------------------------------------------------------------
 # The graft: whole conversations through the scheduler's trim, the cap, the commit and the model
 # ------------------------------------------------------------------------------------------------
-class Rig(object):
-    """A FakeScheduler under the graft, its registry and the cold-chain checking model."""
+def tier_environ(blocks, store_bytes, **extra):
+    """The environment of a tier holding `blocks` payloads of FakeKvIO beside a checkpoint store of store_bytes (the GiB is the whole)."""
+    total = store_bytes + blocks * FakeKvIO.block_bytes
+    environ = {'QWEN_PREFIX_HOST_TIER_GIB': repr(total / float(1 << 30)), 'QWEN_PREFIX_HOST_TIER_MIN_TOKENS': '0',
+               'QWEN_PREFIX_HOST_TIER_MIN_AVAILABLE_GIB': '0', 'QWEN_PREFIX_HOST_TIER_VERIFY': 'all'}
+    environ.update(extra)
+    return environ
 
-    def __init__(self, environ=None, num_blocks=3000, budget=1 << 40, clock=None, sticky=False, mid_loop=True):
+
+class Rig(object):
+    """A FakeScheduler under the graft, its registry and the cold-chain checking model. With tier=<blocks> the registry has a host KV tier of
+    that many payloads (tier_env: more settings) over FakeKvIO; the rig then also keeps the device's block contents and can check them."""
+
+    def __init__(self, environ=None, num_blocks=3000, budget=1 << 40, clock=None, sticky=False, mid_loop=True, tier=None, tier_env=None,
+                 attach_io=True):
         self.patches = [mock.patch.dict(sys.modules, fake_vllm_modules()),
                         mock.patch.dict(os.environ, {'QWEN_PREFIX_STATS_PATH': ''})]
         for patcher in self.patches:
@@ -675,7 +730,15 @@ class Rig(object):
         self.lines = []
         self.scheduler = FakeScheduler(num_blocks=num_blocks)
         kwargs = {} if clock is None else {'clock': clock}
-        self.registry = PrefixRegistry(budget_bytes=budget, environ=dict(environ or {}), **kwargs)
+        environ = dict(environ or {})
+        if tier is not None:
+            environ.update(tier_environ(tier, budget, **(tier_env or {})))
+        self.registry = PrefixRegistry(budget_bytes=budget, environ=environ, **kwargs)
+        self.kv = FakeKvIO()
+        if tier is not None:
+            self.registry.tier.digest_inline = True
+            if attach_io:
+                self.registry.attach_tier_io(self.kv)
         if mid_loop:
             with Quiet():
                 self.registry.enable_mid_loop_capture()
@@ -698,6 +761,7 @@ class Rig(object):
         self.scheduler.add(request)
         out = self.scheduler.schedule()
         row = None
+        single = self.scheduler.kv_cache_manager.coordinator.single_type_managers[0]
         for data in out.scheduled_new_reqs:
             grant = self.registry.grant_for(data.req_id)
             if data.req_id == request.request_id:
@@ -705,9 +769,25 @@ class Rig(object):
             if model:
                 with Quiet():
                     self.model.prefill(data.req_id, self.scheduler.requests[data.req_id].all_token_ids, data.num_computed_tokens)
+                # The model writes the KV of every full block from the resume point on.
+                owned = single.req_to_blocks[data.req_id]
+                scheduled = self.scheduler.requests[data.req_id]
+                for index in range(data.num_computed_tokens // BLOCK, len(scheduled.block_hashes)):
+                    self.kv.device[owned[index].block_id] = kv_content(scheduled.block_hashes[index])
         self.scheduler.finish(request)
         self.rows.append(row)
         return row
+
+    def check_kv(self):
+        """Every block the pool serves as cached holds the bytes its hash stands for, and so does every record of the tier."""
+        pool = self.scheduler.kv_cache_manager.block_pool
+        for key, blocks in pool.cached_block_hash_to_block.map.items():
+            for block in blocks:
+                assert self.kv.device.get(block.block_id) == kv_content(key[0]), 'cached block %d holds the wrong bytes' % block.block_id
+        if self.registry.tier is not None:
+            for key, record in self.registry.tier.records.items():
+                assert bytes(record.payload) == kv_content(key), 'a tier record holds the wrong bytes'
+        return True
 
     def state(self):
         """Everything observable of the registry the policies must not move when off."""
@@ -1381,6 +1461,442 @@ class ClassifyOnTheGraftTests(unittest.TestCase):
         self.assertEqual(made.graft.end_boundary(a), 8192 - CHUNK)
         made.registry.note_attempt('a', a.block_hashes, 8300, made.graft.end_boundary(a), 0, 0)
         self.assertEqual(made.registry.attempts['a'].end, 6144)
+
+
+# ------------------------------------------------------------------------------------------------
+# WP2: the host KV tier
+# ------------------------------------------------------------------------------------------------
+SMALL_POOL = 150      # blocks: A (66 blocks) and a 94-block filler do not both stay
+
+
+def two_turn_scenario(rig_, tenant='alpha', filler_tenant='bravo', second_turn=True):
+    """A's first turn; another tenant's request that takes A's tail blocks (boundary block included); A's next turn."""
+    a = Request('a1', span(4200, 1), salt=salt_of(tenant))
+    rig_.serve(a)
+    rig_.serve(Request('f1', span(6000, 2), salt=salt_of(filler_tenant)))
+    if not second_turn:
+        return a, None
+    a2 = Request('a2', a.all_token_ids + span(700, 3), salt=a.cache_salt)
+    return a, rig_.serve(a2)
+
+
+class TierConfigTests(unittest.TestCase):
+    def config(self, store=1 << 30, **env):
+        return registry_module.tier_config(env, store)
+
+    def test_off_unless_a_budget_is_named(self):
+        self.assertIsNone(self.config())
+        self.assertIsNone(self.config(QWEN_PREFIX_HOST_TIER_GIB='0'))
+        self.assertIsNone(self.config(QWEN_PREFIX_HOST_TIER_GIB=''))
+        self.assertIsNone(PrefixRegistry(budget_bytes=1, environ={}).tier)
+
+    def test_the_budget_is_the_whole_prefix_state_and_the_kv_pages_get_the_rest(self):
+        config = self.config(store=8 << 30, QWEN_PREFIX_HOST_TIER_GIB='32')
+        self.assertEqual((config.total, config.kv_bytes), (32 << 30, 24 << 30))
+        registry = PrefixRegistry(environ={'QWEN_PREFIX_HOST_TIER_GIB': '32'})
+        self.assertEqual((registry.budget_bytes, registry.tier.cap), (8 << 30, 24 << 30), 'the default 8 GiB store')
+        registry = PrefixRegistry(environ={'QWEN_PREFIX_HOST_TIER_GIB': '32', 'QWEN_PREFIX_STORE_GIB': '4'})
+        self.assertEqual(registry.tier.cap, 28 << 30)
+
+    def test_a_budget_that_leaves_no_kv_space_or_a_bad_value_refuses_to_start(self):
+        for gib in ('8', '7.5', '-1', 'big', 'nan'):
+            with self.subTest(gib=gib), self.assertRaises(ValueError):
+                self.config(store=8 << 30, QWEN_PREFIX_HOST_TIER_GIB=gib)
+
+    def test_the_knobs_default_and_are_strict(self):
+        config = self.config(store=0, QWEN_PREFIX_HOST_TIER_GIB='1')
+        self.assertEqual((config.audit, config.spill_max, config.min_tokens, config.verify, config.off_path),
+                         (False, 512, 8192, 'sample', registry_module.TIER_KILL_SWITCH_PATH))
+        self.assertEqual(config.min_available, 16 << 30)
+        audited = self.config(store=0, QWEN_PREFIX_HOST_TIER_GIB='1', QWEN_PREFIX_HOST_TIER_AUDIT='1')
+        self.assertEqual((audited.audit, audited.verify), (True, 'all'), 'the audit checks every digest')
+        self.assertEqual(self.config(store=0, QWEN_PREFIX_HOST_TIER_GIB='1', QWEN_PREFIX_HOST_TIER_VERIFY='off').verify, 'off')
+        for bad in ({'QWEN_PREFIX_HOST_TIER_VERIFY': 'x'}, {'QWEN_PREFIX_HOST_TIER_AUDIT': 'yes'},
+                    {'QWEN_PREFIX_HOST_TIER_SPILL_MAX_BLOCKS': '2.5'}, {'QWEN_PREFIX_HOST_TIER_MIN_TOKENS': '-1'},
+                    {'QWEN_PREFIX_HOST_TIER_MIN_AVAILABLE_GIB': 'some'}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.config(store=0, QWEN_PREFIX_HOST_TIER_GIB='1', **bad)
+
+    def test_the_store_standalone(self):
+        store = registry_module.TierStore(100, digest_inline=True)
+        self.assertTrue(store.put(b'a', b'x' * 60, 't', b'c', 0))
+        self.assertTrue(store.put(b'a', b'x' * 60, 't', b'c', 0), 'a key held keeps its record')
+        self.assertEqual((store.bytes, store.stats['duplicates']), (60, 1))
+        self.assertFalse(store.put(b'big', b'y' * 101, 't', b'c', 1))
+        self.assertEqual(store.stats['refused_size'], 1)
+        self.assertTrue(store.put(b'b', b'z' * 60, 't', b'c', 1))
+        self.assertEqual((sorted(store.records), store.bytes, store.stats['evicted']), ([b'b'], 60, 1))
+        record = store.get(b'b')
+        self.assertTrue(store.verify(record))
+        record.payload = b'w' * 60
+        self.assertFalse(store.verify(record))
+        self.assertIsNone(store.get(b'absent'))
+        self.assertEqual((store.stats['hits'], store.stats['misses']), (1, 1))
+        store.clear()
+        self.assertEqual((store.bytes, len(store.records), store.by_tenant, store.tenant_bytes), (0, 0, {}, {}))
+
+    def test_the_slab_holds_records_in_slots_of_one_mapping_and_reuses_them(self):
+        import mmap
+
+        store = registry_module.TierStore(5 * 16 + 7, digest_inline=True)
+        store.configure(16)
+        self.assertEqual((store.cap, store.slot_bytes, len(store._free)), (5 * 16, 16, 5), 'the cap is a whole number of slots')
+        self.assertIsInstance(store._map, mmap.mmap)
+        for index in range(5):
+            self.assertTrue(store.put(b'k%d' % index, bytes([index]) * 16, 't', b'c', index))
+        self.assertEqual((store.bytes, len(store._free)), (80, 0))
+        self.assertEqual(bytes(store.get(b'k3').payload), bytes([3]) * 16)
+        self.assertTrue(store.put(b'k5', b'\x05' * 16, 't', b'c', 5), 'an eviction frees the oldest slot for it')
+        self.assertNotIn(b'k0', store.records)
+        self.assertEqual(bytes(store.get(b'k5').payload), b'\x05' * 16)
+        self.assertEqual(store.get(b'k5').slot, 0, 'the evicted record\'s slot')
+        self.assertFalse(store.put(b'odd', b'x' * 15, 't', b'c', 0), 'a slab holds blocks of one size')
+        self.assertEqual(store.stats['refused_size'], 1)
+        with self.assertRaises(ValueError):
+            store.configure(32)
+        store.clear()
+        self.assertEqual(sorted(store._free), [0, 1, 2, 3, 4])
+
+    def test_reserve_commit_and_abort(self):
+        store = registry_module.TierStore(3 * 8, digest_inline=True)
+        store.configure(8)
+        slots = store.reserve(2)
+        self.assertEqual(len(slots), 2)
+        slots[0].view[:] = b'A' * 8
+        slots[1].view[:] = b'B' * 8
+        self.assertTrue(store.commit(slots[0], b'a', 't', b'c', 0))
+        store.abort(slots[1:])
+        self.assertEqual((len(store.records), len(store._free)), (1, 2))
+        again = store.reserve(1)
+        again[0].view[:] = b'A' * 8
+        self.assertTrue(store.commit(again[0], b'a', 't', b'c', 0), 'a key already held')
+        self.assertEqual((store.stats['duplicates'], len(store._free), len(store.records)), (1, 2, 1))
+        everything = store.reserve(10)
+        self.assertEqual(len(everything), 3, 'at most the slots there are: the record is evicted for one of them')
+        self.assertEqual(len(store.records), 0)
+        self.assertEqual(store.reserve(1), [], 'every slot is a reservation')
+
+    def test_a_pinned_record_survives_every_eviction(self):
+        for policy in ('lru', 'fair'):
+            with self.subTest(policy=policy):
+                store = registry_module.TierStore(3 * 8, policy=policy, digest_inline=True)
+                store.configure(8)
+                for index in range(3):
+                    store.put(b'k%d' % index, bytes([index]) * 8, 't%d' % (index % 2), b'c', index)
+                store.pin([b'k0'])
+                slots = store.reserve(2)
+                self.assertEqual(len(slots), 2)
+                self.assertIn(b'k0', store.records)
+                self.assertEqual(bytes(store.records[b'k0'].payload), b'\x00' * 8, 'its slot was not handed out')
+                store.abort(slots)
+                for index in (1, 2):
+                    store.put(b'k%d' % index, bytes([index]) * 8, 't%d' % (index % 2), b'c', index)
+                store.pin([b'k0', b'k1', b'k2'])
+                self.assertEqual(store.reserve(3), [], 'nothing unpinned to evict')
+                store.unpin([b'k0', b'k1', b'k2'])
+                self.assertEqual(len(store.reserve(1)), 1)
+
+    def test_the_digest_worker_fills_the_digest_off_the_calling_thread(self):
+        store = registry_module.TierStore(1 << 20)
+        self.addCleanup(store.close)
+        store.put(b'k', b'v' * 4096, 't', b'c', 0)
+        record = store.records[b'k']
+        for _ in range(200):
+            if record.digest is not None:
+                break
+            import time as _time
+            _time.sleep(0.01)
+        self.assertEqual(record.digest, hashlib.sha256(b'v' * 4096).hexdigest())
+        self.assertTrue(store.verify(record))
+        fresh = registry_module.TierRecord(b'x', b'q', 't', b'c', 0, 1)
+        self.assertIsNone(store.verify(fresh), 'no digest yet: nothing is claimed')
+
+
+class HostTierTests(unittest.TestCase):
+    def rig(self, **kwargs):
+        kwargs.setdefault('num_blocks', SMALL_POOL)
+        kwargs.setdefault('budget', 1 << 20)
+        made = Rig(**kwargs)
+        self.addCleanup(made.close)
+        return made
+
+    def test_an_evicted_session_returns_to_a_hit_with_the_bytes_it_left(self):
+        made = self.rig(tier=64)
+        a, (start, grant) = two_turn_scenario(made)
+        stats = made.registry.stats
+        self.assertGreater(stats['tier_spill_blocks'], 0)
+        self.assertEqual(stats['evicted_coupled'], 0, 'the checkpoint at the evicted boundary block was kept, not dropped')
+        self.assertGreater(stats['tier_ckpt_kept'], 0)
+        self.assertEqual((start, grant.q), (4096, 4096), 'the whole conversation up to its last boundary is a hit again')
+        self.assertEqual((stats['tier_restore_requests'], stats['tier_restore_blocks']), (1, stats['tier_spill_blocks']))
+        self.assertTrue(made.check_kv(), 'every cached block, restored ones included, holds its hash\'s bytes')
+        for block in made.kv.writes[0]:
+            self.assertIn(block, made.kv.device)
+        self.assertEqual((stats['class_returning_served'], stats['class_kv_evicted']), (1, 0), 'the telemetry sees a served return, not a miss')
+        self.assertEqual(stats['tier_digest_failures'], 0)
+        pool = made.scheduler.kv_cache_manager.block_pool
+        self.assertEqual(len(pool.free), SMALL_POOL, 'every block is free again')
+
+    def test_without_the_tier_the_same_traffic_is_a_miss(self):
+        made = self.rig()
+        a, (start, grant) = two_turn_scenario(made)
+        self.assertEqual((start, grant.q), (0, 0))
+        self.assertEqual(made.registry.stats['evicted_coupled'], 1)
+        self.assertEqual((made.registry.stats['class_kv_evicted'], made.registry.stats['tier_spill_blocks']), (1, 0))
+
+    def test_another_tenant_with_the_same_text_never_meets_the_record(self):
+        made = self.rig(tier=64)
+        a, _ = two_turn_scenario(made, second_turn=False)
+        twin = Request('twin', a.all_token_ids + span(700, 3), salt=salt_of('mallory'))
+        start, grant = made.serve(twin)
+        self.assertEqual(start, 0)
+        self.assertEqual(made.registry.stats['tier_restore_requests'], 0)
+        self.assertTrue(made.check_kv())
+
+    def test_a_record_that_changed_in_host_memory_is_refused_and_dropped(self):
+        made = self.rig(tier=64)
+        a, _ = two_turn_scenario(made, second_turn=False)
+        tier = made.registry.tier
+        victim = next(iter(tier.records.values()))
+        victim.payload = bytes([victim.payload[0] ^ 1]) + victim.payload[1:]
+        a2 = Request('a2', a.all_token_ids + span(700, 3), salt=a.cache_salt)
+        start, grant = made.serve(a2)
+        stats = made.registry.stats
+        self.assertEqual(start, 0, 'the request is served cold: a corrupt record is a miss')
+        self.assertEqual((stats['tier_digest_failures'], stats['tier_restore_refused_digest']), (1, 1))
+        self.assertNotIn(victim.key, tier.records)
+        self.assertTrue(made.check_kv())
+
+    def test_the_audit_reads_back_every_restored_block_and_stops_on_a_difference(self):
+        made = self.rig(tier=64, tier_env={'QWEN_PREFIX_HOST_TIER_AUDIT': '1'})
+        a, (start, grant) = two_turn_scenario(made)
+        stats = made.registry.stats
+        self.assertEqual(start, 4096)
+        self.assertEqual((stats['tier_audit_reads'], stats['tier_audit_mismatches']), (stats['tier_restore_blocks'], 0))
+        bad = self.rig(tier=64, tier_env={'QWEN_PREFIX_HOST_TIER_AUDIT': '1'})
+        a, _ = two_turn_scenario(bad, second_turn=False)
+        bad.kv.corrupt_write = True
+        with self.assertRaisesRegex(patch_module.TierAuditError, 'read back differently'):
+            bad.serve(Request('a2', a.all_token_ids + span(700, 3), salt=a.cache_salt))
+        self.assertGreater(bad.registry.stats['tier_audit_mismatches'], 0)
+
+    def test_a_failing_device_read_is_counted_and_the_checkpoint_goes_with_the_lost_kv(self):
+        made = self.rig(tier=64)
+        made.kv.fail_read = True
+        a, (start, grant) = two_turn_scenario(made)
+        stats = made.registry.stats
+        self.assertEqual(start, 0)
+        self.assertEqual((stats['tier_spill_failures'], stats['tier_spill_blocks']), (1, 0))
+        self.assertEqual(stats['evicted_coupled'], 1, 'with no KV anywhere the checkpoint is dropped as before')
+        self.assertTrue(made.check_kv())
+
+    def test_three_failing_reads_in_a_row_latch_the_tier_off(self):
+        made = self.rig(tier=64, num_blocks=100)
+        made.kv.fail_read = True
+        for index in range(4):
+            made.serve(Request('x%d' % index, span(4200, 10 + index), salt=salt_of('t%d' % index)))
+        self.assertEqual(made.registry.stats['tier_latched'], 1)
+        self.assertFalse(made.registry.tier_on)
+        self.assertEqual(len(made.registry.tier.records), 0)
+        made.kv.fail_read = False
+        before = len(made.kv.reads)
+        made.serve(Request('y', span(4200, 99), salt=salt_of('late')))
+        self.assertEqual(len(made.kv.reads), before, 'a latched tier reads nothing')
+
+    def test_a_failing_restore_write_falls_back_to_a_cold_turn_and_frees_what_it_took(self):
+        made = self.rig(tier=64)
+        a, _ = two_turn_scenario(made, second_turn=False)
+        made.kv.fail_write = True
+        start, grant = made.serve(Request('a2', a.all_token_ids + span(700, 3), salt=a.cache_salt))
+        stats = made.registry.stats
+        self.assertEqual(start, 0)
+        self.assertEqual(stats['tier_restore_failures'], 1)
+        self.assertEqual(len(made.scheduler.kv_cache_manager.block_pool.free), SMALL_POOL)
+        self.assertTrue(made.check_kv())
+
+    def test_the_cap_keeps_the_lowest_blocks_of_a_chain(self):
+        made = self.rig(tier=64, tier_env={'QWEN_PREFIX_HOST_TIER_SPILL_MAX_BLOCKS': '3'})
+        a, (start, grant) = two_turn_scenario(made)
+        stats = made.registry.stats
+        self.assertEqual(stats['tier_spill_blocks'], 3)
+        self.assertGreater(stats['tier_spill_dropped_cap'], 0)
+        kept = sorted(record.index for record in made.registry.tier.records.values())
+        self.assertEqual(kept, [kept[0], kept[0] + 1, kept[0] + 2], 'consecutive, from the lowest index the eviction reached')
+        self.assertEqual(start, 0, 'the missing top of the run leaves no checkpoint to resume at')
+        self.assertTrue(made.check_kv())
+
+    def test_a_host_short_of_memory_spills_nothing(self):
+        made = self.rig(tier=64, tier_env={'QWEN_PREFIX_HOST_TIER_MIN_AVAILABLE_GIB': '1'})
+        with mock.patch.object(registry_module, 'host_gauges', return_value={'host_mem_available_bytes': 1 << 20}):
+            a, (start, grant) = two_turn_scenario(made)
+        stats = made.registry.stats
+        self.assertEqual((start, stats['tier_spill_blocks']), (0, 0))
+        self.assertGreater(stats['tier_spill_dropped_governor'], 0)
+        self.assertEqual(stats['evicted_coupled'], 1)
+
+    def test_blocks_no_checkpoint_reaches_are_not_spilled(self):
+        made = self.rig(tier=64, tier_env={'QWEN_PREFIX_HOST_TIER_MIN_TOKENS': '8192'})
+        a, (start, grant) = two_turn_scenario(made)
+        self.assertEqual(made.registry.stats['tier_spill_blocks'], 0, 'the session ends below 8192 tokens: not worth a restore')
+        self.assertGreater(made.registry.stats['tier_spill_dropped_useless'], 0)
+        self.assertEqual(start, 0)
+
+    def test_a_pool_with_no_room_leaves_the_turn_cold_and_nothing_evicted_for_it(self):
+        made = self.rig(tier=64, num_blocks=100)
+        a = Request('a1', span(4200, 1), salt=salt_of('alpha'))
+        made.serve(a)
+        made.serve(Request('f1', span(6000, 2), salt=salt_of('bravo')))
+        self.assertGreater(made.registry.stats['tier_spill_blocks'], 0)
+        # A returns with a prompt so long that after the restore the pool could not hold the rest: refused for room
+        a2 = Request('a2', a.all_token_ids + span(2200, 3), salt=a.cache_salt)
+        start, grant = made.serve(a2)
+        self.assertEqual(made.registry.stats['tier_restore_refused_room'] + made.registry.stats['tier_restore_requests'], 1)
+        self.assertTrue(made.check_kv())
+
+    def test_the_kill_switch_file_latches_the_tier_and_empties_it(self):
+        directory = tempfile.mkdtemp(prefix='qwen-tier-kill-')
+        self.addCleanup(shutil.rmtree, directory, True)
+        flag = os.path.join(directory, 'kv-tier.off')
+        made = self.rig(tier=64, tier_env={'QWEN_PREFIX_HOST_TIER_OFF_PATH': flag})
+        a, _ = two_turn_scenario(made, second_turn=False)
+        self.assertGreater(len(made.registry.tier.records), 0)
+        open(flag, 'w').close()
+        made.graft.tier_hooks.kill_switch._last_poll = None
+        start, grant = made.serve(Request('a2', a.all_token_ids + span(700, 3), salt=a.cache_salt))
+        self.assertEqual(start, 0)
+        self.assertEqual((made.registry.stats['tier_latched'], len(made.registry.tier.records)), (1, 0))
+
+    def test_reset_prefix_cache_empties_the_tier_with_the_checkpoints(self):
+        made = self.rig(tier=64)
+        two_turn_scenario(made, second_turn=False)
+        self.assertGreater(len(made.registry.tier.records), 0)
+        made.scheduler.reset_prefix_cache()
+        self.assertEqual((len(made.registry.tier.records), made.registry.tier.bytes, len(made.registry.entries)), (0, 0, 0))
+
+    def test_the_tier_cap_is_the_budget_less_the_checkpoint_store_and_evicts_by_policy(self):
+        made = self.rig(tier=8)
+        tier = made.registry.tier
+        self.assertEqual(tier.cap, 8 * FakeKvIO.block_bytes)
+        for index in range(12):
+            tier.put(b'k%d' % index, kv_content(b'k%d' % index), 'alpha', b'c', index)
+        self.assertEqual((len(tier.records), tier.stats['evicted']), (8, 4))
+        self.assertEqual(sorted(tier.records), sorted(b'k%d' % index for index in range(4, 12)), 'oldest first under lru')
+
+    def test_the_fair_policy_spares_a_small_tenant_in_the_tier(self):
+        made = self.rig(tier=6, environ={'QWEN_PREFIX_EVICT': 'fair'})
+        tier = made.registry.tier
+        for chain in (b'q', b'l'):       # checkpoints reach both chains: nothing is dead, so the policy decides
+            made.registry.entries[chain + b'-ckpt'] = SimpleNamespace(pos=1 << 20, nbytes=1, pins=0)
+            made.registry.by_chain[chain] = {chain + b'-ckpt'}
+        tier.put(b'quiet', kv_content(b'quiet'), 'quiet', b'q', 0)
+        for index in range(10):
+            tier.put(b'loud%d' % index, kv_content(b'x'), 'loud', b'l', index)
+        self.assertIn(b'quiet', tier.records)
+        self.assertEqual(len(tier.records), 6)
+
+    def test_dead_records_go_first(self):
+        made = self.rig(tier=3)
+        tier = made.registry.tier
+        live_chain = b'live'
+        made.registry.entries[b'ckpt'] = SimpleNamespace(pos=8192, nbytes=1, pins=0)
+        made.registry.by_chain[live_chain] = {b'ckpt'}
+        tier.put(b'old-dead', b'x' * 32, 't', b'dead-chain', 0)
+        tier.put(b'live-1', b'y' * 32, 't', live_chain, 0)
+        tier.put(b'live-2', b'z' * 32, 't', live_chain, 1)
+        tier.put(b'new', b'w' * 32, 't', live_chain, 2)
+        self.assertNotIn(b'old-dead', tier.records)
+        self.assertIn(b'live-1', tier.records)
+
+    def test_a_tier_without_the_models_io_refuses_to_install(self):
+        with self.assertRaisesRegex(patch_module.PrefixInstallError, 'attached no tier IO'):
+            made = Rig(tier=8, budget=1 << 20, attach_io=False)
+            self.addCleanup(made.close)
+
+    def test_an_evicted_record_takes_the_checkpoint_with_it_unless_the_device_holds_the_block(self):
+        made = self.rig(tier=2)
+        registry, tier = made.registry, made.registry.tier
+        registry.put(b'boundary', 2048, list(range(2048)), nbytes=1)
+        tier.put(b'boundary', kv_content(b'boundary'), 't', b'c', 31)
+        tier.put(b'other-1', kv_content(b'o1'), 't', b'c', 0)
+        tier.put(b'other-2', kv_content(b'o2'), 't', b'c', 1)
+        self.assertNotIn(b'boundary', registry.entries)
+        self.assertEqual((registry.stats['tier_ckpt_dropped'], registry.stats['tier_evicted']), (1, 1))
+
+    def test_restored_blocks_join_the_free_list_tail_first_so_the_chain_head_is_evicted_last(self):
+        made = self.rig(tier=64)
+        a, _ = two_turn_scenario(made, second_turn=False)
+        again = Request('a2', a.all_token_ids + span(700, 3), salt=a.cache_salt)
+        hooks = made.graft.tier_hooks
+        blocks, h = made.graft.original['get_computed_blocks'](again)
+        self.assertEqual(h, 56 * BLOCK, 'the tail of A (blocks 56-63 and the partial ones) was evicted')
+        self.assertTrue(hooks.load(again, blocks, h, 4096))
+        pool = made.scheduler.kv_cache_manager.block_pool
+        order = [again.block_hashes.index(block.block_hash[0]) for block in pool.free[-64:]]
+        self.assertEqual(order, list(range(63, -1, -1)), 'the restored run, then the request\'s own hit: last block first, chain head last')
+        self.assertEqual(len(pool.free), SMALL_POOL)
+
+    def test_the_stats_and_gauges_name_the_tier(self):
+        made = self.rig(tier=64)
+        two_turn_scenario(made)
+        snap = made.registry.snapshot()
+        self.assertEqual((snap['tier_on'], snap['tier_cap_bytes']), (1, 64 * FakeKvIO.block_bytes))
+        self.assertEqual(snap['tier_entries'], len(made.registry.tier.records))
+        self.assertIn('kv_spilled=', made.registry.telemetry_lines(host={})[0])
+        self.assertTrue(any(line.startswith('install host tier kv_bytes=') for line in made.lines))
+        self.assertTrue(any(line.startswith('host tier restore req=a2') for line in made.lines))
+        self.assertTrue(any(line.startswith('host tier spill blocks=') for line in made.lines))
+
+    def test_with_the_flag_off_there_is_no_tier_at_all(self):
+        made = self.rig()
+        self.assertIsNone(made.registry.tier)
+        self.assertIsNone(made.graft.tier_hooks)
+        self.assertFalse(made.registry.tier_on)
+        two_turn_scenario(made)
+        self.assertEqual(made.kv.reads, [])
+
+
+class HostTierExactnessTests(unittest.TestCase):
+    """Whatever the traffic, with the tier on: every request is served an exact state (FakeGdnModel raises otherwise), every block the pool
+    serves as cached holds the bytes of its hash, and a return after eviction is never worse than without the tier."""
+
+    def run_traffic(self, seed, tier):
+        rng = random.Random(seed)
+        made = Rig(num_blocks=170, budget=1 << 20, tier=tier, tier_env={'QWEN_PREFIX_EVICT': 'lru'} if False else None)
+        try:
+            systems = {name: span(2300, 500 + index) for index, name in enumerate(('alpha', 'bravo', 'charlie'))}
+            histories, rows = {}, []
+            for step in range(36):
+                name = rng.choice(['alpha', 'bravo', 'charlie'])
+                convo = rng.randrange(2)
+                key = (name, convo)
+                base = histories.get(key, systems[name])
+                grow = rng.randrange(1200, 3200)
+                tokens = list(base) + span(grow, 4000 + 31 * step + convo)
+                request = Request('r%d' % step, tokens, salt=salt_of(name))
+                start, grant = made.serve(request)
+                rows.append((start, grant.q if grant else 0))
+                made.check_kv()
+                # (a conversation past 7,000 tokens starts over: three of them must fit the 170-block pool one at a time)
+                histories[key] = None if len(tokens) > 7000 else tokens + span(rng.randrange(50, 400), 9000 + step)
+                if histories[key] is None:
+                    del histories[key]
+            return rows, made.registry.stats.copy()
+        finally:
+            made.close()
+
+    def test_random_traffic_is_exact_and_the_tier_only_adds_hits(self):
+        for seed in range(4):
+            with_rows, with_stats = self.run_traffic(seed, tier=400)
+            without_rows, without_stats = self.run_traffic(seed, tier=None)
+            self.assertEqual(len(with_rows), len(without_rows))
+            self.assertGreater(with_stats['tier_spill_blocks'], 0, 'seed %d spilled something' % seed)
+            self.assertGreater(with_stats['tier_restore_requests'], 0, 'seed %d restored something' % seed)
+            self.assertEqual(with_stats['tier_digest_failures'], 0)
+            self.assertGreaterEqual(with_stats['grant_tokens'], without_stats['grant_tokens'], 'seed %d: the tier never lowers the hits' % seed)
+
+    def test_a_tier_that_cannot_hold_a_block_still_serves_exactly(self):
+        rows, stats = self.run_traffic(7, tier=1)
+        self.assertGreaterEqual(len(rows), 36)
 
 
 # ------------------------------------------------------------------------------------------------

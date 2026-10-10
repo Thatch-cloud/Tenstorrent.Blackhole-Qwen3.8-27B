@@ -95,6 +95,10 @@ GAUGES = {
     'telemetry': '1 when admissions are classified and reuse distance is recorded (QWEN_PREFIX_TELEMETRY)',
     'host_rss_bytes': 'resident set size of the engine process',
     'host_mem_available_bytes': 'MemAvailable of the host the engine runs on',
+    'tier_bytes': 'host bytes the KV tier holds (raw packed attention-KV blocks)',
+    'tier_entries': 'KV blocks the host tier holds',
+    'tier_cap_bytes': 'the KV tier\'s byte cap (QWEN_PREFIX_HOST_TIER_GIB less the checkpoint store)',
+    'tier_on': '1 while the host KV tier spills and restores (configured, the model IO attached, not latched off)',
 }
 # Levels that are the host's, not the writer's: the largest over writers, not the sum.
 MAX_KEYS = ('host_mem_available_bytes',)
@@ -174,6 +178,31 @@ COUNTERS = {
     'lost_tokens_ckpt_evicted': 'tokens a ckpt_evicted returning session had to re-prefill beyond a full hit',
     'lost_tokens_ckpt_missing': 'tokens a ckpt_missing returning session had to re-prefill beyond a full hit',
     'lost_tokens_refused': 'tokens a refused returning session had to re-prefill beyond a full hit',
+    'tier_spill_flushes': 'schedule() calls that spilled evicted KV blocks to the host tier',
+    'tier_spill_blocks': 'KV blocks read from the device into the host tier when vLLM evicted them',
+    'tier_spill_bytes': 'bytes of those blocks',
+    'tier_spill_ms': 'time reading evicted blocks from the device into the tier',
+    'tier_spill_known': 'evicted blocks the tier already held',
+    'tier_spill_dropped_useless': 'evicted blocks not spilled: no checkpoint of their chain reaches them (or below the minimum session size)',
+    'tier_spill_dropped_cap': 'evicted blocks not spilled: over QWEN_PREFIX_HOST_TIER_SPILL_MAX_BLOCKS for the step',
+    'tier_spill_dropped_governor': 'evicted blocks not spilled: the host\'s MemAvailable was under the floor',
+    'tier_spill_dropped_full': 'evicted blocks not spilled: the tier could not make room',
+    'tier_spill_failures': 'device reads of evicted blocks that failed (three in a row latch the tier off)',
+    'tier_restore_requests': 'requests whose missing KV blocks were written back from the host tier',
+    'tier_restore_blocks': 'KV blocks written back from the host tier',
+    'tier_restore_bytes': 'bytes of those blocks',
+    'tier_restore_ms': 'time writing blocks back to the device (digest checks and the audit read-back included)',
+    'tier_restore_refused_room': 'restores refused because the pool lacked free blocks for them and the rest of the request',
+    'tier_restore_refused_digest': 'restores refused because a record failed its digest (the record is dropped)',
+    'tier_restore_failures': 'restores that failed (a missing record, a device write error)',
+    'tier_digest_checks': 'tier records whose digest was checked at restore',
+    'tier_digest_failures': 'tier records that failed their digest at restore',
+    'tier_evicted': 'tier records evicted by the tier\'s own policy',
+    'tier_ckpt_kept': 'checkpoints kept because their boundary block went to the host tier',
+    'tier_ckpt_dropped': 'checkpoints dropped because their KV is in neither the device nor the tier',
+    'tier_audit_reads': 'restored blocks read back from the device and compared (QWEN_PREFIX_HOST_TIER_AUDIT)',
+    'tier_audit_mismatches': 'restored blocks that read back differently (the engine stops)',
+    'tier_latched': '1 once the tier latched itself off (failing device IO, its kill switch)',
 }
 
 

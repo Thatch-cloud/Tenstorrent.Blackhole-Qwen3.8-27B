@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build ~/opgraft-KVR on the rig HOST: qwen_kv_read.so, the standalone nanobind extension that adds ttnn.qwen_read_blocks
+# Build ~/opgraft-KVR on the rig HOST: qwen_kv_read.so, the standalone nanobind extension that adds ttnn.qwen_read_blocks (and, from version 2, the raw
+# qwen_read_blocks_raw / qwen_write_blocks_raw / qwen_block_bytes of the host KV tier)
 # (the prefix audit's region read, docs/prefix-audit-cost.md) WITHOUT replacing any pinned image binary. It is compiled in the
 # ttbuild container against the tt-metal tree the served binaries came from (9f9cd4fd), with the flags ninja uses for the
 # ttnn unity sources, and linked against ttbuild's _ttnncpp.so / libtt_metal.so / nanobind static library; at run time it
@@ -92,7 +93,7 @@ for image in $images; do
   echo "$image: unresolved non-Python symbols: $unresolved"
   test "$unresolved" = 0 || fail=1
   docker run --rm --network none --entrypoint python3 -v "$work:/kvr:ro" -e PYTHONPATH=/kvr "$image" -c \
-    'import ttnn, qwen_kv_read; assert callable(ttnn.qwen_read_blocks); print("IMPORT-OK", qwen_kv_read.QWEN_KV_READ_VERSION)' 2>&1 | grep -E "IMPORT-OK|Error|error" | tail -3 \
+    'import ttnn, qwen_kv_read; assert all(callable(getattr(ttnn, n)) for n in ("qwen_read_blocks", "qwen_block_bytes", "qwen_read_blocks_raw", "qwen_write_blocks_raw")); print("IMPORT-OK", qwen_kv_read.QWEN_KV_READ_VERSION)' 2>&1 | grep -E "IMPORT-OK|Error|error" | tail -3 \
     | tee "$work/import-$tagname.txt"
   grep -q IMPORT-OK "$work/import-$tagname.txt" || { echo "FAIL $image: the module does not import" >&2; fail=1; }
 done

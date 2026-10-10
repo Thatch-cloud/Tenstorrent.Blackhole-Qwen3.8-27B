@@ -85,8 +85,18 @@ PREFIX_SWITCH = 'QWEN_PREFIX_REUSE'
 # The checkpoint registry's store policies and telemetry (qwen_prefix_registry.ENV_EVICT, ENV_SUPERSEDE, ENV_TELEMETRY, ENV_GHOST): a profile's
 # own env like the switch, strict in their values, and only meaningful beside it (prefix_policy_problems). Unset they are the registry's defaults:
 # plain LRU, no supersession, telemetry on.
-PREFIX_POLICY_FLAGS = {'QWEN_PREFIX_EVICT': ('lru', 'fair'), 'QWEN_PREFIX_SUPERSEDE': ('0', '1'), 'QWEN_PREFIX_TELEMETRY': ('0', '1')}
+PREFIX_POLICY_FLAGS = {'QWEN_PREFIX_EVICT': ('lru', 'fair'), 'QWEN_PREFIX_SUPERSEDE': ('0', '1'), 'QWEN_PREFIX_TELEMETRY': ('0', '1'),
+                       'QWEN_PREFIX_CKPT_PRECONVERTED': ('0', '1'), 'QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT': ('0', '1'),
+                       'QWEN_PREFIX_HOST_TIER_AUDIT': ('0', '1'), 'QWEN_PREFIX_HOST_TIER_VERIFY': ('sample', 'all', 'off')}
 PREFIX_GHOST_FLAG = 'QWEN_PREFIX_GHOST_ENTRIES'
+# The host KV tier's numbers (qwen_prefix_registry.tier_config) and the files and switches that only a gate sets. None of the tier or the preconverted
+# checkpoints has run on a card: a traffic profile may not name them active until a qualification record lifts this.
+PREFIX_TIER_GIB = 'QWEN_PREFIX_HOST_TIER_GIB'
+PREFIX_TIER_NUMBERS = (PREFIX_TIER_GIB, 'QWEN_PREFIX_HOST_TIER_SPILL_MAX_BLOCKS', 'QWEN_PREFIX_HOST_TIER_MIN_TOKENS',
+                       'QWEN_PREFIX_HOST_TIER_MIN_AVAILABLE_GIB')
+PREFIX_TIER_OFF_PATH = 'QWEN_PREFIX_HOST_TIER_OFF_PATH'
+PREFIX_GATE_ONLY_VALUES = (('QWEN_PREFIX_CKPT_PRECONVERTED', '1'), ('QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT', '1'),
+                           ('QWEN_PREFIX_HOST_TIER_AUDIT', '1'))
 # Sticky sessions (serving_fast_policy.STICKY_SESSIONS_FLAG): the fast path's side of prefix reuse. Only a
 # profile sets it, and only beside PREFIX_SWITCH and the fast path (prefix_reuse_problems).
 STICKY_SWITCH = 'QWEN_FAST_STICKY_SESSIONS'
@@ -405,7 +415,37 @@ def prefix_policy_problems(profile):
         value = env[PREFIX_GHOST_FLAG]
         if not value.isdigit():
             problems.append('%s=%r is not a number of entries' % (PREFIX_GHOST_FLAG, value))
-    named = [name for name in sorted(list(PREFIX_POLICY_FLAGS) + [PREFIX_GHOST_FLAG]) if name in env]
+    numbers = {}
+    for name in PREFIX_TIER_NUMBERS:
+        if name in env:
+            try:
+                numbers[name] = float(env[name])
+            except ValueError:
+                numbers[name] = None
+            if numbers[name] is None or not numbers[name] >= 0.0 or numbers[name] == float('inf'):
+                problems.append('%s=%r is not a non-negative number' % (name, env[name]))
+    if numbers.get(PREFIX_TIER_GIB):
+        store = env.get('QWEN_PREFIX_STORE_GIB')
+        try:
+            store_gib = float(store) if store not in (None, '') else 8.0
+        except ValueError:
+            store_gib = None
+        if store_gib is not None and numbers[PREFIX_TIER_GIB] <= store_gib:
+            problems.append('%s=%s is the whole prefix state\'s host budget and must exceed QWEN_PREFIX_STORE_GIB (%s): nothing would be left '
+                            'for KV pages' % (PREFIX_TIER_GIB, env[PREFIX_TIER_GIB], store_gib))
+    if PREFIX_TIER_OFF_PATH in env and not re.fullmatch(r'(?!-)[A-Za-z0-9_./-]{1,200}', env[PREFIX_TIER_OFF_PATH]):
+        problems.append('%s=%r is not a plain path' % (PREFIX_TIER_OFF_PATH, env[PREFIX_TIER_OFF_PATH]))
+    if not gate_profile(profile):
+        unqualified = [name for name, value in PREFIX_GATE_ONLY_VALUES if env.get(name) == value]
+        if numbers.get(PREFIX_TIER_GIB):
+            unqualified.append(PREFIX_TIER_GIB)
+        if PREFIX_TIER_OFF_PATH in env:
+            unqualified.append(PREFIX_TIER_OFF_PATH)
+        if unqualified:
+            problems.append('%s: no card has run the host KV tier or the preconverted checkpoints, so only a gate-only profile may name them '
+                            'active' % ', '.join(sorted(unqualified)))
+    named = [name for name in sorted(list(PREFIX_POLICY_FLAGS) + [PREFIX_GHOST_FLAG, PREFIX_TIER_OFF_PATH] + list(PREFIX_TIER_NUMBERS))
+             if name in env]
     if named and not prefix_reuse(profile):
         problems.append('%s set without %s=1: the registry does not exist, so the policy would be inert'
                         % (', '.join(named), PREFIX_SWITCH))

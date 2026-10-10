@@ -58,12 +58,20 @@ class FakeTTNN(object):
     bfloat8_b, TILE_LAYOUT, DRAM_MEMORY_CONFIG = 'bfloat8_b', 'TILE', 'DRAM'
     FabricConfig = type('FabricConfig', (), {'FABRIC_1D': 'f1d', 'FABRIC_1D_RING': 'f1dr'})
 
-    def __init__(self, chips=4, with_extension=True, corrupt=False, lose_shard=False, grow_cache=False, flat_cost=False):
+    def __init__(self, chips=4, with_extension=True, corrupt=False, lose_shard=False, grow_cache=False, flat_cost=False, with_raw=False,
+                 raw_corrupt=False, raw_forgets=False, raw_grows=False, raw_spills=False, raw_wrong_size=False):
         self.chips, self.corrupt, self.lose_shard, self.grow_cache, self.flat_cost = chips, corrupt, lose_shard, grow_cache, flat_cost
         self.mesh = FakeMesh(chips)
         self.calls = []
+        self.raw_corrupt, self.raw_forgets, self.raw_grows, self.raw_spills, self.raw_wrong_size = (
+            raw_corrupt, raw_forgets, raw_grows, raw_spills, raw_wrong_size)
+        # The version-2 raw ops on in-memory tensors: a cache's "packed" bytes are modelled as the raw bytes of its bfloat16 heads.
         if with_extension:
             self.qwen_read_blocks = self._read
+        if with_raw:
+            self.qwen_block_bytes = self._block_bytes
+            self.qwen_read_blocks_raw = self._read_raw
+            self.qwen_write_blocks_raw = self._write_raw
 
     def MeshShape(self, *shape):
         return shape
@@ -114,6 +122,37 @@ class FakeTTNN(object):
         host.host = True
         return host
 
+    def _heads_per_chip(self, cache):
+        return cache.data.shape[1] // self.chips
+
+    def _block_bytes(self, cache):
+        return self._heads_per_chip(cache) * 64 * 256 * cache.data.element_size() + (1 if self.raw_wrong_size else 0)
+
+    def _read_raw(self, cache, out, blocks):
+        import numpy as np
+
+        per = self._heads_per_chip(cache)
+        for device in range(self.chips):
+            for slot, block in enumerate(blocks):
+                part = cache.data[block, device * per:(device + 1) * per].contiguous().view(torch.uint8).numpy()
+                out[device, slot] = np.frombuffer(part.tobytes()[:out.shape[2]], dtype=np.uint8)
+        if self.raw_grows:
+            self.mesh.programs += 1
+
+    def _write_raw(self, cache, data, blocks):
+        per = self._heads_per_chip(cache)
+        for device in range(self.chips):
+            for slot, block in enumerate(blocks):
+                row = bytearray(data[device, slot].tobytes())
+                if self.raw_corrupt:
+                    row[0] ^= 1
+                if self.raw_forgets and slot == 0:
+                    continue
+                part = torch.frombuffer(row, dtype=cache.data.dtype).reshape(per, 64, 256)
+                cache.data[block, device * per:(device + 1) * per] = part
+                if self.raw_spills:
+                    cache.data[3, device * per:(device + 1) * per] = part      # a block no set names
+
     def _read(self, cache, host, blocks):
         host.data = cache.data.index_select(0, torch.as_tensor(blocks, dtype=torch.long)).clone()
         if self.corrupt:
@@ -141,7 +180,9 @@ class CardCheckTests(unittest.TestCase):
         report = card.run(ttnn, ttnn.mesh, 4, 256, 1)
         self.assertTrue(report['ok'], report['problems'])
         self.assertEqual(sorted(name for name in report if isinstance(report[name], dict)),
-                         ['one', 'run', 'scattered', 'shuffled_order', 'two_runs'])
+                         ['one', 'raw', 'run', 'scattered', 'shuffled_order', 'two_runs'])
+        self.assertEqual(report['raw']['status'], 'absent', 'a version-1 extension has no raw ops: reported, not failed')
+        self.assertEqual(report['raw']['missing'], ['qwen_block_bytes', 'qwen_read_blocks_raw', 'qwen_write_blocks_raw'])
         self.assertTrue(all(report[name]['equal'] for name in ('one', 'run', 'scattered', 'shuffled_order', 'two_runs')))
         self.assertEqual(report['program_cache_growth'], 0)
 
@@ -159,6 +200,56 @@ class CardCheckTests(unittest.TestCase):
         reason, source = card.ensure_extension(FakeTTNN(with_extension=False))
         self.assertIsNone(source)
         self.assertTrue(reason and 'qwen_read_blocks' in reason or 'qwen_kv_read' in reason, reason)
+
+
+class RawArmsTests(unittest.TestCase):
+    """Q1' of the host KV tier plan: the version-2 raw block ops, on the in-memory fake whose raw bytes follow its values."""
+
+    def setUp(self):
+        # The fake's bfloat16 heads are 32,768 bytes a block, not the 17,408 a bfloat8_b head packs to on the card.
+        self.saved = card.PACKED_HEAD_BLOCK_BYTES
+        card.PACKED_HEAD_BLOCK_BYTES = 64 * 256 * 2
+        self.addCleanup(setattr, card, 'PACKED_HEAD_BLOCK_BYTES', self.saved)
+
+    def check(self, **knobs):
+        ttnn = FakeTTNN(with_raw=True, **knobs)
+        return card.run(ttnn, ttnn.mesh, 4, 512, 1)
+
+    def test_correct_raw_ops_pass_every_arm_and_report_the_rates(self):
+        report = self.check()
+        self.assertTrue(report['ok'], report['problems'])
+        raw = report['raw']
+        self.assertEqual((raw['status'], raw['program_cache_growth'], raw['slice_bytes']), ('ok', 0, 64 * 256 * 2))
+        for name in ('one', 'run', 'scattered', 'shuffled_order', 'two_runs'):
+            self.assertEqual((raw[name]['bytes_equal'], raw[name]['values_equal'], raw[name]['teeth']), (True, True, True), name)
+        self.assertEqual(sorted(raw['rates'], key=int), ['32', '256'], 'only the sizes the pool holds')
+        for entry in raw['rates'].values():
+            self.assertTrue(entry['read_gbps'] > 0 and entry['write_gbps'] > 0)
+        self.assertTrue(raw['outside_checked'])
+
+    def test_each_wrong_raw_op_fails_with_its_own_reason(self):
+        for knob, text in (('raw_corrupt', 'raw bytes written and read back differ'), ('raw_forgets', 'raw bytes written and read back differ'),
+                           ('raw_grows', 'grew the program cache'), ('raw_spills', 'changed blocks it did not name'),
+                           ('raw_wrong_size', 'qwen_block_bytes is')):
+            with self.subTest(knob=knob):
+                report = self.check(**{knob: True})
+                self.assertFalse(report['ok'])
+                self.assertTrue(any(text in problem for problem in report['problems']), (knob, report['problems']))
+
+    def test_the_probe_logs_the_raw_verdict_and_the_rates(self):
+        lines = []
+        card.PACKED_HEAD_BLOCK_BYTES = self.saved
+        report = probe.run(parse(), ttnn=FakeTTNN(with_raw=True), log=lines.append)
+        self.assertEqual(report['verdict'], 'FAIL', 'the production slice size is not the fake\'s: the size check bites')
+        report = probe.run(parse(), ttnn=FakeTTNN(), log=lines.append)
+        self.assertEqual(report['verdict'], 'PASS')
+        self.assertTrue(any('KV_READ_PROBE raw=absent' in line for line in lines), lines)
+        card.PACKED_HEAD_BLOCK_BYTES = 64 * 256 * 2
+        lines.clear()
+        report = probe.run(parse(), ttnn=FakeTTNN(with_raw=True), log=lines.append)
+        self.assertEqual(report['verdict'], 'PASS', report.get('problems'))
+        self.assertTrue(any(line.startswith('KV_READ_PROBE raw=ok slice_bytes=32768 growth=0 read_gbps=') for line in lines), lines)
+        self.assertEqual(len([line for line in lines if line.startswith('KV_READ_PROBE raw rate blocks=')]), 2)
 
 
 class ProbeTests(unittest.TestCase):

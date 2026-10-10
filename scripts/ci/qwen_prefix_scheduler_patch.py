@@ -47,6 +47,15 @@ e. reset_prefix_cache clears the registry when vLLM's reset succeeded (it return
    then still a subset of the cached KV); _free_request drops the request's staged and committed
    grant, its pin and its remembered token checks (this covers a waiting request that is aborted).
 
+f. The host KV tier (qwen_prefix_registry.TierStore, TierHooks below; QWEN_PREFIX_HOST_TIER_GIB > 0, off otherwise and then none of this runs).
+   A block vLLM evicts from the device pool is queued (d) and, at the end of the schedule() call - before the model has written
+   anything - read raw into host RAM under its block hash, unless nothing could use it; the checkpoint keyed at it stays. For a waiting
+   request whose device hit stops where the tier's consecutive blocks begin, the trim (a) picks Q from the device hit plus those blocks;
+   if Q is beyond the device hit it takes free blocks from the pool (touching the request's own hit first, so they cannot be
+   the victims), writes the tier's bytes into them, registers their hashes and frees them as cached-free blocks - and then asks vLLM
+   again, whose own hit logic, reservation rule and allocation do everything else. Nothing here uses an external-token path or a KV
+   connector. A failure at any point is a miss.
+
 The kill switch (qwen_prefix_registry.KillSwitch, the flag file /models/.qwen-c2/prefix-reuse.off,
 polled at most once a second from the trim) disables the registry for the life of the process.
 
@@ -108,6 +117,8 @@ import os
 import shutil
 import sys
 import time
+import types
+from collections import OrderedDict
 from pathlib import Path
 
 try:
@@ -439,6 +450,31 @@ def install_problems(scheduler, environ=None):
     return problems
 
 
+TIER_POOL_INTERNALS = ('get_new_blocks', 'free_blocks', 'touch', 'cache_full_blocks', 'get_num_free_blocks')
+
+
+def tier_problems(scheduler, registry):
+    """What the host KV tier lacks on this scheduler, [] when it is off or has what it needs: the model's IO (attached by the model graft
+    at warmup, before the scheduler is built), the block pool's allocation and caching calls, vLLM's block-hash constructor."""
+    if getattr(registry, 'tier', None) is None:
+        return []
+    problems = []
+    if registry.tier_io is None:
+        problems.append('QWEN_PREFIX_HOST_TIER_GIB is set but the model graft attached no tier IO (an image without the KV region ops, or a '
+                        'model tree that predates them)')
+    pool = getattr(getattr(scheduler, 'kv_cache_manager', None), 'block_pool', None)
+    missing = [name for name in TIER_POOL_INTERNALS if not hasattr(pool, name)]
+    if missing:
+        problems.append('vLLM internals the host tier binds are missing: %s' % ', '.join('block_pool.' + name for name in missing))
+    if not hasattr(scheduler, 'kv_cache_manager') or not hasattr(scheduler, 'num_lookahead_tokens'):
+        problems.append('the scheduler has no kv_cache_manager or num_lookahead_tokens')
+    try:
+        from vllm.v1.core.kv_cache_utils import make_block_hash_with_group_id  # noqa: F401
+    except ImportError as error:
+        problems.append('cannot import vLLM\'s make_block_hash_with_group_id: %s' % error)
+    return problems
+
+
 def maybe_install(scheduler, environ=None):
     """The hook TTScheduler.__init__ calls last (see INIT_HOOK). Off unless QWEN_PREFIX_REUSE=1."""
     if not prefix_registry.reuse_enabled(environ):
@@ -460,6 +496,9 @@ def install(scheduler, registry=None, kill_switch_path=KILL_SWITCH_PATH, poll_s=
     if problems:
         raise PrefixInstallError('prefix reuse refused: ' + '; '.join(problems))
     registry = registry if registry is not None else shared_registry()
+    problems = tier_problems(scheduler, registry)
+    if problems:
+        raise PrefixInstallError('prefix reuse refused: ' + '; '.join(problems))
     try:
         registry.bind(scheduler)
     except RuntimeError as error:
@@ -485,11 +524,307 @@ class _NoStatistics(object):
         return 0
 
 
+class TierAuditError(AssertionError):
+    """QWEN_PREFIX_HOST_TIER_AUDIT=1 read a restored block back and it was not the bytes written: the engine stops."""
+
+
+class TierHooks(object):
+    """The host KV tier's side of the scheduler graft (module docstring, item f). Everything that touches the device goes through
+    registry.tier_io (read_blocks, write_blocks), which the model graft attaches; the bytes live in registry.tier (TierStore)."""
+
+    def __init__(self, graft):
+        self.graft = graft
+        self.registry = graft.registry
+        self.tier = graft.registry.tier
+        self.io = graft.registry.tier_io
+        self.config = graft.registry.tier_config
+        # block hash -> (block id, tenant, chain, index): evicted since the last flush, bytes still on the device.
+        self.pending = OrderedDict()
+        # block id -> (block hash, chain, tenant, index): what the pool's cached blocks are, as the cap or a restore published them.
+        self.meta = {}
+        self.failures = 0
+        self.checked = 0
+        self.refused_logged = False
+        self.kill_switch = prefix_registry.KillSwitch(self.config.off_path, prefix_registry.KILL_SWITCH_POLL_S, graft.kill_switch.clock)
+        graft.registry.device_holds = self.device_holds
+        graft.registry.tier_slack = 1 if graft.drop_last else 0
+
+    # -- state -----------------------------------------------------------------------------------
+    @property
+    def active(self):
+        return self.registry.tier_on
+
+    def poll(self):
+        if self.kill_switch.poll():
+            self.registry.tier_latch('kill switch %s present' % self.kill_switch.path)
+            self.pending.clear()
+        return self.active
+
+    def key_of(self, block_hash):
+        return self.graft.make_block_hash(block_hash, 0)
+
+    def device_holds(self, block_hash):
+        return self.graft.block_pool.cached_block_hash_to_block.get_one_block(self.key_of(block_hash)) is not None
+
+    def eligible(self, request):
+        return not self.graft.excluded(request) and self.graft.registry.disabled is None and not self.graft.kill_switch.engaged
+
+    # -- publication and eviction (d) --------------------------------------------------------------
+    def note_published(self, request, owned, before, after):
+        """The cap cached owned[before:after] for request: remember what each block is, so its eviction can tell the tier."""
+        hashes = request.block_hashes
+        chain = hashes[0] if len(hashes) else None
+        tenant = prefix_registry.tenant_of_salt(request.cache_salt)
+        for index in range(before, after):
+            block = owned[index]
+            self.meta[block.block_id] = (hashes[index], chain, tenant, index)
+
+    def on_evict(self, block, keys):
+        """vLLM is about to evict `block` (cached under keys). True when its KV is, or will be, in the tier: the checkpoint keyed at it stays."""
+        meta = self.meta.pop(block.block_id, None)
+        if meta is None or not self.active:
+            return False
+        raw = [self.graft.get_block_hash(key) for key in keys]
+        if meta[0] not in raw:
+            return False
+        key, chain, tenant, index = meta
+        stats = self.registry.stats
+        if self.tier.has(key):
+            stats['tier_spill_known'] += 1
+            return True
+        if self.registry._tier_dead(types.SimpleNamespace(chain=chain, index=index)):
+            stats['tier_spill_dropped_useless'] += 1
+            return False
+        self.pending[key] = (block.block_id, tenant, chain, index)
+        return True
+
+    def unhold(self, keys):
+        """These blocks' checkpoints were kept in the expectation of a spill that did not happen: drop the ones with no KV anywhere."""
+        registry = self.registry
+        for key in keys:
+            if registry.entries.get(key) is not None and not self.tier.has(key) and not self.device_holds(key):
+                registry.drop(key, 'coupled')
+                registry.stats['tier_ckpt_dropped'] += 1
+
+    def abandon(self):
+        keys = list(self.pending)
+        self.pending.clear()
+        self.unhold(keys)
+
+    def flush(self):
+        """Read the blocks evicted since the last flush into the tier. Called at the end of every schedule() call (nothing has written the
+        device yet: the model runs afterwards) and before a restore writes. A failure drops what it was keeping and is never raised."""
+        if not self.pending:
+            return
+        items = list(self.pending.items())
+        self.pending.clear()
+        registry, stats, tier = self.registry, self.registry.stats, self.tier
+        if not self.active:
+            self.unhold([key for key, _ in items])
+            return
+        stats['tier_spill_flushes'] += 1
+        gauges = prefix_registry.host_gauges()
+        available = gauges.get('host_mem_available_bytes')
+        if available is not None and available < self.config.min_available:
+            stats['tier_spill_dropped_governor'] += len(items)
+            self.unhold([key for key, _ in items])
+            return
+        # A restore needs the run of blocks from the chain's first, so when the cap bites the lowest indexes of each chain are kept.
+        items.sort(key=lambda item: (item[1][2] or b'', item[1][3]))
+        keep, cut = items[:self.config.spill_max], items[self.config.spill_max:]
+        if cut:
+            stats['tier_spill_dropped_cap'] += len(cut)
+            self.unhold([key for key, _ in cut])
+        began = time.perf_counter()
+        slots = []
+        if tier.slot_bytes:
+            # Slab mode: the device read goes straight into reserved slots (one copy of each block, into memory already resident).
+            slots = tier.reserve(len(keep))
+            if len(slots) < len(keep):
+                stats['tier_spill_dropped_full'] += len(keep) - len(slots)
+                self.unhold([key for key, _ in keep[len(slots):]])
+                keep = keep[:len(slots)]
+            if not keep:
+                return
+        try:
+            payloads = self.io.read_blocks([meta[0] for _, meta in keep], into=[slot.view for slot in slots] if slots else None)
+            if len(payloads) != len(keep):
+                raise ValueError('the tier IO read %d payloads for %d blocks' % (len(payloads), len(keep)))
+        except Exception as error:
+            tier.abort(slots)
+            stats['tier_spill_failures'] += 1
+            self.failures += 1
+            self.graft.log('host tier spill failed (%d so far): %s: %s', self.failures, type(error).__name__, error)
+            self.unhold([key for key, _ in keep])
+            if self.failures >= 3:
+                registry.tier_latch('three device reads in a row failed')
+            return
+        self.failures = 0
+        stored = 0
+        for position, (key, (block_id, tenant, chain, index)) in enumerate(keep):
+            payload = payloads[position]
+            if slots:
+                tier.commit(slots[position], key, tenant, chain, index)
+                stored += 1
+                stats['tier_spill_bytes'] += len(payload)
+            elif tier.put(key, payload, tenant, chain, index):
+                stored += 1
+                stats['tier_spill_bytes'] += len(payload)
+            else:
+                stats['tier_spill_dropped_full'] += 1
+                self.unhold([key])
+        elapsed = (time.perf_counter() - began) * 1000.0
+        stats['tier_spill_blocks'] += stored
+        stats['tier_spill_ms'] += elapsed
+        if stored:
+            self.graft.log('host tier spill blocks=%d bytes=%d ms=%.1f held=%d', stored, sum(len(p) for p in payloads), elapsed, tier.bytes)
+
+    # -- the restore (a) ---------------------------------------------------------------------------
+    def effective_hit(self, request, h):
+        """vLLM's hit length as it would report it if the tier's consecutive blocks after the device hit were cached (h when there are none)."""
+        graft = self.graft
+        if not self.poll() or not self.eligible(request):
+            return h
+        hashes = request.block_hashes
+        drop = 1 if graft.drop_last and h > 0 else 0
+        start = h // BLOCK + drop
+        limit = min(len(hashes), floor_chunk(request.num_prompt_tokens) // BLOCK, (request.num_tokens - 1) // BLOCK)
+        count = 0
+        while start + count < limit and self.tier.has(hashes[start + count]):
+            count += 1
+        if not count:
+            return h
+        return (start + count) * BLOCK - (BLOCK if graft.drop_last else 0)
+
+    def recompute(self, request):
+        """vLLM's own hit again, without a trace in its prefix-cache statistics."""
+        graft = self.graft
+        manager = graft.manager
+        statistics = getattr(manager, 'prefix_cache_stats', None)
+        if statistics is not None:
+            manager.prefix_cache_stats = _NoStatistics()
+        try:
+            return graft.original['get_computed_blocks'](request)
+        finally:
+            if statistics is not None:
+                manager.prefix_cache_stats = statistics
+
+    def check_digest(self, record):
+        mode = self.config.verify
+        if mode == 'off':
+            return True
+        self.checked += 1
+        if mode == 'sample' and self.checked % prefix_registry.TIER_VERIFY_EVERY:
+            return True
+        verdict = self.tier.verify(record)
+        if verdict is None:
+            return True
+        self.registry.stats['tier_digest_checks'] += 1
+        if not verdict:
+            self.registry.stats['tier_digest_failures'] += 1
+        return verdict
+
+    def load(self, request, blocks, h, q):
+        """Make the blocks below Q that the device lacks cached on the device again, from the tier. True when vLLM will now hit them."""
+        graft, registry, stats, tier, pool = self.graft, self.registry, self.registry.stats, self.tier, self.graft.block_pool
+        drop = 1 if graft.drop_last and h > 0 else 0
+        first = h // BLOCK + drop
+        need = q // BLOCK + (1 if graft.drop_last else 0)
+        if need <= first:
+            return False
+        hashes = request.block_hashes
+        records = []
+        for index in range(first, need):
+            record = tier.get(hashes[index])
+            if record is None:
+                stats['tier_restore_failures'] += 1
+                return False
+            records.append(record)
+        lookahead = int(getattr(graft.scheduler, 'num_lookahead_tokens', 0) or 0)
+        beyond = -(-(request.num_tokens + lookahead) // BLOCK) - need + 1
+        if pool.get_num_free_blocks() < (need - first) + max(0, beyond):
+            stats['tier_restore_refused_room'] += 1
+            return False
+        for record in records:
+            if not self.check_digest(record):
+                stats['tier_restore_refused_digest'] += 1
+                graft.log('host tier record failed its digest req=%s block=%d: dropped', request.request_id, record.index)
+                tier.remove(record.key)
+                self.unhold([record.key])
+                return False
+        # The request's own device hit must not be among the victims: take it off the free queue for the length of the restore.
+        protected = list(blocks.blocks[0])
+        if drop:
+            extra = pool.cached_block_hash_to_block.get_one_block(self.key_of(hashes[h // BLOCK]))
+            if extra is None:
+                stats['tier_restore_failures'] += 1
+                return False
+            protected.append(extra)
+        began = time.perf_counter()
+        new = []
+        ok = False
+        pool.touch(protected)
+        tier.pin([record.key for record in records])
+        try:
+            new = pool.get_new_blocks(need - first)
+            # The blocks just taken may have been cached: read them out (they are about to be overwritten).
+            self.flush()
+            ids = [block.block_id for block in new]
+            payloads = [record.payload for record in records]
+            self.io.write_blocks(ids, payloads)
+            if self.config.audit:
+                self.audit(request, ids, payloads)
+            pool.cache_full_blocks(request, [None] * first + list(new), first, need, BLOCK, 0)
+            chain = hashes[0] if len(hashes) else None
+            tenant = prefix_registry.tenant_of_salt(request.cache_salt)
+            for offset, block in enumerate(new):
+                self.meta[block.block_id] = (hashes[first + offset], chain, tenant, first + offset)
+            ok = True
+        except TierAuditError:
+            raise
+        except Exception as error:
+            stats['tier_restore_failures'] += 1
+            self.failures += 1
+            graft.log('host tier restore failed req=%s (%d so far): %s: %s', request.request_id, self.failures, type(error).__name__, error)
+            if self.failures >= 3:
+                registry.tier_latch('three restores in a row failed')
+        finally:
+            tier.unpin([record.key for record in records])
+            if new:
+                pool.free_blocks(reversed(new))
+            pool.free_blocks(reversed(protected))
+        if ok:
+            self.failures = 0
+            elapsed = (time.perf_counter() - began) * 1000.0
+            size = sum(len(record.payload) for record in records)
+            stats['tier_restore_requests'] += 1
+            stats['tier_restore_blocks'] += len(records)
+            stats['tier_restore_bytes'] += size
+            stats['tier_restore_ms'] += elapsed
+            graft.log('host tier restore req=%s blocks=%d bytes=%d ms=%.1f from=%d to=%d', request.request_id, len(records), size,
+                      elapsed, first * BLOCK, need * BLOCK)
+        return ok
+
+    def audit(self, request, ids, payloads):
+        """QWEN_PREFIX_HOST_TIER_AUDIT=1: read the restored blocks back from the device and compare them with the bytes written."""
+        stats = self.registry.stats
+        back = self.io.read_blocks(ids)
+        stats['tier_audit_reads'] += len(ids)
+        bad = [index for index, (a, b) in enumerate(zip(back, payloads)) if bytes(a) != bytes(b)]
+        if len(back) != len(payloads) or bad:
+            stats['tier_audit_mismatches'] += max(1, len(bad))
+            raise TierAuditError('host tier audit: req=%s %d of %d restored blocks read back differently from the bytes written (first '
+                                 'at %s)' % (request.request_id, len(bad), len(ids), bad[:4]))
+
+
 class SchedulerGraft(object):
     # Sticky sessions (the module docstring); off on the class, so a graft built without them - or
     # a stand-in carrying only a registry (the model fixture calls plan() that way) - plans as G1.
     sticky = False
     drop_last = False
+    # The host KV tier's hooks (TierHooks), None unless the registry has a tier and the model attached its IO.
+    tier_hooks = None
+    make_block_hash = None
     # Lever N's peek memo (request id -> the Q the trim would land on), cleared at the start of every schedule() call.
     peeked = {}
 
@@ -610,7 +945,8 @@ class SchedulerGraft(object):
         same_step = registry.same_step_blocks
         first_same = limit
         if same_step:
-            for index in range(limit):
+            # (h may reach past the device blocks: the host tier's consecutive blocks, which no step has cached yet.)
+            for index in range(min(limit, len(group))):
                 if group[index].block_id in same_step:
                     first_same = index
                     break
@@ -664,7 +1000,8 @@ class SchedulerGraft(object):
             finally:
                 if statistics is not None:
                     manager.prefix_cache_stats = statistics
-            q = self.select(request, blocks, h)[0]
+            hooks = self.tier_hooks
+            q = self.select(request, blocks, h if hooks is None else hooks.effective_hit(request, h))[0]
         self.peeked[request_id] = q
         return q
 
@@ -686,10 +1023,17 @@ class SchedulerGraft(object):
                 stats['killed_denied'] += 1
             self.note(request, h, 0, 'denied')
             return empty, 0
-        group = blocks.blocks[0] if h else ()
         hashes = request.block_hashes
         request_id = request.request_id
-        q, key, checkpoint, rejected_same_step = self.select(request, blocks, h, self.peeked.get(request_id))
+        hooks = self.tier_hooks
+        h_effective = h if hooks is None else hooks.effective_hit(request, h)
+        q, key, checkpoint, rejected_same_step = self.select(request, blocks, h_effective, self.peeked.get(request_id))
+        if hooks is not None and q > h:
+            # The best hit lies beyond the device's: bring the tier's blocks back as cached ones and ask vLLM again.
+            if hooks.load(request, blocks, h, q):
+                blocks, h = hooks.recompute(request)
+            q, key, checkpoint, rejected_same_step = self.select(request, blocks, h, self.peeked.get(request_id))
+        group = blocks.blocks[0] if h else ()
         if rejected_same_step:
             stats['same_step_rejects'] += 1
         if registry.entries:
@@ -725,6 +1069,8 @@ class SchedulerGraft(object):
         if after > before:
             owned = self.single.req_to_blocks.get(request_id) or ()
             self.registry.same_step_blocks.update(block.block_id for block in owned[before:after])
+            if self.tier_hooks is not None:
+                self.tier_hooks.note_published(request, owned, before, after)
 
     # -- c. the per-step commit ------------------------------------------------------------------
     def commit(self, output):
@@ -759,11 +1105,17 @@ class SchedulerGraft(object):
         extra = pool.cached_block_hashes_by_block.get(block.block_id)
         if extra:
             keys.extend(extra)
+        hooks = self.tier_hooks
+        # The block's KV goes to the tier at the end of the schedule() call; the checkpoint at it then stays (held).
+        held = hooks is not None and bool(keys) and hooks.on_evict(block, keys)
         evicted = self.original['_maybe_evict_cached_block'](block)
         if evicted and keys and self.registry.entries:
             for key in keys:
                 if pool.cached_block_hash_to_block.get_one_block(key) is None:
-                    self.registry.drop(self.get_block_hash(key), 'coupled')
+                    if held:
+                        self.registry.stats['tier_ckpt_kept'] += 1
+                    else:
+                        self.registry.drop(self.get_block_hash(key), 'coupled')
         return evicted
 
     # -- installation ----------------------------------------------------------------------------
@@ -771,6 +1123,11 @@ class SchedulerGraft(object):
         from vllm.v1.core.kv_cache_utils import get_block_hash
 
         self.get_block_hash = get_block_hash
+        if self.registry.tier is not None:
+            from vllm.v1.core.kv_cache_utils import make_block_hash_with_group_id
+
+            self.make_block_hash = make_block_hash_with_group_id
+            self.tier_hooks = TierHooks(self)
         scheduler, manager, coordinator, pool = self.scheduler, self.manager, self.coordinator, self.block_pool
         registry = self.registry
         original = self.original
@@ -794,7 +1151,15 @@ class SchedulerGraft(object):
 
         def schedule(*args, **kwargs):
             begin_step()
-            output = original['schedule'](*args, **kwargs)
+            hooks = self.tier_hooks
+            try:
+                output = original['schedule'](*args, **kwargs)
+            except BaseException:
+                if hooks is not None:
+                    hooks.abandon()
+                raise
+            if hooks is not None:
+                hooks.flush()
             self.commit(output)
             return output
 
@@ -805,6 +1170,9 @@ class SchedulerGraft(object):
             result = original['reset_prefix_cache'](*args, **kwargs)
             if result:
                 registry.clear()
+                if self.tier_hooks is not None:
+                    self.tier_hooks.pending.clear()
+                    self.tier_hooks.meta.clear()
             else:
                 # vLLM kept every cached block (running requests hold blocks,
                 # scheduler.py:2196-2240), so every checkpoint still has its KV: keep them.
@@ -842,6 +1210,12 @@ class SchedulerGraft(object):
                  getattr(registry, 'evict_policy', 'lru'), int(getattr(registry, 'supersede', False)),
                  int(getattr(registry, 'telemetry', False)), getattr(registry, 'ghost_limit', 0),
                  getattr(registry, 'checkpoint_nbytes', prefix_registry.CHECKPOINT_NBYTES))
+        if self.tier_hooks is not None:
+            config = registry.tier_config
+            self.log('install host tier kv_bytes=%d total_bytes=%d policy=%s audit=%d verify=%s spill_max=%d min_tokens=%d min_available=%d '
+                     'block_bytes=%s fingerprint=%s', config.kv_bytes, config.total, registry.evict_policy, int(config.audit), config.verify,
+                     config.spill_max, config.min_tokens, config.min_available, getattr(registry.tier_io, 'block_bytes', '?'),
+                     getattr(registry.tier_io, 'fingerprint', ''))
         if self.sticky:
             self.log('install sticky=1 lookahead=%d drop_last=%s ceiling=floor2048(P-%d)',
                      getattr(scheduler, 'num_lookahead_tokens', 0), self.drop_last, CHUNK)
