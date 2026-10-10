@@ -1234,7 +1234,16 @@ def round_host_problems(env, container_text, steady_eight):
                     problems.append('%s is set and only %d of %d eight-live drafting steps took the fast %s (%d%% needed)' % (
                         flag, taken, len(drafted), label, int(ROUND_HOST_FAST_SHARE * 100)))
         if set_flags.get(round_host.READ_FLAG) == '1' and len(drafted) > ROUND_HOST_GUARD_AFTER:
-            if not any(step['guard'] for step in drafted):
+            # round_host.guard_full: READ checks the replicated selector feature on every chip for the first 64 reads and every 64th, and the
+            # ledger's `guard` counts the reads that skipped it. Under AUDIT the guard runs on EVERY read (it is part of what the audit compares),
+            # so the counter must stay 0 and a skip there is a code bug; without AUDIT the sampling must show skips once 64 reads have passed
+            # (run 38019684412 and 38020932079: 678 skips in 752 guards; run 38018599272, audited: 0 skips in 375).
+            skipped = sum(step['guard'] for step in drafted)
+            if set_flags.get(round_host.AUDIT_FLAG) == '1':
+                if skipped:
+                    problems.append('%s and %s are set and the replicated-feature guard was skipped %d time(s) over %d steps: the audit runs it on every read' % (
+                        round_host.AUDIT_FLAG, round_host.READ_FLAG, skipped, len(drafted)))
+            elif not skipped:
                 problems.append('%s is set and the replicated-feature guard was never skipped over %d steps' % (round_host.READ_FLAG, len(drafted)))
         if set_flags.get(round_host.KEYED_FLAG) == '1':
             possible = sum(2 if step['live'] == 8 else 1 for step in judged if step['live'] in (4, 8))

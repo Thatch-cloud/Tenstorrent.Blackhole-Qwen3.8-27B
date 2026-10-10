@@ -393,6 +393,7 @@ class ReadTests(RoundHostCase):
         self.arm(**{READ: '1', AUDIT: '1'})
         round_host.reset_counters()
         self.assertTrue(all(round_host.guard_full() for _ in range(200)))
+        self.assertEqual(round_host.COUNTS['guard_skipped'], 0, 'the audited ledger carries guard=0 on every step: c2_smoke_check expects that')
 
     def quad(self):
         generator_ = torch.Generator().manual_seed(21)
@@ -1078,6 +1079,15 @@ class SmokeRuleTests(unittest.TestCase):
         self.assertTrue(any('fast quad merge' in p for p in self.problems(ARM_ENV, self.clean(read=0))))
         self.assertTrue(any('keyed write' in p for p in self.problems(ARM_ENV, self.clean(keyed=0))))
         self.assertTrue(any('never skipped' in p for p in self.problems(ARM_ENV, smoke_text([engaged_line(**ARM_ENV)], ledger_lines(150, guard=0)))))
+        # Under AUDIT the guard runs on every read (round_host.guard_full), so the rule reverses: no skip is the expected ledger (the H1 log of
+        # run 38018599272: 375 guards, 0 skips) and a skip fails the arm.
+        audited = dict(ARM_ENV, **{AUDIT: '1'})
+        audits = ['[ROUND-HOST-AUDIT] kind=select equal=1', '[ROUND-HOST-AUDIT] kind=merge equal=1', '[ROUND-HOST-AUDIT] kind=keyed equal=1 checked=149 changed=0']
+        trail = '\n'.join(audits) + '\n'
+        self.assertEqual(self.problems(audited, smoke_text([engaged_line(**audited)], ledger_lines(150, guard=0)) + trail), [])
+        skipped = self.problems(audited, smoke_text([engaged_line(**audited)], ledger_lines(150, guard=1)) + trail)
+        self.assertTrue(any('the audit runs it on every read' in p for p in skipped), skipped)
+        self.assertFalse(any('never skipped' in p for p in skipped), skipped)
         facts = c2_smoke_check.round_host_problems(ARM_ENV, self.clean(live=4, keyed=1), True)[1]
         self.assertEqual(facts['steps'][0]['live'], 4)
 
@@ -1103,7 +1113,7 @@ class SmokeRuleTests(unittest.TestCase):
     def test_the_audit_needs_an_equal_line_for_each_lever_and_no_unequal_one(self):
         env = dict(ARM_ENV, **{AUDIT: '1'})
         good = ['[ROUND-HOST-AUDIT] kind=select equal=1', '[ROUND-HOST-AUDIT] kind=merge equal=1', '[ROUND-HOST-AUDIT] kind=keyed equal=1 checked=149 changed=0']
-        base = smoke_text([engaged_line(**env)], ledger_lines(120, guard=1))
+        base = smoke_text([engaged_line(**env)], ledger_lines(120, guard=0))
         self.assertEqual(self.problems(env, base + '\n'.join(good) + '\n'), [])
         for missing in range(3):
             lines = [line for number, line in enumerate(good) if number != missing]
