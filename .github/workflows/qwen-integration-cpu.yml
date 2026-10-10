@@ -286,6 +286,8 @@ jobs:
           python -B -m unittest test_grid13_tp
           # TEL
           python -B -m unittest test_card_telemetry
+          # WP0
+          python -B -m unittest test_fusion2_pack
           # WP1
           python -B -m unittest discover -s optimisation/ttnn-op/shard_argmax -p 'test_*.py'
           # WP2

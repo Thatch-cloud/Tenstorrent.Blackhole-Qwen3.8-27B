@@ -125,5 +125,8 @@
    },
    "reason": "tp4/fusion-2: the audited twin of -fx-all-oneq-grid13: every combined lever with its audit plus oneq with its audit (the chain program against the one-chunk-per-core program, bit for bit on every chip) plus grid13 with its audit (the pinned prefill matmuls and the served 64-row configs against the lever's, bit for bit on every chip), in one boot. The exactness job of the combination; not a timing arm."
   }
+ ],
+ "tests": [
+  "test_fusion2_pack"
  ]
 }

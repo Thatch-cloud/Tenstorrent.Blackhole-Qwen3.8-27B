@@ -122,7 +122,8 @@ class TwinTests(unittest.TestCase):
         twins = set(generator.twin_names())
         combined = {fusion.NAMESPACE + 'all', fusion.NAMESPACE + 'all-audit'} | set(fusion.ship_names())            # (the ship candidate is the timed combined arm as a traffic profile)
         combined |= {name for name in PROFILES if name.startswith(fusion.NAMESPACE + 'wph-')}                       # (WPH's composition twins are the combined arm plus their own flags)
-        combined |= {fusion.NAMESPACE + 'all-oneq', fusion.NAMESPACE + 'all-oneq-audit'}                                                 # (tp4/prefill-sdpa: the combined arm and the combined audited arm plus the prefill SDPA flags)
+        # (tp4/prefill-sdpa, M1 and tp4/fusion-2: the combined arm and the combined audited arm plus the prefill SDPA flags (-fx-all-oneq*), the matmul-grid flags (-fx-all-grid13*) or both (-fx-all-oneq-grid13*))
+        combined |= {name for name in PROFILES if name.startswith((fusion.NAMESPACE + 'all-oneq', fusion.NAMESPACE + 'all-grid13'))}
         for name, profile in PROFILES.items():
             if name not in twins and name not in combined:
                 self.assertFalse([knob for knob in generator.KNOBS if knob in profile['env']], name)

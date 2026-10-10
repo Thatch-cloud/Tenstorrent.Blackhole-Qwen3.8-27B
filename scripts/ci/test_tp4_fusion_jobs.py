@@ -510,10 +510,13 @@ class PackageFolderTests(unittest.TestCase):
                                             cwd=str(HERE.parent.parent))
                     self.assertEqual(result.returncode, 0, result.stderr.decode('utf-8', 'replace'))
 
+    # The integrator's own window packs name the tag their B0 builds (the window of tp4/fusion-2: tp4-fusion-6, test_fusion2_pack); every other package folder names the placeholder.
+    OWN_IMAGE = {'F2': 'tp4-fusion-6'}
+
     def test_every_package_template_names_the_one_image(self):
         for folder in self.folders():
             for path in sorted(folder.glob('*.env')):
-                self.assertEqual(job.parse_env(path.read_text(encoding='utf-8'))['C2_IMAGE_TAG'], IMAGE, '%s/%s' % (folder.name, path.name))
+                self.assertEqual(job.parse_env(path.read_text(encoding='utf-8'))['C2_IMAGE_TAG'], self.OWN_IMAGE.get(folder.name, IMAGE), '%s/%s' % (folder.name, path.name))
 
 
 class PublicTests(unittest.TestCase):
