@@ -57,6 +57,7 @@ serving_kv_reservation serving_one_in_flight serving_packed_bridge serving_prefi
 target_packed_pages target_t16_attention_8k_gate target_t16_attention_gate tile_collective_tp two_tile_decode two_tile_norm
 verifier_engine_tp verifier_position_policy c2_parser_rechunk qwen_prefix_metrics prompt_lookup levern_policy levern_scheduler levern_platform levern_route sdpa_long_tp sdpa_multi_tp
 gdn_conv_gates_spread drafter_checkpoint octo_attn_bundle
+qwen_device_zeros qwen_lazy_shard
 tp4_sampdraft tp4_shard_argmax tp4_draft_conv tp4_draft_heads drafter_fixtures drafter_manifest
 serving_parked_engines
 octo_glue8 gdn_rows_dma8_tp gdn_block_conv8_tp gdn_conv_windows_packed8
@@ -497,7 +498,7 @@ class ClosureTests(unittest.TestCase):
         # (make_parked_profiles, make_round_host_profiles, make_octo_profiles and make_octo2_profiles are the generators of the engine-reuse, round-host, octo-T8 and octo-2 lever profile twins: the profile tests that the
         # attach test imports name them, through profile_twins; they serve nothing)
         # (make_w2_kill_profiles generates the W2 kill drill twin of the ship profile and make_kvread_profiles the region-read audit twins; the profile tests name them the same way)
-        loaded -= {'tp_test_support', 'make_parked_profiles', 'make_round_host_profiles', 'make_octo_profiles', 'make_octo2_profiles', 'make_w2_kill_profiles', 'make_kvread_profiles', 'profile_twins'}
+        loaded -= {'tp_test_support', 'make_parked_profiles', 'make_round_host_profiles', 'make_octo_profiles', 'make_octo2_profiles', 'make_w2_kill_profiles', 'make_kvread_profiles', 'make_upload_profiles', 'profile_twins'}
         extra = loaded - self.seen
         # What the attach loads outside the closure is a NOT_SERVED module it enters inert (each named in ATTACH_ENTERS_INERT,
         # exactly) and what those import at module level - not everything any NOT_SERVED module could ever reach.

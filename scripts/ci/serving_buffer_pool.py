@@ -146,6 +146,7 @@ DRAFT_OUTPUTS_REFUSED_MARKER), since such an arm serves the unprotected path.
 """
 
 from contextlib import contextmanager
+import os
 from types import SimpleNamespace
 
 from attention_head_fold import parallel_groups
@@ -670,6 +671,12 @@ class ServingBufferPool:
         # and, when it holds them, the host dtype their UINT16 indices were made from.
         self.draft_outputs_refused = self.draft_output_indices_from = None
         self.closed = False
+        # QWEN_FAST_DEVICE_ZEROS=1: the process's device-zero filler. With the lever off (unset or 0) nothing is imported and nothing below looks at it, so the pool's op
+        # sequence is the served one; qwen_device_zeros reads the value strictly.
+        device_zeros = None
+        if os.environ.get('QWEN_FAST_DEVICE_ZEROS', '0') != '0':
+            import qwen_device_zeros
+            device_zeros = qwen_device_zeros.filler(operations, torch)
         try:
             # The addresses already adopted, one set per chip: a buffer overlaps an earlier one exactly when some chip
             # holds both at one address (`overlaps`), so membership in these sets is that test without comparing every
@@ -696,6 +703,12 @@ class ServingBufferPool:
                 """Replicated tiled BF16 zeros by default; the fixture inputs are row-major
                 integers and the feature taps are sharded on the feature axis, like the
                 buffers they replace (model_batch.py, verifier_engine.py)."""
+                if device_zeros is not None and dtype is None and layout is None and mapper is None:
+                    # QWEN_FAST_DEVICE_ZEROS=1 (qwen_device_zeros): the big replicated tiled zeros are allocated and filled on the card; None means the host
+                    # path below runs unchanged (a small tensor, a refusal, a failed audit).
+                    built = device_zeros.build(shape, operations.bfloat16, operations.TILE_LAYOUT, mesh, operations.DRAM_MEMORY_CONFIG, 'buffer_pool')
+                    if built is not None:
+                        return adopt(built, tensor_bytes(shape, itemsize))
                 host = torch.zeros(shape, dtype=torch.bfloat16 if dtype is None else torch.int32)
                 value = operations.from_torch(host, device=mesh,
                     dtype=operations.bfloat16 if dtype is None else dtype,
@@ -828,6 +841,8 @@ class ServingBufferPool:
                 if draft_outputs:
                     self.draft_output_indices_from = str(index_hosts[0]).replace('torch.', '')
             operations.synchronize_device(mesh)
+            if device_zeros is not None:
+                device_zeros.report('buffer_pool')
         except BaseException:
             self.close()
             raise

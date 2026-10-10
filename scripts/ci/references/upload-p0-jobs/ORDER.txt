@@ -1,0 +1,28 @@
+# The order of the tp4/upload-p0 four-card DEVELOPMENT window: the engine-start upload levers (P0 zero buffers filled on the card, P1a no host transpose on a weight-cache hit), ONE image.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# THE CARDS ARE UNDER DEVELOPMENT, PRODUCTION IS DOWN BY THE OWNER'S CHOICE: NO agentstart, NO agentstop (the node agent is already stopped), NO hand-back, NO deploy, NO :latest move. Z ends with a reset and no agentstart.
+# P0. NO OTHER WINDOW DRIVER MAY BE ALIVE and no privileged builder container may be up. The CPU suite green on the branch first (gh workflow run qwen-cpu-suite.yml -f ref=<branch>). Every result is UNQUALIFIED
+# (the 262k evidence waiver on the gate-only arms). B0 never runs during a timing job. PAUSE ARC CI for T0-T5: they are timed host-side numbers.
+# WHAT THIS PACK DECIDES: whether the two levers may be switched on for production (QWEN_FAST_DEVICE_ZEROS=1, QWEN_FAST_LAZY_SHARD_W=1 on the production profile), by (1) EXACTNESS - the audits read exact=True on the card, the
+# answers equal the control's, the allocator ledger equals the control's (A1 to A3); (2) THE TRADE - engine-start time per phase, paired ABAB (T0 to T3, with T4 and T5 for attribution).
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS A0 <- B0
+# NEEDS A1 A2 <- A0
+# NEEDS A3 <- A1 A2
+# NEEDS T0 T2 <- A0
+# NEEDS T1 T3 T4 T5 <- A3 T0
+# NEEDS T3 <- T2
+# Time (estimate): B0 60 min, A0-A3 about 30 min each, T0-T5 about 25 min each, Z 10 min: about 5 h.
+B0-build stop tp4-upload-p0-1 60
+A0-control-attach stop tp4-upload-p0-1 30
+A1-dzero-audit-attach stop tp4-upload-p0-1 30
+A2-lazy-audit-attach stop tp4-upload-p0-1 30
+A3-upload-audit-attach stop tp4-upload-p0-1 30
+T0-control-a soft tp4-upload-p0-1 25
+T1-upload-a soft tp4-upload-p0-1 25
+T2-control-b soft tp4-upload-p0-1 25
+T3-upload-b soft tp4-upload-p0-1 25
+T4-dzero-only soft tp4-upload-p0-1 25
+T5-lazy-only soft tp4-upload-p0-1 25
+Z-reset soft tp4-upload-p0-1 10

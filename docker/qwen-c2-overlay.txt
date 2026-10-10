@@ -455,3 +455,10 @@ scripts/ci/references/drafter-manifests/dedf8df6.json
 scripts/ci/references/drafter-manifests/b16-98759a49.json
 scripts/ci/references/drafter-manifests/b32-fc65843b.json
 scripts/ci/test_drafter_manifest.py
+
+# tp4/upload-p0 (docs/tp4-fabric-upload.md section 5, P0 and P1a): the engine-start upload levers. qwen_device_zeros fills the KV pool's and the buffer pool's big zero buffers on the card
+# (serving_buffer_pool imports it, serving_c2_contract arms its model hook; QWEN_FAST_DEVICE_ZEROS=1 only), qwen_lazy_shard moves the host transpose of tp_common.shard_w into as_tensor's
+# preprocess (QWEN_FAST_LAZY_SHARD_W=1 only). Both are inert unless a profile sets their switch; neither touches a pinned file (tp_common.py and model.py stay the image's bytes: the hooks are
+# post-import replacements of one function each, taken only when its source digest is the pinned one).
+scripts/ci/qwen_device_zeros.py
+scripts/ci/qwen_lazy_shard.py

@@ -162,8 +162,8 @@ def unsatisfiable_imports():
 
 # Modules the P8 modules plain-import that exist only in the C2 image (its overlay manifest lays them over the base):
 # the baseline as of the drafter-manifest change, plus the overlay modules the wave-2 levers (gdn_conv_gates_spread, sdpa_long_tp) and engine reuse
-# (serving_parked_engines, imported under its flags only) added; all three are in docker/qwen-c2-overlay.txt. A plain import of anything else the bundle lacks is flagged.
-C2_ONLY_PLAIN_IMPORTS = frozenset(['capture_plug.py', 'extent_attention_replay.py', 'extent_attention_replay_tp.py', 'gdn_conv_gates_spread.py', 'levern_policy.py', 'levern_route.py', 'octo_attn_bundle.py', 'packed_any_admission.py', 'sdpa_long_tp.py', 'serving_c2_contract.py', 'serving_fast_lane.py', 'serving_fast_lane_scheduler.py', 'serving_kv_reservation.py', 'serving_parked_engines.py', 'serving_prefill_admission.py', 'serving_request_quarantine.py', 'stall_watch.py', 'trace_census.py'])
+# (serving_parked_engines, imported under its flags only) and tp4/upload-p0 (qwen_device_zeros, imported by serving_buffer_pool under QWEN_FAST_DEVICE_ZEROS=1 only) added; all are in docker/qwen-c2-overlay.txt. A plain import of anything else the bundle lacks is flagged.
+C2_ONLY_PLAIN_IMPORTS = frozenset(['capture_plug.py', 'extent_attention_replay.py', 'extent_attention_replay_tp.py', 'gdn_conv_gates_spread.py', 'levern_policy.py', 'levern_route.py', 'octo_attn_bundle.py', 'packed_any_admission.py', 'qwen_device_zeros.py', 'sdpa_long_tp.py', 'serving_c2_contract.py', 'serving_fast_lane.py', 'serving_fast_lane_scheduler.py', 'serving_kv_reservation.py', 'serving_parked_engines.py', 'serving_prefill_admission.py', 'serving_request_quarantine.py', 'stall_watch.py', 'trace_census.py'])
 
 
 def unsatisfiable_plain_imports():

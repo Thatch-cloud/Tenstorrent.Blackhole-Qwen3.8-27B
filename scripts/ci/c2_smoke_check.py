@@ -1323,6 +1323,57 @@ def sampdraft_problems(container_text, env):
     return problems
 
 
+# tp4/upload-p0 (qwen_device_zeros, qwen_lazy_shard): the engine-start upload levers. Per lever the same rules as the other levers: a profile that asks for it
+# and logs no engaged line ran the served path, a refusal or a mismatch line fails the arm (the lever latched off and the host path ran), an audit flag with no
+# 'exact=True' line was never audited, and an engaged line on a profile that did not ask means the lever ran without its switch. The lines are pinned equal to the
+# modules' by test_upload_p0.
+DEVICE_ZEROS_FLAG = 'QWEN_FAST_DEVICE_ZEROS'
+DEVICE_ZEROS_AUDIT_FLAG = 'QWEN_FAST_DEVICE_ZEROS_AUDIT'
+DEVICE_ZEROS_ENGAGED = '[PINDIAG] tp4 device zeros engaged'
+DEVICE_ZEROS_REFUSED = '[PINDIAG] tp4 device zeros refused'
+DEVICE_ZEROS_AUDIT = '[PINDIAG] tp4 device zeros audit'
+DEVICE_ZEROS_MISMATCH = '[PINDIAG] tp4 device zeros audit mismatch'
+DEVICE_ZEROS_TAGS = ('kv_cache', 'buffer_pool')
+LAZY_SHARD_FLAG = 'QWEN_FAST_LAZY_SHARD_W'
+LAZY_SHARD_AUDIT_FLAG = 'QWEN_FAST_LAZY_SHARD_W_AUDIT'
+LAZY_SHARD_ENGAGED = '[PINDIAG] tp4 lazy shard engaged'
+LAZY_SHARD_REFUSED = '[PINDIAG] tp4 lazy shard refused'
+LAZY_SHARD_AUDIT = '[PINDIAG] tp4 lazy shard audit'
+LAZY_SHARD_MISMATCH = '[PINDIAG] tp4 lazy shard audit mismatch'
+
+
+def upload_p0_problems(env, container_text):
+    """[problem] for the engine-start upload levers a profile's `env` asks for (or does not ask for), read from the container log."""
+    env = env or {}
+    lines = container_text.splitlines()
+    problems = []
+    for flag, audit_flag, engaged, refused, audit, mismatch, what, tags in (
+            (DEVICE_ZEROS_FLAG, DEVICE_ZEROS_AUDIT_FLAG, DEVICE_ZEROS_ENGAGED, DEVICE_ZEROS_REFUSED, DEVICE_ZEROS_AUDIT, DEVICE_ZEROS_MISMATCH,
+             'device zero fill', DEVICE_ZEROS_TAGS),
+            (LAZY_SHARD_FLAG, LAZY_SHARD_AUDIT_FLAG, LAZY_SHARD_ENGAGED, LAZY_SHARD_REFUSED, LAZY_SHARD_AUDIT, LAZY_SHARD_MISMATCH,
+             'lazy shard loader', (None,))):
+        on = env.get(flag) == '1'
+        bad = [line.strip()[:240] for line in lines if refused in line or mismatch in line]
+        problems += ['the %s latched off or was refused (the host path ran, it saved nothing): %s' % (what, line) for line in bad[:4]]
+        if not on:
+            if any(engaged in line for line in lines):
+                problems.append('%s is not set and the log holds %s lines: the %s ran on a profile without it' % (flag, engaged, what))
+            continue
+        for tag in tags:
+            needle = engaged if tag is None else engaged + ' tag=' + tag
+            if not any(needle in line for line in lines):
+                problems.append('%s=1 is set and no engaged line (%s) was logged: the %s never ran%s' % (
+                    flag, needle, what, '' if tag is None else ' for ' + tag))
+        if env.get(audit_flag) == '1':
+            for tag in tags:
+                if not any(audit in line and 'exact=True' in line and (tag is None or 'tag=' + tag in line) for line in lines):
+                    problems.append('%s=1 is set and no passing audit line (%s exact=True%s) was logged: the %s was never audited' % (
+                        audit_flag, audit, '' if tag is None else ' tag=' + tag, what))
+        elif any(audit in line and 'exact=' in line for line in lines):
+            problems.append('%s is not set and the log holds audit lines' % audit_flag)
+    return problems
+
+
 def lookup_problems(env, container_text):
     """The problems the profile's lookup setting leaves: with the flag off no [LOOKUP line at all; on, at least one engaged line naming the
     policy and at least one well-formed round line (a user, a source, a proposed count of 0..15 (not 0 for a lookup round) and a committed
@@ -1941,6 +1992,7 @@ def lever_engagement_problems(env, container_text, smoke=None, drill=False):
     problems.extend(spread_problems(env, container_text))
     problems.extend(drafter_checkpoint_problems(env, container_text))
     problems.extend(w2_kill_problems(env, container_text))
+    problems.extend(upload_p0_problems(env, container_text))
     lever, _ = levern_problems(env, container_text, smoke)
     problems.extend(lever)
     if env.get(LEVERN_FLAG) == '1' and not drill and LEVERN_KILL_PREFIX in container_text:
@@ -1981,6 +2033,7 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     problems += spread_problems(env, container_text)
     problems += drafter_checkpoint_problems(env, container_text)
     problems += w2_kill_problems(env, container_text)
+    problems += upload_p0_problems(env, container_text)
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
     if env is not None and env.get('QWEN_FAST_TP', '2') != '2':

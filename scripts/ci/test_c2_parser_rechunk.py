@@ -88,7 +88,8 @@ class _ParkedTwins(object):
                 # the region-read audit twins of the Lever N audited profiles (make_kvread_profiles; test_kvread_profiles holds the list)
                 or name.endswith(('-ship-prefix-levern-audit-kvr', '-ship-prefix-levern-audit-r2-kvr', '-ship-prefix-levern-audit-r2-kvx'))
                 or name.endswith('-ship-prefix-levern-kvr-parked-audit')
-                or name.endswith('-ship-prefix-levern-w2-er-kill'))      # (and the W2 kill drill twin of the ship profile: test_w2_switch holds it)
+                or name.endswith('-ship-prefix-levern-w2-er-kill')      # (and the W2 kill drill twin of the ship profile: test_w2_switch holds it)
+                or '-ship-prefix-levern-w2-er-traffic-' in name)       # (and the engine-start upload twins of the ship profile: test_upload_p0_profiles holds the list)
 
 
 PARKED_TWINS = _ParkedTwins()
