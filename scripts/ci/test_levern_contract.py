@@ -185,6 +185,15 @@ class RefusalTests(unittest.TestCase):
     def test_the_audit_alone_needs_a_gate_only_profile(self):
         self.refused(self.mutated(CONTROL, gate_only=False), 'gate instrument')
 
+    def test_the_kv_read_knobs_are_gate_instruments_beside_the_audit(self):
+        self.refused(self.mutated(CONTROL, env={'QWEN_FAST_LEVERN_KV_READ': 'region'}, gate_only=False), 'QWEN_FAST_LEVERN_KV_READ')
+        self.assertEqual(contract.levern_problems(self.mutated(CONTROL, env={'QWEN_FAST_LEVERN_KV_READ': 'region'})), [])
+        self.assertEqual(contract.levern_problems(self.mutated(AUDIT, env={'QWEN_FAST_LEVERN_KV_READ': 'cross', 'QWEN_FAST_LEVERN_KV_CROSS_STEPS': '2'})), [])
+        # nothing to read without the audit; a bad value; a traffic profile with the lever on and the knob
+        self.refused(self.mutated(TIMED, env={'QWEN_FAST_LEVERN_KV_READ': 'region'}), 'without QWEN_FAST_LEVERN_AUDIT=1')
+        self.refused(self.mutated(AUDIT, env={'QWEN_FAST_LEVERN_KV_READ': 'auto'}), 'QWEN_FAST_LEVERN_KV_READ must be one of')
+        self.refused(self.mutated(AUDIT, env={'QWEN_FAST_LEVERN_KV_READ': 'region'}, gate_only=False), 'gate instrument')
+
     def test_each_requirement_is_checked(self):
         cases = (
             ('QWEN_FAST_ANY_REQUEST', dict(env={'QWEN_FAST_ANY_REQUEST': '0'}), 'QWEN_FAST_ANY_REQUEST=1'),

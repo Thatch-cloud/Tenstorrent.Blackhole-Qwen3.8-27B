@@ -1,0 +1,23 @@
+# The order of the W2 kill-switch drill (docs/tp4-w2-kill-switch.md): one image, one short card window, run INSIDE any four-card development window or alone.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# P0. PRODUCTION: if the cards serve production, the owner stops the node agent and unserves production BEFORE X0 and restores it after Z (the cutover pack's steps; nothing in this pack does either, and no job here starts or hands back the agent).
+#     B0 is a build and may run while production serves. No other window driver may be alive. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and the tag is pushed on THAT commit.
+# P0. No w2.off file on the hub mount (the job's own step refuses to start with one there, as it does for prefix-reuse.off, levern.off and parked.off).
+# NOT TIMED: nothing here is a timing arm (the sequential rounds after the latch are slow by design); CI need not be paused. Every result is UNQUALIFIED (gate-only profiles).
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0 <- B0
+# NEEDS K-W2a <- X0
+# NEEDS K-W2b <- K-W2a
+# READ RULES (each also needs c2_smoke_check clean; the jobs' own templates have the whole text):
+#   B0     'baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic with a session cap of 8', provenance report with no problem line, the image id.
+#   X0     four cards present and healthy, the fabric as measured, no other driver alive.
+#   K-W2a  the W2-off control: the smoke clean, no W2 line, no kill line; its hashes are the reference.
+#   K-W2b  the drill: one drill line, one latch line, packed rounds before it and none after it, sequential routing after it, no 'at attach' line, every request complete; then levern_compare.py against K-W2a exits 0.
+# NO-GO: a packed round after the latch, a hash difference between K-W2a and K-W2b, a stall, an incomplete request.
+# Time (estimate): B0 40, X0 20, K-W2a 40, K-W2b 70, Z 10: 180 minutes.
+B0-build stop tp4-prodfix-1 40
+X0-status-rescan-reset stop tp4-prodfix-1 20
+K-W2a-control stop tp4-prodfix-1 40
+K-W2b-kill-switch stop tp4-prodfix-1 70
+Z-reset soft tp4-prodfix-1 10

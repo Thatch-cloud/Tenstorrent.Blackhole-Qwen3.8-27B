@@ -356,6 +356,98 @@ class DigestRuleTests(unittest.TestCase):
         self.assertFalse([problem for problem in problems if 'lever' in problem.lower()], problems)
 
 
+def kv_ready(mode):
+    return policy.KV_READ_PREFIX + 'ready mode=' + mode
+
+
+def kv_read(mode, req, prompt, reads=16, blocks=80, fallback='-'):
+    return policy.KV_READ_LINE.format(mode, req, prompt, reads, blocks, 12.5, fallback)
+
+
+def kv_cross(req, tensors=16, bad=0, fallback='-'):
+    return policy.KV_CROSS_LINE.format(req, tensors, bad, 12.5, 480000.0, 80, fallback)
+
+
+class KvReadRuleTests(unittest.TestCase):
+    """QWEN_FAST_LEVERN_KV_READ (the audit digest's region read): the lines it logs and what c2_smoke_check holds them to."""
+
+    SMOKE = {'levern_equal': dict(prompts={'4097': dict(), '6145': dict()}, lengths=[4097, 6145])}
+
+    def env(self, mode=None, steps=None):
+        env = dict(CONTROL_ENV)
+        if mode:
+            env['QWEN_FAST_LEVERN_KV_READ'] = mode
+        if steps is not None:
+            env['QWEN_FAST_LEVERN_KV_CROSS_STEPS'] = str(steps)
+        return env
+
+    def problems(self, env, lines):
+        return check.levern_problems(env, '\n'.join(lines), self.SMOKE)[0]
+
+    def test_the_constants_are_the_policys(self):
+        self.assertEqual(check.LEVERN_KV_READ_FLAG, policy.KV_READ_FLAG)
+        self.assertEqual(check.LEVERN_KV_CROSS_FLAG, policy.KV_CROSS_FLAG)
+        self.assertEqual(check.LEVERN_KV_PREFIX, policy.KV_READ_PREFIX)
+        self.assertEqual(check.LEVERN_KV_SKIPPED, policy.KV_SKIPPED)
+        self.assertTrue(kv_read('region', 'x', 4097).startswith(policy.KV_READ_PREFIX))
+        self.assertTrue(kv_ready('region').startswith(check.LEVERN_KV_READY))
+        self.assertTrue(check.LEVERN_KV_READ.search(kv_read('region', 'x', 4097)))
+        self.assertTrue(check.LEVERN_KV_CROSS.search(kv_cross('x')))
+
+    def test_the_default_full_read_logs_no_line_and_a_line_on_it_is_a_problem(self):
+        digests = [digest('x', 4097), digest('y', 6145)]
+        self.assertEqual(self.problems(self.env(), digests), [])
+        self.assertEqual(self.problems(self.env('full'), digests), [])
+        found = self.problems(self.env(), digests + [kv_read('region', 'x', 4097)])
+        self.assertEqual(len(found), 1)
+        self.assertIn('without QWEN_FAST_LEVERN_KV_READ=region or cross', found[0])
+
+    def test_region_wants_its_ready_line_and_a_read_line_per_digest(self):
+        env = self.env('region')
+        clean = [kv_ready('region'), digest('x', 4097), kv_read('region', 'x', 4097), digest('y', 6145), kv_read('region', 'y', 6145)]
+        self.assertEqual(self.problems(env, clean), [])
+        self.assertTrue(any('ready' in p for p in self.problems(env, clean[1:])))
+        self.assertTrue(any('2 digest(s)' in p for p in self.problems(env, clean[:-1])))
+        self.assertTrue(any('cross-check line' in p for p in self.problems(env, clean + [kv_cross('x')])))
+
+    def test_a_digest_that_skipped_the_kv_has_no_read_line(self):
+        skipped = policy.DIGEST_LINE.format('y', 6145, token_sha(6145), 'a' * 32, 'b' * 32, policy.KV_SKIPPED)
+        lines = [kv_ready('region'), digest('x', 4097), kv_read('region', 'x', 4097), skipped]
+        self.assertEqual(self.problems(self.env('region'), lines), [])
+
+    def test_a_fallback_to_the_whole_read_fails_the_arm(self):
+        lines = [kv_ready('region'), digest('x', 4097), kv_read('region', 'x', 4097, fallback="'RuntimeError: refused'"),
+                 digest('y', 6145), kv_read('region', 'y', 6145)]
+        found = self.problems(self.env('region'), lines)
+        self.assertEqual(len(found), 1)
+        self.assertIn('fell back', found[0])
+
+    def test_cross_wants_a_clean_cross_line_for_the_first_digests(self):
+        env = self.env('cross')
+        base = [kv_ready('cross'), digest('x', 4097), kv_read('cross', 'x', 4097), digest('y', 6145), kv_read('cross', 'y', 6145)]
+        self.assertEqual(self.problems(env, base[:3] + [kv_cross('x')] + base[3:]), [])
+        absent = self.problems(env, base)
+        self.assertEqual(len(absent), 1)
+        self.assertIn('NOT EXERCISED', absent[0])
+        bad = self.problems(env, base[:3] + [kv_cross('x', bad=2)] + base[3:])
+        self.assertEqual(len(bad), 1)
+        self.assertIn('2 MISMATCHED', bad[0])
+        self.assertIn('NOT QUALIFIED', bad[0])
+        fell = self.problems(env, base[:3] + [kv_cross('x', fallback="'AssertionError: x'")] + base[3:])
+        self.assertTrue(any('NOT QUALIFIED' in p for p in fell))
+        empty = self.problems(env, base[:3] + [kv_cross('x', tensors=0)] + base[3:])
+        self.assertTrue(any('compared no tensor' in p for p in empty))
+
+    def test_cross_steps_set_how_many_cross_lines_are_expected(self):
+        base = [kv_ready('cross'), digest('x', 4097), kv_read('cross', 'x', 4097), kv_cross('x'), digest('y', 6145), kv_read('cross', 'y', 6145)]
+        self.assertTrue(self.problems(self.env('cross', 2), base))
+        both = base[:5] + [kv_cross('y')] + base[5:]
+        self.assertEqual(self.problems(self.env('cross', 2), both), [])
+        # zero steps: region with no comparison, and a stray cross line is a count problem
+        zero = [kv_ready('cross'), digest('x', 4097), kv_read('cross', 'x', 4097), digest('y', 6145), kv_read('cross', 'y', 6145)]
+        self.assertEqual(self.problems(self.env('cross', 0), zero), [])
+
+
 def smoke_text(**tests):
     return 'prefix\nSMOKE_JSON ' + json.dumps(tests) + '\n'
 

@@ -84,7 +84,11 @@ class _ParkedTwins(object):
         # (and the round-host gate twins of the Lever N traffic profile: test_tp4_round_host holds the list)
         return ('-ship-prefix-levern-parked' in name or name.endswith('-ship-prefix-levern-audit-r2')
                 or '-ship-prefix-levern-traffic-roundhost' in name
-                or '-ship-prefix-levern-octo' in name or '-ship-prefix-levern-solopacked' in name)
+                or '-ship-prefix-levern-octo' in name or '-ship-prefix-levern-solopacked' in name
+                # the region-read audit twins of the Lever N audited profiles (make_kvread_profiles; test_kvread_profiles holds the list)
+                or name.endswith(('-ship-prefix-levern-audit-kvr', '-ship-prefix-levern-audit-r2-kvr', '-ship-prefix-levern-audit-r2-kvx'))
+                or name.endswith('-ship-prefix-levern-kvr-parked-audit')
+                or name.endswith('-ship-prefix-levern-w2-er-kill'))      # (and the W2 kill drill twin of the ship profile: test_w2_switch holds it)
 
 
 PARKED_TWINS = _ParkedTwins()

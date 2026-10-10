@@ -145,6 +145,34 @@ class FlagTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             policy.audit_enabled({'QWEN_FAST_LEVERN_AUDIT': 'yes'})
 
+    def test_the_kv_read_flags_are_strict_audit_knobs_that_default_to_the_whole_read(self):
+        self.assertEqual(policy.kv_read_mode({}), 'full')
+        self.assertEqual(policy.kv_cross_steps({}), 1)
+        for mode in ('full', 'region', 'cross'):
+            self.assertEqual(policy.kv_read_mode({'QWEN_FAST_LEVERN_KV_READ': mode}), mode)
+        for bad in ('', 'auto', 'Region', '1', ' region', 'whole'):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                policy.kv_read_mode({'QWEN_FAST_LEVERN_KV_READ': bad})
+            self.assertTrue(policy.config_problems({'QWEN_FAST_LEVERN_AUDIT': '1', 'QWEN_FAST_LEVERN_KV_READ': bad}))
+        for bad in ('', '-1', '65', '1.5', 'x'):
+            with self.subTest(steps=bad), self.assertRaises(ValueError):
+                policy.kv_cross_steps({'QWEN_FAST_LEVERN_KV_CROSS_STEPS': bad})
+        self.assertEqual(policy.kv_cross_steps({'QWEN_FAST_LEVERN_KV_CROSS_STEPS': '0'}), 0)
+        audit = {'QWEN_FAST_LEVERN_AUDIT': '1'}
+        self.assertEqual(policy.config_problems(dict(audit, QWEN_FAST_LEVERN_KV_READ='region')), [])
+        self.assertEqual(policy.config_problems(dict(audit, QWEN_FAST_LEVERN_KV_READ='cross', QWEN_FAST_LEVERN_KV_CROSS_STEPS='2')), [])
+        self.assertEqual(policy.config_problems({'QWEN_FAST_LEVER_N': '1', 'QWEN_FAST_LEVERN_AUDIT': '1', 'QWEN_FAST_LEVERN_KV_READ': 'cross'}), [])
+        # a read mode with nothing to read, and a cross count with nothing crossed, are typos
+        self.assertTrue(any('without QWEN_FAST_LEVERN_AUDIT=1' in problem
+                            for problem in policy.config_problems({'QWEN_FAST_LEVERN_KV_READ': 'region'})))
+        self.assertTrue(any('without QWEN_FAST_LEVERN_KV_READ=cross' in problem
+                            for problem in policy.config_problems(dict(audit, QWEN_FAST_LEVERN_KV_READ='region', QWEN_FAST_LEVERN_KV_CROSS_STEPS='2'))))
+        self.assertEqual(policy.config_problems({'QWEN_FAST_LEVERN_KV_READ': 'full'}), [])
+        # audit knobs, not siblings of the master switch: they are valid with the switch off
+        for name in policy.KV_READ_FLAGS:
+            self.assertIn(name, policy.ALL_FLAGS)
+            self.assertNotIn(name, policy.SIBLING_FLAGS)
+
     def test_step_tokens_must_be_a_multiple_of_the_model_chunk(self):
         for value in ('1024', '3000', '2049', '0', '2048.0', '-2048', ' 2048', '', '0x800', '4096\n'):
             with self.subTest(value=value), self.assertRaises(ValueError):

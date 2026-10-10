@@ -89,6 +89,8 @@ PRODUCTION_TAG = 'tp4-serve-2'
 # The images this lab has called production, each with the verify-audit setting its production profile ran (a label is true only
 # when both agree: tp4-serve-2 ran the T1/T2 audits ON, tp4-serve-10 runs them OFF). A later ship adds its tag here.
 PRODUCTION_IMAGES = (('tp4-serve-2', True), ('tp4-serve-10', False))
+LOOKUP_FLAG = 'QWEN_FAST_LOOKUP_DRAFT'
+LOOKUP_POLICY = 'n3m12'            # prompt_lookup's policy string: key length 3, gate 12 (docs/tp4-lookup.md)
 # DRAFTER ARMS (tp4/drafter-arms): which drafter the container serves. The image carries the drafter's fixtures (its tag selects
 # the manifest, drafter_manifest.py) and the derived profile carries only drafter-only flags, which move the proposals and never
 # the verified text, so they are the one arithmetic difference an arm may add. A3 (the calibration) runs on the control arm only.
@@ -97,8 +99,15 @@ DRAFTER_ARMS = {
     'b16-bf8': dict(manifest='b16-98759a49', env=(('QWEN_DRAFTER_MANIFEST', 'b16-98759a49'),)),
     'b32-bf8': dict(manifest='b32-fc65843b', env=(('QWEN_DRAFTER_MANIFEST', 'b32-fc65843b'),)),
     'dedf-bf16': dict(manifest='dedf8df6', env=(('QWEN_FAST_DRAFTER_BF16', '1'),)),
+    # Prompt lookup (tp4/lookup, docs/tp4-lookup.md): the served drafter on the control image, with a host-side lookup over each user's own
+    # token history replacing its proposal rows on the rounds the policy picks. The target verifies every row, so the text is the control's
+    # and only the accepted length moves. No log line at startup shows it: the lookup logs one engaged line per request, so the CANARY
+    # (lookup_problem) is where the arm is held to its markers, not launched_problems.
+    'lookup': dict(manifest='dedf8df6', env=((LOOKUP_FLAG, LOOKUP_POLICY),)),
 }
 DRAFTER_BF16_ENGAGED = '[DRAFTER_BF16] engaged'
+LOOKUP_ENGAGED = '[LOOKUP-DRAFT] engaged'      # prompt_lookup.ENGAGED (a literal here: the lab imports nothing of the serving tree)
+LOOKUP_ROUND = '[LOOKUP-ROUND]'                # prompt_lookup.ROUND_MARKER
 DRAFTER_MANIFEST_LINE = '[DRAFTER_MANIFEST]'
 CONTAINER = 'qwen-c2-taulab'
 PORT = 8022
@@ -516,6 +525,10 @@ def derive_profile(profiles, base, arm=None):
     if profile.get('gate_only') is True:
         raise LabError('profile %s is gate-only: the lab serves the production profile' % base)
     env = profile.setdefault('env', {})
+    if arm == 'lookup' and str(env.get('QWEN_FAST_PARKED_ENGINES', '0')) == '1':
+        # A rebound engine attaches no prompt lookup (serving_fast_policy.parked_engine_problems refuses the pair at boot): measure the lookup on
+        # a profile that builds its engines per request.
+        raise LabError('profile %s runs engine reuse (QWEN_FAST_PARKED_ENGINES=1), which does not run beside the lookup arm' % base)
     for name, value in LOG_FLAGS:
         if str(env.get(name, value)) != value:
             raise LabError('profile %s sets %s to %s, not %s' % (base, name, env[name], value))
@@ -1106,6 +1119,43 @@ def launched_problems(log_lines, derived, arm=None):
     return problems
 
 
+def lookup_problem(text, arm):
+    """None, or why the container's log does not match the drafter arm about prompt lookup. Only the lookup arm may show it: it needs
+    the engaged line naming its policy (logged once per request, so not before the first request) and at least one round line; any
+    other arm shows neither, or its profile carried the flag and the arm is not what it is named. The check is the canary's, after the
+    first turns, because nothing at startup shows the lookup."""
+    asked = dict(DRAFTER_ARMS[arm]['env']).get(LOOKUP_FLAG) if arm in DRAFTER_ARMS else None
+    shown = LOOKUP_ENGAGED in text or LOOKUP_ROUND in text
+    if asked is None:
+        return ('the drafter arm %s does not ask for prompt lookup but the log shows it' % arm) if shown else None
+    if '%s policy=%s ' % (LOOKUP_ENGAGED, asked) not in text:
+        return 'the drafter arm %s asks for prompt lookup (%s) but the log never shows it engaged' % (arm, asked)
+    if LOOKUP_ROUND not in text:
+        return 'the drafter arm %s engaged prompt lookup but the log holds no round line of it' % arm
+    return None
+
+
+def with_lookup_check(canary, log_path, arm, clock=time.time, sleep=time.sleep, wait=CANARY_WAIT_SECONDS):
+    """The canary of a drafter arm: `canary` (the packed rounds and phases check) and then lookup_problem over the container's log, which for
+    the lookup arm is waited for like the rounds are (the log follower lags the container). -> a callable returning a problem or None."""
+    def check():
+        problem = canary()
+        if problem:
+            return problem
+        ends = clock() + wait
+        waits = lookup_problem('', arm) is not None      # the lookup arm needs lines to appear; the others need none to
+        while True:
+            text = ''
+            if os.path.isfile(log_path):
+                with open(log_path, encoding='utf-8', errors='replace') as handle:
+                    text = handle.read()
+            problem = lookup_problem(text, arm)
+            if problem is None or not waits or clock() >= ends:
+                return problem
+            sleep(5)
+    return check
+
+
 def make_canary(log_path, results, clock=time.time, sleep=time.sleep, wait=CANARY_WAIT_SECONDS):
     """The canary the lab runs once after its first ok turns: the container's log must hold [PACKED] rounds that belong to
     turns the lab sent and fast_serving_phases records (the two log flags are then in effect), within `wait` s (the log
@@ -1153,7 +1203,8 @@ def build_parser():
     parser.add_argument('--drafter-arm', choices=sorted(DRAFTER_ARMS), default=None,
                         help='which drafter this run serves (the image carries its fixtures): control (the served drafter), '
                         'b16-bf8 (the block-16 candidate), b32-bf8 (the block-32 candidate, measurement only: used at T16, so positions 1-15) '
-                        'or dedf-bf16 (the served drafter with bfloat16 projection weights). '
+                        'dedf-bf16 (the served drafter with bfloat16 projection weights) or lookup (the served drafter with prompt lookup, '
+                        'QWEN_FAST_LOOKUP_DRAFT=n3m12: the text is the control\'s, only tau moves). '
                         'A3 runs on the control arm only. Default: none, the lab as it was')
     parser.add_argument('--cards', choices=('quad',), default='quad')
     parser.add_argument('--hub', default=gate.HUB)
@@ -1354,6 +1405,10 @@ def main(argv=None, say=print, make_stream=None, make_client=None, make_containe
                   clock=clock, sleep=sleep, say=say, corpus=corpus, alive=container.running, think_end=think_end,
                   tool_call=tool_call)
         lab.canary = (make_canary_check or make_canary)(log_path, results)
+        if options.drafter_arm is not None:
+            # A drafter arm's lookup markers: only the lookup arm may show them (nothing at startup does, so launched_problems cannot).
+            lab.canary = with_lookup_check(lab.canary, log_path, options.drafter_arm, clock=clock, sleep=sleep,
+                                           wait=CANARY_WAIT_SECONDS)
         lab.long_first = options.drafter_arm is not None
         if options.drafter_arm == 'control' and arms[0] == 'A3':
             def stop_on_failed_calibration(arm):

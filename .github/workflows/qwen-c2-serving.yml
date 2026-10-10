@@ -742,7 +742,7 @@ jobs:
           docker stats --no-stream "$name" | tee "$results/stats.txt" || true
           grep -F '[PINDIAG] dram after' <(docker logs "$name" 2>&1) | tail -8 || true
       - name: Kill-switch files must be absent
-        # A prefix-reuse.off or levern.off file left on the hub mount turns a lever off for every later arm and the arm still reads clean
+        # A prefix-reuse.off, levern.off, parked.off or w2.off file left on the hub mount turns a lever off for every later arm and the arm still reads clean
         # (the attach markers print with the switch on). Refuse to start any gate, prefix or smoke job while either exists; the drills write them
         # with their owner token and remove them in their own cleanup, and an operator's file is never removed here.
         if: contains(steps.job.outputs.actions, 'gate') || contains(steps.job.outputs.actions, 'prefix') || contains(steps.job.outputs.actions, 'smoke') || contains(steps.job.outputs.actions, 'replay')
@@ -757,7 +757,7 @@ jobs:
             exit 1
           fi
           left=0
-          for name in prefix-reuse.off levern.off; do
+          for name in prefix-reuse.off levern.off parked.off w2.off; do
             if sudo -n test -e "$hub/.qwen-c2/$name"; then
               echo "kill-switch file present: $name (remove it or hand it to its owner before this job)" >&2
               left=1

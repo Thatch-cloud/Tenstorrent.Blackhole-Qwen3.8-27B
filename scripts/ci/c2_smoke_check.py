@@ -1234,7 +1234,16 @@ def round_host_problems(env, container_text, steady_eight):
                     problems.append('%s is set and only %d of %d eight-live drafting steps took the fast %s (%d%% needed)' % (
                         flag, taken, len(drafted), label, int(ROUND_HOST_FAST_SHARE * 100)))
         if set_flags.get(round_host.READ_FLAG) == '1' and len(drafted) > ROUND_HOST_GUARD_AFTER:
-            if not any(step['guard'] for step in drafted):
+            # round_host.guard_full: READ checks the replicated selector feature on every chip for the first 64 reads and every 64th, and the
+            # ledger's `guard` counts the reads that skipped it. Under AUDIT the guard runs on EVERY read (it is part of what the audit compares),
+            # so the counter must stay 0 and a skip there is a code bug; without AUDIT the sampling must show skips once 64 reads have passed
+            # (run 38019684412 and 38020932079: 678 skips in 752 guards; run 38018599272, audited: 0 skips in 375).
+            skipped = sum(step['guard'] for step in drafted)
+            if set_flags.get(round_host.AUDIT_FLAG) == '1':
+                if skipped:
+                    problems.append('%s and %s are set and the replicated-feature guard was skipped %d time(s) over %d steps: the audit runs it on every read' % (
+                        round_host.AUDIT_FLAG, round_host.READ_FLAG, skipped, len(drafted)))
+            elif not skipped:
                 problems.append('%s is set and the replicated-feature guard was never skipped over %d steps' % (round_host.READ_FLAG, len(drafted)))
         if set_flags.get(round_host.KEYED_FLAG) == '1':
             possible = sum(2 if step['live'] == 8 else 1 for step in judged if step['live'] in (4, 8))
@@ -1434,6 +1443,63 @@ LEVERN_STEP = re.compile(r'\[PINDIAG\] lever N step n=(\d+) kind=(prefill|decode
                          r'(?: f_eff=(\S+))?(?: need=(\S+))?(?: gap_ms=(\S+))?')
 LEVERN_DIGEST = re.compile(r'\[PINDIAG\] lever N digest req=(\S+) prompt=(\d+) tokens_sha=([0-9a-f]{32}) slot_sha=([0-9a-f]{32}) '
                            r'logits_sha=([0-9a-f]{32}) kv_sha=([0-9a-f]{32})')
+
+
+# The audit digest's region read (QWEN_FAST_LEVERN_KV_READ, levern_policy.KV_READ_LINE and KV_CROSS_LINE; docs/prefix-audit-cost.md): one 'kv read mode=' line per
+# digest that read the KV (a prompt over KV_DIGEST_MAX_PROMPT skips it), one 'kv read cross' line per cross-checked digest.
+LEVERN_KV_READ_FLAG = 'QWEN_FAST_LEVERN_KV_READ'
+LEVERN_KV_CROSS_FLAG = 'QWEN_FAST_LEVERN_KV_CROSS_STEPS'
+LEVERN_KV_PREFIX = '[PINDIAG] lever N kv read '
+LEVERN_KV_SKIPPED = '0' * 32
+LEVERN_KV_READ = re.compile(r'\[PINDIAG\] lever N kv read mode=(region|cross) req=(\S+) prompt=(\d+) reads=(\d+) blocks_read=(\d+) '
+                            r'region_ms=([0-9.]+) fallback=(\S.*)$', re.M)
+LEVERN_KV_CROSS = re.compile(r'\[PINDIAG\] lever N kv read cross req=(\S+) tensors=(\d+) mismatched=(\d+) region_ms=([0-9.]+) '
+                             r'whole_read_ms=([0-9.]+) blocks_read=(\d+) fallback=(\S.*)$', re.M)
+LEVERN_KV_READY = '[PINDIAG] lever N kv read ready mode='
+
+
+def levern_kv_read_problems(env, container_text, digests):
+    """[problem] for the audit digest's read mode. Unset or full: no 'lever N kv read' line (a line says a region read ran under a profile that never
+    asked). region or cross: the attach's ready line, one read line per digest that read the KV (a fallback to the whole-cache read in any of them is
+    a failure: the region read did not answer), and under cross one cross line per cross-checked digest (the first QWEN_FAST_LEVERN_KV_CROSS_STEPS,
+    default 1) with mismatched=0 and no fallback: an absent line is NOT EXERCISED and fails, a mismatch is the extension's finding."""
+    mode = env.get(LEVERN_KV_READ_FLAG, 'full')
+    lines = [line for line in container_text.splitlines() if LEVERN_KV_PREFIX in line]
+    if mode not in ('region', 'cross'):
+        return ['%d "%s" line(s) on a profile without %s=region or cross (the first: %s)' % (len(lines), LEVERN_KV_PREFIX.strip(), LEVERN_KV_READ_FLAG,
+                                                                                              lines[0].strip()[:160])] if lines else []
+    problems = []
+    if LEVERN_KV_READY + mode not in container_text:
+        problems.append('%s=%s and no "%s%s" line was logged: the attach never checked the extension' % (LEVERN_KV_READ_FLAG, mode, LEVERN_KV_READY, mode))
+    reads = [m for m in LEVERN_KV_READ.finditer(container_text)]
+    wanted = len([row for row in digests if row['kv'] != LEVERN_KV_SKIPPED])
+    if len(reads) != wanted:
+        problems.append('%s=%s: %d region-read line(s) for %d digest(s) that read the KV (one per digest)' % (LEVERN_KV_READ_FLAG, mode, len(reads), wanted))
+    fell = [m for m in reads if m.group(7).strip() != '-']
+    if fell:
+        problems.append('the region read fell back to the whole-cache read (req %s: %s): the extension did not answer' % (fell[0].group(2), fell[0].group(7)[:160]))
+    crosses = [m for m in LEVERN_KV_CROSS.finditer(container_text)]
+    if mode == 'region':
+        if crosses:
+            problems.append('%d cross-check line(s) under %s=region' % (len(crosses), LEVERN_KV_READ_FLAG))
+        return problems
+    try:
+        steps = int(env.get(LEVERN_KV_CROSS_FLAG, '1'))
+    except ValueError:
+        steps = 1
+    expected = min(steps, wanted)
+    if steps and not crosses:
+        problems.append('%s=cross and no "%scross" line was logged: the region read was never compared with the whole-cache read (NOT EXERCISED)'
+                        % (LEVERN_KV_READ_FLAG, LEVERN_KV_PREFIX))
+    elif len(crosses) != expected:
+        problems.append('%d cross-check line(s), %d expected (%s=%d over %d digest(s))' % (len(crosses), expected, LEVERN_KV_CROSS_FLAG, steps, wanted))
+    for m in crosses:
+        if int(m.group(3)) or m.group(7).strip() != '-':
+            problems.append('cross-check of req %s: %s tensor(s) compared, %s MISMATCHED, fallback %s: the region read is NOT QUALIFIED'
+                            % (m.group(1), m.group(2), m.group(3), m.group(7)[:120]))
+        elif not int(m.group(2)):
+            problems.append('cross-check of req %s compared no tensor' % m.group(1))
+    return problems
 
 
 def _float_or(text, default):
@@ -1735,6 +1801,7 @@ def levern_problems(env, container_text, smoke):
                     problems.append('%s: %s of %s decoding seats progressed inside the %.0f s arrival window: the prefill still froze the others'
                                     % (stall_name, window.get('seats_progressing'), window.get('seats'), span))
     if audit:
+        problems += levern_kv_read_problems(env, container_text, facts['digests'])
         seen = {row['prompt'] for row in facts['digests']}
         for name in LEVERN_ROW_TESTS:
             entry = results.get(name)
@@ -1775,6 +1842,60 @@ def spread_problems(env, container_text):
     if env.get(SPREAD_AUDIT_FLAG) == '1' and not any(
             SPREAD_AUDIT in line and 'exact=True' in line and SPREAD_MISMATCH not in line for line in lines):
         problems.append('%s=1 is set and no passing audit line (%s <n> exact=True) was logged: nothing was compared' % (SPREAD_AUDIT_FLAG, SPREAD_AUDIT))
+    return problems
+
+
+# tp4/w2 kill switch (w2_switch.py, docs/tp4-w2-kill-switch.md): the file w2.off latches the sequential step for the packed blocks W2 runs on (live) and keeps W2 out
+# of the next attach. Outside the drill arm (QWEN_FAST_W2_OFF_AFTER, gate only) ANY kill line is a problem: a leftover w2.off made this arm run without W2 and it would
+# read clean. In the drill arm: one drill line (the server wrote the file), then exactly one latch line, packed rounds before it and NONE after it (every packed round
+# replays a trace that carries W2; the "[PINDIAG] packed extent round" line is logged once per packed round), a routed line per block that went sequential, and the
+# engaged lines the W2 rules already demand (the attach before the file did not skip W2). tests hold these equal to w2_switch's.
+W2_KILL_PREFIX = '[PINDIAG] w2 kill switch'
+W2_KILL_LATCH = re.compile(r'\[PINDIAG\] w2 kill switch \S+ present: ')
+W2_KILL_ATTACH = re.compile(r'\[PINDIAG\] w2 kill switch \S+ present at attach')
+W2_KILL_ROUTED = '[PINDIAG] w2 kill switch routed the round to the sequential step'
+W2_KILL_DRILL = '[PINDIAG] w2 kill switch drill (gate only): wrote '
+W2_OFF_AFTER_FLAG = 'QWEN_FAST_W2_OFF_AFTER'
+PACKED_ROUND_LINE = '[PINDIAG] packed extent round'
+
+
+def w2_kill_problems(env, container_text):
+    """[problem] for the W2 kill switch lines of a server log (see the block comment above): none for a log with no kill line and a profile without the drill."""
+    lines = container_text.splitlines()
+    kill = [index for index, line in enumerate(lines) if W2_KILL_PREFIX in line]
+    drill_wanted = str((env or {}).get(W2_OFF_AFTER_FLAG) or '')
+    if not kill:
+        if drill_wanted:
+            return ['%s=%s is set and no w2 kill switch line was logged: the drill never latched (fewer packed rounds than the trigger, or W2 never ran)' % (
+                W2_OFF_AFTER_FLAG, drill_wanted)]
+        return []
+    if not drill_wanted:
+        return ['the W2 kill switch logged a line outside the drill arm: a w2.off file was present, so this arm did not run W2 on all its rounds '
+                '(a leftover file from an earlier arm?): %s' % lines[kill[0]].strip()[:200]]
+    problems = []
+    latch = [index for index in kill if W2_KILL_LATCH.search(lines[index])]
+    attach = [index for index in kill if W2_KILL_ATTACH.search(lines[index])]
+    drill = [index for index in kill if W2_KILL_DRILL in lines[index]]
+    routed = [index for index in kill if W2_KILL_ROUTED in lines[index]]
+    if attach:
+        problems.append('the W2 kill switch line says the file was present at the attach (%d line(s)): the drill must write it mid-run, not before the engine started' % len(attach))
+    if len(latch) != 1:
+        problems.append('%d W2 kill switch latch lines under %s=%s: the switch latches exactly once' % (len(latch), W2_OFF_AFTER_FLAG, drill_wanted))
+    if len(drill) != 1:
+        problems.append('%d W2 kill drill lines under %s=%s: the server writes the flag file exactly once' % (len(drill), W2_OFF_AFTER_FLAG, drill_wanted))
+    if latch and drill and drill[0] > latch[0]:
+        problems.append('the W2 kill latch line precedes the drill line: the switch latched without the drill writing the file')
+    if latch:
+        rounds = [index for index, line in enumerate(lines) if PACKED_ROUND_LINE in line]
+        before = [index for index in rounds if index < latch[0]]
+        after = [index for index in rounds if index > latch[0]]
+        if not before:
+            problems.append('no packed round (%s) before the W2 kill latch: the drill proves nothing without W2 rounds first' % PACKED_ROUND_LINE)
+        if after:
+            problems.append('%d packed round line(s) (%s) after the W2 kill latch: a trace that carries W2 still replayed (first at line %d, latch at %d)' % (
+                len(after), PACKED_ROUND_LINE, after[0] + 1, latch[0] + 1))
+        if not [index for index in routed if index > latch[0]]:
+            problems.append('no round was routed to the sequential step after the W2 kill latch (%s): nothing served the traffic that followed' % W2_KILL_ROUTED)
     return problems
 
 
@@ -1819,6 +1940,7 @@ def lever_engagement_problems(env, container_text, smoke=None, drill=False):
     problems.extend(sdpa_multi_problems(env, container_text))
     problems.extend(spread_problems(env, container_text))
     problems.extend(drafter_checkpoint_problems(env, container_text))
+    problems.extend(w2_kill_problems(env, container_text))
     lever, _ = levern_problems(env, container_text, smoke)
     problems.extend(lever)
     if env.get(LEVERN_FLAG) == '1' and not drill and LEVERN_KILL_PREFIX in container_text:
@@ -1858,6 +1980,7 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     problems += sdpa_multi_problems(env, container_text)
     problems += spread_problems(env, container_text)
     problems += drafter_checkpoint_problems(env, container_text)
+    problems += w2_kill_problems(env, container_text)
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
     if env is not None and env.get('QWEN_FAST_TP', '2') != '2':

@@ -47,7 +47,9 @@ Rules (`traffic_waiver_problems`, `waived_levers`, `multi_problems`, `parked_pro
 ## 3. Kill switches
 
 Lever N (`levern.off`), prefix reuse (`prefix-reuse.off`) and engine reuse (`parked.off`) each stop with a file on the hub mount and no restart. W2 has
-no runtime switch: the multi programs and the F1 spread are built at attach and captured in the traces, so turning W2 off means an image rollback.
+a switch too (`w2.off`, `docs/tp4-w2-kill-switch.md`), of a different kind: the multi programs and the F1 spread are captured in the packed blocks' traces, so
+the file does not edit a trace. Within about one round it sends every packed round to the exact sequential step (slower, byte-identical greedy output), and
+a restart with the file still present attaches the packed blocks without W2, at full packed speed. An image rollback is no longer the only way off W2.
 
 ## 4. The pack
 

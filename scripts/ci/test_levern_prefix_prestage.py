@@ -206,9 +206,11 @@ class WriteCensusTests(unittest.TestCase):
 
     def test_every_call_on_the_model_or_ttnn_is_on_the_audited_list(self):
         # reads: the host reads of the scratch and the logits, the audit's program-free KV read (_qwen_prefix_audit reads each cache to the host), the
-        # entry the lifecycle's capture wraps, and the allocation of the scratch the scope registers
+        # entry the lifecycle's capture wraps, and the allocation of the scratch the scope registers. The audit digest's region read (QWEN_FAST_LEVERN_KV_READ,
+        # kv_digest_region) is device -> host only: allocate_tensor_on_host makes a HOST tensor, qwen_read_blocks copies named blocks of a cache into it (the cache is
+        # never written, nothing is compiled), Shape builds its shape.
         reads = {'to_torch', 'ConcatMeshToTensor', 'num_program_cache_entries', 'prefill_paged_slots_range', '_ensure_gdn_prefill_scratch',
-                 'synchronize_device', 'ShardTensorToMesh', '_qwen_prefix_audit'}
+                 'synchronize_device', 'ShardTensorToMesh', '_qwen_prefix_audit', 'allocate_tensor_on_host', 'qwen_read_blocks', 'Shape'}
         unknown = sorted((owner, attribute) for (owner, attribute) in self.calls() if attribute not in route.WRITE_SITES and attribute not in reads)
         self.assertEqual(unknown, [], 'a new call on the model or ttnn in levern_route: audit it as a persistent write or a read, add it to WRITE_SITES '
                                       'or to this test\'s reads (the disjoint-writer class is sound only while the list is complete)')

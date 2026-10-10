@@ -123,6 +123,10 @@ PARKED_TWINS = PARKED_TWINS | frozenset(_round_host_twins.twin_names())     # tp
 PARKED_TWINS = PARKED_TWINS | frozenset(_octo_twins.twin_names())     # (and the octo-T8 twins, test_octo_profiles)
 import make_octo2_profiles as _octo2_twins  # noqa: E402
 PARKED_TWINS = PARKED_TWINS | frozenset(_octo2_twins.twin_names())     # (and tp4/octo-2's lever twins, test_octo2_profiles)
+import make_w2_kill_profiles as _w2_kill_twins  # noqa: E402
+PARKED_TWINS = PARKED_TWINS | frozenset(_w2_kill_twins.twin_names())     # (and the W2 kill drill twin, test_w2_switch)
+import make_kvread_profiles as _kvread_twins  # noqa: E402
+PARKED_TWINS = PARKED_TWINS | frozenset(_kvread_twins.twin_names())     # (and the region-read audit twins, test_kvread_profiles)
 
 class ShapeTests(unittest.TestCase):
     @classmethod

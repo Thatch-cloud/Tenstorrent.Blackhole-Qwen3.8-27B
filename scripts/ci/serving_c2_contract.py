@@ -101,7 +101,8 @@ LEVERN_ENV_FLAGS = ('QWEN_FAST_LEVER_N', 'QWEN_FAST_LEVERN_AUDIT', 'QWEN_FAST_LE
                     'QWEN_FAST_LEVERN_PREFILL_SHARE', 'QWEN_FAST_LEVERN_ROUNDS', 'QWEN_FAST_LEVERN_MAX_ROUNDS', 'QWEN_FAST_LEVERN_FAULT',
                     'QWEN_FAST_LEVERN_TTFT_TARGET_S', 'QWEN_FAST_LEVERN_SHORT_TOKENS', 'QWEN_FAST_LEVERN_PARK', 'QWEN_FAST_LEVERN_PARK_SLOTS',
                     'QWEN_FAST_LEVERN_MAX_PARK_S', 'QWEN_FAST_LEVERN_EPOCH_SCOPE',
-                    'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S')
+                    'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S',
+                    'QWEN_FAST_LEVERN_KV_READ', 'QWEN_FAST_LEVERN_KV_CROSS_STEPS')
 LEVERN_PLATFORM_MODULE = 'vllm_tt_plugin.platform'
 # Engine reuse, parked per-slot engines (serving_fast_policy.PARKED_ENGINES_FLAG; default off). A gate-only profile's own switches: the fast
 # path's engine is rebound to each request instead of built (serving_parked_engines), and with PARKED_DRAFTS the pair and quad drafter traces are
@@ -116,6 +117,12 @@ PARKED_NAMES = ('QWEN_FAST_PARKED_ENGINES', 'QWEN_FAST_PARKED_DRAFTS', 'QWEN_FAS
                 'QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT', 'QWEN_FAST_PARKED_OFF_AFTER', 'QWEN_FAST_PARKED_OFF_PATH')
 PARKED_GATE_ONLY = ('QWEN_FAST_PARKED_AUDIT', 'QWEN_FAST_PARKED_NEGATIVE', 'QWEN_FAST_PARKED_FAULT', 'QWEN_FAST_GATE_DRAM_BALLAST',
                     'QWEN_FAST_PARKED_OFF_AFTER', 'QWEN_FAST_PARKED_OFF_PATH')
+# The W2 runtime kill switch (w2_switch: the file /models/.qwen-c2/w2.off beside levern.off, prefix-reuse.off and parked.off). QWEN_FAST_W2_OFF_PATH moves the
+# file (any profile may name it; absolute path), QWEN_FAST_W2_OFF_AFTER is the gate-only drill that writes the file itself after n packed rounds. Pinned equal to
+# w2_switch's by test_w2_switch. Any other QWEN_FAST_W2_ name is refused, so a typo never reads as "off".
+W2_PREFIX = 'QWEN_FAST_W2_'
+W2_NAMES = ('QWEN_FAST_W2_OFF_PATH', 'QWEN_FAST_W2_OFF_AFTER')
+W2_GATE_ONLY = ('QWEN_FAST_W2_OFF_AFTER',)
 # The sources the merged route must carry (levern_route.SOURCES, pinned equal by test_levern_prefix_contract).
 MERGED_SOURCES = ('COLD', 'CHECKPOINT', 'SCRATCH', 'PARKED')
 
@@ -338,6 +345,11 @@ def apply_environment(profile, environ=None):
     # ...and engine reuse: an inherited value must not turn the parked engines (or their bound drafter traces) on under a profile that never asked,
     # nor a gate instrument (the audit, a negative control, a fault, the ballast, the kill switch's trigger) into an arm that did not name it.
     for name in sorted(set(PARKED_NAMES) | set(PARKED_GATE_ONLY) | set((PARKED_SWITCH, PARKED_DRAFTS))):
+        if name not in profile['env']:
+            environ.pop(name, None)
+    # ...and the W2 kill switch's override and drill trigger (w2_switch): an inherited path would move the switch's file, an inherited trigger would
+    # kill W2 by itself after n rounds in an arm that never named it.
+    for name in W2_NAMES:
         if name not in profile['env']:
             environ.pop(name, None)
     return environ
@@ -617,6 +629,34 @@ def multi_problems(profile):
     return problems
 
 
+def w2_problems(profile, environ=None):
+    """Every way the W2 kill switch's names are misused, [] when none (w2_switch, docs/tp4-w2-kill-switch.md): an unknown QWEN_FAST_W2_ name; an override path that is
+    not absolute; the drill trigger (QWEN_FAST_W2_OFF_AFTER) outside a gate-only profile, in the process environment outside a gate profile, not a positive whole number
+    of packed rounds, or without W2 in the profile and a path of its own to write (an arm that kills what it never ran, or writes the production file)."""
+    environ = {} if environ is None else environ
+    env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
+    problems = ['%s is not a W2 kill switch setting (the names are %s)' % (name, ', '.join(W2_NAMES))
+                for name in sorted(env) if name.startswith(W2_PREFIX) and name not in W2_NAMES]
+    for name in W2_NAMES:
+        path = env.get(name)
+        if name == 'QWEN_FAST_W2_OFF_PATH' and path is not None and not (path.startswith('/') and not path.endswith('/')):
+            problems.append('%s must be an absolute file path, got %r' % (name, path))
+    problems += ['%s is a gate instrument: only a gate-only profile sets it' % name for name in W2_GATE_ONLY if name in env and not gate_profile(profile)]
+    if not gate_profile(profile):
+        problems += ['%s is set outside a gate profile: it exists for a gate and must never reach traffic' % name for name in W2_GATE_ONLY if name in environ]
+    after = env.get('QWEN_FAST_W2_OFF_AFTER')
+    if after is not None:
+        if not (after.isascii() and after.isdigit() and after == str(int(after)) and int(after) > 0):
+            problems.append('QWEN_FAST_W2_OFF_AFTER must be a positive whole number of packed rounds, got %r' % (after,))
+        if env.get(MULTI_SWITCH, '').strip() != 'multi' and env.get(F1_SWITCH, '0') != '1':
+            problems.append('QWEN_FAST_W2_OFF_AFTER needs W2 in the profile (%s=multi or %s=1): there is nothing to kill' % (MULTI_SWITCH, F1_SWITCH))
+        path = env.get('QWEN_FAST_W2_OFF_PATH')
+        if path is None or path.startswith('/models/'):
+            problems.append('QWEN_FAST_W2_OFF_AFTER writes the flag file itself: QWEN_FAST_W2_OFF_PATH must name a scratch path in the container '
+                            '(not the hub mount\'s %s), got %r' % ('/models/.qwen-c2/w2.off', path))
+    return problems
+
+
 def levern_problems(profile):
     """Every way the profile's Lever N flags break what the lever needs, [] when none (docs/lever-n-tp4-design-2026-10-04.md section 4).
 
@@ -644,11 +684,15 @@ def levern_problems(profile):
     if not levern_on(profile):
         if audit and profile.get('gate_only') is not True:
             problems.append('Lever N: %s=1 is a gate instrument and needs a gate-only profile' % LEVERN_AUDIT)
+        if profile.get('gate_only') is not True:
+            for name in ('QWEN_FAST_LEVERN_KV_READ', 'QWEN_FAST_LEVERN_KV_CROSS_STEPS'):
+                if name in env:
+                    problems.append('Lever N: %s is a gate instrument (the audit digest\'s read) and needs a gate-only profile' % name)
         return problems
     if profile.get('gate_only') is not True:
         # The traffic arm (stage 1 of the short-window plan): the master switch alone, with its sibling flags and the merged route, may serve traffic
         # (the kill switch levern.off stops it with no restart); the gate instruments never may (they are the gates' own, and a fault is a negative control).
-        for name in (LEVERN_AUDIT, 'QWEN_FAST_LEVERN_FAULT'):
+        for name in (LEVERN_AUDIT, 'QWEN_FAST_LEVERN_FAULT', 'QWEN_FAST_LEVERN_KV_READ', 'QWEN_FAST_LEVERN_KV_CROSS_STEPS'):
             if str(env.get(name, '0')) not in ('0', ''):
                 problems.append('Lever N: %s is a gate instrument and needs a gate-only profile (a traffic profile carries the master switch and the '
                                 'policy flags only)' % name)
@@ -1314,6 +1358,9 @@ def boot(environ=None, orig_argv=None):
     problems = multi_problems(profile)
     if problems:
         raise ValueError('profile %s cannot serve the wave-2 levers: %s' % (profile['name'], '; '.join(problems)))
+    problems = w2_problems(profile, environ)
+    if problems:
+        raise ValueError('profile %s misuses the W2 kill switch: %s' % (profile['name'], '; '.join(problems)))
     problems = drafter_problems(profile)
     if problems:
         raise ValueError('profile %s cannot serve its drafter checkpoint: %s' % (profile['name'], '; '.join(problems)))

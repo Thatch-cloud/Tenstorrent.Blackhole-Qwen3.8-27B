@@ -278,8 +278,22 @@ def digests(rec_snap, conv_snap, logits):
     return gdn.hexdigest()[:32], hashlib.sha256(_bytes(logits)).hexdigest()[:32]
 
 
-def kv_digest(model, page_row, length):
-    """sha256 (32 hex) over the unpacked K/V values of positions [0, length) of one request, in cache order, read one cache tensor at a time."""
+KV_CROSS_ATTR = '_qwen_levern_kv_cross_left'
+
+
+def kv_digest(model, page_row, length, log=None, req_id=None, environ=None):
+    """sha256 (32 hex) over the unpacked K/V values of positions [0, length) of one request, in cache order, read one cache tensor at a time.
+
+    QWEN_FAST_LEVERN_KV_READ (levern_policy.kv_read_mode) picks the read: unset or full is kv_digest_full, today's read of every cache whole and
+    nothing else (the flag-off path is that function, line for line); region and cross are kv_digest_region (docs/prefix-audit-cost.md)."""
+    mode = levern_policy.kv_read_mode(environ)
+    if mode == 'full':
+        return kv_digest_full(model, page_row, length)
+    return kv_digest_region(model, page_row, length, mode, _log if log is None else log, req_id, environ)
+
+
+def kv_digest_full(model, page_row, length):
+    """The whole-cache read: every cache tensor of the pool to the host, one at a time (about 8.4 minutes a request at eight seats x 262k)."""
     import torch
 
     ttnn = _ttnn()
@@ -296,6 +310,114 @@ def kv_digest(model, page_row, length):
             seq = sel.permute(1, 0, 2, 3).reshape(sel.shape[1], needed * size, sel.shape[3])[:, :length]
             digest.update(_bytes(seq))
             del sel, seq
+    return digest.hexdigest()[:32]
+
+
+def region_read_ready(ttnn):
+    """True when ttnn.qwen_read_blocks (and ttnn.allocate_tensor_on_host) exist. The image carries the read as the standalone extension qwen_kv_read
+    (optimisation/ttnn-op/kv_region_read, on sys.path through the .pth the image build lays); importing it sets ttnn.qwen_read_blocks."""
+    if not callable(getattr(ttnn, 'qwen_read_blocks', None)):
+        try:
+            import qwen_kv_read  # noqa: F401
+        except Exception:
+            pass
+    return callable(getattr(ttnn, 'qwen_read_blocks', None)) and hasattr(ttnn, 'allocate_tensor_on_host')
+
+
+def read_blocks(model, ttnn, cache, blocks, heads):
+    """The blocks of one paged KV cache read from the device as raw page ranges (ttnn.qwen_read_blocks: one blocking read per run of consecutive ids)
+    into a host tensor of the cache's dtype and layout holding just those blocks, then unpacked by ttnn.to_torch exactly as the whole-cache read unpacks
+    the cache (qwen_prefix_model_patch._qwen_prefix_read_blocks, the prefix audit's read, is the same code). Compiles nothing, allocates nothing on the
+    device. The unpacked shape must be the whole-cache read's with this selection's block count: a shard lost by the composer would digest a subset of
+    the heads and agree with itself, so a wrong shape raises."""
+    count = int(blocks.numel())
+    # ttnn.Shape supports only __getitem__(int), __len__ and __iter__ (no slice, no tuple operators): copy it to ints first.
+    dims = tuple(int(cache.shape[i]) for i in range(len(cache.shape)))
+    host = ttnn.allocate_tensor_on_host(ttnn.Shape([count] + list(dims[1:])), cache.dtype, cache.layout, model.mesh_device)
+    topology = getattr(cache, 'tensor_topology', None)
+    if callable(topology) and hasattr(host, 'update_tensor_topology'):
+        host.update_tensor_topology(topology())
+    ttnn.qwen_read_blocks(cache, host, [int(block) for block in blocks.tolist()])
+    sel = ttnn.to_torch(host, mesh_composer=heads)
+    want = (count, dims[1] * int(model.num_devices)) + dims[2:]
+    if tuple(sel.shape) != want:
+        raise AssertionError('region read composed shape %r, the whole-cache read gives %r' % (tuple(sel.shape), want))
+    return sel
+
+
+def _cross_wanted(model, environ):
+    """True for a digest that must also be compared with the whole-cache read (KV_READ=cross, the first QWEN_FAST_LEVERN_KV_CROSS_STEPS digests)."""
+    left = getattr(model, KV_CROSS_ATTR, None)
+    if left is None:
+        left = levern_policy.kv_cross_steps(environ)
+    try:
+        setattr(model, KV_CROSS_ATTR, max(0, left - 1))
+    except Exception:
+        pass
+    return left > 0
+
+
+def kv_digest_region(model, page_row, length, mode, log, req_id, environ=None):
+    """kv_digest_full's digest from only the blocks the row's page table names. region: the region read feeds the digest; a read that raises switches
+    this digest to the whole-cache read for the rest of its tensors (named in the line). cross: also the whole-cache read of every cache, the two
+    selections compared byte for byte, and the WHOLE-CACHE bytes feed the digest, so a wrong region read is counted (levern_policy.KV_CROSS_LINE,
+    mismatched=) and can never make two arms agree."""
+    import time
+
+    import torch
+
+    ttnn = _ttnn()
+    if not region_read_ready(ttnn):
+        raise AssertionError('%s=%s but this ttnn has no qwen_read_blocks (the region-read extension qwen_kv_read): the digest would silently read '
+                             'whole caches (about 8 minutes a request at eight seats x 262k)' % (levern_policy.KV_READ_FLAG, mode))
+    heads = ttnn.ConcatMeshToTensor(model.mesh_device, dim=1)
+    blocks = torch.as_tensor(page_row, dtype=torch.long).reshape(-1)
+    cross = mode == 'cross' and _cross_wanted(model, environ)
+    stats = dict(reads=0, blocks=0, region_ms=0.0, whole_ms=0.0, tensors=0, bad=0, fallback=None)
+    region = True
+    digest = hashlib.sha256()
+    for k_cache, v_cache in model._paged_kv_caches:
+        for cache in (k_cache, v_cache):
+            size = int(cache.shape[2])
+            needed = -(-length // size)
+            wanted = blocks[:needed]
+            whole = got = None
+            if cross:
+                tick = time.perf_counter()
+                whole = ttnn.to_torch(cache, mesh_composer=heads)
+                stats['whole_ms'] += (time.perf_counter() - tick) * 1000.0
+            if region:
+                tick = time.perf_counter()
+                try:
+                    got = read_blocks(model, ttnn, cache, wanted, heads)
+                except Exception as failure:                # the digest must still answer: read whole caches from here, loudly
+                    region = False
+                    stats['fallback'] = '%s: %s' % (type(failure).__name__, failure)
+                else:
+                    stats['reads'] += 1
+                    stats['blocks'] += int(wanted.numel())
+                stats['region_ms'] += (time.perf_counter() - tick) * 1000.0
+            if got is None and whole is None:
+                tick = time.perf_counter()
+                whole = ttnn.to_torch(cache, mesh_composer=heads)
+                stats['whole_ms'] += (time.perf_counter() - tick) * 1000.0
+            if whole is not None:
+                sel = whole.index_select(0, wanted)
+                if got is not None:
+                    same = tuple(got.shape) == tuple(sel.shape) and bool(
+                        (got.contiguous().view(torch.uint8) == sel.contiguous().view(torch.uint8)).all())
+                    stats['tensors'] += 1
+                    stats['bad'] += 0 if same else 1
+            else:
+                sel = got
+            del whole, got
+            seq = sel.permute(1, 0, 2, 3).reshape(sel.shape[1], needed * size, sel.shape[3])[:, :length]
+            digest.update(_bytes(seq))
+            del sel, seq
+    fallback = '-' if stats['fallback'] is None else repr(stats['fallback'])
+    log(levern_policy.KV_READ_LINE, mode, req_id, length, stats['reads'], stats['blocks'], stats['region_ms'], fallback)
+    if cross:
+        log(levern_policy.KV_CROSS_LINE, req_id, stats['tensors'], stats['bad'], stats['region_ms'], stats['whole_ms'], stats['blocks'], fallback)
     return digest.hexdigest()[:32]
 
 
@@ -324,7 +446,8 @@ def audit_prefill(model, step, logits, page_row, rec_snap=None, conv_snap=None, 
     if rec_snap is None:
         rec_snap, conv_snap = scratch_snapshot(model)
     slot_sha, logits_sha = digests(rec_snap, conv_snap, logits)
-    kv = kv_digest(model, page_row, step.total) if step.total <= levern_policy.KV_DIGEST_MAX_PROMPT else levern_policy.KV_SKIPPED
+    kv = (kv_digest(model, page_row, step.total, log=log, req_id=step.req_id, environ=getattr(vars(model).get(HANDLE_ATTR), 'environ', None))
+          if step.total <= levern_policy.KV_DIGEST_MAX_PROMPT else levern_policy.KV_SKIPPED)
     log(levern_policy.DIGEST_LINE, step.req_id, step.total, tokens_sha(tokens, step.total) if tokens is not None else levern_policy.KV_SKIPPED,
         slot_sha, logits_sha, kv)
 
@@ -336,6 +459,8 @@ class Handle(object):
     def __init__(self, wrapper, model, original, route, audit, merged=False, merged_cfg=None):
         self.wrapper, self.model, self.original, self.route, self.audit = wrapper, model, original, route, audit
         self.merged, self.merged_cfg = merged, merged_cfg
+        # The environment install() read: the audit digest's read mode (QWEN_FAST_LEVERN_KV_READ) comes from the same one. None: os.environ.
+        self.environ = None
         self.fault_fired = False
         self.owner_refusals = 0
         self.parks = {}
@@ -414,6 +539,14 @@ def install(runner, model, *, environ=None, log=_log):
         problems = requirement_problems(model, merged=merged)
         if problems:
             raise ValueError('Lever N cannot be installed on this model tree: %s' % '; '.join(problems))
+    if audit_on and levern_policy.kv_read_mode(environ) != 'full':
+        # The region read is the audit digest's (QWEN_FAST_LEVERN_KV_READ): an image without the extension refuses HERE, at the attach, not in the first
+        # audited prefill (the prefix audit's rule); the line says which read the digests will take.
+        if not region_read_ready(_ttnn()):
+            raise ValueError('%s=%s but this ttnn has no qwen_read_blocks (the region-read extension qwen_kv_read): the audit digest would silently '
+                             'read whole caches (about 8 minutes a request at eight seats x 262k)'
+                             % (levern_policy.KV_READ_FLAG, levern_policy.kv_read_mode(environ)))
+        log(levern_policy.KV_READ_PREFIX + 'ready mode={}', levern_policy.kv_read_mode(environ))
     handle = Handle(wrapper, model, original, route_on, audit_on, merged=merged,
                     merged_cfg=levern_policy.merged_config(environ) if merged else None)
     fault = levern_policy.fault(environ) if route_on else None
@@ -454,6 +587,7 @@ def install(runner, model, *, environ=None, log=_log):
         vars(model)[ENTRY] = types.MethodType(
             lambda self, *a, **k: route(self, *a, handle=handle, fault=fault, audit=audit_on, log=log, **k), model)
     vars(wrapper)['prefill_forward'] = prefill_forward
+    handle.environ = environ
     vars(model)[HANDLE_ATTR] = handle
     if merged:
         vars(model)[MERGED_ATTR] = True

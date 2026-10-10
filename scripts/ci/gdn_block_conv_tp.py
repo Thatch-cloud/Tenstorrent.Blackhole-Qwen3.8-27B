@@ -134,8 +134,10 @@ def stage(mesh, projected, groups, packed_windows, taps, dt_bias, neg_exp_A, ope
             # QWEN_FAST_TP4_CONV_GATES_SPREAD (F1, gdn_conv_gates_spread): the same launch with the gate tiles on cores of their own; None
             # (one logged line) when it cannot take the call, and then this is the served call below. Unset, none of this runs.
             import gdn_conv_gates_spread
+            import w2_switch
 
-            if gdn_conv_gates_spread.enabled():
+            # The W2 kill switch (w2.off) on the hub mount at the attach leaves the served conv-gates call in place (w2_switch.attach_off logs it).
+            if gdn_conv_gates_spread.enabled() and not w2_switch.attach_off():
                 spread = gdn_conv_gates_spread.launch(operations, mesh, canon, block_windows, taps, dt_bias, neg_exp_A, rows,
                                                       found.gdn_qkv, found.gdn_a_col, found.gdn_b_col, held, spread_entries)
         if spread is None:

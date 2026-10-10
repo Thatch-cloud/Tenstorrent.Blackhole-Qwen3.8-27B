@@ -19,6 +19,7 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import make_kvread_profiles as kvread_twins  # noqa: E402
 import make_octo_profiles as octo_twins  # noqa: E402
 import make_parked_profiles as twins  # noqa: E402
 import serving_c2_contract as contract  # noqa: E402
@@ -241,11 +242,22 @@ class ProfileTests(unittest.TestCase):
         generated = {name for name, parent, env, why in twins.specs()}
         # the octo-T8 twins of the engine-reuse parent carry its flags by inheritance (test_octo_profiles holds each as that parent plus its own flags)
         generated |= {name for name, parent, env, third, why in octo_twins.specs() if parent == octo_twins.PARKED_PARENT}
+        # the W2 kill drill twin of the ship profile carries the parked flags by inheritance (test_w2_switch holds it as that parent plus its two names)
+        import make_w2_kill_profiles
+
+        generated |= set(make_w2_kill_profiles.twin_names())
+        # the region-read audit twins (make_kvread_profiles; test_kvread_profiles holds each as its parent plus one flag) carry their parent's flags by inheritance
+        region_read = {twin: parent for parent, twin, mode in kvread_twins.TWINS}
         for name, profile in profiles.items():
             env = profile['env']
             named = [flag for flag in env if flag.startswith('QWEN_FAST_PARKED_') or flag in ('QWEN_FAST_GATE_DRAM_BALLAST', 'QWEN_FAST_LEVERN_BUILD_MS')]
             with self.subTest(profile=name):
-                if name in generated:
+                if name in region_read:
+                    parent_env = profiles[region_read[name]]['env']
+                    self.assertEqual(sorted(named), sorted(flag for flag in parent_env if flag.startswith('QWEN_FAST_PARKED_')
+                                                           or flag in ('QWEN_FAST_GATE_DRAM_BALLAST', 'QWEN_FAST_LEVERN_BUILD_MS')),
+                                     'a region-read twin names exactly its parent\'s engine-reuse flags')
+                elif name in generated:
                     self.assertTrue(named or name.endswith('-r2'))
                 elif 'owner_traffic_waiver' in profile:
                     # the ship candidate (test_ship_ln_w2_er): the -parked twin's three flags on TRAFFIC, the two parked switches named by its owner waiver

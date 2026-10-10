@@ -92,6 +92,7 @@ import round_host
 import stall_watch
 import trace_census
 import verifier_engine
+import w2_switch
 from verify_prestage import entry_line, hostgap_log_enabled
 
 # Under QWEN_FAST_PACKED_AUDIT=1, one line per user per round for the token-exact gate
@@ -327,6 +328,9 @@ def proposal_rows(block, requests):
     for key in order:
         matched, group = members[key]
         shape = matched.shape
+        if w2_switch.routes_sequential(matched):
+            # The W2 kill switch (w2.off) latched: the round is drafted at the engines' own widths for the exact sequential step.
+            return None
         padded = len(group) != shape.users and pads(matched, len(group))
         if len(group) != shape.users and not padded:
             return None
@@ -393,6 +397,8 @@ def block_rows_for(block, group):
     """`proposal_rows`' decision for ONE block over its own live members: the block's rows per user, or None. See
     proposal_rows for each condition; this is the body of its per-block loop."""
     shape = block.shape
+    if w2_switch.routes_sequential(block):
+        return None
     padded = len(group) != shape.users and pads(block, len(group))
     if len(group) != shape.users and not padded:
         return None
@@ -850,6 +856,9 @@ def octo_serves(octo, entries):
 
 def ineligible(entries, block):
     """Why the block cannot serve this round as one pass, or None when it can."""
+    if w2_switch.routes_sequential(block):
+        # The W2 kill switch (w2.off): the packed block's traces carry W2, so the round goes to the sequential step (the served SDPA and conv gates).
+        return w2_switch.REASON
     shape = block.shape
     padded = len(entries) != shape.users and pads(block, len(entries))
     if len(entries) != shape.users and not padded:
@@ -1067,6 +1076,7 @@ def run_verified_block(entries, *, cancelled, block):
         # buffers the first round allocates lazily (packed proposals, publication).
         memory_ledger.first_packed_round(packed_block=block, round_requests=[entry['request'] for entry in entries])
         round_host.ledger.note_commit((time.perf_counter() - verified) * 1000)
+        w2_switch.note_round(block)
         return outputs
     except BaseException:
         fail_round(entries, block)
