@@ -402,13 +402,8 @@ if [ $# -gt 1 ]; then
 fi
 
 CHECKOUT=$(cd "$S/../../.." && pwd)
-for dir in sdpa_decode_slice sdpa_decode_qwen sdpa_prefill_chain; do
-  test -d "$S/../$dir" || { echo "refusing: $S/../$dir missing (the checkout carries k64j and its siblings)" >&2; exit 1; }
-done
-SL=$(cd "$S/../sdpa_decode_slice" && pwd)
-DS=$(cd "$S/../sdpa_decode_qwen" && pwd)
+test -d "$S/../sdpa_prefill_chain" || { echo "refusing: $S/../sdpa_prefill_chain missing (the checkout carries k64j and sdpa_prefill_chain beside this directory)" >&2; exit 1; }
 PS=$(cd "$S/../sdpa_prefill_chain" && pwd)
-KS=$DS/stage3
 KJ=$K64J_DIR/kernels
 PATCHER=$S/apply_factory_ps.py
 ADMISSION=$CHECKOUT/scripts/ci/packed_any_admission.py
