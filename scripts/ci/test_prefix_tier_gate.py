@@ -668,6 +668,14 @@ class EndToEndTests(unittest.TestCase):
                 self.assertEqual(arm['verdict'], verdict, arm['lines'][-8:])
                 self.assertTrue(any(expect in text for text in arm['problems'] + arm['not_exercised']), (arm['problems'], arm['not_exercised']))
 
+    def test_the_continuations_line_counts_the_salted_hits_and_not_the_cold_twins_that_miss_by_design(self):
+        result, _, _ = run_tiers('tier-timed', self.results)
+        lines = self.arm(result, 'tier-timed')['lines']
+        counted = [line for line in lines if line.startswith('continuations restored: ')]
+        self.assertEqual(len(counted), 1)
+        restored, served = counted[0][len('continuations restored: '):].split(' of ')
+        self.assertEqual((restored, served), ('6', '6'), 'a resident hit and a returning hit per size, all restored; the three cold twins are not continuations of a salt')
+
     def test_the_results_directory_keeps_the_arms_logs_and_the_derived_profile_of_the_timed_arm(self):
         run_tiers('tier-timed', self.results)
         arm_dir = os.path.join(self.results, 'tier-timed')

@@ -1736,7 +1736,9 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None):
             problems += more_problems
             missing += more_missing
             lines += more_lines
-        continued = [r for r in records if r.get('continuation') and r.get('ok')]
+        # The salted continuations only: a cold twin is a continuation of the same prompt under a FRESH salt, which can never hit (T3: 'restored 6 of 9' was the
+        # six salted hits and the three cold twins that miss by design).
+        continued = [r for r in records if r.get('continuation') and r.get('ok') and r.get('role') not in judge.FRESH_ROLES]
         restored = [r for r in continued if q_of(r)]
         lines.append('continuations restored: %d of %d' % (len(restored), len(continued)))
         if continued and not restored:

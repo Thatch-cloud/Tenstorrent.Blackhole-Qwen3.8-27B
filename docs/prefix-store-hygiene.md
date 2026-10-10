@@ -229,7 +229,9 @@ At Q1's device rates (4,096 blocks) one 254k session's spill reads in about 0.65
 0.34 s and 0.20 s), on top of the host column above and not overlapped with it. Measured end to end in T2 (below), the spill ran at
 1.28 GB/s (512-block flushes of 1.14 GB in about 0.89 s: the slab's first fill, page-fault bound as the CPU bench predicted, so about 3.6 s for
 a 128k session and 6.9 s for a 254k one while the slab is still filling) and the audited restore at 0.92-0.97 GB/s (about 4.8 s and 9.3 s), most of
-which is the digest of every block (`verify=all`, 1.5 GB/s) and the read-back, not the device; the timed arm's `sample` restore is T3's figure.
+which is the digest of every block (`verify=all`, 1.5 GB/s) and the read-back, not the device. With the audits off (`verify=sample`, T3 below) the
+restore of a 128k session ran at 4.8 GB/s and of a 254k one at 8.9 GB/s (8.56 GB in 0.96 s), and the spill of a full tier (resident slab slots, not
+the first fill) at 5.6 GB/s over 58,115 blocks.
 
 So the cost of a returning 254k turn is dominated by two device transfers of about 8.8 GB (the restore, and the spill of the
 blocks it displaces from a full pool, which happens in the same step), the digest check if `all` is on, and then the tail
@@ -270,6 +272,25 @@ checkpoint store's own eviction counters moved. The job pack, its order and its 
   719 blocks not spilled for the per-step cap and 715 as useless. The tier's kill switch latched it (`tier_latched` 1) and the next turn was
   exact. 39 checkpoints stored preconverted, 8 restores compared on the card, all equal. The arm took 823.5 s. Like T1 it failed only on the
   multi SDPA audit's passing-line rule (the same fix); nothing else was found.
+
+* T3, `tier-timed` (audits off, `verify=sample`): PASS in 1,774 s, the restored answer IDENTICAL to its cold twin at L=250,919. Per size (a cold
+  prefill / a device-resident hit / the returning hit after the session left the device pool):
+
+  | Session | Cold prefill TTFT | Resident hit | Returning hit (restored) | Restore | Spilled in the same request |
+  |---|---|---|---|---|---|
+  | 32k (L=35,377, Q=30,720) | 8.32 s | 3.46 s | 3.83 s | 481 blocks, 1.07 GB, 612 ms (1.75 GB/s) | 2.35 GB, 865 ms |
+  | 128k (L=131,149, Q=126,976) | 37.59 s | 4.25 s | 4.08 s | 1,985 blocks, 4.42 GB, 923 ms (4.79 GB/s) | 1.14 GB, 236 ms |
+  | 254k (L=250,919, Q=245,760) | 96.00 s | 4.65 s | 6.49 s | 3,841 blocks, 8.56 GB, 961 ms (8.90 GB/s) | 1.14 GB, 142 ms |
+
+  So a session that left the device pool comes back in 3.8 s (32k), 4.1 s (128k) and 6.5 s (254k) of first-token time against 8.3, 37.6 and 96.0 s
+  to prefill it again (2.2x, 9.2x and 14.8x), and within 0.4 s (32k) to 1.8 s (254k) of a hit that never left the device. The small restore is
+  not at line rate (fixed costs and a slab not yet resident); the large ones are. Floods: 12 x ~120k tokens (1,438,814) over the 1,277,952-token
+  pool per cycle. The tier ended full (`tier_bytes` = its 24 GiB cap, 11,565 blocks) after 58,115 blocks (129.5 GB) spilled in 309 flushes
+  (22.9 s), 46,550 records evicted by its own policy and 6,307 blocks (14.05 GB, 3 requests) restored; no failure, digest or refusal counter
+  moved, 394 digest checks (`sample`), 62,782 checkpoints kept and 33 dropped, 47 stored preconverted. The cold twins ran after the timed
+  requests, with the tier full, so their TTFTs (7.8, 37.0 and 97.4 s) include the spill of what they displaced. "Continuations restored 6 of 9"
+  was the six salted hits (one resident and one returning per size, all restored) and the three cold twins, which are a continuation of the same
+  prompt under a fresh salt and miss by design; the line now counts the salted ones only.
 
 ### Not done
 
