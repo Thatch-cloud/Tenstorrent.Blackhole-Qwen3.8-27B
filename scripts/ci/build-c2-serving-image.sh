@@ -21,6 +21,7 @@
 #   Optional env: C2_DRAFTER_MANIFEST (the drafter checkpoint the image serves: a name under
 #   scripts/ci/references/drafter-manifests, default dedf8df6 = the served drafter; any other name needs its fixtures staged by
 #   drafter_stage.py under $fixtures and lays a DRAFTER_MANIFEST marker beside them),
+#   Optional env: C2_KVREAD_DIR (the region-read extension's build directory, default /home/thatch/opgraft-KVR2: version 2, pinned below),
 #   Optional env: C2_CHECKOUT (a checkout to compare the image's trees with, informational),
 #   C2_PROVENANCE_REPORT (where to write the provenance JSON).
 #   The graft is K64j (S2, design W9): its _ttnncpp.so must be $graft_sha, and G1 holds every
@@ -37,14 +38,20 @@ revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
 graft=/home/thatch/opgraft-K64j
 graft_name=opgraft-K64j
 graft_sha=152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7
-kvread=/home/thatch/opgraft-KVR
+# The region-read extension, version 2 (the raw block ops of the host KV tier): its build directory on the rig is opgraft-KVR2, beside the version 1 build
+# (opgraft-KVR) that other branches still pin and mount, which this script neither reads nor writes. C2_KVREAD_DIR names another directory under /home/thatch.
+# Inside the image and the context the directory is still called opgraft-KVR (kvread_name): that is where the Dockerfile and the provenance check look.
+kvread=${C2_KVREAD_DIR:-/home/thatch/opgraft-KVR2}
 kvread_name=opgraft-KVR
-kvread_sha=5b2ad8d72bf134f1ef6413994d2b75511779660555cf0251d2b132773dcbdd8a
+kvread_sha=a80db6d93587e70a3214e58b30683f61782d50204e04c58f90cf5c7c1664ec4c
 previous_graft=/home/thatch/opgraft-K64i
 previous_graft_sha=cf54d716669be6b71f1d627e74892c90f562495dc9500589408a72b4ddccf4a4
 fixtures=/home/thatch/.cache/qwen-experiments
 models=/home/thatch/hf-cache/hub
 ctx=/home/thatch/c2-serving-ctx
+
+case "$kvread" in /home/thatch/*) ;; *) echo "C2_KVREAD_DIR $kvread is not a directory under /home/thatch" >&2; exit 2 ;; esac
+case "$kvread" in *..*|*[!A-Za-z0-9._/-]*) echo "C2_KVREAD_DIR $kvread is not a plain path" >&2; exit 2 ;; esac
 
 self=$(readlink -f "${BASH_SOURCE[0]}")
 case "$self" in

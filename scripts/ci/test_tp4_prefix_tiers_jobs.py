@@ -85,6 +85,17 @@ class PackTests(unittest.TestCase):
         outputs = parsed('B0-build')
         self.assertEqual((outputs['actions'], outputs['bake_default_profile'], outputs['profile']), ('build', '', 'c2-packed-tp4'))
 
+    def test_b0_names_no_path_and_the_build_reads_the_version_2_directory_by_default(self):
+        values = [line for line in (PACK / 'B0-build.env').read_text(encoding='utf-8').splitlines() if line.strip() and not line.startswith('#')]
+        self.assertEqual(values, ['C2_CARDS=quad', 'C2_ACTIONS=build', 'C2_IMAGE_TAG=%s' % TAG, 'C2_PROFILE=c2-packed-tp4'])
+        self.assertFalse([line for line in values if '/' in line], 'no path in the job env')
+        script = (HERE / 'build-c2-serving-image.sh').read_text(encoding='utf-8')
+        self.assertIn('kvread=${C2_KVREAD_DIR:-/home/thatch/opgraft-KVR2}', script)
+        self.assertIn('kvread_name=opgraft-KVR', script)
+        sha = pin_kvread.current_pin()
+        for name in pin_kvread.PIN_SITES:
+            self.assertIn(sha, (ROOT / name).read_text(encoding='utf-8'), name)
+
     def test_x0_and_z_never_start_stop_or_hand_back_the_agent(self):
         for name in ('X0-status-rescan-reset', 'Z-reset'):
             actions = parsed(name)['actions'].split()
@@ -132,7 +143,7 @@ class PackTests(unittest.TestCase):
 
     def test_the_headers_say_what_is_read_and_the_order_says_what_is_not_done_and_the_extension_is_unqualified(self):
         text = (PACK / 'ORDER.txt').read_text(encoding='utf-8')
-        for phrase in ('NEEDS A1 <- Q1', 'NO-GO', 'NEVER COMPILED OR RUN ON A CARD', 'pin_kvread.py', 'build_kv_read.sh', 'tier_image_problems', 'UNQUALIFIED',
+        for phrase in ('NEEDS A1 <- Q1', 'NO-GO', 'NEVER RUN ON A CARD', 'pin_kvread.py', 'build_kv_read.sh', 'opgraft-KVR2', 'tier_image_problems', 'UNQUALIFIED',
                        'NO agentstart', 'NOT_EXERCISED', 'docs/prefix-store-hygiene.md'):
             self.assertIn(phrase, text)
         for name in ('T1-tier-attach', 'T2-tier-returning', 'T3-tier-timed-restore'):
@@ -175,27 +186,42 @@ class PinTests(unittest.TestCase):
         (self.tree / 'build.sh').write_text('kvread_sha=%s\n' % self.old)
         (self.tree / 'prov.py').write_text("KVREAD_SHA256 = '%s'\n" % self.old)
         (self.tree / 'unrelated.txt').write_text('nothing here\n')
+        (self.tree / 'history.md').write_text('the version 1 build was %s\n' % self.old)
         self.out = []
 
+    SITES = ('docker/Dockerfile', 'build.sh', 'prov.py')
+
     def run_main(self, *extra, **kwargs):
-        return pin_kvread.main(['--dir', str(self.build)] + list(extra), root=self.tree, out=self.out.append, pin=self.old, cpp=self.cpp, **kwargs)
+        return pin_kvread.main(['--dir', str(self.build)] + list(extra), root=self.tree, out=self.out.append, pin=self.old, cpp=self.cpp,
+                               sites=kwargs.pop('sites', self.SITES), **kwargs)
 
     def test_a_dry_run_names_the_files_and_changes_nothing(self):
         self.assertEqual(self.run_main(), 0)
         self.assertIn('3 files', self.out[0])
         self.assertIn('(dry run', self.out[-1])
+        self.assertNotIn('history.md', self.out[0])
         self.assertIn(self.old, (self.tree / 'build.sh').read_text())
 
-    def test_write_moves_every_occurrence_and_leaves_other_files_alone(self):
+    def test_write_moves_the_enforcing_sites_and_leaves_the_files_that_quote_the_old_hash_as_history(self):
         self.assertEqual(self.run_main('--write'), 0, self.out)
-        for name in ('docker/Dockerfile', 'build.sh', 'prov.py'):
+        for name in self.SITES:
             text = (self.tree / name).read_text()
             self.assertIn(self.new, text, name)
             self.assertNotIn(self.old, text, name)
         self.assertEqual((self.tree / 'unrelated.txt').read_text(), 'nothing here\n')
+        self.assertIn(self.old, (self.tree / 'history.md').read_text(), 'a file that describes the version 1 build stays true')
+        self.assertTrue(any('left alone' in line and 'history.md' in line for line in self.out), self.out)
+        self.assertIn('3 files', self.out[0])
+        self.assertNotIn('history.md', self.out[0])
         self.out[:] = []
-        self.assertEqual(self.run_main('--write'), 0, 'a second run finds no file with the old pin')
-        self.assertIn('in 0 files', self.out[0])
+        self.assertEqual(self.run_main('--write'), 1, 'with the stale pin, a second run finds the sites already moved and says so instead of passing')
+        self.assertTrue(any('should carry the old pin' in line for line in self.out), self.out)
+
+    def test_a_pin_site_that_no_longer_carries_the_pin_is_refused_not_skipped(self):
+        (self.tree / 'prov.py').write_text('KVREAD_SHA256 = None\n')
+        self.assertEqual(self.run_main('--write'), 1)
+        self.assertTrue(any('prov.py should carry the old pin' in line for line in self.out), self.out)
+        self.assertIn(self.old, (self.tree / 'build.sh').read_text(), 'nothing is rewritten when a site is missing')
 
     def test_a_build_that_is_already_the_pin_moves_nothing(self):
         code = pin_kvread.main(['--dir', str(self.build), '--write'], root=self.tree, out=self.out.append, pin=self.new, cpp=self.cpp)
@@ -227,7 +253,7 @@ class PinTests(unittest.TestCase):
         old = pin_kvread.current_pin()
         files = pin_kvread.tracked_files(ROOT, old)
         names = {str(path.relative_to(ROOT)) for path in files}
-        for expected in ('docker/qwen-c2-serving.Dockerfile', 'scripts/ci/build-c2-serving-image.sh', 'scripts/ci/c2_image_provenance.py', 'scripts/ci/test_c2_image_overlay.py'):
+        for expected in pin_kvread.PIN_SITES:
             self.assertIn(expected, names)
 
 

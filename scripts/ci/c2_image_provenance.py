@@ -88,11 +88,11 @@ GRAFT_OP_DIRS = (
 )
 GRAFT_IN_IMAGE = '/opt/qwen-c2/' + GRAFT_NAME
 # (g) The prefix audit's region read: qwen_kv_read.so, a standalone extension (optimisation/ttnn-op/kv_region_read/build_kv_read.sh) that
-# REPLACES NOTHING. The context carries ~/opgraft-KVR as KVREAD_NAME; the Dockerfile's own RUN pins its sha, installs a .pth for it and
+# REPLACES NOTHING. The context carries the extension's directory (~/opgraft-KVR2 from version 2) as KVREAD_NAME; the Dockerfile's own RUN pins its sha, installs a .pth for it and
 # imports it with no device. G1 holds the image's copy to the context's, and the three pinned binaries (a) to the graft's.
 KVREAD_NAME = 'opgraft-KVR'
 KVREAD_FILE = 'qwen_kv_read.so'
-KVREAD_SHA256 = '5b2ad8d72bf134f1ef6413994d2b75511779660555cf0251d2b132773dcbdd8a'
+KVREAD_SHA256 = 'a80db6d93587e70a3214e58b30683f61782d50204e04c58f90cf5c7c1664ec4c'
 KVREAD_IN_IMAGE = '/opt/qwen-c2/' + KVREAD_NAME
 # Literals the graft's _ttnncpp.so must carry: the [QWEN-SDPA] factory branches the served modes need (F4
 # flags, F9 KV share, F18 q-slice, F22 K64j's runtime extent) and the tree-scratch patch's variable.
@@ -483,7 +483,7 @@ def check_kvread(context, image_files):
     path = Path(context) / KVREAD_NAME / KVREAD_FILE
     if not path.is_file():
         return ['(g) the context has no %s/%s: the image would have no region read for the prefix audit '
-                '(build-c2-serving-image.sh copies ~/opgraft-KVR)' % (KVREAD_NAME, KVREAD_FILE)], []
+                '(build-c2-serving-image.sh copies the extension directory, ~/opgraft-KVR2 from version 2)' % (KVREAD_NAME, KVREAD_FILE)], []
     problems, host = [], c2_overlay.sha256(path)
     if host != KVREAD_SHA256:
         problems.append('(g) the context\'s %s is %s, not the pinned build %s' % (KVREAD_FILE, host, KVREAD_SHA256))

@@ -7,7 +7,8 @@ The extension (optimisation/ttnn-op/kv_region_read/build_kv_read.sh) is pinned b
 the overlay test, so an image never bakes bytes nobody built and checked. Version 2 (the raw block read and write of the host KV tier) is a new build with a new hash;
 this moves all four in one command instead of four hand edits at the start of a card window. It refuses a build that is not this checkout's source (the directory's copy
 of qwen_kv_read.cpp must be byte-identical to the checkout's), that has no MANIFEST.sha256 (the build writes it only after every check passed) or whose binary does not
-carry the four op names (version 1 has no raw ops). Every file that carries the old pin is rewritten, documentation included, so the pin stays one value everywhere.
+carry the four op names (version 1 has no raw ops). Only the four files that ENFORCE the pin are rewritten (PIN_SITES); the files that merely quote the old hash - the version 1 qualification pack and the audit-cost
+note, which describe the version 1 build - are listed and left alone, so they stay true.
 """
 
 import argparse
@@ -25,6 +26,8 @@ OP_NAMES = (b'qwen_read_blocks', b'qwen_read_blocks_raw', b'qwen_write_blocks_ra
 EXTENSION = 'qwen_kv_read.so'
 SOURCE = 'qwen_kv_read.cpp'
 MANIFEST = 'MANIFEST.sha256'
+# The files that enforce the pin: the image build's RUN, the build script, the provenance check (g) and the overlay test that holds the three equal.
+PIN_SITES = ('docker/qwen-c2-serving.Dockerfile', 'scripts/ci/build-c2-serving-image.sh', 'scripts/ci/c2_image_provenance.py', 'scripts/ci/test_c2_image_overlay.py')
 
 
 def sha256_of(path):
@@ -95,7 +98,7 @@ def current_pin():
     return c2_image_provenance.KVREAD_SHA256
 
 
-def main(argv=None, root=ROOT, out=print, pin=None, cpp=CPP):
+def main(argv=None, root=ROOT, out=print, pin=None, cpp=CPP, sites=PIN_SITES):
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--dir', required=True, help='the build directory (build_kv_read.sh writes ~/opgraft-KVR by default)')
     parser.add_argument('--write', action='store_true', help='rewrite the files (default: say what would change)')
@@ -113,13 +116,21 @@ def main(argv=None, root=ROOT, out=print, pin=None, cpp=CPP):
     if new == old:
         out('the build is already the pinned one (%s): nothing to move' % new)
         return 0
-    files = tracked_files(root, old)
+    carrying = tracked_files(root, old)
+    files = [path for path in carrying if str(path.relative_to(root)) in sites]
+    quoting = [path for path in carrying if path not in files]
     out('%s -> %s in %d files: %s' % (old[:12], new[:12], len(files), ', '.join(str(path.relative_to(root)) for path in files)))
+    if quoting:
+        out('left alone (they quote the old hash as history): %s' % ', '.join(str(path.relative_to(root)) for path in quoting))
+    missing = [site for site in sites if not any(str(path.relative_to(root)) == site for path in files)]
+    if missing:
+        out('refused: %s should carry the old pin and does not: the pin sites have moved, update PIN_SITES' % ', '.join(missing))
+        return 1
     if not options.write:
         out('(dry run: --write rewrites them)')
         return 0
     rewrite(files, old, new)
-    left = tracked_files(root, old)
+    left = [path for path in tracked_files(root, old) if path in files]
     if left:
         out('refused: the old pin is still in %s' % ', '.join(str(path) for path in left))
         return 1

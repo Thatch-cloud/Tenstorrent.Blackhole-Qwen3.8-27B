@@ -6,6 +6,10 @@ The device-side region read is now BUILT, as a standalone extension (`optimisati
 symbols resolves against the image's own libraries. NO CARD HAS RUN IT: until the QUALIFY job (`Q1-kvread-qualify`, `references/tp4-kvread-jobs`) has printed `KV_READ_PROBE verdict=PASS` on the four cards, the read is unqualified.
 Nothing here ran on cards.
 
+**Version 2 (2026-10-10, tp4/prefix-tiers).** The same extension gained the raw block ops of the host KV tier (`ttnn.qwen_read_blocks_raw`, `qwen_write_blocks_raw`, `qwen_block_bytes`; `docs/prefix-store-hygiene.md`). It is a different file with its own hash, built into its own
+directory on the rig (`~/opgraft-KVR2`, beside the version 1 build that earlier packs pin and mount), and `scripts/ci/pin_kvread.py` moved the four pin sites (the Dockerfile, `build-c2-serving-image.sh`, `c2_image_provenance.py`, `test_c2_image_overlay.py`) to it. The hash quoted above and in the
+version 1 packs is the version 1 build, which is still true of the directory it names. `build-c2-serving-image.sh` reads `~/opgraft-KVR2` by default (`C2_KVREAD_DIR` names another) and the image still calls the directory `opgraft-KVR`.
+
 **What stops the pack running without the graft.** The W-1 numbers below (P1ab-LN 120/240) assume the graft. `c2_prefix_gate` REFUSES an `exactness-shared` plan
 before any container boots (exit 2, `refused: ...`) when the image's anchor probe (`docker run --network none`, no devices) finds no `ttnn.qwen_read_blocks` (it imports `qwen_kv_read` first), cannot
 import ttnn, or finds the served `model.py` off this checkout's `PATCHED_SHA256` (an image built before the narrowed audit; B0 skips a tag that exists).

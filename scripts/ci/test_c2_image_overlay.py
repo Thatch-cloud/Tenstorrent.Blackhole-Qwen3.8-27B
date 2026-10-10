@@ -1226,14 +1226,23 @@ class ProvenanceTests(unittest.TestCase):
     def test_the_extension_pin_is_one_value_in_the_dockerfile_the_build_script_and_g1(self):
         dockerfile = (ROOT / 'docker' / 'qwen-c2-serving.Dockerfile').read_text(encoding='utf-8')
         script = (ROOT / 'scripts' / 'ci' / 'build-c2-serving-image.sh').read_text(encoding='utf-8')
-        sha = '5b2ad8d72bf134f1ef6413994d2b75511779660555cf0251d2b132773dcbdd8a'
+        sha = 'a80db6d93587e70a3214e58b30683f61782d50204e04c58f90cf5c7c1664ec4c'
         self.assertEqual(provenance.KVREAD_IN_IMAGE, '/opt/qwen-c2/opgraft-KVR')
         self.assertIn('COPY opgraft-KVR/ /opt/qwen-c2/opgraft-KVR/', dockerfile)
         self.assertIn('= %s' % sha, dockerfile)
         self.assertIn('import ttnn, qwen_kv_read; assert callable(ttnn.qwen_read_blocks)', dockerfile)
+        # version 2: the build fails if the baked module lacks the host tier's raw ops, whatever the pin says
+        for op in ('qwen_read_blocks_raw', 'qwen_write_blocks_raw', 'qwen_block_bytes'):
+            self.assertIn("'%s'" % op, dockerfile.split('COPY opgraft-KVR/')[1].split('\n\n')[0])
         self.assertIn('kvread_sha=%s' % sha, script)
         self.assertIn('cp -al "$kvread" "$ctx/$kvread_name"', script)
         self.assertIn('kvread_name=%s' % provenance.KVREAD_NAME, script)
+        # the version 2 build lives in its own directory: the version 1 one (which other branches pin and mount) is neither read nor written by this build,
+        # the override is a plain path under the home, and the name inside the context and the image does not change with the host directory
+        self.assertIn('kvread=${C2_KVREAD_DIR:-/home/thatch/opgraft-KVR2}', script)
+        self.assertNotIn('kvread=/home/thatch/opgraft-KVR\n', script)
+        self.assertIn('C2_KVREAD_DIR $kvread is not a plain path', script)
+        self.assertEqual(provenance.KVREAD_NAME, 'opgraft-KVR')
         # the layer replaces nothing: the pinned libraries are re-checked after it
         layer = dockerfile[dockerfile.index('COPY opgraft-KVR/'):]
         for pinned in ('152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7', '3f5a3d585b46b2bef7d7d2c6c34b88d7f4efb679ec051fb4da615f6ec9ccc9ce'):
