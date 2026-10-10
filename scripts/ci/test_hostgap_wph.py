@@ -95,18 +95,26 @@ class TwinTests(unittest.TestCase):
             'wph-all-async-audit': {DIFF: '1', DIFF_AUDIT: '1', FULL_AUDIT: '1', LEAN: '1', LEAN_AUDIT: '1', READS: 'async', READS_AUDIT: '1'},
             'wph-log': {LOG: '1', PROBE: '1'},
         }
+        # Since the integrator put the three levers into the combined arm itself (reads at async), a composition twin is that arm with its flags set to ITS values: what it adds to
+        # the combined arm is only what differs from it (the WPH.json facts above are the pre-merge ones, held by test_the_manifest_names...).
         for name, expected in wanted.items():
             with self.subTest(name=name):
                 found, removed = added(name)
-                self.assertEqual((found, removed), (expected, []))
+                self.assertEqual((found, removed), ({flag: value for flag, value in expected.items() if PROFILES[COMBINED]['env'].get(flag) != value}, []))
                 self.assertTrue(PROFILES[BASE + 'fx-' + name]['gate_only'])
                 self.assertNotIn('owner_traffic_waiver', PROFILES[BASE + 'fx-' + name])
         self.assertEqual(set(wanted) - {item for item in wanted}, set())
 
-    def test_the_combined_arm_does_not_carry_a_wph_flag_yet(self):
+    def test_the_combined_arm_carries_the_three_wph_levers_and_no_audit_and_no_instrument(self):
         env = PROFILES[COMBINED]['env']
-        for flag in (DIFF, DIFF_AUDIT, LEAN, LEAN_AUDIT, READS, READS_AUDIT, LOG, PROBE):
+        self.assertEqual((env[DIFF], env[LEAN], env[READS]), ('1', '1', 'async'))
+        for flag in (DIFF_AUDIT, LEAN_AUDIT, READS_AUDIT, FULL_AUDIT, LOG, PROBE):
             self.assertNotIn(flag, env)
+        audited = PROFILES[COMBINED + '-audit']['env']
+        for flag in (DIFF_AUDIT, LEAN_AUDIT, READS_AUDIT, FULL_AUDIT):
+            self.assertEqual(audited[flag], '1', flag)
+        for flag in (LOG, PROBE):
+            self.assertNotIn(flag, audited)
         for flag in ('QWEN_FAST_TP4_ROUND_HOST_KEYED', 'QWEN_FAST_TP4_PRESTAGE_BLOCK_EPOCHS', 'QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE'):
             self.assertEqual(env[flag], '1', 'the levers are timed against an arm that has the per-block epochs and the keyed write')
 
@@ -115,6 +123,9 @@ class TwinTests(unittest.TestCase):
             if profile.get('gate_only') is True:
                 continue
             for flag in (DIFF, LEAN, READS, PROBE):
+                if name in generator.ship_names() and flag != PROBE:
+                    self.assertEqual(profile['env'][flag], PROFILES[COMBINED]['env'][flag], name)        # the ship candidate is the combined arm as a traffic profile
+                    continue
                 self.assertNotIn(flag, profile['env'], name)
 
 
