@@ -29804,8 +29804,8 @@
         "evidence": [
           "op-fusion audited attach of the combined arm FXA on tp4-fusion-4, run 38063466256: every lever engaged, 1,148 lever audits exact=True, 0 mismatches, 1,276 round-host audits equal=1, no crash",
           "op-fusion timed pairs, control against levers at eight live (runs 38064345460, 38064674222, 38064938406, 38065338924): round median 150 to 131 ms and 149 to 129 ms, control-to-control floors -1 and -2 ms",
-          "host-gap levers WPH-1 to WPH-3 on the combined arm, audited attach H5 on tp4-fusion-3 (run 38066920769): pre-stage diff 877 audits, lean write_packed 1,727, batched reads 101, every one exact=True with 0 mismatches, no fell back, no crash",
-          "host-gap levers timed against the combined arm (H6 control, H7 levers; runs 38067398179 and 38067865259): round median 131 to 126 ms (-5.45 ms, 267 matched rounds); the repeat pair is running",
+          "host-gap levers WPH-1 to WPH-3 on the combined arm, audited attach H5 on tp4-fusion-3 at tp4/fx-wph 87bc574e (run 38066920769): pre-stage diff 877 audits, lean write_packed 1,727, batched reads 101, every one exact=True with 0 mismatches, no fell back, no crash",
+          "host-gap levers timed against the combined arm (H6 control, H7 levers, at 87bc574e; runs 38067398179 and 38067865259): round median 131 to 126 ms (-5.45 ms, 267 matched rounds); the repeat pair is running",
           "K/V page writer proof, run 38048791849: page=PASS, 1,976 of 1,976 exact; its negative controls fail as they must (runs 38049235214 and 38049283989, page=FAIL)",
           "MLP configuration g3u4d3, run 38043752440: the composed gate, up and down chain 170.4 to 162.1 us per layer, exact",
           "shard argmax tree fold (card-M probe C1): 995 to 165 us at 64 rows, exact; drafter permutation (probe P7): 30 of 30 sections exact, quad K+V 750 to 116 us per layer",

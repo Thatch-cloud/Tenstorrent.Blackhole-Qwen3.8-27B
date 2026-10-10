@@ -356,6 +356,8 @@ def render_ship_order(rows, plan, spec):
         "tested-image rule (the gates run the B0 image, the exact base the production layer is built on) holds for the final run.",
         "# P0. Push ONE tag at a time and wait for its run to finish (the workflow keeps one pending run; a queued tag is cancelled). No other window driver is alive. CI PAUSED from G1 to SR (the skew is timed). "
         "Never cancel a running card job. The cards are 13x10: read the grid from the run.",
+        "# READ NOTE: card jobs run in a container with a CPU quota and no core pinning, while the production serving container is pinned and unthrottled, so host-bound gains (the round-host and the host-gap levers) measured in "
+        "a card job are likely PESSIMISTIC against production.",
         "# B0 builds; the operator builds the production thin layer on the B0 image between B0 and G1 (no card job may run during that build); G1, GX0, GX1 and G2 gate the base on the cards; SR replays the agent's "
         "serving sequence on the thin layer itself (the bytes production will run). C2_TELEMETRY=1 is on every job whose action supports it (the smoke and gate steps: G1, GX0, GX1); the prefix, replay and build steps have none.",
         "# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.",
