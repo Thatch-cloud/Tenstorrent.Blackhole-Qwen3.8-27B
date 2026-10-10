@@ -1,0 +1,51 @@
+# The order of the tp4/next-2 four-card window: ONE image (tp4-next2-1, built by B0 from tp4/next-2 = tp4/octo-2 + tp4/prod-fixes) for the prod-fixes card jobs: the W2 kill-switch drill (docs/tp4-w2-kill-switch.md),
+# the region-read qualification (docs/prefix-audit-cost.md) with the audited engine-reuse pair at its cost, and the prompt-lookup tau arm (docs/tp4-lookup.md, docs/drafter-arms.md). The octo-2 levers have their own pack
+# (tp4-octo2-jobs, same branch): this pack re-points only the prod-fixes jobs and adds nothing of octo-2's.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (dependents are skipped by the NEEDS lines below; every card job begins with a reset). Here only the build and the
+#     status/rescan stop the window: the source packs' own stop classes (K-W2a/K-W2b, Q1, Q2) are soft in this combined window because each failure already skips exactly what depends on it.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z (the cutover pack's steps and post-checks; nothing in this pack does either, and no job here starts or hands back the agent).
+#     B0 is a build and may run while production serves. No other window driver may be alive and no privileged builder container up.
+# P0. The CPU suite is green on the pushed tp4/next-2 head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and the tag is pushed on THAT commit. Push ONE tag at a time and wait for its run to finish (the workflow keeps one pending run;
+#     queued tags are cancelled). Never cancel a running card job. No w2.off, levern.off, prefix-reuse.off or parked.off file on the hub mount.
+# P0. The placeholder tag tp4-next2-1 in every template is the tag B0 builds (sed -i 's/tp4-next2-1/<tag>/' *.env). A commit of a file the image carries needs a new B0 build and a new tag in every template.
+# P0. D-T5 (the prompt-lookup tau arm) carries C2_TAULAB_PAIR_CONTROL=@CONTROL_RUN@: the job reader refuses the template until the placeholder is the digits of the workflow run id of D-T1 (sed -i 's/@CONTROL_RUN@/<digits>/' D-T5-lookup.env).
+#     A SAME-IMAGE CONTROL MUST RUN FIRST: D-T1 is that control on tp4-next2-1 (the drafter pack's D-T1 re-pointed); a control from tp4-drafter-1 or any other image would pair the lookup against a different stack, and the pair report
+#     refuses runs whose image tags differ. Do not push D-T5 before D-T1's run has finished and its id is in the template.
+# NOT TIMED: nothing here is a timing arm (the K-W2 sequential rounds after the latch are slow by design; the audits are exactness jobs; the tau arms measure accepted length, not time): CI need not be paused. Every result is
+#     UNQUALIFIED (gate-only profiles).
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0 <- B0
+# NEEDS Q1 K-W2a D-T1 <- X0
+# NEEDS K-W2b <- K-W2a
+# NEEDS Q2 Q3 <- Q1
+# NEEDS A0R <- Q2
+# NEEDS A1R <- A0R
+# NEEDS D-T5 <- D-T1
+# READ RULES (each also needs c2_smoke_check clean and no stall; the templates' own headers have the whole text):
+#   B0     'baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic with a session cap of 8', provenance report with no problem line (incl. check (g), the region-read extension), the image id.
+#   X0     four cards present and healthy, the fabric as measured, no other driver alive.
+#   Q1     'KV_READ_PROBE verdict=PASS' and 'KV_READ_PROBE extension source: baked'. FAIL or NOT-MEASURED: NOT QUALIFIED, Q2, Q3, A0R and A1R are skipped.
+#   K-W2a  the W2-off control: the smoke clean, no W2 line, no kill line; its hashes are the reference.
+#   K-W2b  the drill: one drill line, one latch line, packed rounds before it and none after it, sequential routing after it, no 'at attach' line, every request complete; then levern_compare.py against K-W2a exits 0.
+#   Q2     the Lever N audit digest cross-checked on a real prompt: 'lever N kv read ready mode=cross', one 'kv read cross ... mismatched=0' line with tensors > 0, no fallback, equal digests against a full-read arm.
+#   Q3     the prefix audit's cross check: plan verdict PASS, '[PREFIX-AUDIT-CROSS] tensors=<n> mismatched=0', mode=region in every '[PREFIX-AUDIT-COST]' line, program count unchanged.
+#   A0R    the engine-reuse control at the region read's cost (A0 plus a 'kv read mode=region' line, fallback=-, per digest).   A1R  the parked arm: parked_compare.py against A0R (every hash, digest and accepted prefix).
+#   D-T1   the control tau arm: A3 runs first and must reproduce the served reference within +/-7 percent (an A3 FAIL stops the arm and voids the window's tau arms), then A1 and A2. NOTE its workflow run id for D-T5.
+#   D-T5   drafter_pair_report.py against D-T1 (the GO rule is pre-registered in its docstring and docs/drafter-arms.md); the container log shows '[LOOKUP-DRAFT] engaged policy=n3m12' and a '[LOOKUP-ROUND]' line or the lab stops.
+# NO-GO: a packed round after the W2 latch, a hash difference between K-W2a and K-W2b, a mismatched cross line, a fallback line, a program compiled by a region read, a digest that differs from a full-read arm's, any stall,
+#     any text difference between D-T1 and D-T5, a pooled tau lower bound not above 1.00 (a lookup GO is a tau finding for the owner, nothing more).
+# Time (estimate, minutes; cumulative in brackets): B0 40 on the build host [40], X0 20 [60], Q1 12 [72], K-W2a 40 [112], K-W2b 70 [182], Q2 45 [227], Q3 75 [302], A0R 75 [377], A1R 75 [452], D-T1 90 [542], D-T5 85 [627], Z 10 [637]:
+#   637 minutes (10 h 37 min) in all, 597 minutes (9 h 57 min) of cards (X0 to Z); Q1 and the kill drill alone are 122 minutes after X0 (12 + 110), the whole pack without the tau pair 422 minutes of cards; about 3 minutes of queue per tag on top.
+B0-build stop tp4-next2-1 40
+X0-status-rescan-reset stop tp4-next2-1 20
+Q1-kvread-qualify soft tp4-next2-1 12
+K-W2a-control soft tp4-next2-1 40
+K-W2b-kill-switch soft tp4-next2-1 70
+Q2-kvread-cross-levern-audit soft tp4-next2-1 45
+Q3-kvread-cross-prefix-audit soft tp4-next2-1 75
+A0R-control-audit-region soft tp4-next2-1 75
+A1R-parked-audit-region soft tp4-next2-1 75
+D-T1-control soft tp4-next2-1 90
+D-T5-lookup soft tp4-next2-1 85
+Z-reset soft tp4-next2-1 10
