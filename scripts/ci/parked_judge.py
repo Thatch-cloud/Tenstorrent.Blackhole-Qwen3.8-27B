@@ -42,11 +42,13 @@ ENGINE_GB = (0.46, 0.51)
 # against a band whose FLOOR is lower and whose CEILING is the production ceiling. Derivation. (1) A parked engine's DRAM is the allocator growth of its captured verify
 # graph (design 3: 0.468-0.495 GB per chip, run v579). (2) The levers fuse or remove ops of that graph and write intermediates to L1 instead of DRAM; none of the levers in
 # the combined arm adds a per-engine buffer, so an engine of any subset of them is no larger than the production engine and no smaller than the engine of the whole set. That
-# is why the ceiling does NOT move: a lever that ADDS per-engine DRAM (the K/V page writer's tables, the fused MLP gate|up op's weights) must fail the ceiling and be
-# given its own measured number, not be absorbed. (3) The whole set (eleven lever flags, MLP config l1, QWEN_FAST_CCL_OPTIONS=served) was measured at 3.346 GB for eight
-# engines, 0.418 GB each, identically on all four chips in two runs (v714, v716): 0.050-0.077 GB (10-16 percent) under the production engine. (4) The floor is that
-# measurement less a margin of 9 percent, 0.38 GB: the set that ships differs from the measured one (MLP config g3u4d3, the CCL string the sweep names, the WP6 capture fix)
-# and none of those is measured yet. Tighten the floor to the measured value less 2 percent (the production band's own margin) once the final set has run.
+# is why the ceiling does NOT move: a lever that ADDS per-engine DRAM (the fused MLP gate|up op's weights, if it ever joins) must fail the ceiling and be given its own
+# measured number, not be absorbed. The K/V page writer removes a DRAM copy (it reads the prepared K/V from L1; its circular buffers are L1) and adds none. (3) The set of
+# the first combined run (eleven lever flags, MLP config l1, QWEN_FAST_CCL_OPTIONS=served, no page writer) was measured at 3.346 GB for eight engines, 0.418 GB each,
+# identically on all four chips in two runs (v714, v716): 0.050-0.077 GB (10-16 percent) under the production engine. (4) The floor is that measurement less a margin of
+# 9 percent, 0.38 GB: the set that ships differs from the measured one (MLP config g3u4d3, CCL rs-c1, the page writer, the WP6 capture fix) and none of those is measured
+# yet, though each is expected to change an engine by megabytes. Tighten the floor to the measured value less 2 percent (the production band's own margin) once the final
+# set has run.
 ENGINE_GB_LEVERS = (0.38, 0.51)
 # An AUDITED lever arm (an _AUDIT flag of the programme on) holds the served composition beside each audited lever, which is DRAM no measurement has read yet (the first
 # audited arm died at engine start): no per-engine ceiling, so the capacity rule is the free-DRAM floor below (the audited floor, as for the parked audit). The audited arm's

@@ -53,10 +53,11 @@ levers of this programme (`c2_smoke_check.fusion_arm_flags`) is judged against `
 
 1. A parked engine's DRAM is the allocator growth of its captured verify graph. The levers fuse or remove ops of that graph and keep intermediates in L1, and none of the
    levers in the combined arm adds a per-engine buffer, so an engine of any subset of them is no larger than the production engine and no smaller than the engine of the whole set.
-2. The ceiling therefore stays at 0.51 GB: a lever that adds per-engine DRAM (the K/V page writer, the fused MLP gate|up op) fails it and gets its own measured figure.
-3. The whole set measured 3.346 GB for eight engines, 0.418 GB each, identically on all four chips in two runs, which is 0.050-0.077 GB (10-16 percent) under the production engine
+2. The ceiling therefore stays at 0.51 GB: a lever that adds per-engine DRAM (the fused MLP gate|up op, if it ever joins) fails it and gets its own measured figure. The K/V page
+   writer removes a DRAM copy (it reads the prepared K/V from L1, its circular buffers are L1) and adds none.
+3. The first combined set (no page writer, MLP config l1, the served CCL set) measured 3.346 GB for eight engines, 0.418 GB each, identically on all four chips in two runs, which is 0.050-0.077 GB (10-16 percent) under the production engine
    and failed the production floor of 3.68 GB.
-4. The floor is that measurement less 9 percent, 0.38 GB, because the set that ships differs from the measured one (MLP config, CCL string, the capture fix). Tighten it to the
-   measurement less 2 percent once the final set has run.
+4. The floor is that measurement less 9 percent, 0.38 GB, because the set that ships differs from the measured one (MLP config g3u4d3, CCL rs-c1, the page writer, the capture
+   fix). Tighten it to the measurement less 2 percent once the final set has run.
 5. An audited lever arm holds the served composition beside each audited lever, which no run has measured: it has no per-engine ceiling, the audited free-DRAM floor still
    binds (3.6 GB free after eight engines), and the smoke prints `engine_gb` per chip so the first completed audited run sets the ceiling.

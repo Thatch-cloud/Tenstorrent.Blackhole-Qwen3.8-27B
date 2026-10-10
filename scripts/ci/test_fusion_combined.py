@@ -40,13 +40,13 @@ PACK = HERE / 'references' / 'fusion-jobs' / 'combined'
 
 SWITCHED_ON = {
     'QWEN_FAST_DRAFT_PERMUTE': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2': '1', 'QWEN_FAST_DRAFT_REDUCE': '1', 'QWEN_FAST_DRAFT_QKV1': '1',
-    'QWEN_FAST_DRAFT_TAIL': '1', 'QWEN_FAST_DRAFT_GATEUP1': '1', 'QWEN_FAST_DRAFT_MM_GRID': '1', 'QWEN_FAST_DRAFT_HEAD64': '1', 'QWEN_FAST_CCL_OPTIONS': 'served',
-    'QWEN_FAST_MLP_CFG': 'g3u4d3', 'QWEN_FAST_DEVICE_ZEROS': '1', 'QWEN_FAST_LAZY_SHARD_W': '1'}
+    'QWEN_FAST_DRAFT_TAIL': '1', 'QWEN_FAST_DRAFT_GATEUP1': '1', 'QWEN_FAST_DRAFT_MM_GRID': '1', 'QWEN_FAST_DRAFT_HEAD64': '1', 'QWEN_FAST_CCL_OPTIONS': 'rs-c1',
+    'QWEN_FAST_MLP_CFG': 'g3u4d3', 'QWEN_FAST_KV_PAGE_WRITER': '1', 'QWEN_FAST_DEVICE_ZEROS': '1', 'QWEN_FAST_LAZY_SHARD_W': '1'}
 AUDIT_FLAGS = {
     'QWEN_FAST_DRAFT_PERMUTE_AUDIT': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT': '1', 'QWEN_FAST_DRAFT_REDUCE_AUDIT': '1', 'QWEN_FAST_DRAFT_QKV1_AUDIT': '1',
     'QWEN_FAST_DRAFT_TAIL_AUDIT': '1', 'QWEN_FAST_DRAFT_GATEUP1_AUDIT': '1', 'QWEN_FAST_DRAFT_MM_GRID_AUDIT': '1', 'QWEN_FAST_DRAFT_HEAD64_AUDIT': '1',
-    'QWEN_FAST_CCL_OPTIONS_AUDIT': '1', 'QWEN_FAST_MLP_CFG_AUDIT': '1', 'QWEN_FAST_DEVICE_ZEROS_AUDIT': '1', 'QWEN_FAST_LAZY_SHARD_W_AUDIT': '1'}
-WAITING = ('QWEN_FAST_KV_PAGE_WRITER', 'QWEN_FAST_MLP_GATEUP')      # the K/V page writer (needs its card-M proof), the fused MLP gate|up (never compiled on a card)
+    'QWEN_FAST_CCL_OPTIONS_AUDIT': '1', 'QWEN_FAST_MLP_CFG_AUDIT': '1', 'QWEN_FAST_KV_PAGE_WRITER_AUDIT': '1', 'QWEN_FAST_DEVICE_ZEROS_AUDIT': '1', 'QWEN_FAST_LAZY_SHARD_W_AUDIT': '1'}
+WAITING = ('QWEN_FAST_MLP_GATEUP',)      # the fused MLP gate|up (exact but slower on the card: NO-GO)
 
 
 def additions(name):
@@ -82,15 +82,17 @@ class TwinShapeTests(unittest.TestCase):
             self.assertTrue(profile['description'].startswith('GATE ONLY, UNQUALIFIED (the op-fusion programme'), name)
         self.assertIn(fusion.WAIVER_FIELD, PARENT)
 
-    def test_the_ccl_set_is_the_served_placeholder_not_the_lever_s_candidate_string(self):
+    def test_the_ccl_set_is_the_sweep_winner_the_lever_itself_carries(self):
         lever = next(item for item in PLAN['levers'] if item['id'] == 'ccl')
-        self.assertNotEqual(lever['value'], 'served', 'the lever\'s own twin carries the candidate string')
-        self.assertEqual(PROFILES[TIMED]['env']['QWEN_FAST_CCL_OPTIONS'], 'served')
+        self.assertEqual(lever['value'], 'rs-c1', 'WP5 P0 winner: chunks per sync 1 on the unit-major reduce-scatters')
+        self.assertNotIn('ccl', SPEC.get('values', {}), 'no override: the combined arm carries the lever\'s own value')
+        self.assertEqual(PROFILES[TIMED]['env']['QWEN_FAST_CCL_OPTIONS'], 'rs-c1')
         self.assertEqual(PROFILES[fusion.NAMESPACE + 'ccl']['env']['QWEN_FAST_CCL_OPTIONS'], lever['value'])
+        self.assertEqual(PROFILES[fusion.NAMESPACE + 'ccl-served']['env']['QWEN_FAST_CCL_OPTIONS'], 'served', 'the A/A control twin keeps the served set')
 
     def test_the_combined_levers_are_the_ones_the_coordinator_named(self):
-        self.assertEqual(SPEC['levers'], ['permute', 's1', 'reduce', 'qkv1', 'tail', 'gateup1', 'mmgrid', 'head64', 'ccl', 'mlpcfg'])
-        self.assertNotIn('kvpage', SPEC['levers'])
+        self.assertEqual(SPEC['levers'], ['permute', 's1', 'reduce', 'qkv1', 'tail', 'gateup1', 'mmgrid', 'head64', 'ccl', 'mlpcfg', 'kvpage'])
+        self.assertEqual(SPEC['values'], {'mlpcfg': 'g3u4d3'})
         self.assertNotIn('mlpgu', SPEC['levers'])
         self.assertIn(TIMED, fusion.twin_names())
         self.assertIn(AUDITED, fusion.twin_names())
@@ -235,13 +237,21 @@ class ValidatorTests(unittest.TestCase):
                 self.assertTrue(tp4_shard_argmax.fold2_enabled(environ))
                 self.assertEqual(qwen_device_zeros.audited(environ), name == AUDITED)
 
-    def test_the_two_levers_that_wait_stay_off(self):
+    def test_the_page_writer_is_on_with_its_recorded_proof_and_the_fused_mlp_stays_off(self):
         import kv_page_writer_tp4
 
+        block = json.loads((HERE / 'ordered_writer_evidence_tp4.json').read_text(encoding='utf-8'))['page_writer']
+        self.assertEqual((block['status'], block['scope'], block['failures']), ('PASS', 'full', 0), 'the card-M proof is recorded')
         for name, environ in self.environments():
             with self.subTest(profile=name):
-                self.assertFalse(kv_page_writer_tp4.enabled(environ))
+                self.assertTrue(kv_page_writer_tp4.enabled(environ))
+                self.assertEqual(kv_page_writer_tp4._read(kv_page_writer_tp4.AUDIT_FLAG, environ), name == AUDITED)
                 self.assertFalse(environ.get('QWEN_FAST_MLP_GATEUP') not in (None, '0'))
+                for width in block['widths']:
+                    for source in block['sources']:
+                        self.assertEqual(kv_page_writer_tp4.evidence_problems(block['wt'], width, source), [], (width, source))
+        with self.assertRaises(ValueError):
+            kv_page_writer_tp4.enabled(dict(gate_environment(dict(PROFILES[TIMED], name=TIMED)), QWEN_FAST_TP='2'))          # a TP4 lever at the pair
 
 
 class SmokeTableTests(unittest.TestCase):
@@ -385,7 +395,7 @@ class CombinedPackTests(unittest.TestCase):
         self.assertEqual((needs['FXA'], needs['FXC1'], needs['FXC2'], needs['FXL2']), ('X0', 'X0', 'FXL1', 'FXC2'))
 
     def test_the_templates_name_the_reader_command_and_every_lever_the_audit_is_judged_by(self):
-        text = (PACK / 'FXL1-all-lever-timed.env').read_text(encoding='utf-8')
+        text = ' '.join(line.lstrip('# ') for line in (PACK / 'FXL1-all-lever-timed.env').read_text(encoding='utf-8').splitlines())        # the generator wraps comment lines
         self.assertIn('python3 scripts/ci/w2ln_timing_compare.py pair <A container log> <B container log> --window steady --a-smoke <A smoke log> --b-smoke <B smoke log>', text)
         audit = (PACK / 'FXA-all-audited-attach.env').read_text(encoding='utf-8')
         for lever in PLAN['levers']:

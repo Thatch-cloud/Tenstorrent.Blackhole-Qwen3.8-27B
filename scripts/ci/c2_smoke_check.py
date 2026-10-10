@@ -173,7 +173,7 @@ FUSION_LEVERS = (
     ('QWEN_FAST_KV_PAGE_WRITER', '1', '[PINDIAG] tp4 kv page writer engaged', '[PINDIAG] tp4 kv page writer fell back', 'K/V page writer'),  # WP2
     ('QWEN_FAST_MLP_CFG', 'l1', '[PINDIAG] tp4 mlp gateup engaged route=cfg', '[PINDIAG] tp4 mlp gateup fell back', 'MLP streaming config and L1 multiply'),  # WP4
     ('QWEN_FAST_MLP_GATEUP', '1', '[PINDIAG] tp4 mlp gateup engaged route=fused', '[PINDIAG] tp4 mlp gateup fell back', 'MLP fused gate|up with SwiGLU epilogue'),  # WP4
-    ('QWEN_FAST_CCL_OPTIONS', 'ag-c1+ag-w1+rs-c1+rs-w1', '[PINDIAG] tp4 ccl options engaged', '[PINDIAG] tp4 ccl options fell back', 'CCL options'),  # WP5
+    ('QWEN_FAST_CCL_OPTIONS', 'rs-c1', '[PINDIAG] tp4 ccl options engaged', '[PINDIAG] tp4 ccl options fell back', 'CCL options'),  # WP5
     ('QWEN_FAST_DRAFT_REDUCE', '1', '[PINDIAG] tp4 draft reduce engaged', '[PINDIAG] tp4 draft reduce fell back', 'WP6 F-F1 drafter local reduce'),  # WP6
     ('QWEN_FAST_DRAFT_TAIL', '1', '[PINDIAG] tp4 draft tail engaged', '[PINDIAG] tp4 draft tail fell back', 'WP6 F-F3a drafter SwiGLU and residual kernels'),  # WP6
     ('QWEN_FAST_DRAFT_GATEUP1', '1', '[PINDIAG] tp4 draft gateup1 engaged', '[PINDIAG] tp4 draft gateup1 fell back', 'WP6 F-F3c drafter fused gate|up matmul'),  # WP6
