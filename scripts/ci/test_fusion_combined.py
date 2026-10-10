@@ -281,6 +281,75 @@ class SmokeTableTests(unittest.TestCase):
         self.assertTrue(any('QWEN_FAST_TP4_SHARD_ARGMAX' in problem for problem in c2_smoke_check.sampdraft_problems('nothing\n', env)))
 
 
+class ParkedEngineBandTests(unittest.TestCase):
+    """The parked-engine DRAM band (parked_judge.ENGINE_GB) is lever-aware for the op-fusion arms and exactly as before for everything else."""
+
+    @staticmethod
+    def ledger(each, free_after=4.0, engines=8):
+        def line(phase, chip, allocated, free):
+            return '[MEMLEDGER] phase=%s point=x chip%d allocated=%.3fGB free=%.3fGB largest_free=%.1fMB total=33.0GB' % (phase, chip, allocated, free, free * 900)
+        return '\n'.join([line('P7', chip, 24.78, 8.87) for chip in range(4)] + [line('P7p', chip, 24.78 + engines * each, free_after) for chip in range(4)]) + '\n'
+
+    @staticmethod
+    def took(env, text):
+        return [problem for problem in c2_smoke_check.parked_container_problems(env, text)[0] if 'parked engines took' in problem]
+
+    def test_only_the_fusion_arms_get_the_lever_band_and_production_keeps_its_own(self):
+        import parked_judge
+
+        for name, profile in PROFILES.items():
+            if profile['env'].get('QWEN_FAST_PARKED_ENGINES') != '1':
+                continue                    # the band is only judged for an arm that parks engines (the older S1 profiles never do)
+            levers, audits = c2_smoke_check.fusion_arm_flags(profile['env'])
+            band = parked_judge.engine_band(levers, audits)
+            twin = name.startswith(fusion.NAMESPACE) or name in fusion.twin_names()
+            with self.subTest(profile=name):
+                if not twin:
+                    self.assertEqual((levers, audits, band), ([], [], parked_judge.ENGINE_GB))
+                else:
+                    self.assertNotEqual(band, parked_judge.ENGINE_GB)
+        self.assertEqual(parked_judge.ENGINE_GB, (0.46, 0.51))
+        self.assertEqual(c2_smoke_check.fusion_arm_flags(None), ([], []))
+        self.assertEqual(c2_smoke_check.fusion_arm_flags(dict(PARENT['env'], QWEN_FAST_DRAFT_REDUCE='0')), ([], []))
+
+    def test_the_measured_combined_arm_passes_and_the_same_reading_still_fails_production(self):
+        # run v714 and v716: 3.346 GB for eight engines on every chip (0.418 each) failed the production band 3.68-4.08 and is the lever arm's measurement
+        reading = self.ledger(3.346 / 8)
+        self.assertEqual(self.took(PROFILES[TIMED]['env'], reading), [])
+        failed = self.took(PARENT['env'], reading)
+        self.assertEqual(len(failed), 4)
+        self.assertTrue(all('3.346' in problem and '3.68-4.08' in problem for problem in failed))
+
+    def test_the_lever_arm_keeps_the_production_ceiling_and_has_a_floor(self):
+        env = PROFILES[TIMED]['env']
+        self.assertEqual(self.took(env, self.ledger(0.495)), [])                      # the production engine is within the lever band
+        self.assertEqual(len(self.took(env, self.ledger(0.52))), 4)                   # a lever that ADDS DRAM is not absorbed
+        self.assertEqual(len(self.took(env, self.ledger(0.37))), 4)                   # an engine that is not the whole captured graph is not either
+        self.assertTrue(any('op-fusion lever arm' in problem for problem in self.took(env, self.ledger(0.52))))
+        self.assertEqual(self.took(PARENT['env'], self.ledger(0.48)), [])
+        self.assertEqual(len(self.took(PARENT['env'], self.ledger(0.418))), 4)
+
+    def test_a_single_lever_twin_lies_between_the_production_engine_and_the_whole_set(self):
+        for name in fusion.twin_names():
+            if name in (TIMED, AUDITED) or name.endswith('-audit'):
+                continue
+            env = PROFILES[name]['env']
+            if not c2_smoke_check.fusion_arm_flags(env)[0]:
+                continue
+            with self.subTest(profile=name):
+                self.assertEqual(self.took(env, self.ledger(0.418)), [])
+                self.assertEqual(self.took(env, self.ledger(0.48)), [])
+
+    def test_an_audited_lever_arm_has_no_ceiling_but_the_free_dram_floor_binds(self):
+        env = PROFILES[AUDITED]['env']
+        self.assertEqual(self.took(env, self.ledger(0.8, free_after=3.7)), [])
+        self.assertEqual(len(self.took(env, self.ledger(0.37, free_after=3.7))), 4)
+        floor = [problem for problem in c2_smoke_check.parked_container_problems(env, self.ledger(0.8, free_after=3.0))[0] if 'floor' in problem]
+        self.assertEqual(len(floor), 4)
+        facts = c2_smoke_check.parked_container_problems(env, self.ledger(0.8, free_after=3.7))[1]
+        self.assertEqual(facts['engine_gb'], {0: 0.8, 1: 0.8, 2: 0.8, 3: 0.8})        # the first completed audited run prints the figure that sets its ceiling
+
+
 class CombinedPackTests(unittest.TestCase):
     NAMES = ('B0-build', 'X0-status-rescan-reset', 'FXA-all-audited-attach', 'FXC1-all-control-timed', 'FXL1-all-lever-timed', 'FXC2-all-control-repeat',
              'FXL2-all-lever-repeat', 'Z-reset')

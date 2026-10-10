@@ -657,14 +657,32 @@ def parked_smoke_problems(results):
     return problems
 
 
+# The one lever of the op-fusion programme that the static sampdraft tables above dispatch (WP1's S1); the sampdraft DRAFT_CONV and DRAFT_HEADS levers are part of the
+# production profile, so they are not fusion levers and must never move the production bands.
+FUSION_SAMPDRAFT_FLAGS = ('QWEN_FAST_TP4_SHARD_ARGMAX',)
+
+
+def fusion_arm_flags(env):
+    """([lever flags], [audit flags]) of the op-fusion programme (FUSION_LEVERS, FUSION_AUDITS and S1 from the sampdraft tables) that the profile env turns on. A lever counts at
+    the value its table row judges (a lever the profile sets to '0' is off); an audit flag counts at '1'. Production and every profile without a lever give ([], []), which keeps
+    parked_judge.ENGINE_GB, the production band, exactly."""
+    env = env or {}
+    levers = set(flag for flag, value, _engaged, _fell, _what in FUSION_LEVERS if env.get(flag) == value)
+    levers |= set(flag for flag in FUSION_SAMPDRAFT_FLAGS if env.get(flag) == '1')
+    audits = set(flag for flag, _marker, _what in FUSION_AUDITS if env.get(flag) == '1')
+    audits |= set(flag + '_AUDIT' for flag in FUSION_SAMPDRAFT_FLAGS if env.get(flag + '_AUDIT') == '1')
+    return sorted(levers), sorted(audits)
+
+
 def parked_container_problems(env, container_text):
     """(problems, facts) of the engine-reuse markers in the container log (parked_judge.judge): what a parked profile must show, and that any other
-    profile shows none."""
+    profile shows none. An op-fusion lever arm is judged against parked_judge's lever band for the engines' DRAM (derivation there); production is not."""
     if env is None:
         return [], {}
     import parked_judge
 
-    return parked_judge.judge(env, container_text)
+    levers, audits = fusion_arm_flags(env)
+    return parked_judge.judge(env, container_text, levers=levers, lever_audits=audits)
 
 
 def ramp_kv_median(log_text):

@@ -45,3 +45,18 @@ folders beside the pack.
 `tp4_profile_report.py` classifies a replay by what it holds: the multi-SDPA 64-row block (one SDPA launch per attention layer, no named conv-gates launch) is the packed
 verify, and the 4-row lone step (four SDPA launches per attention layer, one conv-gates launch) is not. Timed pairs are read PAIRED per round with
 `w2ln_timing_compare.py pair`, never by unpaired medians. The cards expose a 13x10 compute grid since the firmware unlock: read it from the run, never assume 11x10.
+
+### The parked engines' DRAM band on a lever arm
+
+The engine-reuse smoke rule bounds what eight parked engines take of a chip: 0.46-0.51 GB each (`parked_judge.ENGINE_GB`, measured 0.468-0.495). An arm that turns on
+levers of this programme (`c2_smoke_check.fusion_arm_flags`) is judged against `parked_judge.ENGINE_GB_LEVERS` instead; production and every other profile keep the old band.
+
+1. A parked engine's DRAM is the allocator growth of its captured verify graph. The levers fuse or remove ops of that graph and keep intermediates in L1, and none of the
+   levers in the combined arm adds a per-engine buffer, so an engine of any subset of them is no larger than the production engine and no smaller than the engine of the whole set.
+2. The ceiling therefore stays at 0.51 GB: a lever that adds per-engine DRAM (the K/V page writer, the fused MLP gate|up op) fails it and gets its own measured figure.
+3. The whole set measured 3.346 GB for eight engines, 0.418 GB each, identically on all four chips in two runs, which is 0.050-0.077 GB (10-16 percent) under the production engine
+   and failed the production floor of 3.68 GB.
+4. The floor is that measurement less 9 percent, 0.38 GB, because the set that ships differs from the measured one (MLP config, CCL string, the capture fix). Tighten it to the
+   measurement less 2 percent once the final set has run.
+5. An audited lever arm holds the served composition beside each audited lever, which no run has measured: it has no per-engine ceiling, the audited free-DRAM floor still
+   binds (3.6 GB free after eight engines), and the smoke prints `engine_gb` per chip so the first completed audited run sets the ceiling.
