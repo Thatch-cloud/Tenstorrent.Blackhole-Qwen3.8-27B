@@ -726,6 +726,8 @@ def generic_problems(arm, scanned, records, error, expect_profile, store_gib=jud
         if install.get('store_gib') is not None and abs(float(install['store_gib']) - float(store_gib)) > 0.051:
             problems.append('checkpoint store %s GiB, the arm asked %s' % (install['store_gib'], store_gib))
         notes.append('install: %s' % json.dumps(dict((k, v) for k, v in install.items() if k not in ('index', 'time'))))
+    for entry in scanned.get('chunked_installs') or ():
+        notes.append('install (chunked prefill): %s' % json.dumps(dict((k, v) for k, v in entry.items() if k not in ('index', 'time')), sort_keys=True))
     for entry in scanned.get('refused') or ():
         problems.append('a stale grant was refused at commit (%s start_pos=%s Q=%s, F2)' % (
             entry['tag'], entry['start_pos'], entry['q']))
@@ -734,7 +736,8 @@ def generic_problems(arm, scanned, records, error, expect_profile, store_gib=jud
     for record in records:
         if record.get('role') in ('seat', 'flood') or record.get('aborted'):
             continue
-        for severity, text in judge.reuse_problems(record, sequential=arm['strict'], sticky=bool(arm.get('sticky'))):
+        for severity, text in judge.reuse_problems(record, sequential=arm['strict'], sticky=bool(arm.get('sticky')),
+                                                   levern=levern_chunked(scanned)):
             if severity == 'FAIL':
                 problems.append(text)
             elif severity == 'LOST' and arm['strict']:
@@ -780,6 +783,25 @@ def generic_problems(arm, scanned, records, error, expect_profile, store_gib=jud
         problems.append('%d "[TP chunk-replay]" lines on the eager arm: trace_mode decode_only did not reach the '
                         'model' % scanned['chunk_replay'])
     return problems, notes, missing
+
+
+def levern_chunked(scanned):
+    """Whether the engine chunks long prefills (Lever N): it logged `[PINDIAG] prefix: install chunked=levern`. Such an engine admits a hit at its first
+    scheduled step (the sticky admit line's tail) and builds the request's engine at the START OF THE FINAL STEP, not at Q."""
+    return any(entry.get('chunked') == 'levern' for entry in (scanned or {}).get('chunked_installs') or ())
+
+
+def expected_build_frontier(record, q, levern):
+    """The frontier the request's sticky engine build line should say, or None when it cannot be told. Without Lever N the build follows the one prefill step
+    from Q, so the frontier is Q. Under Lever N the engine is built by the final step, which starts at max(Q, floor2048(P - 2048)) (levern_policy: a step
+    never starts below Q and the final one starts at S_last = prefix_judge.resume_ceiling(P), the highest Q a resume is granted, so the two agree when Q is the
+    ceiling): P = 6197 Q = 2048 builds at 4096, a cold P = 4643 at 2048, a cold P = 4073 at 0."""
+    if not levern:
+        return q
+    prompt = record.get('prompt_tokens')
+    if type(prompt) is not int or q is None:
+        return None
+    return max(q, judge.resume_ceiling(prompt))
 
 
 def row_growth_problems(rows):
@@ -1246,12 +1268,20 @@ def s2_findings(arm, log_text, scanned, records):
     if served and not built:
         problems.append('no "[PINDIAG] sticky engine built" line for any of %d served requests (A8): the TTFT split '
                         'is not measured' % len(served))
+    levern = levern_chunked(scanned)
     for record in built:
         build = record['markers']['sticky_builds'][0]
         q = (record.get('markers') or {}).get('q')
-        if q is not None and build.get('frontier') != q:
-            problems.append('%s: its engine was built at frontier %s, its row restored Q=%s' % (
-                record['tag'], build.get('frontier'), q))
+        wanted = expected_build_frontier(record, q, levern)
+        if q is not None and wanted is None:
+            # Lever N and no prompt length to place the final step: the build cannot be below the row's Q, and is on a chunk boundary
+            if build.get('frontier') is None or build['frontier'] < q or build['frontier'] % judge.CHUNK:
+                problems.append('%s: its engine was built at frontier %s, its row restored Q=%s' % (record['tag'], build.get('frontier'), q))
+        elif q is not None and build.get('frontier') != wanted:
+            problems.append('%s: its engine was built at frontier %s, %s' % (
+                record['tag'], build.get('frontier'),
+                ('its row restored Q=%s and the final step of its Lever N prefill starts at max(Q, floor2048(P - 2048)) = %s (P=%s)' % (
+                    q, wanted, record.get('prompt_tokens'))) if levern else 'its row restored Q=%s' % q))
     # Not row_growth_problems' every-row rule: the fast path compiles each prefill shape at its first request.
     growth, compiled = judge.fast_path_growth(scanned.get('rows') or [])
     problems += growth
@@ -1792,7 +1822,7 @@ class Runner(object):
             json.dump(driver.pairs, handle, indent=1)
         with open(os.path.join(arm_dir, 'events.json'), 'w', encoding='utf-8') as handle:
             json.dump(dict(events=driver.events, phases=driver.phases), handle, indent=1, default=str)
-        summary = dict((key, scanned[key]) for key in ('installs', 'refused', 'capture_skipped', 'kill_switch', 'stats',
+        summary = dict((key, scanned[key]) for key in ('installs', 'chunked_installs', 'refused', 'capture_skipped', 'kill_switch', 'stats',
                                                         'launches', 'apc', 'chunking_off', 'chunk_replay', 'kv_tokens',
                                                         'failures', 'eager_warm', 'sticky_installs', 'model_warm',
                                                         'kv_shared'))

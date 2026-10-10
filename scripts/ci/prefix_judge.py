@@ -115,6 +115,30 @@ def resume_ceiling(prompt_tokens):
     return floor_chunk(max(0, int(prompt_tokens) - CHUNK))
 
 
+def levern_final_start(prompt_tokens):
+    """Where the FINAL step of a Lever N chunked prefill of `prompt_tokens` starts: floor2048(P) - 2048 when P has a tail, P - 2048 when it is a whole number
+    of chunks, 0 when P is under two chunks (such a prompt is never split). The same arithmetic as levern_policy.final_start, restated so this module stays an
+    independent model of the engine (test_prefix_judge holds the two equal); it is also resume_ceiling(P), the highest Q a sticky resume is granted."""
+    prompt_tokens = int(prompt_tokens)
+    full = floor_chunk(prompt_tokens)
+    if full < CHUNK:
+        return 0
+    return full - CHUNK if prompt_tokens - full else prompt_tokens - CHUNK
+
+
+def levern_first_step(prompt_tokens, q, tail):
+    """Whether a first scheduled chunk of `tail` tokens from Q is one Lever N's plan can take for a P-token prompt: either the whole rest (P - Q, a step that
+    reaches the end of the prompt from Q at or below P - 2048: the unchunked shape, and the solo step of a prefill nobody waits behind) or a non-final step,
+    which ends on a 2,048-token boundary at or below the final step's start (P = 6197, Q = 2048: 2048 now, then a continuation start=4096 tokens=2101)."""
+    prompt_tokens, q, tail = int(prompt_tokens), int(q), int(tail)
+    if tail < 1 or q < 0 or q + tail > prompt_tokens:
+        return False
+    if q + tail == prompt_tokens:
+        return True
+    end = q + tail
+    return prompt_tokens >= 2 * CHUNK and q % CHUNK == 0 and end % CHUNK == 0 and end <= levern_final_start(prompt_tokens)
+
+
 def capture_boundary(prompt_tokens, sticky=False):
     """The prompt's own capture candidate: floor2048(P), or under sticky sessions C0 = floor2048(P) - 2048."""
     boundary = floor_chunk(prompt_tokens)
@@ -566,7 +590,7 @@ def observed_q(record):
 FRESH_ROLES = ('cold', 'capture', 'cold-batch')
 
 
-def reuse_problems(record, sequential=True, sticky=False):
+def reuse_problems(record, sequential=True, sticky=False, levern=False):
     """What one request's markers say against the oracle's expectation (record['expected']) and the
     request's own role. -> list of (severity, text): FAIL for a missing or inconsistent row, a grant
     to an unsalted or fresh-salt request, a restore without a grant, a capture nobody planned, or
@@ -577,7 +601,8 @@ def reuse_problems(record, sequential=True, sticky=False):
     sticky sessions, module docstring item 5), whatever the overlap: FAIL for a Q above the drafter
     window's ceiling floor2048(L - 2048), a re-admission (the fast path has no preemption), and a hit
     whose sticky admit line is missing or disagrees with its row (Q, P, tail = P - Q), or an admit
-    line for a request that resumed nothing."""
+    line for a request that resumed nothing. levern (the engine logged `install chunked=levern`): the admit's tail is the FIRST
+    scheduled chunk, so it may also be a first step of Lever N's plan (levern_first_step), not only P - Q."""
     markers = record.get('markers') or {}
     expected = record.get('expected') or {}
     role, tag = record.get('role'), record.get('tag')
@@ -612,7 +637,7 @@ def reuse_problems(record, sequential=True, sticky=False):
         if row.get('q') and row.get('l') is not None and row['q'] >= row['l']:
             out.append(('FAIL', '%s: Q=%d is not below L=%s' % (tag, row['q'], row['l'])))
     if sticky:
-        out += sticky_problems(record, rows)
+        out += sticky_problems(record, rows, levern=levern)
     granted = sorted(entry['q'] for entry in markers.get('grants') or () if entry.get('q'))
     restored = sorted(row['q'] for row in rows if row.get('q'))
     if Counter(granted) != Counter(restored):
@@ -662,8 +687,9 @@ def reuse_problems(record, sequential=True, sticky=False):
     return out
 
 
-def sticky_problems(record, rows):
-    """reuse_problems' sticky-session checks of one request's first admission. -> [(severity, text)]."""
+def sticky_problems(record, rows, levern=False):
+    """reuse_problems' sticky-session checks of one request's first admission. levern: the engine chunks long prefills (Lever N), so the admit line's tail
+    is the first scheduled chunk and not necessarily P - Q (levern_first_step). -> [(severity, text)]."""
     markers = record.get('markers') or {}
     tag = record.get('tag')
     prompt = record.get('prompt_tokens')
@@ -682,9 +708,13 @@ def sticky_problems(record, rows):
                                     tag, q, q, [entry.get('q') for entry in admits] or 'none')))
         else:
             admit = matching[0]
-            if prompt is not None and (admit.get('p') != prompt or admit.get('tail') != prompt - q):
-                out.append(('FAIL', '%s: its sticky admit line says P=%s tail=%s, the request is P=%s Q=%d (tail %d)' % (
-                    tag, admit.get('p'), admit.get('tail'), prompt, q, prompt - q)))
+            if prompt is not None:
+                tail = admit.get('tail')
+                first_step = (levern and admit.get('p') == prompt and type(tail) is int and levern_first_step(prompt, q, tail))
+                if admit.get('p') != prompt or (tail != prompt - q and not first_step):
+                    out.append(('FAIL', '%s: its sticky admit line says P=%s tail=%s, the request is P=%s Q=%d (tail %d%s)' % (
+                        tag, admit.get('p'), tail, prompt, q, prompt - q,
+                        ', or a Lever N first step' if levern else '')))
         if len(admits) > 1:
             out.append(('FAIL', '%s: %d sticky admit lines for one request' % (tag, len(admits))))
     elif admits:

@@ -1235,6 +1235,43 @@ class StickyRunnerTests(unittest.TestCase):
         result, _, _ = self.plan('bringup', 'grow', **{'c2-packed-prefix': dict(grow_programs=True)})
         self.assertEqual(result['arms']['bringup-prefix']['verdict'], 'FAIL')
 
+    def lever_n_arm(self, name, **faults):
+        result, _, _ = self.plan('bringup', name, **{'c2-packed-prefix': dict(levern_chunked=True, **faults)})
+        arm = result['arms']['bringup-prefix']
+        with open(os.path.join(self.results, name, 'bringup-prefix', 'server-final.log'), encoding='utf-8') as handle:
+            text = handle.read()
+        return arm, text
+
+    def test_a_lever_n_engine_passes_its_install_line_its_first_step_tail_and_its_final_step_frontier(self):
+        """The PREFIX-GATE readers predated Lever N's chunked prefill (G2 v-run 37997263022, levern-hit): the `install chunked=levern` line, written after the
+        sticky one, was read as THE install (class None, block size None, BF8 None), the sticky admit's tail is the first scheduled chunk and not P - Q, and the engine
+        is built at the final step's start and not at Q. Synthetic lines shaped like those: the arm must pass, and must have exercised each of the three."""
+        arm, text = self.lever_n_arm('levern')
+        self.assertEqual(arm['verdict'], 'PASS', arm['problems'])
+        self.assertTrue(any('install (chunked prefill): ' in note and '"chunked": "levern"' in note for note in arm['notes']), arm['notes'])
+        installs = [line for line in text.splitlines() if 'prefix: install' in line]
+        self.assertTrue(installs[-1].split('prefix: install ', 1)[1].startswith('chunked=levern'), installs)
+        admits = [dict(zip(('q', 'p', 'tail'), map(int, match.groups()))) for match in re.finditer(r'sticky admit req=\S+ Q=(\d+) P=(\d+) tail=(\d+)', text)]
+        self.assertTrue(any(admit['tail'] != admit['p'] - admit['q'] for admit in admits), admits)
+        self.assertTrue(any(admit['tail'] == 2048 for admit in admits), admits)
+        builds = [dict(zip(('frontier', 'prompt'), map(int, match.groups()))) for match in re.finditer(r'frontier=(\d+) prompt=(\d+)', text)]
+        self.assertTrue(any(build['frontier'] and build['frontier'] != 0 for build in builds), builds)
+
+    def test_a_lever_n_engine_whose_build_frontier_is_still_q_fails_and_one_that_admits_the_whole_rest_passes(self):
+        arm, _ = self.lever_n_arm('stale-build', levern_stale_build=True)
+        self.assertEqual(arm['verdict'], 'FAIL', arm['verdict'])
+        self.assertTrue(any('the final step of its Lever N prefill starts at max(Q, floor2048(P - 2048))' in problem for problem in arm['problems']),
+                        arm['problems'][:6])
+        # the whole rest as the admit's tail is a shape Lever N's plan also takes (a prefill nobody waits behind), so it is accepted beside the chunked install line
+        arm, _ = self.lever_n_arm('whole-rest', levern_stale_tail=True)
+        self.assertEqual(arm['verdict'], 'PASS', arm['problems'])
+
+    def test_without_the_chunked_install_line_a_first_step_tail_still_fails(self):
+        result, _, _ = self.plan('bringup', 'nochunk', **{'c2-packed-prefix': dict(levern_chunked=True, levern_no_install=True)})
+        arm = result['arms']['bringup-prefix']
+        self.assertEqual(arm['verdict'], 'FAIL')
+        self.assertTrue(any('its sticky admit line says' in problem for problem in arm['problems']), arm['problems'][:6])
+
     def test_a_hit_built_at_another_frontier_fails(self):
         result, _, _ = self.plan('bringup', 'frontier', **{'c2-packed-prefix': dict(wrong_build_frontier=True)})
         arm = result['arms']['bringup-prefix']

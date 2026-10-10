@@ -794,6 +794,48 @@ class StickyOracleTests(unittest.TestCase):
                           expected=dict(h=8256, q=8192, plan=[]))
         self.assertEqual(pj.reuse_problems(record), [])
 
+    def test_under_lever_n_the_admit_tail_is_the_first_scheduled_chunk(self):
+        """Lever N splits a long prefill into 2,048-token steps while seats decode, and the sticky admit's tail is the first of them (serving_lifecycle logs the
+        step it schedules): P=6197 Q=2048 logs tail=2048, then a continuation start=4096 tokens=2101 (G2, levern-hit). Without the chunked install line the
+        tail is still P - Q and nothing else."""
+        def hit(q, prompt, tail, levern, p=None):
+            record = resolved('h', q=q, l=prompt, prompt_tokens=prompt, grant=dict(h=q + 64, q=q, plan=[]), expected=dict(h=q + 64, q=q, plan=[]))
+            record['markers']['sticky_admits'] = [dict(q=q, p=prompt if p is None else p, tail=tail)]
+            return [text for severity, text in pj.reuse_problems(record, sequential=False, sticky=True, levern=levern) if severity == 'FAIL']
+
+        self.assertEqual(hit(2048, 6197, 2048, levern=True), [])                      # the first chunk of 2048, a continuation of 2101 follows
+        self.assertEqual(hit(2048, 6197, 4149, levern=True), [])                      # a prefill nobody waits behind: the whole rest in one step
+        self.assertEqual(hit(4096, 7914, 3818, levern=True), [])                      # Q is already the final step's start: the whole rest
+        self.assertEqual(hit(4096, 7914, 3818, levern=False), [])
+        self.assertEqual(hit(2048, 14000, 4096, levern=True), [])                     # a solo step of two chunks, ending at 6144 <= S_last (10240)
+        self.assertEqual(hit(2048, 14000, 2048, levern=True), [])
+        # not a step of the plan: off a chunk boundary, past the final step's start, beyond the prompt, or another P
+        for tail in (1000, 2047, 4096, 6197):
+            with self.subTest(tail=tail):
+                bad, = hit(2048, 6197, tail, levern=True)
+                self.assertIn('sticky admit line says P=6197 tail=%d' % tail, bad)
+                self.assertIn('Lever N first step', bad)
+        bad, = hit(2048, 6197, 2048, levern=False)                                    # no chunked install line: only P - Q
+        self.assertIn('sticky admit line says P=6197 tail=2048', bad)
+        self.assertNotIn('Lever N', bad)
+        bad, = hit(2048, 6197, 2048, levern=True, p=9999)                             # another P than the request's is a fault whatever the tail
+        self.assertIn('P=9999', bad)
+
+    def test_lever_n_s_step_arithmetic_here_is_the_policy_s(self):
+        """prefix_judge restates levern_policy's chunk arithmetic so it stays an independent model; hold the two equal on every prompt, boundary Q and first step
+        of a grid (every prompt from 1 to 12,300 at the edges and a stride in between, all boundary Q at or below the ceiling)."""
+        import levern_policy as lp
+
+        for prompt in sorted(set(range(1, 4200)) | set(range(4200, 12300, 97)) | {253698, 253920}):
+            self.assertEqual(pj.levern_final_start(prompt), lp.final_start(prompt), prompt)
+            self.assertEqual(pj.levern_final_start(prompt), pj.resume_ceiling(prompt), prompt)
+        for prompt in (2048, 2049, 4095, 4096, 4097, 6144, 6197, 7914, 8192, 14000, 16384, 20001):
+            for q in range(0, pj.resume_ceiling(prompt) + 1, 2048):
+                for tail in (1, 2047, 2048, 4096, 6144, 8192, 16384, prompt - q, prompt - q - 1):
+                    if tail < 1 or q + tail > prompt:
+                        continue
+                    self.assertEqual(pj.levern_first_step(prompt, q, tail), lp.valid_step(prompt, q, tail), (prompt, q, tail))
+
     def test_strict_settling_excuses_no_preemption(self):
         index = {'h': dict(markers=dict(admissions=2)), 'c': dict(markers=dict(admissions=1))}
         for strict, verdict in ((False, 'NOT_COMPARABLE'), (True, 'DIVERGED')):

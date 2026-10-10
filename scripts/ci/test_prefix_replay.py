@@ -349,6 +349,10 @@ class FakeEngine(object):
               # A hit's engine build line naming another frontier than its Q (wrong_build_frontier), and audit
               # window lines that never mark a window restored (no_restored_windows: every new=1).
               'wrong_build_frontier', 'no_restored_windows',
+              # Lever N beside the prefix graft (QWEN_FAST_LEVER_N=1): the graft's third install line (`chunked=levern`, written AFTER the sticky one), the sticky
+              # admit's tail the FIRST scheduled chunk of Lever N's plan and the engine built at the final step's start; levern_stale_tail and levern_stale_build
+              # keep the old shapes of those two lines (the whole rest, Q) under the chunked install line: defects.
+              'levern_chunked', 'levern_stale_tail', 'levern_stale_build', 'levern_no_install',
               # The audit's own cost line: absent (the image predates the narrowed audit), or its read compiled a program.
               'no_audit_cost', 'audit_compiles', 'no_audit_cross', 'audit_cross_mismatch',
               # vLLM finds nothing cached for any request, so every continuation runs cold (lose_every_hit).
@@ -467,6 +471,9 @@ class FakeEngine(object):
         if self.sticky and 'no_sticky_install' not in self.faults:
             self.say('(EngineCore pid=9) ' + marker_fixture.graft_line(
                 'install sticky=1 lookahead=%d drop_last=%s ceiling=floor2048(P-%d)', 16, True, judge.CHUNK))
+        if self.sticky and 'levern_chunked' in self.faults and 'levern_no_install' not in self.faults:
+            self.say('(EngineCore pid=9) ' + marker_fixture.graft_line(
+                'install chunked=levern: chunked prefill beside the Lever N cap (max_num_scheduled_tokens=%s)', 262032))
         if self.sticky and 'warm_skipped' in self.faults:
             self.say('(EngineCore pid=9) WARNING | models.demos.blackhole.qwen36.tt.qwen36_vllm:_qwen_prefix_warm:960 - '
                      '[PINDIAG] prefix: model warm skipped - not the batched TP path (num_devices=2, '
@@ -718,12 +725,21 @@ class FakeEngine(object):
             if 'diverge_once' in self.faults and q:
                 self.diverged_once = True
         if self.sticky and 'no_sticky_build' not in self.faults:
+            frontier = q
+            if 'levern_chunked' in self.faults and 'levern_stale_build' not in self.faults:
+                # Lever N builds the engine in the FINAL step, which starts at floor2048(P - 2048) whatever Q the hit resumed at (levern_policy.final_start).
+                frontier = max(q, judge.levern_final_start(len(request.prompt_token_ids)))
             self.say('(EngineCore pid=9) INFO [PINDIAG] sticky engine built req=%s ms=3500.0 frontier=%d prompt=%d' % (
-                request.request_id[:48], 0 if 'wrong_build_frontier' in self.faults else q,
+                request.request_id[:48], 0 if 'wrong_build_frontier' in self.faults else frontier,
                 len(request.prompt_token_ids)))
         if self.sticky and first and q and 'no_sticky_admit' not in self.faults:
+            tail = len(request.prompt_token_ids) - q
+            if 'levern_chunked' in self.faults and 'levern_stale_tail' not in self.faults:
+                # The admit's tail is the first chunk scheduled: 2,048 tokens while the prompt still has a non-final step to take, else the whole rest.
+                prompt = len(request.prompt_token_ids)
+                tail = min(judge.CHUNK, judge.levern_final_start(prompt) - q) if q < judge.levern_final_start(prompt) else prompt - q
             self.say("(EngineCore pid=9) INFO [PINDIAG] sticky admit req='%s' Q=%d P=%d tail=%d" % (
-                request.request_id, q, len(request.prompt_token_ids), len(request.prompt_token_ids) - q))
+                request.request_id, q, len(request.prompt_token_ids), tail))
         if not self.prefix:
             return
         before = self.programs

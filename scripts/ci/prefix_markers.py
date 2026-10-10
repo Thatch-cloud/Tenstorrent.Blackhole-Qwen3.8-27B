@@ -79,8 +79,14 @@ never guessed around):
   the fast path's sticky sessions (QWEN_FAST_STICKY_SESSIONS=1):
     [PINDIAG] prefix: install sticky=1 lookahead=<n> drop_last=<bool> ceiling=floor2048(P-2048)
         the scheduler graft's second install line; read into sticky_installs, never installs.
+    [PINDIAG] prefix: install chunked=levern: chunked prefill beside the Lever N cap (max_num_scheduled_tokens=<n>)
+        Lever N's install line (QWEN_FAST_LEVER_N=1 beside the prefix graft), written AFTER the other two; read into chunked_installs (chunked
+        'levern', max_num_scheduled_tokens), never installs: only a body that begins `scheduler=` is the install the gate reads its class, block
+        size and KV dtype from. The gate takes chunked_installs to mean the request's prefill is Lever N's steps, not one.
     [PINDIAG] sticky admit req='<engine request id>' Q=<n> P=<n> tail=<n>
-        serving_lifecycle, once per request admitted at a granted boundary; read into sticky_admits.
+        serving_lifecycle, once per request admitted at a granted boundary; read into sticky_admits. tail is the FIRST scheduled chunk
+        (`chunk` in the lifecycle): the whole rest of the prompt, P - Q, without Lever N, and under Lever N's chunked prefill the first
+        step of the plan (2,048 tokens while seats decode, e.g. P=6197 Q=2048 tail=2048 and a continuation start=4096 tokens=2101).
     [PINDIAG] sticky engine built req=<engine request id, first 48 characters> ms=<f> frontier=<R, 0 cold> [kind=<build|rebind>: engine reuse only]
         prompt=<P> [kind=<build|rebind>]   serving_runtime.STICKY_ENGINE_MARKER, once per admitted request's engine build; read
         into sticky_builds (the TTFT split: the tail prefill, then this build). Under engine reuse (QWEN_FAST_PARKED_ENGINES=1) every
@@ -110,6 +116,11 @@ DOCKER_TIME = re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z) ')
 INSTALL = '[PINDIAG] prefix: install '
 # The scheduler graft's sticky-session install line begins 'install sticky=' (qwen_prefix_scheduler_patch).
 STICKY_INSTALL = 'sticky='
+# The install line the gate reads (class, block size, KV dtype, store) begins 'install scheduler='; Lever N's begins 'install chunked=levern: ...'
+# and is written after the sticky one, so it is its own list (chunked_installs): it carries none of those fields.
+SCHEDULER_INSTALL = 'scheduler='
+CHUNKED_INSTALL = 'chunked='
+CHUNKED_CAP = re.compile(r'max_num_scheduled_tokens=(\d+)')
 STICKY_ADMIT = re.compile(r"\[PINDIAG\] sticky admit req=(?:'([^']*)'|\"([^\"]*)\"|(\S+)) Q=(\d+) P=(\d+) tail=(\d+)")
 STICKY_BUILT = re.compile(r'\[PINDIAG\] sticky engine built req=(\S+) ms=([0-9.]+) frontier=(\d+) prompt=(\d+)(?: kind=(build|rebind))?')
 # qwen_prefix_model_patch.MARKER_WARM: the warm that chose a restore path. Its skip line (off the batched TP path,
@@ -292,7 +303,7 @@ def dram_reading(line):
 def scan(lines):
     """Every marker in a server log (a list of lines, docker timestamps allowed), in order. Each
     entry keeps its line index and timestamp so the driver can window it against a request."""
-    out = dict(installs=[], grants=[], rows=[], audits=[], refused=[], capture_skipped=[], kill_switch=[],
+    out = dict(installs=[], chunked_installs=[], grants=[], rows=[], audits=[], refused=[], capture_skipped=[], kill_switch=[],
                stats=None, launches=[], apc=[], chunking_off=0, chunk_replay=0, dram=[], dram_readings=[],
                kv_tokens=None, failures=[], audit_costs=[], audit_crosses=[], eager_warm=[], four_card_warm=[], sticky_installs=[], sticky_admits=[], sticky_builds=[],
                model_warm=[], model_warm_skipped=[], kv_shared=[], audit_windows=[])
@@ -303,7 +314,17 @@ def scan(lines):
             body = line.split(INSTALL, 1)[1]
             entry = fields(body)
             entry.update(where)
-            out['sticky_installs' if body.startswith(STICKY_INSTALL) else 'installs'].append(entry)
+            if body.startswith(STICKY_INSTALL):
+                out['sticky_installs'].append(entry)
+            elif body.startswith(CHUNKED_INSTALL):
+                # 'chunked=levern: chunked prefill beside the Lever N cap (max_num_scheduled_tokens=262032)': the mode is the word before the colon.
+                entry['chunked'] = body[len(CHUNKED_INSTALL):].split(':', 1)[0].strip()
+                cap = CHUNKED_CAP.search(body)
+                if cap:
+                    entry['max_num_scheduled_tokens'] = int(cap.group(1))
+                out['chunked_installs'].append(entry)
+            elif body.startswith(SCHEDULER_INSTALL):
+                out['installs'].append(entry)
         match = STICKY_ADMIT.search(line)
         if match:
             req = match.group(1) or match.group(2) or match.group(3)

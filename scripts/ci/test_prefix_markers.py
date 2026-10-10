@@ -270,6 +270,27 @@ class StickyLineTests(unittest.TestCase):
         sticky, = scanned['sticky_installs']
         self.assertEqual((sticky['sticky'], sticky['lookahead'], sticky['drop_last']), (1, 16, 'True'))
 
+    def test_the_lever_n_chunked_install_line_is_not_an_install(self):
+        """Lever N's install line, written AFTER the sticky one, begins `chunked=` and carries none of the scheduler line's fields: read as THE install (the gate
+        took installs[-1]) it reported the graft on None, block size None and QWEN_SDPA_BF8=None. Only a body that begins `scheduler=` is an install."""
+        self.assertIn("self.log('install chunked=levern: chunked prefill beside the Lever N cap (max_num_scheduled_tokens=%s)',",
+                      source('qwen_prefix_scheduler_patch.py'), 'the graft prints this line, as the test does')
+        scheduler = install_line()
+        sticky = graft_line('install sticky=1 lookahead=%d drop_last=%s ceiling=floor2048(P-%d)', 16, True, 2048)
+        chunked = graft_line('install chunked=levern: chunked prefill beside the Lever N cap (max_num_scheduled_tokens=%s)', 262032)
+        scanned = pm.scan(['(EngineCore pid=7) ' + scheduler, '(EngineCore pid=7) ' + sticky, '(EngineCore pid=7) ' + chunked])
+        install, = scanned['installs']
+        self.assertEqual((install['scheduler'], install['block_size'], install['QWEN_SDPA_BF8']), ('vllm_tt_plugin.scheduler.TTScheduler', 64, 1))
+        entry, = scanned['chunked_installs']
+        self.assertEqual((entry['chunked'], entry['max_num_scheduled_tokens']), ('levern', 262032))
+        self.assertEqual(len(scanned['sticky_installs']), 1)
+        # not the last line either: the scheduler line is the one install whatever order the graft wrote them in
+        again = pm.scan([chunked, sticky, scheduler])
+        self.assertEqual([item['scheduler'] for item in again['installs']], ['vllm_tt_plugin.scheduler.TTScheduler'])
+        self.assertEqual(len(again['chunked_installs']), 1)
+        # an engine without Lever N logs none
+        self.assertEqual(pm.scan([scheduler, sticky])['chunked_installs'], [])
+
     def test_the_lifecycle_s_admit_and_the_runtime_s_build_lines(self):
         self.assertIn('logger.info(f"[PINDIAG] sticky admit req={new.req_id!r} Q={resume} "', source('serving_lifecycle.py'))
         self.assertIn('f"P={len(new.prompt_token_ids)} tail={chunk}")', source('serving_lifecycle.py'))
