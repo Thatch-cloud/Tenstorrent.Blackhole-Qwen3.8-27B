@@ -370,7 +370,7 @@ class HarnessTests(unittest.TestCase):
 
     def test_the_program_cache_is_on_before_any_op_runs(self):
         status, lines, report, ttnn = self.run_fake()
-        self.assertEqual(ttnn.calls[0], 'program_cache')
+        self.assertEqual(ttnn.calls[:2], ['open', 'program_cache'])
         self.assertTrue(ttnn.program_cache)
 
     def test_without_the_program_cache_no_trace_can_be_captured(self):

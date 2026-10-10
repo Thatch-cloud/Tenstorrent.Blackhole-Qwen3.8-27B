@@ -1,7 +1,7 @@
 # The order of the sub-device overlap pack (optimisation/ttnn-op/subdev_h): can the DFlash2 drafter run CONCURRENTLY with the target verify on a Blackhole chip, through tt-metal sub-devices and two command queues?
 # H1 (one card, ttnn Python only) decides the COMPUTE: a 80-core target sub-device fed by queue 0 and a 30-core drafter sub-device fed by queue 1, traces on both, concurrent wall <= 1.1 x max(solo), outputs
 # byte-identical. H2 (four cards) decides the COLLECTIVES: an all_gather on each sub-device, separate semaphores, sharing a link and (with the prepared graft) on separate links. H2 RUNS LAST in any window and
-# is followed by an all-board reset.
+# is followed by an all-board reset. H2c is expected to hang the mesh (see its header).
 # One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
 # stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (dependents are skipped by the NEEDS lines below; every card job begins with a reset or a fresh open).
 # P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z (the cutover pack's steps and post-checks; nothing in this pack does either).
@@ -16,18 +16,21 @@
 # NEEDS X0 <- H1b
 # NEEDS H2a <- X0 H1b
 # NEEDS H2b <- H2a
+# NEEDS H2c <- H2b
 # READ RULES (each also needs no stall; the templates' own headers have the whole text):
 #   H1a    'SUBDEV_H1 verdict=UNTIMED-PASS', the watcher log with no error/assert line. FAIL-BYTES, NOT-MEASURED, a hang: STOP (reset card M only, as printed), H1b, H2a and H2b are skipped.
 #   H1b    'SUBDEV_H1 verdict=PASS' (concurrent <= 1.1 x max(solo), bytes identical). FAIL-SERIALISED / FAIL-PARTIAL: the finding (the queues do not overlap, or only partly): H2a and H2b are skipped, nothing needs the collectives.
 #   X0     four cards present and healthy, the fabric as measured, no other driver alive.
 #   H2a    'SUBDEV_H2 verdict=UNTIMED-PASS' with watcher_errors=0. FAIL-BYTES or a hang: H2b is skipped, Z resets.
-#   H2b    'SUBDEV_H2 verdict=PASS' or 'PASS-SEPARATE-LINKS'; FAIL-SERIALISED / FAIL-PARTIAL = the sub-devices' gathers contend for the link (build the graft; ag_link_offset.patch).
+#   H2b    'SUBDEV_H2 verdict=SAFE-PASS' (bytes identical; t_ms, d_ms, chained_ms, one_queue_ms): the sub-device collectives are exact; no overlap is judged.
+#   H2c    expected 'SUBDEV_H2 verdict=HANG stage=arm-shared' (two gather streams on one fabric link deadlock the ring); PASS or FAIL-* (it did not hang) is news. Z resets either way.
 # NO-GO: any hang or stall, any byte difference between a concurrent run and a solo run, a TT_FATAL at the manager or the first trace (NOT-MEASURED with the error), a watcher error line.
-# Time (estimate, minutes; cumulative in brackets): H1a 30 [30], H1b 25 [55], X0 20 [75], H2a 30 [105], H2b 40 [145], Z 10 [155]: 155 minutes (2 h 35 min) in all; H1a and H1b alone are 55 minutes after the cards are free;
+# Time (estimate, minutes; cumulative in brackets): H1a 30 [30], H1b 25 [55], X0 20 [75], H2a 30 [105], H2b 30 [135], H2c 25 [160], Z 10 [170]: 170 minutes (2 h 50 min) in all; H1a and H1b alone are 55 minutes after the cards are free;
 #   about 3 minutes of queue per tag on top.
 H1a-subdev-watcher soft tp4-next2-1 30
 H1b-subdev-timed soft tp4-next2-1 25
 X0-status-rescan-reset stop tp4-next2-1 20
 H2a-subdev-quad-watcher soft tp4-next2-1 30
-H2b-subdev-quad-timed soft tp4-next2-1 40
+H2b-subdev-quad-timed soft tp4-next2-1 30
+H2c-subdev-quad-shared soft tp4-next2-1 25
 Z-reset soft tp4-next2-1 10

@@ -17,8 +17,15 @@ Arms (exactness against the host's concatenation on every chip, then timing in i
             link in this tt-metal (num_links counts links from 0; the factory passes its loop index to the fabric), so without the graft this arm
             reads NOT-RUN. The graft is a prepared source, not built.
 
+MEASURED 2026-10-10 (the first card run): the mesh opens, the manager loads, eager gathers on both sub-devices (separate semaphores, two queues) run
+concurrently and are exact, the four traces capture and replay solo exactly, and the FIRST CONCURRENT REPLAY OF TWO GATHER TRACES ON ONE LINK HANGS. The
+fabric does not arbitrate two clients of one router sender channel (worker side: edm_fabric_worker_adapters.hpp open_start / open_finish write the client's
+identity into the channel's single location-info block and set the handshake word, with no check that the channel is free; the router has exactly one
+local-worker sender channel per link, sender channel 0, fabric.cpp), so the arms that share a link are LAST and may be run alone (probe subdev-shared).
+
 PASS = shared-link concurrent wall <= 1.1 x max(solo), every compared tensor identical, nothing hung. PASS-SEPARATE-LINKS = only the separate
-links overlap (the graft is required). The run holds all four cards: put it LAST in a window and follow it with an all-board reset.
+links overlap (the graft is required). SAFE-PASS = the arms that cannot hang (solo, chained by an event, both on one queue) are exact and timed; no overlap
+is judged. The run holds all four cards: put it LAST in a window and follow it with an all-board reset.
 
 Last stdout lines: 'SUBDEV_H2 verdict=...' then one JSON object (kind subdev-h2). Exit: 0 PASS / PASS-SEPARATE-LINKS / UNTIMED-PASS, 1 FAIL,
 2 NOT-MEASURED, 3 the watchdog (a hang; the heartbeat lines 'SUBDEV_H2 alive stage=...' show where).
@@ -42,7 +49,23 @@ LINK_ENV = 'QWEN_AG_LINK_OFFSET_SD1'
 CHIPS = 4
 # (rows, per-chip width in elements): the verify gather of a 64-row slice (hidden 5120 / 4 chips) and the quad draft's (hidden 2560 / 4).
 SHAPES = dict(target=(64, 1280), drafter=(32, 640))
-ARMS = ('t_solo', 'd_solo', 'shared', 'shared2', 'separate')
+# Result keys, in the order the arms RUN: the safe ones first, the one that needs the graft next, the ones that share a fabric link last. Two programs
+# opening the same router sender channel is not arbitrated (see the docstring): a shared-link arm may deadlock the mesh, and a hang ends the process, so
+# nothing that could hang runs before the numbers that cannot are in the report.
+ARMS = ('t_solo', 'd_solo', 'chained', 'one_queue', 'separate', 'shared', 'shared2')
+ARM_GROUPS = dict(solo=('t_solo', 'd_solo'), chained=('chained',), one_queue=('one_queue',), separate=('separate',), shared=('shared',), shared2=('shared2',))
+SAFE_GROUPS = ('solo', 'chained', 'one_queue')
+HAZARD_GROUPS = ('separate', 'shared', 'shared2')
+DEFAULT_ARMS = ','.join(SAFE_GROUPS)
+
+
+def parse_groups(text):
+    """The arm groups named by --arms, in the order they will run (the safe ones first, the hazard ones last)."""
+    names = [name.strip() for name in str(text).split(',') if name.strip()]
+    unknown = [name for name in names if name not in ARM_GROUPS]
+    if unknown or not names:
+        raise ValueError('--arms names %s; known: %s' % (unknown or 'nothing', ', '.join(ARM_GROUPS)))
+    return [group for group in SAFE_GROUPS + HAZARD_GROUPS if group in names]
 
 
 def verdict_line(text, evidence, extra=None):
@@ -52,7 +75,8 @@ def verdict_line(text, evidence, extra=None):
 
     parts = ['%s verdict=%s' % (TAG, text), 'shared_ratio=%s' % number('shared_ratio'), 'separate_ratio=%s' % number('separate_ratio'),
              'shared2_ratio=%s' % number('shared2_ratio'), 't_ms=%s' % number('t_solo_ms'), 'd_ms=%s' % number('d_solo_ms'),
-             'shared_ms=%s' % number('shared_ms'), 'separate_ms=%s' % number('separate_ms'),
+             'shared_ms=%s' % number('shared_ms'), 'separate_ms=%s' % number('separate_ms'), 'chained_ms=%s' % number('chained_ms'),
+             'one_queue_ms=%s' % number('one_queue_ms'),
              'bytes=%s' % ('identical' if not evidence.get('mismatched') and evidence.get('compared') else
                            'DIFFER(%s/%s)' % (evidence.get('mismatched'), evidence.get('compared'))),
              'timing=%d' % int(bool(evidence.get('timing')))]
@@ -95,6 +119,7 @@ class Harness2(object):
         self.arm_ns = {name: [] for name in ARMS}
         self.manager_id = None
         self.topology = getattr(ttnn.Topology, options.topology)
+        self.groups = parse_groups(options.arms)
 
     def span(self, label, seconds=None):
         return self.wd.span(label, self.o.watchdog_s if seconds is None else seconds)
@@ -106,6 +131,7 @@ class Harness2(object):
         self.report['last_stage'] = name
         if self.heartbeat is not None:
             self.heartbeat.set(name)
+        self.snapshot()
         self.persist()
         self.log('%s stage=%s' % (TAG, name))
 
@@ -231,6 +257,8 @@ class Harness2(object):
             out_d = self.run_gathers(d, 1, 1, self.pool(d, 'eager'), 2)
             self.sync(1, [self.sd[1]])
         self.check('eager drafter solo', d, out_d)
+        if 'shared' not in self.groups:
+            return
         self.stage('eager-concurrent')
         for index in range(self.o.eager_rounds):
             with self.span('eager-concurrent'):
@@ -244,23 +272,58 @@ class Harness2(object):
 
     def arm_fns(self):
         sd0, sd1 = self.sd
-        both = lambda a, b, flip: (self.replay(b, 1), self.replay(a, 0)) if flip else (self.replay(a, 0), self.replay(b, 1))  # noqa: E731
 
-        def shared(trace_t, trace_d):
+        def both(first, second, flip):
+            if flip:
+                self.replay(second[0], second[1])
+                self.replay(first[0], first[1])
+            else:
+                self.replay(first[0], first[1])
+                self.replay(second[0], second[1])
+
+        def concurrent(trace_t, trace_d):
             def run(flip):
-                both(trace_t, trace_d, flip)
+                both((trace_t, 0), (trace_d, 1), flip)
                 self.sync(0, [sd0])
                 self.sync(1, [sd1])
             return run
 
+        def chained(flip):
+            self.replay('t', 0)
+            event = self.ttnn.record_event(self.mesh, 0, [sd0])
+            self.ttnn.wait_for_event(1, event)
+            self.replay('d', 1)
+            self.sync(0, [sd0])
+            self.sync(1, [sd1])
+
+        def one_queue(flip):
+            both(('t', 0), ('d0', 0), flip)
+            self.sync(0, [sd0, sd1])
+
         fns = dict(t_solo=lambda flip: (self.replay('t', 0), self.sync(0, [sd0])),
                    d_solo=lambda flip: (self.replay('d', 1), self.sync(1, [sd1])),
-                   shared=shared('t', 'd'))
+                   chained=chained, one_queue=one_queue, shared=concurrent('t', 'd'))
         if 't2' in self.traces:
-            fns['shared2'] = shared('t2', 'd2')
+            fns['shared2'] = concurrent('t2', 'd2')
         if 'ds' in self.traces:
-            fns['separate'] = shared('t', 'ds')
-        return fns
+            fns['separate'] = concurrent('t', 'ds')
+        return {name: fn for name, fn in fns.items() if name in self.selected_arms()}
+
+    def programs_warmed(self):
+        return ['ds'] if getattr(self, 'd_sep', None) is not None else []
+
+    def selected_arms(self):
+        return [arm for group in self.groups for arm in ARM_GROUPS[group]]
+
+    def snapshot(self):
+        """The partial results into the report, so a hang (which ends the process) leaves every number measured before it."""
+        self.report['arms'] = {name: plan.summarize(samples) for name, samples in self.arm_ns.items() if samples}
+        self.report['exactness'] = self.exact
+
+    def announce(self, name):
+        if name in ('shared', 'shared2'):
+            self.log('%s next arm=%s hazard="two clients of one fabric router sender channel; a hang here is the finding"' % (TAG, name))
+        self.stage('arm-' + name)
 
     def run_arm(self, fns, name, flip=False, record=False):
         with self.span('arm-' + name):
@@ -271,36 +334,34 @@ class Harness2(object):
         if record:
             self.arm_ns[name].append(elapsed)
 
-    def exactness(self, fns):
-        t, d = self.t_side, self.d_side
-        self.poison(t, self.out['t'])
-        self.run_arm(fns, 't_solo')
-        self.check('trace target solo', t, self.out['t'])
-        self.poison(d, self.out['d'])
-        self.run_arm(fns, 'd_solo')
-        self.check('trace drafter solo', d, self.out['d'])
-        for name in ('shared', 'shared2', 'separate'):
-            if name not in fns:
-                continue
-            tt, dd, d_side = {'shared': ('t', 'd', d), 'shared2': ('t2', 'd2', d), 'separate': ('t', 'ds', getattr(self, 'd_sep', d))}[name]
-            for repeat in range(2):
-                self.poison(t, self.out[tt])
-                self.poison(d_side, self.out[dd])
-                self.run_arm(fns, name, flip=bool(repeat))
-                self.check('%s #%d target' % (name, repeat), t, self.out[tt])
-                self.check('%s #%d drafter' % (name, repeat), d_side, self.out[dd])
-        self.stage('exactness-done')
+    def arm_outputs(self, name):
+        """(target trace key, drafter trace key, drafter side) of an arm's compared outputs."""
+        d = self.d_side
+        return {'t_solo': ('t', None, None), 'd_solo': (None, 'd', d), 'chained': ('t', 'd', d), 'one_queue': ('t', 'd0', d),
+                'shared': ('t', 'd', d), 'shared2': ('t2', 'd2', d), 'separate': ('t', 'ds', getattr(self, 'd_sep', d))}[name]
 
-    def timing(self, fns):
-        order = [name for name in ARMS if name in fns]
-        for index in range(self.o.warmup + self.o.rounds):
-            shift = index % len(order)
-            arms = order[shift:] + order[:shift]
-            if (index // len(order)) % 2:
-                arms = list(reversed(arms))
-            for name in arms:
-                self.run_arm(fns, name, flip=bool((index // 2) % 2), record=index >= self.o.warmup)
-        self.stage('timing-done')
+    def measure(self, fns):
+        """Arm by arm, in the safety order: the bytes (poisoned outputs, two replays), then the timed rounds, then the snapshot. A hang in a later arm cannot
+        take an earlier arm's numbers with it, and the arms that could hang run after every arm that cannot."""
+        t = self.t_side
+        for name in [arm for arm in ARMS if arm in fns]:
+            self.announce(name)
+            tt, dd, d_side = self.arm_outputs(name)
+            for repeat in range(1 if name in ('t_solo', 'd_solo') else 2):
+                if tt:
+                    self.poison(t, self.out[tt])
+                if dd:
+                    self.poison(d_side, self.out[dd])
+                self.run_arm(fns, name, flip=bool(repeat))
+                if tt:
+                    self.check('%s #%d target' % (name, repeat), t, self.out[tt])
+                if dd:
+                    self.check('%s #%d drafter' % (name, repeat), d_side, self.out[dd])
+            if not self.o.no_timing:
+                for index in range(self.o.warmup + self.o.rounds):
+                    self.run_arm(fns, name, flip=bool((index // 2) % 2), record=index >= self.o.warmup)
+            self.snapshot()
+        self.stage('measure-done')
 
     def run(self):
         ttnn, report = self.ttnn, self.report
@@ -329,37 +390,44 @@ class Harness2(object):
             self.d_side = self.side('drafter', split['drafter'], self.sd[1], *SHAPES['drafter'])
             self.sync_all()
         self.eager()
-        self.stage('capture')
         t, d = self.t_side, self.d_side
-        self.out = {}
-        self.out['t'] = self.capture('t', t, 0, 1, self.pool(t, 'trace1'))
-        self.out['d'] = self.capture('d', d, 1, 1, self.pool(d, 'trace1'))
-        if self.o.two_links:
-            self.warm('t2', t, 0, 2)
-            self.warm('d2', d, 1, 2)
-            self.out['t2'] = self.capture('t2', t, 0, 2, self.pool(t, 'trace2'))
-            self.out['d2'] = self.capture('d2', d, 1, 2, self.pool(d, 'trace2'))
         offset = self.o.link_offset
         report['link_offset'] = offset
-        if offset > 0:
-            # (b): the drafter's gathers on link `offset`. Only the graft reads the variable, and it reads it when a program is BUILT, so it is set
-            # for this one capture and removed after it; the drafter shape is one the shared arm did not use (rows + 32), so the program is built now
-            # (the sub-device is in the program hash, the environment is not).
+        report['arms_requested'] = list(self.groups)
+        # EVERY device allocation and every first run of a program comes BEFORE the first capture: the runtime warns that a buffer allocated while a trace is
+        # active may be corrupted when the trace executes (its temporaries are freed and reusable), and a capture of a program that never ran is a TT_FATAL.
+        self.stage('warm')
+        if 'shared2' in self.groups:
+            self.warm('t2', t, 0, 2)
+            self.warm('d2', d, 1, 2)
+        if 'separate' in self.groups and offset > 0:
+            # (b): the drafter's gathers on link `offset`. Only the graft reads the variable, and it reads it when a program is BUILT, so it is set for
+            # the warm-up that builds it and removed after; the drafter shape is one the shared arm does not use (rows + 32), so the program is new (the
+            # sub-device is in the program hash, the environment is not).
             self.d_sep = self.side('drafter-separate', self.d_side.rect, self.sd[1], SHAPES['drafter'][0] + 32, SHAPES['drafter'][1])
             self.environ[LINK_ENV] = str(offset)
             try:
                 self.warm('ds', self.d_sep, 1, 1)
-                self.out['ds'] = self.capture('ds', self.d_sep, 1, 1, self.pool(self.d_sep, 'trace1'))
             finally:
                 self.environ.pop(LINK_ENV, None)
         else:
-            report['separate'] = 'NOT-RUN: --link-offset is 0; the link-offset graft (ag_link_offset.patch) is not built into this image'
+            report['separate'] = 'NOT-RUN: the arm needs --link-offset 1 and the link-offset graft (ag_link_offset.patch), which no image has built'
+        self.sync_all()
+        self.stage('capture')
+        self.out = {}
+        self.out['t'] = self.capture('t', t, 0, 1, self.pool(t, 'trace1'))
+        self.out['d'] = self.capture('d', d, 1, 1, self.pool(d, 'trace1'))
+        if 'one_queue' in self.groups:
+            self.out['d0'] = self.capture('d0', d, 0, 1, self.pool(d, 'trace0'))
+        if 'shared2' in self.groups:
+            self.out['t2'] = self.capture('t2', t, 0, 2, self.pool(t, 'trace2'))
+            self.out['d2'] = self.capture('d2', d, 1, 2, self.pool(d, 'trace2'))
+        if 'ds' in self.programs_warmed():
+            self.out['ds'] = self.capture('ds', self.d_sep, 1, 1, self.pool(self.d_sep, 'trace1'))
         report['traces'] = sorted(self.traces)
         fns = self.arm_fns()
-        self.stage('exactness')
-        self.exactness(fns)
-        self.stage('timing')
-        self.timing(fns)
+        self.stage('measure')
+        self.measure(fns)
 
     def teardown(self):
         mesh = self.mesh
@@ -385,7 +453,7 @@ class Harness2(object):
 
 def finish(harness, report, options, error):
     """(verdict text, evidence, printed line) from what the harness measured."""
-    arms = {name: plan.summarize(samples) for name, samples in harness.arm_ns.items()} if harness is not None else {}
+    arms = {name: plan.summarize(samples) for name, samples in harness.arm_ns.items() if samples} if harness is not None else {}
     report['arms'] = arms
     if harness is not None:
         report['exactness'] = harness.exact
@@ -398,10 +466,13 @@ def finish(harness, report, options, error):
     for name in ('t_solo', 'd_solo'):
         if arms.get(name, {}).get('median_ms') is not None:
             evidence[name + '_ms'] = arms[name]['median_ms']
+    report['arms_requested'] = report.get('arms_requested') or list(parse_groups(options.arms))
     extra = dict(links=1, topology=options.topology, link_offset=report.get('link_offset', 0),
-                 separate='RUN' if separate_run else 'NOT-RUN')
+                 separate='RUN' if separate_run else 'NOT-RUN', arms='+'.join(report['arms_requested']))
     if error:
         extra['error'] = '"%s"' % ' '.join(str(error).split())[:200].replace('"', "'")
+    if report.get('known_failure'):
+        extra['known_failure'] = '"%s"' % ' '.join(str(report['known_failure']).split())[:200].replace('"', "'")
     line = verdict_line(text, evidence, extra)
     report.update(verdict=text, evidence=evidence)
     return text, evidence, line
@@ -415,7 +486,9 @@ def add_arguments(parser):
     parser.add_argument('--rounds', type=int, default=20)
     parser.add_argument('--warmup', type=int, default=4)
     parser.add_argument('--topology', choices=('Ring', 'Linear'), default='Ring', help='the model picks Ring on four p150')
-    parser.add_argument('--no-two-links', dest='two_links', action='store_false', help='skip the num_links 2 information arm')
+    parser.add_argument('--arms', default=DEFAULT_ARMS,
+                        help='arm groups to run, comma separated, from %s. The default is the arms that cannot hang; shared and shared2 put two gather '
+                             'streams on one fabric link and may deadlock the mesh (separate needs --link-offset 1)' % ', '.join(ARM_GROUPS))
     parser.add_argument('--link-offset', type=int, default=0,
                         help='arm (b): the drafter gathers on fabric link N (needs the link-offset graft, which no image has built; 0 skips the arm)')
     parser.add_argument('--no-timing', action='store_true', help='bytes and hangs only (the watcher pass)')
@@ -432,6 +505,14 @@ def problems_of(options):
     problems = []
     if options.link_offset < 0 or options.link_offset > 1:
         problems.append('--link-offset must be 0 or 1 (the fabric trains two links per card pair)')
+    try:
+        groups = parse_groups(options.arms)
+        if 'separate' in groups and options.link_offset == 0:
+            problems.append('--arms separate needs --link-offset 1 (and the graft)')
+        if options.link_offset and 'separate' not in groups:
+            problems.append('--link-offset 1 runs the separate arm: add it to --arms')
+    except ValueError as error:
+        problems.append(str(error))
     if options.gathers < 2:
         problems.append('--gathers must be at least 2')
     if options.rounds < 3 or options.warmup < 0 or options.eager_rounds < 1:

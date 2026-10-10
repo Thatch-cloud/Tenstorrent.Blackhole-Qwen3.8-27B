@@ -22,7 +22,7 @@ PROFILES = json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8
 TAG = 'tp4-next2-1'
 HARNESS = 'optimisation/ttnn-op/subdev_h/run_card_m.sh'
 H1 = ('H1a-subdev-watcher', 'H1b-subdev-timed')
-H2 = ('H2a-subdev-quad-watcher', 'H2b-subdev-quad-timed')
+H2 = ('H2a-subdev-quad-watcher', 'H2b-subdev-quad-timed', 'H2c-subdev-quad-shared')
 ORDER = H1 + ('X0-status-rescan-reset',) + H2 + ('Z-reset',)
 
 
@@ -78,12 +78,12 @@ class PackTests(unittest.TestCase):
         self.assertEqual(second['cardm_env'].split(), ['IMAGE_TAG=' + TAG])
         self.assertEqual((first['cardm_args'], second['cardm_args']), ('', ''))
 
-    def test_the_h2_jobs_are_the_quad_probe_watcher_pass_first_then_timed_with_a_box_inside_the_fabric_step(self):
-        first, second = parsed(H2[0]), parsed(H2[1])
-        for outputs in (first, second):
+    def test_the_h2_jobs_are_the_quad_probe_watcher_pass_then_timed_safe_arms_then_the_shared_link_arms(self):
+        first, second, third = parsed(H2[0]), parsed(H2[1]), parsed(H2[2])
+        for outputs in (first, second, third):
             self.assertEqual((outputs['cards'], outputs['actions'], outputs['fabric']), ('quad', 'reset fabric', 'FABRIC_1D'))
             self.assertLessEqual(int(outputs['box_minutes']), job.STEP_MINUTES['fabric'])
-        self.assertEqual((first['fabric_probe'], second['fabric_probe']), ('subdev-watch', 'subdev'))
+        self.assertEqual((first['fabric_probe'], second['fabric_probe'], third['fabric_probe']), ('subdev-watch', 'subdev', 'subdev-shared'))
 
     def test_h2_runs_last_and_the_all_board_reset_ends_the_pack(self):
         names = [row[0] for row in order()]
@@ -91,14 +91,15 @@ class PackTests(unittest.TestCase):
             for earlier in H1:
                 self.assertLess(names.index(earlier), names.index(quad))
         self.assertEqual(names[-1], 'Z-reset')
-        self.assertEqual(names[-3:-1], list(H2))
+        self.assertEqual(names[-4:-1], list(H2))
+        self.assertEqual(names[-2], 'H2c-subdev-quad-shared', 'the arms that may hang the mesh run last, just before the reset')
         self.assertEqual(parsed('Z-reset')['actions'], 'status reset')
         self.assertEqual(parsed('X0-status-rescan-reset')['actions'], 'status rescan reset')
         self.assertEqual(names.index('X0-status-rescan-reset'), len(H1))
 
     def test_the_dependency_lines_name_real_jobs_in_order(self):
         names = [row[0] for row in order()]
-        short = {re.match(r'[A-Z]\d*[ab]?', name).group(0): name for name in names}
+        short = {re.match(r'[A-Z]\d*[abc]?', name).group(0): name for name in names}
         for left, right in needs():
             for key in left + right:
                 self.assertIn(key, short, key)
@@ -109,6 +110,7 @@ class PackTests(unittest.TestCase):
         self.assertEqual(graph['H1b'], {'H1a'})
         self.assertEqual(graph['H2a'], {'X0', 'H1b'})
         self.assertEqual(graph['H2b'], {'H2a'})
+        self.assertEqual(graph['H2c'], {'H2b'})
 
     def test_the_stated_minutes_add_up(self):
         rows = order()
@@ -130,7 +132,13 @@ class PackTests(unittest.TestCase):
         self.assertIn('UNTIMED-PASS', text(H1[0]))
         self.assertIn('PASS = concurrent wall <= 1.1 x max(solo walls)', text(H1[1]))
         self.assertIn('ag_link_offset.patch', text(H2[1]))
-        self.assertIn('ALL-BOARD RESET', text(H2[0]))
+        self.assertNotIn('PASS = the shared-link', text(H2[1]), 'H2b no longer judges an overlap')
+        self.assertIn('TT_METAL_WATCHER_DISABLE_ETH=1', text(H2[0]))
+        self.assertIn('25,600', text(H2[0]))
+        self.assertIn('SAFE-PASS', text(H2[1]))
+        self.assertIn('verdict=HANG stage=arm-shared', text(H2[2]))
+        self.assertIn('ALL-BOARD RESET', text(H2[2]))
+        self.assertIn('edm_fabric_worker_adapters.hpp', text(H2[2]))
 
     def test_the_templates_are_unsuperseded_and_name_no_host_address_registry_digest_or_home(self):
         pattern = re.compile(r'(/home/|/Users/|\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|\.local\b|zot\.|sha256:[0-9a-f]{16}|ghp_|token=|blackhole-[A-Za-z0-9]{8,})')
@@ -145,9 +153,11 @@ class RegistrationTests(unittest.TestCase):
     def test_the_job_parser_and_the_workflow_know_the_subdev_probes(self):
         self.assertIn('subdev', job.FABRIC_PROBES)
         self.assertIn('subdev-watch', job.FABRIC_PROBES)
+        self.assertIn('subdev-shared', job.FABRIC_PROBES)
         workflow = (ROOT / '.github' / 'workflows' / 'qwen-c2-serving.yml').read_text(encoding='utf-8')
         self.assertIn('subdev) script=tp4_subdev_probe.py; report=subdev-probe.json ;;', workflow)
         self.assertIn('subdev-watch) script=tp4_subdev_probe.py; report=subdev-probe.json; probe_args=(--watcher) ;;', workflow)
+        self.assertIn('subdev-shared) script=tp4_subdev_probe.py; report=subdev-probe.json; probe_args=(--arms solo,shared,shared2) ;;', workflow)
         self.assertIn('${probe_args[@]+"${probe_args[@]}"}', workflow)
         self.assertIn('probe_args=()', workflow)
         self.assertIn('SUBDEV_H2', workflow)

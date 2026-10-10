@@ -7,8 +7,9 @@ the exactness rule and the verdict are optimisation/ttnn-op/subdev_h/subdev_h2.p
 the way the fabric probe and the mr probe do (the ring descriptor, the fabric config, ONE open, ONE close), with TWO command queues, under a per-call
 watchdog and a heartbeat. The probe holds all four cards: run it LAST in a window and follow it with an all-board reset.
 
---watcher: TT_METAL_WATCHER=5 is set before ttnn is imported (the watcher pass: bytes and hangs only, so it implies --no-timing) and the watcher
-log is copied beside the report with a count of its error lines.
+--watcher: TT_METAL_WATCHER=5 and TT_METAL_WATCHER_DISABLE_ETH=1 are set before ttnn is imported (the watcher pass: bytes and hangs only, so it implies
+--no-timing) and the watcher log is copied beside the report with a count of its error lines. The second variable is not optional: with the watcher on the
+ethernet cores the fabric router does not fit the ACTIVE_ETH kernel config buffer and the mesh does not open (see WATCHER_ENV).
 
 Last stdout lines: 'SUBDEV_H2 verdict=...' then one JSON object (kind subdev-h2). Exit: 0 PASS, PASS-SEPARATE-LINKS or UNTIMED-PASS, 1 FAIL, 2 NOT-MEASURED
 (the mesh did not open, the descriptor is not the ring's), 3 the watchdog.
@@ -34,6 +35,13 @@ import tp4_mesh  # noqa: E402
 
 KIND = subdev_h2.KIND
 WATCHER_LEVEL = '5'
+# The watcher instruments every kernel it builds, the fabric router's ethernet kernels included, and with it on the router no longer fits the
+# ACTIVE_ETH kernel config buffer (a fixed 25 KiB of the HAL, whatever sub-device manager is loaded): open_mesh_device dies in the fabric init with
+# 'Program size (28256) too large for kernel config buffer (25600) on ACTIVE_ETH' before the first sub-device exists (run 38044011709). The ethernet
+# switch compiles the instrumentation out of ethernet kernels only (CreateEthernetKernel adds FORCE_WATCHER_OFF); worker cores, where the gathers' workers
+# and muxes run, stay watched.
+WATCHER_ENV = (('TT_METAL_WATCHER', WATCHER_LEVEL), ('TT_METAL_WATCHER_DISABLE_ETH', '1'))
+ETH_OVERFLOW = 'too large for kernel config buffer'
 WATCHER_ERRORS = re.compile(r'error|assert|tripped|sanitiz|hang|stuck', re.I)
 
 
@@ -44,6 +52,23 @@ def build_parser():
     parser.add_argument('--watcher', action='store_true')
     subdev_h2.add_arguments(parser)
     return parser
+
+
+def apply_watcher_env(options, environ):
+    """Put the watcher variables in `environ` for a --watcher run (before ttnn is imported: the runtime reads them once, at initialisation) and
+    return what the run will see: {name: value or None} for each of WATCHER_ENV."""
+    if options.watcher:
+        for name, value in WATCHER_ENV:
+            environ[name] = value
+    return {name: environ.get(name) for name, _ in WATCHER_ENV}
+
+
+def known_failure(text):
+    """What a traceback means when this project has seen it before, else None."""
+    if ETH_OVERFLOW in (text or '') and 'ACTIVE_ETH' in (text or ''):
+        return ('the fabric router (an ACTIVE_ETH kernel) does not fit its kernel config buffer: the watcher is on the ethernet cores; '
+                'TT_METAL_WATCHER_DISABLE_ETH=1 compiles it out of ethernet kernels')
+    return tp4_fabric_probe.known_signature(text)
 
 
 def watcher_summary(output, environ, home=None):
@@ -78,8 +103,12 @@ def run(options, ttnn=None, torch=None, environ=None, log=plan.say, watchdog=Non
         except OSError:
             pass
 
+    held = {}
+
     def on_fire(label):
         report.update(verdict='HANG', error='watchdog: %s exceeded its budget' % label)
+        if held.get('harness') is not None:
+            held['harness'].snapshot()      # every arm measured before the hang goes into the report
         persist()
 
     if watchdog is None:
@@ -96,8 +125,7 @@ def run(options, ttnn=None, torch=None, environ=None, log=plan.say, watchdog=Non
             report.update(verdict='NOT-MEASURED', error='refused to open: ' + refusal)
             log('%s verdict=NOT-MEASURED error="%s"' % (subdev_h2.TAG, report['error']))
             return report, 2
-        if options.watcher:
-            environ['TT_METAL_WATCHER'] = WATCHER_LEVEL    # before ttnn is imported: the runtime reads it once, at initialisation
+    report['watcher_env'] = apply_watcher_env(options, environ)
     harness, mesh, error = None, None, None
     try:
         if ttnn is None:
@@ -112,12 +140,13 @@ def run(options, ttnn=None, torch=None, environ=None, log=plan.say, watchdog=Non
         mesh.enable_program_cache()      # a trace can only capture programs that already ran: they come from the program cache
         harness = subdev_h2.Harness2(ttnn, torch, mesh, options, watchdog, heartbeat=heartbeat, log=log, clock=clock, report=report,
                                      persist=persist, environ=environ)
+        held['harness'] = harness
         harness.run()
     except BaseException as caught:  # noqa: BLE001
         error = '%s: %s' % (type(caught).__name__, ' '.join(str(caught).split())[:500])
         report['error'] = error
         report['traceback'] = traceback.format_exc()[-3000:]
-        report['known_failure'] = tp4_fabric_probe.known_signature(report['traceback'])
+        report['known_failure'] = known_failure(report['traceback'] + ' ' + error)
     finally:
         if harness is not None:
             harness.teardown()

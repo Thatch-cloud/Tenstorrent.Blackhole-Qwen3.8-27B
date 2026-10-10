@@ -12,9 +12,10 @@ name: Qwen C2 serving image
 #            64-row block against its one-tile calls, bit for bit, then the tile-split wrapper): rs-tile-spike.json
 #            C2_FABRIC_PROBE=kvread runs scripts/ci/tp4_kv_read_probe.py (the prefix audit's region read, ttnn.qwen_read_blocks, against the
 #            whole-cache read byte for byte on the pool-sized cache; KV_READ_PROBE verdict=PASS|FAIL): kv-read-probe.json
-#            C2_FABRIC_PROBE=subdev runs scripts/ci/tp4_subdev_probe.py (H2: an all_gather on the target sub-device and one on the drafter sub-device in
-#            flight together on the (1, 4) ring, two command queues, separate semaphores; SUBDEV_H2 verdict=...): subdev-probe.json; subdev-watch is the
-#            same under TT_METAL_WATCHER=5 (untimed), its watcher log copied beside the report
+#            C2_FABRIC_PROBE=subdev runs scripts/ci/tp4_subdev_probe.py (H2: an all_gather on the target sub-device and one on the drafter sub-device on the
+#            (1, 4) ring, two command queues, separate semaphores; the arms that cannot hang; SUBDEV_H2 verdict=...): subdev-probe.json; subdev-watch is the
+#            same under TT_METAL_WATCHER=5 with the watcher off the ethernet cores (untimed), its watcher log copied beside the report; subdev-shared adds
+#            the arms that put both gather streams on one fabric link (the first card run hung there: it needs the all-board reset after it)
 #   cardm  - a single-card qualification harness (C2_CARDM_HARNESS, e.g. optimisation/ttnn-op/k64j/run_card_b.sh)
 #            on card M alone, card B being reserved for another project: QUAL_CARD=card M, ALLOW_SERVING_CARD=1, after
 #            the same refusals as the gate (anything holding M or A, a platform serving container); never card
@@ -445,6 +446,7 @@ jobs:
             kvread) script=tp4_kv_read_probe.py; report=kv-read-probe.json ;;
             subdev) script=tp4_subdev_probe.py; report=subdev-probe.json ;;
             subdev-watch) script=tp4_subdev_probe.py; report=subdev-probe.json; probe_args=(--watcher) ;;
+            subdev-shared) script=tp4_subdev_probe.py; report=subdev-probe.json; probe_args=(--arms solo,shared,shared2) ;;
             *) echo "unknown fabric probe: $PROBE" >&2; exit 1 ;;
           esac
           results="$RUNNER_TEMP/c2-results/fabric"

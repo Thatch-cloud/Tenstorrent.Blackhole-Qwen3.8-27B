@@ -14,7 +14,8 @@ harnesses' protocol to be tested on a CPU:
   - a timeline: every queue has a free-at time, a replay occupies its queue for the trace's op count x the op cost, `overlap` says how the queues
     interact ('ideal': fully concurrent; 'serial': one dispatcher for all queues; a float: concurrent traces are stretched by that factor), and
     `corrupt_on_overlap` makes a trace replayed while another queue is busy produce different bytes (to prove the harness notices),
-    `drop_replays_on=(1,)` makes a queue's replays do nothing at all (to prove that stale outputs cannot pass), and
+    `drop_replays_on=(1,)` makes a queue's replays do nothing at all (to prove that stale outputs cannot pass), `deadlock_on_shared_link` makes a replay
+    that lands on a link another queue is using raise (the hardware hangs), and
     overlap='link' serialises two replays only while their fabric links intersect (the gather's link set is range(offset, offset + num_links), the
     offset being the QWEN_AG_LINK_OFFSET_SD1 of `environ` read when the gather is built, for sub-device 1 only, as the prepared graft does).
 
@@ -183,6 +184,7 @@ class CoreGrid(object):
 
 class SubDevice(object):
     def __init__(self, sets):
+        self.sets = list(sets)          # one CoreRangeSet per core type: the harnesses give Tensix only, so no sub-device owns an ethernet core
         self.rects = sets[0].rects
 
 
@@ -198,7 +200,8 @@ class FakeEvent(object):
 
 
 class FakeSemaphore(object):
-    pass
+    def __init__(self, rects=()):
+        self.rects = tuple(rects)
 
 
 class Namespace(object):
@@ -265,14 +268,19 @@ class FakeTTNN(object):
     DRAM_MEMORY_CONFIG = 'dram'
     OP_COST_NS = 20000
 
-    def __init__(self, overlap='ideal', grid=(11, 10), chips=1, corrupt_on_overlap=False, op_costs=None, environ=None, drop_replays_on=()):
+    def __init__(self, overlap='ideal', grid=(11, 10), chips=1, corrupt_on_overlap=False, op_costs=None, environ=None, drop_replays_on=(),
+                 deadlock_on_shared_link=False):
         self.overlap, self.grid, self.chips, self.corrupt_on_overlap = overlap, grid, chips, corrupt_on_overlap
         self.environ = {} if environ is None else environ
         self.drop_replays_on = tuple(drop_replays_on)
+        self.deadlock_on_shared_link = deadlock_on_shared_link
         self.busy_links = {0: set(), 1: set()}
         self.gather_env = []
         self.compiled = set()
         self.program_cache = False
+        self.semaphores = []
+        self.fabric_enabled = False
+        self.program_links = {}
         self.op_costs = op_costs or {}
         self.managers, self.loaded = [], None
         self.now = 0
@@ -307,12 +315,12 @@ class FakeTTNN(object):
 
     def submit(self, cq, duration, links=()):
         start = max(self.now, self.free_at[cq])
-        busy_elsewhere = self.other_busy(cq)
+        busy_elsewhere = any(free > start for other, free in self.free_at.items() if other != cq)     # overlap in TIME: a chained replay starts after
         if self.overlap == 'serial':
             start = max(start, max(self.free_at.values()))
         elif self.overlap == 'link':
             for other, free in self.free_at.items():
-                if other != cq and free > self.now and self.busy_links[other] & set(links):
+                if other != cq and free > start and self.busy_links[other] & set(links):
                     start = max(start, free)
         elif isinstance(self.overlap, float) and busy_elsewhere:
             duration = int(duration * (1.0 + self.overlap))
@@ -348,6 +356,11 @@ class FakeTTNN(object):
 
     def open_mesh_device(self, mesh_shape=None, *, l1_small_size=0, trace_region_size=0, num_command_queues=1, dispatch_core_config=None,
                          offset=None, physical_device_ids=(), worker_l1_size=0):
+        if self.fabric_enabled and 'TT_METAL_WATCHER' in self.environ and 'TT_METAL_WATCHER_DISABLE_ETH' not in self.environ:
+            # the fabric router is an ACTIVE_ETH kernel built at open, before any sub-device manager exists: with the watcher compiled into it, it overflows
+            raise RuntimeError('TT_FATAL @ /opt/tt-metal/tt_metal/impl/program/program.cpp:2974: state.offset <= max_size info: Program size (28256) '
+                               'too large for kernel config buffer (25600) on ACTIVE_ETH backtrace: --- Device::configure_fabric()')
+        self.calls.append('open')
         self.opened = dict(shape=mesh_shape, queues=num_command_queues, trace_region_size=trace_region_size)
         return FakeMesh(self, self.chips)
 
@@ -361,6 +374,7 @@ class FakeTTNN(object):
         return args
 
     def set_fabric_config(self, config):
+        self.fabric_enabled = config != 'DISABLED'
         self.calls.append(('fabric', config))
 
     def init_device_compute_kernel_config(self, arch, **kwargs):
@@ -461,7 +475,9 @@ class FakeTTNN(object):
         return self.eltwise('add', [a, b], sub_core_grids)
 
     def create_global_semaphore(self, mesh, cores, initial_value, buffer_type=None):
-        return FakeSemaphore()
+        semaphore = FakeSemaphore(cores.rects)
+        self.semaphores.append(semaphore)
+        return semaphore
 
     def all_gather_async(self, input_tensor, *, persistent_output_buffer=None, dim, multi_device_global_semaphore, num_links=None,
                          memory_config=None, topology='Ring', subdevice_id=None, cluster_axis=None, use_optimal_ccl_for_llama=False,
@@ -478,9 +494,13 @@ class FakeTTNN(object):
             pieces = tuple(part for part in inputs[0].parts)
             return [('gathered', pieces)] * self.chips
 
-        offset = int(self.environ.get('QWEN_AG_LINK_OFFSET_SD1', 0) or 0) if sd == 1 else 0
-        self.gather_env.append((sd, offset))
-        links = tuple(range(offset, offset + (num_links or 1)))
+        # the program cache: the gather is built once per (shape, sub-device, links), reading the environment THEN, and every later call reuses it
+        key = (tuple(shape), sd, num_links or 1)
+        if key not in self.program_links:
+            offset = int(self.environ.get('QWEN_AG_LINK_OFFSET_SD1', 0) or 0) if sd == 1 else 0
+            self.gather_env.append((sd, offset))
+            self.program_links[key] = tuple(range(offset, offset + (num_links or 1)))
+        links = self.program_links[key]
         return self.run_op('ag%d' % (num_links or 1), shape, [input_tensor], sd, parts_fn=gathered, links=links)
 
     # ----------------------------------------------------------------- queues, events, traces
@@ -533,6 +553,12 @@ class FakeTTNN(object):
             raise RuntimeError('trace %d was released' % trace_id)
         if cq != trace.cq:
             raise RuntimeError('trace %d was captured on queue %d and cannot replay on queue %d' % (trace_id, trace.cq, cq))
+        if self.deadlock_on_shared_link and any(
+                free > max(self.now, self.free_at[cq]) and self.busy_links[other] & set(trace.links)
+                for other, free in self.free_at.items() if other != cq):
+            # two clients open the same router sender channel (edm_fabric_worker_adapters.hpp open_start / open_finish, no arbitration): in the
+            # hardware the mesh hangs; the fake raises so that a test sees what the harness had written down by then
+            raise RuntimeError('DEADLOCK: queue %d replayed trace %d onto a fabric link another queue holds' % (cq, trace_id))
         if cq in self.drop_replays_on:        # a queue that silently runs nothing: its outputs keep whatever they held
             self.advance(3000)
             return

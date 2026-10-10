@@ -270,6 +270,7 @@ def verdict_h2(arms, exactness, timing=True, error=None, pass_ratio=PASS_RATIO, 
       NOT-MEASURED / FAIL-BYTES / INCOMPLETE / UNTIMED-PASS   as verdict()
       PASS                  the shared-link concurrent wall is within pass_ratio of the longer solo wall: no graft needed
       PASS-SEPARATE-LINKS   the shared link does not overlap but the separate links do: the link-offset graft is required
+      SAFE-PASS             no arm that overlaps the two gather streams ran (the default arms cannot hang): bytes identical, solo, chained and one-queue timed
       FAIL-SERIALISED / FAIL-PARTIAL   neither overlaps (the separate arm's class when it ran, else the shared arm's)"""
     evidence = dict(compared=exactness.get('compared', 0), mismatched=exactness.get('mismatched', 0), timing=bool(timing), pass_ratio=pass_ratio)
     t, d = _median(arms, 't_solo'), _median(arms, 'd_solo')
@@ -281,6 +282,11 @@ def verdict_h2(arms, exactness, timing=True, error=None, pass_ratio=PASS_RATIO, 
                 evidence[name + '_ms'] = value
                 evidence[name + '_ratio'] = round(value / max(t, d), 4)
                 evidence[name + '_over_sum'] = round(value / (t + d), 4)
+        for name in ('chained', 'one_queue'):
+            value = _median(arms, name)
+            if value:
+                evidence[name + '_ms'] = value
+                evidence[name + '_over_sum'] = round(value / (t + d), 4)
     if error:
         return 'NOT-MEASURED', evidence
     if exactness.get('mismatched', 0):
@@ -289,8 +295,14 @@ def verdict_h2(arms, exactness, timing=True, error=None, pass_ratio=PASS_RATIO, 
         return 'INCOMPLETE', evidence
     if not timing:
         return 'UNTIMED-PASS', evidence
-    if 'shared_ratio' not in evidence:
+    if 'shared_ratio' not in evidence and 'separate_ratio' not in evidence:
+        # no arm that overlaps the two gather streams ran: the safe arms (solo, chained by an event, both on one queue) are all there is to judge
+        if 'chained_ms' in evidence and 'one_queue_ms' in evidence:
+            return 'SAFE-PASS', evidence
         return 'INCOMPLETE', evidence
+    if 'shared_ratio' not in evidence:
+        separate = classify(evidence['separate_ratio'], evidence['separate_over_sum'], pass_ratio)
+        return ('PASS-SEPARATE-LINKS' if separate == 'PASS' else separate), evidence
     shared = classify(evidence['shared_ratio'], evidence['shared_over_sum'], pass_ratio)
     if shared == 'PASS':
         return 'PASS', evidence
@@ -304,7 +316,7 @@ def verdict_h2(arms, exactness, timing=True, error=None, pass_ratio=PASS_RATIO, 
 
 def exit_status(text):
     """The process exit status of a verdict text: 0 PASS, UNTIMED-PASS and PASS-SEPARATE-LINKS, 1 any FAIL or INCOMPLETE, 2 NOT-MEASURED, 3 HANG."""
-    if text in ('PASS', 'UNTIMED-PASS', 'PASS-SEPARATE-LINKS'):
+    if text in ('PASS', 'UNTIMED-PASS', 'PASS-SEPARATE-LINKS', 'SAFE-PASS'):
         return EXIT_CODES['PASS']
     if text == 'NOT-MEASURED':
         return EXIT_CODES['NOT_MEASURED']
