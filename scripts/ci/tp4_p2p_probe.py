@@ -234,13 +234,23 @@ class Probe(h2d.Probe):
                         samples.append(seconds)
                 entry[label] = plan.summarize(samples, nbytes * len(set(senders + receivers)))
             if sharded_direct and len(set(senders + receivers)) == self.positions:
-                host = self.host(name, rows, width, 400, mapper=ttnn.ShardTensorToMesh(self.mesh, dim=0), count=self.positions)
-                samples = []
-                for index in range(self.options.warm + self.options.repeats):
-                    seconds = common.timed(lambda: ttnn.copy_host_to_device_tensor(host, dest), sync)
-                    if index >= self.options.warm:
-                        samples.append(seconds)
-                entry['direct_sharded'] = plan.summarize(samples, nbytes * self.positions)
+                # the production path, into a fresh tensor: the one-coordinate writes narrow handles of dest (the pinned
+                # runtime rewrites a written tensor's coordinates), and a failure here must not cost the A/B above
+                fresh = None
+                try:
+                    host = self.host(name, rows, width, 400, mapper=ttnn.ShardTensorToMesh(self.mesh, dim=0), count=self.positions)
+                    fresh = self.allocate(name, rows, width, self.mesh)
+                    samples = []
+                    for index in range(self.options.warm + self.options.repeats):
+                        seconds = common.timed(lambda: ttnn.copy_host_to_device_tensor(host, fresh), sync)
+                        if index >= self.options.warm:
+                            samples.append(seconds)
+                    entry['direct_sharded'] = plan.summarize(samples, nbytes * self.positions)
+                except Exception as error:  # noqa: BLE001
+                    entry['direct_sharded_error'] = common.error_text(error)
+                finally:
+                    if fresh is not None:
+                        ttnn.deallocate(fresh)
             relay_s = (entry.get('relay') or {}).get('median_s')
             direct_s = min(value for value in ((entry.get('direct') or {}).get('median_s'),
                                                (entry.get('direct_sharded') or {}).get('median_s')) if value) \
