@@ -39,7 +39,9 @@ WP5 (QWEN_FAST_CCL_OPTIONS, scripts/ci/ccl_options_tp.py): the unit-major call m
 sync, buffers per channel) that cannot change a bit (the ring's chunk parity is a function of the tile's index in its channel and of nothing the options
 move); default off, and with it off every statement below runs as before. Under QWEN_FAST_CCL_OPTIONS_AUDIT the first N unit-major calls of a forward also
 run with the values the model passes today, and both results are held and compared after the replay like the U1 audit's (audit_claim, audit_replayed,
-audit_round and audit_release serve both).
+audit_round and audit_release serve both). The WP5 modules (ccl_options_tp, distributed_norm_gather_tp) are imported BY NAME and only when one of the lever's
+flags is in the environment: with the lever off they are not even loaded (and no served module imports them statically, which the image-list closure tests would
+otherwise ask to be listed twice; the overlay manifest carries them).
 
 Stdlib only; ttnn is imported on first use.
 """
@@ -50,10 +52,12 @@ import importlib
 import os
 import sys
 
-import ccl_options_tp
-
 TILE = 32
 CCL_MODULE = 'models.tt_transformers.tt.ccl'
+# WP5: the ccl options lever's modules and flags, by name (see the module docstring).
+CCL_OPTIONS_MODULE = 'ccl_options_tp'
+CCL_GATHER_MODULE = 'distributed_norm_gather_tp'
+CCL_OPTIONS_FLAGS = ('QWEN_FAST_CCL_OPTIONS', 'QWEN_FAST_CCL_OPTIONS_AUDIT', 'QWEN_FAST_CCL_OPTIONS_AUDIT_CALLS')
 NAME = 'tt_all_reduce'
 
 UNIT_MAJOR_FLAG = 'QWEN_FAST_TP4_RS_UNIT_MAJOR'
@@ -78,7 +82,7 @@ AUDIT_MISMATCH_MARKER = '[PINDIAG] tp4 u1 audit mismatch'
 # this process has split so far. unit_major / audit_calls: the U1 settings of the scope; engaged and fallbacks count its calls;
 # audited counts the audited calls per shape in this scope.
 _STATE = {'rows': None, 'splits': 0, 'tiles': 0, 'unit_major': False, 'audit_calls': 0, 'engaged': 0, 'fallbacks': 0,
-          'audited': {}, 'reasons': set()}
+          'audited': {}, 'reasons': set(), 'ccl': None}
 # Audited pairs: {'owner': object or None (not yet claimed), 'shape': (rows, width), 'mine': clone, 'served': clone, 'layout': problem}
 _HELD = []
 
@@ -90,6 +94,25 @@ def _flag(name, environ):
     if value == '1':
         return True
     raise ValueError('%s must be 0 or 1, got %r' % (name, value))
+
+
+def ccl_options_asked(environ=None):
+    """Whether one of the ccl options lever's flags is in the environment (any value: the lever's own strict parser judges it)."""
+    source = os.environ if environ is None else environ
+    return any(name in source for name in CCL_OPTIONS_FLAGS)
+
+
+def ccl_options_settings(environ=None):
+    """ccl_options_tp.settings() when a flag of the lever is in the environment (the module is imported by name then), else None."""
+    if not ccl_options_asked(environ):
+        return None
+    return importlib.import_module(CCL_OPTIONS_MODULE).settings(environ)
+
+
+def current_ccl_plan():
+    """The ccl options plan of the block forward in progress, None outside one or with the lever off."""
+    module = _STATE['ccl']
+    return module.current() if module is not None else None
 
 
 def unit_major_settings(environ=None):
@@ -245,7 +268,7 @@ class TileSplitAllReduce:
         return None
 
     def unit_major(self, tensor, shape, args, kwargs):
-        plan = ccl_options_tp.current()
+        plan = current_ccl_plan()
         reason = self.refusal(tensor, shape, args, kwargs)
         if reason is not None:
             _STATE['fallbacks'] += 1
@@ -253,7 +276,7 @@ class TileSplitAllReduce:
                 _STATE['reasons'].add(reason)
                 _log('%s rows=%d reason=%s' % (FALLBACK_MARKER, shape[2], reason))
             if plan is not None and plan.selection.rs:
-                ccl_options_tp.note_fallback(plan, 'rs', reason)
+                _STATE['ccl'].note_fallback(plan, 'rs', reason)
             return self.split(tensor, shape, args, kwargs)
         key = (shape[2], shape[3])
         audited = _STATE['audited']
@@ -285,7 +308,10 @@ class TileSplitAllReduce:
                     num_links=collective.get_num_links(axis), memory_config=output_memory,
                     intermediate_memory_config=operations.DRAM_MEMORY_CONFIG, topology=operations.Topology.Ring,
                     chunks_per_sync=10, num_workers_per_link=2, num_buffers_per_channel=2)
-        call.update(ccl_options_tp.rs_overrides() if options is None else options)
+        if options is None:
+            module = _STATE['ccl']
+            options = module.rs_overrides() if module is not None else {}
+        call.update(options)
         scattered = operations.experimental.reduce_scatter_minimal_async(view, **call)
         output = operations.reshape(scattered, (1, 1, shape[2], scattered.shape[3]))
         # A view shares its buffer with its source: free a copy only if the reshape made one.
@@ -337,7 +363,8 @@ class TileSplitAllReduce:
         except BaseException:
             operations.deallocate(copy_mine)
             raise
-        hold_pair(operations, copy_mine, served, (shape[2], shape[3]), mine_view, op='rs')
+        module = _STATE['ccl']
+        hold_pair(operations, copy_mine, served, (shape[2], shape[3]), mine_view, 'rs', (module.AUDIT_MARKER, module.AUDIT_MISMATCH_MARKER))
         _STATE['splits'] += 1
         _STATE['tiles'] += shape[2] // TILE
         _STATE['engaged'] += 1
@@ -383,7 +410,7 @@ class TileSplitAllReduce:
 def block_scope(rows, expected=None, log=None, unit_major=False, audit_calls=0, ccl=None, layers=None):
     """Reduce every `rows`-row all-reduce issued inside in the sequential engine's order: split per 32-row tile, or (unit_major)
     one reduce-scatter on the unit-major view for the calls the X1 census covers (the rest split, the reason logged), the first
-    `audit_calls` calls of each shape also split and held for audit_round. `ccl` (ccl_options_tp.settings(), None when the lever is off): the
+    `audit_calls` calls of each shape also split and held for audit_round. `ccl` (ccl_options_tp.settings(), None when the lever is off; its module is found through the settings' own class): the
     named per-call options of the unit-major reduce-scatters and of the norms' gathers over `layers` layers, with their own audit quota. When it
     exits without an error, `expected` (when given) must equal the number reduced: a scope that engaged nothing means the wrapper was never bound
     where the block's layers look it up, and the round would run the unsplit, inexact reduction silently."""
@@ -396,14 +423,18 @@ def block_scope(rows, expected=None, log=None, unit_major=False, audit_calls=0, 
         raise ValueError('The ccl options for the reduce-scatter ride the unit-major lever')
     before = _STATE['splits']
     _STATE.update(rows=rows, unit_major=bool(unit_major), audit_calls=int(audit_calls), engaged=0, fallbacks=0, audited={})
-    plan = ccl_options_tp.begin(ccl, rows, layers, log)
+    module = sys.modules[type(ccl).__module__] if ccl is not None else None
+    plan = module.begin(ccl, rows, layers, log) if module is not None else None
+    _STATE['ccl'] = module
     try:
         yield
     finally:
         _STATE['rows'] = None
         _STATE['unit_major'] = False
         _STATE['audit_calls'] = 0
-        ccl_options_tp.close(plan)
+        _STATE['ccl'] = None
+        if module is not None:
+            module.close(plan)
     engaged = _STATE['splits'] - before
     engaged_unit_major, fallbacks = _STATE['engaged'], _STATE['fallbacks']
     audited = sum((_STATE['audited'] or {}).values())
@@ -426,7 +457,8 @@ def block_scope(rows, expected=None, log=None, unit_major=False, audit_calls=0, 
         if unit_major:
             log('{}', '%s rows=%d calls=%d unit_major=%d fallbacks=%d audited=%d'
                 % (ENGAGED_MARKER, rows, engaged, engaged_unit_major, fallbacks, audited))
-    ccl_options_tp.finish(plan)
+    if module is not None:
+        module.finish(plan)
 
 
 # --- the U1 audit: compared after the replay -----------------------------------------------------------------------------
@@ -520,13 +552,13 @@ def audit_round(operations, owner, round_number, log=None):
     return len(pairs)
 
 
-def hold_pair(operations, copy_mine, served, shape, mine_view, op):
+def hold_pair(operations, copy_mine, served, shape, mine_view, op, markers):
     """Hold a ccl options audit pair for audit_round: `copy_mine` is the options result already cloned into DRAM (the caller freed the original),
-    `served` the result the model's own values produced, which is cloned here and stays the caller's to serve. A layout difference between the two
-    is recorded and raised by audit_round."""
+    `served` the result the model's own values produced, which is cloned here and stays the caller's to serve; `markers` (the audit line's marker and the
+    mismatch line's) are ccl_options_tp's. A layout difference between the two is recorded and raised by audit_round."""
     problems = [name + ' ' + text for name, text in (('layout', _differences(mine_view, _view_of(served))),) if text]
     pair = dict(owner=None, shape=shape, mine=copy_mine, served=None, layout='; '.join(problems) or None,
-                marker=ccl_options_tp.AUDIT_MARKER, mismatch=ccl_options_tp.AUDIT_MISMATCH_MARKER, op=op)
+                marker=markers[0], mismatch=markers[1], op=op)
     try:
         pair['served'] = dram_copy(operations, served)
     except BaseException:
@@ -582,7 +614,7 @@ def scope_for(batch):
     layers = len(batch.model.layers)
     unit_major, audit_calls = unit_major_settings()
     return block_scope(rows, expected=layers * (2 if batch.native_m3 else 1), log=pindiag, unit_major=unit_major,
-                       audit_calls=audit_calls, ccl=ccl_options_tp.settings(), layers=layers)
+                       audit_calls=audit_calls, ccl=ccl_options_settings(), layers=layers)
 
 
 def scoped_run(original):
@@ -612,9 +644,9 @@ def install_scope():
 def install_gather_options():
     """WP5: wrap DistributedNorm.forward in the gather options' shim when QWEN_FAST_CCL_OPTIONS is set (distributed_norm_gather_tp.install; [] when it is
     unset or the model tree is not importable). Bound here, with the scope it runs in, so tp_addresses records and puts back both together."""
-    import distributed_norm_gather_tp
-
-    return distributed_norm_gather_tp.install()
+    if not ccl_options_asked():
+        return []
+    return importlib.import_module(CCL_GATHER_MODULE).install()
 
 
 def install(module=None, scope=True):

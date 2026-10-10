@@ -199,6 +199,48 @@ def census_kwargs():
     return dict(cluster_axis=0, dim=3, topology='Ring', memory_config=DRAM)
 
 
+class TheLeverOffLoadsNothing(unittest.TestCase):
+    """Default off is byte-identical off, and nothing of the lever is even imported: the served module reaches the WP5 modules by name only when a flag of the lever
+    is in the environment, so the image-list closure tests (which read import statements) never see a static import of them."""
+
+    def test_tile_collective_tp_has_no_import_statement_of_the_lever_modules(self):
+        import ast
+        tree = ast.parse(open(os.path.join(HERE, 'tile_collective_tp.py'), encoding='utf-8').read())
+        names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names.update(alias.name.split('.')[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                names.add((node.module or '').split('.')[0])
+        self.assertEqual(names & {'ccl_options_tp', 'distributed_norm_gather_tp', 'ccl_options_smoke'}, set())
+
+    def test_a_forward_with_the_flags_unset_never_loads_them(self):
+        import subprocess
+        code = (
+            'import os, sys\n'
+            'for name in list(os.environ):\n'
+            '    if name.startswith("QWEN_FAST_CCL_OPTIONS"):\n'
+            '        del os.environ[name]\n'
+            'import tile_collective_tp as c\n'
+            'assert c.ccl_options_settings() is None\n'
+            'assert c.install_gather_options() == []\n'
+            'assert c.current_ccl_plan() is None\n'
+            'with c.block_scope(64):\n'
+            '    assert c._STATE["ccl"] is None\n'
+            'assert "ccl_options_tp" not in sys.modules and "distributed_norm_gather_tp" not in sys.modules, sorted(m for m in sys.modules if "ccl" in m)\n'
+            'os.environ["QWEN_FAST_CCL_OPTIONS_AUDIT"] = "1"\n'
+            'try:\n'
+            '    c.ccl_options_settings()\n'
+            'except ValueError:\n'
+            '    pass\n'
+            'else:\n'
+            '    raise SystemExit("the audit flag alone must be refused")\n'
+            'assert "ccl_options_tp" in sys.modules\n')
+        result = subprocess.run([sys.executable, '-B', '-c', code], cwd=HERE, env=dict(os.environ, PYTHONPATH=HERE), stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, universal_newlines=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class TheGrammar(unittest.TestCase):
     def test_served_is_the_empty_set(self):
         selection = options.parse_set('served')

@@ -146,7 +146,8 @@ class GatherShim(object):
             real.deallocate(copy_mine)
             raise
         shape = tuple(served.shape)
-        tile_collective_tp.hold_pair(real, copy_mine, served, (shape[2], shape[3]), mine_view, op='ag')
+        tile_collective_tp.hold_pair(real, copy_mine, served, (shape[2], shape[3]), mine_view, 'ag',
+                                     (ccl_options_tp.AUDIT_MARKER, ccl_options_tp.AUDIT_MISMATCH_MARKER))
         return served
 
 
