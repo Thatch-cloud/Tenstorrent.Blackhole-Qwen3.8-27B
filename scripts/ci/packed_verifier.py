@@ -1289,6 +1289,7 @@ class PackedVerifierEngine:
             hostgap_instr.install(self.operations)
             hostgap_instr.probe_enabled()
             hostgap_instr.probe_every()
+            hostgap_instr.census_every()
         if self.fused is not None:
             diagnostic(self.fused.engaged_line())
         if self.gdn_after_pairs or self.gdn_after_pairs_refusal is not None:

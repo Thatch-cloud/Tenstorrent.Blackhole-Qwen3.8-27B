@@ -228,10 +228,10 @@ class SpanTests(Clean):
         with instr.span('a'):
             pass
         line = instr.note_step()
-        self.assertRegex(line, r'^\[PACKED-HOSTGAP-ROUND\] step=1 probe=0 wall_ms=[0-9.]+ cpu_ms=[0-9.]+ nvcsw=\d+ nivcsw=\d+ minflt=\d+ majflt=\d+ gc_n=\d+ gc_ms=[0-9.]+')
+        self.assertRegex(line, r'^\[PACKED-HOSTGAP-ROUND\] step=1 probe=0 census=0 wall_ms=[0-9.]+ cpu_ms=[0-9.]+ nvcsw=\d+ nivcsw=\d+ minflt=\d+ majflt=\d+ gc_n=\d+ gc_ms=[0-9.]+ gc_max_ms=')
         instr.METER.probed = True
         line = instr.note_step()
-        self.assertRegex(line, r'^\[PACKED-HOSTGAP-ROUND\] step=2 probe=1 ')
+        self.assertRegex(line, r'^\[PACKED-HOSTGAP-ROUND\] step=2 probe=1 census=0 ')
         self.assertFalse(instr.METER.probed)
         self.assertEqual(len(self.lines(instr.ROUND_MARKER)), 2)
         self.assertEqual(self.lines(instr.SPAN_MARKER)[0].split()[1], 'step=1')
@@ -250,6 +250,169 @@ class SpanTests(Clean):
             verify_prestage.note_scratch('entry', dict(admit_ms=1.0, update_states_ms=1.0, storage_ms=1.0, reservation_ms=1.0, refresh_ms=1.0, refresh_writes=0, started=0.0))
             verify_prestage.entry_line(1.0)
         self.assertEqual(len(self.lines(instr.ROUND_MARKER)), 1, 'the first entry only opens an interval')
+
+
+def stat_line(tid, comm, utime, stime, cpu):
+    """A /proc/<pid>/task/<tid>/stat line with the fields hostgap_instr reads (state 3, utime 14, stime 15, processor 39 of 52)."""
+    fields = ['0'] * 52
+    fields[0], fields[1], fields[2], fields[13], fields[14], fields[38] = str(tid), '(%s)' % comm, 'S', str(utime), str(stime), str(cpu)
+    return ' '.join(fields)
+
+
+class SchedulerSideTests(Clean):
+    """The cgroup bandwidth counters on the round line, the thread census, the fence queue and the blocked-call lines."""
+
+    def fake_proc(self, root, threads, allowed='0-63'):
+        base = Path(root) / 'self' / 'task'
+        for tid, comm, utime, stime, cpu, involuntary in threads:
+            (base / str(tid)).mkdir(parents=True, exist_ok=True)
+            (base / str(tid) / 'stat').write_text(stat_line(tid, comm, utime, stime, cpu))
+            (base / str(tid) / 'status').write_text('Name:\t%s\nvoluntary_ctxt_switches:\t5\nnonvoluntary_ctxt_switches:\t%d\n' % (comm, involuntary))
+        (Path(root) / 'self' / 'status').write_text('Name:\tpython3\nCpus_allowed_list:\t%s\n' % allowed)
+
+    def fake_cgroup(self, root, periods, throttled, usec, quota='800000 100000', cpuset='0-63'):
+        (Path(root) / 'cpu.stat').write_text('usage_usec 5\nnr_periods %d\nnr_throttled %d\nthrottled_usec %d\n' % (periods, throttled, usec))
+        (Path(root) / 'cpu.max').write_text(quota + '\n')
+        (Path(root) / 'cpuset.cpus.effective').write_text(cpuset + '\n')
+
+    def tmp(self):
+        import tempfile
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        return directory.name
+
+    def test_the_round_line_carries_the_cgroup_bandwidth_counters_of_its_interval(self):
+        root = self.tmp()
+        self.fake_cgroup(root, 1000, 10, 50000)
+        self.assertIsNone(instr.note_step(root=root))
+        self.fake_cgroup(root, 1060, 14, 62500)
+        line = instr.note_step(root=root)
+        self.assertRegex(line, r' periods=60 thr_n=4 thr_ms=12\.5$')
+        self.assertEqual(instr.cgroup_counters(root), (1060, 14, 62500))
+        self.assertEqual(instr.cgroup_limits(root), 'quota=800000/100000 cpuset=0-63')
+        self.assertIsNone(instr.cgroup_counters(self.tmp()), 'no cgroup files, no counters, no tail')
+        instr.reset()
+        instr.note_step(root=self.tmp())
+        self.assertNotIn('thr_n', instr.note_step(root=self.tmp()))
+
+    def test_a_version_one_cgroup_counts_throttled_time_in_nanoseconds(self):
+        root = self.tmp()
+        (Path(root) / 'cpu').mkdir()
+        (Path(root) / 'cpu' / 'cpu.stat').write_text('nr_periods 7\nnr_throttled 3\nthrottled_time 4000000\n')
+        (Path(root) / 'cpu' / 'cpu.cfs_quota_us').write_text('800000\n')
+        (Path(root) / 'cpu' / 'cpu.cfs_period_us').write_text('100000\n')
+        self.assertEqual(instr.cgroup_counters(root), (7, 3, 4000))
+        self.assertTrue(instr.cgroup_limits(root).startswith('quota=800000/100000'))
+
+    def test_the_interval_frame_gives_the_round_line_the_longest_single_calls(self):
+        ops = Fake()
+        slow = ops.copy_host_to_device_tensor
+
+        def sleeping(host, device, cq_id=None):
+            time.sleep(0.002)
+            return slow(host, device, cq_id)
+
+        ops.copy_host_to_device_tensor = sleeping
+        instr.install(ops)
+        instr.note_step(root=self.tmp())
+        ops.copy_host_to_device_tensor('h', 'd')
+        line = instr.note_step(root=self.tmp())
+        fields = reader.fields(line[len(instr.ROUND_MARKER):])
+        self.assertGreaterEqual(fields['copy_max_ms'], 2.0)
+        self.assertEqual(fields['copy_n'], 1.0)
+
+    def test_the_census_reports_the_busiest_threads_since_the_last_one_and_the_limits(self):
+        proc, cgroup = self.tmp(), self.tmp()
+        self.fake_cgroup(cgroup, 1, 0, 0)
+        self.fake_proc(proc, [(100, 'python3', 1000, 100, 3, 10), (101, 'tt_cq_reader', 500, 0, 7, 2), (102, 'idle thread', 10, 0, 9, 0)], allowed='0-15,32-47')
+        first = instr.census(5, proc, cgroup)
+        self.assertIn('threads=3 allowed=0-15,32-47 quota=800000/100000 cpuset=0-63 interval_s=- busy=-', first)
+        time.sleep(0.05)
+        self.fake_proc(proc, [(100, 'python3', 1006, 102, 4, 30), (101, 'tt_cq_reader', 505, 0, 7, 2), (102, 'idle thread', 10, 0, 9, 0)])
+        line = instr.census(6, proc, cgroup)
+        fields = reader.fields(line[len(instr.THREADS_MARKER):])
+        busy = fields['busy'].split(',')
+        self.assertEqual(len(busy), 3)
+        self.assertTrue(busy[0].startswith('python3:100:') and busy[0].endswith(':20inv:cpu4'), busy)
+        self.assertTrue(busy[1].startswith('tt_cq_reader:101:') and busy[1].endswith(':0inv:cpu7'), busy)
+        self.assertIn('idle_thread:102:0%:0inv:cpu9', busy)
+        share = float(busy[0].split(':')[2].rstrip('%'))
+        interval = float(fields['interval_s'])
+        self.assertAlmostEqual(share, 100.0 * 8 / 100 / interval, delta=share * 0.05 + 1)
+
+    def test_the_census_runs_every_nth_step_and_its_round_line_names_it(self):
+        proc, cgroup = self.tmp(), self.tmp()
+        self.fake_cgroup(cgroup, 1, 0, 0)
+        self.fake_proc(proc, [(100, 'python3', 1, 1, 0, 0)])
+        with patch.dict(os.environ, {instr.CENSUS_EVERY_FLAG: '3'}):
+            for _ in range(8):
+                instr.note_step(root=cgroup, proc=proc)
+        censuses = self.lines(instr.THREADS_MARKER)
+        self.assertEqual(len(censuses), 2)
+        self.assertTrue(censuses[0].startswith('%s step=4 ' % instr.THREADS_MARKER) and censuses[1].startswith('%s step=7 ' % instr.THREADS_MARKER))
+        flagged = [line.split()[1:4] for line in self.lines(instr.ROUND_MARKER) if 'census=1' in line]
+        self.assertEqual(flagged, [['step=4', 'probe=0', 'census=1'], ['step=7', 'probe=0', 'census=1']], 'the interval a census ran in')
+        instr.reset()
+        self.log.clear()
+        with patch.dict(os.environ, {instr.CENSUS_EVERY_FLAG: '0'}):
+            for _ in range(60):
+                instr.note_step(root=cgroup, proc=proc)
+        self.assertEqual(self.lines(instr.THREADS_MARKER), [])
+        for bad in ('x', '-1', ''):
+            with self.assertRaises(ValueError):
+                instr.census_every({instr.CENSUS_EVERY_FLAG: bad})
+        self.assertEqual(instr.census_every({}), 25)
+
+    def test_a_fence_span_says_what_it_waited_behind_and_a_sync_point_clears_the_count(self):
+        ops = Fake()
+        instr.install(ops)
+        with instr.span('window'):
+            for _ in range(5):
+                ops.copy_host_to_device_tensor('h', 'd')
+            ops.execute_trace('m', 't', blocking=False)
+            ops.execute_trace('m', 't', blocking=False)
+            with instr.span('fence'):
+                ops.synchronize_device('m')
+        fence = [line for line in self.lines(instr.SPAN_MARKER) if 'name=fence' in line][0]
+        self.assertTrue(fence.endswith(' fence_q_copy=5 fence_q_tnb=2'), fence)
+        with instr.span('fence'):
+            ops.copy_host_to_device_tensor('h', 'd')
+            ops.to_torch('x')                                                  # a blocking read is a synchronization point too
+            ops.synchronize_device('m')
+        again = [line for line in self.lines(instr.SPAN_MARKER) if 'name=fence' in line][-1]
+        self.assertTrue(again.endswith(' fence_q_copy=0 fence_q_tnb=0'), again)
+
+    def test_a_copy_of_a_millisecond_or_more_gets_a_line_with_its_context_and_a_fence_does_not(self):
+        ops = Fake()
+        slow = ops.copy_host_to_device_tensor
+
+        def sleeping(host, device, cq_id=None):
+            time.sleep(0.0015)
+            return slow(host, device, cq_id)
+
+        ops.copy_host_to_device_tensor = sleeping
+        sleeping_fence = ops.synchronize_device
+        ops.synchronize_device = lambda mesh: (time.sleep(0.0015), sleeping_fence(mesh))[1]
+        instr.install(ops)
+        ops.execute_trace('m', 't', blocking=False)
+        ops.synchronize_device('m')
+        ops.execute_trace('m', 't', blocking=False)
+        ops.copy_host_to_device_tensor('h', 'd')
+        with instr.span('stage_window'):
+            ops.copy_host_to_device_tensor('h', 'd')
+        lines = self.lines(instr.BLOCKED_MARKER)
+        self.assertEqual(len(lines), 2, 'the two slow copies, not the slow fence')
+        first = reader.fields(lines[0][len(instr.BLOCKED_MARKER):])
+        self.assertEqual((first['kind'], first['in'], first['queued_tnb'], first['queued_copy']), ('copy', '-', 1.0, 0.0))
+        self.assertGreaterEqual(first['ms'], 1.5)
+        self.assertLess(first['cpu_ms'], first['ms'])
+        self.assertTrue(isinstance(first['since_tnb_ms'], float) and isinstance(first['since_sync_ms'], float))
+        second = reader.fields(lines[1][len(instr.BLOCKED_MARKER):])
+        self.assertEqual((second['in'], second['queued_copy']), ('stage_window', 1.0))
+        with patch.object(instr, 'BLOCKED_LINES_MAX', 2):
+            ops.copy_host_to_device_tensor('h', 'd')
+        self.assertEqual(len(self.lines(instr.BLOCKED_MARKER)), 2, 'bounded')
 
 
 class ProbeTests(Clean):
@@ -395,9 +558,57 @@ class ReaderTests(unittest.TestCase):
         report = reader.analyse(reader.parse('\n'.join(lines)))
         slow = report['slow']['launch']
         self.assertEqual(slow['n'], 44)
-        self.assertEqual(slow['causes'], {'gc': 1, 'blocked-copy': 1, 'descheduled': 1, 'cpu-bound': 1, 'wait': 1})
+        self.assertEqual(slow['causes'], {'gc': 1, 'blocked-copy': 1, 'device-wait': 0, 'descheduled': 1, 'cpu-bound': 1, 'wait': 1})
         self.assertAlmostEqual(report['slow_step_share'], 5 / 44.0)
         self.assertAlmostEqual(slow['median_ms'], 2.0)
+
+    def test_a_slow_fence_is_the_devices_wait_and_only_a_slow_enqueue_is_a_blocked_copy(self):
+        lines = [self.span(step, 2.0, 1.9) for step in range(1, 40)]
+        lines += [self.span(100, 8.0, 0.4, fence_max_ms=7.5)]
+        lines += [self.span(101, 8.0, 0.4, copy_max_ms=7.5)]
+        report = reader.analyse(reader.parse('\n'.join(lines)))
+        causes = report['slow']['launch']['causes']
+        self.assertEqual((causes['device-wait'], causes['blocked-copy']), (1, 1))
+        self.assertIn('device-wait', reader.CAUSES)
+
+    def test_eight_live_steps_are_tabled_apart_and_the_exposed_host_time_is_the_critical_path_beyond_the_device(self):
+        lines = []
+        for step in range(1, 60):
+            eight = step % 2 == 0
+            lines.append('[PACKED-HOSTGAP-SPAN] step=%d name=window wall_ms=%.2f cpu_ms=9.00 nvcsw=0 nivcsw=0 minflt=0 majflt=0 gc_n=0 gc_ms=0.00' % (step, 22.0 if eight else 10.0))
+            lines.append('[PACKED-HOSTGAP-SPAN] step=%d name=launch wall_ms=%.2f cpu_ms=4.00 nvcsw=0 nivcsw=0 minflt=0 majflt=0 gc_n=0 gc_ms=0.00' % (step, 4.0 if eight else 0.04))
+            lines.append('[PACKED-HOSTGAP-SPAN] step=%d name=fence wall_ms=0.05 cpu_ms=0.03 nvcsw=0 nivcsw=0 minflt=0 majflt=0 gc_n=0 gc_ms=0.00' % step)
+            lines.append('[PACKED-HOSTGAP-SPAN] step=%d name=prestage block=A wall_ms=10.00 cpu_ms=9.00 nvcsw=0 nivcsw=0 minflt=0 majflt=0 gc_n=0 gc_ms=0.00' % step)
+            if eight:
+                lines.append('[PACKED-HOSTGAP-SPAN] step=%d name=prestage block=B wall_ms=10.00 cpu_ms=9.00 nvcsw=0 nivcsw=0 minflt=0 majflt=0 gc_n=0 gc_ms=0.00' % step)
+        lines.append('[PACKED-HOSTGAP-PROBE] round=16 step=2 quads=2 every=16 launch_ms=4.00 sync_ms=16.00 total_ms=20.00 first_enqueue_ms=2.00 twoq_ms=18.00')
+        report = reader.analyse(reader.parse('\n'.join(lines)))
+        self.assertEqual(report['split']['eight_live']['spans']['window']['wall_ms']['p50'], 22.0)
+        self.assertEqual(report['split']['other']['spans']['window']['wall_ms']['p50'], 10.0)
+        self.assertAlmostEqual(report['exposed']['host_ms'], 26.05)
+        self.assertAlmostEqual(report['exposed']['device_ms'], 20.0)
+        self.assertAlmostEqual(report['exposed']['exposed_ms'], 6.05)
+        self.assertIn('EXPOSED HOST TIME', reader.render(report))
+
+    def test_the_throttle_threads_and_blocked_sections(self):
+        lines = ['[PACKED-HOSTGAP-ROUND] step=%d probe=0 census=0 wall_ms=100.00 cpu_ms=30.00 nvcsw=1 nivcsw=%d periods=10 thr_n=%d thr_ms=%d.0' % (step, step, step % 3, 5 * (step % 3))
+                 for step in range(1, 13)]
+        lines += ['[PACKED-HOSTGAP-THREADS] step=7 threads=150 allowed=0-63 quota=800000/100000 cpuset=0-63 interval_s=1.00 busy=python3:100:95%:12inv:cpu3,tt_worker:101:60%:0inv:cpu3',
+                  '[PACKED-HOSTGAP-THREADS] step=12 threads=150 allowed=0-63 quota=800000/100000 cpuset=0-63 interval_s=1.00 busy=python3:100:85%:30inv:cpu3,tt_worker:101:70%:2inv:cpu9']
+        lines += ['[PACKED-HOSTGAP-BLOCKED] step=3 kind=copy ms=3.10 cpu_ms=0.08 in=stage_window since_tnb_ms=0.50 since_sync_ms=8.00 queued_copy=2 queued_tnb=2',
+                  '[PACKED-HOSTGAP-BLOCKED] step=4 kind=copy ms=2.40 cpu_ms=2.00 in=prestage since_tnb_ms=12.00 since_sync_ms=14.00 queued_copy=40 queued_tnb=2']
+        report = reader.analyse(reader.parse('\n'.join(lines)))
+        self.assertEqual(report['census_steps'], [7, 12])
+        throttle = report['throttle']
+        self.assertEqual((throttle['periods'], throttle['throttled_periods']), (100, sum(step % 3 for step in range(1, 13) if step not in (7, 12))))
+        self.assertEqual(report['threads']['n'], 2)
+        top = report['threads']['busy'][0]
+        self.assertEqual((top[0], round(top[1]), top[2], top[3], top[4]), ('python3', 90, 95.0, 42, 1))
+        blocked = report['blocked']
+        self.assertEqual((blocked['n'], blocked['asleep'], blocked['by_span']['stage_window'], blocked['since_tnb']['<1ms']), (2, 1, 1, 1))
+        text = reader.render(report)
+        for word in ('CPU BANDWIDTH', 'THREADS (2 censuses)', 'BLOCKED CALLS', 'python3'):
+            self.assertIn(word, text)
 
     def test_probe_steps_are_dropped_from_every_table(self):
         lines = [self.span(step, 2.0, 1.9) for step in range(1, 40)] + [self.span(7, 30.0, 1.0)]
