@@ -71,6 +71,9 @@ name: Qwen C2 serving image
 #   push   - push it to zot and print the digest
 # (status, platform, unserve, priority and reset are described at their steps.) The job file is
 # parsed by scripts/ci/c2_serving_job.py, which refuses anything these steps must not act on.
+# C2_TT_GRID (10,9 | 11,9 | 12,9, or unset: nothing is passed) clamps the compute grid tt-metal exposes, as insurance for cards that no longer soft-harvest
+# Tensix columns: every step that opens a card gives its container TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=<value> - the fabric probe, the pair and four-card smokes,
+# the gate, prefix and tau lab drivers and the replay (--tt-grid), and the cardm harness (QUAL_TT_GRID, which the harness puts into its container).
 # C2_CARDS picks the card set the hardware steps open: pair (cards M and A, the default) or quad (every Blackhole
 # board present, resolved by board id when used - scripts/ci/card_set.sh - and mounted into the gate and prefix
 # containers, with the general-tp4 profiles). It is one job, one runner and one concurrency group either way: the
@@ -424,6 +427,7 @@ jobs:
           FABRIC: ${{ steps.job.outputs.fabric }}
           PROBE: ${{ steps.job.outputs.fabric_probe }}
           BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}
+          TT_GRID: ${{ steps.job.outputs.tt_grid }}
         run: |
           set -euo pipefail
           # The (1, 4) mesh under the ring descriptor, opened once (one fabric config, one open: a second open in a
@@ -464,6 +468,7 @@ jobs:
           if [ "${PROBE:-fabric}" = kvread ] && [ -s /home/thatch/opgraft-KVR/qwen_kv_read.so ]; then
             kvmount=(-v /home/thatch/opgraft-KVR:/opt/qwen-c2/kvr-mount:ro -e QWEN_KVREAD_DIR=/opt/qwen-c2/kvr-mount)
           fi
+          if [ -n "$TT_GRID" ]; then echo "compute-grid clamp: TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$TT_GRID"; fi
           status=0
           # the job's box (C2_BOX_MINUTES, at most this step's 45) bounds the probe; without one it keeps its 30 minutes
           limit=1800
@@ -475,6 +480,7 @@ jobs:
             -v /dev/hugepages-1G:/dev/hugepages-1G --cap-add SYS_NICE \
             -v "$PWD:/c2:ro" -v "$results:/probe-results" ${kvmount[@]+"${kvmount[@]}"} \
             -e MESH_DEVICE=P150x4 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_C2_SERVING=0 \
+            ${TT_GRID:+-e "TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$TT_GRID"} \
             -e TT_METAL_CACHE=/root/.cache/tt-metal-cache -e TT_CACHE_PATH=/tmp/tt-weights \
             -e TT_MESH_GRAPH_DESC_PATH=/c2/scripts/ci/qwen_p150x4_ring_mesh_graph_descriptor.textproto \
             --entrypoint python3 "$image" -B "/c2/scripts/ci/$script" --fabric "$FABRIC" \
@@ -491,6 +497,7 @@ jobs:
           HARNESS: ${{ steps.job.outputs.cardm_harness }}
           HARNESS_ARGS: ${{ steps.job.outputs.cardm_args }}
           HARNESS_ENV: ${{ steps.job.outputs.cardm_env }}
+          TT_GRID: ${{ steps.job.outputs.tt_grid }}
         run: |
           set -euo pipefail
           # Card B is reserved for another project, so a single-card harness (e.g. the K64j CB2a sections of
@@ -537,8 +544,10 @@ jobs:
           chmod 0777 "$results"
           read -r -a extra <<< "$HARNESS_ENV"
           echo "card M run: $HARNESS | args: $HARNESS_ARGS | env: ${HARNESS_ENV:-none} | results: $results"
+          # C2_TT_GRID: the step's own QUAL_TT_GRID (C2_CARDM_ENV may not set a QUAL_* name); the harness puts it into its container as
+          # TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE, and c2_serving_job.py refuses a harness that does not.
           env ${extra[@]+"${extra[@]}"} QUAL_CARD=blackhole-CEF5729692C19E6D ALLOW_SERVING_CARD=1 RESULTS="$results" \
-            CARD_B_ARGS="$HARNESS_ARGS" bash "$HARNESS" 2>&1 | tee "$results/harness-console.log"
+            CARD_B_ARGS="$HARNESS_ARGS" ${TT_GRID:+QUAL_TT_GRID="$TT_GRID"} bash "$HARNESS" 2>&1 | tee "$results/harness-console.log"
       - name: Collect the card-M results
         if: always() && contains(steps.job.outputs.actions, 'cardm')
         shell: bash
@@ -689,6 +698,7 @@ jobs:
           PROFILE: ${{ steps.job.outputs.profile }}
           TESTS: ${{ steps.job.outputs.tests }}
           BENCH_SHAPES: ${{ steps.job.outputs.bench_shapes }}
+          TT_GRID: ${{ steps.job.outputs.tt_grid }}
         run: |
           set -euo pipefail
           image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
@@ -708,6 +718,7 @@ jobs:
           trap 'docker logs "$name" > "$results/container.log" 2>&1 || true; docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
           # The node agent's container shape (Thatch.Server.Compute container/adapter.rs), with a p300
           # descriptor and QWEN36_BATCHED_DECODE_MODE the contract must undo, and a platform-style argv.
+          if [ -n "$TT_GRID" ]; then echo "compute-grid clamp: TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$TT_GRID"; fi
           docker run -d --name "$name" --read-only \
             --tmpfs /tmp:rw,size=512m --tmpfs /opt/tt-metal/generated:rw,size=1g \
             --tmpfs /root/.cache/ttnn:rw,size=1g --tmpfs /root/.cache/tt-metal-cache:rw,size=8g \
@@ -716,7 +727,7 @@ jobs:
             -v /home/thatch/hf-cache/hub:/models -e HF_HOME=/models -e HF_HUB_CACHE=/models \
             -e MESH_DEVICE=P300 -e QWEN36_BATCHED_DECODE_MODE=host -e VLLM_RPC_TIMEOUT=100000 \
             -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p300_mesh_graph_descriptor.textproto \
-            -e QWEN_C2_PROFILE="$PROFILE" -p 127.0.0.1:8010:8000 \
+            -e QWEN_C2_PROFILE="$PROFILE" ${TT_GRID:+-e "TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$TT_GRID"} -p 127.0.0.1:8010:8000 \
             --entrypoint python3 "$image" -m vllm.entrypoints.openai.api_server \
             --model Qwen/Qwen3.8-27B --served-model-name Qwen/Qwen3.8-27B --host 0.0.0.0 --port 8000 \
             --reasoning-parser qwen3 --tool-call-parser qwen3_xml --enable-auto-tool-choice \
@@ -786,6 +797,7 @@ jobs:
           GATE_SALT: ${{ steps.job.outputs.gate_salt }}
           BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}
           CARDS: ${{ steps.job.outputs.cards }}
+          TT_GRID: ${{ steps.job.outputs.tt_grid }}
         run: |
           set -euo pipefail
           # The fast path has never completed a request inside the serving image: every C2 rate was
@@ -848,7 +860,7 @@ jobs:
             ${GATE_PAIRS:+--pairs "$GATE_PAIRS"} ${GATE_FAMILIES:+--families "$GATE_FAMILIES"} \
             ${GATE_JIT:+--jit "$GATE_JIT"} ${GATE_POLICY:+--policy "$GATE_POLICY"} \
             ${GATE_POLICY_DECISION:+--policy-decision "$GATE_POLICY_DECISION"} ${GATE_AUDITS:+--audits "$GATE_AUDITS"} \
-            ${GATE_SALT:+--salt "$GATE_SALT"} --cards "$CARDS" 2>&1 \
+            ${GATE_SALT:+--salt "$GATE_SALT"} ${TT_GRID:+--tt-grid "$TT_GRID"} --cards "$CARDS" 2>&1 \
             | tee "$RUNNER_TEMP/c2-results/gate.log" || status=$?
           # Read the launched argv (memory read-the-launched-argv): the contract's own line, per arm.
           for log in "$results"/*/server.log; do
@@ -892,6 +904,7 @@ jobs:
           PREFIX_KVREAD_MOUNT: ${{ steps.job.outputs.prefix_kvread_mount }}
           BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}
           CARDS: ${{ steps.job.outputs.cards }}
+          TT_GRID: ${{ steps.job.outputs.tt_grid }}
         run: |
           set -euo pipefail
           # TT prefix-reuse design 2.2 (G1): a serving container per arm in the agent's shape, launched
@@ -957,6 +970,7 @@ jobs:
           python3 scripts/ci/c2_prefix_gate.py --image "$image" --profile "$PREFIX_PROFILE" --plan "$PREFIX_PLAN" \
             --baseline "$PREFIX_BASELINE" --agents "$PREFIX_AGENTS" --budget-seconds "$budget" ${box_left:+--box-seconds "$box_left"} \
             ${PREFIX_KVREAD_MOUNT:+--kvread-mount /home/thatch/opgraft-KVR-s0808fix} \
+            ${TT_GRID:+--tt-grid "$TT_GRID"} \
             --results "$results" --cards "$CARDS" 2>&1 | tee "$RUNNER_TEMP/c2-results/prefix.log" || status=$?
           # Read the launched argv (memory read-the-launched-argv) and the graft's install line, per arm.
           for log in "$results"/*/server.log; do
@@ -982,6 +996,7 @@ jobs:
           TAULAB_COUNTERS: ${{ steps.job.outputs.taulab_counters }}
           TAULAB_DRAFTER_ARM: ${{ steps.job.outputs.taulab_drafter_arm }}
           TAULAB_PAIR_CONTROL: ${{ steps.job.outputs.taulab_pair_control }}
+          TT_GRID: ${{ steps.job.outputs.tt_grid }}
         run: |
           set -euo pipefail
           # The W-T1 tau lab (docs: scripts/ci/c2_tau_lab.py): ONE container of the image on all four cards serving the
@@ -1028,6 +1043,8 @@ jobs:
           args=(--image "$image" --profile "$TAULAB_PROFILE" --data "$data" --results "$run" --public "$public"
                 --arms "$TAULAB_ARMS" --deadline-seconds "$budget" --in-flight "$TAULAB_IN_FLIGHT" --cards quad)
           if [ -n "$TAULAB_MAX_TOKENS" ]; then args+=(--max-tokens "$TAULAB_MAX_TOKENS"); fi
+          # C2_TT_GRID: the compute-grid clamp for the lab's container (the driver prints the one line saying so).
+          if [ -n "$TT_GRID" ]; then args+=(--tt-grid "$TT_GRID"); fi
           # A drafter arm (tp4/drafter-arms): the image carries that drafter's fixtures, the derived profile only its drafter-only flags.
           if [ -n "$TAULAB_DRAFTER_ARM" ]; then args+=(--drafter-arm "$TAULAB_DRAFTER_ARM"); fi
           if [ -n "$TAULAB_COUNTERS" ]; then
@@ -1070,6 +1087,7 @@ jobs:
           TESTS: ${{ steps.job.outputs.tests }}
           BENCH_SHAPES: ${{ steps.job.outputs.bench_shapes }}
           BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}
+          TT_GRID: ${{ steps.job.outputs.tt_grid }}
         run: |
           set -euo pipefail
           # The pair smoke's shape on every Blackhole board present (a general-tp4 profile: the contract sets
@@ -1103,6 +1121,7 @@ jobs:
           ( while :; do echo "[LOAD] $(date +%s) $(cut -d' ' -f1 /proc/loadavg)" >> "$results/load.log"; sleep 60; done ) &
           load_pid=$!
           trap 'kill "$load_pid" 2>/dev/null || true; docker logs "$name" > "$results/container.log" 2>&1 || true; docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          if [ -n "$TT_GRID" ]; then echo "compute-grid clamp: TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$TT_GRID"; fi
           docker run -d --name "$name" --read-only \
             --tmpfs /tmp:rw,size=512m --tmpfs /opt/tt-metal/generated:rw,size=1g \
             --tmpfs /root/.cache/ttnn:rw,size=1g --tmpfs /root/.cache/tt-metal-cache:rw,size=8g \
@@ -1111,7 +1130,7 @@ jobs:
             -v /home/thatch/hf-cache/hub:/models -e HF_HOME=/models -e HF_HUB_CACHE=/models \
             -e MESH_DEVICE=P300 -e QWEN36_BATCHED_DECODE_MODE=host -e VLLM_RPC_TIMEOUT=100000 \
             -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p300_mesh_graph_descriptor.textproto \
-            -e QWEN_C2_GATE=1 -e QWEN_C2_PROFILE="$PROFILE" -p 127.0.0.1:8010:8000 \
+            -e QWEN_C2_GATE=1 -e QWEN_C2_PROFILE="$PROFILE" ${TT_GRID:+-e "TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$TT_GRID"} -p 127.0.0.1:8010:8000 \
             --entrypoint python3 "$image" -m vllm.entrypoints.openai.api_server \
             --model Qwen/Qwen3.8-27B --served-model-name Qwen/Qwen3.8-27B --host 0.0.0.0 --port 8000 \
             --reasoning-parser qwen3 --tool-call-parser qwen3_xml --enable-auto-tool-choice \
@@ -1170,6 +1189,7 @@ jobs:
           REPLAY_PROFILE: ${{ steps.job.outputs.replay_profile }}
           REPLAY_SERVED_MODEL: ${{ steps.job.outputs.replay_served_model }}
           CARDS: ${{ steps.job.outputs.cards }}
+          TT_GRID: ${{ steps.job.outputs.tt_grid }}
         run: |
           set -euo pipefail
           test -n "$IMAGE"
@@ -1214,7 +1234,7 @@ jobs:
           replay_status=0
           ${replay_wrap[@]+"${replay_wrap[@]}"} python3 scripts/ci/c2_platform_replay.py --source "$source" --image "$IMAGE" --cards "$CARDS" \
             ${REPLAY_PROFILE:+--profile "$REPLAY_PROFILE"} ${REPLAY_SERVED_MODEL:+--served-model "$REPLAY_SERVED_MODEL"} \
-            ${REPLAY_BUDGET_SMOKE:+--budget-smoke} \
+            ${REPLAY_BUDGET_SMOKE:+--budget-smoke} ${TT_GRID:+--tt-grid "$TT_GRID"} \
             --results "$RUNNER_TEMP/c2-results/replay" || replay_status=$?
           if [ "$replay_status" = 124 ] || [ "$replay_status" = 137 ]; then
             echo "C2_BOX verdict=TIMEBOX step=replay status=$replay_status box_min=${BOX_MINUTES:-none}" >&2

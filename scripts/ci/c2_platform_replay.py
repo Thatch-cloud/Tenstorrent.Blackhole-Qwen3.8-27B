@@ -77,6 +77,9 @@ import time
 import urllib.error
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import c2_serving_job  # noqa: E402
+
 CARD_M = 'blackhole-CEF5729692C19E6D'
 CARD_A = 'blackhole-3707293C249A5E67'
 CHECKPOINT = 'Qwen/Qwen3.8-27B'
@@ -230,6 +233,16 @@ def profile_entry(profile, profiles_path=PROFILES):
 # its last request) would refuse this replay's own one-off requests - about a dozen distinct sessions
 # inside ten minutes - so the replay turns it off unless --env says otherwise. The cap is its own check.
 DEFAULT_ENV = ('THATCH_SERVING_SESSION_CAP=0',)
+
+
+def tt_grid_env(extra_env, tt_grid):
+    """`extra_env` with the compute-grid clamp (C2_TT_GRID) last, NAME=value, replacing any entry or recorded variable of the same name; unchanged
+    for None or ''. The copy's serving runtime starts the engine with `docker exec`, which carries the container's env, so the clamp reaches the
+    process that opens the cards."""
+    pairs = c2_serving_job.tt_grid_arguments(tt_grid)
+    if not pairs:
+        return tuple(extra_env)
+    return tuple(variable for variable in extra_env if variable.split('=', 1)[0] != c2_serving_job.TT_GRID_ENV) + (pairs[1],)
 
 
 def run_arguments(info, image, name, port, profile=None, devices=None, image_env=(), extra_env=()):
@@ -675,6 +688,9 @@ def main():
                         help='run the image\'s thinking-budget smoke in the container before it is removed')
     parser.add_argument('--env', action='append', default=None, metavar='NAME=value',
                         help='extra container env, repeatable (default: %s)' % ' '.join(DEFAULT_ENV))
+    parser.add_argument('--tt-grid', choices=c2_serving_job.TT_GRIDS, default=None,
+                        help='clamp the compute grid the copy opens: adds %s=... to its env after --env, replacing the source\'s (qwen-c2-serving.yml '
+                             'C2_TT_GRID); default: not passed' % c2_serving_job.TT_GRID_ENV)
     options = parser.parse_args()
     name, port, model, served = options.name, options.port, options.model, options.served_model
     seed = options.seed if options.seed is not None else int(time.time())
@@ -709,6 +725,9 @@ def main():
     extra_env = tuple(options.env) if options.env is not None else DEFAULT_ENV
     if any('=' not in variable for variable in extra_env):
         parser.error('--env takes NAME=value')
+    extra_env = tt_grid_env(extra_env, options.tt_grid)
+    if options.tt_grid:
+        print('[REPLAY] compute-grid clamp: %s=%s in the copy\'s env' % (c2_serving_job.TT_GRID_ENV, options.tt_grid), flush=True)
     quad = options.cards == 'quad'
     startup = options.startup_wait or (QUAD_STARTUP_S if quad else PAIR_STARTUP_S)
     problem, devices = cards_problem(options.cards, options.profile, options.profiles), None

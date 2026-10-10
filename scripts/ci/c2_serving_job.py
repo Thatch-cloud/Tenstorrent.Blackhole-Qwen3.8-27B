@@ -152,6 +152,15 @@ Keys (every one optional but C2_IMAGE_TAG):
                       run's turns with that run's, on the runner, and holds the verdict to the pre-registered GO rule
   C2_TAULAB_COUNTERS  production's spec-decode counters, a rig-local JSON of aggregates (default: none; positions 1-3 are then
                       NOT_ESTABLISHED in the report)
+  C2_TT_GRID          clamp the compute grid tt-metal exposes, as insurance for cards whose firmware no longer soft-harvests Tensix
+                      columns (tensix_col_disable_count 2 -> 0, so the unharvested 13x10 core descriptor is selected instead of 11x10):
+                      exactly 10,9 (11x10, today's grid, valid on a harvested and an unharvested card), 11,9 (12x10) or 12,9 (13x10),
+                      or unset (default, rendered empty: the variable is not passed at all, today's behaviour). The value is the
+                      container's TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE (the end coordinate of compute_with_storage; tt-metal is
+                      fatal only when it exceeds the descriptor). Every step that opens a card forwards it: the fabric probe, the pair
+                      and four-card smokes, the gate, prefix and tau lab drivers (--tt-grid), the replay (--tt-grid) and the cardm
+                      harness (QUAL_TT_GRID, a step-owned name). A cardm harness that does not forward QUAL_TT_GRID is refused with the
+                      key set, before any card time. reset and the node agent's own container (agentstart) are not covered
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
@@ -198,6 +207,12 @@ POLICIES = ('strict', 'dc-i')
 AUDIT_SETS = ('extent', 'all')
 # C2_GATE_SALT (sticky sessions B3): what cache_salt the gate's streams carry; unset sends none, as before.
 SALT_MODES = ('none', 'fresh')
+# C2_TT_GRID: the clamp for the compute grid (tt_metal/llrt/core_descriptor.cpp reads the end coordinate of compute_with_storage from this variable
+# and is fatal only when it exceeds the descriptor, so 10,9 is valid on a harvested 11x10 and an unharvested 13x10 card). Exactly these values or unset.
+TT_GRID_ENV = 'TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE'
+TT_GRIDS = ('10,9', '11,9', '12,9')
+# The name the cardm step hands its harness, which puts it into its container as TT_GRID_ENV (the QUAL_ prefix is the step's: C2_CARDM_ENV refuses it).
+CARDM_TT_GRID_VARIABLE = 'QUAL_TT_GRID'
 DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
 # The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
 PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify')
@@ -425,8 +440,10 @@ def embeds_qual_card(text, library):
     return text[begins[0]:end] == library and text[end:].startswith('qual_card_select\n')
 
 
-def read_cardm(values, requested, root=ROOT, library=QUAL_CARD_LIBRARY):
-    """(harness, args, env) for the cardm step, or JobError. Checked whenever set, required with cardm."""
+def read_cardm(values, requested, root=ROOT, library=QUAL_CARD_LIBRARY, tt_grid=''):
+    """(harness, args, env) for the cardm step, or JobError. Checked whenever set, required with cardm. With a C2_TT_GRID clamp (`tt_grid`) the
+    harness must forward the step's QUAL_TT_GRID into its container: one that does not would run the card at the unclamped grid while the job
+    says it is clamped."""
     harness = values.get('C2_CARDM_HARNESS', '')
     if not harness:
         if requested:
@@ -445,6 +462,9 @@ def read_cardm(values, requested, root=ROOT, library=QUAL_CARD_LIBRARY):
         if not embeds_qual_card(text, canonical):
             raise JobError('C2_CARDM_HARNESS %s does not select its board by the canonical qual_card.sh block; '
                            'refusing to run it on card M' % harness)
+        if tt_grid and CARDM_TT_GRID_VARIABLE not in text:
+            raise JobError('C2_TT_GRID is set but C2_CARDM_HARNESS %s does not forward %s into its container; it would open card M '
+                           'unclamped: unset C2_TT_GRID or use a harness that forwards it' % (harness, CARDM_TT_GRID_VARIABLE))
     args = values.get('C2_CARDM_ARGS', '').split()
     for word in args:
         if not PLAIN_WORD.fullmatch(word):
@@ -462,6 +482,24 @@ def read_cardm(values, requested, root=ROOT, library=QUAL_CARD_LIBRARY):
             raise JobError('C2_CARDM_ENV sets %s twice' % name)
         names.append(name)
     return harness, ' '.join(args), ' '.join(pairs)
+
+
+def read_tt_grid(values):
+    """C2_TT_GRID (module docstring) as the string to hand the container, '' when unset, or JobError for anything but exactly one of TT_GRIDS."""
+    value = values.get('C2_TT_GRID', '')
+    if value and value not in TT_GRIDS:
+        raise JobError('C2_TT_GRID must be one of %s or unset, got %r' % (', '.join(TT_GRIDS), value))
+    return value
+
+
+def tt_grid_arguments(value):
+    """The `docker run` arguments that put the clamp into a container: ['-e', 'TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=10,9'], or [] for
+    None or '' (unset: the container is exactly what it was). A value outside TT_GRIDS is a JobError, never a guess."""
+    if not value:
+        return []
+    if value not in TT_GRIDS:
+        raise JobError('the tt grid must be one of %s or unset, got %r' % (', '.join(TT_GRIDS), value))
+    return ['-e', '%s=%s' % (TT_GRID_ENV, value)]
 
 
 def read_rmi_tags(values, actions):
@@ -551,7 +589,8 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
     drafter_manifest = read_drafter_manifest(values, actions, root)
     if drafter_manifest and 'push' in actions:
         raise JobError('C2_DRAFTER_MANIFEST names a candidate drafter that is not qualified: its image is not pushed')
-    cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root)
+    tt_grid = read_tt_grid(values)
+    cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root, tt_grid=tt_grid)
     drafter_candidates = read_drafter_candidates(values, actions)
     box_minutes = read_box(values, actions)
     outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), rmi_tags=rmi_tags, tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
@@ -559,7 +598,7 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
                    gate_memory_prompt=str(memory_prompt), gate_memory_users=str(memory_users), replay_profile=replay_profile,
                    replay_served_model=replay_served_model, replay_budget_smoke=budget_smoke, cardm_harness=cardm_harness, cardm_args=cardm_args,
-                   cardm_env=cardm_env, bake_default_profile=bake_profile, drafter_candidates=drafter_candidates, box_minutes=box_minutes, drafter_manifest=drafter_manifest)
+                   cardm_env=cardm_env, bake_default_profile=bake_profile, drafter_candidates=drafter_candidates, box_minutes=box_minutes, drafter_manifest=drafter_manifest, tt_grid=tt_grid)
     outputs.update(s2)
     outputs.update(prefix)
     outputs.update(taulab)
