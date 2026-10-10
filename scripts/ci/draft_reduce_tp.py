@@ -203,7 +203,7 @@ def gather_add(operations, mesh, collectives, value, *, retain_temporaries=None,
                 output = operations.add(partial, pieces[chip], dtype=operations.float32, memory_config=operations.DRAM_MEMORY_CONFIG)
                 retain(partial)
         else:
-            if fusion.audit_enabled(fusion.REDUCE_AUDIT) and fusion.audit_due(fusion.REDUCE, site, rows):
+            if fusion.audit_enabled(fusion.REDUCE_AUDIT) and fusion.audit_begin(operations, mesh, fusion.REDUCE, site, rows):
                 _audit(operations, mesh, gathered, output, rows, chips, site)
             fusion.STATS['reduce'] += 1
             if fusion.STATS['reduce'] in MILESTONES:
@@ -223,8 +223,8 @@ def gather_add(operations, mesh, collectives, value, *, retain_temporaries=None,
 
 
 def _audit(operations, mesh, gathered, output, rows, chips, site):
-    """The served slices and adds on the same gathered tensor, compared with the launch's output on every chip (eager: it reads back)."""
-    operations.synchronize_device(mesh)
+    """The served slices and adds on the same gathered tensor, compared with the launch's output on every chip. Eager: only after
+    draft_fusion_tp.audit_begin said yes (outside any capture, the device synchronized)."""
     held = []
 
     def keep(tensor):

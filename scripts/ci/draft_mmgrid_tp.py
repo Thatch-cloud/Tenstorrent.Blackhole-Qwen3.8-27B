@@ -73,8 +73,8 @@ def _matmul(operations, value, weight, grid, rows, columns, kernel):
 
 
 def _audit(operations, mesh, value, weight, served_grid, wide, rows, columns, kernel, site):
-    """Both grids on the same operands, every chip's bytes compared (eager); the temporaries are freed here."""
-    operations.synchronize_device(mesh)
+    """Both grids on the same operands, every chip's bytes compared; the temporaries are freed here. Eager: only after
+    draft_fusion_tp.audit_begin said yes (outside any capture, the device synchronized)."""
     held = []
     try:
         served = _matmul(operations, value, weight, served_grid, rows, columns, kernel)
@@ -104,7 +104,7 @@ def grid_for(operations, mesh, value, weight, served_grid, columns, rows, kernel
     except ValueError as failure:
         fusion.fell_back(fusion.MM_GRID_FALLBACK, site, str(failure))
         return served_grid
-    if fusion.audit_enabled(fusion.MM_GRID_AUDIT) and fusion.audit_due(fusion.MM_GRID, site, rows):
+    if fusion.audit_enabled(fusion.MM_GRID_AUDIT) and fusion.audit_begin(operations, mesh, fusion.MM_GRID, site, rows):
         _audit(operations, mesh, value, weight, served_grid, wide, rows, columns, kernel, site)
     fusion.STATS['mmgrid'] += 1
     fusion.note(fusion.MM_GRID_ENGAGED, 'site=%s served=%dx%d wide=%dx%d cores=%d per_core_N=%d in0_block_w=%d' % (

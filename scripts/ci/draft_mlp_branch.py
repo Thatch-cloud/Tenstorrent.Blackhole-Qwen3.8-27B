@@ -93,8 +93,14 @@ def prepare_mlp_branch(operations, mesh, weights, convolution, retain):
         math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
     # QWEN_FAST_DRAFT_GATEUP1 (draft_gateup_tp.py): one (5120, 2 x 4352) gate|up weight per chip in place of the separate gate and up uploads, so the
     # branch runs one matmul for both. A shard the fused program cannot take keeps the separate uploads (a logged fall-back).
+    levers = _levers_checked()
+    if any(_lever(name + '_AUDIT') for name in levers):
+        # an audit reads back and so must never run inside a trace capture: wrap the capture calls NOW, at load, before any trace exists
+        import draft_fusion_tp
+
+        draft_fusion_tp.track(operations)
     fused_gate_up = False
-    if _levers_checked()[GATEUP1_FLAG]:
+    if levers[GATEUP1_FLAG]:
         import draft_gateup_tp
 
         draft_gateup_tp.enabled()

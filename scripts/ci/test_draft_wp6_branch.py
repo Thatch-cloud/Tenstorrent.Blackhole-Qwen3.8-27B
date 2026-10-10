@@ -65,7 +65,8 @@ def convolve(operations, mesh, hidden, dynamic, base, **options):
 class Run:
     """One execute_mlp_branch call under a set of flags."""
 
-    def __init__(self, flags=(), audits=(), rows=32, quad=False, grid=(13, 10), seed=0, hook=None):
+    def __init__(self, flags=(), audits=(), rows=32, quad=False, grid=(13, 10), seed=0, hook=None, capture=False, warm=False):
+        self.capture, self.warm = capture, warm
         self.environment = {'QWEN_FAST_TP': '4', **{name: '1' for name in flags}, **{name + '_AUDIT': '1' for name in audits}}
         self.rows, self.quad, self.grid, self.seed, self.hook = rows, quad, grid, seed, hook
         self.lines = []
@@ -105,9 +106,19 @@ class Run:
             extra = {}
             if self.quad:
                 extra = dict(quad=quad_draft_tp.QuadPass(), boundaries=tuple((start, start + 16) for start in range(0, self.rows, 16)))
+            def call():
+                return draft_mlp_branch.execute_mlp_branch(operations, mesh, COLLECTIVES, hidden, weights, convolution, retain,
+                    parameters=parameters, trace_safe=True, convolution_operation=convolve, **extra)
+            if self.capture and self.warm:
+                call()                                                  # the eager warm pass the drafter buckets and the fused commit run first
+                self.warm_lines = list(self.lines)
             mark = len(operations.log)
-            state = draft_mlp_branch.execute_mlp_branch(operations, mesh, COLLECTIVES, hidden, weights, convolution, retain,
-                parameters=parameters, trace_safe=True, convolution_operation=convolve, **extra)
+            if self.capture:
+                import attention_batch
+
+                _, state = attention_batch.capture_operation(operations, mesh, call)
+            else:
+                state = call()
             self.operations, self.parameters, self.state, self.kept = operations, parameters, state, kept
             self.log = operations.log[mark:]
             self.programs = operations.programs

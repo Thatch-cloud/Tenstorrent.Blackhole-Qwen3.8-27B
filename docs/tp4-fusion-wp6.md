@@ -48,9 +48,16 @@ MM_GRID is the one lever that exists because of 13x10.
   accumulates K block by block in the same order whichever core multicasts which in0 block.
 
 Proofs: the CPU suite (below) holds each by transliteration of the kernels against the served composition on a functional fake, with negative controls (a different add order, a missing
-rounding point, a swapped gate and up, a reversed K order each DIFFER). The card half is the audit flag of each lever (eager, on the warm pass of each drafter bucket: it reads back, so it can
-only run outside a capture; the first `AUDIT_CALLS` = 10 calls of each site and row count, i.e. every layer's chains, on real activations and weights), then the draft-singles audit and the
-position-keyed accepted-prefix compare.
+rounding point, a swapped gate and up, a reversed K order each DIFFER). The card half is the audit flag of each lever, then the draft-singles audit and the position-keyed accepted-prefix compare.
+
+**The audits never run inside a trace capture** (the first card run of the fusion image died at engine start with `Event Synchronization is not supported during trace capture`: the fused commit
+reaches the drafter's feature chain from inside its capture, and a segment's capture comes before the next segment's warm pass). An audit synchronizes and reads back, so every audit of every lever
+starts with `draft_fusion_tp.audit_begin()`: (1) `track()` wraps the ttnn module's `begin_trace_capture` / `end_trace_capture` once (draft_mlp_branch does it at load when any WP6 audit flag is on, before any
+trace exists; an `Overlay` is followed to its `original`), so `in_capture()` knows; (2) inside a capture nothing is synchronized, read back, uploaded or issued beyond the lever's own launch, one
+`[PINDIAG] tp4 draft <lever> skipped its audit inside a trace capture` line is logged per (lever, site), and the call is not counted against the budget; (3) only the first `AUDIT_CALLS` = 10 calls of
+each (lever, site, rows) are audited, i.e. every layer's chains of the eager warm passes (drafter buckets: dflash_proposal_trace; fused commit: fused_commit_tp.capture), on real activations and weights;
+(4) the audit's first act is the synchronize, and a refusal that names a trace capture (a capture that began before `track()` ever ran) is the same skip; any other failure is raised.
+The lever paths themselves issue nothing a capture forbids: tensors are allocated and launches enqueued as the D2a conv and the served chain do, and every program is compiled by the warm pass that precedes the capture.
 
 ## The hooks the attention branch needs (WP7's file, `draft_attention_branch.py`)
 
@@ -74,5 +81,5 @@ profile of the combined arm (`ops-twin,ops-trace`), from which each lever's gain
 Judge every pair paired per round (`w2ln_timing_compare.py pair`), never by unpaired medians; the texts and the position-keyed accepted prefixes must be equal.
 
 ```
-python3 -B -m unittest test_draft_reduce_tp test_draft_tail_tp test_draft_gateup_tp test_draft_mmgrid_tp test_draft_wp6_branch test_draft_wp6_smoke     (from scripts/ci, python 3.11)
+python3 -B -m unittest test_draft_reduce_tp test_draft_tail_tp test_draft_gateup_tp test_draft_mmgrid_tp test_draft_wp6_branch test_draft_wp6_capture test_draft_wp6_smoke     (from scripts/ci, python 3.11)
 ```
