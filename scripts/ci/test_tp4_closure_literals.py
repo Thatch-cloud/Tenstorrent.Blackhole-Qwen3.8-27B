@@ -59,6 +59,7 @@ verifier_engine_tp verifier_position_policy c2_parser_rechunk qwen_prefix_metric
 gdn_conv_gates_spread drafter_checkpoint
 tp4_sampdraft tp4_shard_argmax tp4_draft_conv tp4_draft_heads drafter_fixtures drafter_manifest
 serving_parked_engines
+octo_glue8 gdn_rows_dma8_tp gdn_block_conv8_tp gdn_conv_windows_packed8
 '''.split())
 
 # Modules the four-card profiles never run their pair code from, and why. The closure does not follow into them.

@@ -1954,9 +1954,10 @@ class PackedVerifierEngine:
                                           self.rounds + 1)
             if tp4_vglue.audit_enabled():
                 # QWEN_FAST_TP4_VGLUE_AUDIT: each engaged GDN lever's output against the served path's, held beside it.
-                # (the octo block's 8 x 8 users run the served path at the glue sites, tp4_vglue.EIGHT_ROW_SERVED: nothing of the levers to compare)
+                # (the octo block's 8 x 8 users run the served path at the glue sites, tp4_vglue.EIGHT_ROW_SERVED: nothing of the levers to compare - unless
+                # QWEN_FAST_OCTO_GLUE8 makes them native (octo_glue8), when the audited entries exist like an M3 block's and a declined lever is a failure)
                 tp4_vglue.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1,
-                                      served_only=(self.users, self.rows_per_user) == (8, 8))
+                                      served_only=(self.users, self.rows_per_user) == (8, 8) and os.environ.get('QWEN_FAST_OCTO_GLUE8', '0') == '0')
                 if os.environ.get('QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT', '0') != '0':
                     # QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT (gdn_conv_gates_spread): the F1 launch's three outputs (conv, beta, g) per audited layer, every chip.
                     import gdn_conv_gates_spread

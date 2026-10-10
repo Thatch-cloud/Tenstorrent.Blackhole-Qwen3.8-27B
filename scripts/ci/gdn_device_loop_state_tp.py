@@ -25,6 +25,8 @@ it, outside `owned`, for tp4_vglue.audit_round to compare after the replay (the 
 layer uses).
 """
 
+import os
+
 import gdn_block_conv_tp
 import gdn_pair_slice_tp
 import gdn_device_loop_state as pinned
@@ -42,6 +44,13 @@ PIECE_ROWS = rows_dma.USER_ROWS
 OCTO_PIECE_ROWS = 8
 OCTO_USERS = 8
 EIGHT_ROW_REASON = 'eight-row users (the octo block): the glue kernels move 16-row half tiles, the served path runs'
+GLUE8_FLAG = 'QWEN_FAST_OCTO_GLUE8'
+
+
+def glue8_requested():
+    """QWEN_FAST_OCTO_GLUE8 is set to anything but '0' (octo_glue8.enabled says whether it is valid). Read here without importing the module, so with the flag off nothing of the
+    quarter-tile movers is imported and every path below is the one that ran before they existed."""
+    return os.environ.get(GLUE8_FLAG, '0') != '0'
 
 
 def _pinned_class():
@@ -60,13 +69,36 @@ class DeviceLoopState(_pinned_class()):
         shape = tuple(projected.shape)
         users = len(spans)
         if users == OCTO_USERS and [tuple(span) for span in spans] == [(user * OCTO_PIECE_ROWS, (user + 1) * OCTO_PIECE_ROWS) for user in range(users)]:
-            return EIGHT_ROW_REASON
+            if not self.eight_native(spans):
+                return EIGHT_ROW_REASON
+            # QWEN_FAST_OCTO_GLUE8: the quarter-tile mover serves the octo block's eight-row users.
+            import gdn_rows_dma8_tp
+
+            if len(shape) != 3 or shape[0] != 1 or shape[1] != users * OCTO_PIECE_ROWS:
+                return 'block projection %r is not (1, %d, W)' % (shape, users * OCTO_PIECE_ROWS)
+            return gdn_rows_dma8_tp.problem([projected], operations)
         if users < 2 or [tuple(span) for span in spans] != [(user * PIECE_ROWS, (user + 1) * PIECE_ROWS) for user in range(users)]:
             return 'spans %r are not contiguous 16-row users from row 0' % (list(spans),)
         if len(shape) != 3 or shape[0] != 1 or shape[1] != users * PIECE_ROWS:
             return 'block projection %r is not (1, %d, W)' % (shape, users * PIECE_ROWS)
         reason = rows_dma.problem([projected], operations)
         return reason
+
+    def eight_native(self, spans):
+        """Whether these spans are the octo block's and QWEN_FAST_OCTO_GLUE8 makes its glue sites native (False, without importing anything, for every other block and for the flag off)."""
+        if len(spans) != OCTO_USERS or not glue8_requested():
+            return False
+        import octo_glue8
+
+        return octo_glue8.is_octo_spans(spans) and octo_glue8.enabled()
+
+    def eight_native_users(self, users):
+        """The same question over a packed block's (piece, ...) users: eight pieces of eight rows."""
+        if len(users) != OCTO_USERS or not glue8_requested():
+            return False
+        import octo_glue8
+
+        return all(len(user[0].shape) == 3 and tuple(user[0].shape)[1] == OCTO_PIECE_ROWS for user in users) and octo_glue8.enabled()
 
     def note_glue_fallback(self, site, reason):
         if reason == EIGHT_ROW_REASON:
@@ -92,18 +124,25 @@ class DeviceLoopState(_pinned_class()):
         operations, mesh = self.operations, self.gdn.mesh
         width = projected.shape[-1]
         pieces = []
+        eight = self.eight_native(spans)
+        mover, piece_rows = (rows_dma, PIECE_ROWS) if not eight else (self.eight_mover(), OCTO_PIECE_ROWS)
         try:
             for user in range(len(spans)):
-                pieces.append(operations.empty((1, PIECE_ROWS, width), dtype=operations.bfloat16,
+                pieces.append(operations.empty((1, piece_rows, width), dtype=operations.bfloat16,
                                                layout=operations.TILE_LAYOUT, device=mesh,
                                                memory_config=operations.L1_MEMORY_CONFIG))
-            rows_dma.launch(mesh, [projected], pieces, rows_dma.split_pieces(len(spans), width))
+            mover.launch(mesh, [projected], pieces, mover.split_pieces(len(spans), width))
         except BaseException:
             for piece in pieces:
                 operations.deallocate(piece)
             raise
         owned.extend(pieces)
         return pieces
+
+    def eight_mover(self):
+        import gdn_rows_dma8_tp
+
+        return gdn_rows_dma8_tp
 
     def served_pieces(self, projected, spans, owned):
         """The pinned path's pieces (a Slice each, resident in L1): what the audit compares the launch's with."""
@@ -134,13 +173,23 @@ class DeviceLoopState(_pinned_class()):
             return super()._recurrence_user_batched(projected, spans, slots, entries, owned)
         reason = self.glue_problem(projected, spans)
         if reason is not None:
-            self.note_glue_fallback('split', reason)
+            if reason != EIGHT_ROW_REASON and self.eight_native(spans):
+                import octo_glue8
+
+                octo_glue8.note_fallback('split', reason)
+            else:
+                self.note_glue_fallback('split', reason)
             return super()._recurrence_user_batched(projected, spans, slots, entries, owned)
         try:
             return self._recurrence_glued(projected, spans, slots, entries, owned)
         except rows_dma.Unsupported as error:
             # Raised before any launch of ours ran and before any state move, so the pinned path starts clean.
-            self.note_glue_fallback('split', str(error))
+            if self.eight_native(spans):
+                import octo_glue8
+
+                octo_glue8.note_fallback('split', str(error))
+            else:
+                self.note_glue_fallback('split', str(error))
             return super()._recurrence_user_batched(projected, spans, slots, entries, owned)
 
     def _recurrence_glued(self, projected, spans, slots, entries, owned):
@@ -186,6 +235,10 @@ class DeviceLoopState(_pinned_class()):
             if result.get('norm_batch', True) or result['states'].shape[0] != stop - start:
                 raise AssertionError('User-batched GDN did not return this user own prefix geometry')
         tp4_vglue.note('gdn_glue')
+        if len(spans) == OCTO_USERS and self.eight_native(spans):
+            import octo_glue8
+
+            octo_glue8.note_engaged('split')
         if audit:
             for result, entries_ in zip(results, audit):
                 result['vglue_audit'] = entries_
@@ -199,13 +252,27 @@ class DeviceLoopState(_pinned_class()):
         options, staged = {}, []
         if tp4_vglue.enabled(tp4_vglue.GDN_BLOCK_CONV):
             if verify_trace_t2.cut('windows'):
+                eight = self.eight_native_users(pending)
+                if eight:
+                    # QWEN_FAST_OCTO_GLUE8: V1 over the quarter-tile mover (gdn_block_conv8_tp); a decline is the glue8 FALLBACK line.
+                    import gdn_block_conv8_tp
+                    import octo_glue8
+
+                    stage_module = gdn_block_conv8_tp
+                    decline = lambda reason: octo_glue8.note_fallback('block_conv', reason)
+                else:
+                    stage_module = gdn_block_conv_tp
+                    decline = lambda reason: self.note_glue_fallback('block_conv', reason)
+
                 def block_stage(groups, windows):
-                    found = gdn_block_conv_tp.stage(
+                    found = stage_module.stage(
                         layer.mesh, projected, groups, windows, taps, layer.tw['dt_bias'], layer.tw['neg_exp_A'], operations,
-                        note_fallback=lambda reason: self.note_glue_fallback('block_conv', reason))
+                        note_fallback=decline)
                     if found is not None:
                         staged.append(found)
                         tp4_vglue.note('gdn_block_conv')
+                        if eight:
+                            octo_glue8.note_engaged('block_conv')
                     return found
 
                 options['block_stage'] = block_stage
@@ -242,14 +309,25 @@ class DeviceLoopState(_pinned_class()):
         if not tp4_vglue.enabled(tp4_vglue.GDN_GLUE) or len(outputs) < 2:
             return super()._finish_packed(spans, results, outputs, owned)
         reason = self.merge_problem(outputs)
+        eight = reason != EIGHT_ROW_REASON and self.eight_outputs(outputs)
         if reason is not None:
-            self.note_glue_fallback('merge', reason)
+            if eight:
+                import octo_glue8
+
+                octo_glue8.note_fallback('merge', reason)
+            else:
+                self.note_glue_fallback('merge', reason)
             return super()._finish_packed(spans, results, outputs, owned)
         operations = self.operations
         try:
             merged = self.merge_outputs(outputs)
         except rows_dma.Unsupported as error:
-            self.note_glue_fallback('merge', str(error))
+            if eight:
+                import octo_glue8
+
+                octo_glue8.note_fallback('merge', str(error))
+            else:
+                self.note_glue_fallback('merge', str(error))
             return super()._finish_packed(spans, results, outputs, owned)
         owned.append(merged)
         audit = self.hold_served_merge(outputs, merged) if tp4_vglue.audit_enabled() else None
@@ -257,11 +335,26 @@ class DeviceLoopState(_pinned_class()):
         if audit:
             combined['vglue_merge_audit'] = audit
         tp4_vglue.note('gdn_merge')
+        if eight:
+            import octo_glue8
+
+            octo_glue8.note_engaged('merge')
         return combined
+
+    def eight_outputs(self, outputs):
+        """Whether these outputs are the octo block's eight (1, 8, N) ones and QWEN_FAST_OCTO_GLUE8 makes their join native."""
+        if len(outputs) != OCTO_USERS or not glue8_requested():
+            return False
+        import octo_glue8
+
+        shapes = {tuple(output.shape) for output in outputs}
+        return len(shapes) == 1 and next(iter(shapes))[:2] == (1, OCTO_PIECE_ROWS) and octo_glue8.enabled()
 
     def merge_problem(self, outputs):
         shapes = {tuple(output.shape) for output in outputs}
         if len(shapes) == 1 and next(iter(shapes))[:2] == (1, OCTO_PIECE_ROWS) and len(outputs) == OCTO_USERS:
+            if self.eight_outputs(outputs):
+                return self.eight_mover().problem(outputs, self.operations)
             return EIGHT_ROW_REASON
         if len(shapes) != 1 or next(iter(shapes))[:2] != (1, PIECE_ROWS):
             return 'outputs %r are not equal (1, 16, N) tensors' % (sorted(shapes),)
@@ -274,11 +367,12 @@ class DeviceLoopState(_pinned_class()):
         part of the contract."""
         operations = self.operations
         width = outputs[0].shape[-1]
-        merged = operations.empty((1, PIECE_ROWS * len(outputs), width), dtype=operations.bfloat16,
+        mover, piece_rows = (self.eight_mover(), OCTO_PIECE_ROWS) if self.eight_outputs(outputs) else (rows_dma, PIECE_ROWS)
+        merged = operations.empty((1, piece_rows * len(outputs), width), dtype=operations.bfloat16,
                                   layout=operations.TILE_LAYOUT, device=self.gdn.mesh,
                                   memory_config=operations.DRAM_MEMORY_CONFIG)
         try:
-            rows_dma.launch(self.gdn.mesh, list(outputs), [merged], rows_dma.merge_outputs(len(outputs), width))
+            mover.launch(self.gdn.mesh, list(outputs), [merged], mover.merge_outputs(len(outputs), width))
         except BaseException:
             operations.deallocate(merged)
             raise
