@@ -301,7 +301,13 @@ class RoundHostTests(unittest.TestCase):
         flags |= {'QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2', 'QWEN_FAST_DEVICE_ZEROS', 'QWEN_FAST_LAZY_SHARD_W'}
         self.assertIn('QWEN_FAST_KV_PAGE_WRITER', flags)
         prestage = (HERE / 'verify_prestage.py').read_text(encoding='utf-8')
-        self.assertEqual([flag for flag in sorted(flags) if flag in prestage], [])
+        # The host-gap package WPH (docs/tp4-fusion-wph.md) is the one exception, and a write-side one: its pre-stage diff and lean writer are chosen INSIDE verify_prestage
+        # (they decide which destinations are written and by which function, never what value a destination gets: packed_values below still names neither), so verify_prestage
+        # names exactly these two flags, each once, as the constants that import their modules.
+        write_side = {'QWEN_FAST_PRESTAGE_DIFF', 'QWEN_FAST_WRITE_PACKED_LEAN'}
+        self.assertEqual([flag for flag in sorted(flags - write_side - set(flag + '_AUDIT' for flag in write_side)) if flag in prestage], [])
+        for flag in sorted(write_side):
+            self.assertEqual(prestage.count("'%s'" % flag), 1, flag)
         tree = ast.parse((HERE / 'packed_verifier.py').read_text(encoding='utf-8'))
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'packed_values')
         constants = {node.value for node in ast.walk(function) if isinstance(node, ast.Constant) and isinstance(node.value, str)}

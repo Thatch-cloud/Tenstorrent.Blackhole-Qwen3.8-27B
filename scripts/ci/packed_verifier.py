@@ -1282,6 +1282,13 @@ class PackedVerifierEngine:
         if verify_prestage.hostgap_log_enabled():
             # tp4/hostgap stage 0: the gen-2 collection log, once per process (idempotent).
             verify_prestage.install_gc_log()
+            # tp4/fx-wph: the host-gap instrument's wrappers on the host calls and its collection counter (hostgap_instr), once per process (idempotent); it reads the
+            # probe flags strictly, here.
+            import hostgap_instr
+
+            hostgap_instr.install(self.operations)
+            hostgap_instr.probe_enabled()
+            hostgap_instr.probe_every()
         if self.fused is not None:
             diagnostic(self.fused.engaged_line())
         if self.gdn_after_pairs or self.gdn_after_pairs_refusal is not None:
@@ -1595,8 +1602,15 @@ class PackedVerifierEngine:
         if len(id_parts) != tp_shapes.chip_count() or len(value_parts) != tp_shapes.chip_count():
             raise AssertionError('%s chip-local outputs required' % tp_shapes.count_word())
         reads_started = time.perf_counter()
-        chip_ids = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in id_parts]
-        chip_values = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in value_parts]
+        if os.environ.get('QWEN_FAST_BATCHED_READS', '0') != '0':
+            # tp4/fx-wph QWEN_FAST_BATCHED_READS (batched_reads_tp, imported only with the flag): the same eight shards as two mesh reads (or non-blocking copies and one
+            # fence); the per-chip tensors it hands back are the served reads' bytes, cut the same way.
+            import batched_reads_tp
+
+            chip_ids, chip_values = batched_reads_tp.verify_reads(self.operations, self.mesh, ids, values, self.block_rows)
+        else:
+            chip_ids = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in id_parts]
+            chip_values = [self.operations.to_torch(part).reshape(-1)[:self.block_rows] for part in value_parts]
         reads_ms = (time.perf_counter() - reads_started) * 1000
         if any(len(value) != self.block_rows for value in (*chip_ids, *chip_values)):
             raise AssertionError('Missing packed prediction rows')
@@ -1912,10 +1926,11 @@ class PackedVerifierEngine:
             started = time.perf_counter()
             hostgap = verify_prestage.hostgap_log_enabled()
             cpu_started = verify_prestage.thread_ms() if hostgap else 0.0
-            if self.prestaged is None:
-                staged = self.stage_packed_inputs(entries)
-            else:
-                staged = self.prestaged.stage(entries, segments, snapshot, reason)
+            with verify_prestage.hostgap_span('verify_stage', block=verify_prestage.block_label(self)):
+                if self.prestaged is None:
+                    staged = self.stage_packed_inputs(entries)
+                else:
+                    staged = self.prestaged.stage(entries, segments, snapshot, reason)
             staged_at = time.perf_counter()
             cpu_staged = verify_prestage.thread_ms() if hostgap else 0.0
             # Claimed before the trace: its segment restores rewrite slot 0, so no engine
@@ -1958,7 +1973,8 @@ class PackedVerifierEngine:
             replayed = time.perf_counter()
             cpu_replayed = verify_prestage.thread_ms() if hostgap else 0.0
             if self.shard_argmax:
-                host = self.shard_predictions()
+                with verify_prestage.hostgap_span('readback', block=verify_prestage.block_label(self)):
+                    host = self.shard_predictions()
             else:
                 logits, ids = self.output
                 parts = self.operations.get_device_tensors(ids)

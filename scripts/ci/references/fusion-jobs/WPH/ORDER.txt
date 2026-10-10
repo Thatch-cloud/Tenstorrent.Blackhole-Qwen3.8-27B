@@ -1,0 +1,54 @@
+# The order of the host-gap package WPH's jobs in the op-fusion programme's four-card DEVELOPMENT window (docs/tp4-fusion-wph.md): ONE image (tp4-fusion-1, built by the pack's B0), run after the pack's X0 (status, rescan, reset).
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# WHAT THE PACKAGE IS. At eight live the device is idle 16.5-18.6 ms of a 150 ms round across seven host turnarounds. With the fusion levers the drafts' window (about 18 ms of host writes for two blocks, 148 non-token buffers
+#   rewritten a block and round) is on the critical path: its end to the fence F9's return fell from 9.4 ms to 0.39 ms, so it wastes 2.4-4.4 ms of the drafter saving. WPH-1 writes only the destinations whose bytes differ (about 73
+#   of 148), WPH-2 takes the per-write mapper and address bookkeeping out of the write, WPH-3 reads the verify and collect read-backs as a few reads (8 per block and 34-40 per round, device idle), WPH-4 is the instrument and the
+#   probe for the one run that shows where the rest of the gap, and the 22 percent of slow rounds, comes from. Every lever is default off, host only and exact by construction (docs/tp4-fusion-wph.md).
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE the pack's X0 and restores it after Z; nothing here does either. No other window driver may be alive.
+# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and the tag is pushed on THAT commit. Push ONE tag at a time and wait for its run to finish. Never cancel a running card job.
+# P0. CI PAUSED from H6 to H9 (CI shares the host and skews round times), and for H10. The cards expose a 13x10 compute grid since the firmware unlock: read it from the run, never assume 11x10.
+# EXACTNESS CLASS: all three levers are bit-identical by construction (the module docstrings of prestage_diff, write_packed_lean and batched_reads_tp carry the argument; the audits prove it on the card). None can change a token:
+#   they change which host bytes are written when, which address reads are made, and how many reads fetch the same bytes. A lever that cannot show exact=True on the device is NO-GO, whatever its timing.
+# PARENT. Every arm below is the combined fusion arm c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all (the production profile plus every integrated lever, the round-host levers included) plus its flags: the levers must
+#   compose with KEYED (the verify-time half of the same staging path) and the per-block epochs, so they are never run on the bare production profile here (the per-lever pack, references/fusion-jobs, does that).
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS H1 <- X0
+# NEEDS H10 <- X0
+# NEEDS H2 <- X0
+# NEEDS H3 <- X0
+# NEEDS H4 <- X0 H1
+# NEEDS H4b <- X0 H1
+# NEEDS H5 <- H2 H3 H4
+# NEEDS H5b <- H2 H3 H4b
+# NEEDS H6 <- X0
+# NEEDS H7 <- H5 H6
+# NEEDS H8 <- H7
+# NEEDS H9 <- H8
+# NEEDS H7b <- H5b H6
+# NEEDS H9b <- H7b
+# DECISION RULES.
+#   H1 (card M, FIRST): verdict not PASS (FAIL or NOT-RUN) -> WPH-3 is out of the arms (skip H4, H4b, H5, H5b, H7, H9, H7b, H9b; run H2 and H3 alone and time them against H6 with their own profiles
+#     -fx-wph-diff and -fx-wph-lean in a copy of H7). 'pick reads=1' -> H4, H5, H7, H9 (the -fx-wph-all profiles). 'pick reads=async' -> H4b, H5b, H7b, H9b (the -fx-wph-all-async ones). 'pick reads=none' -> as a FAIL.
+#   H10 (instrumented, one run): read with scripts/ci/hostgap_read.py. It is data, not a gate; its numbers set what the next levers are worth (the probe's 2Q, the slow-round causes, the share of rounds whose window is the
+#     critical path). A smoke failure of its WPH rule (no instrument line) means the instrument did not run: repeat it before reading anything.
+#   H2..H5b are STOPS for their own lever: a mismatch, a fell-back line or a missing audit line ends that lever until read; run them BEFORE the timed block. H2 also needs the existing full audit
+#     ([PACKED-PRESTAGE-FULLAUDIT] on both blocks, path=diff, mismatches=0) and a [PACKED-PRESTAGE-DIFF] line on the diff path that wrote fewer destinations than it pre-staged.
+#   H6..H9 (the ABAB, control first): w2ln_timing_compare.py pair (H6, H7) and (H8, H9), windows steady and 32k, plus the floor over (H6, H8): GO needs both pairs measured (at least 100 matched rounds, the load rule
+#     applied) and negative beyond the control-to-control floor in both windows, the texts and the accepted prefixes equal. Round time is the read; the window ms and window-end-to-fence-return of the
+#     [PACKED-PRESTAGE-WINDOW] / [PACKED-HOSTGAP-WINDOW] lines (enable with the instrument if wanted) and the early-draft ms are the attribution.
+# NO-GO: any audit mismatch, any fall-back line, a lever boot without its engaged line, any text or accepted-prefix difference against the control, any stall, a pair that is positive.
+# Time (estimate, minutes): H1 25, H10 45, H2 60, H3 50, H4 50, H5 70, H6 35, H7 35, H8 35, H9 35: 440 minutes (7 h 20 min) for the main line; the async alternatives (H4b 50, H5b 70, H7b 35, H9b 35) add 190 only if H1 picks async.
+H1-cardm-batched-reads soft tp4-fusion-1 25
+H10-hostgap-log-unprofiled soft tp4-fusion-1 45
+H2-diff-audit-attach stop tp4-fusion-1 60
+H3-lean-audit-attach stop tp4-fusion-1 50
+H4-reads-audit-attach stop tp4-fusion-1 50
+H5-all-audit-attach stop tp4-fusion-1 70
+H6-fxall-control-timed soft tp4-fusion-1 35
+H7-wph-all-timed soft tp4-fusion-1 35
+H8-fxall-control-repeat soft tp4-fusion-1 35
+H9-wph-all-repeat soft tp4-fusion-1 35
+H4b-reads-async-audit-attach stop tp4-fusion-1 50
+H5b-all-async-audit-attach stop tp4-fusion-1 70
+H7b-wph-all-async-timed soft tp4-fusion-1 35
+H9b-wph-all-async-repeat soft tp4-fusion-1 35

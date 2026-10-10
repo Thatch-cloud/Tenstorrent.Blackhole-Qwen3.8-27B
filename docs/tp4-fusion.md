@@ -12,6 +12,7 @@ and a kill path back to the served ops. Drafter-side levers cannot change a toke
 | WP5 | per-call collective options |
 | WP6 | drafter local reduce, residual and SwiGLU kernels, fused gate and up |
 | WP7 | drafter permutation kernels (K/V assembly, query fold and unfold), fused q, k and v, one 64-row head |
+| WPH | host gap (docs/tp4-fusion-wph.md): the pre-stage writes only the destinations whose bytes differ, a lean `write_packed`, batched verify and collect read-backs, and the instrument and probe for the unprofiled run |
 
 ## The integrator's files
 

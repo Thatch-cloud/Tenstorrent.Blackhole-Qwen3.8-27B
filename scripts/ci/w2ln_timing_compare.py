@@ -38,6 +38,9 @@ EXECUTE_LINE = re.compile(r'([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{
                           r'\[PHASE\] execute total=([0-9]+) new=([0-9]+) cached=([0-9]+) spec=([0-9]+)')
 POSITION = re.compile(r'(?<![A-Za-z0-9_])position=([0-9]+)')
 LEVERN_PREFILL = re.compile(r'lever N step n=\S+ kind=prefill')
+# tp4/fx-wph (hostgap_instr, QWEN_FAST_TP4_HOSTGAP_PROBE): the step that ran a timed synchronize right after its two quad launches is a PROBE round, whose window ran after
+# the quads instead of under them; it is not a round time, and the line below names it. No such line without the probe flag.
+HOSTGAP_PROBE = '[PACKED-HOSTGAP-PROBE]'
 LOAD_LINE = re.compile(r'\[LOAD\] (\d+) (\d+(?:\.\d+)?)')
 DEFAULT_BUCKET = 1024
 # Matched rounds a pair needs INSIDE ONE WINDOW: a shape's 800-token answers take about 240 packed rounds at about 3.3 tokens a round, most of them eight-live, so
@@ -69,7 +72,7 @@ def timed_rounds(log_text, live=DEFAULT_LIVE):
             if current is not None:
                 current['next'] = (at, new, cached)
             previous_prefill = bool(current and current['prefill'])
-            current = dict(at=at, new=new, live=cached, positions=[], prefill=False, after_prefill=previous_prefill, next=None)
+            current = dict(at=at, new=new, live=cached, positions=[], prefill=False, after_prefill=previous_prefill, next=None, probe=False)
             steps.append(current)
             continue
         if current is None:
@@ -80,6 +83,8 @@ def timed_rounds(log_text, live=DEFAULT_LIVE):
                 current['positions'].append(int(position.group(1)))
         elif LEVERN_PREFILL.search(line):
             current['prefill'] = True
+        elif HOSTGAP_PROBE in line:
+            current['probe'] = True
     rounds, dropped = [], 0
     for step in steps:
         if step['new'] != 0 or step['live'] != live or len(step['positions']) != live:
@@ -90,6 +95,8 @@ def timed_rounds(log_text, live=DEFAULT_LIVE):
         seconds = following[0] - step['at']
         if seconds <= 0:
             continue
+        if step['probe']:
+            continue                    # a hostgap probe round: not a round time (and not counted as a Lever N drop)
         if step['prefill'] or step['after_prefill']:
             dropped += 1
             continue

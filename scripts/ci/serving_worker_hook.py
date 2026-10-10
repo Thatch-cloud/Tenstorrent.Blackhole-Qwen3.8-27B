@@ -9,10 +9,25 @@ import round_host
 
 
 PHASE_LOG = os.environ.get('QWEN_FAST_PHASE_LOG') == '1'
+# tp4/fx-wph (QWEN_FAST_TP4_HOSTGAP_LOG=1): the phases the host-gap instrument writes a SPAN line for (wall and thread CPU, context switches, collections, host calls),
+# whatever PHASE_LOG says; the [PHASE] lines themselves are unchanged.
+HOSTGAP_PHASES = frozenset(('execute', 'packed_verify', 'early_draft', 'prepare_proposals', 'propose_quad', 'packed_commit'))
+
+
+def _spanned(name, call):
+    import verify_prestage
+
+    def run():
+        with verify_prestage.hostgap_span('phase:' + name):
+            return call()
+
+    return run
 
 
 def phase(name, request_id, call):
     """Run `call` between a begin and an end line so a hang names its phase."""
+    if name in HOSTGAP_PHASES and os.environ.get('QWEN_FAST_TP4_HOSTGAP_LOG') == '1':
+        call = _spanned(name, call)
     if not PHASE_LOG:
         return call()
     if round_host.lean_enabled() and name in round_host.LEAN_PHASES:

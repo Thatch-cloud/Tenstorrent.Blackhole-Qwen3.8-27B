@@ -593,15 +593,29 @@ def read_quad_outputs(device, outputs, reference=False):
     import verify_prestage
 
     stamps = [time.perf_counter()] if verify_prestage.hostgap_log_enabled() else None
+    # tp4/fx-wph QWEN_FAST_BATCHED_READS (batched_reads_tp, imported only with the flag): every chunk's values and indices and the selector features as a few mesh reads
+    # (or non-blocking copies and one fence) before the loop; the per-chip tensors it hands back are the served reads' bytes. The replicated-feature guard is decided here
+    # then (the same call, once a read), because the features come with the rest.
+    batched, guard = None, None
+    if not reference and os.environ.get('QWEN_FAST_BATCHED_READS', '0') != '0':
+        import batched_reads_tp
+
+        guard = round_host.guard_full() if fast else True
+        batched = batched_reads_tp.quad_reads(operations, device.mesh, outputs, guard)
     halves = ([], [])
-    for chunk in outputs.chunks:
-        values = operations.get_device_tensors(chunk['values'])
-        indices = operations.get_device_tensors(chunk['indices'])
-        if len(values) != chips or len(indices) != chips:
-            raise AssertionError('%s learned head shards required' % tp_shapes.all_chips())
+    for chunk_index, chunk in enumerate(outputs.chunks):
+        if batched is None:
+            values = operations.get_device_tensors(chunk['values'])
+            indices = operations.get_device_tensors(chunk['indices'])
+            if len(values) != chips or len(indices) != chips:
+                raise AssertionError('%s learned head shards required' % tp_shapes.all_chips())
         for chip in range(chips):
-            host_values = operations.to_torch(values[chip]).float().reshape(ROWS, 16)
-            host_indices = operations.to_torch(indices[chip]).long().reshape(ROWS, 16)
+            if batched is None:
+                host_values = operations.to_torch(values[chip]).float().reshape(ROWS, 16)
+                host_indices = operations.to_torch(indices[chip]).long().reshape(ROWS, 16)
+            else:
+                host_values = batched[0][chunk_index][0][chip].float().reshape(ROWS, 16)
+                host_indices = batched[0][chunk_index][1][chip].long().reshape(ROWS, 16)
             for half in range(GROUP_USERS):
                 rows = slice(32 * half, 32 * (half + 1))
                 halves[half].append(dict(chip=chip, start=chunk['start'], stop=chunk['stop'],
@@ -623,8 +637,11 @@ def read_quad_outputs(device, outputs, reference=False):
     candidates = torch.cat([merged_halves[0][0], torch.zeros_like(merged_halves[0][0][:, :1]), merged_halves[1][0]], dim=1)
     unary = torch.cat([merged_halves[0][1], torch.zeros_like(merged_halves[0][1][:, :1]), merged_halves[1][1]], dim=1)
     shards = operations.get_device_tensors(outputs.projected)
-    guard = round_host.guard_full() if fast else True
-    parts = [operations.to_torch(value) for value in (shards if guard else shards[:1])]
+    if batched is None:
+        guard = round_host.guard_full() if fast else True
+        parts = [operations.to_torch(value) for value in (shards if guard else shards[:1])]
+    else:
+        parts = batched[1]
     if stamps is not None:
         stamps.append(time.perf_counter())
     if len(shards) != chips or (guard and any(not torch.equal(parts[0], other) for other in parts[1:])):
