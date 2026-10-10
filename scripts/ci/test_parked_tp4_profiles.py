@@ -250,6 +250,9 @@ class ProfileTests(unittest.TestCase):
         import make_fusion_profiles
 
         generated |= set(make_fusion_profiles.twin_names())
+        # (a fusion twin whose manifest names another parent, such as WP6's singles audit on the audited lean twin, carries none of the engine-reuse flags)
+        fusion_other_parent = {twin['name'] for twin in make_fusion_profiles.profile_twins(make_fusion_profiles.normalise(make_fusion_profiles.read_manifests()))
+                               if twin['parent'] != make_fusion_profiles.PARENT}
         # the region-read audit twins (make_kvread_profiles; test_kvread_profiles holds each as its parent plus one flag) carry their parent's flags by inheritance
         region_read = {twin: parent for parent, twin, mode in kvread_twins.TWINS}
         for name, profile in profiles.items():
@@ -262,7 +265,7 @@ class ProfileTests(unittest.TestCase):
                                                            or flag in ('QWEN_FAST_GATE_DRAM_BALLAST', 'QWEN_FAST_LEVERN_BUILD_MS')),
                                      'a region-read twin names exactly its parent\'s engine-reuse flags')
                 elif name in generated:
-                    self.assertTrue(named or name.endswith('-r2'))
+                    self.assertTrue(named or name.endswith('-r2') or name in fusion_other_parent)
                 elif 'owner_traffic_waiver' in profile:
                     # the ship candidate (test_ship_ln_w2_er): the -parked twin's three flags on TRAFFIC, the two parked switches named by its owner waiver
                     self.assertEqual(sorted(named), sorted(['QWEN_FAST_PARKED_ENGINES', 'QWEN_FAST_PARKED_DRAFTS', 'QWEN_FAST_LEVERN_BUILD_MS']))
