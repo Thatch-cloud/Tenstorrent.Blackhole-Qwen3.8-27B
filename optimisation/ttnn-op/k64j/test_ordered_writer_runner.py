@@ -19,7 +19,8 @@ import test_extent_reader_card_b as base  # noqa: E402
 CI = base.CI
 FILES = ('ordered_writer_tp4_card_test.py', 'ordered_cache_hw_plan.py', 'ordered_cache.py', 'ordered_cache_tp.py',
          'packed_ordered_cache.py', 'page_width_tp4.py', 'ordered_writer_evidence_tp4.json', 'chip_view.py', 'tp_shapes.py',
-         'verify_trace_t1.py', 'verify_trace_t2.py')
+         'verify_trace_t1.py', 'verify_trace_t2.py',
+         'ordered_writer_page_arm_tp4.py', 'kv_page_writer_tp4.py', 'kv_page_writer_tp4.cpp')       # (op-fusion WP2's page64 arm: the runner refuses early without them)
 TEMPLATES = CI / 'references' / 'tp4-262k8-jobs'
 
 
