@@ -1,0 +1,27 @@
+# The order of WP6's own jobs in the op-fusion programme's four-card DEVELOPMENT window (docs/tp4-fusion.md, docs/tp4-fusion-wp6.md): ONE image (tp4-fusion-1, built by the pack's B0), run after the pack's per-lever audits
+# (scripts/ci/references/fusion-jobs: REDUCEA, TAILA, GATEUP1A, MMGRIDA, the lever-by-lever ABAB) or instead of them. These jobs add what the generated pack does not: the draft-singles audit of all four levers together
+# against its control, the combined timed ABAB, and the per-op profile of the combined arm.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE the pack's X0 and restores it after Z; nothing here does either. No other window driver may be alive.
+# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and the tag is pushed on THAT commit. Push ONE tag at a time and wait for its run to finish. Never cancel a running card job.
+# P0. CI PAUSED from WTC1 to WTL2 (CI shares the host and skews round times). The cards expose a 13x10 compute grid since the firmware unlock: read it from the run, never assume 11x10.
+# EXACTNESS CLASS: all four levers are bit-identical by construction (draft_fusion_tp.py); none is tau-only, so there is no tau A/B arm. A lever that cannot show exact=True on the device is NO-GO, whatever its timing.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule.
+# NEEDS WS0 <- X0
+# NEEDS WS1 <- WS0
+# NEEDS WTC1 <- WS1
+# NEEDS WTL1 <- WTC1 WS1
+# NEEDS WTC2 <- WTL1
+# NEEDS WTL2 <- WTC2
+# NEEDS WO1 <- WS1
+# READ RULES: see each template's header; every job also needs c2_smoke_check clean and no stall. Paired reads are PAIRED per round (w2ln_timing_compare.py pair), never unpaired medians.
+# NO-GO: any audit mismatch, any fall-back line, a lever boot without its engaged line, any text or accepted-prefix difference against the control, any stall, a pair that is positive.
+# Time (estimate, minutes): WS0 50, WS1 55, WTC1 35, WTL1 35, WTC2 35, WTL2 35, WO1 150: 395 minutes (6 h 35 min).
+WS0-singles-control soft tp4-fusion-1 50
+WS1-wp6-singles-audit soft tp4-fusion-1 55
+WTC1-control-timed soft tp4-fusion-1 35
+WTL1-wp6-timed soft tp4-fusion-1 35
+WTC2-control-repeat soft tp4-fusion-1 35
+WTL2-wp6-repeat soft tp4-fusion-1 35
+WO1-wp6-op-profile soft tp4-fusion-1 150

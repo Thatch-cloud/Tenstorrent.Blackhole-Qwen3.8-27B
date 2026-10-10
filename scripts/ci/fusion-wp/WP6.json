@@ -1,0 +1,152 @@
+{
+  "wp": "WP6",
+  "branch": "tp4/fx-wp6",
+  "description": "Drafter local reduce, SwiGLU and residual tail kernels, fused gate|up matmul, and the drafter MLP matmuls off the fixed 8-wide grids (R2).",
+  "docs": "docs/tp4-fusion-wp6.md",
+  "levers": [
+    {
+      "id": "reduce",
+      "name": "WP6 F-F1 drafter local reduce",
+      "flag": "QWEN_FAST_DRAFT_REDUCE",
+      "value": "1",
+      "audit_flag": "QWEN_FAST_DRAFT_REDUCE_AUDIT",
+      "marker": "tp4 draft reduce",
+      "reason": "after the unchanged dim-0 all-gather, the drafter's four slices and three fp32 adds ((p0 + p1) + p2) + p3 become one launch (draft_reduce_tp), bit-identical"
+    },
+    {
+      "id": "tail",
+      "name": "WP6 F-F3a drafter SwiGLU and residual kernels",
+      "flag": "QWEN_FAST_DRAFT_TAIL",
+      "value": "1",
+      "audit_flag": "QWEN_FAST_DRAFT_TAIL_AUDIT",
+      "marker": "tp4 draft tail",
+      "reason": "the MLP branch's nine-launch SwiGLU and four-launch residual tail become one launch each with every bf16 rounding point kept (draft_tail_tp), bit-identical"
+    },
+    {
+      "id": "gateup1",
+      "name": "WP6 F-F3c drafter fused gate|up matmul",
+      "flag": "QWEN_FAST_DRAFT_GATEUP1",
+      "value": "1",
+      "audit_flag": "QWEN_FAST_DRAFT_GATEUP1_AUDIT",
+      "env": {
+        "QWEN_FAST_DRAFT_TAIL": "1"
+      },
+      "audit_env": {
+        "QWEN_FAST_DRAFT_TAIL_AUDIT": "1"
+      },
+      "marker": "tp4 draft gateup1",
+      "reason": "the drafter's gate and up projections run as one matmul over a load-time [gate | up] weight and the tail kernel reads both halves in place (so the arm also sets QWEN_FAST_DRAFT_TAIL=1), bit-identical column for column"
+    },
+    {
+      "id": "mmgrid",
+      "name": "WP6 R2 drafter matmuls on device-width grids",
+      "flag": "QWEN_FAST_DRAFT_MM_GRID",
+      "value": "1",
+      "audit_flag": "QWEN_FAST_DRAFT_MM_GRID_AUDIT",
+      "marker": "tp4 draft mmgrid",
+      "reason": "the drafter MLP branch's 1D matmuls change only their program grid, from the fixed 8-wide rectangle to rows as wide as the device's worker grid (same cores, same per-core columns, same in0_block_w), bit-identical"
+    }
+  ],
+  "profiles": [
+    {
+      "name": "wp6",
+      "env": {
+        "QWEN_FAST_DRAFT_REDUCE": "1",
+        "QWEN_FAST_DRAFT_TAIL": "1",
+        "QWEN_FAST_DRAFT_GATEUP1": "1",
+        "QWEN_FAST_DRAFT_MM_GRID": "1"
+      },
+      "reason": "all four WP6 levers together: the arm whose paired timing is read against the production control, after each lever has passed its audit"
+    },
+    {
+      "name": "wp6-audit",
+      "env": {
+        "QWEN_FAST_DRAFT_REDUCE": "1",
+        "QWEN_FAST_DRAFT_TAIL": "1",
+        "QWEN_FAST_DRAFT_GATEUP1": "1",
+        "QWEN_FAST_DRAFT_MM_GRID": "1",
+        "QWEN_FAST_DRAFT_REDUCE_AUDIT": "1",
+        "QWEN_FAST_DRAFT_TAIL_AUDIT": "1",
+        "QWEN_FAST_DRAFT_GATEUP1_AUDIT": "1",
+        "QWEN_FAST_DRAFT_MM_GRID_AUDIT": "1"
+      },
+      "audit": true,
+      "reason": "all four WP6 levers and all four audits on the production stack: every lever compared with the served composition on the device at the warm pass; not a timing arm"
+    },
+    {
+      "name": "wp6-singles",
+      "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-audit-lean",
+      "env": {
+        "QWEN_FAST_DRAFT_REDUCE": "1",
+        "QWEN_FAST_DRAFT_TAIL": "1",
+        "QWEN_FAST_DRAFT_GATEUP1": "1",
+        "QWEN_FAST_DRAFT_MM_GRID": "1",
+        "QWEN_FAST_DRAFT_REDUCE_AUDIT": "1",
+        "QWEN_FAST_DRAFT_TAIL_AUDIT": "1",
+        "QWEN_FAST_DRAFT_GATEUP1_AUDIT": "1",
+        "QWEN_FAST_DRAFT_MM_GRID_AUDIT": "1"
+      },
+      "audit": true,
+      "reason": "all four WP6 levers and their audits on the audited lean twin (QWEN_FAST_DRAFT_SINGLES_AUDIT=all, the verify audits): the draft-singles audit compares the batched quad draft with each user's own single draft in the same round"
+    }
+  ],
+  "image_files": [
+    {
+      "path": "scripts/ci/draft_fusion_tp.py",
+      "reason": "shared flags, markers, core plans and the eager audit of the four levers"
+    },
+    {
+      "path": "scripts/ci/draft_reduce_tp.py",
+      "reason": "F-F1: the reduce launch, the dispatcher target of feature_collective_tp and draft_mlp_branch"
+    },
+    {
+      "path": "scripts/ci/draft_reduce_tp_io.cpp",
+      "reason": "JIT reader kernel of the reduce launch"
+    },
+    {
+      "path": "scripts/ci/draft_reduce_tp_compute.cpp",
+      "reason": "JIT compute kernel of the reduce launch"
+    },
+    {
+      "path": "scripts/ci/draft_fuse_out.cpp",
+      "reason": "JIT writer kernel shared by the reduce and tail launches"
+    },
+    {
+      "path": "scripts/ci/draft_tail_tp.py",
+      "reason": "F-F3a: the SwiGLU and residual launches"
+    },
+    {
+      "path": "scripts/ci/draft_tail_tp_io.cpp",
+      "reason": "JIT reader kernel of the tail launches"
+    },
+    {
+      "path": "scripts/ci/draft_tail_tp_swiglu_compute.cpp",
+      "reason": "JIT compute kernel of the SwiGLU launch"
+    },
+    {
+      "path": "scripts/ci/draft_tail_tp_residual_compute.cpp",
+      "reason": "JIT compute kernel of the residual launch"
+    },
+    {
+      "path": "scripts/ci/draft_gateup_tp.py",
+      "reason": "F-F3c: the fused gate|up weight layout, matmul hook and audit"
+    },
+    {
+      "path": "scripts/ci/draft_mmgrid_tp.py",
+      "reason": "R2: the device-width grid for the drafter matmuls and its audit"
+    },
+    {
+      "path": "scripts/ci/draft_wp6_smoke.py",
+      "reason": "the offline judge of the four levers' markers (chains reached, leaks), the rig host's copy of the smoke table"
+    }
+  ],
+  "tests": [
+    "test_draft_reduce_tp",
+    "test_draft_tail_tp",
+    "test_draft_gateup_tp",
+    "test_draft_mmgrid_tp",
+    "test_draft_wp6_branch",
+    "test_draft_wp6_smoke"
+  ],
+  "notes": "SEE docs/tp4-fusion-wp6.md. For WP0: verified in a scratch merge of this branch with tp4/fusion-1 (27ef2115) after make_fusion_profiles.py --write and make_fusion_jobs.py --write: every entry lands, every WP6 template parses through c2_serving_job.py with rc 0, and four one-line edits to shared tests are still needed, none of which the generators place: (1) test_tp4_closure_literals.py SERVED: add draft_reduce_tp draft_tail_tp draft_gateup_tp draft_mmgrid_tp draft_fusion_tp (draft_mlp_branch.py and feature_collective_tp.py import them lazily and flag-guarded, so a flags-off process never loads them; without the entries test_every_lazy_import_of_a_served_module_is_classified fails); (2) test_serving_image_copy_closure.py C2_ONLY_PLAIN_IMPORTS: add draft_gateup_tp.py draft_mmgrid_tp.py draft_reduce_tp.py draft_tail_tp.py (overlay-only modules that copied P8 modules import; the test counts the lazy imports as plain ones); (3) test_tp4_w1.py CompositionTests.test_only_the_drafter_side_modules_read_the_topology_flag pins the modules that name fast_ccl_topology: the expected list becomes ['dflash_device.py', 'draft_reduce_tp.py', 'feature_collective_tp.py', 'quad_draft.py'] (draft_reduce_tp issues the same all-gather as the served chain, with the served topology); (4) test_tp4_fusion_jobs.py PublicTests.test_the_pack_names_no_host_address_registry_or_home_path reads every entry of references/fusion-jobs with read_text, and WP6's own templates are in references/fusion-jobs/WP6/ (a subfolder, which make_fusion_jobs.py leaves alone): skip directories (if not path.is_file(): continue) or recurse. tp_addresses: nothing to add (feature_collective_tp.gather_add_projection is already the rebound name; it now dispatches on QWEN_FAST_DRAFT_REDUCE itself). wp6_fake_device.py is test support only: not an image file. The profiles wp6, wp6-audit and wp6-singles in profiles[] are the combined arms the templates in references/fusion-jobs/WP6/ use. For WP7 (draft_attention_branch.py, not touched here): three one-line hooks, each lazy and flag-guarded as in draft_mlp_branch.py: the gather at the end of the attention branch: gather = gather_add_projection if quad is None else quad.gather_add_projection; then, if os.environ.get('QWEN_FAST_DRAFT_REDUCE') == '1': import draft_reduce_tp; gather = draft_reduce_tp.choose(gather, quad, 'attention') (the quad's 64-row chains; a branch without a quad already reaches the dispatcher); the residual tail: output = draft_tail_tp.residual(operations, mesh, finished, hidden, retain, site='attention') in place of the two typecasts, add and typecast, under QWEN_FAST_DRAFT_TAIL=1; the wo projection's program grid: grid = draft_mmgrid_tp.grid_for(operations, mesh, value, weight, (8, 10), columns, rows, kernel, site='wo') under QWEN_FAST_DRAFT_MM_GRID=1 (v678: wo +21 percent on its fixed (8, 10) grid). Until those land the engaged line's chains=<n> reaches 5 per quad, not 10: draft_wp6_smoke.py --expect-chains says so. F-F4 (one 64-row drafter LM head) belongs to WP7's draft_shared_head_tp.py / quad_draft_tp.py (the two 32-row halves are quad_draft_tp.head_candidates) and is NOT done here. For WP10 / WP0: the fused commit's 80-core projection (fused_commit_tp.py, 92.8 -> 124.7 us on 13x10 in v678) has the same fixed-grid problem: draft_mmgrid_tp.wide_grid(mesh, cores) and program_config(...) are the one-line fix there, behind QWEN_FAST_DRAFT_MM_GRID, with the same audit helper; est. -0.26 ms per round. No lever here is tau-only (all four are bit-identical by construction and audited on the device), so there is no tau A/B template."
+}
