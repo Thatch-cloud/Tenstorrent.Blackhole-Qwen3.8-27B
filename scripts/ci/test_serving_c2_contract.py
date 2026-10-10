@@ -24,7 +24,7 @@ class _ParkedTwins(object):
                 # the region-read audit twins of the Lever N audited profiles (make_kvread_profiles; test_kvread_profiles holds the list)
                 or name.endswith(('-ship-prefix-levern-audit-kvr', '-ship-prefix-levern-audit-r2-kvr', '-ship-prefix-levern-audit-r2-kvx'))
                 or name.endswith('-ship-prefix-levern-kvr-parked-audit')
-                or name.endswith(('-ship-prefix-levern-dvocab-parked', '-ship-prefix-levern-dvocab-control-parked'))      # (and the draft vocabulary timing twins: test_tp4_draft_vocab_jobs holds them))
+                or name.endswith(('-ship-prefix-levern-dvocab-parked', '-ship-prefix-levern-dvocab-control-parked')))      # (and the draft vocabulary timing twins: test_tp4_draft_vocab_jobs holds them)
 
 
 PARKED_TWINS = _ParkedTwins()
