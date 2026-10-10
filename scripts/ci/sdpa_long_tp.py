@@ -167,7 +167,12 @@ def apply(reader, environ=None):
         # ones, built and qualified at 0x23 by the pinned constructor), builds its own buffers and programs, and logs its own
         # ENGAGED line (the same prefix as every configuration's).
         import sdpa_multi_tp
+        import w2_switch
 
+        if w2_switch.attach_off():
+            # The W2 kill switch (w2.off) was on the hub mount at the attach: leave the served per-user launches in place (reader.multi stays None, the
+            # pinned reader's path); w2_switch logged the line.
+            return None
         for segment in reader.readers:
             applied = tuple(getattr(segment, 'sdpa_modes_applied', None) or ())
             if len(applied) != len(segment.metadata) or any(value != SERVED_FLAGS for value in applied):

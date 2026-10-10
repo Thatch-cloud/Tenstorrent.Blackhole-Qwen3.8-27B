@@ -113,6 +113,10 @@ scripts/ci/early_draft.py
 # that imports it needs this copy beside it; host only, flag off it is read and nothing happens.
 scripts/ci/round_host.py
 
+# The W2 runtime kill switch (w2.off, QWEN_FAST_W2_OFF_PATH; host only): serving_packed_step imports it at module level; sdpa_long_tp.apply and gdn_block_conv_tp.stage ask it
+# before they attach W2. The base has none, so a file of this commit that imports it needs this copy beside it; W2 off, it is read and nothing happens.
+scripts/ci/w2_switch.py
+
 # D0, the one-user lane (QWEN_FAST_SOLO_LANE, gate only; the lanes window): serving_runtime builds the one-user block beside M3
 # when the flag is on and serving_packed_step routes a lone slot-0 round to it (both lazy-import serving_solo_lane), over the
 # shape packed_shapes.solo_shape names. Flag off, none of the three is read: this is what each was call for call.

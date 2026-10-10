@@ -241,6 +241,10 @@ class ProfileTests(unittest.TestCase):
         generated = {name for name, parent, env, why in twins.specs()}
         # the octo-T8 twins of the engine-reuse parent carry its flags by inheritance (test_octo_profiles holds each as that parent plus its own flags)
         generated |= {name for name, parent, env, third, why in octo_twins.specs() if parent == octo_twins.PARKED_PARENT}
+        # the W2 kill drill twin of the ship profile carries the parked flags by inheritance (test_w2_switch holds it as that parent plus its two names)
+        import make_w2_kill_profiles
+
+        generated |= set(make_w2_kill_profiles.twin_names())
         for name, profile in profiles.items():
             env = profile['env']
             named = [flag for flag in env if flag.startswith('QWEN_FAST_PARKED_') or flag in ('QWEN_FAST_GATE_DRAM_BALLAST', 'QWEN_FAST_LEVERN_BUILD_MS')]

@@ -1778,6 +1778,60 @@ def spread_problems(env, container_text):
     return problems
 
 
+# tp4/w2 kill switch (w2_switch.py, docs/tp4-w2-kill-switch.md): the file w2.off latches the sequential step for the packed blocks W2 runs on (live) and keeps W2 out
+# of the next attach. Outside the drill arm (QWEN_FAST_W2_OFF_AFTER, gate only) ANY kill line is a problem: a leftover w2.off made this arm run without W2 and it would
+# read clean. In the drill arm: one drill line (the server wrote the file), then exactly one latch line, packed rounds before it and NONE after it (every packed round
+# replays a trace that carries W2; the "[PINDIAG] packed extent round" line is logged once per packed round), a routed line per block that went sequential, and the
+# engaged lines the W2 rules already demand (the attach before the file did not skip W2). tests hold these equal to w2_switch's.
+W2_KILL_PREFIX = '[PINDIAG] w2 kill switch'
+W2_KILL_LATCH = re.compile(r'\[PINDIAG\] w2 kill switch \S+ present: ')
+W2_KILL_ATTACH = re.compile(r'\[PINDIAG\] w2 kill switch \S+ present at attach')
+W2_KILL_ROUTED = '[PINDIAG] w2 kill switch routed the round to the sequential step'
+W2_KILL_DRILL = '[PINDIAG] w2 kill switch drill (gate only): wrote '
+W2_OFF_AFTER_FLAG = 'QWEN_FAST_W2_OFF_AFTER'
+PACKED_ROUND_LINE = '[PINDIAG] packed extent round'
+
+
+def w2_kill_problems(env, container_text):
+    """[problem] for the W2 kill switch lines of a server log (see the block comment above): none for a log with no kill line and a profile without the drill."""
+    lines = container_text.splitlines()
+    kill = [index for index, line in enumerate(lines) if W2_KILL_PREFIX in line]
+    drill_wanted = str((env or {}).get(W2_OFF_AFTER_FLAG) or '')
+    if not kill:
+        if drill_wanted:
+            return ['%s=%s is set and no w2 kill switch line was logged: the drill never latched (fewer packed rounds than the trigger, or W2 never ran)' % (
+                W2_OFF_AFTER_FLAG, drill_wanted)]
+        return []
+    if not drill_wanted:
+        return ['the W2 kill switch logged a line outside the drill arm: a w2.off file was present, so this arm did not run W2 on all its rounds '
+                '(a leftover file from an earlier arm?): %s' % lines[kill[0]].strip()[:200]]
+    problems = []
+    latch = [index for index in kill if W2_KILL_LATCH.search(lines[index])]
+    attach = [index for index in kill if W2_KILL_ATTACH.search(lines[index])]
+    drill = [index for index in kill if W2_KILL_DRILL in lines[index]]
+    routed = [index for index in kill if W2_KILL_ROUTED in lines[index]]
+    if attach:
+        problems.append('the W2 kill switch line says the file was present at the attach (%d line(s)): the drill must write it mid-run, not before the engine started' % len(attach))
+    if len(latch) != 1:
+        problems.append('%d W2 kill switch latch lines under %s=%s: the switch latches exactly once' % (len(latch), W2_OFF_AFTER_FLAG, drill_wanted))
+    if len(drill) != 1:
+        problems.append('%d W2 kill drill lines under %s=%s: the server writes the flag file exactly once' % (len(drill), W2_OFF_AFTER_FLAG, drill_wanted))
+    if latch and drill and drill[0] > latch[0]:
+        problems.append('the W2 kill latch line precedes the drill line: the switch latched without the drill writing the file')
+    if latch:
+        rounds = [index for index, line in enumerate(lines) if PACKED_ROUND_LINE in line]
+        before = [index for index in rounds if index < latch[0]]
+        after = [index for index in rounds if index > latch[0]]
+        if not before:
+            problems.append('no packed round (%s) before the W2 kill latch: the drill proves nothing without W2 rounds first' % PACKED_ROUND_LINE)
+        if after:
+            problems.append('%d packed round line(s) (%s) after the W2 kill latch: a trace that carries W2 still replayed (first at line %d, latch at %d)' % (
+                len(after), PACKED_ROUND_LINE, after[0] + 1, latch[0] + 1))
+        if not [index for index in routed if index > latch[0]]:
+            problems.append('no round was routed to the sequential step after the W2 kill latch (%s): nothing served the traffic that followed' % W2_KILL_ROUTED)
+    return problems
+
+
 LEVERN_KILL_PREFIX = '[PINDIAG] lever N kill switch'
 DRAFTER_CHECKPOINT_FLAG = 'QWEN_FAST_DRAFTER_CHECKPOINT'
 DRAFTER_CHECKPOINT_MARKER = '[PINDIAG] drafter checkpoint'
@@ -1819,6 +1873,7 @@ def lever_engagement_problems(env, container_text, smoke=None, drill=False):
     problems.extend(sdpa_multi_problems(env, container_text))
     problems.extend(spread_problems(env, container_text))
     problems.extend(drafter_checkpoint_problems(env, container_text))
+    problems.extend(w2_kill_problems(env, container_text))
     lever, _ = levern_problems(env, container_text, smoke)
     problems.extend(lever)
     if env.get(LEVERN_FLAG) == '1' and not drill and LEVERN_KILL_PREFIX in container_text:
@@ -1858,6 +1913,7 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     problems += sdpa_multi_problems(env, container_text)
     problems += spread_problems(env, container_text)
     problems += drafter_checkpoint_problems(env, container_text)
+    problems += w2_kill_problems(env, container_text)
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
     if env is not None and env.get('QWEN_FAST_TP', '2') != '2':

@@ -110,6 +110,9 @@ COPY scripts/ci/verify_prestage.py /experiment-scripts/ci/
 # verify_prestage, packed_verifier, serving_packed_step, serving_packed_bridge, serving_worker_hook, early_draft, dflash_packed_proposal, the coordinator and quad_draft_tp
 # import it at module level or on first use, so it must reach the image beside them. Host only: no kernel, no trace, no allocation.
 COPY scripts/ci/round_host.py /experiment-scripts/ci/
+# tp4/w2 kill switch (the file w2.off under the hub mount's .qwen-c2 directory, QWEN_FAST_W2_OFF_PATH; host only, stdlib only): serving_packed_step imports it at module level
+# and sdpa_long_tp and gdn_block_conv_tp reach it when W2 is attached, so it must reach the image beside them. With W2 off it is read and nothing happens.
+COPY scripts/ci/w2_switch.py /experiment-scripts/ci/
 # Round-fence plan H1b (QWEN_FAST_FUSED_COMMIT, _INPLACE, _LIVE_BANKS, _AUDIT; every flag default off):
 # packed_verifier, serving_packed_step and dflash_proposal_trace import fused_commit when a flag is set,
 # so it must reach the image beside them. It drives the bundle's own slide kernel (the served driver's .cpp).
