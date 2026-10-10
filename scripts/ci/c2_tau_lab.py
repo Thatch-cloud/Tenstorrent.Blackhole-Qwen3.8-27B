@@ -79,6 +79,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import c2_prefix_gate as pg  # noqa: E402
 import c2_serving_gate as gate  # noqa: E402
+import c2_serving_job  # noqa: E402
 import prefix_replay as replay  # noqa: E402
 import tau_lab_report as report  # noqa: E402
 
@@ -1156,6 +1157,9 @@ def build_parser():
                         'or dedf-bf16 (the served drafter with bfloat16 projection weights). '
                         'A3 runs on the control arm only. Default: none, the lab as it was')
     parser.add_argument('--cards', choices=('quad',), default='quad')
+    parser.add_argument('--tt-grid', choices=c2_serving_job.TT_GRIDS, default=None,
+                        help='clamp the compute grid the container opens (%s=...; qwen-c2-serving.yml C2_TT_GRID); default: not passed'
+                        % c2_serving_job.TT_GRID_ENV)
     parser.add_argument('--hub', default=gate.HUB)
     parser.add_argument('--port', type=int, default=PORT)
     parser.add_argument('--dry-run', action='store_true', help='check the data and print the plan (counts) and the docker argv; '
@@ -1291,7 +1295,9 @@ def main(argv=None, say=print, make_stream=None, make_client=None, make_containe
     results_dir = os.path.abspath(options.results)
     derived_path = os.path.join(results_dir, 'profiles.json')
     arguments = pg.server_run(options.image, CONTAINER, derived, devices or ['<card %d>' % n for n in range(4)],
-                              options.port, options.hub, derived_path)
+                              options.port, options.hub, derived_path, tt_grid=options.tt_grid)
+    if options.tt_grid:
+        say('[TAULAB] compute-grid clamp: %s=%s in the container' % (c2_serving_job.TT_GRID_ENV, options.tt_grid))
     if options.dry_run:
         say(json.dumps(arguments))
         return 0

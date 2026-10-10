@@ -542,13 +542,14 @@ def kvread_mount_arguments(image, mount=None, run=subprocess.run):
 
 
 def server_run(image, name, served, devices, port=PORT, hub=gate.HUB, derived_path=None, digests=False,
-               salt_key_path=None, stats_now=False, env=(), gate_only=False):
+               salt_key_path=None, stats_now=False, env=(), gate_only=False, tt_grid=None):
     """`docker run -d` of one serving container: the S1 gate's agent shape (its --rm dropped: the
     reload drill stops and starts the same container), the API on 127.0.0.1:port, a derived
     profiles file when the arm has one, the row digests when asked, the arm's salt key when it has
     one, the gate-only knobs an S2 arm adds (`env`: the extent audit, c2_serving_gate.ARM_ENV_NAMES),
-    and the platform's vLLM argv."""
-    arguments = [token for token in gate.agent_shape(image, name, served, devices, hub, env, gate_only=gate_only) if token != '--rm']
+    and the platform's vLLM argv. `tt_grid` (C2_TT_GRID): the compute-grid clamp, c2_serving_gate.agent_shape's."""
+    arguments = [token for token in gate.agent_shape(image, name, served, devices, hub, env, gate_only=gate_only, tt_grid=tt_grid)
+                 if token != '--rm']
     arguments[2:2] = ['-d']
     arguments += ['-p', '127.0.0.1:%d:8000' % port]
     if digests:
@@ -1584,6 +1585,7 @@ class Runner(object):
         self.containers = containers or gate.platform_containers
         self.corpus = corpus
         self.seed, self.agents, self.turns = seed, agents, turns
+        self.tt_grid = None                 # C2_TT_GRID: the compute-grid clamp every arm's container carries (main sets it after construction)
         self.infra = None
         self.box_deadline = None            # clock time the job's box ends (--box-seconds), or None
         self.waived = False                 # an arm's log showed the 262k waiver
@@ -1639,7 +1641,7 @@ class Runner(object):
         arguments = server_run(self.image, name, arm['served'], self.devices, self.port, self.hub, derived_path,
                                digests=wants_digests(arm), salt_key_path=salt_key_path,
                                stats_now=bool(arm.get('prefix')), env=arm.get('env') or (),
-                               gate_only=bool(arm.get('gate_only')))
+                               gate_only=bool(arm.get('gate_only')), tt_grid=getattr(self, 'tt_grid', None))
         with open(os.path.join(arm_dir, 'docker-run.json'), 'w') as handle:
             json.dump(arguments, handle, indent=1)
         started = self.clock()
@@ -1911,6 +1913,9 @@ def build_parser():
     parser.add_argument('--cards', choices=gate.CARD_SETS, default='pair',
                         help='pair: cards M and A (the default); quad: every Blackhole board present, the four-card '
                              '(1, 4) mesh the TP4 profiles open (qwen-c2-serving.yml C2_CARDS)')
+    parser.add_argument('--tt-grid', choices=c2_serving_job.TT_GRIDS, default=None,
+                        help='clamp the compute grid every arm\'s container opens (%s=...; qwen-c2-serving.yml C2_TT_GRID); '
+                             'default: not passed' % c2_serving_job.TT_GRID_ENV)
     return parser
 
 
@@ -1987,7 +1992,7 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
                                                       salt_key_path='<results>/%s/salt.key' % arm['arm']
                                                       if arm.get('prefix') else None,
                                                       stats_now=bool(arm.get('prefix')), env=arm.get('env') or (),
-                                                      gate_only=bool(arm.get('gate_only'))))))
+                                                      gate_only=bool(arm.get('gate_only')), tt_grid=options.tt_grid))))
         return 0
     if os.environ.get(ALLOW_FULL_AUDIT_ENV) != '1' and any(
             arm['arm'] in AUDIT_COST_ARMS and arm.get('kind') in AUDIT_KINDS for plan in plans for arm in arms_of[plan]):
@@ -2005,10 +2010,15 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
                                         options.port, log=log, seed=options.seed, agents=agents, turns=options.turns)
     if options.box_seconds is not None:
         runner.box_deadline = runner.clock() + options.box_seconds
+    runner.tt_grid = options.tt_grid
+    if options.tt_grid:
+        log('[PREFIX-GATE] compute-grid clamp: %s=%s in every arm\'s container' % (c2_serving_job.TT_GRID_ENV, options.tt_grid))
     summary = dict(image=options.image, profile=options.profile, baseline=options.baseline, plans=plans,
                    worst_case_seconds=worst_case, budget_seconds=options.budget_seconds, box_seconds=options.box_seconds, results={},
                    not_applicable=dict((plan, [dict(arm=arm, why=why) for arm, why in entries])
                                        for plan, entries in skipped.items() if entries))
+    if options.tt_grid:
+        summary['tt_grid'] = options.tt_grid
     try:
         if 'bringup' in plans and anchor is None:
             anchor = anchor_probe(options.image)

@@ -512,6 +512,7 @@ argv=(docker run --rm --name "$name" --network none
   ${KM[@]+"${KM[@]}"}
   ${WM[@]+"${WM[@]}"}
   -e TT_METAL_HOME=/opt/tt-metal -e TT_METAL_CACHE=/kcache -e OMP_NUM_THREADS=8
+  ${QUAL_TT_GRID:+-e "TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$QUAL_TT_GRID"}
   -e QWEN_SDPA_TREE_SCRATCH_ROUNDS=1
   --entrypoint sh "$IMAGE" -c "$inner"
   probe "${args[@]}" ${extra[@]+"${extra[@]}"})
