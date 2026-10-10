@@ -1246,6 +1246,78 @@ class ProvenanceTests(unittest.TestCase):
         self.assertIn('"${GRAFT_SHA}"', step)
         self.assertIn('3f5a3d585b46b2bef7d7d2c6c34b88d7f4efb679ec051fb4da615f6ec9ccc9ce', step)
 
+    # ---- the second graft (tp4/prefill-sdpa): K64j-OQ baked by C2_BAKE_GRAFT=K64j-OQ ----
+    OQ_SO = K64J_SO + b'[QWEN-SDPA-PF] oneq needs one q chunk per core\x00[QWEN-SDPA-PF] oneq=1 q_chunks=%d\x00'
+
+    def make_oq_context(self, ttnncpp=None):
+        """The context a K64j-OQ build stages: the graft directory is opgraft-K64j-OQ (and only it), the binary carries the two oneq literals, and the Dockerfile
+        reads as the build leaves it once --build-arg GRAFT_NAME/GRAFT_SHA are applied (the verifier reads the ARG defaults)."""
+        shutil.move(str(self.context / provenance.GRAFT_NAME), str(self.context / provenance.OQ_GRAFT_NAME))
+        (self.context / provenance.OQ_GRAFT_NAME / '_ttnncpp.so').write_bytes(self.OQ_SO if ttnncpp is None else ttnncpp)
+        dockerfile = self.context / 'Dockerfile'
+        text = dockerfile.read_text()
+        text = text.replace('ARG GRAFT_NAME=opgraft-K64j\n', 'ARG GRAFT_NAME=%s\n' % provenance.OQ_GRAFT_NAME)
+        text = text.replace('ARG GRAFT_SHA=152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7\n',
+                            'ARG GRAFT_SHA=%s\n' % provenance.OQ_GRAFT_TTNNCPP_SHA256)
+        dockerfile.write_text(text)
+
+    def verify_oq(self, **faults):
+        with provenance.using_graft(provenance.OQ_GRAFT_NAME):          # the fixture reads the graft constants at call time, as verify() does
+            built, base = fake_image(self.context, self.entries, **faults)
+        docker = FakeDocker(self.context, built, base, self.env)
+        problems, _ = provenance.verify('sha256:built', self.context, '/models', docker=docker, log=self.log.append, previous_graft=self.previous)
+        return problems, docker
+
+    def test_the_default_variant_is_the_constants_and_the_context_names_its_graft(self):
+        self.assertEqual(provenance.context_graft_name(self.context), provenance.GRAFT_NAME)
+        label, literals, successions = provenance.GRAFT_VARIANTS[provenance.GRAFT_NAME]
+        self.assertEqual((label, literals, successions), (provenance.GRAFT_LABEL, provenance.GRAFT_LITERALS, provenance.ENVIRONMENT_SUCCESSIONS))
+        saved = (provenance.GRAFT_NAME, provenance.GRAFT_LABEL, provenance.GRAFT_IN_IMAGE, provenance.GRAFT_LITERALS, provenance.ENVIRONMENT_SUCCESSIONS)
+        with provenance.using_graft(provenance.OQ_GRAFT_NAME):
+            self.assertEqual((provenance.GRAFT_NAME, provenance.GRAFT_LABEL, provenance.GRAFT_IN_IMAGE), (
+                'opgraft-K64j-OQ', 'K64j-OQ', '/opt/qwen-c2/opgraft-K64j-OQ'))
+            self.assertEqual(provenance.GRAFT_LITERALS, provenance.OQ_GRAFT_LITERALS)
+            self.assertEqual(provenance.ENVIRONMENT_SUCCESSIONS['QWEN_FAST_RUNTIME_BINARY_SHA256'][1], provenance.OQ_GRAFT_TTNNCPP_SHA256)
+        self.assertEqual((provenance.GRAFT_NAME, provenance.GRAFT_LABEL, provenance.GRAFT_IN_IMAGE, provenance.GRAFT_LITERALS,
+                          provenance.ENVIRONMENT_SUCCESSIONS), saved)
+        with self.assertRaisesRegex(ValueError, 'unknown graft'):
+            provenance.using_graft('opgraft-K64k')
+        # the oneq graft keeps every literal of K64j's and adds exactly the two oneq ones; its succession starts from the same gate value
+        self.assertEqual(provenance.OQ_GRAFT_LITERALS[:len(provenance.GRAFT_LITERALS)], provenance.GRAFT_LITERALS)
+        self.assertEqual(len(provenance.OQ_GRAFT_LITERALS), len(provenance.GRAFT_LITERALS) + 2)
+        self.assertEqual(provenance.OQ_ENVIRONMENT_SUCCESSIONS['QWEN_FAST_RUNTIME_BINARY_SHA256'][0],
+                         provenance.ENVIRONMENT_SUCCESSIONS['QWEN_FAST_RUNTIME_BINARY_SHA256'][0])
+        self.assertNotEqual(provenance.OQ_GRAFT_TTNNCPP_SHA256, provenance.ENVIRONMENT_SUCCESSIONS['QWEN_FAST_RUNTIME_BINARY_SHA256'][1])
+
+    def test_a_context_with_both_grafts_is_refused(self):
+        shutil.copytree(str(self.context / provenance.GRAFT_NAME), str(self.context / provenance.OQ_GRAFT_NAME))
+        with self.assertRaisesRegex(ValueError, 'more than one graft'):
+            provenance.context_graft_name(self.context)
+
+    def test_a_faithful_k64j_oq_image_passes_under_its_own_label_literals_and_pin(self):
+        self.make_oq_context()
+        self.assertEqual(provenance.context_graft_name(self.context), provenance.OQ_GRAFT_NAME)
+        problems, _ = self.verify_oq()
+        self.assertEqual(problems, [], problems)
+        self.assertTrue(any('K64j-OQ' in line and '_ttnncpp.so carries' in line and 'oneq' in line for line in self.log), self.log)
+        self.assertIn('[G1] PASS: 0 problem(s)', self.log)
+        # verify() put the module's graft constants back
+        self.assertEqual(provenance.GRAFT_NAME, 'opgraft-K64j')
+
+    def test_a_k64j_oq_context_whose_binary_lacks_the_oneq_literals_fails(self):
+        self.make_oq_context(ttnncpp=K64J_SO)
+        problems, _ = self.verify_oq()
+        self.assertTrue(any('oneq' in problem and 'K64j-OQ' in problem for problem in problems), problems)
+
+    def test_a_k64j_oq_context_baked_with_the_k64j_runtime_pin_fails(self):
+        """The image env must carry the graft's own binary digest: a Dockerfile left at K64j's default (the build arg not passed) is a problem."""
+        self.make_oq_context()
+        dockerfile = self.context / 'Dockerfile'
+        dockerfile.write_text(dockerfile.read_text().replace('ARG GRAFT_SHA=%s\n' % provenance.OQ_GRAFT_TTNNCPP_SHA256,
+                                                             'ARG GRAFT_SHA=152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7\n'))
+        problems, _ = self.verify_oq()
+        self.assertTrue(any('QWEN_FAST_RUNTIME_BINARY_SHA256' in problem for problem in problems), problems)
+
     def test_a_faithful_image_passes(self):
         problems, docker = self.verify()
         self.assertEqual(problems, [], problems)

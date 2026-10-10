@@ -104,17 +104,22 @@ blocks, oneq `K+16` (K = chunk_start / 128). It reproduces the profile's measure
 
 | prompt | chunks | **E** saving, floor step 13.51 us | **E** saving if the chain step is 16.5 us | **M** card-M saving (oneq_report.py) | **M** model-gate TTFT A/B |
 |---|---|---|---|---|---|
-| 32k (32,768) | 16 | 0.47 s | 0.35 s | pending | pending |
-| 128k (131,072) | 64 | 7.88 s | 6.09 s | pending | pending |
-| 254k (253,952) | 124 | 29.80 s | 23.10 s | pending | pending |
+| 32k (32,768) | 16 | 0.47 s | 0.35 s | 0.57 s (0.41 s profile-anchored) | pending (OQ-T1..T4) |
+| 128k (131,072) | 64 | 7.88 s | 6.09 s | 9.46 s (7.79 s profile-anchored) | pending (OQ-T1..T4) |
+| 254k (253,952) | 124 | 29.80 s | 23.10 s | 35.78 s (29.68 s profile-anchored) | pending (OQ-T1..T4) |
 
-Per attention layer at TP4 (**E**, us; **M** pending): chunk_start 0: 319.7 -> 306.2; 2,048: 752.0 -> 522.3; 8,192: 2,048.9 -> 1,170.8; 32,768: 7,236.8 -> 3,764.7;
-65,536: 14,153.9 -> 7,223.3; 129,024: 27,555.8 -> 13,924.2; 196,608: 41,822.4 -> 21,057.5; 251,904: 53,495.0 -> 26,893.8. The ratio tends to 0.5 (0.503 at 252k).
+**Measured on card M** (W1 run 38066157833: watcher PASS 10/10 exact; Q1 run 38066212228: `ONEQ_CARD_M verdict=PASS cases=360 exact=360 tp2=6 grid=4 failures=0`, binary
+`2b81e28f017ccf0ab50028fbae5eb31dd61cfd8a3159233a1ed785712d024a57`). Per attention layer at TP4, 2048 rows, Q in DRAM, served -> oneq (ms): context 4k 0.96 -> 0.69
+(0.72x), 34k 8.73 -> 4.58 (0.52x), 67k 17.06 -> 8.73 (0.51x), 131k 33.17 -> 16.80 (0.51x), 199k 50.26 -> 25.30 (0.50x), 254k 64.27 -> 32.34 (0.50x). The `oneq_noc` arm
+(chain ordered by NoC distance) measured about 0.68x: worse, dropped (not used by any profile or template). The ratio matches the model; the card-M ABSOLUTE times
+(both arms) are 1.20x the profile's in-situ per-layer times (e.g. 64.27 vs 53.5 ms at 252k), which is the 16.5 us chain step of the second column applied to both arms.
+"Card-M saving" applies the card-M lines (absolute, 1.20x the estimate); "profile-anchored" applies the measured oneq / served ratio per chunk start to the profile's
+paired layer times (the estimate's own base) and is the figure to expect in the TTFT A/B: about -7.8 s at 128k and -29.7 s at 254k. The model-gate A/B (OQ-T1..T4) stays
+the end-to-end measurement.
 
-**The main unknown** is the chain step with 16 chains: the estimate assumes the K/V forwarding stays at the compute floor as it does with 8 chains at TP4 (slope
-0.2115 ms per 1k = 13.51 us per step). Q2 on card M measured 16.5 us per step (22 percent above the floor) for the 16-chain TP2 geometry. If oneq lands there, the
-saving is the second column (~77 percent of the best case); the `oneq_noc` arm (chain ordered by NoC distance) and the repeat job show whether placement matters.
-`timing_verdict`: OQ-WIN when the median oneq / served ratio at 32k and beyond is at most 0.75, OQ-PARTIAL up to 0.95.
+**The unknown was the chain step** with 16 chains (the estimate assumed the K/V forwarding stays at the compute floor, 13.51 us per step, as it does with 8 chains at TP4). Card M
+settled it: the 16-chain call sits at the 16.5 us step Q2 measured for the TP2 geometry, in BOTH arms, so the ratio (0.50x from 67k) is the model's and the absolute times are 1.20x
+the profile's. Placement does not help (`oneq_noc` 0.68x). `timing_verdict`: OQ-WIN (median oneq / served ratio at 32k and beyond at most 0.75; measured 0.50-0.52).
 
 ## Other chunk sizes, head counts, grids (what happens, so nothing else regresses)
 
@@ -132,11 +137,66 @@ saving is the second column (~77 percent of the best case); the `oneq_noc` arm (
 
 ## The model hook
 
-`scripts/ci/sdpa_pf_oneq_tp.py`: `QWEN_FAST_SDPA_PF_ONEQ=1` (strict 0/1, default off; needs `QWEN_FAST_SDPA_PF=1`, a production `QWEN_FAST_SDPA_PF_FLAGS`, four-card
-serving) replaces the graft's `_qwen_pf_program_config` with a wrapper that calls it and ORs 0x8 into the chain's word where the factory accepts the call;
-`QWEN_FAST_SDPA_PF_ONEQ_AUDIT=1` also runs the chain's own program on the first 8 and every 24th engaged call and compares both outputs bit for bit on every
-chip. The graft file is not edited and with the flag off nothing is imported. **It cannot engage before two integration steps** (WPP.json notes): the image must
-carry the K64j-OQ `_ttnncpp.so`, and `packed_any_admission.check_runtime`, which pins every mapped `_ttnncpp.so` to K64j's sha, must accept it.
+`scripts/ci/sdpa_pf_oneq_tp.py`: `QWEN_FAST_SDPA_PF_ONEQ=1` (strict 0/1, default off; needs `QWEN_FAST_SDPA_PF=1`, which the image environment sets, a production
+`QWEN_FAST_SDPA_PF_FLAGS`, four-card serving) replaces the graft's `_qwen_pf_program_config` with a wrapper that calls it and ORs 0x8 into the chain's word where the
+factory accepts the call; `QWEN_FAST_SDPA_PF_ONEQ_AUDIT=1` also runs the chain's own program on the first 8 and every 24th engaged call and compares both outputs bit for bit
+on every chip. The graft file is not edited. **Bound by `tp_addresses.install()`**, which imports the module and calls `sdpa_pf_oneq_tp.install(environ)` only when
+either flag is SET (any value, so a malformed one still reaches the strict parser and fails at attach); with both unset nothing of it is imported, and the pair never reaches
+it. `tp_addresses.uninstall()` puts the graft's function back. The module is an overlay-only image file (`docker/qwen-c2-overlay.txt`), not in the P8 copy lists.
+
+## Integration into an image (tp4/prefill-sdpa)
+
+**Which binary: the whole image is switched, with an accept-set, not a flag-gated acceptance.** `build-c2-serving-image.sh` bakes K64j (default, byte-identical to every
+earlier image) or, with the job key `C2_BAKE_GRAFT=K64j-OQ`, the K64j-OQ graft (`~/opgraft-K64j-OQ`): the Dockerfile takes `GRAFT_NAME` / `GRAFT_SHA` as build args (defaults
+K64j's) and sets `QWEN_FAST_RUNTIME_BINARY_SHA256` to the graft's own digest; G1 (`c2_image_provenance.verify`) holds the image to whichever graft the context holds (its
+literals, the K64i superset, the reviewed succession of the runtime pin). Why this and not "accept the new sha only when the profile asks for oneq": the ABAB control arms
+run flag-off on the SAME baked image (one image, a read-only rootfs, no boot-time swap), so an acceptance gated on the flag would refuse the control arm, or demand two
+images and put the pair on different binaries (the pair would then measure the image, not the lever); and the oneq edits are inert unless a call carries 0x8, which only
+the flag produces. `packed_any_admission.admit` accepts exactly the two binaries of `SERVED_BINARIES` (anything else is refused by name; `QWEN_FAST_RUNTIME_BINARY_SHA256` unset
+reads as K64j), and K64j-OQ borrows K64j's evidence records **in a gate boot only** (`QWEN_C2_GATE=1`, logged as `binary_equivalence`); a traffic boot on K64j-OQ needs
+records made on K64j-OQ (below). With the default build nothing changes: K64j serves exactly as before.
+
+**Evidence and pins bound to the K64j binary sha (`152951c1...`), what a swap voids, and what stays valid:**
+
+| Item | Bound to the sha? | On a K64j-OQ image |
+|---|---|---|
+| `packed_any_evidence_tp4.json` (131,328 window; CB1, CB2a, CB2b; pinned by `EVIDENCE_TP4_SHA256`) | yes: `binary.ttnncpp_sha256` | **VOID for traffic** (borrowed in a gate boot) |
+| `packed_any_evidence_tp4_262144.json` (262,144 window; pinned by `EVIDENCE_TP4_262K_SHA256`) | yes | **VOID for traffic** (borrowed in a gate boot) |
+| `packed_any_evidence.json` (the two-chip pair; `EVIDENCE_SHA256`) | yes | void, not served (four cards only) |
+| `ordered_writer_evidence_tp4.json` (E1, `ORDERED_WRITER_EVIDENCE_TP4_SHA256`) | NO: bound to the page-writer kernel source, the pinned compute kernel, the geometry (`design_signature`) and its report; it holds no binary field | stays valid (the kernels are JIT sources the swap does not touch; re-running E1w/E1 is optional confidence, 35 min) |
+| K64j kernel pins in `packed_any_admission.K64J_KERNELS`, the evidence records' `kernels` / `sources` blocks | no (source shas of the four decode kernels and the python modules) | unchanged: the build proves the four kernels and the chain reader are K64j's |
+| `packed_any_admission.K64J_TTNNCPP_SHA256` and the runtime check | yes (the pin) | now `SERVED_BINARIES` (K64j, K64j-OQ); K64j-OQ must also carry the two oneq literals and no K64j-only bytes under its name |
+| `docker/qwen-c2-serving.Dockerfile` (`ARG GRAFT_SHA`, the two library re-checks, the `QWEN_FAST_RUNTIME_BINARY_SHA256` env), `build-c2-serving-image.sh` (`graft_sha`) | yes | default K64j, K64j-OQ by `C2_BAKE_GRAFT` |
+| `c2_image_provenance.py` (`ENVIRONMENT_SUCCESSIONS`, `GRAFT_*`, the `OQ_*` variant), `test_c2_image_overlay` | yes | updated (variant added, tested both ways) |
+| `real_text_compare.REVIEWED_SUCCESSIONS` (K64i -> K64j) | yes | NOT extended: two arms on a K64j and a K64j-OQ image read NOT_COMPARABLE (conservative); the ABAB pairs run on one image |
+| `optimisation/ttnn-op/kv_region_read/build_kv_read.sh` (`TTNNCPP_SHA`, names the image's binaries it builds beside) and the `opgraft-KVR` extension pin (`5b2ad8d7...`) | the build script names K64j's sha; the extension is a separate binary | not voided (no ABI change); set `TTNNCPP_SHA` if KVR is ever rebuilt against an OQ image |
+| card-M requalification templates (`references/tp4-262k8-jobs/E*`, `references/tp4-s2-serve-jobs/EV-*`, `references/fusion-jobs/WP2/KVPAGE-W*`, `.github/c2-serving-job.env` line 94) | they carry `KOPGRAFT64` / `EXPECT_TTNNCPP_SHA256` (placeholders `@K64J_GRAFT_DIR@` / `@K64J_TTNNCPP_SHA256@`, or K64j's literal in the job file) | re-run with the K64j-OQ directory and sha filled in |
+| W1 / W2 / Lever N / engine-reuse / fusion lever evidence, the 262k waiver, `real_text` gates | no (flag-level and source-level) | stand; the fusion pack's gate boots on the OQ image re-prove them on the new binary for free |
+
+A record names ONE binary, so re-recording on K64j-OQ replaces the K64j record in the same file: a K64j image built from that commit is then gate-only. That is the cost of the
+wholesale switch and the reason the K64j-OQ evidence is recorded last, once the lever has paid for itself.
+
+**Requalification (only when a K64j-OQ image is to carry TRAFFIC; gate boots need none).** Card M alone (the pair), the existing recorders and templates, placeholders
+filled with `@K64J_GRAFT_DIR@=$HOME/opgraft-K64j-OQ` and `@K64J_TTNNCPP_SHA256@=2b81e28f...`; production is down for it (the four-card jobs leave the fabric on the ethernet cores,
+hence the quad reset first). Minutes are the templates' own estimates (a quad reset included):
+
+| Step | Templates | Minutes |
+|---|---|---|
+| 131,328 record | `tp4-s2-serve-jobs`: `EV-R0` 12, `EV-W1` 6, `EV-F1` (CB1) 6, `EV-F2` (CB2a) 6, `EV-W2` 8, `EV-F3` (CB2b) 10 | 48 |
+| 262,144 record | `tp4-262k8-jobs`: `E0` 12, `E2w` 8, `E2a` 20, `E2b` 20, `E2xw` 10, `E2c` 30 | 100 (88 after the shared reset: one reset for both records makes the pair 136) |
+| both, one window | one `R0`/`E0` reset, the six 131k jobs without it, the five 262k jobs | about 136 |
+| E1 ordered writer (optional; the record is not bound to the binary) | `E1w` 10, `E1` 25 | 35 |
+| after the cards, no card time | `python3 -B scripts/ci/record_packed_any_evidence_tp4.py --binary k64j-oq [--capacity 262144] --cb1 ... --cb2a ... --cb2b ...` (the recorder checks every report names the K64j-OQ sha); commit each JSON with its re-pinned `EVIDENCE_TP4_SHA256` / `EVIDENCE_TP4_262K_SHA256` together (stage by explicit path: `scripts/ci/__pycache__` is tracked); the CPU suite on the pushed head | no card |
+
+Gate boots (every fusion-pack job, `OQ-A1`, `OQ-T1..T4`, the generated `ONEQ*` jobs) run on the K64j-OQ image today; the ship pack's own jobs (`references/fusion-jobs/ship`) boot
+the traffic profile, so they need the records above first (or the K64j image).
+
+## The jobs of the integration (references/fusion-jobs/WPP, one image `tp4-fusion-1`)
+
+`OQ-B0-build-oq` is the fusion pack's `B0` plus `C2_BAKE_GRAFT=K64j-OQ` (use it in place of `B0` for a window that runs a oneq arm: every other arm then runs the K64j-OQ binary
+with the lever off); `OQ-A1-audited-attach-all` boots `...-fx-all-oneq-audit` (every fx-all lever with its audit, oneq with its audit); `OQ-T1..T4` are the solo prefill ladder ABAB on
+`...-fx-all` (control) and `...-fx-all-oneq` (lever), read with `prefill_ladder_report.py`. The profile twins come from `profiles[]` of `scripts/ci/fusion-wp/WPP.json` (parents
+`...-fx-all` and `...-fx-all-audit`, generated after the combined arm), so the lever is measured on top of the combination and on nothing else.
 
 ## Files
 
@@ -148,4 +208,4 @@ carry the K64j-OQ `_ttnncpp.so`, and `packed_any_admission.check_runtime`, which
 | `build_k64j_oq.sh` | the graft build into `~/opgraft-K64j-OQ` |
 | `oneq_card_m.py`, `run_card_m_oq.sh` | the card-M proof and timing and its runner (the K64j graft mounted read-only, holder check, node recheck, watchdog) |
 | `oneq_report.py` | the estimated-vs-measured table from a card report |
-| `../../../scripts/ci/test_sdpa_oneq_{factory,build,card,tp}.py` | the CPU tests (patch, host-executed C++, planner, protocol model, time model, fake-ttbuild build, fake-ttnn harness and hook) |
+| `../../../scripts/ci/test_sdpa_oneq_{factory,build,card,tp,admission}.py` | the CPU tests (patch, host-executed C++, planner, protocol model, time model, fake-ttbuild build, fake-ttnn harness and hook, tp_addresses binding, the admission accept-set and recorder, the `C2_BAKE_GRAFT` job key and build-script switch) |

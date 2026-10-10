@@ -276,5 +276,110 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(again['binary'], current['binary'], 'without --binary the record is what it was')
 
 
+class BakeGraftJobTests(unittest.TestCase):
+    """C2_BAKE_GRAFT (c2_serving_job.py): the build job's switch to the K64j-OQ graft. Empty is K64j; the one other value is K64j-OQ; a build-time key."""
+
+    ROOT = HERE.parents[1]
+    PROFILES = json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))['profiles']
+    BUILD = {'C2_CARDS': 'quad', 'C2_ACTIONS': 'build', 'C2_IMAGE_TAG': 'tp4-fusion-1', 'C2_PROFILE': 'c2-packed-tp4'}
+
+    def read(self, **extra):
+        import c2_serving_job as job
+        return job.read_job(dict(self.BUILD, **extra), sorted(self.PROFILES), root=str(self.ROOT), envs={name: p.get('env') or {} for name, p in self.PROFILES.items()})
+
+    def test_unset_and_empty_render_empty_so_the_default_build_is_unchanged(self):
+        self.assertEqual(self.read()['bake_graft'], '')
+        self.assertEqual(self.read(C2_BAKE_GRAFT='')['bake_graft'], '')
+
+    def test_k64j_oq_is_the_one_accepted_name(self):
+        self.assertEqual(self.read(C2_BAKE_GRAFT='K64j-OQ')['bake_graft'], 'K64j-OQ')
+        import c2_serving_job as job
+        self.assertEqual(job.BAKE_GRAFTS, ('K64j-OQ',))
+        for bad in ('K64j', 'k64j-oq', 'K64j-OQ ', 'opgraft-K64j-OQ', 'K64i'):
+            with self.subTest(name=bad), self.assertRaisesRegex(job.JobError, 'C2_BAKE_GRAFT must be empty'):
+                self.read(C2_BAKE_GRAFT=bad)
+
+    def test_it_is_a_build_time_key(self):
+        import c2_serving_job as job
+        with self.assertRaisesRegex(job.JobError, 'C2_BAKE_GRAFT is baked at build time'):
+            self.read(C2_ACTIONS='reset smoke', C2_SMOKE_TESTS='warmup,concurrent8_steady', C2_BAKE_GRAFT='K64j-OQ', C2_PROFILE='c2-packed-tp4')
+
+    def test_the_workflow_hands_the_output_to_the_build_script(self):
+        workflow = (HERE.parents[1] / '.github' / 'workflows' / 'qwen-c2-serving.yml').read_text(encoding='utf-8')
+        self.assertIn('C2_BAKE_GRAFT: ${{ steps.job.outputs.bake_graft }}', workflow)
+        script = (HERE / 'build-c2-serving-image.sh').read_text(encoding='utf-8')
+        self.assertIn('${C2_BAKE_GRAFT:-}', script)
+
+    def test_the_oneq_templates_name_the_key_where_it_belongs(self):
+        import c2_serving_job as job
+        folder = HERE / 'references' / 'fusion-jobs' / 'WPP'
+        text = (folder / 'OQ-B0-build-oq.env').read_text(encoding='utf-8')
+        values = job.parse_env(text)
+        self.assertEqual(values['C2_BAKE_GRAFT'], 'K64j-OQ')
+        self.assertEqual(values['C2_IMAGE_TAG'], 'tp4-fusion-1')
+        self.assertEqual(values['C2_BAKE_DEFAULT_PROFILE'], 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic')
+        for path in sorted(folder.glob('OQ-*.env')):
+            if path.name != 'OQ-B0-build-oq.env':
+                self.assertNotIn('C2_BAKE_GRAFT', job.parse_env(path.read_text(encoding='utf-8')), path.name)
+
+
+class BuildScriptTests(unittest.TestCase):
+    """build-c2-serving-image.sh: the graft case block, run in bash on its own, and the pins it shares with the admission and G1."""
+
+    SCRIPT = (HERE / 'build-c2-serving-image.sh').read_text(encoding='utf-8')
+
+    def block(self):
+        start = self.SCRIPT.index('case "${C2_BAKE_GRAFT:-}" in')
+        end = self.SCRIPT.index('esac', start) + len('esac')
+        return self.SCRIPT[start:end]
+
+    def run_block(self, bake):
+        import subprocess
+        program = ('HOME=/h; graft=/home/thatch/opgraft-K64j; graft_name=opgraft-K64j; graft_sha=%s; %s; '
+                   'printf "%%s\\n%%s\\n%%s\\n" "$graft" "$graft_name" "$graft_sha"' % (K64J, self.block()))
+        env = {'PATH': '/usr/bin:/bin'}
+        if bake is not None:
+            env['C2_BAKE_GRAFT'] = bake
+        return subprocess.run(['bash', '-c', program], capture_output=True, text=True, env=env)
+
+    def test_the_default_is_k64j_byte_for_byte(self):
+        done = self.run_block(None)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.split(), ['/home/thatch/opgraft-K64j', 'opgraft-K64j', K64J])
+        self.assertEqual(self.run_block('').stdout.split(), done.stdout.split())
+
+    def test_k64j_oq_swaps_the_directory_the_name_and_the_pin_together(self):
+        done = self.run_block('K64j-OQ')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.split(), ['/h/opgraft-K64j-OQ', 'opgraft-K64j-OQ', OQ])
+
+    def test_anything_else_stops_the_build_before_it_starts(self):
+        for bad in ('K64j', 'k64j-oq', 'K64i'):
+            done = self.run_block(bad)
+            self.assertEqual(done.returncode, 2, bad)
+            self.assertIn('neither empty (K64j) nor K64j-OQ', done.stderr)
+
+    def test_the_pins_are_the_admission_and_g1_constants(self):
+        import c2_image_provenance as provenance
+        self.assertEqual(OQ, provenance.OQ_GRAFT_TTNNCPP_SHA256)
+        self.assertEqual(K64J, provenance.ENVIRONMENT_SUCCESSIONS['QWEN_FAST_RUNTIME_BINARY_SHA256'][1])
+        self.assertIn('graft_sha=%s' % K64J, self.SCRIPT)
+        self.assertIn('graft_sha=%s' % OQ, self.SCRIPT)
+        self.assertIn('--build-arg "GRAFT_NAME=$graft_name" --build-arg "GRAFT_SHA=$graft_sha"', self.SCRIPT)
+        dockerfile = (HERE.parents[1] / 'docker' / 'qwen-c2-serving.Dockerfile').read_text(encoding='utf-8')
+        self.assertIn('ARG GRAFT_SHA=%s' % K64J, dockerfile)
+        self.assertIn('QWEN_FAST_RUNTIME_BINARY_SHA256=${GRAFT_SHA}', dockerfile)
+        self.assertEqual(provenance.dockerfile_env(dockerfile)['QWEN_FAST_RUNTIME_BINARY_SHA256'], K64J)
+
+    def test_the_k64j_oq_graft_directory_is_the_one_the_build_script_stages(self):
+        build = (HERE.parents[1] / 'optimisation' / 'ttnn-op' / 'sdpa_prefill_oneq' / 'build_k64j_oq.sh').read_text(encoding='utf-8')
+        self.assertIn('opgraft-K64j-OQ', build)
+        self.assertIn('opgraft-K64j-OQ', self.SCRIPT)
+
+    def test_the_script_is_valid_bash(self):
+        import subprocess
+        self.assertEqual(subprocess.run(['bash', '-n', str(HERE / 'build-c2-serving-image.sh')], capture_output=True).returncode, 0)
+
+
 if __name__ == '__main__':
     unittest.main()

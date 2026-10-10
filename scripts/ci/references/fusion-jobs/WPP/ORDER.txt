@@ -1,20 +1,25 @@
-# WPP (prefill SDPA S1: one q chunk per core) jobs: card M alone (cardm). L0/L1 build the K64j-OQ graft with no device; W1, Q1 and Q2 are the card-M proof and timing. One template per line: <name> <stop|soft> <image tag> <estimated minutes>.
-# T1-T4 are the lever's end-to-end measurement, the solo prefill ladder (prefill_ladder_solo) ABAB on the production profile and its -fx-oneq twin, read with prefill_ladder_report.py (est. solo TTFT -7.9 s at 131,072 and -29.8 s at 253,920 tokens).
-# The programme's four-card jobs of the lever (the audited attach OQA and the timed ABAB at eight live OQC1 OQL1 OQC2 OQL2, lever id oneq) are generated into ../ORDER.txt from scripts/ci/fusion-wp/WPP.json;
+# WPP (prefill SDPA S1: one q chunk per core) jobs. DONE ON CARD M (alone): L0/L1 built the K64j-OQ graft (no device), W1 (watcher) PASSED 10/10 exact, Q1 PASSED (ONEQ_CARD_M verdict=PASS cases=360 exact=360 failures=0; per-layer SDPA at 2048 rows served -> oneq: 4k 0.96 -> 0.69 ms, 34k 8.73 -> 4.58, 67k 17.06 -> 8.73, 131k 33.17 -> 16.80, 199k 50.26 -> 25.30, 254k 64.27 -> 32.34 = 0.50x; the oneq_noc arm 0.68x, dropped). One template per line: <name> <stop|soft> <image tag> <estimated minutes>.
+# THE FOUR-CARD JOBS (one image, tp4-fusion-1): OQ-B0 builds the fusion image on the K64j-OQ graft (the fusion pack's B0 plus C2_BAKE_GRAFT=K64j-OQ); OQ-A1 is the audited attach of the lever on top of the combined arm (c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all-oneq-audit); T1-T4 are the lever's end-to-end measurement, the solo prefill ladder (prefill_ladder_solo) ABAB on the combined arm (c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all) and on the combined arm plus oneq (c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all-oneq), read with prefill_ladder_report.py (est. solo TTFT -7.9 s at 131,072 and -29.8 s at 253,920 tokens; card M per-layer 0.50x).
+# The programme's decode-round jobs of the lever (the audited attach ONEQA and the timed ABAB at eight live ONEQC1 ONEQL1 ONEQC2 ONEQL2, lever id oneq, on the production profile and its -fx-oneq twin) are generated into ../ORDER.txt from scripts/ci/fusion-wp/WPP.json; they run on the OQ-B0 image too. They are the control that oneq does not slow decode; T1-T4 are the measurement.
 # they need an image whose _ttnncpp.so is the K64j-OQ one (see the notes in WPP.json), so they run only after Q1 passed with OQ-WIN or OQ-PARTIAL.
 # NEEDS OQ-L1-build <- OQ-L0-build-dry
 # NEEDS OQ-W1-watcher <- OQ-L1-build
 # NEEDS OQ-Q1-sweep <- OQ-W1-watcher
 # NEEDS OQ-Q2-timing-repeat <- OQ-Q1-sweep
-# NEEDS OQ-T1-ttft-control-a <- OQ-Q1-sweep
-# NEEDS OQ-T2-ttft-oneq-a <- OQ-T1-ttft-control-a
+# NEEDS OQ-B0-build-oq <- OQ-Q1-sweep
+# NEEDS OQ-A1-audited-attach-all <- OQ-B0-build-oq
+# NEEDS OQ-T1-ttft-control-a <- OQ-B0-build-oq
+# NEEDS OQ-T2-ttft-oneq-a <- OQ-A1-audited-attach-all OQ-T1-ttft-control-a
 # NEEDS OQ-T3-ttft-control-b <- OQ-T2-ttft-oneq-a
 # NEEDS OQ-T4-ttft-oneq-b <- OQ-T3-ttft-control-b
+# X0 (status, rescan, reset) runs before OQ-A1 and Z (reset) after OQ-T4, the fusion pack's own (references/fusion-jobs); production is stopped by the owner before X0 and restored after Z, never by these jobs.
 OQ-L0-build-dry stop tp4-fusion-1 3
 OQ-L1-build stop tp4-fusion-1 20
 OQ-W1-watcher stop tp4-fusion-1 40
 OQ-Q1-sweep stop tp4-fusion-1 75
 OQ-Q2-timing-repeat soft tp4-fusion-1 25
+OQ-B0-build-oq stop tp4-fusion-1 40
+OQ-A1-audited-attach-all soft tp4-fusion-1 60
 OQ-T1-ttft-control-a soft tp4-fusion-1 25
 OQ-T2-ttft-oneq-a soft tp4-fusion-1 25
 OQ-T3-ttft-control-b soft tp4-fusion-1 25

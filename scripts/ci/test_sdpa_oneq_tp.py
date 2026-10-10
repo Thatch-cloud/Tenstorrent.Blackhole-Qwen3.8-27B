@@ -344,6 +344,62 @@ class InstallTests(unittest.TestCase):
         self.assertIs(self.module._qwen_pf_program_config, self.original)
 
 
+class TpAddressesHookTests(unittest.TestCase):
+    """tp_addresses.install() is where the lever is bound at four cards: it imports sdpa_pf_oneq_tp and calls its install(environ) only when one of the two
+    flags is SET (any value, so a malformed one reaches the strict parser); the entries it rebinds are put back by tp_addresses.uninstall()."""
+
+    FOUR = {'QWEN_FAST_TP': '4', 'QWEN_FAST_SDPA_PF': '1'}
+
+    def setUp(self):
+        InstallTests.setUp(self)                      # the fake ttnn and the fake graft module, its holder and a bystander
+        self.addCleanup(InstallTests.tearDown, self)
+        import tp_addresses
+        self.tp_addresses = tp_addresses
+        self.addCleanup(tp_addresses.uninstall)
+
+    def test_flag_unset_or_zero_leaves_the_graft_function_and_never_asks_the_lever(self):
+        for extra in ({}, {'QWEN_FAST_SDPA_PF_ONEQ': '0'}):
+            with self.subTest(extra=extra):
+                self.tp_addresses.uninstall()
+                lever.reset_state()
+                self.tp_addresses.install(dict(self.FOUR, **extra))
+                self.assertIs(self.module._qwen_pf_program_config, self.original)
+                self.assertIs(self.holder._qwen_pf_program_config, self.original)
+        self.tp_addresses.uninstall()
+        with mock.patch.object(lever, 'install', side_effect=AssertionError('asked')) as asked:
+            self.tp_addresses.install(dict(self.FOUR))
+        asked.assert_not_called()
+
+    def test_flag_on_binds_the_wrapper_and_uninstall_puts_the_graft_function_back(self):
+        self.tp_addresses.install(dict(self.FOUR, QWEN_FAST_SDPA_PF_ONEQ='1'))
+        self.assertTrue(self.module._qwen_pf_program_config._oneq_wrapper)
+        self.assertIs(self.holder._qwen_pf_program_config, self.module._qwen_pf_program_config)
+        self.assertIsNot(self.bystander._qwen_pf_program_config, self.module._qwen_pf_program_config)
+        self.tp_addresses.uninstall()
+        self.assertIs(self.module._qwen_pf_program_config, self.original)
+        self.assertIs(self.holder._qwen_pf_program_config, self.original)
+
+    def test_the_lever_gets_the_environment_install_was_given(self):
+        given = dict(self.FOUR, QWEN_FAST_SDPA_PF_ONEQ='1', QWEN_FAST_SDPA_PF_ONEQ_AUDIT='1')
+        with mock.patch.object(lever, 'install', return_value=[]) as called:
+            self.tp_addresses.install(dict(given))
+        called.assert_called_once_with(given)
+
+    def test_a_malformed_or_orphan_flag_reaches_the_strict_parser_and_fails_at_attach(self):
+        for extra in ({'QWEN_FAST_SDPA_PF_ONEQ': 'yes'}, {'QWEN_FAST_SDPA_PF_ONEQ_AUDIT': '1'}):
+            with self.subTest(extra=extra):
+                with self.assertRaises(ValueError):
+                    self.tp_addresses.install(dict(self.FOUR, **extra))
+                self.assertIs(self.module._qwen_pf_program_config, self.original)
+                self.tp_addresses.uninstall()
+
+    def test_the_pair_never_reaches_it(self):
+        with mock.patch.object(lever, 'install', side_effect=AssertionError('asked')):
+            with self.assertRaises(ValueError):
+                self.tp_addresses.install({'QWEN_FAST_TP': '2', 'QWEN_FAST_SDPA_PF_ONEQ': '1', 'QWEN_FAST_SDPA_PF': '1'})
+        self.assertIs(self.module._qwen_pf_program_config, self.original)
+
+
 @unittest.skipIf(torch is None, 'torch not installed')
 class AuditTests(unittest.TestCase):
     def setUp(self):
