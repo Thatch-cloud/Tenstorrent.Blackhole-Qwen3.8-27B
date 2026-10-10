@@ -183,9 +183,13 @@ FUSION_LEVERS = (
     ('QWEN_FAST_DRAFT_PERMUTE', '1', '[PINDIAG] tp4 draft permute engaged', '[PINDIAG] tp4 draft permute fell back', 'F-F2 drafter permutation kernels'),  # WP7
     ('QWEN_FAST_DRAFT_QKV1', '1', '[PINDIAG] tp4 draft qkv1 engaged', '[PINDIAG] tp4 draft qkv1 fell back', 'F-F3c fused drafter q|k|v projection'),  # WP7
     ('QWEN_FAST_DRAFT_HEAD64', '1', '[PINDIAG] tp4 draft head64 engaged', '[PINDIAG] tp4 draft head64 fell back', 'F-F4 one 64-row drafter head'),  # WP7
+    ('QWEN_FAST_PRESTAGE_DIFF', '1', '[PINDIAG] tp4 prestage diff engaged', '[PINDIAG] tp4 prestage diff fell back', 'WPH-1 pre-stage diff'),  # WPH
+    ('QWEN_FAST_WRITE_PACKED_LEAN', '1', '[PINDIAG] tp4 write packed lean engaged', '[PINDIAG] tp4 write packed lean fell back', 'WPH-2 lean write_packed'),  # WPH
+    ('QWEN_FAST_BATCHED_READS', '1', '[PINDIAG] tp4 batched reads engaged', '[PINDIAG] tp4 batched reads fell back', 'WPH-3 batched verify and collect read-backs'),  # WPH
     ('QWEN_FAST_SDPA_PF_ONEQ', '1', '[PINDIAG] sdpa prefill oneq engaged', '[PINDIAG] sdpa prefill oneq fell back', 'S1 prefill SDPA one q chunk per core'),  # WPP
     ('QWEN_FAST_MLP_CFG', 'g3u4d3', '[PINDIAG] tp4 mlp gateup engaged route=cfg', '[PINDIAG] tp4 mlp gateup fell back', 'MLP streaming config g3u4d3 (the card-M sweep winner)'),  # WP0
     ('QWEN_FAST_CCL_OPTIONS', 'served', '[PINDIAG] tp4 ccl options engaged', '[PINDIAG] tp4 ccl options fell back', 'CCL options (the served set)'),  # WP5
+    ('QWEN_FAST_BATCHED_READS', 'async', '[PINDIAG] tp4 batched reads engaged', '[PINDIAG] tp4 batched reads fell back', 'WPH-3 batched read-backs (asynchronous copies)'),  # WPH
 )
 FUSION_AUDITS = (
     ('QWEN_FAST_KV_PAGE_WRITER_AUDIT', '[PINDIAG] tp4 kv page writer audit', 'K/V page writer'),  # WP2
@@ -199,6 +203,9 @@ FUSION_AUDITS = (
     ('QWEN_FAST_DRAFT_PERMUTE_AUDIT', '[PINDIAG] tp4 draft permute audit', 'F-F2 drafter permutation kernels'),  # WP7
     ('QWEN_FAST_DRAFT_QKV1_AUDIT', '[PINDIAG] tp4 draft qkv1 audit', 'F-F3c fused drafter q|k|v projection'),  # WP7
     ('QWEN_FAST_DRAFT_HEAD64_AUDIT', '[PINDIAG] tp4 draft head64 audit', 'F-F4 one 64-row drafter head'),  # WP7
+    ('QWEN_FAST_PRESTAGE_DIFF_AUDIT', '[PINDIAG] tp4 prestage diff audit', 'WPH-1 pre-stage diff'),  # WPH
+    ('QWEN_FAST_WRITE_PACKED_LEAN_AUDIT', '[PINDIAG] tp4 write packed lean audit', 'WPH-2 lean write_packed'),  # WPH
+    ('QWEN_FAST_BATCHED_READS_AUDIT', '[PINDIAG] tp4 batched reads audit', 'WPH-3 batched verify and collect read-backs'),  # WPH
     ('QWEN_FAST_SDPA_PF_ONEQ_AUDIT', '[PINDIAG] sdpa prefill oneq audit', 'S1 prefill SDPA one q chunk per core'),  # WPP
 )
 FUSION_RULES = (
@@ -208,6 +215,7 @@ FUSION_RULES = (
     'draft_wp6_smoke',  # WP0
     'kv_page_writer_tp4_smoke',  # WP0
     'tp4_mlp_gateup_smoke',  # WP4
+    'hostgap_wph_smoke',  # WPH
 )
 # fusion-wp end
 # tp4/v5split (gdn_seq_block_split): the K5-A recurrence launch with each head's value columns split over two cores. A profile that asks for it

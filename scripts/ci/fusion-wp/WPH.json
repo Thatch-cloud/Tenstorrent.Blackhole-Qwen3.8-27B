@@ -1,0 +1,99 @@
+{
+  "wp": "WPH",
+  "branch": "tp4/fx-wph",
+  "levers": [
+    {
+      "id": "prestage-diff",
+      "name": "WPH-1 pre-stage diff",
+      "flag": "QWEN_FAST_PRESTAGE_DIFF",
+      "value": "1",
+      "audit_flag": "QWEN_FAST_PRESTAGE_DIFF_AUDIT",
+      "marker": "tp4 prestage diff",
+      "env": {},
+      "audit_env": {"QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT": "1"},
+      "reason": "the drafts' window pre-stages about 148 verify input buffers a block, and only about 73 change from one round to the next; the block keeps the exact host value last written per destination (its pre-stage, its verify-time diff, its keyed write) and writes only the destinations whose new value is not bit-equal, under the per-block epoch invariant (any other writer kills the record)"
+    },
+    {
+      "id": "lean",
+      "name": "WPH-2 lean write_packed",
+      "flag": "QWEN_FAST_WRITE_PACKED_LEAN",
+      "value": "1",
+      "audit_flag": "QWEN_FAST_WRITE_PACKED_LEAN_AUDIT",
+      "marker": "tp4 write packed lean",
+      "env": {},
+      "audit_env": {},
+      "reason": "write_packed reads every destination's addresses before and after every write and builds one mapper a value; the lean twin builds one mapper, captures the addresses at first sight and checks them once a round in the window, with the same uploads, copies, order and fence"
+    },
+    {
+      "id": "reads",
+      "name": "WPH-3 batched verify and collect read-backs",
+      "flag": "QWEN_FAST_BATCHED_READS",
+      "value": "1",
+      "audit_flag": "QWEN_FAST_BATCHED_READS_AUDIT",
+      "marker": "tp4 batched reads",
+      "env": {},
+      "audit_env": {},
+      "reason": "the verify readback (8 blocking per-shard reads a block) and the quad collect (34-40 a round, device idle) as one mesh-composed read per tensor (value 1) or non-blocking device-to-host copies into host tensors allocated once and one fence (value async); the per-chip tensors handed to the combine and merge code are the same bytes"
+    }
+  ],
+  "profiles": [
+    {"name": "wph-diff", "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all", "env": {"QWEN_FAST_PRESTAGE_DIFF": "1"},
+     "reason": "WPH-1 on the combined fusion arm (it composes with the round-host KEYED write and the other fusion levers)"},
+    {"name": "wph-diff-audit", "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all", "audit": true,
+     "env": {"QWEN_FAST_PRESTAGE_DIFF": "1", "QWEN_FAST_PRESTAGE_DIFF_AUDIT": "1", "QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT": "1"},
+     "reason": "WPH-1 audited on the combined fusion arm: every pre-staged destination read back from every chip after every pre-stage (exact=True), and the existing full read-back after every verify-time diff write (zero mismatches on path=diff)"},
+    {"name": "wph-lean", "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all", "env": {"QWEN_FAST_WRITE_PACKED_LEAN": "1"},
+     "reason": "WPH-2 on the combined fusion arm"},
+    {"name": "wph-lean-audit", "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all", "audit": true,
+     "env": {"QWEN_FAST_WRITE_PACKED_LEAN": "1", "QWEN_FAST_WRITE_PACKED_LEAN_AUDIT": "1"},
+     "reason": "WPH-2 audited on the combined fusion arm: the original before/after address reads beside the book's, and a rotating eight destinations read back from every chip"},
+    {"name": "wph-reads", "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all", "env": {"QWEN_FAST_BATCHED_READS": "1"},
+     "reason": "WPH-3 (mesh-composed reads) on the combined fusion arm"},
+    {"name": "wph-reads-audit", "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all", "audit": true,
+     "env": {"QWEN_FAST_BATCHED_READS": "1", "QWEN_FAST_BATCHED_READS_AUDIT": "1"},
+     "reason": "WPH-3 audited on the combined fusion arm: the served per-shard reads beside the batched ones, bit for bit, the first 16 reads and every 16th"},
+    {"name": "wph-reads-async", "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all", "env": {"QWEN_FAST_BATCHED_READS": "async"},
+     "reason": "WPH-3 (non-blocking device-to-host copies and one fence) on the combined fusion arm; the card-M read probe decides between this and wph-reads"},
+    {"name": "wph-reads-async-audit", "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all", "audit": true,
+     "env": {"QWEN_FAST_BATCHED_READS": "async", "QWEN_FAST_BATCHED_READS_AUDIT": "1"},
+     "reason": "WPH-3 asynchronous variant audited on the combined fusion arm"},
+    {"name": "wph-all", "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all",
+     "env": {"QWEN_FAST_PRESTAGE_DIFF": "1", "QWEN_FAST_WRITE_PACKED_LEAN": "1", "QWEN_FAST_BATCHED_READS": "1"},
+     "reason": "all three WPH levers on the combined fusion arm: the lever arm of the timed ABAB (control: the combined arm itself)"},
+    {"name": "wph-all-audit", "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all", "audit": true,
+     "env": {"QWEN_FAST_PRESTAGE_DIFF": "1", "QWEN_FAST_PRESTAGE_DIFF_AUDIT": "1", "QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT": "1", "QWEN_FAST_WRITE_PACKED_LEAN": "1",
+             "QWEN_FAST_WRITE_PACKED_LEAN_AUDIT": "1", "QWEN_FAST_BATCHED_READS": "1", "QWEN_FAST_BATCHED_READS_AUDIT": "1"},
+     "reason": "all three WPH levers audited together on the combined fusion arm"},
+    {"name": "wph-all-async", "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all",
+     "env": {"QWEN_FAST_PRESTAGE_DIFF": "1", "QWEN_FAST_WRITE_PACKED_LEAN": "1", "QWEN_FAST_BATCHED_READS": "async"},
+     "reason": "all three WPH levers with the asynchronous read-backs (the card-M probe picked async): the alternative lever arm of the timed ABAB"},
+    {"name": "wph-all-async-audit", "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all", "audit": true,
+     "env": {"QWEN_FAST_PRESTAGE_DIFF": "1", "QWEN_FAST_PRESTAGE_DIFF_AUDIT": "1", "QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT": "1", "QWEN_FAST_WRITE_PACKED_LEAN": "1",
+             "QWEN_FAST_WRITE_PACKED_LEAN_AUDIT": "1", "QWEN_FAST_BATCHED_READS": "async", "QWEN_FAST_BATCHED_READS_AUDIT": "1"},
+     "reason": "all three WPH levers audited together, asynchronous read-backs"},
+    {"name": "wph-log", "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all",
+     "env": {"QWEN_FAST_TP4_HOSTGAP_LOG": "1", "QWEN_FAST_TP4_HOSTGAP_PROBE": "1"},
+     "reason": "the host-gap instrument on the combined fusion arm and nothing else: per-round spans with wall against thread CPU, context switches, collections and the host calls (a blocked copy shows as a long single one), and a timed synchronize after the two quad launches every 16th eight-live round (2Q measured directly; probe rounds excluded from timing)"}
+  ],
+  "smoke": [
+    {"flag": "QWEN_FAST_BATCHED_READS", "value": "async", "marker": "tp4 batched reads", "audit_flag": "QWEN_FAST_BATCHED_READS_AUDIT", "what": "WPH-3 batched read-backs (asynchronous copies)"}
+  ],
+  "smoke_rules": ["hostgap_wph_smoke"],
+  "image_files": [
+    {"path": "scripts/ci/prestage_diff.py", "reason": "WPH-1, imported lazily by verify_prestage.BlockPrestage under QWEN_FAST_PRESTAGE_DIFF (the resident record, the bit comparison, the audit); batched_reads_tp reuses its same_bits"},
+    {"path": "scripts/ci/write_packed_lean.py", "reason": "WPH-2, imported lazily by verify_prestage.BlockPrestage under QWEN_FAST_WRITE_PACKED_LEAN (the lean writer and its address book)"},
+    {"path": "scripts/ci/batched_reads_tp.py", "reason": "WPH-3, imported lazily by packed_verifier.shard_predictions and quad_draft_tp.read_quad_outputs under QWEN_FAST_BATCHED_READS"},
+    {"path": "scripts/ci/hostgap_instr.py", "reason": "WPH-4, imported lazily under QWEN_FAST_TP4_HOSTGAP_LOG by verify_prestage.hostgap_span, packed_verifier and the drafts' coordinator (spans, wrappers on the host calls, the probe)"}
+  ],
+  "tests": [
+    "test_prestage_diff",
+    "test_write_packed_lean",
+    "test_batched_reads_tp",
+    "test_hostgap_instr",
+    "test_hostgap_wph",
+    {"discover": "optimisation/ttnn-op/batched_reads"}
+  ],
+  "tp_addresses": {},
+  "card_jobs": "scripts/ci/references/fusion-jobs/WPH/ (ORDER.txt): the one-card read probe first, the audited attaches on the combined arm, the timed ABAB, the instrumented run",
+  "notes": "Hooks are env-gated inside files the package edits, so no tp_addresses row is needed: verify_prestage.py (BlockPrestage: the resident record, the writer choice, the span helper; the three modules are imported only with their flag set to anything but 0), packed_verifier.py (two small blocks: the batched verify readback and, under HOSTGAP_LOG, the instrument's install and two spans), quad_draft_tp.py (the batched collect), dflash_packed_proposal_coordinator.py (spans around the launches, the window, the fence and the collect; the probe after the launches), serving_worker_hook.py (phase spans), w2ln_timing_compare.py (a probe round is not a round time). Needs from the integrator, outside the generated blocks: nothing the branch has not already done: it adds the four modules to test_serving_image_copy_closure.C2_ONLY_PLAIN_IMPORTS and test_tp4_closure_literals.SERVED (one line each; merge them as unions) and it ran make_fusion_profiles.py --write and make_fusion_jobs.py --write so its own CPU run is green: after merging manifests REGENERATE, never hand-merge the fenced blocks. To bring the levers into fx-all add to WP0.json combined[0].levers the ids prestage-diff, lean and reads (the lever values are 1; reads=async if the card-M probe says so, via combined values), with audit flags already in the levers. KEYED (round_host) stays the verify-time half and this package the pre-stage half: PRESTAGE_DIFF records what KEYED wrote. PRESTAGE_BLOCK_EPOCHS is what lets a block's record survive the other block's round; in the global-epoch modes the other block's verify kills it and every pre-stage is the full one (still exact)."
+}

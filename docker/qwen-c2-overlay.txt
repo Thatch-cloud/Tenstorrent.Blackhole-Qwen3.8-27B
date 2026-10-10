@@ -515,6 +515,14 @@ scripts/ci/draft_qkv_tp.py
 scripts/ci/draft_head64_tp.py
 # WP7: the WP7 log rule (an engaged line per site and shape, a passing audit line per quad site, no fell-back line)
 scripts/ci/draft_permute_smoke.py
+# WPH: WPH-1, imported lazily by verify_prestage.BlockPrestage under QWEN_FAST_PRESTAGE_DIFF (the resident record, the bit comparison, the audit); batched_reads_tp reuses its same_bits
+scripts/ci/prestage_diff.py
+# WPH: WPH-2, imported lazily by verify_prestage.BlockPrestage under QWEN_FAST_WRITE_PACKED_LEAN (the lean writer and its address book)
+scripts/ci/write_packed_lean.py
+# WPH: WPH-3, imported lazily by packed_verifier.shard_predictions and quad_draft_tp.read_quad_outputs under QWEN_FAST_BATCHED_READS
+scripts/ci/batched_reads_tp.py
+# WPH: WPH-4, imported lazily under QWEN_FAST_TP4_HOSTGAP_LOG by verify_prestage.hostgap_span, packed_verifier and the drafts' coordinator (spans, wrappers on the host calls, the probe)
+scripts/ci/hostgap_instr.py
 # WPP: the lever: strict flags, the wrapper over the graft's _qwen_pf_program_config, the binary check, the audit (imported by tp_addresses.install when the flag is set; its import of tp_shapes is already in the image)
 scripts/ci/sdpa_pf_oneq_tp.py
 # fusion-wp end

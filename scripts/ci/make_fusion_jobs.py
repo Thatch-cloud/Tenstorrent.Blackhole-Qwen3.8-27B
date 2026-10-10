@@ -488,8 +488,7 @@ def generate(plan, folder=FOLDER):
     by_id = dict((lever['id'], lever) for lever in plan['levers'])
     combined = dict((spec['name'], spec) for spec in plan.get('combined', ()))
     for ship in plan.get('ship', ()):
-        timed, _audits = fusion.combined_env(combined[ship['source']], by_id)
-        shipped = dict(ship, env_flags=sorted(flag for flag in timed if flag.endswith(('_PERMUTE', '_REDUCE', '_QKV1', '_TAIL', '_GATEUP1', '_MM_GRID', '_HEAD64', '_OPTIONS', '_CFG', '_WRITER', '_SHARD_ARGMAX'))))
+        shipped = dict(ship, env_flags=sorted(by_id[ident]['flag'] for ident in combined[ship['source']]['levers']))
         mini = ship_rows(plan, shipped)
         for row in mini:
             out['%s/%s.env' % (SHIP_FOLDER, row['name'])] = render_ship_env(row)

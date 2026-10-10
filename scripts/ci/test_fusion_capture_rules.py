@@ -901,7 +901,7 @@ class FusedCommitSequenceTests(unittest.TestCase):
 HOST_CALLS = frozenset(('to_torch', 'synchronize_device', 'from_torch', 'host_buffer', 'copy_host_to_device_tensor', 'synchronize', 'event_synchronize', 'to_device', 'from_device'))
 LEVER_MODULES = ('kv_page_writer_tp4', 'tp4_mlp_gateup', 'tp4_mlp_fused', 'tp4_shard_argmax', 'ccl_options_tp', 'tile_collective_tp', 'distributed_norm_gather_tp',
                  'draft_permute_tp', 'draft_qkv_tp', 'draft_head64_tp', 'draft_fusion_tp', 'draft_reduce_tp', 'draft_tail_tp', 'draft_gateup_tp', 'draft_mmgrid_tp', 'round_host',
-                 'qwen_device_zeros', 'qwen_lazy_shard')
+                 'qwen_device_zeros', 'qwen_lazy_shard', 'prestage_diff', 'write_packed_lean', 'batched_reads_tp', 'hostgap_instr')
 
 # (module, function, call) -> why it cannot run in a capture
 CLASSIFIED = {
@@ -924,6 +924,16 @@ CLASSIFIED = {
     ('qwen_device_zeros', 'DeviceZeros.report', 'synchronize'): 'upload-p0: engine start',
     ('qwen_device_zeros', 'kv_twin._allocate_kv_caches_tp', 'synchronize_device'): 'upload-p0: engine start (the KV allocation)',
     ('qwen_device_zeros', 'shard_bytes', 'host_buffer'): 'upload-p0: the audit sampler, engine start',
+    ('batched_reads_tp', 'asynchronous', 'synchronize_device'): 'WPH-3: the verify and collect read-backs, after a replay (packed_verifier.shard_predictions, quad_draft_tp.read_quad_outputs), outside the capture',
+    ('batched_reads_tp', 'asynchronous', 'to_torch'): 'WPH-3: the same read-backs',
+    ('batched_reads_tp', 'composed', 'to_torch'): 'WPH-3: the same read-backs',
+    ('batched_reads_tp', 'served', 'to_torch'): 'WPH-3: the served per-shard read the audit compares with, after the replay',
+    ('hostgap_instr', 'sync_probe', 'synchronize_device'): 'WPH-4: the probe between rounds (QWEN_FAST_TP4_HOSTGAP_PROBE, an instrument that no combined arm carries)',
+    ('prestage_diff', 'audit_round', 'to_torch'): 'WPH-1: after a pre-stage, in the drafts window (eager); never in a capture',
+    ('write_packed_lean', 'audit_call', 'to_torch'): 'WPH-2: the audit read-back after a staging write, before a replay; never in a capture',
+    ('write_packed_lean', 'write', 'copy_host_to_device_tensor'): 'WPH-2: the host input staging of the captured buffers, between replays: the captured programs read them, nothing writes them inside a capture',
+    ('write_packed_lean', 'write', 'from_torch'): 'WPH-2: the same staging',
+    ('write_packed_lean', 'write', 'synchronize_device'): 'WPH-2: the staging fence, between replays',
     ('qwen_lazy_shard', 'audit_load', 'from_device'): 'upload-p0: weight load, engine start',
     ('qwen_lazy_shard', 'audit_load', 'from_torch'): 'upload-p0: weight load, engine start',
 }
@@ -983,6 +993,10 @@ GATED = {
     'QWEN_FAST_DEVICE_ZEROS_AUDIT': 'ReadbackCensusTests',          # engine start: the census holds that no readback of it is reachable in a capture
     'QWEN_FAST_LAZY_SHARD_W_AUDIT': 'ReadbackCensusTests',
     'QWEN_FAST_TP4_ROUND_HOST_AUDIT': 'ReadbackCensusTests',        # host only: round_host touches no device
+    'QWEN_FAST_PRESTAGE_DIFF_AUDIT': 'ReadbackCensusTests',         # WPH: the host staging and read-back of the window, between replays (the census says where each readback sits)
+    'QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT': 'ReadbackCensusTests',
+    'QWEN_FAST_WRITE_PACKED_LEAN_AUDIT': 'ReadbackCensusTests',
+    'QWEN_FAST_BATCHED_READS_AUDIT': 'ReadbackCensusTests',
 }
 SEQUENCES = ('FusedCommitSequenceTests',)       # the fused commit's warm / capture order, for the WP6 audits at the feature projection
 

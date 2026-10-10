@@ -63,6 +63,7 @@ serving_parked_engines
 octo_glue8 gdn_rows_dma8_tp gdn_block_conv8_tp gdn_conv_windows_packed8
 kv_page_writer_tp4 sdpa_pf_oneq_tp draft_reduce_tp draft_tail_tp draft_gateup_tp draft_mmgrid_tp draft_fusion_tp draft_permute_tp draft_qkv_tp draft_head64_tp
 tp4_mlp_gateup tp4_mlp_fused
+prestage_diff write_packed_lean batched_reads_tp hostgap_instr
 '''.split())      # (the op-fusion programme's levers, docs/tp4-fusion.md: each imported lazily and flag-guarded by the twin that owns it, so a flags-off process never loads it)
 
 # Modules the four-card profiles never run their pair code from, and why. The closure does not follow into them.

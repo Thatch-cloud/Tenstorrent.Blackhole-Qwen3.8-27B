@@ -42,11 +42,13 @@ SWITCHED_ON = {
     'QWEN_FAST_DRAFT_PERMUTE': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2': '1', 'QWEN_FAST_DRAFT_REDUCE': '1', 'QWEN_FAST_DRAFT_QKV1': '1',
     'QWEN_FAST_DRAFT_TAIL': '1', 'QWEN_FAST_DRAFT_GATEUP1': '1', 'QWEN_FAST_DRAFT_MM_GRID': '1', 'QWEN_FAST_DRAFT_HEAD64': '1', 'QWEN_FAST_CCL_OPTIONS': 'rs-c1',
     'QWEN_FAST_MLP_CFG': 'g3u4d3', 'QWEN_FAST_KV_PAGE_WRITER': '1',
+    'QWEN_FAST_PRESTAGE_DIFF': '1', 'QWEN_FAST_WRITE_PACKED_LEAN': '1', 'QWEN_FAST_BATCHED_READS': 'async',
     'QWEN_FAST_TP4_ROUND_HOST_SELECT': '1', 'QWEN_FAST_TP4_ROUND_HOST_READ': '1', 'QWEN_FAST_TP4_ROUND_HOST_KEYED': '1', 'QWEN_FAST_TP4_ROUND_HOST_LEAN': '1', 'QWEN_FAST_DEVICE_ZEROS': '1', 'QWEN_FAST_LAZY_SHARD_W': '1'}
 AUDIT_FLAGS = {
     'QWEN_FAST_DRAFT_PERMUTE_AUDIT': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT': '1', 'QWEN_FAST_DRAFT_REDUCE_AUDIT': '1', 'QWEN_FAST_DRAFT_QKV1_AUDIT': '1',
     'QWEN_FAST_DRAFT_TAIL_AUDIT': '1', 'QWEN_FAST_DRAFT_GATEUP1_AUDIT': '1', 'QWEN_FAST_DRAFT_MM_GRID_AUDIT': '1', 'QWEN_FAST_DRAFT_HEAD64_AUDIT': '1',
-    'QWEN_FAST_CCL_OPTIONS_AUDIT': '1', 'QWEN_FAST_MLP_CFG_AUDIT': '1', 'QWEN_FAST_KV_PAGE_WRITER_AUDIT': '1', 'QWEN_FAST_TP4_ROUND_HOST_AUDIT': '1', 'QWEN_FAST_DEVICE_ZEROS_AUDIT': '1', 'QWEN_FAST_LAZY_SHARD_W_AUDIT': '1'}
+    'QWEN_FAST_CCL_OPTIONS_AUDIT': '1', 'QWEN_FAST_MLP_CFG_AUDIT': '1', 'QWEN_FAST_KV_PAGE_WRITER_AUDIT': '1', 'QWEN_FAST_PRESTAGE_DIFF_AUDIT': '1', 'QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT': '1',
+    'QWEN_FAST_WRITE_PACKED_LEAN_AUDIT': '1', 'QWEN_FAST_BATCHED_READS_AUDIT': '1', 'QWEN_FAST_TP4_ROUND_HOST_AUDIT': '1', 'QWEN_FAST_DEVICE_ZEROS_AUDIT': '1', 'QWEN_FAST_LAZY_SHARD_W_AUDIT': '1'}
 WAITING = ('QWEN_FAST_MLP_GATEUP',)      # the fused MLP gate|up (exact but slower on the card: NO-GO)
 
 
@@ -92,8 +94,8 @@ class TwinShapeTests(unittest.TestCase):
         self.assertEqual(PROFILES[fusion.NAMESPACE + 'ccl-served']['env']['QWEN_FAST_CCL_OPTIONS'], 'served', 'the A/A control twin keeps the served set')
 
     def test_the_combined_levers_are_the_ones_the_coordinator_named(self):
-        self.assertEqual(SPEC['levers'], ['permute', 's1', 'reduce', 'qkv1', 'tail', 'gateup1', 'mmgrid', 'head64', 'ccl', 'mlpcfg', 'kvpage'])
-        self.assertEqual(SPEC['values'], {'mlpcfg': 'g3u4d3'})
+        self.assertEqual(SPEC['levers'], ['permute', 's1', 'reduce', 'qkv1', 'tail', 'gateup1', 'mmgrid', 'head64', 'ccl', 'mlpcfg', 'kvpage', 'prestage-diff', 'lean', 'reads'])
+        self.assertEqual(SPEC['values'], {'mlpcfg': 'g3u4d3', 'reads': 'async'})
         self.assertNotIn('mlpgu', SPEC['levers'])
         self.assertIn(TIMED, fusion.twin_names())
         self.assertIn(AUDITED, fusion.twin_names())
@@ -301,7 +303,13 @@ class RoundHostTests(unittest.TestCase):
         flags |= {'QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2', 'QWEN_FAST_DEVICE_ZEROS', 'QWEN_FAST_LAZY_SHARD_W'}
         self.assertIn('QWEN_FAST_KV_PAGE_WRITER', flags)
         prestage = (HERE / 'verify_prestage.py').read_text(encoding='utf-8')
-        self.assertEqual([flag for flag in sorted(flags) if flag in prestage], [])
+        # The host-gap package WPH (docs/tp4-fusion-wph.md) is the one exception, and a write-side one: its pre-stage diff and lean writer are chosen INSIDE verify_prestage
+        # (they decide which destinations are written and by which function, never what value a destination gets: packed_values below still names neither), so verify_prestage
+        # names exactly these two flags, each once, as the constants that import their modules.
+        write_side = {'QWEN_FAST_PRESTAGE_DIFF', 'QWEN_FAST_WRITE_PACKED_LEAN'}
+        self.assertEqual([flag for flag in sorted(flags - write_side - set(flag + '_AUDIT' for flag in write_side)) if flag in prestage], [])
+        for flag in sorted(write_side):
+            self.assertEqual(prestage.count("'%s'" % flag), 1, flag)
         tree = ast.parse((HERE / 'packed_verifier.py').read_text(encoding='utf-8'))
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'packed_values')
         constants = {node.value for node in ast.walk(function) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
@@ -328,7 +336,7 @@ class SmokeTableTests(unittest.TestCase):
                 continue
             self.assertIn((flag, value), levers, 'no smoke row judges %s=%s' % (flag, value))
         for flag in AUDIT_FLAGS:
-            if flag in ('QWEN_FAST_DEVICE_ZEROS_AUDIT', 'QWEN_FAST_LAZY_SHARD_W_AUDIT', 'QWEN_FAST_TP4_ROUND_HOST_AUDIT'):
+            if flag in ('QWEN_FAST_DEVICE_ZEROS_AUDIT', 'QWEN_FAST_LAZY_SHARD_W_AUDIT', 'QWEN_FAST_TP4_ROUND_HOST_AUDIT', 'QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE_AUDIT'):
                 continue
             self.assertIn(flag, audits, 'no smoke row demands an exact=True line for ' + flag)
             self.assertEqual(env[flag], '1')
