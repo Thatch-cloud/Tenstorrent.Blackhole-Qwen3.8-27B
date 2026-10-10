@@ -246,7 +246,8 @@ class FakeTTNN(object):
 
     def open_mesh_device(self, shape, **options):
         self.open_options = options
-        return types.SimpleNamespace(compute_with_storage_grid_size=lambda: types.SimpleNamespace(x=self.grid[0], y=self.grid[1]))
+        return types.SimpleNamespace(compute_with_storage_grid_size=lambda: types.SimpleNamespace(x=self.grid[0], y=self.grid[1]),
+                                     dram_grid_size=lambda: types.SimpleNamespace(x=8, y=1))
 
     def close_mesh_device(self, mesh):
         self.closed = True
@@ -273,17 +274,32 @@ class FakeTTNN(object):
         if self.capturing is not None:
             self.capturing.append(microseconds)
 
-    def linear(self, x, weight, compute_kernel_config=None, program_config=None, memory_config=None):
+    def linear(self, x, weight, compute_kernel_config=None, program_config=None, memory_config=None, dtype=None):
         self.linears.append((program_config, memory_config))
         out = x.data.float() @ weight.data.float()
         if program_config.fused_activation == 'silu':
             out = out * torch.sigmoid(out)
-        out = out.to(torch.bfloat16)
+        out = out if dtype == 'f32' else out.to(torch.bfloat16)
         if program_config.per_core_N in self.bad_pcn:
             out.view(torch.int16)[0, 0, 0, 0] ^= 1
         shape = types.SimpleNamespace(k=weight.data.shape[-2], n=weight.data.shape[-1])
         self.spend(self.cost(program_config, shape))
         return Tensor(out)
+
+    def silu(self, t, memory_config=None):
+        self.spend(5.0)
+        return Tensor((t.data.float() * torch.sigmoid(t.data.float())).to(t.data.dtype))
+
+    def typecast(self, t, dtype, memory_config=None):
+        self.spend(2.0)
+        return Tensor(t.data.to(torch.bfloat16))
+
+    def multiply(self, a, b, input_tensor_a_activations=None, dtype=None, memory_config=None):
+        self.spend(7.0)
+        left = a.data.float()
+        if input_tensor_a_activations:
+            left = left * torch.sigmoid(left)
+        return Tensor((left * b.data.float()).to(torch.bfloat16))
 
     def mul(self, a, b, memory_config=None):
         self.spend(4.0 if memory_config == 'dram' else 3.0)
@@ -501,6 +517,196 @@ class FusedArmTests(unittest.TestCase):
         self.assertTrue(all('us' in rows[pairs] for pairs in (2, 3, 5, 7)))
 
 
+class EpilogueTests(unittest.TestCase):
+    # the sweep's C1 rows (13x10, microseconds): gate g<n> and up u<n> at the same per_core_N
+    GATE = {2: 52.18, 3: 51.76, 4: 53.66, 5: 55.91, 6: 61.55, 7: 69.31, 8: 77.56}
+    UP = {2: 47.48, 3: 44.76, 4: 44.13, 5: 45.41, 6: 48.03, 7: 54.43, 8: 57.20}
+
+    def rows(self, table, key, stage=1, exact=True):
+        return [dict(pcn=pcn, us=us, exact=exact, stage=stage, name=key + str(pcn)) for pcn, us in table.items()]
+
+    def test_the_gap_between_gate_and_up_is_a_cost_per_output_column(self):
+        fit = harness.epilogue_fit(self.rows(self.GATE, 'g'), self.rows(self.UP, 'u'))
+        self.assertEqual(fit['points'], 7)
+        self.assertAlmostEqual(fit['us_per_column'], 2.3, delta=0.2)
+        self.assertAlmostEqual(fit['us_per_tile'], 1.15, delta=0.1)
+        self.assertLess(fit['max_residual_us'], 3.5)
+        self.assertEqual(fit['gaps'][2], 4.7)
+
+    def test_too_few_points_or_inexact_or_wider_rows_are_not_used(self):
+        self.assertIsNone(harness.epilogue_fit(self.rows({2: 52.0, 3: 51.0}, 'g'), self.rows({2: 47.0, 3: 44.0}, 'u')))
+        self.assertIsNone(harness.epilogue_fit(self.rows(self.GATE, 'g', exact=False), self.rows(self.UP, 'u')))
+        self.assertIsNone(harness.epilogue_fit(self.rows(self.GATE, 'g', stage=2), self.rows(self.UP, 'u')))
+        self.assertIsNone(harness.epilogue_fit([], []))
+
+
+class DiagnosticShapeTests(unittest.TestCase):
+    def test_the_same_shapes_with_bfloat8_weights(self):
+        table = harness.shape_table(lever)
+        self.assertEqual((table['gate_bf8'].k, table['gate_bf8'].n, table['gate_bf8'].dtype, table['gate_bf8'].silu), (5120, 4352, 'bfp8', True))
+        self.assertEqual((table['up_bf8'].dtype, table['up_bf8'].silu), ('bfp8', False))
+        self.assertEqual(lever.weight_bytes(table['gate_bf8']), 160 * 136 * 1088)
+        self.assertEqual(sorted(set(table) - set(lever.shapes(4))), ['gate_bf8', 'up_bf8'])
+
+    def test_the_t1_gate_cores_apply_to_the_diagnostic_gate_too(self):
+        table = harness.shape_table(lever)
+        self.assertEqual(lever.active_cores(harness.served_row(lever, table['gate_bf8'], 13, 88)['config'], table['gate_bf8']), 68)
+        self.assertEqual(lever.active_cores(harness.served_row(lever, table['gate_bf8'], 13, 44)['config'], table['gate_bf8']), 46)
+
+    def test_a_run_over_the_diagnostic_shapes(self):
+        shapes = small_shapes()
+        ttnn = FakeTTNN(cost=cost_model(dict(gateup=3, down=4)))
+        out = Path(tempfile.mkdtemp()) / 'report.json'
+        with mock.patch.dict(os.environ, dict(QWEN_FAST_TP='4')), mock.patch.object(lever, 'MIN_ACTIVE_CORES', 2), mock.patch.object(harness, 'WATCHDOG_S', 3600), \
+                mock.patch.object(lever, 'shapes', lambda tp=4: shapes):
+            status = harness.main(['--out', str(out), '--rounds', '3', '--shapes', 'gate_bf8', '--arms', 'sweep', '--budget-s', '100000'], torch=torch, ttnn=ttnn,
+                                  lever=lever, clock=ttnn.clock, budget_clock=lambda: 0.0)
+        report = json.loads(out.read_text())
+        self.assertEqual((status, report['verdict']), (0, 'PASS'), report.get('error'))
+        self.assertEqual(report['summary']['gate_bf8']['dtype'], 'bfp8')
+        self.assertNotIn('decision', report, 'the rule needs the real gate and up')
+
+
+class FakeProbeModule(object):
+    """readprobe's stand-in: a launch costs 100 us at one tile a request and less as the chunk grows; write_back copies the source (or, for the broken point, not quite)."""
+
+    BANK_POINTS = ((2, 1), (3, 3), (4, 4))
+    STOCK_POINTS = ((2, 1), (3, 1), (4, 1))
+    BROKEN = set()
+    built = []
+
+    class ReadProbe(object):
+        def __init__(self, operations, mesh, source, destination, dtype, tile_rows, tile_columns, banks, mode, run, chunk, grid, write_back=False, width=None):
+            if mode == 'bank' and tile_columns % banks and FakeProbeModule.strict:
+                raise ValueError('not a bank multiple')
+            self.ttnn, self.source, self.destination, self.write_back = operations, source, destination, write_back
+            self.mode, self.run, self.chunk, self.dtype = mode, run, chunk, dtype
+            self.plan = [None] * (-(-tile_columns // run))
+            self.largest, self.mean, self.requests_per_row = chunk * 576, chunk * 576.0, 100
+            FakeProbeModule.built.append((mode, run, chunk, dtype, write_back, banks))
+
+        def __call__(self):
+            self.ttnn.spend(100.0 / (1.0 + 0.3 * (self.chunk - 1)) * (0.5 if self.dtype == 'bfp8' else 1.0))
+            if self.write_back:
+                data = self.source.data.clone()
+                if (self.mode, self.run, self.chunk) in FakeProbeModule.BROKEN:
+                    data.view(torch.int16)[0, 0, 0, 0] ^= 1
+                self.destination.data = data
+
+    strict = False
+
+
+class ProbeSectionTests(unittest.TestCase):
+    def run_probe(self, ttnn, **overrides):
+        FakeProbeModule.built[:] = []
+        out = Path(tempfile.mkdtemp()) / 'report.json'
+        small = (('gate_bf4', 'bfp4', 256, 1088), ('gate_bf8', 'bfp8', 256, 1088), ('down_bf8', 'bfp8', 1088, 256))
+        with mock.patch.dict(os.environ, dict(QWEN_FAST_TP='4')), mock.patch.object(harness, 'PROBE_SHAPES', small), mock.patch.object(harness, 'WATCHDOG_S', 3600):
+            status = harness.main(['--out', str(out), '--rounds', '3', '--arms', 'probe'], torch=torch, ttnn=ttnn, lever=lever, probe_module=FakeProbeModule,
+                                  clock=ttnn.clock)
+        return status, json.loads(out.read_text())
+
+    def test_every_point_is_checked_then_timed_and_the_verdict_is_read_from_the_gate_shape(self):
+        FakeProbeModule.BROKEN = set()
+        status, report = self.run_probe(FakeTTNN())
+        self.assertEqual((status, report['verdict']), (0, 'PASS'), report.get('error'))
+        section = report['probe']
+        self.assertEqual(section['banks'], 8)
+        rows = section['rows']
+        self.assertEqual(len(rows), 3 * 6)
+        self.assertEqual([(row['mode'], row['run'], row['chunk']) for row in rows[:6]],
+                         [('stock', 2, 1), ('stock', 3, 1), ('stock', 4, 1), ('bank', 2, 1), ('bank', 3, 3), ('bank', 4, 4)])
+        self.assertTrue(all(row['exact'] for row in rows), rows)
+        gate = dict(((row['mode'], row['run']), row) for row in rows if row['shape'] == 'gate_bf4')
+        total_bytes = 8 * 34 * 576
+        self.assertAlmostEqual(gate[('stock', 3)]['us'], 100.0, delta=0.01)
+        self.assertAlmostEqual(gate[('stock', 3)]['gbps'], total_bytes / 100.0 / 1e3, delta=0.5)
+        self.assertAlmostEqual(gate[('bank', 3)]['us'], 100.0 / 1.6, delta=0.05)
+        self.assertAlmostEqual(gate[('bank', 4)]['delta_vs_stock_r3_us'], 100.0 / 1.9 - 100.0, delta=0.05)
+        decision = section['decision']
+        self.assertEqual(decision['verdict'], 'READ-GRANULARITY')
+        self.assertAlmostEqual(decision['ratio'], 1.9, delta=0.05)
+        self.assertEqual(decision['bank_point'], [4, 4])
+        self.assertEqual(decision['stock_point'][1], 1)
+
+    def test_the_correctness_launch_writes_back_and_the_timing_launch_does_not(self):
+        FakeProbeModule.BROKEN = set()
+        self.run_probe(FakeTTNN())
+        flags = [(mode, run, chunk, dtype, write_back) for mode, run, chunk, dtype, write_back, banks in FakeProbeModule.built if dtype == 'bfp4']
+        for point in (('bank', 3, 3), ('stock', 3, 1)):
+            self.assertIn(point + ('bfp4', True), flags)
+            self.assertIn(point + ('bfp4', False), flags)
+        self.assertTrue(all(banks == 8 for unused, unused2, unused3, unused4, unused5, banks in FakeProbeModule.built))
+
+    def test_a_point_whose_copy_differs_is_inexact_and_never_the_answer(self):
+        FakeProbeModule.BROKEN = {('bank', 4, 4)}
+        status, report = self.run_probe(FakeTTNN())
+        rows = dict(((row['shape'], row['mode'], row['run']), row) for row in report['probe']['rows'])
+        broken = rows[('gate_bf4', 'bank', 4)]
+        self.assertFalse(broken['exact'])
+        self.assertEqual(broken['differing'], 1)
+        self.assertEqual(report['probe']['decision']['bank_point'], [3, 3], 'the fastest exact point wins, not the fastest')
+        FakeProbeModule.BROKEN = set()
+
+    def test_a_construction_that_fails_is_a_row_not_the_end(self):
+        FakeProbeModule.BROKEN = set()
+        FakeProbeModule.strict = True
+        try:
+            status, report = self.run_probe(FakeTTNN())
+        finally:
+            FakeProbeModule.strict = False
+        self.assertEqual(status, 0)
+        errors = [row for row in report['probe']['rows'] if 'error' in row]
+        self.assertTrue(errors and all('bank multiple' in row['error'] for row in errors))
+
+    def test_the_verdict_words(self):
+        def row(mode, gbps, exact=True):
+            return dict(shape='gate_bf4', mode=mode, run=3, chunk=3 if mode == 'bank' else 1, gbps=gbps, pct_peak=1.0, exact=exact)
+        self.assertEqual(harness.probe_verdict([row('stock', 240.0), row('bank', 310.0)])['verdict'], 'READ-GRANULARITY')
+        self.assertEqual(harness.probe_verdict([row('stock', 240.0), row('bank', 270.0)])['verdict'], 'MARGINAL')
+        self.assertEqual(harness.probe_verdict([row('stock', 240.0), row('bank', 245.0)])['verdict'], 'NO-EFFECT')
+        self.assertEqual(harness.probe_verdict([row('stock', 240.0), row('bank', 400.0, exact=False)])['verdict'], 'NO-RESULT')
+        self.assertEqual(harness.probe_verdict([])['verdict'], 'NO-RESULT')
+
+
+class SplitSectionTests(unittest.TestCase):
+    def test_each_variant_is_compared_bit_for_bit_and_raced(self):
+        ttnn = FakeTTNN(cost=cost_model(dict(gateup=3, down=4)))
+        out = Path(tempfile.mkdtemp()) / 'report.json'
+        shapes = small_shapes()
+        with mock.patch.dict(os.environ, dict(QWEN_FAST_TP='4')), mock.patch.object(lever, 'shapes', lambda tp=4: shapes), mock.patch.object(harness, 'WATCHDOG_S', 3600):
+            status = harness.main(['--out', str(out), '--rounds', '3', '--arms', 'split'], torch=torch, ttnn=ttnn, lever=lever, clock=ttnn.clock)
+        report = json.loads(out.read_text())
+        self.assertEqual((status, report['verdict']), (0, 'PASS'), report.get('error'))
+        rows = dict((row['variant'], row) for row in report['split']['rows'])
+        self.assertEqual(sorted(rows), ['a_silu_typecast', 'b_fused_in_multiply', 'c_bf16_then_fused', 'served'])
+        self.assertTrue(rows['served']['exact'] and rows['a_silu_typecast']['exact'], 'silu on the float32 sum, rounded to bfloat16, then the product: the served arithmetic')
+        self.assertFalse(rows['b_fused_in_multiply']['exact'], 'no bfloat16 rounding between the SiLU and the product')
+        self.assertFalse(rows['c_bf16_then_fused']['exact'], 'the gate rounded before the SiLU')
+        self.assertGreater(rows['b_fused_in_multiply']['differing'], 0)
+        for row in rows.values():
+            self.assertIn('us', row)
+        # served = gate(40+3|3-3|=40) + up 40+ + multiply 3; variant a adds a silu 5 and a typecast 2
+        self.assertAlmostEqual(rows['a_silu_typecast']['delta_us'], 5.0 + 2.0, delta=0.5)
+        self.assertAlmostEqual(rows['a_silu_typecast']['gain_ms_pass'], -64 * rows['a_silu_typecast']['delta_us'] / 1000.0, delta=0.002)
+
+    def test_a_variant_the_build_refuses_is_a_row(self):
+        ttnn = FakeTTNN(cost=cost_model(dict(gateup=3, down=4)))
+
+        def refusing(*args, **options):
+            raise TypeError("multiply() got an unexpected keyword argument 'input_tensor_a_activations'")
+
+        ttnn.multiply = refusing
+        out = Path(tempfile.mkdtemp()) / 'report.json'
+        shapes = small_shapes()
+        with mock.patch.dict(os.environ, dict(QWEN_FAST_TP='4')), mock.patch.object(lever, 'shapes', lambda tp=4: shapes), mock.patch.object(harness, 'WATCHDOG_S', 3600):
+            harness.main(['--out', str(out), '--rounds', '3', '--arms', 'split'], torch=torch, ttnn=ttnn, lever=lever, clock=ttnn.clock)
+        rows = dict((row['variant'], row) for row in json.loads(out.read_text())['split']['rows'])
+        self.assertIn('unexpected keyword', rows['b_fused_in_multiply']['error'])
+        self.assertIn('us', rows['served'])
+        self.assertIn('us', rows['a_silu_typecast'])
+
+
 # ---------------------------------------------------------------------------------------------------------------------------
 # The run script.
 # ---------------------------------------------------------------------------------------------------------------------------
@@ -535,8 +741,9 @@ class RunScriptTests(unittest.TestCase):
         self.assertIn('tp4_mlp_gateup.py', names)
         for name in names:
             self.assertTrue((CI / name).is_file(), name)
-        self.assertIn('mlp_gateup_card_m.py', self.text)
-        self.assertTrue((HERE / 'mlp_gateup_card_m.py').is_file())
+        self.assertIn('mlp_gateup_card_m.py readprobe.py readprobe_reader.cpp', self.text)
+        for name in ('mlp_gateup_card_m.py', 'readprobe.py', 'readprobe_reader.cpp'):
+            self.assertTrue((HERE / name).is_file(), name)
 
     def test_it_runs_one_card_with_the_geometry_and_no_network(self):
         for needle in ('--network none', '-e QWEN_FAST_TP=4', '-e QWEN_C2_SERVING=0', 'timeout -k 30 "$timeout_s" docker run', 'qual_refuse_holders',
@@ -563,7 +770,7 @@ class PublicTextTests(unittest.TestCase):
     BANNED = re.compile(r'blackhole-[A-Za-z0-9]{8,}|thatch\.local|\d{1,3}(\.\d{1,3}){3}|sha256:[0-9a-f]{16}|[0-9a-f]{40,}|/home/|zot\.|@[A-Z0-9_]+@')
 
     def test_the_new_files_name_no_rig_address_registry_or_digest(self):
-        for path in (HERE / 'mlp_gateup_card_m.py', HERE / 'run_card_m.sh', CI / 'tp4_mlp_gateup.py', CI / 'tp4_mlp_fused.py',
+        for path in (HERE / 'mlp_gateup_card_m.py', HERE / 'readprobe.py', HERE / 'readprobe_reader.cpp', HERE / 'run_card_m.sh', CI / 'tp4_mlp_gateup.py', CI / 'tp4_mlp_fused.py',
                      CI / 'tp4_mlp_fused_input.cpp', CI / 'tp4_mlp_fused_weights.cpp'):
             text = path.read_text(encoding='utf-8')
             if path.suffix == '.sh':          # the canonical qual_card.sh block is shared and names the cards by board id; the rest is this harness's

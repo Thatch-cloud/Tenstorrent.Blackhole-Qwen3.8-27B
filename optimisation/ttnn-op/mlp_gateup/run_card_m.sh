@@ -8,11 +8,12 @@
 #   bash run_card_m.sh                                       # sweep gate, up and down, then the composition
 #   CARD_B_ARGS="--arms sweep,compose,fused" bash run_card_m.sh    # and the fused op (needs tp4_mlp_fused, built in the same checkout)
 #   CARD_B_ARGS="--shapes gdn_in,attn_in,attn_wo,gdn_out --arms sweep" bash run_card_m.sh      # R3: the other four 1D decode matmuls
+#   CARD_B_ARGS="--shapes gate_bf8,up_bf8 --arms sweep,probe,split" bash run_card_m.sh          # why the gate streams at half the down's rate: format, request size, SiLU
 #
 # The grid is the device's own (130 workers on 13x10, 110 on 11x10). MLP_GRID_CLAMP (10,9, 11,9 or 12,9; set it in the job's C2_CARDM_ENV) reaches the container as
 # TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE, so one job can run the same sweep on the old 11x10 grid (the other card-M harnesses do not take the step's C2_TT_GRID;
-# this one takes its own variable so that test_c2_tt_grid's registry of clamp-forwarding harnesses stays what it is). Needs no weights and no fixtures. The scripts (mlp_gateup_card_m.py, tp4_mlp_gateup.py, tp_shapes.py, and for the fused arm
-# tp4_mlp_fused.py with its two kernel sources) are mounted from THIS checkout, one file each: no image build.
+# this one takes its own variable so that test_c2_tt_grid's registry of clamp-forwarding harnesses stays what it is). Needs no weights and no fixtures. The scripts (tp4_mlp_gateup.py, tp_shapes.py, and for the fused arm tp4_mlp_fused.py with its two kernel
+# sources from scripts/ci; mlp_gateup_card_m.py, readprobe.py and its kernel from this directory) are mounted from THIS checkout, one file each: no image build.
 #
 # The image: IMAGE (a full image reference) if set, else the local image whose tag is qwen38-c2-$IMAGE_TAG (IMAGE_TAG comes from the job's C2_CARDM_ENV, a plain tag),
 # looked up in the local store at run time so no registry name is written here.
@@ -388,9 +389,11 @@ for file in tp4_mlp_gateup.py tp4_mlp_fused.py tp4_mlp_fused_input.cpp tp4_mlp_f
   test -s "$src" || { echo "$src missing" >&2; exit 1; }
   SM+=(--mount "type=bind,src=$src,dst=/bench/$file,readonly")
 done
-probe=$here/mlp_gateup_card_m.py
-test -s "$probe" || { echo "$probe missing" >&2; exit 1; }
-SM+=(--mount "type=bind,src=$probe,dst=/bench/mlp_gateup_card_m.py,readonly")
+for file in mlp_gateup_card_m.py readprobe.py readprobe_reader.cpp; do
+  src=$here/$file
+  test -s "$src" || { echo "$src missing" >&2; exit 1; }
+  SM+=(--mount "type=bind,src=$src,dst=/bench/$file,readonly")
+done
 
 # One persistent kernel cache per card: a second run of the same sweep reuses every compiled program.
 mkdir -p "$R" "$R/kcache"

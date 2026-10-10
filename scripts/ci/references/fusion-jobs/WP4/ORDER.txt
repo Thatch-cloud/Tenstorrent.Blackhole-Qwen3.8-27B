@@ -12,8 +12,11 @@
 #     tuned twin the harness printed as an explicit profile in the manifest ({"name": "mlpcfg-tuned", "env": {"QWEN_FAST_MLP_CFG": "<printed name>"}}) and regenerate.
 # READ RULES: the harness exits 0, every shape has a served row and a best exact row, no 'MLP_GATEUP ALERT' (an ALERT is a config that keeps the K loop and still differs from the served
 #     output: that falsifies the exactness argument, and the lever must not ship), the composition's 'exact' map all true.
-# Durations (estimate, minutes): C1 40, C2 40, C3 30, C4 40. C1 and C3 are the short form.
+# C5 after C1 and C3 (their results: the gate at 47 percent of the peak at every core count, the fused op exact but slower): the diagnostics that say WHY (format against shape, the SiLU epilogue,
+#     request size) and whether bank-contiguous reads move the bf4 plateau. READ: MLP_GATEUP probe verdict, MLP_GATEUP epilogue, MLP_GATEUP split.
+# Durations (estimate, minutes): C1 40, C2 40, C3 30, C4 40, C5 40. C1 and C3 are the short form.
 C1-mlp-sweep stop tp4-fusion-1 40
 C2-mlp-sweep-grid11 soft tp4-fusion-1 40
 C3-mlp-fused soft tp4-fusion-1 30
 C4-mlp-other-projections soft tp4-fusion-1 40
+C5-mlp-diagnostics soft tp4-fusion-1 40

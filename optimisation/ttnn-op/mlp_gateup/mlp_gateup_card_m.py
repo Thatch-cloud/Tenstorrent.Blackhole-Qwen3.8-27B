@@ -51,7 +51,7 @@ LAYERS = 64
 THRESHOLD_MS = 0.35
 REGIMES = ('random', 'edge')
 DEFAULT_SHAPES = 'mlp_w1,mlp_w3,mlp_w2'
-ARMS = ('sweep', 'compose', 'fused')
+ARMS = ('sweep', 'compose', 'fused', 'probe', 'split')
 WIDTH_CHOICES = (12, 11, 10, 8)
 STAGE2_TOP = 3
 
@@ -108,8 +108,17 @@ def stage_two(lever, shape, grid_x, grid_y, best_pcns, seen):
     return out
 
 
+def shape_table(lever):
+    """The lever's shapes plus the diagnostic ones: the gate and up with bfloat8_b weights at the same K and N (gate_bf8, up_bf8), to tell what the format does from what the
+    shape does (same tile count, twice the bytes)."""
+    table = dict(lever.shapes(4))
+    table['gate_bf8'] = table['mlp_w1']._replace(key='gate_bf8', dtype='bfp8')
+    table['up_bf8'] = table['mlp_w3']._replace(key='up_bf8', dtype='bfp8')
+    return table
+
+
 def served_row(lever, shape, grid_x, t1_gate_cores=None):
-    shape_cores = shape if t1_gate_cores is None or shape.key != 'mlp_w1' else shape._replace(requested_cores=t1_gate_cores)
+    shape_cores = shape if t1_gate_cores is None or shape.key not in ('mlp_w1', 'gate_bf8') else shape._replace(requested_cores=t1_gate_cores)
     config = lever.builder_config(shape_cores, grid_x)
     return dict(name='served', pcn=config.per_core_N, width=grid_x, config=config, stage=0)
 
@@ -269,10 +278,11 @@ class Rig(object):
                     pass
 
     # -- the ops ------------------------------------------------------------------------------------------------------------
-    def linear(self, x, weight, shape, config, out_memory=None):
+    def linear(self, x, weight, shape, config, out_memory=None, dtype=None):
         program = self.lever.program_config(self.ttnn, config, shape.silu)
+        extra = {} if dtype is None else dict(dtype=dtype)
         return self.ttnn.linear(x, weight, compute_kernel_config=self.ckc, program_config=program,
-                                memory_config=out_memory or self.ttnn.L1_MEMORY_CONFIG)
+                                memory_config=out_memory or self.ttnn.L1_MEMORY_CONFIG, **extra)
 
     def multiply(self, gate, up, memory):
         return self.ttnn.mul(gate, up, memory_config=memory)
@@ -412,7 +422,7 @@ def sweep_shapes(rig, keys, budget, report, out_line, rounds=ROUNDS):
     """Stage one for every shape, then stage two as the budget allows. Fills report['shapes'][key] = {rows, summary} after every row (a hang keeps
     what was measured)."""
     lever = rig.lever
-    table = lever.shapes(4)
+    table = shape_table(lever)
     sweeps, seen = {}, {}
     for key in keys:
         shape = table[key]
@@ -628,6 +638,190 @@ def fused_section(rig, fused_module, rounds=ROUNDS, clock=time.perf_counter):
 
 
 # ---------------------------------------------------------------------------------------------------------------------------
+# What the sweep implies: the SiLU epilogue (pure arithmetic on the rows the sweep already timed).
+# ---------------------------------------------------------------------------------------------------------------------------
+
+def epilogue_fit(gate_rows, up_rows, row_tiles=2):
+    """The cost of the gate's fused SiLU, from the sweep: at every per_core_N both shapes timed (default width, exact), gate minus up is the epilogue (the bytes, the dtype
+    and the reader are the same). Least squares through the origin of that gap on per_core_N: microseconds per output column per core, and per output tile (a column is
+    `row_tiles` tiles at 64 rows). Returns None with fewer than three common points."""
+    up = dict((row['pcn'], row) for row in up_rows if 'us' in row and row.get('exact') is True and row.get('stage') == 1)
+    points = [(row['pcn'], row['us'] - up[row['pcn']]['us']) for row in gate_rows if 'us' in row and row.get('exact') is True and row.get('stage') == 1 and row['pcn'] in up]
+    if len(points) < 3:
+        return None
+    per_column = sum(pcn * gap for pcn, gap in points) / float(sum(pcn * pcn for pcn, gap in points))
+    residual = max(abs(gap - per_column * pcn) for pcn, gap in points)
+    return dict(points=len(points), us_per_column=round(per_column, 3), us_per_tile=round(per_column / row_tiles, 3), max_residual_us=round(residual, 2),
+                gaps=dict((pcn, round(gap, 2)) for pcn, gap in sorted(points)))
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# The read probe (--arms probe): request granularity against bandwidth, no compute.
+# ---------------------------------------------------------------------------------------------------------------------------
+
+PROBE_SHAPES = (('gate_bf4', 'bfp4', 5120, 4352), ('gate_bf8', 'bfp8', 5120, 4352), ('down_bf8', 'bfp8', 4352, 5120))
+WIN_RATIO, MARGINAL_RATIO = 1.25, 1.10
+
+
+def probe_verdict(rows):
+    """READ-GRANULARITY when the best exact bank-contiguous point of the bfloat4_b gate shape reads at least 1.25 times the best stock-pattern point of the same shape;
+    MARGINAL from 1.10; NO-EFFECT below; NO-RESULT without both."""
+    def best(mode):
+        found = [row for row in rows if row['shape'] == 'gate_bf4' and row['mode'] == mode and 'gbps' in row and row.get('exact') is True]
+        return max(found, key=lambda row: row['gbps']) if found else None
+    stock, bank = best('stock'), best('bank')
+    if not stock or not bank:
+        return dict(verdict='NO-RESULT', stock=stock and stock['gbps'], bank=bank and bank['gbps'])
+    ratio = bank['gbps'] / stock['gbps']
+    word = 'READ-GRANULARITY' if ratio >= WIN_RATIO else 'MARGINAL' if ratio >= MARGINAL_RATIO else 'NO-EFFECT'
+    return dict(verdict=word, ratio=round(ratio, 3), stock_gbps=stock['gbps'], stock_point=[stock['run'], stock['chunk']], bank_gbps=bank['gbps'],
+                bank_point=[bank['run'], bank['chunk']], bank_pct_peak=bank['pct_peak'])
+
+
+def probe_section(rig, probe_module, rounds=ROUNDS, clock=time.perf_counter, bank_points=None, stock_points=None):
+    """Per probe shape: a correctness launch per point (every tile read is copied to the same page of a zeroed twin tensor; the host compares the two), then a read-only timed
+    launch per point raced against the stock pattern at three tiles per worker in the same round. Rows: shape, mode, run, chunk, workers, request bytes, us, GB/s, exact."""
+    lever, ttnn, torch = rig.lever, rig.ttnn, rig.torch
+    banks = int(getattr(getattr(rig.mesh, 'dram_grid_size', None) and rig.mesh.dram_grid_size(), 'x', 8))
+    bank_points = tuple(bank_points if bank_points is not None else probe_module.BANK_POINTS)
+    stock_points = tuple(stock_points if stock_points is not None else probe_module.STOCK_POINTS)
+    points = [('stock', run, chunk) for run, chunk in stock_points] + [('bank', run, chunk) for run, chunk in bank_points]
+    section = dict(banks=banks, rows=[])
+    for name, dtype, k, n in PROBE_SHAPES:
+        tile_rows, tile_columns = lever.tiles(k), lever.tiles(n)
+        shape = lever.Shape(name, k, n, dtype, False, 0)
+        total_bytes = tile_rows * tile_columns * lever.TILE_BYTES[dtype]
+        source = rig.weight(shape, seed=7)
+        zeros = rig.upload(torch.zeros(1, 1, tile_pad(k), tile_pad(n), dtype=torch.bfloat16), rig.dtype(dtype), ttnn.DRAM_MEMORY_CONFIG)
+        scratch = rig.upload(torch.zeros(1, 1, tile_pad(k), tile_pad(n), dtype=torch.bfloat16), rig.dtype(dtype), ttnn.DRAM_MEMORY_CONFIG)
+        reference = rig.read(source)
+        probes, arms, rows = {}, {}, {}
+        try:
+            for mode, run, chunk in points:
+                key = '%s-r%d-c%d' % (mode, run, chunk)
+                row = dict(shape=name, dtype=dtype, mode=mode, run=run, chunk=chunk)
+                rows[key] = row
+                try:
+                    checker = probe_module.ReadProbe(ttnn, rig.mesh, source, zeros, dtype, tile_rows, tile_columns, banks, mode, run, chunk,
+                                                     (rig.grid_x, rig.grid_y), write_back=True)
+                    checker()
+                    ttnn.synchronize_device(rig.mesh)
+                    row['differing'] = differing(torch, rig.read(zeros), reference)
+                    row['exact'] = row['differing'] == 0
+                    timer = probe_module.ReadProbe(ttnn, rig.mesh, source, scratch, dtype, tile_rows, tile_columns, banks, mode, run, chunk,
+                                                   (rig.grid_x, rig.grid_y), write_back=False)
+                    row.update(workers=len(timer.plan), request_bytes_max=timer.largest, request_bytes_mean=round(timer.mean, 1),
+                               requests_per_row=timer.requests_per_row)
+                    probes[key] = timer
+                except BaseException as error:  # noqa: BLE001
+                    row['error'] = '%s: %s' % (type(error).__name__, str(error)[:300])
+            base_key = 'stock-r3-c1'
+            if base_key in probes:
+                arms[base_key] = rig.arm(lambda p=probes[base_key]: p(), SHORT, LONG)
+            for key, timer in probes.items():
+                try:
+                    if key == base_key:
+                        continue
+                    arms[key] = rig.arm(lambda p=timer: p(), SHORT, LONG)
+                    raced = rig.race({base_key: arms[base_key], key: arms[key]} if base_key in arms else {key: arms[key]}, rounds, clock)
+                    us = raced[key]['us']
+                    rows[key].update(us=round(us, 3), gbps=round(total_bytes / us / 1e3, 1), pct_peak=round(100.0 * total_bytes / us / 1e3 / lever.PEAK_GBPS, 1))
+                    if base_key in raced:
+                        rows[key]['delta_vs_stock_r3_us'] = round(us - raced[base_key]['us'], 3)
+                    rig.drop(arms.pop(key))
+                except BaseException as error:  # noqa: BLE001
+                    rows[key]['error'] = '%s: %s' % (type(error).__name__, str(error)[:300])
+            if base_key in arms:
+                base_row = rows[base_key]
+                raced = rig.race({base_key: arms[base_key]}, rounds, clock)
+                base_row.update(us=round(raced[base_key]['us'], 3), gbps=round(total_bytes / raced[base_key]['us'] / 1e3, 1),
+                                pct_peak=round(100.0 * total_bytes / raced[base_key]['us'] / 1e3 / lever.PEAK_GBPS, 1))
+        finally:
+            for arm in arms.values():
+                rig.drop(arm)
+            rig.free(source, zeros, scratch)
+        section['rows'].extend(rows[key] for key in ['%s-r%d-c%d' % point for point in points] if key in rows)
+    section['decision'] = probe_verdict(section['rows'])
+    return section
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# Splitting the SiLU out of the gate matmul (--arms split): is it exact, and does it pay?
+# ---------------------------------------------------------------------------------------------------------------------------
+
+def split_section(rig, rounds=ROUNDS, clock=time.perf_counter):
+    """The served gate (SiLU fused in the matmul), up and multiply, against variants that take the SiLU out of the matmul epilogue (about 1.15 us per output tile, serialized
+    after the K loop): A the gate written as float32, silu, typecast to bfloat16, multiply; B the gate written as float32 and the multiply taking the SiLU as its first
+    input's activation (one launch fewer, no bfloat16 rounding between the SiLU and the product: expected NOT exact); C the same with the gate written as bfloat16 (rounded
+    before the SiLU: the control that must differ). Each variant's product is compared bit for bit with the served one and raced against it."""
+    lever, ttnn, torch = rig.lever, rig.ttnn, rig.torch
+    table = lever.shapes(4)
+    gate_shape, up_shape = table['mlp_w1'], table['mlp_w3']
+    x = rig.activation(gate_shape.k, seed=1)
+    w1, w3 = rig.weight(gate_shape, 20), rig.weight(up_shape, 30)
+    served_cfg = dict((key, served_row(lever, table[key], rig.grid_x, rig.t1_gate_cores)['config']) for key in ('mlp_w1', 'mlp_w3'))
+    raw_gate = gate_shape._replace(silu=False)
+    l1 = ttnn.L1_MEMORY_CONFIG
+
+    def served():
+        gate = rig.linear(x, w1, gate_shape, served_cfg['mlp_w1'])
+        up = rig.linear(x, w3, up_shape, served_cfg['mlp_w3'])
+        product = rig.multiply(gate, up, l1)
+        rig.free(gate, up)
+        return product
+
+    def variant_a():
+        raw = rig.linear(x, w1, raw_gate, served_cfg['mlp_w1'], dtype=ttnn.float32)
+        activated = ttnn.silu(raw, memory_config=l1)
+        rig.free(raw)
+        rounded = ttnn.typecast(activated, ttnn.bfloat16, memory_config=l1)
+        rig.free(activated)
+        up = rig.linear(x, w3, up_shape, served_cfg['mlp_w3'])
+        product = rig.multiply(rounded, up, l1)
+        rig.free(rounded, up)
+        return product
+
+    def variant(dtype):
+        def run():
+            raw = rig.linear(x, w1, raw_gate, served_cfg['mlp_w1'], dtype=dtype)
+            up = rig.linear(x, w3, up_shape, served_cfg['mlp_w3'])
+            product = ttnn.multiply(raw, up, input_tensor_a_activations=[ttnn.UnaryOpType.SILU], dtype=ttnn.bfloat16, memory_config=l1)
+            rig.free(raw, up)
+            return product
+        return run
+
+    runs = dict(served=served, a_silu_typecast=variant_a, b_fused_in_multiply=variant(ttnn.float32), c_bf16_then_fused=variant(ttnn.bfloat16))
+    section = dict(rows=[])
+    reference_tensor = served()
+    reference = rig.read(reference_tensor)
+    rig.free(reference_tensor)
+    arms = {}
+    try:
+        for name, run in runs.items():
+            row = dict(variant=name)
+            try:
+                product = run()
+                row['differing'] = differing(torch, rig.read(product), reference)
+                row['exact'] = row['differing'] == 0
+                rig.free(product)
+                arms[name] = rig.arm(run, SHORT, LONG)
+            except BaseException as error:  # noqa: BLE001
+                row['error'] = '%s: %s' % (type(error).__name__, str(error)[:300])
+            section['rows'].append(row)
+        raced = rig.race(arms, rounds, clock)
+        for row in section['rows']:
+            if row['variant'] in raced:
+                row['us'] = round(raced[row['variant']]['us'], 3)
+                row['delta_us'] = round(raced[row['variant']]['us'] - raced['served']['us'], 3)
+                row['gain_ms_pass'] = round(LAYERS * (raced['served']['us'] - raced[row['variant']]['us']) / 1000.0, 3)
+    finally:
+        for arm in arms.values():
+            rig.drop(arm)
+        rig.free(x, w1, w3)
+    return section
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
 # main.
 # ---------------------------------------------------------------------------------------------------------------------------
 
@@ -659,11 +853,11 @@ def print_summary(entry):
                           best['active_cores'], entry['gain_us'], entry['gain_ms_pass'], len(entry['inexact'])), flush=True)
 
 
-def main(argv=None, torch=None, ttnn=None, lever=None, fused_module=None, clock=time.perf_counter, budget_clock=time.time):
+def main(argv=None, torch=None, ttnn=None, lever=None, fused_module=None, probe_module=None, clock=time.perf_counter, budget_clock=time.time):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--out', required=True)
-    parser.add_argument('--shapes', default=DEFAULT_SHAPES, help='comma-separated: mlp_w1 mlp_w3 mlp_w2 (gate, up, down), gdn_in attn_in attn_wo gdn_out (R3)')
-    parser.add_argument('--arms', default='sweep,compose', help='comma-separated: sweep, compose, fused')
+    parser.add_argument('--shapes', default=DEFAULT_SHAPES, help='comma-separated: mlp_w1 mlp_w3 mlp_w2 (gate, up, down), gdn_in attn_in attn_wo gdn_out (R3), gate_bf8 up_bf8 (diagnostic: the same shapes with bfloat8_b weights)')
+    parser.add_argument('--arms', default='sweep,compose', help='comma-separated: sweep, compose, fused, probe (read granularity), split (SiLU out of the matmul)')
     parser.add_argument('--rounds', type=int, default=ROUNDS)
     parser.add_argument('--budget-s', type=int, default=DEFAULT_BUDGET_S, help='stop adding candidates after this many seconds')
     parser.add_argument('--t1', choices=('on', 'off'), default='on', help='the gate at 88 requested cores (QWEN_FAST_VERIFY_T1=1, as served) or 44')
@@ -687,7 +881,7 @@ def main(argv=None, torch=None, ttnn=None, lever=None, fused_module=None, clock=
     try:
         if os.environ.get('QWEN_FAST_TP') != '4':
             raise RuntimeError('QWEN_FAST_TP=4 required (the shapes are the four-card shard\'s)')
-        table = lever.shapes(4)
+        table = shape_table(lever)
         unknown = [key for key in keys if key not in table]
         if unknown:
             raise RuntimeError('unknown shapes %s' % ', '.join(unknown))
@@ -709,6 +903,10 @@ def main(argv=None, torch=None, ttnn=None, lever=None, fused_module=None, clock=
             report['inexact'] = dict((key, entry['inexact']) for key, entry in summaries.items() if entry['inexact'])
             for key, names in report['inexact'].items():
                 print('MLP_GATEUP ALERT %s: configs that keep the K loop but differ from the served output: %s' % (key, ', '.join(names)), flush=True)
+            if 'mlp_w1' in report['shapes'] and 'mlp_w3' in report['shapes']:
+                report['epilogue'] = epilogue_fit(report['shapes']['mlp_w1']['rows'], report['shapes']['mlp_w3']['rows'])
+                if report['epilogue']:
+                    print('MLP_GATEUP epilogue %s' % json.dumps(report['epilogue'], sort_keys=True), flush=True)
         if 'compose' in arms:
             report['multiply_us'] = multiply_micro(rig, options.rounds, clock)
             print('MLP_GATEUP multiply dram=%.2f us l1=%.2f us' % (report['multiply_us']['dram'], report['multiply_us']['l1']), flush=True)
@@ -722,7 +920,18 @@ def main(argv=None, torch=None, ttnn=None, lever=None, fused_module=None, clock=
             report['fused'] = fused_section(rig, fused_module, options.rounds, clock)
             for row in report['fused']['rows']:
                 print('MLP_GATEUP fused %s' % json.dumps(row, sort_keys=True), flush=True)
-        if summaries:
+        if 'probe' in arms:
+            if probe_module is None:
+                import readprobe as probe_module
+            report['probe'] = probe_section(rig, probe_module, options.rounds, clock)
+            for row in report['probe']['rows']:
+                print('MLP_GATEUP probe %s' % json.dumps(row, sort_keys=True), flush=True)
+            print('MLP_GATEUP probe verdict %s' % json.dumps(report['probe']['decision'], sort_keys=True), flush=True)
+        if 'split' in arms:
+            report['split'] = split_section(rig, options.rounds, clock)
+            for row in report['split']['rows']:
+                print('MLP_GATEUP split %s' % json.dumps(row, sort_keys=True), flush=True)
+        if summaries and all(key in summaries for key in ('mlp_w1', 'mlp_w3')):
             report['decision'] = decide(summaries, lever, (report.get('multiply_us') or {}).get('dram'))
             print('MLP_GATEUP verdict %s %s' % (report['decision']['verdict'], json.dumps(report['decision'], sort_keys=True)), flush=True)
             if report['decision'].get('env'):
