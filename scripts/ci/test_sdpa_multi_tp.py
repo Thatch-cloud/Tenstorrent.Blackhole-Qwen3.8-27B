@@ -1066,6 +1066,25 @@ class SmokeTests(unittest.TestCase):
         only_mismatch = '\n'.join([self.ENGAGED % 1, self.CALL % 1, mismatch])
         self.assertEqual(len(c2_smoke_check.sdpa_multi_problems(env_, only_mismatch)), 2, 'a mismatch line is not a passing line')
 
+    def test_an_arm_that_ran_one_request_at_a_time_may_drop_the_passing_audit_line_and_nothing_else(self):
+        """audit_optional (c2_prefix_gate.sdpa_audit_optional): the multi launch compares only in a packed round of two or more users."""
+        env_ = {FLAG: 'multi', AUDIT: '1'}
+        silent = self.text(1, passes=0)
+        self.assertEqual(c2_smoke_check.sdpa_multi_problems(env_, silent, audit_optional=True), [])
+        self.assertEqual(len(c2_smoke_check.sdpa_multi_problems(env_, silent)), 1, 'asked by default: the rule is unchanged where the multi launch runs')
+        self.assertEqual(len(c2_smoke_check.sdpa_multi_problems(env_, silent, audit_optional=False)), 1)
+        mismatch = '[PINDIAG] tp4 sdpa audit MISMATCH round=3 users=4 differing=2 chip 0 layer 3: 2 of 262144 words differ'
+        found = c2_smoke_check.sdpa_multi_problems(env_, self.text(1, passes=0, extra=[mismatch]), audit_optional=True)
+        self.assertEqual(len(found), 1, 'a line that WAS logged is still judged')
+        self.assertIn('audit found a difference', found[0])
+        self.assertEqual(len(c2_smoke_check.sdpa_multi_problems(env_, self.text(1, passes=0, extra=['[PINDIAG] tp4 sdpa audit 9 exact=False users=4']),
+                                                                audit_optional=True)), 1)
+        quiet = c2_smoke_check.sdpa_multi_problems(env_, 'nothing', audit_optional=True)
+        self.assertEqual(len(quiet), 2, 'the engaged and the call lines are still required')
+        self.assertFalse(any('nothing was compared' in problem for problem in quiet))
+        self.assertEqual(c2_smoke_check.lever_engagement_problems(env_, silent, sdpa_audit_optional=True), [])
+        self.assertTrue(any('nothing was compared' in problem for problem in c2_smoke_check.lever_engagement_problems(env_, silent)))
+
     def test_other_profiles_are_not_judged(self):
         for env_ in ({}, None, {FLAG: 'served'}, {FLAG: 'grid8x4'}, {FLAG: 'off'}):
             self.assertEqual(c2_smoke_check.sdpa_multi_problems(env_, 'nothing'), [], env_)

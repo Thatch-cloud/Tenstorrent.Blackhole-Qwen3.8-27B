@@ -200,8 +200,9 @@ The device side is version 2 of the `qwen_kv_read` extension (`optimisation/ttnn
 and `qwen_write_blocks_raw` move named blocks' page ranges between a paged cache tensor and a host buffer (runs of consecutive
 block ids are one region transfer each, every chip's shard, one wait; no program runs and nothing is allocated on the device),
 and `qwen_block_bytes` says how many bytes one block of one chip is. The image refuses to start with the tier on and the ops
-absent. **Version 2 has been written and tested against fakes only: it has not been compiled or run on a card.** The first card
-job of `references/tp4-prefix-tiers-jobs` (Q1) qualifies it byte for byte and prints its rates.
+absent. Version 2 was written and tested against fakes, then qualified on the four cards by the first job of
+`references/tp4-prefix-tiers-jobs` (Q1, the kvread probe's raw arm): raw bytes read, written into a second cache and read back byte for byte,
+the unpacked values equal, no program-cache growth, 13.6 GB/s read and 22.8 GB/s write at 4,096 blocks.
 
 At the production geometry one block (64 tokens) is 32 cache tensors x 4 chips x 17,408 bytes = 2,228,224 bytes, so:
 
@@ -224,6 +225,9 @@ load):
 | digest check at restore, `all` | 1.5 GB/s | 3.0 s | 5.9 s |
 | store: put / get / put with eviction | 24 us / 0.5 us / 5-9 us per block | | |
 
+At Q1's device rates (4,096 blocks) one 254k session's spill reads in about 0.65 s and its restore writes in about 0.39 s (a 128k one in
+0.34 s and 0.20 s), on top of the host column above and not overlapped with it.
+
 So the cost of a returning 254k turn is dominated by two device transfers of about 8.8 GB (the restore, and the spill of the
 blocks it displaces from a full pool, which happens in the same step), the digest check if `all` is on, and then the tail
 prefill; against it is the cold prefill of 254k tokens. The first fill of a slab region is page-fault bound, so the first spills
@@ -243,6 +247,16 @@ does not know: the tier, and the larger size of a preconverted checkpoint (about
 well under that count, and a returning session that got less than the oracle's Q is explained, not failed, when the tier's or the
 checkpoint store's own eviction counters moved. The job pack, its order and its read rules are
 `scripts/ci/references/tp4-prefix-tiers-jobs`; `scripts/ci/pin_kvread.py` moves the extension's pinned hash before its image build.
+
+### First card results (the four-card mesh, the production profile plus the tier names)
+
+* Q1, the raw ops: PASS as above. A1, the audited attach smoke: PASS, 0 audit mismatches over 936 publish rounds.
+* T1, `tier-attach`: three cold/hit pairs IDENTICAL (solo 3 of 3). Four captures stored preconverted (106,954,752 host bytes each, 60-61 ms to
+  convert, at capture); one restore from a preconverted checkpoint (Q=2048 of L=12,427, `restored_ms` 174.5 with the on-card comparison and
+  read-back running) with `[PREFIX-AUDIT-CKPT] tensors=96 conversion_equal=1 readback_equal=1` and the program count unchanged. A chain evicts
+  nothing, so the tier spilled and restored nothing (`tier_cap_bytes`, `tier_on` only); the arm failed only on the multi-user SDPA audit's
+  passing-line rule, which a one-request-at-a-time arm can never satisfy and is now not asked of one (`c2_prefix_gate.sdpa_audit_optional`: only
+  while no packed round of two or more users ran; a logged line is still judged).
 
 ### Not done
 

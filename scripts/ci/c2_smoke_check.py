@@ -196,9 +196,11 @@ SDPA_AUDIT_LINE = '[PINDIAG] tp4 sdpa audit'
 SDPA_AUDIT_MISMATCH = '[PINDIAG] tp4 sdpa audit MISMATCH'
 
 
-def sdpa_multi_problems(env, container_text):
+def sdpa_multi_problems(env, container_text, audit_optional=False):
     """[problem] for a profile that names QWEN_FAST_TP4_SDPA=multi: the engaged line with config=multi flags=0x21, the call line, and
-    (audit flag) every audit line exact with at least one logged, none a MISMATCH."""
+    (audit flag) every audit line exact with at least one logged, none a MISMATCH. audit_optional (a gate arm that runs one request at a time and
+    saw no packed round of two or more users, so the multi launch had nothing to compare: c2_prefix_gate.sdpa_audit_optional) drops only the
+    requirement that one passing audit line exist; a mismatch line, the engaged line and the call line are judged as always."""
     env = env or {}
     if (env.get(SDPA_LONG_FLAG) or '').strip() != SDPA_MULTI_NAME:
         return []
@@ -216,7 +218,8 @@ def sdpa_multi_problems(env, container_text):
     audits = [line for line in lines if SDPA_AUDIT_LINE in line]
     mismatched = [line.strip()[:200] for line in audits if SDPA_AUDIT_MISMATCH in line or 'exact=False' in line]
     problems += ['the multi SDPA audit found a difference: %s' % line for line in mismatched[:4]]
-    if (env.get(SDPA_AUDIT_FLAG) or '').strip() == '1' and not any('exact=True' in line for line in audits if SDPA_AUDIT_MISMATCH not in line):
+    if ((env.get(SDPA_AUDIT_FLAG) or '').strip() == '1' and not audit_optional
+            and not any('exact=True' in line for line in audits if SDPA_AUDIT_MISMATCH not in line)):
         problems.append('%s=1 is set and no passing audit line (%s <n> exact=True) was logged: nothing was compared'
                         % (SDPA_AUDIT_FLAG, SDPA_AUDIT_LINE))
     return problems
@@ -1925,19 +1928,19 @@ def drafter_checkpoint_problems(env, container_text):
     return []
 
 
-def lever_engagement_problems(env, container_text, smoke=None, drill=False):
+def lever_engagement_problems(env, container_text, smoke=None, drill=False, sdpa_audit_optional=False):
     """[problem] for the levers a served profile's `env` asks for, read from a gate arm's server log: the smoke's own per-lever rules (the
     engaged markers, no fall-back line, the audit lines exact, Lever N's install, warm and route ledger), applied by the prefix and serving gates
     too. A gate arm's texts can match with a lever silently not engaged (a graft mounted and never executed), and neither gate read the
     levers' markers before. Lever N's kill switch line is a problem outside the drill arm (`drill` True): a leftover levern.off would
-    otherwise turn the lever off for every later arm and read as a clean run."""
+    otherwise turn the lever off for every later arm and read as a clean run. sdpa_audit_optional: see sdpa_multi_problems."""
     env = env or {}
     # (.extend, not +=: test_tp4_w2 holds that check() itself calls each rule exactly once.)
     problems = []
     problems.extend(sampdraft_problems(container_text, env))
     problems.extend(u1_problems(env, container_text))
     problems.extend(sdpa_long_problems(env, container_text))
-    problems.extend(sdpa_multi_problems(env, container_text))
+    problems.extend(sdpa_multi_problems(env, container_text, audit_optional=sdpa_audit_optional))
     problems.extend(spread_problems(env, container_text))
     problems.extend(drafter_checkpoint_problems(env, container_text))
     problems.extend(w2_kill_problems(env, container_text))

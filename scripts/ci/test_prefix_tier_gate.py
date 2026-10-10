@@ -17,6 +17,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -293,6 +294,65 @@ class WiringTests(unittest.TestCase):
                           '--dry-run', '--cards', 'quad'], devices=['/a', '/b', '/c', '/d'], log=lines.append)
         self.assertEqual(code, 2)
         self.assertTrue(any('names no QWEN_PREFIX_HOST_TIER_GIB' in line for line in lines), lines)
+
+
+class SequentialSdpaTests(unittest.TestCase):
+    """T1 (run 38082865675): three IDENTICAL pairs, a preconverted restore audited equal, and a FAIL on 'QWEN_FAST_TP4_SDPA_AUDIT=1 is set and no passing audit
+    line was logged' - the arm sends one request at a time, so no packed round of two or more users ran and the multi launch had nothing to compare."""
+
+    ENV = {'QWEN_FAST_TP4_SDPA': 'multi', 'QWEN_FAST_TP4_SDPA_AUDIT': '1'}
+    LOG = '\n'.join(['[PINDIAG] tp4 sdpa engaged config=multi grid=11x10 entries=4 users=4 flags=0x21 cores_per_entry=16 active_cores=64 audit=1',
+                     '[PINDIAG] tp4 sdpa multi call users=4 flags=0x21 cores_per_entry=16 audit=1', 'UNQUALIFIED'])
+    NOT_COMPARED = 'nothing was compared'
+
+    def report(self, by_live):
+        return dict(problems=[], rounds=dict(count=sum(by_live.values()), by_live=by_live), extent_audit=dict(lines=0, mismatches=0))
+
+    def findings(self, scenario, by_live, log=None):
+        arm = dict(arm=scenario.replace('_', '-'), scenario=scenario, served_env=dict(self.ENV), env=(), sticky=False)
+        with mock.patch.object(gate.harness, 's2_report', return_value=self.report(by_live)):
+            problems, _, lines, _ = gate.s2_findings(arm, self.LOG if log is None else log, dict(), [])
+        return problems, lines
+
+    def test_the_optional_rule_needs_a_sequential_scenario_and_no_multi_user_round(self):
+        for scenario in gate.SEQUENTIAL_SCENARIOS:
+            self.assertTrue(gate.sdpa_audit_optional(dict(scenario=scenario), self.report({})), scenario)
+            self.assertTrue(gate.sdpa_audit_optional(dict(scenario=scenario), self.report({'1': 12})), 'rounds of one live user are not a multi-user round')
+            self.assertFalse(gate.sdpa_audit_optional(dict(scenario=scenario), self.report({'1': 4, '2': 1})), 'one round of two users and the rule is asked in full')
+            self.assertFalse(gate.sdpa_audit_optional(dict(scenario=scenario), self.report({2: 1})), 'integer keys too')
+            self.assertFalse(gate.sdpa_audit_optional(dict(scenario=scenario), self.report({'many': 1})), 'a key it cannot read keeps the rule')
+        for scenario in ('exactness_shared', 'lifecycle_evict', 'bringup_prefix', 'tier_timed', 'agent_turns', 'levern_hit', 'exactness_audit'):
+            self.assertFalse(gate.sdpa_audit_optional(dict(scenario=scenario), self.report({})), '%s is never waived, whatever it saw' % scenario)
+        self.assertTrue(set(gate.SEQUENTIAL_SCENARIOS) <= set(gate.TIER_SCENARIOS))
+
+    def test_t1_and_t2_no_longer_fail_on_the_audit_they_could_not_have_logged(self):
+        for scenario in gate.SEQUENTIAL_SCENARIOS:
+            problems, lines = self.findings(scenario, {})
+            self.assertEqual([p for p in problems if self.NOT_COMPARED in p], [], scenario)
+            self.assertTrue(any(line.startswith('multi SDPA audit: not asked of this sequential arm') for line in lines), lines)
+
+    def test_the_rule_is_asked_in_full_wherever_the_multi_launch_ran_or_could_have(self):
+        for scenario, by_live in (('tier_returning', {'2': 1}), ('tier_attach', {'1': 3, '4': 2}), ('exactness_shared', {}), ('lifecycle_evict', {}),
+                                  ('bringup_prefix', {'1': 9})):
+            problems, lines = self.findings(scenario, by_live)
+            self.assertTrue([p for p in problems if self.NOT_COMPARED in p], (scenario, by_live, problems))
+            self.assertFalse(any('not asked of this sequential arm' in line for line in lines), (scenario, lines))
+
+    def test_a_sequential_arm_is_still_judged_on_what_the_log_says(self):
+        mismatch = '[PINDIAG] tp4 sdpa audit MISMATCH round=3 users=4 differing=2 chip 0 layer 3: 2 of 262144 words differ'
+        problems, _ = self.findings('tier_attach', {}, log=self.LOG + '\n' + mismatch)
+        self.assertTrue(any('audit found a difference' in p for p in problems), problems)
+        problems, _ = self.findings('tier_returning', {}, log='')
+        self.assertTrue(any('config=multi flags=0x21' in p for p in problems), 'no engaged line: the multi path never attached')
+        self.assertTrue(any('built and never called' in p for p in problems))
+        problems, lines = self.findings('tier_attach', {}, log=self.LOG + '\n[PINDIAG] tp4 sdpa audit 1 exact=True users=4 layers=16 chips=4 words=1 live=2')
+        self.assertEqual([p for p in problems if self.NOT_COMPARED in p], [])
+
+    def test_a_profile_without_the_audit_says_nothing_about_it(self):
+        arm = dict(arm='tier-attach', scenario='tier_attach', served_env={'QWEN_FAST_TP4_SDPA': 'multi'}, env=(), sticky=False)
+        with mock.patch.object(gate.harness, 's2_report', return_value=self.report({})):
+            _, _, lines, _ = gate.s2_findings(arm, self.LOG, dict(), [])
+        self.assertFalse(any('multi SDPA audit' in line for line in lines))
 
 
 class MarkerTests(unittest.TestCase):

@@ -335,6 +335,25 @@ def audit_image_problems(arms, anchor):
 
 
 TIER_SCENARIOS = ('tier_attach', 'tier_returning', 'tier_timed')
+# The scenarios that send one request at a time and wait for it: a decode is never packed with another user's, so the multi-user SDPA launch (W2) has
+# nothing to compare and its audit (QWEN_FAST_TP4_SDPA_AUDIT) logs no line. T1 (run 38082865675) was three IDENTICAL pairs and failed only on that.
+SEQUENTIAL_SCENARIOS = ('tier_attach', 'tier_returning')
+
+
+def sdpa_audit_optional(arm, report):
+    """Whether the multi SDPA audit's "at least one passing audit line" rule is not asked of this arm: its scenario is sequential AND the S2 report saw
+    no packed round of two or more live users. Both, so a sequential arm that did run a multi-user round is held to the rule in full (and so is every
+    other scenario, which is never listed)."""
+    if arm.get('scenario') not in SEQUENTIAL_SCENARIOS:
+        return False
+    by_live = ((report or {}).get('rounds') or {}).get('by_live') or {}
+    for live in by_live:
+        try:
+            if int(live) >= 2:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
 
 
 def tier_image_problems(arms, anchor):
@@ -1496,8 +1515,12 @@ def s2_findings(arm, log_text, scanned, records):
     problems += gate.any_request_check(log_text, any_request)[0]
     # Every lever the arm's profile asks for must have ENGAGED (the smoke's own rules: markers, no fall-back, audit lines exact, Lever N's route
     # ledger); the levern.off drill arm is the one arm allowed Lever N's kill switch line.
+    optional = sdpa_audit_optional(arm, report)
     problems += ['lever: %s' % text for text in c2_smoke_check.lever_engagement_problems(
-        environ, text, drill=arm.get('scenario') in LEVERN_DRILL_SCENARIOS)]
+        environ, text, drill=arm.get('scenario') in LEVERN_DRILL_SCENARIOS, sdpa_audit_optional=optional)]
+    if optional and str(environ.get('QWEN_FAST_TP4_SDPA_AUDIT', '0')) == '1':
+        lines.append('multi SDPA audit: not asked of this sequential arm (no packed round of two or more users ran, so the multi launch had nothing to compare); '
+                     'an audit line that was logged is still judged')
     rounds = report.get('rounds') or {}
     audit = report.get('extent_audit') or {}
     lines.append('S2: %s packed extent rounds (by live users %s), %s audit lines, %s mismatches' % (

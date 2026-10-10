@@ -143,7 +143,7 @@ class PackTests(unittest.TestCase):
 
     def test_the_headers_say_what_is_read_and_the_order_says_what_is_not_done_and_the_extension_is_unqualified(self):
         text = (PACK / 'ORDER.txt').read_text(encoding='utf-8')
-        for phrase in ('NEEDS A1 <- Q1', 'NO-GO', 'NEVER RUN ON A CARD', 'pin_kvread.py', 'build_kv_read.sh', 'opgraft-KVR2', 'tier_image_problems', 'UNQUALIFIED',
+        for phrase in ('NEEDS A1 <- Q1', 'NO-GO', 'Q1 was the first card job to run them', 'pin_kvread.py', 'build_kv_read.sh', 'opgraft-KVR2', 'tier_image_problems', 'UNQUALIFIED',
                        'NO agentstart', 'NOT_EXERCISED', 'docs/prefix-store-hygiene.md'):
             self.assertIn(phrase, text)
         for name in ('T1-tier-attach', 'T2-tier-returning', 'T3-tier-timed-restore'):

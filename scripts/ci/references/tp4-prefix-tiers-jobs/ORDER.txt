@@ -6,8 +6,8 @@
 # production profile is untouched. Both features are default OFF and byte-identical off (test_qwen_prefix_tiers FlagOffIdentityTests, FlagOffGoldenTests).
 # P0. NO OTHER WINDOW DRIVER MAY BE ALIVE and no privileged builder container may be up. The CPU suite green on this branch first (gh workflow run qwen-cpu-suite.yml -f ref=<sha>). Push ONE tag at a time and wait for its run to finish (the workflow keeps one pending run;
 #     queued tags are cancelled). Never cancel a running card job. B0 never runs during a timing job (T3). Production is stopped and unserved by the owner for the window (the cutover pack's steps and post-checks); nothing in this pack starts or hands back the agent.
-# P0. THE EXTENSION. The host tier's device IO is version 2 of the qwen_kv_read extension (ttnn.qwen_read_blocks_raw / qwen_write_blocks_raw / qwen_block_bytes), written and unit-tested on CPU fakes, NEVER RUN ON A CARD.
-#     It is BUILT (on the rig host, by build_kv_read.sh, into its own directory opgraft-KVR2: import-checked against the production image, no unresolved symbol) and PINNED on this branch (pin_kvread.py moved the Dockerfile,
+# P0. THE EXTENSION. The host tier's device IO is version 2 of the qwen_kv_read extension (ttnn.qwen_read_blocks_raw / qwen_write_blocks_raw / qwen_block_bytes), written and unit-tested on CPU fakes; Q1 was the first card job to run them.
+#     Q1 qualified them on the four cards (raw=ok). The extension is BUILT (on the rig host, by build_kv_read.sh, into its own directory opgraft-KVR2: import-checked against the production image, no unresolved symbol) and PINNED on this branch (pin_kvread.py moved the Dockerfile,
 #     build-c2-serving-image.sh, c2_image_provenance.py and test_c2_image_overlay.py to its hash). The version 1 build (opgraft-KVR) is untouched and is what the other packs' kvread jobs mount; this branch's build reads
 #     opgraft-KVR2 by default, so no job env names a path. Nothing to run before B0 but the CPU suite on the pushed head. An image that still baked version 1 would have the tier arms refused before any container boots
 #     (c2_prefix_gate.tier_image_problems) and Q1 would read raw=absent.
@@ -28,6 +28,7 @@
 #       FAIL or NOT-MEASURED: the raw ops are NOT QUALIFIED and the rest of the pack is skipped.
 #   A1  the smoke clean; 'host tier IO attached', 'host tier on gib=32.00 kv_gib=24.00 ... verify=all audit=1', the model warm with restore_mode=h2d; no AssertionError; the ledger and the 'tier rss=' line recorded.
 #   T1  the tier-attach plan PASS: '[PREFIX-AUDIT-CKPT] ... conversion_equal=1 readback_equal=1' on every restore, 'checkpoint preconverted' lines, every pair IDENTICAL, the program count unchanged across the first hit, the tier counters free of failures.
+#       The multi SDPA audit's passing-line rule is not asked of T1 and T2 (one request at a time: no packed round, nothing for the multi launch to compare); a line that was logged is still judged, and the rule is in full if a round of two users ran.
 #   T2  the tier-returning plan PASS: every returning session restored from host RAM at the oracle's Q (blocks on record), every pair IDENTICAL, spill and restore counters non-zero, the failure counters (spill, restore, digest, read-back mismatch) ZERO,
 #       the tier's kill switch latched and the next turn exact, no pins held, the cold twins never restored. NOT_EXERCISED means the flood did not push the sessions out of the pool (the finding is the pool or flood size).
 #   T3  the tier-timed plan PASS (a restore on record at every size and the pairs IDENTICAL) and the timing lines: cold prefill, device-resident hit and returning-hit TTFT per size, the restore's GB/s, the displaced blocks' spill.   Z  the reset completes; the agent stays stopped.
