@@ -74,6 +74,9 @@ name: Qwen C2 serving image
 # C2_TT_GRID (10,9 | 11,9 | 12,9, or unset: nothing is passed) clamps the compute grid tt-metal exposes, as insurance for cards that no longer soft-harvest
 # Tensix columns: every step that opens a card gives its container TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=<value> - the fabric probe, the pair and four-card smokes,
 # the gate, prefix and tau lab drivers and the replay (--tt-grid), and the cardm harness (QUAL_TT_GRID, which the harness puts into its container).
+# C2_TELEMETRY=1 (and C2_TELEMETRY_MS, default 1000) runs the read-only card telemetry sidecar (scripts/ci/card_telemetry.sh) through the smoke and gate steps: per-chip ARC telemetry
+# (AICLK and the limiter holding it, VCORE, power, current, temperatures, kernel NOP counters) into telemetry-smoke/ and telemetry-gate/ of the results, one summary line per chip
+# in the step's log. It reads over PCIe the table the ARC firmware publishes (the read tt-smi makes), sends no ARC message, and never fails a step.
 # C2_CARDS picks the card set the hardware steps open: pair (cards M and A, the default) or quad (every Blackhole
 # board present, resolved by board id when used - scripts/ci/card_set.sh - and mounted into the gate and prefix
 # containers, with the general-tp4 profiles). It is one job, one runner and one concurrency group either way: the
@@ -705,6 +708,8 @@ jobs:
           TESTS: ${{ steps.job.outputs.tests }}
           BENCH_SHAPES: ${{ steps.job.outputs.bench_shapes }}
           TT_GRID: ${{ steps.job.outputs.tt_grid }}
+          TELEMETRY: ${{ steps.job.outputs.telemetry }}
+          TELEMETRY_MS: ${{ steps.job.outputs.telemetry_ms }}
         run: |
           set -euo pipefail
           image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
@@ -721,7 +726,10 @@ jobs:
           if [ -n "${holders// /}" ]; then
             echo "M or A is held by: $holders" >&2; sudo -n fuser -v "$m" "$a" >&2 || true; exit 1
           fi
-          trap 'docker logs "$name" > "$results/container.log" 2>&1 || true; docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          . scripts/ci/card_telemetry.sh
+          trap 'telemetry_stop; docker logs "$name" > "$results/container.log" 2>&1 || true; docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          # C2_TELEMETRY=1: the read-only per-chip telemetry sampler for the whole step (it is started after the holder check above and ends with the smoke client below).
+          telemetry_start smoke "$results/telemetry-smoke" "$m" "$a"
           # The node agent's container shape (Thatch.Server.Compute container/adapter.rs), with a p300
           # descriptor and QWEN36_BATCHED_DECODE_MODE the contract must undo, and a platform-style argv.
           if [ -n "$TT_GRID" ]; then echo "compute-grid clamp: TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$TT_GRID"; fi
@@ -756,6 +764,7 @@ jobs:
             python3 scripts/ci/c2_serving_smoke.py http://127.0.0.1:8010 Qwen/Qwen3.8-27B "$TESTS" \
             "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')/typing.py" \
             scripts/ci/build-c2-serving-image.sh 2>&1 | tee "$results/smoke.log"
+          telemetry_stop
           docker stats --no-stream "$name" | tee "$results/stats.txt" || true
           grep -F '[PINDIAG] dram after' <(docker logs "$name" 2>&1) | tail -8 || true
       - name: Kill-switch files must be absent
@@ -804,6 +813,8 @@ jobs:
           BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}
           CARDS: ${{ steps.job.outputs.cards }}
           TT_GRID: ${{ steps.job.outputs.tt_grid }}
+          TELEMETRY: ${{ steps.job.outputs.telemetry }}
+          TELEMETRY_MS: ${{ steps.job.outputs.telemetry_ms }}
         run: |
           set -euo pipefail
           # The fast path has never completed a request inside the serving image: every C2 rate was
@@ -850,6 +861,11 @@ jobs:
               echo 'a card of the set is held; refusing the gate' >&2; cat "$RUNNER_TEMP/c2-results/gate-holders.txt" >&2; exit 1
             fi
           fi
+          # C2_TELEMETRY=1: the read-only per-chip telemetry sampler for the whole gate (every arm's container), started after the holder checks above; it also stops when this
+          # shell exits, and the always-run telemetry step summarises whatever is left.
+          . scripts/ci/card_telemetry.sh
+          if [ "$CARDS" = quad ]; then telemetry_nodes=("${CARD_SET_NODES[@]}"); else telemetry_nodes=("$m" "$a"); fi
+          telemetry_start gate "$RUNNER_TEMP/c2-results/telemetry-gate" "${telemetry_nodes[@]}"
           # What this step (380 min) and the job (600 min, from C2_JOB_STARTED) leave, less margins for
           # this step's tail: the driver refuses a plan list whose worst case (every arm to its limit,
           # every re-run) does not fit, before any container starts.
@@ -868,6 +884,7 @@ jobs:
             ${GATE_POLICY_DECISION:+--policy-decision "$GATE_POLICY_DECISION"} ${GATE_AUDITS:+--audits "$GATE_AUDITS"} \
             ${GATE_SALT:+--salt "$GATE_SALT"} ${TT_GRID:+--tt-grid "$TT_GRID"} --cards "$CARDS" 2>&1 \
             | tee "$RUNNER_TEMP/c2-results/gate.log" || status=$?
+          telemetry_stop
           # Read the launched argv (memory read-the-launched-argv): the contract's own line, per arm.
           for log in "$results"/*/server.log; do
             [ -f "$log" ] || continue
@@ -1094,6 +1111,8 @@ jobs:
           BENCH_SHAPES: ${{ steps.job.outputs.bench_shapes }}
           BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}
           TT_GRID: ${{ steps.job.outputs.tt_grid }}
+          TELEMETRY: ${{ steps.job.outputs.telemetry }}
+          TELEMETRY_MS: ${{ steps.job.outputs.telemetry_ms }}
         run: |
           set -euo pipefail
           # The pair smoke's shape on every Blackhole board present (a general-tp4 profile: the contract sets
@@ -1126,7 +1145,10 @@ jobs:
           # scripts/ci/w2ln_timing_compare.py --max-load).
           ( while :; do echo "[LOAD] $(date +%s) $(cut -d' ' -f1 /proc/loadavg)" >> "$results/load.log"; sleep 60; done ) &
           load_pid=$!
-          trap 'kill "$load_pid" 2>/dev/null || true; docker logs "$name" > "$results/container.log" 2>&1 || true; docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          . scripts/ci/card_telemetry.sh
+          trap 'telemetry_stop; kill "$load_pid" 2>/dev/null || true; docker logs "$name" > "$results/container.log" 2>&1 || true; docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          # C2_TELEMETRY=1: the read-only per-chip telemetry sampler for the whole step, the model load and warm-up included (it ends with the smoke client below).
+          telemetry_start smoke "$results/telemetry-smoke" "${CARD_SET_NODES[@]}"
           if [ -n "$TT_GRID" ]; then echo "compute-grid clamp: TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$TT_GRID"; fi
           docker run -d --name "$name" --read-only \
             --tmpfs /tmp:rw,size=512m --tmpfs /opt/tt-metal/generated:rw,size=1g \
@@ -1170,6 +1192,7 @@ jobs:
             ${smoke_wrap[@]+"${smoke_wrap[@]}"} python3 scripts/ci/c2_serving_smoke.py http://127.0.0.1:8010 Qwen/Qwen3.8-27B "$TESTS" \
             "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')/typing.py" \
             scripts/ci/build-c2-serving-image.sh 2>&1 | tee "$results/smoke.log" || smoke_status=$?
+          telemetry_stop
           if [ "$smoke_status" != 0 ]; then
             docker logs "$name" > "$results/container.log" 2>&1 || true
             echo "[BOX] the smoke client ended with status $smoke_status (124 or 137: the job's box of ${BOX_MINUTES:-none} min ran out); the box is enforced here, the run is not cancelled" >&2
@@ -1326,6 +1349,17 @@ jobs:
             echo "models: $ids"
           } | tee -a "$log"
           docker logs "$container" 2>&1 | grep -E '\[QWEN-C2\] profile|packed sampler arm' | head -5 | tee -a "$log" || true
+      - name: Telemetry summaries
+        # The smoke and gate steps summarise their own sampler when they end normally; this covers a step that failed, timed out or was cancelled before it could (the sampler
+        # stops by itself when its step's shell is gone). Prints one line per chip and gzips the csv of every telemetry-* directory that has no summary yet.
+        if: always() && steps.job.outputs.telemetry == '1'
+        working-directory: c2
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          . scripts/ci/card_telemetry.sh
+          telemetry_summaries "$RUNNER_TEMP/c2-results"
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
