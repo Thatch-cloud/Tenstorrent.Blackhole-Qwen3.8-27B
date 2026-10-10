@@ -1,0 +1,32 @@
+# The WP5 (CCL options, F-C1) part of the op-fusion window (docs/tp4-fusion.md): the isolated fabric sweeps, the plumbing control and the hang qualification. The lever's audited attach (CCLA) and its timed ABAB (CCLC1 CCLL1
+# CCLC2 CCLL2) are make_fusion_jobs.py's, in scripts/ci/references/fusion-jobs, on the same image. One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# THE ORDER: P0 (the harness smoke) first; P1 (the sweep under the served fabric) and, as the window allows, P2-P4 (the process options: the 8192 payload, FABRIC_1D_RING); then the owner reads the promote strings and the lever's
+# value in scripts/ci/fusion-wp/WP5.json is set to the winner (one line; make_fusion_profiles.py --write regenerates the twins; the placeholder value is the candidate before any sweep); then B0 builds the image,
+# X0 (the generated pack), CCLS (the plumbing control), CCLA (the lever audited), CCLH1-CCLH5 (the hang shapes, five consecutive completions) and the generated ABAB. P0-P4 need only an image with the models tree (the probe
+# runs from the checkout): they may run before B0 on the window's previous image, and each begins with its own all-four reset.
+# THE PROBE LAUNCH needs scripts/ci/fusion-wp/WP5-fabric-probe.patch applied (FABRIC_PROBES in c2_serving_job.py and the case in qwen-c2-serving.yml): until it is, c2_serving_job.py refuses P0-P4 by name.
+# CI PAUSED for the timed jobs only (P-jobs time a collective in a trace: the host runs no build or push beside them). The cards stay under development: no agentstart, no agentstop, no hand-back, no deploy.
+# GRID: the four cards expose a 13x10 compute grid since the firmware unlock; the sweep reads nothing from it (the collectives choose their worker cores from the device), and v678 measured the 13x10 cards at AG 0.65 us and RS 0.5 us per call
+# below v676 (collectives 4.61 to 4.63 ms a verify pass): P1 is the control of its own run, never read against an 11x10 number.
+# NEEDS P1 P2 P3 P4 <- P0
+# NEEDS CCLS <- B0 X0
+# NEEDS CCLH1 CCLH2 CCLH3 CCLH4 CCLH5 <- CCLA
+# READ RULES (each also needs no stall; the probe jobs end with 'CCL_SWEEP verdict=...' and a JSON report, the lever jobs with c2_smoke_check clean):
+#   P0     'CCL_SWEEP verdict=DONE' with every served row EXACT. Anything else stops the sweeps.
+#   P1-P4  'CCL_SWEEP verdict=DONE' (INCOMPLETE and BASE-INEXACT are findings, a watchdog exit 3 names the hung config: reset and rerun with -safe). A promote string needs the config EXACT on every seed, in-trace, and a paired
+#          gain of at least max(0.3 us, twice the A/A noise) in at least 4 of 5 rounds; the probe-only arms are never a promote. P2-P4 are read against P1's served per-call times and fingerprints.
+#   CCLS   the engaged line with fallbacks=0, replay audit lines for both ops (exact=True), hashes equal to the production profile's.
+#   CCLH   five consecutive completions, every user at budget, the concurrent8_code_equal hashes equal in every run and to the control's.
+# NO-GO for adopting a set: any FAIL-BYTES row for the set's options, any audit mismatch, any fall-back line, any stall in CCLH1-CCLH5, a paired ABAB that is not negative beyond the control-to-control floor.
+# Time (estimate, minutes): P0 15, P1 42, P2-P4 32 each, CCLS 40, CCLH 90 each: 643 minutes (10 h 43 min) in all.
+P0-ccl-sweep-quick stop tp4-fusion-1 15
+P1-ccl-sweep-fabric1d soft tp4-fusion-1 42
+P2-ccl-sweep-fabric1d-p8192 soft tp4-fusion-1 32
+P3-ccl-sweep-ring soft tp4-fusion-1 32
+P4-ccl-sweep-ring-p8192 soft tp4-fusion-1 32
+CCLS-plumbing-audit-attach soft tp4-fusion-1 40
+CCLH1-ccl-hang-shapes stop tp4-fusion-1 90
+CCLH2-ccl-hang-shapes stop tp4-fusion-1 90
+CCLH3-ccl-hang-shapes stop tp4-fusion-1 90
+CCLH4-ccl-hang-shapes stop tp4-fusion-1 90
+CCLH5-ccl-hang-shapes stop tp4-fusion-1 90
