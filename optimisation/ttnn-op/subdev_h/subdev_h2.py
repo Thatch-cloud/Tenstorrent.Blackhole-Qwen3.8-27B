@@ -160,6 +160,13 @@ class Harness2(object):
         with self.ttnn.command_queue(queue):
             return [self.gather(side, side.source, links, pool) for _ in range(count)]
 
+    def warm(self, label, side, queue, links):
+        """One eager gather of exactly the program a trace is about to capture: a capture of a program that never ran is a TT_FATAL (its binaries are
+        not on the device yet). The programs of the one-link traces are the eager arm's own; the two-link and separate-link ones are new."""
+        with self.compile_span('warm-' + label):
+            self.run_gathers(side, queue, links, self.pool(side, 'warm'), 1)
+            self.sync(queue, [side.sd])
+
     def capture(self, label, side, queue, links, pool):
         ttnn = self.ttnn
         with self.compile_span('capture-' + label):
@@ -173,6 +180,17 @@ class Harness2(object):
         return outputs
 
     # ------------------------------------------------------------------ comparison
+
+    def poison(self, side, outputs):
+        """Overwrite the checked gathers with NaN before a replay (see subdev_h1.Harness.poison): stale outputs cannot pass."""
+        ttnn, torch = self.ttnn, self.torch
+        shape = (1, 1, side.rows, CHIPS * side.shard)
+        host = ttnn.from_torch(torch.full(shape, torch.nan, dtype=torch.bfloat16), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                               mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh))
+        with self.span('poison'):
+            for pick in sorted({0, len(outputs) // 2, len(outputs) - 1}):
+                ttnn.copy_host_to_device_tensor(host, outputs[pick])
+            self.sync_all()
 
     def check(self, case, side, outputs, informational=False):
         """Every chip's part of the first, middle and last gather against the host concatenation, bitwise."""
@@ -255,8 +273,10 @@ class Harness2(object):
 
     def exactness(self, fns):
         t, d = self.t_side, self.d_side
+        self.poison(t, self.out['t'])
         self.run_arm(fns, 't_solo')
         self.check('trace target solo', t, self.out['t'])
+        self.poison(d, self.out['d'])
         self.run_arm(fns, 'd_solo')
         self.check('trace drafter solo', d, self.out['d'])
         for name in ('shared', 'shared2', 'separate'):
@@ -264,6 +284,8 @@ class Harness2(object):
                 continue
             tt, dd, d_side = {'shared': ('t', 'd', d), 'shared2': ('t2', 'd2', d), 'separate': ('t', 'ds', getattr(self, 'd_sep', d))}[name]
             for repeat in range(2):
+                self.poison(t, self.out[tt])
+                self.poison(d_side, self.out[dd])
                 self.run_arm(fns, name, flip=bool(repeat))
                 self.check('%s #%d target' % (name, repeat), t, self.out[tt])
                 self.check('%s #%d drafter' % (name, repeat), d_side, self.out[dd])
@@ -313,6 +335,8 @@ class Harness2(object):
         self.out['t'] = self.capture('t', t, 0, 1, self.pool(t, 'trace1'))
         self.out['d'] = self.capture('d', d, 1, 1, self.pool(d, 'trace1'))
         if self.o.two_links:
+            self.warm('t2', t, 0, 2)
+            self.warm('d2', d, 1, 2)
             self.out['t2'] = self.capture('t2', t, 0, 2, self.pool(t, 'trace2'))
             self.out['d2'] = self.capture('d2', d, 1, 2, self.pool(d, 'trace2'))
         offset = self.o.link_offset
@@ -324,6 +348,7 @@ class Harness2(object):
             self.d_sep = self.side('drafter-separate', self.d_side.rect, self.sd[1], SHAPES['drafter'][0] + 32, SHAPES['drafter'][1])
             self.environ[LINK_ENV] = str(offset)
             try:
+                self.warm('ds', self.d_sep, 1, 1)
                 self.out['ds'] = self.capture('ds', self.d_sep, 1, 1, self.pool(self.d_sep, 'trace1'))
             finally:
                 self.environ.pop(LINK_ENV, None)

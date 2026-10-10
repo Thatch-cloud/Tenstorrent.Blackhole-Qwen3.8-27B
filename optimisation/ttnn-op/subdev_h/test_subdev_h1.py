@@ -368,6 +368,23 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual((len(target.ops), len(drafter_q1.ops)), (40, 60))
         self.assertEqual(report['recipes'], dict(target=dict(ops=40, matmuls=20), drafter=dict(ops=60, matmuls=ttnn_matmuls(60, 'drafter'))))
 
+    def test_the_program_cache_is_on_before_any_op_runs(self):
+        status, lines, report, ttnn = self.run_fake()
+        self.assertEqual(ttnn.calls[0], 'program_cache')
+        self.assertTrue(ttnn.program_cache)
+
+    def test_without_the_program_cache_no_trace_can_be_captured(self):
+        ttnn = fake_ttnn.FakeTTNN()
+        fake_ttnn.FakeMesh.enable_program_cache, saved = lambda self: None, fake_ttnn.FakeMesh.enable_program_cache
+        try:
+            lines, out = [], os.path.join(self.directory.name, 'c.json')
+            status = subdev_h1.main(['--out', out] + SMALL, ttnn=ttnn, torch=fake_ttnn.FakeTorch(), log=lines.append, clock=ttnn.clock,
+                                    watchdog=plan.Watchdog(backstop=False, exit_fn=lambda code: None))
+        finally:
+            fake_ttnn.FakeMesh.enable_program_cache = saved
+        self.assertEqual(status, 2)
+        self.assertIn('Expected program binaries to be written', self.verdict_line(lines))
+
     def test_the_manager_is_timed_and_cleared_and_the_traces_are_released(self):
         status, lines, report, ttnn = self.run_fake()
         manager = report['manager']
@@ -412,6 +429,23 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertIn('a trace wrote only zeros', self.verdict_line(lines))
         del original
+
+    def test_a_queue_that_silently_runs_nothing_cannot_pass_on_stale_or_poisoned_bytes(self):
+        status, lines, report, ttnn = self.run_fake(drop_replays_on=(1,))
+        self.assertEqual((status, report['verdict']), (2, 'NOT-MEASURED'))
+        self.assertIn('NaN or inf', report['error'])
+        status, lines, report, ttnn = self.run_fake(drop_replays_on=(0,))
+        self.assertEqual((status, report['verdict']), (2, 'NOT-MEASURED'))
+
+    def test_the_references_are_replays_of_poisoned_outputs(self):
+        status, lines, report, ttnn = self.run_fake()
+        self.assertEqual(report['verdict'], 'PASS')
+        self.assertTrue(all(not tensor.poisoned for trace in ttnn.traces.values() for tensor in trace.outputs),
+                        'every replay rewrote the poison it was given')
+
+    def test_the_weight_gains_are_the_simulated_stable_ones(self):
+        self.assertEqual((plan.WEIGHT_GAIN, plan.OUT_GAIN, plan.SCALE_AMPLITUDE), (0.5, 0.02, 0.02))
+        self.assertLessEqual(plan.OUT_GAIN, 0.05, '0.1 overflows bfloat16 within 900 drafter ops')
 
     def test_the_outputs_are_reported_finite_and_live(self):
         status, lines, report, ttnn = self.run_fake()

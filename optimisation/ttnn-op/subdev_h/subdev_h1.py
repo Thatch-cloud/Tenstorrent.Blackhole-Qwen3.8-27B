@@ -150,12 +150,15 @@ class Harness(object):
         side.core_grid = ttnn.CoreGrid(x=grid[0], y=grid[1])
         generator = torch.Generator().manual_seed(seed)
         hidden = plan.PROFILES[profile]['hidden']
-        # Small weights, so that 40 to 75 layer pairs of residual adds stay finite in bfloat16; the same seed gives the same bytes every run.
+        # Gains that keep 40 to 90 layer pairs of residual silu products finite in bfloat16 (subdev_plan.OUT_GAIN says why); the same seed gives the
+        # same bytes every run.
         for weight, (k, n) in plan.weight_shapes(profile).items():
-            values = torch.randn(1, 1, k, n, generator=generator) * (0.5 / (k ** 0.5))
+            gain = plan.OUT_GAIN if weight in ('w_down', 'w_o') else plan.WEIGHT_GAIN
+            values = torch.randn(1, 1, k, n, generator=generator) * (gain / (k ** 0.5))
             side.inputs[weight] = self.upload(values, ttnn.bfloat8_b)
         side.inputs['h0'] = self.upload(torch.randn(1, 1, rows, hidden, generator=generator).to(torch.bfloat16), ttnn.bfloat16)
-        side.inputs['scale'] = self.upload((torch.rand(1, 1, rows, hidden, generator=generator) * 0.5 + 0.25).to(torch.bfloat16), ttnn.bfloat16)
+        side.inputs['scale'] = self.upload(((torch.rand(1, 1, rows, hidden, generator=generator) - 0.5) * (2 * plan.SCALE_AMPLITUDE)).to(torch.bfloat16),
+                                           ttnn.bfloat16)
         return side
 
     def lower(self, side, kind, first, second):
@@ -228,6 +231,27 @@ class Harness(object):
             self.log('%s bytes DIFFER case=%s mismatched=%d/%d first=%s' % (plan.VERDICT_TAG, case, len(bad), len(reference), bad[:3]))
         return not bad
 
+    def poison(self, outputs, names):
+        """Overwrite the compared tensors with NaN before a replay, so that a replay that did not run (or did not write) leaves NaN behind and fails the
+        comparison instead of passing on the previous run's bytes."""
+        ttnn, torch = self.ttnn, self.torch
+        cache = {}
+        with self.span('poison'):
+            for name in names:
+                tensor = outputs[name]
+                shape = tuple(int(dim) for dim in tensor.shape)
+                if shape not in cache:
+                    cache[shape] = ttnn.from_torch(torch.full(shape, torch.nan, dtype=torch.bfloat16), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                                                   mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh))
+                ttnn.copy_host_to_device_tensor(cache[shape], tensor)
+            self.sync_all()
+
+    def poison_for(self, *arms):
+        """Poison the outputs the named arms' traces write: 't' (the target's), 'd1' (the drafter's on queue 1), 'd0' (the drafter's on queue 0)."""
+        wanted = {'t': (self.t_out, self.names_t), 'd1': (self.d1_out, self.names_d), 'd0': (self.d0_out, self.names_d)}
+        for arm in arms:
+            self.poison(*wanted[arm])
+
     def finite(self, tensors):
         torch = self.torch
         return all(bool(torch.isfinite(value.view(torch.bfloat16).float()).all()) for value in tensors.values())
@@ -299,8 +323,10 @@ class Harness(object):
         names_t = plan.checkpoint_names(self.t_side.recipe, self.o.check_every)
         names_d = plan.checkpoint_names(self.d_side.recipe, self.o.check_every)
         self.names_t, self.names_d = names_t, names_d
+        self.poison_for('t')
         self.run_arm('t_solo')
         ref_t = self.read(self.t_out, names_t)
+        self.poison_for('d1')
         self.run_arm('d_solo')
         ref_d = self.read(self.d1_out, names_d)
         self.ref_t, self.ref_d = ref_t, ref_d
@@ -308,15 +334,20 @@ class Harness(object):
         self.report['live'] = dict(target=self.live(ref_t), drafter=self.live(ref_d))
         if not all(self.report['live'].values()):
             raise RuntimeError('a trace wrote only zeros (%s): the byte comparisons would be vacuous' % self.report['live'])
+        if not all(self.report['finite'].values()):
+            raise RuntimeError('a solo reference holds NaN or inf (%s): the trace did not write its outputs (they still hold the poison), or the recipe '
+                               'overflows bfloat16; either way the byte comparisons would be vacuous' % self.report['finite'])
         self.compare('target trace vs eager', self.eager_ref_t, ref_t, informational=True)
         self.compare('drafter trace vs eager', self.eager_ref_d, ref_d, informational=True)
         # the drafter captured on queue 0 against the drafter captured on queue 1: same program, other dispatcher
+        self.poison_for('d0')
         self.replay('d0', 0)
         self.sync(0, [self.sd[1]])
         self.sync_all()
         self.compare('drafter queue 0 vs queue 1', ref_d, self.read(self.d0_out, names_d))
         for repeat in range(2):
             for name in ('concurrent', 'chained', 'one_queue'):
+                self.poison_for('t', 'd0' if name == 'one_queue' else 'd1')
                 self.run_arm(name, flip=bool(repeat))
                 self.compare('%s #%d target' % (name, repeat), ref_t, self.read(self.t_out, names_t))
                 if name == 'one_queue':
@@ -326,6 +357,7 @@ class Harness(object):
         self.stage('exactness-done')
 
     def stress(self):
+        self.poison_for('t', 'd1')
         for index in range(self.o.stress):
             self.run_arm('concurrent', flip=bool(index % 2))
         if self.o.stress:
@@ -344,7 +376,8 @@ class Harness(object):
             for name in arms:
                 self.run_arm(name, flip=bool((index // 2) % 2), record=index >= self.o.warmup)
         self.stage('timing-done')
-        # the outputs after the timed replays: still the solo references' bytes
+        # the outputs after the timed replays: still the solo references' bytes, written by a replay that ran (the poison is rewritten)
+        self.poison_for('t', 'd1')
         self.run_arm('concurrent')
         self.compare('after timing target', self.ref_t, self.read(self.t_out, self.names_t))
         self.compare('after timing drafter', self.ref_d, self.read(self.d1_out, self.names_d))
@@ -483,6 +516,7 @@ def main(argv=None, ttnn=None, torch=None, log=plan.say, exit_fn=None, clock=tim
             mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, 1), l1_small_size=24576, trace_region_size=options.trace_region_bytes,
                                          num_command_queues=2, dispatch_core_config=dispatch_config(ttnn, options.dispatch))
         report['opened'] = True
+        mesh.enable_program_cache()      # a trace can only capture programs that already ran: they come from the program cache
         for needed in ('create_sub_device_manager', 'load_sub_device_manager', 'clear_loaded_sub_device_manager'):
             if not hasattr(mesh, needed):
                 raise RuntimeError('this MeshDevice has no %s' % needed)

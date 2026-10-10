@@ -111,10 +111,24 @@ class H2Tests(unittest.TestCase):
                    watchdog=plan.Watchdog(tag='SUBDEV_H2', backstop=False, exit_fn=lambda code: None), clock=ttnn.clock)
         offsets_sd1 = [offset for sd, offset in ttnn.gather_env if sd == 1]
         self.assertEqual(sorted(set(offsets_sd1)), [0, 1])
-        self.assertEqual(offsets_sd1.count(1), 4, 'only the four gathers of the separate trace were built under the offset')
+        self.assertEqual(offsets_sd1.count(1), 5, 'only the warm-up gather and the four gathers of the separate trace were built under the offset')
         self.assertNotIn('QWEN_AG_LINK_OFFSET_SD1', environ, 'removed again after the capture')
         with open(out) as handle:
             self.assertEqual(json.load(handle)['link_env_was_set'], '1')
+
+    def test_every_program_a_trace_captures_has_run_eagerly_first(self):
+        status, lines, report, ttnn = self.run_fake(extra=['--link-offset', '1'])
+        self.assertEqual(report['verdict'], 'PASS', report.get('error'))
+        with unittest.mock.patch.object(subdev_h2.Harness2, 'warm', lambda *args, **kwargs: None):
+            status, lines, report, ttnn = self.run_fake()
+        self.assertEqual((status, report['verdict']), (2, 'NOT-MEASURED'))
+        self.assertIn('Expected program binaries to be written', report['error'])
+
+    def test_a_queue_that_silently_runs_nothing_fails_on_the_poison_it_left(self):
+        status, lines, report, ttnn = self.run_fake(drop_replays_on=(1,))
+        self.assertEqual((status, report['verdict']), (1, 'FAIL-BYTES'))
+        cases = {case['case'] for case in report['exactness']['cases'] if case['mismatched']}
+        self.assertTrue(any('drafter' in case for case in cases), cases)
 
     def test_bytes_that_differ_under_concurrency_fail(self):
         status, lines, report, ttnn = self.run_fake(corrupt_on_overlap=True)

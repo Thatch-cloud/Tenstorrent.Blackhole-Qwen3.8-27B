@@ -8,10 +8,13 @@ harnesses' protocol to be tested on a CPU:
     gather: subdevice_id + sub_core_grids) and a matmul grid must fit in it;
   - CQOwnerState: a program or trace takes ownership of its sub-device for the queue it is enqueued on and raises while another queue owns it;
     synchronize_device(cq, sub_devices) releases the queue's sub-devices; record_event / wait_for_event transfer ownership (cq_shared_state.cpp);
-  - a trace replays only on the queue it was captured on, and a manager cannot be cleared while a trace is alive (traces are stored per manager);
+  - a trace replays only on the queue it was captured on, a manager cannot be cleared while a trace is alive (traces are stored per manager), and an
+    op captured in a trace must have run eagerly before (the program binaries must already be on the device: a capture of a never-run program is
+    a TT_FATAL, and without the program cache every call builds a fresh program that has never run);
   - a timeline: every queue has a free-at time, a replay occupies its queue for the trace's op count x the op cost, `overlap` says how the queues
     interact ('ideal': fully concurrent; 'serial': one dispatcher for all queues; a float: concurrent traces are stretched by that factor), and
-    `corrupt_on_overlap` makes a trace replayed while another queue is busy produce different bytes (to prove the harness notices), and
+    `corrupt_on_overlap` makes a trace replayed while another queue is busy produce different bytes (to prove the harness notices),
+    `drop_replays_on=(1,)` makes a queue's replays do nothing at all (to prove that stale outputs cannot pass), and
     overlap='link' serialises two replays only while their fabric links intersect (the gather's link set is range(offset, offset + num_links), the
     offset being the QWEN_AG_LINK_OFFSET_SD1 of `environ` read when the gather is built, for sub-device 1 only, as the prepared graft does).
 
@@ -79,7 +82,7 @@ class FakeArray(object):
     def __mul__(self, other):
         return self
 
-    __rmul__ = __add__ = __radd__ = __mul__
+    __rmul__ = __add__ = __radd__ = __sub__ = __rsub__ = __truediv__ = __mul__
 
     def __getitem__(self, key):
         stop_slice = key[-1]
@@ -132,7 +135,12 @@ class FakeTorch(object):
         return canon(first.data) == canon(second.data)
 
     def isfinite(self, value):
-        return FakeBool(True)
+        return FakeBool(value.data != ('poison',))
+
+    nan = float('nan')
+
+    def full(self, shape, value, dtype=None):
+        return FakeArray(shape, ('poison',), dtype or 'float32')
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -181,6 +189,7 @@ class SubDevice(object):
 class FakeTensor(object):
     def __init__(self, shape, parts, fp, owner=None):
         self.shape, self.parts, self.fp, self.owner = tuple(shape), parts, fp, owner
+        self.poisoned = False
 
 
 class FakeEvent(object):
@@ -207,6 +216,10 @@ class FakeMesh(object):
 
     def get_num_devices(self):
         return self.chips
+
+    def enable_program_cache(self):
+        self.ttnn.program_cache = True
+        self.ttnn.calls.append('program_cache')
 
     def compute_with_storage_grid_size(self):
         return Namespace(x=self.ttnn.grid[0], y=self.ttnn.grid[1])
@@ -242,6 +255,7 @@ class Trace(object):
     def __init__(self, ident, cq):
         self.ident, self.cq, self.ops, self.sds, self.released, self.corrupt = ident, cq, [], set(), False, False
         self.links = set()
+        self.outputs = []
 
 
 class FakeTTNN(object):
@@ -251,11 +265,14 @@ class FakeTTNN(object):
     DRAM_MEMORY_CONFIG = 'dram'
     OP_COST_NS = 20000
 
-    def __init__(self, overlap='ideal', grid=(11, 10), chips=1, corrupt_on_overlap=False, op_costs=None, environ=None):
+    def __init__(self, overlap='ideal', grid=(11, 10), chips=1, corrupt_on_overlap=False, op_costs=None, environ=None, drop_replays_on=()):
         self.overlap, self.grid, self.chips, self.corrupt_on_overlap = overlap, grid, chips, corrupt_on_overlap
         self.environ = {} if environ is None else environ
+        self.drop_replays_on = tuple(drop_replays_on)
         self.busy_links = {0: set(), 1: set()}
         self.gather_env = []
+        self.compiled = set()
+        self.program_cache = False
         self.op_costs = op_costs or {}
         self.managers, self.loaded = [], None
         self.now = 0
@@ -375,9 +392,18 @@ class FakeTTNN(object):
         return FakeTensor(values.shape, parts, fingerprint('upload', repr(values.data)))
 
     def get_device_tensors(self, tensor):
-        return [FakeTensor(tensor.shape, [part], fingerprint(tensor.fp, index), tensor.owner) for index, part in enumerate(tensor.parts)]
+        parts = [FakeTensor(tensor.shape, [part], fingerprint(tensor.fp, index), tensor.owner) for index, part in enumerate(tensor.parts)]
+        for part in parts:
+            part.poisoned = tensor.poisoned
+        return parts
+
+    def copy_host_to_device_tensor(self, host, device_tensor, cq_id=None):
+        device_tensor.poisoned = True
+        self.advance(1000)
 
     def to_torch(self, tensor, **kwargs):
+        if tensor.poisoned:
+            return FakeArray(tensor.shape, ('poison',), 'bfloat16')
         corrupt = tensor.owner is not None and self.traces[tensor.owner].corrupt
         part = tensor.parts[0]
         data = ('corrupt', tensor.fp) if corrupt else (part if isinstance(part, tuple) and part[0] == 'gathered' else ('dev', tensor.fp, part))
@@ -392,15 +418,22 @@ class FakeTTNN(object):
         cq = self.current_cq()
         fp = fingerprint(kind, tuple(t.fp for t in inputs))
         parts = parts_fn(inputs) if parts_fn else [('op', fp)] * self.chips
+        program = (kind, tuple(shape), sd, tuple(links))
         if self.capture is not None:
             trace = self.capture
             if cq != trace.cq:
                 raise RuntimeError('an op enqueued on queue %d while a trace is captured on queue %d' % (cq, trace.cq))
+            if not self.program_cache or program not in self.compiled:
+                raise RuntimeError('TT_FATAL: Expected program binaries to be written to the MeshDevice (%s was never run eagerly before the capture)'
+                                   % (program,))
             trace.ops.append(kind)
             trace.sds.add(sd)
             trace.links.update(links)
-            return FakeTensor(shape, parts, fp, owner=trace.ident)
+            tensor = FakeTensor(shape, parts, fp, owner=trace.ident)
+            trace.outputs.append(tensor)
+            return tensor
         self.take(sd, cq)
+        self.compiled.add(program)
         self.submit(cq, self.op_cost(kind), links)
         self.advance(1000)
         return FakeTensor(shape, parts, fp)
@@ -500,8 +533,13 @@ class FakeTTNN(object):
             raise RuntimeError('trace %d was released' % trace_id)
         if cq != trace.cq:
             raise RuntimeError('trace %d was captured on queue %d and cannot replay on queue %d' % (trace_id, trace.cq, cq))
+        if cq in self.drop_replays_on:        # a queue that silently runs nothing: its outputs keep whatever they held
+            self.advance(3000)
+            return
         for sd in sorted(trace.sds):
             self.take(sd, cq)
+        for tensor in trace.outputs:
+            tensor.poisoned = False
         busy = self.submit(cq, sum(self.op_cost(kind) for kind in trace.ops), tuple(trace.links))
         trace.corrupt = bool(busy and self.corrupt_on_overlap)
         self.advance(3000)

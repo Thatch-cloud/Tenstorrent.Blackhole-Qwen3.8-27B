@@ -97,6 +97,15 @@ PROFILES = dict(
     drafter=dict(hidden=2560, inter=3072, attn=2048, norm_ops=True),
 )
 
+# Weights are N(0, gain^2 / K): GATE_GAIN for the gate, up and qkv projections and OUT_GAIN for the down and output projections that feed the residual, and
+# the drafter's scale tensor is uniform in +-SCALE_AMPLITUDE. A residual stack of silu products is unstable (the quadratic term takes over once the hidden state
+# is a few units: 0.1 for OUT_GAIN overflows bfloat16 within 900 drafter ops, 0.05 stays under 25), so these keep 400 target and 900 drafter ops finite, 5 times
+# below the drafter's overflow (a float32 simulation of the recipe with bfloat16 rounding after every op: the last output has rms about 1 for the target and 2 for
+# the drafter, largest value 5 and 16). A harness refuses a run whose solo references are not finite.
+WEIGHT_GAIN = 0.5
+OUT_GAIN = 0.02
+SCALE_AMPLITUDE = 0.02
+
 # One layer pair's ops: (kind, destination, first source, second source). 'h' is the running hidden state: the pair's input is
 # h and its output replaces it. MLP: gate and up projections, silu, product, down projection, residual. Attention-like: qkv
 # projection, silu, output projection, residual. The drafter profile adds a scale product and a second residual (its norms).

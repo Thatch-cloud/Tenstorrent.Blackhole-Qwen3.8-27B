@@ -109,6 +109,7 @@ def run(options, ttnn=None, torch=None, environ=None, log=plan.say, watchdog=Non
                                          trace_region_size=options.trace_region_bytes, num_command_queues=2,
                                          dispatch_core_config=ttnn.DispatchCoreConfig())
         report['opened'] = True
+        mesh.enable_program_cache()      # a trace can only capture programs that already ran: they come from the program cache
         harness = subdev_h2.Harness2(ttnn, torch, mesh, options, watchdog, heartbeat=heartbeat, log=log, clock=clock, report=report,
                                      persist=persist, environ=environ)
         harness.run()
