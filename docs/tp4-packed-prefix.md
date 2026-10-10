@@ -121,7 +121,7 @@ the hold lines and hits restored are printed.
 - **The undrop** (`QWEN_PREFIX_STICKY_UNDROP`): vLLM drops a DFlash hit's last block, costing 2048 tokens of
   re-prefill a turn; neutralising it under sticky sessions is a separate stage.
 - **The host-RAM warm tier** (spill on evict, restore on hit; a raw tile copy op) and the **cold NVMe tier**.
-  Between turns a conversation holds only cached-free blocks and one 154 MB host checkpoint; when the pool
+  Between turns a conversation holds only cached-free blocks and one host checkpoint (78 MB with the bf16 GDN state, `QWEN35_GDN_STATE_BF16=1`; twice that with fp32); when the pool
   overflows vLLM evicts the tail first and the next turn takes a partial hit at an older boundary.
 - **The Lever N merge**: chunked prefill (`prefill/decode interleave`) and the sticky route both own the meaning
   of `start_pos > 0`; one route with three call kinds (cold-first, hit-first, continue) is the merge contract.

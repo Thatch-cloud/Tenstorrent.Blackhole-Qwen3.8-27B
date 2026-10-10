@@ -218,7 +218,7 @@ SETTLE_SECONDS = 3.0
 MAX_LISTED = 16
 # 1280 blocks: above one 65,536-token request, small enough to build a failed allocation and a preemption.
 TINY_BLOCKS = replay.TINY_POOL_TOKENS // judge.BLOCK
-SMALL_STORE_GIB = 0.5         # three checkpoints of CHECKPOINT_NBYTES
+SMALL_STORE_GIB = 0.5         # three fp32-state checkpoints (six with the bf16 state, QWEN35_GDN_STATE_BF16=1; judge.store_entries)
 MODEL_ROOT = '/opt/tt-metal/models/demos/blackhole/qwen36/tt'
 GRAFT_PINS = '/opt/qwen-c2/graft.sha256'
 ANCHOR_FILES = ('model.py', 'qwen36_vllm.py')

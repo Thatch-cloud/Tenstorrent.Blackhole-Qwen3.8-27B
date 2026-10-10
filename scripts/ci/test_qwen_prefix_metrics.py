@@ -481,6 +481,170 @@ class CollectorInstallTests(unittest.TestCase):
         self.assertIn('qwen_prefix_salts_total{verdict="verified"} 3.0', text)
 
 
+def registry_with_returning_sessions():
+    """A registry that has classified admissions and observed two returning sessions' reuse distances."""
+    registry = graft.PrefixRegistry(budget_bytes=1 << 30, environ={})
+    registry.stats.update(class_first_turn=4, class_returning_served=2, class_kv_evicted=1, lost_tokens_kv_evicted=4096,
+                          returning_sessions=3, admitted_prompt_tokens=90000)
+    registry._observe('seconds', 'served', 40.0)
+    registry._observe('seconds', 'missed', 4000.0)
+    registry._observe('tokens', 'served', 15000)
+    registry._observe('tokens', 'missed', 3000000)
+    return registry
+
+
+class TelemetryMetricsTests(unittest.TestCase):
+    def test_every_new_counter_and_gauge_has_a_name_and_a_help(self):
+        for key in ('class_first_turn', 'class_ckpt_evicted_budget', 'lost_tokens_refused', 'evicted_superseded', 'evicted_fair',
+                    'returning_sessions', 'admitted_prompt_tokens'):
+            name, kind, help_text = metrics.metric_name(key)
+            self.assertEqual((name, kind), ('qwen_prefix_' + key, 'counter'))
+            self.assertNotEqual(help_text, 'prefix registry counter %s' % key, key + ' has a help text')
+        for key in ('ghost_now', 'evict_fair', 'supersede', 'telemetry', 'host_rss_bytes', 'host_mem_available_bytes'):
+            self.assertEqual(metrics.metric_name(key)[:2], ('qwen_prefix_' + key, 'gauge'))
+
+    def test_the_host_gauges_ride_with_the_values_only_under_telemetry(self):
+        registry = registry_with_returning_sessions()
+        values = metrics.read_registry(registry)
+        self.assertGreater(values['host_rss_bytes'], 0)
+        self.assertEqual((values['class_first_turn'], values['telemetry'], values['supersede']), (4, 1, 0))
+        off = graft.PrefixRegistry(budget_bytes=1, environ={'QWEN_PREFIX_TELEMETRY': '0'})
+        self.assertNotIn('host_rss_bytes', metrics.read_registry(off))
+
+        class Bare(object):
+            budget_bytes = 1
+
+            def snapshot(self):
+                return {'entries': 0}
+
+        self.assertNotIn('host_rss_bytes', metrics.read_registry(Bare()), 'a registry without telemetry gets no host gauge')
+        self.assertEqual(metrics.read_histograms(off), {})
+        self.assertEqual(metrics.read_histograms(object()), {})
+
+    def test_rss_sums_over_writers_and_mem_available_is_the_largest(self):
+        one = dict(values=dict(host_rss_bytes=100, host_mem_available_bytes=5000), written_unix=1.0)
+        two = dict(values=dict(host_rss_bytes=50, host_mem_available_bytes=4000), written_unix=1.0)
+        rows = {name: value for _, name, _, value in metrics.metric_rows([one, two], now=2.0)}
+        self.assertEqual(rows['qwen_prefix_host_rss_bytes'], 150)
+        self.assertEqual(rows['qwen_prefix_host_mem_available_bytes'], 5000)
+
+    def test_the_export_document_carries_the_histograms(self):
+        tmp = tempfile.mkdtemp(prefix='qwen-prefix-hist-')
+        self.addCleanup(shutil.rmtree, tmp, True)
+        registry = registry_with_returning_sessions()
+        exporter = metrics.Exporter(os.path.join(tmp, 'm'), 1.0, clock=lambda: 10.0, lookup=lambda: registry, pid=4243,
+                                    kill_switch_path=None, logger=lambda *a: None)
+        self.assertTrue(exporter.publish())
+        document = metrics.load_document(os.path.join(tmp, 'm', '4243.json'))
+        seconds = document['histograms']['reuse_seconds']
+        self.assertEqual(seconds['bounds'], list(graft.REUSE_SECONDS_BOUNDS))
+        self.assertEqual((sum(seconds['served']['counts']), seconds['served']['sum'], seconds['missed']['sum']), (1, 40.0, 4000.0))
+
+    def test_histograms_merge_over_writers_and_skip_a_misaligned_one(self):
+        registry = registry_with_returning_sessions()
+        histograms = registry.histograms()
+        merged = metrics.merge_histograms([dict(histograms=histograms), dict(histograms=histograms), dict()], local=histograms)
+        seconds = merged['reuse_seconds']
+        self.assertEqual((sum(seconds['served']['counts']), seconds['served']['sum']), (3, 120.0))
+        odd = {'reuse_seconds': {'bounds': [1, 2], 'served': {'counts': [1, 1, 1], 'sum': 9}}}
+        again = metrics.merge_histograms([dict(histograms=histograms), dict(histograms=odd)])
+        self.assertEqual(sum(again['reuse_seconds']['served']['counts']), 1, 'another build\'s buckets are not added in')
+        broken = {'reuse_seconds': {'bounds': list(graft.REUSE_SECONDS_BOUNDS), 'served': {'counts': [1], 'sum': 'x'}},
+                  'junk': 3, 'reuse_tokens': {'bounds': 'no'}}
+        self.assertEqual(metrics.merge_histograms([dict(histograms=broken)])['reuse_seconds'].keys(), {'bounds'})
+
+    def test_cumulative_buckets_for_prometheus(self):
+        registry = registry_with_returning_sessions()
+        rows = metrics.histogram_rows(registry.histograms())
+        names = sorted({row[0] for row in rows})
+        self.assertEqual(names, ['qwen_prefix_reuse_seconds', 'qwen_prefix_reuse_tokens'])
+        served = [row for row in rows if row[0] == 'qwen_prefix_reuse_seconds' and row[2] == 'served'][0]
+        buckets = dict(served[3])
+        self.assertEqual((buckets['10.0'], buckets['30.0'], buckets['60.0'], buckets['+Inf']), (0, 0, 1, 1))
+        self.assertEqual(served[4], 40.0)
+        missed = [row for row in rows if row[0] == 'qwen_prefix_reuse_tokens' and row[2] == 'missed'][0]
+        self.assertEqual((dict(missed[3])['2097152.0'], dict(missed[3])['4194304.0']), (0, 1), '3,000,000 is le 4,194,304')
+        self.assertEqual(dict(missed[3])['+Inf'], 1)
+        over = graft.PrefixRegistry(budget_bytes=1, environ={})
+        over._observe('tokens', 'missed', 10 ** 9)
+        top = [row for row in metrics.histogram_rows(over.histograms()) if row[0].endswith('tokens') and row[2] == 'missed'][0]
+        self.assertEqual((dict(top[3])['16777216.0'], dict(top[3])['+Inf']), (0, 1), 'above the last bound only the open bucket')
+
+    def test_collect_adds_a_histogram_family_per_unit_when_prometheus_has_one(self):
+        made = []
+
+        class Family(object):
+            def __init__(self, kind, name, documentation, value=None, labels=None):
+                self.samples = []
+                made.append((kind, name))
+
+            def add_metric(self, labels, *args, **kwargs):
+                self.samples.append((tuple(labels), args))
+
+        core = types.ModuleType('prometheus_client.core')
+        core.CounterMetricFamily = lambda *a, **k: Family('counter', *a, **k)
+        core.GaugeMetricFamily = lambda *a, **k: Family('gauge', *a, **k)
+        core.HistogramMetricFamily = lambda *a, **k: Family('histogram', *a, **k)
+        package = types.ModuleType('prometheus_client')
+        package.core = core
+        collector = metrics.PrefixCollector('/nonexistent', lookup=registry_with_returning_sessions)
+        with mock.patch.dict(sys.modules, {'prometheus_client': package, 'prometheus_client.core': core}):
+            families = list(collector.collect())
+        histograms = [family for family, (kind, name) in zip(families, made) if kind == 'histogram']
+        self.assertEqual(sorted(name for kind, name in made if kind == 'histogram'),
+                         ['qwen_prefix_reuse_seconds', 'qwen_prefix_reuse_tokens'])
+        self.assertEqual([sorted(labels for labels, _ in family.samples) for family in histograms], [[('missed',), ('served',)]] * 2)
+        self.assertEqual(made[-2][1], 'qwen_prefix_chat_requests')
+
+    def test_an_old_prometheus_without_histograms_still_serves_the_rest(self):
+        class Family(object):
+            def __init__(self, name, *args, **kwargs):
+                self.name = name
+
+            def add_metric(self, *args, **kwargs):
+                pass
+
+        core = types.ModuleType('prometheus_client.core')
+        core.CounterMetricFamily = Family
+        core.GaugeMetricFamily = Family
+        package = types.ModuleType('prometheus_client')
+        package.core = core
+        collector = metrics.PrefixCollector('/nonexistent', lookup=registry_with_returning_sessions)
+        with mock.patch.dict(sys.modules, {'prometheus_client': package, 'prometheus_client.core': core}), \
+                mock.patch.object(metrics, '_HISTOGRAM_FAILED', []), mock.patch.object(metrics, 'log') as log:
+            families = list(collector.collect())
+            list(collector.collect())
+        self.assertIn('qwen_prefix_class_first_turn', [family.name for family in families])
+        self.assertEqual(log.call_count, 1, 'logged once, not on every scrape')
+
+    @unittest.skipUnless(HAVE_PROMETHEUS, 'prometheus_client is a vLLM dependency: this runs in the image')
+    def test_the_real_exposition_of_the_new_names(self):
+        from prometheus_client import CollectorRegistry, generate_latest
+
+        tmp = tempfile.mkdtemp(prefix='qwen-prefix-expo2-')
+        try:
+            registry = CollectorRegistry()
+            metrics.Exporter(tmp, 1.0, lookup=registry_with_returning_sessions, logger=lambda *a: None).publish()
+            metrics.register_collector(registry, tmp)
+            with mock.patch.dict(metrics._REQUESTS, {}, clear=True), mock.patch.dict(metrics._SALTS, {}, clear=True):
+                text = generate_latest(registry).decode('utf-8')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertIn('qwen_prefix_class_first_turn_total 4.0', text)
+        self.assertIn('qwen_prefix_class_returning_served_total 2.0', text)
+        self.assertIn('qwen_prefix_lost_tokens_kv_evicted_total 4096.0', text)
+        self.assertIn('qwen_prefix_admitted_prompt_tokens_total 90000.0', text)
+        self.assertIn('# TYPE qwen_prefix_host_rss_bytes gauge', text)
+        self.assertIn('# TYPE qwen_prefix_host_mem_available_bytes gauge', text)
+        self.assertIn('# TYPE qwen_prefix_reuse_seconds histogram', text)
+        self.assertIn('qwen_prefix_reuse_seconds_bucket{le="60.0",outcome="served"} 1.0', text)
+        self.assertIn('qwen_prefix_reuse_seconds_bucket{le="+Inf",outcome="missed"} 1.0', text)
+        self.assertIn('qwen_prefix_reuse_seconds_sum{outcome="served"} 40.0', text)
+        self.assertIn('qwen_prefix_reuse_seconds_count{outcome="missed"} 1.0', text)
+        self.assertIn('qwen_prefix_reuse_tokens_bucket{le="16384.0",outcome="served"} 1.0', text)
+        self.assertIn('qwen_prefix_reuse_tokens_sum{outcome="missed"} 3e+06', text)
+
+
 class ContractBootTests(unittest.TestCase):
     """serving_c2_contract.boot starts the right half in the right process under a prefix profile."""
 

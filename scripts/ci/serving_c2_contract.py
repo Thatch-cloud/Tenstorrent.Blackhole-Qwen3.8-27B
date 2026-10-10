@@ -26,7 +26,9 @@ process match it:
    every prefix-reuse graft in the image reads. A profile that sets it must also carry the engine
    flags reuse is exact under (prefix_reuse_problems), or the boot refuses; a profile that does not
    set it gets it removed, so an inherited value cannot turn half of reuse on under exact, c2 or
-   general. Under a prefix profile the API server serves the registry's metrics, which the engine
+   general. The checkpoint registry's store policies and telemetry (QWEN_PREFIX_EVICT, _SUPERSEDE,
+   _TELEMETRY, _GHOST_ENTRIES) are the profile's too: strict values, and only beside the switch
+   (prefix_policy_problems). Under a prefix profile the API server serves the registry's metrics, which the engine
    process exports (qwen_prefix_metrics); it keeps a request's cache_salt only when the salt verifies
    against the platform's salt key (salt_verdict), so a client cannot choose the cache partition it
    shares; it refuses a launched KV connector and warns on a server default that strips past
@@ -80,6 +82,11 @@ INPUT_PROCESSOR = 'vllm.v1.engine.input_processor'
 # The prefix-reuse switch (design section 2.0.1): the model graft's supports_prefix_caching, the
 # scheduler graft's install and the runner patch all read it. Only a profile sets it.
 PREFIX_SWITCH = 'QWEN_PREFIX_REUSE'
+# The checkpoint registry's store policies and telemetry (qwen_prefix_registry.ENV_EVICT, ENV_SUPERSEDE, ENV_TELEMETRY, ENV_GHOST): a profile's
+# own env like the switch, strict in their values, and only meaningful beside it (prefix_policy_problems). Unset they are the registry's defaults:
+# plain LRU, no supersession, telemetry on.
+PREFIX_POLICY_FLAGS = {'QWEN_PREFIX_EVICT': ('lru', 'fair'), 'QWEN_PREFIX_SUPERSEDE': ('0', '1'), 'QWEN_PREFIX_TELEMETRY': ('0', '1')}
+PREFIX_GHOST_FLAG = 'QWEN_PREFIX_GHOST_ENTRIES'
 # Sticky sessions (serving_fast_policy.STICKY_SESSIONS_FLAG): the fast path's side of prefix reuse. Only a
 # profile sets it, and only beside PREFIX_SWITCH and the fast path (prefix_reuse_problems).
 STICKY_SWITCH = 'QWEN_FAST_STICKY_SESSIONS'
@@ -385,6 +392,26 @@ def sticky_problems(profile):
     return problems
 
 
+def prefix_policy_problems(profile):
+    """Every way the profile sets the checkpoint registry's store policies or telemetry (PREFIX_POLICY_FLAGS, PREFIX_GHOST_FLAG) wrongly, [] when
+    none: a value the registry would refuse to start on, or any of them without QWEN_PREFIX_REUSE=1 (they would be inert, and a profile that
+    names a policy it does not run is a misread of what the engine does)."""
+    env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
+    problems = []
+    for name, allowed in sorted(PREFIX_POLICY_FLAGS.items()):
+        if name in env and env[name] not in allowed:
+            problems.append('%s=%r is not one of %s' % (name, env[name], ', '.join(allowed)))
+    if PREFIX_GHOST_FLAG in env:
+        value = env[PREFIX_GHOST_FLAG]
+        if not value.isdigit():
+            problems.append('%s=%r is not a number of entries' % (PREFIX_GHOST_FLAG, value))
+    named = [name for name in sorted(list(PREFIX_POLICY_FLAGS) + [PREFIX_GHOST_FLAG]) if name in env]
+    if named and not prefix_reuse(profile):
+        problems.append('%s set without %s=1: the registry does not exist, so the policy would be inert'
+                        % (', '.join(named), PREFIX_SWITCH))
+    return problems
+
+
 def prefix_reuse_problems(profile):
     """Every way the profile's engine flags break prefix reuse's exactness assumptions, [] when none.
 
@@ -399,7 +426,7 @@ def prefix_reuse_problems(profile):
     engine = profile.get('engine', {})
     value = profile.get('env', {}).get(PREFIX_SWITCH)
     caching = engine.get('enable-prefix-caching') is True
-    problems = sticky_problems(profile)
+    problems = sticky_problems(profile) + prefix_policy_problems(profile)
     if value is not None and str(value) not in ('0', '1'):
         problems.append('%s=%r is neither 1 nor 0' % (PREFIX_SWITCH, value))
     if caching and engine.get('no-enable-prefix-caching'):

@@ -126,6 +126,7 @@ PrefixRegistry = prefix_registry.PrefixRegistry
 StatsExport = prefix_registry.StatsExport
 floor_chunk = prefix_registry.floor_chunk
 shared_registry = prefix_registry.shared_registry
+tenant_of_salt = prefix_registry.tenant_of_salt
 log = prefix_registry.log
 
 PLUGIN_REVISION = 'bf77cd63756fc891b8fb7f7cb3f5c1420f0e044c'
@@ -529,6 +530,26 @@ class SchedulerGraft(object):
     def export(self, force=False):
         if self.stats_export is not None:
             self.stats_export.maybe_export(self.registry, force=force)
+            maybe_tier = getattr(self.stats_export, 'maybe_tier', None)
+            if maybe_tier is not None:
+                maybe_tier(self.registry, force=force)
+
+    def end_boundary(self, request):
+        """The boundary this request's own last checkpoint would sit at (plan's prompt candidate): floor2048(P), less one
+        chunk under sticky sessions with the coordinator dropping a hit's last block. The telemetry's session marker."""
+        boundary = floor_chunk(request.num_prompt_tokens)
+        return boundary - CHUNK if self.sticky and self.drop_last else boundary
+
+    def note(self, request, h, q, kind=None):
+        """Tell the registry's telemetry what the trim answered for this attempt (it reads, nothing more)."""
+        note_attempt = getattr(self.registry, 'note_attempt', None)
+        if note_attempt is None:
+            return
+        try:
+            note_attempt(request.request_id, request.block_hashes, request.num_prompt_tokens,
+                         self.end_boundary(request), h, q, kind)
+        except Exception:
+            pass
 
     @staticmethod
     def excluded(request):
@@ -657,11 +678,13 @@ class SchedulerGraft(object):
             registry.unstage(request.request_id)
             if h:
                 stats[excluded] += 1
+            self.note(request, h, 0, 'unsalted' if excluded == 'unsalted_denied' else 'denied')
             return empty, 0
         if self.kill_switch_engaged():
             registry.unstage(request.request_id)
             if h:
                 stats['killed_denied'] += 1
+            self.note(request, h, 0, 'denied')
             return empty, 0
         group = blocks.blocks[0] if h else ()
         hashes = request.block_hashes
@@ -674,8 +697,12 @@ class SchedulerGraft(object):
                 if boundary // BLOCK <= len(hashes):
                     registry.note_orphan(hashes[boundary // BLOCK - 1])
         plan, unplanned, drain = self.plan(request, h, q)
+        self.note(request, h, q)
         if q or plan or unplanned:
-            registry.stage(Grant(request_id, q, h, key, checkpoint, plan, request, drain, unplanned))
+            gap = floor_chunk(h)
+            registry.stage(Grant(request_id, q, h, key, checkpoint, plan, request, drain, unplanned,
+                                 chain=hashes[0] if len(hashes) else None, tenant=tenant_of_salt(request.cache_salt),
+                                 gap=gap if gap - q >= CHUNK else None))
         else:
             registry.unstage(request_id)
         if q == 0:
@@ -811,6 +838,10 @@ class SchedulerGraft(object):
                  scheduler.vllm_config.parallel_config.distributed_executor_backend,
                  registry.budget_bytes / float(1 << 30), self.kill_switch_path,
                  getattr(self.stats_export, 'path', None), vllm_version)
+        self.log('install policy evict=%s supersede=%d telemetry=%d ghost_entries=%d checkpoint_bytes=%d',
+                 getattr(registry, 'evict_policy', 'lru'), int(getattr(registry, 'supersede', False)),
+                 int(getattr(registry, 'telemetry', False)), getattr(registry, 'ghost_limit', 0),
+                 getattr(registry, 'checkpoint_nbytes', prefix_registry.CHECKPOINT_NBYTES))
         if self.sticky:
             self.log('install sticky=1 lookahead=%d drop_last=%s ceiling=floor2048(P-%d)',
                      getattr(scheduler, 'num_lookahead_tokens', 0), self.drop_last, CHUNK)

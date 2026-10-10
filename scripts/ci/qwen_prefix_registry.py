@@ -6,8 +6,23 @@ process holds what vLLM cannot know about a hit: the GatedDeltaNet (GDN) state t
 
 - Checkpoints: an LRU keyed by vLLM's block hash at the boundary (the hash of block Q/64-1), each
   holding pos, the token ids [0, pos) it was captured from, the model's host tensors (rec_state and
-  conv_carry for both chips) and their size. It is bounded by bytes (QWEN_PREFIX_STORE_GIB, default
-  8 GiB, about 55 checkpoints of 154 MB); a pinned entry is never evicted.
+  conv_carry for the whole mesh) and their size. It is bounded by bytes (QWEN_PREFIX_STORE_GIB, default
+  8 GiB). A checkpoint is as large as the GDN state dtype makes it (checkpoint_nbytes): 78446592 bytes
+  with QWEN35_GDN_STATE_BF16=1 (about 109 in the default store), twice that with the fp32 state; a
+  pinned entry is never evicted.
+- Store hygiene (opt-in, each off unless its flag says so; off, the registry behaves exactly as before):
+  QWEN_PREFIX_SUPERSEDE=1 retires a conversation's older checkpoints when a newer one of the same token
+  path lands, keeping the newest older one (an edit or retry of the last turn still has it) and never a
+  pinned, shared (gap-boundary) or branch-point (granted to two requests) one; QWEN_PREFIX_EVICT=fair
+  evicts the oldest checkpoint of the tenant holding the most bytes (the tenant tag is the salt's)
+  instead of the global oldest. Neither can serve anything the plain LRU could not: a retired or
+  evicted checkpoint is simply a miss, and every served checkpoint is still token-verified.
+- Telemetry (QWEN_PREFIX_TELEMETRY, default on; 0 turns every piece of it off): each admission is
+  classified once, when the step admits it (class_* counters: returning_served, first_turn, rewritten,
+  short, kv_evicted, ckpt_evicted, ckpt_missing, refused, unsalted, denied), a returning session's reuse
+  distance (seconds and admitted prompt tokens since its previous turn) goes into two histograms, and
+  host gauges (engine RSS, MemAvailable) ride with the stats. It reads the request's hashes and counts;
+  it never changes a grant, a trim, a capture or an eviction (test_qwen_prefix_tiers).
 - Grants: staged on every admission attempt inside one schedule() call, committed only for the
   requests the step's SchedulerOutput admits at start_pos == Q (F2, S6), pinned for that one step.
   The model reads grant_for(request_id) per prefill row.
@@ -17,7 +32,11 @@ process holds what vLLM cannot know about a hit: the GatedDeltaNet (GDN) state t
 - Counters (S5): grants, trim loss h-Q, KV hits without a checkpoint, distinct checkpoints found
   without their KV (orphans), token mismatches, capture failures and refusals, restore and capture
   ms, bytes, pins. StatsExport writes them from the scheduler process, rate-limited, as a
-  "[PINDIAG] prefix: stats {...}" line and a JSON file on tmpfs (QWEN_PREFIX_STATS_PATH).
+  "[PINDIAG] prefix: stats {...}" line and a JSON file on tmpfs (QWEN_PREFIX_STATS_PATH). Under the
+  telemetry it also writes, at the same cadence and whether or not a counter moved, two compact
+  key=value lines the host's log reader can parse: "[PINDIAG] prefix: tier rss=<bytes> avail=<bytes>
+  reg_bytes=... reg_entries=... adm=... returning=... <class>=<n> ..." and "[PINDIAG] prefix: reuse
+  bounds_s=... served_s=<counts>:<sum> missed_s=... bounds_tok=... served_tok=... missed_tok=...".
 
 Shared through a fixed sys.modules key (REGISTRY_KEY; precedent serving_lifecycle.PREFILL_GATE_KEY)
 so the scheduler graft (the plugin package's copy of this module) and the model graft (whichever
@@ -57,6 +76,7 @@ and DRAINS at floor2048(L), then the tail runs.
 Pure python; imports nothing outside the standard library.
 """
 
+import bisect
 import gc
 import itertools
 import json
@@ -75,6 +95,13 @@ ENV_REUSE = 'QWEN_PREFIX_REUSE'
 ENV_STORE_GIB = 'QWEN_PREFIX_STORE_GIB'
 ENV_STATS_PATH = 'QWEN_PREFIX_STATS_PATH'
 ENV_STATS_S = 'QWEN_PREFIX_STATS_S'
+# Store hygiene and telemetry (the module docstring). Each is strict: a value outside its set refuses to start.
+ENV_EVICT = 'QWEN_PREFIX_EVICT'            # lru (default) | fair
+ENV_SUPERSEDE = 'QWEN_PREFIX_SUPERSEDE'    # 0 (default) | 1
+ENV_TELEMETRY = 'QWEN_PREFIX_TELEMETRY'    # 1 (default) | 0
+ENV_GHOST = 'QWEN_PREFIX_GHOST_ENTRIES'    # the returning-session memory, entries (default 65536; 0 = none)
+EVICT_POLICIES = ('lru', 'fair')
+DEFAULT_GHOST_ENTRIES = 65536
 # The prefill kwarg the runner patch (qwen_prefix_runner_patch) adds: the request id of each row.
 REQUEST_IDS_KWARG = 'request_ids'
 KILL_SWITCH_PATH = '/models/.qwen-c2/prefix-reuse.off'
@@ -86,9 +113,62 @@ DEFAULT_STORE_GIB = 8.0
 # two engines would share one file. Empty QWEN_PREFIX_STATS_PATH: the log line only.
 DEFAULT_STATS_PATH = '/tmp/qwen-prefix-stats.json'
 DEFAULT_STATS_S = 30.0
-# Host checkpoint, both chips: 48 layers x (fp32 rec_state [1,24,128,128] + bf16 conv_carry
-# [1,3,5120]) = 73.4 MiB per chip, about 154 MB (design section 2.0.3). The model passes the real size.
-CHECKPOINT_NBYTES = 2 * 48 * (24 * 128 * 128 * 4 + 3 * 5120 * 2)
+
+# One host checkpoint is the GatedDeltaNet state of the whole mesh after a 2048-token boundary: per GDN layer the
+# recurrent state [value heads, 128, 128] and the conv carry [3, channels]. The totals over the mesh do not depend on
+# how many chips share them (two chips of 24 heads and 5120 channels, four of 12 and 2560). The recurrent state is
+# fp32 unless QWEN35_GDN_STATE_BF16=1 (the production setting); the conv carry is bf16 either way. The model passes
+# the real size of what it read (qwen_prefix_model_patch._qwen_prefix_read_scratch); this derivation is for the
+# registry's default and for every capacity estimate made without a device (Lever N's host-memory guard, the gate).
+ENV_GDN_STATE_BF16 = 'QWEN35_GDN_STATE_BF16'
+GDN_LAYERS = 48
+GDN_VALUE_HEADS = 48
+GDN_HEAD_DIM = 128
+GDN_CONV_TAPS = 3
+GDN_CONV_CHANNELS = 10240
+CARRY_ITEMSIZE = 2
+
+
+def gdn_state_bf16(environ=None):
+    """Whether the recurrent state is bf16 (QWEN35_GDN_STATE_BF16=1, exactly as the GDN layer reads it)."""
+    environ = os.environ if environ is None else environ
+    return environ.get(ENV_GDN_STATE_BF16) == '1'
+
+
+def checkpoint_nbytes(environ=None, state_bf16=None):
+    """Bytes of one checkpoint for the state dtype (state_bf16, else the environment's). 78446592 for bf16,
+    153944064 for fp32."""
+    if state_bf16 is None:
+        state_bf16 = gdn_state_bf16(environ)
+    itemsize = 2 if state_bf16 else 4
+    return GDN_LAYERS * (GDN_VALUE_HEADS * GDN_HEAD_DIM * GDN_HEAD_DIM * itemsize
+                         + GDN_CONV_TAPS * GDN_CONV_CHANNELS * CARRY_ITEMSIZE)
+
+
+CHECKPOINT_NBYTES_FP32 = checkpoint_nbytes(state_bf16=False)
+CHECKPOINT_NBYTES_BF16 = checkpoint_nbytes(state_bf16=True)
+# What a checkpoint costs in this process (its environment's state dtype, read once at import).
+CHECKPOINT_NBYTES = checkpoint_nbytes()
+
+# A returning session's reuse distance, bucketed (upper bounds; one more bucket above the last): seconds since its
+# previous turn, and prompt tokens admitted for OTHER requests since then (the quantity a cache of that many tokens
+# would have had to hold across).
+REUSE_SECONDS_BOUNDS = (10, 30, 60, 120, 300, 600, 1200, 1800, 3600, 7200, 14400, 28800, 86400)
+REUSE_TOKENS_BOUNDS = (16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216)
+REUSE_OUTCOMES = ('served', 'missed')
+# Bounds on the telemetry's per-request memory (waiting requests with an attempt on file, requests already classified).
+ATTEMPTS_LIMIT = 4096
+CLASSIFIED_LIMIT = 8192
+
+# How an admission is classified (the module docstring); every admission lands in exactly one. The classes that can
+# still carry a partial hit (a prefix shared with another session, or an older boundary) also count class_<name>_hit
+# when the trim granted q > 0.
+CLASSES = ('returning_served', 'first_turn', 'rewritten', 'short', 'kv_evicted', 'ckpt_evicted', 'ckpt_missing',
+           'refused', 'unsalted', 'denied')
+CLASS_HIT = ('first_turn', 'rewritten', 'kv_evicted', 'ckpt_evicted', 'ckpt_missing', 'refused')
+# Why a stored checkpoint left (Ghost.state): the budget (lru or fair), vLLM evicting its boundary block, supersession,
+# a registry clear, or anything else.
+GONE_REASONS = ('budget', 'coupled', 'superseded', 'cleared', 'other')
 
 STAT_NAMES = (
     'attempts', 'staged', 'dropped_attempts', 'commit_mismatch', 'admissions', 'grants',
@@ -99,6 +179,15 @@ STAT_NAMES = (
     'mid_loop_unplanned', 'evicted_lru', 'evicted_coupled', 'dropped', 'clears', 'reset_kept',
     'freed_requests', 'restores', 'restore_ms', 'capture_ms', 'dropped_hits', 'program_growth',
     'inflight_started', 'inflight_captures', 'inflight_dropped',
+    # store hygiene
+    'evicted_fair', 'evicted_superseded', 'supersede_checks', 'supersede_kept_pinned', 'supersede_kept_shared',
+    'supersede_kept_branch',
+    # telemetry: admission classes, their losses, the reuse distance's population
+    'admitted_prompt_tokens', 'returning_sessions', 'class_failures',
+) + tuple('class_' + name for name in CLASSES) + tuple('class_%s_hit' % name for name in CLASS_HIT) + (
+    'class_refused_mismatch',
+) + tuple('class_ckpt_evicted_' + reason for reason in GONE_REASONS) + (
+    'lost_tokens_kv_evicted', 'lost_tokens_ckpt_evicted', 'lost_tokens_ckpt_missing', 'lost_tokens_refused',
 )
 
 
@@ -139,13 +228,98 @@ def store_budget_bytes(environ=None):
     return int(gib * (1 << 30))
 
 
+def strict_flag(environ, name, default):
+    """A 0/1 switch from the environment; unset or empty is the default, anything else but 0 and 1 refuses to start."""
+    raw = environ.get(name)
+    if raw is None or raw == '':
+        return default
+    if raw not in ('0', '1'):
+        raise ValueError('%s=%r must be 0 or 1' % (name, raw))
+    return raw == '1'
+
+
+def evict_policy(environ=None):
+    """QWEN_PREFIX_EVICT: 'lru' (default) or 'fair'. Anything else refuses to start."""
+    environ = os.environ if environ is None else environ
+    raw = environ.get(ENV_EVICT)
+    if raw is None or raw == '':
+        return 'lru'
+    if raw not in EVICT_POLICIES:
+        raise ValueError('%s=%r must be one of %s' % (ENV_EVICT, raw, ', '.join(EVICT_POLICIES)))
+    return raw
+
+
+def ghost_limit(environ=None):
+    """QWEN_PREFIX_GHOST_ENTRIES: how many returning-session records the telemetry keeps (0: none)."""
+    environ = os.environ if environ is None else environ
+    raw = environ.get(ENV_GHOST)
+    if raw is None or raw == '':
+        return DEFAULT_GHOST_ENTRIES
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError('%s=%r is not a number of entries' % (ENV_GHOST, raw))
+    if value < 0:
+        raise ValueError('%s=%r must be >= 0' % (ENV_GHOST, raw))
+    return value
+
+
+def tenant_of_salt(salt):
+    """The tenant a cache_salt partitions: the gateway's opaque tag of a platform salt 'qps1.<tag>.<mac>'
+    (serving_c2_contract.mint_salt), else the whole salt (it is a partition key either way). Never logged and never
+    a metric label: the fair policy reads it, and nothing else does."""
+    if isinstance(salt, str):
+        parts = salt.split('.')
+        if len(parts) == 3 and parts[0] == 'qps1' and parts[1]:
+            return parts[1]
+    return salt or ''
+
+
+def is_prefix(shorter, longer):
+    """Whether the token array `shorter` is the start of `longer` (a byte comparison, no copy)."""
+    count = len(shorter)
+    if count > len(longer) or shorter.itemsize != longer.itemsize:
+        return False
+    width = count * shorter.itemsize
+    return memoryview(shorter).cast('B') == memoryview(longer).cast('B')[0:width]
+
+
+def host_gauges(proc='/proc'):
+    """{'host_rss_bytes': this process's resident set, 'host_mem_available_bytes': the host's MemAvailable} from
+    /proc, each only when readable. Never raises."""
+    values = {}
+    try:
+        with open(os.path.join(proc, 'self', 'status'), encoding='ascii', errors='replace') as handle:
+            for line in handle:
+                if line.startswith('VmRSS:'):
+                    values['host_rss_bytes'] = int(line.split()[1]) * 1024
+                    break
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        with open(os.path.join(proc, 'meminfo'), encoding='ascii', errors='replace') as handle:
+            for line in handle:
+                if line.startswith('MemAvailable:'):
+                    values['host_mem_available_bytes'] = int(line.split()[1]) * 1024
+                    break
+    except (OSError, ValueError, IndexError):
+        pass
+    return values
+
+
 class Checkpoint(object):
     """GDN state at a 2048-token boundary, keyed by vLLM's block hash at that boundary. serial is
-    unique per process, so a remembered token check can never vouch for a later entry."""
+    unique per process, so a remembered token check can never vouch for a later entry.
 
-    __slots__ = ('key', 'pos', 'token_ids', 'rec', 'carry', 'nbytes', 'pins', 'serial')
+    chain (the hash of the prompt's first block, which carries the salt), tenant (the salt's tenant), shared (taken at
+    a gap boundary: another session's prefix reaches it too) and grants (admissions this checkpoint served) feed the
+    store hygiene only; no grant or restore reads them."""
 
-    def __init__(self, key, pos, token_ids, rec=None, carry=None, nbytes=0, serial=0):
+    __slots__ = ('key', 'pos', 'token_ids', 'rec', 'carry', 'nbytes', 'pins', 'serial', 'chain', 'tenant', 'shared',
+                 'grants')
+
+    def __init__(self, key, pos, token_ids, rec=None, carry=None, nbytes=0, serial=0, chain=None, tenant=None,
+                 shared=False):
         self.key = key
         self.pos = pos
         self.token_ids = token_ids
@@ -154,10 +328,30 @@ class Checkpoint(object):
         self.nbytes = int(nbytes)
         self.pins = 0
         self.serial = serial
+        self.chain = chain
+        self.tenant = tenant
+        self.shared = bool(shared)
+        self.grants = 0
 
     def matches(self, tokens):
         """Whether tokens (a sequence of ints) are exactly the ids this checkpoint was captured from."""
         return len(tokens) == self.pos and self.token_ids == token_array(tokens)
+
+
+class Ghost(object):
+    """What the telemetry remembers of a session's previous turn, under the block hash at that turn's last boundary
+    (the key a checkpoint there would have): when it was admitted (seen), the boundary (pos), the prompt length, the
+    engine's admitted-token counter after it (counter), and the checkpoint's fate (state): None while none was stored,
+    'stored', or the reason it left (GONE_REASONS)."""
+
+    __slots__ = ('seen', 'pos', 'prompt', 'counter', 'state')
+
+
+class Attempt(object):
+    """The telemetry's view of one waiting request's latest admission attempt: committed (or dropped with the request)
+    when the step admits it."""
+
+    __slots__ = ('kind', 'h', 'q', 'prompt', 'end', 'chain', 'end_key', 'ghost_key', 'target', 'target_key')
 
 
 class Grant(object):
@@ -166,9 +360,11 @@ class Grant(object):
     should capture. Staged on every admission attempt; committed only when the step's output admits
     the request at start_pos == Q. The model reads the committed one."""
 
-    __slots__ = ('req_id', 'q', 'h', 'key', 'checkpoint', 'plan', 'request', 'tokens', 'drain', 'unplanned', 'prompt')
+    __slots__ = ('req_id', 'q', 'h', 'key', 'checkpoint', 'plan', 'request', 'tokens', 'drain', 'unplanned', 'prompt',
+                 'chain', 'tenant', 'gap')
 
-    def __init__(self, req_id, q, h, key, checkpoint, plan, request, drain=None, unplanned=()):
+    def __init__(self, req_id, q, h, key, checkpoint, plan, request, drain=None, unplanned=(), chain=None, tenant=None,
+                 gap=None):
         # The prompt length, kept past commit (which drops the request): the in-flight plan needs it.
         self.prompt = getattr(request, 'num_prompt_tokens', None)
         self.req_id = req_id
@@ -181,6 +377,10 @@ class Grant(object):
         self.tokens = None
         self.drain = max([q] + [pos for pos, _ in plan]) if drain is None else drain
         self.unplanned = tuple(unplanned)
+        # Store hygiene only: the first block's hash, the salt's tenant, and the gap boundary (a prefix other sessions share).
+        self.chain = chain
+        self.tenant = tenant
+        self.gap = gap
 
     def capture_positions(self):
         return sorted(pos for pos, _ in self.plan)
@@ -199,13 +399,16 @@ class Inflight(object):
     filed under (the grant's, taken when it committed), the prompt length and whether the request's final step has been
     scheduled (then begin_step drops it: that step's captures have run by the next schedule())."""
 
-    __slots__ = ('plan', 'tokens', 'prompt', 'final')
+    __slots__ = ('plan', 'tokens', 'prompt', 'final', 'chain', 'tenant', 'gap')
 
-    def __init__(self, plan, tokens, prompt):
+    def __init__(self, plan, tokens, prompt, chain=None, tenant=None, gap=None):
         self.plan = dict(plan)
         self.tokens = tokens
         self.prompt = prompt
         self.final = False
+        self.chain = chain
+        self.tenant = tenant
+        self.gap = gap
 
 
 class KillSwitch(object):
@@ -243,12 +446,34 @@ class KillSwitch(object):
 class PrefixRegistry(object):
     """The checkpoint LRU (bounded by bytes, pinned entries never evicted) and the grant ledger."""
 
-    def __init__(self, budget_bytes=None, environ=None):
+    def __init__(self, budget_bytes=None, environ=None, clock=time.monotonic):
         if budget_bytes is None:
             budget_bytes = store_budget_bytes(environ)
+        flags = os.environ if environ is None else environ
         self.budget_bytes = int(budget_bytes)
+        # Store hygiene and telemetry (the module docstring): strict, and off or default-equivalent when unset.
+        self.evict_policy = evict_policy(flags)
+        self.supersede = strict_flag(flags, ENV_SUPERSEDE, False)
+        self.telemetry = strict_flag(flags, ENV_TELEMETRY, True)
+        # What a capture is charged when the model does not say (the state dtype's checkpoint).
+        self.checkpoint_nbytes = checkpoint_nbytes(flags)
+        self.clock = clock
         self.entries = OrderedDict()
         self.bytes = 0
+        # chain (first block hash) -> checkpoint keys, and tenant -> bytes held: the hygiene's indexes.
+        self.by_chain = {}
+        self.tenant_bytes = {}
+        # Telemetry: the returning-session memory (block hash at a turn's last boundary -> Ghost), the first-block hashes
+        # seen, each waiting request's latest attempt, the requests already classified (a preempted request is admitted
+        # again), the engine's cumulative admitted prompt tokens and the two reuse-distance histograms.
+        self.ghost = OrderedDict()
+        self.ghost_limit = ghost_limit(flags) if self.telemetry else 0
+        self.chains = OrderedDict()
+        self.attempts = OrderedDict()
+        self.classified = OrderedDict()
+        self.admitted_tokens = 0
+        self.reuse = {'seconds': {name: [[0] * (len(REUSE_SECONDS_BOUNDS) + 1), 0.0] for name in REUSE_OUTCOMES},
+                      'tokens': {name: [[0] * (len(REUSE_TOKENS_BOUNDS) + 1), 0.0] for name in REUSE_OUTCOMES}}
         self.staged = {}
         self.committed = {}
         # req_id -> Inflight: the plans of the requests the cap is splitting (see the module docstring).
@@ -291,6 +516,7 @@ class PrefixRegistry(object):
             self.committed.clear()
             self.inflight.clear()
             self.same_step_blocks.clear()
+            self._forget_sessions()
         self._owner = weakref.ref(owner)
 
     def enable_mid_loop_capture(self):
@@ -304,7 +530,7 @@ class PrefixRegistry(object):
     def get(self, key):
         return self.entries.get(key)
 
-    def put(self, key, pos, token_ids, rec=None, carry=None, nbytes=0):
+    def put(self, key, pos, token_ids, rec=None, carry=None, nbytes=0, chain=None, tenant=None, shared=False):
         if pos <= 0 or pos % CHUNK:
             raise ValueError('a checkpoint is only exact at a %d-token boundary, not %d' % (CHUNK, pos))
         if len(token_ids) != pos:
@@ -326,48 +552,145 @@ class PrefixRegistry(object):
             self._remove(key)
             self.stats['capture_replaced'] += 1
         ids = token_ids if isinstance(token_ids, array) else token_array(token_ids)
-        checkpoint = Checkpoint(key, pos, ids, rec, carry, nbytes, next(self._serials))
+        checkpoint = Checkpoint(key, pos, ids, rec, carry, nbytes, next(self._serials), chain, tenant, shared)
         self.entries[key] = checkpoint
         self.bytes += checkpoint.nbytes
+        self._index(checkpoint)
+        ghost = self.ghost.get(key)
+        if ghost is not None:
+            ghost.state = 'stored'
         self.stats['captures'] += 1
-        self._enforce_budget()
+        self._enforce_budget(protect=key)
         return checkpoint
 
     def touch(self, key):
         if key in self.entries:
             self.entries.move_to_end(key)
 
-    def _remove(self, key):
+    def _remove(self, key, reason=None):
+        """Take a checkpoint out. reason (one of GONE_REASONS) is what the telemetry remembers of why it left; None for
+        a replacement, which leaves a checkpoint of the same key in its place."""
         checkpoint = self.entries.pop(key, None)
         if checkpoint is not None:
             self.bytes -= checkpoint.nbytes
             self.orphan_keys.discard(key)
+            self._unindex(checkpoint)
+            if reason is not None:
+                ghost = self.ghost.get(key)
+                if ghost is not None:
+                    ghost.state = reason
         return checkpoint
 
+    def _index(self, checkpoint):
+        if checkpoint.chain is not None:
+            self.by_chain.setdefault(checkpoint.chain, set()).add(checkpoint.key)
+        self.tenant_bytes[checkpoint.tenant] = self.tenant_bytes.get(checkpoint.tenant, 0) + checkpoint.nbytes
+
+    def _unindex(self, checkpoint):
+        if checkpoint.chain is not None:
+            keys = self.by_chain.get(checkpoint.chain)
+            if keys is not None:
+                keys.discard(checkpoint.key)
+                if not keys:
+                    del self.by_chain[checkpoint.chain]
+        left = self.tenant_bytes.get(checkpoint.tenant, 0) - checkpoint.nbytes
+        if left > 0:
+            self.tenant_bytes[checkpoint.tenant] = left
+        else:
+            self.tenant_bytes.pop(checkpoint.tenant, None)
+
     def drop(self, key, reason='dropped'):
-        checkpoint = self._remove(key)
+        checkpoint = self._remove(key, reason if reason in GONE_REASONS else 'other')
         if checkpoint is not None:
             name = 'evicted_' + reason
             self.stats[name if name in self.stats else 'dropped'] += 1
         return checkpoint
 
-    def _enforce_budget(self):
+    def _enforce_budget(self, protect=None):
         if self.bytes <= self.budget_bytes:
+            return
+        if self.evict_policy == 'fair':
+            self._enforce_fair(protect)
             return
         for key in list(self.entries):
             if self.bytes <= self.budget_bytes:
                 break
             if self.entries[key].pins:
                 continue
-            self._remove(key)
+            self._remove(key, 'budget')
             self.stats['evicted_lru'] += 1
+
+    def _enforce_fair(self, protect=None):
+        while self.bytes > self.budget_bytes:
+            victim = self._fair_victim(protect)
+            if victim is None:
+                return
+            self._remove(victim, 'budget')
+            self.stats['evicted_fair'] += 1
+
+    def _fair_victim(self, protect=None):
+        """The key to evict under the fair policy: the least recently used unpinned checkpoint of the tenant holding the
+        most bytes (a tie goes to the tenant whose candidate is older), so a tenant that fills the store pays for it
+        before a tenant that holds a little does. The checkpoint just stored is spared unless nothing else can go;
+        pinned ones never go."""
+        oldest, age, spared = {}, {}, None
+        for index, (key, entry) in enumerate(self.entries.items()):
+            if entry.pins:
+                continue
+            if key == protect:
+                spared = key
+                continue
+            if entry.tenant not in oldest:
+                oldest[entry.tenant] = key
+                age[entry.tenant] = index
+        if not oldest:
+            return spared
+        tenant = max(oldest, key=lambda name: (self.tenant_bytes.get(name, 0), -age[name]))
+        return oldest[tenant]
+
+    def _supersede(self, newest):
+        """Retire what a newer checkpoint of the same conversation makes dead weight (QWEN_PREFIX_SUPERSEDE=1).
+
+        Candidates are the checkpoints of newest's chain that sit below it ON ITS OWN TOKEN PATH (their token ids are
+        the start of newest's, compared byte for byte), so another conversation that merely shares the first block is
+        never touched. The newest of them is the previous turn and stays: an edit or a retry of the last message
+        resumes there. Of the older ones, a checkpoint stays when it is pinned (this step restores it), shared
+        (taken at a gap boundary: other sessions' prefixes reach it) or a branch point (granted to two admissions:
+        something else resumes from it). Dropping a checkpoint can only turn a later hit into a miss - what is served
+        is still token-verified - and the telemetry names that miss (class_ckpt_evicted_superseded)."""
+        chain = newest.chain
+        if chain is None or self.entries.get(newest.key) is not newest:
+            return
+        stats = self.stats
+        stats['supersede_checks'] += 1
+        older = [entry for entry in (self.entries.get(key) for key in tuple(self.by_chain.get(chain, ())))
+                 if entry is not None and entry.pos < newest.pos and is_prefix(entry.token_ids, newest.token_ids)]
+        if len(older) < 2:
+            return
+        older.sort(key=lambda entry: entry.pos)
+        for entry in older[:-1]:
+            if entry.pins:
+                stats['supersede_kept_pinned'] += 1
+            elif entry.shared:
+                stats['supersede_kept_shared'] += 1
+            elif entry.grants > 1:
+                stats['supersede_kept_branch'] += 1
+            else:
+                self._remove(entry.key, 'superseded')
+                stats['evicted_superseded'] += 1
 
     def clear(self):
         """Drop every checkpoint. Staged and committed grants hold their own checkpoint reference
         and die at the next begin_step, so a clear inside schedule() (the kill switch) or between
         steps (reset_prefix_cache) never breaks an admission vLLM has already been handed."""
+        for key in self.entries:
+            ghost = self.ghost.get(key)
+            if ghost is not None:
+                ghost.state = 'cleared'
         self.entries.clear()
         self.bytes = 0
+        self.by_chain.clear()
+        self.tenant_bytes.clear()
         self.orphan_keys.clear()
         self.token_checks.clear()
         self.stats['clears'] += 1
@@ -378,6 +701,7 @@ class PrefixRegistry(object):
             self.disabled = str(reason)
         self.inflight.clear()
         self.clear()
+        self.attempts.clear()
 
     # -- the trim's helpers ---------------------------------------------------------------------
     def tokens_match(self, req_id, candidate, entry, tokens):
@@ -448,6 +772,10 @@ class PrefixRegistry(object):
                 grant.tokens = token_array(grant.request.all_token_ids[0:max(pos for pos, _ in grant.plan)])
             if grant.checkpoint is not None:
                 grant.checkpoint.pins += 1
+                try:
+                    grant.checkpoint.grants += 1
+                except AttributeError:
+                    pass
                 self.touch(grant.key)
                 self.orphan_keys.discard(grant.key)
                 self.stats['grants'] += 1
@@ -462,6 +790,7 @@ class PrefixRegistry(object):
             self._note_split(grant, admitted[req_id], scheduled)
             done.append(grant)
         self.staged.clear()
+        self._classify_admitted(admitted)
         return done
 
     def _note_split(self, grant, start, scheduled):
@@ -471,7 +800,7 @@ class PrefixRegistry(object):
         tokens = scheduled.get(grant.req_id)
         if type(tokens) is not int or start + tokens >= grant.prompt:
             return
-        self.inflight[grant.req_id] = Inflight(grant.plan, grant.tokens, grant.prompt)
+        self.inflight[grant.req_id] = Inflight(grant.plan, grant.tokens, grant.prompt, grant.chain, grant.tenant, grant.gap)
         self.stats['inflight_started'] += 1
 
     def note_scheduled(self, req_id, start, tokens):
@@ -503,11 +832,13 @@ class PrefixRegistry(object):
             carried = None
             if grant is not None:
                 keys, tokens = dict(grant.plan), grant.tokens
+                origin = grant
             else:
                 carried = self.inflight.get(req_id)
                 if carried is None:
                     raise KeyError('no committed grant for %s' % req_id)
                 keys, tokens = carried.plan, carried.tokens
+                origin = carried
             if pos not in keys:
                 raise KeyError('boundary %d is not planned for %s' % (pos, req_id))
             if loop_pos != pos:
@@ -516,10 +847,18 @@ class PrefixRegistry(object):
                                  'restored as the state at %d)' % (loop_pos, pos, pos))
             if ms is not None:
                 self.stats['capture_ms'] += float(ms)
+            kept = self.stats['capture_kept_pinned']
             stored = self.put(keys[pos], pos, tokens[0:pos], rec, carry,
-                              CHECKPOINT_NBYTES if nbytes is None else nbytes)
+                              self.checkpoint_nbytes if nbytes is None else nbytes,
+                              chain=getattr(origin, 'chain', None), tenant=getattr(origin, 'tenant', None),
+                              shared=getattr(origin, 'gap', None) is not None and pos == origin.gap)
             if carried is not None and stored is not None:
                 self.stats['inflight_captures'] += 1
+            if self.supersede and stored is not None and self.stats['capture_kept_pinned'] == kept:
+                try:
+                    self._supersede(stored)
+                except Exception as error:
+                    log('supersession skipped at %s: %s: %s', pos, type(error).__name__, error)
             return stored
         except Exception as error:
             self.stats['capture_failures'] += 1
@@ -532,6 +871,8 @@ class PrefixRegistry(object):
 
     def forget_request(self, req_id):
         self.token_checks.pop(req_id, None)
+        self.attempts.pop(req_id, None)
+        self.classified.pop(req_id, None)
         found = self.staged.pop(req_id, None) is not None
         if self.inflight.pop(req_id, None) is not None:
             found = True
@@ -545,6 +886,192 @@ class PrefixRegistry(object):
             self.stats['freed_requests'] += 1
         return found
 
+    # -- telemetry: classify every admission, remember returning sessions ----------------------------------
+    def note_attempt(self, req_id, hashes, prompt, end, h, q, kind=None):
+        """The trim's latest answer for a waiting request: vLLM's raw hit h, the trimmed Q, and `kind` when the trim refused
+        the request outright ('unsalted', or 'denied' for a streaming session or the kill switch). hashes are the request's
+        block hashes, prompt its prompt length and end the boundary its own checkpoint would sit at (the prompt boundary,
+        less one chunk under sticky sessions). A request is re-attempted every step it waits; only the latest answer is
+        kept, and classify_admitted settles it when the step admits the request. Reads only; never raises (S7)."""
+        if not self.telemetry or req_id in self.classified:
+            return
+        try:
+            rec = self.attempts.get(req_id)
+            if rec is None:
+                rec = Attempt()
+                rec.prompt = int(prompt or 0)
+                rec.end = int(end)
+                rec.chain = hashes[0] if len(hashes) else None
+                rec.end_key = hashes[end // BLOCK - 1] if 0 < end and end // BLOCK <= len(hashes) else None
+                rec.ghost_key = rec.target = rec.target_key = None
+                if kind is None and self.ghost:
+                    self._match_ghost(rec, hashes)
+                self.attempts[req_id] = rec
+                while len(self.attempts) > ATTEMPTS_LIMIT:
+                    self.attempts.popitem(last=False)
+            rec.kind, rec.h, rec.q = kind, int(h), int(q)
+        except Exception:
+            self.stats['class_failures'] += 1
+
+    def _match_ghost(self, rec, hashes):
+        """The highest boundary of this prompt that an earlier turn left as its last: the request returns to that session.
+        target is the boundary a full hit could reach - less than the ghost's when the prompt is no longer than it (a resent
+        prompt whose length is a whole chunk cannot hit its own last token)."""
+        top = min(len(hashes) * BLOCK, rec.prompt) // CHUNK
+        ghost = self.ghost
+        for k in range(top, 0, -1):
+            key = hashes[k * CHUNK // BLOCK - 1]
+            if key in ghost:
+                target = min(k * CHUNK, floor_chunk(((rec.prompt - 1) // BLOCK) * BLOCK))
+                if target <= 0:
+                    return
+                rec.ghost_key, rec.target = key, target
+                rec.target_key = key if target == k * CHUNK else hashes[target // BLOCK - 1]
+                return
+
+    def _classify_admitted(self, admitted):
+        """commit()'s last step: settle the attempt of every request the step admits, once. Never raises."""
+        if not self.telemetry or not self.attempts:
+            return
+        for req_id, start in admitted.items():
+            rec = self.attempts.pop(req_id, None)
+            if rec is None or req_id in self.classified:
+                continue
+            try:
+                self._classify(req_id, rec, int(start))
+            except Exception as error:
+                self.stats['class_failures'] += 1
+                log('classification skipped req=%s: %s: %s', req_id, type(error).__name__, error)
+            self.classified[req_id] = None
+            while len(self.classified) > CLASSIFIED_LIMIT:
+                self.classified.popitem(last=False)
+
+    def _classify(self, req_id, rec, q):
+        stats = self.stats
+        now = self.clock()
+        ghost = self.ghost.get(rec.ghost_key) if rec.ghost_key is not None else None
+        lost = 0
+        if rec.kind is not None:
+            name = rec.kind
+        elif rec.end <= 0:
+            name = 'short'
+        elif ghost is None:
+            name = 'rewritten' if rec.chain in self.chains else 'first_turn'
+        else:
+            target = rec.target
+            if q >= target:
+                name = 'returning_served'
+            else:
+                lost = target - q
+                if rec.h < target:
+                    name = 'kv_evicted'
+                elif self.entries.get(rec.target_key) is not None:
+                    name = 'refused'
+                    verdict = self.token_checks.get(req_id, {}).get(target)
+                    if verdict is not None and verdict[1] is False:
+                        stats['class_refused_mismatch'] += 1
+                elif ghost.state is None:
+                    name = 'ckpt_missing'
+                else:
+                    name = 'ckpt_evicted'
+                    stats['class_ckpt_evicted_' + (ghost.state if ghost.state in GONE_REASONS else 'other')] += 1
+            stats['returning_sessions'] += 1
+            outcome = 'served' if name == 'returning_served' else 'missed'
+            self._observe('seconds', outcome, max(0.0, now - ghost.seen))
+            self._observe('tokens', outcome, max(0, self.admitted_tokens - ghost.counter))
+        stats['class_' + name] += 1
+        if q > 0 and name in CLASS_HIT:
+            stats['class_%s_hit' % name] += 1
+        if lost:
+            stats['lost_tokens_' + name] += lost
+        # The session's new last boundary, and the engine's running count of prompt tokens admitted.
+        self.admitted_tokens += rec.prompt
+        stats['admitted_prompt_tokens'] += rec.prompt
+        if rec.kind is None and rec.chain is not None:
+            self.chains[rec.chain] = now
+            self.chains.move_to_end(rec.chain)
+            while len(self.chains) > max(self.ghost_limit, 1):
+                self.chains.popitem(last=False)
+            if rec.end_key is not None and self.ghost_limit:
+                record = self.ghost.get(rec.end_key)
+                if record is None:
+                    record = self.ghost[rec.end_key] = Ghost()
+                else:
+                    self.ghost.move_to_end(rec.end_key)
+                record.seen, record.pos, record.prompt, record.counter = now, rec.end, rec.prompt, self.admitted_tokens
+                record.state = 'stored' if rec.end_key in self.entries else None
+                while len(self.ghost) > self.ghost_limit:
+                    self.ghost.popitem(last=False)
+
+    def _observe(self, unit, outcome, value):
+        bounds = REUSE_SECONDS_BOUNDS if unit == 'seconds' else REUSE_TOKENS_BOUNDS
+        cell = self.reuse[unit][outcome]
+        cell[0][bisect.bisect_left(bounds, value)] += 1
+        cell[1] += value
+
+    def _forget_sessions(self):
+        """A rebuilt engine starts with no sessions: the telemetry's memory of the old one would misread them."""
+        self.ghost.clear()
+        self.chains.clear()
+        self.attempts.clear()
+        self.classified.clear()
+
+    @staticmethod
+    def host_gauges():
+        """The host gauges of this process (module-level host_gauges), for the exporter, which reads a registry and nothing else."""
+        return host_gauges()
+
+    def histograms(self):
+        """The reuse-distance histograms: {'reuse_seconds' | 'reuse_tokens': {'bounds': [...], 'served' | 'missed':
+        {'counts': per-bucket counts (one more than bounds: the open top bucket), 'sum': ...}}}. Empty without telemetry."""
+        if not self.telemetry:
+            return {}
+        out = {}
+        for unit, bounds in (('seconds', REUSE_SECONDS_BOUNDS), ('tokens', REUSE_TOKENS_BOUNDS)):
+            entry = {'bounds': list(bounds)}
+            for outcome in REUSE_OUTCOMES:
+                counts, total = self.reuse[unit][outcome]
+                entry[outcome] = {'counts': list(counts), 'sum': total}
+            out['reuse_' + unit] = entry
+        return out
+
+    def telemetry_lines(self, host=None):
+        """The two compact key=value lines the periodic export logs (the module docstring), without the "[PINDIAG]
+        prefix:" lead. host: the host gauges (default: read now)."""
+        values = self.snapshot()
+        host = host_gauges() if host is None else host
+        head = ['tier']
+        for key, name in (('host_rss_bytes', 'rss'), ('host_mem_available_bytes', 'avail')):
+            if key in host:
+                head.append('%s=%d' % (name, host[key]))
+        head.extend('%s=%d' % (name, values[key]) for name, key in (
+            ('reg_bytes', 'bytes'), ('reg_entries', 'entries'), ('reg_budget', 'budget_bytes'), ('ghost', 'ghost_now'),
+            ('adm', 'admissions'), ('adm_tokens', 'admitted_prompt_tokens'), ('grants', 'grants'),
+            ('returning', 'returning_sessions')))
+        head.append('evict=%s' % self.evict_policy)
+        head.append('supersede=%d' % int(self.supersede))
+        head.extend('%s=%d' % (name, values['class_' + name]) for name in CLASSES)
+        head.extend('%s=%d' % (name, values[key]) for name, key in (
+            ('lost_kv', 'lost_tokens_kv_evicted'), ('lost_ckpt', 'lost_tokens_ckpt_evicted'),
+            ('lost_missing', 'lost_tokens_ckpt_missing'), ('lost_refused', 'lost_tokens_refused'),
+            ('superseded', 'evicted_superseded'), ('evicted_lru', 'evicted_lru'), ('evicted_fair', 'evicted_fair'),
+            ('evicted_coupled', 'evicted_coupled')))
+        lines = [' '.join(head)]
+        reuse = ['reuse']
+        histograms = self.histograms()
+        for unit, short in (('reuse_seconds', 's'), ('reuse_tokens', 'tok')):
+            entry = histograms.get(unit)
+            if entry is None:
+                continue
+            reuse.append('bounds_%s=%s' % (short, ','.join(str(bound) for bound in entry['bounds'])))
+            for outcome in REUSE_OUTCOMES:
+                cell = entry[outcome]
+                reuse.append('%s_%s=%s:%d' % (outcome, short, ','.join(str(count) for count in cell['counts']),
+                                              round(cell['sum'])))
+        if len(reuse) > 1:
+            lines.append(' '.join(reuse))
+        return lines
+
     def pins(self):
         return sum(checkpoint.pins for checkpoint in self.entries.values())
 
@@ -554,7 +1081,8 @@ class PrefixRegistry(object):
                       pins=self.pins(), staged_now=len(self.staged), committed_now=len(self.committed),
                       orphans_now=len(self.orphan_keys), inflight_now=len(self.inflight),
                       mid_loop_capture=self.mid_loop_capture,
-                      disabled=self.disabled)
+                      disabled=self.disabled, ghost_now=len(self.ghost), evict_fair=int(self.evict_policy == 'fair'),
+                      supersede=int(self.supersede), telemetry=int(self.telemetry))
         return values
 
 
@@ -579,6 +1107,26 @@ class StatsExport(object):
         self.last_values = None
         self.write_failed = False
         self.exports = 0
+        self.tier_time = None
+        self.tiers = 0
+
+    def maybe_tier(self, registry, force=False):
+        """The registry's telemetry lines (PrefixRegistry.telemetry_lines), at most once per interval_s, whether or not a
+        counter moved (the host gauges drift while the engine decodes). Nothing without telemetry. Never raises."""
+        try:
+            if not getattr(registry, 'telemetry', False):
+                return False
+            now = self.clock()
+            if not force and self.tier_time is not None and now - self.tier_time < self.interval_s:
+                return False
+            self.tier_time = now
+            for line in registry.telemetry_lines():
+                self.log('%s', line)
+            self.tiers += 1
+            return True
+        except Exception as error:
+            self.log('telemetry lines failed: %s: %s', type(error).__name__, error)
+            return False
 
     def maybe_export(self, registry, force=False):
         try:

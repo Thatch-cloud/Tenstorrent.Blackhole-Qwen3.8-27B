@@ -166,8 +166,23 @@ OFF_FILE = 'levern.off'
 OFF_PATH = '/models/.qwen-c2/levern.off'
 OFF_PATH_ENV = 'QWEN_FAST_LEVERN_OFF_PATH'
 OFF_POLL_S = 1.0
-# What a parked scratch costs on the host (qwen_prefix_registry.CHECKPOINT_NBYTES: 48 GDN layers x both chips' fp32 state and bf16 carry).
-PARK_NBYTES = 2 * 48 * (24 * 128 * 128 * 4 + 3 * 5120 * 2)
+# What a parked scratch costs on the host: one GDN checkpoint of the whole mesh (qwen_prefix_registry.checkpoint_nbytes, which this mirrors so the
+# policy imports nothing at load): 48 layers x (value-head state [48, 128, 128] + conv carry [3, 10240] in bf16). The state is bf16 when
+# QWEN35_GDN_STATE_BF16=1 (78446592 bytes, the production setting) and fp32 otherwise (153944064). The route knows the real size of every park it
+# makes (note_park_nbytes); observed_park_nbytes prefers it.
+GDN_STATE_BF16_FLAG = 'QWEN35_GDN_STATE_BF16'
+
+
+def park_nbytes(environ=None, state_bf16=None):
+    """Bytes one parked scratch holds on the host for the GDN state dtype (state_bf16, else the environment's)."""
+    if state_bf16 is None:
+        import os
+
+        state_bf16 = (os.environ if environ is None else environ).get(GDN_STATE_BF16_FLAG) == '1'
+    return 48 * (48 * 128 * 128 * (2 if state_bf16 else 4) + 3 * 10240 * 2)
+
+
+PARK_NBYTES = park_nbytes()
 # What the route and the scheduler share (the lifecycle's prefill gate pattern: a module parked under a fixed sys.modules key, so neither imports
 # the other): the scratch's owner and the parked requests, each as {request id: the position its state is at}.
 STATE_KEY = '_qwen_levern_state'
@@ -188,6 +203,7 @@ def state_holder(create=True):
         holder.owner = None
         holder.parks = {}
         holder.route = False
+        holder.park_nbytes = None
         sys.modules[STATE_KEY] = holder
     return holder
 
@@ -195,6 +211,24 @@ def state_holder(create=True):
 def reset_state():
     holder = state_holder()
     holder.owner, holder.parks, holder.route = None, {}, False
+    holder.park_nbytes = None
+
+
+def note_park_nbytes(nbytes):
+    """The route's report of the real host size of a scratch it just read (what a park costs)."""
+    try:
+        value = int(nbytes)
+    except (TypeError, ValueError):
+        return
+    if value > 0:
+        state_holder().park_nbytes = value
+
+
+def observed_park_nbytes(environ=None):
+    """What the next park will cost the host: the size of the last scratch the route read, else the dtype's derived size."""
+    holder = state_holder(create=False)
+    seen = getattr(holder, 'park_nbytes', None) if holder is not None else None
+    return seen if seen else park_nbytes(environ)
 
 
 def state_has(request_id, position):
@@ -295,7 +329,7 @@ DEFAULT_MAX_PARK_S = 30
 # The decode-gap floor: while the governor holds the prefill at share 1.0 (the deadline needs all the device) the decoders still get one decode round at least
 # every this many seconds. 0 turns the floor off (the governed 1.0 then yields nothing, as before). Costs about 2% of a long prefill at 8 s (one 167 ms round).
 DEFAULT_MAX_GAP_S = 8
-# A long prefill's hit lives for the whole parked time on the host: 154 MB per parked scratch at 262k (design 3.8), so the slot count is small.
+# A long prefill's hit lives for the whole parked time on the host: one checkpoint-sized scratch per park, 78 MB with the bf16 state (twice that with fp32; design 3.8), so the slot count is small.
 MAX_PARK_SLOTS = 4
 
 
