@@ -117,6 +117,8 @@ AGENT = os.path.join(HERE, 'references', 'c2-serving', 'agent-container-36104200
 
 import make_parked_profiles as _parked_twins  # noqa: E402
 PARKED_TWINS = frozenset(name for name, parent, env, why in _parked_twins.specs())
+import make_round_host_profiles as _round_host_twins  # noqa: E402
+PARKED_TWINS = PARKED_TWINS | frozenset(_round_host_twins.twin_names())     # tp4/round-host: test_tp4_round_host holds each
 
 class ShapeTests(unittest.TestCase):
     @classmethod

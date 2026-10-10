@@ -79,6 +79,7 @@ from serving_fast_request import CommittedOutput, budget_cap_enabled
 from serving_sequential_step import describe as describe_sequential, sequential_packed_step
 from serving_worker_hook import note_fixture_writer, phase
 import memory_ledger
+import round_host
 import stall_watch
 import trace_census
 import verifier_engine
@@ -545,6 +546,9 @@ class PackedStep:
             if verify_prestage.hostgap_log_enabled():
                 for index, block in enumerate(self.blocks):
                     verify_prestage.block_label(block, index)
+        # tp4/round-host: the six flags read strictly at the attach (a malformed one, or an audit without a lever, fails here) and the
+        # engaged line written once. Nothing set, nothing logged.
+        round_host.engage()
         # QWEN_FAST_GATE_FORCE_CAP (gate only): refused here, at attach, if malformed; logged once when set.
         cap = forced_cap()
         if cap is not None:
@@ -904,13 +908,16 @@ def run_verified_block(entries, *, cancelled, block):
         # The block stages every entry's inputs itself (packed_verifier.py, verify).
         predictions, metrics = phase('packed_verify', ids, lambda: block.verify(entries))
         verified = time.perf_counter()
+        round_host.ledger.note_verify(metrics, (verified - verify_started) * 1000)
         segments = metrics['segments']
         if len(predictions) != len(entries) or len(segments) != len(entries):
             raise ValueError('The packed block must return one prediction list and one segment per entry')
         outputs = []
         # Only collected under the audit gate: appending a dict per entry is cheap, but
         # there is no reason to pay even that when nobody will read it.
-        commit_host_timings = [] if audit_enabled() else None
+        # tp4/round-host LEAN: the per-user [PACKED-COMMIT-HOST] and the splits behind it are not written (the ledger line carries the time).
+        audit = audit_enabled()
+        commit_host_timings = [] if audit and not round_host.lean_enabled() else None
         # {stage_name: [ms per entry, in entries order]} - built up one entry at a time
         # (commit_entry appends its own dict per call) so the round's line stays
         # positional with commit_host_timings and predictions/segments above; an entry
@@ -938,7 +945,7 @@ def run_verified_block(entries, *, cancelled, block):
             for index, splits in enumerate(publish_stage_timings[PUBLISH_SPLIT_KEY]):
                 audit_log(PUBLISH_SPLIT_LINE, round=getattr(block, 'rounds', 0), entry=index,
                           splits=format_publish_splits(splits))
-        if commit_host_timings is not None and ('replay_fence' in metrics or 'prestage' in metrics):
+        if audit and ('replay_fence' in metrics or 'prestage' in metrics):
             # Round-fence plan H1a only (a block built with QWEN_FAST_PRESTAGE or
             # QWEN_FAST_ROUND_FENCES puts these in its metrics): FENCES_LINE, once per round.
             audit_log(FENCES_LINE, **fences_fields(metrics, block, segments))
@@ -946,6 +953,7 @@ def run_verified_block(entries, *, cancelled, block):
         # round's verify and every commit have returned - outside any capture - to catch the
         # buffers the first round allocates lazily (packed proposals, publication).
         memory_ledger.first_packed_round(packed_block=block, round_requests=[entry['request'] for entry in entries])
+        round_host.ledger.note_commit((time.perf_counter() - verified) * 1000)
         return outputs
     except BaseException:
         fail_round(entries, block)
@@ -1183,7 +1191,7 @@ def commit_entry(entry, block, segment, rows, *, cancelled, metrics, verify_star
     # QWEN_FAST_ROUND_B1 (M0a): this user's publication splits, only when the stage timer
     # above is on too (QWEN_FAST_PACKED_AUDIT) - PUBLISH_SPLIT_LINE.
     split_sink = split_token = None
-    if stage_sink is not None and os.environ.get('QWEN_FAST_ROUND_B1') == '1':
+    if stage_sink is not None and os.environ.get('QWEN_FAST_ROUND_B1') == '1' and not round_host.lean_enabled():
         from dflash_traced_publish import PUBLICATION_SPLITS
 
         split_sink = {}

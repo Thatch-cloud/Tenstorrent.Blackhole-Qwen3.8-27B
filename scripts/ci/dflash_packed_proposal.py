@@ -347,7 +347,12 @@ def select_packed_batched(parts, seeds, counts, predecessors, successors):
     import torch
 
     from draft_selector import select_active_candidates
+    import round_host
 
+    if round_host.select_enabled():
+        # tp4/round-host SELECT (QWEN_FAST_TP4_ROUND_HOST_SELECT): the same selection, bit for bit, with the codebook checks made once
+        # (round_host.select_active_candidates; the reference's own call whenever any check fails).
+        select_active_candidates = round_host.select_active_candidates
     parts, seeds, counts = tuple(parts), tuple(seeds), tuple(counts)
     if not parts or len(parts) != len(seeds) or len(parts) != len(counts):
         raise ValueError('One anchor and one proposal count per packed user required')

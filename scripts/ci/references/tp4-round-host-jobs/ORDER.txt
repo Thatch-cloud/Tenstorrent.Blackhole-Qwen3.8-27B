@@ -1,0 +1,49 @@
+# The order of the tp4/round-host four-card DEVELOPMENT window: the host work inside a verified round (docs/tp4-round-host.md), one image, tp4-rh-1, built from the pushed tp4/round-host commit.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# THE CARDS ARE UNDER DEVELOPMENT: NO agentstart, NO agentstop (the node agent is already stopped), NO hand-back, NO deploy, NO :latest move. Z ends with a reset and no agentstart. If production is live on the cards, prepend the pack's own stop and unserve jobs first.
+# P0. NO OTHER WINDOW DRIVER MAY BE ALIVE and no privileged builder container may be up. The CPU suite green on this branch first (gh workflow run qwen-cpu-suite.yml -f ref=tp4/round-host). Every result is UNQUALIFIED
+# (the arms are gate-only profiles). B0 never runs during a timing job. Judge every ABAB PAIRED per round, never by unpaired medians.
+# P0 CI PAUSED: the owner scales the rig's ARC runner sets to zero for the T block (CI shares the host and skews round times; the hardware host runner that runs these jobs is NOT scaled down) and restores them after T8.
+# P0 LOAD: the maximum for w2ln_timing_compare.py --max-load is `w2ln_timing_compare.py load-limit` of E1's load.log (the MEDIAN host load of an eight-user serving job on this image, plus 3: never the idle load), applied to each job's MEDIAN,
+# and a pair whose two jobs' median loads differ by more than 2 (--load-gap) is VOID; the number is recorded before T1 runs.
+# BASE: origin/tp4/er-drafters (the integration base with Lever N, W2 and engine reuse). CONTROL for every pair: c2-packed-tp4-8x262k-ship-prefix-levern-traffic-roundhost-log (the traffic profile plus the ledger flag and nothing else). ARM:
+# c2-packed-tp4-8x262k-ship-prefix-levern-traffic-roundhost (the control plus QWEN_FAST_TP4_ROUND_HOST_SELECT, _READ, _KEYED and _LEAN). AUDITED ARM (A1 only): the arm plus QWEN_FAST_TP4_ROUND_HOST_AUDIT=1.
+# WHAT IS BUILT (all host only, all default off, all byte-identical off): the per-round ledger line (LOG), the FP64 draft selection with the codebook checks made once (SELECT), the quad readback's merge as one batch and the replicated-feature
+# guard sampled (READ), the verify-time diff keyed on the start and page table (KEYED), the unparsed per-phase lines dropped (LEAN), and the reference-beside-fast audit (AUDIT). NOT built: a device-resident round, publication as a trace
+# (the fused commit already is one), a ring-buffer publication, joined quad outputs, events: each changes a trace or needs a probe the pinned runtime has never had (docs/tp4-round-host.md).
+# ORDER: the cheapest kill signals first: X0 (status, RESCAN, reset), B0, E1 (the exactness control: its hashes are the reference), A1 (the audited attach: every fast path equal to its reference on live data), E2 (the exactness arm: every hash of every
+# test equal to E1's), then the timing pairs T1-T4 (eight live) and T5-T8 (four live), then Z.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS B0 <- X0
+# NEEDS E1 <- X0 B0
+# NEEDS A1 E2 <- E1
+# NEEDS T1 T2 T3 T4 T5 T6 T7 T8 <- A1 E2
+# READ RULES (each also needs c2_smoke_check clean and no stall):
+#   X0  the status prints, the rescan finds every board, the reset completes on all four.   B0  provenance report with no problem line, the image id printed.
+#   E1  admission passed at capacity 262144, every answer completes, c2_smoke_check clean (its round_host rules read the ledger flag alone); RECORD every hash of every test, the position-keyed [PACKED] lines and the load.log (the load maximum).
+#   A1  ONE engaged line naming all six flags, ZERO '[ROUND-HOST-AUDIT] ... equal=0', an equal=1 line for select, merge and keyed, no 'declined' line, the keyed write on at least half of the verifies of a block that can be keyed, SELECT and READ on 95% of the drafting steps,
+#       none of the lines LEAN drops, the ledger on every step (python3 scripts/ci/round_host_report.py summary <log> --live 8, then --live 4). STRICT exactness is E2's read, not A1's: the audit hands the reference's bytes on a difference.
+#   E2  every user's content hash, reasoning hash, completion tokens and finish reason of every test EQUAL to E1's (w2ln_timing_compare.py pair ... --a-smoke --b-smoke), identical accepted prefixes (speed_window_compare.py ... --position-keyed --strict-concurrent-prefixes, exit 0),
+#       the engaged line naming select=1 read=1 keyed=1 lean=1, no declined line. ANY difference or stall is a NO-GO for the lever set.
+#   T1-T4  (eight live) and T5-T8 (four live), paired ABAB per round, control against arm, INSIDE each length's mean-position window (steady below 8,192; 32k 28,672 to 40,960; 128k 106,496 to 139,264; 100 matched rounds a window else VOID; the load rule applied):
+#       python3 scripts/ci/w2ln_timing_compare.py pair <A> <B> --live <8|4> --window <steady|32k|128k> ... and the floor from the two A runs of the block. Then the attribution, python3 scripts/ci/round_host_report.py pair <A> <B> --live <8|4>:
+#       the host time of every phase of the step, B minus A. GO at a length: both pairs measured and negative and the pooled median gain above the A-to-A floor. NO-GO: a pair positive by more than the floor, a text difference, a stall. A VOID pair is no vote.
+#       Estimates (e, from the real logs of the integration image, docs/tp4-round-host.md): about -4.5 ms a round at eight live (157 ms) and about -2.9 ms at four live (81 ms); the readings are theirs to confirm or refute.
+# NO-GO for adopting any lever: any stall, any hash or accepted-prefix difference between E1 and E2, any audit mismatch, any declined line. This window decides nothing about production: it is evidence for the owner. Adoption also needs five consecutive
+# audits-off hang-shape completions on the arm (the shapes of the tp4-hostgap-jobs H1-H5 templates with the arm's profile), because the levers shorten the host gap between traces and the audits-off hang is unexplained and sensitive to timing.
+# Time (estimate): X0 and B0 about 80 min, E1 2 h, A1 1.5 h, E2 2 h, T1-T4 6 h, T5-T8 4.7 h, Z 10 min: about 17 h.
+X0-status-rescan-reset stop tp4-rh-1 20
+B0-build stop tp4-rh-1 60
+E1-exactness-control-smoke stop tp4-rh-1 120
+A1-audited-attach-smoke stop tp4-rh-1 90
+E2-exactness-arm-smoke stop tp4-rh-1 120
+T1-timed8-A-control soft tp4-rh-1 90
+T2-timed8-B-arm soft tp4-rh-1 90
+T3-timed8-A-control soft tp4-rh-1 90
+T4-timed8-B-arm soft tp4-rh-1 90
+T5-timed4-A-control soft tp4-rh-1 70
+T6-timed4-B-arm soft tp4-rh-1 70
+T7-timed4-A-control soft tp4-rh-1 70
+T8-timed4-B-arm soft tp4-rh-1 70
+Z-reset soft tp4-rh-1 10

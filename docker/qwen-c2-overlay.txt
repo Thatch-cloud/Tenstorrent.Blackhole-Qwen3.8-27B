@@ -108,6 +108,11 @@ scripts/ci/serving_packed_step.py
 scripts/ci/verify_prestage.py
 scripts/ci/early_draft.py
 
+# tp4/round-host (QWEN_FAST_TP4_ROUND_HOST_*, default off): the module every touched step file imports (verify_prestage, packed_verifier, serving_packed_step,
+# serving_packed_bridge, serving_worker_hook, early_draft, dflash_packed_proposal, the coordinator, quad_draft_tp). The base has none, so a file of this commit
+# that imports it needs this copy beside it; host only, flag off it is read and nothing happens.
+scripts/ci/round_host.py
+
 # D0, the one-user lane (QWEN_FAST_SOLO_LANE, gate only; the lanes window): serving_runtime builds the one-user block beside M3
 # when the flag is on and serving_packed_step routes a lone slot-0 round to it (both lazy-import serving_solo_lane), over the
 # shape packed_shapes.solo_shape names. Flag off, none of the three is read: this is what each was call for call.

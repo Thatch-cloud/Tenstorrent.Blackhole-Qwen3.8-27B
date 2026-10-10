@@ -203,6 +203,10 @@ class EarlyDraft:
                 self.draft(hook)
         finally:
             self.flush(hook, 'end')
+        # tp4/round-host: the step's ledger line (the drafts are the last of its phases); flags unset, a no-op.
+        import round_host
+
+        round_host.ledger.emit()
         return output
 
     def coordinator_options(self, hook):
@@ -239,6 +243,9 @@ class EarlyDraft:
         self.cache, self.key, self.failure = MISSING, None, None
         self.rounds += 1
         started = time.perf_counter()
+        import round_host
+
+        round_host.ledger.mark('draft0', started)
         self.drafting = True
         try:
             # Under QWEN_FAST_PHASE_LOG the same begin/end lines as the hook's other phases, so the round
@@ -250,6 +257,7 @@ class EarlyDraft:
             return
         finally:
             self.drafting = False
+            round_host.ledger.mark('draft1')
         self.draft_ms = (time.perf_counter() - started) * 1000
         self.cache = result
         self.key = draft_key(hook)

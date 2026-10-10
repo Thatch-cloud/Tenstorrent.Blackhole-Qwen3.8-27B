@@ -108,6 +108,9 @@ jobs:
           for name in verify_prestage.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
+          for name in round_host.py; do
+            cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
+          done
           for name in fused_commit.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done

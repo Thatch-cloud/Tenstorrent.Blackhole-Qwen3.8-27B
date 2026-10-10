@@ -138,7 +138,10 @@ X262K_PROFILES = X262K_TIMED + X262K_AUDITED
 NEXT5_PROFILES = NEXT5_PROFILES + X262K_PROFILES
 # engine reuse (tp4/engine-reuse, test_parked_tp4_profiles holds each as its levern parent plus exactly its flags): the generated gate-only twins
 import make_parked_profiles as parked_twins  # noqa: E402
+import make_round_host_profiles as round_host_twins  # noqa: E402
 PARKED_PROFILES = tuple(name for name, parent, env, why in parked_twins.specs())
+# tp4/round-host (test_tp4_round_host holds each as the Lever N traffic profile plus exactly its flags): exempt wherever the engine-reuse twins are.
+PARKED_PROFILES = PARKED_PROFILES + round_host_twins.twin_names()
 NEXT5_PROFILES = NEXT5_PROFILES + PARKED_PROFILES
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 
