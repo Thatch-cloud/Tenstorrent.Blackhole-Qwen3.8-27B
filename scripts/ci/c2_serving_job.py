@@ -108,6 +108,10 @@ Keys (every one optional but C2_IMAGE_TAG):
   TP4 op profile (docs/tp4-profile.md; C2_GATE_PLAN may name OPS_GATE_PLANS, after every other plan, the twin first):
                       ops-twin, ops-trace - four-card timed profile only (C2_CARDS=quad, QWEN_FAST_TP=4, both verify
                       audits off), attribution only; ops_profile_plan says what each runs and what it writes to ops/
+                      ops-prefill-twin, ops-prefill-trace - the same pair around ONE 131,072-token prompt (the prefill profile:
+                      per-op ms per 2,048-token chunk at every context; the trace arm turns the layer.py profiler-flush hook on).
+                      Either pair or both; each trace needs ITS twin before it. An ops-* job is NEVER cancelled once its gate step
+                      has started (the profiler writes as root); the prefill pair is data, not a gate (the flush hook has not run at TP4)
   C2_GATE_SALT        a cache_salt for every gate stream (sticky sessions, harness item B3; default, rendered
                       empty: none sent, the payload exactly as before): fresh (each stream its own salt, minted
                       under a key the gate mounts, so every request takes the prefix route's capture path and
@@ -189,7 +193,9 @@ LANES_GATE_PLANS = ('lanes-exact', 'round-timing', 'lanes-timing', 'lanes-timing
 # The TP4 op-level device profile (ops_profile_plan; docs/tp4-profile.md): an unprofiled twin, then tracy at op-support
 # 20000 on the four-card timed profile. They profile the device and use a scratch kernel cache, so they run after every
 # judged plan of a job, the twin first (check_ops_order).
-OPS_GATE_PLANS = ('ops-twin', 'ops-trace')
+OPS_GATE_PLANS = ('ops-twin', 'ops-trace', 'ops-prefill-twin', 'ops-prefill-trace')
+# Each profiled ops plan's twin (the text reference): the trace needs its own twin before it in the plan list.
+OPS_TWINS = {'ops-trace': 'ops-twin', 'ops-prefill-trace': 'ops-prefill-twin'}
 ALL_GATE_PLANS = GATE_PLANS + S2_GATE_PLANS + LANES_GATE_PLANS + OPS_GATE_PLANS
 MAX_PAIRS = 4
 BELOW_FAMILY_RANGE = (4096, 16640)   # capacities the pinned (flag-off) mask admits: attention_mask_replay.py:18,26
@@ -568,8 +574,8 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
 
 def check_ops_order(plans):
     """Refuse a plan list that runs an ops plan before a judged one (the profiled arm reserves device DRAM, compiles into
-    a scratch cache and may end as INFRA), that runs ops-trace without ops-twin before it (the twin is the text
-    reference), or that names one twice (one arm directory per ops plan)."""
+    a scratch cache and may end as INFRA), that runs a profiled plan (ops-trace, ops-prefill-trace) without its own twin
+    before it (the twin is the text reference), or that names one twice (one arm directory per ops plan)."""
     seen = None
     for plan in plans:
         if plan in OPS_GATE_PLANS:
@@ -579,8 +585,9 @@ def check_ops_order(plans):
     named = [plan for plan in plans if plan in OPS_GATE_PLANS]
     if len(set(named)) != len(named):
         raise JobError('C2_GATE_PLAN names an ops plan twice: one arm directory per ops plan')
-    if 'ops-trace' in named and named[0] != 'ops-twin':
-        raise JobError('C2_GATE_PLAN: ops-trace needs ops-twin before it (its texts are held against the twin texts)')
+    for trace, twin in sorted(OPS_TWINS.items()):
+        if trace in named and (twin not in named or named.index(twin) > named.index(trace)):
+            raise JobError('C2_GATE_PLAN: %s needs %s before it (its texts are held against the twin texts)' % (trace, twin))
     return plans
 
 

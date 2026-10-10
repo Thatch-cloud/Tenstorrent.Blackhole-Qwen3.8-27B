@@ -38,7 +38,9 @@ name: Qwen C2 serving image
 #            max_tokens=1, ignore_eos, freed slots, against a solo arm); C2_PROFILE picks the profile.
 #            C2_GATE_PLAN ops-twin and ops-trace are the TP4 op-level device profile (docs/tp4-profile.md): after
 #            every other plan, the twin first, on the four-card timed profile (c2-packed-tp4-speed); the CPP report
-#            (compressed) and its analysis are written to gate/ops/ in the artifact.
+#            (compressed) and its analysis are written to gate/ops/ in the artifact. ops-prefill-twin and ops-prefill-trace
+#            are the same pair around one 131,072-token prompt (the prefill profile, docs/tp4-profile.md): their report is
+#            gate/ops/prefill-profile-report.{json,md} beside cpp_device_perf_report.prefill.csv.gz.
 #            C2_GATE_SALT fresh|none salts every stream on a prefix-reuse profile (c2-packed-prefix: the
 #            capture path under the S2 plans; the gate mounts its own salt key).
 #            The driver refuses plans that do not fit the step's and the job's time left; every gate

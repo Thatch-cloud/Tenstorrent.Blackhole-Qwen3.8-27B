@@ -110,3 +110,64 @@ marker, at four users of 4,096 tokens. The analysis (`tp4_profile_report.py`) ch
 - **The result is set against v170 per category** (`vs_v170` in the report; the constants are in `tp4_profile_report.py`).
 - **The compressed CPP report stays in the artifact** (`gate/ops/cpp_device_perf_report.csv.gz`): the prune walks the profile tree only, so
   the kept copy is never pruned whatever its size (a test holds this); per-op core counts come from it.
+
+## Prefill profile: `ops-prefill-twin` and `ops-prefill-trace`
+
+The two profiles above are of the verify (decode). The prefill has its own pair of gate plans, `ops-prefill-twin` and `ops-prefill-trace`
+(`scripts/ci/ops_profile_plan.py`, `C2_GATE_PLAN=ops-prefill-twin,ops-prefill-trace`, after every judged plan, the twin first; a job may name
+this pair, the decode pair, or both pairs in one plan list, each trace after its own twin). They reuse the whole ops machinery: the same
+tracy recipe at op-support 20000 (any other count is refused), the same profile-tree hand-back and disk guard, the same four-card
+timed-profile requirement (`QWEN_FAST_TP=4`, both verify audits off), the same workflow `always()` hand-back step.
+
+| arm | what | why |
+|---|---|---|
+| `ops-prefill-twin` | unprofiled: ONE real-text coding prompt of 131,072 tokens (64 chunks of the model's own 2,048-token outer chunk), 8 tokens out | the text reference and the unperturbed prefill |
+| `ops-prefill-trace` | the same under tracy, with `QWEN_PREFILL_PROFILE_FLUSH=1` | the CPP device report of every prefill op on every chip |
+
+One prompt gives every context: chunk 0 is the short context (no KV before it), chunk 63 the long one (129,024 tokens of KV). The shape is fixed
+in code (`PREFILL_TOKENS`, `MAX_TOKENS_PREFILL`, one user), as the decode shapes are. The profile is the production profile or a twin with
+the same flags: a Lever N prefill step is the model's 2,048-token chunk whatever the scheduler's step is (a solo step of 16,384 tokens runs
+eight of them), so the chunks measured are the chunks served.
+
+**The flush hook.** The device profiler's per-core buffers overflow inside one 2,048-row chunk if they are only read at the end (the
+TP2 prefill ranking lost rows after about scan 22 of a forward). `QWEN_PREFILL_PROFILE_FLUSH=1` (the `layer.py` hook of the image's graft, inert
+when unset) synchronises the mesh and reads the profiler back after every 16th decoder layer, so no more than 16 layers of ops are buffered, and logs
+`[PINDIAG] prefill profile flush` lines (a begin line for chunks 0, 1, 31, 32, 62 and 63, and the first flush). Only the prefill trace arm carries it; the
+decode trace arm never does (`test_ops_profile_plan`). **The hook has never run at TP4 or at op-support 20000**: these two plans are data, not a
+gate. A job that names them runs them soft; the report says when the markers are missing (a note, not a failure) or the rows are incomplete (a
+validity problem the report prints).
+
+**Never cancel an ops-* job once its gate step has started**: the profiler writes as root, a cancelled run leaves root-owned logs and the next
+checkout dies with EACCES. Disk: the guard stops the profiled arm at 4 GB of profile output or 85% disk. A prefill trace of 64 chunks is about 64 x 64 layers
+x tens of ops x four chips of CSV rows; the compressed report is kept as `ops/cpp_device_perf_report.prefill.csv.gz` (the decode arm's is
+`ops/cpp_device_perf_report.csv.gz`, so one job can hold both). Worst case: the twin 105 minutes, the trace 135 minutes (readiness 30 + stream
+60 or 90 + close 15 each); the workflow's gate step is 380 minutes, so name the prefill pair and the decode pair in separate jobs.
+
+### Reading it
+
+    python3 scripts/ci/tp4_prefill_profile_report.py --results <the artifact's gate/ directory>
+
+(or on a bare CSV, `tp4_prefill_profile_report.py cpp_device_perf_report.prefill.csv.gz --server-log ops-prefill-trace/server.log --prompt-tokens 131072`).
+The gate runs it after the profiled arm and writes `ops/prefill-profile-report.{json,md}`. Prefill runs untraced, so the decode replays (rows with a trace
+id) are dropped; per chip the rows are cut into chunks by the SDPA op (16 per chunk, one per attention layer; whole groups counted from the END are the
+prompt, earlier ones are warm-up prefills) and by the two `LayerNormPreAllGather` per layer, which also cut each chunk into 64 layers, each into a mixer
+half and an MLP half. The report has:
+
+* per-op ms per chunk for chunk 0, chunk 1, about 1/4, 1/2, 3/4 and the last chunk (median over chips and maximum over chips);
+* a table of ms per category against the chunk's context: weight matmuls, attention SDPA, GDN conv and GDN scan/other, glue/layout copies
+  (tilize, untilize, typecast, transpose, permute, reshape, slice, concat, copy, pad, reshard), norms, elementwise, collectives and "other" with its
+  top ops listed, so nothing is hidden (a note when the unclassified share is above 10%);
+* attention prefill against context: SDPA ms per chunk fitted to `a + b x context(1k)`, per chunk and per attention layer (`a` the fixed cost of a chunk at
+  context 0, `b` the slope per 1,000 tokens of context);
+* the GDN chunked prefill: conv calls per chunk and per GDN layer (and whether they are constant over the chunks), scan ops and their ms;
+* collectives at the middle chunk: calls per chunk, ms per call, the minimum over the chips (the intrinsic time) and the skew;
+* compute efficiency of the weight matmuls at chunk 0, the middle and the last chunk: achieved TFLOP/s per chip and percent of a stated peak, per weight
+  (GDN and attention in/out projections, gate, up, down). FLOPs are `2 x 2048 x K x N`; (K, N) come from the CSV's input-shape columns when it has them,
+  else from the model geometry divided by four (an assumption, printed). The peak (774 TFLOP/s at LoFi, divided by 1, 2, 3 or 4 for LoFi, HiFi2, HiFi3,
+  HiFi4 from the MATH FIDELITY column, HiFi2 assumed without it) is the vendor sheet's arithmetic, an **ESTIMATE**, and `--peak-tflops` changes it;
+* validity: chips found, chunks found against the prompt's chunk count, the 64/48/16 layer structure, per-chip agreement on every chunk's op count, the
+  flush markers and dropped-marker lines of the server log. The exit status is 1 on a validity problem.
+
+The classification is by op-name substrings, written without ever having seen a TP4 prefill CSV: a name no rule matches lands in "other" and is listed,
+and a structure the splitter cannot find is a validity problem that says what was missing. Kernel-duration sums are attribution, not a critical path and
+not a TTFT claim; the profiled arm's wall time is perturbed. The prefill TTFT and tokens a second come from the solo ladder smoke tests, not from here.

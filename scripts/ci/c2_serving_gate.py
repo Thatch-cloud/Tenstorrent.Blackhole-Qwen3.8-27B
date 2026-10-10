@@ -2954,9 +2954,10 @@ def run_ops_plan(plan, runner, arms):
     report = run_arm(runner, plan, spec, ops=prepared)
     analysis = None
     if profiled and report is not None:
-        twin_dir = os.path.join(runner.results, ops_profile_plan.TWIN)
+        twin_dir = os.path.join(runner.results, ops_profile_plan.PLAN_TWIN.get(plan, ops_profile_plan.TWIN))
         summary = ops_profile_plan.finish_arm(arm_dir, runner.results,
-                                              twin_arm_dir=twin_dir if os.path.isdir(twin_dir) else None, log=runner.log)
+                                              twin_arm_dir=twin_dir if os.path.isdir(twin_dir) else None, log=runner.log,
+                                              plan=plan)
         runner.arms[spec[0]].setdefault('ops', {}).update(summary)
         analysis = summary.get('validity')
     log_path = os.path.join(arm_dir, 'server.log')

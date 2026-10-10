@@ -48,11 +48,11 @@ class PlanTests(unittest.TestCase):
 
     def test_the_plans_are_the_jobs(self):
         self.assertEqual(ops.PLANS, job.OPS_GATE_PLANS)
-        self.assertEqual(ops.PLANS, ('ops-twin', 'ops-trace'))
+        self.assertEqual(ops.PLANS, ('ops-twin', 'ops-trace', 'ops-prefill-twin', 'ops-prefill-trace'))
         self.assertIn('ops-twin', job.ALL_GATE_PLANS)
 
     def test_the_shape_is_fixed_in_code(self):
-        for plan in ops.PLANS:
+        for plan in ('ops-twin', 'ops-trace'):
             arm, = self.arms(plan)
             args = list(arm[1])
             self.assertEqual(args[args.index('--prompt-lengths') + 1], '4096,4096,4096,4096')
@@ -137,6 +137,204 @@ class PlanTests(unittest.TestCase):
     def test_the_arm_limits_cover_readiness_stream_and_close(self):
         self.assertEqual(ops.ARM_SECONDS['ops-twin'], 1800 + 1800 + 300)
         self.assertEqual(ops.ARM_SECONDS['ops-trace'], 1800 + 3600 + 900)
+
+
+PREFILL_PROFILES = ('c2-packed-tp4-speed', 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic')
+
+
+class PrefillPlanTests(unittest.TestCase):
+    """The prefill pair (ops-prefill-twin, ops-prefill-trace): one user, one 131,072-token prompt, the flush hook on the profiled arm alone."""
+
+    def arms(self, plan, profile=PROFILE, profiles=None):
+        return ops.plan_arms(plan, profile, profiles or CHECKOUT_PROFILES, driver)
+
+    def test_the_shape_is_fixed_in_code_and_is_one_long_prompt(self):
+        for plan in ops.PREFILL_PLANS:
+            for profile in PREFILL_PROFILES:
+                with self.subTest(plan=plan, profile=profile):
+                    arm, = self.arms(plan, profile)
+                    args = list(arm[1])
+                    self.assertEqual(args[args.index('--users') + 1], '1')
+                    self.assertEqual(args[args.index('--prompt-lengths') + 1], '131072')
+                    self.assertEqual(args[args.index('--max-tokens') + 1], '8')
+                    self.assertEqual(args[args.index('--user-ignore-eos') + 1], '0')
+                    self.assertNotIn('--user-max-tokens', args)
+                    self.assertEqual(args[args.index('--prompt-source') + 1], 'real-text')
+                    self.assertFalse(arm.judged)
+                    self.assertFalse(driver.arm_runs(plan, arm) - 1)
+                    self.assertEqual(arm.extra['ops']['users'], 1)
+                    self.assertEqual(arm.extra['ops']['shape'], 'prefill')
+        self.assertEqual((ops.PREFILL_TOKENS, ops.MAX_TOKENS_PREFILL, ops.PREFILL_USERS), (131072, 8, 1))
+        self.assertEqual(ops.PREFILL_TOKENS // ops.PREFILL_CHUNK, 64)
+
+    def test_the_decode_plans_are_untouched_by_the_prefill_shape(self):
+        for plan in ('ops-twin', 'ops-trace'):
+            arm, = self.arms(plan)
+            self.assertNotIn('shape', arm.extra['ops'])
+            self.assertNotIn('users', arm.extra['ops'])          # four seats: no users key, as before
+
+    def test_the_flush_hook_is_on_the_prefill_trace_arm_alone(self):
+        twin, = self.arms('ops-prefill-twin')
+        trace, = self.arms('ops-prefill-trace')
+        decode, = self.arms('ops-trace')
+        self.assertEqual(twin.extra['ops']['env'], ())
+        self.assertIsNone(twin.extra['ops']['tracy'])
+        env = dict(trace.extra['ops']['env'])
+        self.assertEqual(env['QWEN_PREFILL_PROFILE_FLUSH'], '1')
+        for name, value in ops.PROFILER_ENV:
+            self.assertEqual(env[name], value)
+        self.assertNotIn('QWEN_PREFILL_PROFILE_FLUSH', dict(decode.extra['ops']['env']))
+        self.assertEqual(trace.extra['ops']['tracy'], ops.tracy_args())
+        self.assertEqual(trace.extra['ops']['tracy'][trace.extra['ops']['tracy'].index('--op-support-count') + 1], '20000')
+
+    def test_the_flush_switch_is_checked_like_the_rest(self):
+        self.assertEqual(ops.check_env((('QWEN_PREFILL_PROFILE_FLUSH', '1'),)), (('QWEN_PREFILL_PROFILE_FLUSH', '1'),))
+        with self.assertRaises(ops.OpsPlanError):
+            ops.check_env((('QWEN_PREFILL_PROFILE_FLUSH', '0'),))
+        with self.assertRaises(ops.OpsPlanError):
+            ops.check_env((('QWEN_FAST_EXTENT_AUDIT', '1'),))
+        self.assertEqual(ops.arm_env('twin', 'ops-prefill-twin'), ())
+        self.assertEqual(ops.arm_env('ops'), ops.PROFILER_ENV)
+        self.assertEqual(ops.arm_env('ops', 'ops-trace'), ops.PROFILER_ENV)
+
+    def test_a_served_profile_that_carries_the_flush_switch_is_refused(self):
+        profiles = copy.deepcopy(CHECKOUT_PROFILES)
+        profiles['profiles']['general']['env']['QWEN_PREFILL_PROFILE_FLUSH'] = '1'
+        with self.assertRaisesRegex(driver.PlanError, 'never runs the profiler'):
+            self.arms('ops-prefill-trace', profiles=profiles)
+
+    def test_the_twin_of_each_profiled_plan(self):
+        self.assertEqual(ops.PLAN_TWIN, {'ops-trace': 'ops-twin', 'ops-prefill-trace': 'ops-prefill-twin'})
+        with tempfile.TemporaryDirectory() as results:
+            for arm in ('ops-twin', 'ops-prefill-twin'):
+                os.makedirs(os.path.join(results, arm))
+            with open(os.path.join(results, 'ops-prefill-twin', 'm3native-gate.json'), 'w') as handle:
+                json.dump({'who': 'prefill twin'}, handle)
+            self.assertEqual(ops.twin_report_of(results, 'ops-prefill-trace'), {'who': 'prefill twin'})
+            self.assertIsNone(ops.twin_report_of(results, 'ops-trace'))                  # the decode twin wrote nothing
+            self.assertIsNone(ops.twin_report_of(results, 'ops-prefill-twin'))
+
+    def test_the_prompt_must_fit_the_profile_and_the_other_gates_refusals_apply(self):
+        profiles = copy.deepcopy(CHECKOUT_PROFILES)
+        profiles['profiles'][PROFILE]['max_prompt_tokens'] = 65536
+        with self.assertRaisesRegex(driver.PlanError, 'exceed'):
+            self.arms('ops-prefill-twin', profiles=profiles)
+        with self.assertRaisesRegex(driver.PlanError, 'QWEN_FAST_VERIFY_T1_AUDIT'):
+            self.arms('ops-prefill-trace', profile='c2-packed-tp4-gate')
+        with self.assertRaisesRegex(driver.PlanError, 'QWEN_FAST_TP'):
+            self.arms('ops-prefill-trace', profile='c2-packed')
+
+    def test_the_arm_limits(self):
+        self.assertEqual(ops.ARM_SECONDS['ops-prefill-twin'], 1800 + 3600 + 900)
+        self.assertEqual(ops.ARM_SECONDS['ops-prefill-trace'], 1800 + 5400 + 900)
+        self.assertEqual(ops.ARM_SECONDS['ops-twin'], 1800 + 1800 + 300)         # unchanged
+
+    def test_the_trace_argv_has_tracy_the_mount_and_the_flush_switch(self):
+        arm, = self.arms('ops-prefill-trace')
+        prepared = ops.planned('/r/ops-prefill-trace', arm.extra['ops'])
+        argv = driver.gate_run('img', 'qwen-c2-gate-ops-prefill-trace', PROFILE, CARDS, '/checkout', '/r/ops-prefill-trace', list(arm[1]),
+                               ops=prepared, gate_only=True)
+        entry = argv.index('python3')
+        self.assertEqual(argv[entry + 1:entry + 5], ['img', '-B', '-m', 'tracy'])
+        self.assertIn('QWEN_PREFILL_PROFILE_FLUSH=1', argv)
+        self.assertEqual(argv[argv.index('--op-support-count') + 1], '20000')
+        self.assertIn('type=bind,src=%s,dst=%s' % (os.path.join('/r/ops-prefill-trace', ops.PROFILE_SUBDIR), ops.PROFILE_DIR), argv)
+        twin, = self.arms('ops-prefill-twin')
+        plain = driver.gate_run('img', 'qwen-c2-gate-ops-prefill-twin', PROFILE, CARDS, '/checkout', '/r/ops-prefill-twin', list(twin[1]),
+                                ops=ops.planned('/r/ops-prefill-twin', twin.extra['ops']), gate_only=True)
+        self.assertNotIn('tracy', plain)
+        self.assertFalse([a for a in plain if a.startswith(('TT_METAL_', 'TTNN_OP_PROFILER', 'QWEN_PREFILL_PROFILE', 'QWEN_FAST_PROFILE'))])
+        self.assertTrue((driver.CONTAINER_PREFIX + 'ops-prefill-trace').startswith('qwen-c2-gate-ops-'))      # the workflow's hand-back greps this
+
+    def test_the_artifact_names(self):
+        self.assertEqual(ops.artifact_names(None), (ops.CSV_GZ, ops.REPORT_JSON, ops.REPORT_MD))
+        self.assertEqual(ops.artifact_names('ops-trace'), (ops.CSV_GZ, ops.REPORT_JSON, ops.REPORT_MD))
+        self.assertEqual(ops.artifact_names('ops-prefill-trace'),
+                         ('cpp_device_perf_report.prefill.csv.gz', 'prefill-profile-report.json', 'prefill-profile-report.md'))
+
+
+class PrefillJobTests(unittest.TestCase):
+    PROFILES = CHECKOUT_PROFILES['profiles']
+
+    def read(self, plan):
+        base = {'C2_ACTIONS': 'status reset gate', 'C2_IMAGE_TAG': 'tp4-prefill-1', 'C2_CARDS': 'quad', 'C2_PROFILE': PROFILE, 'C2_GATE_PLAN': plan,
+                'C2_GATE_JIT': 'record'}
+        return job.read_job(base, self.PROFILES)
+
+    def test_either_pair_or_both_in_any_pair_order(self):
+        for plan in ('ops-prefill-twin', 'ops-prefill-twin,ops-prefill-trace', 'ops-twin,ops-trace,ops-prefill-twin,ops-prefill-trace',
+                     'ops-prefill-twin,ops-prefill-trace,ops-twin,ops-trace', 'ops-twin,ops-prefill-twin,ops-trace,ops-prefill-trace'):
+            with self.subTest(plan=plan):
+                self.assertEqual(self.read(plan)['gate_plan'], plan)
+
+    def test_a_trace_needs_its_own_twin_before_it(self):
+        for plan in ('ops-prefill-trace', 'ops-prefill-trace,ops-prefill-twin', 'ops-twin,ops-prefill-trace', 'ops-prefill-twin,ops-trace'):
+            with self.subTest(plan=plan):
+                with self.assertRaisesRegex(job.JobError, 'needs ops-(prefill-)?twin before it'):
+                    self.read(plan)
+
+    def test_still_after_every_judged_plan_and_never_twice(self):
+        with self.assertRaisesRegex(job.JobError, 'after every judged plan'):
+            self.read('ops-prefill-twin,matrix')
+        with self.assertRaisesRegex(job.JobError, 'twice'):
+            self.read('ops-prefill-twin,ops-prefill-twin')
+        self.assertIn('ops-prefill-trace', job.ALL_GATE_PLANS)
+
+
+class PrefillVerdictTests(unittest.TestCase):
+    CONFIG = dict(CONFIGURATION, QWEN_PREFILL_PROFILE_FLUSH='1')
+
+    def arm(self, **fields):
+        return dict(exit=0, ops=dict(kind='ops', **fields),
+                    ops_env=[list(pair) for pair in ops.PROFILER_ENV + (('QWEN_PREFILL_PROFILE_FLUSH', '1'),)])
+
+    def one(self, text='alpha', configuration=None):
+        return report(texts=[text], configuration=configuration or dict(self.CONFIG), users=1)
+
+    def log(self, flushes=9):
+        return (ops.FLUSH_MARKER + ': prompt 1 chunk 0 begin rows=2048\n') * flushes
+
+    def test_the_twin_passes_with_one_text(self):
+        result = ops.verdict('ops-prefill-twin', self.one(), dict(exit=0, ops=dict(kind='twin')), None, log_text='', users=1)
+        self.assertEqual(result['verdict'], 'PASS')
+        self.assertEqual(len(result['texts']), 1)
+
+    def test_the_trace_passes_with_the_twin_text_and_the_flush_markers(self):
+        result = ops.verdict('ops-prefill-trace', self.one(), self.arm(), self.one(), log_text=self.log(), users=1)
+        self.assertEqual((result['verdict'], result['reason']), ('PASS', None))
+        self.assertFalse([line for line in result['lines'] if 'flush' in line])
+
+    def test_no_flush_marker_is_a_note_and_the_plan_still_passes(self):
+        result = ops.verdict('ops-prefill-trace', self.one(), self.arm(), self.one(), log_text='nothing\n', users=1)
+        self.assertEqual(result['verdict'], 'PASS')
+        self.assertTrue(any('prefill flush marker lines' in line and 'did not run' in line for line in result['lines']))
+
+    def test_a_decode_trace_does_not_ask_for_flush_markers_and_a_prefill_trace_not_for_readbacks(self):
+        decode = ops.verdict('ops-trace', report(), dict(exit=0, ops=dict(kind='ops'), ops_env=[list(p) for p in ops.PROFILER_ENV]), report(), log_text=self.log(0))
+        self.assertTrue(any('read-back lines' in line for line in decode['lines']))
+        self.assertFalse(any('flush marker' in line for line in decode['lines']))
+        prefill = ops.verdict('ops-prefill-trace', self.one(), self.arm(), self.one(), log_text=self.log(), users=1)
+        self.assertFalse(any('read-back lines' in line for line in prefill['lines']))
+
+    def test_a_text_that_differs_names_the_prefill_twin(self):
+        result = ops.verdict('ops-prefill-trace', self.one('beta'), self.arm(), self.one('alpha'), log_text=self.log(), users=1)
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertIn('texts differ from ops-prefill-twin', result['reason'])
+
+    def test_no_prefill_twin_is_not_exercised_and_the_flush_switch_must_arrive(self):
+        result = ops.verdict('ops-prefill-trace', self.one(), self.arm(), None, log_text=self.log(), users=1)
+        self.assertEqual(result['verdict'], 'NOT_EXERCISED')
+        self.assertIn('ops-prefill-twin', result['reason'])
+        missing = dict(self.CONFIG)
+        del missing['QWEN_PREFILL_PROFILE_FLUSH']
+        result = ops.verdict('ops-prefill-trace', self.one(configuration=missing), self.arm(), self.one(), log_text=self.log(), users=1)
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertIn('QWEN_PREFILL_PROFILE_FLUSH=1 never reached the container', result['reason'])
+
+    def test_two_streams_where_one_was_asked_fail(self):
+        result = ops.verdict('ops-prefill-twin', report(texts=['a', 'b']), dict(exit=0, ops=dict(kind='twin')), None, log_text='', users=1)
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertIn('2 streams, asked 1', result['reason'])
 
 
 class DockerShapeTests(unittest.TestCase):
@@ -564,6 +762,162 @@ class EndToEndTests(unittest.TestCase):
             self.assertIn('tracy', arms[1]['docker'])
             self.assertNotIn('tracy', arms[0]['docker'])
             self.assertFalse(os.path.exists(os.path.join(results, 'ops-trace', ops.PROFILE_SUBDIR)))
+
+
+class PrefillAroundTheArmTests(unittest.TestCase):
+    def test_finish_arm_keeps_the_prefill_names_and_runs_the_prefill_analysis(self):
+        from test_tp4_prefill_profile_report import Synthetic
+
+        with tempfile.TemporaryDirectory() as results:
+            arm = os.path.join(results, 'ops-prefill-trace')
+            logs = os.path.join(arm, ops.PROFILE_SUBDIR, '.logs')
+            os.makedirs(logs)
+            Synthetic(chunks=4, warmup=1).write(logs, ops.CSV_NAME)
+            with open(os.path.join(arm, 'm3native-gate.json'), 'w') as handle:
+                json.dump({'streams': [{'prompt_tokens': 4 * 2048}]}, handle)
+            lines = []
+            summary = ops.finish_arm(arm, results, twin_arm_dir=os.path.join(results, 'ops-prefill-twin'), log=lines.append, plan='ops-prefill-trace')
+            self.assertEqual(summary['report'], 'ops/prefill-profile-report.json')
+            self.assertTrue(summary['validity']['ok'], summary)
+            out = os.path.join(results, ops.OPS_SUBDIR)
+            self.assertEqual(sorted(os.listdir(out)), sorted([ops.PREFILL_CSV_GZ, ops.PREFILL_REPORT_JSON, ops.PREFILL_REPORT_MD, ops.PRUNED]))
+            self.assertTrue(any('ops-prefill-trace' in line and 'TP4 prefill op profile' in line for line in lines))
+
+    def test_finish_arm_without_a_plan_is_the_decode_arm_exactly(self):
+        class Analyse(object):
+            @staticmethod
+            def analyse_files(csv_path, **kwargs):
+                Analyse.seen = csv_path
+                return dict(validity=dict(ok=True, problems=[]))
+
+            @staticmethod
+            def render_markdown(data):
+                return '# report\n'
+
+        with tempfile.TemporaryDirectory() as results:
+            arm = os.path.join(results, 'ops-trace')
+            logs = os.path.join(arm, ops.PROFILE_SUBDIR, '.logs')
+            os.makedirs(logs)
+            with open(os.path.join(logs, ops.CSV_NAME), 'w') as handle:
+                handle.write('a,b\n1,2\n')
+            summary = ops.finish_arm(arm, results, log=lambda t: None, analyse=Analyse)
+            self.assertEqual(summary['report'], 'ops/tp4-profile-report.json')
+            self.assertEqual(Analyse.seen, os.path.join(results, ops.OPS_SUBDIR, ops.CSV_GZ))
+
+    def test_the_handback_keeps_each_profiled_arms_report_under_its_own_name(self):
+        with tempfile.TemporaryDirectory() as results:
+            for arm in ('ops-trace', 'ops-prefill-trace'):
+                logs = os.path.join(results, arm, ops.PROFILE_SUBDIR, '.logs')
+                os.makedirs(logs)
+                with open(os.path.join(logs, ops.CSV_NAME), 'w') as handle:
+                    handle.write('a,b\n' + arm + '\n')
+            ops.handback_results(results, 'img', handback=lambda image, path: None, log=lambda text: None)
+            out = os.path.join(results, ops.OPS_SUBDIR)
+            self.assertEqual(sorted(os.listdir(out)), sorted([ops.CSV_GZ, ops.PREFILL_CSV_GZ]))
+            for name, arm in ((ops.CSV_GZ, 'ops-trace'), (ops.PREFILL_CSV_GZ, 'ops-prefill-trace')):
+                with gzip.open(os.path.join(out, name), 'rt') as handle:
+                    self.assertIn(arm, handle.read())
+
+
+class PrefillEndToEndTests(unittest.TestCase):
+    """The gate driver over the prefill pair (and over both pairs) with a fake docker, as the job runs them."""
+    CHUNKS = 4
+
+    def drive(self, plan, trace_text='alpha', write=True):
+        from test_tp4_prefill_profile_report import Synthetic
+
+        def one(text):
+            data = report(texts=[text], users=1, configuration=dict(CONFIGURATION, QWEN_PREFILL_PROFILE_FLUSH='1'))
+            data['streams'][0]['prompt_tokens'] = self.CHUNKS * 2048
+            return data
+
+        def decode(text):
+            return report(texts=[text] * 4)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, 'profiles.json')
+            with open(path, 'w', encoding='utf-8') as handle:
+                json.dump(CHECKOUT_PROFILES, handle)
+            results = os.path.join(directory, 'results')
+            reports = {'ops-prefill-twin': lambda n: one('alpha'), 'ops-prefill-trace': lambda n: one(trace_text),
+                       'ops-twin': lambda n: decode('alpha'), 'ops-trace': lambda n: decode('alpha')}
+            flush = (ops.FLUSH_MARKER + ': prompt 1 chunk 0 begin\n') * 8
+            fake = FakeDocker(reports, {'ops-prefill-twin': 'x\n', 'ops-prefill-trace': flush,
+                                        'ops-twin': 'x\n', 'ops-trace': ops.READBACK_MARKER * 1 + '\n'})
+
+            def execute(arguments, stdout_path, timeout, name):
+                code = fake(arguments, stdout_path, timeout, name)
+                arm_dir = os.path.dirname(stdout_path)
+                if write and name.endswith('ops-prefill-trace'):
+                    logs = os.path.join(arm_dir, ops.PROFILE_SUBDIR, '.logs')
+                    os.makedirs(logs, exist_ok=True)
+                    Synthetic(chunks=self.CHUNKS, warmup=1).write(logs, ops.CSV_NAME)
+                elif write and name.endswith('ops-trace'):
+                    logs = os.path.join(arm_dir, ops.PROFILE_SUBDIR, '.logs')
+                    os.makedirs(logs, exist_ok=True)
+                    synthetic.build(sessions=('1', '2', '3')).write(logs, ops.CSV_NAME)
+                return code
+
+            lines = []
+            code = driver.main(['--image', 'zot/img:c2', '--results', results, '--profiles', path, '--profile', PROFILE, '--plan', plan, '--cards', 'quad',
+                                '--jit', 'record'], execute=execute, devices=CARDS, log=lines.append, containers=lambda: [],
+                               corpus=lambda: dict(V235['real_text']['corpus']))
+            with open(os.path.join(results, 'c2-gate-summary.json'), encoding='utf-8') as handle:
+                summary = json.load(handle)
+            ops_dir = sorted(os.listdir(os.path.join(results, 'ops'))) if os.path.isdir(os.path.join(results, 'ops')) else []
+            with open(os.path.join(results, 'ops-prefill-trace', 'docker-run.json'), encoding='utf-8') as handle:
+                argv = json.load(handle) if os.path.exists(os.path.join(results, 'ops-prefill-trace', 'docker-run.json')) else []
+        return code, summary, lines, ops_dir, fake.calls, argv
+
+    def test_both_prefill_arms_pass_and_the_artifact_holds_the_prefill_report(self):
+        code, summary, lines, ops_dir, calls, argv = self.drive('ops-prefill-twin,ops-prefill-trace')
+        self.assertEqual(code, 0, lines)
+        self.assertEqual([c['arm'] for c in calls], ['ops-prefill-twin', 'ops-prefill-trace'])
+        self.assertEqual(summary['results']['ops-prefill-twin']['verdict'], 'PASS')
+        self.assertEqual(summary['results']['ops-prefill-trace']['verdict'], 'PASS')
+        self.assertEqual(sorted(ops_dir), sorted([ops.PREFILL_CSV_GZ, ops.PREFILL_REPORT_JSON, ops.PREFILL_REPORT_MD, ops.PRUNED]))
+        self.assertIn('tracy', argv)
+        self.assertIn('QWEN_PREFILL_PROFILE_FLUSH=1', argv)
+        self.assertEqual(summary['arms']['ops-prefill-twin']['ops'], dict(kind='twin', disk_guard=None, handback=None))
+        self.assertTrue(summary['arms']['ops-prefill-trace']['ops']['validity']['ok'])
+        self.assertEqual(summary['arms']['ops-prefill-trace']['ops']['report'], 'ops/prefill-profile-report.json')
+        self.assertLess(summary['worst_case_seconds'], 5 * 3600)
+
+    def test_a_trace_text_that_differs_fails_the_prefill_trace_only(self):
+        code, summary, lines, *_ = self.drive('ops-prefill-twin,ops-prefill-trace', trace_text='beta')
+        self.assertEqual(code, 1)
+        self.assertEqual(summary['results']['ops-prefill-trace']['verdict'], 'FAIL')
+        self.assertEqual(summary['results']['ops-prefill-twin']['verdict'], 'PASS')
+
+    def test_a_run_with_no_report_from_tracy_still_passes_and_says_so(self):
+        code, summary, lines, ops_dir, *_ = self.drive('ops-prefill-twin,ops-prefill-trace', write=False)
+        self.assertEqual(code, 0, lines)
+        self.assertIn('no cpp_device_perf_report.csv', summary['arms']['ops-prefill-trace']['ops']['problem'])
+
+    def test_both_pairs_in_one_job_keep_both_reports(self):
+        code, summary, lines, ops_dir, calls, _ = self.drive('ops-twin,ops-trace,ops-prefill-twin,ops-prefill-trace')
+        self.assertEqual(code, 0, lines)
+        self.assertEqual([c['arm'] for c in calls], ['ops-twin', 'ops-trace', 'ops-prefill-twin', 'ops-prefill-trace'])
+        self.assertEqual(sorted(ops_dir), sorted([ops.CSV_GZ, ops.REPORT_JSON, ops.REPORT_MD, ops.PREFILL_CSV_GZ, ops.PREFILL_REPORT_JSON,
+                                                  ops.PREFILL_REPORT_MD, ops.PRUNED]))
+        for plan in ops.PLANS:
+            self.assertEqual(summary['results'][plan]['verdict'], 'PASS', plan)
+
+    def test_dry_run_lists_the_prefill_arms(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, 'profiles.json')
+            with open(path, 'w', encoding='utf-8') as handle:
+                json.dump(CHECKOUT_PROFILES, handle)
+            lines = []
+            results = os.path.join(directory, 'r')
+            code = driver.main(['--image', 'zot/img:c2', '--results', results, '--profiles', path, '--profile', PROFILE,
+                                '--plan', 'ops-prefill-twin,ops-prefill-trace', '--cards', 'quad', '--dry-run'], log=lines.append)
+            self.assertEqual(code, 0, lines)
+            arms = [json.loads(line) for line in lines[1:]]
+            self.assertEqual([a['arm'] for a in arms], ['ops-prefill-twin', 'ops-prefill-trace'])
+            self.assertIn('tracy', arms[1]['docker'])
+            self.assertNotIn('tracy', arms[0]['docker'])
+            self.assertFalse(os.path.exists(os.path.join(results, 'ops-prefill-trace', ops.PROFILE_SUBDIR)))
 
 
 if __name__ == '__main__':

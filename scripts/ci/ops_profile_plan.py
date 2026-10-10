@@ -22,6 +22,17 @@ PLANS, one arm each, run after every judged plan of the job (c2_serving_job refu
 One container per arm yields 4-live rounds, then 3- and 2-live padded rounds as users 1-3 finish, then user 0 alone on the
 1/2/4-row sequential engines (a lone user has no 16-row step on this profile: tp4_profile_report composes it).
 
+PREFILL PLANS (docs/tp4-profile.md, 'Prefill profile'): ops-prefill-twin and ops-prefill-trace, the same pair around ONE user and ONE
+real-text coding prompt of PREFILL_TOKENS = 131,072 tokens (64 prefill chunks of 2,048: chunk 0 is the short context, chunk 63 the
+long one, so one prompt gives every context) and an 8-token answer. The twin is unprofiled (the text reference and the unperturbed
+prefill wall time); the trace arm adds QWEN_PREFILL_PROFILE_FLUSH=1 to the profiler environment (the layer.py hook in the image's
+graft drains the device profiler every 16 decoder layers, so no chunk overflows the per-core buffers) and its CPP report is
+analysed by tp4_prefill_profile_report (per-op ms per chunk, matmul efficiency, attention against context, the GDN chunked
+prefill, glue copies, collectives) into prefill-profile-report.{json,md} beside the compressed report. op-support stays 20000.
+The flush hook has NEVER run at TP4 or at op-support 20000: these two plans are DATA, not a gate (a job that names them runs them
+soft). NEVER cancel an ops-* job once its gate step has started: the profiler writes as root and a cancelled run leaves root-owned
+logs (the next checkout dies with EACCES); the workflow's always() hand-back step covers the prefill arm too.
+
 Verdicts: PASS, FAIL (a harness failure, a stream without text, garbage, or ops-trace texts differing from ops-twin's -
 a difference is reported as a FAIL to look at: profiling shifts scheduling, and the exactness divergence at 32k and above is unresolved), NOT_EXERCISED (the disk guard stopped the arm, or no twin to
 compare with), INFRA (the gate's own). A report that finds too few complete sessions says so in the plan's lines and
@@ -46,7 +57,12 @@ import c2_serving_job
 PLANS = c2_serving_job.OPS_GATE_PLANS
 TWIN = 'ops-twin'
 TRACE = 'ops-trace'
-PLAN_KINDS = {TWIN: 'twin', TRACE: 'ops'}
+PREFILL_TWIN = 'ops-prefill-twin'
+PREFILL_TRACE = 'ops-prefill-trace'
+PREFILL_PLANS = (PREFILL_TWIN, PREFILL_TRACE)
+PLAN_KINDS = {TWIN: 'twin', TRACE: 'ops', PREFILL_TWIN: 'twin', PREFILL_TRACE: 'ops'}
+# Each profiled plan's twin (the text reference and the perturbation reference): its arm directory is the twin plan's name.
+PLAN_TWIN = {TRACE: TWIN, PREFILL_TRACE: PREFILL_TWIN}
 # The shapes are fixed here, not in the job file, so a job cannot drift from what the analysis expects.
 USERS = 4
 LENGTHS = (4096, 4096, 4096, 4096)     # the production shape (4 x 4k coding); v170 had 4k / 8k / 16k / 24k
@@ -55,11 +71,20 @@ USER_MAX_TOKENS = ((0, 256),)
 # An eight-seat profile (engine max-num-seqs 8: two 64-row blocks) is profiled with eight of the same 4k users: the shape per user is unchanged,
 # only the count follows the seats (tp4/262k8). Every four-seat profile keeps the four users it always had, byte for byte.
 SEAT_USERS = 8
+# The prefill plans' shape: one user, one prompt, a short answer (fixed here for the same reason: the analysis expects it).
+PREFILL_USERS = 1
+PREFILL_TOKENS = 131072
+MAX_TOKENS_PREFILL = 8
+PREFILL_CHUNK = 2048
+FLUSH_FLAG = 'QWEN_PREFILL_PROFILE_FLUSH'
+FLUSH_MARKER = '[PINDIAG] prefill profile flush'
+# The hook logs one line per chosen chunk's begin (chunks 0, 1, 31, 32, 62, 63) and one for its first flush.
+MIN_FLUSH_MARKERS = 7
 # Docker limits (seconds): readiness (a profiled arm compiles every profiler-define kernel cold into its tmpfs) plus the
 # stream timeout plus the close (the last read-back, tracy's post-process).
 READINESS_SECONDS = 1800
-STREAM_SECONDS = {TWIN: 1800, TRACE: 3600}
-CLOSE_SECONDS = {TWIN: 300, TRACE: 900}
+STREAM_SECONDS = {TWIN: 1800, TRACE: 3600, PREFILL_TWIN: 3600, PREFILL_TRACE: 5400}
+CLOSE_SECONDS = {TWIN: 300, TRACE: 900, PREFILL_TWIN: 900, PREFILL_TRACE: 900}
 ARM_SECONDS = dict((plan, READINESS_SECONDS + STREAM_SECONDS[plan] + CLOSE_SECONDS[plan]) for plan in PLANS)
 OP_SUPPORT = 20000
 OP_SUPPORT_LIMIT = 20000
@@ -74,6 +99,8 @@ PROFILER_ENV = (('TT_METAL_DEVICE_PROFILER', '1'), ('TT_METAL_PROFILER_TRACE_TRA
                 ('QWEN_FAST_PROFILED_BLOCK_STREAM', '1'), ('TT_METAL_CACHE', SCRATCH_CACHE),
                 (DUMP_FLAG, str(DUMP_EVERY)))
 ARM_ENV_NAMES = frozenset(name for name, _ in PROFILER_ENV)
+# The prefill trace arm alone adds the flush hook's switch (arm_env); a decode plan's environment never carries it.
+PREFILL_ONLY_ENV = (FLUSH_FLAG,)
 # What the harness's qwen_configuration records (QWEN*_ and TT_ names): the rest cannot be shown to arrive.
 CONFIGURATION_PREFIX = re.compile(r'(?:QWEN[0-9]*_|TT_)')
 PATH_ENV = frozenset(['TT_METAL_PROFILER_DIR', 'TT_METAL_CACHE'])
@@ -93,9 +120,13 @@ CSV_NAME = 'cpp_device_perf_report.csv'
 CSV_GZ = CSV_NAME + '.gz'
 REPORT_JSON = 'tp4-profile-report.json'
 REPORT_MD = 'tp4-profile-report.md'
+# The prefill trace arm keeps its own copy and report beside the decode arm's (a job may name both pairs).
+PREFILL_CSV_GZ = 'cpp_device_perf_report.prefill.csv.gz'
+PREFILL_REPORT_JSON = 'prefill-profile-report.json'
+PREFILL_REPORT_MD = 'prefill-profile-report.md'
 PRUNED = 'ops-pruned.json'
 # What no served profile may carry: every profiler variable.
-PROFILE_REFUSED = re.compile(r'(?:TT_METAL_DEVICE_PROFILER|TT_METAL_PROFILE|TT_METAL_PROFILER_|TTNN_OP_PROFILER|QWEN_FAST_PROFILE_)')
+PROFILE_REFUSED = re.compile(r'(?:TT_METAL_DEVICE_PROFILER|TT_METAL_PROFILE|TT_METAL_PROFILER_|TTNN_OP_PROFILER|QWEN_FAST_PROFILE_|QWEN_PREFILL_PROFILE_)')
 REFUSED_TRACY = ('--device-trace-profiler', '--profile-dispatch-cores', '--enable-sum-profiling',
                  '--profiler-capture-perf-counters')
 
@@ -134,16 +165,23 @@ def check_tracy(args):
     return args
 
 
-def arm_env(kind):
-    return () if kind == 'twin' else PROFILER_ENV
+def arm_env(kind, plan=None):
+    """The arm's added environment: none for a twin; the profiler's for a profiled arm, and for the prefill trace arm alone also the
+    flush hook's switch."""
+    if kind == 'twin':
+        return ()
+    return PROFILER_ENV + (((FLUSH_FLAG, '1'),) if plan == PREFILL_TRACE else ())
 
 
 def check_env(env):
+    allowed = ARM_ENV_NAMES | frozenset(PREFILL_ONLY_ENV)
     for name, value in env:
-        if name not in ARM_ENV_NAMES:
-            raise OpsPlanError('%s is not an environment an ops arm may add (%s)' % (name, ', '.join(sorted(ARM_ENV_NAMES))))
+        if name not in allowed:
+            raise OpsPlanError('%s is not an environment an ops arm may add (%s)' % (name, ', '.join(sorted(allowed))))
         if name == DUMP_FLAG and not (value.isdigit() and int(value) >= 1):
             raise OpsPlanError('%s must be a positive replay count, got %r' % (DUMP_FLAG, value))
+        if name == FLUSH_FLAG and value != '1':
+            raise OpsPlanError('%s must be 1 (the hook is on or absent), got %r' % (FLUSH_FLAG, value))
     return env
 
 
@@ -180,14 +218,24 @@ def plan_arms(plan, profile, profiles, gate):
             raise OpsPlanError('%s: profile %s is not in the image' % (plan, profile))
         check_timed_profile(profiles, profile)
         kind = PLAN_KINDS[plan]
-        ops = dict(plan=plan, kind=kind, env=check_env(arm_env(kind)), tracy=tracy_args() if kind == 'ops' else None)
+        ops = dict(plan=plan, kind=kind, env=check_env(arm_env(kind, plan)), tracy=tracy_args() if kind == 'ops' else None)
     except OpsPlanError as error:
         raise gate.PlanError(str(error))
+    context, ceiling, room = gate.profile_limits(profiles, profile)
+    if plan in PREFILL_PLANS:
+        # One user, one 131,072-token prompt, an 8-token answer: every chunk of the prefill under one profile (chunk 0 short, chunk 63 long).
+        ops['users'] = PREFILL_USERS
+        ops['shape'] = 'prefill'
+        gate.check_lengths(profile, [PREFILL_TOKENS], room, '%s prompt lengths' % plan)
+        gate.check_budget(profile, MAX_TOKENS_PREFILL, ceiling, '%s --max-tokens' % plan)
+        args = gate.common_args(profile, context, STREAM_SECONDS[plan], readiness=READINESS_SECONDS) + [
+            '--users', str(PREFILL_USERS), '--prompt-lengths', str(PREFILL_TOKENS),
+            '--max-tokens', str(MAX_TOKENS_PREFILL), '--user-ignore-eos', '0', '--stagger', str(gate.STAGGER)]
+        return [gate.Arm(plan, args, ARM_SECONDS[plan], rerun=False, judged=False, role='ops', ops=ops)]
     users = plan_users(profiles, profile)
     lengths = LENGTHS if users == USERS else (LENGTHS[0],) * users
     if users != USERS:
         ops['users'] = users
-    context, ceiling, room = gate.profile_limits(profiles, profile)
     gate.check_lengths(profile, list(lengths), room, '%s prompt lengths' % plan)
     gate.check_budget(profile, max(MAX_TOKENS, max(tokens for _, tokens in USER_MAX_TOKENS)), ceiling,
                       '%s --max-tokens' % plan)
@@ -373,13 +421,23 @@ def write_json(path, value):
         json.dump(value, handle, indent=1, sort_keys=True)
 
 
-def finish_arm(arm_dir, results, twin_arm_dir=None, log=print, analyse=None):
+def artifact_names(plan):
+    """(compressed CPP report, report json, report md) a profiled plan keeps in <results>/ops/: the decode arm's names unchanged, the prefill
+    arm's its own."""
+    if plan == PREFILL_TRACE:
+        return PREFILL_CSV_GZ, PREFILL_REPORT_JSON, PREFILL_REPORT_MD
+    return CSV_GZ, REPORT_JSON, REPORT_MD
+
+
+def finish_arm(arm_dir, results, twin_arm_dir=None, log=print, analyse=None, plan=None):
     """After the profiled arm (and handback_arm): compress the CPP report into <results>/ops/, run the analysis over it
-    with both arms' server logs and gate reports, and prune the raw tree. Returns the arm's summary (never raises)."""
+    with both arms' server logs and gate reports, and prune the raw tree. Returns the arm's summary (never raises).
+    `plan` is the profiled plan (None: the decode trace): the prefill trace plan keeps its own names and runs the prefill analysis."""
     summary = dict(kind='ops')
     profile = os.path.join(arm_dir, PROFILE_SUBDIR)
     out = os.path.join(results, OPS_SUBDIR)
     os.makedirs(out, exist_ok=True)
+    csv_name, json_name, md_name = artifact_names(plan)
     csv_path = find_csv(profile) if os.path.isdir(profile) else None
     if csv_path is None:
         summary['problem'] = 'no %s under %s: tracy wrote no CPP report (the arm ended before its first read-back?)' % (
@@ -387,21 +445,24 @@ def finish_arm(arm_dir, results, twin_arm_dir=None, log=print, analyse=None):
     else:
         try:
             summary['csv_bytes'] = os.path.getsize(csv_path)
-            summary['csv_gz_bytes'] = gzip_file(csv_path, os.path.join(out, CSV_GZ))
+            summary['csv_gz_bytes'] = gzip_file(csv_path, os.path.join(out, csv_name))
             if analyse is None:
-                import tp4_profile_report as analyse
+                if plan == PREFILL_TRACE:
+                    import tp4_prefill_profile_report as analyse
+                else:
+                    import tp4_profile_report as analyse
             report = analyse.analyse_files(
-                os.path.join(out, CSV_GZ), server_log=os.path.join(arm_dir, 'server.log'),
+                os.path.join(out, csv_name), server_log=os.path.join(arm_dir, 'server.log'),
                 gate_json=os.path.join(arm_dir, 'm3native-gate.json'),
                 twin_log=os.path.join(twin_arm_dir, 'server.log') if twin_arm_dir else None,
                 twin_json=os.path.join(twin_arm_dir, 'm3native-gate.json') if twin_arm_dir else None)
-            write_json(os.path.join(out, REPORT_JSON), report)
-            with open(os.path.join(out, REPORT_MD), 'w', encoding='utf-8') as handle:
+            write_json(os.path.join(out, json_name), report)
+            with open(os.path.join(out, md_name), 'w', encoding='utf-8') as handle:
                 handle.write(analyse.render_markdown(report))
-            summary['report'] = '%s/%s' % (OPS_SUBDIR, REPORT_JSON)
+            summary['report'] = '%s/%s' % (OPS_SUBDIR, json_name)
             summary['validity'] = report.get('validity')
             for line in analyse.render_markdown(report).splitlines()[:40]:
-                log('[C2-GATE] %s: %s' % (TRACE, line))
+                log('[C2-GATE] %s: %s' % (plan or TRACE, line))
         except Exception as error:
             summary['problem'] = 'analysis failed: %r' % (error,)
     if os.path.isdir(profile):
@@ -453,9 +514,10 @@ def arrival_problems(report, env):
     return problems
 
 
-def log_problems(log_text, kind):
+def log_problems(log_text, kind, plan=None):
     """What the server log must and must not say: no verify audit line on either arm, and on the profiled arm the
-    read-back lines (at least MIN_READBACKS)."""
+    read-back lines (at least MIN_READBACKS); on the PREFILL profiled arm the flush hook's marker lines (at least
+    MIN_FLUSH_MARKERS) instead - a note when they are missing, never a failure (the hook has not run at TP4 before)."""
     if log_text is None:
         return [], ['no server log to check the audit and read-back lines against']
     problems, notes = [], []
@@ -463,7 +525,13 @@ def log_problems(log_text, kind):
         if marker in log_text:
             problems.append('"%s" is in the server log: the verify trace carries an audit, so it is not the timed trace'
                             % marker)
-    if kind == 'ops':
+    if kind == 'ops' and plan == PREFILL_TRACE:
+        flushes = log_text.count(FLUSH_MARKER)
+        if flushes < MIN_FLUSH_MARKERS:
+            notes.append('%d prefill flush marker lines (%s), fewer than the %d a %d-token prompt logs: the flush hook did not '
+                         'run (or the image lacks it), so the per-core buffers may have overflowed inside a chunk and the '
+                         'report may be missing rows' % (flushes, FLUSH_MARKER, MIN_FLUSH_MARKERS, PREFILL_TOKENS))
+    elif kind == 'ops':
         readbacks = log_text.count(READBACK_MARKER)
         if readbacks < MIN_READBACKS:
             notes.append('%d read-back lines (%s), fewer than the %d expected: the run may have been short, or the '
@@ -489,7 +557,7 @@ def verdict(plan, report, arm, twin_report, log_text=None, analysis=None, users=
         problems.append('%d streams, asked %d' % (len(report.get('streams') or []), users))
     problems += arrival_problems(report, (arm or {}).get('ops_env') or ())
     problems += text_problems(report, 'this arm\'s')
-    found, notes = log_problems(log_text, kind)
+    found, notes = log_problems(log_text, kind, plan)
     problems += found
     lines += ['note: %s' % note for note in notes]
     digests = [hashlib.sha256(text.encode('utf-8')).hexdigest() if isinstance(text, str) else None
@@ -499,12 +567,13 @@ def verdict(plan, report, arm, twin_report, log_text=None, analysis=None, users=
         return dict(verdict='FAIL' if problems else 'PASS', reason='; '.join(problems) or None, lines=lines,
                     texts=digests, packed_phase=report.get('packed_phase'))
     shortfalls = []
+    twin = PLAN_TWIN.get(plan, TWIN)
     if twin_report is None:
-        shortfalls.append('texts not compared: no %s report' % TWIN)
-    elif text_problems(twin_report, TWIN):
-        shortfalls.append('texts not compared: %s' % '; '.join(text_problems(twin_report, TWIN)))
+        shortfalls.append('texts not compared: no %s report' % twin)
+    elif text_problems(twin_report, twin):
+        shortfalls.append('texts not compared: %s' % '; '.join(text_problems(twin_report, twin)))
     elif not problems and stream_texts(twin_report) != stream_texts(report):
-        problems.append('texts differ from %s: the texts diverged (profiling shifts scheduling; the exactness divergence at 32k and above is unresolved, so compare against a twin-vs-twin first)' % TWIN)
+        problems.append('texts differ from %s: the texts diverged (profiling shifts scheduling; the exactness divergence at 32k and above is unresolved, so compare against a twin-vs-twin first)' % twin)
     if problems:
         return dict(verdict='FAIL', reason='; '.join(problems), lines=lines, ops=ops)
     if ops.get('problem'):
@@ -522,7 +591,7 @@ def twin_report_of(results, plan):
     """The twin arm's harness report for the profiled plan (or None)."""
     if PLAN_KINDS[plan] == 'twin':
         return None
-    path = os.path.join(results, TWIN, 'm3native-gate.json')
+    path = os.path.join(results, PLAN_TWIN[plan], 'm3native-gate.json')
     if not os.path.isfile(path):
         return None
     with open(path, encoding='utf-8') as handle:
@@ -542,7 +611,7 @@ def handback_results(results, image, handback=docker_handback, log=print):
             handback(image, profile)
         except Exception as error:
             log('[OPS] %s: hand-back failed: %s' % (arm, error))
-        kept = os.path.join(results, OPS_SUBDIR, CSV_GZ)
+        kept = os.path.join(results, OPS_SUBDIR, artifact_names(arm)[0])
         csv_path = find_csv(profile)
         if csv_path is not None and not os.path.exists(kept):
             # The gate never got to compress the report (cancelled, timed out): keep it before the prune drops it.

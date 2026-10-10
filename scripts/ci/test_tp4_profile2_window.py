@@ -171,8 +171,12 @@ class ProfileTests(unittest.TestCase):
             with self.subTest(plan=plan):
                 arm, = ops.plan_arms(plan, TIMED, PROFILES, driver)
                 args = list(arm[1])
-                self.assertEqual(args[args.index('--prompt-lengths') + 1], '4096,4096,4096,4096')
-                self.assertEqual(args[args.index('--users') + 1], '4')
+                if plan in ops.PREFILL_PLANS:          # the prefill pair: one user, one 131,072-token prompt (test_ops_profile_plan holds it)
+                    self.assertEqual(args[args.index('--prompt-lengths') + 1], '131072')
+                    self.assertEqual(args[args.index('--users') + 1], '1')
+                else:
+                    self.assertEqual(args[args.index('--prompt-lengths') + 1], '4096,4096,4096,4096')
+                    self.assertEqual(args[args.index('--users') + 1], '4')
                 self.assertFalse(arm.judged)
 
     def test_the_gate_orders_the_ops_plans_last_and_the_twin_first(self):
