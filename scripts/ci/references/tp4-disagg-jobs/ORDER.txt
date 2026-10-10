@@ -1,0 +1,27 @@
+# The disaggregation step-1 window (docs/tp4-disagg-step1.md): ONE image, no build, no new code. It measures the two TP2 factors the 2P+2D model turns on (r: TP2 prefill time over
+# TP4's; k: TP2 decode round over TP4's) on the same image, prompts and shapes, plus today's TP4 production stack at 4k-250k prefill and 1-8 live decode, and the decoders' rate
+# inside a cold 120k prefill. One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z (the cutover runbook's steps and post-checks); nothing here does either.
+# P0. Push ONE tag at a time and wait for its run to finish (the workflow keeps one pending run; queued tags are cancelled). Never cancel a running card job. D2 must be the job
+#     right after X0 (a pair job carries no reset: a pair-only reset leaves M's and A's links to B and C untrained).
+# P0. TIMED: D1, D2 and D3 are timing arms: pause the rig's CI runners before X0 and restore them after Z (ARC_PAUSE / ARC_RESTORE), and read the load log of each run.
+# P0. Image: tp4-next2-1 (or tp4-octo2-1, the same stack: sed -i 's/tp4-next2-1/tp4-octo2-1/' *.env). general-2link, general-tp4-bench and the ship profile are in both.
+# NOT EXACTNESS GATES: nothing here qualifies anything; agreement (D1, D2) answers only "are TP2 and TP4 greedy outputs bit-equal on this image" (expected: no).
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule.
+# NEEDS D2 <- X0
+# NEEDS D1 <- X0
+# NEEDS D3 <- X0
+# READ RULES (each also needs the smoke log clean and no stall):
+#   X0  four cards present and healthy, no other driver alive.
+#   D2  bench-general-2link.json: max_ttft_s of 1x4096/1x32768/1x60000, median and steady tok/s per user of 1x4096/2x4096/4x4096/4x32768; agreement-general-2link.json.
+#   D1  bench-general-tp4-bench.json (the same shapes plus 1x130000 and 8x4096); agreement-general-tp4-bench.json; then tp_agreement.py compare against D2's file.
+#   D3  bench-<ship profile>.json (prefill 4k/32k/128k/250k, decode 1/2/4/8 live), the stall8_cold128k line, concurrent8_steady.
+# THE RESULT: r(L) = D2/D1 ttft at 4k, 32k, 60k; k(n) = D1/D2 steady rate at 1, 2, 4 live. Re-run the model (python3 docs/tp4-disagg-model.py --mix prod --seeds 4 --r <r> --k <k>, and --sweep) with them. DECISION (pre-registered):
+#   k >= 1.75 at 4 live: 2P+2D is closed (model: at most about +8% committed tokens per second on the busiest mix and losses on every other); k <= 1.6 and r <= 1.6:
+#   step 1b (a TP2 fast-path pair on the two-link cabling, its own contract, evidence and link policy) to measure the fast path's own k before any transfer code.
+# Time (estimate, minutes; cumulative in brackets): X0 20 [20], D2 45 [65], D1 60 [125], D3 75 [200], Z 10 [210]: about 3.5 h of cards plus about 3 min of queue per tag.
+X0-status-rescan-reset stop tp4-next2-1 20
+D2-tp2-g1-bench soft tp4-next2-1 45
+D1-tp4-g1-bench soft tp4-next2-1 60
+D3-tp4-ship-bench soft tp4-next2-1 75
+Z-reset soft tp4-next2-1 10
