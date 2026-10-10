@@ -56,7 +56,7 @@ profiled_block_stream_override publish_prewarm quad_draft_tp octo_draft_tp reque
 serving_kv_reservation serving_one_in_flight serving_packed_bridge serving_prefill_admission serving_request_quarantine serving_solo_lane serving_octo serving_fast_lane serving_fast_lane_scheduler stage_profile
 target_packed_pages target_t16_attention_8k_gate target_t16_attention_gate tile_collective_tp two_tile_decode two_tile_norm
 verifier_engine_tp verifier_position_policy c2_parser_rechunk qwen_prefix_metrics prompt_lookup levern_policy levern_scheduler levern_platform levern_route sdpa_long_tp sdpa_multi_tp
-gdn_conv_gates_spread drafter_checkpoint
+gdn_conv_gates_spread drafter_checkpoint octo_attn_bundle
 tp4_sampdraft tp4_shard_argmax tp4_draft_conv tp4_draft_heads drafter_fixtures drafter_manifest
 serving_parked_engines
 octo_glue8 gdn_rows_dma8_tp gdn_block_conv8_tp gdn_conv_windows_packed8
@@ -494,9 +494,9 @@ class ClosureTests(unittest.TestCase):
         self.assertTrue(report['ok'], 'test_tp4_attach_profile fails, so its import set means nothing')
         known = module_names()
         loaded = {name for name in report['modules'] if name in known and not name.startswith('test_')}
-        # (make_parked_profiles, make_round_host_profiles and make_octo_profiles are the generators of the engine-reuse, round-host and octo-T8 profile twins: the profile tests that the
+        # (make_parked_profiles, make_round_host_profiles, make_octo_profiles and make_octo2_profiles are the generators of the engine-reuse, round-host, octo-T8 and octo-2 lever profile twins: the profile tests that the
         # attach test imports name them, through profile_twins; they serve nothing)
-        loaded -= {'tp_test_support', 'make_parked_profiles', 'make_round_host_profiles', 'make_octo_profiles', 'profile_twins'}
+        loaded -= {'tp_test_support', 'make_parked_profiles', 'make_round_host_profiles', 'make_octo_profiles', 'make_octo2_profiles', 'profile_twins'}
         extra = loaded - self.seen
         # What the attach loads outside the closure is a NOT_SERVED module it enters inert (each named in ATTACH_ENTERS_INERT,
         # exactly) and what those import at module level - not everything any NOT_SERVED module could ever reach.

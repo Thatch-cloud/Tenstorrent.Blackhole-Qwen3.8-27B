@@ -496,7 +496,7 @@ class MarkersTests(unittest.TestCase):
             tree = ast.parse(handle.read(), feature_version=(3, 7))
         imports = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
         # octo_attn_bundle: the Lever 3 smoke rule, imported inside lever_problems only when its flag is set or its marker is in the log
-        self.assertEqual(imports, {'argparse', 'json', 'os', 'octo_markers', 'octo_attn_bundle', 're', 'sys'})
+        self.assertEqual(imports, {'argparse', 'json', 'os', 'octo_markers', 'octo_attn_bundle', 'octo_glue8', 're', 'sys'})
 
 
 if __name__ == '__main__':

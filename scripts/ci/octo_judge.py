@@ -30,6 +30,8 @@ THE TP4/OCTO-2 LEVERS (lever_problems; each default off, gate only, and a leak o
              written by the coordinator after the pass was enqueued); no fallback line, no disabled marker, no refusal. The cost of the lever is tau, not text: judged by
              octo2_report (committed tokens per round, the draft's own time), not here.
   bundle     QWEN_FAST_OCTO_ATTN_BUNDLE (octo_attn_bundle.bundle_problems, Lever 3).
+  glue8      QWEN_FAST_OCTO_GLUE8 (octo_glue8.glue8_problems, Lever 2): every native site the levers that are on ask for engaged at users=8 rows=8 on all 48 GDN layers of the octo
+             capture, no fell-back line, and the served 8-row path logged at none of them; flag off, any glue8 line or count is a leak.
 
 PAIRED TIMING (pair_verdict). Under `alternate` the counted rounds come in pairs (octo, then m3) on ONE boot, the same users at the same positions. A round's
 cycle is its step plus the gap before it (gap_ms: the drafts, the host work and the scheduler between two steps), so the drafts both shapes pay are in it. The
@@ -120,6 +122,8 @@ def judge(env, container_text):
 DRAFT_FLAG = 'QWEN_FAST_OCTO_DRAFT'
 BUNDLE_FLAGS = ('QWEN_FAST_OCTO_ATTN_BUNDLE', 'QWEN_FAST_OCTO_ATTN_BUNDLE_AUDIT')
 BUNDLE_MARKER = '[OCTO-ATTN-BUNDLE]'
+GLUE8_FLAG = 'QWEN_FAST_OCTO_GLUE8'
+GLUE8_MARKERS = ('tp4 octo glue8', 'glue8_')
 DRAFT_MIN_SHARE = 0.5
 
 
@@ -134,6 +138,13 @@ def lever_problems(env, text, facts, found):
         import octo_attn_bundle
 
         problems.extend(octo_attn_bundle.bundle_problems(text, env))
+    if flag_on(env, GLUE8_FLAG) or any(marker in text for marker in GLUE8_MARKERS):
+        import octo_glue8
+
+        try:
+            problems.extend(octo_glue8.glue8_problems(text, env))
+        except ValueError as failure:                      # a malformed flag value, or the lever at the pair
+            problems.append(str(failure))
     return problems
 
 

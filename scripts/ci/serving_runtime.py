@@ -485,6 +485,13 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         bundle_problems = octo_attn_bundle.admission_problems()
         if bundle_problems:
             raise ValueError('QWEN_FAST_OCTO_ATTN_BUNDLE is refused: %s' % '; '.join(bundle_problems))
+    elif os.environ.get('QWEN_FAST_OCTO_GLUE8', '0') != '0':
+        # ...and so are the glue levers at eight-row users (tp4/octo-2 Lever 2): refusal() names the octo block, the gate run and the lever to make native.
+        import octo_glue8
+
+        glue8_reason = octo_glue8.refusal()
+        if glue8_reason is not None:
+            raise ValueError('QWEN_FAST_OCTO_GLUE8 is refused: %s' % glue8_reason)
     if os.environ.get('QWEN_FAST_SOLO_PACKED', '0') != '0':
         import serving_octo
 

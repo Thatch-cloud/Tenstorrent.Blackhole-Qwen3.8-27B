@@ -402,6 +402,13 @@ scripts/ci/attention_block_fold_tp.py
 scripts/ci/attention_block_fold_tp.cpp
 scripts/ci/extent_attention_fold_tp.py
 scripts/ci/extent_attention_octo_tp.py
+# tp4/octo-2 Lever 2 (QWEN_FAST_OCTO_GLUE8, gate only, default off): the quarter-tile glue; gdn_user_batch_conv imports octo_glue8 at module level, so it ships in both copy lists and here.
+scripts/ci/gdn_rows_dma8_tp.py
+scripts/ci/gdn_rows_dma8_tp.cpp
+scripts/ci/gdn_block_conv8_tp.py
+scripts/ci/gdn_conv_windows_packed8.py
+scripts/ci/gdn_conv_windows_packed8.cpp
+scripts/ci/octo_glue8.py
 # The long-context SDPA configuration (tp4/sdpa-long, QWEN_FAST_TP4_SDPA, default off): sdpa_long_tp.RUNTIME_FILES, imported by extent_attention_fold_tp.
 scripts/ci/sdpa_long_tp.py
 # tp4/sdpa-multi (QWEN_FAST_TP4_SDPA=multi): sdpa_long_tp imports sdpa_multi_tp when that value is set; the three kernels are its JIT sources.

@@ -1,0 +1,42 @@
+# The order of the tp4/octo-2 four-card DEVELOPMENT window: ONE image and ONE window for the three octo levers (docs/tp4-octo2.md) behind the octo-T8 timed arm: Lever 1 the octo draft (docs/tp4-octo-draft.md),
+# Lever 2 the verify-glue levers at eight-row users (docs/tp4-octo-glue8.md), Lever 3 the octo block's attention in two launches (docs/tp4-octo-attn-bundle.md). Branch tp4/octo-2 = tp4/window-next + the three levers.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (a lever's follow-up jobs are skipped by the NEEDS lines below, the other levers still run).
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z (the cutover pack's restore steps and post-checks; nothing in this pack does either, and no job here starts or hands
+#     back the agent). B0 is a build and may run while production serves. No other window driver may be alive and no privileged builder container up.
+# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and the tag is pushed on THAT commit. Push ONE tag at a time and wait for its run to finish (the workflow keeps one pending run;
+#     queued tags are cancelled). Never cancel a running card job.
+# P0. CI PAUSED: the owner scales the rig's ARC runner sets to zero from OC1 to the last timed job (CI shares the host and skews round times; the hardware host runner that runs these jobs is NOT scaled down) and restores them after it.
+# Every result is UNQUALIFIED (gate-only profiles). Judge every pair PAIRED per round (octo2_report.py), never by unpaired medians; check the load average (a busy host skews host phases 10 to 20 percent).
+# LINEAGE, READ BEFORE BELIEVING A NUMBER: every twin derives from c2-packed-tp4-8x262k-ship-prefix-levern-octo, the Lever N octo arm (make_octo_profiles, make_octo2_profiles), NOT from the shipped W2 + engine reuse profile; a GO is a go to
+#     rebase the twin onto the ship profile and confirm there, not to ship. The octo shape itself is +3.5 percent on the O3 card run (bar +10): the levers are what is to bring it to the bar.
+# THE ARMS AND WHAT EACH ONE READS (exactness is the text hash against OC1, never an audit of the draft: nothing else drafts T8):
+#   OC1/OC2  the control: octo2_report's control, c2_smoke_check clean, RECORD every hash, the load and the early-draft ms per shape.
+#   OD1/OD2  Lever 1: octo_compare against the control (every answer equal) and octo2_report (GO at +5 percent on the octo rate per seat, aggregate AND median, m3 rounds within 5 percent); prints the tau change.
+#   OGA/OG1  Lever 2: the audited attach settles the canonical set at eight rows (the vglue audit, in the trace), then the timed arm as OD1.
+#   OBA/OB1  Lever 3: the audited bundle settles that K64j 0x21 at B > 1 eight-row entries equals the single launches (OBA is the only job that does), then the timed arm as OD1.
+#   OL1      all three at once, only after each lever has passed alone: about the sum, never more than it.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0 <- B0
+# NEEDS OC1 OGA OBA <- X0
+# NEEDS OD1 <- OC1
+# NEEDS OG1 <- OGA OC1
+# NEEDS OB1 <- OBA OC1
+# NEEDS OL1 <- OD1 OG1 OB1
+# NEEDS OC2 <- OD1
+# NEEDS OD2 <- OC2
+# NO-GO for adopting a lever: any stall, any hash or accepted-prefix difference against the control, any audit mismatch, any fallback or disabled line, any program compiled on an octo shape switch, a verdict under +5 percent,
+#     the m3 rounds of the two boots more than 5 percent apart (the boots are not comparable: read neither), a tau loss larger than the time gain (Lever 1).
+# Time (estimate): B0 40, X0 20, OC1 55, OD1 60, OGA 90, OG1 60, OBA 45, OB1 60, OL1 60, OC2 55, OD2 60, Z 10: 615 minutes (10 h 15 min), 500 minutes without the repeat pair (OC2, OD2); about 3 minutes of queue per tag on top.
+B0-build stop tp4-octo2-1 40
+X0-status-rescan-reset stop tp4-octo2-1 20
+OC1-octo-control-timed soft tp4-octo2-1 55
+OD1-octo-draft-timed soft tp4-octo2-1 60
+OGA-octo-glue8-audit-attach-lean soft tp4-octo2-1 90
+OG1-octo-glue8-timed soft tp4-octo2-1 60
+OBA-octo-bundle-audit soft tp4-octo2-1 45
+OB1-octo-bundle-timed soft tp4-octo2-1 60
+OL1-octo-levers-timed soft tp4-octo2-1 60
+OC2-octo-control-repeat soft tp4-octo2-1 55
+OD2-octo-draft-repeat soft tp4-octo2-1 60
+Z-reset soft tp4-octo2-1 10

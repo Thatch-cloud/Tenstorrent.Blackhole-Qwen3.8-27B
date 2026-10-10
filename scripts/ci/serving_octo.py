@@ -57,6 +57,7 @@ GATE_PROFILE_ENV = 'QWEN_C2_GATE_PROFILE'
 M3_BLOCKS_FLAG = 'QWEN_FAST_M3_BLOCKS'
 DRAFT_FLAG = 'QWEN_FAST_OCTO_DRAFT'
 BUNDLE_FLAGS = ('QWEN_FAST_OCTO_ATTN_BUNDLE', 'QWEN_FAST_OCTO_ATTN_BUNDLE_AUDIT')
+GLUE8_FLAG = 'QWEN_FAST_OCTO_GLUE8'
 
 MARKER = '[OCTO]'
 ADMITTED_MARKER = MARKER + ' admitted'
@@ -260,6 +261,13 @@ def octo_admission(m3, environ=None, *, log=None):
         import octo_draft_tp
 
         problems.extend(octo_draft_tp.admission_problems(environ))
+    # QWEN_FAST_OCTO_GLUE8 (octo_glue8, Lever 2; gate only, default off): the verify-glue levers at the octo block's eight-row users. Its reason joins this list; off, not even the import.
+    if environ.get(GLUE8_FLAG, '0') != '0':
+        import octo_glue8
+
+        reason = octo_glue8.refusal(environ)
+        if reason is not None:
+            problems.append(reason)
     # QWEN_FAST_OCTO_ATTN_BUNDLE (octo_attn_bundle, Lever 3; gate only, default off): the octo block's attention in ceil(8 / N) launches per layer. Its reasons join this list; off, not even the import.
     if any(environ.get(name, '0') not in ('', '0') for name in BUNDLE_FLAGS):
         import octo_attn_bundle
