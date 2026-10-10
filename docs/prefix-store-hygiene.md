@@ -2,8 +2,10 @@
 
 The GatedDeltaNet (GDN) checkpoints that make a prefix hit exact live in `qwen_prefix_registry.PrefixRegistry`, one per
 engine process. This note covers what that store now measures about its misses, the two opt-in policies that keep it
-useful, and the size arithmetic behind its budget. Nothing here changes what a hit serves: a checkpoint is still
-token-verified before it is granted, and a retired or evicted checkpoint is only ever a miss.
+useful, the size arithmetic behind its budget, and two opt-in features that make a returning turn cheaper: checkpoints
+stored in the device's own layout, and a host-RAM tier for the attention-KV pages vLLM evicts. Nothing here changes what a
+hit serves: a checkpoint is still token-verified before it is granted, a retired or evicted checkpoint is only ever a miss,
+and everything restored from host RAM is, byte for byte, what was evicted.
 
 ## Checkpoint size
 
@@ -96,3 +98,151 @@ digest of everything observable over a set of conversations against the registry
 
 A profile may set them in its `env` only beside `QWEN_PREFIX_REUSE=1`, and only to the values above
 (`serving_c2_contract.prefix_policy_problems`); any other value stops the engine at start.
+
+## Checkpoints stored in the device's layout (`QWEN_PREFIX_CKPT_PRECONVERTED=1`, default off)
+
+A restore used to put each of the 96 GDN checkpoint tensors (48 layers, state and conv carry) through a single-threaded host
+tilize and dtype conversion inside the call, about 1.15 GB/s, and the call is on the critical path of the returning turn.
+With the flag on, that conversion happens once, at capture time (off the critical path): the tensor is stored as the
+`ttnn` host tensor the device takes (`from_torch` to the device tensor's own dtype and TILE layout, sharded over the mesh as
+the restore shards it), and the restore is 96 `copy_host_to_device_tensor` calls and one synchronize. It needs the `h2d`
+restore mode (the one the serving model chooses); with the flag on and another mode the model stops at start.
+
+* Size: the stored form is tile-padded (the conv carry's 3 rows become 32), so a checkpoint is charged its stored size,
+  about 106.95 MB for the mesh against 78.45 MB unconverted (bf16 state), and the default 8 GiB store holds about 80 of them
+  instead of 109.
+* Exactness: the stored bytes are what today's conversion produces from the same values. `test_qwen_prefix_model_runtime`
+  (PreconvertedCheckpoints) pins that on the CPU fakes; on the card `QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT=1` converts again
+  after each restore and compares every tensor with the stored one, uploads, reads the device scratch back and compares it
+  with the source, and logs `[PREFIX-AUDIT-CKPT] tensors=96 conversion_equal=1 readback_equal=1` (any 0 stops the engine).
+  Each capture stored this way logs `[PINDIAG] prefix: checkpoint preconverted req=<id> pos=<n> tensors=<n> host_bytes=<n>
+  convert_ms=<f>`: the conversion moved to the capturing prefill (by that many milliseconds) from the returning turn's restore.
+  A conversion that fails leaves the unconverted checkpoint, which a restore converts as before.
+* Both names are gate-only until a qualification record lifts it (`serving_c2_contract.prefix_policy_problems` refuses them on
+  a traffic profile, and `apply_environment` drops an inherited value under a profile that does not name them).
+
+## The host KV tier (`QWEN_PREFIX_HOST_TIER_GIB`, default 0 = off)
+
+Prefix reuse needs two things for a returning turn: the GDN checkpoint (host RAM, above) and the attention-KV pages of the
+prefix, which live in the device pool and are evicted when other sessions need the room. A checkpoint whose pages were
+evicted is useless, so the registry dropped it (`evicted_coupled`) and the turn re-prefilled from the start. With the tier on:
+
+1. **Spill.** When vLLM is about to evict a cached KV block whose chain has a checkpoint at or above it (a block with none is
+   `tier_spill_dropped_useless`), the scheduler graft remembers it; at the end of that `schedule()` call, with the device idle
+   and nothing yet written for the step, the blocks are read from the device in one pass into the tier and the checkpoint at
+   the block is kept (`tier_ckpt_kept`) instead of dropped.
+2. **Restore.** When a returning turn's trim finds that the best hit lies beyond the device's, the missing blocks are written
+   back to freshly taken pool blocks, hashed and cached exactly as if the turn had just computed them, and vLLM's own hit logic
+   is asked again: from there on it is an ordinary device hit, under vLLM's own reservation and accounting. There is no
+   connector and no external-token path.
+3. **Never worse than a miss.** A restore that cannot run (the pool lacks the room, a record failed its digest, the device call
+   raised, the kill switch) is a miss, and the turn prefills as it would have without the tier. Three device failures in a row
+   latch the tier off for the life of the process and clear it (`tier_latched`).
+
+Tenancy is by construction: a block is keyed by vLLM's chained block hash, which carries the `cache_salt`, so a request under
+another salt can never name a tenant's block (the gate checks that no fresh-salt request is ever restored). The tier's byte
+budget is the *whole* prefix-state host budget, `QWEN_PREFIX_HOST_TIER_GIB`; the checkpoint store keeps its own
+`QWEN_PREFIX_STORE_GIB` share of it and the KV pages get the rest (the GiB must exceed the store's). Inside its share the tier
+evicts records no checkpoint reaches first, then by the registry's `QWEN_PREFIX_EVICT` policy (`lru` or `fair`, per tenant); a
+record being restored is pinned against that. The pages are held in one anonymous mapping (no `core` dump, grown by use, not
+reserved up front), so host RSS rises with what the tier holds, up to its cap; with swap off the cap is the number to size.
+
+### Byte-identical restore
+
+* A block's payload is the raw packed bytes of every KV cache tensor for that block (K then V per layer, every chip's page
+  range), moved by the `qwen_kv_read` extension's raw block ops (below): no host tensor, no unpack, no repack.
+* A digest (sha256) of each record is computed off the critical thread and checked at restore (`QWEN_PREFIX_HOST_TIER_VERIFY`:
+  `sample`, one block in sixteen, the default; `all`; `off`). A record that fails is dropped and the restore refused.
+* `QWEN_PREFIX_HOST_TIER_AUDIT=1` (gate-only) reads every restored block back from the device and compares it with the bytes
+  written, raising and stopping the engine on any difference, and forces `all`.
+* The end-to-end proof is the gate's: a returning turn against its cold twin (every output token) and the slot and logits
+  digests. The CPU proofs run the real scheduler graft, on a fake pool and on vLLM 0.25.1's own pool and scheduler objects,
+  with a device whose block contents are a pure function of the block's hash, and check after every scenario that every
+  block the pool serves as cached, and every record of the tier, holds the bytes its hash stands for.
+
+### Flags
+
+| Name | Default | Meaning |
+|---|---|---|
+| `QWEN_PREFIX_HOST_TIER_GIB` | 0 (off) | the whole prefix state's host budget in GiB; must exceed `QWEN_PREFIX_STORE_GIB`; needs `QWEN_PREFIX_REUSE=1` |
+| `QWEN_PREFIX_HOST_TIER_VERIFY` | `sample` | digest check at restore: `sample`, `all`, `off` |
+| `QWEN_PREFIX_HOST_TIER_AUDIT` | 0 | gate-only: read back and compare every restored block (forces `all`) |
+| `QWEN_PREFIX_HOST_TIER_SPILL_MAX_BLOCKS` | 512 | most blocks one step's evictions may spill; the lowest block indexes of each chain are kept |
+| `QWEN_PREFIX_HOST_TIER_MIN_TOKENS` | 8192 | sessions whose checkpoint ends below this are not worth a restore and are not spilled |
+| `QWEN_PREFIX_HOST_TIER_MIN_AVAILABLE_GIB` | 16 | no spill while the host's `MemAvailable` is under this |
+| `QWEN_PREFIX_HOST_TIER_OFF_PATH` | `kv-tier.off` beside `prefix-reuse.off` | the tier's own kill-switch file: present, the tier latches off and clears, no restart |
+
+`prefix-reuse.off` (the registry's kill switch) also disables the tier: nothing is granted, so nothing is spilled or restored.
+
+### Metrics and log lines
+
+Counters (`qwen_prefix_<name>_total`, timers `qwen_prefix_<name>_seconds_total`): `tier_spill_{flushes,blocks,bytes,ms,known}`,
+`tier_spill_dropped_{useless,cap,governor,full}`, `tier_spill_failures`, `tier_restore_{requests,blocks,bytes,ms}`,
+`tier_restore_refused_{room,digest}`, `tier_restore_failures`, `tier_digest_{checks,failures}`, `tier_evicted`,
+`tier_ckpt_{kept,dropped}`, `tier_audit_{reads,mismatches}`, `tier_latched` (1 once the tier latched itself off). Gauges:
+`qwen_prefix_tier_{bytes,entries,cap_bytes,on}`. The existing `qwen_prefix_class_kv_evicted_total` and `qwen_prefix_lost_tokens_kv_evicted_total`
+are what the tier is meant to move.
+
+```
+[PINDIAG] prefix: host tier on gib=<f> kv_gib=<f> block_bytes=<n> verify=<mode> audit=<0|1> spill_max_blocks=<n> min_tokens=<n> slack=<n> off_path=<path>
+[PINDIAG] prefix: host tier IO attached block_bytes=<n> tensors=<n> chips=<n> slice_bytes=<n> fingerprint=<s>
+[PINDIAG] prefix: host tier spill blocks=<n> bytes=<n> ms=<f> held=<n>
+[PINDIAG] prefix: host tier restore req=<id> blocks=<n> bytes=<n> ms=<f> from=<tokens> to=<tokens>
+[PINDIAG] prefix: host tier latched off: <reason>
+```
+
+### The device ops, and what they cost
+
+The device side is version 2 of the `qwen_kv_read` extension (`optimisation/ttnn-op/kv_region_read`): `ttnn.qwen_read_blocks_raw`
+and `qwen_write_blocks_raw` move named blocks' page ranges between a paged cache tensor and a host buffer (runs of consecutive
+block ids are one region transfer each, every chip's shard, one wait; no program runs and nothing is allocated on the device),
+and `qwen_block_bytes` says how many bytes one block of one chip is. The image refuses to start with the tier on and the ops
+absent. **Version 2 has been written and tested against fakes only: it has not been compiled or run on a card.** The first card
+job of `references/tp4-prefix-tiers-jobs` (Q1) qualifies it byte for byte and prints its rates.
+
+At the production geometry one block (64 tokens) is 32 cache tensors x 4 chips x 17,408 bytes = 2,228,224 bytes, so:
+
+| Session | Blocks | Bytes | Share of a 24 GiB KV budget |
+|---|---|---|---|
+| 128k (131,072 tokens) | 2,048 | 4.56 GB | 17.7% |
+| 254k (253,920 tokens) | 3,968 | 8.84 GB | 34.3% |
+
+Host-side cost, measured on the CPU with the device ops stubbed (`scripts/ci/bench_prefix_tier.py`: the adapter's staging copies,
+the store and the digests, at 512 blocks on a busy 20-core host; the device time is NOT in these, and the rates move with the host's
+load):
+
+| Step | Rate | 128k | 254k |
+|---|---|---|---|
+| spill, staging copy into resident slab slots | 9.6-10.7 GB/s | 0.4-0.5 s | 0.8-0.9 s |
+| spill, first fill of a slab region (page faults) | 1.05-1.22 GB/s | 3.7-4.3 s | 7.2-8.4 s |
+| restore, staging copy from the slab | 4.7-9.4 GB/s | 0.5-1.0 s | 0.9-1.9 s |
+| digest at spill (a worker thread, off the step) | 1.5 GB/s | 3.0 s | 5.9 s |
+| digest check at restore, `sample` (1 block in 16) | 1.5 GB/s | 0.19 s | 0.37 s |
+| digest check at restore, `all` | 1.5 GB/s | 3.0 s | 5.9 s |
+| store: put / get / put with eviction | 24 us / 0.5 us / 5-9 us per block | | |
+
+So the cost of a returning 254k turn is dominated by two device transfers of about 8.8 GB (the restore, and the spill of the
+blocks it displaces from a full pool, which happens in the same step), the digest check if `all` is on, and then the tail
+prefill; against it is the cold prefill of 254k tokens. The first fill of a slab region is page-fault bound, so the first spills
+after start are slower than the steady state; nothing is pre-faulted. The gate's `tier-timed` arm measures the whole sequence
+at ~32k, ~128k and ~254k (the cold prefill's TTFT, a device-resident hit's, the returning hit's with its restore and displaced
+spill) and prints the device rates the host-side table leaves out.
+
+### The gate
+
+`c2_prefix_gate.py --plan tiers` (`tier-attach`, `tier-returning`, `tier-timed`, each also a plan) on
+`c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-tier-audit`, generated by `make_prefix_tier_profiles.py` from the production
+profile (the tier names plus the multi-user SDPA launch's own audit, which the gate's extent audit needs beside W2; gate-only,
+no traffic waiver). `tier-returning` builds three ~56k sessions, floods the pool with fresh-salt prompts until every cached block
+of the sessions has left the device, brings each session back against its cold twin, and writes the tier's kill switch; it is
+NOT_EXERCISED, never a pass, if no returning turn was restored. Two things the gate's oracle (`prefix_judge.Oracle`)
+does not know: the tier, and the larger size of a preconverted checkpoint (about 80 fit in the default store, not 109). The arms stay
+well under that count, and a returning session that got less than the oracle's Q is explained, not failed, when the tier's or the
+checkpoint store's own eviction counters moved. The job pack, its order and its read rules are
+`scripts/ci/references/tp4-prefix-tiers-jobs`; `scripts/ci/pin_kvread.py` moves the extension's pinned hash before its image build.
+
+### Not done
+
+The NVMe tier; the tier on a traffic profile (the contract refuses it until a qualification record exists); the restore through
+vLLM's connector API (not needed: the pages are cached before the hit is looked up); a device-side gather that would let the
+spill overlap the step; arming anything on the production profile.

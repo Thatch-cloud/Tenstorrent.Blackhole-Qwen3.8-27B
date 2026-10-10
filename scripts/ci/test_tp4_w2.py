@@ -155,10 +155,12 @@ class ProfileTests(unittest.TestCase):
                         self.assertFalse(carried)
         # (and the W2 kill drill twin of the ship profile: a gate-only copy of it plus the two kill switch names, test_w2_switch)
         from make_w2_kill_profiles import twin_names as kill_twins
+        # (and the host KV tier's audited twin of it: the same copy plus the tier names and the multi launch's audit, test_prefix_tier_profiles)
+        from make_prefix_tier_profiles import twin_names as tier_twins
         carriers = sorted(name for name, profile in load()['profiles'].items() if spread.FLAG in profile.get('env', {}))
-        self.assertEqual(carriers, sorted([W2, W2_AUDIT] + list(WINDOW_F1) + sorted(SHIPPED) + list(kill_twins())))
+        self.assertEqual(carriers, sorted([W2, W2_AUDIT] + list(WINDOW_F1) + sorted(SHIPPED) + list(kill_twins()) + list(tier_twins())))
         multi = sorted(name for name, profile in load()['profiles'].items() if profile.get('env', {}).get(sdpa_long_tp.FLAG) == 'multi')
-        self.assertEqual(multi, sorted([SDPA_TIMED, SDPA_AUDITED, W2, W2_AUDIT, NOF1, NOF1_AUDIT] + list(WINDOW_MULTI) + sorted(SHIPPED) + list(kill_twins())))
+        self.assertEqual(multi, sorted([SDPA_TIMED, SDPA_AUDITED, W2, W2_AUDIT, NOF1, NOF1_AUDIT] + list(WINDOW_MULTI) + sorted(SHIPPED) + list(kill_twins()) + list(tier_twins())))
 
     def test_sdpa_multi_s_own_arms_are_untouched_by_the_merge(self):
         found = load()['profiles']

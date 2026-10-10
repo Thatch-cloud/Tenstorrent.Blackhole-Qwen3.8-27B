@@ -97,6 +97,10 @@ PREFIX_TIER_NUMBERS = (PREFIX_TIER_GIB, 'QWEN_PREFIX_HOST_TIER_SPILL_MAX_BLOCKS'
 PREFIX_TIER_OFF_PATH = 'QWEN_PREFIX_HOST_TIER_OFF_PATH'
 PREFIX_GATE_ONLY_VALUES = (('QWEN_PREFIX_CKPT_PRECONVERTED', '1'), ('QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT', '1'),
                            ('QWEN_PREFIX_HOST_TIER_AUDIT', '1'))
+# Every name of the two features: the profile's to switch on, so a value inherited from the process under a profile that does not name it is dropped
+# (apply_environment), as Lever N's, engine reuse's and W2's are.
+PREFIX_TIER_ENV_NAMES = (tuple(name for name, _value in PREFIX_GATE_ONLY_VALUES) + PREFIX_TIER_NUMBERS
+                         + (PREFIX_TIER_OFF_PATH, 'QWEN_PREFIX_HOST_TIER_VERIFY'))
 # Sticky sessions (serving_fast_policy.STICKY_SESSIONS_FLAG): the fast path's side of prefix reuse. Only a
 # profile sets it, and only beside PREFIX_SWITCH and the fast path (prefix_reuse_problems).
 STICKY_SWITCH = 'QWEN_FAST_STICKY_SESSIONS'
@@ -367,6 +371,11 @@ def apply_environment(profile, environ=None):
     # ...and the W2 kill switch's override and drill trigger (w2_switch): an inherited path would move the switch's file, an inherited trigger would
     # kill W2 by itself after n rounds in an arm that never named it.
     for name in W2_NAMES:
+        if name not in profile['env']:
+            environ.pop(name, None)
+    # ...and the preconverted checkpoints and the host KV tier (default off, gate only until a qualification record lifts it): an inherited
+    # switch must not turn either on under a profile that never named it.
+    for name in PREFIX_TIER_ENV_NAMES:
         if name not in profile['env']:
             environ.pop(name, None)
     return environ

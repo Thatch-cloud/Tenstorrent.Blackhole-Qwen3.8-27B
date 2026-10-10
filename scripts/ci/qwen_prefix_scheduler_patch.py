@@ -548,6 +548,11 @@ class TierHooks(object):
         self.kill_switch = prefix_registry.KillSwitch(self.config.off_path, prefix_registry.KILL_SWITCH_POLL_S, graft.kill_switch.clock)
         graft.registry.device_holds = self.device_holds
         graft.registry.tier_slack = 1 if graft.drop_last else 0
+        # The gate reads this line (prefix_markers.TIER_ON): the tier is configured and the model graft's IO is attached.
+        graft.log('host tier on gib=%.2f kv_gib=%.2f block_bytes=%d verify=%s audit=%d spill_max_blocks=%d min_tokens=%d slack=%d off_path=%s',
+                  self.config.total / float(1 << 30), self.config.kv_bytes / float(1 << 30), int(getattr(self.io, 'block_bytes', 0) or 0),
+                  self.config.verify, 1 if self.config.audit else 0, self.config.spill_max, self.config.min_tokens, graft.registry.tier_slack,
+                  self.config.off_path)
 
     # -- state -----------------------------------------------------------------------------------
     @property

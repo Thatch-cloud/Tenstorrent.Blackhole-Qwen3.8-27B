@@ -246,6 +246,10 @@ class ProfileTests(unittest.TestCase):
         import make_w2_kill_profiles
 
         generated |= set(make_w2_kill_profiles.twin_names())
+        # the host KV tier's twin of the same parent carries them by inheritance too (test_prefix_tier_profiles holds it as that parent plus the tier names)
+        import make_prefix_tier_profiles
+
+        generated |= set(make_prefix_tier_profiles.twin_names())
         # the region-read audit twins (make_kvread_profiles; test_kvread_profiles holds each as its parent plus one flag) carry their parent's flags by inheritance
         region_read = {twin: parent for parent, twin, mode in kvread_twins.TWINS}
         for name, profile in profiles.items():

@@ -1125,8 +1125,9 @@ class ProfileTests(unittest.TestCase):
 
     def test_no_other_profile_carries_the_audit_flag_and_the_default_is_untouched(self):
         from test_tp4_w2ln_profiles import SDPA_AUDIT as WINDOW_AUDITED     # the combined window's audit carriers (test_tp4_w2ln_profiles)
+        from make_prefix_tier_profiles import twin_names as tier_twins      # the host KV tier's audited twin of the ship profile: the multi launch's own audit beside the gate's extent audit (test_prefix_tier_profiles)
         for name, body in PROFILES.items():
-            if name not in (AUDITED, 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1-audit') + tuple(WINDOW_AUDITED):       # tp4/w2: the audited wave-2 arm carries it too (test_tp4_w2)
+            if name not in (AUDITED, 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1-audit') + tuple(WINDOW_AUDITED) + tuple(tier_twins()):       # tp4/w2: the audited wave-2 arm carries it too (test_tp4_w2)
                 self.assertNotIn(AUDIT, body.get('env', {}), name)
         self.assertEqual(json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))['default'], 'c2-packed-tp4')
 

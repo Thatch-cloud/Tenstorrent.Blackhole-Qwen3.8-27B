@@ -419,8 +419,19 @@ class FakeEngine(object):
             return
         self.say('[PINDIAG] prefix: ' + (message % values if values else message))
 
+    # Hooks a subclass overrides to model more of the engine (test_prefix_tier_gate's host KV tier): the pool, the registry, and what is attached once the
+    # graft is built.
+    def make_pool(self, count):
+        return FakePool(count)
+
+    def make_registry(self):
+        return graft.PrefixRegistry(environ=dict(QWEN_PREFIX_STORE_GIB=str(self.store_gib)))
+
+    def attach_extras(self):
+        pass
+
     def boot(self):
-        self.pool = FakePool(self.num_blocks)
+        self.pool = self.make_pool(self.num_blocks)
         self.single = SimpleNamespace(num_cached_block={}, req_to_blocks={})
         self.coordinator = FakeCoordinator(self.pool, self.single)
         self.manager = FakeManager(self.pool, self.coordinator)
@@ -428,7 +439,7 @@ class FakeEngine(object):
             # DFlash is EAGLE-like to vLLM: the coordinator flags group 0 and a hit loses its last block.
             self.coordinator.eagle_group_ids = {0}
             self.manager.drop_last = True
-        self.registry = graft.PrefixRegistry(environ=dict(QWEN_PREFIX_STORE_GIB=str(self.store_gib)))
+        self.registry = self.make_registry()
         # The served model graft declares its mid-loop captures at warmup (qwen_prefix_model_patch).
         self.registry.enable_mid_loop_capture()
         self.graft = graft.SchedulerGraft(SimpleNamespace(kv_cache_manager=self.manager), self.registry,
@@ -442,6 +453,7 @@ class FakeEngine(object):
                                    _maybe_evict_cached_block=self.pool._maybe_evict_cached_block)
         self.graft.get_block_hash = lambda key: key
         self.pool.evict = self.graft.evict
+        self.attach_extras()
         self.waiting, self.running = deque(), []
         self.preemptions = 0
         self.dropped_hits = 0
@@ -979,6 +991,11 @@ class FakeContainer(object):
 
     def exec_shell(self, script, timeout=60):
         self.scripts.append(script)
+        tier_switch = getattr(self.engine, 'tier_switch', None)
+        if tier_switch is not None and replay.TIER_DRILL_OFF_PATH in script:
+            # The host tier's own kill switch (a tier engine models it): written by the gate's echo, removed by its rm.
+            tier_switch('rm -f' not in script)
+            return 0, ''
         if ('echo %s >' % replay.KILL_SWITCH_OWNER) in script:
             self.engine.kill_switch(True)
         elif 'rm -f' in script:

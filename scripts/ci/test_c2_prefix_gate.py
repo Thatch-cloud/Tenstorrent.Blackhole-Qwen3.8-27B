@@ -40,7 +40,7 @@ WORKFLOW = os.path.join(ROOT, '.github', 'workflows', 'qwen-c2-serving.yml')
 CPU_WORKFLOW = os.path.join(ROOT, '.github', 'workflows', 'qwen-integration-cpu.yml')
 JOB_FILE = os.path.join(ROOT, '.github', 'c2-serving-job.env')
 NEW_TESTS = ('test_prefix_agent_corpus', 'test_prefix_markers', 'test_prefix_judge', 'test_prefix_report',
-             'test_prefix_replay', 'test_prefix_oracle_check', 'test_c2_prefix_gate')
+             'test_prefix_replay', 'test_prefix_oracle_check', 'test_c2_prefix_gate', 'test_prefix_tier_profiles', 'test_prefix_tier_gate', 'test_tp4_prefix_tiers_jobs')
 CURRENT = dict(engine=None)
 
 
@@ -213,7 +213,7 @@ class ArmTests(unittest.TestCase):
         document = profiles()
         self.assertEqual(gate.PLANS, job.PREFIX_PLANS + tuple(arm for arm, _ in job.PREFIX_ARM_PLANS))
         self.assertEqual(sorted(arm for arm, _ in job.PREFIX_ARM_PLANS),
-                         sorted(entry[0] for plan in ('exactness', 'lifecycle', 'agent-turns') for entry in gate.PLAN_ARMS[plan]))
+                         sorted(entry[0] for plan in ('exactness', 'lifecycle', 'agent-turns', 'tiers') for entry in gate.PLAN_ARMS[plan]))
         for arm, plan in job.PREFIX_ARM_PLANS:
             with self.subTest(arm=arm):
                 alone = gate.plan_arms(arm, 'general-prefix', 'general', document)

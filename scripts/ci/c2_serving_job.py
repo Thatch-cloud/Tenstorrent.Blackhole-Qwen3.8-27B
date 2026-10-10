@@ -121,7 +121,13 @@ Keys (every one optional but C2_IMAGE_TAG):
                       sticky-session profiles only; on them exactness-traced and lifecycle-tiny are
                       NOT_APPLICABLE, and a plan with no applicable arm is refused by the gate. agent-turns
                       (tp4/packed-prefix: the agent-turn replay, eight conversations of several turns) runs the prefix
-                      and the control arm; agent-turns-prefix and agent-turns-baseline run one arm each (the ABAB jobs)
+                      and the control arm; agent-turns-prefix and agent-turns-baseline run one arm each (the ABAB jobs).
+                      tiers (tp4/prefix-tiers: the host KV tier and the preconverted checkpoints; needs a profile with
+                      QWEN_PREFIX_HOST_TIER_GIB, no baseline) is three arms, each also a plan: tier-attach (the audited
+                      chain: the first restore from preconverted tensors, compared with today's conversion), tier-returning
+                      (sessions, a flood the size of the KV pool, every session's return against its cold twin, the tier's
+                      kill switch) and tier-timed (TTFT of a cold prefill, a device-resident hit and a host restore at
+                      ~32k/128k/254k; a measurement beside its exactness read)
   C2_PREFIX_PROFILE   the prefix-reuse profile it serves (default general-prefix; must be a checkout profile)
   C2_PREFIX_BASELINE  the no-reuse profile it compares against (default general; none: timing without
                       the baseline arm)
@@ -200,7 +206,7 @@ AUDIT_SETS = ('extent', 'all')
 SALT_MODES = ('none', 'fresh')
 DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
 # The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
-PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify')
+PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify', 'tiers')
 # (arm, its plan): each exactness and lifecycle arm is a plan of its own, named as the arm, that runs
 # only it, judged as inside its plan (neither plan has a cross-arm check; c2_prefix_gate.PLAN_ARMS).
 # G1 v47 (run 36246961161) needed the eager arm again without the traced and audit arms' hour.
@@ -209,7 +215,9 @@ PREFIX_ARM_PLANS = (('exactness-traced', 'exactness'), ('exactness-audit', 'exac
                     ('lifecycle-evict', 'lifecycle'), ('lifecycle-store', 'lifecycle'),
                     ('lifecycle-tiny', 'lifecycle'),
                     # tp4/packed-prefix: the agent-turn replay's two arms, each as a job of its own (the ABAB pairs)
-                    ('agent-turns-prefix', 'agent-turns'), ('agent-turns-baseline', 'agent-turns'))
+                    ('agent-turns-prefix', 'agent-turns'), ('agent-turns-baseline', 'agent-turns'),
+                    # tp4/prefix-tiers: the host KV tier and the preconverted checkpoints, each arm a job of its own (docs/prefix-store-hygiene.md)
+                    ('tier-attach', 'tiers'), ('tier-returning', 'tiers'), ('tier-timed', 'tiers'))
 # The W-T1 tau lab (c2_tau_lab.py): its arms, the production profile it serves and its time box.
 TAULAB_ARMS = ('A1', 'A2', 'A3', 'A4', 'A5')
 TAULAB_PROFILE = 'c2-packed-tp4'

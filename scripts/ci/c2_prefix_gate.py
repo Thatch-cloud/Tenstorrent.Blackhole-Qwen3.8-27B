@@ -257,6 +257,11 @@ DERIVED = dict(
                                        VLLM_SERVER_DEV_MODE='1')),
     # The Lever N kill-switch drill: the flag lives INSIDE the container (never on the hub mount a later arm reads).
     leverndrill=dict(env=dict(QWEN_FAST_LEVERN_OFF_PATH=replay.LEVERN_DRILL_OFF_PATH)),
+    # The host KV tier's TIMED arm: the tier profile's audit instruments off (the read-back of every restore, the preconverted comparison, the digest of
+    # every block, the SDPA audit the W2 parent needs beside the extent audit that timed arms do not carry), so what is timed is the restore itself; the
+    # digest check falls back to its sampled default.
+    tiertime=dict(env=dict(QWEN_PREFIX_HOST_TIER_AUDIT='0', QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT='0', QWEN_PREFIX_HOST_TIER_VERIFY='sample',
+                           QWEN_FAST_TP4_SDPA_AUDIT='0')),
 )
 # (arm, scenario, which profile, derived changes, docker timeout seconds, strict oracle)
 PLAN_ARMS = dict(
@@ -281,10 +286,16 @@ PLAN_ARMS = dict(
        'levern-hit': (('levern-hit', 'levern_hit', 'prefix', None, 9000, False),),
        # The qualification of the region read on a real prompt (docs/prefix-audit-cost.md): the short exactness chain, audited, the first
        # audited step cross-checked against the whole-cache read (~8 minutes at the production pool), the rest at the region read's cost.
-       'read-qualify': (('read-qualify', 'exactness_audit', 'prefix', 'auditcross', 3600, True),)}
+       'read-qualify': (('read-qualify', 'exactness_audit', 'prefix', 'auditcross', 3600, True),),
+       # tp4/prefix-tiers (docs/prefix-store-hygiene.md): the preconverted checkpoints and the host KV tier on a profile that names
+       # QWEN_PREFIX_HOST_TIER_GIB (make_prefix_tier_profiles). tier-attach: the audited chain; tier-returning: the forced eviction and the
+       # returning sessions against their cold twins (audits on, no baseline); tier-timed: the restore's TTFT at ~32k/128k/254k (the audits off).
+       'tiers': (('tier-attach', 'tier_attach', 'prefix', None, 3600, True),
+                 ('tier-returning', 'tier_returning', 'prefix', None, 9000, False),
+                 ('tier-timed', 'tier_timed', 'prefix', 'tiertime', 7200, False))}
 )
 # The scenarios that measure rather than judge exactness: no extent audit, no row digests (they would time the audit).
-TIMED_SCENARIOS = ('timing', 'agent_turns', 'levern_hit')
+TIMED_SCENARIOS = ('timing', 'agent_turns', 'levern_hit', 'tier_timed')
 # The scenarios that write the Lever N kill switch on purpose (the engagement rule allows its kill line there).
 LEVERN_DRILL_SCENARIOS = ('levern_faults',)
 # The single-arm plans (c2_serving_job.PREFIX_ARM_PLANS): the arm exactly as its plan runs it.
@@ -321,6 +332,45 @@ def audit_image_problems(arms, anchor):
                    'references/tp4-kvread-jobs; docs/prefix-audit-cost.md); %s=1 overrides, for a run that wants the slow audit' % (
                        ', '.join(names), anchor.get('region_read'), ALLOW_FULL_AUDIT_ENV))
     return out
+
+
+TIER_SCENARIOS = ('tier_attach', 'tier_returning', 'tier_timed')
+
+
+def tier_image_problems(arms, anchor):
+    """Why the image cannot run the tier arms, or []: refused before any container boots. The host KV tier moves blocks with ttnn.qwen_read_blocks_raw /
+    qwen_write_blocks_raw / qwen_block_bytes, version 2 of the qwen_kv_read extension; an image whose extension is the first version refuses the attach
+    (the model graft asserts), which a whole arm would spend its boot discovering."""
+    names = [arm['arm'] for arm in arms if arm.get('scenario') in TIER_SCENARIOS]
+    if not names:
+        return []
+    if anchor.get('error'):
+        return ['%s: the anchor probe could not read the image: %s' % (', '.join(names), anchor['error'])]
+    out = []
+    if anchor.get('stage_mismatched'):
+        out.append('%s: the served %s not the prefix model graft of this checkout (qwen_prefix_model_patch.PATCHED_SHA256): the image predates the '
+                   'preconverted checkpoints and the host tier' % (', '.join(names), ' and '.join(anchor['stage_mismatched'])))
+    if anchor.get('raw_ops') is not True:
+        out.append('%s: this image has no ttnn.qwen_read_blocks_raw / qwen_write_blocks_raw / qwen_block_bytes (the qwen_kv_read extension, version 2; probe '
+                   'says %s): the tier would refuse to attach. Build the extension (optimisation/ttnn-op/kv_region_read/build_kv_read.sh), qualify it on '
+                   'the cards first (the kvread probe prints "KV_READ_PROBE raw=ok"), and bake it or mount it (--kvread-mount, '
+                   'C2_PREFIX_KVREAD_MOUNT=1)' % (', '.join(names), anchor.get('raw_ops')))
+    return out
+
+
+def tier_profile(profile):
+    """The profile's tier settings, or None when it names no QWEN_PREFIX_HOST_TIER_GIB: gib, whether the restore audit and the preconverted
+    comparison are on, the digest mode."""
+    env = dict((str(key), str(value)) for key, value in (profile.get('env') or {}).items())
+    try:
+        gib = float(env.get('QWEN_PREFIX_HOST_TIER_GIB') or 0)
+    except ValueError:
+        return None
+    if not gib > 0:
+        return None
+    return dict(gib=gib, audit=env.get('QWEN_PREFIX_HOST_TIER_AUDIT') == '1', preconverted=env.get('QWEN_PREFIX_CKPT_PRECONVERTED') == '1',
+                preconverted_audit=env.get('QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT') == '1', verify=env.get('QWEN_PREFIX_HOST_TIER_VERIFY') or 'sample',
+                store_gib=env.get('QWEN_PREFIX_STORE_GIB') or '8')
 
 
 class PlanError(ValueError):
@@ -378,6 +428,12 @@ def not_applicable(plan, profile, profiles):
         elif arm == 'lifecycle-tiny' and is_sticky_profile(chosen):
             out.append((arm, 'profile %s budgets the KV pool for every seat\'s whole context and the fast path has '
                              'no preemption: a tiny pool is not a shape it serves' % profile))
+        elif arm.startswith('tier-'):
+            tier = tier_profile(chosen)
+            if tier is None:
+                out.append((arm, 'profile %s names no QWEN_PREFIX_HOST_TIER_GIB: the tier arms run on a tier profile (make_prefix_tier_profiles)' % profile))
+            elif not tier['preconverted']:
+                out.append((arm, 'profile %s does not name QWEN_PREFIX_CKPT_PRECONVERTED=1: the tier arms read the preconverted checkpoints' % profile))
     return out
 
 
@@ -446,6 +502,8 @@ def plan_arms(plan, profile, baseline, profiles):
         entry = dict(arm=arm, scenario=scenario, served=served, derived=derived, timeout=timeout, strict=strict,
                      prefix=which == 'prefix', kind=kind, context=context,
                      seats=int(((chosen.get('engine') or {}).get('max-num-seqs')) or 4))
+        if scenario in TIER_SCENARIOS:
+            entry['tier'] = tier_profile(chosen)      # not None: not_applicable left the arm out of a profile without the tier
         s2 = is_s2_profile(chosen)
         sticky = which == 'prefix' and sticky_profile
         if s2 and scenario not in TIMED_SCENARIOS:
@@ -573,7 +631,9 @@ def anchor_script(root=MODEL_ROOT, pins=GRAFT_PINS, files=ANCHOR_FILES):
     return ('cd ' + root + ' && sha256sum ' + ' '.join(files) + '; echo ==pins; cat ' + pins + '; echo ==pinned; '
             + listed + ' | while read -r p; do sha256sum "$p" 2>/dev/null || echo "missing  $p"; done; '
             'echo ==markers; grep -rlF "[PREFIX]" . || true; '
-            'echo ==region; python3 -c "import ttnn\ntry:\n import qwen_kv_read\nexcept Exception:\n pass\nprint(\'region\', int(callable(getattr(ttnn, \'qwen_read_blocks\', None))))" '
+            'echo ==region; python3 -c "import ttnn\ntry:\n import qwen_kv_read\nexcept Exception:\n pass\n'
+            'raw = all(callable(getattr(ttnn, n, None)) for n in (\'qwen_read_blocks_raw\', \'qwen_write_blocks_raw\', \'qwen_block_bytes\'))\n'
+            'print(\'region\', int(callable(getattr(ttnn, \'qwen_read_blocks\', None))), \'raw\', int(raw))" '
             '2>/dev/null | tail -n 1 || true')
 
 
@@ -597,7 +657,7 @@ def parse_anchor(text):
     stage_mismatched: those whose served sha is not it, marker_files, prefix_marker_in: marker files
     the probe can vouch for (the two anchor files or a pinned one), unpinned: anchor files pinned by
     neither)."""
-    files, pins, actual, marked, section, region_read = {}, {}, {}, [], 'files', None
+    files, pins, actual, marked, section, region_read, raw_ops = {}, {}, {}, [], 'files', None, None
     for line in text.splitlines():
         if line.startswith('==pins'):
             section = 'pins'
@@ -612,8 +672,11 @@ def parse_anchor(text):
             section = 'region'
             continue
         if section == 'region':
-            if line.split()[:1] == ['region'] and len(line.split()) == 2:
-                region_read = line.split()[1] == '1'
+            parts = line.split()
+            if parts[:1] == ['region'] and len(parts) in (2, 4):
+                region_read = parts[1] == '1'
+                if len(parts) == 4 and parts[2] == 'raw':
+                    raw_ops = parts[3] == '1'
             continue
         if section == 'markers':
             path = line.strip()
@@ -640,7 +703,7 @@ def parse_anchor(text):
     stage_mismatched = sorted(path for path in stage_pins if files.get(path) != stage_pins[path])
     vouched = set(ANCHOR_FILES) | set(pins)
     return dict(files=files, pins=pins, actual=actual, mismatched=mismatched, stage_pins=stage_pins,
-                stage_mismatched=stage_mismatched, marker_files=marked, region_read=region_read,
+                stage_mismatched=stage_mismatched, marker_files=marked, region_read=region_read, raw_ops=raw_ops,
                 prefix_marker_in=sorted(path for path in marked if path in vouched),
                 unpinned=sorted(path for path in ANCHOR_FILES if path not in pins and path not in stage_pins))
 
@@ -1016,6 +1079,11 @@ STAT_REASONS = dict(
     evicted_lru=('the checkpoint LRU', 'no checkpoint was pushed out of the small store by the LRU'),
     dropped_hits=('an allocation failure after a grant (F2)',
                   'no staged grant with Q > 0 was dropped at commit (an allocation failure after a grant, F2)'),
+    tier_spill_blocks=('the host tier\'s spill', 'the tier spilled no block: the flood evicted nothing from the device pool, or the tier never saw the eviction'),
+    tier_restore_requests=('the host tier\'s restore', 'no request was restored from the host tier'),
+    tier_restore_blocks=('the host tier\'s restore', 'the host tier restored no block'),
+    tier_audit_reads=('the restore audit', 'no restored block was read back and compared (QWEN_PREFIX_HOST_TIER_AUDIT=1)'),
+    tier_digest_checks=('the restore digest check', 'no block\'s digest was checked at restore'),
 )
 
 
@@ -1212,6 +1280,204 @@ def lifecycle_findings(arm, records, events, scanned, stats):
     return problems, missing, lines
 
 
+# The tier counters that must stay at zero in every tier arm (tier_latched is the tier-returning drill's, judged there).
+TIER_BAD_COUNTERS = (
+    ('tier_spill_failures', 'a spill (device read) failed'),
+    ('tier_restore_failures', 'a restore (device write) failed'),
+    ('tier_restore_refused_digest', 'a restore was refused because a block no longer matched its digest (the host bytes changed under the tier)'),
+    ('tier_digest_failures', 'a block\'s digest check failed'),
+    ('tier_audit_mismatches', 'a restored block read back differently from the bytes written'),
+)
+# Counters whose non-zero value says the tier (or the checkpoint store) was short of room (or of host memory), not that it was wrong: a returning turn
+# that got less than the oracle's Q may be explained by them.
+TIER_ROOM_COUNTERS = ('tier_evicted', 'tier_spill_dropped_cap', 'tier_spill_dropped_governor', 'tier_spill_dropped_full', 'tier_restore_refused_room',
+                      'evicted_lru', 'evicted_fair')      # (the last two: the CHECKPOINT store was short of room, which the oracle's store arithmetic does not know for preconverted checkpoints)
+
+
+def in_window(entries, record):
+    """The log entries (scan's lists) inside a record's log window."""
+    window = (record or {}).get('log_window') or [None, None]
+    if window[0] is None:
+        return []
+    return [entry for entry in entries if window[0] <= entry['index'] <= window[1]]
+
+
+def tier_stat_problems(stats, where):
+    return ['%s=%s %s: %s' % (name, stats[name], where, why) for name, why in TIER_BAD_COUNTERS if stats.get(name)]
+
+
+def gb(value):
+    return '%.2f' % ((value or 0) / 1e9)
+
+
+def tier_timed_rows(arm, records, events, scanned):
+    """One line per timed size: the three TTFTs, the restore on record and the spill the returning request paid. -> (problems, not exercised, lines)."""
+    problems, missing, lines = [], [], []
+    index = by_tag(records)
+    restores = dict((entry.get('tag'), entry) for entry in scanned.get('tier_restores') or ())
+    names = sorted((name for name in events if name.startswith('tier-timed-') and name[len('tier-timed-'):].isdigit()),
+                   key=lambda name: int(name[len('tier-timed-'):]))
+    if not names:
+        missing.append('no timed session was built (the scenario sized none inside the served context)')
+    for name in names:
+        event = events[name]
+        back = index.get(event.get('return_tag')) or {}
+        restore = restores.get(event.get('return_tag'))
+        spills = in_window(scanned.get('tier_spills') or (), back)
+        spilled_bytes, spilled_ms = sum(e.get('bytes') or 0 for e in spills), sum(e.get('ms') or 0 for e in spills)
+        if not event.get('return_ok'):
+            missing.append('%s: the returning turn failed (%s)' % (name, back.get('error') or back.get('aborted')))
+            continue
+        if restore is None:
+            missing.append('%s: no "host tier restore" line for the returning turn %s (Q=%s): it was not restored from host RAM (the flood left its '
+                           'blocks on the device, or the tier did not hold them)' % (name, event.get('return_tag'), q_of(back)))
+        text = ('%s: prompt %s tokens; cold prefill TTFT %s s (%s tokens; the first cycle is into an empty pool); device-resident hit TTFT %s s; returning hit TTFT %s s (Q=%s)'
+                % (name, event.get('return_prompt_tokens'), event.get('build_ttft_s'), event.get('build_prompt_tokens'),
+                   event.get('resident_ttft_s'), event.get('return_ttft_s'), q_of(back)))
+        if restore is not None:
+            rate = (restore.get('bytes') or 0) / (restore.get('ms') * 1e6) if restore.get('ms') else None
+            text += ('; restore %s blocks %s GB in %s ms (%s GB/s); displaced blocks spilled in the same request: %s GB in %s ms over %d flushes'
+                     % (restore.get('blocks'), gb(restore.get('bytes')), restore.get('ms'), '%.2f' % rate if rate else '-', gb(spilled_bytes),
+                        round(spilled_ms, 1), len(spills)))
+        lines.append(text)
+    return problems, missing, lines
+
+
+def tier_findings(arm, records, events, scanned, stats):
+    """The host KV tier's and the preconverted checkpoints' reading of an arm (the tiers plan; prefix_markers' tier_* lists, the registry's tier_*
+    counters). Exactness itself is the arm's pairs (hit against cold twin) and the digests; this adds what must be ON RECORD for those to mean
+    anything: the tier attached, checkpoints stored preconverted, (audited) restores compared, and on tier-returning/tier-timed a session that
+    really left the device pool and really came back from host RAM. -> (problems, not exercised, lines)."""
+    problems, missing, lines = [], [], []
+    tier = arm.get('tier') or {}
+    scenario = arm['scenario']
+    on, attached = scanned.get('tier_on') or [], scanned.get('tier_io') or []
+    if not attached:
+        missing.append('no "host tier IO attached" line: the model graft never gave the tier its device IO')
+    if not on:
+        missing.append('no "host tier on" line: the scheduler graft never installed the tier')
+    else:
+        lines.append('tier: %s' % json.dumps(dict((key, on[0].get(key)) for key in ('gib', 'kv_gib', 'block_bytes', 'verify', 'audit', 'spill_max_blocks',
+                                                                                  'min_tokens', 'slack'))))
+    if not scanned.get('ckpt_preconverted'):
+        missing.append('no checkpoint was stored preconverted (no "checkpoint preconverted" line): QWEN_PREFIX_CKPT_PRECONVERTED=1 did nothing')
+    audits = scanned.get('ckpt_audits') or []
+    lines.append('preconverted checkpoints: %d stored, %d restore audit lines' % (scanned.get('ckpt_preconverted') or 0, len(audits)))
+    if tier.get('preconverted_audit'):
+        if not audits:
+            missing.append('QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT=1 but no [PREFIX-AUDIT-CKPT] line: no restore compared its preconverted tensors with '
+                           'the conversion and read the device back')
+        for entry in audits:
+            if entry.get('conversion_equal') != 1 or entry.get('readback_equal') != 1:
+                problems.append('[PREFIX-AUDIT-CKPT] line %s: conversion_equal=%s readback_equal=%s differing=%s' % (
+                    entry.get('index'), entry.get('conversion_equal'), entry.get('readback_equal'), entry.get('differing')))
+    drilled = scenario == 'tier_returning'
+    trouble = scanned.get('tier_trouble') or []
+    for entry in trouble:
+        if 'latched off' in entry['line'] and 'kill switch' in entry['line'] and drilled and (events.get('tier-kill') or {}).get('written'):
+            continue
+        problems.append('server log line %s: %s' % (entry['index'], entry['line'][:200]))
+    if stats is None:
+        missing.append('no registry stats export (%s or a "[PINDIAG] prefix: stats" line): the tier counters are not read' % markers.STATS_FILE)
+        return problems, missing, lines
+    lines.append('tier counters: %s' % json.dumps(dict((key, value) for key, value in sorted(stats.items()) if key.startswith('tier_') and value),
+                                                  sort_keys=True))
+    if stats.get('pins'):
+        problems.append('%s checkpoint pins held after every request ended' % stats['pins'])
+    if stats.get('commit_mismatch'):
+        problems.append('%s grants refused at commit (start_pos != Q)' % stats['commit_mismatch'])
+    if stats.get('tier_latched') and not drilled:
+        problems.append('tier_latched=%s: the tier latched itself off (no kill switch was written in this arm)' % stats['tier_latched'])
+    # Tenancy: the tier's blocks are keyed by the salted block hash, so a request under a fresh salt (a cold twin, a flood, an unsalted one) can never be
+    # restored from them; one that was is another tenant's pages served.
+    index = by_tag(records)
+    for entry in scanned.get('tier_restores') or ():
+        record = index.get(entry.get('tag'))
+        if record is not None and (record.get('role') in judge.FRESH_ROLES or record.get('role') in ('flood', 'unsalted')):
+            problems.append('%s (role %s, a fresh salt) was restored %s blocks from the tier: another tenant\'s pages' % (
+                record['tag'], record.get('role'), entry.get('blocks')))
+    before = (events.get('stats-before-tier-kill') or {}).get('stats') if drilled else None
+    problems += tier_stat_problems(before if before is not None else stats, 'before the tier kill switch' if before is not None else 'at the end')
+    if drilled and before is not None:
+        problems += tier_stat_problems(stats, 'at the end')
+    if scenario in ('tier_returning', 'tier_timed'):
+        evidence = before if before is not None else stats
+        wanted = ['tier_spill_blocks', 'tier_restore_requests', 'tier_restore_blocks']
+        if tier.get('audit'):
+            wanted += ['tier_audit_reads', 'tier_digest_checks']
+        missing += required_stats(evidence, wanted)
+    if scenario == 'tier_returning':
+        more_problems, more_missing, more_lines = tier_returning_rows(arm, records, events, scanned, stats, before)
+        problems += more_problems
+        missing += more_missing
+        lines += more_lines
+    elif scenario == 'tier_timed':
+        more_problems, more_missing, more_lines = tier_timed_rows(arm, records, events, scanned)
+        problems += more_problems
+        missing += more_missing
+        lines += more_lines
+    return problems, missing, lines
+
+
+def tier_returning_rows(arm, records, events, scanned, stats, before):
+    """The returning sessions after the flood: each restored from the tier at the oracle's Q, the kill switch's latch. -> (problems, not exercised, lines)."""
+    problems, missing, lines = [], [], []
+    index = by_tag(records)
+    flood = events.get('tier-flood') or {}
+    lines.append('flood: %s' % json.dumps(flood))
+    if not flood:
+        missing.append('the flood did not run')
+    after = hits(records, 'tier-after-flood')
+    restores = dict((entry.get('tag'), entry) for entry in scanned.get('tier_restores') or ())
+    evidence = before if before is not None else (stats or {})
+    room = sorted(name for name in TIER_ROOM_COUNTERS if evidence.get(name))
+    rows, restored, lost = [], [], []
+    for record in after:
+        wanted = (record.get('expected') or {}).get('q', 0)
+        got = q_of(record) or 0
+        restore = restores.get(record.get('tag'))
+        rows.append((record.get('prompt_tokens'), got, wanted, restore.get('blocks') if restore else None))
+        if restore is not None:
+            restored.append(record)
+        if got < wanted:
+            lost.append(record)
+    lines.append('after the flood (L, Q, oracle Q, blocks restored from host RAM): %s' % rows)
+    if not after:
+        missing.append('no returning turn ran after the flood')
+    elif not restored:
+        missing.append('no returning turn was restored from the tier (no "host tier restore" line for %d turns): the flood left every session on the '
+                       'device, or the tier held none of its blocks' % len(after))
+    spilled = (evidence.get('tier_spill_blocks') or 0) > 0
+    for record in lost:
+        if room:
+            lines.append('%s restored less than the oracle expects (Q=%s, oracle %s) with the tier short of room (%s)' % (
+                record['tag'], q_of(record), (record.get('expected') or {}).get('q'), ', '.join(room)))
+        elif not restored and not spilled:
+            lines.append('%s restored less than the oracle expects (Q=%s, oracle %s) and the tier spilled nothing: the arm is not exercised, not the tier wrong' % (
+                record['tag'], q_of(record), (record.get('expected') or {}).get('q')))
+        else:
+            problems.append('%s: Q=%s under the oracle\'s %s with no tier loss on record (no eviction, drop or refusal): the tier lost a session it had '
+                            'room for' % (record['tag'], q_of(record), (record.get('expected') or {}).get('q')))
+    again = hits(records, 'tier-again')
+    lines.append('one more turn on a restored session (L, Q, oracle Q): %s' % [(r.get('prompt_tokens'), q_of(r), (r.get('expected') or {}).get('q'))
+                                                                           for r in again])
+    kill = events.get('tier-kill') or {}
+    lines.append('tier kill switch: %s' % json.dumps(kill))
+    if not kill.get('written'):
+        missing.append('the tier\'s kill switch file could not be written')
+    else:
+        if not any('latched off' in entry['line'] for entry in scanned.get('tier_trouble') or ()):
+            problems.append('the tier kill switch file was present but no "host tier latched off" line')
+        if (stats or {}).get('tier_latched') != 1:
+            problems.append('the tier kill switch was written but tier_latched=%s' % (stats or {}).get('tier_latched'))
+        if not kill.get('removed'):
+            problems.append('the tier kill switch file this gate wrote could not be removed')
+        latched = index.get(kill.get('latched_tag')) or {}
+        if latched and not latched.get('ok'):
+            problems.append('the turn after the tier latched off failed: %s' % (latched.get('error') or latched.get('aborted')))
+    return problems, missing, lines
+
+
 def s2_findings(arm, log_text, scanned, records):
     """An arm on an S2 profile (the module docstring's sticky section): the S2 gate's reading of its log,
     the C2-any lines, KV_SHARED, and on a sticky arm the install, warmup, admit and build lines and the
@@ -1368,16 +1634,19 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None):
     lines = []
     if arm['prefix']:
         bringup = arm['scenario'] == 'bringup_prefix'
+        # The tier-attach chain is salted pairs only: its capturing rows have no uncaptured twin (the bring-up's unsalted turn is that), so it measures
+        # the hits (a restore from preconverted tensors compiles nothing) and not the first capture.
+        measured_hit = bringup or arm['scenario'] == 'tier_attach'
         program, detail, unmeasured = judge.program_cache_problems(scanned.get('rows') or [], driver.pairs,
-                                                                   first_capture=bringup, require_hit=bringup)
+                                                                   first_capture=bringup, require_hit=measured_hit)
         lines.append('program cache across hits and the first capture: %s' % json.dumps(detail, sort_keys=True))
         problems += program
-        (missing if bringup else notes).extend(unmeasured)
+        (missing if measured_hit else notes).extend(unmeasured)
         digest_fail, digest_missing, digest_notes = digest_findings(arm, driver)
         problems += digest_fail
         missing += digest_missing
         notes += digest_notes
-        if bringup and stats is not None and stats.get('unsalted_denied'):
+        if arm['scenario'] == 'bringup_prefix' and stats is not None and stats.get('unsalted_denied'):
             problems.append('the registry denied %s unsalted requests a hit: an unsalted request published blocks'
                             % stats['unsalted_denied'])
     report = {}
@@ -1388,6 +1657,11 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None):
         lines += more_lines
     if arm['scenario'] in LEVERN_DRILL_SCENARIOS:
         more_problems, more_missing, more_lines = levern_findings(driver.events, log_text)
+        problems += more_problems
+        missing += more_missing
+        lines += more_lines
+    if arm['scenario'] in TIER_SCENARIOS:
+        more_problems, more_missing, more_lines = tier_findings(arm, records, driver.events, scanned, stats)
         problems += more_problems
         missing += more_missing
         lines += more_lines
@@ -1685,11 +1959,11 @@ class Runner(object):
             self.log('[PREFIX-GATE] arm %s: ready after %.0f s' % (arm['arm'], self.clock() - started))
             driver.context_tokens = self.served_context(client, arm, driver)
             kwargs = {}
-            if arm['scenario'] in ('lifecycle_evict', 'lifecycle_tiny'):
+            if arm['scenario'] in ('lifecycle_evict', 'lifecycle_tiny', 'tier_returning', 'tier_timed'):
                 kwargs['pool_tokens'] = markers.scan(follower.lines()).get('kv_tokens')
             if arm['scenario'] == 'lifecycle_evict':
                 kwargs['restart'] = lambda: self.restart(container, client, follower, driver)
-            if arm['scenario'] in TIMED_SCENARIOS:
+            if arm['scenario'] in TIMED_SCENARIOS and arm['scenario'] not in TIER_SCENARIOS:
                 kwargs.update(agents=self.agents, turns=self.turns)
             if arm.get('full'):
                 kwargs['full'] = True
@@ -1994,6 +2268,14 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
         if anchor is None:
             anchor = anchor_probe(options.image)
         problems = audit_image_problems([arm for plan in plans for arm in arms_of[plan]], anchor)
+        if problems:
+            for problem in problems:
+                log('refused: %s' % problem)
+            return 2
+    if any(arm.get('scenario') in TIER_SCENARIOS for plan in plans for arm in arms_of[plan]):
+        if anchor is None:
+            anchor = anchor_probe(options.image)
+        problems = tier_image_problems([arm for plan in plans for arm in arms_of[plan]], anchor)
         if problems:
             for problem in problems:
                 log('refused: %s' % problem)

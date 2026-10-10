@@ -1,0 +1,45 @@
+# The order of the tp4/prefix-tiers four-card DEVELOPMENT window: the preconverted GDN checkpoints (QWEN_PREFIX_CKPT_PRECONVERTED) and the host KV tier (QWEN_PREFIX_HOST_TIER_GIB) on the production stack, one image, tp4-prefix-tiers-1, built from
+# the pushed tp4/prefix-tiers commit. What the two features are, their flags, metrics, log lines and costs: docs/prefix-store-hygiene.md.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# THE CARDS ARE UNDER DEVELOPMENT: NO agentstart, NO agentstop, NO hand-back, NO deploy, NO :latest move. Z ends with a reset and no agentstart. No profile of the traffic family names a tier flag (serving_c2_contract.prefix_policy_problems refuses it): every result is UNQUALIFIED and the
+# production profile is untouched. Both features are default OFF and byte-identical off (test_qwen_prefix_tiers FlagOffIdentityTests, FlagOffGoldenTests).
+# P0. NO OTHER WINDOW DRIVER MAY BE ALIVE and no privileged builder container may be up. The CPU suite green on this branch first (gh workflow run qwen-cpu-suite.yml -f ref=<sha>). Push ONE tag at a time and wait for its run to finish (the workflow keeps one pending run;
+#     queued tags are cancelled). Never cancel a running card job. B0 never runs during a timing job (T3). Production is stopped and unserved by the owner for the window (the cutover pack's steps and post-checks); nothing in this pack starts or hands back the agent.
+# P0. THE EXTENSION. The host tier's device IO is version 2 of the qwen_kv_read extension (ttnn.qwen_read_blocks_raw / qwen_write_blocks_raw / qwen_block_bytes), written and unit-tested on CPU fakes, NEVER COMPILED OR RUN ON A CARD. Before B0, once, on the rig host:
+#     optimisation/ttnn-op/kv_region_read/build_kv_read.sh   (builds it from this checkout's source and import-checks the four ops)
+#     python3 scripts/ci/pin_kvread.py --dir <the build directory> --write   (moves the pinned sha256 in the Dockerfile, build-c2-serving-image.sh, c2_image_provenance.py and the overlay test; refuses a build that is not this checkout's source at version 2)
+#     then commit, the CPU suite on that commit, push. Without it the image bakes version 1 and the tier arms are refused before any container boots (c2_prefix_gate.tier_image_problems), which is also what Q1 would read as raw=absent.
+# P0. The placeholder tag tp4-prefix-tiers-1 in every template is the tag B0 builds (sed -i 's/tp4-prefix-tiers-1/<tag>/' *.env). A commit of a file the image carries needs a new B0 build and a new tag in every template.
+# ORDER: the cheapest kill signals first: X0 (status, rescan, reset), B0 (may precede X0: a build is no card job), Q1 (the raw block ops byte for byte on the served mesh, with their device rates: the first thing no card has ever run), A1 (the audited attach of the tier
+# profile: the engine starts with the tier's device IO and serves the smoke as it did), T1 (the audited chain: the first restores from preconverted checkpoints, compared on card with today's conversion), T2 (the returning-session smoke: the forced eviction and the
+# restore, byte for byte, against cold twins, and the tier's kill switch), T3 (the timed restore at ~32k/128k/254k), Z.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0 <- B0
+# NEEDS Q1 <- X0
+# NEEDS A1 <- Q1
+# NEEDS T1 <- A1
+# NEEDS T2 <- T1
+# NEEDS T3 <- T2
+# READ RULES (each also needs c2_smoke_check clean where it runs and no stall; the templates' own headers have the whole text):
+#   B0  provenance report with no problem line (check (g): the extension at its new pin), the closure checks pass, the image id printed.   X0  the status prints, the rescan finds every board, the reset completes on all four.
+#   Q1  'KV_READ_PROBE verdict=PASS', 'KV_READ_PROBE extension source: baked', 'KV_READ_PROBE raw=ok' (bytes read, written into a second cache and read back equal, unpacked values equal, no program-cache growth) and the rate lines. raw=absent: the pin was not moved (P0).
+#       FAIL or NOT-MEASURED: the raw ops are NOT QUALIFIED and the rest of the pack is skipped.
+#   A1  the smoke clean; 'host tier IO attached', 'host tier on gib=32.00 kv_gib=24.00 ... verify=all audit=1', the model warm with restore_mode=h2d; no AssertionError; the ledger and the 'tier rss=' line recorded.
+#   T1  the tier-attach plan PASS: '[PREFIX-AUDIT-CKPT] ... conversion_equal=1 readback_equal=1' on every restore, 'checkpoint preconverted' lines, every pair IDENTICAL, the program count unchanged across the first hit, the tier counters free of failures.
+#   T2  the tier-returning plan PASS: every returning session restored from host RAM at the oracle's Q (blocks on record), every pair IDENTICAL, spill and restore counters non-zero, the failure counters (spill, restore, digest, read-back mismatch) ZERO,
+#       the tier's kill switch latched and the next turn exact, no pins held, the cold twins never restored. NOT_EXERCISED means the flood did not push the sessions out of the pool (the finding is the pool or flood size).
+#   T3  the tier-timed plan PASS (a restore on record at every size and the pairs IDENTICAL) and the timing lines: cold prefill, device-resident hit and returning-hit TTFT per size, the restore's GB/s, the displaced blocks' spill.   Z  the reset completes; the agent stays stopped.
+# NO-GO for adopting either flag: any byte that differs (a [PREFIX-AUDIT-CKPT] line with a 0, a tier_audit_mismatches or tier_digest_failures count, a pair not IDENTICAL), any restore failure that was not a clean miss, a tier that latched off on its own, a returning
+# session that the tier had room for and lost, a fresh-salt request restored from the tier, any stall, any program compiled by a restore or a spill. This window decides nothing about production: it is evidence for the owner.
+# NOT in this window: the NVMe tier, the tier on a traffic profile (no qualification record lifts the contract's refusal yet), arming anything on the production profile.
+# Time (estimate, minutes; cumulative in brackets): B0 60 [60], X0 20 [80], Q1 30 [110], A1 120 [230], T1 90 [320], T2 210 [530], T3 150 [680], Z 10 [690]: about 11.5 hours; the floods (a pool of cold prefills per cycle: one in T2, three in T3) are the
+# unmeasured part, measure them on T2.
+B0-build stop tp4-prefix-tiers-1 60
+X0-status-rescan-reset stop tp4-prefix-tiers-1 20
+Q1-kvread-v2-raw-probe stop tp4-prefix-tiers-1 30
+A1-tier-audited-attach-smoke stop tp4-prefix-tiers-1 120
+T1-tier-attach stop tp4-prefix-tiers-1 90
+T2-tier-returning stop tp4-prefix-tiers-1 210
+T3-tier-timed-restore soft tp4-prefix-tiers-1 150
+Z-reset soft tp4-prefix-tiers-1 10

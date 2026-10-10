@@ -496,8 +496,8 @@ class ClosureTests(unittest.TestCase):
         loaded = {name for name in report['modules'] if name in known and not name.startswith('test_')}
         # (make_parked_profiles, make_round_host_profiles, make_octo_profiles and make_octo2_profiles are the generators of the engine-reuse, round-host, octo-T8 and octo-2 lever profile twins: the profile tests that the
         # attach test imports name them, through profile_twins; they serve nothing)
-        # (make_w2_kill_profiles generates the W2 kill drill twin of the ship profile and make_kvread_profiles the region-read audit twins; the profile tests name them the same way)
-        loaded -= {'tp_test_support', 'make_parked_profiles', 'make_round_host_profiles', 'make_octo_profiles', 'make_octo2_profiles', 'make_w2_kill_profiles', 'make_kvread_profiles', 'profile_twins'}
+        # (make_w2_kill_profiles generates the W2 kill drill twin of the ship profile, make_kvread_profiles the region-read audit twins and make_prefix_tier_profiles the host KV tier's; the profile tests name them the same way)
+        loaded -= {'tp_test_support', 'make_parked_profiles', 'make_round_host_profiles', 'make_octo_profiles', 'make_octo2_profiles', 'make_w2_kill_profiles', 'make_kvread_profiles', 'make_prefix_tier_profiles', 'profile_twins'}
         extra = loaded - self.seen
         # What the attach loads outside the closure is a NOT_SERVED module it enters inert (each named in ATTACH_ENTERS_INERT,
         # exactly) and what those import at module level - not everything any NOT_SERVED module could ever reach.

@@ -94,6 +94,19 @@ never guessed around):
     [PINDIAG] verify t2 kv shared ...   verify_trace_t2.KV_SHARED, a packed round's K/V conflict (the proposal
         guard's or the stage's); read into kv_shared, which a fast-path prefix arm needs empty.
 
+  the host KV tier and the preconverted checkpoints (QWEN_PREFIX_HOST_TIER_GIB, QWEN_PREFIX_CKPT_PRECONVERTED; docs/prefix-store-hygiene.md):
+    [PINDIAG] prefix: host tier on gib=<f> kv_gib=<f> block_bytes=<n> verify=<sample|all|off> audit=<0|1> spill_max_blocks=<n> min_tokens=<n> slack=<n> off_path=<path>
+        the scheduler graft, once, when the tier is configured and the model graft's IO is attached; read into tier_on.
+    [PINDIAG] prefix: host tier IO attached block_bytes=<n> tensors=<n> chips=<n> slice_bytes=<n> fingerprint=<s>
+        the model graft, once, after the warm; read into tier_io.
+    [PINDIAG] prefix: host tier spill blocks=<n> bytes=<n> ms=<f> held=<n>          one per flush; read into tier_spills.
+    [PINDIAG] prefix: host tier restore req=<id> blocks=<n> bytes=<n> ms=<f> from=<n> to=<n>
+        one per restored request (the blocks written to the device before vLLM's own hit logic ran); read into tier_restores.
+    [PINDIAG] prefix: host tier latched off: ... | host tier spill failed ... | host tier restore failed ...    read into tier_trouble.
+    [PREFIX-AUDIT-CKPT] tensors=<n> conversion_equal=<0|1> readback_equal=<0|1> differing=[...]
+        QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT=1, after a restore from preconverted tensors; read into ckpt_audits.
+    [PINDIAG] prefix: checkpoint preconverted req=<id> pos=<n> tensors=<n> host_bytes=<n> convert_ms=<f>      one per capture stored preconverted; counted into ckpt_preconverted.
+
 Other lines read: the serving contract's '[QWEN-C2] profile <name>: vLLM argv [...]' (the launched
 argv, memory read-the-launched-argv), the TT platform's 'Automatic prefix caching is enabled' and
 'Chunked prefill is not supported ... disabling it', the model's '[TP chunk-replay]' (the traced
@@ -134,6 +147,13 @@ GRANT = re.compile(r'\[PINDIAG\] prefix: grant req=(\S+) h=(\d+) Q=(\d+)(?: drai
 COMMIT_REFUSED = re.compile(r'\[PINDIAG\] prefix: commit refused req=(\S+) start_pos=(\d+) Q=(\d+)')
 CAPTURE_SKIPPED = re.compile(r'\[PINDIAG\] prefix: capture skipped req=(\S+) pos=(\S+): (.*)$')
 KILL_SWITCH = '[PINDIAG] prefix: kill switch '
+TIER_ON = '[PINDIAG] prefix: host tier on '
+TIER_IO = '[PINDIAG] prefix: host tier IO attached '
+TIER_SPILL = '[PINDIAG] prefix: host tier spill blocks='
+TIER_RESTORE = '[PINDIAG] prefix: host tier restore req='
+TIER_TROUBLE = ('[PINDIAG] prefix: host tier latched off', '[PINDIAG] prefix: host tier spill failed', '[PINDIAG] prefix: host tier restore failed')
+CKPT_AUDIT = '[PREFIX-AUDIT-CKPT] tensors='
+CKPT_PRECONVERTED = '[PINDIAG] prefix: checkpoint preconverted '
 STATS = re.compile(r'\[PINDIAG\] prefix: stats (\{.*\})\s*$')
 MODEL_ROW = '[PREFIX] '
 # A row, not the model's other [PREFIX] lines (program growth, capture skipped, no registry).
@@ -300,13 +320,43 @@ def dram_reading(line):
     return dict(point=match.group(1).strip(), chips=chips, unavailable=unavailable, text=text[:400])
 
 
+def tier_line(out, line, where):
+    """One of the host tier's or the preconverted checkpoints' lines (TIER_*, CKPT_*) into the scan's lists."""
+    if TIER_ON in line:
+        entry = fields(line.split(TIER_ON, 1)[1])
+        entry.update(where)
+        out['tier_on'].append(entry)
+    elif TIER_IO in line:
+        entry = fields(line.split(TIER_IO, 1)[1])
+        entry.update(where)
+        out['tier_io'].append(entry)
+    elif TIER_SPILL in line:
+        entry = fields('blocks=' + line.split(TIER_SPILL, 1)[1])
+        entry.update(where)
+        out['tier_spills'].append(entry)
+    elif TIER_RESTORE in line:
+        entry = fields('req=' + line.split(TIER_RESTORE, 1)[1])
+        entry.update(where)
+        entry['tag'] = request_tag(entry['req']) if isinstance(entry.get('req'), str) else None
+        out['tier_restores'].append(entry)
+    elif any(marker in line for marker in TIER_TROUBLE):
+        out['tier_trouble'].append(dict(where, line=line.strip()[:300]))
+    elif CKPT_AUDIT in line:
+        entry = fields('tensors=' + line.split(CKPT_AUDIT, 1)[1])
+        entry.update(where)
+        out['ckpt_audits'].append(entry)
+    elif CKPT_PRECONVERTED in line:
+        out['ckpt_preconverted'] += 1
+
+
 def scan(lines):
     """Every marker in a server log (a list of lines, docker timestamps allowed), in order. Each
     entry keeps its line index and timestamp so the driver can window it against a request."""
     out = dict(installs=[], chunked_installs=[], grants=[], rows=[], audits=[], refused=[], capture_skipped=[], kill_switch=[],
                stats=None, launches=[], apc=[], chunking_off=0, chunk_replay=0, dram=[], dram_readings=[],
                kv_tokens=None, failures=[], audit_costs=[], audit_crosses=[], eager_warm=[], four_card_warm=[], sticky_installs=[], sticky_admits=[], sticky_builds=[],
-               model_warm=[], model_warm_skipped=[], kv_shared=[], audit_windows=[])
+               model_warm=[], model_warm_skipped=[], kv_shared=[], audit_windows=[], tier_on=[], tier_io=[], tier_spills=[], tier_restores=[],
+               tier_trouble=[], ckpt_audits=[], ckpt_preconverted=0)
     for index, raw in enumerate(lines):
         stamp, line = split_timestamp(raw.rstrip('\n'))
         where = dict(index=index, time=stamp)
@@ -381,6 +431,8 @@ def scan(lines):
                                                pos=match.group(2), reason=match.group(3)[:200]))
         if KILL_SWITCH in line:
             out['kill_switch'].append(dict(where, line=line.strip()[:300]))
+        if '] prefix: host tier ' in line or CKPT_AUDIT in line or CKPT_PRECONVERTED in line:
+            tier_line(out, line, where)
         if EAGER_WARM in line:
             entry = fields(line.split(EAGER_WARM, 1)[1])
             entry.update(where)
