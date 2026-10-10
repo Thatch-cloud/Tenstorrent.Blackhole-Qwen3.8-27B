@@ -21,6 +21,7 @@ import unittest
 import c2_serving_job as job
 import hostgap_wph_smoke as rule
 import make_fusion_profiles as generator
+import make_prefix_tier_profiles as tier_generator
 import test_prestage_diff as tpd
 
 HERE = Path(__file__).resolve().parent
@@ -123,8 +124,8 @@ class TwinTests(unittest.TestCase):
             if profile.get('gate_only') is True:
                 continue
             for flag in (DIFF, LEAN, READS, PROBE):
-                if name in generator.ship_names() and flag != PROBE:
-                    self.assertEqual(profile['env'][flag], PROFILES[COMBINED]['env'][flag], name)        # the ship candidate is the combined arm as a traffic profile
+                if (name in generator.ship_names() or name in tier_generator.ship_names()) and flag != PROBE:
+                    self.assertEqual(profile['env'][flag], PROFILES[COMBINED]['env'][flag], name)        # the ship candidate (and the one with the host tier) is the combined arm as a traffic profile
                     continue
                 self.assertNotIn(flag, profile['env'], name)
 
