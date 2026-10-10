@@ -19,7 +19,8 @@ What it does, from tt-metal's cpp_device_perf_report.csv (TT_METAL_PROFILER_CPP_
     count;
   * classifies every op by its ROLE in the layer, never by core count (TP4 core counts differ from TP2's): a layer is GDN
     if its mixer holds GdnConvGates, else attention; matmuls by position (first = in-projection, last = out-projection;
-    gate, up, down in the MLP half); the recurrence is the longest generic op after the last conv-gates launch; the
+    gate, up, down in the MLP half); the recurrence is the longest generic op after the last conv-gates launch; a GDN layer with no named conv-gates launch
+    (the multi-SDPA block's: F1 is a generic op) books as conv-gates the chain launch two before the recurrence that is off the chain's full grid (f1_conv_gates); the
     attention core is the SDPA op, or per user the longest generic between AttnPrep and the heads concat;
   * reports time per category and layer type, weight throughput and ns per tile per core per matmul, collectives per call
     with the skew between chips, the cross-chip critical path, the in-trace dispatch gaps, the per-user and per-live-count
@@ -238,6 +239,21 @@ def layer_type(names):
     return 'gdn' if any(name.startswith('GenericOp') for name in names) else 'attn'
 
 
+F1_DETAIL = 'f1'   # the role detail of a conv-gates launch that is a generic op (W2's F1), not a named GdnConvGates launch
+
+
+def f1_conv_gates(ops, chain):
+    """The index of the F1 conv-gates launch among `chain`, the generic launches of one GDN mixer before its recurrence, or None. F1 is a generic op, so a
+    multi-SDPA block's GDN layer holds no GdnConvGates; its chain is the mover launches around it (split, conv windows, canon, window stack, F1, unstack), F1 the
+    second-to-last, and it is the one launch of the chain that is not on the full grid (it runs on the conv and gate cores it was planned for). Both must hold:
+    anything else (a fused chain, a different order) is left in the GDN glue rather than guessed."""
+    if len(chain) < 4:
+        return None
+    candidate = chain[-2]
+    others = [ops[i].cores for i in chain if i != candidate]
+    return candidate if ops[candidate].cores < min(others) else None
+
+
 def classify(ops):
     """(roles, layer count, layer types): roles[i] = (layer index or None, layer type, category, detail)."""
     layers, final = segment(ops)
@@ -263,11 +279,13 @@ def classify(ops):
                         sdpa = [i for i in inner if ops[i].k >= 0.5 * top]
         mm = [i for i in mixer if is_matmul(ops[i].op)]
         generic = [i for i in mixer if ops[i].op.startswith('GenericOp')]
-        recurrence = None
+        recurrence = f1 = None
         if ltype == 'gdn' and generic:
             conv = [i for i in mixer if ops[i].op.startswith('GdnConvGates')]
             after = [i for i in generic if not conv or i > max(conv)]
             recurrence = max(after or generic, key=lambda i: ops[i].k)
+            if not conv:
+                f1 = f1_conv_gates(ops, [i for i in generic if i < recurrence])
         for i in mixer:
             name = ops[i].op
             detail = None
@@ -283,6 +301,8 @@ def classify(ops):
                 cat = 'gdn.recurrence'
             elif ltype == 'gdn' and name.startswith('GdnConvGates'):
                 cat = 'gdn.conv_gates'
+            elif i == f1:
+                cat, detail = 'gdn.conv_gates', F1_DETAIL
             elif i in sdpa:
                 cat, detail = 'attn.sdpa', sdpa.index(i)
             elif name.startswith('BinaryNg') and i > (mm[-1] if mm else m1):
@@ -329,8 +349,9 @@ def sdpa_per_attention_layer(ops, roles):
 
 
 def conv_gates_per_gdn_layer(roles):
-    """The conv-gates launches in one GDN layer of this replay (one per user in the block), or None without a GDN layer."""
-    counts = collections.Counter(role[0] for role in roles if role[2] == 'gdn.conv_gates')
+    """The NAMED conv-gates launches in one GDN layer of this replay (one per user in the block), or None without any: F1, a generic op, is booked under
+    gdn.conv_gates too (detail F1_DETAIL) but is one launch for all the users and says nothing about how many there are."""
+    counts = collections.Counter(role[0] for role in roles if role[2] == 'gdn.conv_gates' and role[3] != F1_DETAIL)
     return statistics.median(counts.values()) if counts else None
 
 
@@ -445,6 +466,11 @@ def read_json(path):
 def weight_table(tp=4):
     """{detail key: (K, N per chip, dtype)} of the weight matmuls, from tp_shapes' geometry (the model's totals divided by
     the chip count); the dtypes are the families' (gate and up bf4, the rest bf8): assumptions, printed as such."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        # `python3 -I` (the way a downloaded artifact is read) does not put the script's own directory on sys.path, and the import below
+        # then failed silently and left every dtype, MB and GB/s column blank. Appended, so it can shadow nothing.
+        sys.path.append(here)
     try:
         import tp_shapes
         geo = tp_shapes.geometry(tp)
@@ -508,7 +534,7 @@ def analyse_trace(info, table=None):
                 for u in users:
                     sdpa_by_user[u].append(median(users[u]))
                 conv_counts.append(collections.Counter(role[0] for op, role in zip(ops, roles)
-                                                       if role[2] == 'gdn.conv_gates'))
+                                                       if role[2] == 'gdn.conv_gates' and role[3] != F1_DETAIL))
                 for op, (li, lt, name, detail) in zip(ops, roles):
                     if name.startswith('mm.') and name != 'mm.lm_head':
                         key = name if detail is None else '%s.%s' % (name, detail)
@@ -1089,6 +1115,8 @@ def analyse_sessions(sessions, every, columns=(), chips=4, log_text=None, gate_j
     log = parse_log(log_text) if log_text else None
     twin = parse_log(twin_log) if twin_log else None
     problems, notes = [], []
+    if not table:
+        notes.append('no weight geometry (tp_shapes could not be read at %d chips): the dtype, MB, GB/s and ns per tile columns of the weight matmuls are blank' % chips)
     if len(devices_all) != chips:
         problems.append('%d chips in the CSV (%s), expected %d' % (len(devices_all), ','.join(devices_all), chips))
     listing = []

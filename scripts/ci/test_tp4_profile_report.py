@@ -754,6 +754,65 @@ class MultiSdpaBlockTests(unittest.TestCase):
     def test_the_validity_has_no_structure_problem(self):
         self.assertEqual(self.result['validity']['problems'], [])
 
+    def test_the_f1_generic_op_is_booked_under_conv_gates_not_gdn_glue(self):
+        cats = self.block['categories']
+        self.assertAlmostEqual(cats['gdn.conv_gates']['ms'][0], 0.859, delta=0.03)       # M676: 48 launches of 17.89 us
+        self.assertAlmostEqual(cats['gdn.glue']['ms'][0], 5.14, delta=0.05)
+        self.assertAlmostEqual(self.block['by_layer_type']['gdn']['us']['gdn.conv_gates'], 17.9, delta=1.0)
+        self.assertAlmostEqual(self.block['groups']['gdn.conv_gates'], cats['gdn.conv_gates']['ms'][0], places=3)
+        self.assertIsNone(self.block['conv_gates_per_gdn_layer'], 'F1 is one launch for all the users: it is no count of them')
+        self.assertEqual(self.block['layout'], 'multi')
+        # the roles: one conv-gates launch in each of the 48 GDN layers, on the launch two before the recurrence
+        roles, layers, types = report.classify(self.ops_of('0'))
+        found = [(i, role) for i, role in enumerate(roles) if role[2] == 'gdn.conv_gates']
+        self.assertEqual(len(found), 48)
+        self.assertTrue(all(role[3] == report.F1_DETAIL and role[1] == 'gdn' for _, role in found))
+        self.assertEqual(report.conv_gates_per_gdn_layer(roles), None)
+        recurrences = [i for i, role in enumerate(roles) if role[2] == 'gdn.recurrence']
+        self.assertEqual([i - j for (j, _), i in zip(found, recurrences)], [2] * 48)
+
+    def test_the_lone_step_keeps_its_named_conv_gates(self):
+        self.assertEqual(self.lone['conv_gates_per_gdn_layer'], 1)
+        self.assertAlmostEqual(self.lone['categories']['gdn.conv_gates']['ms'][0], 48 * 0.0206, delta=0.03)
+
+    def test_the_f1_launch_is_the_one_off_the_full_grid_second_to_last_before_the_recurrence(self):
+        def ops(cores):
+            return [report.Op('GenericOp', c, 1000.0, i, i, i, 0.0) for i, c in enumerate(cores)]
+
+        chain = ops([110, 110, 110, 110, 82, 110])
+        self.assertEqual(report.f1_conv_gates(chain, list(range(6))), 4)
+        # the same chain on a wider grid: the relation holds, not the number
+        self.assertEqual(report.f1_conv_gates(ops([130, 130, 130, 130, 82, 130]), list(range(6))), 4)
+        # a tie (F1 on the full grid), a lower launch elsewhere, a short chain: not guessed
+        self.assertIsNone(report.f1_conv_gates(ops([110, 110, 110, 110, 110, 110]), list(range(6))))
+        self.assertIsNone(report.f1_conv_gates(ops([110, 110, 82, 110, 110, 110]), list(range(6))))
+        self.assertIsNone(report.f1_conv_gates(ops([110, 82, 110]), list(range(3))))
+        # a named conv-gates launch in the mixer leaves the booking to the name
+        replay = [('EmbeddingsDeviceOperation', 8, 5000)] + layer_ops(0, 4, lambda user: 1) * 3 + [('LayerNormDeviceOperation', 8, 8000)]
+        roles, _layers, _types = report.classify([report.Op(n.replace('DeviceOperation', ''), c, ns, i, i, i, 0) for i, (n, c, ns) in enumerate(replay)])
+        self.assertFalse([role for role in roles if role[3] == report.F1_DETAIL])
+
+    def test_the_weight_columns_are_filled_when_the_artifact_is_read_with_python_isolated(self):
+        directory = tempfile.mkdtemp()
+        result = subprocess.run([sys.executable, '-I', os.path.join(HERE, 'tp4_profile_report.py'), MULTI_FIXTURE, '--out', directory],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(result.returncode, 0, result.stderr.decode('utf-8', 'replace'))
+        with open(os.path.join(directory, 'tp4-profile-report.json'), encoding='utf-8') as handle:
+            weights = json.load(handle)['verify_packed']['weights']
+        gate = weights['mm.mlp.gate']
+        self.assertEqual((gate['dtype'], gate['cores']), ('bf4', 68))
+        self.assertAlmostEqual(gate['mbytes'], 12.53, delta=0.01)
+        self.assertAlmostEqual(gate['gbps'], 236, delta=8)
+        for key, mbytes in (('mm.gdn_in', 22.46), ('mm.attn_in', 19.50), ('mm.mlp.down', 23.67), ('mm.lm_head', 337.72)):
+            self.assertAlmostEqual(weights[key]['mbytes'], mbytes, delta=0.01, msg=key)
+            self.assertEqual(weights[key]['dtype'], 'bf8')
+        self.assertNotIn('no weight geometry', result.stdout.decode('utf-8'))
+
+    def test_a_report_without_weight_geometry_says_so_instead_of_leaving_blank_columns(self):
+        got = report.analyse_sessions(self.sessions, self.every, self.columns, chips=4, table={})
+        self.assertTrue(any('no weight geometry' in note for note in got['validity']['notes']))
+        self.assertNotIn('dtype', got['verify_packed']['weights']['mm.mlp.gate'])
+
     def test_a_block_without_a_log_has_four_assumed_users_and_with_a_log_the_logged_ones(self):
         self.assertEqual((self.block['users'], self.block['users_from']), (4, 'assumed (no host log)'))
         text = log_of([(1, 4, [], self.block['span_ms'][0], {}), (2, 4, [], self.block['span_ms'][0], {})])

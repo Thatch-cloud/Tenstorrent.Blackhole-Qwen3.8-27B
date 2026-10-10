@@ -72,7 +72,9 @@ problem.
 * **Categories are by role, not core count**: a layer is GDN if it holds GdnConvGates, or holds no SDPA, AttnPrep or heads concat and
   holds generic ops (a multi-SDPA block's GDN layers hold no GdnConvGates); matmuls by position; the recurrence is the longest generic
   after the last conv-gates launch; the attention core is the SDPA op, or per user the longest generic between AttnPrep and the heads
-  concat.
+  concat. A multi-SDPA block's conv-gates is F1, a generic op: it is the launch two before the recurrence that is not on the full grid of its
+  chain (so it is booked under gdn.conv_gates, not gdn glue, on an 11x10 and a 13x10 grid alike); a chain that does not look like that is left in
+  the glue. The weight matmuls' dtype, MB and GB/s columns come from tp_shapes' geometry (assumed dtypes); a report that cannot read it says so in its notes.
 * The sections: groups against the research projection and TP2 (which terms did not scale), categories per chip, per-layer means,
   weight matmuls (GB/s, % of DRAM, ns per tile per core: the bf4 grid question), collectives per call (the minimum over chips is the
   intrinsic time, the skew is waiting on the slowest chip), SDPA fixed cost and slope per 1k tokens (four contexts per round), kernel
