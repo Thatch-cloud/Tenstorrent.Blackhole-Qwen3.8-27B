@@ -209,6 +209,7 @@ import prefix_markers as markers  # noqa: E402
 import prefix_replay as replay  # noqa: E402
 import prefix_report as report  # noqa: E402
 import qwen_prefix_model_patch as model_patch  # noqa: E402
+import qwen_prefix_registry as registry_names  # noqa: E402
 
 PLANS = c2_serving_job.PREFIX_PLANS + tuple(arm for arm, _ in c2_serving_job.PREFIX_ARM_PLANS)
 harness = gate.harness
@@ -251,6 +252,20 @@ PLATFORM_ARGS = ['--model', 'Qwen/Qwen3.8-27B', '--served-model-name', replay.SE
                                     'trace_region_size': 1073741824}})]
 
 
+QUOTA_DEVICE_CAP_TOKENS = 262144
+QUOTA_DEVICE_FLOOR_TOKENS = 65536
+QUOTA_HOST_CAP_GIB = 12
+QUOTA_HOST_FLOOR_GIB = 4
+
+
+def quota_env(profile):
+    """The tenant-quota env of the isolated arm: the device numbers always, the host's only on a profile that names the tier (a host quota without one refuses to start)."""
+    env = {registry_names.ENV_QUOTA_DEVICE_CAP: str(QUOTA_DEVICE_CAP_TOKENS), registry_names.ENV_QUOTA_DEVICE_FLOOR: str(QUOTA_DEVICE_FLOOR_TOKENS)}
+    if tier_profile(profile) is not None:
+        env.update({registry_names.ENV_QUOTA_HOST_CAP: str(QUOTA_HOST_CAP_GIB), registry_names.ENV_QUOTA_HOST_FLOOR: str(QUOTA_HOST_FLOOR_GIB)})
+    return env
+
+
 def tiny_pool_env(profile, pool=replay.TINY_POOL_TOKENS):
     """QWEN36_MAX_TOKENS_ALL_USERS for a pool of `pool` tokens: the TT worker adds one block per
     sequence of padding (plugin worker.py:538-539) and rounds up to blocks (:573), and the profile's
@@ -276,6 +291,9 @@ DERIVED = dict(
     # digest check falls back to its sampled default.
     tiertime=dict(env=dict(QWEN_PREFIX_HOST_TIER_AUDIT='0', QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT='0', QWEN_PREFIX_HOST_TIER_VERIFY='sample',
                            QWEN_FAST_TP4_SDPA_AUDIT='0')),
+    # The per-tenant quotas (the tier-quota plan's isolated arm): the profile plus a device cap and floor and, when it has the host tier, the host's. The floor is above the
+    # session of the protected tenant (prefix_replay.QUOTA_B_TOKENS), the cap well under the pool, so that the flooding tenant must recycle its own blocks.
+    quota=lambda profile: dict(env=quota_env(profile)),
 )
 # (arm, scenario, which profile, derived changes, docker timeout seconds, strict oracle)
 PLAN_ARMS = dict(
@@ -311,6 +329,10 @@ PLAN_ARMS = dict(
        # session that left the device pool returns, and while a long fresh prompt displaces blocks into the tier. One arm each, on a tier profile OR on its no-tier control
        # (the ABAB pairs run the same plan on both): tier-concurrent is the audited arm (exactness and engagement; the stall is printed, not judged), tier-concurrent-timed
        # the timed one (no audit instruments: the stall budget is judged).
+       # Tenant isolation (prefix_replay.scenario_tier_quota): tenant A floods the pool while tenant B's session must stay in it. quota-control is the same scenario with no
+       # quota (the flood must reach B, or the arm proves nothing), quota-isolated the profile with the quota env (DERIVED['quota']); each is also a plan.
+       'tier-quota': (('quota-control', 'tier_quota', 'prefix', None, 9000, False),
+                      ('quota-isolated', 'tier_quota', 'prefix', 'quota', 9000, False)),
        'tier-concurrent': (('tier-concurrent', 'tier_concurrent', 'prefix', None, 7200, False),),
        'tier-concurrent-timed': (('tier-concurrent-timed', 'tier_concurrent_timed', 'prefix', None, 7200, False),)}
 )
@@ -355,7 +377,8 @@ def audit_image_problems(arms, anchor):
 
 
 CONCURRENT_SCENARIOS = ('tier_concurrent', 'tier_concurrent_timed')
-TIER_SCENARIOS = ('tier_attach', 'tier_returning', 'tier_timed') + CONCURRENT_SCENARIOS
+QUOTA_SCENARIOS = ('tier_quota',)
+TIER_SCENARIOS = ('tier_attach', 'tier_returning', 'tier_timed') + CONCURRENT_SCENARIOS + QUOTA_SCENARIOS
 # The tier scenarios in which a session must be seen to leave the device pool and come back from host RAM (the counters and the restore line are asked of them).
 TIER_RESTORE_SCENARIOS = ('tier_returning', 'tier_timed') + CONCURRENT_SCENARIOS
 # The tier arms that also run on a profile WITHOUT the tier: the control of the concurrent pairs (the stall of a cold re-prefill beside the same seats).
@@ -1549,6 +1572,68 @@ def concurrent_findings(arm, records, events, scanned):
     return problems, missing, lines
 
 
+def quota_findings(arm, records, events, scanned, stats):
+    """The tenant-quota arms' reading (prefix_replay.scenario_tier_quota): tenant A flooded the device pool; tenant B's session must still be in it when it returns - a
+    DEVICE-RESIDENT hit (the oracle's Q, no host-tier restore line for the request) - on the isolated arm, and must NOT be on the control arm (else the flood proved nothing).
+    The quota arm also needs the install line, its own evictions on the books (the cap bit) and, with a host quota, the host's. The pairs (each return against its cold
+    twin) are the arm's exactness read. -> (problems, not exercised, lines)."""
+    problems, missing, lines = [], [], []
+    event = events.get('tier-quota') or {}
+    isolated = arm.get('kind') == 'quota'
+    if not event:
+        missing.append('the scenario never reached its measurement (no tier-quota event)')
+        return problems, missing, lines
+    if event.get('skipped'):
+        missing.append('the served context cannot hold the two sessions (B %s, A %s tokens): nothing was sized' % (event.get('b_size'), event.get('a_size')))
+        return problems, missing, lines
+    on = scanned.get('quota_on') or []
+    if isolated and not on:
+        missing.append('no "tenant quota on" line: the quota was configured and never installed (an image without it, or the engine refused it)')
+    elif isolated:
+        lines.append('quota: %s' % json.dumps(dict((key, on[0].get(key)) for key in ('device_cap_tokens', 'device_floor_tokens', 'host_cap_bytes', 'host_floor_bytes')), sort_keys=True))
+    elif on:
+        problems.append('the control arm installed a tenant quota (%s): it is the arm with none' % on[0].get('line', 'tenant quota on'))
+    index = by_tag(records)
+    restores = set(entry.get('tag') for entry in scanned.get('tier_restores') or ())
+    for name, tag_key, ok_key in (('B', 'b_return_tag', 'b_return_ok'), ('A', 'a_return_tag', 'a_return_ok')):
+        record = index.get(event.get(tag_key)) or {}
+        expected = (record.get('expected') or {}).get('q')
+        q = q_of(record)
+        resident = bool(record.get('ok')) and bool(expected) and q is not None and q >= expected and record.get('tag') not in restores
+        lines.append('tenant %s returned: Q=%s (the oracle\'s %s), %s, TTFT %s s' % (
+            name, q, expected, 'device-resident' if resident else ('restored from host RAM' if record.get('tag') in restores else 'not resident'), record.get('ttft_s')))
+        if not event.get(ok_key):
+            missing.append('tenant %s\'s returning turn failed (%s)' % (name, record.get('error') or record.get('aborted') or 'not sent'))
+            continue
+        if name != 'B':
+            continue
+        overrides = (stats or {}).get('quota_dev_floor_overrides')
+        if isolated:
+            if resident:
+                continue
+            if overrides:
+                missing.append('the floors were overridden %s times (the pool could not honour them): tenant B\'s survival is not shown' % overrides)
+            else:
+                problems.append('tenant B\'s returning turn was not a device-resident hit (Q=%s of the oracle\'s %s%s): tenant A\'s flood reached B\'s blocks despite the quota' % (
+                    q, expected, ', restored from host RAM' if record.get('tag') in restores else ''))
+        elif resident:
+            missing.append('the control arm kept tenant B\'s session in the pool through the flood (Q=%s): the flood did not reach B, so the isolated arm proves nothing' % q)
+    if isolated and stats:
+        own, shared = stats.get('quota_dev_evictions_own', 0), stats.get('quota_dev_evictions_global', 0)
+        lines.append('device quota: %s blocks demoted, evicted %s by the cap (own) and %s by vLLM\'s order (global), %s blocks set aside by the floor, %s overrides; tenants %s, at cap %s' % (
+            stats.get('quota_dev_demoted_blocks'), own, shared, stats.get('quota_dev_floor_protected'), stats.get('quota_dev_floor_overrides'),
+            stats.get('quota_dev_tenants'), stats.get('quota_dev_at_cap')))
+        if on and on[0].get('device_cap_tokens') and not own:
+            missing.append('tenant A\'s flood evicted none of its own blocks (quota_dev_evictions_own=0): the cap never bit')
+        if on and on[0].get('host') and arm.get('tier'):
+            lines.append('host quota: evicted %s records by the cap (own) and %s by the tier\'s policy (global), %s skipped for the floor; tenants %s, at cap %s' % (
+                stats.get('quota_host_evictions_own'), stats.get('quota_host_evictions_global'), stats.get('quota_host_floor_protected'),
+                stats.get('quota_host_tenants'), stats.get('quota_host_at_cap')))
+            if not stats.get('quota_host_evictions_own'):
+                missing.append('the host tier evicted none of tenant A\'s records by its cap (quota_host_evictions_own=0): the host cap never bit')
+    return problems, missing, lines
+
+
 def tier_returning_rows(arm, records, events, scanned, stats, before):
     """The returning sessions after the flood: each restored from the tier at the oracle's Q, the kill switch's latch. -> (problems, not exercised, lines)."""
     problems, missing, lines = [], [], []
@@ -1801,6 +1886,11 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None):
         lines += more_lines
     if arm['scenario'] in CONCURRENT_SCENARIOS:
         more_problems, more_missing, more_lines = concurrent_findings(arm, records, driver.events, scanned)
+        problems += more_problems
+        missing += more_missing
+        lines += more_lines
+    if arm['scenario'] in QUOTA_SCENARIOS:
+        more_problems, more_missing, more_lines = quota_findings(arm, records, driver.events, scanned, stats)
         problems += more_problems
         missing += more_missing
         lines += more_lines
@@ -2101,7 +2191,7 @@ class Runner(object):
             self.log('[PREFIX-GATE] arm %s: ready after %.0f s' % (arm['arm'], self.clock() - started))
             driver.context_tokens = self.served_context(client, arm, driver)
             kwargs = {}
-            if arm['scenario'] in ('lifecycle_evict', 'lifecycle_tiny', 'tier_returning', 'tier_timed') + CONCURRENT_SCENARIOS:
+            if arm['scenario'] in ('lifecycle_evict', 'lifecycle_tiny', 'tier_returning', 'tier_timed') + CONCURRENT_SCENARIOS + QUOTA_SCENARIOS:
                 kwargs['pool_tokens'] = markers.scan(follower.lines()).get('kv_tokens')
             if arm['scenario'] == 'lifecycle_evict':
                 kwargs['restart'] = lambda: self.restart(container, client, follower, driver)

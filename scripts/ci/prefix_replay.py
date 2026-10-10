@@ -2170,6 +2170,74 @@ def scenario_tier_concurrent(driver, pool_tokens=None, seats=None, return_tokens
             driver.event('tier-concurrent', **event)
 
 
+# TENANT QUOTA (docs/prefix-store-hygiene.md "Tenant quotas"; c2_prefix_gate: the tier-quota plan, quota_findings): one tenant floods the pool while another tenant's session
+# must survive in it. Tenant B builds a session; tenant A (ONE salt: a tenant is the salt's tag, so every flood is A's) builds a smaller one and then floods the device pool
+# with fresh prompts totalling the pool and one more flood; then B returns - the hit must be DEVICE-RESIDENT when the quota is on (the floor protects B, the cap makes A evict
+# its own blocks), and is not when it is off (the control arm: the flood reached B) - and A returns (its own blocks beyond its cap went to the host tier, or nowhere). Each
+# return is sent first as a hit and then as its cold twin under a fresh salt, compared in full (a strict pair): the exactness read of both tenants.
+QUOTA_B_TOKENS = 56000           # at most the device floor the plan's quota arm sets (c2_prefix_gate.DERIVED['quota'])
+QUOTA_A_TOKENS = 32000
+QUOTA_FLOOD_TOKENS = TIER_TIMED_FLOOD_TOKENS
+QUOTA_MAX_TOKENS = 128
+QUOTA_RETURN_INPUT_TOKENS = TIER_RETURN_INPUT_TOKENS
+
+
+def quota_floods(driver, pool_tokens, length, salt, label):
+    """Prompts of ONE tenant (`salt`) totalling the pool and one more flood, each its own text: the tenant's cap is what bites. -> the flood sizes (tokens)."""
+    count = max(2, -(-int(pool_tokens) // length) + TIER_FLOOD_MARGIN_FLOODS) if pool_tokens else 4
+    sizes = []
+    for index in range(count):
+        flood = driver.conversation('%s-flood-%d' % (label, index))
+        flood.salt = salt
+        sized_message(driver, flood, 1, length)
+        sizes.append(driver.fit(flood, FLOOD_MAX_TOKENS) or driver.measure(flood.body()))
+        driver.send(flood.body(), 'flood', salt, 'flood', flood, FLOOD_MAX_TOKENS)
+    driver.event('%s-flood' % label, pool_tokens=pool_tokens, floods=count, flood_tokens=sum(sizes), sizes=sizes, context=driver.context())
+    return sizes
+
+
+def quota_return(driver, conv, case):
+    """The tenant's session returns: the next turn as a salted hit, then its cold twin (a fresh salt, the same body), compared in full. -> the hit's record."""
+    conv.extend(QUOTA_RETURN_INPUT_TOKENS)
+    driver.fit(conv, QUOTA_MAX_TOKENS)
+    body = conv.body()
+    hit = driver.send(body, 'hit', conv.salt, case, conv, QUOTA_MAX_TOKENS, continuation=True)
+    driver.answer(conv, hit)
+    if hit.get('ok'):
+        cold = driver.send(body, 'cold', driver.fresh_salt(), case + '-cold', conv, QUOTA_MAX_TOKENS, continuation=True)
+        strict_pair(driver, case, cold, hit, body, conv, QUOTA_MAX_TOKENS, None)
+    return hit
+
+
+def scenario_tier_quota(driver, pool_tokens=None, b_tokens=None, a_tokens=None, flood_tokens=None):
+    """Build B's session and A's, flood the pool as A, return B (the isolation read), return A (its own loss, exactly)."""
+    room = driver.context() - 2 * QUOTA_RETURN_INPUT_TOKENS - QUOTA_MAX_TOKENS - 2 * FIT_MARGIN_TOKENS
+    if driver.prompt_limit is not None:
+        room = min(room, driver.prompt_limit - 2 * QUOTA_RETURN_INPUT_TOKENS - 2 * FIT_MARGIN_TOKENS)
+    b_size, a_size = min(int(b_tokens or QUOTA_B_TOKENS), room), min(int(a_tokens or QUOTA_A_TOKENS), room)
+    if min(b_size, a_size) < 4096:
+        driver.event('tier-quota', skipped=True, b_size=b_size, a_size=a_size)
+        return
+    sessions = {}
+    for name, size, salt in (('quota-b', b_size, None), ('quota-a', a_size, driver.salt('quota-tenant-a'))):
+        conv = driver.conversation(name)
+        if salt is not None:
+            conv.salt = salt
+        sized_message(driver, conv, 1, size)
+        driver.fit(conv, QUOTA_MAX_TOKENS)
+        built = driver.send(conv.body(), 'hit', conv.salt, name + '-build', conv, QUOTA_MAX_TOKENS)
+        driver.answer(conv, built)
+        sessions[name] = (conv, built)
+    a_salt = sessions['quota-a'][0].salt
+    length = min(int(flood_tokens or QUOTA_FLOOD_TOKENS), driver.context() - FLOOD_MAX_TOKENS - FIT_MARGIN_TOKENS)
+    sizes = quota_floods(driver, pool_tokens, length, a_salt, 'quota')
+    b_return = quota_return(driver, sessions['quota-b'][0], 'quota-b-return')
+    a_return = quota_return(driver, sessions['quota-a'][0], 'quota-a-return')
+    driver.event('tier-quota', b_size=b_size, a_size=a_size, pool_tokens=pool_tokens, flood_sizes=sizes, b_build_ok=bool(sessions['quota-b'][1].get('ok')),
+                 a_build_ok=bool(sessions['quota-a'][1].get('ok')), b_return_tag=b_return.get('tag'), b_return_ok=bool(b_return.get('ok')),
+                 b_return_ttft_s=b_return.get('ttft_s'), a_return_tag=a_return.get('tag'), a_return_ok=bool(a_return.get('ok')), a_return_ttft_s=a_return.get('ttft_s'))
+
+
 SCENARIOS = dict(bringup_reference=scenario_bringup_reference, bringup_prefix=scenario_bringup_prefix,
                  exactness_traced=lambda driver, **_: scenario_exactness(driver, 'traced'),
                  exactness_audit=lambda driver, **_: scenario_exactness(driver, 'audit'),
@@ -2180,7 +2248,7 @@ SCENARIOS = dict(bringup_reference=scenario_bringup_reference, bringup_prefix=sc
                  levern_hit=lambda driver, **_: scenario_levern_hit(driver),
                  levern_faults=lambda driver, **_: scenario_levern_faults(driver),
                  tier_attach=scenario_tier_attach, tier_returning=scenario_tier_returning, tier_timed=scenario_tier_timed,
-                 tier_concurrent=scenario_tier_concurrent, tier_concurrent_timed=scenario_tier_concurrent)
+                 tier_concurrent=scenario_tier_concurrent, tier_concurrent_timed=scenario_tier_concurrent, tier_quota=scenario_tier_quota)
 
 
 def records_jsonl(records):

@@ -101,6 +101,12 @@ PREFIX_GATE_ONLY_VALUES = (('QWEN_PREFIX_CKPT_PRECONVERTED', '1'), ('QWEN_PREFIX
 # (apply_environment), as Lever N's, engine reuse's and W2's are.
 PREFIX_TIER_ENV_NAMES = (tuple(name for name, _value in PREFIX_GATE_ONLY_VALUES) + PREFIX_TIER_NUMBERS
                          + (PREFIX_TIER_OFF_PATH, 'QWEN_PREFIX_HOST_TIER_VERIFY'))
+# The per-tenant quotas of the prefix store (qwen_prefix_registry.QUOTA_ENV_NAMES; docs/prefix-store-hygiene.md "Tenant quotas"): default off and byte-identical off, strict in
+# their values, meaningful only beside the switch, and gate-only until a qualification record exists (a traffic profile may not name one). The device numbers are tokens in
+# whole 64-token blocks (a cap at least one 2048-token chunk, a floor at most the cap); the host numbers are GiB and need the host tier.
+PREFIX_QUOTA_TOKENS = ('QWEN_PREFIX_TENANT_QUOTA_DEVICE_CAP_TOKENS', 'QWEN_PREFIX_TENANT_QUOTA_DEVICE_FLOOR_TOKENS')
+PREFIX_QUOTA_GIB = ('QWEN_PREFIX_TENANT_QUOTA_HOST_CAP_GIB', 'QWEN_PREFIX_TENANT_QUOTA_HOST_FLOOR_GIB')
+PREFIX_QUOTA_NAMES = PREFIX_QUOTA_TOKENS + PREFIX_QUOTA_GIB
 # Sticky sessions (serving_fast_policy.STICKY_SESSIONS_FLAG): the fast path's side of prefix reuse. Only a
 # profile sets it, and only beside PREFIX_SWITCH and the fast path (prefix_reuse_problems).
 STICKY_SWITCH = 'QWEN_FAST_STICKY_SESSIONS'
@@ -381,7 +387,7 @@ def apply_environment(profile, environ=None):
             environ.pop(name, None)
     # ...and the preconverted checkpoints and the host KV tier (default off, gate only until a qualification record lifts it): an inherited
     # switch must not turn either on under a profile that never named it.
-    for name in PREFIX_TIER_ENV_NAMES:
+    for name in PREFIX_TIER_ENV_NAMES + PREFIX_QUOTA_NAMES:
         if name not in profile['env']:
             environ.pop(name, None)
     # ...and the engine-start upload levers: an inherited switch must not move the KV pool's or the weights' load path under a profile that never asked.
@@ -454,6 +460,32 @@ def prefix_policy_problems(profile):
                             'for KV pages' % (PREFIX_TIER_GIB, env[PREFIX_TIER_GIB], store_gib))
     if PREFIX_TIER_OFF_PATH in env and not re.fullmatch(r'(?!-)[A-Za-z0-9_./-]{1,200}', env[PREFIX_TIER_OFF_PATH]):
         problems.append('%s=%r is not a plain path' % (PREFIX_TIER_OFF_PATH, env[PREFIX_TIER_OFF_PATH]))
+    quota_tokens = {}
+    for name in PREFIX_QUOTA_TOKENS:
+        if name in env:
+            if not re.fullmatch(r'[0-9]+', env[name]) or int(env[name]) % 64:
+                problems.append('%s=%r is not a whole number of 64-token blocks (digits only)' % (name, env[name]))
+            else:
+                quota_tokens[name] = int(env[name])
+    cap, floor = quota_tokens.get(PREFIX_QUOTA_TOKENS[0], 0), quota_tokens.get(PREFIX_QUOTA_TOKENS[1], 0)
+    if cap and cap < 2048:
+        problems.append('%s=%d is below one 2048-token chunk' % (PREFIX_QUOTA_TOKENS[0], cap))
+    if cap and floor > cap:
+        problems.append('%s=%d exceeds %s=%d' % (PREFIX_QUOTA_TOKENS[1], floor, PREFIX_QUOTA_TOKENS[0], cap))
+    quota_gib = {}
+    for name in PREFIX_QUOTA_GIB:
+        if name in env:
+            try:
+                quota_gib[name] = float(env[name])
+            except ValueError:
+                quota_gib[name] = None
+            if quota_gib[name] is None or not quota_gib[name] >= 0.0 or quota_gib[name] == float('inf'):
+                problems.append('%s=%r is not a finite non-negative number of GiB' % (name, env[name]))
+                del quota_gib[name]
+    if any(quota_gib.values()) and not numbers.get(PREFIX_TIER_GIB):
+        problems.append('%s names a host quota but %s is not set: the quota would be inert' % (', '.join(sorted(name for name in quota_gib if quota_gib[name])), PREFIX_TIER_GIB))
+    if quota_gib.get(PREFIX_QUOTA_GIB[0]) and quota_gib.get(PREFIX_QUOTA_GIB[1], 0.0) > quota_gib[PREFIX_QUOTA_GIB[0]]:
+        problems.append('%s exceeds %s' % (PREFIX_QUOTA_GIB[1], PREFIX_QUOTA_GIB[0]))
     if not gate_profile(profile):
         # A traffic profile may name the tier and the preconverted checkpoints only under its owner traffic waiver (TIER_WAIVABLE_LEVERS); the audits and
         # the kill-switch path are a gate's own.
@@ -463,11 +495,14 @@ def prefix_policy_problems(profile):
             unqualified.append(PREFIX_TIER_GIB)
         if PREFIX_TIER_OFF_PATH in env:
             unqualified.append(PREFIX_TIER_OFF_PATH)
+        quotas = [name for name in PREFIX_QUOTA_NAMES if name in env and env[name] not in ('', '0') and (quota_tokens.get(name) or quota_gib.get(name))]
+        if quotas:
+            problems.append('%s: no qualification record exists for the per-tenant quotas of the prefix store, so only a gate-only profile may name them' % ', '.join(sorted(quotas)))
         if unqualified:
             problems.append('%s: no qualification record exists for the host KV tier or the preconverted checkpoints, so only a gate-only profile may name them '
                             'active, or a traffic profile whose %s names QWEN_PREFIX_HOST_TIER_GIB and QWEN_PREFIX_CKPT_PRECONVERTED at their values (the audits and '
                             'the kill-switch path are a gate\'s own)' % (', '.join(sorted(unqualified)), TRAFFIC_WAIVER))
-    named = [name for name in sorted(list(PREFIX_POLICY_FLAGS) + [PREFIX_GHOST_FLAG, PREFIX_TIER_OFF_PATH] + list(PREFIX_TIER_NUMBERS))
+    named = [name for name in sorted(list(PREFIX_POLICY_FLAGS) + [PREFIX_GHOST_FLAG, PREFIX_TIER_OFF_PATH] + list(PREFIX_TIER_NUMBERS) + list(PREFIX_QUOTA_NAMES))
              if name in env]
     if named and not prefix_reuse(profile):
         problems.append('%s set without %s=1: the registry does not exist, so the policy would be inert'

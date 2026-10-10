@@ -348,12 +348,62 @@ commit, run the CPU suite on that commit. After a merge that moves a parent prof
 
 The pack is `scripts/ci/references/fusion-jobs/tier` (one image of its own, `tp4-fusion-tier-1`, a placeholder for the tag its B0 builds from the pushed
 head): B0, X0, **TCX0/TCX1** (the GX-style exactness pair: the control and the candidate over the parked and Lever N equal-answer list, compared with
-`parked_compare.py`), **TC1** (the audited concurrent arm on the audit twin), **TC2 to TC5** (the timed ABAB: control, tier, control, tier) and Z.
-`ORDER.txt` has the NEEDS lines, the read rules, the no-go list and the estimated minutes (about 7 h 10 min). The ship gates G1, G2 and SR of
+`parked_compare.py`), **TC1** (the audited concurrent arm on the audit twin), **TQ1** (the tenant-quota gate, below), **TC2 to TC5** (the timed ABAB: control, tier, control, tier) and Z.
+`ORDER.txt` has the NEEDS lines, the read rules, the no-go list and the estimated minutes (about 9 h 10 min). The ship gates G1, G2 and SR of
 `fusion-jobs/ship` are run on the candidate afterwards by changing their profile names.
+
+### Tenant quotas (`QWEN_PREFIX_TENANT_QUOTA_*`, default off)
+
+One tenant's flood must not push another tenant's session out of the cache. The tenant is the salt's (`tenant_of_salt`: the gateway's opaque tag), the same numbers apply to
+every tenant, and nothing here names, logs or exports a tenant, a salt or a digest.
+
+| Variable | Meaning |
+|---|---|
+| `QWEN_PREFIX_TENANT_QUOTA_DEVICE_CAP_TOKENS` | most prefix tokens one tenant keeps cached in the device pool (digits only, a multiple of 64, at least 2,048; 0 or unset: no cap) |
+| `QWEN_PREFIX_TENANT_QUOTA_DEVICE_FLOOR_TOKENS` | prefix tokens of a tenant that other tenants' allocations may not evict (a multiple of 64, at most the cap; 0 or unset: none) |
+| `QWEN_PREFIX_TENANT_QUOTA_HOST_CAP_GIB` | most host-tier GiB one tenant holds (needs the tier; 0 or unset: no cap) |
+| `QWEN_PREFIX_TENANT_QUOTA_HOST_FLOOR_GIB` | host-tier GiB of a tenant that other tenants' spills may not evict (at most the cap and half the tier's KV budget) |
+
+Every value is parsed strictly and the engine refuses to start on a bad one (a sign, an exponent, a space, `inf`, a non-multiple of the block, a floor above its cap, a host quota
+without the tier); at install the scheduler graft also refuses a floor above half the pool, a cap above the whole pool, and a vLLM without the free queue's `prepend_n`. Unset, none of
+it is installed: the pool, the stats and the log are byte for byte what they were (`test_qwen_prefix_quota`, `test_qwen_prefix_tiers`). The profile contract keeps the names
+gate-only (a traffic profile may not name one) until a qualification record exists, and drops an inherited value under a profile that does not name it.
+
+**Device pool** (`DeviceQuota` in `qwen_prefix_scheduler_patch.py`). A tenant's *resident* tokens are its cached prefix blocks (published by the cap, or restored from the tier),
+running or idle. The **cap** is soft by what is running (a running request's blocks cannot be evicted): when a tenant's resident blocks pass its cap, its OWN idle blocks, oldest
+first, are moved to the front of vLLM's free queue - at publication and at every free - so the next allocation by anyone evicts them before anything else. The **floor** protects:
+an allocation walks the front of the free queue and sets aside, at the tail, any idle block whose tenant (not the allocating one) would fall below its floor by losing it. The eviction
+order is therefore (1) a tenant's own idle blocks beyond its cap, oldest first; (2) vLLM's own LRU order over everything else (blocks never cached or no longer cached first) among
+tenants above their floor; (3) only when nothing else satisfies the allocation, a protected block, counted as a floor *override* (the allocation is vLLM's and never fails for a quota;
+an override voids the isolation gate). The walk costs the blocks it looks at plus the ones it sets aside, and only when a floor is set.
+
+**Host tier** (`TierStore`). The cap evicts the tenant's OWN oldest unpinned records first (reservations of a batch count); the floor skips a record whose removal would take its tenant
+below the floor; with only protected records left the spill is refused (a cache has no allocation to fail), counted. Same units, same counters.
+
+**Counters** (the registry stats, the export and the `stats` line; present only when a quota is on): `quota_dev_demoted_blocks`, `quota_dev_evictions_own` / `_global`,
+`quota_dev_floor_protected`, `quota_dev_floor_overrides`, `quota_host_evictions_own` / `_global`, `quota_host_floor_protected`, `quota_host_refused`, and the gauges
+`quota_dev_tenants`, `quota_dev_at_cap`, `quota_host_tenants`, `quota_host_at_cap` (how many tenants, how many at their cap; never which). The install line is
+`tenant quota on device_cap_tokens=... device_floor_tokens=... host_cap_bytes=... host_floor_bytes=...`.
+
+**Cold-tier client** (`cold_tier_client.py`, a stub nothing calls yet): the engine's side of a service that would hold what leaves host RAM. `ColdKey(tenant, layout, block_hash)`
+names a block (the tenant is the opaque tag; the layout version changes whenever the bytes would mean something else, and a key of another layout is an error, never a miss);
+`fetch(key, out)` writes into a buffer the caller owns (a slot of the pinned host slab, so no copy) and returns a `Future` of the bytes written (0: absent); `store(key, data)` and
+`contains(key)` are `Future`s too; nothing blocks the scheduler. `InMemoryColdTier` is the fake (real threads, an injectable delay and failure). The service itself is not in this repository.
+
+**Gate** (`c2_prefix_gate.py --plan tier-quota`, also `quota-control` and `quota-isolated` as plans of their own, on a gate-only audit twin with the tier). Tenant B builds a session
+(56k) and tenant A (one salt) a smaller one (32k); A floods the device pool with prompts totalling the pool and one more flood; B returns, then A, each as a hit and as its cold twin
+under a fresh salt, compared in full. `quota-control` is the twin as it is: the flood must reach B (restored from host RAM or cold), else the arm is NOT_EXERCISED. `quota-isolated`
+is the same twin with the quota env the gate derives (cap 262,144 and floor 65,536 tokens, 12 GiB and 4 GiB on the host): B's return must be a **device-resident hit** (the oracle's Q
+and no `host tier restore` line for the request), the install line must be in the log, tenant A's own evictions on the books (the device cap bit, and the host cap), no floor
+override, and the pairs identical. `tier_concurrent_compare.py --quota <control> <isolated>` then compares the two arms' returning answers for B and A (identical: the quota moves
+which blocks the pool keeps, never an answer). Job template `TQ1` in the pack above.
+
+**Estimated, not measured**: nothing of this has run on a card. The tests run the real `DeviceQuota` and `TierStore` on a copy of vLLM's free queue (always), on vLLM's own `BlockPool`
+and `FreeKVCacheBlockQueue` (where vLLM imports), and through the real `install()`; the gate over a vLLM-shaped fake pool shows the control losing B and the isolated arm keeping it.
+The cost of the floor's walk and of the demotion is a few list operations per allocation and per free, expected well under the scheduler step's noise; to be read from the isolated arm.
 
 ### Not done
 
-The NVMe tier; the tier on a traffic profile beyond the ship candidate's own PENDING waiver (the contract refuses it anywhere else); the restore through
+Per-tenant quota numbers (every tenant has the same); the quotas on a traffic profile (gate-only until a qualification record); the cold-tier service (only its client interface and a fake); the NVMe tier; the tier on a traffic profile beyond the ship candidate's own PENDING waiver (the contract refuses it anywhere else); the restore through
 vLLM's connector API (not needed: the pages are cached before the hit is looked up); a device-side gather that would let the
 spill overlap the step; arming anything on the production profile.

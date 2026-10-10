@@ -13,6 +13,10 @@ finding). What is read, per pair:
   STALL     each window's round time p50/p99 and longest wait of any seat, B against A (percent), each arm against its own control window, and the stall budget (the Lever N decode
             gap floor, 8 s) for both arms: a longest wait over it is a problem.
 
+With --quota (two paths: the quota-control arm and the quota-isolated arm of the tier-quota plan, each a results directory) it compares what that plan sends instead: tenant B's
+and tenant A's returning answers (cases quota-b-return, quota-a-return) over the whole output, which must be IDENTICAL across the two arms - the same prompts, greedy, so a quota
+that changes an answer is a defect - and reads no seats and no stall.
+
 Exit 0 only when every compared text is IDENTICAL, both arms hold the same seats, and no stall is over the budget; 1 otherwise; 2 for a missing input.
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
@@ -26,12 +30,13 @@ if HERE not in sys.path:
 import prefix_concurrent as concurrent  # noqa: E402
 
 WHOLE_CASES = (concurrent.RETURN_CASE, concurrent.SPILL_CASE, concurrent.COLD_CASE)
+QUOTA_CASES = ('quota-b-return', 'quota-a-return')
 
 
-def whole_rows(records_a, records_b):
-    """[row] for the returning turn, the long prompt and the cold twin: their token ids (and finish reasons) equal whole."""
+def whole_rows(records_a, records_b, cases=WHOLE_CASES):
+    """[row] for the returning turn, the long prompt and the cold twin (or the cases given): their token ids (and finish reasons) equal whole."""
     rows = []
-    for case in WHOLE_CASES:
+    for case in cases:
         a, b = concurrent.first_record(records_a, case), concurrent.first_record(records_b, case)
         if a is None and b is None:
             continue
@@ -68,6 +73,22 @@ def stall_lines(stats_a, stats_b, label_a, label_b):
             name, a['p50_s'], a['p99_s'], label_a, b['p50_s'], b['p99_s'], label_b, a['max_gap_s'], b['max_gap_s'], a['seats'], b['seats'], label_b,
             'n/a' if change is None else '%+.1f%% against %s' % (change, label_a)))
     return lines
+
+
+def compare_quota(records_a, records_b, label_a='control', label_b='isolated'):
+    """-> dict(verdict, problems, lines, whole). The two arms of the tier-quota plan: tenant B's and tenant A's returning answers, whole."""
+    problems, lines = [], []
+    whole = whole_rows(records_a, records_b, QUOTA_CASES)
+    if not whole:
+        problems.append('neither arm sent a quota-b-return or a quota-a-return request')
+    for row in whole:
+        lines.append('%s %s vs %s: %s (%s)' % (row['case'], label_a, label_b, row['verdict'], row['detail']))
+        if row['verdict'] != 'IDENTICAL':
+            problems.append('%s %s: %s' % (row['case'], row['verdict'], row['detail']))
+    missing = [case for case in QUOTA_CASES if case not in [row['case'] for row in whole]]
+    if whole and missing:
+        problems.append('no %s in either arm' % ', '.join(missing))
+    return dict(verdict='FAIL' if problems else 'PASS', problems=problems, lines=lines, whole=whole)
 
 
 def compare_pair(records_a, records_b, label_a='A', label_b='B', minimum=concurrent.MIN_COMMON_TOKENS, budget=concurrent.DEFAULT_GAP_BUDGET_S, control_s=None):
@@ -112,7 +133,25 @@ def main(argv=None, out=print):
     parser.add_argument('--labels', default='control,tier,control-repeat,tier-repeat', help='comma-separated names for A B C D')
     parser.add_argument('--budget', type=float, default=concurrent.DEFAULT_GAP_BUDGET_S, help='the stall budget in seconds (the Lever N decode gap floor)')
     parser.add_argument('--min-tokens', type=int, default=concurrent.MIN_COMMON_TOKENS)
+    parser.add_argument('--quota', action='store_true', help='compare the two arms of the tier-quota plan (A control, B isolated): the returning answers of tenants B and A')
     options = parser.parse_args(argv)
+    if options.quota:
+        if len(options.paths) != 2:
+            out('refused: --quota takes exactly two paths (the quota-control and the quota-isolated results)')
+            return 2
+        labels = ['control', 'isolated']
+        try:
+            loaded = [concurrent.load_records(path) for path in options.paths]
+        except (IOError, OSError, ValueError) as error:
+            out('refused: %s' % error)
+            return 2
+        result = compare_quota(loaded[0], loaded[1], labels[0], labels[1])
+        for line in result['lines']:
+            out(line)
+        for problem in result['problems']:
+            out('problem: %s' % problem)
+        out('tier quota %s vs %s: %s' % (labels[0], labels[1], result['verdict']))
+        return 0 if result['verdict'] == 'PASS' else 1
     if len(options.paths) not in (2, 4):
         out('refused: give A B (one pair) or A B C D (the ABAB: two pairs and the control-to-control floor)')
         return 2

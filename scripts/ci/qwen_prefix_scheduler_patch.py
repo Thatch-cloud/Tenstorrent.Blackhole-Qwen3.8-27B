@@ -56,6 +56,18 @@ f. The host KV tier (qwen_prefix_registry.TierStore, TierHooks below; QWEN_PREFI
    again, whose own hit logic, reservation rule and allocation do everything else. Nothing here uses an external-token path or a KV
    connector. A failure at any point is a miss.
 
+g. Tenant quotas (qwen_prefix_registry.QuotaConfig, DeviceQuota below; QWEN_PREFIX_TENANT_QUOTA_DEVICE_CAP_TOKENS / _FLOOR_TOKENS, off unless named and then none of
+   this runs). The tenant is the salt's (tenant_of_salt); the same numbers apply to every tenant. A tenant's RESIDENT tokens are its cached prefix blocks in the
+   device pool, running or idle. The CAP is soft by what is running (a running request's blocks cannot be evicted): when a tenant's resident blocks pass its cap,
+   its OWN idle blocks, oldest first, are moved to the front of vLLM's free queue, so the next allocation of anyone evicts them before anything else - at publication
+   and at every free. The FLOOR protects: an allocation (by another tenant) walks the front of the free queue and sets aside, at the tail, an idle block of a tenant
+   whose resident blocks would fall below its floor by losing it. The eviction order is therefore: (1) a tenant's own idle blocks beyond its cap, oldest first; (2)
+   vLLM's own LRU order over everything else - blocks never cached or no longer cached first - among tenants above their floor; (3) only when nothing else can
+   satisfy the allocation, a protected block (counted as a floor override: the allocation is vLLM's and must not fail for a quota). Blocks of no tenant (never
+   published by the cap) are in no quota. Counters are aggregates only (tenants, tenants at cap, evictions by reason own/global, blocks protected): nothing
+   labelled by tenant is logged or exported. Off, none of it is installed and the pool, the stats and the log are what they were. The host tier has the same
+   quotas in bytes (qwen_prefix_registry.TierStore).
+
 The kill switch (qwen_prefix_registry.KillSwitch, the flag file /models/.qwen-c2/prefix-reuse.off,
 polled at most once a second from the trim) disables the registry for the life of the process.
 
@@ -475,6 +487,37 @@ def tier_problems(scheduler, registry):
     return problems
 
 
+QUOTA_POOL_INTERNALS = ('free_blocks', 'get_new_blocks', 'free_block_queue')
+QUOTA_QUEUE_INTERNALS = ('remove', 'append', 'prepend_n', 'fake_free_list_head', 'fake_free_list_tail', 'num_free_blocks')
+
+
+def quota_problems(scheduler, registry):
+    """What the device quota lacks on this scheduler, [] when it is off or has what it needs: the pool's free calls and its free queue (the quota moves blocks to the
+    queue's front and tail), the manager's allocate_slots, and numbers the pool can honour (a floor above half the pool cannot be guaranteed to two tenants, a cap above
+    the whole pool is a typo)."""
+    quota = getattr(registry, 'quota', None)
+    if quota is None or not quota.device_on:
+        return []
+    problems = []
+    manager = getattr(scheduler, 'kv_cache_manager', None)
+    pool = getattr(manager, 'block_pool', None)
+    missing = ['block_pool.' + name for name in QUOTA_POOL_INTERNALS if not hasattr(pool, name)]
+    queue = getattr(pool, 'free_block_queue', None)
+    missing += ['block_pool.free_block_queue.' + name for name in QUOTA_QUEUE_INTERNALS if queue is None or not hasattr(queue, name)]
+    if not hasattr(manager, 'allocate_slots'):
+        missing.append('kv_cache_manager.allocate_slots')
+    if missing:
+        problems.append('vLLM internals the device quota binds are missing: %s' % ', '.join(missing))
+    blocks = getattr(getattr(scheduler, 'kv_cache_config', None), 'num_blocks', None)
+    if isinstance(blocks, int) and blocks > 0:
+        if quota.device_floor_blocks * 2 > blocks:
+            problems.append('%s=%d is more than half the %d-token pool: two tenants could not both be guaranteed it' % (
+                prefix_registry.ENV_QUOTA_DEVICE_FLOOR, quota.device_floor_blocks * BLOCK, blocks * BLOCK))
+        if quota.device_cap_blocks > blocks:
+            problems.append('%s=%d is more than the whole %d-token pool' % (prefix_registry.ENV_QUOTA_DEVICE_CAP, quota.device_cap_blocks * BLOCK, blocks * BLOCK))
+    return problems
+
+
 def maybe_install(scheduler, environ=None):
     """The hook TTScheduler.__init__ calls last (see INIT_HOOK). Off unless QWEN_PREFIX_REUSE=1."""
     if not prefix_registry.reuse_enabled(environ):
@@ -496,7 +539,7 @@ def install(scheduler, registry=None, kill_switch_path=KILL_SWITCH_PATH, poll_s=
     if problems:
         raise PrefixInstallError('prefix reuse refused: ' + '; '.join(problems))
     registry = registry if registry is not None else shared_registry()
-    problems = tier_problems(scheduler, registry)
+    problems = tier_problems(scheduler, registry) + quota_problems(scheduler, registry)
     if problems:
         raise PrefixInstallError('prefix reuse refused: ' + '; '.join(problems))
     try:
@@ -644,7 +687,7 @@ class TierHooks(object):
         slots = []
         if tier.slot_bytes:
             # Slab mode: the device read goes straight into reserved slots (one copy of each block, into memory already resident).
-            slots = tier.reserve(len(keep))
+            slots = tier.reserve(len(keep), [meta[1] for _, meta in keep])
             if len(slots) < len(keep):
                 stats['tier_spill_dropped_full'] += len(keep) - len(slots)
                 self.unhold([key for key, _ in keep[len(slots):]])
@@ -770,6 +813,10 @@ class TierHooks(object):
         ok = False
         pool.touch(protected)
         tier.pin([record.key for record in records])
+        tenant = prefix_registry.tenant_of_salt(request.cache_salt)
+        quota = graft.quota
+        if quota is not None:
+            quota.allocating = tenant
         try:
             new = pool.get_new_blocks(need - first)
             # The blocks just taken may have been cached: read them out (they are about to be overwritten).
@@ -781,9 +828,10 @@ class TierHooks(object):
                 self.audit(request, ids, payloads)
             pool.cache_full_blocks(request, [None] * first + list(new), first, need, BLOCK, 0)
             chain = hashes[0] if len(hashes) else None
-            tenant = prefix_registry.tenant_of_salt(request.cache_salt)
             for offset, block in enumerate(new):
                 self.meta[block.block_id] = (hashes[first + offset], chain, tenant, first + offset)
+            if quota is not None:
+                quota.note_published(new, tenant)
             ok = True
         except TierAuditError:
             raise
@@ -794,6 +842,8 @@ class TierHooks(object):
             if self.failures >= 3:
                 registry.tier_latch('three restores in a row failed')
         finally:
+            if quota is not None:
+                quota.allocating = None
             tier.unpin([record.key for record in records])
             if new:
                 pool.free_blocks(reversed(new))
@@ -822,6 +872,190 @@ class TierHooks(object):
                                  'at %s)' % (request.request_id, len(bad), len(ids), bad[:4]))
 
 
+class DeviceQuota(object):
+    """The per-tenant quotas on the device pool (module docstring, item g). It keeps, per cached block the cap or a restore published, the tenant it belongs to
+    (owner), per tenant the count of such blocks (resident) and the blocks freed and not since touched or evicted, oldest first (idle: entries are validated on use,
+    so a block touched back into service is simply skipped). It touches vLLM's free queue in two places only: it moves a tenant's excess idle blocks to the FRONT
+    (prepend_n: the next allocation evicts them first), and it sets protected idle blocks aside at the TAIL while an allocation walks the front. Everything else is
+    vLLM's own."""
+
+    def __init__(self, graft, config):
+        self.graft = graft
+        self.registry = graft.registry
+        self.pool = graft.block_pool
+        self.cap = config.device_cap_blocks
+        self.floor = config.device_floor_blocks
+        self.owner = {}
+        self.resident = {}
+        self.idle = {}
+        self.demoted = {}
+        self.allocating = None
+        self.stats = graft.registry.stats
+        self.original = {}
+
+    def attach(self, manager):
+        """Put the quota's calls on the pool and the manager (instance attributes, like the graft's own wrappers): free_blocks (the idle bookkeeping and the cap's demotion),
+        get_new_blocks (the floor's walk; only with a floor) and allocate_slots (who is allocating)."""
+        pool, original = self.pool, self.original
+        original['free_blocks'] = pool.free_blocks
+        original['get_new_blocks'] = pool.get_new_blocks
+
+        def free_blocks(ordered_blocks):
+            blocks = list(ordered_blocks)
+            original['free_blocks'](blocks)
+            self.on_free(blocks)
+
+        def get_new_blocks(num_blocks):
+            self.protect(num_blocks)
+            return original['get_new_blocks'](num_blocks)
+
+        pool.free_blocks = free_blocks
+        if self.floor:
+            pool.get_new_blocks = get_new_blocks
+        if hasattr(manager, 'allocate_slots'):
+            original['allocate_slots'] = manager.allocate_slots
+
+            def allocate_slots(request, *args, **kwargs):
+                self.allocating = prefix_registry.tenant_of_salt(request.cache_salt) if request.cache_salt else None
+                try:
+                    return original['allocate_slots'](request, *args, **kwargs)
+                finally:
+                    self.allocating = None
+
+            manager.allocate_slots = allocate_slots
+
+    # -- accounting -----------------------------------------------------------------------------
+    def note_published(self, blocks, tenant):
+        """The cap (or a restore) cached `blocks` for `tenant`: they are its resident blocks now. Over the cap, its excess idle blocks are demoted."""
+        for block in blocks:
+            if block.block_id not in self.owner:
+                self.owner[block.block_id] = tenant
+                self.resident[tenant] = self.resident.get(tenant, 0) + 1
+        self.enforce(tenant)
+
+    def on_free(self, blocks):
+        """vLLM freed `blocks` (after its own free_blocks ran): the cached ones with no reference left are idle, newest last, and their tenants are re-checked."""
+        tenants = []
+        for block in blocks:
+            tenant = self.owner.get(block.block_id)
+            if tenant is None or block.ref_cnt != 0 or block.block_hash is None:
+                continue
+            group = self.idle.setdefault(tenant, OrderedDict())
+            group.pop(block.block_id, None)
+            group[block.block_id] = block
+            self.demoted.pop(block.block_id, None)
+            if tenant not in tenants:
+                tenants.append(tenant)
+        for tenant in tenants:
+            self.enforce(tenant)
+
+    def on_evict(self, block):
+        """vLLM evicted `block` from the cache: it is no tenant's resident block now. Counted by reason: a block this quota had demoted left because its tenant was over
+        its cap (own); any other left by vLLM's own order (global)."""
+        tenant = self.owner.pop(block.block_id, None)
+        if tenant is None:
+            return
+        left = self.resident.get(tenant, 0) - 1
+        if left > 0:
+            self.resident[tenant] = left
+        else:
+            self.resident.pop(tenant, None)
+        group = self.idle.get(tenant)
+        if group is not None:
+            group.pop(block.block_id, None)
+            if not group:
+                del self.idle[tenant]
+        self.stats['quota_dev_evictions_own' if self.demoted.pop(block.block_id, None) is not None else 'quota_dev_evictions_global'] += 1
+
+    def clear(self):
+        self.owner.clear()
+        self.resident.clear()
+        self.idle.clear()
+        self.demoted.clear()
+
+    def _idle_valid(self, tenant, block):
+        queue_linked = getattr(block, 'prev_free_block', None) is not None
+        return (block.ref_cnt == 0 and block.block_hash is not None and self.owner.get(block.block_id) == tenant and queue_linked)
+
+    # -- the cap ----------------------------------------------------------------------------------
+    def enforce(self, tenant):
+        """The cap: while `tenant`'s resident blocks exceed it, move its oldest idle blocks (not already moved) to the front of the free queue. A block in use cannot be
+        moved: the excess it accounts for is demoted when the request frees it."""
+        if not self.cap:
+            return 0
+        excess = self.resident.get(tenant, 0) - self.cap
+        if excess <= 0:
+            return 0
+        pending = 0
+        for block_id in [key for key, (owner, _) in self.demoted.items() if owner == tenant]:
+            if self._idle_valid(tenant, self.demoted[block_id][1]):
+                pending += 1
+            else:
+                del self.demoted[block_id]
+        need = excess - pending
+        if need <= 0:
+            return 0
+        group = self.idle.get(tenant)
+        if not group:
+            return 0
+        picked, stale = [], []
+        for block_id, block in group.items():
+            if not self._idle_valid(tenant, block):
+                stale.append(block_id)
+                continue
+            picked.append(block)
+            if len(picked) >= need:
+                break
+        for block_id in stale:
+            group.pop(block_id, None)
+        queue = self.pool.free_block_queue
+        for block in picked:
+            queue.remove(block)
+            group.pop(block.block_id, None)
+            self.demoted[block.block_id] = (tenant, block)
+        if picked:
+            queue.prepend_n(picked)
+            self.stats['quota_dev_demoted_blocks'] += len(picked)
+        if group is not None and not group:
+            self.idle.pop(tenant, None)
+        return len(picked)
+
+    # -- the floor --------------------------------------------------------------------------------
+    def protect(self, num_blocks):
+        """Before an allocation of `num_blocks`: walk the front of the free queue and put at the tail every idle block that is protected (its tenant would fall below the
+        floor by losing it, and the tenant is not the one allocating), until `num_blocks` unprotected blocks head the queue. If there are fewer, the allocation takes
+        protected blocks after all (an override: vLLM's allocation never fails for a quota)."""
+        if not self.floor or num_blocks <= 0:
+            return
+        queue = self.pool.free_block_queue
+        tail = queue.fake_free_list_tail
+        block = queue.fake_free_list_head.next_free_block
+        limit = queue.num_free_blocks
+        taken, found, examined, moved = {}, 0, 0, 0
+        while found < num_blocks and block is not tail and block is not None and examined < limit:
+            examined += 1
+            following = block.next_free_block
+            tenant = self.owner.get(block.block_id) if block.block_hash is not None else None
+            if tenant is not None and tenant != self.allocating and self.resident.get(tenant, 0) - taken.get(tenant, 0) <= self.floor:
+                queue.remove(block)
+                queue.append(block)
+                moved += 1
+            else:
+                found += 1
+                if tenant is not None:
+                    taken[tenant] = taken.get(tenant, 0) + 1
+            block = following
+        if moved:
+            self.stats['quota_dev_floor_protected'] += moved
+        if found < num_blocks:
+            self.stats['quota_dev_floor_overrides'] += num_blocks - found
+
+    def gauge(self):
+        """The aggregates the stats carry: how many tenants hold resident blocks and how many are at their cap."""
+        at_cap = sum(1 for held in self.resident.values() if self.cap and held >= self.cap)
+        return dict(quota_dev_tenants=len(self.resident), quota_dev_at_cap=at_cap)
+
+
 class SchedulerGraft(object):
     # Sticky sessions (the module docstring); off on the class, so a graft built without them - or
     # a stand-in carrying only a registry (the model fixture calls plan() that way) - plans as G1.
@@ -829,6 +1063,8 @@ class SchedulerGraft(object):
     drop_last = False
     # The host KV tier's hooks (TierHooks), None unless the registry has a tier and the model attached its IO.
     tier_hooks = None
+    # The per-tenant device quota (DeviceQuota), None unless QWEN_PREFIX_TENANT_QUOTA_DEVICE_* names one.
+    quota = None
     make_block_hash = None
     # Lever N's peek memo (request id -> the Q the trim would land on), cleared at the start of every schedule() call.
     peeked = {}
@@ -1076,6 +1312,8 @@ class SchedulerGraft(object):
             self.registry.same_step_blocks.update(block.block_id for block in owned[before:after])
             if self.tier_hooks is not None:
                 self.tier_hooks.note_published(request, owned, before, after)
+            if self.quota is not None:
+                self.quota.note_published(owned[before:after], prefix_registry.tenant_of_salt(request.cache_salt))
 
     # -- c. the per-step commit ------------------------------------------------------------------
     def commit(self, output):
@@ -1114,6 +1352,8 @@ class SchedulerGraft(object):
         # The block's KV goes to the tier at the end of the schedule() call; the checkpoint at it then stays (held).
         held = hooks is not None and bool(keys) and hooks.on_evict(block, keys)
         evicted = self.original['_maybe_evict_cached_block'](block)
+        if evicted and self.quota is not None:
+            self.quota.on_evict(block)
         if evicted and keys and self.registry.entries:
             for key in keys:
                 if pool.cached_block_hash_to_block.get_one_block(key) is None:
@@ -1142,6 +1382,10 @@ class SchedulerGraft(object):
         original['_maybe_evict_cached_block'] = pool._maybe_evict_cached_block
         original['reset_prefix_cache'] = scheduler.reset_prefix_cache
         original['_free_request'] = scheduler._free_request
+        quota = None
+        if registry.quota is not None and registry.quota.device_on:
+            quota = self.quota = DeviceQuota(self, registry.quota)
+            registry.quota_gauge = quota.gauge
 
         def get_computed_blocks(request):
             blocks, h = original['get_computed_blocks'](request)
@@ -1178,6 +1422,8 @@ class SchedulerGraft(object):
                 if self.tier_hooks is not None:
                     self.tier_hooks.pending.clear()
                     self.tier_hooks.meta.clear()
+                if self.quota is not None:
+                    self.quota.clear()
             else:
                 # vLLM kept every cached block (running requests hold blocks,
                 # scheduler.py:2196-2240), so every checkpoint still has its KV: keep them.
@@ -1194,6 +1440,8 @@ class SchedulerGraft(object):
         pool._maybe_evict_cached_block = _maybe_evict_cached_block
         scheduler.reset_prefix_cache = reset_prefix_cache
         scheduler._free_request = _free_request
+        if quota is not None:
+            quota.attach(manager)
 
         spec = scheduler.kv_cache_config.kv_cache_groups[0].kv_cache_spec
         module = sys.modules.get(type(scheduler).__module__)
@@ -1221,6 +1469,11 @@ class SchedulerGraft(object):
                      'block_bytes=%s fingerprint=%s', config.kv_bytes, config.total, registry.evict_policy, int(config.audit), config.verify,
                      config.spill_max, config.min_tokens, config.min_available, getattr(registry.tier_io, 'block_bytes', '?'),
                      getattr(registry.tier_io, 'fingerprint', ''))
+        if registry.quota is not None:
+            # The gate reads this line (prefix_markers.QUOTA_ON): the numbers only, never a tenant.
+            self.log('tenant quota on device_cap_tokens=%d device_floor_tokens=%d host_cap_bytes=%d host_floor_bytes=%d device=%d host=%d',
+                     registry.quota.device_cap_blocks * BLOCK, registry.quota.device_floor_blocks * BLOCK, registry.quota.host_cap_bytes,
+                     registry.quota.host_floor_bytes, int(quota is not None), int(self.tier_hooks is not None and registry.quota.host_on))
         if self.sticky:
             self.log('install sticky=1 lookahead=%d drop_last=%s ceiling=floor2048(P-%d)',
                      getattr(scheduler, 'num_lookahead_tokens', 0), self.drop_last, CHUNK)

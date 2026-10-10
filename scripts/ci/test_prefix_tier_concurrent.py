@@ -546,7 +546,7 @@ class PackTests(unittest.TestCase):
         rows = self.order()
         names = [row[0] for row in rows]
         self.assertEqual(sorted(names), sorted(path.stem for path in PACK.glob('*.env')))
-        self.assertEqual([name.split('-')[0] for name in names], ['B0', 'X0', 'TCX0', 'TCX1', 'TC1', 'TC2', 'TC3', 'TC4', 'TC5', 'Z'])
+        self.assertEqual([name.split('-')[0] for name in names], ['B0', 'X0', 'TCX0', 'TCX1', 'TC1', 'TQ1', 'TC2', 'TC3', 'TC4', 'TC5', 'Z'])
         for name, mode, image, minutes in rows:
             self.assertIn(mode, ('stop', 'soft'), name)
             self.assertEqual(image, self.IMAGE, name)
@@ -559,11 +559,13 @@ class PackTests(unittest.TestCase):
             left, right = line[len('# NEEDS '):].split(' <- ')
             self.assertTrue(set(left.split() + right.split()) <= short, line)
         self.assertIn('# NEEDS TC3 <- TC1 TC2', needs, 'the tier is timed only after its audited arm and the control passed')
+        self.assertIn('# NEEDS TQ1 <- TC1', needs)
 
     def test_every_template_runs_what_its_name_says(self):
         expect = {
             'TCX0-exact-control': ('smoke', None, tier_twin.FX_PARENT), 'TCX1-exact-tier': ('smoke', None, tier_twin.SHIP),
             'TC1-tier-concurrent-audited': ('prefix', 'tier-concurrent', tier_twin.SHIP_AUDIT),
+            'TQ1-tier-quota-isolation': ('prefix', 'tier-quota', tier_twin.SHIP_AUDIT),
             'TC2-tier-concurrent-control-timed': ('prefix', 'tier-concurrent-timed', tier_twin.FX_PARENT),
             'TC3-tier-concurrent-tier-timed': ('prefix', 'tier-concurrent-timed', tier_twin.SHIP),
             'TC4-tier-concurrent-control-repeat': ('prefix', 'tier-concurrent-timed', tier_twin.FX_PARENT),
@@ -598,17 +600,20 @@ class PackTests(unittest.TestCase):
         for needle in (tier_twin.SHIP, tier_twin.FX_PARENT, tier_twin.SHIP_AUDIT, tier_twin.SHIP_WAIVER_ID, 'tier_concurrent_compare.py', 'ESTIMATE (not measured)',
                        '8 s', 'Lever N decode gap floor'):
             self.assertIn(needle, text)
-        for name in ('TC1-tier-concurrent-audited', 'TC3-tier-concurrent-tier-timed'):
+        for name in ('TC1-tier-concurrent-audited', 'TC3-tier-concurrent-tier-timed', 'TQ1-tier-quota-isolation'):
             body = (PACK / ('%s.env' % name)).read_text(encoding='utf-8')
             self.assertIn('Duration (estimate', body)
         compare_text = (PACK / 'TC2-tier-concurrent-control-timed.env').read_text(encoding='utf-8')
         self.assertIn('tier_concurrent_compare.py <TC2 results> <TC3 results> <TC4 results> <TC5 results>', compare_text)
         self.assertIn('parked_compare.py', (PACK / 'TCX1-exact-tier.env').read_text(encoding='utf-8'))
+        quota_text = (PACK / 'TQ1-tier-quota-isolation.env').read_text(encoding='utf-8')
+        self.assertIn('tier_concurrent_compare.py --quota <results>/quota-control <results>/quota-isolated', quota_text)
+        self.assertIn('DEVICE-RESIDENT', quota_text)
 
     def test_every_prefix_template_plans_in_the_gate_as_a_dry_run(self):
         results = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, results, True)
-        for name in ('TC1-tier-concurrent-audited', 'TC2-tier-concurrent-control-timed', 'TC3-tier-concurrent-tier-timed'):
+        for name in ('TC1-tier-concurrent-audited', 'TQ1-tier-quota-isolation', 'TC2-tier-concurrent-control-timed', 'TC3-tier-concurrent-tier-timed'):
             env = self.env(name)
             lines = []
             code = gate.main(['--image', 'img', '--profiles', str(REAL_PROFILES), '--results', results, '--profile', env['C2_PREFIX_PROFILE'], '--plan', env['C2_PREFIX_PLAN'],

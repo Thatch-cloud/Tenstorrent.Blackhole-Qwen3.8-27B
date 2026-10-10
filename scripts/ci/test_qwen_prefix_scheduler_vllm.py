@@ -1464,5 +1464,69 @@ class HostTierOnRealVllmTests(unittest.TestCase):
         self.assertEqual(with_state.registry.stats['tier_digest_failures'], 0)
 
 
+@unittest.skipIf(VLLM_ERROR is not None, 'vLLM is not importable here (%s)' % VLLM_ERROR)
+class TenantQuotaOnRealVllmTests(unittest.TestCase):
+    """The per-tenant device quota (module docstring of qwen_prefix_scheduler_patch, item g) on vLLM's own scheduler, KVCacheManager.allocate_slots, block pool and
+    free queue, through the real install(): tenant A floods a pool tenant B's session sits in. With the quota B's return is a hit (A evicted its own blocks, or B was
+    set aside by the floor); without it (the negative control) the flood reaches B. test_qwen_prefix_quota holds the same on a copy of the queue and on the pool class."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = Env()
+
+    def setUp(self):
+        self.env.logs[:] = []
+
+    def traffic(self, num_blocks=200, **quota):
+        registry = STATE['graft'].PrefixRegistry(budget_bytes=1 << 40, environ=dict(quota))
+        scheduler, state = self.env.make(num_blocks=num_blocks, registry=registry)
+        drive = Drive(self.env, scheduler, state, 'quota-%s' % sorted(quota))
+        b = drive.add('b', tokens(4200, 'quota-b'), 1, salt='tenant-b')
+        drive.run()
+        for index in range(4):
+            drive.add('a%d' % index, tokens(4200, 'quota-a-%d' % index), 1, salt='tenant-a')
+            drive.run()
+        drive.add('b2', list(b.prompt_token_ids) + list(b.output_token_ids) + tokens(600, 'quota-b2'), 1, salt='tenant-b')
+        drive.run()
+        return drive, state
+
+    def test_without_the_quota_the_flood_reaches_the_other_tenant(self):
+        drive, state = self.traffic()
+        self.assertEqual(drive.row('b2').start, 0, 'negative control: b\'s blocks were the oldest')
+        self.assertIsNone(state.quota)
+
+    def test_the_cap_makes_the_flooding_tenant_evict_its_own_blocks(self):
+        cap = {'QWEN_PREFIX_TENANT_QUOTA_DEVICE_CAP_TOKENS': '4096'}
+        drive, state = self.traffic(**cap)
+        row = drive.row('b2')
+        self.assertEqual((row.start, row.q), (4096, 4096), 'b came back to a hit')
+        stats = state.registry.stats
+        self.assertGreater(stats['quota_dev_evictions_own'], 0)
+        self.assertEqual(stats['quota_dev_evictions_global'], 0)
+        self.assertTrue(any(line.startswith('tenant quota on device_cap_tokens=4096') for line in self.env.logs))
+        pool = drive.scheduler.kv_cache_manager.block_pool
+        count, block = 0, pool.free_block_queue.fake_free_list_head.next_free_block
+        while block is not pool.free_block_queue.fake_free_list_tail:
+            count += 1
+            block = block.next_free_block
+        self.assertEqual(count, pool.free_block_queue.num_free_blocks, 'the free queue stayed whole')
+        self.assertEqual(pool.get_num_free_blocks(), 199, 'every block is free again')
+        self.assertTrue(set(state.quota.owner) == {b.block_id for b in pool.blocks if b.block_hash is not None})
+
+    def test_the_floor_alone_sets_the_other_tenants_blocks_aside(self):
+        drive, state = self.traffic(**{'QWEN_PREFIX_TENANT_QUOTA_DEVICE_FLOOR_TOKENS': '4096'})
+        row = drive.row('b2')
+        self.assertEqual((row.start, row.q), (4096, 4096))
+        stats = state.registry.stats
+        self.assertGreater(stats['quota_dev_floor_protected'], 0)
+        self.assertEqual(stats['quota_dev_floor_overrides'], 0)
+
+    def test_the_numbers_the_pool_cannot_honour_refuse_the_install(self):
+        registry = STATE['graft'].PrefixRegistry(budget_bytes=1 << 40, environ={'QWEN_PREFIX_TENANT_QUOTA_DEVICE_FLOOR_TOKENS': str(120 * BLOCK)})
+        with self.assertRaises(STATE['graft'].PrefixInstallError) as caught:
+            self.env.make(num_blocks=200, registry=registry)
+        self.assertIn('more than half', str(caught.exception))
+
+
 if __name__ == '__main__':
     unittest.main()

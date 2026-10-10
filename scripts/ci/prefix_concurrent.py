@@ -180,11 +180,11 @@ def compare_seats(first, second, minimum=MIN_COMMON_TOKENS):
 
 def load_records(path):
     """The records of a results directory (<dir>/records.jsonl, or <dir>/<arm>/records.jsonl for the first arm directory that holds one: a tier-concurrent job's
-    results hold exactly one arm) or of a records.jsonl file. IOError when there is none."""
+    results hold exactly one arm; so does a quota arm's) or of a records.jsonl file. IOError when there is none."""
     candidates = [path]
     if os.path.isdir(path):
         candidates = [os.path.join(path, 'records.jsonl')]
-        candidates += [os.path.join(path, name, 'records.jsonl') for name in sorted(os.listdir(path)) if name.startswith('tier-concurrent')]
+        candidates += [os.path.join(path, name, 'records.jsonl') for name in sorted(os.listdir(path)) if name.startswith(('tier-concurrent', 'quota-'))]
     for candidate in candidates:
         if os.path.isfile(candidate):
             with open(candidate, encoding='utf-8') as handle:

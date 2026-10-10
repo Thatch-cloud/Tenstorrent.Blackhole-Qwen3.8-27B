@@ -94,6 +94,10 @@ never guessed around):
     [PINDIAG] verify t2 kv shared ...   verify_trace_t2.KV_SHARED, a packed round's K/V conflict (the proposal
         guard's or the stage's); read into kv_shared, which a fast-path prefix arm needs empty.
 
+  the per-tenant quotas (QWEN_PREFIX_TENANT_QUOTA_*; docs/prefix-store-hygiene.md "Tenant quotas"):
+    [PINDIAG] prefix: tenant quota on device_cap_tokens=<n> device_floor_tokens=<n> host_cap_bytes=<n> host_floor_bytes=<n> device=<0|1> host=<0|1>
+        the scheduler graft, once, when a quota is configured: the numbers only, never a tenant; read into quota_on.
+
   the host KV tier and the preconverted checkpoints (QWEN_PREFIX_HOST_TIER_GIB, QWEN_PREFIX_CKPT_PRECONVERTED; docs/prefix-store-hygiene.md):
     [PINDIAG] prefix: host tier on gib=<f> kv_gib=<f> block_bytes=<n> verify=<sample|all|off> audit=<0|1> spill_max_blocks=<n> min_tokens=<n> slack=<n> off_path=<path>
         the scheduler graft, once, when the tier is configured and the model graft's IO is attached; read into tier_on.
@@ -147,6 +151,7 @@ GRANT = re.compile(r'\[PINDIAG\] prefix: grant req=(\S+) h=(\d+) Q=(\d+)(?: drai
 COMMIT_REFUSED = re.compile(r'\[PINDIAG\] prefix: commit refused req=(\S+) start_pos=(\d+) Q=(\d+)')
 CAPTURE_SKIPPED = re.compile(r'\[PINDIAG\] prefix: capture skipped req=(\S+) pos=(\S+): (.*)$')
 KILL_SWITCH = '[PINDIAG] prefix: kill switch '
+QUOTA_ON = '[PINDIAG] prefix: tenant quota on '
 TIER_ON = '[PINDIAG] prefix: host tier on '
 TIER_IO = '[PINDIAG] prefix: host tier IO attached '
 TIER_SPILL = '[PINDIAG] prefix: host tier spill blocks='
@@ -356,7 +361,7 @@ def scan(lines):
                stats=None, launches=[], apc=[], chunking_off=0, chunk_replay=0, dram=[], dram_readings=[],
                kv_tokens=None, failures=[], audit_costs=[], audit_crosses=[], eager_warm=[], four_card_warm=[], sticky_installs=[], sticky_admits=[], sticky_builds=[],
                model_warm=[], model_warm_skipped=[], kv_shared=[], audit_windows=[], tier_on=[], tier_io=[], tier_spills=[], tier_restores=[],
-               tier_trouble=[], ckpt_audits=[], ckpt_preconverted=0)
+               tier_trouble=[], ckpt_audits=[], ckpt_preconverted=0, quota_on=[])
     for index, raw in enumerate(lines):
         stamp, line = split_timestamp(raw.rstrip('\n'))
         where = dict(index=index, time=stamp)
@@ -431,6 +436,10 @@ def scan(lines):
                                                pos=match.group(2), reason=match.group(3)[:200]))
         if KILL_SWITCH in line:
             out['kill_switch'].append(dict(where, line=line.strip()[:300]))
+        if QUOTA_ON in line:
+            entry = fields(line.split(QUOTA_ON, 1)[1])
+            entry.update(where)
+            out['quota_on'].append(entry)
         if '] prefix: host tier ' in line or CKPT_AUDIT in line or CKPT_PRECONVERTED in line:
             tier_line(out, line, where)
         if EAGER_WARM in line:

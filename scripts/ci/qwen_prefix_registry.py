@@ -31,6 +31,10 @@ process holds what vLLM cannot know about a hit: the GatedDeltaNet (GDN) state t
   budget: checkpoints (QWEN_PREFIX_STORE_GIB) plus KV pages take the rest. Blocks are keyed by vLLM's chained block hash,
   which carries the salt, so tenants never meet. A restored block is the evicted block's bytes (a digest checked on
   restore, a read-back compared under QWEN_PREFIX_HOST_TIER_AUDIT=1); any failure is a miss.
+- Tenant quotas (QWEN_PREFIX_TENANT_QUOTA_*, default off, byte-identical off; docs/prefix-store-hygiene.md "Tenant quotas"): a per-tenant cap and floor on the cached prefix
+  tokens in the device pool (the scheduler graft's DeviceQuota) and on the bytes in the host tier (TierStore), keyed by the salt's tenant tag. The cap makes a tenant that passes it
+  lose its OWN oldest blocks (records) first; the floor spares a tenant's last tokens (bytes) from everyone else's allocations (spills). quota_config parses the four knobs strictly;
+  the counters it adds (QUOTA_STAT_NAMES) are aggregates and exist only when a quota is on. No tenant, salt or digest is ever logged or exported.
 - Grants: staged on every admission attempt inside one schedule() call, committed only for the
   requests the step's SchedulerOutput admits at start_pos == Q (F2, S6), pinned for that one step.
   The model reads grant_for(request_id) per prefill row.
@@ -195,6 +199,20 @@ TIER_VERIFY_MODES = ('sample', 'all', 'off')
 TIER_VERIFY_EVERY = 16
 # A scan for dead records stops after this many of the oldest.
 TIER_DEAD_SCAN = 256
+
+# Per-tenant quotas (the module docstring, "Tenant quotas"): off unless one of these names a number. Every knob is strict: digits only, and a value the engine
+# could not honour refuses to start. The tenant is the salt's (tenant_of_salt); the same numbers apply to every tenant.
+ENV_QUOTA_DEVICE_CAP = 'QWEN_PREFIX_TENANT_QUOTA_DEVICE_CAP_TOKENS'       # most prefix tokens one tenant keeps cached in the device pool (0/unset: no cap)
+ENV_QUOTA_DEVICE_FLOOR = 'QWEN_PREFIX_TENANT_QUOTA_DEVICE_FLOOR_TOKENS'   # prefix tokens of a tenant that other tenants' allocations may not evict (0/unset: none)
+ENV_QUOTA_HOST_CAP = 'QWEN_PREFIX_TENANT_QUOTA_HOST_CAP_GIB'              # most host-tier GiB one tenant holds (0/unset: no cap)
+ENV_QUOTA_HOST_FLOOR = 'QWEN_PREFIX_TENANT_QUOTA_HOST_FLOOR_GIB'          # host-tier GiB of a tenant that other tenants' spills may not evict (0/unset: none)
+QUOTA_ENV_NAMES = (ENV_QUOTA_DEVICE_CAP, ENV_QUOTA_DEVICE_FLOOR, ENV_QUOTA_HOST_CAP, ENV_QUOTA_HOST_FLOOR)
+# The counters a quota adds to the registry's stats (only when a quota is on, so the stats of an engine without one are what they were). Aggregates only: no per-tenant
+# label, key or line ever carries a salt or a tenant tag.
+QUOTA_STAT_NAMES = (
+    'quota_dev_demoted_blocks', 'quota_dev_evictions_own', 'quota_dev_evictions_global', 'quota_dev_floor_protected', 'quota_dev_floor_overrides',
+    'quota_host_evictions_own', 'quota_host_evictions_global', 'quota_host_floor_protected', 'quota_host_refused',
+)
 TIER_STAT_NAMES = (
     'tier_spill_flushes', 'tier_spill_blocks', 'tier_spill_bytes', 'tier_spill_ms', 'tier_spill_known',
     'tier_spill_dropped_useless', 'tier_spill_dropped_cap', 'tier_spill_dropped_governor', 'tier_spill_dropped_full',
@@ -529,6 +547,76 @@ def tier_config(environ, store_budget_bytes):
     return config
 
 
+class QuotaConfig(object):
+    """The per-tenant quotas (quota_config): device_cap_blocks and device_floor_blocks (0: none) in 64-token blocks, host_cap_bytes and host_floor_bytes (0: none)."""
+
+    __slots__ = ('device_cap_blocks', 'device_floor_blocks', 'host_cap_bytes', 'host_floor_bytes')
+
+    @property
+    def device_on(self):
+        return bool(self.device_cap_blocks or self.device_floor_blocks)
+
+    @property
+    def host_on(self):
+        return bool(self.host_cap_bytes or self.host_floor_bytes)
+
+    def describe(self):
+        return dict(device_cap_tokens=self.device_cap_blocks * BLOCK, device_floor_tokens=self.device_floor_blocks * BLOCK,
+                    host_cap_bytes=self.host_cap_bytes, host_floor_bytes=self.host_floor_bytes)
+
+
+def _quota_tokens(environ, name):
+    """A token count from the environment: unset or empty is 0 (off); anything else must be plain digits (no sign, no space, no exponent) and a whole number of blocks."""
+    raw = environ.get(name)
+    if raw is None or raw == '':
+        return 0
+    if not (raw.isascii() and raw.isdigit()):
+        raise ValueError('%s=%r is not a whole number of tokens (digits only)' % (name, raw))
+    value = int(raw)
+    if value % BLOCK:
+        raise ValueError('%s=%r is not a multiple of the %d-token block' % (name, raw, BLOCK))
+    return value // BLOCK
+
+
+def _quota_gib(environ, name):
+    raw = environ.get(name)
+    if raw is None or raw == '':
+        return 0
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError('%s=%r is not a number of GiB' % (name, raw))
+    if not (value >= 0.0) or value == float('inf'):
+        raise ValueError('%s=%r must be a finite number >= 0' % (name, raw))
+    return int(value * (1 << 30))
+
+
+def quota_config(environ, tier_kv_bytes=None):
+    """The per-tenant quotas from the environment, None when none is named (or all are 0). Strict: a cap below one 2048-token chunk (a tenant could never keep a
+    checkpoint's worth of KV), a floor above its cap, a host quota without the host tier, and a host floor above half the tier's KV budget (two tenants could not both be
+    guaranteed) refuse to start."""
+    config = QuotaConfig()
+    config.device_cap_blocks = _quota_tokens(environ, ENV_QUOTA_DEVICE_CAP)
+    config.device_floor_blocks = _quota_tokens(environ, ENV_QUOTA_DEVICE_FLOOR)
+    config.host_cap_bytes = _quota_gib(environ, ENV_QUOTA_HOST_CAP)
+    config.host_floor_bytes = _quota_gib(environ, ENV_QUOTA_HOST_FLOOR)
+    if not (config.device_on or config.host_on):
+        return None
+    if config.device_cap_blocks and config.device_cap_blocks * BLOCK < CHUNK:
+        raise ValueError('%s=%d is below one %d-token chunk' % (ENV_QUOTA_DEVICE_CAP, config.device_cap_blocks * BLOCK, CHUNK))
+    if config.device_cap_blocks and config.device_floor_blocks > config.device_cap_blocks:
+        raise ValueError('%s=%d exceeds %s=%d' % (ENV_QUOTA_DEVICE_FLOOR, config.device_floor_blocks * BLOCK, ENV_QUOTA_DEVICE_CAP, config.device_cap_blocks * BLOCK))
+    if config.host_on:
+        if tier_kv_bytes is None:
+            raise ValueError('%s / %s need the host KV tier (%s > 0): without it the quota would be inert' % (ENV_QUOTA_HOST_CAP, ENV_QUOTA_HOST_FLOOR, ENV_TIER_GIB))
+        if config.host_cap_bytes and config.host_floor_bytes > config.host_cap_bytes:
+            raise ValueError('%s exceeds %s' % (ENV_QUOTA_HOST_FLOOR, ENV_QUOTA_HOST_CAP))
+        if config.host_floor_bytes * 2 > int(tier_kv_bytes):
+            raise ValueError('%s=%s is more than half the tier\'s KV budget (%d bytes): two tenants could not both be guaranteed it' % (
+                ENV_QUOTA_HOST_FLOOR, environ.get(ENV_QUOTA_HOST_FLOOR), int(tier_kv_bytes)))
+    return config
+
+
 class TierRecord(object):
     """One evicted attention-KV block held in host RAM: its raw packed bytes (payload), the chain it belongs to (the first block's hash),
     its position in it (index) and its tenant, and the sha256 of the bytes once the digest worker has computed it."""
@@ -550,11 +638,12 @@ class TierRecord(object):
 class Slot(object):
     """One slot of the tier's slab, reserved for a block about to be read into it (view is writable); commit files it under a key, abort frees it."""
 
-    __slots__ = ('index', 'view')
+    __slots__ = ('index', 'view', 'tenant')
 
-    def __init__(self, index, view):
+    def __init__(self, index, view, tenant=None):
         self.index = index
         self.view = view
+        self.tenant = tenant
 
 
 class TierStore(object):
@@ -569,8 +658,14 @@ class TierStore(object):
     dumps; a record is a slot, an eviction returns the slot, and the device read is made straight into a reserved slot - so the host does one copy
     of a block, into memory that is already resident after the first fill, instead of a fresh allocation and page faults per block."""
 
-    def __init__(self, cap_bytes, policy='lru', fingerprint='', digest_inline=False, on_evict=None, dead=None):
+    def __init__(self, cap_bytes, policy='lru', fingerprint='', digest_inline=False, on_evict=None, dead=None, tenant_cap=0, tenant_floor=0, counters=None):
         self.cap = int(cap_bytes)
+        # Per-tenant quotas in bytes (0: none): a tenant over tenant_cap loses its OWN oldest records first; a record whose removal would take its tenant below
+        # tenant_floor is never another tenant's victim. counters is the dict the aggregate counters (QUOTA_STAT_NAMES) are kept in.
+        self.tenant_cap = int(tenant_cap or 0)
+        self.tenant_floor = int(tenant_floor or 0)
+        self.counters = counters if counters is not None else {}
+        self.reserved = {}
         self.policy = policy
         self.fingerprint = fingerprint
         self.records = OrderedDict()
@@ -625,32 +720,48 @@ class TierStore(object):
     def _slot_view(self, index):
         return self._view[index * self.slot_bytes:(index + 1) * self.slot_bytes]
 
-    def _take_slot(self):
+    def _take_slot(self, tenant=None):
+        if self.tenant_cap and not self._enforce_cap(tenant, self.slot_bytes):
+            self._count('quota_host_refused')
+            return None
         if not self._free:
             victim = self._victim()
             if victim is None:
                 return None
-            self.remove(victim, evicted=True)
-        return Slot(self._free.pop(), None) if self._free else None
+            self.remove(victim, evicted=True, reason='global')
+        return Slot(self._free.pop(), None, tenant) if self._free else None
 
-    def reserve(self, count):
+    def reserve(self, count, tenants=None):
         """Up to `count` slots to read blocks into, evicting by policy to make them (fewer when the store cannot: every slot is a
-        reservation). Each must be committed or aborted."""
+        reservation). `tenants` (one per slot) lets the per-tenant cap apply before the slot is taken. Each must be committed or aborted."""
         slots = []
-        for _ in range(count):
-            slot = self._take_slot()
+        for position in range(count):
+            tenant = tenants[position] if tenants else None
+            slot = self._take_slot(tenant)
             if slot is None:
                 break
             slot.view = self._slot_view(slot.index)
+            if self.tenant_cap:
+                self.reserved[tenant] = self.reserved.get(tenant, 0) + self.slot_bytes
             slots.append(slot)
         return slots
 
+    def _release_reservation(self, slot):
+        if self.tenant_cap:
+            left = self.reserved.get(slot.tenant, 0) - self.slot_bytes
+            if left > 0:
+                self.reserved[slot.tenant] = left
+            else:
+                self.reserved.pop(slot.tenant, None)
+
     def abort(self, slots):
         for slot in slots:
+            self._release_reservation(slot)
             self._free.append(slot.index)
 
     def commit(self, slot, key, tenant=None, chain=None, index=0):
         """File a reserved slot, now holding a block's bytes, under key. A key already held keeps its record and the slot goes back."""
+        self._release_reservation(slot)
         existing = self.records.get(key)
         if existing is not None:
             self.records.move_to_end(key)
@@ -699,13 +810,17 @@ class TierStore(object):
             self.stats['refused_size'] += 1
             return False
         if self.slot_bytes:
-            slot = self._take_slot()
+            slot = self._take_slot(tenant)
             if slot is None:
                 self.stats['refused_full'] += 1
                 return False
             view = self._slot_view(slot.index)
             view[:] = memoryview(payload).cast('B')
             return self._file(TierRecord(key, view, tenant, chain, int(index), next(self._serials), slot.index))
+        if self.tenant_cap and not self._enforce_cap(tenant, size):
+            self._count('quota_host_refused')
+            self.stats['refused_full'] += 1
+            return False
         if not self._make_room(size):
             self.stats['refused_full'] += 1
             return False
@@ -716,8 +831,35 @@ class TierStore(object):
             victim = self._victim()
             if victim is None:
                 return False
-            self.remove(victim, evicted=True)
+            self.remove(victim, evicted=True, reason='global')
         return True
+
+    def _count(self, name, value=1):
+        if name in self.counters:
+            self.counters[name] += value
+
+    def _enforce_cap(self, tenant, need):
+        """The per-tenant cap: evict `tenant`'s own oldest unpinned records until its bytes (and the reservations it already holds) plus `need` fit under tenant_cap.
+        True when they do; False when `need` alone exceeds the cap or what is left is pinned."""
+        cap = self.tenant_cap
+        if need > cap:
+            return False
+        group = self.by_tenant.get(tenant)
+        while self.tenant_bytes.get(tenant, 0) + self.reserved.get(tenant, 0) + need > cap:
+            victim = None
+            for key in (group or ()):
+                if key not in self.pinned:
+                    victim = key
+                    break
+            if victim is None:
+                return False
+            self.remove(victim, evicted=True, reason='own')
+            group = self.by_tenant.get(tenant)
+        return True
+
+    def _protected(self, record):
+        """Whether removing `record` would take its tenant below the floor: it is then no other tenant's victim."""
+        return bool(self.tenant_floor) and self.tenant_bytes.get(record.tenant, 0) - record.nbytes < self.tenant_floor
 
     def pin(self, keys):
         """Keep these records through any eviction until unpin (a restore is about to write their bytes to the device: in slab mode an eviction
@@ -735,19 +877,35 @@ class TierStore(object):
                     break
                 if key not in pinned and self.dead(record):
                     return key
+        held = 0
+        found = None
         if self.policy == 'fair' and self.tenant_bytes:
             # The tenants holding the most bytes first: the oldest unpinned record of the first that has one.
             for tenant in sorted(self.tenant_bytes, key=lambda name: -self.tenant_bytes[name]):
                 for key in self.by_tenant[tenant]:
-                    if key not in pinned:
-                        return key
-            return None
-        for key in self.records:
-            if key not in pinned:
-                return key
-        return None
+                    if key in pinned:
+                        continue
+                    if self.tenant_floor and self._protected(self.records[key]):
+                        held += 1
+                        continue
+                    found = key
+                    break
+                if found is not None:
+                    break
+        else:
+            for key, record in self.records.items():
+                if key in pinned:
+                    continue
+                if self.tenant_floor and self._protected(record):
+                    held += 1
+                    continue
+                found = key
+                break
+        if held:
+            self._count('quota_host_floor_protected', held)
+        return found
 
-    def remove(self, key, evicted=False):
+    def remove(self, key, evicted=False, reason=None):
         record = self.records.pop(key, None)
         if record is None:
             return None
@@ -766,6 +924,8 @@ class TierStore(object):
             self._free.append(record.slot)
         if evicted:
             self.stats['evicted'] += 1
+            if reason is not None:
+                self._count('quota_host_evictions_' + reason)
             if self.on_evict is not None:
                 self.on_evict(record)
         return record
@@ -811,6 +971,11 @@ class TierStore(object):
         if executor is not None:
             executor.shutdown(wait=True)
 
+    def tenants_at_cap(self):
+        """How many tenants hold their cap (an aggregate: the count, never who)."""
+        cap = self.tenant_cap
+        return sum(1 for held in self.tenant_bytes.values() if cap and held + (self.slot_bytes or 1) > cap)
+
     def snapshot(self):
         return dict(bytes=self.bytes, entries=len(self.records), cap=self.cap, tenants=len(self.tenant_bytes),
                     slots=(self.cap // self.slot_bytes) if self.slot_bytes else 0, free_slots=len(self._free))
@@ -837,11 +1002,16 @@ class PrefixRegistry(object):
         self.tier = None
         self.tier_io = None
         self.device_holds = None
+        # Per-tenant quotas (QUOTA_ENV_NAMES): None unless named. The counters exist only then, so an engine without one keeps the stats it had.
+        self.quota = quota_config(flags, self.tier_config.kv_bytes if self.tier_config is not None else None)
         # Blocks past a checkpoint's boundary a restore must still have: 1 when vLLM drops a hit's last block (sticky sessions), else 0.
         self.tier_slack = 0
+        quota_counters = dict.fromkeys(QUOTA_STAT_NAMES, 0) if self.quota is not None else {}
         if self.tier_config is not None:
             self.tier = TierStore(self.tier_config.kv_bytes, self.evict_policy, digest_inline=self.tier_config.audit,
-                                  on_evict=self._tier_evicted, dead=self._tier_dead)
+                                  on_evict=self._tier_evicted, dead=self._tier_dead,
+                                  tenant_cap=self.quota.host_cap_bytes if self.quota is not None else 0,
+                                  tenant_floor=self.quota.host_floor_bytes if self.quota is not None else 0, counters=quota_counters)
         self.entries = OrderedDict()
         self.bytes = 0
         # chain (first block hash) -> checkpoint keys, and tenant -> bytes held: the hygiene's indexes.
@@ -872,6 +1042,11 @@ class PrefixRegistry(object):
         # re-attempted every step it stays blocked, and its token prefix never changes.
         self.token_checks = {}
         self.stats = dict.fromkeys(STAT_NAMES, 0)
+        if quota_counters:
+            # One dict: the tier store counts into the registry's own stats.
+            self.stats.update(quota_counters)
+            if self.tier is not None:
+                self.tier.counters = self.stats
         self._owner = None
         self._serials = itertools.count(1)
 
@@ -1521,6 +1696,13 @@ class PrefixRegistry(object):
                       supersede=int(self.supersede), telemetry=int(self.telemetry))
         tier = self.tier.snapshot() if self.tier is not None else dict(bytes=0, entries=0, cap=0)
         values.update(tier_bytes=tier['bytes'], tier_entries=tier['entries'], tier_cap_bytes=tier['cap'], tier_on=int(self.tier_on))
+        if self.quota is not None:
+            # Aggregates only: how many tenants the quotas see and how many hold their cap, never which (no tenant tag, salt or digest is exported).
+            values.update(quota_on=1, quota_dev_tenants=0, quota_dev_at_cap=0, quota_host_tenants=len(self.tier.tenant_bytes) if self.tier is not None else 0,
+                          quota_host_at_cap=self.tier.tenants_at_cap() if self.tier is not None else 0)
+            gauge = getattr(self, 'quota_gauge', None)
+            if gauge is not None:
+                values.update(gauge())
         return values
 
 

@@ -17,6 +17,7 @@
 # NEEDS TCX0 <- X0
 # NEEDS TCX1 <- TCX0
 # NEEDS TC1 <- TCX1
+# NEEDS TQ1 <- TC1
 # NEEDS TC2 <- X0
 # NEEDS TC3 <- TC1 TC2
 # NEEDS TC4 <- TC3
@@ -25,17 +26,21 @@
 #   B0   provenance report with no problem line, the '[KVREAD] qwen_kv_read 2' line, the closure checks, the image id.   X0  the status prints, the rescan finds every board, the reset completes on all four.
 #   TCX0 TCX1  parked_compare.py (control, tier): every content hash EQUAL, compared above 0, the parked judge with 0 problems; the tier's attach lines in the TCX1 container log. Any difference is NO-GO.
 #   TC1  the tier-concurrent plan PASS (audited): every pair IDENTICAL, the restore and the spill on record, zero failure counters, all seven seats across every judged window; the stall printed.
+#   TQ1  the tier-quota plan PASS (both arms): tenant B's return is a device-resident hit on quota-isolated and is not on quota-control, the quota's own evictions on the books, all pairs IDENTICAL, then tier_concurrent_compare.py --quota.
 #   TC2 TC3 TC4 TC5  the tier-concurrent-timed plan PASS each (the stall budget judged: no wait over 8 s), then tier_concurrent_compare.py over the four: the seats' text and the three answers IDENTICAL across profiles,
 #     the round p50/p99 and longest wait per window side by side, the tier's p99 against the control's in percent, and the control-to-control floor.
+# TENANT QUOTAS (TQ1): the per-tenant caps and floors of the prefix store (QWEN_PREFIX_TENANT_QUOTA_*; default off, byte-identical off, gate-only until a qualification record exists) are NOT in the candidate profile; the gate derives their env
+#   for the isolated arm. The cold-tier client interface (scripts/ci/cold_tier_client.py) is a stub the engine does not call.
 # NO-GO for the tier on the ship profile: any text that differs (a seat, the returning answer, the long prompt's), a seat that waited over the floor in any window of the tier arm, a restore failure that was not a clean miss, a tier that latched off
 #   on its own, a fresh-salt request restored from the tier, any program compiled by a restore or a spill. The tier's cost (the round p99 regression in the restore and spill windows, against the control profile's same windows) is the number for the owner.
-# Time (estimate, minutes; nothing of the concurrent scenario has run on a card): B0 60, X0 20, TCX0 25, TCX1 25, TC1 90, TC2 to TC5 50 each, Z 10: 430 minutes (7 h 10 min), plus about 3 minutes of queue per tag. The unmeasured parts are the flood time at the
+# Time (estimate, minutes; nothing of the concurrent scenario has run on a card): B0 60, X0 20, TCX0 25, TCX1 25, TC1 90, TQ1 120, TC2 to TC5 50 each, Z 10: 550 minutes (9 h 10 min), plus about 3 minutes of queue per tag. The unmeasured parts are the flood time at the
 #   production pool (a pool of cold prefills before the seats start) and the audited arm's cost; T2 measured 24 floods of the 56k kind over its pool.
 B0-tier-build stop tp4-fusion-tier-1 60
 X0-status-rescan-reset stop tp4-fusion-tier-1 20
 TCX0-exact-control stop tp4-fusion-tier-1 25
 TCX1-exact-tier stop tp4-fusion-tier-1 25
 TC1-tier-concurrent-audited stop tp4-fusion-tier-1 90
+TQ1-tier-quota-isolation stop tp4-fusion-tier-1 120
 TC2-tier-concurrent-control-timed soft tp4-fusion-tier-1 50
 TC3-tier-concurrent-tier-timed soft tp4-fusion-tier-1 50
 TC4-tier-concurrent-control-repeat soft tp4-fusion-tier-1 50
