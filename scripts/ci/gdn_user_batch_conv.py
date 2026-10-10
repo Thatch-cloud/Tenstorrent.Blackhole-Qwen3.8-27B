@@ -49,6 +49,8 @@ handed over as `seq_block_audit`, outside `owned`, like the T2 audit's windows. 
 here differs.
 """
 
+import os
+
 from gdn_multitoken_conv import addresses, release_owned, validate_projected
 
 import gdn_seq_block
@@ -84,6 +86,16 @@ def eight_row_block(groups):
         return len(groups) == 8 and all(len(user[0].shape) == 3 and tuple(user[0].shape)[1] == 8 for user in groups)
     except (TypeError, IndexError, AttributeError):
         return False
+
+
+def eight_row_native(groups):
+    """Whether these users are the octo block's AND QWEN_FAST_OCTO_GLUE8 makes the T2 windows native at eight rows (gdn_conv_windows_packed8). False, without importing
+    anything, for every other block and for the flag off."""
+    if os.environ.get('QWEN_FAST_OCTO_GLUE8', '0') == '0' or not eight_row_block(groups):
+        return False
+    import octo_glue8
+
+    return octo_glue8.enabled()
 
 
 def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, kernels, operations=None, *,
@@ -125,13 +137,21 @@ def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, ke
             shared.append(weights)
         if t2_cut('windows'):
             from gdn_conv_windows_packed import Unsupported, build_windows_packed
+            eight_native = eight_row_native(groups)
+            if eight_native:
+                # QWEN_FAST_OCTO_GLUE8: the eight-row twin of the packed windows launch (its Unsupported is the pinned module's own).
+                from gdn_conv_windows_packed8 import build_windows_packed8 as build_windows_packed
             try:
                 packed_windows = build_windows_packed(mesh, [(projected, conv_states)
                                                              for projected, initial, conv_states in groups],
                                                       operations=operations)
             except Unsupported as reason:
                 t2_note('windows_fallback')
-                if eight_row_block(groups):
+                if eight_native:
+                    import octo_glue8
+
+                    octo_glue8.note_fallback('windows', reason)
+                elif eight_row_block(groups):
                     # Octo-T8: eight users of eight rows are a quarter tile each, which the packed windows kernel (16-row users) does not move; the served per-user
                     # windows run (exact). Its own marker, not the FALLBACK a gated arm fails on: the block's known state (docs/tp4-octo.md).
                     import tp4_vglue
@@ -142,6 +162,10 @@ def run_user_batched_projected(mesh, users, taps, dt_bias, neg_exp_A, norm_w, ke
             else:
                 owned.extend(window for user in packed_windows for window in user)
                 t2_note('windows')
+                if eight_native:
+                    import octo_glue8
+
+                    octo_glue8.note_engaged('windows')
         staged = None
         if block_stage is not None and packed_windows is not None:
             staged = block_stage(groups, packed_windows)
