@@ -83,8 +83,9 @@ class FakeTTNN(object):
     class ShardOrientation(object):
         ROW_MAJOR = 'row'
 
-    def __init__(self, clock, rs_cost, ag_cost, corrupt=None, refuse=None, payload_report=None):
+    def __init__(self, clock, rs_cost, ag_cost, corrupt=None, refuse=None, payload_report=None, canonicalise=False):
         self.clock, self.rs_cost, self.ag_cost = clock, rs_cost, ag_cost
+        self.canonicalise = canonicalise
         self.corrupt, self.refuse = corrupt, refuse
         self.payload_report = payload_report
         self.traces, self.capture, self.live = {}, None, 0
@@ -130,7 +131,12 @@ class FakeTTNN(object):
     # tensors
     def from_torch(self, host, dtype=None, layout=None, device=None, memory_config=None, mesh_mapper=None):
         assert mesh_mapper == 0 and host.shape[0] == CHIPS
-        return FakeTensor([host[k:k + 1].clone() for k in range(CHIPS)], memory_config)
+        chips = [host[k:k + 1].clone() for k in range(CHIPS)]
+        if self.canonicalise:                                   # the host tilizer: -0 and the denormals (zero exponent) come back as +0
+            for chip in chips:
+                bits = chip.view(torch.int16)
+                bits[(bits & 0x7F80) == 0] = 0
+        return FakeTensor(chips, memory_config)
 
     def get_device_tensors(self, tensor):
         return list(tensor.chips)
@@ -390,6 +396,24 @@ class TheSweep(Fixture):
         self.assertEqual(sorted(report['fingerprints']), sorted(report['scenarios']))
         self.assertTrue(all(len(value) == 64 for value in report['fingerprints'].values()))
         self.assertFalse(self.rows(report, 'ag/l1-ws')['ag-w1']['promote'])
+
+    def test_the_gather_is_compared_with_the_inputs_as_the_host_path_returns_them(self):
+        ttnn = self.runtime(canonicalise=True)
+        report, _ = self.sweep(ttnn, only='ag', skip_probe_only=True)
+        for name in ('ag/l1-ws', 'ag/dram-ws', 'ag/l1-dram'):
+            self.assertEqual(self.rows(report, name)['served']['status'], 'EXACT', name)
+            changed = report['roundtrip_changed'][name]
+            self.assertEqual(sorted(changed), ['0', '1'])
+            # three special patterns (-0, and the two denormals of either sign share a zero exponent: -0, +0 stays, 1, -1) per chip: -0, 0x0001, 0x8001 change
+            self.assertEqual(changed['0'], 3 * CHIPS)
+        raw = sweep.ag_inputs(torch, 0)
+        self.assertGreater(sweep.bits_equal(torch, torch.cat([raw[k:k + 1] for k in range(CHIPS)], dim=3),
+                                            torch.cat([c.clone() for c in ttnn.from_torch(raw, mesh_mapper=0).chips], dim=3))[1], 0,
+                           'the raw torch tensor would have read the host path as a corrupted gather')
+
+    def test_a_host_path_that_changes_nothing_records_zero(self):
+        report, _ = self.sweep(self.runtime(), only='ag', skip_probe_only=True)
+        self.assertEqual(set(value for scenario in report['roundtrip_changed'].values() for value in scenario.values()), {0})
 
     def test_an_option_that_changes_a_bit_is_never_timed_or_promoted(self):
         ttnn = self.runtime(corrupt=lambda kwargs: kwargs.get('chunks_per_sync') == 5)

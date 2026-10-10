@@ -29,7 +29,8 @@ the owner knows what the barrier costs; no named set here can contain them.
 THE FLAG. QWEN_FAST_CCL_OPTIONS=<named set> (default unset: byte-identical, nothing wrapped, nothing logged). A set is a '+'-joined list of
 tokens, each an option of one op: rs-l<N> num_links, rs-w<N> num_workers_per_link, rs-c<N> chunks_per_sync, rs-b<N> num_buffers_per_channel and the
 same four for the gather as ag-..., plus ag-linear (topology Linear) and ag-bcast (use_broadcast). 'served' is the empty set: the lever is
-engaged and every call carries the values it carries today (the A/A control of the plumbing). The set is strict: an unknown token, a value outside
+engaged and every call carries the values it carries today (the A/A control of the plumbing). A set with reduce-scatter tokens only does not wrap
+DistributedNorm.forward at all (gather_active). The set is strict: an unknown token, a value outside
 the table's ranges, a repeated option, or a reduce-scatter token without QWEN_FAST_TP4_RS_UNIT_MAJOR=1 (the options ride the unit-major call that
 the X1 census covers; the per-tile split calls the model's own tt_all_reduce with its own values) is a ValueError at the first block forward.
 QWEN_FAST_CCL_OPTIONS_AUDIT=1 (gate arms only) runs, for the first QWEN_FAST_CCL_OPTIONS_AUDIT_CALLS (default 32, even) calls of each op in every
@@ -137,6 +138,12 @@ _FLAG_TOKEN = re.compile(r'^ag-(linear|bcast)$')
 
 Selection = namedtuple('Selection', 'name rs ag')
 Settings = namedtuple('Settings', 'selection audit_calls')
+
+
+def gather_active(selection):
+    """Whether the norms' gather shim is part of this set: it names a gather option, or it is the empty set (the plumbing control engages both ops with
+    nothing changed). A set of reduce-scatter options alone leaves DistributedNorm.forward unwrapped: one less moving part in the served path."""
+    return bool(selection.ag) or not selection.rs
 
 
 def option_effect(op, name):
@@ -269,7 +276,7 @@ def begin(configured, rows, layers, log=None):
         return None
     if _STATE['plan'] is not None:
         raise ValueError('A ccl options plan is already open (%d rows)' % _STATE['plan'].rows)
-    plan = Plan(configured.selection, configured.audit_calls, rows, layers, log)
+    plan = Plan(configured.selection, configured.audit_calls, rows, layers if gather_active(configured.selection) else None, log)
     _STATE['plan'] = plan
     return plan
 

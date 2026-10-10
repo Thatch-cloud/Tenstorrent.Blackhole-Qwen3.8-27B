@@ -17,7 +17,7 @@ results (tile_collective_tp.hold_pair) for the comparison after the replay. The 
 the byte proof on the serving image.
 
 Fail closed: install() refuses to wrap a DistributedNorm.forward whose source is not the pinned one (FORWARD_SHA256), because the shim is only proven
-against that source. It wraps nothing when QWEN_FAST_CCL_OPTIONS is unset.
+against that source. It wraps nothing when QWEN_FAST_CCL_OPTIONS is unset or names reduce-scatter options only (ccl_options_tp.gather_active).
 
 Stdlib only; ttnn is reached through the module the wrapped function sees.
 """
@@ -181,7 +181,8 @@ def _is_decode(args, kwargs):
 def install(module=None, check_source=True):
     """Wrap DistributedNorm.forward. -> [(namespace, name, original)] for tp_addresses to put back; [] when QWEN_FAST_CCL_OPTIONS is unset, when the
     model tree is not importable here (the CPU suite) or when it is already wrapped. A forward whose source is not the pinned one raises."""
-    if ccl_options_tp.settings() is None:
+    configured = ccl_options_tp.settings()
+    if configured is None or not ccl_options_tp.gather_active(configured.selection):
         return []
     if module is None:
         try:

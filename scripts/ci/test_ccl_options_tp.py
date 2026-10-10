@@ -205,7 +205,8 @@ class TheLeverOffLoadsNothing(unittest.TestCase):
 
     def test_tile_collective_tp_has_no_import_statement_of_the_lever_modules(self):
         import ast
-        tree = ast.parse(open(os.path.join(HERE, 'tile_collective_tp.py'), encoding='utf-8').read())
+        with open(os.path.join(HERE, 'tile_collective_tp.py'), encoding='utf-8') as handle:
+            tree = ast.parse(handle.read())
         names = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -448,11 +449,19 @@ class TheReduceScatterWiring(Fixture):
 
     def test_the_guard_refuses_a_forward_the_gather_wrapper_never_saw(self):
         with self.assertRaises(AssertionError) as raised:
-            with self.scope('rs-w1', layers=64):
+            with self.scope('rs-w1+ag-w1', layers=64):
                 self.call(partials(64))
         self.assertIn('saw 0 norm gathers', str(raised.exception))
         self.assertIsNone(options.current())
         self.assertFalse([line for line in self.lines if options.ENGAGED_MARKER in line])
+
+    def test_a_reduce_scatter_only_set_does_not_ask_for_the_gather_wrapper(self):
+        for text, active in (('rs-c1', False), ('rs-w1+rs-c1', False), ('served', True), ('ag-w1', True), ('rs-c1+ag-c1', True)):
+            self.assertEqual(options.gather_active(options.parse_set(text)), active, text)
+        with self.scope('rs-c1', layers=64):
+            self.call(partials(64))
+            self.assertIsNone(options.current().layers)
+        self.assertTrue([line for line in self.lines if options.ENGAGED_MARKER in line][-1].endswith('rs=1 ag=0 fallbacks=0 audited=0'))
 
     def test_the_guard_accepts_the_final_norm_or_not(self):
         for gathers in (128, 129):
@@ -843,6 +852,17 @@ class TheInstall(Fixture):
         self.assertIn('not the pinned source', str(raised.exception))
         self.assertIs(self.module.DistributedNorm.forward, self.original)
 
+    def test_a_set_of_reduce_scatter_options_alone_leaves_the_norm_unwrapped(self):
+        digest = gather_tp.forward_digest(self.original)
+        with patch.dict(os.environ, dict(UNIT_MAJOR, **{options.OPTIONS_FLAG: 'rs-c1'})), patch.object(gather_tp, 'FORWARD_SHA256', digest):
+            self.assertEqual(gather_tp.install(self.module), [])
+        self.assertIs(self.module.DistributedNorm.forward, self.original)
+        for text in ('served', 'ag-c1', 'rs-c1+ag-c1'):
+            with patch.dict(os.environ, dict(UNIT_MAJOR, **{options.OPTIONS_FLAG: text})), patch.object(gather_tp, 'FORWARD_SHA256', digest):
+                changed = gather_tp.install(self.module)
+                self.assertEqual(len(changed), 1, text)
+                self.module.DistributedNorm.forward = self.original
+
     def test_without_the_model_tree_nothing_is_bound(self):
         with patch.dict(os.environ, dict(FOUR, **{options.OPTIONS_FLAG: 'ag-w1'})), patch.dict(sys.modules, {'models': None}):
             self.assertEqual(gather_tp.install(), [])
@@ -911,6 +931,14 @@ class TheSmokeRule(unittest.TestCase):
         self.assertEqual(ccl_options_smoke.problems(self.ENV, '\n'.join([self.engaged(), self.engaged()])), [])
         self.assertEqual(ccl_options_smoke.problems(dict(self.ENV, **{options.OPTIONS_FLAG: 'ag-w1'}), self.engaged('ag-w1', rs=0)), [])
         self.assertEqual(ccl_options_smoke.problems(dict(self.ENV, **{options.OPTIONS_FLAG: 'served'}), self.engaged('served', rs=0)), [])
+
+    def test_a_reduce_scatter_only_set_needs_no_gather_count_and_no_gather_audit(self):
+        env = dict(UNIT_MAJOR, **{options.OPTIONS_FLAG: 'rs-c1'})
+        self.assertEqual(ccl_options_smoke.problems(env, self.engaged('rs-c1', ag=0)), [])
+        self.assertTrue(ccl_options_smoke.problems(env, self.engaged('rs-c1', rs=0, ag=0)))
+        audited = dict(env, **{options.AUDIT_FLAG: '1'})
+        self.assertEqual(ccl_options_smoke.problems(audited, '\n'.join([self.engaged('rs-c1', ag=0), self.audit('rs')])), [])
+        self.assertTrue(ccl_options_smoke.problems(audited, self.engaged('rs-c1', ag=0)))
 
     def test_no_engaged_line_wrong_set_zero_counts(self):
         self.assertTrue(ccl_options_smoke.problems(self.ENV, 'no lever lines'))
