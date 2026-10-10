@@ -1,5 +1,7 @@
 """Prepared learned attention branch for device-resident draft-stack execution."""
 
+import os
+
 from draft_attention import composed_draft_attention, draft_sdpa
 from draft_convolution import grouped_causal_convolution
 from feature_collective import gather_add_projection
@@ -55,6 +57,24 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
         projections={name: projection(name, 0) for name in ('q', 'k', 'v')},
         head_norms={name: upload(weights[f'layers.0.self_attn.{name}_norm.weight'].reshape(1, 1, 4, 32), row_major=True)
                     for name in ('q', 'k')}, output_projection=projection('o', 1))
+
+
+def served_key_value(operations, plan, caches, live, retain, name):
+    """The packed users' K (or V) as the served path assembles it: the plan's pieces joined on the row axis (cached banks, each user's live rows, its pad)."""
+    pieces = []
+    for part in plan:
+        if part['kind'] == 'cached':
+            pieces.append(caches[part['user']][name])
+            continue
+        # 'live' takes this user's own rows out of the shared block. 'pad'
+        # fills the tail of the segment, and any rows do: the mask covers
+        # them, exactly as it already covers the live rows beyond block_rows
+        # at one user today. A pair's pads carry no 'source' (rows 0-15); the
+        # quad's name their pair's rows, so every segment is its pair's bytes.
+        start = part['source'].start if 'source' in part else 0
+        pieces.append(retain(operations.slice(live[name], (0, 0, start, 0),
+            (1, tp_shapes.active().draft_kv_heads, start + part['rows'], 128))))
+    return retain(operations.concat(pieces, dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
 
 
 def execute_attention_branch(operations, mesh, collectives, hidden, history, mask, rope, retain, *,
@@ -200,25 +220,26 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
         live = (project_key_value if quad is None else quad.project_key_value)(operations, proposal, query, tables,
             retain, parameters=parameters)
         heads = dict(q=normalize_head('q', live['q']))
+
+        def assembled(name):
+            return served_key_value(operations, plan, caches, live, retain, name)
+
+        # QWEN_FAST_DRAFT_PERMUTE (draft_permute_tp.py, default off): the packed users' K and V as ONE permutation launch (the cached banks and the
+        # live and pad rows placed by the plan, the served round trip's value rule applied to the pieces it round-trips). None, the default and the
+        # only value with the flag off, changes nothing here.
+        engaged = None
+        if spans is not None and os.environ.get('QWEN_FAST_DRAFT_PERMUTE', '0') != '0':
+            import draft_permute_tp
+
+            if draft_permute_tp.hook_enabled():
+                engaged = draft_permute_tp.assemble_kv(operations, plan, caches, live, retain, served=assembled,
+                    site='pair' if quad is None else ('octo' if getattr(quad, 'users', 4) == 8 else 'quad'))
         for name in ('k', 'v'):
             if spans is None:
                 heads[name] = retain(operations.concat([cached_history[name], live[name]],
                     dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
                 continue
-            pieces = []
-            for part in plan:
-                if part['kind'] == 'cached':
-                    pieces.append(caches[part['user']][name])
-                    continue
-                # 'live' takes this user's own rows out of the shared block. 'pad'
-                # fills the tail of the segment, and any rows do: the mask covers
-                # them, exactly as it already covers the live rows beyond block_rows
-                # at one user today. A pair's pads carry no 'source' (rows 0-15); the
-                # quad's name their pair's rows, so every segment is its pair's bytes.
-                start = part['source'].start if 'source' in part else 0
-                pieces.append(retain(operations.slice(live[name], (0, 0, start, 0),
-                    (1, tp_shapes.active().draft_kv_heads, start + part['rows'], 128))))
-            heads[name] = retain(operations.concat(pieces, dim=2, memory_config=operations.DRAM_MEMORY_CONFIG))
+            heads[name] = assembled(name) if engaged is None else engaged[name]
     else:
         context_input = retain(operations.slice(history, (0, 0, 0, 0), (1, 1, context, 5120)))
         proposal_input = retain(operations.slice(prepared, (0, 0, 0, 0), (1, 1, block_rows, 5120)))

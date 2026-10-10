@@ -208,7 +208,15 @@ def validate_quad(operations, query, key, value, mask):
 def quad_fold_query(operations, query, retain):
     """(1, q, 64, 128) -> (1, 4q, 32, 128). Each tile-aligned half is folded by the pair fold (pair_row_exact_tp.fold_query:
     head (2q/kv)h + 4u' + j), read as (kv, 2 * group, 32, 128), and the halves are concatenated on dim 1, so folded head
-    (4q/kv)h + group * u + j with u = 2p + u'. The GQA group then maps it to KV head 4h + u: user u's segment of head h."""
+    (4q/kv)h + group * u + j with u = 2p + u'. The GQA group then maps it to KV head 4h + u: user u's segment of head h.
+
+    QWEN_FAST_DRAFT_PERMUTE (draft_permute_tp.py, default off): the whole fold as one permutation launch; this function's body is its served reference."""
+    if os.environ.get('QWEN_FAST_DRAFT_PERMUTE', '0') != '0':
+        import draft_permute_tp
+
+        if draft_permute_tp.hook_enabled():
+            return draft_permute_tp.fold_query(operations, query, retain, site='quad', halves=USERS // GROUP_USERS, users=GROUP_USERS,
+                                               block=BLOCK, served=lambda: quad_fold_query(operations, query, retain))
     from pair_row_exact_tp import fold_query
 
     query_heads, key_heads, group = heads()[:3]
@@ -229,7 +237,15 @@ def quad_fold_keys(operations, tensor, retain):
 
 def quad_unfold_output(operations, output, retain):
     """(1, 4q, 32, 128) -> (1, q, 64, 128): per half p, folded heads [(4q/kv)h + 2 * group * p, ... + 2 * group) are pair
-    p's (1, 2q, 32, 128) fold output, which the pair unfold turns into the pair's packed rows."""
+    p's (1, 2q, 32, 128) fold output, which the pair unfold turns into the pair's packed rows.
+
+    QWEN_FAST_DRAFT_PERMUTE (draft_permute_tp.py, default off): the whole unfold as one permutation launch; this function's body is its served reference."""
+    if os.environ.get('QWEN_FAST_DRAFT_PERMUTE', '0') != '0':
+        import draft_permute_tp
+
+        if draft_permute_tp.hook_enabled():
+            return draft_permute_tp.unfold_output(operations, output, retain, site='quad', halves=USERS // GROUP_USERS, users=GROUP_USERS,
+                                                  block=BLOCK, served=lambda: quad_unfold_output(operations, output, retain))
     from pair_row_exact_tp import unfold_output
 
     query_heads, key_heads, group = heads()[:3]
@@ -619,6 +635,19 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
     def __init__(self, devices, *, sdpa=None, conv=None):
         super().__init__(devices, sdpa=sdpa, conv=conv)
         self.quad = QuadPass(self.quad.sdpa, self.quad.conv)
+
+    def _execute(self, bucket, owned, retain):
+        """The pinned pass. With QWEN_FAST_DRAFT_PERMUTE_AUDIT the permutation audit is told whether this is the bucket's eager warm pass (it byte-compares the served
+        composition beside each launch there) or the capture that records the launches only (a capture cannot read a tensor back)."""
+        if os.environ.get('QWEN_FAST_DRAFT_PERMUTE_AUDIT', '0') == '0':
+            return super()._execute(bucket, owned, retain)
+        import draft_permute_tp
+
+        previous = draft_permute_tp.set_pass(owned is not bucket.owned)
+        try:
+            return super()._execute(bucket, owned, retain)
+        finally:
+            draft_permute_tp.set_pass(previous)
 
     def _placeholder_banks(self):
         """cached_history: per user (device order) and layer, a k / v pair of zeros, (1, kv, 2048, 128) - the pair's own
