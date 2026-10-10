@@ -30,7 +30,7 @@ FOLDER = HERE / 'references' / 'fusion-jobs'
 IMAGE = 'tp4-fusion-1'
 SHIP = fusion.PARENT
 SMOKE_TESTS = 'warmup,concurrent8_steady'
-MINUTES = dict(build=40, status=20, audit=40, timed=35, reset=10)
+MINUTES = dict(build=40, status=20, audit=40, timed=35, reset=10, combined_audit=60)
 
 HEADER = """# A committed TEMPLATE of .github/c2-serving-job.env for the op-fusion programme's four-card window (scripts/ci/c2_serving_job.py parses it): copy it over
 # .github/c2-serving-job.env on a throwaway commit of tp4/fusion-1 and push a tag experiment/c2-serving-vN. Nothing here names a rig, a card, a host or a registry: the cards
@@ -181,6 +181,80 @@ def env_text(env):
     return ', '.join('%s=%s' % pair for pair in sorted(env.items())) or 'nothing'
 
 
+COMBINED_FOLDER = 'combined'
+
+
+def combined_prefix(name):
+    return 'FX' if name == 'all' else 'FX' + name.upper().replace('-', '')
+
+
+def env_pairs(env):
+    return ', '.join('%s=%s' % pair for pair in sorted(env.items()))
+
+
+def combined_twins(plan, spec):
+    """(timed twin, audit twin) of one combined spec, from the profile generator."""
+    twins = dict((twin['name'], twin) for twin in fusion.profile_twins(plan))
+    return twins[fusion.NAMESPACE + spec['name']], twins[fusion.NAMESPACE + spec['name'] + '-audit']
+
+
+def combined_rows(plan, spec):
+    """The rows of one combined spec's mini-pack: B0, X0, the audited attach of the combination, its timed ABAB, Z."""
+    timed, audited = combined_twins(plan, spec)
+    levers = [lever for lever in plan['levers'] if lever['id'] in spec['levers']]
+    prefix, name = combined_prefix(spec['name']), spec['name']
+    judged = ', '.join('%s (%s)' % (lever['name'], lever['flag']) for lever in levers)
+    every = jobs(plan)
+    rows = [every[0], every[1], dict(
+        name='%sA-%s-audited-attach' % (prefix, name), mode='soft', minutes=MINUTES['combined_audit'], actions='reset smoke', profile=audited['name'], tests=SMOKE_TESTS,
+        needs=('%sA <- X0' % prefix,),
+        why=("%sA (EXACTNESS of the combination %s, %s): %s = the production profile plus %s. Every lever of it runs its audit, which compares the served composition beside the lever on the device. "
+             "READ: c2_smoke_check clean under EVERY lever's rule at once (%s): each lever logs its engaged line and an audit line with exact=True, no fell-back line, no 'audit mismatch', no stall, every "
+             "answer complete. ANY mismatch, fallback or missing audit line is NO-GO for the combination: read which lever's rule names it, and ablate with the per-lever pack (references/fusion-jobs). "
+             "%s Duration (estimate): %d minutes." % (prefix, name, spec['wp'], audited['name'], env_pairs(audited['env']), judged, fusion.sentence(spec['reason']), MINUTES['combined_audit'])))]
+    legs = (('C1', 'control-timed', SHIP, 'the CONTROL (A1): the production profile itself, no lever', ['X0']),
+            ('L1', 'lever-timed', timed['name'], 'the LEVERS (B1): the production profile plus %s' % env_pairs(timed['env']), ['%sA' % prefix, '%sC1' % prefix]),
+            ('C2', 'control-repeat', SHIP, 'the CONTROL again (A2)', ['%sL1' % prefix]),
+            ('L2', 'lever-repeat', timed['name'], 'the LEVERS again (B2)', ['%sC2' % prefix]))
+    for leg, label, profile, what, needs in legs:
+        rows.append(dict(
+            name='%s%s-%s-%s' % (prefix, leg, name, label), mode='soft', minutes=MINUTES['timed'], actions='reset smoke', profile=profile, tests=SMOKE_TESTS,
+            needs=('%s%s <- %s' % (prefix, leg, ' '.join(needs)),),
+            why=("%s%s (TIMED, the combination %s, %s): %s; eight live (concurrent8_steady) in the %s pair of the ABAB, every boot a fresh reset. READ: c2_smoke_check clean (a lever arm also has every engaged "
+                 "line and no fell-back line), no stall; then PAIRED per round, never by unpaired medians: python3 scripts/ci/w2ln_timing_compare.py pair <A container log> <B container log> "
+                 "--window steady --a-smoke <A smoke log> --b-smoke <B smoke log> for (%sC1, %sL1) and (%sC2, %sL2), and its floor subcommand over the two control logs; the texts equal "
+                 "(text_mismatches empty). Levers on together: %s. %s Duration (estimate): %d minutes."
+                 % (prefix, leg, name, spec['wp'], what, 'first' if leg in ('C1', 'L1') else 'repeat', prefix, prefix, prefix, prefix, judged, fusion.sentence(spec['reason']), MINUTES['timed']))))
+    rows.append(every[-1])
+    for row in rows:
+        row.setdefault('text', None)
+    return rows
+
+
+def render_combined_order(rows, plan, spec):
+    total = sum(row['minutes'] for row in rows)
+    prefix = combined_prefix(spec['name'])
+    timed, _audited = combined_twins(plan, spec)
+    lines = [
+        "# The order of the op-fusion programme's COMBINED window (docs/tp4-fusion.md): the levers %s ON TOGETHER, one audited attach and one timed control/lever ABAB at eight live; ONE image (%s)." % (', '.join(spec['levers']), IMAGE),
+        "# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. The same B0, X0 and Z as the per-lever pack (references/fusion-jobs), which is the ABLATION: run it for the levers of a combination that fails.",
+        "# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z; nothing here does either. CI PAUSED from the first timed job to the last. The CPU suite is green on the pushed head;",
+        "#     push ONE tag at a time and wait for its run to finish. Never cancel a running card job. Every result is UNQUALIFIED (gate-only twins). Read the grid from the run (13x10 since the firmware unlock), never assume 11x10.",
+        "# THE TWINS: %s%s (the timed arm) and %s%s-audit are generated by make_fusion_profiles.py from the combined entry of %s: the production profile plus %s." % (
+            fusion.NAMESPACE, spec['name'], fusion.NAMESPACE, spec['name'], spec['file'], env_pairs(timed['env'])),
+        "# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.",
+    ]
+    for row in rows:
+        lines.extend('# NEEDS ' + need for need in row['needs'])
+    lines += [
+        "# READ RULES: B0 and X0 as the per-lever pack. %sA: every lever's engaged line and an audit line with exact=True, no fell-back line, no 'audit mismatch'. ANY failure is NO-GO for the combination." % prefix,
+        "#   %sC1 %sL1 %sC2 %sL2: w2ln_timing_compare.py pair, the steady window, 8 live; GO needs both pairs measured (at least 100 matched rounds, the load rule applied) and negative beyond the control-to-control floor, the texts equal." % (prefix, prefix, prefix, prefix),
+        "# Time (estimate, minutes): %d in all (%d h %d min), %d of cards." % (total, total // 60, total % 60, total - MINUTES['build']),
+    ]
+    lines += ['%s %s %s %d' % (row['name'], row['mode'], IMAGE, row['minutes']) for row in rows]
+    return '\n'.join(lines) + '\n'
+
+
 def render_env(row):
     if row.get('text') is not None:
         return row['text']
@@ -216,7 +290,7 @@ def package_folders(folder):
     folder = Path(folder)
     found = []
     if folder.is_dir():
-        found += ['%s/%s' % (folder.name, path.name) for path in folder.iterdir() if path.is_dir()]
+        found += ['%s/%s' % (folder.name, path.name) for path in folder.iterdir() if path.is_dir() and path.name != COMBINED_FOLDER]
         if folder.name == 'fusion-jobs' and folder.parent.is_dir():
             found += [path.name for path in folder.parent.iterdir() if path.is_dir() and path.name.startswith('fusion-') and path != folder]
     return sorted(found)
@@ -247,6 +321,9 @@ def render_order(rows, plan, folder=FOLDER):
         "# THE PACKAGES' OWN FOLDERS (card-M and detail templates, their read rules and decision rules; under references/): %s." % (', '.join(packs) or 'none yet'),
         "# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.",
     ]
+    for spec in plan.get('combined', ()):
+        lines.insert(-1, "# THE COMBINED PACK (references/fusion-jobs/%s: %s%s, the levers %s on together; its own ORDER.txt) runs FIRST; this ORDER is the ablation, for the levers of a combination that fails." % (
+            COMBINED_FOLDER, fusion.NAMESPACE, spec['name'], ', '.join(spec['levers'])))
     for item in plan.get('pack_include', ()):
         lines.insert(-1, "# FOLDED IN: %s* are the templates of references/%s (%s), renamed and on the one image; their read and decision rules are that folder's ORDER.txt. %s" % (
             item['prefix'], item['folder'], item['wp'], ' '.join(item['reason'].split())))
@@ -276,12 +353,18 @@ def generate(plan, folder=FOLDER):
     rows = jobs(plan, Path(folder).parent)
     out = dict(('%s.env' % row['name'], render_env(row)) for row in rows)
     out['ORDER.txt'] = render_order(rows, plan, folder)
+    for spec in plan.get('combined', ()):
+        mini = combined_rows(plan, spec)
+        for row in mini:
+            out['%s/%s.env' % (COMBINED_FOLDER, row['name'])] = render_env(row)
+        out['%s/ORDER.txt' % COMBINED_FOLDER] = render_combined_order(mini, plan, spec)
     return out
 
 
 def stale(folder, wanted):
-    """[file names] that differ from `wanted` or are not in it."""
+    """[file names] that differ from `wanted` or are not in it (the pack's own files and the combined/ sub-folder, which the generator owns whole)."""
     found = dict((path.name, path.read_text(encoding='utf-8')) for path in Path(folder).glob('*') if path.is_file())
+    found.update(('%s/%s' % (COMBINED_FOLDER, path.name), path.read_text(encoding='utf-8')) for path in (Path(folder) / COMBINED_FOLDER).glob('*') if path.is_file())
     names = sorted(set(found) | set(wanted))
     return [name for name in names if found.get(name) != wanted.get(name)]
 
@@ -309,6 +392,7 @@ def main(argv=None):
     folder.mkdir(parents=True, exist_ok=True)
     for name in differ:
         path = folder / name
+        path.parent.mkdir(parents=True, exist_ok=True)
         if name in wanted:
             with open(str(path), 'w', encoding='utf-8', newline='\n') as handle:
                 handle.write(wanted[name])

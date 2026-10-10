@@ -52,7 +52,7 @@ IMAGE_ROOTS = ('scripts/ci/', 'speculative-decoding/harness/')
 
 # What a manifest may hold. Aliases are the spellings a package is likely to use; they mean the canonical key.
 INFO_KEYS = ('wp', 'branch', 'head', 'description', 'reason', 'notes', 'card_jobs', 'docs', 'owner', 'ci_run', 'status')
-KEYS = ('levers', 'profiles', 'smoke', 'smoke_rules', 'pack_arms', 'pack_order', 'pack_last', 'pack_include', 'image_files', 'tests', 'tp_addresses')
+KEYS = ('levers', 'profiles', 'smoke', 'smoke_rules', 'pack_arms', 'pack_order', 'pack_last', 'pack_include', 'combined', 'image_files', 'tests', 'tp_addresses')
 ALIASES = {
     'twin_profiles': 'profiles', 'profile_twins': 'profiles', 'twins': 'profiles',
     'smoke_dispatch': 'smoke', 'smoke_markers': 'smoke', 'smoke_modules': 'smoke', 'smoke_check': 'smoke',
@@ -295,6 +295,26 @@ def include_of(wp, raw, where):
     return dict(folder=folder, prefix=prefix, audits=names['audits'], timed=names['timed'], reason=text_of(raw.get('reason', 'folded in by %s' % wp), where, 'reason'))
 
 
+def combined_of(wp, raw, where):
+    """One combined twin spec: several levers on together (a timed twin `<name>` and its audit twin `<name>-audit`) over the production profile."""
+    if not isinstance(raw, dict) or set(raw) - {'name', 'levers', 'values', 'env', 'audit_env', 'reason'}:
+        raise ManifestError('%s: a combined entry is {"name", "levers", "values", "env", "audit_env", "reason"}' % where)
+    name = text_of(raw.get('name'), where, 'name')
+    if not ID.match(name):
+        raise ManifestError('%s: combined name %r must be lower-case letters, digits and single dashes' % (where, name))
+    levers = [text_of(item, where, 'a combined lever id') for item in listing(raw.get('levers'), where, 'levers')]
+    if not levers or len(set(levers)) != len(levers):
+        raise ManifestError('%s: combined %s names its levers once each (a list of lever ids)' % (where, name))
+    values = raw.get('values') or {}
+    if not isinstance(values, dict) or any(isinstance(v, bool) or not isinstance(v, (str, int)) or str(v) == '' for v in values.values()):
+        raise ManifestError('%s: combined %s values is {"<lever id>": "<value>"}' % (where, name))
+    values = dict((key, str(value)) for key, value in values.items())
+    if set(values) - set(levers):
+        raise ManifestError('%s: combined %s overrides the value of %s, which it does not switch on' % (where, name, ', '.join(sorted(set(values) - set(levers)))))
+    return dict(name=name, levers=levers, values=values, env=env_of(raw.get('env'), where, 'env'), audit_env=env_of(raw.get('audit_env'), where, 'audit_env'),
+                reason=text_of(raw.get('reason', 'several levers on together'), where, 'reason'))
+
+
 def tests_of(wp, value, where):
     """[(module or ('discover', dir, pattern), reason)]."""
     out = []
@@ -360,7 +380,7 @@ def tp_of(wp, value, where):
 
 def normalise(manifests):
     """The plan: every manifest's entries in one structure, in file-name then file order. Names collide across packages: refused."""
-    plan = dict(levers=[], profiles=[], smoke=[], smoke_rules=[], pack_arms=[], pack_order=[], pack_last=[], pack_include=[], image_files=[], tests=[], tp={key: [] for key in TP_KEYS}, info=[])
+    plan = dict(levers=[], profiles=[], smoke=[], smoke_rules=[], pack_arms=[], pack_order=[], pack_last=[], pack_include=[], combined=[], image_files=[], tests=[], tp={key: [] for key in TP_KEYS}, info=[])
     for file_name, raw in manifests:
         where = 'fusion-wp/' + file_name
         wp = text_of(raw.get('wp', Path(file_name).stem.upper()), where, 'wp')
@@ -396,6 +416,8 @@ def normalise(manifests):
             if not ID.match(arm):
                 raise ManifestError('%s: pack arm %r is the suffix of an extra profile twin (lower-case letters, digits and single dashes)' % (where, arm))
             plan['pack_arms'].append((wp, arm))
+        for item in listing(canonical.get('combined', (0, None))[1], where, 'combined'):
+            plan['combined'].append(dict(combined_of(wp, item, where), wp=wp, file=file_name))
         for item in listing(canonical.get('pack_include', (0, None))[1], where, 'pack_include'):
             plan['pack_include'].append(dict(include_of(wp, item, where), wp=wp))
         for arm in listing(canonical.get('pack_order', (0, None))[1], where, 'pack_order'):
@@ -445,6 +467,11 @@ def normalise(manifests):
     for wp, arm, _reason in plan['pack_last']:
         if arm not in known:
             raise ManifestError('%s: pack_last arm %s is neither a lever nor a pack arm' % (wp, arm))
+    lever_ids = set(lever['id'] for lever in plan['levers'])
+    for spec in plan['combined']:
+        missing = [lever for lever in spec['levers'] if lever not in lever_ids]
+        if missing:
+            raise ManifestError('%s: combined %s switches on %s, which is no lever of any manifest' % (spec['wp'], spec['name'], ', '.join(missing)))
     prefixes = [item['prefix'] for item in plan['pack_include']]
     if len(set(prefixes)) != len(prefixes):
         raise ManifestError('two pack_include entries use one prefix')
@@ -488,6 +515,30 @@ def profile_twins(plan):
                             why='THIS ARM, %s audited (%s): the lever plus %s=1, which runs the served composition beside the lever on the device and logs '
                                 'exact=True or a mismatch. The exactness job; not a timing arm. %s' % (lever['name'], lever['wp'], lever['audit_flag'],
                                                                                                      sentence(lever['reason']))))
+    by_id = dict((lever['id'], lever) for lever in plan['levers'])
+    for spec in plan.get('combined', ()):
+        timed, audits = {}, {}
+        for ident in spec['levers']:
+            lever = by_id[ident]
+            additions = dict(lever['env'])
+            additions[lever['flag']] = spec['values'].get(ident, lever['value'])
+            for key, value in additions.items():
+                if timed.get(key, value) != value:
+                    raise ManifestError('%s: combined %s: the levers disagree on %s (%s and %s)' % (spec['wp'], spec['name'], key, timed[key], value))
+                timed[key] = value
+            if lever['audit_flag']:
+                audits[lever['audit_flag']] = '1'
+                audits.update(lever['audit_env'])
+        timed.update(spec['env'])
+        names = ', '.join('%s (%s)' % (by_id[ident]['name'], by_id[ident]['wp']) for ident in spec['levers'])
+        out.append(dict(name=NAMESPACE + spec['name'], parent=PARENT, env=dict(timed), wp=spec['wp'], file=spec['file'], kind='timed', lever=None, combined=spec,
+                        why='THIS ARM, the combination %s (%s): %s' % (spec['name'], names, sentence(spec['reason']))))
+        audit_env = dict(timed)
+        audit_env.update(audits)
+        audit_env.update(spec['audit_env'])
+        out.append(dict(name=NAMESPACE + spec['name'] + '-audit', parent=PARENT, env=audit_env, wp=spec['wp'], file=spec['file'], kind='audit', lever=None, combined=spec,
+                        why='THIS ARM, the combination %s audited (%s): every lever of it plus its _AUDIT flag, which runs the served composition beside the lever on the device and logs exact=True '
+                            'or a mismatch. The exactness job; not a timing arm. %s' % (spec['name'], names, sentence(spec['reason']))))
     for item in plan['profiles']:
         out.append(dict(name=item['name'], parent=item['parent'], env=dict(item['env']), wp=item['wp'], file=item['file'],
                         kind='audit' if item['audit'] else 'timed', lever=None, why='THIS ARM (%s): %s' % (item['wp'], sentence(item['reason']))))
