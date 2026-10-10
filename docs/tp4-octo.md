@@ -5,6 +5,10 @@ eight-row group per bundle, the publication warm and the fused commit cover the 
 admission logs every card question as an `[OCTO] UNQUALIFIED` line naming the job that settles it (`serving_octo.UNQUALIFIED_ITEMS`), and the first card job (Q1w) is the one that can kill the shape. Every
 card result this document asks for is UNQUALIFIED until it has run. Default off, gate only, byte-identical off. No kernel and no K64j graft changed: see section 5.
 
+**First card run (O3, 8 live, the octo timed arm): +3.5% committed tokens per second per seat against the m3 rounds on the same boot (bar +10%).** The three levers that are to close the gap
+(the octo draft, the glue levers at eight-row users, the attention in two launches) are tp4/octo-2: docs/tp4-octo2.md. Sections 5 below that say "not built" for the quarter-tile glue and the one-draft pass
+are superseded by docs/tp4-octo-glue8.md and docs/tp4-octo-draft.md.
+
 Owner rule: **strict exactness**. Greedy output must stay byte-identical to the target's own greedy decode. Speculation may only change how many tokens a round
 commits, never which.
 
