@@ -1557,6 +1557,19 @@ class TierConfigTests(unittest.TestCase):
         store.clear()
         self.assertEqual(sorted(store._free), [0, 1, 2, 3, 4])
 
+    def test_a_slab_that_cannot_be_mapped_leaves_the_store_in_heap_mode_and_working(self):
+        with mock.patch('mmap.mmap', side_effect=OSError(12, 'Cannot allocate memory')):
+            store = registry_module.TierStore(5 * 16 + 7, digest_inline=True)
+            self.assertIs(store.configure(16), False)
+        self.assertEqual((store.slot_bytes, store.cap, store._map), (0, 5 * 16 + 7, None), 'nothing changed but the reason')
+        self.assertIn('Cannot allocate memory', store.slab_error)
+        for index in range(5):
+            self.assertTrue(store.put(b'k%d' % index, bytes([index]) * 16, 't', b'c', index))
+        self.assertTrue(store.put(b'k5', b'\x05' * 16, 't', b'c', 5), 'the cap still bounds the bytes: an eviction makes room')
+        self.assertNotIn(b'k0', store.records)
+        self.assertEqual(bytes(store.get(b'k5').payload), b'\x05' * 16)
+        self.assertEqual(store.reserve(1), [], 'no slots in heap mode: the scheduler graft reads into fresh arrays instead')
+
     def test_reserve_commit_and_abort(self):
         store = registry_module.TierStore(3 * 8, digest_inline=True)
         store.configure(8)
@@ -1636,6 +1649,23 @@ class HostTierTests(unittest.TestCase):
         self.assertEqual(stats['tier_digest_failures'], 0)
         pool = made.scheduler.kv_cache_manager.block_pool
         self.assertEqual(len(pool.free), SMALL_POOL, 'every block is free again')
+
+    def test_the_tier_works_in_heap_mode_when_its_mapping_is_refused(self):
+        import contextlib
+        import io
+
+        written = io.StringIO()
+        with mock.patch('mmap.mmap', side_effect=OSError(12, 'Cannot allocate memory')), contextlib.redirect_stderr(written):
+            made = self.rig(tier=64)
+        self.assertEqual(made.registry.tier.slot_bytes, 0)
+        self.assertTrue(made.registry.tier_on)
+        self.assertIn('[PINDIAG] prefix: host tier slab not mapped (OSError: [Errno 12] Cannot allocate memory)', written.getvalue())
+        a, (start, grant) = two_turn_scenario(made)
+        stats = made.registry.stats
+        self.assertEqual((start, grant.q), (4096, 4096), 'the session comes back from the tier all the same')
+        self.assertGreater(stats['tier_restore_blocks'], 0)
+        self.assertTrue(made.check_kv())
+        self.assertEqual(stats['tier_digest_failures'], 0)
 
     def test_without_the_tier_the_same_traffic_is_a_miss(self):
         made = self.rig()

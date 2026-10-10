@@ -145,7 +145,10 @@ budget is the *whole* prefix-state host budget, `QWEN_PREFIX_HOST_TIER_GIB`; the
 `QWEN_PREFIX_STORE_GIB` share of it and the KV pages get the rest (the GiB must exceed the store's). Inside its share the tier
 evicts records no checkpoint reaches first, then by the registry's `QWEN_PREFIX_EVICT` policy (`lru` or `fair`, per tenant); a
 record being restored is pinned against that. The pages are held in one anonymous mapping (no `core` dump, grown by use, not
-reserved up front), so host RSS rises with what the tier holds, up to its cap; with swap off the cap is the number to size.
+reserved up front), so host RSS rises with what the tier holds, up to its cap; with swap off the cap is the number to size. If the
+kernel refuses the one mapping of the whole cap (a strict overcommit policy, a small host), the tier starts anyway and holds the
+blocks as separate arrays, still bounded by the cap and a little slower on the first fills; it says so once
+(`[PINDIAG] prefix: host tier slab not mapped (...)`).
 
 ### Byte-identical restore
 

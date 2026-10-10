@@ -564,7 +564,7 @@ class TierStore(object):
     used (lru) or the oldest record of the tenant holding the most bytes (fair), sparing the record just stored. Digests are computed
     off the scheduler thread (hashlib releases the GIL), or inline with digest_inline (tests, the audit).
 
-    Two ways to hold the bytes. Heap mode (the default, and what the unit tests use): a record keeps the payload object it was given. Slab mode
+    Two ways to hold the bytes. Heap mode (the default, what the unit tests use, and what a slab that cannot be mapped falls back to): a record keeps the payload object it was given. Slab mode
     (configure(slot_bytes), which attach_tier_io calls with the model's block size): one anonymous mapping, cap // slot_bytes slots, kept out of core
     dumps; a record is a slot, an eviction returns the slot, and the device read is made straight into a reserved slot - so the host does one copy
     of a block, into memory that is already resident after the first fill, instead of a fresh allocation and page faults per block."""
@@ -583,6 +583,7 @@ class TierStore(object):
         self._executor = None
         self._serials = itertools.count(1)
         self.slot_bytes = 0
+        self.slab_error = None
         self.pinned = set()
         self._map = None
         self._view = None
@@ -597,21 +598,29 @@ class TierStore(object):
 
         slot_bytes = int(slot_bytes)
         if self.slot_bytes == slot_bytes:
-            return
+            return True
         if self.slot_bytes or self.records:
             raise ValueError('the tier store is already holding data in another layout')
         slots = self.cap // slot_bytes
         if slots < 1:
             raise ValueError('the tier cap (%d bytes) does not hold one block of %d bytes' % (self.cap, slot_bytes))
+        try:
+            mapping = mmap.mmap(-1, slots * slot_bytes)
+        except (OSError, ValueError, OverflowError, MemoryError) as error:
+            # No room for one mapping of the whole cap (a strict overcommit policy, a small host): the store stays in heap mode, one array per record,
+            # and its cap still bounds the bytes. A tier that could not start would be worse than a slower one.
+            self.slab_error = '%s: %s' % (type(error).__name__, error)
+            return False
         self.slot_bytes = slot_bytes
         self.cap = slots * slot_bytes
-        self._map = mmap.mmap(-1, self.cap)
+        self._map = mapping
         try:
             self._map.madvise(mmap.MADV_DONTDUMP)
         except (AttributeError, OSError):
             pass
         self._view = memoryview(self._map)
         self._free = list(range(slots - 1, -1, -1))
+        return True
 
     def _slot_view(self, index):
         return self._view[index * self.slot_bytes:(index + 1) * self.slot_bytes]
@@ -909,8 +918,8 @@ class PrefixRegistry(object):
         if self.tier is not None:
             self.tier.fingerprint = str(getattr(io, 'fingerprint', ''))
             block_bytes = int(getattr(io, 'block_bytes', 0) or 0)
-            if block_bytes:
-                self.tier.configure(block_bytes)
+            if block_bytes and not self.tier.configure(block_bytes):
+                log('host tier slab not mapped (%s): the blocks are held as separate arrays, the cap still bounds the bytes', self.tier.slab_error)
 
     @property
     def tier_on(self):
