@@ -174,7 +174,7 @@ class H2Tests(unittest.TestCase):
                                     watchdog=plan.Watchdog(tag='SUBDEV_H2', backstop=False, exit_fn=lambda code: None))
             self.assertEqual(status, 2)
             self.assertEqual(environ['TT_METAL_WATCHER'], '5')
-            self.assertTrue(any('verdict=NOT-MEASURED' in str(line) and 'No module named' in str(line) for line in lines), lines)
+            self.assertTrue(any('verdict=NOT-MEASURED' in str(line) and 'ModuleNotFoundError' in str(line) for line in lines), lines)
 
     def test_bad_arguments_never_reach_the_device(self):
         ttnn = fake_ttnn.FakeTTNN(chips=4)
