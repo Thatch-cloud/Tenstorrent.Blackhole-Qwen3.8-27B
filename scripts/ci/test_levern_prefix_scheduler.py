@@ -124,7 +124,7 @@ def install(environ=None, *, kv=None, off_exists=None):
     env.update(environ or {})
     env = {name: value for name, value in env.items() if value is not None}
     runtime = levern_scheduler.LevernRuntime(levern_policy.config(env), log=log, clock=clock, wall=wall, merged=levern_policy.merged_config(env),
-                                             off_path='/nonexistent/levern.off')
+                                             off_path='/nonexistent/levern.off', adaptive=levern_policy.adaptive_config(env))
     if off_exists is not None:
         runtime.off.exists = off_exists
     original_prefill, original_schedule = cls._schedule_prefill_only, cls.schedule
@@ -847,15 +847,15 @@ class SkewWithShortsTests(GateFreeCase):
         prompt = self.LONGS[who]
         return (300.0 + 3.7 * start / 1000.0) * max(1, -(-tokens // CHUNK)) + (5000.0 if start + tokens >= prompt else 0.0)
 
-    def replay(self, gap, build_ms=2500.0):
+    def replay(self, gap, build_ms=2500.0, extra=None):
         prompts = dict(self.LONGS, **self.SHORTS)
         saved = levern_policy.effective_share.__defaults__, levern_policy.governor_need.__defaults__
         # build_ms is the first defaulted parameter; the trailing ones (builds, engine reuse's per-prefill costs) keep theirs.
         levern_policy.effective_share.__defaults__ = (build_ms,) + saved[0][1:]
         levern_policy.governor_need.__defaults__ = (build_ms,) + saved[1][1:]
         try:
-            rig = Rig(environ={'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180', 'QWEN_FAST_LEVERN_ROUNDS': None, 'QWEN_FAST_LEVERN_PREFILL_SHARE': '0.5',
-                               'QWEN_FAST_LEVERN_PARK': 'host', 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': str(gap)}, seats=8, decoders=0)
+            rig = Rig(environ=dict({'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180', 'QWEN_FAST_LEVERN_ROUNDS': None, 'QWEN_FAST_LEVERN_PREFILL_SHARE': '0.5',
+                                    'QWEN_FAST_LEVERN_PARK': 'host', 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': str(gap)}, **(extra or {})), seats=8, decoders=0)
             t0 = rig.clock.now
             for index, name in enumerate(self.ORDER):
                 rig.add(name, prompts[name], arrival=rig.wall.now + 0.05 * index)
@@ -879,13 +879,14 @@ class SkewWithShortsTests(GateFreeCase):
             levern_policy.effective_share.__defaults__, levern_policy.governor_need.__defaults__ = saved
         end = max(ttft.values())
         edges = [0.0] + [r for r in rounds if r <= end] + [end]
-        lines = [levern_policy.STEP_LINE_MERGED.format(*call.args[1:]) for call in rig.log.call_args_list
-                 if call.args and call.args[0] == levern_policy.STEP_LINE_MERGED]
-        return dict(ttft=ttft, worst=max(b - a for a, b in zip(edges, edges[1:])), lines=lines)
+        formats = (levern_policy.STEP_LINE_MERGED, levern_policy.STEP_LINE_ADAPTIVE)
+        lines = [call.args[0].format(*call.args[1:]) for call in rig.log.call_args_list if call.args and call.args[0] in formats]
+        return dict(ttft=ttft, worst=max(b - a for a, b in zip(edges, edges[1:])), lines=lines, log=rig.log)
 
-    def rule(self, run, gap):
+    def rule(self, run, gap, extra=None):
         steps = c2_smoke_check.levern_facts(chr(10).join(run['lines']))['steps']
-        return c2_smoke_check.levern_alternation_problems(steps, {'QWEN_FAST_LEVERN_PREFILL_SHARE': '0.5', 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': str(gap)})
+        return c2_smoke_check.levern_alternation_problems(steps, dict({'QWEN_FAST_LEVERN_PREFILL_SHARE': '0.5', 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': str(gap)},
+                                                                      **(extra or {})))
 
     def test_the_floor_bounds_the_stall_and_the_slowest_user_stays_inside_the_deadline(self):
         on, off = self.replay(8), self.replay(0)
@@ -913,6 +914,239 @@ class SkewWithShortsTests(GateFreeCase):
         """Why BUILD_MS stays 2500: at 5000 the governor pins f_eff at 1.0 earlier and a short waits behind both longs."""
         late = [name for name in self.SHORTS if self.replay(8, build_ms=5000.0)['ttft'][name] > 200.0]
         self.assertEqual(len(late), 2)
+
+
+ADAPTIVE_ON = {'QWEN_FAST_LEVERN_ADAPTIVE': '1'}
+SHARE_MODE = {'QWEN_FAST_LEVERN_ROUNDS': None, 'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180', 'QWEN_FAST_LEVERN_PARK': '0', 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': '8'}
+
+
+def step_lines(rig):
+    """The step lines the scheduler logged, formatted (either format), as the smoke check reads them."""
+    formats = (levern_policy.STEP_LINE_MERGED, levern_policy.STEP_LINE_ADAPTIVE)
+    return [call.args[0].format(*call.args[1:]) for call in rig.log.call_args_list if call.args and call.args[0] in formats]
+
+
+class AdaptiveGovernorTests(GateFreeCase):
+    """QWEN_FAST_LEVERN_ADAPTIVE=1 on the plugin's TTScheduler: few decoders raise the prefill share and lower the deadline target, more decoders run today's
+    pacing, the flag off is today's log byte for byte, and the decode-gap floor and the alternation rules (the smoke check's, over the scheduler's own lines) hold
+    in every replayed schedule (docs/lever-n-adaptive-governor.md)."""
+
+    def rig(self, decoders, adaptive=True, extra=None, seats=8):
+        environ = dict(SHARE_MODE, **(ADAPTIVE_ON if adaptive else {}))
+        environ.update(extra or {})
+        return Rig(environ=environ, seats=seats, decoders=decoders)
+
+    def run_long(self, rig, prompt=100000, prefill_ms=700.0, decode_ms=100.0, steps=4000):
+        rig.add('long', prompt)
+        t0 = rig.clock.now
+        for _ in range(steps):
+            rig.step(prefill_ms=prefill_ms, decode_ms=decode_ms)
+            if rig.idle() and rig.scheduler.requests['long'].num_computed_tokens >= prompt:
+                break
+        else:
+            self.fail('the long prefill never finished')
+        return rig.clock.now - t0
+
+    def test_the_flag_off_logs_today_s_lines_byte_for_byte_and_runs_today_s_schedule(self):
+        plain = self.rig(2, adaptive=False)
+        explicit = Rig(environ=dict(SHARE_MODE, QWEN_FAST_LEVERN_ADAPTIVE='0'), decoders=2)
+        for rig in (plain, explicit):
+            self.run_long(rig)
+        self.assertEqual(plain.events, explicit.events)
+        self.assertEqual(plain.log.call_args_list, explicit.log.call_args_list)
+        self.assertTrue(step_lines(plain))
+        self.assertFalse([call for call in plain.log.call_args_list if call.args and call.args[0] in (levern_policy.STEP_LINE_ADAPTIVE, levern_policy.ADAPTIVE_LINE)])
+        self.assertIsNone(plain.runtime.alternator.adaptive)
+
+    def test_few_decoders_raise_the_share_and_the_long_prefill_finishes_sooner(self):
+        for decoders in (1, 2):
+            with self.subTest(decoders=decoders):
+                control, adaptive = self.rig(decoders, adaptive=False), self.rig(decoders)
+                wall_control, wall_adaptive = self.run_long(control), self.run_long(adaptive)
+                self.assertLess(wall_adaptive, 0.75 * wall_control, 'the prefill gets 0.9 of the wall time instead of 0.5')
+                steps = c2_smoke_check.levern_facts(chr(10).join(step_lines(adaptive)))['steps']
+                prefills = [step for step in steps if step['kind'] == 'prefill']
+                self.assertTrue(prefills)
+                for step in prefills:
+                    self.assertEqual((step['adaptive'], step['base'], step['target']), (True, 0.9, 120))
+                    self.assertGreaterEqual(step['f_eff'], 0.9)
+                self.assertEqual(c2_smoke_check.levern_adaptive_problems(steps, dict(SHARE_MODE, **ADAPTIVE_ON), ADAPTIVE_TEXT), [])
+
+    def test_more_decoders_than_the_threshold_run_today_s_pacing_exactly(self):
+        for decoders in (3, 4, 7):
+            with self.subTest(decoders=decoders):
+                control, adaptive = self.rig(decoders, adaptive=False), self.rig(decoders)
+                self.run_long(control)
+                self.run_long(adaptive)
+                self.assertEqual(control.events, adaptive.events, 'the same schedule as the control, step for step')
+                steps = c2_smoke_check.levern_facts(chr(10).join(step_lines(adaptive)))['steps']
+                for step in steps:
+                    self.assertFalse(step['adaptive'])
+                    self.assertEqual((step['base'], step['target']), (0.5, 180))
+                self.assertEqual([step['f_eff'] for step in steps],
+                                 [step['f_eff'] for step in c2_smoke_check.levern_facts(chr(10).join(step_lines(control)))['steps']])
+
+    def test_the_policy_follows_the_live_decoder_count_up_and_down(self):
+        rig = self.rig(2)
+        rig.add('long', 200000)
+        seen = []
+
+        def adaptive_of_last():
+            return c2_smoke_check.levern_facts(step_lines(rig)[-1])['steps'][0]['adaptive']
+
+        for _ in range(6):
+            rig.step(prefill_ms=700.0, decode_ms=100.0)
+        seen.append(adaptive_of_last())
+        rig.scheduler.add_decoder('d9')                    # three decoders: load, today's pacing
+        for _ in range(6):
+            rig.step(prefill_ms=700.0, decode_ms=100.0)
+        seen.append(adaptive_of_last())
+        rig.scheduler.finish('d9')
+        rig.scheduler.finish('d1')                         # one decoder left
+        for _ in range(6):
+            rig.step(prefill_ms=700.0, decode_ms=100.0)
+        seen.append(adaptive_of_last())
+        rig.scheduler.finish('d0')                         # none left: nothing is owed, the device is never idled
+        for _ in range(4):
+            rig.step(prefill_ms=700.0, decode_ms=100.0)
+        seen.append(adaptive_of_last())
+        self.assertEqual(seen, [True, False, True, False])
+        self.assertEqual(rig.events[-1][0], 'prefill')
+
+    def test_the_threshold_is_a_knob_and_zero_decoders_are_never_adaptive(self):
+        rig = self.rig(3, extra={'QWEN_FAST_LEVERN_ADAPTIVE_DECODERS': '3'})
+        self.run_long(rig, prompt=30000)
+        steps = c2_smoke_check.levern_facts(chr(10).join(step_lines(rig)))['steps']
+        self.assertTrue(all(step['adaptive'] for step in steps if step['kind'] == 'prefill' and step['seats'] == 3))
+        self.assertFalse(rig.runtime.alternator.adaptive_active(0))
+        self.assertTrue(rig.runtime.alternator.adaptive_active(3))
+        self.assertFalse(rig.runtime.alternator.adaptive_active(4))
+
+    def test_static_rounds_are_never_overridden(self):
+        with self.assertRaisesRegex(ValueError, 'static rounds'):
+            self.rig(2, extra={'QWEN_FAST_LEVERN_ROUNDS': '2'})
+
+    def test_two_cold_prompts_beside_two_decoders_pin_the_governor_and_the_floor_holds(self):
+        """The adaptive target (120 s) cannot hold two cold 254k prompts, so the governor pins 1.0 as it does at 180 s: the decoders still get a round at least
+        every G seconds, and the smoke check's alternation rules (one stretch bound, a round between non-pinned steps) read the scheduler's own lines clean."""
+        runs = {}
+        for label, adaptive in (('on', True), ('off', False)):
+            rig = self.rig(2, adaptive=adaptive)
+            t0 = rig.clock.now
+            for name, prompt in (('long1', 251727), ('long2', 253238)):
+                rig.add(name, prompt)
+            rounds, finished, longest = [], {}, 0.0
+            prompts = {'long1': 251727, 'long2': 253238}
+            for _ in range(6000):
+                if len(finished) == 2:
+                    break
+                event = rig.step(prefill_ms=SkewTests.step_ms, decode_ms=SkewTests.ROUND_MS)
+                if event[0] == 'decode':
+                    rounds.append(rig.clock.now - t0)
+                else:
+                    longest = max(longest, SkewTests.step_ms(event[1], event[2], event[3]) / 1000.0)
+                    if event[2] + event[3] >= prompts[event[1]]:
+                        finished[event[1]] = rig.clock.now - t0
+            else:
+                self.fail('no progress')
+            end = max(finished.values())
+            edges = [0.0] + [value for value in rounds if value <= end] + [end]
+            lines = step_lines(rig)
+            steps = c2_smoke_check.levern_facts(chr(10).join(lines))['steps']
+            runs[label] = dict(end=end, worst=max(b - a for a, b in zip(edges, edges[1:])), longest=longest, steps=steps, rig=rig)
+        on = runs['on']
+        self.assertIn(1.0, [step['f_eff'] for step in on['steps']], 'two cold 254k prompts cannot meet the 120 s target: pinned')
+        self.assertLessEqual(on['worst'], 8.0 + on['longest'] + 1.0, 'the decode-gap floor: G + the longest step + 1 s')
+        env = dict(SHARE_MODE, **ADAPTIVE_ON, QWEN_FAST_LEVERN_PREFILL_SHARE='0.5')
+        self.assertEqual(c2_smoke_check.levern_alternation_problems(on['steps'], env), [])
+        self.assertEqual(c2_smoke_check.levern_adaptive_problems(on['steps'], env, ADAPTIVE_TEXT), [])
+        self.assertLessEqual(on['end'], runs['off']['end'] + 1.0, 'never slower than today for the same shape')
+
+    def test_the_whole_skew_shape_keeps_the_floor_and_the_alternation_rules_with_the_policy_on(self):
+        skew = SkewWithShortsTests('test_the_floor_bounds_the_stall_and_the_slowest_user_stays_inside_the_deadline')
+        on, off = skew.replay(8, extra=ADAPTIVE_ON), skew.replay(8)
+        env = dict(SHARE_MODE, **ADAPTIVE_ON, QWEN_FAST_LEVERN_PREFILL_SHARE='0.5')
+        self.assertEqual(skew.rule(on, 8, extra=ADAPTIVE_ON), [], 'the alternation and floor rules over the adaptive run\'s lines')
+        steps = c2_smoke_check.levern_facts(chr(10).join(on['lines']))['steps']
+        self.assertTrue(any(step['adaptive'] for step in steps if step['kind'] == 'prefill'), 'the shape has stretches with one or two live decoders')
+        self.assertEqual(c2_smoke_check.levern_adaptive_problems(steps, env, ADAPTIVE_TEXT), [])
+        self.assertLess(on['worst'], 8.0 + 8.0 + 1.0)
+        self.assertLessEqual(max(on['ttft'].values()), max(off['ttft'].values()) + 3.0, 'the slowest user is not made later')
+
+    def test_a_random_replay_never_breaks_the_floor_or_yields_less_than_the_control(self):
+        """200 seeded schedules: random decoder counts (0 to 8), step times, prompts and arrivals. At every decision that runs a prefill step with decoders
+        waiting after a prefill step, the governed share was 1.0 and fewer than G seconds had passed since the last decode round (the floor), the share is
+        never below the control's for the same input, and below 1.0 every prefill step is followed by a decode round."""
+        import random
+
+        for seed in range(200):
+            rng = random.Random(seed)
+            clock = Clock()
+            clock.now = 5000.0
+            wall = Clock()
+            wall.now = 1.7e9
+            merged = levern_policy.merged_config({'QWEN_FAST_LEVERN_TTFT_TARGET_S': str(rng.choice((0, 60, 180))),
+                                                  'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': str(rng.choice((4, 8, 20)))})
+            cfg = levern_policy.config({'QWEN_FAST_LEVERN_PREFILL_SHARE': str(rng.choice((0.25, 0.5, 0.8)))})
+            adaptive = levern_policy.Adaptive(rng.randint(1, 4), rng.choice((0.7, 0.9, 0.97)), rng.choice((0, 90, 120)))
+            on = levern_policy.Alternator(cfg, clock=clock, merged=merged, wall=wall, adaptive=adaptive)
+            off = levern_policy.Alternator(cfg, clock=Clock(), merged=merged, wall=wall)
+            off.clock.now = clock.now
+            gap_s = merged.max_gap_s
+            last_kind, last_decodes, decodes = None, 0, rng.randint(0, 8)
+            for step in range(300):
+                if rng.random() < 0.1:
+                    decodes = rng.randint(0, 8)
+                remaining = rng.choice((5000.0, 40000.0, 95000.0))
+                hint = [(wall.now - rng.uniform(0, 150), remaining)] + ([(wall.now - rng.uniform(0, 100), remaining)] if rng.random() < 0.4 else [])
+                for alternator in (on, off):
+                    alternator.pending_hint = list(hint)
+                decision = on.begin(decodes, True)
+                off.begin(decodes, True)
+                self.assertGreaterEqual(on.share, off.share - 1e-9, 'seed %d step %d: the adaptive share is never below the control\'s' % (seed, step))
+                if decodes > adaptive.decoders or decodes == 0:
+                    self.assertEqual(on.share, off.share, 'seed %d step %d: more decoders than the threshold run today\'s share' % (seed, step))
+                if decision.kind == 'prefill' and decodes and last_kind == 'prefill' and last_decodes and not on.short_owed:
+                    self.assertGreaterEqual(on.share, 1.0, 'seed %d step %d: two prefill steps in a row with decoders waiting only when the governor pins 1.0' % (seed, step))
+                    self.assertLess(on.gap_ms() / 1000.0, gap_s, 'seed %d step %d: and then only inside the %d s floor' % (seed, step, gap_s))
+                took = rng.uniform(300.0, 1500.0) if decision.kind == 'prefill' else rng.uniform(100.0, 250.0)
+                on.end(decision.kind)
+                off.end(decision.kind)
+                last_kind, last_decodes = decision.kind, decodes
+                for tick in (clock, wall, off.clock):
+                    tick.advance_ms(took)
+
+
+ADAPTIVE_TEXT = levern_policy.ADAPTIVE_LINE.format(2, 0.9, 120, 8)
+
+
+class AdaptiveInstallTests(GateFreeCase):
+    def install(self, extra):
+        cls = plugin_class(TrimmingScheduler)
+        config = SimpleNamespace(scheduler_config=SimpleNamespace(scheduler_cls=cls))
+        environ = {'QWEN_FAST_LEVER_N': '1', 'QWEN_FAST_ANY_REQUEST': '1', 'QWEN_PREFIX_REUSE': '1', 'QWEN_FAST_STICKY_SESSIONS': '1', 'QWEN_FAST_LEVERN_PARK': 'host'}
+        environ.update(extra)
+        log = Mock()
+        with patch.dict(os.environ, environ, clear=False):
+            for name in ('QWEN_FAST_DECODE_STEPS_PER_ADMISSION', 'QWEN_FAST_KV_RESERVATION', 'QWEN_FAST_LEVERN_ROUNDS') + levern_policy.ADAPTIVE_FLAGS:
+                if name not in extra:
+                    os.environ.pop(name, None)
+            admission.install(config, log=log)
+        return cls, log
+
+    def test_the_install_line_says_what_the_policy_runs_and_only_when_it_is_on(self):
+        _, log = self.install({'QWEN_FAST_LEVERN_ADAPTIVE': '1'})
+        lines = [call.args for call in log.call_args_list if call.args and call.args[0] == levern_policy.ADAPTIVE_LINE]
+        self.assertEqual(lines, [(levern_policy.ADAPTIVE_LINE, 2, 0.9, 120, 8)])
+        _, quiet = self.install({})
+        self.assertFalse([call for call in quiet.call_args_list if call.args and call.args[0] == levern_policy.ADAPTIVE_LINE])
+
+    def test_a_policy_that_cannot_work_fails_the_install_by_name(self):
+        for extra, word in (({'QWEN_FAST_LEVERN_ADAPTIVE': '1', 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': '0'}, 'REQUIRES the decode-gap floor'),
+                            ({'QWEN_FAST_LEVERN_ADAPTIVE': '1', 'QWEN_FAST_LEVERN_ADAPTIVE_SHARE': '1.0'}, 'must be in \\(0, 1\\)'),
+                            ({'QWEN_FAST_LEVERN_ADAPTIVE': '1', 'QWEN_FAST_LEVERN_ADAPTIVE_DECODERS': '8'}, 'QWEN_FAST_LEVERN_ADAPTIVE_DECODERS')):
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, word):
+                self.install(extra)
 
 
 if __name__ == '__main__':

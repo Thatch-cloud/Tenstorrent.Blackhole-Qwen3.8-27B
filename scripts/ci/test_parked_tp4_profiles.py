@@ -246,6 +246,10 @@ class ProfileTests(unittest.TestCase):
         import make_w2_kill_profiles
 
         generated |= set(make_w2_kill_profiles.twin_names())
+        # the adaptive governor's twin of the ship profile carries the parked flags by inheritance too (test_adaptive_profiles)
+        import make_adaptive_profiles
+
+        generated |= set(make_adaptive_profiles.twin_names())
         # the region-read audit twins (make_kvread_profiles; test_kvread_profiles holds each as its parent plus one flag) carry their parent's flags by inheritance
         region_read = {twin: parent for parent, twin, mode in kvread_twins.TWINS}
         for name, profile in profiles.items():

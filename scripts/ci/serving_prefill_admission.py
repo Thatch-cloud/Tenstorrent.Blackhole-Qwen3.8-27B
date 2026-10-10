@@ -1122,7 +1122,10 @@ def install(config, *, importer=importlib.import_module, log=None, queue_factory
         # Beside prefix reuse (QWEN_PREFIX_REUSE=1) it is the MERGED route's runtime: the peeked cap, the single-candidate pass, the pre-pass
         # quarantine, the short lane, the governor and the kill switch (levern_scheduler).
         merged = levern_policy.merged_config() if os.environ.get('QWEN_PREFIX_REUSE') == '1' else None
-        levern = levern_scheduler.LevernRuntime(log=log, merged=merged)
+        # The adaptive governor (QWEN_FAST_LEVERN_ADAPTIVE=1, gate only): None unless asked, and then nothing below differs. A malformed value or a
+        # combination it cannot work in (no merged route, the floor off) fails the install by name, never a silent default.
+        adaptive = levern_policy.adaptive_config()
+        levern = levern_scheduler.LevernRuntime(log=log, merged=merged, adaptive=adaptive)
     state = new_state()
     setattr(cls, METHOD, wrap(original, queue_factory=queue_factory, log=log, steps=steps, state=state, kv=kv, levern=levern))
     log(INSTALLED + '{}', name)
@@ -1138,4 +1141,6 @@ def install(config, *, importer=importlib.import_module, log=None, queue_factory
             cfg.max_rounds)
         if merged is not None:
             log(levern_policy.GOVERNOR_LINE, merged.ttft_s, merged.max_gap_s)
+        if adaptive is not None:
+            log(levern_policy.ADAPTIVE_LINE, adaptive.decoders, adaptive.share, adaptive.ttft_s, merged.max_gap_s)
     return name

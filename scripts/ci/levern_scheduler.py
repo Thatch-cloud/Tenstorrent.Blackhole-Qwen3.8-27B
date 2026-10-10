@@ -46,6 +46,8 @@ target rule:
                resumes when no short can be admitted. A short never parks a short, a long parked for QWEN_FAST_LEVERN_MAX_PARK_S admits no more
                shorts, and a long the deadline governor needs (f_eff = 1) is never preempted. A short is paced at R = 1.
   governor     the Alternator's share is raised so every pending long finishes within QWEN_FAST_LEVERN_TTFT_TARGET_S (levern_policy.effective_share).
+               Gate only, QWEN_FAST_LEVERN_ADAPTIVE=1: while few decoders are live its base share and its target move (levern_policy.Adaptive); each step
+               line then carries base=, target= and adaptive= beside f_eff.
   kill switch  the file levern.off (levern_policy.OffSwitch): new prompts get a whole-prompt cap and the short lane closes; in-flight prefills
                finish through the route.
 """
@@ -120,13 +122,18 @@ def _requests(queue):
 class LevernRuntime(object):
     """What the two wrappers share: the parsed flags, the Alternator, the step counter and the log."""
 
-    def __init__(self, cfg=None, *, log=None, clock=None, fault=None, merged=None, wall=None, off_path=None):
+    def __init__(self, cfg=None, *, log=None, clock=None, fault=None, merged=None, wall=None, off_path=None, adaptive=None):
         self.cfg = levern_policy.config() if cfg is None else cfg
         # The merged route's flags (levern_policy.Merged), None on the stage-1 route: every merged decision below is behind it.
         self.merged = merged
         kwargs = {} if clock is None else dict(clock=clock)
         if wall is not None:
             kwargs['wall'] = wall
+        if adaptive is not None:
+            # The adaptive governor (QWEN_FAST_LEVERN_ADAPTIVE=1, gate only): it changes the governor's two inputs and logs three more fields per step.
+            if merged is None:
+                raise ValueError('the adaptive governor needs the merged route (the deadline governor and the decode-gap floor live there)')
+            kwargs['adaptive'] = adaptive
         self.alternator = levern_policy.Alternator(self.cfg, merged=merged, **kwargs)
         self.log = admission._log if log is None else log
         self.fault = levern_policy.fault() if fault is None else fault
@@ -704,6 +711,11 @@ def _log_step(scheduler, runtime, decision, wanted, reason, prefill, result, par
               decision.prev_kind or '-', prev_ms, '%.0f' % decision.owed_ms, decision.owed_rounds)
     if runtime.merged is not None:
         alternator = runtime.alternator
-        runtime.log(levern_policy.STEP_LINE_MERGED, *(values + (alternator.share, alternator.need, alternator.gap_ms())))
+        merged_values = values + (alternator.share, alternator.need, alternator.gap_ms())
+        if alternator.adaptive is not None:
+            # The adaptive governor's fields: the base share and the deadline target this step's governor started from, and whether the policy was in force.
+            runtime.log(levern_policy.STEP_LINE_ADAPTIVE, *(merged_values + (alternator.base_share, alternator.target_s, int(alternator.adaptive_active()))))
+        else:
+            runtime.log(levern_policy.STEP_LINE_MERGED, *merged_values)
     else:
         runtime.log(levern_policy.STEP_LINE, *values)
