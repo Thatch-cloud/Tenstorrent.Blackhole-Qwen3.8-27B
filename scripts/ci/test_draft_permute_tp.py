@@ -74,20 +74,20 @@ def from_raw(raw):
 
 
 def tensor_pages(tensor):
-    """(heads, rows, 128) int16 -> {page: raw tile}, page = (head * row tiles + row tile) * 4 + column tile."""
+    """(heads, rows, width) int16, width a multiple of 32 -> {page: raw tile}, page = (head * row tiles + row tile) * column tiles + column tile."""
     heads, rows, width = tensor.shape
-    tile_rows = -(-rows // 32)
+    tile_rows, columns = -(-rows // 32), width // 32
     padded = torch.zeros(heads, tile_rows * 32, width, dtype=torch.int16)
     padded[:, :rows] = tensor
-    return {(h * tile_rows + tr) * 4 + c: to_raw(padded[h, 32 * tr:32 * tr + 32, 32 * c:32 * c + 32])
-            for h in range(heads) for tr in range(tile_rows) for c in range(width // 32)}
+    return {(h * tile_rows + tr) * columns + c: to_raw(padded[h, 32 * tr:32 * tr + 32, 32 * c:32 * c + 32])
+            for h in range(heads) for tr in range(tile_rows) for c in range(columns)}
 
 
-def pages_tensor(pages, heads, rows):
-    tile_rows = -(-rows // 32)
-    out = torch.zeros(heads, tile_rows * 32, DIM, dtype=torch.int16)
+def pages_tensor(pages, heads, rows, width=DIM):
+    tile_rows, columns = -(-rows // 32), width // 32
+    out = torch.zeros(heads, tile_rows * 32, width, dtype=torch.int16)
     for page, raw in pages.items():
-        row_group, column = divmod(page, 4)
+        row_group, column = divmod(page, columns)
         h, tr = divmod(row_group, tile_rows)
         out[h, 32 * tr:32 * tr + 32, 32 * column:32 * column + 32] = from_raw(raw)
     return out[:, :rows]
@@ -229,10 +229,10 @@ class ExecutingOperations(FakeOperations):
 
     def to_logical(self, tensor, chip=0):
         shard = tensor.shards[chip]
-        return pages_tensor(shard.pages, leading(shard.shape), shard.shape[-2]).reshape(shard.shape)
+        return pages_tensor(shard.pages, leading(shard.shape), shard.shape[-2], shard.shape[-1]).reshape(shard.shape)
 
     def to_torch(self, shard):
-        return pages_tensor(shard.pages, leading(shard.shape), shard.shape[-2]).reshape(shard.shape).view(torch.bfloat16)
+        return pages_tensor(shard.pages, leading(shard.shape), shard.shape[-2], shard.shape[-1]).reshape(shard.shape).view(torch.bfloat16)
 
     def generic_op(self, tensors, program):
         super().generic_op(tensors, program)

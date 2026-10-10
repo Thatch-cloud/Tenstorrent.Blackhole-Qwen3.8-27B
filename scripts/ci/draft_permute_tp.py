@@ -94,22 +94,33 @@ def _read(name, environ):
     raise ValueError('%s must be 0 or 1, got %r' % (name, value))
 
 
-def enabled(environ=None):
-    """Whether QWEN_FAST_DRAFT_PERMUTE is on. Strict; on at the pair is refused (a four-card lever)."""
-    if not _read(FLAG, environ):
+def lever_enabled(flag, environ=None):
+    """Whether a WP7 drafter lever's flag is on: strict 0 or 1, read at call time; on at the pair is refused (a four-card lever). The three levers (permutations, fused q|k|v, one 64-row
+    head) share this reading."""
+    if not _read(flag, environ):
         return False
     if tp_shapes.chip_count(os.environ if environ is None else environ) == tp_shapes.PAIR:
-        raise ValueError('%s=1 is a TP4 lever: it needs QWEN_FAST_TP=4, this process serves the pair' % FLAG)
+        raise ValueError('%s=1 is a TP4 lever: it needs QWEN_FAST_TP=4, this process serves the pair' % flag)
     return True
+
+
+def lever_audit_enabled(audit_flag, flag, environ=None):
+    """Whether a lever's audit flag is on. An audit without its lever is a misconfigured arm and raises: it would pass having audited nothing."""
+    if not _read(audit_flag, environ):
+        return False
+    if not lever_enabled(flag, environ):
+        raise ValueError('%s=1 needs %s=1: the audit would compare nothing' % (audit_flag, flag))
+    return True
+
+
+def enabled(environ=None):
+    """Whether QWEN_FAST_DRAFT_PERMUTE is on (see lever_enabled)."""
+    return lever_enabled(FLAG, environ)
 
 
 def audit_enabled(environ=None):
-    """Whether QWEN_FAST_DRAFT_PERMUTE_AUDIT is on. An audit without the lever is a misconfigured arm and raises: it would pass having audited nothing."""
-    if not _read(AUDIT_FLAG, environ):
-        return False
-    if not enabled(environ):
-        raise ValueError('%s=1 needs %s=1: the audit would compare nothing' % (AUDIT_FLAG, FLAG))
-    return True
+    """Whether QWEN_FAST_DRAFT_PERMUTE_AUDIT is on (see lever_audit_enabled)."""
+    return lever_audit_enabled(AUDIT_FLAG, FLAG, environ)
 
 
 def validate(environ=None):
@@ -139,8 +150,12 @@ def set_pass(eager):
     return previous
 
 
-def auditing():
-    return _PASS['eager'] is True and audit_enabled()
+def auditing(audit_flag=AUDIT_FLAG, flag=FLAG):
+    """Whether the audit of the lever named by `flag` / `audit_flag` runs now: the pass is the eager warm pass and the audit flag is on."""
+    return _PASS['eager'] is True and lever_audit_enabled(audit_flag, flag)
+
+
+AUDIT_FLAGS = (AUDIT_FLAG, 'QWEN_FAST_DRAFT_QKV1_AUDIT', 'QWEN_FAST_DRAFT_HEAD64_AUDIT')
 
 
 _SERVED = {'depth': 0}
@@ -514,10 +529,12 @@ def launch(operations, mesh, sources, destinations, per_lane, size, rows, *, can
 # The audit.
 # ---------------------------------------------------------------------------------------------
 
-def compare(operations, pairs, site, shape):
+def compare(operations, pairs, site, shape, *, audit=None, mismatch=None):
     """Byte-compare each (name, engaged, served) pair on every chip as int16 bit patterns (-0 and +0 differ). Logs the audit marker and returns True, or logs the mismatch
-    marker and raises AssertionError."""
+    marker and raises AssertionError. `audit` / `mismatch` are the markers of the lever that asks (default: this module's)."""
     import torch
+
+    audit, mismatch = audit or AUDIT, mismatch or MISMATCH
 
     bad = []
     for name, mine, theirs in pairs:
@@ -527,10 +544,10 @@ def compare(operations, pairs, site, shape):
             if tuple(a.shape) != tuple(b.shape) or not torch.equal(a, b):
                 bad.append((name, chip))
     if bad:
-        message = '%s site=%s shape=%s differing=%s' % (MISMATCH, site, shape, bad[:8])
+        message = '%s site=%s shape=%s differing=%s' % (mismatch, site, shape, bad[:8])
         tp4_sampdraft.log_line(message)
         raise AssertionError(message)
-    tp4_sampdraft.log_line('%s exact=True site=%s shape=%s tensors=%d' % (AUDIT, site, shape, len(pairs)))
+    tp4_sampdraft.log_line('%s exact=True site=%s shape=%s tensors=%d' % (audit, site, shape, len(pairs)))
     return True
 
 

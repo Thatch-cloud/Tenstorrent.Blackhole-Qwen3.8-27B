@@ -1,0 +1,11 @@
+# WP7 (drafter attention) jobs of the op-fusion window, in the order WP7 asks for them. The generated pack (scripts/ci/references/fusion-jobs, make_fusion_jobs.py) holds the per-lever audited attaches (PERMUTEA, QKV1A,
+# HEAD64A) and timed ABABs (PERMUTEC1 / L1 / C2 / L2 ...); this folder holds the one job the generator does not make, which leads: the card-M permutation-bytes probe. One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# 1) P7  card M, before any quad job: the permutation bytes against the served assembly, fold and unfold on edge and all-pattern data, and which pieces the value rule touches (the cached banks). NEEDS: B0 of the generated pack only.
+# 2) PERMUTEA / QKV1A / HEAD64A  the audited attaches of the generated pack: the bucket's eager warm pass runs the served composition beside each launch and compares every output on every chip ('... audit exact=True site=kv|fold|unfold
+#    shape=quad', 'site=heads' for qkv1, 'site=head' for head64). HEAD64A is the one that may find a difference without anything being wrong: if the auto matmul config at M = 64 blocks K differently the head is TAU-ONLY; the
+#    gate is then a tau A/B on the arm without the audit flag (compare accepted tokens per round and the early-draft ms), not a NO-GO of the card work.
+# 3) the ABAB per lever (the generated pack): read the round time paired per round AND the early-draft ms (the '[PACKED-HOSTGAP-...]' draft phase / early-draft lines of the container log), which is the phase these levers shorten
+#    (quad passes of 14.26 ms of device time each; the permutation lever is estimated at -2.5 to -3.3 ms a quad, the fused projections -0.55, the head -0.89).
+# 4) draft-singles audit and proposal audit on attach (QWEN_FAST_DRAFT_SINGLES_AUDIT, QWEN_FAST_QUAD_DRAFT_AUDIT) with the lever on, and the position-keyed accepted-prefix compare against the control, are the end-to-end exactness gate of every WP7 lever.
+# GRID: read it from the run (AVAILABLE WORKER CORE COUNT); the launches cover the first rows of the grid at its full width as ONE CoreRange (13x10 today, 11x10 on an older firmware), never a literal.
+P7-cardm-permute-bytes soft tp4-fusion-1 30

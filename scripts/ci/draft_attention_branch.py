@@ -30,7 +30,6 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
 
     native_kernel = None
     if precise_native:
-        import os
         from native_draft_sdpa import audit_active_kernel
 
         native_kernel = audit_active_kernel(os.environ['TT_METAL_HOME'])
@@ -48,7 +47,7 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
     kernel = operations.WormholeComputeKernelConfig(math_fidelity=operations.MathFidelity.HiFi4,
         math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
     base = convolution['layers.0.attention_conv.base_kernel']
-    return dict(operations=operations, mesh=mesh, source_weights=weights, source_convolution=convolution,
+    prepared = dict(operations=operations, mesh=mesh, source_weights=weights, source_convolution=convolution,
         kernel=kernel, native_kernel=native_kernel, native_head_layout=native_head_layout, block_rows=block_rows,
         live_query_qk=live_query_qk, native_proposal_attention=native_proposal_attention,
         norm=upload(convolution['layers.0.input_layernorm.weight'].reshape(1, 1, 160, 32), row_major=True),
@@ -57,6 +56,15 @@ def prepare_attention_branch(operations, mesh, weights, convolution, retain, *, 
         projections={name: projection(name, 0) for name in ('q', 'k', 'v')},
         head_norms={name: upload(weights[f'layers.0.self_attn.{name}_norm.weight'].reshape(1, 1, 4, 32), row_major=True)
                     for name in ('q', 'k')}, output_projection=projection('o', 1))
+    if os.environ.get('QWEN_FAST_DRAFT_QKV1', '0') != '0':
+        # QWEN_FAST_DRAFT_QKV1 (draft_qkv_tp.py, default off): beside the separate q, k and v weights (the pair, the single-user path and the audits keep running on them), the
+        # per-chip [q | k | v] concatenation the fused projection launch reads. Uploaded last, so the flag changes no other upload.
+        import draft_qkv_tp
+
+        if draft_qkv_tp.enabled():
+            prepared['projections']['qkv'] = upload(draft_qkv_tp.fused_host_weight(torch, weights, tp_shapes.chip_count()), sharded=True,
+                                                    dtype=draft_projection_dtype(operations))
+    return prepared
 
 
 def served_key_value(operations, plan, caches, live, retain, name):
@@ -207,7 +215,20 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
     if cached_history is not None:
         from draft_kv_projection import project_key_value
 
-        query = retain(operations.typecast(project(prepared, parameters['projections']['q'], (8, 8), proposal_rows, 1), operations.bfloat16))
+        # QWEN_FAST_DRAFT_QKV1 (draft_qkv_tp.py, default off): the packed quad / octo pass projects q, k and v as ONE fused matmul and splits the heads in one launch; `fused`
+        # is then the split heads dict(q=, k=, v=) and the q projection below is not run. None (the default, and every call the lever cannot take) changes nothing here.
+        fused = None
+        if quad is not None and spans is not None and os.environ.get('QWEN_FAST_DRAFT_QKV1', '0') != '0':
+            import draft_qkv_tp
+
+            if draft_qkv_tp.hook_enabled():
+                def served_projections():
+                    flat_query = retain(operations.typecast(project(prepared, parameters['projections']['q'], (8, 8), proposal_rows, 1), operations.bfloat16))
+                    return quad.project_key_value(operations, prepared, flat_query, rope['live_k'], retain, parameters=parameters, split_only=True)
+
+                fused = draft_qkv_tp.project(operations, prepared, retain, parameters=parameters, project=project, rows=proposal_rows, served=served_projections,
+                                             site='octo' if getattr(quad, 'users', 4) == 8 else 'quad')
+        query = None if fused is not None else retain(operations.typecast(project(prepared, parameters['projections']['q'], (8, 8), proposal_rows, 1), operations.bfloat16))
         if spans is None:
             valid = retain(operations.slice(prepared, (0, 0, 0, 0), (1, 1, block_rows, 5120)))
             proposal = retain(operations.pad(valid, [(0, 0), (0, 0), (0, 32 - block_rows), (0, 0)], 0.0))
@@ -218,7 +239,7 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
             # already laid out in block order.
             proposal, tables = prepared, rope['live_k']
         live = (project_key_value if quad is None else quad.project_key_value)(operations, proposal, query, tables,
-            retain, parameters=parameters)
+            retain, parameters=parameters, **({} if fused is None else dict(split=fused)))
         heads = dict(q=normalize_head('q', live['q']))
 
         def assembled(name):

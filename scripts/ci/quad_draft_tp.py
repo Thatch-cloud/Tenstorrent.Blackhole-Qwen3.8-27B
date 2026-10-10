@@ -344,25 +344,35 @@ def served_split_projected_heads(operations, query, key, value, retain):
     return dict(q=query_heads, k=key_heads, v=value_heads)
 
 
-def project_key_value(operations, inputs, query, cosine_sine, retain, *, parameters):
+def project_key_value(operations, inputs, query, cosine_sine, retain, *, parameters, split=None, split_only=False):
     """draft_kv_projection_tp.project_key_value at 64 rows: the same program (per_core_M = rows // 32 = 2), the 64-row head
-    split, then today's k norm, rotary and typecast."""
+    split, then today's k norm, rotary and typecast.
+
+    QWEN_FAST_DRAFT_QKV1 (draft_qkv_tp.py, default off): `split` is the already split dict(q=, k=, v=) heads of the fused projection launch (no
+    `query`, no k / v matmul here), and `split_only` returns the split heads of the served projections right after the split - the fused launch's
+    audit reference. Neither given, this is the served function."""
     if (parameters.get('operations') is not operations or parameters.get('native_head_layout') is not True
-            or tuple(inputs.shape) != (1, 1, ROWS, HIDDEN) or tuple(query.shape) != (1, 1, ROWS, tp_shapes.active().draft_query)
+            or tuple(inputs.shape) != (1, 1, ROWS, HIDDEN)
+            or (split is None and tuple(query.shape) != (1, 1, ROWS, tp_shapes.active().draft_query))
             or len(cosine_sine) != 2 or any(tuple(table.shape) != (1, 1, ROWS, HEAD_DIM) for table in cosine_sine)
-            or not _tiled_dram(operations, (inputs, query, *cosine_sine))):
+            or not _tiled_dram(operations, (inputs, *(() if split is not None else (query,)), *cosine_sine))):
         raise ValueError('Owned 64-row BF16 tiled K/V rows, the live-key rotary tables and native head parameters '
                          'required')
     kernel = parameters['kernel']
-    program = operations.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(8, 8),
-        in0_block_w=4, out_subblock_h=1, out_subblock_w=1, per_core_M=ROWS // 32,
-        per_core_N=1, fuse_batch=True, fused_activation=None, mcast_in0=True)
-    flat = {}
-    for name in ('k', 'v'):
-        projected = retain(operations.matmul(inputs, parameters['projections'][name], dtype=operations.float32,
-            compute_kernel_config=kernel, program_config=program, memory_config=operations.DRAM_MEMORY_CONFIG))
-        flat[name] = retain(operations.typecast(projected, operations.bfloat16))
-    made = split_projected_heads(operations, query, flat['k'], flat['v'], retain)
+    if split is None:
+        program = operations.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=(8, 8),
+            in0_block_w=4, out_subblock_h=1, out_subblock_w=1, per_core_M=ROWS // 32,
+            per_core_N=1, fuse_batch=True, fused_activation=None, mcast_in0=True)
+        flat = {}
+        for name in ('k', 'v'):
+            projected = retain(operations.matmul(inputs, parameters['projections'][name], dtype=operations.float32,
+                compute_kernel_config=kernel, program_config=program, memory_config=operations.DRAM_MEMORY_CONFIG))
+            flat[name] = retain(operations.typecast(projected, operations.bfloat16))
+        made = split_projected_heads(operations, query, flat['k'], flat['v'], retain)
+        if split_only:
+            return made
+    else:
+        made = split
     normalized = retain(operations.rms_norm(made['k'], epsilon=1e-6, weight=parameters['head_norms']['k'],
         compute_kernel_config=kernel, memory_config=operations.DRAM_MEMORY_CONFIG))
     wide = [retain(operations.typecast(value, operations.float32)) for value in (normalized, *cosine_sine)]
@@ -502,15 +512,29 @@ def halves_convolution(operations, mesh, hidden, dynamic, base, *, boundaries, r
 # ---------------------------------------------------------------------------------------------
 
 def head_candidates(operations, model, normalized, owned, retain):
-    """H0: draft_shared_head_tp.shared_head_candidates on each tile-aligned 32-row half, then the candidate concat."""
+    """H0: draft_shared_head_tp.shared_head_candidates on each tile-aligned 32-row half, then the candidate concat.
+
+    QWEN_FAST_DRAFT_HEAD64 (draft_head64_tp.py, default off): the two halves' matmuls as one 64-row matmul; `served_halves` is the served reference."""
     from draft_shared_head_tp import shared_head_candidates
 
     if tuple(normalized.shape) != (1, 1, ROWS, HIDDEN):
         raise ValueError('The 64-row learned-normalized block required')
-    halves = []
-    for half in range(GROUP_USERS):
-        block = retain(operations.slice(normalized, (0, 0, 32 * half, 0), (1, 1, 32 * (half + 1), HIDDEN)))
-        halves.append(shared_head_candidates(operations, model, block, owned))
+
+    def served_halves():
+        halves = []
+        for half in range(GROUP_USERS):
+            block = retain(operations.slice(normalized, (0, 0, 32 * half, 0), (1, 1, 32 * (half + 1), HIDDEN)))
+            halves.append(shared_head_candidates(operations, model, block, owned))
+        return halves
+
+    if os.environ.get('QWEN_FAST_DRAFT_HEAD64', '0') != '0':
+        import draft_head64_tp
+
+        if draft_head64_tp.hook_enabled():
+            fused = draft_head64_tp.candidates(operations, model, normalized, owned, served=served_halves, site='quad', halves=GROUP_USERS)
+            if fused is not None:
+                return _pinned.concat_candidates(operations, fused[0], fused[1], retain)
+    halves = served_halves()
     return _pinned.concat_candidates(operations, halves[0], halves[1], retain)
 
 
@@ -637,9 +661,9 @@ class PreparedQuadDFlashProposal(_pinned.PreparedQuadDFlashProposal):
         self.quad = QuadPass(self.quad.sdpa, self.quad.conv)
 
     def _execute(self, bucket, owned, retain):
-        """The pinned pass. With QWEN_FAST_DRAFT_PERMUTE_AUDIT the permutation audit is told whether this is the bucket's eager warm pass (it byte-compares the served
-        composition beside each launch there) or the capture that records the launches only (a capture cannot read a tensor back)."""
-        if os.environ.get('QWEN_FAST_DRAFT_PERMUTE_AUDIT', '0') == '0':
+        """The pinned pass. With one of the WP7 audits (QWEN_FAST_DRAFT_PERMUTE_AUDIT, _QKV1_AUDIT, _HEAD64_AUDIT) the audit is told whether this is the bucket's eager warm pass (it
+        byte-compares the served composition beside each launch there) or the capture that records the launches only (a capture cannot read a tensor back)."""
+        if all(os.environ.get(name, '0') == '0' for name in ('QWEN_FAST_DRAFT_PERMUTE_AUDIT', 'QWEN_FAST_DRAFT_QKV1_AUDIT', 'QWEN_FAST_DRAFT_HEAD64_AUDIT')):
             return super()._execute(bucket, owned, retain)
         import draft_permute_tp
 

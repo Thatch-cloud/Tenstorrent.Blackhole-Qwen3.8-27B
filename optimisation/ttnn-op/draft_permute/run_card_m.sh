@@ -353,7 +353,6 @@ qual_reset_hint() {
   fi
 }
 # <<< qual_card.sh
-
 qual_card_select
 R=${RESULTS:-$HOME/permuteprobe/$QUAL_TAG}
 name=qwen-permuteprobe-$QUAL_TAG
