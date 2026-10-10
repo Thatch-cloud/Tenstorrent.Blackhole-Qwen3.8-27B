@@ -34,6 +34,22 @@ Two packages each need a line in a file the other owns. The integrator's hooks (
 `draft_reduce_tp.choose`, `QWEN_FAST_DRAFT_TAIL` replaces the residual tail), and WP7's permutation levers at the octo shapes (`octo_draft_tp.octo_fold_query` and
 `octo_unfold_output`, `QWEN_FAST_DRAFT_PERMUTE`, `site='octo'`). Both are lazy, strict and flag-guarded; flags off, the op sequence is the one the files had before.
 
+## The trace-capture gate
+
+Two audits of the programme broke a rule of the device on a card that no CPU test could see: one synchronized inside the fused-commit capture, the other launched an audit
+program that had never run eagerly ("Cannot load new binaries during trace capture"). `scripts/ci/capture_rules.py` is the CPU model of exactly those two rules, a wrapper any
+fake ttnn can be put behind: while a capture is open (between `begin_trace_capture` and `end_trace_capture`) it refuses (a) every host round trip (`synchronize_device`,
+`to_torch`, a host write to a device tensor) and (b) every op or program launch whose key (op, tensor shapes / dtypes / layouts, configs and, for `generic_op`, the kernels'
+sources, compile-time arguments, defines, circular buffers and core ranges, never the runtime arguments or addresses) did not run eagerly before it. Every violation is also
+recorded, so a lever that catches the exception is still found.
+
+`test_fusion_capture_rules` drives each lever's lifecycle through it with its audit on, in the order the stack gives it (the eager warm forward, the capture, replays, the audit after
+a replay, the release): the K/V page writer (warm ordered writer, captured per-user writer), the MLP configuration, the shard argmax with the tree fold, the CCL options (reduce-scatter
+and the norms' gather), WP6's four drafter levers in the single and quad MLP branch and in the fused commit's segment-by-segment order, WP7's permutation sites (K/V, fold, unfold at the
+pair, quad and octo shapes), the fused q|k|v projection and the 64-row head. A census lists every synchronize / readback / host write in the lever modules with the reason it cannot
+run in a capture, and a coverage test requires a scenario for every audit flag of the audited combined twin. Run against the pre-fix heads, the gate fails exactly where the cards
+did: WP6's audits at 9175d883 (a synchronize inside the capture) and WP2's audited writer at 96d674c7 (its audit programs inside the capture).
+
 ## The pack
 
 `scripts/ci/references/fusion-jobs/ORDER.txt` runs B0 (the image `tp4-fusion-1`), X0, every lever's audited attach, every lever's timed control/lever ABAB at eight live,
