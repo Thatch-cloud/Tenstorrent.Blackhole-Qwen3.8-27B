@@ -22,7 +22,6 @@ import unittest
 import torch
 
 import fused_1d
-import test_verify_trace_t1_graft as graft
 import tp4_mlp_fused as fused
 import tp4_mlp_gateup as lever
 

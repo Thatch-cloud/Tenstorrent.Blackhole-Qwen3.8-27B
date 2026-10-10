@@ -27,7 +27,6 @@ from unittest import mock
 import torch
 
 import tp4_mlp_gateup as lever
-import tp_shapes
 import test_verify_trace_t1_graft as graft
 
 HERE = Path(__file__).resolve().parent
@@ -786,25 +785,42 @@ class BinderTests(unittest.TestCase):
         self.assertEqual(binder.calls - before, binder.expected_calls)
         self.assertNotIn('forward', model.layers[0].feed_forward.__dict__, 'the override is gone after the forward')
 
-    def test_a_block_that_is_not_64_rows_or_not_native_raises_after_one_fell_back_line(self):
+    def test_a_block_that_is_not_64_rows_or_not_native_binds_nothing_after_one_fell_back_line_each(self):
         lines = []
         with mock.patch.object(lever, 'log_line', lines.append), env(QWEN_FAST_MLP_CFG='l1'):
-            with self.assertRaisesRegex(ValueError, '64-row block'):
-                lever.bindings(model_of(self.fake), 128, self.fake.ttnn)
-            with self.assertRaisesRegex(ValueError, 'Lever N native graft'):
-                lever.bindings(model_of(self.fake), 64, self.fake.ttnn, native_m3=False)
-            with self.assertRaisesRegex(ValueError, 'Lever N native graft'):
-                lever.bindings(model_of(self.fake, native=False), 64, self.fake.ttnn)
+            self.assertEqual(lever.bindings(model_of(self.fake), 128, self.fake.ttnn), ())
+            self.assertEqual(lever.bindings(model_of(self.fake), 64, self.fake.ttnn, native_m3=False), ())
+            self.assertEqual(lever.bindings(model_of(self.fake, native=False), 64, self.fake.ttnn), ())
         self.assertEqual(len([line for line in lines if lever.FALLBACK in line]), 3)
+        self.assertIn('64-row block', lines[0])
+        self.assertIn('Lever N native graft', lines[1])
 
-    def test_a_refused_k_loop_raises_with_its_line(self):
+    def test_a_refused_k_loop_binds_nothing_with_its_line(self):
         model = model_of(self.fake)
         lines = []
         self.fake.ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig = lambda **options: types.SimpleNamespace(**dict(options, in0_block_w=2))
         with mock.patch.object(lever, 'log_line', lines.append), env(QWEN_FAST_MLP_CFG='d4'):
-            with self.assertRaisesRegex(ValueError, 'K loop'):
-                lever.bindings(model, 64, self.fake.ttnn)
-        self.assertTrue(lines and lines[0].startswith(lever.FALLBACK + ' reason='))
+            self.assertEqual(lever.bindings(model, 64, self.fake.ttnn), ())
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith(lever.FALLBACK + ' reason=') and 'K loop' in lines[0], lines)
+
+    def test_a_fused_launch_that_cannot_be_built_binds_nothing(self):
+        model = model_of(self.fake, layers=2)
+        lines = []
+
+        class Broken(object):
+            def __init__(self, *args, **options):
+                raise OSError('the native compute kernel source is not there')
+
+        module = types.ModuleType('tp4_mlp_fused')
+        module.FusedGateUp = Broken
+        with mock.patch.dict(sys.modules, {'tp4_mlp_fused': module}), mock.patch.object(lever, 'log_line', lines.append), env(QWEN_FAST_MLP_GATEUP='1'):
+            self.assertEqual(lever.bindings(model, 64, self.fake.ttnn), ())
+        self.assertEqual(lines, [lever.FALLBACK + ' reason=the native compute kernel source is not there'])
+
+    def test_a_bad_flag_combination_still_raises_at_the_warm(self):
+        with env(QWEN_FAST_MLP_GATEUP='1', QWEN_FAST_MLP_CFG='g2'), self.assertRaises(ValueError):
+            lever.bindings(model_of(self.fake), 64, self.fake.ttnn)
 
     def test_the_fused_route_builds_one_op_per_layer_with_the_served_approximation_mode(self):
         model = model_of(self.fake, layers=2)

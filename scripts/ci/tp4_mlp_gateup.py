@@ -617,8 +617,10 @@ class Tp4MlpBinding(object):
 
 def bindings(model, rows, operations, native_m3=True, environ=None):
     """The binders model_batch.two_tile_bindings appends for the lever: () when no lever is on, otherwise one Tp4MlpBinding. A flag combination
-    that cannot run raises here (at the block's warm, never mid-round); a model or grid the lever cannot serve raises with the reason, after
-    one fell-back line, so a profile that asks for the lever never silently times the served path."""
+    that cannot run raises here (at the block's warm, never mid-round). A model, block or grid the lever cannot serve (not 64 rows, no graft, a
+    named config that would move the K loop, a fused launch that cannot be built) binds NOTHING after one fell-back line: the served ops run, as
+    with the flags unset, and the fusion smoke rule fails the arm by name, so a profile that asks for the lever never silently times the served path
+    and a process that serves traffic keeps serving."""
     selection = resolve(environ)
     if selection.route is None:
         return ()
@@ -641,9 +643,9 @@ def bindings(model, rows, operations, native_m3=True, environ=None):
                                                math_approx_mode=bool(getattr(layer.feed_forward.compute_kernel_config_decode,
                                                                               'math_approx_mode', True)))
                      for layer in model.layers]
-    except (ValueError, AttributeError, TypeError) as error:
-        log_line(fallback_line(str(error).splitlines()[0][:200]))
-        raise
+    except (ValueError, AttributeError, TypeError, OSError, ImportError) as error:
+        log_line(fallback_line((str(error).splitlines() or [type(error).__name__])[0][:200]))
+        return ()
     return (Tp4MlpBinding(model, rows, operations, plan, fused=fused),)
 
 
