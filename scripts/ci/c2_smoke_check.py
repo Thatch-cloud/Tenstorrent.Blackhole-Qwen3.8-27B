@@ -114,6 +114,8 @@ STALL_TESTS = (STALL_TEST, 'stall8_cold128k')
 # The two-arrival shape (the combined window): six decoders and TWO simultaneous cold arrivals. Recorded, not gated, but every stream (the arrivals' too) must end
 # in tokens, each arrival must have a time to first token and no error, and the seat gaps must exist (HX-C's and S's reads depend on them).
 COLD2_TEST = 'cold2_254k'
+# The prefill ladder and the few-decoder long prefill (the prefill measurement pack): numbers recorded, never gated; every request must end in tokens with a time to first token and a prompt count.
+PREFILL_LADDER_TESTS = ('prefill_ladder_solo', 'prefill_ladder_busy', 'prefill_few_decoders')
 # Lever N (tp4/lever-n): the hang shapes are streams of several users (the arrival and the follow-ups included); the equal tests are rows of exact-length completions.
 LEVERN_USER_TESTS = ('levern_equal_busy', 'levern_decoder_finishes', 'levern_all_decoders_finish', 'levern_cancel_mid_prefill',
                      'levern_arrival_during_prefill', 'levern_seed_stops')
@@ -511,6 +513,45 @@ def cold2_problems(entry):
     return problems
 
 
+def prefill_ladder_problems(results):
+    """[problem] for the prefill ladder results (PREFILL_LADDER_TESTS): the rungs of the solo and busy ladders (a dict keyed by rung) and the shapes of the few-decoder test
+    (a list) are each a request that ended in tokens, with a numeric time to first token and the server's prompt token count; a decoder beside a rung is a stream that ended
+    in tokens too. The times themselves are recorded, not gated (decoders that ended before the rung's first token are a note in the row, not a problem). [] for a run without these tests."""
+    problems = []
+    for name in PREFILL_LADDER_TESTS:
+        entry = results.get(name)
+        if entry is None:
+            continue
+        if not isinstance(entry, dict):
+            problems.append('%s: no result' % name)
+            continue
+        if 'error' in entry:
+            problems.append('%s: %s' % (name, entry['error']))
+            continue
+        if name == 'prefill_few_decoders':
+            rows = [('%s shape %d' % (name, index), row) for index, row in enumerate(entry.get('shapes') or [])]
+        else:
+            rungs = entry.get('rungs') if isinstance(entry.get('rungs'), dict) else {}
+            rows = [('%s rung %s' % (name, key), rungs[key]) for key in sorted(rungs, key=lambda value: int(value) if str(value).isdigit() else 0)]
+        if not rows:
+            problems.append('%s: no rung or shape was recorded' % name)
+        for label, row in rows:
+            problems += stream_problems(label, row)
+            if not isinstance(row, dict) or 'error' in row:
+                continue
+            if not isinstance(row.get('ttft_s'), (int, float)):
+                problems.append('%s: no time to first token' % label)
+            if not isinstance(row.get('prompt_tokens'), int):
+                problems.append('%s: the server reported no prompt token count' % label)
+            if name != 'prefill_ladder_solo':
+                decoders = row.get('decoders')
+                if not decoders:
+                    problems.append('%s: no decoder was recorded beside the arrival' % label)
+                for decoder in decoders or ():
+                    problems += stream_problems('%s decoder %s' % (label, decoder.get('seat') if isinstance(decoder, dict) else '?'), decoder)
+    return problems
+
+
 def smoke_problems(results, container_text=''):
     problems = []
     if results is None:
@@ -545,6 +586,7 @@ def smoke_problems(results, container_text=''):
         elif isinstance(stall, dict):
             problems.append('%s: %s' % (stall_name, stall['error']))
     problems += cold2_problems(results.get(COLD2_TEST))
+    problems += prefill_ladder_problems(results)
     problems += levern_smoke_problems(results)
     problems += parked_smoke_problems(results)
     for replay in REPLAY_TESTS:

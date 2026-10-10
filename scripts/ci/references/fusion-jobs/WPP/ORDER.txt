@@ -1,12 +1,21 @@
 # WPP (prefill SDPA S1: one q chunk per core) jobs: card M alone (cardm). L0/L1 build the K64j-OQ graft with no device; W1, Q1 and Q2 are the card-M proof and timing. One template per line: <name> <stop|soft> <image tag> <estimated minutes>.
+# T1-T4 are the lever's end-to-end measurement, the solo prefill ladder (prefill_ladder_solo) ABAB on the production profile and its -fx-oneq twin, read with prefill_ladder_report.py (est. solo TTFT -7.9 s at 131,072 and -29.8 s at 253,920 tokens).
 # The programme's four-card jobs of the lever (the audited attach OQA and the timed ABAB at eight live OQC1 OQL1 OQC2 OQL2, lever id oneq) are generated into ../ORDER.txt from scripts/ci/fusion-wp/WPP.json;
 # they need an image whose _ttnncpp.so is the K64j-OQ one (see the notes in WPP.json), so they run only after Q1 passed with OQ-WIN or OQ-PARTIAL.
 # NEEDS OQ-L1-build <- OQ-L0-build-dry
 # NEEDS OQ-W1-watcher <- OQ-L1-build
 # NEEDS OQ-Q1-sweep <- OQ-W1-watcher
 # NEEDS OQ-Q2-timing-repeat <- OQ-Q1-sweep
+# NEEDS OQ-T1-ttft-control-a <- OQ-Q1-sweep
+# NEEDS OQ-T2-ttft-oneq-a <- OQ-T1-ttft-control-a
+# NEEDS OQ-T3-ttft-control-b <- OQ-T2-ttft-oneq-a
+# NEEDS OQ-T4-ttft-oneq-b <- OQ-T3-ttft-control-b
 OQ-L0-build-dry stop tp4-fusion-1 3
 OQ-L1-build stop tp4-fusion-1 20
 OQ-W1-watcher stop tp4-fusion-1 40
 OQ-Q1-sweep stop tp4-fusion-1 75
 OQ-Q2-timing-repeat soft tp4-fusion-1 25
+OQ-T1-ttft-control-a soft tp4-fusion-1 25
+OQ-T2-ttft-oneq-a soft tp4-fusion-1 25
+OQ-T3-ttft-control-b soft tp4-fusion-1 25
+OQ-T4-ttft-oneq-b soft tp4-fusion-1 25

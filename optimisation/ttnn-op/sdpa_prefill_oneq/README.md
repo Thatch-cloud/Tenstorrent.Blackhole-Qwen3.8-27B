@@ -85,7 +85,7 @@ QUAL_CARD=<card M board id> ALLOW_SERVING_CARD=1 WATCHER=1 IMAGE=<served image> 
 # 5. the estimated-vs-measured table from its report
 python3 -B optimisation/ttnn-op/sdpa_prefill_oneq/oneq_report.py ~/kwork64/k64j-oq/card-m/oneq-<stamp>.json --markdown
 ```
-(templates: `references/fusion-jobs/WPP/OQ-W1-watcher.env`, `OQ-Q1-sweep.env`, `OQ-Q2-timing-repeat.env`; read rules and stop rules in its ORDER.txt.) Card M is half of
+(templates: `references/fusion-jobs/WPP/OQ-W1-watcher.env`, `OQ-Q1-sweep.env`, `OQ-Q2-timing-repeat.env`; read rules and stop rules in its ORDER.txt.) The end-to-end number is the solo TTFT pair `OQ-T1..OQ-T4` (four cards: `prefill_ladder_solo` on the production profile and on its `-fx-oneq` twin, ABAB, read with `scripts/ci/prefill_ladder_report.py`; it needs the image with the K64j-OQ binary, see below). Card M is half of
 the serving pair: look at `gh run list` for the qwen-two-p150a-exclusive group first; a hang's printed reset hint resets card M and card A together.
 
 `oneq_card_m.py` on ONE card of the mesh, TP4 shape (6 Q heads, 1 KV head, head dim 256, q/k chunk 128, bf8, HiFi2 with fp32 dest, flexible chunk_start tensor,

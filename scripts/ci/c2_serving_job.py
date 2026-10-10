@@ -164,6 +164,14 @@ Keys (every one optional but C2_IMAGE_TAG):
                       and four-card smokes, the gate, prefix and tau lab drivers (--tt-grid), the replay (--tt-grid) and the cardm
                       harness (QUAL_TT_GRID, a step-owned name). A cardm harness that does not forward QUAL_TT_GRID is refused with the
                       key set, before any card time. reset and the node agent's own container (agentstart) are not covered
+  C2_TELEMETRY        '' (default) or 1: the smoke and gate steps run the read-only card telemetry sidecar (scripts/ci/card_telemetry.sh, card_telemetry.py) for the
+                      whole step: per-chip ARC telemetry once per interval (AICLK and the limiter holding it, VCORE, power, current, temperatures, kernel NOP counters)
+                      into telemetry-<step>/ of the results (telemetry.csv.gz, telemetry-summary.json and .txt) and one summary line per chip in the step's log. Reads
+                      only (no ARC message, no write), opens each chip for a moment per sample as the host's telemetry collector does, and never fails a step: a host
+                      without pyluwen logs UNAVAILABLE and the step runs without it. Refused unless C2_ACTIONS has smoke or gate (nothing else samples)
+  C2_TELEMETRY_MS     the sample interval in milliseconds, 100..10000 (default, rendered 1000 with C2_TELEMETRY=1: once a second). The firmware refreshes the table every
+                      100 ms; a limiter that engages for less than the interval can fall between two samples (the kernel NOP and thermal trip counters are cumulative and
+                      complete). Refused without C2_TELEMETRY=1
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
@@ -216,6 +224,10 @@ TT_GRID_ENV = 'TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE'
 TT_GRIDS = ('10,9', '11,9', '12,9')
 # The name the cardm step hands its harness, which puts it into its container as TT_GRID_ENV (the QUAL_ prefix is the step's: C2_CARDM_ENV refuses it).
 CARDM_TT_GRID_VARIABLE = 'QUAL_TT_GRID'
+# C2_TELEMETRY: the card telemetry sidecar of the smoke and gate steps (card_telemetry.sh). The sample interval in milliseconds: the firmware refreshes its table every 100 ms.
+TELEMETRY_STEPS = ('smoke', 'gate')
+TELEMETRY_MS_RANGE = (100, 10000)
+TELEMETRY_DEFAULT_MS = 1000
 DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
 # The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
 PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify')
@@ -505,6 +517,25 @@ def tt_grid_arguments(value):
     return ['-e', '%s=%s' % (TT_GRID_ENV, value)]
 
 
+def read_telemetry(values, actions):
+    """(telemetry, interval) for C2_TELEMETRY and C2_TELEMETRY_MS (module docstring): ('', '') when off, ('1', '<ms>') when on, or JobError. Off is the job exactly as it was:
+    no key of the telemetry is read beyond refusing an interval that has nothing to time."""
+    flag = values.get('C2_TELEMETRY', '')
+    if flag not in ('', '1'):
+        raise JobError('C2_TELEMETRY must be empty or 1, got %r' % flag)
+    text = values.get('C2_TELEMETRY_MS', '').strip()
+    if not flag:
+        if text:
+            raise JobError('C2_TELEMETRY_MS is the interval of the telemetry sidecar: set C2_TELEMETRY=1')
+        return '', ''
+    if not set(actions) & set(TELEMETRY_STEPS):
+        raise JobError('C2_TELEMETRY=1 samples during the %s steps: C2_ACTIONS has neither' % ' and '.join(TELEMETRY_STEPS))
+    interval = positive_int('C2_TELEMETRY_MS', text) if text else TELEMETRY_DEFAULT_MS
+    if not TELEMETRY_MS_RANGE[0] <= interval <= TELEMETRY_MS_RANGE[1]:
+        raise JobError('C2_TELEMETRY_MS must be %d..%d milliseconds, got %d' % (TELEMETRY_MS_RANGE + (interval,)))
+    return '1', str(interval)
+
+
 def read_rmi_tags(values, actions):
     """C2_RMI_TAGS as a space-joined string: required with the rmi action, refused without it, every tag well formed
     and none of them protected."""
@@ -593,6 +624,7 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
     if drafter_manifest and 'push' in actions:
         raise JobError('C2_DRAFTER_MANIFEST names a candidate drafter that is not qualified: its image is not pushed')
     tt_grid = read_tt_grid(values)
+    telemetry, telemetry_ms = read_telemetry(values, actions)
     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root, tt_grid=tt_grid)
     drafter_candidates = read_drafter_candidates(values, actions)
     box_minutes = read_box(values, actions)
@@ -601,7 +633,8 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
                    gate_memory_prompt=str(memory_prompt), gate_memory_users=str(memory_users), replay_profile=replay_profile,
                    replay_served_model=replay_served_model, replay_budget_smoke=budget_smoke, cardm_harness=cardm_harness, cardm_args=cardm_args,
-                   cardm_env=cardm_env, bake_default_profile=bake_profile, drafter_candidates=drafter_candidates, box_minutes=box_minutes, drafter_manifest=drafter_manifest, tt_grid=tt_grid)
+                   cardm_env=cardm_env, bake_default_profile=bake_profile, drafter_candidates=drafter_candidates, box_minutes=box_minutes, drafter_manifest=drafter_manifest, tt_grid=tt_grid,
+                   telemetry=telemetry, telemetry_ms=telemetry_ms)
     outputs.update(s2)
     outputs.update(prefix)
     outputs.update(taulab)

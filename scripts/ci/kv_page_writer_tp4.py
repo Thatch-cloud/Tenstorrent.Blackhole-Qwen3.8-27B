@@ -34,7 +34,9 @@ tensors after the second (qwen36_attention_tp._decode_from_prep), which is the c
 call, or a forward that ends on a held call, is a bug that raises. Flag unset: nothing here is imported and the chained writer is byte for
 byte what it was (test_kv_page_writer_tp4 holds it).
 
-AUDIT (QWEN_FAST_KV_PAGE_WRITER_AUDIT=1, a correctness arm, never timed). Around each page launch: audit prep copies the unit tiles
+AUDIT (QWEN_FAST_KV_PAGE_WRITER_AUDIT=1, a correctness arm, never timed). The audit issues no synchronize and no readback inside a capture, and no program
+that has not run before it: the warm forward (ORDERED mode) runs the whole audit sequence eagerly on shared scratch state (Audit.warm), so the capture finds
+every program cached. audit_round reads the counters after a replay. Around each page launch: audit prep copies the unit tiles
 of the real cache into a small shadow cache and writes shadow positions; the SERVED chained writer runs on the shadow with the same prepared
 K/V; the page launch runs on the real cache; audit check counts the 32-bit words of every unit that differ between the real cache and the
 shadow. audit_round reads the counters after a replay and logs '<n> exact=True' or the mismatch line.
@@ -725,9 +727,24 @@ class Audit:
                                operations.ROW_MAJOR_LAYOUT)
         self.rounds = 0
 
+    @classmethod
+    def warm(cls, operations, mesh, wt):
+        """The warm forward's audit state: ONE set per mesh and unit width, shared by every warm writer (the warm forward is eager and its layers run one
+        after the other, so one set of shadows serves them all), never registered and never read. It exists so the warm forward runs the audit's
+        programs - prep, the served chained write on the 16-block shadow, the check - and its S2I copy EAGERLY: a program that has never run
+        cannot be loaded during a trace capture ('Cannot load new binaries during trace capture', the first card run of the audit twin, run 38055792581,
+        whose engine start died at audit_prep inside the capture). The compile-time arguments of those programs do not depend on the tensors' addresses,
+        so the capture's writers hit the cache."""
+        key = (id(operations), id(mesh), wt)
+        found = _WARM_AUDITS.get(key)
+        if found is None:
+            found = _WARM_AUDITS[key] = cls(operations, mesh, wt)
+        return found
+
 
 _REGISTRY = []
 _LAYERS = [0]
+_WARM_AUDITS = {}
 
 
 def registry():
@@ -805,10 +822,14 @@ class KVPageWriter:
         self.calls = 0
         self.launches = 0
         # The audit compares the launch with the served chained writer on a shadow cache, which is valid only where no two users share a tile row: not in
-        # the warm forward's ORDERED mode (placeholders that all sit on one tile row), so that writer carries no audit and is never registered.
-        self.audit = Audit(operations, mesh, self.wt) if self.audit_on and not self.ordered else None
-        if self.audit is not None:
-            _REGISTRY.append(self)
+        # the warm forward's ORDERED mode (placeholders that all sit on one tile row). That writer's audit RUNS (eagerly, so that every program of the audit
+        # is in the program cache before a capture needs it) but compares nothing anyone reads: it uses the shared warm state and is never registered.
+        if self.audit_on:
+            self.audit = Audit.warm(operations, mesh, self.wt) if self.ordered else Audit(operations, mesh, self.wt)
+            if not self.ordered:
+                _REGISTRY.append(self)
+        else:
+            self.audit = None
 
     def call(self, cache, packed, chained=None):
         """True when this call was taken (held or launched); False when the chained writer must serve it. `chained` is the callable that
