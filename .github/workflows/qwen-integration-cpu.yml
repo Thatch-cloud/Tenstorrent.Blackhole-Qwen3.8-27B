@@ -293,7 +293,7 @@ jobs:
           python -B -m unittest test_ccl_options_tp test_ccl_options_jobs
           python -B -m unittest discover -s optimisation/ttnn-op/ccl_sweep -p 'test_*.py'
           # WP6
-          python -B -m unittest test_draft_reduce_tp test_draft_tail_tp test_draft_gateup_tp test_draft_mmgrid_tp test_draft_wp6_branch test_draft_wp6_smoke
+          python -B -m unittest test_draft_reduce_tp test_draft_tail_tp test_draft_gateup_tp test_draft_mmgrid_tp test_draft_wp6_branch test_draft_wp6_smoke test_draft_wp6_capture
           # WP7
           python -B -m unittest test_draft_permute_tp test_draft_qkv_tp test_draft_head64_tp
           python -B -m unittest discover -s optimisation/ttnn-op/draft_permute -p 'test_*.py'
