@@ -686,5 +686,216 @@ class V170ComparisonTests(unittest.TestCase):
         self.assertEqual(packed['vs_v170']['verify']['weight matmuls']['v170'], 17.0)
 
 
+MULTI_FIXTURE = os.path.join(HERE, 'references', 'tp4-profile', 'v676-multi-sdpa-slim.csv.gz')
+
+
+def multi_fixture():
+    return report.load(MULTI_FIXTURE)
+
+
+class MultiSdpaBlockTests(unittest.TestCase):
+    """v676 (the shipped multi-SDPA stack): its 64-row blocks hold ONE SDPA launch per attention layer and no named
+    conv-gates launch (F1 is a generic op), so the per-user count read them as lone steps; the 1,599-launch 4-row step,
+    which holds four SDPA launches per attention layer (one per row) and one conv-gates launch, was picked as the
+    "packed verify". The fixture is trace 0 (two replays) and the 4-row step (one replay) on all four chips."""
+
+    @classmethod
+    def setUpClass(cls):
+        sessions, every, columns = multi_fixture()
+        cls.sessions, cls.every, cls.columns = sessions, every, columns
+        cls.result = report.analyse_sessions(sessions, every, columns, chips=4)
+        cls.block = cls.result['verify_packed']
+        cls.lone = cls.result['verify_lone']
+
+    def ops_of(self, trace):
+        return next(ops for (t, _, _), ops in sorted(self.sessions.items()) if t == trace)
+
+    def test_the_block_is_the_packed_verify_and_the_four_row_step_is_not(self):
+        listing = dict((row['trace'], row) for row in self.result['traces'])
+        self.assertEqual((listing['0']['kind'], listing['0']['ops']), ('verify-packed', 1681))
+        self.assertEqual((listing['344']['kind'], listing['344']['ops']), ('verify-single', 1599))
+        self.assertEqual(listing['0']['detail']['layout'], 'multi')
+        self.assertEqual((listing['344']['detail']['layout'], listing['344']['detail']['sdpa_launches'],
+                          listing['344']['detail']['conv_users']), ('lone', 4, 1))
+        self.assertEqual(report.trace_signature(self.ops_of('0'))[0], 'verify-packed')
+        self.assertEqual(report.trace_signature(self.ops_of('344'))[0], 'verify-single')
+
+    def test_the_packed_verify_is_the_1681_launch_block_at_about_45_6_ms_per_chip(self):
+        self.assertEqual((self.block['trace'], self.block['ops']), ('0', 1681))
+        self.assertEqual(len(self.block['kernel_sum_ms']), 4)
+        for ms in self.block['kernel_sum_ms']:
+            self.assertAlmostEqual(ms, 45.55, delta=0.1)
+        self.assertAlmostEqual(self.block['span_ms'][0], 46.7, delta=0.1)
+        self.assertAlmostEqual(self.block['gap_ms'][0], 1.15, delta=0.03)
+        self.assertEqual(self.block['complete_sessions'], 2)
+
+    def test_the_lone_step_is_analysed_separately(self):
+        self.assertEqual((self.lone['trace'], self.lone['ops'], self.lone['layout']), ('344', 1599, 'lone'))
+        self.assertAlmostEqual(self.lone['kernel_sum_ms'][0], 34.78, delta=0.05)
+        self.assertEqual(len(self.lone['sdpa_us_by_user']), 4)
+        self.assertEqual(self.lone['conv_gates_per_gdn_layer'], 1)
+        self.assertEqual((self.lone['gdn_layers'], self.lone['attn_layers']), (48, 16))
+
+    def test_the_block_layers_are_48_gdn_and_16_attention_and_each_attention_layer_has_one_sdpa(self):
+        self.assertEqual((self.block['layers'], self.block['gdn_layers'], self.block['attn_layers']), (64, 48, 16))
+        self.assertEqual(self.block['sdpa_us_by_user'].keys(), {'0'})
+        self.assertAlmostEqual(self.block['categories']['attn.sdpa']['ms'][0], 16 * 0.1015, delta=0.05)
+        self.assertAlmostEqual(self.block['categories']['gdn.recurrence']['ms'][0], 48 * 0.1935, delta=0.05)
+        self.assertIsNone(self.block['conv_gates_per_gdn_layer'])
+
+    def test_the_categories_are_the_measured_census(self):
+        cats = self.block['categories']
+        # weight matmuls 17.03, GDN recurrence 9.29, collectives 4.71 + sampler's 0.68, sampler argmax and glue 1.03 (M676)
+        weights = sum(cats[k]['ms'][0] for k in cats if k.startswith('mm.'))
+        self.assertAlmostEqual(weights, 17.03, delta=0.1)
+        self.assertAlmostEqual(cats['collective']['ms'][0], 4.71, delta=0.05)
+        self.assertAlmostEqual(cats['sampler.argmax/glue']['ms'][0], 1.03, delta=0.05)
+
+    def test_the_validity_has_no_structure_problem(self):
+        self.assertEqual(self.result['validity']['problems'], [])
+
+    def test_a_block_without_a_log_has_four_assumed_users_and_with_a_log_the_logged_ones(self):
+        self.assertEqual((self.block['users'], self.block['users_from']), (4, 'assumed (no host log)'))
+        text = log_of([(1, 4, [], self.block['span_ms'][0], {}), (2, 4, [], self.block['span_ms'][0], {})])
+        with_log = report.analyse_sessions(self.sessions, self.every, self.columns, chips=4, log_text=text)['verify_packed']
+        self.assertEqual((with_log['users'], with_log['users_from']), (4, 'host log users='))
+        self.assertIn('within', with_log['pick']['reason'])
+        self.assertLess(with_log['pick']['candidates'][0]['span_error'], 0.01)
+
+    def test_there_is_no_per_user_sdpa_fit_for_a_multi_launch(self):
+        rounds = [(1, 4, [], 46.7, {0: 4100, 1: 8200, 2: 12300, 3: 16400}),
+                  (2, 4, [], 46.7, {0: 4110, 1: 8210, 2: 12310, 3: 16410})]
+        got = report.analyse_sessions(self.sessions, self.every, self.columns, chips=4,
+                                      log_text=log_of(rounds))['verify_packed']
+        self.assertIsNone(got['sdpa_fit'])
+
+    def test_the_16_row_projection_divides_the_per_user_terms_by_the_block_users_not_by_the_sdpa_launches(self):
+        lane = self.result['lane_16_row']
+        self.assertAlmostEqual(lane['categories']['attn.sdpa'], self.block['categories']['attn.sdpa']['ms'][0] / 4.0,
+                               places=3)
+
+    def test_the_markdown_names_the_layout_and_the_multi_launch(self):
+        text = report.render_markdown(self.result)
+        self.assertIn('multi layout', text)
+        self.assertIn('one multi launch per attention layer for all 4 users', text)
+        self.assertNotIn('SDPA us by user', text)
+        self.assertIn('| 0 | verify-packed | 1681 |', text)
+        self.assertIn('| 344 | verify-single | 1599 |', text)
+
+    def test_the_file_path_reads_the_same_fixture(self):
+        got = report.analyse_files(MULTI_FIXTURE)
+        self.assertEqual((got['verify_packed']['trace'], got['verify_lone']['trace']), ('0', '344'))
+        self.assertTrue(got['validity']['ok'])
+
+    def copy_lone(self, sessions, trace, count, scale=1.0):
+        """`count` complete replays of the 4-row step as `trace`, durations scaled by `scale`."""
+        for (t, sid, device), ops in list(self.sessions.items()):
+            if t != '344':
+                continue
+            for n in range(1, count + 1):
+                sessions[(trace, str(n), device)] = [op._replace(k=op.k * scale) for op in ops]
+
+    def lone_variants(self, spec):
+        """The block plus lone-step traces: spec = [(trace, replays, scale)]."""
+        sessions = dict((key, ops) for key, ops in self.sessions.items() if key[0] == '0')
+        for trace, count, scale in spec:
+            self.copy_lone(sessions, trace, count, scale)
+        return report.analyse_sessions(sessions, self.every, self.columns, chips=4)
+
+    def test_three_lone_traces_of_one_kernel_sum_are_not_three_widths(self):
+        got = self.lone_variants([('320', 3, 1.0), ('272', 9, 1.0), ('344', 5, 1.0)])
+        self.assertTrue(all(row['kind'] == 'verify-single' for row in got['traces'] if row['trace'] != '0'))
+        self.assertFalse(any('label' in row for row in got['traces']))
+        self.assertEqual(got['single_user_labels'], {})
+        self.assertTrue(any('widths cannot be told apart' in note for note in got['validity']['notes']))
+        # the lone step is the trace with the most complete sessions among equals (and a full sample)
+        self.assertEqual(got['verify_lone']['trace'], '272')
+        self.assertEqual(got['verify_packed']['trace'], '0')
+
+    def test_three_lone_traces_of_three_kernel_sums_are_the_1_2_and_4_row_steps(self):
+        got = self.lone_variants([('1', 9, 0.9), ('2', 9, 1.0), ('4', 3, 1.1)])
+        labels = dict((row['trace'], row.get('label')) for row in got['traces'])
+        self.assertEqual((labels['1'], labels['2'], labels['4']), ('verify-w1', 'verify-w2', 'verify-w4'))
+        self.assertEqual(got['verify_lone']['trace'], '2')    # the widest with a full sample (the w4 has only 3)
+
+    def test_the_structure_checks_know_the_three_layouts(self):
+        analysis = dict(layers=64, gdn_layers=48, attn_layers=16, conv_gates_per_gdn_layer=None,
+                        sdpa_us_by_user={'0': 1.0})
+        self.assertEqual(report.structure_problems('b', analysis, 4, layout='multi'), [])
+        two = dict(analysis, sdpa_us_by_user={'0': 1.0, '1': 1.0})
+        self.assertEqual(len(report.structure_problems('b', two, 4, layout='multi')), 1)
+        lone = dict(analysis, conv_gates_per_gdn_layer=1, sdpa_us_by_user=dict((str(i), 1.0) for i in range(4)))
+        self.assertEqual(report.structure_problems('l', lone, 1, layout='lone'), [])
+        three = dict(lone, sdpa_us_by_user=dict((str(i), 1.0) for i in range(3)))
+        self.assertEqual(len(report.structure_problems('l', three, 1, layout='lone')), 1)
+        per_user = dict(analysis, conv_gates_per_gdn_layer=4, sdpa_us_by_user=dict((str(i), 1.0) for i in range(4)))
+        self.assertEqual(report.structure_problems('p', per_user, 4), [])
+        self.assertEqual(len(report.structure_problems('p', dict(per_user, conv_gates_per_gdn_layer=1), 4)), 1)
+
+
+class BlockLayoutSignatureTests(unittest.TestCase):
+    """trace_signature on synthetic replays: what makes a 64-layer replay the block, whatever its SDPA count."""
+
+    def ops_of(self, rows):
+        return [report.Op(n.replace('DeviceOperation', ''), c, ns, i, i, i, 0) for i, (n, c, ns) in enumerate(rows)]
+
+    def per_user_rows(self, sdpa, conv):
+        rows = [('EmbeddingsDeviceOperation', 8, 5000)]
+        for index in range(64):
+            layer = layer_ops(index, max(sdpa, conv), lambda user: 100000)
+            if index % 4 == 3:
+                keep = [r for r in layer if not r[0].startswith('SdpaDecode')]
+                at = next(i for i, r in enumerate(keep) if r[0].startswith('AttnPrep')) + 1
+                layer = keep[:at] + [('SdpaDecodeDeviceOperation', 32, 100000)] * sdpa + keep[at:]
+            else:
+                keep = [r for r in layer if not r[0].startswith('GdnConvGates')]
+                at = next(i for i, r in enumerate(keep) if r[0] == 'MatmulDeviceOperation') + 1
+                layer = keep[:at] + [('GdnConvGatesDeviceOperation', 4, 35000)] * conv + keep[at:]
+            rows += layer
+        return rows + [('LayerNormDeviceOperation', 8, 8000), ('MatmulDeviceOperation', 108, 1870000),
+                       ('GenericOpDeviceOperation', 8, 1300000)]
+
+    def test_four_sdpa_launches_with_one_conv_gates_launch_is_a_four_row_step_not_a_block(self):
+        kind, detail = report.trace_signature(self.ops_of(self.per_user_rows(sdpa=4, conv=1)))
+        self.assertEqual((kind, detail['layout']), ('verify-single', 'lone'))
+
+    def test_one_launch_of_each_is_a_one_row_step(self):
+        self.assertEqual(report.trace_signature(self.ops_of(self.per_user_rows(sdpa=1, conv=1)))[0], 'verify-single')
+
+    def test_four_launches_of_each_is_the_per_user_block(self):
+        kind, detail = report.trace_signature(self.ops_of(self.per_user_rows(sdpa=4, conv=4)))
+        self.assertEqual((kind, detail['layout'], detail['users']), ('verify-packed', 'per-user', 4))
+
+    def test_the_f1_conv_gates_as_a_generic_op_with_per_user_sdpa_is_still_the_block(self):
+        rows = [(n.replace('GdnConvGates', 'GenericOp'), c, ns) for n, c, ns in self.per_user_rows(sdpa=4, conv=4)]
+        kind, detail = report.trace_signature(self.ops_of(rows))
+        self.assertEqual((kind, detail['layout'], detail['users']), ('verify-packed', 'per-user', 4))
+
+    def test_one_sdpa_launch_without_a_fold_and_without_conv_gates_is_not_called_a_block(self):
+        rows = [(n.replace('GdnConvGates', 'GenericOp'), c, ns) for n, c, ns in self.per_user_rows(sdpa=1, conv=1)]
+        self.assertEqual(report.trace_signature(self.ops_of(rows))[0], 'verify-single')
+
+    def test_one_folded_sdpa_launch_without_conv_gates_is_the_multi_block(self):
+        rows = []
+        for name, cores, ns in self.per_user_rows(sdpa=1, conv=1):
+            if name.startswith('GdnConvGates'):
+                continue
+            if name.startswith('SdpaDecode'):
+                rows += [('GenericOpDeviceOperation', 96, 15000), (name, cores, ns), ('GenericOpDeviceOperation', 110, 17000)]
+            else:
+                rows.append((name, cores, ns))
+        kind, detail = report.trace_signature(self.ops_of(rows))
+        self.assertEqual((kind, detail['layout'], detail['users']), ('verify-packed', 'multi', None))
+        roles, layers, types = report.classify(self.ops_of(rows))
+        self.assertEqual((layers, types.count('gdn'), types.count('attn')), (64, 48, 16))
+
+    def test_a_mixer_of_generic_ops_alone_is_a_gdn_layer_not_an_attention_layer(self):
+        self.assertEqual(report.layer_type(['Matmul', 'GenericOp', 'GenericOp', 'GenericOp', 'Matmul']), 'gdn')
+        self.assertEqual(report.layer_type(['Matmul', 'AttnPrep', 'GenericOp', 'Matmul']), 'attn')
+        self.assertEqual(report.layer_type(['Matmul', 'GenericOp', 'SdpaDecode', 'GenericOp']), 'attn')
+        self.assertEqual(report.layer_type(['Matmul', 'GdnConvGates', 'GenericOp']), 'gdn')
+        self.assertEqual(report.layer_type(['Matmul', 'Matmul']), 'attn')
+
+
 if __name__ == '__main__':
     unittest.main()

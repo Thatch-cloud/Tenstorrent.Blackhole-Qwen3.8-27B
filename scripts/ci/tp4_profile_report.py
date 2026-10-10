@@ -11,8 +11,12 @@ and tp4-profile-report.md beside the CSV (or into --out) and prints the markdown
 What it does, from tt-metal's cpp_device_perf_report.csv (TT_METAL_PROFILER_CPP_POST_PROCESS=1, trace tracking on):
   * keeps only trace replays that are COMPLETE on every chip (the profiler's per-core buffers fill at different points, so
     late sessions are truncated), and maps each verify replay to its packed round by session id ([PACKED-PHASE] round=);
-  * identifies traces by what they contain, not by id: a trace of 64 layers is a verify; its attention layers hold one
-    SDPA launch per user in the block (four: the packed 64-row block; one: a lone user's 1/2/4-row step);
+  * identifies traces by what they contain, not by id: a trace of 64 layers is a verify. Two layouts hold a packed
+    64-row block: per-user (one SDPA launch and one named conv-gates launch per user in each layer) and multi-SDPA (W2/F1:
+    ONE SDPA launch per attention layer, folded in and out by generic ops, and no named conv-gates launch, so the users
+    cannot be counted from the op names; the host log's [PACKED-PHASE] users= says). A lone user's 1/2/4-row step holds
+    ONE named conv-gates launch per GDN layer and one SDPA launch per row, so it is never the block, whatever its SDPA
+    count;
   * classifies every op by its ROLE in the layer, never by core count (TP4 core counts differ from TP2's): a layer is GDN
     if its mixer holds GdnConvGates, else attention; matmuls by position (first = in-projection, last = out-projection;
     gate, up, down in the MLP half); the recurrence is the longest generic op after the last conv-gates launch; the
@@ -63,6 +67,8 @@ TRACE_MS_FIELD = re.compile(r'\btrace_ms=([0-9.]+)')
 PER_USER = ('attn.sdpa', 'gdn.conv_gates', 'attn.glue', 'gdn.glue')
 CHAIN_BOUND = ('gdn.recurrence',)   # one chain per (user, head) core, all users in parallel: a 16-token chain is the block's
 EXPECTED_LAYERS = dict(layers=64, gdn=48, attn=16, users=4, sdpa_per_attn=4, conv_per_gdn=4)
+LONE_ROWS = (1, 2, 4)   # a lone user's step holds one SDPA launch per row
+LABEL_SEPARATION = 0.01   # lone-step widths are told apart by kernel sum only when the sums differ by this fraction
 GROUPS = collections.OrderedDict([
     ('weight matmuls', ('mm.',)), ('gdn.recurrence', ('gdn.recurrence',)), ('gdn.glue', ('gdn.glue',)),
     ('gdn.conv_gates', ('gdn.conv_gates',)), ('attn.sdpa', ('attn.sdpa',)), ('attn.glue', ('attn.glue',)),
@@ -217,6 +223,21 @@ def is_matmul(op):
     return 'Matmul' in op
 
 
+def is_sdpa(name):
+    return name.startswith('SdpaDecode') or name.startswith('SDPA') or name.startswith('Sdpa')
+
+
+def layer_type(names):
+    """'gdn' or 'attn' from the op names of one mixer. A mixer with a named conv-gates launch is GDN; one with an SDPA,
+    AttnPrep or heads-concat launch is attention; one with neither (the F1 conv-gates is a generic op, so a multi-SDPA
+    block's GDN layers hold no GdnConvGates) is GDN when it holds generic ops, else attention."""
+    if any(name.startswith('GdnConvGates') for name in names):
+        return 'gdn'
+    if any(is_sdpa(name) or name.startswith('AttnPrep') or 'ConcatHeads' in name for name in names):
+        return 'attn'
+    return 'gdn' if any(name.startswith('GenericOp') for name in names) else 'attn'
+
+
 def classify(ops):
     """(roles, layer count, layer types): roles[i] = (layer index or None, layer type, category, detail)."""
     layers, final = segment(ops)
@@ -225,12 +246,11 @@ def classify(ops):
     for index, ((m0, m1), (p0, p1)) in enumerate(layers):
         mixer, mlp = list(range(m0, m1)), list(range(p0, p1))
         names = [ops[i].op for i in mixer]
-        ltype = 'gdn' if any(name.startswith('GdnConvGates') for name in names) else 'attn'
+        ltype = layer_type(names)
         types.append(ltype)
         sdpa = []
         if ltype == 'attn':
-            named = [i for i in mixer if ops[i].op.startswith('SdpaDecode') or ops[i].op.startswith('SDPA')
-                     or ops[i].op.startswith('Sdpa')]
+            named = [i for i in mixer if is_sdpa(ops[i].op)]
             if named:
                 sdpa = named
             else:
@@ -314,17 +334,46 @@ def conv_gates_per_gdn_layer(roles):
     return statistics.median(counts.values()) if counts else None
 
 
+def multi_sdpa_share(ops, roles):
+    """The share of attention layers whose one SDPA launch is folded in and out by generic ops (W2's multi-SDPA: a fold-in
+    launch right before it and a fold-out launch right after it), or None without an attention layer. A per-row or per-user
+    SDPA sits between Slice ops instead, and a lone step's single SDPA has no fold."""
+    by_layer = collections.defaultdict(list)
+    for i, role in enumerate(roles):
+        if role[2] == 'attn.sdpa':
+            by_layer[role[0]].append(i)
+    if not by_layer:
+        return None
+    folded = sum(1 for idx in by_layer.values()
+                 if len(idx) == 1 and idx[0] > 0 and idx[0] + 1 < len(ops)
+                 and ops[idx[0] - 1].op.startswith('GenericOp') and ops[idx[0] + 1].op.startswith('GenericOp'))
+    return folded / float(len(by_layer))
+
+
 def trace_signature(ops):
-    """What one replay contains: (kind, detail) - 'verify-packed' (users = SDPA launches per attention layer, or conv-gates
-    launches per GDN layer, >= 2), 'verify-single' (one), 'drafter', 'small' or 'other'."""
+    """What one replay contains: (kind, detail) - 'verify-packed', 'verify-single', 'drafter', 'small' or 'other'.
+
+    A 64-layer replay is the packed block when
+      * its GDN layers hold two or more named conv-gates launches (the per-user layout; users = that count), or
+      * they hold none and its attention layers hold two or more SDPA launches (per-user SDPA with the F1 conv-gates;
+        users = that count), or
+      * they hold none and each attention layer holds ONE SDPA launch folded in and out by generic ops (the multi-SDPA
+        layout, detail layout='multi': the users are not countable from op names, users=None).
+    Anything else is a lone user's step ('verify-single'): one named conv-gates launch per GDN layer and one SDPA launch
+    per row, so a 4-row step holds four SDPA launches per attention layer and is NOT a four-user block."""
     norms = sum(1 for op in ops if is_norm(op.op))
     if norms >= 2 * LAYERS:
         roles, layers, _ = classify(ops)
-        users = sdpa_per_attention_layer(ops, roles)
-        conv = conv_gates_per_gdn_layer(roles)
-        if max(users or 0, conv or 0) >= 2:
-            return 'verify-packed', dict(layers=layers, users=int(users or 0), conv_users=int(conv or 0))
-        return 'verify-single', dict(layers=layers, users=1, conv_users=int(conv or 0))
+        sdpa = int(sdpa_per_attention_layer(ops, roles) or 0)
+        conv = int(conv_gates_per_gdn_layer(roles) or 0)
+        base = dict(layers=layers, sdpa_launches=sdpa, conv_users=conv)
+        if conv >= 2:
+            return 'verify-packed', dict(base, users=max(sdpa, conv), layout='per-user')
+        if conv == 0 and sdpa >= 2:
+            return 'verify-packed', dict(base, users=sdpa, layout='per-user')
+        if conv == 0 and sdpa == 1 and (multi_sdpa_share(ops, roles) or 0.0) >= 0.5:
+            return 'verify-packed', dict(base, users=None, layout='multi')
+        return 'verify-single', dict(base, users=1, layout='lone')
     if any(op.op.startswith('TopK') or 'ArgMax' in op.op for op in ops) and any('Sdpa' in op.op or 'SDPA' in op.op
                                                                               for op in ops):
         return 'drafter', dict(ops=len(ops))
@@ -644,7 +693,7 @@ def project_16_row(single, packed):
     with the rows, are interpolated between 4 and 64 rows."""
     if not single or not packed:
         return None
-    users = len(packed.get('sdpa_us_by_user') or {}) or 4
+    users = packed.get('users') or len(packed.get('sdpa_us_by_user') or {}) or EXPECTED_LAYERS['users']
     s, b = single['categories'], packed['categories']
     table = collections.OrderedDict()
     for name in sorted(set(s) | set(b)):
@@ -697,19 +746,30 @@ def texts_of(gate_json):
     return [(stream or {}).get('text') for stream in (gate_json or {}).get('streams') or []]
 
 
-def structure_problems(label, analysis, users):
+def structure_problems(label, analysis, users, layout='per-user'):
     """What an op-name drift or a bundled SDPA would break silently: the layer count, the GDN / attention split, and the SDPA
-    and conv-gates launches per layer must be the model's (64 layers, 48 GDN, 16 attention, one launch per user)."""
+    and conv-gates launches per layer. The block's per-user layout holds one launch of each per user; the multi-SDPA layout
+    holds ONE SDPA launch per attention layer and no named conv-gates launch (F1 is a generic op); a lone step holds one
+    conv-gates launch per GDN layer and one SDPA launch per row (1, 2 or 4)."""
     if not analysis:
         return []
     out = []
     conv = analysis.get('conv_gates_per_gdn_layer')
     sdpa = len(analysis.get('sdpa_us_by_user') or {})
-    for what, got, want in (('layers', analysis['layers'], EXPECTED_LAYERS['layers']),
-                            ('GDN layers', analysis['gdn_layers'], EXPECTED_LAYERS['gdn']),
-                            ('attention layers', analysis['attn_layers'], EXPECTED_LAYERS['attn']),
-                            ('SDPA launches per attention layer', sdpa, users),
-                            ('conv-gates launches per GDN layer', conv, users)):
+    checks = [('layers', analysis['layers'], EXPECTED_LAYERS['layers']),
+              ('GDN layers', analysis['gdn_layers'], EXPECTED_LAYERS['gdn']),
+              ('attention layers', analysis['attn_layers'], EXPECTED_LAYERS['attn'])]
+    if layout == 'multi':
+        checks.append(('SDPA launches per attention layer', sdpa, 1))
+    elif layout == 'lone':
+        if sdpa not in LONE_ROWS:
+            out.append('%s: SDPA launches per attention layer %s, expected one per row (%s) (an op-name drift or a '
+                       'bundled launch would mis-segment the trace)' % (label, sdpa, '/'.join(str(r) for r in LONE_ROWS)))
+        checks.append(('conv-gates launches per GDN layer', conv, 1))
+    else:
+        checks.append(('SDPA launches per attention layer', sdpa, users))
+        checks.append(('conv-gates launches per GDN layer', conv, users))
+    for what, got, want in checks:
         if got != want:
             out.append('%s: %s %s, expected %s (an op-name drift or a bundled launch would mis-segment the trace)' % (
                 label, what, got, want))
@@ -740,9 +800,11 @@ def span_match(info, rounds):
 
 def pick_packed(traces, listing, rounds, users):
     """(trace id or None, how it was chosen). A candidate is a 'verify-packed' trace. In order: it holds one SDPA launch
-    per attention layer and one conv-gates launch per GDN layer for each of the `users` (each criterion counts), then
-    its device span matches the host's trace_ms (when a log names the rounds), then the number of complete sessions. A
-    lone user's 4-row step can have more sessions in a run that ends on it, so the count alone must never decide."""
+    per attention layer and one conv-gates launch per GDN layer for each of the `users` (each criterion counts; a
+    multi-SDPA block holds one SDPA launch for all of them and no named conv-gates launch, its users are not countable
+    from op names, so its layout counts as both), then its device span matches the host's trace_ms (when a log names the
+    rounds), then the number of complete sessions. A lone user's 4-row step can have more sessions in a run that ends on
+    it, so the count alone must never decide."""
     detail_of = dict((row['trace'], row.get('detail') or {}) for row in listing)
     candidates = [row['trace'] for row in listing if row['kind'] == 'verify-packed' and traces[row['trace']]['complete']]
     if not candidates:
@@ -750,17 +812,21 @@ def pick_packed(traces, listing, rounds, users):
     table = []
     for trace in candidates:
         detail = detail_of[trace]
-        structural = (detail.get('users') == users) + (detail.get('conv_users') == users)
+        multi = detail.get('layout') == 'multi'
+        structural = 2 if multi else (detail.get('users') == users) + (detail.get('conv_users') == users)
         error = span_match(traces[trace], rounds)
         table.append(dict(trace=trace, sdpa_users=detail.get('users'), conv_users=detail.get('conv_users'),
-                          structural=structural, span_error=error, complete=len(traces[trace]['complete']),
+                          layout=detail.get('layout'), structural=structural, span_error=error, complete=len(traces[trace]['complete']),
                           ops=traces[trace]['ops']))
     ok = lambda e: e is None or e <= SPAN_MATCH_TOLERANCE
     table.sort(key=lambda e: (-e['structural'], not ok(e['span_error']),
                               e['span_error'] if e['span_error'] is not None else 0.0, -e['complete'], -e['ops']))
     best = table[0]
     why = []
-    if best['structural']:
+    if best['layout'] == 'multi':
+        why.append('multi-SDPA layout (one SDPA launch per attention layer, folded in and out, and no per-user conv-gates '
+                   'launch: the users cannot be counted from op names)')
+    elif best['structural']:
         why.append('%d of 2 structural criteria (SDPA and conv-gates launches per layer = %d users)' % (
             best['structural'], users))
     if best['span_error'] is not None:
@@ -1003,6 +1069,18 @@ def vs_v170(groups, anatomy, host):
     return out
 
 
+def block_users(analysis, layout, rounds):
+    """(users in the packed block, where that came from). A per-user block holds one SDPA launch per user; a multi-SDPA
+    block holds one for all of them, so its users come from the host's [PACKED-PHASE] users= field (the block width,
+    whatever the live count) and, without a log, are the model's four."""
+    if layout != 'multi':
+        return len(analysis.get('sdpa_us_by_user') or {}) or EXPECTED_LAYERS['users'], 'SDPA launches per layer'
+    logged = [r['users'] for r in rounds.values() if r.get('users')]
+    if logged:
+        return int(median(logged)), 'host log users='
+    return EXPECTED_LAYERS['users'], 'assumed (no host log)'
+
+
 def analyse_sessions(sessions, every, columns=(), chips=4, log_text=None, gate_json=None, twin_log=None, twin_json=None,
                      table=None, eager=None):
     table = weight_table(chips) if table is None else table
@@ -1030,16 +1108,30 @@ def analyse_sessions(sessions, every, columns=(), chips=4, log_text=None, gate_j
     rounds = (log or {}).get('rounds') or {}
     # The packed block is told by what it holds and by what the host timed, never by its session count.
     packed_id, packed_pick = pick_packed(traces, listing, rounds, EXPECTED_LAYERS['users'])
-    # The lone lane's widths (1, 2, 4 rows) are told apart by their kernel sums (a wider verify takes longer).
-    single_sorted = sorted(single, key=lambda t: next(r['kernel_sum_ms'] for r in listing if r['trace'] == t))
-    labels = dict((t, w) for t, w in zip(single_sorted, ('w1', 'w2', 'w4'))) if len(single_sorted) == 3 else {}
+    # The lone lane's widths (1, 2, 4 rows) are told apart by their kernel sums (a wider verify takes longer), but only when
+    # the sums differ: three traces of one structure and one sum (v676's 1,599-launch steps) are not three widths.
+    kernel_sum_of = dict((r['trace'], r.get('kernel_sum_ms') or 0.0) for r in listing)
+    single_sorted = sorted(single, key=lambda t: kernel_sum_of[t])
+    labels = {}
+    if len(single_sorted) == 3:
+        sums = [kernel_sum_of[t] for t in single_sorted]
+        if all(b >= a * (1.0 + LABEL_SEPARATION) for a, b in zip(sums, sums[1:])):
+            labels = dict((t, w) for t, w in zip(single_sorted, ('w1', 'w2', 'w4')))
+        else:
+            notes.append('%d lone-step traces share one kernel sum (%s ms): their widths cannot be told apart, so the '
+                         'w1/w2/w4 labels are withheld' % (len(single_sorted), '/'.join('%.2f' % v for v in sums)))
     for row in listing:
         if row['trace'] in labels:
             row['label'] = 'verify-%s' % labels[row['trace']]
     lone_complete = [t for t in single_sorted if traces[t]['complete']]
-    # the lone step: the widest replay with a full sample (a sequential fallback round leaves one session of another width)
-    lone_id = max(lone_complete, key=lambda t: (len(traces[t]['complete']) >= MIN_SESSIONS, len(single_sorted) and
-                                                single_sorted.index(t))) if lone_complete else None
+    # the lone step: the widest replay with a full sample (a sequential fallback round leaves one session of another width);
+    # between traces of one width, the one with the most complete sessions
+    lone_id = None
+    if lone_complete:
+        full = [t for t in lone_complete if len(traces[t]['complete']) >= MIN_SESSIONS] or lone_complete
+        widest = max(kernel_sum_of[t] for t in full)
+        lone_id = max((t for t in full if kernel_sum_of[t] >= widest * (1.0 - LABEL_SEPARATION)),
+                      key=lambda t: len(traces[t]['complete']))
     result = dict(traces=listing, chips=devices_all)
     packed_analysis = single_analysis = None
     if packed_id and traces[packed_id]['complete']:
@@ -1048,11 +1140,16 @@ def analyse_sessions(sessions, every, columns=(), chips=4, log_text=None, gate_j
         problems.append('no verify-64 (packed block) replay is complete on every chip: read the trace list')
     if lone_id and traces[lone_id]['complete']:
         single_analysis = analyse_trace(dict(traces[lone_id]), table)
+    packed_detail = next((r.get('detail') or {} for r in listing if r['trace'] == packed_id), {})
+    layout = packed_detail.get('layout') or 'per-user'
     if packed_analysis:
         packed_analysis['trace'] = packed_id
         packed_analysis['pick'] = packed_pick
+        packed_analysis['layout'] = layout
+        packed_analysis['users'], packed_analysis['users_from'] = block_users(packed_analysis, layout, rounds)
         packed_analysis['groups'] = grouped(packed_analysis)
-        packed_analysis['sdpa_fit'] = sdpa_fit(packed_analysis, rounds)
+        # a multi-SDPA block has one SDPA launch for all its users: there is no per-user SDPA time to fit against context
+        packed_analysis['sdpa_fit'] = None if layout == 'multi' else sdpa_fit(packed_analysis, rounds)
         packed_analysis['by_live'] = by_live(packed_analysis, rounds)
         packed_analysis['round_map'] = round_map_check(packed_analysis, rounds)
         packed_analysis['round_timeline'] = round_timeline(packed_analysis, every, packed_id, packed_analysis['devices'],
@@ -1078,10 +1175,11 @@ def analyse_sessions(sessions, every, columns=(), chips=4, log_text=None, gate_j
             notes.append('the session id = round assumption is doubtful (median device-span error %.0f%% against the '
                          'host trace_ms): per-round attachments (live count, contexts) may be off' %
                          (100 * packed_analysis['round_map']['median_error']))
-    problems += structure_problems('verify-64', packed_analysis, users=EXPECTED_LAYERS['users'])
-    problems += structure_problems('lone step', single_analysis, users=1)
+    problems += structure_problems('verify-64', packed_analysis, users=EXPECTED_LAYERS['users'], layout=layout)
+    problems += structure_problems('lone step', single_analysis, users=1, layout='lone')
     if single_analysis:
         single_analysis['trace'] = lone_id
+        single_analysis['layout'] = 'lone'
         single_analysis['groups'] = grouped(single_analysis)
         if single_analysis['complete_sessions'] < MIN_SESSIONS:
             notes.append('%d complete 4-row lone-step sessions, fewer than the %d asked for' % (
@@ -1160,8 +1258,9 @@ def render_markdown(report):
     packed = report.get('verify_packed')
     if packed:
         pick = packed.get('pick') or {}
-        lines += ['', '## The packed 64-row verify (trace %s, %d layers: %d GDN, %d attention)' % (
-            packed['trace'], packed['layers'], packed['gdn_layers'], packed['attn_layers']), '',
+        lines += ['', '## The packed 64-row verify (trace %s, %d layers: %d GDN, %d attention; %s layout)' % (
+            packed['trace'], packed['layers'], packed['gdn_layers'], packed['attn_layers'],
+            packed.get('layout') or 'per-user'), '',
             'Picked as the packed block by: %s.' % pick.get('reason'), '',
             'Kernel sum %s ms, device span %s ms, in-trace gaps %s ms (per chip); cross-chip critical path %s ms, '
             'collective skew %s ms. Projection %.1f ms, TP2 C2 %.1f ms.' % (
@@ -1195,8 +1294,12 @@ def render_markdown(report):
             fit = packed['sdpa_fit']
             lines += ['', 'SDPA against context (%d points, contexts %s k): %s us fixed + %s us per 1k tokens.' % (
                 fit['points'], fit['contexts_k'], fmt(fit['intercept_us']), fmt(fit['slope_us_per_1k'], 3))]
-        lines += ['', 'SDPA us by user in the block (segment order): %s.' % ', '.join(
-            '%s: %s' % (u, fmt(v)) for u, v in packed['sdpa_us_by_user'].items())]
+        if packed.get('layout') == 'multi':
+            lines += ['', 'SDPA: one multi launch per attention layer for all %s users (%s), %s us.' % (
+                packed.get('users'), packed.get('users_from'), ', '.join(fmt(v) for v in packed['sdpa_us_by_user'].values()))]
+        else:
+            lines += ['', 'SDPA us by user in the block (segment order): %s.' % ', '.join(
+                '%s: %s' % (u, fmt(v)) for u, v in packed['sdpa_us_by_user'].items())]
         live = packed['by_live']
         if live['table']:
             lines += ['', 'Kernel ms by live users: %s; marginal %s ms per live user.' % (

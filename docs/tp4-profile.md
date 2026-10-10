@@ -62,11 +62,17 @@ problem.
   are dropped); no audit line in the server log; the launched configuration has QWEN_FAST_TP=4 and both audits at 0; at least 8
   complete 4-live verify sessions and 8 complete 4-row sessions (a note when fewer); at least 20 read-back lines; dropped-marker
   lines; the texts identical to the twin's.
-* **Traces are identified by content**: a trace of 64 layers is a verify; one SDPA launch per user per attention layer means the
-  packed block (four) or a lone user (one). The lone lane's widths (1, 2, 4 rows) are told apart by kernel sum.
-* **Categories are by role, not core count**: a layer is GDN if it holds GdnConvGates; matmuls by position; the recurrence is the
-  longest generic after the last conv-gates launch; the attention core is the SDPA op, or per user the longest generic between
-  AttnPrep and the heads concat.
+* **Traces are identified by content**: a trace of 64 layers is a verify. It is the packed block when its GDN layers hold two or more
+  named conv-gates launches (the per-user layout), or none and its attention layers hold two or more SDPA launches (per-user SDPA with
+  the F1 conv-gates, a generic op), or none and each attention layer holds one SDPA launch folded in and out by generic ops (the
+  multi-SDPA layout: the users cannot be counted from op names, so they come from the host log's `[PACKED-PHASE] users=`, else four are
+  assumed). Anything else is a lone user's step: one named conv-gates launch per GDN layer and one SDPA launch per row, so the 4-row
+  step holds four SDPA launches per attention layer and is not a four-user block. The lone lane's widths (1, 2, 4 rows) are told apart
+  by kernel sum, and only when the sums differ.
+* **Categories are by role, not core count**: a layer is GDN if it holds GdnConvGates, or holds no SDPA, AttnPrep or heads concat and
+  holds generic ops (a multi-SDPA block's GDN layers hold no GdnConvGates); matmuls by position; the recurrence is the longest generic
+  after the last conv-gates launch; the attention core is the SDPA op, or per user the longest generic between AttnPrep and the heads
+  concat.
 * The sections: groups against the research projection and TP2 (which terms did not scale), categories per chip, per-layer means,
   weight matmuls (GB/s, % of DRAM, ns per tile per core: the bf4 grid question), collectives per call (the minimum over chips is the
   intrinsic time, the skew is waiting on the slowest chip), SDPA fixed cost and slope per 1k tokens (four contexts per round), kernel
@@ -100,7 +106,7 @@ The second profile (`scripts/ci/references/tp4-profile2-jobs`, image `tp4-prof-2
 marker, at four users of 4,096 tokens. The analysis (`tp4_profile_report.py`) changed in four ways:
 
 - **The packed block is picked by what it holds and what the host timed.** A candidate is a 64-layer trace with one SDPA launch per
-  attention layer and one conv-gates launch per GDN layer for each of the four users; among those, the one whose device span matches the
+  attention layer and one conv-gates launch per GDN layer for each of the four users (or the multi-SDPA layout above); among those, the one whose device span matches the
   host's `[PACKED-PHASE]` `trace_ms` (within 10%) wins, and only then the session count. The report prints how it chose. (v170's report
   picked the lone user's 4-row step, which had the most sessions.)
 - **The round around the verify is attributed by kind**, from the device rows between one packed replay and the next on chip 0: the eager
