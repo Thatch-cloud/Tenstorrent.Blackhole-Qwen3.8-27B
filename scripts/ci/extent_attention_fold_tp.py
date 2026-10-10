@@ -14,6 +14,7 @@ path, logged as FALLBACK and counted (nothing is guessed).
 """
 
 from contextlib import contextmanager
+import os
 
 import attention_block_fold_tp
 import extent_attention_replay_tp as base_module
@@ -29,6 +30,15 @@ def _pinned_class():
     if getattr(base, '__module__', None) == __name__:
         base = base.__mro__[1]
     return base
+
+
+OCTO_ATTN_BUNDLE_FLAGS = ('QWEN_FAST_OCTO_ATTN_BUNDLE', 'QWEN_FAST_OCTO_ATTN_BUNDLE_AUDIT')
+
+
+def octo_flags_requested():
+    """Whether QWEN_FAST_OCTO_ATTN_BUNDLE or its audit is set to anything but unset, empty or '0' (octo_attn_bundle.requested is this test; a test holds the two equal): the
+    one environment read a flag-off process makes here."""
+    return any((os.environ.get(name) or '').strip() not in ('', '0') for name in OCTO_ATTN_BUNDLE_FLAGS)
 
 
 def eight_row_segments(segments):
@@ -59,6 +69,12 @@ class PackedExtentReplayReader(_pinned_class()):
         # QWEN_FAST_TP4_SDPA (sdpa_long_tp): flag unset or off, this returns at once and nothing is touched.
         try:
             sdpa_long_tp.apply(self)
+            # QWEN_FAST_OCTO_ATTN_BUNDLE (octo_attn_bundle, gate only): the octo block's eight single-entry launches per layer as ceil(8 / N) bundled ones, set as this
+            # reader's `multi`. Asked before the module is imported, so a process with the flags unset never imports it and nothing here changes.
+            if octo_flags_requested():
+                import octo_attn_bundle
+
+                octo_attn_bundle.apply(self)
         except BaseException:
             self.close()
             raise
