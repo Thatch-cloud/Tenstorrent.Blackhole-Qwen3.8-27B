@@ -108,6 +108,8 @@ jobs:
           python -B -m unittest test_sdpa_long_tp test_sdpa_tp4_long test_tp4_sdpa_long_window test_sdpa_multi_tp test_tp4_sdpa_multi_window
           python -B -m unittest test_gdn_conv_gates_spread test_tp4_w2 test_tp4_mr_probe test_tp4_kv_read_probe test_stage_prod_audit test_tp4_kvread_jobs test_tp4_kvread_next_jobs test_tp4_next2_1_jobs
           python -B -m unittest test_w2_switch
+          python -B -m unittest test_adaptive_profiles test_tp4_prefill_jobs test_tp4_prefill_profile_report test_prefill_ladder_smoke
+          python -B -m unittest test_levern_policy test_levern_prefix_scheduler
           python -B -m unittest test_tp4_w2ln_profiles test_w2ln_identity_census test_tp4_w2ln_window test_drafter_checkpoint test_w2ln_timing_compare test_ship_ln_w2_er
           python -B -m unittest test_tp4_stage1_windows test_stage1_judge_dry_run
           python -B -m unittest test_tp4_session_0808 test_session_cutover_judge test_tp4_kv_read_probe

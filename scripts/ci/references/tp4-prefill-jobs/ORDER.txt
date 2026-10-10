@@ -1,0 +1,52 @@
+# The order of the tp4/prefill four-card window: the PREFILL measurement jobs and the adaptive Lever N governor's paired timing, on the tp4/next-2 stack (tp4/octo-2 + tp4/prod-fixes) plus this branch.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (dependents are skipped by the NEEDS lines below; every card job begins with a reset). Here only the build and the
+#     status/rescan stop the window.
+# WHAT THE WINDOW IS FOR (docs/tp4-profile.md 'Prefill profile', docs/lever-n-adaptive-governor.md):
+#   PL1  the SOLO prefill ladder (one request at a time, nothing else running, so the Lever N governor paces nothing) at about 4k / 32k / 128k / 254k prompt tokens, and the same ladder with SEVEN short decoders running
+#        (today's policy): TTFT and prefill tok/s per rung, busy over solo.
+#   PP1  the prefill device op profile: ONE 131,072-token coding prompt = 64 prefill chunks of 2,048 tokens under tracy (op-support 20000), the profiler drained every 16 layers by the layer.py flush hook: per-op ms per chunk
+#        at every context, the big matmuls' compute efficiency, attention prefill against context, the GDN chunked prefill (conv calls per chunk), glue and layout copies, collectives.
+#   AD   the adaptive governor (QWEN_FAST_LEVERN_ADAPTIVE, default off, gate only): ABAB of the production profile against its gate-only twin on skew, 32k and a one-or-two-decoder long-prefill shape.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z (the cutover pack's steps and post-checks; nothing in this pack does either, and no job here starts or hands back the
+#     agent). B0 is a build and may run while production serves. No other window driver may be alive and no privileged builder container up.
+# P0. The CPU suite is green on the pushed tp4/prefill-1 head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and the tag is pushed on THAT commit. Push ONE tag at a time and wait for its run to finish (the workflow keeps one
+#     pending run; queued tags are cancelled). Never cancel a running card job, and NEVER cancel PP1 once its gate step has started (the profiler writes as root: a cancelled run leaves root-owned logs and the next checkout dies with
+#     EACCES). No w2.off, levern.off, prefix-reuse.off or parked.off file on the hub mount.
+# P0. TWO IMAGES: tp4-next2-1 (the integrated tp4/next-2 image, built by that window's B0) for X0, PL1, PP1 and Z, which measure the stack as it is; tp4-prefill-1 (a PLACEHOLDER for the tag B0 of THIS pack builds from the pushed head:
+#     sed -i 's/tp4-prefill-1/<tag>/' *.env) for the AD arms, because the governor is image code. A commit of a file the image carries needs a new B0 build and a new tag in every template that names it. With the flag off the
+#     governor image paces, decides and logs exactly as tp4-next2-1 does (a test compares the whole log), so A1 and A2 are the production profile on the new image.
+# TIMED: PL1 and the four AD arms are timing jobs: the ARC runner sets are at ZERO for them (PL1 alone 30 minutes, the AD block about 160), no build and no CI push beside them. B0 never runs during them. X0, PP1 and Z are not timed
+#     (PP1 is attribution; the ARC runner sets can be restored before it). Every result is UNQUALIFIED (the twin is gate only; the ladder and the profile are measurements, not gates).
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0 <- B0
+# NEEDS PL1 PP1 <- X0
+# NEEDS AD-A1 AD-B1 AD-A2 AD-B2 <- X0 B0
+# NEEDS AD-B1 <- AD-A1
+# NEEDS AD-A2 <- AD-B1
+# NEEDS AD-B2 <- AD-A2
+# READ RULES (each also needs c2_smoke_check clean and no stall; the templates' own headers have the whole text):
+#   B0   'baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic with a session cap of 8', the provenance report with no problem line, the image id.
+#   X0   four cards present and healthy, the fabric as measured, no other driver alive.
+#   PL1  every rung of both ladders a stream that ends in tokens; `python3 scripts/ci/prefill_ladder_report.py <smoke results>`: TTFT and prefill tok/s per rung, busy over solo, the decoders still live at each busy rung's first token
+#        (a note below 6), the decoders' worst gap. Recorded, never gated. The solo 254k rung is ESTIMATED at about 98 s (levern_policy.StepTimes seeds, not measured there).
+#   AD   in order, stopping at the first failure: the launched argv (A: no adaptive name, B: the four names); c2_smoke_check clean with its levern_adaptive_problems rule (A: no adaptive trace at all; B: the install line, the
+#        base=/target=/adaptive= fields on every step line, adaptive=1 exactly for prefill steps with 1 or 2 decoders, prefill_few_decoders EXERCISED); the alternation and decode-gap-floor rules clean in both arms;
+#        `python3 scripts/ci/prefill_ladder_report.py A.json --second B.json` (the few-decoder TTFT ratio B over A, ESTIMATED 0.60 to 0.65 at 254k, and the arrival text column 'same'); the eight-live windows (skew, 32k) with
+#        scripts/ci/w2ln_timing_compare.py: B inside the A-to-A drift (A1 against A2), the slowest skew first token under 238 s in both.
+#   PP1  gate/ops/prefill-profile-report.md validity block first (the launched argv, the flush marker lines, 64 chunks on every chip with equal row counts, no dropped-marker line), then the per-chunk tables. DATA, not a gate:
+#        the flush hook has never run at TP4 or at op-support 20000 and the report has never seen a real TP4 prefill CSV.
+# NO-GO: for the governor, any text difference between A and B, a floor or alternation problem in either arm, a skew slowest first token over the limit, an eight-live window outside the A-to-A drift (the policy must be inert there),
+#     an adaptive trace on A or none on B. The policy ships OFF whatever the result: a GO is a finding for the owner (it trades the one or two decoders' decode rate during a long prefill for the long prompt's TTFT),
+#     nothing more, and arming it in production is a profile change the owner decides.
+# Time (estimate, minutes; cumulative in brackets): B0 40 on the build host, X0 20 [20], PL1 30 [50], AD-A1 40 [90], AD-B1 40 [130], AD-A2 40 [170], AD-B2 40 [210], PP1 120 (255 at worst) [330], Z 10 [340]:
+#   340 minutes (5 h 40 min) of cards (X0 to Z), 380 with the build; about 3 minutes of queue per tag on top. PL1 and PP1 alone, without the governor block, are 160 minutes of cards.
+B0-build stop tp4-prefill-1 40
+X0-status-rescan-reset stop tp4-next2-1 20
+PL1-prefill-ladder soft tp4-next2-1 30
+AD-A1-production-timed soft tp4-prefill-1 40
+AD-B1-adaptive-timed soft tp4-prefill-1 40
+AD-A2-production-timed soft tp4-prefill-1 40
+AD-B2-adaptive-timed soft tp4-prefill-1 40
+PP1-prefill-profile soft tp4-next2-1 120
+Z-reset soft tp4-next2-1 10
