@@ -1179,11 +1179,18 @@ class ProfileTests(unittest.TestCase):
         with open(PROFILES_PATH, encoding='utf-8') as handle:
             data = json.load(handle)
         self.assertEqual(data['default'], 'c2-packed-tp4')
+        import make_fusion_profiles as fusion
+
+        # the op-fusion programme's two combined twins (gate only) carry the four levers on purpose, and the audit flag on the audited one
+        combined = {fusion.NAMESPACE + 'all': {SELECT, READ, KEYED, LEAN}, fusion.NAMESPACE + 'all-audit': {SELECT, READ, KEYED, LEAN, AUDIT}}
         for name, profile in data['profiles'].items():
             if name in self.ADDED:
                 continue
             with self.subTest(name=name):
-                self.assertFalse(set(round_host.FLAGS) & set(profile.get('env', {})))
+                carried = set(round_host.FLAGS) & set(profile.get('env', {}))
+                self.assertEqual(carried, combined.get(name, set()))
+                if name in combined:
+                    self.assertIs(profile.get('gate_only'), True)
 
     def test_the_checked_in_twins_are_what_the_generator_makes_from_the_parent(self):
         self.assertEqual(generator.main(['--check']), 0)

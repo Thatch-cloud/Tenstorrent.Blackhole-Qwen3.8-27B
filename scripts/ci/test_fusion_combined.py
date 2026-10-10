@@ -41,11 +41,12 @@ PACK = HERE / 'references' / 'fusion-jobs' / 'combined'
 SWITCHED_ON = {
     'QWEN_FAST_DRAFT_PERMUTE': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2': '1', 'QWEN_FAST_DRAFT_REDUCE': '1', 'QWEN_FAST_DRAFT_QKV1': '1',
     'QWEN_FAST_DRAFT_TAIL': '1', 'QWEN_FAST_DRAFT_GATEUP1': '1', 'QWEN_FAST_DRAFT_MM_GRID': '1', 'QWEN_FAST_DRAFT_HEAD64': '1', 'QWEN_FAST_CCL_OPTIONS': 'rs-c1',
-    'QWEN_FAST_MLP_CFG': 'g3u4d3', 'QWEN_FAST_KV_PAGE_WRITER': '1', 'QWEN_FAST_DEVICE_ZEROS': '1', 'QWEN_FAST_LAZY_SHARD_W': '1'}
+    'QWEN_FAST_MLP_CFG': 'g3u4d3', 'QWEN_FAST_KV_PAGE_WRITER': '1',
+    'QWEN_FAST_TP4_ROUND_HOST_SELECT': '1', 'QWEN_FAST_TP4_ROUND_HOST_READ': '1', 'QWEN_FAST_TP4_ROUND_HOST_KEYED': '1', 'QWEN_FAST_TP4_ROUND_HOST_LEAN': '1', 'QWEN_FAST_DEVICE_ZEROS': '1', 'QWEN_FAST_LAZY_SHARD_W': '1'}
 AUDIT_FLAGS = {
     'QWEN_FAST_DRAFT_PERMUTE_AUDIT': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT': '1', 'QWEN_FAST_DRAFT_REDUCE_AUDIT': '1', 'QWEN_FAST_DRAFT_QKV1_AUDIT': '1',
     'QWEN_FAST_DRAFT_TAIL_AUDIT': '1', 'QWEN_FAST_DRAFT_GATEUP1_AUDIT': '1', 'QWEN_FAST_DRAFT_MM_GRID_AUDIT': '1', 'QWEN_FAST_DRAFT_HEAD64_AUDIT': '1',
-    'QWEN_FAST_CCL_OPTIONS_AUDIT': '1', 'QWEN_FAST_MLP_CFG_AUDIT': '1', 'QWEN_FAST_KV_PAGE_WRITER_AUDIT': '1', 'QWEN_FAST_DEVICE_ZEROS_AUDIT': '1', 'QWEN_FAST_LAZY_SHARD_W_AUDIT': '1'}
+    'QWEN_FAST_CCL_OPTIONS_AUDIT': '1', 'QWEN_FAST_MLP_CFG_AUDIT': '1', 'QWEN_FAST_KV_PAGE_WRITER_AUDIT': '1', 'QWEN_FAST_TP4_ROUND_HOST_AUDIT': '1', 'QWEN_FAST_DEVICE_ZEROS_AUDIT': '1', 'QWEN_FAST_LAZY_SHARD_W_AUDIT': '1'}
 WAITING = ('QWEN_FAST_MLP_GATEUP',)      # the fused MLP gate|up (exact but slower on the card: NO-GO)
 
 
@@ -254,6 +255,63 @@ class ValidatorTests(unittest.TestCase):
             kv_page_writer_tp4.enabled(dict(gate_environment(dict(PROFILES[TIMED], name=TIMED)), QWEN_FAST_TP='2'))          # a TP4 lever at the pair
 
 
+class RoundHostTests(unittest.TestCase):
+    """The round-host levers (tp4/round-host) beside the fusion levers: accepted together, judged by their own smoke rule, and KEYED independent of every fusion lever."""
+
+    FLAGS = ('QWEN_FAST_TP4_ROUND_HOST_SELECT', 'QWEN_FAST_TP4_ROUND_HOST_READ', 'QWEN_FAST_TP4_ROUND_HOST_KEYED', 'QWEN_FAST_TP4_ROUND_HOST_LEAN')
+
+    def test_the_flags_parse_strictly_beside_the_fusion_levers_and_the_audit_is_only_on_the_audited_twin(self):
+        import round_host
+
+        for name in (TIMED, AUDITED):
+            environ = gate_environment(dict(PROFILES[name], name=name))
+            with self.subTest(profile=name):
+                state = round_host.parse(environ)
+                self.assertEqual([flag for flag in round_host.FLAGS if state[flag]],
+                                 [flag for flag in round_host.FLAGS if flag in self.FLAGS or (name == AUDITED and flag == round_host.AUDIT_FLAG)])
+                self.assertFalse(state[round_host.LOG_FLAG], 'the ledger comes from LEAN')
+                self.assertTrue(round_host.requested(environ))
+        base = gate_environment(dict(PROFILES[TIMED], name=TIMED))
+        for flag in self.FLAGS:
+            base.pop(flag)
+        base['QWEN_FAST_TP4_ROUND_HOST_AUDIT'] = '1'
+        with self.assertRaises(ValueError, msg='an audit with no lever is refused: the check is live'):
+            round_host.parse(base)
+
+    def test_the_smoke_rule_of_the_round_host_judges_both_twins_by_their_own_flags(self):
+        import round_host
+
+        for name in (TIMED, AUDITED):
+            env = PROFILES[name]['env']
+            problems, _facts = c2_smoke_check.round_host_problems(env, '', False)
+            self.assertTrue(any('round host' in problem and 'one needed' in problem for problem in problems), name)
+            engaged = '%s %s' % (round_host.ENGAGED_MARKER, ' '.join('%s=%d' % (flag.rsplit('_', 1)[-1].lower(), int(env.get(flag) == '1')) for flag in round_host.FLAGS))
+            right, _facts = c2_smoke_check.round_host_problems(env, engaged + '\n', False)
+            self.assertFalse([problem for problem in right if 'the engaged line says' in problem], name)
+            wrong, _facts = c2_smoke_check.round_host_problems(env, engaged.replace('keyed=1', 'keyed=0') + '\n', False)
+            self.assertTrue([problem for problem in wrong if 'keyed=0' in problem], name)
+
+    def test_the_keyed_values_and_the_pre_stage_name_no_fusion_lever(self):
+        """KEYED's claim is that every staged value but the tokens is a pure function of (start, page table) per segment. The staged list is packed_values and the pre-stage
+        snapshot is verify_prestage; neither reads a fusion lever's flag, so no lever can change a staged value (a lever that did would make the keyed round write stale bytes)."""
+        import ast
+
+        flags = set(flag for flag, _value, _engaged, _fell, _what in c2_smoke_check.FUSION_LEVERS) | set(flag + '_AUDIT' for flag, *_rest in c2_smoke_check.FUSION_LEVERS)
+        flags |= set(row[0] for row in c2_smoke_check.SAMPDRAFT_LEVERS) | set(row[0] for row in c2_smoke_check.SAMPDRAFT_AUDITS)
+        flags |= {'QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2', 'QWEN_FAST_DEVICE_ZEROS', 'QWEN_FAST_LAZY_SHARD_W'}
+        self.assertIn('QWEN_FAST_KV_PAGE_WRITER', flags)
+        prestage = (HERE / 'verify_prestage.py').read_text(encoding='utf-8')
+        self.assertEqual([flag for flag in sorted(flags) if flag in prestage], [])
+        tree = ast.parse((HERE / 'packed_verifier.py').read_text(encoding='utf-8'))
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'packed_values')
+        constants = {node.value for node in ast.walk(function) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+        self.assertEqual(sorted(flags & constants), [])
+        names = {node.id for node in ast.walk(function) if isinstance(node, ast.Name)}
+        self.assertFalse(names & {'kv_page_writer_tp4', 'draft_fusion_tp', 'tp4_mlp_gateup', 'tp4_shard_argmax', 'ccl_options_tp'})
+        keyed = (HERE / 'verify_prestage.py').read_text(encoding='utf-8')
+        self.assertIn("__slots__ = ('starts', 'tables', 'readers', 'token_index', 'kv_ok')", keyed)
+
+
 class SmokeTableTests(unittest.TestCase):
     def rows(self):
         levers = [(flag, value) for flag, value, _engaged, _fell, _what in c2_smoke_check.FUSION_LEVERS]
@@ -266,11 +324,11 @@ class SmokeTableTests(unittest.TestCase):
         env = PROFILES[AUDITED]['env']
         companions = ('QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2', 'QWEN_FAST_DEVICE_ZEROS', 'QWEN_FAST_LAZY_SHARD_W')     # (judged by their packages' own rules, not the generic tables)
         for flag, value in SWITCHED_ON.items():
-            if flag in companions:
+            if flag in companions or flag.startswith('QWEN_FAST_TP4_ROUND_HOST_'):      # (the round-host levers: c2_smoke_check.round_host_problems)
                 continue
             self.assertIn((flag, value), levers, 'no smoke row judges %s=%s' % (flag, value))
         for flag in AUDIT_FLAGS:
-            if flag in ('QWEN_FAST_DEVICE_ZEROS_AUDIT', 'QWEN_FAST_LAZY_SHARD_W_AUDIT'):
+            if flag in ('QWEN_FAST_DEVICE_ZEROS_AUDIT', 'QWEN_FAST_LAZY_SHARD_W_AUDIT', 'QWEN_FAST_TP4_ROUND_HOST_AUDIT'):
                 continue
             self.assertIn(flag, audits, 'no smoke row demands an exact=True line for ' + flag)
             self.assertEqual(env[flag], '1')
