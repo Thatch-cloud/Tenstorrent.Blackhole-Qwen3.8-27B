@@ -11,6 +11,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+import make_fusion_profiles as fusion  # noqa: E402
 import make_upload_profiles as generator  # noqa: E402
 import profile_twins  # noqa: E402
 import serving_c2_contract as contract  # noqa: E402
@@ -119,9 +120,12 @@ class TwinTests(unittest.TestCase):
 
     def test_the_parent_and_every_other_profile_carry_no_switch(self):
         twins = set(generator.twin_names())
+        combined = {fusion.NAMESPACE + 'all', fusion.NAMESPACE + 'all-audit'}
         for name, profile in PROFILES.items():
-            if name not in twins:
+            if name not in twins and name not in combined:
                 self.assertFalse([knob for knob in generator.KNOBS if knob in profile['env']], name)
+        for name in sorted(combined):
+            self.assertEqual(sorted(knob for knob in generator.KNOBS if knob in PROFILES[name]['env'] and not knob.endswith('_AUDIT')), sorted([generator.ZEROS, generator.LAZY]), name)
         self.assertEqual(contract.upload_problems(dict(PROFILES[PARENT], name=PARENT)), [])
 
     def test_an_inherited_process_environment_never_reaches_the_parent_and_the_twins_keep_their_own(self):
