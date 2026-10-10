@@ -277,6 +277,7 @@ jobs:
           python -B -m unittest discover -s scripts/ci -p 'test_gdn_direct_window*.py'
           python -B -m unittest discover -s scripts/ci -p 'test_compact_score*.py'
           python -B -m unittest test_octo test_octo_block test_octo_judge test_octo_profiles test_tp4_octo_jobs test_extent_attention_octo_tp test_tp4_window_next
+          python -B -m unittest test_octo_draft
           bash -n scripts/ci/run-simulator.sh
           bash -n scripts/ci/simulator-suite.sh
           bash -n scripts/ci/mlp-clock-hardware-suite.sh

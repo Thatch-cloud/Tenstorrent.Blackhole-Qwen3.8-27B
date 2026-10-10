@@ -473,6 +473,11 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         import serving_octo
 
         octo_record = serving_octo.octo_admission(m3_shape(policy), log=pindiag)
+    elif os.environ.get('QWEN_FAST_OCTO_DRAFT', '0') != '0':
+        # QWEN_FAST_OCTO_DRAFT drafts the octo rounds: without the octo block it is refused by name (a bad value too), never a flag that silently does nothing.
+        import octo_draft_tp
+
+        octo_draft_tp.admission(log=pindiag)
     if os.environ.get('QWEN_FAST_SOLO_PACKED', '0') != '0':
         import serving_octo
 

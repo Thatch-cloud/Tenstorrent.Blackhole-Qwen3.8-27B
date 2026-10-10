@@ -981,7 +981,7 @@ class DFlashDevice:
                                        or not native_proposal_attention):
             # QWEN_FAST_PAIR_ROW_EXACT (pair_row_exact.py): the folded draft SDPA is a packed pair's only.
             raise ValueError('The folded pair SDPA serves a packed pair on the native proposal path only')
-        if quad is not None and (pack is None or len(pack) != 4 or row_exact is not False or cached_history is None
+        if quad is not None and (pack is None or len(pack) != getattr(quad, 'users', 4) or row_exact is not False or cached_history is None
                                  or not native_proposal_attention or audit_convolution
                                  or not getattr(self, 'fused_convolution', False)):
             # QWEN_FAST_QUAD_DRAFT (quad_draft.py): the 64-row pass of four packed users; None, the default and
@@ -995,8 +995,11 @@ class DFlashDevice:
         rows = 32 if pack is not None else self.block_rows
         if quad is not None:
             rows = quad.rows
+        # QWEN_FAST_OCTO_DRAFT (octo_draft_tp.OctoPass): eight users of EIGHT rows share the 64-row block, so the seams are the pass's own block, not this device's T16 one.
+        # Every other pass (and no pass) carries no `block` and keeps this device's rows.
+        seam_rows = getattr(quad, 'block', self.block_rows) if quad is not None else self.block_rows
         seams = None if pack is None else tuple(
-            (index * self.block_rows, (index + 1) * self.block_rows) for index in range(len(pack)))
+            (index * seam_rows, (index + 1) * seam_rows) for index in range(len(pack)))
         # QWEN_FAST_PROPOSAL_AUDIT (ProposalAudit): `observe(name, tensor)` reads a
         # replicated intermediate back from both chips at the stage that made it. None,
         # the default and the only value with the audit off, adds no operation and
