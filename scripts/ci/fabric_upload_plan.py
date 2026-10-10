@@ -26,8 +26,6 @@ ENCODING = {1: 8.0 / 10.0, 2: 8.0 / 10.0, 3: 128.0 / 130.0, 4: 128.0 / 130.0, 5:
 WIDE_LANES = 16
 # The relay is adopted only when it saves at least this fraction of the direct time (and the absolute floor below).
 RELAY_MIN_GAIN = 0.20
-# Two cards' writes "overlap" when four cards written together take at most this multiple of the slowest card alone.
-OVERLAP_MAX_RATIO = 1.5
 # Per-request bytes of a prefix restore per chip (docs/tp4-fabric-upload.md, section 1): the full-attention KV is
 # 16 layers x K and V x one 256-wide head per chip in bfloat8_b (1,088 B per 32 x 32 tile), so 8,704 B per token per
 # chip; a GDN checkpoint is 78,446,592 B for the whole mesh (bf16 state and carry), a quarter per chip.
@@ -207,23 +205,32 @@ def _rate(rates, pos):
     return float(rate)
 
 
-def direct_seconds(card_bytes, h2d_gbps, overlap=True):
+def _host_term(card_bytes, host_gbps):
+    """Seconds the host needs for every card's bytes at its measured aggregate rate (0 without a cap)."""
+    return float(sum(card_bytes)) / (float(host_gbps) * 1e9) if host_gbps else 0.0
+
+
+def direct_seconds(card_bytes, h2d_gbps, overlap=True, host_gbps=None):
     """Every card takes its own bytes over its own PCIe. card_bytes and h2d_gbps are per position (lists or dicts).
-    overlap: the four cards' writes run together (the time is the slowest card's), else one after another (the sum)."""
+    overlap: the four cards' writes run together (the time is the slowest card's), else one after another (the sum).
+    host_gbps: the host's aggregate rate with every card written at once (F1's together arm): no upload of the mesh can
+    beat sum(card_bytes) / host_gbps, whichever links the bytes take."""
     times = []
     for pos, nbytes in enumerate(card_bytes):
         if nbytes < 0:
             raise PlanError('negative bytes for position %d' % pos)
         times.append(nbytes / (_rate(h2d_gbps, pos) * 1e9) if nbytes else 0.0)
-    return max(times) if overlap else sum(times)
+    return max(max(times) if overlap else sum(times), _host_term(card_bytes, host_gbps))
 
 
-def relay_seconds(card_bytes, h2d_gbps, pairs, fabric_gbps, overlap=True, chunk_bytes=64 << 20, hop_penalty=1.0):
+def relay_seconds(card_bytes, h2d_gbps, pairs, fabric_gbps, overlap=True, chunk_bytes=64 << 20, hop_penalty=1.0,
+                  host_gbps=None):
     """The relay: each sender takes its own bytes plus its receivers' over PCIe (into a staging buffer), and the fabric
     moves each receiver's bytes on, pipelined chunk by chunk, so a pair costs max(host time, fabric time) plus one
     chunk's fabric time to fill the pipe. A receiver takes nothing over PCIe. fabric_gbps: one rate (every pair) or
     {(sender, receiver): rate}; a pair of more than one hop is divided by hop_penalty ** (hops - 1) when no per-pair
-    rate is given (1.0: a multi-hop route keeps the rate, which the p2p job measures). overlap as in direct_seconds."""
+    rate is given (1.0: a multi-hop route keeps the rate, which the p2p job measures). overlap and host_gbps as in
+    direct_seconds: the relay moves the same bytes across the host, so the host's aggregate cap binds it the same way."""
     receivers = dict((receiver, (sender, hops)) for sender, receiver, hops in pairs)
     load = dict((pos, float(nbytes)) for pos, nbytes in enumerate(card_bytes) if pos not in receivers)
     for receiver, (sender, _) in receivers.items():
@@ -242,11 +249,12 @@ def relay_seconds(card_bytes, h2d_gbps, pairs, fabric_gbps, overlap=True, chunk_
         nbytes = float(card_bytes[receiver])
         fill = min(nbytes, float(chunk_bytes)) / (rate * 1e9)
         fabric[sender] = fabric.get(sender, 0.0) + nbytes / (rate * 1e9) + fill
+    capped = _host_term(card_bytes, host_gbps)
     per_sender = dict((pos, max(host[pos], fabric.get(pos, 0.0))) for pos in host)
     if overlap:
-        return max(per_sender.values()) if per_sender else 0.0
+        return max([capped] + list(per_sender.values()))
     # Serialized host writes: the PCIe parts add up; the fabric of the last sender drains after the last write.
-    return sum(host.values()) + max([fabric.get(pos, 0.0) - host[pos] for pos in host] + [0.0])
+    return max(capped, sum(host.values())) + max([fabric.get(pos, 0.0) - host[pos] for pos in host] + [0.0])
 
 
 def replicated_seconds(nbytes, h2d_gbps, fabric_gbps, chips=CHIPS, overlap=True):
@@ -272,27 +280,32 @@ def restore_bytes_per_card(tokens, kv_bytes_per_token=KV_BYTES_PER_TOKEN_PER_CHI
 
 
 def decide(h2d, fabric, card_bytes, min_saving_s=0.0, wide=WIDE_LANES):
-    """The pre-registered decision the two jobs feed (docs/tp4-fabric-upload.md, section 4).
+    """The decision the two jobs feed (docs/tp4-fabric-upload.md, section 4).
 
     h2d: {'widths': [lanes per position], 'alone_gbps': [GB/s per position, each card written alone],
           'together_s': seconds for the four cards written together with `together_bytes` each,
           'together_bytes': bytes per card in that arm}
-    fabric: {(sender, receiver): GB/s} measured x16 -> x4, both pairs concurrently.
+    fabric: {(sender, receiver): GB/s} measured x16 -> x4 (both pairs at once, or the faster exact socket).
     card_bytes: bytes per position the decision is for (a weight load, a restore).
 
-    Returns dict(verdict, reasons, direct_s, relay_s, pairs, overlap). Verdicts:
+    The host's aggregate rate (host_gbps = cards x together_bytes / together_s) caps every upload of the mesh whichever
+    links its bytes take; both times are computed under it. (Revised after F1, run 38036227448: the first version
+    classed the together arm as overlapping or serial; four cards together reached 23.9 GB/s, more than one card alone
+    and far less than the 68 GB/s the four alone rates add up to, which neither class described.)
+
+    Returns dict(verdict, reasons, direct_s, relay_s, pairs, host_gbps, overlap). Verdicts:
       RELAY            the relay saves >= RELAY_MIN_GAIN of the direct time and >= min_saving_s
       DIRECT           it does not (the fabric, or the senders' doubled PCIe load, eats the gain)
-      HOST-BOUND       the x4 cards written alone are within RELAY_MIN_GAIN of the x16 cards: their links are not what
-                       limits an upload, so moving bytes off them cannot help; the host path is the fix
+      HOST-BOUND       the host, not the x4 links, sets the direct time: the host's aggregate cap is at least the
+                       slowest card's own link time, or the x4 cards alone are within RELAY_MIN_GAIN of the x16 cards.
+                       Moving bytes between links cannot help; the host path is the fix
       NOT-MEASURED     a rate, a width or a pair is missing
-    overlap (reported, and the mode both times are computed in): the four cards written together took at most
-    OVERLAP_MAX_RATIO x the slowest card alone, so their writes run concurrently; otherwise they add up."""
+    overlap: host_gbps over the sum of the alone rates (1.0 = the cards' writes overlap fully)."""
     reasons = []
     widths = h2d.get('widths') or []
     alone = h2d.get('alone_gbps') or []
     pairs = relay_pairs(widths, wide=wide)
-    out = dict(verdict='NOT-MEASURED', reasons=reasons, direct_s=None, relay_s=None, pairs=pairs, overlap=None)
+    out = dict(verdict='NOT-MEASURED', reasons=reasons, direct_s=None, relay_s=None, pairs=pairs, host_gbps=None, overlap=None)
     if len(widths) != len(card_bytes) or len(alone) != len(card_bytes) or any(not rate for rate in alone):
         reasons.append('per-position widths and alone rates are required for every card')
         return out
@@ -303,13 +316,19 @@ def decide(h2d, fabric, card_bytes, min_saving_s=0.0, wide=WIDE_LANES):
     if not together or not together_bytes:
         reasons.append('the four-cards-together arm is missing')
         return out
-    slowest_alone = max(float(together_bytes) / (float(rate) * 1e9) for rate in alone)
-    overlap = together <= OVERLAP_MAX_RATIO * slowest_alone
-    out['overlap'] = overlap
-    direct = direct_seconds(card_bytes, alone, overlap=overlap)
+    host_gbps = len(card_bytes) * float(together_bytes) / float(together) / 1e9
+    out.update(host_gbps=round(host_gbps, 3), overlap=round(host_gbps / sum(float(rate) for rate in alone), 3))
+    direct = direct_seconds(card_bytes, alone, host_gbps=host_gbps)
     out['direct_s'] = round(direct, 6)
+    link_term = direct_seconds(card_bytes, alone)
+    host_term = _host_term(card_bytes, host_gbps)
     narrow = max(float(alone[receiver]) for _, receiver, _ in pairs)
     wide_rate = min(float(alone[sender]) for sender, _, _ in pairs)
+    if host_term >= link_term:
+        out['verdict'] = 'HOST-BOUND'
+        reasons.append('the host moves the mesh at %.1f GB/s: %.3f s for these bytes against %.3f s for the slowest card on its own '
+                       'link; every relayed byte still crosses the host' % (host_gbps, host_term, link_term))
+        return out
     if narrow >= (1.0 - RELAY_MIN_GAIN) * wide_rate:
         out['verdict'] = 'HOST-BOUND'
         reasons.append('the x4 cards alone reach %.3f GB/s against %.3f GB/s for the x16 senders: the links do not set the rate'
@@ -319,7 +338,7 @@ def decide(h2d, fabric, card_bytes, min_saving_s=0.0, wide=WIDE_LANES):
     if missing:
         reasons.append('no fabric rate for %s' % ', '.join('%d->%d' % pair for pair in missing))
         return out
-    relay = relay_seconds(card_bytes, alone, pairs, fabric, overlap=overlap)
+    relay = relay_seconds(card_bytes, alone, pairs, fabric, host_gbps=host_gbps)
     out['relay_s'] = round(relay, 6)
     saving = direct - relay
     if direct > 0 and saving >= RELAY_MIN_GAIN * direct and saving >= min_saving_s:

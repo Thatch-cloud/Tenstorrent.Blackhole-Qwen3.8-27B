@@ -17,6 +17,11 @@
 # AFTER BOTH (docs/tp4-fabric-upload.md section 4): F2's relay_over_direct on relay/*/all is the empirical answer for bulk uploads (RELAY needs <= 0.8 on rm16k and
 #   tile_bf8, every relay arm exact); fabric_upload_plan.decide(F1 decide_inputs, F2 rates, card_bytes) extrapolates to (a) the weight load (about 6.9 GB a card) and
 #   (b) a 128k / 254k warm-tier restore (restore_bytes_per_card). Record RELAY / DIRECT / HOST-BOUND in docs/tp4-fabric-upload.md.
+# RESULTS 2026-10-10 (docs/tp4-fabric-upload.md section 6): F1 run 38036227448 MEASURED; F2 run 38036326663 PARTIAL (tile_bf8: point_to_point cannot move block-float,
+#   now recorded as unsupported; the intermediate-spec binding is absent from the image, now a recorded fact). VERDICT: DIRECT for every use - relay_over_direct
+#   2.55-2.74; decide() HOST-BOUND at the measured 23.9 GB/s four-card host aggregate. The relay is parked.
+# NEXT (optional, one job): re-run F1 alone - the same template now also runs chunked (calls under the 32 MiB pinned threshold), threads (one Python thread per card)
+#   and per-thread host CPU, to locate the 23.9 GB/s cap. F2 need not run again unless a faster unicast path appears.
 # Time (estimate): F1 reset 3-12 + probe 8-20 min; F2 reset 3-12 + probe 10-25 min (the first call of each new shape/pair compiles); about 1 h in all.
 F1-h2d-per-card stop tp4-serve-11 30
 F2-p2p-x16-to-x4 soft tp4-serve-11 35

@@ -1,8 +1,12 @@
 # TP4 fabric upload: feeding the x4 cards over the fabric instead of their own PCIe
 
-Status: **design and two measurement jobs; nothing has been measured on cards yet, and nothing in serving changes.**
+Status: **measured. Verdict: DIRECT for every use (section 6). The relay is 2.6x slower than writing the same bytes
+direct, and the uploads are bound by the host, not by the x4 links. Nothing in serving changes.**
 The owner directive of 2026-10-10 says the four cards should use the fabric, not PCIe, for upload.
-The branch is `tp4/fabric-upload`.
+The branch is `tp4/fabric-upload`. F1 is run 38036227448 (MEASURED) and F2 is run 38036326663.
+
+Sections 0-5 are the design and estimates as registered before the runs. Their **A** figures are superseded by the
+measurements in section 6.
 
 The hardware:
 - Two of the four p150a cards train PCIe Gen5 x16 on CPU root ports.
@@ -20,6 +24,22 @@ File:line references to `ttnn/...`, `tt_metal/...` and `tests/...` are into the 
 `9f9cd4fd590f4b606bd0981a4fe0b6403eb38ec9`; "UMD" is its UMD submodule.
 
 ## 0. Bottom line
+
+**After F1/F2 (section 6):**
+1. **DIRECT.**
+   - The relay took 2.55-2.74x the time of a direct write of the same bytes (F2 `relay_over_direct`). The registered bar
+     was 0.8 or less.
+   - Fed the measured rates, `decide()` returns HOST-BOUND for the weights, the zero buffers, the GDN checkpoint and
+     128k/254k restores: every relayed byte still crosses the host.
+2. **The caps are on the host.**
+   - Four cards written together reach 23.9 GB/s, against 68.6 GB/s for the four alone rates added up.
+   - Above 32 MiB per call (the pinned path, with the IOMMU on), one x16 card falls from ~35 to 20.5 GB/s.
+   - Host conversion runs at 1.36 GB/s for bf8 and 3.06 GB/s for bf16. It is 92% of the 71 ms GDN restore.
+3. **The fabric ops are slower than the x4 links (13.8 GB/s).**
+   - `point_to_point` moves 4.3 GB/s whatever the hop count, and cannot carry bfloat8_b at all.
+   - Sockets move 9.4 GB/s per connection, 18.8 GB/s at two.
+
+**As registered before the runs:**
 
 1. **What PCIe carries today is not what makes engine start slow.**
    - Engine start takes 2 min 47 s on an idle rig and 9 min 43 s under CI load (M).
@@ -397,6 +417,12 @@ card_bytes, min_saving_s)` extrapolates.**
 - If F1's `subset` shows no exact one-coordinate write (and F2's `mapper_write` agrees), there is no relay host leg.
   A relay would then need a new host path, for example pinned shard transfers from C++.
 
+Revision after F1 (recorded, not hidden): `decide()` first classed the four-cards-together arm as either overlapping
+(the time of the slowest card) or serial (the sum). The measurement was neither: 23.9 GB/s for the mesh, above one
+card alone and a third of the alone rates added up. The model now takes that measured host aggregate as a cap on every
+upload of the mesh, direct or relayed (`fabric_upload_plan.decide`, `host_gbps`). The empirical rule for bulk uploads
+(F2 `relay_over_direct`) did not change.
+
 ## 5. Implementation plan
 
 Every phase is opt-in, and defaults stay byte-identical. Effort is in engineer-days; card sessions are listed apart.
@@ -438,3 +464,160 @@ So a relayed shard is byte-identical by construction. It is also **verified**:
 1. P0 and P1 now: they shorten engine start and restores whatever F1/F2 say.
 2. F1 and F2 next: about 1 h of cards.
 3. P2-P4 only on a RELAY verdict for that use.
+
+## 6. Results: F1 run 38036227448, F2 run 38036326663 (2026-10-10)
+
+F1 verdict: MEASURED, every read-back exact. F2 verdict: PARTIAL.
+- Every non-bf8 transfer and relay was exact.
+- Every `tile_bf8` arm failed: `point_to_point` cannot size a block-float intermediate (6.4).
+- The 39 problem lines were `ttnn.p2p_compute_intermediate_tensor_spec` missing from the image's top level. The op then
+  allocated its own intermediate on every call.
+- The probe now records both as facts rather than errors, and measures bf8 over sockets instead (6.5).
+
+The ring maps the cards as x16, x4, x16, x4 (positions 0-3), so the relay pairs are 0->1 and 2->3, one hop each.
+Every card sits in an IOMMU group; the container sees 4 IOMMU units and 64 usable CPUs.
+
+### 6.1 Host-to-device, per card (F1, M)
+
+ROW_MAJOR, 16 KiB pages; median GB/s. The 1024 MiB rows are `decide()`'s alone rates.
+
+| Call size | x16 (pos 0 / 2) | x4 (pos 1 / 3) |
+|---:|---:|---:|
+| 4 MiB | 24.6 / 24.8 | 12.7 / 12.8 |
+| 16 MiB | **35.8 / 34.4** | 13.5 / 13.5 |
+| 64 MiB | 21.0 / 21.5 | 13.7 / 13.7 |
+| 256 MiB | 20.4 / 20.1 | 13.8 / 13.8 |
+| 1024 MiB | 20.5 / 20.4 | 13.8 / 13.8 |
+
+| Arm | Result |
+|---|---|
+| TILE bf16 at 256 MiB | x16 21.0 / 20.9, x4 13.8 |
+| TILE bf8 at 256 MiB (device bytes) | x16 21.7 / 20.6, x4 13.8 |
+| Four cards together, sharded, 256 MiB each | **23.9 GB/s** for the mesh (6.0 per card); bf8 22.7 |
+| Four cards together, replicated, 256 MiB | 31.5 GB/s for the mesh |
+| Device to host, alone | 7-11 GB/s up to 16 MiB; **3.5-3.9 GB/s** from 64 MiB; together 8.6 for the mesh |
+| GDN restore (production shape, h2d path) | 71.1 ms = **65.6 ms host conversion** (1.20 GB/s) + 5.5 ms copies (14.3 GB/s for the mesh); 1.10 GB/s overall, as measured in production |
+| Host conversion only, `from_torch(device=None)` of 256 MiB bf16 | ROW_MAJOR 2.9 GB/s, TILE bf16 3.06 GB/s, **TILE bf8 1.36 GB/s** |
+| One-coordinate write | `get_device_tensors` view: broadcast to all four, as read from the code. One-coordinate mapper: **exact** on every card, and the tensor keeps all four coordinates |
+
+**What it says:**
+- The x4 cards run at 88% of their link ceiling, 13.8 of 15.75 GB/s.
+- The x16 cards run at a third of theirs: 20.5 of 63 GB/s on large calls, 35 GB/s at 16 MiB.
+
+### 6.2 Fabric (F2, M)
+
+| Arm | Result |
+|---|---|
+| `point_to_point`, every directed line edge, 256 MiB, ROW_MAJOR | **4.32-4.33 GB/s**; the same at three hops (0->3: 4.33): one worker core sets it, not the links |
+| `point_to_point`, TILE bf16 | 2.6-2.7 GB/s (bf16 packets are cut to a power of two) |
+| `point_to_point`, both pairs at once | 8.6 GB/s (4.3 each: independent) |
+| `point_to_point`, local copy (sender = receiver) | 180 GB/s |
+| First call | 0.70 s (program compile); later new shapes and pairs only the transfer |
+| Sockets, 256 MiB ROW_MAJOR, DRAM FIFO | **9.4 GB/s with one connection, 18.8 GB/s with two**, exact both ways (scales with connections; four are in the next run) |
+| Fabric payload size | 4,352 B |
+
+### 6.3 Relay against direct, same bytes, one process (F2 `relay/rm16k/256MiB/*`, M)
+
+| Arm | Relay | Direct | relay_over_direct |
+|---|---:|---:|---:|
+| 0 -> 1 (x16 -> x4) | 88.2 ms | 32.5 ms | **2.71** |
+| 2 -> 3 | 88.9 ms | 32.5 ms | **2.74** |
+| All four cards | 114.1 ms | 57.1 ms per-coordinate, **44.7 ms** production sharded write | **2.55** |
+
+### 6.4 Verdicts against the registered rule (section 4)
+
+**Bulk uploads (weights): DIRECT.**
+- `relay_over_direct` is 2.55-2.74 against the 0.8 bar, with every relay arm exact.
+- The tile_bf8 rows the rule also names could not run. `point_to_point` sizes its intermediate with `tt::datum_size`,
+  which throws for block-float formats (`point_to_point_device_op.cpp:170-171` → `tt_backend_api_types.hpp:83`), so
+  the op cannot move bfloat8_b at all.
+- The rm16k margin, 3.2x past the bar, settles the verdict without bf8.
+
+**`decide()` on the measured rates** (alone 20.5/13.8/20.4/13.8 GB/s, host aggregate 23.9 GB/s, fabric at the 18.8 GB/s
+socket rate): HOST-BOUND for every use.
+
+| Use (bytes per card) | direct (host-capped) | links alone could do | relay via sockets | relay via `point_to_point` |
+|---|---:|---:|---:|---:|
+| Weights (6.9 GB) | 1.155 s | 0.500 s | 1.155 s | 1.616 s |
+| Zero buffers (14 GB) | 2.343 s | 1.014 s | 2.343 s | 3.262 s |
+| Restore 128k (1.16 GB) | 194 ms | 84 ms | 194 ms | 285 ms |
+| Restore 254k (2.23 GB) | 373 ms | 161 ms | 373 ms | 533 ms |
+| GDN checkpoint (19.6 MB) | 3.3 ms | 1.4 ms | 3.3 ms | 9.1 ms |
+
+**Why the directive cannot pay on this host:**
+- A byte an x4 card does not take over its own PCIe still crosses the host, on an x16 card's PCIe.
+- With all four cards writing, the host moves 23.9 GB/s whichever link carries the bytes. That is less than the two x4
+  links alone (27.6 GB/s).
+- The relay can tie direct at best (sockets) and loses with `point_to_point`.
+
+**Even if the host cap is lifted**, the x16 cards' best rate (35 GB/s at 16 MiB calls) is 2.5x an x4 card's, not much
+above the 2x the relay needs:
+- direct: B / 13.8;
+- relay: 2B / 35 = 0.057B, against 0.072B direct.
+- That saves 21%, at the 20% bar, and only with a fabric path of at least 17.5 GB/s per pair (two or more socket
+  connections) that never touches the bf8 limit. **The relay is parked.**
+
+### 6.5 The host-side caps, and what to do about each
+
+**1. The four-card aggregate: 23.9 GB/s together against 68.6 GB/s for the four alone rates added up.**
+- What is known:
+  - One x16 card drops from ~35 GB/s to 20.5 GB/s once a call passes 32 MiB.
+  - That is the threshold of the pinned zero-copy path, which runs only with the IOMMU on, and it is on (section 1.3).
+  - On that path the cards read the user buffer's 4 KiB pages through the IOMMU. Smaller calls instead go through the
+    1 GiB hugepage issue queue.
+  - Reads back to the host show the same knee: 7-11 GB/s at 16 MiB or less, 3.5-3.9 GB/s at 64 MiB or more.
+  - Replicated (one host buffer, four readers) reaches 31.5 GB/s; sharded (four buffers) reaches 23.9.
+- What is not known: whether the cap is IOMMU translation, host memory reads, or the host issuing the four writes one
+  after another.
+- **Test, in a re-run of F1** (no card job here; the arms are on the branch):
+  - `chunked/together`: the same 256 MiB per card in calls of 8 MiB a card, 32 MiB in all, so through the hugepage
+    path.
+  - `chunked/alone`: each card in 16 MiB calls.
+  - `threads_busy` on the together, chunked and threads arms: per-thread host CPU. It shows whether the upload is one
+    busy host thread or several.
+  - `threads`: four Python threads, one per card, each writing its own card with the one-coordinate write.
+    `copy_host_to_device_tensor`'s binding has no GIL release (`ttnn-nanobind/operations/core.cpp:329-335`), so this
+    may serialize; the arm says so either way.
+  - `TT_MESH_*` is now recorded in the environment (`TT_MESH_PASS_THROUGH_THREAD_POOL` serializes the per-card
+    dispatch).
+- **Fix candidates, in order:**
+  - (a) If `chunked` lifts the aggregate, upload in calls of 32 MiB or less: a loader-side change (cache-hit loads,
+    restores, spills), no runtime patch.
+  - (b) If one host thread is busy, issue per-card writes from per-card threads in C++ (a small extension) or with the
+    GIL released.
+  - (c) If the pinned path is the cap and must stay, back host buffers with hugepages to cut IOMMU translation misses.
+    This needs control of the host buffer's allocation.
+
+**2. Host conversion: bf8 1.36 GB/s, bf16 3.06 GB/s, even ROW_MAJOR only 2.9 GB/s, single-threaded.**
+- It is 92% of the GDN restore: 65.6 of 71.1 ms.
+- It also covers the drafter's 0.46 GB per card, converted to bf8 on every boot without a cache file.
+- **Fix: pre-converted bytes.**
+  - The weights already are: the tensor cache holds device-layout tiles, so a cache hit converts nothing beyond the
+    transpose P1 removes.
+  - Store the GDN checkpoint as the converted host tensors (`from_torch` output) instead of torch tensors. The restore
+    then drops from ~71 ms to the ~5.5 ms copy (I).
+  - Give the drafter projections a tensor cache.
+  - The warm KV tier keeps raw device pages: no conversion.
+- Where conversion cannot be avoided:
+  - convert shards in parallel threads, if `from_torch` releases the GIL (unknown: the next run's `threads_busy` hints
+    at it);
+  - or tilize on the device (`from_torch(device=mesh)` tilizes bf16 on the card, `py_to_tt_tensor.cpp:65-99`; bf8 only
+    with `enable_bfloat_opt`).
+
+**3. Device to host at 3.5-3.9 GB/s per card for large reads** (spills, Lever N park-out, audits).
+- The same knee as the writes.
+- Read in calls of 16 MiB or less (7-11 GB/s), as part of fix 1(a).
+
+**4. Zero buffers: P0 is unchanged and still the first thing to do.**
+- 14 GB per card at the measured 23.9 GB/s aggregate is about 2.3 s of host-to-device per engine start (I).
+- An on-device fill moves no host bytes at all.
+
+### 6.6 Next
+
+1. P0, on-device zero fill.
+2. P1, now with the pre-converted GDN checkpoint and the drafter cache.
+3. One F1 re-run, to locate the 23.9 GB/s cap. Its new arms are on this branch. `C2_FABRIC_PROBE=h2d` runs them, and
+   the F1 template is unchanged.
+4. No relay work: P2-P4 are not started.
+5. If a future runtime offers a multi-core multi-link unicast at 25 GB/s or more per pair that takes bf8, and the host
+   cap is lifted, re-run F2 against the same rule.

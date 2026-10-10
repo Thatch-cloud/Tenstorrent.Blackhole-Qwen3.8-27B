@@ -30,10 +30,17 @@ ARMS (in this order; the report is rewritten after each):
             --tile-sizes-mib. Every size read back once and compared (exact), and that read timed (d2h)
   together  the four cards in one call: a ShardTensorToMesh host tensor, the same bytes per card as alone at
             --together-mib (rm16k and tile_bf8), and a ReplicateTensorToMesh one (the replicated weights' path)
+  chunked   the four-card cap found by F1 (run 38036227448: 23.9 GB/s together against 68 GB/s summed alone): the same
+            --together-mib per card written in calls of at most 32 MiB in all (8 MiB a card: under the pinned zero-copy
+            threshold, so through the hugepage memcpy path), and each card alone in 16 MiB calls; with per-thread CPU
+            (thread_busy: is the upload one host thread?)
   restore   the production GDN checkpoint shape (48 layers; rec_state 12x128x128 and conv_carry 3x2,560 per chip, bf16,
             TILE) through _qwen_prefix_restore's h2d path: host conversion and the copies timed apart
   convert   host-only: ttnn.from_torch(device=None) of --together-mib of bf16 into each format (what a cache miss or a
             restore spends before any PCIe transfer)
+  threads   last (concurrent calls into one mesh may not be safe): four Python threads, one per card, each writing its own
+            card's --together-mib with the one-coordinate write, started together, one synchronize; whole and in 8 MiB
+            calls. Exact read back; per-thread CPU. Against together: whether per-card host threads lift the cap
 
 VERDICT (last line 'H2D_PROBE verdict=...'): MEASURED (every arm ran, every read-back exact; exit 0), INEXACT (a read-back
 differed; exit 1), PARTIAL (an arm errored; exit 2), NOT-MEASURED (refused before the open, or the mesh did not open;
@@ -43,6 +50,7 @@ exit 2); the watchdog exits 3. Timings are reported, never judged here: fabric_u
 import argparse
 import os
 import sys
+import time
 import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -69,7 +77,9 @@ GDN_LAYERS = 48
 GDN_REC = (12, 128, 128)
 GDN_CARRY = (3, 2560)
 STATUS = {'MEASURED': 0, 'INEXACT': 1}
-ARMS = ('subset', 'alone', 'together', 'restore', 'convert')
+ARMS = ('subset', 'alone', 'together', 'chunked', 'restore', 'convert', 'threads')
+CHUNK_TOGETHER_MIB = 8
+CHUNK_ALONE_MIB = 16
 
 
 def fmt(name):
@@ -110,7 +120,7 @@ def build_parser():
     parser.add_argument('--warm', type=int, default=WARM)
     parser.add_argument('--subset-mib', type=int, default=SUBSET_MIB)
     parser.add_argument('--restore-layers', type=int, default=GDN_LAYERS)
-    parser.add_argument('--arms', default='subset,alone,together,restore,convert')
+    parser.add_argument('--arms', default=','.join(ARMS))
     return parser
 
 
@@ -135,7 +145,7 @@ def verdict(report):
 
 def environment(environ):
     """What shapes a host->device rate besides the link: the runtime's switches, the CPUs and hugepages the container got."""
-    out = dict((key, value) for key, value in environ.items() if key.startswith('TT_METAL_') or key.startswith('TTNN_'))
+    out = dict((key, value) for key, value in environ.items() if key.startswith(('TT_METAL_', 'TTNN_', 'TT_MESH_')))
     try:
         out['cpus_usable'] = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
@@ -153,6 +163,7 @@ class Probe(object):
     def __init__(self, ttnn, torch, mesh, report, options, log):
         self.ttnn, self.torch, self.mesh, self.report, self.options, self.log = ttnn, torch, mesh, report, options, log
         self.positions = tp4_mesh.DEVICES
+        self.method = None
 
     # -- helpers ---------------------------------------------------------------------------------------------------
     def host(self, name, rows, width, offset, mapper=None, count=1):
@@ -206,7 +217,6 @@ class Probe(object):
 
     def readback(self, target, composer=None):
         """(seconds for the device->host read, the torch tensor)."""
-        import time
         ttnn = self.ttnn
         started = time.perf_counter()
         back = ttnn.from_device(target)
@@ -219,7 +229,8 @@ class Probe(object):
     def record(self, name, record):
         self.report.arm(name, record)
         self.log('%s arm=%s %s' % (TAG, name, ' '.join('%s=%s' % (key, record.get(key)) for key in (
-            'pos', 'chip', 'width', 'nbytes', 'gbps_median', 'gbps_best', 'first_s', 'd2h_gbps', 'exact', 'status', 'error') if key in record)))
+            'pos', 'chip', 'width', 'nbytes', 'gbps_median', 'gbps_best', 'first_s', 'd2h_gbps', 'per_card_gbps_median',
+            'threads_busy', 'exact', 'status', 'error') if key in record)))
         return record
 
     # -- arms ------------------------------------------------------------------------------------------------------
@@ -373,6 +384,11 @@ class Probe(object):
                 target = self.allocate(name, rows, width, self.mesh)
                 try:
                     self.timed_copy(entry, host, target, self.mesh, nbytes * self.positions)
+                    before, started = common.thread_cpu(), time.perf_counter()
+                    ttnn.copy_host_to_device_tensor(host, target)
+                    ttnn.synchronize_device(self.mesh)
+                    entry['threads_busy'] = common.thread_busy(before, common.thread_cpu(),
+                                                               time.perf_counter() - started)
                     entry['per_card_gbps_median'] = plan.gbps(nbytes, entry.get('median_s'))
                     seconds, _ = self.readback(target, composer=ttnn.ConcatMeshToTensor(self.mesh, dim=0))
                     entry.update(d2h_s=round(seconds, 6), d2h_gbps=plan.gbps(nbytes * self.positions, seconds))
@@ -386,9 +402,125 @@ class Probe(object):
                 entry['error'] = common.error_text(error)
             self.record(arm, entry)
 
+    def profiled(self, entry, loop, sync_device, nbytes):
+        """Time `loop` (warm, then repeats) with one synchronize each, and the busiest host threads over the timed part."""
+        ttnn = self.ttnn
+        samples = []
+        for index in range(self.options.warm + self.options.repeats):
+            if index == self.options.warm:
+                before, started = common.thread_cpu(), time.perf_counter()
+            seconds = common.timed(loop, lambda: ttnn.synchronize_device(sync_device))
+            if index >= self.options.warm:
+                samples.append(seconds)
+        wall = time.perf_counter() - started
+        entry.update(plan.summarize(samples, nbytes))
+        entry['threads_busy'] = common.thread_busy(before, common.thread_cpu(), wall)
+        return entry
+
+    def chunked(self):
+        """The together arm's bytes in calls under the 32 MiB pinned threshold, and each card alone in 16 MiB calls (the
+        latter through the one-coordinate write, so only when subset qualified it)."""
+        ttnn = self.ttnn
+        mib = self.options.together_mib
+        rows, width, elements, nbytes = shape_for('rm16k', CHUNK_TOGETHER_MIB)
+        calls = max(1, mib // CHUNK_TOGETHER_MIB)
+        entry = dict(format='rm16k', mib_per_card=mib, call_mib_per_card=CHUNK_TOGETHER_MIB, calls=calls,
+                     nbytes=nbytes * self.positions * calls)
+        target = None
+        try:
+            host = self.host('rm16k', rows, width, 0, mapper=ttnn.ShardTensorToMesh(self.mesh, dim=0), count=self.positions)
+            target = self.allocate('rm16k', rows, width, self.mesh)
+            self.profiled(entry, lambda: [ttnn.copy_host_to_device_tensor(host, target) for _ in range(calls)], self.mesh,
+                          entry['nbytes'])
+            entry['per_card_gbps_median'] = plan.gbps(nbytes * calls, entry.get('median_s'))
+            back = self.shards(ttnn.from_device(target))
+            entry['exact'] = all(self.torch.equal(got.reshape(rows, width), want.reshape(rows, width))
+                                 for got, want in zip(back, self.shards(host)))
+        except Exception as error:  # noqa: BLE001
+            entry['error'] = common.error_text(error)
+        finally:
+            if target is not None:
+                ttnn.deallocate(target)
+        self.record('chunked/together/rm16k/%dMiBx%d' % (CHUNK_TOGETHER_MIB, calls), entry)
+        if self.method != 'mapper':
+            self.report.data.setdefault('skipped', []).append('chunked/alone: the one-coordinate write did not qualify')
+            return
+        rows, width, elements, nbytes = shape_for('rm16k', CHUNK_ALONE_MIB)
+        calls = max(1, mib // CHUNK_ALONE_MIB)
+        cards = (self.report.data.get('positions') or {}).get('cards') or [{}] * self.positions
+        for pos in range(self.positions):
+            entry = dict(pos=pos, chip=cards[pos].get('chip'), width=cards[pos].get('width'), format='rm16k',
+                         call_mib=CHUNK_ALONE_MIB, calls=calls, nbytes=nbytes * calls)
+            target = None
+            try:
+                host = self.one_coordinate_host('rm16k', rows, width, pos, pos)
+                target = self.allocate('rm16k', rows, width, self.mesh)
+                writer = ttnn.get_device_tensors(target)[pos]
+                self.profiled(entry, lambda: [ttnn.copy_host_to_device_tensor(host, writer) for _ in range(calls)], self.mesh,
+                              entry['nbytes'])
+                _, back = self.readback(ttnn.get_device_tensors(target)[pos])
+                entry['exact'] = bool(self.torch.equal(back.reshape(rows, width),
+                                                       common.pattern(self.torch, elements, pos).reshape(rows, width)))
+            except Exception as error:  # noqa: BLE001
+                entry['error'] = common.error_text(error)
+            finally:
+                if target is not None:
+                    ttnn.deallocate(target)
+            self.record('chunked/alone/rm16k/%dMiBx%d/pos%d' % (CHUNK_ALONE_MIB, calls, pos), entry)
+
+    def threads(self):
+        """Four Python threads, one per card, each writing its own card (one-coordinate writes), whole and chunked."""
+        import threading
+        ttnn = self.ttnn
+        mib = self.options.together_mib
+        if self.method != 'mapper':
+            self.report.data.setdefault('skipped', []).append('threads: the one-coordinate write did not qualify')
+            return
+        for call_mib in (mib, CHUNK_TOGETHER_MIB):
+            rows, width, elements, nbytes = shape_for('rm16k', call_mib)
+            calls = max(1, mib // call_mib)
+            entry = dict(format='rm16k', mib_per_card=mib, call_mib_per_card=call_mib, calls=calls,
+                         nbytes=nbytes * calls * self.positions)
+            target = None
+            try:
+                hosts = [self.one_coordinate_host('rm16k', rows, width, pos, pos) for pos in range(self.positions)]
+                target = self.allocate('rm16k', rows, width, self.mesh)
+                writers = [ttnn.get_device_tensors(target)[pos] for pos in range(self.positions)]
+                failures = []
+
+                def worker(pos, gate):
+                    try:
+                        gate.wait()
+                        for _ in range(calls):
+                            ttnn.copy_host_to_device_tensor(hosts[pos], writers[pos])
+                    except Exception as error:  # noqa: BLE001
+                        failures.append('pos%d: %s' % (pos, common.error_text(error)))
+
+                def loop():
+                    gate = threading.Barrier(self.positions)
+                    workers = [threading.Thread(target=worker, args=(pos, gate)) for pos in range(self.positions)]
+                    for thread in workers:
+                        thread.start()
+                    for thread in workers:
+                        thread.join()
+
+                self.profiled(entry, loop, self.mesh, entry['nbytes'])
+                if failures:
+                    entry['error'] = '; '.join(sorted(failures)[:4])
+                else:
+                    entry['per_card_gbps_median'] = plan.gbps(nbytes * calls, entry.get('median_s'))
+                    back = [ttnn.to_torch(ttnn.from_device(view)).reshape(rows, width) for view in ttnn.get_device_tensors(target)]
+                    entry['exact'] = all(self.torch.equal(back[pos], common.pattern(self.torch, elements, pos).reshape(rows, width))
+                                         for pos in range(self.positions))
+            except Exception as error:  # noqa: BLE001
+                entry['error'] = common.error_text(error)
+            finally:
+                if target is not None:
+                    ttnn.deallocate(target)
+            self.record('threads/rm16k/%dMiBx%d' % (call_mib, calls), entry)
+
     def restore(self):
         """_qwen_prefix_restore's h2d path on the production checkpoint shape: conversion and copies timed apart."""
-        import time
         ttnn, torch = self.ttnn, self.torch
         chips = self.positions
         layers = self.options.restore_layers
@@ -439,7 +571,6 @@ class Probe(object):
         return self.record('restore', entry)
 
     def convert(self):
-        import time
         ttnn, torch = self.ttnn, self.torch
         mib = self.options.together_mib
         for name, layout, dtype, width, _ in FORMATS:
@@ -485,9 +616,10 @@ def run(options, ttnn=None, torch=None, environ=None, log=print, report=None, li
         method = None
         if 'subset' in arms:
             method = (common.guarded(report, 'subset', probe.subset, {}) or {}).get('method')
+        probe.method = method
         if 'alone' in arms:
             common.guarded(report, 'alone', lambda: probe.alone(method))
-        for name in ('together', 'restore', 'convert'):
+        for name in ('together', 'chunked', 'restore', 'convert', 'threads'):
             if name in arms:
                 common.guarded(report, name, getattr(probe, name))
     except Exception as error:  # noqa: BLE001

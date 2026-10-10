@@ -63,8 +63,13 @@ LINE_EDGES = ((0, 1), (1, 0), (1, 2), (2, 1), (2, 3), (3, 2))
 FAR = (0, 3)
 STATUS = {'MEASURED': 0, 'INEXACT': 1}
 ARMS = ('local', 'edges', 'far', 'pairs', 'both', 'reverse', 'relay', 'socket')
+# point_to_point sizes its intermediate with tt::datum_size of the input's data format, which throws for block-float formats
+# (point_to_point_device_op.cpp:170-171 -> tt_backend_api_types.hpp:83): the op cannot move bfloat8_b at the pinned runtime.
+# F2 run 38036326663 hit it on every tile_bf8 arm. Such an arm is recorded as unsupported, not as an error.
+UNSUPPORTED_MARK = 'datum for bfp'
 SOCKET_FIFO_KIB = 64
-SOCKET_CONNECTIONS = (1, 2)
+SOCKET_CONNECTIONS = (1, 2, 4)
+SOCKET_FORMATS = ('rm16k', 'tile_bf8')
 
 
 def build_parser():
@@ -112,15 +117,43 @@ class Probe(h2d.Probe):
         ttnn.synchronize_device(self.mesh)
         return out, self.shards(host)
 
-    def intermediate(self, source, sender, receiver):
+    def spec_function(self):
+        """ttnn's p2p_compute_intermediate_tensor_spec wherever the image binds it (F2 run 38036326663: not at ttnn's top
+        level), or None; looked up once and recorded in the report."""
+        if hasattr(self, '_spec_function'):
+            return self._spec_function
         ttnn = self.ttnn
+        found, where = None, None
+        candidates = [('ttnn', ttnn)]
+        native = getattr(ttnn, '_ttnn', None)
+        operations = getattr(native, 'operations', None) if native is not None else None
+        if operations is not None:
+            candidates.append(('ttnn._ttnn.operations.point_to_point', getattr(operations, 'point_to_point', None)))
+            candidates.append(('ttnn._ttnn.operations', operations))
+        for label, owner in candidates:
+            function = getattr(owner, 'p2p_compute_intermediate_tensor_spec', None) if owner is not None else None
+            if callable(function):
+                found, where = function, label
+                break
+        self._spec_function = found
+        self.report.data['intermediate'] = ('preallocated from %s' % where) if found else \
+            'op-allocated each call (p2p_compute_intermediate_tensor_spec is not bound in this image)'
+        self.report.save()
+        return found
+
+    def intermediate(self, source, sender, receiver):
+        """A preallocated intermediate, or None (the op allocates its own each call; recorded once, not a problem)."""
+        ttnn = self.ttnn
+        function = self.spec_function()
+        if function is None:
+            return None
         try:
-            spec = ttnn.p2p_compute_intermediate_tensor_spec(source, self.coord(sender), self.coord(receiver),
-                                                             ttnn.Topology.Linear)
-            return ttnn.allocate_tensor_on_device(spec, self.mesh)
+            return ttnn.allocate_tensor_on_device(function(source, self.coord(sender), self.coord(receiver),
+                                                           ttnn.Topology.Linear), self.mesh)
         except Exception as error:  # noqa: BLE001
-            self.report.problem('intermediate %d->%d not preallocated (%s): the op allocates its own each call'
-                                % (sender, receiver, common.error_text(error)))
+            if UNSUPPORTED_MARK in str(error):
+                raise
+            self.report.data.setdefault('intermediate_errors', []).append('%d->%d: %s' % (sender, receiver, common.error_text(error)))
             return None
 
     def call(self, source, sender, receiver, out, inter):
@@ -147,6 +180,8 @@ class Probe(h2d.Probe):
         cards = (self.report.data.get('positions') or {}).get('cards') or []
         if cards:
             entry['widths'] = [[cards[s].get('width'), cards[r].get('width')] for s, r in transfers]
+        if name in self.unsupported:
+            return self.skip_unsupported(arm, entry, name)
         held = []
         try:
             rows, width, nbytes, source, sources = self.prepared(name, mib)
@@ -174,7 +209,7 @@ class Probe(h2d.Probe):
             entry['exact'] = all(self.exact(out, [(sender, receiver)], sentinels, sources, rows, width)
                                  for sender, receiver, out, _, sentinels in outs)
         except Exception as error:  # noqa: BLE001
-            entry['error'] = common.error_text(error)
+            self.note_error(entry, name, error)
         finally:
             for tensor in held:
                 try:
@@ -187,6 +222,23 @@ class Probe(h2d.Probe):
             entry.get('per_transfer_gbps_median'), entry.get('exact'), (' error=' + entry['error']) if entry.get('error') else ''))
         return entry
 
+    def note_error(self, entry, name, error):
+        """An arm's exception: the block-float limit of point_to_point marks the format unsupported (every later arm of it is
+        skipped as unsupported); anything else is the arm's error."""
+        text = common.error_text(error)
+        if UNSUPPORTED_MARK in text:
+            self.unsupported[name] = 'ttnn.point_to_point cannot size a block-float intermediate: %s' % text
+            self.report.data['unsupported_formats'] = dict(self.unsupported)
+            entry['unsupported'] = self.unsupported[name]
+        else:
+            entry['error'] = text
+
+    def skip_unsupported(self, arm, entry, name):
+        entry['unsupported'] = self.unsupported[name]
+        self.report.arm(arm, entry)
+        self.log('%s arm=%s unsupported (%s)' % (TAG, arm, name))
+        return entry
+
     def relay(self, arm, name, mib, pairs, sharded_direct=False):
         """The relay end to end against a direct write of the same bytes (module docstring, arm relay)."""
         ttnn, torch = self.ttnn, self.torch
@@ -195,6 +247,8 @@ class Probe(h2d.Probe):
         receivers = [receiver for _, receiver in pairs]
         entry = dict(format=name, mib=mib, pairs=[list(pair) for pair in pairs], nbytes_per_card=nbytes,
                      hops=[plan.line_hops(s, r) for s, r in pairs])
+        if name in self.unsupported:
+            return self.skip_unsupported(arm, entry, name)
         held = []
         try:
             dest, sentinels = self.output(name, rows, width)
@@ -257,7 +311,7 @@ class Probe(h2d.Probe):
                 if (entry.get('direct') or {}).get('median_s') else None
             entry['relay_over_direct'] = round(relay_s / direct_s, 4) if relay_s and direct_s else None
         except Exception as error:  # noqa: BLE001
-            entry['error'] = common.error_text(error)
+            self.note_error(entry, name, error)
         finally:
             for tensor in held:
                 try:
@@ -374,6 +428,7 @@ def run(options, ttnn=None, torch=None, environ=None, log=print, report=None, li
         report.save()
         probe = Probe(ttnn, torch, mesh, report, options, log)
         probe.submeshes = ()
+        probe.unsupported = {}
         found = probe.links(**(link_kwargs or {}))
         probe.fabric_facts()
         pairs, unknown = fallback_pairs(found)
@@ -421,10 +476,11 @@ def run(options, ttnn=None, torch=None, environ=None, log=print, report=None, li
                     probe.relay('relay/%s/%dMiB/all' % (name, options.edge_mib), name, options.edge_mib, pairs,
                                 sharded_direct=True)
         if 'socket' in arms:
-            for sender, receiver in pairs:
-                for connections in SOCKET_CONNECTIONS:
-                    probe.socket('socket/rm16k/%dMiB/%d->%d/%dconn' % (options.edge_mib, sender, receiver, connections), 'rm16k',
-                                 options.edge_mib, sender, receiver, connections)
+            for name in SOCKET_FORMATS:
+                for sender, receiver in pairs:
+                    for connections in SOCKET_CONNECTIONS:
+                        probe.socket('socket/%s/%dMiB/%d->%d/%dconn' % (name, options.edge_mib, sender, receiver, connections),
+                                     name, options.edge_mib, sender, receiver, connections)
     except Exception as error:  # noqa: BLE001
         report.data.update(error=common.error_text(error), traceback=traceback.format_exc()[-3000:])
         report.problem('stopped: ' + report.data['error'])

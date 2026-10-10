@@ -87,9 +87,11 @@ class FakeTtnn(object):
         DRAM, L1 = 'DRAM', 'L1'
 
     def __init__(self, descriptor_path, view='broadcast', mapper='exact', refuse_submesh=False, corrupt_p2p=False,
-                 fail_open=False, refuse_socket=False):
+                 fail_open=False, refuse_socket=False, spec_bound=False, bfp_p2p=False):
         self.view, self.mapper, self.refuse_submesh, self.corrupt_p2p = view, mapper, refuse_submesh, corrupt_p2p
-        self.fail_open, self.refuse_socket = fail_open, refuse_socket
+        self.fail_open, self.refuse_socket, self.bfp_p2p = fail_open, refuse_socket, bfp_p2p
+        if spec_bound:   # the serving image does not bind it at ttnn's top level (F2 run 38036326663)
+            self.p2p_compute_intermediate_tensor_spec = self._spec
         self.descriptor_path = descriptor_path
         self.cluster = type('cluster', (), {'serialize_cluster_descriptor': staticmethod(lambda: descriptor_path)})
         self.calls, self.closed, self.quiesced, self.fabric = [], False, False, None
@@ -246,10 +248,15 @@ class FakeTtnn(object):
         parent.shards[pos].copy_(source.reshape(parent.shards[pos].shape))
 
     # fabric
-    def p2p_compute_intermediate_tensor_spec(self, source, sender, receiver, topology):
+    def _spec(self, source, sender, receiver, topology):
+        if source.dtype == 'bf8' and not self.bfp_p2p:
+            raise ValueError('datum for bfp2, bfp4, bfp8 is invalid')
         return ('spec', source.shape, source.dtype, source.layout)
 
     def point_to_point(self, source, sender, receiver, output_tensor=None, intermediate_tensor=None, topology=None):
+        if source.dtype == 'bf8' and not self.bfp_p2p and sender != receiver:
+            # the pinned op sizes its intermediate with tt::datum_size, which throws for block-float formats
+            raise ValueError('datum for bfp2, bfp4, bfp8 is invalid')
         self.calls.append(('p2p', sender[1], receiver[1]))
         data = source.shards[sender[1]].clone()
         if self.corrupt_p2p and sender != receiver:
@@ -417,36 +424,51 @@ class ModelTests(unittest.TestCase):
 
 
 class DecisionTests(unittest.TestCase):
-    def h2d(self, alone, together_s, widths=(16, 16, 4, 4)):
-        return dict(widths=list(widths), alone_gbps=list(alone), together_s=together_s, together_bytes=256 << 20)
+    MIB256 = 256 << 20
 
-    def test_link_bound_with_a_fast_fabric_is_relay(self):
-        cards = [7e9] * 4
-        out = plan.decide(self.h2d([40, 40, 10, 10], 0.03), {(0, 2): 40.0, (1, 3): 40.0}, cards)
+    def h2d(self, alone, together_s, widths=(16, 16, 4, 4)):
+        return dict(widths=list(widths), alone_gbps=list(alone), together_s=together_s, together_bytes=self.MIB256)
+
+    def test_link_bound_with_a_fast_fabric_and_a_fast_host_is_relay(self):
+        out = plan.decide(self.h2d([40, 40, 10, 10], 0.006), {(0, 2): 40.0, (1, 3): 40.0}, [7e9] * 4)
         self.assertEqual(out['verdict'], 'RELAY', out)
-        self.assertTrue(out['overlap'])
+        self.assertGreater(out['host_gbps'], 150)
         self.assertLess(out['relay_s'], out['direct_s'])
 
-    def test_x4_as_fast_as_x16_is_host_bound(self):
-        out = plan.decide(self.h2d([1.2, 1.2, 1.15, 1.1], 0.9), {(0, 2): 40.0, (1, 3): 40.0}, [7e9] * 4)
+    def test_the_measured_host_cap_is_host_bound(self):
+        # F1 run 38036227448: x16 20.5 and x4 13.8 GB/s alone, four cards together 256 MiB each in 44.9 ms (23.9 GB/s)
+        out = plan.decide(self.h2d([20.502, 13.813, 20.442, 13.815], 0.044921, widths=(16, 4, 16, 4)),
+                          {(0, 1): 18.8, (2, 3): 18.8}, [6.9e9] * 4)
         self.assertEqual(out['verdict'], 'HOST-BOUND', out)
-        self.assertFalse(out['overlap'], 'four cards together took four times one card')
+        self.assertAlmostEqual(out['host_gbps'], 23.9, places=1)
+        self.assertAlmostEqual(out['overlap'], 0.35, places=2)
+        self.assertIn('every relayed byte still crosses the host', out['reasons'][0])
+
+    def test_x4_as_fast_as_x16_is_host_bound(self):
+        out = plan.decide(self.h2d([1.2, 1.2, 1.15, 1.1], 0.0001), {(0, 2): 40.0, (1, 3): 40.0}, [7e9] * 4)
+        self.assertEqual(out['verdict'], 'HOST-BOUND', out)
+        self.assertIn('links do not set the rate', out['reasons'][0])
 
     def test_a_slow_fabric_is_direct(self):
-        out = plan.decide(self.h2d([40, 40, 10, 10], 0.03), {(0, 2): 6.0, (1, 3): 6.0}, [7e9] * 4)
+        out = plan.decide(self.h2d([40, 40, 10, 10], 0.006), {(0, 2): 6.0, (1, 3): 6.0}, [7e9] * 4)
         self.assertEqual(out['verdict'], 'DIRECT', out)
 
     def test_the_absolute_floor(self):
-        out = plan.decide(self.h2d([40, 40, 10, 10], 0.03), {(0, 2): 40.0, (1, 3): 40.0}, [7e6] * 4, min_saving_s=1.0)
+        out = plan.decide(self.h2d([40, 40, 10, 10], 0.006), {(0, 2): 40.0, (1, 3): 40.0}, [7e6] * 4, min_saving_s=1.0)
         self.assertEqual(out['verdict'], 'DIRECT')
 
+    def test_the_host_cap_binds_both_times(self):
+        cards = [1e9] * 4
+        self.assertAlmostEqual(plan.direct_seconds(cards, [40, 40, 10, 10], host_gbps=20.0), 0.2)
+        self.assertAlmostEqual(plan.relay_seconds(cards, [40, 40, 10, 10], [(0, 2, 1), (1, 3, 1)], 50.0, host_gbps=20.0), 0.2)
+
     def test_missing_inputs_are_not_measured(self):
-        self.assertEqual(plan.decide(self.h2d([40, None, 10, 10], 0.03), {}, [1] * 4)['verdict'], 'NOT-MEASURED')
+        self.assertEqual(plan.decide(self.h2d([40, None, 10, 10], 0.006), {}, [1] * 4)['verdict'], 'NOT-MEASURED')
         self.assertEqual(plan.decide(self.h2d([40, 40, 10, 10], None), {}, [1] * 4)['verdict'], 'NOT-MEASURED')
-        out = plan.decide(self.h2d([40, 40, 10, 10], 0.03), {(0, 2): 40.0}, [1e9] * 4)
+        out = plan.decide(self.h2d([40, 40, 10, 10], 0.006), {(0, 2): 40.0}, [1e9] * 4)
         self.assertEqual(out['verdict'], 'NOT-MEASURED')
         self.assertIn('1->3', out['reasons'][0])
-        self.assertEqual(plan.decide(self.h2d([40] * 4, 0.03, widths=(16,) * 4), {}, [1] * 4)['verdict'], 'NOT-MEASURED')
+        self.assertEqual(plan.decide(self.h2d([40] * 4, 0.006, widths=(16,) * 4), {}, [1] * 4)['verdict'], 'NOT-MEASURED')
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -491,6 +513,15 @@ class H2dProbeTests(unittest.TestCase):
         self.assertEqual(arms['alone/rm16k/1MiB/pos2']['width'], 4)
         self.assertIn('together/rm16k/1MiB', arms)
         self.assertIn('replicated/rm16k/1MiB', arms)
+        self.assertIn('threads_busy', arms['together/rm16k/1MiB'])
+        self.assertTrue(arms['chunked/together/rm16k/8MiBx1']['exact'])
+        self.assertEqual(sorted(name for name in arms if name.startswith('chunked/alone/')),
+                         ['chunked/alone/rm16k/16MiBx1/pos%d' % pos for pos in range(4)])
+        self.assertTrue(all(arms['chunked/alone/rm16k/16MiBx1/pos%d' % pos]['exact'] for pos in range(4)))
+        for name in ('threads/rm16k/1MiBx1', 'threads/rm16k/8MiBx1'):
+            self.assertTrue(arms[name]['exact'], arms[name])
+            self.assertNotIn('error', arms[name])
+        self.assertTrue(lines[-2].startswith('H2D_PROBE arm=threads/rm16k/8MiBx1'), 'threads runs last: %s' % lines[-2])
         self.assertTrue(arms['restore']['exact'])
         self.assertEqual(arms['restore']['logical_bytes'], h2d.gdn_checkpoint_bytes(4, 2))
         self.assertEqual(h2d.gdn_checkpoint_bytes(), 78446592, 'the production checkpoint')
@@ -580,6 +611,11 @@ class P2pProbeTests(unittest.TestCase):
         self.assertEqual(arms['local/rm16k/1MiB/0->0']['hops'], [0])
         self.assertEqual(arms['both/rm16k/1MiB']['transfers'], [[0, 2], [1, 3]])
         self.assertEqual(arms['pair/tile_bf8/1MiB/0->2']['widths'], [[16, 4]])
+        self.assertIn('block-float', arms['pair/tile_bf8/1MiB/0->2']['unsupported'])
+        self.assertNotIn('error', arms['pair/tile_bf8/1MiB/0->2'])
+        self.assertEqual(sorted(report['unsupported_formats']), ['tile_bf8'])
+        self.assertTrue(report['intermediate'].startswith('op-allocated'))
+        self.assertEqual(report['problems'], [], 'neither the unbound spec function nor bf8 is a problem')
         self.assertEqual(arms['pair/rm16k/1MiB/1->3']['hops'], [2])
         self.assertIn('reverse/rm16k/1MiB/2->0', arms)
         self.assertEqual(sorted(report['decide_inputs']), ['0->2', '1->3'])
@@ -588,11 +624,12 @@ class P2pProbeTests(unittest.TestCase):
         self.assertTrue(relay['exact'])
         self.assertIn('direct_sharded', relay, 'all four positions: the production sharded write is the baseline too')
         self.assertTrue(relay['relay_over_direct'])
-        self.assertTrue(arms['relay/tile_bf8/1MiB/0->2']['exact'])
+        self.assertIn('unsupported', arms['relay/tile_bf8/1MiB/0->2'])
         self.assertNotIn('direct_sharded', arms['relay/rm16k/1MiB/0->2'])
-        self.assertEqual(sorted(report['relay_ab']), sorted(name for name in arms if name.startswith('relay/')))
-        for connections in (1, 2):
-            self.assertTrue(arms['socket/rm16k/1MiB/1->3/%dconn' % connections]['exact'])
+        self.assertEqual(sorted(report['relay_ab']), sorted(name for name in arms if name.startswith('relay/rm16k')))
+        for name in ('rm16k', 'tile_bf8'):
+            for connections in (1, 2, 4):
+                self.assertTrue(arms['socket/%s/1MiB/1->3/%dconn' % (name, connections)]['exact'])
         self.assertIn('send', fake.calls)
         self.assertTrue(lines[-1].startswith('P2P_PROBE verdict=MEASURED'))
 
@@ -612,6 +649,14 @@ class P2pProbeTests(unittest.TestCase):
         self.assertTrue(report['arms']['edge/rm16k/1MiB/0->1']['exact'], 'the fabric arms do not depend on it')
         status, report, _, _ = self.run_probe(mapper='corrupt')
         self.assertEqual((status, report['verdict']), (1, 'INEXACT'))
+
+    def test_a_bound_spec_function_preallocates_and_block_float_runs_where_the_op_takes_it(self):
+        status, report, _, _ = self.run_probe(spec_bound=True, bfp_p2p=True)
+        self.assertEqual((status, report['verdict']), (0, 'MEASURED'))
+        self.assertEqual(report['intermediate'], 'preallocated from ttnn')
+        self.assertTrue(report['arms']['pair/tile_bf8/1MiB/0->2']['exact'])
+        self.assertTrue(report['arms']['relay/tile_bf8/1MiB/all']['exact'])
+        self.assertNotIn('unsupported_formats', report)
 
     def test_a_corrupting_transfer_is_inexact(self):
         status, report, _, _ = self.run_probe(corrupt_p2p=True)

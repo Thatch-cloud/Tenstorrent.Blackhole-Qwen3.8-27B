@@ -134,6 +134,33 @@ def error_text(error):
     return '%s: %s' % (type(error).__name__, str(error)[:400])
 
 
+def thread_cpu(proc='/proc/self/task'):
+    """{thread id: CPU seconds (user + system)} for every thread of this process, {} where /proc is unreadable."""
+    ticks = float(os.sysconf('SC_CLK_TCK')) if hasattr(os, 'sysconf') else 100.0
+    out = {}
+    try:
+        names = os.listdir(proc)
+    except OSError:
+        return out
+    for name in names:
+        try:
+            with open(os.path.join(proc, name, 'stat')) as handle:
+                fields = handle.read().rsplit(')', 1)[1].split()
+            out[name] = (int(fields[11]) + int(fields[12])) / ticks
+        except (OSError, IndexError, ValueError):
+            continue
+    return out
+
+
+def thread_busy(before, after, wall, top=6):
+    """The busiest threads over `wall` seconds, as utilisation fractions (1.0 = one core all the time), highest first:
+    whether a transfer ran on one host thread or several."""
+    if not wall:
+        return []
+    use = sorted(((after.get(key, 0.0) - before.get(key, 0.0)) / wall for key in after), reverse=True)
+    return [round(value, 3) for value in use[:top] if value > 0]
+
+
 def guarded(report, name, call, default=None):
     """Run one arm; an exception becomes a problem line in the report (the next arm still runs) and `default` is returned."""
     try:
