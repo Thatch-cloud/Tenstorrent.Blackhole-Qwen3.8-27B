@@ -72,7 +72,10 @@ def arms(plan):
     last = dict((arm_id, reason) for _wp, arm_id, reason in plan.get('pack_last', ()))
     for arm in out:
         arm['last'] = last.get(arm['id'])
-    return [arm for arm in out if not arm['last']] + [arm for arm in out if arm['last']]
+    first = [arm_id for _wp, arm_id in plan.get('pack_order', ())]
+    rank = lambda arm: first.index(arm['id']) if arm['id'] in first else len(first)      # noqa: E731
+    middle = sorted((arm for arm in out if not arm['last']), key=rank)       # (stable: the unlisted keep the manifests' order)
+    return middle + [arm for arm in out if arm['last']]
 
 
 def jobs(plan):

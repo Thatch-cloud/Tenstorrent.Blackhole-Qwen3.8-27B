@@ -311,6 +311,28 @@ class ArmTests(unittest.TestCase):
         text = (pack / 'ORDER.txt').read_text(encoding='utf-8')
         self.assertIn('# LAST: S1 (S1 shard argmax) runs after every other arm, audit and ABAB alike: needs a card-M record first', text)
 
+    def test_pack_order_runs_the_listed_levers_first_in_that_order_then_the_rest_then_the_last(self):
+        manifests = json.loads(json.dumps(MANIFESTS))
+        manifests['WP0.json'] = {'wp': 'WP0', 'pack_order': ['dperm', 'ccl'], 'pack_last': ['ccl']}
+        names = [short(line[0]) for line in order_lines(pack_of(plan_of(manifests)))]
+        self.assertEqual(names, ['B0', 'X0', 'DPERMA', 'S1A', 'DPERMC1', 'DPERML1', 'DPERMC2', 'DPERML2', 'S1C1', 'S1L1', 'S1C2', 'S1L2', 'CCLC1', 'CCLL1', 'CCLC2', 'CCLL2', 'Z'],
+                         'an arm under pack_last is last even when pack_order lists it')
+        manifests['WP0.json'] = {'wp': 'WP0', 'pack_order': ['dperm', 'ccl']}
+        names = [short(line[0]) for line in order_lines(pack_of(plan_of(manifests)))]
+        self.assertEqual([n for n in names if n.endswith('A')], ['DPERMA', 'S1A'], 'listed first, then the unlisted in manifest order (ccl has no audit)')
+        self.assertEqual([n for n in names if n.endswith('C1')], ['DPERMC1', 'CCLC1', 'S1C1'])
+
+    def test_pack_order_with_an_unknown_or_repeated_arm_is_refused(self):
+        manifests = json.loads(json.dumps(MANIFESTS))
+        manifests['WP0.json'] = {'wp': 'WP0', 'pack_order': ['nothing']}
+        with self.assertRaises(fusion.ManifestError) as caught:
+            plan_of(manifests)
+        self.assertIn('pack_order arm nothing is neither a lever nor a pack arm', str(caught.exception))
+        manifests['WP0.json'] = {'wp': 'WP0', 'pack_order': ['s1', 's1']}
+        with self.assertRaises(fusion.ManifestError) as caught:
+            plan_of(manifests)
+        self.assertIn('names s1 twice', str(caught.exception))
+
     def test_an_arm_under_pack_last_that_is_nothing_is_refused_by_name(self):
         manifests = json.loads(json.dumps(MANIFESTS))
         manifests['WP0.json'] = {'wp': 'WP0', 'pack_last': ['nothing']}

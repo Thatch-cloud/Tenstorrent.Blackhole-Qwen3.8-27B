@@ -52,7 +52,7 @@ IMAGE_ROOTS = ('scripts/ci/', 'speculative-decoding/harness/')
 
 # What a manifest may hold. Aliases are the spellings a package is likely to use; they mean the canonical key.
 INFO_KEYS = ('wp', 'branch', 'head', 'description', 'reason', 'notes', 'card_jobs', 'docs', 'owner', 'ci_run', 'status')
-KEYS = ('levers', 'profiles', 'smoke', 'smoke_rules', 'pack_arms', 'pack_last', 'image_files', 'tests', 'tp_addresses')
+KEYS = ('levers', 'profiles', 'smoke', 'smoke_rules', 'pack_arms', 'pack_order', 'pack_last', 'image_files', 'tests', 'tp_addresses')
 ALIASES = {
     'twin_profiles': 'profiles', 'profile_twins': 'profiles', 'twins': 'profiles',
     'smoke_dispatch': 'smoke', 'smoke_markers': 'smoke', 'smoke_modules': 'smoke', 'smoke_check': 'smoke',
@@ -339,7 +339,7 @@ def tp_of(wp, value, where):
 
 def normalise(manifests):
     """The plan: every manifest's entries in one structure, in file-name then file order. Names collide across packages: refused."""
-    plan = dict(levers=[], profiles=[], smoke=[], smoke_rules=[], pack_arms=[], pack_last=[], image_files=[], tests=[], tp={key: [] for key in TP_KEYS}, info=[])
+    plan = dict(levers=[], profiles=[], smoke=[], smoke_rules=[], pack_arms=[], pack_order=[], pack_last=[], image_files=[], tests=[], tp={key: [] for key in TP_KEYS}, info=[])
     for file_name, raw in manifests:
         where = 'fusion-wp/' + file_name
         wp = text_of(raw.get('wp', Path(file_name).stem.upper()), where, 'wp')
@@ -375,6 +375,12 @@ def normalise(manifests):
             if not ID.match(arm):
                 raise ManifestError('%s: pack arm %r is the suffix of an extra profile twin (lower-case letters, digits and single dashes)' % (where, arm))
             plan['pack_arms'].append((wp, arm))
+        for arm in listing(canonical.get('pack_order', (0, None))[1], where, 'pack_order'):
+            arm = text_of(arm, where, 'a pack_order arm')
+            arm = arm[len(NAMESPACE):] if arm.startswith(NAMESPACE) else arm
+            if not ID.match(arm):
+                raise ManifestError('%s: pack_order arm %r is a lever id or an extra twin suffix' % (where, arm))
+            plan['pack_order'].append((wp, arm))
         for arm in listing(canonical.get('pack_last', (0, None))[1], where, 'pack_last'):
             reason = 'listed under pack_last by %s' % wp
             if isinstance(arm, dict):
@@ -416,6 +422,12 @@ def normalise(manifests):
     for wp, arm, _reason in plan['pack_last']:
         if arm not in known:
             raise ManifestError('%s: pack_last arm %s is neither a lever nor a pack arm' % (wp, arm))
+    listed = [arm for _wp, arm in plan['pack_order']]
+    for wp, arm in plan['pack_order']:
+        if arm not in known:
+            raise ManifestError('%s: pack_order arm %s is neither a lever nor a pack arm' % (wp, arm))
+        if listed.count(arm) > 1:
+            raise ManifestError('%s: pack_order names %s twice' % (wp, arm))
     owners = {}
     for twin in profile_twins(plan):
         if twin['name'] in owners:
