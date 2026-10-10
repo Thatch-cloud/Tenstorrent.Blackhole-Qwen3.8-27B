@@ -42,7 +42,10 @@ def image_env():
         lines.append(line.rstrip(chr(92)).strip())
         if not line.rstrip().endswith(chr(92)):
             break
-    return dict(re.findall(r'(QWEN_[A-Z0-9_]+)=(\S+)', ' '.join(lines)))
+    # a ${NAME} in the ENV is the Dockerfile's build arg (QWEN_FAST_RUNTIME_BINARY_SHA256=${GRAFT_SHA}): read with the arg's DEFAULT, what a build with no --build-arg bakes
+    defaults = dict(re.findall(r'(?m)^ARG (\w+)=(\S+)\s*$', text))
+    return {name: re.sub(r'\$\{(\w+)\}', lambda match: defaults.get(match.group(1), match.group(0)), value)
+            for name, value in re.findall(r'(QWEN_[A-Z0-9_]+)=(\S+)', ' '.join(lines))}
 
 
 def container_env(name):
