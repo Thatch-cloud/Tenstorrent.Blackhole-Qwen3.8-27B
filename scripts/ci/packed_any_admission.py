@@ -269,6 +269,27 @@ def served_binary(environ=None):
     return requested if requested in SERVED_BINARIES else K64J_TTNNCPP_SHA256
 
 
+IMAGE_GRAFT_ARG = 'GRAFT_SHA'
+
+
+def image_binary(environ=None):
+    """The binary the image UNDER TEST claims to bake: the runtime pin the image's ENV carries (QWEN_FAST_RUNTIME_BINARY_SHA256, what a running container
+    has) or, during the build's own test steps (which run before that ENV instruction), the GRAFT_SHA build arg the Dockerfile exposes to every RUN
+    (docker/qwen-c2-serving.Dockerfile: K64j's by default, K64j-OQ's with C2_BAKE_GRAFT=K64j-OQ). Neither set reads as K64j, the only graft before the build arg
+    existed. Raises AdmissionRefused for a value that is neither of SERVED_BINARIES (or two that disagree): the in-image test must never learn its expectation from
+    the binary it is checking, so an unknown pin is a failure, not a new expectation."""
+    environ = os.environ if environ is None else environ
+    found = {name: (environ.get(name) or '').lower() for name in (RUNTIME_BINARY_ENV, IMAGE_GRAFT_ARG)}
+    found = {name: value for name, value in found.items() if value}
+    problems = ['%s=%s names neither K64j (%s) nor K64j-OQ (%s)' % (name, value, K64J_TTNNCPP_SHA256[:16], K64J_OQ_TTNNCPP_SHA256[:16])
+                for name, value in found.items() if value not in SERVED_BINARIES]
+    if len(set(found.values())) > 1:
+        problems.append('the image pins disagree: %s' % ', '.join('%s=%s' % (name, value[:16]) for name, value in sorted(found.items())))
+    if problems:
+        raise AdmissionRefused('the image under test pins a binary the admission does not serve: %s' % '; '.join(problems), problems)
+    return next(iter(found.values())) if found else K64J_TTNNCPP_SHA256
+
+
 def binary_label(sha):
     return SERVED_BINARIES.get(sha, 'K64j')
 

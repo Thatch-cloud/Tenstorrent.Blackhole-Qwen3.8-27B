@@ -109,6 +109,94 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn('lacks', str(caught.exception))
 
 
+class InImageRuntimeLogicTests(unittest.TestCase):
+    """The in-image test of the image build (test_packed_any_admission.InImageRuntimeTests.test_the_image_runtime_is_k64j_as_qualified), run here against a
+    fake runtime root for both build-arg values. The build's test steps run BEFORE the Dockerfile's ENV, so the image's declaration is the GRAFT_SHA build arg
+    (exposed to every RUN as an environment variable); a running container has QWEN_FAST_RUNTIME_BINARY_SHA256 instead. Run build 38081569132 failed here: the
+    test required K64j whatever was baked."""
+
+    def setUp(self):
+        import test_packed_any_admission as module
+        self.module = module
+        self.tmp = Path(tempfile.mkdtemp(prefix='oneq-inimage-'))
+        self.addCleanup(__import__('shutil').rmtree, str(self.tmp), True)
+
+    def run_in_image_test(self, runtime, environ):
+        """Call the test method body directly (the class is skipped outside an image) with check_runtime pointed at the fake root and `environ` as the process
+        environment."""
+        real = admission.check_runtime
+        case = self.module.InImageRuntimeTests('test_the_image_runtime_is_k64j_as_qualified')
+        with runtime, mock.patch.dict('os.environ', environ, clear=True), \
+                mock.patch.object(admission, 'check_runtime', lambda root, **kwargs: real(self.tmp, **kwargs)):
+            case.test_the_image_runtime_is_k64j_as_qualified()
+
+    def k64j(self):
+        runtime = FakeRuntime(self.tmp)
+        runtime.patches.append(mock.patch.object(admission, 'SERVED_BINARIES', {sha(runtime.binary): 'K64j', OQ: 'K64j-OQ'}))
+        return runtime
+
+    def oq(self):
+        runtime = FakeRuntime(self.tmp, admission.BINARY_LITERALS + admission.ONEQ_BINARY_LITERALS)
+        runtime.patches.append(mock.patch.object(admission, 'K64J_TTNNCPP_SHA256', K64J))           # K64j stays the real K64j: these bytes are K64j-OQ's, not K64j's
+        runtime.patches.append(mock.patch.object(admission, 'K64J_OQ_TTNNCPP_SHA256', sha(runtime.binary)))
+        runtime.patches.append(mock.patch.object(admission, 'SERVED_BINARIES', {K64J: 'K64j', sha(runtime.binary): 'K64j-OQ'}))
+        return runtime
+
+    def test_the_k64j_image_passes_with_its_build_arg_with_the_runtime_pin_or_with_neither(self):
+        pin = sha(self.k64j().binary)
+        for environ in ({'GRAFT_SHA': pin}, {admission.RUNTIME_BINARY_ENV: pin}, {admission.RUNTIME_BINARY_ENV: pin, 'GRAFT_SHA': pin}, {}):
+            with self.subTest(environ=sorted(environ)):
+                self.run_in_image_test(self.k64j(), environ)
+
+    def test_the_k64j_oq_image_passes_with_its_build_arg_or_its_runtime_pin(self):
+        pin = sha(self.oq().binary)
+        for environ in ({'GRAFT_SHA': pin}, {admission.RUNTIME_BINARY_ENV: pin}, {admission.RUNTIME_BINARY_ENV: pin, 'GRAFT_SHA': pin}):
+            with self.subTest(environ=sorted(environ)):
+                self.run_in_image_test(self.oq(), environ)
+
+    def test_a_baked_k64j_oq_does_not_pass_as_k64j_and_the_other_way_round(self):
+        with self.assertRaises(admission.AdmissionRefused) as caught:           # K64j declared (the default build arg), K64j-OQ bytes baked
+            self.run_in_image_test(self.oq(), {'GRAFT_SHA': K64J})
+        self.assertIn("not K64j's", str(caught.exception))
+        plain = sha(self.k64j().binary)
+        with self.assertRaises(admission.AdmissionRefused) as caught:           # K64j-OQ declared, K64j bytes baked (the build arg without the graft)
+            self.run_in_image_test(self.k64j_declaring_oq(plain), {'GRAFT_SHA': 'e' * 64})
+        self.assertIn('K64j-OQ', str(caught.exception))
+
+    def k64j_declaring_oq(self, plain):
+        runtime = FakeRuntime(self.tmp)
+        runtime.patches.append(mock.patch.object(admission, 'K64J_OQ_TTNNCPP_SHA256', 'e' * 64))
+        runtime.patches.append(mock.patch.object(admission, 'SERVED_BINARIES', {plain: 'K64j', 'e' * 64: 'K64j-OQ'}))
+        return runtime
+
+    def test_any_other_pin_is_refused_by_name_and_two_pins_that_disagree_are_refused(self):
+        for environ in ({'GRAFT_SHA': 'ab' * 32}, {'GRAFT_SHA': 'not a sha'}, {admission.RUNTIME_BINARY_ENV: 'cf54d716669be6b71f1d627e74892c90f562495dc9500589408a72b4ddccf4a4'}):
+            with self.subTest(environ=environ), self.assertRaises(admission.AdmissionRefused) as caught:
+                self.run_in_image_test(self.k64j(), environ)
+            self.assertIn('names neither K64j', str(caught.exception))
+        with self.assertRaises(admission.AdmissionRefused) as caught:
+            admission.image_binary({admission.RUNTIME_BINARY_ENV: OQ, 'GRAFT_SHA': K64J})
+        self.assertIn('the image pins disagree', str(caught.exception))
+
+    def test_image_binary_reads_the_runtime_pin_and_the_build_arg_and_defaults_to_k64j(self):
+        self.assertEqual(admission.image_binary({}), K64J)
+        self.assertEqual(admission.image_binary({'GRAFT_SHA': OQ}), OQ)
+        self.assertEqual(admission.image_binary({'GRAFT_SHA': OQ.upper()}), OQ)
+        self.assertEqual(admission.image_binary({admission.RUNTIME_BINARY_ENV: K64J}), K64J)
+        self.assertEqual(admission.image_binary({admission.RUNTIME_BINARY_ENV: OQ, 'GRAFT_SHA': OQ}), OQ)
+        self.assertEqual(admission.image_binary({'GRAFT_SHA': ''}), K64J)
+
+    def test_the_dockerfile_exposes_the_build_arg_before_every_test_step_that_reads_it(self):
+        """The in-image test steps are RUN steps before the ENV instruction: GRAFT_SHA must be declared above them (an ARG is an environment variable of the RUN
+        steps that follow its declaration) and the runtime-pin ENV must come after, which is why the test reads the build arg."""
+        dockerfile = (HERE.parents[1] / 'docker' / 'qwen-c2-serving.Dockerfile').read_text(encoding='utf-8')
+        arg = dockerfile.index('\nARG GRAFT_SHA=')
+        for step in ('python3 -B -m unittest $tests', 'qwen_prefix_stage.py apply'):
+            self.assertLess(arg, dockerfile.index(step), step)
+        self.assertLess(dockerfile.index('python3 -B -m unittest $tests'), dockerfile.index('QWEN_FAST_RUNTIME_BINARY_SHA256=${GRAFT_SHA}'))
+        self.assertEqual(dockerfile.count('\nFROM '), 1, 'one stage: the ARG stays in scope for every step below it')
+
+
 class EvidenceTests(unittest.TestCase):
     def problems(self, record, environ, capacity=admission.CAPACITY_131K):
         return admission.evidence_problems(record, tp=4, capacity=capacity, environ=environ)
