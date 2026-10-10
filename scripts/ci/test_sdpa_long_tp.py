@@ -214,9 +214,11 @@ class SmokeAndProfileTests(unittest.TestCase):
         # the ship candidate carries multi on TRAFFIC only under its owner traffic waiver, which must name the flag (test_ship_ln_w2_er)
         # the W2 kill drill twin of the ship profile is a gate-only copy of it (test_w2_switch)
         from make_w2_kill_profiles import twin_names as kill_twins
+        # the op-fusion programme's twins are the production profile plus exactly their flags, so they carry multi too (test_fusion_wp)
+        from make_fusion_profiles import twin_names as fusion_twin_names
         from test_tp4_w2ln_profiles import MULTI as WINDOW_MULTI, SHIPPED
         allowed = {self.TWIN, 'c2-packed-tp4-8x262k-best-sdpamulti', 'c2-packed-tp4-8x262k-best-sdpamulti-audit',
-                   'c2-packed-tp4-8x262k-w2', 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1', 'c2-packed-tp4-8x262k-w2-nof1-audit'} | set(WINDOW_MULTI) | set(kill_twins())
+                   'c2-packed-tp4-8x262k-w2', 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1', 'c2-packed-tp4-8x262k-w2-nof1-audit'} | set(WINDOW_MULTI) | set(kill_twins()) | set(fusion_twin_names())
         for name, body in self.PROFILES.items():
             if name in SHIPPED:
                 self.assertEqual(body['owner_traffic_waiver']['levers'].get(FLAG), body['env'].get(FLAG), name)

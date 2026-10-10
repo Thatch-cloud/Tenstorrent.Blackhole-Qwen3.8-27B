@@ -246,6 +246,10 @@ class ProfileTests(unittest.TestCase):
         import make_w2_kill_profiles
 
         generated |= set(make_w2_kill_profiles.twin_names())
+        # the op-fusion programme's twins (make_fusion_profiles; test_fusion_wp holds each as the production profile plus exactly its flags) carry its parked flags by inheritance
+        import make_fusion_profiles
+
+        generated |= set(make_fusion_profiles.twin_names())
         # the region-read audit twins (make_kvread_profiles; test_kvread_profiles holds each as its parent plus one flag) carry their parent's flags by inheritance
         region_read = {twin: parent for parent, twin, mode in kvread_twins.TWINS}
         for name, profile in profiles.items():
