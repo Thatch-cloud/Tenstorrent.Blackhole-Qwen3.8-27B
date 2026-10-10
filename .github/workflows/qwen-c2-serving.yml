@@ -12,6 +12,9 @@ name: Qwen C2 serving image
 #            64-row block against its one-tile calls, bit for bit, then the tile-split wrapper): rs-tile-spike.json
 #            C2_FABRIC_PROBE=kvread runs scripts/ci/tp4_kv_read_probe.py (the prefix audit's region read, ttnn.qwen_read_blocks, against the
 #            whole-cache read byte for byte on the pool-sized cache; KV_READ_PROBE verdict=PASS|FAIL): kv-read-probe.json
+#            C2_FABRIC_PROBE=subdev runs scripts/ci/tp4_subdev_probe.py (H2: an all_gather on the target sub-device and one on the drafter sub-device in
+#            flight together on the (1, 4) ring, two command queues, separate semaphores; SUBDEV_H2 verdict=...): subdev-probe.json; subdev-watch is the
+#            same under TT_METAL_WATCHER=5 (untimed), its watcher log copied beside the report
 #   cardm  - a single-card qualification harness (C2_CARDM_HARNESS, e.g. optimisation/ttnn-op/k64j/run_card_b.sh)
 #            on card M alone, card B being reserved for another project: QUAL_CARD=card M, ALLOW_SERVING_CARD=1, after
 #            the same refusals as the gate (anything holding M or A, a platform serving container); never card
@@ -434,11 +437,14 @@ jobs:
           image=zot.thatch.local:5000/tt-vllm:qwen38-c2-$TAG
           # C2_FABRIC_PROBE: the fabric probe (the default) or the reduction-order spike; both open the mesh once, from
           # this checkout, under the same descriptor and contract-off environment.
+          probe_args=()
           case "${PROBE:-fabric}" in
             fabric) script=tp4_fabric_probe.py; report=fabric-probe.json ;;
             rs-tile) script=tp4_rs_tile_spike.py; report=rs-tile-spike.json ;;
             mr) script=tp4_mr_probe.py; report=mr-probe.json ;;
             kvread) script=tp4_kv_read_probe.py; report=kv-read-probe.json ;;
+            subdev) script=tp4_subdev_probe.py; report=subdev-probe.json ;;
+            subdev-watch) script=tp4_subdev_probe.py; report=subdev-probe.json; probe_args=(--watcher) ;;
             *) echo "unknown fabric probe: $PROBE" >&2; exit 1 ;;
           esac
           results="$RUNNER_TEMP/c2-results/fabric"
@@ -477,10 +483,10 @@ jobs:
             -e MESH_DEVICE=P150x4 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_C2_SERVING=0 \
             -e TT_METAL_CACHE=/root/.cache/tt-metal-cache -e TT_CACHE_PATH=/tmp/tt-weights \
             -e TT_MESH_GRAPH_DESC_PATH=/c2/scripts/ci/qwen_p150x4_ring_mesh_graph_descriptor.textproto \
-            --entrypoint python3 "$image" -B "/c2/scripts/ci/$script" --fabric "$FABRIC" \
+            --entrypoint python3 "$image" -B "/c2/scripts/ci/$script" --fabric "$FABRIC" ${probe_args[@]+"${probe_args[@]}"} \
             --output "/probe-results/$report" 2>&1 | tee "$RUNNER_TEMP/c2-results/fabric-probe.log" || status=$?
           sudo -n chown -R "$(id -u):$(id -g)" "$results" 2>/dev/null || true
-          grep -E 'FABRIC_PROBE|TP4_RS_TILE|MR_PROBE|KV_READ_PROBE' "$RUNNER_TEMP/c2-results/fabric-probe.log" | tail -60 || true
+          grep -E 'FABRIC_PROBE|TP4_RS_TILE|MR_PROBE|KV_READ_PROBE|SUBDEV_H2' "$RUNNER_TEMP/c2-results/fabric-probe.log" | tail -60 || true
           exit "$status"
       - name: Run a qualification harness on card M
         if: contains(steps.job.outputs.actions, 'cardm')
@@ -578,6 +584,8 @@ jobs:
           ls -la "$out" 2>/dev/null | head -40
           # The verdict line of either K64j harness: k64j_card_b.py's K64J_CARD, extent_reader_card_b.py's K64J_READER.
           grep -h -E '^K64J_(CARD|READER) ' "$out"/*.log 2>/dev/null | tail -2 || true
+          # The verdict line of the sub-device overlap harness H1 (optimisation/ttnn-op/subdev_h/subdev_h1.py).
+          grep -h -E '^SUBDEV_H1 verdict=' "$out"/*.log 2>/dev/null | tail -1 || true
       - name: G1 base drift
         if: contains(steps.job.outputs.actions, 'drift')
         working-directory: c2

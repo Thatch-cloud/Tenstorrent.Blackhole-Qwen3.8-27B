@@ -55,6 +55,7 @@ EMBEDDING = [
     OPS / 'v5split' / 'run_card_m.sh',
     OPS / 'sdpa_tp4_long' / 'run_card_m.sh',
     OPS / 'mr_probe' / 'run_card_m.sh',
+    OPS / 'subdev_h' / 'run_card_m.sh',
     OPS / 'gdn_conv_gates_spread' / 'run_card_m.sh',
     OPS / 'canon_probe' / 'run_card_m.sh',
     OPS / 'sdpa_decode_qwen' / 'run_probe_k1.sh',
@@ -84,6 +85,7 @@ LAUNCH = {
     OPS / 'v5split' / 'run_card_m.sh': r'^timeout -k 30 "\$timeout_s" docker run',
     OPS / 'sdpa_tp4_long' / 'run_card_m.sh': r'^timeout -k 30 "\$timeout_s" docker run',
     OPS / 'mr_probe' / 'run_card_m.sh': r'^timeout -k 30 "\$timeout_s" docker run',
+    OPS / 'subdev_h' / 'run_card_m.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
     OPS / 'gdn_conv_gates_spread' / 'run_card_m.sh': r'^timeout -k 30 "\$timeout_s" docker run',
     OPS / 'canon_probe' / 'run_card_m.sh': r'^timeout -k 30 "\$timeout_s" docker run',
     OPS / 'sdpa_decode_qwen' / 'run_probe_k1.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
@@ -112,7 +114,7 @@ SCRUB = ('QUAL_CARD', 'ALLOW_SERVING_CARD', 'M1_READER', 'IMAGE', 'M1_ARGS', 'M1
          'RESULTS', 'M1_SRC', 'KOPGRAFT_PF', 'PF_SRC', 'PF_DRY_RUN', 'WATCHER', 'REFERENCE', 'CARD', 'NAME',
          'CONTAINER', 'GDN_USER_BATCH_DEVICE', 'K64F_SRC', 'KOPGRAFT64', 'REPO', 'RUNNER_NAME', 'FAKE_HELD', 'MSYS',
          'PROBE_DRY_RUN', 'EXPECT_TTNNCPP_SHA256', 'K64I_DRY_RUN', 'KOPGRAFT64_REFERENCE', 'PAIR_ROW_DRY_RUN', 'K64J_DRY_RUN', 'K64J_CARD_DRY_RUN', 'K64J_BUILD_DRY_RUN',
-         'GDN_SEQ_BLOCK_IMAGE')
+         'GDN_SEQ_BLOCK_IMAGE', 'SUBDEV_DRY_RUN', 'WATCHDOG_S', 'IMAGE_TAG')
 
 
 def with_x():
@@ -1721,7 +1723,7 @@ class HarnessTests(unittest.TestCase):
                      OPS / 'verify_t2' / 'run_card_m.sh', OPS / 'c1e_gateup' / 'run_card_b.sh',
                      OPS / 'draft_slide_inplace' / 'run_card_b.sh',
                      OPS / 'sdpa_decode_qwen' / 'run_probe_k1.sh', OPS / 'sdpa_decode_slice' / 'run_card_b.sh',
-                     OPS / 'pair_row_probe' / 'run_card_b.sh', OPS / 'k64j_probe' / 'run_card_b.sh'] + SOURCING
+                     OPS / 'pair_row_probe' / 'run_card_b.sh', OPS / 'k64j_probe' / 'run_card_b.sh', OPS / 'subdev_h' / 'run_card_m.sh'] + SOURCING
 
     def invoke(self, path, directory, **env):
         args = [arg.replace('{out}', Path(directory, 'out').as_posix()) for arg in self.ARGS.get(path, [])]
@@ -1779,6 +1781,7 @@ class HarnessTests(unittest.TestCase):
             (OPS / 'sdpa_decode_slice' / 'run_card_b.sh', dict(K64I_DRY_RUN='1'), 'qwen-k64i-card-m'),
             (OPS / 'pair_row_probe' / 'run_card_b.sh', dict(PAIR_ROW_DRY_RUN='1'), 'qwen-pairrow-card-m'),
             (OPS / 'k64j_probe' / 'run_card_b.sh', dict(K64J_DRY_RUN='1'), 'qwen-k64j-card-m'),
+            (OPS / 'subdev_h' / 'run_card_m.sh', dict(SUBDEV_DRY_RUN='1'), 'qwen-subdev-card-m'),
         )
         for path, env, name in runs:
             with self.subTest(path=path.name), tempfile.TemporaryDirectory() as directory:

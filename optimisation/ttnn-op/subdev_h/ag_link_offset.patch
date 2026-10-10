@@ -1,0 +1,61 @@
+--- a/ttnn/cpp/ttnn/operations/experimental/ccl/all_gather_async/device/all_gather_async_default_program_factory.cpp
++++ b/ttnn/cpp/ttnn/operations/experimental/ccl/all_gather_async/device/all_gather_async_default_program_factory.cpp
+@@ -8,6 +8,8 @@
+ #include "ttnn/operations/experimental/ccl/composite_common.hpp"
+ #include <tt-metalium/tensor_accessor_args.hpp>
+ 
++#include <cstdlib>
++
+ namespace ttnn {
+ 
+ using namespace ccl;
+@@ -646,7 +648,17 @@
+     auto worker_core_iter = sender_worker_core_range_set.ranges().cbegin();
+     auto mux_core_iter = mux_core_range_set.ranges().cbegin();
+     auto termination_master_core_iter = termination_master_core_ranges.cbegin();
++    // QWEN graft (optimisation/ttnn-op/subdev_h/subdev_h2.py): the all-gather programs of sub-device 1 (the drafter's) connect to fabric link (link + QWEN_AG_LINK_OFFSET_SD1)
++    // instead of link, so a target gather on sub-device 0 and a drafter gather on sub-device 1 do not share a fabric sender channel. Unset or 0: byte-identical
++    // to the unpatched factory. sub_device_id is part of the op's program hash, so the two sub-devices never share a cached program.
++    uint32_t qwen_link_offset = 0;
++    if (const char* offset_env = std::getenv("QWEN_AG_LINK_OFFSET_SD1")) {
++        if (sub_device_id.has_value() && *(sub_device_id.value()) == 1) {
++            qwen_link_offset = static_cast<uint32_t>(std::strtoul(offset_env, nullptr, 10));
++        }
++    }
+     for (uint32_t link = 0; link < num_links; link++) {
++        const uint32_t fabric_link = link + qwen_link_offset;
+         for (uint32_t dir = 0; dir < num_directions_per_link; dir++) {
+             CoreCoord termination_master_logical_core = {0, 0};
+             CoreCoord mux_virtual_core = {0, 0};
+@@ -660,11 +672,11 @@
+                     if (dir) {  // forward
+                         const auto dst_node_id = mesh_device->get_fabric_node_id(backward_coord.value());
+                         mux_rt_args = mux_kernel_config.get_fabric_mux_run_time_args(
+-                            src_node_id, dst_node_id, link, program, {mux_logical_core});
++                            src_node_id, dst_node_id, fabric_link, program, {mux_logical_core});
+                     } else {
+                         const auto dst_node_id = mesh_device->get_fabric_node_id(forward_coord.value());
+                         mux_rt_args = mux_kernel_config.get_fabric_mux_run_time_args(
+-                            src_node_id, dst_node_id, link, program, {mux_logical_core});
++                            src_node_id, dst_node_id, fabric_link, program, {mux_logical_core});
+                     }
+                     tt::tt_metal::SetRuntimeArgs(program, mux_kernel_id, {mux_logical_core}, mux_rt_args);
+                 }
+@@ -787,7 +799,7 @@
+                             const auto src_fabric_node_id = mesh_device->get_fabric_node_id(sender_device_coord);
+                             const auto dst_fabric_node_id = mesh_device->get_fabric_node_id(backward_coord.value());
+                             tt::tt_fabric::append_fabric_connection_rt_args(
+-                                src_fabric_node_id, dst_fabric_node_id, link, program, {core}, writer_rt_args);
++                                src_fabric_node_id, dst_fabric_node_id, fabric_link, program, {core}, writer_rt_args);
+                         }
+                     } else {
+                         writer_rt_args.push_back(forward_coord.has_value());
+@@ -795,7 +807,7 @@
+                             const auto src_fabric_node_id = mesh_device->get_fabric_node_id(sender_device_coord);
+                             const auto dst_fabric_node_id = mesh_device->get_fabric_node_id(forward_coord.value());
+                             tt::tt_fabric::append_fabric_connection_rt_args(
+-                                src_fabric_node_id, dst_fabric_node_id, link, program, {core}, writer_rt_args);
++                                src_fabric_node_id, dst_fabric_node_id, fabric_link, program, {core}, writer_rt_args);
+                         }
+                         writer_rt_args.push_back(false);
+                     }

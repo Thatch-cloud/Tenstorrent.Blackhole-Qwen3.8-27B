@@ -1,0 +1,33 @@
+# The order of the sub-device overlap pack (optimisation/ttnn-op/subdev_h): can the DFlash2 drafter run CONCURRENTLY with the target verify on a Blackhole chip, through tt-metal sub-devices and two command queues?
+# H1 (one card, ttnn Python only) decides the COMPUTE: a 80-core target sub-device fed by queue 0 and a 30-core drafter sub-device fed by queue 1, traces on both, concurrent wall <= 1.1 x max(solo), outputs
+# byte-identical. H2 (four cards) decides the COLLECTIVES: an all_gather on each sub-device, separate semaphores, sharing a link and (with the prepared graft) on separate links. H2 RUNS LAST in any window and
+# is followed by an all-board reset.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (dependents are skipped by the NEEDS lines below; every card job begins with a reset or a fresh open).
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z (the cutover pack's steps and post-checks; nothing in this pack does either).
+#     H1a and H1b are card-M jobs of the pair (the cardm action): they never run while a quad step holds the cards, and the harness refuses while anything else can reach card M or card A.
+# P0. The CPU suite is green on the pushed head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and the tag is pushed on THAT commit. Push ONE tag at a time and wait for its run to finish (the workflow keeps one pending run;
+#     queued tags are cancelled). Never cancel a running card job. No w2.off, levern.off, prefix-reuse.off or parked.off file on the hub mount.
+# P0. The placeholder tag tp4-next2-1 in every template is the tag of the window's own image (sed -i 's/tp4-next2-1/<tag>/' *.env). The pack builds nothing: the harnesses mount this checkout's files. If the window has
+#     no image, give the cardm jobs IMAGE=<an image reference> in C2_CARDM_ENV (any C2 image, or the rebuilt P8) and the quad jobs any built C2 tag.
+# TIMED: H1b and H2b are timing arms: pause the ARC runners (restore after the last timed job). H1a and H2a are not timed.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS H1b <- H1a
+# NEEDS X0 <- H1b
+# NEEDS H2a <- X0 H1b
+# NEEDS H2b <- H2a
+# READ RULES (each also needs no stall; the templates' own headers have the whole text):
+#   H1a    'SUBDEV_H1 verdict=UNTIMED-PASS', the watcher log with no error/assert line. FAIL-BYTES, NOT-MEASURED, a hang: STOP (reset card M only, as printed), H1b, H2a and H2b are skipped.
+#   H1b    'SUBDEV_H1 verdict=PASS' (concurrent <= 1.1 x max(solo), bytes identical). FAIL-SERIALISED / FAIL-PARTIAL: the finding (the queues do not overlap, or only partly): H2a and H2b are skipped, nothing needs the collectives.
+#   X0     four cards present and healthy, the fabric as measured, no other driver alive.
+#   H2a    'SUBDEV_H2 verdict=UNTIMED-PASS' with watcher_errors=0. FAIL-BYTES or a hang: H2b is skipped, Z resets.
+#   H2b    'SUBDEV_H2 verdict=PASS' or 'PASS-SEPARATE-LINKS'; FAIL-SERIALISED / FAIL-PARTIAL = the sub-devices' gathers contend for the link (build the graft; ag_link_offset.patch).
+# NO-GO: any hang or stall, any byte difference between a concurrent run and a solo run, a TT_FATAL at the manager or the first trace (NOT-MEASURED with the error), a watcher error line.
+# Time (estimate, minutes; cumulative in brackets): H1a 30 [30], H1b 25 [55], X0 20 [75], H2a 30 [105], H2b 40 [145], Z 10 [155]: 155 minutes (2 h 35 min) in all; H1a and H1b alone are 55 minutes after the cards are free;
+#   about 3 minutes of queue per tag on top.
+H1a-subdev-watcher soft tp4-next2-1 30
+H1b-subdev-timed soft tp4-next2-1 25
+X0-status-rescan-reset stop tp4-next2-1 20
+H2a-subdev-quad-watcher soft tp4-next2-1 30
+H2b-subdev-quad-timed soft tp4-next2-1 40
+Z-reset soft tp4-next2-1 10

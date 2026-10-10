@@ -28,7 +28,11 @@ Keys (every one optional but C2_IMAGE_TAG):
                       TP4_RS_TILE) or mr (tp4_mr_probe.py: the verify readback's mesh-read arms at four chips, optimisation/ttnn-op/mr_probe's
                       arms and verdict, MR_PROBE verdict=GO|MESH-ONLY|NO-GO) or kvread (tp4_kv_read_probe.py: the prefix audit's region read,
                       ttnn.qwen_read_blocks, against the whole-cache read byte for byte on the pool-sized cache; KV_READ_PROBE verdict=PASS|FAIL, the exit
-                      status is the verdict); needs the fabric action
+                      status is the verdict) or subdev (tp4_subdev_probe.py, H2 of the sub-device overlap programme: an all_gather on the target
+                      sub-device and one on the drafter sub-device in flight together on the (1, 4) ring, each with its own semaphores and command queue,
+                      optimisation/ttnn-op/subdev_h/subdev_h2.py; SUBDEV_H2 verdict=PASS|PASS-SEPARATE-LINKS|FAIL-*|NOT-MEASURED; holds all four cards: run it
+                      LAST, before an all-board reset) or subdev-watch (the same under TT_METAL_WATCHER=5, bytes and hangs only, no timing verdict);
+                      needs the fabric action
   C2_SUPERSEDED_BY    set on every template of a pack that a later pack replaced (references/tp4-w2-jobs); read_job REFUSES such a template
   C2_PROFILE          the C2 profile smoke and gate serve (default: general)
   C2_CARDS            the card set the hardware steps open: pair (cards M and A, the default) or quad (every
@@ -172,7 +176,7 @@ TP4_MESH_DEVICE = 'P150x4'
 # (general-2link: the same pair under the two-channel descriptor this cabling needs).
 PAIR_MESH_DEVICES = (None, 'P300')
 FABRIC_CONFIGS = ('FABRIC_1D', 'FABRIC_1D_RING')
-FABRIC_PROBES = ('fabric', 'rs-tile', 'mr', 'kvread')
+FABRIC_PROBES = ('fabric', 'rs-tile', 'mr', 'kvread', 'subdev', 'subdev-watch')
 DRAFTER_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,63}')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
