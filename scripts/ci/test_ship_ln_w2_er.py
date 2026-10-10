@@ -83,7 +83,7 @@ class ProfileTests(unittest.TestCase):
                 self.assertNotIn(name, env)
 
     def test_it_is_the_only_profile_that_carries_an_owner_traffic_waiver(self):
-        self.assertEqual(sorted(name for name, body in raw()['profiles'].items() if contract.TRAFFIC_WAIVER in body), [SHIP])
+        self.assertEqual(sorted(name for name, body in raw()['profiles'].items() if contract.TRAFFIC_WAIVER in body), ['c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic', SHIP])
 
     def test_the_waiver_names_exactly_the_four_levers_cites_the_evidence_and_records_a_decision(self):
         waiver = load()[contract.TRAFFIC_WAIVER]

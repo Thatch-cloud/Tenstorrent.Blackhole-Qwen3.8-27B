@@ -128,7 +128,7 @@ PARKED_TWINS = PARKED_TWINS | frozenset(_w2_kill_twins.twin_names())     # (and 
 import make_kvread_profiles as _kvread_twins  # noqa: E402
 PARKED_TWINS = PARKED_TWINS | frozenset(_kvread_twins.twin_names())     # (and the region-read audit twins, test_kvread_profiles)
 import make_fusion_profiles as _fusion_twins  # noqa: E402
-PARKED_TWINS = PARKED_TWINS | frozenset(_fusion_twins.twin_names())     # (and the op-fusion programme's twins, test_fusion_wp)
+PARKED_TWINS = PARKED_TWINS | frozenset(_fusion_twins.twin_names()) | frozenset(_fusion_twins.ship_names())     # (and the op-fusion programme's twins, test_fusion_wp)
 import make_upload_profiles as _upload_twins  # noqa: E402
 PARKED_TWINS = PARKED_TWINS | frozenset(_upload_twins.twin_names())     # (and the engine-start upload twins, test_upload_p0_profiles)
 

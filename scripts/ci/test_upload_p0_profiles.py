@@ -120,7 +120,7 @@ class TwinTests(unittest.TestCase):
 
     def test_the_parent_and_every_other_profile_carry_no_switch(self):
         twins = set(generator.twin_names())
-        combined = {fusion.NAMESPACE + 'all', fusion.NAMESPACE + 'all-audit'}
+        combined = {fusion.NAMESPACE + 'all', fusion.NAMESPACE + 'all-audit'} | set(fusion.ship_names())            # (the ship candidate is the timed combined arm as a traffic profile)
         for name, profile in PROFILES.items():
             if name not in twins and name not in combined:
                 self.assertFalse([knob for knob in generator.KNOBS if knob in profile['env']], name)

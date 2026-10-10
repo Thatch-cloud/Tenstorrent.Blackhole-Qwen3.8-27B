@@ -61,7 +61,7 @@ import make_kvread_profiles as kvread_twins  # noqa: E402
 BEST262K = BEST262K + kvread_twins.twin_names()
 # the op-fusion programme's twins (make_fusion_profiles, from the manifests in fusion-wp; test_fusion_wp holds each as the production profile plus exactly its flags)
 import make_fusion_profiles as fusion_twins  # noqa: E402
-BEST262K = BEST262K + fusion_twins.twin_names()
+BEST262K = BEST262K + fusion_twins.twin_names() + fusion_twins.ship_names()
 # the engine-start upload twins of the ship profile (make_upload_profiles; test_upload_p0_profiles holds each as that parent plus its switches)
 import make_upload_profiles as upload_twins  # noqa: E402
 BEST262K = BEST262K + upload_twins.twin_names()

@@ -17,3 +17,9 @@ def twin_names():
             + tuple(make_octo_profiles.twin_names()) + tuple(make_octo2_profiles.twin_names())
             + tuple(make_w2_kill_profiles.twin_names()) + tuple(make_kvread_profiles.twin_names())
             + tuple(make_upload_profiles.twin_names()) + tuple(make_fusion_profiles.twin_names()))
+
+
+def generated_names():
+    """twin_names plus the TRAFFIC profiles an integration generator writes (the op-fusion ship candidate: not gate-only, so not a twin). The census tests that enumerate the traffic profiles
+    exempt these; the tests that assert a property of the gate-only twins use twin_names."""
+    return twin_names() + tuple(make_fusion_profiles.ship_names())

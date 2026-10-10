@@ -1,0 +1,19 @@
+# The order of the op-fusion SHIP gates (docs/tp4-fusion.md, modelled on references/tp4-ship-ln-w2-er-jobs): the profile c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic = the production profile plus exactly the env of the combined gate arm c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all, a TRAFFIC profile under the owner traffic waiver w2-er-fx-262k-2026-10-11. ONE image (tp4-ship-2, a placeholder: B0 builds it from the approved commit).
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: nothing later runs, and nothing ships, after a failure of this job.
+# P0. THE OWNER'S DECISION on the profile's owner_traffic_waiver is the only thing between this pack and B0: it is PENDING until the owner replaces the decision sentence with one starting APPROVED (python3 scripts/ci/make_fusion_profiles.py --approve-ship "APPROVED ...": it edits the ship entry of scripts/ci/fusion-wp/WP0.json, the source, and regenerates the profile; the field that flips is owner_traffic_waiver.decision of the profile, nothing else), and the CPU suite is green on THAT commit. B0 and SR need it (B0 bakes the profile, SR boots the baked default); a PENDING profile BOOTS in a gate or a smoke and logs the word, so G1, GX0, GX1 and G2 select it by name and CAN run on any image carrying the code (the fusion image) BEFORE the approval, as evidence: the pack's tested-image rule (the gates run the B0 image, the exact base the production layer is built on) holds for the final run.
+# P0. Push ONE tag at a time and wait for its run to finish (the workflow keeps one pending run; a queued tag is cancelled). No other window driver is alive. CI PAUSED from G1 to SR (the skew is timed). Never cancel a running card job. The cards are 13x10: read the grid from the run.
+# B0 builds; the operator builds the production thin layer on the B0 image between B0 and G1 (no card job may run during that build); G1, GX0, GX1 and G2 gate the base on the cards; SR replays the agent's serving sequence on the thin layer itself (the bytes production will run). C2_TELEMETRY=1 is on every job whose action supports it (the smoke and gate steps: G1, GX0, GX1); the prefix, replay and build steps have none.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS G1 <- B0
+# NEEDS GX0 <- B0
+# NEEDS GX1 <- GX0
+# NEEDS G2 <- B0
+# NEEDS SR <- G1 GX1
+# PASS (all needed before any publish or :latest move): B0 built and its provenance clean; G1 every smoke rule clean, skew under 238 s, 0 crashes, parked judge 0 problems; GX1 every hash equal to GX0's; G2 PASS (or the owner's recorded override against its control); SR 'PLATFORM_REPLAY passed=True'. Any failure: production is restored from the rollback image instead (no retry on the cards without the owner).
+# Time (estimate, minutes): B0 35, G1 60, GX0 15, GX1 15, G2 35, SR 30: 190 minutes (3 h 10 min), plus the thin layer (about 10) and about 3 minutes of queue per tag.
+B0-ship-build stop tp4-ship-2 35
+G1-ship-gate stop tp4-ship-2 60
+GX0-exact-control stop tp4-ship-2 15
+GX1-exact-ship stop tp4-ship-2 15
+G2-prefix-hit soft tp4-ship-2 35
+SR-platform-replay stop tp4-ship-2 30
