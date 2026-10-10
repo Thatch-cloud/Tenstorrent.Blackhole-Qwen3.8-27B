@@ -27,6 +27,19 @@ After a merge, run both with `--write` (`--check` fails when a block is stale, `
 holds that the output is deterministic and idempotent, that every manifest entry lands and that a manifest it cannot place is refused by name; `test_tp4_fusion_jobs` holds the
 pack. The generated twins are exempt from the profile-enumerating tests through `profile_twins.py`.
 
+## Cross-package hooks
+
+Two packages each need a line in a file the other owns. The integrator's hooks (one commit, `test_fusion_hooks` holds them): WP6's three drafter levers in
+`draft_attention_branch.execute_attention_branch` (`QWEN_FAST_DRAFT_MM_GRID` widens the wo projection's grid, `QWEN_FAST_DRAFT_REDUCE` hands the gather to
+`draft_reduce_tp.choose`, `QWEN_FAST_DRAFT_TAIL` replaces the residual tail), and WP7's permutation levers at the octo shapes (`octo_draft_tp.octo_fold_query` and
+`octo_unfold_output`, `QWEN_FAST_DRAFT_PERMUTE`, `site='octo'`). Both are lazy, strict and flag-guarded; flags off, the op sequence is the one the files had before.
+
+## The pack
+
+`scripts/ci/references/fusion-jobs/ORDER.txt` runs B0 (the image `tp4-fusion-1`), X0, every lever's audited attach, every lever's timed control/lever ABAB at eight live,
+then Z. A lever that cannot engage yet (WP2 until its card-M record lands) runs last in each section (`pack_last`). The packages' own card-M and detail templates are in their
+folders beside the pack.
+
 ## Reading a card run
 
 `tp4_profile_report.py` classifies a replay by what it holds: the multi-SDPA 64-row block (one SDPA launch per attention layer, no named conv-gates launch) is the packed
