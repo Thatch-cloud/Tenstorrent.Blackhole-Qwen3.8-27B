@@ -1566,7 +1566,7 @@ class ParentTests(unittest.TestCase):
             self.skipTest('no git history for %s' % PARENT)
         before = result.stdout.decode('utf-8').splitlines()
         after = without_trace_census(without_levern(without_diag_trim(without_prefill_scratch(without_any_request(without_sticky(
-            without_solo_and_lanes(without_m3_blocks(without_request_warm(without_parked_engines(without_octo((HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines())))))))))))
+            without_solo_and_lanes(without_m3_blocks(without_request_warm(without_parked_engines(without_octo(without_draft_vocab((HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines()))))))))))))
         changed = [line for line in difflib.unified_diff(before, after, lineterm='', n=0)
                    if line[:1] in '+-' and not line.startswith(('+++', '---'))]
         added = [line[1:].strip() for line in changed if line.startswith('+')]
@@ -1966,6 +1966,15 @@ def without_parked_engines(lines):
             raise AssertionError('The engine-reuse hunk %r is not in serving_runtime.py exactly once' % now[:60])
         text = text.replace(now, before)
     return text.splitlines()
+
+
+def without_draft_vocab(lines):
+    """serving_runtime.py less the draft vocabulary hunks (QWEN_FAST_DRAFT_VOCAB, tp4/draft-vocab; gate only, default off), which landed after every parent this test compares with:
+    the lazy admission (which sits inside the run without_octo cuts, so this cutter runs FIRST) and the head build after the shared draft weights. Each is cut whole, found exactly once,
+    so nothing else is hidden."""
+    lines = cut_once(lines, '# QWEN_FAST_DRAFT_VOCAB (draft_vocab_tp; gate only, default off): the drafter proposes from a coding shortlist of the vocabulary (the target still verifies all of it).',
+                     'draft_vocab = draft_vocab_tp.admission(log=pindiag)')
+    return cut_once(lines, 'if draft_vocab is not None:', "memory_ledger.record('P5', point='draft_vocab_head')")
 
 
 def without_request_warm(lines):
