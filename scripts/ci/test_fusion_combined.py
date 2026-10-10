@@ -41,7 +41,7 @@ PACK = HERE / 'references' / 'fusion-jobs' / 'combined'
 SWITCHED_ON = {
     'QWEN_FAST_DRAFT_PERMUTE': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2': '1', 'QWEN_FAST_DRAFT_REDUCE': '1', 'QWEN_FAST_DRAFT_QKV1': '1',
     'QWEN_FAST_DRAFT_TAIL': '1', 'QWEN_FAST_DRAFT_GATEUP1': '1', 'QWEN_FAST_DRAFT_MM_GRID': '1', 'QWEN_FAST_DRAFT_HEAD64': '1', 'QWEN_FAST_CCL_OPTIONS': 'served',
-    'QWEN_FAST_MLP_CFG': 'l1', 'QWEN_FAST_DEVICE_ZEROS': '1', 'QWEN_FAST_LAZY_SHARD_W': '1'}
+    'QWEN_FAST_MLP_CFG': 'g3u4d3', 'QWEN_FAST_DEVICE_ZEROS': '1', 'QWEN_FAST_LAZY_SHARD_W': '1'}
 AUDIT_FLAGS = {
     'QWEN_FAST_DRAFT_PERMUTE_AUDIT': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT': '1', 'QWEN_FAST_DRAFT_REDUCE_AUDIT': '1', 'QWEN_FAST_DRAFT_QKV1_AUDIT': '1',
     'QWEN_FAST_DRAFT_TAIL_AUDIT': '1', 'QWEN_FAST_DRAFT_GATEUP1_AUDIT': '1', 'QWEN_FAST_DRAFT_MM_GRID_AUDIT': '1', 'QWEN_FAST_DRAFT_HEAD64_AUDIT': '1',
@@ -205,6 +205,21 @@ class ValidatorTests(unittest.TestCase):
                 self.assertIsNotNone(resolved)
                 self.assertFalse(tp4_mlp_gateup._read(tp4_mlp_gateup.GATEUP, environ))
                 self.assertEqual(tp4_mlp_gateup._read(tp4_mlp_gateup.CFG_AUDIT, environ), name == AUDITED)
+
+    def test_the_named_mlp_configuration_is_the_one_the_smoke_rule_judges(self):
+        import tp4_mlp_gateup
+        import tp4_mlp_gateup_smoke
+
+        env = PROFILES[AUDITED]['env']
+        self.assertEqual(tp4_mlp_gateup.resolve(env).name, 'g3u4d3')
+        line = '[PINDIAG] tp4 mlp gateup engaged route=cfg name=%s rows=64 layers=64 g3u4d3 l1_multiply=1 audit=1 stride=1'
+        audit = '[PINDIAG] tp4 mlp gateup audit route=cfg name=%s layer=0 exact=True'
+        good = '\n'.join([line % 'g3u4d3', audit % 'g3u4d3'])
+        self.assertEqual(tp4_mlp_gateup_smoke.problems(env, good), [])
+        self.assertEqual([p for p in c2_smoke_check.fusion_problems(good, env) if 'MLP' in p or 'mlp' in p], [])
+        wrong = '\n'.join([line % 'l1', audit % 'l1'])
+        self.assertTrue(tp4_mlp_gateup_smoke.problems(env, wrong), 'a log of another configuration is not this arm\'s')
+        self.assertTrue([p for p in c2_smoke_check.fusion_problems('nothing\n', env) if 'QWEN_FAST_MLP_CFG=g3u4d3' in p])
 
     def test_the_upload_levers_and_the_shard_argmax_fold_parse(self):
         import qwen_device_zeros

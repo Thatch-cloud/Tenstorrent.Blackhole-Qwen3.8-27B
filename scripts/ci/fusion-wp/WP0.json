@@ -1,6 +1,15 @@
 {
  "wp": "WP0",
  "description": "the integrator's own manifest: wiring a package asked for in its notes, kept out of the package's manifest so that the package's schema test and its file stay as pushed",
+ "smoke": [
+  {
+   "flag": "QWEN_FAST_MLP_CFG",
+   "value": "g3u4d3",
+   "engaged": "[PINDIAG] tp4 mlp gateup engaged route=cfg",
+   "fell_back": "[PINDIAG] tp4 mlp gateup fell back",
+   "what": "MLP streaming config g3u4d3 (the card-M sweep winner)"
+  }
+ ],
  "smoke_rules": [
   "tp4_shard_argmax_smoke",
   "ccl_options_smoke",
@@ -64,7 +73,8 @@
     "mlpcfg"
    ],
    "values": {
-    "ccl": "served"
+    "ccl": "served",
+    "mlpcfg": "g3u4d3"
    },
    "env": {
     "QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2": "1",
@@ -75,7 +85,7 @@
     "QWEN_FAST_DEVICE_ZEROS_AUDIT": "1",
     "QWEN_FAST_LAZY_SHARD_W_AUDIT": "1"
    },
-   "reason": "every lever that is exact by construction on together, to be timed and audited once before any ablation: the drafter permutations, S1 with the tree fold, the drafter reduce, fused q|k|v, tail kernels, fused gate|up weight and device-width matmul grids, the 64-row drafter head, the CCL options at the SERVED (empty) set until the sweep names the winner, the MLP streaming config l1, and the two engine-start upload levers; NOT the K/V page writer (it needs its card-M proof) and NOT the fused MLP gate|up (its kernels have never compiled on a card)"
+   "reason": "every lever that is exact by construction on together, to be timed and audited once before any ablation: the drafter permutations, S1 with the tree fold, the drafter reduce, fused q|k|v, tail kernels, fused gate|up weight and device-width matmul grids, the 64-row drafter head, the CCL options at the SERVED (empty) set until the sweep names the winner, the MLP streaming config g3u4d3 (card-M sweep: the composed gate, up and down chain 170.4 to 162.1 us per layer, exact), and the two engine-start upload levers; NOT the K/V page writer (it needs its card-M proof) and NOT the fused MLP gate|up (its kernels have never compiled on a card)"
   }
  ]
 }

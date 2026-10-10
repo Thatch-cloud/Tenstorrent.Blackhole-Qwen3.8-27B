@@ -181,6 +181,7 @@ FUSION_LEVERS = (
     ('QWEN_FAST_DRAFT_PERMUTE', '1', '[PINDIAG] tp4 draft permute engaged', '[PINDIAG] tp4 draft permute fell back', 'F-F2 drafter permutation kernels'),  # WP7
     ('QWEN_FAST_DRAFT_QKV1', '1', '[PINDIAG] tp4 draft qkv1 engaged', '[PINDIAG] tp4 draft qkv1 fell back', 'F-F3c fused drafter q|k|v projection'),  # WP7
     ('QWEN_FAST_DRAFT_HEAD64', '1', '[PINDIAG] tp4 draft head64 engaged', '[PINDIAG] tp4 draft head64 fell back', 'F-F4 one 64-row drafter head'),  # WP7
+    ('QWEN_FAST_MLP_CFG', 'g3u4d3', '[PINDIAG] tp4 mlp gateup engaged route=cfg', '[PINDIAG] tp4 mlp gateup fell back', 'MLP streaming config g3u4d3 (the card-M sweep winner)'),  # WP0
     ('QWEN_FAST_CCL_OPTIONS', 'served', '[PINDIAG] tp4 ccl options engaged', '[PINDIAG] tp4 ccl options fell back', 'CCL options (the served set)'),  # WP5
 )
 FUSION_AUDITS = (
