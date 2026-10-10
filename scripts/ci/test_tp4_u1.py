@@ -3,6 +3,7 @@ its refusals, its audit, the profiles and the job pack. Nothing here ran on four
 (docs/tp4-exact-ring-parity.md) and the audit arm is what proves it again on the serving image."""
 
 import json
+import make_octo_profiles
 import make_parked_profiles
 import profile_twins
 import os

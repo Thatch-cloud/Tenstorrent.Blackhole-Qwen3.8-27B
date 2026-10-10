@@ -38,6 +38,10 @@ from verify_trace_t1 import cut as verify_t1_cut, note as verify_t1_note
 
 USERS = 4
 PIECE_ROWS = rows_dma.USER_ROWS
+# The octo block's users: eight rows each, a quarter tile. The glue kernels move half tiles only, so such spans take the served path and say so (tp4_vglue.EIGHT_ROW_SERVED).
+OCTO_PIECE_ROWS = 8
+OCTO_USERS = 8
+EIGHT_ROW_REASON = 'eight-row users (the octo block): the glue kernels move 16-row half tiles, the served path runs'
 
 
 def _pinned_class():
@@ -55,6 +59,8 @@ class DeviceLoopState(_pinned_class()):
         operations = self.operations
         shape = tuple(projected.shape)
         users = len(spans)
+        if users == OCTO_USERS and [tuple(span) for span in spans] == [(user * OCTO_PIECE_ROWS, (user + 1) * OCTO_PIECE_ROWS) for user in range(users)]:
+            return EIGHT_ROW_REASON
         if users < 2 or [tuple(span) for span in spans] != [(user * PIECE_ROWS, (user + 1) * PIECE_ROWS) for user in range(users)]:
             return 'spans %r are not contiguous 16-row users from row 0' % (list(spans),)
         if len(shape) != 3 or shape[0] != 1 or shape[1] != users * PIECE_ROWS:
@@ -63,6 +69,14 @@ class DeviceLoopState(_pinned_class()):
         return reason
 
     def note_glue_fallback(self, site, reason):
+        if reason == EIGHT_ROW_REASON:
+            # The octo block's known state, not a lever that saved nothing by accident: its own marker, its own counter.
+            line = '%s site=%s reason=%s' % (tp4_vglue.EIGHT_ROW_SERVED, site, reason)
+            if line not in self.glue_fallbacks:
+                self.glue_fallbacks.add(line)
+                tp4_vglue.log_line(line)
+            tp4_vglue.note('gdn_%s_eight_row_served' % site)
+            return
         line = '%s site=%s reason=%s' % (tp4_vglue.FALLBACK, site, reason)
         if line not in self.glue_fallbacks:
             self.glue_fallbacks.add(line)
@@ -247,6 +261,8 @@ class DeviceLoopState(_pinned_class()):
 
     def merge_problem(self, outputs):
         shapes = {tuple(output.shape) for output in outputs}
+        if len(shapes) == 1 and next(iter(shapes))[:2] == (1, OCTO_PIECE_ROWS) and len(outputs) == OCTO_USERS:
+            return EIGHT_ROW_REASON
         if len(shapes) != 1 or next(iter(shapes))[:2] != (1, PIECE_ROWS):
             return 'outputs %r are not equal (1, 16, N) tensors' % (sorted(shapes),)
         return rows_dma.problem(outputs, self.operations)

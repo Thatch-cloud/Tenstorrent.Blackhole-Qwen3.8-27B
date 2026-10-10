@@ -53,7 +53,7 @@ gdn_batched_conv gdn_conv_prefix_copy gdn_conv_windows gdn_conv_windows_packed g
 gdn_seq_block_split gdn_snapshot gdn_vsplit gdn_vsplit_norm_batch gdn_working_state model_link_policy mtp_hidden_capture mtp_hidden_rows ordered_cache
 packed_ordered_cache packed_weight_check padded_probe pair_row_exact page_width_tp4 proposal_native_attention
 profiled_block_stream_override publish_prewarm quad_draft_tp request_width_warm fused_commit_tp draft_singles_audit draft_convolution_fused_tp draft_shared_head_tp pair_row_exact_tp runtime_binary_override sdpa_tree_scratch serving_gather_experiment
-serving_kv_reservation serving_one_in_flight serving_packed_bridge serving_prefill_admission serving_request_quarantine serving_solo_lane serving_fast_lane serving_fast_lane_scheduler stage_profile
+serving_kv_reservation serving_one_in_flight serving_packed_bridge serving_prefill_admission serving_request_quarantine serving_solo_lane serving_octo serving_fast_lane serving_fast_lane_scheduler stage_profile
 target_packed_pages target_t16_attention_8k_gate target_t16_attention_gate tile_collective_tp two_tile_decode two_tile_norm
 verifier_engine_tp verifier_position_policy c2_parser_rechunk qwen_prefix_metrics prompt_lookup levern_policy levern_scheduler levern_platform levern_route sdpa_long_tp sdpa_multi_tp
 gdn_conv_gates_spread drafter_checkpoint
@@ -493,9 +493,9 @@ class ClosureTests(unittest.TestCase):
         self.assertTrue(report['ok'], 'test_tp4_attach_profile fails, so its import set means nothing')
         known = module_names()
         loaded = {name for name in report['modules'] if name in known and not name.startswith('test_')}
-        # (make_parked_profiles and make_round_host_profiles are the generators of the engine-reuse and round-host profile twins: the profile tests that the
+        # (make_parked_profiles, make_round_host_profiles and make_octo_profiles are the generators of the engine-reuse, round-host and octo-T8 profile twins: the profile tests that the
         # attach test imports name them, through profile_twins; they serve nothing)
-        loaded -= {'tp_test_support', 'make_parked_profiles', 'make_round_host_profiles', 'profile_twins'}
+        loaded -= {'tp_test_support', 'make_parked_profiles', 'make_round_host_profiles', 'make_octo_profiles', 'profile_twins'}
         extra = loaded - self.seen
         # What the attach loads outside the closure is a NOT_SERVED module it enters inert (each named in ATTACH_ENTERS_INERT,
         # exactly) and what those import at module level - not everything any NOT_SERVED module could ever reach.

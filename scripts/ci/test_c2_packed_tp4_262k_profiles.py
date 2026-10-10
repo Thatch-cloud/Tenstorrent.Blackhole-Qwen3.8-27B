@@ -17,6 +17,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+import make_octo_profiles as octo_twins  # noqa: E402
 import make_parked_profiles as parked_twins  # noqa: E402
 import make_round_host_profiles as round_host_twins  # noqa: E402
 import packed_any_admission as admission  # noqa: E402
@@ -49,6 +50,8 @@ BEST262K = ('c2-packed-tp4-8x262k-best', 'c2-packed-tp4-8x262k-best-audit', 'c2-
 BEST262K = BEST262K + tuple(name for name, parent, env, why in parked_twins.specs())
 # tp4/round-host: the generated gate-only twins of the Lever N traffic profile (test_tp4_round_host holds each as its parent plus its flags)
 BEST262K = BEST262K + round_host_twins.twin_names()
+# octo-T8 and the lone-user round (tp4/octo-t8): the generated gate-only twins of the levern profiles (test_octo_profiles holds each as its parent plus its flags and, for the octo ones, the memory plan)
+BEST262K = BEST262K + octo_twins.twin_names()
 # tp4/262k8-x (test_tp4_262k8_x holds each as the best-time-gate or best-audit twin plus/minus exactly one lever): the experiments image's arms; 262k knobs by inheritance.
 X262K = tuple('c2-packed-tp4-8x262k-best-time-gate-' + lever for lever in ('nosamp', 's1', 'd2', 'dbf16', 'lookup', 'stack')) + (
     'c2-packed-tp4-8x262k-best-nosamp-audit', 'c2-packed-tp4-8x262k-best-stack-audit')

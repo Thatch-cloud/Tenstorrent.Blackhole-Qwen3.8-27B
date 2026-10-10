@@ -189,12 +189,21 @@ EXTENT_LAYOUT_START = 256
 # (extent_attention_replay.EXTENT_GROUP_ROWS and EXTENT_BUNDLE_ENTRIES, pinned equal the same way).
 EXTENT_GROUP_ROWS = 8
 EXTENT_BUNDLE_ENTRIES = 2
+# Octo-T8 (QWEN_FAST_OCTO, serving_octo): eight users of ONE eight-row group each, a bundle of one entry (K64j G8B1, flags 0x21). The attach asks for this shape only
+# when the octo flag is admitted; the reader that takes it (extent_attention_octo_tp) is gate only until the qualification job Q1 has run on cards.
+EXTENT_OCTO_SHAPE = (8, 8)
+EXTENT_OCTO_BUNDLE_ENTRIES = 1
 
 
 def extent_bundle_batches(rows, group_rows):
     """How many groups each bundle of a `rows`-row extent segment packs, in bundle order: the first
     dimension of its lent table and the length of its cur_pos."""
     return tuple(len(bundle) for bundle in parallel_groups(EXTENT_LAYOUT_START, rows, max_group_rows=group_rows))
+
+
+def extent_bundle_entries(count, rows):
+    """The groups per bundle the extent readers take for a (users, rows_per_user) shape: two (G8B2) for every shape but the octo block's, one (G8B1)."""
+    return EXTENT_OCTO_BUNDLE_ENTRIES if (count, rows) == EXTENT_OCTO_SHAPE else EXTENT_BUNDLE_ENTRIES
 
 
 def default_packed_shapes(users):
@@ -624,11 +633,11 @@ class ServingBufferPool:
                 # The readers refuse any other grouping at block build, after the attach has
                 # allocated everything; refuse it here, before the first allocation.
                 if packed_replay_group_rows != EXTENT_GROUP_ROWS or any(
-                        set(extent_bundle_batches(rows, EXTENT_GROUP_ROWS)) != {EXTENT_BUNDLE_ENTRIES}
+                        set(extent_bundle_batches(rows, EXTENT_GROUP_ROWS)) != {extent_bundle_entries(count, rows)}
                         for count, rows in packed_shapes):
                     raise ValueError('Extent replay storage is qualified at G8B2 only (eight-row groups, two per '
-                                     'bundle, K64j CB1): packed group width %r over shapes %r'
-                                     % (packed_replay_group_rows, packed_shapes))
+                                     'bundle, K64j CB1; the octo block\'s %r is G8B1, one per bundle, gate only): packed group width %r over shapes %r'
+                                     % (EXTENT_OCTO_SHAPE, packed_replay_group_rows, packed_shapes))
                 replay_capacities = (extent_capacity,)
             else:
                 admitted = family_capacities(page_width=page_width)

@@ -228,6 +228,36 @@ class TwinTests(PackedFixture):
             self.assertIn('not (1, 32, W)', state.glue_problem(projected, ((0, 16), (16, 32))))
             self.assertIsNone(state.glue_problem(projected, ((0, 16), (16, 32), (32, 48), (48, 64))))
 
+    def test_the_octo_blocks_eight_row_users_take_the_served_path_under_their_own_marker_not_the_fallback_one(self):
+        # Octo-T8: eight users of eight rows are a quarter tile each, which no glue kernel moves yet. The pinned path runs (exact), and the line says so
+        # without the marker a gated arm fails on (tp4_vglue.FALLBACK): the octo block's known state.
+        state, operations, layer, active, calls = self.build_state(twin.DeviceLoopState)
+        octo_spans = tuple((8 * user, 8 * user + 8) for user in range(8))
+        with four(), patch('gdn_rows_dma_tp.problem', return_value=None):
+            self.assertEqual(state.glue_problem(SimpleNamespace(shape=(1, 64, BLOCK_WIDTH)), octo_spans), twin.EIGHT_ROW_REASON)
+            self.assertEqual(state.merge_problem([SimpleNamespace(shape=(1, 8, OUTPUT_WIDTH))] * 8), twin.EIGHT_ROW_REASON)
+            # two or four eight-row users are NOT the octo block: the ordinary refusal
+            self.assertIn('not contiguous', state.glue_problem(SimpleNamespace(shape=(1, 32, BLOCK_WIDTH)), octo_spans[:4]))
+            self.assertIn('not equal (1, 16, N)', state.merge_problem([SimpleNamespace(shape=(1, 8, OUTPUT_WIDTH))] * 4))
+            state.note_glue_fallback('split', twin.EIGHT_ROW_REASON)
+            state.note_glue_fallback('merge', twin.EIGHT_ROW_REASON)
+        self.assertTrue(any(line.startswith(tp4_vglue.EIGHT_ROW_SERVED) and 'site=split' in line for line in self.lines), self.lines)
+        self.assertFalse(any(line.startswith(tp4_vglue.FALLBACK) for line in self.lines), self.lines)
+        self.assertNotEqual(tp4_vglue.EIGHT_ROW_SERVED, tp4_vglue.FALLBACK)
+        self.assertFalse(tp4_vglue.EIGHT_ROW_SERVED.startswith(tp4_vglue.FALLBACK))
+        self.assertEqual(tp4_vglue.take(), {'gdn_split_eight_row_served': 1, 'gdn_merge_eight_row_served': 1})
+
+    def test_the_audit_has_nothing_to_read_at_the_octo_blocks_served_path_and_still_fails_a_lever_that_declined_elsewhere(self):
+        # QWEN_FAST_TP4_VGLUE_AUDIT demands an entry per lever per user for the audited layers; the octo block's glue sites run the served path, so it holds none, and
+        # served_only (packed_verifier passes it for 8 users x 8 rows) says so instead of raising 'nothing compared' on the first octo replay.
+        records = [(0, {'segment_results': [{} for _ in range(8)]})]
+        with four(), env(QWEN_FAST_TP4_GDN_GLUE='1', QWEN_FAST_TP4_GDN_BLOCK_CONV='1', QWEN_FAST_TP4_VGLUE_AUDIT='1'):
+            self.assertEqual(tp4_vglue.audit_round(None, records, 1, served_only=True), 0)
+            with self.assertRaises(AssertionError):
+                tp4_vglue.audit_round(None, records, 1)           # the same records on an M3 block: a declined lever is a failure
+        text = (HERE / 'packed_verifier.py').read_text(encoding='utf-8')
+        self.assertIn('served_only=(self.users, self.rows_per_user) == (8, 8)', text)
+
     def test_a_launch_the_kernel_cannot_carry_falls_back_before_any_state_move(self):
         with four():
             expected, expected_calls, unused = self.run_decode(pinned_state.DeviceLoopState)

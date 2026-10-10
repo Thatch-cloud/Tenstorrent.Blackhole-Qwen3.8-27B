@@ -8,7 +8,10 @@ verbatim, hash-checked), the same descriptors, with every literal drawn from tp_
 at. gdn_seq_block picks between the two per call (its `batch` proxy); at the pair nothing here runs.
 
 Four users x 12 heads = 48 worker cores of the 11 x 10 grid: one wave, as the pair's 4 x 24 = 96 are (the chain does not
-get faster, docs/tp4 S2T-O1 is the plan that uses the freed cores). Uncertified: host construction only. The kernels take
+get faster, docs/tp4 S2T-O1 is the plan that uses the freed cores). EIGHT users x 12 heads = 96 cores is the octo-T8 block
+(QWEN_FAST_OCTO, docs/tp4-octo.md: eight seats of eight rows in one 64-row block): still one wave, still disjoint contiguous shares of the
+same grid, the same kernels per worker - so MAX_USERS here is 8, the pair's module (pinned, MAX_USERS 4) untouched. A four-user M3 block
+builds exactly what it built. Uncertified: host construction only. The kernels take
 their geometry as compile-time arguments (H, Ct and the offsets), so no kernel source changes, but nothing here has run at
 H = 12 on a device; gdn_user_batch_device_test with a geometry argument is the spike (S2T-01).
 """
@@ -25,7 +28,10 @@ import verify_trace_t1
 # What the pair's module owns and this one shares unchanged: flags, kernel loading, the float packing, the descriptor
 # coalescing (geometry free), the placement helpers' constants.
 DEFAULT_ROOT = pair.DEFAULT_ROOT
-MAX_USERS = pair.MAX_USERS
+# Users one batched launch carries at four cards: 12 heads a chip, so 8 users take 96 of the 110 cores of the 11 x 10 grid (one wave, disjoint shares). The pair's is
+# pair.MAX_USERS (4 x 24 heads = 96): that module is hash-pinned and stays 4.
+PAIR_MAX_USERS = pair.MAX_USERS
+MAX_USERS = 8
 FLAG = pair.FLAG
 MIN_USERS_FLAG = pair.MIN_USERS_FLAG
 enabled = pair.enabled

@@ -12,6 +12,7 @@ What is held, on the CPU, with the coordinator's own tests' fakes (the quad trac
   - the smoke check expects two engaged markers (one per block) and a round both quads served, in concurrent8_steady.
 """
 
+import make_octo_profiles
 import make_parked_profiles
 import profile_twins
 import os

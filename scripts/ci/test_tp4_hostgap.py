@@ -19,6 +19,7 @@ what they cannot do:
   - the smoke rules, the four profiles (the control plus flags and nothing else), the job pack, and the shipping lists."""
 
 import json
+import make_octo_profiles
 import make_parked_profiles
 import profile_twins
 import os

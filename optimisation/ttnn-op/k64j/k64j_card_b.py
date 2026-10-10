@@ -159,7 +159,9 @@ TAIL, SHARE, SLICE, READAHEAD = 0x1, 0x2, 0x4, 0x8
 EXTENT = 0x20                           # apply_factory_k64j.FLAG_EXTENT
 UNKNOWN_CONTROL = 0x10                  # apply_factory_k64j.UNKNOWN_FLAG_CONTROL: still refused
 KNOWN_FLAGS = TAIL | SHARE | SLICE | READAHEAD | EXTENT
-SHAPES = {'G4B3': (4, 3), 'G8B2': (8, 2), 'G4B1': (4, 1)}   # rows per fold group, entries (G4B1: K's idle call)
+SHAPES = {'G4B3': (4, 3), 'G8B2': (8, 2), 'G4B1': (4, 1), 'G8B1': (8, 1)}   # rows per fold group, entries (G4B1: K's idle call; G8B1: the octo-T8 block's user)
+OCTO_SHAPE = 'G8B1'                     # octo-T8 (docs/tp4-octo.md): ONE eight-row group per bundle, no KV share, one KV head per chip only
+OCTO_FLAGS = TAIL | EXTENT              # 0x21; its compile-time twin is 0x1
 BUNDLE_SHAPES = ('G4B3', 'G8B2')
 FLAG_SETS = (0x21, 0x23, 0x27, 0x2F)
 TRACE_COMBOS = (('G4B3', 0x21), ('G8B2', 0x27))
@@ -191,6 +193,11 @@ NOT_RUN = {'K4': 'the mask kernel at capacity 256 against its host mirror is W10
 TICKET_ROWS = 16                                        # one served ticket (a packed round's rows per user)
 SERVED_ROWS, SERVED_BATCH = 8, 2                        # LAYOUT(16, 8) = parallel_groups(256, 16, max_group_rows=8)
 SERVED_OFFSETS = (0, 8)                                 # its one bundle's group offsets: one G8B2 call per ticket
+# The served geometries CB2a (K2, X7, Z) can be run at. G8B2 is the M3 block's 16-row ticket; G8B1 is the octo-T8 block's 8-row ticket (LAYOUT(8, 8) = one bundle of
+# one group): the same extent reader's call at one entry, flags 0x21 (compile-time twin 0x1). set_served_geometry rebinds the four names above (and nothing else), and
+# every function that reads them reads them at CALL time.
+SERVED_GEOMETRIES = {'G8B2': dict(ticket_rows=16, rows=8, batch=2, offsets=(0, 8)),
+                     'G8B1': dict(ticket_rows=8, rows=8, batch=1, offsets=(0,))}
 SERVED_FLAGS = TAIL | SHARE | SLICE | EXTENT            # 0x27: the extent reader's call at G8B2
 COMPILE_FLAGS = SERVED_FLAGS & ~EXTENT                  # 0x7: v235's served call, at capacity E
 SERVED_FLAGS_ONE_HEAD = TAIL | SHARE | EXTENT           # 0x23 at one KV head: no q-slice (F15 refuses it), the same bundle
@@ -296,6 +303,8 @@ def valid_combo(shape, flags, kv_heads=PAIR_KV_HEADS):
     one KV head); read-ahead needs share."""
     if shape not in SHAPES or flags & ~KNOWN_FLAGS or not flags & EXTENT or not flags & TAIL:
         return False
+    if shape == OCTO_SHAPE:
+        return kv_heads == ONE_KV_HEAD and flags == OCTO_FLAGS        # octo: 0x21 at one KV head, nothing else
     rows, batch = SHAPES[shape]
     if flags & SHARE and batch < 2:
         return False
@@ -312,11 +321,26 @@ def default_trace_combos(kv_heads=PAIR_KV_HEADS):
     return TRACE_COMBOS if kv_heads == PAIR_KV_HEADS else TRACE_COMBOS_ONE_HEAD
 
 
-def served_flags_for(kv_heads=PAIR_KV_HEADS):
-    """(served, compile-time) flags of CB2a's G8B2 bundle: 0x27 / 0x7 on the pair, 0x23 / 0x3 at one KV head."""
+def served_flags_for(kv_heads=PAIR_KV_HEADS, geometry='G8B2'):
+    """(served, compile-time) flags of CB2a's bundle: G8B2 0x27 / 0x7 on the pair, 0x23 / 0x3 at one KV head; the octo block's G8B1 is 0x21 / 0x1 at one KV head only."""
+    if geometry == OCTO_SHAPE:
+        if kv_heads != ONE_KV_HEAD:
+            raise ValueError('The octo geometry %s is the four-card chip\'s (one KV head per chip: --kv-heads 1)' % OCTO_SHAPE)
+        return OCTO_FLAGS, OCTO_FLAGS & ~EXTENT
     if kv_heads == PAIR_KV_HEADS:
         return SERVED_FLAGS, COMPILE_FLAGS
     return SERVED_FLAGS_ONE_HEAD, COMPILE_FLAGS_ONE_HEAD
+
+
+def set_served_geometry(name):
+    """Point TICKET_ROWS, SERVED_ROWS, SERVED_BATCH and SERVED_OFFSETS at one of SERVED_GEOMETRIES; returns the previous name."""
+    global TICKET_ROWS, SERVED_ROWS, SERVED_BATCH, SERVED_OFFSETS
+    if name not in SERVED_GEOMETRIES:
+        raise ValueError('Unknown served geometry %r (known: %s)' % (name, ', '.join(sorted(SERVED_GEOMETRIES))))
+    previous = 'G8B1' if SERVED_BATCH == 1 else 'G8B2'
+    found = SERVED_GEOMETRIES[name]
+    TICKET_ROWS, SERVED_ROWS, SERVED_BATCH, SERVED_OFFSETS = found['ticket_rows'], found['rows'], found['batch'], found['offsets']
+    return previous
 
 
 def parse_combos(text, kv_heads=PAIR_KV_HEADS):
@@ -393,15 +417,16 @@ def reference_sample(count, wanted):
     return {round(index * (count - 1) / (wanted - 1)) for index in range(wanted)}
 
 
-def mask_row_positions(word, rows=SERVED_ROWS, batches=SERVED_BATCH, offset=0):
+def mask_row_positions(word, rows=None, batches=None, offset=0):
     """attention_mask_replay.cpp:24 (and attention_mask_replay.mask_position): folded row h of entry b sits at
     word + offset + b * rows + (h % (rows * 6)) / 6 - [[position per row] per entry]. The folded rows are rows * 12 on
     the pair (two KV-head blocks of rows * 6) and rows * 6 at one KV head (token-major: h / 6 is the token)."""
+    rows, batches = SERVED_ROWS if rows is None else rows, SERVED_BATCH if batches is None else batches
     return [[word + offset + batch * rows + (head % (rows * 6)) // 6 for head in range(rows * local_heads())]
             for batch in range(batches)]
 
 
-def served_mask(torch, word, capacity, width=None, rows=SERVED_ROWS, batches=SERVED_BATCH, offset=0):
+def served_mask(torch, word, capacity, width=None, rows=None, batches=None, offset=0):
     """The pinned mask kernel on the host (attention_mask_replay.cpp:18-33) run with the start word `word` at
     `capacity`, into a zero-initialised tensor (attention_replay.py:51): (batches, 1, rows * 12, width) bf16 (rows * 6
     at one KV head: local_heads()), -inf
@@ -409,6 +434,7 @@ def served_mask(torch, word, capacity, width=None, rows=SERVED_ROWS, batches=SER
     is past the row's (mask_row_positions), +0.0 elsewhere. At rows 8 there is no padding head (h < 96 = rows * 12,
     cpp :28). width (default capacity) keeps the tensor's LAST width columns: the wide mask is width = capacity."""
     width = capacity if width is None else width
+    rows, batches = SERVED_ROWS if rows is None else rows, SERVED_BATCH if batches is None else batches
     if (any(type(value) is not int for value in (word, capacity, width)) or word < 0 or capacity < K_CHUNK
             or capacity % K_CHUNK or not K_CHUNK <= width <= capacity):
         raise ValueError('served_mask needs a word >= 0, a 256-aligned capacity and a width of 256 .. capacity')
@@ -431,17 +457,19 @@ def wide_mask(torch, start, extent):
     return served_mask(torch, start, extent)
 
 
-def accept_limit(start, rows=TICKET_ROWS):
+def accept_limit(start, rows=None):
     """design 2.4: a ticket at `start` commits at most min(rows, E - start) rows, those at positions below E."""
+    rows = TICKET_ROWS if rows is None else rows
     return min(rows, split_model.extent(start) - start)
 
 
-def ticket_positions(start, rows=TICKET_ROWS):
-    return list(range(start, start + rows))
+def ticket_positions(start, rows=None):
+    return list(range(start, start + (TICKET_ROWS if rows is None else rows)))
 
 
-def valid_positions(start, rows=TICKET_ROWS):
+def valid_positions(start, rows=None):
     """The ticket's rows the boundary cap commits (positions < E): the rows K2 compares."""
+    rows = TICKET_ROWS if rows is None else rows
     return list(range(start, start + accept_limit(start, rows)))
 
 
@@ -775,6 +803,8 @@ def verdict_line(report):
         words.append('k2_floor_differing=%d/%d' % (rows['floor_differing'], rows['floor']))
     if report.get('kv_heads') is not None:
         words.append('kv_heads=%d' % report['kv_heads'])          # one-head runs only; the pair's line has no such word
+    if report.get('geometry'):
+        words.append('geometry=%s' % report['geometry'])           # the octo run only; every other line is what it always was
     words.append('k2_verdict=%s' % decision.get('k2', 'not_run'))
     coverage = decision.get('k2_coverage')
     if coverage:
@@ -1748,6 +1778,10 @@ def parse_args(argv=None):
                         help='KV heads per chip: 2 (the pair: 12 query heads, the default) or 1 (a four-card chip: 6 query '
                              'heads on one KV head; the q-slice combos 0x27 / 0x2F are refused, the defaults are G4B3 and '
                              'G8B2 at 0x21 / 0x23 and CB2a\'s served call is 0x23)')
+    parser.add_argument('--octo', action='store_true',
+                        help='the octo-T8 block\'s geometry (docs/tp4-octo.md): ONE eight-row group per bundle, G8B1 at flags 0x21 (tail | extent, no KV share), one KV head per chip '
+                             '(--kv-heads 1). The default combos and trace combos become G8B1:0x21 and CB2a\'s served ticket (K2, X7, Z) the 8-row one-entry call against its compile-time '
+                             'twin 0x1 and the native one-row decode. Sections M and K (the G4B3 mixed and skip families) are not octo sections and are refused with it')
     parser.add_argument('--combos', default=None,
                         help='X, M and L: shape:flags pairs (G4B3 0x21/0x23, G8B2 0x21/0x23/0x27/0x2F; default %s, at '
                              '--kv-heads 1 %s)' % (','.join(combo_name(*combo) for combo in default_combos()),
@@ -1790,13 +1824,16 @@ def parse_args(argv=None):
     def ints(text):
         return [int(value) for value in text.split(',') if value.strip()]
 
+    if args.octo and args.kv_heads != ONE_KV_HEAD:
+        parser.error('--octo is the four-card chip\'s geometry: it needs --kv-heads 1')
     try:
         args.extents = ints(args.extents)
         args.starts = ints(args.starts)
         args.seeds = ints(args.seeds)
-        args.combos = (default_combos(args.kv_heads) if args.combos is None
+        octo_default = [(OCTO_SHAPE, OCTO_FLAGS)]
+        args.combos = ((octo_default if args.octo else default_combos(args.kv_heads)) if args.combos is None
                        else parse_combos(args.combos, args.kv_heads))
-        args.trace_combos = (list(default_trace_combos(args.kv_heads)) if args.trace_combos is None
+        args.trace_combos = ((list(octo_default) if args.octo else list(default_trace_combos(args.kv_heads))) if args.trace_combos is None
                              else parse_combos(args.trace_combos, args.kv_heads))
         args.k2_sweep = parse_range(args.k2_sweep, '--k2-sweep')
         args.k2_floor = parse_range(args.k2_floor, '--k2-floor')
@@ -1806,7 +1843,9 @@ def parse_args(argv=None):
         args.z_starts = ints(args.z_starts)
     except ValueError as error:
         parser.error(str(error))
-    args.served_flags, args.compile_flags = served_flags_for(args.kv_heads)
+    args.geometry = OCTO_SHAPE if args.octo else 'G8B2'
+    args.served_flags, args.compile_flags = served_flags_for(args.kv_heads, args.geometry)
+    set_served_geometry(args.geometry)
     if args.deadline_s < 0:
         parser.error('--deadline-s must be >= 0')
     args.variants = [value for value in args.variants.split(',') if value]
@@ -1847,6 +1886,10 @@ def parse_args(argv=None):
         parser.error('--seeds and --variants (normal, peaky) must be non-empty')
     if not args.combos or any(name not in SECTIONS for name in args.sections):
         parser.error('--combos must be non-empty and --sections a subset of %s' % ','.join(SECTIONS))
+    if args.octo and {'M', 'K'} & set(args.sections):
+        parser.error('--octo: sections M and K are the G4B3 mixed-family and skip checks, not the octo geometry\'s (one entry has nothing to mix or share); run N, X, L, T and CB2a\'s K2, X7, Z')
+    if not args.octo and any(shape == OCTO_SHAPE for shape, flags in args.combos + args.trace_combos):
+        parser.error('a G8B1 combo is the octo geometry: pass --octo (it also sets CB2a\'s served ticket)')
     if args.trace_families < 1 or args.trace_references < 0 or min(args.iters, args.rounds) < 1 or args.warmup < 0:
         parser.error('--trace-families, --iters and --rounds must be >= 1, --trace-references >= 0')
     if args.expect_binary_sha256 and (len(args.expect_binary_sha256) != 64
@@ -1903,12 +1946,16 @@ def check_log(report, text):
 
 def main(argv=None):
     """parse_args, then run_main with the geometry (card.set_kv_heads) of --kv-heads in force and restored afterwards."""
-    args = parse_args(argv)
-    previous = card.set_kv_heads(args.kv_heads)
+    served = (TICKET_ROWS, SERVED_ROWS, SERVED_BATCH, SERVED_OFFSETS)       # parse_args points the served ticket at --octo's geometry
     try:
-        return run_main(args, argv)
+        args = parse_args(argv)
+        previous = card.set_kv_heads(args.kv_heads)
+        try:
+            return run_main(args, argv)
+        finally:
+            card.set_kv_heads(previous)
     finally:
-        card.set_kv_heads(previous)
+        set_served_geometry('G8B1' if served[2] == 1 else 'G8B2')
 
 
 def run_main(args, argv=None):
@@ -1925,6 +1972,8 @@ def run_main(args, argv=None):
     if args.kv_heads != PAIR_KV_HEADS:
         # The four-card record's own words (record_packed_any_evidence_tp4.kv_problems reads kv_heads, an int).
         report.update(kv_heads=args.kv_heads, local_heads=local_heads(), fold_rows_per_token=local_heads())
+    if args.octo:
+        report['geometry'] = OCTO_SHAPE
     if set(CB2A_SECTIONS) & set(args.sections):
         tickets = (k2_tickets(args.k2_sweep, args.k2_floor, args.cb2_extents, args.cb2_starts)
                    if 'K2' in args.sections else [])

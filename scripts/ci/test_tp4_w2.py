@@ -227,7 +227,7 @@ class MergeSeamTests(unittest.TestCase):
 
     def test_the_flagged_twin_table_holds_both_branches_rows(self):
         found = tp_addresses.FLAGGED_TWINS
-        self.assertEqual(found[('extent_attention_replay_tp', 'PackedExtentReplayReader')][0], 'QWEN_FAST_TP4_ATTN_FOLD or QWEN_FAST_TP4_SDPA')
+        self.assertEqual(found[('extent_attention_replay_tp', 'PackedExtentReplayReader')][0], 'QWEN_FAST_TP4_ATTN_FOLD or QWEN_FAST_TP4_SDPA or QWEN_FAST_OCTO')
         self.assertEqual(found[('gdn_seq_block', 'execute')][0], V5_FLAG)
         self.assertEqual(found[('gdn_device_loop_state', 'DeviceLoopState')][0], 'QWEN_FAST_TP4_GDN_GLUE')
 
@@ -242,7 +242,7 @@ class MergeSeamTests(unittest.TestCase):
     def test_the_packed_verifier_runs_both_audits_after_the_replay(self):
         source = (HERE / 'packed_verifier.py').read_text(encoding='utf-8')
         for marker in ('tile_collective_tp.audit_round(self.operations, self.fixture, self.rounds + 1)', 'sdpa_audit(self.rounds + 1)',
-                       'tp4_vglue.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)',
+                       'tp4_vglue.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1,',
                        'gdn_conv_gates_spread.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)'):
             self.assertEqual(source.count(marker), 1, marker)
         self.assertLess(source.index('tp4_vglue.audit_round('), source.index('gdn_conv_gates_spread.audit_round('))

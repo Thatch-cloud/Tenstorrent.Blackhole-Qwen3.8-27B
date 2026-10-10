@@ -8,6 +8,7 @@ and agentstart (never a deploy). The templates are public, so they name no rig, 
 """
 
 import json
+import make_octo_profiles
 import make_parked_profiles
 import profile_twins
 import os

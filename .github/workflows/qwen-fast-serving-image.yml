@@ -48,7 +48,7 @@ jobs:
           cp serving-build-orchestrator/docker/qwen-fast-serving.Dockerfile "$context/docker/"
           cp serving-build-orchestrator/scripts/ci/serving_native_install.py "$context/scripts/ci/"
           cp serving-build-orchestrator/scripts/ci/serving_image_preflight.py "$context/scripts/ci/"
-          for name in serving_fast_policy.py serving_lifecycle.py serving_request_factory.py serving_plugin_patch.py serving_dflash_registry.py serving_canary_runner.py serving_fast_request.py serving_worker_hook.py serving_one_in_flight.py serving_vllm_packed.py serving_vllm_contract.py model_batch.py serving_packed_bridge.py serving_sequential_step.py serving_vllm_state.py serving_buffer_pool.py serving_solo_lane.py request_width_warm.py runtime_binary_override.py dflash_proposal_trace.py gdn_user_batch.py gdn_user_batch_conv.py gdn_seq_block.py dflash_packed_proposal.py dflash_packed_proposal_coordinator.py dflash_pipelined_publish.py dflash_traced_publish.py profiled_block_stream_override.py; do
+          for name in serving_fast_policy.py serving_lifecycle.py serving_request_factory.py serving_plugin_patch.py serving_dflash_registry.py serving_canary_runner.py serving_fast_request.py serving_worker_hook.py serving_one_in_flight.py serving_vllm_packed.py serving_vllm_contract.py model_batch.py serving_packed_bridge.py serving_sequential_step.py serving_vllm_state.py serving_buffer_pool.py serving_solo_lane.py serving_octo.py request_width_warm.py runtime_binary_override.py dflash_proposal_trace.py gdn_user_batch.py gdn_user_batch_conv.py gdn_seq_block.py dflash_packed_proposal.py dflash_packed_proposal_coordinator.py dflash_pipelined_publish.py dflash_traced_publish.py profiled_block_stream_override.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
           cp serving-build-orchestrator/scripts/ci/test_serving_*.py "$context/scripts/ci/"
@@ -90,7 +90,7 @@ jobs:
           for name in verify_trace_t2.py gdn_conv_windows_packed.py gdn_conv_windows_packed.cpp packed_ordered_cache.py page_width_tp4.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
-          for name in tp4_vglue.py gdn_commit_lanes_tp.cpp gdn_rows_dma_tp.py gdn_rows_dma_tp.cpp gdn_device_loop_state_tp.py gdn_block_conv_tp.py attention_block_fold_tp.py attention_block_fold_tp.cpp extent_attention_fold_tp.py gdn_pair_slice_tp.py; do
+          for name in tp4_vglue.py gdn_commit_lanes_tp.cpp gdn_rows_dma_tp.py gdn_rows_dma_tp.cpp gdn_device_loop_state_tp.py gdn_block_conv_tp.py attention_block_fold_tp.py attention_block_fold_tp.cpp extent_attention_octo_tp.py extent_attention_fold_tp.py gdn_pair_slice_tp.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
           for name in draft_wide_tp.py; do

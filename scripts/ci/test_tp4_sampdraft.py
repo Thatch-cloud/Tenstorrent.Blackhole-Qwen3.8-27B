@@ -3,6 +3,7 @@ prove each lever engaged, and the image copy lists and CPU allowlist that carry 
 
 import ast
 import json
+import make_octo_profiles
 import make_parked_profiles
 import profile_twins
 import os

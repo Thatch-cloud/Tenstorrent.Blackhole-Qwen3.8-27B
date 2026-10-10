@@ -41,6 +41,10 @@ ALL_FLAGS = LEVERS + (PAIR_SLICE, DISPATCH_DIAG, AUDIT)
 
 ENGAGED = '[PINDIAG] tp4 vglue engaged'
 FALLBACK = '[PINDIAG] tp4 vglue fell back'
+# Octo-T8 (QWEN_FAST_OCTO): the half-tile glue kernels (gdn_rows_dma_tp, gdn_block_conv_tp) move 16-row users; an 8-row user is a quarter tile no kernel here moves yet. A block of
+# eight-row segments therefore takes the SERVED (pinned) path at those sites - exact, a few launches slower - and says so with this line, which is NOT the FALLBACK marker (a gated
+# arm fails on FALLBACK because there it means a lever saved nothing by accident; here it is the known state of the octo block, and the timing arms measure it).
+EIGHT_ROW_SERVED = '[PINDIAG] tp4 vglue octo 8-row served path'
 AUDIT_MARKER = '[PINDIAG] tp4 vglue audit'
 AUDIT_MISMATCH = '[PINDIAG] tp4 vglue audit mismatch'
 
@@ -48,7 +52,7 @@ AUDIT_MISMATCH = '[PINDIAG] tp4 vglue audit mismatch'
 # (test_tp4_vglue checks it), so what the CPU tests proved is what ships.
 RUNTIME_FILES = ('tp4_vglue.py', 'gdn_commit_lanes_tp.cpp', 'gdn_rows_dma_tp.py', 'gdn_rows_dma_tp.cpp',
                  'gdn_device_loop_state_tp.py', 'gdn_block_conv_tp.py', 'attention_block_fold_tp.py',
-                 'attention_block_fold_tp.cpp', 'extent_attention_fold_tp.py', 'gdn_pair_slice_tp.py')
+                 'attention_block_fold_tp.cpp', 'extent_attention_fold_tp.py', 'extent_attention_octo_tp.py', 'gdn_pair_slice_tp.py')
 
 
 def _read(name, environ):
@@ -107,6 +111,18 @@ def engaged_levers(environ=None):
 def marker(site, **counts):
     """The ENGAGED line: `[PINDIAG] tp4 vglue engaged site=<site> k=v ...` with the counts in the order given."""
     return ' '.join([ENGAGED, 'site=%s' % site] + ['%s=%s' % pair for pair in counts.items()])
+
+
+_LOGGED_ONCE = set()
+
+
+def log_once_line(message, key):
+    """log_line, once per process per `key` (the octo block's served-path notices repeat on every layer of every capture)."""
+    if key in _LOGGED_ONCE:
+        return False
+    _LOGGED_ONCE.add(key)
+    log_line(message)
+    return True
 
 
 def log_line(message):
@@ -221,15 +237,16 @@ def missing_entries(result, environ=None):
     return found
 
 
-def audit_round(operations, records, round_number):
+def audit_round(operations, records, round_number, served_only=False):
     """Compare the layers verify_trace_t2.audit_layers names for this round (every layer on round 1, then two per round in
     rotation). Every audited layer must carry the entries the engaged GDN levers imply (a lever that declined on a layer is
     a failure, not a pass on what is left) and something must have been compared. Logs AUDIT_MARKER
     '<n> exact=True layers=<L> entries=<k>' or AUDIT_MISMATCH and raises. With neither GDN lever on there is nothing for
-    this audit to read (V4a has its own in packed_verifier) and it returns 0 without a line."""
+    this audit to read (V4a has its own in packed_verifier) and it returns 0 without a line. `served_only` (the octo block's eight-row users, which run the
+    SERVED path under EIGHT_ROW_SERVED: no lever engaged, so no entry exists and the served path is its own reference) returns 0 the same way."""
     import verify_trace_t2
 
-    if not (enabled(GDN_GLUE) or pair_slice_enabled()):
+    if served_only or not (enabled(GDN_GLUE) or pair_slice_enabled()):
         return 0
     layers = verify_trace_t2.audit_layers(round_number, len(records) or verify_trace_t2.GDN_LAYERS)
     compared, mismatches = 0, []

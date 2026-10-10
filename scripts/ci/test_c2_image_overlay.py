@@ -19,6 +19,7 @@ and test_the_layer_commits_are_reachable fails loudly on a shallow clone.
 import ast
 import hashlib
 import json
+import make_octo_profiles
 import make_parked_profiles
 import profile_twins
 import os

@@ -181,6 +181,26 @@ class VerdictTests(unittest.TestCase):
         seeds = self.report(card.FOUR_SECTIONS, [self.equal(name) for name in card.FOUR_SECTIONS], reduced=True)
         self.assertEqual(card.scope_of(seeds), 'reduced')
 
+    def test_the_octo_block_is_qualified_by_ub_and_nt_at_eight_users_of_eight_rows_in_its_own_scope(self):
+        # Q2: the batched launch at 8 users x 12 heads = 96 of the 110 cores, bit for bit against eight per-user launches (UB) and the native twin (NT)
+        arguments = card.parse(['--out', 'x.json', '--sections', 'UB,NT', '--users', '8', '--rows', '8'])
+        self.assertEqual((arguments.users, arguments.rows), (8, 8))
+        found = self.report(['UB', 'NT'], [self.equal('UB'), self.equal('NT')], geometry='8x8')
+        self.assertEqual((found['decision']['verdict'], card.scope_of(found)), ('PASS', 'octo'))
+        self.assertIn('scope=octo tp=4 chips=1of4', card.verdict_line(found))
+        self.assertTrue(card.verdict_line(found).endswith('geometry=8x8'))
+        self.assertEqual(card.scope_of(self.report(['UB'], [self.equal('UB')], geometry='8x8')), 'reduced')
+        self.assertEqual(card.scope_of(self.report(['UB', 'NT'], [self.equal('UB'), self.equal('NT')], geometry='8x8', reduced=True)), 'reduced')
+        default = card.parse(['--out', 'x.json'])
+        self.assertEqual((default.users, default.rows), (4, 16), 'the M3 block, as it always ran')
+        plain = card.verdict_line(self.report(card.FOUR_SECTIONS, [self.equal(name) for name in card.FOUR_SECTIONS], geometry='4x16'))
+        self.assertNotIn('geometry', plain, 'the default block\'s verdict line is what it always was')
+        self.assertNotIn('geometry', card.verdict_line(self.report(card.FOUR_SECTIONS, [self.equal(name) for name in card.FOUR_SECTIONS])))
+        for options in (['--users', '8'], ['--rows', '8'], ['--users', '9', '--rows', '8'], ['--users', '8', '--rows', '8', '--sections', 'UB,K5'],
+                        ['--users', '8', '--rows', '8', '--sections', 'DMA']):
+            with self.subTest(options=options), self.assertRaises(SystemExit):
+                card.parse(['--out', 'x.json'] + options)
+
     def test_arguments(self):
         arguments = card.parse(['--out', 'x.json'])
         self.assertEqual((arguments.sections, arguments.seeds, arguments.prefixes),

@@ -12,6 +12,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import make_octo_profiles
 import make_parked_profiles
 import profile_twins
 import os

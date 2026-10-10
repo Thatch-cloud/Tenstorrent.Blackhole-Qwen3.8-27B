@@ -140,7 +140,13 @@ def _gdn_glue(environ):
 def _attn_fold(environ):
     import tp4_vglue
 
-    return tp4_vglue.enabled(tp4_vglue.ATTN_FOLD, environ) or _sdpa_long(environ)
+    return tp4_vglue.enabled(tp4_vglue.ATTN_FOLD, environ) or _sdpa_long(environ) or _octo(environ)
+
+
+def _octo(environ):
+    """QWEN_FAST_OCTO set to anything but 'off' (unset is off): the fold twin is also the class that hands an eight-row-segment block to the octo readers
+    (extent_attention_octo_tp), so it must be the bound class whenever the flag is asked for. A malformed value is the admission's to refuse, by name."""
+    return (os.environ if environ is None else environ).get('QWEN_FAST_OCTO', 'off') != 'off'
 
 
 def _sdpa_long(environ):
@@ -169,7 +175,7 @@ def _split_v(environ):
 
 FLAGGED_TWINS = {
     ('gdn_device_loop_state', 'DeviceLoopState'): ('QWEN_FAST_TP4_GDN_GLUE', _gdn_glue),
-    ('extent_attention_replay_tp', 'PackedExtentReplayReader'): ('QWEN_FAST_TP4_ATTN_FOLD or QWEN_FAST_TP4_SDPA', _attn_fold),
+    ('extent_attention_replay_tp', 'PackedExtentReplayReader'): ('QWEN_FAST_TP4_ATTN_FOLD or QWEN_FAST_TP4_SDPA or QWEN_FAST_OCTO', _attn_fold),
     ('gdn_seq_block', 'execute'): ('QWEN_FAST_GDN_SPLIT_V', _split_v),
 }
 FLAGGED_MODULE_TWINS = {

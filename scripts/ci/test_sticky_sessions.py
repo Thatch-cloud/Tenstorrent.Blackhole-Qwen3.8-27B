@@ -33,6 +33,7 @@ block). What is held here:
   writers    every device write of a resumed request lands in its own blocks at or above R.
 """
 
+import make_octo_profiles
 import make_parked_profiles
 import profile_twins
 import contextlib

@@ -15,6 +15,7 @@ value for their own arm) are listed by count only: none is on the serving path."
 
 import ast
 import json
+import make_octo_profiles
 import make_parked_profiles
 import profile_twins
 import os

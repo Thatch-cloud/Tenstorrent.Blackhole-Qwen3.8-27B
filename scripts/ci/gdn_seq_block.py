@@ -793,7 +793,7 @@ def audit_round(operations, records, layers, round_number):
     return compared
 
 
-def audit(root=DEFAULT_ROOT, users=batch.MAX_USERS, built_level=0, variant='A', diag=None):
+def audit(root=DEFAULT_ROOT, users=getattr(batch, 'PAIR_MAX_USERS', batch.MAX_USERS), built_level=0, variant='A', diag=None):
     """Host-only description of what one K5-A launch would build; never opens a device."""
     kernels = load_kernels(root, built_level, variant=variant, diag=diag, unqualified=True)
     io, fp32 = cb_plan(variant)
@@ -822,7 +822,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Read-only host audit; never opens a device')
     parser.add_argument('--root', type=Path, required=True)
-    parser.add_argument('--users', type=int, default=batch.MAX_USERS)
+    parser.add_argument('--users', type=int, default=getattr(batch, 'PAIR_MAX_USERS', batch.MAX_USERS))
     parser.add_argument('--level', type=int, default=0)
     parser.add_argument('--variant', choices=VARIANTS, default='A')
     parser.add_argument('--diag', choices=[value for value in DIAGNOSTICS if value], default=None)

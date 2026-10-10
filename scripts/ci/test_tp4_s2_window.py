@@ -7,6 +7,7 @@ parses with c2_serving_job, opens the cards in ONE step, agrees with its card se
 gate accepts on the profile they name."""
 
 import json
+import make_octo_profiles
 import make_parked_profiles
 import profile_twins
 import os

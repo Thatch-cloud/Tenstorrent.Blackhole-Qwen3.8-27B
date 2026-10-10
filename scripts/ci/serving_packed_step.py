@@ -56,6 +56,15 @@ own backstop in commit_user is unreachable. QWEN_FAST_GATE_FORCE_CAP (gate only)
 commit lower still, for the ticket-width arm (design Q5). A block without the methods (every block
 before S2) is asked exactly what it was before.
 
+Octo-T8 (QWEN_FAST_OCTO=live|alternate, GATE ONLY, default off; serving_octo): beside the two M3 blocks a THIRD packed block of eight users x eight
+rows (packed_shapes.octo_shape) over pool slots 0..7, sharing their carries by identity. When enough seats are live (serving_octo.octo_min_live) and the block
+admits every member, the coming round's tickets are drafted at EIGHT rows for it (`proposal_groups`: one group, the octo block, every live request) and the
+round runs as ONE 64-row pass (`route_octo`) in place of the two M3 passes; otherwise the groups, the tickets and the step are exactly the two-block ones.
+Under `alternate` the shape switches on every eligible round. A round whose tickets are not all octo-width, or that the octo block does not serve at the
+step, goes to `packed_device_step`'s narrowing and the sequential step like any other. Each switch of shape bumps the fixture write epoch (`announce_shape`,
+before the drafts' fence window, exactly as D0's `announce_round`). With no octo block (the default) none of this exists: `octo` is None and every path below
+is what it was.
+
 Variable-user rounds (M2, QWEN_FAST_PADDED_BLOCK=1 at the 64-row block, default off): a block
 built with `padded_min_users` also serves padded_min_users <= n < users live requests as one
 pass, the other segments idle (packed_verifier.py, VARIABLE-USER ROUNDS). proposal_rows drafts
@@ -514,7 +523,7 @@ class PackedStep:
     `packed_device_rounds` instead; `self.block` is then None, since no one block owns the
     round."""
 
-    def __init__(self, blocks, *, solo=None, per_block_widths=False):
+    def __init__(self, blocks, *, solo=None, per_block_widths=False, octo=None, octo_state=None):
         if blocks is None:
             raise ValueError('A packed verify block is required')
         self.blocks = tuple(blocks) if isinstance(blocks, (list, tuple)) else (blocks,)
@@ -537,14 +546,26 @@ class PackedStep:
         self.solo = solo
         self.last_solo = None
         self.route = None
+        # Octo-T8 (QWEN_FAST_OCTO, serving_octo; default off): the third block of eight users x eight rows beside the TWO M3 blocks, and the policy state that
+        # decides, round by round, which shape the tickets are drafted for. Both None, every path below is what it was.
+        if (octo is None) != (octo_state is None):
+            raise ValueError('The octo block and its state (serving_octo.OctoState) go together')
+        if octo is not None:
+            shape = octo.shape
+            if (not per_block_widths or len(self.blocks) != 2 or solo is not None or octo in self.blocks
+                    or (shape.users, shape.rows_per_user) != (8, 8)):
+                raise ValueError('The octo block is a separate eight-user eight-row block beside two M3 blocks that decide their widths per block, and no solo block')
+        self.octo, self.octo_state = octo, octo_state
         if len(self.blocks) > 1:
             # tp4/hostgap: the two-block pre-stage and the per-block epochs, engaged (or refused, with the reason) once, here, by
             # the flags; host only. Neither flag set, nothing changes. Stage 0 also labels the blocks for its lines.
+            # The octo block (when there is one) is a third block of the same pre-stage: its own fixture, its own snapshot.
             import verify_prestage
 
-            verify_prestage.engage_two_block(self.blocks)
+            staged = self.blocks if octo is None else self.blocks + (octo,)
+            verify_prestage.engage_two_block(staged)
             if verify_prestage.hostgap_log_enabled():
-                for index, block in enumerate(self.blocks):
+                for index, block in enumerate(staged):
                     verify_prestage.block_label(block, index)
         # tp4/round-host: the six flags read strictly at the attach (a malformed one, or an audit without a lever, fails here) and the
         # engaged line written once. Nothing set, nothing logged.
@@ -558,6 +579,8 @@ class PackedStep:
         # QWEN_FAST_STALL_DEADLINE_S: one packed round (or its sequential fallback) is one watched scope; without the flag
         # scope() is a nullcontext and this is the routing below.
         with stall_watch.scope('step', 'packed round users=%d' % len(entries)):
+            if self.octo is not None:
+                return self.route_octo(entries, cancelled)
             if self.solo is not None:
                 return self.route_round(entries, cancelled)
             return self.run_blocks(entries, cancelled)
@@ -580,6 +603,73 @@ class PackedStep:
         finally:
             after = [getattr(block, 'rounds', 0) for block in self.blocks], getattr(self.solo, 'rounds', 0)
             self.route = ('solo' if after[1] != counts[1] else 'packed' if after[0] != counts[0] else 'sequential')
+
+    def route_octo(self, entries, cancelled):
+        """A step with the octo block: the round runs on it when every entry is an octo-width ticket (the drafts were made for it, `proposal_groups`), else on the
+        two M3 blocks (or the sequential step) as ever. `route` records where it went - 'octo', 'packed' or 'sequential', by which block's round counter moved -
+        and the octo state counts the round and writes its line AFTER it ran: a line that says the octo block executed, not that it was mounted."""
+        entries = list(entries)
+        state = self.octo_state
+        octo_round = octo_serves(self.octo, entries)
+        rows = len(entries[0]['ticket'].tokens) if entries else 0
+        counts = [getattr(block, 'rounds', 0) for block in self.blocks], getattr(self.octo, 'rounds', 0)
+        self.announce_shape('octo' if octo_round else 'm3')
+        self.route = None
+        state.begin()
+        outputs = None
+        try:
+            # ORDERING INVARIANT (packed_device_rounds): no block's verify may replay between another block's verify and that block's commit flush, so every other
+            # block still holding deferred commits is flushed BEFORE this round's verify.
+            running = (self.octo,) if octo_round else self.blocks
+            held = [block for block in self.all_blocks() if block not in running and getattr(block, 'deferred_commits', None)]
+            if held:
+                flush_blocks_deferred(held, 'verify')
+            if octo_round:
+                outputs = packed_device_step(entries, cancelled=cancelled, block=self.octo)
+            else:
+                outputs = self.run_blocks(entries, cancelled)
+            return outputs
+        finally:
+            after = [getattr(block, 'rounds', 0) for block in self.blocks], getattr(self.octo, 'rounds', 0)
+            ran = 'octo' if after[1] != counts[1] else 'm3' if after[0] != counts[0] else 'seq'
+            self.route = {'octo': 'octo', 'm3': 'packed', 'seq': 'sequential'}[ran]
+            if outputs is not None:
+                state.finish(ran, live=len(entries), rows=rows, committed=sum(len(output.token_ids) for output in outputs))
+
+    def announce_shape(self, shape):
+        """The coming round's shape ('octo' or 'm3'), known when the drafts plan it (`proposal_groups`, before their fence window) and again when the step routes it:
+        a switch from the last announced shape bumps the fixture write epoch (note_fixture_writer), exactly as D0's note_switch does. The epoch bump of a switch belongs
+        BEFORE the window that pre-stages the coming verify, not at the step after it; the step's own call then finds the shape already noted and does not bump again.
+        Over-bumping is the safe direction: a plan that does not hold bumps again when the next plan differs. Host only."""
+        if self.octo_state.switched(shape):
+            note_fixture_writer('octo-switch')
+
+    def octo_rows(self, live, blocked=None):
+        """The ticket width of a round the octo block would serve over these live requests (its rows per user), or None: too few live (serving_octo.octo_min_live), a
+        member the hook's budget narrowing would cut at this width (`blocked`, a set of request ids), a member not bound to the block, or the block's own per-member rules
+        (block_rows_for: the padded count and idle-segment rules, tokens left, the extent block's frontier range, page 0, the K/V tile rows)."""
+        if len(live) < self.octo_state.min_live:
+            return None
+        if blocked and any(id(request) in blocked for request in live):
+            return None
+        for request in live:
+            try:
+                self.octo.segment_of(request.engine)
+            except ValueError:
+                return None
+        return block_rows_for(self.octo, live)
+
+    def octo_groups(self, groups, requests, blocked=None):
+        """`proposal_groups` with the octo block: the coming round's shape is planned (OctoState.plan), announced, and when it is 'octo' the groups are ONE entry for
+        the octo block (every live request, at its 8 rows) and one for the requests no block serves (finished ones); otherwise `groups`, the two-block answer, as it was."""
+        live = [request for request in requests if not request.session.finished]
+        rows = self.octo_rows(live, blocked) if live else None
+        shape = self.octo_state.plan(rows is not None)
+        self.announce_shape(shape)
+        if shape != 'octo':
+            return groups
+        rest = [request for request in requests if request.session.finished]
+        return [(self.octo, rows, live)] + ([(None, None, rest)] if rest else [])
 
     def solo_rows(self, request):
         """The ticket width the solo block would serve this ONE request at (16), or None: not its slot, no token budget left,
@@ -623,13 +713,17 @@ class PackedStep:
             note_solo_skipped(self.solo, requests, rows)
         return rows
 
-    def proposal_groups(self, requests):
+    def proposal_groups(self, requests, *, blocked=None):
         """[(block, rows, requests)] for the coming round (module `proposal_groups`), when this step decides its widths
         per block (QWEN_FAST_M3_BLOCKS=2); None otherwise, and the worker hook then asks `proposal_rows` as it always
-        did."""
+        did. With the octo block (QWEN_FAST_OCTO) the round may instead be ONE group for it (octo_groups); `blocked` is
+        then the set of request ids the hook's budget narrowing would cut at the octo width."""
         if not self.per_block_widths:
             return None
-        return proposal_groups(self.blocks, requests)
+        groups = proposal_groups(self.blocks, requests)
+        if self.octo is None:
+            return groups
+        return self.octo_groups(groups, requests, blocked)
 
     def while_waiting_groups(self, groups):
         """The drafts' fence window for a per-block round: one window per block whose members are drafted at its width
@@ -694,9 +788,10 @@ class PackedStep:
         return WhileWaiting(block, requests)
 
     def all_blocks(self):
-        """Every block a round may run on: the packed blocks, then the solo block (D0) when there is one. A block armed
+        """Every block a round may run on: the packed blocks, then the solo block (D0) or the octo block when there is one. A block armed
         for deferred commits that does not run the round is disarmed by the flush (PackedVerifierEngine.flush_commits)."""
-        return self.blocks if self.solo is None else self.blocks + (self.solo,)
+        extra = tuple(block for block in (self.solo, self.octo) if block is not None)
+        return self.blocks + extra if extra else self.blocks
 
     def arm_deferred_commits(self):
         """Round-fence plan H2 (early_draft.py, QWEN_FAST_GDN_AFTER_PAIRS): ask every block to defer its
@@ -733,6 +828,24 @@ def flush_blocks_deferred(blocks, site):
     if first_error is not None:
         raise first_error
     return count
+
+
+def octo_serves(octo, entries):
+    """Whether this round is one the octo block serves: every entry an octo-width ticket (8 rows) of a request bound to the block. The routing decision at the
+    step: the tickets were drafted for the shape (`PackedStep.proposal_groups`), so the width is what says which shape the round was planned as. An entry the block
+    does not hold, or a ticket of any other width, is not an octo round (the block's own `ineligible` then narrows or refuses what it must)."""
+    entries = list(entries)
+    if not entries:
+        return False
+    rows = octo.shape.rows_per_user
+    for entry in entries:
+        if len(entry['ticket'].tokens) != rows:
+            return False
+        try:
+            octo.segment_of(entry['request'].engine)
+        except ValueError:
+            return False
+    return True
 
 
 def ineligible(entries, block):

@@ -13,12 +13,13 @@ PROFILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'qwen_c2_pro
 
 
 class _ParkedTwins(object):
-    """The generated engine-reuse gate twins by name (this file ships in the image, where make_parked_profiles does not: test_parked_tp4_profiles holds the list)."""
+    """The generated engine-reuse and octo-T8 gate twins by name (this file ships in the image, where make_parked_profiles and make_octo_profiles do not: test_parked_tp4_profiles and test_octo_profiles hold the lists)."""
 
     def __contains__(self, name):
         # (and the round-host gate twins of the Lever N traffic profile: test_tp4_round_host holds the list)
         return ('-ship-prefix-levern-parked' in name or name.endswith('-ship-prefix-levern-audit-r2')
-                or '-ship-prefix-levern-traffic-roundhost' in name)
+                or '-ship-prefix-levern-traffic-roundhost' in name
+                or '-ship-prefix-levern-octo' in name or '-ship-prefix-levern-solopacked' in name)
 
 
 PARKED_TWINS = _ParkedTwins()

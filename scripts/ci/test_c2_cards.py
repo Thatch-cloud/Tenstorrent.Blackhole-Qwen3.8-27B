@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import c2_prefix_gate as prefix_gate  # noqa: E402
 import c2_serving_gate as gate  # noqa: E402
 import c2_serving_job as job  # noqa: E402
+import make_octo_profiles  # noqa: E402
 import make_parked_profiles  # noqa: E402
 import profile_twins  # noqa: E402
 

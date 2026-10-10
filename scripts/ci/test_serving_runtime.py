@@ -1,4 +1,5 @@
 from contextlib import contextmanager, nullcontext
+import copy
 from functools import partial
 from types import SimpleNamespace
 import io
@@ -8,7 +9,7 @@ import unittest
 import torch
 from unittest.mock import Mock, patch
 
-from packed_shapes import m1_shape, m3_shape
+from packed_shapes import m1_shape, m3_shape, octo_shape
 import serving_packed_step
 import serving_runtime
 import serving_sequential_step
@@ -33,7 +34,10 @@ class RuntimeAttachmentTests(unittest.TestCase):
                  replay_group_rows=None, block_stream=STREAM, extra_env=None, refused=False, padded=None,
                  capture_position=None, block_extent=None, refused_in_attach=None, refused_after_blocks=None,
                  admission=None, pool_refused=None, blocks_refused=None, real_admission=(), pool_extra=None,
-                 m3_blocks=None, carries_in_place=True, phase_failure=None, parked=None):
+                 m3_blocks=None, carries_in_place=True, phase_failure=None, parked=None, octo=None):
+        # Octo-T8 (QWEN_FAST_OCTO): `octo`, a dict (the admission's record: mode, min_live), sets the flag and stands a recording fake in for
+        # serving_octo.octo_admission; the attach then builds a THIRD block, octo_shape over pool slots 0..7, captured with the two M3 blocks
+        # (every block a distinct fake object: the step refuses an octo block that is one of the M3 blocks).
         # QWEN_FAST_M3_BLOCKS (`m3_blocks`, 2 at eight requests): two 64-row M3 blocks built in two phases (A1c), each
         # fake block recording 'block_warm', 'block_capture' and 'block_finish' among the events, and reporting
         # `carries_in_place` as given. `phase_failure` is the (phase method name, exception) a fake block fails with.
@@ -61,6 +65,8 @@ class RuntimeAttachmentTests(unittest.TestCase):
                         if parked is not None else nullcontext())
         policy_patch = (patch('serving_fast_policy.parked_engine_problems', return_value=[])
                         if parked is not None else nullcontext())
+        octo_patch = (patch('serving_octo.octo_admission', return_value=dict(rows=8, users=8, unqualified=[], **octo))
+                      if octo is not None else nullcontext())
         parked_built = ['parked_build'] if parked is not None else []
         parked_closed = ['parked_close'] if parked is not None else []
         # S2 (QWEN_FAST_EXTENT_REPLAY): the flag in the final environment is what the pool must be told and
@@ -102,8 +108,9 @@ class RuntimeAttachmentTests(unittest.TestCase):
         # the switch does nothing.
         two_blocks = packed and users == 4 and four_as_two is not False
         m3x2 = packed and m3_blocks == 2
+        octo_on = octo is not None
         if m3x2:
-            shapes = (m3_shape(68), m3_shape(68))
+            shapes = (m3_shape(68), m3_shape(68)) + ((octo_shape(68),) if octo_on else ())
         elif two_blocks:
             shapes = (m1_shape(68), m1_shape(68))
         else:
@@ -171,9 +178,15 @@ class RuntimeAttachmentTests(unittest.TestCase):
             events.append('weights_build')
             return weights
 
+        built_blocks = []
+
         def build_block(*args, **kwargs):
             events.append('block_build')
-            return block
+            if not octo_on:
+                return block
+            built_blocks.append(copy.copy(block))        # distinct objects, the same recording methods
+            built_blocks[-1].shape = kwargs['shape']      # (the step reads the octo block's shape)
+            return built_blocks[-1]
 
         env = {'QWEN_FAST_PACKED_STEP': '1' if packed else '0'}
         if four_as_two is not None:
@@ -184,6 +197,8 @@ class RuntimeAttachmentTests(unittest.TestCase):
             env['QWEN_FAST_EXTENT_REPLAY'] = '1'
         if m3_blocks is not None:
             env['QWEN_FAST_M3_BLOCKS'] = str(m3_blocks)
+        if octo_on:
+            env['QWEN_FAST_OCTO'] = octo['mode']
         if parked is not None:
             env['QWEN_FAST_PARKED_ENGINES'] = '1'
         env.update(extra_env or {})
@@ -203,7 +218,7 @@ class RuntimeAttachmentTests(unittest.TestCase):
                 patch.object(serving_runtime, 'PreparedDraftWeights', side_effect=build_weights) as prepared, \
                 patch.object(serving_runtime, 'pindiag', side_effect=diag) as diagnostic, \
                 patch('packed_verifier.PackedVerifierEngine', side_effect=build_block) as packed_engine, \
-                parked_patch, policy_patch, \
+                parked_patch, policy_patch, octo_patch, \
                 patch('sampling_link_policy.sampler_links', side_effect=lambda *args: nullcontext()) as links, \
                 patch.object(serving_runtime, 'FastServingLifecycle', return_value=lifecycle,
                              side_effect=RuntimeError('attach failed') if attach_fail else None) as install, \
@@ -217,7 +232,9 @@ class RuntimeAttachmentTests(unittest.TestCase):
                     # device step that serves the rounds - with the block(s) when built,
                     # and why none was when the switch asked for one.
                     lines = [json.loads(line) for line in out.getvalue().splitlines() if line.startswith('{')]
-                    if built and (two_blocks or m3x2):
+                    if built and m3x2 and octo_on:
+                        step = dict(serving_packed_step.describe(), blocks=[dict(name='packed-block')] * 2, octo=dict(name='packed-block'))
+                    elif built and (two_blocks or m3x2):
                         step = dict(serving_packed_step.describe(), blocks=[dict(name='packed-block')] * len(shapes))
                     elif built:
                         step = dict(serving_packed_step.describe(), block=dict(name='packed-block'))
@@ -255,7 +272,7 @@ class RuntimeAttachmentTests(unittest.TestCase):
                         # own set through the separate `packed_replicas` count.
                         self.assertEqual(options['packed_shapes'],
                                          ((2, 16),) if two_blocks and not m3x2
-                                         else ((shapes[0].users, shapes[0].rows_per_user),))
+                                         else ((4, 16), (8, 8)) if octo_on else ((shapes[0].users, shapes[0].rows_per_user),))
                         expected.add('packed_shapes')
                         if two_blocks or m3x2:
                             self.assertEqual(options['packed_replicas'], {(4, 16) if m3x2 else (2, 16): 2})
@@ -309,11 +326,14 @@ class RuntimeAttachmentTests(unittest.TestCase):
                             expected_options = dict(pool=pool, shared_weights=weights, shape=shape,
                                                     feature_taps=(5, 19, 33, 47, 61))
                             if m3x2:
-                                expected_options['pool_slots'] = tuple(range(4 * index, 4 * index + 4))
+                                expected_options['pool_slots'] = tuple(range(4 * index, 4 * index + 4)) if index < 2 else tuple(range(8))
                                 expected_options['defer_capture'] = True
+                                if index == 2:
+                                    # the octo block pads from its minimum live seats whether or not QWEN_FAST_PADDED_BLOCK is set
+                                    expected_options['padded_min_users'] = octo['min_live']
                             elif two_blocks:
                                 expected_options['pool_slots'] = tuple(range(2 * index, 2 * index + 2))
-                            if padded is not None:
+                            if padded is not None and not (octo_on and index == 2):
                                 # QWEN_FAST_PADDED_BLOCK: the one keyword it adds, only where admitted.
                                 expected_options['padded_min_users'] = padded
                             if capture_position is not None:
@@ -327,7 +347,14 @@ class RuntimeAttachmentTests(unittest.TestCase):
                             self.place_blocks.assert_called_once_with(((0, 1, 2, 3), (4, 5, 6, 7)))
                         else:
                             self.place_blocks.assert_not_called()
-                        if two_blocks or m3x2:
+                        if octo_on:
+                            self.assertEqual(len(packed_step.blocks), 2)
+                            self.assertEqual(built_blocks[:2], list(packed_step.blocks), 'the step\'s two M3 blocks are the first two built')
+                            self.assertIs(packed_step.octo, built_blocks[2], 'the third block built is the octo block')
+                            self.assertNotIn(packed_step.octo, packed_step.blocks)
+                            self.assertEqual((packed_step.octo_state.mode, packed_step.octo_state.min_live), (octo['mode'], octo['min_live']))
+                            self.assertIsNone(packed_step.block, 'no single block owns a multi-block round')
+                        elif two_blocks or m3x2:
                             self.assertEqual(packed_step.blocks, (block, block))
                             self.assertIsNone(packed_step.block, 'no single block owns a two-block round')
                         else:
@@ -355,7 +382,7 @@ class RuntimeAttachmentTests(unittest.TestCase):
                         expected.append(('{}{} (gate only)', serving_runtime.CAPTURE_POSITION_MARKER, capture_position))
                     if m3x2:
                         # one line per block capture, the program-cache count before and after (None: no mesh reports it)
-                        expected.extend((serving_runtime.CAPTURE_PROGRAMS_MARKER, index, None, None) for index in range(2))
+                        expected.extend((serving_runtime.CAPTURE_PROGRAMS_MARKER, index, None, None) for index in range(len(shapes)))
                     expected.append(('[PINDIAG] dram after attach: {}', 'unavailable (pool without device statistics)'
                                      if pool_extra is None else serving_runtime.dram_line(pool)))
                     # The admission's own lines (packed_any_admission, where it runs unpatched) are kept apart.
@@ -379,7 +406,8 @@ class RuntimeAttachmentTests(unittest.TestCase):
                 block_closed = ['block_close'] * len(shapes)
                 if m3x2:
                     # every block warms, then every block captures, then every block finishes (A1c)
-                    block_built = block_built + ['block_warm'] * 2 + ['block_capture'] * 2 + ['block_finish'] * 2
+                    count = len(shapes)
+                    block_built = block_built + ['block_warm'] * count + ['block_capture'] * count + ['block_finish'] * count
                 # Under the extent flag the admission runs first, the pool check right after the pool and the
                 # block check after the block(s) and the attach's own extent check, each recorded only where
                 # patched.
@@ -410,8 +438,9 @@ class RuntimeAttachmentTests(unittest.TestCase):
                     # Refused inside the attach before the pool: logged, with nothing built to close.
                     self.assertEqual(events, [*admitted, failed(refused_in_attach)])
                 elif phase_failure is not None:
-                    reached = {'warm': ['block_warm'], 'capture': ['block_warm'] * 2 + ['block_capture'],
-                               'finish': ['block_warm'] * 2 + ['block_capture'] * 2 + ['block_finish']}[phase_failure[0]]
+                    count = len(shapes)
+                    reached = {'warm': ['block_warm'], 'capture': ['block_warm'] * count + ['block_capture'],
+                               'finish': ['block_warm'] * count + ['block_capture'] * count + ['block_finish']}[phase_failure[0]]
                     self.assertEqual(events, [*admitted, 'pool_build', *pool_checked, 'runtime_enter', 'weights_build',
                                               *(['block_build'] * len(shapes)), *reached, failed(phase_failure[1]),
                                               *block_closed, 'weights_close', 'runtime_exit', 'pool_close'])
@@ -848,6 +877,64 @@ class RuntimeAttachmentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'extent=.False, False.'):
             self.exercise(**self.EXTENT, block_extent=False, **self.M3X2,
                           refused_after_blocks='QWEN_FAST_EXTENT_REPLAY=1, but the packed blocks built are extent=[False, False]')
+
+    # --- octo-T8: QWEN_FAST_OCTO builds a THIRD block beside the two M3 blocks -------------------------------------------
+
+    OCTO = dict(mode='alternate', min_live=6)
+
+    def test_an_admitted_octo_flag_builds_the_third_block_over_all_eight_slots_and_binds_it_into_the_step(self):
+        # exercise() asserts: packed_shapes ((4, 16), (8, 8)) with packed_replicas {(4, 16): 2}, three blocks (two M3 over (0..3) and (4..7), the octo
+        # shape over (0..7), padded from its minimum live seats), all three captured together (warm x3, capture x3, finish x3), the step bound to the two
+        # M3 blocks AND the octo block with its state, the arrival placement still by M3 block, the stage line carrying the octo block.
+        self.exercise(**self.EXTENT, **self.M3X2, octo=self.OCTO)
+        self.assertEqual([call.kwargs['shape'] for call in self.engine_calls], [m3_shape(68), m3_shape(68), octo_shape(68)])
+        self.assertEqual([call.kwargs['pool_slots'] for call in self.engine_calls], [(0, 1, 2, 3), (4, 5, 6, 7), tuple(range(8))])
+        octo_call = self.engine_calls[2]
+        self.assertEqual((octo_call.kwargs['shape'].users, octo_call.kwargs['shape'].rows_per_user, octo_call.kwargs['shape'].block_rows), (8, 8, 64))
+        self.assertEqual(octo_call.kwargs['padded_min_users'], 6)
+        self.assertIs(octo_call.kwargs['defer_capture'], True, 'captured with the M3 blocks, never after them (the construction order)')
+        self.assertEqual(self.pool_options['packed_replicas'], {(4, 16): 2}, 'two M3 sets and ONE octo set')
+        self.place_blocks.assert_called_once_with(((0, 1, 2, 3), (4, 5, 6, 7)))
+
+    def test_the_octo_block_keeps_its_own_publication_warm_and_the_second_m3_block_does_not(self):
+        flags = []
+        original = serving_runtime.complete_blocks_two_phase
+
+        def spy(blocks, *args, **kwargs):
+            for block in blocks:
+                block.warm_publication = True
+            result = original(blocks, *args, **kwargs)
+            flags.append([block.warm_publication for block in blocks])
+            return result
+
+        with patch.object(serving_runtime, 'complete_blocks_two_phase', side_effect=spy):
+            self.exercise(**self.EXTENT, **self.M3X2, octo=self.OCTO)
+        self.assertEqual(flags, [[True, False, True]], 'A and the octo block publish-warm; B reuses A\'s program cache entries')
+
+    def test_the_octo_flag_needs_the_extent_path_and_two_m3_blocks_at_the_attach_itself(self):
+        with self.assertRaisesRegex(ValueError, 'builds the third block beside two M3 blocks over the extent storage'):
+            self.exercise(**self.M3X2, octo=self.OCTO, refused_in_attach=(
+                'QWEN_FAST_OCTO=alternate builds the third block beside two M3 blocks over the extent storage (QWEN_FAST_M3_BLOCKS=2 and QWEN_FAST_EXTENT_REPLAY=1)'))
+
+    def test_the_attach_is_refused_unless_the_octo_block_reports_carries_in_place_too(self):
+        message = ('QWEN_FAST_M3_BLOCKS=2 needs every M3 block to read its carries in place (QWEN_FAST_VERIFY_T1 #3); '
+                   'blocks [0, 1, 2] do not report carries_in_place')
+        with self.assertRaisesRegex(ValueError, r'blocks .0, 1, 2. do not report carries_in_place'):
+            self.exercise(**self.EXTENT, **self.M3X2, octo=self.OCTO, carries_in_place=False, refused_after_blocks=message)
+
+    def test_every_block_must_be_the_extent_block_the_octo_block_too(self):
+        with self.assertRaisesRegex(ValueError, r'extent=.False, False, False.'):
+            self.exercise(**self.EXTENT, block_extent=False, **self.M3X2, octo=self.OCTO,
+                          refused_after_blocks='QWEN_FAST_EXTENT_REPLAY=1, but the packed blocks built are extent=[False, False, False]')
+
+    def test_a_failure_in_any_phase_closes_all_three_blocks_and_logs_before_the_scopes_close(self):
+        for phase in ('warm', 'capture', 'finish'):
+            with self.subTest(phase=phase), self.assertRaisesRegex(RuntimeError, '%s refused' % phase):
+                self.exercise(**self.EXTENT, **self.M3X2, octo=self.OCTO, phase_failure=(phase, RuntimeError('%s refused' % phase)))
+
+    def test_a_request_failure_after_a_three_block_attach_closes_all_three_before_the_weights(self):
+        with self.assertRaisesRegex(RuntimeError, 'request failed'):
+            self.exercise(fail=True, **self.EXTENT, **self.M3X2, octo=self.OCTO)
 
     def test_the_block_count_is_read_strictly_and_names_the_flag(self):
         read = serving_runtime.m3_blocks

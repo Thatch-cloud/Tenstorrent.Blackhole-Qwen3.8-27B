@@ -35,6 +35,12 @@ own SMOKE_JSON line and the container log and exits non-zero on:
     each block that pre-stages, at least one path=full line (the comparator checked against the full stage itself), buffers x chips
     checked on every line, and zero mismatches in every one (a path=full mismatch is the comparator's artifact, a path=diff one the lever's, and the
     two are reported apart); a profile without the flag logs none of these lines;
+  - octo-T8 (QWEN_FAST_OCTO=live|alternate, tp4/octo-t8; octo_judge, called by octo_container_problems): the shape must have EXECUTED, not been mounted - a
+    flag-off profile logs no [OCTO] line; a flagged one logs its admission once and at least 16 rounds with shape=octo (written after the octo block's own round
+    counter moved), at rows=8 with live at least min_live; under `alternate` at least 16 counted rounds of EACH shape and the counted rounds strictly alternate;
+    no program compiled on the first round of a shape after a switch (the [OCTO] programs line: after must equal before, and the counter must be readable);
+    eligible rounds that ran as something else than planned stay under a tenth. QWEN_FAST_SOLO_PACKED=1: a padded round of a lone live user ran and none
+    went to the per-request engines. The paired timing (octo_judge --verdict) is a separate read, not a stop condition;
   - a code-prompt answer that is not text (coding, concurrent4_steady, steady_resend): a stream that finished with `stop` at
     its first token (an instant EOS: v172's users 0 and 1) or before MIN_ANSWER_TOKENS, or whose sample is mostly non-Latin
     script (v172's users 2 and 3: mixed-script symbols), and, at four cards (QWEN_FAST_TP not 2), a first prefill whose [MEMLEDGER] item=model_after_prefill
@@ -926,6 +932,21 @@ def m3_blocks(env):
     return 2 if env.get('QWEN_FAST_M3_BLOCKS') == '2' else 1
 
 
+def octo_blocks(env):
+    """The packed blocks octo-T8 adds beside the M3 ones: 1 when the profile asks for QWEN_FAST_OCTO live or alternate (a third block, which the host-gap pre-stage
+    engages over too), else 0."""
+    return 1 if str(env.get('QWEN_FAST_OCTO', 'off')) in ('live', 'alternate') else 0
+
+
+def octo_container_problems(env, container_text):
+    """(problems, facts) of the octo-T8 markers in the container log (octo_judge.judge): what an octo profile must show, and that any other profile shows none."""
+    if env is None:
+        return [], {}
+    import octo_judge
+
+    return octo_judge.judge(env, container_text)
+
+
 def fused_problems(env, container_text, steady, facts=None):
     """The problems the profile's fused-commit settings leave: see the module docstring."""
     import lever_n_m3native_gate as gate
@@ -941,14 +962,15 @@ def fused_problems(env, container_text, steady, facts=None):
     facts = report if facts is None else facts
     engaged_lines = container_text.count(gate.FUSED_ENGAGED_MARKER)
     # Every 64-row M3 block builds its own fused commit and logs its own engaged line (packed_verifier, once per block): one line a block.
-    blocks = m3_blocks(env)
+    # (and the octo-T8 block, a third packed block with its own fused commit: users x (1 + rows) traces in place, 8 x 9 = 72)
+    blocks = m3_blocks(env) + octo_blocks(env)
     if engaged_lines != blocks:
         problems.append('the fused commit engaged line (%s) appears %d times, not %s' % (
-            gate.FUSED_ENGAGED_MARKER, engaged_lines, 'once' if blocks == 1 else 'once per M3 block (%d blocks)' % blocks))
+            gate.FUSED_ENGAGED_MARKER, engaged_lines, 'once' if blocks == 1 else 'once per %s block (%d blocks)' % ('packed' if octo_blocks(env) else 'M3', blocks)))
     engaged = facts.get('engaged')
     inplace = env.get(FUSED_INPLACE_FLAG) == '1'
     for later in list(gate.FUSED_ENGAGED_LINE.finditer(container_text))[1:]:
-        wanted = int(later.group(1)) * (1 + FUSED_PREFIXES) if inplace else int(later.group(1))
+        wanted = int(later.group(1)) * (1 + int(later.group(2))) if inplace else int(later.group(1))     # (one slide per accepted prefix 1..rows: 16 at M3, 8 at octo)
         if int(later.group(7)) != wanted:
             problems.append('a further fused-commit block captured %d traces, not %d (%s users)' % (int(later.group(7)), wanted, later.group(1)))
     if engaged is not None:
@@ -974,7 +996,9 @@ def fused_problems(env, container_text, steady, facts=None):
             rounds = {}
             for match in gate.FUSED_LINE.finditer(container_text):
                 rounds.setdefault(match.group(1), []).append(match.group(4))
-            both_blocks = sum(1 for paths in rounds.values() if len(paths) == 4 * blocks and all(path == 'fused' for path in paths))
+            both_blocks = sum(1 for paths in rounds.values()
+                              if (len(paths) == 4 * m3_blocks(env) or (octo_blocks(env) and len(paths) % 4 == 0 and len(paths) >= 4 * m3_blocks(env)))
+                              and all(path == 'fused' for path in paths))
         if not (facts.get('four_fused_rounds') or both_blocks):
             problems.append('no round had all four users on the fused path (%d fused publications, %d today; reasons %s)' % (
                 facts.get('fused', 0), facts.get('today', 0), facts.get('today_reasons')))
@@ -1069,9 +1093,9 @@ def hostgap_problems(env, container_text, steady_eight):
     if facts['hostgap_refused']:
         problems.append('the two-block pre-stage was refused at attach (%d line(s) %s): the arm measures nothing' % (
             facts['hostgap_refused'], HOSTGAP_REFUSED))
-    elif facts['hostgap_engaged'] != blocks:
+    elif facts['hostgap_engaged'] != blocks + octo_blocks(env):
         problems.append('the two-block engaged line (%s) appears %d times, not once per M3 block (%d)' % (
-            HOSTGAP_ENGAGED, facts['hostgap_engaged'], blocks))
+            HOSTGAP_ENGAGED, facts['hostgap_engaged'], blocks + octo_blocks(env)))
     per_block = env.get(HOSTGAP_EPOCHS_FLAG) == '1'
     if per_block:
         if HOSTGAP_EPOCHS_REFUSED in container_text:
@@ -1888,6 +1912,10 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
             problems += parked_judge.memory_problems(container_text)
         if parked_facts:
             facts['parked'] = parked_facts
+        octo_found, octo_facts = octo_container_problems(env, container_text)
+        problems += octo_found
+        if octo_facts:
+            facts['octo'] = octo_facts
     if entry is not None:
         problems += traffic_problems(container_text, entry)
         problems += waiver_problems(container_text, entry)

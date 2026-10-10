@@ -119,6 +119,12 @@ scripts/ci/round_host.py
 scripts/ci/packed_shapes.py
 scripts/ci/serving_solo_lane.py
 
+# Octo-T8 (QWEN_FAST_OCTO, gate only; docs/tp4-octo.md) and the lone-user padded round (QWEN_FAST_SOLO_PACKED, gate only): serving_runtime lazy-imports serving_octo at the attach
+# when either flag is set and refuses it by name until its device pieces exist; serving_packed_step routes the third block (given by the attach, never built today) and
+# serving_worker_hook carries the budget-narrowing set (both over packed_shapes.octo_shape). Flags off, serving_octo is imported by nothing: every other module is what it was.
+# (octo_markers, octo_judge, octo_compare and make_octo_profiles are the gate's tools on the rig host: not served.)
+scripts/ci/serving_octo.py
+
 # QWEN_FAST_M3_REQUEST_WARM=1 or even (tp4/warm4 and the eight-seat profiles): serving_runtime lazy-imports request_width_warm and runs it
 # before the process's first trace capture - right after the prefill warm and before the one 64-row block's construction, or, at two
 # blocks, between their warm phase and their captures - so the request engine's rows 1/2/4 programs and state exist before any
@@ -393,6 +399,7 @@ scripts/ci/gdn_block_conv_tp.py
 scripts/ci/attention_block_fold_tp.py
 scripts/ci/attention_block_fold_tp.cpp
 scripts/ci/extent_attention_fold_tp.py
+scripts/ci/extent_attention_octo_tp.py
 # The long-context SDPA configuration (tp4/sdpa-long, QWEN_FAST_TP4_SDPA, default off): sdpa_long_tp.RUNTIME_FILES, imported by extent_attention_fold_tp.
 scripts/ci/sdpa_long_tp.py
 # tp4/sdpa-multi (QWEN_FAST_TP4_SDPA=multi): sdpa_long_tp imports sdpa_multi_tp when that value is set; the three kernels are its JIT sources.
