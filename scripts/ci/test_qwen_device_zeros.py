@@ -296,7 +296,7 @@ class BuildTests(unittest.TestCase):
                 ttnn = FakeTTNN(fail=failing)
                 filler, log = filler_for(ttnn)
                 self.assertIsNone(self.build(ttnn, filler))
-                self.assertTrue(filler.latched and failing in ' '.join(ttnn.names()) or filler.latched)
+                self.assertTrue(filler.latched)
                 if failing == 'full_like':
                     self.assertEqual(len(ttnn.freed), 1, 'the half-built tensor is freed')
                 refusals = [line for line in log.lines if line.startswith(zeros.REFUSED)]
@@ -516,6 +516,37 @@ class KvTwinTests(unittest.TestCase):
         ttnn = FakeTTNN()
         module = PinnedModel.load(ttnn)
         self.assertEqual(zeros.source_digest(module.Qwen36Model._allocate_kv_caches_tp), zeros.KV_SOURCE_SHA256)
+
+    def test_the_twin_differs_from_the_pinned_method_in_mk_and_the_report_alone(self):
+        import ast
+
+        def method(source, name):
+            for node in ast.walk(ast.parse(source)):
+                if isinstance(node, ast.FunctionDef) and node.name == name:
+                    return node
+            self.fail('no %s' % name)
+
+        original = method(MODEL_FIXTURE.read_text(encoding='utf-8'), '_allocate_kv_caches_tp')
+        twin = method(Path(zeros.__file__).read_text(encoding='utf-8'), '_allocate_kv_caches_tp')
+
+        def body(node, drop):
+            statements = node.body[1:]                                  # (the docstring differs by the twin's marker)
+            return [ast.dump(statement) for statement in statements if not drop(statement)]
+
+        def is_mk(statement):
+            return isinstance(statement, ast.FunctionDef) and statement.name == '_mk'
+
+        def is_twin_only(statement):
+            if isinstance(statement, ast.Assign) and [target.id for target in statement.targets if isinstance(target, ast.Name)] == ['zeros']:
+                return True
+            return isinstance(statement, ast.If) and 'zeros' in ast.dump(statement.test) and 'report' in ast.dump(statement)
+
+        self.assertEqual(body(twin, lambda statement: is_mk(statement) or is_twin_only(statement)), body(original, is_mk))
+        self.assertEqual([arg.arg for arg in twin.args.args], [arg.arg for arg in original.args.args])
+        # ...and `_mk`'s fallback is the original's expression, statement for statement
+        original_mk = [statement for statement in original.body if is_mk(statement)][0]
+        twin_mk = [statement for statement in twin.body if is_mk(statement)][0]
+        self.assertEqual(ast.dump(twin_mk.body[-1]), ast.dump(original_mk.body[-1]), 'the fallback return is the original\'s as_tensor call')
 
     def test_off_the_model_method_is_the_image_s_and_arm_hooks_nothing(self):
         ttnn = FakeTTNN()
