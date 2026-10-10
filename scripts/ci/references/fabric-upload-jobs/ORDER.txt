@@ -1,0 +1,22 @@
+# The fabric-upload measurement pack (docs/tp4-fabric-upload.md): two card jobs that pin the unknowns before any upload path is changed. Owner directive
+# 2026-10-10: the x4 cards should receive their uploads over the fabric, not their own PCIe. These jobs measure whether, where and by how much that pays.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# P0. Both jobs open all four cards: production must be stopped and unserved by the owner for the window (nothing here stops or starts the node agent), no
+#     other window driver alive. Push ONE tag at a time and wait for its run to finish; never cancel a running card job.
+# P0. The probes are mounted from the checkout (-v "$PWD:/c2:ro"), so the tag's commit is what runs; the image only supplies ttnn at the pinned tt-metal
+#     (ttnn.point_to_point, ttnn.copy_host_to_device_tensor, create_submeshes). Any image built on the pinned tt-metal will do; tp4-serve-11 is the one named.
+# P0. TIMED: pause the ARC CI runners for both jobs (the rig's CI load skews host-side numbers; the 2026-10-09 load ran 5.5x slower under it) and restore them after.
+# P0. The CPU suite (test_fabric_upload) is green on the pushed head.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule.
+# NEEDS F2-p2p-x16-to-x4 <- F1-h2d-per-card
+# READ RULES:
+#   F1  'H2D_PROBE verdict=MEASURED'. INEXACT stops the pack. The decision inputs: alone_gbps per position (rm16k at the largest size), together_s, the
+#       subset arm's status, and restore's convert/copy split.
+#   F2  'P2P_PROBE verdict=MEASURED' with every pair exact. INEXACT = NO-GO for the relay on that path. PARTIAL: read the problems (a refused socket keeps the
+#       point_to_point arms; 'relay arms skipped' means the one-coordinate host write did not qualify, as F1's subset arm should already have said).
+# AFTER BOTH (docs/tp4-fabric-upload.md section 4): F2's relay_over_direct on relay/*/all is the empirical answer for bulk uploads (RELAY needs <= 0.8 on rm16k and
+#   tile_bf8, every relay arm exact); fabric_upload_plan.decide(F1 decide_inputs, F2 rates, card_bytes) extrapolates to (a) the weight load (about 6.9 GB a card) and
+#   (b) a 128k / 254k warm-tier restore (restore_bytes_per_card). Record RELAY / DIRECT / HOST-BOUND in docs/tp4-fabric-upload.md.
+# Time (estimate): F1 reset 3-12 + probe 8-20 min; F2 reset 3-12 + probe 10-25 min (the first call of each new shape/pair compiles); about 1 h in all.
+F1-h2d-per-card stop tp4-serve-11 30
+F2-p2p-x16-to-x4 soft tp4-serve-11 35

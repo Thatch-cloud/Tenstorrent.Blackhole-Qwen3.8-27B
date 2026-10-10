@@ -28,7 +28,10 @@ Keys (every one optional but C2_IMAGE_TAG):
                       TP4_RS_TILE) or mr (tp4_mr_probe.py: the verify readback's mesh-read arms at four chips, optimisation/ttnn-op/mr_probe's
                       arms and verdict, MR_PROBE verdict=GO|MESH-ONLY|NO-GO) or kvread (tp4_kv_read_probe.py: the prefix audit's region read,
                       ttnn.qwen_read_blocks, against the whole-cache read byte for byte on the pool-sized cache; KV_READ_PROBE verdict=PASS|FAIL, the exit
-                      status is the verdict); needs the fabric action
+                      status is the verdict) or h2d (tp4_h2d_probe.py: per-card host->device bandwidth, x16 against x4, each card alone and the four
+                      together, the GDN restore's conversion against its copies, and the relay's one-coordinate host write; H2D_PROBE verdict=MEASURED|...)
+                      or p2p (tp4_p2p_probe.py: ttnn.point_to_point unicast over the fabric, x16 -> x4 relay pairs, every line edge, byte for byte;
+                      P2P_PROBE verdict=MEASURED|...; docs/tp4-fabric-upload.md); needs the fabric action
   C2_SUPERSEDED_BY    set on every template of a pack that a later pack replaced (references/tp4-w2-jobs); read_job REFUSES such a template
   C2_PROFILE          the C2 profile smoke and gate serve (default: general)
   C2_CARDS            the card set the hardware steps open: pair (cards M and A, the default) or quad (every
@@ -172,7 +175,7 @@ TP4_MESH_DEVICE = 'P150x4'
 # (general-2link: the same pair under the two-channel descriptor this cabling needs).
 PAIR_MESH_DEVICES = (None, 'P300')
 FABRIC_CONFIGS = ('FABRIC_1D', 'FABRIC_1D_RING')
-FABRIC_PROBES = ('fabric', 'rs-tile', 'mr', 'kvread')
+FABRIC_PROBES = ('fabric', 'rs-tile', 'mr', 'kvread', 'h2d', 'p2p')
 DRAFTER_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,63}')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
