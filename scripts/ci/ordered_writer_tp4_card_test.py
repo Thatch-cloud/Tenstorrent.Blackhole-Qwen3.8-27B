@@ -30,6 +30,14 @@ Run with QWEN_FAST_TP=4 (tp_shapes reads it at import). Verdict line:
 scope=full needs both writers, both widths, seeds 0,1,2 and all three cases, each decisive; a section that raised is NO-DECISION.
 
   QWEN_FAST_TP=4 python3 ordered_writer_tp4_card_test.py --out results.json
+
+The PAGE64 arm (--writers page64, ordered_writer_page_arm_tp4.py): the proof that the page-parallel K/V writer (kv_page_writer_tp4) leaves the served
+writer's bytes - bfloat8_b read-modify-write idempotence on the hardware packer, plan unknown U1. Its cases ride the same report: kind 'page' (served
+and page writer on identical caches, the COMPLETE caches compared after every step, K and V, both sources, both widths, three payload regimes, eager and
+replay, then the page writer run again on the same inputs) and kind 'noop' (every stored row written back to where it came from, by the served writer and
+by the page writer: no bit may change). The E1 verdict, tally and scope count the E1 writers' checks only; the arm adds ' page=<verdict>
+page_scope=<scope>' to the verdict line and its own 'page_decision'. Extra options: --page-sources, --page-regimes, --page-wt, --page-negative drop|slot
+(the kernel with a row left out / the second tile row written as the first: those cases must FAIL), --no-page-noop.
 """
 
 import argparse
@@ -47,6 +55,8 @@ BLOCK_SIZE = 64
 HEAD_DIM = 256
 PADDED_HEADS = 32
 WRITERS = ('chained64', 'tiles32')
+PAGE_WRITER = 'page64'
+PAGE_KINDS = ('page', 'noop')
 LAUNCH_ROWS = {'chained64': 64, 'tiles32': 32}
 WIDTHS = (2052, 4096)
 CONTROL_WIDTH, WIDE_WIDTH = 2052, 4096
@@ -174,6 +184,8 @@ def build_cases(widths=WIDTHS, writers=WRITERS, seeds=SEEDS, modes=MODES):
     for seed in seeds:
         for width in widths:
             for writer in writers:
+                if writer not in WRITERS:
+                    continue                     # the page64 arm's cases come from ordered_writer_page_arm_tp4.build_page_cases
                 for mode in modes:
                     cases.append(dict(index=len(cases), name=case_name(writer, width, mode, seed), writer=writer, width=width,
                                       mode=mode, seed=seed))
@@ -213,15 +225,24 @@ def required_checks(spec):
 # Verdict (pure).
 # ---------------------------------------------------------------------------------------------
 
+def e1_checks(report):
+    """The checks of the E1 writers (everything the page64 arm did not record)."""
+    return [check for check in report.get('checks', []) if check.get('kind') not in PAGE_KINDS]
+
+
+def e1_plan(report):
+    return [case for case in report.get('plan', []) if case.get('kind') not in PAGE_KINDS]
+
+
 def decide(report):
     """PASS / FAIL / NO-DECISION: every requested case ran, recorded every required check, and every check is exact."""
     problems = []
     if report.get('error'):
         return dict(verdict='NO-DECISION', problems=[str(report['error'])[:200]])
     by_case = {}
-    for check in report.get('checks', []):
+    for check in e1_checks(report):
         by_case.setdefault(check['case'], {})[(check['name'], check.get('step'))] = check
-    for case in report.get('plan', []):
+    for case in e1_plan(report):
         recorded = by_case.get(case['name'])
         state = (report.get('cases') or {}).get(case['name']) or {}
         if state.get('error'):
@@ -235,7 +256,7 @@ def decide(report):
             problems.append('%s lacks %d checks (%s)' % (case['name'], len(missing), missing[0]))
     if problems:
         return dict(verdict='NO-DECISION', problems=problems[:20])
-    inexact = [check for check in report.get('checks', []) if not check.get('exact')]
+    inexact = [check for check in e1_checks(report) if not check.get('exact')]
     if inexact:
         first = inexact[0]
         return dict(verdict='FAIL', problems=['%d checks differ (first: %s %s step %s)' % (
@@ -251,17 +272,24 @@ def scope_of(report):
 
 
 def tally(report):
-    checks = report.get('checks', [])
+    checks = e1_checks(report)
     return dict(checks=len(checks), exact=sum(1 for check in checks if check.get('exact')))
 
 
 def verdict_line(report):
     counts = tally(report)
     requested = report.get('requested') or {}
-    return '%s verdict=%s scope=%s width=%s chips=1of%s checks=%d exact=%d writers=%s widths=%s seeds=%s' % (
+    line = '%s verdict=%s scope=%s width=%s chips=1of%s checks=%d exact=%d writers=%s widths=%s seeds=%s' % (
         VERDICT, report['decision']['verdict'], scope_of(report), max(requested.get('widths') or [0]), report.get('tp'),
         counts['checks'], counts['exact'], ','.join(requested.get('writers', ())),
         ','.join(str(width) for width in requested.get('widths', ())), ','.join(str(seed) for seed in requested.get('seeds', ())))
+    page = report.get('page_decision')
+    if page and page.get('verdict') != 'absent':
+        import ordered_writer_page_arm_tp4 as arm
+
+        counts = arm.tally_page(report)
+        line += ' page=%s page_scope=%s page_checks=%d page_exact=%d' % (page['verdict'], arm.page_scope(report), counts['checks'], counts['exact'])
+    return line
 
 
 def parse(argv=None):
@@ -273,6 +301,11 @@ def parse(argv=None):
     parser.add_argument('--modes', default=','.join(MODES))
     parser.add_argument('--root', type=Path, default=Path(os.environ.get('TT_METAL_HOME', '/opt/tt-metal')))
     parser.add_argument('--trace-region-bytes', type=int, default=4194304)
+    parser.add_argument('--page-sources', default='dram,l1', help='page64 arm: where the prepared K/V is read from (interleaved DRAM, L1 shards)')
+    parser.add_argument('--page-regimes', default='exact,random,edge', help='page64 arm: payload regimes')
+    parser.add_argument('--page-wt', type=int, default=0, help='page64 arm: column tiles per unit (0: kv_page_writer_tp4.tiles_per_core())')
+    parser.add_argument('--page-negative', default='', help='page64 arm: a negative control (drop | slot); those cases must FAIL')
+    parser.add_argument('--no-page-noop', action='store_true', help='page64 arm: leave out the noop (write-back) cases')
     # accepted for run_card_b.sh, which passes them to every harness
     parser.add_argument('--watchdog', type=float, default=0.0)
     parser.add_argument('--deadline-s', type=float, default=0.0)
@@ -284,8 +317,12 @@ def parse(argv=None):
     arguments.modes = [item for item in arguments.modes.split(',') if item]
     if set(arguments.widths) - set(WIDTHS):
         parser.error('--widths within %s' % ','.join(map(str, WIDTHS)))
-    if set(arguments.writers) - set(WRITERS):
-        parser.error('--writers within %s' % ','.join(WRITERS))
+    if set(arguments.writers) - set(WRITERS) - {PAGE_WRITER}:
+        parser.error('--writers within %s' % ','.join(WRITERS + (PAGE_WRITER,)))
+    arguments.page_sources = [item for item in arguments.page_sources.split(',') if item]
+    arguments.page_regimes = [item for item in arguments.page_regimes.split(',') if item]
+    if arguments.page_negative not in ('', 'drop', 'slot'):
+        parser.error('--page-negative is drop or slot')
     if set(arguments.modes) - set(MODES):
         parser.error('--modes within %s' % ','.join(MODES))
     return arguments
@@ -451,6 +488,16 @@ def write_report(arguments, report):
     arguments.out.write_text(json.dumps(report, indent=1, default=str) + '\n')
 
 
+def page_cases_of(arguments, first_index=0):
+    """The page64 arm's case specs for these arguments ([] when page64 is not among the writers)."""
+    if PAGE_WRITER not in arguments.writers:
+        return []
+    import ordered_writer_page_arm_tp4 as arm
+
+    return arm.build_page_cases(arguments.widths, arguments.seeds, arguments.modes, arguments.page_sources, arguments.page_regimes,
+                                noop=not arguments.no_page_noop, first_index=first_index)
+
+
 def run(arguments, report, cases):
     import torch
     import ttnn
@@ -489,6 +536,18 @@ def run(arguments, report, cases):
             with view.installed():
                 ordered_cache_tp.update(mesh, cache, packed, positions, pages, kernels)
 
+        prig = None
+        if any(spec.get('kind') in PAGE_KINDS for spec in cases):
+            import kv_page_writer_tp4
+            import ordered_writer_page_arm_tp4 as arm
+
+            wt = arguments.page_wt or kv_page_writer_tp4.tiles_per_core()
+            texts = dict(reader=kv_page_writer_tp4.source_text(), writer=kv_page_writer_tp4.source_text())
+            prig = arm.PageRig(rig, hw, kernels, texts, wt, arguments.page_negative or None)
+            report['page'] = arm.design_summary(prig)
+            report['page'].update(grid=[grid.x, grid.y], negative=arguments.page_negative or None)
+            report['sources']['kv_page_writer_tp4.cpp'] = sha256_file(kv_page_writer_tp4.source_path())
+            report['sources']['kv_page_writer_tp4.py'] = sha256_file(kv_page_writer_tp4.__file__)
         with scoped_admission(page_width_tp4) as patch:
             report['admission_patch'] = dict(module='page_width_tp4.admitted', width=patch.width,
                                              scope='the run only; restored on exit')
@@ -498,9 +557,22 @@ def run(arguments, report, cases):
                     state['skipped'] = True
                     continue
                 print('--- case %s' % spec['name'], flush=True)
-                case = build_case(spec)
-                state['table_sha256'] = [table_digest(table) for table in case['tables']]
                 try:
+                    if spec.get('kind') in PAGE_KINDS:
+                        if spec['kind'] == 'page':
+                            case = arm.build_page_case(spec)
+                            state['table_sha256'] = [table_digest(table) for table in case['tables']]
+                            arm.run_page_case(prig, hw, case, report)
+                        else:
+                            arm.run_noop_case(prig, hw, arm.build_noop_case(spec), report)
+                        mine = [check for check in report['checks'] if check['case'] == spec['name']]
+                        state['exact'] = all(check['exact'] for check in mine)
+                        print(json.dumps(dict(case=spec['name'], exact=state['exact'], checks=len(mine))), flush=True)
+                        report['in_progress'] = spec['name']
+                        write_report(arguments, report)
+                        continue
+                    case = build_case(spec)
+                    state['table_sha256'] = [table_digest(table) for table in case['tables']]
                     run_case(rig, hw, case, kernels, report, chained if case['writer'] == 'chained64' else tiles)
                     mine = [check for check in report['checks'] if check['case'] == case['name']]
                     state['exact'] = all(check['exact'] for check in mine)
@@ -512,7 +584,7 @@ def run(arguments, report, cases):
                     state['traceback'] = traceback.format_exc()
                     print(state['traceback'], flush=True)
                     rig.owned.clear()
-                report['in_progress'] = case['name']
+                report['in_progress'] = spec['name']
                 write_report(arguments, report)
         report.pop('in_progress', None)
         report['view'] = dict(realised=view.realised, phantom=view.phantom, launches=view.launches)
@@ -523,9 +595,10 @@ def run(arguments, report, cases):
 def main(argv=None):
     arguments = parse(argv)
     cases = build_cases(arguments.widths, arguments.writers, arguments.seeds, arguments.modes)
+    cases = cases + page_cases_of(arguments, first_index=len(cases))
     problems = []
     for spec in cases:
-        if spec['writer'] == 'chained64' and spec['mode'] != 'replay_unchanged':
+        if spec.get('kind') not in PAGE_KINDS and spec['writer'] == 'chained64' and spec['mode'] != 'replay_unchanged':
             found = conflicts(build_case(spec))
             if found:
                 problems.append((spec['name'], found[0]))
@@ -535,7 +608,18 @@ def main(argv=None):
                   requested=dict(widths=arguments.widths, writers=arguments.writers, seeds=arguments.seeds, modes=arguments.modes),
                   checks=[], cases={}, samples={}, sources={}, tp=None,
                   env={name: os.environ.get(name) for name in ('QWEN_FAST_TP',)})
-    report['plan'] = [dict(name=spec['name'], required=[list(item) for item in required_checks(spec)]) for spec in cases]
+    if PAGE_WRITER in arguments.writers:
+        report['requested']['page'] = dict(sources=arguments.page_sources, regimes=arguments.page_regimes, noop=not arguments.no_page_noop,
+                                           negative=arguments.page_negative or None, wt=arguments.page_wt or None)
+    report['plan'] = []
+    for spec in cases:
+        if spec.get('kind') in PAGE_KINDS:
+            import ordered_writer_page_arm_tp4 as arm
+
+            report['plan'].append(dict(name=spec['name'], kind=spec['kind'], writer=spec['writer'],
+                                       required=[list(item) for item in arm.required_checks(spec)]))
+        else:
+            report['plan'].append(dict(name=spec['name'], required=[list(item) for item in required_checks(spec)]))
     try:
         if problems:
             raise SystemExit('the plan has two rows on one block: %r' % (problems[0],))
@@ -546,10 +630,15 @@ def main(argv=None):
         report['error'] = repr(error)
         report['traceback'] = traceback.format_exc()
     report['decision'] = decide(report)
+    if PAGE_WRITER in arguments.writers:
+        import ordered_writer_page_arm_tp4 as arm
+
+        report['page_decision'] = arm.decide_page(report)
     report['verdict_line'] = verdict_line(report)
     write_report(arguments, report)
     print(report['verdict_line'], flush=True)
-    return 0 if report['decision']['verdict'] == 'PASS' else 1
+    page = (report.get('page_decision') or {}).get('verdict', 'absent')
+    return 0 if report['decision']['verdict'] == 'PASS' and page in ('PASS', 'absent') else 1
 
 
 if __name__ == '__main__':

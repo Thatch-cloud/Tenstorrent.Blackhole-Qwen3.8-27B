@@ -11,6 +11,13 @@ and exact, both writers, both widths, seeds 0-2, all three cases (eager, replay_
 readback, the page-table entries and the anchor positions, the scoped admission patch (recorded as the harness wrote it), and the
 sha256 of ordered_cache.py against the live file. A report that does not qualify is an error, never a record.
 
+The page64 arm (tp4/fx-wp2, kv_page_writer_tp4.py): a report that also ran --writers page64 at full page scope (every regime, both sources, all three modes,
+both widths, seeds 0-2, K and V, the write-back proofs, no negative control, a PASS page_decision) adds a 'page_writer' block to the record, bound to the
+design the run exercised (kv_page_writer_tp4.design_signature: the kernel's sha256, the pinned compute kernel's, the geometry), checked against the LIVE design
+before anything is written. The lever (kv_page_writer_tp4.evidence_problems) engages only on that block. A page-only report (no E1 writers) is recorded with
+--merge-page: it adds or replaces the block in the record already on disk (which must stand at its pin) and touches nothing else but the pin. A record
+without the block is exactly what it was: the E1 writers' record, admitting width 4,096, and the page writer refused.
+
 Writes, in one go: ordered_writer_evidence_tp4.json (LF, one-space indent) and ORDERED_WRITER_EVIDENCE_TP4_SHA256 in
 page_width_tp4.py. Commit both by explicit path (scripts/ci/__pycache__ is tracked: never `git add` a directory or -A).
 
@@ -33,10 +40,122 @@ if HERE not in sys.path:
 import page_width_tp4  # noqa: E402
 import record_packed_any_evidence_tp4 as base  # noqa: E402
 
+PAGE_WRITER = 'page64'
+
 RecordError = base.RecordError
 TOP_KEYS = ('schema', 'what', 'status', 'provenance', 'run', 'tag', 'commit', 'card', 'image', 'harness', 'report',
             'report_sha256', 'verdict_line', 'scope', 'chips', 'kv_heads', 'failures', 'widths', 'writers', 'seeds',
-            'sections', 'entries', 'anchor_positions', 'blocks', 'counts', 'admission_patch', 'sources')
+            'sections', 'entries', 'anchor_positions', 'blocks', 'counts', 'admission_patch', 'sources', 'page_writer')
+PAGE_KEY = 'page_writer'
+PAGE_BLOCK_KEYS = ('status', 'scope', 'failures', 'design_signature', 'wt', 'units', 'kernel_sha256', 'compute_sha256', 'widths', 'sources',
+                   'regimes', 'modes', 'caches', 'seeds', 'counts', 'proofs', 'grid', 'run', 'tag', 'commit', 'image', 'report', 'report_sha256',
+                   'page_verdict')
+
+
+def page_problems(report, root=HERE):
+    """Every reason the report's page64 arm does not qualify the page writer (empty when it does)."""
+    import kv_page_writer_tp4 as kvpw
+    import ordered_writer_page_arm_tp4 as arm
+
+    problems = []
+    requested = report.get('requested') or {}
+    page = requested.get('page') or {}
+    if arm.PAGE_WRITER not in (requested.get('writers') or ()):
+        return ['the report did not run --writers page64']
+    words = base.line_words(report.get('verdict_line'))
+    decision = report.get('page_decision') or {}
+    if decision.get('verdict') != 'PASS' or words.get('page') != 'PASS':
+        problems.append('page verdict %s (line %s), not PASS' % (decision.get('verdict'), words.get('page')))
+    if words.get('page_scope') != 'full' or arm.page_scope(report) != 'full':
+        problems.append('page scope %s, not full' % words.get('page_scope'))
+    if report.get('in_progress'):
+        problems.append('a checkpoint (in progress %s), not the final report' % report['in_progress'])
+    if report.get('error'):
+        problems.append('error %s' % str(report['error'])[:100])
+    if page.get('negative'):
+        problems.append('a negative-control run (%s) is never evidence' % page['negative'])
+    if page.get('noop') is not True:
+        problems.append('the write-back (noop) proofs did not run')
+    for key, wanted in (('sources', arm.SOURCES), ('regimes', arm.REGIMES)):
+        missing = [item for item in wanted if item not in (page.get(key) or ())]
+        if missing:
+            problems.append('requested page %s lack %s' % (key, missing))
+    for key, wanted in (('widths', kvpw.PROOF_WIDTHS), ('seeds', (0, 1, 2)), ('modes', kvpw.PROOF_MODES)):
+        missing = [item for item in wanted if item not in (requested.get(key) or ())]
+        if missing:
+            problems.append('requested %s lack %s' % (key, missing))
+    checks = [check for check in report.get('checks') or [] if check.get('kind') in arm.PAGE_KINDS]
+    exact = sum(1 for check in checks if check.get('exact'))
+    if not checks or exact != len(checks):
+        problems.append('%d of %d page checks exact' % (exact, len(checks)))
+    names = {check.get('name') for check in checks}
+    for wanted in ('served_equal_k', 'served_equal_v', 'host_equal_k', 'host_equal_v', 'twice_equal_k', 'twice_equal_v', 'noop_equal_k',
+                   'noop_equal_v', 'fill_equal'):
+        if wanted not in names:
+            problems.append('no %s check recorded' % wanted)
+    seen = {(check.get('regime'), check.get('source'), check.get('mode'), check.get('width')) for check in checks if check.get('kind') == 'page'}
+    for regime, source, mode in arm.MATRIX:
+        for width in kvpw.PROOF_WIDTHS:
+            if (regime, source, mode, width) not in seen:
+                problems.append('no page case ran %s %s %s at width %d' % (regime, source, mode, width))
+                break
+    recorded = {(check['case'], check['name'], check.get('step')) for check in checks}
+    for entry in report.get('plan') or ():
+        if entry.get('kind') in arm.PAGE_KINDS:
+            lacking = [item for item in entry.get('required') or () if (entry['name'], item[0], item[1]) not in recorded]
+            if lacking:
+                problems.append('page case %s lacks %d required checks' % (entry['name'], len(lacking)))
+                break
+    for name, state in sorted((report.get('cases') or {}).items()):
+        if name.startswith(('page64-', 'noop-')) and (state.get('error') or state.get('skipped') or state.get('exact') is not True):
+            problems.append('page case %s: %s' % (name, 'raised' if state.get('error') else 'cut' if state.get('skipped') else 'not exact'))
+            break
+    proofs = arm.proofs_of(report)
+    for label, entry in sorted(proofs.items()):
+        if entry['checks'] <= 0 or entry['checks'] != entry['exact']:
+            problems.append('proof %s: %d of %d checks exact' % (label, entry['exact'], entry['checks']))
+    info = report.get('page') or {}
+    wt = info.get('wt')
+    if wt not in kvpw.WIDTHS:
+        problems.append('the report names unit width %r' % (wt,))
+    else:
+        live = kvpw.design_signature(wt)
+        if info.get('design_signature') != live:
+            problems.append('the run exercised design %s, the live one is %s (run the page arm on these bytes)' % (str(info.get('design_signature'))[:16], live[:16]))
+        if (report.get('sources') or {}).get('kv_page_writer_tp4.cpp') != kvpw.source_sha256():
+            problems.append('the run loaded kv_page_writer_tp4.cpp at another sha256 than the live file')
+        if info.get('negative'):
+            problems.append('the page design ran with a negative control (%s)' % info['negative'])
+    return problems
+
+
+def page_block(report, digest, path, run, tag, commit, image):
+    """The 'page_writer' record of a qualifying report (page_problems empty)."""
+    import ordered_writer_page_arm_tp4 as arm
+
+    info, requested = report['page'], report['requested']
+    page = requested['page']
+    words = base.line_words(report['verdict_line'])
+    counts = arm.tally_page(report)
+    return dict(status='PASS', scope='full', failures=0, design_signature=info['design_signature'], wt=info['wt'], units=info['units'],
+                kernel_sha256=info['kernel_sha256'], compute_sha256=info['design']['compute_sha256'],
+                widths=sorted(requested['widths']), sources=sorted(page['sources']), regimes=sorted(page['regimes']),
+                modes=sorted(requested['modes']), caches=['k', 'v'], seeds=sorted(requested['seeds']), counts=dict(checks=counts['checks'], exact=counts['exact']),
+                proofs=arm.proofs_of(report), grid=list(info.get('grid') or []), run=int(run), tag=tag, commit=commit, image=image,
+                report=base.report_name(path), report_sha256=digest,
+                page_verdict='page=%s page_scope=%s page_checks=%s page_exact=%s' % (
+                    words.get('page'), words.get('page_scope'), words.get('page_checks'), words.get('page_exact')))
+
+
+def common_ref_problems(commit, image, run, tag):
+    problems = []
+    if not (isinstance(commit, str) and re.fullmatch(r'[0-9a-f]{40}', commit)):
+        problems.append('--commit must be the 40-hex commit the run tested')
+    if not (isinstance(image, str) and re.fullmatch(r'[0-9A-Za-z._-]{3,60}', image)):
+        problems.append('--image is the image TAG NAME only (no registry, no digest)')
+    if run is None or not tag:
+        problems.append('--run and --tag are required')
+    return problems
 
 
 def build(report, digest, path, run, tag, commit, image, watcher=None, root=HERE):
@@ -99,6 +218,9 @@ def build(report, digest, path, run, tag, commit, image, watcher=None, root=HERE
         problems.append('--image is the image TAG NAME only (no registry, no digest)')
     if run is None or not tag:
         problems.append('--run and --tag are required')
+    with_page = PAGE_WRITER in (requested.get('writers') or ())
+    if with_page:
+        problems.extend(page_problems(report, root))
     if problems:
         raise RecordError(problems)
     evidence = dict(
@@ -125,6 +247,25 @@ def build(report, digest, path, run, tag, commit, image, watcher=None, root=HERE
         sources={'ordered_cache.py': ran})
     if watcher:
         evidence['watcher_pass'] = watcher
+    if with_page:
+        evidence[PAGE_KEY] = page_block(report, digest, path, run, tag, commit, image)
+    return evidence
+
+
+def merge_page(report, digest, path, run, tag, commit, image, evidence_path, sources_root=HERE):
+    """The record on disk with the page64 report's 'page_writer' block added or replaced (the E1 part untouched). The record must still stand: PASS, the
+    live ordered_cache.py bytes."""
+    problems = common_ref_problems(commit, image, run, tag) + page_problems(report, sources_root)
+    try:
+        with open(evidence_path, 'rb') as handle:
+            existing = json.loads(handle.read().decode('utf-8'))
+    except (OSError, ValueError) as error:
+        raise RecordError(problems + ['the record to extend does not read: %s' % str(error)[:80]])
+    problems.extend('the record on disk: ' + item for item in page_width_tp4.evidence_problems(existing, sources_root))
+    if problems:
+        raise RecordError(problems)
+    evidence = dict(existing)
+    evidence[PAGE_KEY] = page_block(report, digest, path, run, tag, commit, image)
     return evidence
 
 
@@ -158,6 +299,8 @@ def parse_args(argv=None):
     parser.add_argument('--watcher', help='the watcher pass\'s report (optional)')
     parser.add_argument('--watcher-run', type=int)
     parser.add_argument('--watcher-tag')
+    parser.add_argument('--merge-page', action='store_true',
+                        help='the report is a page64-only run: add or replace the page_writer block in the record on disk (the E1 part is kept)')
     parser.add_argument('--dry-run', action='store_true', help='check and print the result; write nothing')
     return parser.parse_args(argv)
 
@@ -167,7 +310,10 @@ def main(argv=None, out=print):
     try:
         report, digest = base.read_report(args.report)
         watcher = base.watcher_entry(args.watcher_run, args.watcher_tag, None) if args.watcher_run else None
-        evidence = build(report, digest, args.report, args.run, args.tag, args.commit, args.image, watcher, args.sources_root)
+        if args.merge_page:
+            evidence = merge_page(report, digest, args.report, args.run, args.tag, args.commit, args.image, args.evidence, args.sources_root)
+        else:
+            evidence = build(report, digest, args.report, args.run, args.tag, args.commit, args.image, watcher, args.sources_root)
     except RecordError as error:
         for problem in error.problems:
             out('REFUSED: ' + problem)
@@ -180,6 +326,10 @@ def main(argv=None, out=print):
     payload = dump(evidence)
     sha = hashlib.sha256(payload).hexdigest()
     remaining = page_width_tp4.evidence_problems(evidence, args.sources_root)
+    if PAGE_KEY in evidence:
+        import kv_page_writer_tp4 as kvpw
+
+        remaining = remaining + kvpw.block_problems(evidence[PAGE_KEY], evidence[PAGE_KEY].get('wt'))
     out('evidence sha256 %s; %d problems left for page_width_tp4%s' % (sha, len(remaining), '' if not remaining else ':'))
     for problem in remaining:
         out('  - ' + problem)
