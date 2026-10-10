@@ -30,7 +30,7 @@ Keys (every one optional but C2_IMAGE_TAG):
                       ttnn.qwen_read_blocks, against the whole-cache read byte for byte on the pool-sized cache; KV_READ_PROBE verdict=PASS|FAIL, the exit
                       status is the verdict) or subdev (tp4_subdev_probe.py, H2 of the sub-device overlap programme: an all_gather on the target
                       sub-device and one on the drafter sub-device in flight together on the (1, 4) ring, each with its own semaphores and command queue,
-                      optimisation/ttnn-op/subdev_h/subdev_h2.py; the arms that cannot hang: solo, chained by an event, both on one queue; SUBDEV_H2 verdict=SAFE-PASS|FAIL-*|
+                      optimisation/ttnn-op/subdev_h/subdev_h2.py; the arms that cannot hang: solo, chained by an event; SUBDEV_H2 verdict=SAFE-PASS|FAIL-*|
                       NOT-MEASURED; holds all four cards: run it LAST, before an all-board reset) or subdev-watch (the same under TT_METAL_WATCHER=5 with
                       the watcher off the ethernet cores, bytes and hangs only, no timing verdict) or subdev-shared (solo plus the arms that put both gather
                       streams on ONE fabric link: PASS|FAIL-*, or a hang, which wedges the mesh and needs the all-board reset) or subdev-links (the

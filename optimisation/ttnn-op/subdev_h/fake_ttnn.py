@@ -17,7 +17,10 @@ harnesses' protocol to be tested on a CPU:
     `drop_replays_on=(1,)` makes a queue's replays do nothing at all (to prove that stale outputs cannot pass), `deadlock_on_shared_link` makes a replay
     that lands on a link another queue is using raise (the hardware hangs), and
     overlap='link' serialises two replays only while their fabric links intersect (the gather's link set is range(offset, offset + num_links), the
-    offset being the QWEN_AG_LINK_OFFSET_SD1 of `environ` read when the gather is built, for sub-device 1 only, as the prepared graft does).
+    offset being the QWEN_AG_LINK_OFFSET_SD1 of `environ` read when the gather is built, for sub-device 1 only, as the prepared graft does);
+  - `per_sub_device_waits=True` replays a trace as the hardware does (trace/dispatch.cpp issue_trace_commands: one wait per sub-device the trace uses): it
+    starts when ITS sub-devices are free, not when its queue is, so a sub-device-1 trace replayed from queue 0 right after a sub-device-0 trace runs
+    alongside it. Link conflicts (deadlock_on_shared_link, overlap='link') are then judged between in-flight traces whatever queue they came from.
 
 Tensors carry a fingerprint instead of data: an op's fingerprint is a hash of its kind and its inputs', so "bitwise equal" means "same computation".
 """
@@ -269,8 +272,10 @@ class FakeTTNN(object):
     OP_COST_NS = 20000
 
     def __init__(self, overlap='ideal', grid=(11, 10), chips=1, corrupt_on_overlap=False, op_costs=None, environ=None, drop_replays_on=(),
-                 deadlock_on_shared_link=False):
+                 deadlock_on_shared_link=False, per_sub_device_waits=False):
         self.overlap, self.grid, self.chips, self.corrupt_on_overlap = overlap, grid, chips, corrupt_on_overlap
+        self.per_sub_device_waits = per_sub_device_waits
+        self.sd_free, self.inflight, self.cq_barrier = {}, [], {0: 0, 1: 0}
         self.environ = {} if environ is None else environ
         self.drop_replays_on = tuple(drop_replays_on)
         self.deadlock_on_shared_link = deadlock_on_shared_link
@@ -531,6 +536,7 @@ class FakeTTNN(object):
                 del self.owner[sd]
                 del self.owner_event[sd]
         self.free_at[cq_id] = max(self.free_at[cq_id], mesh_event.time_ns)
+        self.cq_barrier[cq_id] = max(self.cq_barrier[cq_id], mesh_event.time_ns)       # what the queue enqueues after the wait starts after the event
         self.advance(1500)
 
     def begin_trace_capture(self, mesh, *, cq_id=None):
@@ -553,6 +559,8 @@ class FakeTTNN(object):
             raise RuntimeError('trace %d was released' % trace_id)
         if cq != trace.cq:
             raise RuntimeError('trace %d was captured on queue %d and cannot replay on queue %d' % (trace_id, trace.cq, cq))
+        if self.per_sub_device_waits and cq not in self.drop_replays_on:
+            return self.replay_per_sub_device(trace, trace_id, cq, blocking)
         if self.deadlock_on_shared_link and any(
                 free > max(self.now, self.free_at[cq]) and self.busy_links[other] & set(trace.links)
                 for other, free in self.free_at.items() if other != cq):
@@ -568,6 +576,33 @@ class FakeTTNN(object):
             tensor.poisoned = False
         busy = self.submit(cq, sum(self.op_cost(kind) for kind in trace.ops), tuple(trace.links))
         trace.corrupt = bool(busy and self.corrupt_on_overlap)
+        self.advance(3000)
+        if blocking:
+            self.now = max(self.now, self.free_at[cq])
+
+    def replay_per_sub_device(self, trace, trace_id, cq, blocking):
+        links = set(trace.links)
+        start = max([self.now, self.cq_barrier[cq]] + [self.sd_free.get(sd, 0) for sd in trace.sds])
+        others = [(end, held, ident) for end, held, ident in self.inflight if end > start and ident != trace_id]
+        if self.deadlock_on_shared_link and any(held & links for _, held, _ in others):
+            raise RuntimeError('DEADLOCK: trace %d replayed onto a fabric link a trace still in flight holds' % trace_id)
+        if self.overlap == 'link':
+            for end, held, _ in others:
+                if held & links:
+                    start = max(start, end)
+        elif self.overlap == 'serial':
+            start = max([start] + [end for end, _, _ in others])
+        for sd in sorted(trace.sds):
+            self.take(sd, cq)
+        for tensor in trace.outputs:
+            tensor.poisoned = False
+        end = start + sum(self.op_cost(kind) for kind in trace.ops)
+        busy = any(other_end > start for other_end, _, _ in others)
+        trace.corrupt = bool(busy and self.corrupt_on_overlap)
+        for sd in trace.sds:
+            self.sd_free[sd] = end
+        self.inflight = [entry for entry in self.inflight if entry[0] > self.now] + [(end, links, trace_id)]
+        self.free_at[cq] = max(self.free_at[cq], end)
         self.advance(3000)
         if blocking:
             self.now = max(self.now, self.free_at[cq])

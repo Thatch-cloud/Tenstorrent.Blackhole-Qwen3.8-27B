@@ -119,7 +119,7 @@ class RegistrationTests(unittest.TestCase):
     def test_the_parser_and_the_workflow_mount_and_check_the_graft(self):
         self.assertIn('subdev-links', job.FABRIC_PROBES)
         workflow = (ROOT / '.github' / 'workflows' / 'qwen-c2-serving.yml').read_text(encoding='utf-8')
-        self.assertIn('subdev-links) script=tp4_subdev_probe.py; report=subdev-probe.json; probe_args=(--arms solo,link_cost,chained,one_queue,separate --link-offset 1) ;;', workflow)
+        self.assertIn('subdev-links) script=tp4_subdev_probe.py; report=subdev-probe.json; probe_args=(--arms solo,link_cost,separate,chained,one_queue --link-offset 1) ;;', workflow)
         for needle in ('lomount=()', '"$HOME/opgraft-K64j-LO"', 'sha256sum -c --quiet MANIFEST.sha256', '/opt/tt-metal/build_Release/ttnn/_ttnncpp.so:ro',
                        '/opt/tt-metal/build_Release/lib/_ttnncpp.so:ro', 'QWEN_AG_LINK_GRAFT_SHA256=$lo_sha', '${lomount[@]+"${lomount[@]}"}'):
             self.assertIn(needle, workflow)
@@ -130,7 +130,19 @@ class RegistrationTests(unittest.TestCase):
 
     def test_the_probe_arms_the_workflow_passes_are_known_to_the_harness(self):
         import subdev_h2
-        self.assertEqual(subdev_h2.parse_groups('solo,link_cost,chained,one_queue,separate'), ['solo', 'link_cost', 'chained', 'one_queue', 'separate'])
+        # the decisive separate arm right after the arms that cannot hang, before chained and one_queue (the first run of this job hung in one_queue, which
+        # was a shared-link arm, and never reached separate); no arm of the job puts two streams on one link
+        order = ['solo', 'link_cost', 'separate', 'chained', 'one_queue']
+        self.assertEqual(subdev_h2.parse_groups('solo,link_cost,chained,one_queue,separate'), order)
+        self.assertEqual(subdev_h2.parse_groups('solo,link_cost,separate,chained,one_queue'), order)
+        workflow = (ROOT / '.github' / 'workflows' / 'qwen-c2-serving.yml').read_text(encoding='utf-8')
+        case = [line for line in workflow.splitlines() if line.strip().startswith('subdev-links) script=')][0]
+        arms = case.split('--arms ')[1].split(' ')[0].split(',')
+        self.assertEqual(arms, order)
+        self.assertFalse({'shared', 'shared2'} & set(arms))
+        header = (PACK / 'H2d-subdev-quad-links.env').read_text(encoding='utf-8')
+        self.assertLess(header.index('THE DECISIVE ARM, separate'), header.index('then chained'))
+        self.assertIn('before_hang', header)
 
 
 if __name__ == '__main__':

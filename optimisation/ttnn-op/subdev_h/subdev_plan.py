@@ -274,27 +274,27 @@ def classify(ratio, over_sum, pass_ratio=PASS_RATIO):
 def verdict_h2(arms, exactness, timing=True, error=None, pass_ratio=PASS_RATIO, separate_run=False):
     """(verdict text, evidence) of the four-card collective probe H2. `arms` has t_solo, d_solo, shared (both gathers concurrent on the SAME fabric
     link: num_links 1 on each), optionally shared2 (num_links 2 on each; informational) and separate (the drafter's gather on link 1, which needs the
-    link-offset graft; `separate_run` says it was attempted). Texts:
+    link-offset graft; `separate_run` says it was attempted) and one_queue (both traces from queue 0, the drafter's on link 1; informational: it adds
+    one_queue_ratio but never changes the verdict). Texts:
       NOT-MEASURED / FAIL-BYTES / INCOMPLETE / UNTIMED-PASS   as verdict()
       PASS                  the shared-link concurrent wall is within pass_ratio of the longer solo wall: no graft needed
       PASS-SEPARATE-LINKS   the shared link does not overlap but the separate links do: the link-offset graft is required
-      SAFE-PASS             no arm that overlaps the two gather streams ran (the default arms cannot hang): bytes identical, solo, chained and one-queue timed
+      SAFE-PASS             no arm that overlaps the two gather streams ran (the default arms cannot hang): bytes identical, solo and chained timed
       FAIL-SERIALISED / FAIL-PARTIAL   neither overlaps (the separate arm's class when it ran, else the shared arm's)"""
     evidence = dict(compared=exactness.get('compared', 0), mismatched=exactness.get('mismatched', 0), timing=bool(timing), pass_ratio=pass_ratio)
     t, d = _median(arms, 't_solo'), _median(arms, 'd_solo')
     if t and d:
         evidence.update(sum_ms=round(t + d, 4), max_solo_ms=round(max(t, d), 4))
-        for name in ('shared', 'shared2', 'separate'):
+        for name in ('shared', 'shared2', 'separate', 'one_queue'):
             value = _median(arms, name)
             if value:
                 evidence[name + '_ms'] = value
                 evidence[name + '_ratio'] = round(value / max(t, d), 4)
                 evidence[name + '_over_sum'] = round(value / (t + d), 4)
-        for name in ('chained', 'one_queue'):
-            value = _median(arms, name)
-            if value:
-                evidence[name + '_ms'] = value
-                evidence[name + '_over_sum'] = round(value / (t + d), 4)
+        value = _median(arms, 'chained')
+        if value:
+            evidence['chained_ms'] = value
+            evidence['chained_over_sum'] = round(value / (t + d), 4)
         two = _median(arms, 't_solo2')
         if two:
             evidence['t_solo2_ms'] = two
@@ -308,8 +308,8 @@ def verdict_h2(arms, exactness, timing=True, error=None, pass_ratio=PASS_RATIO, 
     if not timing:
         return 'UNTIMED-PASS', evidence
     if 'shared_ratio' not in evidence and 'separate_ratio' not in evidence:
-        # no arm that overlaps the two gather streams ran: the safe arms (solo, chained by an event, both on one queue) are all there is to judge
-        if 'chained_ms' in evidence and 'one_queue_ms' in evidence:
+        # no arm that overlaps the two gather streams ran: the safe arms (solo, chained by an event) are all there is to judge
+        if 'chained_ms' in evidence:
             return 'SAFE-PASS', evidence
         return 'INCOMPLETE', evidence
     if 'shared_ratio' not in evidence:

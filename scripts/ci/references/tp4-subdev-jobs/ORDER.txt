@@ -22,7 +22,7 @@
 #   H1b    'SUBDEV_H1 verdict=PASS' (concurrent <= 1.1 x max(solo), bytes identical). FAIL-SERIALISED / FAIL-PARTIAL: the finding (the queues do not overlap, or only partly): H2a and H2b are skipped, nothing needs the collectives.
 #   X0     four cards present and healthy, the fabric as measured, no other driver alive.
 #   H2a    'SUBDEV_H2 verdict=UNTIMED-PASS' with watcher_errors=0. FAIL-BYTES or a hang: H2b is skipped, Z resets.
-#   H2b    'SUBDEV_H2 verdict=SAFE-PASS' (bytes identical; t_ms, d_ms, chained_ms, one_queue_ms): the sub-device collectives are exact; no overlap is judged.
+#   H2b    'SUBDEV_H2 verdict=SAFE-PASS' (bytes identical; t_ms, d_ms, chained_ms): the sub-device collectives are exact; no overlap is judged.
 #   H2c    expected 'SUBDEV_H2 verdict=HANG stage=arm-shared' (two gather streams on one fabric link deadlock the ring); PASS or FAIL-* (it did not hang) is news. Z resets either way.
 # NO-GO: any hang or stall, any byte difference between a concurrent run and a solo run, a TT_FATAL at the manager or the first trace (NOT-MEASURED with the error), a watcher error line.
 # Time (estimate, minutes; cumulative in brackets): H1a 30 [30], H1b 25 [55], X0 20 [75], H2a 30 [105], H2b 30 [135], H2c 25 [160], Z 10 [170]: 170 minutes (2 h 50 min) in all; H1a and H1b alone are 55 minutes after the cards are free;

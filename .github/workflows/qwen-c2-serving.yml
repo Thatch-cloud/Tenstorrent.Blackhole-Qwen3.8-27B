@@ -17,7 +17,9 @@ name: Qwen C2 serving image
 #            same under TT_METAL_WATCHER=5 with the watcher off the ethernet cores (untimed), its watcher log copied beside the report; subdev-shared adds
 #            the arms that put both gather streams on one fabric link (the first card run hung there: it needs the all-board reset after it)
 #            C2_FABRIC_PROBE=subdev-links is the decisive run: the same probe on the K64j graft with the all-gather link offset mounted (the drafter's gathers
-#            on link 1, the target's on link 0), the target's link cost, and the pre-registered port rule (SUBDEV_H2 ... port=GO|CONDITIONAL|NO-GO)
+#            on link 1, the target's on link 0), the target's link cost, and the pre-registered port rule (SUBDEV_H2 ... port=GO|CONDITIONAL|NO-GO);
+#            the arms run solo, link_cost, separate (the decisive one, before anything else that could hang), chained, then one_queue (both traces from queue 0,
+#            the drafter's on link 1; informational), never an arm that shares a link
 #   cardm  - a single-card qualification harness (C2_CARDM_HARNESS, e.g. optimisation/ttnn-op/k64j/run_card_b.sh)
 #            on card M alone, card B being reserved for another project: QUAL_CARD=card M, ALLOW_SERVING_CARD=1, after
 #            the same refusals as the gate (anything holding M or A, a platform serving container); never card
@@ -449,7 +451,7 @@ jobs:
             subdev) script=tp4_subdev_probe.py; report=subdev-probe.json ;;
             subdev-watch) script=tp4_subdev_probe.py; report=subdev-probe.json; probe_args=(--watcher) ;;
             subdev-shared) script=tp4_subdev_probe.py; report=subdev-probe.json; probe_args=(--arms solo,shared,shared2) ;;
-            subdev-links) script=tp4_subdev_probe.py; report=subdev-probe.json; probe_args=(--arms solo,link_cost,chained,one_queue,separate --link-offset 1) ;;
+            subdev-links) script=tp4_subdev_probe.py; report=subdev-probe.json; probe_args=(--arms solo,link_cost,separate,chained,one_queue --link-offset 1) ;;
             *) echo "unknown fabric probe: $PROBE" >&2; exit 1 ;;
           esac
           results="$RUNNER_TEMP/c2-results/fabric"

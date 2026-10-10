@@ -6,6 +6,9 @@ What the first card runs (2026-10-10) put into these tests:
     existed: the watcher variables must switch the watcher off on the ethernet cores (test_the_watcher_pass_...).
   - H2b: everything up to the first CONCURRENT replay of two gather traces on one fabric link worked, and that replay hung the mesh: the arms that cannot
     hang run first and keep their numbers when a later one hangs (test_a_hang_in_a_shared_link_arm_...).
+  - H2d (the link-offset run): the arm called one_queue hung, because its drafter trace was the link-0 program and a trace replay waits only for its own
+    sub-devices, so both traces ran at once on one router whatever the queue count; the separate arm, the decisive one, never ran. Now separate runs right
+    after the solo arms, and one_queue is built from the link-1 program and runs after it (test_the_h2d_...).
 
 Run: python -B -m unittest test_tp4_subdev_probe   (from scripts/ci)
 """
@@ -29,8 +32,8 @@ import subdev_plan as plan  # noqa: E402
 import tp4_mesh  # noqa: E402
 
 SMALL = ['--gathers', '4', '--rounds', '5', '--warmup', '1', '--eager-rounds', '2', '--heartbeat-s', '0']
-SHARED = ['--arms', 'solo,chained,one_queue,shared']
-ALL = ['--arms', 'solo,chained,one_queue,shared,shared2']
+SHARED = ['--arms', 'solo,chained,shared']
+ALL = ['--arms', 'solo,chained,shared,shared2']
 
 
 def make_dog(exits=None, **kwargs):
@@ -86,12 +89,12 @@ class H2Tests(unittest.TestCase):
         line = self.verdict_line(lines)
         self.assertEqual((status, report['verdict']), (0, 'SAFE-PASS'), line)
         self.assertNotIn('error', report, report.get('traceback'))
-        self.assertEqual(sorted(report['arms']), ['chained', 'd_solo', 'one_queue', 't_solo'])
-        for name in ('t_solo', 'd_solo', 'chained', 'one_queue'):
+        self.assertEqual(sorted(report['arms']), ['chained', 'd_solo', 't_solo'])
+        for name in ('t_solo', 'd_solo', 'chained'):
             self.assertEqual(report['arms'][name]['n'], 5, name)
-        self.assertEqual(report['arms_requested'], ['solo', 'chained', 'one_queue'])
-        self.assertEqual(sorted(report['traces']), ['d', 'd0', 't'])
-        self.assertIn('arms=solo+chained+one_queue', line)
+        self.assertEqual(report['arms_requested'], ['solo', 'chained'])
+        self.assertEqual(sorted(report['traces']), ['d', 't'])
+        self.assertIn('arms=solo+chained', line)
         self.assertIn('bytes=identical', line)
         self.assertAlmostEqual(report['evidence']['chained_over_sum'], 1.0, delta=0.05)      # chained = one after the other
         self.assertEqual(json.loads(lines[-1])['kind'], 'subdev-h2')
@@ -102,12 +105,12 @@ class H2Tests(unittest.TestCase):
         self.assertFalse(any('eager concurrent' in case['case'] for case in report['exactness']['cases']))
         self.assertIn('eager target solo', [case['case'] for case in report['exactness']['cases']])
 
-    def test_chained_and_one_queue_are_exact_and_cost_about_the_sum_of_the_solo_walls(self):
+    def test_chained_is_exact_and_costs_about_the_sum_of_the_solo_walls(self):
         status, lines, report, ttnn = self.run_fake(overlap='serial')
         names = [case['case'] for case in report['exactness']['cases']]
-        for expected in ('chained #0 target', 'chained #1 drafter', 'one_queue #0 drafter', 'one_queue #1 target', 't_solo #0 target', 'd_solo #0 drafter'):
+        for expected in ('chained #0 target', 'chained #1 drafter', 't_solo #0 target', 'd_solo #0 drafter'):
             self.assertIn(expected, names)
-        self.assertAlmostEqual(report['evidence']['one_queue_over_sum'], 1.0, delta=0.05)
+        self.assertAlmostEqual(report['evidence']['chained_over_sum'], 1.0, delta=0.05)
         self.assertEqual(report['verdict'], 'SAFE-PASS', 'with only the safe arms nothing is judged serial or concurrent')
 
     # ------------------------------------------------------------------ the arms that overlap the two streams
@@ -118,7 +121,7 @@ class H2Tests(unittest.TestCase):
         self.assertEqual((status, report['verdict']), (0, 'PASS'), line)
         self.assertLessEqual(report['evidence']['shared_ratio'], 1.1)
         self.assertLessEqual(report['evidence']['shared2_ratio'], 1.1)
-        self.assertEqual(sorted(report['traces']), ['d', 'd0', 'd2', 't', 't2'])
+        self.assertEqual(sorted(report['traces']), ['d', 'd2', 't', 't2'])
         self.assertIn('separate=NOT-RUN', line)
         self.assertIn('NOT-RUN', report['separate'])
         self.assertTrue(any('next arm=shared hazard=' in str(line) for line in lines))
@@ -126,9 +129,14 @@ class H2Tests(unittest.TestCase):
     def test_the_hazard_arms_run_after_every_arm_that_cannot_hang(self):
         status, lines, report, ttnn = self.run_fake(ALL)
         stages = [line.split('stage=')[1] for line in lines if isinstance(line, str) and line.startswith('SUBDEV_H2 stage=arm-')]
-        self.assertEqual(stages, ['arm-t_solo', 'arm-d_solo', 'arm-chained', 'arm-one_queue', 'arm-shared', 'arm-shared2'])
-        self.assertEqual([arm for arm in subdev_h2.ARMS], ['t_solo', 'd_solo', 't_solo2', 'chained', 'one_queue', 'separate', 'shared', 'shared2'])
-        self.assertEqual(subdev_h2.parse_groups('shared,solo,separate,chained'), ['solo', 'chained', 'separate', 'shared'])
+        self.assertEqual(stages, ['arm-t_solo', 'arm-d_solo', 'arm-chained', 'arm-shared', 'arm-shared2'])
+        self.assertEqual([arm for arm in subdev_h2.ARMS], ['t_solo', 'd_solo', 't_solo2', 'separate', 'chained', 'one_queue', 'shared', 'shared2'])
+        # the decisive separate arm right after the solo arms, before chained and before every arm that puts a second client on a router
+        self.assertEqual(subdev_h2.parse_groups('shared,solo,separate,chained'), ['solo', 'separate', 'chained', 'shared'])
+        self.assertEqual(subdev_h2.parse_groups('one_queue,chained,separate,link_cost,solo'), ['solo', 'link_cost', 'separate', 'chained', 'one_queue'])
+        self.assertEqual(subdev_h2.parse_groups('shared2,shared,one_queue,separate'), ['separate', 'one_queue', 'shared', 'shared2'])
+        self.assertEqual(subdev_h2.SAFE_GROUPS, ('solo', 'link_cost', 'chained'))
+        self.assertNotIn('one_queue', subdev_h2.SAFE_GROUPS, 'it was a shared-link arm in the first link-offset run: it hung')
 
     def test_one_dispatcher_for_both_queues_fails_serialised_and_says_so(self):
         status, lines, report, ttnn = self.run_fake(SHARED, overlap='serial')
@@ -138,14 +146,14 @@ class H2Tests(unittest.TestCase):
     def test_a_shared_link_that_serialises_fails_and_the_link_offset_graft_would_pass_it(self):
         status, lines, report, ttnn = self.run_fake(SHARED, overlap='link')
         self.assertEqual((status, report['verdict']), (1, 'FAIL-SERIALISED'), report['evidence'])
-        status, lines, report, ttnn = self.run_fake(['--arms', 'solo,chained,one_queue,separate,shared', '--link-offset', '1'], overlap='link')
+        status, lines, report, ttnn = self.run_fake(['--arms', 'solo,chained,separate,shared', '--link-offset', '1'], overlap='link')
         self.assertEqual((status, report['verdict']), (0, 'PASS-SEPARATE-LINKS'), report['evidence'])
         self.assertIn('separate=RUN', self.verdict_line(lines))
         self.assertLessEqual(report['evidence']['separate_ratio'], 1.1)
         self.assertGreater(report['evidence']['shared_ratio'], 1.1)
 
     def test_the_separate_arm_alone_can_pass(self):
-        status, lines, report, ttnn = self.run_fake(['--arms', 'solo,chained,one_queue,separate', '--link-offset', '1'], overlap='link')
+        status, lines, report, ttnn = self.run_fake(['--arms', 'solo,chained,separate', '--link-offset', '1'], overlap='link')
         self.assertEqual((status, report['verdict']), (0, 'PASS-SEPARATE-LINKS'))
         self.assertNotIn('shared', report['arms'])
 
@@ -163,7 +171,7 @@ class H2Tests(unittest.TestCase):
         status, lines, report, ttnn = self.run_fake(SHARED, corrupt_on_overlap=True)
         self.assertEqual((status, report['verdict']), (1, 'FAIL-BYTES'))
         cases = {case['case'] for case in report['exactness']['cases'] if case['mismatched']}
-        self.assertTrue(cases and all(case.startswith('shared') for case in cases), cases)     # chained and one-queue are not overlap: still exact
+        self.assertTrue(cases and all(case.startswith('shared') for case in cases), cases)     # chained is not overlap: still exact
 
     def test_a_queue_that_silently_runs_nothing_fails_on_the_poison_it_left(self):
         status, lines, report, ttnn = self.run_fake(drop_replays_on=(1,))
@@ -173,7 +181,8 @@ class H2Tests(unittest.TestCase):
 
     # ------------------------------------------------------------------ the separate-links run: the graft, the link cost, the pre-registered rule
 
-    LINKS = ['--arms', 'solo,link_cost,chained,one_queue,separate', '--link-offset', '1']
+    LINKS = ['--arms', 'solo,link_cost,separate,chained,one_queue', '--link-offset', '1']
+    HONEST = dict(overlap='link', per_sub_device_waits=True, deadlock_on_shared_link=True)     # the hardware: sub-devices of one queue do not wait for each other
 
     def test_the_separate_links_run_measures_the_link_cost_and_applies_the_port_rule(self):
         status, lines, report, ttnn = self.run_fake(self.LINKS, overlap='link')
@@ -183,12 +192,143 @@ class H2Tests(unittest.TestCase):
         self.assertEqual(report['port_rule']['decision'], 'GO')
         self.assertIn('port=GO', line)
         self.assertIn('link_cost=1.0', line)
-        self.assertEqual(sorted(report['traces']), ['d', 'd0', 'ds', 't', 't2'])
+        self.assertEqual(sorted(report['traces']), ['d', 'ds', 'ds0', 't', 't2'])
         self.assertNotIn('d2', report['traces'], 'the drafter at two links is not needed for the link cost')
-        self.assertEqual(report['arms_requested'], ['solo', 'link_cost', 'chained', 'one_queue', 'separate'])
+        self.assertNotIn('d0', report['traces'], 'the link-0 drafter program on queue 0 was the shared-link arm that hung')
+        self.assertEqual(report['arms_requested'], ['solo', 'link_cost', 'separate', 'chained', 'one_queue'])
         self.assertTrue(report['graft']['ok'])
         stages = [line.split('stage=')[1] for line in lines if isinstance(line, str) and line.startswith('SUBDEV_H2 stage=arm-')]
-        self.assertEqual(stages, ['arm-t_solo', 'arm-d_solo', 'arm-t_solo2', 'arm-chained', 'arm-one_queue', 'arm-separate'])
+        self.assertEqual(stages, ['arm-t_solo', 'arm-d_solo', 'arm-t_solo2', 'arm-separate', 'arm-chained', 'arm-one_queue'])
+
+    # ------------------------------------------------------------------ the H2d hang: one_queue was a shared-link arm
+
+    def test_the_h2d_arms_run_without_a_deadlock_when_the_hardware_does_not_order_sub_devices_on_one_queue(self):
+        status, lines, report, ttnn = self.run_fake(self.LINKS, **self.HONEST)
+        self.assertEqual((status, report['verdict']), (0, 'PASS-SEPARATE-LINKS'), report.get('error'))
+        self.assertEqual(report['port_rule']['decision'], 'GO')
+        # (queue, sub-device, links) of every trace: the target on link 0 (and the link-cost trace on both), the drafter alone on link 0 on queue 1, and BOTH
+        # of the offset drafter's, the separate arm's (queue 1) and the one-queue arm's (queue 0), on link 1
+        by_queue = sorted((trace.cq, tuple(sorted(trace.sds)), tuple(sorted(trace.links))) for trace in ttnn.traces.values())
+        self.assertEqual(by_queue, [(0, (0,), (0,)), (0, (0,), (0, 1)), (0, (1,), (1,)), (1, (1,), (0,)), (1, (1,), (1,))])
+        self.assertLessEqual(report['evidence']['one_queue_ratio'], 1.1, 'two sub-devices from one queue overlap when their links differ')
+        self.assertEqual(report['exactness']['mismatched'], 0)
+        self.assertIn('one_queue_bytes=identical', self.verdict_line(lines))
+        self.assertIn('one_queue_ratio=', self.verdict_line(lines))
+
+    def test_the_h2d_hang_is_reproduced_by_a_link_zero_drafter_on_one_queue_and_separate_has_already_been_measured(self):
+        original = subdev_h2.Harness2.capture
+
+        def link_zero_drafter(harness, label, side, queue, links, pool):
+            if label == 'ds0':
+                # the old arrangement: the drafter's trace on queue 0 is the program built WITHOUT the offset (the 'd' program, link 0)
+                return original(harness, label, harness.d_side, queue, links, harness.pool(harness.d_side, 'trace0'))
+            return original(harness, label, side, queue, links, pool)
+        with unittest.mock.patch.object(subdev_h2.Harness2, 'capture', link_zero_drafter):
+            status, lines, report, ttnn = self.run_fake(self.LINKS, **self.HONEST)
+        self.assertEqual((status, report['verdict']), (2, 'NOT-MEASURED'))
+        self.assertIn('DEADLOCK', report['error'])
+        self.assertEqual(report['last_stage'], 'arm-one_queue')
+        for name in ('t_solo', 'd_solo', 't_solo2', 'separate', 'chained'):
+            self.assertEqual(report['arms'][name]['n'], 5, name)         # separate and chained are in the report: they ran before the hang
+        self.assertNotIn('one_queue', report['arms'])
+        # the decisive arm had finished: the rule is applied to it and says on what basis (an error is not a NO-GO of an arm that passed)
+        self.assertEqual(report['port_rule']['decision'], 'GO')
+        self.assertEqual(report['port_rule']['basis'], 'separate-only-after-error')
+        self.assertEqual(report['before_error']['completed'], ['t_solo', 'd_solo', 't_solo2', 'separate', 'chained'])
+        self.assertIn('port=GO port_basis=separate-only-after-error', self.verdict_line(lines))
+
+    def test_a_failed_one_queue_capture_drops_that_arm_and_keeps_the_separate_arm(self):
+        original = subdev_h2.Harness2.capture
+
+        def failing(harness, label, side, queue, links, pool):
+            if label == 'ds0':
+                raise RuntimeError('TT_FATAL: cannot capture on queue 0')
+            return original(harness, label, side, queue, links, pool)
+        with unittest.mock.patch.object(subdev_h2.Harness2, 'capture', failing):
+            status, lines, report, ttnn = self.run_fake(self.LINKS, **self.HONEST)
+        self.assertEqual((status, report['verdict']), (0, 'PASS-SEPARATE-LINKS'), report.get('error'))
+        self.assertIn('NOT-RUN: the capture failed: TT_FATAL', report['one_queue'])
+        self.assertNotIn('one_queue', report['arms'])
+        self.assertEqual(report['port_rule']['decision'], 'GO')
+
+    def test_an_offset_that_never_reaches_the_build_leaves_the_separate_arm_on_link_zero_and_it_is_the_one_that_hangs(self):
+        environ = {}
+        ttnn = fake_ttnn.FakeTTNN(chips=4, environ={}, **self.HONEST)         # the fake never sees the exported offset: every program is link 0
+        out = os.path.join(self.directory.name, 'x.json')
+        lines = []
+        files = make_graft(self.directory.name, environ)
+        status = probe.main(['--output', out] + SMALL + self.LINKS, ttnn=ttnn, torch=fake_ttnn.FakeTorch(), environ=environ, log=lines.append,
+                            watchdog=make_dog(), clock=ttnn.clock, graft_files=files)
+        with open(out) as handle:
+            report = json.load(handle)
+        self.assertEqual((status, report['verdict']), (2, 'NOT-MEASURED'))
+        self.assertIn('DEADLOCK', report['error'])
+        self.assertEqual(report['last_stage'], 'arm-separate')
+        self.assertEqual(report['port_rule']['decision'] if 'port_rule' in report else 'NO-GO', 'NO-GO')
+
+    def test_a_hang_after_the_separate_arm_still_reports_what_it_showed(self):
+        report_path = os.path.join(self.directory.name, 'r.json')
+        exits, stream, lines = [], io.StringIO(), []
+        clock = [0.0]
+        dog = plan.Watchdog(tag=subdev_h2.TAG, backstop=False, exit_fn=exits.append, clock=lambda: clock[0], stream=stream)
+        environ = {}
+        files = make_graft(self.directory.name, environ)
+        ttnn = fake_ttnn.FakeTTNN(chips=4, environ=environ, overlap='link')
+        original = ttnn.execute_trace
+
+        def stuck(mesh, trace_id, **kwargs):
+            if dog.current() == 'arm-one_queue' and not exits:
+                clock[0] = 10000.0
+                dog.check()
+            return original(mesh, trace_id, **kwargs)
+        ttnn.execute_trace = stuck
+        probe.main(['--output', report_path] + SMALL + self.LINKS, ttnn=ttnn, torch=fake_ttnn.FakeTorch(), environ=environ, log=lines.append,
+                   watchdog=dog, clock=ttnn.clock, graft_files=files)
+        self.assertEqual(exits[:1], [3])
+        self.assertRegex(stream.getvalue(), r'^SUBDEV_H2 verdict=HANG stage=arm-one_queue')
+        before = [line for line in lines if isinstance(line, str) and line.startswith('SUBDEV_H2 before_hang ')]
+        self.assertEqual(len(before), 1, lines)
+        self.assertIn('separate=PASS-SEPARATE-LINKS', before[0])
+        self.assertIn('port=GO', before[0])
+        self.assertIn('completed=t_solo+d_solo+t_solo2+separate+chained', before[0])
+        with open(report_path) as handle:
+            report = json.load(handle)
+        self.assertEqual(report['before_hang']['port'], 'GO')      # (the fake's watchdog does not end the process: the run goes on, the finding stays)
+        self.assertEqual(report['before_hang']['completed'], ['t_solo', 'd_solo', 't_solo2', 'separate', 'chained'])
+
+    def test_a_hang_in_the_separate_arm_itself_has_no_before_hang_finding(self):
+        report_path = os.path.join(self.directory.name, 'r.json')
+        exits, stream, lines = [], io.StringIO(), []
+        clock = [0.0]
+        dog = plan.Watchdog(tag=subdev_h2.TAG, backstop=False, exit_fn=exits.append, clock=lambda: clock[0], stream=stream)
+        environ = {}
+        files = make_graft(self.directory.name, environ)
+        ttnn = fake_ttnn.FakeTTNN(chips=4, environ=environ, overlap='link')
+        original = ttnn.execute_trace
+
+        def stuck(mesh, trace_id, **kwargs):
+            if dog.current() == 'arm-separate' and not exits:
+                clock[0] = 10000.0
+                dog.check()
+            return original(mesh, trace_id, **kwargs)
+        ttnn.execute_trace = stuck
+        probe.main(['--output', report_path] + SMALL + self.LINKS, ttnn=ttnn, torch=fake_ttnn.FakeTorch(), environ=environ, log=lines.append,
+                   watchdog=dog, clock=ttnn.clock, graft_files=files)
+        self.assertEqual(exits[:1], [3])
+        self.assertRegex(stream.getvalue(), r'^SUBDEV_H2 verdict=HANG stage=arm-separate')
+        self.assertFalse([line for line in lines if isinstance(line, str) and 'before_hang' in line])
+        with open(report_path) as handle:
+            self.assertNotIn('before_hang', json.load(handle))
+
+    def test_the_one_queue_bytes_are_informational(self):
+        exact = dict(compared=0, mismatched=0, cases=[dict(case='one_queue #0 target', compared=6, mismatched=0), dict(case='one_queue #1 drafter', compared=6, mismatched=2),
+                                                       dict(case='separate #0 target', compared=6, mismatched=0)])
+        self.assertEqual(subdev_h2.one_queue_bytes(exact), 'DIFFER(2/12)')
+        self.assertEqual(subdev_h2.one_queue_bytes(dict(cases=[dict(case='one_queue #0 target', compared=6, mismatched=0)])), 'identical')
+        text, evidence = plan.verdict_h2({'t_solo': dict(median_ms=1.0, n=5), 'd_solo': dict(median_ms=0.5, n=5), 'separate': dict(median_ms=1.05, n=5),
+                                          'one_queue': dict(median_ms=1.4, n=5)}, dict(compared=40, mismatched=0), separate_run=True)
+        self.assertEqual(text, 'PASS-SEPARATE-LINKS', 'a one_queue that does not overlap does not change the verdict')
+        self.assertEqual(evidence['one_queue_ratio'], 1.4)
 
     def test_the_port_rule_follows_the_measured_link_cost(self):
         for costs, decision in (({'ag1': 22000, 'ag2': 20000}, 'GO'), ({'ag1': 30000, 'ag2': 20000}, 'CONDITIONAL'), ({'ag1': 50000, 'ag2': 20000}, 'NO-GO')):
@@ -207,7 +347,7 @@ class H2Tests(unittest.TestCase):
         self.assertEqual(report['port_rule']['decision'], 'NO-GO')
 
     def test_the_rule_is_not_applied_to_a_run_without_the_separate_arm(self):
-        status, lines, report, ttnn = self.run_fake(['--arms', 'solo,link_cost,chained,one_queue'])
+        status, lines, report, ttnn = self.run_fake(['--arms', 'solo,link_cost,chained'])
         self.assertEqual(report['verdict'], 'SAFE-PASS')
         self.assertNotIn('port_rule', report)
         self.assertEqual(report['evidence']['link_cost'], 1.0)
@@ -263,7 +403,7 @@ class H2Tests(unittest.TestCase):
         status, lines, report, ttnn = self.run_fake(SHARED, overlap='link', deadlock_on_shared_link=True)
         self.assertEqual((status, report['verdict']), (2, 'NOT-MEASURED'))
         self.assertIn('DEADLOCK', report['error'])
-        for name in ('t_solo', 'd_solo', 'chained', 'one_queue'):
+        for name in ('t_solo', 'd_solo', 'chained'):
             self.assertEqual(report['arms'][name]['n'], 5, name)           # timed before the shared arm ran
         self.assertNotIn('shared', report['arms'])
         self.assertEqual(report['exactness']['mismatched'], 0)
@@ -291,7 +431,7 @@ class H2Tests(unittest.TestCase):
         # the report on disk when the watchdog fired (the process would exit here): the hang verdict and the safe arms' timings
         with open(report_path) as handle:
             report = json.load(handle)
-        self.assertEqual(report['arms']['one_queue']['n'], 5)
+        self.assertEqual(report['arms']['chained']['n'], 5)
 
     # ------------------------------------------------------------------ the arrangement the first card run settled
 
@@ -371,8 +511,7 @@ class H2Tests(unittest.TestCase):
         self.assertEqual(ttnn.opened['queues'], 2)
         self.assertEqual((report['plan']['target_cores'], report['plan']['drafter_cores']), (80, 30))
         self.assertEqual(report['chips'], 4)
-        self.assertEqual({(t.cq, tuple(sorted(t.sds))) for t in ttnn.traces.values()}, {(0, (0,)), (1, (1,))} | {(0, (1,))},
-                         'target on queue 0, drafter on queue 1, and the one-queue control: the drafter again on queue 0')
+        self.assertEqual({(t.cq, tuple(sorted(t.sds))) for t in ttnn.traces.values()}, {(0, (0,)), (1, (1,))}, 'target on queue 0, drafter on queue 1')
 
     def test_a_grid_wider_than_the_planned_split_leaves_idle_cores_not_a_third_sub_device(self):
         status, lines, report, ttnn = self.run_fake(grid=(13, 10))
@@ -425,7 +564,10 @@ class H2Tests(unittest.TestCase):
     def test_bad_arguments_never_reach_the_device(self):
         ttnn = fake_ttnn.FakeTTNN(chips=4)
         for bad, needle in ((['--gathers', '1'], '--gathers'), (['--link-offset', '2'], '--link-offset'), (['--arms', 'solo,bogus'], 'bogus'),
-                            (['--arms', 'solo,separate'], 'needs --link-offset 1'), (['--link-offset', '1'], 'add it to --arms')):
+                            (['--arms', 'solo,separate'], 'needs --link-offset 1'), (['--link-offset', '1'], 'add it to --arms'),
+                            (['--arms', 'solo,one_queue'], 'one_queue needs --link-offset 1'),
+                            (['--arms', 'solo,one_queue', '--link-offset', '1'], 'one_queue needs separate'),
+                            (['--arms', 'solo,separate,one_queue'], 'separate needs --link-offset 1')):
             with unittest.mock.patch('sys.stderr', new=io.StringIO()) as stderr:
                 status = probe.main(['--output', os.path.join(self.directory.name, 'r.json')] + bad, ttnn=ttnn, torch=fake_ttnn.FakeTorch(),
                                     log=lambda line: None)
@@ -475,7 +617,7 @@ class ParserTests(unittest.TestCase):
         options = probe.build_parser().parse_args(['--output', 'x.json'])
         self.assertEqual((options.fabric, options.topology, options.link_offset, options.watcher, options.no_timing),
                          ('FABRIC_1D', 'Ring', 0, False, False))
-        self.assertEqual(options.arms, 'solo,chained,one_queue')
+        self.assertEqual(options.arms, 'solo,chained')
         self.assertEqual((options.target_cores, options.drafter_cores), (80, 30))
         self.assertEqual(subdev_h2.problems_of(options), [])
 

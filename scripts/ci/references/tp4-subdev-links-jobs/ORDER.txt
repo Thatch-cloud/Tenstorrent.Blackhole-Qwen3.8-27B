@@ -17,7 +17,8 @@
 #   L1     'K64J_LO_TTNNCPP_SHA256=<sha>' and 'ok    REPRODUCED' (or the warning with every other check green); no FAIL line; ~/opgraft-K64j is untouched.
 #   X0     four cards present and healthy, the fabric as measured, no other driver alive.
 #   H2d    'SUBDEV_H2 verdict=PASS-SEPARATE-LINKS ... port=GO' justifies the port; port=CONDITIONAL needs the measured collective share (see H2d's header); port=NO-GO or a hang or NOT-MEASURED does not.
-# NO-GO: any hang or stall, any byte difference, a graft check that fails (the report says which copy hashed to what), no overlap on separate links, link_cost > 1.75.
+#          If a later arm (one_queue, informational) hangs after separate completed, the line 'SUBDEV_H2 before_hang separate=... port=...' carries the decision from the finished separate arm; a hang IN separate is NO-GO.
+# NO-GO: a hang or stall in the separate arm or before it, any byte difference in a solo/chained/separate comparison, a graft check that fails (the report says which copy hashed to what), no overlap on separate links, link_cost > 1.75.
 # Time (estimate, minutes; cumulative in brackets): L0 3 [3], L1 20 [23], X0 20 [43], H2d 35 [78], Z 10 [88]: 88 minutes (1 h 28 min) in all, 65 of them with the cards (X0 to Z); about 3 minutes of queue per tag on top.
 L0-build-k64j-lo-dry soft tp4-next2-1 3
 L1-build-k64j-lo stop tp4-next2-1 20

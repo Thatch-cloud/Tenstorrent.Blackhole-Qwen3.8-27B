@@ -179,10 +179,20 @@ def run(options, ttnn=None, torch=None, environ=None, log=plan.say, watchdog=Non
         report.update(verdict='HANG', error='watchdog: %s exceeded its budget' % label)
         if held.get('harness') is not None:
             held['harness'].snapshot()      # every arm measured before the hang goes into the report
+            try:
+                line, found = subdev_h2.partial_findings(held['harness'], options)
+            except BaseException:  # noqa: BLE001
+                line, found = None, None
+            if found:
+                # the decisive separate arm finished before a later arm hung: say what it showed (the HANG line alone would read as a NO-GO)
+                report['before_hang'] = found
+                log(line)
         persist()
 
     if watchdog is None:
         watchdog = plan.Watchdog(tag=subdev_h2.TAG, on_fire=on_fire).start()
+    elif getattr(watchdog, 'on_fire', None) is None:
+        watchdog.on_fire = on_fire      # a watchdog handed in (the tests') reports the same partial findings
     if ttnn is None:
         descriptor = report['descriptor']
         problems = None
