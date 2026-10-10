@@ -7,7 +7,7 @@ What make_fusion_jobs.py does not make for the CCL options (F-C1): the isolated 
 ccl-sweep probe, tp4_ccl_sweep_probe.py), the plumbing control's audited attach (CCLS), and the hang qualification (CCLH1-CCLH5: five consecutive completions of the hang
 shapes on the lever's profile). The audited attach (CCLA) and the timed ABAB (CCLC1 CCLL1 CCLC2 CCLL2) of the lever itself are make_fusion_jobs.py's, on the same image.
 
-The lever's profile is `<production>-fx-ccl` (make_fusion_profiles.py, from the lever `ccl` of scripts/ci/fusion-wp/WP5.json); the sweep decides its value, so the hang runs
+The lever's profile is `<base>-fx-ccl` (base = the production profile without its -traffic suffix) (make_fusion_profiles.py, from the lever `ccl` of scripts/ci/fusion-wp/WP5.json); the sweep decides its value, so the hang runs
 and the ABAB wait for it. Nothing here names a rig, a card, a host or a registry; nothing stops, starts or hands back the node agent.
 """
 
@@ -21,8 +21,9 @@ FOLDER = REPO / 'scripts' / 'ci' / 'references' / 'fusion-jobs' / 'WP5'
 
 IMAGE = 'tp4-fusion-1'
 PRODUCTION = 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic'
-LEVER = PRODUCTION + '-fx-ccl'
-PLUMBING_AUDIT = PRODUCTION + '-fx-ccl-served-audit'
+BASE = 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er'             # the integrator's twin namespace is BASE + '-fx-' (make_fusion_profiles.NAMESPACE)
+LEVER = BASE + '-fx-ccl'
+PLUMBING_AUDIT = BASE + '-fx-ccl-served-audit'
 HANG_TESTS = 'warmup,concurrent4_steady,concurrent8_steady,steady_resend,replay_concurrent4,replay_concurrent8,concurrent8_code_equal,concurrent5_split,concurrent8_drain'
 AUDIT_TESTS = 'warmup,concurrent8_steady'
 

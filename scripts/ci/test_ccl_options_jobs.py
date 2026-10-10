@@ -45,10 +45,10 @@ def profiles_with_twins():
     wanted = {}
     for lever in plan['levers']:
         env = dict(lever['env'], **{lever['flag']: lever['value']})
-        wanted['%s-fx-%s' % (make_pack.PRODUCTION, lever['id'])] = env
-        wanted['%s-fx-%s-audit' % (make_pack.PRODUCTION, lever['id'])] = dict(env, **dict(lever['audit_env'], **{lever['audit_flag']: '1'}))
+        wanted['%s-fx-%s' % (make_pack.BASE, lever['id'])] = env
+        wanted['%s-fx-%s-audit' % (make_pack.BASE, lever['id'])] = dict(env, **dict(lever['audit_env'], **{lever['audit_flag']: '1'}))
     for item in plan['profiles']:
-        wanted['%s-fx-%s' % (make_pack.PRODUCTION, item['name'])] = item['env']
+        wanted['%s-fx-%s' % (make_pack.BASE, item['name'])] = item['env']
     for name, env in wanted.items():
         if name not in data['profiles']:
             twin = copy.deepcopy(data['profiles'][make_pack.PRODUCTION])
@@ -151,7 +151,8 @@ class ThePack(unittest.TestCase):
         except ImportError:
             self.skipTest('the integration scaffolding is not in this tree')
         self.assertEqual(make_pack.PRODUCTION, make_fusion_profiles.PARENT)
-        self.assertEqual(make_fusion_profiles.NAMESPACE, make_pack.PRODUCTION + '-fx-')
+        self.assertEqual(make_pack.BASE, make_fusion_profiles.BASE)
+        self.assertEqual(make_fusion_profiles.NAMESPACE, make_pack.BASE + '-fx-')
 
 
 class TheManifest(unittest.TestCase):
