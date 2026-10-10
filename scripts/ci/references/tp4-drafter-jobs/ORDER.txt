@@ -15,6 +15,8 @@
 # NEEDS D-T2-b16-bf8 <- B1-build-b16 D-T1-control
 # NEEDS D-T4-b32-bf8 <- B2-build-b32 D-T1-control
 # NEEDS D-T3-dedf-bf16 <- B0-build-control D-T1-control
+# NEEDS D-T5-lookup <- B0-build-control D-T1-control
+# D-T5 (lookup) is a tau arm on the control image: the served drafter with QWEN_FAST_LOOKUP_DRAFT=n3m12 (docs/tp4-lookup.md), judged by the same pair report and the same GO rule as the others. It is MEASUREMENT ONLY here: no D-Q job is attached to it. A lookup GO is a tau finding for the owner; the timing of its host cost is tp4-lookup-jobs' (TL1-TL4), and engine reuse (QWEN_FAST_PARKED_ENGINES) refuses the lookup (a rebound engine attaches none), so serving it needs that pairing designed first.
 # D-Q (the qualification of the b16 arm) runs only when D-T2 returns GO from drafter_pair_report.py.
 # D-T4 (b32) is MEASUREMENT ONLY (the tau lab): its licence is a hub metadata field with no LICENSE file and part of its training prompts' licence is unstated, so no D-Q job is attached to it; a b32 GO is a tau finding for the owner, and serving it needs a separate owner licence decision first. The b32 image is never pushed.
 # A bf16 GO (D-T3) CANNOT be qualified in this window: no gate profile pairs bf16 with the production 8 x 262k prefix shape (tp4-dbf16-jobs holds 131k-window profiles and a timing twin only, and the bf16 weights
@@ -25,8 +27,8 @@
 # both runs launched clean (the container log showed the arm's own markers; the lab refuses otherwise), asked the same questions (profile, seed, max_tokens, data) and carried the right image tags. The control's A3 PASS/FAIL is reported beside the verdict as an annotation (it compares with an older stack); a control A3 FAIL still stops the control arm after A3 and voids that window's tau arms.
 # NO-GO for adopting an arm: any stall, any text difference between arms, any audit mismatch, or a pooled lower bound not above 1.00. A GO moves nothing by itself: production requalification (3-6 window-hours), a new base image and the owner's decision follow.
 # TIME (sized from the measured W1-window job times: status+rescan+reset 4, image build 22, audited attach 17-19, one eight-user hang shape 13-15, timed smoke 15; a job's tests add to its attach; Q2 is an ESTIMATE, nothing like it was measured):
-#   X0 6, B0, B1 and B2 30 each on the build host (no card), tau arms 90 + 85 + 85 + 85 = 345 min = 5.8 h (each arm's deadline 80-85 min, about 1.3-1.4 h with the container load), Z 5.
-#   A GO arm's qualification 290 min = 4.8 h (Q1 40, Q2 45, Q3 25, Q4 5 x 15, Q5 25, Q6 4 x 20). Cards: tau only 5.9 h; with a qualification 10.8 h; add 1.5 h of build-host time.
+#   X0 6, B0, B1 and B2 30 each on the build host (no card), tau arms 90 + 85 + 85 + 85 + 85 = 430 min = 7.2 h (each arm's deadline 80-85 min, about 1.3-1.4 h with the container load), Z 5.
+#   A GO arm's qualification 290 min = 4.8 h (Q1 40, Q2 45, Q3 25, Q4 5 x 15, Q5 25, Q6 4 x 20). Cards: tau only 7.3 h; with a qualification 12.1 h; add 1.5 h of build-host time.
 #   If the qualification does not fit what is left of the combined window, it moves to a follow-on window: the tau verdict is the first deliverable.
 X0-status-rescan stop tp4-drafter-1 6
 B0-build-control stop tp4-drafter-1 30
@@ -36,6 +38,7 @@ D-T1-control soft tp4-drafter-1 90
 D-T2-b16-bf8 soft tp4-drafter-b16-1 85
 D-T3-dedf-bf16 soft tp4-drafter-1 85
 D-T4-b32-bf8 soft tp4-drafter-b32-1 85
+D-T5-lookup soft tp4-drafter-1 85
 D-Q1-s1-audited-smoke go-arm-only tp4-drafter-b16-1 40
 D-Q2-bringup-matrix go-arm-only tp4-drafter-b16-1 45
 D-Q3-singles-quad-audits-4live go-arm-only tp4-drafter-b16-1 25

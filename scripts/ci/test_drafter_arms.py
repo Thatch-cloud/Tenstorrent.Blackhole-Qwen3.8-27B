@@ -24,7 +24,7 @@ with open(os.path.join(HERE, 'qwen_c2_profiles.json'), encoding='utf-8') as _han
 NAMES = sorted(PROFILES['profiles'])
 FOLDER = os.path.join(HERE, 'references', 'tp4-drafter-jobs')
 BASE = 'c2-packed-tp4'
-CANDIDATE_IMAGES = {'b16-bf8': 'tp4-drafter-b16-1', 'b32-bf8': 'tp4-drafter-b32-1', 'dedf-bf16': 'tp4-drafter-1'}
+CANDIDATE_IMAGES = {'b16-bf8': 'tp4-drafter-b16-1', 'b32-bf8': 'tp4-drafter-b32-1', 'dedf-bf16': 'tp4-drafter-1', 'lookup': 'tp4-drafter-1'}
 
 
 class ArmProfileTests(unittest.TestCase):
@@ -61,6 +61,62 @@ class ArmProfileTests(unittest.TestCase):
         self.assertNotIn('gate_only', document['profiles'][name] and [key for key in document['profiles'][name]
                                                                        if document['profiles'][name][key] is True])
 
+    def test_the_lookup_arm_adds_the_lookup_policy_to_the_serving_profile(self):
+        import prompt_lookup
+        name, document, added = self.added('lookup')
+        self.assertEqual(name, BASE + '+taulab+lookup')
+        self.assertEqual(added, dict(QWEN_FAST_PACKED_AUDIT='1', QWEN_FAST_PHASE_TIMING='1', QWEN_FAST_LOOKUP_DRAFT='n3m12'))
+        self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document, 'lookup'), [])
+        self.assertIsNot(document['profiles'][name].get('gate_only'), True)
+        # the policy the arm names is one prompt_lookup parses (a malformed one raises at the first request, never at the boot), the one the
+        # smoke arms and docs/tp4-lookup.md run, and the served drafter is the control's
+        self.assertEqual(repr(prompt_lookup.parse_policy(lab.LOOKUP_POLICY)), 'n3m12')
+        self.assertEqual(lab.LOOKUP_FLAG, prompt_lookup.LOOKUP_FLAG)
+        self.assertEqual(lab.DRAFTER_ARMS['lookup']['manifest'], lab.DRAFTER_ARMS['control']['manifest'])
+        self.assertNotIn('QWEN_DRAFTER_MANIFEST', document['profiles'][name]['env'])
+        self.assertNotIn(prompt_lookup.LOOKUP_FLAG, PROFILES['profiles'][BASE]['env'], 'the control arm carries no lookup')
+
+    def test_the_lookup_module_is_in_both_image_copy_lists(self):
+        # the arm runs the control image: the lookup must already be in it (a scripts/ci file reaches an image only through BOTH lists)
+        root = os.path.join(HERE, '..', '..', 'docker')
+        with open(os.path.join(root, 'qwen-fast-serving.Dockerfile'), encoding='utf-8') as handle:
+            self.assertIn('COPY scripts/ci/prompt_lookup.py /experiment-scripts/ci/', handle.read().splitlines())
+        with open(os.path.join(root, 'qwen-c2-overlay.txt'), encoding='utf-8') as handle:
+            self.assertIn('scripts/ci/prompt_lookup.py', handle.read().splitlines())
+
+    def test_the_contract_and_the_admission_boot_the_lookup_arm(self):
+        import packed_any_admission as admission
+        import serving_c2_contract as contract
+        import test_c2_packed_tp4_profiles as profile_tests
+        name, document = lab.derive_profile(PROFILES, BASE, 'lookup')
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, 'profiles.json')
+        with open(path, 'w') as handle:
+            json.dump(document, handle)
+        profile = contract.load_profile(path, name)
+        environ = contract.apply_environment(profile, {})
+        self.assertEqual(environ['QWEN_FAST_LOOKUP_DRAFT'], 'n3m12')
+        for check in (contract.parked_problems, contract.drafter_problems, contract.levern_problems, contract.mesh_problems,
+                      contract.sticky_problems, contract.prefix_reuse_problems, contract.multi_problems, contract.traffic_waiver_problems):
+            self.assertEqual(check(profile), [], check.__name__)
+        over_image = dict(profile_tests.image_env(), **document['profiles'][name]['env'])
+        self.assertEqual(admission.width(over_image), 4)
+        self.assertEqual(admission.check_environment(over_image, profile_tests.M3), [])
+
+    def test_the_lookup_arm_refuses_a_base_that_runs_engine_reuse(self):
+        import serving_fast_policy as policy
+        reuse = copy.deepcopy(PROFILES)
+        reuse['profiles'][BASE]['env']['QWEN_FAST_PARKED_ENGINES'] = '1'
+        with self.assertRaisesRegex(lab.LabError, 'engine reuse'):
+            lab.derive_profile(reuse, BASE, 'lookup')
+        # the other arms and the lab as it was are not the lookup's business
+        self.assertEqual(lab.derive_profile(reuse, BASE, 'dedf-bf16')[0], BASE + '+taulab+dedf-bf16')
+        self.assertEqual(lab.derive_profile(reuse, BASE)[0], BASE + '+taulab')
+        # and the contract's own rule is the reason: the pair is refused at boot
+        self.assertTrue(any('QWEN_FAST_LOOKUP_DRAFT' in text for text in policy.parked_engine_problems(
+            {'QWEN_FAST_PARKED_ENGINES': '1', 'QWEN_FAST_LOOKUP_DRAFT': 'n3m12'}, 8)))
+
     def test_the_arm_flags_are_arithmetic_only_for_their_own_arm(self):
         name, document = lab.derive_profile(PROFILES, BASE, 'dedf-bf16')
         # Judged without the arm (the lab as it was), the same derived profile is an arithmetic change; so is another arm's flag.
@@ -69,6 +125,10 @@ class ArmProfileTests(unittest.TestCase):
         self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document, 'b32-bf8'), ['QWEN_FAST_DRAFTER_BF16'])
         document['profiles'][name]['env']['QWEN_FAST_QUAD_DRAFT'] = '1' if PROFILES['profiles'][BASE]['env'].get('QWEN_FAST_QUAD_DRAFT') != '1' else '0'
         self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document, 'dedf-bf16'), ['QWEN_FAST_QUAD_DRAFT'])
+        looked, document = lab.derive_profile(PROFILES, BASE, 'lookup')
+        self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document), ['QWEN_FAST_LOOKUP_DRAFT'])
+        self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document, 'dedf-bf16'), ['QWEN_FAST_LOOKUP_DRAFT'])
+        self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document, 'lookup'), [])
 
     def test_what_is_refused(self):
         with self.assertRaises(lab.LabError):
@@ -77,6 +137,10 @@ class ArmProfileTests(unittest.TestCase):
         clash['profiles'][BASE]['env']['QWEN_FAST_DRAFTER_BF16'] = '0'
         with self.assertRaises(lab.LabError):
             lab.derive_profile(clash, BASE, 'dedf-bf16')
+        other = copy.deepcopy(PROFILES)
+        other['profiles'][BASE]['env']['QWEN_FAST_LOOKUP_DRAFT'] = 'n2m4'
+        with self.assertRaises(lab.LabError):
+            lab.derive_profile(other, BASE, 'lookup')
         gated = copy.deepcopy(PROFILES)
         gated['profiles'][BASE]['gate_only'] = True
         with self.assertRaises(lab.LabError):
@@ -106,6 +170,7 @@ class LabRuleTests(unittest.TestCase):
         self.assertFalse(lab.is_production_run('r/tt-vllm:qwen38-c2-tp4-serve-10', False, 'b16-bf8'))
         self.assertFalse(lab.is_production_run('r/tt-vllm:qwen38-c2-tp4-serve-10', False, 'b32-bf8'))
         self.assertFalse(lab.is_production_run('r/tt-vllm:qwen38-c2-tp4-serve-10', False, 'dedf-bf16'))
+        self.assertFalse(lab.is_production_run('r/tt-vllm:qwen38-c2-tp4-serve-10', False, 'lookup'))
         self.assertFalse(lab.is_production_run('r/tt-vllm:qwen38-c2-tp4-cand-1', False))
         self.assertIsNone(lab.production_audits('r/tt-vllm:qwen38-c2-tp4-cand-1'))
 
@@ -119,7 +184,7 @@ class LabRuleTests(unittest.TestCase):
         self.assertEqual(lab.select_arms(every, None), list(lab.ARMS))
         self.assertEqual(lab.select_arms(every, 'control'), ['A3', 'A1', 'A2', 'A4', 'A5'], 'the calibration runs first')
         self.assertEqual(lab.select_arms('A1 A2 A3', 'control'), ['A3', 'A1', 'A2'])
-        for arm in ('b16-bf8', 'b32-bf8', 'dedf-bf16'):
+        for arm in ('b16-bf8', 'b32-bf8', 'dedf-bf16', 'lookup'):
             self.assertEqual(lab.select_arms(every, arm), ['A1', 'A2', 'A4', 'A5'])
             self.assertEqual(lab.select_arms('A1 A2', arm), ['A1', 'A2'])
             with self.assertRaisesRegex(lab.LabError, 'control arm'):
@@ -145,10 +210,62 @@ class LabRuleTests(unittest.TestCase):
         self.assertTrue(lab.launched_problems(['[QWEN-C2] profile %s' % control] + good[1:], control, 'control'))
         self.assertEqual(lab.launched_problems(['[QWEN-C2] profile %s' % control], control), [])
 
+    def test_the_lookup_arm_has_no_startup_marker_and_the_canary_holds_it_to_its_lines(self):
+        import prompt_lookup
+        derived = BASE + '+taulab+lookup'
+        self.assertEqual(lab.launched_problems(['[QWEN-C2] profile %s' % derived], derived, 'lookup'), [])
+        self.assertTrue(lab.launched_problems(['[QWEN-C2] profile %s' % derived, '[DRAFTER_BF16] engaged'], derived, 'lookup'))
+        self.assertTrue(lab.launched_problems(['[QWEN-C2] profile %s' % derived, '[DRAFTER_MANIFEST] b16-98759a49 in force: x/y'], derived, 'lookup'))
+        # the literals are prompt_lookup's own
+        self.assertEqual((lab.LOOKUP_ENGAGED, lab.LOOKUP_ROUND), (prompt_lookup.ENGAGED, prompt_lookup.ROUND_MARKER))
+        engaged = '%s policy=n3m12 request=cmpl-1 history=900' % prompt_lookup.ENGAGED
+        rounds = '%s request=cmpl-1 position=900 source=lookup match=14 offered=15 proposed=15 committed=7' % prompt_lookup.ROUND_MARKER
+        self.assertIsNone(lab.lookup_problem('\n'.join(['noise', engaged, rounds]), 'lookup'))
+        self.assertIn('never shows it engaged', lab.lookup_problem('noise', 'lookup'))
+        self.assertIn('never shows it engaged', lab.lookup_problem(engaged.replace('n3m12', 'n2m4') + '\n' + rounds, 'lookup'))
+        self.assertIn('no round line', lab.lookup_problem(engaged, 'lookup'))
+        # any other arm shows neither line
+        for arm in ('control', 'b16-bf8', 'b32-bf8', 'dedf-bf16'):
+            self.assertIsNone(lab.lookup_problem('noise', arm), arm)
+            self.assertIn('does not ask for prompt lookup', lab.lookup_problem(engaged, arm), arm)
+            self.assertIn('does not ask for prompt lookup', lab.lookup_problem(rounds, arm), arm)
+
+    def test_the_lookup_canary_waits_for_the_lines_the_arm_needs_and_not_for_the_ones_it_forbids(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, 'server.log')
+        now = [0.0]
+        slept = []
+
+        def sleep(seconds):
+            slept.append(seconds)
+            now[0] += seconds
+            if len(slept) == 2:           # the log follower catches up on the second wait
+                with open(path, 'a') as handle:
+                    handle.write('[LOOKUP-DRAFT] engaged policy=n3m12 request=r history=5\n'
+                                 '[LOOKUP-ROUND] request=r position=5 source=dflash2 match=0 offered=0 proposed=0 committed=3\n')
+        check = lab.with_lookup_check(lambda: None, path, 'lookup', clock=lambda: now[0], sleep=sleep, wait=60)
+        self.assertIsNone(check())
+        self.assertEqual(len(slept), 2)
+        # never arriving: the problem after the wait
+        os.remove(path)
+        now[0] = 0.0
+        self.assertIn('never shows it engaged', lab.with_lookup_check(lambda: None, path, 'lookup', clock=lambda: now[0],
+                                                                      sleep=lambda seconds: now.__setitem__(0, now[0] + seconds), wait=20)())
+        # another arm does not wait, and a lookup line is its problem at once; the base canary's own problem comes first
+        slept[:] = []
+        self.assertIsNone(lab.with_lookup_check(lambda: None, path, 'control', clock=lambda: now[0], sleep=sleep, wait=60)())
+        with open(path, 'w') as handle:
+            handle.write('[LOOKUP-DRAFT] engaged policy=n3m12 request=r history=5\n')
+        self.assertIn('does not ask for prompt lookup', lab.with_lookup_check(lambda: None, path, 'control', clock=lambda: now[0], sleep=sleep, wait=60)())
+        self.assertEqual(slept, [])
+        self.assertEqual(lab.with_lookup_check(lambda: 'no rounds', path, 'lookup', clock=lambda: now[0], sleep=sleep, wait=60)(), 'no rounds')
+
     def test_the_report_names_the_arm_and_stays_public(self):
         public = dict(drafter=dict(arm='b16-bf8', bf16=False), label='non-production', verdict='NO-GO')
         report.assert_public(public)
         report.assert_public(dict(drafter=dict(arm='b32-bf8', bf16=False), label='non-production', verdict='NO-GO'))
+        report.assert_public(dict(drafter=dict(arm='lookup', bf16=False), label='non-production', verdict='NO-GO'))
         with self.assertRaises(report.PrivacyError):
             report.assert_public(dict(drafter=dict(arm='0xSomeone/private-name')))
 
@@ -289,6 +406,10 @@ class PairReportTests(unittest.TestCase):
         other = self.run_pair(*synthetic(gain=1.2), arm='dedf-bf16', candidate_extra=dict(image_tag='tp4-drafter-b16-1'))
         self.assertEqual(other['gates']['matched'], 'FAIL')
         self.assertEqual(self.run_pair(*synthetic(gain=1.2), arm='dedf-bf16')['gates']['matched'], 'PASS')
+        # the lookup is a flag on the control image too
+        other = self.run_pair(*synthetic(gain=1.2), arm='lookup', candidate_extra=dict(image_tag='tp4-drafter-b16-1'))
+        self.assertEqual(other['gates']['matched'], 'FAIL')
+        self.assertEqual(self.run_pair(*synthetic(gain=1.2), arm='lookup')['gates']['matched'], 'PASS')
         # b32 is its own drafter image too: the control's image, or another candidate's, fails the pair
         for image in ('tp4-drafter-1',):
             self.assertEqual(self.run_pair(*synthetic(gain=1.2), arm='b32-bf8', candidate_extra=dict(image_tag=image))['gates']['matched'],
@@ -300,7 +421,10 @@ class PairReportTests(unittest.TestCase):
             public = self.run_pair(*synthetic(gain=1.15), arm=arm)
             self.assertEqual((public['verdict'], set(public['gates'].values())), ('GO', {'PASS'}), arm)
             self.assertEqual(self.run_pair(*synthetic(gain=1.0), arm=arm)['verdict'], 'NO-GO', arm)
-        self.assertEqual(pair_report.CANDIDATE_ARMS, ('b16-bf8', 'b32-bf8', 'dedf-bf16'))
+        self.assertEqual(pair_report.CANDIDATE_ARMS, ('b16-bf8', 'b32-bf8', 'dedf-bf16', 'lookup'))
+        self.assertEqual(pair_report.SAME_IMAGE_ARMS, ('dedf-bf16', 'lookup'))
+        self.assertEqual(sorted(pair_report.CANDIDATE_ARMS + ('control',)), sorted(lab.DRAFTER_ARMS))
+        self.assertEqual(sorted(pair_report.CANDIDATE_ARMS + ('control',)), sorted(job.TAULAB_DRAFTER_ARMS))
 
     def test_a_diverged_turn_is_not_scored(self):
         control, candidate = synthetic(gain=1.2, diverge=3)
@@ -405,6 +529,51 @@ class LabMainTests(unittest.TestCase):
         self.assertEqual((info['drafter_arm'], info['seed'], info['max_tokens']), ('control', lab.SEED, None))
         self.assertIn('A1', info['data_counts'])
 
+    LOOKUP_LINES = ('[LOOKUP-DRAFT] engaged policy=n3m12 request=%s history=900',
+                    '[LOOKUP-ROUND] request=%s position=900 source=lookup match=14 offered=15 proposed=15 committed=7')
+
+    class LookupEngine(harness.FakeEngine):
+        """The container of the lookup arm: its requests also log the lookup's engaged line and a round line."""
+
+        def stream(self, path, body, timeout, keep):
+            result = harness.FakeEngine.stream(self, path, body, timeout, keep)
+            self.emit([line % result['request_id'] for line in LabMainTests.LOOKUP_LINES])
+            return result
+
+    def test_the_lookup_arm_runs_when_its_lines_show_and_the_run_records_the_arm(self):
+        log = ['[QWEN-C2] profile %s' % self.derived('lookup')]
+        code, out, results, public, engine, _ = self.run_arm('lookup', log, ['--arms', 'A1'], engine=self.LookupEngine())
+        self.assertNotEqual(code, 2, 'nothing at startup shows the lookup, so the startup check cannot refuse it')
+        self.assertTrue(engine.requests)
+        with open(os.path.join(results, 'run.json'), encoding='utf-8') as handle:
+            info = json.load(handle)
+        self.assertEqual((info['drafter_arm'], info['launched_problems']), ('lookup', []))
+        self.assertFalse(info.get('tripped'), info)
+        self.assertNotIn('error', info)
+        with open(os.path.join(results, 'profiles.json'), encoding='utf-8') as handle:
+            derived = json.load(handle)
+        self.assertEqual(derived['profiles'][self.derived('lookup')]['env']['QWEN_FAST_LOOKUP_DRAFT'], 'n3m12')
+        self.assertTrue(any('canary ok' in line for line in out), out)
+
+    def test_a_lookup_arm_whose_lookup_never_engaged_is_stopped_by_the_canary(self):
+        # the flag did not cross into the container (the read-the-launched-argv trap): the arm would measure the control under its name
+        log = ['[QWEN-C2] profile %s' % self.derived('lookup')]
+        with mock.patch.object(lab, 'CANARY_WAIT_SECONDS', 0.05):
+            code, out, results, public, engine, _ = self.run_arm('lookup', log, ['--arms', 'A1'])
+        self.assertEqual(code, 1)
+        with open(os.path.join(results, 'run.json'), encoding='utf-8') as handle:
+            info = json.load(handle)
+        self.assertTrue(info['tripped'], info)
+        self.assertTrue(any('canary' in line and 'never shows it engaged' in line for line in out), out)
+        self.assertLessEqual(len(engine.requests), lab.CANARY_TURNS + 8, 'the lab stops after the canary, not at the end of the arm')
+
+    def test_a_control_whose_log_shows_the_lookup_is_stopped_by_the_canary(self):
+        log = ['[QWEN-C2] profile %s' % self.derived('control')]
+        with mock.patch.object(lab, 'CANARY_WAIT_SECONDS', 0.05):
+            code, out, results, public, engine, _ = self.run_arm('control', log, ['--arms', 'A1'], engine=self.LookupEngine())
+        self.assertEqual(code, 1)
+        self.assertTrue(any('does not ask for prompt lookup' in line for line in out), out)
+
     def test_the_control_calibrates_first_and_a_failed_calibration_stops_the_arms(self):
         log = ['[QWEN-C2] profile %s' % self.derived('control')]
         real = lab.analyze
@@ -453,13 +622,17 @@ class JobKeyTests(unittest.TestCase):
             self.read(C2_TAULAB_DRAFTER_ARM='b16-bf8', C2_TAULAB_ARMS='A1 A3', C2_TAULAB_PAIR_CONTROL='123')
 
     def test_a_candidate_arm_without_its_control_run_is_refused(self):
-        for arm in ('b16-bf8', 'b32-bf8', 'dedf-bf16'):
+        for arm in ('b16-bf8', 'b32-bf8', 'dedf-bf16', 'lookup'):
             with self.assertRaisesRegex(job.JobError, 'PAIR_CONTROL'):
                 self.read(C2_TAULAB_DRAFTER_ARM=arm)
 
     def test_the_pair_control_is_a_run_id_for_a_candidate_only(self):
         outputs = self.read(C2_TAULAB_DRAFTER_ARM='dedf-bf16', C2_TAULAB_PAIR_CONTROL='12345678901', C2_TAULAB_ARMS='A1 A2')
         self.assertEqual((outputs['taulab_drafter_arm'], outputs['taulab_pair_control']), ('dedf-bf16', '12345678901'))
+        outputs = self.read(C2_TAULAB_DRAFTER_ARM='lookup', C2_TAULAB_PAIR_CONTROL='12345678901')
+        self.assertEqual((outputs['taulab_drafter_arm'], outputs['taulab_arms']), ('lookup', 'A1 A2 A4 A5'))
+        with self.assertRaisesRegex(job.JobError, 'A3'):
+            self.read(C2_TAULAB_DRAFTER_ARM='lookup', C2_TAULAB_ARMS='A1 A3', C2_TAULAB_PAIR_CONTROL='123')
         for bad in ({'C2_TAULAB_DRAFTER_ARM': 'nonsense'},
                     {'C2_TAULAB_DRAFTER_ARM': 'b16-bf8', 'C2_TAULAB_PAIR_CONTROL': 'run-1'},
                     {'C2_TAULAB_PAIR_CONTROL': '123'},
@@ -522,13 +695,13 @@ class TemplateTests(unittest.TestCase):
             outputs = job.read_job(self.pushable(row[0]), NAMES, meshes=job.profile_meshes())
             self.assertEqual(outputs['cards'], 'quad', row[0])
 
-    def test_the_four_tau_arms(self):
+    def test_the_tau_arms(self):
         arms = {}
         for row in self.rows():
             if row[0].startswith('D-T'):
                 outputs = job.read_job(self.pushable(row[0]), NAMES, meshes=job.profile_meshes())
                 arms[row[0]] = outputs
-        self.assertEqual(sorted(entry['taulab_drafter_arm'] for entry in arms.values()), ['b16-bf8', 'b32-bf8', 'control', 'dedf-bf16'])
+        self.assertEqual(sorted(entry['taulab_drafter_arm'] for entry in arms.values()), ['b16-bf8', 'b32-bf8', 'control', 'dedf-bf16', 'lookup'])
         for name, outputs in arms.items():
             self.assertIn('taulab', outputs['actions'].split(), name)
             if outputs['taulab_drafter_arm'] == 'control':
@@ -556,10 +729,10 @@ class TemplateTests(unittest.TestCase):
         text = open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8').read()
         qualification = sum(minutes for name, minutes in rows.items() if name.startswith('D-Q'))
         taus = sum(minutes for name, minutes in rows.items() if name.startswith('D-T'))
-        self.assertEqual((qualification, taus), (290, 345))
+        self.assertEqual((qualification, taus), (290, 430))
         self.assertIn('290 min = 4.8 h', text)
-        self.assertIn('90 + 85 + 85 + 85 = 345 min = 5.8 h', text)
-        for name in ('D-T1-control', 'D-T2-b16-bf8', 'D-T3-dedf-bf16', 'D-T4-b32-bf8'):
+        self.assertIn('90 + 85 + 85 + 85 + 85 = 430 min = 7.2 h', text)
+        for name in ('D-T1-control', 'D-T2-b16-bf8', 'D-T3-dedf-bf16', 'D-T4-b32-bf8', 'D-T5-lookup'):
             deadline = int(self.parse(name + '.env')['C2_TAULAB_DEADLINE'])
             self.assertGreater(rows[name], deadline, 'the job estimate holds the deadline and the reset')
             self.assertLessEqual(deadline, 85)
@@ -580,6 +753,29 @@ class TemplateTests(unittest.TestCase):
         self.assertIn('owner licence decision', text)
         # the manifest a template names is the one the arm uses
         self.assertEqual(lab.DRAFTER_ARMS['b32-bf8']['manifest'], build['C2_DRAFTER_MANIFEST'])
+
+    def test_the_lookup_arm_is_a_same_image_tau_arm_with_no_qualification(self):
+        tau = self.parse('D-T5-lookup.env')
+        control = self.parse('D-T1-control.env')
+        self.assertEqual((tau['C2_IMAGE_TAG'], tau['C2_TAULAB_DRAFTER_ARM'], tau['C2_TAULAB_PROFILE']),
+                         (control['C2_IMAGE_TAG'], 'lookup', control['C2_TAULAB_PROFILE']), 'the control image and profile: a flag only')
+        self.assertNotIn('C2_DRAFTER_MANIFEST', tau)
+        self.assertNotIn('A3', tau['C2_TAULAB_ARMS'].split())
+        rows = dict((row[0], row) for row in self.rows())
+        self.assertEqual(rows['D-T5-lookup'][1:3], ['soft', 'tp4-drafter-1'])
+        names = [row[0] for row in self.rows()]
+        self.assertLess(names.index('D-T1-control'), names.index('D-T5-lookup'))
+        self.assertLess(names.index('D-T5-lookup'), names.index('D-Q1-s1-audited-smoke'))
+        with open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8') as handle:
+            text = handle.read()
+        self.assertIn('# NEEDS D-T5-lookup <- B0-build-control D-T1-control', text)
+        self.assertIn('MEASUREMENT ONLY here: no D-Q job is attached to it', text)
+        # the arm's env is the one the template's header names, and the lab's flag is the one docs/tp4-lookup.md documents
+        with open(os.path.join(FOLDER, 'D-T5-lookup.env'), encoding='utf-8') as handle:
+            header = handle.read()
+        self.assertIn('QWEN_FAST_LOOKUP_DRAFT=n3m12', header)
+        self.assertEqual(dict(lab.DRAFTER_ARMS['lookup']['env']), {'QWEN_FAST_LOOKUP_DRAFT': 'n3m12'})
+        self.assertIn("'[LOOKUP-DRAFT] engaged policy=n3m12'", header)
 
     def test_a_bf16_go_is_not_routed_to_a_pack_that_cannot_qualify_it(self):
         text = open(os.path.join(FOLDER, 'ORDER.txt'), encoding='utf-8').read()

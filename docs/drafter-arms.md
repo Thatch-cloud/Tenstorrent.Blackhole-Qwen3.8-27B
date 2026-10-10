@@ -58,7 +58,7 @@ suite. Instead:
   laptop. The b16 manifest in this branch was produced that way.
 
 **Tau lab, drafter mode.** The W-T1 tau lab (`c2_tau_lab.py`, `tau_lab_report.py`, the `taulab` action of `qwen-c2-serving.yml`) is ported from
-`tp4/tau-lab`. New: `--drafter-arm` (job key `C2_TAULAB_DRAFTER_ARM`) with four arms, selected by the image (its tag carries the manifest's fixtures) and by the derived
+`tp4/tau-lab`. New: `--drafter-arm` (job key `C2_TAULAB_DRAFTER_ARM`) with five arms, selected by the image (its tag carries the manifest's fixtures) and by the derived
 profile, which adds only that arm's drafter-only flags on top of the production profile and the lab's two log flags:
 
 | arm | image | flags added | log marker the lab requires (it refuses and exits 2 before sending anything without it) |
@@ -67,6 +67,11 @@ profile, which adds only that arm's drafter-only flags on top of the production 
 | `b16-bf8` | candidate manifest | `QWEN_DRAFTER_MANIFEST` | `[DRAFTER_MANIFEST] ... in force` |
 | `b32-bf8` | candidate manifest (measurement only) | `QWEN_DRAFTER_MANIFEST` | `[DRAFTER_MANIFEST] ... in force` |
 | `dedf-bf16` | default manifest | `QWEN_FAST_DRAFTER_BF16=1` | `[DRAFTER_BF16] engaged` |
+| `lookup` | default manifest | `QWEN_FAST_LOOKUP_DRAFT=n3m12` | none at startup (the lookup logs per request); the lab's canary after the first turns requires `[LOOKUP-DRAFT] engaged policy=n3m12` and a `[LOOKUP-ROUND]` line, and stops the lab without them |
+
+The `lookup` arm (D-T5, docs/tp4-lookup.md) is the served drafter with a host-side prompt lookup over each user's own token history replacing its proposal rows on the rounds
+the policy picks. It runs on the control image like `dedf-bf16`, is judged by the same GO rule (equal image tags are its `matched` clause), and is measurement only: it cannot run on a profile
+with engine reuse (a rebound engine attaches no lookup; the lab refuses such a base), and what it costs a round is the timing pack's (`tp4-lookup-jobs`).
 
 The drafter flags move the proposals and never the text, so they are the one arithmetic difference an arm may add (the lab's check refuses any
 other). The refusal is real: with a drafter arm, a container log that does not show the arm's own markers (the wrong image tag, a bf16 switch that never engaged) ends the lab before
@@ -98,7 +103,7 @@ Any FAIL is NO-GO; no FAIL with something unestablished is NOT_ESTABLISHED; othe
 The job reader also refuses a candidate arm that names no `C2_TAULAB_PAIR_CONTROL`, so a forgotten edit cannot leave a window without a verdict. The summary holds aggregates only (the report's public-words check).
 
 **Card gates** (`scripts/ci/references/tp4-drafter-jobs/`, parameterised templates; no private detail): X0 status/rescan, B0, B1 and B2 builds (control image and
-the two candidate images from the same commit), the four tau arms D-T1 (control, with A3 first), D-T2 (b16-bf8), D-T3 (dedf-bf16), D-T4 (b32-bf8, measurement only), 80-85 min deadlines each (about 5.8 h for the four),
+the two candidate images from the same commit), the five tau arms D-T1 (control, with A3 first), D-T2 (b16-bf8), D-T3 (dedf-bf16), D-T4 (b32-bf8, measurement only), D-T5 (lookup, measurement only), 80-85 min deadlines each (about 7.2 h for the five),
 and, **for the b16 arm if it is a GO only** (b32 has none), the qualification (about 4.8 h, sized from the W1 window's measured job times; if it does not fit the combined window it moves to a follow-on): S1 audited smoke (8 x 262k, every audit incl. the draft singles and quad audits), bringup + matrix against the tracked
 v235 texts, the singles/quad audits on the four-live paths, five consecutive hang-shape completions, the 8 x 262k attach, a short ABAB against the control image, and Z.
 Kill rules are in each template and `ORDER.txt` (machine-greppable `# NEEDS` lines). **A bf16 GO has no qualification path in this pack**: no gate profile
