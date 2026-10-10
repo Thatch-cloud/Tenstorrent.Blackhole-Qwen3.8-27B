@@ -64,6 +64,8 @@ EMBEDDING = [
     OPS / 'quad_draft_probe' / 'run_card_b.sh',
     OPS / 'k64j' / 'run_card_b.sh',
     OPS / 'k64j' / 'build_k64j.sh',
+    OPS / 'sdpa_prefill_oneq' / 'build_k64j_oq.sh',
+    OPS / 'sdpa_prefill_oneq' / 'run_card_m_oq.sh',
     OPS / 'kernels-batch64' / 'attn_prep' / 'build-and-test-b64.sh',
     OPS / 'kernels-batch64' / 'nlp_concat_heads_decode' / 'build-and-test-b64.sh',
 ]
@@ -92,6 +94,7 @@ LAUNCH = {
     OPS / 'k64j_probe' / 'run_card_b.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
     OPS / 'quad_draft_probe' / 'run_card_b.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
     OPS / 'k64j' / 'run_card_b.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
+    OPS / 'sdpa_prefill_oneq' / 'run_card_m_oq.sh': r'^timeout -k 30 "\$timeout_s" "\$\{argv\[@\]\}"',
     OPS / 'kernels-batch64' / 'attn_prep' / 'build-and-test-b64.sh': r'^docker run -d --name "\$CONTAINER"',
     OPS / 'kernels-batch64' / 'nlp_concat_heads_decode' / 'build-and-test-b64.sh': r'^timeout 900 docker run',
 }
