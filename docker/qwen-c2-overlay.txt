@@ -523,6 +523,8 @@ scripts/ci/write_packed_lean.py
 scripts/ci/batched_reads_tp.py
 # WPH: WPH-4, imported lazily under QWEN_FAST_TP4_HOSTGAP_LOG by verify_prestage.hostgap_span, packed_verifier and the drafts' coordinator (spans, wrappers on the host calls, the probe)
 scripts/ci/hostgap_instr.py
+# WPP: the lever: strict flags, the wrapper over the graft's _qwen_pf_program_config, the binary check, the audit (imported by tp_addresses.install when the flag is set; its import of tp_shapes is already in the image)
+scripts/ci/sdpa_pf_oneq_tp.py
 # fusion-wp end
 
 # tp4/upload-p0 (docs/tp4-fabric-upload.md section 5, P0 and P1a): the engine-start upload levers. qwen_device_zeros fills the KV pool's and the buffer pool's big zero buffers on the card

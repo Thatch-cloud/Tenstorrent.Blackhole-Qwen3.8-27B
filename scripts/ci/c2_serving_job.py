@@ -58,6 +58,9 @@ Keys (every one optional but C2_IMAGE_TAG):
                       serves and what a rollback moves). Default, rendered empty: nothing is baked, the default is qwen_c2_profiles.json's
                       (production's four seats). Needs the build action, C2_CARDS=quad and a four-card (P150x4), not gate_only, profile; a
                       profile with an owner_traffic_waiver (serving_c2_contract.TRAFFIC_WAIVER) is baked only once its decision reads APPROVED
+  C2_BAKE_GRAFT       build only: the op graft the image bakes. Default, rendered empty: K64j (every earlier image). K64j-OQ: K64j plus the prefill SDPA's oneq edits
+                      (optimisation/ttnn-op/sdpa_prefill_oneq/build_k64j_oq.sh, ~/opgraft-K64j-OQ), which QWEN_FAST_SDPA_PF_ONEQ=1 needs; the packed-any admission
+                      serves on it and, in a gate boot, on K64j's evidence (packed_any_admission.equivalent). Needs the build action
   C2_DRAFTER_CANDIDATES  build only: the pinned drafter candidate ids (scripts/ci/drafter_checkpoints.json) whose bytes the image build stages beside the default
                       checkpoint (build-c2-serving-image.sh). Space- or comma-separated; every id must be a candidate of the table (the default is never staged);
                       needs the build action. Default, rendered empty: only the placeholder (drafter_checkpoint.py, docs/tp4-combined-window.md)
@@ -620,6 +623,7 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
         if problems:
             raise JobError(problems[0])
     bake_profile = read_bake(values, actions, cards, root)
+    bake_graft = read_bake_graft(values, actions)
     drafter_manifest = read_drafter_manifest(values, actions, root)
     if drafter_manifest and 'push' in actions:
         raise JobError('C2_DRAFTER_MANIFEST names a candidate drafter that is not qualified: its image is not pushed')
@@ -633,7 +637,7 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
                    gate_memory_prompt=str(memory_prompt), gate_memory_users=str(memory_users), replay_profile=replay_profile,
                    replay_served_model=replay_served_model, replay_budget_smoke=budget_smoke, cardm_harness=cardm_harness, cardm_args=cardm_args,
-                   cardm_env=cardm_env, bake_default_profile=bake_profile, drafter_candidates=drafter_candidates, box_minutes=box_minutes, drafter_manifest=drafter_manifest, tt_grid=tt_grid,
+                   cardm_env=cardm_env, bake_default_profile=bake_profile, bake_graft=bake_graft, drafter_candidates=drafter_candidates, box_minutes=box_minutes, drafter_manifest=drafter_manifest, tt_grid=tt_grid,
                    telemetry=telemetry, telemetry_ms=telemetry_ms)
     outputs.update(s2)
     outputs.update(prefix)
@@ -721,6 +725,21 @@ def read_drafter_manifest(values, actions, root=ROOT):
         raise JobError('C2_DRAFTER_MANIFEST is applied at build time: C2_ACTIONS has no build')
     if not os.path.isfile(os.path.join(root, 'scripts', 'ci', 'references', 'drafter-manifests', name + '.json')):
         raise JobError('C2_DRAFTER_MANIFEST %r is not a manifest under scripts/ci/references/drafter-manifests' % name)
+    return name
+
+
+BAKE_GRAFTS = ('K64j-OQ',)
+
+
+def read_bake_graft(values, actions):
+    """C2_BAKE_GRAFT (module docstring): '' (K64j) or 'K64j-OQ', or JobError. The build script reads the same name from the environment."""
+    name = values.get('C2_BAKE_GRAFT', '')
+    if not name:
+        return ''
+    if name not in BAKE_GRAFTS:
+        raise JobError('C2_BAKE_GRAFT must be empty (K64j) or one of %s, got %r' % (', '.join(BAKE_GRAFTS), name))
+    if 'build' not in actions:
+        raise JobError('C2_BAKE_GRAFT is baked at build time: C2_ACTIONS has no build')
     return name
 
 

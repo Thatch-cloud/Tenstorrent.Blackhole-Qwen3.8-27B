@@ -302,6 +302,8 @@ jobs:
           # WPH
           python -B -m unittest test_prestage_diff test_write_packed_lean test_batched_reads_tp test_hostgap_instr test_hostgap_wph
           python -B -m unittest discover -s optimisation/ttnn-op/batched_reads -p 'test_*.py'
+          # WPP
+          python -B -m unittest test_sdpa_oneq_factory test_sdpa_oneq_build test_sdpa_oneq_card test_sdpa_oneq_tp test_sdpa_oneq_admission
           # fusion-wp end
           bash -n scripts/ci/run-simulator.sh
           bash -n scripts/ci/simulator-suite.sh

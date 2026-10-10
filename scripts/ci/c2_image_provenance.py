@@ -117,6 +117,26 @@ ENVIRONMENT_SUCCESSIONS = {
 # binary; a replaced or rebuilt ~/opgraft-K64i would otherwise make "keeps all of K64i's strings" vacuous.
 PREVIOUS_GRAFT_LABEL = 'K64i'
 PREVIOUS_GRAFT_TTNNCPP_SHA256 = ENVIRONMENT_SUCCESSIONS['QWEN_FAST_RUNTIME_BINARY_SHA256'][0]
+
+# THE SECOND GRAFT. build-c2-serving-image.sh bakes K64j (the default: everything above) or, with C2_BAKE_GRAFT=K64j-OQ, K64j-OQ: K64j plus the prefill SDPA's oneq
+# edits (optimisation/ttnn-op/sdpa_prefill_oneq/build_k64j_oq.sh). The context holds exactly one of the two directories and verify() holds the image to that one: the
+# same binaries and op directories, its literals (K64j-OQ's carry the two oneq literals as well), the K64i superset, and the runtime pin the image sets - from the
+# v235 gate's K64i value to the graft's own (the reviewed succession of the variant). The default variant IS the constants above.
+OQ_GRAFT_NAME = 'opgraft-K64j-OQ'
+OQ_GRAFT_TTNNCPP_SHA256 = '2b81e28f017ccf0ab50028fbae5eb31dd61cfd8a3159233a1ed785712d024a57'
+OQ_GRAFT_LITERALS = GRAFT_LITERALS + ('[QWEN-SDPA-PF] oneq needs one q chunk per core', '[QWEN-SDPA-PF] oneq=1 q_chunks=')
+OQ_ENVIRONMENT_SUCCESSIONS = {
+    'QWEN_FAST_RUNTIME_BINARY_SHA256': (
+        ENVIRONMENT_SUCCESSIONS['QWEN_FAST_RUNTIME_BINARY_SHA256'][0],
+        OQ_GRAFT_TTNNCPP_SHA256,
+        'graft K64j-OQ replaces K64j (the prefill SDPA\'s oneq edits, flag 0x8 of the per-call chain word): K64j\'s contents byte for byte and K64j\'s QWEN strings '
+        'kept (build_k64j_oq.sh), inert unless QWEN_FAST_SDPA_PF_ONEQ=1; exact never sets the flag, and the card-M sweep holds the oneq program to the stock path '
+        'bit for bit'),
+}
+GRAFT_VARIANTS = {
+    GRAFT_NAME: ('K64j', GRAFT_LITERALS, ENVIRONMENT_SUCCESSIONS),
+    OQ_GRAFT_NAME: ('K64j-OQ', OQ_GRAFT_LITERALS, OQ_ENVIRONMENT_SUCCESSIONS),
+}
 GRAFT_MANIFEST = 'MANIFEST.sha256'
 # sha256sum's lines, as the graft builds write them ((cd $G && find . -type f ! -name MANIFEST.sha256 | sort |
 # xargs sha256sum) > MANIFEST.sha256): the digest, a space, ' ' or '*' for the mode, the ./-relative path.
@@ -369,15 +389,21 @@ def graft_dirs(dockerfile_text):
 
 
 def dockerfile_env(dockerfile_text):
-    """{name: value} every ENV instruction in a Dockerfile sets (KEY=VALUE form, unquoted)."""
+    """{name: value} every ENV instruction in a Dockerfile sets (KEY=VALUE form, unquoted). A ${NAME} in a value is expanded with the DEFAULT of an
+    `ARG NAME=default` line (what docker does with no --build-arg: the Dockerfile's graft args are K64j's); one with no default stays as written."""
     joined = dockerfile_text.replace('\r\n', '\n').replace('\\\n', ' ')
+    defaults = {}
+    for line in joined.split('\n'):
+        if line.startswith('ARG ') and '=' in line:
+            name, _, value = line[4:].strip().partition('=')
+            defaults[name] = value
     env = {}
     for line in joined.split('\n'):
         if line.startswith('ENV '):
             for token in line[4:].split():
                 name, separator, value = token.partition('=')
                 if separator:
-                    env[name] = value
+                    env[name] = re.sub(r'\$\{(\w+)\}', lambda match: defaults.get(match.group(1), match.group(0)), value)
     return env
 
 
@@ -936,7 +962,50 @@ def overlay_destinations(entries, source_shas):
             if not destination.startswith(c2_overlay.PURELIB)}
 
 
-def verify(image, context, models, checkout=None, docker=None, log=print, previous_graft=None):
+def context_graft_name(context):
+    """The graft directory a build context holds: GRAFT_NAME (K64j) or OQ_GRAFT_NAME (K64j-OQ), never both; neither reads as the default (a context built
+    for a test may hold no graft at all)."""
+    present = [name for name in GRAFT_VARIANTS if (Path(context) / name).is_dir()]
+    if len(present) > 1:
+        raise ValueError('the context holds more than one graft (%s): the image bakes exactly one' % ', '.join(present))
+    return present[0] if present else GRAFT_NAME
+
+
+class using_graft(object):
+    """Rebind the module's graft constants (GRAFT_NAME, GRAFT_LABEL, GRAFT_IN_IMAGE, GRAFT_LITERALS, ENVIRONMENT_SUCCESSIONS) to a variant's for the duration of a
+    `with` block, and put them back: every check below reads them at call time. The default variant changes nothing."""
+
+    NAMES = ('GRAFT_NAME', 'GRAFT_LABEL', 'GRAFT_IN_IMAGE', 'GRAFT_LITERALS', 'ENVIRONMENT_SUCCESSIONS')
+
+    def __init__(self, name):
+        if name not in GRAFT_VARIANTS:
+            raise ValueError('unknown graft %r (known: %s)' % (name, ', '.join(sorted(GRAFT_VARIANTS))))
+        self.name = name
+
+    def __enter__(self):
+        module = sys.modules[__name__]
+        self.saved = {key: getattr(module, key) for key in self.NAMES}
+        label, literals, successions = GRAFT_VARIANTS[self.name]
+        values = dict(GRAFT_NAME=self.name, GRAFT_LABEL=label, GRAFT_IN_IMAGE='/opt/qwen-c2/' + self.name, GRAFT_LITERALS=literals,
+                      ENVIRONMENT_SUCCESSIONS=successions)
+        for key, value in values.items():
+            setattr(module, key, value)
+        return self
+
+    def __exit__(self, *exc):
+        module = sys.modules[__name__]
+        for key, value in self.saved.items():
+            setattr(module, key, value)
+        return False
+
+
+def verify(image, context, models, checkout=None, docker=None, log=print, previous_graft=None, graft_name=None):
+    """verify_graft under the graft the context holds (context_graft_name; `graft_name` names it), K64j unless the context holds K64j-OQ."""
+    with using_graft(graft_name or context_graft_name(context)):
+        return verify_graft(image, context, models, checkout, docker, log, previous_graft)
+
+
+def verify_graft(image, context, models, checkout=None, docker=None, log=print, previous_graft=None):
     """Run (a)-(e) (and (i) with a checkout); return (problems, report). previous_graft: the graft
     GRAFT_NAME replaces (the rig's ~/opgraft-K64i), whose strings the new binaries must keep."""
     docker = docker or Docker()

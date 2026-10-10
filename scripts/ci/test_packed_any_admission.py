@@ -953,8 +953,12 @@ class InImageRuntimeTests(unittest.TestCase):
     built before CB2b runs, and then every c2-packed attach refuses."""
 
     def test_the_image_runtime_is_k64j_as_qualified(self):
-        record = admission.check_runtime('/opt/tt-metal')
-        self.assertEqual(set(record['binaries'].values()), {admission.K64J_TTNNCPP_SHA256})
+        """K64j, or K64j-OQ (K64j plus the prefill SDPA's oneq edits) when the image was built with C2_BAKE_GRAFT=K64j-OQ: the graft the image declares
+        (admission.image_binary: the runtime pin or the GRAFT_SHA build arg, K64j when neither is set) must be one of the two the admission serves AND be
+        exactly what both binary paths hold, with the four K64j kernels. Any other pin, or a binary that is not the pinned one, still fails."""
+        served = admission.image_binary()
+        record = admission.check_runtime('/opt/tt-metal', served=served)
+        self.assertEqual(set(record['binaries'].values()), {served})
         self.assertEqual(record['kernels'], admission.K64J_KERNELS)
 
     def test_the_image_evidence_is_the_pinned_file_and_names_the_installed_reader(self):

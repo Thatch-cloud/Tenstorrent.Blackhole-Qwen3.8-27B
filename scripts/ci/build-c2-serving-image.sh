@@ -37,6 +37,19 @@ revision=dedf8df68adfb1afeaf7b7480c0a0243108177b4
 graft=/home/thatch/opgraft-K64j
 graft_name=opgraft-K64j
 graft_sha=152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7
+# C2_BAKE_GRAFT (the job key of the same name): empty bakes K64j, the graft every earlier image carried; K64j-OQ bakes ~/opgraft-K64j-OQ instead (K64j plus the
+# prefill SDPA's oneq edits, optimisation/ttnn-op/sdpa_prefill_oneq/build_k64j_oq.sh: QWEN_FAST_SDPA_PF_ONEQ=1 needs it). The Dockerfile takes the name and the sha as
+# build args, G1 finds which graft the context holds and holds the image to that one, the previous graft stays K64i, and the K64j-OQ build proved, when it was
+# built, that it keeps every QWEN string of K64j.
+case "${C2_BAKE_GRAFT:-}" in
+  '') ;;
+  K64j-OQ)
+    graft=$HOME/opgraft-K64j-OQ
+    graft_name=opgraft-K64j-OQ
+    graft_sha=2b81e28f017ccf0ab50028fbae5eb31dd61cfd8a3159233a1ed785712d024a57
+    ;;
+  *) echo "C2_BAKE_GRAFT=${C2_BAKE_GRAFT} is neither empty (K64j) nor K64j-OQ" >&2; exit 2 ;;
+esac
 kvread=/home/thatch/opgraft-KVR
 kvread_name=opgraft-KVR
 kvread_sha=5b2ad8d72bf134f1ef6413994d2b75511779660555cf0251d2b132773dcbdd8a
@@ -83,7 +96,7 @@ done
 echo "${C2_DRAFTER_CANDIDATES:-}" > "$ctx/drafter-candidates.txt"
 (cd "$graft" && sha256sum -c --quiet MANIFEST.sha256) || { echo "$graft does not verify against its MANIFEST.sha256" >&2; exit 2; }
 if [ "$(sha256sum < "$graft/_ttnncpp.so" | cut -c1-64)" != "$graft_sha" ]; then
-  echo "$graft/_ttnncpp.so is not the K64j binary $graft_sha" >&2
+  echo "$graft/_ttnncpp.so is not the ${C2_BAKE_GRAFT:-K64j} binary $graft_sha" >&2
   exit 2
 fi
 # G1 holds the graft's strings to the previous graft's, so that graft must be K64i as built: its MANIFEST.sha256
@@ -215,6 +228,7 @@ PY
   echo "baking the serving default $baked_profile with a session cap of $baked_cap"
 fi
 DOCKER_BUILDKIT=1 docker build -f "$ctx/Dockerfile" --build-arg "KERNEL_CACHE=$kernel_cache" \
+  --build-arg "GRAFT_NAME=$graft_name" --build-arg "GRAFT_SHA=$graft_sha" \
   --build-arg "SOURCE_REVISION=$source_revision" "${bake[@]}" --tag "$provisional" --iidfile "$iid" "$ctx"
 built=$(cat "$iid")
 # Belt and braces for a builder that ignores --tag: the provisional tag must exist before anything else runs.

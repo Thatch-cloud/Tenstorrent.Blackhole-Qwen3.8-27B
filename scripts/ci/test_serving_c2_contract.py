@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 import tempfile
 import types
@@ -304,6 +305,9 @@ class PackedAnyProfileTest(unittest.TestCase):
         # c2_image_provenance.dockerfile_env's parse (that module is not in the image this test also runs in).
         image = dict(token.partition('=')[::2] for line in joined.split(chr(10)) if line.startswith('ENV ')
                      for token in line[4:].split() if '=' in token)
+        # a ${NAME} value is a build arg (QWEN_FAST_RUNTIME_BINARY_SHA256=${GRAFT_SHA}): read with the ARG's default, what a build with no --build-arg bakes
+        defaults = dict(line[4:].strip().partition('=')[::2] for line in joined.split(chr(10)) if line.startswith('ARG ') and '=' in line)
+        image = {name: re.sub(r'[$][{](\w+)[}]', lambda match: defaults.get(match.group(1), match.group(0)), value) for name, value in image.items()}
         for name, admitted in (('c2-packed', True), ('c2-packed-gate', True), ('c2', False)):
             profile = self.load(name)
             env = contract.apply_environment(profile, dict(image))

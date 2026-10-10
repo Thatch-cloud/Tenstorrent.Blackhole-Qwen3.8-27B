@@ -1186,6 +1186,9 @@ class ProfileTests(unittest.TestCase):
         combined.update((name, {SELECT, READ, KEYED, LEAN}) for name in fusion.ship_names())            # the ship candidate: the timed combined arm as a traffic profile
         # the host-gap package WPH's composition twins (-fx-wph-*) are the combined timed arm plus their own flags, so they carry the four levers (never the audit flag)
         combined.update({name: {SELECT, READ, KEYED, LEAN} for name in data['profiles'] if name.startswith(fusion.NAMESPACE + 'wph-')})
+        # tp4/prefill-sdpa: the oneq twins are the combined arm and the combined audited arm plus the prefill SDPA flags, so they carry what their parents carry
+        combined[fusion.NAMESPACE + 'all-oneq'] = {SELECT, READ, KEYED, LEAN}
+        combined[fusion.NAMESPACE + 'all-oneq-audit'] = {SELECT, READ, KEYED, LEAN, AUDIT}
         for name, profile in data['profiles'].items():
             if name in self.ADDED:
                 continue

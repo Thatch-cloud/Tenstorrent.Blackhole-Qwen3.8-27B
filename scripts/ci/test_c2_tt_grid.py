@@ -361,12 +361,15 @@ class ReplayTests(unittest.TestCase):
 
 
 class CardMHarnessTests(unittest.TestCase):
-    FORWARDING = ('c1e_gateup', 'draft_slide_inplace', 'k64j_probe', 'k64j', 'pair_row_probe', 'quad_draft_probe', 'sdpa_decode_slice')
+    FORWARDING = ('c1e_gateup', 'draft_slide_inplace', 'k64j_probe', 'k64j', 'pair_row_probe', 'quad_draft_probe', 'sdpa_decode_slice',
+                  'optimisation/ttnn-op/sdpa_prefill_oneq/run_card_m_oq.sh')
     # The harnesses that print their docker argv on a dry run, and the variable that selects the dry run.
     DRY = (('sdpa_decode_slice', 'K64I_DRY_RUN'), ('pair_row_probe', 'PAIR_ROW_DRY_RUN'), ('k64j_probe', 'K64J_DRY_RUN'),
            ('k64j', 'K64J_CARD_DRY_RUN'), ('quad_draft_probe', 'QUAD_DRY_RUN'))
 
     def harness(self, directory):
+        if directory.endswith('.sh'):             # a harness whose runner is not <dir>/run_card_b.sh is named by its path
+            return directory
         return 'optimisation/ttnn-op/%s/run_card_b.sh' % directory
 
     def text(self, relative):

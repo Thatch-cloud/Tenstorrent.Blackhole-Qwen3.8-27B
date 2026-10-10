@@ -33,8 +33,13 @@ RUN set -eu; if [ "${TRIAGE_INSTALL}" = 1 ]; then \
 # the decode factory with the runtime extent (flag 0x20, F19-F22) and its four kernels, _ttnncpp.so 152951c1
 # (K64i's 30 QWEN strings kept, 34 in all). The arm mounts each binary over its path and each op directory
 # over the image's (a directory mount REPLACES the directory, so the image's copy is removed first).
-COPY opgraft-K64j/ /opt/qwen-c2/opgraft-K64j/
-RUN set -eu; g=/opt/qwen-c2/opgraft-K64j; \
+# GRAFT_NAME / GRAFT_SHA: the graft this image bakes. The defaults are K64j's, exactly what every earlier image carried; build-c2-serving-image.sh passes K64j-OQ's
+# (opgraft-K64j-OQ, 2b81e28f...: K64j plus the prefill SDPA's oneq edits, optimisation/ttnn-op/sdpa_prefill_oneq/build_k64j_oq.sh) when the job sets
+# C2_BAKE_GRAFT=K64j-OQ, which QWEN_FAST_SDPA_PF_ONEQ=1 needs. The build context holds exactly one of the two directories (c2_image_provenance.py reads which).
+ARG GRAFT_NAME=opgraft-K64j
+ARG GRAFT_SHA=152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7
+COPY ${GRAFT_NAME}/ /opt/qwen-c2/${GRAFT_NAME}/
+RUN set -eu; g=/opt/qwen-c2/${GRAFT_NAME}; \
     for pair in _ttnn.so:/opt/tt-metal/ttnn/ttnn/_ttnn.so \
                 _ttnncpp.so:/opt/tt-metal/build_Release/ttnn/_ttnncpp.so \
                 _ttnncpp.so:/opt/tt-metal/build_Release/lib/_ttnncpp.so; do \
@@ -46,7 +51,7 @@ RUN set -eu; g=/opt/qwen-c2/opgraft-K64j; \
                 sdpa:/opt/tt-metal/ttnn/cpp/ttnn/operations/transformer/sdpa; do \
       target=$(readlink -f "${pair#*:}"); rm -rf "$target"; cp -a "$g/${pair%%:*}" "$target"; \
     done; \
-    test "$(sha256sum < /opt/tt-metal/build_Release/lib/_ttnncpp.so | cut -c1-64)" = 152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7; \
+    test "$(sha256sum < /opt/tt-metal/build_Release/lib/_ttnncpp.so | cut -c1-64)" = "${GRAFT_SHA}"; \
     test "$(sha256sum < "$(readlink -f /opt/tt-metal/ttnn/ttnn/_ttnn.so)" | cut -c1-64)" = "$(sha256sum < $g/_ttnn.so | cut -c1-64)"
 
 # The prefix audit's region read (docs/prefix-audit-cost.md, optimisation/ttnn-op/kv_region_read/build_kv_read.sh): qwen_kv_read.so, a
@@ -59,7 +64,7 @@ RUN set -eu; k=/opt/qwen-c2/opgraft-KVR; \
     site=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])'); \
     echo "$k" > "$site/qwen_kv_read_path.pth"; \
     python3 -c "import ttnn, qwen_kv_read; assert callable(ttnn.qwen_read_blocks); print('[KVREAD] qwen_kv_read', qwen_kv_read.QWEN_KV_READ_VERSION, qwen_kv_read.__file__)"; \
-    test "$(sha256sum < /opt/tt-metal/build_Release/lib/_ttnncpp.so | cut -c1-64)" = 152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7; \
+    test "$(sha256sum < /opt/tt-metal/build_Release/lib/_ttnncpp.so | cut -c1-64)" = "${GRAFT_SHA}"; \
     test "$(sha256sum < /opt/tt-metal/build_Release/lib/libtt_metal.so | cut -c1-64)" = 3f5a3d585b46b2bef7d7d2c6c34b88d7f4efb679ec051fb4da615f6ec9ccc9ce
 
 # The v235 model-tree graft (artifact m3native-graft-sha-36087022223): the five wired model
@@ -141,7 +146,7 @@ ENV QWEN_ATTN_PREP=1 QWEN_CARDS_ALLOCATED=1 QWEN_DRAFT_KV_SLIDE_EXPERIMENT=1 QWE
     QWEN_FAST_PHASE_TIMING=1 QWEN_FAST_PIPELINED_COMMITS=1 QWEN_FAST_PIPELINED_PROPOSALS=1 \
     QWEN_FAST_PIPELINED_PUBLISH=1 QWEN_FAST_PRESTAGE=1 QWEN_FAST_PUBLISH_PREWARM=1 QWEN_FAST_QUAD_DRAFT=1 \
     QWEN_FAST_REPLAY_GROUP_ROWS=8 QWEN_FAST_ROUND_B1=1 QWEN_FAST_ROUND_FENCES=1 \
-    QWEN_FAST_RUNTIME_BINARY_SHA256=152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7 \
+    QWEN_FAST_RUNTIME_BINARY_SHA256=${GRAFT_SHA} \
     QWEN_FAST_SDPA_MODES=tail,share,slice QWEN_FAST_SDPA_PF=1 QWEN_FAST_SDPA_PF_FLAGS=0x3 \
     QWEN_FAST_SEQ_PUBLISH_LOG=1 QWEN_FAST_SHARD_CHECK=0 QWEN_FAST_SHARED_CCL=1 QWEN_FAST_SINGLE_GATEUP=1 \
     QWEN_FAST_SKIP_BLOCK_STREAM=1 QWEN_FAST_TRACED_PUBLISH=1 QWEN_FAST_VERIFY_T1=1 QWEN_FAST_VERIFY_T2=1 \
