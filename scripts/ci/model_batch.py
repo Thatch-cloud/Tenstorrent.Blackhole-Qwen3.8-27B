@@ -383,10 +383,17 @@ def two_tile_bindings(rows, model, operations):
     # either way, so every existing positional unpack of this function's return keeps
     # working unchanged with native_attn off.
     guards = (attention_binding.prep_guard, attention_binding.concat_guard) if native_attn else ()
+    # WP4 (op-fusion programme, tp4_mlp_gateup): the 64-row MLP gate/up levers bind a fifth binder, appended like the guards, only when one of their flags is
+    # in the environment. With none the module is not even imported and the tuple is what it was.
+    extra = ()
+    if any(name in os.environ for name in ('QWEN_FAST_MLP_GATEUP', 'QWEN_FAST_MLP_GATEUP_AUDIT', 'QWEN_FAST_MLP_CFG', 'QWEN_FAST_MLP_CFG_AUDIT',
+                                           'QWEN_FAST_MLP_AUDIT_STRIDE')):
+        import tp4_mlp_gateup
+        extra = tp4_mlp_gateup.bindings(model, rows, operations, native_m3=native_m3)
     return (bind_two_tile_norms(model, rows, operations),
             attention_binding,
             bind_two_tile_mlp(model, rows, operations, native_m3=native_m3),
-            bind_two_tile_gdn_output(model, rows, operations, native_m3=native_m3)) + guards
+            bind_two_tile_gdn_output(model, rows, operations, native_m3=native_m3)) + guards + extra
 
 
 def compact_gdn_enabled(rows, requested, serial_sdpa, profiler):

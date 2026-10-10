@@ -1,0 +1,19 @@
+# The order of WP4's (MLP gate/up) card-M jobs, one template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (its product is data).
+# These run INSIDE the op-fusion window (scripts/ci/references/fusion-jobs: B0 builds the image, X0 resets; production is down). They use card M alone through the cardm step: no reset
+# between them, one after the other, each a tag of its own (push ONE tag at a time and wait for its run to finish; never cancel a running card job).
+# C1 FIRST, before any four-card WP4 arm: it settles whether the gate/up gap is the program CONFIG (the plan's 0.35 ms a pass) or needs the FUSED op (up to 2.1 ms a pass), and prints the
+#     QWEN_FAST_MLP_CFG value to put in a profile. Its rule is pre-registered in the harness docstring (optimisation/ttnn-op/mlp_gateup/mlp_gateup_card_m.py):
+#       CONFIG-ENOUGH  the best exact config of the gate and up is worth >= 0.35 ms a pass and the fused op could add < 0.35 ms: ship the config name; skip C3 and the fused arm.
+#       BUILD-FUSED    the fused op could add >= 0.35 ms over the best config: run C3, then the four-card audit of QWEN_FAST_MLP_GATEUP.
+#       NEITHER        both under 0.35 ms: streaming is at the ceiling; F-D2 (the L1 multiply, QWEN_FAST_MLP_CFG=l1) is all there is.
+# THE FOUR-CARD ARMS OF WP4 come from the manifest (fusion-wp/WP4.json: levers mlpcfg = QWEN_FAST_MLP_CFG=l1 and mlpgu = QWEN_FAST_MLP_GATEUP=1) through make_fusion_jobs.py: per lever an audited
+#     attach (the _AUDIT flag runs the served composition beside the lever and compares the SwiGLU product and the layer output on every chip) and the timed ABAB at eight live. After C1, add the
+#     tuned twin the harness printed as an explicit profile in the manifest ({"name": "mlpcfg-tuned", "env": {"QWEN_FAST_MLP_CFG": "<printed name>"}}) and regenerate.
+# READ RULES: the harness exits 0, every shape has a served row and a best exact row, no 'MLP_GATEUP ALERT' (an ALERT is a config that keeps the K loop and still differs from the served
+#     output: that falsifies the exactness argument, and the lever must not ship), the composition's 'exact' map all true.
+# Durations (estimate, minutes): C1 40, C2 40, C3 30, C4 40. C1 and C3 are the short form.
+C1-mlp-sweep stop tp4-fusion-1 40
+C2-mlp-sweep-grid11 soft tp4-fusion-1 40
+C3-mlp-fused soft tp4-fusion-1 30
+C4-mlp-other-projections soft tp4-fusion-1 40
