@@ -35,6 +35,12 @@ audit_round and audit_release); both results are cloned into DRAM held outside t
 each path produced, not of a buffer the model has reused. Every buffer the path uses (the view, the reduce-scatter's output and
 intermediate, the semaphores of the model's TT_CCL, the audit's clones) is made inside the forward the capture records.
 
+WP5 (QWEN_FAST_CCL_OPTIONS, scripts/ci/ccl_options_tp.py): the unit-major call may carry a named set of per-call options (links, workers, chunks per
+sync, buffers per channel) that cannot change a bit (the ring's chunk parity is a function of the tile's index in its channel and of nothing the options
+move); default off, and with it off every statement below runs as before. Under QWEN_FAST_CCL_OPTIONS_AUDIT the first N unit-major calls of a forward also
+run with the values the model passes today, and both results are held and compared after the replay like the U1 audit's (audit_claim, audit_replayed,
+audit_round and audit_release serve both).
+
 Stdlib only; ttnn is imported on first use.
 """
 
@@ -43,6 +49,8 @@ import functools
 import importlib
 import os
 import sys
+
+import ccl_options_tp
 
 TILE = 32
 CCL_MODULE = 'models.tt_transformers.tt.ccl'
@@ -237,39 +245,48 @@ class TileSplitAllReduce:
         return None
 
     def unit_major(self, tensor, shape, args, kwargs):
+        plan = ccl_options_tp.current()
         reason = self.refusal(tensor, shape, args, kwargs)
         if reason is not None:
             _STATE['fallbacks'] += 1
             if reason not in _STATE['reasons']:
                 _STATE['reasons'].add(reason)
                 _log('%s rows=%d reason=%s' % (FALLBACK_MARKER, shape[2], reason))
+            if plan is not None and plan.selection.rs:
+                ccl_options_tp.note_fallback(plan, 'rs', reason)
             return self.split(tensor, shape, args, kwargs)
         key = (shape[2], shape[3])
         audited = _STATE['audited']
+        if plan is not None:
+            plan.rs_engaged += 1
         if _STATE['audit_calls'] and audited.get(key, 0) < _STATE['audit_calls']:
             audited[key] = audited.get(key, 0) + 1
             return self.audited(tensor, shape, args, kwargs)
+        if plan is not None and plan.audit_open('rs'):
+            return self.ccl_audited(tensor, shape, args, kwargs)
         output = self.reduce_unit_major(tensor, shape, args, kwargs, consume=True)
         _STATE['splits'] += 1
         _STATE['tiles'] += shape[2] // TILE
         _STATE['engaged'] += 1
         return output
 
-    def reduce_unit_major(self, tensor, shape, args, kwargs, consume):
+    def reduce_unit_major(self, tensor, shape, args, kwargs, consume, options=None):
         """The one reduce-scatter on the (1, R/32, 32, W) view, as the X1 spike called it, and its result viewed back as
-        (1, 1, R, W/chips). `consume` frees the input as tt_all_reduce does (never when the split runs on it next)."""
+        (1, 1, R, W/chips). `consume` frees the input as tt_all_reduce does (never when the split runs on it next). `options`: the
+        keyword overrides of a QWEN_FAST_CCL_OPTIONS set; None takes the block scope's (none when the lever is off), {} the model's own values."""
         operations = self.operations
         mesh, collective = args
         axis = kwargs.get('cluster_axis', 0)
         output_memory = kwargs.get('memory_config') or tensor.memory_config()
         view = operations.reshape(tensor, (1, shape[2] // TILE, TILE, shape[3]))
-        scattered = operations.experimental.reduce_scatter_minimal_async(
-            view, persistent_output_buffers=None, dim=3,
-            multi_device_global_semaphore=collective.get_and_cycle_rs_semaphore_handles(),
-            barrier_semaphore=collective.get_and_cycle_barrier_semaphore_handle(),
-            num_links=collective.get_num_links(axis), memory_config=output_memory,
-            intermediate_memory_config=operations.DRAM_MEMORY_CONFIG, topology=operations.Topology.Ring,
-            chunks_per_sync=10, num_workers_per_link=2, num_buffers_per_channel=2)
+        call = dict(persistent_output_buffers=None, dim=3,
+                    multi_device_global_semaphore=collective.get_and_cycle_rs_semaphore_handles(),
+                    barrier_semaphore=collective.get_and_cycle_barrier_semaphore_handle(),
+                    num_links=collective.get_num_links(axis), memory_config=output_memory,
+                    intermediate_memory_config=operations.DRAM_MEMORY_CONFIG, topology=operations.Topology.Ring,
+                    chunks_per_sync=10, num_workers_per_link=2, num_buffers_per_channel=2)
+        call.update(ccl_options_tp.rs_overrides() if options is None else options)
+        scattered = operations.experimental.reduce_scatter_minimal_async(view, **call)
         output = operations.reshape(scattered, (1, 1, shape[2], scattered.shape[3]))
         # A view shares its buffer with its source: free a copy only if the reshape made one.
         if view is not tensor and not _same_buffer(view, tensor):
@@ -304,6 +321,26 @@ class TileSplitAllReduce:
             operations.deallocate(copy_mine)
             raise
         _HELD.append(pair)
+        return served
+
+    def ccl_audited(self, tensor, shape, args, kwargs):
+        """QWEN_FAST_CCL_OPTIONS_AUDIT: the unit-major call with the set's options and the same call with the values the model passes today, each
+        cloned into DRAM and held for audit_round; the model's values' result is the one served (it consumes the input, which the first call left
+        alone). One reduce-scatter more than an unaudited call: the plan's count keeps the forward's total even."""
+        operations = self.operations
+        mine = self.reduce_unit_major(tensor, shape, args, kwargs, consume=False)
+        mine_view = _view_of(mine)
+        copy_mine = operations.clone(mine, memory_config=operations.DRAM_MEMORY_CONFIG)
+        operations.deallocate(mine)
+        try:
+            served = self.reduce_unit_major(tensor, shape, args, kwargs, consume=True, options={})
+        except BaseException:
+            operations.deallocate(copy_mine)
+            raise
+        hold_pair(operations, copy_mine, served, (shape[2], shape[3]), mine_view, op='rs')
+        _STATE['splits'] += 1
+        _STATE['tiles'] += shape[2] // TILE
+        _STATE['engaged'] += 1
         return served
 
     def split(self, tensor, shape, args, kwargs):
@@ -343,25 +380,30 @@ class TileSplitAllReduce:
 
 
 @contextmanager
-def block_scope(rows, expected=None, log=None, unit_major=False, audit_calls=0):
+def block_scope(rows, expected=None, log=None, unit_major=False, audit_calls=0, ccl=None, layers=None):
     """Reduce every `rows`-row all-reduce issued inside in the sequential engine's order: split per 32-row tile, or (unit_major)
     one reduce-scatter on the unit-major view for the calls the X1 census covers (the rest split, the reason logged), the first
-    `audit_calls` calls of each shape also split and held for audit_round. When it exits without an error, `expected` (when
-    given) must equal the number reduced: a scope that engaged nothing means the wrapper was never bound where the block's
-    layers look it up, and the round would run the unsplit, inexact reduction silently."""
+    `audit_calls` calls of each shape also split and held for audit_round. `ccl` (ccl_options_tp.settings(), None when the lever is off): the
+    named per-call options of the unit-major reduce-scatters and of the norms' gathers over `layers` layers, with their own audit quota. When it
+    exits without an error, `expected` (when given) must equal the number reduced: a scope that engaged nothing means the wrapper was never bound
+    where the block's layers look it up, and the round would run the unsplit, inexact reduction silently."""
     validate_rows(rows)
     if _STATE['rows'] is not None:
         raise ValueError('A block scope is already open (%d rows)' % _STATE['rows'])
     if audit_calls and not unit_major:
         raise ValueError('The unit-major audit needs the unit-major lever')
+    if ccl is not None and ccl.selection.rs and not unit_major:
+        raise ValueError('The ccl options for the reduce-scatter ride the unit-major lever')
     before = _STATE['splits']
     _STATE.update(rows=rows, unit_major=bool(unit_major), audit_calls=int(audit_calls), engaged=0, fallbacks=0, audited={})
+    plan = ccl_options_tp.begin(ccl, rows, layers, log)
     try:
         yield
     finally:
         _STATE['rows'] = None
         _STATE['unit_major'] = False
         _STATE['audit_calls'] = 0
+        ccl_options_tp.close(plan)
     engaged = _STATE['splits'] - before
     engaged_unit_major, fallbacks = _STATE['engaged'], _STATE['fallbacks']
     audited = sum((_STATE['audited'] or {}).values())
@@ -374,8 +416,8 @@ def block_scope(rows, expected=None, log=None, unit_major=False, audit_calls=0):
                              % (engaged_unit_major, fallbacks, engaged))
     if unit_major and expected is not None:
         # The ring's semaphore parity is a hang factor (request_width_warm.py): the forward's reduce-scatter count must stay even.
-        # A unit-major call is one, an audited call three (one, then the split's two), a fallback rows/32.
-        scatters = (engaged_unit_major - audited) + 3 * audited + fallbacks * (rows // TILE)
+        # A unit-major call is one, an audited call three (one, then the split's two), a fallback rows/32, a ccl-audited call two.
+        scatters = (engaged_unit_major - audited) + 3 * audited + fallbacks * (rows // TILE) + (plan.audited['rs'] if plan is not None else 0)
         if scatters % 2:
             raise AssertionError('The unit-major forward issued %d reduce-scatters (%d engaged, %d audited, %d fallbacks): an odd '
                                  'count flips the ring semaphore parity' % (scatters, engaged_unit_major, audited, fallbacks))
@@ -384,6 +426,7 @@ def block_scope(rows, expected=None, log=None, unit_major=False, audit_calls=0):
         if unit_major:
             log('{}', '%s rows=%d calls=%d unit_major=%d fallbacks=%d audited=%d'
                 % (ENGAGED_MARKER, rows, engaged, engaged_unit_major, fallbacks, audited))
+    ccl_options_tp.finish(plan)
 
 
 # --- the U1 audit: compared after the replay -----------------------------------------------------------------------------
@@ -422,7 +465,8 @@ def audit_pairs(owner):
 def audit_round(operations, owner, round_number, log=None):
     """Compare every pair `owner` holds, on every chip, as int16 bit patterns (-0 and +0 differ). Returns the pairs compared (0
     when the owner holds none: the audit off). One AUDIT_MARKER line per shape (calls, chips, elements) on rounds 0 to 3 and
-    every 50th after; a layout difference, a shape difference or any differing element logs AUDIT_MISMATCH_MARKER and raises."""
+    every 50th after; a layout difference, a shape difference or any differing element logs AUDIT_MISMATCH_MARKER and raises. The pairs of the
+    ccl options audit (QWEN_FAST_CCL_OPTIONS_AUDIT) carry their own markers and an op= field."""
     pairs = audit_pairs(owner)
     if not pairs:
         return 0
@@ -433,36 +477,73 @@ def audit_round(operations, owner, round_number, log=None):
 
     log = log or _log
     mismatches, tallies = [], {}
+    markers = []
+
+    def fail(pair, text):
+        mismatches.append(text)
+        markers.append(pair.get('mismatch', AUDIT_MISMATCH_MARKER))
+
     for index, pair in enumerate(pairs):
         label = 'shape=%dx%d call=%d' % (pair['shape'][0], pair['shape'][1], index)
+        if pair.get('op'):
+            label += ' op=%s' % pair['op']
         if pair['layout']:
-            mismatches.append('%s layout %s' % (label, pair['layout']))
+            fail(pair, '%s layout %s' % (label, pair['layout']))
         lefts = operations.get_device_tensors(pair['mine'])
         rights = operations.get_device_tensors(pair['served'])
         if len(lefts) != len(rights):
-            mismatches.append('%s chips %d against %d' % (label, len(lefts), len(rights)))
+            fail(pair, '%s chips %d against %d' % (label, len(lefts), len(rights)))
             continue
-        tally = tallies.setdefault((pair.get('label'), pair['shape']), dict(calls=0, chips=len(lefts), elements=0))
+        tally = tallies.setdefault((pair.get('marker', AUDIT_MARKER), pair.get('op'), pair.get('label'), pair['shape']),
+                                   dict(calls=0, chips=len(lefts), elements=0))
         tally['calls'] += 1
         for chip, (left, right) in enumerate(zip(lefts, rights)):
             a = operations.to_torch(left).contiguous().view(torch.int16)
             b = operations.to_torch(right).contiguous().view(torch.int16)
             if a.shape != b.shape:
-                mismatches.append('%s chip %d: shape %r against %r' % (label, chip, tuple(a.shape), tuple(b.shape)))
+                fail(pair, '%s chip %d: shape %r against %r' % (label, chip, tuple(a.shape), tuple(b.shape)))
             elif not torch.equal(a, b):
-                mismatches.append('%s chip %d: %d of %d elements differ' % (label, chip, int((a != b).sum()), a.numel()))
+                fail(pair, '%s chip %d: %d of %d elements differ' % (label, chip, int((a != b).sum()), a.numel()))
             else:
                 tally['elements'] += a.numel()
     if mismatches:
-        message = '%s round=%d %s' % (AUDIT_MISMATCH_MARKER, round_number, '; '.join(mismatches[:4]))
+        message = '%s round=%d %s' % (markers[0], round_number, '; '.join(mismatches[:4]))
         log(message)
         raise AssertionError(message)
     if round_number <= 3 or round_number % 50 == 0:
-        for label, shape in sorted(tallies, key=lambda key: (str(key[0]), key[1])):
-            tally = tallies[(label, shape)]
-            log('%s shape=%dx%d owner=%s round=%d calls=%d chips=%d elements=%d exact=True'
-                % (AUDIT_MARKER, shape[0], shape[1], label, round_number, tally['calls'], tally['chips'], tally['elements']))
+        for key in sorted(tallies, key=lambda key: (key[0], str(key[1]), str(key[2]), key[3])):
+            marker, op, label, shape = key
+            tally = tallies[key]
+            log('%s shape=%dx%d owner=%s round=%d%s calls=%d chips=%d elements=%d exact=True'
+                % (marker, shape[0], shape[1], label, round_number, (' op=%s' % op) if op else '', tally['calls'], tally['chips'],
+                   tally['elements']))
     return len(pairs)
+
+
+def hold_pair(operations, copy_mine, served, shape, mine_view, op):
+    """Hold a ccl options audit pair for audit_round: `copy_mine` is the options result already cloned into DRAM (the caller freed the original),
+    `served` the result the model's own values produced, which is cloned here and stays the caller's to serve. A layout difference between the two
+    is recorded and raised by audit_round."""
+    problems = [name + ' ' + text for name, text in (('layout', _differences(mine_view, _view_of(served))),) if text]
+    pair = dict(owner=None, shape=shape, mine=copy_mine, served=None, layout='; '.join(problems) or None,
+                marker=ccl_options_tp.AUDIT_MARKER, mismatch=ccl_options_tp.AUDIT_MISMATCH_MARKER, op=op)
+    try:
+        pair['served'] = dram_copy(operations, served)
+    except BaseException:
+        operations.deallocate(copy_mine)
+        raise
+    _HELD.append(pair)
+    return pair
+
+
+def dram_copy(operations, tensor):
+    """A copy of `tensor` in interleaved DRAM, held outside the model's buffers: a sharded tensor (the norms' gathered input) is converted, an
+    interleaved one cloned."""
+    memory = tensor.memory_config() if callable(getattr(tensor, 'memory_config', None)) else None
+    is_sharded = getattr(memory, 'is_sharded', None)
+    if callable(is_sharded) and is_sharded():
+        return operations.to_memory_config(tensor, operations.DRAM_MEMORY_CONFIG)
+    return operations.clone(tensor, memory_config=operations.DRAM_MEMORY_CONFIG)
 
 
 def audit_release(operations, owner):
@@ -501,7 +582,7 @@ def scope_for(batch):
     layers = len(batch.model.layers)
     unit_major, audit_calls = unit_major_settings()
     return block_scope(rows, expected=layers * (2 if batch.native_m3 else 1), log=pindiag, unit_major=unit_major,
-                       audit_calls=audit_calls)
+                       audit_calls=audit_calls, ccl=ccl_options_tp.settings(), layers=layers)
 
 
 def scoped_run(original):
@@ -526,6 +607,14 @@ def install_scope():
         return []
     model_batch.ModelBatch.run = scoped_run(current)
     return [(ClassAttributes(model_batch.ModelBatch), 'run', current)]
+
+
+def install_gather_options():
+    """WP5: wrap DistributedNorm.forward in the gather options' shim when QWEN_FAST_CCL_OPTIONS is set (distributed_norm_gather_tp.install; [] when it is
+    unset or the model tree is not importable). Bound here, with the scope it runs in, so tp_addresses records and puts back both together."""
+    import distributed_norm_gather_tp
+
+    return distributed_norm_gather_tp.install()
 
 
 def install(module=None, scope=True):
@@ -557,4 +646,5 @@ def install(module=None, scope=True):
         changed.append((module.__dict__, NAME, original))
     if scope:
         changed += install_scope()
+        changed += install_gather_options()
     return changed
