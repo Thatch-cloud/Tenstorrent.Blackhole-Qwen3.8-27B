@@ -16,6 +16,8 @@ name: Qwen C2 serving image
 #            (1, 4) ring, two command queues, separate semaphores; the arms that cannot hang; SUBDEV_H2 verdict=...): subdev-probe.json; subdev-watch is the
 #            same under TT_METAL_WATCHER=5 with the watcher off the ethernet cores (untimed), its watcher log copied beside the report; subdev-shared adds
 #            the arms that put both gather streams on one fabric link (the first card run hung there: it needs the all-board reset after it)
+#            C2_FABRIC_PROBE=subdev-links is the decisive run: the same probe on the K64j graft with the all-gather link offset mounted (the drafter's gathers
+#            on link 1, the target's on link 0), the target's link cost, and the pre-registered port rule (SUBDEV_H2 ... port=GO|CONDITIONAL|NO-GO)
 #   cardm  - a single-card qualification harness (C2_CARDM_HARNESS, e.g. optimisation/ttnn-op/k64j/run_card_b.sh)
 #            on card M alone, card B being reserved for another project: QUAL_CARD=card M, ALLOW_SERVING_CARD=1, after
 #            the same refusals as the gate (anything holding M or A, a platform serving container); never card
@@ -447,6 +449,7 @@ jobs:
             subdev) script=tp4_subdev_probe.py; report=subdev-probe.json ;;
             subdev-watch) script=tp4_subdev_probe.py; report=subdev-probe.json; probe_args=(--watcher) ;;
             subdev-shared) script=tp4_subdev_probe.py; report=subdev-probe.json; probe_args=(--arms solo,shared,shared2) ;;
+            subdev-links) script=tp4_subdev_probe.py; report=subdev-probe.json; probe_args=(--arms solo,link_cost,chained,one_queue,separate --link-offset 1) ;;
             *) echo "unknown fabric probe: $PROBE" >&2; exit 1 ;;
           esac
           results="$RUNNER_TEMP/c2-results/fabric"
@@ -472,6 +475,22 @@ jobs:
           if [ "${PROBE:-fabric}" = kvread ] && [ -s /home/thatch/opgraft-KVR/qwen_kv_read.so ]; then
             kvmount=(-v /home/thatch/opgraft-KVR:/opt/qwen-c2/kvr-mount:ro -e QWEN_KVREAD_DIR=/opt/qwen-c2/kvr-mount)
           fi
+          # subdev-links runs the four-card sub-device probe on the K64j graft with the all-gather link offset (optimisation/ttnn-op/subdev_h/build_k64j_lo.sh builds
+          # ~/opgraft-K64j-LO and never touches ~/opgraft-K64j): its _ttnncpp.so goes over the image's two copies, read-only, and its sha256 is exported for the
+          # probe, which refuses to measure anything unless every copy it can load hashes to it and carries the patched factory's literal (a graft mounted is
+          # not a graft executed). The graft's manifest must verify first.
+          lomount=()
+          if [ "${PROBE:-fabric}" = subdev-links ]; then
+            lo="$HOME/opgraft-K64j-LO"
+            for part in _ttnncpp.so MANIFEST.sha256; do
+              test -s "$lo/$part" || { echo "the link-offset graft is not built: $lo/$part is missing (optimisation/ttnn-op/subdev_h/build_k64j_lo.sh)" >&2; exit 1; }
+            done
+            (cd "$lo" && sha256sum -c --quiet MANIFEST.sha256) || { echo "the link-offset graft's MANIFEST.sha256 does not verify" >&2; exit 1; }
+            lo_sha=$(sha256sum "$lo/_ttnncpp.so" | cut -c1-64)
+            echo "link-offset graft $lo/_ttnncpp.so $lo_sha"
+            lomount=(-v "$lo/_ttnncpp.so:/opt/tt-metal/build_Release/ttnn/_ttnncpp.so:ro" -v "$lo/_ttnncpp.so:/opt/tt-metal/build_Release/lib/_ttnncpp.so:ro"
+                     -e "QWEN_AG_LINK_GRAFT_SHA256=$lo_sha")
+          fi
           status=0
           # the job's box (C2_BOX_MINUTES, at most this step's 45) bounds the probe; without one it keeps its 30 minutes
           limit=1800
@@ -481,7 +500,7 @@ jobs:
             --tmpfs /root/.cache/ttnn:rw,exec,nosuid,size=1g --tmpfs /root/.cache/tt-metal-cache:rw,exec,nosuid,size=8g \
             --shm-size 4g --memory 80g --cpus 8 "${devices[@]}" \
             -v /dev/hugepages-1G:/dev/hugepages-1G --cap-add SYS_NICE \
-            -v "$PWD:/c2:ro" -v "$results:/probe-results" ${kvmount[@]+"${kvmount[@]}"} \
+            -v "$PWD:/c2:ro" -v "$results:/probe-results" ${kvmount[@]+"${kvmount[@]}"} ${lomount[@]+"${lomount[@]}"} \
             -e MESH_DEVICE=P150x4 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_C2_SERVING=0 \
             -e TT_METAL_CACHE=/root/.cache/tt-metal-cache -e TT_CACHE_PATH=/tmp/tt-weights \
             -e TT_MESH_GRAPH_DESC_PATH=/c2/scripts/ci/qwen_p150x4_ring_mesh_graph_descriptor.textproto \

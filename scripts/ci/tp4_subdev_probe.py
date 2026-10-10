@@ -71,6 +71,76 @@ def known_failure(text):
     return tp4_fabric_probe.known_signature(text)
 
 
+GRAFT_ENV = 'QWEN_AG_LINK_GRAFT_SHA256'
+GRAFT_FILES = ('/opt/tt-metal/build_Release/ttnn/_ttnncpp.so', '/opt/tt-metal/build_Release/lib/_ttnncpp.so')
+GRAFT_MARKER = subdev_h2.LINK_ENV.encode()
+
+
+def file_sha256(path, chunk=1 << 22):
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for block in iter(lambda: handle.read(chunk), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def file_contains(path, needle, chunk=1 << 24):
+    """Whether the file holds `needle`, read in blocks that overlap by the needle's length."""
+    keep = b''
+    with open(path, 'rb') as handle:
+        for block in iter(lambda: handle.read(chunk), b''):
+            window = keep + block
+            if needle in window:
+                return True
+            keep = window[-(len(needle) - 1):]
+    return False
+
+
+def verify_graft(environ, files=GRAFT_FILES):
+    """Is the link-offset graft what this container will load? Returns dict(ok, problems, expected, binaries={path: sha}, marker={path: bool}).
+    The workflow mounts the graft's _ttnncpp.so over the image's two copies and exports its sha256 as QWEN_AG_LINK_GRAFT_SHA256; here each copy must hash to
+    exactly that and carry the literal the patched factory reads. A graft mounted is not a graft executed: loaded_graft() checks the mapped libraries too."""
+    expected = environ.get(GRAFT_ENV, '')
+    found = dict(expected=expected, binaries={}, marker={}, problems=[])
+    if not expected:
+        found['problems'].append('%s is not set: the fabric step mounts the graft and exports its sha256 (probe subdev-links)' % GRAFT_ENV)
+    for path in files:
+        try:
+            found['binaries'][path] = file_sha256(path)
+            found['marker'][path] = file_contains(path, GRAFT_MARKER)
+        except OSError as error:
+            found['problems'].append('%s: %s' % (path, error))
+            continue
+        if expected and found['binaries'][path] != expected:
+            found['problems'].append('%s is %s, not the graft %s' % (path, found['binaries'][path][:16], expected[:16]))
+        if not found['marker'][path]:
+            found['problems'].append('%s does not contain %s: it is not the link-offset graft' % (path, subdev_h2.LINK_ENV))
+    found['ok'] = not found['problems']
+    return found
+
+
+def loaded_graft(found, maps_text):
+    """After `import ttnn`: every _ttnncpp.so the process has mapped (from /proc/self/maps) is one of the verified copies or hashes to the graft's sha."""
+    mapped = sorted({line.split()[-1] for line in maps_text.splitlines() if line.split() and line.split()[-1].endswith('_ttnncpp.so')})
+    found['mapped'] = mapped
+    for path in mapped:
+        if path in found['binaries']:
+            continue
+        try:
+            digest = file_sha256(path)
+        except OSError as error:
+            found['problems'].append('mapped %s: %s' % (path, error))
+            continue
+        found['binaries'][path] = digest
+        if digest != found['expected']:
+            found['problems'].append('the process mapped %s (%s), which is not the graft %s' % (path, digest[:16], found['expected'][:16]))
+    if not mapped:
+        found['problems'].append('no _ttnncpp.so is mapped after the import: the graft check cannot see what was loaded')
+    found['ok'] = not found['problems']
+    return found
+
+
 def watcher_summary(output, environ, home=None):
     """Copy the watcher log beside `output` and count its error lines: {'log': path, 'lines': n, 'errors': n} or {'log': None}."""
     root = home or environ.get('TT_METAL_HOME', '/opt/tt-metal')
@@ -87,7 +157,7 @@ def watcher_summary(output, environ, home=None):
     return dict(log=target.name, lines=len(lines), errors=len(bad), first=bad[:5])
 
 
-def run(options, ttnn=None, torch=None, environ=None, log=plan.say, watchdog=None, heartbeat=None, clock=None):
+def run(options, ttnn=None, torch=None, environ=None, log=plan.say, watchdog=None, heartbeat=None, clock=None, graft_files=GRAFT_FILES):
     """The measurement; returns (report, exit status). `ttnn` and `torch` are the modules (fakes in the tests)."""
     import time
     environ = os.environ if environ is None else environ
@@ -128,9 +198,20 @@ def run(options, ttnn=None, torch=None, environ=None, log=plan.say, watchdog=Non
     report['watcher_env'] = apply_watcher_env(options, environ)
     harness, mesh, error = None, None, None
     try:
+        graft = None
+        if options.link_offset > 0:
+            # the separate-links arm means nothing on a binary without the graft: check the files BEFORE anything is imported or opened
+            graft = report['graft'] = verify_graft(environ, graft_files)
+            if not graft['ok']:
+                raise RuntimeError('the link-offset graft is not what is mounted: ' + '; '.join(graft['problems']))
         if ttnn is None:
             import torch  # noqa: F811
             import ttnn  # noqa: F811
+            if graft is not None:
+                with open('/proc/self/maps') as handle:
+                    loaded_graft(graft, handle.read())
+                if not graft['ok']:
+                    raise RuntimeError('the link-offset graft is not what is loaded: ' + '; '.join(graft['problems']))
         ttnn.set_fabric_config(getattr(ttnn.FabricConfig, options.fabric))
         with watchdog.span('open-mesh', options.compile_watchdog_s):
             mesh = ttnn.open_mesh_device(ttnn.MeshShape(*tp4_mesh.MESH_SHAPE), l1_small_size=24576,
@@ -167,7 +248,7 @@ def run(options, ttnn=None, torch=None, environ=None, log=plan.say, watchdog=Non
     return report, plan.exit_status(text)
 
 
-def main(argv=None, ttnn=None, torch=None, environ=None, log=plan.say, watchdog=None, heartbeat=None, clock=None):
+def main(argv=None, ttnn=None, torch=None, environ=None, log=plan.say, watchdog=None, heartbeat=None, clock=None, graft_files=GRAFT_FILES):
     options = build_parser().parse_args(argv)
     if options.watcher:
         options.no_timing = True
@@ -179,7 +260,8 @@ def main(argv=None, ttnn=None, torch=None, environ=None, log=plan.say, watchdog=
     if beat is None and options.heartbeat_s:
         beat = plan.Heartbeat(subdev_h2.TAG, period=options.heartbeat_s).start()
     try:
-        _, status = run(options, ttnn=ttnn, torch=torch, environ=environ, log=log, watchdog=watchdog, heartbeat=beat, clock=clock)
+        _, status = run(options, ttnn=ttnn, torch=torch, environ=environ, log=log, watchdog=watchdog, heartbeat=beat, clock=clock,
+                        graft_files=graft_files)
     finally:
         if beat is not None:
             beat.stop()

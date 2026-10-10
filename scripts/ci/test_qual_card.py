@@ -56,6 +56,7 @@ EMBEDDING = [
     OPS / 'sdpa_tp4_long' / 'run_card_m.sh',
     OPS / 'mr_probe' / 'run_card_m.sh',
     OPS / 'subdev_h' / 'run_card_m.sh',
+    OPS / 'subdev_h' / 'build_k64j_lo.sh',
     OPS / 'gdn_conv_gates_spread' / 'run_card_m.sh',
     OPS / 'canon_probe' / 'run_card_m.sh',
     OPS / 'sdpa_decode_qwen' / 'run_probe_k1.sh',
@@ -114,7 +115,7 @@ SCRUB = ('QUAL_CARD', 'ALLOW_SERVING_CARD', 'M1_READER', 'IMAGE', 'M1_ARGS', 'M1
          'RESULTS', 'M1_SRC', 'KOPGRAFT_PF', 'PF_SRC', 'PF_DRY_RUN', 'WATCHER', 'REFERENCE', 'CARD', 'NAME',
          'CONTAINER', 'GDN_USER_BATCH_DEVICE', 'K64F_SRC', 'KOPGRAFT64', 'REPO', 'RUNNER_NAME', 'FAKE_HELD', 'MSYS',
          'PROBE_DRY_RUN', 'EXPECT_TTNNCPP_SHA256', 'K64I_DRY_RUN', 'KOPGRAFT64_REFERENCE', 'PAIR_ROW_DRY_RUN', 'K64J_DRY_RUN', 'K64J_CARD_DRY_RUN', 'K64J_BUILD_DRY_RUN',
-         'GDN_SEQ_BLOCK_IMAGE', 'SUBDEV_DRY_RUN', 'WATCHDOG_S', 'IMAGE_TAG')
+         'GDN_SEQ_BLOCK_IMAGE', 'SUBDEV_DRY_RUN', 'WATCHDOG_S', 'IMAGE_TAG', 'LO_BUILD_DRY_RUN', 'LO_BASE_GRAFT', 'LO_GRAFT')
 
 
 def with_x():

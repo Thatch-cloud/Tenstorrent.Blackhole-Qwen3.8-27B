@@ -164,7 +164,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertTrue((HERE / 'tp4_subdev_probe.py').is_file())
 
     def test_a_probe_name_the_parser_does_not_know_is_refused(self):
-        values = job.parse_env(text(H2[1]).replace('C2_FABRIC_PROBE=subdev', 'C2_FABRIC_PROBE=subdev-links'))
+        values = job.parse_env(text(H2[1]).replace('C2_FABRIC_PROBE=subdev', 'C2_FABRIC_PROBE=subdev-bogus'))
         with self.assertRaises(job.JobError):
             job.read_job(values, sorted(PROFILES), root=ROOT)
 

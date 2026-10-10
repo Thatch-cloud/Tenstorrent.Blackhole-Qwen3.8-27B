@@ -38,6 +38,14 @@ TARGET_ROWS = 64
 DRAFTER_ROWS = 32
 # A concurrent wall this close to the SUM of the solo walls is "serialised": the queues did not overlap at all.
 SERIALISED_FRACTION = 0.90
+# The PORT RULE, registered before the separate-links run (verdict_h2 / port_rule). The drafter's gathers go on fabric link 1 and the target's on link 0, so
+# the target loses one of its two links while the drafter runs. link_cost = (the target's gather trace on ONE link) / (the same trace on TWO links), measured
+# in the same job. A verify block is V = 53 ms of device time, 8-live round = 2 V' + 15 ms, today 160 ms; a port is worth taking at +10 percent seat rate
+# (round <= 145.5 ms, V' <= 65.2 ms). With V' = 56.1 to 59.9 (the 80-core target, scratchpad model) + the measured overlap penalty (H1: 6.9 percent, +3.1 ms net
+# of the model's 0.6) + the link penalty p = c * 53 ms * (link_cost - 1) for a collective share c of the verify block, that needs p <= 2.2 to 6.0 ms, i.e.
+# c * (link_cost - 1) <= 0.042 (worst grid loss) to 0.113 (best). At c = 0.15: link_cost <= 1.28 or <= 1.75.
+LINK_COST_GO = 1.25         # GO: holds for any c up to 0.17 even at the worst grid loss
+LINK_COST_MAX = 1.75        # above it no c of 0.15 or more can pay for it even at the best grid loss: NO-GO, take the drafter-without-CCL route
 ARMS = ('t_solo', 'd_solo', 'concurrent', 'chained', 'one_queue')
 EXIT_CODES = dict(PASS=0, UNTIMED_PASS=0, FAIL=1, NOT_MEASURED=2, HANG=3)
 
@@ -287,6 +295,10 @@ def verdict_h2(arms, exactness, timing=True, error=None, pass_ratio=PASS_RATIO, 
             if value:
                 evidence[name + '_ms'] = value
                 evidence[name + '_over_sum'] = round(value / (t + d), 4)
+        two = _median(arms, 't_solo2')
+        if two:
+            evidence['t_solo2_ms'] = two
+            evidence['link_cost'] = round(t / two, 4)
     if error:
         return 'NOT-MEASURED', evidence
     if exactness.get('mismatched', 0):
@@ -312,6 +324,25 @@ def verdict_h2(arms, exactness, timing=True, error=None, pass_ratio=PASS_RATIO, 
             return 'PASS-SEPARATE-LINKS', evidence
         return separate, evidence
     return shared, evidence
+
+
+def port_rule(evidence, text):
+    """(decision, reason) of the pre-registered port rule for a separate-links run. GO: the gathers on separate links overlap (PASS-SEPARATE-LINKS: the concurrent
+    wall within pass_ratio of the longer solo, every byte identical, no hang) AND link_cost <= LINK_COST_GO. CONDITIONAL: link_cost in (LINK_COST_GO,
+    LINK_COST_MAX]: decide with the measured collective share c of the verify block and the grid loss (c * (link_cost - 1) <= 0.042 to 0.113). NO-GO: no overlap on
+    separate links, wrong bytes, a hang, or link_cost above LINK_COST_MAX. UNDECIDED: the separate arm or the link cost was not measured."""
+    if text in ('NOT-MEASURED', 'HANG', 'FAIL-BYTES', 'FAIL-SERIALISED', 'FAIL-PARTIAL'):
+        return 'NO-GO', 'the separate-links run ended %s' % text
+    if text != 'PASS-SEPARATE-LINKS':
+        return 'UNDECIDED', 'the separate-links arm did not run (verdict %s)' % text
+    cost = evidence.get('link_cost')
+    if cost is None:
+        return 'UNDECIDED', 'link_cost was not measured (arm link_cost missing)'
+    if cost <= LINK_COST_GO:
+        return 'GO', 'separate links overlap and the target pays %.2fx for one link' % cost
+    if cost <= LINK_COST_MAX:
+        return 'CONDITIONAL', 'separate links overlap; the target pays %.2fx for one link: c * (%.2f - 1) must be <= 0.042 to 0.113' % (cost, cost)
+    return 'NO-GO', 'separate links overlap but the target pays %.2fx for one link (> %.2f)' % (cost, LINK_COST_MAX)
 
 
 def exit_status(text):

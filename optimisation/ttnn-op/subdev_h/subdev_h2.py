@@ -10,6 +10,7 @@ Arms (exactness against the host's concatenation on every chip, then timing in i
 
   eager     solo target gather, solo drafter gather, then both concurrently (queue 0 and queue 1), a few times: the cheap hang detector
   t_solo, d_solo   a trace of K gathers on one sub-device alone
+  t_solo2   the target's trace at num_links 2 alone: link_cost = t_solo / t_solo2, what the target pays when the drafter owns link 1 (arm group link_cost)
   shared    BOTH traces concurrently, both on fabric link 0 (num_links 1 on each): (a) sharing a link
   shared2   the same with num_links 2 on each (information only; production gathers use both links)
   separate  (b) the drafter's gathers on link 1, the target's on link 0: needs the link-offset graft (ag_link_offset.patch: the all-gather
@@ -52,11 +53,12 @@ SHAPES = dict(target=(64, 1280), drafter=(32, 640))
 # Result keys, in the order the arms RUN: the safe ones first, the one that needs the graft next, the ones that share a fabric link last. Two programs
 # opening the same router sender channel is not arbitrated (see the docstring): a shared-link arm may deadlock the mesh, and a hang ends the process, so
 # nothing that could hang runs before the numbers that cannot are in the report.
-ARMS = ('t_solo', 'd_solo', 'chained', 'one_queue', 'separate', 'shared', 'shared2')
-ARM_GROUPS = dict(solo=('t_solo', 'd_solo'), chained=('chained',), one_queue=('one_queue',), separate=('separate',), shared=('shared',), shared2=('shared2',))
-SAFE_GROUPS = ('solo', 'chained', 'one_queue')
+ARMS = ('t_solo', 'd_solo', 't_solo2', 'chained', 'one_queue', 'separate', 'shared', 'shared2')
+ARM_GROUPS = dict(solo=('t_solo', 'd_solo'), link_cost=('t_solo2',), chained=('chained',), one_queue=('one_queue',), separate=('separate',),
+                  shared=('shared',), shared2=('shared2',))
+SAFE_GROUPS = ('solo', 'link_cost', 'chained', 'one_queue')
 HAZARD_GROUPS = ('separate', 'shared', 'shared2')
-DEFAULT_ARMS = ','.join(SAFE_GROUPS)
+DEFAULT_ARMS = 'solo,chained,one_queue'      # link_cost is the separate-links job's
 
 
 def parse_groups(text):
@@ -304,6 +306,8 @@ class Harness2(object):
                    d_solo=lambda flip: (self.replay('d', 1), self.sync(1, [sd1])),
                    chained=chained, one_queue=one_queue, shared=concurrent('t', 'd'))
         if 't2' in self.traces:
+            fns['t_solo2'] = lambda flip: (self.replay('t2', 0), self.sync(0, [sd0]))
+        if 'd2' in self.traces:
             fns['shared2'] = concurrent('t2', 'd2')
         if 'ds' in self.traces:
             fns['separate'] = concurrent('t', 'ds')
@@ -337,7 +341,7 @@ class Harness2(object):
     def arm_outputs(self, name):
         """(target trace key, drafter trace key, drafter side) of an arm's compared outputs."""
         d = self.d_side
-        return {'t_solo': ('t', None, None), 'd_solo': (None, 'd', d), 'chained': ('t', 'd', d), 'one_queue': ('t', 'd0', d),
+        return {'t_solo': ('t', None, None), 't_solo2': ('t2', None, None), 'd_solo': (None, 'd', d), 'chained': ('t', 'd', d), 'one_queue': ('t', 'd0', d),
                 'shared': ('t', 'd', d), 'shared2': ('t2', 'd2', d), 'separate': ('t', 'ds', getattr(self, 'd_sep', d))}[name]
 
     def measure(self, fns):
@@ -397,8 +401,9 @@ class Harness2(object):
         # EVERY device allocation and every first run of a program comes BEFORE the first capture: the runtime warns that a buffer allocated while a trace is
         # active may be corrupted when the trace executes (its temporaries are freed and reusable), and a capture of a program that never ran is a TT_FATAL.
         self.stage('warm')
-        if 'shared2' in self.groups:
+        if 'shared2' in self.groups or 'link_cost' in self.groups:
             self.warm('t2', t, 0, 2)
+        if 'shared2' in self.groups:
             self.warm('d2', d, 1, 2)
         if 'separate' in self.groups and offset > 0:
             # (b): the drafter's gathers on link `offset`. Only the graft reads the variable, and it reads it when a program is BUILT, so it is set for
@@ -419,8 +424,9 @@ class Harness2(object):
         self.out['d'] = self.capture('d', d, 1, 1, self.pool(d, 'trace1'))
         if 'one_queue' in self.groups:
             self.out['d0'] = self.capture('d0', d, 0, 1, self.pool(d, 'trace0'))
-        if 'shared2' in self.groups:
+        if 'shared2' in self.groups or 'link_cost' in self.groups:
             self.out['t2'] = self.capture('t2', t, 0, 2, self.pool(t, 'trace2'))
+        if 'shared2' in self.groups:
             self.out['d2'] = self.capture('d2', d, 1, 2, self.pool(d, 'trace2'))
         if 'ds' in self.programs_warmed():
             self.out['ds'] = self.capture('ds', self.d_sep, 1, 1, self.pool(self.d_sep, 'trace1'))
@@ -473,6 +479,12 @@ def finish(harness, report, options, error):
         extra['error'] = '"%s"' % ' '.join(str(error).split())[:200].replace('"', "'")
     if report.get('known_failure'):
         extra['known_failure'] = '"%s"' % ' '.join(str(report['known_failure']).split())[:200].replace('"', "'")
+    if separate_run:
+        decision, reason = plan.port_rule(evidence, text)
+        extra['port'] = decision
+        report['port_rule'] = dict(decision=decision, reason=reason, link_cost_go=plan.LINK_COST_GO, link_cost_max=plan.LINK_COST_MAX)
+    if evidence.get('link_cost') is not None:
+        extra['link_cost'] = evidence['link_cost']
     line = verdict_line(text, evidence, extra)
     report.update(verdict=text, evidence=evidence)
     return text, evidence, line

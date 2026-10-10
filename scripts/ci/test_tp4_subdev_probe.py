@@ -37,13 +37,30 @@ def make_dog(exits=None, **kwargs):
     return plan.Watchdog(tag=subdev_h2.TAG, backstop=False, exit_fn=(exits.append if exits is not None else (lambda code: None)), **kwargs)
 
 
-def run_probe(directory, extra=(), environ=None, **fake):
+def make_graft(directory, environ, marker=True, sha_ok=True, count=2):
+    """Stand-ins for the graft's two mounted copies, and the sha256 the workflow exports for them."""
+    import hashlib
+    body = b'\x7fELF\x00fake graft\x00' + (probe.GRAFT_MARKER + b'\x00' if marker else b'')
+    paths = []
+    for index in range(count):
+        path = os.path.join(directory, 'copy%d_ttnncpp.so' % index)
+        with open(path, 'wb') as handle:
+            handle.write(body)
+        paths.append(path)
+    environ[probe.GRAFT_ENV] = hashlib.sha256(body).hexdigest() if sha_ok else '0' * 64
+    return tuple(paths)
+
+
+def run_probe(directory, extra=(), environ=None, graft=None, **fake):
     environ = {} if environ is None else environ
     ttnn = fake_ttnn.FakeTTNN(chips=4, environ=environ, **fake)
     lines = []
     out = os.path.join(directory, 'subdev-probe.json')
+    if graft is None and '--link-offset' in extra and extra[list(extra).index('--link-offset') + 1] != '0':
+        graft = {}
+    files = make_graft(directory, environ, **graft) if graft is not None else probe.GRAFT_FILES
     status = probe.main(['--output', out] + SMALL + list(extra), ttnn=ttnn, torch=fake_ttnn.FakeTorch(), environ=environ, log=lines.append,
-                        watchdog=make_dog(lines), clock=ttnn.clock)
+                        watchdog=make_dog(lines), clock=ttnn.clock, graft_files=files)
     with open(out) as handle:
         report = json.load(handle)
     return status, lines, report, ttnn
@@ -110,7 +127,7 @@ class H2Tests(unittest.TestCase):
         status, lines, report, ttnn = self.run_fake(ALL)
         stages = [line.split('stage=')[1] for line in lines if isinstance(line, str) and line.startswith('SUBDEV_H2 stage=arm-')]
         self.assertEqual(stages, ['arm-t_solo', 'arm-d_solo', 'arm-chained', 'arm-one_queue', 'arm-shared', 'arm-shared2'])
-        self.assertEqual([arm for arm in subdev_h2.ARMS], ['t_solo', 'd_solo', 'chained', 'one_queue', 'separate', 'shared', 'shared2'])
+        self.assertEqual([arm for arm in subdev_h2.ARMS], ['t_solo', 'd_solo', 't_solo2', 'chained', 'one_queue', 'separate', 'shared', 'shared2'])
         self.assertEqual(subdev_h2.parse_groups('shared,solo,separate,chained'), ['solo', 'chained', 'separate', 'shared'])
 
     def test_one_dispatcher_for_both_queues_fails_serialised_and_says_so(self):
@@ -153,6 +170,92 @@ class H2Tests(unittest.TestCase):
         self.assertEqual((status, report['verdict']), (1, 'FAIL-BYTES'))
         cases = {case['case'] for case in report['exactness']['cases'] if case['mismatched']}
         self.assertTrue(any('drafter' in case for case in cases), cases)
+
+    # ------------------------------------------------------------------ the separate-links run: the graft, the link cost, the pre-registered rule
+
+    LINKS = ['--arms', 'solo,link_cost,chained,one_queue,separate', '--link-offset', '1']
+
+    def test_the_separate_links_run_measures_the_link_cost_and_applies_the_port_rule(self):
+        status, lines, report, ttnn = self.run_fake(self.LINKS, overlap='link')
+        line = self.verdict_line(lines)
+        self.assertEqual((status, report['verdict']), (0, 'PASS-SEPARATE-LINKS'), report.get('error'))
+        self.assertEqual(report['evidence']['link_cost'], 1.0)             # the fake's gather costs the same on one link and on two
+        self.assertEqual(report['port_rule']['decision'], 'GO')
+        self.assertIn('port=GO', line)
+        self.assertIn('link_cost=1.0', line)
+        self.assertEqual(sorted(report['traces']), ['d', 'd0', 'ds', 't', 't2'])
+        self.assertNotIn('d2', report['traces'], 'the drafter at two links is not needed for the link cost')
+        self.assertEqual(report['arms_requested'], ['solo', 'link_cost', 'chained', 'one_queue', 'separate'])
+        self.assertTrue(report['graft']['ok'])
+        stages = [line.split('stage=')[1] for line in lines if isinstance(line, str) and line.startswith('SUBDEV_H2 stage=arm-')]
+        self.assertEqual(stages, ['arm-t_solo', 'arm-d_solo', 'arm-t_solo2', 'arm-chained', 'arm-one_queue', 'arm-separate'])
+
+    def test_the_port_rule_follows_the_measured_link_cost(self):
+        for costs, decision in (({'ag1': 22000, 'ag2': 20000}, 'GO'), ({'ag1': 30000, 'ag2': 20000}, 'CONDITIONAL'), ({'ag1': 50000, 'ag2': 20000}, 'NO-GO')):
+            status, lines, report, ttnn = self.run_fake(self.LINKS, overlap='link', op_costs=costs)
+            self.assertEqual(report['verdict'], 'PASS-SEPARATE-LINKS', costs)
+            self.assertEqual(report['port_rule']['decision'], decision, (costs, report['evidence']['link_cost']))
+            self.assertIn('port=%s' % decision, self.verdict_line(lines))
+            self.assertEqual(status, 0)
+
+    def test_without_an_overlap_on_separate_links_the_rule_says_no_go(self):
+        status, lines, report, ttnn = self.run_fake(self.LINKS, overlap='serial')
+        self.assertEqual((status, report['verdict']), (1, 'FAIL-SERIALISED'))
+        self.assertEqual(report['port_rule']['decision'], 'NO-GO')
+        status, lines, report, ttnn = self.run_fake(self.LINKS, corrupt_on_overlap=True)
+        self.assertEqual((status, report['verdict']), (1, 'FAIL-BYTES'))
+        self.assertEqual(report['port_rule']['decision'], 'NO-GO')
+
+    def test_the_rule_is_not_applied_to_a_run_without_the_separate_arm(self):
+        status, lines, report, ttnn = self.run_fake(['--arms', 'solo,link_cost,chained,one_queue'])
+        self.assertEqual(report['verdict'], 'SAFE-PASS')
+        self.assertNotIn('port_rule', report)
+        self.assertEqual(report['evidence']['link_cost'], 1.0)
+
+    def test_a_graft_that_is_not_the_mounted_binary_stops_before_anything_is_opened(self):
+        for graft, needle in ((dict(marker=False), 'does not contain QWEN_AG_LINK_OFFSET_SD1'), (dict(sha_ok=False), 'not the graft 0000000000000000')):
+            status, lines, report, ttnn = self.run_fake(self.LINKS, overlap='link', graft=graft)
+            self.assertEqual((status, report['verdict']), (2, 'NOT-MEASURED'), graft)
+            self.assertIn('the link-offset graft is not what is mounted', report['error'])
+            self.assertIn(needle, report['error'])
+            self.assertIsNone(ttnn.opened, 'nothing was opened')
+            self.assertFalse(report['graft']['ok'])
+
+    def test_no_sha_in_the_environment_is_no_graft(self):
+        environ = {}
+        ttnn = fake_ttnn.FakeTTNN(chips=4, environ=environ)
+        out = os.path.join(self.directory.name, 'g.json')
+        lines = []
+        status = probe.main(['--output', out] + SMALL + self.LINKS, ttnn=ttnn, torch=fake_ttnn.FakeTorch(), environ=environ, log=lines.append,
+                            watchdog=make_dog(), clock=ttnn.clock, graft_files=())
+        self.assertEqual(status, 2)
+        self.assertIsNone(ttnn.opened)
+        self.assertIn('QWEN_AG_LINK_GRAFT_SHA256 is not set', self.verdict_line(lines))
+
+    def test_the_loaded_libraries_are_checked_too(self):
+        environ = {}
+        files = make_graft(self.directory.name, environ)
+        found = probe.verify_graft(environ, files)
+        self.assertTrue(found['ok'], found['problems'])
+        maps = '\n'.join('7f00-7f01 r-xp 0000 00:00 0 %s' % path for path in files)
+        self.assertTrue(probe.loaded_graft(dict(found, binaries=dict(found['binaries']), problems=[]), maps)['ok'])
+        other = os.path.join(self.directory.name, 'other_ttnncpp.so')
+        with open(other, 'wb') as handle:
+            handle.write(b'the image\'s own binary\x00')
+        bad = probe.loaded_graft(dict(found, binaries=dict(found['binaries']), problems=[]), maps + '\n7f02-7f03 r-xp 0 00:00 0 ' + other)
+        self.assertFalse(bad['ok'])
+        self.assertIn('the process mapped %s' % other, bad['problems'][0])
+        none = probe.loaded_graft(dict(found, binaries=dict(found['binaries']), problems=[]), '7f00-7f01 r-xp 0 00:00 0 /usr/lib/libc.so.6')
+        self.assertFalse(none['ok'])
+        self.assertIn('no _ttnncpp.so is mapped', none['problems'][0])
+
+    def test_the_marker_search_finds_a_literal_across_a_block_boundary(self):
+        path = os.path.join(self.directory.name, 'x.so')
+        with open(path, 'wb') as handle:
+            handle.write(b'a' * 100 + probe.GRAFT_MARKER + b'b' * 100)
+        self.assertTrue(probe.file_contains(path, probe.GRAFT_MARKER, chunk=107))
+        self.assertTrue(probe.file_contains(path, probe.GRAFT_MARKER, chunk=7))
+        self.assertFalse(probe.file_contains(path, b'NOT_THERE', chunk=7))
 
     # ------------------------------------------------------------------ a hang keeps what was measured before it
 
