@@ -25,6 +25,7 @@ EXPECTED = {
     twins.BASE + '-octo-bundle': {twins.BUNDLE: '4'},
     twins.BASE + '-octo-bundle-audit': {twins.BUNDLE: '4', twins.BUNDLE_AUDIT: '1'},
     twins.BASE + '-octo-glue8': {twins.GLUE8: '1'},
+    twins.BASE + '-octo-glue8-audit': {twins.GLUE8: '1'},
     twins.BASE + '-octo-levers': {twins.DRAFT: '1', twins.BUNDLE: '4', twins.GLUE8: '1'},
 }
 
@@ -57,13 +58,13 @@ class GeneratorTests(unittest.TestCase):
 
 class TwinTests(unittest.TestCase):
     def test_the_names_and_the_env_additions(self):
-        self.assertEqual({name: env for name, env, why in twins.specs()}, EXPECTED)
+        self.assertEqual({name: env for name, parent, env, why in twins.specs()}, EXPECTED)
         self.assertEqual(set(NAMES), set(EXPECTED))
 
     def test_each_twin_is_its_parent_plus_exactly_its_env_and_gate_only(self):
-        parent = profiles()[twins.PARENT]
         for name, added in EXPECTED.items():
             with self.subTest(profile=name):
+                parent = profiles()[twins.AUDIT_PARENT if name.endswith('-glue8-audit') else twins.PARENT]
                 profile = profiles()[name]
                 self.assertEqual(profile['env'], dict(parent['env'], **added))
                 self.assertEqual({key: value for key, value in profile.items() if key not in ('env', 'description')},
@@ -72,6 +73,7 @@ class TwinTests(unittest.TestCase):
                 self.assertEqual(profile['env']['QWEN_C2_GATE_PROFILE'], '1')
                 self.assertEqual(profile['env']['QWEN_FAST_OCTO'], 'alternate')
                 self.assertIn('GATE ONLY, UNQUALIFIED', profile['description'])
+                self.assertIn('The parent is %s ' % (twins.AUDIT_PARENT if name.endswith('-glue8-audit') else twins.PARENT), profile['description'])
 
     def test_no_other_profile_names_a_lever_flag(self):
         for name, profile in profiles().items():
@@ -79,6 +81,15 @@ class TwinTests(unittest.TestCase):
                 continue
             with self.subTest(profile=name):
                 self.assertFalse(set(twins.FLAGS) & set(profile.get('env') or {}))
+
+    def test_the_audited_glue_twin_carries_the_vglue_audit_and_no_draft_beside_the_singles_audit(self):
+        env = profiles()[twins.BASE + '-octo-glue8-audit']['env']
+        self.assertEqual((env['QWEN_FAST_TP4_VGLUE_AUDIT'], env['QWEN_FAST_VERIFY_T1_AUDIT'], env['QWEN_FAST_VERIFY_T2_AUDIT']), ('1', '1', '1'))
+        self.assertEqual(env['QWEN_FAST_DRAFT_SINGLES_AUDIT'], 'all')
+        self.assertNotIn(twins.DRAFT, env, 'the octo draft is refused beside the singles audit')
+        for name in NAMES:
+            if twins.DRAFT in profiles()[name]['env']:
+                self.assertEqual(profiles()[name]['env'].get('QWEN_FAST_DRAFT_SINGLES_AUDIT'), None, name)
 
     def test_the_memory_plan_is_the_parents(self):
         parent = profiles()[twins.PARENT]

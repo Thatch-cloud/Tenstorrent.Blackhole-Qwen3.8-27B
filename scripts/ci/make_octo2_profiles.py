@@ -12,6 +12,8 @@ The twins (suffixes of the parent P = c2-packed-tp4-8x262k-ship-prefix-levern):
   P-octo-bundle        QWEN_FAST_OCTO_ATTN_BUNDLE=4: the octo block's attention in two launches per layer instead of eight (docs/tp4-octo-attn-bundle.md). THE ARM of Lever 3.
   P-octo-bundle-audit  the bundle arm plus QWEN_FAST_OCTO_ATTN_BUNDLE_AUDIT=1: the eight single launches run beside the bundled ones and are compared in-trace. Not a timing arm.
   P-octo-glue8         QWEN_FAST_OCTO_GLUE8=1: the GDN glue levers at the octo block's eight-row users (docs/tp4-octo-glue8.md). THE ARM of Lever 2.
+  P-octo-glue8-audit   the glue8 arm on the AUDITED octo twin (P-octo-audit: the verify T1 and T2 audits, the vglue audit that compares every native glue site with the served path in-trace). The
+                       exactness job of Lever 2; not a timing arm. (The octo draft is refused beside that twin's singles audit, so there is no audited draft twin: the fold is a CPU proof.)
   P-octo-levers        all three levers (draft, bundle, glue8): the arm whose gain is the sum the owner asked for, read after each lever has passed alone.
 
 Every twin is gate_only and unqualified: nothing serves traffic on a lever until its exactness and paired-timing jobs (scripts/ci/references/tp4-octo2-jobs) have run and the owner decides.
@@ -29,6 +31,7 @@ PROFILES = Path(__file__).resolve().parent / 'qwen_c2_profiles.json'
 
 BASE = 'c2-packed-tp4-8x262k-ship-prefix-levern'
 PARENT = BASE + '-octo'
+AUDIT_PARENT = BASE + '-octo-audit'
 DRAFT = 'QWEN_FAST_OCTO_DRAFT'
 BUNDLE = 'QWEN_FAST_OCTO_ATTN_BUNDLE'
 BUNDLE_AUDIT = 'QWEN_FAST_OCTO_ATTN_BUNDLE_AUDIT'
@@ -42,7 +45,11 @@ COMMON = ('GATE ONLY, UNQUALIFIED (tp4/octo-2, docs/tp4-octo2.md; octo-T8 itself
 
 
 def specs():
-    """[(profile name, env additions, what it is)] in the order they are written."""
+    """[(profile name, parent name, env additions, what it is)] in the order they are written."""
+    return [(name, AUDIT_PARENT if name.endswith('-audit') and GLUE8 in env else PARENT, env, why) for name, env, why in _specs()]
+
+
+def _specs():
     return [
         (BASE + '-octo-draft', {DRAFT: '1'},
          'THIS ARM, Lever 1: %s=1. An octo round with all eight seats live is drafted by ONE eight-seat, eight-row, 64-row pass (octo_draft_tp) instead of the two four-seat quad passes. '
@@ -56,6 +63,9 @@ def specs():
          'The exactness job; not a timing arm.' % BUNDLE_AUDIT),
         (BASE + '-octo-glue8', {GLUE8: '1'},
          'THIS ARM, Lever 2: %s=1. The GDN verify-glue levers (split, merge, block conv, packed windows) run natively at the octo block\'s eight-row users instead of the served path.' % GLUE8),
+        (BASE + '-octo-glue8-audit', {GLUE8: '1'},
+         'THIS ARM, Lever 2 audited: %s=1 on the audited octo twin, so the vglue audit (QWEN_FAST_TP4_VGLUE_AUDIT) compares every native split, merge and block-conv entry of the octo block with the served path in the '
+         'trace, on every chip, and the verify T1 and T2 audits run on both shapes. The exactness job; two tests only (an audited 8x262k request costs about 8.4 minutes).' % GLUE8),
         (BASE + '-octo-levers', {DRAFT: '1', BUNDLE: BUNDLE_VALUE, GLUE8: '1'},
          'THIS ARM, all three levers: %s=1, %s=%s and %s=1 together; read after each has passed alone.' % (DRAFT, BUNDLE, BUNDLE_VALUE, GLUE8)),
     ]
@@ -63,35 +73,37 @@ def specs():
 
 def twin_names():
     """The generated twins' names (the profile-enumerating tests exempt them through profile_twins; test_octo2_profiles holds each)."""
-    return tuple(name for name, _env, _why in specs())
+    return tuple(name for name, _parent, _env, _why in specs())
 
 
-def parent_problems(profile):
+def parent_problems(profile, name=PARENT):
     """Why the parent cannot be twinned, [] when it can."""
     problems = []
     for flag in FLAGS:
         if flag in (profile.get('env') or {}):
-            problems.append('%s already names %s: a parent never carries the lever it is twinned with' % (PARENT, flag))
+            problems.append('%s already names %s: a parent never carries the lever it is twinned with' % (name, flag))
     if profile.get('gate_only') is not True:
-        problems.append('%s is not gate_only' % PARENT)
+        problems.append('%s is not gate_only' % name)
     if (profile.get('env') or {}).get('QWEN_FAST_OCTO') != 'alternate':
-        problems.append('%s is not the QWEN_FAST_OCTO=alternate timed arm' % PARENT)
+        problems.append('%s is not a QWEN_FAST_OCTO=alternate octo twin' % name)
     return problems
 
 
 def generate(data):
     """data's profiles with the twins inserted right after their parent (every other entry unmoved); returns the new dict."""
     profiles = data['profiles']
-    if PARENT not in profiles:
-        raise ValueError('the parent profile %s is not defined (make_octo_profiles.py --write first)' % PARENT)
-    problems = parent_problems(profiles[PARENT])
+    problems = []
+    for parent in (PARENT, AUDIT_PARENT):
+        if parent not in profiles:
+            raise ValueError('the parent profile %s is not defined (make_octo_profiles.py --write first)' % parent)
+        problems.extend(parent_problems(profiles[parent], parent))
     if problems:
         raise ValueError('; '.join(problems))
     generated = {}
-    for name, env, why in specs():
-        profile = copy.deepcopy(profiles[PARENT])
+    for name, parent, env, why in specs():
+        profile = copy.deepcopy(profiles[parent])
         profile['env'].update(env)
-        profile['description'] = COMMON + why
+        profile['description'] = (COMMON if parent == PARENT else COMMON.replace(PARENT, parent)) + why
         profile.pop('gate_only', None)
         profile['gate_only'] = True
         generated[name] = profile
