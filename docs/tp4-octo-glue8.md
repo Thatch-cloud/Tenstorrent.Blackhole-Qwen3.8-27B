@@ -24,7 +24,7 @@ V1, the block conv. V3a (the attention fold, `attn_fold=16`) already works at on
 | `split` | V2 `QWEN_FAST_TP4_GDN_GLUE` | per user a tile Slice (users 0, 4) or an untilize / slice / tilize round trip (1, 2, 3, 5, 6, 7), 8 pieces, in L1 | one `gdn_rows_dma8_tp` launch |
 | `merge` | V2 | 8 untilizes, a concat, a tilize | one launch, block in interleaved DRAM like the served join |
 | `block_conv` | V1 `QWEN_FAST_TP4_GDN_BLOCK_CONV` (needs V2 and the windows) | 8 `gdn_decode_conv_gates` launches at batch 8, 8 `z` slices | canon block, window stack, ONE conv gates at batch 64, unstack (`gdn_block_conv8_tp`) |
-| `windows` | T2 `QWEN_FAST_VERIFY_T2` (cut `windows`) | 8 served window launches (72 us each, latency bound) | one `gdn_conv_windows_packed8` launch for the 32 windows |
+| `windows` | T2 `QWEN_FAST_VERIFY_T2` (cut `windows`; the serving image's ENV default is 1, no profile names it) | 8 served window launches (72 us each, latency bound) | one `gdn_conv_windows_packed8` launch for the 32 windows |
 
 Files: `octo_glue8.py` (flag, markers, smoke rule), `gdn_rows_dma8_tp.py` + `.cpp` (the mover), `gdn_block_conv8_tp.py`, `gdn_conv_windows_packed8.py` + `.cpp`. Edited existing files, each only on the eight-row geometry behind the flag:
 `gdn_device_loop_state_tp.py` (the twin class: split, merge, which block stage), `gdn_user_batch_conv.py` (which windows builder), `packed_verifier.py` (the V1/V2 audit reads the octo block when the flag makes its sites native; before, `served_only`). The
@@ -61,8 +61,11 @@ Everything here changes how bytes move, never what the arithmetic is. The one ne
                                                                                            the existing per-capture count line: one count per GDN layer of the octo block's capture
 ```
 
-`octo_glue8.glue8_problems(log_text, env)` is the rule (to be called by `octo_judge` / `c2_smoke_check` for a profile that carries the flag): flag off, not one glue8 line and no `glue8_*` count; flag on, for every site `sites_wanted(env)` names, an engaged line at users=8 rows=8,
+`octo_glue8.glue8_problems(log_text, env)` is the rule (`env` is the profile's env; an absent `QWEN_FAST_VERIFY_T2` reads as on, as the image has it) (to be called by `octo_judge` / `c2_smoke_check` for a profile that carries the flag): flag off, not one glue8 line and no `glue8_*` count; flag on, for every site `sites_wanted(env)` names, an engaged line at users=8 rows=8,
 the count equal to 48 in a vglue engaged line, no `fell back` line, and no `[PINDIAG] tp4 vglue octo 8-row served path` line for that site. `octo_glue8.refusal(env)` is the admission question (needs `QWEN_FAST_TP=4`, `QWEN_FAST_OCTO` live or alternate, and at least one lever to make native).
+
+Tests (93, `scripts/ci`, all in the CPU allowlist): `test_octo_glue8` (mover on raw tiles, flag, smoke rule, files), `test_octo_glue8_block` (V1 data and stage), `test_octo_glue8_windows` (copy map, kernel diff, driver, wiring), `test_octo_glue8_twin` (the twin class
+flag off and on, the audit, the block stage choice). `test_tp4_closure_literals` classifies the four new lazy-imported modules as SERVED (scanned for pair literals; none).
 
 ## 5. What is NOT native, and why
 
