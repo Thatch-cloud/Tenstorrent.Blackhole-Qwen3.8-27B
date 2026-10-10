@@ -58,6 +58,10 @@ AUDITED = {
     ('packed_ordered_cache.py', 'ChainedOrderedCacheWriter.__init__', 'assign', 'positions'): 'the writer\'s own positions, built at construction',
     ('sdpa_long_tp.py', 'apply', 'subscript-assign', 'metadata'): 'the grid configurations rewrite the program config entries in place at the attach; never for multi',
     ('sdpa_multi_tp.py', 'MultiBlock.__init__', 'assign', 'cur_pos'): 'multi\'s OWN stacked cur_pos buffer (not a reader attribute)',
+    # tp4/octo-2 Lever 3 (QWEN_FAST_OCTO_ATTN_BUNDLE, gate only): the octo block's bundled attention is set as the reader's `multi` slot ONCE, from the fold reader's constructor at the attach
+    # (octo_attn_bundle.apply, before any trace); OctoBundle is MultiBlock's duck type, so packed_verifier's rebound check compares it with the one the trace was captured on. It builds its own
+    # stacked buffers (like MultiBlock) and binds the readers' identities at the attach; QWEN_FAST_TP4_SDPA (multi proper) is refused beside it (octo_attn_bundle.admission_problems).
+    ('octo_attn_bundle.py', 'apply', 'assign', 'multi'): 'assigned once at the attach by the fold reader\'s constructor; OctoBundle is the multi duck type and the same rebound check covers it',
     ('model_batch.py', 'ModelBatch.__init__', 'assign', 'replay_reader'): 'the batch constructor: five alternative constructions (the packed extent reader, its pair twins), each assigned once '
                                                                           'before any trace is captured; nothing else in the image assigns the attribute',
     ('sdpa_long_tp.py', 'apply', 'assign', 'multi'): 'the attach: the multi launch is bound to the reader once, from the reader constructor, before any trace',

@@ -121,6 +121,8 @@ PARKED_TWINS = frozenset(name for name, parent, env, why in _parked_twins.specs(
 import make_round_host_profiles as _round_host_twins  # noqa: E402
 PARKED_TWINS = PARKED_TWINS | frozenset(_round_host_twins.twin_names())     # tp4/round-host: test_tp4_round_host holds each
 PARKED_TWINS = PARKED_TWINS | frozenset(_octo_twins.twin_names())     # (and the octo-T8 twins, test_octo_profiles)
+import make_octo2_profiles as _octo2_twins  # noqa: E402
+PARKED_TWINS = PARKED_TWINS | frozenset(_octo2_twins.twin_names())     # (and tp4/octo-2's lever twins, test_octo2_profiles)
 
 class ShapeTests(unittest.TestCase):
     @classmethod

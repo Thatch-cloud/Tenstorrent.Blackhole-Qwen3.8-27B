@@ -1207,6 +1207,17 @@ class HookTests(unittest.TestCase):
         hook._packed_coordinator = coordinator
         return hook, bridges, coordinator
 
+    @staticmethod
+    def vllm_stub():
+        """vllm is not installed on the CPU runner: the hook imports DraftTokenIds from it inside the drafts."""
+        from types import ModuleType
+
+        outputs = ModuleType('vllm.v1.outputs')
+        outputs.DraftTokenIds = Mock()
+        v1, root = ModuleType('vllm.v1'), ModuleType('vllm')
+        root.v1, v1.outputs = v1, outputs
+        return {'vllm': root, 'vllm.v1': v1, 'vllm.v1.outputs': outputs}
+
     def drive(self, flag, octo_block, group_block, rows=8):
         hook, bridges, coordinator = self.hook(octo_block=octo_block, groups=None)
         groups = [(group_block, rows, [bridge.request for bridge in bridges])]
@@ -1216,7 +1227,7 @@ class HookTests(unittest.TestCase):
         with patch.dict(os.environ, env), patch('serving_worker_hook.discard_stale_ticket'), patch('serving_worker_hook.phase', side_effect=lambda name, ids, call: call()), \
                 patch('serving_worker_hook.budget_cap_enabled', return_value=False), patch('serving_worker_hook.real_remaining_budget', return_value=None), \
                 patch('serving_worker_hook.window_flags_on', return_value=False), patch('dflash_packed_proposal.packed_proposal_enabled', return_value=True), \
-                patch('vllm.v1.outputs.DraftTokenIds', create=True, new=Mock()):
+                patch.dict(sys.modules, self.vllm_stub()):
             try:
                 hook._drafts_by_block(bridges, groups, None)
             except Exception:
