@@ -224,7 +224,7 @@ class HarnessTests(unittest.TestCase):
     def test_the_card_job_template_parses_through_the_job_reader_with_rc_0(self):
         import subprocess
 
-        template = CI / 'references' / 'fusion-jobs' / 'WP7' / 'P7-cardm-permute-bytes.env'
+        template = CI / 'references' / 'fusion-wp7-jobs' / 'P7-cardm-permute-bytes.env'
         result = subprocess.run([sys.executable, '-s', str(CI / 'c2_serving_job.py'), str(template), str(CI / 'qwen_c2_profiles.json')], capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr[-400:] + result.stdout[-400:])
         self.assertIn('cardm_harness=optimisation/ttnn-op/draft_permute/run_card_m.sh', result.stdout)
