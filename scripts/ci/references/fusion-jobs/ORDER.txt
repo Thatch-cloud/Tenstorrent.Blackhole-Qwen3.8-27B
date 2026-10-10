@@ -13,7 +13,7 @@
 #     confirm it in the ship profile, not to ship. Each twin is the production profile plus exactly one lever (and, for the audit twin, its _AUDIT flag): make_fusion_profiles.py generated it from the package's manifest.
 # THE JOBS OF A LEVER <ID>: <ID>A the audited attach (exactness: the lever's served-composition comparison in the trace), then the timed ABAB at eight live (concurrent8_steady): <ID>C1 control, <ID>L1 lever, <ID>C2 control, <ID>L2 lever.
 #     The audits of every lever run before any timed pair, so a lever that is not exact costs one short job, not an hour of timing.
-# THE PACKAGES' OWN FOLDERS (card-M and detail templates, their read rules and decision rules) are beside this file: WP1.
+# THE PACKAGES' OWN FOLDERS (card-M and detail templates, their read rules and decision rules; under references/): fusion-jobs/WP1.
 # DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
 # NEEDS X0 <- B0
 # NEEDS S1A <- X0

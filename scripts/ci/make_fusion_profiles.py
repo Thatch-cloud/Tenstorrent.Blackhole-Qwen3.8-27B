@@ -547,10 +547,10 @@ def smoke_rows(plan, text):
         elif flag in taken:
             raise ManifestError('%s: %s is already dispatched by c2_smoke_check.py with the markers %s, not %s' % (
                 entry['wp'], flag, ' / '.join(taken[flag]), entry['engaged']))
-        elif flag in seen:
-            report.append((entry['wp'], entry['origin'], 'c2_smoke_check.py', 'existing', '%s is dispatched once for the lever and its smoke entry' % flag))
+        elif (flag, entry['value']) in seen:
+            report.append((entry['wp'], entry['origin'], 'c2_smoke_check.py', 'existing', '%s=%s is dispatched once for the lever and its smoke entry' % (flag, entry['value'])))
         else:
-            seen.add(flag)
+            seen.add((flag, entry['value']))
             levers.append((entry['wp'], entry['origin'], (flag, entry['value'], entry['engaged'], entry['fell_back'] or (entry['engaged'].rsplit(' ', 1)[0] + ' fell back'),
                                                          entry['what'])))
             report.append((entry['wp'], entry['origin'], 'c2_smoke_check.py', 'landed', 'FUSION_LEVERS %s' % flag))
@@ -558,10 +558,10 @@ def smoke_rows(plan, text):
         if audit_flag:
             if audit_flag in taken:
                 report.append((entry['wp'], entry['origin'], 'c2_smoke_check.py', 'existing', 'the static tables already dispatch %s' % audit_flag))
-            elif audit_flag in seen:
+            elif ('audit', audit_flag) in seen:
                 report.append((entry['wp'], entry['origin'], 'c2_smoke_check.py', 'existing', '%s is dispatched once' % audit_flag))
             else:
-                seen.add(audit_flag)
+                seen.add(('audit', audit_flag))
                 audits.append((entry['wp'], entry['origin'], (audit_flag, entry['audit'], entry['what'])))
                 report.append((entry['wp'], entry['origin'], 'c2_smoke_check.py', 'landed', 'FUSION_AUDITS %s' % audit_flag))
     return levers, audits, report

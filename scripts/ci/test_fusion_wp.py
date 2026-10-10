@@ -548,6 +548,16 @@ class ManifestShapeTests(unittest.TestCase):
         plan = self.plan(levers=[{'id': 'x', 'name': 'x', 'flag': 'QWEN_FAST_TP4_X', 'marker': 'tp4 x', 'module': 'x_smoke.py'}])
         self.assertIn('scripts/ci/x_smoke.py', [path for _wp, path, _reason in plan['image_files']])
 
+    def test_one_flag_with_two_values_is_two_rows_of_the_table(self):
+        """WP5's lever sets the options to a promoted string and its plumbing control sets the same flag to `served`: each is judged for its own value."""
+        manifests = {'WP3.json': {'wp': 'WP3', 'levers': [{'id': 'x', 'name': 'x', 'flag': 'QWEN_FAST_TP4_X', 'value': 'a+b', 'audit_flag': 'QWEN_FAST_TP4_X_AUDIT', 'marker': 'tp4 x'}],
+                                  'smoke': [{'flag': 'QWEN_FAST_TP4_X', 'value': 'served', 'audit_flag': 'QWEN_FAST_TP4_X_AUDIT', 'marker': 'tp4 x'}]}}
+        out, _report = gen.generate(real_texts(), plan_of(manifests), ROOT)
+        levers = literal('\n'.join(block(out['smoke'])), 'FUSION_LEVERS')
+        audits = literal('\n'.join(block(out['smoke'])), 'FUSION_AUDITS')
+        self.assertEqual([(row[0], row[1]) for row in levers], [('QWEN_FAST_TP4_X', 'a+b'), ('QWEN_FAST_TP4_X', 'served')])
+        self.assertEqual([row[0] for row in audits], ['QWEN_FAST_TP4_X_AUDIT'], 'one audit flag, one audit row')
+
     def test_a_smoke_flag_with_a_lever_of_the_same_flag_is_dispatched_once(self):
         manifests = {'WP3.json': {'wp': 'WP3', 'levers': [{'id': 'x', 'name': 'x', 'flag': 'QWEN_FAST_TP4_X', 'audit_flag': 'QWEN_FAST_TP4_X_AUDIT', 'marker': 'tp4 x'}],
                                   'smoke': [{'flag': 'QWEN_FAST_TP4_X', 'audit_flag': 'QWEN_FAST_TP4_X_AUDIT', 'marker': 'tp4 x'}]}}

@@ -150,12 +150,24 @@ def wrap(text, width=170):
     return lines
 
 
+def package_folders(folder):
+    """The packages' own template folders, by name relative to references/: the sub-folders of the pack (fusion-jobs/WP1) and, for the pack itself (fusion-jobs), the sibling folders that start with
+    `fusion-` (fusion-jobs-wp5, fusion-wp7-jobs: a package may keep its templates beside the pack so that nothing sits among the files the generator owns)."""
+    folder = Path(folder)
+    found = []
+    if folder.is_dir():
+        found += ['%s/%s' % (folder.name, path.name) for path in folder.iterdir() if path.is_dir()]
+        if folder.name == 'fusion-jobs' and folder.parent.is_dir():
+            found += [path.name for path in folder.parent.iterdir() if path.is_dir() and path.name.startswith('fusion-') and path != folder]
+    return sorted(found)
+
+
 def render_order(rows, plan, folder=FOLDER):
     total = sum(row['minutes'] for row in rows)
     cards = total - MINUTES['build']
     repeats = sum(row['minutes'] for row in rows if re.match(r'^[A-Z0-9]+(C2|L2)-', row['name']))
     every = arms(plan)
-    packs = sorted(path.name for path in Path(folder).iterdir() if path.is_dir()) if Path(folder).is_dir() else []
+    packs = package_folders(folder)
     lines = [
         "# The order of the op-fusion programme's four-card DEVELOPMENT window (docs/tp4-fusion.md): ONE image (%s, built by B0 from tp4/fusion-1 = tp4/next2-1 + the merged work packages) and ONE window for the" % IMAGE,
         "# fused-op arms of the packages, each behind default-off flags: %s." % ('; '.join('%s (%s: %s)' % (arm['name'], arm['wp'], env_text(arm['env'])) for arm in every) or 'none merged yet'),
@@ -172,7 +184,7 @@ def render_order(rows, plan, folder=FOLDER):
         "#     confirm it in the ship profile, not to ship. Each twin is the production profile plus exactly one lever (and, for the audit twin, its _AUDIT flag): make_fusion_profiles.py generated it from the package's manifest.",
         "# THE JOBS OF A LEVER <ID>: <ID>A the audited attach (exactness: the lever's served-composition comparison in the trace), then the timed ABAB at eight live (concurrent8_steady): <ID>C1 control, <ID>L1 lever, <ID>C2 control, <ID>L2 lever.",
         "#     The audits of every lever run before any timed pair, so a lever that is not exact costs one short job, not an hour of timing.",
-        "# THE PACKAGES' OWN FOLDERS (card-M and detail templates, their read rules and decision rules) are beside this file: %s." % (', '.join(packs) or 'none yet'),
+        "# THE PACKAGES' OWN FOLDERS (card-M and detail templates, their read rules and decision rules; under references/): %s." % (', '.join(packs) or 'none yet'),
         "# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.",
     ]
     for row in rows:

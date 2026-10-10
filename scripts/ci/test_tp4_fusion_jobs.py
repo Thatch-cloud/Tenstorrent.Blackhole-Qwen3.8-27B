@@ -307,20 +307,31 @@ class ArmTests(unittest.TestCase):
             jobs_gen.generate(plan_of(manifests), FOLDER)
         self.assertIn('same job prefix S1F2', str(caught.exception))
 
-    def test_the_order_names_the_packages_own_folders(self):
-        folder = Path(tempfile.mkdtemp(prefix='fusion-pack-'))
+    def test_the_order_names_the_packages_own_folders_inside_and_beside_the_pack(self):
+        references = Path(tempfile.mkdtemp(prefix='fusion-refs-'))
+        folder = references / 'fusion-jobs'
+        folder.mkdir()
         (folder / 'WP9').mkdir()
-        (folder / 'WP9' / 'ORDER.txt').write_text('x\n', encoding='utf-8')
+        (references / 'fusion-jobs-wp5').mkdir()
+        (references / 'fusion-wp7-jobs').mkdir()
+        (references / 'tp4-octo2-jobs').mkdir()
+        self.assertEqual(jobs_gen.package_folders(folder), ['fusion-jobs-wp5', 'fusion-jobs/WP9', 'fusion-wp7-jobs'])
         text = jobs_gen.generate(self.plan, folder)['ORDER.txt']
-        self.assertIn('beside this file: WP9.', text)
-        self.assertIn('beside this file: none yet.', jobs_gen.generate(self.plan, Path(tempfile.mkdtemp()))['ORDER.txt'])
+        self.assertIn('under references/): fusion-jobs-wp5, fusion-jobs/WP9, fusion-wp7-jobs.', text)
+        self.assertNotIn('tp4-octo2-jobs', text)
+        self.assertIn('under references/): none yet.', jobs_gen.generate(self.plan, Path(tempfile.mkdtemp()) / 'fusion-jobs')['ORDER.txt'])
 
 
 class PackageFolderTests(unittest.TestCase):
     """A package's own templates (references/fusion-jobs/<WP>/), written against the profiles the generator places: each exits zero through the reader."""
 
+    @staticmethod
+    def folders():
+        """The packages' own template folders: inside the pack and the `fusion-*` folders beside it."""
+        return [FOLDER.parent / name.split('/')[-1] if '/' not in name else FOLDER / name.split('/')[-1] for name in jobs_gen.package_folders(FOLDER)]
+
     def test_every_template_of_every_package_folder_exits_zero(self):
-        folders = [path for path in sorted(FOLDER.iterdir()) if path.is_dir()]
+        folders = self.folders()
         for folder in folders:
             for path in sorted(folder.glob('*.env')):
                 with self.subTest('%s/%s' % (folder.name, path.name)):
@@ -329,15 +340,19 @@ class PackageFolderTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr.decode('utf-8', 'replace'))
 
     def test_every_package_template_names_the_one_image(self):
-        for folder in [path for path in sorted(FOLDER.iterdir()) if path.is_dir()]:
+        for folder in self.folders():
             for path in sorted(folder.glob('*.env')):
                 self.assertEqual(job.parse_env(path.read_text(encoding='utf-8'))['C2_IMAGE_TAG'], IMAGE, '%s/%s' % (folder.name, path.name))
 
 
 class PublicTests(unittest.TestCase):
+    @staticmethod
+    def package_folders():
+        return PackageFolderTests.folders()
+
     def test_the_pack_names_no_host_address_registry_or_home_path(self):
         pattern = re.compile(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|/home/|/Users/|[A-Za-z]:[\\/]|\.local\b|\.lan\b|\bssh\b|ghcr\.io|docker\.io|sha256:[0-9a-f]{12}|spark-|thatch@')
-        for folder in (FOLDER, PACK):
+        for folder in [FOLDER, PACK] + self.package_folders():
             for path in sorted(folder.rglob('*')):
                 if path.is_dir():
                     continue
