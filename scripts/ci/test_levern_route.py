@@ -42,8 +42,9 @@ class Rig(object):
     """One engine: the staged model (the G1 stage's output, which every C2 build applies), its vLLM wrapper and a block pool, with the route
     installed under `environ`."""
 
-    def __init__(self, environ=ON, sources=None, install=True, traced=False):
+    def __init__(self, environ=ON, sources=None, install=True, traced=False, region_reads=False):
         self.fake = F.FakeTTNN()
+        self.fake.region_reads = region_reads
         self.logger = F.FakeLogger()
         model_source, vllm_source = sources or F.staged_sources()
         self.module = F.load_source(model_source, 'qwen36_model_under_test', F.model_stubs(self.fake, self.logger))
@@ -515,6 +516,150 @@ class AuditTests(unittest.TestCase):
         writes = [entry for entry in control.fake.log if entry[0] in ('copy', 'h2d', 'deallocate')]
         baseline = [entry for entry in plain.fake.log if entry[0] in ('copy', 'h2d', 'deallocate')]
         self.assertEqual(writes, baseline)
+
+
+REGION = dict(CONTROL, QWEN_FAST_LEVERN_KV_READ='region')
+CROSS = dict(CONTROL, QWEN_FAST_LEVERN_KV_READ='cross')
+
+
+class RegionDigestTests(unittest.TestCase):
+    """QWEN_FAST_LEVERN_KV_READ (docs/prefix-audit-cost.md): the audit digest's kv_sha from only the blocks the row's page table names, through the
+    qwen_kv_read extension, byte-identical to the whole-cache read. Run on the fixture's strict Shape fake (ttnn.Shape takes an int index only)."""
+
+    TOTAL = 5000
+
+    def digests(self, rig):
+        return [line.split('lever N digest ')[1] for line in rig.marker('lever N digest')]
+
+    def lines(self, rig, kind):
+        return rig.marker('lever N kv read ' + kind)
+
+    def run_arm(self, environ, region_reads=True, total=None, seed=40, prepare=None, rounds=1):
+        total = total or self.TOTAL
+        rig = Rig(environ=environ, region_reads=region_reads)
+        if prepare is not None:
+            prepare(rig.fake)
+        for index in range(rounds):
+            rig.whole('c%d' % index, F.prompt(total, seed=seed + index), rig.pool.row(total), 3)
+        return rig
+
+    def test_flag_off_the_digest_is_the_whole_cache_read_and_logs_no_region_line(self):
+        rig = self.run_arm(CONTROL)
+        self.assertEqual(len(self.digests(rig)), 1)
+        self.assertEqual(self.lines(rig, ''), [])
+        self.assertFalse([entry for entry in rig.fake.log if entry[0] in ('read_blocks', 'allocate_host')])
+
+    def test_region_and_cross_digests_equal_the_whole_cache_read(self):
+        for total in (4097, 5000, 9000):
+            with self.subTest(total=total):
+                full = self.run_arm(CONTROL, region_reads=False, total=total)
+                region = self.run_arm(REGION, total=total)
+                cross = self.run_arm(CROSS, total=total)
+                self.assertEqual(self.digests(full), self.digests(region))
+                self.assertEqual(self.digests(full), self.digests(cross))
+
+    def test_a_split_prefill_under_the_region_read_equals_the_whole_prompt_under_the_whole_read(self):
+        total = 9000
+        control = self.run_arm(CONTROL, region_reads=False, total=total, seed=41)
+        split = Rig(environ=dict(AUDIT, QWEN_FAST_LEVERN_KV_READ='region'), region_reads=True)
+        split.split('c0', F.prompt(total, seed=41), split.pool.row(total), 3)
+        self.assertEqual(self.digests(control), self.digests(split))
+
+    def test_the_region_read_reads_only_the_rows_blocks_and_never_a_whole_cache(self):
+        rig = self.run_arm(REGION)
+        needed = -(-self.TOTAL // F.BLOCK)
+        reads = [entry for entry in rig.fake.log if entry[0] == 'read_blocks']
+        caches = sum(len(pair) for pair in rig.model._paged_kv_caches)
+        self.assertEqual([entry[1] for entry in reads], [needed] * caches)
+        pool = rig.model._paged_kv_caches[0][0].shape[0]
+        self.assertLess(needed, pool)
+        whole = [entry for entry in rig.fake.log if entry[0] == 'to_torch' and entry[1][0] == pool]
+        self.assertEqual(whole, [], 'a whole-cache read ran under KV_READ=region')
+        line = self.lines(rig, 'mode=region')
+        self.assertEqual(len(line), 1)
+        self.assertIn('reads=%d blocks_read=%d' % (caches, caches * needed), line[0])
+        self.assertTrue(line[0].endswith('fallback=-'))
+        self.assertEqual(self.lines(rig, 'cross'), [])
+
+    def test_the_region_read_compiles_nothing(self):
+        rig = self.run_arm(REGION)
+        control = self.run_arm(CONTROL, region_reads=False)
+        self.assertEqual(rig.fake.programs, control.fake.programs, 'the region read added a program')
+
+        def compile_one(fake):
+            fake.region_compile = True
+
+        # the detector can see a compile: a read that compiled would differ from the control
+        self.assertNotEqual(self.run_arm(REGION, prepare=compile_one).fake.programs, control.fake.programs)
+
+    def test_cross_compares_every_selection_and_counts_nothing_bad_on_a_correct_read(self):
+        rig = self.run_arm(CROSS)
+        line = self.lines(rig, 'cross')
+        self.assertEqual(len(line), 1)
+        caches = sum(len(pair) for pair in rig.model._paged_kv_caches)
+        self.assertIn('tensors=%d mismatched=0' % caches, line[0])
+        self.assertTrue(line[0].endswith('fallback=-'))
+
+    def test_a_wrong_region_read_is_counted_and_the_digest_is_the_whole_reads(self):
+        reference = self.run_arm(CONTROL, region_reads=False)
+
+        def corrupt(fake):
+            fake.region_corrupt = True
+
+        rig = self.run_arm(CROSS, prepare=corrupt)
+        line = self.lines(rig, 'cross')[0]
+        self.assertNotIn('mismatched=0', line)
+        self.assertEqual(self.digests(rig), self.digests(reference), 'a wrong region read must not feed the cross arm\'s digest')
+        # region mode has no reference to compare with: the wrong bytes are digested (this is what cross exists to catch)
+        bad = self.run_arm(REGION, prepare=corrupt)
+        self.assertNotEqual(self.digests(bad), self.digests(reference))
+
+    def test_only_the_first_digests_are_cross_checked(self):
+        rig = self.run_arm(dict(CROSS, QWEN_FAST_LEVERN_KV_CROSS_STEPS='2'), rounds=3)
+        self.assertEqual(len(self.digests(rig)), 3)
+        self.assertEqual(len(self.lines(rig, 'cross')), 2)
+        self.assertEqual(len(self.lines(rig, 'mode=')), 3)
+        none = self.run_arm(dict(CROSS, QWEN_FAST_LEVERN_KV_CROSS_STEPS='0'))
+        self.assertEqual(self.lines(none, 'cross'), [])
+
+    def test_a_refused_region_read_falls_back_to_the_whole_read_and_says_so(self):
+        reference = self.run_arm(CONTROL, region_reads=False)
+
+        def refuse(fake):
+            fake.region_refuse = True
+
+        rig = self.run_arm(REGION, prepare=refuse)
+        self.assertEqual(self.digests(rig), self.digests(reference))
+        line = self.lines(rig, 'mode=region')[0]
+        self.assertIn("fallback='RuntimeError", line)
+        self.assertIn('reads=0', line)
+
+    def test_a_lost_shard_is_a_shape_error_and_never_a_digest_of_a_subset_of_the_heads(self):
+        reference = self.run_arm(CONTROL, region_reads=False)
+
+        def lose(fake):
+            fake.region_lose_shard = True
+
+        rig = self.run_arm(REGION, prepare=lose)
+        self.assertEqual(self.digests(rig), self.digests(reference))
+        self.assertIn('region read composed shape', self.lines(rig, 'mode=region')[0])
+
+    def test_an_image_without_the_extension_is_refused_at_the_attach_not_in_the_first_prefill(self):
+        for environ in (REGION, CROSS):
+            with self.subTest(mode=environ['QWEN_FAST_LEVERN_KV_READ']):
+                with self.assertRaises(ValueError) as caught:
+                    Rig(environ=environ, region_reads=False)
+                self.assertIn('qwen_kv_read', str(caught.exception))
+        ready = Rig(environ=REGION, region_reads=True)
+        self.assertTrue(ready.marker('lever N kv read ready mode=region'))
+        full = Rig(environ=CONTROL, region_reads=False)
+        self.assertEqual(full.marker('lever N kv read'), [])
+
+    def test_a_long_prompt_still_skips_the_kv_digest(self):
+        with mock.patch.object(policy, 'KV_DIGEST_MAX_PROMPT', 4096):
+            rig = self.run_arm(REGION)
+        self.assertEqual(self.lines(rig, 'mode='), [])
+        self.assertIn('kv_sha=' + policy.KV_SKIPPED, self.digests(rig)[0])
 
 
 class WarmTests(unittest.TestCase):
