@@ -52,7 +52,7 @@ IMAGE_ROOTS = ('scripts/ci/', 'speculative-decoding/harness/')
 
 # What a manifest may hold. Aliases are the spellings a package is likely to use; they mean the canonical key.
 INFO_KEYS = ('wp', 'branch', 'head', 'description', 'reason', 'notes', 'card_jobs', 'docs', 'owner', 'ci_run', 'status')
-KEYS = ('levers', 'profiles', 'smoke', 'smoke_rules', 'image_files', 'tests', 'tp_addresses')
+KEYS = ('levers', 'profiles', 'smoke', 'smoke_rules', 'pack_arms', 'image_files', 'tests', 'tp_addresses')
 ALIASES = {
     'twin_profiles': 'profiles', 'profile_twins': 'profiles', 'twins': 'profiles',
     'smoke_dispatch': 'smoke', 'smoke_markers': 'smoke', 'smoke_modules': 'smoke', 'smoke_check': 'smoke',
@@ -60,7 +60,7 @@ ALIASES = {
     'overlay_manifest': 'image_files', 'image_entries': 'image_files',
     'cpu_tests': 'tests', 'cpu_allowlist': 'tests', 'allowlist': 'tests', 'test_modules': 'tests', 'tests_to_allowlist': 'tests',
     'tp_addresses_rows': 'tp_addresses',
-    'smoke_rule': 'smoke_rules', 'smoke_check_rules': 'smoke_rules',
+    'smoke_rule': 'smoke_rules', 'smoke_check_rules': 'smoke_rules', 'pack_arm': 'pack_arms', 'card_pack': 'pack_arms',
 }
 TP_KEYS = ('twins', 'module_twins', 'flagged_twins', 'flagged_module_twins')
 
@@ -338,7 +338,7 @@ def tp_of(wp, value, where):
 
 def normalise(manifests):
     """The plan: every manifest's entries in one structure, in file-name then file order. Names collide across packages: refused."""
-    plan = dict(levers=[], profiles=[], smoke=[], smoke_rules=[], image_files=[], tests=[], tp={key: [] for key in TP_KEYS}, info=[])
+    plan = dict(levers=[], profiles=[], smoke=[], smoke_rules=[], pack_arms=[], image_files=[], tests=[], tp={key: [] for key in TP_KEYS}, info=[])
     for file_name, raw in manifests:
         where = 'fusion-wp/' + file_name
         wp = text_of(raw.get('wp', Path(file_name).stem.upper()), where, 'wp')
@@ -368,6 +368,12 @@ def normalise(manifests):
             plan['smoke'].append(entry)
             if entry['module']:
                 plan['image_files'].append((wp, entry['module'], 'the smoke module of %s' % entry['flag']))
+        for arm in listing(canonical.get('pack_arms', (0, None))[1], where, 'pack_arms'):
+            arm = text_of(arm, where, 'a pack arm')
+            arm = arm[len(NAMESPACE):] if arm.startswith(NAMESPACE) else arm
+            if not ID.match(arm):
+                raise ManifestError('%s: pack arm %r is the suffix of an extra profile twin (lower-case letters, digits and single dashes)' % (where, arm))
+            plan['pack_arms'].append((wp, arm))
         for module in listing(canonical.get('smoke_rules', (0, None))[1], where, 'smoke_rules'):
             module = text_of(module, where, 'a smoke rule module')
             module = module[len('scripts/ci/'):] if module.startswith('scripts/ci/') else module
@@ -388,6 +394,11 @@ def normalise(manifests):
             if other:
                 raise ManifestError('%s and %s both name the lever %s %s: one package owns a lever' % (other, lever['wp'], what, lever[key]))
             seen[(what, lever[key])] = lever['wp']
+    explicit = set(item['name'][len(NAMESPACE):] for item in plan['profiles'])
+    for wp, arm in plan['pack_arms']:
+        base = arm[:-len('-audit')] if arm.endswith('-audit') else arm
+        if base not in explicit and arm not in explicit:
+            raise ManifestError('%s: pack arm %s is not an extra profile twin of any manifest (a lever is in the pack already)' % (wp, arm))
     owners = {}
     for twin in profile_twins(plan):
         if twin['name'] in owners:

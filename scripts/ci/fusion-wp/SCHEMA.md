@@ -38,6 +38,7 @@ block is stale. A manifest with a key the generator cannot place is refused by n
 | `profiles[]` | `qwen_c2_profiles.json` | an extra twin: `{"name": "<id>", "env": {...}, "reason": "...", "audit": false}`; `name` is the suffix after `-fx-`; `parent` defaults to the production profile |
 | `smoke[]` | `c2_smoke_check.py` | a marker row without a profile: `{"flag", "value", "marker" or "engaged"/"fell_back"/"audit", "audit_flag", "what"}` |
 | `smoke_rules[]` | `c2_smoke_check.py` | the package's own stricter smoke rule: a host-side module of `scripts/ci` (`"tp4_shard_argmax_smoke"`) with `problems(env, container_text) -> [problem]`, called once per arm by `fusion_problems` (not an image file) |
+| `pack_arms[]` | `references/fusion-jobs` | extra profile twins (`profiles[]`) that join the integrated card pack: the suffixes (`"s1f2"`); a lever is in the pack already, and an extra twin that no manifest names stays with its package's own folder |
 | `image_files[]` | `docker/qwen-c2-overlay.txt` | strings or `{"path", "reason"}`, under `scripts/ci/` (every new module, kernel source, smoke module and any module an overlaid file imports); the overlay is the ONE image list, the P8 copy lists are not touched |
 | `tests[]` | the CPU allowlist (the regression step the any-ref CPU suite runs) | module names (`test_x`, or `test_x.Class.method`) or `{"discover": "<dir>", "pattern": "test_*.py"}` |
 | `tp_addresses` | `tp_addresses.py` | `twins` (module, attr, twin module, twin attr), `module_twins` (module, twin module), `flagged_twins` / `flagged_module_twins` (`{"module", "attr", "flag", "gate": "module:function"}`, the gate takes the environment mapping) |
@@ -54,8 +55,9 @@ a duplicate, a path outside `scripts/ci/`).
 
 A package's own templates live in `scripts/ci/references/fusion-jobs/<WP>/` (its card-M jobs, its detail jobs, its read and decision rules; every template passes
 `python3 -s scripts/ci/c2_serving_job.py <env> scripts/ci/qwen_c2_profiles.json` with rc 0, naming the one image `tp4-fusion-1`). The files directly in `fusion-jobs/` are the
-integrator's: `make_fusion_jobs.py` writes B0, X0, Z and, for every lever and every extra profile twin, an audited attach (`<ID>A`) and a timed control/lever ABAB at eight live
-(`<ID>C1 <ID>L1 <ID>C2 <ID>L2`); an extra twin `x` with an audit twin `x-audit` is one arm.
+integrator's: `make_fusion_jobs.py` writes B0, X0, Z and, for every lever (and every extra profile twin named under `pack_arms`), an audited attach (`<ID>A`) and a timed control/lever ABAB at eight
+live (`<ID>C1 <ID>L1 <ID>C2 <ID>L2`); an extra twin `x` with an audit twin `x-audit` is one arm. A package may keep its templates in
+`references/fusion-jobs/<WP>/` or in a sibling `references/fusion-*` folder.
 
 `WP0.json` is the integrator's own manifest (same schema): wiring a package asked for in its notes (for example a `smoke_rules` entry for its stricter smoke module), kept out of the
 package's file so that the package's manifest stays exactly as it pushed it.

@@ -3,8 +3,8 @@
     python3 scripts/ci/make_fusion_jobs.py --write   regenerate the templates and ORDER.txt from scripts/ci/fusion-wp/*.json
     python3 scripts/ci/make_fusion_jobs.py --check   exit 1 if the checked-in pack is not what the manifests generate
 
-ONE image (tp4-fusion-1, built by B0 from the pushed branch head), ONE window, one tag at a time. The pack is B0 (build), X0 (status, rescan, reset), then for every arm of every
-merged package (make_fusion_profiles.py: the levers and the extra profile twins in scripts/ci/fusion-wp/*.json):
+ONE image (tp4-fusion-1, built by B0 from the pushed branch head), ONE window, one tag at a time. The pack is B0 (build), X0 (status, rescan, reset), then for every lever of every
+merged package (make_fusion_profiles.py: scripts/ci/fusion-wp/*.json; an extra profile twin joins when a manifest names it under pack_arms):
 
   <ID>A   the AUDITED attach smoke: the lever's -audit twin (the lever plus its _AUDIT flag, which runs the served composition beside the lever on the device) over warmup and
           concurrent8_steady; the exactness gate. Skipped for a lever with no audit flag (its timed jobs then need the control only).
@@ -39,9 +39,11 @@ HEADER = """# A committed TEMPLATE of .github/c2-serving-job.env for the op-fusi
 
 def arms(plan):
     """[dict(prefix, id, wp, name, reason, timed, audit, env)] in the order the arms are written: one per lever (its timed twin and, with an audit flag, its audit twin), then one
-    per explicit profile twin (`<suffix>` timed, `<suffix>-audit` its audit twin; an audit twin with no timed one is an audit-only arm). The prefix is the id in capitals
+    per extra profile twin a manifest names under pack_arms (`<suffix>` timed, `<suffix>-audit` its audit twin; an audit twin with no timed one is an audit-only arm); the other
+    extra twins (variants, combinations, controls) belong to their package's own folder. The prefix is the id in capitals
     ('s1' -> S1, 'kv-writer' -> KVWRITER) and must be unique."""
     out, by_id, seen = [], {}, {}
+    chosen = set(arm for _wp, arm in plan.get('pack_arms', ()))
     for twin in fusion.profile_twins(plan):
         suffix = twin['name'][len(fusion.NAMESPACE):]
         if twin['kind'] == 'audit' and suffix.endswith('-audit'):
@@ -50,6 +52,8 @@ def arms(plan):
             ident, slot = suffix, 'audit'
         else:
             ident, slot = suffix, 'timed'
+        if twin['lever'] is None and ident not in chosen and suffix not in chosen:
+            continue            # an extra twin (a variant, a combination, a control) is in the pack only when a manifest names it under pack_arms
         arm = by_id.get(ident)
         if arm is None:
             prefix = ident.upper().replace('-', '')

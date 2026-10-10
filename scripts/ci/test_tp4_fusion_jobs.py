@@ -257,12 +257,12 @@ class SyntheticPackTests(unittest.TestCase):
 
 
 ARM_MANIFESTS = {
-    'WP1.json': {'wp': 'WP1', 'levers': [{'id': 's1', 'name': 'S1 shard argmax', 'flag': 'QWEN_FAST_TP4_SHARD_ARGMAX', 'audit_flag': 'QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT',
+    'WP1.json': {'wp': 'WP1', 'pack_arms': ['s1f2'], 'levers': [{'id': 's1', 'name': 'S1 shard argmax', 'flag': 'QWEN_FAST_TP4_SHARD_ARGMAX', 'audit_flag': 'QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT',
                                           'marker': 'tp4 shard argmax', 'reason': 'one scan'}],
                  'profiles': [{'name': 's1f2', 'env': {'QWEN_FAST_TP4_SHARD_ARGMAX': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2': '1'}, 'reason': 'tree fold'},
                               {'name': 's1f2-audit', 'audit': True, 'reason': 'tree fold audited',
                                'env': {'QWEN_FAST_TP4_SHARD_ARGMAX': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT': '1'}}]},
-    'WP6.json': {'wp': 'WP6', 'profiles': [{'name': 'dr-x', 'env': {'QWEN_FAST_TP4_DRAFT_REDUCE': '1'}, 'reason': 'x'},
+    'WP6.json': {'wp': 'WP6', 'pack_arms': ['dr-x', 'dr-solo-audit'], 'profiles': [{'name': 'dr-x', 'env': {'QWEN_FAST_TP4_DRAFT_REDUCE': '1'}, 'reason': 'x'},
                                            {'name': 'dr-solo-audit', 'audit': True, 'env': {'QWEN_FAST_TP4_DRAFT_REDUCE': '1', 'QWEN_FAST_TP4_DRAFT_REDUCE_AUDIT': '1'},
                                             'reason': 'an audit with no timed twin'}]},
 }
@@ -300,9 +300,30 @@ class ArmTests(unittest.TestCase):
             result = subprocess.run([sys.executable, '-s', str(READER), str(path), str(self.profiles)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(HERE.parent.parent))
             self.assertEqual(result.returncode, 0, path.name + ' ' + result.stderr.decode('utf-8', 'replace'))
 
+    def test_an_extra_twin_is_in_the_pack_only_when_a_manifest_names_it(self):
+        manifests = json.loads(json.dumps(ARM_MANIFESTS))
+        del manifests['WP1.json']['pack_arms']
+        del manifests['WP6.json']['pack_arms']
+        pack = pack_of(plan_of(manifests))
+        self.assertEqual([short(line[0]) for line in order_lines(pack)], ['B0', 'X0', 'S1A', 'S1C1', 'S1L1', 'S1C2', 'S1L2', 'Z'], 'levers only')
+        # the twins are still in the profiles file: the packages' own folders use them
+        twins = json.loads(profiles_file(plan_of(manifests)).read_text(encoding='utf-8'))['profiles']
+        self.assertIn(fusion.NAMESPACE + 's1f2', twins)
+        self.assertIn(fusion.NAMESPACE + 'dr-solo-audit', twins)
+
+    def test_a_pack_arm_that_is_no_extra_twin_is_refused_by_name(self):
+        manifests = json.loads(json.dumps(ARM_MANIFESTS))
+        manifests['WP6.json']['pack_arms'] = ['nothing']
+        with self.assertRaises(fusion.ManifestError) as caught:
+            plan_of(manifests)
+        self.assertIn('pack arm nothing is not an extra profile twin', str(caught.exception))
+        manifests['WP6.json']['pack_arms'] = ['s1']
+        with self.assertRaises(fusion.ManifestError):
+            plan_of(manifests)
+
     def test_two_arms_with_one_prefix_are_refused(self):
         manifests = dict(ARM_MANIFESTS)
-        manifests['WP2.json'] = {'wp': 'WP2', 'profiles': [{'name': 's-1f2', 'env': {'QWEN_FAST_TP4_X': '1'}, 'reason': 'x'}]}
+        manifests['WP2.json'] = {'wp': 'WP2', 'pack_arms': ['s-1f2'], 'profiles': [{'name': 's-1f2', 'env': {'QWEN_FAST_TP4_X': '1'}, 'reason': 'x'}]}
         with self.assertRaises(fusion.ManifestError) as caught:
             jobs_gen.generate(plan_of(manifests), FOLDER)
         self.assertIn('same job prefix S1F2', str(caught.exception))
