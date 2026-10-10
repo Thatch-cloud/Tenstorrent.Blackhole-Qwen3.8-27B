@@ -1068,7 +1068,8 @@ class SchedulerParityTests(unittest.TestCase):
                 with graft_fakes.Quiet():
                     model.prefill(data.req_id, scheduler.requests[data.req_id].all_token_ids, data.num_computed_tokens)
             scheduler.finish(request)
-        stats = dict(registry.stats)
+        # The counters the parent kept: the store policies' and the telemetry's are fed by this graft's trim and not by the parent's.
+        stats = {name: registry.stats[name] for name in prefix_registry.LEGACY_STAT_NAMES}
         for name in ('capture_ms', 'restore_ms'):
             stats.pop(name)
         return trace, stats, [line for line in logs if not line.startswith('install ')]

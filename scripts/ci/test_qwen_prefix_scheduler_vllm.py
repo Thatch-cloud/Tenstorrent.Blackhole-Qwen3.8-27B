@@ -1148,9 +1148,7 @@ class StickyReservationOnRealVllmTests(unittest.TestCase):
 
 
 # What the registry counted before the store policies and the telemetry existed (everything else is new).
-LEGACY_STATS = [name for name in source_patch.prefix_registry.STAT_NAMES
-                if not (name.startswith(('class_', 'lost_tokens_', 'supersede_'))
-                        or name in ('evicted_fair', 'evicted_superseded', 'admitted_prompt_tokens', 'returning_sessions'))]
+LEGACY_STATS = list(source_patch.prefix_registry.LEGACY_STAT_NAMES)
 
 
 @unittest.skipIf(VLLM_ERROR is not None, 'vLLM is not importable here (%s)' % VLLM_ERROR)

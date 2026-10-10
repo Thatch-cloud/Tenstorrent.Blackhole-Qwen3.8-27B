@@ -170,7 +170,9 @@ CLASS_HIT = ('first_turn', 'rewritten', 'kv_evicted', 'ckpt_evicted', 'ckpt_miss
 # a registry clear, or anything else.
 GONE_REASONS = ('budget', 'coupled', 'superseded', 'cleared', 'other')
 
-STAT_NAMES = (
+# The counters the registry kept before the store policies and the telemetry; a graft that does not feed those (an older one) leaves the
+# rest at zero, so a parity check against it compares these.
+LEGACY_STAT_NAMES = (
     'attempts', 'staged', 'dropped_attempts', 'commit_mismatch', 'admissions', 'grants',
     'grant_tokens', 'trim_loss_tokens', 'kv_hit_without_checkpoint', 'orphans',
     'same_step_rejects', 'token_checks', 'token_mismatches', 'unsalted_denied', 'session_denied',
@@ -179,6 +181,8 @@ STAT_NAMES = (
     'mid_loop_unplanned', 'evicted_lru', 'evicted_coupled', 'dropped', 'clears', 'reset_kept',
     'freed_requests', 'restores', 'restore_ms', 'capture_ms', 'dropped_hits', 'program_growth',
     'inflight_started', 'inflight_captures', 'inflight_dropped',
+)
+STAT_NAMES = LEGACY_STAT_NAMES + (
     # store hygiene
     'evicted_fair', 'evicted_superseded', 'supersede_checks', 'supersede_kept_pinned', 'supersede_kept_shared',
     'supersede_kept_branch',

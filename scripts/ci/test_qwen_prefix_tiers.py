@@ -44,9 +44,7 @@ from test_qwen_prefix_scheduler_patch import (  # noqa: E402
     FakeGdnModel, FakeScheduler, Quiet, Request, fake_vllm_modules, tokens as make_tokens)
 
 BF16 = {'QWEN35_GDN_STATE_BF16': '1'}
-LEGACY_STATS = [name for name in registry_module.STAT_NAMES
-                if not (name.startswith(('class_', 'lost_tokens_', 'supersede_')) or name in (
-                    'evicted_fair', 'evicted_superseded', 'admitted_prompt_tokens', 'returning_sessions'))]
+LEGACY_STATS = list(registry_module.LEGACY_STAT_NAMES)
 
 
 def salt_of(tag):
