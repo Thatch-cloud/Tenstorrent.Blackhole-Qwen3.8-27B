@@ -1,4 +1,4 @@
-"""WP5's card templates and manifest on the CPU: the pack (references/fusion-jobs/WP5) is what optimisation/ttnn-op/ccl_sweep/make_pack.py generates, every template parses
+"""WP5's card templates and manifest on the CPU: the pack (references/fusion-jobs-wp5) is what optimisation/ttnn-op/ccl_sweep/make_pack.py generates, every template parses
 through c2_serving_job.py with rc 0 (the twin profiles the integrator's generator makes are built here from the manifest when the profiles file does not have them yet, and the
 fabric-probe patch is applied to a copy of the job reader when the tree has not taken it yet), the manifest names real files and a lever value the strict parser accepts."""
 
@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -23,7 +24,7 @@ sys.path.insert(0, str(REPO / 'optimisation' / 'ttnn-op' / 'ccl_sweep'))
 import ccl_options_tp  # noqa: E402
 import make_pack  # noqa: E402
 
-PACK = HERE / 'references' / 'fusion-jobs' / 'WP5'
+PACK = HERE / 'references' / 'fusion-jobs-wp5'
 MANIFEST = HERE / 'fusion-wp' / 'WP5.json'
 PATCH = HERE / 'fusion-wp' / 'WP5-fabric-probe.patch'
 PROFILES = HERE / 'qwen_c2_profiles.json'
@@ -87,10 +88,19 @@ class ThePack(unittest.TestCase):
         self.assertEqual(make_pack.stale(PACK, wanted), [])
         self.assertEqual(sorted(path.name for path in PACK.glob('*')), sorted(wanted))
 
-    def test_the_pack_is_a_subfolder_the_pack_generator_never_reads(self):
+    def test_the_pack_is_a_sibling_of_the_integrators_folder_not_inside_it(self):
         self.assertTrue(PACK.is_dir())
-        self.assertEqual(PACK.parent.name, 'fusion-jobs')
-        self.assertEqual(PACK.name, 'WP5')
+        self.assertEqual(PACK.parent, HERE / 'references')
+        self.assertEqual(PACK.name, 'fusion-jobs-wp5')
+        self.assertFalse((HERE / 'references' / 'fusion-jobs' / 'WP5').exists(), 'test_tp4_fusion_jobs reads every entry of fusion-jobs as a file')
+
+    def test_the_pack_and_the_patch_name_no_host_address_registry_or_home_path(self):
+        pattern = re.compile(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|/home/|/Users/|[A-Za-z]:[\\/]|\.local\b|\.lan\b|\bssh\b|ghcr\.io|docker\.io|sha256:[0-9a-f]{12}|spark-|thatch@')
+        for path in sorted(PACK.iterdir()) + [PATCH, MANIFEST]:
+            text = path.read_text(encoding='utf-8')
+            with self.subTest(path.name):
+                self.assertIsNone(pattern.search(text), pattern.search(text) and pattern.search(text).group(0))
+                self.assertNotIn('\r', text)
 
     def test_order_lists_every_template_once_with_a_mode_and_minutes(self):
         lines = [line.split() for line in (PACK / 'ORDER.txt').read_text(encoding='utf-8').splitlines() if line and not line.startswith('#')]

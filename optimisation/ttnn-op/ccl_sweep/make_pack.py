@@ -1,4 +1,4 @@
-"""The WP5 card templates (scripts/ci/references/fusion-jobs/WP5), generated (stdlib only).
+"""The WP5 card templates (scripts/ci/references/fusion-jobs-wp5), generated (stdlib only).
 
     python3 optimisation/ttnn-op/ccl_sweep/make_pack.py --write   regenerate the templates and ORDER.txt
     python3 optimisation/ttnn-op/ccl_sweep/make_pack.py --check   exit 1 if the checked-in pack is not what this generates
@@ -17,7 +17,8 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent.parent
-FOLDER = REPO / 'scripts' / 'ci' / 'references' / 'fusion-jobs' / 'WP5'
+# A sibling of references/fusion-jobs, not a subfolder: test_tp4_fusion_jobs reads every entry of that folder as a file.
+FOLDER = REPO / 'scripts' / 'ci' / 'references' / 'fusion-jobs-wp5'
 
 IMAGE = 'tp4-fusion-1'
 PRODUCTION = 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic'
