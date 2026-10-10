@@ -513,6 +513,14 @@ class EvidenceTests(unittest.TestCase):
         (self.dir / 'ordered_cache.py').write_bytes((self.dir / 'ordered_cache.py').read_bytes() + b'\n')
         self.assertIn('does not stand', self.problems(digest)[0])
 
+    def test_the_proof_widths_are_the_page_widths_the_ordered_writers_are_qualified_at(self):
+        import ordered_writer_tp4_card_test as card
+
+        self.assertEqual(kvpw.PROOF_WIDTHS, page_width_tp4.WIDTHS_RECORDED)
+        self.assertEqual(kvpw.PROOF_WIDTHS, card.WIDTHS)
+        self.assertEqual(kvpw.PROOF_CACHES, ('k', 'v'))
+        self.assertEqual(kvpw.PROOF_MODES, tuple(card.MODES))
+
     def test_the_signature_binds_the_kernel_the_pinned_compute_and_the_geometry(self):
         base = kvpw.design_signature(2)
         self.assertEqual(base, kvpw.design_signature(2))

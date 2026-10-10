@@ -2,7 +2,7 @@
 # The lever's own audited attach and timed ABAB are generated into ../ORDER.txt from scripts/ci/fusion-wp/WP2.json (lever id kvpage); they run only after W2 PASSED and was recorded
 # (ordered_writer_evidence_tp4.json carries a page_writer block): without it the lever falls back to the chained writer and those jobs would measure nothing.
 # NEEDS KVPAGE-W2-proof <- KVPAGE-W1-proof-watcher
-KVPAGE-W1-proof-watcher stop tp4-fusion-1 20
+KVPAGE-W1-proof-watcher stop tp4-fusion-1 30
 KVPAGE-W2-proof stop tp4-fusion-1 100
 KVPAGE-W3-negative-drop soft tp4-fusion-1 12
 KVPAGE-W4-negative-slot soft tp4-fusion-1 12
