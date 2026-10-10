@@ -98,7 +98,7 @@
      "eight parked engines take 3.346 GB of DRAM per chip, 0.418 GB each and identical on all four chips in every op-fusion run (the lever arms' band of parked_judge)",
      "the W2 and engine-reuse evidence of the approved waiver w2-er-262k-2026-10-10 (docs/tp4-ship-ln-w2-er.md), live in production since 2026-10-10"
     ],
-    "decision": "PENDING: requested on 2026-10-11 for the owner's decision; the op-fusion levers have run on cards only as gate-only twins and the ship gates have not run"
+    "decision": "APPROVED by the owner 2026-10-11 (Claude Code session, after the fusion ship gates FXA, G1, GX0/GX1 and G2 passed on tp4-fusion-5): Yeah I approve but want to keep going"
    }
   }
  ]
