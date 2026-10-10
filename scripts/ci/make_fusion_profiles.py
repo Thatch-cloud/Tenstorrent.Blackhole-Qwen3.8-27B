@@ -12,7 +12,8 @@ a merge, regenerate):
   scripts/ci/qwen_c2_profiles.json         per lever, two GATE-ONLY twins of the production profile (PARENT below, byte for byte but for the owner traffic waiver
                                            and gate_only): -fx-<id> (the flag on: the timed arm) and -fx-<id>-audit (plus the lever's _AUDIT flag: the exactness arm)
   scripts/ci/c2_smoke_check.py             FUSION_LEVERS / FUSION_AUDITS, the marker tables fusion_problems() reads (a fall-back line fails the smoke; a profile that
-                                           asks for the lever and logs no engaged line fails; an audit flag with no 'exact=True' audit line fails)
+                                           asks for the lever and logs no engaged line fails; an audit flag with no 'exact=True' audit line fails), and FUSION_RULES,
+                                           the packages' own stricter rules (host-side modules with problems(env, container_text)) that it calls once per arm
   docker/qwen-c2-overlay.txt               the image copy list: the ONE list (c2_overlay.py); the P8 copy lists are not touched
   .github/workflows/qwen-integration-cpu.yml   the CPU allowlist: the regression step the any-ref CPU suite runs
   scripts/ci/tp_addresses.py               twin rows, when a package binds a twin module or class through tp_addresses
@@ -51,7 +52,7 @@ IMAGE_ROOTS = ('scripts/ci/', 'speculative-decoding/harness/')
 
 # What a manifest may hold. Aliases are the spellings a package is likely to use; they mean the canonical key.
 INFO_KEYS = ('wp', 'branch', 'head', 'description', 'reason', 'notes', 'card_jobs', 'docs', 'owner', 'ci_run', 'status')
-KEYS = ('levers', 'profiles', 'smoke', 'image_files', 'tests', 'tp_addresses')
+KEYS = ('levers', 'profiles', 'smoke', 'smoke_rules', 'image_files', 'tests', 'tp_addresses')
 ALIASES = {
     'twin_profiles': 'profiles', 'profile_twins': 'profiles', 'twins': 'profiles',
     'smoke_dispatch': 'smoke', 'smoke_markers': 'smoke', 'smoke_modules': 'smoke', 'smoke_check': 'smoke',
@@ -59,6 +60,7 @@ ALIASES = {
     'overlay_manifest': 'image_files', 'image_entries': 'image_files',
     'cpu_tests': 'tests', 'cpu_allowlist': 'tests', 'allowlist': 'tests', 'test_modules': 'tests', 'tests_to_allowlist': 'tests',
     'tp_addresses_rows': 'tp_addresses',
+    'smoke_rule': 'smoke_rules', 'smoke_check_rules': 'smoke_rules',
 }
 TP_KEYS = ('twins', 'module_twins', 'flagged_twins', 'flagged_module_twins')
 
@@ -336,7 +338,7 @@ def tp_of(wp, value, where):
 
 def normalise(manifests):
     """The plan: every manifest's entries in one structure, in file-name then file order. Names collide across packages: refused."""
-    plan = dict(levers=[], profiles=[], smoke=[], image_files=[], tests=[], tp={key: [] for key in TP_KEYS}, info=[])
+    plan = dict(levers=[], profiles=[], smoke=[], smoke_rules=[], image_files=[], tests=[], tp={key: [] for key in TP_KEYS}, info=[])
     for file_name, raw in manifests:
         where = 'fusion-wp/' + file_name
         wp = text_of(raw.get('wp', Path(file_name).stem.upper()), where, 'wp')
@@ -366,6 +368,13 @@ def normalise(manifests):
             plan['smoke'].append(entry)
             if entry['module']:
                 plan['image_files'].append((wp, entry['module'], 'the smoke module of %s' % entry['flag']))
+        for module in listing(canonical.get('smoke_rules', (0, None))[1], where, 'smoke_rules'):
+            module = text_of(module, where, 'a smoke rule module')
+            module = module[len('scripts/ci/'):] if module.startswith('scripts/ci/') else module
+            module = module[:-3] if module.endswith('.py') else module
+            if not MODULE.match(module):
+                raise ManifestError('%s: smoke rule %r is a module in scripts/ci (its problems(env, container_text) returns a list of strings)' % (where, module))
+            plan['smoke_rules'].append((wp, module))
         for path, reason in path_entries(wp, canonical.get('image_files', (0, None))[1], where, 'image_files'):
             plan['image_files'].append((wp, path, reason))
         for module, reason in tests_of(wp, canonical.get('tests', (0, None))[1], where):
@@ -558,13 +567,33 @@ def smoke_rows(plan, text):
     return levers, audits, report
 
 
-def smoke_block(levers, audits):
+def smoke_block(levers, audits, rules=()):
     lines = ['FUSION_LEVERS = (']
     lines += ['    %s,  # %s' % (repr(row), wp) for wp, _origin, row in levers]
     lines += [')', 'FUSION_AUDITS = (']
     lines += ['    %s,  # %s' % (repr(row), wp) for wp, _origin, row in audits]
+    lines += [')', 'FUSION_RULES = (']
+    lines += ['    %s,  # %s' % (repr(module), wp) for wp, module in rules]
     lines += [')']
     return lines
+
+
+def rule_rows(plan, root):
+    """([(wp, module)], report): the packages' own smoke rules (a host-side module in scripts/ci with problems(env, container_text)), each once."""
+    rows, report, seen = [], [], set()
+    for wp, module in plan['smoke_rules']:
+        path = Path(root) / 'scripts' / 'ci' / (module + '.py')
+        if not path.is_file():
+            raise ManifestError('%s: smoke rule module %s is not in scripts/ci' % (wp, module))
+        if 'def problems(' not in path.read_text(encoding='utf-8'):
+            raise ManifestError('%s: smoke rule module %s has no problems(env, container_text)' % (wp, module))
+        if module in seen:
+            report.append((wp, 'smoke_rules ' + module, 'c2_smoke_check.py', 'existing', 'named once'))
+            continue
+        seen.add(module)
+        rows.append((wp, module))
+        report.append((wp, 'smoke_rules ' + module, 'c2_smoke_check.py', 'landed', 'FUSION_RULES'))
+    return rows, report
 
 
 def overlay_rows(plan, text, root):
@@ -711,8 +740,9 @@ def generate(texts, plan, root=REPO):
     for twin in profile_twins(plan):
         report.append((twin['wp'], 'profile ' + twin['name'], 'qwen_c2_profiles.json', 'landed', twin['kind']))
     levers, audits, smoke_report = smoke_rows(plan, texts['smoke'])
-    out['smoke'] = replace_block(texts['smoke'], smoke_block(levers, audits), 'c2_smoke_check.py')
-    report += smoke_report
+    rules, rules_report = rule_rows(plan, root)
+    out['smoke'] = replace_block(texts['smoke'], smoke_block(levers, audits, rules), 'c2_smoke_check.py')
+    report += smoke_report + rules_report
     rows, overlay_report = overlay_rows(plan, texts['overlay'], root)
     out['overlay'] = replace_block(texts['overlay'], overlay_block(rows), 'docker/qwen-c2-overlay.txt')
     report += overlay_report

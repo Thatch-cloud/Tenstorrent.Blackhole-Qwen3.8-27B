@@ -53,7 +53,7 @@ def profiles_file(plan):
 
 def pack_of(plan):
     folder = Path(tempfile.mkdtemp(prefix='fusion-pack-'))
-    for name, text in jobs_gen.generate(plan).items():
+    for name, text in jobs_gen.generate(plan, folder).items():
         (folder / name).write_text(text, encoding='utf-8')
     return folder
 
@@ -78,7 +78,7 @@ PACK = pack_of(PLAN)
 
 class CheckedInTests(unittest.TestCase):
     def test_the_checked_in_pack_is_what_the_manifests_in_the_tree_generate(self):
-        wanted = jobs_gen.generate(fusion.normalise(fusion.read_manifests()))
+        wanted = jobs_gen.generate(fusion.normalise(fusion.read_manifests()), FOLDER)
         self.assertEqual(jobs_gen.stale(FOLDER, wanted), [])
         self.assertEqual(jobs_gen.main(['--check']), 0)
 
@@ -249,18 +249,98 @@ class SyntheticPackTests(unittest.TestCase):
     def test_a_stale_template_is_reported_and_removed_by_write(self):
         folder = pack_of(PLAN)
         (folder / 'OLD-stale.env').write_text('C2_CARDS=quad\n', encoding='utf-8')
-        wanted = jobs_gen.generate(PLAN)
+        wanted = jobs_gen.generate(PLAN, folder)
         self.assertEqual(jobs_gen.stale(folder, wanted), ['OLD-stale.env'])
         self.assertEqual(jobs_gen.main(['--write', '--folder', str(folder), '--manifests', str(self.manifests_dir())]), 0)
         self.assertFalse((folder / 'OLD-stale.env').exists())
         self.assertEqual(jobs_gen.stale(folder, wanted), [])
 
 
+ARM_MANIFESTS = {
+    'WP1.json': {'wp': 'WP1', 'levers': [{'id': 's1', 'name': 'S1 shard argmax', 'flag': 'QWEN_FAST_TP4_SHARD_ARGMAX', 'audit_flag': 'QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT',
+                                          'marker': 'tp4 shard argmax', 'reason': 'one scan'}],
+                 'profiles': [{'name': 's1f2', 'env': {'QWEN_FAST_TP4_SHARD_ARGMAX': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2': '1'}, 'reason': 'tree fold'},
+                              {'name': 's1f2-audit', 'audit': True, 'reason': 'tree fold audited',
+                               'env': {'QWEN_FAST_TP4_SHARD_ARGMAX': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2': '1', 'QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT': '1'}}]},
+    'WP6.json': {'wp': 'WP6', 'profiles': [{'name': 'dr-x', 'env': {'QWEN_FAST_TP4_DRAFT_REDUCE': '1'}, 'reason': 'x'},
+                                           {'name': 'dr-solo-audit', 'audit': True, 'env': {'QWEN_FAST_TP4_DRAFT_REDUCE': '1', 'QWEN_FAST_TP4_DRAFT_REDUCE_AUDIT': '1'},
+                                            'reason': 'an audit with no timed twin'}]},
+}
+
+
+class ArmTests(unittest.TestCase):
+    """The extra profile twins of a package (a variant of a lever, a combination) are arms of the pack too."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.plan = plan_of(ARM_MANIFESTS)
+        cls.profiles = profiles_file(cls.plan)
+        cls.pack = pack_of(cls.plan)
+
+    def test_a_profile_twin_and_its_audit_twin_are_one_arm_with_an_audited_attach_and_an_abab(self):
+        names = [short(line[0]) for line in order_lines(self.pack)]
+        self.assertEqual(names, ['B0', 'X0', 'S1A', 'S1F2A', 'DRSOLOA',
+                                 'S1C1', 'S1L1', 'S1C2', 'S1L2', 'S1F2C1', 'S1F2L1', 'S1F2C2', 'S1F2L2', 'DRXC1', 'DRXL1', 'DRXC2', 'DRXL2', 'Z'])
+        twins = json.loads(self.profiles.read_text(encoding='utf-8'))['profiles']
+        self.assertEqual(values(self.pack, 'S1F2A-s1f2-audit-attach')['C2_PROFILE'], fusion.NAMESPACE + 's1f2-audit')
+        self.assertEqual(values(self.pack, 'S1F2L1-s1f2-lever-timed')['C2_PROFILE'], fusion.NAMESPACE + 's1f2')
+        self.assertEqual(values(self.pack, 'S1F2C2-s1f2-control-repeat')['C2_PROFILE'], SHIP)
+        self.assertEqual(twins[fusion.NAMESPACE + 's1f2']['env']['QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2'], '1')
+
+    def test_the_needs_lines_gate_each_arm_on_its_own_audit_and_an_audit_only_arm_has_no_timing(self):
+        text = (self.pack / 'ORDER.txt').read_text(encoding='utf-8')
+        needs = dict((left, right.split()) for left, right in re.findall(r'^# NEEDS (.+?) <- (.+)$', text, re.M))
+        self.assertEqual(needs['S1F2L1'], ['S1F2A', 'S1F2C1'])
+        self.assertEqual(needs['DRXL1'], ['DRXC1'], 'a timed twin with no audit twin needs its control only')
+        self.assertEqual(needs['DRSOLOA'], ['X0'])
+        self.assertFalse([name for name in needs if name.startswith('DRSOLOC') or name.startswith('DRSOLOL')])
+
+    def test_every_template_exits_zero_through_the_command_line_reader(self):
+        for path in sorted(self.pack.glob('*.env')):
+            result = subprocess.run([sys.executable, '-s', str(READER), str(path), str(self.profiles)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(HERE.parent.parent))
+            self.assertEqual(result.returncode, 0, path.name + ' ' + result.stderr.decode('utf-8', 'replace'))
+
+    def test_two_arms_with_one_prefix_are_refused(self):
+        manifests = dict(ARM_MANIFESTS)
+        manifests['WP2.json'] = {'wp': 'WP2', 'profiles': [{'name': 's-1f2', 'env': {'QWEN_FAST_TP4_X': '1'}, 'reason': 'x'}]}
+        with self.assertRaises(fusion.ManifestError) as caught:
+            jobs_gen.generate(plan_of(manifests), FOLDER)
+        self.assertIn('same job prefix S1F2', str(caught.exception))
+
+    def test_the_order_names_the_packages_own_folders(self):
+        folder = Path(tempfile.mkdtemp(prefix='fusion-pack-'))
+        (folder / 'WP9').mkdir()
+        (folder / 'WP9' / 'ORDER.txt').write_text('x\n', encoding='utf-8')
+        text = jobs_gen.generate(self.plan, folder)['ORDER.txt']
+        self.assertIn('beside this file: WP9.', text)
+        self.assertIn('beside this file: none yet.', jobs_gen.generate(self.plan, Path(tempfile.mkdtemp()))['ORDER.txt'])
+
+
+class PackageFolderTests(unittest.TestCase):
+    """A package's own templates (references/fusion-jobs/<WP>/), written against the profiles the generator places: each exits zero through the reader."""
+
+    def test_every_template_of_every_package_folder_exits_zero(self):
+        folders = [path for path in sorted(FOLDER.iterdir()) if path.is_dir()]
+        for folder in folders:
+            for path in sorted(folder.glob('*.env')):
+                with self.subTest('%s/%s' % (folder.name, path.name)):
+                    result = subprocess.run([sys.executable, '-s', str(READER), str(path), str(fusion.PROFILES)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            cwd=str(HERE.parent.parent))
+                    self.assertEqual(result.returncode, 0, result.stderr.decode('utf-8', 'replace'))
+
+    def test_every_package_template_names_the_one_image(self):
+        for folder in [path for path in sorted(FOLDER.iterdir()) if path.is_dir()]:
+            for path in sorted(folder.glob('*.env')):
+                self.assertEqual(job.parse_env(path.read_text(encoding='utf-8'))['C2_IMAGE_TAG'], IMAGE, '%s/%s' % (folder.name, path.name))
+
+
 class PublicTests(unittest.TestCase):
     def test_the_pack_names_no_host_address_registry_or_home_path(self):
         pattern = re.compile(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|/home/|/Users/|[A-Za-z]:[\\/]|\.local\b|\.lan\b|\bssh\b|ghcr\.io|docker\.io|sha256:[0-9a-f]{12}|spark-|thatch@')
         for folder in (FOLDER, PACK):
-            for path in sorted(folder.iterdir()):
+            for path in sorted(folder.rglob('*')):
+                if path.is_dir():
+                    continue
                 text = path.read_text(encoding='utf-8')
                 with self.subTest(path.name):
                     self.assertIsNone(pattern.search(text), pattern.search(text) and pattern.search(text).group(0))

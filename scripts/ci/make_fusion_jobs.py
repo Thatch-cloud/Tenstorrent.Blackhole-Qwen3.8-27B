@@ -3,8 +3,8 @@
     python3 scripts/ci/make_fusion_jobs.py --write   regenerate the templates and ORDER.txt from scripts/ci/fusion-wp/*.json
     python3 scripts/ci/make_fusion_jobs.py --check   exit 1 if the checked-in pack is not what the manifests generate
 
-ONE image (tp4-fusion-1, built by B0 from the pushed branch head), ONE window, one tag at a time. The pack is B0 (build), X0 (status, rescan, reset), then for every lever of every
-merged package (make_fusion_profiles.py: the levers in scripts/ci/fusion-wp/*.json):
+ONE image (tp4-fusion-1, built by B0 from the pushed branch head), ONE window, one tag at a time. The pack is B0 (build), X0 (status, rescan, reset), then for every arm of every
+merged package (make_fusion_profiles.py: the levers and the extra profile twins in scripts/ci/fusion-wp/*.json):
 
   <ID>A   the AUDITED attach smoke: the lever's -audit twin (the lever plus its _AUDIT flag, which runs the served composition beside the lever on the device) over warmup and
           concurrent8_steady; the exactness gate. Skipped for a lever with no audit flag (its timed jobs then need the control only).
@@ -37,15 +37,34 @@ HEADER = """# A committed TEMPLATE of .github/c2-serving-job.env for the op-fusi
 # carries needs a new B0 build and a new tag in every template. The cards are under development: this window never stops, starts or hands back the node agent."""
 
 
-def lever_ids(plan):
-    """[(job prefix, lever)] in manifest order; the prefix is the id in capitals ('s1' -> S1, 'kv-writer' -> KVWRITER) and must be unique."""
-    out, seen = [], {}
-    for lever in plan['levers']:
-        prefix = lever['id'].upper().replace('-', '')
-        if prefix in seen or prefix in ('B0', 'X0', 'Z'):
-            raise fusion.ManifestError('lever %s (%s) and %s give the same job prefix %s' % (lever['id'], lever['wp'], seen.get(prefix, 'the pack'), prefix))
-        seen[prefix] = lever['id']
-        out.append((prefix, lever))
+def arms(plan):
+    """[dict(prefix, id, wp, name, reason, timed, audit, env)] in the order the arms are written: one per lever (its timed twin and, with an audit flag, its audit twin), then one
+    per explicit profile twin (`<suffix>` timed, `<suffix>-audit` its audit twin; an audit twin with no timed one is an audit-only arm). The prefix is the id in capitals
+    ('s1' -> S1, 'kv-writer' -> KVWRITER) and must be unique."""
+    out, by_id, seen = [], {}, {}
+    for twin in fusion.profile_twins(plan):
+        suffix = twin['name'][len(fusion.NAMESPACE):]
+        if twin['kind'] == 'audit' and suffix.endswith('-audit'):
+            ident, slot = suffix[:-len('-audit')], 'audit'
+        elif twin['kind'] == 'audit':
+            ident, slot = suffix, 'audit'
+        else:
+            ident, slot = suffix, 'timed'
+        arm = by_id.get(ident)
+        if arm is None:
+            prefix = ident.upper().replace('-', '')
+            if prefix in seen or prefix in ('B0', 'X0', 'Z'):
+                raise fusion.ManifestError('arm %s (%s) and %s give the same job prefix %s' % (ident, twin['wp'], seen.get(prefix, 'the pack'), prefix))
+            seen[prefix] = ident
+            lever = twin['lever']
+            arm = by_id[ident] = dict(prefix=prefix, id=ident, wp=twin['wp'], timed=None, audit=None, env={},
+                                      name=lever['name'] if lever else ident, reason=lever['reason'] if lever else twin['why'])
+            out.append(arm)
+        arm[slot] = twin['name']
+        if slot == 'timed':
+            arm['env'] = twin['env']
+        elif not arm['env']:
+            arm['env'] = twin['env']
     return out
 
 
@@ -63,39 +82,45 @@ def jobs(plan):
                   "Stop rule: anything else. (The owner stops the node agent and unserves production before it, and restores production after Z, with the cutover pack's own steps.) Duration (estimate): %d minutes."
                   % MINUTES['status'])),
     ]
-    levers = lever_ids(plan)
-    for prefix, lever in levers:
-        if not lever['audit_flag']:
+    every = arms(plan)
+    for arm in every:
+        if not arm['audit']:
             continue
-        twin = fusion.twin_id(lever, True)
+        prefix = arm['prefix']
         rows.append(dict(
-            name='%sA-%s-audit-attach' % (prefix, lever['id']), mode='soft', minutes=MINUTES['audit'], actions='reset smoke', profile=twin, tests=SMOKE_TESTS,
+            name='%sA-%s-audit-attach' % (prefix, arm['id']), mode='soft', minutes=MINUTES['audit'], actions='reset smoke', profile=arm['audit'], tests=SMOKE_TESTS,
             needs=('%sA <- X0' % prefix,),
-            why=("%sA (EXACTNESS, %s): %s = the production profile plus %s=%s and %s=1; the audit runs the served composition beside the lever on the device and logs exact=True or a mismatch. "
-                 "READ: c2_smoke_check clean with the fusion rules (the engaged line for the lever, no fell-back line, at least one '%s' line carrying exact=True, no 'audit mismatch'), no stall, every answer complete. "
+            why=("%sA (EXACTNESS, %s): %s = the production profile plus %s; the audit runs the served composition beside the lever on the device and logs exact=True or a mismatch. "
+                 "READ: c2_smoke_check clean with the fusion rules (the engaged line for the lever, no fell-back line, at least one audit line carrying exact=True, no 'audit mismatch'), no stall, every answer complete. "
                  "ANY mismatch, fallback or missing audit line is NO-GO for the lever and skips its timed jobs. %s Duration (estimate): %d minutes."
-                 % (prefix, lever['wp'], twin, lever['flag'], lever['value'], lever['audit_flag'], lever['audit'] or '', fusion.sentence(lever['reason']), MINUTES['audit']))))
-    for prefix, lever in levers:
-        twin = fusion.twin_id(lever, False)
-        gate = ['%sA' % prefix] if lever['audit_flag'] else []
+                 % (prefix, arm['wp'], arm['audit'], env_text(arm['env']), fusion.sentence(arm['reason']), MINUTES['audit']))))
+    for arm in every:
+        if not arm['timed']:
+            continue
+        prefix = arm['prefix']
+        gate = ['%sA' % prefix] if arm['audit'] else []
         legs = (('C1', 'control-timed', SHIP, 'the CONTROL (A1): the production profile itself, no lever', ['X0']),
-                ('L1', 'lever-timed', twin, 'the LEVER (B1): the production profile plus %s=%s' % (lever['flag'], lever['value']), gate + ['%sC1' % prefix]),
+                ('L1', 'lever-timed', arm['timed'], 'the LEVER (B1): the production profile plus %s' % env_text(arm['env']), gate + ['%sC1' % prefix]),
                 ('C2', 'control-repeat', SHIP, 'the CONTROL again (A2)', ['%sL1' % prefix]),
-                ('L2', 'lever-repeat', twin, 'the LEVER again (B2)', ['%sC2' % prefix]))
+                ('L2', 'lever-repeat', arm['timed'], 'the LEVER again (B2)', ['%sC2' % prefix]))
         for leg, label, profile, what, needs in legs:
             rows.append(dict(
-                name='%s%s-%s-%s' % (prefix, leg, lever['id'], label), mode='soft', minutes=MINUTES['timed'], actions='reset smoke', profile=profile, tests=SMOKE_TESTS,
+                name='%s%s-%s-%s' % (prefix, leg, arm['id'], label), mode='soft', minutes=MINUTES['timed'], actions='reset smoke', profile=profile, tests=SMOKE_TESTS,
                 needs=('%s%s <- %s' % (prefix, leg, ' '.join(needs)),),
                 why=("%s%s (TIMED, %s, %s): %s; eight live (concurrent8_steady) in the %s pair of the ABAB, every boot a fresh reset. READ: c2_smoke_check clean (a lever arm also has its engaged line "
                      "and no fell-back line), no stall; then PAIRED per round, never by unpaired medians: python3 scripts/ci/w2ln_timing_compare.py pair <A container log> <B container log> "
                      "--window steady --a-smoke <A smoke log> --b-smoke <B smoke log> for (%sC1, %sL1) and (%sC2, %sL2), and its floor subcommand over the two control logs; the texts equal "
                      "(text_mismatches empty). %s Duration (estimate): %d minutes."
-                     % (prefix, leg, lever['name'], lever['wp'], what, 'first' if leg in ('C1', 'L1') else 'repeat', prefix, prefix, prefix, prefix,
-                        fusion.sentence(lever['reason']), MINUTES['timed']))))
+                     % (prefix, leg, arm['name'], arm['wp'], what, 'first' if leg in ('C1', 'L1') else 'repeat', prefix, prefix, prefix, prefix,
+                        fusion.sentence(arm['reason']), MINUTES['timed']))))
     rows.append(dict(name='Z-reset', mode='soft', minutes=MINUTES['reset'], actions='status reset', profile=None, tests='', needs=(),
                      why=("Z: the window's end: status and an all-four reset, no agent start (the cards stay under development). (The owner restores production afterwards: card reset, link measurement, "
                           "topology republish, agent restart, deploy and the post-checks.) Duration (estimate): %d minutes." % MINUTES['reset'])))
     return rows
+
+
+def env_text(env):
+    return ', '.join('%s=%s' % pair for pair in sorted(env.items())) or 'nothing'
 
 
 def render_env(row):
@@ -125,15 +150,16 @@ def wrap(text, width=170):
     return lines
 
 
-def render_order(rows, plan):
+def render_order(rows, plan, folder=FOLDER):
     total = sum(row['minutes'] for row in rows)
     cards = total - MINUTES['build']
     repeats = sum(row['minutes'] for row in rows if re.match(r'^[A-Z0-9]+(C2|L2)-', row['name']))
-    levers = lever_ids(plan)
+    every = arms(plan)
+    packs = sorted(path.name for path in Path(folder).iterdir() if path.is_dir()) if Path(folder).is_dir() else []
     lines = [
         "# The order of the op-fusion programme's four-card DEVELOPMENT window (docs/tp4-fusion.md): ONE image (%s, built by B0 from tp4/fusion-1 = tp4/next2-1 + the merged work packages) and ONE window for the" % IMAGE,
-        "# fused-op levers of the packages, each behind a default-off flag: %s." % (', '.join('%s (%s, %s)' % (lever['name'], lever['wp'], lever['flag']) for _prefix, lever in levers) or 'none merged yet'),
-        "# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.",
+        "# fused-op arms of the packages, each behind default-off flags: %s." % ('; '.join('%s (%s: %s)' % (arm['name'], arm['wp'], env_text(arm['env'])) for arm in every) or 'none merged yet'),
+        "# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. The minutes are generic ESTIMATES (nothing has run on a card): a package's own folder has its own.",
         "# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (a lever's timed jobs are skipped by the NEEDS lines below, the other levers still run).",
         "# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z (the cutover pack's restore steps and post-checks; nothing in this pack does either, and no job here starts or",
         "#     hands back the agent). B0 is a build and may run while production serves. No other window driver may be alive and no privileged builder container up.",
@@ -146,6 +172,7 @@ def render_order(rows, plan):
         "#     confirm it in the ship profile, not to ship. Each twin is the production profile plus exactly one lever (and, for the audit twin, its _AUDIT flag): make_fusion_profiles.py generated it from the package's manifest.",
         "# THE JOBS OF A LEVER <ID>: <ID>A the audited attach (exactness: the lever's served-composition comparison in the trace), then the timed ABAB at eight live (concurrent8_steady): <ID>C1 control, <ID>L1 lever, <ID>C2 control, <ID>L2 lever.",
         "#     The audits of every lever run before any timed pair, so a lever that is not exact costs one short job, not an hour of timing.",
+        "# THE PACKAGES' OWN FOLDERS (card-M and detail templates, their read rules and decision rules) are beside this file: %s." % (', '.join(packs) or 'none yet'),
         "# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.",
     ]
     for row in rows:
@@ -165,11 +192,11 @@ def render_order(rows, plan):
     return '\n'.join(lines) + '\n'
 
 
-def generate(plan):
-    """{file name: text} of the whole pack."""
+def generate(plan, folder=FOLDER):
+    """{file name: text} of the whole pack; `folder` is where the pack lives (the packages' own sub-folders beside it are named in ORDER.txt)."""
     rows = jobs(plan)
     out = dict(('%s.env' % row['name'], render_env(row)) for row in rows)
-    out['ORDER.txt'] = render_order(rows, plan)
+    out['ORDER.txt'] = render_order(rows, plan, folder)
     return out
 
 
@@ -190,7 +217,7 @@ def main(argv=None):
     if not (arguments.write or arguments.check):
         parser.error('--write or --check')
     try:
-        wanted = generate(fusion.normalise(fusion.read_manifests(arguments.manifests)))
+        wanted = generate(fusion.normalise(fusion.read_manifests(arguments.manifests)), Path(arguments.folder))
     except fusion.ManifestError as error:
         sys.stderr.write('make_fusion_jobs: %s\n' % error)
         return 2

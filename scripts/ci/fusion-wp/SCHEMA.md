@@ -22,6 +22,7 @@ block is stale. A manifest with a key the generator cannot place is refused by n
       "reason": "one line: what the lever fuses"
     }
   ],
+  "smoke_rules": ["tp4_shard_argmax_smoke"],
   "image_files": [{"path": "scripts/ci/tp4_shard_argmax_fold2.cpp", "reason": "JIT source of the lever"}],
   "tests": ["test_tp4_shard_argmax_fold2", {"discover": "optimisation/ttnn-op/shard_argmax"}],
   "tp_addresses": {"module_twins": [["quad_draft", "quad_draft_tp"]]},
@@ -36,6 +37,7 @@ block is stale. A manifest with a key the generator cannot place is refused by n
 | `levers[]` | `qwen_c2_profiles.json`, `c2_smoke_check.py` | per lever two gate-only twins of the production profile, `<production>-fx-<id>` (the flag on: the timed arm) and `...-fx-<id>-audit` (plus `audit_flag=1`); the smoke tables (engaged line required when the profile sets the flag, a fell-back line always fails, an audit flag needs a line with `exact=True`) |
 | `profiles[]` | `qwen_c2_profiles.json` | an extra twin: `{"name": "<id>", "env": {...}, "reason": "...", "audit": false}`; `name` is the suffix after `-fx-`; `parent` defaults to the production profile |
 | `smoke[]` | `c2_smoke_check.py` | a marker row without a profile: `{"flag", "value", "marker" or "engaged"/"fell_back"/"audit", "audit_flag", "what"}` |
+| `smoke_rules[]` | `c2_smoke_check.py` | the package's own stricter smoke rule: a host-side module of `scripts/ci` (`"tp4_shard_argmax_smoke"`) with `problems(env, container_text) -> [problem]`, called once per arm by `fusion_problems` (not an image file) |
 | `image_files[]` | `docker/qwen-c2-overlay.txt` | strings or `{"path", "reason"}`, under `scripts/ci/` (every new module, kernel source, smoke module and any module an overlaid file imports); the overlay is the ONE image list, the P8 copy lists are not touched |
 | `tests[]` | the CPU allowlist (the regression step the any-ref CPU suite runs) | module names (`test_x`, or `test_x.Class.method`) or `{"discover": "<dir>", "pattern": "test_*.py"}` |
 | `tp_addresses` | `tp_addresses.py` | `twins` (module, attr, twin module, twin attr), `module_twins` (module, twin module), `flagged_twins` / `flagged_module_twins` (`{"module", "attr", "flag", "gate": "module:function"}`, the gate takes the environment mapping) |
@@ -47,3 +49,10 @@ words differ. A flag the static smoke tables already dispatch is recognised and 
 Refused: an unknown key; a file named in `image_files`, `tests` or `tp_addresses` that is not in the tree; a lever flag already in
 the parent profile; two packages naming one lever id, flag or profile name; an overlay line `c2_overlay.py` refuses (a pinned file,
 a duplicate, a path outside `scripts/ci/`).
+
+## Card jobs
+
+A package's own templates live in `scripts/ci/references/fusion-jobs/<WP>/` (its card-M jobs, its detail jobs, its read and decision rules; every template passes
+`python3 -s scripts/ci/c2_serving_job.py <env> scripts/ci/qwen_c2_profiles.json` with rc 0, naming the one image `tp4-fusion-1`). The files directly in `fusion-jobs/` are the
+integrator's: `make_fusion_jobs.py` writes B0, X0, Z and, for every lever and every extra profile twin, an audited attach (`<ID>A`) and a timed control/lever ABAB at eight live
+(`<ID>C1 <ID>L1 <ID>C2 <ID>L2`); an extra twin `x` with an audit twin `x-audit` is one arm.

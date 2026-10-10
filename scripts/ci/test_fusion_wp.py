@@ -179,7 +179,7 @@ class CheckedInTests(unittest.TestCase):
         self.assertFalse([name for name in profiles if name.startswith(gen.NAMESPACE)])
         for name in ('smoke', 'overlay', 'cpu', 'addresses'):
             self.assertEqual(gen.outside(new[name]), gen.outside(texts[name]), name)
-        self.assertEqual(block(new['smoke']), ['FUSION_LEVERS = (', ')', 'FUSION_AUDITS = (', ')'])
+        self.assertEqual(block(new['smoke']), ['FUSION_LEVERS = (', ')', 'FUSION_AUDITS = (', ')', 'FUSION_RULES = (', ')'])
         self.assertEqual(block(new['overlay']), [])
         for key in gen.TP_KEYS:
             self.assertEqual(block(new['addresses'], key), [], key)
@@ -557,6 +557,71 @@ class ManifestShapeTests(unittest.TestCase):
         self.assertEqual([row[0] for row in levers], ['QWEN_FAST_TP4_X'])
         self.assertEqual([row[0] for row in audits], ['QWEN_FAST_TP4_X_AUDIT'])
         self.assertEqual({row[3] for row in report}, {'landed', 'existing'})
+
+
+class SmokeRuleModuleTests(unittest.TestCase):
+    """A package's own stricter smoke rule: a host-side module with problems(env, container_text), named under smoke_rules."""
+
+    def manifests(self):
+        return {'WP1.json': dict(MANIFESTS['WP1.json'], smoke_rules=['tp4_shard_argmax_smoke'])}
+
+    def root(self):
+        root = scratch_root()
+        (root / 'scripts' / 'ci' / 'tp4_shard_argmax_smoke.py').write_text('def problems(env, container_text):\n    return []\n', encoding='utf-8')
+        return root
+
+    def test_a_rule_module_lands_in_the_rules_table_once(self):
+        out, report = gen.generate(real_texts(), plan_of(self.manifests()), self.root())
+        self.assertEqual(literal('\n'.join(block(out['smoke'])), 'FUSION_RULES'), ('tp4_shard_argmax_smoke',))
+        self.assertIn(('WP1', 'smoke_rules tp4_shard_argmax_smoke', 'c2_smoke_check.py', 'landed', 'FUSION_RULES'), report)
+
+    def test_a_rule_module_the_tree_lacks_or_without_problems_is_refused(self):
+        with self.assertRaises(gen.ManifestError) as caught:
+            gen.generate(real_texts(), plan_of(self.manifests()), scratch_root())
+        self.assertIn('smoke rule module tp4_shard_argmax_smoke is not in scripts/ci', str(caught.exception))
+        root = self.root()
+        (root / 'scripts' / 'ci' / 'tp4_shard_argmax_smoke.py').write_text('x = 1\n', encoding='utf-8')
+        with self.assertRaises(gen.ManifestError) as caught:
+            gen.generate(real_texts(), plan_of(self.manifests()), root)
+        self.assertIn('has no problems(env, container_text)', str(caught.exception))
+
+    def test_fusion_problems_calls_each_rule_with_the_env_and_the_log_and_reports_a_rule_that_cannot_run(self):
+        module = types.ModuleType('fusion_rule_probe')
+        module.problems = lambda env, text: ['probe saw %s %d' % (sorted((env or {}).items()), len(text))]
+        with mock.patch.dict(sys.modules, {'fusion_rule_probe': module}), mock.patch.object(c2_smoke_check, 'FUSION_RULES', ('fusion_rule_probe', 'fusion_rule_missing')):
+            found = c2_smoke_check.fusion_problems('abc', {'A': '1'})
+            self.assertEqual(found[0], "probe saw [('A', '1')] 3")
+            self.assertEqual(len(found), 2)
+            self.assertIn('smoke rule of fusion_rule_missing could not run', found[1])
+            self.assertTrue(any('probe saw' in p for p in c2_smoke_check.lever_engagement_problems({'A': '1'}, 'abc')))
+            problems, _facts = c2_smoke_check.check('', 'abc', False, env={'A': '1'})
+            self.assertTrue(any('probe saw' in p for p in problems))
+
+
+class SampdraftCompanionTests(unittest.TestCase):
+    """QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2 (WP1) is strict and needs its lever; nothing changes while it is unset."""
+
+    def test_the_companion_without_its_lever_is_refused_at_attach_and_with_it_is_fine(self):
+        import tp4_sampdraft as sd
+
+        base = {'QWEN_FAST_TP': '4'}
+        sd.validate(dict(base))
+        sd.validate(dict(base, **{sd.SHARD_ARGMAX: '1', sd.SHARD_ARGMAX_FOLD2: '1'}))
+        sd.validate(dict(base, **{sd.SHARD_ARGMAX: '1', sd.SHARD_ARGMAX_FOLD2: '0'}))
+        with self.assertRaises(ValueError) as caught:
+            sd.validate(dict(base, **{sd.SHARD_ARGMAX_FOLD2: '1'}))
+        self.assertIn('needs QWEN_FAST_TP4_SHARD_ARGMAX=1', str(caught.exception))
+        with self.assertRaises(ValueError):
+            sd.validate(dict(base, **{sd.SHARD_ARGMAX: '1', sd.SHARD_ARGMAX_FOLD2: 'yes'}))
+
+    def test_the_companion_is_a_tp4_flag_like_the_levers(self):
+        import tp4_sampdraft as sd
+
+        with self.assertRaises(ValueError):
+            sd.validate({'QWEN_FAST_TP': '2', sd.SHARD_ARGMAX_FOLD2: '1'})
+        self.assertIn(sd.SHARD_ARGMAX_FOLD2, sd.COMPANIONS)
+        self.assertNotIn(sd.SHARD_ARGMAX_FOLD2, sd.ALL_FLAGS, 'the census tests of the levers and audits iterate ALL_FLAGS')
+        self.assertEqual(sd.LEVERS, ('QWEN_FAST_TP4_SHARD_ARGMAX', 'QWEN_FAST_TP4_DRAFT_CONV', 'QWEN_FAST_TP4_DRAFT_HEADS'), 'the lever tuple is unchanged')
 
 
 class SchemaTests(unittest.TestCase):
