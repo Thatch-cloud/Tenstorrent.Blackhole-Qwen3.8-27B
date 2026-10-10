@@ -3,7 +3,9 @@
 The cardm action's two steps are also run here as the runner would run them (bash; skipped without it),
 against stand-ins for docker, sudo, fuser, readlink and a harness that records what it was given."""
 
+import glob
 import io
+import json
 import os
 import re
 import subprocess
@@ -18,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import c2_platform_replay as replay  # noqa: E402
 import c2_serving_job as job  # noqa: E402
+import c2_smoke_check as smoke_check  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -756,7 +759,8 @@ class CardBTests(unittest.TestCase):
 
 def box(**values):
     base = dict(C2_IMAGE_TAG='tp4-serve-11', C2_PROFILE='c2-packed-tp4-8x262k-ship-prefix', C2_PREFIX_PROFILE='c2-packed-tp4-8x262k-ship-prefix',
-                C2_PREFIX_PLAN='exactness-shared', C2_PREFIX_BASELINE='none')
+                C2_PREFIX_PLAN='exactness-shared', C2_PREFIX_BASELINE='none',
+                C2_SMOKE_TESTS='warmup,concurrent8_steady')   # that profile asks for the eight-seat levers: its smoke must name the test
     base.update(values)
     return job.read_job(base, job.profile_names())
 
@@ -872,6 +876,141 @@ class BoxWorkflowTests(unittest.TestCase):
         except ImportError:
             self.skipTest('no PyYAML')
         self.assertIn('jobs', yaml.safe_load(text))
+
+
+QUAD_BLOCKS, TWO_BLOCK = 'QWEN_FAST_QUAD_DRAFT_BLOCKS', 'QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE'
+# Stand-in profile envs for read_job(envs=...): what each asks for, as c2_smoke_check judges it.
+STEADY_ENVS = {'quad': {QUAD_BLOCKS: '2'}, 'prestage': {TWO_BLOCK: '1'}, 'both': {QUAD_BLOCKS: '2', TWO_BLOCK: '1'},
+               'one-block': {QUAD_BLOCKS: '0', TWO_BLOCK: '0'}, 'plain': {'QWEN_FAST_TP': '4'}}
+
+
+def steady_job(profile='quad', tests='warmup,coding', **more):
+    values = dict(C2_IMAGE_TAG='v6-teardown', C2_CARDS='quad', C2_ACTIONS='reset smoke', C2_PROFILE=profile, C2_SMOKE_TESTS=tests)
+    values.update(more)
+    return job.read_job(values, PROFILES + sorted(STEADY_ENVS), meshes={}, envs=STEADY_ENVS)
+
+
+class SteadyEightTests(unittest.TestCase):
+    """c2_smoke_check judges the eight-seat quad and the two-block pre-stage on concurrent8_steady alone, and concurrent8_steady is opt-in in
+    c2_serving_smoke.py: a four-card smoke job whose profile asks for either and whose C2_SMOKE_TESTS leaves it out is refused here, before any
+    card time is spent (2026-10-09: six healthy runs were marked failure by the check after 10-90 minutes of card)."""
+
+    def test_a_profile_that_asks_for_the_quad_or_the_pre_stage_needs_the_test_named(self):
+        for profile, wanted in (('quad', 'the eight-seat quad'), ('prestage', 'the two-block pre-stage'),
+                                ('both', 'the eight-seat quad and the two-block pre-stage')):
+            with self.subTest(profile=profile), self.assertRaises(job.JobError) as caught:
+                steady_job(profile, 'warmup,coding')
+            message = str(caught.exception)
+            self.assertIn('concurrent8_steady', message)
+            self.assertIn('C2_SMOKE_TESTS', message)
+            self.assertIn(wanted, message)
+            self.assertIn('profile ' + profile, message)
+            self.assertIn('warmup, coding', message, 'the message says what the list does name')
+
+    def test_an_empty_list_is_the_default_set_and_leaves_the_opt_in_test_out(self):
+        for profile in ('quad', 'prestage'):
+            with self.subTest(profile=profile), self.assertRaisesRegex(job.JobError, 'nothing: the default set leaves it out'):
+                steady_job(profile, '')
+        with self.assertRaisesRegex(job.JobError, 'concurrent8_steady'):
+            job.read_job(dict(C2_IMAGE_TAG='v6-teardown', C2_CARDS='quad', C2_ACTIONS='reset smoke', C2_PROFILE='quad'),
+                         PROFILES + ['quad'], meshes={}, envs=STEADY_ENVS)
+
+    def test_naming_the_test_anywhere_in_the_list_passes(self):
+        for tests in ('concurrent8_steady', 'warmup,concurrent8_steady', 'concurrent8_steady,warmup,coding', 'warmup,concurrent8_steady,'):
+            with self.subTest(tests=tests):
+                self.assertEqual(steady_job('both', tests)['tests'], tests)
+
+    def test_the_list_is_split_on_commas_only_as_the_smoke_splits_it(self):
+        """c2_serving_smoke.py reads set(filter(None, argv[3].split(','))): a name with a space around it never runs, so it never counts."""
+        for tests in ('warmup, concurrent8_steady', 'warmup,concurrent8_steady ', 'warmup concurrent8_steady', 'concurrent8_steady_x',
+                      'concurrent4_steady', 'Concurrent8_steady'):
+            with self.subTest(tests=tests), self.assertRaisesRegex(job.JobError, 'concurrent8_steady'):
+                steady_job('quad', tests)
+
+    def test_only_a_four_card_smoke_job_of_a_profile_that_asks_is_judged(self):
+        # no flag at all, or the flags switched off: nothing to judge
+        for profile in ('plain', 'one-block'):
+            self.assertEqual(steady_job(profile, 'warmup')['tests'], 'warmup')
+        # the check runs in the four-card smoke step only: a job with no smoke (a gate, a reset) is not held to the test list
+        for actions in ('reset', 'reset gate', 'status rescan reset'):
+            self.assertEqual(steady_job('quad', 'warmup', C2_ACTIONS=actions)['actions'], actions)
+        self.assertEqual(job.steady_eight_problems({'C2_SMOKE_TESTS': 'warmup'}, ['smoke'], 'pair', 'quad', STEADY_ENVS), [])
+        self.assertEqual(job.steady_eight_problems({'C2_SMOKE_TESTS': 'warmup'}, ['smoke'], 'quad', 'not-a-profile', STEADY_ENVS), [])
+        # a value other than the one the check judges on (the quad needs '2', the pre-stage '1') is not this rule's business
+        self.assertEqual(job.steady_eight_problems({}, ['smoke'], 'quad', 'x', {'x': {QUAD_BLOCKS: '3', TWO_BLOCK: '2'}}), [])
+
+    def test_a_stated_reason_exempts_the_job_and_nothing_else(self):
+        reason = 'paired timing arm: its test list is fixed by the protocol'
+        self.assertEqual(steady_job('both', 'warmup,parked_turns', C2_SMOKE_PARTIAL=reason)['tests'], 'warmup,parked_turns')
+        # naming the test needs no reason, and a reason beside it changes nothing
+        self.assertEqual(steady_job('both', 'warmup,concurrent8_steady', C2_SMOKE_PARTIAL=reason)['tests'], 'warmup,concurrent8_steady')
+        for bad in ('x', 'short', 'tab\tseparated reason', 'accent \u00e9 in the reason', 'r' * 201):
+            with self.subTest(reason=bad), self.assertRaisesRegex(job.JobError, 'C2_SMOKE_PARTIAL'):
+                steady_job('both', 'warmup', C2_SMOKE_PARTIAL=bad)
+        # an empty value is no reason: the refusal stands
+        with self.assertRaisesRegex(job.JobError, 'does not name concurrent8_steady'):
+            steady_job('both', 'warmup', C2_SMOKE_PARTIAL='')
+
+    def test_main_refuses_with_the_missing_test_named_and_no_output(self):
+        profile = sorted(name for name in job.profile_envs() if job.steady_eight_problems({}, ['smoke'], 'quad', name, job.profile_envs()))[0]
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, 'job.env')
+            with open(path, 'w') as handle:
+                handle.write('C2_CARDS=quad\nC2_ACTIONS=reset smoke\nC2_IMAGE_TAG=v7-test\nC2_PROFILE=%s\nC2_SMOKE_TESTS=warmup\n' % profile)
+            with redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(job.main([path]), 1)
+            self.assertEqual(out.getvalue(), '')
+            self.assertIn('concurrent8_steady', err.getvalue())
+            self.assertIn(profile, err.getvalue())
+            with open(path, 'a') as handle:
+                handle.write('C2_SMOKE_TESTS=warmup,concurrent8_steady\n')   # a later line wins
+            with redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()):
+                self.assertEqual(job.main([path]), 0)
+            self.assertIn('tests=warmup,concurrent8_steady', out.getvalue())
+
+    def test_the_constants_are_the_smoke_checks(self):
+        self.assertEqual(job.STEADY_EIGHT_TEST, smoke_check.STEADY_EIGHT_TEST)
+        flags = dict((flag, value) for flag, value, _ in job.STEADY_EIGHT_FLAGS)
+        self.assertEqual(flags, {smoke_check.QUAD_BLOCKS_FLAG: smoke_check.QUAD_BLOCKS_VALUE, smoke_check.HOSTGAP_TWO_BLOCK_FLAG: '1'})
+
+    def test_the_rule_agrees_with_the_smoke_check_for_every_profile(self):
+        """The smoke check is the authority: for each profile of qwen_c2_profiles.json, a smoke that ran only the warmup is told 'did not run
+        concurrent8_steady' by c2_smoke_check.check exactly when the reader refuses a four-card smoke job that omits the test."""
+        with open(job.PROFILES, encoding='utf-8') as handle:
+            document = json.load(handle)['profiles']
+        envs = job.profile_envs()
+        asking = 0
+        for name, entry in sorted(document.items()):
+            problems, _ = smoke_check.check('warmup {"error": null, "wall_s": 1.0}\n', '', False, env=entry.get('env') or {}, entry=entry)
+            checked = any('did not run concurrent8_steady' in problem for problem in problems)
+            asking += checked
+            with self.subTest(profile=name):
+                self.assertEqual(bool(job.steady_eight_problems({}, ['smoke'], 'quad', name, envs)), checked)
+        self.assertGreater(asking, 0, 'no profile asks for the eight-seat levers - the parity check has drifted')
+
+    def test_every_committed_template_passes_and_a_partial_key_is_never_stale(self):
+        """Every template under scripts/ci/references (and the tracked job file) is a job a window may run: each either names concurrent8_steady
+        or carries C2_SMOKE_PARTIAL with a reason, and a template that carries the key needs it (so it goes when the test is added)."""
+        envs = job.profile_envs()
+        paths = sorted(glob.glob(os.path.join(HERE, 'references', '**', '*.env'), recursive=True)) + [JOB_FILE]
+        judged = exempt = 0
+        for path in paths:
+            with open(path, encoding='utf-8') as handle:
+                values = job.parse_env(handle.read())
+            if values.get('C2_SUPERSEDED_BY'):
+                continue    # void: read_job refuses it before this rule
+            actions = job.split_list(values.get('C2_ACTIONS', 'status')) or ['status']
+            args = (actions, values.get('C2_CARDS') or 'pair', values.get('C2_PROFILE') or 'general', envs)
+            name = os.path.relpath(path, HERE)
+            with self.subTest(template=name):
+                self.assertEqual(job.steady_eight_problems(values, *args), [])
+                if values.get('C2_SMOKE_PARTIAL'):
+                    exempt += 1
+                    bare = dict((key, value) for key, value in values.items() if key != 'C2_SMOKE_PARTIAL')
+                    self.assertTrue(job.steady_eight_problems(bare, *args), 'C2_SMOKE_PARTIAL on a template that names the test or needs none')
+            judged += 1
+        self.assertGreater(judged, 100)
+        self.assertGreater(exempt, 0)
 
 
 if __name__ == '__main__':

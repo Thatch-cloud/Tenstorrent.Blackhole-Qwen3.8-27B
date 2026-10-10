@@ -17,6 +17,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import c2_smoke_check as check  # noqa: E402
+import parked_compare  # noqa: E402
 from test_levern_smoke import SMOKE, Fake, SmokeRuns, function_source  # noqa: E402
 
 FAST = {'SMOKE_PARKED_ABORT_AFTER_S': '0.05', 'SMOKE_PARKED_THINK_S': '0.01', 'SMOKE_PARKED_STAGGER_S': '0.01'}
@@ -108,6 +109,11 @@ class LifecycleTests(SmokeRuns):
         self.assertGreater(entry['tokens_per_s'], 0)
         self.assertEqual(entry['completion_tokens'], sum(user['tokens'] for user in entry['users']))
         self.assertEqual(check.smoke_problems(results), [])
+        # the consumer reads the producer's own rows once through JSON, as the two arms' logs reach it (longest_gap_s is the [gap, began_at] pair)
+        log = 'SMOKE_JSON ' + json.dumps(results) + '\n'
+        problems, compared, lines = parked_compare.compare(log, log)
+        self.assertEqual(problems, [])
+        self.assertTrue(any(line.startswith('PARKED_COMPARE turns {') and '"turns": 40' in line for line in lines), lines[-4:])
 
 
 class ListedTests(unittest.TestCase):

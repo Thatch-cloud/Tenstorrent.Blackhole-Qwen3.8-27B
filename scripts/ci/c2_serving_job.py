@@ -38,9 +38,16 @@ Keys (every one optional but C2_IMAGE_TAG):
                       boards: it needs C2_REPLAY_PROFILE, a P150x4 profile) and push - not cardm or priority, which
                       are pair-shaped - and only profiles that name mesh_device P150x4 (general-tp4 ...);
                       pair takes only profiles that name none. Anything else is refused here, before a card opens.
-  C2_SMOKE_TESTS      comma-separated c2_serving_smoke.py tests, empty for all (agreement and bench are opt-in: only
-                      when named - tp_agreement.py collect and tp_decode_bench.py, results in agreement-<profile>.json
-                      and bench-<profile>.json)
+  C2_SMOKE_TESTS      comma-separated c2_serving_smoke.py tests, empty for the default set (agreement, bench and concurrent8_steady are
+                      opt-in: only when named - tp_agreement.py collect and tp_decode_bench.py, results in agreement-<profile>.json
+                      and bench-<profile>.json). A four-card smoke whose profile asks for the eight-seat quad
+                      (QWEN_FAST_QUAD_DRAFT_BLOCKS=2) or the two-block pre-stage (QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE=1) MUST name
+                      concurrent8_steady: c2_smoke_check.py judges those levers on that test alone and fails the run without it, so this
+                      reader refuses the job before any card time is spent (steady_eight_problems)
+  C2_SMOKE_PARTIAL    a reason (8..200 printable characters) that exempts a four-card smoke job from that refusal: the job KNOWS it omits
+                      concurrent8_steady (a measurement or fault arm whose test list is fixed by its protocol). The smoke check is
+                      unchanged, so such a run still ends red on its concurrent8_steady rule: read its logs, not its conclusion. A
+                      committed template that needs the key is held to it by test_c2_serving_job; one that does not never carries it
   C2_BENCH_SHAPES     the bench test's shapes, comma-separated STREAMSxPROMPT (default: tp_decode_bench's ladder)
   C2_PLATFORM_IMAGE   the thatch-serving-tt image the replay runs
   C2_BAKE_DEFAULT_PROFILE  build only: bake this profile as the image's serving default (the image ENV QWEN_C2_PROFILE) and
@@ -249,6 +256,17 @@ CARDM_REFUSED_ENV = CARDM_STEP_ENV + ('PATH', 'HOME', 'ENV', 'SHELLOPTS', 'IFS',
 CARDM_REFUSED_PREFIXES = ('QUAL_', 'BASH', 'LD_', 'DOCKER_', 'SUDO_')
 
 
+# The smoke test c2_smoke_check.py judges the eight-seat levers on, and the two profile flags that need it. c2_smoke_check's rule (blocks_problems,
+# hostgap_problems): a profile that asks for the eight-seat quad (QWEN_FAST_QUAD_DRAFT_BLOCKS=2) or the two-block pre-stage
+# (QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE=1) fails the four-card smoke unless concurrent8_steady ran and did not error. concurrent8_steady is opt-in
+# in c2_serving_smoke.py (it runs only when named), so an empty or short C2_SMOKE_TESTS lets a healthy run be marked failed after its card time
+# (2026-10-09: six runs). test_c2_serving_job holds these constants and the profile rule against c2_smoke_check itself.
+STEADY_EIGHT_TEST = 'concurrent8_steady'
+SMOKE_PARTIAL = re.compile(r'[ -~]{8,200}')
+STEADY_EIGHT_FLAGS = (('QWEN_FAST_QUAD_DRAFT_BLOCKS', '2', 'the eight-seat quad'),
+                      ('QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE', '1', 'the two-block pre-stage'))
+
+
 # Tags rmi must never delete. Production's base is tt-vllm:qwen38-c2-tp4-serve-7; the P8 base (qwen-fast-serving:ci-*) is a
 # different repository, so no tag here can ever name it. The named tags are the lineages production has run on, the prefixes
 # cover every other serve-N, and anything with 'prod' in it is refused whatever else it says.
@@ -291,6 +309,38 @@ def refuse_fabric_with_serving(actions):
     if 'fabric' in actions and beside:
         raise JobError('C2_ACTIONS has fabric with %s: the probe closes the mesh and a second open in one job wedges '
                        'the ethernet cores; run the probe in its own job, reset first' % ', '.join(beside))
+
+
+def profile_envs(path=PROFILES):
+    """{profile: its env dict}: the served environment c2_smoke_check.py judges the log against (its profile_env reads the same key)."""
+    with open(path, encoding='utf-8') as handle:
+        return dict((name, body.get('env') or {}) for name, body in json.load(handle)['profiles'].items())
+
+
+def steady_eight_problems(values, actions, cards, profile, envs):
+    """[reason] for a four-card smoke job whose profile c2_smoke_check.py will judge on concurrent8_steady while C2_SMOKE_TESTS leaves it out.
+    The smoke check fails such a run whatever it logged ('the profile asks for the eight-seat quad and the smoke did not run concurrent8_steady
+    ... the blocks were not judged', and the same for the two-block pre-stage); the card time is spent before anything says so. The test list is
+    split as c2_serving_smoke.py splits it (on commas, nothing trimmed), and empty means its default set, which leaves the opt-in test out."""
+    if 'smoke' not in actions or cards != 'quad':
+        return []
+    env = envs.get(profile) or {}
+    asked = [label for flag, value, label in STEADY_EIGHT_FLAGS if env.get(flag) == value]
+    if not asked:
+        return []
+    tests = [name for name in values.get('C2_SMOKE_TESTS', '').split(',') if name]
+    if STEADY_EIGHT_TEST in tests:
+        return []
+    partial = values.get('C2_SMOKE_PARTIAL', '')
+    if partial and not SMOKE_PARTIAL.fullmatch(partial):
+        return ['C2_SMOKE_PARTIAL is the reason this job omits %s: 8..200 printable characters, got %r' % (STEADY_EIGHT_TEST, partial)]
+    if partial:
+        return []
+    return ['C2_SMOKE_TESTS does not name %s (it names %s): profile %s asks for %s, and the smoke check judges it on that test alone, so the run '
+            'would fail after its card time; add %s (comma-separated, no spaces), or state in C2_SMOKE_PARTIAL why it is left out '
+            '(the run then still ends red on that rule)'
+            % (STEADY_EIGHT_TEST, ', '.join(tests) if tests else 'nothing: the default set leaves it out', profile, ' and '.join(asked),
+               STEADY_EIGHT_TEST)]
 
 
 def read_cards(values, actions, profile_of, named):
@@ -434,8 +484,8 @@ def read_rmi_tags(values, actions):
     return ' '.join(tags)
 
 
-def read_job(values, profiles, root=ROOT, meshes=None):
-    """The workflow outputs for a parsed job file, or JobError. `meshes`: profile_meshes() (the checkout's when not given)."""
+def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
+    """The workflow outputs for a parsed job file, or JobError. `meshes`: profile_meshes() and `envs`: profile_envs() (the checkout's when not given)."""
     if values.get('C2_SUPERSEDED_BY'):
         raise JobError('this template belongs to a superseded pack (C2_SUPERSEDED_BY=%s): its rules are void, use that pack' % values['C2_SUPERSEDED_BY'])
     actions = split_list(values.get('C2_ACTIONS', 'status')) or ['status']
@@ -492,6 +542,10 @@ def read_job(values, profiles, root=ROOT, meshes=None):
         if (values.get('C2_CARDS') or 'pair') != 'quad':
             raise JobError('C2_ACTIONS has taulab: the tau lab serves the four-card (1, 4) mesh and needs C2_CARDS=quad')
     cards = read_cards(values, actions, meshes, named)
+    if 'smoke' in actions and cards == 'quad':
+        problems = steady_eight_problems(values, actions, cards, profile, profile_envs() if envs is None else envs)
+        if problems:
+            raise JobError(problems[0])
     bake_profile = read_bake(values, actions, cards, root)
     drafter_manifest = read_drafter_manifest(values, actions, root)
     if drafter_manifest and 'push' in actions:
@@ -780,7 +834,7 @@ def main(argv=None):
         with open(argv[0], encoding='utf-8') as handle:
             values = parse_env(handle.read())
         profiles = profile_names(argv[1] if len(argv) > 1 else PROFILES)
-        sys.stdout.write(render(read_job(values, profiles)))
+        sys.stdout.write(render(read_job(values, profiles, envs=profile_envs(argv[1] if len(argv) > 1 else PROFILES))))
     except (JobError, OSError, ValueError, KeyError) as error:
         sys.stderr.write('c2-serving-job.env refused: %s\n' % error)
         return 1
