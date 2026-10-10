@@ -1,0 +1,236 @@
+diff --git a/.github/workflows/qwen-c2-serving.yml b/.github/workflows/qwen-c2-serving.yml
+index 1f4afab1..592dc277 100644
+--- a/.github/workflows/qwen-c2-serving.yml
++++ b/.github/workflows/qwen-c2-serving.yml
+@@ -1094,6 +1094,9 @@ jobs:
+           BENCH_SHAPES: ${{ steps.job.outputs.bench_shapes }}
+           BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}
+           TT_GRID: ${{ steps.job.outputs.tt_grid }}
++          CPUS: ${{ steps.job.outputs.cpus }}
++          CPUSET: ${{ steps.job.outputs.cpuset }}
++          CPU_SHARES: ${{ steps.job.outputs.cpu_shares }}
+         run: |
+           set -euo pipefail
+           # The pair smoke's shape on every Blackhole board present (a general-tp4 profile: the contract sets
+@@ -1128,10 +1131,16 @@ jobs:
+           load_pid=$!
+           trap 'kill "$load_pid" 2>/dev/null || true; docker logs "$name" > "$results/container.log" 2>&1 || true; docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+           if [ -n "$TT_GRID" ]; then echo "compute-grid clamp: TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$TT_GRID"; fi
++          # C2_CPUS, C2_CPUSET, C2_CPU_SHARES (c2_serving_job.py): the container's CPU placement; all unset is today's `--cpus 8` and nothing else.
++          cpu_args=(--cpus "${CPUS:-8}")
++          if [ "$CPUS" = none ]; then cpu_args=(); fi
++          if [ -n "$CPUSET" ]; then cpu_args+=(--cpuset-cpus "$CPUSET"); fi
++          if [ -n "$CPU_SHARES" ]; then cpu_args+=(--cpu-shares "$CPU_SHARES"); fi
++          echo "container cpu placement: ${cpu_args[*]:-no quota, no pinning}"
+           docker run -d --name "$name" --read-only \
+             --tmpfs /tmp:rw,size=512m --tmpfs /opt/tt-metal/generated:rw,size=1g \
+             --tmpfs /root/.cache/ttnn:rw,size=1g --tmpfs /root/.cache/tt-metal-cache:rw,size=8g \
+-            --shm-size 4g --memory 80g --cpus 8 "${devices[@]}" \
++            --shm-size 4g --memory 80g ${cpu_args[@]+"${cpu_args[@]}"} "${devices[@]}" \
+             -v /dev/hugepages-1G:/dev/hugepages-1G --cap-add SYS_NICE \
+             -v /home/thatch/hf-cache/hub:/models -e HF_HOME=/models -e HF_HUB_CACHE=/models \
+             -e MESH_DEVICE=P300 -e QWEN36_BATCHED_DECODE_MODE=host -e VLLM_RPC_TIMEOUT=100000 \
+diff --git a/scripts/ci/c2_serving_job.py b/scripts/ci/c2_serving_job.py
+index 8eba9f7a..97659c7f 100644
+--- a/scripts/ci/c2_serving_job.py
++++ b/scripts/ci/c2_serving_job.py
+@@ -164,6 +164,13 @@ Keys (every one optional but C2_IMAGE_TAG):
+                       and four-card smokes, the gate, prefix and tau lab drivers (--tt-grid), the replay (--tt-grid) and the cardm
+                       harness (QUAL_TT_GRID, a step-owned name). A cardm harness that does not forward QUAL_TT_GRID is refused with the
+                       key set, before any card time. reset and the node agent's own container (agentstart) are not covered
++  C2_CPUS             the four-card smoke container's CPU quota (docker --cpus): a whole number 1..64, or `none` for no quota; unset (default, rendered empty) is today's 8.
++                      Production's container has NO quota unless the node agent's THATCH_CONTAINER_CPUS is set (thatch-node-agent container/adapter.rs build_container_args), and the
++                      rig's ci-docker-fence.service gives its thatch-inference-* containers cores 0-15,32-47 and cpu-shares 262144; the smoke container (qwen-c2-smoke) is neither
++                      fenced nor weighted, so a timed card job differs from production in CPU placement until these three keys say otherwise
++  C2_CPUSET           the smoke container's --cpuset-cpus, a list such as 0-15,32-47; unset (default) is none
++  C2_CPU_SHARES       the smoke container's --cpu-shares, 2..262144 (262144 is cgroup v2 cpu.weight 10000, the fence's weight for the serving container); unset (default) is docker's 1024
++                      All three belong to the smoke action on the four-card set (the step that starts qwen-c2-smoke) and are refused with any other job
+ 
+ Stdlib only, Python 3.7 syntax: it runs on the rig host.
+ """
+@@ -596,12 +603,13 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
+     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root, tt_grid=tt_grid)
+     drafter_candidates = read_drafter_candidates(values, actions)
+     box_minutes = read_box(values, actions)
++    cpus, cpuset, cpu_shares = read_cpu_placement(values, actions, cards)
+     outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), rmi_tags=rmi_tags, tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
+                    platform_image=platform_image, gate_plan=','.join(plans),
+                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
+                    gate_memory_prompt=str(memory_prompt), gate_memory_users=str(memory_users), replay_profile=replay_profile,
+                    replay_served_model=replay_served_model, replay_budget_smoke=budget_smoke, cardm_harness=cardm_harness, cardm_args=cardm_args,
+-                   cardm_env=cardm_env, bake_default_profile=bake_profile, drafter_candidates=drafter_candidates, box_minutes=box_minutes, drafter_manifest=drafter_manifest, tt_grid=tt_grid)
++                   cardm_env=cardm_env, bake_default_profile=bake_profile, drafter_candidates=drafter_candidates, box_minutes=box_minutes, drafter_manifest=drafter_manifest, tt_grid=tt_grid, cpus=cpus, cpuset=cpuset, cpu_shares=cpu_shares)
+     outputs.update(s2)
+     outputs.update(prefix)
+     outputs.update(taulab)
+@@ -675,6 +683,36 @@ def read_box(values, actions):
+     return str(minutes)
+ 
+ 
++CPUS_MAX = 64
++CPUSET = re.compile(r'^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$')
++CPU_SHARES_RANGE = (2, 262144)
++
++
++def read_cpu_placement(values, actions, cards):
++    """(cpus, cpuset, cpu_shares) of C2_CPUS, C2_CPUSET and C2_CPU_SHARES (module docstring) as strings the smoke step hands docker, '' for each that is unset, or JobError. Only the
++    four-card smoke action takes them: a job without it would silently run at the default placement."""
++    cpus = values.get('C2_CPUS', '').strip()
++    cpuset = values.get('C2_CPUSET', '').strip()
++    shares = values.get('C2_CPU_SHARES', '').strip()
++    if not (cpus or cpuset or shares):
++        return '', '', ''
++    if 'smoke' not in actions or cards != 'quad':
++        raise JobError('C2_CPUS, C2_CPUSET and C2_CPU_SHARES place the four-card smoke container: C2_ACTIONS needs smoke and C2_CARDS=quad')
++    if cpus and cpus != 'none':
++        count = positive_int('C2_CPUS', cpus)
++        if count > CPUS_MAX:
++            raise JobError('C2_CPUS must be at most %d or none, got %d' % (CPUS_MAX, count))
++        cpus = str(count)
++    if cpuset and not CPUSET.match(cpuset):
++        raise JobError('C2_CPUSET must be a CPU list such as 0-15,32-47, got %r' % cpuset)
++    if shares:
++        count = positive_int('C2_CPU_SHARES', shares)
++        if not CPU_SHARES_RANGE[0] <= count <= CPU_SHARES_RANGE[1]:
++            raise JobError('C2_CPU_SHARES must be %d..%d, got %d' % (CPU_SHARES_RANGE[0], CPU_SHARES_RANGE[1], count))
++        shares = str(count)
++    return cpus, cpuset, shares
++
++
+ def read_drafter_manifest(values, actions, root=ROOT):
+     """C2_DRAFTER_MANIFEST (module docstring), '' when unset or the default, or JobError: a name that is a committed manifest."""
+     name = values.get('C2_DRAFTER_MANIFEST', '')
+diff --git a/scripts/ci/references/fusion-jobs/WPH/H11a-scheduler-census-control.env b/scripts/ci/references/fusion-jobs/WPH/H11a-scheduler-census-control.env
+new file mode 100644
+index 00000000..fcd75326
+--- /dev/null
++++ b/scripts/ci/references/fusion-jobs/WPH/H11a-scheduler-census-control.env
+@@ -0,0 +1,17 @@
++# A committed TEMPLATE of .github/c2-serving-job.env for the op-fusion programme's host-gap package WPH (scripts/ci/c2_serving_job.py parses it): copy it over
++# .github/c2-serving-job.env on a throwaway commit of the fusion integration branch and push a tag experiment/c2-serving-vN. Nothing here names a rig, a card, a host or a registry: the cards
++# are resolved at run time. The jobs are templates only: no tag is pushed from the branch by its author. WPH/ORDER.txt has the order, the stop rules, the minutes and the read rules.
++# ONE IMAGE FOR THE WHOLE WINDOW: C2_IMAGE_TAG=tp4-fusion-1 is a PLACEHOLDER for the tag the pack's B0 builds from the pushed branch head (sed -i 's/tp4-fusion-1/<tag>/' *.env). A commit of a file the image
++# carries needs a new B0 build and a new tag in every template. The cards are under development: this window never stops, starts or hands back the node agent.
++# H11a (CONTROL PLACEMENT, WPH-4): the smoke container exactly as every card job starts it today: --cpus 8, no pinning, docker's default weight.
++# The host-gap package's scheduler experiment (docs/tp4-fusion-wph.md): the instrumented fx-all run again, with the scheduler's side recorded - the container cgroup's CPU-bandwidth counters on every round
++# line, a thread census every 25th step, what each fence waited behind, and a line for every copy that blocked a millisecond or more - ARC PAUSED (min/max 0 on the rig's runner sets; the owner restores
++# them), so the host is as quiet as a timed card job makes it. NO WPH LEVER IS ON: the arm is c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-wph-log, the combined arm plus the instrument.
++# READ: python3 scripts/ci/hostgap_read.py <container log>: the EIGHT-LIVE table (window, launch, fence, collect), the EXPOSED line, CPU BANDWIDTH (throttled periods of the container cgroup),
++# THREADS (quota, cpuset, the busiest threads and the CPUs they sit on), BLOCKED CALLS (what a blocked copy followed) and WHAT THE FENCE WAITED BEHIND. Compare H11a with H11b round for round (probe and
++# census steps are dropped by the reader). Duration (estimate): 45 minutes.
++C2_CARDS=quad
++C2_ACTIONS=reset smoke
++C2_IMAGE_TAG=tp4-fusion-1
++C2_PROFILE=c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-wph-log
++C2_SMOKE_TESTS=warmup,concurrent8_steady,concurrent8_code_32k
+diff --git a/scripts/ci/references/fusion-jobs/WPH/H11b-scheduler-census-prod-placement.env b/scripts/ci/references/fusion-jobs/WPH/H11b-scheduler-census-prod-placement.env
+new file mode 100644
+index 00000000..ed43d5a4
+--- /dev/null
++++ b/scripts/ci/references/fusion-jobs/WPH/H11b-scheduler-census-prod-placement.env
+@@ -0,0 +1,23 @@
++# A committed TEMPLATE of .github/c2-serving-job.env for the op-fusion programme's host-gap package WPH (scripts/ci/c2_serving_job.py parses it): copy it over
++# .github/c2-serving-job.env on a throwaway commit of the fusion integration branch and push a tag experiment/c2-serving-vN. Nothing here names a rig, a card, a host or a registry: the cards
++# are resolved at run time. The jobs are templates only: no tag is pushed from the branch by its author. WPH/ORDER.txt has the order, the stop rules, the minutes and the read rules.
++# ONE IMAGE FOR THE WHOLE WINDOW: C2_IMAGE_TAG=tp4-fusion-1 is a PLACEHOLDER for the tag the pack's B0 builds from the pushed branch head (sed -i 's/tp4-fusion-1/<tag>/' *.env). A commit of a file the image
++# carries needs a new B0 build and a new tag in every template. The cards are under development: this window never stops, starts or hands back the node agent.
++# H11b (PRODUCTION-LIKE PLACEMENT, WPH-4): the same arm with the CPU placement the production serving container gets: NO quota (the node agent passes --cpus only when THATCH_CONTAINER_CPUS is set), cores
++# 0-15,32-47 and cpu-shares 262144 (cgroup v2 weight 10000), which is what the rig's ci-docker-fence.service gives every thatch-inference-* container as it starts. Needs the C2_CPUS / C2_CPUSET /
++# C2_CPU_SHARES keys of scripts/ci/fusion-wp/WPH-cpus.patch (c2_serving_job.py and the four-card smoke step). If H11b's rounds are shorter than H11a's the difference is the card jobs' placement, not the
++# stack: every timed pair must then be taken at one placement.
++# The host-gap package's scheduler experiment (docs/tp4-fusion-wph.md): the instrumented fx-all run again, with the scheduler's side recorded - the container cgroup's CPU-bandwidth counters on every round
++# line, a thread census every 25th step, what each fence waited behind, and a line for every copy that blocked a millisecond or more - ARC PAUSED (min/max 0 on the rig's runner sets; the owner restores
++# them), so the host is as quiet as a timed card job makes it. NO WPH LEVER IS ON: the arm is c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-wph-log, the combined arm plus the instrument.
++# READ: python3 scripts/ci/hostgap_read.py <container log>: the EIGHT-LIVE table (window, launch, fence, collect), the EXPOSED line, CPU BANDWIDTH (throttled periods of the container cgroup),
++# THREADS (quota, cpuset, the busiest threads and the CPUs they sit on), BLOCKED CALLS (what a blocked copy followed) and WHAT THE FENCE WAITED BEHIND. Compare H11a with H11b round for round (probe and
++# census steps are dropped by the reader). Duration (estimate): 45 minutes.
++C2_CARDS=quad
++C2_ACTIONS=reset smoke
++C2_IMAGE_TAG=tp4-fusion-1
++C2_PROFILE=c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-wph-log
++C2_SMOKE_TESTS=warmup,concurrent8_steady,concurrent8_code_32k
++C2_CPUS=none
++C2_CPUSET=0-15,32-47
++C2_CPU_SHARES=262144
+diff --git a/scripts/ci/references/fusion-jobs/WPH/ORDER.txt b/scripts/ci/references/fusion-jobs/WPH/ORDER.txt
+index 603d57a0..fef131b3 100644
+--- a/scripts/ci/references/fusion-jobs/WPH/ORDER.txt
++++ b/scripts/ci/references/fusion-jobs/WPH/ORDER.txt
+@@ -13,6 +13,8 @@
+ #   compose with KEYED (the verify-time half of the same staging path) and the per-block epochs, so they are never run on the bare production profile here (the per-lever pack, references/fusion-jobs, does that).
+ # DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+ # NEEDS H1 <- X0
++# NEEDS H11a <- X0
++# NEEDS H11b <- X0 H11a
+ # NEEDS H10 <- X0
+ # NEEDS H2 <- X0
+ # NEEDS H3 <- X0
+@@ -52,3 +54,5 @@ H4b-reads-async-audit-attach stop tp4-fusion-1 50
+ H5b-all-async-audit-attach stop tp4-fusion-1 70
+ H7b-wph-all-async-timed soft tp4-fusion-1 35
+ H9b-wph-all-async-repeat soft tp4-fusion-1 35
++H11a-scheduler-census-control soft tp4-fusion-1 45
++H11b-scheduler-census-prod-placement soft tp4-fusion-1 45
+diff --git a/scripts/ci/test_c2_serving_job.py b/scripts/ci/test_c2_serving_job.py
+index ee75cfa8..00025271 100644
+--- a/scripts/ci/test_c2_serving_job.py
++++ b/scripts/ci/test_c2_serving_job.py
+@@ -804,6 +804,45 @@ class BoxTests(unittest.TestCase):
+         self.assertIsNone(job.PROFILE_NAME.fullmatch('c2' * 40))
+ 
+ 
++class CpuPlacementTests(unittest.TestCase):
++    """C2_CPUS, C2_CPUSET, C2_CPU_SHARES: the CPU placement of the four-card smoke container (the host-gap package's scheduler experiment); unset is today's `--cpus 8`."""
++
++    SMOKE = dict(C2_ACTIONS='reset smoke', C2_CARDS='quad')
++
++    def test_unset_is_empty_and_each_key_is_passed_through_validated(self):
++        none = box(**self.SMOKE)
++        self.assertEqual((none['cpus'], none['cpuset'], none['cpu_shares']), ('', '', ''))
++        placed = box(C2_CPUS=' 16 ', C2_CPUSET='0-15,32-47', C2_CPU_SHARES='262144', **self.SMOKE)
++        self.assertEqual((placed['cpus'], placed['cpuset'], placed['cpu_shares']), ('16', '0-15,32-47', '262144'))
++        self.assertEqual(box(C2_CPUS='none', **self.SMOKE)['cpus'], 'none')
++        self.assertEqual(box(C2_CPUSET='3', **self.SMOKE)['cpuset'], '3')
++
++    def test_a_bad_value_or_a_job_without_the_four_card_smoke_is_refused(self):
++        for values in (dict(C2_CPUS='0'), dict(C2_CPUS='65'), dict(C2_CPUS='eight'), dict(C2_CPUS='8.5'), dict(C2_CPUSET='0-15,'), dict(C2_CPUSET='a'), dict(C2_CPUSET='0 15'),
++                       dict(C2_CPU_SHARES='1'), dict(C2_CPU_SHARES='262145'), dict(C2_CPU_SHARES='x')):
++            with self.subTest(values=values), self.assertRaises(job.JobError):
++                box(**dict(self.SMOKE, **values))
++        for actions in (dict(C2_ACTIONS='reset', C2_CARDS='quad'), dict(C2_ACTIONS='reset smoke', C2_CARDS='pair'), dict(C2_ACTIONS='reset gate', C2_CARDS='quad')):
++            with self.subTest(actions=actions), self.assertRaises(job.JobError):
++                box(C2_CPUS='16', **actions)
++        with self.assertRaises(job.JobError) as raised:
++            box(C2_CPUS='16', C2_ACTIONS='reset', C2_CARDS='quad')
++        self.assertIn('four-card smoke', str(raised.exception))
++
++    def test_the_smoke_step_places_the_container_with_the_keys_and_keeps_today_when_they_are_unset(self):
++        text = step_text('Smoke on the four-card set')
++        script = step_script('Smoke on the four-card set')
++        for name in ('cpus', 'cpuset', 'cpu_shares'):
++            self.assertIn('${{ steps.job.outputs.%s }}' % name, text)
++        self.assertIn('cpu_args=(--cpus "${CPUS:-8}")', script)
++        self.assertIn('if [ "$CPUS" = none ]; then cpu_args=(); fi', script)
++        self.assertIn('--cpuset-cpus "$CPUSET"', script)
++        self.assertIn('--cpu-shares "$CPU_SHARES"', script)
++        self.assertIn('${cpu_args[@]+"${cpu_args[@]}"}', script)
++        self.assertNotIn('--memory 80g --cpus 8', script, 'the quota is no longer hard-coded in the four-card smoke')
++        self.assertEqual(step_script('Smoke on cards M+A').count('--memory 80g --cpus 8'), 1, 'the pair smoke is untouched')
++
++
+ class BoxWorkflowTests(unittest.TestCase):
+     """The workflow's side of the box, the heal wait and the readiness poll."""
+ 
+diff --git a/scripts/ci/test_hostgap_wph.py b/scripts/ci/test_hostgap_wph.py
+index 8ed88467..690b86a5 100644
+--- a/scripts/ci/test_hostgap_wph.py
++++ b/scripts/ci/test_hostgap_wph.py
+@@ -133,6 +133,8 @@ EXPECTED = {
+     'H5b-all-async-audit-attach': ('reset smoke', BASE + 'fx-wph-all-async-audit', 'stop'),
+     'H7b-wph-all-async-timed': ('reset smoke', BASE + 'fx-wph-all-async', 'soft'),
+     'H9b-wph-all-async-repeat': ('reset smoke', BASE + 'fx-wph-all-async', 'soft'),
++    'H11a-scheduler-census-control': ('reset smoke', BASE + 'fx-wph-log', 'soft'),
++    'H11b-scheduler-census-prod-placement': ('reset smoke', BASE + 'fx-wph-log', 'soft'),
+ }
+ 
+ 

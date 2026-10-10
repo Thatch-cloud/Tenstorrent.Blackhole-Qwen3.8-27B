@@ -26,6 +26,19 @@ The calls are timed by thin wrappers installed on the ttnn namespace once, at th
 arguments and return its result, and count nothing else. Off, nothing is installed and nothing here is imported (verify_prestage.hostgap_span imports this module only with
 the flag).
 
+THE SCHEDULER'S SIDE (added after the first instrumented run, whose slow spans were descheduled, CPU bound or waiting, none of them in a collection):
+  - the ROUND line ends with the container's CPU-bandwidth counters for the interval (`thr_n` periods in which the cgroup's quota ran out, `thr_ms` time it spent throttled, `periods`
+    elapsed: cgroup v2 cpu.stat, or v1) so CFS-quota throttling (docker --cpus) is told from plain contention directly; and with the longest single call of every kind in the interval
+    (the interval is an open span of its own);
+  - every CENSUS_EVERY-th step (QWEN_FAST_TP4_HOSTGAP_CENSUS_EVERY, default 25, 0 = never) one `[PACKED-HOSTGAP-THREADS]` line: the container's cgroup limits (cpu.max, cpuset), the CPUs
+    the main thread may run on, the thread count, and the busiest threads of THIS process since the last census (comm, tid, percent of a CPU, involuntary switches, the CPU it last ran on).
+    The census step reads about 150 /proc files, so it is named `census=1` on its round line and the reader drops it with the probe steps;
+  - at every fence the number of copies and non-blocking trace enqueues made since the previous synchronization point (a fence, a blocking trace or a blocking read) is written on the
+    span as `fence_q_copy=` and `fence_q_tnb=`: what the fence waited behind, besides the traces' own device time;
+  - every copy, upload or trace enqueue that takes 1 ms or more (the first BLOCKED_LINES_MAX of the process) gets a `[PACKED-HOSTGAP-BLOCKED]` line of its own: which span it was in, how
+    long it took against the CPU it used (a thread that sleeps inside the call, not one that was descheduled), how long after the last non-blocking trace enqueue and the last
+    synchronization point it started, and how many copies and trace enqueues were already queued behind that point.
+
 A reader of the lines is hostgap_read.py (tables, probe rounds dropped, slow rounds classified by cause).
 """
 
@@ -43,6 +56,17 @@ LOG_FLAG = 'QWEN_FAST_TP4_HOSTGAP_LOG'
 PROBE_FLAG = 'QWEN_FAST_TP4_HOSTGAP_PROBE'
 PROBE_EVERY_FLAG = 'QWEN_FAST_TP4_HOSTGAP_PROBE_EVERY'
 PROBE_EVERY = 16
+CENSUS_EVERY_FLAG = 'QWEN_FAST_TP4_HOSTGAP_CENSUS_EVERY'
+CENSUS_EVERY = 25
+CENSUS_THREADS = 12
+THREADS_MARKER = '[PACKED-HOSTGAP-THREADS]'
+BLOCKED_MARKER = '[PACKED-HOSTGAP-BLOCKED]'
+BLOCKED_LINE_S = 0.001
+BLOCKED_LINES_MAX = 400
+ENQUEUE_KINDS = ('copy', 'up', 'tnb', 'd2h')
+CGROUP_ROOT = '/sys/fs/cgroup'
+PROC_ROOT = '/proc'
+SYNC_KINDS = ('fence', 'tb', 'read')
 ENGAGED_MARKER = '[PINDIAG] tp4 hostgap instrument engaged'
 PROBE_ENGAGED_MARKER = '[PINDIAG] tp4 hostgap probe engaged'
 ROUND_MARKER = '[PACKED-HOSTGAP-ROUND]'
@@ -81,6 +105,16 @@ def probe_every(environ=None):
     return int(value)
 
 
+def census_every(environ=None):
+    """Steps between thread censuses (0 = none)."""
+    value = (os.environ if environ is None else environ).get(CENSUS_EVERY_FLAG)
+    if value is None:
+        return CENSUS_EVERY
+    if not value.isdigit():
+        raise ValueError('%s must be a non-negative integer' % CENSUS_EVERY_FLAG)
+    return int(value)
+
+
 def log_line(text):
     import verify_prestage
 
@@ -104,6 +138,15 @@ class Meter:
         self.probes = 0
         self.first_enqueue = None   # perf_counter of the first non-blocking trace enqueue since the last mark
         self.installed = {}
+        self.pending = dict(copy=0, tnb=0)      # copies and non-blocking trace enqueues since the last synchronization point
+        self.interval = None        # the open frame of the step interval (its longest single calls)
+        self.cgroup = None          # the cgroup counters at the last step entry
+        self.census = None          # the per-thread CPU ticks at the last census
+        self.census_steps = 0
+        self.censused = False       # a census ran in the interval that is open
+        self.last_tnb = None        # perf_counter at the end of the last non-blocking trace enqueue
+        self.last_sync = None       # perf_counter at the end of the last synchronization point
+        self.blocked_lines = 0
 
 
 METER = Meter()
@@ -181,19 +224,47 @@ class Timed:
         try:
             return self.__dict__[WRAPPED_ATTRIBUTE](*args, **kwargs)
         finally:
-            spent = time.perf_counter() - started
+            ended = time.perf_counter()
+            spent = ended - started
             kind = self.__dict__['_kind_of'](args, kwargs)
+            cpu_spent = time.thread_time() - cpu
             record = METER.calls[kind]
             record[0] += 1
             record[1] += spent
-            record[2] += time.thread_time() - cpu
+            record[2] += cpu_spent
             if spent >= LONG_CALL_S:
                 record[3] += 1
-            if kind == 'tnb' and METER.first_enqueue is None:
-                METER.first_enqueue = started
+                if kind in ENQUEUE_KINDS and METER.blocked_lines < BLOCKED_LINES_MAX:
+                    blocked(kind, started, ended, cpu_spent)
+            if kind == 'tnb':
+                METER.last_tnb = ended
+                if METER.first_enqueue is None:
+                    METER.first_enqueue = started
+            if kind in METER.pending:
+                METER.pending[kind] += 1
+            elif kind in SYNC_KINDS:
+                if kind == 'fence':
+                    queued = dict(METER.pending)
+                    for frame in METER.frames:
+                        frame['fence_queue'] = queued
+                METER.pending['copy'] = METER.pending['tnb'] = 0
+                METER.last_sync = ended
             for frame in METER.frames:
                 if spent > frame['max'].get(kind, 0.0):
                     frame['max'][kind] = spent
+
+
+def blocked(kind, started, ended, cpu_spent):
+    """One `[PACKED-HOSTGAP-BLOCKED]` line for a call that handed work to the device and took LONG_CALL_S or more. Never raises."""
+    try:
+        METER.blocked_lines += 1
+        inside = next((frame['name'] for frame in reversed(METER.frames) if frame.get('name')), '-')
+        since = lambda mark: '-' if mark is None else '%.2f' % ((started - mark) * 1000)
+        log_line('%s step=%d kind=%s ms=%.2f cpu_ms=%.2f in=%s since_tnb_ms=%s since_sync_ms=%s queued_copy=%d queued_tnb=%d' % (
+            BLOCKED_MARKER, METER.step, kind, (ended - started) * 1000, cpu_spent * 1000, inside, since(METER.last_tnb), since(METER.last_sync),
+            METER.pending['copy'], METER.pending['tnb']))
+    except BaseException:
+        pass
 
 
 def timed(function, kind_of):
@@ -271,7 +342,7 @@ def uninstall_gc():
 @contextlib.contextmanager
 def span(name, **tags):
     """One `[PACKED-HOSTGAP-SPAN] step= name= <tags> <figures>` line for the code inside. Never raises, never changes what the code inside does."""
-    frame = dict(max={}, gc_max=0.0, start=snapshot())
+    frame = dict(name=name, max={}, gc_max=0.0, start=snapshot())
     METER.frames.append(frame)
     try:
         yield frame
@@ -283,24 +354,138 @@ def span(name, **tags):
                     break
             found = difference(frame['start'], snapshot())
             extra = ''.join(' %s=%s' % (key, str(value).replace(' ', '_')) for key, value in tags.items())
-            log_line('%s step=%d name=%s%s %s' % (SPAN_MARKER, METER.step, name, extra, figures(found, frame['max'], frame['gc_max'])))
+            queue = frame.get('fence_queue')
+            tail = '' if queue is None else ' fence_q_copy=%d fence_q_tnb=%d' % (queue['copy'], queue['tnb'])
+            log_line('%s step=%d name=%s%s %s%s' % (SPAN_MARKER, METER.step, name, extra, figures(found, frame['max'], frame['gc_max']), tail))
         except BaseException:
             pass
 
 
-def note_step():
+def read_text(path):
+    try:
+        with open(path) as handle:
+            return handle.read()
+    except (OSError, ValueError):
+        return None
+
+
+def cgroup_counters(root=None):
+    """(periods, throttled periods, throttled microseconds) of this container's cgroup (v2 cpu.stat, else v1), or None where the host cannot say."""
+    root = CGROUP_ROOT if root is None else root
+    text = read_text(root + '/cpu.stat')
+    if text is None:
+        text = read_text(root + '/cpu/cpu.stat') or read_text(root + '/cpu,cpuacct/cpu.stat')
+    if text is None:
+        return None
+    found = {}
+    for line in text.splitlines():
+        name, _, value = line.partition(' ')
+        if value.strip().isdigit():
+            found[name] = int(value)
+    if 'nr_throttled' not in found:
+        return None
+    if 'throttled_usec' in found:
+        micro = found['throttled_usec']
+    else:
+        micro = found.get('throttled_time', 0) // 1000                        # v1 counts throttled_time in nanoseconds
+    return found.get('nr_periods', 0), found['nr_throttled'], int(micro)
+
+
+def cgroup_limits(root=None):
+    """The container's CPU limits as text: 'quota=<quota>/<period> cpuset=<cpus>' (cgroup v2 cpu.max, else v1 cfs_quota_us and cfs_period_us; quota 'max' is none), '-' where unreadable."""
+    root = CGROUP_ROOT if root is None else root
+    quota = (read_text(root + '/cpu.max') or '').split()
+    if len(quota) == 2:
+        limit = '%s/%s' % (quota[0], quota[1])
+    else:
+        micro = (read_text(root + '/cpu/cpu.cfs_quota_us') or read_text(root + '/cpu,cpuacct/cpu.cfs_quota_us') or '').strip()
+        period = (read_text(root + '/cpu/cpu.cfs_period_us') or read_text(root + '/cpu,cpuacct/cpu.cfs_period_us') or '').strip()
+        limit = '%s/%s' % (micro, period) if micro and period else '-'
+    cpuset = (read_text(root + '/cpuset.cpus.effective') or read_text(root + '/cpuset/cpuset.effective_cpus') or '-').strip() or '-'
+    return 'quota=%s cpuset=%s' % (limit, cpuset)
+
+
+def thread_ticks(proc=None):
+    """{tid: (comm, ticks used, involuntary switches, last cpu)} for the threads of this process: /proc/self/task/<tid>/stat and status. Unreadable threads are left out."""
+    proc = PROC_ROOT if proc is None else proc
+    found = {}
+    base = proc + '/self/task'
+    try:
+        tids = os.listdir(base)
+    except OSError:
+        return found
+    for tid in tids:
+        text = read_text('%s/%s/stat' % (base, tid))
+        if not text or ')' not in text:
+            continue
+        head, tail = text.rsplit(')', 1)
+        fields = tail.split()
+        if len(fields) < 37:
+            continue
+        comm = head.split('(', 1)[-1]
+        involuntary = 0
+        status = read_text('%s/%s/status' % (base, tid)) or ''
+        for line in status.splitlines():
+            if line.startswith('nonvoluntary_ctxt_switches'):
+                involuntary = int(line.split()[1])
+                break
+        found[tid] = (comm.replace(' ', '_'), int(fields[11]) + int(fields[12]), involuntary, int(fields[36]))
+    return found
+
+
+def census(step, proc=None, root=None):
+    """The `[PACKED-HOSTGAP-THREADS]` line: the limits, the main thread's allowed CPUs, the thread count and the busiest threads since the last census. Returns the line."""
+    now, ticks = time.perf_counter(), thread_ticks(proc)
+    before, METER.census = METER.census, (now, ticks)
+    allowed = '-'
+    status = read_text((PROC_ROOT if proc is None else proc) + '/self/status') or ''
+    for line in status.splitlines():
+        if line.startswith('Cpus_allowed_list'):
+            allowed = line.split(None, 1)[1].strip()
+    busy = []
+    if before is not None:
+        interval = max(now - before[0], 1e-6)
+        tick = os.sysconf('SC_CLK_TCK') if hasattr(os, 'sysconf') else 100
+        for tid, (comm, used, involuntary, cpu) in ticks.items():
+            old = before[1].get(tid)
+            share = 100.0 * (used - (old[1] if old else 0)) / tick / interval
+            busy.append((share, comm, tid, involuntary - (old[2] if old else 0), cpu))
+        busy.sort(reverse=True)
+    line = '%s step=%d threads=%d allowed=%s %s interval_s=%s busy=%s' % (
+        THREADS_MARKER, METER.step, len(ticks), allowed, cgroup_limits(root), '-' if before is None else '%.2f' % (now - before[0]),
+        ','.join('%s:%s:%.0f%%:%dinv:cpu%d' % (comm, tid, share, inv, cpu) for share, comm, tid, inv, cpu in busy[:CENSUS_THREADS]) or '-')
+    log_line(line)
+    return line
+
+
+def note_step(root=None, proc=None):
     """A step's entry (verify_prestage.entry_line, once a step): the ROUND line of the interval that ended here - every step is the time between two entries - then a new
-    interval. The first call only opens one."""
+    interval. The first call only opens one. The line ends with the interval's longest single call of each kind and the container's CPU-bandwidth counters (thr_n throttled
+    periods, thr_ms throttled time, periods)."""
     now = snapshot()
     last = METER.last
     METER.last = now
     METER.step += 1
     probed, METER.probed = METER.probed, False
-    if last is None:
-        return None
-    found = difference(last, now)
-    line = '%s step=%d probe=%d %s' % (ROUND_MARKER, METER.step - 1, int(probed), figures(found))
-    log_line(line)
+    censused, METER.censused = METER.censused, False
+    counters, before = cgroup_counters(root), METER.cgroup
+    METER.cgroup = counters
+    interval, METER.interval = METER.interval, dict(max={}, gc_max=0.0, start=now)
+    METER.frames[:] = [frame for frame in METER.frames if frame is not interval]
+    METER.frames.append(METER.interval)
+    line = None
+    if last is not None:
+        found = difference(last, now)
+        tail = ''
+        if counters is not None and before is not None:
+            tail = ' periods=%d thr_n=%d thr_ms=%.1f' % (counters[0] - before[0], counters[1] - before[1], (counters[2] - before[2]) / 1000.0)
+        line = '%s step=%d probe=%d census=%d %s%s' % (ROUND_MARKER, METER.step - 1, int(probed), int(censused), figures(
+            found, None if interval is None else interval['max'], None if interval is None else interval['gc_max']), tail)
+        log_line(line)
+    every = census_every()
+    if every and METER.step > 1 and (METER.step - 1) % every == 0:
+        METER.censused = True
+        census(METER.step, proc, root)
     return line
 
 

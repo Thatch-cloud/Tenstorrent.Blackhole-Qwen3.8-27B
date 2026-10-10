@@ -74,3 +74,34 @@ the coordinator does one timed `synchronize_device` right after the two quad lau
 `ORDER.txt`: H1 the one-card read probe (decides `1` or `async` or neither), H10 the instrumented unprofiled run on fx-all, H2-H5 the audited attaches on fx-all plus each lever (and all three),
 then the ABAB H6-H9 (control fx-all, lever fx-all plus the three), one tag at a time. The per-lever arms against the production profile are generated into the integrated pack
 (`PRESTAGEDIFF*`, `LEAN*`, `READS*`).
+
+## What the first instrumented run showed (H10: fx-all plus the instrument, ARC running, 4.0k prompts)
+
+Read with `hostgap_read.py` (eight-live steps apart from the one-block rounds; the instrument adds about 1 us per wrapped host call and a log line per span, so absolute times are 1-2 ms a round high):
+
+| Eight-live step (both blocks pre-staged) | p50 ms |
+| --- | ---: |
+| launch of the two quads | 4.33 |
+| window (two pre-stages 10.0 + 9.5, T_proj staging about 1.3, glue) | 22.25 |
+| fence after the window | 0.05 |
+| the probe: first enqueue after the launch start, then 2Q | 2.25, 18.44 |
+| host path (launch + window + fence) against device (first enqueue + 2Q) | 26.6 against 20.7 |
+| **host time on the critical path** | **5.9** |
+| collect (34 reads = 1.17 ms; the rest, 2.3 ms, is merge and selection on the CPU) | 3.47 |
+| readback of one block (8 reads = 0.45 ms) | 0.83 |
+
+* The 11.6 ms window median of the whole run is 78 % one-block steps (window 10.8 ms against a single quad). For eight-live steps the window is critical in 91 % of the rounds and exceeds the device's remaining
+  time by about 6 ms: that, not 2.4-4.4 ms, is what PRESTAGE_DIFF and WRITE_PACKED_LEAN can return, minus the drain of the writes still queued behind the quads when the device finishes.
+* A pre-stage is 10.0 ms wall and 9.1 ms CPU: only 3.2 ms of it is inside `copy_host_to_device_tensor` (148 x 11.6 us, one voluntary context switch each) and `from_torch` (148 x 10.4 us); about 6.7 ms
+  is Python and binding work around them (the 296 address reads, 148 mappers, `packed_values`, the binding validation). With 73 of 148 destinations written the pre-stage falls to about 5.4 ms (the
+  comparison itself costs 0.5 ms a block with memcmp), so the two window levers together remove about 7 ms a round, more than the 5.9 ms on the path.
+* The read-backs are cheaper than estimated: 34-56 us a read, so BATCHED_READS is worth about 0.9-1.2 ms a round, not 3. The collect is CPU bound (3.1 of 3.5 ms).
+* Scheduling: 42 % of the steps had more than 20 involuntary switches; on eight-live steps the contended ones cost +5.8 ms in the early draft (41.7 against 35.9) and +4.3 ms in the window at the median. The
+  stalls are bimodal (0.08 ms or 43 ms a switch) and not aligned to a 100 ms period. The cause is not decided by that run; the next one records the cgroup throttle counters, a thread census and each
+  blocked copy.
+* The 491 "blocked-copy" fences of the first reader were fences: a fence waits for the device by design (the queue ahead of it holds the quad traces and, behind them, the window's writes). The
+  reader now calls those `device-wait`. The copies that really block are single calls of 2.3-3.7 ms with the CPU idle (0.09 ms), 16 % of the T_proj staging spans, 24 % of the quad launches, 10 % of
+  the pre-stages, 5 % of the verify-time writes; in most of them the thread was not descheduled.
+* Placement: card jobs start the smoke container as `--cpus 8` with no pinning and docker's default weight, while the production container has no quota (unless THATCH_CONTAINER_CPUS is set) and is
+  given cores 0-15,32-47 and the maximum weight by ci-docker-fence.service. `scripts/ci/fusion-wp/WPH-cpus.patch` (not applied) adds C2_CPUS / C2_CPUSET / C2_CPU_SHARES to the four-card smoke and the
+  two jobs H11a (today's placement) and H11b (production-like), both with the instrument.
