@@ -48,6 +48,13 @@ def fold_query(operations, query, retain):
 
     The u=0 half is the query as it is; the u=1 half is the query with its row halves swapped, so user b's rows
     sit at rows 0-15 exactly as they do in b's single-user trace. The row moves are bf16 copies."""
+    if os.environ.get('QWEN_FAST_DRAFT_PERMUTE', '0') != '0':
+        # QWEN_FAST_DRAFT_PERMUTE (draft_permute_tp.py, default off): the pair fold as one permutation launch; the rest of this function is its served reference.
+        import draft_permute_tp
+
+        if draft_permute_tp.hook_enabled():
+            return draft_permute_tp.fold_query(operations, query, retain, site='pair', halves=1, users=2, block=BLOCK_ROWS,
+                                               served=lambda: fold_query(operations, query, retain))
     memory = operations.DRAM_MEMORY_CONFIG
     query_heads, key_heads, group, folded_query_heads, _ = heads()
     upper = retain(operations.slice(query, (0, 0, 0, 0), (1, query_heads, BLOCK_ROWS, HEAD_DIM)))
@@ -67,6 +74,13 @@ def fold_keys(operations, tensor, retain):
 def unfold_output(operations, output, retain):
     """(1, 32, 32, 128) -> (1, 16, 32, 128): head 4h+j's rows 0-15 from folded head 8h+j (user a) and its rows
     16-31 from folded head 8h+4+j's rows 0-15 (user b) - the packed layout the rest of the branch reads."""
+    if os.environ.get('QWEN_FAST_DRAFT_PERMUTE', '0') != '0':
+        # QWEN_FAST_DRAFT_PERMUTE (draft_permute_tp.py, default off): the pair unfold as one permutation launch; the rest of this function is its served reference.
+        import draft_permute_tp
+
+        if draft_permute_tp.hook_enabled():
+            return draft_permute_tp.unfold_output(operations, output, retain, site='pair', halves=1, users=2, block=BLOCK_ROWS,
+                                                  served=lambda: unfold_output(operations, output, retain))
     query_heads, key_heads, group, _, _ = heads()
     grouped = retain(operations.reshape(output, (key_heads, 2 * group, 32, HEAD_DIM)))
     halves = []
