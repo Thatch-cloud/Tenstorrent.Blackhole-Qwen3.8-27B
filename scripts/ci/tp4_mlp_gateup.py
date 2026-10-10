@@ -4,8 +4,8 @@ The packed 64-row verify block runs each of the 64 layers' MLP as five launches:
 the up matmul (bfloat4_b, 34 to 46 cores), their multiply (written to DRAM at 64 rows), the down matmul (bfloat8_b, 32 cores) and the
 reduce-scatter. The device profile (v676, v678) has the three weight matmuls at 236, 284 and 357 GB/s of a 512 GB/s part, and
 the multiply one more launch plus a DRAM round trip. The graft's mlp.py, tp_common.py and fused_1d.py are pinned and never edited;
-this module is their TWIN for the 64-row decode arm only, bound per layer around the block's forward (model_batch.two_tile_bindings,
-the way the two-tile binders are) and absent from the process unless a flag asks.
+this module is their TWIN for the 64-row decode arm only, bound per layer around the block's forward (two_tile_decode.bind_two_tile_mlp hands
+the lever's binder the MLP binder's place, as the two-tile binders are bound) and absent from the process unless a flag asks.
 
   QWEN_FAST_MLP_CFG=<name>    F-D2 and the streaming config: the served five launches with the multiply written to L1 (F-D2), and
                               the gate, up and down program configs re-partitioned as the name says. The name is `l1` (only the
@@ -174,7 +174,7 @@ def resolve(environ=None):
 
 
 def requested(environ=None):
-    """Whether any lever is on (the cheap test model_batch makes before it imports anything else). Raises on a bad flag."""
+    """Whether any lever is on (the cheap test before anything else is imported). Raises on a bad flag."""
     return resolve(environ).route is not None
 
 
@@ -616,7 +616,7 @@ class Tp4MlpBinding(object):
 
 
 def bindings(model, rows, operations, native_m3=True, environ=None):
-    """The binders model_batch.two_tile_bindings appends for the lever: () when no lever is on, otherwise one Tp4MlpBinding. A flag combination
+    """The lever's binder for two_tile_decode.bind_two_tile_mlp: () when no lever is on, otherwise (Tp4MlpBinding,). A flag combination
     that cannot run raises here (at the block's warm, never mid-round). A model, block or grid the lever cannot serve (not 64 rows, no graft, a
     named config that would move the K loop, a fused launch that cannot be built) binds NOTHING after one fell-back line: the served ops run, as
     with the flags unset, and the fusion smoke rule fails the arm by name, so a profile that asks for the lever never silently times the served path

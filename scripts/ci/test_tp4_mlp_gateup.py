@@ -843,7 +843,8 @@ class BinderTests(unittest.TestCase):
 
 
 class HookTests(unittest.TestCase):
-    """model_batch.two_tile_bindings appends the lever's binder, and does nothing at all without a flag."""
+    """two_tile_decode.bind_two_tile_mlp (reached through model_batch.two_tile_bindings, which is not edited) hands the lever's binder the MLP's place when a flag
+    asks and binds nothing new otherwise."""
 
     def setUp(self):
         import test_two_tile_decode as tests
@@ -861,26 +862,50 @@ class HookTests(unittest.TestCase):
             tuple_, unused, unused2 = self.bind()
         called.assert_not_called()
         self.assertEqual([binder.label for binder in tuple_], ['decode norm', 'full-attention forward', 'MLP forward', 'GDN output projection'])
+        self.assertEqual([binder.expected_calls for binder in tuple_], [129, 16, 0, 0])
 
     def test_with_the_module_absent_and_no_flag_nothing_imports_it(self):
         with mock.patch.dict(sys.modules, {'tp4_mlp_gateup': None}):
             tuple_, unused, unused2 = self.bind()
         self.assertEqual(len(tuple_), 4)
 
-    def test_a_flag_appends_the_lever_s_binder_last(self):
-        sentinel = types.SimpleNamespace(label='x', bindings=[], expected_calls=0, calls=0)
+    def test_a_flag_puts_the_lever_s_binder_in_the_mlp_s_place_and_keeps_the_tuple_s_shape(self):
+        sentinel = types.SimpleNamespace(label='MLP gate/up lever', bindings=[], expected_calls=64, calls=0)
         with mock.patch.object(lever, 'bindings', return_value=(sentinel,)) as called:
             tuple_, model, ttnn = self.bind(QWEN_FAST_MLP_CFG='l1')
-        self.assertEqual(len(tuple_), 5)
-        self.assertIs(tuple_[-1], sentinel)
+        self.assertEqual(len(tuple_), 4, 'norm, attention, MLP, GDN output: every positional unpack keeps working')
+        self.assertIs(tuple_[2], sentinel)
         called.assert_called_once()
         self.assertEqual(called.call_args.args[1], 64)
         self.assertIs(called.call_args.kwargs['native_m3'], True)
+
+    def test_a_lever_that_binds_nothing_leaves_the_binder_that_was_there(self):
+        with mock.patch.object(lever, 'bindings', return_value=()):
+            tuple_, model, ttnn = self.bind(QWEN_FAST_MLP_CFG='l1')
+        self.assertEqual(tuple_[2].label, 'MLP forward')
+        self.assertEqual(tuple_[2].expected_calls, 0)
 
     def test_the_audit_flags_and_the_stride_alone_also_reach_the_module_so_a_stray_one_raises(self):
         for name, value in (('QWEN_FAST_MLP_GATEUP_AUDIT', '1'), ('QWEN_FAST_MLP_CFG_AUDIT', '1'), ('QWEN_FAST_MLP_AUDIT_STRIDE', '2')):
             with self.subTest(flag=name), self.assertRaises(ValueError):
                 self.bind(**{name: value})
+
+    def test_the_flags_the_hook_watches_are_the_modules(self):
+        import two_tile_decode
+        self.assertEqual(tuple(two_tile_decode.MLP_LEVER_FLAGS), tuple(lever.ALL_FLAGS))
+
+    def test_the_lever_s_binder_runs_inside_the_blocks_per_forward_check(self):
+        """model_batch.run counts binder.calls against expected_calls; the lever's binder satisfies the contract end to end over the real Tp4MlpForward."""
+        fake = Fake()
+        model = model_of(fake, layers=3)
+        with env(QWEN_FAST_MLP_CFG='l1'):
+            binder = lever.bindings(model, 64, fake.ttnn)[0]
+        from model_batch import instance_overrides
+        before = binder.calls
+        with instance_overrides(binder.bindings), fake.modules():
+            for layer in model.layers:
+                layer.feed_forward.forward(activation())
+        self.assertEqual(binder.calls - before, binder.expected_calls)
 
 
 # ---------------------------------------------------------------------------------------------------------------------------
@@ -984,7 +1009,7 @@ class FileTests(unittest.TestCase):
             self.assertTrue((HERE / name).is_file(), name)
         manifest = json.loads((HERE / 'fusion-wp' / 'WP4.json').read_text(encoding='utf-8'))
         listed = [item if isinstance(item, str) else item['path'] for item in manifest['image_files']]
-        for name in lever.RUNTIME_FILES:
+        for name in lever.RUNTIME_FILES + ('two_tile_decode.py',):
             self.assertIn('scripts/ci/' + name, listed)
 
     def test_the_manifest_levers_are_the_flags_of_this_module(self):
