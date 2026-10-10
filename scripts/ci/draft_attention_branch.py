@@ -6,7 +6,7 @@ from draft_attention import composed_draft_attention, draft_sdpa
 from draft_convolution import grouped_causal_convolution
 from feature_collective import gather_add_projection
 from draft_head_layout import split_projected_heads, concatenate_query_heads
-from draft_mlp_branch import draft_projection_dtype
+from draft_mlp_branch import draft_projection_dtype, _levers_checked, REDUCE_FLAG, TAIL_FLAG, MM_GRID_FLAG
 import draft_wide_tp
 import tp_shapes
 
@@ -189,6 +189,8 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
                            or value.dtype != operations.bfloat16 for value in cache.values())):
                 raise ValueError('Explicit native fixed-bucket historical K/V heads required')
     kernel = parameters['kernel']
+    # The op-fusion programme's drafter levers (tp4/fx-wp6; draft_mlp_branch holds the same three flags): each strict, default off, and a flag-off process imports none of the modules.
+    levers = _levers_checked()
 
     def project(value, weight, grid, rows, columns):
         program = operations.MatmulMultiCoreReuseMultiCast1DProgramConfig(compute_with_storage_grid_size=grid,
@@ -330,13 +332,32 @@ def execute_attention_branch(operations, mesh, collectives, hidden, history, mas
     else:
         transposed = retain(operations.transpose(rounded, 1, 2))
         merged = retain(operations.reshape(transposed, (1, 1, 32, tp_shapes.active().draft_query)))
-    partial = project(merged, parameters['output_projection'], (8, 10), proposal_rows, 2)
+    output_grid = (8, 10)
+    if levers[MM_GRID_FLAG]:
+        # QWEN_FAST_DRAFT_MM_GRID (draft_mmgrid_tp.py): the wo projection's program on a grid as wide as the device's (the same cores, per-core columns and in0_block_w)
+        import draft_mmgrid_tp
+
+        draft_mmgrid_tp.enabled()
+        output_grid = draft_mmgrid_tp.grid_for(operations, mesh, merged, parameters['output_projection'], output_grid, 2, proposal_rows, kernel, site='wo')
+    partial = project(merged, parameters['output_projection'], output_grid, proposal_rows, 2)
     gather = gather_add_projection if quad is None else quad.gather_add_projection
+    if levers[REDUCE_FLAG]:
+        # QWEN_FAST_DRAFT_REDUCE (draft_reduce_tp.py): the four slices and three adds after the gather as one launch (the quad's 64-row chains; a branch without a quad
+        # already reaches the dispatcher in feature_collective_tp)
+        import draft_reduce_tp
+
+        gather = draft_reduce_tp.choose(gather, quad, 'attention')
     reduced = watch('reduced', retain(gather(operations, mesh, collectives, partial, retain_temporaries=retain,
         **(dict(observe=observe) if observe is not None else {}))))
     rounded = retain(operations.typecast(reduced, operations.bfloat16))
     finished = watch('conv-out', retain(convolve(operations, mesh, rounded, dynamic[2:], parameters['bases'][2:],
         fp32_intermediates=True, retain_temporaries=retain, **seams)))
+    if levers[TAIL_FLAG]:
+        # QWEN_FAST_DRAFT_TAIL (draft_tail_tp.py): the residual tail (two typecasts, an fp32 add, a typecast) as one launch
+        import draft_tail_tp
+
+        draft_tail_tp.enabled()
+        return watch('output', draft_tail_tp.residual(operations, mesh, finished, hidden, retain, site='attention'))
     wide = [retain(operations.typecast(value, operations.float32)) for value in (finished, hidden)]
     summed = retain(operations.add(*wide, dtype=operations.float32))
     return watch('output', retain(operations.typecast(summed, operations.bfloat16)))

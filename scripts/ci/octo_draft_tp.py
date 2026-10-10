@@ -201,7 +201,15 @@ def validate_octo(operations, query, key, value, mask):
 def octo_fold_query(operations, query, retain):
     """(1, q, 64, 128) -> (1, 8q, 32, 128). Each tile-aligned half holds four users' eight rows; it is rotated by 0, 8, 16 and 24 rows (the quarters in a cyclic order) so that
     user k of the half sits at rows 0-7, as in its single-user trace, then read as (kv, group, 32, 128) and the four rotations are concatenated on dim 1, and the two halves
-    after them: folded head (8 * group) * h + group * u + j with u = 4p + k. The GQA group then maps it to KV head 8h + u: user u's segment of head h."""
+    after them: folded head (8 * group) * h + group * u + j with u = 4p + k. The GQA group then maps it to KV head 8h + u: user u's segment of head h.
+
+    QWEN_FAST_DRAFT_PERMUTE (draft_permute_tp.py, default off): the whole fold as one permutation launch; this function's body is its served reference."""
+    if os.environ.get('QWEN_FAST_DRAFT_PERMUTE', '0') != '0':
+        import draft_permute_tp
+
+        if draft_permute_tp.hook_enabled():
+            return draft_permute_tp.fold_query(operations, query, retain, site='octo', halves=HALVES, users=HALF_USERS, block=BLOCK,
+                                               served=lambda: octo_fold_query(operations, query, retain))
     query_heads, key_heads, group = heads()[:3]
     memory = operations.DRAM_MEMORY_CONFIG
     halves = []
@@ -223,7 +231,15 @@ def octo_fold_keys(operations, tensor, retain):
 
 
 def octo_unfold_output(operations, output, retain):
-    """(1, 8q, 32, 128) -> (1, q, 64, 128): user u's rows 0-7 of its group of folded heads, read back to its eight rows of the block (concatenated per half, then the halves)."""
+    """(1, 8q, 32, 128) -> (1, q, 64, 128): user u's rows 0-7 of its group of folded heads, read back to its eight rows of the block (concatenated per half, then the halves).
+
+    QWEN_FAST_DRAFT_PERMUTE (draft_permute_tp.py, default off): the whole unfold as one permutation launch; this function's body is its served reference."""
+    if os.environ.get('QWEN_FAST_DRAFT_PERMUTE', '0') != '0':
+        import draft_permute_tp
+
+        if draft_permute_tp.hook_enabled():
+            return draft_permute_tp.unfold_output(operations, output, retain, site='octo', halves=HALVES, users=HALF_USERS, block=BLOCK,
+                                                  served=lambda: octo_unfold_output(operations, output, retain))
     query_heads, key_heads, group = heads()[:3]
     memory = operations.DRAM_MEMORY_CONFIG
     grouped = retain(operations.reshape(output, (key_heads, heads()[3] // key_heads, 32, HEAD_DIM)))
