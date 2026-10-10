@@ -1,0 +1,53 @@
+{
+ "wp": "WP1",
+ "branch": "tp4/fx-wp1",
+ "description": "verify tail: S1, the tile-native shard argmax, with the two-level tree fold (QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2) and the joined words output",
+ "levers": [
+  {
+   "id": "s1",
+   "name": "S1 shard argmax",
+   "flag": "QWEN_FAST_TP4_SHARD_ARGMAX",
+   "value": "1",
+   "audit_flag": "QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT",
+   "marker": "tp4 shard argmax",
+   "reason": "the per-shard argmax of every 64-row verify is one scan launch on the whole device grid plus a one-core fold instead of Untilize + ArgMax + the V4a Gather (1.03 ms per pass; an earlier stack's ABAB measured it at -0.70 to -0.76 ms of trace_ms per verify)"
+  }
+ ],
+ "profiles": [
+  {
+   "name": "s1f2",
+   "env": {
+    "QWEN_FAST_TP4_SHARD_ARGMAX": "1",
+    "QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2": "1"
+   },
+   "audit": false,
+   "reason": "S1 with the two-level tree fold (the scan's partials folded by eight cores, then one) instead of the one-core fold: the same answer, estimated to leave about 0.1 ms more of the 1.03 ms; the card-M job decides which fold ships"
+  },
+  {
+   "name": "s1f2-audit",
+   "env": {
+    "QWEN_FAST_TP4_SHARD_ARGMAX": "1",
+    "QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2": "1",
+    "QWEN_FAST_TP4_SHARD_ARGMAX_AUDIT": "1"
+   },
+   "audit": true,
+   "reason": "S1 with the tree fold and its audit (today's Untilize + ArgMax + Gather beside the kernels, every row of every chip every round, and the joined words against the kernel's own ids and value bits)"
+  }
+ ],
+ "image_files": [
+  {
+   "path": "scripts/ci/tp4_shard_argmax_fold2.cpp",
+   "reason": "JIT source of the tree fold, read beside tp4_shard_argmax.py (tp4_shard_argmax.py, _scan.cpp and _fold.cpp are listed already)"
+  }
+ ],
+ "tests": [
+  "test_tp4_shard_argmax",
+  {
+   "discover": "optimisation/ttnn-op/shard_argmax",
+   "reason": "the card-M harness's tests and the trace_ms ABAB reader's"
+  }
+ ],
+ "tp_addresses": {},
+ "card_jobs": "scripts/ci/references/fusion-jobs/WP1/ (ORDER.txt: C1 card-M timing+bytes FIRST, A1a/A1b audited attach, T1..T4 ABAB on trace_ms + T2alt/T4alt); C1 and the control arms parse today, the lever arms once make_fusion_profiles.py has placed the twins",
+ "notes": "FLAGS. QWEN_FAST_TP4_SHARD_ARGMAX and _AUDIT exist (tp4_sampdraft). QWEN_FAST_TP4_SHARD_ARGMAX_FOLD2 is NEW and read only by tp4_shard_argmax.fold2_enabled (strict 0/1, raises at the pair and without S1; reserve() raises at the block warm). tp4_sampdraft.py (shared) does not know it: add it to ALL_FLAGS and pair it with SHARD_ARGMAX in validate() the way AUDITS pairs an audit with its lever, so an arm that sets FOLD2 without S1 fails at attach. SMOKE. The generated tables carry the three-marker rule (S1's flag is dispatched statically already). The stricter rule - fold=1|2 matching the profile, words=1, tasks=2*workers, an audit line for chips=4, no lines without the lever - is scripts/ci/tp4_shard_argmax_smoke.py problems(env, container_text), a host-side module (not an image file) for c2_smoke_check.fusion_problems to call once per arm. IMAGE. fold2.cpp only; tp4_shard_argmax.py and _fold.cpp changed in place. tp_addresses: none (three (1,1,1,64) outputs and two reserved scratch buffers, no L1 table). W3-MR LAYOUT (the one both use): per chip three ROW_MAJOR DRAM tensors of one 64-word page, shape (1,1,1,64), the same on every chip: ids uint32 (256 B), values bf16 (128 B), words uint32 (256 B) = (column << 16) | bits, rows >= rows zero. MR's two-read arm (tp4_mesh_read.read_predictions on ids and values) needs no change; its word arm reads tp4_shard_argmax.words_for(output[2]) once with the same ConcatMeshToTensor(dim=0) composer and decodes each chip's rows with tp4_shard_argmax.decode_words(rows_slice, block_rows) (handles the sign bit of columns >= 32768). The words tensor is freed by tp4_shard_argmax.release_audit, which packed_verifier.release_sampdraft_audit already calls per trace output: MR must not free it. GRID. The scan uses every worker the device reports (110 on 11x10, 130 on 13x10): 220 or 260 tasks, runs of 17-18 or 14-15 tile columns, a scan about 15 percent shorter on 13x10; the partials buffer is (1,1,2*workers,32), the one-core fold's CB and FOLD_MAX_PAGES define follow it (17 CB pages at 260 pages) and it gets 18 percent slower with the extra records, the tree fold's level-1 blocks grow from 28 to 34 pages on the same eight cores; the engaged marker reports workers=<W> tasks=<2W>; answers do not depend on the grid; a grid under 108 workers (runs over 18 tile columns) is a logged fall-back to the served path. v678's profile on the unlocked cards (ArgMax 945 -> 877 us on 130 cores) is the served path S1 replaces."
+}
