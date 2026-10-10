@@ -1,0 +1,38 @@
+# The order of the region-read QUALIFICATION pack (docs/prefix-audit-cost.md): what a card window runs to qualify the audits' region read (the qwen_kv_read extension, ttnn.qwen_read_blocks) and then to run the audited
+# engine-reuse pair at its cost. A SUPPLEMENT to a combined window (tp4-window-next, tp4-engine-reuse-jobs): it adds rows to that window's ORDER and replaces A0 and A1 of the engine-reuse pack; it builds no image and
+# moves no :latest. tp4-kvread-jobs is the earlier W-1 pack (the same Q1 on tp4-serve-11 and the prefix gate's P1 arms on production bytes).
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>.
+# stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# P0. The cards are free (production stopped and unserved by the owner for the window, as the window's own pack says) and no other window driver is alive. Nothing here starts, stops or hands back the node agent.
+# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and the tag is pushed on THAT commit: the gate steps run on the runner from the checkout. Push ONE tag at a time.
+# THE IMAGE: tp4-next-1 is the placeholder every template carries (sed -i 's/tp4-next-1/<tag>/' *.env). The image must be built from a head that has levern_route's QWEN_FAST_LEVERN_KV_READ (this pack's branch)
+# AND bakes the extension (Dockerfile layer and provenance check (g)); an image built earlier does not read the knob (it would digest whole caches, 8.4 minutes a request) and c2_smoke_check fails the arm for the missing ready line.
+#
+# WHY. The Lever N audit (QWEN_FAST_LEVERN_AUDIT=1) digests the KV of every prefill of at most 32,785 tokens by reading EVERY cache tensor of the whole pool to the host: about 8.4 minutes a request at 8 x 262k. The
+# engine-reuse A0 and A1 (profiles ...-levern-audit-r2 and ...-levern-parked-audit) were timeboxed at 90 minutes after ten requests with parked_equal and parked_budgets never run. The prefix audit
+# (QWEN_PREFIX_AUDIT=1) had the same cost and already has the extension (QWEN_PREFIX_AUDIT_READ=auto|region|full|cross, c2_prefix_gate's exactness-shared and read-qualify arms); the Lever N digest did not.
+# THE FIX (default off, byte-identical off). QWEN_FAST_LEVERN_KV_READ = full (unset: today's read) | region | cross, gate only, beside QWEN_FAST_LEVERN_AUDIT=1 (levern_policy.kv_read_mode; levern_route.kv_digest):
+#   region reads only the blocks the row's page table names through the extension, into a host tensor ttnn.to_torch unpacks as it unpacks a whole cache, so the digest is the same digest, in seconds;
+#   cross is region plus the whole-cache read of the first QWEN_FAST_LEVERN_KV_CROSS_STEPS digests (default 1), the two selections compared byte for byte, the WHOLE-cache bytes feeding the digest.
+# The twins (scripts/ci/make_kvread_profiles.py generates them; test_kvread_profiles holds them): ...-ship-prefix-levern-audit-kvr, ...-levern-audit-r2-kvr, ...-levern-audit-r2-kvx (cross), ...-levern-kvr-parked-audit
+# (the parked-audit parent plus the knob; not named '...-parked-audit-kvr': the octo and engine-reuse generators anchor on every '...-levern-parked' name). Every one is gate only; nothing else names the knob.
+# THE SMOKE RULE: c2_smoke_check.levern_kv_read_problems (a ready line at the attach, a read line per digest, no fallback, under cross a clean cross line, no line at all when the knob is off).
+#
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS Q2 Q3 <- Q1
+# NEEDS A0R <- Q2
+# NEEDS A1R <- A0R
+# READ RULES (each also needs c2_smoke_check clean and no stall; the templates' own headers have the whole text):
+#   Q1  'KV_READ_PROBE verdict=PASS' and 'KV_READ_PROBE extension source: baked': the extension is byte-identical to the whole-cache read on the served mesh at the production pool's size, compiles nothing and follows the row.
+#       FAIL or NOT-MEASURED: NOT QUALIFIED - every other job of this pack is skipped and the audited jobs run as their own packs wrote them (the whole-cache read).
+#   Q2  the Lever N audit digest cross-checked on a real prompt: 'lever N kv read ready mode=cross', ONE 'lever N kv read cross ... mismatched=0 ... fallback=-' line with tensors > 0, a 'kv read mode=cross' line per digest with
+#       fallback=-, and levern_compare.py equal digests against a full-read arm for the prompts in common. A mismatch is the extension's finding (read it before anything else).
+#   Q3  the prefix audit's cross check on the production stack's audited profile: plan verdict PASS, '[PREFIX-AUDIT-CROSS] tensors=<n> mismatched=0', mode=region in every '[PREFIX-AUDIT-COST]' line, program count unchanged.
+#   A0R the engine-reuse control at the region read's cost: as A0 (docs/tp4-engine-reuse.md) plus a 'kv read mode=region' line with fallback=- per digest.   A1R the parked arm: as A1, parked_compare.py against A0R (every hash, digest and accepted prefix).
+# NO-GO for adopting the region read for any audited arm: a mismatched cross line, a fallback line, an absent cross line, a program compiled by a read, a digest that differs from a full-read arm's for the same prompt.
+# Time (estimate): Q1 12 (box 30), Q2 45, Q3 75, A0R 75, A1R 75, about 4.7 h in all against A0 and A1's 5 h for the two (each of which was timeboxed unfinished): the saving is that A0R and A1R now complete.
+Q1-kvread-qualify stop tp4-next-1 12
+Q2-kvread-cross-levern-audit stop tp4-next-1 45
+Q3-kvread-cross-prefix-audit soft tp4-next-1 75
+A0R-control-audit-region soft tp4-next-1 75
+A1R-parked-audit-region soft tp4-next-1 75

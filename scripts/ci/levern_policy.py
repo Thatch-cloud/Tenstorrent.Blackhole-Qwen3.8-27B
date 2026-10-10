@@ -46,6 +46,13 @@ THE FLAGS (all default off or default value; every malformed value is a ValueErr
                                                     the NON-interleaved control that produces the digests the audited
                                                     interleaved arm is compared with)
     QWEN_FAST_LEVERN_FAULT              unset       gate only negative control: foreign | final-hold
+    QWEN_FAST_LEVERN_KV_READ            full        gate only, beside QWEN_FAST_LEVERN_AUDIT=1: how the audit's kv_sha reads the paged KV caches. full (unset)
+                                                    is today's read of every cache tensor whole (about 8.4 minutes a request at eight seats x 262k);
+                                                    region reads only the blocks the row's page table names through the qwen_kv_read extension
+                                                    (levern_route.kv_digest; docs/prefix-audit-cost.md), the same bytes; cross is region, and for the
+                                                    first QWEN_FAST_LEVERN_KV_CROSS_STEPS digests (default 1) every selection is also compared byte for
+                                                    byte with the whole-cache read (the qualification on a real prompt: it pays one whole-pool read)
+    QWEN_FAST_LEVERN_KV_CROSS_STEPS     1           digests cross-checked under KV_READ=cross, 0..64
 
 ENGINE REUSE (serving_parked_engines; meaningful only beside QWEN_FAST_LEVER_N=1):
     QWEN_FAST_LEVERN_BUILD_MS           unset       the deadline governor's cost of one admission's engine: unset is today's single fixed
@@ -84,6 +91,11 @@ MAX_ROUNDS_FLAG = 'QWEN_FAST_LEVERN_MAX_ROUNDS'
 AUDIT_FLAG = 'QWEN_FAST_LEVERN_AUDIT'
 FAULT_FLAG = 'QWEN_FAST_LEVERN_FAULT'
 FAULTS = ('foreign', 'final-hold')
+KV_READ_FLAG = 'QWEN_FAST_LEVERN_KV_READ'
+KV_CROSS_FLAG = 'QWEN_FAST_LEVERN_KV_CROSS_STEPS'
+KV_READ_MODES = ('full', 'region', 'cross')
+DEFAULT_KV_CROSS_STEPS = 1
+MAX_KV_CROSS_STEPS = 64
 TTFT_FLAG = 'QWEN_FAST_LEVERN_TTFT_TARGET_S'
 SHORT_FLAG = 'QWEN_FAST_LEVERN_SHORT_TOKENS'
 PARK_FLAG = 'QWEN_FAST_LEVERN_PARK'
@@ -98,7 +110,9 @@ MERGED_FLAGS = (TTFT_FLAG, SHORT_FLAG, PARK_FLAG, PARK_SLOTS_FLAG, MAX_PARK_FLAG
 # Every flag of this module: a sibling set while the master switch is off is a configuration error the contract names
 # (a typo must not leave an arm silently running the control).
 SIBLING_FLAGS = (STEP_FLAG, SOLO_FLAG, SHARE_FLAG, ROUNDS_FLAG, MAX_ROUNDS_FLAG, FAULT_FLAG, BUILD_MS_FLAG) + MERGED_FLAGS
-ALL_FLAGS = (FLAG, AUDIT_FLAG) + SIBLING_FLAGS
+# The audit's own knobs (gate instruments, valid beside the audit switch alone, never beside the master switch only): not siblings of the lever.
+KV_READ_FLAGS = (KV_READ_FLAG, KV_CROSS_FLAG)
+ALL_FLAGS = (FLAG, AUDIT_FLAG) + KV_READ_FLAGS + SIBLING_FLAGS
 
 DEFAULT_STEP = CHUNK
 DEFAULT_SOLO = 8 * CHUNK
@@ -135,6 +149,11 @@ ROUTE_WARM_LINE = '[PINDIAG] lever N route warmed before the packed traces: step
 DIGEST_LINE = '[PINDIAG] lever N digest req={} prompt={} tokens_sha={} slot_sha={} logits_sha={} kv_sha={}'
 KV_DIGEST_MAX_PROMPT = 32785
 KV_SKIPPED = '0' * 32
+# One per digest read through the region extension (KV_READ=region or cross; none under the default full read): what the read cost and whether it fell back.
+# KV_CROSS_LINE is the qualification line of a cross-checked digest (c2_smoke_check reads it): every region selection against the whole-cache read of the same blocks.
+KV_READ_LINE = '[PINDIAG] lever N kv read mode={} req={} prompt={} reads={} blocks_read={} region_ms={:.1f} fallback={}'
+KV_CROSS_LINE = '[PINDIAG] lever N kv read cross req={} tensors={} mismatched={} region_ms={:.1f} whole_read_ms={:.1f} blocks_read={} fallback={}'
+KV_READ_PREFIX = '[PINDIAG] lever N kv read '
 FINAL_HOLD_LINE = '[PINDIAG] lever N final-step dram hold req={} prompt={} decodes={} short={}'
 REFUSED_LINE = '[PINDIAG] lever N REFUSED {}'
 # The merged route's lines (docs/lever-n-prefix-merged-route.md). PARK_LINE: a scratch parked to host or restored from it; QUARANTINE_LINE: a request
@@ -205,6 +224,24 @@ def enabled(environ=None):
 def audit_enabled(environ=None):
     """Whether QWEN_FAST_LEVERN_AUDIT=1 (strictly 0 or 1)."""
     return _flag(os.environ if environ is None else environ, AUDIT_FLAG)
+
+
+def kv_read_mode(environ=None):
+    """How the audit's kv_sha reads the KV caches: 'full' (QWEN_FAST_LEVERN_KV_READ unset or full: every cache whole, today's read), 'region' or 'cross'.
+    Strict: anything else is a ValueError."""
+    environ = os.environ if environ is None else environ
+    value = environ.get(KV_READ_FLAG)
+    if value is None:
+        return 'full'
+    if value not in KV_READ_MODES:
+        raise ValueError('%s must be one of %s, got %r' % (KV_READ_FLAG, ', '.join(KV_READ_MODES), value))
+    return value
+
+
+def kv_cross_steps(environ=None):
+    """How many digests QWEN_FAST_LEVERN_KV_READ=cross compares with the whole-cache read (default 1)."""
+    environ = os.environ if environ is None else environ
+    return _whole(environ, KV_CROSS_FLAG, DEFAULT_KV_CROSS_STEPS, 0, MAX_KV_CROSS_STEPS)
 
 
 def _whole(environ, name, default, low, high=None, multiple=None):
@@ -311,9 +348,20 @@ def config_problems(environ=None):
         config(environ)
         merged_config(environ)
         build_ms_mode(environ)
+        kv_read_mode(environ)
+        kv_cross_steps(environ)
     except ValueError as failure:
         problems.append(str(failure))
         on = environ.get(FLAG) == '1'
+    try:
+        read_without_audit = kv_read_mode(environ) != 'full' and not audit_enabled(environ)
+    except ValueError:
+        read_without_audit = False                      # already named above
+    if read_without_audit:
+        problems.append('%s=%s set without %s=1: the region read is the audit digest\'s, there is nothing else for it to read'
+                        % (KV_READ_FLAG, environ.get(KV_READ_FLAG), AUDIT_FLAG))
+    if environ.get(KV_CROSS_FLAG) is not None and environ.get(KV_READ_FLAG) != 'cross':
+        problems.append('%s set without %s=cross: nothing is cross-checked' % (KV_CROSS_FLAG, KV_READ_FLAG))
     siblings = [name for name in SIBLING_FLAGS if environ.get(name) is not None]
     if siblings and not on:
         problems.append('%s set without %s=1: %s' % (', '.join(siblings), FLAG, 'a typo must not leave an arm running '

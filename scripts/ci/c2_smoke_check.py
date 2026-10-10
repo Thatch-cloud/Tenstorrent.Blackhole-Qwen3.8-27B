@@ -1445,6 +1445,63 @@ LEVERN_DIGEST = re.compile(r'\[PINDIAG\] lever N digest req=(\S+) prompt=(\d+) t
                            r'logits_sha=([0-9a-f]{32}) kv_sha=([0-9a-f]{32})')
 
 
+# The audit digest's region read (QWEN_FAST_LEVERN_KV_READ, levern_policy.KV_READ_LINE and KV_CROSS_LINE; docs/prefix-audit-cost.md): one 'kv read mode=' line per
+# digest that read the KV (a prompt over KV_DIGEST_MAX_PROMPT skips it), one 'kv read cross' line per cross-checked digest.
+LEVERN_KV_READ_FLAG = 'QWEN_FAST_LEVERN_KV_READ'
+LEVERN_KV_CROSS_FLAG = 'QWEN_FAST_LEVERN_KV_CROSS_STEPS'
+LEVERN_KV_PREFIX = '[PINDIAG] lever N kv read '
+LEVERN_KV_SKIPPED = '0' * 32
+LEVERN_KV_READ = re.compile(r'\[PINDIAG\] lever N kv read mode=(region|cross) req=(\S+) prompt=(\d+) reads=(\d+) blocks_read=(\d+) '
+                            r'region_ms=([0-9.]+) fallback=(\S.*)$', re.M)
+LEVERN_KV_CROSS = re.compile(r'\[PINDIAG\] lever N kv read cross req=(\S+) tensors=(\d+) mismatched=(\d+) region_ms=([0-9.]+) '
+                             r'whole_read_ms=([0-9.]+) blocks_read=(\d+) fallback=(\S.*)$', re.M)
+LEVERN_KV_READY = '[PINDIAG] lever N kv read ready mode='
+
+
+def levern_kv_read_problems(env, container_text, digests):
+    """[problem] for the audit digest's read mode. Unset or full: no 'lever N kv read' line (a line says a region read ran under a profile that never
+    asked). region or cross: the attach's ready line, one read line per digest that read the KV (a fallback to the whole-cache read in any of them is
+    a failure: the region read did not answer), and under cross one cross line per cross-checked digest (the first QWEN_FAST_LEVERN_KV_CROSS_STEPS,
+    default 1) with mismatched=0 and no fallback: an absent line is NOT EXERCISED and fails, a mismatch is the extension's finding."""
+    mode = env.get(LEVERN_KV_READ_FLAG, 'full')
+    lines = [line for line in container_text.splitlines() if LEVERN_KV_PREFIX in line]
+    if mode not in ('region', 'cross'):
+        return ['%d "%s" line(s) on a profile without %s=region or cross (the first: %s)' % (len(lines), LEVERN_KV_PREFIX.strip(), LEVERN_KV_READ_FLAG,
+                                                                                              lines[0].strip()[:160])] if lines else []
+    problems = []
+    if LEVERN_KV_READY + mode not in container_text:
+        problems.append('%s=%s and no "%s%s" line was logged: the attach never checked the extension' % (LEVERN_KV_READ_FLAG, mode, LEVERN_KV_READY, mode))
+    reads = [m for m in LEVERN_KV_READ.finditer(container_text)]
+    wanted = len([row for row in digests if row['kv'] != LEVERN_KV_SKIPPED])
+    if len(reads) != wanted:
+        problems.append('%s=%s: %d region-read line(s) for %d digest(s) that read the KV (one per digest)' % (LEVERN_KV_READ_FLAG, mode, len(reads), wanted))
+    fell = [m for m in reads if m.group(7).strip() != '-']
+    if fell:
+        problems.append('the region read fell back to the whole-cache read (req %s: %s): the extension did not answer' % (fell[0].group(2), fell[0].group(7)[:160]))
+    crosses = [m for m in LEVERN_KV_CROSS.finditer(container_text)]
+    if mode == 'region':
+        if crosses:
+            problems.append('%d cross-check line(s) under %s=region' % (len(crosses), LEVERN_KV_READ_FLAG))
+        return problems
+    try:
+        steps = int(env.get(LEVERN_KV_CROSS_FLAG, '1'))
+    except ValueError:
+        steps = 1
+    expected = min(steps, wanted)
+    if steps and not crosses:
+        problems.append('%s=cross and no "%scross" line was logged: the region read was never compared with the whole-cache read (NOT EXERCISED)'
+                        % (LEVERN_KV_READ_FLAG, LEVERN_KV_PREFIX))
+    elif len(crosses) != expected:
+        problems.append('%d cross-check line(s), %d expected (%s=%d over %d digest(s))' % (len(crosses), expected, LEVERN_KV_CROSS_FLAG, steps, wanted))
+    for m in crosses:
+        if int(m.group(3)) or m.group(7).strip() != '-':
+            problems.append('cross-check of req %s: %s tensor(s) compared, %s MISMATCHED, fallback %s: the region read is NOT QUALIFIED'
+                            % (m.group(1), m.group(2), m.group(3), m.group(7)[:120]))
+        elif not int(m.group(2)):
+            problems.append('cross-check of req %s compared no tensor' % m.group(1))
+    return problems
+
+
 def _float_or(text, default):
     try:
         return float(text)
@@ -1744,6 +1801,7 @@ def levern_problems(env, container_text, smoke):
                     problems.append('%s: %s of %s decoding seats progressed inside the %.0f s arrival window: the prefill still froze the others'
                                     % (stall_name, window.get('seats_progressing'), window.get('seats'), span))
     if audit:
+        problems += levern_kv_read_problems(env, container_text, facts['digests'])
         seen = {row['prompt'] for row in facts['digests']}
         for name in LEVERN_ROW_TESTS:
             entry = results.get(name)

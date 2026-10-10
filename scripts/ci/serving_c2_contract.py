@@ -101,7 +101,8 @@ LEVERN_ENV_FLAGS = ('QWEN_FAST_LEVER_N', 'QWEN_FAST_LEVERN_AUDIT', 'QWEN_FAST_LE
                     'QWEN_FAST_LEVERN_PREFILL_SHARE', 'QWEN_FAST_LEVERN_ROUNDS', 'QWEN_FAST_LEVERN_MAX_ROUNDS', 'QWEN_FAST_LEVERN_FAULT',
                     'QWEN_FAST_LEVERN_TTFT_TARGET_S', 'QWEN_FAST_LEVERN_SHORT_TOKENS', 'QWEN_FAST_LEVERN_PARK', 'QWEN_FAST_LEVERN_PARK_SLOTS',
                     'QWEN_FAST_LEVERN_MAX_PARK_S', 'QWEN_FAST_LEVERN_EPOCH_SCOPE',
-                    'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S')
+                    'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S',
+                    'QWEN_FAST_LEVERN_KV_READ', 'QWEN_FAST_LEVERN_KV_CROSS_STEPS')
 LEVERN_PLATFORM_MODULE = 'vllm_tt_plugin.platform'
 # Engine reuse, parked per-slot engines (serving_fast_policy.PARKED_ENGINES_FLAG; default off). A gate-only profile's own switches: the fast
 # path's engine is rebound to each request instead of built (serving_parked_engines), and with PARKED_DRAFTS the pair and quad drafter traces are
@@ -683,11 +684,15 @@ def levern_problems(profile):
     if not levern_on(profile):
         if audit and profile.get('gate_only') is not True:
             problems.append('Lever N: %s=1 is a gate instrument and needs a gate-only profile' % LEVERN_AUDIT)
+        if profile.get('gate_only') is not True:
+            for name in ('QWEN_FAST_LEVERN_KV_READ', 'QWEN_FAST_LEVERN_KV_CROSS_STEPS'):
+                if name in env:
+                    problems.append('Lever N: %s is a gate instrument (the audit digest\'s read) and needs a gate-only profile' % name)
         return problems
     if profile.get('gate_only') is not True:
         # The traffic arm (stage 1 of the short-window plan): the master switch alone, with its sibling flags and the merged route, may serve traffic
         # (the kill switch levern.off stops it with no restart); the gate instruments never may (they are the gates' own, and a fault is a negative control).
-        for name in (LEVERN_AUDIT, 'QWEN_FAST_LEVERN_FAULT'):
+        for name in (LEVERN_AUDIT, 'QWEN_FAST_LEVERN_FAULT', 'QWEN_FAST_LEVERN_KV_READ', 'QWEN_FAST_LEVERN_KV_CROSS_STEPS'):
             if str(env.get(name, '0')) not in ('0', ''):
                 problems.append('Lever N: %s is a gate instrument and needs a gate-only profile (a traffic profile carries the master switch and the '
                                 'policy flags only)' % name)
