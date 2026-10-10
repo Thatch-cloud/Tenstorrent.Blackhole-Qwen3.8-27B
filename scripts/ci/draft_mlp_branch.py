@@ -16,8 +16,8 @@ DRAFT_BF8_FLAG = 'QWEN_FAST_DRAFT_BF8'
 # QWEN_FAST_DRAFTER_BF16=1 keeps every drafter projection bfloat16 whatever QWEN_FAST_DRAFT_BF8 says (the serving image
 # bakes DRAFT_BF8=1). Default off: the dtype is decided by DRAFT_BF8 exactly as before.
 DRAFTER_BF16_FLAG = 'QWEN_FAST_DRAFTER_BF16'
-# tp4/fx-wp6 (op-fusion programme, work package 6): three default-off drafter levers, strict 0 or 1 (draft_fusion_tp.py holds the full text). They are
-# read here with a plain environment read and their modules are imported only when the flag is on, so a process with all three off runs exactly the
+# tp4/fx-wp6 (op-fusion programme, work package 6): four default-off drafter levers, strict 0 or 1 (draft_fusion_tp.py holds the full text). They are
+# read here with a plain environment read and their modules are imported only when the flag is on, so a process with all four off runs exactly the
 # ops below and does not even load the new files.
 REDUCE_FLAG = 'QWEN_FAST_DRAFT_REDUCE'        # draft_reduce_tp: the gather-add chain's slices and adds as one launch
 TAIL_FLAG = 'QWEN_FAST_DRAFT_TAIL'            # draft_tail_tp: SwiGLU and the residual tail as one launch each

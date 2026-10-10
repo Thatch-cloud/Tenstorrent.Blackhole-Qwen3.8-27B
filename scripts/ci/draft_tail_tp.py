@@ -152,7 +152,7 @@ def _launch(operations, mesh, compute_source, left, right, shape, found, *, left
             coordinate = operations.MeshCoordinate(0, chip)
             program[operations.MeshCoordinateRange(coordinate, coordinate)] = operations.ProgramDescriptor(
                 kernels=[reader, writer, compute], cbs=buffers)
-        operations.generic_op([left, right, output], program)
+        operations.generic_op([left] + ([] if right is left else [right]) + [output], program)      # a fused gate|up is one tensor read twice
     except BaseException:
         operations.deallocate(output)
         raise

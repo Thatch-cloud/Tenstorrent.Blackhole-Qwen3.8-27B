@@ -10,11 +10,14 @@ THE FOUR LEVERS (all default off, strict 0 or 1, four cards only; each has an _A
   QWEN_FAST_DRAFT_GATEUP1  F-F3c draft_gateup_tp    the gate and up projections as one matmul launch over a load-time concatenation of
                                                     the two weights (the output columns are independent, so each equals the separate
                                                     matmul's column).
+  QWEN_FAST_DRAFT_MM_GRID  R2    draft_mmgrid_tp    the MLP branch's matmuls on program grids as wide as the device's worker grid (13 x 10 since
+                                                    the firmware unlock) instead of the fixed 8-wide ones, with the same cores, per-core columns
+                                                    and in0_block_w, so the same K loop; on v678 the fixed 8-wide grids lost 17-36 percent.
 
-EXACTNESS CLASS. All three are bit-identical by construction: the same SFPU fp32 add order, the same typecast and silu primitives at the
-same rounding points, the same matmul K loop. A drafter change cannot change a served token (the target verifies every proposal), only
+EXACTNESS CLASS. All four are bit-identical by construction: the same SFPU fp32 add order, the same typecast and silu primitives at the
+same rounding points, the same matmul K loop and per-core columns. A drafter change cannot change a served token (the target verifies every proposal), only
 the proposals, so the gate is the eager audit below plus the draft-singles audit and the position-keyed accepted-prefix
-compare. None of the three is tau-only, so none needs a tau A/B; if an audit ever says otherwise the lever is NO-GO, not a tau question.
+compare. None of the four is tau-only, so none needs a tau A/B; if an audit ever says otherwise the lever is NO-GO, not a tau question.
 
 THE AUDIT (QWEN_FAST_DRAFT_<LEVER>_AUDIT=1, needs its lever). The served composition runs beside the fused launch on the very same
 operands and every chip's bytes are compared (fp32 and bf16 as integer bit patterns: -0 and +0 differ, NaN payloads count). It is EAGER:
@@ -34,8 +37,8 @@ MARKERS (every FELL BACK and MISMATCH line fails a gated arm, draft_wp6_smoke.pr
 THE GRID. Every launch reads the compute grid from the device (mesh.compute_with_storage_grid_size(): 11 x 10 until 2026-10-10 07:10Z,
 13 x 10 since the firmware unlock) and spreads its tiles over min(tiles, grid cores, WORKER_CAP) cores in row-major order; nothing
 here names 11 or 13. A grid that cannot be read is a logged fall-back to the served ops. What 13 x 10 changes: the reduce chain
-(320 tiles at 64 rows) and the residual (320 tiles) run on 64 / 110 / 130 cores = 5 / 3 / 3 tiles each, so a wider grid helps up to
-WORKER_CAP only; the fused gate|up matmul keeps its 8 x 10 program grid (68 cores) on both, because 272 output tiles split into whole
+(320 tiles at 64 rows) and the residual (320 tiles) run on min(320, grid, WORKER_CAP) = 110 cores on both grids (3 tiles each), so a wider
+grid changes nothing for them; the fused gate|up matmul keeps its 8 x 10 program grid (68 cores) on both, because 272 output tiles split into whole
 per-core columns only as 4 x 68 (2 x 136 would need 136 cores, more than either grid has).
 
 Stdlib only at import (torch inside the audit), importable on py 3.7.

@@ -9,9 +9,9 @@ refused, the launch failed) and its texts will still equal the control's. So, pe
   audit on    (the audit flag; the lever flag must be on too) at least one `audit <n> exact=True` line: an audited arm must have audited;
   flag off    not one engaged, fell-back, audit or mismatch line of that lever (a leak means the lever ran where nobody asked for it).
 
-The REDUCE engaged line carries chains=<n> (draft_reduce_tp.MILESTONES: 1, 5 and 10 chains run). A profile whose chains never reach EXPECTED_CHAINS
-(5 once the MLP branch's chains run at the quad; 10 once the attention branch's hook is in too) has half of its chains still on the served ops:
-`chains_problems` reports it when the caller says how many to expect.
+The REDUCE engaged line carries chains=<n> (draft_reduce_tp.MILESTONES: 1, 5 and 10 chains run). A profile whose chains never reach the count the hooks give
+(5 per quad once the MLP branch's chains run; 10 once the attention branch's hook is in too) has half of its chains still on the served ops:
+`chains_problems` reports it when the caller says how many to expect (--expect-chains).
 
 main() reads one log and one profile env from the command line:
     python3 draft_wp6_smoke.py --log container.log [--profile NAME [--profiles qwen_c2_profiles.json]] [--env KEY=VALUE ...] [--expect-chains N]
