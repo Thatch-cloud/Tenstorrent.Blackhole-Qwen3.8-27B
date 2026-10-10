@@ -894,6 +894,235 @@ class FusedCommitSequenceTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------------------------------------------------------------
+# The two PREFILL levers of tp4/fusion-2 (their audited twins are -fx-all-oneq-audit, -fx-all-grid13-audit and -fx-all-oneq-grid13-audit, not the audited combined twin).
+#
+# M1 (QWEN_FAST_GRID13, grid13_tp.py): the wrappers of tp_common's prefill all-gather matmuls, the 64-row verify projections and the fused commit's feature projection. The
+# verify projections and the commit run inside captures, so the audit's own synchronization and read-back are skipped there (audit_begin: one logged line) and everything
+# a capture launches must have run eagerly first. The whole lever, every sub-switch and the audit, is driven through one lifecycle (test_grid13_tp holds the per-sub-switch
+# scenarios).
+#
+# WPP (QWEN_FAST_SDPA_PF_ONEQ, sdpa_pf_oneq_tp.py): the prefill SDPA with one q chunk per core. Prefill is EAGER in this stack (the repo's captures are the decode side), so
+# its audit - the chain's program run beside the lever's on the same operands and both outputs read back from every chip - lives in eager prefill only. The scenarios hold
+# (a) that audited prefill chunks and a decode capture beside them are clean, (b) that the timed arm's program is launched in a capture only after it ran eagerly, and (c)
+# the negative control: an audited prefill SDPA inside a capture is refused by name, which is why the audit is a gate-arm instrument.
+# ---------------------------------------------------------------------------------------------------------------------------------
+
+def grid13_lifecycle(subs='1', audit=True, replays=2):
+    import grid13_tp as grid13
+    import test_grid13_tp as fake
+
+    environ = {grid13.FLAG: subs}
+    if audit:
+        environ[grid13.AUDIT_FLAG] = '1'
+    escaped = None
+    with fake.Rig(environ=environ, sync_guard=True) as rig:
+        rig.install()
+        served = rig.tp_common.create_matmul_1d_decode_progcfg(64, 1536, 5120, num_cores=33, grid_w=13)
+        commit = fake.Program1D(compute_with_storage_grid_size=(8, 10), in0_block_w=4, out_subblock_h=1, out_subblock_w=1, per_core_M=1, per_core_N=2,
+                                fuse_batch=True, fused_activation=None, mcast_in0=True)
+        value, weight = fake.dummy(rig.mesh, (1, 1, 32, 15360), 1), fake.dummy(rig.mesh, (1, 1, 15360, 5120), 2)
+
+        def forward():
+            rig.prefill(width=4128)
+            rig.prefill(width=3584)
+            rig.prefill('all_gather_swiglu_prefill', width=8704)
+            x, w = fake.dummy(rig.mesh, (1, 1, 64, 1536), 3), fake.dummy(rig.mesh, (1, 1, 1536, 5120), 5)
+            rig.tp_common.matmul_1d_decode(x, w, served, 'cfg', out_memory_config='dram')
+            chosen = grid13.commit_program(rig.target, rig.mesh, commit, value=value, weight=weight, kernel='k')
+            rig.target.matmul(value, weight, program_config=chosen, compute_kernel_config='k')
+
+        forward()                                                           # the eager warm pass: lever, audit
+        warm_audits = len(rig.matching('exact=True'))
+        trace = rig.target.begin_trace_capture(0)
+        try:
+            for _ in range(replays):
+                forward()                                                   # captured: the lever's programs again, the audits skipped
+        except Exception as error:                                          # noqa: BLE001 - the scenario reports it
+            escaped = error
+        finally:
+            rig.target.end_trace_capture(0, trace)
+        return Lifecycle(rig.rules, rig.lines, escaped=escaped, warm_audits=warm_audits, audits=len(rig.matching('exact=True')), skipped=len(rig.matching(grid13.SKIPPED)),
+                         engaged=len(rig.matching(grid13.ENGAGED)))
+
+
+class Grid13CaptureTests(unittest.TestCase):
+    def test_the_whole_lever_with_its_audit_synchronizes_and_reads_back_nothing_in_a_capture_and_launches_only_warm_programs(self):
+        found = grid13_lifecycle()
+        self.assertIsNone(found.escaped)
+        self.assertEqual(found.clean(), [])
+        self.assertEqual(found.rules.attempts, [])
+        self.assertEqual(found.rules.captures, 1)
+        self.assertTrue(found.rules.captured_launches)
+        self.assertGreaterEqual(found.warm_audits, 5, 'the eager pass audited the three prefill sites, a verify projection and the commit')
+        self.assertEqual(found.audits, found.warm_audits, 'no audit line came from a capture')
+        self.assertTrue(found.skipped, 'the capture skipped its audits with the logged line')
+        self.assertTrue(found.engaged)
+
+    def test_the_timed_arm_without_the_audit_is_clean_too(self):
+        found = grid13_lifecycle(audit=False)
+        self.assertIsNone(found.escaped)
+        self.assertEqual(found.clean(), [])
+        self.assertEqual((found.warm_audits, found.skipped), (0, 0))
+
+    def test_each_sub_switch_alone_is_clean(self):
+        for subs in ('prefill', 'verify', 'drafter'):
+            with self.subTest(subs=subs):
+                found = grid13_lifecycle(subs=subs)
+                self.assertIsNone(found.escaped)
+                self.assertEqual(found.clean(), [])
+
+    def test_negative_control_a_shape_the_warm_pass_never_ran_is_found_by_the_rules(self):
+        import test_grid13_tp as fake
+
+        with fake.Rig(environ={'QWEN_FAST_GRID13': 'prefill'}, sync_guard=True) as rig:
+            rig.install()
+            rig.prefill(rows=2048)
+            rig.target.begin_trace_capture(0)
+            try:
+                with self.assertRaises(CaptureViolation):
+                    rig.prefill(rows=1024)
+            finally:
+                rig.target.end_trace_capture(0, 1)
+            self.assertTrue(rig.rules.problems())
+
+
+class FakeBits:
+    """The torch tensor surface sdpa_pf_oneq_tp._compare uses, over a tuple of ints (no torch in the CPU image of this host)."""
+
+    def __init__(self, bits):
+        self.bits = tuple(bits)
+        self.shape = (len(self.bits),)
+
+    def to(self, dtype):
+        return self
+
+    def contiguous(self):
+        return self
+
+    def view(self, dtype):
+        return self
+
+    def numel(self):
+        return len(self.bits)
+
+    def __ne__(self, other):
+        return FakeBits(int(a != b) for a, b in zip(self.bits, other.bits))
+
+    def sum(self):
+        return sum(self.bits)
+
+
+class PrefillOps(TinyOps):
+    """TinyOps with the chunked prefill SDPA: the result depends on the operands and not on the program config (what the audit asserts on the device)."""
+
+    bfloat16 = 'bf16'
+    int16 = 'int16'
+
+    class SDPAProgramConfig:
+        def __init__(self, **fields):
+            self.__dict__.update(fields)
+
+    def __init__(self):
+        TinyOps.__init__(self)
+        self.transformer = SimpleNamespace(chunked_scaled_dot_product_attention=self.sdpa)
+        self.sdpa_calls = []
+
+    def sdpa(self, q, k, v, page_table=None, chunk_start_idx=0, program_config=None, **options):
+        self.sdpa_calls.append(program_config.max_cores_per_head_batch)
+        out = Tensor(q.shape)
+        out.bits = (q.shape[-2], k.shape[-2], chunk_start_idx)
+        return out
+
+    def to_torch(self, tensor, mesh_composer=None):
+        return FakeBits(tensor.bits)
+
+
+class FakeTorch:
+    bfloat16 = 'bfloat16'
+    int16 = 'int16'
+
+    @staticmethod
+    def equal(a, b):
+        return a.bits == b.bits
+
+
+def oneq_lifecycle(audit, prefill_chunks=3, replays=2, captured_chunk=None):
+    """Eager prefill chunks (the lever's program, the audit beside it), then a decode capture; `captured_chunk` = (rows) puts a prefill SDPA of that size inside a capture."""
+    import sdpa_pf_oneq_tp as lever
+
+    ops = PrefillOps()
+    guarded = capture_rules.guard(ops)
+    served = guarded.SDPAProgramConfig(served=True, max_cores_per_head_batch=0)
+    layer = SimpleNamespace(_sdpa_pf_word=0x5EFA0003, NH=6, NKV=1, mesh=SimpleNamespace(compute_with_storage_grid_size=lambda: (13, 10)))
+
+    def graft(layer_, served_, qk_chunk, flexible, S):
+        return guarded.SDPAProgramConfig(compute_with_storage_grid_size=(13, 10), exp_approx_mode=False, q_chunk_size=qk_chunk, k_chunk_size=qk_chunk,
+                                         max_cores_per_head_batch=0x5EFA0003)
+
+    lines = []
+    escaped = None
+    lever.reset_state()
+    lever._STATE.update(original=graft, audit=audit, binary_ok=True)
+    try:
+        with mock.patch.dict(sys.modules, {'ttnn': guarded, 'torch': FakeTorch}), mock.patch.object(lever, '_log', lines.append):
+            def chunk(rows, start=0):
+                config = lever.program_config(layer, served, 128, True, rows)
+                return guarded.transformer.chunked_scaled_dot_product_attention(Tensor((1, 6, rows, 128)), Tensor((1, 1, start + rows, 128)), Tensor((1, 1, start + rows, 128)),
+                                                                                chunk_start_idx=start, program_config=config)
+
+            for index in range(prefill_chunks):
+                chunk(2048, start=2048 * index)                                  # eager prefill: the lever's program, the audit's reference program, both read back
+            decode = (Tensor((32, 64)), Tensor((64, 32)))
+            guarded.matmul(*decode, program_config='decode')                     # the decode forward ran eagerly before its capture
+            trace = guarded.begin_trace_capture('mesh')
+            try:
+                for _ in range(replays):
+                    guarded.matmul(*decode, program_config='decode')
+                if captured_chunk is not None:
+                    chunk(captured_chunk)
+            except Exception as error:                                           # noqa: BLE001 - the scenario reports it
+                escaped = error
+            finally:
+                guarded.end_trace_capture('mesh', trace)
+            audit_state = (lever._STATE['audit_calls'], lever._STATE['audited'])
+    finally:
+        lever.reset_state()
+    return Lifecycle(guarded.rules, lines, escaped=escaped, ops=ops, audit_state=audit_state)
+
+
+class OneqCaptureTests(unittest.TestCase):
+    def test_the_audited_eager_prefill_reads_back_and_the_decode_capture_beside_it_is_clean(self):
+        found = oneq_lifecycle(audit=True)
+        self.assertIsNone(found.escaped)
+        self.assertEqual(found.clean(), [])
+        self.assertEqual(found.rules.attempts, [])
+        self.assertEqual(found.audit_state, (3, 3), 'every eager chunk was audited (the first eight are)')
+        self.assertEqual(sum(1 for line in found.lines if 'oneq audit n=' in line and 'exact=True' in line), 3)
+        self.assertEqual(sorted(set(found.ops.sdpa_calls)), [0x5EFA0003, 0x5EFA000B], 'the chain and the one-chunk-per-core program both ran, eagerly')
+        self.assertEqual(found.rules.captures, 1)
+
+    def test_the_timed_arm_launches_in_a_capture_only_what_ran_eagerly(self):
+        found = oneq_lifecycle(audit=False, captured_chunk=2048)
+        self.assertIsNone(found.escaped)
+        self.assertEqual(found.clean(), [])
+        self.assertEqual(found.audit_state, (0, 0))
+        self.assertEqual(set(found.ops.sdpa_calls), {0x5EFA000B})
+
+    def test_a_captured_chunk_of_a_size_that_never_ran_eagerly_is_found_by_the_rules(self):
+        found = oneq_lifecycle(audit=False, captured_chunk=1024)
+        self.assertIsInstance(found.escaped, CaptureViolation)
+        self.assertIn(NEW_BINARIES, str(found.escaped))
+
+    def test_negative_control_an_audited_prefill_sdpa_inside_a_capture_is_refused_by_name(self):
+        """The audit reads both outputs back (to_torch), so it belongs to eager prefill: inside a capture the rules refuse it. Prefill is not captured in this stack; this is the
+        statement of why the audit is a gate-arm instrument (-audit twins only), never in a timed arm or traffic."""
+        found = oneq_lifecycle(audit=True, captured_chunk=2048)
+        self.assertIsInstance(found.escaped, CaptureViolation)
+        self.assertTrue(found.rules.attempts)
+        self.assertTrue(found.clean())
+
+
+# ---------------------------------------------------------------------------------------------------------------------------------
 # The census of host round trips: every place a lever module of the programme synchronizes, reads a tensor back or writes one from the host, with the reason it cannot be reached
 # inside a capture. The scenarios above prove the ones the fakes can drive; this census is what keeps the rest honest - a new call site fails until someone classifies it.
 # ---------------------------------------------------------------------------------------------------------------------------------
@@ -901,7 +1130,8 @@ class FusedCommitSequenceTests(unittest.TestCase):
 HOST_CALLS = frozenset(('to_torch', 'synchronize_device', 'from_torch', 'host_buffer', 'copy_host_to_device_tensor', 'synchronize', 'event_synchronize', 'to_device', 'from_device'))
 LEVER_MODULES = ('kv_page_writer_tp4', 'tp4_mlp_gateup', 'tp4_mlp_fused', 'tp4_shard_argmax', 'ccl_options_tp', 'tile_collective_tp', 'distributed_norm_gather_tp',
                  'draft_permute_tp', 'draft_qkv_tp', 'draft_head64_tp', 'draft_fusion_tp', 'draft_reduce_tp', 'draft_tail_tp', 'draft_gateup_tp', 'draft_mmgrid_tp', 'round_host',
-                 'qwen_device_zeros', 'qwen_lazy_shard', 'prestage_diff', 'write_packed_lean', 'batched_reads_tp', 'hostgap_instr')
+                 'qwen_device_zeros', 'qwen_lazy_shard', 'prestage_diff', 'write_packed_lean', 'batched_reads_tp', 'hostgap_instr',
+                 'grid13_tp', 'sdpa_pf_oneq_tp')
 
 # (module, function, call) -> why it cannot run in a capture
 CLASSIFIED = {
@@ -934,6 +1164,12 @@ CLASSIFIED = {
     ('write_packed_lean', 'write', 'copy_host_to_device_tensor'): 'WPH-2: the host input staging of the captured buffers, between replays: the captured programs read them, nothing writes them inside a capture',
     ('write_packed_lean', 'write', 'from_torch'): 'WPH-2: the same staging',
     ('write_packed_lean', 'write', 'synchronize_device'): 'WPH-2: the staging fence, between replays',
+    ('grid13_tp', 'audit_begin', 'synchronize_device'): 'M1: after in_capture() has said no (a capture skips its audit with one logged line)',
+    ('grid13_tp', '_audit_agmm', 'synchronize_device'): 'M1: inside the prefill audit, after audit_begin said the call is eager',
+    ('grid13_tp', 'wrap_matmul_1d_decode.matmul_1d_decode', 'synchronize_device'): 'M1: inside the verify audit, after audit_begin said the call is eager',
+    ('grid13_tp', 'commit_program', 'synchronize_device'): 'M1: inside the fused-commit audit, after audit_begin said the call is eager',
+    ('grid13_tp', '_bits', 'to_torch'): 'M1: the readback of an audit that audit_begin let run (eager only)',
+    ('sdpa_pf_oneq_tp', '_compare', 'to_torch'): 'WPP: the audit reads both prefill SDPA outputs back; prefill is eager in this stack and the audit is a gate-arm instrument (OneqCaptureTests: refused by name inside a capture)',
     ('qwen_lazy_shard', 'audit_load', 'from_device'): 'upload-p0: weight load, engine start',
     ('qwen_lazy_shard', 'audit_load', 'from_torch'): 'upload-p0: weight load, engine start',
 }
@@ -998,6 +1234,14 @@ GATED = {
     'QWEN_FAST_WRITE_PACKED_LEAN_AUDIT': 'ReadbackCensusTests',
     'QWEN_FAST_BATCHED_READS_AUDIT': 'ReadbackCensusTests',
 }
+# The audit flags of the PREFILL levers: they join the audited twins -fx-all-oneq-audit, -fx-all-grid13-audit and -fx-all-oneq-grid13-audit (and the per-lever -fx-oneq-audit), not the
+# audited combined twin, so they are held by their own table. A flag that joins one of those twins without a scenario fails CoverageTests.
+GATED_PREFILL = {
+    'QWEN_FAST_SDPA_PF_ONEQ_AUDIT': 'OneqCaptureTests',
+    'QWEN_FAST_GRID13_AUDIT': 'Grid13CaptureTests',
+}
+PREFILL_AUDITED_TWINS = ('oneq-audit', 'all-oneq-audit', 'all-grid13-audit', 'all-oneq-grid13-audit')
+PREFILL_TIMED_TWINS = ('oneq', 'all-oneq', 'all-grid13', 'all-oneq-grid13')
 SEQUENCES = ('FusedCommitSequenceTests',)       # the fused commit's warm / capture order, for the WP6 audits at the feature projection
 
 
@@ -1022,6 +1266,49 @@ class CoverageTests(unittest.TestCase):
 
         profiles = json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))['profiles']
         self.assertEqual([name for name in GATED if name in profiles[fusion.NAMESPACE + 'all']['env']], [])
+
+    def test_every_audit_flag_of_the_prefill_lever_twins_has_a_scenario_in_this_module(self):
+        import json
+
+        import make_fusion_profiles as fusion
+
+        profiles = json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))['profiles']
+        combined = set(name for name, value in profiles[fusion.NAMESPACE + 'all-audit']['env'].items() if name.endswith('_AUDIT') and value == '1')
+        seen = set()
+        for suffix in PREFILL_AUDITED_TWINS:
+            with self.subTest(twin=suffix):
+                env = profiles[fusion.NAMESPACE + suffix]['env']
+                audits = set(name for name, value in env.items() if name.endswith('_AUDIT') and value == '1') - combined
+                self.assertEqual(sorted(name for name in audits if name not in GATED_PREFILL), [], 'an audit flag joined a prefill-lever twin with no capture scenario')
+                self.assertTrue(audits, 'the twin carries the lever audit flag')
+                seen |= audits
+        self.assertEqual(seen, set(GATED_PREFILL), 'a gated prefill audit flag is on no audited twin')
+        for name in sorted(set(GATED_PREFILL.values())):
+            self.assertTrue(isinstance(globals().get(name), type) and issubclass(globals()[name], unittest.TestCase), name)
+
+    def test_the_timed_prefill_twins_carry_no_audit_flag_so_none_of_this_runs_in_their_captures(self):
+        import json
+
+        import make_fusion_profiles as fusion
+
+        profiles = json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))['profiles']
+        for suffix in PREFILL_TIMED_TWINS:
+            self.assertEqual([name for name in GATED_PREFILL if name in profiles[fusion.NAMESPACE + suffix]['env']], [], suffix)
+
+    def test_the_prefill_twins_exist_and_nothing_else_carries_their_flags(self):
+        import json
+
+        import make_fusion_profiles as fusion
+
+        profiles = json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))['profiles']
+        carriers = sorted(name[len(fusion.NAMESPACE):] for name, profile in profiles.items()
+                          if name.startswith(fusion.NAMESPACE) and set(GATED_PREFILL) & set(profile['env']))
+        self.assertEqual(carriers, sorted(PREFILL_AUDITED_TWINS))
+        for name, profile in profiles.items():
+            if not name.startswith(fusion.NAMESPACE):
+                self.assertFalse(set(GATED_PREFILL) & set(profile['env']), name)
+        self.assertFalse(set(GATED_PREFILL) & set(profiles[fusion.PARENT]['env']))
+        self.assertFalse(set(GATED_PREFILL) & set(profiles[fusion.NAMESPACE + 'traffic']['env']), 'the ship profile carries no prefill-lever audit flag')
 
 
 if __name__ == '__main__':
