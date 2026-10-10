@@ -16,7 +16,8 @@ THE SHAPES (the stack's, from tile_collective_tp and DistributedNorm):
 EXACTNESS. rs: random heavy-tailed bfloat16 partials (integers are exact under any association and cannot see a changed order), the unit-major result of
 every config against the model's own tt_all_reduce on each 32-row tile alone (the sequential engine's call; X1's anchor), joined over the four chips, as
 int16 bit patterns, for SEEDS seeds; and the first and last call of the captured trace against the eager result. ag: the gathered tensor on every chip
-against the host concatenation of the four inputs, with -0 and denormals in the inputs. A config whose bits differ is FAIL-BYTES and is never timed.
+against the four inputs after the same upload and download (the host tilizer canonicalises -0 and denormals to +0, so the raw torch tensor is not the
+reference; the report records how many elements that path changed), with -0 and denormals in the inputs. A config whose bits differ is FAIL-BYTES and is never timed.
 The base config's output is fingerprinted (sha256 of the bits) so two runs under different fabric configs or payloads can be compared offline
 (compare_reports).
 
@@ -413,7 +414,23 @@ class Sweep(object):
             else:
                 source = ag_inputs(torch, seed)
                 self.sources.append(source)
-                self.anchors.append(torch.cat([source[chip:chip + 1] for chip in range(CHIPS)], dim=3))
+                self.anchors.append(self.ag_anchor(source, seed))
+
+    def ag_anchor(self, source, seed):
+        """What the gather must return: the four inputs as the HOST PATH hands them back, side by side. The gather copies tile pages, but the inputs reach the
+        device through the host tilizer and leave it through the untilizer, which canonicalises zero-exponent bfloat16 (-0 and the denormals become +0: the plan's U2,
+        V2's canonical rule). Comparing the gather with the raw torch tensor read that canonicalisation as a corrupted gather (P0: 96 differing elements = the
+        three special patterns on every chip and seed, and the served all-gather is exact in production). So the reference is the same upload and download, one chip
+        at a time, in the scenario's input memory; how many elements that path changed is recorded in the report (roundtrip_changed)."""
+        h, torch = self.h, self.torch
+        tensor = h.upload(source, h.memory(self.scenario.input))
+        try:
+            chips = h.download(tensor)
+        finally:
+            h.ttnn.deallocate(tensor)
+        changed = sum(bits_equal(torch, chips[k], source[k:k + 1])[1] for k in range(CHIPS))
+        self.report.setdefault('roundtrip_changed', {}).setdefault(self.scenario.name, {})[str(seed)] = changed
+        return torch.cat(chips, dim=3)
 
     def rs_anchor(self, source):
         """The sequential engine's call on each 32-row tile alone (the model's tt_all_reduce, Ring, the model's keywords), the four chips' columns joined."""

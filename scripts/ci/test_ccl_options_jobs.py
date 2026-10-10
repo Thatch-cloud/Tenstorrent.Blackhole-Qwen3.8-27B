@@ -174,7 +174,8 @@ class TheManifest(unittest.TestCase):
         self.assertEqual((lever['id'], lever['flag'], lever['audit_flag']), ('ccl', ccl_options_tp.OPTIONS_FLAG, ccl_options_tp.AUDIT_FLAG))
         selection = ccl_options_tp.parse_set(lever['value'])
         self.assertEqual(selection.name, lever['value'], 'the manifest carries the canonical form')
-        self.assertTrue(selection.rs and selection.ag)
+        self.assertTrue(selection.rs, 'the lever is the reduce-scatter winner of the P0 sweep')
+        self.assertFalse(selection.ag, 'a reduce-scatter-only lever leaves DistributedNorm.forward unwrapped')
         self.assertEqual(lever['marker'], 'tp4 ccl options')
         for marker in (ccl_options_tp.ENGAGED_MARKER, ccl_options_tp.FALLBACK_MARKER, ccl_options_tp.AUDIT_MARKER):
             self.assertTrue(marker.startswith('[PINDIAG] ' + lever['marker'] + ' '), marker)
