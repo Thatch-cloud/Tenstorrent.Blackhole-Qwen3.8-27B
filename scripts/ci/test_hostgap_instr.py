@@ -130,6 +130,22 @@ class WrapperTests(Clean):
         self.assertIsNotNone(instr.METER.first_enqueue)
         self.assertEqual(self.lines(instr.ENGAGED_MARKER)[0].split('wrapped=')[1].count(','), 5, 'the six calls this namespace has')
 
+    def test_a_wrapped_function_keeps_the_attributes_of_the_original(self):
+        class Operation:
+            golden_function = staticmethod(lambda: 'golden')
+            __name__ = 'to_torch'
+
+            def __call__(self, value, mesh_composer=None):
+                return 'read'
+
+        ops = Fake()
+        ops.to_torch = Operation()
+        instr.install(ops)
+        self.assertEqual(ops.to_torch.golden_function(), 'golden')
+        self.assertEqual(ops.to_torch('x'), 'read')
+        instr.uninstall(ops)
+        self.assertIsInstance(ops.to_torch, Operation)
+
     def test_installing_twice_wraps_once_and_uninstall_puts_the_functions_back(self):
         ops = Fake()
         original = ops.copy_host_to_device_tensor

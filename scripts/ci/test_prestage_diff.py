@@ -102,6 +102,46 @@ class SameBitsTests(unittest.TestCase):
         self.assertTrue(prestage_diff.same_bits(torch.zeros(8, dtype=torch.int32)[2:5], torch.zeros(3, dtype=torch.int32)))
 
 
+class ComparatorTests(unittest.TestCase):
+    def fallback(self, left, right):
+        with patch.object(prestage_diff, '_MEMCMP', [False]):
+            return prestage_diff.same_bits(left, right)
+
+    def test_the_memcmp_path_and_the_torch_path_give_the_same_answers(self):
+        generator = torch.Generator().manual_seed(5)
+        cases = []
+        for dtype in (torch.bfloat16, torch.float16, torch.float32, torch.float64, torch.int32, torch.int64, torch.uint8, torch.bool, torch.int16):
+            base = (torch.randn(6, 5, generator=generator) * 4).to(dtype) if dtype != torch.bool else torch.rand(6, 5, generator=generator) > 0.5
+            other = base.clone()
+            cases.append((base, base.clone()))
+            if dtype.is_floating_point:
+                other.view(-1)[7] = -0.0 if base.view(-1)[7] == 0 else other.view(-1)[7] * 2
+            else:
+                other.view(-1)[7] = ~other.view(-1)[7] if dtype == torch.bool else other.view(-1)[7] + 1
+            cases.append((base, other))
+            cases.append((base, base.reshape(5, 6).clone()))
+            cases.append((base, base.to(torch.float32) if dtype != torch.float32 else base.to(torch.float64)))
+            cases.append((base[:, 1:], base[:, 1:].clone()))                      # not contiguous: the torch path
+            cases.append((base.t(), base.t().contiguous()))                       # a transposed view against its dense copy
+            cases.append((base[2:3], base[2:3].clone()))                          # a dense view with a storage offset
+            cases.append((base[:0], base[:0].clone()))                            # empty
+        plus, minus = torch.tensor([0.0], dtype=torch.bfloat16), torch.tensor([-0.0], dtype=torch.bfloat16)
+        cases += [(plus, minus), (minus, minus.clone())]
+        nan_a, nan_b = (torch.tensor([code], dtype=torch.int16).view(torch.bfloat16) for code in (0x7FC1, 0x7FC2))
+        cases += [(nan_a, nan_b), (nan_a, nan_a.clone())]
+        for left, right in cases:
+            self.assertEqual(prestage_diff.same_bits(left, right), self.fallback(left, right), (left.dtype, tuple(left.shape)))
+        self.assertTrue(prestage_diff.memcmp(), 'libc is there on this host')
+
+    def test_a_tensor_with_a_storage_offset_compares_its_own_bytes_and_a_last_byte_difference_is_found(self):
+        big = torch.arange(64, dtype=torch.int32)
+        other = big.clone()
+        self.assertTrue(prestage_diff.same_bits(big[8:24], other[8:24]))
+        other[23] += 1
+        self.assertFalse(prestage_diff.same_bits(big[8:24], other[8:24]))
+        self.assertTrue(prestage_diff.same_bits(big[8:23], other[8:23]))
+
+
 class DiffFixture(tvp.PrestageFixture):
     """The four-user block with the lever on (and whatever else a test asks for), every line captured."""
 
@@ -188,6 +228,95 @@ class EquivalenceTests(DiffFixture, tvp.EquivalenceTests):
                 for path, reason, total, written in self.diff_paths():
                     self.assertLessEqual(int(written), int(total))
                 self.assertTrue(any(int(written) < int(total) for path, reason, total, written in self.diff_paths() if path == 'diff'))
+
+
+class InterleavingTests(DiffFixture):
+    """Random rounds with other writers interleaved: an epoch bump (a Lever N chunk, an admission, a detach) at a random point of a round, and an engine-reuse REBIND that swaps two
+    users' page tables and frontiers between rounds with no epoch move at all (a value change the lever must catch by value). The device after every window and every verify is the full
+    stage's, and the predictions are the flag-off run's."""
+
+    def plan(self, rng, rounds):
+        positions = {name: rng.randrange(4100, 4180) for name in NAMES}
+        tables = {name: tvp.user_table(rng, index) for index, name in enumerate(NAMES)}
+        out = []
+        for number in range(rounds):
+            if number and rng.random() < 0.35:                  # a rebind: two users swap tables and frontiers (no epoch bump)
+                a, b = rng.sample(NAMES, 2)
+                tables[a], tables[b] = tables[b], tables[a]
+                positions[a], positions[b] = positions[b], positions[a]
+            if number and rng.random() < 0.5:                   # a page append
+                name = rng.choice(NAMES)
+                column = min(tvp.PAGE_WIDTH - 1, (positions[name] + 15) // 64 + rng.randrange(0, 2))
+                tables[name] = tables[name].clone()
+                tables[name][0, column] = 100 * (NAMES.index(name) + 1) + 99
+            out.append(dict(users={name: (positions[name], tables[name].clone()) for name in NAMES}, token_base=rng.randrange(0, 90),
+                            bump=rng.choice((None, None, 'before-window', 'after-window', 'after-verify'))))
+            for name in NAMES:
+                positions[name] = min(tvp.FAMILY_LAST, positions[name] + rng.randrange(1, 17))
+        return out
+
+    def drive(self, plan, **flags):
+        block = self.open_diff(**flags) if flags is not None else self.open_block()
+        served = []
+        for number, spec in enumerate(plan):
+            if number:
+                if spec['bump'] == 'before-window':
+                    verify_prestage.bump('lever-n-chunk')
+                self.window(block, spec['users'])
+                if spec['bump'] == 'after-window':
+                    verify_prestage.bump('admission')
+            predictions, metrics, staged = self.round(block, spec['users'], spec['token_base'])
+            self.assert_device_holds(block, staged)
+            if spec['bump'] == 'after-verify':
+                verify_prestage.bump('detach')
+            served.append((predictions, metrics['segments']))
+        block.close()
+        self.block = None
+        return served
+
+    def test_random_bumps_and_rebinds_leave_the_device_the_full_stages_and_the_predictions_the_control(self):
+        for seed in range(10):
+            with self.subTest(seed=seed):
+                plan = self.plan(random.Random(1000 + seed), rounds=7)
+                clean()
+                self.h1a.clear()
+                on = self.drive(plan, audit=seed % 2 == 0, lean=seed % 3 == 0, keyed=seed % 4 < 2)
+                self.assertEqual(self.diff_lines(prestage_diff.MISMATCH_MARKER), [], 'the audit found nothing: no write was missed')
+                paths = {item[0] for item in self.diff_paths()}
+                clean()
+                for name in (DIFF, AUDIT, LEAN, KEYED):
+                    os.environ.pop(name, None)
+                round_host.refresh(dict(os.environ))
+                off = self.drive_off(plan)
+                self.assertEqual(on, off)
+                self.assertTrue(paths <= {'full', 'diff'})
+
+    def drive_off(self, plan):
+        block = self.open_block()
+        served = []
+        for number, spec in enumerate(plan):
+            predictions, metrics, staged = self.round(block, spec['users'], spec['token_base'])
+            served.append((predictions, metrics['segments']))
+        block.close()
+        self.block = None
+        return served
+
+    def test_a_rebind_with_no_epoch_move_is_caught_by_value(self):
+        block = self.open_diff()
+        users = tvp.base_users()
+        self.round(block, users)
+        users = tvp.advanced(users, 2)
+        self.window(block, users)
+        self.round(block, users)
+        swapped = dict(users)
+        swapped['A'], swapped['B'] = (users['B'][0], users['B'][1]), (users['A'][0], users['A'][1])
+        fixture = block.fixture
+        written = self.written(lambda: self.window(block, swapped))
+        ids = {id(value) for value in written}
+        self.assertIn(id(fixture.pages), ids, 'the page tables of the swapped users differ')
+        self.assertEqual(self.diff_paths()[-1][:2], ('diff', '-'))
+        self.round(block, swapped)
+        self.assert_device_holds(block, self.staged_users(block, self.entries(swapped)))
 
 
 class DiffTests(DiffFixture):
