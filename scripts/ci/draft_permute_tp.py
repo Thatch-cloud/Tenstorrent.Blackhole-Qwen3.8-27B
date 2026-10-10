@@ -459,10 +459,11 @@ def grid_size(mesh):
     return grid.x, grid.y
 
 
-def launch(operations, mesh, sources, destinations, per_lane, size, rows, *, canon_denorm=True, processors=PROCESSORS):
+def launch(operations, mesh, sources, destinations, per_lane, size, rows, *, canon_denorm=True, processors=PROCESSORS, chips=None):
     """One generic_op running the planned lanes (plan_lanes) over per-chip programs, on the one rectangle of `rows` full rows of the grid. Every source shares one accessor layout and
-    every destination another; anything else is Unsupported. Returns the number of lanes with records and the number of cores."""
-    chips = tp_shapes.chip_count()
+    every destination another; anything else is Unsupported. Returns the number of lanes with records and the number of cores. `chips` (default: the width this process
+    serves at) is the card probe's one-chip override."""
+    chips = tp_shapes.chip_count() if chips is None else chips
     source_shards = [operations.get_device_tensors(tensor) for tensor in sources]
     destination_shards = [operations.get_device_tensors(tensor) for tensor in destinations]
     if any(len(shards) != chips for shards in source_shards + destination_shards):
@@ -560,7 +561,7 @@ def _plan_for(mesh, records, sources, destinations, processors=PROCESSORS):
     return plan_lanes(records, grid_size(mesh), sources, destinations, processors)
 
 
-def assemble_kv(operations, plan, caches, live, retain, *, served, site, canon_cached=True, processors=PROCESSORS):
+def assemble_kv(operations, plan, caches, live, retain, *, served, site, canon_cached=True, processors=PROCESSORS, chips=None):
     """dict(k=, v=) for the packed users' K and V: one launch, or `served(name)` for each name when this call cannot take it. `caches[u]` is user u's {k, v} bank (1, kv, rows, 128),
     `live` the {k, v, ...} of the proposal block (1, kv, rows, 128); `served(name)` is the served assembly of one tensor (it retains its own outputs); `site` the
     shape label (pair / quad / octo)."""
@@ -614,7 +615,7 @@ def assemble_kv(operations, plan, caches, live, retain, *, served, site, canon_c
         ordered.extend(caches[user][name] for user in range(users))
         ordered.append(live[name])
     try:
-        lanes, cores = launch(operations, mesh, ordered, outputs, per_lane, size, rows, processors=processors)
+        lanes, cores = launch(operations, mesh, ordered, outputs, per_lane, size, rows, processors=processors, chips=chips)
     except Unsupported as failure:
         for tensor in outputs:
             operations.deallocate(tensor)
@@ -633,7 +634,7 @@ def assemble_kv(operations, plan, caches, live, retain, *, served, site, canon_c
     return engaged
 
 
-def _fold_site(operations, tensor, retain, *, served, site, halves, users, block, folding, name, processors=PROCESSORS):
+def _fold_site(operations, tensor, retain, *, served, site, halves, users, block, folding, name, processors=PROCESSORS, chips=None):
     found = tp_shapes.active()
     query_heads, kv_heads = found.draft_heads, found.draft_kv_heads
     group = query_heads // kv_heads
@@ -664,7 +665,7 @@ def _fold_site(operations, tensor, retain, *, served, site, halves, users, block
     shape = (1, folded_heads, TILE, HEAD_DIM) if folding else (1, query_heads, TILE * halves, HEAD_DIM)
     output = operations.empty(shape, dtype=operations.bfloat16, layout=operations.TILE_LAYOUT, device=mesh, memory_config=operations.DRAM_MEMORY_CONFIG)
     try:
-        lanes, cores = launch(operations, mesh, [tensor], [output], per_lane, size, rows, processors=processors)
+        lanes, cores = launch(operations, mesh, [tensor], [output], per_lane, size, rows, processors=processors, chips=chips)
     except Unsupported as failure:
         operations.deallocate(output)
         _fall_back(name, site, str(failure))
@@ -680,11 +681,11 @@ def _fold_site(operations, tensor, retain, *, served, site, halves, users, block
     return result
 
 
-def fold_query(operations, query, retain, *, served, site, halves, users, block):
+def fold_query(operations, query, retain, *, served, site, halves, users, block, **options):
     """The folded query (1, kv * halves * users * group, 32, 128) of a (1, heads, 32 * halves, 128) query: one launch, or `served()`."""
-    return _fold_site(operations, query, retain, served=served, site=site, halves=halves, users=users, block=block, folding=True, name='fold')
+    return _fold_site(operations, query, retain, served=served, site=site, halves=halves, users=users, block=block, folding=True, name='fold', **options)
 
 
-def unfold_output(operations, output, retain, *, served, site, halves, users, block):
+def unfold_output(operations, output, retain, *, served, site, halves, users, block, **options):
     """The packed attention rows (1, heads, 32 * halves, 128) of a folded SDPA output: one launch, or `served()`."""
-    return _fold_site(operations, output, retain, served=served, site=site, halves=halves, users=users, block=block, folding=False, name='unfold')
+    return _fold_site(operations, output, retain, served=served, site=site, halves=halves, users=users, block=block, folding=False, name='unfold', **options)

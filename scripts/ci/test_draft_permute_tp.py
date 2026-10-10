@@ -31,6 +31,7 @@ from unittest.mock import Mock, patch
 import torch
 
 import draft_attention_branch
+import draft_permute_smoke as smoke
 import draft_permute_tp as perm
 import octo_draft_tp
 import pair_row_exact_tp
@@ -90,6 +91,14 @@ def pages_tensor(pages, heads, rows):
         h, tr = divmod(row_group, tile_rows)
         out[h, 32 * tr:32 * tr + 32, 32 * column:32 * column + 32] = from_raw(raw)
     return out[:, :rows]
+
+
+def leading(shape):
+    """The product of the dimensions before the last two (a tile tensor's 'heads')."""
+    count = 1
+    for extent in shape[:-2]:
+        count *= extent
+    return count
 
 
 def quarter_ranges(quarter):
@@ -209,7 +218,7 @@ class ExecutingOperations(FakeOperations):
 
     def tensor(self, shape, dtype='bf16', layout='tile', logical=None):
         self.counter += 1
-        pages = tensor_pages(logical.reshape(shape[1], shape[2], shape[3])) if logical is not None else {}
+        pages = tensor_pages(logical.reshape(-1, shape[-2], shape[-1])) if logical is not None else {}
         outer = SimpleNamespace(shape=tuple(shape), dtype=dtype, layout=layout, memory_config=lambda: 'dram', name='t%d' % self.counter, device=lambda: self.mesh)
         outer.shards = [Shard(dict(pages) if logical is not None else {}, tuple(shape)) for _ in range(self.chips)]
         return outer
@@ -220,10 +229,10 @@ class ExecutingOperations(FakeOperations):
 
     def to_logical(self, tensor, chip=0):
         shard = tensor.shards[chip]
-        return pages_tensor(shard.pages, shard.shape[1], shard.shape[2]).reshape(shard.shape)
+        return pages_tensor(shard.pages, leading(shard.shape), shard.shape[-2]).reshape(shard.shape)
 
     def to_torch(self, shard):
-        return pages_tensor(shard.pages, shard.shape[1], shard.shape[2]).reshape(shard.shape).view(torch.bfloat16)
+        return pages_tensor(shard.pages, leading(shard.shape), shard.shape[-2]).reshape(shard.shape).view(torch.bfloat16)
 
     def generic_op(self, tensors, program):
         super().generic_op(tensors, program)
@@ -909,6 +918,70 @@ class FlagOffTests(unittest.TestCase):
             with patch.object(perm, 'assemble_kv', side_effect=lambda *a, served, site, **o: sites.append(site) or {n: served(n) for n in 'kv'}), self.served_sites():
                 attention_run4(quad=True)
         self.assertEqual(sites, ['quad'])
+
+
+# --- the log rule ------------------------------------------------------------------------------------------------------------
+
+class SmokeTests(unittest.TestCase):
+    QUAD = {smoke.FLAG: '1', smoke.QUAD_FLAG: '1'}
+
+    def engaged(self, site, shape):
+        return '2026 INFO %s site=%s shape=%s users=4 kv_heads=2 rows=8320' % (smoke.ENGAGED, site, shape)
+
+    def audit(self, site, shape, exact=True):
+        return '%s exact=%s site=%s shape=%s tensors=2' % (smoke.AUDIT, exact, site, shape)
+
+    def full(self):
+        return '\n'.join(self.engaged(site, 'quad') for site in smoke.SITES)
+
+    def test_a_profile_without_the_flag_has_none_of_the_lines(self):
+        self.assertEqual(smoke.problems({}, 'unrelated line\n'), [])
+        self.assertEqual(smoke.problems(None, ''), [])
+        found = smoke.problems({smoke.QUAD_FLAG: '1'}, self.engaged('kv', 'quad'))
+        self.assertEqual(len(found), 1)
+        self.assertIn('without %s' % smoke.FLAG, found[0])
+        self.assertTrue(smoke.problems({smoke.AUDIT_FLAG: '1'}, ''))
+
+    def test_the_quad_profile_needs_an_engaged_line_per_site(self):
+        self.assertEqual(smoke.problems(self.QUAD, self.full()), [])
+        missing = '\n'.join([self.engaged('kv', 'quad'), self.engaged('fold', 'quad')])
+        found = smoke.problems(self.QUAD, missing)
+        self.assertEqual(len(found), 1)
+        self.assertIn('site=unfold shape=quad', found[0])
+        self.assertEqual(len(smoke.problems(self.QUAD, self.full().replace('shape=quad', 'shape=pair'))), 3, 'the pair shape is not the quad')
+
+    def test_the_octo_profile_needs_the_octo_kv_line(self):
+        env = dict(self.QUAD)
+        env[smoke.OCTO_FLAG] = '1'
+        self.assertEqual(len(smoke.problems(env, self.full())), 1)
+        self.assertEqual(smoke.problems(env, self.full() + '\n' + self.engaged('kv', 'octo')), [])
+
+    def test_with_no_quad_or_octo_flag_any_kv_line_will_do(self):
+        self.assertEqual(smoke.problems({smoke.FLAG: '1'}, self.engaged('kv', 'pair')), [])
+        self.assertTrue(smoke.problems({smoke.FLAG: '1'}, self.engaged('fold', 'pair')))
+
+    def test_a_fall_back_or_an_audit_difference_fails_every_arm(self):
+        fell = '%s site=kv shape=quad reason=an operand is not interleaved DRAM' % smoke.FELL_BACK
+        self.assertTrue(any('fell back' in item for item in smoke.problems(self.QUAD, self.full() + '\n' + fell)))
+        different = '%s site=kv shape=quad differing=[(\'v\', 0)]' % smoke.MISMATCH
+        self.assertTrue(any('found a difference' in item for item in smoke.problems(self.QUAD, self.full() + '\n' + different)))
+        self.assertTrue(smoke.problems({}, fell))
+
+    def test_the_audit_arm_needs_a_passing_line_for_each_quad_site(self):
+        env = dict(self.QUAD)
+        env[smoke.AUDIT_FLAG] = '1'
+        passing = '\n'.join(self.audit(site, 'quad') for site in smoke.SITES)
+        self.assertEqual(smoke.problems(env, self.full() + '\n' + passing), [])
+        self.assertEqual(len(smoke.problems(env, self.full())), 3, 'nothing was compared')
+        partial = '\n'.join(self.audit(site, 'quad') for site in ('kv', 'fold'))
+        found = smoke.problems(env, self.full() + '\n' + partial)
+        self.assertEqual(len(found), 1)
+        self.assertIn('site=unfold', found[0])
+        self.assertTrue(smoke.problems(env, self.full() + '\n' + self.audit('kv', 'quad', exact=False)))
+
+    def test_the_rule_is_stdlib_only(self):
+        source = (HERE / 'draft_permute_smoke.py').read_text()
+        self.assertEqual(sorted(set(re.findall(r'^(?:import|from) (\w+)', source, re.M))), ['re'])
 
 
 class KernelSourceTests(unittest.TestCase):
