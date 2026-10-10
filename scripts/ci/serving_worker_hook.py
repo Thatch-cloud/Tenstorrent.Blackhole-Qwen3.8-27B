@@ -771,6 +771,16 @@ class FastWorkerHook:
             groups = ask([bridge.request for bridge in bridges], blocked=self.octo_blocked(bridges))
         return groups if isinstance(groups, list) else None
 
+    def octo_draft_round(self, groups):
+        """QWEN_FAST_OCTO_DRAFT: whether these (block, rows, requests) groups, after the budget narrowing, are the octo block's round at its eight rows. False with the flag unset, with no octo
+        block, and for a round the narrowing sent to the M3 blocks or the engines' widths."""
+        octo = getattr(self.packed_step, 'octo', None)
+        if octo is None:
+            return False
+        from dflash_packed_proposal_coordinator import octo_draft_requested
+
+        return octo_draft_requested() and any(block is octo and rows is not None for block, rows, unused in groups)
+
     def octo_blocked(self, bridges):
         """The ids of the requests whose budget narrowing (`_drafts_by_block`) would cut a round at the octo block's rows: a member vLLM no longer owes a token, or one too
         near the context end for the scheduler to offer the rows (a request finished or at the end of its budget leaves the shape for the round)."""
@@ -832,6 +842,9 @@ class FastWorkerHook:
 
                     coordinator = self._packed_coordinator = PackedProposalCoordinator()
                 options = {}
+                if self.octo_draft_round(final):
+                    # QWEN_FAST_OCTO_DRAFT: an octo round at its eight rows is drafted by ONE eight-seat pass when all eight seats are live (the coordinator decides); only then is the keyword passed.
+                    options['octo_draft'] = True
                 if any(rows is not None for unused, rows, unused2 in final) and window_flags_on():
                     make = getattr(self.packed_step, 'while_waiting_groups', None)
                     while_waiting = make(final) if callable(make) else None

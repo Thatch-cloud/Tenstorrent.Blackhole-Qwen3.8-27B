@@ -120,7 +120,7 @@ jobs:
           for name in pair_row_exact.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
-          for name in quad_draft.py quad_conv_io.cpp publish_prewarm.py quad_draft_tp.py draft_singles_audit.py fused_commit_tp.py; do
+          for name in quad_draft.py quad_conv_io.cpp publish_prewarm.py quad_draft_tp.py draft_singles_audit.py fused_commit_tp.py octo_draft_tp.py; do
             cp "serving-build-orchestrator/scripts/ci/$name" "$context/scripts/ci/"
           done
           for name in publication_warm.py; do

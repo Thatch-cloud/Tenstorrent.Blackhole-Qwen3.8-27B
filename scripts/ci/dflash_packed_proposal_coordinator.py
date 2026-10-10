@@ -85,6 +85,11 @@ def pooled_draft_mask_shapes(users, block_rows):
         if quad_blocks_requested():
             for slots, _ in _pooled_quad_blocks(quad_draft, users, block_rows):
                 shapes.setdefault(slots, tuple(quad_draft.quad_host_mask().shape))
+    if octo_draft_requested():
+        import octo_draft_tp
+
+        if max(octo_draft_tp.SLOTS) < users and block_rows == octo_draft_tp.PREPARED_BLOCK:
+            shapes[tuple(octo_draft_tp.SLOTS)] = tuple(octo_draft_tp.octo_host_mask().shape)
     return shapes
 
 
@@ -154,6 +159,11 @@ def pooled_draft_output_shapes(users, block_rows):
         if quad_blocks_requested():
             for slots, _ in _pooled_quad_blocks(quad_draft, users, block_rows):
                 shapes.setdefault(slots, spec(quad_draft.ROWS, quad_draft.ROWS))
+    if octo_draft_requested():
+        import octo_draft_tp
+
+        if max(octo_draft_tp.SLOTS) < users and block_rows == octo_draft_tp.PREPARED_BLOCK:
+            shapes[tuple(octo_draft_tp.SLOTS)] = spec(octo_draft_tp.ROWS, octo_draft_tp.ROWS)
     return shapes
 
 
@@ -222,6 +232,18 @@ def quad_blocks_refusal(quad_draft, users=None, environ=None):
     if refuse is None:
         return 'the two-quad draft serves QWEN_FAST_TP=4 only (this quad_draft has no QUADS)'
     return refuse(users, environ)
+
+# QWEN_FAST_OCTO_DRAFT (octo_draft_tp.py; gate only, default off): at an octo round (QWEN_FAST_OCTO) with all eight seats live, ONE eight-seat, eight-row, 64-row draft pass in place of the
+# two quad passes. Read here without importing the module (a pair process never loads the four-card twins); the attach validates the value strictly (octo_draft_tp.enabled), and the hook
+# passes octo_draft=True to prepare() only for a round the packed step planned for the octo block. Off, none of this runs and prepare() is called as it always was.
+OCTO_DRAFT_FLAG = 'QWEN_FAST_OCTO_DRAFT'
+OCTO_RELEASED_LINE = '[OCTO-DRAFT] released slots={slots}'
+
+
+def octo_draft_requested(environ=None):
+    """QWEN_FAST_OCTO_DRAFT set to anything but '' or '0'."""
+    return (os.environ if environ is None else environ).get(OCTO_DRAFT_FLAG, '') not in ('', '0')
+
 
 # QWEN_FAST_DRAFT_SINGLES_AUDIT (draft_singles_audit.py; default off): every batched group of a round - a packed pair or the
 # quad - against its members' own single-user drafts, prepared with the same seeds in the same round and compared bit for bit
@@ -664,6 +686,12 @@ class PackedProposalCoordinator:
         self.quad_blocks = {} if self._book is None else self._book.quad_blocks
         self.quad_block_failures = {}
         self.quad_blocked = {}
+        # QWEN_FAST_OCTO_DRAFT: (devices, trace, released) of the eight-seat pass over slots 0-7, its consecutive failures, the reason it was blocked (None: not), and how many rounds
+        # it served. Read only with the flag on.
+        self.octo = None
+        self.octo_failures = 0
+        self.octo_blocked = None
+        self.octo_rounds = 0
         # Engine reuse (QWEN_FAST_PARKED_ENGINES=1, no book; empty otherwise): {pair group, 'quad' or the block's slots: the members' rebind_generation
         # when the trace was captured}.
         self.generations = {}
@@ -696,6 +724,9 @@ class PackedProposalCoordinator:
         for state in self.quad_blocks.values():
             state[1].close()
         self.quad_blocks.clear()
+        if self.octo is not None:
+            self.octo[1].close()
+            self.octo = None
         self.generations.clear()
 
     # -- every close of a pair or block-quad trace goes through these two: with the draft book registered they retire through it (closed once,
@@ -753,6 +784,8 @@ class PackedProposalCoordinator:
                     or self._rebound(group, (device_a, device_b))):
                 self._close_pair(group)
                 pairs.append(list(group))
+        if self.octo is not None and (any(getattr(device, 'closed', False) for device in self.octo[0]) or self._rebound('octo', self.octo[0])):
+            self._close_octo()
         audit_log(RELEASED_LINE, quad=quad, pairs=pairs)
         return dict(quad=quad, pairs=pairs)
 
@@ -780,6 +813,8 @@ class PackedProposalCoordinator:
             if device_a is device or device_b is device:
                 self._close_pair(group)
                 pairs.append(list(group))
+        if self.octo is not None and any(member is device for member in self.octo[0]):
+            self._close_octo()
         audit_log(PARKED_RELEASED_LINE, slot=getattr(getattr(device, 'pool_slot', None), 'index', None), quad=quad, pairs=pairs)
         return dict(quad=quad, pairs=pairs)
 
@@ -885,7 +920,7 @@ class PackedProposalCoordinator:
             audit_log(RECAPTURE_LINE, slot=getattr(getattr(device, 'pool_slot', None), 'index', None))
         return True
 
-    def prepare(self, bridges, packed_round=None, while_waiting=None, after_reads=None):
+    def prepare(self, bridges, packed_round=None, while_waiting=None, after_reads=None, octo_draft=False):
         """Phase A, packed variant: pair eligible bridges by fixed pool slot, run one
         traced pass per full packable pair, prepare_device() unchanged for anything
         left over (an unpaired bridge, a lone survivor of a broken pair, a pair not
@@ -917,7 +952,11 @@ class PackedProposalCoordinator:
         block's deferred GDN commit traces queue behind the pairs and their readback, not ahead of
         them. Only when the batched pairs cover every prepared device (QWEN_FAST_ROUND_B1, no single
         whose phase-B finish() still reads); otherwise it is not called here and the early draft
-        flushes at its end."""
+        flushes at its end.
+
+        `octo_draft` (QWEN_FAST_OCTO_DRAFT; the hook passes it, True, only for a round the packed step planned for the octo block and only with the flag on): try the
+        one eight-seat, eight-row pass (_prepare_octo) before the quads; a round it does not serve (fewer than eight live and packable seats, a refusal, a failure) goes on
+        to the quads and pairs below exactly as it would have."""
         from dflash_packed_proposal import pair_slots
         from serving_worker_hook import phase, pipelined_device
         import round_host
@@ -953,6 +992,8 @@ class PackedProposalCoordinator:
         quad = None
         # QWEN_FAST_QUAD_DRAFT_BLOCKS: this round's per-block quads (_prepare_quad_blocks), empty in every round it does not serve.
         block_quads = []
+        # QWEN_FAST_OCTO_DRAFT: this round's eight-seat pass (_prepare_octo), None in every round it does not serve.
+        octo = None
         # QWEN_FAST_DRAFT_SINGLES_AUDIT: this round's audit (draft_singles_audit.Round), None in every round it does not run.
         singles_audit = None
 
@@ -971,7 +1012,18 @@ class PackedProposalCoordinator:
 
         try:
             ledger.mark('quads0')
-            if os.environ.get(QUAD_DRAFT_FLAG, '0') != '0' and quad_blocks_requested():
+            octo = self._prepare_octo(groups, by_slot, round_number, batched) if octo_draft else None
+            if octo is None and self.octo is not None:
+                # An earlier octo round's proposal that nothing consumed (the round changed shape after its drafts): drop it now, so no device still wearing its view is answered
+                # by it - the view matches on the seed alone, and a seven-proposal pass cannot answer a wider ticket. A no-op when nothing is pending.
+                self.octo[1].discard_pending()
+            if octo is not None:
+                # One pass drafted all eight seats at eight rows: no quad and no pair runs this round.
+                prepared.extend(octo['devices'])
+                fence = octo['fence']
+                groups = []
+                ledger.mark('quads1')
+            elif os.environ.get(QUAD_DRAFT_FLAG, '0') != '0' and quad_blocks_requested():
                 # One quad per block of four slots; the pairs of a block that did not form stay with `groups`.
                 block_quads, groups = self._prepare_quad_blocks(groups, by_slot, round_number, batched, prepared)
                 ledger.mark('quads1')
@@ -1147,6 +1199,113 @@ class PackedProposalCoordinator:
             audit_log(SINGLES_LINE, round=round_number, slots=[slot for slot, _ in singles],
                       reasons=[reason for _, reason in singles])
         return prepared
+
+    # -- QWEN_FAST_OCTO_DRAFT (octo_draft_tp.py) -----------------------------------------------------------
+    def _close_octo(self):
+        """Close the eight-seat pass's trace and forget it (its DRAM is the pairs' and the engines' again)."""
+        slots = ','.join(str(slot) for slot in range(len(self.octo[0])))
+        self.octo[1].close()
+        self.octo = None
+        self.generations.pop('octo', None)
+        audit_log(OCTO_RELEASED_LINE, slots=slots)
+
+    def _retire_octo(self, by_slot):
+        """Close the pass's trace once a device it was built for has closed or a slot holds another device: it can never replay again. A device merely absent this round keeps it."""
+        state = self.octo
+        if state is None:
+            return
+        import octo_draft_tp
+
+        devices = state[0]
+        if any(device.closed for device in devices) or any(
+                slot in by_slot and by_slot[slot]['device'] is not device
+                for slot, device in zip(octo_draft_tp.SLOTS, devices)) or self._rebound('octo', devices):
+            self._close_octo()
+
+    def _block_octo(self, round_number, reason):
+        """Give up on the pass for the process: close its trace and log DISABLED_MARKER (the gate fails on it). The quads keep serving."""
+        import octo_draft_tp
+
+        if self.octo_blocked is not None:
+            return
+        self.octo_blocked = reason
+        if self.octo is not None:
+            self._close_octo()
+        audit_log('{marker} round={round} failures={failures} reason={reason}', marker=octo_draft_tp.DISABLED_MARKER, round=round_number,
+                  failures=self.octo_failures, reason=str(reason).replace(' ', '_')[:160])
+
+    def _prepare_octo(self, groups, by_slot, round_number, batched):
+        """Prepare the one eight-seat, eight-row pass over slots 0-7, or None for the quads. Engages only when the groups are exactly the four pairs (0, 1) .. (6, 7), every pair is
+        packable, octo_draft_tp.refusal finds nothing and it has not given up. A fresh build needs octo_draft_tp.capture_bytes() plus the packed reserve of free DRAM
+        (capture_headroom). A failure falls the round back to the quads (FALLBACK_LINE); GIVE_UP_FAILURES in a row block it for the process. On success each device wears a
+        view of the pass (the first success releases every single-user capture still held, as the quad's does) and the pass joins the round's batched selection."""
+        import octo_draft_tp
+        from serving_worker_hook import phase
+
+        octo_draft_tp.enabled()
+        self._retire_octo(by_slot)
+        if self.octo_blocked is not None or [tuple(group) for group in groups] != list(octo_draft_tp.PAIRS):
+            return None
+        entries = [by_slot[slot] for slot in octo_draft_tp.SLOTS]
+        devices = [entry['device'] for entry in entries]
+        if not all(packable(devices[first], devices[second]) for first, second in octo_draft_tp.PAIRS):
+            return None
+        reason = octo_draft_tp.refusal(devices, batched)
+        if reason is not None:
+            self._block_octo(round_number, reason)
+            return None
+        state = self.octo
+        trace = state[1] if state is not None and all(old is new for old, new in zip(state[0], devices)) else None
+        fresh = trace is None or not trace.buckets
+        if fresh:
+            short, reading = capture_headroom(devices[0], octo_draft_tp.capture_bytes())
+            if short:
+                reason = 'dram_reserve:headroom=%d' % reading['largest_free']
+                if 'free' in reading:
+                    reason += ':free=%d:short=%s' % (reading['free'], '+'.join(short))
+                audit_log(octo_draft_tp.FALLBACK_LINE, round=round_number, reason=reason)
+                return None
+        if trace is None:
+            if state is not None:
+                state[1].close()
+            trace = octo_draft_tp.PreparedOctoDFlashProposal(devices)
+            self.octo = (tuple(devices), trace, False)
+            self._note_generations('octo', devices)
+        seeds = [entry['seed'] for entry in entries]
+        ids = ','.join(str(entry['bridge'].request.session.request_id) for entry in entries)
+        ledger_token = ledger_before('octo', octo_draft_tp.capture_bytes(), 'slots=' + ','.join(str(slot) for slot in octo_draft_tp.SLOTS)) if fresh else None
+        started = time.perf_counter()
+        try:
+            ready = phase('propose_octo', ids, lambda: trace.prepare_device(seeds))
+        except Exception as failure:
+            ledger_after(ledger_token)
+            trace.discard_pending()
+            self.octo_failures += 1
+            audit_log(octo_draft_tp.FALLBACK_LINE, round=round_number, reason=('%s:%s' % (type(failure).__name__, str(failure)[:120])).replace(' ', '_'))
+            if self.octo_failures >= octo_draft_tp.GIVE_UP_FAILURES:
+                self._block_octo(round_number, 'consecutive_failures=%d' % self.octo_failures)
+            return None
+        ledger_after(ledger_token)
+        if not ready:
+            return None
+        built_ms = octo_draft_tp.elapsed_ms(started)
+        self.octo_failures = 0
+        self.octo_rounds += 1
+        try:
+            for which, device in enumerate(devices):
+                _install(device, trace, which)
+            held = self.octo
+            if not held[2]:
+                for device in devices:
+                    self._release_single_user(device)
+                self.octo = (held[0], trace, True)
+        except BaseException:
+            devices[0].operations.synchronize_device(devices[0].mesh)
+            trace.discard_pending()
+            raise
+        batched.append((list(octo_draft_tp.SLOTS), trace))
+        audit_log(octo_draft_tp.ROUND_LINE, round=round_number, built=int(trace.last_built), ms=built_ms)
+        return dict(devices=devices, fence=(devices[0].operations, devices[0].mesh), trace=trace)
 
     # -- QWEN_FAST_QUAD_DRAFT (quad_draft.py) --------------------------------------------------------------
     def _retire_quad(self, by_slot, slots=None):

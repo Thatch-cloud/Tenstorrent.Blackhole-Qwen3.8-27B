@@ -55,6 +55,7 @@ M3_USERS = 4
 GATE_ENV = 'QWEN_C2_GATE'
 GATE_PROFILE_ENV = 'QWEN_C2_GATE_PROFILE'
 M3_BLOCKS_FLAG = 'QWEN_FAST_M3_BLOCKS'
+DRAFT_FLAG = 'QWEN_FAST_OCTO_DRAFT'
 
 MARKER = '[OCTO]'
 ADMITTED_MARKER = MARKER + ' admitted'
@@ -251,6 +252,13 @@ def octo_admission(m3, environ=None, *, log=None):
                         % OCTO_FLAG)
     for key, text in device_gaps():
         problems.append('device piece %s is not built: %s' % (key, text))
+    # QWEN_FAST_OCTO_DRAFT (octo_draft_tp; gate only, default off): ONE eight-seat, eight-row draft pass for the octo rounds. Its own reasons join this list; off (unset or '0') nothing
+    # of it is read, not even the import.
+    draft = environ.get(DRAFT_FLAG, '0') != '0'
+    if draft:
+        import octo_draft_tp
+
+        problems.extend(octo_draft_tp.admission_problems(environ))
     if problems:
         for problem in problems:
             log('{}: {}', REFUSED_MARKER, problem)
@@ -259,7 +267,9 @@ def octo_admission(m3, environ=None, *, log=None):
     for index, piece in enumerate(unqualified, 1):
         log('{} ({}/{}): {}', UNQUALIFIED_MARKER, index, len(unqualified), piece)
     log('{} mode={} rows={} users={} min_live={} (gate only)', ADMITTED_MARKER, mode, ROWS, USERS, minimum)
-    return dict(mode=mode, rows=ROWS, users=USERS, min_live=minimum, unqualified=unqualified)
+    if draft:
+        octo_draft_tp.log_admitted(lambda text: log('{}', text))
+    return dict(mode=mode, rows=ROWS, users=USERS, min_live=minimum, unqualified=unqualified, **(dict(draft=True) if draft else {}))
 
 
 def solo_packed_admission(m3, environ=None, *, log=None):

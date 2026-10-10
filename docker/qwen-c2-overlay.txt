@@ -160,6 +160,8 @@ scripts/ci/quad_draft.py
 # reach the image at P8's commit otherwise, without them, and the four-card quad dies at its first round on the import.
 scripts/ci/quad_draft_tp.py
 scripts/ci/draft_singles_audit.py
+# The eight-seat, eight-row draft pass for the octo rounds (QWEN_FAST_OCTO_DRAFT, gate only, default off): imported lazily by the coordinator, serving_octo and serving_runtime with the flag set.
+scripts/ci/octo_draft_tp.py
 # TP4 fused commit (tp4/fcommit): the four-card twin of fused_commit, which tp_addresses.install() puts in its place at
 # QWEN_FAST_TP=4 only (MODULE_TWINS). It reaches the image at P8's commit otherwise not at all, and the four-card process would
 # die on the import at the first block that sets QWEN_FAST_FUSED_COMMIT=1.
