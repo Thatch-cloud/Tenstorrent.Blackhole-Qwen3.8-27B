@@ -443,6 +443,7 @@ class EvidenceTests(unittest.TestCase):
         """Write the shipped record with `block` as its page_writer (None: no block at all) and the overrides; returns the file's sha256."""
         evidence = json.loads(page_width_tp4.EVIDENCE.read_text())
         evidence.update(overrides)
+        evidence.pop('page_writer', None)                # whatever the shipped record carries, the record under test carries `block` or none
         if block is not None:
             evidence['page_writer'] = block
         payload = (json.dumps(evidence, indent=1) + '\n').encode()

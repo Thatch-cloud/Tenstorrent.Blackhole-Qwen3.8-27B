@@ -699,7 +699,7 @@ class RecordTests(unittest.TestCase):
         code, lines = self.run_recorder(self.page_only(), merge=True)
         self.assertEqual(code, 0, lines)
         after = json.loads(self.evidence.read_text())
-        self.assertEqual({key: value for key, value in after.items() if key != 'page_writer'}, before)
+        self.assertEqual({key: value for key, value in after.items() if key != 'page_writer'}, {key: value for key, value in before.items() if key != 'page_writer'})
         self.assertEqual(kvpw.block_problems(after['page_writer'], 2), [])
         digest = hashlib.sha256(self.evidence.read_bytes()).hexdigest()
         self.assertIn("ORDERED_WRITER_EVIDENCE_TP4_SHA256 = '%s'" % digest, (self.dir / 'page_width_tp4.py').read_text())
