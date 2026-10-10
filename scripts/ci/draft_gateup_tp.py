@@ -110,13 +110,13 @@ def served_projection(operations, parameters, value, weight, rows, columns):
 
 def audit(operations, mesh, parameters, prepared, fused, rows, site='mlp'):
     """Eager: upload the separate gate and up weights from the host shards, run the served matmuls (program config of the served spread) on the
-    same input, and compare every chip's bytes with the fused output's halves. Frees what it made. Raises AssertionError on a difference."""
+    same input, and compare every chip's bytes with the fused output's halves. Frees what it made. Raises AssertionError on a difference.
+    Only after draft_fusion_tp.audit_begin said yes (outside any capture, the device synchronized)."""
     import torch
 
     shards = parameters['shards']
     dtype = parameters['device_projections'][0].dtype
     columns = served_columns(tuple(shards[0][0].shape)[1] // 32)
-    operations.synchronize_device(mesh)
     held = []
     try:
         references = []
@@ -155,7 +155,7 @@ def project_fused(operations, mesh, parameters, prepared, project, rows, *, site
     fusion.STATS['gateup1'] += 1
     fusion.note(fusion.GATEUP1_ENGAGED, 'site=%s rows=%d per_core_N=%d cores=%d tiles=%d' % (
         site, rows, found['columns'], found['cores'], found['tiles']))
-    if fusion.audit_enabled(fusion.GATEUP1_AUDIT) and fusion.audit_due(fusion.GATEUP1, site, rows):
+    if fusion.audit_enabled(fusion.GATEUP1_AUDIT) and fusion.audit_begin(operations, mesh, fusion.GATEUP1, site, rows):
         audit(operations, mesh, parameters, prepared, fused, rows, site)
     return fused
 

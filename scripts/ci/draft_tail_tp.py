@@ -204,8 +204,8 @@ def _engaged(site, rows, kind, tasks, workers):
 
 
 def _audited(operations, mesh, kind, site, rows, mine, make_reference, **fields):
-    """The eager audit: `make_reference(keep)` is the served composition on the same operands; compared on every chip, then freed."""
-    operations.synchronize_device(mesh)
+    """The eager audit: `make_reference(keep)` is the served composition on the same operands; compared on every chip, then freed. Only after
+    draft_fusion_tp.audit_begin said yes (outside any capture, the device synchronized)."""
     held = []
 
     def keep(tensor):
@@ -235,7 +235,7 @@ def swiglu(operations, mesh, gate, up, retain, *, served, site='mlp'):
     except Exception as failure:  # noqa: BLE001 - the served ops can still run on the same operands
         fusion.fell_back(fusion.TAIL_FALLBACK, site + '.swiglu', 'the launch failed: %s: %s' % (type(failure).__name__, str(failure)[:120]))
         return served(operations, gate, up, retain)
-    if fusion.audit_enabled(fusion.TAIL_AUDIT) and fusion.audit_due(fusion.TAIL, site + '.swiglu', rows):
+    if fusion.audit_enabled(fusion.TAIL_AUDIT) and fusion.audit_begin(operations, mesh, fusion.TAIL, site + '.swiglu', rows):
         _audited(operations, mesh, 'swiglu', site, rows, output, lambda keep: served(operations, gate, up, keep))
     found = plan(rows, width // 32, fusion.grid_of(mesh))
     _engaged(site, rows, 'swiglu', found['tasks'], found['workers'])
@@ -258,7 +258,7 @@ def swiglu_fused(operations, mesh, gate_up, retain, *, served, site='mlp'):
         fusion.fell_back(fusion.TAIL_FALLBACK, site + '.swiglu', 'the launch failed: %s: %s' % (type(failure).__name__, str(failure)[:120]))
         gate, up = served_halves(operations, gate_up, rows, retain)
         return served(operations, gate, up, retain)
-    if fusion.audit_enabled(fusion.TAIL_AUDIT) and fusion.audit_due(fusion.TAIL, site + '.swiglu', rows):
+    if fusion.audit_enabled(fusion.TAIL_AUDIT) and fusion.audit_begin(operations, mesh, fusion.TAIL, site + '.swiglu', rows):
         def reference(keep):
             gate, up = served_halves(operations, gate_up, rows, keep)
             return served(operations, gate, up, keep)
@@ -280,7 +280,7 @@ def residual(operations, mesh, finished, hidden, retain, *, site='mlp'):
     except Exception as failure:  # noqa: BLE001
         fusion.fell_back(fusion.TAIL_FALLBACK, site + '.residual', 'the launch failed: %s: %s' % (type(failure).__name__, str(failure)[:120]))
         return served_residual(operations, finished, hidden, retain)
-    if fusion.audit_enabled(fusion.TAIL_AUDIT) and fusion.audit_due(fusion.TAIL, site + '.residual', rows):
+    if fusion.audit_enabled(fusion.TAIL_AUDIT) and fusion.audit_begin(operations, mesh, fusion.TAIL, site + '.residual', rows):
         _audited(operations, mesh, 'residual', site, rows, output, lambda keep: served_residual(operations, finished, hidden, keep))
     found = plan(rows, HIDDEN // 32, fusion.grid_of(mesh))
     _engaged(site, rows, 'residual', found['tasks'], found['workers'])

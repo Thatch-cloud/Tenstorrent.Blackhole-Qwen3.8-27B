@@ -114,6 +114,8 @@ class FakeOperations:
         self.experimental = SimpleNamespace(all_gather_async=self.all_gather_async)
         self.sync_count = 0
         self.programs = []                       # the program config of every matmul, in order
+        self.capture_open = False                # between begin_trace_capture and end_trace_capture: synchronize and readbacks are refused
+        self.capture_attempts = []               # what was refused during a capture ('synchronize_device', 'to_torch', 'from_torch')
         self.grid_noise = None                   # a callable (grid, result data) -> data: a 'bad hardware' model for the grid audit
 
     # -- descriptors --------------------------------------------------------------------------------------------------
@@ -148,6 +150,7 @@ class FakeOperations:
         return tensor
 
     def from_torch(self, value, device=None, dtype=None, layout=None, memory_config=None, mesh_mapper=None):
+        self._refuse_in_capture('from_torch')
         kind = mesh_mapper[0] if mesh_mapper else 'replicate'
         if kind == 'shard':
             parts = list(value.chunk(self.chips, dim=mesh_mapper[1]))
@@ -171,6 +174,7 @@ class FakeOperations:
         return tensor.shards
 
     def to_torch(self, value, **options):
+        self._refuse_in_capture('to_torch')
         if isinstance(value, Shard):
             return value.data.clone()
         return torch.stack([shard.data for shard in value.shards])
@@ -181,8 +185,27 @@ class FakeOperations:
         tensor.freed = True
         self.log.append(('deallocate', tensor.name))
 
+    def _refuse_in_capture(self, what):
+        if self.capture_open:
+            self.capture_attempts.append(what)
+            raise RuntimeError('TT_FATAL fd_mesh_command_queue.cpp:1042 !trace_id_.has_value(): Event Synchronization is not supported '
+                               'during trace capture (%s)' % what)
+
     def synchronize_device(self, mesh):
+        self._refuse_in_capture('synchronize_device')
         self.sync_count += 1
+
+    def begin_trace_capture(self, mesh, cq_id=0):
+        if self.capture_open:
+            raise RuntimeError('a capture is already open')
+        self.capture_open = True
+        return 7
+
+    def end_trace_capture(self, mesh, trace, cq_id=0):
+        self.capture_open = False
+
+    def release_trace(self, mesh, trace):
+        pass
 
     # -- ops (per-chip torch) ---------------------------------------------------------------------------------------------
     def _map(self, name, tensor, fn, dtype, **extra):

@@ -21,11 +21,18 @@ compare. None of the four is tau-only, so none needs a tau A/B; if an audit ever
 
 THE AUDIT (QWEN_FAST_DRAFT_<LEVER>_AUDIT=1, needs its lever). The served composition runs beside the fused launch on the very same
 operands and every chip's bytes are compared (fp32 and bf16 as integer bit patterns: -0 and +0 differ, NaN payloads count). It is EAGER:
-it reads back, so it can only run outside a trace capture. The drafter buckets warm every pass eagerly before they capture it
-(dflash_proposal_trace: execute, synchronize, then capture_operation), so the first calls of each (lever, site, rows) are the warm
-pass's, on real activations and real weights, and only those are audited (AUDIT_CALLS per key: all five layers' chains); later calls and
-every call inside a capture run the fused launch alone. A mismatch logs the *_MISMATCH marker and raises. An audit flag with no lever
-raises at the first read, as tp4_sampdraft's do: it would pass having compared nothing.
+it synchronizes and reads back, and a device refuses both while a trace is being captured ("Event Synchronization is not supported during
+trace capture", the first card run of the fusion image: the fused commit reaches the drafter's feature chain from inside its capture). So
+every audit starts with audit_begin(), the one rule of all four levers:
+  1. track(): the ttnn module's begin_trace_capture / end_trace_capture are wrapped once (idempotent), so in_capture() knows from then on;
+  2. inside a capture (that depth, or a tp4_draft_conv audit scope): NO synchronize, NO readback, NO extra op - the lever's own launch runs
+     alone, one 'skipped its audit inside a trace capture' line is logged per (lever, site), and the call is not counted against the budget;
+  3. the budget: only the first AUDIT_CALLS calls of each (lever, site, rows) are audited;
+  4. the barrier: the audit's first act is the synchronize; if the device refuses it because a capture is active (a capture that began before
+     track() ever ran), that is the same skip, never an error. Any other failure of the synchronize is raised.
+The drafter buckets and the fused commit warm every pass eagerly before they capture it (dflash_proposal_trace, fused_commit_tp.capture), so
+the warm calls - real activations, real weights - are what gets audited; the same call inside the capture is skipped. A mismatch logs the
+*_MISMATCH marker and raises. An audit flag with no lever raises at the first read, as tp4_sampdraft's do: it would pass having compared nothing.
 
 MARKERS (every FELL BACK and MISMATCH line fails a gated arm, draft_wp6_smoke.problems; ENGAGED is the proof a lever ran):
   [PINDIAG] tp4 draft reduce engaged chains=<n> ...     [PINDIAG] tp4 draft reduce fell back ...     [PINDIAG] tp4 draft reduce audit <n> exact=True ...
@@ -265,9 +272,13 @@ def fp32_compute_config(operations, fp32_inputs):
 # The eager audit.
 # ---------------------------------------------------------------------------------------------
 
+SKIPPED = '[PINDIAG] tp4 draft %s skipped its audit inside a trace capture'
+_CAPTURE = {'depth': 0}
+CAPTURE_WORDS = ('trace capture', 'capturing')
+
+
 def capturing():
-    """Whether a drafter capture scope of the samp-draft audits is open (a readback inside a capture is not allowed). False when that
-    machinery is not loaded; the warm-pass rule in the module text covers the rest."""
+    """Whether a drafter capture scope of the samp-draft audits is open (tp4_draft_conv). False when that machinery is not loaded."""
     module = sys.modules.get('tp4_draft_conv')
     if module is None:
         return False
@@ -277,13 +288,74 @@ def capturing():
         return False
 
 
-def audit_due(lever, site, rows):
-    """Whether this call is one of the first AUDIT_CALLS of its (lever, site, rows) - and counts it. False inside a capture scope."""
-    if capturing():
+def _base(operations):
+    """The object that owns begin_trace_capture: through attention_batch.Overlay-style wrappers (their `original`) down to the ttnn module."""
+    for _ in range(8):
+        inner = getattr(operations, 'original', None)
+        if inner is None or inner is operations:
+            break
+        operations = inner
+    return operations
+
+
+def track(operations):
+    """Wrap operations.begin_trace_capture / end_trace_capture, once, so that in_capture() knows when a capture is open. Idempotent; an object
+    without the two functions (a fake that never captures) is left alone. Every served capture goes through attention_batch.capture_operation,
+    which looks these up on the ttnn module at call time."""
+    target = _base(operations)
+    begin, end = getattr(target, 'begin_trace_capture', None), getattr(target, 'end_trace_capture', None)
+    if begin is None or end is None or getattr(begin, 'tracked_by_wp6', False):
+        return
+
+    def begin_capture(*args, **options):
+        result = begin(*args, **options)
+        _CAPTURE['depth'] += 1
+        return result
+
+    def end_capture(*args, **options):
+        try:
+            return end(*args, **options)
+        finally:
+            _CAPTURE['depth'] = max(0, _CAPTURE['depth'] - 1)
+
+    begin_capture.tracked_by_wp6 = True
+    end_capture.tracked_by_wp6 = True
+    target.begin_trace_capture = begin_capture
+    target.end_trace_capture = end_capture
+
+
+def in_capture(operations=None):
+    """Whether a trace capture is open: a tracked begin without its end, or a tp4_draft_conv audit scope."""
+    if operations is not None:
+        track(operations)
+    return _CAPTURE['depth'] > 0 or capturing()
+
+
+def skipped(lever, site, rows):
+    note(SKIPPED % lever_word(lever), 'site=%s rows=%d' % (site, rows))
+
+
+def lever_word(lever):
+    return {REDUCE: 'reduce', TAIL: 'tail', GATEUP1: 'gateup1', MM_GRID: 'mmgrid'}[lever]
+
+
+def audit_begin(operations, mesh, lever, site, rows):
+    """Whether the caller may run its eager audit NOW (and the device is synchronized when it says yes). The one rule of all four levers' audits - see
+    the module text: never inside a capture, never past the budget, and a synchronize the device refuses for a capture is a skip, not a failure."""
+    track(operations)
+    if in_capture():
+        skipped(lever, site, rows)
         return False
     key = (lever, site, rows)
     if _AUDITED.get(key, 0) >= AUDIT_CALLS:
         return False
+    try:
+        operations.synchronize_device(mesh)
+    except Exception as failure:  # noqa: BLE001 - classified below; anything but a capture refusal is the caller's to see
+        if any(word in str(failure).lower() for word in CAPTURE_WORDS):
+            skipped(lever, site, rows)
+            return False
+        raise
     _AUDITED[key] = _AUDITED.get(key, 0) + 1
     return True
 
@@ -297,6 +369,7 @@ def reset():
     """Forget the logged lines, the audit counters and the statistics (tests only)."""
     _LOGGED.clear()
     _AUDITED.clear()
+    _CAPTURE['depth'] = 0
     for key in STATS:
         STATS[key] = 0
 
