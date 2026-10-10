@@ -56,3 +56,6 @@ A package's own templates live in `scripts/ci/references/fusion-jobs/<WP>/` (its
 `python3 -s scripts/ci/c2_serving_job.py <env> scripts/ci/qwen_c2_profiles.json` with rc 0, naming the one image `tp4-fusion-1`). The files directly in `fusion-jobs/` are the
 integrator's: `make_fusion_jobs.py` writes B0, X0, Z and, for every lever and every extra profile twin, an audited attach (`<ID>A`) and a timed control/lever ABAB at eight live
 (`<ID>C1 <ID>L1 <ID>C2 <ID>L2`); an extra twin `x` with an audit twin `x-audit` is one arm.
+
+`WP0.json` is the integrator's own manifest (same schema): wiring a package asked for in its notes (for example a `smoke_rules` entry for its stricter smoke module), kept out of the
+package's file so that the package's manifest stays exactly as it pushed it.

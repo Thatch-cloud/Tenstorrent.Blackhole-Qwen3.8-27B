@@ -174,6 +174,7 @@ FUSION_LEVERS = (
 FUSION_AUDITS = (
 )
 FUSION_RULES = (
+    'tp4_shard_argmax_smoke',  # WP0
 )
 # fusion-wp end
 # tp4/v5split (gdn_seq_block_split): the K5-A recurrence launch with each head's value columns split over two cores. A profile that asks for it

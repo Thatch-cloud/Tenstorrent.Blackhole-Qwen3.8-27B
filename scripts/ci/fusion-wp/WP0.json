@@ -1,0 +1,8 @@
+{
+ "wp": "WP0",
+ "description": "the integrator's own manifest: wiring a package asked for in its notes, kept out of the package's manifest so that the package's schema test and its file stay as pushed",
+ "smoke_rules": [
+  "tp4_shard_argmax_smoke"
+ ],
+ "notes": "WP1 (S1 shard argmax): its notes ask for c2_smoke_check.fusion_problems to call scripts/ci/tp4_shard_argmax_smoke.problems(env, container_text) once per arm (fold, words=1, tasks = 2 x workers, the audit for four chips, no lines without the lever)."
+}
