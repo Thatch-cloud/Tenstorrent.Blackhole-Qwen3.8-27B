@@ -207,7 +207,7 @@ def combined_rows(plan, spec):
     every = jobs(plan)
     rows = [every[0], every[1], dict(
         name='%sA-%s-audited-attach' % (prefix, name), mode='soft', minutes=MINUTES['combined_audit'], actions='reset smoke', profile=audited['name'], tests=SMOKE_TESTS,
-        needs=('%sA <- X0' % prefix,),
+        telemetry=True, needs=('%sA <- X0' % prefix,),
         why=("%sA (EXACTNESS of the combination %s, %s): %s = the production profile plus %s. Every lever of it runs its audit, which compares the served composition beside the lever on the device. "
              "READ: c2_smoke_check clean under EVERY lever's rule at once (%s): each lever logs its engaged line and an audit line with exact=True, no fell-back line, no 'audit mismatch', no stall, every "
              "answer complete. ANY mismatch, fallback or missing audit line is NO-GO for the combination: read which lever's rule names it, and ablate with the per-lever pack (references/fusion-jobs). "
@@ -219,7 +219,7 @@ def combined_rows(plan, spec):
     for leg, label, profile, what, needs in legs:
         rows.append(dict(
             name='%s%s-%s-%s' % (prefix, leg, name, label), mode='soft', minutes=MINUTES['timed'], actions='reset smoke', profile=profile, tests=SMOKE_TESTS,
-            needs=('%s%s <- %s' % (prefix, leg, ' '.join(needs)),),
+            telemetry=True, needs=('%s%s <- %s' % (prefix, leg, ' '.join(needs)),),
             why=("%s%s (TIMED, the combination %s, %s): %s; eight live (concurrent8_steady) in the %s pair of the ABAB, every boot a fresh reset. READ: c2_smoke_check clean (a lever arm also has every engaged "
                  "line and no fell-back line), no stall; then PAIRED per round, never by unpaired medians: python3 scripts/ci/w2ln_timing_compare.py pair <A container log> <B container log> "
                  "--window steady --a-smoke <A smoke log> --b-smoke <B smoke log> for (%sC1, %sL1) and (%sC2, %sL2), and its floor subcommand over the two control logs; the texts equal "
@@ -259,7 +259,12 @@ def render_env(row):
     if row.get('text') is not None:
         return row['text']
     lines = [HEADER % dict(image=IMAGE)]
-    lines += ['# ' + piece for piece in wrap(row['why'])]
+    why = row['why']
+    if row.get('telemetry'):
+        why += (' TELEMETRY (C2_TELEMETRY=1, scripts/ci/card_telemetry.py; on the control and the lever legs alike, so the pairs stay paired): the read-only ARC sidecar samples every chip once a second through '
+                'the smoke step (AICLK and the limiter holding it, power, current, temperature, kernel NOPs); read telemetry-smoke/telemetry-summary.txt beside the timing, and the first [TELEMETRY] line must say '
+                'decode check ok. It reads only (no ARC message, no write) and runs on the host: it is not part of any arm.')
+    lines += ['# ' + piece for piece in wrap(why)]
     lines += ['C2_CARDS=quad', 'C2_ACTIONS=%s' % row['actions'], 'C2_IMAGE_TAG=%s' % IMAGE]
     if row['profile']:
         lines.append('C2_PROFILE=%s' % row['profile'])
@@ -267,6 +272,8 @@ def render_env(row):
         lines.append('C2_BAKE_DEFAULT_PROFILE=%s' % row['bake'])
     if row['tests']:
         lines.append('C2_SMOKE_TESTS=%s' % row['tests'])
+    if row.get('telemetry'):
+        lines.append('C2_TELEMETRY=1')
     return '\n'.join(lines) + '\n'
 
 

@@ -462,6 +462,16 @@ class CombinedPackTests(unittest.TestCase):
         for word in ('exact=True', 'no fell-back line', "no 'audit mismatch'", 'EVERY lever\'s rule'):
             self.assertIn(word, audit)
 
+    def test_the_audited_attach_and_the_four_timed_jobs_run_the_telemetry_sidecar_and_the_rest_do_not(self):
+        keyed = {name: [line for line in (PACK / (name + '.env')).read_text(encoding='utf-8').splitlines() if line == 'C2_TELEMETRY=1'] for name in self.NAMES}
+        for name in ('FXA-all-audited-attach', 'FXC1-all-control-timed', 'FXL1-all-lever-timed', 'FXC2-all-control-repeat', 'FXL2-all-lever-repeat'):
+            self.assertEqual(keyed[name], ['C2_TELEMETRY=1'], name)
+            outputs = job.read_job(self.values(name), job.profile_names(str(HERE / 'qwen_c2_profiles.json')), envs=job.profile_envs(str(HERE / 'qwen_c2_profiles.json')))
+            self.assertEqual(outputs['telemetry'], '1', name)
+        for name in ('B0-build', 'X0-status-rescan-reset', 'Z-reset'):
+            self.assertEqual(keyed[name], [], name)
+        self.assertEqual(set(keyed) - {'B0-build', 'X0-status-rescan-reset', 'Z-reset'}, {name for name, lines in keyed.items() if lines}, 'only the arms carry it')
+
     def test_every_template_exits_zero_through_the_job_reader_and_the_command_line(self):
         profiles = job.profile_names(str(HERE / 'qwen_c2_profiles.json'))
         envs = job.profile_envs(str(HERE / 'qwen_c2_profiles.json'))
