@@ -62,6 +62,9 @@ BEST262K = BEST262K + kvread_twins.twin_names()
 # the op-fusion programme's twins (make_fusion_profiles, from the manifests in fusion-wp; test_fusion_wp holds each as the production profile plus exactly its flags)
 import make_fusion_profiles as fusion_twins  # noqa: E402
 BEST262K = BEST262K + fusion_twins.twin_names()
+# the engine-start upload twins of the ship profile (make_upload_profiles; test_upload_p0_profiles holds each as that parent plus its switches)
+import make_upload_profiles as upload_twins  # noqa: E402
+BEST262K = BEST262K + upload_twins.twin_names()
 # tp4/262k8-x (test_tp4_262k8_x holds each as the best-time-gate or best-audit twin plus/minus exactly one lever): the experiments image's arms; 262k knobs by inheritance.
 X262K = tuple('c2-packed-tp4-8x262k-best-time-gate-' + lever for lever in ('nosamp', 's1', 'd2', 'dbf16', 'lookup', 'stack')) + (
     'c2-packed-tp4-8x262k-best-nosamp-audit', 'c2-packed-tp4-8x262k-best-stack-audit')

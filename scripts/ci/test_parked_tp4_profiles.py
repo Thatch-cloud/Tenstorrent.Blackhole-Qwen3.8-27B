@@ -255,6 +255,11 @@ class ProfileTests(unittest.TestCase):
                                if twin['parent'] != make_fusion_profiles.PARENT}
         # the region-read audit twins (make_kvread_profiles; test_kvread_profiles holds each as its parent plus one flag) carry their parent's flags by inheritance
         region_read = {twin: parent for parent, twin, mode in kvread_twins.TWINS}
+        # the engine-start upload twins of the ship profile (make_upload_profiles; test_upload_p0_profiles holds each as that parent plus its switches) carry the parent's
+        # three engine-reuse flags by inheritance, its owner waiver being dropped on a gate profile
+        import make_upload_profiles
+
+        generated |= set(make_upload_profiles.twin_names())
         for name, profile in profiles.items():
             env = profile['env']
             named = [flag for flag in env if flag.startswith('QWEN_FAST_PARKED_') or flag in ('QWEN_FAST_GATE_DRAM_BALLAST', 'QWEN_FAST_LEVERN_BUILD_MS')]

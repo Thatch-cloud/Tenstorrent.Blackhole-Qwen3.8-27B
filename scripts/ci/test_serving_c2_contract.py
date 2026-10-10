@@ -13,7 +13,7 @@ PROFILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'qwen_c2_pro
 
 
 class _ParkedTwins(object):
-    """The generated engine-reuse and octo-T8 gate twins by name (this file ships in the image, where make_parked_profiles and make_octo_profiles do not: test_parked_tp4_profiles and test_octo_profiles hold the lists)."""
+    """The generated engine-reuse and octo-T8 gate twins by name (this file ships in the image, where make_parked_profiles, make_octo_profiles and make_upload_profiles do not: test_parked_tp4_profiles, test_octo_profiles and test_upload_p0_profiles hold the lists)."""
 
     def __contains__(self, name):
         # (and the round-host gate twins of the Lever N traffic profile: test_tp4_round_host holds the list)
@@ -24,6 +24,8 @@ class _ParkedTwins(object):
                 # the region-read audit twins of the Lever N audited profiles (make_kvread_profiles; test_kvread_profiles holds the list)
                 or name.endswith(('-ship-prefix-levern-audit-kvr', '-ship-prefix-levern-audit-r2-kvr', '-ship-prefix-levern-audit-r2-kvx'))
                 or name.endswith('-ship-prefix-levern-kvr-parked-audit')
+                # the engine-start upload twins of the ship profile (make_upload_profiles; test_upload_p0_profiles holds the list)
+                or '-ship-prefix-levern-w2-er-traffic-' in name
                 or '-ship-prefix-levern-w2-er-fx-' in name)      # (and the op-fusion programme's twins of the ship profile: test_fusion_wp holds them)
 
 
