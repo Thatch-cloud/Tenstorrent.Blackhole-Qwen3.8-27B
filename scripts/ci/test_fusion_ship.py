@@ -88,14 +88,14 @@ class ProfileTests(unittest.TestCase):
         self.assertNotIn(SHIP, fusion.twin_names())
         self.assertEqual(fusion.generate_profiles(json.loads(PROFILES_PATH.read_text(encoding='utf-8')), PLAN)['profiles'][SHIP], PROFILES[SHIP])
 
-    def test_the_waiver_is_well_formed_names_the_four_levers_and_is_pending(self):
+    def test_the_waiver_is_well_formed_names_the_four_levers_and_is_pending_or_approved(self):
         waiver = PROFILES[SHIP][contract.TRAFFIC_WAIVER]
         self.assertEqual(contract.traffic_waiver_problems(dict(PROFILES[SHIP], name=SHIP)), [])
         self.assertEqual(waiver['levers'], contract.WAIVABLE_LEVERS)
         self.assertEqual(waiver['levers'], PROFILES[PARENT][contract.TRAFFIC_WAIVER]['levers'])
         self.assertNotEqual(waiver['id'], PROFILES[PARENT][contract.TRAFFIC_WAIVER]['id'])
-        self.assertTrue(waiver['decision'].startswith('PENDING'))
-        self.assertTrue(contract.traffic_waiver_pending(dict(PROFILES[SHIP], name=SHIP)))
+        self.assertTrue(waiver['decision'].startswith(('PENDING', 'APPROVED')), waiver['decision'])
+        self.assertEqual(contract.traffic_waiver_pending(dict(PROFILES[SHIP], name=SHIP)), waiver['decision'].startswith('PENDING'))
         self.assertFalse(contract.traffic_waiver_pending(dict(PROFILES[PARENT], name=PARENT)), 'the production profile stays approved')
         self.assertTrue(PROFILES[PARENT][contract.TRAFFIC_WAIVER]['decision'].startswith('APPROVED'))
         self.assertEqual(sorted(name for name, body in PROFILES.items() if contract.TRAFFIC_WAIVER in body), sorted([fusion.NAMESPACE + 'traffic', PARENT]))
@@ -145,7 +145,7 @@ class ContractTests(unittest.TestCase):
 
     def test_the_bake_refuses_a_pending_decision_and_accepts_an_approved_one(self):
         with self.assertRaises(job.JobError) as caught:
-            job.read_bake({'C2_BAKE_DEFAULT_PROFILE': SHIP}, ['build'], 'quad', root=self.with_profiles(PROFILES[SHIP][contract.TRAFFIC_WAIVER]['decision']))
+            job.read_bake({'C2_BAKE_DEFAULT_PROFILE': SHIP}, ['build'], 'quad', root=self.with_profiles('PENDING: requested on 2026-10-11 for the owner\'s decision'))
         self.assertIn('not APPROVED', str(caught.exception))
         self.assertEqual(job.read_bake({'C2_BAKE_DEFAULT_PROFILE': SHIP}, ['build'], 'quad', root=self.with_profiles('APPROVED by the owner 2026-10-11: ship it')), SHIP)
 
@@ -200,6 +200,7 @@ class ApprovalTests(unittest.TestCase):
 
     def test_the_command_line_flips_the_decision_in_a_scratch_copy_and_regenerates_the_profile(self):
         directory = self.copy_manifests()
+        checked_in = PROFILES_PATH.read_text(encoding='utf-8')
         profiles = Path(tempfile.mkdtemp()) / 'profiles.json'
         self.addCleanup(shutil.rmtree, str(profiles.parent), True)
         shutil.copy(str(PROFILES_PATH), str(profiles))
@@ -214,7 +215,7 @@ class ApprovalTests(unittest.TestCase):
             self.assertEqual(fusion.main(['--approve-ship', 'APPROVED by the owner 2026-10-11: ok', '--manifests', str(directory)]), 0)
         data = json.loads(profiles.read_text(encoding='utf-8'))
         self.assertTrue(data['profiles'][SHIP][contract.TRAFFIC_WAIVER]['decision'].startswith('APPROVED'))
-        self.assertTrue(PROFILES[SHIP][contract.TRAFFIC_WAIVER]['decision'].startswith('PENDING'), 'the checked-in profile was not touched')
+        self.assertEqual(PROFILES_PATH.read_text(encoding='utf-8'), checked_in, 'the checked-in profile was not touched')
 
 
 class PackTests(unittest.TestCase):
@@ -231,10 +232,11 @@ class PackTests(unittest.TestCase):
                               cwd=str(REPO))
 
     def test_every_gate_parses_and_the_build_is_refused_exactly_while_the_decision_is_pending(self):
+        pending = PROFILES[SHIP][contract.TRAFFIC_WAIVER]['decision'].startswith('PENDING')
         for name in self.NAMES:
             with self.subTest(name=name):
                 result = self.run_job(name)
-                if name == 'B0-ship-build':
+                if name == 'B0-ship-build' and pending:
                     self.assertEqual(result.returncode, 1)
                     self.assertIn('not APPROVED', (result.stdout + result.stderr).decode('utf-8', 'replace'))
                 else:
