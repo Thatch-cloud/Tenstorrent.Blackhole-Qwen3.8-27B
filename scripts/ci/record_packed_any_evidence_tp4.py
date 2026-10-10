@@ -136,12 +136,22 @@ def common_problems(label, report, words, problems):
         problems.append('%s: the deadline cut %d section runs' % (label, len(report['deadline']['skipped'])))
 
 
-def binary_problems(label, report, problems, kernels=True):
-    """The loaded _ttnncpp.so is the admission's K64j and the kernels the harness found are its four."""
+def binary_choice(name):
+    """--binary: 'k64j' (the default: today's record) or 'k64j-oq' (the record of the K64j-OQ binary, optimisation/ttnn-op/sdpa_prefill_oneq)."""
+    choices = {'k64j': admission.K64J_TTNNCPP_SHA256, 'k64j-oq': admission.K64J_OQ_TTNNCPP_SHA256}
+    if name not in choices:
+        raise SystemExit('--binary is k64j or k64j-oq, not %r' % (name,))
+    return choices[name]
+
+
+def binary_problems(label, report, problems, kernels=True, served=None):
+    """The loaded _ttnncpp.so is the binary the record is for (the admission's K64j, or K64j-OQ with --binary k64j-oq) and the kernels the harness
+    found are K64j's four (K64j-OQ carries K64j's decode kernels byte for byte)."""
+    served = admission.K64J_TTNNCPP_SHA256 if served is None else served
     binary = report.get('binary') or {}
-    if binary.get('sha256') != admission.K64J_TTNNCPP_SHA256:
-        problems.append('%s: the loaded binary is %s, not K64j %s' % (label, str(binary.get('sha256'))[:16],
-                                                                        admission.K64J_TTNNCPP_SHA256[:16]))
+    if binary.get('sha256') != served:
+        problems.append('%s: the loaded binary is %s, not %s %s' % (label, str(binary.get('sha256'))[:16], admission.binary_label(served),
+                                                                   served[:16]))
     if binary and binary.get('k64j') is False:
         problems.append('%s: the loaded binary is not K64j (stage %s)' % (label, binary.get('stage')))
     if kernels:
@@ -204,14 +214,14 @@ def capacity_problems(label, report, capacity, problems):
                         % (label, report.get('capacity'), capacity, capacity))
 
 
-def build_cb1(report, digest, path, run, tag, watcher=None, capacity=admission.CAPACITY_131K):
+def build_cb1(report, digest, path, run, tag, watcher=None, capacity=admission.CAPACITY_131K, served=None):
     """sections.CB1 from the final report of the card harness (--kv-heads 1, the default sections), or RecordError."""
     design = admission.capacity_design(capacity)
     problems = []
     capacity_problems('CB1', report, capacity, problems)
     words = line_words(report.get('verdict_line'))
     common_problems('CB1', report, words, problems)
-    binary_problems('CB1', report, problems)
+    binary_problems('CB1', report, problems, served=served)
     kv_problems('CB1', report, words, problems)
     missing = [name for name in CB1_SECTIONS if name not in (report.get('sections') or ())]
     if missing:
@@ -260,7 +270,7 @@ def build_cb1(report, digest, path, run, tag, watcher=None, capacity=admission.C
     return section
 
 
-def build_cb2a(report, digest, path, run, tag, watcher=None, capacity=admission.CAPACITY_131K):
+def build_cb2a(report, digest, path, run, tag, watcher=None, capacity=admission.CAPACITY_131K, served=None):
     """sections.CB2a from the final report of the card harness (--sections K2,X7,Z at --kv-heads 1), or RecordError."""
     design = admission.capacity_design(capacity)
     problems = []
@@ -271,7 +281,7 @@ def build_cb2a(report, digest, path, run, tag, watcher=None, capacity=admission.
     words = line_words(report.get('verdict_line'))
     decision = report.get('decision') or {}
     common_problems('CB2a', report, words, problems)
-    binary_problems('CB2a', report, problems)
+    binary_problems('CB2a', report, problems, served=served)
     kv_problems('CB2a', report, words, problems)
     missing = [name for name in CB2A_SECTIONS if name not in (report.get('sections') or ())]
     if missing:
@@ -342,7 +352,7 @@ def reader_sha(root=HERE):
         return hashlib.sha256(handle.read()).hexdigest()
 
 
-def build_cb2b(report, digest, path, run, tag, commit, image, watcher=None, root=HERE, capacity=admission.CAPACITY_131K):
+def build_cb2b(report, digest, path, run, tag, commit, image, watcher=None, root=HERE, capacity=admission.CAPACITY_131K, served=None):
     """sections.CB2b from the final report of the four-card extent reader (full scope, chips=1of4), or RecordError."""
     design = admission.capacity_design(capacity)
     problems = []
@@ -352,7 +362,7 @@ def build_cb2b(report, digest, path, run, tag, commit, image, watcher=None, root
     common_problems('CB2b', report, words, problems)
     # The reader harness checks the mounted kernels with the card harness's own check (k64j_card_b.check_kernels): the
     # reader's evidence is K64j's only if its kernels were the four the admission names, as CB1's and CB2a's are.
-    binary_problems('CB2b', report, problems)
+    binary_problems('CB2b', report, problems, served=served)
     if decision.get('scope') != admission.CB2B_SCOPE or words.get('scope') != admission.CB2B_SCOPE:
         problems.append('CB2b: scope %s (line %s), not full: %s' % (decision.get('scope'), words.get('scope'),
                                                                    decision.get('scope_short')))
@@ -497,9 +507,15 @@ WHAT_RECORDED_262K = ('The four-card (QWEN_FAST_TP=4) record of packed_any_admis
                       'commit; the 131,328 record and its pin are never touched.')
 
 
-def record(evidence, sections, audit=None, capacity=admission.CAPACITY_131K):
-    """A new evidence dict: `sections` (name -> section dict) replaces the PENDING ones; the reader sha256 joins `sources`."""
+def record(evidence, sections, audit=None, capacity=admission.CAPACITY_131K, binary=None):
+    """A new evidence dict: `sections` (name -> section dict) replaces the PENDING ones; the reader sha256 joins `sources`. `binary` (a sha256 of
+    admission.SERVED_BINARIES, default: the record's own) is the binary the reports were made on: the record then names it."""
     evidence = json.loads(json.dumps(evidence))
+    if binary is not None and binary != (evidence.get('binary') or {}).get('ttnncpp_sha256'):
+        evidence['binary'] = dict(evidence.get('binary') or {}, ttnncpp_sha256=binary,
+                                  note='the %s binary (%s): the reports of this record were made on it. The decode kernels are K64j\'s four, byte for '
+                                       'byte; the build of this binary proves its delta to K64j (optimisation/ttnn-op/sdpa_prefill_oneq/build_k64j_oq.sh).'
+                                       % (admission.binary_label(binary), binary[:16]))
     if capacity != admission.CAPACITY_131K:
         evidence['capacity'] = capacity
     evidence['sections'] = dict(evidence.get('sections') or {})
@@ -542,6 +558,8 @@ def parse_args(argv=None):
     parser.add_argument('--cb2b-image', help='the image TAG NAME the pinned siblings were served from (no registry, no digest)')
     parser.add_argument('--extent-audit-run', type=int, help='the four-card gate run that audited the extent path on chips 0-3')
     parser.add_argument('--extent-audit-tag')
+    parser.add_argument('--binary', default='k64j', help='the binary the reports were made on: k64j (default) or k64j-oq; the record then names it, so '
+                                                         'a traffic boot on that binary qualifies strictly (packed_any_admission.evidence_problems)')
     parser.add_argument('--dry-run', action='store_true', help='check and print the result; write nothing')
     return parser.parse_args(argv)
 
@@ -549,6 +567,7 @@ def parse_args(argv=None):
 def main(argv=None, out=print):
     args = parse_args(argv)
     capacity = args.capacity
+    served = binary_choice(args.binary)
     if args.evidence is None:
         args.evidence = str(admission.evidence_path(4, capacity))
     if not (args.cb1 or args.cb2a or args.cb2b):
@@ -566,7 +585,7 @@ def main(argv=None, out=print):
             watcher = watcher_entry(getattr(args, name + '_watcher_run'), getattr(args, name + '_watcher_tag'),
                                     getattr(args, name + '_watcher'))
             sections[section_name] = builder(report, digest, path, getattr(args, name + '_run'), getattr(args, name + '_tag'),
-                                             watcher, capacity)
+                                             watcher, capacity, served)
         except RecordError as error:
             problems += error.problems
     if args.cb2b:
@@ -574,7 +593,7 @@ def main(argv=None, out=print):
             report, digest = read_report(args.cb2b)
             watcher = watcher_entry(args.cb2b_watcher_run, args.cb2b_watcher_tag, args.cb2b_watcher)
             sections['CB2b'], sha = build_cb2b(report, digest, args.cb2b, args.cb2b_run, args.cb2b_tag, args.cb2b_commit,
-                                               args.cb2b_image, watcher, args.sources_root, capacity)
+                                               args.cb2b_image, watcher, args.sources_root, capacity, served)
             sources[READER_TP] = sha
         except RecordError as error:
             problems += error.problems
@@ -583,7 +602,7 @@ def main(argv=None, out=print):
             out('REFUSED: ' + problem)
         return 1
     evidence = record(current, sections, (args.extent_audit_run, args.extent_audit_tag)
-                      if args.extent_audit_run and args.extent_audit_tag else None, capacity)
+                      if args.extent_audit_run and args.extent_audit_tag else None, capacity, served)
     evidence['sources'] = dict(current.get('sources') or {}, **sources)
     dirty = hygiene_problems(evidence)
     if dirty:
@@ -592,7 +611,8 @@ def main(argv=None, out=print):
         return 1
     payload = dump(evidence)
     digest = hashlib.sha256(payload).hexdigest()
-    remaining = admission.evidence_problems(evidence, args.sources_root, tp=4, capacity=capacity)
+    remaining = admission.evidence_problems(evidence, args.sources_root, tp=4, capacity=capacity,
+                                            environ={admission.RUNTIME_BINARY_ENV: served})
     out('evidence sha256 %s; sections recorded: %s; %d problems left for the admission%s' % (
         digest, ','.join(sorted(sections)), len(remaining), '' if not remaining else ':'))
     for problem in remaining:

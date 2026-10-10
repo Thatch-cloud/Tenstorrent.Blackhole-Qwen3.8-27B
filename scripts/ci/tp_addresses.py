@@ -277,6 +277,17 @@ def install(environ=None):
     for namespace, name, old in trace_census.install():
         _REBOUND.append((namespace, name, old))
         rebound += 1
+    # The prefill SDPA's one-q-chunk-per-core program word (tp4/prefill-sdpa, QWEN_FAST_SDPA_PF_ONEQ=1): the graft's _qwen_pf_program_config is wrapped
+    # to OR the oneq bit into the chain word where the factory takes the call. sdpa_pf_oneq_tp is an overlay-only module (docker/qwen-c2-overlay.txt),
+    # so it is imported only when either of its flags is SET (any value, so a malformed one still reaches its strict parser and raises at attach):
+    # with both unset nothing of it is imported or bound. Its install() is inert for '0', needs QWEN_FAST_SDPA_PF=1 otherwise, and the pair never reaches it.
+    env = os.environ if environ is None else environ
+    if any(env.get(name) is not None for name in ('QWEN_FAST_SDPA_PF_ONEQ', 'QWEN_FAST_SDPA_PF_ONEQ_AUDIT')):
+        import sdpa_pf_oneq_tp
+
+        for namespace, name, old in sdpa_pf_oneq_tp.install(environ):
+            _REBOUND.append((namespace, name, old))
+            rebound += 1
     return rebound
 
 

@@ -27,7 +27,9 @@ here runs; any other value is refused by extent_replay_enabled):
   3. the binary (check_runtime): QWEN_FAST_RUNTIME_BINARY_SHA256 names K64j's _ttnncpp.so, both paths
      dflash_combined_sim_runtime.BINARIES names hash to it and carry the K64j literals (a graft .so
      replaces the whole binary: memory graft-so-drops-image-patches), the four K64j kernels are their
-     recorded bytes, and sdpa_tree_scratch.audit(root, patched=True) holds;
+     recorded bytes, and sdpa_tree_scratch.audit(root, patched=True) holds. The binary may also be K64j-OQ (K64J_OQ_TTNNCPP_SHA256: K64j plus
+     the prefill SDPA's oneq edits, nothing else), named by the same variable and carrying its two extra literals; every record below was made
+     on K64j, so a K64j-OQ boot borrows K64j's record in a GATE boot only (equivalent) and a traffic boot needs a record of its own;
   4. the evidence (check_evidence): packed_any_evidence.json at its pinned sha256, naming that binary and
      those kernels, recording CB1, CB2a and CB2b as PASS with the coverage each must have (evidence_problems:
      the design's seeds, variants, families, starts and geometries, and a count floor per section), and the
@@ -107,6 +109,19 @@ RUNTIME_BINARY_ENV = 'QWEN_FAST_RUNTIME_BINARY_SHA256'
 # factory with F19-F22 and the four kernels below. K64i's is kept for the provenance succession.
 K64J_TTNNCPP_SHA256 = '152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7'
 K64I_TTNNCPP_SHA256 = 'cf54d716669be6b71f1d627e74892c90f562495dc9500589408a72b4ddccf4a4'
+# K64j-OQ (optimisation/ttnn-op/sdpa_prefill_oneq/build_k64j_oq.sh, card-M runs W1 and Q1 of tp4/prefill-sdpa): K64j's contents byte for byte
+# (the decode factory, its four kernels, the chain reader, _ttnn.so and every op directory) with the PREFILL SDPA factory's oneq edits, flag 0x8 of the per-call
+# chain word (one q chunk per core). The build proves the delta: K64j alone rebuilt in the same ttbuild, every QWEN string of K64j kept, only the two oneq literals
+# new, the same exported symbols, one manifest line. The edits are inert unless a call carries the 0x8 bit (QWEN_FAST_SDPA_PF_ONEQ=1).
+K64J_OQ_TTNNCPP_SHA256 = '2b81e28f017ccf0ab50028fbae5eb31dd61cfd8a3159233a1ed785712d024a57'
+# The binaries this admission serves on, with the name the logs use. Every evidence record below was recorded on K64j, and a record names ONE binary
+# (binary.ttnncpp_sha256): see equivalent() for what that means for K64j-OQ.
+SERVED_BINARIES = {K64J_TTNNCPP_SHA256: 'K64j', K64J_OQ_TTNNCPP_SHA256: 'K64j-OQ'}
+ONEQ_BINARY_LITERALS = (b'[QWEN-SDPA-PF] oneq needs one q chunk per core', b'[QWEN-SDPA-PF] oneq=1 q_chunks=')
+# served binary -> the binary whose evidence it may borrow, and only in a GATE boot (QWEN_C2_GATE=1: never traffic). K64j-OQ differs from K64j in the prefill
+# factory alone, which no decode-extent section (CB1, CB2a, CB2b) exercises; a traffic boot still needs a record of its own binary
+# (record_packed_any_evidence_tp4.py --binary k64j-oq, then the pins re-set), the requalification list in optimisation/ttnn-op/sdpa_prefill_oneq/README.md.
+EVIDENCE_BORROWS = {K64J_OQ_TTNNCPP_SHA256: K64J_TTNNCPP_SHA256}
 # Format literals the served binary must carry (pooled_attention_replay.required_binary_markers for
 # tail, share, slice and extent, plus the tree-scratch patch's environment name).
 BINARY_LITERALS = (
@@ -247,6 +262,22 @@ def gate_only(environ=None):
     return (os.environ if environ is None else environ).get(GATE_ENV) == '1'
 
 
+def served_binary(environ=None):
+    """The binary this process serves on: QWEN_FAST_RUNTIME_BINARY_SHA256 when it names one of SERVED_BINARIES, else K64j (the default every record and
+    test below was written for; admit refuses any other value by name)."""
+    requested = ((os.environ if environ is None else environ).get(RUNTIME_BINARY_ENV) or '').lower()
+    return requested if requested in SERVED_BINARIES else K64J_TTNNCPP_SHA256
+
+
+def binary_label(sha):
+    return SERVED_BINARIES.get(sha, 'K64j')
+
+
+def equivalent(recorded, served, environ=None):
+    """Whether a record made on binary `recorded` may stand for binary `served` here: only the reviewed pair of EVIDENCE_BORROWS and only in a gate boot."""
+    return recorded != served and EVIDENCE_BORROWS.get(served) == recorded and gate_only(environ)
+
+
 def _log(template, *values):
     """One server-log line, brace-formatted (dflash_device.pindiag's signature): loguru where the engine
     has it, print otherwise."""
@@ -368,16 +399,19 @@ def literals_missing(path, literals=BINARY_LITERALS):
             return [literal for literal in literals if view.find(literal) < 0]
 
 
-def check_runtime(root, binaries=None):
-    """Item 3 without the environment: the K64j binary at every path BINARIES names, carrying
-    BINARY_LITERALS; the four K64j kernels; the audited tree-scratch sources. `binaries`, when given, is
+def check_runtime(root, binaries=None, served=None):
+    """Item 3 without the environment: the K64j binary (or, with `served` naming it, K64j-OQ) at every path BINARIES names, carrying
+    BINARY_LITERALS (and K64j-OQ's own); the four K64j kernels; the audited tree-scratch sources. `binaries`, when given, is
     {path: sha256} already read this process (runtime_binary_override.install's record), so the attach
     does not hash the binaries twice. Returns a record; raises AdmissionRefused with every problem, each
     naming its file relative to `root` (one short line each)."""
     from dflash_combined_sim_runtime import BINARIES
 
     root = Path(root)
-    problems, record = [], dict(binaries={}, kernels={}, literals=[literal.decode() for literal in BINARY_LITERALS])
+    served = K64J_TTNNCPP_SHA256 if served is None else served
+    label = binary_label(served)
+    literals = BINARY_LITERALS + (ONEQ_BINARY_LITERALS if served == K64J_OQ_TTNNCPP_SHA256 else ())
+    problems, record = [], dict(binaries={}, kernels={}, literals=[literal.decode() for literal in literals])
     for name in BINARIES:
         path = root / name
         if not path.is_file():
@@ -385,9 +419,9 @@ def check_runtime(root, binaries=None):
             continue
         digest = (binaries or {}).get(name) or sha256_file(path)
         record['binaries'][name] = digest
-        if digest != K64J_TTNNCPP_SHA256:
-            problems.append('%s is %s, not K64j\'s %s' % (name, digest[:16], K64J_TTNNCPP_SHA256[:16]))
-        missing = literals_missing(path)
+        if digest != served:
+            problems.append('%s is %s, not %s\'s %s' % (name, digest[:16], label, served[:16]))
+        missing = literals_missing(path, literals)
         if missing:
             problems.append('%s lacks %s' % (name, ', '.join(repr(literal.decode()) for literal in missing)))
     for name, wanted in sorted(K64J_KERNELS.items()):
@@ -593,12 +627,13 @@ def _one_head_problems(sections, problems):
             problems.append('CB2b: the reader served %s, not %s (one KV head)' % (served.get('flags'), CB2B_SERVED_FLAGS_TP4))
 
 
-def evidence_problems(evidence, sources_root=HERE, tp=None, capacity=CAPACITY_131K):
+def evidence_problems(evidence, sources_root=HERE, tp=None, capacity=CAPACITY_131K, environ=None):
     """Every reason the evidence does not qualify the extent path for these bytes; [] when it does. `tp` is the
     width the record is for (default: the width this process serves at); four cards read the reader twin's sha256,
     a G8B2 0x23 CB1 combo, CB2b's 1of4 chip view, and one KV head in CB1, CB2a and CB2b (_one_head_problems).
     `capacity` is the window the record is for (default 131,328, today's set; 262,144 only at four cards: the design set of
-    capacity_design, and the record names its capacity)."""
+    capacity_design, and the record names its capacity). `environ` names the binary served (served_binary: K64j unless
+    QWEN_FAST_RUNTIME_BINARY_SHA256 names K64j-OQ) and whether this is a gate boot, in which K64j-OQ may borrow K64j's record (equivalent)."""
     tp = width() if tp is None else tp
     problems = []
     if not isinstance(evidence, dict) or evidence.get('schema') != EVIDENCE_SCHEMA:
@@ -610,9 +645,13 @@ def evidence_problems(evidence, sources_root=HERE, tp=None, capacity=CAPACITY_13
         if evidence.get('capacity') != capacity:
             problems.append('capacity: the record is for %s, not %d' % (evidence.get('capacity'), capacity))
     binary = evidence.get('binary') or {}
-    if binary.get('ttnncpp_sha256') != K64J_TTNNCPP_SHA256:
-        problems.append('binary: the evidence qualified %s, not K64j %s' % (str(binary.get('ttnncpp_sha256'))[:16],
-                                                                           K64J_TTNNCPP_SHA256[:16]))
+    served = served_binary(environ)
+    recorded = binary.get('ttnncpp_sha256')
+    if recorded != served and not equivalent(recorded, served, environ):
+        problems.append('binary: the evidence qualified %s, not %s %s%s' % (
+            str(recorded)[:16], binary_label(served), served[:16],
+            '' if served not in EVIDENCE_BORROWS or EVIDENCE_BORROWS[served] != recorded else
+            ' (a record made on K64j stands for K64j-OQ in a gate boot only: re-record it on K64j-OQ before traffic)'))
     if evidence.get('kernels') != K64J_KERNELS:
         problems.append('kernels: the evidence names other kernel bytes than K64j\'s four')
     sources = evidence.get('sources') or {}
@@ -640,7 +679,7 @@ def evidence_problems(evidence, sources_root=HERE, tp=None, capacity=CAPACITY_13
     return problems
 
 
-def check_evidence(path=None, *, expected_sha256=None, sources_root=HERE, tp=None, capacity=CAPACITY_131K):
+def check_evidence(path=None, *, expected_sha256=None, sources_root=HERE, tp=None, capacity=CAPACITY_131K, environ=None):
     """Item 4: the evidence file at its pinned sha256, and evidence_problems empty. Returns the parsed
     record; raises AdmissionRefused naming every problem (one entry each in its `problems`). The file and its pin
     are the pair's or the four-card record's by `tp` (default: the width this process serves at), or the 262,144-token
@@ -661,7 +700,7 @@ def check_evidence(path=None, *, expected_sha256=None, sources_root=HERE, tp=Non
     except ValueError as error:
         raise AdmissionRefused('%s does not parse: %s' % (path.name, error),
                                ['evidence: %s does not parse: %s' % (path.name, str(error)[:120])])
-    problems = evidence_problems(evidence, sources_root, tp, capacity)
+    problems = evidence_problems(evidence, sources_root, tp, capacity, environ)
     if problems:
         raise AdmissionRefused('the evidence does not qualify the extent path%s: ' % (
             '' if capacity == CAPACITY_131K else ' at capacity %d' % capacity) + '; '.join(problems),
@@ -685,14 +724,14 @@ def _log_unqualified(log, problems):
         log('{} ({}/{}): {}', UNQUALIFIED_MARKER, index, len(problems), problem)
 
 
-def check_window_262k(*, sources_root=HERE, evidence_path_=None, expected_sha256=None, writer_state=None):
+def check_window_262k(*, sources_root=HERE, evidence_path_=None, expected_sha256=None, writer_state=None, environ=None):
     """The 262,144-token window's prerequisites, none of them waivable: the window's own evidence record at its own pin
     (check_evidence at capacity 262,144) and E1, the ordered writers' page-table width 4,096 (page_width_tp4). Returns the
     parsed 262k record; raises AdmissionRefused naming every problem with the capacity."""
     problems, record = [], None
     try:
         record = check_evidence(evidence_path_, expected_sha256=expected_sha256, sources_root=sources_root, tp=4,
-                                capacity=CAPACITY_262K)
+                                capacity=CAPACITY_262K, environ=environ)
     except AdmissionRefused as refusal:
         problems.extend('capacity %d: %s' % (CAPACITY_262K, problem) for problem in refusal.problems)
     if writer_state is None:
@@ -733,7 +772,7 @@ def tp_guard(environ=None, *, log=None, sources_root=HERE):
         return None
     log = _log if log is None else log
     try:
-        check_evidence(tp=tp, sources_root=sources_root)
+        check_evidence(tp=tp, sources_root=sources_root, environ=environ)
     except AdmissionRefused as refusal:
         if not unqualified_allowed(environ):
             raise AdmissionRefused('QWEN_FAST_TP=%d serves on the pair\'s evidence otherwise, and %s is not a qualifying '
@@ -746,7 +785,7 @@ def tp_guard(environ=None, *, log=None, sources_root=HERE):
         # The window's own evidence and E1, in a gate run too: the waiver above is the 131,328 record's alone. Only the explicit
         # QWEN_FAST_262K_EVIDENCE_WAIVER=1 (waiver_for_262k: a gate run of a gate-only profile, else refused) passes without them.
         try:
-            check_window_262k(sources_root=sources_root)
+            check_window_262k(sources_root=sources_root, environ=environ)
         except AdmissionRefused as refusal:
             if not waiver_for_262k(environ, 'tp_guard: %d evidence problems, one UNQUALIFIED line each' % len(refusal.problems), log):
                 raise
@@ -768,11 +807,13 @@ def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evide
         problems.append('%s is not 1' % FLAG)
     problems.extend(check_environment(environ, m3))
     requested = (environ.get(RUNTIME_BINARY_ENV) or '').lower()
-    if requested != K64J_TTNNCPP_SHA256:
-        problems.append('%s=%s, not K64j\'s %s' % (RUNTIME_BINARY_ENV, requested[:16] or '(unset)',
-                                                  K64J_TTNNCPP_SHA256[:16]))
-    if binary_record is not None and binary_record.get('override') != K64J_TTNNCPP_SHA256:
-        problems.append('the runtime binary override admitted %s, not K64j' % str(binary_record.get('override'))[:16])
+    if requested not in SERVED_BINARIES:
+        problems.append('%s=%s, not K64j\'s %s or K64j-OQ\'s %s' % (RUNTIME_BINARY_ENV, requested[:16] or '(unset)',
+                                                                   K64J_TTNNCPP_SHA256[:16], K64J_OQ_TTNNCPP_SHA256[:16]))
+    served = requested if requested in SERVED_BINARIES else K64J_TTNNCPP_SHA256
+    label = binary_label(served)
+    if binary_record is not None and binary_record.get('override') != served:
+        problems.append('the runtime binary override admitted %s, not %s' % (str(binary_record.get('override'))[:16], label))
     tp = width(environ)
     record = dict(flag=FLAG, shape=m3[1])
     capacity = CAPACITY_131K
@@ -809,13 +850,19 @@ def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evide
     if blocks != 1:
         record['blocks'] = blocks
     unqualified, waived = [], []
+    # The evidence checks take the environment only when this process serves K64j-OQ (the binary named there decides what a record must say); on K64j the calls
+    # are exactly what they always were.
+    env_kw = {} if served == K64J_TTNNCPP_SHA256 else dict(environ=environ)
     if wide:
-        window_check = lambda: check_window_262k(evidence_path_=evidence)
+        window_check = lambda: check_window_262k(evidence_path_=evidence, **env_kw)
     elif tp == tp_shapes.PAIR:
-        window_check = lambda: check_evidence(evidence)
+        window_check = lambda: check_evidence(evidence, **env_kw)
     else:
-        window_check = lambda: check_evidence(evidence, tp=tp)
-    for name, check in (('runtime', lambda: check_runtime(runtime_root, (binary_record or {}).get('binaries'))),
+        window_check = lambda: check_evidence(evidence, tp=tp, **env_kw)
+    # K64j: the call is exactly today's (the two arguments); K64j-OQ names itself as the third.
+    runtime_args = ((runtime_root, (binary_record or {}).get('binaries')) if served == K64J_TTNNCPP_SHA256
+                    else (runtime_root, (binary_record or {}).get('binaries'), served))
+    for name, check in (('runtime', lambda: check_runtime(*runtime_args)),
                         ('evidence', window_check)):
         if name == 'evidence' and capacity not in CAPACITIES:
             continue                       # already refused by name above; there is no record to read for it
@@ -839,8 +886,8 @@ def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evide
         page_width_tp4.log_waiver_once('admission at capacity %d passes without the 262k evidence (%d problems, one UNQUALIFIED line each)' % (capacity, len(waived)), log)
         record['waived'] = waived
         _log_unqualified(log, waived)
-        log('{} passed UNQUALIFIED: K64j {} x{}; kernels {}; {} evidence problems (262k waiver, gate only){}',
-            MARKER, K64J_TTNNCPP_SHA256[:16], len(record['runtime']['binaries']),
+        log('{} passed UNQUALIFIED: {} {} x{}; kernels {}; {} evidence problems (262k waiver, gate only){}',
+            MARKER, label, served[:16], len(record['runtime']['binaries']),
             ','.join(sha[:8] for _, sha in sorted(K64J_KERNELS.items())), len(waived), suffix)
         _STATE['record'] = record
         return record
@@ -849,14 +896,19 @@ def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evide
         # line each, and the process may never take traffic (its profile is gate_only).
         record['unqualified'] = unqualified
         _log_unqualified(log, unqualified)
-        log('{} passed UNQUALIFIED: K64j {} x{}; kernels {}; {} evidence problems (gate only){}',
-            MARKER, K64J_TTNNCPP_SHA256[:16], len(record['runtime']['binaries']),
+        log('{} passed UNQUALIFIED: {} {} x{}; kernels {}; {} evidence problems (gate only){}',
+            MARKER, label, served[:16], len(record['runtime']['binaries']),
             ','.join(sha[:8] for _, sha in sorted(K64J_KERNELS.items())), len(unqualified), suffix)
         _STATE['record'] = record
         return record
     sections = record['evidence']['sections']
-    log('{} passed: K64j {} x{}; kernels {}; evidence {}; CB1 {} CB2a {} CB2b {}; reader {}{}',
-        MARKER, K64J_TTNNCPP_SHA256[:16], len(record['runtime']['binaries']),
+    recorded = (record['evidence'].get('binary') or {}).get('ttnncpp_sha256')
+    if equivalent(recorded, served, environ):
+        record['binary_equivalence'] = dict(recorded=recorded, served=served)
+        log('{} evidence recorded on {} {} stands for {} {} by the reviewed equivalence (gate boot only; traffic needs a record on {})',
+            MARKER, binary_label(recorded), recorded[:16], label, served[:16], label)
+    log('{} passed: {} {} x{}; kernels {}; evidence {}; CB1 {} CB2a {} CB2b {}; reader {}{}',
+        MARKER, label, served[:16], len(record['runtime']['binaries']),
         ','.join(sha[:8] for _, sha in sorted(K64J_KERNELS.items())), evidence_pin(tp, capacity)[:16],
         sections['CB1']['run'], sections['CB2a']['run'], sections['CB2b']['run'],
         ','.join(record['evidence']['sources'][name][:16] for name in qualified_sources(tp)), suffix)

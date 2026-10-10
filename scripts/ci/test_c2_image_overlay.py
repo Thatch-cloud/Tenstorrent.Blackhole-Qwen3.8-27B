@@ -668,9 +668,13 @@ class OneListTests(unittest.TestCase):
         k64j = packed_any_admission.K64J_TTNNCPP_SHA256
         text = code_lines(C2_DOCKERFILE)
         self.assertEqual(provenance.GRAFT_NAME, 'opgraft-K64j')
-        self.assertIn('COPY %s/ %s/' % (provenance.GRAFT_NAME, provenance.GRAFT_IN_IMAGE), text)
-        self.assertIn('g=%s;' % provenance.GRAFT_IN_IMAGE, text)
-        self.assertIn('_ttnncpp.so | cut -c1-64)" = %s;' % k64j, text)
+        # The graft is a build arg whose DEFAULTS are K64j's (build-c2-serving-image.sh passes K64j-OQ's with C2_BAKE_GRAFT=K64j-OQ).
+        self.assertIn('ARG GRAFT_NAME=%s\n' % provenance.GRAFT_NAME, text)
+        self.assertIn('ARG GRAFT_SHA=%s\n' % k64j, text)
+        self.assertIn('COPY ${GRAFT_NAME}/ /opt/qwen-c2/${GRAFT_NAME}/', text)
+        self.assertIn('g=/opt/qwen-c2/${GRAFT_NAME};', text)
+        self.assertEqual(text.count('_ttnncpp.so | cut -c1-64)" = "${GRAFT_SHA}";'), 2, 'the graft step and the region-read step both repeat the pin')
+        self.assertIn('QWEN_FAST_RUNTIME_BINARY_SHA256=${GRAFT_SHA}', text)
         self.assertEqual(provenance.dockerfile_env(text)['QWEN_FAST_RUNTIME_BINARY_SHA256'], k64j)
         self.assertNotIn('K64i', text)
         self.assertNotIn(packed_any_admission.K64I_TTNNCPP_SHA256, text)
@@ -1236,8 +1240,11 @@ class ProvenanceTests(unittest.TestCase):
         self.assertIn('kvread_name=%s' % provenance.KVREAD_NAME, script)
         # the layer replaces nothing: the pinned libraries are re-checked after it
         layer = dockerfile[dockerfile.index('COPY opgraft-KVR/'):]
-        for pinned in ('152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7', '3f5a3d585b46b2bef7d7d2c6c34b88d7f4efb679ec051fb4da615f6ec9ccc9ce'):
-            self.assertIn(pinned, layer.split('\n\n', 1)[0])
+        # the K64j sha is the default of the GRAFT_SHA build arg (K64j-OQ overrides it) and is checked by variable in the layer
+        self.assertIn('ARG GRAFT_SHA=152951c1c0de5c9dfad2d62c295393a43b2ecf353965c55c709da7e539b975b7', dockerfile)
+        step = layer.split('\n\n', 1)[0]
+        self.assertIn('"${GRAFT_SHA}"', step)
+        self.assertIn('3f5a3d585b46b2bef7d7d2c6c34b88d7f4efb679ec051fb4da615f6ec9ccc9ce', step)
 
     def test_a_faithful_image_passes(self):
         problems, docker = self.verify()
