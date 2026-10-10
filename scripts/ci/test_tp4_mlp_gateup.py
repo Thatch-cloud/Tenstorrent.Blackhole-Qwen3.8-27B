@@ -1050,8 +1050,10 @@ class FileTests(unittest.TestCase):
             result = subprocess.run([sys.executable, '-s', str(HERE / 'c2_serving_job.py'), str(FOLDER / (row[0] + '.env')),
                                      str(HERE / 'qwen_c2_profiles.json')], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('C2_TT_GRID=10,9', (FOLDER / 'C2-mlp-sweep-grid11.env').read_text(encoding='utf-8'))
-        self.assertNotIn('C2_TT_GRID', (FOLDER / 'C1-mlp-sweep.env').read_text(encoding='utf-8'))
+        clamped = (FOLDER / 'C2-mlp-sweep-grid11.env').read_text(encoding='utf-8')
+        self.assertIn('MLP_GRID_CLAMP=10,9', clamped)
+        self.assertNotIn('C2_TT_GRID=', clamped, 'the card-M harnesses do not forward the step\'s clamp; this one takes its own variable')
+        self.assertNotIn('MLP_GRID_CLAMP', (FOLDER / 'C1-mlp-sweep.env').read_text(encoding='utf-8'))
 
     def test_the_first_job_is_the_sweep_with_the_composition(self):
         order = [line.split() for line in (FOLDER / 'ORDER.txt').read_text(encoding='utf-8').splitlines() if line.strip() and not line.startswith('#')]

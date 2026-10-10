@@ -9,8 +9,9 @@
 #   CARD_B_ARGS="--arms sweep,compose,fused" bash run_card_m.sh    # and the fused op (needs tp4_mlp_fused, built in the same checkout)
 #   CARD_B_ARGS="--shapes gdn_in,attn_in,attn_wo,gdn_out --arms sweep" bash run_card_m.sh      # R3: the other four 1D decode matmuls
 #
-# The grid is the device's own (130 workers on 13x10, 110 on 11x10); a C2_TT_GRID clamp reaches the container as TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE, so one job
-# can run the same sweep on the old grid. Needs no weights and no fixtures. The scripts (mlp_gateup_card_m.py, tp4_mlp_gateup.py, tp_shapes.py, and for the fused arm
+# The grid is the device's own (130 workers on 13x10, 110 on 11x10). MLP_GRID_CLAMP (10,9, 11,9 or 12,9; set it in the job's C2_CARDM_ENV) reaches the container as
+# TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE, so one job can run the same sweep on the old 11x10 grid (the other card-M harnesses do not take the step's C2_TT_GRID;
+# this one takes its own variable so that test_c2_tt_grid's registry of clamp-forwarding harnesses stays what it is). Needs no weights and no fixtures. The scripts (mlp_gateup_card_m.py, tp4_mlp_gateup.py, tp_shapes.py, and for the fused arm
 # tp4_mlp_fused.py with its two kernel sources) are mounted from THIS checkout, one file each: no image build.
 #
 # The image: IMAGE (a full image reference) if set, else the local image whose tag is qwen38-c2-$IMAGE_TAG (IMAGE_TAG comes from the job's C2_CARDM_ENV, a plain tag),
@@ -30,6 +31,10 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 REPO=${REPO:-$(cd "$here/../../.." && pwd)}
+case ${MLP_GRID_CLAMP:-} in
+  ''|10,9|11,9|12,9) ;;
+  *) echo "refusing: MLP_GRID_CLAMP=$MLP_GRID_CLAMP is none of 10,9 11,9 12,9 (or unset)" >&2; exit 1 ;;
+esac
 
 # >>> qual_card.sh: which board a qualification harness runs on (canonical copy scripts/ci/qual_card.sh)
 # Every single-card harness under optimisation/ttnn-op embeds this block byte for byte (the scripts in
@@ -411,7 +416,7 @@ timeout -k 30 "$timeout_s" docker run --rm --name "$name" --network none \
   --mount "type=bind,src=$R/kcache,dst=/kcache" \
   -e QWEN_FAST_TP=4 \
   -e TT_METAL_HOME=/opt/tt-metal -e TT_METAL_CACHE=/kcache -e OMP_NUM_THREADS=8 \
-  ${QUAL_TT_GRID:+-e "TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$QUAL_TT_GRID"} \
+  ${MLP_GRID_CLAMP:+-e "TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$MLP_GRID_CLAMP"} \
   --workdir /bench \
   -e QWEN_C2_SERVING=0 --entrypoint env "$IMAGE" -u TT_MESH_GRAPH_DESC_PATH python3 -B /bench/mlp_gateup_card_m.py \
   --out "/results/mlp-$stamp.json" "${extra[@]}" \

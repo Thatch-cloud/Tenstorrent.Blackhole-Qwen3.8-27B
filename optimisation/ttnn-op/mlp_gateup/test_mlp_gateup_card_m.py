@@ -514,9 +514,20 @@ class RunScriptTests(unittest.TestCase):
         library = (CI / 'qual_card.sh').read_text(encoding='utf-8')
         self.assertTrue(c2_serving_job.embeds_qual_card(self.text, library))
 
-    def test_it_forwards_the_grid_clamp_into_its_container(self):
-        self.assertIn('${QUAL_TT_GRID:+-e "TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$QUAL_TT_GRID"}', self.text)
-        self.assertIn('QUAL_TT_GRID', self.text)
+    def test_it_forwards_its_own_grid_clamp_not_the_steps(self):
+        self.assertIn('${MLP_GRID_CLAMP:+-e "TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$MLP_GRID_CLAMP"}', self.text)
+        self.assertNotIn('QUAL_TT_GRID', self.text, 'test_c2_tt_grid keeps a registry of the harnesses that forward the step\'s variable; this is not one of them')
+
+    @unittest.skipUnless(shutil.which('bash'), 'needs bash')
+    def test_it_refuses_a_clamp_that_is_none_of_the_jobs_values_before_it_looks_at_a_card(self):
+        env = dict((key, value) for key, value in os.environ.items() if not key.startswith('QUAL_'))
+        for bad in ('9,9', '10,10', 'x'):
+            result = subprocess.run(['bash', str(self.script)], capture_output=True, text=True, env=dict(env, MLP_GRID_CLAMP=bad))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('MLP_GRID_CLAMP=%s is none of 10,9 11,9 12,9' % bad, result.stderr)
+        for good in ('10,9', '11,9', '12,9', ''):
+            result = subprocess.run(['bash', str(self.script)], capture_output=True, text=True, env=dict(env, MLP_GRID_CLAMP=good))
+            self.assertIn('QUAL_CARD is not set', result.stderr, 'a good value passes the check and meets the missing card')
 
     def test_it_mounts_only_files_that_exist_and_names_the_harness(self):
         found = re.search(r'for file in ([^;]+); do', self.text)
