@@ -47,6 +47,10 @@ FELL_BACK_MARKER = MARKER + ' fell back '
 AUDIT_MARKER = MARKER + ' audit '
 
 
+class WindowRefused(ValueError):
+    """The aligned join produced something other than the window (rows, layout or dtype); its result is released and the exact join serves."""
+
+
 def _strict_bool(name, environ):
     value = (os.environ if environ is None else environ).get(name, '0')
     if value not in ('0', '1'):
@@ -159,8 +163,14 @@ def aligned_join(operations, parts, lead, rows, *, addresses):
         raise
     if len(parts) > 1:
         _release(operations, addresses, joined, (window,))
+    problem = None
     if window.shape[2] != rows:
-        raise AssertionError('The aligned window holds %d rows, not %d' % (window.shape[2], rows))
+        problem = 'The aligned window holds %d rows, not %d' % (window.shape[2], rows)
+    elif getattr(window, 'layout', None) != getattr(parts[0], 'layout', None) or window.dtype != parts[0].dtype:
+        problem = 'The aligned window changed layout or dtype (%r %r)' % (getattr(window, 'layout', None), window.dtype)
+    if problem is not None:
+        operations.deallocate(window)
+        raise WindowRefused(problem)
     return window
 
 

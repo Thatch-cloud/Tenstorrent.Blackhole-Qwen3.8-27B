@@ -305,6 +305,20 @@ class AuditTests(unittest.TestCase):
         for output in outputs:
             self.assertTrue(same(output, window_of(host, 35377)))
 
+    def test_a_refused_aligned_join_falls_back_to_the_exact_one(self):
+        wrong = Recorder()
+        original = wrong.slice
+
+        def slice_dropping_a_row(value, start, end):
+            out = original(value, start, end)
+            return out[..., :-1, :] if value.shape[2] == 2080 else out
+        wrong.slice = slice_dropping_a_row
+        capture, outputs, operations, host = run_capture(35377, environ={twa.FLAG: '1'}, operations=wrong)
+        self.assertEqual(logged(capture, twa.ENGAGED_MARKER), [])
+        self.assertEqual(len(logged(capture, twa.FELL_BACK_MARKER)), 1)
+        for output in outputs:
+            self.assertTrue(same(output, window_of(host, 35377)))
+
     def test_audit_without_flag_is_refused(self):
         with self.assertRaises(ValueError):
             run_capture(35377, environ={twa.FLAG: '1', twa.AUDIT_FLAG: '2'})

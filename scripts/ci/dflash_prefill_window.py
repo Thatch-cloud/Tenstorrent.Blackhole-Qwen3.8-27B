@@ -577,12 +577,17 @@ class PrefillWindowCapture:
                 state = 'exact'
                 merged = values[0] if len(values) == 1 else operations.concat(values, dim=2,
                     memory_config=operations.DRAM_MEMORY_CONFIG)
-            elif layout is not None:
-                state = 'engaged'
-                merged = twa.aligned_join(operations, values, layout['lead'], window['rows'], addresses=addresses)
             else:
-                state = 'fell back'
-                merged = twa.exact_join(operations, values, cover, window, addresses=addresses)
+                merged = None
+                if layout is not None:
+                    try:
+                        merged = twa.aligned_join(operations, values, layout['lead'], window['rows'], addresses=addresses)
+                        state = 'engaged'
+                    except twa.WindowRefused:
+                        merged = None
+                if merged is None:
+                    state = 'fell back'
+                    merged = twa.exact_join(operations, values, cover, window, addresses=addresses)
             if not any(merged is value for value in values):
                 self.merged.append(merged)
             if state == 'engaged' and self.aligned_audit:
