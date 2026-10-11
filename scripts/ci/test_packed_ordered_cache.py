@@ -346,8 +346,8 @@ class BlockLayoutTests(unittest.TestCase):
         import packed_verifier
 
         source = inspect.getsource(packed_verifier.PackedVerifierEngine.build_fixture)
+        # (the behaviour, with the engine's real build_pack, is test_block_warm_capture; here only the wiring's shape)
         self.assertIn("with verify_trace_t2.block_layout(layout):", source)
-        self.assertIn("layout = pack['segments'] if isinstance(pack, dict) and 'segments' in pack else None", source)
         self.assertLess(source.index('block_layout(layout)'), source.index('return ModelBatch('))
         model_batch = Path(poc.__file__).with_name('model_batch.py').read_text(encoding='utf-8')
         self.assertNotIn('layout_spans', model_batch, 'the serving-bundle pin (test_quad_draft) keeps model_batch.py as it was')

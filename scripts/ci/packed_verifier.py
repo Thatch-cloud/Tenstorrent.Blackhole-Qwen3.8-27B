@@ -1553,7 +1553,10 @@ class PackedVerifierEngine:
         pack = build_pack([participant(placeholder, self.rows_per_user, 0, self.checkpoints[user], self.carries[user])
                            for user, placeholder in enumerate(placeholders)], block_rows=self.block_rows)
         # (the block's own layout for the K/V writers built here, warm fixture and captured one alike: verify_trace_t2.block_layout)
-        layout = pack['segments'] if isinstance(pack, dict) and 'segments' in pack else None       # (a stand-in pack without segments, as some tests build, has no layout to give)
+        # build_pack returns the LIST of the users' dicts (ModelBatch makes its pack['segments'] from it, packed_rows): the block's layout is the running sum of their rows. (The first version of this
+        # read pack['segments'] behind an isinstance guard, was always None in production and left the octo block's warm forward on the page writer: card run 38124550905.)
+        rows = [user.get('rows') for user in pack] if isinstance(pack, (list, tuple)) and all(isinstance(user, dict) for user in pack) else []
+        layout = tuple((sum(rows[:index]), sum(rows[:index + 1])) for index in range(len(rows))) if rows and all(type(value) is int for value in rows) else None
         with verify_trace_t2.block_layout(layout):
             return ModelBatch(self.model, [1] * self.block_rows, self.capture_position, placeholders[0].pages, self.helpers,
                 self.checkpoints[0], self.block_rows, pack=pack,
