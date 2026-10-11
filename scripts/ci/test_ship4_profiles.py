@@ -143,6 +143,27 @@ class CandidateTests(unittest.TestCase):
         self.assertFalse([name for name in wanted if name.startswith(('ship-traffic-s4/', 'ship4/'))], 'another generator owns the ship4 folder whole')
 
 
+class CaptureTests(unittest.TestCase):
+    def test_the_octo_blocks_warm_and_captured_writers_take_the_same_path_under_the_candidates_own_env(self):
+        """Card run 38117538847 (GX1 of this candidate on tp4-ship-4): engine start died capturing the octo block's verify trace, 'Cannot load new binaries during trace capture' at
+        packed_ordered_cache's to_memory_config. The K/V page writer (QWEN_FAST_KV_PAGE_WRITER=1, in the candidate's env) was attached to the octo block's warm forward and declined in the
+        captured one, so the capture launched the chained writer's programs that no eager forward had run. The warm forward and the capture of the octo block are built the way the model
+        builds them, under the candidate's and the audited twin's env, behind the capture rules (test_fusion_capture_rules.octo_kv_lifecycle)."""
+        from test_fusion_capture_rules import octo_kv_lifecycle
+        import kv_page_writer_tp4 as kvpw
+
+        for name in (SHIP, AUDIT, NOGRID13):
+            for source in ('dram', 'l1'):
+                with self.subTest(profile=name, source=source):
+                    found = octo_kv_lifecycle(name, source=source)
+                    self.assertEqual(found.clean(), [])
+                    self.assertIsNone(found.escaped)
+                    self.assertIsNone(found.warm.page)
+                    self.assertIsNone(found.captured.page)
+                    self.assertEqual(PROFILES[name]['env']['QWEN_FAST_KV_PAGE_WRITER'], '1')
+                    self.assertEqual(len([line for line in found.lines if kvpw.OCTO_SERVED in line]), 1)
+
+
 class TwinTests(unittest.TestCase):
     def test_the_twins_are_gate_only_generated_and_exempt(self):
         self.assertEqual(twins.twin_names(), (AUDIT, NOGRID13))
