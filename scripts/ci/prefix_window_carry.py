@@ -90,6 +90,11 @@ def export(operations, mesh, outputs, position, boundary):
         shape = tuple(tap.shape)
         if len(shape) != 4 or shape[2] != min(position, CHUNK):
             raise ValueError('a complete window output has %d rows, not %r' % (min(position, CHUNK), shape))
+        if rows == shape[2]:
+            # A prompt that ends on the boundary carries its whole window: read the output itself (a full-range slice may be the
+            # same buffer, which must not be released under the capture).
+            payload.append(operations.to_torch(tap, mesh_composer=composer).contiguous())
+            continue
         piece = operations.slice(tap, (0, 0, 0, 0), (shape[0], shape[1], rows, shape[3]))
         try:
             payload.append(operations.to_torch(piece, mesh_composer=composer).contiguous())

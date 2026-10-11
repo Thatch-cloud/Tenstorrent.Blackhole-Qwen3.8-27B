@@ -494,6 +494,15 @@ class WindowTests(unittest.TestCase):
                 self.assertTrue(all(any(tensor is gone for gone in ops.deallocated) for tensor in uploaded))
         first.close()
 
+    def test_a_prompt_on_the_boundary_exports_its_whole_window_without_releasing_it(self):
+        ops = Ops()
+        capture = self.prefill(ops, 8192)
+        outputs = capture.outputs()
+        start, payload, _, _ = carry_module.export(ops, 'mesh', outputs, 8192, 8192)
+        self.assertEqual((start, payload[0].shape[2]), (6144, CHUNK))
+        self.assertFalse(any(any(tensor is gone for gone in ops.deallocated) for tensor in outputs), 'the window outputs stay alive')
+        capture.close()
+
     def test_the_ledger_counts_exactly_the_carried_rows(self):
         stored = prefix_registry.Window(6952, 8192, [torch.zeros(CHIPS, 1, 1240, WIDTH, dtype=torch.bfloat16)], 1)
         carried = carry_module.Carried(stored, 10100, 8192)

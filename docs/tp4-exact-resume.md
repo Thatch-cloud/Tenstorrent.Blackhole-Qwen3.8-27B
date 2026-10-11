@@ -377,7 +377,7 @@ qualification, then gates; about 6-8 h). P2 needs at least three.
 
 ## 6. As built (2026-10-11): Phase 0 and P0
 
-Nothing in this section has run on a card. The CPU proofs are `test_exact_resume` (30 tests) and `test_tp4_split_probe`
+Nothing in this section has run on a card. The CPU proofs are `test_exact_resume` (32 tests) and `test_tp4_split_probe`
 (17 tests); the card pack is `scripts/ci/references/fusion-jobs/ER` (ORDER.txt there).
 
 ### 6.1 P0 switches (default off, gate-only: `serving_c2_contract.exact_resume_problems`)
