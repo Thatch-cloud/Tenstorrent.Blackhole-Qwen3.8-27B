@@ -1552,11 +1552,9 @@ class PackedVerifierEngine:
         replay and written by nothing inside it); and no T16 gate (it pins rows == 16)."""
         pack = build_pack([participant(placeholder, self.rows_per_user, 0, self.checkpoints[user], self.carries[user])
                            for user, placeholder in enumerate(placeholders)], block_rows=self.block_rows)
-        # (the block's own layout for the K/V writers built here, warm fixture and captured one alike: packed_ordered_cache.block_layout)
-        import packed_ordered_cache
-
+        # (the block's own layout for the K/V writers built here, warm fixture and captured one alike: verify_trace_t2.block_layout)
         layout = pack['segments'] if isinstance(pack, dict) and 'segments' in pack else None       # (a stand-in pack without segments, as some tests build, has no layout to give)
-        with packed_ordered_cache.block_layout(layout):
+        with verify_trace_t2.block_layout(layout):
             return ModelBatch(self.model, [1] * self.block_rows, self.capture_position, placeholders[0].pages, self.helpers,
                 self.checkpoints[0], self.block_rows, pack=pack,
                 # S2: the extent readers over the pool's full-width tables and cur_pos words, else today's.

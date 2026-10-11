@@ -40,27 +40,9 @@ The descriptors are rebuilt on every call, exactly as ordered_cache.update does,
 program-cache behaviour is the served one.
 """
 
-import contextlib
 import os
 
 import tp_shapes
-
-_LAYOUT = [None]                 # the spans of the block whose fixtures are being built (block_layout), None outside packed_verifier.build_fixture
-
-
-@contextlib.contextmanager
-def block_layout(spans):
-    """The block's OWN users' spans for the writers built inside (packed_verifier.build_fixture, for the warm fixture and the captured one alike). The warm fixture's writer chains every row
-    (model_batch.chained_writer_options(single_chain=True): its placeholders write one tile row), so its `spans` are one span of 64 rows whatever the block is; the writer decides what kind of
-    block it serves (kv_page_writer_tp4.attach: the octo block keeps the chained writer) from this layout instead, so the warm forward and the captured one take the same writer and the
-    capture launches only programs the warm forward ran (card run 38117538847). model_batch.py is not edited for it: the serving-bundle pin (test_quad_draft) keeps that file as it was."""
-    previous = _LAYOUT[0]
-    _LAYOUT[0] = previous if spans is None else tuple((int(first), int(last)) for first, last in spans)
-    try:
-        yield
-    finally:
-        _LAYOUT[0] = previous
-
 
 KV_HEADS, KV_WIDTH = 32, 256
 TILE_ROWS = 32
@@ -337,8 +319,10 @@ class ChainedOrderedCacheWriter:
         if any(os.environ.get(name) is not None for name in PAGE_WRITER_FLAGS):
             import kv_page_writer_tp4
 
+            from verify_trace_t2 import layout as block_layout
+
             self.page = kv_page_writer_tp4.attach(mesh, operations, kernels, positions=positions, pages=pages, spans=self.spans,
-                                                  launch_rows=launch_rows, layout_spans=layout_spans if layout_spans is not None else _LAYOUT[0])
+                                                  launch_rows=launch_rows, layout_spans=layout_spans if layout_spans is not None else block_layout())
 
     def serve_shadow(self, cache, packed, positions, pages):
         """The served chained write of this writer's spans onto another cache: the page writer's audit runs it on its shadow cache."""

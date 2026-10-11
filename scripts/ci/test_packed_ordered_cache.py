@@ -311,24 +311,34 @@ class WriterTests(unittest.TestCase):
 
 class BlockLayoutTests(unittest.TestCase):
     """Card run 38117538847: the warm fixture's writer chains every row (one span of 64 rows), so the writer cannot tell the block's kind from its spans. packed_verifier.build_fixture
-    builds both fixtures inside block_layout(the block's segments); the writer reads it (kv_page_writer_tp4.attach)."""
+    builds both fixtures inside verify_trace_t2.block_layout(the block's segments); the writer reads it (kv_page_writer_tp4.attach)."""
 
     def test_the_layout_is_set_for_the_writers_built_inside_and_restored_after(self):
-        self.assertIsNone(poc._LAYOUT[0])
-        with poc.block_layout([[0, 16], [16, 32]]):
-            self.assertEqual(poc._LAYOUT[0], ((0, 16), (16, 32)))
-            with poc.block_layout(((0, 8),)):
-                self.assertEqual(poc._LAYOUT[0], ((0, 8),))
-            self.assertEqual(poc._LAYOUT[0], ((0, 16), (16, 32)))
-        self.assertIsNone(poc._LAYOUT[0])
-        with poc.block_layout(None):
-            self.assertIsNone(poc._LAYOUT[0])
+        import verify_trace_t2 as t2
+
+        self.assertIsNone(t2.layout())
+        with t2.block_layout([[0, 16], [16, 32]]):
+            self.assertEqual(t2.layout(), ((0, 16), (16, 32)))
+            with t2.block_layout(((0, 8),)):
+                self.assertEqual(t2.layout(), ((0, 8),))
+            self.assertEqual(t2.layout(), ((0, 16), (16, 32)))
+        self.assertIsNone(t2.layout())
+        with t2.block_layout(None):
+            self.assertIsNone(t2.layout())
         try:
-            with poc.block_layout(((0, 8),)):
+            with t2.block_layout(((0, 8),)):
                 raise RuntimeError('a failing fixture build')
         except RuntimeError:
             pass
-        self.assertIsNone(poc._LAYOUT[0])
+        self.assertIsNone(t2.layout())
+
+    def test_the_chained_writer_hands_the_layout_to_the_page_writer_decision(self):
+        # (the end-to-end build is test_fusion_capture_rules.KVPageTests; here the wiring is read from the source)
+        import inspect
+
+        source = inspect.getsource(poc.ChainedOrderedCacheWriter.__init__)
+        self.assertIn('layout_spans=layout_spans if layout_spans is not None else block_layout()', source)
+        self.assertIn('from verify_trace_t2 import layout as block_layout', source)
 
     def test_packed_verifier_builds_both_fixtures_inside_the_blocks_layout_and_model_batch_is_untouched(self):
         import inspect
@@ -336,11 +346,13 @@ class BlockLayoutTests(unittest.TestCase):
         import packed_verifier
 
         source = inspect.getsource(packed_verifier.PackedVerifierEngine.build_fixture)
-        self.assertIn("with packed_ordered_cache.block_layout(layout):", source)
+        self.assertIn("with verify_trace_t2.block_layout(layout):", source)
         self.assertIn("layout = pack['segments'] if isinstance(pack, dict) and 'segments' in pack else None", source)
         self.assertLess(source.index('block_layout(layout)'), source.index('return ModelBatch('))
         model_batch = Path(poc.__file__).with_name('model_batch.py').read_text(encoding='utf-8')
         self.assertNotIn('layout_spans', model_batch, 'the serving-bundle pin (test_quad_draft) keeps model_batch.py as it was')
+        self.assertNotIn('packed_ordered_cache.', source, 'test_tp4_packed_prefix_audit: no lever module names a K/V pool write call')
+
 
 if __name__ == '__main__':
     unittest.main()

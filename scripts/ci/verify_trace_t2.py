@@ -82,6 +82,33 @@ RUNTIME_FILES = ('verify_trace_t2.py', 'gdn_conv_windows_packed.py', 'gdn_conv_w
 _COUNTS = {}
 _LOGGED = set()
 _AUDIT = dict(rounds=0)
+_LAYOUT = [None]                 # the spans of the block whose fixtures are being built (block_layout), None outside packed_verifier.build_fixture
+
+
+class block_layout(object):
+    """The block's OWN users' spans for the K/V writers built inside (packed_verifier.build_fixture, the warm fixture and the captured one alike); None leaves the layout as it was. The warm
+    fixture's writer chains every row (model_batch.chained_writer_options(single_chain=True): its placeholders write one tile row), so its `spans` are one span of 64 rows whatever the block
+    is; the writer decides what kind of block it serves (kv_page_writer_tp4.attach: the octo block keeps the chained writer) from this layout instead, so the warm forward and the captured
+    one take the same writer and the capture launches only programs the warm forward ran (card run 38117538847). model_batch.py is not edited for it: the serving-bundle pin
+    (test_quad_draft) keeps that file as it was. (A class, not contextlib: this module imports only os.)"""
+
+    def __init__(self, spans):
+        self.spans = spans
+
+    def __enter__(self):
+        self.previous = _LAYOUT[0]
+        if self.spans is not None:
+            _LAYOUT[0] = tuple((int(first), int(last)) for first, last in self.spans)
+        return self
+
+    def __exit__(self, *exc):
+        _LAYOUT[0] = self.previous
+        return False
+
+
+def layout():
+    """The block layout set by block_layout, or None."""
+    return _LAYOUT[0]
 
 
 def enabled():
