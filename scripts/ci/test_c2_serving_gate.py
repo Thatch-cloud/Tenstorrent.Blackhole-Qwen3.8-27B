@@ -139,6 +139,8 @@ import make_fusion_profiles as _fusion_twins  # noqa: E402
 PARKED_TWINS = PARKED_TWINS | frozenset(_fusion_twins.twin_names()) | frozenset(_fusion_twins.ship_names())     # (and the op-fusion programme's twins, test_fusion_wp)
 import make_octo3_profiles as _octo3_twins  # noqa: E402
 PARKED_TWINS = PARKED_TWINS | frozenset(_octo3_twins.twin_names())     # (and tp4/octo-3's octo twins of the fused stack, test_octo3_profiles)
+import make_ship4_profiles as _ship4_twins  # noqa: E402
+PARKED_TWINS = PARKED_TWINS | frozenset(_ship4_twins.twin_names())     # (and tp4/ship-4's twins of the combined candidate, test_ship4_profiles)
 import make_upload_profiles as _upload_twins  # noqa: E402
 PARKED_TWINS = PARKED_TWINS | frozenset(_upload_twins.twin_names())     # (and the engine-start upload twins, test_upload_p0_profiles)
 

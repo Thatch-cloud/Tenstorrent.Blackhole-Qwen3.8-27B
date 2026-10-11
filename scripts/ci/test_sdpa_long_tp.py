@@ -220,9 +220,10 @@ class SmokeAndProfileTests(unittest.TestCase):
         from make_prefix_tier_profiles import twin_names as tier_twins
         from make_upload_profiles import twin_names as upload_twins      # (and the engine-start upload twins of the ship profile: test_upload_p0_profiles)
         from make_octo3_profiles import twin_names as octo3_twin_names      # (and tp4/octo-3's octo twins of the combined arm: test_octo3_profiles)
+        from make_ship4_profiles import twin_names as ship4_twin_names      # (and tp4/ship-4's: test_ship4_profiles)
         from test_tp4_w2ln_profiles import MULTI as WINDOW_MULTI, SHIPPED
         allowed = {self.TWIN, 'c2-packed-tp4-8x262k-best-sdpamulti', 'c2-packed-tp4-8x262k-best-sdpamulti-audit',
-                   'c2-packed-tp4-8x262k-w2', 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1', 'c2-packed-tp4-8x262k-w2-nof1-audit'} | set(WINDOW_MULTI) | set(kill_twins()) | set(upload_twins()) | set(fusion_twin_names()) | set(octo3_twin_names()) | set(tier_twins())
+                   'c2-packed-tp4-8x262k-w2', 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1', 'c2-packed-tp4-8x262k-w2-nof1-audit'} | set(WINDOW_MULTI) | set(kill_twins()) | set(upload_twins()) | set(fusion_twin_names()) | set(octo3_twin_names()) | set(ship4_twin_names()) | set(tier_twins())
         for name, body in self.PROFILES.items():
             if name in SHIPPED:
                 self.assertEqual(body['owner_traffic_waiver']['levers'].get(FLAG), body['env'].get(FLAG), name)

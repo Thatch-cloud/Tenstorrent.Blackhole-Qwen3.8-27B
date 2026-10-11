@@ -107,7 +107,7 @@ class ProfileTests(unittest.TestCase):
                 self.assertEqual(waiver['id'], PROFILES[name]['env'][contract.OCTO_WAIVER_ENV])
                 self.assertNotEqual(waiver['id'], PROFILES[FUSION_SHIP][contract.TRAFFIC_WAIVER]['id'])
                 self.assertGreaterEqual(len(waiver['evidence']), 5)
-        self.assertEqual(sorted(name for name, body in PROFILES.items() if contract.TRAFFIC_WAIVER in body), sorted(list(fusion.ship_names()) + [fusion.PARENT]))
+        self.assertEqual(sorted(name for name, body in PROFILES.items() if contract.TRAFFIC_WAIVER in body), sorted(list(fusion.ship_names()) + [fusion.PARENT] + list(__import__('make_prefix_tier_profiles').ship_names())))
 
     def test_the_waiver_says_what_the_levers_are_outside_of_and_what_would_record_them_instead(self):
         text = PROFILES[SHIP][contract.TRAFFIC_WAIVER]['waives']

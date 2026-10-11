@@ -288,6 +288,8 @@ jobs:
           python -B -m unittest test_audit_sampling test_octo3_contract test_octo3_profiles test_octo3_judge test_octo3_pack test_octo3_ship
           # RB
           python -B -m unittest test_tap_window_aligned
+          # S4
+          python -B -m unittest test_ship4_profiles test_ship4_pack
           # TEL
           python -B -m unittest test_card_telemetry
           # TW

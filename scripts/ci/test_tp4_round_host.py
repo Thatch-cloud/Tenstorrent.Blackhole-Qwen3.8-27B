@@ -1199,6 +1199,10 @@ class ProfileTests(unittest.TestCase):
         # tp4/octo-3: the octo twins of the combined arms (-fx-all-octo3*, -fx-all-oneq-grid13-octo3*) are those arms plus the octo env, so they carry the four levers (and the audit flag on the audited twins)
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in data['profiles']
                          if name in twins_octo3.twin_names()})
+        # tp4/ship-4: the combined candidate's twins are the octo-3 audited twin / the candidate plus their own env (test_ship4_profiles), so they carry the four levers (and the audit flag on the audited twin)
+        import make_ship4_profiles as twins_ship4
+
+        combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_ship4.twin_names()})
         for name, profile in data['profiles'].items():
             if name in self.ADDED:
                 continue

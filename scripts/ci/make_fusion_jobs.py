@@ -263,6 +263,8 @@ SHIP_IMAGE = 'tp4-ship-2'
 
 def ship_folder(spec):
     """The folder of one ship spec's pack: `ship` for the first ship candidate, `ship-<name>` for one built on it (a ship entry with extra env: its own image, its own gates)."""
+    if spec.get('pack'):
+        return spec['pack']
     return SHIP_FOLDER if not spec.get('env') else '%s-%s' % (SHIP_FOLDER, spec['name'])
 
 
@@ -338,6 +340,13 @@ def ship_rows(plan, spec):
                   "alias before and after the restart, and no kill-switch line (no levern.off, prefix-reuse.off or parked.off left on the hub). PASS: 'PLATFORM_REPLAY passed=True'. The replay turns the "
                   "session cap off; the cap is read live after the deploy. The replay step has no telemetry sidecar. Measured basis: 25 minutes.%s" % (ship, note))),
     ]
+
+
+def shipped_spec(plan, ship):
+    """The ship entry with the flags its profile sets over the production profile (env_flags: the combined arm's levers and the entry's own env), the spec ship_rows reads."""
+    by_id = dict((lever['id'], lever) for lever in plan['levers'])
+    combined = dict((spec['name'], spec) for spec in plan.get('combined', ()))
+    return dict(ship, env_flags=sorted(by_id[ident]['flag'] for ident in combined[ship['source']]['levers']) + sorted(ship['env']))
 
 
 def render_ship_env(row, image=SHIP_IMAGE):
@@ -470,8 +479,9 @@ def render_order(rows, plan, folder=FOLDER):
         lines.insert(-1, "# THE COMBINED PACK (references/fusion-jobs/%s: %s%s, the levers %s on together; its own ORDER.txt) runs FIRST; this ORDER is the ablation, for the levers of a combination that fails." % (
             COMBINED_FOLDER, fusion.NAMESPACE, spec['name'], ', '.join(spec['levers'])))
     for ship in plan.get('ship', ()):
-        lines.insert(-1, "# THE SHIP PACK (references/fusion-jobs/%s: B0 G1 GX0 GX1 G2 SR for the traffic profile %s%s under the owner traffic waiver %s, PENDING until the owner approves; its own ORDER.txt) runs AFTER the combined "
-                         "window passes, not before it." % (ship_folder(ship), fusion.NAMESPACE, ship['name'], ship['waiver']['id']))
+        lines.insert(-1, "# THE SHIP PACK (references/fusion-jobs/%s: %s for the traffic profile %s%s under the owner traffic waiver %s, PENDING until the owner approves; its own ORDER.txt) runs AFTER the combined "
+                         "window passes, not before it." % (ship_folder(ship), ('the gates, the audited attach and the timed windows, generated whole by its own script' if ship.get('pack') else 'B0 G1 GX0 GX1 G2 SR'),
+                                                            fusion.NAMESPACE, ship['name'], ship['waiver']['id']))
     for item in plan.get('pack_include', ()):
         lines.insert(-1, "# FOLDED IN: %s* are the templates of references/%s (%s), renamed and on the one image; their read and decision rules are that folder's ORDER.txt. %s" % (
             item['prefix'], item['folder'], item['wp'], ' '.join(item['reason'].split())))
@@ -506,10 +516,10 @@ def generate(plan, folder=FOLDER):
         for row in mini:
             out['%s/%s.env' % (COMBINED_FOLDER, row['name'])] = render_env(row)
         out['%s/ORDER.txt' % COMBINED_FOLDER] = render_combined_order(mini, plan, spec)
-    by_id = dict((lever['id'], lever) for lever in plan['levers'])
-    combined = dict((spec['name'], spec) for spec in plan.get('combined', ()))
     for ship in plan.get('ship', ()):
-        shipped = dict(ship, env_flags=sorted(by_id[ident]['flag'] for ident in combined[ship['source']]['levers']) + sorted(ship['env']))
+        if ship.get('pack'):
+            continue                                    # another generator owns that folder whole (make_ship4_jobs.py)
+        shipped = shipped_spec(plan, ship)
         mini = ship_rows(plan, shipped)
         for row in mini:
             out['%s/%s.env' % (ship_folder(ship), row['name'])] = render_ship_env(row, ship_image(ship))
@@ -521,7 +531,7 @@ def stale(folder, wanted):
     """[file names] that differ from `wanted` or are not in it (the pack's own files and the combined/ sub-folder, which the generator owns whole)."""
     found = dict((path.name, path.read_text(encoding='utf-8')) for path in Path(folder).glob('*') if path.is_file())
     found.update(('%s/%s' % (COMBINED_FOLDER, path.name), path.read_text(encoding='utf-8')) for path in (Path(folder) / COMBINED_FOLDER).glob('*') if path.is_file())
-    for ship_dir in sorted(path for path in Path(folder).glob('%s*' % SHIP_FOLDER) if path.is_dir()):
+    for ship_dir in sorted(path for path in Path(folder).glob('%s*' % SHIP_FOLDER) if path.is_dir() and (path.name == SHIP_FOLDER or path.name.startswith(SHIP_FOLDER + '-'))):
         found.update(('%s/%s' % (ship_dir.name, path.name), path.read_text(encoding='utf-8')) for path in ship_dir.glob('*') if path.is_file())
     names = sorted(set(found) | set(wanted))
     return [name for name in names if found.get(name) != wanted.get(name)]
