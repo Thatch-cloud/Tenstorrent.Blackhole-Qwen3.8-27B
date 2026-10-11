@@ -320,6 +320,21 @@ class RequalificationTemplatesTests(unittest.TestCase):
                 self.assertEqual(minutes[new], order[old], new)
 
 
+def admit_boot(environ, max_position=None):
+    """admit() as a four-card boot with `environ` over the extent environment, the runtime check answering for the binary named in it: -> (record, log lines). A traffic
+    boot has no QWEN_C2_GATE; the E1 record and the 262k window are whatever the checkout holds unless the caller patches page_width_tp4."""
+    env = {admission.FLAG: '1', 'QWEN_FAST_ANY_REQUEST': '1', 'QWEN_FAST_REPLAY_GROUP_ROWS': '8', 'QWEN_SDPA_TREE_SCRATCH_ROUNDS': '1', 'QWEN_FAST_SDPA_MODES': 'tail,share',
+           'QWEN_FAST_TP': '4'}
+    env.update(environ)
+    if max_position:
+        env['QWEN_FAST_MAX_POSITION'] = str(max_position)
+    lines = Lines()
+    with mock.patch.dict(admission._STATE, clear=True), mock.patch.object(
+            admission, 'check_runtime', lambda root, binaries=None, served=None: dict(binaries={'a': served or K64J, 'b': served or K64J}, kernels={}, literals=[])):
+        record = admission.admit('/opt/tt-metal', m3=M3, environ=env, log=lines)
+    return record, lines
+
+
 def landed_files(directory):
     """The state after the records land: the committed K64j records copied with their binary reset to K64j-OQ, in `directory`, and the constants that name them."""
     paths = {}
@@ -426,16 +441,7 @@ class OwnRecordTests(unittest.TestCase):
         self.assertIn('not the reviewed', str(caught.exception))
 
     def admit(self, environ, max_position=None):
-        env = {admission.FLAG: '1', 'QWEN_FAST_ANY_REQUEST': '1', 'QWEN_FAST_REPLAY_GROUP_ROWS': '8', 'QWEN_SDPA_TREE_SCRATCH_ROUNDS': '1', 'QWEN_FAST_SDPA_MODES': 'tail,share',
-               'QWEN_FAST_TP': '4'}
-        env.update(environ)
-        if max_position:
-            env['QWEN_FAST_MAX_POSITION'] = str(max_position)
-        lines = Lines()
-        with mock.patch.dict(admission._STATE, clear=True), mock.patch.object(
-                admission, 'check_runtime', lambda root, binaries=None, served=None: dict(binaries={'a': served or K64J, 'b': served or K64J}, kernels={}, literals=[])):
-            record = admission.admit('/opt/tt-metal', m3=M3, environ=env, log=lines)
-        return record, lines
+        return admit_boot(environ, max_position)
 
     def test_the_admit_of_a_traffic_boot_passes_on_the_own_record_logs_its_pin_and_needs_no_equivalence(self):
         self.land(admission.CAPACITY_131K)
@@ -562,6 +568,59 @@ class RecorderTests(unittest.TestCase):
             differing = [(a, b) for a, b in zip(old_lines, new_lines) if a != b]
             self.assertEqual(len(old_lines), len(new_lines))
             self.assertEqual(differing, [('%s = None' % name, "%s = '%s'" % (name, 'ab' * 32))])
+
+
+@unittest.skipUnless(LANDED, 'the K64j-OQ records have not landed in this checkout')
+class TrafficBootOnTheCommittedRecordsTests(unittest.TestCase):
+    """With the RQ records landed, a TRAFFIC boot on K64j-OQ passes the admission on the committed files at their committed pins: no patch of a constant, no gate switch, no
+    equivalence, the real E1 record. The same boots on K64j still pass on K64j's records."""
+
+    def test_a_traffic_boot_on_k64j_oq_is_admitted_at_131k_on_its_own_record(self):
+        record, lines = admit_boot({ENV: OQ})
+        self.assertNotIn('binary_equivalence', record, 'its own record, not K64j\'s by the gate-boot equivalence')
+        self.assertEqual(record['evidence']['binary']['ttnncpp_sha256'], OQ)
+        self.assertEqual(len(lines), 1)
+        self.assertIn('packed-any admission passed: K64j-OQ %s x2' % OQ[:16], lines[0])
+        self.assertIn('evidence %s' % admission.EVIDENCE_TP4_K64J_OQ_SHA256[:16], lines[0])
+        self.assertEqual(hashlib.sha256(admission.EVIDENCE_TP4_K64J_OQ.read_bytes()).hexdigest(), admission.EVIDENCE_TP4_K64J_OQ_SHA256)
+
+    def test_a_traffic_boot_on_k64j_oq_is_admitted_at_262k_on_its_own_record_and_the_real_e1(self):
+        record, lines = admit_boot({ENV: OQ}, max_position=262144)
+        self.assertEqual(record['capacity'], 262144)
+        self.assertNotIn('binary_equivalence', record)
+        self.assertEqual(record['evidence']['binary']['ttnncpp_sha256'], OQ)
+        self.assertEqual(record['evidence']['capacity'], 262144)
+        self.assertEqual(len(lines), 1)
+        self.assertIn('packed-any admission passed: K64j-OQ %s x2' % OQ[:16], lines[0])
+        self.assertIn('evidence %s' % admission.EVIDENCE_TP4_262K_K64J_OQ_SHA256[:16], lines[0])
+        self.assertTrue(lines[0].endswith(' capacity=262144'), lines[0])
+        self.assertEqual(hashlib.sha256(admission.EVIDENCE_TP4_262K_K64J_OQ.read_bytes()).hexdigest(), admission.EVIDENCE_TP4_262K_K64J_OQ_SHA256)
+
+    def test_the_guard_of_every_other_four_card_process_admits_it_too(self):
+        for max_position in (None, 262144):
+            env = {'QWEN_FAST_TP': '4', ENV: OQ}
+            if max_position:
+                env['QWEN_FAST_MAX_POSITION'] = str(max_position)
+            with self.subTest(max_position=max_position):
+                self.assertEqual(admission.tp_guard(env, log=Lines(), sources_root=str(HERE)), [])
+
+    def test_a_gate_boot_on_k64j_oq_reads_the_same_own_record(self):
+        record, lines = admit_boot(dict(GATE, **{ENV: OQ}), max_position=262144)
+        self.assertNotIn('binary_equivalence', record)
+        self.assertEqual(record['evidence']['binary']['ttnncpp_sha256'], OQ)
+
+    def test_k64j_still_serves_traffic_on_its_own_records_at_both_capacities(self):
+        for max_position, pin in ((None, admission.EVIDENCE_TP4_SHA256), (262144, admission.EVIDENCE_TP4_262K_SHA256)):
+            with self.subTest(max_position=max_position):
+                record, lines = admit_boot({ENV: K64J}, max_position=max_position)
+                self.assertEqual(record['evidence']['binary']['ttnncpp_sha256'], K64J)
+                self.assertIn('packed-any admission passed: K64j %s x2' % K64J[:16], lines[0])
+                self.assertIn('evidence %s' % pin[:16], lines[0])
+
+    def test_a_binary_that_is_neither_is_still_refused_by_name(self):
+        with self.assertRaises(admission.AdmissionRefused) as caught:
+            admit_boot({ENV: 'a' * 64})
+        self.assertIn("not K64j's %s or K64j-OQ's %s" % (K64J[:16], OQ[:16]), str(caught.exception))
 
 
 class LandingTests(unittest.TestCase):

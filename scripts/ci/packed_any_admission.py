@@ -225,9 +225,9 @@ EVIDENCE_TP4_262K_SHA256 = '422bfbaa03d1615b1a42d22ca566138b2c1929fc2ed917ba8adc
 # process uses its own record for a capacity when that capacity's pin is set (own_record), strictly; without one it falls back to K64j's record, which qualifies it in a gate
 # boot only (equivalent). The 8x262k traffic boot needs BOTH of its own records: tp_guard reads the 131,328 one in every process, the window check the 262,144 one.
 EVIDENCE_TP4_K64J_OQ = HERE / 'packed_any_evidence_tp4_k64j_oq.json'
-EVIDENCE_TP4_K64J_OQ_SHA256 = None
+EVIDENCE_TP4_K64J_OQ_SHA256 = '4eb798279b6d7f232084b4835de8c7376b67c2eaf9c5782780974ae96e53feea'
 EVIDENCE_TP4_262K_K64J_OQ = HERE / 'packed_any_evidence_tp4_262144_k64j_oq.json'
-EVIDENCE_TP4_262K_K64J_OQ_SHA256 = None
+EVIDENCE_TP4_262K_K64J_OQ_SHA256 = 'c8a7251d6c680c88291293abbd79fa2ba36815c3eea23c5da1321824a5ddd95c'
 
 _STATE = {}
 
