@@ -18,6 +18,13 @@ Groups:
   QWEN_VLLM_SOURCE naming the pinned vLLM 0.25.1 sdist tree through its stubs; with neither they are skipped. They
   need `tokenizers` and `pydantic`. The tokenizer is a byte-level BPE built here (one token per byte, the real ids of
   the 33 added tokens), so any text can be streamed one token at a time.
+
+Order independence. The image runs many test modules in ONE unittest process, so by the time these run, another module may
+have imported vllm.parser.qwen3, armed this fix (its import hook fires, or it installs at once on an imported module) or
+left an ImportHook in sys.meta_path. Every test therefore sets up the state it needs and restores what it found: the
+Arm/Boot tests strip the leftover ImportHooks and choose the module's starting state (not imported, imported and stock,
+imported and already patched) explicitly, and EngineTests reads the converter it finds, takes the stock one out of it
+(fix.uninstall) and puts the found one back when the class is done.
 """
 
 import ast
@@ -57,6 +64,36 @@ def live_lines(run):
     finally:
         fix._LOGGED.add('live')
     return [line for line in err.getvalue().splitlines() if 'toolcall whitespace: live' in line]
+
+
+def own_hooks():
+    """The ImportHooks of this fix that sys.meta_path holds right now."""
+    return [hook for hook in sys.meta_path if isinstance(hook, fix.ImportHook)]
+
+
+_ABSENT = object()
+
+
+def isolate_import_state(imported=None):
+    """Start from a known import state whatever ran before in this process, and return the function that puts the process
+    back: no ImportHook of this fix in sys.meta_path (an earlier module's boot may have left one), and sys.modules[MODULE]
+    absent (imported=None: the module is not imported yet, so arming registers the hook) or `imported` (a module that is
+    already imported: arming installs at once). Only that one sys.modules entry and the meta_path list are touched."""
+    meta_path, present = list(sys.meta_path), sys.modules.get(fix.MODULE, _ABSENT)
+
+    def restore():
+        sys.meta_path[:] = meta_path
+        if present is _ABSENT:
+            sys.modules.pop(fix.MODULE, None)
+        else:
+            sys.modules[fix.MODULE] = present
+
+    sys.meta_path[:] = [hook for hook in meta_path if not isinstance(hook, fix.ImportHook)]
+    if imported is None:
+        sys.modules.pop(fix.MODULE, None)
+    else:
+        sys.modules[fix.MODULE] = imported
+    return restore
 
 
 # ------------------------------------------------------------------ the template and the stock converter
@@ -355,9 +392,11 @@ class ArmTests(unittest.TestCase):
     def setUp(self):
         self.saved = list(sys.meta_path)
         self.addCleanup(lambda: sys.meta_path.__setitem__(slice(None), self.saved))
+        # a hook an earlier module (the image runs them in one process) left in sys.meta_path is not this test's
+        sys.meta_path[:] = [hook for hook in self.saved if not isinstance(hook, fix.ImportHook)]
 
     def hooks(self):
-        return [hook for hook in sys.meta_path if isinstance(hook, fix.ImportHook)]
+        return own_hooks()
 
     def test_enabled_is_on_unless_the_environment_or_the_profile_says_otherwise(self):
         for profile, environ, expected in [({}, {}, True), ({}, {'QWEN_C2_TOOLCALL_WS': ''}, True),
@@ -470,8 +509,12 @@ class SmokeTests(unittest.TestCase):
 class BootTests(unittest.TestCase):
     """serving_c2_contract.boot arms the fix in the vLLM API server, under every profile."""
 
-    def boot(self, name, environ=None, orig_argv=None, profile_patch=None):
+    def boot(self, name, environ=None, orig_argv=None, profile_patch=None, imported=None):
+        """Boot under profile `name` and return (the ImportHooks it registered, its stderr). The process starts with
+        vllm.parser.qwen3 not imported (imported=None) or already imported as the module `imported`, and without any
+        ImportHook of this fix, whatever ran before in the process; all of it is put back afterwards."""
         orig_argv = orig_argv or ['python3', '-m', contract.API_SERVER, '--port', '8000']
+        restore_import_state = isolate_import_state(imported)
         saved = list(sys.meta_path), list(sys.path), list(sys.argv)
         err = io.StringIO()
         try:
@@ -486,12 +529,13 @@ class BootTests(unittest.TestCase):
             try:
                 sys.argv[:] = ['-m', '--port', '8000']
                 contract.boot(environ=dict({'QWEN_C2_SERVING': '1', 'QWEN_C2_PROFILES': PROFILES}, **(environ or {})), orig_argv=orig_argv)
-                hooks = [hook for hook in sys.meta_path if isinstance(hook, fix.ImportHook)]
+                hooks = own_hooks()
             finally:
                 for patch in reversed(patches):
                     patch.stop()
         finally:
             sys.meta_path[:], sys.path[:], sys.argv[:] = saved
+            restore_import_state()
         return hooks, err.getvalue()
 
     def test_every_profile_family_arms_it_by_default(self):
@@ -503,6 +547,42 @@ class BootTests(unittest.TestCase):
                 hooks, err = self.boot(name)
                 self.assertEqual([hook.name for hook in hooks], [fix.MODULE])
                 self.assertIn('[QWEN-C2] profile %s: toolcall whitespace armed: vllm.parser.qwen3._qwen3_arg_converter' % name, err)
+
+    def test_every_profile_family_arms_it_whatever_state_the_parser_module_is_in(self):
+        # (the image runs this after other modules: vllm.parser.qwen3 may be imported by then, even patched by the installer)
+        for name in ('general', 'exact', 'coding', 'c2', 'c2-gate', 'c2-packed', 'c2-packed-gate'):
+            armed = '[QWEN-C2] profile %s: toolcall whitespace armed: vllm.parser.qwen3._qwen3_arg_converter' % name
+            installed = 'toolcall whitespace: installed on fake_vllm_parser_qwen3._qwen3_arg_converter'
+            with self.subTest(profile=name, state='imported, stock'):
+                module = fake_module()
+                hooks, err = self.boot(name, imported=module)
+                self.assertEqual(hooks, [])                                       # nothing left to hook: installed at once
+                self.assertTrue(getattr(module._qwen3_arg_converter, fix.INSTALLED))
+                self.assertIs(module.qwen3_config().arg_converter, module._qwen3_arg_converter)
+                self.assertIn(armed, err)
+                self.assertEqual(err.count(installed), 1)
+            with self.subTest(profile=name, state='imported, already patched'):
+                module = fake_module()
+                replacement = fix.install(module, lambda line: None)
+                hooks, err = self.boot(name, imported=module)
+                self.assertEqual(hooks, [])
+                self.assertIs(module._qwen3_arg_converter, replacement)           # idempotent: not wrapped twice
+                self.assertIs(replacement.__wrapped__, stock_converter)
+                self.assertIn(armed, err)
+                self.assertNotIn(installed, err)
+            with self.subTest(profile=name, state='not imported'):
+                hooks, err = self.boot(name)
+                self.assertEqual([hook.name for hook in hooks], [fix.MODULE])
+                self.assertIn(armed, err)
+
+    def test_a_hook_left_by_an_earlier_boot_does_not_change_what_this_boot_registers(self):
+        stale = fix.ImportHook(fix.MODULE, lambda module: None)
+        sys.meta_path.insert(0, stale)
+        self.addCleanup(lambda: stale in sys.meta_path and sys.meta_path.remove(stale))
+        hooks, err = self.boot('c2')
+        self.assertEqual([hook.name for hook in hooks], [fix.MODULE])
+        self.assertNotIn(stale, hooks)
+        self.assertIn(stale, sys.meta_path)                                       # and the stale one is back afterwards
 
     def test_the_environment_switch_turns_it_off(self):
         hooks, err = self.boot('c2', environ={'QWEN_C2_TOOLCALL_WS': '0'})
@@ -586,14 +666,28 @@ class EngineTests(unittest.TestCase):
             raise unittest.SkipTest('tokenizers is not installed')
         cls.tokenizer = byte_tokenizer()
         cls.module = sys.modules['vllm.parser.qwen3']
+        # The converter this process holds now: the stock one, or ours when another module of the same unittest process
+        # armed the fix (its import hook fired on the first import, or it installed on the imported module). The tests need
+        # the stock one to compare against and to install onto, and the next module the one it found.
+        found = cls.module._qwen3_arg_converter
+        cls.addClassCleanup(cls.put_back, found)
+        fix.uninstall(cls.module)
         cls.stock = staticmethod(cls.module._qwen3_arg_converter)
         if getattr(cls.stock, fix.INSTALLED, False):
-            raise AssertionError('vllm.parser.qwen3 is already patched before the tests ran')
+            raise AssertionError('vllm.parser.qwen3 holds the fix and uninstall() could not take it out')
         cls.kind = fix.probe(cls.stock)
         parser_base = cls.environment.abstract_parser.DelegatingParser
         cls.Parser = type('_Parser', (parser_base,), dict(reasoning_parser_cls=cls.environment.reasoning,
                                                            tool_parser_cls=cls.environment.tool))
         sys.stderr.write('[%s] EngineTests on %s; the stock converter is %r\n' % (__name__, cls.environment.mode, cls.kind))
+
+    @classmethod
+    def put_back(cls, converter):
+        """Leave vllm.parser.qwen3 holding `converter` (what the class found) and its cached config built from it."""
+        setattr(cls.module, fix.FUNCTION, converter)
+        config = getattr(cls.module, fix.CONFIG_FUNCTION, None)
+        if hasattr(config, 'cache_clear'):
+            config.cache_clear()
 
     def tearDown(self):
         fix.uninstall(self.module)
