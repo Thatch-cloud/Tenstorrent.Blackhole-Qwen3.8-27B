@@ -307,6 +307,88 @@ class PackTests(unittest.TestCase):
         self.assertNotIn('fusion-jobs/ship,', text.split('THE PACKAGES')[1].split('\n')[0])
 
 
+class Ship3PackTests(unittest.TestCase):
+    """references/fusion-jobs/ship3: the SAME ship profile on the image that also carries the tool-call whitespace fix (scripts/ci/fusion-wp/TW.json)."""
+    PACK3 = HERE / 'references' / 'fusion-jobs' / 'ship3'
+    NAMES = ('B0-ship3-build', 'TC-toolcall-smoke', 'SR-ship3-replay')
+
+    def values(self, name):
+        found = {}
+        for line in (self.PACK3 / (name + '.env')).read_text(encoding='utf-8').splitlines():
+            if line and not line.startswith('#'):
+                key, _sep, value = line.partition('=')
+                found[key] = value
+        return found
+
+    def test_the_pack_is_what_the_generator_makes_and_the_ship_pack_is_untouched(self):
+        wanted = jobs_gen.generate(PLAN)
+        found = {path.name: path.read_text(encoding='utf-8') for path in self.PACK3.glob('*') if path.is_file()}
+        self.assertEqual(found, {name.split('/', 1)[1]: text for name, text in wanted.items() if name.startswith('ship3/')})
+        self.assertEqual(sorted(name[:-4] for name in found if name.endswith('.env')), sorted(self.NAMES))
+        self.assertEqual(jobs_gen.stale(HERE / 'references' / 'fusion-jobs', wanted), [])
+        self.assertEqual(jobs_gen.SHIP_IMAGE, 'tp4-ship-2', 'the ship pack keeps its own image tag')
+
+    def test_every_template_parses_and_names_the_ship_3_image(self):
+        pending = PROFILES[SHIP][contract.TRAFFIC_WAIVER]['decision'].startswith('PENDING')
+        for name in self.NAMES:
+            with self.subTest(name=name):
+                result = subprocess.run([sys.executable, '-B', '-s', str(HERE / 'c2_serving_job.py'), str(self.PACK3 / (name + '.env')), str(PROFILES_PATH)],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(REPO))
+                if name == 'B0-ship3-build' and pending:
+                    self.assertEqual(result.returncode, 1)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr.decode('utf-8', 'replace'))
+                self.assertEqual(self.values(name)['C2_IMAGE_TAG'], jobs_gen.SHIP3_IMAGE)
+        self.assertEqual(jobs_gen.SHIP3_IMAGE, 'tp4-ship-3')
+
+    def test_the_build_and_the_replay_use_the_same_ship_profile_as_the_ship_pack(self):
+        self.assertEqual(self.values('B0-ship3-build')['C2_BAKE_DEFAULT_PROFILE'], pack_values('B0-ship-build')['C2_BAKE_DEFAULT_PROFILE'])
+        self.assertEqual(self.values('B0-ship3-build')['C2_BAKE_DEFAULT_PROFILE'], SHIP)
+        self.assertEqual(self.values('B0-ship3-build')['C2_ACTIONS'], 'build')
+        self.assertEqual(self.values('SR-ship3-replay')['C2_REPLAY_PROFILE'], SHIP)
+        self.assertEqual(self.values('SR-ship3-replay')['C2_PLATFORM_IMAGE'], pack_values('SR-platform-replay')['C2_PLATFORM_IMAGE'])
+        self.assertEqual(self.values('SR-ship3-replay')['C2_ACTIONS'], pack_values('SR-platform-replay')['C2_ACTIONS'])
+
+    def test_the_tool_call_smoke_runs_the_ship_profile_over_the_tool_call_tests(self):
+        smoke = self.values('TC-toolcall-smoke')
+        self.assertEqual(smoke['C2_PROFILE'], SHIP)
+        self.assertEqual(smoke['C2_ACTIONS'], 'reset smoke')
+        tests = smoke['C2_SMOKE_TESTS'].split(',')
+        for name in ('warmup', 'tool_call', 'stream_tool_call', 'stream_reasoning'):
+            self.assertIn(name, tests)
+        self.assertNotIn('concurrent8_steady', tests)
+        self.assertIn('C2_SMOKE_PARTIAL', smoke)
+        self.assertNotIn('C2_TELEMETRY', smoke)
+
+    def test_the_order_is_build_smoke_replay_with_the_dependencies_and_says_why_the_device_gates_are_not_repeated(self):
+        text = (self.PACK3 / 'ORDER.txt').read_text(encoding='utf-8')
+        rows = [line.split() for line in text.splitlines() if line and not line.startswith('#')]
+        self.assertEqual([row[0] for row in rows], list(self.NAMES))
+        self.assertEqual({row[0]: row[1] for row in rows}, {'B0-ship3-build': 'stop', 'TC-toolcall-smoke': 'stop', 'SR-ship3-replay': 'stop'})
+        self.assertEqual({row[2] for row in rows}, {jobs_gen.SHIP3_IMAGE})
+        for word in ('# NEEDS TC <- B0', '# NEEDS SR <- B0 TC', 'WHY THE SHIP PACK', 'c2_toolcall_whitespace.py', 'APPROVED'):
+            self.assertIn(word, text)
+        main = (HERE / 'references' / 'fusion-jobs' / 'ORDER.txt').read_text(encoding='utf-8')
+        self.assertIn('THE SHIP-3 PACK (references/fusion-jobs/ship3', main)
+
+    def test_the_text_is_public_safe(self):
+        for path in sorted(self.PACK3.glob('*')):
+            body = path.read_text(encoding='utf-8')
+            for word in fusion.SHIP_FORBIDDEN:
+                self.assertNotIn(word, body, (path.name, word))
+
+    def test_the_fix_reaches_the_image_and_both_cpu_workflows(self):
+        overlay = (REPO / 'docker' / 'qwen-c2-overlay.txt').read_text(encoding='utf-8').splitlines()
+        for path in ('scripts/ci/c2_toolcall_whitespace.py', 'scripts/ci/toolcall_whitespace_smoke.py', 'scripts/ci/test_c2_toolcall_whitespace.py', 'scripts/ci/serving_c2_contract.py'):
+            self.assertIn(path, overlay)
+        workflows = REPO / '.github' / 'workflows'
+        self.assertIn('python -B -m unittest test_c2_toolcall_whitespace', (workflows / 'qwen-integration-cpu.yml').read_text(encoding='utf-8'))
+        installed = (workflows / 'qwen-fast-vllm-cpu.yml').read_text(encoding='utf-8')
+        self.assertIn('python -B -m unittest -v test_c2_toolcall_whitespace', installed)
+        self.assertLess(installed.index('test_c2_parser_rechunk'), installed.index('test_c2_toolcall_whitespace'))
+        self.assertIn('toolcall_whitespace_smoke', c2_smoke_check.FUSION_RULES)
+
+
 class ReadingTests(unittest.TestCase):
     def test_parked_compare_judges_the_ship_arm_with_the_lever_band_and_the_control_with_the_production_one(self):
         calls = []

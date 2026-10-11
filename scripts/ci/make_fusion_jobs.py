@@ -325,11 +325,11 @@ def ship_rows(plan, spec):
     ]
 
 
-def render_ship_env(row):
-    lines = [SHIP_HEADER % dict(image=SHIP_IMAGE)]
+def render_ship_env(row, image=SHIP_IMAGE, header=SHIP_HEADER):
+    lines = [header % dict(image=image)]
     why = row['why'] + ((' Duration (estimate): %d minutes.' % row['minutes']) if 'Duration' not in row['why'] and 'Estimate' not in row['why'] else '')
     lines += ['# ' + piece for piece in wrap(why)]
-    lines += ['C2_CARDS=quad', 'C2_ACTIONS=%s' % row['actions'], 'C2_IMAGE_TAG=%s' % SHIP_IMAGE]
+    lines += ['C2_CARDS=quad', 'C2_ACTIONS=%s' % row['actions'], 'C2_IMAGE_TAG=%s' % image]
     if row['profile']:
         lines.append('C2_PROFILE=%s' % row['profile'])
     if row.get('bake'):
@@ -371,6 +371,87 @@ def render_ship_order(rows, plan, spec):
             ', '.join('%s %d' % (row['name'].split('-')[0], row['minutes']) for row in rows), total, total // 60, total % 60),
     ]
     lines += ['%s %s %s %d' % (row['name'], row['mode'], SHIP_IMAGE, row['minutes']) for row in rows]
+    return '\n'.join(lines) + '\n'
+
+
+# ---- the SHIP-3 pack (references/fusion-jobs/ship3): the ship image plus the tool-call whitespace fix (scripts/ci/c2_toolcall_whitespace.py), a correctness fix of the API server ----
+
+SHIP3_FOLDER = 'ship3'
+SHIP3_IMAGE = 'tp4-ship-3'
+TC_TESTS = 'warmup,coding,tool_call,stream_tool_call,stream_reasoning'
+SHIP3_MINUTES = dict(B0=35, TC=20, SR=30)
+SHIP3_HEADER = """# A committed TEMPLATE of .github/c2-serving-job.env for the SHIP-3 gates (scripts/ci/c2_serving_job.py parses it): copy it over .github/c2-serving-job.env on a throwaway commit of
+# tp4/ship-3 and push a tag experiment/c2-serving-vN. Nothing here names a rig, a card, a host or a registry: the cards are resolved at run time. Templates only: no tag is pushed from the
+# branch by its author. ORDER.txt has the order, the stop rules, the minutes and the pass rule. ONE IMAGE: C2_IMAGE_TAG=%(image)s is a PLACEHOLDER for the tag B0 builds from the pushed commit
+# (sed -i 's/%(image)s/<tag>/' *.env). The ship profile and its approved waiver are the ship pack's, byte for byte. Nothing here stops, starts or hands back the node agent."""
+
+
+def ship3_rows(plan, spec):
+    """The rows of the ship-3 pack: B0 (bake the SAME ship profile on the image that also carries the tool-call whitespace fix), TC (a short tool-call smoke of the ship profile on that image)
+    and SR (the node agent's serving sequence on the thin layer built on B0). The ship pack's device gates (G1, GX0, GX1, G2) are not repeated: the fix is host-side Python in the API server."""
+    ship = fusion.NAMESPACE + spec['name']
+    waiver = spec['waiver']
+    fix = ('ONE correctness fix and nothing else on top of the ship image: the API server swaps the argument converter of vLLM 0.25.1\'s qwen3 tool-call parser (it strip()s every <parameter=...> value, '
+           'so a written file loses its final newline and an edit loses its indentation) for the exact inverse of the chat template, which removes the one framing newline at each end and nothing else '
+           '(scripts/ci/c2_toolcall_whitespace.py; ON for every profile; QWEN_C2_TOOLCALL_WS=0 turns it off). No device code, no profile env and no token the model generates changes.')
+    return [
+        dict(name='B0-ship3-build', mode='stop', minutes=SHIP3_MINUTES['B0'], actions='build', profile=None, bake=ship, tests=None, telemetry=False, extra=[], needs=(),
+             why=("B0 (STOP): build the SHIP-3 image from the pushed tp4/ship-3 commit with %s baked as the image's serving default (ENV QWEN_C2_PROFILE) and THATCH_SERVING_SESSION_CAP baked as its max-num-seqs (8): "
+                  "the profile, its owner traffic waiver (id %s, decision APPROVED, committed) and the bake are the ship pack's. The image is the ship image plus %s HOW THE FIX REACHES THE IMAGE: "
+                  "docker/qwen-c2-overlay.txt, the ONE image list (generated from scripts/ci/fusion-wp/TW.json), names c2_toolcall_whitespace.py, toolcall_whitespace_smoke.py and test_c2_toolcall_whitespace.py "
+                  "beside serving_c2_contract.py (which arms the fix in boot() and is overlaid already); the build's in-image test run executes test_c2_toolcall_whitespace against the image's installed vLLM "
+                  "(its EngineTests class runs the real parsers). The CPU suite must be green on the tagged commit (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and the tag is pushed on THAT commit. "
+                  "READ: 'baking the serving default %s with a session cap of 8', the provenance report '(c) the image default is the BAKED profile ...', no problem line, the in-image unit test run ending OK, "
+                  "the image id. Estimate 35 minutes (the tp4-ship-1 build took 35)." % (ship, waiver['id'], fix, ship))),
+        dict(name='TC-toolcall-smoke', mode='stop', minutes=SHIP3_MINUTES['TC'], actions='reset smoke', profile=ship, tests=TC_TESTS, telemetry=False,
+             extra=['C2_SMOKE_PARTIAL=tool-call smoke: its test list is fixed by the protocol, so concurrent8_steady is not run', 'C2_BOX_MINUTES=40'], needs=('TC <- B0',),
+             why=("TC (STOP): a SHORT smoke of the ship profile %s on the SHIP-3 image: a warmup, a coding answer, the non-streaming tool_call test, the two STREAMED parser tests (stream_tool_call: tool_calls "
+                  "deltas with a JSON call and no <tool_call> marker in the content; stream_reasoning) and nothing else. The smoke ends red only by the concurrent8_steady list rule (C2_SMOKE_PARTIAL names the "
+                  "omission). READ (c2_smoke_check, every rule clean, including the fusion rule toolcall_whitespace_smoke from scripts/ci/fusion-wp/TW.json): the container log holds 'toolcall whitespace: armed' and "
+                  "'toolcall whitespace: installed on' (a 'disabled' line fails it), the profile's own engaged lines are the ship pack's, tool_call, stream_tool_call and stream_reasoning pass, the ship profile boots on 13x10 as in "
+                  "the ship pack. WHAT IT DOES NOT PROVE: neither tool-call test asks the model for an argument with edge whitespace (what the model writes is its own), so the byte-level proof is the CPU test "
+                  "against the real parsers (test_c2_toolcall_whitespace: the stock parser strips, the fixed one keeps, render, parse, render is the identity), run in CI and in the image build; this job proves the "
+                  "fix is live in the server that took the requests and that tool calls still arrive intact. No telemetry sidecar (a short functional smoke). Estimate 20 minutes." % ship)),
+        dict(name='SR-ship3-replay', mode='stop', minutes=SHIP3_MINUTES['SR'], actions='reset replay', profile=None, tests=None, telemetry=False,
+             extra=['C2_PLATFORM_IMAGE=local:thin-layer', 'C2_REPLAY_PROFILE=%s' % ship, 'C2_BOX_MINUTES=60'], needs=('SR <- B0 TC',),
+             why=("SR (STOP): the four-card platform replay of the PRODUCTION image: the node agent's serving sequence in a copy of its container running the THIN LAYER built on the B0 (SHIP-3) image "
+                  "(C2_PLATFORM_IMAGE=local:thin-layer: the step reads the image name from a file the operator writes on the runner; it is never committed). The replay sets no profile, so it boots "
+                  "the ship profile BY THE IMAGE DEFAULT, which is why it needs the baked B0 image. THE RECORDED SOURCE IMAGE: as in the ship pack's SR, the replay copies the node agent's container from "
+                  "a tracked record (scripts/ci/references/c2-serving, the step's --source) and needs that image present on the rig host (c2_platform_replay.source_problem); when the step reports 'the source "
+                  "image ... is not on this host', the operator pulls it first - the image name stays out of this file. READ the vLLM subprocess log: '[QWEN-C2] profile %s: vLLM argv', the OWNER TRAFFIC WAIVER "
+                  "line, the P150x4 mesh, admission passed with no UNQUALIFIED admission line and no 262k evidence waiver, prefix installed, the Lever N install and warm lines, the parked build line, every "
+                  "op-fusion lever's engaged line, 'toolcall whitespace: armed' and 'toolcall whitespace: installed on', the :tt alias before and after the restart, and no kill-switch line (no levern.off, "
+                  "prefix-reuse.off or parked.off left on the hub). PASS: 'PLATFORM_REPLAY passed=True'. The replay turns the session cap off; the cap is read live after the deploy. The replay step has no "
+                  "telemetry sidecar. Measured basis: 25 minutes." % ship)),
+    ]
+
+
+def render_ship3_order(rows, plan, spec):
+    ship = fusion.NAMESPACE + spec['name']
+    total = sum(row['minutes'] for row in rows)
+    lines = [
+        "# The order of the SHIP-3 gates (docs/tp4-fusion.md): the SAME ship profile as references/fusion-jobs/ship (%s = the production profile plus exactly the env of the combined gate arm "
+        "%s%s, a TRAFFIC profile under the owner traffic waiver %s, APPROVED, byte for byte) on an image that also carries ONE correctness fix: the tool-call whitespace converter of the API server "
+        "(scripts/ci/c2_toolcall_whitespace.py, scripts/ci/fusion-wp/TW.json). ONE image (%s, a placeholder: B0 builds it from the pushed tp4/ship-3 commit)." % (ship, fusion.NAMESPACE, spec['source'], spec['waiver']['id'], SHIP3_IMAGE),
+        "# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: nothing later runs, and nothing ships, after a failure of this job.",
+        "# WHY THE SHIP PACK'S DEVICE GATES (G1 GX0 GX1 G2) ARE NOT REPEATED: the fix is host-side Python in the vLLM API server process (it replaces one argument converter of the tool-call parser). It adds no device code, "
+        "changes no profile env and no token the model generates, only the bytes of the argument strings the server hands the client. Whether the ship pack's verdicts carry over to this image is the owner's call; if the owner wants the "
+        "tested-image rule applied strictly, run the ship pack's templates on this image (sed -i 's/tp4-ship-2/<tag>/' on a copy of references/fusion-jobs/ship/*.env).",
+        "# P0. The owner's approval of the waiver is committed already (the profile's owner_traffic_waiver.decision starts APPROVED), so B0 bakes. The CPU suite is green on the pushed commit and the tag is pushed on THAT commit. "
+        "Push ONE tag at a time and wait for its run to finish (the workflow keeps one pending run; a queued tag is cancelled). No other window driver is alive. Never cancel a running card job. The cards are 13x10: read the grid from the run.",
+        "# B0 builds (it may run while production serves); the operator builds the production thin layer on the B0 image between TC and SR (no card job may run during that build); TC smokes the ship profile on the B0 image; SR "
+        "replays the agent's serving sequence on the thin layer itself (the bytes production will run).",
+        "# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.",
+    ]
+    for row in rows:
+        lines.extend('# NEEDS ' + need for need in row['needs'])
+    lines += [
+        "# PASS (all needed before any publish or :latest move): B0 built, its provenance clean and its in-image unit test run OK; TC every smoke rule clean (the toolcall_whitespace_smoke rule included) and tool_call, stream_tool_call and stream_reasoning "
+        "passing; SR 'PLATFORM_REPLAY passed=True'. Any failure: production is restored from the rollback image instead (no retry on the cards without the owner).",
+        "# Time (estimate, minutes): %s: %d minutes (%d h %d min), plus the thin layer (about 10) and about 3 minutes of queue per tag." % (
+            ', '.join('%s %d' % (row['name'].split('-')[0], row['minutes']) for row in rows), total, total // 60, total % 60),
+    ]
+    lines += ['%s %s %s %d' % (row['name'], row['mode'], SHIP3_IMAGE, row['minutes']) for row in rows]
     return '\n'.join(lines) + '\n'
 
 
@@ -416,7 +497,7 @@ def package_folders(folder):
     folder = Path(folder)
     found = []
     if folder.is_dir():
-        found += ['%s/%s' % (folder.name, path.name) for path in folder.iterdir() if path.is_dir() and path.name not in (COMBINED_FOLDER, SHIP_FOLDER)]
+        found += ['%s/%s' % (folder.name, path.name) for path in folder.iterdir() if path.is_dir() and path.name not in (COMBINED_FOLDER, SHIP_FOLDER, SHIP3_FOLDER)]
         if folder.name == 'fusion-jobs' and folder.parent.is_dir():
             found += [path.name for path in folder.parent.iterdir() if path.is_dir() and path.name.startswith('fusion-') and path != folder]
     return sorted(found)
@@ -453,6 +534,8 @@ def render_order(rows, plan, folder=FOLDER):
     for ship in plan.get('ship', ()):
         lines.insert(-1, "# THE SHIP PACK (references/fusion-jobs/%s: B0 G1 GX0 GX1 G2 SR for the traffic profile %s%s under the owner traffic waiver %s, PENDING until the owner approves; its own ORDER.txt) runs AFTER the combined "
                          "window passes, not before it." % (SHIP_FOLDER, fusion.NAMESPACE, ship['name'], ship['waiver']['id']))
+        lines.insert(-1, "# THE SHIP-3 PACK (references/fusion-jobs/%s: B0 TC SR, the same traffic profile on the image that also carries the tool-call whitespace fix; its own ORDER.txt) replaces the ship pack's "
+                         "build and replay when that fix is to ship; the ship pack's gates are not repeated." % SHIP3_FOLDER)
     for item in plan.get('pack_include', ()):
         lines.insert(-1, "# FOLDED IN: %s* are the templates of references/%s (%s), renamed and on the one image; their read and decision rules are that folder's ORDER.txt. %s" % (
             item['prefix'], item['folder'], item['wp'], ' '.join(item['reason'].split())))
@@ -495,6 +578,10 @@ def generate(plan, folder=FOLDER):
         for row in mini:
             out['%s/%s.env' % (SHIP_FOLDER, row['name'])] = render_ship_env(row)
         out['%s/ORDER.txt' % SHIP_FOLDER] = render_ship_order(mini, plan, ship)
+        mini3 = ship3_rows(plan, shipped)
+        for row in mini3:
+            out['%s/%s.env' % (SHIP3_FOLDER, row['name'])] = render_ship_env(row, SHIP3_IMAGE, SHIP3_HEADER)
+        out['%s/ORDER.txt' % SHIP3_FOLDER] = render_ship3_order(mini3, plan, ship)
     return out
 
 
@@ -503,6 +590,7 @@ def stale(folder, wanted):
     found = dict((path.name, path.read_text(encoding='utf-8')) for path in Path(folder).glob('*') if path.is_file())
     found.update(('%s/%s' % (COMBINED_FOLDER, path.name), path.read_text(encoding='utf-8')) for path in (Path(folder) / COMBINED_FOLDER).glob('*') if path.is_file())
     found.update(('%s/%s' % (SHIP_FOLDER, path.name), path.read_text(encoding='utf-8')) for path in (Path(folder) / SHIP_FOLDER).glob('*') if path.is_file())
+    found.update(('%s/%s' % (SHIP3_FOLDER, path.name), path.read_text(encoding='utf-8')) for path in (Path(folder) / SHIP3_FOLDER).glob('*') if path.is_file())
     names = sorted(set(found) | set(wanted))
     return [name for name in names if found.get(name) != wanted.get(name)]
 

@@ -207,6 +207,7 @@ FUSION_AUDITS = (
     ('QWEN_FAST_BATCHED_READS_AUDIT', '[PINDIAG] tp4 batched reads audit', 'WPH-3 batched verify and collect read-backs'),  # WPH
 )
 FUSION_RULES = (
+    'toolcall_whitespace_smoke',  # TW
     'tp4_shard_argmax_smoke',  # WP0
     'ccl_options_smoke',  # WP0
     'draft_permute_smoke',  # WP0
