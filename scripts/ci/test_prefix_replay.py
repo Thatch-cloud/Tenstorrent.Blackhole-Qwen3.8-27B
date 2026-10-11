@@ -61,6 +61,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import prefix_agent_corpus as pc  # noqa: E402
 import prefix_judge as judge  # noqa: E402
 import prefix_markers as pm  # noqa: E402
+import c2_toolcall_whitespace as toolcall_ws  # noqa: E402
 import prefix_replay as replay  # noqa: E402
 import qwen_prefix_registry as prefix_registry  # noqa: E402
 import qwen_prefix_scheduler_patch as graft  # noqa: E402
@@ -456,6 +457,10 @@ class FakeEngine(object):
         profile = self.profile
         self.say('(APIServer pid=1) [QWEN-C2] profile %s: vLLM argv %s' % (
             self.name, json.dumps(marker_fixture.launched_argv(profile))))
+        # The API server's boot arms the tool-call whitespace fix for every profile (serving_c2_contract.arm_toolcall_whitespace) and vLLM then imports its qwen3 parser:
+        # c2_smoke_check's toolcall_whitespace_smoke rule reads these two lines out of any log that holds the argv line.
+        self.say('(APIServer pid=1) [QWEN-C2] profile %s: %s: vllm.parser.qwen3._qwen3_arg_converter keeps the edge whitespace of tool-call arguments' % (self.name, toolcall_ws.ARMED))
+        self.say('(APIServer pid=1) [QWEN-C2] toolcall whitespace: installed on vllm.parser.qwen3._qwen3_arg_converter: a tool argument keeps its edge whitespace')
         if self.prefix:
             self.say('INFO platform.py:83] Chunked prefill is not supported for `model_type=qwen3_5`; disabling it.')
         self.say('INFO platform.py:1153] Automatic prefix caching is %s' % ('enabled' if self.prefix else 'disabled'))
