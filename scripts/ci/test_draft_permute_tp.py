@@ -953,8 +953,9 @@ class SmokeTests(unittest.TestCase):
     def test_the_octo_profile_needs_the_octo_kv_line(self):
         env = dict(self.QUAD)
         env[smoke.OCTO_FLAG] = '1'
-        self.assertEqual(len(smoke.problems(env, self.full())), 1)
-        self.assertEqual(smoke.problems(env, self.full() + '\n' + self.engaged('kv', 'octo')), [])
+        # (tp4/octo-3: the octo fold and unfold are hooked, so the octo pass needs all three sites at shape=octo)
+        self.assertEqual(len(smoke.problems(env, self.full())), 3)
+        self.assertEqual(smoke.problems(env, self.full() + '\n' + '\n'.join(self.engaged(site, 'octo') for site in ('kv', 'fold', 'unfold'))), [])
 
     def test_with_no_quad_or_octo_flag_any_kv_line_will_do(self):
         self.assertEqual(smoke.problems({smoke.FLAG: '1'}, self.engaged('kv', 'pair')), [])

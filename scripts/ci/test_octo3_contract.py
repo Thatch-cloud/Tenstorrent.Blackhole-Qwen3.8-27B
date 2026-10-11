@@ -216,7 +216,7 @@ class WaiverRunTests(unittest.TestCase):
             octo.octo_admission(M3, environ, log=log)
         admitted = [line for line in log.lines if line.startswith(octo.ADMITTED_MARKER)]
         self.assertTrue(admitted[0].endswith('(gate only)'), admitted)
-        self.assertIsNone(octo_markers.admissions(admitted[0])[0]['waiver'])
+        self.assertNotIn('waiver', octo_markers.admissions(admitted[0])[0])
 
     def test_the_gate_marker_wins_over_a_stray_waiver_id(self):
         environ = dict(image_env())

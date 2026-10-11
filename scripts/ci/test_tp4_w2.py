@@ -159,10 +159,11 @@ class ProfileTests(unittest.TestCase):
         from make_upload_profiles import twin_names as upload_twins
         # (and the op-fusion programme's twins: the production profile plus exactly one lever each, test_fusion_wp)
         from make_fusion_profiles import twin_names as fusion_twins
+        from make_octo3_profiles import twin_names as octo3_twins      # (and tp4/octo-3's octo twins of the combined arm, test_octo3_profiles)
         carriers = sorted(name for name, profile in load()['profiles'].items() if spread.FLAG in profile.get('env', {}))
-        self.assertEqual(carriers, sorted([W2, W2_AUDIT] + list(WINDOW_F1) + sorted(SHIPPED) + list(kill_twins()) + list(upload_twins()) + list(fusion_twins())))
+        self.assertEqual(carriers, sorted([W2, W2_AUDIT] + list(WINDOW_F1) + sorted(SHIPPED) + list(kill_twins()) + list(upload_twins()) + list(fusion_twins()) + list(octo3_twins())))
         multi = sorted(name for name, profile in load()['profiles'].items() if profile.get('env', {}).get(sdpa_long_tp.FLAG) == 'multi')
-        self.assertEqual(multi, sorted([SDPA_TIMED, SDPA_AUDITED, W2, W2_AUDIT, NOF1, NOF1_AUDIT] + list(WINDOW_MULTI) + sorted(SHIPPED) + list(kill_twins()) + list(upload_twins()) + list(fusion_twins())))
+        self.assertEqual(multi, sorted([SDPA_TIMED, SDPA_AUDITED, W2, W2_AUDIT, NOF1, NOF1_AUDIT] + list(WINDOW_MULTI) + sorted(SHIPPED) + list(kill_twins()) + list(upload_twins()) + list(fusion_twins()) + list(octo3_twins())))
 
     def test_sdpa_multi_s_own_arms_are_untouched_by_the_merge(self):
         found = load()['profiles']
@@ -248,8 +249,8 @@ class MergeSeamTests(unittest.TestCase):
     def test_the_packed_verifier_runs_both_audits_after_the_replay(self):
         source = (HERE / 'packed_verifier.py').read_text(encoding='utf-8')
         for marker in ('tile_collective_tp.audit_round(self.operations, self.fixture, self.rounds + 1)', 'sdpa_audit(self.rounds + 1)',
-                       'tp4_vglue.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1,',
-                       'gdn_conv_gates_spread.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)'):
+                       'tp4_vglue.audit_round(self.operations, self.fixture.retained.records, audit_round_number,',
+                       'gdn_conv_gates_spread.audit_round(self.operations, self.fixture.retained.records, audit_round_number)'):     # (tp4/octo-3: the sampled round number, = self.rounds + 1 unsampled)
             self.assertEqual(source.count(marker), 1, marker)
         self.assertLess(source.index('tp4_vglue.audit_round('), source.index('gdn_conv_gates_spread.audit_round('))
 

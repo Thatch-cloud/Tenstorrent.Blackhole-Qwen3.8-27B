@@ -21,6 +21,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import c2_serving_job as job  # noqa: E402
+import make_fusion_profiles as fusion_ships  # noqa: E402
 import make_parked_profiles as twins  # noqa: E402
 import serving_c2_contract as contract  # noqa: E402
 
@@ -48,6 +49,9 @@ def flat(profile):
     body.pop(contract.TRAFFIC_WAIVER, None)
     return body
 
+
+# the four levers of the production waiver (tp4/octo-3 added the octo levers to the contract's waivable table; they belong to the octo ship candidates' waivers, test_octo3_ship)
+FOUR_LEVERS = {'QWEN_FAST_TP4_SDPA': 'multi', 'QWEN_FAST_TP4_CONV_GATES_SPREAD': '1', 'QWEN_FAST_PARKED_ENGINES': '1', 'QWEN_FAST_PARKED_DRAFTS': '1'}
 
 class ProfileTests(unittest.TestCase):
     def test_it_is_the_levern_traffic_profile_plus_exactly_the_w2_and_engine_reuse_keys(self):
@@ -83,11 +87,11 @@ class ProfileTests(unittest.TestCase):
                 self.assertNotIn(name, env)
 
     def test_it_is_the_only_profile_that_carries_an_owner_traffic_waiver(self):
-        self.assertEqual(sorted(name for name, body in raw()['profiles'].items() if contract.TRAFFIC_WAIVER in body), ['c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic', 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-oneq', SHIP])
+        self.assertEqual(sorted(name for name, body in raw()['profiles'].items() if contract.TRAFFIC_WAIVER in body), sorted(list(fusion_ships.ship_names()) + [SHIP]))     # (the op-fusion ship candidates: test_fusion_ship, test_oneq_ship, test_octo3_ship)
 
     def test_the_waiver_names_exactly_the_four_levers_cites_the_evidence_and_records_a_decision(self):
         waiver = load()[contract.TRAFFIC_WAIVER]
-        self.assertEqual(waiver['levers'], contract.WAIVABLE_LEVERS)
+        self.assertEqual(waiver['levers'], FOUR_LEVERS)
         self.assertEqual(sorted(waiver), sorted(contract.TRAFFIC_WAIVER_FIELDS))
         self.assertTrue(any('37878277301' in item for item in waiver['evidence']), 'the SDPA multi exactness run')
         self.assertTrue(any('37918498075' in item for item in waiver['evidence']), 'the engine-reuse hang shapes')
@@ -102,7 +106,7 @@ class ContractTests(unittest.TestCase):
                       contract.prefix_reuse_problems, contract.mesh_problems):
             with self.subTest(check=check.__name__):
                 self.assertEqual(check(profile), [])
-        self.assertEqual(contract.waived_levers(profile), contract.WAIVABLE_LEVERS)
+        self.assertEqual(contract.waived_levers(profile), FOUR_LEVERS)
 
     def test_without_the_waiver_every_lever_is_refused_on_traffic(self):
         profile = load()
@@ -115,7 +119,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual([text.split('=')[0] for text in parked], ['QWEN_FAST_PARKED_ENGINES', 'QWEN_FAST_PARKED_DRAFTS'], parked)
 
     def test_a_lever_the_waiver_does_not_name_is_still_refused(self):
-        for flag in contract.WAIVABLE_LEVERS:
+        for flag in FOUR_LEVERS:
             with self.subTest(flag=flag):
                 profile = load()
                 del profile[contract.TRAFFIC_WAIVER]['levers'][flag]
@@ -200,7 +204,7 @@ class BootTests(unittest.TestCase):
         self.assertEqual(result['name'], SHIP)
         waived = [line for line in lines if contract.TRAFFIC_WAIVER_MARKER in line]
         self.assertEqual(len(waived), 1, lines)
-        for flag, value in contract.WAIVABLE_LEVERS.items():
+        for flag, value in FOUR_LEVERS.items():
             self.assertIn('%s=%s' % (flag, value), waived[0])
         self.assertIn('[decision: %s' % load()[contract.TRAFFIC_WAIVER]['decision'].split(None, 1)[0], waived[0])
         self.assertTrue(waived[0].startswith('profile %s: ' % SHIP))

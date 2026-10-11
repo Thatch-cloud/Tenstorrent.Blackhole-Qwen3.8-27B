@@ -168,7 +168,7 @@ def render_order(table):
         "prefill arm %s." % (OCTO, QUAD, AUDIT, PREFILL_AUDIT),
         "# THE DEEP TESTS. The octo shape needs six or more seats decoding at once. concurrent8_code_32k / _128k (800 tokens) never have them (the first users finish before the last has prefilled), so "
         "they run beside the new concurrent8_code_32k_long / _128k_long (3,000 / 4,000 tokens, ignore_eos: the whole prefill queue is outlasted and eight seats decode together at depth for about a minute). "
-        "The octo-2 card runs' 32k read (bundle 4%% below the control) had no octo round in it.",
+        "The octo-2 card runs' 32k read (bundle 4% below the control) had no octo round in it.",
         "# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z; nothing in this pack does either. B0 is a build and may run while production serves. No "
         "other window driver may be alive.",
         "# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and each tag is pushed on THAT commit (the throwaway commit carries only "
@@ -192,7 +192,7 @@ def render_order(table):
         "#   X0   four cards present and healthy, the fabric as measured, the 13x10 grid in the run, no other window driver alive.",
         "#   A1   (STOP) every lever's engaged line and an audit line with exact=True under the fusion rules and the octo rules; the vglue / windows / F1 audit lines name the sample; no fell-back line, no "
         "'audit mismatch', the memory ledger's free DRAM per chip recorded. ANY failure is NO-GO for the octo arms and halts the window.",
-        "#   C1 L1 C2 L2   octo3_report.py (the all-live window of each test, both pairs, the floors) and octo_compare.py (every answer equal). GO for shipping octo-everywhere: no LOSS in any test, a GAIN in "
+        "#   C1 L1 C2 L2   octo3_report.py (the all-live window of each test, both pairs, the floors), octo_compare.py (every answer equal) and octo_judge.py on both arm logs (the shape executed). GO for shipping octo-everywhere: no LOSS in any test, a GAIN in "
         "concurrent8_steady, every text equal, the octo judge clean on both arm logs. A LOSS at 32k or 120k means the bundle or the draft costs at depth: bisect with the quad-draft arm and the octo-2 levers one at a "
         "time (make_octo2_profiles.py's twins run on the Lever N stack only).",
         "#   Q1 Q2   the draft A/B as its job says; the decision is the default drafter of an octo round.",

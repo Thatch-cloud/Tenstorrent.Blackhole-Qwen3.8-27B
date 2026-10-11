@@ -70,7 +70,7 @@ def programs(text):
 
 def admissions(text):
     """[dict] of every admitted line."""
-    return [dict(mode=mode, rows=int(rows), users=int(users), min_live=int(min_live), waiver=waiver or None)
+    return [dict(mode=mode, rows=int(rows), users=int(users), min_live=int(min_live), **({'waiver': waiver} if waiver else {}))
             for mode, rows, users, min_live, waiver in ADMITTED_PATTERN.findall(text or '')]
 
 

@@ -157,3 +157,5 @@ mounted change is not an executed change); (b) under `alternate`, at least 16 co
 `packed_shapes.octo_shape`; `serving_octo` (flags, admission, policy state, device pieces); `extent_attention_octo_tp` (the octo extent readers); `k64j_card_b.py --octo` and `gdn_tp4_card_test.py --users 8 --rows 8` (the qualification harnesses); `octo_markers`, `octo_judge`, `octo_compare` (the log, the judgement, the arm against its control);
 `serving_packed_step` (octo routing), `serving_worker_hook` (the blocked set), `serving_runtime` (the admission and the tripwire); `make_octo_profiles` (the gate-only twins); tests `test_octo`, `test_octo_block`,
 `test_octo_judge`, `test_octo_profiles`, `test_tp4_octo_jobs`.
+
+The shape beside the fused stack (W2, engine reuse, the op-fusion set), its non-alternating mode and the ship candidates: docs/tp4-octo3.md.

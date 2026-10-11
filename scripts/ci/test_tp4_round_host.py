@@ -1180,6 +1180,7 @@ class ProfileTests(unittest.TestCase):
             data = json.load(handle)
         self.assertEqual(data['default'], 'c2-packed-tp4')
         import make_fusion_profiles as fusion
+        import make_octo3_profiles as twins_octo3
 
         # the op-fusion programme's two combined twins (gate only) carry the four levers on purpose, and the audit flag on the audited one
         combined = {fusion.NAMESPACE + 'all': {SELECT, READ, KEYED, LEAN}, fusion.NAMESPACE + 'all-audit': {SELECT, READ, KEYED, LEAN, AUDIT}}
@@ -1191,6 +1192,9 @@ class ProfileTests(unittest.TestCase):
         # the four levers always, and the audit flag on the audited twin
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in data['profiles']
                          if name.startswith((fusion.NAMESPACE + 'all-oneq', fusion.NAMESPACE + 'all-grid13'))})
+        # tp4/octo-3: the octo twins of the combined arms (-fx-all-octo3*, -fx-all-oneq-grid13-octo3*) are those arms plus the octo env, so they carry the four levers (and the audit flag on the audited twins)
+        combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in data['profiles']
+                         if name in twins_octo3.twin_names()})
         for name, profile in data['profiles'].items():
             if name in self.ADDED:
                 continue

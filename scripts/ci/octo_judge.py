@@ -231,9 +231,9 @@ def octo_problems(env, asked, found, facts, text=''):
             problems.append('the admission says mode=%s min_live=%d and the profile asks %s %d' % (admitted[0]['mode'], admitted[0]['min_live'], asked, minimum))
         # tp4/octo-3: a traffic profile is admitted under its owner traffic waiver and the line says which; a gate-only profile is admitted through its gate marker and says so.
         wanted_waiver = str((env or {}).get(WAIVER_FLAG, '')).strip() or None
-        if admitted[0]['waiver'] != wanted_waiver:
+        if admitted[0].get('waiver') != wanted_waiver:
             problems.append('the admission says %s and the profile %s' % (
-                'it ran under the owner traffic waiver %s' % admitted[0]['waiver'] if admitted[0]['waiver'] else 'it ran as a gate run',
+                'it ran under the owner traffic waiver %s' % admitted[0].get('waiver') if admitted[0].get('waiver') else 'it ran as a gate run',
                 'carries the waiver id %s' % wanted_waiver if wanted_waiver else 'carries no waiver id (a gate-only profile)'))
     if not found['unqualified']:
         problems.append('no [OCTO] UNQUALIFIED line: the admission did not say what is unqualified')

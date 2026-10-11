@@ -456,6 +456,9 @@ class FakeEngine(object):
         profile = self.profile
         self.say('(APIServer pid=1) [QWEN-C2] profile %s: vLLM argv %s' % (
             self.name, json.dumps(marker_fixture.launched_argv(profile))))
+        # the API server arms the tool-call whitespace fix for every profile and logs it (c2_toolcall_whitespace; toolcall_whitespace_smoke reads the two lines of a booted API server)
+        self.say('(APIServer pid=1) [QWEN-C2] profile %s: toolcall whitespace armed: vllm.parser.qwen3._qwen3_arg_converter keeps edge whitespace' % self.name)
+        self.say('(APIServer pid=1) INFO toolcall whitespace: installed on vllm.parser.qwen3._qwen3_arg_converter: a tool argument keeps its edge whitespace')
         if self.prefix:
             self.say('INFO platform.py:83] Chunked prefill is not supported for `model_type=qwen3_5`; disabling it.')
         self.say('INFO platform.py:1153] Automatic prefix caching is %s' % ('enabled' if self.prefix else 'disabled'))
