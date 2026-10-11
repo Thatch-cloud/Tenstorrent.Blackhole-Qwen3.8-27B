@@ -11,7 +11,9 @@ device) and its texts will still equal the control's. So, by the sub-switches th
             with no `verify saw` line, means the wrapper was never reached; the `installed` line says whether it was bound at all
   drafter   nothing is required: its hook is the unapplied patch fusion-wp/M1-dflash-device.patch; a site=drafter.commit line, when there is one, is read like the others
   every arm NO `fell back` line (the served ops ran: the timing is not the lever's) and NO `audit mismatch` line
-  audit on  (QWEN_FAST_GRID13_AUDIT=1; the lever must be on too) a passing `audit n=<n> exact=True site=<site>` line for every site the arm requires
+  audit on  (QWEN_FAST_GRID13_AUDIT=1; the lever must be on too) a passing `audit n=<n> exact=True site=<site>` line for every site the arm requires, and NO
+            `audit skipped reason=<why> site=<site>` line: an audit that was due and could not run (no device to synchronize, the activation could not be copied) compared
+            nothing, so an audited attach cannot pass on the served ops alone (card run 38116769673 died on that path; the skip is the logged form of it)
   lever off not one engaged, fell-back or audit line (a leak means the lever ran where nobody asked for it)
 
     python3 grid13_smoke.py --log container.log [--profile NAME [--profiles qwen_c2_profiles.json]] [--env KEY=VALUE ...]
@@ -34,6 +36,7 @@ ENGAGED = PREFIX + ' engaged'
 FELL_BACK = PREFIX + ' fell back'
 AUDIT = PREFIX + ' audit'
 MISMATCH = PREFIX + ' audit mismatch'
+AUDIT_SKIPPED = PREFIX + ' audit skipped'
 UNCHANGED = PREFIX + ' unchanged'
 SAW = PREFIX + ' verify saw'
 INSTALLED = PREFIX + ' installed'
@@ -81,6 +84,7 @@ def problems(env, container_text):
         return found
     found += ['the grid13 lever fell back (the served matmul grids ran, it saved nothing): %s' % line.strip()[:200] for line in lines if FELL_BACK in line][:4]
     found += ['audit mismatch in the log: %s' % line.strip()[:200] for line in lines if MISMATCH in line][:4]
+    found += ['an audit was skipped, so nothing was compared at that site (the lever result was served unchecked): %s' % line.strip()[:200] for line in lines if AUDIT_SKIPPED in line][:4]
     explained = set()                       # the verify sites that logged an `unchanged` line with its reason instead of an engaged one
     for label, names in required_sites(env):
         if _logged(lines, ENGAGED, names):
