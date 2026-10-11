@@ -513,10 +513,17 @@ class PackageFolderTests(unittest.TestCase):
     # The integrator's own window packs name the tag their B0 builds (the window of tp4/fusion-2: tp4-fusion-6, test_fusion2_pack); every other package folder names the placeholder.
     OWN_IMAGE = {'F2': 'tp4-fusion-6'}
 
+    # The WPP folder's RQ jobs (the packed-any re-record on the K64j-OQ binary) name the tag OQ-B0 built, as plain words in a public tag commit; every other template of the folder is the placeholder.
+    OWN_IMAGE_FILES = {('WPP', 'RQ'): 'tp4-oneq-1'}
+
     def test_every_package_template_names_the_one_image(self):
         for folder in self.folders():
             for path in sorted(folder.glob('*.env')):
-                self.assertEqual(job.parse_env(path.read_text(encoding='utf-8'))['C2_IMAGE_TAG'], self.OWN_IMAGE.get(folder.name, IMAGE), '%s/%s' % (folder.name, path.name))
+                want = self.OWN_IMAGE.get(folder.name, IMAGE)
+                for (name, prefix), tag in self.OWN_IMAGE_FILES.items():
+                    if folder.name == name and path.name.startswith(prefix):
+                        want = tag
+                self.assertEqual(job.parse_env(path.read_text(encoding='utf-8'))['C2_IMAGE_TAG'], want, '%s/%s' % (folder.name, path.name))
 
 
 class PublicTests(unittest.TestCase):

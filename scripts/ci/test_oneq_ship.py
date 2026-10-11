@@ -256,19 +256,36 @@ class RequalificationTemplatesTests(unittest.TestCase):
                 self.assertEqual(run_job(path).returncode, 0)
         self.assertEqual(sorted(path.stem for path in WPP.glob('RQ*.env')), sorted(('RQ0-quad-reset',) + self.RQ1 + self.RQ2))
 
-    def test_the_arguments_are_the_k64j_templates_arguments_on_the_k64j_oq_graft(self):
+    def test_the_arguments_are_the_k64j_templates_arguments_on_the_k64j_oq_graft_by_name(self):
+        by_name = ('KOPGRAFT64=', 'EXPECT_TTNNCPP_SHA256=', 'IMAGE=', 'IMAGE_C2_TAG=', 'KOPGRAFT64_NAME=')
         for new_names, old_names, folder in ((self.RQ1, self.OLD_131K, 'tp4-s2-serve-jobs'), (self.RQ2, self.OLD_262K, 'tp4-262k8-jobs')):
             for new, old in zip(new_names, old_names):
                 with self.subTest(new=new):
                     mine, theirs = env_values(WPP / (new + '.env')), self.old(folder, old)
                     for key in ('C2_CARDS', 'C2_ACTIONS', 'C2_CARDM_HARNESS', 'C2_CARDM_ARGS'):
                         self.assertEqual(mine[key], theirs[key], key)
-                    words = lambda text: sorted(word for word in text.split() if not word.startswith(('KOPGRAFT64=', 'EXPECT_TTNNCPP_SHA256=')))
+                    words = lambda text: sorted(word for word in text.split() if not word.startswith(by_name))
                     self.assertEqual(words(mine['C2_CARDM_ENV']), words(theirs['C2_CARDM_ENV']))
-                    self.assertIn('KOPGRAFT64=@K64J_OQ_GRAFT_DIR@', mine['C2_CARDM_ENV'])
-                    self.assertIn('EXPECT_TTNNCPP_SHA256=@K64J_OQ_TTNNCPP_SHA256@', mine['C2_CARDM_ENV'])
-                    self.assertNotIn('K64J_GRAFT_DIR@', mine['C2_CARDM_ENV'])
-                    self.assertEqual(mine['C2_IMAGE_TAG'], 'tp4-fusion-1', 'the placeholder every package folder names (the window retags it)')
+
+    def test_the_graft_the_digest_and_the_image_are_plain_literal_words_for_a_public_tag_commit(self):
+        """No placeholder, no path, no registry: the graft is a directory NAME under the runner's home (KOPGRAFT64_NAME), the digest the literal K64j-OQ one already in tracked
+        code, the image its C2 tag (IMAGE_C2_TAG = C2_IMAGE_TAG = tp4-oneq-1, the image OQ-B0 builds)."""
+        for path in sorted(WPP.glob('RQ*.env')):
+            text = path.read_text(encoding='utf-8')
+            values = env_values(path)
+            with self.subTest(path=path.name):
+                self.assertNotIn('@', text)
+                self.assertEqual(values['C2_IMAGE_TAG'], 'tp4-oneq-1')
+                if values['C2_ACTIONS'] != 'cardm':
+                    continue
+                pairs = dict(word.partition('=')[::2] for word in values['C2_CARDM_ENV'].split())
+                self.assertEqual(pairs['KOPGRAFT64_NAME'], 'opgraft-K64j-OQ')
+                self.assertNotIn('KOPGRAFT64', pairs)
+                self.assertEqual(pairs['EXPECT_TTNNCPP_SHA256'], OQ)
+                self.assertEqual(pairs['IMAGE_C2_TAG'], 'tp4-oneq-1')
+                self.assertNotIn('IMAGE', pairs)
+                for word in values['C2_CARDM_ENV'].split():
+                    self.assertTrue(job.PLAIN_WORD.fullmatch(word), word)
 
     def test_the_262k_jobs_name_the_window_and_the_131k_ones_do_not(self):
         for name in self.RQ2:
@@ -292,7 +309,7 @@ class RequalificationTemplatesTests(unittest.TestCase):
         self.assertEqual(minutes['RQ0-quad-reset'] + sum(minutes[name] for name in self.RQ1), 48)
         self.assertEqual(sum(minutes[name] for name in self.RQ2), 88)
         self.assertEqual(sum(minutes.values()), 136)
-        self.assertEqual({row[2] for row in rows.values()}, {'tp4-fusion-1'})
+        self.assertEqual({row[2] for row in rows.values()}, {'tp4-oneq-1'})
         for name in self.RQ1 + self.RQ2:
             self.assertTrue(any(line.startswith('# NEEDS %s <- ' % name) for line in text.splitlines()), name)
         # the minutes are the K64j templates' own estimates

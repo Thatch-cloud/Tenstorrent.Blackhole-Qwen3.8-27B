@@ -179,7 +179,9 @@ are and keep qualifying K64j images from the same commit, the K64j-OQ files qual
 strictly (a traffic boot, a gate boot alike), and until then falls back to K64j's, which qualifies it in a gate boot only. Nothing else in the repository names the new files.
 
 **Requalification (only when a K64j-OQ image is to carry TRAFFIC; gate boots need none).** Card M alone (the pair), the K64j harness and the K64j templates' arguments with the K64j-OQ graft
-and digest, as job envs: `references/fusion-jobs/WPP/RQ0..RQ2` (the image tag is the usual placeholder `tp4-fusion-1`, retagged to the image OQ-B0 built, e.g. `tp4-oneq-1`; placeholders `@K64J_OQ_GRAFT_DIR@`, `@K64J_OQ_TTNNCPP_SHA256@`, `@SERVED_IMAGE@`). Production is down for it (the
+and digest, as job envs: `references/fusion-jobs/WPP/RQ0..RQ2`, every value final and a plain word for a public tag commit: the graft by directory name (`KOPGRAFT64_NAME=opgraft-K64j-OQ`, resolved under the runner's home by
+`run_card_b.sh`; `KOPGRAFT64` as a full path still wins when set), the literal K64j-OQ digest (`EXPECT_TTNNCPP_SHA256=2b81e28f...`) and the window's image by its C2 tag (`IMAGE_C2_TAG=C2_IMAGE_TAG=tp4-oneq-1`, the image OQ-B0 built; `run_card_b.sh` finds the local `tt-vllm:qwen38-c2-<tag>`; `IMAGE` still wins when set).
+Production is down for it (the
 four-card jobs leave the fabric on the ethernet cores, hence the quad reset first). **The 8x262k ship profile needs BOTH records**: `tp_guard` reads the 131,328 record in every four-card
 process and the window check reads the 262,144 one (with E1, which is not bound to the binary and stays). Minutes are the K64j templates' own estimates:
 

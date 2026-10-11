@@ -126,7 +126,7 @@
 # the harness writes its partial report at once and unwinds. A 124 exit prints the hang hint below unless the log
 # shows the harness finished that unwinding ('ERROR terminated by signal', printed after the device closed).
 #
-# Env: KOPGRAFT64 (default ~/opgraft-K64j), EXPECT_TTNNCPP_SHA256, IMAGE (default image P8), RESULTS
+# Env: KOPGRAFT64 (default ~/opgraft-K64j) or KOPGRAFT64_NAME (a directory name under $HOME), EXPECT_TTNNCPP_SHA256, IMAGE (default image P8) or IMAGE_C2_TAG, RESULTS
 # (~/kwork64/k64j/<card tag>), CARD_B_ARGS (extra harness args, appended last, e.g. "--sections X,M --seeds 0"),
 # WATCHER=1, WATCHDOG_S, K64J_CARD_DRY_RUN=1, K64J_HARNESS (card, the default, extent_reader, nkv1_spike, gdn_tp4 or ordered_writer; the
 # last three are the four-card port's one-card window, see below; TP4_WIDTH=2 is gdn_tp4's PARITY run; TP4_WIDTH=4 is extent_reader's
@@ -141,6 +141,29 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 probe_dir=$(cd "$here/../k64j_probe" 2>/dev/null && pwd || echo "$here/../k64j_probe")
 qwen=$(cd "$here/../sdpa_decode_qwen" 2>/dev/null && pwd || echo "$here/../sdpa_decode_qwen")
+# KOPGRAFT64_NAME=<directory name>: the graft by NAME under $HOME (opgraft-K64j-OQ), so that a job env holds a plain word and a public tag commit names no host path. KOPGRAFT64 (a full
+# path) still wins when it is set. A name with a '/', a '..', a leading '.' or '-' or any character but letters, digits, '.', '_' and '-' is refused before anything is read.
+# IMAGE_C2_TAG=<tag>: IMAGE by the tag of a C2 image on this host (the workflow's own lookup: the local tt-vllm:qwen38-c2-<tag>, whatever registry prefix it carries), so that a job env
+# holds a plain tag and no image reference. IMAGE still wins when it is set. A tag with any character but letters, digits, '.', '_' and '-' is refused.
+# >>> graft and image by name
+if [ -z "${KOPGRAFT64:-}" ] && [ -n "${KOPGRAFT64_NAME:-}" ]; then
+  case "$KOPGRAFT64_NAME" in
+    .|..|*..*|[-.]*|*[!A-Za-z0-9._-]*)
+      echo "refusing: KOPGRAFT64_NAME=$KOPGRAFT64_NAME is a directory name under \$HOME (letters, digits, '.', '_' and '-'; no '/', no '..', no leading '.' or '-')" >&2
+      exit 1 ;;
+  esac
+  KOPGRAFT64=$HOME/$KOPGRAFT64_NAME
+fi
+if [ -z "${IMAGE:-}" ] && [ -n "${IMAGE_C2_TAG:-}" ]; then
+  case "$IMAGE_C2_TAG" in
+    *[!A-Za-z0-9._-]*|[-.]*)
+      echo "refusing: IMAGE_C2_TAG=$IMAGE_C2_TAG is a C2 image tag (letters, digits, '.', '_' and '-')" >&2
+      exit 1 ;;
+  esac
+  IMAGE=$(docker image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | awk -v want="tt-vllm:qwen38-c2-$IMAGE_C2_TAG" '{ n = split($0, part, "/"); if (part[n] == want) { print; exit } }' || true)
+  [ -n "$IMAGE" ] || { echo "refusing: no local image tt-vllm:qwen38-c2-$IMAGE_C2_TAG on this host (IMAGE_C2_TAG)" >&2; exit 1; }
+fi
+# <<< graft and image by name
 G=${KOPGRAFT64:-$HOME/opgraft-K64j}
 IMAGE=${IMAGE:-sha256:57cb699489436842d7e7bdd5ab917d509b4492fc95f6f083ef7d2865b488c2ef}
 EXPECT=${EXPECT_TTNNCPP_SHA256:-}
