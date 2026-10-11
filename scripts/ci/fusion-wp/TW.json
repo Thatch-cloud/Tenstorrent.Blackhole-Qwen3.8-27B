@@ -1,0 +1,26 @@
+{
+ "wp": "TW",
+ "branch": "tp4/toolcall-whitespace",
+ "description": "Correctness fix, not a lever: vLLM 0.25.1's qwen3 / qwen3_xml tool-call parser strip()s every <parameter=...> value (vllm/parser/qwen3.py, _qwen3_arg_converter, `value.strip()` twice), so the client receives tool-call arguments without their leading and trailing whitespace: a written file loses its final newline, an edit's old_string / new_string loses its indentation, a whitespace-only value becomes empty, and the corrupted call is re-rendered into tokens the model never generated on the next turn. c2_toolcall_whitespace.py swaps that converter, in the vLLM API server only, for one that removes exactly the chat template's one framing newline at each end (what vLLM 0.23's qwen3_coder parser did) and nothing else; render -> parse -> render is the identity. DEFAULT ON for every profile (a pure correctness fix: no token the model generates changes, no device code, only the bytes of the argument strings the API server hands the client; QWEN_C2_TOOLCALL_WS=0 or \"toolcall_whitespace\": false in a profile turns it off). It is not a lever: no flag in a profile's env, no profile twin, no card job.",
+ "image_files": [
+  {
+   "path": "scripts/ci/c2_toolcall_whitespace.py",
+   "reason": "serving_c2_contract.boot imports it in the API server for every profile (arm_toolcall_whitespace) and swaps vllm.parser.qwen3._qwen3_arg_converter with it; an image without it fails that boot"
+  },
+  {
+   "path": "scripts/ci/toolcall_whitespace_smoke.py",
+   "reason": "the overlaid test module imports it (the smoke rule itself runs on the host; the image's test run must find the module its test imports)"
+  },
+  {
+   "path": "scripts/ci/test_c2_toolcall_whitespace.py",
+   "reason": "the image's own test run: the EngineTests class runs the fix against the image's installed vLLM 0.25.1 parsers (stock parser strips, fixed one keeps, render -> parse -> render identity, streaming and non-streaming)"
+  }
+ ],
+ "smoke_rules": [
+  "toolcall_whitespace_smoke"
+ ],
+ "tests": [
+  "test_c2_toolcall_whitespace"
+ ],
+ "notes": "WP0 TODO. (1) make_fusion_profiles.py --write places the two image_files lines and the test module; until then test_c2_overlay_closure (serving_c2_contract.py imports a module the image does not hold) and the 'checked-in files are what the manifests generate' tests (test_fusion_wp, test_tp4_fusion_jobs) are red by exactly that block. (2) smoke_rules: toolcall_whitespace_smoke.problems(env, container_text) (also an image_files entry, because the overlaid test module imports it) needs the container log of an API-server boot (the contract's 'profile NAME: vLLM argv' line); it asks for the 'toolcall whitespace armed' line and the 'installed on' line (or 'not needed' on a vLLM whose converter already keeps the edges), and treats a 'disabled' line as a problem unless the arm's env sets QWEN_C2_TOOLCALL_WS=0. (3) qwen-fast-vllm-cpu.yml (tag-triggered installed-vLLM contract, not a shared file named by the preamble): add `python -B -m unittest -v test_c2_toolcall_whitespace` beside test_c2_parser_rechunk, so the real installed 0.25.1 parsers run it too. In the any-ref CPU suite the EngineTests class is skipped (no vLLM there), exactly as test_c2_parser_rechunk's CorpusTests are; the other 35 tests run. (4) Shared files this branch DID edit: scripts/ci/test_tp4_closure_literals.py (one word: c2_toolcall_whitespace added to SERVED beside c2_parser_rechunk, because serving_c2_contract.arm_toolcall_whitespace imports it lazily and test_every_lazy_import_of_a_served_module_is_classified fails without it; keep it when merging) and scripts/ci/serving_c2_contract.py, 16 added lines (a docstring paragraph, arm_toolcall_whitespace() beside arm_parser_rechunk(), one call in boot() inside `if api_server:` before the parser M arming). It is the arming point, the preamble's shared list does not name it, and parser M's was added the same way; expect a textual merge with other packages that touch boot(). The hook is a different class from the contract's PostImportHook on purpose (it is armed for every profile, and test_c2_parser_rechunk / test_serving_c2_contract assert the profile-gated PostImportHook sets exactly). (5) Not done on purpose: no card job (nothing runs on a device), no profile env flag, no audit twin (the equivalent audit is the CPU test against the real parsers). 13x10: nothing depends on the compute grid. (6) Same bug class elsewhere: nemotron_v3 and seed_oss share qwen3_config and _qwen3_arg_converter, so the swap changes them too; this image serves neither. The converter is whitespace-sensitive for one thing the fix does not touch: a null-typed value the model pads with extra blank lines (`\\n\\nnull\\n\\n`) is no longer coerced to null (coerce_to_schema_type compares value.lower() == 'null'); the template never renders that."
+}
