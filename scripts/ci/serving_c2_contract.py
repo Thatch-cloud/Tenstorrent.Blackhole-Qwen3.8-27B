@@ -48,7 +48,10 @@ process match it:
    server: when vLLM imports vllm.parser.abstract_parser, DelegatingParser.parse_delta is wrapped
    to feed the parsers one token per sub-delta where that matters and merge the results into one
    message per step. general, the general-prefix profiles and exact never arm it (general and
-   general-prefix decode one token per step).
+   general-prefix decode one token per step). Every profile, in the same API server, arms
+   c2_toolcall_whitespace (QWEN_C2_TOOLCALL_WS=0 or "toolcall_whitespace": false turns it off): vLLM 0.25.1's
+   qwen3 tool parser strip()s every <parameter=...> value, which loses the trailing newline of a written file
+   and the indentation of an edit; the fix removes only the template's one framing newline at each end.
 8. meshes: a profile that names no mesh_device serves the pair exactly as before - the image's MESH_DEVICE
    (P300, a (1, 2) mesh) under the p150_x2 descriptor. A profile with mesh_device P150x4 (the general-tp4
    family) serves all four cards as one (1, 4) mesh: the contract sets MESH_DEVICE from it, the profile names
@@ -1404,6 +1407,16 @@ def arm_parser_rechunk(profile_name):
         profile_name, c2_parser_rechunk.MODULE, c2_parser_rechunk.CLASS)
 
 
+def arm_toolcall_whitespace(profile, environ):
+    """Keep the edge whitespace of tool-call arguments in the vLLM API server (c2_toolcall_whitespace): vLLM 0.25.1's
+    qwen3 parser strip()s every argument. ON for every profile unless QWEN_C2_TOOLCALL_WS=0 or the profile says
+    "toolcall_whitespace": false. The module is imported here, at boot, so an image without it fails the API server's
+    boot instead of serving the bug; install refuses a parser that is not vLLM 0.25.1's."""
+    import c2_toolcall_whitespace
+
+    return c2_toolcall_whitespace.arm(profile, environ)
+
+
 def boot(environ=None, orig_argv=None):
     environ = os.environ if environ is None else environ
     if environ.get('QWEN_C2_SERVING') != '1':
@@ -1495,6 +1508,7 @@ def boot(environ=None, orig_argv=None):
             counter = salt_counter()
             sys.meta_path.insert(0, PostImportHook(
                 INPUT_PROCESSOR, lambda module: install_salt_policy(module, key, counter)))
+        arm_toolcall_whitespace(profile, environ)
         if parser_rechunk(profile):
             arm_parser_rechunk(profile['name'])
         if profile.get('request_contract', True) is False:
