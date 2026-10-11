@@ -234,5 +234,137 @@ class LeverTableTests(unittest.TestCase):
         self.assertEqual(len(re.findall(r'(?m)^\| `QWEN_', text)) >= len(levers.LEVERS), True)
 
 
+
+class OctoModeJudgingTests(unittest.TestCase):
+    """Card run 38129663805 (the audited attach of the combined candidate, tp4/ship-4) read red on rules that assume the M3 quads: under QWEN_FAST_OCTO=live with the octo draft the
+    eight-seat rounds are octo rounds drafted by ONE pass over eight slots, the second quad is never built, and the keyed round-host write is off while the T2 audit asks for its lines."""
+
+    OCTO = {'QWEN_FAST_QUAD_DRAFT_BLOCKS': '2', 'QWEN_FAST_OCTO': 'live', 'QWEN_FAST_OCTO_DRAFT': '1'}
+    FACTS = dict(quad_markers=1, quad_marker_slots=['0,1,2,3'], quads_rounds=0, octo_pass_rounds=147, quad_fallbacks=0, quad_disabled=0,
+                 pooled_mask_slots=['0,1,2,3'], pooled_output_slots=['0,1,2,3'], pooled_refused=0, singles_groups_equal=['0,1,2,3'])
+
+    def problems(self, env, **changes):
+        return check.blocks_problems(dict(self.FACTS, **changes), env, True)
+
+    def test_the_log_of_the_card_run_is_clean_under_the_octo_draft(self):
+        self.assertEqual(self.problems(self.OCTO), [])
+        self.assertEqual(self.problems(dict(self.OCTO, QWEN_FAST_DRAFT_SINGLES_AUDIT='1')), [])
+
+    def test_the_first_quad_is_still_required_and_the_second_at_most_once(self):
+        self.assertTrue(any('quad marker' in p for p in self.problems(self.OCTO, quad_markers=0, quad_marker_slots=[])))
+        self.assertTrue(any('quad marker' in p for p in self.problems(self.OCTO, quad_markers=1, quad_marker_slots=['4,5,6,7'])))
+        self.assertEqual(self.problems(self.OCTO, quad_markers=2, quad_marker_slots=['0,1,2,3', '4,5,6,7'], pooled_mask_slots=['0,1,2,3', '4,5,6,7'],
+                                       pooled_output_slots=['0,1,2,3', '4,5,6,7']), [])
+        self.assertTrue(any('quad marker' in p for p in self.problems(self.OCTO, quad_markers=2, quad_marker_slots=['0,1,2,3', '0,1,2,3'])))
+
+    def test_a_round_must_have_been_drafted_by_the_octo_pass_or_by_both_quads(self):
+        self.assertTrue(any('no round was drafted by the octo pass' in p for p in self.problems(self.OCTO, octo_pass_rounds=0)))
+        self.assertEqual(self.problems(self.OCTO, octo_pass_rounds=0, quads_rounds=3), [])
+
+    def test_a_fallback_or_a_disable_still_fails_under_the_octo_draft(self):
+        self.assertTrue(any('fell back 2 times and was disabled 1' in p for p in self.problems(self.OCTO, quad_fallbacks=2, quad_disabled=1)))
+
+    def test_the_m3_rules_are_what_they_were_without_the_octo_draft_and_off_octo(self):
+        for env in (dict(self.OCTO, QWEN_FAST_OCTO_DRAFT='0'), {'QWEN_FAST_QUAD_DRAFT_BLOCKS': '2'}, dict(self.OCTO, QWEN_FAST_OCTO='alternate')):
+            with self.subTest(env=sorted(env.items())):
+                found = self.problems(env)
+                self.assertTrue(any('quad marker' in p and 'once for each of 0,1,2,3 and 4,5,6,7' in p for p in found), found)
+                self.assertTrue(any('no round was served by both quads' in p for p in found), found)
+                self.assertTrue(any('pooled' in p and '4,5,6,7' in p for p in found), found)
+        both = dict(self.FACTS, quad_markers=2, quad_marker_slots=['0,1,2,3', '4,5,6,7'], quads_rounds=9, octo_pass_rounds=0, pooled_mask_slots=['0,1,2,3', '4,5,6,7'],
+                    pooled_output_slots=['0,1,2,3', '4,5,6,7'])
+        self.assertEqual(check.blocks_problems(both, dict(self.OCTO, QWEN_FAST_OCTO_DRAFT='0'), True), [])
+
+    def test_the_facts_count_the_octo_pass_selection(self):
+        text = '[PACKED-SELECT] round=3 pairs=[[0, 1, 2, 3, 4, 5, 6, 7]] users=8 calls=1 collect_ms=4.4 select_ms=2.8\n[PACKED-SELECT] round=4 pairs=[[0, 1, 2, 3], [4, 5]] users=6 calls=1\n'
+        facts = check.draft_facts(text)
+        self.assertEqual((facts['octo_pass_rounds'], facts['quads_rounds']), (1, 0))
+
+    def test_the_candidates_profiles_are_judged_as_octo_pass_arms(self):
+        for name in sorted(PROFILES):
+            if name.startswith(BASE + '-w2-er-fx-') and 'QWEN_FAST_OCTO_DRAFT' in PROFILES[name]['env'] and PROFILES[name]['env'].get('QWEN_FAST_OCTO') == 'live':
+                self.assertTrue(check.octo_pass_mode(PROFILES[name]['env']), name)
+        self.assertFalse(check.octo_pass_mode({}))
+
+
+class KeyedUnderTheT2AuditTests(unittest.TestCase):
+    """verify_prestage.key_matches returns False while QWEN_FAST_VERIFY_T2_AUDIT=1 (an audited verify takes the diff that writes the audit's lines): the audited arm takes no keyed write, M3 or octo."""
+
+    FLAGS = {'QWEN_FAST_TP4_ROUND_HOST_LOG': '1', 'QWEN_FAST_TP4_ROUND_HOST_SELECT': '1', 'QWEN_FAST_TP4_ROUND_HOST_READ': '1', 'QWEN_FAST_TP4_ROUND_HOST_KEYED': '1',
+             'QWEN_FAST_TP4_ROUND_HOST_LEAN': '1', 'QWEN_FAST_TP4_ROUND_HOST_AUDIT': '1'}
+
+    def text(self, keyed=0):
+        import round_host
+
+        engaged = '[PINDIAG] round host engaged ' + ' '.join('%s=%d' % (name.rsplit('_', 1)[-1].lower(), int(self.FLAGS.get(name) == '1')) for name in round_host.FLAGS)
+        lines = [engaged]
+        for number in range(120):
+            values = {name: 1.0 for name in round_host.Ledger.FIELDS}
+            lines.append(round_host.format_line(number + 1, 8, values, dict(select=1, read=4, keyed=keyed, guard=0), {}, 1000 + number))
+        lines += ['[ROUND-HOST-AUDIT] kind=select equal=1', '[ROUND-HOST-AUDIT] kind=merge equal=1']
+        return '\n'.join(lines) + '\n'
+
+    def test_the_audited_octo_twin_is_not_held_to_a_keyed_share_or_a_keyed_audit_line(self):
+        env = dict(self.FLAGS, QWEN_FAST_VERIFY_T2_AUDIT='1')
+        problems, facts = check.round_host_problems(env, self.text(keyed=0), True)
+        self.assertEqual(problems, [])
+        self.assertEqual(facts.get('round_host_keyed_exempt'), 'verify_t2_audit')
+        self.assertNotIn('round_host_keyed_share', facts)
+
+    def test_without_the_t2_audit_both_rules_stand(self):
+        for value in ('0', None):
+            env = dict(self.FLAGS, **({} if value is None else {'QWEN_FAST_VERIFY_T2_AUDIT': value}))
+            problems, facts = check.round_host_problems(env, self.text(keyed=0), True)
+            self.assertTrue(any('took the keyed write' in p for p in problems), problems)
+            self.assertTrue(any('kind=keyed' in p for p in problems), problems)
+        problems, facts = check.round_host_problems(dict(self.FLAGS), self.text(keyed=1) + '[ROUND-HOST-AUDIT] kind=keyed equal=1 checked=149 changed=0\n', True)
+        self.assertEqual(problems, [])
+
+    def test_the_candidates_own_profiles_say_which_arm_is_exempt(self):
+        for name in sorted(PROFILES):
+            env = PROFILES[name]['env']
+            if name.startswith(BASE + '-w2-er-fx-') and env.get('QWEN_FAST_TP4_ROUND_HOST_KEYED') == '1' and env.get('QWEN_FAST_VERIFY_T2_AUDIT') == '1':
+                self.assertEqual(env.get('QWEN_FAST_TP4_ROUND_HOST_AUDIT'), '1', name)
+                self.assertTrue(PROFILES[name].get('gate_only') is True, name)
+
+
+class OctoDramFloorTests(unittest.TestCase):
+    """The free DRAM after the eight parked engines: 2.186 GB a chip measured on the audited octo arm (card run 38129663805), the four-user stack's floors (3.6 audited, 4.7 audits-off) are not its."""
+
+    def ledger(self, free):
+        facts = '\n'.join('[MEMLEDGER] phase=P7 point=x chip%d allocated=%.3fGB free=%.3fGB largest_free=%.1fMB total=33.508GB' % (chip, 33.508 - free - 3.346, free + 3.346, (free + 3.3) * 900)
+                         for chip in range(4)) + '\n'
+        facts += '\n'.join('[MEMLEDGER] phase=P7p point=parked k=8 chip%d allocated=%.3fGB free=%.3fGB largest_free=%.1fMB total=33.5GB' % (chip, 33.508 - free, free, free * 900)
+                          for chip in range(4)) + '\n'
+        import parked_markers as markers
+
+        return markers.scan(facts.splitlines())
+
+    def test_the_measured_audited_reading_passes_the_octo_floor_and_fails_the_four_user_one(self):
+        import parked_judge as judge
+
+        facts = self.ledger(2.186)
+        band = judge.ENGINE_GB_LEVERS                    # (the fusion levers' band: 0.418 GB an engine, measured on this arm too)
+        self.assertEqual(judge.ledger_problems(facts, 8, True, band, octo=True), [])
+        self.assertTrue(any('3.6 GB floor of the audited arm' in p for p in judge.ledger_problems(facts, 8, True, band)))
+        self.assertTrue(any('2.1 GB floor of the octo audited arm' in p for p in judge.ledger_problems(self.ledger(2.0), 8, True, band, octo=True)))
+
+    def test_the_audits_off_octo_floor_is_its_own_estimate_and_binds(self):
+        import parked_judge as judge
+
+        band = judge.ENGINE_GB_LEVERS
+        self.assertEqual(judge.ledger_problems(self.ledger(3.4), 8, False, band, octo=True), [])
+        self.assertTrue(any('3.2 GB floor of the octo audits-off arm' in p for p in judge.ledger_problems(self.ledger(3.0), 8, False, band, octo=True)))
+        self.assertTrue(any('4.7 GB floor of the audits-off arm' in p for p in judge.ledger_problems(self.ledger(3.4), 8, False, band)))
+
+    def test_the_octo_floors_are_set_by_the_flag_the_profile_sets(self):
+        import parked_judge as judge
+
+        self.assertTrue(judge.octo_on({'QWEN_FAST_OCTO': 'live'}) and judge.octo_on({'QWEN_FAST_OCTO': 'alternate'}))
+        self.assertFalse(judge.octo_on({}) or judge.octo_on({'QWEN_FAST_OCTO': 'off'}))
+        self.assertLess(judge.LEDGER_FREE_FLOOR_OCTO_GB['audited'], 2.186)
+        self.assertLess(judge.LEDGER_FREE_FLOOR_OCTO_GB['plain'], 2.186 + 1.10)       # below the audited reading plus the least the audits ever held
+        self.assertGreater(judge.LEDGER_FREE_FLOOR_OCTO_GB['audited'], 1.47 + 0.25 - 1.0)   # (the arrival's need is met at steady state by the lower consumers' arithmetic in parked_judge)
+
 if __name__ == '__main__':
     unittest.main()

@@ -174,6 +174,31 @@ layout to `kv_page_writer_tp4.attach` (`layout_spans`), and the decision reads i
 `test_fusion_capture_rules.KVPageTests` builds both writers the way the model does, under the real profiles' env, and runs the warm forward then the capture behind the capture rules; the
 negative control (a warm writer without the layout) reproduces the card's failure. Any other lever that decides a block's path from the warm fixture's collapsed spans would fail the same way.
 
+## 7b. Card finding: the audited attach of the combined candidate (run 38129663805)
+
+The candidate booted and served (audit_mismatches 0 over 803 publish rounds, octo rounds executed, no compile on a shape switch); four things read red.
+
+1. **`RecursionError` in every mid-serving draft build, then `octo draft disabled`.** `draft_fusion_tp.track` and `grid13_tp.track` both wrap the ttnn module's `begin_trace_capture` / `end_trace_capture`
+   and both run on every audit call; each looked only for its OWN marker on the TOP wrapper, so with the other's wrapper on top each wrapped again. A Lever N cycle alternates prefill chunks (grid13's
+   agmm audits) with draft passes (WP6's audits): the chain grew one layer per alternation until the next capture (a new pair's build, the octo draft's rebuild) recursed through it. Neither package alone
+   alternates, so neither package's tests saw it. Fix: every tracker lists itself and the trackers beneath it on its wrapper (`capture_trackers`) and finds its own anywhere in the chain
+   (test_capture_trackers: 5,000 alternations leave two wrappers; the old code fails it). Only the audited arms call `track`; the traffic arm never ran into this. `QWEN_FAST_OCTO_DRAFT=1` stays in the
+   candidate: the +46.6% measured on the Lever N stack was all three levers together, the quad-draft arm (Q1/Q2) is the A/B that decides whether the octo draft's +6.1% is worth its extra capture
+   (its tau, one more trace, a lifecycle beside the draft book); with the recursion gone nothing else argues for dropping it.
+2. **`only 0 of 225 verifies took the keyed write` and no `kind=keyed` audit line.** `verify_prestage.key_matches` returns False while `QWEN_FAST_VERIFY_T2_AUDIT=1` (an audited verify takes the diff that
+   writes the T2 audit's lines), so an arm that sets it takes the value diff on every round, M3 or octo: the audited octo twins set it (the packed-window audit of the third block), `-fx-all-audit` does not.
+   Not an octo gap: the smoke rule now exempts the keyed share and the keyed audit line under that flag (`round_host_keyed_exempt`). What the audited arm gives up is the diff's own recompute, about
+   2.3 ms of a verify (`diff_ms` of the fences line); the keyed claim is audited by the arms without the T2 audit (M3 blocks, `-fx-all-audit`), and an octo round's keyed share is judged on the traffic
+   arm's ledger. Nothing here measures the keyed write ON an octo round: the first unaudited ledger that does is G1's.
+3. **Quad rules that assume the M3 pair of quads.** Under `QWEN_FAST_OCTO=live` with the octo draft the eight-seat rounds are one pass over eight slots (`[PACKED-SELECT] pairs=[[0..7]]`), the second quad
+   is never built and the first still serves the M3 rounds below the octo threshold. `blocks_problems` is octo-pass aware (`octo_pass_mode`): the first quad is required, the second at most once, a round
+   must be drafted by the octo pass or by both quads, a quad fallback or disable still fails. Without the octo draft, under `alternate` and off octo the rules are unchanged (test_octo3_judge).
+4. **Free DRAM after the parked engines, 2.186 GB a chip against a 3.6 GB audited floor.** Measured on all four chips; the parked engines took the usual 3.336 GB (0.418 each). The octo block's packed
+   block is 3.602 GB against 2.471 GB for an M3 block and the lower KV pool gives back about 1.9 GB, so the octo stack holds about 1.5 GB less than the four-user one; the audits (1.10-1.26 GB on the
+   four-user stack) are part of what is held in the audited arm. The octo arms have their own floors (`parked_judge.LEDGER_FREE_FLOOR_OCTO_GB`): audited 2.1 GB (the measurement less 4%), audits-off
+   3.2 GB (an ESTIMATE: the audited reading plus the audits' least cost; G1's P7p reading replaces it). The traffic arm needs about 1.47 GB for an arrival and keeps about 2.5 GB at its floor after the first
+   round, the quad and the octo draft have built; the audited arm measured 1.498 GB there. No change to the host tier (host RAM) or the octo plan is needed for the traffic arm.
+
 ## 8. Not done
 
 K5-A at eight rows (the octo block keeps the served batched GDN launch); an 8x8 K/V page writer (own card-M record); the octo draft in the draft book; the batched collect for the octo pass; the Q1/Q2 qualification

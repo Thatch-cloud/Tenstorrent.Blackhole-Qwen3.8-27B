@@ -15,7 +15,8 @@
   "test_octo3_judge",
   "test_octo3_pack",
   "test_octo3_ship",
-  "test_block_warm_capture"
+  "test_block_warm_capture",
+  "test_capture_trackers"
  ],
  "ship": [
   {
