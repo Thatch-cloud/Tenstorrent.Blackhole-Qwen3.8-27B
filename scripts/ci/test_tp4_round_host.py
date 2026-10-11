@@ -1185,6 +1185,10 @@ class ProfileTests(unittest.TestCase):
         # the op-fusion programme's two combined twins (gate only) carry the four levers on purpose, and the audit flag on the audited one
         combined = {fusion.NAMESPACE + 'all': {SELECT, READ, KEYED, LEAN}, fusion.NAMESPACE + 'all-audit': {SELECT, READ, KEYED, LEAN, AUDIT}}
         combined.update((name, {SELECT, READ, KEYED, LEAN}) for name in fusion.ship_names())            # the ship candidate: the timed combined arm as a traffic profile
+        import make_prefix_tier_profiles as tier
+
+        # ... and the same with the host KV tier (make_prefix_tier_profiles): the candidate as a traffic profile, its audit twin gate only with the audit flag
+        combined.update({tier.SHIP: {SELECT, READ, KEYED, LEAN}, tier.SHIP_AUDIT: {SELECT, READ, KEYED, LEAN, AUDIT}})
         # the host-gap package WPH's composition twins (-fx-wph-*) are the combined timed arm plus their own flags, so they carry the four levers (never the audit flag)
         combined.update({name: {SELECT, READ, KEYED, LEAN} for name in data['profiles'] if name.startswith(fusion.NAMESPACE + 'wph-')})
         # the single-lever composition twins on top of the combined arm are the combined arm (or the combined audited arm) plus their own flags, so they carry what their parents carry:
@@ -1202,7 +1206,7 @@ class ProfileTests(unittest.TestCase):
                 carried = set(round_host.FLAGS) & set(profile.get('env', {}))
                 self.assertEqual(carried, combined.get(name, set()))
                 if name in combined:
-                    self.assertIs(profile.get('gate_only'), None if name in fusion.ship_names() else True)
+                    self.assertIs(profile.get('gate_only'), None if name in fusion.ship_names() or name == tier.SHIP else True)
 
     def test_the_checked_in_twins_are_what_the_generator_makes_from_the_parent(self):
         self.assertEqual(generator.main(['--check']), 0)

@@ -246,6 +246,10 @@ class ProfileTests(unittest.TestCase):
         import make_w2_kill_profiles
 
         generated |= set(make_w2_kill_profiles.twin_names())
+        # the host KV tier's twin of the same parent carries them by inheritance too (test_prefix_tier_profiles holds it as that parent plus the tier names)
+        import make_prefix_tier_profiles
+
+        generated |= set(make_prefix_tier_profiles.twin_names())
         # the op-fusion programme's twins (make_fusion_profiles; test_fusion_wp holds each as the production profile plus exactly its flags) carry its parked flags by inheritance
         import make_fusion_profiles
 

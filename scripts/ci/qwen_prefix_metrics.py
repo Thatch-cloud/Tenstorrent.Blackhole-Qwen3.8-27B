@@ -33,6 +33,17 @@ capture failures, LRU and coupled evictions, unsalted and kill-switch denials, r
 grants; plus the export's own health: live writers, the oldest live write's age, dead writers' files,
 unreadable files, and whether the kill-switch file exists.
 
+Store hygiene and telemetry (qwen_prefix_registry; the registry's module docstring): the counters of the
+store policies (evicted_fair, evicted_superseded, supersede_*), of the admission classes (class_<name>, which
+partition the admissions: returning_served, first_turn, rewritten, short, kv_evicted, ckpt_evicted, ckpt_missing,
+refused, unsalted, denied; class_<name>_hit for those that still got a partial hit; class_ckpt_evicted_<why>,
+lost_tokens_<class>, returning_sessions, admitted_prompt_tokens), gauges for the policies in force (evict_fair,
+supersede, telemetry), the returning-session memory (ghost_now) and the engine process's host RSS and the host's
+MemAvailable (host_rss_bytes, host_mem_available_bytes: summed over writers, and MemAvailable the largest, since it
+is the host's), and two Prometheus histograms of a returning session's reuse distance, qwen_prefix_reuse_seconds and
+qwen_prefix_reuse_tokens, labelled outcome=served|missed (seconds since its previous turn; prompt tokens admitted for
+other requests since). The histograms ride in the export document beside the values.
+
 The API server also counts chat requests by the fields that decide whether the next turn's prompt
 extends this one - top-level reasoning_effort and chat_template_kwargs' reasoning_effort,
 preserve_thinking and enable_thinking (P0b, correction C6) - and by whether a cache_salt came with it
@@ -78,7 +89,19 @@ GAUGES = {
     'inflight_now': 'split prefills (Lever N) whose capture plan is still held for their later steps',
     'mid_loop_capture': '1 once the model graft declared captures inside its chunk loop (gap boundaries planned)',
     'disabled': '1 once the kill switch latched the registry off for the life of the engine',
+    'ghost_now': 'returning-session records the telemetry holds (bounded by QWEN_PREFIX_GHOST_ENTRIES)',
+    'evict_fair': '1 when the checkpoint store evicts fairly by tenant (QWEN_PREFIX_EVICT=fair), 0 for plain LRU',
+    'supersede': '1 when a newer checkpoint retires its conversation\'s older ones (QWEN_PREFIX_SUPERSEDE=1)',
+    'telemetry': '1 when admissions are classified and reuse distance is recorded (QWEN_PREFIX_TELEMETRY)',
+    'host_rss_bytes': 'resident set size of the engine process',
+    'host_mem_available_bytes': 'MemAvailable of the host the engine runs on',
+    'tier_bytes': 'host bytes the KV tier holds (raw packed attention-KV blocks)',
+    'tier_entries': 'KV blocks the host tier holds',
+    'tier_cap_bytes': 'the KV tier\'s byte cap (QWEN_PREFIX_HOST_TIER_GIB less the checkpoint store)',
+    'tier_on': '1 while the host KV tier spills and restores (configured, the model IO attached, not latched off)',
 }
+# Levels that are the host's, not the writer's: the largest over writers, not the sum.
+MAX_KEYS = ('host_mem_available_bytes',)
 COUNTERS = {
     'attempts': 'admission attempts the trim saw (vLLM calls get_computed_blocks once per attempt)',
     'staged': 'grants staged (idempotent per attempt)',
@@ -119,6 +142,67 @@ COUNTERS = {
     'capture_disabled': 'captures refused because the registry is latched off',
     'mid_loop_unplanned': 'boundaries below the loop drain left unplanned (the model had not declared mid-loop captures)',
     'reset_kept': 'reset_prefix_cache calls vLLM refused, so the registry was kept',
+    'evicted_fair': 'checkpoints evicted by the byte budget under the fair policy (the oldest of the biggest tenant)',
+    'evicted_superseded': 'checkpoints retired because a newer one of the same conversation landed',
+    'supersede_checks': 'captures that looked for superseded checkpoints',
+    'supersede_kept_pinned': 'superseded checkpoints kept because this step restores them',
+    'supersede_kept_shared': 'superseded checkpoints kept because they sit at a shared (gap) boundary',
+    'supersede_kept_branch': 'superseded checkpoints kept because two admissions resumed from them',
+    'admitted_prompt_tokens': 'prompt tokens of the admissions the telemetry classified',
+    'returning_sessions': 'admissions that extend the prompt of an earlier turn whose last boundary is remembered',
+    'class_failures': 'admissions the classification could not settle (the request still served)',
+    'class_returning_served': 'returning sessions whose hit reached their previous last boundary',
+    'class_first_turn': 'admissions with no earlier turn and a first block never seen (cold)',
+    'class_rewritten': 'admissions whose first block was seen but no earlier turn\'s boundary is a prefix (another session\'s '
+                       'shared prefix, or a rewritten or compacted history)',
+    'class_short': 'admissions too short to hold a reusable boundary',
+    'class_kv_evicted': 'returning sessions whose KV blocks were evicted from the device pool below their previous boundary',
+    'class_ckpt_evicted': 'returning sessions whose KV survived but whose checkpoint was stored and then removed',
+    'class_ckpt_missing': 'returning sessions whose KV survived but whose checkpoint was never stored',
+    'class_refused': 'returning sessions whose checkpoint is resident but was not granted (token mismatch, same-step, ceiling)',
+    'class_unsalted': 'admissions without a cache_salt (no hit is possible)',
+    'class_denied': 'admissions denied a hit (streaming session, kill switch)',
+    'class_refused_mismatch': 'refused returning sessions whose checkpoint token ids differed from the request',
+    'class_first_turn_hit': 'first-turn admissions that still got a partial hit through a shared prefix',
+    'class_rewritten_hit': 'rewritten admissions that still got a partial hit',
+    'class_kv_evicted_hit': 'kv_evicted returning sessions that still got a hit at an older boundary',
+    'class_ckpt_evicted_hit': 'ckpt_evicted returning sessions that still got a hit at an older boundary',
+    'class_ckpt_missing_hit': 'ckpt_missing returning sessions that still got a hit at an older boundary',
+    'class_refused_hit': 'refused returning sessions that still got a hit at an older boundary',
+    'class_ckpt_evicted_budget': 'ckpt_evicted sessions whose checkpoint the byte budget evicted',
+    'class_ckpt_evicted_coupled': 'ckpt_evicted sessions whose checkpoint went with its evicted boundary block',
+    'class_ckpt_evicted_superseded': 'ckpt_evicted sessions whose checkpoint a newer one superseded',
+    'class_ckpt_evicted_cleared': 'ckpt_evicted sessions whose checkpoint a registry clear dropped',
+    'class_ckpt_evicted_other': 'ckpt_evicted sessions whose checkpoint left for another reason',
+    'lost_tokens_kv_evicted': 'tokens a kv_evicted returning session had to re-prefill beyond its previous boundary\'s hit',
+    'lost_tokens_ckpt_evicted': 'tokens a ckpt_evicted returning session had to re-prefill beyond a full hit',
+    'lost_tokens_ckpt_missing': 'tokens a ckpt_missing returning session had to re-prefill beyond a full hit',
+    'lost_tokens_refused': 'tokens a refused returning session had to re-prefill beyond a full hit',
+    'tier_spill_flushes': 'schedule() calls that spilled evicted KV blocks to the host tier',
+    'tier_spill_blocks': 'KV blocks read from the device into the host tier when vLLM evicted them',
+    'tier_spill_bytes': 'bytes of those blocks',
+    'tier_spill_ms': 'time reading evicted blocks from the device into the tier',
+    'tier_spill_known': 'evicted blocks the tier already held',
+    'tier_spill_dropped_useless': 'evicted blocks not spilled: no checkpoint of their chain reaches them (or below the minimum session size)',
+    'tier_spill_dropped_cap': 'evicted blocks not spilled: over QWEN_PREFIX_HOST_TIER_SPILL_MAX_BLOCKS for the step',
+    'tier_spill_dropped_governor': 'evicted blocks not spilled: the host\'s MemAvailable was under the floor',
+    'tier_spill_dropped_full': 'evicted blocks not spilled: the tier could not make room',
+    'tier_spill_failures': 'device reads of evicted blocks that failed (three in a row latch the tier off)',
+    'tier_restore_requests': 'requests whose missing KV blocks were written back from the host tier',
+    'tier_restore_blocks': 'KV blocks written back from the host tier',
+    'tier_restore_bytes': 'bytes of those blocks',
+    'tier_restore_ms': 'time writing blocks back to the device (digest checks and the audit read-back included)',
+    'tier_restore_refused_room': 'restores refused because the pool lacked free blocks for them and the rest of the request',
+    'tier_restore_refused_digest': 'restores refused because a record failed its digest (the record is dropped)',
+    'tier_restore_failures': 'restores that failed (a missing record, a device write error)',
+    'tier_digest_checks': 'tier records whose digest was checked at restore',
+    'tier_digest_failures': 'tier records that failed their digest at restore',
+    'tier_evicted': 'tier records evicted by the tier\'s own policy',
+    'tier_ckpt_kept': 'checkpoints kept because their boundary block went to the host tier',
+    'tier_ckpt_dropped': 'checkpoints dropped because their KV is in neither the device nor the tier',
+    'tier_audit_reads': 'restored blocks read back from the device and compared (QWEN_PREFIX_HOST_TIER_AUDIT)',
+    'tier_audit_mismatches': 'restored blocks that read back differently (the engine stops)',
+    'tier_latched': '1 once the tier latched itself off (failing device IO, its kill switch)',
 }
 
 
@@ -176,7 +260,21 @@ def read_registry(registry, attempts=3):
     if 'disabled' in values:
         # the registry holds the reason (a string) once latched, else None
         values['disabled'] = int(values['disabled'] is not None)
+    if getattr(registry, 'telemetry', False):
+        try:
+            values.update(registry.host_gauges())
+        except Exception:
+            pass
     return numbers(values)
+
+
+def read_histograms(registry):
+    """The registry's reuse-distance histograms ({} for a registry without telemetry)."""
+    try:
+        histograms = registry.histograms()
+    except Exception:
+        return {}
+    return histograms if isinstance(histograms, dict) else {}
 
 
 def start_ticks(pid, proc='/proc'):
@@ -240,7 +338,7 @@ class Exporter(object):
         return dict(schema=SCHEMA, pid=self.pid, start_ticks=self.ticks, written_unix=self.clock(),
                     interval_s=self.interval_s, writes=self.writes + 1, errors=self.errors,
                     kill_switch_file=bool(self.kill_switch_path and os.path.exists(self.kill_switch_path)),
-                    values=read_registry(registry))
+                    values=read_registry(registry), histograms=read_histograms(registry))
 
     def publish(self):
         """Write one snapshot; False when this process holds no registry (nothing is written)."""
@@ -395,7 +493,10 @@ def metric_rows(documents, dead=0, unreadable=0, now=None, local=None):
     totals = {}
     for values in [document['values'] for document in documents] + ([local] if local is not None else []):
         for key, value in numbers(values).items():
-            totals[key] = totals.get(key, 0) + value
+            if key in MAX_KEYS:
+                totals[key] = max(totals.get(key, value), value)
+            else:
+                totals[key] = totals.get(key, 0) + value
     rows = []
     for key in sorted(totals):
         name, kind, help_text = metric_name(key)
@@ -417,6 +518,61 @@ def metric_rows(documents, dead=0, unreadable=0, now=None, local=None):
     return rows
 
 
+_HISTOGRAM_FAILED = []
+
+
+def merge_histograms(documents, local=None):
+    """{'reuse_seconds' | 'reuse_tokens': {'bounds': [...], outcome: {'counts': [...], 'sum': x}}} summed over every live
+    writer (and the local registry). A writer whose bounds differ from the first seen (another build) is skipped, never
+    added into misaligned buckets."""
+    merged = {}
+    for histograms in [document.get('histograms') for document in documents] + [local]:
+        if not isinstance(histograms, dict):
+            continue
+        for name, entry in histograms.items():
+            if not isinstance(entry, dict) or not isinstance(entry.get('bounds'), list):
+                continue
+            into = merged.setdefault(name, {'bounds': list(entry['bounds'])})
+            if entry['bounds'] != into['bounds']:
+                continue
+            for outcome, cell in entry.items():
+                if outcome == 'bounds' or not isinstance(cell, dict):
+                    continue
+                counts, total = cell.get('counts'), cell.get('sum')
+                if (not isinstance(counts, list) or len(counts) != len(into['bounds']) + 1
+                        or not all(isinstance(count, (int, float)) and not isinstance(count, bool) for count in counts)
+                        or not isinstance(total, (int, float))):
+                    continue
+                target = into.setdefault(outcome, {'counts': [0] * len(counts), 'sum': 0})
+                target['counts'] = [a + b for a, b in zip(target['counts'], counts)]
+                target['sum'] += total
+    return merged
+
+
+HISTOGRAM_HELP = {
+    'reuse_seconds': 'seconds since a returning session\'s previous turn, by whether its hit reached the previous boundary '
+                     '(served) or not (missed)',
+    'reuse_tokens': 'prompt tokens admitted for other requests since a returning session\'s previous turn (the reuse distance a '
+                    'cache would have had to span), by outcome',
+}
+
+
+def histogram_rows(merged):
+    """[(name, help, outcome, [(le, cumulative count)] ending in +Inf, sum)] for the Prometheus histograms."""
+    rows = []
+    for name in sorted(merged):
+        entry = merged[name]
+        for outcome in sorted(key for key in entry if key != 'bounds'):
+            cell = entry[outcome]
+            running, buckets = 0, []
+            for bound, count in zip(entry['bounds'], cell['counts']):
+                running += count
+                buckets.append((repr(float(bound)), running))
+            buckets.append(('+Inf', running + cell['counts'][-1]))
+            rows.append((PREFIX + name, HISTOGRAM_HELP.get(name, 'reuse distance histogram'), outcome, buckets, cell['sum']))
+    return rows
+
+
 class PrefixCollector(object):
     """A prometheus_client custom collector over the engine exports (see the module docstring)."""
 
@@ -435,12 +591,32 @@ class PrefixCollector(object):
                 local = None
         return metric_rows(documents, dead, unreadable, self.clock(), local)
 
+    def histograms(self):
+        """The merged reuse-distance histograms of every live writer (and a registry of this process)."""
+        documents = read_documents(self.directory, self.alive)[0]
+        registry = self.lookup()
+        return merge_histograms(documents, read_histograms(registry) if registry is not None else None)
+
     def collect(self):
         from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
         for kind, name, help_text, value in self.rows():
             family = CounterMetricFamily if kind == 'counter' else GaugeMetricFamily
             yield family(name, help_text, value=value)
+        try:
+            from prometheus_client.core import HistogramMetricFamily
+
+            families = {}
+            for name, help_text, outcome, buckets, total in histogram_rows(self.histograms()):
+                if name not in families:
+                    families[name] = HistogramMetricFamily(name, help_text, labels=('outcome',))
+                families[name].add_metric([outcome], buckets, total)
+            for name in sorted(families):
+                yield families[name]
+        except Exception as error:
+            if not _HISTOGRAM_FAILED:
+                _HISTOGRAM_FAILED.append(error)
+                log('reuse histograms not exposed: %s: %s', type(error).__name__, error)
         requests = CounterMetricFamily(
             PREFIX + 'chat_requests', 'chat completions by the fields that decide whether the next turn\'s prompt '
             'extends this one (reasoning_effort, chat_template_kwargs) and by cache_salt (unset: no hit)',

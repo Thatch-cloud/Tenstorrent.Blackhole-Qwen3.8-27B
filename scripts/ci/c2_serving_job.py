@@ -127,7 +127,23 @@ Keys (every one optional but C2_IMAGE_TAG):
                       sticky-session profiles only; on them exactness-traced and lifecycle-tiny are
                       NOT_APPLICABLE, and a plan with no applicable arm is refused by the gate. agent-turns
                       (tp4/packed-prefix: the agent-turn replay, eight conversations of several turns) runs the prefix
-                      and the control arm; agent-turns-prefix and agent-turns-baseline run one arm each (the ABAB jobs)
+                      and the control arm; agent-turns-prefix and agent-turns-baseline run one arm each (the ABAB jobs).
+                      tiers (tp4/prefix-tiers: the host KV tier and the preconverted checkpoints; needs a profile with
+                      QWEN_PREFIX_HOST_TIER_GIB, no baseline) is three arms, each also a plan: tier-attach (the audited
+                      chain: the first restore from preconverted tensors, compared with today's conversion), tier-returning
+                      (sessions, a flood the size of the KV pool, every session's return against its cold twin, the tier's
+                      kill switch) and tier-timed (TTFT of a cold prefill, a device-resident hit and a host restore at
+                      ~32k/128k/254k; a measurement beside its exactness read)
+                      tier-concurrent and tier-concurrent-timed (what the tier costs the users who are not using it: seven
+                      seats decode steadily while an eighth session returns from host RAM, and while a long fresh prompt
+                      displaces blocks into the tier; the longest wait of any seat and the round p50/p99 against the arm's own
+                      control window, the returning turn against its cold twin) are one arm each and run on a tier profile OR
+                      on its no-tier control profile (the ABAB pairs); the audited one prints the stall, the timed one judges it
+                      against the Lever N decode gap floor; scripts/ci/tier_concurrent_compare.py compares two arms' results
+                      tier-quota (per-tenant quotas, qwen_prefix_registry.QUOTA_ENV_NAMES; needs a sticky prefix profile, with or without the tier): quota-control
+                      and quota-isolated (the profile plus the quota env, derived), each also a plan: tenant A floods the device pool while tenant B's session
+                      must still be a DEVICE-RESIDENT hit when it returns (quota-isolated) and must not be (quota-control: the flood has to reach it); both
+                      tenants' returns are compared with their cold twins
   C2_PREFIX_PROFILE   the prefix-reuse profile it serves (default general-prefix; must be a checkout profile)
   C2_PREFIX_BASELINE  the no-reuse profile it compares against (default general; none: timing without
                       the baseline arm)
@@ -233,7 +249,7 @@ TELEMETRY_MS_RANGE = (100, 10000)
 TELEMETRY_DEFAULT_MS = 1000
 DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
 # The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
-PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify')
+PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify', 'tiers', 'tier-concurrent', 'tier-concurrent-timed', 'tier-quota')
 # (arm, its plan): each exactness and lifecycle arm is a plan of its own, named as the arm, that runs
 # only it, judged as inside its plan (neither plan has a cross-arm check; c2_prefix_gate.PLAN_ARMS).
 # G1 v47 (run 36246961161) needed the eager arm again without the traced and audit arms' hour.
@@ -242,7 +258,11 @@ PREFIX_ARM_PLANS = (('exactness-traced', 'exactness'), ('exactness-audit', 'exac
                     ('lifecycle-evict', 'lifecycle'), ('lifecycle-store', 'lifecycle'),
                     ('lifecycle-tiny', 'lifecycle'),
                     # tp4/packed-prefix: the agent-turn replay's two arms, each as a job of its own (the ABAB pairs)
-                    ('agent-turns-prefix', 'agent-turns'), ('agent-turns-baseline', 'agent-turns'))
+                    ('agent-turns-prefix', 'agent-turns'), ('agent-turns-baseline', 'agent-turns'),
+                    # tp4/prefix-tiers: the host KV tier and the preconverted checkpoints, each arm a job of its own (docs/prefix-store-hygiene.md)
+                    ('tier-attach', 'tiers'), ('tier-returning', 'tiers'), ('tier-timed', 'tiers'),
+                    # the per-tenant quotas: the control (none) and the isolated arm (the quota env, derived), each a job of its own
+                    ('quota-control', 'tier-quota'), ('quota-isolated', 'tier-quota'))
 # The W-T1 tau lab (c2_tau_lab.py): its arms, the production profile it serves and its time box.
 TAULAB_ARMS = ('A1', 'A2', 'A3', 'A4', 'A5')
 TAULAB_PROFILE = 'c2-packed-tp4'

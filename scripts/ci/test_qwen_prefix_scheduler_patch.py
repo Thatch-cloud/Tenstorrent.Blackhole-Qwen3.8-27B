@@ -328,6 +328,7 @@ def fake_vllm_modules():
     coordinator.UnitaryKVCacheCoordinator = UnitaryKVCacheCoordinator
     utils = types.ModuleType('vllm.v1.core.kv_cache_utils')
     utils.get_block_hash = lambda key: key[0]
+    utils.make_block_hash_with_group_id = lambda block_hash, group_id: (block_hash, 0)
     modules['vllm.v1.core.kv_cache_coordinator'] = coordinator
     modules['vllm.v1.core.kv_cache_utils'] = utils
     return modules
@@ -395,6 +396,30 @@ class Pool(object):
 
     def give_back(self, blocks):
         self.free.extend(reversed(blocks))
+
+    # vLLM's BlockPool calls the host KV tier uses (the free list stands in for its free queue, which holds cached-free blocks too).
+    def get_num_free_blocks(self):
+        return len(self.free)
+
+    def get_new_blocks(self, count):
+        if count > len(self.free):
+            raise ValueError('Cannot get %d free blocks from the pool' % count)
+        return self.take(count)
+
+    def touch(self, blocks):
+        for block in blocks:
+            if block in self.free:
+                self.free.remove(block)
+
+    def free_blocks(self, ordered_blocks):
+        """The first block given is the first evicted (it joins the free list first)."""
+        self.free.extend(ordered_blocks)
+
+    def cache_full_blocks(self, request, blocks, num_cached_blocks, num_full_blocks, block_size, kv_cache_group_id, block_mask=None):
+        for index in range(num_cached_blocks, num_full_blocks):
+            key = (request.block_hashes[index], 0)
+            blocks[index].block_hash = key
+            self.cached_block_hash_to_block.insert(key, blocks[index])
 
 
 class Single(object):
@@ -538,6 +563,45 @@ class FakeScheduler(object):
             return False
         self.kv_cache_manager.block_pool.cached_block_hash_to_block.map.clear()
         return True
+
+
+class FakeKvIO(object):
+    """The model's tier IO on an in-memory device: block id -> the bytes the block holds. What a block holds is a pure function of its hash
+    (kv_content), as the real KV of a hash is of its token chain, so a block is right exactly when it holds kv_content(its hash)."""
+
+    block_bytes = 32
+    fingerprint = 'fake-kvio-1'
+
+    def __init__(self):
+        self.device = {}
+        self.reads = []
+        self.writes = []
+        self.fail_read = self.fail_write = self.corrupt_write = False
+
+    def read_blocks(self, ids, into=None):
+        if self.fail_read:
+            raise RuntimeError('device read refused')
+        self.reads.append(list(ids))
+        payloads = [self.device.get(block, b'\x00' * self.block_bytes) for block in ids]
+        if into is not None:
+            for view, payload in zip(into, payloads):
+                view[:] = payload
+            return list(into)
+        return payloads
+
+    def write_blocks(self, ids, payloads):
+        if self.fail_write:
+            raise RuntimeError('device write refused')
+        self.writes.append(list(ids))
+        for block, payload in zip(ids, payloads):
+            data = bytes(payload)
+            if self.corrupt_write:
+                data = bytes([data[0] ^ 1]) + data[1:]
+            self.device[block] = data
+
+
+def kv_content(block_hash):
+    return hashlib.sha256(b'kv' + bytes(block_hash)).digest()
 
 
 def tokens(count, seed):

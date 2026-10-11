@@ -94,9 +94,10 @@ class Engine(object):
     """One engine process: a model (stock or staged), its vLLM wrapper, a registry and a block pool."""
 
     def __init__(self, traced=False, environ=ON, sources=None, registry=True, h2d_refuse=False, h2d_mode='exact',
-                 region_reads=False, num_blocks=4096):
+                 region_reads=False, num_blocks=4096, raw_blocks=False):
         self.fake = F.FakeTTNN()
         self.fake.region_reads = region_reads
+        self.fake.raw_blocks = raw_blocks
         self.fake.h2d_refuse = h2d_refuse
         self.fake.h2d_mode = h2d_mode
         self.log = F.FakeLogger()
@@ -654,6 +655,309 @@ class Capture(ExactTestBase):
         engine.turn({'id': 'd'}, F.prompt(5000, seed=85), 0, [4096, 6144], force_plan=True)
         self.assertIn('plan=[4096] ', engine.rows_prefix()[-1])
         self.assertIn('dropped=[6144]', engine.rows_prefix()[-1])
+
+
+class PreconvertedCheckpoints(ExactTestBase):
+    """P1b: QWEN_PREFIX_CKPT_PRECONVERTED=1 stores each checkpoint tensor as the host tensor ttnn.from_torch built (the device's tile
+    layout and dtype) at capture, so a restore is copy_host_to_device_tensor and nothing else. Default off: the checkpoint is the torch
+    tensors and the restore converts, as before. Exactness is the same requirement either way: a hit equals a cold run byte for byte."""
+
+    ENV = dict(ON, QWEN_PREFIX_CKPT_PRECONVERTED='1')
+    AUDIT = dict(ENV, QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT='1')
+
+    def engine_with(self, environ, **kwargs):
+        engine = Engine(traced=self.traced, environ=environ, **kwargs)
+        engine.warm()
+        return engine
+
+    def chain(self, engine, name='pre', lengths=(3000, 5500, 7300, 9000)):
+        base = F.prompt(12000, seed=91)
+        conv, q = {'id': name}, 0
+        for length in lengths:
+            boundary = length // F.CHUNK * F.CHUNK
+            plan = [boundary] if boundary > q else []
+            self.run_turn_and_cold(engine, conv, base[:length], q, plan)
+            if plan:
+                q = plan[0]
+        return base
+
+    def converted(self, engine):
+        return [item for entry in engine.registry.entries.values() for item in list(entry.rec) + list(entry.carry)]
+
+    def test_a_chain_of_hits_equals_cold_runs_byte_for_byte(self):
+        engine = self.engine_with(self.ENV)
+        self.chain(engine)
+        self.assertGreater(engine.registry.stats['grants'], 0)
+        self.assertEqual(engine.registry.stats['restores'], engine.registry.stats['grants'])
+        items = self.converted(engine)
+        self.assertTrue(items)
+        self.assertTrue(all(isinstance(item, patcher_converted(engine)) for item in items))
+
+    def test_a_restore_converts_nothing_and_writes_the_stored_tensors(self):
+        engine = self.engine_with(self.ENV)
+        base = F.prompt(12000, seed=92)
+        conv = {'id': 'one'}
+        engine.turn(conv, base[:5000], 0, [4096])
+        entry = engine.registry.get(F.key_at(base[:5000].tolist(), 4096))
+        layers = len(entry.rec)
+        engine.fake.log.clear()
+        engine.turn(conv, base[:6500], 4096, [6144])
+        window = [row[0] for row in engine.fake.log if row[0] == 'h2d' or (row[0] == 'from_torch' and row[1] is False)]
+        # The restore's uploads come first; the new boundary's capture converts afterwards (once per tensor, at save time).
+        self.assertEqual(window[:2 * layers], ['h2d'] * (2 * layers), 'the restore converts nothing: it only uploads')
+        self.assertEqual(window[2 * layers:], ['from_torch'] * (2 * layers), 'what follows is the next capture\'s own conversion')
+
+    def test_off_by_default_the_checkpoint_is_the_torch_tensors_and_a_restore_converts_them(self):
+        engine = self.engine_with(ON)
+        base = F.prompt(12000, seed=93)
+        conv = {'id': 'off'}
+        engine.turn(conv, base[:5000], 0, [4096])
+        entry = engine.registry.get(F.key_at(base[:5000].tolist(), 4096))
+        self.assertTrue(all(isinstance(item, torch.Tensor) for item in list(entry.rec) + list(entry.carry)))
+        engine.fake.log.clear()
+        engine.turn(conv, base[:6500], 4096, [6144])
+        window = [row[0] for row in engine.fake.log if row[0] == 'h2d' or (row[0] == 'from_torch' and row[1] is False)]
+        self.assertEqual(window, ['from_torch', 'h2d'] * (2 * len(entry.rec)), 'each tensor is converted, then uploaded')
+
+    def test_the_stored_bytes_are_what_todays_conversion_produces(self):
+        """The same capture with the flag off and on: the stored host tensor equals ttnn.from_torch of the torch checkpoint, with the
+        restore's own arguments (the target's dtype, TILE layout, no device, ShardTensorToMesh on dim 0)."""
+        off = self.engine_with(ON)
+        on = self.engine_with(self.ENV)
+        base = F.prompt(12000, seed=94)
+        for engine in (off, on):
+            engine.turn({'id': 'same'}, base[:5000], 0, [4096])
+        key = F.key_at(base[:5000].tolist(), 4096)
+        torch_entry, converted_entry = off.registry.get(key), on.registry.get(key)
+        layers = [layer.attention for layer in on.model.layers if not layer.is_full_attention]
+        self.assertEqual(len(torch_entry.rec), len(converted_entry.rec))
+        for index, dn in enumerate(layers):
+            for source, stored, target in ((torch_entry.rec[index], converted_entry.rec[index], dn.rec_state),
+                                           (torch_entry.carry[index], converted_entry.carry[index], dn.conv_carry)):
+                legacy = on.fake.from_torch(source, dtype=target.dtype, layout=on.fake.TILE_LAYOUT, device=None,
+                                            mesh_mapper=on.fake.ShardTensorToMesh(on.model.mesh_device, dim=0))
+                self.assertTrue(torch.equal(stored.host.data, legacy.data))
+                self.assertEqual((stored.host.dtype.name, stored.host.layout, stored.host.on_device),
+                                 (legacy.dtype.name, legacy.layout, legacy.on_device))
+                self.assertEqual((stored.shape, stored.dtype), (tuple(source.shape), source.dtype))
+
+    def test_the_registry_is_charged_the_tilized_size(self):
+        engine = self.engine_with(self.ENV)
+        base = F.prompt(12000, seed=95)
+        engine.turn({'id': 'size'}, base[:5000], 0, [4096])
+        entry = engine.registry.get(F.key_at(base[:5000].tolist(), 4096))
+        # 3 GDN layers on 2 chips: rec [1, 2, 2, 2] fp32 per chip pads to [1, 2, 32, 32]; the carry [1, 3, 4] bf16 to [1, 32, 32]
+        want = 3 * 2 * (1 * 2 * 32 * 32 * 4 + 1 * 32 * 32 * 2)
+        self.assertEqual(entry.nbytes, want)
+        self.assertEqual(engine.registry.bytes, want)
+        self.assertGreater(entry.nbytes, 3 * (2 * 8 * 4 + 2 * 12 * 2), 'more than the logical bytes: the carry is padded to a tile')
+
+    def test_a_checkpoint_that_cannot_be_preconverted_stays_torch_and_the_request_is_exact(self):
+        engine = self.engine_with(self.ENV)
+        real = engine.fake.from_torch
+
+        def refuse(tensor, dtype=None, layout=None, device=None, mesh_mapper=None, memory_config=None):
+            if device is None:
+                raise MemoryError('host tensor')
+            return real(tensor, dtype=dtype, layout=layout, device=device, mesh_mapper=mesh_mapper, memory_config=memory_config)
+
+        engine.fake.from_torch = refuse
+        engine.module.ttnn.from_torch = refuse
+        base = F.prompt(12000, seed=96)
+        self.run_turn_and_cold(engine, {'id': 'refuse'}, base[:5000], 0, [4096])
+        entry = engine.registry.get(F.key_at(base[:5000].tolist(), 4096))
+        self.assertTrue(all(isinstance(item, torch.Tensor) for item in entry.rec))
+        self.assertTrue(engine.log.lines('checkpoint not preconverted'))
+
+    def test_forcing_the_copy_path_leaves_the_checkpoints_torch(self):
+        engine = self.engine_with(dict(self.ENV, QWEN_PREFIX_RESTORE='copy'))
+        base = F.prompt(12000, seed=97)
+        conv = {'id': 'copy'}
+        self.run_turn_and_cold(engine, conv, base[:5000], 0, [4096])
+        entry = engine.registry.get(F.key_at(base[:5000].tolist(), 4096))
+        self.assertTrue(all(isinstance(item, torch.Tensor) for item in entry.rec))
+        self.run_turn_and_cold(engine, conv, base[:6500], 4096, [6144])
+
+    def test_the_audit_compares_the_conversion_and_the_read_back_and_logs_it(self):
+        engine = self.engine_with(self.AUDIT)
+        base = F.prompt(12000, seed=98)
+        conv = {'id': 'audit'}
+        self.run_turn_and_cold(engine, conv, base[:5000], 0, [4096])
+        entry = engine.registry.get(F.key_at(base[:5000].tolist(), 4096))
+        self.assertTrue(all(item.source is not None for item in list(entry.rec) + list(entry.carry)))
+        self.run_turn_and_cold(engine, conv, base[:6500], 4096, [6144])
+        lines = engine.log.lines('[PREFIX-AUDIT-CKPT]')
+        self.assertEqual(len(lines), 1)
+        self.assertIn('tensors=6 conversion_equal=1 readback_equal=1', lines[0])
+
+    def test_the_audit_stops_the_engine_on_a_stored_tensor_that_changed(self):
+        engine = self.engine_with(self.AUDIT)
+        base = F.prompt(12000, seed=99)
+        conv = {'id': 'bad'}
+        engine.turn(conv, base[:5000], 0, [4096])
+        entry = engine.registry.get(F.key_at(base[:5000].tolist(), 4096))
+        entry.rec[1].host.data.view(-1)[0] += 1.0       # a bit of the stored conversion flips
+        with self.assertRaisesRegex(AssertionError, 'restored differently from its source'):
+            engine.turn(conv, base[:6500], 4096, [6144])
+        self.assertTrue(engine.log.lines('conversion_equal=0'))
+
+    def test_the_audit_flag_alone_keeps_nothing_and_changes_nothing(self):
+        engine = self.engine_with(dict(ON, QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT='1'))
+        base = F.prompt(12000, seed=100)
+        self.run_turn_and_cold(engine, {'id': 'only'}, base[:5000], 0, [4096])
+        entry = engine.registry.get(F.key_at(base[:5000].tolist(), 4096))
+        self.assertTrue(all(isinstance(item, torch.Tensor) for item in entry.rec))
+        self.assertEqual(engine.log.lines('[PREFIX-AUDIT-CKPT]'), [])
+
+    def test_the_row_check_accepts_a_converted_checkpoint_and_still_refuses_a_wrong_shape(self):
+        engine = self.engine_with(self.ENV)
+        base = F.prompt(12000, seed=101)
+        conv = {'id': 'spec'}
+        engine.turn(conv, base[:5000], 0, [4096])
+        entry = engine.registry.get(F.key_at(base[:5000].tolist(), 4096))
+        entry.rec[0].shape = (2, 2, 2, 4)
+        with self.assertRaisesRegex(AssertionError, 'checkpoint \\(rec shape, dtype, carry shape, dtype\\)'):
+            engine.turn(conv, base[:6500], 4096, [6144])
+
+
+class HostTierIO(ExactTestBase):
+    """The host KV tier's device side: QWEN_PREFIX_HOST_TIER_GIB attaches an IO that reads and writes KV blocks as raw bytes through the
+    qwen_kv_read extension's version-2 ops. Without the flag nothing is attached and the ops are never called."""
+
+    ENV = dict(ON, QWEN_PREFIX_HOST_TIER_GIB='32')
+
+    def engine_with(self, environ, raw=True, **kwargs):
+        engine = Engine(traced=self.traced, environ=environ, raw_blocks=raw, **kwargs)
+        engine.warm()
+        return engine
+
+    def test_the_flag_attaches_an_io_that_knows_the_pool_s_geometry(self):
+        engine = self.engine_with(self.ENV)
+        io = engine.registry.tier_io
+        self.assertIsInstance(io, engine.module._QwenKvTierIO)
+        # 'GGAGA': two full-attention layers of K and V = four caches; two chips; 2 heads of 64 x 2 float32 values per chip per block
+        self.assertEqual((len(io.caches), io.chips, io.slice_bytes), (4, 2, 2 * 64 * 2 * 4))
+        self.assertEqual(io.block_bytes, 4 * 2 * io.slice_bytes)
+        self.assertIn('kvtier1:4x2x1024', io.fingerprint)
+        self.assertTrue(engine.log.lines('host tier IO attached block_bytes=8192'))
+
+    def test_without_the_flag_nothing_is_attached_and_the_ops_are_never_called(self):
+        engine = self.engine_with(ON)
+        self.assertIsNone(engine.registry.tier_io)
+        base = F.prompt(6000, seed=120)
+        engine.turn({'id': 'off'}, base, 0, [4096])
+        self.assertFalse([row for row in engine.fake.log if row[0] in ('read_blocks_raw', 'write_blocks_raw')])
+
+    def test_an_image_without_the_raw_ops_refuses_to_start_naming_them(self):
+        engine = Engine(traced=self.traced, environ=self.ENV, raw_blocks=False)
+        with self.assertRaisesRegex(AssertionError, 'lacks ttnn.qwen_read_blocks_raw, ttnn.qwen_write_blocks_raw, ttnn.qwen_block_bytes'):
+            engine.warm()
+        self.assertIsNone(engine.registry.tier_io)
+
+    def test_the_io_waits_on_the_holder_for_a_registry_the_scheduler_has_not_built_yet(self):
+        engine = Engine(traced=self.traced, environ=self.ENV, registry=False, raw_blocks=True)
+        with registry_scope(None), prefix_env(self.ENV):
+            engine.wrapper.warmup_model_prefill(engine.model._paged_kv_caches, False)
+            holder = sys.modules[patcher.REGISTRY_KEY]
+            self.assertIsInstance(holder.tier_io, engine.module._QwenKvTierIO)
+            registry = prefix_registry.shared_registry(environ={'QWEN_PREFIX_HOST_TIER_GIB': '32'})
+            self.assertIs(registry.tier_io, holder.tier_io)
+            self.assertEqual(registry.tier.fingerprint, holder.tier_io.fingerprint)
+            self.assertTrue(registry.tier_on)
+
+    def serve_blocks(self, engine, seed=121):
+        base = F.prompt(6000, seed=seed)
+        conv = {'id': 'io%d' % seed}
+        engine.turn(conv, base, 0, [4096])
+        return conv['row'][0, :6000 // F.BLOCK].tolist()
+
+    def test_a_block_read_raw_and_written_back_is_the_same_bytes_and_only_that_block(self):
+        engine = self.engine_with(self.ENV)
+        io = engine.registry.tier_io
+        blocks = self.serve_blocks(engine)
+        want = [cache.data.clone() for cache in io.caches]
+        payloads = io.read_blocks(blocks[10:14])
+        self.assertEqual((len(payloads), {len(p) for p in payloads}), (4, {io.block_bytes}))
+        self.assertTrue(all(len(bytes(p)) == io.block_bytes for p in payloads), 'bytes-like')
+        for cache in io.caches:                         # lose the blocks, as an eviction and a reuse would
+            cache.data[blocks[10:14]] = 0
+        io.write_blocks(blocks[10:14], payloads)
+        for cache, before in zip(io.caches, want):
+            self.assertTrue(torch.equal(cache.data, before), 'every cache, every block: the same values, the neighbours untouched')
+
+    def test_the_payload_is_the_caches_bytes_chip_by_chip_in_the_documented_order(self):
+        engine = self.engine_with(self.ENV)
+        io = engine.registry.tier_io
+        blocks = self.serve_blocks(engine, seed=122)
+        block = blocks[3]
+        payload = io.read_blocks([block])[0]
+        offset = 0
+        for cache in io.caches:                           # tensor by tensor (layer, then K, then V) ...
+            per_chip = cache.data.shape[1] // io.chips
+            for chip in range(io.chips):                  # ... chip by chip ...
+                part = cache.data[block, chip * per_chip:(chip + 1) * per_chip].contiguous().view(torch.uint8).numpy().tobytes()
+                self.assertEqual(bytes(payload[offset:offset + io.slice_bytes]), part)    # ... the block's page range
+                offset += io.slice_bytes
+        self.assertEqual(offset, io.block_bytes)
+
+    def test_a_scattered_and_shuffled_set_round_trips(self):
+        engine = self.engine_with(self.ENV)
+        io = engine.registry.tier_io
+        blocks = self.serve_blocks(engine, seed=123)
+        picked = [blocks[40], blocks[3], blocks[41], blocks[17], blocks[16]]
+        before = [cache.data.clone() for cache in io.caches]
+        payloads = io.read_blocks(picked)
+        io.write_blocks(list(reversed(picked)), list(reversed(payloads)))
+        for cache, was in zip(io.caches, before):
+            self.assertTrue(torch.equal(cache.data, was))
+        swapped = io.read_blocks([picked[0]])[0]
+        self.assertEqual(bytes(swapped), bytes(payloads[0]))
+
+    def test_a_set_larger_than_one_device_call_is_chunked_and_still_round_trips(self):
+        engine = self.engine_with(self.ENV)
+        io = engine.registry.tier_io
+        blocks = self.serve_blocks(engine, seed=126)
+        io.CHUNK_BLOCKS = 4
+        before = [cache.data.clone() for cache in io.caches]
+        engine.fake.log.clear()
+        payloads = io.read_blocks(blocks[:10])
+        reads = [row for row in engine.fake.log if row[0] == 'read_blocks_raw']
+        self.assertEqual(sorted(row[1] for row in reads), [2] * len(io.caches) + [4] * 2 * len(io.caches))
+        for cache in io.caches:
+            cache.data[blocks[:10]] = 0
+        io.write_blocks(blocks[:10], payloads)
+        for cache, was in zip(io.caches, before):
+            self.assertTrue(torch.equal(cache.data, was))
+        self.assertEqual(sum(1 for row in engine.fake.log if row[0] == 'write_blocks_raw'), 3 * len(io.caches))
+
+    def test_a_wrong_sized_payload_and_a_count_mismatch_are_refused_before_the_device_is_touched(self):
+        engine = self.engine_with(self.ENV)
+        io = engine.registry.tier_io
+        blocks = self.serve_blocks(engine, seed=124)
+        engine.fake.log.clear()
+        with self.assertRaisesRegex(ValueError, 'the KV block is'):
+            io.write_blocks(blocks[:1], [b'short'])
+        with self.assertRaisesRegex(ValueError, 'payloads for'):
+            io.write_blocks(blocks[:2], [b'x'])
+        self.assertFalse([row for row in engine.fake.log if row[0] == 'write_blocks_raw'])
+
+    def test_a_refusing_device_raises_to_the_caller(self):
+        engine = self.engine_with(self.ENV)
+        io = engine.registry.tier_io
+        blocks = self.serve_blocks(engine, seed=125)
+        engine.fake.raw_read_fail = True
+        with self.assertRaisesRegex(RuntimeError, 'read refused'):
+            io.read_blocks(blocks[:2])
+        engine.fake.raw_read_fail = False
+        payloads = io.read_blocks(blocks[:2])
+        engine.fake.raw_write_fail = True
+        with self.assertRaisesRegex(RuntimeError, 'write refused'):
+            io.write_blocks(blocks[:2], payloads)
+
+
+def patcher_converted(engine):
+    """The staged model module's converted-tensor class (the staged source defines it)."""
+    return engine.module._QwenPrefixConverted
 
 
 class FastPathCoexistence(ExactTestBase):

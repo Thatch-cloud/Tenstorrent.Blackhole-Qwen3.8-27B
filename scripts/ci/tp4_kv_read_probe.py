@@ -12,6 +12,11 @@ Reads only: nothing is computed on the cards and no byte of the model's output c
 
 The real-prompt half of the qualification is the prefix gate's read-qualify arm (QWEN_PREFIX_AUDIT_READ=cross): see docs/prefix-audit-cost.md.
 
+QUALIFY, part three (the host KV tier's Q1'): when the extension is version 2 the same run checks ttnn.qwen_read_blocks_raw / qwen_write_blocks_raw
+(kv_region_read_card.run_raw): raw bytes read, written into a second cache and read back byte for byte, the unpacked values equal through the
+region read, a changed byte not read back as the original, no program growth, and the GB/s of 32, 256, 1024 and 4096 blocks each way. A version-1
+image reports raw=absent (not a failure: the host tier then refuses to attach).
+
 Last stdout lines: 'KV_READ_PROBE verdict=PASS|FAIL|NOT-MEASURED ...' then one JSON object (kind kv-read-probe-quad). Exit 0 PASS, 1 FAIL
 (any mismatch: the audit falls back to the old read), 2 the mesh did not open, the descriptor is not the ring's, or the extension is
 absent, 3 the watchdog.
@@ -86,6 +91,15 @@ def run(options, ttnn=None, environ=None, log=print):
             report['verdict'], chips, options.blocks, checks.get('whole_device_read_s'), checks.get('whole_unpack_s'),
             (checks.get('one') or {}).get('read_ms'), (checks.get('run') or {}).get('read_ms'), checks.get('read_ms_per_block_largest'),
             checks.get('program_cache_growth'), len(checks['problems'])))
+        raw = checks.get('raw') or {}
+        rates = raw.get('rates') or {}
+        top = rates.get(str(max((int(size) for size in rates), default=0))) or {}
+        log('KV_READ_PROBE raw=%s slice_bytes=%s growth=%s read_gbps=%s write_gbps=%s at_blocks=%s' % (
+            raw.get('status'), raw.get('slice_bytes'), raw.get('program_cache_growth'), top.get('read_gbps'), top.get('write_gbps'),
+            max((int(size) for size in rates), default=None)))
+        for size in sorted(rates, key=int):
+            log('KV_READ_PROBE raw rate blocks=%s bytes=%s read_ms=%s write_ms=%s read_gbps=%s write_gbps=%s' % (
+                size, rates[size]['bytes'], rates[size]['read_ms'], rates[size]['write_ms'], rates[size]['read_gbps'], rates[size]['write_gbps']))
         for problem in checks['problems']:
             log('KV_READ_PROBE problem: %s' % problem)
     except Exception as error:  # noqa: BLE001

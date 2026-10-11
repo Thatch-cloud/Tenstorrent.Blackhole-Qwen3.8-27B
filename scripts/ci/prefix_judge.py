@@ -73,8 +73,18 @@ CHUNK = 2048
 BLOCK = 64
 # How many rows a finding names before it counts the rest (c2_prefix_gate.MAX_LISTED).
 MAX_LISTED = 16
-# One checkpoint, both chips: 48 layers x (fp32 rec [1,24,128,128] + bf16 carry [1,3,5120]) (design 2.0.3).
-CHECKPOINT_NBYTES = 2 * 48 * (24 * 128 * 128 * 4 + 3 * 5120 * 2)
+
+
+def checkpoint_nbytes(state_bf16=False):
+    """One checkpoint of the whole mesh (qwen_prefix_registry.checkpoint_nbytes, mirrored: this module stays stdlib-only and
+    standalone): 48 layers x (recurrent state [48,128,128] + bf16 carry [3,10240]). The state is fp32 by default and bf16
+    under QWEN35_GDN_STATE_BF16=1, the production setting (78446592 bytes against 153944064): a gate that judges a store of
+    a given size must be told which dtype the engine ran."""
+    return 48 * (48 * 128 * 128 * (2 if state_bf16 else 4) + 3 * 10240 * 2)
+
+
+# The fp32 size, the gate's historical arithmetic (the default of store_entries and Oracle).
+CHECKPOINT_NBYTES = checkpoint_nbytes(False)
 DEFAULT_STORE_GIB = 8.0
 VERDICT_ORDER = ('FAIL', 'INFRA', 'RERUN', 'NOT_COMPARABLE', 'UNSTABLE', 'NOT_EXERCISED')
 
@@ -91,8 +101,9 @@ def worst(verdicts):
     return 'PASS' if verdicts else 'FAIL'
 
 
-def store_entries(store_gib=DEFAULT_STORE_GIB):
-    return int(float(store_gib) * (1 << 30)) // CHECKPOINT_NBYTES
+def store_entries(store_gib=DEFAULT_STORE_GIB, state_bf16=False):
+    """How many checkpoints a store of store_gib GiB holds: 55 of the default 8 GiB with the fp32 state, 109 with bf16."""
+    return int(float(store_gib) * (1 << 30)) // checkpoint_nbytes(state_bf16)
 
 
 def prefix_digests(tokens, step=BLOCK):
@@ -156,8 +167,8 @@ class Oracle(object):
     fast path's sticky sessions (module docstring item 5): the DFlash drop, the drafter-window ceiling
     and the C0 capture."""
 
-    def __init__(self, capacity=None, sticky=False):
-        self.capacity = store_entries() if capacity is None else int(capacity)
+    def __init__(self, capacity=None, sticky=False, state_bf16=False):
+        self.capacity = store_entries(state_bf16=state_bf16) if capacity is None else int(capacity)
         self.sticky = bool(sticky)
         self.published = {}
         self.checkpoints = OrderedDict()

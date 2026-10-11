@@ -31,6 +31,7 @@ import c2_serving_job as job  # noqa: E402
 import c2_smoke_check  # noqa: E402
 import make_fusion_jobs as jobs_gen  # noqa: E402
 import make_fusion_profiles as fusion  # noqa: E402
+import make_prefix_tier_profiles as tier_ships  # noqa: E402
 import parked_compare  # noqa: E402
 import parked_judge  # noqa: E402
 import serving_c2_contract as contract  # noqa: E402
@@ -99,7 +100,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(contract.traffic_waiver_pending(dict(PROFILES[SHIP], name=SHIP)), waiver['decision'].startswith('PENDING'))
         self.assertFalse(contract.traffic_waiver_pending(dict(PROFILES[PARENT], name=PARENT)), 'the production profile stays approved')
         self.assertTrue(PROFILES[PARENT][contract.TRAFFIC_WAIVER]['decision'].startswith('APPROVED'))
-        self.assertEqual(sorted(name for name, body in PROFILES.items() if contract.TRAFFIC_WAIVER in body), sorted(list(fusion.ship_names()) + [PARENT]))   # (the second ship candidate: test_oneq_ship; the octo ones: test_octo3_ship)
+        self.assertEqual(sorted(name for name, body in PROFILES.items() if contract.TRAFFIC_WAIVER in body), sorted(list(fusion.ship_names()) + [PARENT] + list(tier_ships.ship_names())))   # (the host KV tier's candidate: test_prefix_tier_profiles; the second ship candidate: test_oneq_ship; the octo ones: test_octo3_ship)
         self.assertGreaterEqual(len(waiver['evidence']), 5)
         self.assertEqual(waiver['decision'], SPEC['waiver']['decision'])
 

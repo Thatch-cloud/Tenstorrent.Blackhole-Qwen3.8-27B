@@ -54,7 +54,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import qwen_prefix_scheduler_patch as source_patch  # noqa: E402
-from test_qwen_prefix_scheduler_patch import FakeGdnModel, ModelAssertion  # noqa: E402,F401
+from test_qwen_prefix_scheduler_patch import FakeGdnModel, FakeKvIO, ModelAssertion, kv_content  # noqa: E402,F401
 
 try:
     import torch
@@ -933,7 +933,7 @@ class StickyEnv(Env):
         register_all_kvcache_specs(self.vllm_config)
         self.structured = StructuredOutputManager(self.vllm_config)
 
-    def make_sticky(self, environ=None, mid_loop=True, scheduler_cls=None, num_blocks=None):
+    def make_sticky(self, environ=None, mid_loop=True, scheduler_cls=None, num_blocks=None, registry=None):
         kv_cache_config = self.kv_cache_config
         if num_blocks is not None:
             kv_cache_config = dataclasses.replace(kv_cache_config, num_blocks=num_blocks)
@@ -942,7 +942,7 @@ class StickyEnv(Env):
                                            structured_output_manager=self.structured, block_size=BLOCK,
                                            hash_block_size=BLOCK, include_finished_set=False, log_stats=True)
         scheduler.use_v2_model_runner = False
-        registry = self.graft.PrefixRegistry(budget_bytes=1 << 40)
+        registry = registry if registry is not None else self.graft.PrefixRegistry(budget_bytes=1 << 40)
         registry.mid_loop_capture = mid_loop
         state = self.graft.install(scheduler, registry=registry, logger=self.log,
                                    stats=self.graft.StatsExport(path='', logger=self.log),
@@ -1145,6 +1145,387 @@ class StickyReservationOnRealVllmTests(unittest.TestCase):
         self.assertEqual(guarded.max_running, 1, 'the rule admits one of the two')
         unguarded = run(False)
         self.assertTrue(unguarded.preempted, 'the negative control did not preempt: the proof proves nothing')
+
+
+# What the registry counted before the store policies and the telemetry existed (everything else is new).
+LEGACY_STATS = list(source_patch.prefix_registry.LEGACY_STAT_NAMES)
+
+
+@unittest.skipIf(VLLM_ERROR is not None, 'vLLM is not importable here (%s)' % VLLM_ERROR)
+class TiersOnRealVllmTests(unittest.TestCase):
+    """The checkpoint store's telemetry (every admission classified once, with the reuse distance of a returning session) and
+    its hygiene (supersession, the fair policy) on vLLM's own scheduler, block pool, request hashes and eviction: the
+    classification reads vLLM's raw hit h and the trimmed Q at the admission the step really makes, and a pool smaller than the
+    traffic makes vLLM evict. test_qwen_prefix_tiers holds the same behaviours on the fakes."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = Env()
+        cls.sticky_env = StickyEnv()
+
+    def setUp(self):
+        self.env.logs[:] = []
+        self.sticky_env.logs[:] = []
+
+    def registry(self, budget=1 << 40, **environ):
+        return STATE['graft'].PrefixRegistry(budget_bytes=budget, environ=environ)
+
+    def chain(self, registry, turns=6, answer=300, num_blocks=None):
+        scheduler, state = self.env.make(registry=registry, num_blocks=num_blocks)
+        drive = Drive(self.env, scheduler, state, 'tiers-chain')
+        prompt = tokens(3000, 'chain-0')
+        for turn in range(turns):
+            request = drive.add('t%d' % turn, prompt, answer)
+            drive.run()
+            prompt = list(request.prompt_token_ids) + list(request.output_token_ids) + tokens(900, 'chain-%d' % turn)
+        return drive, state
+
+    def test_a_chained_conversation_is_one_first_turn_and_then_served_every_turn(self):
+        drive, state = self.chain(self.registry())
+        stats = state.registry.stats
+        self.assertEqual((stats['class_first_turn'], stats['class_returning_served'], stats['returning_sessions']), (1, 5, 5))
+        self.assertEqual(sum(stats['class_' + name] for name in source_patch.prefix_registry.CLASSES), 6)
+        self.assertEqual((stats['class_failures'], stats['class_kv_evicted'], stats['class_ckpt_evicted']), (0, 0, 0))
+        seconds = state.registry.histograms()['reuse_seconds']['served']
+        self.assertEqual(sum(seconds['counts']), 5)
+        tokens_cell = state.registry.histograms()['reuse_tokens']['served']
+        self.assertEqual(tokens_cell['sum'], 0, 'a lone conversation: no other request was admitted between its turns')
+        self.assertEqual(stats['admitted_prompt_tokens'], sum(len(request.prompt_token_ids) for request in drive.requests.values()))
+
+    def test_a_real_eviction_is_counted_as_a_kv_evicted_return(self):
+        """Another tenant's request evicts the tail of x, boundary block included (x is 66 blocks of a 99-block pool and y takes
+        the 33 untouched ones, x's two uncached tail blocks and x's boundary block), so the checkpoint goes with it (coupled)
+        and x's next turn takes vLLM's partial hit below its previous boundary."""
+        scheduler, state = self.env.make(num_blocks=100, registry=self.registry())
+        registry = state.registry
+        drive = Drive(self.env, scheduler, state, 'tiers-evict')
+        x = drive.add('x', tokens(4200, 'tiers-x'))
+        drive.run()
+        drive.add('y', tokens(2300, 'tiers-y'), 1, salt='tenant-y')
+        drive.run()
+        self.assertEqual(registry.stats['evicted_coupled'], 1)
+        drive.add('x2', list(x.prompt_token_ids) + list(x.output_token_ids) + tokens(600, 'tiers-x2'))
+        drive.run()
+        row = drive.row('x2')
+        self.assertEqual((row.start, row.q), (0, 0))
+        self.assertLess(row.h, 4096)
+        stats = registry.stats
+        self.assertEqual((stats['class_first_turn'], stats['class_kv_evicted']), (2, 1), 'x and y are first turns; x2 returns to a miss')
+        self.assertEqual(stats['lost_tokens_kv_evicted'], 4096)
+        self.assertEqual(sum(registry.histograms()['reuse_seconds']['missed']['counts']), 1)
+        self.assertGreater(registry.histograms()['reuse_tokens']['missed']['sum'], 0, 'y\'s prompt was admitted in between')
+
+    def test_a_checkpoint_the_budget_took_with_the_kv_still_cached_is_counted_apart(self):
+        registry = self.registry(budget=1)
+        scheduler, state = self.env.make(registry=registry)
+        drive = Drive(self.env, scheduler, state, 'tiers-budget')
+        x = drive.add('x', tokens(4200, 'tiers-bx'))
+        drive.run()
+        drive.add('y', tokens(4200, 'tiers-by'), 1, salt='tenant-y')
+        drive.run()
+        self.assertEqual(registry.stats['evicted_lru'], 1)
+        drive.add('x2', list(x.prompt_token_ids) + list(x.output_token_ids) + tokens(600, 'tiers-bx2'))
+        drive.run()
+        stats = registry.stats
+        self.assertEqual((drive.row('x2').start, stats['class_ckpt_evicted'], stats['class_ckpt_evicted_budget']), (0, 1, 1))
+        self.assertEqual(stats['lost_tokens_ckpt_evicted'], 4096)
+
+    def test_sticky_sessions_are_judged_by_the_boundary_the_dropped_block_leaves(self):
+        scheduler, state = self.sticky_env.make_sticky()
+        drive = Drive(self.sticky_env, scheduler, state, 'tiers-sticky')
+        prompt = tokens(3000, 'tiers-sticky-0')
+        for turn in range(6):
+            request = drive.add('c%d' % turn, prompt, 64)
+            drive.run()
+            prompt = list(request.prompt_token_ids) + list(request.output_token_ids) + tokens(2600, 'tiers-sticky-%d' % turn)
+        stats = state.registry.stats
+        self.assertEqual((stats['class_short'], stats['class_rewritten'], stats['class_returning_served']), (1, 1, 4),
+                         'turn 0 is too short to leave a boundary under the drop, turn 1 finds none, 2-5 resume at the previous one')
+        self.assertEqual((stats['class_kv_evicted'], stats['class_ckpt_evicted'], stats['class_ckpt_missing'], stats['class_refused']),
+                         (0, 0, 0, 0))
+        self.assertEqual(stats['class_failures'], 0)
+
+    def test_the_telemetry_leaves_every_decision_of_the_real_scheduler_alone(self):
+        def traffic(**environ):
+            registry = self.registry(budget=6, **environ)
+            scheduler, state = self.env.make(registry=registry, num_blocks=300)
+            drive = Drive(self.env, scheduler, state, 'tiers-identity')
+            text = {tenant: tokens(2300, 'sys-' + tenant) for tenant in ('tenant-a', 'tenant-b')}
+            for turn in range(8):
+                for tenant in ('tenant-a', 'tenant-b'):
+                    drive.add('%s-%d' % (tenant, turn), text[tenant] + tokens(1200 + 100 * turn, 'u-%s-%d' % (tenant, turn)), 8,
+                              salt=tenant)
+                    drive.run()
+                    request = drive.requests['%s-%d' % (tenant, turn)]
+                    text[tenant] = list(request.prompt_token_ids) + list(request.output_token_ids)
+            registry = state.registry
+            return dict(rows=[tuple(row)[2:] for row in drive.rows], entries=[(key, entry.pos) for key, entry in registry.entries.items()],
+                        stats={name: registry.stats[name] for name in LEGACY_STATS}), registry
+
+        on, registry = traffic()
+        off, _ = traffic(QWEN_PREFIX_TELEMETRY='0')
+        self.assertEqual(on, off)
+        self.assertGreater(on['stats']['grants'], 0)
+        self.assertGreater(on['stats']['evicted_lru'] + on['stats']['evicted_coupled'], 0)
+        self.assertEqual(sum(registry.stats['class_' + name] for name in source_patch.prefix_registry.CLASSES), 16)
+
+    def test_supersession_serves_the_same_turns_from_fewer_checkpoints(self):
+        off_drive, off_state = self.chain(self.registry())
+        on_drive, on_state = self.chain(self.registry(QWEN_PREFIX_SUPERSEDE='1'))
+        self.assertEqual([row.start for row in on_drive.rows], [row.start for row in off_drive.rows],
+                         'a continuation is granted the same Q with the older checkpoints retired')
+        self.assertEqual(on_state.registry.stats['token_mismatches'], 0)
+        self.assertGreater(on_state.registry.stats['evicted_superseded'], 0)
+        self.assertLess(len(on_state.registry.entries), len(off_state.registry.entries))
+        self.assertTrue(set(on_state.registry.entries) <= set(off_state.registry.entries))
+        self.assertLess(on_state.registry.bytes, off_state.registry.bytes)
+        self.assertEqual(off_state.registry.stats['evicted_superseded'], 0)
+
+    def test_the_fair_policy_keeps_a_quiet_tenant_s_checkpoint_through_a_flood(self):
+        def run(policy):
+            registry = self.registry(budget=3, QWEN_PREFIX_EVICT=policy)
+            scheduler, state = self.env.make(registry=registry)
+            drive = Drive(self.env, scheduler, state, 'tiers-fair-' + policy)
+            quiet = drive.add('q1', tokens(4200, 'tiers-quiet'), 1, salt='qps1.quietTENANT.' + 'f' * 64)
+            drive.run()
+            for index in range(6):
+                drive.add('l%d' % index, tokens(4200, 'tiers-loud-%d' % index), 1, salt='qps1.loudTENANT.' + 'f' * 64)
+                drive.run()
+            drive.add('q2', list(quiet.prompt_token_ids) + list(quiet.output_token_ids) + tokens(600, 'tiers-q2'), 1,
+                      salt='qps1.quietTENANT.' + 'f' * 64)
+            drive.run()
+            return drive.row('q2').start, registry
+
+        lru_start, lru = run('lru')
+        fair_start, fair = run('fair')
+        self.assertEqual(lru_start, 0)
+        self.assertEqual(fair_start, 4096)
+        self.assertGreater(fair.stats['evicted_fair'], 0)
+        self.assertEqual((fair.stats['evicted_lru'], lru.stats['evicted_fair']), (0, 0))
+
+
+class KvDrive(Drive):
+    """Drive whose fake model also writes the KV: after every prefill row the full blocks from the resume point on hold kv_content(hash),
+    the bytes that hash stands for (a block is right exactly when it holds them). io is the tier's FakeKvIO, which is also the device."""
+
+    def __init__(self, env, scheduler, state, name, io):
+        super(KvDrive, self).__init__(env, scheduler, state, name)
+        self.io = io
+
+    def prefill_row(self, rid, start):
+        super(KvDrive, self).prefill_row(rid, start)
+        request = self.requests[rid]
+        owned = self.scheduler.kv_cache_manager.get_block_ids(rid)[0]
+        for index in range(start // BLOCK, len(request.block_hashes)):
+            self.io.device[owned[index]] = kv_content(request.block_hashes[index])
+
+    def check_kv(self):
+        """Every cached block of vLLM's pool and every record of the tier holds the bytes of its hash."""
+        from vllm.v1.core.kv_cache_utils import get_block_hash
+
+        pool = self.scheduler.kv_cache_manager.block_pool
+        for block in pool.blocks:
+            if block.is_null or block.block_hash is None:
+                continue
+            if self.io.device.get(block.block_id) != kv_content(get_block_hash(block.block_hash)):
+                raise AssertionError('cached block %d holds the wrong bytes' % block.block_id)
+        tier = self.state.registry.tier
+        if tier is not None:
+            for key, record in tier.records.items():
+                if bytes(record.payload) != kv_content(key):
+                    raise AssertionError('a tier record holds the wrong bytes')
+        return True
+
+
+@unittest.skipIf(VLLM_ERROR is not None, 'vLLM is not importable here (%s)' % VLLM_ERROR)
+class HostTierOnRealVllmTests(unittest.TestCase):
+    """The host KV tier on vLLM's own scheduler, block pool, hashes and eviction (module docstring of qwen_prefix_scheduler_patch, item f):
+    a block vLLM evicts is read into the tier, a returning request's missing blocks are written back as cached-free blocks and vLLM's own hit
+    logic takes them, and what the pool serves holds the bytes of its hashes throughout. The general shape and the fast path's sticky shape
+    (DFlash, the dropped last block); the pool is smaller than the traffic; a negative control runs the same traffic with the tier off."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = Env()
+        cls.sticky = StickyEnv()
+
+    def setUp(self):
+        self.env.logs[:] = []
+        self.sticky.logs[:] = []
+
+    def registry(self, blocks=None, store=1 << 20, **extra):
+        environ = dict(extra)
+        if blocks is not None:
+            total = store + blocks * FakeKvIO.block_bytes
+            environ.update({'QWEN_PREFIX_HOST_TIER_GIB': repr(total / float(1 << 30)), 'QWEN_PREFIX_HOST_TIER_MIN_TOKENS': '0',
+                            'QWEN_PREFIX_HOST_TIER_MIN_AVAILABLE_GIB': '0', 'QWEN_PREFIX_HOST_TIER_VERIFY': 'all'})
+        registry = STATE['graft'].PrefixRegistry(budget_bytes=store, environ=environ)
+        io = FakeKvIO()
+        if blocks is not None:
+            registry.tier.digest_inline = True
+            registry.attach_tier_io(io)
+        return registry, io
+
+    def general_pair(self, blocks, num_blocks=100):
+        registry, io = self.registry(blocks)
+        scheduler, state = self.env.make(num_blocks=num_blocks, registry=registry)
+        drive = KvDrive(self.env, scheduler, state, 'tier-general', io)
+        x = drive.add('x', tokens(4200, 'tier-x'))
+        drive.run()
+        drive.add('y', tokens(2300, 'tier-y'), 1, salt='tenant-y')
+        drive.run()
+        drive.add('x2', list(x.prompt_token_ids) + list(x.output_token_ids) + tokens(600, 'tier-x2'))
+        drive.run()
+        return drive, state
+
+    def test_an_evicted_conversation_returns_to_a_hit_and_the_pool_holds_the_right_bytes(self):
+        drive, state = self.general_pair(blocks=200)
+        stats = state.registry.stats
+        row = drive.row('x2')
+        self.assertEqual((row.start, row.q), (4096, 4096))
+        self.assertGreater(stats['tier_spill_blocks'], 0)
+        self.assertEqual((stats['tier_restore_requests'], stats['tier_digest_failures'], stats['tier_restore_failures']), (1, 0, 0))
+        self.assertEqual(stats['evicted_coupled'], 0)
+        self.assertTrue(drive.check_kv())
+        self.assertEqual(drive.scheduler.kv_cache_manager.block_pool.get_num_free_blocks(), 99, 'every block is free again')
+        self.assertEqual((stats['class_returning_served'], stats['class_kv_evicted']), (1, 0))
+        self.assertEqual(stats['token_mismatches'], 0)
+
+    def test_the_same_traffic_without_the_tier_is_a_miss(self):
+        drive, state = self.general_pair(blocks=None)
+        row = drive.row('x2')
+        self.assertEqual((row.start, state.registry.stats['evicted_coupled'], state.registry.stats['class_kv_evicted']), (0, 2, 1),
+                         'x lost its boundary block to y, and y its own checkpoint to x2')
+        self.assertTrue(drive.check_kv())
+
+    def test_the_audit_reads_the_restored_blocks_back_on_vllms_own_pool(self):
+        registry, io = self.registry(200, QWEN_PREFIX_HOST_TIER_AUDIT='1')
+        scheduler, state = self.env.make(num_blocks=100, registry=registry)
+        drive = KvDrive(self.env, scheduler, state, 'tier-audit', io)
+        x = drive.add('x', tokens(4200, 'tier-ax'))
+        drive.run()
+        drive.add('y', tokens(2300, 'tier-ay'), 1, salt='tenant-y')
+        drive.run()
+        io.corrupt_write = True
+        drive.add('x2', list(x.prompt_token_ids) + list(x.output_token_ids) + tokens(600, 'tier-ax2'))
+        with self.assertRaises(STATE['graft'].TierAuditError):
+            drive.run()
+
+    def test_sticky_sessions_restore_through_the_dropped_last_block(self):
+        """DFlash's lookahead of 16 makes vLLM drop a hit's last block: a resume at C0 needs the block after it cached too."""
+        def run(blocks):
+            registry, io = self.registry(blocks, store=1 << 20)
+            scheduler, state = self.sticky.make_sticky(num_blocks=200, registry=registry)
+            self.assertTrue(state.drop_last)
+            drive = KvDrive(self.sticky, scheduler, state, 'tier-sticky-%s' % blocks, io)
+            x = drive.add('x', tokens(10000, 'tier-sx'))
+            drive.run()
+            drive.add('y', tokens(6700, 'tier-sy'), 1, salt='tenant-y')
+            drive.run()
+            drive.add('x2', list(x.prompt_token_ids) + list(x.output_token_ids) + tokens(1500, 'tier-sx2'))
+            drive.run()
+            return drive, state
+
+        drive, state = run(blocks=400)
+        row = drive.row('x2')
+        self.assertEqual((row.start, row.q), (6144, 6144), 'C0 = floor2048(10000) - 2048')
+        stats = state.registry.stats
+        self.assertGreater(stats['tier_restore_blocks'], 0)
+        self.assertEqual(stats['tier_restore_failures'], 0)
+        self.assertTrue(drive.check_kv())
+        control, control_state = run(blocks=None)
+        self.assertEqual(control.row('x2').start, 0, 'without the tier the evicted tail leaves nothing to resume from')
+        self.assertTrue(control.check_kv())
+
+    def test_conversations_returning_after_eviction_on_a_small_pool_never_preempt_and_every_block_ends_free(self):
+        def run(blocks):
+            registry, io = self.registry(blocks)
+            scheduler, state = self.env.make(num_blocks=260, registry=registry)
+            drive = KvDrive(self.env, scheduler, state, 'tier-traffic-%s' % blocks, io)
+            prompts = {agent: tokens(3700 + 100 * agent, 'tier-a%d' % agent) for agent in range(4)}
+            salts = {0: 'tenant-a', 1: 'tenant-b', 2: 'tenant-c', 3: 'tenant-d'}
+            for turn in range(4):
+                for agent in range(4):
+                    request = drive.add('agent%d-turn%d' % (agent, turn), prompts[agent], 8, salt=salts[agent])
+                    drive.run()
+                    drive.check_kv()
+                    prompts[agent] = list(request.prompt_token_ids) + list(request.output_token_ids) + tokens(1500, 'tier-n%d-%d' % (agent, turn))
+            return drive, state
+
+        with_tier, with_state = run(400)
+        without, without_state = run(None)
+        starts = lambda drive: [row.start for row in drive.rows]  # noqa: E731
+        self.assertGreater(sum(starts(with_tier)), sum(starts(without)), 'the tier turns misses into hits')
+        self.assertGreater(with_state.registry.stats['tier_restore_requests'], 0)
+        for drive in (with_tier, without):
+            self.assertEqual(drive.scheduler.kv_cache_manager.block_pool.get_num_free_blocks(), 259)
+            self.assertFalse([request for request in drive.requests.values() if getattr(request, 'num_preemptions', 0)])
+        self.assertEqual(with_state.registry.stats['token_mismatches'], 0)
+        self.assertEqual(with_state.registry.stats['tier_digest_failures'], 0)
+
+
+@unittest.skipIf(VLLM_ERROR is not None, 'vLLM is not importable here (%s)' % VLLM_ERROR)
+class TenantQuotaOnRealVllmTests(unittest.TestCase):
+    """The per-tenant device quota (module docstring of qwen_prefix_scheduler_patch, item g) on vLLM's own scheduler, KVCacheManager.allocate_slots, block pool and
+    free queue, through the real install(): tenant A floods a pool tenant B's session sits in. With the quota B's return is a hit (A evicted its own blocks, or B was
+    set aside by the floor); without it (the negative control) the flood reaches B. test_qwen_prefix_quota holds the same on a copy of the queue and on the pool class."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = Env()
+
+    def setUp(self):
+        self.env.logs[:] = []
+
+    def traffic(self, num_blocks=200, **quota):
+        registry = STATE['graft'].PrefixRegistry(budget_bytes=1 << 40, environ=dict(quota))
+        scheduler, state = self.env.make(num_blocks=num_blocks, registry=registry)
+        drive = Drive(self.env, scheduler, state, 'quota-%s' % sorted(quota))
+        b = drive.add('b', tokens(4200, 'quota-b'), 1, salt='tenant-b')
+        drive.run()
+        for index in range(4):
+            drive.add('a%d' % index, tokens(4200, 'quota-a-%d' % index), 1, salt='tenant-a')
+            drive.run()
+        drive.add('b2', list(b.prompt_token_ids) + list(b.output_token_ids) + tokens(600, 'quota-b2'), 1, salt='tenant-b')
+        drive.run()
+        return drive, state
+
+    def test_without_the_quota_the_flood_reaches_the_other_tenant(self):
+        drive, state = self.traffic()
+        self.assertEqual(drive.row('b2').start, 0, 'negative control: b\'s blocks were the oldest')
+        self.assertIsNone(state.quota)
+
+    def test_the_cap_makes_the_flooding_tenant_evict_its_own_blocks(self):
+        cap = {'QWEN_PREFIX_TENANT_QUOTA_DEVICE_CAP_TOKENS': '4096'}
+        drive, state = self.traffic(**cap)
+        row = drive.row('b2')
+        self.assertEqual((row.start, row.q), (4096, 4096), 'b came back to a hit')
+        stats = state.registry.stats
+        self.assertGreater(stats['quota_dev_evictions_own'], 0)
+        self.assertEqual(stats['quota_dev_evictions_global'], 0)
+        self.assertTrue(any(line.startswith('tenant quota on device_cap_tokens=4096') for line in self.env.logs))
+        pool = drive.scheduler.kv_cache_manager.block_pool
+        count, block = 0, pool.free_block_queue.fake_free_list_head.next_free_block
+        while block is not pool.free_block_queue.fake_free_list_tail:
+            count += 1
+            block = block.next_free_block
+        self.assertEqual(count, pool.free_block_queue.num_free_blocks, 'the free queue stayed whole')
+        self.assertEqual(pool.get_num_free_blocks(), 199, 'every block is free again')
+        self.assertTrue(set(state.quota.owner) == {b.block_id for b in pool.blocks if b.block_hash is not None})
+
+    def test_the_floor_alone_sets_the_other_tenants_blocks_aside(self):
+        drive, state = self.traffic(**{'QWEN_PREFIX_TENANT_QUOTA_DEVICE_FLOOR_TOKENS': '4096'})
+        row = drive.row('b2')
+        self.assertEqual((row.start, row.q), (4096, 4096))
+        stats = state.registry.stats
+        self.assertGreater(stats['quota_dev_floor_protected'], 0)
+        self.assertEqual(stats['quota_dev_floor_overrides'], 0)
+
+    def test_the_numbers_the_pool_cannot_honour_refuse_the_install(self):
+        registry = STATE['graft'].PrefixRegistry(budget_bytes=1 << 40, environ={'QWEN_PREFIX_TENANT_QUOTA_DEVICE_FLOOR_TOKENS': str(120 * BLOCK)})
+        with self.assertRaises(STATE['graft'].PrefixInstallError) as caught:
+            self.env.make(num_blocks=200, registry=registry)
+        self.assertIn('more than half', str(caught.exception))
 
 
 if __name__ == '__main__':

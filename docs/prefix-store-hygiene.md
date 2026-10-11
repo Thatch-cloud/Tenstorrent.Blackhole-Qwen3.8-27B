@@ -1,0 +1,409 @@
+# Prefix checkpoint store: telemetry and hygiene
+
+The GatedDeltaNet (GDN) checkpoints that make a prefix hit exact live in `qwen_prefix_registry.PrefixRegistry`, one per
+engine process. This note covers what that store now measures about its misses, the two opt-in policies that keep it
+useful, the size arithmetic behind its budget, and two opt-in features that make a returning turn cheaper: checkpoints
+stored in the device's own layout, and a host-RAM tier for the attention-KV pages vLLM evicts. Nothing here changes what a
+hit serves: a checkpoint is still token-verified before it is granted, a retired or evicted checkpoint is only ever a miss,
+and everything restored from host RAM is, byte for byte, what was evicted.
+
+## Checkpoint size
+
+One checkpoint is the GDN state of the whole mesh after a 2048-token boundary: 48 layers of recurrent state
+`[48 value heads, 128, 128]` plus a bf16 conv carry `[3, 10240]`. The totals do not depend on how many chips share them.
+
+| Recurrent state | Bytes per checkpoint | Checkpoints in the default 8 GiB store |
+|---|---|---|
+| bf16 (`QWEN35_GDN_STATE_BF16=1`, the serving setting) | 78,446,592 | 109 |
+| fp32 (the model default) | 153,944,064 | 55 |
+
+The model reports the real size of what it reads; `qwen_prefix_registry.checkpoint_nbytes()` derives the same number
+from the state dtype for the registry's default charge, Lever N's host-memory guard (`levern_policy.park_nbytes`, and
+`observed_park_nbytes`, which prefers the size of the last scratch the route really read) and the gate's capacity
+arithmetic (`prefix_judge.store_entries(..., state_bf16=True)`). A gate that judges a store of a given size must be told
+which dtype the engine ran.
+
+## Admission classes (always on; `QWEN_PREFIX_TELEMETRY=0` turns the whole of it off)
+
+Every admission is classified once, when the step admits it, by what the trim answered (vLLM's raw hit `h`, the trimmed
+`Q`) and by a bounded memory of earlier turns. A turn is remembered under the block hash at its last boundary (the prompt
+boundary `floor2048(P)`, less one chunk under sticky sessions); a later request whose own hash chain contains that hash is
+a *returning session*, and the highest such boundary is the one it should have resumed at.
+
+| Class | Meaning |
+|---|---|
+| `returning_served` | a returning session whose trimmed hit reached its previous boundary |
+| `first_turn` | no earlier turn, and its first block (which carries the salt) was never seen |
+| `rewritten` | its first block was seen, but no earlier turn's boundary is a prefix: another session's shared prefix, or a rewritten, compacted or edited history |
+| `short` | too short to hold a reusable boundary |
+| `kv_evicted` | returning; vLLM's hit stopped below the previous boundary (the device pool evicted the blocks) |
+| `ckpt_evicted` | returning; the KV survived but the checkpoint was stored and then removed (`class_ckpt_evicted_<why>`: `budget`, `coupled`, `superseded`, `cleared`, `other`) |
+| `ckpt_missing` | returning; the KV survived and no checkpoint was ever stored there (a capture failed or was never planned) |
+| `refused` | returning; the checkpoint is resident but was not granted (`class_refused_mismatch` counts token-id mismatches) |
+| `unsalted` | no `cache_salt`: no hit is possible |
+| `denied` | a streaming-input session, or the kill switch is latched |
+
+The classes partition the admissions. `class_<name>_hit` counts those of a miss class that still got a partial hit
+(through a prefix shared with another session, or an older boundary), and `lost_tokens_<class>` sums the tokens a
+returning session had to prefill beyond what a full hit would have saved.
+
+A returning session's **reuse distance** goes into two histograms, split by outcome (`served` or `missed`): the seconds
+since its previous turn, and the prompt tokens admitted for *other* requests since then (the span a cache would have had
+to hold across).
+
+### Prometheus (the engine's `/metrics`)
+
+| Name | Kind |
+|---|---|
+| `qwen_prefix_class_<name>_total`, `qwen_prefix_class_<name>_hit_total`, `qwen_prefix_class_ckpt_evicted_<reason>_total`, `qwen_prefix_class_refused_mismatch_total` | counters |
+| `qwen_prefix_lost_tokens_{kv_evicted,ckpt_evicted,ckpt_missing,refused}_total`, `qwen_prefix_returning_sessions_total`, `qwen_prefix_admitted_prompt_tokens_total`, `qwen_prefix_class_failures_total` | counters |
+| `qwen_prefix_reuse_seconds{outcome}`, `qwen_prefix_reuse_tokens{outcome}` | histograms |
+| `qwen_prefix_host_rss_bytes` (the engine process), `qwen_prefix_host_mem_available_bytes` (the host's `MemAvailable`) | gauges |
+| `qwen_prefix_registry_bytes`, `qwen_prefix_registry_entries`, `qwen_prefix_registry_budget_bytes` | gauges (as before) |
+| `qwen_prefix_ghost_now`, `qwen_prefix_evict_fair`, `qwen_prefix_supersede`, `qwen_prefix_telemetry` | gauges: the memory's size and the policies in force |
+
+Metrics are per class, never labelled by tenant.
+
+### Log lines
+
+At the stats cadence (`QWEN_PREFIX_STATS_S`, default 30 s), whether or not a counter moved, the engine log gains two
+`key=value` lines beside the existing `[PINDIAG] prefix: stats {...}` JSON:
+
+```
+[PINDIAG] prefix: tier rss=<bytes> avail=<bytes> reg_bytes=<n> reg_entries=<n> reg_budget=<n> ghost=<n> adm=<n> adm_tokens=<n> grants=<n> returning=<n> evict=<lru|fair> supersede=<0|1> returning_served=<n> first_turn=<n> ... denied=<n> lost_kv=<n> lost_ckpt=<n> lost_missing=<n> lost_refused=<n> superseded=<n> evicted_lru=<n> evicted_fair=<n> evicted_coupled=<n>
+[PINDIAG] prefix: reuse bounds_s=<csv> served_s=<counts csv>:<sum> missed_s=<counts csv>:<sum> bounds_tok=<csv> served_tok=<counts csv>:<sum> missed_tok=<counts csv>:<sum>
+```
+
+The counts are per bucket (one more than the bounds: the open top bucket). `rss` and `avail` are omitted where `/proc`
+cannot be read. One more line at install names the policy: `[PINDIAG] prefix: install policy evict=... supersede=...
+telemetry=... ghost_entries=... checkpoint_bytes=...`.
+
+The returning-session memory is bounded (`QWEN_PREFIX_GHOST_ENTRIES`, default 65536 records, 0 for none); the per-request
+tables are bounded in code. It costs a few dictionary operations per admission attempt and nothing on the device path.
+
+## Opt-in store policies
+
+Both are off unless set, and off they leave the registry's decisions exactly as they were (`test_qwen_prefix_tiers` pins a
+digest of everything observable over a set of conversations against the registry as it was before these existed).
+
+* `QWEN_PREFIX_SUPERSEDE=1` retires, when a newer checkpoint of a conversation lands, that conversation's older ones: the
+  candidates are the checkpoints of the same first block that are token-prefixes of the new one, the newest of them (the
+  previous turn, which a retry or an edit of the last message resumes from) stays, and so does any that is pinned (this step
+  restores it), shared (taken at a gap boundary, so other sessions' prefixes reach it) or a branch point (granted to two
+  admissions). The remaining cost is a history rewritten below the previous turn's boundary; `class_ckpt_evicted_superseded`
+  counts exactly those misses.
+* `QWEN_PREFIX_EVICT=fair` evicts, over the byte budget, the least recently used unpinned checkpoint of the tenant holding the
+  most bytes (the tenant is the salt's opaque tag), sparing the checkpoint just stored, instead of the global oldest. The
+  default `lru` is the previous behaviour. Evictions by the fair policy count in `evicted_fair`.
+
+A profile may set them in its `env` only beside `QWEN_PREFIX_REUSE=1`, and only to the values above
+(`serving_c2_contract.prefix_policy_problems`); any other value stops the engine at start.
+
+## Checkpoints stored in the device's layout (`QWEN_PREFIX_CKPT_PRECONVERTED=1`, default off)
+
+A restore used to put each of the 96 GDN checkpoint tensors (48 layers, state and conv carry) through a single-threaded host
+tilize and dtype conversion inside the call, about 1.15 GB/s, and the call is on the critical path of the returning turn.
+With the flag on, that conversion happens once, at capture time (off the critical path): the tensor is stored as the
+`ttnn` host tensor the device takes (`from_torch` to the device tensor's own dtype and TILE layout, sharded over the mesh as
+the restore shards it), and the restore is 96 `copy_host_to_device_tensor` calls and one synchronize. It needs the `h2d`
+restore mode (the one the serving model chooses); with the flag on and another mode the model stops at start.
+
+* Size: the stored form is tile-padded (the conv carry's 3 rows become 32), so a checkpoint is charged its stored size,
+  about 106.95 MB for the mesh against 78.45 MB unconverted (bf16 state), and the default 8 GiB store holds about 80 of them
+  instead of 109.
+* Exactness: the stored bytes are what today's conversion produces from the same values. `test_qwen_prefix_model_runtime`
+  (PreconvertedCheckpoints) pins that on the CPU fakes; on the card `QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT=1` converts again
+  after each restore and compares every tensor with the stored one, uploads, reads the device scratch back and compares it
+  with the source, and logs `[PREFIX-AUDIT-CKPT] tensors=96 conversion_equal=1 readback_equal=1` (any 0 stops the engine).
+  Each capture stored this way logs `[PINDIAG] prefix: checkpoint preconverted req=<id> pos=<n> tensors=<n> host_bytes=<n>
+  convert_ms=<f>`: the conversion moved to the capturing prefill (by that many milliseconds) from the returning turn's restore.
+  A conversion that fails leaves the unconverted checkpoint, which a restore converts as before.
+* Both names are gate-only until a qualification record lifts it (`serving_c2_contract.prefix_policy_problems` refuses them on
+  a traffic profile, and `apply_environment` drops an inherited value under a profile that does not name them).
+
+## The host KV tier (`QWEN_PREFIX_HOST_TIER_GIB`, default 0 = off)
+
+Prefix reuse needs two things for a returning turn: the GDN checkpoint (host RAM, above) and the attention-KV pages of the
+prefix, which live in the device pool and are evicted when other sessions need the room. A checkpoint whose pages were
+evicted is useless, so the registry dropped it (`evicted_coupled`) and the turn re-prefilled from the start. With the tier on:
+
+1. **Spill.** When vLLM is about to evict a cached KV block whose chain has a checkpoint at or above it (a block with none is
+   `tier_spill_dropped_useless`), the scheduler graft remembers it; at the end of that `schedule()` call, with the device idle
+   and nothing yet written for the step, the blocks are read from the device in one pass into the tier and the checkpoint at
+   the block is kept (`tier_ckpt_kept`) instead of dropped.
+2. **Restore.** When a returning turn's trim finds that the best hit lies beyond the device's, the missing blocks are written
+   back to freshly taken pool blocks, hashed and cached exactly as if the turn had just computed them, and vLLM's own hit logic
+   is asked again: from there on it is an ordinary device hit, under vLLM's own reservation and accounting. There is no
+   connector and no external-token path.
+3. **Never worse than a miss.** A restore that cannot run (the pool lacks the room, a record failed its digest, the device call
+   raised, the kill switch) is a miss, and the turn prefills as it would have without the tier. Three device failures in a row
+   latch the tier off for the life of the process and clear it (`tier_latched`).
+
+Tenancy is by construction: a block is keyed by vLLM's chained block hash, which carries the `cache_salt`, so a request under
+another salt can never name a tenant's block (the gate checks that no fresh-salt request is ever restored). The tier's byte
+budget is the *whole* prefix-state host budget, `QWEN_PREFIX_HOST_TIER_GIB`; the checkpoint store keeps its own
+`QWEN_PREFIX_STORE_GIB` share of it and the KV pages get the rest (the GiB must exceed the store's). Inside its share the tier
+evicts records no checkpoint reaches first, then by the registry's `QWEN_PREFIX_EVICT` policy (`lru` or `fair`, per tenant); a
+record being restored is pinned against that. The pages are held in one anonymous mapping (no `core` dump, grown by use, not
+reserved up front), so host RSS rises with what the tier holds, up to its cap; with swap off the cap is the number to size. If the
+kernel refuses the one mapping of the whole cap (a strict overcommit policy, a small host), the tier starts anyway and holds the
+blocks as separate arrays, still bounded by the cap and a little slower on the first fills; it says so once
+(`[PINDIAG] prefix: host tier slab not mapped (...)`).
+
+### Byte-identical restore
+
+* A block's payload is the raw packed bytes of every KV cache tensor for that block (K then V per layer, every chip's page
+  range), moved by the `qwen_kv_read` extension's raw block ops (below): no host tensor, no unpack, no repack.
+* A digest (sha256) of each record is computed off the critical thread and checked at restore (`QWEN_PREFIX_HOST_TIER_VERIFY`:
+  `sample`, one block in sixteen, the default; `all`; `off`). A record that fails is dropped and the restore refused.
+* `QWEN_PREFIX_HOST_TIER_AUDIT=1` (gate-only) reads every restored block back from the device and compares it with the bytes
+  written, raising and stopping the engine on any difference, and forces `all`.
+* The end-to-end proof is the gate's: a returning turn against its cold twin (every output token) and the slot and logits
+  digests. The CPU proofs run the real scheduler graft, on a fake pool and on vLLM 0.25.1's own pool and scheduler objects,
+  with a device whose block contents are a pure function of the block's hash, and check after every scenario that every
+  block the pool serves as cached, and every record of the tier, holds the bytes its hash stands for.
+
+### Flags
+
+| Name | Default | Meaning |
+|---|---|---|
+| `QWEN_PREFIX_HOST_TIER_GIB` | 0 (off) | the whole prefix state's host budget in GiB; must exceed `QWEN_PREFIX_STORE_GIB`; needs `QWEN_PREFIX_REUSE=1` |
+| `QWEN_PREFIX_HOST_TIER_VERIFY` | `sample` | digest check at restore: `sample`, `all`, `off` |
+| `QWEN_PREFIX_HOST_TIER_AUDIT` | 0 | gate-only: read back and compare every restored block (forces `all`) |
+| `QWEN_PREFIX_HOST_TIER_SPILL_MAX_BLOCKS` | 512 | most blocks one step's evictions may spill; the lowest block indexes of each chain are kept |
+| `QWEN_PREFIX_HOST_TIER_MIN_TOKENS` | 8192 | sessions whose checkpoint ends below this are not worth a restore and are not spilled |
+| `QWEN_PREFIX_HOST_TIER_MIN_AVAILABLE_GIB` | 16 | no spill while the host's `MemAvailable` is under this |
+| `QWEN_PREFIX_HOST_TIER_OFF_PATH` | `kv-tier.off` beside `prefix-reuse.off` | the tier's own kill-switch file: present, the tier latches off and clears, no restart |
+
+`prefix-reuse.off` (the registry's kill switch) also disables the tier: nothing is granted, so nothing is spilled or restored.
+
+### Metrics and log lines
+
+Counters (`qwen_prefix_<name>_total`, timers `qwen_prefix_<name>_seconds_total`): `tier_spill_{flushes,blocks,bytes,ms,known}`,
+`tier_spill_dropped_{useless,cap,governor,full}`, `tier_spill_failures`, `tier_restore_{requests,blocks,bytes,ms}`,
+`tier_restore_refused_{room,digest}`, `tier_restore_failures`, `tier_digest_{checks,failures}`, `tier_evicted`,
+`tier_ckpt_{kept,dropped}`, `tier_audit_{reads,mismatches}`, `tier_latched` (1 once the tier latched itself off). Gauges:
+`qwen_prefix_tier_{bytes,entries,cap_bytes,on}`. The existing `qwen_prefix_class_kv_evicted_total` and `qwen_prefix_lost_tokens_kv_evicted_total`
+are what the tier is meant to move.
+
+```
+[PINDIAG] prefix: host tier on gib=<f> kv_gib=<f> block_bytes=<n> verify=<mode> audit=<0|1> spill_max_blocks=<n> min_tokens=<n> slack=<n> off_path=<path>
+[PINDIAG] prefix: host tier IO attached block_bytes=<n> tensors=<n> chips=<n> slice_bytes=<n> fingerprint=<s>
+[PINDIAG] prefix: host tier spill blocks=<n> bytes=<n> ms=<f> held=<n>
+[PINDIAG] prefix: host tier restore req=<id> blocks=<n> bytes=<n> ms=<f> from=<tokens> to=<tokens>
+[PINDIAG] prefix: host tier latched off: <reason>
+```
+
+### The device ops, and what they cost
+
+The device side is version 2 of the `qwen_kv_read` extension (`optimisation/ttnn-op/kv_region_read`): `ttnn.qwen_read_blocks_raw`
+and `qwen_write_blocks_raw` move named blocks' page ranges between a paged cache tensor and a host buffer (runs of consecutive
+block ids are one region transfer each, every chip's shard, one wait; no program runs and nothing is allocated on the device),
+and `qwen_block_bytes` says how many bytes one block of one chip is. The image refuses to start with the tier on and the ops
+absent. Version 2 was written and tested against fakes, then qualified on the four cards by the first job of
+`references/tp4-prefix-tiers-jobs` (Q1, the kvread probe's raw arm): raw bytes read, written into a second cache and read back byte for byte,
+the unpacked values equal, no program-cache growth, 13.6 GB/s read and 22.8 GB/s write at 4,096 blocks.
+
+At the production geometry one block (64 tokens) is 32 cache tensors x 4 chips x 17,408 bytes = 2,228,224 bytes, so:
+
+| Session | Blocks | Bytes | Share of a 24 GiB KV budget |
+|---|---|---|---|
+| 128k (131,072 tokens) | 2,048 | 4.56 GB | 17.7% |
+| 254k (253,920 tokens) | 3,968 | 8.84 GB | 34.3% |
+
+Host-side cost, measured on the CPU with the device ops stubbed (`scripts/ci/bench_prefix_tier.py`: the adapter's staging copies,
+the store and the digests, at 512 blocks on a busy 20-core host; the device time is NOT in these, and the rates move with the host's
+load):
+
+| Step | Rate | 128k | 254k |
+|---|---|---|---|
+| spill, staging copy into resident slab slots | 9.6-10.7 GB/s | 0.4-0.5 s | 0.8-0.9 s |
+| spill, first fill of a slab region (page faults) | 1.05-1.22 GB/s | 3.7-4.3 s | 7.2-8.4 s |
+| restore, staging copy from the slab | 4.7-9.4 GB/s | 0.5-1.0 s | 0.9-1.9 s |
+| digest at spill (a worker thread, off the step) | 1.5 GB/s | 3.0 s | 5.9 s |
+| digest check at restore, `sample` (1 block in 16) | 1.5 GB/s | 0.19 s | 0.37 s |
+| digest check at restore, `all` | 1.5 GB/s | 3.0 s | 5.9 s |
+| store: put / get / put with eviction | 24 us / 0.5 us / 5-9 us per block | | |
+
+At Q1's device rates (4,096 blocks) one 254k session's spill reads in about 0.65 s and its restore writes in about 0.39 s (a 128k one in
+0.34 s and 0.20 s), on top of the host column above and not overlapped with it. Measured end to end in T2 (below), the spill ran at
+1.28 GB/s (512-block flushes of 1.14 GB in about 0.89 s: the slab's first fill, page-fault bound as the CPU bench predicted, so about 3.6 s for
+a 128k session and 6.9 s for a 254k one while the slab is still filling) and the audited restore at 0.92-0.97 GB/s (about 4.8 s and 9.3 s), most of
+which is the digest of every block (`verify=all`, 1.5 GB/s) and the read-back, not the device. With the audits off (`verify=sample`, T3 below) the
+restore of a 128k session ran at 4.8 GB/s and of a 254k one at 8.9 GB/s (8.56 GB in 0.96 s), and the spill of a full tier (resident slab slots, not
+the first fill) at 5.6 GB/s over 58,115 blocks.
+
+So the cost of a returning 254k turn is dominated by two device transfers of about 8.8 GB (the restore, and the spill of the
+blocks it displaces from a full pool, which happens in the same step), the digest check if `all` is on, and then the tail
+prefill; against it is the cold prefill of 254k tokens. The first fill of a slab region is page-fault bound, so the first spills
+after start are slower than the steady state; nothing is pre-faulted. The gate's `tier-timed` arm measures the whole sequence
+at ~32k, ~128k and ~254k (the cold prefill's TTFT, a device-resident hit's, the returning hit's with its restore and displaced
+spill) and prints the device rates the host-side table leaves out.
+
+### The gate
+
+`c2_prefix_gate.py --plan tiers` (`tier-attach`, `tier-returning`, `tier-timed`, each also a plan) on
+`c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-tier-audit`, generated by `make_prefix_tier_profiles.py` from the production
+profile (the tier names plus the multi-user SDPA launch's own audit, which the gate's extent audit needs beside W2; gate-only,
+no traffic waiver). `tier-returning` builds three ~56k sessions, floods the pool with fresh-salt prompts until every cached block
+of the sessions has left the device, brings each session back against its cold twin, and writes the tier's kill switch; it is
+NOT_EXERCISED, never a pass, if no returning turn was restored. Two things the gate's oracle (`prefix_judge.Oracle`)
+does not know: the tier, and the larger size of a preconverted checkpoint (about 80 fit in the default store, not 109). The arms stay
+well under that count, and a returning session that got less than the oracle's Q is explained, not failed, when the tier's or the
+checkpoint store's own eviction counters moved. The job pack, its order and its read rules are
+`scripts/ci/references/tp4-prefix-tiers-jobs`; `scripts/ci/pin_kvread.py` moves the extension's pinned hash before its image build.
+
+### First card results (the four-card mesh, the production profile plus the tier names)
+
+* Q1, the raw ops: PASS as above. A1, the audited attach smoke: PASS, 0 audit mismatches over 936 publish rounds.
+* T1, `tier-attach`: three cold/hit pairs IDENTICAL (solo 3 of 3). Four captures stored preconverted (106,954,752 host bytes each, 60-61 ms to
+  convert, at capture); one restore from a preconverted checkpoint (Q=2048 of L=12,427, `restored_ms` 174.5 with the on-card comparison and
+  read-back running) with `[PREFIX-AUDIT-CKPT] tensors=96 conversion_equal=1 readback_equal=1` and the program count unchanged. A chain evicts
+  nothing, so the tier spilled and restored nothing (`tier_cap_bytes`, `tier_on` only); the arm failed only on the multi-user SDPA audit's
+  passing-line rule, which a one-request-at-a-time arm can never satisfy and is now not asked of one (`c2_prefix_gate.sdpa_audit_optional`: only
+  while no packed round of two or more users ran; a logged line is still judged).
+
+* T2, `tier-returning` (audits on): 24 fresh-salt floods (1,341,743 tokens over a 1,277,952-token pool) pushed three ~56k sessions out of the
+  device pool, and all three came back from host RAM at the oracle's Q (53,248, 49,152 and 53,248 of L=58,564, 54,624 and 59,010; 833, 769 and
+  833 blocks, 1.86, 1.71 and 1.86 GB, in 1.96, 1.87 and 1.92 s with every block's digest checked and every block read back and compared); one
+  more turn on a restored session hit at 55,296 of 59,613. All five pairs IDENTICAL (solo 5 of 5), program count unchanged. Counters:
+  8,053 blocks (17.94 GB) spilled in 79 flushes (13.99 s), 2,435 blocks (5.43 GB) restored, 2,435 read-backs and digest checks, and zero spill
+  failures, restore failures, digest failures and read-back mismatches; 8,772 checkpoints kept because their block went to the tier, 3 dropped;
+  719 blocks not spilled for the per-step cap and 715 as useless. The tier's kill switch latched it (`tier_latched` 1) and the next turn was
+  exact. 39 checkpoints stored preconverted, 8 restores compared on the card, all equal. The arm took 823.5 s. Like T1 it failed only on the
+  multi SDPA audit's passing-line rule (the same fix); nothing else was found.
+
+* T3, `tier-timed` (audits off, `verify=sample`): PASS in 1,774 s, the restored answer IDENTICAL to its cold twin at L=250,919. Per size (a cold
+  prefill / a device-resident hit / the returning hit after the session left the device pool):
+
+  | Session | Cold prefill TTFT | Resident hit | Returning hit (restored) | Restore | Spilled in the same request |
+  |---|---|---|---|---|---|
+  | 32k (L=35,377, Q=30,720) | 8.32 s | 3.46 s | 3.83 s | 481 blocks, 1.07 GB, 612 ms (1.75 GB/s) | 2.35 GB, 865 ms |
+  | 128k (L=131,149, Q=126,976) | 37.59 s | 4.25 s | 4.08 s | 1,985 blocks, 4.42 GB, 923 ms (4.79 GB/s) | 1.14 GB, 236 ms |
+  | 254k (L=250,919, Q=245,760) | 96.00 s | 4.65 s | 6.49 s | 3,841 blocks, 8.56 GB, 961 ms (8.90 GB/s) | 1.14 GB, 142 ms |
+
+  So a session that left the device pool comes back in 3.8 s (32k), 4.1 s (128k) and 6.5 s (254k) of first-token time against 8.3, 37.6 and 96.0 s
+  to prefill it again (2.2x, 9.2x and 14.8x), and within 0.4 s (32k) to 1.8 s (254k) of a hit that never left the device. The small restore is
+  not at line rate (fixed costs and a slab not yet resident); the large ones are. Floods: 12 x ~120k tokens (1,438,814) over the 1,277,952-token
+  pool per cycle. The tier ended full (`tier_bytes` = its 24 GiB cap, 11,565 blocks) after 58,115 blocks (129.5 GB) spilled in 309 flushes
+  (22.9 s), 46,550 records evicted by its own policy and 6,307 blocks (14.05 GB, 3 requests) restored; no failure, digest or refusal counter
+  moved, 394 digest checks (`sample`), 62,782 checkpoints kept and 33 dropped, 47 stored preconverted. The cold twins ran after the timed
+  requests, with the tier full, so their TTFTs (7.8, 37.0 and 97.4 s) include the spill of what they displaced. "Continuations restored 6 of 9"
+  was the six salted hits (one resident and one returning per size, all restored) and the three cold twins, which are a continuation of the same
+  prompt under a fresh salt and miss by design; the line now counts the salted ones only.
+
+### Concurrent restore and spill (`tier-concurrent`, `tier-concurrent-timed`)
+
+T1 to T3 ran the tier with nothing else on the engine. What a shippable tier also owes is what it costs the users who are not using it: the
+spill (a device read of the blocks an allocation displaces) happens at the end of a scheduler step and the restore (a device write of a returning
+session's pages) before the next one, so the seats decoding beside them wait for both. The two plans measure that, each one arm (one job), on a
+tier profile or on its no-tier control (the pairs below run the same plan on both):
+
+* `tier-concurrent` is the audited arm (the audit twin; exactness and engagement; the stall is printed, not judged: the audits are its cost);
+  `tier-concurrent-timed` is the timed one (no audit instrument; the stall budget is judged).
+* The scenario (`prefix_replay.scenario_tier_concurrent`): a session is built to the largest size the profile admits (254k, capped by the context and
+  the prompt limit) and pushed out of the device pool by fresh-salt floods totalling the pool (no seat is decoding yet); then **seven seats** start
+  (about 4k-token real coding prompts, `ignore_eos`, a 60,000-token budget, so they outlast the scenario), and after every first token, a 10 s
+  settle and a 60 s **control** window (the seats alone): the session **returns** (restored from host RAM on a tier profile, re-prefilled cold on
+  the control; it decodes 512 tokens beside the seven as an eighth seat), a long fresh 120k prompt is sent (**spill**: its blocks displace cached
+  ones, which the tier reads out to host RAM; on the control it displaces nothing to the host), and the returning turn's **cold twin** (a fresh
+  salt, the same body) is sent and compared with it (a strict pair). Every request under test is built, fitted and tokenized before the window
+  that precedes it, so a window times the request and not the tokenizer.
+* What is read (`prefix_concurrent`, from the seats' streamed chunks alone: `chunk_times` and `sent_s` are in `records.jsonl`): a seat's interval
+  between two chunks is its round time and the longest interval is the longest it waited for a token. Windows: `control`, `restore` (the returning
+  turn's send to its first token), `restore_decode` (the rest of its answer), `spill` (the long prompt's send to its first token), `cold` (the
+  cold twin's). Per window: how many of the seven seats decoded across all of it, the round time p50/p99/mean over their complete intervals, the
+  longest wait of any seat that overlaps it, and the round p99 against the arm's own control window as a percentage.
+* Judged: a window without all seven seats decoding across it is NOT_EXERCISED (a seat finished its budget or failed), as is a tier arm with no `host
+  tier restore` line for the returning turn or no `host tier spill` line inside the long prompt's request; the tier's counters as in `tier-returning`;
+  the pair (the restored answer against its cold twin) IDENTICAL; and, on the **timed** arm, **no seat waiting longer than the Lever N decode gap
+  floor** (`QWEN_FAST_LEVERN_MAX_DECODE_GAP_S`, 8 s when the profile does not say) in any window, control included. The round p99 regression is
+  printed as a number, with no threshold. It is the stall of an *event*: the seats grow by their own decode (some 20k tokens each by the spill
+  window), so a later window is slower whatever happens beside it. **The tier's cost is this arm's window against the control profile's same
+  window**, which is what the offline comparator prints.
+* `scripts/ci/tier_concurrent_compare.py <A> <B> [<C> <D>]` (A control, B tier, C control repeat, D tier repeat, each a results directory):
+  the seven seats' output token ids compared over the tokens both arms streamed (the seats are stopped when the scenario ends, at different lengths
+  in different arms; `IDENTICAL`, `DIVERGED` at the first differing token, or `SHORT` under 1,000 common tokens, which proves nothing), the returning,
+  long-prompt and cold-twin answers compared whole, each window's round p50/p99 and longest wait side by side with the tier's p99 against the
+  control's in percent, the budget for both arms, and, for the ABAB, the **floor** (the same control profile twice). Exit 0 only when every text is
+  identical and no wait is over the budget. The seven streams of a tier arm are "unchanged" when they equal the control boot's: the prompts are
+  seeded by name, not by arm, and decoding is greedy.
+* **Estimated, not measured** (nothing of this scenario has run on a card; the fakes in `test_prefix_tier_concurrent` run it end to end, with a
+  stall injected into the restore, but their times mean nothing): the seats' wait at the largest size. T3 measured the restore itself at 254k as
+  3,841 blocks, 8.56 GB in 0.96 s (8.9 GB/s) with 0.14 s of displaced blocks spilled in the same request, and the returning turn's first token at
+  6.49 s (a device-resident hit 4.65 s), nothing else running; if the seats wait for the whole of it, the wait is at most about 6.5 s against
+  the 8 s floor, a margin of about 1.5 s, and the 128k session (4.1 s) is well inside. The flood time at the production pool (12 x 120k-token cold
+  prefills) and the audited arm's cost are the unmeasured parts of the job times in the pack.
+
+### The ship candidate (`...-w2-er-tierfx-traffic`) and its job pack
+
+`make_prefix_tier_profiles.py` also writes the **ship candidate**: the op-fusion ship profile (`...-w2-er-fx-traffic`) plus exactly the tier at its
+production setting (`QWEN_PREFIX_HOST_TIER_GIB=32` beside the 8 GiB checkpoint store, `verify=sample`, `audit=0`) and the preconverted checkpoints
+(`QWEN_PREFIX_CKPT_PRECONVERTED=1`, its audit 0): a traffic profile with no gate instrument, carrying **its own owner traffic waiver** (id
+`w2-er-fx-tier-262k-2026-10-11`) whose decision is **PENDING**; and its gate-only audit twin `...-tierfx-audit` (the combined fusion audit arm plus
+the tier with every instrument on). The contract refuses the two tier levers on a traffic profile whose waiver does not name them
+(`serving_c2_contract.TIER_WAIVABLE_LEVERS`); a PENDING profile boots in a gate or a smoke and logs the word, but no build bakes it. The control of
+every pairing is `...-fx-traffic` itself. To approve: replace `SHIP_DECISION` in the generator with a sentence starting `APPROVED`, run `--write`,
+commit, run the CPU suite on that commit. After a merge that moves a parent profile, regenerate, never hand-merge.
+
+The pack is `scripts/ci/references/fusion-jobs/tier` (one image of its own, `tp4-fusion-tier-1`, a placeholder for the tag its B0 builds from the pushed
+head): B0, X0, **TCX0/TCX1** (the GX-style exactness pair: the control and the candidate over the parked and Lever N equal-answer list, compared with
+`parked_compare.py`), **TC1** (the audited concurrent arm on the audit twin), **TQ1** (the tenant-quota gate, below), **TC2 to TC5** (the timed ABAB: control, tier, control, tier) and Z.
+`ORDER.txt` has the NEEDS lines, the read rules, the no-go list and the estimated minutes (about 9 h 10 min). The ship gates G1, G2 and SR of
+`fusion-jobs/ship` are run on the candidate afterwards by changing their profile names.
+
+### Tenant quotas (`QWEN_PREFIX_TENANT_QUOTA_*`, default off)
+
+One tenant's flood must not push another tenant's session out of the cache. The tenant is the salt's (`tenant_of_salt`: the gateway's opaque tag), the same numbers apply to
+every tenant, and nothing here names, logs or exports a tenant, a salt or a digest.
+
+| Variable | Meaning |
+|---|---|
+| `QWEN_PREFIX_TENANT_QUOTA_DEVICE_CAP_TOKENS` | most prefix tokens one tenant keeps cached in the device pool (digits only, a multiple of 64, at least 2,048; 0 or unset: no cap) |
+| `QWEN_PREFIX_TENANT_QUOTA_DEVICE_FLOOR_TOKENS` | prefix tokens of a tenant that other tenants' allocations may not evict (a multiple of 64, at most the cap; 0 or unset: none) |
+| `QWEN_PREFIX_TENANT_QUOTA_HOST_CAP_GIB` | most host-tier GiB one tenant holds (needs the tier; 0 or unset: no cap) |
+| `QWEN_PREFIX_TENANT_QUOTA_HOST_FLOOR_GIB` | host-tier GiB of a tenant that other tenants' spills may not evict (at most the cap and half the tier's KV budget) |
+
+Every value is parsed strictly and the engine refuses to start on a bad one (a sign, an exponent, a space, `inf`, a non-multiple of the block, a floor above its cap, a host quota
+without the tier); at install the scheduler graft also refuses a floor above half the pool, a cap above the whole pool, and a vLLM without the free queue's `prepend_n`. Unset, none of
+it is installed: the pool, the stats and the log are byte for byte what they were (`test_qwen_prefix_quota`, `test_qwen_prefix_tiers`). The profile contract keeps the names
+gate-only (a traffic profile may not name one) until a qualification record exists, and drops an inherited value under a profile that does not name it.
+
+**Device pool** (`DeviceQuota` in `qwen_prefix_scheduler_patch.py`). A tenant's *resident* tokens are its cached prefix blocks (published by the cap, or restored from the tier),
+running or idle. The **cap** is soft by what is running (a running request's blocks cannot be evicted): when a tenant's resident blocks pass its cap, its OWN idle blocks, oldest
+first, are moved to the front of vLLM's free queue - at publication and at every free - so the next allocation by anyone evicts them before anything else. The **floor** protects:
+an allocation walks the front of the free queue and sets aside, at the tail, any idle block whose tenant (not the allocating one) would fall below its floor by losing it. The eviction
+order is therefore (1) a tenant's own idle blocks beyond its cap, oldest first; (2) vLLM's own LRU order over everything else (blocks never cached or no longer cached first) among
+tenants above their floor; (3) only when nothing else satisfies the allocation, a protected block, counted as a floor *override* (the allocation is vLLM's and never fails for a quota;
+an override voids the isolation gate). The walk costs the blocks it looks at plus the ones it sets aside, and only when a floor is set.
+
+**Host tier** (`TierStore`). The cap evicts the tenant's OWN oldest unpinned records first (reservations of a batch count); the floor skips a record whose removal would take its tenant
+below the floor; with only protected records left the spill is refused (a cache has no allocation to fail), counted. Same units, same counters.
+
+**Counters** (the registry stats, the export and the `stats` line; present only when a quota is on): `quota_dev_demoted_blocks`, `quota_dev_evictions_own` / `_global`,
+`quota_dev_floor_protected`, `quota_dev_floor_overrides`, `quota_host_evictions_own` / `_global`, `quota_host_floor_protected`, `quota_host_refused`, and the gauges
+`quota_dev_tenants`, `quota_dev_at_cap`, `quota_host_tenants`, `quota_host_at_cap` (how many tenants, how many at their cap; never which). The install line is
+`tenant quota on device_cap_tokens=... device_floor_tokens=... host_cap_bytes=... host_floor_bytes=...`.
+
+**Cold-tier client** (`cold_tier_client.py`, a stub nothing calls yet): the engine's side of a service that would hold what leaves host RAM. `ColdKey(tenant, layout, block_hash)`
+names a block (the tenant is the opaque tag; the layout version changes whenever the bytes would mean something else, and a key of another layout is an error, never a miss);
+`fetch(key, out)` writes into a buffer the caller owns (a slot of the pinned host slab, so no copy) and returns a `Future` of the bytes written (0: absent); `store(key, data)` and
+`contains(key)` are `Future`s too; nothing blocks the scheduler. `InMemoryColdTier` is the fake (real threads, an injectable delay and failure). The service itself is not in this repository.
+
+**Gate** (`c2_prefix_gate.py --plan tier-quota`, also `quota-control` and `quota-isolated` as plans of their own, on a gate-only audit twin with the tier). Tenant B builds a session
+(56k) and tenant A (one salt) a smaller one (32k); A floods the device pool with prompts totalling the pool and one more flood; B returns, then A, each as a hit and as its cold twin
+under a fresh salt, compared in full. `quota-control` is the twin as it is: the flood must reach B (restored from host RAM or cold), else the arm is NOT_EXERCISED. `quota-isolated`
+is the same twin with the quota env the gate derives (cap 262,144 and floor 65,536 tokens, 12 GiB and 4 GiB on the host): B's return must be a **device-resident hit** (the oracle's Q
+and no `host tier restore` line for the request), the install line must be in the log, tenant A's own evictions on the books (the device cap bit, and the host cap), no floor
+override, and the pairs identical. `tier_concurrent_compare.py --quota <control> <isolated>` then compares the two arms' returning answers for B and A (identical: the quota moves
+which blocks the pool keeps, never an answer). Job template `TQ1` in the pack above.
+
+**Estimated, not measured**: nothing of this has run on a card. The tests run the real `DeviceQuota` and `TierStore` on a copy of vLLM's free queue (always), on vLLM's own `BlockPool`
+and `FreeKVCacheBlockQueue` (where vLLM imports), and through the real `install()`; the gate over a vLLM-shaped fake pool shows the control losing B and the isolated arm keeping it.
+The cost of the floor's walk and of the demotion is a few list operations per allocation and per free, expected well under the scheduler step's noise; to be read from the isolated arm.
+
+### Not done
+
+Per-tenant quota numbers (every tenant has the same); the quotas on a traffic profile (gate-only until a qualification record); the cold-tier service (only its client interface and a fake); the NVMe tier; the tier on a traffic profile beyond the ship candidate's own PENDING waiver (the contract refuses it anywhere else); the restore through
+vLLM's connector API (not needed: the pages are cached before the hit is looked up); a device-side gather that would let the
+spill overlap the step; arming anything on the production profile.

@@ -123,7 +123,7 @@ class ControlTests(unittest.TestCase):
         # ship/262k-prefix (the owner's choice to ship W1 + packed prefix reuse at eight seats x 262k): the one traffic profile with the switches on
         import make_fusion_profiles as _fusion
 
-        self.assertEqual(sorted(traffic), sorted(['c2-packed-tp4-8x262k-ship-prefix', 'c2-packed-tp4-8x262k-ship-prefix-levern-traffic', 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic'] + list(_fusion.ship_names())), 'only the both-levers ship profile, its Lever N twin and the fusion ship candidates (the second adds the prefill SDPA) turn sticky sessions on for traffic')
+        self.assertEqual(sorted(traffic), sorted(['c2-packed-tp4-8x262k-ship-prefix', 'c2-packed-tp4-8x262k-ship-prefix-levern-traffic', 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic'] + list(_fusion.ship_names()) + ['c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-tierfx-traffic']), 'only the both-levers ship profile, its Lever N twin and the fusion ship candidates (the second adds the prefill SDPA) turn sticky sessions on for traffic')
 
     def test_the_twins_and_their_parents_are_on_the_same_four_card_mesh(self):
         for name, parent in PAIRS:
