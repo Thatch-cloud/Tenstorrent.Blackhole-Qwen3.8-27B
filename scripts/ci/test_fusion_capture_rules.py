@@ -282,11 +282,11 @@ def octo_kv_lifecycle(profile, source='l1', layers=2, hinted=True):
     the captured one inside an open capture, behind the capture rules. Card run 38117538847 (GX1 of the combined candidate of tp4/ship-4) died at engine start here: the warm writer took the
     K/V page writer (its spans, one chain of 64 rows, are not the octo block's) and the captured one declined it (its spans are 8 x 8), so the capture launched the chained writer's
     conversion and chained launch, which had never run eagerly ('Cannot load new binaries during trace capture', mesh_workload.cpp:159). `hinted=False` builds the warm writer without the
-    block's layout, the way the first version did (packed_verifier.build_fixture supplies it: packed_ordered_cache.block_layout)."""
+    block's layout, the way the first version did (packed_verifier.build_fixture supplies it: verify_trace_t2.block_layout)."""
     import json
     import kv_page_writer_tp4 as kvpw
     import model_batch
-    import packed_ordered_cache as poc
+    import verify_trace_t2
     from test_kv_page_writer_tp4 import FakeTTNN, KERNELS, WIDTH, block, mesh, tiles
 
     class Capturing(FakeTTNN):
@@ -321,8 +321,8 @@ def octo_kv_lifecycle(profile, source='l1', layers=2, hinted=True):
 
         def writer(single_chain):
             chained = model_batch.chained_writer_options(pack, tiles(raw, WIDTH), tensors['positions'], tensors['pages'], single_chain=single_chain)
-            # packed_verifier.build_fixture builds both fixtures inside packed_ordered_cache.block_layout(pack['segments']); `hinted=False` leaves the context out
-            with (poc.block_layout(pack['segments']) if hinted else contextlib.nullcontext()):
+            # packed_verifier.build_fixture builds both fixtures inside verify_trace_t2.block_layout(pack['segments']); `hinted=False` leaves the context out
+            with (verify_trace_t2.block_layout(pack['segments']) if hinted else contextlib.nullcontext()):
                 return model_batch.cache_writer(operations, device, KERNELS, ordered_cache=True, cache_tiles=tiles(raw, WIDTH), serial=lambda: None, chained=chained)
 
         warm, captured = writer(True), writer(False)
