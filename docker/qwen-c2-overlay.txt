@@ -193,6 +193,10 @@ scripts/ci/packed_any_evidence_tp4.json
 # The 262,144-token window's own record (QWEN_FAST_MAX_POSITION=262144), at its own pin (EVIDENCE_TP4_262K_SHA256): a skeleton until the E2
 # windows record its sections, so a 262,144 attach is refused - a gate run included - and the 131,328 record above is never touched.
 scripts/ci/packed_any_evidence_tp4_262144.json
+# The K64j-OQ records (their own files and pins, packed_any_admission.own_record): a K64j-OQ process reads these in place of the two above, and a traffic boot on that binary is admitted
+# on them. Recorded from the RQ0-RQ2 card-M jobs (references/fusion-jobs/WPP) with record_packed_any_evidence_tp4.py --binary k64j-oq.
+scripts/ci/packed_any_evidence_tp4_k64j_oq.json
+scripts/ci/packed_any_evidence_tp4_262144_k64j_oq.json
 # S2 B6: the extent block (packed_verifier, overlaid above) imports publication_warm at attach and publishes the
 # drafter's eager publication once at every shape serving can ask of it, so a refused fused commit or a sequential
 # step compiles nothing after attach. New: no older layer holds it, so without this line the extent block's attach
