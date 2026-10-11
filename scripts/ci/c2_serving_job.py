@@ -174,6 +174,12 @@ Keys (every one optional but C2_IMAGE_TAG):
                       run's turns with that run's, on the runner, and holds the verdict to the pre-registered GO rule
   C2_TAULAB_COUNTERS  production's spec-decode counters, a rig-local JSON of aggregates (default: none; positions 1-3 are then
                       NOT_ESTABLISHED in the report)
+  C2_MODEL_REPO + C2_MODEL_REVISION  another checkpoint of the SAME architecture (qwen_c2_checkpoint.py, qwen_c2_checkpoints.json; docs/tp4-swift.md), default off: both or neither,
+                      a catalog pair that is not the base, the revision the 40-hex commit. The smoke and taulab steps then start their container with QWEN_C2_MODEL_REPO and
+                      QWEN_C2_MODEL_REVISION (the contract moves the snapshot, keys the converted-weight directory by the pair and refuses a snapshot whose config, tokenizer or chat
+                      template differ from the base's), serve it under the catalog's served name (output model_served) and the smoke check reads the container log for the
+                      checkpoint lines (c2_smoke_check.py --expect-checkpoint). Needs C2_CARDS=quad and C2_ACTIONS from status rescan reset smoke taulab with a smoke or a taulab in it;
+                      the gate, prefix, replay, probe, build and push steps are refused (they do not forward it). Unset, every output is empty and no argv changes.
   C2_TT_GRID          clamp the compute grid tt-metal exposes, as insurance for cards whose firmware no longer soft-harvests Tensix
                       columns (tensix_col_disable_count 2 -> 0, so the unharvested 13x10 core descriptor is selected instead of 11x10):
                       exactly 10,9 (11x10, today's grid, valid on a harvested and an unharvested card), 11,9 (12x10) or 12,9 (13x10),
@@ -273,6 +279,9 @@ TAULAB_DEADLINE_MINUTES = 270
 MAX_TAULAB_DEADLINE_MINUTES = 540
 TAULAB_IN_FLIGHT = 8
 MAX_TAULAB_IN_FLIGHT = 16
+# C2_MODEL_REPO / C2_MODEL_REVISION (qwen_c2_checkpoint.py): the steps that pass the selection into their container, and the ones that need no card step to be useful.
+MODEL_ACTIONS = ('status', 'rescan', 'reset', 'smoke', 'taulab')
+MODEL_SERVING_ACTIONS = ('smoke', 'taulab')
 # A rig-local path: plain characters, relative to the runner's home or absolute, never a '..' component or a leading '-'.
 PLAIN_PATH = re.compile(r'(?!-)[A-Za-z0-9_./-]{1,200}')
 PREFIX_PROFILE = 'general-prefix'
@@ -652,6 +661,7 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root, tt_grid=tt_grid)
     drafter_candidates = read_drafter_candidates(values, actions)
     box_minutes = read_box(values, actions)
+    model = read_model(values, actions, cards, lambda action: taulab['taulab_profile'] if action == 'taulab' else profile, root)
     outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), rmi_tags=rmi_tags, tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
@@ -662,6 +672,7 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
     outputs.update(s2)
     outputs.update(prefix)
     outputs.update(taulab)
+    outputs.update(model)
     return outputs
 
 
@@ -930,6 +941,40 @@ def read_taulab(values, profiles, running):
     return dict(taulab_profile=profile, taulab_data=paths['C2_TAULAB_DATA'], taulab_arms=' '.join(arms),
                 taulab_deadline=str(minutes), taulab_in_flight=str(in_flight), taulab_max_tokens=str(max_tokens),
                 taulab_counters=paths['C2_TAULAB_COUNTERS'], taulab_drafter_arm=drafter_arm, taulab_pair_control=pair_control)
+
+
+def read_model(values, actions, cards, profile_of, root=ROOT):
+    """C2_MODEL_REPO / C2_MODEL_REVISION (module docstring) as the outputs model_repo, model_revision and model_served, all empty when unset, or JobError.
+    `profile_of` maps an action to the profile name its container serves (smoke: C2_PROFILE, taulab: C2_TAULAB_PROFILE)."""
+    repo, revision = values.get('C2_MODEL_REPO', ''), values.get('C2_MODEL_REVISION', '')
+    if not repo and not revision:
+        return dict(model_repo='', model_revision='', model_served='')
+    sys.path.insert(0, HERE)
+    try:
+        import qwen_c2_checkpoint as checkpoint
+    finally:
+        sys.path.remove(HERE)
+    try:
+        catalog = checkpoint.load_catalog(os.path.join(root, 'scripts', 'ci', 'qwen_c2_checkpoints.json'))
+        sel = checkpoint.selection({checkpoint.REPO_ENV: repo, checkpoint.REVISION_ENV: revision}, catalog)
+        if sel.is_base:
+            raise checkpoint.CheckpointError('%s@%s is the base: leave C2_MODEL_REPO and C2_MODEL_REVISION empty (nothing moves for the base)' % (repo, revision[:12]))
+        if cards != 'quad':
+            raise checkpoint.CheckpointError('another checkpoint is served on the four-card mesh: it needs C2_CARDS=quad')
+        outside = sorted(set(actions) - set(MODEL_ACTIONS))
+        if outside:
+            raise checkpoint.CheckpointError('C2_ACTIONS has %s, which does not forward the checkpoint into its container (allowed: %s)' % (', '.join(outside), ' '.join(MODEL_ACTIONS)))
+        serving = [action for action in actions if action in MODEL_SERVING_ACTIONS]
+        if not serving:
+            raise checkpoint.CheckpointError('C2_ACTIONS has no smoke or taulab: nothing would serve the checkpoint')
+        with open(os.path.join(root, 'scripts', 'ci', 'qwen_c2_profiles.json'), encoding='utf-8') as handle:
+            entries = json.load(handle)['profiles']
+        for action in serving:
+            name = profile_of(action)
+            checkpoint.snapshot_candidates(entries[name]['snapshots'], sel, catalog)
+    except (checkpoint.CheckpointError, KeyError) as error:
+        raise JobError('C2_MODEL_REPO / C2_MODEL_REVISION: %s' % error)
+    return dict(model_repo=sel.repo, model_revision=sel.revision, model_served=checkpoint.served_model(sel.repo, sel.revision, catalog))
 
 
 def render(outputs):

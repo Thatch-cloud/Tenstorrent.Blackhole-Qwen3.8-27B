@@ -23,7 +23,7 @@ def post(path, body, timeout=900):
         return error.code, error.read().decode(errors='replace')[:400]
 
 
-def stream(messages, max_tokens, drop_after=None, timeout=1800, keep_stamps=False, on_token=None, **extra):
+def stream(messages, max_tokens, drop_after=None, timeout=1800, keep_stamps=False, on_token=None, keep_text=False, **extra):
     body = dict(model=MODEL, messages=messages, max_tokens=max_tokens, stream=True,
                 stream_options={'include_usage': True}, **extra)
     request = urllib.request.Request(BASE + '/v1/chat/completions', data=json.dumps(body).encode(), method='POST',
@@ -67,7 +67,8 @@ def stream(messages, max_tokens, drop_after=None, timeout=1800, keep_stamps=Fals
                 content_sha256=hashlib.sha256(content.encode('utf-8')).hexdigest(), content_chars=len(content),
                 reasoning_sha256=hashlib.sha256(reasoning.encode('utf-8')).hexdigest(), reasoning_chars=len(reasoning),
                 started_at=round(started, 3), first_at=round(first, 3) if first else None, ended_at=round(ended, 3),
-                **(dict(delta_stamps=stamps) if keep_stamps else {}))
+                **(dict(delta_stamps=stamps) if keep_stamps else {}),
+                **(dict(full_content=content, full_reasoning=reasoning) if keep_text else {}))
 
 
 def record(name, function):
@@ -1422,6 +1423,70 @@ def bench():
 
 if ONLY and 'bench' in ONLY:
     record('bench', bench)
+
+
+def coding_set():
+    # Opt-in (the Swift window, docs/tp4-swift.md): the twenty self-checking Python problems of references/swift/coding-problems.json, each sent as one request (the prompt and the
+    # instructions, thinking on, greedy as the contract forces), CODING_SET_WORKERS at a time (default 8, the seats). Every answer is saved whole, the reasoning and the content apart,
+    # with the finish reason and the token counts (the server's /tokenize on each part, else none: swift_coding_report.py then splits the completion tokens by characters), as
+    # CODING_SET_OUT (else coding-set.json); swift_coding_report.py runs the tests on a CPU host. max_tokens: the file's, or CODING_SET_MAX_TOKENS. Nothing is judged here.
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, 'references', 'swift', 'coding-problems.json'), encoding='utf-8') as handle:
+        document = json.load(handle)
+    problems = document['problems']
+    max_tokens = int(os.environ.get('CODING_SET_MAX_TOKENS') or document['max_tokens'])
+    workers = max(1, int(os.environ.get('CODING_SET_WORKERS') or 8))
+    answers = [None] * len(problems)
+    cursor = [0]
+    lock = threading.Lock()
+
+    def worker():
+        while True:
+            with lock:
+                index = cursor[0]
+                cursor[0] += 1
+            if index >= len(problems):
+                return
+            problem = problems[index]
+            prompt = problem['prompt'] + '\n\n' + (document['instructions'] % problem['entry_point'])
+            try:
+                answers[index] = stream([{'role': 'user', 'content': prompt}], max_tokens, keep_text=True)
+            except Exception as error:
+                answers[index] = dict(error=repr(error)[:300])
+
+    threads = [threading.Thread(target=worker) for _ in range(min(workers, len(problems)))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    def count(text):
+        if not text:
+            return 0
+        try:
+            status, body = post('/tokenize', dict(model=MODEL, prompt=text, add_special_tokens=False), timeout=300)
+        except Exception:
+            return None
+        return body.get('count') if status == 200 and isinstance(body, dict) and isinstance(body.get('count'), int) else None
+
+    saved = []
+    for problem, answer in zip(problems, answers):
+        answer = answer or dict(error='no answer')
+        reasoning, content = answer.get('full_reasoning') or '', answer.get('full_content') or ''
+        saved.append(dict(id=problem['id'], entry_point=problem['entry_point'], finish=answer.get('finish'), error=answer.get('error'), prompt_tokens=answer.get('prompt_tokens'),
+                          completion_tokens=answer.get('completion_tokens'), ttft=answer.get('ttft'), decode_tok_s=answer.get('decode_tok_s'),
+                          reasoning=reasoning, content=content, reasoning_tokens=count(reasoning) if not answer.get('error') else None,
+                          content_tokens=count(content) if not answer.get('error') else None))
+    with open(os.environ.get('CODING_SET_OUT', 'coding-set.json'), 'w', encoding='utf-8') as handle:
+        json.dump(dict(label=os.environ.get('AGREEMENT_LABEL', 'run'), model=MODEL, max_tokens=max_tokens, version=document['version'], results=saved), handle)
+    return dict(problems=len(saved), errors=sum(1 for item in saved if item['error']), finish_length=sum(1 for item in saved if item['finish'] == 'length'),
+                empty_content=sum(1 for item in saved if not item['content'].strip()), completion_tokens=sum(item['completion_tokens'] or 0 for item in saved),
+                server_token_counts=sum(1 for item in saved if item['reasoning_tokens'] is not None and item['content_tokens'] is not None))
+
+
+if ONLY and 'coding_set' in ONLY:
+    record('coding_set', coding_set)
 print('SMOKE_JSON ' + json.dumps(results))
 if (results.get('agreement') or {}).get('ok') is False or 'error' in (results.get('agreement') or {}):
     print('SMOKE_FAILED agreement: %s' % json.dumps((results['agreement'].get('reasons') or results['agreement'].get('error')))[:600])

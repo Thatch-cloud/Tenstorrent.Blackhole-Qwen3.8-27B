@@ -1021,6 +1021,8 @@ jobs:
           TAULAB_DRAFTER_ARM: ${{ steps.job.outputs.taulab_drafter_arm }}
           TAULAB_PAIR_CONTROL: ${{ steps.job.outputs.taulab_pair_control }}
           TT_GRID: ${{ steps.job.outputs.tt_grid }}
+          MODEL_REPO: ${{ steps.job.outputs.model_repo }}
+          MODEL_REVISION: ${{ steps.job.outputs.model_revision }}
         run: |
           set -euo pipefail
           # The W-T1 tau lab (docs: scripts/ci/c2_tau_lab.py): ONE container of the image on all four cards serving the
@@ -1071,6 +1073,9 @@ jobs:
           if [ -n "$TT_GRID" ]; then args+=(--tt-grid "$TT_GRID"); fi
           # A drafter arm (tp4/drafter-arms): the image carries that drafter's fixtures, the derived profile only its drafter-only flags.
           if [ -n "$TAULAB_DRAFTER_ARM" ]; then args+=(--drafter-arm "$TAULAB_DRAFTER_ARM"); fi
+          # C2_MODEL_REPO / C2_MODEL_REVISION (default off): the lab's container serves another checkpoint of the same architecture (the driver refuses the arm when the container's log
+          # does not show the checkpoint lines, and prints the line saying so).
+          if [ -n "$MODEL_REPO" ]; then args+=(--model-repo "$MODEL_REPO" --model-revision "$MODEL_REVISION"); fi
           if [ -n "$TAULAB_COUNTERS" ]; then
             counters="$TAULAB_COUNTERS"
             case "$counters" in /*) ;; *) counters="$HOME/$counters" ;; esac
@@ -1087,6 +1092,7 @@ jobs:
           fi
           # Read the launched argv (memory read-the-launched-argv): the contract's own lines name the profile it booted.
           if [ -f "$run/server.log" ]; then grep -F '[QWEN-C2]' "$run/server.log" | head -4 || true; fi
+          if [ -f "$run/server.log" ] && [ -n "$MODEL_REPO" ]; then grep -F '[QWEN-C2] checkpoint' "$run/server.log" | head -4 || true; fi
           if [ -f "$run/server.log" ] && [ -n "$TAULAB_DRAFTER_ARM" ]; then grep -F -e '[DRAFTER_MANIFEST]' -e '[DRAFTER_BF16]' "$run/server.log" | head -4 || true; fi
           # The paired verdict (drafter_pair_report.py): this candidate arm's turns against the control run's, both read from the rig-local
           # results directories; only the aggregate summary joins the artifact. The step's own status stays the lab's.
@@ -1114,6 +1120,9 @@ jobs:
           TT_GRID: ${{ steps.job.outputs.tt_grid }}
           TELEMETRY: ${{ steps.job.outputs.telemetry }}
           TELEMETRY_MS: ${{ steps.job.outputs.telemetry_ms }}
+          MODEL_REPO: ${{ steps.job.outputs.model_repo }}
+          MODEL_REVISION: ${{ steps.job.outputs.model_revision }}
+          SERVED_MODEL: ${{ steps.job.outputs.model_served }}
         run: |
           set -euo pipefail
           # The pair smoke's shape on every Blackhole board present (a general-tp4 profile: the contract sets
@@ -1151,6 +1160,11 @@ jobs:
           # C2_TELEMETRY=1: the read-only per-chip telemetry sampler for the whole step, the model load and warm-up included (it ends with the smoke client below).
           telemetry_start smoke "$results/telemetry-smoke" "${CARD_SET_NODES[@]}"
           if [ -n "$TT_GRID" ]; then echo "compute-grid clamp: TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$TT_GRID"; fi
+          # C2_MODEL_REPO / C2_MODEL_REVISION (qwen_c2_checkpoint.py; default off, both empty): another checkpoint of the same architecture. The contract moves the snapshot, keys the
+          # converted-weight directory by the pair and refuses a snapshot that is not the base's in config, tokenizer and chat template; the container is named by the checkpoint's own
+          # served name so a client can tell which model answered. The smoke check below reads the container's checkpoint lines.
+          served="${SERVED_MODEL:-Qwen/Qwen3.8-27B}"
+          if [ -n "$MODEL_REPO" ]; then echo "checkpoint asked: $MODEL_REPO@$MODEL_REVISION served as $served"; fi
           docker run -d --name "$name" --read-only \
             --tmpfs /tmp:rw,size=512m --tmpfs /opt/tt-metal/generated:rw,size=1g \
             --tmpfs /root/.cache/ttnn:rw,size=1g --tmpfs /root/.cache/tt-metal-cache:rw,size=8g \
@@ -1159,9 +1173,10 @@ jobs:
             -v /home/thatch/hf-cache/hub:/models -e HF_HOME=/models -e HF_HUB_CACHE=/models \
             -e MESH_DEVICE=P300 -e QWEN36_BATCHED_DECODE_MODE=host -e VLLM_RPC_TIMEOUT=100000 \
             -e TT_MESH_GRAPH_DESC_PATH=/opt/tt-metal/tt_metal/fabric/mesh_graph_descriptors/p300_mesh_graph_descriptor.textproto \
-            -e QWEN_C2_GATE=1 -e QWEN_C2_PROFILE="$PROFILE" ${TT_GRID:+-e "TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$TT_GRID"} -p 127.0.0.1:8010:8000 \
+            -e QWEN_C2_GATE=1 -e QWEN_C2_PROFILE="$PROFILE" ${TT_GRID:+-e "TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$TT_GRID"} \
+            ${MODEL_REPO:+-e "QWEN_C2_MODEL_REPO=$MODEL_REPO" -e "QWEN_C2_MODEL_REVISION=$MODEL_REVISION"} -p 127.0.0.1:8010:8000 \
             --entrypoint python3 "$image" -m vllm.entrypoints.openai.api_server \
-            --model Qwen/Qwen3.8-27B --served-model-name Qwen/Qwen3.8-27B --host 0.0.0.0 --port 8000 \
+            --model "${MODEL_REPO:-Qwen/Qwen3.8-27B}" --served-model-name "$served" --host 0.0.0.0 --port 8000 \
             --reasoning-parser qwen3 --tool-call-parser qwen3_xml --enable-auto-tool-choice \
             --max-model-len 65536 --max-num-seqs 2 --block-size 64 --no-enable-prefix-caching \
             --additional-config '{"tt": {"l1_small_size": 24576, "fabric_config": "FABRIC_1D", "trace_region_size": 1073741824}}'
@@ -1189,8 +1204,9 @@ jobs:
           fi
           smoke_status=0
           AGREEMENT_OUT="$results/agreement-$PROFILE.json" BENCH_OUT="$results/bench-$PROFILE.json" \
+            CODING_SET_OUT="$results/coding-set-$PROFILE.json" \
             AGREEMENT_LABEL="$PROFILE" AGREEMENT_ROOT="$PWD" \
-            ${smoke_wrap[@]+"${smoke_wrap[@]}"} python3 scripts/ci/c2_serving_smoke.py http://127.0.0.1:8010 Qwen/Qwen3.8-27B "$TESTS" \
+            ${smoke_wrap[@]+"${smoke_wrap[@]}"} python3 scripts/ci/c2_serving_smoke.py http://127.0.0.1:8010 "$served" "$TESTS" \
             "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')/typing.py" \
             scripts/ci/build-c2-serving-image.sh 2>&1 | tee "$results/smoke.log" || smoke_status=$?
           telemetry_stop
@@ -1204,7 +1220,7 @@ jobs:
           # text, an audit mismatch, and on a slide-on profile a ramp commit above 50 ms) before the next job of a chain.
           docker logs "$name" > "$results/container.log" 2>&1 || true
           python3 scripts/ci/c2_smoke_check.py --smoke-log "$results/smoke.log" --container-log "$results/container.log" \
-            --profile "$PROFILE"
+            --profile "$PROFILE" ${MODEL_REPO:+--expect-checkpoint "$MODEL_REPO@$MODEL_REVISION"}
           docker stats --no-stream "$name" | tee "$results/stats.txt" || true
           grep -F '[PINDIAG] dram after' <(docker logs "$name" 2>&1) | tail -8 || true
       - name: Replay the node agent's serving sequence

@@ -456,7 +456,7 @@ AGENT_ENV = ('HF_HOME=/models', 'HF_HUB_CACHE=/models', 'MESH_DEVICE=P300', 'QWE
              'DO_NOT_TRACK=1', 'VLLM_NO_USAGE_STATS=1', 'PYTHONDONTWRITEBYTECODE=1')
 
 
-def agent_shape(image, name, profile, devices, hub=HUB, env=(), gate_only=False, ops_env=(), tt_grid=None):
+def agent_shape(image, name, profile, devices, hub=HUB, env=(), gate_only=False, ops_env=(), tt_grid=None, model=None):
     """`docker run` of the node agent's container, up to the image: read-only root, the agent's tmpfs
     set, 8 CPUs, 80g, 4g shm, the two cards in the order given, hugepages, SYS_NICE, the hub at
     /models, the environment the platform adds (AGENT_ENV), and QWEN_C2_SERVING=1 with the profile.
@@ -465,7 +465,8 @@ def agent_shape(image, name, profile, devices, hub=HUB, env=(), gate_only=False,
     demands to boot a gate-only profile; a profile that is not gate only gets the agent's argv byte for byte.
     `ops_env` (an ops-trace arm's profiler variables, ops_profile_plan.ARM_ENV_NAMES) follows the same way.
     `tt_grid` (C2_TT_GRID: 10,9 | 11,9 | 12,9) adds the compute-grid clamp TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE after the profile; None, the
-    argv is exactly what it was."""
+    argv is exactly what it was. `model` ((repo, revision) of qwen_c2_checkpoints.json, C2_MODEL_REPO / C2_MODEL_REVISION) adds QWEN_C2_MODEL_REPO and
+    QWEN_C2_MODEL_REVISION right after the grid clamp; None, the argv is exactly what it was."""
     arguments = ['docker', 'run', '--rm', '--name', name, '--read-only']
     for tmpfs in AGENT_TMPFS:
         arguments += ['--tmpfs', tmpfs]
@@ -478,6 +479,8 @@ def agent_shape(image, name, profile, devices, hub=HUB, env=(), gate_only=False,
     if gate_only:
         arguments += ['-e', 'QWEN_C2_GATE=1']
     arguments += c2_serving_job.tt_grid_arguments(tt_grid)
+    if model:
+        arguments += ['-e', 'QWEN_C2_MODEL_REPO=%s' % model[0], '-e', 'QWEN_C2_MODEL_REVISION=%s' % model[1]]
     for name_, value in env:
         if name_ not in ARM_ENV_NAMES:
             raise PlanError('%s is not an environment an arm may add (%s): a profile\'s keys are the profile\'s'

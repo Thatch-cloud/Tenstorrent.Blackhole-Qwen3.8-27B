@@ -669,13 +669,14 @@ def kvread_mount_arguments(image, mount=None, run=subprocess.run):
 
 
 def server_run(image, name, served, devices, port=PORT, hub=gate.HUB, derived_path=None, digests=False,
-               salt_key_path=None, stats_now=False, env=(), gate_only=False, tt_grid=None):
+               salt_key_path=None, stats_now=False, env=(), gate_only=False, tt_grid=None, model=None):
     """`docker run -d` of one serving container: the S1 gate's agent shape (its --rm dropped: the
     reload drill stops and starts the same container), the API on 127.0.0.1:port, a derived
     profiles file when the arm has one, the row digests when asked, the arm's salt key when it has
     one, the gate-only knobs an S2 arm adds (`env`: the extent audit, c2_serving_gate.ARM_ENV_NAMES),
-    and the platform's vLLM argv. `tt_grid` (C2_TT_GRID): the compute-grid clamp, c2_serving_gate.agent_shape's."""
-    arguments = [token for token in gate.agent_shape(image, name, served, devices, hub, env, gate_only=gate_only, tt_grid=tt_grid)
+    and the platform's vLLM argv. `tt_grid` (C2_TT_GRID): the compute-grid clamp, c2_serving_gate.agent_shape's. `model` (C2_MODEL_REPO / C2_MODEL_REVISION): the
+    checkpoint pair, agent_shape's; None, the argv is exactly what it was."""
+    arguments = [token for token in gate.agent_shape(image, name, served, devices, hub, env, gate_only=gate_only, tt_grid=tt_grid, model=model)
                  if token != '--rm']
     arguments[2:2] = ['-d']
     arguments += ['-p', '127.0.0.1:%d:8000' % port]
@@ -689,8 +690,11 @@ def server_run(image, name, served, devices, port=PORT, hub=gate.HUB, derived_pa
     if derived_path:
         arguments += ['--mount', 'type=bind,src=%s,dst=%s,readonly' % (derived_path, DERIVED_MOUNT),
                       '-e', 'QWEN_C2_PROFILES=%s' % DERIVED_MOUNT]
+    platform = list(PLATFORM_ARGS)
+    if model:
+        platform[platform.index('--model') + 1] = model[0]       # the platform asks for the checkpoint it is served (the contract refuses a mismatch)
     return (arguments + kvread_mount_arguments(image)
-            + ['--entrypoint', 'python3', image, '-m', 'vllm.entrypoints.openai.api_server'] + PLATFORM_ARGS)
+            + ['--entrypoint', 'python3', image, '-m', 'vllm.entrypoints.openai.api_server'] + platform)
 
 
 def anchor_script(root=MODEL_ROOT, pins=GRAFT_PINS, files=ANCHOR_FILES):

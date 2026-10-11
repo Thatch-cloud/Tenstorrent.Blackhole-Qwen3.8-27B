@@ -68,6 +68,10 @@ process match it:
    plugin still falls back to host sampling per batch for what the device sampler cannot do); the file
    HOST_SAMPLING_FILE or QWEN_HOST_SAMPLING=1 drops it at boot, so every batch samples on the host.
 
+9. another checkpoint of the same architecture (qwen_c2_checkpoint.py, qwen_c2_checkpoints.json; default off): QWEN_C2_MODEL_REPO and QWEN_C2_MODEL_REVISION, both, a pair the
+   catalog lists and that differs from the base, move the profile's snapshot to that checkpoint's, key the converted-weight directory (TT_CACHE_PATH) by the pair so two
+   checkpoints never share a cache, and refuse a snapshot whose config, tokenizer or chat template are not the base's byte for byte. Unset, the base is served exactly as before.
+
 Nothing here changes a gate: every step is off unless QWEN_C2_SERVING=1.
 """
 
@@ -276,6 +280,71 @@ def resolve_snapshot(profile, exists=os.path.isdir):
         if exists(candidate):
             return candidate
     raise ValueError('None of the pinned target snapshots is mounted: %s' % ', '.join(profile['snapshots']))
+
+
+# The names configure_checkpoint reads (qwen_c2_checkpoint.REPO_ENV, REVISION_ENV and the derived ones it sets); a test holds them equal to the module's.
+CHECKPOINT_ENV = ('QWEN_C2_MODEL_REPO', 'QWEN_C2_MODEL_REVISION', 'QWEN_C2_CHECKPOINT_KEY', 'QWEN_C2_CHECKPOINT_SNAPSHOT', 'QWEN_C2_WEIGHT_CACHE_BASE')
+
+
+def configure_checkpoint(profile, environ, api_server, exists=os.path.isdir):
+    """Item 9. -> the snapshot the engine serves instead of the profile's own, or None (nothing selected, or the base itself: the environment is left as it was).
+
+    Every process sets the environment (the keyed TT_CACHE_PATH, the derived names) so a child inherits and re-derives the same values; the identity checks, the cache marker and
+    the log line are the API server's alone. Any refusal is a ValueError: the API server exits (status 78) rather than serve another checkpoint's bytes under the base's name."""
+    if not any(environ.get(name) for name in CHECKPOINT_ENV):
+        return None      # nothing asked and nothing inherited: no import, no change (the off path is the code that was here before)
+    import qwen_c2_checkpoint as checkpoint
+
+    try:
+        sel = checkpoint.selection(environ)
+        if sel is None or sel.is_base:
+            checkpoint.configure_environment(environ, sel, None)
+            if sel is not None and api_server:
+                log('model is the base %s@%s: nothing moved (the base snapshot, its own converted weights)', sel.repo, sel.revision)
+            return None
+        catalog = checkpoint.load_catalog()
+        snapshot = checkpoint.resolve_snapshot(profile['snapshots'], sel, catalog, exists)
+        facts = checkpoint.configure_environment(environ, sel, snapshot)
+        if api_server:
+            problems = checkpoint.verify_snapshot(snapshot, sel, catalog)
+            if problems:
+                raise checkpoint.CheckpointError('; '.join(problems))
+            claim = checkpoint.claim_cache(environ, sel)
+            log('%s', checkpoint.log_text(facts, (len(catalog['identity_files']), len(sel.entry['shards']))))
+            log('weight cache %s: %s%s', facts['weight_cache'], 'created' if claim['created'] else 'found',
+                '' if claim['first_boot_complete'] or claim['created'] else ' (its first boot never completed: a truncated tensor file fails the load loudly; delete the directory to rebuild)')
+        return snapshot
+    except checkpoint.CheckpointError as error:
+        raise ValueError('profile %s cannot serve the asked checkpoint: %s' % (profile['name'], error))
+
+
+BASE_MODEL_ID = 'Qwen/Qwen3.8-27B'
+
+
+def platform_model(argv):
+    """The value of vLLM's --model in an argv (the platform's, before rewrite_argv drops it), or None."""
+    for index, token in enumerate(argv):
+        if token == '--model':
+            return argv[index + 1] if index + 1 < len(argv) else None
+        if token.startswith('--model='):
+            return token[len('--model='):]
+    return None
+
+
+def check_platform_model(argv, environ):
+    """Item 9: the model id the platform asks for must be the model this image serves (qwen_c2_checkpoint.platform_model_problems). The usual case, the base id or no id, costs nothing."""
+    asked = platform_model(argv)
+    selected = any(environ.get(name) for name in CHECKPOINT_ENV[:2])
+    if not selected and (asked is None or asked == BASE_MODEL_ID):
+        return
+    import qwen_c2_checkpoint as checkpoint
+
+    try:
+        problems = checkpoint.platform_model_problems(asked, checkpoint.selection(environ), checkpoint.load_catalog())
+    except checkpoint.CheckpointError as error:
+        problems = [str(error)]
+    if problems:
+        raise ValueError('; '.join(problems))
 
 
 def mesh_of(profile):
@@ -1659,11 +1728,13 @@ def boot(environ=None, orig_argv=None):
     eos_ids = frozenset(int(token) for token in profile['eos_ids'])
     orig_argv = getattr(sys, 'orig_argv', None) if orig_argv is None else orig_argv
     api_server = is_api_server(orig_argv)
+    checkpoint_snapshot = configure_checkpoint(profile, environ, api_server)
     if prefix_reuse(profile):
         install_prefix_metrics(api_server)
         sys.meta_path.insert(0, PostImportHook(MODEL_ENTRY, log_model_tree))
     if api_server:
-        snapshot = resolve_snapshot(profile)
+        check_platform_model(sys.argv[1:], environ)
+        snapshot = checkpoint_snapshot or resolve_snapshot(profile)
         if tt_config(profile).get('sample_on_device_mode') is not None and host_sampling_forced(environ):
             profile = dict(without_device_sampling(profile), name=profile['name'])
             log('profile %s: host sampling for every batch (%s=1 or %s): sample_on_device_mode dropped',

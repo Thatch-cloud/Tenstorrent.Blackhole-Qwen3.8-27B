@@ -1,0 +1,203 @@
+{
+ "about": "The checkpoints the C2 serving stack may serve besides its base (scripts/ci/qwen_c2_checkpoint.py, docs/tp4-swift.md). Public facts of the model repositories only: file digests (sha256 of the file bytes), the safetensors index (the digest of its weight_map) and the weight shards (size and sha256, which is the hub blob name). A checkpoint is selectable only when every identity file below is byte-identical to the base entry's and its tensors, shard names and shard sizes equal the base's: the same architecture, the same shapes, the same tokenizer and chat template. Only its weights differ.",
+ "schema": 1,
+ "identity_files": [
+  "config.json",
+  "generation_config.json",
+  "tokenizer_config.json",
+  "chat_template.jinja",
+  "tokenizer.json",
+  "vocab.json",
+  "merges.txt",
+  "preprocessor_config.json",
+  "video_preprocessor_config.json"
+ ],
+ "base": {
+  "repo": "Qwen/Qwen3.8-27B",
+  "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "files": {
+   "config.json": "191e0af232104ed8b65258cf3fb2b842e288008baca7633c11b82a1ac7203aab",
+   "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+   "tokenizer_config.json": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+   "chat_template.jinja": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+   "tokenizer.json": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+   "vocab.json": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003",
+   "merges.txt": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
+   "preprocessor_config.json": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+   "video_preprocessor_config.json": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+  },
+  "weight_map_sha256": "1a5f0c9442cebf63eb9f0c4cd4d7d80b338f90012744edf79ee26ce45dba441b",
+  "tensors": 1199,
+  "total_size": 55562855904,
+  "shards": {
+   "model-00001-of-00018.safetensors": {
+    "size": 3966730552,
+    "sha256": "ba0ce20aae489ad196733da5064bcdf159a1fe84f53336648196e1ebb7751b1c"
+   },
+   "model-00002-of-00018.safetensors": {
+    "size": 3043080328,
+    "sha256": "06a148c01bfbe3faa14a5f184a7ff29a706f7ae1c8b2705d2058e26d17a001fb"
+   },
+   "model-00003-of-00018.safetensors": {
+    "size": 2542796952,
+    "sha256": "2e1bf62cbcd406eaa64b60d10353e1f0ef4039d0976e56f05cabe953454f9968"
+   },
+   "model-00004-of-00018.safetensors": {
+    "size": 3988973152,
+    "sha256": "511e34063187882659753c4d93f3859f93c019fd438d8813071921c81d9a3f1a"
+   },
+   "model-00005-of-00018.safetensors": {
+    "size": 2099339864,
+    "sha256": "635cb53446dc74f219740fc59e18b774f877b803b9722e289ca62575a6efa701"
+   },
+   "model-00006-of-00018.safetensors": {
+    "size": 3979553696,
+    "sha256": "0bc5214fac607f0e6cc92eec3789d4b8559410ef9fce66621ba8158e8410dae0"
+   },
+   "model-00007-of-00018.safetensors": {
+    "size": 2108759344,
+    "sha256": "80b0c49033e9a0d5762562aa12f4acdb7f54da586f3d0110f28c48d91cf07892"
+   },
+   "model-00008-of-00018.safetensors": {
+    "size": 3979553696,
+    "sha256": "7192c5b66185d3592927daabee1cc19e6f6e0ce75988ee20e824b624765fda79"
+   },
+   "model-00009-of-00018.safetensors": {
+    "size": 2108759344,
+    "sha256": "af3c48cc37af44f3db6ae0579baf019180d48d9c527caa0a1f03ff85813a56d8"
+   },
+   "model-00010-of-00018.safetensors": {
+    "size": 3979553696,
+    "sha256": "163490a76f3bea3a40855b7efc04ce6d27afaf1a34f0bbde495b9491f76457c9"
+   },
+   "model-00011-of-00018.safetensors": {
+    "size": 2108759344,
+    "sha256": "5f3ae1b948aeee39da77aec558e8236cd65fe4d7cb7686a76bb007acc563c6d8"
+   },
+   "model-00012-of-00018.safetensors": {
+    "size": 3979553696,
+    "sha256": "a3de1c7114677a8f5ac5c4892c90e8238ea5c1e2038c80e757dfc87c3902ca55"
+   },
+   "model-00013-of-00018.safetensors": {
+    "size": 2108759344,
+    "sha256": "06ab79a41f74c9c5cb734816feb0c7fc364104b227165ee7391231e1155aa02a"
+   },
+   "model-00014-of-00018.safetensors": {
+    "size": 3979553696,
+    "sha256": "4138ed94603065ba884bbcadedb04d7718bb40117e85e6f5c6fc5b9c05b7a85b"
+   },
+   "model-00015-of-00018.safetensors": {
+    "size": 2108759344,
+    "sha256": "69224e27b9de4e7dbf6fc936c6eaae08447bda3b80a6c31a871ab451173afd22"
+   },
+   "model-00016-of-00018.safetensors": {
+    "size": 3979564040,
+    "sha256": "73cb9a1089fb6155cb648609478d6633be8a5c7d9ca5a05bc8925ce8a553cefe"
+   },
+   "model-00017-of-00018.safetensors": {
+    "size": 2108759344,
+    "sha256": "beb51f01056142ac4984bd800507b0dd0fd18de57f8e9ef6ea41d1a3598983a8"
+   },
+   "model-00018-of-00018.safetensors": {
+    "size": 3392197344,
+    "sha256": "1d3479509e21494658f9b64d317f5ea8e55c4025d28c702d6c4d0b356ce8ea06"
+   }
+  }
+ },
+ "checkpoints": [
+  {
+   "repo": "ukisai/Swift-1.5-Qwen3.8-27b",
+   "revision": "b4c84d42903a8646b25857eb2827288d92ed85a4",
+   "files": {
+    "config.json": "191e0af232104ed8b65258cf3fb2b842e288008baca7633c11b82a1ac7203aab",
+    "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+    "tokenizer_config.json": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+    "chat_template.jinja": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+    "tokenizer.json": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+    "vocab.json": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003",
+    "merges.txt": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
+    "preprocessor_config.json": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+    "video_preprocessor_config.json": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+   },
+   "weight_map_sha256": "1a5f0c9442cebf63eb9f0c4cd4d7d80b338f90012744edf79ee26ce45dba441b",
+   "tensors": 1199,
+   "total_size": 55562855904,
+   "shards": {
+    "model-00001-of-00018.safetensors": {
+     "size": 3966730552,
+     "sha256": "b9dcb3e15c00823d46d92f645f8a7324cdd1163c39ff6c04de48fa6e478952a0"
+    },
+    "model-00002-of-00018.safetensors": {
+     "size": 3043080328,
+     "sha256": "ecf7312565a089592217b58d761e714f3b3d85d4ec578a15d901210a9ba14773"
+    },
+    "model-00003-of-00018.safetensors": {
+     "size": 2542796952,
+     "sha256": "cec21a53517089f1b9708a77936465420f266482a45da26fd4c0dd596d609d08"
+    },
+    "model-00004-of-00018.safetensors": {
+     "size": 3988973152,
+     "sha256": "3a1a2bfcfd177e62fbe78f08b2b1d3edac59c495397aa64d0d1c41b727a94c73"
+    },
+    "model-00005-of-00018.safetensors": {
+     "size": 2099339864,
+     "sha256": "389931270466dcdbc9125bda7572cc7712f164e1fe774e7377524abca899b0c2"
+    },
+    "model-00006-of-00018.safetensors": {
+     "size": 3979553696,
+     "sha256": "da6f16eabe6be8552af22ed5ad171ae97469fa5bb5d5e613982460e43265debf"
+    },
+    "model-00007-of-00018.safetensors": {
+     "size": 2108759344,
+     "sha256": "b4b9f91766d367f0260882d97b5c0862863c393ef381f54d48dfda3d362072a9"
+    },
+    "model-00008-of-00018.safetensors": {
+     "size": 3979553696,
+     "sha256": "df58405d10cb8a199e3e5a01346c6b6ebf2a1bed05d6b11e14f856543b28e55c"
+    },
+    "model-00009-of-00018.safetensors": {
+     "size": 2108759344,
+     "sha256": "84ba24193b7d0885ef504ce5806d3d4ebbe5506fdfd5919f4837ebc9479611e6"
+    },
+    "model-00010-of-00018.safetensors": {
+     "size": 3979553696,
+     "sha256": "aacd71e34312a13bf487a06c9c54205ad31f72a8788b0a550154a04565820a97"
+    },
+    "model-00011-of-00018.safetensors": {
+     "size": 2108759344,
+     "sha256": "6d967f431bdfde43c38839188023c5507d5d0dce6a1daa6bbbf8605ecb3da9aa"
+    },
+    "model-00012-of-00018.safetensors": {
+     "size": 3979553696,
+     "sha256": "c36593694bc3f250449ae2196366e6cf788c122dc9a645fbe6ef116746fc5d73"
+    },
+    "model-00013-of-00018.safetensors": {
+     "size": 2108759344,
+     "sha256": "b50b55cffe8be40b6eb90c43b1d3cec7672d7f3a86b2efd436db5a83619686d2"
+    },
+    "model-00014-of-00018.safetensors": {
+     "size": 3979553696,
+     "sha256": "27b627a940af6ba6f26d240767ca75a4774d02a91255c3a2274dd316e364d1d1"
+    },
+    "model-00015-of-00018.safetensors": {
+     "size": 2108759344,
+     "sha256": "f9203192d4a759f6fc58c32eebda8a2f00f4a15dc183f06ddc263de49595ade5"
+    },
+    "model-00016-of-00018.safetensors": {
+     "size": 3979564040,
+     "sha256": "cf3333f84d3783148a58b24612998ba24b8c60dc69f77e14d86e66ef958c23de"
+    },
+    "model-00017-of-00018.safetensors": {
+     "size": 2108759344,
+     "sha256": "e446dd9c79fc0255d9b2181a9a85debb2b5b51b2eb31177c4c1a7daa198221f7"
+    },
+    "model-00018-of-00018.safetensors": {
+     "size": 3392197344,
+     "sha256": "2898c2335e6ce74567af2de8373d7468c403fb5e69f4b00f5f7b83fb815d71be"
+    }
+   },
+   "served_model": "ukisai/Swift-1.5-Qwen3.8-27b",
+   "notes": "RL post-train of the base (the model card claims fewer thinking tokens and better coding scores at temperature 1.0; this stack serves greedy only). Weights licence: the repo's own (see its LICENSE and NOTICE): a decision for the owner, not for this file."
+  }
+ ]
+}

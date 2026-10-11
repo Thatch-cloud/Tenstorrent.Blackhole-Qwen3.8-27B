@@ -603,6 +603,12 @@ def smoke_problems(results, container_text=''):
             continue
         if 'error' in entry:
             problems.append('%s: %s' % (name, entry['error']))
+    coding_set = results.get('coding_set')            # the Swift window's coding set (c2_serving_smoke.coding_set): a measurement, but a request that errored is a fault
+    if isinstance(coding_set, dict):
+        if 'error' in coding_set:
+            problems.append('coding_set: %s' % coding_set['error'])
+        elif coding_set.get('errors'):
+            problems.append('coding_set: %s of %s requests errored' % (coding_set.get('errors'), coding_set.get('problems')))
     if 'warmup' in results and 'error' not in results['warmup'] and results['warmup'].get('value') != 200:
         problems.append('warmup: status %s' % results['warmup'].get('value'))
     for name in ('coding', RESEND_TEST):
@@ -2367,6 +2373,9 @@ def main(argv=None):
     parser.add_argument('--profile', required=True)
     parser.add_argument('--profiles', type=Path, default=DEFAULT_PROFILES)
     parser.add_argument('--max-ramp-kv-ms', type=float, default=50.0)
+    parser.add_argument('--expect-checkpoint', default=None, metavar='REPO@REVISION',
+                        help='the job served another checkpoint of the same architecture (C2_MODEL_REPO / C2_MODEL_REVISION, qwen_c2_checkpoint.py): the container log must hold the '
+                        'contract\'s checkpoint line with the keyed weight cache directory and the worker\'s "checkpoint bound" line, and no line for another selection')
     options = parser.parse_args(argv)
     try:
         smoke = options.smoke_log.read_text(encoding='utf-8', errors='replace')
@@ -2378,6 +2387,12 @@ def main(argv=None):
         print('SMOKE_CHECK unreadable: %s' % error, file=sys.stderr)
         return 2
     problems, facts = check(smoke, container, slide, options.max_ramp_kv_ms, env, entry)
+    if options.expect_checkpoint:
+        import qwen_c2_checkpoint
+        repo, _, revision = options.expect_checkpoint.partition('@')
+        found = qwen_c2_checkpoint.container_log_problems(container, (repo, revision))
+        problems = list(problems) + ['checkpoint: ' + item for item in found]
+        facts['checkpoint'] = '%s@%s' % (repo, revision[:12])
     print('SMOKE_CHECK profile=%s slide=%s %s' % (options.profile, 'on' if slide else 'off', json.dumps(facts)))
     if facts.get('unqualified'):
         print('SMOKE_CHECK %s: the 262k evidence records were waived or a launch outside them ran; this result is a measurement, never evidence' % facts['unqualified'])

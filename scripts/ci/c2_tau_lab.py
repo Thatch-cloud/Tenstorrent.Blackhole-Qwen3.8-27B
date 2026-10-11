@@ -1096,7 +1096,7 @@ def wait_ready(client, container, clock, sleep, seconds=READINESS_SECONDS):
     return 'no /v1/models answer in %d s' % seconds
 
 
-def launched_problems(log_lines, derived, arm=None):
+def launched_problems(log_lines, derived, arm=None, model=None):
     """What the launched container's own log says against what was asked (memory read-the-launched-argv): the contract's
     '[QWEN-C2]' lines must name the derived profile; a drafter arm's own markers must show (the bf16 weights engaged, the
     candidate manifest in force) and must not show on an arm that did not ask for them. [str]."""
@@ -1104,6 +1104,13 @@ def launched_problems(log_lines, derived, arm=None):
     problems = []
     if derived not in text:
         problems.append('the container log never names the derived profile %s' % derived)
+    if model:
+        # Another checkpoint was asked (qwen_c2_checkpoint.py): the contract's own lines must name it, keyed cache and all, or the arm would measure the base under its name.
+        import qwen_c2_checkpoint
+        problems += qwen_c2_checkpoint.container_log_problems(text, model)
+    elif '[QWEN-C2] checkpoint' in text:
+        import qwen_c2_checkpoint
+        problems += qwen_c2_checkpoint.container_log_problems(text, None)
     if arm is not None:
         asked = dict(DRAFTER_ARMS[arm]['env'])
         bf16 = asked.get('QWEN_FAST_DRAFTER_BF16') == '1'
@@ -1184,6 +1191,21 @@ def make_canary(log_path, results, clock=time.time, sleep=time.sleep, wait=CANAR
     return check
 
 
+def read_model(options):
+    """(repo, revision) of the checkpoint asked for with --model-repo / --model-revision, or None; LabError for one alone, an unlisted pair or the base itself."""
+    if not options.model_repo and not options.model_revision:
+        return None
+    import qwen_c2_checkpoint as checkpoint
+
+    try:
+        sel = checkpoint.selection({checkpoint.REPO_ENV: options.model_repo or '', checkpoint.REVISION_ENV: options.model_revision or ''})
+    except checkpoint.CheckpointError as error:
+        raise LabError('the checkpoint: %s' % error)
+    if sel.is_base:
+        raise LabError('the checkpoint is the base: leave --model-repo and --model-revision out')
+    return (sel.repo, sel.revision)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--image', default=None)
@@ -1212,6 +1234,8 @@ def build_parser():
                         help='clamp the compute grid the container opens (%s=...; qwen-c2-serving.yml C2_TT_GRID); default: not passed'
                         % c2_serving_job.TT_GRID_ENV)
     parser.add_argument('--hub', default=gate.HUB)
+    parser.add_argument('--model-repo', default=None, help='another checkpoint of the same architecture (qwen_c2_checkpoints.json; C2_MODEL_REPO); needs --model-revision')
+    parser.add_argument('--model-revision', default=None, help='its 40-hex revision (C2_MODEL_REVISION)')
     parser.add_argument('--port', type=int, default=PORT)
     parser.add_argument('--dry-run', action='store_true', help='check the data and print the plan (counts) and the docker argv; '
                                                               'run nothing; exits nonzero on any shortfall')
@@ -1330,14 +1354,20 @@ def main(argv=None, say=print, make_stream=None, make_client=None, make_containe
     if extra:
         say('refused: the derived profile changes arithmetic: %s' % ', '.join(extra))
         return 2
+    try:
+        model = read_model(options)
+    except LabError as error:
+        say('refused: %s' % error)
+        return 2
     audits = audits_on(profiles, options.profile)
-    production = is_production_run(options.image, audits, options.drafter_arm)
+    production = is_production_run(options.image, audits, options.drafter_arm) and model is None
     limits = dict(prompt=pg.prompt_limit(profiles, options.profile))
     say('[TAULAB] data: %s' % ' '.join('%s=%d' % pair for pair in sorted(plan_counts(data, arms).items())))
     if scrub:
         say('[TAULAB] A2 scrub report: kept=%s dropped=%s, final check clean' % (scrub.get('kept'), scrub.get('dropped')))
-    say('[TAULAB] profile %s -> %s, image %s, verify audits on=%s, production=%s, drafter arm=%s' % (
-        options.profile, derived, 'tag ' + image_tag(options.image), audits, production, options.drafter_arm or 'none'))
+    say('[TAULAB] profile %s -> %s, image %s, verify audits on=%s, production=%s, drafter arm=%s%s' % (
+        options.profile, derived, 'tag ' + image_tag(options.image), audits, production, options.drafter_arm or 'none',
+        '' if model is None else ', checkpoint %s@%s (not the base)' % (model[0], model[1][:12])))
     try:
         devices = devices if devices is not None else (None if options.dry_run else gate.devices_for(options.cards))
     except Exception as error:  # noqa: BLE001 - the card-set error lists the boards' ids: only its type goes out
@@ -1346,7 +1376,7 @@ def main(argv=None, say=print, make_stream=None, make_client=None, make_containe
     results_dir = os.path.abspath(options.results)
     derived_path = os.path.join(results_dir, 'profiles.json')
     arguments = pg.server_run(options.image, CONTAINER, derived, devices or ['<card %d>' % n for n in range(4)],
-                              options.port, options.hub, derived_path, tt_grid=options.tt_grid)
+                              options.port, options.hub, derived_path, tt_grid=options.tt_grid, model=model)
     if options.tt_grid:
         say('[TAULAB] compute-grid clamp: %s=%s in the container' % (c2_serving_job.TT_GRID_ENV, options.tt_grid))
     if options.dry_run:
@@ -1397,11 +1427,11 @@ def main(argv=None, say=print, make_stream=None, make_client=None, make_containe
         say('[TAULAB] ready after %.0f s' % info['ready_seconds'])
         context = client.context_tokens()
         info['context_tokens'] = context
-        problems = launched_problems(follower.lines(), derived, options.drafter_arm)
+        problems = launched_problems(follower.lines(), derived, options.drafter_arm, model)
         info['launched_problems'] = problems
         for problem in problems:
-            say('[TAULAB] %s: %s' % ('REFUSED' if options.drafter_arm else 'WARNING', problem))
-        if options.drafter_arm and problems:
+            say('[TAULAB] %s: %s' % ('REFUSED' if (options.drafter_arm or model) else 'WARNING', problem))
+        if (options.drafter_arm or model) and problems:
             # A drafter arm is only that arm when the container's own log says so: a wrong image tag or a bf16 switch that
             # never engaged would otherwise spend the whole arm measuring something else under the arm's name.
             raise ArmMismatch(problems[0])

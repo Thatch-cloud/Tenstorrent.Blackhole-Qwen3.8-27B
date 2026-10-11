@@ -290,6 +290,8 @@ jobs:
           python -B -m unittest test_tap_window_aligned
           # S4
           python -B -m unittest test_ship4_profiles test_ship4_pack
+          # SW
+          python -B -m unittest test_qwen_c2_checkpoint test_swift_coding test_swift_pack
           # TEL
           python -B -m unittest test_card_telemetry
           # TW
