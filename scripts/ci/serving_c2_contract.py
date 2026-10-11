@@ -318,6 +318,30 @@ def configure_checkpoint(profile, environ, api_server, exists=os.path.isdir):
         raise ValueError('profile %s cannot serve the asked checkpoint: %s' % (profile['name'], error))
 
 
+def checkpoint_limits(limits, environ):
+    """Item 9: request_limits(profile) with the selected checkpoint's catalog numbers laid over it (qwen_c2_checkpoints.json "request": today default_max_tokens, the max_tokens a
+    request that omits it gets, within the same clamp and the same output budget). No selection, or the base: `limits` itself, nothing read."""
+    if not any(environ.get(name) for name in CHECKPOINT_ENV[:2]):
+        return limits
+    import qwen_c2_checkpoint as checkpoint
+
+    try:
+        changes = checkpoint.request_overrides(checkpoint.selection(environ))
+    except checkpoint.CheckpointError as error:
+        raise ValueError(str(error))
+    if not changes:
+        return limits
+    out = dict(limits)
+    default = changes.get('default_max_tokens')
+    if default is not None:
+        if not 1 <= default <= limits['budget']:
+            raise ValueError('the checkpoint\'s default_max_tokens %r is not an integer from 1 to the output budget %d' % (default, limits['budget']))
+        log('request default max_tokens %d for this checkpoint (its catalog entry; the profile says %s); the clamp, the %d-token output budget and the KV admission are unchanged',
+            default, limits['default_max_tokens'], limits['budget'])
+        out['default_max_tokens'] = default
+    return out
+
+
 BASE_MODEL_ID = 'Qwen/Qwen3.8-27B'
 
 
@@ -1729,6 +1753,8 @@ def boot(environ=None, orig_argv=None):
     orig_argv = getattr(sys, 'orig_argv', None) if orig_argv is None else orig_argv
     api_server = is_api_server(orig_argv)
     checkpoint_snapshot = configure_checkpoint(profile, environ, api_server)
+    if api_server:
+        limits = checkpoint_limits(limits, environ)
     if prefix_reuse(profile):
         install_prefix_metrics(api_server)
         sys.meta_path.insert(0, PostImportHook(MODEL_ENTRY, log_model_tree))

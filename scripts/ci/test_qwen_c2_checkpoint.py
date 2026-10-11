@@ -571,6 +571,95 @@ class JobKeyTests(unittest.TestCase):
             self.assertIn('C2_MODEL', str(raised.exception))
 
 
+class RequestDefaultTests(unittest.TestCase):
+    """Swift's answer room: a request that omits max_tokens gets 16,384 (the output budget) instead of the profile's 8,192; the base keeps the profile's. The clamp to the room a long prompt
+    leaves, the 16,384 ceiling and the per-request KV admission are the contract's own and unchanged."""
+    SHIP = json.loads(PROFILES.read_text(encoding='utf-8'))['profiles']['c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4']
+
+    def limits(self, environ):
+        base = contract.request_limits(self.SHIP)
+        with mock.patch.object(contract, 'log', lambda *args: None):
+            return base, contract.checkpoint_limits(base, environ)
+
+    def enforce(self, limits, prompt_tokens, max_tokens=None):
+        params = type('Params', (), dict(n=1, logprobs=None, prompt_logprobs=None, structured_outputs=None, logit_bias=None, allowed_token_ids=None, bad_words=None, stop=None,
+                                         min_tokens=0, stop_token_ids=None, max_tokens=max_tokens))()
+        contract.enforce_request(params, prompt_tokens=prompt_tokens, max_model_len=262144, budget=limits['budget'], eos_ids=frozenset((248046, 248044)), max_prompt_tokens=limits['max_prompt_tokens'],
+                                 min_answer_tokens=limits['min_answer_tokens'], default_max_tokens=limits['default_max_tokens'], drafter_headroom_tokens=limits.get('drafter_headroom_tokens', 0),
+                                 kv_pool_blocks=limits.get('kv_pool_blocks'))
+        return params.max_tokens
+
+    def test_the_catalog_gives_swift_the_budget_and_the_base_nothing(self):
+        self.assertEqual(SWIFT['request'], {'default_max_tokens': 16384})
+        self.assertNotIn('request', BASE)
+        self.assertEqual(checkpoint.request_overrides(checkpoint.selection(PAIR)), {'default_max_tokens': 16384})
+        self.assertEqual(checkpoint.request_overrides(checkpoint.selection(BASE_PAIR)), {})
+        self.assertEqual(checkpoint.request_overrides(None), {})
+
+    def test_the_ship_profile_is_untouched_and_only_swift_changes_the_limit(self):
+        base, off = self.limits({})
+        self.assertIs(off, base, 'no selection: the very same limits, nothing read')
+        self.assertEqual((base['default_max_tokens'], base['budget'], base['min_answer_tokens'], base['kv_pool_blocks']), (8192, 16384, 8192, 16499))
+        self.assertEqual(self.limits(dict(BASE_PAIR))[1], base, 'the base pair: the profile\'s numbers')
+        _, swift = self.limits(dict(PAIR))
+        self.assertEqual(swift['default_max_tokens'], 16384)
+        self.assertEqual({key: value for key, value in swift.items() if key != 'default_max_tokens'}, {key: value for key, value in base.items() if key != 'default_max_tokens'})
+
+    def test_an_override_over_the_budget_is_refused(self):
+        base = contract.request_limits(self.SHIP)
+        with mock.patch.object(checkpoint, 'request_overrides', return_value={'default_max_tokens': 16385}), mock.patch.object(contract, 'log', lambda *args: None):
+            with self.assertRaises(ValueError):
+                contract.checkpoint_limits(base, dict(PAIR))
+
+    def test_a_catalog_request_block_is_checked(self):
+        for request in ({'default_max_tokens': 0}, {'default_max_tokens': '16384'}, {'other': 5}, [1]):
+            with self.subTest(request=request), tempfile.TemporaryDirectory() as tmp:
+                broken = copy.deepcopy(CATALOG)
+                broken['checkpoints'][0]['request'] = request
+                path = Path(tmp) / 'c.json'
+                path.write_text(json.dumps(broken), encoding='utf-8')
+                with self.assertRaises(checkpoint.CheckpointError):
+                    checkpoint.load_catalog(str(path))
+        broken = copy.deepcopy(CATALOG)
+        broken['base']['request'] = {'default_max_tokens': 16384}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'c.json'
+            path.write_text(json.dumps(broken), encoding='utf-8')
+            with self.assertRaises(checkpoint.CheckpointError):
+                checkpoint.load_catalog(str(path))
+
+    def test_the_default_is_clamped_to_the_room_a_long_prompt_leaves_and_an_explicit_value_is_the_budget_at_most(self):
+        _, swift = self.limits(dict(PAIR))
+        base = contract.request_limits(self.SHIP)
+        self.assertEqual(self.enforce(swift, 1000), 16384)
+        self.assertEqual(self.enforce(base, 1000), 8192, 'the base keeps its 8,192')
+        self.assertEqual(self.enforce(swift, 200000), 16384)
+        self.assertEqual(self.enforce(swift, 253920), 8192, 'the longest admitted prompt: 262,144 less the 32 headroom less 253,920 leaves 8,192')
+        self.assertEqual(self.enforce(swift, 250000), 12112)
+        self.assertEqual(self.enforce(swift, 1000, 20000), 16384, 'the ceiling is the budget: an explicit larger value is clamped, as before')
+        self.assertEqual(self.enforce(swift, 1000, 5000), 5000)
+        with self.assertRaises(contract.ContractError):
+            self.enforce(swift, 253921)
+
+    def test_every_default_request_is_admitted_by_the_kv_check_and_eight_fit_to_a_long_prompt(self):
+        from serving_kv_reservation import request_blocks
+        _, swift = self.limits(dict(PAIR))
+        pool = swift['kv_pool_blocks']
+        self.assertEqual(pool, 16499)
+        for prompt in (1, 4096, 32768, 120000, 200000, 253920):
+            granted = self.enforce(swift, prompt)
+            self.assertLessEqual(request_blocks(prompt, granted), pool, 'a single default request is never refused for its blocks (%d tokens)' % prompt)
+        # eight default requests at once, each holding its worst case: the longest prompt for which all eight fit in the pool
+        def eight_fit(prompt, default):
+            return 8 * request_blocks(prompt, min(default, 262144 - 32 - prompt)) <= pool
+
+        for prompt in (4096, 32768, 65536, 100000, 115000):
+            self.assertTrue(eight_fit(prompt, 16384), prompt)
+        self.assertEqual(max(prompt for prompt in range(110000, 125000) if eight_fit(prompt, 16384)), 115488)
+        self.assertEqual(max(prompt for prompt in range(110000, 130000) if eight_fit(prompt, 8192)), 123680)
+        self.assertFalse(eight_fit(120000, 16384), 'between 115,488 and 123,680 prompt tokens the eighth DEFAULT-max_tokens request waits for blocks (the reservation holds it) where the 8,192 default ran it')
+
+
 class PlatformModelTests(unittest.TestCase):
     """The model id the platform asks for must be the model the image serves: Swift is never answered under the base's name, nor the base under Swift's."""
 

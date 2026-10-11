@@ -55,6 +55,7 @@ BOUND_LINE = 'checkpoint bound'
 REPO = re.compile(r'[0-9A-Za-z._-]{1,96}/[0-9A-Za-z._-]{1,96}')
 REVISION = re.compile(r'[0-9a-f]{40}')
 SHARD = re.compile(r'model-[0-9]{5}-of-[0-9]{5}\.safetensors')
+REQUEST_KEYS = frozenset(('default_max_tokens',))
 
 
 class CheckpointError(ValueError):
@@ -127,6 +128,11 @@ def load_catalog(path=None):
                 raise CheckpointError('%s: %s differs from the base\'s (another architecture or shape)' % (entry['repo'], field))
         if sorted(entry['shards']) != sorted(base['shards']) or any(entry['shards'][n]['size'] != base['shards'][n]['size'] for n in base['shards']):
             raise CheckpointError('%s: the weight shards (names, sizes) differ from the base\'s' % entry['repo'])
+        request = entry.get('request', {})
+        if not isinstance(request, dict) or set(request) - REQUEST_KEYS or any(type(value) is not int or value < 1 for value in request.values()):
+            raise CheckpointError('%s: request may only hold positive ints named %s' % (entry['repo'], ', '.join(sorted(REQUEST_KEYS))))
+    if 'request' in base:
+        raise CheckpointError('the base carries no request overrides: its numbers are its profile\'s')
     return catalog
 
 
@@ -205,6 +211,13 @@ def platform_model_problems(asked, sel, catalog):
     if named in listed and named != serves:
         return ['the platform asks for the model %s but this image serves %s (%s)' % (named, serves, 'QWEN_C2_MODEL_REPO/REVISION name it' if sel is not None and not sel.is_base else 'no checkpoint is selected: the base')]
     return []
+
+
+def request_overrides(sel):
+    """The request-contract numbers the selected checkpoint's catalog entry replaces the profile's with ({} for the base or no selection): today default_max_tokens."""
+    if sel is None or sel.is_base:
+        return {}
+    return dict(sel.entry.get('request') or {})
 
 
 def keyed_cache_dir(base_cache, sel):
