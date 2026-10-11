@@ -920,12 +920,17 @@ class KVPageWriter:
         return self.pending is None
 
 
-def attach(mesh, operations, kernels, *, positions, pages, spans, launch_rows, environ=None):
+def attach(mesh, operations, kernels, *, positions, pages, spans, launch_rows, environ=None, layout_spans=None):
     """A KVPageWriter, or None after one logged line when this block cannot take the lever (the chained writer then runs, unchanged). A
-    misconfigured flag raises; an unsupported block or missing evidence never does."""
+    misconfigured flag raises; an unsupported block or missing evidence never does.
+
+    `layout_spans` (model_batch.chained_writer_options): the BLOCK's own user spans, which the octo decision reads. The warm fixture's `spans` are one chain over every row (its placeholders
+    write one tile row), so deciding on `spans` alone attached the page writer to the octo block's WARM forward and declined it in the captured one: the capture then launched the chained
+    writer's programs, which had never run eagerly (card run 38117538847, 'Cannot load new binaries during trace capture'). The warm and the captured forward of a block take the same writer."""
     if not enabled(environ):
         return None
-    if launch_rows == BLOCK_ROWS and tuple((int(first), int(last)) for first, last in spans) == OCTO_SPANS:
+    shape = spans if layout_spans is None else layout_spans
+    if launch_rows == BLOCK_ROWS and tuple((int(first), int(last)) for first, last in shape) == OCTO_SPANS:
         return octo_served()
     try:
         layer = _LAYERS[0]

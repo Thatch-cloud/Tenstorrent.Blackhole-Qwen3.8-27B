@@ -656,7 +656,10 @@ class FixtureTests(unittest.TestCase):
         with patch.dict('os.environ', ON, clear=True):
             self.assertEqual(chained_writer_options(pack, ['tile'], 'positions', 'pages'),
                              dict(positions='positions', pages='pages', spans=pack['segments'], tiles=['tile'],
-                                  launch_rows=64))
+                                  launch_rows=64, layout_spans=pack['segments']))
+            # the warm fixture's single chain: one span of 64 rows, the block's own layout unchanged (the octo block's page-writer decision reads the layout, not the chain)
+            warm = chained_writer_options(pack, ['tile'], 'positions', 'pages', single_chain=True)
+            self.assertEqual((warm['spans'], warm['layout_spans']), (((0, 64),), pack['segments']))
             self.assertIsNone(chained_writer_options(None, ['tile'], 'positions', 'pages'))
             self.assertIsNone(chained_writer_options(pack, [], 'positions', 'pages'))
         with patch.dict('os.environ', dict(ON, QWEN_FAST_VERIFY_T2_KV_ROWS='32'), clear=True):

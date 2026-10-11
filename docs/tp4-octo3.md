@@ -163,6 +163,16 @@ production executes on every adoption, its saving on a returning turn is less th
 profiles (never beside prefix reuse, Lever N, engine reuse or sticky sessions). Include it only as a gate-only twin measured in the RB turn ABAB, or as a strict value that trims the diagnostics and keeps
 the adoption readback (about 10 lines in `memory_ledger.trim_enabled`).
 
+## 7a. Card finding: the page writer's octo decline (GX1 of the combined candidate, run 38117538847)
+
+The combined candidate's first card boot died at engine start while capturing the third block's verify trace (`Cannot load new binaries during trace capture`, `mesh_workload.cpp:159`, in
+`packed_ordered_cache.ChainedOrderedCacheWriter.__call__`'s `to_memory_config`). Cause (this branch's, not the candidate's other parts): the K/V page writer declined the octo block by its SPANS
+(eight users of eight rows), but the block's WARM forward is built over one chain of 64 rows (`model_batch.chained_writer_options(single_chain=True)`: the placeholders write one tile row), so the
+warm forward attached the page writer and the captured one did not; the capture then launched the chained writer's conversion and chained launch, which had never run eagerly. The octo-2 runs
+never met it (no page writer on the Lever N stack). Fix: the decision reads the block's own layout (`layout_spans`, the same in both forwards) and both forwards take the chained writer.
+`test_fusion_capture_rules.KVPageTests` builds both writers the way the model does, under the real profiles' env, and runs the warm forward then the capture behind the capture rules; the
+negative control (a warm writer without the layout) reproduces the card's failure. Any other lever that decides a block's path from the warm fixture's collapsed spans would fail the same way.
+
 ## 8. Not done
 
 K5-A at eight rows (the octo block keeps the served batched GDN launch); an 8x8 K/V page writer (own card-M record); the octo draft in the draft book; the batched collect for the octo pass; the Q1/Q2 qualification
