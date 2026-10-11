@@ -90,6 +90,15 @@ class Host(object):
         return list(self.value)
 
 
+class Shape(tuple):
+    """A tensor shape as the card's ttnn gives it to Python: indexed by an integer, never sliced (the first verify wrapper read `shape[-2:]`, raised on the card, and stayed silent)."""
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            raise TypeError('Shape does not support slicing')
+        return tuple.__getitem__(self, index)
+
+
 class Tensor(object):
     dtype = 'bf16'
     layout = 'tile'
@@ -98,7 +107,7 @@ class Tensor(object):
 
     def __init__(self, shape, chips, mesh, name='t'):
         Tensor.counter[0] += 1
-        self.shape = tuple(shape)
+        self.shape = Shape(shape)
         self.chips = list(chips)                    # one list of ints per chip
         self.mesh = mesh
         self.name = name
@@ -387,7 +396,7 @@ class Rig(object):
     def weight(self, width):
         return dummy(self.mesh, (1, 1, 5120, width), 11)
 
-    def prefill(self, name='all_gather_matmul_prefill', rows=2048, width=4128, **kwargs):
+    def prefill(self, name='all_gather_matmul_prefill', rows=2048, width=4120, **kwargs):
         function = getattr(self.tp_common, name)
         return function(self.x(rows), self.weight(width), Collectives(), 'cfg', 'ring', **kwargs)
 
@@ -620,6 +629,28 @@ class PrefillShimTests(unittest.TestCase):
             self.assertEqual(rig.matching(grid13.FELL_BACK), [])
             self.assertEqual(grid13.STATS['agmm'], 4)
 
+    def test_the_fused_gdn_weight_is_the_gdn_in_site_at_its_logical_width_and_at_the_padded_one(self):
+        """Card run 38106780113: the fused GDN weight reports its LOGICAL width (Shape([5120, 4120]) in the cache log), and the site was only matched at the tile-padded 4,128, so its engaged,
+        unchanged and audit lines said `agmm` and the smoke rule wanted `gdn_in`."""
+        import tp_shapes
+
+        geometry = tp_shapes.active(TP4)
+        self.assertEqual((geometry.gdn_qkvzab, geometry.gdn_qkvzab_padded), (4120, 4128))
+        with patch.dict(os.environ, TP4):
+            for width in (4120, 4128):
+                self.assertEqual(grid13.agmm_site(dict(weight_tensor=dummy(None, (1, 1, 5120, width), 1))), 'gdn_in', width)
+            self.assertEqual(grid13.agmm_site(dict(weight_tensor=dummy(None, (1, 1, 5120, 3584), 1))), 'attn_in')
+            self.assertEqual(grid13.agmm_site(dict(weight_tensor=dummy(None, (1, 1, 5120, 777), 1))), 'agmm')
+        with Rig(environ={grid13.FLAG: 'prefill', grid13.AUDIT_FLAG: '1'}) as rig:
+            rig.install()
+            rig.prefill(width=4120)
+            rig.prefill(width=3584)
+            rig.prefill('all_gather_swiglu_prefill', width=8704)
+            self.assertEqual(sorted(line.split('site=')[1].split()[0] for line in rig.matching(grid13.ENGAGED)), ['attn_in', 'gate_up', 'gdn_in'])
+            self.assertEqual(sorted(line.split('site=')[1].split()[0] for line in rig.matching('exact=True')), ['attn_in', 'gate_up', 'gdn_in'])
+            self.assertNotIn('site=agmm', '\n'.join(rig.lines))
+            self.assertEqual(grid13_smoke.problems({grid13.FLAG: 'prefill', grid13.AUDIT_FLAG: '1'}, '\n'.join(rig.lines)), [])
+
     def test_an_11_by_10_device_keeps_the_served_call_and_says_why(self):
         with Rig(columns=11, environ={grid13.FLAG: 'prefill'}) as rig:
             rig.install()
@@ -838,7 +869,56 @@ class VerifyTests(unittest.TestCase):
                 served = self.served(rig, k, n, cores, grid_w=13 if cores != 64 else 8)
                 used, _ = self.run_projection(rig, served, k, n, rows=rows)
                 self.assertIs(used, served, (k, n, rows))
-            self.assertEqual(rig.lines, [])
+            self.assertEqual([line for line in rig.lines if grid13.PREFIX + ' installed' not in line and grid13.PREFIX + ' verify saw' not in line], [])
+            saw = rig.matching(grid13.PREFIX + ' verify saw')
+            self.assertEqual(len(saw), len(set((rows, k, n) for k, n, _cores, rows in cases)))      # one line per distinct (rows, k, n), every one of them a served call here
+            self.assertTrue(any('rows=64 k=5120 n=4128 lever_site=verify.gdn_in' in line for line in saw))
+
+    def test_the_install_line_and_the_saw_lines_say_what_was_reached(self):
+        with Rig(environ={grid13.FLAG: 'verify'}) as rig:
+            rig.install()
+            self.assertEqual(rig.lines, ['%s installed subs=verify wrapped=matmul_1d_decode namespaces=1' % grid13.PREFIX])
+            served = self.served(rig, 1536, 5120, 33)
+            self.run_projection(rig, served, 1536, 5120, rows=32)                   # a one-user call: seen, a lever site, but not the packed block
+            self.run_projection(rig, served, 1536, 5120, rows=32)                   # (once)
+            self.run_projection(rig, served, 1536, 5120, rows=64)
+            saw = rig.matching(grid13.PREFIX + ' verify saw')
+            self.assertEqual(len(saw), 2)
+            self.assertIn('rows=32 k=1536 n=5120 lever_site=verify.out (not the 64-row packed block: the served call)', saw[0])
+            self.assertIn('rows=64 k=1536 n=5120 lever_site=verify.out', saw[1])
+            self.assertEqual(len(rig.matching(grid13.ENGAGED)), 1)
+        with Rig(environ={grid13.FLAG: '1'}) as rig:
+            rig.install()
+            self.assertIn('subs=drafter,prefill,verify wrapped=all_gather_matmul_prefill,all_gather_swiglu_prefill,matmul_1d_decode', rig.lines[0])
+
+    def test_the_shape_is_read_by_index_so_a_shape_that_does_not_slice_still_engages(self):
+        with Rig(environ={grid13.FLAG: 'verify'}) as rig:
+            rig.install()
+            weight = dummy(rig.mesh, (1536, 5120), 5)
+            with self.assertRaises(TypeError):
+                weight.shape[-2:]
+            served = self.served(rig, 1536, 5120, 33)
+            used, _ = self.run_projection(rig, served, 1536, 5120)
+            self.assertIsNot(used, served)
+            self.assertEqual(len(rig.matching(grid13.ENGAGED)), 1)
+
+    def test_an_operand_that_cannot_be_read_is_said_once_and_the_served_call_runs(self):
+        with Rig(environ={grid13.FLAG: 'verify'}) as rig:
+            rig.install()
+            served = self.served(rig, 1536, 5120, 33)
+
+            def opaque(seed):
+                tensor = dummy(rig.mesh, (1, 1, 64, 1536), seed)
+                tensor.shape = None                                                # a tensor whose shape cannot be indexed
+                return tensor
+
+            for _ in range(2):
+                with self.assertRaises(TypeError):                                 # the fake pinned function needs a shape too: the lever handed the call to it unchanged
+                    rig.tp_common.matmul_1d_decode(opaque(3), opaque(5), served, 'cfg', out_memory_config='dram')
+            lines = rig.matching('site=verify.operands')
+            self.assertEqual(len(lines), 1)
+            self.assertIn(grid13.UNCHANGED, lines[0])
+            self.assertIn('the operand shapes cannot be read', lines[0])
 
     def test_the_in_projections_only_when_the_cfg_names_them(self):
         with Rig(environ={grid13.FLAG: 'verify', grid13.CFG_FLAG: 'out=3,gdn_in=2,attn_in=3'}) as rig:
@@ -1053,6 +1133,29 @@ class SmokeRuleTests(unittest.TestCase):
         found = grid13_smoke.problems(env, text)
         self.assertEqual(len(found), 1)
         self.assertIn('attn_in', found[0])
+
+    def test_an_unchanged_verify_out_line_stands_for_the_engaged_one_and_needs_no_audit(self):
+        env = {grid13.FLAG: '1', grid13.AUDIT_FLAG: '1'}
+        unchanged = '%s reason=the served config is already 3 output columns a core on that grid site=verify.out' % grid13.UNCHANGED
+        text = '\n'.join(line for line in self.log(audited=True).splitlines() if 'site=verify.out ' not in line)
+        found = grid13_smoke.problems(env, text)
+        self.assertEqual(len(found), 2)                                                       # no engaged line and no audit line
+        self.assertEqual(grid13_smoke.problems(env, text + '\n' + unchanged), [])
+        text_off = '\n'.join(line for line in self.log().splitlines() if 'site=verify.out ' not in line)
+        self.assertEqual(grid13_smoke.problems({grid13.FLAG: '1'}, text_off + '\n' + unchanged), [])
+        gdn_off = '\n'.join(line for line in self.log().splitlines() if 'site=gdn_in ' not in line)
+        info = '%s reason=only 8 tile rows, below the 16 the plan is derived for site=gdn_in' % grid13.UNCHANGED
+        self.assertEqual(len(grid13_smoke.problems({grid13.FLAG: '1'}, gdn_off + '\n' + info)), 1)       # a prefill site is not excused by an unchanged line
+
+    def test_the_failure_for_a_silent_verify_site_says_how_far_the_wrapper_got(self):
+        env = {grid13.FLAG: 'verify'}
+        none = grid13_smoke.problems(env, '')
+        self.assertEqual(len(none), 1)
+        self.assertIn('no `installed` line', none[0])
+        installed = '%s installed subs=verify wrapped=matmul_1d_decode namespaces=1' % grid13.PREFIX
+        self.assertIn('the model never called it', grid13_smoke.problems(env, installed)[0])
+        saw = installed + '\n%s verify saw matmul_1d_decode rows=32 k=1536 n=5120 lever_site=verify.out (not the 64-row packed block: the served call)' % grid13.PREFIX
+        self.assertIn('wrapper was reached', grid13_smoke.problems(env, saw)[0])
 
     def test_an_unchanged_line_is_information(self):
         env = {grid13.FLAG: '1'}
