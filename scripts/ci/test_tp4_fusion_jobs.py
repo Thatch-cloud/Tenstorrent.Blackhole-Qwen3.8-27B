@@ -511,7 +511,7 @@ class PackageFolderTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr.decode('utf-8', 'replace'))
 
     # The integrator's own window packs name the tag their B0 builds (the window of tp4/fusion-2: tp4-fusion-6, test_fusion2_pack); every other package folder names the placeholder.
-    OWN_IMAGE = {'F2': 'tp4-fusion-6'}
+    OWN_IMAGE = {'F2': 'tp4-fusion-6', 'O3': 'tp4-octo3-1'}
 
     # The WPP folder's RQ jobs (the packed-any re-record on the K64j-OQ binary) name the tag OQ-B0 built, as plain words in a public tag commit; every other template of the folder is the placeholder.
     OWN_IMAGE_FILES = {('WPP', 'RQ'): 'tp4-oneq-1'}

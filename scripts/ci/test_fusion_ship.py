@@ -91,14 +91,15 @@ class ProfileTests(unittest.TestCase):
     def test_the_waiver_is_well_formed_names_the_four_levers_and_is_pending_or_approved(self):
         waiver = PROFILES[SHIP][contract.TRAFFIC_WAIVER]
         self.assertEqual(contract.traffic_waiver_problems(dict(PROFILES[SHIP], name=SHIP)), [])
-        self.assertEqual(waiver['levers'], contract.WAIVABLE_LEVERS)
+        # the four levers of the production waiver (tp4/octo-3 added the octo levers to the contract's waivable table; they belong to the octo ship candidates' waivers)
+        self.assertEqual(waiver['levers'], {key: value for key, value in contract.WAIVABLE_LEVERS.items() if not key.startswith('QWEN_FAST_OCTO')})
         self.assertEqual(waiver['levers'], PROFILES[PARENT][contract.TRAFFIC_WAIVER]['levers'])
         self.assertNotEqual(waiver['id'], PROFILES[PARENT][contract.TRAFFIC_WAIVER]['id'])
         self.assertTrue(waiver['decision'].startswith(('PENDING', 'APPROVED')), waiver['decision'])
         self.assertEqual(contract.traffic_waiver_pending(dict(PROFILES[SHIP], name=SHIP)), waiver['decision'].startswith('PENDING'))
         self.assertFalse(contract.traffic_waiver_pending(dict(PROFILES[PARENT], name=PARENT)), 'the production profile stays approved')
         self.assertTrue(PROFILES[PARENT][contract.TRAFFIC_WAIVER]['decision'].startswith('APPROVED'))
-        self.assertEqual(sorted(name for name, body in PROFILES.items() if contract.TRAFFIC_WAIVER in body), sorted([fusion.NAMESPACE + 'traffic', fusion.NAMESPACE + 'traffic-oneq', PARENT]))   # (the second ship candidate: test_oneq_ship)
+        self.assertEqual(sorted(name for name, body in PROFILES.items() if contract.TRAFFIC_WAIVER in body), sorted(list(fusion.ship_names()) + [PARENT]))   # (the second ship candidate: test_oneq_ship; the octo ones: test_octo3_ship)
         self.assertGreaterEqual(len(waiver['evidence']), 5)
         self.assertEqual(waiver['decision'], SPEC['waiver']['decision'])
 

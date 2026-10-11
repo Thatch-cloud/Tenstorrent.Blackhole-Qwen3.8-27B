@@ -54,6 +54,9 @@ M3_USERS = 4
 
 GATE_ENV = 'QWEN_C2_GATE'
 GATE_PROFILE_ENV = 'QWEN_C2_GATE_PROFILE'
+# tp4/octo-3: the owner's traffic waiver admits the shape in a run that is not a gate run. The profile's own env carries the waiver's id (the contract refuses the name on any profile whose
+# owner_traffic_waiver has another id, on a gate-only profile, and removes an inherited value: serving_c2_contract.octo_problems), so this module needs only to see that it is set.
+WAIVER_ENV = 'QWEN_FAST_OCTO_WAIVER'
 M3_BLOCKS_FLAG = 'QWEN_FAST_M3_BLOCKS'
 DRAFT_FLAG = 'QWEN_FAST_OCTO_DRAFT'
 BUNDLE_FLAGS = ('QWEN_FAST_OCTO_ATTN_BUNDLE', 'QWEN_FAST_OCTO_ATTN_BUNDLE_AUDIT')
@@ -135,6 +138,23 @@ def gate_run(environ=None):
     serving_solo_lane.gate_run's rule, without its import (test_octo pins the two equal)."""
     environ = os.environ if environ is None else environ
     return environ.get(GATE_ENV) == '1' and environ.get(GATE_PROFILE_ENV) == '1'
+
+
+def waiver_run(environ=None):
+    """Whether this process runs under an owner traffic waiver: the profile's QWEN_FAST_OCTO_WAIVER names the waiver's id and the run is not a gate-only profile's (a gate-only profile admits
+    through its marker and carries no id). The waiver is the owner's decision that the shape runs unqualified; this is the only way in other than gate_run."""
+    environ = os.environ if environ is None else environ
+    return bool((environ.get(WAIVER_ENV) or '').strip()) and environ.get(GATE_PROFILE_ENV) != '1'
+
+
+def waiver_id(environ=None):
+    environ = os.environ if environ is None else environ
+    return (environ.get(WAIVER_ENV) or '').strip() or None
+
+
+def admitted_run(environ=None):
+    """gate_run or waiver_run: the two ways the admission lets an unqualified shape run."""
+    return gate_run(environ) or waiver_run(environ)
 
 
 def octo_mode(environ=None):
@@ -252,9 +272,9 @@ def octo_admission(m3, environ=None, *, log=None):
     if idle > capacity:
         problems.append('%s=%d leaves %d idle segments and a block holds %d (%s): the design\'s %d live seats need a third idle target'
                         % (MIN_LIVE_FLAG, minimum, idle, capacity, IDLE_CAPACITY_NOTE, MIN_LIVE_TARGET))
-    if not gate_run(environ):
-        problems.append('%s is admitted only in a gate run of a gate-only four-card profile (QWEN_C2_GATE=1 and QWEN_C2_GATE_PROFILE=1): no card run has qualified it'
-                        % OCTO_FLAG)
+    if not admitted_run(environ):
+        problems.append('%s is admitted only in a gate run of a gate-only four-card profile (QWEN_C2_GATE=1 and QWEN_C2_GATE_PROFILE=1) or under the owner traffic waiver of a traffic '
+                        'profile (%s names the waiver\'s id): no card run has qualified it' % (OCTO_FLAG, WAIVER_ENV))
     for key, text in device_gaps():
         problems.append('device piece %s is not built: %s' % (key, text))
     # QWEN_FAST_OCTO_DRAFT (octo_draft_tp; gate only, default off): ONE eight-seat, eight-row draft pass for the octo rounds. Its own reasons join this list; off (unset or '0') nothing
@@ -283,7 +303,10 @@ def octo_admission(m3, environ=None, *, log=None):
     unqualified = ['%s [job %s]' % item for item in UNQUALIFIED_ITEMS]
     for index, piece in enumerate(unqualified, 1):
         log('{} ({}/{}): {}', UNQUALIFIED_MARKER, index, len(unqualified), piece)
-    log('{} mode={} rows={} users={} min_live={} (gate only)', ADMITTED_MARKER, mode, ROWS, USERS, minimum)
+    if waiver_run(environ):
+        log('{} mode={} rows={} users={} min_live={} (owner traffic waiver {})', ADMITTED_MARKER, mode, ROWS, USERS, minimum, waiver_id(environ))
+    else:
+        log('{} mode={} rows={} users={} min_live={} (gate only)', ADMITTED_MARKER, mode, ROWS, USERS, minimum)
     if draft:
         octo_draft_tp.log_admitted(lambda text: log('{}', text))
     return dict(mode=mode, rows=ROWS, users=USERS, min_live=minimum, unqualified=unqualified, **(dict(draft=True) if draft else {}))

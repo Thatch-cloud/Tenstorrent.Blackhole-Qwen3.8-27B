@@ -101,7 +101,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(waiver['decision'], SPEC['waiver']['decision'])
         self.assertGreaterEqual(len(waiver['evidence']), 3)
         self.assertIn('inherits in full', waiver['waives'])
-        self.assertEqual(sorted(name for name, body in PROFILES.items() if contract.TRAFFIC_WAIVER in body), sorted([SHIP, ONEQ_SHIP, fusion.PARENT]))
+        self.assertEqual(sorted(name for name, body in PROFILES.items() if contract.TRAFFIC_WAIVER in body), sorted(list(fusion.ship_names()) + [fusion.PARENT]))   # (tp4/octo-3: the octo ship candidates carry waivers too: test_octo3_ship)
         text = json.dumps([PROFILES[ONEQ_SHIP]['description'], waiver])
         for word in fusion.SHIP_FORBIDDEN:
             self.assertNotIn(word, text)

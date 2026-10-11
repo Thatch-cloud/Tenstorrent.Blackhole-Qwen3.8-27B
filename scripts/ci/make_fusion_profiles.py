@@ -320,6 +320,9 @@ SHIP_FIELDS = ('id', 'waives', 'evidence', 'decision')
 # A ship entry may build on the combined arm with extra env (`env`), name the op graft its image bakes (`bake_graft`: c2_serving_job.BAKE_GRAFTS) and the ship entry whose profile is its
 # exactness control (`control`); without them it is the production profile plus the combined arm, as the first ship candidate is.
 SHIP_GRAFTS = ('K64j-OQ',)
+# `memory_plan` of a ship entry: the third block's memory plan of the octo shape (make_octo_profiles.MEMORY: the KV pool lowered, the trace region raised, QWEN36_MAX_TOKENS_ALL_USERS
+# following the pool), applied to the generated traffic profile. `image` overrides the placeholder tag of the ship pack, `read_note` adds a sentence to its G1 and GX1 read rules.
+SHIP_MEMORY_PLANS = ('octo',)
 SHIP_DECISIONS = ('PENDING', 'APPROVED')
 SHIP_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,62}')
 SHIP_FORBIDDEN = ('thatch' + '.local', '192' + '.168.', 'sha256' + ':', '/' + 'home' + '/', '@')       # the decision sentence is public text: no host, registry, digest, path or address
@@ -340,14 +343,17 @@ def decision_problem(decision):
 def ship_of(wp, raw, where):
     """One ship spec: a TRAFFIC profile `<namespace><name>` = the production profile plus exactly the env of the combined twin `from`, carrying an owner traffic waiver of its own
     (the four waivable levers the production profile's waiver names, and the fields below). The decision is PENDING until the owner's sentence replaces it."""
-    if not isinstance(raw, dict) or set(raw) - {'name', 'from', 'reason', 'waiver', 'env', 'bake_graft', 'control'}:
-        raise ManifestError('%s: a ship entry is {"name", "from", "reason", "waiver"} and, for a ship candidate built on another one, {"env", "bake_graft", "control"}' % where)
+    if not isinstance(raw, dict) or set(raw) - {'name', 'from', 'reason', 'waiver', 'env', 'bake_graft', 'control', 'memory_plan', 'image', 'read_note'}:
+        raise ManifestError('%s: a ship entry is {"name", "from", "reason", "waiver"} and, for a ship candidate built on another one, {"env", "bake_graft", "control", "memory_plan", "image", "read_note"}' % where)
     name = text_of(raw.get('name'), where, 'name')
     if not ID.match(name):
         raise ManifestError('%s: ship name %r must be lower-case letters, digits and single dashes' % (where, name))
     waiver = raw.get('waiver')
-    if not isinstance(waiver, dict) or set(waiver) != set(SHIP_FIELDS):
-        raise ManifestError('%s: ship %s waiver is an object with exactly %s' % (where, name, ', '.join(SHIP_FIELDS)))
+    if not isinstance(waiver, dict) or set(waiver) - set(SHIP_FIELDS + ('levers',)) or set(SHIP_FIELDS) - set(waiver):
+        raise ManifestError('%s: ship %s waiver is an object with exactly %s (and, for the levers a ship candidate adds to the production waiver\'s, "levers")' % (where, name, ', '.join(SHIP_FIELDS)))
+    levers = waiver.get('levers')
+    if 'levers' in waiver and not (isinstance(levers, dict) and levers and all(isinstance(key, str) and isinstance(value, str) for key, value in levers.items())):
+        raise ManifestError('%s: ship %s waiver levers is a non-empty object {flag: exact value}' % (where, name))
     if not (isinstance(waiver['id'], str) and SHIP_ID.fullmatch(waiver['id'])):
         raise ManifestError('%s: ship %s waiver id must match %s, got %r' % (where, name, SHIP_ID.pattern, waiver['id']))
     for field in ('waives',):
@@ -364,8 +370,15 @@ def ship_of(wp, raw, where):
     control = raw.get('control')
     if control is not None:
         control = text_of(control, where, 'control')
+    memory_plan = raw.get('memory_plan')
+    if memory_plan is not None and memory_plan not in SHIP_MEMORY_PLANS:
+        raise ManifestError('%s: ship %s memory_plan is one of %s, got %r' % (where, name, ', '.join(SHIP_MEMORY_PLANS), memory_plan))
+    image = raw.get('image')
+    if image is not None and not (isinstance(image, str) and re.fullmatch(r'tp4-[a-z0-9][a-z0-9.-]{1,40}-[0-9]+', image)):
+        raise ManifestError('%s: ship %s image is a placeholder tag like tp4-octo3-ship-1, got %r' % (where, name, image))
     return dict(name=name, source=text_of(raw.get('from'), where, 'from'), reason=text_of(raw.get('reason', 'the ship candidate'), where, 'reason'),
-                waiver=dict((field, waiver[field]) for field in SHIP_FIELDS), env=env_of(raw.get('env'), where, 'env'), bake_graft=bake_graft, control=control)
+                waiver=dict((field, waiver[field]) for field in SHIP_FIELDS + (('levers',) if 'levers' in waiver else ())), env=env_of(raw.get('env'), where, 'env'),
+                bake_graft=bake_graft, control=control, memory_plan=memory_plan, image=image, read_note=(text_of(raw['read_note'], where, 'read_note') if raw.get('read_note') else None))
 
 
 def tests_of(wp, value, where):
@@ -654,6 +667,16 @@ def ship_description(twin):
     extra = ship.get('env') or {}
     built_on = ('plus the extra env %s' % ', '.join('%s=%s' % pair for pair in sorted(extra.items()))) if extra else ''
     graft = (' Its image bakes the %s op graft (C2_BAKE_GRAFT=%s), and a traffic boot on that binary is admitted only on packed-any records made on it.' % (ship['bake_graft'], ship['bake_graft'])) if ship.get('bake_graft') else ''
+    if ship.get('waiver', {}).get('levers'):
+        added = ', '.join('%s=%s' % pair for pair in sorted(ship['waiver']['levers'].items()))
+        return ('A SHIP CANDIDATE built on the op-fusion programme\'s (docs/tp4-fusion.md, docs/tp4-octo3.md, scripts/ci/fusion-wp/%s), a TRAFFIC profile (NOT gate_only): %s plus exactly the env of the combined '
+                'gate arm %s%s%s (%s) and nothing else; no gate instrument, no audit, no telemetry%s. The W2 and engine-reuse levers it carries and the levers its waiver adds (%s) serve traffic '
+                'only under the owner traffic waiver of this profile (id %s), whose decision sentence starts PENDING until the owner records the approval as a sentence starting APPROVED '
+                '(docs/tp4-fusion.md says how): a profile whose decision does not start with APPROVED boots in a gate or a smoke and logs the word, but no build bakes it.%s %s Generated by '
+                'scripts/ci/make_fusion_profiles.py: regenerate, never hand-merge.'
+                % (twin['file'], PARENT, NAMESPACE, ship['source'], (' ' + built_on) if built_on else '', env,
+                   ', and the third block\'s memory plan (the KV pool lowered, the trace region raised, QWEN36_MAX_TOKENS_ALL_USERS following the pool)' if ship.get('memory_plan') else '',
+                   added, ship['waiver']['id'], graft, twin['why']))
     return ('The SHIP CANDIDATE of the op-fusion programme (docs/tp4-fusion.md, scripts/ci/fusion-wp/%s), a TRAFFIC profile (NOT gate_only): %s plus exactly the env of the combined gate arm '
             '%s%s%s (%s) and nothing else; no gate instrument, no audit, no telemetry. The W2 and engine-reuse levers it carries serve traffic only under the owner traffic waiver of this '
             'profile (id %s), whose decision sentence starts PENDING until the owner records the approval as a sentence starting APPROVED (docs/tp4-fusion.md says how): a profile whose decision '
@@ -699,7 +722,9 @@ def generate_profiles(data, plan):
                 raise ManifestError('%s: %s carries no owner traffic waiver whose levers the ship profile could name' % (twin['wp'], parent))
             waiver = twin['ship']['waiver']
             profile['description'] = ship_description(twin)
-            profile[WAIVER_FIELD] = dict(id=waiver['id'], levers=dict(levers), waives=waiver['waives'], evidence=list(waiver['evidence']), decision=waiver['decision'])
+            profile[WAIVER_FIELD] = dict(id=waiver['id'], levers=dict(levers, **waiver.get('levers', {})), waives=waiver['waives'], evidence=list(waiver['evidence']), decision=waiver['decision'])
+            if twin['ship'].get('memory_plan') == 'octo':
+                make_octo3_profiles.apply_memory_plan(profile)
             profile.pop('gate_only', None)
             generated[twin['name']] = profile
             continue

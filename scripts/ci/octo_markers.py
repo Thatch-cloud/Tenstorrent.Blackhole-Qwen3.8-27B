@@ -5,7 +5,8 @@ here), and every field is read by name, so a field a producer adds never hides a
 around: a mounted change is not an executed change, so what proves the octo block ran is a line its round wrote AFTER its own verify counter moved.
 
   serving_octo.admission (attach):
-    [OCTO] admitted mode=<live|alternate> rows=8 users=8 min_live=<n> (gate only)
+    [OCTO] admitted mode=<live|alternate> rows=8 users=8 min_live=<n> (gate only)             a gate run of a gate-only profile
+    [OCTO] admitted mode=live rows=8 users=8 min_live=<n> (owner traffic waiver <id>)      a traffic profile under its owner traffic waiver (tp4/octo-3)
     [OCTO] UNQUALIFIED (gate only) (<i>/<n>): <a piece nothing has qualified yet>
     [OCTO] refused: <reason>                                      one per reason; the attach then raises
   serving_packed_step.PackedStep (per round, written after the round ran; octo block configured only):
@@ -43,7 +44,7 @@ ROUND_PATTERN = re.compile(
     r'\[OCTO\] round=(\d+) shape=(octo|m3|seq) planned=(octo|m3) live=(\d+) rows=(\d+) eligible=([01]) counted=([01]) '
     r'octo_rounds=(\d+) m3_rounds=(\d+) committed=(\d+) step_ms=([0-9.]+) gap_ms=([0-9.]+)')
 PROGRAMS_PATTERN = re.compile(r'\[OCTO\] programs shape=(octo|m3|seq) round=(\d+) switch=([01]) before=(\d+|None) after=(\d+|None)')
-ADMITTED_PATTERN = re.compile(r'\[OCTO\] admitted mode=(live|alternate) rows=(\d+) users=(\d+) min_live=(\d+)')
+ADMITTED_PATTERN = re.compile(r'\[OCTO\] admitted mode=(live|alternate) rows=(\d+) users=(\d+) min_live=(\d+)(?: \(owner traffic waiver ([a-z0-9][a-z0-9.-]*)\))?')
 
 
 def rounds(text):
@@ -69,8 +70,8 @@ def programs(text):
 
 def admissions(text):
     """[dict] of every admitted line."""
-    return [dict(mode=mode, rows=int(rows), users=int(users), min_live=int(min_live))
-            for mode, rows, users, min_live in ADMITTED_PATTERN.findall(text or '')]
+    return [dict(mode=mode, rows=int(rows), users=int(users), min_live=int(min_live), waiver=waiver or None)
+            for mode, rows, users, min_live, waiver in ADMITTED_PATTERN.findall(text or '')]
 
 
 # QWEN_FAST_OCTO_DRAFT (octo_draft_tp; gate only): ONE eight-seat, eight-row draft pass for the octo rounds. Its lines are not [OCTO] lines (octo_draft_tp owns them):

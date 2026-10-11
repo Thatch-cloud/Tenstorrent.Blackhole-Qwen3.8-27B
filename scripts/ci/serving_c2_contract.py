@@ -126,6 +126,17 @@ PARKED_GATE_ONLY = ('QWEN_FAST_PARKED_AUDIT', 'QWEN_FAST_PARKED_NEGATIVE', 'QWEN
 W2_PREFIX = 'QWEN_FAST_W2_'
 W2_NAMES = ('QWEN_FAST_W2_OFF_PATH', 'QWEN_FAST_W2_OFF_AFTER')
 W2_GATE_ONLY = ('QWEN_FAST_W2_OFF_AFTER',)
+# octo-T8 and its three levers (serving_octo, octo_draft_tp, octo_attn_bundle, octo_glue8; tp4/octo-3, docs/tp4-octo3.md). Pinned equal to the modules' names by test_octo3_contract. A GATE-ONLY profile
+# carries them behind its gate marker (QWEN_C2_GATE_PROFILE=1: serving_octo admits them in a gate run only). A TRAFFIC profile carries the four levers only under its owner traffic waiver
+# (octo_problems): the shape and the levers have no pinned qualification record (the K64j 0x21 eight-row group per bundle, B > 1 entries of it, the batched GDN launch at eight users, the
+# quarter-tile glue movers), so the waiver names each at its exact value, and the profile's own QWEN_FAST_OCTO_WAIVER carries the waiver's id into the process (the one name by which
+# serving_octo.waiver_run admits a non-gate run; the contract refuses it anywhere else and an inherited value is removed). The bundle's audit and the audit sampling are a gate's own.
+OCTO_SWITCH = 'QWEN_FAST_OCTO'
+OCTO_WAIVER_ENV = 'QWEN_FAST_OCTO_WAIVER'
+OCTO_LEVERS = ('QWEN_FAST_OCTO', 'QWEN_FAST_OCTO_DRAFT', 'QWEN_FAST_OCTO_ATTN_BUNDLE', 'QWEN_FAST_OCTO_GLUE8')
+OCTO_KNOBS = ('QWEN_FAST_OCTO_MIN_LIVE', 'QWEN_FAST_OCTO_DRAFT_CONV')
+OCTO_GATE_ONLY = ('QWEN_FAST_OCTO_ATTN_BUNDLE_AUDIT', 'QWEN_FAST_SOLO_PACKED', 'QWEN_FAST_AUDIT_FIRST', 'QWEN_FAST_AUDIT_EVERY')
+OCTO_NAMES = OCTO_LEVERS + OCTO_KNOBS + OCTO_GATE_ONLY + (OCTO_WAIVER_ENV,)
 # The engine-start upload levers (qwen_device_zeros: the KV pool and the buffer pool's zero buffers filled on the device; qwen_lazy_shard: a weight-cache hit
 # without the host transpose). Pinned equal to the modules' NAMES by test_upload_p0. A profile sets them (default off, strict '0'/'1'); the audit twins are a gate
 # profile's own (the audit reads pages back and costs engine-start time); an inherited value never turns a lever on under a profile that did not name it.
@@ -365,6 +376,11 @@ def apply_environment(profile, environ=None):
     for name in UPLOAD_NAMES:
         if name not in profile['env']:
             environ.pop(name, None)
+    # ...and octo-T8: an inherited flag must not turn the shape (or the waiver id that admits it in a non-gate run, or the audit sampling that thins a gate's audits) on under a profile that
+    # never named it.
+    for name in OCTO_NAMES:
+        if name not in profile['env']:
+            environ.pop(name, None)
     return environ
 
 
@@ -544,7 +560,11 @@ TRAFFIC_WAIVER = 'owner_traffic_waiver'
 TRAFFIC_WAIVER_FIELDS = ('id', 'levers', 'waives', 'evidence', 'decision')
 TRAFFIC_WAIVER_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,62}')
 WAIVABLE_LEVERS = {'QWEN_FAST_TP4_SDPA': 'multi', 'QWEN_FAST_TP4_CONV_GATES_SPREAD': '1', 'QWEN_FAST_PARKED_ENGINES': '1',
-                   'QWEN_FAST_PARKED_DRAFTS': '1'}
+                   'QWEN_FAST_PARKED_DRAFTS': '1',
+                   # tp4/octo-3 (octo_problems): the octo shape at every eligible eight-live round (never `alternate`, which exists to time two shapes on one boot), its draft pass, the
+                   # bundled attention (four users a launch) and the glue levers at eight-row users; QWEN_FAST_OCTO_MIN_LIVE is the knob the shape's eligibility reads (6: the eight
+                   # segments less the two idle ones page 0 can hold)
+                   'QWEN_FAST_OCTO': 'live', 'QWEN_FAST_OCTO_DRAFT': '1', 'QWEN_FAST_OCTO_ATTN_BUNDLE': '4', 'QWEN_FAST_OCTO_GLUE8': '1', 'QWEN_FAST_OCTO_MIN_LIVE': '6'}
 TRAFFIC_WAIVER_MARKER = 'OWNER TRAFFIC WAIVER'
 # The decision is a sentence that starts with one of these words. PENDING is a REQUEST: the profile boots (gates and G1 provenance boot every
 # profile) and logs the word, but no build may bake it as an image default (c2_serving_job.read_bake, build-c2-serving-image.sh) until the commit
@@ -620,6 +640,44 @@ def waived(profile, flag, env):
     """Whether the profile's owner traffic waiver names `flag` at the value the env sets it to."""
     value = waived_levers(profile).get(flag)
     return value is not None and env.get(flag) == value
+
+
+def octo_problems(profile, environ=None):
+    """Every way the octo-T8 flags are set outside what the contract admits, [] when none (tp4/octo-3, docs/tp4-octo3.md). A profile with none of the names is clean without a read.
+    A GATE-ONLY profile may set every name but the waiver's own env (it has no waiver). A TRAFFIC profile sets the four levers (OCTO_LEVERS) only under its owner traffic waiver, each
+    named at its exact value (WAIVABLE_LEVERS) and set in the env, together with QWEN_FAST_OCTO_WAIVER equal to the waiver's id, and never the gate-only names (the bundle's audit, the
+    audit sampling, the lone-user padded round); a lever set and not named is refused here, a waiver naming a lever the profile does not set (a stale waiver) by traffic_waiver_problems, as for W2.
+    A traffic profile that sets QWEN_FAST_OCTO_WAIVER without the shape is refused too (a waiver id with nothing under it)."""
+    env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
+    if not any(name in env for name in OCTO_NAMES):
+        return []
+    problems = []
+    if profile.get('gate_only') is True:
+        if OCTO_WAIVER_ENV in env:
+            problems.append('%s is a traffic profile\'s: a gate-only profile admits the shape through its gate marker and needs no waiver id' % OCTO_WAIVER_ENV)
+        return problems
+    mode = env.get(OCTO_SWITCH, 'off')
+    on = mode != 'off' or any(env.get(name, '0') not in ('', '0') for name in OCTO_LEVERS[1:])
+    problems += ['%s=%s is a gate instrument: only a gate-only profile sets it' % (name, env[name]) for name in OCTO_GATE_ONLY if env.get(name, '0') not in ('', '0')]
+    if not on:
+        if OCTO_WAIVER_ENV in env:
+            problems.append('%s=%s without the octo shape (%s=live): a waiver id with nothing under it' % (OCTO_WAIVER_ENV, env[OCTO_WAIVER_ENV], OCTO_SWITCH))
+        return problems
+    for name in OCTO_LEVERS:
+        value = env.get(name)
+        if value in (None, '', '0', 'off'):
+            continue
+        if not waived(profile, name, env):
+            problems.append('%s=%s needs a gate-only profile: octo-T8 and its levers have no pinned qualification record (the K64j 0x21 eight-row group per bundle and B > 1 entries of '
+                            'it, the batched GDN launch at eight users, the quarter-tile glue movers) - or the owner\'s %s naming it' % (name, value, TRAFFIC_WAIVER))
+    minimum = env.get('QWEN_FAST_OCTO_MIN_LIVE')
+    if minimum is not None and not waived(profile, 'QWEN_FAST_OCTO_MIN_LIVE', env):
+        problems.append('QWEN_FAST_OCTO_MIN_LIVE=%s on a traffic profile needs the owner\'s %s naming it (at 6)' % (minimum, TRAFFIC_WAIVER))
+    waiver = profile.get(TRAFFIC_WAIVER) or {}
+    if not isinstance(waiver, dict) or env.get(OCTO_WAIVER_ENV) != waiver.get('id'):
+        problems.append('%s=%r and the profile\'s %s id is %r: the process takes the waiver\'s id from the profile, and only that one' % (
+            OCTO_WAIVER_ENV, env.get(OCTO_WAIVER_ENV), TRAFFIC_WAIVER, waiver.get('id') if isinstance(waiver, dict) else None))
+    return problems
 
 
 def multi_problems(profile):
@@ -1435,6 +1493,9 @@ def boot(environ=None, orig_argv=None):
     problems = multi_problems(profile)
     if problems:
         raise ValueError('profile %s cannot serve the wave-2 levers: %s' % (profile['name'], '; '.join(problems)))
+    problems = octo_problems(profile, environ)
+    if problems:
+        raise ValueError('profile %s cannot serve octo-T8: %s' % (profile['name'], '; '.join(problems)))
     problems = w2_problems(profile, environ)
     if problems:
         raise ValueError('profile %s misuses the W2 kill switch: %s' % (profile['name'], '; '.join(problems)))

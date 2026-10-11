@@ -537,6 +537,26 @@ def concurrent8_code_128k():
     return dict(run_users('concurrent8_code_128k', prompts), corpus=corpus, fit=fit)
 
 
+# tp4/octo-3: the octo shape needs six or more seats DECODING AT ONCE, and the two deep tests above never have them: eight 32k (or 120k) prompts prefill one after another
+# (about 15 s a 32k prompt, 33 s a 120k one), and an 800-token answer is over in 40 s, so the first users are done before the last arrives (the 32k test of the octo-2 card runs had
+# live4 = -75 s and NOT ONE eight-live round: its 'bundle was 4% slower at 32k' was the arrival order of a thread race, not the shape). These twins give every user a budget that
+# outlasts the whole prefill queue (ignore_eos, as the stall shape's decoders): the last user arrives while the first is still decoding, and the eight-live window at depth is
+# long enough to time (about 55 s at 32k, 60 s at 120k). Same prompts as the 800-token tests; the budgets are sized from the card logs' prefill and decode rates.
+DEEP_LONG_BUDGETS = {'concurrent8_code_32k_long': 3000, 'concurrent8_code_128k_long': 4000}
+
+
+def concurrent8_code_32k_long():
+    # Opt-in (tp4/octo-3). concurrent8_code_32k with 3,000-token budgets and ignore_eos: all eight seats decode at depth together once the queue has prefilled.
+    prompts, corpus = code_prompts((32768,) * 8)
+    return dict(run_users('concurrent8_code_32k_long', prompts, max_tokens=DEEP_LONG_BUDGETS['concurrent8_code_32k_long'], ignore_eos=True), corpus=corpus)
+
+
+def concurrent8_code_128k_long():
+    # Opt-in (tp4/octo-3). concurrent8_code_128k with 4,000-token budgets and ignore_eos: all eight seats decode at about 120k together once the queue has prefilled.
+    prompts, corpus, fit = fitted_code_prompts((DEEP_PROMPT_TOKENS,) * 8)
+    return dict(run_users('concurrent8_code_128k_long', prompts, max_tokens=DEEP_LONG_BUDGETS['concurrent8_code_128k_long'], ignore_eos=True), corpus=corpus, fit=fit)
+
+
 SKEW_LONG_TOKENS = 253920           # the stall arm's cold prompt: known to fit the 262k profile's room with a short answer
 SKEW_SHORT_TOKENS = 4096
 SKEW_TARGETS = (SKEW_LONG_TOKENS, SKEW_SHORT_TOKENS, SKEW_SHORT_TOKENS, SKEW_SHORT_TOKENS,
@@ -675,7 +695,7 @@ FEWDEC_SHAPES = ((1, 120000, 4000), (2, 253920, 6000))     # (decoders, cold pro
 
 # Every shape's concurrent request count, held at or under the eight seats of the 262k profiles by test_w2ln_smoke_shapes (a request past max-num-seqs
 # waits for a seat, and its time to first token then measures somebody else's budget).
-SHAPE_SEATS = {'concurrent8_skew': 8, 'concurrent8_code_32k': 8, 'concurrent8_code_128k': 8,
+SHAPE_SEATS = {'concurrent8_skew': 8, 'concurrent8_code_32k': 8, 'concurrent8_code_128k': 8, 'concurrent8_code_32k_long': 8, 'concurrent8_code_128k_long': 8,
                'stall8_cold262k': STALL_SHORT_SEATS + 1, 'stall8_cold128k': STALL_SHORT_SEATS + 1,
                'cold2_254k': COLD2_DECODERS + COLD2_ARRIVALS, 'levern_equal_busy': 7 + 1, 'levern_decoder_finishes': 7 + 1,
                'prefill_ladder_solo': 1, 'prefill_ladder_busy': LADDER_DECODERS + 1, 'prefill_few_decoders': 3}
@@ -1333,6 +1353,10 @@ if ONLY and 'concurrent8_code_32k' in ONLY:
     record('concurrent8_code_32k', concurrent8_code_32k)
 if ONLY and 'concurrent8_code_128k' in ONLY:
     record('concurrent8_code_128k', concurrent8_code_128k)
+if ONLY and 'concurrent8_code_32k_long' in ONLY:
+    record('concurrent8_code_32k_long', concurrent8_code_32k_long)
+if ONLY and 'concurrent8_code_128k_long' in ONLY:
+    record('concurrent8_code_128k_long', concurrent8_code_128k_long)
 if ONLY and 'concurrent8_skew' in ONLY:
     record('concurrent8_skew', concurrent8_skew)
 if ONLY and 'stall8_cold262k' in ONLY:

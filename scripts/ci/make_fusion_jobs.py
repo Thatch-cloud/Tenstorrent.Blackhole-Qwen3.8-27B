@@ -268,7 +268,7 @@ def ship_folder(spec):
 
 def ship_image(spec):
     """The placeholder tag of one ship pack's image: tp4-ship-2 for the first candidate, tp4-<name>-1 for one with extra env."""
-    return SHIP_IMAGE if not spec.get('env') else 'tp4-%s-1' % spec['name']
+    return spec.get('image') or (SHIP_IMAGE if not spec.get('env') else 'tp4-%s-1' % spec['name'])
 G1_TESTS = ('warmup,coding,concurrent8_steady,concurrent8_skew,stall8_cold262k,levern_decoder_finishes,levern_all_decoders_finish,levern_cancel_mid_prefill,levern_arrival_during_prefill,'
             'levern_seed_stops,concurrent8_drain,parked_abort_reuse,parked_turns')
 GX_TESTS = 'warmup,parked_equal,parked_budgets,levern_equal,levern_equal_busy'
@@ -290,6 +290,7 @@ def ship_rows(plan, spec):
                  'power, current, temperature, kernel NOPs); read telemetry-smoke/telemetry-summary.txt beside the result; the first [TELEMETRY] line must say decode check ok. It runs on the host '
                  'and reads only.')
     levers = ', '.join(sorted(spec['env_flags']))
+    note = (' ' + spec['read_note']) if spec.get('read_note') else ''
     return [
         dict(name='B0-ship-build', mode='stop', minutes=SHIP_MINUTES['B0'], actions='build', profile=None, bake=ship, tests=None, telemetry=False, extra=list(graft), needs=(),
              why=("B0 (STOP): build the SHIP image from the commit that records the owner's approval, with %s baked as the image's serving default (ENV QWEN_C2_PROFILE) and THATCH_SERVING_SESSION_CAP baked "
@@ -308,7 +309,7 @@ def ship_rows(plan, spec):
                   "(c2_smoke_check, every rule clean, including the smoke's concurrent8_steady list rule and the fusion rules): '[QWEN-C2] profile %s: OWNER TRAFFIC WAIVER', 'lever N governor: ttft=180 "
                   "gap_floor=8', the tp4 sdpa multi engaged line and its UNQUALIFIED line (expected at 262,144), the conv-gates spread engaged line, EVERY op-fusion lever's engaged line and no "
                   "fell-back line (%s), the round-host engaged line with select and read taken on at least 95 percent of the drafting steps, the parked build of 8 engines at 0.41-0.51 GB each (parked_judge's "
-                  "lever band; 0.418 measured) and every rebind clean, no stall, 0 crashes, skew under 238 s, the DRAM-after-attach lines (record the free DRAM per chip). %s" % (ship, levers, telemetry))),
+                  "lever band; 0.418 measured) and every rebind clean, no stall, 0 crashes, skew under 238 s, the DRAM-after-attach lines (record the free DRAM per chip). %s%s" % (ship, levers, telemetry, note))),
         dict(name='GX0-exact-control', mode='stop', minutes=SHIP_MINUTES['GX0'], actions='reset smoke', profile=control, tests=GX_TESTS, telemetry=True,
              extra=['C2_SMOKE_PARTIAL=exactness control arm: its test list is fixed by the protocol, so concurrent8_steady is not run', 'C2_BOX_MINUTES=40'], needs=('GX0 <- B0',),
              why=("GX0 (STOP): the CONTROL of the exactness pair, on the same image as GX1: the %s profile %s over the exactness test list (the parked and Lever N equal-answer tests: the same "
@@ -318,7 +319,7 @@ def ship_rows(plan, spec):
              extra=['C2_SMOKE_PARTIAL=exactness ship arm: its test list is fixed by the protocol, so concurrent8_steady is not run', 'C2_BOX_MINUTES=40'], needs=('GX1 <- GX0',),
              why=("GX1 (STOP): EXACTNESS of the ship profile %s against its control GX0 on the same image: the same prompts, unaudited. READ: python3 scripts/ci/parked_compare.py --control <GX0 smoke log> "
                   "--parked <GX1 smoke log> --control-container <GX0 container log> --parked-container <GX1 container log> --profile %s: every levern_equal, levern_equal_busy and parked_equal content hash "
-                  "EQUAL (the last w2-er GX: 37 of 37), compared above 0, the parked judge with 0 problems under the lever band. Any difference is NO-GO for shipping. %s" % (ship, ship, telemetry))),
+                  "EQUAL (the last w2-er GX: 37 of 37), compared above 0, the parked judge with 0 problems under the lever band. Any difference is NO-GO for shipping. %s%s" % (ship, ship, telemetry, note))),
         dict(name='G2-prefix-hit', mode='soft', minutes=SHIP_MINUTES['G2'], actions='reset prefix', profile=None, tests=None, telemetry=False,
              extra=['C2_PREFIX_PLAN=levern-hit', 'C2_PREFIX_PROFILE=%s' % ship, 'C2_PREFIX_BASELINE=none', 'C2_BOX_MINUTES=45'], needs=('G2 <- B0',),
              why=("G2 (SOFT): the salted prefix hit on the SHIP image beside six decoding seats (c2_prefix_gate.py --plan levern-hit, no baseline): a returning turn reuses its prefix (cached tokens above 0) while "
@@ -335,7 +336,7 @@ def ship_rows(plan, spec):
                   "dropped it) - the image name stays out of this file. READ the vLLM subprocess log: '[QWEN-C2] profile %s: vLLM argv', the OWNER TRAFFIC WAIVER line, the P150x4 mesh, admission passed "
                   "with no UNQUALIFIED admission line and no 262k evidence waiver, prefix installed, the Lever N install and warm lines, the parked build line, every op-fusion lever's engaged line, the :tt "
                   "alias before and after the restart, and no kill-switch line (no levern.off, prefix-reuse.off or parked.off left on the hub). PASS: 'PLATFORM_REPLAY passed=True'. The replay turns the "
-                  "session cap off; the cap is read live after the deploy. The replay step has no telemetry sidecar. Measured basis: 25 minutes." % ship)),
+                  "session cap off; the cap is read live after the deploy. The replay step has no telemetry sidecar. Measured basis: 25 minutes.%s" % (ship, note))),
     ]
 
 
