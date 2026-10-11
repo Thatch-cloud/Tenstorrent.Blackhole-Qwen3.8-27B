@@ -194,16 +194,19 @@ class PermuteSmokeOctoTests(unittest.TestCase):
                     out.append('[PINDIAG] tp4 draft permute audit exact=True site=%s shape=%s tensors=4' % (site, shape))
         return '\n'.join(out) + '\n'
 
+    PASS = '[OCTO-DRAFT] round=23 built=1 ms=4084.5\n'        # the octo draft pass drafted a round: its sites are demanded from then on (draft_permute_smoke)
+
     def test_the_octo_fold_and_unfold_are_demanded_now_that_they_are_hooked(self):
-        self.assertEqual(permute_smoke.problems(self.ON, self.log(['quad', 'octo'])), [])
-        found = permute_smoke.problems(self.ON, self.log(['quad']))
+        self.assertEqual(permute_smoke.problems(self.ON, self.log(['quad', 'octo']) + self.PASS), [])
+        found = permute_smoke.problems(self.ON, self.log(['quad']) + self.PASS)
         self.assertEqual(len(found), 3)
         self.assertTrue(all('shape=octo' in problem for problem in found))
+        self.assertEqual(permute_smoke.problems(self.ON, self.log(['quad'])), [], 'no round of the octo pass: no octo site demanded (card run 38142850011)')
 
     def test_the_audit_must_have_compared_at_the_octo_pass_too(self):
         env = dict(self.ON, QWEN_FAST_DRAFT_PERMUTE_AUDIT='1')
-        self.assertEqual(permute_smoke.problems(env, self.log(['quad', 'octo'], audited=True)), [])
-        text = self.log(['quad'], audited=True) + self.log(['octo'])
+        self.assertEqual(permute_smoke.problems(env, self.log(['quad', 'octo'], audited=True) + self.PASS), [])
+        text = self.log(['quad'], audited=True) + self.log(['octo']) + self.PASS
         self.assertEqual(len(permute_smoke.problems(env, text)), 3)
 
 
