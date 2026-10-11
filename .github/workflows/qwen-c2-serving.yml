@@ -452,6 +452,7 @@ jobs:
             ccl-sweep-core) script=tp4_ccl_sweep_probe.py; report=ccl-sweep.json; probe_args="--skip-probe-only --no-exotic" ;;
             ccl-sweep-p8192) script=tp4_ccl_sweep_probe.py; report=ccl-sweep.json; probe_args="--payload 8192 --skip-probe-only --no-exotic" ;;
             ccl-sweep-quick) script=tp4_ccl_sweep_probe.py; report=ccl-sweep.json; probe_args="--quick --skip-probe-only" ;;
+            split) script=tp4_split_probe.py; report=split-probe.json ;;
             *) echo "unknown fabric probe: $PROBE" >&2; exit 1 ;;
           esac
           results="$RUNNER_TEMP/c2-results/fabric"
@@ -477,6 +478,10 @@ jobs:
           if [ "${PROBE:-fabric}" = kvread ] && [ -s /home/thatch/opgraft-KVR/qwen_kv_read.so ]; then
             kvmount=(-v /home/thatch/opgraft-KVR:/opt/qwen-c2/kvr-mount:ro -e QWEN_KVREAD_DIR=/opt/qwen-c2/kvr-mount)
           fi
+          # split builds the image's own model from its first few real layers (docs/tp4-exact-resume.md 5.3): the hub the prefix step mounts, read-only here.
+          if [ "${PROBE:-fabric}" = split ]; then
+            kvmount+=(-v "${C2_HUB_DIR:-/home/thatch/hf-cache/hub}:/models:ro" -e HF_HOME=/models -e HF_HUB_CACHE=/models -e HF_HUB_OFFLINE=1)
+          fi
           if [ -n "$TT_GRID" ]; then echo "compute-grid clamp: TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$TT_GRID"; fi
           status=0
           # the job's box (C2_BOX_MINUTES, at most this step's 45) bounds the probe; without one it keeps its 30 minutes
@@ -495,7 +500,7 @@ jobs:
             --entrypoint python3 "$image" -B "/c2/scripts/ci/$script" --fabric "$FABRIC" \
             --output "/probe-results/$report" ${probe_args} 2>&1 | tee "$RUNNER_TEMP/c2-results/fabric-probe.log" || status=$?
           sudo -n chown -R "$(id -u):$(id -g)" "$results" 2>/dev/null || true
-          grep -E 'FABRIC_PROBE|TP4_RS_TILE|MR_PROBE|KV_READ_PROBE|CCL_SWEEP' "$RUNNER_TEMP/c2-results/fabric-probe.log" | tail -60 || true
+          grep -E 'FABRIC_PROBE|TP4_RS_TILE|MR_PROBE|KV_READ_PROBE|CCL_SWEEP|SPLIT_PROBE' "$RUNNER_TEMP/c2-results/fabric-probe.log" | tail -60 || true
           exit "$status"
       - name: Run a qualification harness on card M
         if: contains(steps.job.outputs.actions, 'cardm')
