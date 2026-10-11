@@ -31,7 +31,10 @@ Keys (every one optional but C2_IMAGE_TAG):
                       status is the verdict) or ccl-sweep (tp4_ccl_sweep_probe.py: the verify's reduce-scatter and norm gathers with every value of
                       ccl_options_tp, bit-compared against the sequential engine's call and timed in-trace, one fabric config per run; CCL_SWEEP
                       verdict=...; -safe skips the barrier-removal arms, -core also the exotic stage, -p8192 asks the fabric for an 8192 byte packet
-                      payload (core only), -quick is a short grid, a smoke of the harness); needs the fabric action
+                      payload (core only), -quick is a short grid, a smoke of the harness) or split (tp4_split_probe.py: a prefill resumed at a
+                      128-aligned position inside a 2048 chunk against the unsplit cold prefill, bit for bit, on the image's own model with its first
+                      few real layers; the step mounts the hub read-only for it; SPLIT_PROBE verdict=IDENTICAL|DIFFERS|FAIL, exit 0/2/1;
+                      docs/tp4-exact-resume.md 5.3); needs the fabric action
   C2_SUPERSEDED_BY    set on every template of a pack that a later pack replaced (references/tp4-w2-jobs); read_job REFUSES such a template
   C2_PROFILE          the C2 profile smoke and gate serve (default: general)
   C2_CARDS            the card set the hardware steps open: pair (cards M and A, the default) or quad (every
@@ -198,7 +201,8 @@ TP4_MESH_DEVICE = 'P150x4'
 # (general-2link: the same pair under the two-channel descriptor this cabling needs).
 PAIR_MESH_DEVICES = (None, 'P300')
 FABRIC_CONFIGS = ('FABRIC_1D', 'FABRIC_1D_RING')
-FABRIC_PROBES = ('fabric', 'rs-tile', 'mr', 'kvread', 'ccl-sweep', 'ccl-sweep-safe', 'ccl-sweep-core', 'ccl-sweep-p8192', 'ccl-sweep-quick')
+FABRIC_PROBES = ('fabric', 'rs-tile', 'mr', 'kvread', 'ccl-sweep', 'ccl-sweep-safe', 'ccl-sweep-core', 'ccl-sweep-p8192', 'ccl-sweep-quick',
+                 'split')
 DRAFTER_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,63}')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
