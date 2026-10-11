@@ -50,12 +50,14 @@ OCTO_FLAG = 'QWEN_FAST_OCTO'
 MIN_LIVE_FLAG = 'QWEN_FAST_OCTO_MIN_LIVE'
 SOLO_PACKED_FLAG = 'QWEN_FAST_SOLO_PACKED'
 MIN_LIVE_DEFAULT = 6
+USERS_OCTO = 8
 MIN_ROUNDS = 16
 MAX_FALLBACK_SHARE = 0.10
 MIN_GAIN = 1.10
 MIN_PAIRS = 16
 ENGAGED_OCTO = re.compile(r'\[PINDIAG\] extent replay engaged segments=8 flags=((?:0x21,){7}0x21) mask=narrow capacity=\d+ geometry=G8B1')
 FACTORY_OCTO = re.compile(r'\[QWEN-SDPA\] runtime-extent entries=1 kv_share=false')
+FACTORY_ENTRIES = re.compile(r'\[QWEN-SDPA\] runtime-extent entries=(\d+) kv_share=false')
 PADDED_LIVE1 = re.compile(r'\[PINDIAG\] packed padded round live=1 ')
 PADDED_SKIPPED_LIVE1 = re.compile(r'\[PINDIAG\] packed padded skipped live=1 eligible=1 ')
 
@@ -72,6 +74,28 @@ def min_live(env):
 
 def solo_packed(env):
     return str((env or {}).get(SOLO_PACKED_FLAG, '0')) == '1'
+
+
+def factory_entries(env):
+    """The K64j factory's `entries=<B>` values the octo block must have logged, as a sorted tuple: (1,) for the single launches (eight per layer, one entry each);
+    with QWEN_FAST_OCTO_ATTN_BUNDLE=N the bundle's launch sizes (the factory logs the page table's batch B, so two launches of four users log entries=4), and entries=1 as well under
+    the bundle's audit (the eight single launches run beside the bundled ones). Not a count of lines: the factory logs once per program built, not per launch.
+    NOTE the W2 stack (QWEN_FAST_TP4_SDPA=multi on the M3 blocks) logs entries=4 kv_share=false for ITS one-launch-per-block program, so on a bundle of four the line cannot tell the
+    bundle from W2; the bundle's own engaged and call lines (octo_attn_bundle.bundle_problems) and the octo reader's G8B1 line are what prove the octo block ran it."""
+    env = env or {}
+    value = str(env.get('QWEN_FAST_OCTO_ATTN_BUNDLE', '0')).strip()
+    if value in ('', '0') or not value.isdigit() or not 2 <= int(value) <= 6:
+        return (1,)
+    size = int(value)
+    sizes = set()
+    remaining = USERS_OCTO
+    launches = -(-remaining // size)
+    base, extra = divmod(remaining, launches)
+    for index in range(launches):
+        sizes.add(base + (1 if index < extra else 0))
+    if str(env.get('QWEN_FAST_OCTO_ATTN_BUNDLE_AUDIT', '0')).strip() not in ('', '0'):
+        sizes.add(1)
+    return tuple(sorted(sizes))
 
 
 def lines_of(text):
@@ -223,13 +247,20 @@ def octo_problems(env, asked, found, facts, text=''):
             break
     # (a2) the program the octo block ran: eight segment readers at 0x21 (G8B1), and the factory's own one-entry, no-share line
     engaged = len(ENGAGED_OCTO.findall(text))
-    factory = len(FACTORY_OCTO.findall(text))
-    facts.update(octo_engaged_lines=engaged, octo_factory_lines=factory)
+    wanted_entries = factory_entries(env)
+    seen_entries = sorted({int(item) for item in FACTORY_ENTRIES.findall(text)})
+    factory = len(FACTORY_OCTO.findall(text)) if wanted_entries == (1,) else sum(1 for item in FACTORY_ENTRIES.findall(text) if int(item) in wanted_entries)
+    facts.update(octo_engaged_lines=engaged, octo_factory_lines=factory, octo_factory_entries=seen_entries)
     if octo_rounds and not engaged:
         problems.append('octo rounds ran and no "extent replay engaged segments=8 flags=0x21,...,0x21 ... geometry=G8B1" line was logged: the octo block\'s readers '
                         'were not the eight-row group-per-bundle ones (a log of the M3 blocks\' 0x23 programs would pass every other rule)')
-    if octo_rounds and not factory:
-        problems.append('octo rounds ran and no "[QWEN-SDPA] runtime-extent entries=1 kv_share=false" factory line was logged: no K64j program of one entry and no KV share was built')
+    if octo_rounds:
+        for entries in wanted_entries:
+            if entries not in seen_entries:
+                problems.append('octo rounds ran and no "[QWEN-SDPA] runtime-extent entries=%d kv_share=false" factory line was logged: no K64j program of %d entr%s and no KV share was built%s'
+                                % (entries, entries, 'y' if entries == 1 else 'ies', '' if wanted_entries == (1,) else
+                                   ' (the bundled octo attention launches %s users at a time; a bundle is the factory\'s B-entry program, which logs entries=B, not the single launch\'s entries=1)'
+                                   % ','.join(str(item) for item in wanted_entries if item != 1)))
     if rounds:
         last = rounds[-1]
         if last['octo_rounds'] != counts['octo'] or last['m3_rounds'] != counts['m3']:

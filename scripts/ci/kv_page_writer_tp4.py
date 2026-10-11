@@ -56,6 +56,10 @@ WT_FLAG = 'QWEN_FAST_KV_PAGE_WRITER_WT'
 
 ENGAGED = '[PINDIAG] tp4 kv page writer engaged'
 FELL_BACK = '[PINDIAG] tp4 kv page writer fell back'
+# tp4/octo-3: the octo block (8 users x 8 rows) is not this writer's shape - the design (design_signature) binds 4 users x 16 rows - and its K/V writes stay the chained writer's. That is
+# the block's known state, not a lever that failed, so it says so in words of its own (the precedent: tp4_vglue's `octo 8-row served path`): no 'fell back' text, which every fusion
+# smoke rule fails on, and one line per process that octo_judge/kv_page_writer_tp4_smoke demand of an octo profile.
+OCTO_SERVED = '[PINDIAG] tp4 kv page writer octo 8-row served path'
 AUDIT_MARKER = '[PINDIAG] tp4 kv page writer audit'
 AUDIT_MISMATCH = '[PINDIAG] tp4 kv page writer audit mismatch'
 
@@ -66,6 +70,7 @@ RUNTIME_FILES = ('kv_page_writer_tp4.py', 'kv_page_writer_tp4.cpp', 'kv_page_wri
 GROUPS = 4              # packed users in the 64-row block (M3)
 GROUP_ROWS = 16         # rows per user
 BLOCK_ROWS = GROUPS * GROUP_ROWS
+OCTO_SPANS = tuple((8 * user, 8 * user + 8) for user in range(8))   # the octo block's captured forward: eight users of eight rows (serving_octo)
 SLOTS = 2               # tile rows 16 consecutive positions can touch
 CACHES = 2              # K and V
 ROW_TILES = 8           # column tiles of a 256-wide K or V row
@@ -416,6 +421,16 @@ def fall_back(reason):
     if reason not in _NOTED:
         _NOTED.add(reason)
         log_line('%s reason=%s' % (FELL_BACK, reason))
+    return None
+
+
+def octo_served():
+    """The octo block's captured forward (eight 8-row users): one OCTO_SERVED line per process, and None - the served chained writer (generic in spans) runs. Not a fall-back: the page
+    writer's record is bound to a design of four users of sixteen rows (design_signature binds the groups and rows), an 8 x 8 design is its own card-M record, and the M3 blocks keep the lever."""
+    if ('octo',) not in _NOTED:
+        _NOTED.add(('octo',))
+        log_line('%s reason=the design (and its card-M record) is four users of %d rows; the octo block\'s eight users of 8 rows keep the chained writer'
+                 % (OCTO_SERVED, GROUP_ROWS))
     return None
 
 
@@ -910,6 +925,8 @@ def attach(mesh, operations, kernels, *, positions, pages, spans, launch_rows, e
     misconfigured flag raises; an unsupported block or missing evidence never does."""
     if not enabled(environ):
         return None
+    if launch_rows == BLOCK_ROWS and tuple((int(first), int(last)) for first, last in spans) == OCTO_SPANS:
+        return octo_served()
     try:
         layer = _LAYERS[0]
         _LAYERS[0] += 1

@@ -5,9 +5,11 @@
 `env` is the served profile's environment (a dict of strings, or None), `container_text` the server log. The parent smoke check calls this once per arm. What it holds:
 
   - without the flag: none of the lever's lines (engaged, audit, fell back) may appear - a log line from a lever the profile did not ask for is a profile that engaged it by another route;
-  - with the flag: an engaged line for each of the three sites at each shape the profile serves - K/V (`site=kv`), fold and unfold at `shape=quad` when QWEN_FAST_QUAD_DRAFT=1, and `site=kv shape=octo`
-    when QWEN_FAST_OCTO_DRAFT=1 (the octo fold and unfold are not hooked: octo_draft_tp is not WP7's file). The pair shapes are reported when they ran and demanded when no quad serves;
-  - with the audit flag: a passing line (`audit exact=True`) for each quad site the engaged lines name (the audit compares in the quad bucket's eager warm pass);
+  - with the flag: an engaged line for each of the three sites at each shape the profile serves - K/V (`site=kv`), fold and unfold at `shape=quad` when QWEN_FAST_QUAD_DRAFT=1, and all three at
+    `shape=octo` when QWEN_FAST_OCTO_DRAFT=1 (tp4/octo-3: the fold and unfold are hooked in octo_draft_tp since the fusion integration; this rule used to demand the octo K/V site alone). The pair
+    shapes are reported when they ran and demanded when no quad serves;
+  - with the audit flag: a passing line (`audit exact=True`) for each quad site, and each octo site when QWEN_FAST_OCTO_DRAFT=1, the engaged lines name (the audit compares in the bucket's
+    eager warm pass; octo_draft_tp's `_execute` tells it which pass it is, as quad_draft_tp's does);
   - on any arm: no fall-back line (a fall-back is the lever not running: the arm measured the old composition) and no audit mismatch line.
 """
 
@@ -55,7 +57,7 @@ def problems(env, container_text):
     if _on(env, QUAD_FLAG):
         wanted += [(site, 'quad') for site in SITES]
     if _on(env, OCTO_FLAG):
-        wanted.append(('kv', 'octo'))
+        wanted += [(site, 'octo') for site in SITES]
     if not wanted:
         wanted = [('kv', None)]
     for site, shape in wanted:
@@ -65,8 +67,8 @@ def problems(env, container_text):
     if _on(env, AUDIT_FLAG):
         passing = set(_site(line) for line in audited if ' exact=True' in line)
         for site, shape in wanted:
-            if shape != 'quad':
+            if shape not in ('quad', 'octo'):
                 continue
-            if (site, 'quad') not in passing:
-                found.append('%s=1 is set and no passing audit line (%s exact=True site=%s shape=quad) was logged: nothing was compared' % (AUDIT_FLAG, AUDIT, site))
+            if (site, shape) not in passing:
+                found.append('%s=1 is set and no passing audit line (%s exact=True site=%s shape=%s) was logged: nothing was compared' % (AUDIT_FLAG, AUDIT, site, shape))
     return found

@@ -86,9 +86,12 @@ EXCLUDED_FLAGS = (
     ('QWEN_FAST_LANE', 'the fast lane rides on the D0 block'),
 )
 # Flags whose OFF values are more than '0' (sdpa_long_tp.OFF_VALUES): refused when set to anything else. The long-context SDPA configurations are qualified at flags 0x23 (G8B2)
-# only, and sdpa_multi_tp tiles 16-row users: neither takes an octo (0x21, eight-row) segment.
+# only, and none of them takes an octo (0x21, eight-row) segment. QWEN_FAST_TP4_SDPA=multi (W2, sdpa_multi_tp) is the ONE exception, since tp4/octo-3: it is the two M3 blocks'
+# one-launch SDPA over sixteen-row users and it does not run on the octo block at all (extent_attention_fold_tp.PackedExtentReplayReader leaves an eight-row reader to the octo readers,
+# `multi` stays None for it; w2_switch.applies already excludes the octo block), so the fused ship stack (W2 + engine reuse + the fusion levers) is admitted beside the octo block.
 EXCLUDED_OFF_VALUES = (
-    ('QWEN_FAST_TP4_SDPA', ('', '0', 'off'), 'the long-context SDPA configurations (sdpa_long_tp, sdpa_multi_tp) are qualified at 0x23 and 16-row users, not the octo 0x21 eight-row segment'),
+    ('QWEN_FAST_TP4_SDPA', ('', '0', 'off', 'multi'), 'the long-context SDPA configurations (sdpa_long_tp) are qualified at 0x23, not the octo 0x21 eight-row segment; only multi '
+                                                       '(W2: the M3 blocks\' one-launch SDPA, never run on the octo block) may sit beside it'),
 )
 
 # The device pieces the octo block needs, by key -> what must exist (a requirement, so a refusal reads right when a piece is missing). `device_gaps` lists every key not built;

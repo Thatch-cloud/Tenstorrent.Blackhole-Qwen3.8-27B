@@ -102,6 +102,7 @@ WORKER_CAP = 110                    # most cores any launch of these levers uses
 AUDIT_CALLS = 10                    # calls audited per (lever, site, rows): five layers x (attention, MLP) at the quad
 _LOGGED = set()
 _AUDITED = {}
+_SHAPE = [None]                     # the draft pass being built ('octo' while octo_draft_tp's pass is; None for the pairs and quads): part of the audit budget's key
 STATS = {'reduce': 0, 'tail': 0, 'gateup1': 0, 'mmgrid': 0, 'fallback': 0}
 
 
@@ -346,7 +347,7 @@ def audit_begin(operations, mesh, lever, site, rows):
     if in_capture():
         skipped(lever, site, rows)
         return False
-    key = (lever, site, rows)
+    key = (lever, site, rows, _SHAPE[0])
     if _AUDITED.get(key, 0) >= AUDIT_CALLS:
         return False
     try:
@@ -362,13 +363,22 @@ def audit_begin(operations, mesh, lever, site, rows):
 
 def audited_total(lever):
     """How many calls of `lever` have been audited so far (the n of the 'audit <n> exact=True' line)."""
-    return sum(count for (name, _, _), count in _AUDITED.items() if name == lever)
+    return sum(count for key, count in _AUDITED.items() if key[0] == lever)
+
+
+def set_shape(tag):
+    """The pass the caller is building (octo_draft_tp's `_execute` says 'octo'): the audit budget is per (lever, site, rows, pass), so the octo pass - 64 rows like the quads - is audited
+    in its own right instead of finding the budget the two quads' warm passes spent (tp4/octo-3). Returns the previous tag; the line texts are unchanged."""
+    previous = _SHAPE[0]
+    _SHAPE[0] = tag
+    return previous
 
 
 def reset():
     """Forget the logged lines, the audit counters and the statistics (tests only)."""
     _LOGGED.clear()
     _AUDITED.clear()
+    _SHAPE[0] = None
     _CAPTURE['depth'] = 0
     for key in STATS:
         STATS[key] = 0

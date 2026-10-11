@@ -66,9 +66,12 @@ class PackedExtentReplayReader(_pinned_class()):
             octo.build_packed(self, *args, **kwargs)
         else:
             super().__init__(*args, **kwargs)
-        # QWEN_FAST_TP4_SDPA (sdpa_long_tp): flag unset or off, this returns at once and nothing is touched.
+        # QWEN_FAST_TP4_SDPA (sdpa_long_tp): flag unset or off, this returns at once and nothing is touched. W2 (QWEN_FAST_TP4_SDPA=multi) is the M3 blocks' one-launch SDPA over
+        # sixteen-row users: the octo block (eight-row segments, one entry per user, flags 0x21) does not take it, it keeps its own reader (eight single launches, or the two bundled ones
+        # under QWEN_FAST_OCTO_ATTN_BUNDLE) and `multi` stays None for it (tp4/octo-3: serving_octo admits the flag beside octo for exactly this reason).
         try:
-            sdpa_long_tp.apply(self)
+            if not eight_row_segments(segments):
+                sdpa_long_tp.apply(self)
             # QWEN_FAST_OCTO_ATTN_BUNDLE (octo_attn_bundle, gate only): the octo block's eight single-entry launches per layer as ceil(8 / N) bundled ones, set as this
             # reader's `multi`. Asked before the module is imported, so a process with the flags unset never imports it and nothing here changes.
             if octo_flags_requested():

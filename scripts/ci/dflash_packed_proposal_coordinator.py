@@ -707,12 +707,16 @@ class PackedProposalCoordinator:
     def close(self):
         if self.book is not None:
             # 2c: the traces are the book's, bound to the slots for the process. A hook's close drops the views its devices wear and resets the
-            # per-hook give-up state (a drain gives a blocked quad another chance); the traces stay.
+            # per-hook give-up state (a drain gives a blocked quad another chance); the traces stay. The octo pass's trace (QWEN_FAST_OCTO_DRAFT) is the coordinator's own,
+            # never the book's: a hook's close closes it.
             self.book.drop_views()
             self.quad_failures = 0
             self.quad_disabled = False
             self.quad_block_failures.clear()
             self.quad_blocked.clear()
+            if self.octo is not None:
+                self.octo[1].close()
+                self.octo = None
             self.generations.clear()
             return
         for _, _, trace, _ in self.pairs.values():
@@ -750,11 +754,13 @@ class PackedProposalCoordinator:
 
     def _rebound(self, key, devices):
         """Engine reuse, E1: whether a trace recorded under `key` was captured for an earlier request of one of `devices` - its generation has
-        moved on since. Always False with QWEN_FAST_PARKED_ENGINES off, and with the draft book (whose traces outlive requests by design)."""
-        return self.book is None and parked_engines_on() and self.generations.get(key) != generations(devices)
+        moved on since. Always False with QWEN_FAST_PARKED_ENGINES off, and with the draft book (whose traces outlive requests by design) - except the octo pass's own trace
+        (tp4/octo-3, QWEN_FAST_OCTO_DRAFT beside engine reuse): it is not in the book (the book holds pairs and block quads), so it follows a rebound member as it does
+        without the book and is rebuilt by the next all-eight-live octo round."""
+        return (self.book is None or key == 'octo') and parked_engines_on() and self.generations.get(key) != generations(devices)
 
     def _note_generations(self, key, devices):
-        if self.book is None and parked_engines_on():
+        if (self.book is None or key == 'octo') and parked_engines_on():
             self.generations[key] = generations(devices)
 
     def release_closed(self):
@@ -795,8 +801,11 @@ class PackedProposalCoordinator:
         half of - as release_closed closes a closed device's. A parked device stays open for its slot's next request, so `closed` never marks
         these dead; left alone they would hold their DRAM until the slots re-form (and a rebound member's generation retires them then). The
         partners keep their released singles, which _ensure_single_user rebuilds the first round each drafts alone. Logs PARKED_RELEASED_LINE.
-        With the book nothing is released: the traces are the slots' for the process."""
+        With the book nothing is released: the traces are the slots' for the process - but the octo pass's trace, which is not the book's, is closed when `device` is one of
+        its eight (tp4/octo-3: QWEN_FAST_OCTO_DRAFT beside QWEN_FAST_PARKED_DRAFTS)."""
         if self.book is not None:
+            if self.octo is not None and any(member is device for member in self.octo[0]):
+                self._close_octo()
             return dict(quad=0, pairs=[])
         quad = 0
         if self.quad is not None and any(member is device for member in self.quad[0]):

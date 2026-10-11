@@ -1181,6 +1181,7 @@ def hostgap_facts(container_text):
                 hostgap_live4_verifies=len(live4),
                 hostgap_live4_full_no_snapshot=sum(1 for path, reason in live4 if path == 'full' and reason == 'no-snapshot'),
                 hostgap_live4_diff=sum(1 for path, reason in live4 if path == 'diff'),
+                hostgap_live8_diff=sum(1 for path, reason, live in HOSTGAP_PRESTAGE_LINE.findall(container_text) if live == '8' and path == 'diff'),
                 hostgap_verify_live4=verifies, hostgap_audit_lines=audits,
                 hostgap_full_audits=len(audits), hostgap_full_audit_blocks=sorted({item[0] for item in audits}),
                 hostgap_full_audits_full=sum(1 for item in audits if item[1] == 'full'),
@@ -1247,7 +1248,8 @@ def hostgap_problems(env, container_text, steady_eight, decode=True):
             problems.append('the profile asks for the two-block pre-stage and the smoke did not run %s (or it errored): the lever was '
                             'not judged' % STEADY_EIGHT_TEST)
         return problems, facts          # (a ladder-only run: not asked, check() reports it)
-    if not facts['hostgap_live4_diff']:
+    if not facts['hostgap_live4_diff'] and not (octo_blocks(env) and facts['hostgap_live8_diff']):
+        # (an octo-live arm verifies every eight-live round on the octo block: the 4-live verifies are the ramp and the drain, so the diff path may also be shown at 8 live)
         problems.append('no 4-live verify took the diff path: the pre-stage never served a verify')
     if env.get(HOSTGAP_LOG_FLAG) == '1':
         problems.extend(hostgap_share_problems(facts['hostgap_verify_live4'], per_block))
@@ -1258,6 +1260,10 @@ def hostgap_problems(env, container_text, steady_eight, decode=True):
         facts['hostgap_share'] = 'unread (%s off)' % HOSTGAP_LOG_FLAG
     if env.get(HOSTGAP_AUDIT_FLAG) == '1':
         wanted = ['A', 'B'] if per_block else ['A']
+        if octo_blocks(env):
+            # An octo-live arm runs the M3 blocks only below six live seats (the ramp and the drain), so a short audited attach may not audit both of them; the octo block
+            # ('C', the third block of the pre-stage) runs every eight-live round and is the one this arm exists for. The M3 blocks' own audit is the combined arm's (FXA).
+            wanted = ['C']
         if facts['hostgap_audit_mismatches_diff']:
             problems.append('%d staged buffers differed from the full stage after a DIFF write in the full audit '
                             '([PACKED-PRESTAGE-FULLAUDIT] path=diff): the lever staged something other than the full stage'
@@ -1385,7 +1391,9 @@ def round_host_problems(env, container_text, steady_eight):
             elif not skipped:
                 problems.append('%s is set and the replicated-feature guard was never skipped over %d steps' % (round_host.READ_FLAG, len(drafted)))
         if set_flags.get(round_host.KEYED_FLAG) == '1':
-            possible = sum(2 if step['live'] == 8 else 1 for step in judged if step['live'] in (4, 8))
+            # An eight-live M3 step verifies twice (the ledger's v0 and v1); an eight-live OCTO step verifies once on the one 8 x 8 block (v1 is `-`), so the possible verifies of
+            # a step are the verify times it wrote (tp4/octo-3: under QWEN_FAST_OCTO=live the old count of two per eight-live step capped the share at 0.5 and failed a healthy arm).
+            possible = sum(2 if step['live'] == 8 and step['fields'].get('v1', 0.0) is not None else 1 for step in judged if step['live'] in (4, 8))
             taken = sum(step['keyed'] for step in judged if step['live'] in (4, 8))
             facts['round_host_keyed_share'] = round(taken / possible, 3) if possible else None
             if possible >= ROUND_HOST_MIN_STEPS and taken < ROUND_HOST_KEYED_SHARE * possible:

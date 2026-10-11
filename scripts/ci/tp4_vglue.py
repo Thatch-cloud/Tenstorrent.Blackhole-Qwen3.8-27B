@@ -265,7 +265,13 @@ def audit_round(operations, records, round_number, served_only=False):
         log_line(message)
         raise AssertionError(message)
     _AUDIT['rounds'] += 1
-    log_line('%s %d exact=True layers=%s entries=%d' % (AUDIT_MARKER, _AUDIT['rounds'], label, compared))
+    # QWEN_FAST_AUDIT_FIRST / QWEN_FAST_AUDIT_EVERY (audit_sampling): a sampled arm says so on the line (nothing is appended while sampling is off)
+    sample = ''
+    if os.environ.get('QWEN_FAST_AUDIT_EVERY') or os.environ.get('QWEN_FAST_AUDIT_FIRST'):
+        import audit_sampling
+
+        sample = ' sample=' + audit_sampling.label()
+    log_line('%s %d exact=True layers=%s entries=%d%s' % (AUDIT_MARKER, _AUDIT['rounds'], label, compared, sample))
     return compared
 
 

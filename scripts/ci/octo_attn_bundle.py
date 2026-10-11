@@ -140,7 +140,9 @@ def admission_problems(environ=None):
     if tp_shapes.chip_count(source) != TP4:
         problems.append('%s is a TP4 lever: it needs QWEN_FAST_TP=4' % FLAG)
     sdpa = (source.get(SDPA_FLAG) or '').strip().lower()
-    if sdpa not in ('', '0', 'off'):
+    if sdpa not in ('', '0', 'off', 'multi'):
+        # (tp4/octo-3: 'multi' is W2, the M3 blocks' one-launch SDPA over sixteen-row users; the octo block never runs it - the reader twin leaves an eight-row reader to the octo
+        # readers and this bundle - so the two do not meet. Any other configuration is the long-context SDPA of 0x23 segments and is still a second way to bundle.)
         problems.append('%s and %s are two ways to bundle the SDPA launches: set one' % (FLAG, SDPA_FLAG))
     return problems
 
@@ -327,9 +329,27 @@ def apply(reader, environ=None):
         block.close()
         raise
     reader.multi = block
-    _log(marker(groups, block.plans, grid, audit))
-    _log('%s: %s' % (UNQUALIFIED, UNQUALIFIED_TEXT))
+    # The block's fixture is built TWICE at the attach (packed_verifier._warm_and_fixture: the eager warm forward's fixture, then the captured one), and each builds its own reader and so
+    # its own bundle: the card logs of tp4/octo-2 (OB1, OL1) held two engaged lines per boot and the smoke rule wants exactly one. The two lines are the same fact (same launches, same
+    # grid, same audit), so the process says it once: the first attach that built a bundle logs; the later ones are the captured fixture's twin and build the same thing silently.
+    _log_once(marker(groups, block.plans, grid, audit))
+    _log_once('%s: %s' % (UNQUALIFIED, UNQUALIFIED_TEXT))
     return block
+
+
+_LOGGED = set()
+
+
+def _log_once(message):
+    """Log `message` unless this process already did (the warm fixture and the captured fixture build the same bundle). reset_logged() forgets, for tests."""
+    if message in _LOGGED:
+        return
+    _LOGGED.add(message)
+    _log(message)
+
+
+def reset_logged():
+    _LOGGED.clear()
 
 
 def reader_is_octo(reader):

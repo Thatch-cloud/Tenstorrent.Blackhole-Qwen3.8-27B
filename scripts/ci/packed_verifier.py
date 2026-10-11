@@ -200,6 +200,7 @@ from verifier_pack import GDN_LAYERS, build_pack, participant
 import gdn_seq_block
 import round_host
 import verify_prestage
+import audit_sampling
 import capture_plug
 import tp_shapes
 import tile_collective_tp
@@ -1016,6 +1017,8 @@ class PackedVerifierEngine:
         # the captured retained block on the fence diet (F3, F8; set after the capture, below).
         # Off, `prestaged` is None, `round_fences` False, and every path below is today's.
         self.round_fences = verify_prestage.round_fences_enabled()
+        # QWEN_FAST_AUDIT_FIRST / QWEN_FAST_AUDIT_EVERY: a malformed sampling flag fails the attach here, by name, never as every round audited (or none)
+        audit_sampling.settings()
         self.prestaged = (verify_prestage.BlockPrestage(self, audit=verify_prestage.audit_enabled())
                           if verify_prestage.enabled() else None)
         self.validated_this_round = False
@@ -1984,27 +1987,31 @@ class PackedVerifierEngine:
                 host = self.operations.to_torch(parts[0]).reshape(-1)[:self.block_rows].tolist()
             if len(host) != self.block_rows:
                 raise AssertionError('Missing packed prediction rows')
-            if self.windows_audit:
+            # QWEN_FAST_AUDIT_FIRST / QWEN_FAST_AUDIT_EVERY (audit_sampling, gate profiles only): the four host read-back audits below (the packed windows, K5-A, the GDN glue
+            # and F1) read hundreds of tensors off four chips after a replay; a sampled arm reads them on the first N rounds and every K-th after, and their layer rotation follows the
+            # audited rounds' ordinal. Unset: every round, round_number as ever (audit_round_number is self.rounds + 1).
+            audit_round_number = audit_sampling.ordinal(self.rounds + 1) if audit_sampling.sampled(self.rounds + 1) else None
+            if self.windows_audit and audit_round_number is not None:
                 # QWEN_FAST_VERIFY_T2_AUDIT (G1 for #1): this replay's packed windows against the
                 # served ones built beside them in the same trace - every GDN layer on round 1,
                 # then two per round in rotation (verify_trace_t2.audit_layers).
-                verify_trace_t2.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)
-            if getattr(self, 'seq_block_audit', ()):
+                verify_trace_t2.audit_round(self.operations, self.fixture.retained.records, audit_round_number)
+            if getattr(self, 'seq_block_audit', ()) and audit_round_number is not None:
                 # QWEN_FAST_GDN_SEQ_BLOCK_AUDIT: this replay's K5-A prefix states and gated output
                 # against the served launch's on the same inputs, every audited layer.
                 gdn_seq_block.audit_round(self.operations, self.fixture.retained.records, self.seq_block_audit,
-                                          self.rounds + 1)
-            if tp4_vglue.audit_enabled():
+                                          audit_round_number)
+            if tp4_vglue.audit_enabled() and audit_round_number is not None:
                 # QWEN_FAST_TP4_VGLUE_AUDIT: each engaged GDN lever's output against the served path's, held beside it.
                 # (the octo block's 8 x 8 users run the served path at the glue sites, tp4_vglue.EIGHT_ROW_SERVED: nothing of the levers to compare - unless
                 # QWEN_FAST_OCTO_GLUE8 makes them native (octo_glue8), when the audited entries exist like an M3 block's and a declined lever is a failure)
-                tp4_vglue.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1,
+                tp4_vglue.audit_round(self.operations, self.fixture.retained.records, audit_round_number,
                                       served_only=(self.users, self.rows_per_user) == (8, 8) and os.environ.get('QWEN_FAST_OCTO_GLUE8', '0') == '0')
                 if os.environ.get('QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT', '0') != '0':
                     # QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT (gdn_conv_gates_spread): the F1 launch's three outputs (conv, beta, g) per audited layer, every chip.
                     import gdn_conv_gates_spread
 
-                    gdn_conv_gates_spread.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)
+                    gdn_conv_gates_spread.audit_round(self.operations, self.fixture.retained.records, audit_round_number)
             # QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT: this replay's unit-major reductions against the split's held beside them.
             tile_collective_tp.audit_round(self.operations, self.fixture, self.rounds + 1)
             mlp = mlp_audit()
