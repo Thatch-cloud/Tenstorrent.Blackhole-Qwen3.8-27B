@@ -195,6 +195,9 @@ CREDIT_HOLD_LINE = '[PINDIAG] decode credit hold left={} decodes={}'
 GATE_CARRIED_LINE = ('[PINDIAG] gate-held pass carried finished={} past the discarded prefill pass into the decode-only step')
 CREDIT_CARRIED_LINE = ('[PINDIAG] decode credit carried finished={} past the discarded prefill pass into the '
                        'decode-only step')
+# THE SLICED RESTORE (QWEN_PREFIX_TIER_RESTORE_SLICE; qwen_prefix_scheduler_patch, docstring item h): the candidate this pass would admit is held while its blocks come back from the host
+# tier a slice per engine step; the pass is then a decode-only pass, like a DRAM or KV hold.
+RESTORE_CARRIED_LINE = ('[PINDIAG] sliced restore carried finished={} past the discarded prefill pass into the decode-only step')
 CREDIT_REFUSED_LINE = '[PINDIAG] decode credit REFUSED {!r}: {}; the one-fresh-prefill cap is installed with the credit off'
 CREDIT_INSTALLED_LINE = '[PINDIAG] decode credit installed on {}: steps={}'
 MEGABYTE = 10 ** 6
@@ -774,6 +777,25 @@ def dram_hold(scheduler, decodes, state, log, modules=None, candidates=None):
     return True
 
 
+def restore_hold(scheduler, candidates, decodes, log):
+    """Whether the candidate this pass would admit is held for the next slice of its restore from the host KV tier (SchedulerGraft.restore_hold: it restores the slice, in this
+    call). False when the prefix graft is not on this scheduler, slicing is off, nothing waits, nothing is decoding (there is no one to interleave with: the restore runs whole in the
+    trim), or the request has nothing to restore. A failure of the hold is never the pass's: the request is admitted and the trim restores it whole."""
+    if not decodes or not candidates:
+        return False
+    graft = getattr(scheduler, '_qwen_prefix', None)
+    hold = getattr(graft, 'restore_hold', None)
+    if not callable(hold):
+        return False
+    try:
+        return bool(hold(candidates[0]))
+    except AssertionError:
+        raise
+    except Exception as failure:
+        log('[PINDIAG] sliced restore hold failed ({}: {}): the request is admitted and restored whole', type(failure).__name__, str(failure)[:160])
+        return False
+
+
 KV_FLAG = 'QWEN_FAST_KV_RESERVATION'
 
 
@@ -924,19 +946,24 @@ def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None, lever
             # When the prompt does not fit the DRAM left, it waits as behind a held gate.
             dram_flag = (not kv_flag and not hide and waiting_capacity(self.max_num_running_reqs, seats_held, allowed) > 0
                          and dram_hold(self, decodes, state, log, candidates=candidates()))
-            return kv_flag, dram_flag
+            # THE SLICED RESTORE: asked last, when nothing else holds the step, because the call itself restores a slice of the candidate's blocks.
+            restore_flag = (not kv_flag and not dram_flag and not hide and waiting_capacity(self.max_num_running_reqs, seats_held, allowed) > 0
+                            and restore_hold(self, candidates(), decodes, log))
+            return kv_flag, dram_flag, restore_flag
 
-        kv_held, dram_held = holds()
-        if (kv_held or dram_held) and plan is not None and plan.preempted is not None:
+        kv_held, dram_held, restore_held = holds()
+        if (kv_held or dram_held or restore_held) and plan is not None and plan.preempted is not None:
             # The short prompt would not fit: the long prefill it would have parked simply continues (no decode-only pass in its place).
             plan.demote()
             partials, held = 1, gate_held()
             allowed, hide = admission(partials, held)
             seats_held = decodes + len(plan.hidden)
-            kv_held = dram_held = False
+            kv_held = dram_held = restore_held = False
         if kv_held:
             allowed, hide = 0, True
         if dram_held:
+            allowed, hide = 0, True
+        if restore_held:
             allowed, hide = 0, True
         if steps and state['credit'] and hide and decodes and not partials:
             # A decode-only pass follows whatever held this one (the credit, the gate or the DRAM hold): it pays a step.
@@ -1028,7 +1055,7 @@ def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None, lever
                     self.running.insert(min(index, len(self.running)), request)
                 self.running.extend(request for request in hidden_running if id(request) not in placed)
             self.max_num_running_reqs = saved_max
-        if capped is not None and not (dram_held or kv_held or credit_held):
+        if capped is not None and not (dram_held or kv_held or credit_held or restore_held):
             # The pass is about to run: it must be the one the cap was computed for (levern_scheduler.verify), or the engine stops here.
             levern.verify(result, capped)
         if dram_held:
@@ -1036,6 +1063,8 @@ def wrap(original, *, queue_factory, log, steps=None, state=None, kv=None, lever
             carry_finished(self, result, decodes, log)
         elif kv_held:
             carry_finished(self, result, decodes, log, kv.CARRIED_LINE)
+        elif restore_held:
+            carry_finished(self, result, decodes, log, RESTORE_CARRIED_LINE)
         elif credit_held:
             carry_finished(self, result, decodes, log, CREDIT_CARRIED_LINE)
         elif hide:

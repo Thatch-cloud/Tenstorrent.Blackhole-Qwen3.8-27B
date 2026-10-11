@@ -56,6 +56,16 @@ f. The host KV tier (qwen_prefix_registry.TierStore, TierHooks below; QWEN_PREFI
    again, whose own hit logic, reservation rule and allocation do everything else. Nothing here uses an external-token path or a KV
    connector. A failure at any point is a miss.
 
+h. The sliced restore (QWEN_PREFIX_TIER_RESTORE_SLICE blocks, QWEN_PREFIX_TIER_RESTORE_SLICE_MS; off unless named, and then the restore is item f's, whole, in the trim). A returning
+   session's blocks come back a bounded slice per engine step instead of all in one: the one-fresh-prefill admission (serving_prefill_admission) asks SchedulerGraft.restore_hold
+   for the head candidate before it admits it; the hold starts a RestoreJob (the tier's records pinned, the request's own device hit touched), and each call restores one slice -
+   the digests of its records, an allocation of that many blocks (whose evictions are spilled at once, so a step's spill is bounded too), the raw device write, the read-back
+   audit - and reports the request held, so the pass is a decode-only pass and the seats keep getting rounds. The slice is as many blocks as the time budget allows at the cost per
+   block measured so far, at most the block cap. The request is admitted in the step its last slice lands; the blocks are hashed into the pool only then (all or nothing, so no other
+   request ever sees a half restore) and freed as cached blocks, and vLLM's own hit logic takes them. A job ends with its request (the free hook), the kill switch, a latched tier or
+   a failure (a miss: the request is admitted cold, and its tier hit is not retried); a trim that reaches a request whose job is unfinished finishes it whole. What it cannot slice
+   is what a device-resident hit costs anyway: the tail prefill and the engine build.
+
 g. Tenant quotas (qwen_prefix_registry.QuotaConfig, DeviceQuota below; QWEN_PREFIX_TENANT_QUOTA_DEVICE_CAP_TOKENS / _FLOOR_TOKENS, off unless named and then none of
    this runs). The tenant is the salt's (tenant_of_salt); the same numbers apply to every tenant. A tenant's RESIDENT tokens are its cached prefix blocks in the
    device pool, running or idle. The CAP is soft by what is running (a running request's blocks cannot be evicted): when a tenant's resident blocks pass its cap,
@@ -571,6 +581,39 @@ class TierAuditError(AssertionError):
     """QWEN_PREFIX_HOST_TIER_AUDIT=1 read a restored block back and it was not the bytes written: the engine stops."""
 
 
+class RestoreJob(object):
+    """One returning request's restore in progress (docstring item h): the records to write back (one per block from `first` to `need`), the request's own device hit
+    (`protected`, touched for the job's length so no allocation of the job can take it), the blocks written so far (`new`, held by the job, not yet hashed), and the cost so far."""
+
+    __slots__ = ('request', 'request_id', 'first', 'need', 'records', 'keys', 'protected', 'new', 'tenant', 'work_ms', 'slices', 'max_ms', 'held', 'step', 'bytes')
+
+    def __init__(self, request, first, need, records, protected, tenant):
+        self.request, self.request_id = request, request.request_id
+        self.first, self.need = first, need
+        self.records, self.keys = records, [record.key for record in records]
+        self.protected = protected
+        self.new = []
+        self.tenant = tenant
+        self.work_ms = 0.0
+        self.slices = 0
+        self.max_ms = 0.0
+        self.held = 0
+        self.step = None
+        self.bytes = 0
+
+    @property
+    def total(self):
+        return self.need - self.first
+
+
+class SliceRefused(Exception):
+    """A slice could not be written (a record failed its digest): the job is abandoned and the request goes on without the tier."""
+
+
+# The blocks of the first slice of a job when no cost per block has been measured yet (a probe), and the longest one slice may hold the engine before the gate calls it a defect.
+SLICE_PROBE_BLOCKS = 8
+
+
 class TierHooks(object):
     """The host KV tier's side of the scheduler graft (module docstring, item f). Everything that touches the device goes through
     registry.tier_io (read_blocks, write_blocks), which the model graft attaches; the bytes live in registry.tier (TierStore)."""
@@ -588,6 +631,14 @@ class TierHooks(object):
         self.failures = 0
         self.checked = 0
         self.refused_logged = False
+        # The sliced restore (docstring item h): the block cap and the time budget per step, the jobs in progress (request id -> RestoreJob), the requests whose job was abandoned (their tier
+        # hit is ignored), whether the admission wrapper that asks for the hold is on the scheduler, and the measured milliseconds per block (EWMA).
+        self.slice_blocks = int(getattr(self.config, 'restore_slice', 0) or 0)
+        self.slice_ms = float(getattr(self.config, 'restore_slice_ms', prefix_registry.DEFAULT_TIER_SLICE_MS))
+        self.jobs = {}
+        self.refused = set()
+        self.hold_ready = False
+        self.rate = None
         self.kill_switch = prefix_registry.KillSwitch(self.config.off_path, prefix_registry.KILL_SWITCH_POLL_S, graft.kill_switch.clock)
         graft.registry.device_holds = self.device_holds
         graft.registry.tier_slack = 1 if graft.drop_last else 0
@@ -616,6 +667,11 @@ class TierHooks(object):
 
     def eligible(self, request):
         return not self.graft.excluded(request) and self.graft.registry.disabled is None and not self.graft.kill_switch.engaged
+
+    @property
+    def slicing(self):
+        """Whether restores are sliced: the flag is on, the admission wrapper that holds a request between slices is on the scheduler, and the tier works."""
+        return self.slice_blocks > 0 and self.hold_ready and self.active
 
     # -- publication and eviction (d) --------------------------------------------------------------
     def note_published(self, request, owned, before, after):
@@ -731,7 +787,7 @@ class TierHooks(object):
     def effective_hit(self, request, h):
         """vLLM's hit length as it would report it if the tier's consecutive blocks after the device hit were cached (h when there are none)."""
         graft = self.graft
-        if not self.poll() or not self.eligible(request):
+        if not self.poll() or not self.eligible(request) or request.request_id in self.refused:
             return h
         hashes = request.block_hashes
         drop = 1 if graft.drop_last and h > 0 else 0
@@ -775,6 +831,15 @@ class TierHooks(object):
     def load(self, request, blocks, h, q):
         """Make the blocks below Q that the device lacks cached on the device again, from the tier. True when vLLM will now hit them."""
         graft, registry, stats, tier, pool = self.graft, self.registry, self.registry.stats, self.tier, self.graft.block_pool
+        job = self.jobs.get(request.request_id)
+        if job is not None:
+            # The trim reached a request whose sliced restore is unfinished (the admission hold was not asked for it): finish it now, whole.
+            state = 'more'
+            while state == 'more':
+                state = self.advance(job, whole=True)
+            return state == 'done'
+        if self.slice_blocks:
+            stats['tier_slice_inline'] += 1
         drop = 1 if graft.drop_last and h > 0 else 0
         first = h // BLOCK + drop
         need = q // BLOCK + (1 if graft.drop_last else 0)
@@ -859,6 +924,204 @@ class TierHooks(object):
             graft.log('host tier restore req=%s blocks=%d bytes=%d ms=%.1f from=%d to=%d', request.request_id, len(records), size,
                       elapsed, first * BLOCK, need * BLOCK)
         return ok
+
+    # -- the sliced restore (docstring item h) -------------------------------------------------------------------
+    def hold(self, request):
+        """Called by the one-fresh-prefill admission for the candidate it is about to admit: True while the request's blocks are not all back from the tier (this call restored a
+        slice of them, or started the job), so the pass must not admit it; False when it may be admitted (nothing to restore, or the last slice landed in this call, or the restore
+        was abandoned). Never raises into the scheduler except for a failed audit, which stops the engine as it does unsliced."""
+        job = self.jobs.get(request.request_id)
+        if not self.slicing or request.request_id in self.refused:
+            if job is not None:
+                self.abort(job, 'sliced restore off', refuse=False)
+            return False
+        if not self.poll() or not self.eligible(request):
+            if job is not None:
+                self.abort(job, 'the tier is off for this request', refuse=False)
+            return False
+        if job is None:
+            job = self.start(request)
+            if job is None:
+                return False
+        if job.step == self.graft.step_no:
+            return True
+        state = self.advance(job)
+        if state == 'more':
+            job.held += 1
+            self.registry.stats['tier_slice_held'] += 1
+            return True
+        return False
+
+    def start(self, request):
+        """The job for a request that needs the tier's blocks, or None (nothing to restore, a record gone, no room, no slice to give): what load() checks before it allocates, without
+        allocating. Takes the pins and touches the request's own device hit; abort() gives them back."""
+        graft, registry, stats, tier, pool = self.graft, self.registry, self.registry.stats, self.tier, self.graft.block_pool
+        blocks, h = self.recompute(request)
+        h_effective = self.effective_hit(request, h)
+        if h_effective <= h:
+            return None
+        q = graft.select(request, blocks, h_effective, graft.peeked.get(request.request_id))[0]
+        if q <= h:
+            return None
+        drop = 1 if graft.drop_last and h > 0 else 0
+        first = h // BLOCK + drop
+        need = q // BLOCK + (1 if graft.drop_last else 0)
+        if need <= first:
+            return None
+        hashes = request.block_hashes
+        records = []
+        for index in range(first, need):
+            record = tier.get(hashes[index])
+            if record is None:
+                stats['tier_restore_failures'] += 1
+                return None
+            records.append(record)
+        lookahead = int(getattr(graft.scheduler, 'num_lookahead_tokens', 0) or 0)
+        beyond = -(-(request.num_tokens + lookahead) // BLOCK) - need + 1
+        if pool.get_num_free_blocks() < (need - first) + max(0, beyond):
+            stats['tier_restore_refused_room'] += 1
+            return None
+        protected = list(blocks.blocks[0])
+        if drop:
+            extra = pool.cached_block_hash_to_block.get_one_block(self.key_of(hashes[h // BLOCK]))
+            if extra is None:
+                stats['tier_restore_failures'] += 1
+                return None
+            protected.append(extra)
+        pool.touch(protected)
+        tier.pin([record.key for record in records])
+        job = RestoreJob(request, first, need, records, protected, prefix_registry.tenant_of_salt(request.cache_salt))
+        self.jobs[request.request_id] = job
+        stats['tier_slice_jobs'] += 1
+        return job
+
+    def slice_size(self, remaining):
+        """How many blocks the next slice restores: the time budget over the measured cost per block (a probe of SLICE_PROBE_BLOCKS before any is measured), at least one, at most the
+        block cap and what is left."""
+        if self.rate is None:
+            blocks = SLICE_PROBE_BLOCKS
+        else:
+            blocks = int(self.slice_ms / max(self.rate, 1e-6))
+        return max(1, min(self.slice_blocks or remaining, blocks, remaining))
+
+    def advance(self, job, whole=False):
+        """One slice of `job` (all that is left when `whole`): the digests of its records, an allocation of its blocks (what that evicts is spilled before anything is written), the raw write,
+        the read-back audit. -> 'more', 'done' (the job is finished and gone) or 'failed' (abandoned and gone)."""
+        graft, registry, stats, tier, pool = self.graft, self.registry, self.registry.stats, self.tier, self.graft.block_pool
+        remaining = job.total - len(job.new)
+        count = remaining if whole else self.slice_size(remaining)
+        low = len(job.new)
+        records = job.records[low:low + count]
+        if pool.get_num_free_blocks() < count:
+            stats['tier_restore_refused_room'] += 1
+            self.abort(job, 'no room for %d blocks' % count)
+            return 'failed'
+        began = time.perf_counter()
+        quota = graft.quota
+        try:
+            for record in records:
+                if not self.check_digest(record):
+                    stats['tier_restore_refused_digest'] += 1
+                    graft.log('host tier record failed its digest req=%s block=%d: dropped', job.request_id, record.index)
+                    tier.remove(record.key)
+                    self.unhold([record.key])
+                    raise SliceRefused()
+            if quota is not None:
+                quota.allocating = job.tenant
+            try:
+                new = pool.get_new_blocks(count)
+            finally:
+                if quota is not None:
+                    quota.allocating = None
+            job.new.extend(new)
+            self.flush()
+            ids = [block.block_id for block in new]
+            payloads = [record.payload for record in records]
+            self.io.write_blocks(ids, payloads)
+            if self.config.audit:
+                self.audit(job.request, ids, payloads)
+        except SliceRefused:
+            self.abort(job, 'a record failed its digest')
+            return 'failed'
+        except TierAuditError:
+            self.abort(job, 'the audit failed', refuse=False)
+            raise
+        except Exception as error:
+            stats['tier_restore_failures'] += 1
+            self.failures += 1
+            graft.log('host tier restore failed req=%s (%d so far): %s: %s', job.request_id, self.failures, type(error).__name__, error)
+            if self.failures >= 3:
+                registry.tier_latch('three restores in a row failed')
+            self.abort(job, 'a slice failed')
+            return 'failed'
+        elapsed = (time.perf_counter() - began) * 1000.0
+        size = sum(len(record.payload) for record in records)
+        job.work_ms += elapsed
+        job.bytes += size
+        job.slices += 1
+        job.max_ms = max(job.max_ms, elapsed)
+        job.step = graft.step_no
+        per_block = elapsed / count
+        self.rate = per_block if self.rate is None else 0.5 * self.rate + 0.5 * per_block
+        stats['tier_slice_steps'] += 1
+        stats['tier_slice_blocks'] += count
+        stats['tier_slice_ms'] += elapsed
+        stats['tier_slice_max_ms'] = max(stats['tier_slice_max_ms'], elapsed)
+        graft.log('host tier restore slice req=%s blocks=%d done=%d of %d ms=%.1f', job.request_id, count, len(job.new), job.total, elapsed)
+        if len(job.new) < job.total:
+            return 'more'
+        self.finish(job)
+        return 'done'
+
+    def finish(self, job):
+        """The last slice has landed: hash the blocks into the pool and free them as cached ones (vLLM's own hit logic takes them), let go of the pins and the request's own hit."""
+        graft, registry, stats, tier, pool = self.graft, self.registry, self.registry.stats, self.tier, self.graft.block_pool
+        request, hashes = job.request, job.request.block_hashes
+        try:
+            pool.cache_full_blocks(request, [None] * job.first + list(job.new), job.first, job.need, BLOCK, 0)
+            chain = hashes[0] if len(hashes) else None
+            for offset, block in enumerate(job.new):
+                self.meta[block.block_id] = (hashes[job.first + offset], chain, job.tenant, job.first + offset)
+            if graft.quota is not None:
+                graft.quota.note_published(job.new, job.tenant)
+        finally:
+            self.release(job)
+        self.failures = 0
+        stats['tier_restore_requests'] += 1
+        stats['tier_restore_blocks'] += job.total
+        stats['tier_restore_bytes'] += job.bytes
+        stats['tier_restore_ms'] += job.work_ms
+        graft.log('host tier restore req=%s blocks=%d bytes=%d ms=%.1f from=%d to=%d slices=%d max_slice_ms=%.1f held_steps=%d', job.request_id, job.total, job.bytes,
+                  job.work_ms, job.first * BLOCK, job.need * BLOCK, job.slices, job.max_ms, job.held)
+
+    def release(self, job):
+        """Give back everything a job holds: its blocks (cached by now, or plain garbage), the request's own hit, the pins."""
+        pool = self.graft.block_pool
+        self.jobs.pop(job.request_id, None)
+        self.tier.unpin(job.keys)
+        try:
+            if job.new:
+                pool.free_blocks(reversed(job.new))
+        finally:
+            pool.free_blocks(reversed(job.protected))
+        job.new, job.protected = [], []
+
+    def abort(self, job, reason, refuse=True):
+        """Abandon a job: the blocks written so far are freed uncached, the pins and the request's own hit given back. `refuse`: the request's tier hit is ignored from now on (a miss,
+        not retried every step)."""
+        stats = self.registry.stats
+        stats['tier_slice_aborted'] += 1
+        self.graft.log('host tier restore slice aborted req=%s after %d of %d blocks: %s', job.request_id, len(job.new), job.total, reason)
+        self.release(job)
+        if refuse:
+            self.refused.add(job.request_id)
+
+    def cancel(self, request_id):
+        """The request ended (finished, aborted, freed): its job goes with it, and so does the memory of a refusal."""
+        job = self.jobs.get(request_id)
+        if job is not None:
+            self.abort(job, 'the request ended', refuse=False)
+        self.refused.discard(request_id)
 
     def audit(self, request, ids, payloads):
         """QWEN_PREFIX_HOST_TIER_AUDIT=1: read the restored blocks back from the device and compare them with the bytes written."""
@@ -1065,6 +1328,8 @@ class SchedulerGraft(object):
     tier_hooks = None
     # The per-tenant device quota (DeviceQuota), None unless QWEN_PREFIX_TENANT_QUOTA_DEVICE_* names one.
     quota = None
+    # The serial of the schedule() call in progress (begin_step counts it): a restore job takes one slice per step.
+    step_no = 0
     make_block_hash = None
     # Lever N's peek memo (request id -> the Q the trim would land on), cleared at the start of every schedule() call.
     peeked = {}
@@ -1092,6 +1357,14 @@ class SchedulerGraft(object):
     @property
     def killed(self):
         return self.kill_switch.engaged or self.registry.disabled is not None
+
+    def restore_hold(self, request):
+        """The one-fresh-prefill admission asks, for the candidate it is about to admit, whether to hold it for the next slice of its restore from the tier (TierHooks.hold; docstring
+        item h). False when slicing is off, the request may not hit, or there is nothing to restore."""
+        hooks = self.tier_hooks
+        if hooks is None or not hooks.slicing or self.excluded(request) or self.killed:
+            return False
+        return hooks.hold(request)
 
     def kill_switch_engaged(self):
         if self.kill_switch.poll():
@@ -1394,6 +1667,7 @@ class SchedulerGraft(object):
         def begin_step():
             registry.begin_step()
             self.peeked.clear()
+            self.step_no += 1
 
         def cache_blocks(request, num_computed_tokens):
             return self.cap(request, num_computed_tokens)
@@ -1431,6 +1705,8 @@ class SchedulerGraft(object):
             return result
 
         def _free_request(request, *args, **kwargs):
+            if self.tier_hooks is not None:
+                self.tier_hooks.cancel(request.request_id)
             registry.forget_request(request.request_id)
             return original['_free_request'](request, *args, **kwargs)
 
@@ -1463,6 +1739,14 @@ class SchedulerGraft(object):
                  getattr(registry, 'evict_policy', 'lru'), int(getattr(registry, 'supersede', False)),
                  int(getattr(registry, 'telemetry', False)), getattr(registry, 'ghost_limit', 0),
                  getattr(registry, 'checkpoint_nbytes', prefix_registry.CHECKPOINT_NBYTES))
+        if self.tier_hooks is not None and self.tier_hooks.slice_blocks:
+            hooks = self.tier_hooks
+            hooks.hold_ready = bool(getattr(getattr(type(scheduler), '_schedule_prefill_only', None), ADMISSION_WRAPPED, False))
+            if hooks.hold_ready:
+                # The gate and the smoke read this line (prefix_markers.TIER_SLICE_ON).
+                self.log('host tier restore slice on blocks=%d ms=%.0f', hooks.slice_blocks, hooks.slice_ms)
+            else:
+                self.log('host tier restore slice fell back: no one-fresh-prefill admission wrapper on this scheduler to hold a request between slices; restores run whole, in the trim')
         if self.tier_hooks is not None:
             config = registry.tier_config
             self.log('install host tier kv_bytes=%d total_bytes=%d policy=%s audit=%d verify=%s spill_max=%d min_tokens=%d min_available=%d '

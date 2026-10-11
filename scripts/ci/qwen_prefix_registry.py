@@ -191,6 +191,12 @@ ENV_TIER_MIN_TOKENS = 'QWEN_PREFIX_HOST_TIER_MIN_TOKENS'    # sessions whose che
 ENV_TIER_MIN_AVAILABLE = 'QWEN_PREFIX_HOST_TIER_MIN_AVAILABLE_GIB'   # no spill while the host's MemAvailable is under this
 ENV_TIER_VERIFY = 'QWEN_PREFIX_HOST_TIER_VERIFY'            # sample | all | off: digest checks at restore
 ENV_TIER_OFF_PATH = 'QWEN_PREFIX_HOST_TIER_OFF_PATH'        # the tier's own kill-switch file (gate containers)
+# The sliced restore (docs/prefix-store-hygiene.md "Sliced restore"): a returning session's blocks come back a bounded slice per engine step, the other seats decoding in between.
+ENV_TIER_RESTORE_SLICE = 'QWEN_PREFIX_TIER_RESTORE_SLICE'       # most blocks one engine step restores (digits only; 0 or unset: the restore runs whole, in the trim)
+ENV_TIER_RESTORE_SLICE_MS = 'QWEN_PREFIX_TIER_RESTORE_SLICE_MS'  # the milliseconds of restore work one engine step aims at (the slice adapts to the measured cost per block)
+DEFAULT_TIER_SLICE_MS = 200.0
+MAX_TIER_SLICE_BLOCKS = 65536
+MAX_TIER_SLICE_MS = 60000.0
 TIER_KILL_SWITCH_PATH = '/models/.qwen-c2/kv-tier.off'
 DEFAULT_TIER_SPILL_MAX_BLOCKS = 512
 DEFAULT_TIER_MIN_TOKENS = 8192
@@ -207,6 +213,9 @@ ENV_QUOTA_DEVICE_FLOOR = 'QWEN_PREFIX_TENANT_QUOTA_DEVICE_FLOOR_TOKENS'   # pref
 ENV_QUOTA_HOST_CAP = 'QWEN_PREFIX_TENANT_QUOTA_HOST_CAP_GIB'              # most host-tier GiB one tenant holds (0/unset: no cap)
 ENV_QUOTA_HOST_FLOOR = 'QWEN_PREFIX_TENANT_QUOTA_HOST_FLOOR_GIB'          # host-tier GiB of a tenant that other tenants' spills may not evict (0/unset: none)
 QUOTA_ENV_NAMES = (ENV_QUOTA_DEVICE_CAP, ENV_QUOTA_DEVICE_FLOOR, ENV_QUOTA_HOST_CAP, ENV_QUOTA_HOST_FLOOR)
+# The counters the sliced restore adds to the registry's stats (only when QWEN_PREFIX_TIER_RESTORE_SLICE is on, so the stats of an engine without it are what they were).
+SLICE_STAT_NAMES = ('tier_slice_jobs', 'tier_slice_steps', 'tier_slice_blocks', 'tier_slice_ms', 'tier_slice_max_ms', 'tier_slice_held', 'tier_slice_aborted',
+                    'tier_slice_inline')
 # The counters a quota adds to the registry's stats (only when a quota is on, so the stats of an engine without one are what they were). Aggregates only: no per-tenant
 # label, key or line ever carries a salt or a tenant tag.
 QUOTA_STAT_NAMES = (
@@ -503,7 +512,7 @@ class TierConfig(object):
     """The host KV tier's settings (tier_config): total (the whole prefix state's host budget, bytes), kv_bytes (what the KV pages
     get: the total less the checkpoint store's budget), and the knobs."""
 
-    __slots__ = ('total', 'kv_bytes', 'audit', 'spill_max', 'min_tokens', 'min_available', 'verify', 'off_path')
+    __slots__ = ('total', 'kv_bytes', 'audit', 'spill_max', 'min_tokens', 'min_available', 'verify', 'off_path', 'restore_slice', 'restore_slice_ms')
 
 
 def _tier_float(environ, name, default, minimum=0.0):
@@ -544,7 +553,33 @@ def tier_config(environ, store_budget_bytes):
         raise ValueError('%s=%r must be one of %s' % (ENV_TIER_VERIFY, verify, ', '.join(TIER_VERIFY_MODES)))
     config.verify = 'all' if config.audit and verify != 'off' else verify
     config.off_path = environ.get(ENV_TIER_OFF_PATH) or TIER_KILL_SWITCH_PATH
+    config.restore_slice, config.restore_slice_ms = restore_slice_config(environ)
     return config
+
+
+def restore_slice_config(environ):
+    """(blocks, ms) of the sliced restore from the environment: (0, DEFAULT_TIER_SLICE_MS) when unset. Strict: the blocks are plain digits (no sign, no exponent, no space) from 0 to
+    MAX_TIER_SLICE_BLOCKS, the milliseconds a finite number above 0 and at most MAX_TIER_SLICE_MS, and the milliseconds without the blocks would be inert."""
+    raw = environ.get(ENV_TIER_RESTORE_SLICE)
+    blocks = 0
+    if raw is not None and raw != '':
+        if not (raw.isascii() and raw.isdigit()):
+            raise ValueError('%s=%r is not a whole number of blocks (digits only)' % (ENV_TIER_RESTORE_SLICE, raw))
+        blocks = int(raw)
+        if blocks > MAX_TIER_SLICE_BLOCKS:
+            raise ValueError('%s=%d is above %d blocks' % (ENV_TIER_RESTORE_SLICE, blocks, MAX_TIER_SLICE_BLOCKS))
+    raw_ms = environ.get(ENV_TIER_RESTORE_SLICE_MS)
+    millis = DEFAULT_TIER_SLICE_MS
+    if raw_ms is not None and raw_ms != '':
+        try:
+            millis = float(raw_ms)
+        except ValueError:
+            raise ValueError('%s=%r is not a number of milliseconds' % (ENV_TIER_RESTORE_SLICE_MS, raw_ms))
+        if not (millis > 0.0) or millis == float('inf') or millis > MAX_TIER_SLICE_MS:
+            raise ValueError('%s=%r must be a finite number above 0 and at most %d' % (ENV_TIER_RESTORE_SLICE_MS, raw_ms, MAX_TIER_SLICE_MS))
+        if not blocks:
+            raise ValueError('%s is set and %s is not: the time budget would be inert' % (ENV_TIER_RESTORE_SLICE_MS, ENV_TIER_RESTORE_SLICE))
+    return blocks, millis
 
 
 class QuotaConfig(object):
@@ -1042,6 +1077,11 @@ class PrefixRegistry(object):
         # re-attempted every step it stays blocked, and its token prefix never changes.
         self.token_checks = {}
         self.stats = dict.fromkeys(STAT_NAMES, 0)
+        if self.tier_config is not None and self.tier_config.restore_slice:
+            self.stats.update(dict.fromkeys(SLICE_STAT_NAMES, 0))
+        elif flags.get(ENV_TIER_RESTORE_SLICE) not in (None, '', '0') or flags.get(ENV_TIER_RESTORE_SLICE_MS) not in (None, ''):
+            raise ValueError('%s / %s need the host KV tier (%s > 0): without it the sliced restore would be inert' % (
+                ENV_TIER_RESTORE_SLICE, ENV_TIER_RESTORE_SLICE_MS, ENV_TIER_GIB))
         if quota_counters:
             # One dict: the tier store counts into the registry's own stats.
             self.stats.update(quota_counters)

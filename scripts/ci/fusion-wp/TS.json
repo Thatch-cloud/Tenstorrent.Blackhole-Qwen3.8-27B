@@ -1,0 +1,20 @@
+{
+ "wp": "TS",
+ "branch": "tp4/tier-slice",
+ "description": "The sliced host-tier restore (QWEN_PREFIX_TIER_RESTORE_SLICE, QWEN_PREFIX_TIER_RESTORE_SLICE_MS): a returning session's blocks come back from the host tier a bounded slice per engine step, the other seats decoding in between, instead of all in one scheduler step. TC1 on the audited ship-4 twin (run 38133584894) froze 7 seats for 22.5 s around one 254k restore; the restore itself was 6.3 s (digests of every block 3.6 s before it, the write and read-back audit inside it), the rest the returning request's own tail prefill and engine build (4.2 s) and, in the audited twin only, the drafter-op audits of the first two rounds with the request live (12.9 s). The flag moves none of the bytes and none of the answers; it changes only when the restore's work is done.",
+ "smoke": [
+  {
+   "flag": "QWEN_PREFIX_TIER_RESTORE_SLICE",
+   "value": "512",
+   "engaged": "[PINDIAG] prefix: host tier restore slice on",
+   "fell_back": "[PINDIAG] prefix: host tier restore slice fell back",
+   "what": "sliced host-tier restore"
+  }
+ ],
+ "tests": [
+  "test_qwen_prefix_tier_slice",
+  "test_tier_slice_tools"
+ ],
+ "card_jobs": "scripts/ci/references/fusion-jobs/tier-slice/ (ORDER.txt: TS1 the audited sliced arm, TS2 TS3 TS4 TS5 the timed ABAB on the ship-4 candidate: control, sliced, control, sliced)",
+ "notes": "FLAGS. QWEN_PREFIX_TIER_RESTORE_SLICE is a number of blocks (digits only, 0 or unset: off, the restore runs whole in the trim exactly as before), QWEN_PREFIX_TIER_RESTORE_SLICE_MS the milliseconds of restore work one engine step aims at (default 200; inert without the blocks); both are refused at start by qwen_prefix_registry.restore_slice_config on a bad value or without QWEN_PREFIX_HOST_TIER_GIB, and by serving_c2_contract.prefix_policy_problems in a profile (a traffic profile may name them only when its owner traffic waiver names the tier). THE SHIP ENTRY: to turn it on in the candidate add QWEN_PREFIX_TIER_RESTORE_SLICE=512 (and, to move the budget, QWEN_PREFIX_TIER_RESTORE_SLICE_MS) to the env of the ship entry of fusion-wp/S4.json after the timed pair has said so; the smoke row above then requires the 'host tier restore slice on' line and fails the arm on a 'fell back' line. NO PROFILE TWIN: the arms are DERIVED by c2_prefix_gate (the slice kind: the profile plus the two names), so nothing is added to qwen_c2_profiles.json and no census test moves. FILES it touches in the image: qwen_prefix_registry.py, qwen_prefix_scheduler_patch.py and serving_prefill_admission.py (all listed in the overlay already); prefix_markers.py, c2_prefix_gate.py, c2_serving_job.py, serving_c2_contract.py, tier_stall_breakdown.py and tier_slice_model.py are host-side. WHAT IT NEEDS: the one-fresh-prefill admission wrapper on the scheduler class (serving_prefill_admission, installed by the C2 lifecycle) to hold the returning request between slices; without it the graft logs 'host tier restore slice fell back' and restores whole. WHAT IT CANNOT DO: slice the returning request's own tail prefill and engine build, which a device-resident hit pays too (T3: 4.65 s to the first token at 254k, nothing else running); the seats' wait is bounded by the slice budget plus a round PLUS that."
+}

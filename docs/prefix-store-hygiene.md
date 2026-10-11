@@ -352,6 +352,52 @@ head): B0, X0, **TCX0/TCX1** (the GX-style exactness pair: the control and the c
 `ORDER.txt` has the NEEDS lines, the read rules, the no-go list and the estimated minutes (about 9 h 10 min). The ship gates G1, G2 and SR of
 `fusion-jobs/ship` are run on the candidate afterwards by changing their profile names.
 
+### Sliced restore (`QWEN_PREFIX_TIER_RESTORE_SLICE`, default off)
+
+**Why.** The first card result of the concurrent plan on the ship-4 candidate's audited twin (TC1, seven seats decoding, one 254k session returning from host RAM) froze every seat for 22.5 s
+(longest wait; the control window beside it was p50/p99 0.493/0.712 s). The restore itself was 3,905 blocks, 8.70 GB in 6,321 ms (1.38 GB/s, `verify=all` and the read-back audit on); the returning turn's first
+token came at 14.9 s against 178.8 s for its cold twin. `scripts/ci/tier_stall_breakdown.py <container log>` reads where the time went from the log alone. From TC1's log, measured:
+
+| phase | seconds | what it is |
+|---|---|---|
+| admission to the restore's start | about 3.6 | the digests: `verify=all` hashes every block (0.93 ms each on the card, 2.4 GB/s) before anything is written |
+| the restore ("host tier restore ... ms=6321") | 6.3 | 0.9 s the spill of the 512 displaced blocks it kept (the audited arm digests them inline; the other 3,393 were dropped by `spill_max`) and about 5.4 s the allocation, the raw write and the read-back compare of 3,905 blocks |
+| the returning request's own prefill ("lever N route ... ms=") | 2.1 | the final step of the prompt: 3,586 tokens after the restored frontier |
+| to the rebuilt engine ("sticky engine built ... ms=1837") | 2.1 | slot adoption, the drafter's tap window, the parked rebind |
+| first packed round with the request live to the next | 8.1 and 4.8 | 234 drafter-op audit lines: the audited twin audits the first rounds of a new live set |
+
+The seats froze 14.98 s (their last packed round before the request to the first round line after it), and the first round with the request live then took 8.1 s and the next 4.8 s (234 drafter-op audit lines: the audited twin audits the first rounds of a new live set); a seat's next token
+is the end of that first round, which is the 22.5 s longest wait (14.98 s plus about 7.5 s). **Most of it is the audited twin's own cost**: the digests (3.6 s) and about 5.2 s of the restore's 6.3 s (T3 restored the same number of blocks with the audits off in 1.1 s with the spill) are 8.8 s of the 15 s
+freeze, and the drafter audits are the 12.9 s of rounds after it. What no audit setting removes is the restore's own work and the returning request's final prefill step and engine build (about 4.2 to 4.8 s): T3 measured a device-resident hit at 4.65 s to its first token and the whole returning
+turn at 6.49 s (restore 0.96 s at 8.9 GB/s plus 0.14 s spill), with nothing else running.
+
+**What the flag does.** Without it the restore runs whole inside one scheduler step (`TierHooks.load`, at trim time). With `QWEN_PREFIX_TIER_RESTORE_SLICE=<blocks>` (digits only; 0 or unset: off, byte-identical,
+no new stats keys or log fields) and `QWEN_PREFIX_TIER_RESTORE_SLICE_MS=<ms>` (default 200, inert without the blocks; both need `QWEN_PREFIX_HOST_TIER_GIB`; strict parser, refused at start otherwise), the same restore is done in bounded
+slices, one per engine step, and the one-fresh-prefill admission wrapper (`serving_prefill_admission`) **holds the returning request** (nothing is admitted that pass, a decode-only pass follows, so the other seats get a round between
+slices) until its blocks are all resident. Per slice: the records' digests, `get_new_blocks(n)`, the spill of what that allocation displaced, the raw device write, the read-back audit (when on). The first slice is a probe of 8
+blocks; the next are `slice_ms` over the measured ms-per-block (EWMA), at most the block cap. The blocks enter the prefix cache only when the last slice is done, so a half-restored prefix is never a hit. A job is abandoned
+(blocks returned, the request cold-prefills or hits what is resident) when its request ends, a digest or a write fails, there is no room, or the tier latches off or is killed; a trim that reaches an unfinished job
+finishes it whole (counted `tier_slice_inline`). If the admission wrapper is absent the graft logs `host tier restore slice fell back` and restores whole. The flag moves no bytes and no answer; it changes when the work is done. It also
+spills **every** block a slice displaces (the whole restore dropped everything beyond `spill_max`): more stays in the tier, at more total work.
+
+Markers: `[PINDIAG] prefix: host tier restore slice on blocks=<n> ms=<n>` (once), a `... slice req=<id> blocks=<n> done=<n> of <n> ms=<f>` line per slice, the final `host tier restore ... slices=<n> max_slice_ms=<f> held_steps=<n>` line, and the
+failure lines `... slice fell back` and `... slice aborted req=<id> after <n> of <n> blocks: <why>`. The registry adds `tier_slice_jobs/steps/blocks/ms/max_ms/held/aborted/inline` to its stats only when the flag is on. The smoke row (`fusion-wp/TS.json`) requires
+the `slice on` line whenever the flag is in a profile and fails the arm on `fell back`.
+
+**The gate.** `--plan tier-concurrent-sliced` (audited) and `--plan tier-concurrent-timed-sliced` (timed) derive the arm from any profile that has the tier: the profile plus `QWEN_PREFIX_TIER_RESTORE_SLICE=512` and
+`..._SLICE_MS=200` (no profile twin, no census change). The judge wants the `slice on` line, a restore line with `slices=` above 1 and `held_steps=` above 0 (else NOT_EXERCISED), no `fell back`, no slice over 1,000 ms, and no `aborted` line other
+than the request's own end. The pack is `scripts/ci/references/fusion-jobs/tier-slice` (B0, X0, **TS1** the audited sliced arm, **TS2 to TS5** the timed ABAB on the ship-4 candidate: control, sliced, control, sliced; read with
+`tier_concurrent_compare.py` and `tier_stall_breakdown.py`).
+
+**Estimated, not measured** (`scripts/ci/tier_slice_model.py`; the cost per block is from T3 and TC1 above and the model reproduces TC1's whole-restore stall, 10.4 s estimated against about 10 s read from the log; nothing of the slicing has run on
+a card, and the fakes in `test_qwen_prefix_tier_slice` and `test_tier_slice_tools` time nothing). Unaudited, 3,905 blocks, `slice_ms` 200: 12 slices of about 0.2 s (0.53 ms a block, restore plus spill), the seats' wait **caused by the restore** falls from about 1.1 s plus a round to about 0.2 s plus a
+round (0.35 s against 1.27 s), the returning turn's first token comes about **1.65 s later** (a round of about 0.15 s between each slice) and the restore's total work grows from 1.1 s to 2.1 s (the spill is no longer capped). At `slice_ms` 400:
+9 slices, 0.42 s, +1.2 s. Audited, the same restore is about 80 slices and +39 s: the audited arm is for exactness, not timing. On this host's CPU, one block's sha256 is 0.90 ms (2.5 GB/s), the audit compare 1.7 ms, the Python bookkeeping 31 to 47 us a block (about 1 ms a slice at a cap of 32, 20 ms at 512).
+
+**What it does not do.** The seats' longest wait is a slice plus a round **plus the returning request's final prefill step and engine build** (about 4.2 to 4.8 s at 254k, T3; `levern_policy.step_budget` gives the final step everything left, by
+design), so the estimate is a longest wait of about **5 s against about 6 s whole**: inside the 8 s floor with a margin of about 3 s, and **not under 2 s**. Getting under 2 s needs the final step and the rebind sliced too, which is Lever N's
+work and not this flag's. The audited twin's drafter audits (12.9 s of the TC1 freeze) are also not touched.
+
 ### Tenant quotas (`QWEN_PREFIX_TENANT_QUOTA_*`, default off)
 
 One tenant's flood must not push another tenant's session out of the cache. The tenant is the salt's (`tenant_of_salt`: the gateway's opaque tag), the same numbers apply to

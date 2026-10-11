@@ -292,6 +292,8 @@ jobs:
           python -B -m unittest test_ship4_profiles test_ship4_pack
           # TEL
           python -B -m unittest test_card_telemetry
+          # TS
+          python -B -m unittest test_qwen_prefix_tier_slice test_tier_slice_tools
           # TW
           python -B -m unittest test_c2_toolcall_whitespace
           # WP0
