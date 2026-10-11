@@ -194,10 +194,11 @@ The candidate booted and served (audit_mismatches 0 over 803 publish rounds, oct
    is never built and the first still serves the M3 rounds below the octo threshold. `blocks_problems` is octo-pass aware (`octo_pass_mode`): the first quad is required, the second at most once, a round
    must be drafted by the octo pass or by both quads, a quad fallback or disable still fails. Without the octo draft, under `alternate` and off octo the rules are unchanged (test_octo3_judge).
 4. **Free DRAM after the parked engines, 2.186 GB a chip against a 3.6 GB audited floor.** Measured on all four chips; the parked engines took the usual 3.336 GB (0.418 each). The octo block's packed
-   block is 3.602 GB against 2.471 GB for an M3 block and the lower KV pool gives back about 1.9 GB, so the octo stack holds about 1.5 GB less than the four-user one; the audits (1.10-1.26 GB on the
-   four-user stack) are part of what is held in the audited arm. The octo arms have their own floors (`parked_judge.LEDGER_FREE_FLOOR_OCTO_GB`): audited 2.1 GB (the measurement less 4%), audits-off
-   3.2 GB (an ESTIMATE: the audited reading plus the audits' least cost; G1's P7p reading replaces it). The traffic arm needs about 1.47 GB for an arrival and keeps about 2.5 GB at its floor after the first
-   round, the quad and the octo draft have built; the audited arm measured 1.498 GB there. No change to the host tier (host RAM) or the octo plan is needed for the traffic arm.
+   block is 3.602 GB against 2.471 GB for an M3 block and the lower KV pool gives back about 1.9 GB, so the octo stack holds about 1.5 GB less than the four-user one; the audits are part of what is held in the audited arm.
+   The octo arms have their own floors (`parked_judge.LEDGER_FREE_FLOOR_OCTO_GB`): audited 2.1 GB (the measurement less 4%); audits-off 4.7 GB, the four-user stack's, because the traffic arm MEASURED
+   4.907 GB free a chip after the parked engines (G1, run 38131783025; P7 after the attach 8.254 GB): the audits of the octo stack hold 2.72 GB, not the 1.10-1.26 GB of the four-user one, and my first
+   estimate of 3.2 GB for this floor was far too loose. The traffic arm needs about 1.47 GB for an arrival and keeps about 4.2 GB after the first round, the quad and the octo draft have built; the audited
+   arm measured 1.498 GB there. No change to the host tier (host RAM) or the octo plan is needed for the traffic arm.
 
 ## 8. Not done
 

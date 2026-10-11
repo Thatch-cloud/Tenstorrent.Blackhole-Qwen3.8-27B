@@ -1426,6 +1426,7 @@ def round_host_problems(env, container_text, steady_eight):
             possible = sum(2 if step['live'] == 8 and step['fields'].get('v1', 0.0) is not None else 1 for step in judged if step['live'] in (4, 8))
             taken = sum(step['keyed'] for step in judged if step['live'] in (4, 8))
             facts['round_host_keyed_share'] = round(taken / possible, 3) if possible else None
+            found['round_host_keyed_share'] = facts['round_host_keyed_share']       # (found.update(facts) ran above: the share was computed and never reported, `keyed_share: null` in every SMOKE_CHECK line)
             if possible >= ROUND_HOST_MIN_STEPS and taken < ROUND_HOST_KEYED_SHARE * possible:
                 problems.append('%s is set and only %d of %d verifies took the keyed write (%d%% needed)' % (
                     round_host.KEYED_FLAG, taken, possible, int(ROUND_HOST_KEYED_SHARE * 100)))
