@@ -12,7 +12,7 @@ of `scripts/ci/fusion-wp/S4.json`. It is the approved fusion ship profile (`-fx-
 | part | env | what it is |
 | --- | --- | --- |
 | prefill SDPA, one q chunk per core | `QWEN_FAST_SDPA_PF_ONEQ=1` | acts in prefill only; the image bakes the K64j-OQ graft (`bake_graft`), whose packed-any records have landed (tp4/oneq-ship) |
-| 13x10 matmul grids | `QWEN_FAST_GRID13=1` | **the one switchable line** (section 4) |
+| 13x10 matmul grids | `QWEN_FAST_GRID13=prefill,drafter` | **the one switchable line** (section 4); the decode verify sub-switch (`verify.out`) is held out of the candidate and runs only in the audited twin (`=1`) until an audited attach has compared it |
 | octo-T8, non-alternating | `QWEN_FAST_OCTO=live`, `_OCTO_MIN_LIVE=6`, `_OCTO_DRAFT=1`, `_OCTO_ATTN_BUNDLE=4`, `_OCTO_GLUE8=1`, `QWEN_FAST_OCTO_WAIVER=<id>` | every eligible 8-live round on the third packed block (docs/tp4-octo3.md); the waiver id in the env is what admits it outside a gate |
 | tile-aligned drafter window | `QWEN_FAST_TAP_WINDOW_ALIGNED=1` | data movement before any block runs (tp4/rebind-fast) |
 | host KV tier, preconverted checkpoints | `QWEN_PREFIX_HOST_TIER_GIB=32`, `_AUDIT=0`, `_VERIFY=sample`, `QWEN_PREFIX_CKPT_PRECONVERTED=1`, `_AUDIT=0` | the tier's production setting (docs/prefix-store-hygiene.md); no kill-switch path, no instrument |
@@ -23,7 +23,7 @@ The tool-call whitespace fix is **not** in the table: it is default on for every
 **Not in the candidate:** the per-tenant quotas (`QWEN_PREFIX_TENANT_QUOTA_*`). The contract refuses them on a traffic profile until a qualification record exists (`prefix_policy_problems`); they stay a gate-only
 instrument (job TQ1 on the audited twin). `QWEN_FAST_ADMISSION_DIAG_TRIM` stays excluded (docs/tp4-octo3.md section 7).
 
-Differences between the candidates, mechanically (held by `test_ship4_profiles`): `-fx-traffic-s4` = `-fx-traffic-o3-oneq` + `QWEN_FAST_GRID13=1` + the five tier env lines, and nothing else (same engine, same
+Differences between the candidates, mechanically (held by `test_ship4_profiles`): `-fx-traffic-s4` = `-fx-traffic-o3-oneq` + `QWEN_FAST_GRID13=prefill,drafter` + the five tier env lines, and nothing else (same engine, same
 memory plan); it is also `-fx-traffic` + the octo, prefill, TAP and tier env + the memory plan.
 
 ## 2. Measured and estimated
@@ -57,7 +57,7 @@ it with `python3 scripts/ci/make_fusion_profiles.py --approve-ship "APPROVED by 
 
 ## 4. The switchable line
 
-`QWEN_FAST_GRID13=1` is one line of the ship entry's `env`. If the F2 decode ABAB (or the N1/N2 pair below, inside the whole stack) says LOSS, delete that line from `S4.json`, run `make_fusion_profiles.py --write`,
+`QWEN_FAST_GRID13=prefill,drafter` is one line of the ship entry's `env` (the audited twin carries `=1`, which adds the verify sub-switch: the first audited attach of it, run 38116769673, stopped at engine start on an unresolved device before it compared anything, and the next one is its first audit). If the F2 decode ABAB (or the N1/N2 pair below, inside the whole stack) says LOSS, delete that line from `S4.json`, run `make_fusion_profiles.py --write`,
 `make_ship4_profiles.py --write` (the no-grid twin then equals the candidate, so its parent check refuses: delete the twin and the N jobs in the same change) and `make_ship4_jobs.py --write`, and re-run A1 and G1 on the new
 profile. The prefill SDPA line is separable the same way (its separate pack is `references/fusion-jobs/ship-traffic-o3` for the octo-only candidate, whose image does not need the K64j-OQ graft).
 

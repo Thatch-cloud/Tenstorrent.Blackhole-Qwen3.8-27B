@@ -19,6 +19,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+import grid13_smoke  # noqa: E402
 import make_fusion_jobs as jobs_gen  # noqa: E402
 import make_fusion_profiles as fusion  # noqa: E402
 import make_octo3_profiles as octo3  # noqa: E402
@@ -63,7 +64,7 @@ class CandidateTests(unittest.TestCase):
     def test_it_is_the_octo_oneq_candidate_plus_exactly_the_grids_and_the_tier(self):
         base, ship = PROFILES[O3_ONEQ], PROFILES[SHIP]
         added = {key: value for key, value in ship['env'].items() if base['env'].get(key) != value}
-        self.assertEqual(added, dict(tier.SHIP_ENV, QWEN_FAST_GRID13='1', **{contract.OCTO_WAIVER_ENV: SPEC['waiver']['id']}))
+        self.assertEqual(added, dict(tier.SHIP_ENV, QWEN_FAST_GRID13='prefill,drafter', **{contract.OCTO_WAIVER_ENV: SPEC['waiver']['id']}))
         self.assertEqual(sorted(set(base['env']) - set(ship['env'])), [])
         self.assertEqual(ship['engine'], base['engine'], 'the third block\'s memory plan is the octo candidates\'')
         self.assertEqual((ship['engine']['num-gpu-blocks-override'], ship['engine']['additional-config']['tt']['trace_region_size']), (16500, 640 << 20))
@@ -166,14 +167,22 @@ class TwinTests(unittest.TestCase):
         ship, audit = PROFILES[SHIP]['env'], PROFILES[AUDIT]['env']
         self.assertEqual([key for key in ship if key not in audit], [contract.OCTO_WAIVER_ENV])
         different = {key for key in ship if key in audit and ship[key] != audit[key]}
-        self.assertEqual(different, {'QWEN_FAST_VERIFY_T2_AUDIT', 'QWEN_PREFIX_HOST_TIER_AUDIT', 'QWEN_PREFIX_HOST_TIER_VERIFY', 'QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT'})
+        self.assertEqual(different, {'QWEN_FAST_VERIFY_T2_AUDIT', 'QWEN_PREFIX_HOST_TIER_AUDIT', 'QWEN_PREFIX_HOST_TIER_VERIFY', 'QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT',
+                                     'QWEN_FAST_GRID13'})
+        # the grids: the candidate carries the two sub-switches proven exact on cards, the audited twin all three, so that its attach exercises and audits the decode verify sub-switch
+        # (site verify.out) that run 38116769673 died on before it compared anything
+        self.assertEqual((ship['QWEN_FAST_GRID13'], audit['QWEN_FAST_GRID13'], audit['QWEN_FAST_GRID13_AUDIT']), ('prefill,drafter', '1', '1'))
+        self.assertEqual(sorted(grid13_smoke.subswitches(ship)), ['drafter', 'prefill'])
+        self.assertEqual(sorted(grid13_smoke.subswitches(audit)), ['drafter', 'prefill', 'verify'])
+        self.assertNotIn('verify.out', [label for label, _names in grid13_smoke.required_sites(ship)])
+        self.assertIn('verify.out', [label for label, _names in grid13_smoke.required_sites(audit)])
         extra = set(audit) - set(ship)
         self.assertTrue(all(key.endswith('_AUDIT') or key in ('QWEN_FAST_AUDIT_FIRST', 'QWEN_FAST_AUDIT_EVERY', 'QWEN_C2_GATE_PROFILE', 'QWEN_PREFIX_HOST_TIER_OFF_PATH') for key in extra), sorted(extra))
 
     def test_the_control_twin_is_the_candidate_without_the_grids_and_the_waiver_id_but_gate_only(self):
         ship, control = PROFILES[SHIP], PROFILES[NOGRID13]
         changed = {key: (ship['env'].get(key), control['env'].get(key)) for key in set(ship['env']) | set(control['env']) if ship['env'].get(key) != control['env'].get(key)}
-        self.assertEqual(changed, {'QWEN_FAST_GRID13': ('1', None), contract.OCTO_WAIVER_ENV: (SPEC['waiver']['id'], None), 'QWEN_C2_GATE_PROFILE': (None, '1')})
+        self.assertEqual(changed, {'QWEN_FAST_GRID13': ('prefill,drafter', None), contract.OCTO_WAIVER_ENV: (SPEC['waiver']['id'], None), 'QWEN_C2_GATE_PROFILE': (None, '1')})
         self.assertEqual(control['engine'], ship['engine'])
         for key in ship:
             if key not in ('env', 'description', 'gate_only', contract.TRAFFIC_WAIVER):
