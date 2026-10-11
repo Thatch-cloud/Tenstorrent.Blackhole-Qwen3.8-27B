@@ -272,12 +272,112 @@ def kvpage_lifecycle(audit, layers=2, source='dram', replays=3):
     return Lifecycle(operations.rules, lines, page=captured.page, replayed=raw.replayed, escaped=escaped)
 
 
+# The profiles whose env puts the K/V page writer beside the octo shape (the octo-3 ship candidate and the audited-attach twin of the fused stack); tp4/ship-4 adds its combined candidate and its audited twin (test_ship4_profiles).
+OCTO_KV_PROFILES = ('c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-o3', 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all-octo3', 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all-octo3-audit')
+
+
+def octo_kv_lifecycle(profile, source='l1', layers=2, hinted=True):
+    """The OCTO block's K/V writers the way the model builds them (model_batch.cache_writer over model_batch.chained_writer_options), under the real profile's env: the WARM forward's
+    writer (one chain over every row, the placeholders write one tile row) and the CAPTURED forward's (the block's eight users of eight rows), the warm forward run eagerly and then
+    the captured one inside an open capture, behind the capture rules. Card run 38117538847 (GX1 of the combined candidate of tp4/ship-4) died at engine start here: the warm writer took the
+    K/V page writer (its spans, one chain of 64 rows, are not the octo block's) and the captured one declined it (its spans are 8 x 8), so the capture launched the chained writer's
+    conversion and chained launch, which had never run eagerly ('Cannot load new binaries during trace capture', mesh_workload.cpp:159). `hinted=False` builds the warm writer without the
+    block's layout, the way the first version did."""
+    import json
+    import kv_page_writer_tp4 as kvpw
+    import model_batch
+    import packed_ordered_cache as poc
+    from test_kv_page_writer_tp4 import FakeTTNN, KERNELS, WIDTH, block, mesh, tiles
+
+    class Capturing(FakeTTNN):
+        def __init__(self, chips=1):
+            FakeTTNN.__init__(self, chips)
+            self.next_trace = 0
+
+        def begin_trace_capture(self, device, cq_id=0):
+            self.next_trace += 1
+            return self.next_trace
+
+        def end_trace_capture(self, device, trace, cq_id=0):
+            return None
+
+        def synchronize_device(self, device):
+            return None
+
+    profiles = json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))['profiles']
+    environ = {key: str(value) for key, value in profiles[profile]['env'].items()}
+    environ.setdefault('QWEN_FAST_VERIFY_T2', '1')              # (the served container's own setting: the chained K/V writer is verify-trace T2's cut #2; the card log says kv_chains=32)
+    lines = []
+    with contextlib.ExitStack() as stack:
+        for patch in (mock.patch.dict(os.environ, environ), mock.patch.object(kvpw, 'log_line', lines.append), mock.patch.object(kvpw, 'evidence_problems', return_value=[]),
+                      mock.patch.object(kvpw, '_NOTED', set()), mock.patch.object(kvpw, '_REGISTRY', [])):
+            stack.enter_context(patch)
+        raw = Capturing(chips=1)
+        operations = capture_rules.guard(raw)
+        device = mesh(chips=1, grid=(13, 10))
+        tensors = block(raw, source=source)
+        pack = dict(segments=kvpw.OCTO_SPANS)
+        call = dict(update_idxs_tensor=SimpleNamespace(shape=(64,)), page_table=SimpleNamespace(shape=(64, WIDTH)))
+
+        def writer(single_chain):
+            chained = model_batch.chained_writer_options(pack, tiles(raw, WIDTH), tensors['positions'], tensors['pages'], single_chain=single_chain)
+            if single_chain and not hinted:
+                chained.pop('layout_spans', None)
+            return model_batch.cache_writer(operations, device, KERNELS, ordered_cache=True, cache_tiles=tiles(raw, WIDTH), serial=lambda: None, chained=chained)
+
+        warm, captured = writer(True), writer(False)
+
+        def forward(one):
+            for unused in range(layers):
+                for cache, packed in zip(tensors['caches'], tensors['packed']):
+                    one(cache, packed, **call)
+
+        forward(warm)
+        escaped = None
+        trace = operations.begin_trace_capture(device)
+        try:
+            forward(captured)
+        except CaptureViolation as error:
+            escaped = error
+        finally:
+            operations.end_trace_capture(device, trace)
+    return Lifecycle(operations.rules, lines, warm=warm, captured=captured, escaped=escaped)
+
+
 class KVPageTests(unittest.TestCase):
     def test_the_timed_arm_launches_one_program_in_the_capture_that_the_warm_forward_ran(self):
         found = kvpage_lifecycle(audit=False)
         self.assertEqual(found.clean(), [])
         self.assertEqual(found.replayed, 3)
         self.assertTrue(any(' ordered=0 ' in line for line in found.lines))
+
+    def test_the_octo_block_s_warm_and_captured_writers_take_the_same_path_under_the_candidates_env(self):
+        """The octo candidates' own env (QWEN_FAST_KV_PAGE_WRITER=1 beside the octo shape): the octo block keeps the chained writer in the warm forward as in the capture."""
+        import kv_page_writer_tp4 as kvpw
+
+        for profile in OCTO_KV_PROFILES:
+            for source in ('dram', 'l1'):
+                with self.subTest(profile=profile, source=source):
+                    found = octo_kv_lifecycle(profile, source=source)
+                    self.assertEqual(found.clean(), [])
+                    self.assertIsNone(found.escaped)
+                    self.assertIsNone(found.warm.page)
+                    self.assertIsNone(found.captured.page)
+                    self.assertTrue(found.rules.captured_launches, 'the capture launched the chained writer\'s programs, every one of them run eagerly by the warm forward')
+                    self.assertEqual(len([line for line in found.lines if kvpw.OCTO_SERVED in line]), 1, 'one octo served-path line per process')
+
+    def test_a_warm_writer_that_does_not_know_the_block_s_layout_is_what_died_on_the_card(self):
+        found = octo_kv_lifecycle(OCTO_KV_PROFILES[0], hinted=False)
+        self.assertIsNotNone(found.warm.page, 'the first version attached the page writer to the warm forward (one span of 64 rows)')
+        self.assertIsNone(found.captured.page)
+        self.assertIsNotNone(found.escaped)
+        self.assertIn('Cannot load new binaries during trace capture', str(found.escaped))
+        self.assertTrue(found.clean())
+
+    def test_the_m3_blocks_still_take_the_page_writer_in_both_forwards(self):
+        found = kvpage_lifecycle(audit=False)
+        self.assertIsNotNone(found.page)
+        self.assertEqual(found.clean(), [])
 
     def test_the_timed_arm_with_the_prepared_k_v_in_l1_is_the_same(self):
         self.assertEqual(kvpage_lifecycle(audit=False, source='l1').clean(), [])

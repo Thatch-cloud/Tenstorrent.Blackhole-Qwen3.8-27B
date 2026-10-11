@@ -101,6 +101,26 @@ class PageWriterTests(unittest.TestCase):
         self.assertEqual(page_smoke.OCTO_SERVED, page_writer.OCTO_SERVED)
         self.assertEqual(page_writer.OCTO_SPANS, tuple((8 * user, 8 * user + 8) for user in range(8)))
 
+    def test_the_decision_reads_the_blocks_layout_so_the_warm_forward_takes_the_same_path(self):
+        """The warm fixture's spans are one chain over every row; the octo block is recognised by its users' layout, in the warm forward as in the captured one (card run 38117538847)."""
+        lines = []
+        from unittest.mock import patch
+
+        warm_spans = ((0, 64),)
+        with patch.object(page_writer, 'log_line', side_effect=lines.append), patch.object(page_writer, 'enabled', return_value=True):
+            self.assertIsNone(page_writer.attach(object(), object(), {}, positions=object(), pages=object(), spans=warm_spans, launch_rows=64, layout_spans=page_writer.OCTO_SPANS))
+            self.assertIsNone(page_writer.attach(object(), object(), {}, positions=object(), pages=object(), spans=page_writer.OCTO_SPANS, launch_rows=64,
+                                                 layout_spans=page_writer.OCTO_SPANS))
+            self.assertEqual(len(lines), 1)
+            # a four-user block is not the octo block whatever its warm chain looks like: the attach goes on to build the writer
+            lines[:] = []
+            m3 = ((0, 16), (16, 32), (32, 48), (48, 64))
+            with patch.object(page_writer, 'KVPageWriter', side_effect=lambda *args, **kwargs: ('writer', kwargs['spans'])):
+                self.assertEqual(page_writer.attach(object(), object(), {}, positions=object(), pages=object(), spans=warm_spans, launch_rows=64, layout_spans=m3),
+                                 ('writer', warm_spans))
+                self.assertEqual(page_writer.attach(object(), object(), {}, positions=object(), pages=object(), spans=m3, launch_rows=64)[0], 'writer')
+            self.assertFalse([line for line in lines if page_writer.OCTO_SERVED in line])
+
     def test_an_octo_profile_must_log_the_line_and_a_plain_one_must_not(self):
         text = self.ENGAGED + '\n' + page_writer.OCTO_SERVED + ' reason=x\n'
         self.assertEqual(page_smoke.problems(self.ON, text), [])
