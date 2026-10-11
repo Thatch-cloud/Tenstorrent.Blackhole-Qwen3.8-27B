@@ -342,6 +342,8 @@ RESEND_TEST = 'steady_resend'
 QUAD_ROUND = re.compile(r'\[PACKED-SELECT\] round=\d+ pairs=\[\[0, 1, 2, 3\]\] users=4 ')
 # Both quads in one round: eight users, one select line (the quad's group of four slots, twice).
 QUADS_ROUND = re.compile(r'\[PACKED-SELECT\] round=\d+ pairs=\[\[0, 1, 2, 3\], \[4, 5, 6, 7\]\] users=8 ')
+# An octo round drafted by the octo draft pass (QWEN_FAST_OCTO_DRAFT): one select line over all eight slots (tp4/ship-4: under QWEN_FAST_OCTO=live the eight-seat rounds are these, not the two quads').
+OCTO_PASS_ROUND = re.compile(r'\[PACKED-SELECT\] round=\d+ pairs=\[\[0, 1, 2, 3, 4, 5, 6, 7\]\] users=\d+ ')
 QUAD_MARKER_SLOTS = re.compile(r'\[PINDIAG\] quad draft engaged slots=\[([0-9,]*)\]')
 PAIR_ROUND = re.compile(r'\[PACKED-SELECT\] round=\d+ pairs=\[\[0, 1\], \[2, 3\]\] users=4 ')
 QUAD_MARKER = '[PINDIAG] quad draft engaged'
@@ -879,6 +881,7 @@ def draft_facts(container_text):
     quad_audit = QUAD_AUDIT.findall(container_text)
     return dict(quad_rounds=len(QUAD_ROUND.findall(container_text)),
                 quads_rounds=len(QUADS_ROUND.findall(container_text)),
+                octo_pass_rounds=len(OCTO_PASS_ROUND.findall(container_text)),
                 quad_marker_slots=sorted(QUAD_MARKER_SLOTS.findall(container_text)),
                 pair_rounds=len(PAIR_ROUND.findall(container_text)),
                 quad_markers=container_text.count(QUAD_MARKER), quad_disabled=container_text.count(QUAD_DISABLED),
@@ -920,6 +923,11 @@ def fast_path(env):
             or any(key in env for key in (QUAD_FLAG, QUAD_BLOCKS_FLAG, SINGLES_AUDIT_FLAG)))
 
 
+def octo_pass_mode(env):
+    """Whether the profile's eight-seat rounds are drafted by the octo draft pass: QWEN_FAST_OCTO=live (every eligible round is an octo round) with QWEN_FAST_OCTO_DRAFT=1."""
+    return str((env or {}).get('QWEN_FAST_OCTO', '')) == 'live' and str((env or {}).get('QWEN_FAST_OCTO_DRAFT', '')) == '1'
+
+
 def blocks_problems(facts, env, steady_eight, decode=True):
     """QWEN_FAST_QUAD_DRAFT_BLOCKS: what a profile that asks for the eight-seat quad must show. A value other than '2' fails whatever
     ran (the coordinator refuses it by name). Held to the log only by a smoke that ran concurrent8_steady (eight users past the
@@ -939,11 +947,23 @@ def blocks_problems(facts, env, steady_eight, decode=True):
             problems.append('the profile asks for the eight-seat quad and the smoke did not run %s (or it errored): the blocks were not judged'
                             % STEADY_EIGHT_TEST)
         return problems          # (a ladder-only run: not asked, check() reports it)
-    if facts['quad_markers'] != 2 or list(facts['quad_marker_slots']) != sorted(QUAD_BLOCK_SLOTS):
+    # tp4/ship-4: under QWEN_FAST_OCTO=live the eight-seat rounds are octo rounds (one 64-row pass of 8 x 8), drafted by the octo draft pass when QWEN_FAST_OCTO_DRAFT=1: the second quad (slots
+    # 4-7) then drafts no eight-seat round and may never be built, and the rounds that show the draft working are the octo pass's own select lines. The first quad still serves the M3 rounds below the
+    # octo threshold, so it is still required. With the octo draft off (the fused quads draft the octo rounds cut to seven rows), under `alternate` (half the rounds are M3) and for every non-octo
+    # profile, the rules below are what they were.
+    octo_pass = octo_pass_mode(env)
+    required = QUAD_BLOCK_SLOTS[:1] if octo_pass else QUAD_BLOCK_SLOTS
+    markers_ok = (facts['quad_markers'] == len(facts['quad_marker_slots']) == len(set(facts['quad_marker_slots'])) and set(facts['quad_marker_slots']) <= set(QUAD_BLOCK_SLOTS)
+                  and set(required) <= set(facts['quad_marker_slots'])
+                  if octo_pass else facts['quad_markers'] == 2 and list(facts['quad_marker_slots']) == sorted(QUAD_BLOCK_SLOTS))
+    if not markers_ok:
         problems.append('the quad marker (%s) appears %d times with slots %s, not once for each of %s: a block never engaged or '
-                        'engaged twice' % (QUAD_MARKER, facts['quad_markers'], facts['quad_marker_slots'],
-                                           ' and '.join(QUAD_BLOCK_SLOTS)))
-    if not facts['quads_rounds']:
+                        'engaged twice%s' % (QUAD_MARKER, facts['quad_markers'], facts['quad_marker_slots'], ' and '.join(required),
+                                             ' (the octo shape serves the eight-seat rounds with the octo draft pass: only the first quad is required, the second at most once)' if octo_pass else ''))
+    if octo_pass:
+        if not facts['octo_pass_rounds'] and not facts['quads_rounds']:
+            problems.append('no round was drafted by the octo pass (no [PACKED-SELECT] pairs=[[0, 1, 2, 3, 4, 5, 6, 7]] line) and none by both quads: the eight steady users drafted some other way')
+    elif not facts['quads_rounds']:
         problems.append('no round was served by both quads (no [PACKED-SELECT] pairs=[[0, 1, 2, 3], [4, 5, 6, 7]] users=8 line): the '
                         'eight steady users drafted some other way')
     if facts['quad_fallbacks'] or facts['quad_disabled']:
@@ -951,7 +971,7 @@ def blocks_problems(facts, env, steady_eight, decode=True):
     # The pre-capture buffers of both quads: a quad that built without them uploaded its own mask and read its own outputs after the
     # request traces existed (the post-capture allocation hazard of v86), which no text comparison can see.
     for label, key in (('mask', 'pooled_mask_slots'), ('outputs', 'pooled_output_slots')):
-        missing = [slots for slots in QUAD_BLOCK_SLOTS if slots not in facts.get(key, ())]
+        missing = [slots for slots in required if slots not in facts.get(key, ())]
         if missing:
             problems.append('no "[PINDIAG] draft %s pooled slots=[...]" line for the quad over slots %s: it built without the pool pre-trace '
                             '%s' % (label, ' and '.join(missing), label))
@@ -959,7 +979,7 @@ def blocks_problems(facts, env, steady_eight, decode=True):
         problems.append('%d "pooled refused" lines: the pool could not serve a draft mask or output set' % facts['pooled_refused'])
     # With the singles audit on, each block's quad must have been audited, not any one line.
     if env.get(SINGLES_AUDIT_FLAG) not in (None, '', '0'):
-        missing = [slots for slots in QUAD_BLOCK_SLOTS if slots not in facts.get('singles_groups_equal', ())]
+        missing = [slots for slots in required if slots not in facts.get('singles_groups_equal', ())]
         if missing:
             problems.append('%s is set and no [DRAFT-SINGLES-AUDIT] group=[%s] equal=1 line was logged for the quad over slots %s'
                             % (SINGLES_AUDIT_FLAG, '...', ' and '.join(missing)))
@@ -1331,6 +1351,7 @@ def round_host_problems(env, container_text, steady_eight):
     env = env or {}
     found = round_host_facts(container_text)
     set_flags = {name: env.get(name, '0') for name in round_host.FLAGS if env.get(name, '0') != '0'}
+    keyed_exempt = (env.get('QWEN_FAST_VERIFY_T2_AUDIT') or '0') == '1'            # (see the keyed rule below)
     steps, audits = found['steps'], found['audits']
     problems = []
     marked = (container_text.count(round_host.ENGAGED_MARKER) or container_text.count(round_host.REFUSED_MARKER) or steps or audits
@@ -1393,7 +1414,13 @@ def round_host_problems(env, container_text, steady_eight):
                         round_host.AUDIT_FLAG, round_host.READ_FLAG, skipped, len(drafted)))
             elif not skipped:
                 problems.append('%s is set and the replicated-feature guard was never skipped over %d steps' % (round_host.READ_FLAG, len(drafted)))
-        if set_flags.get(round_host.KEYED_FLAG) == '1':
+        # The keyed write is DISABLED while the T2 audit's diagnostic lines are asked for (verify_prestage.key_matches: an audited verify takes the diff that writes them), so an arm that sets
+        # QWEN_FAST_VERIFY_T2_AUDIT=1 (the octo audited twins: the packed-window audit of the third block) takes the value diff on every round, M3 or octo, and logs no keyed audit line.
+        # Neither the share nor the audit line is judged there; the keyed claim is audited by the arms without the T2 audit (-fx-all-audit's M3 blocks), and on an octo round by the
+        # unaudited ledger's keyed= field (judged below, counting one verify for an octo step). Host time the audited arm gives up: the diff's own recompute, about 2.3 ms of a verify (diff_ms).
+        if keyed_exempt and set_flags.get(round_host.KEYED_FLAG) == '1':
+            found['round_host_keyed_exempt'] = 'verify_t2_audit'
+        if set_flags.get(round_host.KEYED_FLAG) == '1' and not keyed_exempt:
             # An eight-live M3 step verifies twice (the ledger's v0 and v1); an eight-live OCTO step verifies once on the one 8 x 8 block (v1 is `-`), so the possible verifies of
             # a step are the verify times it wrote (tp4/octo-3: under QWEN_FAST_OCTO=live the old count of two per eight-live step capped the share at 0.5 and failed a healthy arm).
             possible = sum(2 if step['live'] == 8 and step['fields'].get('v1', 0.0) is not None else 1 for step in judged if step['live'] in (4, 8))
@@ -1412,7 +1439,7 @@ def round_host_problems(env, container_text, steady_eight):
         problems.append('%d round-host audit line(s) read equal=0 (%s): a fast path and its reference differ' % (len(unequal), ','.join(sorted(set(unequal)))))
     if set_flags.get(round_host.AUDIT_FLAG) == '1':
         for flag, kind in ROUND_HOST_AUDIT_KINDS.items():
-            if set_flags.get(flag) == '1' and not any(item == (kind, 1) for item in audits) and (steady_eight or kind != 'keyed'):
+            if set_flags.get(flag) == '1' and not any(item == (kind, 1) for item in audits) and (steady_eight or kind != 'keyed') and not (kind == 'keyed' and keyed_exempt):
                 problems.append('%s and %s are set and no [ROUND-HOST-AUDIT] kind=%s equal=1 line was logged: nothing was compared' % (
                     round_host.AUDIT_FLAG, flag, kind))
     elif audits:

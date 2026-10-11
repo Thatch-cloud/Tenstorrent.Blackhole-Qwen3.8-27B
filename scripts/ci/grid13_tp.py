@@ -244,7 +244,7 @@ def track(operations):
     functions (a fake that never captures) is left alone."""
     target = _base(operations)
     begin, end = getattr(target, 'begin_trace_capture', None), getattr(target, 'end_trace_capture', None)
-    if begin is None or end is None or getattr(begin, 'tracked_by_grid13', False):
+    if begin is None or end is None or 'grid13' in getattr(begin, 'capture_trackers', ()):
         return
 
     def begin_capture(*args, **options):
@@ -258,6 +258,11 @@ def track(operations):
         finally:
             _CAPTURE['depth'] = max(0, _CAPTURE['depth'] - 1)
 
+    # every tracker (this module's and the other fusion package's: draft_fusion_tp / grid13_tp each wrap the same two functions) lists itself and the trackers beneath it on its wrapper, so
+    # that either one finds its own wrapper ANYWHERE in the chain. Looking only at the top wrapper's own marker made the two re-wrap each other on every audit call (a chain that grew by one
+    # layer per alternation until begin_trace_capture raised RecursionError: card run 38129663805, the pair and octo draft builds mid-serving).
+    begin_capture.capture_trackers = tuple(getattr(begin, 'capture_trackers', ())) + ('grid13',)
+    end_capture.capture_trackers = tuple(getattr(end, 'capture_trackers', ())) + ('grid13',)
     begin_capture.tracked_by_grid13 = True
     end_capture.tracked_by_grid13 = True
     target.begin_trace_capture = begin_capture
