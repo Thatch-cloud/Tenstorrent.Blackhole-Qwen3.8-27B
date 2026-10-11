@@ -1,0 +1,27 @@
+{
+  "wp": "RB",
+  "branch": "tp4/rebind-fast",
+  "description": "The parked-engine rebind's slow mode: the drafter window's join compiles shape-keyed programs (and, on a kernel-cache miss, JIT-builds kernels) for every new prompt-length split; the tile-aligned window makes the set of shapes fixed",
+  "levers": [
+    {
+      "id": "twa",
+      "name": "tile-aligned drafter window",
+      "flag": "QWEN_FAST_TAP_WINDOW_ALIGNED",
+      "value": "1",
+      "audit_flag": "QWEN_FAST_TAP_WINDOW_ALIGNED_AUDIT",
+      "marker": "tap window aligned",
+      "reason": "the five tap windows [P-2048, P) are snapshotted as tile-aligned pieces and joined by one tiled concat (fixed 2080 rows) and one slice at (P-2048) mod 32, instead of a concat of unaligned pieces whose untilize/concat/retilize programs (and untilize writer kernels) are keyed by the split; data movement only, so bit-identical (the audit compares today's composition on every chip)"
+    }
+  ],
+  "profiles": [],
+  "image_files": [
+    {
+      "path": "scripts/ci/tap_window_aligned.py",
+      "reason": "the lever's flags, aligned bounds, join plan, joins and audit compare; dflash_prefill_window (already overlaid) imports it only when QWEN_FAST_TAP_WINDOW_ALIGNED is set and not 0"
+    }
+  ],
+  "tests": [
+    "test_tap_window_aligned"
+  ],
+  "notes": "dflash_prefill_window.py is edited on this branch and is already an overlay line (docker/qwen-c2-overlay.txt): no new line for it. rebind_split.py is a host-side reader (the RB pack's READ), not an image file. Card jobs: references/fusion-jobs/RB (ORDER.txt); their -fx-twa and -fx-twa-audit profiles exist only once make_fusion_profiles.py --write has run on the integrated branch."
+}
