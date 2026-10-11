@@ -432,7 +432,8 @@ class SmokeRulesTests(unittest.TestCase):
 
     def test_each_rule_is_called_once_by_check_and_once_by_the_gate_arms(self):
         source = (HERE / 'c2_smoke_check.py').read_text(encoding='utf-8')
-        self.assertEqual(source.count('problems += fusion_problems(container_text, env)'), 1)
+        # (check() passes `decode`: False only for a ladder-only smoke, test_smoke_ladder_only; the gate arms' call takes the default, strict)
+        self.assertEqual(source.count('problems += fusion_problems(container_text, env, decode)'), 1)
         self.assertEqual(source.count('problems.extend(fusion_problems(container_text, env))'), 1)
 
     def test_the_real_tables_are_well_formed(self):

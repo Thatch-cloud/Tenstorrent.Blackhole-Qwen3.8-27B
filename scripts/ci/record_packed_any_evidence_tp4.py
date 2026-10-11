@@ -522,18 +522,31 @@ def record(evidence, sections, audit=None, capacity=admission.CAPACITY_131K, bin
     for name, section in sections.items():
         evidence['sections'][name] = section
     if all((evidence['sections'].get(name) or {}).get('status') == 'PASS' for name in admission.SECTIONS):
-        evidence['what'] = WHAT_RECORDED if capacity == admission.CAPACITY_131K else WHAT_RECORDED_262K
+        what = WHAT_RECORDED if capacity == admission.CAPACITY_131K else WHAT_RECORDED_262K
+        recorded_on = (evidence.get('binary') or {}).get('ttnncpp_sha256')
+        if recorded_on == admission.K64J_OQ_TTNNCPP_SHA256:       # K64j-OQ's own file: its own pin (admission.own_record)
+            what = what.replace(pin_name(capacity), pin_name(capacity, recorded_on)) + (
+                ' This is the record of the K64j-OQ binary: the K64j record beside it is untouched and keeps qualifying K64j.')
+        evidence['what'] = what
     evidence['provenance'] = provenance_text(evidence, audit)
     return evidence
 
 
-def repin(admission_path, digest, capacity=admission.CAPACITY_131K):
-    """packed_any_admission.py with EVIDENCE_TP4_SHA256 (or, for the 262,144-token window, EVIDENCE_TP4_262K_SHA256) set to `digest`,
-    the bytes otherwise untouched: the other capacity's pin is never rewritten."""
-    name = 'EVIDENCE_TP4_SHA256' if capacity == admission.CAPACITY_131K else 'EVIDENCE_TP4_262K_SHA256'
+def pin_name(capacity, binary=None):
+    """The packed_any_admission constant that pins the record for (`capacity`, `binary`): K64j's (the default) or K64j-OQ's own."""
+    oq = binary == admission.K64J_OQ_TTNNCPP_SHA256
+    if capacity == admission.CAPACITY_131K:
+        return 'EVIDENCE_TP4_K64J_OQ_SHA256' if oq else 'EVIDENCE_TP4_SHA256'
+    return 'EVIDENCE_TP4_262K_K64J_OQ_SHA256' if oq else 'EVIDENCE_TP4_262K_SHA256'
+
+
+def repin(admission_path, digest, capacity=admission.CAPACITY_131K, binary=None):
+    """packed_any_admission.py with the pin of this record (EVIDENCE_TP4_SHA256, EVIDENCE_TP4_262K_SHA256, or for `binary` K64j-OQ its own EVIDENCE_TP4_K64J_OQ_SHA256 /
+    EVIDENCE_TP4_262K_K64J_OQ_SHA256, None until recorded) set to `digest`, the bytes otherwise untouched: no other record's pin is ever rewritten."""
+    name = pin_name(capacity, binary)
     with open(admission_path, 'rb') as handle:
         text = handle.read().decode('utf-8')
-    new, count = re.subn(r"^(%s = )'[0-9a-f]{64}'" % name, r"\1'%s'" % digest, text, flags=re.M)
+    new, count = re.subn(r"^(%s = )(?:'[0-9a-f]{64}'|None)" % name, r"\1'%s'" % digest, text, flags=re.M)
     if count != 1:
         raise RecordError(['%s has %d %s assignments, not 1' % (os.path.basename(admission_path), count, name)])
     return new.encode('utf-8')
@@ -568,12 +581,21 @@ def main(argv=None, out=print):
     args = parse_args(argv)
     capacity = args.capacity
     served = binary_choice(args.binary)
+    own = served == admission.K64J_OQ_TTNNCPP_SHA256
     if args.evidence is None:
-        args.evidence = str(admission.evidence_path(4, capacity))
+        # K64j-OQ has records of its own, beside K64j's (admission.own_record): the file is the binary's, whether or not it exists yet
+        args.evidence = str(admission.evidence_path(4, capacity) if not own else
+                            (admission.EVIDENCE_TP4_262K_K64J_OQ if capacity == admission.CAPACITY_262K else admission.EVIDENCE_TP4_K64J_OQ))
     if not (args.cb1 or args.cb2a or args.cb2b):
         out('nothing to record: name at least one of --cb1, --cb2a, --cb2b')
         return 2
-    with open(args.evidence, 'rb') as handle:
+    fresh = own and not os.path.isfile(args.evidence)
+    if fresh and not (args.cb1 and args.cb2a and args.cb2b):
+        out('REFUSED: the first K64j-OQ record for capacity %d needs all three of --cb1, --cb2a and --cb2b: a section carried over from the K64j record would claim a run '
+            'on the wrong binary' % capacity)
+        return 1
+    # a new K64j-OQ record starts from K64j's file for its shape only (every section is replaced above), an existing one from itself
+    with open(str(admission.evidence_path(4, capacity)) if fresh else args.evidence, 'rb') as handle:
         current = json.loads(handle.read().decode('utf-8'))
     sections, sources, problems = {}, {}, []
     for name, section_name, builder in (('cb1', 'CB1', build_cb1), ('cb2a', 'CB2a', build_cb2a)):
@@ -617,15 +639,14 @@ def main(argv=None, out=print):
         digest, ','.join(sorted(sections)), len(remaining), '' if not remaining else ':'))
     for problem in remaining:
         out('  - ' + problem)
-    pinned = repin(args.admission, digest, capacity)   # both payloads are made before either file is opened for writing
+    pinned = repin(args.admission, digest, capacity, served)   # both payloads are made before either file is opened for writing
     if args.dry_run:
         return 0
     with open(args.evidence, 'wb') as handle:
         handle.write(payload)
     with open(args.admission, 'wb') as handle:
         handle.write(pinned)
-    out('wrote %s and re-pinned %s in %s' % (args.evidence, 'EVIDENCE_TP4_SHA256' if capacity == admission.CAPACITY_131K
-                                              else 'EVIDENCE_TP4_262K_SHA256', args.admission))
+    out('wrote %s and re-pinned %s in %s' % (args.evidence, pin_name(capacity, served), args.admission))
     return 0
 
 

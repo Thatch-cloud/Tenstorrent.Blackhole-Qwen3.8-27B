@@ -116,6 +116,28 @@ STALL_TESTS = (STALL_TEST, 'stall8_cold128k')
 COLD2_TEST = 'cold2_254k'
 # The prefill ladder and the few-decoder long prefill (the prefill measurement pack): numbers recorded, never gated; every request must end in tokens with a time to first token and a prompt count.
 PREFILL_LADDER_TESTS = ('prefill_ladder_solo', 'prefill_ladder_busy', 'prefill_few_decoders')
+# A LADDER-ONLY run: a smoke list whose every test decodes at most a few tokens per request (warmup, and the solo prefill ladder's 16-token answer per rung). Such a run
+# never reaches the speculative decode rounds, so the levers that act ONLY there (the drafter's attention branch, the host-side per-round levers) have nothing to engage on and
+# the conditions that need the eight-user steady mix have not been asked. Those conditions are reported as 'not asked' (facts['not_asked'], one SMOKE_CHECK line each) instead
+# of failing, and ONLY then: any other test in the smoke (concurrent8_steady, prefill_ladder_busy, prefill_few_decoders, a single decode test...) and an empty or unreadable smoke keep
+# every rule as it was. Fall-back lines, audit mismatches and every lever that acts in prefill (the prefill SDPA, the matmul grids, the CCL options, the page writer, the MLP
+# configuration, the engine-start levers) are judged in a ladder-only run exactly as anywhere else.
+LADDER_ONLY_TESTS = ('warmup', 'prefill_ladder_solo')
+DECODE_ONLY_FLAGS = frozenset((
+    'QWEN_FAST_DRAFT_REDUCE', 'QWEN_FAST_DRAFT_TAIL', 'QWEN_FAST_DRAFT_GATEUP1', 'QWEN_FAST_DRAFT_MM_GRID', 'QWEN_FAST_DRAFT_PERMUTE', 'QWEN_FAST_DRAFT_QKV1',
+    'QWEN_FAST_DRAFT_HEAD64', 'QWEN_FAST_PRESTAGE_DIFF', 'QWEN_FAST_WRITE_PACKED_LEAN', 'QWEN_FAST_BATCHED_READS',
+    'QWEN_FAST_TP4_DRAFT_CONV', 'QWEN_FAST_TP4_DRAFT_HEADS'))
+DECODE_ONLY_RULES = ('draft_permute_smoke', 'draft_wp6_smoke', 'hostgap_wph_smoke')    # the packages' own site rules of those levers (FUSION_RULES)
+
+
+def ladder_only(smoke):
+    """True when `smoke` (smoke_results: {test: result}) holds tests and every one is a LADDER_ONLY_TESTS test; False for no smoke, an unreadable one, or any other test."""
+    return bool(smoke) and isinstance(smoke, dict) and all(name in LADDER_ONLY_TESTS for name in smoke)
+
+
+def decode_only_flag(flag):
+    """Whether `flag` (a lever flag or its _AUDIT twin) belongs to a lever that acts only in the speculative decode rounds."""
+    return (flag[:-len('_AUDIT')] if flag.endswith('_AUDIT') else flag) in DECODE_ONLY_FLAGS
 # Lever N (tp4/lever-n): the hang shapes are streams of several users (the arrival and the follow-ups included); the equal tests are rows of exact-length completions.
 LEVERN_USER_TESTS = ('levern_equal_busy', 'levern_decoder_finishes', 'levern_all_decoders_finish', 'levern_cancel_mid_prefill',
                      'levern_arrival_during_prefill', 'levern_seed_stops')
@@ -895,7 +917,7 @@ def fast_path(env):
             or any(key in env for key in (QUAD_FLAG, QUAD_BLOCKS_FLAG, SINGLES_AUDIT_FLAG)))
 
 
-def blocks_problems(facts, env, steady_eight):
+def blocks_problems(facts, env, steady_eight, decode=True):
     """QWEN_FAST_QUAD_DRAFT_BLOCKS: what a profile that asks for the eight-seat quad must show. A value other than '2' fails whatever
     ran (the coordinator refuses it by name). Held to the log only by a smoke that ran concurrent8_steady (eight users past the
     2,048-row draft window together, the only mix both quads can serve): exactly two engaged markers, one for each block of slots, at
@@ -910,9 +932,10 @@ def blocks_problems(facts, env, steady_eight):
     if env.get(QUAD_FLAG, '1') != '1':
         problems.append('%s=%s without %s=1: no quad can form' % (QUAD_BLOCKS_FLAG, value, QUAD_FLAG))
     if not steady_eight:
-        problems.append('the profile asks for the eight-seat quad and the smoke did not run %s (or it errored): the blocks were not judged'
-                        % STEADY_EIGHT_TEST)
-        return problems
+        if decode:
+            problems.append('the profile asks for the eight-seat quad and the smoke did not run %s (or it errored): the blocks were not judged'
+                            % STEADY_EIGHT_TEST)
+        return problems          # (a ladder-only run: not asked, check() reports it)
     if facts['quad_markers'] != 2 or list(facts['quad_marker_slots']) != sorted(QUAD_BLOCK_SLOTS):
         problems.append('the quad marker (%s) appears %d times with slots %s, not once for each of %s: a block never engaged or '
                         'engaged twice' % (QUAD_MARKER, facts['quad_markers'], facts['quad_marker_slots'],
@@ -940,7 +963,7 @@ def blocks_problems(facts, env, steady_eight):
     return problems
 
 
-def draft_problems(facts, env, steady, steady_eight=False):
+def draft_problems(facts, env, steady, steady_eight=False, decode=True):
     """The problems the profile's batched-draft settings leave: see the module docstring. Only a smoke that ran the steady
     four-user mix can be held to it; the audits' unequal lines fail whatever ran. With QWEN_FAST_QUAD_DRAFT_BLOCKS set the quad
     rules are blocks_problems' (the eight-user mix), not the four-user ones."""
@@ -952,7 +975,7 @@ def draft_problems(facts, env, steady, steady_eight=False):
                         % (facts['singles_audits_unequal'], ', '.join(facts['singles_audit_stages'])))
     if env.get(QUAD_BLOCKS_FLAG, '') not in ('', '0'):
         # blocks_problems holds the singles audit to one equal=1 line per quad (more than the any-line rule below).
-        problems += blocks_problems(facts, env, steady_eight)
+        problems += blocks_problems(facts, env, steady_eight, decode)
         return problems
     if not steady:
         return problems
@@ -1190,7 +1213,7 @@ def hostgap_share_problems(verifies, per_block):
     return []
 
 
-def hostgap_problems(env, container_text, steady_eight):
+def hostgap_problems(env, container_text, steady_eight, decode=True):
     """(problems, facts) for the eight-seat host-gap levers: see the module docstring. Judged only where the profile asked for one;
     a profile without QWEN_FAST_TP4_TWO_BLOCK_PRESTAGE logs none of the lever's lines."""
     facts = hostgap_facts(container_text)
@@ -1220,9 +1243,10 @@ def hostgap_problems(env, container_text, steady_eight):
             problems.append('the block-epochs engaged line (%s) appears %d times, not once' % (
                 HOSTGAP_EPOCHS_ENGAGED, facts['hostgap_epochs_engaged']))
     if not steady_eight:
-        problems.append('the profile asks for the two-block pre-stage and the smoke did not run %s (or it errored): the lever was '
-                        'not judged' % STEADY_EIGHT_TEST)
-        return problems, facts
+        if decode:
+            problems.append('the profile asks for the two-block pre-stage and the smoke did not run %s (or it errored): the lever was '
+                            'not judged' % STEADY_EIGHT_TEST)
+        return problems, facts          # (a ladder-only run: not asked, check() reports it)
     if not facts['hostgap_live4_diff']:
         problems.append('no 4-live verify took the diff path: the pre-stage never served a verify')
     if env.get(HOSTGAP_LOG_FLAG) == '1':
@@ -1421,37 +1445,44 @@ def tpub_problems(env, container_text):
     return problems
 
 
-def sampdraft_problems(container_text, env):
+def sampdraft_problems(container_text, env, decode=True):
     """The tp4/samp-draft stop conditions (see SAMPDRAFT_LEVERS): fall-backs always; a missing engaged line for a lever the profile
-    sets; a missing 'exact=True' audit line for an audit the profile sets."""
+    sets; a missing 'exact=True' audit line for an audit the profile sets. `decode` False (a ladder-only run, ladder_only) waives the two
+    missing-line rules of the decode-only levers (DECODE_ONLY_FLAGS); fall-backs are never waived."""
     problems = []
     lines = container_text.splitlines()
     for flag, engaged, fell_back, what in SAMPDRAFT_LEVERS:
         fell = [line.strip()[:200] for line in lines if fell_back in line]
         problems += ['the %s fell back (the served path ran, it saved nothing): %s' % (what, line) for line in fell[:4]]
-        if env is not None and env.get(flag) == '1' and engaged not in container_text:
+        if env is not None and env.get(flag) == '1' and engaged not in container_text and (decode or not decode_only_flag(flag)):
             problems.append('%s is set and no engaged line (%s) was logged: the %s never ran' % (flag, engaged, what))
     for flag, marker, what in SAMPDRAFT_AUDITS:
-        if env is not None and env.get(flag) == '1' and not any(marker in line and 'exact=True' in line for line in lines):
+        if (env is not None and env.get(flag) == '1' and (decode or not decode_only_flag(flag))
+                and not any(marker in line and 'exact=True' in line for line in lines)):
             problems.append('%s is set and no passing audit line (%s ... exact=True) was logged: the %s was never audited'
                             % (flag, marker, what))
     return problems
 
 
-def fusion_problems(container_text, env):
+def fusion_problems(container_text, env, decode=True):
     """The op-fusion programme's stop conditions (FUSION_LEVERS, FUSION_AUDITS): a fall-back line always; a missing engaged line for a lever the profile sets
-    (to the lever's value); a missing 'exact=True' audit line for an audit flag the profile sets. An audit MISMATCH line is already `audit mismatch` to check()."""
+    (to the lever's value); a missing 'exact=True' audit line for an audit flag the profile sets. An audit MISMATCH line is already `audit mismatch` to check().
+    `decode` False (a ladder-only run, ladder_only) waives the two missing-line rules of the decode-only levers (DECODE_ONLY_FLAGS) and skips the packages' own
+    site rules of those levers (DECODE_ONLY_RULES); fall-backs, the prefill levers and every other rule are judged as always."""
     problems = []
     lines = container_text.splitlines()
     for flag, value, engaged, fell_back, what in FUSION_LEVERS:
         fell = [line.strip()[:200] for line in lines if fell_back in line]
         problems += ['the %s fell back (the served path ran, it saved nothing): %s' % (what, line) for line in fell[:4]]
-        if env is not None and env.get(flag) == value and engaged not in container_text:
+        if env is not None and env.get(flag) == value and engaged not in container_text and (decode or not decode_only_flag(flag)):
             problems.append('%s=%s is set and no engaged line (%s) was logged: the %s never ran' % (flag, value, engaged, what))
     for flag, marker, what in FUSION_AUDITS:
-        if env is not None and env.get(flag) == '1' and not any(marker in line and 'exact=True' in line for line in lines):
+        if (env is not None and env.get(flag) == '1' and (decode or not decode_only_flag(flag))
+                and not any(marker in line and 'exact=True' in line for line in lines)):
             problems.append('%s is set and no passing audit line (%s ... exact=True) was logged: the %s was never audited' % (flag, marker, what))
     for module in FUSION_RULES:
+        if not decode and module in DECODE_ONLY_RULES:
+            continue
         try:
             import importlib
 
@@ -2140,10 +2171,41 @@ def lever_engagement_problems(env, container_text, smoke=None, drill=False):
     return problems
 
 
+def not_asked_items(env, container_text):
+    """What a ladder-only run (ladder_only) was not asked, for the profile's `env`: [str], one per family, only for what the profile sets and the log does not show. The
+    decode-only levers with no engaged line, their audits with no exact=True line, the packages' site rules, the eight-seat quad blocks and the two-block pre-stage (both
+    judged by concurrent8_steady only)."""
+    env = env or {}
+    lines = container_text.splitlines()
+    items = []
+    missing = [what for flag, value, engaged, _fell, what in FUSION_LEVERS
+               if env.get(flag) == value and decode_only_flag(flag) and engaged not in container_text]
+    missing += [what for flag, engaged, _fell, what in SAMPDRAFT_LEVERS
+                if env.get(flag) == '1' and decode_only_flag(flag) and engaged not in container_text]
+    if missing:
+        items.append('no engaged line required of the decode-only levers: %s' % '; '.join(sorted(set(missing))))
+    unaudited = [what for flag, marker, what in FUSION_AUDITS
+                 if env.get(flag) == '1' and decode_only_flag(flag) and not any(marker in line and 'exact=True' in line for line in lines)]
+    unaudited += [what for flag, marker, what in SAMPDRAFT_AUDITS
+                  if env.get(flag) == '1' and decode_only_flag(flag) and not any(marker in line and 'exact=True' in line for line in lines)]
+    if unaudited:
+        items.append('no audit line (exact=True) required of the decode-only levers: %s' % '; '.join(sorted(set(unaudited))))
+    if any(env.get(flag) not in (None, '', '0') for flag in DECODE_ONLY_FLAGS):
+        items.append('the site rules of %s' % ', '.join(DECODE_ONLY_RULES))
+    if env.get(QUAD_BLOCKS_FLAG, '') not in ('', '0'):
+        items.append('the eight-seat quad blocks (%s needs %s)' % (QUAD_BLOCKS_FLAG, STEADY_EIGHT_TEST))
+    if env.get(HOSTGAP_TWO_BLOCK_FLAG) == '1':
+        items.append('the two-block pre-stage under load (%s needs %s)' % (HOSTGAP_TWO_BLOCK_FLAG, STEADY_EIGHT_TEST))
+    return items
+
+
 def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=None):
     """(problems, facts) for a smoke log and a container log. `env` (the served profile's) adds the batched-draft
-    stop conditions, `entry` (its whole record) the traffic profile's admission and parser conditions."""
+    stop conditions, `entry` (its whole record) the traffic profile's admission and parser conditions. A LADDER-ONLY smoke (ladder_only: warmup and the solo prefill
+    ladder, 16-token answers) is not asked what only the speculative decode rounds can show: facts['not_asked'] lists what was waived, main prints each as a
+    'SMOKE_CHECK not asked' line; with any other test in the smoke (or none readable) every rule is what it was."""
     smoke = smoke_results(smoke_text)
+    decode = not ladder_only(smoke)
     problems = smoke_problems(smoke, container_text)
     mismatches = [line.strip()[:200] for line in container_text.splitlines() if MISMATCH.search(line)]
     problems += ['audit mismatch in the container log: %s' % line for line in mismatches[:4]]
@@ -2165,8 +2227,8 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         problems.append('%s is set and no diagnostic line (%s) was logged' % (DISPATCH_DIAG_FLAG, DISPATCH_DIAG_LINE))
     if env is not None and env.get(GDN_SPLIT_FLAG) == '2' and GDN_SPLIT_ENGAGED not in container_text:
         problems.append('%s=2 is set and no engaged line (%s) was logged: the split recurrence never ran' % (GDN_SPLIT_FLAG, GDN_SPLIT_ENGAGED))
-    problems += sampdraft_problems(container_text, env)
-    problems += fusion_problems(container_text, env)
+    problems += sampdraft_problems(container_text, env, decode)
+    problems += fusion_problems(container_text, env, decode)
     problems += u1_problems(env, container_text)
     problems += sdpa_long_problems(env, container_text)
     problems += sdpa_multi_problems(env, container_text)
@@ -2197,7 +2259,7 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         # The batched-draft conditions are the S2 fast path's: a G1 profile (general-*) never drafts, so they would fail it.
         if fast_path(env):
             steady_eight = STEADY_EIGHT_TEST in (smoke or {}) and 'error' not in smoke[STEADY_EIGHT_TEST]
-            problems += draft_problems(drafts, env, steady, steady_eight)
+            problems += draft_problems(drafts, env, steady, steady_eight, decode)
         fused = fused_facts(env, container_text)
         if fused is not None:
             facts['fused'] = fused
@@ -2205,7 +2267,7 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         problems += tpub_problems(env, container_text)
         problems += lookup_problems(env, container_text)
         hostgap, hostgap_found = hostgap_problems(
-            env, container_text, STEADY_EIGHT_TEST in (smoke or {}) and 'error' not in smoke[STEADY_EIGHT_TEST])
+            env, container_text, STEADY_EIGHT_TEST in (smoke or {}) and 'error' not in smoke[STEADY_EIGHT_TEST], decode)
         problems += hostgap
         if any(hostgap_found[key] for key in ('hostgap_engaged', 'hostgap_refused', 'hostgap_live4_diff', 'hostgap_full_audits')):
             facts['hostgap'] = hostgap_found
@@ -2238,8 +2300,11 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     stamp = unqualified_stamp(container_text)
     if stamp:
         facts['unqualified'] = stamp
+    not_asked = [] if decode else not_asked_items(env, container_text)
     if slide:
-        if median is None:
+        if median is None and not decode:
+            not_asked.append('the ramp commit time (no [PACKED-PUBLISH] round with a commit: nothing decoded past a few tokens)')
+        elif median is None:
             problems.append('no [PACKED-PUBLISH] round with a commit: the ramp commit time is unread (QWEN_FAST_PACKED_AUDIT?)')
         elif median > max_ramp_ms and audited_verify(env):
             # The verify audits inflate prepare_history (v423, v578: 51.7 ms with zero mismatches); the threshold is judged on the
@@ -2248,6 +2313,8 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
         elif median > max_ramp_ms:
             problems.append('ramp commit: median of the largest prepare_history per round is %.1f ms, above %.0f ms '
                             '(the slide is not taking effect)' % (median, max_ramp_ms))
+    if not decode:
+        facts['not_asked'] = not_asked
     return problems, facts
 
 
@@ -2272,6 +2339,8 @@ def main(argv=None):
     print('SMOKE_CHECK profile=%s slide=%s %s' % (options.profile, 'on' if slide else 'off', json.dumps(facts)))
     if facts.get('unqualified'):
         print('SMOKE_CHECK %s: the 262k evidence records were waived or a launch outside them ran; this result is a measurement, never evidence' % facts['unqualified'])
+    for item in facts.get('not_asked', ()):
+        print('SMOKE_CHECK not asked: ladder-only run (the smoke ran only %s): %s' % (', '.join(LADDER_ONLY_TESTS), item))
     for problem in problems:
         print('SMOKE_CHECK FAILED: %s' % problem)
     return 1 if problems else 0

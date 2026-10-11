@@ -198,6 +198,13 @@ class InImageRuntimeLogicTests(unittest.TestCase):
 
 
 class EvidenceTests(unittest.TestCase):
+    def setUp(self):
+        # about K64j-OQ with NO record of its own: K64j's stands for it in a gate boot only (test_oneq_ship holds the state with the records landed)
+        for name in ('EVIDENCE_TP4_K64J_OQ_SHA256', 'EVIDENCE_TP4_262K_K64J_OQ_SHA256'):
+            patch = mock.patch.object(admission, name, None)
+            patch.start()
+            self.addCleanup(patch.stop)
+
     def problems(self, record, environ, capacity=admission.CAPACITY_131K):
         return admission.evidence_problems(record, tp=4, capacity=capacity, environ=environ)
 
@@ -267,6 +274,11 @@ class AdmitTests(unittest.TestCase):
         self.state = mock.patch.dict(admission._STATE, clear=True)
         self.state.start()
         self.addCleanup(self.state.stop)
+        # these tests are about K64j-OQ with NO record of its own (K64j's stands for it in a gate boot only); test_oneq_ship holds the state with the records landed
+        for name in ('EVIDENCE_TP4_K64J_OQ_SHA256', 'EVIDENCE_TP4_262K_K64J_OQ_SHA256'):
+            patch = mock.patch.object(admission, name, None)
+            patch.start()
+            self.addCleanup(patch.stop)
         self.lines = Lines()
 
     def runtime(self, sha_):

@@ -219,6 +219,15 @@ X7_FLOOR_262K = len(CB2_EXTENTS_262K) * len(CB2_STARTS) * len(SEEDS) * len(CB2A_
 # The 262,144 record and its own pin, a skeleton until E2 records its sections (a name the 131k recorder's repin never matches).
 EVIDENCE_TP4_262K = HERE / 'packed_any_evidence_tp4_262144.json'
 EVIDENCE_TP4_262K_SHA256 = '422bfbaa03d1615b1a42d22ca566138b2c1929fc2ed917ba8adc7cd58d68a3d8'
+# THE K64j-OQ RECORDS (tp4/oneq-ship). A record names ONE binary (binary.ttnncpp_sha256), so a K64j-OQ record is a SEPARATE file beside K64j's, never a rewrite of it: the K64j
+# records above stay what they were and keep qualifying K64j images, the K64j-OQ files below qualify K64j-OQ images. Each is pinned like the others and is None until recorded
+# (record_packed_any_evidence_tp4.py --binary k64j-oq writes the file and sets the pin in one go, the RQ1 and RQ2 jobs of references/fusion-jobs/WPP produce the reports). A K64j-OQ
+# process uses its own record for a capacity when that capacity's pin is set (own_record), strictly; without one it falls back to K64j's record, which qualifies it in a gate
+# boot only (equivalent). The 8x262k traffic boot needs BOTH of its own records: tp_guard reads the 131,328 one in every process, the window check the 262,144 one.
+EVIDENCE_TP4_K64J_OQ = HERE / 'packed_any_evidence_tp4_k64j_oq.json'
+EVIDENCE_TP4_K64J_OQ_SHA256 = None
+EVIDENCE_TP4_262K_K64J_OQ = HERE / 'packed_any_evidence_tp4_262144_k64j_oq.json'
+EVIDENCE_TP4_262K_K64J_OQ_SHA256 = None
 
 _STATE = {}
 
@@ -245,13 +254,29 @@ def qualified_sources(tp):
     return QUALIFIED_SOURCES if tp == tp_shapes.PAIR else QUALIFIED_SOURCES_TP4
 
 
-def evidence_path(tp, capacity=CAPACITY_131K):
+def own_record(tp, capacity, binary):
+    """(path, pin) of the record made on `binary` itself, when that binary has one pinned (K64j-OQ at four cards, per capacity), else None: K64j's records are the default ones."""
+    if binary == K64J_OQ_TTNNCPP_SHA256 and tp != tp_shapes.PAIR:
+        path, pin = ((EVIDENCE_TP4_262K_K64J_OQ, EVIDENCE_TP4_262K_K64J_OQ_SHA256) if capacity == CAPACITY_262K
+                     else (EVIDENCE_TP4_K64J_OQ, EVIDENCE_TP4_K64J_OQ_SHA256))
+        if pin:
+            return path, pin
+    return None
+
+
+def evidence_path(tp, capacity=CAPACITY_131K, binary=None):
+    own = own_record(tp, capacity, binary)
+    if own is not None:
+        return own[0]
     if capacity == CAPACITY_262K:
         return EVIDENCE_TP4_262K
     return EVIDENCE if tp == tp_shapes.PAIR else EVIDENCE_TP4
 
 
-def evidence_pin(tp, capacity=CAPACITY_131K):
+def evidence_pin(tp, capacity=CAPACITY_131K, binary=None):
+    own = own_record(tp, capacity, binary)
+    if own is not None:
+        return own[1]
     if capacity == CAPACITY_262K:
         return EVIDENCE_TP4_262K_SHA256
     return EVIDENCE_SHA256 if tp == tp_shapes.PAIR else EVIDENCE_TP4_SHA256
@@ -706,8 +731,9 @@ def check_evidence(path=None, *, expected_sha256=None, sources_root=HERE, tp=Non
     are the pair's or the four-card record's by `tp` (default: the width this process serves at), or the 262,144-token
     window's own (EVIDENCE_TP4_262K at EVIDENCE_TP4_262K_SHA256) by `capacity`."""
     tp = width() if tp is None else tp
-    expected_sha256 = evidence_pin(tp, capacity) if expected_sha256 is None else expected_sha256
-    path = Path(evidence_path(tp, capacity) if path is None else path)
+    binary = served_binary(environ)
+    expected_sha256 = evidence_pin(tp, capacity, binary) if expected_sha256 is None else expected_sha256
+    path = Path(evidence_path(tp, capacity, binary) if path is None else path)
     if not path.is_file():
         raise AdmissionRefused('the extent path has no evidence: %s is missing' % path,
                                ['evidence: %s is missing' % path.name])
@@ -930,7 +956,7 @@ def admit(runtime_root, *, m3, binary_record=None, environ=None, log=None, evide
             MARKER, binary_label(recorded), recorded[:16], label, served[:16], label)
     log('{} passed: {} {} x{}; kernels {}; evidence {}; CB1 {} CB2a {} CB2b {}; reader {}{}',
         MARKER, label, served[:16], len(record['runtime']['binaries']),
-        ','.join(sha[:8] for _, sha in sorted(K64J_KERNELS.items())), evidence_pin(tp, capacity)[:16],
+        ','.join(sha[:8] for _, sha in sorted(K64J_KERNELS.items())), evidence_pin(tp, capacity, served)[:16],
         sections['CB1']['run'], sections['CB2a']['run'], sections['CB2b']['run'],
         ','.join(record['evidence']['sources'][name][:16] for name in qualified_sources(tp)), suffix)
     _STATE['record'] = record

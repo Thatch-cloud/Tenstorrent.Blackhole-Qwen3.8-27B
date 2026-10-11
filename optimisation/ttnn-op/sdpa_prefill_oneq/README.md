@@ -160,9 +160,9 @@ records made on K64j-OQ (below). With the default build nothing changes: K64j se
 
 | Item | Bound to the sha? | On a K64j-OQ image |
 |---|---|---|
-| `packed_any_evidence_tp4.json` (131,328 window; CB1, CB2a, CB2b; pinned by `EVIDENCE_TP4_SHA256`) | yes: `binary.ttnncpp_sha256` | **VOID for traffic** (borrowed in a gate boot) |
-| `packed_any_evidence_tp4_262144.json` (262,144 window; pinned by `EVIDENCE_TP4_262K_SHA256`) | yes | **VOID for traffic** (borrowed in a gate boot) |
-| `packed_any_evidence.json` (the two-chip pair; `EVIDENCE_SHA256`) | yes | void, not served (four cards only) |
+| `packed_any_evidence_tp4.json` (131,328 window; CB1, CB2a, CB2b; pinned by `EVIDENCE_TP4_SHA256`) | yes: `binary.ttnncpp_sha256` | stays K64j's; **K64j-OQ needs a record of its own** for traffic (borrowed from this one in a gate boot) |
+| `packed_any_evidence_tp4_262144.json` (262,144 window; pinned by `EVIDENCE_TP4_262K_SHA256`) | yes | stays K64j's; **K64j-OQ needs a record of its own** for traffic (borrowed from this one in a gate boot) |
+| `packed_any_evidence.json` (the two-chip pair; `EVIDENCE_SHA256`) | yes | not served on K64j-OQ (four cards only) |
 | `ordered_writer_evidence_tp4.json` (E1, `ORDERED_WRITER_EVIDENCE_TP4_SHA256`) | NO: bound to the page-writer kernel source, the pinned compute kernel, the geometry (`design_signature`) and its report; it holds no binary field | stays valid (the kernels are JIT sources the swap does not touch; re-running E1w/E1 is optional confidence, 35 min) |
 | K64j kernel pins in `packed_any_admission.K64J_KERNELS`, the evidence records' `kernels` / `sources` blocks | no (source shas of the four decode kernels and the python modules) | unchanged: the build proves the four kernels and the chain reader are K64j's |
 | `packed_any_admission.K64J_TTNNCPP_SHA256` and the runtime check | yes (the pin) | now `SERVED_BINARIES` (K64j, K64j-OQ); K64j-OQ must also carry the two oneq literals and no K64j-only bytes under its name |
@@ -173,23 +173,63 @@ records made on K64j-OQ (below). With the default build nothing changes: K64j se
 | card-M requalification templates (`references/tp4-262k8-jobs/E*`, `references/tp4-s2-serve-jobs/EV-*`, `references/fusion-jobs/WP2/KVPAGE-W*`, `.github/c2-serving-job.env` line 94) | they carry `KOPGRAFT64` / `EXPECT_TTNNCPP_SHA256` (placeholders `@K64J_GRAFT_DIR@` / `@K64J_TTNNCPP_SHA256@`, or K64j's literal in the job file) | re-run with the K64j-OQ directory and sha filled in |
 | W1 / W2 / Lever N / engine-reuse / fusion lever evidence, the 262k waiver, `real_text` gates | no (flag-level and source-level) | stand; the fusion pack's gate boots on the OQ image re-prove them on the new binary for free |
 
-A record names ONE binary, so re-recording on K64j-OQ replaces the K64j record in the same file: a K64j image built from that commit is then gate-only. That is the cost of the
-wholesale switch and the reason the K64j-OQ evidence is recorded last, once the lever has paid for itself.
+A record names ONE binary (`binary.ttnncpp_sha256`), so the K64j-OQ records are **files of their own beside K64j's**, never a rewrite of them (tp4/oneq-ship): K64j's two records stay what they
+are and keep qualifying K64j images from the same commit, the K64j-OQ files qualify K64j-OQ images. Each K64j-OQ file has its own pin in `packed_any_admission.py`
+(`EVIDENCE_TP4_K64J_OQ_SHA256`, `EVIDENCE_TP4_262K_K64J_OQ_SHA256`), `None` until recorded; a K64j-OQ process reads its own record for a capacity once that pin is set (`own_record`),
+strictly (a traffic boot, a gate boot alike), and until then falls back to K64j's, which qualifies it in a gate boot only. Nothing else in the repository names the new files.
 
-**Requalification (only when a K64j-OQ image is to carry TRAFFIC; gate boots need none).** Card M alone (the pair), the existing recorders and templates, placeholders
-filled with `@K64J_GRAFT_DIR@=$HOME/opgraft-K64j-OQ` and `@K64J_TTNNCPP_SHA256@=2b81e28f...`; production is down for it (the four-card jobs leave the fabric on the ethernet cores,
-hence the quad reset first). Minutes are the templates' own estimates (a quad reset included):
+**Requalification (only when a K64j-OQ image is to carry TRAFFIC; gate boots need none).** Card M alone (the pair), the K64j harness and the K64j templates' arguments with the K64j-OQ graft
+and digest, as job envs: `references/fusion-jobs/WPP/RQ0..RQ2` (the image tag is the usual placeholder `tp4-fusion-1`, retagged to the image OQ-B0 built, e.g. `tp4-oneq-1`; placeholders `@K64J_OQ_GRAFT_DIR@`, `@K64J_OQ_TTNNCPP_SHA256@`, `@SERVED_IMAGE@`). Production is down for it (the
+four-card jobs leave the fabric on the ethernet cores, hence the quad reset first). **The 8x262k ship profile needs BOTH records**: `tp_guard` reads the 131,328 record in every four-card
+process and the window check reads the 262,144 one (with E1, which is not bound to the binary and stays). Minutes are the K64j templates' own estimates:
 
-| Step | Templates | Minutes |
+| Jobs | Reads | Minutes |
 |---|---|---|
-| 131,328 record | `tp4-s2-serve-jobs`: `EV-R0` 12, `EV-W1` 6, `EV-F1` (CB1) 6, `EV-F2` (CB2a) 6, `EV-W2` 8, `EV-F3` (CB2b) 10 | 48 |
-| 262,144 record | `tp4-262k8-jobs`: `E0` 12, `E2w` 8, `E2a` 20, `E2b` 20, `E2xw` 10, `E2c` 30 | 100 (88 after the shared reset: one reset for both records makes the pair 136) |
-| both, one window | one `R0`/`E0` reset, the six 131k jobs without it, the five 262k jobs | about 136 |
-| E1 ordered writer (optional; the record is not bound to the binary) | `E1w` 10, `E1` 25 | 35 |
-| after the cards, no card time | `python3 -B scripts/ci/record_packed_any_evidence_tp4.py --binary k64j-oq [--capacity 262144] --cb1 ... --cb2a ... --cb2b ...` (the recorder checks every report names the K64j-OQ sha); commit each JSON with its re-pinned `EVIDENCE_TP4_SHA256` / `EVIDENCE_TP4_262K_SHA256` together (stage by explicit path: `scripts/ci/__pycache__` is tracked); the CPU suite on the pushed head | no card |
+| `RQ0-quad-reset` | all four boards | 12 |
+| `RQ1-W1` (watcher), `RQ1-F1` (CB1), `RQ1-F2` (CB2a), `RQ1-W2` (reader watcher), `RQ1-F3` (CB2b) | the 131,328 record | 6 + 6 + 6 + 8 + 10 = 36 (with RQ0: 48) |
+| `RQ2-W1`, `RQ2-F1`, `RQ2-F2`, `RQ2-W2`, `RQ2-F3` | the 262,144 record | 8 + 20 + 20 + 10 + 30 = 88 |
+| both, one window | RQ0, then RQ1, then RQ2 (`# NEEDS` chain in WPP/ORDER.txt, any failure stops) | 136 |
+| E1 ordered writer | not needed: its record is bound to the kernel sources, not the binary | 0 (35 if re-run for confidence) |
 
-Gate boots (every fusion-pack job, `OQ-A1`, `OQ-T1..T4`, the generated `ONEQ*` jobs) run on the K64j-OQ image today; the ship pack's own jobs (`references/fusion-jobs/ship`) boot
-the traffic profile, so they need the records above first (or the K64j image).
+## Landing the K64j-OQ records
+
+After the last RQ job of a window (no card time; the CPU suite on the pushed head; stage by explicit path, `scripts/ci/__pycache__` is tracked):
+
+```
+# 1. fetch the four final reports and the four watcher reports of each window from the runs' artifacts (cardm/card-RQ1-F1*.json, reader-RQ1-F3*.json, ...)
+# 2. the 131,328 record: the three final reports, the watcher passes they cite, the run ids and tags of the jobs, the commit the CB2b run tested and the image tag
+python3 -B scripts/ci/record_packed_any_evidence_tp4.py --binary k64j-oq \
+    --cb1 <RQ1-F1 report> --cb1-run <run> --cb1-tag <tag> --cb1-watcher <RQ1-W1 report> --cb1-watcher-run <run> --cb1-watcher-tag <tag> \
+    --cb2a <RQ1-F2 report> --cb2a-run <run> --cb2a-tag <tag> --cb2a-watcher <RQ1-W1 report> --cb2a-watcher-run <run> --cb2a-watcher-tag <tag> \
+    --cb2b <RQ1-F3 report> --cb2b-run <run> --cb2b-tag <tag> --cb2b-commit <40-hex> --cb2b-image tp4-oneq-1 --cb2b-watcher <RQ1-W2 report> --cb2b-watcher-run <run> --cb2b-watcher-tag <tag>
+# 3. the 262,144 record: the same with --capacity 262144 and the RQ2 reports
+python3 -B scripts/ci/record_packed_any_evidence_tp4.py --binary k64j-oq --capacity 262144 ...
+# 4. commit exactly: scripts/ci/packed_any_evidence_tp4_k64j_oq.json, scripts/ci/packed_any_evidence_tp4_262144_k64j_oq.json, scripts/ci/packed_any_admission.py (two pin lines)
+git add scripts/ci/packed_any_evidence_tp4_k64j_oq.json scripts/ci/packed_any_evidence_tp4_262144_k64j_oq.json scripts/ci/packed_any_admission.py
+```
+
+What the recorder does and refuses: it checks every report against the admission's own constants BEFORE writing (the loaded binary is K64j-OQ's, the four decode kernels K64j's, scope full, no
+failures, every liveness control moved, the one-KV-head shape, the reader's sha against the live file); the first K64j-OQ record of a capacity needs all three of `--cb1 --cb2a --cb2b` (a
+section carried over from the K64j record would claim a run on the wrong binary), a later run updates the K64j-OQ file in place; it writes the file (LF, one-space indent) and sets the pin of
+that file only, `None` becoming the digest, in one go; K64j's files and pins are never opened for writing. A report made on K64j, a reduced scope or a differing comparison is an error, never a record.
+
+**How the admission then accepts a TRAFFIC boot on K64j-OQ.** `QWEN_FAST_RUNTIME_BINARY_SHA256` names the baked graft (`C2_BAKE_GRAFT=K64j-OQ`); `check_evidence` takes `own_record(tp, capacity,
+binary)` for that binary when its pin is set, hashes the file against the pin, and `evidence_problems` holds the record's `binary.ttnncpp_sha256` equal to the served binary (strictly: the
+gate-boot equivalence is not needed and not used). The passed line reads `packed-any admission passed: K64j-OQ <sha16> x2; ... evidence <pin16>`. `tp_guard` (every four-card process) and
+`check_window_262k` (the 262k attach) follow the same selection, so the two files and their pins are all there is to land.
+
+**Which tests change: none.** `test_oneq_ship` holds both states: the committed one (pins `None`, no file) and the recorded one (every pinned file is there, at its pin, names K64j-OQ and qualifies
+a boot on it with no problem; K64j's records are untouched). The landing was simulated on this branch with the two files and the two pins written by the recorder's own `repin`: 1,400
+tests of the admission, evidence, recorder, waiver, profile and prefix modules pass with no edit (the one error, `test_model_profile`, is on `tp4/fusion-2` itself). The tests that mean
+"K64j-OQ with no record of its own" patch the two pins to `None` for their duration.
+
+**Then the ship candidate.** `c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-oneq` (generated from the ship entry `traffic-oneq` of `scripts/ci/fusion-wp/WPP.json`: the fusion ship profile plus
+`QWEN_FAST_SDPA_PF_ONEQ=1`, its own waiver, PENDING) has its gate pack in `references/fusion-jobs/ship-traffic-oneq` (B0 bakes the K64j-OQ graft and the profile, G1/GX/G2/SR as the first pack's, GX0's
+control is the fusion ship profile on the same image). Order: RQ0-RQ2, the landing commit, the CPU suite, the owner's decision
+(`python3 scripts/ci/make_fusion_profiles.py --approve-ship "APPROVED ..." --ship traffic-oneq`, then the CPU suite on that commit), then B0 and the gates.
+
+Gate boots (every fusion-pack job, `OQ-A1`, `OQ-T1..T4`, the generated `ONEQ*` jobs) run on the K64j-OQ image today; the ship packs' own jobs boot the traffic profile, so the K64j-OQ ship pack
+(`ship-traffic-oneq`) needs the records above first, and the first pack (`ship`, the fusion ship profile on K64j) needs nothing new.
 
 ## The jobs of the integration (references/fusion-jobs/WPP, one image `tp4-fusion-1`)
 

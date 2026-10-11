@@ -255,7 +255,7 @@ class MergeSeamTests(unittest.TestCase):
 
     def test_the_smoke_check_runs_every_branchs_rule(self):
         source = (HERE / 'c2_smoke_check.py').read_text(encoding='utf-8')
-        for call in ('problems += sampdraft_problems(container_text, env)', 'problems += u1_problems(env, container_text)',
+        for call in ('problems += sampdraft_problems(container_text, env, decode)', 'problems += u1_problems(env, container_text)',
                      'problems += sdpa_long_problems(env, container_text)', 'problems += sdpa_multi_problems(env, container_text)',
                      'problems += spread_problems(env, container_text)'):
             self.assertEqual(source.count(call), 1, call)

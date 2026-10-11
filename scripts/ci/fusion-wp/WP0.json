@@ -127,6 +127,7 @@
   }
  ],
  "tests": [
-  "test_fusion2_pack"
+  "test_fusion2_pack",
+  "test_smoke_ladder_only"
  ]
 }
