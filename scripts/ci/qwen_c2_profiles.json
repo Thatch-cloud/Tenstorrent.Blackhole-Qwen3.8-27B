@@ -32344,7 +32344,7 @@
           "the 13x10 grids carried by this profile are the prefill and drafter sub-switches only (QWEN_FAST_GRID13=prefill,drafter): both audited exact on cards in the M1 programme; the verify sub-switch (site verify.out) has NOT been audited on a card (its first audited attach, run 38116769673, died at engine start on a device read) and is held out of this profile",
           "what has NOT run: any of the above together, the tier beside octo-T8 or engine reuse's concurrent seats, the audited attach A1 of references/fusion-jobs/ship4, the paired decode ABAB at 4k, 32k and 120k, the tier concurrent-restore pair and the ship gates G1, GX0, GX1, G2 and SR on this profile"
         ],
-        "decision": "PENDING: requested on 2026-10-11 for the owner's decision; the combination has not run on a card and the gates of references/fusion-jobs/ship4 have not run on this profile"
+        "decision": "APPROVED by the owner 2026-10-12 (Claude Code session, after the ship-4 gates on tp4-ship-4r2/r3: GX 37/37 identical, A1 audited 0 mismatches, G1, decode ABAB +25% at 4k, tier TC1/TC3, G2): Approve"
       }
     },
     "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic": {
