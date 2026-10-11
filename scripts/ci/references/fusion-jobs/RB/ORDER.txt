@@ -22,11 +22,11 @@
 #   life, (3) the transcripts equal the control's, (4) turn latency p90 B <= A in both pairs. Saving per returning turn on a split new to the cache:
 #   about 0.55 s at the rebind (B 650 -> 110 ms) plus up to 0.4 s in the tail prefill (estimate from the logs above).
 # Time (estimate, minutes): B0 40 (a build), X0 10, RBA 60, RBC1 55, RBL1 55, RBC2 55, RBL2 55, Z 5: 295 minutes of cards.
-B0-build-rb stop tp4-rebind-fast-1 40
-X0-status-rescan-reset stop tp4-rebind-fast-1 10
-RBA-twa-audit-attach stop tp4-rebind-fast-1 60
-RBC1-control-turns-a soft tp4-rebind-fast-1 55
-RBL1-twa-turns-a soft tp4-rebind-fast-1 55
-RBC2-control-turns-b soft tp4-rebind-fast-1 55
-RBL2-twa-turns-b soft tp4-rebind-fast-1 55
-Z-reset stop tp4-rebind-fast-1 5
+B0-build-rb stop tp4-fusion-1 40
+X0-status-rescan-reset stop tp4-fusion-1 10
+RBA-twa-audit-attach stop tp4-fusion-1 60
+RBC1-control-turns-a soft tp4-fusion-1 55
+RBL1-twa-turns-a soft tp4-fusion-1 55
+RBC2-control-turns-b soft tp4-fusion-1 55
+RBL2-twa-turns-b soft tp4-fusion-1 55
+Z-reset stop tp4-fusion-1 5

@@ -65,6 +65,7 @@ kv_page_writer_tp4 sdpa_pf_oneq_tp draft_reduce_tp draft_tail_tp draft_gateup_tp
 tp4_mlp_gateup tp4_mlp_fused
 prestage_diff write_packed_lean batched_reads_tp hostgap_instr
 grid13_tp
+tap_window_aligned
 '''.split())      # (the op-fusion programme's levers, docs/tp4-fusion.md: each imported lazily and flag-guarded by the twin that owns it, so a flags-off process never loads it)
 
 # Modules the four-card profiles never run their pair code from, and why. The closure does not follow into them.
