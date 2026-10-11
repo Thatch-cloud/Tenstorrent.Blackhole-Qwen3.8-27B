@@ -320,6 +320,12 @@ class KeyedUnderTheT2AuditTests(unittest.TestCase):
         problems, facts = check.round_host_problems(dict(self.FLAGS), self.text(keyed=1) + '[ROUND-HOST-AUDIT] kind=keyed equal=1 checked=149 changed=0\n', True)
         self.assertEqual(problems, [])
 
+    def test_the_keyed_share_is_reported_in_the_facts_the_smoke_check_prints(self):
+        """G1's SMOKE_CHECK line read keyed_share: null although the rule had computed it: found.update(facts) ran before the share was set."""
+        problems, facts = check.round_host_problems(dict(self.FLAGS), self.text(keyed=2) + '[ROUND-HOST-AUDIT] kind=keyed equal=1 checked=149 changed=0\n', True)
+        self.assertEqual(problems, [])
+        self.assertEqual(facts['round_host_keyed_share'], 1.0)           # (an eight-live M3 step verifies twice: two keyed writes of two possible)
+
     def test_the_candidates_own_profiles_say_which_arm_is_exempt(self):
         for name in sorted(PROFILES):
             env = PROFILES[name]['env']
@@ -349,13 +355,15 @@ class OctoDramFloorTests(unittest.TestCase):
         self.assertTrue(any('3.6 GB floor of the audited arm' in p for p in judge.ledger_problems(facts, 8, True, band)))
         self.assertTrue(any('2.1 GB floor of the octo audited arm' in p for p in judge.ledger_problems(self.ledger(2.0), 8, True, band, octo=True)))
 
-    def test_the_audits_off_octo_floor_is_its_own_estimate_and_binds(self):
+    def test_the_audits_off_octo_floor_is_the_four_user_one_and_the_measured_traffic_reading_passes_it(self):
+        """G1 of the combined candidate (card run 38131783025), the traffic profile: 4.907 GB free a chip after the parked engines; the audits hold 2.72 GB of the octo stack's DRAM."""
         import parked_judge as judge
 
         band = judge.ENGINE_GB_LEVERS
-        self.assertEqual(judge.ledger_problems(self.ledger(3.4), 8, False, band, octo=True), [])
-        self.assertTrue(any('3.2 GB floor of the octo audits-off arm' in p for p in judge.ledger_problems(self.ledger(3.0), 8, False, band, octo=True)))
-        self.assertTrue(any('4.7 GB floor of the audits-off arm' in p for p in judge.ledger_problems(self.ledger(3.4), 8, False, band)))
+        self.assertEqual(judge.ledger_problems(self.ledger(4.907), 8, False, band, octo=True), [])
+        self.assertEqual(judge.LEDGER_FREE_FLOOR_OCTO_GB['plain'], judge.LEDGER_FREE_FLOOR_GB['plain'])
+        self.assertTrue(any('4.7 GB floor of the octo audits-off arm' in p for p in judge.ledger_problems(self.ledger(4.0), 8, False, band, octo=True)))
+        self.assertTrue(any('4.7 GB floor of the audits-off arm' in p for p in judge.ledger_problems(self.ledger(4.0), 8, False, band)))
 
     def test_the_octo_floors_are_set_by_the_flag_the_profile_sets(self):
         import parked_judge as judge
@@ -363,7 +371,7 @@ class OctoDramFloorTests(unittest.TestCase):
         self.assertTrue(judge.octo_on({'QWEN_FAST_OCTO': 'live'}) and judge.octo_on({'QWEN_FAST_OCTO': 'alternate'}))
         self.assertFalse(judge.octo_on({}) or judge.octo_on({'QWEN_FAST_OCTO': 'off'}))
         self.assertLess(judge.LEDGER_FREE_FLOOR_OCTO_GB['audited'], 2.186)
-        self.assertLess(judge.LEDGER_FREE_FLOOR_OCTO_GB['plain'], 2.186 + 1.10)       # below the audited reading plus the least the audits ever held
+        self.assertLess(judge.LEDGER_FREE_FLOOR_OCTO_GB['plain'], 4.907)              # below the measured traffic reading
         self.assertGreater(judge.LEDGER_FREE_FLOOR_OCTO_GB['audited'], 1.47 + 0.25 - 1.0)   # (the arrival's need is met at steady state by the lower consumers' arithmetic in parked_judge)
 
 if __name__ == '__main__':
