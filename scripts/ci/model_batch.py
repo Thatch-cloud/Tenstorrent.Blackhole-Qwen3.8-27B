@@ -284,10 +284,8 @@ def chained_writer_options(pack, cache_tiles, positions, pages, single_chain=Fal
     if pack is None or not cache_tiles or not verify_trace_t2.cut('kv_chains'):
         return None
     spans = ((pack['segments'][0][0], pack['segments'][-1][1]),) if single_chain else pack['segments']
-    # layout_spans: the block's own users' spans, the same in the warm fixture and the captured one (the writer decides what shape the block is from these, never from `spans`, which the
-    # warm fixture collapses to one chain: the octo block's page-writer decline once differed between the two forwards and the capture launched programs the warm forward never ran)
     return dict(positions=positions, pages=pages, spans=spans, tiles=cache_tiles,
-                launch_rows=verify_trace_t2.kv_rows(), layout_spans=tuple((int(first), int(last)) for first, last in pack['segments']))
+                launch_rows=verify_trace_t2.kv_rows())
 
 
 def chained_writer_summary(writers, chained):

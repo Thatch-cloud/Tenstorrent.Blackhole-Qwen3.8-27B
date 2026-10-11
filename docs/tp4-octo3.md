@@ -169,7 +169,8 @@ The combined candidate's first card boot died at engine start while capturing th
 `packed_ordered_cache.ChainedOrderedCacheWriter.__call__`'s `to_memory_config`). Cause (this branch's, not the candidate's other parts): the K/V page writer declined the octo block by its SPANS
 (eight users of eight rows), but the block's WARM forward is built over one chain of 64 rows (`model_batch.chained_writer_options(single_chain=True)`: the placeholders write one tile row), so the
 warm forward attached the page writer and the captured one did not; the capture then launched the chained writer's conversion and chained launch, which had never run eagerly. The octo-2 runs
-never met it (no page writer on the Lever N stack). Fix: the decision reads the block's own layout (`layout_spans`, the same in both forwards) and both forwards take the chained writer.
+never met it (no page writer on the Lever N stack). Fix: `packed_verifier.build_fixture` builds both fixtures inside `packed_ordered_cache.block_layout(the block's segments)`, the writer hands that
+layout to `kv_page_writer_tp4.attach` (`layout_spans`), and the decision reads it: both forwards take the chained writer. (`model_batch.py` is not edited: test_quad_draft pins it.)
 `test_fusion_capture_rules.KVPageTests` builds both writers the way the model does, under the real profiles' env, and runs the warm forward then the capture behind the capture rules; the
 negative control (a warm writer without the layout) reproduces the card's failure. Any other lever that decides a block's path from the warm fixture's collapsed spans would fail the same way.
 
