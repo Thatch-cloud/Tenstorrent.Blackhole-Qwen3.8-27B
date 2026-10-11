@@ -154,12 +154,18 @@ def fresh_plan(prompt_tokens, sticky=False):
 class Oracle(object):
     """The expected hit, trim and captures of each admitted request, in admission order. sticky: the
     fast path's sticky sessions (module docstring item 5): the DFlash drop, the drafter-window ceiling
-    and the C0 capture."""
+    and the C0 capture. Exact resume P0 (docs/tp4-exact-resume.md 5.2, sticky only): undrop - no
+    DFlash drop and the prompt boundary floor2048(P) planned (plus C0 while the carry is off); carry -
+    a checkpoint at floor2048(P) carries the window rows from max(0, P - 2048), and a later prompt P'
+    may resume on it above floor2048(P' - 2048) when those rows reach down to P' - 2048."""
 
-    def __init__(self, capacity=None, sticky=False):
+    def __init__(self, capacity=None, sticky=False, undrop=False, carry=False):
         self.capacity = store_entries() if capacity is None else int(capacity)
         self.sticky = bool(sticky)
+        self.undrop = self.sticky and bool(undrop)
+        self.carry = self.undrop and bool(carry)
         self.published = {}
+        # key -> the first position of the window rows the checkpoint carries (carry only), else None
         self.checkpoints = OrderedDict()
         self.killed = False
 
@@ -173,27 +179,34 @@ class Oracle(object):
         blocks = 0
         while blocks < min(usable, len(digests)) and digests[blocks] in published:
             blocks += 1
-        if self.sticky and blocks:
+        if self.sticky and blocks and not self.undrop:
             blocks -= 1     # vLLM's EAGLE drop: DFlash's hit loses its last matched block
         h = blocks * BLOCK
         q = 0
         top = h // CHUNK
+        ceiling = resume_ceiling(len(tokens))
         if self.sticky:
-            top = min(top, resume_ceiling(len(tokens)) // CHUNK)
+            top = min(top, (max(0, len(tokens) - 1) if self.carry else ceiling) // CHUNK)
         for k in range(top, 0, -1):
             key = (salt, digests[k * CHUNK // BLOCK - 1])
             if key in self.checkpoints:
+                start = self.checkpoints[key]
+                if self.sticky and k * CHUNK > ceiling and (start is None or start > max(0, len(tokens) - CHUNK)):
+                    continue
                 q = k * CHUNK
                 self.checkpoints.move_to_end(key)
                 break
         plan = set()
-        boundary = capture_boundary(len(tokens), self.sticky)
+        boundary = capture_boundary(len(tokens), self.sticky and not self.undrop)
         if boundary > q:
             plan.add(boundary)
+        if self.undrop and not self.carry and boundary - CHUNK > q:
+            plan.add(boundary - CHUNK)
         if floor_chunk(h) - q >= CHUNK:
             plan.add(floor_chunk(h))
         for position in sorted(plan):
-            self._put((salt, digests[position // BLOCK - 1]))
+            window = max(0, len(tokens) - CHUNK) if self.carry and position == floor_chunk(len(tokens)) else None
+            self._put((salt, digests[position // BLOCK - 1]), window)
         cap = floor_chunk(len(tokens)) // BLOCK
         published.update(digests[0:cap])
         return dict(h=h, q=q, plan=sorted(plan), published=cap * BLOCK)
@@ -214,17 +227,18 @@ class Oracle(object):
         tokens = list(tokens)
         capped = (max(0, len(tokens) - 1) // BLOCK) * BLOCK
         raw = min(self.published_tokens(salt, tokens), capped)
-        if self.sticky and raw:
+        if self.sticky and raw and not self.undrop:
             raw -= BLOCK
         return raw
 
-    def _put(self, key):
+    def _put(self, key, window=None):
         if self.capacity <= 0:
             return
         if key in self.checkpoints:
             self.checkpoints.move_to_end(key)
+            self.checkpoints[key] = window
         else:
-            self.checkpoints[key] = True
+            self.checkpoints[key] = window
         while len(self.checkpoints) > self.capacity:
             self.checkpoints.popitem(last=False)
 

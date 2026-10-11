@@ -281,10 +281,15 @@ PLAN_ARMS = dict(
        'levern-hit': (('levern-hit', 'levern_hit', 'prefix', None, 9000, False),),
        # The qualification of the region read on a real prompt (docs/prefix-audit-cost.md): the short exactness chain, audited, the first
        # audited step cross-checked against the whole-cache read (~8 minutes at the production pool), the rest at the region read's cost.
-       'read-qualify': (('read-qualify', 'exactness_audit', 'prefix', 'auditcross', 3600, True),)}
+       'read-qualify': (('read-qualify', 'exactness_audit', 'prefix', 'auditcross', 3600, True),),
+       # Exact resume P0 (docs/tp4-exact-resume.md 5.2; prefix_replay.scenario_exact_resume): short returning tool turns on ~9k, ~33k and ~120k contexts,
+       # judged (every hit against its cold twin, the oracle's Q strict, the window carry's lines: exact_resume_findings) and timed (the same
+       # conversations, no audit: the ABAB's arm, read by exact_resume_compare.py).
+       'exact-resume': (('exact-resume', 'exact_resume', 'prefix', None, 7200, True),),
+       'exact-resume-timed': (('exact-resume-timed', 'exact_resume_timed', 'prefix', None, 7200, False),)}
 )
 # The scenarios that measure rather than judge exactness: no extent audit, no row digests (they would time the audit).
-TIMED_SCENARIOS = ('timing', 'agent_turns', 'levern_hit')
+TIMED_SCENARIOS = ('timing', 'agent_turns', 'levern_hit', 'exact_resume_timed')
 # The scenarios that write the Lever N kill switch on purpose (the engagement rule allows its kill line there).
 LEVERN_DRILL_SCENARIOS = ('levern_faults',)
 # The single-arm plans (c2_serving_job.PREFIX_ARM_PLANS): the arm exactly as its plan runs it.
@@ -1357,6 +1362,73 @@ def levern_kill_prefix():
     return c2_smoke_check.LEVERN_KILL_PREFIX
 
 
+# Exact resume P0 (docs/tp4-exact-resume.md 5.2; prefix_window_carry): the served profile's switches, as the oracle models them.
+UNDROP_FLAG = 'QWEN_PREFIX_STICKY_UNDROP'
+CARRY_FLAG = 'QWEN_PREFIX_WINDOW_CARRY'
+CARRY_AUDIT_FLAG = 'QWEN_PREFIX_WINDOW_CARRY_AUDIT'
+
+
+def exact_resume_switches(arm):
+    """{'undrop': bool, 'carry': bool} for a sticky prefix arm's Driver, read from the served profile's env (both False elsewhere)."""
+    env = arm.get('served_env') or {}
+    sticky = bool(arm.get('sticky'))
+    return dict(undrop=sticky and env.get(UNDROP_FLAG) == '1', carry=sticky and env.get(CARRY_FLAG) == '1')
+
+
+def exact_resume_findings(arm, scanned, records, pairs):
+    """(problems, missing, lines) of a sticky arm whose profile turns exact resume on: the scheduler graft's engaged line with the
+    profile's switches; under the audit, every window digest line exact=True and every cold/hit pair's two windows equal (the carried
+    window is the cold one, byte for byte); a carried admission on record wherever a carried resume was predicted. Nothing for an arm
+    whose profile sets neither switch."""
+    env = arm.get('served_env') or {}
+    switches = exact_resume_switches(arm)
+    if not (switches['undrop'] or switches['carry']):
+        return [], [], []
+    problems, missing, lines = [], [], []
+    engaged = scanned.get('window_engaged') or []
+    if not engaged:
+        problems.append('no "[PINDIAG] prefix: window carry engaged" line: the profile sets the exact-resume switches and the scheduler '
+                        'graft did not engage them')
+    else:
+        last = engaged[-1]
+        if int(last.get('undrop', -1)) != int(switches['undrop']) or int(last.get('carry', -1)) != int(switches['carry']):
+            problems.append('the window carry engaged line says undrop=%s carry=%s, the profile %d and %d' % (
+                last.get('undrop'), last.get('carry'), switches['undrop'], switches['carry']))
+    carried = scanned.get('window_carried') or []
+    stored = scanned.get('window_stored') or []
+    skipped = scanned.get('window_skipped') or []
+    lines.append('exact resume: %d carried admissions (%d window rows), %d windows stored (%.1f ms mean), %d skipped' % (
+        len(carried), sum(entry['rows'] for entry in carried), len(stored),
+        sum(entry['ms'] for entry in stored) / len(stored) if stored else 0.0, len(skipped)))
+    predicted = [record for record in records if record.get('continuation') and record.get('ok')
+                 and (record.get('expected') or {}).get('q', 0) > max(0, (record.get('prompt_tokens') or 0) - 2048)]
+    if switches['carry'] and predicted and not carried:
+        missing.append('%d continuations were predicted above P - 2048 and no admission carried a window' % len(predicted))
+    if env.get(CARRY_AUDIT_FLAG) == '1':
+        audits = scanned.get('window_audits') or []
+        bad = [entry for entry in audits if not entry['exact']]
+        if bad:
+            problems.append('%d window carry audit lines say exact=False (first: %s transport=%s)' % (
+                len(bad), bad[0]['tag'], bad[0]['transport']))
+        by_tag = {}
+        for entry in audits:
+            by_tag.setdefault(entry['tag'], []).append(entry)
+        compared = differ = 0
+        for pair in pairs:
+            cold, hit = by_tag.get(pair.get('cold')), by_tag.get(pair.get('hit'))
+            if not cold or not hit:
+                continue
+            compared += 1
+            if cold[-1]['sha'] != hit[-1]['sha']:
+                differ += 1
+                problems.append('pair %s / %s: the hit\'s drafter window (Q=%d, %d rows carried) differs from its cold twin\'s' % (
+                    pair.get('cold'), pair.get('hit'), hit[-1]['q'], hit[-1]['carried']))
+        lines.append('exact resume audit: %d window lines, %d pairs compared, %d differ' % (len(audits), compared, differ))
+        if carried and not compared:
+            missing.append('windows were carried but no cold/hit pair had both window digests')
+    return problems, missing, lines
+
+
 def judge_arm(arm, driver, scanned, stats, error, log_text=None):
     """One arm's verdict dict (the plan's cross-arm checks come after, in judge_plan)."""
     records = driver.records
@@ -1384,6 +1456,11 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None):
     report = {}
     if arm.get('s2') or arm.get('sticky'):
         more_problems, more_missing, more_lines, report = s2_findings(arm, log_text, scanned, records)
+        problems += more_problems
+        missing += more_missing
+        lines += more_lines
+    if arm.get('sticky') and arm['prefix']:
+        more_problems, more_missing, more_lines = exact_resume_findings(arm, scanned, records, driver.pairs)
         problems += more_problems
         missing += more_missing
         lines += more_lines
@@ -1673,7 +1750,8 @@ class Runner(object):
                                deadline=deadline, clock=self.clock, sleep=self.sleep, say=self.log,
                                strict=arm['strict'], salt_key=salt_key, sticky=bool(arm.get('sticky')),
                                batch_invariant=bool(arm.get('s2')), prompt_limit=arm.get('prompt_limit'),
-                               seats=arm.get('seats') or 4)
+                               seats=arm.get('seats') or 4,
+                               **dict((key, True) for key, value in exact_resume_switches(arm).items() if value))
         error, stats, metrics, output = None, None, {}, ''
         boxed_out = False
         try:

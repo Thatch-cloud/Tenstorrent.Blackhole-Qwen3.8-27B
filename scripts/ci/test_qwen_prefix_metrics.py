@@ -47,9 +47,11 @@ class TheSharedMechanism(unittest.TestCase):
         """The exporter finds the registry where the graft parks it, and names every counter it keeps."""
         self.assertEqual(metrics.REGISTRY_KEY, graft.REGISTRY_KEY)
         self.assertEqual(metrics.KILL_SWITCH_PATH, graft.KILL_SWITCH_PATH)
-        self.assertEqual(sorted(set(graft.STAT_NAMES) - set(metrics.COUNTERS)), [])
+        # The exact-resume and turn-telemetry counters (docs/tp4-exact-resume.md 5.2, 5.3) exist only while their switches are on.
+        names = set(graft.STAT_NAMES) | set(getattr(graft, 'WINDOW_STAT_NAMES', ())) | set(getattr(graft, 'TURN_STAT_NAMES', ()))
+        self.assertEqual(sorted(names - set(metrics.COUNTERS)), [])
         snapshot = graft.PrefixRegistry(budget_bytes=1).snapshot()
-        self.assertEqual(sorted(set(snapshot) - set(graft.STAT_NAMES) - set(metrics.GAUGES)), [])
+        self.assertEqual(sorted(set(snapshot) - names - set(metrics.GAUGES)), [])
 
     def test_the_process_registry_is_the_shared_one(self):
         self.assertIsNone(metrics.process_registry({}))

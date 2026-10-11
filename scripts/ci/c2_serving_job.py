@@ -127,7 +127,10 @@ Keys (every one optional but C2_IMAGE_TAG):
                       sticky-session profiles only; on them exactness-traced and lifecycle-tiny are
                       NOT_APPLICABLE, and a plan with no applicable arm is refused by the gate. agent-turns
                       (tp4/packed-prefix: the agent-turn replay, eight conversations of several turns) runs the prefix
-                      and the control arm; agent-turns-prefix and agent-turns-baseline run one arm each (the ABAB jobs)
+                      and the control arm; agent-turns-prefix and agent-turns-baseline run one arm each (the ABAB jobs).
+                      exact-resume (judged) and exact-resume-timed (the ABAB's arm) are the exact-resume P0 returning
+                      turns (docs/tp4-exact-resume.md 5.2): short tool turns on ~9k, ~33k and ~120k contexts, every turn a
+                      cold/hit pair; exact_resume_compare.py pairs the hits of two timed arms
   C2_PREFIX_PROFILE   the prefix-reuse profile it serves (default general-prefix; must be a checkout profile)
   C2_PREFIX_BASELINE  the no-reuse profile it compares against (default general; none: timing without
                       the baseline arm)
@@ -233,7 +236,9 @@ TELEMETRY_MS_RANGE = (100, 10000)
 TELEMETRY_DEFAULT_MS = 1000
 DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
 # The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
-PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify')
+PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify',
+                # exact resume P0 (docs/tp4-exact-resume.md 5.2): the judged and the timed returning-turn arms
+                'exact-resume', 'exact-resume-timed')
 # (arm, its plan): each exactness and lifecycle arm is a plan of its own, named as the arm, that runs
 # only it, judged as inside its plan (neither plan has a cross-arm check; c2_prefix_gate.PLAN_ARMS).
 # G1 v47 (run 36246961161) needed the eager arm again without the traced and audit arms' hour.

@@ -1007,6 +1007,10 @@ def install_prefix_metrics(api_server, on_import=None):
                 def on_import(name, callback):
                     sys.meta_path.insert(0, PostImportHook(name, callback))
             qwen_prefix_metrics.install_collector(on_import)
+            # Tool-call argument whitespace, counts only (docs/tp4-exact-resume.md 5.3).
+            counter = getattr(qwen_prefix_metrics, 'install_tool_arg_counter', None)
+            if counter is not None:
+                counter(on_import)
         else:
             qwen_prefix_metrics.start_exporter()
         qwen_prefix_metrics.export_in_forked_children()

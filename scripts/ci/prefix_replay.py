@@ -634,7 +634,7 @@ class Driver(object):
     def __init__(self, client, arm, corpus, log=None, container=None, seed=0, max_tokens=DEFAULT_MAX_TOKENS,
                  deadline=None, clock=time.time, sleep=time.sleep, say=print, pods=ci_pods, strict=True,
                  store_capacity=None, salt_key=None, context_tokens=None, sticky=False, batch_invariant=False,
-                 prompt_limit=None, seats=4):
+                 prompt_limit=None, seats=4, undrop=False, carry=False):
         self.client, self.arm, self.corpus, self.log, self.container = client, arm, corpus, log, container
         # The served profile's seats (max-num-seqs): the shared-block arm uses eight agents on an eight-seat engine.
         self.seats = int(seats)
@@ -649,7 +649,9 @@ class Driver(object):
         self.seed, self.max_tokens, self.deadline = seed, max_tokens, deadline
         self.clock, self.sleep, self.say, self.pods = clock, sleep, say, pods
         self.strict = strict
-        self.oracle = judge.Oracle(store_capacity, sticky=self.sticky)
+        # Exact resume P0 (docs/tp4-exact-resume.md 5.2): the served profile's undrop and window carry, modelled by the oracle.
+        self.undrop, self.carry = bool(undrop), bool(carry)
+        self.oracle = judge.Oracle(store_capacity, sticky=self.sticky, undrop=self.undrop, carry=self.carry)
         self.records, self.pairs, self.events, self.phases = [], [], {}, {}
         self.history = {}
         self.lock = threading.Lock()
@@ -1465,7 +1467,8 @@ def lifecycle_reload(driver, restart):
     driver.answer(conv, hit)
     info = restart()
     seconds, window = (info.get('seconds'), info.get('log_window')) if isinstance(info, dict) else (info, None)
-    driver.oracle = judge.Oracle(driver.oracle.capacity, sticky=driver.oracle.sticky)
+    driver.oracle = judge.Oracle(driver.oracle.capacity, sticky=driver.oracle.sticky, undrop=driver.oracle.undrop,
+                                 carry=driver.oracle.carry)
     driver.event('reload', seconds=seconds, log_window=window)
     conv.extend(800)
     hit = driver.pair(conv, 'after-reload')
@@ -1922,6 +1925,37 @@ def scenario_levern_faults(driver):
     driver.answer(conv, latched)
 
 
+# Exact resume P0 (docs/tp4-exact-resume.md 5.2): returning tool turns of short new content on top of ~9k, ~33k and ~120k contexts. Each
+# turn is a cold/hit pair; a turn whose new content stays under 2048 - (P mod 2048) can resume above P' - 2048 only on a carried drafter
+# window, the longer ones exercise the undrop alone. The judged arm holds every hit to its cold twin and the oracle's Q; the timed arm is the
+# same conversations without any audit, for the ABAB (exact_resume_compare.py pairs the hits of two arms).
+EXACT_RESUME_FIRST = (9000, 33000, 120000)
+EXACT_RESUME_INPUTS = (150, 400, 900, 1700, 2600, 300)
+
+
+def scenario_exact_resume(driver, firsts=None, inputs=None, **_):
+    firsts = EXACT_RESUME_FIRST if firsts is None else tuple(firsts)
+    inputs = EXACT_RESUME_INPUTS if inputs is None else tuple(inputs)
+    cap = driver.context() - driver.max_tokens - FIT_MARGIN_TOKENS
+    if driver.prompt_limit is not None:
+        cap = min(cap, driver.prompt_limit)
+    for first in firsts:
+        target = min(first, cap - sum(inputs) - len(inputs) * (driver.max_tokens + FIT_MARGIN_TOKENS))
+        if target < 4 * judge.CHUNK:
+            driver.event('exact-resume', first=first, exercised=False, reason='the context leaves no room for the turns')
+            continue
+        case = 'er-%d' % first
+        conv, _ = fitted_conversation(driver, case, target)
+        hit = driver.pair(conv, case)
+        driver.answer(conv, hit)
+        for size in inputs:
+            if not hit.get('ok'):
+                break
+            conv.extend(size)
+            hit = driver.pair(conv, case)
+            driver.answer(conv, hit)
+
+
 SCENARIOS = dict(bringup_reference=scenario_bringup_reference, bringup_prefix=scenario_bringup_prefix,
                  exactness_traced=lambda driver, **_: scenario_exactness(driver, 'traced'),
                  exactness_audit=lambda driver, **_: scenario_exactness(driver, 'audit'),
@@ -1930,7 +1964,8 @@ SCENARIOS = dict(bringup_reference=scenario_bringup_reference, bringup_prefix=sc
                  lifecycle_evict=scenario_lifecycle_evict, lifecycle_store=scenario_lifecycle_store,
                  lifecycle_tiny=scenario_lifecycle_tiny, timing=scenario_timing, agent_turns=scenario_agent_turns,
                  levern_hit=lambda driver, **_: scenario_levern_hit(driver),
-                 levern_faults=lambda driver, **_: scenario_levern_faults(driver))
+                 levern_faults=lambda driver, **_: scenario_levern_faults(driver),
+                 exact_resume=scenario_exact_resume, exact_resume_timed=scenario_exact_resume)
 
 
 def records_jsonl(records):

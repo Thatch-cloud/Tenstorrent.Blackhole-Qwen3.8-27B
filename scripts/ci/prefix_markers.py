@@ -128,6 +128,14 @@ STICKY_BUILT = re.compile(r'\[PINDIAG\] sticky engine built req=(\S+) ms=([0-9.]
 MODEL_WARM = '[PINDIAG] prefix: model warm restore_mode='
 MODEL_WARM_SKIPPED = '[PINDIAG] prefix: model warm skipped'
 KV_SHARED = '[PINDIAG] verify t2 kv shared'    # verify_trace_t2.KV_SHARED
+# Exact resume P0 (prefix_window_carry; docs/tp4-exact-resume.md 5.2): the scheduler graft's engaged line, the lifecycle's carried admissions,
+# the window exports and skips, and the audit's per-prefill window digest.
+WINDOW_ENGAGED = '[PINDIAG] prefix: window carry engaged '
+WINDOW_CARRIED = re.compile(r'\[PINDIAG\] prefix: window carry carried req=(\S+) Q=(\d+) P=(\d+) rows=(\d+)')
+WINDOW_STORED = re.compile(r'\[PINDIAG\] prefix: window carry stored req=(\S+) pos=(\d+) rows=(\d+) bytes=(\d+) ms=([0-9.]+)')
+WINDOW_SKIPPED = re.compile(r'\[PINDIAG\] prefix: window carry skipped req=(\S+) why=(\S+)')
+WINDOW_AUDIT = re.compile(r'\[PINDIAG\] prefix: window carry audit req=(\S+) P=(\d+) Q=(\d+) carried=(\d+) window_sha=([0-9a-f]+) '
+                          r'transport=(\w+) exact=(True|False)')
 AUDIT_WINDOW = re.compile(r'\[PREFIX-AUDIT\] req=(\S+) Q=(\d+) L=(\d+) window=(\d+) tokens=\[(\d+),(\d+)\) '
                           r'new=([01]) kv=(\S+)')
 GRANT = re.compile(r'\[PINDIAG\] prefix: grant req=(\S+) h=(\d+) Q=(\d+)(?: drain=(\d+))? plan=\[([0-9, ]*)\]')
@@ -306,7 +314,8 @@ def scan(lines):
     out = dict(installs=[], chunked_installs=[], grants=[], rows=[], audits=[], refused=[], capture_skipped=[], kill_switch=[],
                stats=None, launches=[], apc=[], chunking_off=0, chunk_replay=0, dram=[], dram_readings=[],
                kv_tokens=None, failures=[], audit_costs=[], audit_crosses=[], eager_warm=[], four_card_warm=[], sticky_installs=[], sticky_admits=[], sticky_builds=[],
-               model_warm=[], model_warm_skipped=[], kv_shared=[], audit_windows=[])
+               model_warm=[], model_warm_skipped=[], kv_shared=[], audit_windows=[],
+               window_engaged=[], window_carried=[], window_stored=[], window_skipped=[], window_audits=[])
     for index, raw in enumerate(lines):
         stamp, line = split_timestamp(raw.rstrip('\n'))
         where = dict(index=index, time=stamp)
@@ -343,6 +352,26 @@ def scan(lines):
             out['model_warm_skipped'].append(dict(where, line=line.strip()[:300]))
         if KV_SHARED in line:
             out['kv_shared'].append(dict(where, line=line.strip()[:300]))
+        if WINDOW_ENGAGED in line:
+            entry = fields(line.split(WINDOW_ENGAGED, 1)[1])
+            entry.update(where)
+            out['window_engaged'].append(entry)
+        match = WINDOW_CARRIED.search(line)
+        if match:
+            out['window_carried'].append(dict(where, req=match.group(1), tag=request_tag(match.group(1)), q=int(match.group(2)),
+                                              p=int(match.group(3)), rows=int(match.group(4))))
+        match = WINDOW_STORED.search(line)
+        if match:
+            out['window_stored'].append(dict(where, req=match.group(1), tag=request_tag(match.group(1)), pos=int(match.group(2)),
+                                             rows=int(match.group(3)), bytes=int(match.group(4)), ms=float(match.group(5))))
+        match = WINDOW_SKIPPED.search(line)
+        if match:
+            out['window_skipped'].append(dict(where, req=match.group(1), tag=request_tag(match.group(1)), why=match.group(2)))
+        match = WINDOW_AUDIT.search(line)
+        if match:
+            out['window_audits'].append(dict(where, req=match.group(1), tag=request_tag(match.group(1)), p=int(match.group(2)),
+                                             q=int(match.group(3)), carried=int(match.group(4)), sha=match.group(5),
+                                             transport=match.group(6), exact=match.group(7) == 'True'))
         match = AUDIT_WINDOW.search(line)
         if match:
             out['audit_windows'].append(dict(where, req=match.group(1), tag=request_tag(match.group(1)),

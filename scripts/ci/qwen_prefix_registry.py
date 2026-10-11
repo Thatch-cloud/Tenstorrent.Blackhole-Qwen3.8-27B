@@ -54,6 +54,13 @@ and DRAINS at floor2048(L), then the tail runs.
     without Lever N behaves exactly as it did.
   - The model also counts program_growth (a row whose program cache grew after warmup, F3) in
     registry.stats, and reports restore time through note_restore(ms).
+- Exact resume P0 (docs/tp4-exact-resume.md 5.2; QWEN_PREFIX_STICKY_UNDROP, QWEN_PREFIX_WINDOW_CARRY, default off): capture() remembers
+  which checkpoints each request stored (captured_by), and the fast path, once the prefill has finished, files the drafter window rows
+  below the prompt boundary on that checkpoint (attach_window: a Window, charged to the byte budget). A checkpoint carrying a Window that
+  covers [P' - 2048, Q) may be granted above P' - 2048 (window_covers). With the switches off nothing here changes and the stats keys are
+  the ones they always were.
+- Turn telemetry (QWEN_PREFIX_TURN_TELEMETRY, on unless 0): TurnMemory counts how each continuation's prompt relates to the previous
+  turn's prompt and answer (the turn_* counters; counts only, see the class).
 Pure python; imports nothing outside the standard library.
 """
 
@@ -102,6 +109,225 @@ STAT_NAMES = (
 )
 
 
+# Exact resume P0 (docs/tp4-exact-resume.md 5.2; default off, gate-only profiles). QWEN_PREFIX_STICKY_UNDROP=1 (sticky sessions only):
+# the scheduler graft asks vLLM for its hit WITHOUT the EAGLE last-block drop (DFlash on TT reads its window from the prefill capture,
+# not from a recomputed last block) and plans the prompt boundary floor2048(P) as G1 always did. QWEN_PREFIX_WINDOW_CARRY=1 (needs the
+# undrop): the checkpoint at floor2048(P) also carries the drafter window rows below it, so the next turn may resume above P' - 2048.
+# QWEN_PREFIX_WINDOW_CARRY_AUDIT=1 (gate only, needs the carry) reads every carried window back and digests every sticky window.
+ENV_UNDROP = 'QWEN_PREFIX_STICKY_UNDROP'
+ENV_WINDOW_CARRY = 'QWEN_PREFIX_WINDOW_CARRY'
+ENV_WINDOW_CARRY_AUDIT = 'QWEN_PREFIX_WINDOW_CARRY_AUDIT'
+# Turn telemetry (docs/tp4-exact-resume.md 5.3; ON unless =0): how each continuation's prompt relates to the previous turn's prompt and
+# answer, counted by class (no token, text, salt or tenant leaves this process); QWEN_PREFIX_TURN_MEMORY bounds the turns remembered.
+ENV_TURN_TELEMETRY = 'QWEN_PREFIX_TURN_TELEMETRY'
+ENV_TURN_MEMORY = 'QWEN_PREFIX_TURN_MEMORY'
+DEFAULT_TURN_MEMORY = 2048
+# The answer tokens a remembered turn keeps (from its anchor block on): a longer answer is compared this far only.
+TURN_TAIL_TOKENS = 4096
+WINDOW_STAT_NAMES = ('window_stored', 'window_missing', 'window_grants', 'window_grant_tokens')
+TURN_STAT_NAMES = (
+    'turn_records', 'turn_forgotten', 'turn_first', 'turn_earlier', 'turn_before_prompt_end', 'turn_at_p_minus_2',
+    'turn_at_p_minus_1', 'turn_at_decode_start', 'turn_in_answer', 'turn_extends', 'turn_long_unresolved', 'turn_prev_length',
+    'turn_in_answer_lt16', 'turn_in_answer_lt64', 'turn_in_answer_lt256', 'turn_in_answer_lt1024', 'turn_in_answer_ge1024',
+    'turn_out_lt256', 'turn_out_lt1024', 'turn_out_lt4096', 'turn_out_ge4096',
+    'turn_new_lt256', 'turn_new_lt1024', 'turn_new_lt4096', 'turn_new_ge4096',
+)
+
+
+def strict_switch(environ, name, default='0'):
+    """A strict on/off switch: unset (or empty) is the default, '0' off, '1' on; anything else refuses to start (ValueError)."""
+    environ = os.environ if environ is None else environ
+    raw = environ.get(name)
+    if raw is None or raw == '':
+        raw = default
+    if raw not in ('0', '1'):
+        raise ValueError('%s=%r: only 0 or 1' % (name, raw))
+    return raw == '1'
+
+
+def undrop_enabled(environ=None):
+    return strict_switch(environ, ENV_UNDROP)
+
+
+def window_carry_enabled(environ=None):
+    return strict_switch(environ, ENV_WINDOW_CARRY)
+
+
+def window_carry_audit_enabled(environ=None):
+    return strict_switch(environ, ENV_WINDOW_CARRY_AUDIT)
+
+
+def turn_telemetry_enabled(environ=None):
+    return strict_switch(environ, ENV_TURN_TELEMETRY, default='1')
+
+
+def exact_resume_problems(environ=None):
+    """Why the exact-resume switches cannot run as set ([] when they can): the carry needs the undrop (its Q is above the dropped hit)
+    and the audit needs the carry."""
+    environ = os.environ if environ is None else environ
+    problems = []
+    try:
+        undrop, carry, audit = undrop_enabled(environ), window_carry_enabled(environ), window_carry_audit_enabled(environ)
+    except ValueError as error:
+        return [str(error)]
+    if carry and not undrop:
+        problems.append('%s=1 needs %s=1: a carried resume sits above the hit vLLM grants with the EAGLE drop' % (ENV_WINDOW_CARRY, ENV_UNDROP))
+    if audit and not carry:
+        problems.append('%s=1 without %s=1: there is no carried window to audit' % (ENV_WINDOW_CARRY_AUDIT, ENV_WINDOW_CARRY))
+    return problems
+
+
+def telemetry_problems(environ=None):
+    """Why the turn telemetry's switches cannot be read ([] when they can): a malformed value refuses to start."""
+    try:
+        if turn_telemetry_enabled(environ):
+            TurnMemory(environ)
+    except ValueError as error:
+        return [str(error)]
+    return []
+
+
+class Window(object):
+    """The drafter window rows a checkpoint carries: the target taps of positions [start, end) (end = the checkpoint's pos) as the fast
+    path's opaque host payload, its size and digest. A resume at end for a prompt of P tokens needs [max(0, P - 2048), end): covers()."""
+
+    __slots__ = ('start', 'end', 'payload', 'nbytes', 'digest')
+
+    def __init__(self, start, end, payload, nbytes, digest=None):
+        self.start, self.end, self.payload, self.nbytes, self.digest = int(start), int(end), payload, int(nbytes), digest
+
+    def covers(self, prompt, q):
+        return q == self.end and self.start <= max(0, int(prompt) - CHUNK)
+
+
+def window_covers(checkpoint, prompt, q):
+    """Whether `checkpoint` carries the drafter window a resume at q of a prompt of `prompt` tokens needs below q."""
+    window = getattr(checkpoint, 'window', None)
+    return window is not None and window.covers(prompt, q)
+
+
+def _bucket(value, bounds, names):
+    for bound, name in zip(bounds, names):
+        if value < bound:
+            return name
+    return names[-1]
+
+
+class TurnMemory(object):
+    """The previous turns of salted conversations, bounded, for the turn telemetry (docs/tp4-exact-resume.md 5.3). A finished request
+    is remembered under the block hash of its ANCHOR, the last whole block at or below P - 2 (a prompt that diverges at P - 1 or P - 2 still
+    contains it), with its prompt length P, its end E (prompt plus answer) and its tokens from the anchor on (at most TURN_TAIL_TOKENS); and
+    under its first block's hash (the salt's chain head) for the 'earlier' class. A new salted request is classified ONCE, at its first
+    admission attempt, by the longest common prefix L of its prompt with the newest remembered turn whose anchor its own chain contains:
+      extends              L >= E: the prompt carries every token the previous answer generated (the client echoed the reasoning)
+      in_answer            P < L < E: it diverged inside the answer (a trimmed or re-rendered tool call, a cut answer)
+      at_decode_start      L == P
+      at_p_minus_1         L == P - 1 (the reasoning was dropped: the template's '<think>' '\\n' became '<think>' '\\n\\n' '</think>')
+      at_p_minus_2         L == P - 2 (the '<think>' itself went: preserve_thinking=false at a new user message)
+      before_prompt_end    anchor <= L < P - 2
+      earlier              no anchor in its chain, but its first block is a known turn's: it diverged further back (or a sibling)
+      first                nothing known
+    and the answer length E - P, the new content P' - E (extends) and the in-answer offset L - P are counted in buckets. Counts only."""
+
+    def __init__(self, environ=None):
+        environ = os.environ if environ is None else environ
+        raw = environ.get(ENV_TURN_MEMORY)
+        try:
+            capacity = DEFAULT_TURN_MEMORY if raw in (None, '') else int(raw)
+        except ValueError:
+            raise ValueError('%s=%r is not a number of turns' % (ENV_TURN_MEMORY, raw))
+        if capacity < 0:
+            raise ValueError('%s=%r must be >= 0' % (ENV_TURN_MEMORY, raw))
+        self.capacity = capacity
+        self.anchors = OrderedDict()
+        self.heads = {}
+        self.seen = set()
+
+    def record(self, request, stats):
+        """Remember a finished request's turn (a normal finish only: stopped or length-capped). Never raises."""
+        try:
+            if not self.capacity or not getattr(request, 'cache_salt', None):
+                return False
+            status = getattr(getattr(request, 'status', None), 'name', str(getattr(request, 'status', '')))
+            if 'STOPPED' not in status and 'LENGTH' not in status:
+                return False
+            prompt = int(request.num_prompt_tokens)
+            tokens = request.all_token_ids
+            end = len(tokens)
+            anchor = ((prompt - 2) // BLOCK) * BLOCK
+            hashes = request.block_hashes
+            if anchor < BLOCK or end <= prompt or len(hashes) < anchor // BLOCK:
+                return False
+            key = hashes[anchor // BLOCK - 1]
+            tail = array('i', tokens[anchor:min(end, anchor + TURN_TAIL_TOKENS)])
+            self.anchors[key] = (prompt, end, anchor, tail, 'LENGTH' in status)
+            self.anchors.move_to_end(key)
+            self.heads[hashes[0]] = key
+            stats['turn_records'] += 1
+            while len(self.anchors) > self.capacity:
+                old, _ = self.anchors.popitem(last=False)
+                stats['turn_forgotten'] += 1
+                for head in [head for head, value in self.heads.items() if value == old]:
+                    del self.heads[head]
+            return True
+        except Exception:
+            return False
+
+    def classify(self, request, stats):
+        """Count a new salted request's class once (its first admission attempt). Never raises."""
+        try:
+            request_id = request.request_id
+            if request_id in self.seen:
+                return None
+            self.seen.add(request_id)
+            hashes = request.block_hashes
+            prompt_tokens = int(request.num_prompt_tokens)
+            found = None
+            for index in range(min(len(hashes), prompt_tokens // BLOCK) - 1, -1, -1):
+                found = self.anchors.get(hashes[index])
+                if found is not None:
+                    break
+            if found is None:
+                name = 'earlier' if hashes and hashes[0] in self.heads else 'first'
+                stats['turn_' + name] += 1
+                return name
+            prompt, end, anchor, tail, cut = found
+            tokens = request.all_token_ids
+            limit = min(len(tail), prompt_tokens - anchor)
+            same = 0
+            while same < limit and tokens[anchor + same] == tail[same]:
+                same += 1
+            common = anchor + same
+            if cut:
+                stats['turn_prev_length'] += 1
+            stats['turn_' + _bucket(end - prompt, (256, 1024, 4096), ('out_lt256', 'out_lt1024', 'out_lt4096', 'out_ge4096'))] += 1
+            if common >= end:
+                name = 'extends'
+                stats['turn_' + _bucket(prompt_tokens - end, (256, 1024, 4096),
+                                        ('new_lt256', 'new_lt1024', 'new_lt4096', 'new_ge4096'))] += 1
+            elif same == len(tail) and same < prompt_tokens - anchor:
+                name = 'long_unresolved'
+            elif common > prompt:
+                name = 'in_answer'
+                stats['turn_' + _bucket(common - prompt, (16, 64, 256, 1024),
+                                        ('in_answer_lt16', 'in_answer_lt64', 'in_answer_lt256', 'in_answer_lt1024', 'in_answer_ge1024'))] += 1
+            elif common == prompt:
+                name = 'at_decode_start'
+            elif common == prompt - 1:
+                name = 'at_p_minus_1'
+            elif common == prompt - 2:
+                name = 'at_p_minus_2'
+            else:
+                name = 'before_prompt_end'
+            stats['turn_' + name] += 1
+            return name
+        except Exception:
+            return None
+
+    def forget(self, request_id):
+        self.seen.discard(request_id)
+
+
 def log(message, *values):
     """A [PINDIAG] prefix marker on stderr (the engine's log). Never raises."""
     try:
@@ -143,7 +369,7 @@ class Checkpoint(object):
     """GDN state at a 2048-token boundary, keyed by vLLM's block hash at that boundary. serial is
     unique per process, so a remembered token check can never vouch for a later entry."""
 
-    __slots__ = ('key', 'pos', 'token_ids', 'rec', 'carry', 'nbytes', 'pins', 'serial')
+    __slots__ = ('key', 'pos', 'token_ids', 'rec', 'carry', 'nbytes', 'pins', 'serial', 'window')
 
     def __init__(self, key, pos, token_ids, rec=None, carry=None, nbytes=0, serial=0):
         self.key = key
@@ -154,6 +380,9 @@ class Checkpoint(object):
         self.nbytes = int(nbytes)
         self.pins = 0
         self.serial = serial
+        # Exact resume P0 (QWEN_PREFIX_WINDOW_CARRY): the drafter window rows below pos the capturing prefill computed (a Window),
+        # attached after that prefill finished; None everywhere else (and always with the flag off).
+        self.window = None
 
     def matches(self, tokens):
         """Whether tokens (a sequence of ints) are exactly the ids this checkpoint was captured from."""
@@ -263,6 +492,16 @@ class PrefixRegistry(object):
         # re-attempted every step it stays blocked, and its token prefix never changes.
         self.token_checks = {}
         self.stats = dict.fromkeys(STAT_NAMES, 0)
+        # Exact resume P0 (docs/tp4-exact-resume.md 5.2) and the turn telemetry (5.3): their counters exist only while they are on,
+        # so a registry with both off snapshots exactly the keys it always had.
+        self.window_carry = window_carry_enabled(environ)
+        if self.window_carry:
+            self.stats.update(dict.fromkeys(WINDOW_STAT_NAMES, 0))
+        # req_id -> {pos: block hash key} of the checkpoints this request's prefill stored (window carry only).
+        self.captured_by = {}
+        self.turns = TurnMemory(environ) if turn_telemetry_enabled(environ) else None
+        if self.turns is not None:
+            self.stats.update(dict.fromkeys(TURN_STAT_NAMES, 0))
         self._owner = None
         self._serials = itertools.count(1)
 
@@ -452,6 +691,10 @@ class PrefixRegistry(object):
                 self.orphan_keys.discard(grant.key)
                 self.stats['grants'] += 1
                 self.stats['grant_tokens'] += grant.q
+                if self.window_carry and grant.prompt is not None and grant.q > max(0, grant.prompt - CHUNK):
+                    # A carried resume: above the window ceiling floor2048(P - 2048) by these tokens.
+                    self.stats['window_grants'] += 1
+                    self.stats['window_grant_tokens'] += grant.q - floor_chunk(max(0, grant.prompt - CHUNK))
             self.stats['admissions'] += 1
             self.stats['trim_loss_tokens'] += grant.h - grant.q
             self.stats['mid_loop_unplanned'] += len(grant.unplanned)
@@ -520,6 +763,8 @@ class PrefixRegistry(object):
                               CHECKPOINT_NBYTES if nbytes is None else nbytes)
             if carried is not None and stored is not None:
                 self.stats['inflight_captures'] += 1
+            if self.window_carry and stored is not None:
+                self.captured_by.setdefault(req_id, {})[pos] = keys[pos]
             return stored
         except Exception as error:
             self.stats['capture_failures'] += 1
@@ -530,7 +775,41 @@ class PrefixRegistry(object):
         self.stats['restores'] += 1
         self.stats['restore_ms'] += float(ms)
 
+    # -- exact resume P0: the drafter window a checkpoint carries -------------------------------
+    def stored_at(self, req_id, pos):
+        """Whether req_id's prefill stored a checkpoint at pos that is still resident (window carry only)."""
+        key = (self.captured_by.get(req_id) or {}).get(pos)
+        entry = self.entries.get(key) if key is not None else None
+        return entry is not None and entry.pos == pos
+
+    def attach_window(self, req_id, pos, start, payload, nbytes, digest=None):
+        """The fast path's report, once req_id's prefill has finished, of its drafter window rows [start, pos) (the target taps the
+        capture recorded below the checkpoint this request stored at pos): filed on that checkpoint and charged to the byte budget.
+        None (counted) when the request stored no checkpoint at pos or it is already gone. Never raises."""
+        try:
+            if not self.window_carry:
+                return None
+            key = (self.captured_by.get(req_id) or {}).get(pos)
+            entry = self.entries.get(key) if key is not None else None
+            if entry is None or entry.pos != pos or not 0 <= start < pos:
+                self.stats['window_missing'] += 1
+                return None
+            if entry.window is not None:
+                entry.nbytes -= entry.window.nbytes
+                self.bytes -= entry.window.nbytes
+            entry.window = Window(start, pos, payload, nbytes, digest)
+            entry.nbytes += entry.window.nbytes
+            self.bytes += entry.window.nbytes
+            self.stats['window_stored'] += 1
+            self._enforce_budget()
+            return entry if self.entries.get(key) is entry else None
+        except Exception as error:
+            self.stats['window_missing'] += 1
+            log('window not attached req=%s pos=%s: %s', req_id, pos, error)
+            return None
+
     def forget_request(self, req_id):
+        self.captured_by.pop(req_id, None)
         self.token_checks.pop(req_id, None)
         found = self.staged.pop(req_id, None) is not None
         if self.inflight.pop(req_id, None) is not None:

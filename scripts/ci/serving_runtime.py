@@ -999,7 +999,7 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         if lane_config is not None:
             lanes = serving_fast_lane.LaneRuntime(lane_config, log=pindiag)
 
-        def capture_factory(position, start=0):
+        def capture_factory(position, start=0, carry=None):
             owner.validate()
             # The allocator just before this user's prefill; the bridge factory reads it
             # again just after, so the pair bounds what the prefill leaves resident.
@@ -1010,6 +1010,9 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                 if start:
                     raise ValueError('A prefill resumed at %d needs %s=1' % (start, STICKY_SESSIONS_FLAG))
                 return PrefillWindowCapture(operations, model, position, TARGET_TAPS)
+            if carry is not None:
+                # Exact resume P0 (prefix_window_carry; only the lifecycle's carried admissions pass it): the window rows below start.
+                return PrefillWindowCapture(operations, model, position, TARGET_TAPS, start=start, prefix_route=True, carry=carry)
             return PrefillWindowCapture(operations, model, position, TARGET_TAPS, start=start, prefix_route=True)
 
         def bridge_factory(state, capture):
