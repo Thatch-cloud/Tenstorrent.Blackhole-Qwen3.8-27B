@@ -1,8 +1,10 @@
 # Exact resume for returning agent turns (TP4, scoping)
 
-**Date:** 2026-10-11. **Base:** `tp4/fusion-2` (a3d6583c). **Status:** CPU-only scoping. Nothing here is implemented,
-and no card time was used. Phase-0 numbers come from existing card artifacts (runs 38084230415 tier-timed, 38083229148
-tier-returning, 38080393657 levern-hit beside six decoders). Every number is labelled **measured** or **estimated**.
+**Date:** 2026-10-11. **Base:** `tp4/fusion-2` (a3d6583c). **Status:** sections 0-5 are the scoping (CPU only). Section 6
+records what was then built on this branch: P0 (gate-only, default off), the Phase-0 telemetry (counting only) and the
+split-invariance probe. Nothing has run on a card yet. Phase-0 numbers come from existing card artifacts (runs 38084230415
+tier-timed, 38083229148 tier-returning, 38080393657 levern-hit beside six decoders). Every number is labelled **measured**
+or **estimated**.
 
 ## 0. Summary
 
@@ -227,6 +229,8 @@ session-scoped, never in the shared cache.
    resume.
    - Those rows are a suffix of turn N's window rows below `floor2048(P_prev)`. Turn N computed them with full chunk
      programs at absolute positions, which is what the cold twin computes (E0).
+   - (As built, section 6: the carried rows are the target TAPS, not the projected history - more bytes, but one splice
+     point that every window consumer reads, and exact without assuming the projection is row-invariant.)
    - At turn N's rebind, read the projected history rows `[P_prev - 2048, floor2048(P_prev))` to the host and attach
      them to the checkpoint at `floor2048(P_prev)`: at most 2048 x 5120 bf16 = 21 MB, about 10.5 MB on average. Use
      the history (`HISTORY_SHAPE (1, 1, 2048, 5120)`, `serving_buffer_pool.py:161`), not the raw five taps (105 MB).
@@ -329,7 +333,7 @@ session-scoped, never in the shared cache.
 
 | | Host | Device |
 |---|---|---|
-| P0 | Window rows of at most 21 MB per checkpoint. The 8 GiB store then holds about 67-73 preconverted checkpoints instead of about 80. One checkpoint per turn, as today. | none |
+| P0 | As designed: window rows of at most 21 MB per checkpoint (projected history), about 67-73 preconverted checkpoints in the 8 GiB store instead of about 80. As built (section 6): the target taps, at most 105 MB (about 52 MB on average), about 40-55 checkpoints. One checkpoint per turn, as today. | none (the carried rows are uploaded for the turn's window build only, as a cold prefill's capture holds them) |
 | P1 | +107 MB per turn (the checkpoint at R) | Session-held tail blocks of at most 32 x 2.23 MB = 71 MB (evictable) |
 | P2 | +107 MB per turn, plus the drafter state (about 0.13 GB per session if parked on the host) | Decode-written blocks of about 37-48 x 2.23 MB; the per-seat snapshot buffer about 150 MB per chip for 8 seats (free about 4.9 GB per chip, **measured** at the hit) |
 
@@ -370,3 +374,87 @@ qualification, then gates; about 6-8 h). P2 needs at least three.
 4. P1, only if the probe passes or the owner accepts E1 and telemetry shows that clients drop reasoning or give short
    answers.
 5. P2, only if telemetry shows that most turns echo reasoning, round-trip, and have long answers.
+
+## 6. As built (2026-10-11): Phase 0 and P0
+
+Nothing in this section has run on a card. The CPU proofs are `test_exact_resume` (30 tests) and `test_tp4_split_probe`
+(17 tests); the card pack is `scripts/ci/references/fusion-jobs/ER` (ORDER.txt there).
+
+### 6.1 P0 switches (default off, gate-only: `serving_c2_contract.exact_resume_problems`)
+
+| Switch | What it does | Where |
+|---|---|---|
+| `QWEN_PREFIX_STICKY_UNDROP=1` | Sticky sessions only. The coordinator's `find_longest_cache_hit` runs with an empty `eagle_group_ids`, for that lookup only, so vLLM's hit keeps its last block. `plan()` captures `floor2048(P)`, plus C0 while the carry is off. | `qwen_prefix_scheduler_patch.py` (install, `wrap`, `plan`) |
+| `QWEN_PREFIX_WINDOW_CARRY=1` | Needs the undrop. After every sticky prefill, the window rows `[P - 2048, floor2048(P))` of the capture's five target taps are read to host (every chip's bytes) and filed on the checkpoint this request stored at `floor2048(P)`. A later prompt `P'` may resume there above `P' - 2048` when those rows reach down to `P' - 2048`. | `prefix_window_carry.py`; `qwen_prefix_registry.py` (`Window`, `attach_window`, `window_covers`); `select()`; `serving_lifecycle._granted_resume` / `_file_window`; `dflash_prefill_window` (the ledger counts the carried rows, and `outputs()` puts them in front); `levern_policy.valid_step` |
+| `QWEN_PREFIX_WINDOW_CARRY_AUDIT=1` | Needs the carry; gate only. The uploaded rows are read back against the stored bytes (`transport`), and every sticky window's sha256 is logged. | `prefix_window_carry.after_prefill`, `Carried.upload` |
+
+**Why the carried taps are exact (E0).**
+- Turn N computed the rows `[P_prev - 2048, floor2048(P_prev))` with full 2048-row chunk programs at absolute
+  positions. The cold twin of `P'` runs the same programs on the same tokens at those positions, so its taps there are
+  the same bytes.
+- The carry moves those bytes host to device unchanged: bfloat16, per chip, `ConcatMeshToTensor` /
+  `ShardTensorToMesh` on the mesh's dimension 0.
+- Every consumer of the window (the parked-engine rebind's projection, the cold build) sees a complete window of the
+  usual shape. The CPU fake device checks this row for row: the spliced window equals the cold window of the same prompt.
+
+**Markers** (`prefix_markers.scan` reads them; `c2_prefix_gate.exact_resume_findings` judges them):
+
+```
+[PINDIAG] prefix: window carry engaged undrop=<0|1> carry=<0|1> audit=<0|1> ceiling=...
+[PINDIAG] prefix: window carry carried req= Q= P= rows=
+[PINDIAG] prefix: window carry stored req= pos= rows= bytes= ms=
+[PINDIAG] prefix: window carry skipped req= why=
+[PINDIAG] prefix: window carry audit req= P= Q= carried= window_sha= transport= exact=
+```
+
+The sticky install line (`install sticky=1 lookahead=16 drop_last=True`) is unchanged: `drop_last` there is vLLM's own
+setting.
+
+**Off path.** With the switches unset, the graft makes exactly the decisions of the base commit's graft (loaded from git)
+on a sticky DFlash scenario, and the registry keeps its keys.
+
+**Cost (estimated).**
+- The export reads at most 2048 rows x 5 taps x 5120 x 2 B, about 105 MB (about 52 MB on average). That is about
+  0.04-0.1 s on turn N, by comparison with the 31 ms the 78 MB checkpoint read measures.
+- The upload on the carried turn is at most the same bytes.
+- The store charges the rows to the checkpoint: the 8 GiB store then holds about 40-55 preconverted checkpoints
+  instead of about 80 (107 MB each plus 52 MB of window on average, 105 MB at most).
+
+### 6.2 Phase 0
+
+- **Turn telemetry** (on unless `QWEN_PREFIX_TURN_TELEMETRY=0`; counts only, no tokens, text, salt or tenant leave the
+  engine).
+  - Every salted admission is classified once against the newest remembered turn of its chain:
+    `turn_extends`, `turn_in_answer`, `turn_at_decode_start`, `turn_at_p_minus_1`, `turn_at_p_minus_2`,
+    `turn_before_prompt_end`, `turn_earlier`, `turn_first`.
+  - Buckets cover the answer length, the new content and the in-answer offset.
+  - These are exported as `qwen_prefix_turn_*_total` through the registry's stats file.
+  - The API server counts every finished tool call's parameter values, and those carrying more edge whitespace than
+    the template's one newline each side: `qwen_prefix_tool_args{kind}`. It wraps vLLM's Qwen3 arg converter and
+    leaves the conversion unchanged.
+- **Split-invariance probe** (`tp4_split_probe.py`, `C2_FABRIC_PROBE=split`).
+  - It runs from the checkout inside an existing image.
+  - It uses the image's own model with its first layers up to the first full-attention layer, under the production
+    profile's environment.
+  - Per length it compares the cold prefill, bit for bit, with:
+    - a determinism control;
+    - a 2048-aligned split (the harness control);
+    - four 128-aligned splits.
+  - It compares the GDN states, the logits and the KV rows, by region.
+  - `SPLIT_PROBE verdict=IDENTICAL|DIFFERS|FAIL`. Template SP0, about 25 minutes (estimated).
+
+### 6.3 The gate and the pack
+
+- **Plans** (`c2_prefix_gate`, `c2_serving_job.PREFIX_PLANS`):
+  - `exact-resume` is judged: strict cold-twin pairs, the oracle with the undrop and the carry, and the window digests
+    of every pair equal under the audit.
+  - `exact-resume-timed` is the ABAB's arm.
+  - Both use `prefix_replay.scenario_exact_resume`: first prompts of about 9k, 33k and 120k tokens, then returning tool
+    turns of 150, 400, 900, 1700, 2600 and 300 new tokens.
+  - `exact_resume_compare.py` pairs the hits of two timed arms (the answers identical, the Q, the tail and the TTFT
+    delta).
+- **Pack:** B0, X0, SP0, ERA (the audited attach), ERX (the cold-twin pairs), ERC1/ERL1/ERC2/ERL2 (the timed ABAB),
+  optional ERB1/ERB2 (the agent-turn replay at eight seats), and Z.
+  - Estimated 350 minutes without ERB1/ERB2, 440 with them.
+  - The twins `-fx-all-er` and `-fx-all-er-audit` are placed by WP0 from `scripts/ci/fusion-wp/ER.json`.
+

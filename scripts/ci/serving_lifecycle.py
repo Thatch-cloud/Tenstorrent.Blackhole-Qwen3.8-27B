@@ -169,10 +169,17 @@ class FastServingLifecycle:
         # Off, nothing below reads the prefix registry and a hit is refused as it always was.
         self.sticky = sticky_sessions_enabled()
         if self.sticky:
-            import prefix_window_carry
+            # Exact resume P0: read strictly here, so a process with the switch unset imports nothing new.
+            import os
 
-            self.window_carry = prefix_window_carry.enabled()
-            self.window_carry_audit = self.window_carry and prefix_window_carry.audit_enabled()
+            raw = os.environ.get('QWEN_PREFIX_WINDOW_CARRY') or '0'
+            if raw not in ('0', '1'):
+                raise ValueError('QWEN_PREFIX_WINDOW_CARRY=%r: only 0 or 1' % (raw,))
+            if raw == '1':
+                import prefix_window_carry
+
+                self.window_carry = True
+                self.window_carry_audit = prefix_window_carry.audit_enabled()
         self.max_model_len = getattr(getattr(config, 'model_config', None), 'max_model_len', None)
         self.quarantine = None
         # QWEN_FAST_LANE (serving_fast_lane.LaneRuntime; default off, None): one fast lane beside standard lanes. On, the

@@ -568,6 +568,15 @@ class LifecycleCarryTests(sticky_tests.LifecycleFixture):
                 self.assertIn('R is above the prompt minus 2048', str(case.error))
                 self.assertTrue(case.lifecycle.failed)
 
+    def test_the_switch_off_imports_nothing_new(self):
+        with mock.patch.dict(sys.modules):
+            sys.modules.pop('prefix_window_carry', None)
+            case = self.admit(12000, 8192, carry='0')
+            self.assertNotIn('prefix_window_carry', sys.modules)
+        self.assertFalse(case.lifecycle.window_carry)
+        with self.assertRaisesRegex(ValueError, 'only 0 or 1'):
+            self.admit(12000, 8192, carry='on')
+
     def test_an_ordinary_resume_builds_the_capture_it_always_built(self):
         case = self.admit(12000, 8192)
         self.assertIsNone(case.error)
