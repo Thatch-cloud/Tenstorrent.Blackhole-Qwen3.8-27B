@@ -578,6 +578,19 @@ class LandingTests(unittest.TestCase):
                          sorted(['packed_any_evidence.json', 'packed_any_evidence_tp4.json', 'packed_any_evidence_tp4_262144.json']
                                 + [path.name for path in (admission.EVIDENCE_TP4_K64J_OQ, admission.EVIDENCE_TP4_262K_K64J_OQ) if path.exists()]))
 
+    def test_a_pinned_k64j_oq_record_is_carried_by_the_image_overlay(self):
+        """The overlay manifest is the one image list: a pin without the file's overlay line gives a K64j-OQ image a pin and no record (every attach then refuses, a gate boot too)."""
+        lines = {line.strip() for line in (REPO / 'docker' / 'qwen-c2-overlay.txt').read_text(encoding='utf-8').splitlines()}
+        for path, pin in ((admission.EVIDENCE_TP4_K64J_OQ, admission.EVIDENCE_TP4_K64J_OQ_SHA256),
+                          (admission.EVIDENCE_TP4_262K_K64J_OQ, admission.EVIDENCE_TP4_262K_K64J_OQ_SHA256)):
+            with self.subTest(path=path.name):
+                if pin is not None:
+                    self.assertIn('scripts/ci/' + path.name, lines)
+                else:
+                    self.assertNotIn('scripts/ci/' + path.name, lines, 'an overlay line for a file that does not exist yet')
+        for path in (admission.EVIDENCE_TP4, admission.EVIDENCE_TP4_262K):
+            self.assertIn('scripts/ci/' + path.name, lines)
+
     def test_the_k64j_only_tests_hold_in_both_states(self):
         """A K64j process reads K64j's records whatever else is committed (the whole of the existing admission tests rests on it)."""
         for capacity in admission.CAPACITIES:

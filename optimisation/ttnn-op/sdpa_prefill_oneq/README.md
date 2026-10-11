@@ -204,8 +204,11 @@ python3 -B scripts/ci/record_packed_any_evidence_tp4.py --binary k64j-oq \
     --cb2b <RQ1-F3 report> --cb2b-run <run> --cb2b-tag <tag> --cb2b-commit <40-hex> --cb2b-image tp4-oneq-1 --cb2b-watcher <RQ1-W2 report> --cb2b-watcher-run <run> --cb2b-watcher-tag <tag>
 # 3. the 262,144 record: the same with --capacity 262144 and the RQ2 reports
 python3 -B scripts/ci/record_packed_any_evidence_tp4.py --binary k64j-oq --capacity 262144 ...
-# 4. commit exactly: scripts/ci/packed_any_evidence_tp4_k64j_oq.json, scripts/ci/packed_any_evidence_tp4_262144_k64j_oq.json, scripts/ci/packed_any_admission.py (two pin lines)
-git add scripts/ci/packed_any_evidence_tp4_k64j_oq.json scripts/ci/packed_any_evidence_tp4_262144_k64j_oq.json scripts/ci/packed_any_admission.py
+# 4. list both files in the image overlay (docker/qwen-c2-overlay.txt, after the line of packed_any_evidence_tp4_262144.json): without the lines a K64j-OQ image has a pin and no file
+#    scripts/ci/packed_any_evidence_tp4_k64j_oq.json
+#    scripts/ci/packed_any_evidence_tp4_262144_k64j_oq.json
+# 5. commit exactly these four paths (the two pin lines of packed_any_admission.py are the recorder's)
+git add scripts/ci/packed_any_evidence_tp4_k64j_oq.json scripts/ci/packed_any_evidence_tp4_262144_k64j_oq.json scripts/ci/packed_any_admission.py docker/qwen-c2-overlay.txt
 ```
 
 What the recorder does and refuses: it checks every report against the admission's own constants BEFORE writing (the loaded binary is K64j-OQ's, the four decode kernels K64j's, scope full, no
@@ -216,11 +219,11 @@ that file only, `None` becoming the digest, in one go; K64j's files and pins are
 **How the admission then accepts a TRAFFIC boot on K64j-OQ.** `QWEN_FAST_RUNTIME_BINARY_SHA256` names the baked graft (`C2_BAKE_GRAFT=K64j-OQ`); `check_evidence` takes `own_record(tp, capacity,
 binary)` for that binary when its pin is set, hashes the file against the pin, and `evidence_problems` holds the record's `binary.ttnncpp_sha256` equal to the served binary (strictly: the
 gate-boot equivalence is not needed and not used). The passed line reads `packed-any admission passed: K64j-OQ <sha16> x2; ... evidence <pin16>`. `tp_guard` (every four-card process) and
-`check_window_262k` (the 262k attach) follow the same selection, so the two files and their pins are all there is to land.
+`check_window_262k` (the 262k attach) follow the same selection, so the two files, their two pins and their two overlay lines are all there is to land (`test_oneq_ship` fails a pinned record that the overlay does not carry).
 
 **Which tests change: none.** `test_oneq_ship` holds both states: the committed one (pins `None`, no file) and the recorded one (every pinned file is there, at its pin, names K64j-OQ and qualifies
-a boot on it with no problem; K64j's records are untouched). The landing was simulated on this branch with the two files and the two pins written by the recorder's own `repin`: 1,400
-tests of the admission, evidence, recorder, waiver, profile and prefix modules pass with no edit (the one error, `test_model_profile`, is on `tp4/fusion-2` itself). The tests that mean
+a boot on it with no problem; K64j's records are untouched). The landing was simulated on this branch (a scratch commit, discarded) with the two files, the two pins written by the recorder's own `repin` and the two overlay lines: the overlay, image-provenance, copy-closure, fusion
+and ship test modules (251 tests) pass with no edit, as do 1,400 tests of the admission, evidence, recorder, waiver, profile and prefix modules with the files and pins alone (the one error, `test_model_profile`, is on `tp4/fusion-2` itself). The tests that mean
 "K64j-OQ with no record of its own" patch the two pins to `None` for their duration.
 
 **Then the ship candidate.** `c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-oneq` (generated from the ship entry `traffic-oneq` of `scripts/ci/fusion-wp/WPP.json`: the fusion ship profile plus
