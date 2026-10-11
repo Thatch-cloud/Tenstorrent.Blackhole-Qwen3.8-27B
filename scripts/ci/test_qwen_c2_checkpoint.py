@@ -571,6 +571,64 @@ class JobKeyTests(unittest.TestCase):
             self.assertIn('C2_MODEL', str(raised.exception))
 
 
+class ProductionBootTests(unittest.TestCase):
+    """contract.boot of the approved ship-4 TRAFFIC profile in the API server, as the platform launches it, with the environment the Swift thin layer bakes and the platform's --model naming Swift:
+    it passes with the profile's own (APPROVED) waiver and nothing else, serves Swift's snapshot from the keyed cache, and keeps the platform's served name."""
+    SHIP = 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4'
+
+    def boot(self, environ_extra, argv, verify=True):
+        hub = Hub(self)
+        document = json.loads(PROFILES.read_text(encoding='utf-8'))
+        entry = copy.deepcopy(document['profiles'][self.SHIP])
+        wanted = ['/models/models--Qwen--Qwen3.8-27B/snapshots/' + BASE['revision'], '/models/hub/models--Qwen--Qwen3.8-27B/snapshots/' + BASE['revision']]
+        self.assertEqual(entry['snapshots'], wanted)
+        # the real catalog, the real profile; the hub is a temp tree whose Swift snapshot the (patched) verification accepts
+        root = hub.root / 'models'
+        snapshot = root / 'models--ukisai--Swift-1.5-Qwen3.8-27b' / 'snapshots' / SWIFT['revision']
+        snapshot.mkdir(parents=True)
+        entry['snapshots'] = [str(root / 'models--Qwen--Qwen3.8-27B' / 'snapshots' / BASE['revision'])]
+        profiles = hub.root / 'profiles.json'
+        profiles.write_text(json.dumps(dict(default=self.SHIP, profiles={self.SHIP: entry})), encoding='utf-8')
+        environ = dict(environ_extra, QWEN_C2_SERVING='1', QWEN_C2_PROFILE=self.SHIP, QWEN_C2_PROFILES=str(profiles), MESH_DEVICE='P300', TT_CACHE_PATH=str(hub.root / 'experiment-cache' / 'weights'))
+        before, saved, lines = list(sys.meta_path), list(sys.argv), []
+        sys.argv[:] = list(argv)
+        try:
+            with mock.patch.dict(os.environ, {'QWEN_C2_PROFILE': self.SHIP}), mock.patch.object(contract, 'fix_sys_path'), mock.patch.object(contract, 'install_teardown_skip'), \
+                    mock.patch.object(contract, 'install_prefix_metrics'), mock.patch.object(contract, 'read_salt_key', return_value=(None, 'none')), \
+                    mock.patch.object(contract, 'log', lambda message, *values: lines.append(message % values if values else message)), \
+                    mock.patch.object(checkpoint, 'verify_snapshot', return_value=[]):
+                contract.boot(environ=environ, orig_argv=['python3', '-m', contract.API_SERVER])
+            hooks = [hook for hook in sys.meta_path if hook not in before]
+            return list(sys.argv), environ, lines, hooks, str(snapshot)
+        finally:
+            sys.argv[:] = saved
+            sys.meta_path[:] = before
+
+    PLATFORM = ['api_server', '--model', SWIFT['repo'], '--served-model-name', SWIFT['repo'] + ':tt', '--host', '0.0.0.0', '--port', '8000', '--reasoning-parser', 'qwen3', '--tool-call-parser', 'qwen3_xml',
+                '--enable-auto-tool-choice', '--max-model-len', '65536', '--max-num-seqs', '2', '--block-size', '64', '--no-enable-prefix-caching', '--additional-config', '{"tt": {}}']
+
+    def test_the_thin_layers_environment_and_the_platforms_model_boot_the_approved_profile_without_a_new_waiver(self):
+        argv, environ, lines, hooks, snapshot = self.boot(PAIR, self.PLATFORM)
+        self.assertEqual(argv[argv.index('--model') + 1], snapshot, 'the engine serves the Swift snapshot')
+        self.assertEqual(argv[argv.index('--served-model-name') + 1], SWIFT['repo'] + ':tt', 'the platform\'s served name (the alias) is kept')
+        self.assertEqual((argv[argv.index('--max-model-len') + 1], argv[argv.index('--max-num-seqs') + 1]), ('262144', '8'), 'the profile owns the window and the seats')
+        self.assertEqual((argv[argv.index('--reasoning-parser') + 1], argv[argv.index('--tool-call-parser') + 1]), ('qwen3', 'qwen3_xml'), 'the platform\'s parsers are kept')
+        self.assertIn(snapshot, json.loads(argv[argv.index('--additional-config') + 1])['qwen_fast_runtime']['target_snapshot'])
+        self.assertTrue(environ['TT_CACHE_PATH'].endswith('-ckpt/' + checkpoint.selection(PAIR).key))
+        text = '\n'.join(lines)
+        self.assertIn('OWNER TRAFFIC WAIVER ship4-fx-262k-2026-10-11', text, 'the profile\'s own, approved waiver is the only one in play')
+        self.assertIn('checkpoint %s@%s' % (SWIFT['repo'], SWIFT['revision']), text)
+        self.assertIn('request default max_tokens 16384', text)
+        self.assertTrue([hook for hook in hooks if getattr(hook, 'name', None) == contract.INPUT_PROCESSOR], 'the request contract is armed')
+
+    def test_the_base_platform_on_the_swift_image_and_swift_on_the_base_image_are_refused(self):
+        with self.assertRaises(ValueError) as raised:
+            self.boot(PAIR, ['api_server', '--model', BASE['repo'], '--port', '8000'])
+        self.assertIn('the platform asks for the model', str(raised.exception))
+        with self.assertRaises(ValueError):
+            self.boot({}, ['api_server', '--model', SWIFT['repo'], '--port', '8000'])
+
+
 class RequestDefaultTests(unittest.TestCase):
     """Swift's answer room: a request that omits max_tokens gets 16,384 (the output budget) instead of the profile's 8,192; the base keeps the profile's. The clamp to the room a long prompt
     leaves, the 16,384 ceiling and the per-request KV admission are the contract's own and unchanged."""

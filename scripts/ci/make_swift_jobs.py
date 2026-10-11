@@ -29,7 +29,7 @@ SHIP = twins.SHIP                      # the approved ship-4 profile: the profil
 AUDIT = twins.AUDIT                    # its audited twin (SA1)
 PRODUCTION = fusion.PARENT
 SMOKE_TESTS = 'warmup,coding,prefill_ladder_solo,concurrent8_steady,coding_set'
-FIRST_BOOT_TESTS = 'warmup,concurrent8_steady'
+FIRST_BOOT_TESTS = 'warmup,coding,concurrent8_steady'
 DECODE_TESTS = ship4.GRID_TESTS        # warmup,concurrent8_steady,concurrent8_code_32k_long
 TAULAB_PROFILE = 'c2-packed-tp4'
 
@@ -63,16 +63,18 @@ def rows():
                     why=('X0: the card state before the window: status, a rescan of the topology, an all-four reset. READ: four cards present and healthy, the fabric as measured, the compute grid of the run '
                          '(AVAILABLE WORKER CORE COUNT; 13x10 since the firmware unlock), no other window driver alive. Also before W0, by the operator: the Swift weights are on the card host whole '
                          '(python3 scripts/ci/qwen_c2_checkpoint.py check --hub <the hub directory> --repo %s --revision %s [--hash-shards]: "ok", exit 0) and the hub filesystem has at least 80 GB free '
-                         '(the Swift converted weights are about as large as the base\'s, tens of GB, and W0 writes them). Stop rule: anything else. The owner stops the node agent and unserves production BEFORE it and '
+                         '(the Swift converted weights are about as large as the base\'s, 24 GB, and W0 writes them). Stop rule: anything else. The owner stops the node agent and unserves production BEFORE it and '
                          'restores production after Z with the cutover pack\'s own steps.' % (REPO, REVISION))))
     out.append(dict(name='W0-swift-first-boot', mode='stop', minutes=60, actions='reset smoke', profile=SHIP, tests=FIRST_BOOT_TESTS, telemetry=True, box=150, needs=('W0 <- X0',), model=True, extra=[],
                     why=('W0 (STOP): the FIRST BOOT of Swift, which builds its converted-weight cache. The cache is keyed by the checkpoint (TT_CACHE_PATH becomes <base path>-ckpt/<repo>--<revision>), so it starts EMPTY: every tensor '
                          'is converted from the checkpoint\'s safetensors (bf16 to the TP4 shards in bfp8 and bfp4, the packed MLP blocks) and written, then the engines are built and the traces captured. The base\'s cache '
-                         'is neither read nor written. ESTIMATE of the conversion: 10 to 30 minutes on top of the warm boot (the base\'s warm boot is 3 to 14 minutes by load; its converted weights are about 30 GB; the first '
-                         'cold four-card boot of the TP4 stack was ready after 376 s on the general path), so 20 to 45 minutes in all; the BOX is 150 minutes and the smoke step\'s own readiness wait is 80 minutes: a conversion '
-                         'that outlasts it kills the container in the middle of a write, and the next boot then logs "its first boot never completed" for the directory (delete <hub>/.qwen-c2/weights-ckpt/<key> and re-run W0). '
-                         'RUN WITH THE CI PAUSED (a model load under CI load has hit the platform\'s load timeout). Tests: warmup and concurrent8_steady (the smoke check requires it on this profile): the first multi-user rounds '
-                         'on the new weights. READ: %s "ready=1 after N s" in the step log: RECORD N, it is the cold load; the warm one is SW1\'s, and it is the number a production deploy of Swift has to fit under the platform\'s '
+                         'is neither read nor written. EVIDENCE for the time: the base\'s whole four-card converted cache (1,246 tensor files, 24 GB, in tensor_cache_bfp8 and tensor_cache_bfp8_mesh1x4) carries file times within 3 minutes 15 '
+                         'seconds of each other, so the conversion and write are about 3 to 4 minutes; add the first read of the 52 GB of safetensors from a cold page cache (minutes) and the warm boot (3 to 14 minutes by load): '
+                         'ESTIMATE 8 to 25 minutes for the first boot (the cold general-path TP4 boot of the first four-card run was ready after 376 s). The Swift cache is about as large as the base\'s, 24 GB. The BOX is 150 '
+                         'minutes and the smoke step\'s own readiness wait is 80 minutes: a boot killed during the write leaves a partial cache directory and the next boot then logs "its first boot never completed" for it (delete '
+                         '<hub>/.qwen-c2/weights-ckpt/<key> and re-run W0). RUN WITH THE CI PAUSED (a model load under CI load has hit the platform\'s load timeout). Tests: warmup, coding (a Python rewrite of a shell script) and '
+                         'concurrent8_steady (the smoke check requires it on this profile): a coding answer and the first multi-user rounds on the new weights. THE SAME FILE IS THE PRODUCTION FIRST BOOT: run right after production is '
+                         'unloaded, it builds the cache the platform\'s boot will find (the platform container mounts the same hub, so the keyed directory under /experiment-cache, a link into the hub, is the same files). READ: %s "ready=1 after N s" in the step log: RECORD N, it is the cold load; the warm one is SW1\'s, and it is the number a production deploy of Swift has to fit under the platform\'s '
                          'bounded load attempt (about 13.5 minutes). "[QWEN-C2] weight cache complete (first boot of this directory)" once. The octo rounds of concurrent8_steady, no stall, no "audit mismatch". Any refusal line '
                          '("cannot serve the asked checkpoint") means the snapshot is not the base\'s in config/tokenizer/template or is incomplete: read it, fix the download, do NOT work around it. %s'
                          % (CHECKPOINT_READ, TELEMETRY))))

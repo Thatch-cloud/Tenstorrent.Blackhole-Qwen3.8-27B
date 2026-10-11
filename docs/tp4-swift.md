@@ -71,8 +71,10 @@ greedily with thinking on (12,288 tokens at most); the report runs the code on a
 
 * Greedy only: the model card's numbers are at temperature 1.0 and this stack's request contract serves greedy; RL post-trained models can loop or lengthen under greedy. The coding set reads it.
 * Drafter fit: the DFlash drafter was fit to the base; tau on Swift is unknown until T2 (a lower tau is a slower decode).
-* Conversion time of the first boot is an estimate (no cold TP4 conversion log was found): the smoke step waits 80 minutes for readiness; a boot killed during the conversion leaves a partial cache directory (delete it and re-run W0).
-  A production deploy must find the cache built: the platform's bounded load attempt is about 13.5 minutes.
+* Conversion time of the first boot: the base's whole four-card converted cache (1,246 tensor files, 24 GB) has file times within 3 minutes 15 seconds, so the conversion is a few minutes; with a cold read of the 52 GB of
+  safetensors and the warm boot the first boot is an ESTIMATED 8 to 25 minutes. The smoke step waits 80 minutes for readiness; a boot killed during the write leaves a partial cache directory (delete it and re-run W0).
+  A production deploy must find the cache built: the platform's bounded load attempt is about 13.5 minutes. The keyed directory is on the hub (`/experiment-cache` is a link to the hub's `.qwen-c2`, which the card-job container
+  and the platform container both mount read-write), so the cache a card job builds is the one the platform boots on.
 * Disk: the hub filesystem must take tens of GB more for the converted weights, and the window image is another 30 GB.
 * Licence: the Swift repository carries its own licence (see its LICENSE and NOTICE; commercial use is conditional); that is the owner's decision, not the stack's.
 * Evidence: every exactness record was made on the base's weights; every Swift number is UNQUALIFIED.
