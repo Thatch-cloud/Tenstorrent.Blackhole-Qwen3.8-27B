@@ -362,6 +362,10 @@ def apply_environment(profile, environ=None):
     for name in UPLOAD_NAMES:
         if name not in profile['env']:
             environ.pop(name, None)
+    # ...and exact resume P0: an inherited switch must not lift vLLM's drop or carry a window under a profile that never asked.
+    for name in EXACT_RESUME_NAMES:
+        if name not in profile['env']:
+            environ.pop(name, None)
     return environ
 
 
@@ -771,6 +775,34 @@ def merged_route_problems(profile, env):
             if env.get(name) != '1':
                 problems.append('Lever N: QWEN_FAST_LEVERN_EPOCH_SCOPE=route needs %s=1 (the disjoint-writer class engages only with the per-block '
                                 'epochs, whose staging destinations it is checked against)' % name)
+    return problems
+
+
+# Exact resume P0 (docs/tp4-exact-resume.md 5.2; qwen_prefix_registry): the undrop, the drafter-window carry and its audit. Gate-only until a
+# qualification record exists, only beside sticky sessions with prefix reuse, the carry only with the undrop and the audit only with the
+# carry; an inherited value under a profile that does not name one is dropped (apply_environment).
+EXACT_RESUME_NAMES = ('QWEN_PREFIX_STICKY_UNDROP', 'QWEN_PREFIX_WINDOW_CARRY', 'QWEN_PREFIX_WINDOW_CARRY_AUDIT')
+
+
+def exact_resume_problems(profile):
+    """[problem] when a profile names the exact-resume switches wrongly (nothing is checked for a profile that names none)."""
+    env = profile.get('env') or {}
+    named = [name for name in EXACT_RESUME_NAMES if name in env]
+    if not named:
+        return []
+    problems = []
+    values = dict((name, str(env[name])) for name in named)
+    problems += ['%s=%r: only 0 or 1' % (name, value) for name, value in sorted(values.items()) if value not in ('0', '1')]
+    on = set(name for name, value in values.items() if value == '1')
+    if on and profile.get('gate_only') is not True:
+        problems.append('%s are gate-only until a qualification record exists: %s is not gate_only' % (', '.join(sorted(on)), profile.get('name')))
+    if on and not (prefix_reuse(profile) and sticky_sessions(profile)):
+        problems.append('%s need %s=1 and %s=1 (the scheduler graft serves the fast path\'s sticky hit only)'
+                        % (', '.join(sorted(on)), PREFIX_SWITCH, STICKY_SWITCH))
+    if EXACT_RESUME_NAMES[1] in on and EXACT_RESUME_NAMES[0] not in on:
+        problems.append('%s=1 without %s=1' % (EXACT_RESUME_NAMES[1], EXACT_RESUME_NAMES[0]))
+    if EXACT_RESUME_NAMES[2] in on and EXACT_RESUME_NAMES[1] not in on:
+        problems.append('%s=1 without %s=1' % (EXACT_RESUME_NAMES[2], EXACT_RESUME_NAMES[1]))
     return problems
 
 
@@ -1432,6 +1464,9 @@ def boot(environ=None, orig_argv=None):
     problems = upload_problems(profile)
     if problems:
         raise ValueError('profile %s misuses the engine-start upload levers: %s' % (profile['name'], '; '.join(problems)))
+    problems = exact_resume_problems(profile)
+    if problems:
+        raise ValueError('profile %s misuses the exact-resume switches: %s' % (profile['name'], '; '.join(problems)))
     problems = drafter_problems(profile)
     if problems:
         raise ValueError('profile %s cannot serve its drafter checkpoint: %s' % (profile['name'], '; '.join(problems)))

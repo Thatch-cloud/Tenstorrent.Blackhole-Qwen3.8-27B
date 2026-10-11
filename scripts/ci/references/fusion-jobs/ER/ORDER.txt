@@ -1,0 +1,47 @@
+# The order of the EXACT RESUME window (docs/tp4-exact-resume.md: Phase 0 and P0). P0 = QWEN_PREFIX_STICKY_UNDROP + QWEN_PREFIX_WINDOW_CARRY on the combined arm: a returning sticky turn resumes at floor2048(P)
+# (one chunk higher than today) on the same chunk-program checkpoints, and a turn with little new content resumes there too, its drafter window's older rows carried from the turn that computed them.
+# Byte-exact (E0) by construction; the window's exactness gates are ERX (cold-twin pairs, the window digests equal) and ERA (the audited boot). Phase 0's split-invariance probe SP0 answers whether a
+# 128-aligned resume (P1, P2) could be byte-exact too; it needs no build (an existing image, the probe from the checkout).
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: nothing later runs after a failure of this job. soft: a failure or a skip does not stop the window.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z (the cutover pack's steps and post-checks); nothing here does either. CI PAUSED from ERC1 to ERL2
+#     (and ERB1 to ERB2): they are timings. Push ONE tag at a time and wait for its run to finish; never cancel a running card job. The CPU suite is green on the pushed head. No other window driver alive.
+# P0. THE TWINS (WP0 places them from scripts/ci/fusion-wp/ER.json with make_fusion_profiles.py --write): c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all-er (= -fx-all plus QWEN_PREFIX_STICKY_UNDROP=1,
+#     QWEN_PREFIX_WINDOW_CARRY=1) and c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all-er-audit (= -fx-all-audit plus those and QWEN_PREFIX_WINDOW_CARRY_AUDIT=1). Gate-only; every result UNQUALIFIED.
+#     Until they are placed, the ER templates naming them fail c2_serving_job.py's profile check; they pass it against the generated profiles file.
+# P0. IMAGE: tp4-er-1 is a PLACEHOLDER for the tag B0 builds from the pushed branch head (sed -i 's/tp4-er-1/<tag>/' *.env). SP0 runs on tp4-fusion-6 (or tp4-oneq-1) and needs no build.
+#     Read the grid from the run (13x10 since the firmware unlock), never assume 11x10.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0-er-status-rescan-reset <- B0-er-build
+# NEEDS SP0-split-probe <- X0-er-status-rescan-reset
+# NEEDS ERA-er-audit-attach <- X0-er-status-rescan-reset
+# NEEDS ERX-er-exactness <- ERA-er-audit-attach
+# NEEDS ERC1-er-control-timed <- ERA-er-audit-attach
+# NEEDS ERL1-er-lever-timed <- ERX-er-exactness ERC1-er-control-timed
+# NEEDS ERC2-er-control-repeat <- ERL1-er-lever-timed
+# NEEDS ERL2-er-lever-repeat <- ERC2-er-control-repeat
+# NEEDS ERB1-er-busy-control <- ERX-er-exactness
+# NEEDS ERB2-er-busy-lever <- ERB1-er-busy-control
+# READ RULES (each also needs c2_smoke_check or the prefix gate clean where it runs, and no stall; the templates' own headers have the whole text):
+#   B0   provenance report with no problem line, the image id.   X0  status, rescan and reset complete on all four.
+#   SP0  'SPLIT_PROBE verdict=IDENTICAL' (exit 0): a 128-aligned resume is byte-exact, P1 needs no owner decision on exactness; 'verdict=DIFFERS' (exit 2, a valid measured answer: read split-probe.json
+#        for the tensors and regions) means P1/P2 are E1 (equal to a split twin, not to the cold prefill): the owner decides; 'verdict=FAIL' is no answer (a control or the build failed). Soft: P0 does not depend on it.
+#   ERA  c2_smoke_check clean under every fx-all lever's rule and exact_resume_smoke: 'window carry engaged undrop=1 carry=1 audit=1', the sticky install line unchanged, no window audit exact=False.
+#   ERX  the exact-resume plan PASS: every cold/hit pair IDENTICAL, the oracle's Q strict, at least one carried admission, every window audit exact=True and every pair's window digests EQUAL. ANY difference: NO-GO.
+#   ERC1 ERL1 ERC2 ERL2  exact_resume_compare.py (ERC1, ERL1) and (ERC2, ERL2): the hits IDENTICAL across the arms, the lever's Q one chunk higher where expected, the TTFT delta per conversation against
+#        the control-to-control spread (ERC1 against ERC2). GO needs both pairs negative beyond the spread and the texts equal.
+#   ERB1 ERB2  (optional) prefix_agent_turns.py: the turns IDENTICAL across the arms, the paired continuation TTFT, the stall of the other seats.
+# NO-GO for P0: any pair that differs (ERX), a window digest that differs, an audit line with exact=False, a Q above the oracle's, any program compiled after the warm, a lever answer that differs from the control's.
+# Time (estimate, minutes; nothing of P0 has run on a card): B0 40, X0 20, SP0 25, ERA 45, ERX 50, ERC1 to ERL2 40 each, ERB1 and ERB2 45 each, Z 10: 440 minutes (7 h 20 min) with the optional busy pair,
+#   350 (5 h 50 min) without it, plus about 3 minutes of queue per tag. The unmeasured parts are the ~120k conversation's cold twins in ERX and the weight load in SP0.
+B0-er-build stop tp4-er-1 40
+X0-er-status-rescan-reset stop tp4-er-1 20
+SP0-split-probe soft tp4-fusion-6 25
+ERA-er-audit-attach stop tp4-er-1 45
+ERX-er-exactness stop tp4-er-1 50
+ERC1-er-control-timed soft tp4-er-1 40
+ERL1-er-lever-timed soft tp4-er-1 40
+ERC2-er-control-repeat soft tp4-er-1 40
+ERL2-er-lever-repeat soft tp4-er-1 40
+ERB1-er-busy-control soft tp4-er-1 45
+ERB2-er-busy-lever soft tp4-er-1 45
+Z-er-reset soft tp4-er-1 10

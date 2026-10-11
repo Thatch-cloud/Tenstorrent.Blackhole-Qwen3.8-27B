@@ -654,6 +654,28 @@ class GateTests(unittest.TestCase):
                                                                        'Q=0 carried=0 window_sha=ab transport=mismatch exact=False')[0])
 
 
+class ContractTests(unittest.TestCase):
+    def profile(self, env, gate_only=True):
+        base = dict(QWEN_PREFIX_REUSE='1', QWEN_FAST_STICKY_SESSIONS='1')
+        base.update(env)
+        return dict(name='p', gate_only=gate_only, env=base)
+
+    def test_the_contract_refuses_every_misuse_and_drops_inherited_switches(self):
+        import serving_c2_contract as contract
+
+        self.assertEqual(contract.exact_resume_problems(dict(name='p', env={})), [])
+        self.assertEqual(contract.exact_resume_problems(self.profile({UNDROP: '1', CARRY: '1', AUDIT: '1'})), [])
+        self.assertIn('gate-only', contract.exact_resume_problems(self.profile({UNDROP: '1'}, gate_only=False))[0])
+        self.assertIn('without %s=1' % UNDROP, contract.exact_resume_problems(self.profile({CARRY: '1'}))[0])
+        self.assertIn('without %s=1' % CARRY, contract.exact_resume_problems(self.profile({UNDROP: '1', AUDIT: '1'}))[0])
+        self.assertIn('only 0 or 1', contract.exact_resume_problems(self.profile({UNDROP: 'yes'}))[0])
+        self.assertIn('need QWEN_PREFIX_REUSE=1', contract.exact_resume_problems(dict(name='p', gate_only=True, env={UNDROP: '1'}))[0])
+        environ = {UNDROP: '1', CARRY: '1', 'OTHER': 'x'}
+        contract.apply_environment(dict(name='p', env={}, mesh_graph_descriptor='d'), environ)
+        self.assertNotIn(UNDROP, environ)
+        self.assertNotIn(CARRY, environ)
+
+
 class PlanTests(unittest.TestCase):
     def test_the_plans_are_known_to_the_job_reader_and_the_gate(self):
         import c2_serving_job
