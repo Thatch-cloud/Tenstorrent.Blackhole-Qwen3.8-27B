@@ -1082,7 +1082,9 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             # admitted request, so the log shows what each costs and what is left.
             # Under QWEN_FAST_ADMISSION_DIAG_TRIM=1 the line is off (it reads the allocator of every chip, and
             # the first engine's ledger point carries the same reading) and only the first engine is walked.
-            if not memory_ledger.trim_enabled():
+            # QWEN_FAST_ADMISSION_LEAN: also off for a request rebound onto a parked engine (nothing was built: the line is one more allocator reading,
+            # about 70 ms with every seat stopped, for a figure the backstop and the next hold read anyway); a cold build keeps it.
+            if not memory_ledger.trim_enabled() and not (rebound and os.environ.get('QWEN_FAST_ADMISSION_LEAN') == '1'):
                 pindiag('[PINDIAG] dram after engine {}: {}', str(state.req_id)[:48], dram_line(pool))
             if not rebound and memory_ledger.admission_diag('engine'):
                 memory_ledger.engine_admitted(str(state.req_id), engine_request=request)

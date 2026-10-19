@@ -73,6 +73,33 @@ meaningful only beside QWEN_FAST_LEVER_N=1):
     QWEN_FAST_LEVERN_MAX_PARK_S         30          a long parked this many seconds in total admits no further short, 1..3600
     QWEN_FAST_LEVERN_EPOCH_SCOPE        global      route: an intermediate step that wrote no decode slot bumps no fixture epoch
                                                     (verify_prestage's disjoint writer class); global: every step does (today's rule)
+
+THE ADAPTIVE GOVERNOR (gate only, default off; docs/lever-n-adaptive-governor.md; meaningful only beside the merged route and the share mode):
+    QWEN_FAST_LEVERN_ADAPTIVE           0 | 1       1: while at most QWEN_FAST_LEVERN_ADAPTIVE_DECODERS decoders are live (and at least one: with none
+                                                    nothing is owed anyway) the governor starts from the higher prefill share below and the lower TTFT
+                                                    target below; with more decoders live it runs exactly today's pacing. Unset or 0: nothing here runs and
+                                                    every decision, step line and log line is byte for byte what it was
+    QWEN_FAST_LEVERN_ADAPTIVE_DECODERS  2           the most decoders that still count as few, 1..7
+    QWEN_FAST_LEVERN_ADAPTIVE_SHARE     0.9         the base prefill share while few decoders are live, a decimal in (0, 1): never 1.0 (the static control's
+                                                    stall); the governed base is max(QWEN_FAST_LEVERN_PREFILL_SHARE, this)
+    QWEN_FAST_LEVERN_ADAPTIVE_TTFT_S    120         the deadline governor's target while few decoders are live, whole seconds, taken as min(this,
+                                                    QWEN_FAST_LEVERN_TTFT_TARGET_S) when that target is on; 0 leaves the target as it is
+    The decode-gap floor is not touched: a share below 1.0 owes the decoders a round after every prefill step (RMIN) and a governed 1.0 still yields at
+    least every QWEN_FAST_LEVERN_MAX_DECODE_GAP_S seconds, which the adaptive policy REQUIRES to be on (a floor of 0 is a configuration error).
+
+THE PRODUCTION-SHAPE PACING (gate only, default off; docs/tp4-sched-1.md section 5; meaningful only beside the share mode, and the two short knobs only beside the merged route
+with QWEN_FAST_LEVERN_PARK=host, where the short class exists). Production is many returning turns (a ~3k-token tail at a long context, the SHORT class) beside a few cold long
+prefills: 58% of card wall time is prefill steps, and a short step costs about 1.8 s (its prefill, plus 0.54 s of engine rebind), after which the decoders get ONE round.
+    QWEN_FAST_LEVERN_OWED_CAP_MS        unset       the most a prefill step may owe the decoders, in ms (100..10000). Unset: QWEN_FAST_LEVERN_MAX_ROUNDS (8) times the measured
+                                                    round time, which is 0.5-0.6 s for one to four seats (a round is 67-81 ms) and so binds below the share's debt for any chunk
+                                                    past 60-80k of context or any final step (1.8 s): the decoders' share falls short of QWEN_FAST_LEVERN_PREFILL_SHARE exactly
+                                                    where they are few and fast. Set, the cap is this many ms whatever the seats
+    QWEN_FAST_LEVERN_SHORT_SHARE        unset       f_s in (0, 1): after a SHORT prefill step that ran beside decoders the debt grows by dt x (1 - f_s) / f_s (at least one round, as
+                                                    today), instead of exactly one round. 0.65 on a 1.8 s step is 0.97 s, six or seven rounds at seven seats. The deadline governor
+                                                    still never governs a short, and a governed 1.0 (a long needing all the device) still pays a short one round
+    QWEN_FAST_LEVERN_SHORT_WAIT_S       unset       1..600: the returning turn's guard. While the oldest waiting SHORT has waited this many seconds the debt is forgiven at every
+                                                    decision (the one round after a short step, RMIN, stays), so a burst of returning turns cannot queue behind a generous
+                                                    SHORT_SHARE for more than about this long. Needs SHORT_SHARE
 """
 
 import math
@@ -104,15 +131,27 @@ MAX_PARK_FLAG = 'QWEN_FAST_LEVERN_MAX_PARK_S'
 EPOCH_FLAG = 'QWEN_FAST_LEVERN_EPOCH_SCOPE'
 GAP_FLAG = 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S'
 BUILD_MS_FLAG = 'QWEN_FAST_LEVERN_BUILD_MS'
+ADAPTIVE_FLAG = 'QWEN_FAST_LEVERN_ADAPTIVE'
+ADAPTIVE_DECODERS_FLAG = 'QWEN_FAST_LEVERN_ADAPTIVE_DECODERS'
+ADAPTIVE_SHARE_FLAG = 'QWEN_FAST_LEVERN_ADAPTIVE_SHARE'
+ADAPTIVE_TTFT_FLAG = 'QWEN_FAST_LEVERN_ADAPTIVE_TTFT_S'
+OWED_CAP_FLAG = 'QWEN_FAST_LEVERN_OWED_CAP_MS'
+SHORT_SHARE_FLAG = 'QWEN_FAST_LEVERN_SHORT_SHARE'
+SHORT_WAIT_FLAG = 'QWEN_FAST_LEVERN_SHORT_WAIT_S'
 PARK_MODES = ('0', 'host')
 EPOCH_SCOPES = ('global', 'route')
 MERGED_FLAGS = (TTFT_FLAG, SHORT_FLAG, PARK_FLAG, PARK_SLOTS_FLAG, MAX_PARK_FLAG, EPOCH_FLAG, GAP_FLAG)
 # Every flag of this module: a sibling set while the master switch is off is a configuration error the contract names
 # (a typo must not leave an arm silently running the control).
 SIBLING_FLAGS = (STEP_FLAG, SOLO_FLAG, SHARE_FLAG, ROUNDS_FLAG, MAX_ROUNDS_FLAG, FAULT_FLAG, BUILD_MS_FLAG) + MERGED_FLAGS
+# The adaptive governor's flags (gate only): the switch and its three knobs. Like the audit's they are not siblings of the master switch: adaptive_problems
+# holds their own rules (a knob without the switch, the switch without the master switch, the merged route and the floor it needs).
+ADAPTIVE_FLAGS = (ADAPTIVE_FLAG, ADAPTIVE_DECODERS_FLAG, ADAPTIVE_SHARE_FLAG, ADAPTIVE_TTFT_FLAG)
+# The production-shape pacing's flags (gate only): not siblings of the master switch either; sched_problems holds their own rules.
+SCHED_FLAGS = (OWED_CAP_FLAG, SHORT_SHARE_FLAG, SHORT_WAIT_FLAG)
 # The audit's own knobs (gate instruments, valid beside the audit switch alone, never beside the master switch only): not siblings of the lever.
 KV_READ_FLAGS = (KV_READ_FLAG, KV_CROSS_FLAG)
-ALL_FLAGS = (FLAG, AUDIT_FLAG) + KV_READ_FLAGS + SIBLING_FLAGS
+ALL_FLAGS = (FLAG, AUDIT_FLAG) + KV_READ_FLAGS + SIBLING_FLAGS + ADAPTIVE_FLAGS + SCHED_FLAGS
 
 DEFAULT_STEP = CHUNK
 DEFAULT_SOLO = 8 * CHUNK
@@ -135,6 +174,16 @@ STEP_LINE_MERGED = STEP_LINE + ' f_eff={:.3f} need={:.3f} gap_ms={:.0f}'
 # need is the governor's unclamped demand (above 1.0 the deadline cannot be met even at full share) and gap_ms the wall time since the last decode round
 # (the decode-gap floor, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S, reads it). Logged once at install: the governor's target and the floor.
 GOVERNOR_LINE = '[PINDIAG] lever N governor: ttft={} gap_floor={}'
+# The adaptive governor (QWEN_FAST_LEVERN_ADAPTIVE=1 only; a profile without it logs neither line): the install line, and the step line's three added fields:
+# the base share the governor started from this step (the adaptive share while few decoders are live, else the profile's), the deadline target it used
+# (whole seconds, 0 off) and whether the adaptive policy was in force (1) or the step ran today's pacing (0). f_eff, need and gap_ms keep their meaning.
+ADAPTIVE_LINE = '[PINDIAG] lever N adaptive: decoders<={} share={} ttft={} gap_floor={}'
+STEP_LINE_ADAPTIVE = STEP_LINE_MERGED + ' base={:.3f} target={} adaptive={}'
+# The production-shape pacing (any of QWEN_FAST_LEVERN_OWED_CAP_MS / _SHORT_SHARE / _SHORT_WAIT_S; a profile without them logs neither line): the install line, and the step line's three
+# added fields after the adaptive ones when those are on: whether the step the pass advanced is a SHORT (a returning turn), the owed cap in force in ms, and whether the returning turn's
+# guard forgave the debt at this decision.
+SCHED_LINE = '[PINDIAG] lever N sched: owed_cap_ms={} short_share={} short_wait_s={}'
+STEP_SCHED_SUFFIX = ' short={} cap_ms={:.0f} guard={}'
 # wrote_slot is MEASURED (the number of _write_gdn_slot calls the step made, not a function of the step's position) and window is the
 # program-cache entries the drafter-window snapshot compiled inside the step (dflash_prefill_window.window_programs): they cannot be warmed
 # (keyed on the prompt's geometry), and the four-card tripwire excludes them the same way (B-A-W).
@@ -349,6 +398,158 @@ def merged_config(environ=None):
                   _whole(environ, GAP_FLAG, DEFAULT_MAX_GAP_S, 0, 600))
 
 
+Adaptive = namedtuple('Adaptive', 'decoders share ttft_s')
+DEFAULT_ADAPTIVE_DECODERS = 2
+MAX_ADAPTIVE_DECODERS = 7
+DEFAULT_ADAPTIVE_SHARE = 0.9
+DEFAULT_ADAPTIVE_TTFT_S = 120
+
+
+def adaptive_on(environ=None):
+    """Whether QWEN_FAST_LEVERN_ADAPTIVE=1, strictly: unset or '0' is off, '1' is on, anything else is a ValueError."""
+    return _flag(os.environ if environ is None else environ, ADAPTIVE_FLAG)
+
+
+def _adaptive_share(environ):
+    value = environ.get(ADAPTIVE_SHARE_FLAG)
+    if value is None:
+        return DEFAULT_ADAPTIVE_SHARE
+    if not value.isascii() or not value.replace('.', '', 1).isdigit():
+        raise ValueError('%s must be a decimal number in (0, 1), got %r' % (ADAPTIVE_SHARE_FLAG, value))
+    share = float(value)
+    if not math.isfinite(share) or not 0.0 < share < 1.0:
+        raise ValueError('%s must be in (0, 1) (1.0 is the static control arm\'s stall, chunked), got %r' % (ADAPTIVE_SHARE_FLAG, value))
+    return share
+
+
+def adaptive_problems(environ=None):
+    """Every reason the adaptive governor's flags in `environ` cannot be read or cannot work, one string each; [] when they are fine or the policy is off.
+    Its knobs without the switch are a typo (an arm would silently run today's pacing); on, it needs the share mode (static rounds override the share), a
+    share below 1.0 (the static 1.0 control arm yields nothing), the merged route (the deadline governor and the decode-gap floor live there) and the
+    floor ON (QWEN_FAST_LEVERN_MAX_DECODE_GAP_S not 0)."""
+    environ = os.environ if environ is None else environ
+    problems = []
+    try:
+        on = adaptive_on(environ)
+    except ValueError as failure:
+        return [str(failure)]
+    knobs = [name for name in ADAPTIVE_FLAGS[1:] if environ.get(name) is not None]
+    if knobs and not on:
+        problems.append('%s set without %s=1: a typo must not leave an arm running today\'s pacing' % (', '.join(knobs), ADAPTIVE_FLAG))
+    if not on:
+        return problems
+    if environ.get(FLAG) != '1':
+        problems.append('%s=1 set without %s=1: the adaptive governor is the lever\'s' % (ADAPTIVE_FLAG, FLAG))
+    for name, read in ((ADAPTIVE_DECODERS_FLAG, lambda: _whole(environ, ADAPTIVE_DECODERS_FLAG, DEFAULT_ADAPTIVE_DECODERS, 1, MAX_ADAPTIVE_DECODERS)),
+                       (ADAPTIVE_SHARE_FLAG, lambda: _adaptive_share(environ)),
+                       (ADAPTIVE_TTFT_FLAG, lambda: _whole(environ, ADAPTIVE_TTFT_FLAG, DEFAULT_ADAPTIVE_TTFT_S, 0, 3600))):
+        try:
+            read()
+        except ValueError as failure:
+            problems.append(str(failure))
+    if environ.get(ROUNDS_FLAG) is not None:
+        problems.append('%s=1 beside %s: static rounds override the prefill share, there is nothing to adapt' % (ADAPTIVE_FLAG, ROUNDS_FLAG))
+    if environ.get(SHARE_FLAG) is not None:
+        try:
+            if _share(environ) >= 1.0:
+                problems.append('%s=1 beside %s=1: the static 1.0 control arm yields nothing, there is nothing to adapt' % (ADAPTIVE_FLAG, SHARE_FLAG))
+        except ValueError:
+            pass                                        # named by config()
+    if environ.get('QWEN_PREFIX_REUSE') != '1':
+        problems.append('%s=1 needs the merged route (QWEN_PREFIX_REUSE=1 beside %s=1): the deadline governor and the decode-gap floor live there'
+                        % (ADAPTIVE_FLAG, FLAG))
+    try:
+        floor = _whole(environ, GAP_FLAG, DEFAULT_MAX_GAP_S, 0, 600)
+    except ValueError:
+        floor = None                                    # named by merged_config()
+    if floor == 0:
+        problems.append('%s=1 with %s=0: the adaptive policy raises the prefill share and REQUIRES the decode-gap floor' % (ADAPTIVE_FLAG, GAP_FLAG))
+    return problems
+
+
+def adaptive_config(environ=None):
+    """The Adaptive policy of `environ` (decoders, share, ttft_s), or None when QWEN_FAST_LEVERN_ADAPTIVE is unset or 0. Strict: a malformed value or a
+    combination adaptive_problems names is a ValueError, never a default."""
+    environ = os.environ if environ is None else environ
+    if not adaptive_on(environ):
+        return None
+    problems = adaptive_problems(environ)
+    if problems:
+        raise ValueError('; '.join(problems))
+    return Adaptive(_whole(environ, ADAPTIVE_DECODERS_FLAG, DEFAULT_ADAPTIVE_DECODERS, 1, MAX_ADAPTIVE_DECODERS), _adaptive_share(environ),
+                    _whole(environ, ADAPTIVE_TTFT_FLAG, DEFAULT_ADAPTIVE_TTFT_S, 0, 3600))
+
+
+Sched = namedtuple('Sched', 'owed_cap_ms short_share short_wait_s')
+MIN_OWED_CAP_MS, MAX_OWED_CAP_MS = 100, 10000
+MAX_SHORT_WAIT_S = 600
+
+
+def _short_share(environ):
+    value = environ.get(SHORT_SHARE_FLAG)
+    if value is None:
+        return None
+    if not value.isascii() or not value.replace('.', '', 1).isdigit():
+        raise ValueError('%s must be a decimal number in (0, 1), got %r' % (SHORT_SHARE_FLAG, value))
+    share = float(value)
+    if not math.isfinite(share) or not 0.0 < share < 1.0:
+        raise ValueError('%s must be in (0, 1) (1.0 owes nothing beyond the one round: leave it unset), got %r' % (SHORT_SHARE_FLAG, value))
+    return share
+
+
+def sched_problems(environ=None):
+    """Every reason the production-shape pacing's flags in `environ` cannot be read or cannot work, one string each; [] when they are fine or none is set. A knob without
+    the master switch is a typo (an arm would silently run today's pacing); set, they need the share mode (static rounds override the share, and a static share of 1.0
+    owes nothing), the short knobs need the merged route with the short lane (QWEN_PREFIX_REUSE=1, QWEN_FAST_LEVERN_PARK=host, a nonzero QWEN_FAST_LEVERN_SHORT_TOKENS:
+    the short class does not exist otherwise) and the wait guard needs the share it guards."""
+    environ = os.environ if environ is None else environ
+    named = [name for name in SCHED_FLAGS if environ.get(name) is not None]
+    if not named:
+        return []
+    problems = []
+    for name, read in ((OWED_CAP_FLAG, lambda: _whole(environ, OWED_CAP_FLAG, None, MIN_OWED_CAP_MS, MAX_OWED_CAP_MS)),
+                       (SHORT_SHARE_FLAG, lambda: _short_share(environ)),
+                       (SHORT_WAIT_FLAG, lambda: _whole(environ, SHORT_WAIT_FLAG, None, 1, MAX_SHORT_WAIT_S))):
+        try:
+            read()
+        except ValueError as failure:
+            problems.append(str(failure))
+    if environ.get(FLAG) != '1':
+        problems.append('%s set without %s=1: a typo must not leave an arm running today\'s pacing' % (', '.join(named), FLAG))
+    if environ.get(ROUNDS_FLAG) is not None:
+        problems.append('%s beside %s: static rounds override the prefill share, there is nothing to pace' % (', '.join(named), ROUNDS_FLAG))
+    if environ.get(SHARE_FLAG) is not None:
+        try:
+            if _share(environ) >= 1.0:
+                problems.append('%s beside %s=1: the static 1.0 control arm owes the decoders nothing' % (', '.join(named), SHARE_FLAG))
+        except ValueError:
+            pass                                        # named by config()
+    shorts = [name for name in (SHORT_SHARE_FLAG, SHORT_WAIT_FLAG) if environ.get(name) is not None]
+    if shorts:
+        if environ.get('QWEN_PREFIX_REUSE') != '1':
+            problems.append('%s needs the merged route (QWEN_PREFIX_REUSE=1 beside %s=1): the short class is the merged route\'s' % (', '.join(shorts), FLAG))
+        if environ.get(PARK_FLAG, '0') != 'host':
+            problems.append('%s needs %s=host: without the short lane no request is a SHORT' % (', '.join(shorts), PARK_FLAG))
+        if environ.get(SHORT_FLAG) == '0':
+            problems.append('%s with %s=0: the short class is empty' % (', '.join(shorts), SHORT_FLAG))
+    if environ.get(SHORT_WAIT_FLAG) is not None and environ.get(SHORT_SHARE_FLAG) is None:
+        problems.append('%s without %s: the guard bounds the wait a short share causes' % (SHORT_WAIT_FLAG, SHORT_SHARE_FLAG))
+    return problems
+
+
+def sched_config(environ=None):
+    """The Sched pacing of `environ` (owed_cap_ms, short_share, short_wait_s: None for each unset), or None when none of its flags is set. Strict: a malformed value or a
+    combination sched_problems names is a ValueError, never a default."""
+    environ = os.environ if environ is None else environ
+    if all(environ.get(name) is None for name in SCHED_FLAGS):
+        return None
+    problems = sched_problems(environ)
+    if problems:
+        raise ValueError('; '.join(problems))
+    return Sched(_whole(environ, OWED_CAP_FLAG, None, MIN_OWED_CAP_MS, MAX_OWED_CAP_MS), _short_share(environ),
+                 _whole(environ, SHORT_WAIT_FLAG, None, 1, MAX_SHORT_WAIT_S))
+
+
 def build_ms_mode(environ=None):
     """QWEN_FAST_LEVERN_BUILD_MS: None when unset (today's fixed BUILD_MS, charged once), 'learned', or a number of ms (> 0) that replaces
     BUILD_MS. Strict: anything else is a ValueError."""
@@ -396,6 +597,8 @@ def config_problems(environ=None):
                         % (KV_READ_FLAG, environ.get(KV_READ_FLAG), AUDIT_FLAG))
     if environ.get(KV_CROSS_FLAG) is not None and environ.get(KV_READ_FLAG) != 'cross':
         problems.append('%s set without %s=cross: nothing is cross-checked' % (KV_CROSS_FLAG, KV_READ_FLAG))
+    problems += adaptive_problems(environ)
+    problems += sched_problems(environ)
     siblings = [name for name in SIBLING_FLAGS if environ.get(name) is not None]
     if siblings and not on:
         problems.append('%s set without %s=1: %s' % (', '.join(siblings), FLAG, 'a typo must not leave an arm running '
@@ -709,10 +912,21 @@ class Alternator(object):
     scheduler run its default step). end(kind) is called with what the step turned out to be, so the next begin can
     charge the interval to it. A kind is 'prefill' only for a step that scheduled prefill tokens."""
 
-    def __init__(self, cfg, clock=time.monotonic, merged=None, wall=time.time):
+    def __init__(self, cfg, clock=time.monotonic, merged=None, wall=time.time, adaptive=None, sched=None):
         self.cfg, self.clock = cfg, clock
         self.merged = merged
         self.wall = wall
+        # The production-shape pacing (Sched; None unless one of its flags is set, and then nothing below differs): the oldest waiting SHORT's wait in seconds, set by the scheduler
+        # before every begin() beside pending_hint (0.0 when none waits), and whether the guard forgave the debt at the latest decision.
+        self.sched = sched
+        self.short_wait_s = 0.0
+        self.guarded = False
+        # The adaptive governor (QWEN_FAST_LEVERN_ADAPTIVE=1; None otherwise, and then nothing below differs from the governor without it): the live
+        # decoder count of the latest begin(), the share the governor started from at that step and the deadline target it used.
+        self.adaptive = adaptive
+        self.decodes = 0
+        self.base_share = cfg.share
+        self.target_s = merged.ttft_s if merged is not None else 0
         # The deadline governor's input, set by the scheduler before every begin(): [(arrival_s, remaining_device_ms)] in service order.
         self.pending_hint = []
         self.share = cfg.share
@@ -748,12 +962,16 @@ class Alternator(object):
                     if cfg.rounds is not None:
                         self.owed_rounds = max(self.owed_rounds, 1)
                     else:
-                        self.owed_ms = min(cfg.max_rounds * self.round_ms, self.owed_ms + self.round_ms)
+                        # QWEN_FAST_LEVERN_SHORT_SHARE: the debt of a short step is the share's (at least the one round it always was).
+                        debt = self.round_ms
+                        short_share = self.sched.short_share if self.sched is not None else None
+                        if short_share is not None:
+                            debt = max(debt, dt_ms * (1.0 - short_share) / short_share)
+                        self.owed_ms = min(self.owed_cap_ms(), self.owed_ms + debt)
                 elif cfg.rounds is not None:
                     self.owed_rounds = cfg.rounds
                 elif self.share < 1.0:
-                    cap = cfg.max_rounds * self.round_ms
-                    self.owed_ms = min(cap, self.owed_ms + dt_ms * (1.0 - self.share) / self.share)
+                    self.owed_ms = min(self.owed_cap_ms(), self.owed_ms + dt_ms * (1.0 - self.share) / self.share)
             return
         self.since_prefill += 1
         self.short_owed = False
@@ -764,6 +982,17 @@ class Alternator(object):
             self.owed_rounds = max(0, self.owed_rounds - 1)
         else:
             self.owed_ms = max(0.0, self.owed_ms - dt_ms)
+
+    def owed_cap_ms(self):
+        """The most one step may add to the debt, in ms: QWEN_FAST_LEVERN_OWED_CAP_MS when set, else QWEN_FAST_LEVERN_MAX_ROUNDS times the measured round time (today's)."""
+        if self.sched is not None and self.sched.owed_cap_ms:
+            return float(self.sched.owed_cap_ms)
+        return self.cfg.max_rounds * self.round_ms
+
+    def guard_active(self):
+        """Whether the returning turn's guard holds: QWEN_FAST_LEVERN_SHORT_WAIT_S is set and the oldest waiting SHORT has waited that long."""
+        sched = self.sched
+        return bool(sched is not None and sched.short_wait_s and self.short_wait_s >= sched.short_wait_s)
 
     def owes(self):
         cfg = self.cfg
@@ -786,11 +1015,31 @@ class Alternator(object):
         return bool(merged is not None and merged.max_gap_s and self.decoded_at is not None
                     and self.clock() - self.decoded_at >= merged.max_gap_s)
 
+    def adaptive_active(self, decodes=None):
+        """Whether the adaptive policy is in force for `decodes` live decoders (the latest begin()'s when None): at least one (with none nothing is owed
+        anyway) and at most QWEN_FAST_LEVERN_ADAPTIVE_DECODERS, and the share mode (static rounds override the share)."""
+        adaptive = getattr(self, 'adaptive', None)
+        if adaptive is None or self.cfg.rounds is not None:
+            return False
+        count = self.decodes if decodes is None else decodes
+        return 1 <= count <= adaptive.decoders
+
     def govern(self):
-        """Recompute the share from the pending prefills the scheduler handed in (pending_hint); the base share when the governor is off."""
+        """Recompute the share from the pending prefills the scheduler handed in (pending_hint); the base share when the governor is off.
+
+        The adaptive policy changes only the two inputs: while few decoders are live the base share is max(the profile's, the adaptive one) and the deadline
+        target is min(the profile's, the adaptive one); with more decoders live (or the policy off) both are the profile's and every call below is today's.
+        The output is still clamped to [base, 1.0], so a share below 1.0 owes the decoders a round after every prefill step and a governed 1.0 is the decode-gap
+        floor's (owes)."""
         merged = self.merged
+        base, target = self.cfg.share, (merged.ttft_s if merged is not None else 0)
+        if self.adaptive_active():
+            base = max(base, self.adaptive.share)
+            if target and self.adaptive.ttft_s:
+                target = min(target, self.adaptive.ttft_s)
+        self.base_share, self.target_s = base, target
         if merged is None or not merged.ttft_s or self.cfg.rounds is not None:
-            self.share = self.cfg.share
+            self.share = base
         else:
             now = self.wall()
             mode = getattr(self, 'build_mode', None)
@@ -800,14 +1049,15 @@ class Alternator(object):
                 cost = dict(builds=admission_cost().per_pending(len(self.pending_hint)))
             else:
                 cost = dict(build_ms=mode)
-            self.share = effective_share(self.cfg.share, merged.ttft_s, self.pending_hint, now, **cost)
-            self.need = governor_need(self.cfg.share, merged.ttft_s, self.pending_hint, now, **cost)
+            self.share = effective_share(base, target, self.pending_hint, now, **cost)
+            self.need = governor_need(base, target, self.pending_hint, now, **cost)
             return self.share
         self.need = self.share
         return self.share
 
     def begin(self, decodes, pending):
         now = self.clock()
+        self.decodes = decodes
         self.govern()
         prev_kind, prev_ms = self.last_kind, None
         if self.last_at is not None:
@@ -816,6 +1066,10 @@ class Alternator(object):
                 self._account(prev_kind, self.last_decodes, prev_ms)
         self.last_at = now
         self.last_decodes = decodes
+        # The returning turn's guard: a SHORT has waited past QWEN_FAST_LEVERN_SHORT_WAIT_S, so no debt is paid ahead of it (the one round after a short step, RMIN, stays).
+        self.guarded = bool(decodes) and self.guard_active()
+        if self.guarded:
+            self.owed_ms = 0.0
         if decodes and self.decoded_at is None:
             self.decoded_at = now         # the floor counts from when decoders were first seen waiting
         if not decodes:
@@ -832,7 +1086,7 @@ class Alternator(object):
             return Decision('prefill', 'none-pending', prev_kind, prev_ms, 0.0, 0)
         if decodes and self.owes():
             return Decision('decode', 'owed', prev_kind, prev_ms, self.owed_ms, self.owed_rounds)
-        return Decision('prefill', 'idle' if not decodes else 'paid', prev_kind, prev_ms, self.owed_ms, self.owed_rounds)
+        return Decision('prefill', 'idle' if not decodes else 'guard' if self.guarded else 'paid', prev_kind, prev_ms, self.owed_ms, self.owed_rounds)
 
     def end(self, kind, short=False):
         if kind not in ('prefill', 'decode'):

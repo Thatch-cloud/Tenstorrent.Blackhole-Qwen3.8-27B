@@ -555,6 +555,79 @@ def dram_reading(pool):
     return reading, None
 
 
+# QWEN_FAST_ADMISSION_LEAN (default off; gate only; docs/tp4-sched-1.md section 4): the four admission costs that are not the rebind. A returning turn's engine
+# build, measured 541 ms (p50) in production, is a parked rebind of 188 ms plus about 350 ms of host-side accounting around it, all of it with every seat stopped
+# (the engine is synchronous): the post-prefill DRAM backstop's allocator reading (about 70 ms: four DRAM views and four trace views), the GDN slot adoption's conv-slice
+# readback (30 to 145 ms, 48 layers, a geometry proof that is the same for every admission of a slot), the memory ledger's op=rebind bracket (a reading before the rebind and
+# one after, about 62 and 65 ms; the image turns the ledger on and nothing judges the bracket per rebind) and, after the 'sticky engine built' line, the 'dram after engine' log
+# line (another reading, about 66 ms). With the flag on: the readback is taken at each slot's first adoption only (memory_ledger.trim_enabled's rule), so is the bracket
+# (serving_request_factory.lean_bracket_skipped), the line is off for a request rebound onto a parked engine, and the backstop REUSES the reading this very admission's DRAM
+# hold took a few seconds earlier when that reading leaves room by a wide margin (reusable_reading). Unset or 0, every call is what it was.
+LEAN_FLAG = 'QWEN_FAST_ADMISSION_LEAN'
+# What a reused reading is discounted by: the prefill between the hold and the backstop persists tens of MB a chip (the window snapshots; 27 MB seen in the audited
+# card run: 28.774 -> 28.801 GB allocated) and can only split the largest free block, at worst in half. The reading must fit the backstop's need after BOTH.
+LEAN_ALLOWANCE_BYTES = 512 * MEGABYTE
+LEAN_READING_MAX_AGE_S = 30.0
+LEAN_READINGS_KEPT = 16
+LEAN_REUSED_LINE = ('[PINDIAG] admission lean backstop reused the admission reading request={} age_ms={:.0f} free={} largest_free={} need={} allowance={}: '
+                    'no allocator read after the prefill')
+_LEAN_READINGS = {}
+
+
+def lean_enabled(environ=None):
+    """QWEN_FAST_ADMISSION_LEAN=1. Lenient like memory_ledger.trim_enabled (a malformed value is off here and named by lean_problems, which the profile contract
+    runs): this is read inside an admission, where an exception would stop the engine."""
+    return (os.environ if environ is None else environ).get(LEAN_FLAG) == '1'
+
+
+def lean_problems(environ=None):
+    """[why] when QWEN_FAST_ADMISSION_LEAN is set to anything but 0 or 1, else []."""
+    value = (os.environ if environ is None else environ).get(LEAN_FLAG)
+    if value is not None and value not in ('0', '1'):
+        return ['%s must be 0 or 1, got %r' % (LEAN_FLAG, value)]
+    return []
+
+
+def note_reading(request_id, detail, clock=time.monotonic):
+    """The DRAM hold's (or the final-step gate's) reading that let `request_id` through, kept for its post-prefill backstop. Only under the flag, only a complete
+    reading, and the newest `LEAN_READINGS_KEPT` requests' (the state stays bounded however many requests pass)."""
+    if request_id is None or not isinstance(detail, dict) or not lean_enabled():
+        return
+    free, largest = detail.get('free'), detail.get('largest_free')
+    if type(free) is not int or type(largest) is not int:
+        return
+    _LEAN_READINGS.pop(request_id, None)
+    _LEAN_READINGS[request_id] = dict(at=clock(), free=free, largest_free=largest, trace_largest_free=detail.get('trace_largest_free'))
+    while len(_LEAN_READINGS) > LEAN_READINGS_KEPT:
+        _LEAN_READINGS.pop(next(iter(_LEAN_READINGS)))
+
+
+def forget_readings():
+    _LEAN_READINGS.clear()
+
+
+def reusable_reading(request_id, need, reserve, *, trace_need=None, clock=time.monotonic):
+    """The reading the post-prefill backstop of `request_id` may use instead of reading the allocator again, or None (it reads). Single use. The reading is the
+    admission hold's own for this request, at most LEAN_READING_MAX_AGE_S old, and it must clear the backstop's terms (split_short) after the allowance: the free
+    total less LEAN_ALLOWANCE_BYTES and the largest free block halved less LEAN_ALLOWANCE_BYTES. A trace term that applies (trace_need > 0, None meaning the engine
+    build's default) needs a trace reading in it. Anything tighter reads."""
+    kept = _LEAN_READINGS.pop(request_id, None)
+    if kept is None or not lean_enabled():
+        return None
+    if clock() - kept['at'] > LEAN_READING_MAX_AGE_S:
+        return None
+    free, largest = kept['free'] - LEAN_ALLOWANCE_BYTES, kept['largest_free'] // 2 - LEAN_ALLOWANCE_BYTES
+    if free < 0 or largest < 0:
+        return None
+    wanted = TRACE_CONTIGUOUS_BYTES if trace_need is None else trace_need
+    if wanted > 0 and kept['trace_largest_free'] is None:
+        return None
+    if split_short(free, largest, need, reserve, kept['trace_largest_free'], trace_need=trace_need):
+        return None
+    kept['age_ms'] = (clock() - kept['at']) * 1000.0
+    return kept
+
+
 def dram_predicate(pool, reserve, parked=None):
     """The predicate the worker registers, admits(prompt_tokens) -> (ok, detail): ok is False only when the
     pool's reading exists and is short of a term of THE SPLIT for dram_need, its contiguous term the admission's
@@ -729,6 +802,8 @@ def dram_hold(scheduler, decodes, state, log, modules=None, candidates=None):
         largest, need, unavailable = detail['largest_free'], detail['need'], detail.get('unavailable')
         # THE SPLIT's readings (dram_predicate); a predicate that names none logs them 'unread'.
         free, trace, short = detail.get('free'), detail.get('trace_largest_free'), detail.get('short')
+        if ok:
+            note_reading(request_id, detail)         # (QWEN_FAST_ADMISSION_LEAN: the post-prefill backstop may use it)
     except Exception as failure:
         ok, largest, need, unavailable = True, None, None, '%s: %s' % (type(failure).__name__, str(failure)[:120])
         free = trace = short = parked_terms = None
@@ -1151,7 +1226,12 @@ def install(config, *, importer=importlib.import_module, log=None, queue_factory
         # Beside prefix reuse (QWEN_PREFIX_REUSE=1) it is the MERGED route's runtime: the peeked cap, the single-candidate pass, the pre-pass
         # quarantine, the short lane, the governor and the kill switch (levern_scheduler).
         merged = levern_policy.merged_config() if os.environ.get('QWEN_PREFIX_REUSE') == '1' else None
-        levern = levern_scheduler.LevernRuntime(log=log, merged=merged)
+        # The adaptive governor (QWEN_FAST_LEVERN_ADAPTIVE=1, gate only): None unless asked, and then nothing below differs. A malformed value or a
+        # combination it cannot work in (no merged route, the floor off) fails the install by name, never a silent default.
+        adaptive = levern_policy.adaptive_config()
+        # The production-shape pacing (QWEN_FAST_LEVERN_OWED_CAP_MS / _SHORT_SHARE / _SHORT_WAIT_S, gate only): None unless one is set, strict like the adaptive governor.
+        sched = levern_policy.sched_config()
+        levern = levern_scheduler.LevernRuntime(log=log, merged=merged, adaptive=adaptive, sched=sched)
     state = new_state()
     setattr(cls, METHOD, wrap(original, queue_factory=queue_factory, log=log, steps=steps, state=state, kv=kv, levern=levern))
     log(INSTALLED + '{}', name)
@@ -1167,4 +1247,9 @@ def install(config, *, importer=importlib.import_module, log=None, queue_factory
             cfg.max_rounds)
         if merged is not None:
             log(levern_policy.GOVERNOR_LINE, merged.ttft_s, merged.max_gap_s)
+        if adaptive is not None:
+            log(levern_policy.ADAPTIVE_LINE, adaptive.decoders, adaptive.share, adaptive.ttft_s, merged.max_gap_s)
+        if sched is not None:
+            log(levern_policy.SCHED_LINE, sched.owed_cap_ms if sched.owed_cap_ms is not None else '-', sched.short_share if sched.short_share is not None else '-',
+                sched.short_wait_s if sched.short_wait_s is not None else '-')
     return name

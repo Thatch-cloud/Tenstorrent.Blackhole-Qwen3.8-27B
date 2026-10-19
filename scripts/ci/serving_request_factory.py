@@ -3,6 +3,7 @@
 from contextlib import ExitStack, contextmanager, nullcontext
 import os
 from pathlib import Path
+import time
 from types import SimpleNamespace
 
 from serving_fast_request import FastRequest
@@ -98,8 +99,36 @@ DRAM_BACKSTOP_REFUSED = '[PINDIAG] dram backstop refused request '
 # Engine reuse (QWEN_FAST_PARKED_ENGINES=1 only): the parked terms the registered predicate also asks.
 DRAM_PARKED_REGISTERED = '[PINDIAG] dram admission parked terms: '
 REBIND_FAILED_MARKER = '[PINDIAG] parked rebind failed '
+# QWEN_FAST_ADMISSION_LEAN (serving_prefill_admission.LEAN_FLAG, duplicated here so that an admission without the flag imports nothing: the test pins them equal): one line per slot adoption (readback=0 when the conv-slice readback was skipped) and, from the bridge, one per
+# admission with the milliseconds of the backstop and the adoption that remain.
+LEAN_FLAG = 'QWEN_FAST_ADMISSION_LEAN'
+LEAN_ADOPT_MARKER = '[PINDIAG] admission lean adopt '
+# ...and one per rebound admission: A the host checks, the DRAM backstop and the slot adoption, B the placement, the rebind's host refusal check and the first window join,
+# C the rebind itself (ParkedEngineSet.rebind_slot), all measured by the factory's own clock; total_ms is the sum, a part of the 'sticky engine built' line's ms.
+LEAN_SPLIT_MARKER = '[PINDIAG] admission lean split '
 # W6a's executed-path marker: the buckets the engine's proposal capture actually holds, read after the build.
 PROPOSAL_BUCKETS_BUILT = '[PINDIAG] proposal buckets built request='
+
+
+def lean_enabled(environ=None):
+    """QWEN_FAST_ADMISSION_LEAN=1 (serving_prefill_admission.lean_enabled's rule: lenient here, the profile contract names a malformed value)."""
+    return (os.environ if environ is None else environ).get(LEAN_FLAG) == '1'
+
+
+# QWEN_FAST_ADMISSION_LEAN: the parked slots whose rebind the memory ledger has bracketed once in this process (op=rebind, a reading before and one after, some 60 ms each
+# with every seat stopped; nothing judges them per rebind). Only read and written under the flag.
+_REBIND_BRACKETED = set()
+
+
+def lean_bracket_skipped(slot):
+    """Whether the ledger's op=rebind bracket is left out for a rebind onto parked slot `slot`: under QWEN_FAST_ADMISSION_LEAN=1, for every rebind of a slot after its first (the
+    bracket of the first one is the record; the DRAM hold and the backstop are the checks). Off, always False and nothing is recorded."""
+    if not lean_enabled():
+        return False
+    if slot in _REBIND_BRACKETED:
+        return True
+    _REBIND_BRACKETED.add(slot)
+    return False
 
 
 def extent_replay_enabled(environ=None):
@@ -223,6 +252,14 @@ def dram_backstop(pool, *, request_id, reserve=None, log=None, parked=None, make
     else:
         need = admission.parked_backstop_need(reserve, rebind=parked['rebind'], single=parked['single'])
     log = _log if log is None else log
+    lean = admission.lean_enabled()
+    if lean:
+        # QWEN_FAST_ADMISSION_LEAN: the reading the admission's own DRAM hold took a few seconds ago, when it clears this need with a wide margin (the allowance
+        # covers the prefill in between): no allocator read here. Else the reading below.
+        reused = admission.reusable_reading(request_id, need, reserve, trace_need=None if parked is None else admission.parked_trace_need(parked['single']))
+        if reused is not None:
+            log(admission.LEAN_REUSED_LINE, request_id, reused['age_ms'], reused['free'], reused['largest_free'], need, admission.LEAN_ALLOWANCE_BYTES)
+            return reused['largest_free']
     for attempt in (0, 1):
         reading, reason = admission.dram_reading(pool)
         if reading is None:
@@ -383,7 +420,11 @@ def adopt_prefill_slot(helpers, capture, request_id):
     # admission freeze) is taken at each slot's first adoption only; the later adoptions of that slot keep the metadata
     # checks and copy exactly the same. Off, every adoption is called as it always was.
     import memory_ledger
-    skip_readback = memory_ledger.trim_enabled() and slot in _ADOPT_VERIFIED
+    # QWEN_FAST_ADMISSION_LEAN takes the trim's rule for this one site: the conv-slice readback at each slot's first adoption only.
+    lean = lean_enabled()
+    trimmed = memory_ledger.trim_enabled() or lean
+    skip_readback = trimmed and slot in _ADOPT_VERIFIED
+    began = time.perf_counter() if lean else None
     if skip_readback:
         chips = {helper.adopt_slot(slot, layer=layer, readback=False) for layer, helper in enumerate(helpers)}
     else:
@@ -391,8 +432,10 @@ def adopt_prefill_slot(helpers, capture, request_id):
     if len(chips) != 1 or not isinstance(next(iter(chips)), int) or next(iter(chips)) < 1:
         raise ValueError('Every GDN layer must verify its adopted slot on the same chips; got %r' % (sorted(chips, key=repr),))
     (verified,) = chips
-    if memory_ledger.trim_enabled():
+    if trimmed:
         _ADOPT_VERIFIED.add(slot)
+    if lean:
+        _log(LEAN_ADOPT_MARKER + 'request={} slot={} readback={} ms={:.1f}', request_id, slot, 0 if skip_readback else 1, (time.perf_counter() - began) * 1000.0)
     _log('[PINDIAG] adopted GDN slot {} into slot 0: {} layers, conv slices verified on {} for request {}',
          slot, len(helpers), 'both chips' if verified == 2 else '%d chips' % verified, request_id)
 
@@ -414,7 +457,7 @@ def rebind_parked(parked, entry, *, model, pages, state, capture, prompt, seed, 
 
     components = parked.components
     token = None
-    if extent_memory:
+    if extent_memory and not lean_bracket_skipped(entry.index):
         import memory_ledger
 
         terms = parked.slot_terms(entry)
@@ -456,6 +499,10 @@ def rebind_parked(parked, entry, *, model, pages, state, capture, prompt, seed, 
 def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, fixtures, eos_ids,
                  collectives=None, buffer_pool=None, shared_weights=None, capture_rows=None, parked=None):
     from dflash_request_runtime import TARGET_TAPS
+
+    # QWEN_FAST_ADMISSION_LEAN: the admission's own clock, for the split line a rebind logs (the A, B and C segments of scripts/ci/rebind_split.py without the ledger).
+    lean = lean_enabled()
+    entered = time.perf_counter() if lean else None
 
     # Engine reuse (QWEN_FAST_PARKED_ENGINES=1 only; serving_runtime passes `parked`, the attach's serving_parked_engines.ParkedEngineSet, and
     # nothing otherwise): every host check below runs as it always does, in its order, so a refusal is the same with the flag on and off; the
@@ -545,6 +592,7 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
     # After the host-side refusals, so a rejected request touches no device state, and
     # before the drafter, the engine and every other reader of slot 0.
     adopt_prefill_slot(helpers, capture, state.req_id)
+    adopted = time.perf_counter() if lean else None
     entry = pinned = None
     fell_back = False
     if parked is not None:
@@ -578,10 +626,15 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
     with ExitStack() as owned:
         owned.callback(release_capture)
         if entry is not None:
+            rebinding = time.perf_counter() if lean else None
             request = rebind_parked(parked, entry, model=model, pages=pages, state=state, capture=capture, prompt=prompt, seed=seed,
                                     budget=budget, eos_ids=() if any_request and ignore_eos else eos_ids, extent_memory=extent_memory,
                                     release_capture=release_capture)
             if request is not None:
+                if lean:
+                    done = time.perf_counter()
+                    _log(LEAN_SPLIT_MARKER + 'request={} a_ms={:.1f} b_ms={:.1f} c_ms={:.1f} total_ms={:.1f}', str(state.req_id)[:48], (adopted - entered) * 1000.0,
+                         (rebinding - adopted) * 1000.0, (done - rebinding) * 1000.0, (done - entered) * 1000.0)
                 owned.pop_all()
                 return request
             fell_back = True

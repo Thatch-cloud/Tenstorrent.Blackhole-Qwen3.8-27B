@@ -1793,7 +1793,7 @@ LEVERN_PARK_OUT = re.compile(r'\[PINDIAG\] lever N park out req=(\S+) at=(\d+)')
 LEVERN_PARK_IN = re.compile(r'\[PINDIAG\] lever N park in req=(\S+) at=(\d+)')
 LEVERN_STEP = re.compile(r'\[PINDIAG\] lever N step n=(\d+) kind=(prefill|decode) seats=(\d+) req=(\S+) start=(\S+) tokens=(\d+) '
                          r'end=(\S+) prompt=(\S+) final=(\S+) reason=(\S+) prev=(\S+):(\S+)ms owed_ms=(\S+) owed_rounds=(\d+)'
-                         r'(?: f_eff=(\S+))?(?: need=(\S+))?(?: gap_ms=(\S+))?')
+                         r'(?: f_eff=(\S+))?(?: need=(\S+))?(?: gap_ms=(\S+))?(?: base=(\S+) target=(\S+) adaptive=([01]))?(?: short=([01]) cap_ms=(\S+) guard=([01]))?')
 LEVERN_DIGEST = re.compile(r'\[PINDIAG\] lever N digest req=(\S+) prompt=(\d+) tokens_sha=([0-9a-f]{32}) slot_sha=([0-9a-f]{32}) '
                            r'logits_sha=([0-9a-f]{32}) kv_sha=([0-9a-f]{32})')
 
@@ -1869,7 +1869,9 @@ def levern_facts(container_text):
               for m in LEVERN_ROUTE.finditer(container_text)]
     steps = [dict(n=int(m.group(1)), kind=m.group(2), seats=int(m.group(3)), req=m.group(4), start=m.group(5), tokens=int(m.group(6)),
                   end=m.group(7), prompt=m.group(8), final=m.group(9), reason=m.group(10), prev_kind=m.group(11), prev_ms=_float_or(m.group(12), 0.0),
-                  f_eff=_float_or(m.group(15), None), need=_float_or(m.group(16), None), gap_ms=_float_or(m.group(17), None))
+                  f_eff=_float_or(m.group(15), None), need=_float_or(m.group(16), None), gap_ms=_float_or(m.group(17), None),
+                  **({} if m.group(20) is None else dict(base=_float_or(m.group(18), None), target=_float_or(m.group(19), None), adaptive=m.group(20) == '1')),
+                  **({} if m.group(21) is None else dict(short=m.group(21) == '1', cap_ms=_float_or(m.group(22), None), guard=m.group(23) == '1', owed_ms=_float_or(m.group(13), 0.0))))
              for m in LEVERN_STEP.finditer(container_text)]
     digests = [dict(req=m.group(1), prompt=int(m.group(2)), tokens=m.group(3), slot=m.group(4), logits=m.group(5), kv=m.group(6))
                for m in LEVERN_DIGEST.finditer(container_text)]
@@ -2018,6 +2020,110 @@ def levern_alternation_problems(steps, env, launched_gap_s=None):
     return problems
 
 
+LEVERN_ADAPTIVE_FLAG = 'QWEN_FAST_LEVERN_ADAPTIVE'
+LEVERN_ADAPTIVE_LINE = '[PINDIAG] lever N adaptive: '
+LEVERN_ADAPTIVE_SLACK = 0.0006       # shares print with three decimals
+
+
+def levern_adaptive_problems(steps, env, container_text, results=None):
+    """The adaptive governor (QWEN_FAST_LEVERN_ADAPTIVE, docs/lever-n-adaptive-governor.md) over the scheduler's step lines.
+    Off (unset or 0): the policy must leave NO trace: no "lever N adaptive:" install line and no base=/target=/adaptive= field on any step line (flag off logs byte
+    for byte what it did). On: the install line; every step line carries the fields; every PREFILL step that ran with 1..QWEN_FAST_LEVERN_ADAPTIVE_DECODERS
+    decoders says adaptive=1 and started from max(QWEN_FAST_LEVERN_PREFILL_SHARE, the adaptive share) with the lowered deadline target; every prefill step with no
+    decoder or more than that many says adaptive=0 and started from today's share and target (the return to today's pacing under load); no step's f_eff is below its
+    base; and when prefill_few_decoders ran, at least one step must have been adaptive (NOT EXERCISED otherwise). The decode-gap floor and the alternation are
+    levern_alternation_problems' (an adaptive share is below 1.0 or governed, so both rules apply to its lines unchanged)."""
+    lines = [line for line in container_text.splitlines() if LEVERN_ADAPTIVE_LINE in line]
+    carrying = [step for step in steps if step.get('adaptive') is not None]
+    if str(env.get(LEVERN_ADAPTIVE_FLAG, '0')) != '1':
+        problems = []
+        if lines:
+            problems.append('%d "%s" line(s) on a profile without %s=1 (the first: %s)' % (len(lines), LEVERN_ADAPTIVE_LINE.strip(), LEVERN_ADAPTIVE_FLAG, lines[0].strip()[:160]))
+        if carrying:
+            problems.append('%d step line(s) carry base=/target=/adaptive= fields on a profile without %s=1: the flag off must log what it always did (first n=%d)'
+                            % (len(carrying), LEVERN_ADAPTIVE_FLAG, carrying[0]['n']))
+        return problems
+    problems = []
+    try:
+        few = int(env.get('QWEN_FAST_LEVERN_ADAPTIVE_DECODERS', 2))
+        adaptive_share = float(env.get('QWEN_FAST_LEVERN_ADAPTIVE_SHARE', 0.9))
+        adaptive_target = int(env.get('QWEN_FAST_LEVERN_ADAPTIVE_TTFT_S', 120))
+        today_share = float(env.get('QWEN_FAST_LEVERN_PREFILL_SHARE', 0.5))
+        today_target = int(env.get('QWEN_FAST_LEVERN_TTFT_TARGET_S', 180))
+    except (TypeError, ValueError):
+        return ['the adaptive governor\'s flags in the profile do not parse, so its steps cannot be judged']
+    if not lines:
+        problems.append('%s=1 and no "%s" line was logged: the image does not carry the adaptive governor, or the flag never reached the container'
+                        % (LEVERN_ADAPTIVE_FLAG, LEVERN_ADAPTIVE_LINE.strip()))
+    if steps and not carrying:
+        problems.append('%s=1 and none of %d step line(s) carries base=/target=/adaptive=: the scheduler ran without the policy' % (LEVERN_ADAPTIVE_FLAG, len(steps)))
+    want_target = min(today_target, adaptive_target) if today_target and adaptive_target else today_target
+    engaged = 0
+    for step in carrying:
+        if step['kind'] != 'prefill':
+            continue
+        few_live = 1 <= step['seats'] <= few
+        engaged += int(few_live and step['adaptive'])
+        if step['adaptive'] != few_live:
+            problems.append('step n=%d ran with %d decoder(s) and logged adaptive=%d (the policy is in force for 1 to %d decoders)'
+                            % (step['n'], step['seats'], int(step['adaptive']), few))
+            continue
+        base, target = (max(today_share, adaptive_share), want_target) if few_live else (today_share, today_target)
+        if step.get('base') is None or abs(step['base'] - base) > LEVERN_ADAPTIVE_SLACK or step.get('target') != target:
+            problems.append('step n=%d (%d decoder(s), adaptive=%d) started from base=%s target=%s, expected base=%.3f target=%s'
+                            % (step['n'], step['seats'], int(step['adaptive']), step.get('base'), step.get('target'), base, target))
+        if step.get('f_eff') is not None and step.get('base') is not None and step['f_eff'] < step['base'] - LEVERN_ADAPTIVE_SLACK:
+            problems.append('step n=%d: f_eff %.3f is below its base share %.3f' % (step['n'], step['f_eff'], step['base']))
+    few_entry = (results or {}).get('prefill_few_decoders')
+    if isinstance(few_entry, dict) and 'error' not in few_entry and carrying and not engaged:
+        problems.append('prefill_few_decoders ran and no prefill step with 1 to %d decoder(s) logged adaptive=1: the policy was NOT EXERCISED' % few)
+    return problems[:8]
+
+
+LEVERN_SCHED_FLAGS = ('QWEN_FAST_LEVERN_OWED_CAP_MS', 'QWEN_FAST_LEVERN_SHORT_SHARE', 'QWEN_FAST_LEVERN_SHORT_WAIT_S')
+LEVERN_SCHED_LINE = '[PINDIAG] lever N sched: '
+# The shapes whose returning turns judge the short pacing: a run that names none of them has not exercised it (no NOT EXERCISED then).
+LEVERN_SCHED_RETURNING_TESTS = ('agent_turns', 'parked_turns', 'concurrent8_skew')
+
+
+def levern_sched_problems(steps, env, container_text, results=None):
+    """The production-shape pacing (QWEN_FAST_LEVERN_OWED_CAP_MS / _SHORT_SHARE / _SHORT_WAIT_S, docs/tp4-sched-1.md section 5) over the scheduler's step lines.
+    None of the three set: the policy must leave NO trace (no "lever N sched:" install line, no short=/cap_ms=/guard= field on any step line). Set: the install line; every step
+    line carries the fields; cap_ms is QWEN_FAST_LEVERN_OWED_CAP_MS when that is set; guard=1 appears only with QWEN_FAST_LEVERN_SHORT_WAIT_S set and on a line whose
+    debt is zero (the guard forgave it); and, when a returning-turn shape ran (LEVERN_SCHED_RETURNING_TESTS) beside the short share, at least one SHORT prefill step ran beside
+    decoders (NOT EXERCISED otherwise). The alternation (a decode round after every short step) and the decode-gap floor are levern_alternation_problems'."""
+    named = [name for name in LEVERN_SCHED_FLAGS if env.get(name) not in (None, '')]
+    lines = [line for line in container_text.splitlines() if LEVERN_SCHED_LINE in line]
+    carrying = [step for step in steps if step.get('short') is not None]
+    if not named:
+        problems = []
+        if lines:
+            problems.append('%d "%s" line(s) on a profile that sets none of %s (the first: %s)' % (len(lines), LEVERN_SCHED_LINE.strip(), ', '.join(LEVERN_SCHED_FLAGS), lines[0].strip()[:160]))
+        if carrying:
+            problems.append('%d step line(s) carry short=/cap_ms=/guard= fields on a profile that sets none of the pacing flags: the flags off must log what they always did (first n=%d)'
+                            % (len(carrying), carrying[0]['n']))
+        return problems
+    problems = []
+    if not lines:
+        problems.append('%s set and no "%s" line was logged: the image does not carry the pacing, or the flags never reached the container' % (', '.join(named), LEVERN_SCHED_LINE.strip()))
+    if steps and not carrying:
+        problems.append('%s set and none of %d step line(s) carries short=/cap_ms=/guard=: the scheduler ran without the pacing' % (', '.join(named), len(steps)))
+    cap = env.get('QWEN_FAST_LEVERN_OWED_CAP_MS')
+    guard_on = env.get('QWEN_FAST_LEVERN_SHORT_WAIT_S') not in (None, '')
+    for step in carrying:
+        if cap is not None and step.get('cap_ms') != float(cap):
+            problems.append('step n=%d logged cap_ms=%s with QWEN_FAST_LEVERN_OWED_CAP_MS=%s' % (step['n'], step.get('cap_ms'), cap))
+        if step.get('guard') and not guard_on:
+            problems.append('step n=%d logged guard=1 with QWEN_FAST_LEVERN_SHORT_WAIT_S unset' % step['n'])
+        if step.get('guard') and step['kind'] == 'prefill' and step['seats'] > 0 and _float_or(step.get('owed_ms'), 0.0):
+            problems.append('step n=%d logged guard=1 and owed_ms=%s: the guard forgives the debt' % (step['n'], step.get('owed_ms')))
+    returning = [name for name in LEVERN_SCHED_RETURNING_TESTS if isinstance((results or {}).get(name), dict) and 'error' not in results[name]]
+    if returning and env.get('QWEN_FAST_LEVERN_SHORT_SHARE') not in (None, '') and carrying:
+        if not any(step['kind'] == 'prefill' and step.get('short') and step['seats'] > 0 for step in carrying):
+            problems.append('%s ran and no SHORT prefill step ran beside decoders: the short pacing was NOT EXERCISED' % ', '.join(returning))
+    return problems[:8]
+
+
 def levern_governor_floor(container_text):
     """The decode-gap floor (seconds) the container logged on its governor line, or None when the line is missing (an image without the floor)."""
     found = LEVERN_GOVERNOR.findall(container_text)
@@ -2119,6 +2225,8 @@ def levern_problems(env, container_text, smoke):
         facts['split_prompts'] = len({row['req'] for row in served})
         facts['route_steps'] = len(served)
         problems += levern_exercise_problems(env, results, facts)
+        problems += levern_adaptive_problems(facts['steps'], env, container_text, results)
+        problems += levern_sched_problems(facts['steps'], env, container_text, results)
         if served:
             if not facts['steps']:
                 problems.append('prompts were split (%d route lines) and no "lever N step" line was logged: the scheduler\'s alternation never ran'

@@ -46,6 +46,8 @@ target rule:
                resumes when no short can be admitted. A short never parks a short, a long parked for QWEN_FAST_LEVERN_MAX_PARK_S admits no more
                shorts, and a long the deadline governor needs (f_eff = 1) is never preempted. A short is paced at R = 1.
   governor     the Alternator's share is raised so every pending long finishes within QWEN_FAST_LEVERN_TTFT_TARGET_S (levern_policy.effective_share).
+               Gate only, QWEN_FAST_LEVERN_ADAPTIVE=1: while few decoders are live its base share and its target move (levern_policy.Adaptive); each step
+               line then carries base=, target= and adaptive= beside f_eff.
   kill switch  the file levern.off (levern_policy.OffSwitch): new prompts get a whole-prompt cap and the short lane closes; in-flight prefills
                finish through the route.
 """
@@ -120,13 +122,25 @@ def _requests(queue):
 class LevernRuntime(object):
     """What the two wrappers share: the parsed flags, the Alternator, the step counter and the log."""
 
-    def __init__(self, cfg=None, *, log=None, clock=None, fault=None, merged=None, wall=None, off_path=None):
+    def __init__(self, cfg=None, *, log=None, clock=None, fault=None, merged=None, wall=None, off_path=None, adaptive=None, sched=None):
         self.cfg = levern_policy.config() if cfg is None else cfg
         # The merged route's flags (levern_policy.Merged), None on the stage-1 route: every merged decision below is behind it.
         self.merged = merged
         kwargs = {} if clock is None else dict(clock=clock)
         if wall is not None:
             kwargs['wall'] = wall
+        if adaptive is not None:
+            # The adaptive governor (QWEN_FAST_LEVERN_ADAPTIVE=1, gate only): it changes the governor's two inputs and logs three more fields per step.
+            if merged is None:
+                raise ValueError('the adaptive governor needs the merged route (the deadline governor and the decode-gap floor live there)')
+            kwargs['adaptive'] = adaptive
+        if sched is not None:
+            # The production-shape pacing (QWEN_FAST_LEVERN_OWED_CAP_MS / _SHORT_SHARE / _SHORT_WAIT_S, gate only): the owed cap alone works on either route, the short knobs
+            # need the short class, which is the merged route's.
+            if merged is None and (sched.short_share is not None or sched.short_wait_s is not None):
+                raise ValueError('the short pacing (QWEN_FAST_LEVERN_SHORT_SHARE / _SHORT_WAIT_S) needs the merged route (the short class is its)')
+            kwargs['sched'] = sched
+        self.sched = sched
         self.alternator = levern_policy.Alternator(self.cfg, merged=merged, **kwargs)
         self.log = admission._log if log is None else log
         self.fault = levern_policy.fault() if fault is None else fault
@@ -407,6 +421,18 @@ class LevernRuntime(object):
             hint.append((arrival if type(arrival) in (int, float) else now, self.step_times.remaining_ms(prompt, start, self.cfg.step)))
         return hint
 
+    def oldest_short_wait(self, scheduler):
+        """Seconds the oldest waiting SHORT request (a returning turn) has waited since it arrived, 0.0 when none waits: the returning turn's guard reads it
+        (QWEN_FAST_LEVERN_SHORT_WAIT_S). A short that cannot be classified or has no arrival time counts as not waiting."""
+        now, oldest = self.wall(), 0.0
+        for request in self.waiting_in_order(scheduler):
+            if self.klass_of(scheduler, request) != 'short':
+                continue
+            arrival = getattr(request, 'arrival_time', None)
+            if type(arrival) in (int, float):
+                oldest = max(oldest, now - arrival)
+        return oldest
+
     def observe(self, decision):
         """Teach the step-time model the wall time of the previous prefill step (the scheduler's own interval between two schedule() calls)."""
         if self.last_prefill is None or decision.prev_kind != 'prefill' or decision.prev_ms is None:
@@ -580,6 +606,8 @@ class LevernRuntime(object):
             short = detail.get('short')
         except Exception:
             return False
+        if ok:
+            admission.note_reading(request_id, detail)      # (QWEN_FAST_ADMISSION_LEAN: the final step's backstop may use this reading)
         if ok or unavailable:
             self.final_held = None
             return False
@@ -636,6 +664,8 @@ def wrap_schedule(original, runtime):
             runtime.pass_short = False
             # Only a call that can start or continue a prefill needs the governor's input (a decode round would peek every waiting long for nothing).
             runtime.alternator.pending_hint = runtime.pending_hint(self) if pending else []
+            if runtime.sched is not None and runtime.sched.short_wait_s:
+                runtime.alternator.short_wait_s = runtime.oldest_short_wait(self) if pending else 0.0
         decision = runtime.alternator.begin(decodes, pending)
         if merged:
             runtime.observe(decision)
@@ -704,6 +734,16 @@ def _log_step(scheduler, runtime, decision, wanted, reason, prefill, result, par
               decision.prev_kind or '-', prev_ms, '%.0f' % decision.owed_ms, decision.owed_rounds)
     if runtime.merged is not None:
         alternator = runtime.alternator
-        runtime.log(levern_policy.STEP_LINE_MERGED, *(values + (alternator.share, alternator.need, alternator.gap_ms())))
+        merged_values = values + (alternator.share, alternator.need, alternator.gap_ms())
+        line = levern_policy.STEP_LINE_MERGED
+        if alternator.adaptive is not None:
+            # The adaptive governor's fields: the base share and the deadline target this step's governor started from, and whether the policy was in force.
+            line = levern_policy.STEP_LINE_ADAPTIVE
+            merged_values += (alternator.base_share, alternator.target_s, int(alternator.adaptive_active()))
+        if runtime.sched is not None:
+            # The production-shape pacing's fields: whether the step is a returning turn's (a SHORT), the owed cap in force, and whether the guard forgave the debt here.
+            line += levern_policy.STEP_SCHED_SUFFIX
+            merged_values += (int(runtime.pass_short), alternator.owed_cap_ms(), int(alternator.guarded))
+        runtime.log(line, *merged_values)
     else:
         runtime.log(levern_policy.STEP_LINE, *values)

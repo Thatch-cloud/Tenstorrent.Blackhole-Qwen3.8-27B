@@ -40,9 +40,9 @@ PLAN = fusion.normalise(fusion.read_manifests())
 SPEC = next(item for item in PLAN['ship'] if item['name'] == 'traffic-s5')
 PARENT_COMMIT = '27af6902'                      # tp4/swift: the production tree this branch was cut from
 # what the candidate sets that ship 4 does not (or sets differently), the waiver id aside
-CHANGES = {'QWEN_FAST_PREFILL_HANDOFF': '1', 'QWEN_FAST_GRID13': '1', 'QWEN_FAST_SOLO_PACKED': '1', 'QWEN_PREFIX_STICKY_UNDROP': '1', 'QWEN_PREFIX_WINDOW_CARRY': '1', 'QWEN_PREFIX_TIER_RESTORE_SLICE': '512',
+CHANGES = {'QWEN_FAST_PREFILL_HANDOFF': '1', 'QWEN_FAST_ADMISSION_LEAN': '1', 'QWEN_FAST_ADMISSION_DIAG_TRIM': '1', 'QWEN_PREFIX_HOST_TIER_SPILL_MODE': 'complete', 'QWEN_FAST_GRID13': '1', 'QWEN_FAST_SOLO_PACKED': '1', 'QWEN_PREFIX_STICKY_UNDROP': '1', 'QWEN_PREFIX_WINDOW_CARRY': '1', 'QWEN_PREFIX_TIER_RESTORE_SLICE': '512',
            'QWEN_PREFIX_TIER_RESTORE_SLICE_MS': '200', 'QWEN_PREFIX_HOST_TIER_GIB': '48', 'QWEN_PREFIX_STORE_GIB': '16'}
-NEXT_LEVERS = {'QWEN_FAST_SOLO_PACKED': '1', 'QWEN_PREFIX_STICKY_UNDROP': '1', 'QWEN_PREFIX_WINDOW_CARRY': '1'}
+NEXT_LEVERS = {'QWEN_FAST_SOLO_PACKED': '1', 'QWEN_PREFIX_STICKY_UNDROP': '1', 'QWEN_PREFIX_WINDOW_CARRY': '1', 'QWEN_FAST_ADMISSION_LEAN': '1', 'QWEN_PREFIX_HOST_TIER_SPILL_MODE': 'complete'}
 # what the image's own ENV carries that the levers' admissions read (docker/qwen-c2-serving.Dockerfile)
 IMAGE_ENV = {'QWEN_FAST_PACKED_STEP': '1', 'QWEN_FAST_PADDED_BLOCK': '1', 'QWEN_FAST_SINGLE_GATEUP': '1', 'QWEN_FAST_FOUR_AS_TWO': '0', 'QWEN_FAST_VERIFY_T2': '1'}
 
@@ -50,7 +50,7 @@ IMAGE_ENV = {'QWEN_FAST_PACKED_STEP': '1', 'QWEN_FAST_PADDED_BLOCK': '1', 'QWEN_
 def boot_problems(profile):
     from test_octo3_contract import boot_problems as every_check
 
-    return every_check(profile) + contract.prefix_policy_problems(profile) + contract.exact_resume_problems(profile)
+    return every_check(profile) + contract.prefix_policy_problems(profile) + contract.exact_resume_problems(profile) + contract.sched_problems(profile)
 
 
 def parent_profiles():
@@ -179,7 +179,7 @@ class ContractTests(unittest.TestCase):
             self.assertTrue(any(flag in problem for problem in problems), (flag, problems))
 
     def test_the_levers_are_waivable_at_their_value_only(self):
-        for flag, bad in (('QWEN_FAST_SOLO_PACKED', '0'), ('QWEN_PREFIX_STICKY_UNDROP', '2'), ('QWEN_PREFIX_WINDOW_CARRY', 'on')):
+        for flag, bad in (('QWEN_FAST_SOLO_PACKED', '0'), ('QWEN_PREFIX_STICKY_UNDROP', '2'), ('QWEN_PREFIX_WINDOW_CARRY', 'on'), ('QWEN_FAST_ADMISSION_LEAN', '0'), ('QWEN_PREFIX_HOST_TIER_SPILL_MODE', 'cap')):
             profile = self.profile()
             profile[contract.TRAFFIC_WAIVER]['levers'][flag] = bad
             self.assertTrue(any(flag in problem for problem in contract.traffic_waiver_problems(profile)), flag)
@@ -190,6 +190,29 @@ class ContractTests(unittest.TestCase):
             profile = self.profile(QWEN_PREFIX_HOST_TIER_GIB=size)
             profile[contract.TRAFFIC_WAIVER]['levers']['QWEN_PREFIX_HOST_TIER_GIB'] = size
             self.assertEqual(contract.traffic_waiver_problems(profile) == [], ok, size)
+
+    def test_the_governor_knobs_are_not_in_the_candidate_and_stay_a_gates_own(self):
+        governor = ('QWEN_FAST_LEVERN_ADAPTIVE', 'QWEN_FAST_LEVERN_OWED_CAP_MS', 'QWEN_FAST_LEVERN_SHORT_SHARE', 'QWEN_FAST_LEVERN_SHORT_WAIT_S')
+        for name in (SHIP, AUDIT, NOWC):
+            for flag in governor:
+                self.assertNotIn(flag, PROFILES[name]['env'], (name, flag))
+        for flag, value in (('QWEN_FAST_LEVERN_ADAPTIVE', '1'), ('QWEN_FAST_LEVERN_OWED_CAP_MS', '1500'), ('QWEN_FAST_LEVERN_SHORT_SHARE', '0.65'), ('QWEN_FAST_LEVERN_SHORT_WAIT_S', '5')):
+            self.assertTrue(self.refused(self.profile(**{flag: value})), flag)
+        for flag in contract.PREFIX_SPILL_KNOBS:
+            self.assertNotIn(flag, PROFILES[SHIP]['env'], 'the complete spills keep their default knobs')
+        import make_sched_profiles
+
+        self.assertEqual(PROFILES[make_sched_profiles.NAMESPACE + 'all']['env']['QWEN_FAST_LEVERN_ADAPTIVE'], '1', 'the governor stays available as the gate-only -sch-all arm')
+
+    def test_the_lean_admission_and_the_complete_spills_need_the_waiver_and_the_spills_the_tier(self):
+        without = self.profile()
+        del without[contract.TRAFFIC_WAIVER]['levers']['QWEN_FAST_ADMISSION_LEAN']
+        self.assertTrue(any('QWEN_FAST_ADMISSION_LEAN' in problem for problem in self.refused(without)))
+        spill = self.profile(QWEN_PREFIX_HOST_TIER_GIB=None)
+        del spill[contract.TRAFFIC_WAIVER]['levers']['QWEN_PREFIX_HOST_TIER_GIB']
+        self.assertTrue(any('SPILL_MODE' in problem for problem in contract.prefix_policy_problems(spill)))
+        self.assertEqual(PROFILES[SHIP]['env']['QWEN_FAST_ADMISSION_DIAG_TRIM'], '1')
+        self.assertEqual(PROFILES[AUDIT]['env']['QWEN_FAST_ADMISSION_DIAG_TRIM'], '1')
 
     def test_the_gate_names_stay_a_gates_own(self):
         for flag, value in (('QWEN_PREFIX_WINDOW_CARRY_AUDIT', '1'), ('QWEN_FAST_TP4_GDN_WC_AUDIT', '1')):

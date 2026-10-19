@@ -573,6 +573,9 @@ def rebind_device(device, taps, *, position, window=None, negative=None, audit=F
         raise ValueError('A parked device keeps no K/V projection capture')
     rows = prefill_window(position)['rows']
     started = time.perf_counter()
+    # QWEN_FAST_ADMISSION_LEAN: where the milliseconds of a rebind go (the fence and the dropped proposal, the re-zero, the projection, the copy and its fence, the K/V history),
+    # for the card run that decides what, if anything, of a rebind can be done before the prefill ends. Unset, nothing is timed and the return value is what it was.
+    marks = [started] if os.environ.get('QWEN_FAST_ADMISSION_LEAN') == '1' else None
     operations.synchronize_device(device.mesh)
     capture = single_capture(device)
     if capture is not None:
@@ -583,6 +586,8 @@ def rebind_device(device, taps, *, position, window=None, negative=None, audit=F
         raise ValueError('A parked device has no publication pending')
     before = peak_reading(slot.pool) if audit else None
     zeroed = None
+    if marks is not None:
+        marks.append(time.perf_counter())
     if negative != 'drafter':
         slot.pool.rezero(slot)
         if audit:
@@ -590,8 +595,12 @@ def rebind_device(device, taps, *, position, window=None, negative=None, audit=F
             if zeroed is not None:
                 raise AssertionError(zeroed)
             zeroed = True
+    if marks is not None:
+        marks.append(time.perf_counter())
     projected = project_window(device, taps, rows, window=window)
     padded = operations.pad(projected, [(0, 0), (0, 0), (0, HISTORY_ROWS - rows), (0, 0)], 0.0)
+    if marks is not None:
+        marks.append(time.perf_counter())
     if audit:
         peak = peak_reading(slot.pool)
         if before is not None and peak is not None:
@@ -603,6 +612,8 @@ def rebind_device(device, taps, *, position, window=None, negative=None, audit=F
     operations.deallocate(padded)
     device.history, device.spare_history = slot.history, slot.spare_history
     operations.synchronize_device(device.mesh)
+    if marks is not None:
+        marks.append(time.perf_counter())
     if negative != 'drafter':
         device.kv_history = draft_history_class()(operations, device.mesh, [layer[0] for layer in device.layers], device.history,
             position=position, history_rows=rows, capture_projection=False, storage=slot.kv,
@@ -628,7 +639,13 @@ def rebind_device(device, taps, *, position, window=None, negative=None, audit=F
         device._packed_capture_released = False
     device.proposal_capture = capture
     capture.kv_history = device.kv_history
-    return dict(ms=(time.perf_counter() - started) * 1000, single_rebuilt=rebuilt, window=window, zeroed=zeroed)
+    info = dict(ms=(time.perf_counter() - started) * 1000, single_rebuilt=rebuilt, window=window, zeroed=zeroed)
+    if marks is not None:
+        marks.append(time.perf_counter())
+        # fence_ms: the opening fence and the dropped proposal; rezero_ms; project_ms: the projection and the pad; copy_ms: the copy, the history swap and its fence; history_ms: the K/V history
+        # and the host state
+        info['phases'] = dict(zip(('fence_ms', 'rezero_ms', 'project_ms', 'copy_ms', 'history_ms'), ((after - before) * 1000.0 for before, after in zip(marks, marks[1:]))))
+    return info
 
 
 # -- the set -----------------------------------------------------------------------------------------------------------------------
@@ -642,6 +659,8 @@ FEATURE_WIDTH = 5120
 BUILT_MARKER = '[PINDIAG] parked engines built '
 WARM_MARKER = '[PINDIAG] parked drafter warm '
 REBIND_MARKER = '[PINDIAG] parked rebind '
+# QWEN_FAST_ADMISSION_LEAN only: where the milliseconds of one rebind went (rebind_device's phases, then engine.rebind's page tables, carry save and host state).
+PHASES_MARKER = '[PINDIAG] admission lean rebind phases '
 PEAK_MARKER = '[PINDIAG] parked rebind peak '
 DIGEST_MARKER = '[PINDIAG] parked rebind digest '
 REFUSED_MARKER = '[PINDIAG] parked rebind refused '
@@ -1248,11 +1267,16 @@ class ParkedEngineSet:
                 engine.page_table_writer = lambda *arguments: None
             if self.negative == 'widths':
                 engine.keep_captured_widths = True
+            engine_began = time.perf_counter()
             try:
                 engine.rebind(session, pages)
             finally:
                 for name in ('save_carry', 'page_table_writer', 'keep_captured_widths'):
                     engine.__dict__.pop(name, None)
+            if 'phases' in info:
+                phases = dict(info['phases'], engine_ms=(time.perf_counter() - engine_began) * 1000.0)
+                self.log(PHASES_MARKER + 'request={} slot={} ' + ' '.join('%s={:.1f}' % name for name in phases), str(request_id if request_id is not None else session.request_id)[:48], entry.index,
+                         *phases.values())
             if self.audit and self.negative != 'carry':
                 audit_rebound_state(engine, entry.index, self.log, slot0_before=slot0,
                                     zeroed=info['zeroed'] if self.negative != 'drafter' else None)

@@ -206,6 +206,24 @@ MAX_TIER_SLICE_BLOCKS = 65536
 MAX_TIER_SLICE_MS = 60000.0
 TIER_KILL_SWITCH_PATH = '/models/.qwen-c2/kv-tier.off'
 DEFAULT_TIER_SPILL_MAX_BLOCKS = 512
+# COMPLETE SPILLS (docs/tp4-sched-1.md section 3; default off): QWEN_PREFIX_HOST_TIER_SPILL_MODE=complete lifts the per-flush cap of ENV_TIER_SPILL_MAX blocks. The cap
+# drops what it cuts for good: the blocks vLLM evicted are reused by the very allocation that evicted them, so their bytes cannot wait for a later step. The one flush
+# that exceeds the cap is a restore (TierHooks.load allocates the whole session at once and evicts as many blocks as it restores: 3,393 of the 3,905 blocks a 254k
+# session displaced in the TC1 card run were dropped). In complete mode the flush spills everything up to ENV_TIER_SPILL_HARD_MAX blocks (default: a 262,144-token session
+# is 4,096 blocks), in batches of ENV_TIER_SPILL_BATCH blocks (each batch is one reservation and one device read, so a failed read loses its batch and not the flush), and
+# logs a flush that held the engine longer than ENV_TIER_SPILL_WARN_MS. The cost of a block is measured, about 1.7 ms while the slab fills and 0.4 ms once it is resident.
+ENV_TIER_SPILL_MODE = 'QWEN_PREFIX_HOST_TIER_SPILL_MODE'
+ENV_TIER_SPILL_HARD_MAX = 'QWEN_PREFIX_HOST_TIER_SPILL_HARD_MAX_BLOCKS'
+ENV_TIER_SPILL_BATCH = 'QWEN_PREFIX_HOST_TIER_SPILL_BATCH_BLOCKS'
+ENV_TIER_SPILL_WARN_MS = 'QWEN_PREFIX_HOST_TIER_SPILL_WARN_MS'
+TIER_SPILL_MODES = ('cap', 'complete')
+DEFAULT_TIER_SPILL_HARD_MAX_BLOCKS = 4096
+DEFAULT_TIER_SPILL_BATCH_BLOCKS = 512
+DEFAULT_TIER_SPILL_WARN_MS = 1000
+MAX_TIER_SPILL_BLOCKS = 65536
+# The counters complete spills add to the registry's stats (only when the mode is on, so the stats of an engine without it are what they were): flushes in batches, blocks the
+# cap would have dropped that were spilled instead, the largest flush (blocks, ms) and the flushes over the warning bound.
+SPILL_STAT_NAMES = ('tier_spill_batches', 'tier_spill_cap_lifted', 'tier_spill_max_blocks', 'tier_spill_max_ms', 'tier_spill_slow')
 DEFAULT_TIER_MIN_TOKENS = 8192
 DEFAULT_TIER_MIN_AVAILABLE_GIB = 16.0
 TIER_VERIFY_MODES = ('sample', 'all', 'off')
@@ -811,6 +829,48 @@ def restore_slice_config(environ):
     return blocks, millis
 
 
+class SpillPlan(object):
+    """The complete-spill mode's numbers (spill_plan): hard_max (the most blocks one flush spills), batch (blocks per device read) and warn_ms."""
+
+    __slots__ = ('hard_max', 'batch', 'warn_ms')
+
+
+def _spill_whole(environ, name, default, low, high):
+    raw = environ.get(name)
+    if raw is None or raw == '':
+        return default
+    if not raw.isascii() or not raw.isdigit():
+        raise ValueError('%s=%r must be a whole number in plain digits' % (name, raw))
+    value = int(raw)
+    if not low <= value <= high:
+        raise ValueError('%s=%r must be from %d to %d' % (name, raw, low, high))
+    return value
+
+
+def spill_plan(environ, config):
+    """The complete-spill mode (ENV_TIER_SPILL_MODE=complete) from the environment, None for the default cap mode. Strict: a mode that is neither, the mode without the host
+    tier, a knob without the mode (an arm must not run the cap while believing otherwise), a hard maximum below the cap (the mode would spill LESS than the cap), a batch above the hard maximum."""
+    mode = environ.get(ENV_TIER_SPILL_MODE)
+    if mode is not None and mode != '' and mode not in TIER_SPILL_MODES:
+        raise ValueError('%s=%r must be one of %s' % (ENV_TIER_SPILL_MODE, mode, ', '.join(TIER_SPILL_MODES)))
+    knobs = [name for name in (ENV_TIER_SPILL_HARD_MAX, ENV_TIER_SPILL_BATCH, ENV_TIER_SPILL_WARN_MS) if environ.get(name) not in (None, '')]
+    if mode != 'complete':
+        if knobs:
+            raise ValueError('%s set without %s=complete: the cap mode would ignore it' % (', '.join(knobs), ENV_TIER_SPILL_MODE))
+        return None
+    if config is None:
+        raise ValueError('%s=complete needs the host KV tier (%s > 0): without it there is nothing to spill to' % (ENV_TIER_SPILL_MODE, ENV_TIER_GIB))
+    plan = SpillPlan()
+    plan.hard_max = _spill_whole(environ, ENV_TIER_SPILL_HARD_MAX, DEFAULT_TIER_SPILL_HARD_MAX_BLOCKS, 1, MAX_TIER_SPILL_BLOCKS)
+    plan.batch = _spill_whole(environ, ENV_TIER_SPILL_BATCH, min(DEFAULT_TIER_SPILL_BATCH_BLOCKS, plan.hard_max), 1, MAX_TIER_SPILL_BLOCKS)   # (the default batch never exceeds a hard maximum below it)
+    plan.warn_ms = _spill_whole(environ, ENV_TIER_SPILL_WARN_MS, DEFAULT_TIER_SPILL_WARN_MS, 1, 600000)
+    if plan.hard_max < config.spill_max:
+        raise ValueError('%s=%d is below %s=%d: the complete mode would spill less than the cap' % (ENV_TIER_SPILL_HARD_MAX, plan.hard_max, ENV_TIER_SPILL_MAX, config.spill_max))
+    if plan.batch > plan.hard_max:
+        raise ValueError('%s=%d is above %s=%d' % (ENV_TIER_SPILL_BATCH, plan.batch, ENV_TIER_SPILL_HARD_MAX, plan.hard_max))
+    return plan
+
+
 class QuotaConfig(object):
     """The per-tenant quotas (quota_config): device_cap_blocks and device_floor_blocks (0: none) in 64-token blocks, host_cap_bytes and host_floor_bytes (0: none)."""
 
@@ -1263,6 +1323,8 @@ class PrefixRegistry(object):
         # The host KV tier (the module docstring): off unless QWEN_PREFIX_HOST_TIER_GIB names a budget. tier_io is the model's side
         # (read_blocks / write_blocks), attached by the model graft; the scheduler graft's TierHooks refuse to install without it.
         self.tier_config = tier_config(flags, self.budget_bytes)
+        # Complete spills (SpillPlan; None: the cap): the counters it adds exist only then.
+        self.spill_plan = spill_plan(flags, self.tier_config)
         self.tier = None
         self.tier_io = None
         self.device_holds = None
@@ -1311,6 +1373,8 @@ class PrefixRegistry(object):
         elif flags.get(ENV_TIER_RESTORE_SLICE) not in (None, '', '0') or flags.get(ENV_TIER_RESTORE_SLICE_MS) not in (None, ''):
             raise ValueError('%s / %s need the host KV tier (%s > 0): without it the sliced restore would be inert' % (
                 ENV_TIER_RESTORE_SLICE, ENV_TIER_RESTORE_SLICE_MS, ENV_TIER_GIB))
+        if self.spill_plan is not None:
+            self.stats.update(dict.fromkeys(SPILL_STAT_NAMES, 0))
         if quota_counters:
             # One dict: the tier store counts into the registry's own stats.
             self.stats.update(quota_counters)

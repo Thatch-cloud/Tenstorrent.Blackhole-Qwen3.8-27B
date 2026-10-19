@@ -1,0 +1,54 @@
+# The order of the tp4/sched-1 window (docs/tp4-sched-1.md; scripts/ci/make_sched_jobs.py): the scheduler-side levers on the approved ship-4 profile c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4 and its six gate-only twins (make_sched_profiles.py), the checkpoint production serves (ukisai/Swift-1.5-Qwen3.8-27b, revision b4c84d42903a), ONE image (tp4-sched-1, a placeholder: B0 builds it from the pushed tp4/sched-1 head WITH the K64j-OQ graft and the agent_turns branch merged) and ONE window.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (the NEEDS lines skip what depended on it).
+# WHAT THIS DECIDES (the owner's, never the window's): whether production should turn on, one by one, the four levers: the lean admission (QWEN_FAST_ADMISSION_LEAN: the part of a returning turn's 541 ms engine build that is accounting, ESTIMATED -300 ms of the 541 and a further 66 ms outside it), complete spills of the host tier (QWEN_PREFIX_HOST_TIER_SPILL_MODE=complete), the returning-turn pacing (an owed cap in ms, a share for returning turns, its guard) and the few-decoder policy (QWEN_FAST_LEVERN_ADAPTIVE). Only the first removes device time; the pacing and the policy move delay between a returning turn's wait and the decoders' gaps, and the note's simulation says by how much. Every result is UNQUALIFIED.
+# THE MEASUREMENT: the agent_turns smoke test (the production-shaped multi-turn run: six sessions at 64k-200k tokens of context, twelve returning turns each, about 13 minutes; scripts/ci/agent_turns.py reads and judges it) is built on the branch tp4/agent-turns and is NOT in this branch's c2_serving_smoke.py. P0: merge that branch into the head B0 builds (it merges without a conflict), or every timed job below names a test the image does not have. parked_turns (in this tree) is a closed loop of fresh 4k-24k prompts with no growing context and no prefix hits: it is A1's exactness shape, not the measurement.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z; nothing in this pack does either. B0 is a build and may run while production serves. No other window driver may be alive and no privileged builder container up.
+# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and each tag is pushed on THAT commit (the throwaway commit carries only .github/c2-serving-job.env). Push ONE tag at a time and wait for its run to finish; queued tags are cancelled. Never cancel a running card job.
+# P0. SWIFT IS ON THE CARD HOST AND ITS CONVERTED CACHE IS BUILT: python3 scripts/ci/qwen_c2_checkpoint.py check --hub <the hub directory> --repo ukisai/Swift-1.5-Qwen3.8-27b --revision b4c84d42903a8646b25857eb2827288d92ed85a4 exits 0, and the Swift window's W0 (or the production first boot) has built the keyed weight cache, so every smoke job here logs "weight cache ...: found". This pack builds nothing of it. The prefix-gate jobs (S1, T0-T3) run the base weights.
+# P0. GRID: the four cards expose a 13x10 compute grid since the firmware unlock. Read it from the run, never assume 11x10: every pair runs on one grid.
+# ARC-ZERO A1 T3
+# ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO (minRunners and maxRunners 0, the normal values written down first, restored by the same patch with the old numbers) BEFORE A1 and restores them AFTER T3, i.e. around every audited boot (a model load under CI load has hit the platform's load timeout) and every timed job. B0, X0 and Z do not need the pause.
+# THE JOBS, in value order (cut the window at a block end): GATES: B0 X0 A1 S1 (280 min); COMBINED ABAB: C1 L1 C2 L2 (200 min); ATTRIBUTION: LE1 PA1 FD0 FD1 (200 min); TIER ABAB: T0 T1 T2 T3 (200 min); END: Z (10 min). B0 is the WINDOW build.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0 <- B0
+# NEEDS A1 <- X0
+# NEEDS S1 <- A1
+# NEEDS C1 <- S1
+# NEEDS L1 <- C1
+# NEEDS C2 <- L1
+# NEEDS L2 <- C2
+# NEEDS LE1 <- L2
+# NEEDS PA1 <- LE1
+# NEEDS FD0 <- PA1
+# NEEDS FD1 <- FD0
+# NEEDS T0 <- FD1
+# NEEDS T1 <- T0
+# NEEDS T2 <- T1
+# NEEDS T3 <- T2
+# READ RULES (each also needs c2_smoke_check clean where it runs and no stall; the templates' own headers have the whole text):
+#   B0   'baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4 with a session cap of 8', the provenance report with no problem line, its K64j-OQ graft line, the image id.
+#   X0   four cards present and healthy, the fabric as measured, the 13x10 grid in the run, no other window driver alive; the Swift weight cache found.
+#   A1   (STOP) every audit line exact=True with entries above 0, no 'audit mismatch', no 'fell back', the lever lines of the four levers (sched_report.py prints them), no stall.
+#   S1   (STOP) the tier-concurrent plan PASS on c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-sch-all-audit (every pair IDENTICAL, zero digest failures and audit mismatches), the 'spill complete on' line, a restore flush above 512 blocks with lifted= above 0, tier_spill_dropped_cap 0.
+#   C1 L1 C2 L2   the agent_turns pairs per turn by index, the answers EQUAL turn for turn, concurrent8_steady within the control-to-control floor; sched_report.py --second on the container logs. GO for a lever needs a GAIN beyond the floor and no LOSS elsewhere.
+#   LE1 PA1 FD0 FD1   the attribution of the combined arm: the lean split and the rebind p50 (LE1), the rounds after a returning turn, the guard and the TTFT cost (PA1), prefill_ladder_report.py --second (FD1 over FD0).
+#   T0 T1 T2 T3   the tier-concurrent-timed plan PASS each (the stall budget judged), then tier_concurrent_compare.py over the four: IDENTICAL texts, the arm against the control, the floor; the cost of the flush in the seats' longest wait.
+# NO-GO for a lever: any text that differs from the control's, an audit mismatch, a stall, a refusal at the attach, an 'engaged' line that is absent, a LOSS in a timed test beyond the floor, and for complete spills a longest wait over the 8 s floor (they then need the sliced restore beside them). Adopting a lever is the owner's decision: each is a gate instrument today and a ship profile needs an owner traffic waiver naming it (docs/tp4-sched-1.md).
+# Time (estimate, minutes): B0 40, X0 20, A1 120, S1 100, C1 50, L1 50, C2 50, L2 50, LE1 50, PA1 50, FD0 50, FD1 50, T0 50, T1 50, T2 50, T3 50, Z 10: 890 minutes (14 h 50 min) in all, 850 minutes of cards (X0 to Z).
+B0-build-window stop tp4-sched-1 40
+X0-status-rescan-reset stop tp4-sched-1 20
+A1-sch-audited-attach stop tp4-sched-1 120
+S1-sch-tier-audited stop tp4-sched-1 100
+C1-control-a soft tp4-sched-1 50
+L1-all-a soft tp4-sched-1 50
+C2-control-b soft tp4-sched-1 50
+L2-all-b soft tp4-sched-1 50
+LE1-lean-a soft tp4-sched-1 50
+PA1-pace-a soft tp4-sched-1 50
+FD0-few-control soft tp4-sched-1 50
+FD1-few-adaptive soft tp4-sched-1 50
+T0-tier-control-a soft tp4-sched-1 50
+T1-tier-spill-a soft tp4-sched-1 50
+T2-tier-control-b soft tp4-sched-1 50
+T3-tier-spill-b soft tp4-sched-1 50
+Z-reset soft tp4-sched-1 10

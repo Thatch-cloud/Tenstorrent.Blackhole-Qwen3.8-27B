@@ -103,7 +103,12 @@ never guessed around):
         the scheduler graft, once, when the tier is configured and the model graft's IO is attached; read into tier_on.
     [PINDIAG] prefix: host tier IO attached block_bytes=<n> tensors=<n> chips=<n> slice_bytes=<n> fingerprint=<s>
         the model graft, once, after the warm; read into tier_io.
-    [PINDIAG] prefix: host tier spill blocks=<n> bytes=<n> ms=<f> held=<n>          one per flush; read into tier_spills.
+    [PINDIAG] prefix: host tier spill blocks=<n> bytes=<n> ms=<f> held=<n>          one per flush; read into tier_spills. Complete spills
+        (QWEN_PREFIX_HOST_TIER_SPILL_MODE=complete) append batches=<n> lifted=<n> (lifted: blocks the per-flush cap would have dropped, spilled instead).
+    [PINDIAG] prefix: host tier spill complete on cap_blocks=<n> hard_max_blocks=<n> batch_blocks=<n> warn_ms=<n>
+        the scheduler graft, once, in complete mode only; read into tier_spill_complete.
+    [PINDIAG] prefix: host tier spill slow blocks=<n> ms=<f> warn_ms=<n> batches=<n>
+        a complete-mode flush that held the engine past the warning bound; read into tier_spill_slow.
     [PINDIAG] prefix: host tier restore req=<id> blocks=<n> bytes=<n> ms=<f> from=<n> to=<n> [slices=<n> max_slice_ms=<f> held_steps=<n>]
         one per restored request (the blocks written to the device before vLLM's own hit logic ran); read into tier_restores. A sliced restore (QWEN_PREFIX_TIER_RESTORE_SLICE) adds
         the three trailing fields and its ms is the sum of its slices' work.
@@ -168,6 +173,8 @@ QUOTA_ON = '[PINDIAG] prefix: tenant quota on '
 TIER_ON = '[PINDIAG] prefix: host tier on '
 TIER_IO = '[PINDIAG] prefix: host tier IO attached '
 TIER_SPILL = '[PINDIAG] prefix: host tier spill blocks='
+TIER_SPILL_COMPLETE = '[PINDIAG] prefix: host tier spill complete on '
+TIER_SPILL_SLOW = '[PINDIAG] prefix: host tier spill slow '
 TIER_RESTORE = '[PINDIAG] prefix: host tier restore req='
 TIER_SLICE_ON = '[PINDIAG] prefix: host tier restore slice on '
 TIER_SLICE = '[PINDIAG] prefix: host tier restore slice req='
@@ -367,6 +374,14 @@ def tier_line(out, line, where):
         entry = fields('blocks=' + line.split(TIER_SPILL, 1)[1])
         entry.update(where)
         out['tier_spills'].append(entry)
+    elif TIER_SPILL_COMPLETE in line:
+        entry = fields(line.split(TIER_SPILL_COMPLETE, 1)[1])
+        entry.update(where)
+        out['tier_spill_complete'].append(entry)
+    elif TIER_SPILL_SLOW in line:
+        entry = fields(line.split(TIER_SPILL_SLOW, 1)[1])
+        entry.update(where)
+        out['tier_spill_slow'].append(entry)
     elif TIER_RESTORE in line:
         entry = fields('req=' + line.split(TIER_RESTORE, 1)[1])
         entry.update(where)
@@ -389,7 +404,7 @@ def scan(lines):
                stats=None, launches=[], apc=[], chunking_off=0, chunk_replay=0, dram=[], dram_readings=[],
                kv_tokens=None, failures=[], audit_costs=[], audit_crosses=[], eager_warm=[], four_card_warm=[], sticky_installs=[], sticky_admits=[], sticky_builds=[],
                model_warm=[], model_warm_skipped=[], kv_shared=[], audit_windows=[], tier_on=[], tier_io=[], tier_spills=[], tier_restores=[],
-               tier_trouble=[], ckpt_audits=[], ckpt_preconverted=0, quota_on=[], tier_slice_on=[], tier_slices=[], tier_slice_trouble=[],
+               tier_spill_complete=[], tier_spill_slow=[], tier_trouble=[], ckpt_audits=[], ckpt_preconverted=0, quota_on=[], tier_slice_on=[], tier_slices=[], tier_slice_trouble=[],
                window_engaged=[], window_carried=[], window_stored=[], window_skipped=[], window_audits=[])
     for index, raw in enumerate(lines):
         stamp, line = split_timestamp(raw.rstrip('\n'))

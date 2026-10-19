@@ -27,6 +27,7 @@ import sys
 
 import make_np1_profiles as np1
 import make_octo_profiles
+import make_sched_profiles as sched
 import make_ship4_profiles as ship4
 
 PROFILES = Path(__file__).resolve().parent / 'qwen_c2_profiles.json'
@@ -121,7 +122,7 @@ def generate(data):
     audit['gate_only'] = True
     generated = {ARM: arm, AUDIT: audit}
     remaining = [name for name in profiles if name not in generated]            # a previous generation is replaced below
-    anchors = [name for name in remaining if name in np1.twin_names()]            # (tp4/next-1: after the lone-user round's twins, which sit after the ship-4 twins; the ship-5 twins sit after these)
+    anchors = [name for name in remaining if name in np1.twin_names() or name in sched.twin_names()]            # (tp4/next-1: after the lone-user round's twins and the scheduler levers' (which sit after the ship-4 twins); the prefill-2 and ship-5 twins sit after these)
     if not anchors:
         raise ValueError('the tp4/ship-4 twins are not in the profiles file (make_ship4_profiles.py --write first)')
     anchor = anchors[-1]

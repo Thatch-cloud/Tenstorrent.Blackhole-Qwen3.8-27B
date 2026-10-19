@@ -679,6 +679,10 @@ class TierHooks(object):
                   self.config.total / float(1 << 30), self.config.kv_bytes / float(1 << 30), int(getattr(self.io, 'block_bytes', 0) or 0),
                   self.config.verify, 1 if self.config.audit else 0, self.config.spill_max, self.config.min_tokens, graft.registry.tier_slack,
                   self.config.off_path)
+        plan = getattr(graft.registry, 'spill_plan', None)
+        if plan is not None:
+            # The gate reads this line (prefix_markers.TIER_SPILL_COMPLETE): the cap is lifted to the hard maximum, in batches.
+            graft.log('host tier spill complete on cap_blocks=%d hard_max_blocks=%d batch_blocks=%d warn_ms=%d', self.config.spill_max, plan.hard_max, plan.batch, plan.warn_ms)
 
     # -- state -----------------------------------------------------------------------------------
     @property
@@ -767,10 +771,16 @@ class TierHooks(object):
             return
         # A restore needs the run of blocks from the chain's first, so when the cap bites the lowest indexes of each chain are kept.
         items.sort(key=lambda item: (item[1][2] or b'', item[1][3]))
-        keep, cut = items[:self.config.spill_max], items[self.config.spill_max:]
+        # COMPLETE SPILLS (QWEN_PREFIX_HOST_TIER_SPILL_MODE=complete; the registry's SpillPlan, None by default): the cap is the plan's hard maximum, and the blocks are
+        # read in batches (flush_batches). Without a plan the cap and everything below it are what they always were.
+        plan = getattr(registry, 'spill_plan', None)
+        limit = self.config.spill_max if plan is None else max(self.config.spill_max, plan.hard_max)
+        keep, cut = items[:limit], items[limit:]
         if cut:
             stats['tier_spill_dropped_cap'] += len(cut)
             self.unhold([key for key, _ in cut])
+        if plan is not None:
+            return self.flush_batches(keep, plan)
         began = time.perf_counter()
         slots = []
         if tier.slot_bytes:
@@ -814,6 +824,76 @@ class TierHooks(object):
         stats['tier_spill_ms'] += elapsed
         if stored:
             self.graft.log('host tier spill blocks=%d bytes=%d ms=%.1f held=%d', stored, sum(len(p) for p in payloads), elapsed, tier.bytes)
+
+    def flush_batches(self, keep, plan):
+        """flush's reads for the complete mode: `keep` (every evicted block up to the plan's hard maximum, lowest indexes of each chain first) is reserved and read in
+        batches of plan.batch blocks, so that one device read and one slab reservation never exceed a batch and a read that fails loses its batch and the rest of the flush, not
+        what was already stored. Everything else is flush's: the same counters, the same drops (a tier that cannot make room drops the rest of the flush, a failed read
+        unholds it), the same latch after three failures in a row; plus the complete mode's own counters and the one line when the flush held the engine past plan.warn_ms."""
+        registry, stats, tier = self.registry, self.registry.stats, self.tier
+        began = time.perf_counter()
+        lifted = max(0, len(keep) - self.config.spill_max)
+        if lifted:
+            stats['tier_spill_cap_lifted'] += lifted
+        stored = batches = 0
+        stored_bytes = 0
+        low = 0
+        while low < len(keep):
+            part = keep[low:low + plan.batch]
+            slots = []
+            if tier.slot_bytes:
+                slots = tier.reserve(len(part), [meta[1] for _, meta in part])
+                if len(slots) < len(part):
+                    stats['tier_spill_dropped_full'] += len(part) - len(slots)
+                    self.unhold([key for key, _ in part[len(slots):]])
+                    part = part[:len(slots)]
+                if not part:
+                    # The tier can make no room: the batches that follow meet the same refusal.
+                    rest = keep[low + plan.batch:]
+                    stats['tier_spill_dropped_full'] += len(rest)
+                    self.unhold([key for key, _ in rest])
+                    break
+            try:
+                payloads = self.io.read_blocks([meta[0] for _, meta in part], into=[slot.view for slot in slots] if slots else None)
+                if len(payloads) != len(part):
+                    raise ValueError('the tier IO read %d payloads for %d blocks' % (len(payloads), len(part)))
+            except Exception as error:
+                tier.abort(slots)
+                stats['tier_spill_failures'] += 1
+                self.failures += 1
+                self.graft.log('host tier spill failed (%d so far): %s: %s', self.failures, type(error).__name__, error)
+                self.unhold([key for key, _ in keep[low:]])
+                if self.failures >= 3:
+                    registry.tier_latch('three device reads in a row failed')
+                break
+            self.failures = 0
+            batches += 1
+            for position, (key, (block_id, tenant, chain, index)) in enumerate(part):
+                payload = payloads[position]
+                if slots:
+                    tier.commit(slots[position], key, tenant, chain, index)
+                    stored += 1
+                    stats['tier_spill_bytes'] += len(payload)
+                    stored_bytes += len(payload)
+                elif tier.put(key, payload, tenant, chain, index):
+                    stored += 1
+                    stats['tier_spill_bytes'] += len(payload)
+                    stored_bytes += len(payload)
+                else:
+                    stats['tier_spill_dropped_full'] += 1
+                    self.unhold([key])
+            low += plan.batch
+        elapsed = (time.perf_counter() - began) * 1000.0
+        stats['tier_spill_blocks'] += stored
+        stats['tier_spill_ms'] += elapsed
+        stats['tier_spill_batches'] += batches
+        stats['tier_spill_max_blocks'] = max(stats['tier_spill_max_blocks'], stored)
+        stats['tier_spill_max_ms'] = max(stats['tier_spill_max_ms'], elapsed)
+        if elapsed > plan.warn_ms:
+            stats['tier_spill_slow'] += 1
+            self.graft.log('host tier spill slow blocks=%d ms=%.1f warn_ms=%d batches=%d', stored, elapsed, plan.warn_ms, batches)
+        if stored:
+            self.graft.log('host tier spill blocks=%d bytes=%d ms=%.1f held=%d batches=%d lifted=%d', stored, stored_bytes, elapsed, tier.bytes, batches, lifted)
 
     # -- the restore (a) ---------------------------------------------------------------------------
     def effective_hit(self, request, h):

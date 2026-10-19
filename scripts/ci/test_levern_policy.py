@@ -686,6 +686,407 @@ class DecodeGapFloorTests(unittest.TestCase):
         self.assertEqual(alternator.begin(4, True).kind, 'prefill', 'decoders seen now: the floor counts from here')
 
 
+ADAPTIVE_ENV = {'QWEN_FAST_LEVER_N': '1', 'QWEN_PREFIX_REUSE': '1', 'QWEN_FAST_LEVERN_ADAPTIVE': '1'}
+
+
+class AdaptiveConfigTests(unittest.TestCase):
+    """QWEN_FAST_LEVERN_ADAPTIVE (gate only, default off): strict flags, never a silent default."""
+
+    def test_unset_or_zero_is_off_and_the_defaults_are_the_documented_ones(self):
+        self.assertIsNone(policy.adaptive_config({}))
+        self.assertIsNone(policy.adaptive_config({'QWEN_FAST_LEVERN_ADAPTIVE': '0'}))
+        self.assertEqual(policy.adaptive_config(ADAPTIVE_ENV), policy.Adaptive(2, 0.9, 120))
+        self.assertEqual(policy.adaptive_problems({}), [])
+        self.assertEqual(policy.adaptive_problems({'QWEN_FAST_LEVERN_ADAPTIVE': '0'}), [])
+
+    def test_every_knob_parses(self):
+        env = dict(ADAPTIVE_ENV, QWEN_FAST_LEVERN_ADAPTIVE_DECODERS='4', QWEN_FAST_LEVERN_ADAPTIVE_SHARE='0.75', QWEN_FAST_LEVERN_ADAPTIVE_TTFT_S='0')
+        self.assertEqual(policy.adaptive_config(env), policy.Adaptive(4, 0.75, 0))
+        self.assertEqual(policy.config_problems(env), [])
+
+    def test_a_bad_value_is_refused_by_name_never_defaulted(self):
+        for name, bad in (('QWEN_FAST_LEVERN_ADAPTIVE', '2'), ('QWEN_FAST_LEVERN_ADAPTIVE_DECODERS', '0'), ('QWEN_FAST_LEVERN_ADAPTIVE_DECODERS', '8'),
+                          ('QWEN_FAST_LEVERN_ADAPTIVE_DECODERS', 'two'), ('QWEN_FAST_LEVERN_ADAPTIVE_SHARE', '0'), ('QWEN_FAST_LEVERN_ADAPTIVE_SHARE', '1.0'),
+                          ('QWEN_FAST_LEVERN_ADAPTIVE_SHARE', '1.5'), ('QWEN_FAST_LEVERN_ADAPTIVE_SHARE', 'high'), ('QWEN_FAST_LEVERN_ADAPTIVE_SHARE', 'nan'),
+                          ('QWEN_FAST_LEVERN_ADAPTIVE_TTFT_S', '-1'), ('QWEN_FAST_LEVERN_ADAPTIVE_TTFT_S', '99999'), ('QWEN_FAST_LEVERN_ADAPTIVE_TTFT_S', '1.5')):
+            with self.subTest(name=name, bad=bad):
+                env = dict(ADAPTIVE_ENV, **{name: bad})
+                with self.assertRaisesRegex(ValueError, name):
+                    policy.adaptive_config(env)
+                self.assertTrue([problem for problem in policy.config_problems(env) if name in problem], name)
+
+    def test_what_it_cannot_work_beside_is_a_problem(self):
+        cases = ((dict(ADAPTIVE_ENV, QWEN_FAST_LEVERN_ROUNDS='2'), 'static rounds'),
+                 (dict(ADAPTIVE_ENV, QWEN_FAST_LEVERN_PREFILL_SHARE='1'), 'static 1.0 control'),
+                 (dict(ADAPTIVE_ENV, QWEN_FAST_LEVERN_MAX_DECODE_GAP_S='0'), 'REQUIRES the decode-gap floor'),
+                 ({'QWEN_FAST_LEVER_N': '1', 'QWEN_FAST_LEVERN_ADAPTIVE': '1'}, 'merged route'),
+                 ({'QWEN_PREFIX_REUSE': '1', 'QWEN_FAST_LEVERN_ADAPTIVE': '1'}, 'without QWEN_FAST_LEVER_N=1'))
+        for env, word in cases:
+            with self.subTest(word=word):
+                self.assertTrue([problem for problem in policy.adaptive_problems(env) if word in problem], policy.adaptive_problems(env))
+                self.assertTrue([problem for problem in policy.config_problems(env) if word in problem])
+                with self.assertRaises(ValueError):
+                    policy.adaptive_config(env)
+
+    def test_a_knob_without_the_switch_is_a_typo(self):
+        for name in policy.ADAPTIVE_FLAGS[1:]:
+            with self.subTest(name=name):
+                problems = policy.adaptive_problems({'QWEN_FAST_LEVER_N': '1', 'QWEN_PREFIX_REUSE': '1', name: '1'})
+                self.assertTrue(problems and 'QWEN_FAST_LEVERN_ADAPTIVE=1' in problems[0])
+        self.assertIsNone(policy.adaptive_config({'QWEN_FAST_LEVERN_ADAPTIVE_SHARE': '0.8'}))
+
+    def test_the_flags_are_known_to_the_lever_and_are_not_siblings(self):
+        for name in policy.ADAPTIVE_FLAGS:
+            self.assertIn(name, policy.ALL_FLAGS)
+            self.assertNotIn(name, policy.SIBLING_FLAGS)
+            self.assertNotIn(name, policy.MERGED_FLAGS)
+
+
+class AdaptiveAlternatorTests(unittest.TestCase):
+    """The governor's two inputs move with the live decoder count and nothing else does."""
+
+    def make(self, adaptive=policy.Adaptive(2, 0.9, 120), ttft='180', **flags):
+        clock, wall = Clock(), Clock()
+        wall.now = 1.7e9
+        cfg = policy.config({key: str(value) for key, value in flags.items()})
+        merged = policy.merged_config({'QWEN_FAST_LEVERN_TTFT_TARGET_S': ttft})
+        return policy.Alternator(cfg, clock=clock, merged=merged, wall=wall, adaptive=adaptive), clock, wall
+
+    def test_few_decoders_start_from_the_adaptive_share_and_the_lower_target(self):
+        alternator, clock, wall = self.make()
+        alternator.begin(2, True)
+        self.assertEqual((alternator.base_share, alternator.target_s, alternator.share, alternator.adaptive_active()), (0.9, 120, 0.9, True))
+        alternator.end('prefill')
+        alternator.begin(3, True)
+        self.assertEqual((alternator.base_share, alternator.target_s, alternator.share, alternator.adaptive_active()), (0.5, 180, 0.5, False))
+        alternator.end('prefill')
+        alternator.begin(0, True)
+        self.assertEqual((alternator.base_share, alternator.target_s, alternator.adaptive_active()), (0.5, 180, False), 'no decoder: nothing to yield to')
+
+    def test_the_profile_s_higher_share_and_lower_target_win_over_the_adaptive_ones(self):
+        alternator, _, _ = self.make(policy.Adaptive(2, 0.6, 240), ttft='100', QWEN_FAST_LEVERN_PREFILL_SHARE='0.8')
+        alternator.begin(1, True)
+        self.assertEqual((alternator.base_share, alternator.target_s), (0.8, 100))
+        none, _, _ = self.make(policy.Adaptive(2, 0.9, 0), ttft='180')
+        none.begin(1, True)
+        self.assertEqual((none.base_share, none.target_s), (0.9, 180), 'a zero adaptive target leaves the profile\'s')
+        off, _, _ = self.make(policy.Adaptive(2, 0.9, 120), ttft='0')
+        off.begin(1, True)
+        self.assertEqual((off.share, off.target_s), (0.9, 0), 'the deadline governor off stays off: only the share moves')
+
+    def test_the_lower_target_raises_the_governed_share_for_a_long_prompt(self):
+        times = policy.StepTimes()
+        pending = [(0.0, times.remaining_ms(253920, 0))]
+        today = policy.effective_share(0.5, 180, pending, 0.0)
+        adaptive = policy.effective_share(0.9, 120, pending, 0.0)
+        self.assertGreater(today, 0.52)
+        self.assertLess(today, 0.58)
+        self.assertEqual(adaptive, 0.9, '(94.5 s of work + the build) / 120 s = 0.79 is under the 0.9 base: the base share holds')
+        pinned = policy.effective_share(0.9, 90, pending, 0.0)
+        self.assertEqual(pinned, 1.0, 'a 90 s target cannot hold a cold 254k prompt: pinned, and the floor then yields every G seconds')
+
+    def test_the_decoders_are_owed_a_tenth_not_a_whole_step_at_point_nine(self):
+        alternator, clock, _ = self.make(ttft='0')
+        alternator.begin(2, True)
+        alternator.end('prefill')
+        clock.advance_ms(1000)
+        decision = alternator.begin(2, True)
+        self.assertEqual(decision.kind, 'decode')
+        self.assertAlmostEqual(decision.owed_ms, 1000 * 0.1 / 0.9, places=3)
+        today, clock2, _ = self.make(adaptive=None, ttft='0')
+        today.begin(2, True)
+        today.end('prefill')
+        clock2.advance_ms(1000)
+        self.assertAlmostEqual(today.begin(2, True).owed_ms, 1000.0, places=3)
+
+    def test_with_the_policy_absent_nothing_differs_from_the_governor_without_it(self):
+        for decodes in (0, 1, 2, 3, 8):
+            with self.subTest(decodes=decodes):
+                one, clock_one, wall_one = self.make(adaptive=None)
+                two, clock_two, wall_two = self.make(adaptive=None)
+                for alternator, wall in ((one, wall_one), (two, wall_two)):
+                    alternator.pending_hint = [(wall.now - 100.0, 40000.0)]
+                self.assertEqual(one.begin(decodes, True), two.begin(decodes, True))
+                self.assertEqual((one.share, one.need, one.base_share, one.target_s), (two.share, two.need, 0.5, 180))
+
+    def test_static_rounds_switch_the_policy_off(self):
+        alternator, _, _ = self.make(QWEN_FAST_LEVERN_ROUNDS='3')
+        alternator.begin(1, True)
+        self.assertFalse(alternator.adaptive_active())
+        self.assertEqual(alternator.share, 0.5)
+
+
+class AdaptiveFloorTests(DecodeGapFloorTests):
+    """Every decode-gap floor test again with the adaptive policy on and two decoders live (the policy in force), so the floor guarantee is held in its regime:
+    the governed 1.0 still yields at least every G seconds, a short still gets its round, the floor off still gives the pinned 1.0 no yields."""
+
+    def make(self, gap, share='0.5'):
+        clock = Clock()
+        cfg = policy.config({'QWEN_FAST_LEVERN_PREFILL_SHARE': share})
+        merged = policy.merged_config({'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180', 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': str(gap)})
+        alternator = policy.Alternator(cfg, clock=clock, merged=merged, wall=clock, adaptive=policy.Adaptive(2, 0.9, 120))
+        one = policy.StepTimes().remaining_ms(253920, 0)
+        alternator.pending_hint = [(clock.now, one), (clock.now, one)]
+        return alternator, clock
+
+    def drive(self, alternator, clock, steps=100, step_ms=1000.0, round_ms=167.0, decodes=2):
+        return super().drive(alternator, clock, steps=steps, step_ms=step_ms, round_ms=round_ms, decodes=decodes)
+
+    def test_two_cold_prompts_pin_the_governor_above_one(self):
+        alternator, clock = self.make(8)
+        alternator.begin(2, True)
+        self.assertEqual(alternator.share, 1.0)
+        self.assertGreater(alternator.need, 1.0)
+        self.assertEqual(alternator.cfg.share, 0.5)
+        self.assertEqual(alternator.base_share, 0.9)
+
+    def test_a_short_step_is_followed_by_its_round_at_a_pinned_one(self):
+        alternator, clock = self.make(8)
+        alternator.begin(2, True)
+        alternator.end('prefill', short=True)
+        clock.advance_ms(4400)
+        decision = alternator.begin(2, True)
+        self.assertEqual((decision.kind, decision.reason), ('decode', 'owed'))
+        alternator.end('decode')
+        clock.advance_ms(167)
+        self.assertEqual(alternator.begin(2, True).kind, 'prefill')
+
+    def test_below_one_the_alternation_is_what_it_was(self):
+        # (the control's test above, in the adaptive regime: the base is the adaptive 0.9, one round follows every prefill step, and the floor changes nothing)
+        alternator, clock = self.make(8)
+        alternator.pending_hint = [(clock.now, 1000.0)]
+        kinds, worst, decode_s = self.drive(alternator, clock, steps=20)
+        self.assertEqual(alternator.share, 0.9)
+        off, off_clock = self.make(0)
+        off.pending_hint = [(off_clock.now, 1000.0)]
+        self.assertEqual(kinds, self.drive(off, off_clock, steps=20)[0], 'the floor changes nothing below a pinned 1.0')
+        self.assertGreaterEqual([kind for kind, _ in kinds].count('decode'), 19, 'at least one decode round after every prefill step (RMIN)')
+        self.assertLessEqual(worst, 1.0 + 0.5, 'the decoders wait at most one prefill step')
+
+    def test_nothing_owed_without_decoders_and_the_clock_restarts_when_they_arrive(self):
+        alternator, clock = self.make(8)
+        kinds, worst, decode_s = self.drive(alternator, clock, steps=30, decodes=0)
+        self.assertEqual(decode_s, 0.0)
+        clock.advance_ms(50000)
+        self.assertEqual(alternator.begin(2, True).kind, 'prefill', 'decoders seen now: the floor counts from here')
+
+    def test_more_than_two_decoders_get_the_control_share_and_the_same_floor(self):
+        alternator, clock = self.make(8)
+        alternator.begin(3, True)
+        self.assertEqual((alternator.base_share, alternator.share >= 1.0), (0.5, True), 'two cold 254k prompts pin the governor at 180 s too')
+        kinds, worst, decode_s = self.drive(alternator, clock, decodes=3)
+        self.assertLessEqual(worst, 8.0 + 1.0)
+
+
+SCHED_ENV = {'QWEN_FAST_LEVER_N': '1', 'QWEN_PREFIX_REUSE': '1', 'QWEN_FAST_LEVERN_PARK': 'host'}
+
+
+class SchedConfigTests(unittest.TestCase):
+    """The production-shape pacing (QWEN_FAST_LEVERN_OWED_CAP_MS / _SHORT_SHARE / _SHORT_WAIT_S; gate only, default off): strict flags, never a silent default."""
+
+    def test_unset_is_off(self):
+        self.assertIsNone(policy.sched_config({}))
+        self.assertIsNone(policy.sched_config(SCHED_ENV))
+        self.assertEqual(policy.sched_problems({}), [])
+        self.assertEqual(policy.sched_problems(SCHED_ENV), [])
+
+    def test_every_knob_parses_alone_or_together(self):
+        env = dict(SCHED_ENV, QWEN_FAST_LEVERN_OWED_CAP_MS='1500')
+        self.assertEqual(policy.sched_config(env), policy.Sched(1500, None, None))
+        env = dict(SCHED_ENV, QWEN_FAST_LEVERN_SHORT_SHARE='0.65')
+        self.assertEqual(policy.sched_config(env), policy.Sched(None, 0.65, None))
+        env = dict(SCHED_ENV, QWEN_FAST_LEVERN_OWED_CAP_MS='1500', QWEN_FAST_LEVERN_SHORT_SHARE='0.65', QWEN_FAST_LEVERN_SHORT_WAIT_S='6')
+        self.assertEqual(policy.sched_config(env), policy.Sched(1500, 0.65, 6))
+        self.assertEqual(policy.config_problems(env), [])
+
+    def test_the_owed_cap_alone_needs_no_merged_route(self):
+        env = {'QWEN_FAST_LEVER_N': '1', 'QWEN_FAST_LEVERN_OWED_CAP_MS': '1500'}
+        self.assertEqual(policy.sched_problems(env), [])
+        self.assertEqual(policy.sched_config(env), policy.Sched(1500, None, None))
+
+    def test_a_bad_value_is_refused_by_name_never_defaulted(self):
+        for name, bad in (('QWEN_FAST_LEVERN_OWED_CAP_MS', '99'), ('QWEN_FAST_LEVERN_OWED_CAP_MS', '10001'), ('QWEN_FAST_LEVERN_OWED_CAP_MS', '1.5'),
+                          ('QWEN_FAST_LEVERN_OWED_CAP_MS', 'a lot'), ('QWEN_FAST_LEVERN_SHORT_SHARE', '0'), ('QWEN_FAST_LEVERN_SHORT_SHARE', '1'),
+                          ('QWEN_FAST_LEVERN_SHORT_SHARE', '1.0'), ('QWEN_FAST_LEVERN_SHORT_SHARE', '-0.5'), ('QWEN_FAST_LEVERN_SHORT_SHARE', 'nan'),
+                          ('QWEN_FAST_LEVERN_SHORT_SHARE', 'half'), ('QWEN_FAST_LEVERN_SHORT_WAIT_S', '0'), ('QWEN_FAST_LEVERN_SHORT_WAIT_S', '601'),
+                          ('QWEN_FAST_LEVERN_SHORT_WAIT_S', '2.5')):
+            with self.subTest(name=name, bad=bad):
+                env = dict(SCHED_ENV, QWEN_FAST_LEVERN_SHORT_SHARE='0.65')
+                env[name] = bad
+                with self.assertRaisesRegex(ValueError, name):
+                    policy.sched_config(env)
+                self.assertTrue([problem for problem in policy.config_problems(env) if name in problem], name)
+
+    def test_what_it_cannot_work_beside_is_a_problem(self):
+        cap = {'QWEN_FAST_LEVERN_OWED_CAP_MS': '1500'}
+        share = {'QWEN_FAST_LEVERN_SHORT_SHARE': '0.65'}
+        cases = ((dict(SCHED_ENV, QWEN_FAST_LEVERN_ROUNDS='2', **cap), 'static rounds'),
+                 (dict(SCHED_ENV, QWEN_FAST_LEVERN_PREFILL_SHARE='1', **cap), 'static 1.0 control'),
+                 ({'QWEN_FAST_LEVER_N': '1', 'QWEN_FAST_LEVERN_PARK': 'host', **share}, 'merged route'),
+                 ({'QWEN_FAST_LEVER_N': '1', 'QWEN_PREFIX_REUSE': '1', **share}, 'QWEN_FAST_LEVERN_PARK=host'),
+                 (dict(SCHED_ENV, QWEN_FAST_LEVERN_SHORT_TOKENS='0', **share), 'class is empty'),
+                 (dict(SCHED_ENV, QWEN_FAST_LEVERN_SHORT_WAIT_S='6'), 'without QWEN_FAST_LEVERN_SHORT_SHARE'),
+                 ({'QWEN_PREFIX_REUSE': '1', 'QWEN_FAST_LEVERN_PARK': 'host', **cap}, 'without QWEN_FAST_LEVER_N=1'))
+        for env, word in cases:
+            with self.subTest(word=word):
+                self.assertTrue([problem for problem in policy.sched_problems(env) if word in problem], policy.sched_problems(env))
+                self.assertTrue([problem for problem in policy.config_problems(env) if word in problem])
+                with self.assertRaises(ValueError):
+                    policy.sched_config(env)
+
+    def test_the_flags_are_known_to_the_lever_and_are_not_siblings(self):
+        for name in policy.SCHED_FLAGS:
+            self.assertIn(name, policy.ALL_FLAGS)
+            self.assertNotIn(name, policy.SIBLING_FLAGS)
+            self.assertNotIn(name, policy.MERGED_FLAGS)
+            self.assertNotIn(name, policy.ADAPTIVE_FLAGS)
+
+
+class SchedAlternatorTests(unittest.TestCase):
+    """What the three knobs change in the alternation, and that nothing else moves."""
+
+    def make(self, sched=None, adaptive=None, rounds_seen=None, **flags):
+        clock, wall = Clock(), Clock()
+        wall.now = 1.7e9
+        cfg = policy.config({key: str(value) for key, value in flags.items()})
+        merged = policy.merged_config({'QWEN_FAST_LEVERN_TTFT_TARGET_S': '0'})
+        alternator = policy.Alternator(cfg, clock=clock, merged=merged, wall=wall, adaptive=adaptive, sched=sched)
+        if rounds_seen:
+            alternator.round_ms = 70.0                # a lone/few-seat round of the ship profile (the EWMA is StepTimes' and AlternatorTests' to hold)
+        return alternator, clock
+
+    def after_step(self, alternator, clock, ms, decodes=2, short=False):
+        """A prefill step of `ms` ms with `decodes` live decoders, then the next decision."""
+        alternator.begin(decodes, True)
+        alternator.end('prefill', short=short)
+        clock.advance_ms(ms)
+        return alternator.begin(decodes, True)
+
+    def test_the_default_cap_is_max_rounds_times_the_round_and_binds_for_few_fast_seats(self):
+        alternator, clock = self.make(rounds_seen=True)
+        self.assertAlmostEqual(alternator.owed_cap_ms(), 8 * alternator.round_ms)
+        decision = self.after_step(alternator, clock, 1800.0)
+        self.assertAlmostEqual(decision.owed_ms, 8 * alternator.round_ms, places=3, msg='a 1.8 s step owes 1.8 s at f = 0.5; the cap holds it to 8 rounds')
+        self.assertLess(decision.owed_ms, 600.0)
+
+    def test_an_owed_cap_in_ms_replaces_it_whatever_the_seats(self):
+        alternator, clock = self.make(sched=policy.Sched(1500, None, None), rounds_seen=True)
+        self.assertEqual(alternator.owed_cap_ms(), 1500.0)
+        self.assertAlmostEqual(self.after_step(alternator, clock, 1800.0).owed_ms, 1500.0, places=3)
+        alternator, clock = self.make(sched=policy.Sched(1500, None, None), rounds_seen=True)
+        self.assertAlmostEqual(self.after_step(alternator, clock, 800.0).owed_ms, 800.0, places=3, msg='under the cap the debt is the share\'s, as before')
+
+    def test_a_short_step_owes_one_round_today_and_the_share_with_a_short_share(self):
+        today, clock = self.make(rounds_seen=True)
+        decision = self.after_step(today, clock, 1800.0, short=True)
+        self.assertAlmostEqual(decision.owed_ms, today.round_ms, places=3, msg='today: one round, whatever the step cost')
+        shared, clock = self.make(sched=policy.Sched(None, 0.65, None), rounds_seen=True)
+        decision = self.after_step(shared, clock, 1800.0, short=True)
+        self.assertAlmostEqual(decision.owed_ms, min(shared.owed_cap_ms(), 1800.0 * 0.35 / 0.65), places=3)
+        capped, clock = self.make(sched=policy.Sched(2000, 0.65, None), rounds_seen=True)
+        self.assertAlmostEqual(self.after_step(capped, clock, 1800.0, short=True).owed_ms, 1800.0 * 0.35 / 0.65, places=3, msg='the owed cap of the share\'s debt is in ms')
+
+    def test_a_short_share_never_owes_less_than_the_one_round_of_today(self):
+        for share in (0.99, 0.95, 0.9):
+            alternator, clock = self.make(sched=policy.Sched(None, share, None), rounds_seen=True)
+            decision = self.after_step(alternator, clock, 100.0, short=True)         # a 100 ms short step: the share's debt is under a round
+            self.assertGreaterEqual(decision.owed_ms, alternator.round_ms - 1e-6, share)
+            self.assertEqual(decision.kind, 'decode')
+
+    def test_a_long_step_is_paced_by_the_share_not_the_short_share(self):
+        alternator, clock = self.make(sched=policy.Sched(None, 0.65, None), rounds_seen=True, QWEN_FAST_LEVERN_MAX_ROUNDS=64)
+        decision = self.after_step(alternator, clock, 1000.0, short=False)
+        self.assertAlmostEqual(decision.owed_ms, 1000.0, places=3, msg='f = 0.5 on a long step')
+
+    def test_a_governed_one_still_pays_a_short_its_one_round_and_nothing_more(self):
+        clock, wall = Clock(), Clock()
+        wall.now = 1.7e9
+        merged = policy.merged_config({'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180'})
+        alternator = policy.Alternator(policy.config({}), clock=clock, merged=merged, wall=wall, sched=policy.Sched(None, 0.65, None))
+        alternator.round_ms = 70.0
+        alternator.pending_hint = [(wall.now - 170.0, 100000.0)]      # a long that cannot make its deadline at any share below 1.0
+        alternator.begin(2, True)
+        self.assertEqual(alternator.share, 1.0)
+        alternator.end('prefill', short=True)
+        clock.advance_ms(1800.0)
+        decision = alternator.begin(2, True)
+        self.assertEqual(decision.kind, 'decode', 'the short is owed its one round')
+        alternator.end('decode')
+        clock.advance_ms(70.0)
+        self.assertEqual(alternator.begin(2, True).kind, 'prefill', 'and no more: the long keeps all the device, the share of a short does not apply')
+
+    def test_the_guard_forgives_the_debt_and_keeps_the_one_round(self):
+        alternator, clock = self.make(sched=policy.Sched(None, 0.65, 5), rounds_seen=True)
+        alternator.short_wait_s = 6.0
+        decision = self.after_step(alternator, clock, 1800.0, short=True)
+        self.assertEqual((decision.kind, decision.owed_ms), ('decode', 0.0), 'the one round after a short step stays (RMIN), the debt is gone')
+        self.assertTrue(alternator.guarded)
+        alternator.end('decode')
+        clock.advance_ms(70.0)
+        decision = alternator.begin(2, True)
+        self.assertEqual((decision.kind, decision.reason), ('prefill', 'guard'), 'the next pass goes to the waiting short')
+        # ...and with the short served (nobody waits) the debt is paid again
+        alternator.short_wait_s = 0.0
+        alternator.end('prefill', short=True)
+        clock.advance_ms(1800.0)
+        decision = alternator.begin(2, True)
+        self.assertFalse(alternator.guarded)
+        self.assertGreater(decision.owed_ms, 500.0)
+
+    def test_the_guard_waits_for_its_bound(self):
+        alternator, clock = self.make(sched=policy.Sched(None, 0.65, 5), rounds_seen=True)
+        alternator.short_wait_s = 4.9
+        decision = self.after_step(alternator, clock, 1800.0, short=True)
+        self.assertFalse(alternator.guarded)
+        self.assertGreater(decision.owed_ms, 500.0)
+
+    def test_an_all_none_pacing_is_no_pacing(self):
+        """Sched(None, None, None) (never built by sched_config) decides exactly as the absent policy does, on a seeded random schedule."""
+        import random
+
+        outcomes = []
+        for sched in (None, policy.Sched(None, None, None)):
+            alternator, clock = self.make(sched=sched)
+            rng, trace = random.Random(7), []
+            for _ in range(400):
+                decodes, pending = rng.choice((0, 1, 2, 3, 7)), rng.random() < 0.9
+                decision = alternator.begin(decodes, pending)
+                kind = decision.kind
+                short = kind == 'prefill' and rng.random() < 0.5
+                alternator.end(kind, short=short)
+                clock.advance_ms(rng.choice((70.0, 140.0, 800.0, 1800.0)) if kind == 'prefill' else 70.0 + rng.random() * 70.0)
+                trace.append((decision, alternator.share, alternator.owed_ms))
+            outcomes.append(trace)
+        self.assertEqual(outcomes[0], outcomes[1])
+
+    def test_the_invariants_hold_on_random_schedules(self):
+        """Seeded: a short step beside decoders is always followed by a decode step (the smoke check's rule 3); the debt never exceeds the cap in force; the guard leaves no debt."""
+        import random
+
+        for seed in range(30):
+            rng = random.Random(seed)
+            sched = policy.Sched(rng.choice((None, 400, 1500)), rng.choice((None, 0.5, 0.65, 0.8)), rng.choice((None, 3, 6)) if True else None)
+            if sched.short_wait_s and sched.short_share is None:
+                sched = sched._replace(short_wait_s=None)
+            alternator, clock = self.make(sched=sched, rounds_seen=rng.choice((False, True)))
+            short_open = False
+            for _ in range(300):
+                decodes = rng.choice((1, 2, 3, 7))
+                alternator.short_wait_s = rng.choice((0.0, 2.0, 7.0))
+                decision = alternator.begin(decodes, True)
+                bound = sched.owed_cap_ms if sched.owed_cap_ms else alternator.cfg.max_rounds * policy.INITIAL_ROUND_MS      # (the default cap follows the measured round: never above the first)
+                self.assertLessEqual(decision.owed_ms, bound + 1e-6, (seed, decision))
+                if alternator.guarded:
+                    self.assertEqual(decision.owed_ms, 0.0)
+                if short_open:
+                    self.assertEqual(decision.kind, 'decode', (seed, 'a short step is followed by a decode step'))
+                kind = decision.kind
+                short = kind == 'prefill' and rng.random() < 0.5
+                alternator.end(kind, short=short)
+                short_open = short and decodes > 0
+                clock.advance_ms(rng.choice((300.0, 900.0, 1800.0)) if kind == 'prefill' else rng.choice((67.0, 140.0, 250.0)))
+
+
 class OffSwitchTests(unittest.TestCase):
     def test_it_latches_once_and_polls_at_most_once_a_second(self):
         clock, present, calls = Clock(), [False], []

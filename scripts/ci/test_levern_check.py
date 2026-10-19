@@ -812,5 +812,58 @@ class SkewDeadlineTests(unittest.TestCase):
         self.assertIn('240', found[0])
 
 
+SCHED_ENV = dict(ENV, QWEN_FAST_LEVERN_SHORT_SHARE='0.65', QWEN_FAST_LEVERN_SHORT_WAIT_S='5', QWEN_FAST_LEVERN_OWED_CAP_MS='1500', QWEN_PREFIX_REUSE='1',
+                 QWEN_FAST_LEVERN_PARK='host')
+SCHED_INSTALL = policy.SCHED_LINE.format(1500, 0.65, 5)
+
+
+def sched_step(n, kind='prefill', seats=6, req='r0', short=1, cap=1500, guard=0, owed='970', reason='paid'):
+    """A merged-route step line with the pacing's three fields (STEP_LINE_MERGED + STEP_SCHED_SUFFIX)."""
+    line = policy.STEP_LINE_MERGED + policy.STEP_SCHED_SUFFIX
+    if kind == 'decode':
+        return line.format(n, 'decode', seats, '-', '-', seats, '-', '-', '-', reason, 'prefill', '1800.0', owed, 0, 0.5, 0.5, 0, 0, cap, guard)
+    return line.format(n, 'prefill', seats, req, 0, 4088, 4088, 4088, 1, reason, 'decode', '140.0', owed, 0, 0.5, 0.5, 0, short, cap, guard)
+
+
+class SchedPacingRuleTests(unittest.TestCase):
+    """c2_smoke_check.levern_sched_problems over synthetic step lines: silent when none of the three flags is set, strict when they are."""
+
+    def problems(self, lines, env=SCHED_ENV, results=None, install=True):
+        text = chr(10).join(([SCHED_INSTALL] if install else []) + lines)
+        return check.levern_sched_problems(check.levern_facts(text)['steps'], env, text, results)
+
+    def test_the_flags_off_leave_no_trace(self):
+        self.assertEqual(self.problems([step(1, 'prefill', 3, 'a', 0, 4088, 4088, 4088, 1)], env=ENV, install=False), [])
+        found = self.problems([sched_step(1)], env=ENV, install=True)
+        self.assertEqual(len(found), 2)
+        self.assertIn('line(s) on a profile that sets none', found[0])
+        self.assertIn('carry short=/cap_ms=/guard= fields', found[1])
+
+    def test_a_clean_pacing_log_has_no_problem(self):
+        lines = [sched_step(1), sched_step(2, 'decode', owed='830'), sched_step(3, req='r1', guard=1, owed='0', reason='guard')]
+        self.assertEqual(self.problems(lines), [])
+
+    def test_each_requirement_has_a_negative_control(self):
+        self.assertTrue([p for p in self.problems([sched_step(1)], install=False) if '"[PINDIAG] lever N sched:" line was logged' in p])
+        plain = step(1, 'prefill', 3, 'a', 0, 4088, 4088, 4088, 1)
+        self.assertTrue([p for p in self.problems([plain]) if 'carries short=/cap_ms=/guard=' in p])
+        self.assertTrue([p for p in self.problems([sched_step(1, cap=1000)]) if 'cap_ms=1000.0 with QWEN_FAST_LEVERN_OWED_CAP_MS=1500' in p])
+        no_guard = dict(SCHED_ENV)
+        del no_guard['QWEN_FAST_LEVERN_SHORT_WAIT_S']
+        self.assertTrue([p for p in self.problems([sched_step(1, guard=1, owed='0')], env=no_guard) if 'guard=1 with QWEN_FAST_LEVERN_SHORT_WAIT_S unset' in p])
+        self.assertTrue([p for p in self.problems([sched_step(1, guard=1, owed='400')]) if 'the guard forgives the debt' in p])
+
+    def test_a_returning_turn_shape_that_ran_no_short_beside_decoders_is_not_exercised(self):
+        results = {'agent_turns': {'turns': 3}}
+        self.assertTrue([p for p in self.problems([sched_step(1, short=0), sched_step(2, short=1, seats=0)], results=results) if 'NOT EXERCISED' in p])
+        self.assertEqual(self.problems([sched_step(1, short=1)], results=results), [])
+        self.assertEqual(self.problems([sched_step(1, short=0)], results={}), [], 'no returning-turn shape ran: nothing to exercise')
+        self.assertEqual(self.problems([sched_step(1, short=0)], results={'agent_turns': {'error': 'x'}}), [], 'a failed shape is the smoke check\'s other rules\'')
+
+    def test_the_rule_is_wired_into_the_lever_n_problems(self):
+        text = chr(10).join(['[PINDIAG] lever N installed on x', SCHED_INSTALL, sched_step(1, cap=900)])
+        self.assertTrue([p for p in check.levern_problems(SCHED_ENV, text, {})[0] if 'logged cap_ms=900.0' in p])
+
+
 if __name__ == '__main__':
     unittest.main()

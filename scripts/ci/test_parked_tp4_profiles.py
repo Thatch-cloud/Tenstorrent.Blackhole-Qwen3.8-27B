@@ -283,6 +283,9 @@ class ProfileTests(unittest.TestCase):
         import make_pf2_profiles
 
         generated |= set(make_pf2_profiles.twin_names())      # (tp4/prefill-2's twins of the approved ship-4 profile, test_pf2_profiles)
+        import make_sched_profiles
+
+        generated |= set(make_sched_profiles.twin_names())      # (tp4/sched-1's, test_sched_profiles)
         for name, profile in profiles.items():
             env = profile['env']
             named = [flag for flag in env if flag.startswith('QWEN_FAST_PARKED_') or flag in ('QWEN_FAST_GATE_DRAM_BALLAST', 'QWEN_FAST_LEVERN_BUILD_MS')]

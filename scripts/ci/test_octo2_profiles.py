@@ -17,6 +17,7 @@ import make_np1_profiles as np1_twins  # noqa: E402
 import make_s5_profiles as s5_twins  # noqa: E402
 import make_xe_profiles as xe_twins  # noqa: E402
 import make_pf2_profiles as pf2_twins  # noqa: E402
+import make_sched_profiles as sched_twins  # noqa: E402
 import make_octo_profiles as octo_twins  # noqa: E402
 import serving_octo as octo  # noqa: E402
 from test_c2_packed_tp4_profiles import profiles  # noqa: E402
@@ -83,7 +84,7 @@ class TwinTests(unittest.TestCase):
 
     def test_no_other_profile_names_a_lever_flag(self):
         for name, profile in profiles().items():
-            if name in EXPECTED or name in octo3_twins.owned_names() or name in ship4_twins.owned_names() or name in np1_twins.twin_names() or name in s5_twins.owned_names() or name in xe_twins.twin_names() or name in pf2_twins.twin_names():      # (tp4/octo-3's twins and ship candidates are the fused stack's octo arms; tp4/np1-fastlane's are the ship-4 candidate's; tp4/exact-end's are the ship-4 candidate's; so are tp4/prefill-2's)
+            if name in EXPECTED or name in octo3_twins.owned_names() or name in ship4_twins.owned_names() or name in np1_twins.twin_names() or name in s5_twins.owned_names() or name in xe_twins.twin_names() or name in pf2_twins.twin_names() or name in sched_twins.twin_names():      # (tp4/octo-3's twins and ship candidates are the fused stack's octo arms; tp4/np1-fastlane's are the ship-4 candidate's; tp4/exact-end's are the ship-4 candidate's; so are tp4/prefill-2's; tp4/sched-1's are the ship-4 candidate's)
                 continue
             with self.subTest(profile=name):
                 self.assertFalse(set(twins.FLAGS) & set(profile.get('env') or {}))
