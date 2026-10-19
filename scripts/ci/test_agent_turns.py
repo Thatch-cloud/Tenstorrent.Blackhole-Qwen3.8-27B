@@ -286,6 +286,7 @@ class RunShapeTests(AgentRuns):
         problems, facts = check.check(stdout, text, False, env={'QWEN_PREFIX_REUSE': '1'})
         self.assertEqual([item for item in problems if 'agent_turns' in item], [], problems)
         found = facts['agent_turns']['agent_turns']
+        json.dumps(facts)       # the facts line c2_smoke_check prints
         self.assertEqual((found['requests'], found['errors']), (12, 0))
         self.assertTrue(found['salted'])
         self.assertEqual(found['reuse']['returning_turns'], 9)
