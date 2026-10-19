@@ -177,7 +177,9 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_TAULAB_IN_FLIGHT requests in flight per independent-turn arm (default 8: the four seats and four queued; 1..16)
   C2_TAULAB_MAX_TOKENS  the answer budget of A1, A2, A4 and A5 (default, rendered empty: 2048; A3 always keeps the lanes' 2400)
   C2_TAULAB_DRAFTER_ARM  which drafter the run serves (default, rendered empty: the lab as it was): control (the served drafter),
-                      b16-bf8 (the block-16 candidate), b32-bf8 (the block-32 candidate, measurement only), dedf-bf16 (the
+                      b16-bf8 (the block-16 candidate), b32-bf8 (the block-32 candidate, measurement only), sw1ft-bf8 (the drafter this
+                      repository fine-tuned on Swift-1.5's own greedy text, docs/tp4-swift-drafter.md; run it with C2_MODEL_REPO/REVISION
+                      naming Swift, control arm included), dedf-bf16 (the
                       served drafter with bfloat16 projection weights) or lookup (the served drafter with prompt lookup,
                       QWEN_FAST_LOOKUP_DRAFT=n3m12, on the control image). The image (C2_IMAGE_TAG) carries the drafter's fixtures;
                       a candidate arm leaves A3 out of the default arms (A3 is
@@ -289,7 +291,7 @@ PREFIX_ARM_PLANS = (('exactness-traced', 'exactness'), ('exactness-audit', 'exac
 # The W-T1 tau lab (c2_tau_lab.py): its arms, the production profile it serves and its time box.
 TAULAB_ARMS = ('A1', 'A2', 'A3', 'A4', 'A5')
 TAULAB_PROFILE = 'c2-packed-tp4'
-TAULAB_DRAFTER_ARMS = ('control', 'b16-bf8', 'b32-bf8', 'dedf-bf16', 'lookup')
+TAULAB_DRAFTER_ARMS = ('control', 'b16-bf8', 'b32-bf8', 'sw1ft-bf8', 'dedf-bf16', 'lookup')
 DEFAULT_DRAFTER_MANIFEST = 'dedf8df6'
 DRAFTER_MANIFEST_NAME = re.compile(r'[a-z0-9][a-z0-9._-]{0,63}')
 TAULAB_DEADLINE_MINUTES = 270

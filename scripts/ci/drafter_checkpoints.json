@@ -12,6 +12,31 @@
         "hidden": 5120,
         "layers": 5
       }
+    },
+    "sw1-ft1-f8013036": {
+      "revision": "f8013036dbf8992d5d4feb647876f6a402c93a7c",
+      "dtype": "bf8",
+      "config_sha256": "ee3e1e6d297a2f0cdd270d7f5ea150e67ae87bf1d90d314078345eb2bdf32202",
+      "weights_sha256": "1a6e65f79175c1b75f61e72bd53fb2511aa998b75a81ec0aa1852bf2bbd5a47f",
+      "manifests": {
+        "attention/manifest.json": "dfe35342097dc7905c2ed42a6163608acc48b5b96f84294895d6236a0a2b4a5b",
+        "convolution/manifest.json": "d3450a5fa74fcdcc6a7ca022a62ac4cb736de5f311440aca803b32d2a1457e72",
+        "layer-1/manifest.json": "a79fb58783f89a7cd74f12e06cf41936ec31999a1fad9f7b4b728034e0c392e9",
+        "layer-2/manifest.json": "42643378885212954bf6d9a1927bdc40143aaeb5eb574ff0636ee23321d8e872",
+        "layer-3/manifest.json": "2918098ca503288c193c354df782c93fb3a7304061dccc0bbae631fb0209d07e",
+        "layer-4/manifest.json": "628f5d35cd8df5d24561975ce5f61e0253428b21de97ac8d638bbf5b0db7a2d0",
+        "mlp/manifest.json": "c381d92de55d3019dd276a130a897bad8cb0323656d8e82f5c396e9d44d7d5c8",
+        "projection/manifest.json": "7859a3876aae9e564a6ccfb5f4a237434e80c3e9af520bcdb86661fd682250e6",
+        "selector/manifest.json": "c9a8f0952f80b01d702d82b2b3848fcec72a6ce7c5d86369a9c6814547523cde"
+      },
+      "geometry": {
+        "window": 2048,
+        "num_speculative_tokens": 15,
+        "rows_per_user": 16,
+        "target_taps": 5,
+        "hidden": 5120,
+        "layers": 5
+      }
     }
   }
 }

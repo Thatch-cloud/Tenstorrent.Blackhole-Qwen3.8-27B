@@ -65,7 +65,8 @@ class TableTests(unittest.TestCase):
     def test_the_committed_table_is_valid_and_its_default_is_the_baked_checkpoint(self):
         document = dc.load()
         self.assertEqual(document['default'], 'dflash2-dedf8df6')
-        self.assertEqual(sorted(document['checkpoints']), ['dflash2-dedf8df6'], 'no candidate id exists yet')
+        # the one pinned candidate is the Swift-1.5 fine-tune of the served drafter (test_swift_drafter holds its pins against its manifest)
+        self.assertEqual([name for name in sorted(document['checkpoints']) if not name.startswith('sw1-ft1-')], ['dflash2-dedf8df6'], 'no other candidate id exists')
         self.assertEqual(document['checkpoints']['dflash2-dedf8df6']['revision'], 'dedf8df68adfb1afeaf7b7480c0a0243108177b4')
         self.assertEqual(dc.paths('dflash2-dedf8df6'), ('/experiment-dflash-fixture', '/draft-config'))
         self.assertEqual(dc.table_problems(table()), [])

@@ -1,0 +1,20 @@
+{
+  "wp": "DR",
+  "branch": "tp4/swift-drafter",
+  "description": "Not a lever: a different weights file for the DFlash2 drafter. The served drafter fine-tuned on Swift-1.5's own greedy text (docs/tp4-swift-drafter.md): a local drafter manifest, its committed config, a drafter_checkpoints.json entry, the tau lab arm sw1ft-bf8 and the card pack. Default off: the default manifest (dedf8df6) and the production profile are untouched; the weights are not in the repository.",
+  "image_files": [
+    {
+      "path": "scripts/ci/references/drafter-manifests/sw1-ft1-f8013036.json",
+      "reason": "the manifest of the candidate drafter; the image build reads it for the pins, the loader for every byte check"
+    },
+    {
+      "path": "scripts/ci/references/drafter-configs/sw1-ft1-f8013036.config.json",
+      "reason": "a local drafter has no hub repository: the build copies this committed config (hashed to the manifest's config_sha256) instead of fetching one"
+    }
+  ],
+  "tests": [
+    "test_swift_drafter"
+  ],
+  "card_jobs": "scripts/ci/references/fusion-jobs/DR (ORDER.txt)",
+  "docs": "docs/tp4-swift-drafter.md"
+}

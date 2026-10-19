@@ -22,7 +22,7 @@ THE GO RULE (pre-registered; docs/drafter-arms.md). All of:
   arms      the control run's drafter arm is exactly 'control' and the candidate run's is the arm named here
   launch    neither run recorded a launched-container problem (the log did not show the arm's own markers) or an error
   matched   the two runs agree on profile, seed, max_tokens and per-arm data counts; the control and candidate image tags differ
-            for b16-bf8 and b32-bf8 (a different drafter image each) and are equal for dedf-bf16 and lookup (the same image, a
+            for b16-bf8, b32-bf8 and sw1ft-bf8 (a different drafter image each) and are equal for dedf-bf16 and lookup (the same image, a
             switch only: the bf16 weights, the prompt lookup)
 Any FAIL is NO-GO; no FAIL with something not established is NOT_ESTABLISHED; otherwise GO. The control arm is the one arm that
 calibrates A3 (c2_tau_lab: a candidate that moves tau would fail it by construction). The A3 verdict (against an old-stack
@@ -41,7 +41,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import tau_lab_report as report  # noqa: E402
 
-CANDIDATE_ARMS = ('b16-bf8', 'b32-bf8', 'dedf-bf16', 'lookup')
+CANDIDATE_ARMS = ('b16-bf8', 'b32-bf8', 'sw1ft-bf8', 'dedf-bf16', 'lookup')
 # The arms that run on the control's own image (a flag only); every other arm is a different drafter image.
 SAME_IMAGE_ARMS = ('dedf-bf16', 'lookup')
 MIN_ROUNDS = report.MIN_ROUNDS
