@@ -10,8 +10,10 @@ together do to a production-shaped multi-turn run against the approved profile (
 the few-decoder policy) and what do complete spills do to a restore beside seven seats (the tier ABAB T0 T1 T2 T3). Nothing here changes the approved profile, its image or its cache; every result is
 UNQUALIFIED.
 
-THE MEASUREMENT is the agent_turns smoke test: a production-shaped multi-turn run (agents that return to the same conversation with a tool result of a few thousand tokens at a long context).
-It is built on another branch (it is not in c2_serving_smoke.py of this one): merge that branch into the window head BEFORE B0, or the timed jobs name a test the image does not have.
+THE MEASUREMENT is the agent_turns smoke test: a production-shaped multi-turn run (six sessions on 64k / 128k / 200k-token contexts, each returning twelve times with a tool result of a few hundred
+tokens, a few thousand old tokens re-prefilled, an engine rebind, a few hundred tokens decoded, a tool gap of 1-8 s; about 13 minutes). It lives on the branch tp4/agent-turns (pushed; scripts/ci/agent_turns.py
+plans it, reads the container log and judges it; the branch merges into this one without a conflict) and is not in c2_serving_smoke.py of this one: merge it into the window head BEFORE B0, or the timed jobs
+name a test the image does not have.
 """
 
 import argparse
@@ -36,7 +38,7 @@ AUDIT_TESTS = 'warmup,coding,parked_turns,prefill_ladder_solo,concurrent8_steady
 FEW_TESTS = 'warmup,prefill_few_decoders,concurrent8_steady'          # (the eight-seat rule: the smoke check judges the quad profile on concurrent8_steady alone)
 
 HEADER = """# A committed TEMPLATE of .github/c2-serving-job.env for the tp4/sched-1 window (the scheduler-side levers; scripts/ci/c2_serving_job.py parses it): copy it over
-# .github/c2-serving-job.env on a throwaway commit of tp4/sched-1 (with the agent_turns branch merged: see ORDER.txt) and push a tag experiment/c2-serving-vN, ONE TAG AT A TIME (wait for the run to finish; never cancel a running card job).
+# .github/c2-serving-job.env on a throwaway commit of tp4/sched-1 (with the branch tp4/agent-turns merged: see ORDER.txt) and push a tag experiment/c2-serving-vN, ONE TAG AT A TIME (wait for the run to finish; never cancel a running card job).
 # Nothing here names a rig, a card, a host or a registry: the cards are resolved at run time. The jobs are templates only: no tag is pushed from the branch by its author. ORDER.txt has the
 # order, the stop rules, the minutes and the read rules.
 # ONE IMAGE FOR THE WHOLE WINDOW: C2_IMAGE_TAG=%(image)s is a PLACEHOLDER for the tag B0 builds from the pushed branch head WITH the K64j-OQ graft (sed -i 's/%(image)s/<tag>/' *.env). A commit of a file
@@ -66,7 +68,7 @@ def rows():
     out = []
     out.append(dict(name='B0-build-window', mode='stop', minutes=40, actions='build', profile=None, tests=None, telemetry=False, box=None, needs=(), model=False,
                     extra=['C2_BAKE_DEFAULT_PROFILE=%s' % SHIP, 'C2_BAKE_GRAFT=K64j-OQ'],
-                    why=('B0 (STOP): the WINDOW image %s, built from the pushed tp4/sched-1 head (= tp4/swift, the ship-4 stack with the checkpoint selection, plus the scheduler-side levers) WITH the agent_turns branch '
+                    why=('B0 (STOP): the WINDOW image %s, built from the pushed tp4/sched-1 head (= tp4/swift, the ship-4 stack with the checkpoint selection, plus the scheduler-side levers) WITH the branch tp4/agent-turns '
                          'merged: the approved ship-4 profile %s baked as the serving default with a session cap of 8, plus C2_BAKE_GRAFT=K64j-OQ. Every lever is a gate instrument of the twins and is off in the baked '
                          'profile, so the image serves exactly what production serves until a job names a twin. READ: "baking the serving default %s with a session cap of 8", the provenance report with no '
                          'problem line, its K64j-OQ graft line, the image id. A build, not a card job; no privileged builder container may be up and no card job may run during it. Estimate from the last builds: '
@@ -95,9 +97,10 @@ def rows():
         letter = 'a' if index == 1 else 'b'
         out.append(dict(name='%s-control-%s' % (control, letter), mode='soft', minutes=50, actions='reset smoke', profile=SHIP, tests=TIMED_TESTS, telemetry=True, box=90,
                         needs=('C1 <- S1',) if index == 1 else ('C2 <- L1',), model=True, extra=[],
-                        why=('%s (TIMED, the CONTROL of the %s ABAB pair): the approved ship-4 profile %s on Swift, the stack production runs. Tests: warmup; %s (the production-shaped multi-turn run: agents that return '
-                             'with a tool result of a few thousand tokens at a long context, so the returning-turn prefill, the engine rebind and the decoders\' gaps are the production ones); concurrent8_steady (eight '
-                             'users: the parity row and the boot-to-boot floor). Every boot a fresh reset. %s %s %s' % (control, 'first' if index == 1 else 'second', SHIP, MEASURE, ARC, CHECKPOINT_READ, TELEMETRY))))
+                        why=('%s (TIMED, the CONTROL of the %s ABAB pair): the approved ship-4 profile %s on Swift, the stack production runs. Tests: warmup; %s (the production-shaped multi-turn run of the branch tp4/agent-turns: six sessions at 64k-200k tokens of context that return twelve times each, so the returning-turn prefill, the engine rebind '
+                             'and the decoders\' gaps are the production ones); concurrent8_steady (eight users: the parity row and the boot-to-boot floor, and the test the smoke check judges the eight-seat profile on). Every boot a fresh '
+                             'reset. READ: the agent_turns entry (python3 scripts/ci/agent_turns.py report <container log>): committed tokens a second, TTFT by context, the re-prefill, the per-live-users table, prefill\'s and decode\'s share '
+                             'of the run. %s %s %s' % (control, 'first' if index == 1 else 'second', SHIP, MEASURE, ARC, CHECKPOINT_READ, TELEMETRY))))
         out.append(dict(name='%s-all-%s' % (arm, letter), mode='soft', minutes=50, actions='reset smoke', profile=ARM['all'], tests=TIMED_TESTS, telemetry=True, box=90,
                         needs=('L1 <- C1',) if index == 1 else ('L2 <- C2',), model=True, extra=[],
                         why=('%s (TIMED, the ARM of the %s ABAB pair): %s, the approved ship-4 profile with the gate marker in place of its owner waiver id and the four levers on (QWEN_FAST_ADMISSION_LEAN=1, '
@@ -188,7 +191,7 @@ def render_order(table):
         "# WHAT THIS DECIDES (the owner's, never the window's): whether production should turn on, one by one, the four levers: the lean admission (QWEN_FAST_ADMISSION_LEAN: the part of a returning turn's 541 ms engine build that is "
         "accounting, ESTIMATED -285 ms), complete spills of the host tier (QWEN_PREFIX_HOST_TIER_SPILL_MODE=complete), the returning-turn pacing (an owed cap in ms, a share for returning turns, its guard) and the few-decoder policy "
         "(QWEN_FAST_LEVERN_ADAPTIVE). Only the first removes device time; the pacing and the policy move delay between a returning turn's wait and the decoders' gaps, and the note's simulation says by how much. Every result is UNQUALIFIED.",
-        "# THE MEASUREMENT: the agent_turns smoke test (the production-shaped multi-turn run) is built on another branch and is NOT in this branch's c2_serving_smoke.py. P0: merge that branch into the head B0 builds, or every timed job below names a test the image does not have. "
+        "# THE MEASUREMENT: the agent_turns smoke test (the production-shaped multi-turn run: six sessions at 64k-200k tokens of context, twelve returning turns each, about 13 minutes; scripts/ci/agent_turns.py reads and judges it) is built on the branch tp4/agent-turns and is NOT in this branch's c2_serving_smoke.py. P0: merge that branch into the head B0 builds (it merges without a conflict), or every timed job below names a test the image does not have. "
         "parked_turns (in this tree) is a closed loop of fresh 4k-24k prompts with no growing context and no prefix hits: it is A1's exactness shape, not the measurement.",
         "# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z; nothing in this pack does either. B0 is a build and may run while production serves. No other window driver may be alive and no privileged builder container up.",
         "# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and each tag is pushed on THAT commit (the throwaway commit carries only .github/c2-serving-job.env). Push ONE tag at a time and wait for its run "

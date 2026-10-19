@@ -533,13 +533,10 @@ def trace_largest_free(pool):
         return None, '%s: %s' % (type(failure).__name__, str(failure)[:120])
 
 
-def dram_reading(pool, trace=True):
+def dram_reading(pool):
     """(reading, None), or (None, why) when the pool's DRAM statistics cannot be read: what THE SPLIT reads, the
     smallest free and the smallest largest free block over the chips (free, largest_free), and the trace region's
-    smallest largest free block (trace_largest_free, None when unread, trace_unread saying why).
-
-    `trace` False (QWEN_FAST_ADMISSION_LEAN only, and only where the caller's trace term cannot bind: parked_trace_need is 0) leaves the
-    trace region's allocator view unread, four more allocator calls (one a chip) for a number split_short would not use."""
+    smallest largest free block (trace_largest_free, None when unread, trace_unread saying why)."""
     statistics = getattr(pool, 'dram_statistics', None)
     if not callable(statistics):
         return None, 'pool without device statistics'
@@ -551,20 +548,17 @@ def dram_reading(pool, trace=True):
                        largest_free=min(int(chip['largest_free']) for chip in report))
     except Exception as failure:
         return None, '%s: %s' % (type(failure).__name__, str(failure)[:120])
-    if trace:
-        reading['trace_largest_free'], reading['trace_unread'] = trace_largest_free(pool)
-    else:
-        reading['trace_largest_free'], reading['trace_unread'] = None, 'not asked: no trace term (QWEN_FAST_ADMISSION_LEAN)'
+    reading['trace_largest_free'], reading['trace_unread'] = trace_largest_free(pool)
     return reading, None
 
 
 # QWEN_FAST_ADMISSION_LEAN (default off; gate only; docs/tp4-sched-1.md section 4): the three admission costs that are not the rebind. A returning turn's engine
 # build, measured 541 ms (p50) in production, is a parked rebind of 188 ms plus about 350 ms of host-side accounting around it, all of it with every seat stopped
 # (the engine is synchronous): the post-prefill DRAM backstop's allocator reading (about 70 ms: four DRAM views and four trace views), the GDN slot adoption's conv-slice
-# readback (about 140-170 ms, 48 layers, a geometry proof that is the same for every admission of a slot) and the 'dram after engine' log line (another reading, about
+# readback (about 115-185 ms, 48 layers, a geometry proof that is the same for every admission of a slot) and the 'dram after engine' log line (another reading, about
 # 70 ms). With the flag on: the readback is taken at each slot's first adoption only (memory_ledger.trim_enabled's rule), the line is off for a request rebound onto a
 # parked engine, and the backstop REUSES the reading this very admission's DRAM hold took a few seconds earlier when that reading leaves room by a wide margin
-# (reusable_reading); the hold's and the backstop's readings skip the trace-region view when the parked arrival has no trace term. Unset or 0, every call is what it was.
+# (reusable_reading). Unset or 0, every call is what it was.
 LEAN_FLAG = 'QWEN_FAST_ADMISSION_LEAN'
 # What a reused reading is discounted by: the prefill between the hold and the backstop persists tens of MB a chip (the window snapshots; 27 MB seen in the audited
 # card run: 28.774 -> 28.801 GB allocated) and can only split the largest free block, at worst in half. The reading must fit the backstop's need after BOTH.
@@ -651,8 +645,7 @@ def dram_predicate(pool, reserve, parked=None):
             need = dram_need(prompt_tokens, reserve)
         else:
             need = parked_need(prompt_tokens, reserve, rebind=terms['rebind'], single=terms['single'])
-        # (QWEN_FAST_ADMISSION_LEAN: a parked arrival whose single capture is intact has no trace term, parked_trace_need(0) = 0, so the trace region is not read)
-        reading, reason = dram_reading(pool, **(dict(trace=False) if terms is not None and not terms.get('single') and lean_enabled() else {}))
+        reading, reason = dram_reading(pool)
         if reading is None:
             return True, dict(largest_free=None, need=need, unavailable=reason, **({} if terms is None else dict(parked=terms)))
         short = split_short(reading['free'], reading['largest_free'], need, reserve, reading['trace_largest_free'],

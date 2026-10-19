@@ -3,7 +3,7 @@
 A returning turn is a parked-engine rebind (188 ms) wrapped in about 350 ms of host-side accounting with every seat stopped: the post-prefill DRAM
 backstop's allocator reading, the GDN slot adoption's conv-slice readback and the 'dram after engine' line. The flag takes the readback at each slot's first
 adoption only (the trim's rule), drops the line for a rebound request, and lets the backstop reuse the reading the same admission's DRAM hold took when it
-leaves room by a wide margin (and skips the trace views where no trace term applies). Unset, every call is what it always was.
+leaves room by a wide margin. Unset, every call is what it always was.
 
     nice python3 -B -m unittest test_sched_lean      (from scripts/ci)
 """
@@ -209,51 +209,6 @@ class HoldNotesTests(Fresh):
         self.assertEqual(admission._LEAN_READINGS, {})
 
 
-class PredicateReadingTests(Fresh):
-    """The hold's own reading skips the trace views exactly when the parked arrival has no trace term."""
-
-    def counts(self, on, terms):
-        pool = CountingPool()
-        admits = admission.dram_predicate(pool, RESERVE, parked=None if terms is None else (lambda: terms))
-        with environ(on):
-            ok, detail = admits(4088)
-        return pool, ok, detail
-
-    def test_flag_off_the_trace_region_is_read_for_every_arrival(self):
-        for terms in (None, dict(rebind=admission.PARKED_REBIND_BYTES, single=0, credit=0)):
-            pool, ok, detail = self.counts(False, terms)
-            self.assertEqual((pool.dram_calls, pool.trace_calls), (1, 1))
-            self.assertEqual(detail['trace_largest_free'], 148 * MB)
-            self.assertIs(ok, True)
-
-    def test_lean_a_parked_arrival_with_its_single_intact_leaves_the_trace_region_unread(self):
-        pool, ok, detail = self.counts(True, dict(rebind=admission.PARKED_REBIND_BYTES, single=0, credit=0))
-        self.assertEqual((pool.dram_calls, pool.trace_calls), (1, 0))
-        self.assertIsNone(detail['trace_largest_free'])
-        self.assertIs(ok, True)
-        self.assertEqual(detail['short'], ())
-
-    def test_lean_an_arrival_that_has_a_trace_term_still_reads_the_region(self):
-        single = admission.measured_single_capture_bytes()
-        for terms in (None, dict(rebind=admission.PARKED_REBIND_BYTES, single=single, credit=0)):
-            pool, _ok, detail = self.counts(True, terms)
-            self.assertEqual((pool.dram_calls, pool.trace_calls), (1, 1), terms)
-            self.assertEqual(detail['trace_largest_free'], 148 * MB)
-
-    def test_the_decision_is_the_same_with_and_without_the_unread_trace_view(self):
-        terms = dict(rebind=admission.PARKED_REBIND_BYTES, single=0, credit=0)
-        for free, largest in ((4_800 * MB, 4_700 * MB), (1_200 * MB, 4_700 * MB), (4_800 * MB, 300 * MB), (2_000 * MB, 700 * MB)):
-            outcomes = []
-            for on in (False, True):
-                pool = CountingPool(free=free, largest=largest, trace=1 * MB)       # (a trace region that would be short if a trace term applied)
-                admits = admission.dram_predicate(pool, RESERVE, parked=lambda: terms)
-                with environ(on):
-                    ok, detail = admits(4088)
-                outcomes.append((ok, detail['short']))
-            self.assertEqual(outcomes[0], outcomes[1], (free, largest))
-            self.assertNotIn('trace', outcomes[0][1])
-
-
 class BackstopTests(Fresh):
     def backstop(self, pool, on, *, parked=None, kept=None, request_id='r', log=None, clock=None, **options):
         log = Mock() if log is None else log
@@ -281,11 +236,11 @@ class BackstopTests(Fresh):
         self.assertEqual(line[1], 'r')
         self.assertEqual(line[-1], admission.LEAN_ALLOWANCE_BYTES)
 
-    def test_lean_without_a_kept_reading_it_reads_and_skips_the_trace_view_only_where_no_trace_term_applies(self):
-        for parked, trace_calls in ((self.PARKED_INTACT, 0), (None, 1), (dict(rebind=admission.PARKED_REBIND_BYTES, single=admission.measured_single_capture_bytes()), 1)):
+    def test_lean_without_a_kept_reading_it_reads_the_whole_allocator_view_as_before(self):
+        for parked in (self.PARKED_INTACT, None, dict(rebind=admission.PARKED_REBIND_BYTES, single=admission.measured_single_capture_bytes())):
             pool = CountingPool()
             self.backstop(pool, True, parked=parked)
-            self.assertEqual((pool.dram_calls, pool.trace_calls), (1, trace_calls), parked)
+            self.assertEqual((pool.dram_calls, pool.trace_calls), (1, 1), parked)
 
     def test_lean_a_tight_reading_is_read_again_and_judged_on_the_real_one(self):
         need = admission.parked_backstop_need(RESERVE, rebind=admission.PARKED_REBIND_BYTES, single=0)

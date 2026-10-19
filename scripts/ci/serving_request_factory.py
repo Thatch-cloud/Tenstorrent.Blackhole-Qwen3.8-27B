@@ -239,13 +239,13 @@ def dram_backstop(pool, *, request_id, reserve=None, log=None, parked=None, make
     lean = admission.lean_enabled()
     if lean:
         # QWEN_FAST_ADMISSION_LEAN: the reading the admission's own DRAM hold took a few seconds ago, when it clears this need with a wide margin (the allowance
-        # covers the prefill in between): no allocator read here. Else the reading below, without the trace views when no trace term applies.
+        # covers the prefill in between): no allocator read here. Else the reading below.
         reused = admission.reusable_reading(request_id, need, reserve, trace_need=None if parked is None else admission.parked_trace_need(parked['single']))
         if reused is not None:
             log(admission.LEAN_REUSED_LINE, request_id, reused['age_ms'], reused['free'], reused['largest_free'], need, admission.LEAN_ALLOWANCE_BYTES)
             return reused['largest_free']
     for attempt in (0, 1):
-        reading, reason = admission.dram_reading(pool, **(dict(trace=False) if lean and parked is not None and not parked['single'] else {}))
+        reading, reason = admission.dram_reading(pool)
         if reading is None:
             log('[PINDIAG] dram backstop unavailable for request {}: {} (not refused)', request_id, reason)
             return None
