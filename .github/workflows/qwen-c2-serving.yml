@@ -1156,7 +1156,20 @@ jobs:
           ( while :; do echo "[LOAD] $(date +%s) $(cut -d' ' -f1 /proc/loadavg)" >> "$results/load.log"; sleep 60; done ) &
           load_pid=$!
           . scripts/ci/card_telemetry.sh
-          trap 'telemetry_stop; kill "$load_pid" 2>/dev/null || true; docker logs "$name" > "$results/container.log" 2>&1 || true; docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          # agent_turns / agent_turns_long (scripts/ci/agent_turns.py): a prefix-reuse profile keeps a request's cache_salt only when it verifies against the salt key the contract reads, so for
+          # those two tests ONLY the step writes a throwaway key outside the uploaded results, mounts it read-only and points the contract at it (QWEN_PREFIX_SALT_KEY_FILE, as the gate does), and
+          # the smoke client mints its sessions' salts under the same file (SMOKE_SALT_KEY_FILE). Without it the run is unsalted and measures a server with reuse off. Every other job is unchanged.
+          salt_key=
+          salt_args=()
+          case ",$TESTS," in
+            *,agent_turns,*|*,agent_turns_long,*)
+              salt_key="$RUNNER_TEMP/c2-smoke-salt.key"
+              python3 -c 'import binascii, os, sys; open(sys.argv[1], "wb").write(binascii.hexlify(os.urandom(32)) + b"\n")' "$salt_key"
+              chmod 0644 "$salt_key"
+              salt_args=(-v "$salt_key:/c2-smoke/salt.key:ro" -e QWEN_PREFIX_SALT_KEY_FILE=/c2-smoke/salt.key)
+              export SMOKE_SALT_KEY_FILE="$salt_key" ;;
+          esac
+          trap 'telemetry_stop; kill "$load_pid" 2>/dev/null || true; docker logs "$name" > "$results/container.log" 2>&1 || true; docker rm -f "$name" >/dev/null 2>&1 || true; rm -f "$salt_key"' EXIT
           # C2_TELEMETRY=1: the read-only per-chip telemetry sampler for the whole step, the model load and warm-up included (it ends with the smoke client below).
           telemetry_start smoke "$results/telemetry-smoke" "${CARD_SET_NODES[@]}"
           if [ -n "$TT_GRID" ]; then echo "compute-grid clamp: TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$TT_GRID"; fi
@@ -1168,7 +1181,7 @@ jobs:
           docker run -d --name "$name" --read-only \
             --tmpfs /tmp:rw,size=512m --tmpfs /opt/tt-metal/generated:rw,size=1g \
             --tmpfs /root/.cache/ttnn:rw,size=1g --tmpfs /root/.cache/tt-metal-cache:rw,size=8g \
-            --shm-size 4g --memory 80g --cpus 8 "${devices[@]}" \
+            --shm-size 4g --memory 80g --cpus 8 "${devices[@]}" ${salt_args[@]+"${salt_args[@]}"} \
             -v /dev/hugepages-1G:/dev/hugepages-1G --cap-add SYS_NICE \
             -v /home/thatch/hf-cache/hub:/models -e HF_HOME=/models -e HF_HUB_CACHE=/models \
             -e MESH_DEVICE=P300 -e QWEN36_BATCHED_DECODE_MODE=host -e VLLM_RPC_TIMEOUT=100000 \
