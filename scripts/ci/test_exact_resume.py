@@ -15,6 +15,7 @@
 """
 
 import os
+import re
 import subprocess
 import sys
 import types
@@ -232,7 +233,8 @@ class GraftOffTests(Harness):
         stats = dict(installed.registry.stats)
         for name in ('capture_ms', 'restore_ms') + prefix_registry.TURN_STAT_NAMES:
             stats.pop(name, None)
-        return trace, stats, [line for line in self.logs if not line.startswith('install ')]
+        # The registry's stats line carries the host's own memory readings (rss=, avail=: /proc, different on every read), which no graft decides.
+        return trace, stats, [re.sub(r'\b(rss|avail)=\d+', r'\1=N', line) for line in self.logs if not line.startswith('install ')]
 
     def test_the_switches_off_make_the_base_graft_s_decisions(self):
         base = base_module('qwen_prefix_scheduler_patch.py')
