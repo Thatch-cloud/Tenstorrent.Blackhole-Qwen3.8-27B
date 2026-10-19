@@ -339,6 +339,8 @@ def variants():
         ('lone', 'lone-user padded round (np1)', {}, dict(np1=True)),
         ('lone', 'np1 + owed cap 1500 ms', {'QWEN_FAST_LEVERN_OWED_CAP_MS': '1500'}, dict(np1=True)),
         ('lone', 'np1 + adaptive', {'QWEN_FAST_LEVERN_ADAPTIVE': '1'}, dict(np1=True)),
+        ('lone', 'np1 + step 4096 while the user decodes', {'QWEN_FAST_LEVERN_STEP_TOKENS': '4096'}, dict(np1=True)),
+        ('lone', 'np1 + step 4096 + solo step 32768', {'QWEN_FAST_LEVERN_STEP_TOKENS': '4096', 'QWEN_FAST_LEVERN_SOLO_STEP_TOKENS': '32768'}, dict(np1=True)),
     ]
 
 
