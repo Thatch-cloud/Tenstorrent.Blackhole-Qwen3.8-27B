@@ -1206,7 +1206,9 @@ def install(config, *, importer=importlib.import_module, log=None, queue_factory
         # The adaptive governor (QWEN_FAST_LEVERN_ADAPTIVE=1, gate only): None unless asked, and then nothing below differs. A malformed value or a
         # combination it cannot work in (no merged route, the floor off) fails the install by name, never a silent default.
         adaptive = levern_policy.adaptive_config()
-        levern = levern_scheduler.LevernRuntime(log=log, merged=merged, adaptive=adaptive)
+        # The production-shape pacing (QWEN_FAST_LEVERN_OWED_CAP_MS / _SHORT_SHARE / _SHORT_WAIT_S, gate only): None unless one is set, strict like the adaptive governor.
+        sched = levern_policy.sched_config()
+        levern = levern_scheduler.LevernRuntime(log=log, merged=merged, adaptive=adaptive, sched=sched)
     state = new_state()
     setattr(cls, METHOD, wrap(original, queue_factory=queue_factory, log=log, steps=steps, state=state, kv=kv, levern=levern))
     log(INSTALLED + '{}', name)
@@ -1224,4 +1226,7 @@ def install(config, *, importer=importlib.import_module, log=None, queue_factory
             log(levern_policy.GOVERNOR_LINE, merged.ttft_s, merged.max_gap_s)
         if adaptive is not None:
             log(levern_policy.ADAPTIVE_LINE, adaptive.decoders, adaptive.share, adaptive.ttft_s, merged.max_gap_s)
+        if sched is not None:
+            log(levern_policy.SCHED_LINE, sched.owed_cap_ms if sched.owed_cap_ms is not None else '-', sched.short_share if sched.short_share is not None else '-',
+                sched.short_wait_s if sched.short_wait_s is not None else '-')
     return name

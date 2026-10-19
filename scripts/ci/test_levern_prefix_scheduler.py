@@ -124,7 +124,8 @@ def install(environ=None, *, kv=None, off_exists=None):
     env.update(environ or {})
     env = {name: value for name, value in env.items() if value is not None}
     runtime = levern_scheduler.LevernRuntime(levern_policy.config(env), log=log, clock=clock, wall=wall, merged=levern_policy.merged_config(env),
-                                             off_path='/nonexistent/levern.off', adaptive=levern_policy.adaptive_config(env))
+                                             off_path='/nonexistent/levern.off', adaptive=levern_policy.adaptive_config(env),
+                                             sched=levern_policy.sched_config(env))
     if off_exists is not None:
         runtime.off.exists = off_exists
     original_prefill, original_schedule = cls._schedule_prefill_only, cls.schedule
@@ -879,7 +880,7 @@ class SkewWithShortsTests(GateFreeCase):
             levern_policy.effective_share.__defaults__, levern_policy.governor_need.__defaults__ = saved
         end = max(ttft.values())
         edges = [0.0] + [r for r in rounds if r <= end] + [end]
-        formats = (levern_policy.STEP_LINE_MERGED, levern_policy.STEP_LINE_ADAPTIVE)
+        formats = step_formats()
         lines = [call.args[0].format(*call.args[1:]) for call in rig.log.call_args_list if call.args and call.args[0] in formats]
         return dict(ttft=ttft, worst=max(b - a for a, b in zip(edges, edges[1:])), lines=lines, log=rig.log)
 
@@ -920,9 +921,15 @@ ADAPTIVE_ON = {'QWEN_FAST_LEVERN_ADAPTIVE': '1'}
 SHARE_MODE = {'QWEN_FAST_LEVERN_ROUNDS': None, 'QWEN_FAST_LEVERN_TTFT_TARGET_S': '180', 'QWEN_FAST_LEVERN_PARK': '0', 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': '8'}
 
 
+def step_formats():
+    """Every step-line format the merged runtime logs: the merged line, with the adaptive governor's fields, with the production-shape pacing's, with both."""
+    return (levern_policy.STEP_LINE_MERGED, levern_policy.STEP_LINE_ADAPTIVE, levern_policy.STEP_LINE_MERGED + levern_policy.STEP_SCHED_SUFFIX,
+            levern_policy.STEP_LINE_ADAPTIVE + levern_policy.STEP_SCHED_SUFFIX)
+
+
 def step_lines(rig):
     """The step lines the scheduler logged, formatted (either format), as the smoke check reads them."""
-    formats = (levern_policy.STEP_LINE_MERGED, levern_policy.STEP_LINE_ADAPTIVE)
+    formats = step_formats()
     return [call.args[0].format(*call.args[1:]) for call in rig.log.call_args_list if call.args and call.args[0] in formats]
 
 
@@ -1120,6 +1127,123 @@ class AdaptiveGovernorTests(GateFreeCase):
 ADAPTIVE_TEXT = levern_policy.ADAPTIVE_LINE.format(2, 0.9, 120, 8)
 
 
+SCHED_MODE = dict(SHARE_MODE, QWEN_FAST_LEVERN_PARK='host', QWEN_FAST_LEVERN_TTFT_TARGET_S='0')
+
+
+class SchedPacingTests(GateFreeCase):
+    """QWEN_FAST_LEVERN_OWED_CAP_MS / _SHORT_SHARE / _SHORT_WAIT_S on the plugin's TTScheduler (docs/tp4-sched-1.md section 5): four decoders and room for four more (the seats a burst of returning turns takes), returning turns of about
+    4,000 tokens (SHORT beside the lane), the measured shape of a returning turn (a 1.8 s step with its engine rebind) and of a round (140 ms at seven seats)."""
+    SHORT_MS, ROUND_MS = 1800.0, 140.0
+
+    def rig(self, extra=None, decoders=4):
+        rig = Rig(environ=dict(SCHED_MODE, **(extra or {})), seats=8, decoders=decoders)
+        rig.runtime.alternator.round_ms = self.ROUND_MS        # (the round time the runtime has learned by now, not its 250 ms seed)
+        return rig
+
+    def burst(self, rig, count=3, prompt=4088, age_s=0.0):
+        for index in range(count):
+            rig.add('r%d' % index, prompt, arrival=rig.wall.now - age_s)
+
+    def run_burst(self, rig, count=3, max_steps=400, **kwargs):
+        self.burst(rig, count, **kwargs)
+        for _ in range(max_steps):
+            rig.step(prefill_ms=self.SHORT_MS, decode_ms=self.ROUND_MS)
+            if rig.idle() and sum(1 for event in rig.events if event[0] == 'prefill') >= count:
+                break
+        else:
+            self.fail('the burst never finished')
+        return rig
+
+    def rounds_after_each_short(self, rig):
+        """The decode steps between a prefill step and the next one (the last short's rounds counted until the log ends)."""
+        counts, run, seen = [], 0, False
+        for event in rig.events:
+            if event[0] == 'prefill':
+                if seen:
+                    counts.append(run)
+                seen, run = True, 0
+            elif seen:
+                run += 1
+        return counts
+
+    def test_off_nothing_differs_and_nothing_extra_is_logged(self):
+        one, two = self.rig(), self.rig()
+        for rig in (one, two):
+            self.run_burst(rig)
+        self.assertEqual(one.events, two.events)
+        self.assertEqual(one.log.call_args_list, two.log.call_args_list)
+        self.assertIsNone(one.runtime.sched)
+        self.assertFalse([call for call in one.log.call_args_list if call.args and (call.args[0] == levern_policy.SCHED_LINE
+                                                                                   or call.args[0].endswith(levern_policy.STEP_SCHED_SUFFIX))])
+        self.assertEqual(self.rounds_after_each_short(one)[:2], [1, 1], 'today: one round after each returning turn')
+
+    def test_a_short_share_gives_the_decoders_the_shares_rounds_after_each_returning_turn(self):
+        today = self.run_burst(self.rig())
+        shared = self.run_burst(self.rig({'QWEN_FAST_LEVERN_SHORT_SHARE': '0.65'}))
+        expected = 1800.0 * 0.35 / 0.65 / self.ROUND_MS       # 6.9 rounds
+        after = self.rounds_after_each_short(shared)
+        self.assertEqual(len(after), 2)
+        for rounds in after:
+            self.assertAlmostEqual(rounds, expected, delta=1.5)
+        self.assertGreater(min(after), 2 * max(self.rounds_after_each_short(today)))
+        # the same three returning turns, served: the third one's turn comes later by the rounds the decoders were paid
+        def finished_at(rig):
+            return rig.clock.now
+        self.assertGreater(finished_at(shared), finished_at(today) + 2 * 5 * self.ROUND_MS / 1000.0)
+
+    def test_the_smoke_rules_hold_over_the_scheduler_s_own_lines_with_every_knob_on(self):
+        rig = self.run_burst(self.rig({'QWEN_FAST_LEVERN_SHORT_SHARE': '0.65', 'QWEN_FAST_LEVERN_SHORT_WAIT_S': '5', 'QWEN_FAST_LEVERN_OWED_CAP_MS': '1500'}), count=4)
+        steps = c2_smoke_check.levern_facts(chr(10).join(step_lines(rig)))['steps']
+        self.assertTrue(steps)
+        env = {'QWEN_FAST_LEVERN_PREFILL_SHARE': '0.5', 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': '8'}
+        self.assertEqual(c2_smoke_check.levern_alternation_problems(steps, env), [])
+
+    def test_the_guard_forgives_the_debt_of_a_burst_that_has_waited_past_its_bound(self):
+        fresh = self.run_burst(self.rig({'QWEN_FAST_LEVERN_SHORT_SHARE': '0.65', 'QWEN_FAST_LEVERN_SHORT_WAIT_S': '5'}), count=3)
+        old = self.run_burst(self.rig({'QWEN_FAST_LEVERN_SHORT_SHARE': '0.65', 'QWEN_FAST_LEVERN_SHORT_WAIT_S': '5'}), count=3, age_s=20.0)
+        after = self.rounds_after_each_short(fresh)
+        self.assertGreater(after[0], 5, 'the first returning turn of a burst that has just arrived is followed by the share\'s rounds')
+        self.assertLess(after[-1], after[0], 'and the guard cuts the debt once the last of the burst has waited past its bound')
+        self.assertEqual(self.rounds_after_each_short(old), [1, 1], 'a burst that has waited 20 s gets its one round and goes on')
+        def guarded(rig):
+            return {args[3] for args in [call.args[1:] for call in rig.log.call_args_list if call.args and call.args[0].endswith(levern_policy.STEP_SCHED_SUFFIX)]
+                    if args[-1] == 1}
+        self.assertIn('r0', guarded(old), 'the step lines say guard=1 from the first decision on a burst that had already waited 20 s')
+        self.assertNotIn('r0', guarded(fresh), 'and not on the first returning turn of one that has just arrived')
+        self.assertLessEqual(guarded(fresh), {'r1', 'r2'}, 'only the later ones, once they have waited past the bound')
+
+    def test_the_step_line_carries_short_cap_and_guard_and_the_install_line_the_settings(self):
+        rig = self.run_burst(self.rig({'QWEN_FAST_LEVERN_SHORT_SHARE': '0.65', 'QWEN_FAST_LEVERN_OWED_CAP_MS': '1500'}), count=2)
+        facts = c2_smoke_check.levern_facts(chr(10).join(step_lines(rig)))
+        self.assertTrue(facts['steps'])
+        lines = step_lines(rig)
+        self.assertTrue(all(' short=' in line and ' cap_ms=1500 ' in line for line in lines), lines[:2])
+        prefill = [line for line in lines if ' kind=prefill ' in line]
+        self.assertTrue(all(' short=1 ' in line for line in prefill), 'both returning turns are SHORT')
+
+    def test_the_owed_cap_in_ms_gives_a_lone_decoder_the_share_the_rounds_cap_took_away(self):
+        def long_run(extra):
+            rig = Rig(environ=dict(SCHED_MODE, **extra), seats=8, decoders=1)
+            rig.runtime.alternator.round_ms = 70.0
+            rig.add('long', 100000)
+            before = rig.clock.now
+            for _ in range(3000):
+                rig.step(prefill_ms=1000.0, decode_ms=70.0)
+                if rig.idle() and rig.scheduler.requests['long'].num_computed_tokens >= 100000:
+                    break
+            decode_s = sum(0.070 for event in rig.events if event[0] == 'decode')
+            return decode_s / (rig.clock.now - before)
+        today, capped = long_run({}), long_run({'QWEN_FAST_LEVERN_OWED_CAP_MS': '1500'})
+        self.assertLess(today, 0.40, 'a 1 s chunk owes 1 s at f = 0.5, but 8 rounds of 70 ms cap it at 0.56 s: the lone decoder gets about a third')
+        self.assertGreater(capped, 0.47, 'with the cap in ms the lone decoder gets the half the share promises')
+
+    def test_the_short_knobs_need_the_short_lane_at_the_install(self):
+        for extra in ({'QWEN_FAST_LEVERN_SHORT_SHARE': '0.65', 'QWEN_FAST_LEVERN_PARK': '0'},):
+            with self.assertRaises(ValueError):
+                levern_policy.sched_config(dict(MERGED_ENV, QWEN_FAST_LEVERN_ROUNDS=None, **extra)) if False else levern_policy.sched_config(
+                    {key: value for key, value in dict(MERGED_ENV, **extra).items() if key != 'QWEN_FAST_LEVERN_ROUNDS'})
+
+
 class AdaptiveInstallTests(GateFreeCase):
     def install(self, extra):
         cls = plugin_class(TrimmingScheduler)
@@ -1128,7 +1252,7 @@ class AdaptiveInstallTests(GateFreeCase):
         environ.update(extra)
         log = Mock()
         with patch.dict(os.environ, environ, clear=False):
-            for name in ('QWEN_FAST_DECODE_STEPS_PER_ADMISSION', 'QWEN_FAST_KV_RESERVATION', 'QWEN_FAST_LEVERN_ROUNDS') + levern_policy.ADAPTIVE_FLAGS:
+            for name in ('QWEN_FAST_DECODE_STEPS_PER_ADMISSION', 'QWEN_FAST_KV_RESERVATION', 'QWEN_FAST_LEVERN_ROUNDS') + levern_policy.ADAPTIVE_FLAGS + levern_policy.SCHED_FLAGS:
                 if name not in extra:
                     os.environ.pop(name, None)
             admission.install(config, log=log)
@@ -1140,6 +1264,21 @@ class AdaptiveInstallTests(GateFreeCase):
         self.assertEqual(lines, [(levern_policy.ADAPTIVE_LINE, 2, 0.9, 120, 8)])
         _, quiet = self.install({})
         self.assertFalse([call for call in quiet.call_args_list if call.args and call.args[0] == levern_policy.ADAPTIVE_LINE])
+
+    def test_the_pacing_install_line_says_the_settings_and_only_when_one_is_set(self):
+        _, log = self.install({'QWEN_FAST_LEVERN_OWED_CAP_MS': '1500', 'QWEN_FAST_LEVERN_SHORT_SHARE': '0.65'})
+        lines = [call.args for call in log.call_args_list if call.args and call.args[0] == levern_policy.SCHED_LINE]
+        self.assertEqual(lines, [(levern_policy.SCHED_LINE, 1500, 0.65, '-')])
+        _, quiet = self.install({})
+        self.assertFalse([call for call in quiet.call_args_list if call.args and call.args[0] == levern_policy.SCHED_LINE])
+
+    def test_a_pacing_that_cannot_work_fails_the_install_by_name(self):
+        for extra, word in (({'QWEN_FAST_LEVERN_SHORT_SHARE': '1.0'}, 'must be in \\(0, 1\\)'),
+                            ({'QWEN_FAST_LEVERN_SHORT_WAIT_S': '6'}, 'without QWEN_FAST_LEVERN_SHORT_SHARE'),
+                            ({'QWEN_FAST_LEVERN_OWED_CAP_MS': '50'}, 'QWEN_FAST_LEVERN_OWED_CAP_MS'),
+                            ({'QWEN_FAST_LEVERN_SHORT_SHARE': '0.65', 'QWEN_FAST_LEVERN_PARK': '0'}, 'QWEN_FAST_LEVERN_PARK=host')):
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, word):
+                self.install(extra)
 
     def test_a_policy_that_cannot_work_fails_the_install_by_name(self):
         for extra, word in (({'QWEN_FAST_LEVERN_ADAPTIVE': '1', 'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S': '0'}, 'REQUIRES the decode-gap floor'),

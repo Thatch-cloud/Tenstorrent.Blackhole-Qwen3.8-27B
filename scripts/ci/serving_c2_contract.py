@@ -141,9 +141,11 @@ LEVERN_ENV_FLAGS = ('QWEN_FAST_LEVER_N', 'QWEN_FAST_LEVERN_AUDIT', 'QWEN_FAST_LE
                     'QWEN_FAST_LEVERN_MAX_PARK_S', 'QWEN_FAST_LEVERN_EPOCH_SCOPE',
                     'QWEN_FAST_LEVERN_MAX_DECODE_GAP_S',
                     'QWEN_FAST_LEVERN_KV_READ', 'QWEN_FAST_LEVERN_KV_CROSS_STEPS',
-                    'QWEN_FAST_LEVERN_ADAPTIVE', 'QWEN_FAST_LEVERN_ADAPTIVE_DECODERS', 'QWEN_FAST_LEVERN_ADAPTIVE_SHARE', 'QWEN_FAST_LEVERN_ADAPTIVE_TTFT_S')
-# The adaptive governor (levern_policy.ADAPTIVE_FLAGS): a gate instrument, never traffic.
-LEVERN_ADAPTIVE_FLAGS = ('QWEN_FAST_LEVERN_ADAPTIVE', 'QWEN_FAST_LEVERN_ADAPTIVE_DECODERS', 'QWEN_FAST_LEVERN_ADAPTIVE_SHARE', 'QWEN_FAST_LEVERN_ADAPTIVE_TTFT_S')
+                    'QWEN_FAST_LEVERN_ADAPTIVE', 'QWEN_FAST_LEVERN_ADAPTIVE_DECODERS', 'QWEN_FAST_LEVERN_ADAPTIVE_SHARE', 'QWEN_FAST_LEVERN_ADAPTIVE_TTFT_S',
+                    'QWEN_FAST_LEVERN_OWED_CAP_MS', 'QWEN_FAST_LEVERN_SHORT_SHARE', 'QWEN_FAST_LEVERN_SHORT_WAIT_S')
+# The adaptive governor (levern_policy.ADAPTIVE_FLAGS) and the production-shape pacing (levern_policy.SCHED_FLAGS, docs/tp4-sched-1.md): gate instruments, never traffic.
+LEVERN_ADAPTIVE_FLAGS = ('QWEN_FAST_LEVERN_ADAPTIVE', 'QWEN_FAST_LEVERN_ADAPTIVE_DECODERS', 'QWEN_FAST_LEVERN_ADAPTIVE_SHARE', 'QWEN_FAST_LEVERN_ADAPTIVE_TTFT_S',
+                         'QWEN_FAST_LEVERN_OWED_CAP_MS', 'QWEN_FAST_LEVERN_SHORT_SHARE', 'QWEN_FAST_LEVERN_SHORT_WAIT_S')
 LEVERN_PLATFORM_MODULE = 'vllm_tt_plugin.platform'
 # Engine reuse, parked per-slot engines (serving_fast_policy.PARKED_ENGINES_FLAG; default off). A gate-only profile's own switches: the fast
 # path's engine is rebound to each request instead of built (serving_parked_engines), and with PARKED_DRAFTS the pair and quad drafter traces are
@@ -1014,7 +1016,7 @@ def levern_problems(profile):
                     problems.append('Lever N: %s is a gate instrument (the audit digest\'s read) and needs a gate-only profile' % name)
             for name in LEVERN_ADAPTIVE_FLAGS:
                 if name in env:
-                    problems.append('Lever N: %s is a gate instrument (the adaptive governor, docs/lever-n-adaptive-governor.md) and needs a gate-only profile' % name)
+                    problems.append('Lever N: %s is a gate instrument (the adaptive governor, docs/lever-n-adaptive-governor.md, or the production-shape pacing, docs/tp4-sched-1.md) and needs a gate-only profile' % name)
         return problems
     if profile.get('gate_only') is not True:
         # The traffic arm (stage 1 of the short-window plan): the master switch alone, with its sibling flags and the merged route, may serve traffic
