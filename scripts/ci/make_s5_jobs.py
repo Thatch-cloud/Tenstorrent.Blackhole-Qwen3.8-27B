@@ -9,13 +9,14 @@ production serves (ukisai/Swift-1.5-Qwen3.8-27b, selected by the job keys C2_MOD
 
 THREE ORDER FILES share the folder (the window driver reads a fixed ORDER.txt, so a window other than the first is run from a commit where its file is ORDER.txt: `git mv ORDER-W2.txt ORDER.txt`):
 
-  ORDER.txt        WINDOW 1 (about 3 h of cards after the build): B0 build (while production serves), X0, A1 the combined audited attach on `-fx-s5-audit` (STOP), A2 the audited prefix arm (exact resume),
-                   T1A and T1B the timed pair (the approved ship-4 profile against the candidate at one, two and four live seats with eight beside them), Z.
-  ORDER-W2.txt     WINDOW 2: NP9's long-answer jobs N1 N2 N3 (the 32,768-token ceiling) on the same image and the candidate, A3 the audited sliced restore (optional), Z.
+  ORDER.txt        WINDOW 1 (3 h 35 min of cards after the build): B0 build (while production serves), X0, A1 the combined audited attach on `-fx-s5-audit` (STOP; with the production-shaped agent_turns),
+                   T1A and T1B the timed pair (the approved ship-4 profile against the candidate at one, two and four live seats with eight beside them, and agent_turns on both legs), Z.
+  ORDER-W2.txt     WINDOW 2: A2 the audited exact-resume prefix arm (cold-twin pairs, moved here from window 1 to keep it short), NP9's long-answer jobs N1 N2 N3 (the 32,768-token ceiling) on the same
+                   image and the candidate, A3 the audited sliced restore (optional), Z.
   ORDER-SHIP.txt   AFTER THE OWNER APPROVES (and only then): B1 the ship build and SR the platform replay of the candidate, exactly as the ship-4 pack's: B1 is refused by the job reader while the waiver is PENDING.
 
-The agent-turn test (smoke name `agent_turns`, built on another branch) is a placeholder: AGENT_TURNS_TEST below is empty; set it to the smoke name once it has landed in scripts/ci/c2_serving_smoke.py and run
-this script with --write: A1, T1A and T1B then name it (and their minutes grow by AGENT_TURNS_MINUTES).
+The production-shaped agent test (smoke name `agent_turns`, tp4/agent-turns, merged) is named in A1, A1N, T1A and T1B by AGENT_TURNS_TEST below; empty that constant and run this script with --write to
+take it out again (the minutes shrink by AGENT_TURNS_MINUTES).
 """
 
 import argparse
@@ -41,10 +42,10 @@ TIMED_TESTS = 'warmup,np1_live1,np1_live2,np1_live4,concurrent8_steady'
 NP9_SOLO_TESTS = 'warmup,concurrent8_steady,long_answer_prefix,long_answer_solo_4k,long_answer_solo_200k'
 NP9_SHORT_TESTS = 'warmup,concurrent8_steady,long_answer8_4k'
 NP9_DEEP_TESTS = 'warmup,concurrent8_steady,long_answer8_96k'
-# The production-shaped multi-turn agent test is built on another branch (smoke name agent_turns). Empty: a comment placeholder in A1, T1A and T1B. Set to the smoke name once
-# scripts/ci/c2_serving_smoke.py has it and run --write: it is appended to their C2_SMOKE_TESTS and their minutes grow by AGENT_TURNS_MINUTES.
-AGENT_TURNS_TEST = ''
-AGENT_TURNS_MINUTES = 25
+# The production-shaped multi-turn agent test (tp4/agent-turns, merged; agent_turns.py plan: 6 sessions of 64k to 200k tokens, 12 turns each, an estimate of 12.8 minutes unaudited): appended to the
+# C2_SMOKE_TESTS of A1, A1N, T1A and T1B and added to their minutes. The audited arm is slower per round (sampled audits), so it gets more. Empty AGENT_TURNS_TEST takes it out of all four.
+AGENT_TURNS_TEST = 'agent_turns'
+AGENT_TURNS_MINUTES = {'A1': 20, 'A1N': 20, 'T1A': 15, 'T1B': 15}
 MODEL = ['C2_MODEL_REPO=%s' % REPO, 'C2_MODEL_REVISION=%s' % REVISION]
 ORDERS = ('ORDER.txt', 'ORDER-W2.txt', 'ORDER-SHIP.txt')
 
@@ -81,7 +82,7 @@ NO_MEMORY = ('MEMORY READ: the output ceiling allocates no verifier capture, pro
              'hold" that the same prompts would not have drawn at 16,384, no engine-build failure, no "audit mismatch", no stall.')
 LEVER_READS = ('LEVER READS (the candidate\'s additions, on top of the ship-4 reads): NP1: octo_judge.py --container-log <container log> --profile %s clean (the solo rule: at least one "packed padded round live=1" line, no '
                '"packed padded skipped live=1 eligible=1" line, beside the octo rules) and ' + np1_lines('owner traffic waiver <id>') + '; EXACT RESUME: "[PINDIAG] prefix: window carry engaged undrop=1 carry=1" once (the scheduler graft\'s install line; a '
-               'smoke sends no salt, so the carried admissions are the prefix arms\'); SLICED RESTORE: "host tier restore slice on blocks=512 ms=200" once; GRID13: the "tp4 grid13 engaged" line names all three '
+               'smoke without a salt never reaches it: agent_turns does, and window 2\'s prefix arm A2 holds the carried hits against cold twins); SLICED RESTORE: "host tier restore slice on blocks=512 ms=200" once; GRID13: the "tp4 grid13 engaged" line names all three '
                'sub-switches; TIER: the "host tier on" line says the 48 GiB budget and the 16 GiB checkpoint store.')
 
 
@@ -89,12 +90,16 @@ def agent(tests):
     return tests + (',' + AGENT_TURNS_TEST if AGENT_TURNS_TEST else '')
 
 
-def agent_minutes():
-    return AGENT_TURNS_MINUTES if AGENT_TURNS_TEST else 0
+def agent_minutes(job):
+    return AGENT_TURNS_MINUTES[job] if AGENT_TURNS_TEST else 0
 
 
-AGENT_PLACEHOLDER = ('# AGENT TURNS (placeholder): the production-shaped multi-turn agent test, smoke name agent_turns, is built on another branch. When it has landed in scripts/ci/c2_serving_smoke.py, set '
-                     'AGENT_TURNS_TEST in scripts/ci/make_s5_jobs.py and run it with --write: this job then names it in C2_SMOKE_TESTS and its estimate grows by %d minutes.' % AGENT_TURNS_MINUTES)
+AGENT_READ = ('AGENT TURNS (agent_turns.py, tp4/agent-turns): SIX sessions of 64k, 128k and 200k tokens of coding context, each a cold opening request and then 12 returning turns (a ~150-400 token tool result appended after '
+              'the previous answer verbatim, 200-600 tokens out, a 1-8 s tool gap), every session under its own cache_salt (the smoke step writes a throwaway salt key and mounts it only for this test). It is the one '
+              'smoke that reaches the prefix store, sticky sessions, the engine rebind, exact resume (the undrop and the carry) and the lone-user round at the live counts a real conversation mix produces. A MEASUREMENT, no speed '
+              'threshold: the judge fails an errored or timed-out request, a request with no tokens or no finish, and a salted run that reuses nothing on more than 10% of its returning turns. The six contexts total about '
+              '800,000 tokens of the 1,055,488-token pool, so it does not force the host tier (A3 does). `python3 scripts/ci/agent_turns.py report --smoke-log <smoke> --container-log <container>` prints the rates, the TTFT by '
+              'context bucket, the re-prefilled tokens and the per-live table; run it on both legs of the pair and set them side by side.')
 
 
 def rows():
@@ -111,9 +116,8 @@ def rows():
                     why=('X0: the card state before the window: status, a rescan of the topology, an all-four reset. READ: four cards present and healthy, the fabric as measured, the compute grid of the run '
                          '(AVAILABLE WORKER CORE COUNT; 13x10 since the firmware unlock), no other window driver alive. The Swift weight cache exists on the card host: "weight cache ...: found" is the read of every '
                          'smoke job below. Stop rule: anything else. The owner stops the node agent and unserves production BEFORE it and restores production after Z with the cutover pack\'s own steps.')))
-    a1_minutes = 90 + agent_minutes()
-    out.append(dict(name='A1-s5-audited-attach', orders=('w1',), mode='stop', minutes=a1_minutes, actions='reset smoke', profile=AUDIT, tests=agent(A1_TESTS), telemetry=True, box=150, model=True, extra=[],
-                    comment=AGENT_PLACEHOLDER,
+    a1_minutes = 90 + agent_minutes('A1')
+    out.append(dict(name='A1-s5-audited-attach', orders=('w1',), mode='stop', minutes=a1_minutes, actions='reset smoke', profile=AUDIT, tests=agent(A1_TESTS), telemetry=True, box=180, model=True, extra=[],
                     why=('A1 (EXACTNESS of the whole candidate, STOP): %s, the audited twin of the ship-5 candidate: every audit of the shipped ship-4 stack (the K/V page writer\'s audit of every unit it writes, the verify T2 audit, the '
                          'pre-stage diff and two-block pre-stage audits, the multi-user SDPA launch\'s audit, the vglue, conv-gates and octo-lever audits, the 13x10 grids with all three sub-switches, the tile-aligned drafter window, the '
                          'host tier with every instrument on, the host read-backs SAMPLED) plus what the candidate adds: the lone-user padded round (NP1), exact resume with its carry audit, the sliced restore at the 48 GiB tier and '
@@ -125,15 +129,14 @@ def rows():
                          'block: WC takes 2 or 4 users), NO "kv shared", NO "page0 ... refused" for an eligible lone user, no stall. The memory ledger\'s free DRAM per chip after the attach: RECORD it. THE FIRST COMPILE OF THE WC KERNELS '
                          'IS THIS JOB (they have never been through a compiler): when the log shows the attach stopping at a WC compile error or a "gdn wc" refusal and at nothing else, that is a fault of an UNSHIPPED lever, '
                          'not of the candidate: run A1N (the same job on the twin without WC) and keep the window going; ANY other failure is NO-GO for the candidate and halts the window. %s %s %s'
-                         % (AUDIT, (' After those, %s (see the placeholder line below).' % AGENT_TURNS_TEST) if AGENT_TURNS_TEST else ' The agent-turn test is added when it lands (placeholder below).',
+                         % (AUDIT, (' Last, agent_turns on the audited twin. ' + AGENT_READ) if AGENT_TURNS_TEST else '',
                             AUDIT, np1_lines('gate only'), CHECKPOINT_READ, TELEMETRY, ARC))))
-    out.append(dict(name='A1N-s5-audited-attach-nowc', orders=(), mode='stop', minutes=a1_minutes, actions='reset smoke', profile=AUDIT_NOWC, tests=agent(A1_TESTS), telemetry=True, box=150, model=True, extra=[],
-                    comment=AGENT_PLACEHOLDER,
+    out.append(dict(name='A1N-s5-audited-attach-nowc', orders=(), mode='stop', minutes=90 + agent_minutes('A1N'), actions='reset smoke', profile=AUDIT_NOWC, tests=agent(A1_TESTS), telemetry=True, box=180, model=True, extra=[],
                     why=('A1N (the FALLBACK of A1, not in any ORDER: pushed only when A1 stopped on W3 WC alone): %s, the audited twin without W3 WC and with F1\'s audit back, on Swift, the same tests and the same READ as A1 for '
                          'everything but WC. If A1N passes the candidate is audited whole; W3 WC stays unproven and is not in the candidate. %s %s %s' % (AUDIT_NOWC, CHECKPOINT_READ, TELEMETRY, ARC))))
-    out.append(dict(name='A2-s5-prefix-exact-resume', orders=('w1',), mode='soft', minutes=55, actions='reset prefix', profile=None, tests=None, telemetry=False, box=120, model=False,
+    out.append(dict(name='A2-s5-prefix-exact-resume', orders=('w2',), mode='soft', minutes=55, actions='reset prefix', profile=None, tests=None, telemetry=False, box=120, model=False,
                     prefix=('exact-resume', AUDIT), extra=[],
-                    why=('A2 (EXACT RESUME and the prefix store, the prefix arm the smoke harness cannot be: a smoke sends no salt, so no smoke test reaches the prefix store, the host tier or a returning turn): c2_prefix_gate.py '
+                    why=('A2 (EXACT RESUME against a COLD TWIN, the strict pair read agent_turns does not make: agent_turns proves reuse and measures it, A2 proves every hit equal to its cold prefill): c2_prefix_gate.py '
                          '--plan exact-resume on the audited twin %s, no baseline: first prompts of about 9k, 33k and 120k tokens, then returning tool turns of 150, 400, 900, 1,700, 2,600 and 300 new tokens, EVERY turn a '
                          'cold/hit pair under a fresh salt, on sticky sessions with the undrop and the drafter-window carry and their audits, beside the lone-user padded round (each request here is alone: every round is a '
                          'lone-user padded round with every audit on), the preconverted checkpoints and the tier at its new size. It runs on the BASE checkpoint (the prefix step does not forward the selection; exactness is a '
@@ -141,22 +144,20 @@ def rows():
                          'turns that fit the window and "window carry audit ... exact=True" with the carried window\'s digest equal to the cold twin\'s, no "audit mismatch", no "fell back", no stall, no program compiled by a '
                          'hit after its cold twin. SOFT: a failure here is NO-GO for the exact-resume lines of the candidate (QWEN_PREFIX_STICKY_UNDROP and QWEN_PREFIX_WINDOW_CARRY in the ship entry of '
                          'scripts/ci/fusion-wp/S5.json), not for the rest; read it before the owner approves. Estimate 55 minutes (the ER pack\'s ERX estimated 50). %s' % (AUDIT, ARC))))
-    out.append(dict(name='T1A-s4-control', orders=('w1',), mode='soft', minutes=30 + agent_minutes(), actions='reset smoke', profile=SHIP4, tests=agent(TIMED_TESTS), telemetry=True, box=80, model=True, extra=[],
-                    comment=AGENT_PLACEHOLDER,
+    out.append(dict(name='T1A-s4-control', orders=('w1',), mode='soft', minutes=30 + agent_minutes('T1A'), actions='reset smoke', profile=SHIP4, tests=agent(TIMED_TESTS), telemetry=True, box=95, model=True, extra=[],
                     why=('T1A (TIMED, the CONTROL of the pair): the approved ship-4 profile %s on Swift, the stack production runs: a lone live user decodes on the 4-row per-request engine, two or three on the padded 64-row block, four on '
-                         'the full block, six or more on the octo block. Tests: %s. Every boot a fresh reset. %s %s %s' % (SHIP4, SHAPES, ARC, CHECKPOINT_READ, TELEMETRY))))
-    out.append(dict(name='T1B-s5-candidate', orders=('w1',), mode='soft', minutes=30 + agent_minutes(), actions='reset smoke', profile=SHIP5, tests=agent(TIMED_TESTS), telemetry=True, box=80, model=True, extra=[],
-                    comment=AGENT_PLACEHOLDER,
+                         'the full block, six or more on the octo block. Tests: %s%s. Every boot a fresh reset. %s %s %s' % (SHIP4, SHAPES, (', then agent_turns (production-shaped traffic). ' + AGENT_READ) if AGENT_TURNS_TEST else '', ARC, CHECKPOINT_READ, TELEMETRY))))
+    out.append(dict(name='T1B-s5-candidate', orders=('w1',), mode='soft', minutes=30 + agent_minutes('T1B'), actions='reset smoke', profile=SHIP5, tests=agent(TIMED_TESTS), telemetry=True, box=95, model=True, extra=[],
                     why=('T1B (TIMED, the CANDIDATE of the pair): the ship-5 candidate %s, a TRAFFIC profile whose owner waiver is PENDING (a profile whose decision does not start with APPROVED boots in a gate or a smoke and logs '
                          'the word), the same tests as T1A, on Swift. %s READ: c2_smoke_check clean AND python3 scripts/ci/octo_judge.py --container-log <container log> --profile %s clean (the solo rule beside the octo rules); %s. '
                          'Then: python3 scripts/ci/np1_report.py --control-a <T1A smoke> --arm-a <T1B smoke> --control-b <T1A smoke> --arm-b <T1B smoke> --arm-container <T1B container> --profile %s: np1_report is an ABAB '
                          'reader and this pair has ONE boot a side, so each smoke is passed twice and the boot-to-boot floors read exactly 1 (no noise allowance): the ratios per test (the aggregate of the all-live window of '
                          'the candidate over the control\'s) are the read, a GAIN at np1_live1 is the claim, and a LOSS the reader prints at a parity row for a difference of 2%% to 5%% is boot noise until a second pair '
                          '(T1A T1B again, the owner\'s call) says otherwise. The texts must be EQUAL, user by user: python3 scripts/ci/octo_compare.py --control <T1A smoke> --octo <T1B smoke> --octo-container <T1B container> --profile %s: the '
-                         'same checkpoint, greedy, so a difference is a token the candidate changed and is NO-GO. %s %s %s' % (SHIP5, ARC, SHIP5, LEVER_READS % SHIP5, SHIP5, SHIP5, ARC, CHECKPOINT_READ, TELEMETRY))))
-    out.append(dict(name='Z-reset', orders=('w1', 'w2'), mode='soft', minutes=5, actions='status reset', profile=None, tests=None, telemetry=False, box=None, model=False, extra=[],
-                    why=('Z: the window\'s end: status and an all-four reset, no agent start (the cards stay under development). The owner restores the ARC runner sets to their normal scale, then production: card reset, link '
-                         'measurement, topology republish, agent restart, deploy and the post-checks. Nothing in this window touched production\'s image, profile, alias or cache.')))
+                         'same checkpoint, greedy, so a difference is a token the candidate changed and is NO-GO.%s %s %s %s' % (SHIP5, ARC, SHIP5, LEVER_READS % SHIP5, SHIP5, SHIP5,
+                         (' AGENT TURNS: python3 scripts/ci/agent_turns.py report --smoke-log <T1B smoke> --container-log <T1B container> beside the same for T1A (agent_turns is judged by c2_smoke_check on each leg): the rates, the TTFT '
+                          'by context bucket, the tokens re-prefilled (the candidate\'s exact resume should re-prefill up to 2,048 fewer on a returning turn), and the per-turn answer hashes equal.') if AGENT_TURNS_TEST else '',
+                         ARC, CHECKPOINT_READ, TELEMETRY))))
     # window 2: NP9's long-answer jobs on the candidate, and the audited sliced restore
     out.append(dict(name='N1-long-answer-solo', orders=('w2',), mode='stop', minutes=75, actions='reset smoke', profile=SHIP5, tests=NP9_SOLO_TESTS, telemetry=True, box=150, model=True, extra=[],
                     why=('N1 (STOP; NP9\'s N1 on the candidate): ONE request at a time, 30,000 tokens, on Swift. warmup; concurrent8_steady (the profile\'s required eight-user check, which also proves the octo rounds still run); '
@@ -203,6 +204,10 @@ def rows():
                          'lever\'s engaged line, the :tt alias before and after the restart, and no kill-switch line (no levern.off, prefix-reuse.off or parked.off left on the hub). PASS: \'PLATFORM_REPLAY passed=True\'. The replay '
                          'runs the base checkpoint (the replay step does not forward the selection); production picks Swift from its node environment, which the replay\'s copy of the agent\'s container records. '
                          'The replay turns the session cap off; the cap is read live after the deploy. %s Measured basis for the estimate: 25 minutes.' % (SHIP5, LEVER_READS % SHIP5))))
+    # the window's end (windows 1 and 2): last in both orders
+    out.append(dict(name='Z-reset', orders=('w1', 'w2'), mode='soft', minutes=5, actions='status reset', profile=None, tests=None, telemetry=False, box=None, model=False, extra=[],
+                    why=('Z: the window\'s end: status and an all-four reset, no agent start (the cards stay under development). The owner restores the ARC runner sets to their normal scale, then production: card reset, link '
+                         'measurement, topology republish, agent restart, deploy and the post-checks. Nothing in this window touched production\'s image, profile, alias or cache.')))
     return out
 
 
@@ -216,8 +221,6 @@ def render_env(row):
     lines = [HEADER % dict(image=IMAGE)]
     why = row['why'] if ('Duration' in row['why'] or 'Estimate' in row['why']) else row['why'] + ' Duration (estimate): %d minutes.' % row['minutes']
     lines += ['# ' + piece for piece in jobs.wrap(why)]
-    if row.get('comment'):
-        lines += ['# ' + piece for piece in jobs.wrap(row['comment'][2:])]
     lines += ['C2_CARDS=quad', 'C2_ACTIONS=%s' % row['actions'], 'C2_IMAGE_TAG=%s' % IMAGE]
     if row['profile']:
         lines.append('C2_PROFILE=%s' % row['profile'])
@@ -241,8 +244,8 @@ def render_env(row):
 def needs_of(name):
     """The NEEDS directives of one ORDER file, by window key."""
     return {
-        'w1': ['X0 <- B0', 'A1 <- X0', 'A2 <- A1', 'T1A <- A1', 'T1B <- T1A'],
-        'w2': ['N1 <- X0', 'N2 <- N1', 'N3 <- N1', 'A3 <- X0'],
+        'w1': ['X0 <- B0', 'A1 <- X0', 'T1A <- A1', 'T1B <- T1A'],
+        'w2': ['A2 <- X0', 'N1 <- X0', 'N2 <- N1', 'N3 <- N1', 'A3 <- X0'],
         'ship': ['SR <- B1'],
     }[name]
 
@@ -290,19 +293,22 @@ def render_order_w1(table):
         "placeholder: B0 builds it from the pushed tp4/next-1 head WITH the K64j-OQ graft) and ONE window. The control of every pair is the approved ship-4 profile %s on the same image." % (SHIP5, REPO, REVISION[:12], IMAGE, SHIP4),
         COMMON_FORMAT,
         CANDIDATE % (SHIP5, twins_waiver_id(), SHIP4),
-        "# WHAT THIS DECIDES (the owner's, never the window's): whether the candidate goes to production in place of the ship-4 profile. A1 is the exactness gate of everything the candidate adds and of the one lever it does not (W3 WC); "
-        "A2 is the only job that reaches the prefix store, a returning turn and the sticky chain (a smoke sends no salt); T1A T1B time the candidate against production at one, two and four live seats with eight beside them. "
-        "Expected: a lone user x2 to x3 (the arithmetic of docs/tp4-np1-fastlane.md, not a measurement), nothing at two or more seats, a returning agent turn 0.5 to 1.3 s sooner (docs/tp4-exact-resume.md, an estimate). Every result is UNQUALIFIED.",
+        "# WHAT THIS DECIDES (the owner's, never the window's): whether the candidate goes to production in place of the ship-4 profile. A1 is the exactness gate of everything the candidate adds and of the one lever it does not (W3 WC), "
+        "and ends with agent_turns, the production-shaped salted multi-turn test that reaches the prefix store, exact resume and the rebinds; T1A T1B time the candidate against production at one, two and four live seats with eight "
+        "beside them AND on agent_turns, so the comparison also measures production-shaped traffic. Expected: a lone user x2 to x3 (the arithmetic of docs/tp4-np1-fastlane.md, not a measurement), nothing at two or more seats, a returning "
+        "agent turn 0.5 to 1.3 s sooner (docs/tp4-exact-resume.md, an estimate). Every result is UNQUALIFIED.",
         "# THE NEW DEVICE FACTS (first on a card here): NP1 gives the K/V writers and the extent reader a block id past vLLM's pool in a page table (K1 to K4 of docs/tp4-np1-fastlane.md); exact resume wraps vLLM's hit lookup and uploads carried "
-        "drafter-window rows; the sliced restore holds a returning request between slices; W3 WC launches two kernels that have never been through a compiler. A1 and A2 are the first card to do any of it, with the audits on.",
-        "# AGENT-TURN TEST: the production-shaped multi-turn agent test (smoke name agent_turns) is built on another branch. %s HOW TO ADD IT: set AGENT_TURNS_TEST = 'agent_turns' in scripts/ci/make_s5_jobs.py once c2_serving_smoke.py has it, "
-        "run python3 scripts/ci/make_s5_jobs.py --write (A1, A1N, T1A and T1B then name it; their estimates grow by %d minutes each), commit." % ('It IS NAMED in A1, A1N, T1A and T1B.' if AGENT_TURNS_TEST else 'It is NOT yet named in any job (a placeholder comment sits in A1, A1N, T1A and T1B).', AGENT_TURNS_MINUTES),
+        "drafter-window rows; the sliced restore holds a returning request between slices; W3 WC launches two kernels that have never been through a compiler. A1 is the first card to do any of it, with the audits on; A2 and A3 (window 2) "
+        "are the strict cold-twin and forced-eviction reads.",
+        "# WHAT WAS TRIMMED TO KEEP THIS WINDOW NEAR 3 H: A2 (the exact-resume prefix arm with cold twins, 55 min) moved to the front of window 2, because agent_turns in A1 now runs the same salted returning-turn path under every audit "
+        "(it proves reuse and measures it; A2 proves each hit equal to its cold prefill). The sliced restore's forced-eviction arm A3 (100 min) is window 2's optional tail. The window is %(total)d minutes of cards against the 180 target: the "
+        "boots (A1, T1A, T1B: three model loads) are what cost. To cut more: drop agent_turns from T1A and T1B (-%(agent)d min; the pair then times the np1 shapes alone) or concurrent5_split and concurrent8_drain from A1 (about -10 min)."
+        % dict(total=cards, agent=(AGENT_TURNS_MINUTES['T1A'] + AGENT_TURNS_MINUTES['T1B']) if AGENT_TURNS_TEST else 0),
     ] + COMMON_P0 + [
         "# ARC-ZERO A1 T1B",
         "# ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO (minRunners and maxRunners 0, the normal values written down first, restored by the same patch with the old numbers) BEFORE A1 and restores them AFTER T1B, i.e. around "
         "every audited boot (a model load under CI load has hit the platform's load timeout) and every timed job. B0, X0 and Z do not need the pause.",
-        "# THE JOBS, in value order (cut the window at a block end): %s. B0 is the WINDOW build and runs while production serves, so it is outside the card minutes." % blocks_text(table, (('GATES', 'X0 A1'), ('PREFIX ARM', 'A2'), ('DECODE PAIR', 'T1A T1B'), ('END', 'Z'))),
-        "# 3 H CUT: A2 is the only job that is not the owner's list of window 1 (the smoke harness cannot reach the prefix store); X0 A1 T1A T1B Z is %d minutes. To run it later (as the first job of window 2, or alone) set SKIP_JOBS=A2 in the pack conf." % sum(row['minutes'] for row in table if row['name'].split('-')[0] in ('X0', 'A1', 'T1A', 'T1B', 'Z')),
+        "# THE JOBS, in value order (cut the window at a block end): %s. B0 is the WINDOW build and runs while production serves, so it is outside the card minutes." % blocks_text(table, (('GATES', 'X0 A1'), ('DECODE PAIR', 'T1A T1B'), ('END', 'Z'))),
         "# FALLBACK: A1N (a template in this folder, not in this ORDER) is A1 on %s, the audited twin without W3 WC. Push it, with the same placeholder tag, only when A1 stopped on W3 WC alone (a WC compile error or a 'gdn wc' refusal and nothing else). It takes A1's place in every NEEDS line below." % AUDIT_NOWC,
         "# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.",
     ]
@@ -312,10 +318,9 @@ def render_order_w1(table):
         "# READ RULES (each also needs c2_smoke_check clean, whose fusion, octo, grid13, exact-resume and WC rules read the container log, and no stall; the templates' own headers have the whole text):",
         "#   B0   'baking the serving default %s with a session cap of 8', the provenance report with no problem line, its K64j-OQ graft line, the image id." % SHIP4,
         "#   X0   four cards present and healthy, the fabric as measured, the 13x10 grid in the run, no other window driver alive; the Swift weight cache found.",
-        "#   A1   (STOP) every audit line exact=True with entries above 0, octo_judge.py clean under %s (the solo rule), the NP1 lines, the WC engaged line on the M3 blocks and its audit line (the octo block's one 'fell back reason=8 users' line is the design), "
+        "#   A1   (STOP) every audit line exact=True with entries above 0, octo_judge.py clean under %s (the solo rule), the NP1 lines, agent_turns judged (no errored or timed-out request; reuse on at least 90%% of the returning turns), the WC engaged line on the M3 blocks and its audit line (the octo block's one 'fell back reason=8 users' line is the design), "
         "no 'audit mismatch', no other 'fell back', no 'kv shared', the memory ledger recorded. A fault of W3 WC alone: run A1N. ANY other failure is NO-GO and halts the window." % AUDIT,
-        "#   A2   (SOFT, the prefix arm) the exact-resume plan PASS: every pair IDENTICAL, the oracle's Q on every turn, the carry's audit lines exact=True, no stall; a failure is NO-GO for the exact-resume lines.",
-        "#   T1A T1B   np1_report.py GO (a GAIN at np1_live1, no LOSS elsewhere), octo_compare.py (every answer equal) and octo_judge.py on the candidate's log; c2_smoke_check clean on both.",
+                "#   T1A T1B   np1_report.py GO (a GAIN at np1_live1, no LOSS elsewhere), octo_compare.py (every answer equal) and octo_judge.py on the candidate's log; c2_smoke_check clean on both; agent_turns.py report on both legs side by side (committed tok/s, TTFT p50/p90 of the returning turns by context bucket, the tokens re-prefilled: exact resume should cut them by up to 2,048 a turn), the per-turn answer hashes equal.",
         "# NO-GO for the candidate: any stall, any text difference against the control, any audit mismatch, any fallback line beyond the one named, an arm that logs no engaged line, a refusal at the attach (the cache not one block longer, a request block id "
         "past the pool, a restore that latched the tier off), a lone-user round that never ran or an eligible one that went to the engines, a LOSS in a timed test. A failing lever is taken out by deleting its lines from the ship entry of scripts/ci/fusion-wp/S5.json "
         "and regenerating (a new build). Adopting is the owner's decision: ORDER-SHIP.txt (B1, SR) runs after the approval, never before.",
@@ -329,7 +334,7 @@ def render_order_w2(table):
     names, total, cards, builds = total_lines(table)
     lines = [
         "# The order of the tp4/next-1 WINDOW 2 (docs/tp4-next1.md, docs/tp4-np9-answer32k.md; scripts/ci/make_s5_jobs.py): NP9's long-answer jobs on the ship-5 candidate %s and the SAME image as window 1 (%s, the tag B0 built), Swift "
-        "(%s, revision %s) with the 32,768-token output ceiling of its catalog entry, and A3 the audited sliced restore. RUN IT FROM A COMMIT WHERE THIS FILE IS ORDER.txt (git mv ORDER-W2.txt ORDER.txt): the window driver reads a fixed ORDER.txt." % (SHIP5, IMAGE, REPO, REVISION[:12]),
+        "(%s, revision %s) with the 32,768-token output ceiling of its catalog entry, with A2 (the audited exact-resume arm, from window 1) first and A3 the audited sliced restore last. RUN IT FROM A COMMIT WHERE THIS FILE IS ORDER.txt (git mv ORDER-W2.txt ORDER.txt): the window driver reads a fixed ORDER.txt." % (SHIP5, IMAGE, REPO, REVISION[:12]),
         COMMON_FORMAT,
         CANDIDATE % (SHIP5, twins_waiver_id(), SHIP4),
         "# WHAT THIS DECIDES (the owner's, never the window's): whether the 32,768-token ceiling goes to production with the candidate. The CPU side is settled (docs/tp4-np9-answer32k.md: the ceiling allocates no device memory on the serving shape; it costs "
@@ -337,9 +342,9 @@ def render_order_w2(table):
         "# WINDOW 1 AND THE CEILING: the catalog key reaches every Swift boot of the image, window 1's included. Window 1 asks at most 2,000 tokens (np1 shapes) and 12,288 (the coding set) and compares arms booted from the same image, so the key does not touch its "
         "reads. If window 1 must run on the old 16,384 ceiling, delete the one line '\"output_budget\": 32768' from the Swift entry of scripts/ci/qwen_c2_checkpoints.json before B0 (and put it back before this window): it is data and nothing else moves.",
     ] + COMMON_P0 + [
-        "# ARC-ZERO N1 A3",
-        "# ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO BEFORE N1 and restores them AFTER A3 (the decodes here run 7 to 30 minutes and every boot is a model load under the platform's timeout).",
-        "# THE JOBS, in value order (cut the window at a block end): %s." % blocks_text(table, (('ONE SEAT', 'X0 N1'), ('EIGHT SEATS', 'N2 N3'), ('SLICED RESTORE', 'A3'), ('END', 'Z'))),
+        "# ARC-ZERO A2 A3",
+        "# ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO BEFORE A2 and restores them AFTER A3 (the decodes here run 7 to 30 minutes and every boot is a model load under the platform's timeout).",
+        "# THE JOBS, in value order (cut the window at a block end): %s." % blocks_text(table, (('EXACT RESUME, COLD TWINS', 'X0 A2'), ('ONE SEAT', 'N1'), ('EIGHT SEATS', 'N2 N3'), ('SLICED RESTORE', 'A3'), ('END', 'Z'))),
         "# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.",
     ]
     for need in needs_of('w2'):
@@ -347,6 +352,7 @@ def render_order_w2(table):
     lines += [
         "# READ RULES (each also needs c2_smoke_check clean, with the container log, and no stall; the templates' own headers have the whole text):",
         "#   X0   four cards present and healthy, the fabric as measured, the 13x10 grid in the run, no other window driver alive; Swift on the host.",
+        "#   A2   (SOFT) the exact-resume plan PASS: every pair IDENTICAL, the oracle's Q on every turn, the carry's audit lines exact=True, no stall; a failure is NO-GO for the exact-resume lines.",
         "#   N1   (STOP) the ceiling lines (request output budget 32768; request contract installed ... <= 32768), the checkpoint lines, long_answer_prefix prefix_equal=True, every long_answer user finish length with 30000 tokens.",
         "#   N2   the same ceiling and answer rules at eight live; octo_judge clean; no hold line (4,280 of 16,499 blocks).",
         "#   N3   the same at 96,000-token prompts; NO 'kv reservation hold' line (15,768 of 16,499 blocks); the per-seat rate at depth recorded.",

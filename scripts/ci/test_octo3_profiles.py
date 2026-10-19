@@ -120,11 +120,12 @@ class TwinTests(unittest.TestCase):
 
     def test_the_audit_sampling_is_on_the_audited_twins_alone(self):
         import make_np1_profiles
+        import make_s5_profiles
         import make_ship4_profiles
 
         for name, profile in PROFILES.items():
             has = 'QWEN_FAST_AUDIT_EVERY' in profile['env']
-            self.assertEqual(has, name in (twins.FX_ALL + '-octo3-audit', twins.FX_ALL_PREFILL + '-octo3-audit', make_ship4_profiles.AUDIT, make_np1_profiles.AUDIT), name)      # (and tp4/ship-4's audited twin of the combined candidate, and tp4/np1-fastlane's copy of it)
+            self.assertEqual(has, name in (twins.FX_ALL + '-octo3-audit', twins.FX_ALL_PREFILL + '-octo3-audit', make_ship4_profiles.AUDIT, make_np1_profiles.AUDIT, make_s5_profiles.AUDIT, make_s5_profiles.AUDIT_NOWC), name)      # (and tp4/ship-4's audited twin of the combined candidate, and tp4/np1-fastlane's copy of it)
         import audit_sampling
 
         for name in (twins.FX_ALL + '-octo3-audit', twins.FX_ALL_PREFILL + '-octo3-audit'):
@@ -151,9 +152,10 @@ class TwinTests(unittest.TestCase):
 
     def test_no_other_profile_names_an_octo3_only_name(self):
         import make_np1_profiles
+        import make_s5_profiles
         import make_ship4_profiles
 
-        owned = set(twins.owned_names()) | set(make_ship4_profiles.owned_names()) | set(make_np1_profiles.twin_names())      # (tp4/ship-4's twins and combined candidate carry the octo env too: test_ship4_profiles)
+        owned = set(twins.owned_names()) | set(make_ship4_profiles.owned_names()) | set(make_np1_profiles.twin_names()) | set(make_s5_profiles.owned_names())      # (tp4/ship-4's twins and combined candidate carry the octo env too: test_ship4_profiles)
         for name, profile in PROFILES.items():
             if name in owned or name in octo_twins.twin_names() or name in octo2_twins.twin_names():
                 continue

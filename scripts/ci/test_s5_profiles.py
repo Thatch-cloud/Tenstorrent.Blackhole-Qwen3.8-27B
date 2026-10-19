@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -74,7 +75,7 @@ class CandidateTests(unittest.TestCase):
     def test_the_candidate_is_the_approved_ship_4_profile_plus_exactly_the_named_differences(self):
         old, new = PROFILES[SHIP4], PROFILES[SHIP]
         changed = {key: new['env'].get(key) for key in set(old['env']) | set(new['env']) if old['env'].get(key) != new['env'].get(key)}
-        self.assertEqual(changed, dict(CHANGES, **{contract.OCTO_WAIVER_ENV: new['waiver_id'] if False else PROFILES[SHIP][contract.TRAFFIC_WAIVER]['id']}))
+        self.assertEqual(changed, dict(CHANGES, **{contract.OCTO_WAIVER_ENV: PROFILES[SHIP][contract.TRAFFIC_WAIVER]['id']}))
         for key in old:
             if key not in ('env', 'description', contract.TRAFFIC_WAIVER):
                 self.assertEqual(new[key], old[key], key)
@@ -214,10 +215,8 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(octo.admitted_run({octo.GATE_ENV: '1', octo.GATE_PROFILE_ENV: '1'}))
         self.assertFalse(octo.admitted_run({}))
         lines = []
-        import idle_scratch
-
         env = dict(IMAGE_ENV, QWEN_FAST_SOLO_PACKED='1', QWEN_FAST_TP='4', QWEN_FAST_EXTENT_REPLAY='1', QWEN_FAST_PACKED_STEP='1', QWEN_FAST_M3_BLOCKS='2')
-        with unittest_mock_patch(idle_scratch):
+        with mock.patch.object(octo, 'scratch_pages', lambda: (16500,)):
             for extra, ok in (({octo.WAIVER_ENV: 'ship5-fx-262k-2026-10-19'}, True), ({octo.GATE_ENV: '1', octo.GATE_PROFILE_ENV: '1'}, True), ({}, False)):
                 lines[:] = []
                 try:
@@ -229,12 +228,6 @@ class ContractTests(unittest.TestCase):
                 if ok:
                     self.assertEqual(found['min_users'], 1)
                     self.assertTrue(lines[-1].endswith('(owner traffic waiver ship5-fx-262k-2026-10-19)' if octo.WAIVER_ENV in extra else '(gate only)'), lines)
-
-
-def unittest_mock_patch(idle_scratch):
-    from unittest import mock
-
-    return mock.patch.object(octo, 'scratch_pages', lambda: (16500,))
 
 
 class TwinTests(unittest.TestCase):

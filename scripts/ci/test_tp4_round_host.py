@@ -1206,6 +1206,11 @@ class ProfileTests(unittest.TestCase):
         import make_np1_profiles as twins_np1      # tp4/np1-fastlane: the ship candidate / its audited twin plus one flag, so the same round-host flags (test_np1_profiles)
 
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_np1.twin_names()})
+        import make_s5_profiles as twins_s5      # tp4/next-1: the ship-5 candidate's audited twins (the ship-4 audited twin plus levers); the candidate itself is in fusion.ship_names()
+
+        combined.update({name: {SELECT, READ, KEYED, LEAN, AUDIT} for name in twins_s5.twin_names()})            # (both are audited twins: -s5-audit and its -nowc fallback)
+        combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set())          # exact resume's twins of the combined arms (fusion-wp/ER.json: -fx-all-er, -fx-all-er-audit)
+                         for name in (fusion.NAMESPACE + 'all-er', fusion.NAMESPACE + 'all-er-audit')})
         for name, profile in data['profiles'].items():
             if name in self.ADDED:
                 continue

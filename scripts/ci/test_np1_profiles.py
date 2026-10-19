@@ -115,7 +115,9 @@ class ProtectedTests(unittest.TestCase):
         self.assertEqual(DATA['default'], before['default'])
         for name, profile in before['profiles'].items():
             self.assertEqual(PROFILES[name], profile, name)
-        self.assertEqual(sorted(set(PROFILES) - set(before['profiles'])), sorted(twins.NAMES))
+        # (tp4/next-1 integrated this branch with exact resume's twins and the ship-5 candidate's, which are generated beside NP1's: test_exact_resume, test_s5_profiles)
+        integrated = (ship4.NAMESPACE + 'all-er', ship4.NAMESPACE + 'all-er-audit', ship4.NAMESPACE + 'traffic-s5', ship4.NAMESPACE + 's5-audit', ship4.NAMESPACE + 's5-audit-nowc')
+        self.assertEqual(sorted(set(PROFILES) - set(before['profiles'])), sorted(twins.NAMES + integrated))
         self.assertEqual(list(PROFILES)[:0], [])
 
     def test_the_approved_traffic_profile_never_names_the_flag_and_a_traffic_profile_that_did_would_be_refused(self):

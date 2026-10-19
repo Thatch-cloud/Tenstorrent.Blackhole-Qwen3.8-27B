@@ -79,6 +79,12 @@ def specs():
     return [(AUDIT, AUDIT_PARENT, audit_description()), (AUDIT_NOWC, AUDIT_PARENT, nowc_description())]
 
 
+def owned_names():
+    """The audited twins and the candidate (a traffic profile make_fusion_profiles generates from fusion-wp/S5.json): the census tests that assert no other profile names an octo, tier or
+    round-host flag exempt all three."""
+    return NAMES + (SHIP,)
+
+
 def twin_names():
     """The generated twin's name (the profile-enumerating tests exempt it through profile_twins; test_s5_profiles holds it)."""
     return NAMES
