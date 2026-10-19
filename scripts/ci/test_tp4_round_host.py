@@ -1203,6 +1203,8 @@ class ProfileTests(unittest.TestCase):
         import make_ship4_profiles as twins_ship4
 
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_ship4.twin_names()})
+        # tp4/exact-resume (ER, placed from fusion-wp/ER.json): the combined arm / its audited twin plus the exact-resume switches, so the four levers (and the audit flag on the audited twin)
+        combined.update({fusion.NAMESPACE + 'all-er': {SELECT, READ, KEYED, LEAN}, fusion.NAMESPACE + 'all-er-audit': {SELECT, READ, KEYED, LEAN, AUDIT}})
         import make_xe_profiles as twins_xe      # tp4/exact-end: the ship candidate / its audited twin plus one flag, so the same round-host flags (test_xe_profiles)
 
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_xe.twin_names()})
