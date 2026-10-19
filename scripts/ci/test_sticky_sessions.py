@@ -1072,6 +1072,10 @@ class SchedulerParityTests(unittest.TestCase):
         stats = {name: registry.stats[name] for name in prefix_registry.LEGACY_STAT_NAMES}
         for name in ('capture_ms', 'restore_ms'):
             stats.pop(name)
+        # The turn telemetry (qwen_prefix_registry.TurnMemory, docs/tp4-exact-resume.md 5.3) counts in the current graft's trim and
+        # free only: observability, not a decision, so the parity is held on everything else.
+        for name in getattr(prefix_registry, 'TURN_STAT_NAMES', ()):
+            stats.pop(name, None)
         return trace, stats, [line for line in logs if not line.startswith('install ')]
 
     def test_the_flag_off_graft_matches_the_parent(self):

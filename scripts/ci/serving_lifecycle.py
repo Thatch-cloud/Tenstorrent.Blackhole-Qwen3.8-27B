@@ -84,6 +84,11 @@ class FastServingLifecycle:
     # the runtime kill switch (the parked.off file). None, the default and the only value without the flag, calls nothing.
     idle = None
     parked_poll = None
+    # Exact resume P0 (QWEN_PREFIX_WINDOW_CARRY under sticky sessions, set per instance in __init__; prefix_window_carry): a granted hit may
+    # resume above P - 2048 when its checkpoint carries the drafter window rows below it, and every sticky prefill files its own window
+    # rows on the checkpoint it stored. Off on the class, so a lifecycle built without __init__ behaves exactly as before.
+    window_carry = False
+    window_carry_audit = False
 
     # request_id is assigned at five sites - construction, reset, the
     # EOS-at-first-token release, the prefill-to-decode handoff, and admission.
@@ -163,6 +168,18 @@ class FastServingLifecycle:
         # QWEN_FAST_STICKY_SESSIONS (phase 1; default off), read once for the lifecycle's life.
         # Off, nothing below reads the prefix registry and a hit is refused as it always was.
         self.sticky = sticky_sessions_enabled()
+        if self.sticky:
+            # Exact resume P0: read strictly here, so a process with the switch unset imports nothing new.
+            import os
+
+            raw = os.environ.get('QWEN_PREFIX_WINDOW_CARRY') or '0'
+            if raw not in ('0', '1'):
+                raise ValueError('QWEN_PREFIX_WINDOW_CARRY=%r: only 0 or 1' % (raw,))
+            if raw == '1':
+                import prefix_window_carry
+
+                self.window_carry = True
+                self.window_carry_audit = prefix_window_carry.audit_enabled()
         self.max_model_len = getattr(getattr(config, 'model_config', None), 'max_model_len', None)
         self.quarantine = None
         # QWEN_FAST_LANE (serving_fast_lane.LaneRuntime; default off, None): one fast lane beside standard lanes. On, the
@@ -290,6 +307,14 @@ class FastServingLifecycle:
 
         return isinstance(failure, RequestRefused)
 
+    @staticmethod
+    def _carried_window(grant, prompt, resume):
+        """Exact resume P0: whether the committed grant's checkpoint carries the drafter window rows [max(0, P - 2048), R) (the
+        registry's Window, duck-typed: the plugin's copy of qwen_prefix_registry made it)."""
+        window = getattr(getattr(grant, 'checkpoint', None), 'window', None)
+        covers = getattr(window, 'covers', None)
+        return callable(covers) and covers(prompt, resume) is True
+
     def _granted_resume(self, new, chunk):
         """Sticky sessions: where this new request's prefill resumes - R when it arrives at
         num_computed_tokens == R > 0 on a granted prefix hit, else 0 (a cold prompt, judged by
@@ -321,7 +346,7 @@ class FastServingLifecycle:
             problems.append('the committed grant is at Q=%r' % (granted,))
         if computed % RESUME_CHUNK:
             problems.append('R is not a %d-token boundary' % RESUME_CHUNK)
-        if computed > prompt - RESUME_CHUNK:
+        if computed > prompt - RESUME_CHUNK and not (self.window_carry and self._carried_window(grant, prompt, computed)):
             problems.append('R is above the prompt minus %d (the draft window)' % RESUME_CHUNK)
         if self.merged:
             import levern_policy
@@ -602,7 +627,21 @@ class FastServingLifecycle:
                 # The capture's ledger counts from R, and it must record the prefix-reuse route's
                 # slot: the model prefills [R, P) through that route, which runs under this capture
                 # only when the capture declares it records it.
-                self.capture = self.capture_factory(len(new.prompt_token_ids), start=resume)
+                if resume > len(new.prompt_token_ids) - RESUME_CHUNK:
+                    # Exact resume P0: _granted_resume admitted R above P - 2048 only on a covering window.
+                    import prefix_window_carry
+
+                    carry = prefix_window_carry.Carried(committed_grant(new.req_id).checkpoint.window, len(new.prompt_token_ids),
+                                                        resume)
+                    self.capture = self.capture_factory(len(new.prompt_token_ids), start=resume, carry=carry)
+                    self.capture.carry_audit = self.window_carry_audit
+                    try:
+                        from loguru import logger
+                        logger.info(prefix_window_carry.CARRIED_LINE.format(new.req_id, resume, len(new.prompt_token_ids), carry.rows))
+                    except BaseException:
+                        pass
+                else:
+                    self.capture = self.capture_factory(len(new.prompt_token_ids), start=resume)
                 if getattr(self.capture, 'records_prefix_route', False) is not True:
                     raise ValueError('Sticky admission of %r at %d: the prefill capture does not record the '
                                      'prefix-reuse route' % (new.req_id, resume))
@@ -868,7 +907,31 @@ class FastServingLifecycle:
             raise ValueError('Expected native prefill deferred sampler on the final chunk')
         self.chunk_in_flight = False
         self.prefill_pending = True
+        if self.window_carry:
+            self._file_window()
         return None
+
+    def _file_window(self):
+        """Exact resume P0: the finished prefill's window rows below floor2048(P) onto the checkpoint it stored there (and, under the audit,
+        its window digest). Never raises: without them the next turn resumes at the window ceiling, as with the carry off."""
+        import sys
+
+        import prefix_window_carry
+
+        def log(template, *values):
+            try:
+                from loguru import logger
+                logger.info(template.format(*values))
+            except BaseException:
+                pass
+
+        try:
+            registry = getattr(sys.modules.get(PREFIX_REGISTRY_KEY), 'registry', None)
+            capture = self.capture
+            prefix_window_carry.after_prefill(capture, self.request_id, registry, capture.operations, capture.model.mesh_device, log,
+                                              audit=self.window_carry_audit)
+        except Exception as error:
+            log(prefix_window_carry.SKIPPED_LINE, self.request_id, type(error).__name__)
 
     def _sample(self, worker, grammar_output):
         self._check()

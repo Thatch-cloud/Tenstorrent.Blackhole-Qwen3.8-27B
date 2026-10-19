@@ -111,11 +111,16 @@ def chunk_window(position, chunk_start, valid_rows):
     return dict(start=start, end=max(start, end), rows=max(0, end - start))
 
 
-def resume_start(position, start):
+def resume_start(position, start, carried=0):
     """The absolute token a prefill capture's ledger starts at: 0 for a cold prompt, or a
     granted prefix hit R (sticky sessions) - a 2048-token boundary at or below
     position - 2048, so the whole draft window [position - 2048, position) is prefilled
-    by this capture's own chunks exactly as a cold run prefills it."""
+    by this capture's own chunks exactly as a cold run prefills it. Exact resume P0
+    (QWEN_PREFIX_WINDOW_CARRY, prefix_window_carry): R may sit above position - 2048 when
+    the capture carries the window rows below it, exactly carried = R - max(0, position - 2048)."""
+    if (type(carried) is int and carried > 0 and type(start) is int and start % RESUME_CHUNK == 0
+            and 0 < start < position and carried == start - max(0, position - RESUME_CHUNK)):
+        return start
     if (type(start) is not int or start < 0 or start % RESUME_CHUNK
             or (start and start > position - RESUME_CHUNK)):
         raise ValueError('A resumed prefill must start at 0 or at a %d-token boundary at or below the '
@@ -124,8 +129,8 @@ def resume_start(position, start):
     return start
 
 
-def validate_prefill_chunks(position, chunks, start=0):
-    cursor, pieces = resume_start(position, start), []
+def validate_prefill_chunks(position, chunks, start=0, carried=0):
+    cursor, pieces = resume_start(position, start, carried), []
     for chunk in chunks:
         if (chunk.get('chunk_start') != cursor or type(chunk.get('bucket')) is not int
                 or not 32 <= chunk['bucket'] <= 2048 or chunk['bucket'] % 32
@@ -137,7 +142,7 @@ def validate_prefill_chunks(position, chunks, start=0):
         if piece['rows']:
             pieces.append(piece)
         cursor += chunk['valid_rows']
-    if cursor != position or sum(piece['rows'] for piece in pieces) != prefill_window(position)['rows']:
+    if cursor != position or carried + sum(piece['rows'] for piece in pieces) != prefill_window(position)['rows']:
         raise ValueError('Prefill chunks must cover the full prompt and the exact draft tail')
     return pieces
 
@@ -221,9 +226,20 @@ def _snapshot_prefill_tail(operations, value, position, *, checks=None, chunk_st
 
 
 class PrefillWindowCapture:
-    def __init__(self, operations, model, position, taps, *, checks=None, start=0, prefix_route=False):
+    def __init__(self, operations, model, position, taps, *, checks=None, start=0, prefix_route=False, carry=None):
         self.operations, self.model, self.position, self.taps = operations, model, position, tuple(taps)
         self.window = prefill_window(position)
+        # Exact resume P0 (QWEN_PREFIX_WINDOW_CARRY): a prefix_window_carry.Carried holding the window rows
+        # [position - 2048, start) the checkpoint's capturing turn computed; outputs() puts them in front of
+        # this capture's own rows. None (the default) is the capture as it always was.
+        self.carried = carry
+        self.carried_rows = 0
+        self.carry_audit = False
+        if carry is not None:
+            if carry.end != start or carry.start != max(0, position - RESUME_CHUNK) or not 0 < carry.rows < self.window['rows']:
+                raise ValueError('A carried window must cover [%d, %d) exactly: carries [%r, %r)'
+                                 % (max(0, position - RESUME_CHUNK), start, getattr(carry, 'start', None), getattr(carry, 'end', None)))
+            self.carried_rows = carry.rows
         if not callable(getattr(model, '_forward_prefill_chunk_masked_tp', None)):
             raise ValueError('Pinned native TP slot-prefill chunk boundary required')
         # Sticky sessions (QWEN_FAST_STICKY_SESSIONS; default start 0 and no route, which is
@@ -233,7 +249,7 @@ class PrefillWindowCapture:
         # route (PREFIX_ROUTE_ENTRY) when the model has it, so its GDN slot is recorded like
         # any batched entry's; records_prefix_route is what the route checks before it runs
         # under this capture.
-        self.start = resume_start(position, start)
+        self.start = resume_start(position, start, self.carried_rows)
         self.prefix_route = prefix_route is True
         self.records_prefix_route = self.prefix_route and callable(getattr(model, PREFIX_ROUTE_ENTRY, None))
         if self.start and not self.records_prefix_route:
@@ -487,7 +503,7 @@ class PrefillWindowCapture:
             with instance_overrides(self.bindings()):
                 yield self
             if self.cursor >= self.position:
-                validate_prefill_chunks(self.position, self.chunks, self.start)
+                validate_prefill_chunks(self.position, self.chunks, self.start, self.carried_rows)
                 if self.prefill_slot is not None and self.segment_slot is None:
                     # Admission adopts prefill_slot as the FINAL chunk's slot. It carries
                     # over between segments, so a final segment that finished the prompt
@@ -525,7 +541,7 @@ class PrefillWindowCapture:
             # chunk set raises HERE rather than inside the segment, and an abandoned
             # capture must still release its snapshots and un-install its hooks.
             try:
-                validate_prefill_chunks(self.position, self.chunks, self.start)
+                validate_prefill_chunks(self.position, self.chunks, self.start, self.carried_rows)
             except BaseException:
                 self.close()
                 raise
@@ -534,6 +550,9 @@ class PrefillWindowCapture:
             raise ValueError('Complete open chunked prefill capture required')
         if self.result is None:
             parts = [child.outputs() for child in self.children]
+            if self.carried is not None:
+                # The carried rows first (they are the window's oldest positions), uploaded once; close() releases them.
+                parts = [tuple(self.carried.upload(self.operations, self.model.mesh_device, audit=self.carry_audit))] + parts
             if self.aligned:
                 try:
                     self.result = self.aligned_outputs(parts)
@@ -568,12 +587,25 @@ class PrefillWindowCapture:
         operations, window = self.operations, self.window
         pieces = [(chunk['chunk_start'], chunk['valid_rows']) for chunk in self.chunks if chunk['retained_rows']]
         output, states = [], set()
+        # Exact resume P0 (QWEN_PREFIX_WINDOW_CARRY) beside the aligned window: outputs() puts the carried rows in front of this capture's own
+        # parts. They are exact bytes of rows [window start, R) (R a chunk boundary, so the capture's own parts start on a tile boundary), and
+        # their count is not a tile multiple, so no aligned join applies: the capture's parts are cut to their exact pieces (exact_join) and joined
+        # behind the carried rows in ONE concat, which is the composition a capture without the aligned flag builds.
+        carried = None
+        if self.carried is not None:
+            carried, parts = parts[0], parts[1:]
         for index in range(len(self.taps)):
             values = [part[index] for part in parts]
             cover = twa.covers(window, pieces, [value.shape[2] for value in values])
             expanded = twa.expanded(cover)
-            layout = twa.plan(window, cover) if expanded else None
-            if not expanded:
+            layout = twa.plan(window, cover) if expanded and carried is None else None
+            if carried is not None:
+                stop = window['start'] + carried[index].shape[2]
+                state = 'carried'
+                merged = twa.exact_join(operations, [carried[index]] + values,
+                                        [dict(begin=window['start'], end=stop, start=window['start'], stop=stop, aligned=False)] + cover,
+                                        window, addresses=addresses)
+            elif not expanded:
                 state = 'exact'
                 merged = values[0] if len(values) == 1 else operations.concat(values, dim=2,
                     memory_config=operations.DRAM_MEMORY_CONFIG)
@@ -625,7 +657,10 @@ class PrefillWindowCapture:
             return
         self.closed = True
         first_error = None
-        for release, value in [(self.operations.deallocate, tensor) for tensor in self.merged] + [
+        carried = list(getattr(self.carried, 'uploaded', None) or ()) if self.carried is not None else []
+        if self.carried is not None:
+            self.carried.uploaded = []
+        for release, value in [(self.operations.deallocate, tensor) for tensor in self.merged + carried] + [
                 (lambda captured: captured.close(), child) for child in self.children]:
             try:
                 release(value)

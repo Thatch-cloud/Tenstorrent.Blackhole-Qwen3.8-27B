@@ -1,0 +1,51 @@
+{
+ "wp": "ER",
+ "branch": "tp4/exact-resume",
+ "description": "Exact resume P0 (docs/tp4-exact-resume.md 5.2): a returning sticky turn resumes at floor2048(P) instead of floor2048(P) - 2048. QWEN_PREFIX_STICKY_UNDROP=1 lifts vLLM's EAGLE last-block drop for the hit lookup (the scheduler graft) and plans floor2048(P); QWEN_PREFIX_WINDOW_CARRY=1 files the drafter window rows below floor2048(P) on that checkpoint (prefix_window_carry) so a turn with less than 2048 - (P mod 2048) new tokens may resume above P' - 2048 too; QWEN_PREFIX_WINDOW_CARRY_AUDIT=1 reads the carried rows back and digests every sticky window for the cold-twin comparison. Byte-exact (E0): the same chunk-program checkpoints, one chunk higher, and the cold window's own rows. Plus the turn telemetry (counts only, on unless QWEN_PREFIX_TURN_TELEMETRY=0) and the Phase-0 split-invariance probe (C2_FABRIC_PROBE=split, runs from the checkout on an existing image).",
+ "profiles": [
+  {
+   "name": "all-er",
+   "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all",
+   "audit": false,
+   "env": {
+    "QWEN_PREFIX_STICKY_UNDROP": "1",
+    "QWEN_PREFIX_WINDOW_CARRY": "1"
+   },
+   "reason": "exact resume P0 on the combined arm: the undrop and the drafter-window carry; the timed arm of the returning-turn ABAB ERC1/ERL1/ERC2/ERL2 (the control is -fx-all itself, same plans). Est. -0.5 / -0.8 / -1.3 s first-token time per typical tool turn at 32k / 128k / 254k (docs/tp4-exact-resume.md 4.3)."
+  },
+  {
+   "name": "all-er-audit",
+   "parent": "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-all-audit",
+   "audit": true,
+   "env": {
+    "QWEN_PREFIX_STICKY_UNDROP": "1",
+    "QWEN_PREFIX_WINDOW_CARRY": "1",
+    "QWEN_PREFIX_WINDOW_CARRY_AUDIT": "1"
+   },
+   "reason": "the audited twin: every fx-all lever with its audit plus the carry's audit (the carried rows read back against the stored bytes, every sticky window's digest for the gate's cold-twin comparison); the audited attach ERA and the exactness arm ERX. Not a timing arm."
+  }
+ ],
+ "smoke": [
+  {
+   "flag": "QWEN_PREFIX_WINDOW_CARRY",
+   "value": "1",
+   "engaged": "[PINDIAG] prefix: window carry engaged",
+   "what": "exact resume P0: the undrop and the drafter-window carry (the scheduler graft's install line; a smoke sends no salt, so the carried admissions and the audit are the prefix gate's)"
+  }
+ ],
+ "smoke_rules": [
+  "exact_resume_smoke"
+ ],
+ "image_files": [
+  {
+   "path": "scripts/ci/prefix_window_carry.py",
+   "reason": "the carry's fast-path half: export of the window rows after a sticky prefill, the carried rows' upload and audit (imported lazily by serving_lifecycle and dflash_prefill_window's capture under QWEN_PREFIX_WINDOW_CARRY)"
+  }
+ ],
+ "tests": [
+  "test_exact_resume",
+  "test_tp4_split_probe"
+ ],
+ "card_jobs": "scripts/ci/references/fusion-jobs/ER (ORDER.txt there): SP0 the split-invariance probe on an existing image (no build), then B0 X0 ERA ERX ERC1 ERL1 ERC2 ERL2 [ERB1 ERB2] Z on the image built from this branch.",
+ "notes": "WP0 TODO. (1) Place: the two profiles (gate-only twins of -fx-all and -fx-all-audit), the smoke row, the smoke rule exact_resume_smoke (host side, problems(env, container_text)), the overlay line for prefix_window_carry.py and the two test modules; until then test_c2_overlay_closure (serving_lifecycle imports prefix_window_carry) and the 'checked-in files are what the manifests generate' tests are red by exactly that block, and the ER templates naming the twins fail c2_serving_job.py's profile check (they pass it against the generated profiles file: see the ER ORDER.txt). (2) Shared-ish files this branch DID edit because the lever lives in them and the preamble's list does not name them: qwen_prefix_registry.py and qwen_prefix_scheduler_patch.py (both copied into the plugin package by the G1 stage; the overlay already lists both), serving_lifecycle.py, serving_runtime.py, dflash_prefill_window.py, levern_policy.py, serving_c2_contract.py (exact_resume_problems, apply_environment drops the three names when inherited, install_tool_arg_counter call), qwen_prefix_metrics.py, prefix_judge.py, prefix_markers.py, prefix_replay.py, c2_prefix_gate.py, c2_serving_job.py (PREFIX_PLANS exact-resume and exact-resume-timed; FABRIC_PROBES split), .github/workflows/qwen-c2-serving.yml (the split probe case and its read-only hub mount), test_sticky_sessions.py (its parity comparison leaves the turn_* counters out), test_qwen_prefix_metrics.py, test_tp4_closure_literals.py (prefix_window_carry is SERVED). Expect textual merges with tp4/prefix-tiers (it rewrites the registry and the scheduler graft heavily): the window lives on Checkpoint.window and the carry's grants in select(), both small. (3) The turn telemetry is ON by default (counting only: one dictionary scan per salted admission, at most 2048 remembered turns of at most 4096 int32 tokens); QWEN_PREFIX_TURN_TELEMETRY=0 turns it off. It is not a lever and needs no profile. (4) 13x10: nothing here depends on the compute grid; the split probe reads the grid from the device."
+}

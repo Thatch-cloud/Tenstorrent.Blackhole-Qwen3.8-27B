@@ -1566,7 +1566,8 @@ class ParentTests(unittest.TestCase):
             self.skipTest('no git history for %s' % PARENT)
         before = result.stdout.decode('utf-8').splitlines()
         after = without_trace_census(without_levern(without_diag_trim(without_prefill_scratch(without_any_request(without_sticky(
-            without_solo_and_lanes(without_m3_blocks(without_request_warm(without_parked_engines(without_octo(without_idle_scratch((HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines()))))))))))))
+            without_solo_and_lanes(without_m3_blocks(without_request_warm(without_parked_engines(without_octo(without_idle_scratch(without_exact_resume(
+                (HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines())))))))))))))
         changed = [line for line in difflib.unified_diff(before, after, lineterm='', n=0)
                    if line[:1] in '+-' and not line.startswith(('+++', '---'))]
         added = [line[1:].strip() for line in changed if line.startswith('+')]
@@ -1891,6 +1892,17 @@ def without_m3_blocks(lines):
             raise AssertionError('M3 blocks hunk %d is not in serving_runtime.py exactly once: %r' % (index, now[:120]))
         text = text.replace(now, before)
     return text.split(chr(10))[:-1]
+
+
+def without_exact_resume(lines):
+    """serving_runtime.py less exact resume P0 (QWEN_PREFIX_WINDOW_CARRY, default off; docs/tp4-exact-resume.md 5.2), which landed after
+    this parent: capture_factory's `carry` parameter back to the signature phase 1 gave it, and its carried branch (the lifecycle passes a
+    carry only for a carried admission) cut. Each is cut exactly once and checked statement by statement, so nothing else is hidden."""
+    lines = replace_run(lines, ('def capture_factory(position, start=0, carry=None):',), ['        def capture_factory(position, start=0):'])
+    return cut_code(lines, 'if carry is not None:',
+                    'return PrefillWindowCapture(operations, model, position, TARGET_TAPS, start=start, prefix_route=True, carry=carry)',
+                    ('if carry is not None:',
+                     'return PrefillWindowCapture(operations, model, position, TARGET_TAPS, start=start, prefix_route=True, carry=carry)'))
 
 
 def without_sticky(lines):

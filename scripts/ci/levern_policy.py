@@ -460,8 +460,22 @@ def valid_step(prompt, computed, chunk):
     if end > prompt:
         return False
     if end == prompt:
-        return computed <= max(prompt - CHUNK, 0)
+        # Exact resume P0 (QWEN_PREFIX_WINDOW_CARRY=1, docs/tp4-exact-resume.md 5.2): a prefix hit may resume above P - 2,048 when its
+        # checkpoint carries the drafter window rows below it; the trim granted it only then, and the lifecycle checks the window again.
+        return computed <= max(prompt - CHUNK, 0) or window_carry_on()
     return prompt >= 2 * CHUNK and end % CHUNK == 0 and end <= final_start(prompt)
+
+
+WINDOW_CARRY_FLAG = 'QWEN_PREFIX_WINDOW_CARRY'
+
+
+def window_carry_on(environ=None):
+    """Whether the exact-resume window carry is on (strict: only unset, 0 or 1; the scheduler graft refuses anything else at install)."""
+    environ = os.environ if environ is None else environ
+    raw = environ.get(WINDOW_CARRY_FLAG) or '0'
+    if raw not in ('0', '1'):
+        raise ValueError('%s=%r: only 0 or 1' % (WINDOW_CARRY_FLAG, raw))
+    return raw == '1'
 
 
 def plan_from(prompt, start, *, decoding=True, step=DEFAULT_STEP, solo=DEFAULT_SOLO):

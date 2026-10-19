@@ -89,6 +89,19 @@ kv_cache_coordinator.py, single_type_kv_cache_manager.py). Under the flag, and o
     drop_last=<bool>".
 Unset, every path here is G1's own.
 
+Exact resume P0 (docs/tp4-exact-resume.md 5.2; both default off, gate-only profiles, sticky sessions only):
+  * QWEN_PREFIX_STICKY_UNDROP=1: the graft wraps the coordinator's find_longest_cache_hit so that vLLM's hit keeps its last matched
+    block (the EAGLE drop exists for a drafter that recomputes the last block's hidden states; DFlash on TT reads its window from the
+    prefill capture), and the plan captures the prompt boundary floor2048(P) as G1 does. Without the window carry the ceiling stays
+    floor2048(P - 2048), so the plan also keeps C0 = floor2048(P) - 2048 (a mid-loop capture) for the turns that land under it;
+  * QWEN_PREFIX_WINDOW_CARRY=1 (needs the undrop): the trim may land above P - 2048, up to floor2048(P - 1), on a checkpoint whose
+    Window covers [P - 2048, Q) (qwen_prefix_registry.window_covers): the drafter window rows below Q come from the turn that captured
+    it, the rows from Q on from this prefill; the plan captures only floor2048(P);
+  * one line, "[PINDIAG] prefix: window carry engaged undrop=<0|1> carry=<0|1> audit=<0|1> ceiling=<...>", says which ran (the
+    sticky install line above is unchanged: drop_last there is vLLM's coordinator's own setting).
+Turn telemetry (QWEN_PREFIX_TURN_TELEMETRY, on unless 0): the trim classifies every salted request once (TurnMemory.classify) and
+_free_request remembers every finished one (TurnMemory.record); counters only.
+
 install() refuses to start - the engine dies in TTScheduler.__init__ - unless async scheduling is
 off (blocks hashed at allocation in step t are unwritten when step t+1 reads them), chunked prefill
 is off with a whole-prompt token budget and long_prefill_token_threshold 0 (vLLM splits a prefill
@@ -454,6 +467,20 @@ def install_problems(scheduler, environ=None):
             problems.append('speculative lookahead is on: sticky sessions accept only %s with %d proposals '
                             '(lookahead %d), not lookahead %r' % (STICKY_METHOD, STICKY_PROPOSALS,
                                                                    STICKY_LOOKAHEAD, lookahead))
+    resume = prefix_registry.exact_resume_problems(environ)
+    problems.extend(resume)
+    problems.extend(prefix_registry.telemetry_problems(environ))
+    undrop_on = not resume and prefix_registry.undrop_enabled(environ)
+    if undrop_on and not sticky_enabled(environ):
+        problems.append('%s=1 without sticky sessions: the undrop serves the fast path\'s DFlash hit only' % prefix_registry.ENV_UNDROP)
+    elif undrop_on:
+        coordinator = getattr(getattr(scheduler, 'kv_cache_manager', None), 'coordinator', None)
+        if not isinstance(getattr(coordinator, 'eagle_group_ids', None), set) or not callable(
+                getattr(coordinator, 'find_longest_cache_hit', None)):
+            problems.append('%s=1: the coordinator has no eagle_group_ids set and find_longest_cache_hit (vLLM 0.25.1\'s unitary '
+                            'coordinator), so the drop cannot be lifted' % prefix_registry.ENV_UNDROP)
+        elif not drops_last_block(coordinator):
+            problems.append('%s=1: vLLM does not drop the last block here, there is nothing to lift' % prefix_registry.ENV_UNDROP)
     if parallel is not None and getattr(parallel, 'pipeline_parallel_size', 1) != 1:
         problems.append('pipeline parallel size %s: a step\'s grants must be read before the next '
                         'schedule()' % parallel.pipeline_parallel_size)
@@ -551,6 +578,11 @@ def install(scheduler, registry=None, kill_switch_path=KILL_SWITCH_PATH, poll_s=
     graft = SchedulerGraft(scheduler, registry, KillSwitch(kill_switch_path, poll_s, clock), logger, stats,
                            sticky=sticky_enabled(environ))
     graft.environ = environ
+    if graft.sticky:
+        # Exact resume P0 (the module docstring); install_problems has refused every combination that cannot run.
+        graft.undrop = prefix_registry.undrop_enabled(environ)
+        graft.carry = prefix_registry.window_carry_enabled(environ)
+        graft.carry_audit = prefix_registry.window_carry_audit_enabled(environ)
     graft.wrap()
     scheduler._qwen_prefix = graft
     return graft
@@ -1066,6 +1098,10 @@ class SchedulerGraft(object):
     # The per-tenant device quota (DeviceQuota), None unless QWEN_PREFIX_TENANT_QUOTA_DEVICE_* names one.
     quota = None
     make_block_hash = None
+    # Exact resume P0 (the module docstring): set by install() under sticky sessions only, off on the class.
+    undrop = False
+    carry = False
+    carry_audit = False
     # Lever N's peek memo (request id -> the Q the trim would land on), cleared at the start of every schedule() call.
     peeked = {}
 
@@ -1158,10 +1194,15 @@ class SchedulerGraft(object):
         prompt_boundary = floor_chunk(request.num_prompt_tokens)
         drain = floor_chunk(request.num_tokens)
         candidates = set()
-        sticky = getattr(self, 'sticky', False) and getattr(self, 'drop_last', False)
+        undrop = getattr(self, 'undrop', False)
+        sticky = getattr(self, 'sticky', False) and getattr(self, 'drop_last', False) and not undrop
         capture_boundary = prompt_boundary - CHUNK if sticky else prompt_boundary
         if capture_boundary > q:
             candidates.add(capture_boundary)
+        if undrop and not getattr(self, 'carry', False) and prompt_boundary - CHUNK > q:
+            # The undrop without the carry: a next turn whose prompt ends under floor2048(P) + 2048 is held to the window ceiling
+            # floor2048(P' - 2048) = C0, so C0 stays planned beside the prompt boundary.
+            candidates.add(prompt_boundary - CHUNK)
         gap_boundary = floor_chunk(h)
         if gap_boundary - q >= CHUNK:
             candidates.add(gap_boundary)
@@ -1196,9 +1237,15 @@ class SchedulerGraft(object):
         q, key, checkpoint = 0, None, None
         rejected_same_step = False
         k = h // CHUNK
+        window_ceiling = None
         if self.sticky:
-            # The fast path's drafter window [P - 2048, P) must be this prefill's own chunks.
-            k = min(k, max(0, request.num_prompt_tokens - CHUNK) // CHUNK)
+            # The fast path's drafter window [P - 2048, P) must be this prefill's own chunks - unless the checkpoint carries the
+            # window rows below it (QWEN_PREFIX_WINDOW_CARRY): then any boundary below P qualifies, checked per candidate below.
+            window_ceiling = max(0, request.num_prompt_tokens - CHUNK) // CHUNK * CHUNK
+            if getattr(self, 'carry', False):
+                k = min(k, max(0, request.num_prompt_tokens - 1) // CHUNK)
+            else:
+                k = min(k, window_ceiling // CHUNK)
         if ceiling is not None:
             k = min(k, ceiling // CHUNK)
         while k > 0:
@@ -1210,6 +1257,9 @@ class SchedulerGraft(object):
                 continue
             entry = registry.get(hashes[count - 1])
             if entry is None:
+                continue
+            if (window_ceiling is not None and candidate > window_ceiling
+                    and not prefix_registry.window_covers(entry, request.num_prompt_tokens, candidate)):
                 continue
             if not registry.tokens_match(request_id, candidate, entry, lambda: request.all_token_ids):
                 continue
@@ -1264,6 +1314,8 @@ class SchedulerGraft(object):
                 stats['killed_denied'] += 1
             self.note(request, h, 0, 'denied')
             return empty, 0
+        if registry.turns is not None:
+            registry.turns.classify(request, stats)
         hashes = request.block_hashes
         request_id = request.request_id
         hooks = self.tier_hooks
@@ -1431,9 +1483,28 @@ class SchedulerGraft(object):
             return result
 
         def _free_request(request, *args, **kwargs):
+            if registry.turns is not None:
+                # Counting only, never raises (TurnMemory.record skips an unsalted request and a streaming session).
+                if not getattr(request, 'resumable', False):
+                    registry.turns.record(request, registry.stats)
+                registry.turns.forget(request.request_id)
             registry.forget_request(request.request_id)
             return original['_free_request'](request, *args, **kwargs)
 
+        if self.undrop:
+            original['find_longest_cache_hit'] = coordinator.find_longest_cache_hit
+
+            def find_longest_cache_hit(*args, **kwargs):
+                # vLLM 0.25.1's unitary coordinator passes drop_eagle_block=(0 in eagle_group_ids) to its one manager: for the length
+                # of this lookup the set is empty, so the hit keeps its last matched block (the module docstring, exact resume P0).
+                saved = coordinator.eagle_group_ids
+                coordinator.eagle_group_ids = set()
+                try:
+                    return original['find_longest_cache_hit'](*args, **kwargs)
+                finally:
+                    coordinator.eagle_group_ids = saved
+
+            coordinator.find_longest_cache_hit = find_longest_cache_hit
         manager.get_computed_blocks = get_computed_blocks
         coordinator.cache_blocks = cache_blocks
         scheduler.schedule = schedule
@@ -1477,6 +1548,10 @@ class SchedulerGraft(object):
         if self.sticky:
             self.log('install sticky=1 lookahead=%d drop_last=%s ceiling=floor2048(P-%d)',
                      getattr(scheduler, 'num_lookahead_tokens', 0), self.drop_last, CHUNK)
+            if self.undrop or self.carry:
+                self.log('window carry engaged undrop=%d carry=%d audit=%d ceiling=%s', int(self.undrop), int(self.carry),
+                         int(self.carry_audit), 'floor2048(P-1) with a covering window, else floor2048(P-%d)' % CHUNK
+                         if self.carry else 'floor2048(P-%d)' % CHUNK)
             if levern_chunked(scheduler, self.environ):
                 # The merged route (Lever N beside prefix reuse): chunked prefill is on, and the Lever N cap installed on the class is the only thing
                 # that splits a prefill (its own line, so the sticky line above is what it always was).

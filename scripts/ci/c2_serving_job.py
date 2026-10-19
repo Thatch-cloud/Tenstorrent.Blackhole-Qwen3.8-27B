@@ -31,7 +31,10 @@ Keys (every one optional but C2_IMAGE_TAG):
                       status is the verdict) or ccl-sweep (tp4_ccl_sweep_probe.py: the verify's reduce-scatter and norm gathers with every value of
                       ccl_options_tp, bit-compared against the sequential engine's call and timed in-trace, one fabric config per run; CCL_SWEEP
                       verdict=...; -safe skips the barrier-removal arms, -core also the exotic stage, -p8192 asks the fabric for an 8192 byte packet
-                      payload (core only), -quick is a short grid, a smoke of the harness); needs the fabric action
+                      payload (core only), -quick is a short grid, a smoke of the harness) or split (tp4_split_probe.py: a prefill resumed at a
+                      128-aligned position inside a 2048 chunk against the unsplit cold prefill, bit for bit, on the image's own model with its first
+                      few real layers; the step mounts the hub read-only for it; SPLIT_PROBE verdict=IDENTICAL|DIFFERS|FAIL, exit 0/2/1;
+                      docs/tp4-exact-resume.md 5.3); needs the fabric action
   C2_SUPERSEDED_BY    set on every template of a pack that a later pack replaced (references/tp4-w2-jobs); read_job REFUSES such a template
   C2_PROFILE          the C2 profile smoke and gate serve (default: general)
   C2_CARDS            the card set the hardware steps open: pair (cards M and A, the default) or quad (every
@@ -144,6 +147,9 @@ Keys (every one optional but C2_IMAGE_TAG):
                       and quota-isolated (the profile plus the quota env, derived), each also a plan: tenant A floods the device pool while tenant B's session
                       must still be a DEVICE-RESIDENT hit when it returns (quota-isolated) and must not be (quota-control: the flood has to reach it); both
                       tenants' returns are compared with their cold twins
+                      exact-resume (judged) and exact-resume-timed (the ABAB's arm) are the exact-resume P0 returning
+                      turns (docs/tp4-exact-resume.md 5.2): short tool turns on ~9k, ~33k and ~120k contexts, every turn a
+                      cold/hit pair; exact_resume_compare.py pairs the hits of two timed arms
   C2_PREFIX_PROFILE   the prefix-reuse profile it serves (default general-prefix; must be a checkout profile)
   C2_PREFIX_BASELINE  the no-reuse profile it compares against (default general; none: timing without
                       the baseline arm)
@@ -217,7 +223,8 @@ TP4_MESH_DEVICE = 'P150x4'
 # (general-2link: the same pair under the two-channel descriptor this cabling needs).
 PAIR_MESH_DEVICES = (None, 'P300')
 FABRIC_CONFIGS = ('FABRIC_1D', 'FABRIC_1D_RING')
-FABRIC_PROBES = ('fabric', 'rs-tile', 'mr', 'kvread', 'ccl-sweep', 'ccl-sweep-safe', 'ccl-sweep-core', 'ccl-sweep-p8192', 'ccl-sweep-quick')
+FABRIC_PROBES = ('fabric', 'rs-tile', 'mr', 'kvread', 'ccl-sweep', 'ccl-sweep-safe', 'ccl-sweep-core', 'ccl-sweep-p8192', 'ccl-sweep-quick',
+                 'split')
 DRAFTER_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,63}')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
@@ -255,7 +262,9 @@ TELEMETRY_MS_RANGE = (100, 10000)
 TELEMETRY_DEFAULT_MS = 1000
 DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
 # The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
-PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify', 'tiers', 'tier-concurrent', 'tier-concurrent-timed', 'tier-quota')
+PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify', 'tiers', 'tier-concurrent', 'tier-concurrent-timed', 'tier-quota',
+                # exact resume P0 (docs/tp4-exact-resume.md 5.2): the judged and the timed returning-turn arms
+                'exact-resume', 'exact-resume-timed')
 # (arm, its plan): each exactness and lifecycle arm is a plan of its own, named as the arm, that runs
 # only it, judged as inside its plan (neither plan has a cross-arm check; c2_prefix_gate.PLAN_ARMS).
 # G1 v47 (run 36246961161) needed the eager arm again without the traced and audit arms' hour.

@@ -524,6 +524,10 @@ def apply_environment(profile, environ=None):
     for name in OCTO_NAMES:
         if name not in profile['env']:
             environ.pop(name, None)
+    # ...and exact resume P0: an inherited switch must not lift vLLM's drop or carry a window under a profile that never asked.
+    for name in EXACT_RESUME_NAMES:
+        if name not in profile['env']:
+            environ.pop(name, None)
     return environ
 
 
@@ -1066,6 +1070,34 @@ def merged_route_problems(profile, env):
     return problems
 
 
+# Exact resume P0 (docs/tp4-exact-resume.md 5.2; qwen_prefix_registry): the undrop, the drafter-window carry and its audit. Gate-only until a
+# qualification record exists, only beside sticky sessions with prefix reuse, the carry only with the undrop and the audit only with the
+# carry; an inherited value under a profile that does not name one is dropped (apply_environment).
+EXACT_RESUME_NAMES = ('QWEN_PREFIX_STICKY_UNDROP', 'QWEN_PREFIX_WINDOW_CARRY', 'QWEN_PREFIX_WINDOW_CARRY_AUDIT')
+
+
+def exact_resume_problems(profile):
+    """[problem] when a profile names the exact-resume switches wrongly (nothing is checked for a profile that names none)."""
+    env = profile.get('env') or {}
+    named = [name for name in EXACT_RESUME_NAMES if name in env]
+    if not named:
+        return []
+    problems = []
+    values = dict((name, str(env[name])) for name in named)
+    problems += ['%s=%r: only 0 or 1' % (name, value) for name, value in sorted(values.items()) if value not in ('0', '1')]
+    on = set(name for name, value in values.items() if value == '1')
+    if on and profile.get('gate_only') is not True:
+        problems.append('%s are gate-only until a qualification record exists: %s is not gate_only' % (', '.join(sorted(on)), profile.get('name')))
+    if on and not (prefix_reuse(profile) and sticky_sessions(profile)):
+        problems.append('%s need %s=1 and %s=1 (the scheduler graft serves the fast path\'s sticky hit only)'
+                        % (', '.join(sorted(on)), PREFIX_SWITCH, STICKY_SWITCH))
+    if EXACT_RESUME_NAMES[1] in on and EXACT_RESUME_NAMES[0] not in on:
+        problems.append('%s=1 without %s=1' % (EXACT_RESUME_NAMES[1], EXACT_RESUME_NAMES[0]))
+    if EXACT_RESUME_NAMES[2] in on and EXACT_RESUME_NAMES[1] not in on:
+        problems.append('%s=1 without %s=1' % (EXACT_RESUME_NAMES[2], EXACT_RESUME_NAMES[1]))
+    return problems
+
+
 def upload_problems(profile):
     """[problem] when a profile names the engine-start upload levers wrongly: a value that is not '0'/'1', a count out of range, an audit or a knob without its
     lever, an audit flag on a profile that is not a gate's."""
@@ -1299,6 +1331,10 @@ def install_prefix_metrics(api_server, on_import=None):
                 def on_import(name, callback):
                     sys.meta_path.insert(0, PostImportHook(name, callback))
             qwen_prefix_metrics.install_collector(on_import)
+            # Tool-call argument whitespace, counts only (docs/tp4-exact-resume.md 5.3).
+            counter = getattr(qwen_prefix_metrics, 'install_tool_arg_counter', None)
+            if counter is not None:
+                counter(on_import)
         else:
             qwen_prefix_metrics.start_exporter()
         qwen_prefix_metrics.export_in_forked_children()
@@ -1800,6 +1836,9 @@ def boot(environ=None, orig_argv=None):
     problems = upload_problems(profile)
     if problems:
         raise ValueError('profile %s misuses the engine-start upload levers: %s' % (profile['name'], '; '.join(problems)))
+    problems = exact_resume_problems(profile)
+    if problems:
+        raise ValueError('profile %s misuses the exact-resume switches: %s' % (profile['name'], '; '.join(problems)))
     problems = drafter_problems(profile)
     if problems:
         raise ValueError('profile %s cannot serve its drafter checkpoint: %s' % (profile['name'], '; '.join(problems)))

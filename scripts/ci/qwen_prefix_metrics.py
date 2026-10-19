@@ -103,6 +103,37 @@ GAUGES = {
 # Levels that are the host's, not the writer's: the largest over writers, not the sum.
 MAX_KEYS = ('host_mem_available_bytes',)
 COUNTERS = {
+    # Exact resume P0 (QWEN_PREFIX_WINDOW_CARRY; docs/tp4-exact-resume.md 5.2): present only with the carry on.
+    'window_stored': 'drafter windows filed on the checkpoint their prefill stored at floor2048(P)',
+    'window_missing': 'window exports with no resident checkpoint to file them on',
+    'window_grants': 'grants above the window ceiling floor2048(P - 2048), on a carried window',
+    'window_grant_tokens': 'tokens those grants reused beyond the window ceiling',
+    # Turn telemetry (QWEN_PREFIX_TURN_TELEMETRY, on unless 0; docs/tp4-exact-resume.md 5.3): counts only.
+    'turn_records': 'finished salted turns remembered',
+    'turn_forgotten': 'remembered turns pushed out of the bounded memory',
+    'turn_first': 'salted requests with no remembered turn in their chain',
+    'turn_earlier': 'salted requests whose first block is a remembered turn\'s but that diverged before its prompt end',
+    'turn_before_prompt_end': 'continuations that diverged inside the previous prompt\'s last block',
+    'turn_at_p_minus_2': 'continuations that diverged at P - 2 (the previous turn\'s <think> was stripped)',
+    'turn_at_p_minus_1': 'continuations that diverged at P - 1 (the previous turn\'s reasoning was not echoed)',
+    'turn_at_decode_start': 'continuations that diverged at the previous turn\'s first generated token',
+    'turn_in_answer': 'continuations that diverged inside the previous answer',
+    'turn_extends': 'continuations that carry every token of the previous answer (the reasoning was echoed)',
+    'turn_long_unresolved': 'continuations that matched the whole remembered answer prefix of a longer answer',
+    'turn_prev_length': 'continuations whose previous answer ended at its token limit',
+    'turn_in_answer_lt16': 'in-answer divergences under 16 tokens into the answer',
+    'turn_in_answer_lt64': 'in-answer divergences 16 to 63 tokens into the answer',
+    'turn_in_answer_lt256': 'in-answer divergences 64 to 255 tokens into the answer',
+    'turn_in_answer_lt1024': 'in-answer divergences 256 to 1023 tokens into the answer',
+    'turn_in_answer_ge1024': 'in-answer divergences 1024 or more tokens into the answer',
+    'turn_out_lt256': 'matched continuations whose previous answer was under 256 tokens',
+    'turn_out_lt1024': 'matched continuations whose previous answer was 256 to 1023 tokens',
+    'turn_out_lt4096': 'matched continuations whose previous answer was 1024 to 4095 tokens',
+    'turn_out_ge4096': 'matched continuations whose previous answer was 4096 tokens or more',
+    'turn_new_lt256': 'extending continuations that added under 256 new prompt tokens',
+    'turn_new_lt1024': 'extending continuations that added 256 to 1023 new prompt tokens',
+    'turn_new_lt4096': 'extending continuations that added 1024 to 4095 new prompt tokens',
+    'turn_new_ge4096': 'extending continuations that added 4096 new prompt tokens or more',
     'attempts': 'admission attempts the trim saw (vLLM calls get_computed_blocks once per attempt)',
     'staged': 'grants staged (idempotent per attempt)',
     'dropped_attempts': 'staged grants dropped because the step did not admit the request',
@@ -617,6 +648,13 @@ class PrefixCollector(object):
             if not _HISTOGRAM_FAILED:
                 _HISTOGRAM_FAILED.append(error)
                 log('reuse histograms not exposed: %s: %s', type(error).__name__, error)
+        tools = CounterMetricFamily(
+            PREFIX + 'tool_args', 'finished tool calls and their parameter values as the model wrote them, and how many of those '
+            'carried leading or trailing whitespace beyond the template\'s one newline each side (the parser strips it, so the echoed '
+            'call no longer re-renders to the generated tokens; counts only)', labels=('kind',))
+        for kind, value in sorted(tool_arg_counts().items()):
+            tools.add_metric([kind], value)
+        yield tools
         requests = CounterMetricFamily(
             PREFIX + 'chat_requests', 'chat completions by the fields that decide whether the next turn\'s prompt '
             'extends this one (reasoning_effort, chat_template_kwargs) and by cache_salt (unset: no hit)',
@@ -635,6 +673,64 @@ class PrefixCollector(object):
         # Names vary with the registry's counters; an empty describe keeps registration from calling
         # collect() before an engine exists.
         return []
+
+
+# -- tool-call argument whitespace (docs/tp4-exact-resume.md 5.3, counts only) ---------------------------
+# vLLM 0.25.1's Qwen3 parser keeps each parameter as value.strip() (vllm/parser/qwen3.py _qwen3_arg_converter); the template renders
+# '<parameter=k>\n' + value + '\n</parameter>'. A value the model wrote with more edge whitespace than that one newline each side therefore
+# comes back from the client as a different string, and the next turn's prompt diverges inside the call. Counted on the final conversion
+# of each call (partial=False: the streaming flush or the non-streaming extract), never changed.
+PARSER_MODULE = 'vllm.parser.qwen3'
+ARG_CONVERTER = '_qwen3_arg_converter'
+TOOL_PARAM = re.compile(r'<\s*parameter\s*=\s*([^>]*)>(.*?)(?:<\s*/\s*parameter\s*>|(?=<\s*parameter\s*=))', re.DOTALL)
+TOOL_ARG_KINDS = ('calls', 'calls_edge_whitespace', 'params', 'params_edge_whitespace')
+_TOOL_ARGS = dict.fromkeys(TOOL_ARG_KINDS, 0)
+
+
+def edge_whitespace(raw_value):
+    """Whether a parameter value as written between its tags differs from the template's rendering of the parser's value."""
+    return raw_value != '\n' + raw_value.strip() + '\n'
+
+
+def count_tool_args(raw_args):
+    params = edge = 0
+    for match in TOOL_PARAM.finditer(raw_args or ''):
+        params += 1
+        if edge_whitespace(match.group(2)):
+            edge += 1
+    with _REQUESTS_LOCK:
+        _TOOL_ARGS['calls'] += 1
+        _TOOL_ARGS['params'] += params
+        _TOOL_ARGS['params_edge_whitespace'] += edge
+        if edge:
+            _TOOL_ARGS['calls_edge_whitespace'] += 1
+
+
+def tool_arg_counts():
+    with _REQUESTS_LOCK:
+        return dict(_TOOL_ARGS)
+
+
+def wrap_arg_converter(module):
+    """Count every final conversion of a Qwen3 tool call's arguments; the conversion itself is the original, untouched."""
+    original = getattr(module, ARG_CONVERTER, None)
+    if original is None or getattr(original, '_qwen_prefix', False):
+        return False
+
+    def converter(raw_args, partial):
+        result = original(raw_args, partial)
+        if not partial:
+            try:
+                count_tool_args(raw_args)
+            except Exception:
+                pass
+        return result
+
+    converter._qwen_prefix = True
+    converter.__wrapped__ = original
+    setattr(module, ARG_CONVERTER, converter)
+    log('tool-call argument whitespace counted on %s.%s', module.__name__, ARG_CONVERTER)
+    return True
 
 
 # -- request shapes that decide whether prompt N+1 extends prompt N (P0b, correction C6) -------------
@@ -771,6 +867,19 @@ def guarded(name, wrap):
             return False
 
     return callback
+
+
+def install_tool_arg_counter(on_import, modules=None):
+    """In the API server: count tool-call argument whitespace (wrap_arg_converter) now for a parser module already imported, else when it
+    is; guarded like install_collector's wraps."""
+    modules = sys.modules if modules is None else modules
+    callback = guarded(PARSER_MODULE, wrap_arg_converter)
+    module = modules.get(PARSER_MODULE)
+    if module is not None:
+        callback(module)
+    else:
+        on_import(PARSER_MODULE, callback)
+    return True
 
 
 def install_collector(on_import, directory=None, modules=None):
