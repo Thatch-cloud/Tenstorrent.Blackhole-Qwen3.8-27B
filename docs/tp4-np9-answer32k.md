@@ -9,7 +9,8 @@ nothing in production moved.
 
 * **Device memory: none.** The policy comment (`serving_fast_policy.py:27-35`, before this change) said the budget is paid per admitted request in verifier captures, one set per 256-position mask
   family. That is true of replay attention. It is not what the serving profile builds: under C2-any beside the extent readers the captures are the sequential widths 1, 2 and 4 whatever the budget,
-  there is one 2048 proposal bucket, and the page table is the whole window. A 32,768 budget allocates the same bytes as a 16,384 one (table below, held by `test_np9_answer32k`).
+  there is one 2048 proposal bucket, and the page table is the whole window. A 32,768 budget allocates the same bytes as a 16,384 one (table below, held by `test_np9_answer32k`). On the host the cost is the session's `emitted` list and vLLM's `output_token_ids`
+  growing to at most 32,768 ints per request (well under 1 MB each).
 * **What a longer ceiling does cost is KV admission**, not KV memory: the reservation holds `prompt + max_tokens` blocks per running request for the request's whole life. The pool does not
   change (16,499 usable blocks); the number of long-prompt requests that run at once does, and only for requests that name a `max_tokens` above 16,384 (those were clamped to 16,384 before).
   A request that omits `max_tokens` still gets 16,384 on Swift (8,192 on the profile and the base): the default is unchanged.
