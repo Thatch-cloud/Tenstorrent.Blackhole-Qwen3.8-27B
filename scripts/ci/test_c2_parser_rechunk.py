@@ -91,6 +91,7 @@ class _ParkedTwins(object):
                 or name.endswith(('-ship-prefix-levern-w2-er-kill', '-ship-prefix-levern-w2-er-tier-audit'))      # (and the W2 kill drill twin of the ship profile: test_w2_switch holds it)
                 or '-ship-prefix-levern-w2-er-traffic-' in name       # (the engine-start upload twins of the ship profile: test_upload_p0_profiles holds the list)
                 or '-ship-prefix-levern-w2-er-fx-' in name      # (and the op-fusion programme's twins of the ship profile: test_fusion_wp holds them)
+                or '-ship-prefix-levern-w2-er-pf2-' in name      # (and tp4/prefill-2's twins of the approved ship-4 profile: test_pf2_profiles holds them)
                 or '-ship-prefix-levern-w2-er-tierfx-' in name)      # (and the host KV tier's ship candidate and its audit twin: test_prefix_tier_profiles holds them)
 
 
