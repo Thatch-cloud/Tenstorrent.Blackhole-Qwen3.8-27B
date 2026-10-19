@@ -124,6 +124,7 @@ class TwinTests(unittest.TestCase):
         combined |= {name for name in PROFILES if name.startswith(fusion.NAMESPACE + 'wph-')}                       # (WPH's composition twins are the combined arm plus their own flags)
         # (tp4/prefill-sdpa, M1 and tp4/fusion-2: the combined arm and the combined audited arm plus the prefill SDPA flags (-fx-all-oneq*), the matmul-grid flags (-fx-all-grid13*) or both (-fx-all-oneq-grid13*))
         combined |= {name for name in PROFILES if name.startswith((fusion.NAMESPACE + 'all-oneq', fusion.NAMESPACE + 'all-grid13'))}
+        combined |= {fusion.NAMESPACE + 'all-er', fusion.NAMESPACE + 'all-er-audit'}            # (exact resume's gate-only twins of the combined arms: fusion-wp/ER.json)
         import make_octo3_profiles
 
         import make_np1_profiles
