@@ -56,7 +56,7 @@ profiled_block_stream_override publish_prewarm quad_draft_tp octo_draft_tp reque
 serving_kv_reservation serving_one_in_flight serving_packed_bridge serving_prefill_admission serving_request_quarantine serving_solo_lane serving_octo serving_fast_lane serving_fast_lane_scheduler stage_profile
 target_packed_pages target_t16_attention_8k_gate target_t16_attention_gate tile_collective_tp two_tile_decode two_tile_norm
 verifier_engine_tp verifier_position_policy c2_parser_rechunk c2_toolcall_whitespace qwen_prefix_metrics prompt_lookup levern_policy levern_scheduler levern_platform levern_route sdpa_long_tp sdpa_multi_tp
-gdn_conv_gates_spread gdn_wc drafter_checkpoint octo_attn_bundle qwen_c2_checkpoint idle_scratch
+gdn_conv_gates_spread gdn_wc drafter_checkpoint octo_attn_bundle qwen_c2_checkpoint idle_scratch prefill_handoff
 qwen_device_zeros qwen_lazy_shard
 tp4_sampdraft tp4_shard_argmax tp4_draft_conv tp4_draft_heads drafter_fixtures drafter_manifest
 serving_parked_engines
@@ -504,7 +504,7 @@ class ClosureTests(unittest.TestCase):
         # (make_parked_profiles, make_round_host_profiles, make_octo_profiles and make_octo2_profiles are the generators of the engine-reuse, round-host, octo-T8 and octo-2 lever profile twins: the profile tests that the
         # attach test imports name them, through profile_twins; they serve nothing)
         # (make_w2_kill_profiles generates the W2 kill drill twin of the ship profile and make_kvread_profiles the region-read audit twins; the profile tests name them the same way; make_np1_profiles the tp4/np1-fastlane twins; make_xe_profiles the tp4/exact-end twins)
-        loaded -= {'tp_test_support', 'make_parked_profiles', 'make_round_host_profiles', 'make_octo_profiles', 'make_octo2_profiles', 'make_octo3_profiles', 'make_ship4_profiles', 'make_np1_profiles', 'make_s5_profiles', 'make_xe_profiles', 'make_w2_kill_profiles', 'make_kvread_profiles', 'make_prefix_tier_profiles', 'make_fusion_profiles', 'make_upload_profiles', 'profile_twins'}
+        loaded -= {'tp_test_support', 'make_parked_profiles', 'make_round_host_profiles', 'make_octo_profiles', 'make_octo2_profiles', 'make_octo3_profiles', 'make_ship4_profiles', 'make_np1_profiles', 'make_s5_profiles', 'make_xe_profiles', 'make_pf2_profiles', 'make_w2_kill_profiles', 'make_kvread_profiles', 'make_prefix_tier_profiles', 'make_fusion_profiles', 'make_upload_profiles', 'profile_twins'}
         extra = loaded - self.seen
         # What the attach loads outside the closure is a NOT_SERVED module it enters inert (each named in ATTACH_ENTERS_INERT,
         # exactly) and what those import at module level - not everything any NOT_SERVED module could ever reach.

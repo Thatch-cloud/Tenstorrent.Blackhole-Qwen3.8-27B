@@ -473,6 +473,8 @@ scripts/ci/grid13_tp.py
 scripts/ci/idle_scratch.py
 # O3: packed_verifier imports it at module level (QWEN_FAST_AUDIT_FIRST / QWEN_FAST_AUDIT_EVERY: the sampled host read-back audits); inert while both are unset
 scripts/ci/audit_sampling.py
+# PF2: levern_route imports it at the attach once QWEN_FAST_PREFILL_HANDOFF or its audit flag is set (the device-side slot hand-off of the final step); an image without it refuses that boot
+scripts/ci/prefill_handoff.py
 # RB: the lever's flags, aligned bounds, join plan, joins and audit compare; dflash_prefill_window (already overlaid) imports it only when QWEN_FAST_TAP_WINDOW_ALIGNED is set and not 0
 scripts/ci/tap_window_aligned.py
 # SW: serving_c2_contract.configure_checkpoint imports it in every process once a checkpoint is asked for, and serving_startup.bind_checkpoint in the worker once one is bound; an image without it refuses that boot

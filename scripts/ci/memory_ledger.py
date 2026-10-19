@@ -72,6 +72,13 @@ admission and never asked of the block: v79's P0 model.embedding is one 1.271 GB
 only what is resident, never a transient peak (prefill intermediates, engine-build scratch), which is freed before
 it walks. The pair and single-user captures are before/after points, not walked, and the trace a capture retains is
 not walked either, so neither is in it.
+
+TRACE-REGION HEADROOM (tp4/next-1). The phase lines above are DRAM alone. At the phases in TRACE_PHASES (P7 after the attach, P12 after the first packed round, P13 before shutdown) one more line a chip
+reads the trace region (BufferType.TRACE, the view the before/after points already read): the headroom the traces captured so far leave in the region the profile sized
+(additional-config tt.trace_region_size), which the next prefill kernel decision (traced masked tails) needs:
+    [MEMLEDGER] phase=P7 chip<n> trace_total= trace_used= trace_free= trace_largest_free=
+or, where this ttnn exposes no view of the region, '[MEMLEDGER] phase=P7 trace unavailable (<why>)' once. The same figures are the report's 'trace' list. It is a read of an allocator
+view as the before/after points do: no allocation, no program, no trace, and the delta checks, the known set and the residual are untouched by it.
 """
 
 import json
@@ -86,6 +93,9 @@ TRIM_FLAG = 'QWEN_FAST_ADMISSION_DIAG_TRIM'
 L1_FLAG = 'QWEN_FAST_MEMORY_LEDGER_L1'
 RESIDUAL_LIMIT = 1.5e9
 RESIDUAL_PHASE = 'P7'
+# tp4/next-1: the phases whose per-chip trace-region headroom is logged beside the DRAM figures: P7 (after the attach: every trace the attach captured is resident, so this is
+# the headroom the next kernel decision reads), P12 (after the first packed round) and P13 (before shutdown). Every other phase reads nothing of the trace region.
+TRACE_PHASES = ('P7', 'P12', 'P13')
 # Bank rounding is bounded per buffer by one of ITS OWN pages per bank (see the module
 # docstring). The MLP block stream measured 3,227,516,928 B allocated against
 # 3,220,439,040 B logical over 64 buffers (docs/mlp-block-stream.md:28,73): 110,592 B per
@@ -655,8 +665,25 @@ class MemoryLedger:
                       categories_total=self.category_totals())
         if l1 is not None:
             report['l1'] = l1
+        if name in TRACE_PHASES:
+            report['trace'] = self.trace_headroom(label)
         self.emit(json.dumps(report, default=str))
         return report
+
+    def trace_headroom(self, label):
+        """The per-chip trace-region figures of this phase, logged as one line a chip (or one 'unavailable' line), and returned for the report. Never raises."""
+        try:
+            trace = self.trace_reading()
+            if isinstance(trace, dict):
+                self.log('[MEMLEDGER] phase=%s trace unavailable (%s)' % (label, str(trace.get('unavailable'))[:100]))
+                return trace
+            for item in trace:
+                self.log('[MEMLEDGER] phase=%s chip%d trace_total=%s trace_used=%s trace_free=%s trace_largest_free=%s'
+                         % (label, item['chip'], _mb(item['total']), _mb(item['allocated']), _mb(item['free']), _mb(item['largest_free'])))
+            return trace
+        except BaseException as failure:
+            self.log('[MEMLEDGER] phase=%s trace unavailable (%s: %s)' % (label, type(failure).__name__, str(failure)[:80]))
+            return dict(unavailable='%s: %s' % (type(failure).__name__, str(failure)[:80]))
 
     def unmatched(self):
         """Every (phase, chip) whose allocator delta the walk did not explain, largest first."""

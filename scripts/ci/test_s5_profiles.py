@@ -40,7 +40,7 @@ PLAN = fusion.normalise(fusion.read_manifests())
 SPEC = next(item for item in PLAN['ship'] if item['name'] == 'traffic-s5')
 PARENT_COMMIT = '27af6902'                      # tp4/swift: the production tree this branch was cut from
 # what the candidate sets that ship 4 does not (or sets differently), the waiver id aside
-CHANGES = {'QWEN_FAST_GRID13': '1', 'QWEN_FAST_SOLO_PACKED': '1', 'QWEN_PREFIX_STICKY_UNDROP': '1', 'QWEN_PREFIX_WINDOW_CARRY': '1', 'QWEN_PREFIX_TIER_RESTORE_SLICE': '512',
+CHANGES = {'QWEN_FAST_PREFILL_HANDOFF': '1', 'QWEN_FAST_GRID13': '1', 'QWEN_FAST_SOLO_PACKED': '1', 'QWEN_PREFIX_STICKY_UNDROP': '1', 'QWEN_PREFIX_WINDOW_CARRY': '1', 'QWEN_PREFIX_TIER_RESTORE_SLICE': '512',
            'QWEN_PREFIX_TIER_RESTORE_SLICE_MS': '200', 'QWEN_PREFIX_HOST_TIER_GIB': '48', 'QWEN_PREFIX_STORE_GIB': '16'}
 NEXT_LEVERS = {'QWEN_FAST_SOLO_PACKED': '1', 'QWEN_PREFIX_STICKY_UNDROP': '1', 'QWEN_PREFIX_WINDOW_CARRY': '1'}
 # what the image's own ENV carries that the levers' admissions read (docker/qwen-c2-serving.Dockerfile)

@@ -307,6 +307,63 @@ class BeforePointTests(unittest.TestCase):
                          dict(unavailable='RuntimeError: no view'))
 
 
+class TraceHeadroomTests(unittest.TestCase):
+    """tp4/next-1: the attach's ledger output carries the trace region's headroom per chip at the phases in TRACE_PHASES (after the attach, after the first packed round, before shutdown)
+    and at no other phase; where the view does not exist it says so once; it never touches the delta checks."""
+
+    def test_the_phases_after_the_attach_log_total_used_and_free_per_chip(self):
+        operations = TraceOperations()
+        operations.trace_allocated[id(operations.devices[0])] = 120 * 2 ** 20
+        operations.trace_allocated[id(operations.devices[1])] = 200 * 2 ** 20
+        ledger, lines, reports = ledger_for(operations)
+        ledger.phase('P6', point='block0')
+        self.assertEqual([line for line in lines if 'trace' in line], [], 'a phase before the attach ends reads no trace region')
+        report = ledger.phase('P7')
+        found = [line for line in messages(lines) if line.startswith('[MEMLEDGER] phase=P7 chip') and 'trace_total=' in line]
+        self.assertEqual(found, [
+            '[MEMLEDGER] phase=P7 chip0 trace_total=%.1fMB trace_used=%.1fMB trace_free=%.1fMB trace_largest_free=%.1fMB'
+            % (256 * 2 ** 20 / 1e6, 120 * 2 ** 20 / 1e6, 136 * 2 ** 20 / 1e6, 136 * 2 ** 20 / 1e6),
+            '[MEMLEDGER] phase=P7 chip1 trace_total=%.1fMB trace_used=%.1fMB trace_free=%.1fMB trace_largest_free=%.1fMB'
+            % (256 * 2 ** 20 / 1e6, 200 * 2 ** 20 / 1e6, 56 * 2 ** 20 / 1e6, 56 * 2 ** 20 / 1e6)])
+        self.assertTrue(all(len(line) <= memory_ledger.LINE_BUDGET for line in lines))
+        self.assertEqual([item['free'] for item in report['trace']], [136 * 2 ** 20, 56 * 2 ** 20])
+        self.assertEqual([item['free'] for item in reports[-1]['trace']], [136 * 2 ** 20, 56 * 2 ** 20], 'the report carries them too')
+        operations.trace_allocated[id(operations.devices[0])] = 130 * 2 ** 20
+        ledger.first_packed_round = None
+        ledger.phase('P12', point='first_packed_round')
+        self.assertTrue(any(line.startswith('[MEMLEDGER] phase=P12 point=first_packed_round chip0 trace_total=') and 'trace_free=%.1fMB' % (126 * 2 ** 20 / 1e6) in line
+                            for line in messages(lines)))
+        ledger.phase('P8', point='req=abc')
+        self.assertFalse([line for line in lines if line.startswith('[MEMLEDGER] phase=P8') and 'trace_' in line])
+
+    def test_without_a_trace_view_it_says_so_once_and_the_checks_are_unchanged(self):
+        with_view, without_view = TraceOperations(), FakeOperations()
+        plain, lines, reports = ledger_for(without_view)
+        plain.phase('P0')
+        report = plain.phase('P7')
+        self.assertEqual([line for line in lines if 'trace unavailable' in line and line.startswith('[MEMLEDGER] phase=P7')], [
+            line for line in lines if line.startswith('[MEMLEDGER] phase=P7 trace unavailable')])
+        self.assertEqual(len([line for line in lines if line.startswith('[MEMLEDGER] phase=P7 trace unavailable')]), 1)
+        self.assertIn('unavailable', report['trace'])
+        traced, traced_lines, _ = ledger_for(with_view)
+        traced.phase('P0')
+        traced_report = traced.phase('P7')
+        self.assertEqual(report['check'], traced_report['check'], 'the delta checks do not read the trace region')
+        self.assertEqual(report['residual'], traced_report['residual'])
+
+    def test_a_view_that_raises_is_logged_never_raised(self):
+        operations = TraceOperations()
+        ledger, lines, _ = ledger_for(operations)
+        ledger.phase('P0')
+        with patch.object(MemoryLedger, 'trace_reading', side_effect=RuntimeError('no view')):
+            ledger.phase('P7')
+        self.assertTrue(any(line.startswith('[MEMLEDGER] phase=P7 trace unavailable (RuntimeError: no view)') for line in lines))
+
+    def test_the_phases_are_the_documented_ones(self):
+        self.assertEqual(memory_ledger.TRACE_PHASES, ('P7', 'P12', 'P13'))
+        self.assertIn(memory_ledger.RESIDUAL_PHASE, memory_ledger.TRACE_PHASES, 'the headroom after the attach is the residual phase\'s')
+
+
 class ItemLargestBufferTests(unittest.TestCase):
     """Each phase's item line names the largest single buffer the walk found for it (the S2 split's
     LARGEST_BUFFER_BYTES, measured: serving_prefill_admission), and the JSON carries it per chip; read-only, from the

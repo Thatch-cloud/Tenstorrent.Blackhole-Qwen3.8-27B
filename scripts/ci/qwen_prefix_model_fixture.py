@@ -179,7 +179,7 @@ class FakeTTNN(object):
         for name in ('bfloat16', 'float32', 'bfloat8_b', 'uint32', 'int32', 'TILE_LAYOUT',
                      'ROW_MAJOR_LAYOUT', 'DRAM_MEMORY_CONFIG', 'L1_MEMORY_CONFIG', 'BufferType'):
             setattr(module, name, getattr(self, name))
-        for name in ('from_torch', 'as_tensor', 'to_torch', 'copy', 'copy_host_to_device_tensor',
+        for name in ('from_torch', 'as_tensor', 'to_torch', 'copy', 'clone', 'copy_host_to_device_tensor',
                      'deallocate', 'synchronize_device', 'execute_trace', 'ConcatMeshToTensor',
                      'ShardTensorToMesh', 'ReplicateTensorToMesh', 'get_device_tensors', 'get_memory_view'):
             setattr(module, name, getattr(self, name))
@@ -315,6 +315,22 @@ class FakeTTNN(object):
             self.log.append(('compile',) + key)
         self.log.append(key)
         dst.data.copy_(src.data + 1 if self.copy_corrupt else src.data)
+
+    def clone(self, tensor, dtype=None, memory_config=None, compute_kernel_config=None):
+        """ttnn.clone: a bit copy of a live device tensor into a new one (same dtype, layout, chips). clone_refuse makes it raise (the hand-off's fallback); clone_corrupt makes it write
+        wrong bytes (the hand-off's audit); the program it needs is recorded like copy's."""
+        if tensor is None or tensor.deallocated or not tensor.on_device:
+            raise RuntimeError('ttnn.clone needs a live device tensor')
+        if getattr(self, 'clone_refuse', False):
+            raise RuntimeError('ttnn.clone: refused')
+        key = ('clone', tensor.shape, tensor.dtype.name)
+        if key not in self.programs:
+            self.programs.add(key)
+            self.log.append(('compile',) + key)
+        self.log.append(key)
+        out = FakeTensor(tensor.data + 1 if getattr(self, 'clone_corrupt', False) else tensor.data.clone(), tensor.dtype, tensor.layout, True)
+        out.chips = tensor.chips
+        return out
 
     def copy_host_to_device_tensor(self, host, device_tensor, cq_id=0):
         self.log.append(('h2d', host.shape, host.dtype.name))
@@ -501,6 +517,7 @@ class ToyGDN(object):
         self._zero_conv0 = self._zero_conv_carry = self._zero_rec = None
         self._stable_state = False
         self.slots = {}
+        self.write_order = []
         self.reset_state()
         self._stable_state = True
 
@@ -521,7 +538,17 @@ class ToyGDN(object):
         self.fake.copy(self._zero_conv_carry, self.conv_carry)
 
     def write_slot(self, slot, rec, convs):
+        # The graft's write_slot consumes its sources (its _write_index deallocates them): a caller that hands it a tensor it still needs finds that tensor gone.
         self.slots[slot] = (rec.data.clone(), [c.data.clone() for c in convs])
+        # ...and the batched decode buffers hold the slot's rows afterwards, as the real _write_index leaves them (host view: chip c's rows start at c * B, a conv tap is [chips, B, D])
+        chips = self.rec_state.data.shape[0] // self.B
+        for chip in range(chips):
+            self.rec_state.data[chip * self.B + slot] = rec.data[chip].to(self.rec_state.data.dtype)
+        for tap, conv in zip(self.conv_states, convs):
+            tap.data[:, slot, :] = conv.data[:, 0, :].to(tap.data.dtype)
+        for tensor in [rec] + list(convs):
+            tensor.deallocated = True
+        self.write_order.append(slot)
 
 
 class Toy(object):

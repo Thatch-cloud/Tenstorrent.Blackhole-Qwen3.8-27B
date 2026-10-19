@@ -57,7 +57,8 @@ import make_ship4_profiles as ship4_twins  # noqa: E402
 import make_np1_profiles as np1_twins  # noqa: E402
 import make_s5_profiles as s5_twins  # noqa: E402
 import make_xe_profiles as xe_twins  # noqa: E402
-BEST262K = BEST262K + octo_twins.twin_names() + octo2_twins.twin_names() + octo3_twins.twin_names() + ship4_twins.twin_names() + xe_twins.twin_names() + np1_twins.twin_names() + s5_twins.twin_names()      # (and tp4/next-1's ship-5 candidate and its audited twins, test_s5_profiles; tp4/octo-2's lever twins, test_octo2_profiles; tp4/octo-3's, test_octo3_profiles; tp4/ship-4's, test_ship4_profiles; tp4/np1-fastlane's, test_np1_profiles; tp4/exact-end's, test_xe_profiles)
+import make_pf2_profiles as pf2_twins  # noqa: E402
+BEST262K = BEST262K + octo_twins.twin_names() + octo2_twins.twin_names() + octo3_twins.twin_names() + ship4_twins.twin_names() + pf2_twins.twin_names() + xe_twins.twin_names() + np1_twins.twin_names() + s5_twins.twin_names()      # (and tp4/next-1's ship-5 candidate and its audited twins, test_s5_profiles; tp4/octo-2's lever twins, test_octo2_profiles; tp4/octo-3's, test_octo3_profiles; tp4/ship-4's, test_ship4_profiles; tp4/np1-fastlane's, test_np1_profiles; tp4/exact-end's, test_xe_profiles; tp4/prefill-2's, test_pf2_profiles)
 # the W2 kill drill twin of the ship profile (test_w2_switch holds it as that parent plus the two kill switch names)
 import make_w2_kill_profiles as w2_kill_twins  # noqa: E402
 BEST262K = BEST262K + w2_kill_twins.twin_names()

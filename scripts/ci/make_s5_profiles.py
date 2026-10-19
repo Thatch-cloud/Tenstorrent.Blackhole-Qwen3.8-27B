@@ -4,14 +4,14 @@
     python3 scripts/ci/make_s5_profiles.py --check   exit 1 if the checked-in twin is not what its parents generate
 
 NEVER hand-merge this entry into the profiles file. Run make_fusion_profiles.py --write FIRST (it writes the ship-5 candidate, `-fx-traffic-s5`, from scripts/ci/fusion-wp/S5.json), then
-make_octo3_profiles.py and make_ship4_profiles.py (the audited twin of ship 4 is this twin's parent), make_np1_profiles.py and make_xe_profiles.py (this one is placed after the last), then this.
+make_octo3_profiles.py and make_ship4_profiles.py (the audited twin of ship 4 is this twin's parent), make_np1_profiles.py, make_xe_profiles.py and make_pf2_profiles.py (this one is placed after the last), then this.
 
 THE CANDIDATE is the traffic profile `-fx-traffic-s5` (docs/tp4-next1.md): the approved ship-4 profile plus the lone-user padded round (NP1), exact resume P0, the sliced host-tier restore, the decode verify
 sub-switch of the 13x10 grids and the owner-approved host RAM budget (a 48 GiB tier beside a 16 GiB checkpoint store), under ONE owner traffic waiver whose decision is PENDING. Its gate-only twins:
 
   -fx-s5-audit  THE AUDITED ATTACH ARM: the ship-4 audited twin (`-fx-s4-audit`: every audit of the shipped stack, the host tier with every instrument on, the verify sub-switch of the grids) plus every
                 difference of the candidate from ship 4 (the candidate's own env, read from the two profiles so that it cannot drift) plus the instruments of what the candidate adds
-                (QWEN_PREFIX_WINDOW_CARRY_AUDIT) plus the one lever it does NOT carry, W3 WC (QWEN_FAST_TP4_GDN_WC with its audit): the audited run is the lever's first, and a lever that is wrong
+                (QWEN_PREFIX_WINDOW_CARRY_AUDIT, QWEN_FAST_PREFILL_HANDOFF_AUDIT) plus the one lever it does NOT carry, W3 WC (QWEN_FAST_TP4_GDN_WC with its audit): the audited run is the lever's first, and a lever that is wrong
                 costs one audited attach, not a candidate. F1's audit (QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT) is taken out because gdn_wc refuses it beside WC (a layer WC serves never calls F1's
                 launch; WC's own audit holds those layers instead, and F1 stays the launch for a layer WC declines, the octo block's among them).
 
@@ -28,7 +28,7 @@ import json
 from pathlib import Path
 import sys
 
-import make_xe_profiles as xe
+import make_pf2_profiles as pf2
 import make_ship4_profiles as ship4
 
 PROFILES = Path(__file__).resolve().parent / 'qwen_c2_profiles.json'
@@ -41,8 +41,8 @@ AUDIT = NAMESPACE + 's5-audit'
 AUDIT_NOWC = NAMESPACE + 's5-audit-nowc'
 WAIVER_ENV = ship4.WAIVER_ENV
 WAIVER_FIELD = ship4.WAIVER_FIELD
-# What the audited twin adds that the candidate does not carry: the carry's audit and W3 WC with its audit.
-AUDIT_ADDS = {'QWEN_PREFIX_WINDOW_CARRY_AUDIT': '1', 'QWEN_FAST_TP4_GDN_WC': '1', 'QWEN_FAST_TP4_GDN_WC_AUDIT': '1'}
+# What the audited twin adds that the candidate does not carry: the carry's audit, the hand-off's audit (PF2-H is in the candidate; its audit is a gate's own) and W3 WC with its audit.
+AUDIT_ADDS = {'QWEN_PREFIX_WINDOW_CARRY_AUDIT': '1', 'QWEN_FAST_PREFILL_HANDOFF_AUDIT': '1', 'QWEN_FAST_TP4_GDN_WC': '1', 'QWEN_FAST_TP4_GDN_WC_AUDIT': '1'}
 # What the audited twin takes out: gdn_wc.enabled() refuses F1's audit beside WC.
 AUDIT_REMOVES = ('QWEN_FAST_TP4_CONV_GATES_SPREAD_AUDIT',)
 WC_FLAGS = ('QWEN_FAST_TP4_GDN_WC', 'QWEN_FAST_TP4_GDN_WC_AUDIT')
@@ -116,7 +116,7 @@ def parent_problems(profiles):
 
 
 def generate(data):
-    """data's profiles with the twin inserted right after the tp4/exact-end twins (every other entry unmoved); returns the new dict."""
+    """data's profiles with the twin inserted right after the tp4/prefill-2 twins (every other entry unmoved); returns the new dict."""
     profiles = data['profiles']
     problems = parent_problems(profiles)
     if problems:
@@ -140,9 +140,9 @@ def generate(data):
     nowc['gate_only'] = True
     generated = {AUDIT: audit, AUDIT_NOWC: nowc}
     remaining = [name for name in profiles if name not in generated]            # a previous generation is replaced below
-    anchors = [name for name in remaining if name in xe.twin_names()]
+    anchors = [name for name in remaining if name in pf2.twin_names()]
     if not anchors:
-        raise ValueError('the tp4/exact-end twins are not in the profiles file (make_xe_profiles.py --write first)')
+        raise ValueError('the tp4/prefill-2 twins are not in the profiles file (make_pf2_profiles.py --write first)')
     anchor = anchors[-1]
     result = {}
     for name in remaining:
