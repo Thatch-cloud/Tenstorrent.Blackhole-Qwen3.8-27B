@@ -1566,7 +1566,7 @@ class ParentTests(unittest.TestCase):
             self.skipTest('no git history for %s' % PARENT)
         before = result.stdout.decode('utf-8').splitlines()
         after = without_trace_census(without_levern(without_diag_trim(without_prefill_scratch(without_any_request(without_sticky(
-            without_solo_and_lanes(without_m3_blocks(without_request_warm(without_parked_engines(without_octo((HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines())))))))))))
+            without_solo_and_lanes(without_m3_blocks(without_request_warm(without_parked_engines(without_octo(without_admission_lean((HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines()))))))))))))
         changed = [line for line in difflib.unified_diff(before, after, lineterm='', n=0)
                    if line[:1] in '+-' and not line.startswith(('+++', '---'))]
         added = [line[1:].strip() for line in changed if line.startswith('+')]
@@ -2011,6 +2011,20 @@ def without_trace_census(lines):
     if sorted(value.strip() for value in found) != sorted(hooks):
         raise AssertionError('The trace_census hooks are not in serving_runtime.py exactly once each')
     return [value for value in lines if value.strip() not in hooks]
+
+
+def without_admission_lean(lines):
+    """serving_runtime.py less QWEN_FAST_ADMISSION_LEAN (tp4/sched-1), which landed after this parent: the two comment lines and the one extra condition on the
+    'dram after engine' line put back as the parent had them, the hunk asserted to be exactly that and found once."""
+    guarded = "if not memory_ledger.trim_enabled() and not (rebound and os.environ.get('QWEN_FAST_ADMISSION_LEAN') == '1'):"
+    stripped = [value.strip() for value in lines]
+    if stripped.count(guarded) != 1:
+        raise AssertionError('The admission-lean condition is not in serving_runtime.py exactly once')
+    at = stripped.index(guarded)
+    if not (stripped[at - 2].startswith('# QWEN_FAST_ADMISSION_LEAN: also off for a request rebound') and stripped[at - 1].startswith('# about 70 ms with every seat stopped')):
+        raise AssertionError('The admission-lean comment is not above its condition')
+    indent = len(lines[at]) - len(lines[at].lstrip())
+    return lines[:at - 2] + [' ' * indent + 'if not memory_ledger.trim_enabled():'] + lines[at + 1:]
 
 
 def without_diag_trim(lines):

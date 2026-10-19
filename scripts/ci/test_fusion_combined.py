@@ -378,7 +378,7 @@ class ParkedEngineBandTests(unittest.TestCase):
                 continue                    # the band is only judged for an arm that parks engines (the older S1 profiles never do)
             levers, audits = c2_smoke_check.fusion_arm_flags(profile['env'])
             band = parked_judge.engine_band(levers, audits)
-            twin = name.startswith(fusion.NAMESPACE) or name in fusion.twin_names() or '-w2-er-tierfx-' in name       # (the host KV tier's ship candidate and audit twin carry the fusion levers: test_prefix_tier_profiles)
+            twin = name.startswith(fusion.NAMESPACE) or name in fusion.twin_names() or '-w2-er-tierfx-' in name or '-w2-er-sch-' in name       # (the host KV tier's ship candidate and audit twin carry the fusion levers: test_prefix_tier_profiles; so do the tp4/sched-1 twins of the approved ship-4 profile: test_sched_profiles)
             with self.subTest(profile=name):
                 if not twin:
                     self.assertEqual((levers, audits, band), ([], [], parked_judge.ENGINE_GB))

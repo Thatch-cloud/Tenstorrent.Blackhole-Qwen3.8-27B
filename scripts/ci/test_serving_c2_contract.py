@@ -29,7 +29,8 @@ class _ParkedTwins(object):
                 # the engine-start upload twins of the ship profile (make_upload_profiles; test_upload_p0_profiles holds the list)
                 or '-ship-prefix-levern-w2-er-traffic-' in name
                 or '-ship-prefix-levern-w2-er-fx-' in name      # (and the op-fusion programme's twins of the ship profile: test_fusion_wp holds them)
-                or '-ship-prefix-levern-w2-er-tierfx-' in name)      # (and the host KV tier's ship candidate and its audit twin: test_prefix_tier_profiles holds them)
+                or '-ship-prefix-levern-w2-er-tierfx-' in name      # (and the host KV tier's ship candidate and its audit twin: test_prefix_tier_profiles holds them)
+                or '-ship-prefix-levern-w2-er-sch-' in name)      # (and the tp4/sched-1 twins of the approved ship-4 profile: test_sched_profiles holds them)
 
 
 PARKED_TWINS = _ParkedTwins()
