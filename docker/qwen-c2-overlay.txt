@@ -430,6 +430,10 @@ scripts/ci/octo_attn_bundle.py
 scripts/ci/gdn_conv_gates_spread.py
 scripts/ci/gdn_conv_gates_spread_reader.cpp
 scripts/ci/gdn_conv_gates_spread_writer.cpp
+# tp4/w3 (QWEN_FAST_TP4_GDN_WC, default off): gdn_device_loop_state_tp imports gdn_wc when the flag is set; the two kernels are its JIT sources.
+scripts/ci/gdn_wc.py
+scripts/ci/gdn_wc_reader.cpp
+scripts/ci/gdn_wc_writer.cpp
 # Traced publication K/V fusion head-count fix (tp4/next-3-scope): its TP4 sibling cache slices the per-chip KV head count.
 scripts/ci/dflash_traced_publish.py
 # Prompt-lookup drafting (tp4/lookup, QWEN_FAST_LOOKUP_DRAFT, default off): serving_request_factory imports it when the flag names a policy and

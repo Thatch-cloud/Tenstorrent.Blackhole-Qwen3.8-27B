@@ -53,6 +53,28 @@ def glue8_requested():
     return os.environ.get(GLUE8_FLAG, '0') != '0'
 
 
+WC_FLAG = 'QWEN_FAST_TP4_GDN_WC'                # gdn_wc.FLAG (a literal here so an unset flag imports nothing)
+WC_AUDIT_FLAG = 'QWEN_FAST_TP4_GDN_WC_AUDIT'
+
+
+def wc_requested():
+    """QWEN_FAST_TP4_GDN_WC (gdn_wc): whether this layer asks for the one-launch windows + conv + gates stage. With the flag unset or 0 (and its audit flag
+    too) nothing is imported and this is False; set, gdn_wc.enabled() validates it strictly and raises on a bad value or a missing prerequisite."""
+    if os.environ.get(WC_FLAG, '0') == '0' and os.environ.get(WC_AUDIT_FLAG, '0') == '0':
+        return False
+    import gdn_wc
+
+    return gdn_wc.enabled()
+
+
+class WcPiece(object):
+    """The shape of a per-user piece the V2 split launch did not make because WC makes the pieces' consumers' tensors from the block directly. The batched loop
+    validates a piece by its shape and nothing else reads it (the audits make real pieces); any other use fails loudly."""
+
+    def __init__(self, shape):
+        self.shape = tuple(shape)
+
+
 def _pinned_class():
     """The pinned class, whichever way this module was imported (tp_addresses.install rebinds the pinned module's own name to
     this class, so a module first imported after install must not take itself for its base)."""
@@ -197,7 +219,12 @@ class DeviceLoopState(_pinned_class()):
         order, the T1 notes and the launch are the pinned body's, statement for statement."""
         operations, layer = self.operations, self.gdn
         last = len(spans) - 1
-        pieces = self.split_pieces(projected, spans, owned)
+        wc = wc_requested()
+        if wc and not (tp4_vglue.audit_enabled() or verify_trace_t2.audit_enabled()):
+            # QWEN_FAST_TP4_GDN_WC: no split launch. Shape stand-ins keep the batched loop's validation; if WC declines the layer the real pieces are made below.
+            pieces = [WcPiece((1, PIECE_ROWS, projected.shape[-1])) for span in spans]
+        else:
+            pieces = self.split_pieces(projected, spans, owned)
         audit = None
         if tp4_vglue.audit_enabled():
             audit = self.hold_served_pieces(projected, spans, pieces)
@@ -226,7 +253,14 @@ class DeviceLoopState(_pinned_class()):
             verify_t1_note('direct_carry')
         if direct_last:
             verify_t1_note('last_carry')
-        results = self.run_users(projected, pieces, pending)
+        wc_stage = None
+        if wc:
+            wc_stage = self.wc_stage(projected, pending)
+            if wc_stage is None and isinstance(pieces[0], WcPiece):
+                # WC declined (one logged line): the V2 split and the V1 chain, as without the flag.
+                pieces = self.split_pieces(projected, spans, owned)
+                pending = [(piece, *rest) for piece, (stand_in, *rest) in zip(pieces, pending)]
+        results = self.run_users(projected, pieces, pending) if wc_stage is None else self.run_users(projected, pieces, pending, wc_stage)
         if len(results) != len(spans):
             raise AssertionError('Batched GDN returned a result per packed user')
         for result, (start, stop) in zip(results, spans):
@@ -244,13 +278,32 @@ class DeviceLoopState(_pinned_class()):
                 result['vglue_audit'] = entries_
         return results
 
-    def run_users(self, projected, pieces, pending):
+    def wc_stage(self, projected, pending):
+        """QWEN_FAST_TP4_GDN_WC: the one-launch windows + conv + gates stage for this layer (gdn_wc.stage), from the conv states the state moves left in `pending`;
+        a BlockStage carrying the sixteen windows, or None (one logged line; nothing made) when WC cannot take the layer. Under the audits `pending` holds the real
+        pieces and the stage builds the served per-user path from them."""
+        import gdn_wc
+
+        layer, operations = self.gdn, self.operations
+        audited = gdn_wc.audit_enabled() or verify_trace_t2.audit_enabled() or tp4_vglue.audit_enabled()
+        found = gdn_wc.stage(layer.mesh, projected, [list(user[2]) for user in pending], list(layer.tw['conv_taps']), layer.tw['dt_bias'],
+                             layer.tw['neg_exp_A'], operations, groups=[tuple(user) for user in pending] if audited else None)
+        if found is not None:
+            tp4_vglue.note('gdn_block_conv')
+            tp4_vglue.note('gdn_wc')
+        return found
+
+    def run_users(self, projected, pieces, pending, wc=None):
         """The per-user convolution and gates, then the one recurrence launch: the pinned call, plus (QWEN_FAST_TP4_GDN_BLOCK_CONV)
-        the block stage that makes the four users' conv, beta, g and z with one conv_gates launch."""
+        the block stage that makes the four users' conv, beta, g and z with one conv_gates launch. `wc` (QWEN_FAST_TP4_GDN_WC) is the stage the one-launch
+        windows + conv + gates already made: the loop then builds neither the T2 windows nor the block stage."""
         layer, operations = self.gdn, self.operations
         taps = list(layer.tw['conv_taps'])
         options, staged = {}, []
-        if tp4_vglue.enabled(tp4_vglue.GDN_BLOCK_CONV):
+        if wc is not None:
+            options['prebuilt'] = wc
+            staged.append(wc)
+        elif tp4_vglue.enabled(tp4_vglue.GDN_BLOCK_CONV):
             if verify_trace_t2.cut('windows'):
                 eight = self.eight_native_users(pending)
                 if eight:

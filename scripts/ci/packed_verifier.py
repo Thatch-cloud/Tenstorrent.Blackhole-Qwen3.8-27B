@@ -2052,6 +2052,12 @@ class PackedVerifierEngine:
                     import gdn_conv_gates_spread
 
                     gdn_conv_gates_spread.audit_round(self.operations, self.fixture.retained.records, audit_round_number)
+                if os.environ.get('QWEN_FAST_TP4_GDN_WC_AUDIT', '0') != '0':
+                    # QWEN_FAST_TP4_GDN_WC_AUDIT (gdn_wc): the one-launch windows + conv + gates stage's per-user outputs and sixteen advanced windows
+                    # against the served per-user path, every audited layer, every chip.
+                    import gdn_wc
+
+                    gdn_wc.audit_round(self.operations, self.fixture.retained.records, audit_round_number)
             # QWEN_FAST_TP4_RS_UNIT_MAJOR_AUDIT: this replay's unit-major reductions against the split's held beside them.
             tile_collective_tp.audit_round(self.operations, self.fixture, self.rounds + 1)
             mlp = mlp_audit()
