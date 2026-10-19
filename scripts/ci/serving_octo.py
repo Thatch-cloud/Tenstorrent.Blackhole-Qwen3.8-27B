@@ -355,7 +355,7 @@ def solo_packed_admission(m3, environ=None, *, log=None):
     if idle > capacity:
         problems.append('a lone user leaves %d idle segments of the 4-user block and a block holds %d (%s): the block refuses padded_min_users '
                         'below %d at construction%s' % (idle, capacity, IDLE_CAPACITY_NOTE, M3_USERS - capacity,
-                                                         '' if scratch else '; the KV scratch page (idle_scratch.py, two more idle targets) was not allocated in this process'))
+                                                         '' if scratch else ' (idle_scratch.py\'s KV scratch page, two more idle targets, was not allocated in this process)'))
     if not gate_run(environ):
         problems.append('%s is admitted only in a gate run of a gate-only four-card profile (QWEN_C2_GATE=1 and QWEN_C2_GATE_PROFILE=1)' % SOLO_PACKED_FLAG)
     if problems:

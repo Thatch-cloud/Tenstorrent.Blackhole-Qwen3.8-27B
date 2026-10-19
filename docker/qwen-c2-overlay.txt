@@ -129,6 +129,11 @@ scripts/ci/serving_solo_lane.py
 # (octo_markers, octo_judge, octo_compare and make_octo_profiles are the gate's tools on the rig host: not served.)
 scripts/ci/serving_octo.py
 
+# NP1 (QWEN_FAST_SOLO_PACKED, gate only; docs/tp4-np1-fastlane.md): the scratch KV page the lone-user padded round parks its third idle segment's K/V in. serving_c2_contract imports it at boot
+# when the flag is set (a PostImportHook on the model entry wraps the KV allocation), serving_cache_owner claims the page at the attach and serving_octo counts it in the admission (all lazy,
+# flag set only). Flag off, nothing imports it: every other module is what it was.
+scripts/ci/idle_scratch.py
+
 # QWEN_FAST_M3_REQUEST_WARM=1 or even (tp4/warm4 and the eight-seat profiles): serving_runtime lazy-imports request_width_warm and runs it
 # before the process's first trace capture - right after the prefill warm and before the one 64-row block's construction, or, at two
 # blocks, between their warm phase and their captures - so the request engine's rows 1/2/4 programs and state exist before any
