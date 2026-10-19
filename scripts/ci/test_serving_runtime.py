@@ -1,4 +1,4 @@
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 import copy
 from functools import partial
 from types import SimpleNamespace
@@ -22,6 +22,22 @@ from test_serving_fast_policy import FastPolicyTests
 SHAPES = {2: m1_shape(68), 4: m3_shape(68)}
 
 
+class Together:
+    """Several context managers as one (the attach test's with-statement is at the interpreter's limit of statically nested blocks)."""
+
+    def __init__(self, *managers):
+        self.managers = managers
+
+    def __enter__(self):
+        self.stack = ExitStack()
+        for manager in self.managers:
+            self.stack.enter_context(manager)
+        return self
+
+    def __exit__(self, *exception):
+        return self.stack.__exit__(*exception)
+
+
 class RuntimeAttachmentTests(unittest.TestCase):
     ATTACH_FAILED = ('[PINDIAG] attach failed with RuntimeError: attach failed; closing the attach scopes now (the '
                      'packed block if built, the draft weights, the admitted combined runtime from its shared-QK '
@@ -34,7 +50,7 @@ class RuntimeAttachmentTests(unittest.TestCase):
                  replay_group_rows=None, block_stream=STREAM, extra_env=None, refused=False, padded=None,
                  capture_position=None, block_extent=None, refused_in_attach=None, refused_after_blocks=None,
                  admission=None, pool_refused=None, blocks_refused=None, real_admission=(), pool_extra=None,
-                 m3_blocks=None, carries_in_place=True, phase_failure=None, parked=None, octo=None):
+                 m3_blocks=None, carries_in_place=True, phase_failure=None, parked=None, octo=None, solo_packed=None):
         # Octo-T8 (QWEN_FAST_OCTO): `octo`, a dict (the admission's record: mode, min_live), sets the flag and stands a recording fake in for
         # serving_octo.octo_admission; the attach then builds a THIRD block, octo_shape over pool slots 0..7, captured with the two M3 blocks
         # (every block a distinct fake object: the step refuses an octo block that is one of the M3 blocks).
@@ -67,6 +83,11 @@ class RuntimeAttachmentTests(unittest.TestCase):
                         if parked is not None else nullcontext())
         octo_patch = (patch('serving_octo.octo_admission', return_value=dict(rows=8, users=8, unqualified=[], **octo))
                       if octo is not None else nullcontext())
+        # NP1 (QWEN_FAST_SOLO_PACKED): `solo_packed`, a dict (the admission's record: min_users and, with the KV scratch page, scratch_pages), sets the flag and stands a fake in for
+        # serving_octo.solo_packed_admission; the M3 blocks then pad from min_users and take the scratch pages (the octo block never does).
+        solo_patch = (patch('serving_octo.solo_packed_admission', return_value=dict(solo_packed))
+                      if solo_packed is not None else nullcontext())
+        octo_patch = Together(octo_patch, solo_patch)      # (one context manager: the attach's with-statement is at the interpreter's limit of nested blocks)
         parked_built = ['parked_build'] if parked is not None else []
         parked_closed = ['parked_close'] if parked is not None else []
         # S2 (QWEN_FAST_EXTENT_REPLAY): the flag in the final environment is what the pool must be told and
@@ -199,6 +220,8 @@ class RuntimeAttachmentTests(unittest.TestCase):
             env['QWEN_FAST_M3_BLOCKS'] = str(m3_blocks)
         if octo_on:
             env['QWEN_FAST_OCTO'] = octo['mode']
+        if solo_packed is not None:
+            env['QWEN_FAST_SOLO_PACKED'] = '1'
         if parked is not None:
             env['QWEN_FAST_PARKED_ENGINES'] = '1'
         env.update(extra_env or {})
@@ -336,6 +359,9 @@ class RuntimeAttachmentTests(unittest.TestCase):
                             if padded is not None and not (octo_on and index == 2):
                                 # QWEN_FAST_PADDED_BLOCK: the one keyword it adds, only where admitted.
                                 expected_options['padded_min_users'] = padded
+                            if solo_packed is not None and solo_packed.get('scratch_pages') and not (octo_on and index == 2):
+                                # NP1: the scratch pages of the admission, the M3 blocks' alone.
+                                expected_options['idle_scratch_pages'] = solo_packed['scratch_pages']
                             if capture_position is not None:
                                 # S2 G3b's gate-only QWEN_FAST_PACKED_CAPTURE_POSITION: its one keyword.
                                 expected_options['capture_position'] = capture_position
@@ -852,6 +878,19 @@ class RuntimeAttachmentTests(unittest.TestCase):
             with self.subTest(extra_env=extra_env), self.assertRaisesRegex(ValueError, message):
                 self.exercise(packed=True, users=8, four_as_two=False, block_stream=block_stream, extra_env=extra_env,
                               refused=True)
+
+    def test_the_lone_user_flag_hands_its_scratch_pages_to_the_m3_blocks_alone_and_off_there_is_no_keyword(self):
+        # exercise() asserts every keyword of every block (padded_min_users, idle_scratch_pages) against what the admission's record says
+        record = dict(min_users=1, scratch_pages=(16500,))
+        self.exercise(**self.EXTENT, **self.M3X2, octo=self.OCTO, padded=1, solo_packed=record)
+        self.assertEqual([call.kwargs.get('idle_scratch_pages') for call in self.engine_calls], [(16500,), (16500,), None])
+        self.assertEqual([call.kwargs.get('padded_min_users') for call in self.engine_calls], [1, 1, 6], 'the octo block pads from its six live seats whatever the flag says')
+        # an admission without scratch pages (none was allocated, and the real admission refuses that) hands none
+        self.exercise(**self.EXTENT, **self.M3X2, padded=1, solo_packed=dict(min_users=1))
+        self.assertEqual([call.kwargs.get('idle_scratch_pages') for call in self.engine_calls], [None, None])
+        # flag off: the padded block as it was, no scratch keyword anywhere
+        self.exercise(**self.EXTENT, **self.M3X2, octo=self.OCTO, padded=2, extra_env={'QWEN_FAST_PADDED_BLOCK': '1'})
+        self.assertTrue(all('idle_scratch_pages' not in call.kwargs for call in self.engine_calls))
 
     def test_the_attach_is_refused_unless_both_blocks_report_carries_in_place(self):
         message = ('QWEN_FAST_M3_BLOCKS=2 needs every M3 block to read its carries in place (QWEN_FAST_VERIFY_T1 #3); '

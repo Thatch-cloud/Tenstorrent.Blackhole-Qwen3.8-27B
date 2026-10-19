@@ -1566,7 +1566,7 @@ class ParentTests(unittest.TestCase):
             self.skipTest('no git history for %s' % PARENT)
         before = result.stdout.decode('utf-8').splitlines()
         after = without_trace_census(without_levern(without_diag_trim(without_prefill_scratch(without_any_request(without_sticky(
-            without_solo_and_lanes(without_m3_blocks(without_request_warm(without_parked_engines(without_octo((HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines())))))))))))
+            without_solo_and_lanes(without_m3_blocks(without_request_warm(without_parked_engines(without_octo(without_idle_scratch((HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines()))))))))))))
         changed = [line for line in difflib.unified_diff(before, after, lineterm='', n=0)
                    if line[:1] in '+-' and not line.startswith(('+++', '---'))]
         added = [line[1:].strip() for line in changed if line.startswith('+')]
@@ -1607,6 +1607,12 @@ def replace_run(lines, run, replacement):
     if len(starts) != 1:
         raise AssertionError('%r is not in serving_runtime.py exactly once' % (run,))
     return lines[:starts[0]] + list(replacement) + lines[starts[0] + len(run):]
+
+
+def without_idle_scratch(lines):
+    """serving_runtime.py less NP1's one keyword (tp4/np1-fastlane, default off: QWEN_FAST_SOLO_PACKED=1 hands the scratch pages the lone-user padded round writes to the M3 blocks), which
+    landed after every parent this test compares with. Its admission lines sit inside the octo run without_octo already cuts. Found exactly once, so nothing else is hidden."""
+    return replace_run(lines, ("**({'idle_scratch_pages': idle_scratch_pages} if idle_scratch_pages and not is_octo else {}),",), [])
 
 
 def without_octo(lines):

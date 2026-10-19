@@ -126,9 +126,10 @@ class TwinTests(unittest.TestCase):
         combined |= {name for name in PROFILES if name.startswith((fusion.NAMESPACE + 'all-oneq', fusion.NAMESPACE + 'all-grid13'))}
         import make_octo3_profiles
 
+        import make_np1_profiles
         import make_ship4_profiles
 
-        combined |= set(make_octo3_profiles.twin_names()) | set(make_ship4_profiles.twin_names())                                                           # (tp4/octo-3: the octo twins of the combined arms carry the combined arm's switches)
+        combined |= set(make_octo3_profiles.twin_names()) | set(make_ship4_profiles.twin_names()) | set(make_np1_profiles.twin_names())                                                           # (tp4/octo-3: the octo twins of the combined arms carry the combined arm's switches)
         for name, profile in PROFILES.items():
             if name not in twins and name not in combined:
                 self.assertFalse([knob for knob in generator.KNOBS if knob in profile['env']], name)

@@ -1,0 +1,33 @@
+# The order of the tp4/np1-fastlane window (docs/tp4-np1-fastlane.md; scripts/ci/make_np1_jobs.py): the lone-user padded round (QWEN_FAST_SOLO_PACKED=1) on the approved ship-4 profile c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4 and its two gate-only twins (make_np1_profiles.py), the checkpoint production serves (ukisai/Swift-1.5-Qwen3.8-27b, revision b4c84d42903a), ONE image (tp4-np1-1, a placeholder: B0 builds it from the pushed tp4/np1-fastlane head WITH the K64j-OQ graft) and ONE window.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (the NEEDS lines skip what depended on it).
+# WHAT THIS DECIDES (the owner's, never the window's): whether a lone user (and a lone user of the other block) should decode on the padded 64-row block. Today a lone live user runs the 4-row per-request engine (83.9 ms a pass plus a 15.3 ms host gap, 3.70 tokens a round: ~37 tokens a second); two live users run the padded block (52.8 ms plus 19.6 ms, 13.56 tokens a round for the pair: ~94 a user). A1 is the exactness gate (every audit on, the lone user's rounds among them); C1 L1 C2 L2 time the arm against the production profile at one, two and four live seats with eight beside them. The expected gain at one seat is x2 to x3 and nothing at two or more; the expectation is the arithmetic above, not a measurement. Every result is UNQUALIFIED.
+# THE ONE NEW DEVICE FACT: the flag makes the KV cache tensors one block longer than vLLM's pool (a scratch page, 557,056 bytes a chip) and parks the third idle segment's K/V there. No program, trace or kernel is new; a block id past the pool in a page table is a value the K/V writers and the extent reader have never been given. A1 is the first card to give it to them, with the audits on.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z; nothing in this pack does either. B0 is a build and may run while production serves. No other window driver may be alive and no privileged builder container up.
+# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and each tag is pushed on THAT commit (the throwaway commit carries only .github/c2-serving-job.env). Push ONE tag at a time and wait for its run to finish; queued tags are cancelled. Never cancel a running card job.
+# P0. SWIFT IS ON THE CARD HOST AND ITS CONVERTED CACHE IS BUILT: python3 scripts/ci/qwen_c2_checkpoint.py check --hub <the hub directory> --repo ukisai/Swift-1.5-Qwen3.8-27b --revision b4c84d42903a8646b25857eb2827288d92ed85a4 exits 0, and the Swift window's W0 (or the production first boot) has built the keyed weight cache, so every serving job here logs "weight cache ...: found". This pack builds nothing of it.
+# P0. GRID: the four cards expose a 13x10 compute grid since the firmware unlock. Read it from the run, never assume 11x10: every pair runs on one grid.
+# ARC-ZERO A1 L2
+# ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO (minRunners and maxRunners 0, the normal values written down first, restored by the same patch with the old numbers) BEFORE A1 and restores them AFTER L2, i.e. around every audited boot (a model load under CI load has hit the platform's load timeout) and every timed job. B0, X0 and Z do not need the pause.
+# THE JOBS, in value order (cut the window at a block end): GATES: B0 X0 A1 (180 min); DECODE ABAB: C1 L1 C2 L2 (180 min); END: Z (10 min). B0 is the WINDOW build.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0 <- B0
+# NEEDS A1 <- X0
+# NEEDS C1 <- A1
+# NEEDS L1 <- C1
+# NEEDS C2 <- L1
+# NEEDS L2 <- C2
+# READ RULES (each also needs c2_smoke_check clean and no stall; the templates' own headers have the whole text):
+#   B0   'baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4 with a session cap of 8', the provenance report with no problem line, its K64j-OQ graft line, the image id.
+#   X0   four cards present and healthy, the fabric as measured, the 13x10 grid in the run, no other window driver alive; the Swift weight cache found.
+#   A1   (STOP) octo_judge.py clean under c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-s4-np1-audit (the solo rule: a padded round of a lone live user ran, none went to the per-request engines), the NP1 lines (scratch page allocated, admitted, two M3 blocks at max_idle=4), every audit line exact=True, no 'audit mismatch', no 'fell back', no 'kv shared', the memory ledger recorded. ANY failure is NO-GO and halts the window.
+#   C1 L1 C2 L2   np1_report.py (the all-live window of each test, both pairs, the floors) GO, octo_compare.py (every answer equal) and octo_judge.py on both arm logs. GO: a GAIN at np1_live1, no LOSS elsewhere, every text equal.
+# NO-GO for the lone-user round: any stall, any text difference against the control, any audit mismatch, any fallback line, a refusal at the attach (the cache not one block longer, a request block id past the pool), a lone-user round that never ran or an eligible one that went to the engines, a LOSS in a timed test. Adopting is the owner's decision: the flag is a gate instrument today and a ship profile needs an owner traffic waiver naming it (docs/tp4-np1-fastlane.md).
+# Time (estimate, minutes): B0 40, X0 20, A1 120, C1 45, L1 45, C2 45, L2 45, Z 10: 370 minutes (6 h 10 min) in all, 330 minutes of cards (X0 to Z).
+B0-build-window stop tp4-np1-1 40
+X0-status-rescan-reset stop tp4-np1-1 20
+A1-np1-audited-attach stop tp4-np1-1 120
+C1-control-a soft tp4-np1-1 45
+L1-np1-a soft tp4-np1-1 45
+C2-control-b soft tp4-np1-1 45
+L2-np1-b soft tp4-np1-1 45
+Z-reset soft tp4-np1-1 10

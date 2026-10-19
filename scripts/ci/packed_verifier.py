@@ -633,6 +633,8 @@ PADDED_SKIPPED_MARKER = '[PINDIAG] packed padded skipped'
 PADDED_REFUSED_MARKER = '[PINDIAG] packed padded refused'
 PADDED_PAGE0_MARKER = '[PINDIAG] packed padded page0'
 PADDED_IDLE_COMMIT_MARKER = '[PINDIAG] packed padded idle commit'
+# NP1 (QWEN_FAST_SOLO_PACKED, idle_scratch.py): one reserved scratch page is two more idle targets (its two 32-row tile rows), the same as page 0 is two.
+IDLE_SEGMENTS_PER_PAGE = 2
 
 
 def padded_block_min_users(environ=None):
@@ -810,11 +812,14 @@ def same_bits(expected, actual):
         return False
 
 
-def page_zero_index(table, start, rows, *, extent=False):
+def page_zero_index(table, start, rows, *, extent=False, also=()):
     """The first index inside [0, (start + rows + 63) // 64) at which this (1, page_width) page
     table holds physical page 0, or None: every page a user at `start` reads or writes in a
     `rows`-row round (padded_probe.used_pages). Raises ValueError when the table cannot map that
     range, and whatever indexing raises for a table that is not one.
+
+    NP1 (`also`, the block's idle_scratch_pages; empty, the default, is the rule as it was): a
+    scratch page an idle segment writes is as forbidden in a live table as page 0 is.
 
     S2 (`extent=True`, design 2.6): also every page the extent SDPA reads, [0, E // 64) with
     E = (start // 256 + 1) * 256 - a page-0 key there sits at a masked position, and a NaN one would
@@ -829,7 +834,7 @@ def page_zero_index(table, start, rows, *, extent=False):
     if len(values) < used:
         raise ValueError('a %d-entry page table cannot map positions [0, %d)' % (len(values), limit))
     for index, value in enumerate(values):
-        if int(value) == 0:
+        if int(value) == 0 or (also and int(value) in also):
             return index
     return None
 
@@ -841,7 +846,7 @@ class PackedVerifierEngine:
 
     def __init__(self, operations, model, helpers, sampler, *, pool, shared_weights, shape, feature_taps,
                  capture_position=None, pool_slots=None, padded_min_users=None, collectives=None,
-                 defer_capture=False):
+                 defer_capture=False, idle_scratch_pages=()):
         import torch
 
         # QWEN_FAST_M3_BLOCKS=2 (serving_runtime.complete_blocks_two_phase): True builds only the first part of the
@@ -861,12 +866,20 @@ class PackedVerifierEngine:
         # QWEN_FAST_PADDED_BLOCK (variable-user rounds M2): the fewest live users a round of this
         # block may serve, the rest of its segments idle; None, the default, serves exactly
         # `users`, as always. Passed by serving_runtime only where it admits the flag. At most
-        # MAX_IDLE_SEGMENTS idle segments fit page 0, and at least one user must be live.
+        # `idle_capacity` idle segments fit the pages that take their K/V (page 0's two tile rows,
+        # MAX_IDLE_SEGMENTS, and two more for every idle_scratch_pages page: NP1), and at least one
+        # user must be live.
+        scratch = tuple(idle_scratch_pages or ())
+        if len(set(scratch)) != len(scratch) or any(type(page) is not int or page < 1 for page in scratch):
+            raise ValueError('idle_scratch_pages are distinct physical pages, each 1 or more (page 0 is vLLM\'s null block); got %r'
+                             % (idle_scratch_pages,))
+        self.idle_scratch_pages = scratch
+        self.idle_capacity = self.MAX_IDLE_SEGMENTS + IDLE_SEGMENTS_PER_PAGE * len(scratch)
         if padded_min_users is not None and (
                 type(padded_min_users) is not int
-                or not max(1, shape.users - self.MAX_IDLE_SEGMENTS) <= padded_min_users < shape.users):
+                or not max(1, shape.users - self.idle_capacity) <= padded_min_users < shape.users):
             raise ValueError('padded_min_users must be an integer in [%d, %d) for a %d-user block; got %r'
-                             % (max(1, shape.users - self.MAX_IDLE_SEGMENTS), shape.users, shape.users,
+                             % (max(1, shape.users - self.idle_capacity), shape.users, shape.users,
                                 padded_min_users))
         self.padded_min_users = padded_min_users
         self.padded_rounds = 0
@@ -1273,8 +1286,9 @@ class PackedVerifierEngine:
         self.phase = 'idle'
         if self.padded_min_users is not None:
             diagnostic('%s min_users=%d users=%d max_idle=%d carries_in_place=%d'
-                       % (PADDED_ADMITTED_MARKER, self.padded_min_users, self.users, self.MAX_IDLE_SEGMENTS,
-                          int(self.carries_in_place)))
+                       % (PADDED_ADMITTED_MARKER, self.padded_min_users, self.users, self.idle_capacity,
+                          int(self.carries_in_place))
+                       + ('' if not self.idle_scratch_pages else ' scratch_pages=%s' % ','.join(str(page) for page in self.idle_scratch_pages)))
         if self.round_fences:
             # Only this block's retained records: a sequential engine's never take the diet.
             self.fixture.retained.use_round_fences()
@@ -1808,14 +1822,20 @@ class PackedVerifierEngine:
                 if user is None and getattr(self.segment_slots[segment], 'lent', True):
                     return ('idle segment %d: pool slot %d is lent and the verify trace moves carries '
                             '(QWEN_FAST_VERIFY_T1 #3 not in every layer)' % (segment, self.pool_slots[segment]))
+        scratch = getattr(self, 'idle_scratch_pages', ())
         for segment in live:
             tokens, start, table = users[segment]
             try:
                 index = page_zero_index(table, start, self.rows_per_user,
-                                        **({'extent': True} if getattr(self, 'extent', False) else {}))
+                                        **({'extent': True} if getattr(self, 'extent', False) else {}),
+                                        **({'also': scratch} if scratch else {}))
             except (IndexError, TypeError, ValueError, AttributeError) as error:
                 return 'page0 unmapped: segment %d position %s: %s' % (segment, start, error)
             if index is not None:
+                if scratch and int(table[0][index]) != 0:
+                    # NP1: a scratch page the idle segments write (the reason starts 'page0' too: its callers log both under one marker).
+                    return 'page0 scratch page %d in a live table: segment %d position %d page_index %d' % (
+                        int(table[0][index]), segment, int(start), index)
                 return 'page0 in a live table: segment %d position %d page_index %d' % (segment, int(start), index)
         return None
 
@@ -1835,6 +1855,12 @@ class PackedVerifierEngine:
         only; what stage_packed takes in an idle segment's place. Refuses live segments that
         are not distinct segments of this block, and a third idle segment.
 
+        NP1 (idle_scratch_pages, QWEN_FAST_SOLO_PACKED; empty, the default, is all of the above): the
+        idle segments after the second go to a scratch page, two to a page: idle j >= 2 writes tile
+        row j % 2 of scratch page (j - 2) // 2 through a table that holds that page in every entry
+        (the extent reader reads pages [0, E // 64) of it), so a segment still never shares a
+        (page, tile row) with another. The refusal is at idle_capacity idle segments.
+
         S2's extent block: F = 0, so an idle segment is an ordinary user at start 0 or 32 in family
         E = 256 on the zero table (design 1.4 #1) - the same page-0 tile row as F = C - 256, since C
         is a multiple of 64 - and its SDPA reads one 256-key chunk instead of the whole table."""
@@ -1845,12 +1871,20 @@ class PackedVerifierEngine:
                                               for segment in live):
             raise ValueError('Live segments must be distinct segments of this %d-user block: %r' % (self.users, live))
         idle = [segment for segment in range(self.users) if segment not in live]
-        if len(idle) > self.MAX_IDLE_SEGMENTS:
-            raise ValueError('At most %d idle segments: page 0 holds two 32-row tile rows, so idle segments %s '
-                             'would share one' % (self.MAX_IDLE_SEGMENTS, idle))
+        scratch = getattr(self, 'idle_scratch_pages', ())
+        capacity = self.MAX_IDLE_SEGMENTS + IDLE_SEGMENTS_PER_PAGE * len(scratch)
+        if len(idle) > capacity:
+            raise ValueError('At most %d idle segments: page 0 holds two 32-row tile rows%s, so idle segments %s '
+                             'would share one' % (capacity, '' if not scratch else ' and each scratch page two more', idle))
         first = 0 if getattr(self, 'extent', False) else self.replay_capacity - 256
-        return {segment: ((1,) * self.rows_per_user, first + 32 * (index % 2),
-                          torch.zeros((1, self.shape.page_width), dtype=torch.int32))
+
+        def table(index):
+            sink = index // IDLE_SEGMENTS_PER_PAGE
+            if sink == 0:
+                return torch.zeros((1, self.shape.page_width), dtype=torch.int32)
+            return torch.full((1, self.shape.page_width), scratch[sink - 1], dtype=torch.int32)
+
+        return {segment: ((1,) * self.rows_per_user, first + 32 * (index % 2), table(index))
                 for index, segment in enumerate(idle)}
 
     def verify(self, entries):
@@ -2317,8 +2351,9 @@ class PackedVerifierEngine:
                            tables=[[list(address) for address in tables] for tables in self.replay_addresses]),
             setup_ms=getattr(self, 'setup_ms', None), rounds=self.rounds,
             **({} if self.padded_min_users is None else dict(padded=dict(
-                min_users=self.padded_min_users, max_idle=self.MAX_IDLE_SEGMENTS,
-                carries_in_place=self.carries_in_place, rounds=self.padded_rounds))),
+                min_users=self.padded_min_users, max_idle=self.idle_capacity,
+                carries_in_place=self.carries_in_place, rounds=self.padded_rounds,
+                **({} if not self.idle_scratch_pages else dict(scratch_pages=list(self.idle_scratch_pages)))))),
             **({} if self.prestaged is None else dict(prestage=dict(self.prestaged.counts, audit=self.prestaged.audit))),
             **({} if not self.round_fences else dict(round_fences=True)),
             **({} if self.fused is None else dict(fused_commit=self.fused.describe())),

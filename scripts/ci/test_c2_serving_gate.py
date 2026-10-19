@@ -140,7 +140,8 @@ PARKED_TWINS = PARKED_TWINS | frozenset(_fusion_twins.twin_names()) | frozenset(
 import make_octo3_profiles as _octo3_twins  # noqa: E402
 PARKED_TWINS = PARKED_TWINS | frozenset(_octo3_twins.twin_names())     # (and tp4/octo-3's octo twins of the fused stack, test_octo3_profiles)
 import make_ship4_profiles as _ship4_twins  # noqa: E402
-PARKED_TWINS = PARKED_TWINS | frozenset(_ship4_twins.twin_names())     # (and tp4/ship-4's twins of the combined candidate, test_ship4_profiles)
+import make_np1_profiles as _np1_twins  # noqa: E402
+PARKED_TWINS = PARKED_TWINS | frozenset(_ship4_twins.twin_names()) | frozenset(_np1_twins.twin_names())     # (and tp4/ship-4's twins of the combined candidate, test_ship4_profiles; tp4/np1-fastlane's, test_np1_profiles)
 import make_upload_profiles as _upload_twins  # noqa: E402
 PARKED_TWINS = PARKED_TWINS | frozenset(_upload_twins.twin_names())     # (and the engine-start upload twins, test_upload_p0_profiles)
 

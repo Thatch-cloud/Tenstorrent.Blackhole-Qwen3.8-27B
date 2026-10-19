@@ -1203,6 +1203,9 @@ class ProfileTests(unittest.TestCase):
         import make_ship4_profiles as twins_ship4
 
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_ship4.twin_names()})
+        import make_np1_profiles as twins_np1      # tp4/np1-fastlane: the ship candidate / its audited twin plus one flag, so the same round-host flags (test_np1_profiles)
+
+        combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_np1.twin_names()})
         for name, profile in data['profiles'].items():
             if name in self.ADDED:
                 continue

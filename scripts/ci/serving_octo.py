@@ -25,7 +25,8 @@ FLAGS (default off; strict values):
     QWEN_FAST_OCTO_MIN_LIVE   the fewest live seats a round needs for octo (default 6 = the eight segments less the two idle ones page 0 can hold).
                               5 is the design's number and is refused until a third idle target exists (IDLE below).
     QWEN_FAST_SOLO_PACKED     0 | 1. A lone live user (and two or three in one block) takes the padded 64-row T16 block instead of the 1/2/4-row
-                              per-request engines.
+                              per-request engines. Engages only with the KV scratch page NP1 adds (idle_scratch.py, docs/tp4-np1-fastlane.md): the lone user's
+                              three idle segments need a third (page, tile row) target, and the model's KV allocation is extended by one block for it.
 Lines (server log): octo_markers.py.
 
 WHAT IS BUILT AND WHAT IS NOT QUALIFIED. Every DEVICE_PIECES entry is built on the host and tested on CPU (the flag no longer refuses by name): the attach builds the
@@ -182,16 +183,28 @@ def solo_packed_requested(environ=None):
     return value == '1'
 
 
-def idle_capacity():
-    """The most idle segments one packed block can hold: PackedVerifierEngine.MAX_IDLE_SEGMENTS (2: page 0's two tile rows)."""
+def idle_capacity(scratch_pages=0):
+    """The most idle segments one packed block can hold: PackedVerifierEngine.MAX_IDLE_SEGMENTS (2: page 0's two tile rows), and - NP1 - two more for each of `scratch_pages`
+    scratch pages (idle_scratch.py; 0, the default, is the rule as it was)."""
     try:
+        import packed_verifier
         from packed_verifier import PackedVerifierEngine
 
         value = getattr(PackedVerifierEngine, 'MAX_IDLE_SEGMENTS', None)
+        per_page = getattr(packed_verifier, 'IDLE_SEGMENTS_PER_PAGE', None)
     except ImportError:
-        value = None
+        value = per_page = None
     # (a class a test replaced reports no integer: the documented two)
-    return value if type(value) is int else 2
+    return (value if type(value) is int else 2) + (per_page if type(per_page) is int else 2) * scratch_pages
+
+
+def scratch_pages():
+    """The KV scratch block ids this process's allocation recorded (idle_scratch.reserved), () when it recorded none or the module cannot be read."""
+    try:
+        import idle_scratch
+    except ImportError:
+        return ()
+    return idle_scratch.reserved()
 
 
 def gdn_batch_users():
@@ -316,8 +329,9 @@ def solo_packed_admission(m3, environ=None, *, log=None):
     """None while QWEN_FAST_SOLO_PACKED is off. Else the record (min_users 1: the padded block is built to serve a lone live user), or ValueError naming every reason.
 
     A lone user in the 4-user M3 block leaves THREE idle segments. Page 0 holds two (PackedVerifierEngine.MAX_IDLE_SEGMENTS), and the block refuses a
-    padded_min_users below users - 2 at construction. So the lone user is refused until a third idle target exists (the same limit octo's 5-live
-    round meets, IDLE_CAPACITY_NOTE); two or three live users in a block are the padded rounds QWEN_FAST_PADDED_BLOCK=1 already serves, which this flag does not need."""
+    padded_min_users below users - capacity at construction. So the lone user is refused until a third idle target exists (the same limit octo's 5-live
+    round meets, IDLE_CAPACITY_NOTE): NP1's scratch page (idle_scratch.py: one KV block more than vLLM's pool, recorded by the allocation in this process) is two
+    more targets, and with it the capacity is four. Two or three live users in a block are the padded rounds QWEN_FAST_PADDED_BLOCK=1 already serves, which this flag does not need."""
     environ = os.environ if environ is None else environ
     if not solo_packed_requested(environ):
         return None
@@ -336,16 +350,21 @@ def solo_packed_admission(m3, environ=None, *, log=None):
     if environ.get('QWEN_FAST_SOLO_LANE', '0') not in ('0', ''):
         problems.append('QWEN_FAST_SOLO_LANE=%s: the D0 one-user block and the padded lone round are two answers to one question' % environ.get('QWEN_FAST_SOLO_LANE'))
     idle = M3_USERS - 1
-    capacity = idle_capacity()
+    scratch = scratch_pages()
+    capacity = idle_capacity(len(scratch))
     if idle > capacity:
         problems.append('a lone user leaves %d idle segments of the 4-user block and a block holds %d (%s): the block refuses padded_min_users '
-                        'below %d at construction' % (idle, capacity, IDLE_CAPACITY_NOTE, M3_USERS - capacity))
+                        'below %d at construction%s' % (idle, capacity, IDLE_CAPACITY_NOTE, M3_USERS - capacity,
+                                                         '' if scratch else ' (idle_scratch.py\'s KV scratch page, two more idle targets, was not allocated in this process)'))
     if not gate_run(environ):
         problems.append('%s is admitted only in a gate run of a gate-only four-card profile (QWEN_C2_GATE=1 and QWEN_C2_GATE_PROFILE=1)' % SOLO_PACKED_FLAG)
     if problems:
         for problem in problems:
             log('{}: {}', SOLO_PACKED_MARKER + ' refused', problem)
         raise ValueError('%s=1 is refused: %s' % (SOLO_PACKED_FLAG, '; '.join(problems)))
+    if scratch:
+        log('{} admitted min_users=1 scratch_pages={} (gate only)', SOLO_PACKED_MARKER, ','.join(str(page) for page in scratch))
+        return dict(min_users=1, scratch_pages=scratch)
     log('{} admitted min_users=1 (gate only)', SOLO_PACKED_MARKER)
     return dict(min_users=1)
 

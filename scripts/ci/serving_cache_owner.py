@@ -1,5 +1,7 @@
 """Verify that serving and captured target execution share the same physical KV."""
 
+import os
+
 from gdn_multitoken_conv import addresses
 import tp_shapes
 
@@ -12,6 +14,15 @@ class ServingCacheOwner:
             raise ValueError('One TP%d target with native eight-slot GDN required' % tp_shapes.chip_count())
         self.bindings = self.inspect()
         self.physical_pages = self.bindings[0][1][0]
+        # NP1 (QWEN_FAST_SOLO_PACKED=1, idle_scratch.py; default off, and then nothing is imported): the cache holds vLLM's pool plus the scratch blocks the lone-user padded round
+        # parks its idle segments' K/V in. `physical_pages` stays the POOL (the ids a request's block table may name, which the bridge factory and the page binding bound-check), and
+        # `scratch_pages` the blocks past it. A cache that is not exactly that fails the attach here.
+        self.scratch_pages = ()
+        if os.environ.get('QWEN_FAST_SOLO_PACKED', '0') != '0':
+            import idle_scratch
+
+            self.scratch_pages = idle_scratch.claim(self.physical_pages)
+            self.physical_pages = self.scratch_pages[0]
 
     def inspect(self):
         caches = self.model._paged_kv_caches
