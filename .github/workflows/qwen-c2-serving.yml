@@ -453,6 +453,7 @@ jobs:
             ccl-sweep-p8192) script=tp4_ccl_sweep_probe.py; report=ccl-sweep.json; probe_args="--payload 8192 --skip-probe-only --no-exotic" ;;
             ccl-sweep-quick) script=tp4_ccl_sweep_probe.py; report=ccl-sweep.json; probe_args="--quick --skip-probe-only" ;;
             split) script=tp4_split_probe.py; report=split-probe.json ;;
+            split-attribute) script=tp4_split_probe.py; report=split-probe.json; probe_args="--attribute --profile c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4" ;;
             *) echo "unknown fabric probe: $PROBE" >&2; exit 1 ;;
           esac
           results="$RUNNER_TEMP/c2-results/fabric"
@@ -479,7 +480,7 @@ jobs:
             kvmount=(-v /home/thatch/opgraft-KVR:/opt/qwen-c2/kvr-mount:ro -e QWEN_KVREAD_DIR=/opt/qwen-c2/kvr-mount)
           fi
           # split builds the image's own model from its first few real layers (docs/tp4-exact-resume.md 5.3): the hub the prefix step mounts, read-only here.
-          if [ "${PROBE:-fabric}" = split ]; then
+          if [ "${PROBE:-fabric}" = split ] || [ "${PROBE:-fabric}" = split-attribute ]; then
             kvmount+=(-v "${C2_HUB_DIR:-/home/thatch/hf-cache/hub}:/models:ro" -e HF_HOME=/models -e HF_HUB_CACHE=/models -e HF_HUB_OFFLINE=1)
           fi
           if [ -n "$TT_GRID" ]; then echo "compute-grid clamp: TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=$TT_GRID"; fi
@@ -931,6 +932,8 @@ jobs:
           PREFIX_BASELINE: ${{ steps.job.outputs.prefix_baseline }}
           PREFIX_AGENTS: ${{ steps.job.outputs.prefix_agents }}
           PREFIX_KVREAD_MOUNT: ${{ steps.job.outputs.prefix_kvread_mount }}
+          MODEL_REPO: ${{ steps.job.outputs.model_repo }}
+          MODEL_REVISION: ${{ steps.job.outputs.model_revision }}
           BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}
           CARDS: ${{ steps.job.outputs.cards }}
           TT_GRID: ${{ steps.job.outputs.tt_grid }}
@@ -1000,6 +1003,7 @@ jobs:
             --baseline "$PREFIX_BASELINE" --agents "$PREFIX_AGENTS" --budget-seconds "$budget" ${box_left:+--box-seconds "$box_left"} \
             ${PREFIX_KVREAD_MOUNT:+--kvread-mount /home/thatch/opgraft-KVR-s0808fix} \
             ${TT_GRID:+--tt-grid "$TT_GRID"} \
+            ${MODEL_REPO:+--model-repo "$MODEL_REPO" --model-revision "$MODEL_REVISION"} \
             --results "$results" --cards "$CARDS" 2>&1 | tee "$RUNNER_TEMP/c2-results/prefix.log" || status=$?
           # Read the launched argv (memory read-the-launched-argv) and the graft's install line, per arm.
           for log in "$results"/*/server.log; do

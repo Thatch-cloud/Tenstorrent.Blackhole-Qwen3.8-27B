@@ -555,6 +555,16 @@ class JobKeyTests(unittest.TestCase):
         taulab = self.read(C2_MODEL_REPO=SWIFT['repo'], C2_MODEL_REVISION=SWIFT['revision'], C2_ACTIONS='reset taulab', C2_SMOKE_TESTS='')
         self.assertEqual(taulab['model_repo'], SWIFT['repo'])
 
+    def test_a_prefix_gate_carries_the_pair(self):
+        """tp4/exact-end: the prefix gate forwards the pair into every arm's container (c2_prefix_gate.py --model-repo/--model-revision) and reads each arm's log for it."""
+        outputs = self.read(C2_MODEL_REPO=SWIFT['repo'], C2_MODEL_REVISION=SWIFT['revision'], C2_ACTIONS='reset prefix', C2_PREFIX_PLAN='tier-concurrent',
+                            C2_PREFIX_PROFILE=self.PROFILE, C2_PREFIX_BASELINE='none')
+        self.assertEqual((outputs['model_repo'], outputs['model_revision'], outputs['model_served']), (SWIFT['repo'], SWIFT['revision'], 'ukisai/Swift-1.5-Qwen3.8-27b'))
+        for label, values in (('a pair job', dict(C2_CARDS='pair')), ('a gate beside it', dict(C2_ACTIONS='reset gate prefix'))):
+            with self.subTest(label), self.assertRaises(job.JobError):
+                self.read(C2_MODEL_REPO=SWIFT['repo'], C2_MODEL_REVISION=SWIFT['revision'], C2_PREFIX_PLAN='tier-concurrent', C2_PREFIX_PROFILE=self.PROFILE,
+                          C2_PREFIX_BASELINE='none', **dict({'C2_ACTIONS': 'reset prefix'}, **values))
+
     def test_every_misuse_is_refused(self):
         pair = dict(C2_MODEL_REPO=SWIFT['repo'], C2_MODEL_REVISION=SWIFT['revision'])
         for label, values in (('one alone', dict(C2_MODEL_REPO=SWIFT['repo'])), ('the other alone', dict(C2_MODEL_REVISION=SWIFT['revision'])),
@@ -562,7 +572,6 @@ class JobKeyTests(unittest.TestCase):
                               ('the base', dict(C2_MODEL_REPO=BASE['repo'], C2_MODEL_REVISION=BASE['revision'])),
                               ('a pair job', dict(pair, C2_CARDS='pair', C2_PROFILE='general')),
                               ('a gate', dict(pair, C2_ACTIONS='reset gate')),
-                              ('a prefix gate', dict(pair, C2_ACTIONS='reset prefix', C2_PREFIX_PLAN='tier-concurrent', C2_PREFIX_PROFILE=self.PROFILE, C2_PREFIX_BASELINE='none')),
                               ('a replay', dict(pair, C2_ACTIONS='reset replay', C2_PLATFORM_IMAGE='local:thin-layer', C2_REPLAY_PROFILE=self.PROFILE)),
                               ('a build', dict(pair, C2_ACTIONS='build')),
                               ('nothing to serve', dict(pair, C2_ACTIONS='status reset'))):

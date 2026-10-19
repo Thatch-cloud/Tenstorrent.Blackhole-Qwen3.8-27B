@@ -262,9 +262,12 @@ class PrefillWindowCapture:
         if os.environ.get(ALIGNED_FLAG, '0') != '0':
             import tap_window_aligned
 
-            # Never with a carried window: the aligned join reads the pieces of THIS capture's chunks, and the carried rows are a part it does not know.
-            self.aligned = tap_window_aligned.enabled() and checks is None and carry is None
+            self.aligned = tap_window_aligned.enabled() and checks is None
             self.aligned_audit = self.aligned and tap_window_aligned.audit_enabled()
+            if self.aligned and carry is not None:
+                # Exact resume P0 beside the tile-aligned window (the ship-4 profile has both): the carried rows are one more aligned part, led by
+                # the padding that makes the upload a whole number of tiles (prefix_window_carry.Carried.align), so a carried turn compiles nothing.
+                carry.align()
         self.cursor = self.start
         self.started = self.active = self.complete = self.closed = False
         # How many engine steps this prompt's chunks arrived across. One for an
@@ -587,6 +590,9 @@ class PrefillWindowCapture:
 
         operations, window = self.operations, self.window
         pieces = [(chunk['chunk_start'], chunk['valid_rows']) for chunk in self.chunks if chunk['retained_rows']]
+        if self.carried is not None:
+            # The carried part is the first part: absolute rows [begin, q), begin on a tile boundary (the window start less its padding).
+            pieces = [(self.carried.begin, self.carried.end - self.carried.begin)] + pieces
         output, states = [], set()
         for index in range(len(self.taps)):
             values = [part[index] for part in parts]

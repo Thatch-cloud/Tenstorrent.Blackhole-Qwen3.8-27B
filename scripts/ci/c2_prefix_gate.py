@@ -1917,8 +1917,21 @@ def exact_resume_findings(arm, scanned, records, pairs):
     return problems, missing, lines
 
 
-def judge_arm(arm, driver, scanned, stats, error, log_text=None):
-    """One arm's verdict dict (the plan's cross-arm checks come after, in judge_plan)."""
+def checkpoint_findings(model, log_text):
+    """([problem], [line]) of one arm's container log against the checkpoint pair the job asked for (C2_MODEL_REPO / C2_MODEL_REVISION): the contract's checkpoint line
+    with the keyed weight cache, the worker's "checkpoint bound" line, and no line for any other selection (qwen_c2_checkpoint.container_log_problems). An arm that ran
+    the base under a Swift label is the failure this exists for: the pair has to cross into the container, and only the log can say it did."""
+    import qwen_c2_checkpoint
+
+    found = qwen_c2_checkpoint.container_log_problems(log_text or '', tuple(model))
+    return (['checkpoint: %s' % item for item in found],
+            ['checkpoint %s@%s: %s' % (model[0], model[1][:12], 'read' if not found else 'NOT READ')])
+
+
+def judge_arm(arm, driver, scanned, stats, error, log_text=None, model=None):
+    """One arm's verdict dict (the plan's cross-arm checks come after, in judge_plan). `model` ((repo, revision), C2_MODEL_REPO / C2_MODEL_REVISION): the
+    arm's container log must carry the contract's checkpoint line with the keyed weight cache and the worker's "checkpoint bound" line, and no line for any
+    other selection (qwen_c2_checkpoint.container_log_problems); None, nothing is read."""
     records = driver.records
     index = by_tag(records)
     for pair in driver.pairs:
@@ -2031,6 +2044,10 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None):
         if continued and not restored:
             missing.append('no continuation restored Q > 0 (%d served, every one cold): the timing measures no reuse'
                            % len(continued))
+    if model is not None:
+        more_problems, more_lines = checkpoint_findings(model, log_text)
+        problems += more_problems
+        lines += more_lines
     diverged, unstable, not_comparable, rerun = pair_problems(driver.pairs)
     problems += diverged
     summary = judge.pair_summary(driver.pairs)
@@ -2171,6 +2188,7 @@ class Runner(object):
         self.corpus = corpus
         self.seed, self.agents, self.turns = seed, agents, turns
         self.tt_grid = None                 # C2_TT_GRID: the compute-grid clamp every arm's container carries (main sets it after construction)
+        self.model = None                   # C2_MODEL_REPO / C2_MODEL_REVISION: the (repo, revision) every arm's container serves; None is the base
         self.infra = None
         self.box_deadline = None            # clock time the job's box ends (--box-seconds), or None
         self.waived = False                 # an arm's log showed the 262k waiver
@@ -2226,7 +2244,7 @@ class Runner(object):
         arguments = server_run(self.image, name, arm['served'], self.devices, self.port, self.hub, derived_path,
                                digests=wants_digests(arm), salt_key_path=salt_key_path,
                                stats_now=bool(arm.get('prefix')), env=arm.get('env') or (),
-                               gate_only=bool(arm.get('gate_only')), tt_grid=getattr(self, 'tt_grid', None))
+                               gate_only=bool(arm.get('gate_only')), tt_grid=getattr(self, 'tt_grid', None), model=getattr(self, 'model', None))
         with open(os.path.join(arm_dir, 'docker-run.json'), 'w') as handle:
             json.dump(arguments, handle, indent=1)
         started = self.clock()
@@ -2316,7 +2334,8 @@ class Runner(object):
         scanned = markers.scan(lines)
         stats = stats if stats is not None else scanned.get('stats')
         judge.resolve(driver.records, scanned)
-        result = judge_arm(arm, driver, scanned, stats, None if boxed_out else error, log_text='\n'.join(lines))
+        result = judge_arm(arm, driver, scanned, stats, None if boxed_out else error, log_text='\n'.join(lines),
+                           **({'model': self.model} if getattr(self, 'model', None) else {}))
         if boxed_out:
             # Everything else the arm found still counts (a FAIL or an INFRA stays); a run the box cut short is NOT_EXERCISED with boxed set, whatever the partial checks
             # said: it did not finish, so it cannot pass, and it is never a FAIL of the engine.
@@ -2499,6 +2518,9 @@ def build_parser():
     parser.add_argument('--cards', choices=gate.CARD_SETS, default='pair',
                         help='pair: cards M and A (the default); quad: every Blackhole board present, the four-card '
                              '(1, 4) mesh the TP4 profiles open (qwen-c2-serving.yml C2_CARDS)')
+    parser.add_argument('--model-repo', default=None, help='serve another checkpoint of the same architecture in every arm\'s container '
+                        '(qwen-c2-serving.yml C2_MODEL_REPO; needs --model-revision); default: the base, the argv exactly as it was')
+    parser.add_argument('--model-revision', default=None, help='the 40-hex commit of --model-repo (C2_MODEL_REVISION)')
     parser.add_argument('--tt-grid', choices=c2_serving_job.TT_GRIDS, default=None,
                         help='clamp the compute grid every arm\'s container opens (%s=...; qwen-c2-serving.yml C2_TT_GRID); '
                              'default: not passed' % c2_serving_job.TT_GRID_ENV)
@@ -2508,6 +2530,12 @@ def build_parser():
 def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
     global KVREAD_MOUNT
     options = build_parser().parse_args(argv)
+    model = None
+    if options.model_repo or options.model_revision:
+        if not (options.model_repo and options.model_revision):
+            print('refusing: --model-repo and --model-revision go together (C2_MODEL_REPO / C2_MODEL_REVISION)', file=sys.stderr)
+            return 2
+        model = (options.model_repo, options.model_revision)
     KVREAD_MOUNT = options.kvread_mount or None
     if KVREAD_MOUNT and not options.dry_run:
         problem = kvread_mount_problem(KVREAD_MOUNT)
@@ -2578,7 +2606,7 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
                                                       salt_key_path='<results>/%s/salt.key' % arm['arm']
                                                       if arm.get('prefix') else None,
                                                       stats_now=bool(arm.get('prefix')), env=arm.get('env') or (),
-                                                      gate_only=bool(arm.get('gate_only')), tt_grid=options.tt_grid))))
+                                                      gate_only=bool(arm.get('gate_only')), tt_grid=options.tt_grid, model=model))))
         return 0
     if os.environ.get(ALLOW_FULL_AUDIT_ENV) != '1' and any(
             arm['arm'] in AUDIT_COST_ARMS and arm.get('kind') in AUDIT_KINDS for plan in plans for arm in arms_of[plan]):
@@ -2605,6 +2633,9 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
     if options.box_seconds is not None:
         runner.box_deadline = runner.clock() + options.box_seconds
     runner.tt_grid = options.tt_grid
+    runner.model = model
+    if model:
+        log('[PREFIX-GATE] checkpoint %s@%s in every arm\'s container; every arm\'s log is read for the contract\'s checkpoint lines' % (model[0], model[1][:12]))
     if options.tt_grid:
         log('[PREFIX-GATE] compute-grid clamp: %s=%s in every arm\'s container' % (c2_serving_job.TT_GRID_ENV, options.tt_grid))
     summary = dict(image=options.image, profile=options.profile, baseline=options.baseline, plans=plans,
@@ -2613,6 +2644,8 @@ def main(argv=None, devices=None, log=print, runner_factory=None, anchor=None):
                                        for plan, entries in skipped.items() if entries))
     if options.tt_grid:
         summary['tt_grid'] = options.tt_grid
+    if model:
+        summary['model'] = '%s@%s' % model
     try:
         if 'bringup' in plans and anchor is None:
             anchor = anchor_probe(options.image)

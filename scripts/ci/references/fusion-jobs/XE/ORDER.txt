@@ -1,0 +1,41 @@
+# The order of the tp4/exact-end window (docs/tp4-exact-end.md; scripts/ci/make_xe_jobs.py): exact resume P0 (QWEN_PREFIX_STICKY_UNDROP=1 + QWEN_PREFIX_WINDOW_CARRY=1) on the approved ship-4 profile c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4 and its two gate-only twins (make_xe_profiles.py), the checkpoint production serves (ukisai/Swift-1.5-Qwen3.8-27b, revision b4c84d42903a), ONE image (tp4-xe-1, a placeholder: B0 builds it from the pushed tp4/exact-end head WITH the K64j-OQ graft) and ONE window.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (the NEEDS lines skip what depended on it).
+# WHAT THIS DECIDES (the owner's, never the window's): whether a returning turn should resume one 2048 chunk higher than today. Today it resumes at floor2048(P_prev) - 2048 and re-prefills 2,048 + (P_prev mod 2,048) tokens it already processed (about 3,070 on average; production: 2.95 million tokens over 996 turns). P0 resumes at floor2048(P_prev), the cold prefill's own last 2048 boundary: the same programs on the same bytes, so a hit equals its cold twin (E0), and the drafter window rows below it are carried from the turn that computed them. XX is the exactness gate (every audit on, every pair against its cold twin, the window digests); XC1 XL1 XC2 XL2 time it. Every result is UNQUALIFIED.
+# WHAT IS NEW ON THE DEVICE: nothing the cold prefill does not already run (the same chunk programs at the same absolute positions); the carried rows are uploaded once per carried turn and join the tile-aligned window as its first part. WHAT IS NEW IN THE HARNESS: the prefix gate serves the Swift checkpoint (--model-repo/--model-revision) and reads every arm's log for it.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z; nothing in this pack does either. B0 is a build and may run while production serves. No other window driver may be alive and no privileged builder container up.
+# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and each tag is pushed on THAT commit (the throwaway commit carries only .github/c2-serving-job.env). Push ONE tag at a time and wait for its run to finish; queued tags are cancelled. Never cancel a running card job.
+# P0. SWIFT IS ON THE CARD HOST AND ITS CONVERTED CACHE IS BUILT: python3 scripts/ci/qwen_c2_checkpoint.py check --hub <the hub directory> --repo ukisai/Swift-1.5-Qwen3.8-27b --revision b4c84d42903a8646b25857eb2827288d92ed85a4 exits 0, and the Swift window's W0 (or the production first boot) has built the keyed weight cache, so every serving job here logs "weight cache ...: found". This pack builds nothing of it.
+# P0. GRID: the four cards expose a 13x10 compute grid since the firmware unlock. Read it from the run, never assume 11x10: every pair runs on one grid.
+# ARC-ZERO SP1 XB2
+# ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO (minRunners and maxRunners 0, the normal values written down first, restored by the same patch with the old numbers) BEFORE SP1 and restores them AFTER XB2, i.e. around every weight load, every audited boot (a model load under CI load has hit the platform's load timeout) and every timed job. B0, X0 and Z do not need the pause.
+# THE JOBS, in value order (cut the window at a block end): GATES: B0 X0 SP1 XX (210 min); RETURNING-TURN ABAB: XC1 XL1 XC2 XL2 (180 min); EIGHT-SEAT REPLAY (optional): XB1 XB2 (90 min); END: Z (10 min). B0 is the WINDOW build.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0 <- B0
+# NEEDS SP1 <- X0
+# NEEDS XX <- X0
+# NEEDS XC1 <- XX
+# NEEDS XL1 <- XC1 XX
+# NEEDS XC2 <- XL1
+# NEEDS XL2 <- XC2
+# NEEDS XB1 <- XX
+# NEEDS XB2 <- XB1
+# READ RULES (each also needs the prefix gate or c2_smoke_check clean and no stall; the templates' own headers have the whole text):
+#   B0   'baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4 with a session cap of 8', the provenance report with no problem line, its K64j-OQ graft line, the image id.
+#   X0   four cards present and healthy, the fabric as measured, the 13x10 grid in the run, no other window driver alive; the Swift weight cache found.
+#   SP1  'SPLIT_PROBE verdict=IDENTICAL' (exit 0): a 128-aligned resume is byte-exact; 'verdict=DIFFERS' (exit 2, a valid measured answer) plus the 'SPLIT_PROBE attribution' lines: cause=bucket or cause=handoff per split (the doc's 2); 'verdict=FAIL' is no answer. Soft: P0 does not depend on it.
+#   XX   (STOP) the exact-resume plan PASS: every cold/hit pair IDENTICAL, the oracle's Q strict, at least one carried admission, every window audit exact=True and every pair's window digests EQUAL, the checkpoint read. ANY difference is NO-GO.
+#   XC1 XL1 XC2 XL2   exact_resume_compare.py (XC1, XL1) and (XC2, XL2): the hits IDENTICAL across the arms, the lever's Q one chunk higher where expected, the TTFT delta per conversation against the control-to-control spread (XC1 against XC2). GO needs both pairs negative beyond the spread and the texts equal.
+#   XB1 XB2  (optional) prefix_agent_turns.py: the turns IDENTICAL across the arms, the paired continuation TTFT, the stall of the other seats.
+# NO-GO for P0: any pair that differs (XX), a window digest that differs, an audit line with exact=False, a Q above the oracle's, any program compiled after the warm, a lever answer that differs from the control's, a missing checkpoint line. Adopting is the owner's decision: the switches are gate instruments today (serving_c2_contract.exact_resume_problems) and a ship profile needs an owner traffic waiver naming them (docs/tp4-exact-end.md 7).
+# Time (estimate, minutes): B0 40, X0 20, SP1 30, XX 120, XC1 45, XL1 45, XC2 45, XL2 45, XB1 45, XB2 45, Z 10: 490 minutes (8 h 10 min) in all, 450 minutes of cards (X0 to Z).
+B0-xe-build stop tp4-xe-1 40
+X0-xe-status-rescan-reset stop tp4-xe-1 20
+SP1-split-attribution soft tp4-xe-1 30
+XX-xe-exactness stop tp4-xe-1 120
+XC1-control-a soft tp4-xe-1 45
+XL1-xe-a soft tp4-xe-1 45
+XC2-control-b soft tp4-xe-1 45
+XL2-xe-b soft tp4-xe-1 45
+XB1-xe-busy-control soft tp4-xe-1 45
+XB2-xe-busy-lever soft tp4-xe-1 45
+Z-xe-reset soft tp4-xe-1 10
