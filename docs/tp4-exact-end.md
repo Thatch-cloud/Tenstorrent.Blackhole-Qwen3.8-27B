@@ -1,7 +1,9 @@
 # Exact-end resume (TP4): why a returning turn cannot yet prefill only its new tokens, and what to do instead
 
 **Date:** 2026-10-19. **Branch:** `tp4/exact-end`, which is `tp4/swift` (27af6902, the ship-4 stack with the Swift checkpoint) merged with
-`tp4/exact-resume` (4f141594, exact resume P0, built and never run on a card). **Status:** research and CPU work only. Nothing in this note has run on a
+`tp4/exact-resume` (4f141594, exact resume P0, built and never run on a card). The merge keeps P0's nine commits and its history intact (`tp4/exact-resume` was 67 commits behind `tp4/swift`; a rebase
+stopped at its second commit on conflicts in the prefix modules, so the nine commits were merged instead, once: 13 files, all additions on both sides: the tier and quota plans beside the
+exact-resume ones, the checkpoint class, the scheduler graft, the oracle's signature). **Status:** research and CPU work only. Nothing in this note has run on a
 card; every number is labelled **measured** (a card artifact or production log), **modelled** (arithmetic on measured medians, `scripts/ci/exact_end_model.py`)
 or **argued** (read from code, to be settled by the card job named next to it).
 
@@ -17,7 +19,7 @@ tokens, 3,095 to 3,433 of them old (2.95 million over 996 turns: 2,962 a turn; t
 | Question | Short answer |
 | --- | --- |
 | 1. Why is a non-2048 resume not bit-identical? | A program's arithmetic is chosen by its **bucket** (matmul program configs are a function of the row count, `graft/model_config.py:269`), and the GDN state is **stored** between programs in bf16 (`QWEN35_GDN_STATE_BF16=1`, the serving setting) where the cold prefill makes no store. A resume inside a 2048 cell runs another bucket on a state that was stored where the cold run does not store. Which of the two matters is **not settled by the one card probe that ran** (v839 mixes them); `tp4_split_probe.py --attribute` (job SP1, 30 minutes, no build) separates them. Section 2. |
-| 2. Can the engine keep an end-of-turn state so that only the new tokens are prefilled, byte-exactly? | **No, not without a kernel or a numerics change, and nothing finer than P0 is worth building without one.** A byte-exact resume has to run the cold prefill's own programs on the cold prefill's own bytes, and a program costs its *bucket*, not its valid rows. The cold prefill's tail is one masked bucket (`bucket_for(P mod 2048)`); P0 already runs exactly that one program and nothing else. Resuming later inside the tail (a 128-aligned state, "intermediate per-chunk partial state") saves nothing unless a SMALLER bucket than the cold run's is numerically equal to it, which is the thing the probe says it is not. Section 3. |
+| 2. Can the engine keep an end-of-turn state so that only the new tokens are prefilled, byte-exactly? | **No, not without a kernel or a numerics change, and nothing finer than P0 is worth building without one.** A byte-exact resume has to run the cold prefill's own programs on the cold prefill's own bytes, and a program costs its *bucket*, not its valid rows. The cold prefill's tail is one masked bucket (`bucket_for(P mod 2048)`); P0 already runs exactly that one program and nothing else. Resuming later inside the tail (a 128-aligned state, "intermediate per-chunk partial state") saves nothing unless a SMALLER bucket than the cold run's is numerically equal to it; the card probe that ran did not establish that (its arms mix two causes) and the code gives no reason to expect it (matmul configs are chosen by the bucket). Section 3. |
 | 3. The numerically-equivalent option (resume at the decode-time state)? | Needs an owner decision **and kernel work** (the usable state is at a 128 boundary, not at `P_prev`; today's kernels give it only by an extra forward on turn N that cancels the gain). The most it can add over P0 is 12% of today's prefill time (about 7% of card wall time). The only past measurement of what rounding-level prefill differences do to real text is bad: 8 of 8 answers diverged within 256 tokens, 1 of 4 first tokens differed (`docs/real-text-2026-09-24.md` section 3). Section 4 has the facts and a gate. |
 | 4. Interactions | P0 composes with the checkpoint store, the host tier, engine reuse, Lever N and the tile-aligned window, with **one defect found and fixed by this branch**: merging P0 onto the ship-4 stack had switched the tile-aligned drafter window off under a carry, which brings back the per-prompt-length concat compile on every carried turn. Section 5. |
 
@@ -156,7 +158,7 @@ inexact in every cell.
 | **A1 = P0** (undrop + window carry) | `floor2048(P_prev)` = 163,840 | the tail only | 2,048 | **yes (E0), by construction** | built; to be proven on cards (XX) |
 | A2 "one checkpoint higher still" | `floor2048(P)` | the same tail | 2,048 | yes, and the same as A1 | impossible above A1: a state on the 2048 grid above `floor2048(P_prev)` exists only after a FULL chunk program, and turn N ran a tail there. On the crossing turn it would need the cell's full chunk, which nobody has computed |
 | A3 128-aligned state, **cold bucket forced** | 164,864 | one program, bucket 2048, masked | **2,048** | yes if SP1's F arms are IDENTICAL | the state at R (section 3.3) |
-| A4 128-aligned state, **small bucket** | 164,864 | one program, bucket 256 | **256** | only if SP1 says `cause=handoff`-free AND the small buckets match (none today) | the state at R and bucket-invariant programs |
+| A4 128-aligned state, **small bucket** | 164,864 | one program, bucket 256 | **256** | only if SP1 reads `cause=none` (the small buckets' programs and the store are both exact; nothing says so today) | the state at R (section 3.3) |
 | B (decode-time state, section 4) | 164,864 | bucket 256 | 256 | no (E1) | owner decision, kernel work |
 
 ### 3.2 Why P0 is the floor of anything byte-exact
@@ -164,7 +166,7 @@ inexact in every cell.
 Take the cold prefill of the new prompt P in the common case (P and P_prev in one cell, `c = floor2048(P)`). Its last program is `(c, bucket_for(t), t)`, one program over all of `[c, P)`.
 
 1. Every row of that program is computed with that bucket's program config. A resume that reproduces the cold prefill's bytes for the rows `[R, P)` must run those rows in **a program with the same
-   arithmetic**: the cold bucket (or, if SP1 proves it, a smaller one that is numerically equal, which today's evidence contradicts).
+   arithmetic**: the cold bucket (or, if SP1 proves it, a smaller one that is numerically equal, which no evidence supports today).
 2. A program's cost is its bucket (section 1.1): running the cold bucket on the rows `[R, P)` costs the same as running it on `[c, P)`.
 3. P0 runs exactly `(c, bucket_for(t), t)` and nothing else. It is the cheapest program list whose every program is a program the cold prefill runs.
 
@@ -179,8 +181,9 @@ on the grid, so no exact resume can avoid that chunk.
 Section 3.2 leaves exactly three routes below P0. None is possible without touching an op or the numerics; none was started.
 
 1. **Bucket-invariant programs** (SP1 `cause=bucket`). Make the prefill matmul program configs of the buckets 128..1024 arithmetic-equal to the 2048 one: the same K blocking (`in0_block_w`), the same
-   accumulation dtype and partial-sum spill for every M, with only `per_core_M` and the grid following M. That is a change in `create_prefill_matmul_program_config`'s tuning for the prefill sites
-   (tt-metal's `tt/model_config` side, called from `graft/model_config.py:266-270`) and re-qualification of every prefill: the cold prefill's own tail changes too, so it moves the baseline.
+   accumulation dtype and partial-sum spill for every M, with only `per_core_M` and the grid following M. That is a change in the tuning `tp_common.create_prefill_matmul_program_config` /
+   `tp_common.prefill_tuning` hand to the prefill sites (the image's `models/demos/blackhole/qwen36/tt/tp_common.py`, called from `graft/model_config.py:266-270`; the file is sha-pinned on the serving
+   path, so the change goes through its callers, the graft's `prefill_progcfg`) and re-qualification of every prefill: the cold prefill's own tail changes too, so it moves the baseline.
 2. **An in-program state emit** (SP1 `cause=handoff`). A twin of the fused chunk GDN op (a JIT/programmable-op twin, no factory edit, like the op-fusion programme's) that also writes the recurrent state after
    a chosen 128-row sub-chunk, plus the conv carry rows `[R - 3, R)`, so that turn N's tail program hands over the cold run's own state at `R = floor128(P_prev)`. It must be qualified byte-for-byte against the op it twins.
 3. **Where the state at R comes from without paying for it on turn N.** Splitting turn N's tail at R costs an extra forward on turn N (0.25-0.6 s, **estimated** from the T=128 medians) that cancels the
