@@ -36,9 +36,9 @@ The packed pass is faster than the per-request one because it carries the fusion
 
 * **Capture widths.** Nothing new: the block's verify trace is captured once at 4 segments x 16 rows (`packed_shapes.m3_shape`); a round with fewer live users replays the same trace with the other
   segments staged idle (`packed_verifier.py` module docstring, VARIABLE-USER ROUNDS; `gdn_user_batch.py:50-70`). The commit traces are per (segment, prefix 1..16); an idle segment decides at prefix 0 and writes no state.
-* **Idle rows.** `idle_inputs` (`:1849-1875`): tokens `(1,)*16`, start 0 or 32 (the extent block: family E = 256), through an all-zero page table: K/V lands on physical page 0 (vLLM's null block), on tile row
-  `j % 2` for the j-th idle segment. The idle carries are read in place (`carries_in_place`, `padded_refusal` `:1805-1830`), so no idle slot's state moves.
-* **Page tables.** Live tables must not name page 0 inside the range the round reads or writes (`padded_refusal`, `page_zero_index` `:813-835`); the extent attention reads pages `[0, E // 64)` of every segment.
+* **Idle rows.** `idle_inputs` (`:1849-1888`): tokens `(1,)*16`, start 0 or 32 (the extent block: family E = 256), through an all-zero page table: K/V lands on physical page 0 (vLLM's null block), on tile row
+  `j % 2` for the j-th idle segment. The idle carries are read in place (`carries_in_place`, `padded_refusal` `:1805-1845`), so no idle slot's state moves.
+* **Page tables.** Live tables must not name page 0 inside the range the round reads or writes (`padded_refusal`, `page_zero_index` `:815-837`); the extent attention reads pages `[0, E // 64)` of every segment.
 * **The (page, tile row) rule.** The K/V writers are exact only while no two segments write one (page, tile row) (`verify_trace_t2.py:203-221` `kv_conflict`; the page-parallel writer's header,
   `kv_page_writer_tp4.py` EXACTNESS). Page 0 has two 32-row tile rows, so two idle segments fit and a third does not. **This is the whole obstacle**: a lone user is three idle segments.
 * **The drafter's row count.** 16 (seed + 15): `bridge.drafts(packed_rows=16)` (`serving_worker_hook.py:889-891`) -> `session.propose(max_rows=16)`. The draft pass is the request's own single-user capture whatever the
