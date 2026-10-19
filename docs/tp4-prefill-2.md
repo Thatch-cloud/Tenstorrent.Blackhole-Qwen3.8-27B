@@ -16,7 +16,7 @@ templates, and two kernel-class designs. **Nothing here has run on a card.** Eve
    fitted model; 49 percent of the step at 120k-160k), exact. Everything in this document is priced before and after it, because after it a typical step is ONE masked tail pass and the tail pass is
    what is left.
 4. **Built here (PF2-H, `QWEN_FAST_PREFILL_HANDOFF`, gate only, default off): the final step's GDN state goes to the decode slot from device-side clones.** The ship-4 device profile (PF1, run 38051000905)
-   shows what the host round trip costs: after the last chunk the device idles 48.6 ms for 240 blocking reads, and the 48-layer slot write runs 115.2 ms for 8.0 ms of device kernels (1,919 ops of host
+   shows what the host round trip costs: after the last chunk the device idles 48.6 ms for the logits and 240 blocking reads, and the 48-layer slot write runs 115.2 ms for 8.0 ms of device kernels (1,919 ops of host
    dispatch). The lever removes the reads and the uploads and keeps the graft's own `write_slot` (bytes written are the scratch's: exact by construction, audited on the card). Its worth is **20 ms
    (10-30) a final step, 1.6 percent of the window's route time today (0.8-2.3), 2.6 percent after exact resume (1.3-3.8)** (**E**). On production's prefill share (58 percent of card time, the owner's figure; this log
    window shows 22 percent of wall and 37 percent of busy time, see 3.5) that is 0.5-1.3 percent of card time. It is the only exact change that needs no kernel and has evidence behind it; it is small.
@@ -95,9 +95,9 @@ eager (`trace_mode decode_only`): the chunk loop is the eager masked forward at 
 
 Three facts read off the fits:
 
-* The chunk's slope 2.108 ms per 1k tokens is 1.1286 x 3.3841 x 0.552: the served oneq SDPA is 0.55 of the paired call (card M's 0.505 per layer, with the cards' power limit taking some back).
+* The chunk's slope 2.108 ms per 1k tokens is 1.1286 x 3.3841 x 0.552: the served oneq SDPA is 0.55 of the paired call (card M's 0.505 per layer; the rest is not explained by a measurement: the OQ-T pair agrees with the slope, 0.63 at 131k, and a likely cause is the 300 W board limit, 96 busy cores drawing more than 48 and the whole chunk paying in clock, **E**).
 * **A tail pass costs a flat 320-410 ms before any attention.** Bucket 128 costs 324 ms at no context; bucket 2048 costs 407. The device work of a 128-row forward is a few tens of milliseconds: the rest is
-  the eager dispatch of ~3,155 ops (~100 us each) and the end-of-prompt work. A smaller bucket therefore does not make a short tail cheap, and finer buckets (a 1,536) would not either.
+  the eager dispatch of ~3,155 ops (**E**: ~100 us an op; the PF1 timeline's median gap between ops is 56 us) and the end-of-prompt work. A smaller bucket therefore does not make a short tail cheap, and finer buckets (a 1,536) would not either.
 * **Bucket 256 is an anomaly: +300 ms at 160k of context.** Its two q chunks per head pair onto six cores (the stock SDPA, not the chain: rows 256 are outside 512/1024/2048), so each core streams two
   K lengths. The 128-row bucket has one q chunk per head, the 512-row one runs the chain with one chunk per core. A tail of 129-256 tokens (6.4 percent of the window's prompts) pays it.
 
@@ -133,8 +133,8 @@ Class: **E0** byte-exact by construction (audited exactness arm), **E1** exact a
 | # | change | class | at 120-160k, a 3.3k step (ms) | today | after P0 | cost (days) | risk |
 | --- | --- | --- | ---: | ---: | ---: | --- | --- |
 | 1 | **exact resume P0**: resume one chunk higher (tp4/exact-end, built) | E0 | -580 to -670 (49%) | -39% | | built; one card window | low |
-| 2 | traced masked tails: the tail pass becomes a replay (valid_len moved off the host) | E0, K | -21 (bucket 2048) to -130 (bucket <= 1024) | -5.7% | -9.4% | 10-15 | high: trace region, GDN op arguments |
-| 3 | K-split SDPA for the tail passes (section 7) | T, K | 0 (2,048-row tails) to -110 (<= 1024-row) | -4.6% | -7.6% | 15-25 | high |
+| 2 | traced masked tails: the tail pass becomes a replay (valid_len moved off the host) | E0, K | -21 (bucket 2048); -118 (1,024), -136 (512), -176 (128) | -5.7% | -9.4% | 10-15 | high: trace region, GDN op arguments |
+| 3 | K-split SDPA for the tail passes (section 7) | T, K | 0 (2,048-row tails); -120 to -155 (1,024-row), -190 to -250 (<= 512-row) | -4.6% | -7.6% | 15-25 | high |
 | 4 | `QWEN_GDN_PREFILL_MMRS=1` (fused out-projection + reduce-scatter; the flag exists, off in every TP4 profile) | unproven (fp32 sum order) | -12 to -25 a pass | -2.4% | -2.4% | 1 | medium: deadlocked on 1x2, TP4 unproven |
 | 5 | **PF2-H device-side hand-off (built)** | E0 | **-20 (10-30)** | **-1.6%** | **-2.6%** | 3 (done) | low |
 | 6 | tail bucket 256 -> 512 above 16k of context | E1 | -250 for a 129-256 token tail, 0 otherwise | -0.8% | -1.2% | 1 | low |
@@ -197,7 +197,7 @@ byte for byte, on every chip, and (b) every other row unchanged. A prompt of one
 
 ### 5.4 Tests (CPU, on the real staged `model.py` with the recording fake ttnn)
 
-`test_prefill_handoff` (33): strict settings; the device slot equals the host slot, with the logits and the KV, at six lengths on both routes; on the final step 15 reads and 15 uploads disappear
+`test_prefill_handoff` (34): strict settings; the device slot equals the host slot, with the logits and the KV, at six lengths on both routes; on the final step 15 reads and 15 uploads disappear
 (three GDN layers x five tensors) and 15 clones appear; non-final steps do nothing new; the slot write is counted for the lifecycle; the scratch survives for the next prompt (and a hand-off that gave the
 scratch itself to the consuming write is SEEN: the next prompt fails); flag unset = no handoff and no line, `0` = the same device calls as unset plus the timing line; a corrupting clone is caught by the
 audit and goes unnoticed without it; a write that touches another slot is caught; a refused clone falls back once and stays there, and a clone that fails midway writes nothing; the warm compiles what the final
@@ -249,7 +249,7 @@ Slice 0's core is the merge core. Each slice runs the unchanged compute loop ove
 to the merge core's L1 over the NoC (S-1 partials, <= 3 x 66 KB, against 1.5 MB of L1) and the merge core folds them in with the ring merge, in slice order, then writes the normalised output. The merge
 costs ~15-20 us a layer against ~8 ms of K stream saved per layer at 170k for S = 2 (**E**).
 
-**Exactness argument (tolerance).** Each slice is the sequential kernel on a prefix-free sub-range, so its (out_s, lse_s) is exact in the kernel's own arithmetic; the merge is the ring kernel's. The deviation
+**Exactness argument (tolerance).** Each slice is the sequential kernel on its own K sub-range (only the last carries the diagonal), so its (out_s, lse_s) is exact in the kernel's own arithmetic; the merge is the ring kernel's. The deviation
 from the sequential result is the rounding of an extra bf16 round trip of out_s and of the sigmoid form of the merge: of the order of one bf16 ulp relative per merge, comparable to the call's own output rounding.
 Acceptance would be: the card-M harness shows max abs and relative error against the oneq call inside a bound taken from the call's own run-to-run difference against the stock path; the model gate
 shows identical tokens on real code text at 4k/32k/128k and on the agent replay; the audited attach compares each call with the oneq program within the bound (not bitwise).
@@ -291,7 +291,7 @@ card M and read the region's use) before anything else is written. Worth (**E**)
 
 ## 9. Order of work
 
-1. **Exact resume P0** (tp4/exact-end): its pack exists; it is half of every step. Stack it with this branch's pack in one window: A1 and AP1 here cost 240 minutes and run on the same image family.
+1. **Exact resume P0** (tp4/exact-end): its pack exists; it is half of every step. Stack it with this branch's pack in one window: A1 and AP1 here cost 190 minutes and run on the same image family.
 2. **PF2-H** on top (this branch): small, exact, cheap to confirm; it grows from 1.6 to 2.6 percent of route time once P0 has removed the first chunk.
 3. **The measurement that decides between 7 and 8:** the free trace region after the attach (A1's ledger records DRAM, not the trace region: add the line), and one card-M probe of the gate-neutralised
    conv/scan against the masked path. Both are about an hour of card M.
