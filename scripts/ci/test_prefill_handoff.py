@@ -15,7 +15,6 @@ What is held:
   census     the module makes no ttnn or model call the audit has not seen."""
 
 import ast
-import contextlib
 import sys
 import unittest
 from pathlib import Path
