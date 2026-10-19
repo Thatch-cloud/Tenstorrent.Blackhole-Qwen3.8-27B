@@ -593,6 +593,56 @@ def prefill_ladder_problems(results):
     return problems
 
 
+# NP9 (docs/tp4-np9-answer32k.md): the long-answer tests of c2_serving_smoke.py. Every user asks for `asked` tokens with ignore_eos, so it must end with finish "length" and exactly that many tokens; a
+# server whose output ceiling is lower clamps the request (finish "length" at the ceiling, fewer tokens than asked) and reads as a fault here. long_answer_prefix holds the long answer to begin with the
+# short one (the budget enters a round only at the last few tokens).
+LONG_ANSWER_TESTS = ('long_answer_solo_4k', 'long_answer_solo_200k', 'long_answer8_4k', 'long_answer8_96k')
+LONG_ANSWER_PREFIX_TEST = 'long_answer_prefix'
+LONG_ANSWER_CEILING_LINE = 'request contract installed: greedy, max_tokens <= 32768'      # serving_c2_contract.install_request_contract, with the checkpoint's output_budget
+
+
+def long_answer_problems(results, container_text=''):
+    """[problem] for the NP9 long-answer tests present in `results`; [] for a run without them. With the container log (non-empty), the API server must also have installed the 32,768-token ceiling:
+    a job whose checkpoint selection did not cross into the container serves the profile's 16,384 and its long answers would only read as clamped."""
+    problems = []
+    if container_text and any(name in results for name in LONG_ANSWER_TESTS + (LONG_ANSWER_PREFIX_TEST,)) and LONG_ANSWER_CEILING_LINE not in container_text:
+        problems.append('long answers: the container log never says "%s": the checkpoint\'s output budget did not reach the request contract' % LONG_ANSWER_CEILING_LINE)
+    for name in LONG_ANSWER_TESTS:
+        entry = results.get(name)
+        if entry is None:
+            continue
+        if not isinstance(entry, dict) or 'error' in entry:
+            problems.append('%s: %s' % (name, entry.get('error') if isinstance(entry, dict) else 'no result'))
+            continue
+        asked, users = entry.get('asked'), entry.get('users') or []
+        if type(asked) is not int or not users:
+            problems.append('%s: no asked budget or no user was recorded' % name)
+            continue
+        for index, user in enumerate(users):
+            label = '%s user %d' % (name, index)
+            problems += stream_problems(label, user)
+            if not isinstance(user, dict) or 'error' in user:
+                continue
+            if user.get('finish') != 'length':
+                problems.append('%s: finished with %r, not "length": ignore_eos must run it to its max_tokens' % (label, user.get('finish')))
+            if user.get('tokens') != asked:
+                problems.append('%s: %r tokens, asked %d (a lower tokens count at "length" is the server\'s output ceiling clamping the request)' % (label, user.get('tokens'), asked))
+    entry = results.get(LONG_ANSWER_PREFIX_TEST)
+    if entry is not None:
+        if not isinstance(entry, dict) or 'error' in entry:
+            problems.append('%s: %s' % (LONG_ANSWER_PREFIX_TEST, entry.get('error') if isinstance(entry, dict) else 'no result'))
+        else:
+            for label in ('short', 'long'):
+                answer = entry.get(label) or {}
+                wanted = (entry.get('asked') or [None, None])[0 if label == 'short' else 1]
+                if answer.get('finish') != 'length' or answer.get('tokens') != wanted:
+                    problems.append('%s %s answer: %r tokens, finish %r, asked %r' % (LONG_ANSWER_PREFIX_TEST, label, answer.get('tokens'), answer.get('finish'), wanted))
+            if entry.get('prefix_equal') is not True:
+                problems.append('%s: the long answer does not begin with the short one (first difference at character %r of %r compared): greedy decoding changed with the budget'
+                                % (LONG_ANSWER_PREFIX_TEST, entry.get('first_difference'), entry.get('compared_chars')))
+    return problems
+
+
 def smoke_problems(results, container_text=''):
     problems = []
     if results is None:
@@ -648,6 +698,7 @@ def smoke_problems(results, container_text=''):
                     problems.append('%s: no tokens' % name)
                 elif user.get('finish') is None:
                     problems.append('%s: no finish reason' % name)
+    problems += long_answer_problems(results, container_text)
     problems += solo_problems(results, container_text)
     for name in STREAM_PARSER_TESTS:
         entry = results.get(name)

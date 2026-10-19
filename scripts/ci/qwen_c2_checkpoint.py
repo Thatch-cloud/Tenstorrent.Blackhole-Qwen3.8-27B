@@ -55,7 +55,11 @@ BOUND_LINE = 'checkpoint bound'
 REPO = re.compile(r'[0-9A-Za-z._-]{1,96}/[0-9A-Za-z._-]{1,96}')
 REVISION = re.compile(r'[0-9a-f]{40}')
 SHARD = re.compile(r'model-[0-9]{5}-of-[0-9]{5}\.safetensors')
-REQUEST_KEYS = frozenset(('default_max_tokens',))
+REQUEST_KEYS = frozenset(('default_max_tokens', 'output_budget'))
+# output_budget: the server ceiling on max_tokens (QWEN_FAST_OUTPUT_BUDGET) the checkpoint is served with, a multiple of OUTPUT_BUDGET_STEP up to OUTPUT_BUDGET_MAX. The same two numbers as
+# serving_fast_policy.PACKED_FAMILY_TOKENS and MAXIMUM_OUTPUT_BUDGET (this module is stdlib only and must not import that one, which reads the environment at import; a test holds them equal).
+OUTPUT_BUDGET_STEP = 256
+OUTPUT_BUDGET_MAX = 32768
 
 
 class CheckpointError(ValueError):
@@ -131,6 +135,11 @@ def load_catalog(path=None):
         request = entry.get('request', {})
         if not isinstance(request, dict) or set(request) - REQUEST_KEYS or any(type(value) is not int or value < 1 for value in request.values()):
             raise CheckpointError('%s: request may only hold positive ints named %s' % (entry['repo'], ', '.join(sorted(REQUEST_KEYS))))
+        budget = request.get('output_budget')
+        if budget is not None and (budget % OUTPUT_BUDGET_STEP or budget > OUTPUT_BUDGET_MAX):
+            raise CheckpointError('%s: request output_budget must be a multiple of %d up to %d, got %r' % (entry['repo'], OUTPUT_BUDGET_STEP, OUTPUT_BUDGET_MAX, budget))
+        if budget is not None and request.get('default_max_tokens', 0) > budget:
+            raise CheckpointError('%s: request default_max_tokens %r is over its output_budget %r' % (entry['repo'], request['default_max_tokens'], budget))
     if 'request' in base:
         raise CheckpointError('the base carries no request overrides: its numbers are its profile\'s')
     return catalog
@@ -214,7 +223,8 @@ def platform_model_problems(asked, sel, catalog):
 
 
 def request_overrides(sel):
-    """The request-contract numbers the selected checkpoint's catalog entry replaces the profile's with ({} for the base or no selection): today default_max_tokens."""
+    """The request-contract numbers the selected checkpoint's catalog entry replaces the profile's with ({} for the base or no selection): default_max_tokens (the max_tokens a request that omits it gets)
+    and output_budget (the ceiling on max_tokens; serving_c2_contract.checkpoint_budget_problems holds it to the profile it is laid over)."""
     if sel is None or sel.is_base:
         return {}
     return dict(sel.entry.get('request') or {})

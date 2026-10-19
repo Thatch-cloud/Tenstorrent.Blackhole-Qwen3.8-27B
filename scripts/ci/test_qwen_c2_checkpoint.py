@@ -587,6 +587,7 @@ class ProductionBootTests(unittest.TestCase):
         snapshot = root / 'models--ukisai--Swift-1.5-Qwen3.8-27b' / 'snapshots' / SWIFT['revision']
         snapshot.mkdir(parents=True)
         entry['snapshots'] = [str(root / 'models--Qwen--Qwen3.8-27B' / 'snapshots' / BASE['revision'])]
+        Path(entry['snapshots'][0]).mkdir(parents=True)
         profiles = hub.root / 'profiles.json'
         profiles.write_text(json.dumps(dict(default=self.SHIP, profiles={self.SHIP: entry})), encoding='utf-8')
         environ = dict(environ_extra, QWEN_C2_SERVING='1', QWEN_C2_PROFILE=self.SHIP, QWEN_C2_PROFILES=str(profiles), MESH_DEVICE='P300', TT_CACHE_PATH=str(hub.root / 'experiment-cache' / 'weights'))
@@ -621,6 +622,56 @@ class ProductionBootTests(unittest.TestCase):
         self.assertIn('request default max_tokens 16384', text)
         self.assertTrue([hook for hook in hooks if getattr(hook, 'name', None) == contract.INPUT_PROCESSOR], 'the request contract is armed')
 
+    def test_swift_serves_the_raised_output_budget_in_the_environment_and_the_request_contract_and_the_base_keeps_the_profiles(self):
+        """NP9: the profile says 16,384 and the Swift catalog entry 32,768. The environment (read by serving_fast_policy when the worker imports it) and the API server's request contract carry
+        32,768 for Swift; the base pair and no selection carry the profile's. The ship-4 profile itself is not touched (test_np9_answer32k pins its digest)."""
+        argv, environ, lines, hooks, snapshot = self.boot(PAIR, self.PLATFORM)
+        self.assertEqual(environ['QWEN_FAST_OUTPUT_BUDGET'], '32768')
+        text = '\n'.join(lines)
+        self.assertIn('request output budget 32768 for this checkpoint (its catalog entry; the profile says 16384)', text)
+        self.assertIn('output budget 32768, context 262144', text, 'the mesh line reads the raised budget')
+        hook = [hook for hook in hooks if getattr(hook, 'name', None) == contract.INPUT_PROCESSOR][0]
+
+        class InputProcessor(object):
+            model_config = type('Config', (), dict(max_model_len=262144))()
+            calls = []
+
+            def process_inputs(self, request_id, prompt, params, *args, **kwargs):
+                self.calls.append(params.max_tokens)
+
+        module = type(sys)('fake_input_processor_np9')
+        module.InputProcessor = InputProcessor
+        with mock.patch.object(contract, 'log', lambda *args: None):
+            hook.callback(module)
+        params = lambda max_tokens: type('Params', (), dict(temperature=0.7, n=1, logprobs=None, prompt_logprobs=None, structured_outputs=None, logit_bias=None, allowed_token_ids=None, bad_words=None, stop=None,
+                                                          min_tokens=0, stop_token_ids=None, max_tokens=max_tokens))()
+        for asked, granted in ((None, 16384), (20000, 20000), (32768, 32768), (64000, 32768)):
+            InputProcessor().process_inputs('r', {'prompt_token_ids': [1] * 1000}, params(asked))
+        self.assertEqual(InputProcessor.calls, [16384, 20000, 32768, 32768])
+        base_argv, base_environ, base_lines, base_hooks, _ = self.boot(BASE_PAIR, ['api_server', '--model', BASE['repo'], '--port', '8000'])
+        self.assertEqual(base_environ['QWEN_FAST_OUTPUT_BUDGET'], '16384')
+        self.assertNotIn('request output budget', '\n'.join(base_lines))
+        none_argv, none_environ, none_lines, none_hooks, _ = self.boot({}, ['api_server', '--port', '8000'])
+        self.assertEqual(none_environ['QWEN_FAST_OUTPUT_BUDGET'], '16384')
+
+    def test_every_process_of_the_swift_image_exports_the_raised_budget_and_re_derives_it(self):
+        """A child (the engine core, a worker) runs boot too: apply_environment writes the profile's 16,384 and configure_checkpoint lays Swift's 32,768 over it, every time."""
+        document = json.loads(PROFILES.read_text(encoding='utf-8'))
+        profile = dict(document['profiles'][self.SHIP], name=self.SHIP)
+        for api_server in (True, False, False):
+            environ = dict(PAIR, TT_CACHE_PATH=BASE_CACHE)
+            for _ in range(2):
+                contract.apply_environment(profile, environ)
+                self.assertEqual(environ['QWEN_FAST_OUTPUT_BUDGET'], '16384', 'the profile\'s own value, written first')
+                with mock.patch.object(contract, 'log', lambda *args: None), mock.patch.object(checkpoint, 'verify_snapshot', return_value=[]), \
+                        mock.patch.object(checkpoint, 'claim_cache', return_value=dict(created=True, first_boot_complete=False)):
+                    contract.configure_checkpoint(profile, environ, api_server, exists=lambda path: True)
+                self.assertEqual(environ['QWEN_FAST_OUTPUT_BUDGET'], '32768')
+        environ = dict(TT_CACHE_PATH=BASE_CACHE)
+        contract.apply_environment(profile, environ)
+        self.assertIsNone(contract.configure_checkpoint(profile, environ, False))
+        self.assertEqual(environ['QWEN_FAST_OUTPUT_BUDGET'], '16384', 'no selection: the profile\'s')
+
     def test_the_base_platform_on_the_swift_image_and_swift_on_the_base_image_are_refused(self):
         with self.assertRaises(ValueError) as raised:
             self.boot(PAIR, ['api_server', '--model', BASE['repo'], '--port', '8000'])
@@ -630,14 +681,14 @@ class ProductionBootTests(unittest.TestCase):
 
 
 class RequestDefaultTests(unittest.TestCase):
-    """Swift's answer room: a request that omits max_tokens gets 16,384 (the output budget) instead of the profile's 8,192; the base keeps the profile's. The clamp to the room a long prompt
-    leaves, the 16,384 ceiling and the per-request KV admission are the contract's own and unchanged."""
+    """Swift's answer room: a request that omits max_tokens gets 16,384 instead of the profile's 8,192, and the ceiling on an explicit max_tokens is 32,768 instead of the profile's 16,384 (NP9,
+    docs/tp4-np9-answer32k.md); the base keeps the profile's numbers. The clamp to the room a long prompt leaves, the prompt cap and the per-request KV admission are the contract's own and unchanged."""
     SHIP = json.loads(PROFILES.read_text(encoding='utf-8'))['profiles']['c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4']
 
     def limits(self, environ):
         base = contract.request_limits(self.SHIP)
         with mock.patch.object(contract, 'log', lambda *args: None):
-            return base, contract.checkpoint_limits(base, environ)
+            return base, contract.checkpoint_limits(base, environ, self.SHIP)
 
     def enforce(self, limits, prompt_tokens, max_tokens=None):
         params = type('Params', (), dict(n=1, logprobs=None, prompt_logprobs=None, structured_outputs=None, logit_bias=None, allowed_token_ids=None, bad_words=None, stop=None,
@@ -648,9 +699,9 @@ class RequestDefaultTests(unittest.TestCase):
         return params.max_tokens
 
     def test_the_catalog_gives_swift_the_budget_and_the_base_nothing(self):
-        self.assertEqual(SWIFT['request'], {'default_max_tokens': 16384})
+        self.assertEqual(SWIFT['request'], {'default_max_tokens': 16384, 'output_budget': 32768})
         self.assertNotIn('request', BASE)
-        self.assertEqual(checkpoint.request_overrides(checkpoint.selection(PAIR)), {'default_max_tokens': 16384})
+        self.assertEqual(checkpoint.request_overrides(checkpoint.selection(PAIR)), {'default_max_tokens': 16384, 'output_budget': 32768})
         self.assertEqual(checkpoint.request_overrides(checkpoint.selection(BASE_PAIR)), {})
         self.assertEqual(checkpoint.request_overrides(None), {})
 
@@ -660,17 +711,20 @@ class RequestDefaultTests(unittest.TestCase):
         self.assertEqual((base['default_max_tokens'], base['budget'], base['min_answer_tokens'], base['kv_pool_blocks']), (8192, 16384, 8192, 16499))
         self.assertEqual(self.limits(dict(BASE_PAIR))[1], base, 'the base pair: the profile\'s numbers')
         _, swift = self.limits(dict(PAIR))
-        self.assertEqual(swift['default_max_tokens'], 16384)
-        self.assertEqual({key: value for key, value in swift.items() if key != 'default_max_tokens'}, {key: value for key, value in base.items() if key != 'default_max_tokens'})
+        self.assertEqual((swift['default_max_tokens'], swift['budget']), (16384, 32768))
+        moved = ('default_max_tokens', 'budget')
+        self.assertEqual({key: value for key, value in swift.items() if key not in moved}, {key: value for key, value in base.items() if key not in moved},
+                         'the prompt cap, the answer room, the headroom and the KV pool are the profile\'s own')
 
     def test_an_override_over_the_budget_is_refused(self):
         base = contract.request_limits(self.SHIP)
         with mock.patch.object(checkpoint, 'request_overrides', return_value={'default_max_tokens': 16385}), mock.patch.object(contract, 'log', lambda *args: None):
             with self.assertRaises(ValueError):
-                contract.checkpoint_limits(base, dict(PAIR))
+                contract.checkpoint_limits(base, dict(PAIR), self.SHIP)
 
     def test_a_catalog_request_block_is_checked(self):
-        for request in ({'default_max_tokens': 0}, {'default_max_tokens': '16384'}, {'other': 5}, [1]):
+        for request in ({'default_max_tokens': 0}, {'default_max_tokens': '16384'}, {'other': 5}, [1], {'output_budget': 32769}, {'output_budget': 33024}, {'output_budget': 0},
+                        {'output_budget': 100}, {'output_budget': 16384, 'default_max_tokens': 16640}):
             with self.subTest(request=request), tempfile.TemporaryDirectory() as tmp:
                 broken = copy.deepcopy(CATALOG)
                 broken['checkpoints'][0]['request'] = request
@@ -694,7 +748,9 @@ class RequestDefaultTests(unittest.TestCase):
         self.assertEqual(self.enforce(swift, 200000), 16384)
         self.assertEqual(self.enforce(swift, 253920), 8192, 'the longest admitted prompt: 262,144 less the 32 headroom less 253,920 leaves 8,192')
         self.assertEqual(self.enforce(swift, 250000), 12112)
-        self.assertEqual(self.enforce(swift, 1000, 20000), 16384, 'the ceiling is the budget: an explicit larger value is clamped, as before')
+        self.assertEqual(self.enforce(swift, 1000, 20000), 20000, 'the ceiling is Swift\'s 32,768 now: 20,000 is no longer clamped')
+        self.assertEqual(self.enforce(swift, 1000, 64000), 32768, 'the ceiling is the budget: an explicit larger value is clamped, as before')
+        self.assertEqual(self.enforce(base, 1000, 20000), 16384, 'the base keeps its ceiling')
         self.assertEqual(self.enforce(swift, 1000, 5000), 5000)
         with self.assertRaises(contract.ContractError):
             self.enforce(swift, 253921)
