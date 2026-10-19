@@ -24,7 +24,7 @@ with open(os.path.join(HERE, 'qwen_c2_profiles.json'), encoding='utf-8') as _han
 NAMES = sorted(PROFILES['profiles'])
 FOLDER = os.path.join(HERE, 'references', 'tp4-drafter-jobs')
 BASE = 'c2-packed-tp4'
-CANDIDATE_IMAGES = {'b16-bf8': 'tp4-drafter-b16-1', 'b32-bf8': 'tp4-drafter-b32-1', 'dedf-bf16': 'tp4-drafter-1', 'lookup': 'tp4-drafter-1'}
+CANDIDATE_IMAGES = {'b16-bf8': 'tp4-drafter-b16-1', 'b32-bf8': 'tp4-drafter-b32-1', 'sw1ft-bf8': 'tp4-swift-drafter-1', 'dedf-bf16': 'tp4-drafter-1', 'lookup': 'tp4-drafter-1'}
 
 
 class ArmProfileTests(unittest.TestCase):
@@ -421,7 +421,7 @@ class PairReportTests(unittest.TestCase):
             public = self.run_pair(*synthetic(gain=1.15), arm=arm)
             self.assertEqual((public['verdict'], set(public['gates'].values())), ('GO', {'PASS'}), arm)
             self.assertEqual(self.run_pair(*synthetic(gain=1.0), arm=arm)['verdict'], 'NO-GO', arm)
-        self.assertEqual(pair_report.CANDIDATE_ARMS, ('b16-bf8', 'b32-bf8', 'dedf-bf16', 'lookup'))
+        self.assertEqual(pair_report.CANDIDATE_ARMS, ('b16-bf8', 'b32-bf8', 'sw1ft-bf8', 'dedf-bf16', 'lookup'))
         self.assertEqual(pair_report.SAME_IMAGE_ARMS, ('dedf-bf16', 'lookup'))
         self.assertEqual(sorted(pair_report.CANDIDATE_ARMS + ('control',)), sorted(lab.DRAFTER_ARMS))
         self.assertEqual(sorted(pair_report.CANDIDATE_ARMS + ('control',)), sorted(job.TAULAB_DRAFTER_ARMS))

@@ -1,0 +1,40 @@
+# The order of the Swift drafter window (docs/tp4-swift-drafter.md): does the DFlash drafter FINE-TUNED on Swift-1.5's own greedy text accept more of Swift's text than the base-fit drafter the cards serve today, and does a
+# round cost the same? Judged on the cards by the tau lab PAIRED per turn (T1 control, T2 candidate) against the pre-registered GO rule of drafter_pair_report.py, then by the timed decode ABAB (C1 L1 C2 L2).
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window.
+# WHAT THIS DECIDES (the owner's, never the window's): whether the fine-tuned drafter replaces the served one for Swift. A GO moves nothing by itself: a ship needs the exactness gates of tp4-drafter-jobs re-run on the
+# candidate image, a push exception for a local drafter (the push step refuses every image that carries a drafter marker today) and the owner's decision, and the weights are the owner's to release (see docs/tp4-swift-drafter.md: training data, licence).
+# P0. PRODUCTION: Swift is what the cards serve; the owner stops the node agent and unserves production BEFORE X0 and restores it after Z. Nothing in this pack does either. B0 and B1 are builds and may run while production serves.
+# P0. THE WEIGHTS ARE ON THE BUILD HOST BEFORE B1 (3.85 GB, copied over the wired link by the owner or the operator; never committed): python3 scripts/ci/drafter_stage.py stage --checkpoint <the trained file> --manifest sw1-ft1-f8013036 --cache <the fixture cache the build reads (C2_DRAFTER_FIXTURES)>.
+#   The checkpoint file must hash to the manifest's weights_sha256 (drafter_stage.py checks the header, the size and every tensor). The same host holds Swift (qwen_c2_checkpoint.py check) and its converted weights (production built them).
+# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and each tag is pushed on THAT commit (the throwaway commit carries only .github/c2-serving-job.env). Push ONE tag at a time and wait for its run to finish; queued tags are cancelled. Never cancel a running card job.
+# P0. GRID: the four cards expose a 13x10 compute grid since the firmware unlock. Read it from the run, never assume 11x10.
+# ARC-ZERO C1 L1 C2 L2 SA1
+# ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO (minRunners and maxRunners 0, the normal values written down first, restored by the same patch with the old numbers) BEFORE the first timed job and restores them AFTER SA1. B0, B1, X0, T1, T2 and Z do not need the pause.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0-status-rescan-reset <- B0-build-control
+# NEEDS T1-tau-swift-control <- X0-status-rescan-reset
+# NEEDS T2-tau-swift-sw1ft <- B1-build-sw1ft T1-tau-swift-control
+# NEEDS C1-swift-control-a <- X0-status-rescan-reset T2-tau-swift-sw1ft
+# NEEDS L1-swift-sw1ft-a <- B1-build-sw1ft C1-swift-control-a
+# NEEDS C2-swift-control-b <- L1-swift-sw1ft-a
+# NEEDS L2-swift-sw1ft-b <- C2-swift-control-b
+# NEEDS SA1-swift-sw1ft-audited-attach <- B1-build-sw1ft T2-tau-swift-sw1ft
+# READ RULES (each also needs c2_smoke_check clean and no stall; the templates' own headers have the whole text):
+#   B0 B1  'baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4 with a session cap of 8', the provenance report with no problem line, its K64j-OQ graft line, the image id; B1 also the 'drafter manifest sw1-ft1-f8013036' line.
+#   X0     four cards present and healthy, the fabric as measured, the 13x10 grid in the run, no other window driver alive, qwen_c2_checkpoint.py check ok.
+#   T1 T2  the lab's report complete=True with the Swift checkpoint lines in the container log; T2 also '[DRAFTER_MANIFEST] sw1-ft1-f8013036 in force'. T2's step prints the pair verdict (GO / NO-GO / NOT_ESTABLISHED) against T1's run.
+#   C1 L1 C2 L2  octo3_report.py and octo_judge.py as in the L1 header; octo_compare.py: the verified text of control and fine-tune IDENTICAL.
+#   SA1    every audit line exact=True, no 'audit mismatch', no 'fell back', the checkpoint and drafter-manifest lines. Any mismatch is NO-GO for the fine-tune.
+# NO-GO for adopting the fine-tune: any stall, any text difference between the arms, any audit mismatch, or a pooled lower bound not above 1.00 (a NOT_ESTABLISHED is not a GO either).
+# Time (estimate, minutes): 530 in all, 450 of cards (X0 to Z).
+B0-build-control stop tp4-swift-drafter-0 40
+B1-build-sw1ft stop tp4-swift-drafter-1 40
+X0-status-rescan-reset stop tp4-swift-drafter-0 20
+T1-tau-swift-control soft tp4-swift-drafter-0 75
+T2-tau-swift-sw1ft soft tp4-swift-drafter-1 75
+C1-swift-control-a soft tp4-swift-drafter-0 40
+L1-swift-sw1ft-a soft tp4-swift-drafter-1 40
+C2-swift-control-b soft tp4-swift-drafter-0 40
+L2-swift-sw1ft-b soft tp4-swift-drafter-1 40
+SA1-swift-sw1ft-audited-attach soft tp4-swift-drafter-1 110
+Z-reset soft tp4-swift-drafter-0 10

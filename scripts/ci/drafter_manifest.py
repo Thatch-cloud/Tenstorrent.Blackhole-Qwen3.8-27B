@@ -28,6 +28,11 @@ DIRECTORY = Path(__file__).resolve().with_name('references') / 'drafter-manifest
 DEFAULT_SHA256 = 'fd1c50b9d6dca5c1a2defaa6ac489ca46df39a77daab20faebc6ae3ebc94a54c'
 HEADER_SHA256 = '0c2c70601b30f8d1ca7d5794b817779ba2dcf1956cfc7d4f83e87091e1ab7c8c'
 CHECKPOINT_BYTES = 3848817896
+# A drafter this repository trained itself has no hub repository: `source` local, a model named local/<name>, a revision that is the
+# first 40 hex digits of the weights' sha256, and its config committed under references/drafter-configs/<name>.config.json (the
+# image build copies it instead of fetching one; its sha256 is the manifest's config_sha256 either way).
+SOURCES = ('hub', 'local')
+LOCAL_PREFIX = 'local/'
 NAME = re.compile(r'[a-z0-9][a-z0-9._-]{0,63}')
 HEX64 = re.compile(r'[0-9a-f]{64}')
 HEX40 = re.compile(r'[0-9a-f]{40}')
@@ -101,6 +106,14 @@ def validate(manifest, name):
     if (HEX40.fullmatch(str(manifest['revision'])) is None or not isinstance(manifest['model'], str)
             or manifest['model'].count('/') != 1):
         raise ValueError('Drafter manifest %s needs a full 40-character revision of an owner/name repository' % name)
+    source = manifest.get('source', 'hub')
+    if source not in SOURCES:
+        raise ValueError('Drafter manifest %s: source must be one of %s' % (name, ', '.join(SOURCES)))
+    if source == 'local' and (not manifest['model'].startswith(LOCAL_PREFIX) or not isinstance(manifest.get('base'), str)):
+        raise ValueError('Drafter manifest %s: a local checkpoint is named %s<name>, has a content-derived revision '
+                         '(the first 40 hex digits of its weights sha256) and names the manifest it was trained from (base)' % (name, LOCAL_PREFIX))
+    if source == 'local' and manifest['revision'] != str(manifest.get('weights_sha256', ''))[:40]:
+        raise ValueError('Drafter manifest %s: a local checkpoint\'s revision is the first 40 hex digits of its weights_sha256' % name)
     if (manifest['header_sha256'] != HEADER_SHA256 or manifest['checkpoint_bytes'] != CHECKPOINT_BYTES):
         raise ValueError('Drafter manifest %s: only the byte-identical DFlash2 layout loads (header and size)' % name)
     for key in ('config_sha256', 'fc_first32_sha256'):
