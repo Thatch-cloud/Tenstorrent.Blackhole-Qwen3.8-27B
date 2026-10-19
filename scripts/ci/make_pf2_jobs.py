@@ -28,7 +28,7 @@ SHIP = ship4.SHIP                      # the approved ship-4 profile: what produ
 CONTROL = twins.CONTROL                # its gate-only twin with QWEN_FAST_PREFILL_HANDOFF=0: the control of every timed pair
 ARM = twins.ARM                        # ... with =1: the timed arm
 AUDIT = twins.AUDIT                    # the ship-4 audited twin with =1 and its audit: the audited attach arm
-SMOKE_TESTS = 'warmup,coding,parked_turns,prefill_ladder_solo,concurrent8_steady'      # (the eight-seat profile's smoke rule requires concurrent8_steady)
+SMOKE_TESTS = 'warmup,coding,parked_turns,prefill_ladder_solo,prefill_few_decoders,concurrent8_steady'      # (the eight-seat profile's smoke rule requires concurrent8_steady)
 TIMED_TESTS = SMOKE_TESTS
 
 HEADER = """# A committed TEMPLATE of .github/c2-serving-job.env for the tp4/prefill-2 window (the device-side hand-off of the final step's GDN state; scripts/ci/c2_serving_job.py parses it): copy it over
@@ -48,7 +48,8 @@ TELEMETRY = ('TELEMETRY (C2_TELEMETRY=1, scripts/ci/card_telemetry.py): the read
              'A rate difference that comes with a different loaded AICLK between the arms is the clocks, not the lever.')
 ARC = 'TIMED: the ARC runner sets are at ZERO for this job (ORDER.txt, ARC-ZERO); no build, no CI push, no other job beside it.'
 SHAPES = ('warmup; coding (one user); parked_turns (eight seats, forty closed-loop turns of 4k to 24k tokens: forty final steps, each a hand-off beside seven decoding seats); prefill_ladder_solo (one request at a time '
-          'at about 4k, 32k, 128k and 254k tokens: four final steps); concurrent8_steady (eight users: eight final steps, then the octo rounds, which the lever never touches)')
+          'at about 4k, 32k, 128k and 254k tokens: four final steps); prefill_few_decoders (one decoding seat beside a 120k-token arrival and two beside a 254k one: two more final steps, at 120k and 254k of '
+          'context, beside seats that wait for them); concurrent8_steady (eight users: eight final steps, then the octo rounds, which the lever never touches)')
 PF2_LINES = ('the lines in the container log: "[PINDIAG] lever N route installed: route=1 audit=0 merged=COLD,CHECKPOINT,SCRATCH,PARKED handoff=%s" once; on the arms "[PINDIAG] prefill handoff engaged mode=device layers=48 clones=240" '
              'once and one "[PF2] handoff mode=device ms=.. read_ms=0.0 clone_ms=.. write_ms=.. layers=48" per final step; on the control one "[PF2] handoff mode=host ms=.. read_ms=.. write_ms=.. layers=48" per final step and no '
              '"engaged" line; no "fell back" line and no program growth after the warm anywhere')
@@ -67,7 +68,7 @@ def rows():
                          '(AVAILABLE WORKER CORE COUNT; 13x10 since the firmware unlock), no other window driver alive. The Swift weight cache exists on the card host (the Swift window\'s W0 built it): "weight cache '
                          '...: found" is the read of every smoke job below. Stop rule: anything else. The owner stops the node agent and unserves production BEFORE it and restores production after Z with the '
                          'cutover pack\'s own steps.')))
-    out.append(dict(name='A1-pf2-audited-attach', mode='stop', minutes=90, actions='reset smoke', profile=AUDIT, tests=SMOKE_TESTS, telemetry=True, box=135, needs=('A1 <- X0',), model=True, prefix=None, extra=[],
+    out.append(dict(name='A1-pf2-audited-attach', mode='stop', minutes=100, actions='reset smoke', profile=AUDIT, tests=SMOKE_TESTS, telemetry=True, box=150, needs=('A1 <- X0',), model=True, prefix=None, extra=[],
                     why=('A1 (EXACTNESS of the device-side hand-off on cold prompts, STOP): %s, the ship-4 audited twin (every audit of the candidate) with QWEN_FAST_PREFILL_HANDOFF=1 and QWEN_FAST_PREFILL_HANDOFF_AUDIT=1, on Swift. '
                          'Each of the first 8 final steps and every 24th after reads the whole batched decode state of all 48 GDN layers before and after the slot write and requires (a) the slot\'s rows equal to the scratch\'s host copy '
                          'byte for byte on every chip and (b) every other row unchanged. %s. READ: c2_smoke_check clean; %s; "[PINDIAG] prefill handoff audit n=<k> exact=True slot=.. layers=48 tensors_checked=.." for n=1..8 and then every 24th '
@@ -83,12 +84,12 @@ def rows():
     pair = (('T1', 'T2'), ('T3', 'T4'))
     for index, (control, arm) in enumerate(pair, 1):
         letter = 'a' if index == 1 else 'b'
-        out.append(dict(name='%s-ctl-%s' % (control, letter), mode='soft', minutes=45, actions='reset smoke', profile=CONTROL, tests=TIMED_TESTS, telemetry=True, box=80,
+        out.append(dict(name='%s-ctl-%s' % (control, letter), mode='soft', minutes=55, actions='reset smoke', profile=CONTROL, tests=TIMED_TESTS, telemetry=True, box=90,
                         needs=('T1 <- A1 AP1',) if index == 1 else ('T3 <- T2',), model=True, prefix=None, extra=[],
                         why=('%s (TIMED, the CONTROL of the %s smoke pair): %s, the approved ship-4 profile with the gate marker for its waiver id and QWEN_FAST_PREFILL_HANDOFF=0: the host path of the final step, byte for byte '
                              'production\'s, which also prints the "[PF2] handoff mode=host" timing line, on Swift. Tests: %s. Every boot a fresh reset. %s %s %s'
                              % (control, 'first' if index == 1 else 'second', CONTROL, SHAPES, ARC, CHECKPOINT_READ, TELEMETRY))))
-        out.append(dict(name='%s-pf2-%s' % (arm, letter), mode='soft', minutes=45, actions='reset smoke', profile=ARM, tests=TIMED_TESTS, telemetry=True, box=80,
+        out.append(dict(name='%s-pf2-%s' % (arm, letter), mode='soft', minutes=55, actions='reset smoke', profile=ARM, tests=TIMED_TESTS, telemetry=True, box=90,
                         needs=('T2 <- T1',) if index == 1 else ('T4 <- T3',), model=True, prefix=None, extra=[],
                         why=('%s (TIMED, the ARM of the %s smoke pair): %s, the control with QWEN_FAST_PREFILL_HANDOFF=1 and nothing else, the same tests as %s, on Swift. %s READ: c2_smoke_check clean; %s. Then, after the four boots of the pair '
                              '(T1 T2 T3 T4): python3 -B scripts/ci/pf2_report.py --control <T1 container log> --control <T3 container log> --arm <T2 container log> --arm <T4 container log>: the hand-off milliseconds per final step '

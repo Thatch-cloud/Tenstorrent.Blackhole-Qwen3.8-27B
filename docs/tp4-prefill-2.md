@@ -215,12 +215,12 @@ a second line to read). Worth: another 20-40 ms a final step (**E**).
 
 | block | jobs | minutes (E) |
 | --- | --- | ---: |
-| gates | B0 window build (ship-4 profile baked, K64j-OQ graft), X0, **A1 audited attach on Swift** (stop), **AP1 audited returning turns** (stop: `tier-timed` at about 32k/128k/254k) | 240 |
-| smoke ABAB | T1 control, T2 lever, T3 control, T4 lever on Swift: warmup, coding, parked_turns (40 final steps), prefill_ladder_solo, concurrent8_steady | 180 |
+| gates | B0 window build (ship-4 profile baked, K64j-OQ graft), X0, **A1 audited attach on Swift** (stop), **AP1 audited returning turns** (stop: `tier-timed` at about 32k/128k/254k) | 250 |
+| smoke ABAB | T1 control, T2 lever, T3 control, T4 lever on Swift: warmup, coding, parked_turns (40 final steps), prefill_ladder_solo (4k-254k), prefill_few_decoders (a 120k and a 254k arrival beside decoding seats), concurrent8_steady | 220 |
 | returning turns | R1 control, R2 lever: `tier-timed`, the hand-off at 125k and 245k of context | 180 |
 | end | Z | 10 |
 
-Total 610 minutes (570 on cards). Every smoke job carries `C2_MODEL_REPO=ukisai/Swift-1.5-Qwen3.8-27b`, `C2_MODEL_REVISION=b4c84d42903a8646b25857eb2827288d92ed85a4`; the prefix steps do not forward the selection
+Total 660 minutes (620 on cards). There is no 160k rung: the hand-off does not depend on the context (the state it moves is the same size), and the returning-turn pair reads it at 125k and 245k. Every smoke job carries `C2_MODEL_REPO=ukisai/Swift-1.5-Qwen3.8-27b`, `C2_MODEL_REVISION=b4c84d42903a8646b25857eb2827288d92ed85a4`; the prefix steps do not forward the selection
 (`MODEL_ACTIONS`) and serve the base checkpoint, which the hand-off does not depend on. The measurement is the `[PF2] handoff` line both arms print, read by
 `python3 -B scripts/ci/pf2_report.py --control <T1 log> --control <T3 log> --arm <T2 log> --arm <T4 log>` (mean/median/p90 of the hand-off per final step, the saving, the route milliseconds by context
 band; exit 1 when the pair is not a pair), beside `prefill_ladder_report.py` for the cold ladder (TTFT ratios and equal answers). The expected saving is a few tens of milliseconds a step against ladder TTFTs of
