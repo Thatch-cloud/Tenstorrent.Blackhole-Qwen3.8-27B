@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import c2_prefix_gate as gate  # noqa: E402
 import c2_serving_gate  # noqa: E402
+import c2_smoke_check  # noqa: E402
 import c2_serving_job as job  # noqa: E402
 import prefix_judge as judge  # noqa: E402
 import prefix_markers as pm  # noqa: E402
@@ -40,7 +41,7 @@ WORKFLOW = os.path.join(ROOT, '.github', 'workflows', 'qwen-c2-serving.yml')
 CPU_WORKFLOW = os.path.join(ROOT, '.github', 'workflows', 'qwen-integration-cpu.yml')
 JOB_FILE = os.path.join(ROOT, '.github', 'c2-serving-job.env')
 NEW_TESTS = ('test_prefix_agent_corpus', 'test_prefix_markers', 'test_prefix_judge', 'test_prefix_report',
-             'test_prefix_replay', 'test_prefix_oracle_check', 'test_c2_prefix_gate', 'test_prefix_tier_profiles', 'test_prefix_tier_gate', 'test_prefix_tier_concurrent', 'test_prefix_tier_quota', 'test_qwen_prefix_quota', 'test_tp4_prefix_tiers_jobs')
+             'test_prefix_replay', 'test_prefix_oracle_check', 'test_c2_prefix_gate', 'test_prefix_tier_profiles', 'test_prefix_tier_gate', 'test_prefix_tier_concurrent', 'test_prefix_tier_quota', 'test_qwen_prefix_quota', 'test_tp4_prefix_tiers_jobs', 'test_prefix_rejudge')
 CURRENT = dict(engine=None)
 
 
@@ -1705,6 +1706,232 @@ class WorkflowTests(unittest.TestCase):
         modules = set(token for line in named for token in line.split())
         for module in NEW_TESTS:
             self.assertIn(module, modules, '%s is not run by qwen-integration-cpu.yml' % module)
+
+
+REAL_PROFILES_FILE = os.path.join(HERE, 'qwen_c2_profiles.json')
+S5_AUDIT = 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-s5-audit'          # asks QWEN_PREFIX_STORE_GIB=16 on purpose (the host RAM budget)
+S4_AUDIT = 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-s4-xe-audit'       # asks 8
+ER_UNDROP, ER_CARRY, ER_AUDIT = 'QWEN_PREFIX_STICKY_UNDROP', 'QWEN_PREFIX_WINDOW_CARRY', 'QWEN_PREFIX_WINDOW_CARRY_AUDIT'
+
+
+def real_profiles():
+    with open(REAL_PROFILES_FILE, encoding='utf-8') as handle:
+        return json.load(handle)
+
+
+class StoreSizeTests(unittest.TestCase):
+    """A2 (run 39248960529) failed on 'checkpoint store 16.0 GiB, the arm asked 8.0': the s5 profiles ask for 16 GiB, the judge asked 8 of every arm but the small-store one."""
+
+    def arm(self, profile, plan='exact-resume'):
+        return gate.plan_arms(plan, profile, 'none', real_profiles())[0]
+
+    def store_problems(self, arm, install_gib):
+        scanned = pm.scan([marker_fixture.install_line().replace('store_gib=8.0', 'store_gib=%.1f' % install_gib)])
+        problems, _, _ = gate.generic_problems(arm, scanned, [], None, arm['served'], gate.expected_store_gib(arm))
+        return [problem for problem in problems if problem.startswith('checkpoint store')]
+
+    def test_the_arm_expects_what_its_served_profile_asks(self):
+        s5, s4 = self.arm(S5_AUDIT), self.arm(S4_AUDIT)
+        self.assertEqual((s5['store_gib'], gate.expected_store_gib(s5)), ('16', 16.0))
+        self.assertEqual((s4['store_gib'], gate.expected_store_gib(s4)), ('8', 8.0))
+        small = arm_of('lifecycle', 'lifecycle-store')
+        self.assertEqual((small['store_gib'], gate.expected_store_gib(small)), (str(gate.SMALL_STORE_GIB), gate.SMALL_STORE_GIB), 'the derived small-store arm')
+
+    def test_an_arm_described_by_hand_falls_back_as_it_always_did(self):
+        self.assertEqual(gate.expected_store_gib(dict(kind='store')), gate.SMALL_STORE_GIB)
+        self.assertEqual(gate.expected_store_gib(dict(kind='audit')), judge.DEFAULT_STORE_GIB)
+        self.assertEqual(gate.expected_store_gib(dict(served_env={'QWEN_PREFIX_STORE_GIB': '16'})), 16.0)
+        self.assertEqual(gate.expected_store_gib(dict(store_gib='4', served_env={'QWEN_PREFIX_STORE_GIB': '16'})), 4.0, 'the plan\'s own key first')
+        self.assertEqual(gate.expected_store_gib(dict(store_gib='', served_env={})), judge.DEFAULT_STORE_GIB, 'a profile that names none: the registry default')
+        self.assertEqual(gate.expected_store_gib(dict(store_gib='sixteen')), judge.DEFAULT_STORE_GIB, 'not a number: the default, so the install line cannot match it by accident')
+
+    def test_a_profile_that_asks_16_and_serves_16_passes(self):
+        self.assertEqual(self.store_problems(self.arm(S5_AUDIT), 16.0), [])
+        self.assertEqual(self.store_problems(self.arm(S4_AUDIT), 8.0), [])
+
+    def test_a_mismatch_between_the_profile_and_the_install_line_still_fails(self):
+        bad, = self.store_problems(self.arm(S5_AUDIT), 8.0)
+        self.assertIn('checkpoint store 8.0 GiB, the arm asked 16.0', bad)
+        self.assertIn('QWEN_PREFIX_STORE_GIB', bad)
+        bad, = self.store_problems(self.arm(S4_AUDIT), 16.0)
+        self.assertIn('checkpoint store 16.0 GiB, the arm asked 8.0', bad)
+        small = arm_of('lifecycle', 'lifecycle-store')
+        self.assertEqual(self.store_problems(small, 0.5), [])
+        self.assertTrue(self.store_problems(small, 8.0))
+
+
+def carried_log(prompt=9412, q=8192, rows=828, engaged='undrop=1 carry=1 audit=1', audit_exact=True, carried_line=True, tag='pfx-er-0006-hit'):
+    """The log lines of one carried resume: grant, [PREFIX] row, sticky admit, the window carry lines (the forms A2's server logged)."""
+    req = 'chatcmpl-%s-8d7be8a8' % tag
+    lines = []
+    if engaged:
+        lines.append('(EngineCore pid=67) [PINDIAG] prefix: window carry engaged %s ceiling=floor2048(P-1) with a covering window, else floor2048(P-2048)' % engaged)
+    lines += [marker_fixture.grant_line(req, q, q, []),
+              "(EngineCore pid=67) INFO [PINDIAG] sticky admit req='%s' Q=%d P=%d tail=%d" % (req, q, prompt, prompt - q)]
+    if carried_line:
+        lines.append('(EngineCore pid=67) [PINDIAG] prefix: window carry carried req=%s Q=%d P=%d rows=%d' % (req, q, prompt, rows))
+    lines += ['(EngineCore pid=67) [PINDIAG] prefix: window carry audit req=%s P=%d Q=%d carried=%d window_sha=%s transport=exact exact=%s' % (
+                  req, prompt, q, rows, 'a' * 64, audit_exact),
+              '[PREFIX] req=%s Q=%d L=%d path=eager restored_ms=218.8 captured=[] capture_ms=0 programs=1113 programs_before=1113' % (req, q, prompt)]
+    return lines
+
+
+class CarriedCeilingGateTests(unittest.TestCase):
+    """A2's seven flagged hits (Q=8192 for P=9412 and six more) were the exact resume P0's deliberate resumes one checkpoint above floor2048(P - 2048), each carrying its drafter
+    window, each audited exact=True. The gate judges them against floor2048(P - 1) when the carry is engaged and the request carried, and against the old ceiling otherwise."""
+
+    TAG = 'pfx-er-0006-hit'
+
+    def arm(self, **env):
+        return dict(arm='exact-resume', prefix=True, strict=True, sticky=True, kind=None, scenario='exact_resume',
+                    served_env=dict({ER_UNDROP: '1', ER_CARRY: '1', ER_AUDIT: '1'}, **env), store_gib=None)
+
+    def hit_record(self, prompt=9412, q=8192, scanned=None):
+        record = dict(tag=self.TAG, role='hit', ok=True, prompt_tokens=prompt, expected=dict(h=q, q=q, plan=[]))
+        judge.resolve([record], scanned)
+        return record
+
+    def ceiling_problems(self, arm, lines, prompt=9412, q=8192):
+        scanned = pm.scan(lines)
+        problems, _, _ = gate.generic_problems(arm, scanned, [self.hit_record(prompt, q, scanned)], None, 'x')
+        return [problem for problem in problems if 'is above floor2048' in problem]
+
+    def test_the_carry_is_engaged_when_the_profile_asks_and_the_graft_says_so(self):
+        lines = pm.scan(carried_log())
+        self.assertTrue(gate.carry_engaged(self.arm(), lines))
+        self.assertFalse(gate.carry_engaged(self.arm(**{ER_CARRY: '0'}), lines), 'the profile does not ask')
+        self.assertFalse(gate.carry_engaged(dict(self.arm(), sticky=False), lines), 'not a sticky arm')
+        self.assertFalse(gate.carry_engaged(self.arm(), pm.scan(carried_log(engaged=None))), 'no engaged line: the graft never took the switches')
+        self.assertFalse(gate.carry_engaged(self.arm(), pm.scan(carried_log(engaged='undrop=1 carry=0 audit=0'))), 'engaged without the carry')
+        self.assertFalse(gate.carry_engaged(self.arm(), {}))
+
+    def test_a_carried_resume_above_the_old_ceiling_passes(self):
+        self.assertEqual(self.ceiling_problems(self.arm(), carried_log()), [])
+        self.assertEqual(self.ceiling_problems(self.arm(), carried_log(prompt=128532, q=126976, rows=492), prompt=128532, q=126976), [])
+        no_audit = self.arm()
+        del no_audit['served_env'][ER_AUDIT]
+        self.assertEqual(self.ceiling_problems(no_audit, [line for line in carried_log() if 'carry audit' not in line]), [])
+
+    def test_the_same_resume_fails_where_the_carry_is_not_engaged(self):
+        old = self.ceiling_problems(self.arm(), carried_log(engaged=None))
+        self.assertEqual(len(old), 1)
+        self.assertIn('Q=8192 is above floor2048(L - 2048) = 6144: a resume inside the fast path\'s drafter window (a C1 grant the sticky trim forbids)', old[0])
+        self.assertEqual(len(self.ceiling_problems(self.arm(**{ER_CARRY: '0'}), carried_log())), 1, 'the profile does not ask for the carry')
+        self.assertEqual(len(self.ceiling_problems(self.arm(), carried_log(engaged='undrop=1 carry=0 audit=0'))), 1)
+
+    def test_an_engaged_carry_does_not_excuse_a_resume_that_carried_nothing_or_an_inexact_one(self):
+        bad, = self.ceiling_problems(self.arm(), carried_log(carried_line=False, rows=0))
+        self.assertIn('is not a carried resume: no "window carry carried" line (rows above 0)', bad)
+        bad, = self.ceiling_problems(self.arm(), carried_log(audit_exact=False))
+        self.assertIn('is not a carried resume: its window carry audit says exact=False (transport=exact, carried=828)', bad)
+        bad, = self.ceiling_problems(self.arm(), carried_log(rows=500))
+        self.assertIn('the 500 carried window rows reach down only to position 7692, above P - 2048 = 7364', bad)
+
+    def test_a_resume_under_the_old_ceiling_is_unchanged_whatever_the_carry(self):
+        for lines in (carried_log(q=6144, rows=0, carried_line=False), carried_log(q=6144, rows=0, carried_line=False, engaged=None)):
+            self.assertEqual(self.ceiling_problems(self.arm(), lines, q=6144), [])
+
+
+class LeverMultiUserTests(unittest.TestCase):
+    """A2 failed on fifteen lever checks whose levers act only in a round of two or more live users, on an arm that sends one request at a time (its S2 report: 3440 packed
+    rounds by live users {"1": 3440}). A sequential arm reports them NOT_EXERCISED; a multi-user round that left one unengaged still fails; the smoke and the serving gate keep them."""
+
+    ENV = {'QWEN_FAST_QUAD_DRAFT': '1', 'QWEN_FAST_M3_BLOCKS': '2', 'QWEN_FAST_DRAFT_PERMUTE': '1', 'QWEN_FAST_DRAFT_PERMUTE_AUDIT': '1', 'QWEN_FAST_DRAFT_QKV1': '1',
+           'QWEN_FAST_DRAFT_QKV1_AUDIT': '1', 'QWEN_FAST_DRAFT_HEAD64': '1', 'QWEN_FAST_DRAFT_HEAD64_AUDIT': '1', 'QWEN_FAST_BATCHED_READS': 'async',
+           'QWEN_FAST_BATCHED_READS_AUDIT': '1', 'QWEN_FAST_CCL_OPTIONS': 'rs-c1', 'QWEN_FAST_CCL_OPTIONS_AUDIT': '1'}
+    # What a solo arm logs of these levers: the CCL options engaged with replay audits of ONE block owner, the batched reads at the verify site.
+    SOLO = ['[PINDIAG] tp4 ccl options engaged set=rs-c1 rows=64 rs=128 ag=0 fallbacks=0 audited=32',
+            '[PINDIAG] tp4 ccl options audit shape=64x5120 owner=capture4 round=50 op=rs calls=32 chips=4 elements=10485760 exact=True',
+            '[PINDIAG] tp4 batched reads engaged site=verify mode=async tensors=2 chips=4',
+            '[PINDIAG] tp4 batched reads audit site=verify mode=async reads=1 tensors=2 chips=4 exact=True']
+
+    def report(self, by_live):
+        return dict(problems=[], rounds=dict(count=sum(by_live.values()), by_live=by_live), extent_audit=dict(lines=0, mismatches=0))
+
+    def findings(self, by_live, log=None, env=None):
+        arm = dict(arm='exact-resume', scenario='exact_resume', served_env=dict(self.ENV if env is None else env), env=(), sticky=False)
+        with mock.patch.object(gate.harness, 's2_report', return_value=self.report(by_live)):
+            problems, _, lines, _ = gate.s2_findings(arm, '\n'.join(self.SOLO if log is None else log), dict(), [])
+        return [p for p in problems if p.startswith('lever: ')], lines
+
+    def test_the_rounds_the_report_counted(self):
+        self.assertEqual(gate.live_users_seen(self.report({'1': 3440})), 1)
+        self.assertEqual(gate.live_users_seen(self.report({'1': 9, '4': 2, '2': 0})), 4)
+        self.assertEqual(gate.live_users_seen(self.report({2: 1})), 2, 'integer keys too')
+        self.assertIsNone(gate.live_users_seen(self.report({})))
+        self.assertIsNone(gate.live_users_seen(self.report({'many': 1})))
+        self.assertIsNone(gate.live_users_seen(dict(problems=['s2_report failed'])))
+        self.assertTrue(gate.solo_rounds_only(self.report({'1': 3440})))
+        for by_live in ({}, {'1': 4, '2': 1}, {'8': 1}, {'many': 1}):
+            self.assertFalse(gate.solo_rounds_only(self.report(by_live)), by_live)
+
+    def test_the_levers_the_solo_arm_could_not_exercise_are_not_a_failure_of_it(self):
+        problems, lines = self.findings({'1': 3440})
+        self.assertEqual(problems, [])
+        header, = [line for line in lines if 'lever checks NOT_EXERCISED' in line]
+        self.assertIn('15 lever checks NOT_EXERCISED (each needs 2 or more live users; no packed round of this arm had more than 1', header)
+        listed = [line for line in lines if line.startswith('  not exercised: lever: ')]
+        self.assertEqual(len(listed), 15)
+        for flag in ('QWEN_FAST_DRAFT_PERMUTE=1', 'QWEN_FAST_DRAFT_QKV1=1', 'QWEN_FAST_DRAFT_HEAD64=1', 'QWEN_FAST_DRAFT_PERMUTE_AUDIT is set', 'QWEN_FAST_DRAFT_PERMUTE_AUDIT=1',
+                     'QWEN_FAST_DRAFT_QKV1_AUDIT', 'QWEN_FAST_DRAFT_HEAD64_AUDIT', 'site=kv shape=quad', 'site=fold shape=quad', 'site=unfold shape=quad',
+                     'QWEN_FAST_BATCHED_READS is set and no engaged line for site=collect', 'QWEN_FAST_BATCHED_READS_AUDIT is set and no passing audit line for site=collect',
+                     'QWEN_FAST_CCL_OPTIONS_AUDIT: op=rs replay audits came from 1 block owner(s), 2 blocks are served'):
+            self.assertTrue(any(flag in line for line in listed), flag)
+
+    def test_one_multi_user_round_holds_the_arm_to_every_lever(self):
+        for by_live in ({'1': 3440, '2': 1}, {'4': 12}, {'8': 1}):
+            problems, lines = self.findings(by_live)
+            self.assertEqual(len(problems), 15, by_live)
+            self.assertFalse(any('NOT_EXERCISED' in line for line in lines), lines)
+
+    def test_an_arm_the_report_says_nothing_about_is_held_to_every_lever(self):
+        for by_live in ({}, {'many': 1}):
+            problems, lines = self.findings(by_live)
+            self.assertEqual(len(problems), 15, by_live)
+            self.assertFalse(any('NOT_EXERCISED' in line for line in lines), lines)
+
+    def test_the_downgrade_is_the_multi_user_shapes_only(self):
+        """Solo rounds, and still a failure: a lever whose engaged line any round writes, the batched reads' verify site, a CCL audit with no replay at all, a fall-back, an audit
+        mismatch, a lever line on a profile that did not ask for it."""
+        env = dict(self.ENV, QWEN_FAST_DRAFT_REDUCE='1')
+        problems, lines = self.findings({'1': 3440}, env=env)
+        self.assertTrue(problems and all('QWEN_FAST_DRAFT_REDUCE' in problem for problem in problems), problems)
+        self.assertTrue(any('QWEN_FAST_DRAFT_REDUCE=1 is set and no engaged line' in problem for problem in problems), problems)
+        no_verify = [line for line in self.SOLO if 'site=verify' not in line]
+        problems, _ = self.findings({'1': 3440}, log=no_verify)
+        self.assertEqual(len(problems), 6, problems)
+        self.assertTrue(all('QWEN_FAST_BATCHED_READS' in problem for problem in problems), problems)
+        self.assertEqual(len([problem for problem in problems if 'site=verify' in problem]), 2, 'the verify site is every round\'s, not the quads\'')
+        no_replay = [line.replace('round=50', 'round=0') for line in self.SOLO]
+        problems, _ = self.findings({'1': 3440}, log=no_replay)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn('no replay audit line', problems[0])
+        for extra, text in (('[PINDIAG] tp4 draft permute fell back reason=x', 'fell back'),
+                            ('[PINDIAG] tp4 ccl options audit mismatch shape=64x5120', 'found a difference'),
+                            ('[PINDIAG] tp4 batched reads fell back site=verify', 'fell back')):
+            problems, _ = self.findings({'1': 3440}, log=self.SOLO + [extra])
+            self.assertTrue(any(text in problem for problem in problems), (extra, problems))
+        problems, _ = self.findings({'1': 3440}, log=['[PINDIAG] tp4 draft qkv1 engaged site=quad'], env={'QWEN_FAST_DRAFT_QKV1': '1'})
+        self.assertEqual(problems, [], 'a lever engaged where it is asked: nothing to say')
+        problems, lines = self.findings({'1': 3440}, log=self.SOLO, env={})
+        self.assertEqual(len(problems), 2, problems)
+        self.assertTrue(all('on a profile without' in problem for problem in problems), 'lever lines on a profile that did not ask are never downgraded')
+        self.assertFalse(any('NOT_EXERCISED' in line for line in lines))
+
+    def test_the_split_is_pinned_to_the_rules_that_write_the_messages(self):
+        """Every message split_multi_user_levers moves comes from a rule today, and a multi-user problem the rules write in another form is NOT moved (it fails loudly)."""
+        found = c2_smoke_check.lever_engagement_problems(self.ENV, '\n'.join(self.SOLO))
+        kept, multi = c2_smoke_check.split_multi_user_levers(found)
+        self.assertEqual((kept, multi), ([], found))
+        self.assertEqual(len(found), 15)
+        kept, multi = c2_smoke_check.split_multi_user_levers(['QWEN_FAST_DRAFT_PERMUTE has changed its wording and is not at all the old form', 'x'])
+        self.assertEqual((kept, multi), (['QWEN_FAST_DRAFT_PERMUTE has changed its wording and is not at all the old form', 'x'], []))
+        self.assertEqual(c2_smoke_check.MULTI_USER_MIN_LIVE, 2)
+
+    def test_the_smoke_and_the_serving_gate_keep_every_one_of_them(self):
+        """lever_engagement_problems (the smoke's rules, which c2_serving_gate calls too) is untouched: the downgrade is the prefix gate's and only on its sequential arms."""
+        self.assertEqual(len(c2_smoke_check.lever_engagement_problems(self.ENV, '\n'.join(self.SOLO))), 15)
+        self.assertEqual(len(c2_serving_gate.lever_engagement_problems(self.ENV, '\n'.join(self.SOLO))), 15)
 
 
 class GateOnlyServedProfileTests(unittest.TestCase):

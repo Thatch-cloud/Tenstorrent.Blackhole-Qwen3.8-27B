@@ -120,9 +120,14 @@ def token_sha(tokens):
     return hashlib.sha256(array('q', list(tokens or ())).tobytes()).hexdigest()
 
 
-def resume_ceiling(prompt_tokens):
+def resume_ceiling(prompt_tokens, carry=False):
     """The highest Q sticky sessions grant a prompt of `prompt_tokens`: floor2048(P - 2048), so the fast
-    path's drafter window [P - 2048, P) is this prefill's own chunks."""
+    path's drafter window [P - 2048, P) is this prefill's own chunks. carry (exact resume P0, the window
+    carry engaged): floor2048(P - 1), one checkpoint higher - the resume may stop inside the drafter window
+    when the checkpoint carries the window rows below Q (window_carry_problems says whether a request's did);
+    the engine's own line reads `ceiling=floor2048(P-1) with a covering window, else floor2048(P-2048)`."""
+    if carry:
+        return floor_chunk(max(0, int(prompt_tokens) - 1))
     return floor_chunk(max(0, int(prompt_tokens) - CHUNK))
 
 
@@ -197,7 +202,7 @@ class Oracle(object):
         top = h // CHUNK
         ceiling = resume_ceiling(len(tokens))
         if self.sticky:
-            top = min(top, (max(0, len(tokens) - 1) if self.carry else ceiling) // CHUNK)
+            top = min(top, resume_ceiling(len(tokens), self.carry) // CHUNK)
         for k in range(top, 0, -1):
             key = (salt, digests[k * CHUNK // BLOCK - 1])
             if key in self.checkpoints:
@@ -522,9 +527,10 @@ def resolve(records, scanned):
     row without a request id falls back to the one row inside the request's log window whose L is
     its prompt length. The FIRST row is the admission judged against the oracle (q, l); the
     admissions count is the number of rows (a preempted request is re-admitted and prints again);
-    `grant` is the first admission's (the grants logged before the second row). Sets
-    record['markers'] and returns the records."""
-    grants, rows, audits, skipped, admits, windows = {}, {}, {}, {}, {}, {}
+    `grant` is the first admission's (the grants logged before the second row). Exact resume P0's
+    per-request lines ride along: window_carried (`window carry carried`: Q, P, rows) and window_audits
+    (`window carry audit`: P, Q, carried, transport, exact). Sets record['markers'] and returns the records."""
+    grants, rows, audits, skipped, admits, windows, carries, carry_audits = {}, {}, {}, {}, {}, {}, {}, {}
     for entry in scanned.get('grants') or ():
         grants.setdefault(entry['tag'], []).append(entry)
     for entry in scanned.get('sticky_admits') or ():
@@ -533,6 +539,12 @@ def resolve(records, scanned):
     for entry in scanned.get('audit_windows') or ():
         if entry.get('tag'):
             windows.setdefault(entry['tag'], []).append(entry)
+    for entry in scanned.get('window_carried') or ():
+        if entry.get('tag'):
+            carries.setdefault(entry['tag'], []).append(entry)
+    for entry in scanned.get('window_audits') or ():
+        if entry.get('tag'):
+            carry_audits.setdefault(entry['tag'], []).append(entry)
     builds = list(scanned.get('sticky_builds') or ())
     untagged = []
     for entry in scanned.get('rows') or ():
@@ -551,6 +563,7 @@ def resolve(records, scanned):
         found = dict(grants=list(grants.get(tag) or ()), rows=list(rows.get(tag) or ()),
                      audit=(audits.get(tag) or [None])[0], skipped=list(skipped.get(tag) or ()), matched='tag',
                      sticky_admits=list(admits.get(tag) or ()), audit_windows=list(windows.get(tag) or ()),
+                     window_carried=list(carries.get(tag) or ()), window_audits=list(carry_audits.get(tag) or ()),
                      sticky_builds=[entry for entry in builds if engine_id_matches(entry.get('req'), tag)])
         if not found['rows'] and untagged and record.get('log_window'):
             start, end = record['log_window']
@@ -615,7 +628,7 @@ def observed_q(record):
 FRESH_ROLES = ('cold', 'capture', 'cold-batch')
 
 
-def reuse_problems(record, sequential=True, sticky=False, levern=False):
+def reuse_problems(record, sequential=True, sticky=False, levern=False, carry=False):
     """What one request's markers say against the oracle's expectation (record['expected']) and the
     request's own role. -> list of (severity, text): FAIL for a missing or inconsistent row, a grant
     to an unsalted or fresh-salt request, a restore without a grant, a capture nobody planned, or
@@ -627,7 +640,9 @@ def reuse_problems(record, sequential=True, sticky=False, levern=False):
     window's ceiling floor2048(L - 2048), a re-admission (the fast path has no preemption), and a hit
     whose sticky admit line is missing or disagrees with its row (Q, P, tail = P - Q), or an admit
     line for a request that resumed nothing. levern (the engine logged `install chunked=levern`): the admit's tail is the FIRST
-    scheduled chunk, so it may also be a first step of Lever N's plan (levern_first_step), not only P - Q."""
+    scheduled chunk, so it may also be a first step of Lever N's plan (levern_first_step), not only P - Q. carry (exact resume P0: the profile asks for the window
+    carry AND the scheduler graft logged `window carry engaged ... carry=1`): the ceiling is floor2048(P - 1) for a request that carried its drafter window
+    (window_carry_problems) and floor2048(P - 2048) for every other."""
     markers = record.get('markers') or {}
     expected = record.get('expected') or {}
     role, tag = record.get('role'), record.get('tag')
@@ -662,7 +677,7 @@ def reuse_problems(record, sequential=True, sticky=False, levern=False):
         if row.get('q') and row.get('l') is not None and row['q'] >= row['l']:
             out.append(('FAIL', '%s: Q=%d is not below L=%s' % (tag, row['q'], row['l'])))
     if sticky:
-        out += sticky_problems(record, rows, levern=levern)
+        out += sticky_problems(record, rows, levern=levern, carry=carry)
     granted = sorted(entry['q'] for entry in markers.get('grants') or () if entry.get('q'))
     restored = sorted(row['q'] for row in rows if row.get('q'))
     if Counter(granted) != Counter(restored):
@@ -712,9 +727,35 @@ def reuse_problems(record, sequential=True, sticky=False, levern=False):
     return out
 
 
-def sticky_problems(record, rows, levern=False):
+def window_carry_problems(record, q, prompt):
+    """Why a first admission at `q` above floor2048(P - 2048) is NOT a carried resume (exact resume P0, docs/tp4-exact-resume.md 5.2), or [] when it is one: the request has
+    a window carry line (`window carry carried req= Q= P= rows=`, rows above 0) or an audit line that carried rows (`window carry audit ... carried=<n>`) for this Q and P, the
+    rows reach down to P - 2048 (the checkpoint's window starts at Q - rows, and the Oracle resumes above the ceiling only when that start is at or below P - 2048: the
+    drafter window [P - 2048, P) is then the carried rows plus this prefill's own chunks), and every audit line of the request says exact=True with transport=exact. Q
+    above floor2048(P - 1), the carry's own ceiling (resume_ceiling), is never carried: the prompt's last chunk has to be prefilled. -> [reason]."""
+    markers = record.get('markers') or {}
+    if q > resume_ceiling(prompt, carry=True):
+        return ['Q is above floor2048(L - 1) = %d, the highest resume even a carried window grants' % resume_ceiling(prompt, carry=True)]
+    carried = [entry for entry in markers.get('window_carried') or () if entry.get('q') == q and entry.get('p') == prompt]
+    audits = [entry for entry in markers.get('window_audits') or () if entry.get('q') == q and entry.get('p') == prompt]
+    rows = max([entry.get('rows') or 0 for entry in carried] + [entry.get('carried') or 0 for entry in audits] + [0])
+    out = []
+    if rows < 1:
+        out.append('no "window carry carried" line (rows above 0) and no window carry audit line with carried above 0 says a drafter window came with the resume')
+    elif q - rows > prompt - CHUNK:
+        out.append('the %d carried window rows reach down only to position %d, above P - 2048 = %d: the window does not cover the drafter\'s' % (rows, q - rows, prompt - CHUNK))
+    for entry in audits:
+        if not entry.get('exact'):
+            out.append('its window carry audit says exact=False (transport=%s, carried=%s)' % (entry.get('transport'), entry.get('carried')))
+        elif entry.get('carried') and entry.get('transport') != 'exact':
+            out.append('its window carry audit says transport=%s, not exact' % entry.get('transport'))
+    return out
+
+
+def sticky_problems(record, rows, levern=False, carry=False):
     """reuse_problems' sticky-session checks of one request's first admission. levern: the engine chunks long prefills (Lever N), so the admit line's tail
-    is the first scheduled chunk and not necessarily P - Q (levern_first_step). -> [(severity, text)]."""
+    is the first scheduled chunk and not necessarily P - Q (levern_first_step). carry (exact resume P0, engaged): a Q above floor2048(P - 2048) is granted to a request that
+    carried its drafter window and to nothing else (window_carry_problems). -> [(severity, text)]."""
     markers = record.get('markers') or {}
     tag = record.get('tag')
     prompt = record.get('prompt_tokens')
@@ -722,8 +763,13 @@ def sticky_problems(record, rows, levern=False):
     first = rows[0] if rows else None
     q = (first or {}).get('q')
     if q and prompt is not None and q > resume_ceiling(prompt):
-        out.append(('FAIL', '%s: Q=%d is above floor2048(L - 2048) = %d: a resume inside the fast path\'s drafter '
-                            'window (a C1 grant the sticky trim forbids)' % (tag, q, resume_ceiling(prompt))))
+        not_carried = window_carry_problems(record, q, prompt) if carry else None
+        if not_carried is None:
+            out.append(('FAIL', '%s: Q=%d is above floor2048(L - 2048) = %d: a resume inside the fast path\'s drafter '
+                                'window (a C1 grant the sticky trim forbids)' % (tag, q, resume_ceiling(prompt))))
+        elif not_carried:
+            out.append(('FAIL', '%s: Q=%d is above floor2048(L - 2048) = %d and is not a carried resume: %s' % (
+                tag, q, resume_ceiling(prompt), '; '.join(not_carried))))
     admits = markers.get('sticky_admits') or []
     if q:
         matching = [entry for entry in admits if entry.get('q') == q]

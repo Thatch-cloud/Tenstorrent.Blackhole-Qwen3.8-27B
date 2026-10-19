@@ -181,7 +181,8 @@ fit, and no request or readiness wait runs past its arm's deadline.
 
 Writes <results>/<arm>/ (server.log, records.jsonl, pairs.json, events.json, arm.json, docker-run.json,
 profiles.json for a derived arm) and <results>/c2-prefix-summary.json; exits 0 only when every plan
-passed, 2 when refused up front.
+passed, 2 when refused up front. A finished arm's directory is judged again, with no docker and no card, by prefix_rejudge.py (a stale rule found on a run costs seconds to re-read, not
+a window): `python3 prefix_rejudge.py --arm-dir <results>/prefix/<arm>`.
 
 Stdlib only, Python 3.7 syntax: it runs on the rig host.
 """
@@ -426,6 +427,25 @@ def sdpa_audit_optional(arm, report):
     return True
 
 
+def live_users_seen(report):
+    """The most live users any packed round of the S2 report had (`rounds.by_live`, keys are the live counts as strings), or None when the report counts no round or a key is not a
+    number: nothing is then known about what ran, and the callers read None as "a multi-user round may have run"."""
+    by_live = ((report or {}).get('rounds') or {}).get('by_live') or {}
+    try:
+        seen = [int(live) for live, count in by_live.items() if count]
+    except (TypeError, ValueError):
+        return None
+    return max(seen) if seen else None
+
+
+def solo_rounds_only(report):
+    """Whether the arm's packed rounds were ALL under c2_smoke_check.MULTI_USER_MIN_LIVE live users (an arm that sends one request at a time: the exact-resume arm's were
+    {"1": 3440}), so the levers that only a multi-user round exercises had nothing to engage on. False when any round had that many, and False when the report counts none
+    (c2_smoke_check.split_multi_user_levers): a multi-user round that left a lever unengaged keeps failing, and so does an arm we know nothing about."""
+    seen = live_users_seen(report)
+    return seen is not None and seen < c2_smoke_check.MULTI_USER_MIN_LIVE
+
+
 def tier_image_problems(arms, anchor):
     """Why the image cannot run the tier arms, or []: refused before any container boots. The host KV tier moves blocks with ttnn.qwen_read_blocks_raw /
     qwen_write_blocks_raw / qwen_block_bytes, version 2 of the qwen_kv_read extension; an image whose extension is the first version refuses the attach
@@ -592,7 +612,8 @@ def plan_arms(plan, profile, baseline, profiles):
         context = context_of(document, served)
         entry = dict(arm=arm, scenario=scenario, served=served, derived=derived, timeout=timeout, strict=strict,
                      prefix=which == 'prefix', kind=kind, context=context,
-                     seats=int(((chosen.get('engine') or {}).get('max-num-seqs')) or 4))
+                     seats=int(((chosen.get('engine') or {}).get('max-num-seqs')) or 4),
+                     store_gib=(chosen.get('env') or {}).get('QWEN_PREFIX_STORE_GIB'))
         if scenario in TIER_SCENARIOS:
             entry['tier'] = tier_profile(chosen)      # not None: not_applicable left the arm out of a profile without the tier
         s2 = is_s2_profile(chosen)
@@ -812,6 +833,25 @@ def quiet_windows(events):
             if isinstance(event, dict) and event.get('log_window')]
 
 
+STORE_GIB_FLAG = 'QWEN_PREFIX_STORE_GIB'
+
+
+def expected_store_gib(arm):
+    """The GiB of checkpoint store the arm's install line (`[PINDIAG] prefix: install ... store_gib=`) must report: what the SERVED profile asks for in QWEN_PREFIX_STORE_GIB
+    (plan_arms keeps it as arm['store_gib']; the s5 profiles ask 16 on purpose, the s4 ones 8, the derived small-store arm SMALL_STORE_GIB), the registry's default when the
+    profile names none. An arm described by hand, without the key, falls back to its served_env and then to the kind: SMALL_STORE_GIB for the small-store arm, else the
+    default. A value that is not a number is the default too, so the install line - which cannot have honoured it - fails the arm instead of matching it."""
+    asked = arm.get('store_gib')
+    if asked in (None, ''):
+        asked = (arm.get('served_env') or {}).get(STORE_GIB_FLAG)
+    if asked in (None, ''):
+        return SMALL_STORE_GIB if arm.get('kind') == 'store' else judge.DEFAULT_STORE_GIB
+    try:
+        return float(asked)
+    except (TypeError, ValueError):
+        return judge.DEFAULT_STORE_GIB
+
+
 def generic_problems(arm, scanned, records, error, expect_profile, store_gib=judge.DEFAULT_STORE_GIB, windows=()):
     """Everything an arm fails on whatever its plan: the scenario's own error, failure lines in the
     log, the launched argv, and - on a prefix arm - the platform's prefix lines, the install marker,
@@ -883,7 +923,7 @@ def generic_problems(arm, scanned, records, error, expect_profile, store_gib=jud
         if str(install.get('QWEN_SDPA_BF8')) != '1':
             problems.append('QWEN_SDPA_BF8=%s: the served KV is not bf8 (F4)' % install.get('QWEN_SDPA_BF8'))
         if install.get('store_gib') is not None and abs(float(install['store_gib']) - float(store_gib)) > 0.051:
-            problems.append('checkpoint store %s GiB, the arm asked %s' % (install['store_gib'], store_gib))
+            problems.append('checkpoint store %s GiB, the arm asked %s (the served profile\'s %s)' % (install['store_gib'], store_gib, STORE_GIB_FLAG))
         notes.append('install: %s' % json.dumps(dict((k, v) for k, v in install.items() if k not in ('index', 'time'))))
     for entry in scanned.get('chunked_installs') or ():
         notes.append('install (chunked prefill): %s' % json.dumps(dict((k, v) for k, v in entry.items() if k not in ('index', 'time')), sort_keys=True))
@@ -896,7 +936,7 @@ def generic_problems(arm, scanned, records, error, expect_profile, store_gib=jud
         if record.get('role') in ('seat', 'flood') or record.get('aborted'):
             continue
         for severity, text in judge.reuse_problems(record, sequential=arm['strict'], sticky=bool(arm.get('sticky')),
-                                                   levern=levern_chunked(scanned)):
+                                                   levern=levern_chunked(scanned), carry=carry_engaged(arm, scanned)):
             if severity == 'FAIL':
                 problems.append(text)
             elif severity == 'LOST' and arm['strict']:
@@ -1773,8 +1813,18 @@ def s2_findings(arm, log_text, scanned, records):
     # Every lever the arm's profile asks for must have ENGAGED (the smoke's own rules: markers, no fall-back, audit lines exact, Lever N's route
     # ledger); the levern.off drill arm is the one arm allowed Lever N's kill switch line.
     optional = sdpa_audit_optional(arm, report)
-    problems += ['lever: %s' % text for text in c2_smoke_check.lever_engagement_problems(
-        environ, text, drill=arm.get('scenario') in LEVERN_DRILL_SCENARIOS, sdpa_audit_optional=optional)]
+    found = c2_smoke_check.lever_engagement_problems(
+        environ, text, drill=arm.get('scenario') in LEVERN_DRILL_SCENARIOS, sdpa_audit_optional=optional)
+    # The levers that act only in a round of two or more live users (the drafter's packed passes, the quads' collect read-back, the second block's CCL audit) cannot engage on an
+    # arm whose every packed round had one: they are NOT_EXERCISED there, said in the arm's lines, and never a failure of it. An arm with one such round is held to all of them.
+    unasked = []
+    if solo_rounds_only(report):
+        found, unasked = c2_smoke_check.split_multi_user_levers(found)
+    problems += ['lever: %s' % text for text in found]
+    if unasked:
+        lines.append('%d lever checks NOT_EXERCISED (each needs %d or more live users; no packed round of this arm had more than %d, and a round that did would fail them):' % (
+            len(unasked), c2_smoke_check.MULTI_USER_MIN_LIVE, live_users_seen(report)))
+        lines += ['  not exercised: lever: %s' % text for text in unasked]
     if optional and str(environ.get('QWEN_FAST_TP4_SDPA_AUDIT', '0')) == '1':
         lines.append('multi SDPA audit: not asked of this sequential arm (no packed round of two or more users ran, so the multi launch had nothing to compare); '
                      'an audit line that was logged is still judged')
@@ -1915,6 +1965,14 @@ def exact_resume_switches(arm):
     return dict(undrop=sticky and env.get(UNDROP_FLAG) == '1', carry=sticky and env.get(CARRY_FLAG) == '1')
 
 
+def carry_engaged(arm, scanned):
+    """Whether the window carry is ENGAGED on this arm: the served profile asks for it (QWEN_PREFIX_WINDOW_CARRY=1 on a sticky arm, exact_resume_switches) AND the scheduler graft
+    logged `[PINDIAG] prefix: window carry engaged ... carry=1`. Both, so the carry's higher resume ceiling (judge.resume_ceiling) is judged only where the engine says it
+    runs it: a profile whose switch never reached the graft is held to floor2048(P - 2048), and exact_resume_findings names the missing line."""
+    return bool(exact_resume_switches(arm)['carry']) and any(
+        str(entry.get('carry')) == '1' for entry in (scanned or {}).get('window_engaged') or ())
+
+
 def exact_resume_findings(arm, scanned, records, pairs):
     """(problems, missing, lines) of a sticky arm whose profile turns exact resume on: the scheduler graft's engaged line with the
     profile's switches; under the audit, every window digest line exact=True and every cold/hit pair's two windows equal (the carried
@@ -1989,8 +2047,7 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None, model=None):
     for pair in driver.pairs:
         judge.settle(pair, index, strict=bool(arm.get('s2')))
     problems, notes, missing = generic_problems(arm, scanned, records, error, arm['served'],
-                                                SMALL_STORE_GIB if arm.get('kind') == 'store' else judge.DEFAULT_STORE_GIB,
-                                                quiet_windows(driver.events))
+                                                expected_store_gib(arm), quiet_windows(driver.events))
     lines = []
     if arm['prefix']:
         bringup = arm['scenario'] == 'bringup_prefix'

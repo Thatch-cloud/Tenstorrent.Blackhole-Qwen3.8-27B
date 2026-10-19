@@ -2412,6 +2412,32 @@ def lever_engagement_problems(env, container_text, smoke=None, drill=False, sdpa
     return problems
 
 
+# The levers (and the sites of a lever) that only a round of two or more live users can exercise, for a gate whose arm sends one request at a time (the prefix gate's sequential
+# arms: its S2 report counts every packed round by live users, `by_live`, and the 8x262k exact-resume arm's was {"1": 3440}). The drafter permutation (draft_permute_tp: the packed
+# pass's K/V assembly, fold and unfold; draft_attention_branch hooks it only when `spans` is set, at site pair, quad or octo), the fused q|k|v projection (QKV1: the quad / octo pass,
+# `quad is not None and spans is not None`; the pair, the single-user path and the audits keep the separate weights) and the 64-row drafter head (HEAD64: the quad's two 32-row halves
+# as one matmul) are all the packed passes'; the batched reads' collect site is the quads' (hostgap_wph_smoke asks it only when QWEN_FAST_QUAD_DRAFT=1; the verify site is every
+# round's and stays asked); and the CCL options audit wants one replay audit from each of the QWEN_FAST_M3_BLOCKS block owners, of which a solo round reaches the first. A sequential
+# arm cannot show any of them engage, so the rules above read FAIL where the arm only did not ask the question. The messages are matched by the form the rules above give them
+# (test_c2_prefix_gate pins each form to the rule that writes it): a rule whose wording changes stops being matched, and the gate then fails loudly, never silently.
+MULTI_USER_MIN_LIVE = 2
+MULTI_USER_LEVER_PROBLEMS = tuple(re.compile(pattern) for pattern in (
+    r'^QWEN_FAST_DRAFT_(?:PERMUTE|QKV1|HEAD64)(?:_AUDIT)?(?:=1)? is set and no (?:engaged|passing audit) line',
+    r'^QWEN_FAST_BATCHED_READS(?:_AUDIT)? is set and no (?:engaged|passing audit) line for site=collect',
+    r'^QWEN_FAST_CCL_OPTIONS_AUDIT: op=\w+ replay audits came from \d+ block owner\(s\), \d+ blocks are served$',
+))
+
+
+def split_multi_user_levers(problems):
+    """(problems, multi-user problems) of the list lever_engagement_problems returned: the second holds the ones a round of MULTI_USER_MIN_LIVE or more live users alone could
+    have cleared (MULTI_USER_LEVER_PROBLEMS), in order; the first is everything else, untouched. The CALLER decides whether the arm ran such a round (the prefix gate: its S2 report's
+    by_live) and only then moves the second list out of the failures: this function changes no gate's behaviour by itself, and lever_engagement_problems still returns all of them."""
+    kept, multi = [], []
+    for problem in problems:
+        (multi if any(pattern.search(problem) for pattern in MULTI_USER_LEVER_PROBLEMS) else kept).append(problem)
+    return kept, multi
+
+
 def not_asked_items(env, container_text):
     """What a ladder-only run (ladder_only) was not asked, for the profile's `env`: [str], one per family, only for what the profile sets and the log does not show. The
     decode-only levers with no engaged line, their audits with no exact=True line, the packages' site rules, the eight-seat quad blocks and the two-block pre-stage (both

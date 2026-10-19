@@ -794,6 +794,94 @@ class StickyOracleTests(unittest.TestCase):
                           expected=dict(h=8256, q=8192, plan=[]))
         self.assertEqual(pj.reuse_problems(record), [])
 
+    def test_the_carry_ceiling_is_the_oracle_s_own(self):
+        """Exact resume P0 (docs/tp4-exact-resume.md 5.2): with the window carry engaged a resume may stop one checkpoint higher, at floor2048(P - 1), where the engine's own line says
+        `ceiling=floor2048(P-1) with a covering window, else floor2048(P-2048)`. One function holds both ceilings and the oracle reads it."""
+        self.assertEqual([pj.resume_ceiling(p, carry=True) for p in (2048, 2049, 4096, 4097, 9412, 10164, 33373, 120332)],
+                         [0, 2048, 2048, 4096, 8192, 8192, 32768, 118784])
+        for prompt in (1, 2047, 2048, 2049, 4095, 4096, 4097, 9412, 123136):
+            self.assertEqual(pj.resume_ceiling(prompt), pj.resume_ceiling(prompt, carry=False), prompt)
+            self.assertGreaterEqual(pj.resume_ceiling(prompt, carry=True), pj.resume_ceiling(prompt), prompt)
+        # The oracle's grant under the carry never passes it, and equals it when a covering window exists: a three-turn chain on one salt.
+        first = seq(10, 9000)
+        oracle = pj.Oracle(capacity=100, sticky=True, undrop=True, carry=True)
+        oracle.admit('s', first)
+        second = first + seq(77, 412)                     # P = 9412: the checkpoint at 8192 carries the window rows from 9000 - 2048 = 6952
+        grant = oracle.admit('s', second)
+        self.assertEqual(grant['q'], 8192)
+        self.assertEqual(grant['q'], pj.resume_ceiling(len(second), carry=True))
+        self.assertGreater(grant['q'], pj.resume_ceiling(len(second)))
+
+    def carried_hit(self, q=8192, prompt=9412, rows=828, carried=True, audits=None, carry=True, window_q=None):
+        """The FAIL texts of a first admission above the old ceiling with the window carry lines the markers resolve to (prefix_markers WINDOW_CARRIED / WINDOW_AUDIT).
+        audits: the request's audit lines as (carried, transport, exact) triples, by default the one a carried resume logs."""
+        record = resolved('h', q=q, l=prompt, prompt_tokens=prompt, grant=dict(h=q + 64, q=q, plan=[]), expected=dict(h=q + 64, q=q, plan=[]))
+        record['markers']['sticky_admits'] = [dict(q=q, p=prompt, tail=prompt - q)]
+        record['markers']['window_carried'] = [dict(tag='h', q=q if window_q is None else window_q, p=prompt, rows=rows)] if carried else []
+        audits = [(rows, 'exact', True)] if audits is None else audits
+        record['markers']['window_audits'] = [dict(tag='h', p=prompt, q=q, carried=n, sha='ab', transport=transport, exact=exact) for n, transport, exact in audits]
+        return [text for severity, text in pj.reuse_problems(record, sequential=False, sticky=True, carry=carry) if severity == 'FAIL']
+
+    def test_a_carried_resume_above_the_old_ceiling_is_not_a_problem(self):
+        """A2's seven flagged hits: Q=8192 for P=9412 (old ceiling 6144), carried 828 rows, audit transport=exact exact=True."""
+        self.assertEqual(self.carried_hit(), [])
+        self.assertEqual(self.carried_hit(audits=[]), [], 'the audit is a profile option: the carried line alone is the evidence')
+        self.assertEqual(self.carried_hit(carried=False), [], 'and the audit line alone (carried above 0) is too')
+        for q, prompt, rows in ((8192, 10164, 76), (32768, 33373, 1443), (32768, 33946, 870), (118784, 120332, 500), (120832, 122000, 880), (126976, 128532, 492)):
+            with self.subTest(q=q, prompt=prompt):
+                self.assertEqual(self.carried_hit(q=q, prompt=prompt, rows=rows), [])
+        # A Q at or under the old ceiling needs no window and asks nothing of the carry lines.
+        self.assertEqual(self.carried_hit(q=6144, prompt=9412, rows=0, carried=False, audits=[]), [])
+
+    def test_without_the_carry_engaged_the_old_ceiling_stands(self):
+        bad, = self.carried_hit(carry=False)
+        self.assertIn('Q=8192 is above floor2048(L - 2048) = 6144', bad)
+        self.assertIn('the fast path\'s drafter window (a C1 grant the sticky trim forbids)', bad)
+        self.assertNotIn('carried resume', bad)
+        self.assertEqual(len(self.carried_hit(carry=False, audits=[], carried=False)), 1, 'engaged or not, carry lines do not excuse a run that did not engage it')
+
+    def test_a_resume_above_the_old_ceiling_that_carried_nothing_still_fails(self):
+        for kwargs in (dict(carried=False, audits=[]), dict(rows=0, audits=[(0, 'none', True)]), dict(window_q=6144, audits=[])):   # a carried line for another Q is no evidence
+            with self.subTest(kwargs=kwargs):
+                bad, = self.carried_hit(**kwargs)
+                self.assertIn('Q=8192 is above floor2048(L - 2048) = 6144 and is not a carried resume', bad)
+                self.assertIn('no "window carry carried" line (rows above 0)', bad)
+
+    def test_a_carried_audit_that_is_not_exact_fails(self):
+        bad, = self.carried_hit(audits=[(828, 'exact', False)])
+        self.assertIn('its window carry audit says exact=False (transport=exact, carried=828)', bad)
+        bad, = self.carried_hit(audits=[(828, 'host', True)])
+        self.assertIn('its window carry audit says transport=host, not exact', bad)
+        # The good audit does not hide a bad one beside it.
+        bad, = self.carried_hit(audits=[(828, 'exact', True), (828, 'exact', False)])
+        self.assertIn('exact=False', bad)
+        self.assertEqual(self.carried_hit(audits=[(828, 'exact', True), (828, 'exact', True)]), [])
+
+    def test_a_window_that_does_not_cover_the_drafter_window_fails(self):
+        """The checkpoint's window starts at Q - rows; the drafter needs [P - 2048, Q) from it, so rows must reach down to P - 2048 (the oracle's `start > P - 2048` skip)."""
+        self.assertEqual(self.carried_hit(q=8192, prompt=9412, rows=828), [])           # exactly covers: 8192 - 828 = 7364 = 9412 - 2048
+        bad, = self.carried_hit(q=8192, prompt=9412, rows=827, audits=[])
+        self.assertIn('the 827 carried window rows reach down only to position 7365, above P - 2048 = 7364', bad)
+
+    def test_nothing_is_carried_above_floor2048_of_p_minus_one(self):
+        """Not even a carried window lets a resume reach the prompt's last chunk (Q = floor2048(P - 1) is the engine's own ceiling)."""
+        self.assertEqual(pj.window_carry_problems(dict(markers=dict(window_carried=[dict(q=10240, p=10240, rows=2048)])), 10240, 10240),
+                         ['Q is above floor2048(L - 1) = 8192, the highest resume even a carried window grants'])
+        self.assertEqual(pj.window_carry_problems(dict(markers=dict(window_carried=[dict(q=10240, p=10241, rows=2048)])), 10240, 10241), [])
+
+    def test_resolve_hands_each_request_its_own_carry_lines(self):
+        lines = ['2026-01-01T00:00:00Z (EngineCore pid=1) [PINDIAG] prefix: window carry engaged undrop=1 carry=1 audit=1 ceiling=floor2048(P-1) with a covering window, else floor2048(P-2048)',
+                 '2026-01-01T00:00:01Z (EngineCore pid=1) [PINDIAG] prefix: window carry carried req=chatcmpl-pfx-a-1-hit-1a2b3c4d Q=8192 P=9412 rows=828',
+                 '2026-01-01T00:00:02Z (EngineCore pid=1) [PINDIAG] prefix: window carry audit req=chatcmpl-pfx-a-1-hit-1a2b3c4d P=9412 Q=8192 carried=828 window_sha=%s transport=exact exact=True' % ('a' * 64),
+                 '2026-01-01T00:00:03Z (EngineCore pid=1) [PINDIAG] prefix: window carry audit req=chatcmpl-pfx-a-1-cold-5e6f7a8b P=9412 Q=0 carried=0 window_sha=%s transport=none exact=True' % ('a' * 64)]
+        records = [dict(tag='pfx-a-1-hit'), dict(tag='pfx-a-1-cold'), dict(tag='pfx-a-1-other')]
+        pj.resolve(records, pm.scan(lines))
+        hit, cold, other = (record['markers'] for record in records)
+        self.assertEqual([(entry['q'], entry['p'], entry['rows']) for entry in hit['window_carried']], [(8192, 9412, 828)])
+        self.assertEqual([(entry['carried'], entry['transport'], entry['exact']) for entry in hit['window_audits']], [(828, 'exact', True)])
+        self.assertEqual((cold['window_carried'], [entry['transport'] for entry in cold['window_audits']]), ([], ['none']))
+        self.assertEqual((other['window_carried'], other['window_audits']), ([], []))
+
     def test_under_lever_n_the_admit_tail_is_the_first_scheduled_chunk(self):
         """Lever N splits a long prefill into 2,048-token steps while seats decode, and the sticky admit's tail is the first of them (serving_lifecycle logs the
         step it schedules): P=6197 Q=2048 logs tail=2048, then a continuation start=4096 tokens=2101 (G2, levern-hit). Without the chunked install line the
