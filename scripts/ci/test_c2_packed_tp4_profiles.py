@@ -595,9 +595,12 @@ class FreezeProfileTests(unittest.TestCase):
                                  ('1', '1'), 'the twins keep the audits on, as the traffic profile did when they were measured')
 
     def test_the_traffic_profile_and_every_other_profile_leave_the_flags_unset(self):
+        import make_s5_profiles
+
         for name, profile in profiles().items():
             if name not in FREEZE_PROFILES:
-                self.assertNotIn(TRIM, profile['env'], name)
+                if name not in make_s5_profiles.owned_names():            # (tp4/next-1: the ship-5 candidate and its audited twins set the trim, QWEN_FAST_ADMISSION_DIAG_TRIM=1, by the owner's decision)
+                    self.assertNotIn(TRIM, profile['env'], name)
                 self.assertNotIn(CREDIT, profile['env'], name)
         for flag in (TRIM, CREDIT):
             self.assertNotIn(flag, image_env(), 'the image leaves it unset: off is the default')

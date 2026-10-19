@@ -132,7 +132,9 @@ class ProtectedTests(unittest.TestCase):
         import make_s5_profiles
         import make_xe_profiles
 
-        integrated = set(make_np1_profiles.twin_names()) | set(make_xe_profiles.twin_names()) | set(make_s5_profiles.owned_names()) | {name for name in PROFILES if name.endswith(('-fx-all-er', '-fx-all-er-audit'))}
+        import make_sched_profiles
+
+        integrated = set(make_np1_profiles.twin_names()) | set(make_sched_profiles.twin_names()) | set(make_xe_profiles.twin_names()) | set(make_s5_profiles.owned_names()) | {name for name in PROFILES if name.endswith(('-fx-all-er', '-fx-all-er-audit'))}
         self.assertEqual(sorted(set(PROFILES) - set(before['profiles']) - integrated), sorted(twins.NAMES))
 
     def test_the_approved_traffic_profile_never_names_either_flag(self):
