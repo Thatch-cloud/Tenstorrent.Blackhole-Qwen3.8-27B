@@ -1688,6 +1688,20 @@ def arm_toolcall_whitespace(profile, environ):
     return c2_toolcall_whitespace.arm(profile, environ)
 
 
+def arm_idle_scratch(profile_name, environ):
+    """NP1 (QWEN_FAST_SOLO_PACKED=1, gate only; idle_scratch.py, docs/tp4-np1-fastlane.md): when the model entry is imported, wrap Qwen36ForCausalLM.allocate_kv_cache so the worker's KV
+    caches hold one block more than vLLM's pool - the scratch page the lone-user padded round parks its third idle segment's K/V in. The module is imported here, at boot, so an image
+    without it fails the boot instead of serving the flag mounted and never executed; the wrapper raises at the model import if the class or the method is not there."""
+    import idle_scratch
+
+    count = idle_scratch.wanted(environ)
+    if count:
+        sys.meta_path.insert(0, PostImportHook(idle_scratch.MODEL_ENTRY, idle_scratch.install))
+        log('profile %s: NP1 armed (%s=1): %s.%s.%s will allocate %d KV block(s) beyond the pool vLLM sizes, for the idle segments of a lone-user padded round (gate only)',
+            profile_name, idle_scratch.SOLO_PACKED_FLAG, idle_scratch.MODEL_ENTRY, idle_scratch.MODEL_CLASS, idle_scratch.ALLOCATOR, count)
+    return count
+
+
 def boot(environ=None, orig_argv=None):
     environ = os.environ if environ is None else environ
     if environ.get('QWEN_C2_SERVING') != '1':
@@ -1758,6 +1772,8 @@ def boot(environ=None, orig_argv=None):
     if prefix_reuse(profile):
         install_prefix_metrics(api_server)
         sys.meta_path.insert(0, PostImportHook(MODEL_ENTRY, log_model_tree))
+    if environ.get('QWEN_FAST_SOLO_PACKED', '0') != '0':
+        arm_idle_scratch(profile['name'], environ)
     if api_server:
         check_platform_model(sys.argv[1:], environ)
         snapshot = checkpoint_snapshot or resolve_snapshot(profile)

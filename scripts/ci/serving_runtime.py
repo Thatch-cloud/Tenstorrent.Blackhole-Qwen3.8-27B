@@ -492,11 +492,14 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         glue8_reason = octo_glue8.refusal()
         if glue8_reason is not None:
             raise ValueError('QWEN_FAST_OCTO_GLUE8 is refused: %s' % glue8_reason)
+    # NP1 (QWEN_FAST_SOLO_PACKED=1): the scratch pages the lone user's idle segments write (idle_scratch.py), the M3 blocks' alone; none, no keyword below.
+    idle_scratch_pages = ()
     if os.environ.get('QWEN_FAST_SOLO_PACKED', '0') != '0':
         import serving_octo
 
         solo_packed = serving_octo.solo_packed_admission(m3_shape(policy), log=pindiag)
         padded_min_users = solo_packed['min_users']
+        idle_scratch_pages = solo_packed.get('scratch_pages', ())
     # An admitted octo flag BUILDS the third block below (octo_shape over pool slots 0..7, captured with the two M3 blocks in complete_blocks_two_phase) and the
     # attach proves it did (`octo_block` is not None, in the packed step): an admitted flag with no block built would be a mounted change that never executes.
     # QWEN_FAST_PACKED_CAPTURE_POSITION (S2 G3b, gate only, default unset): parsed here, before
@@ -843,6 +846,8 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
                                                     **({'defer_capture': True} if m3_blocks_two else {}),
                                                     **({'padded_min_users': octo_record['min_live']} if is_octo
                                                        else {'padded_min_users': padded_min_users} if padded_min_users is not None else {}),
+                                                    # NP1: the M3 blocks' idle segments past page 0's two tile rows go to the scratch page (the octo block pads from 6 live seats and needs none).
+                                                    **({'idle_scratch_pages': idle_scratch_pages} if idle_scratch_pages and not is_octo else {}),
                                                     # S2 G3b's gate-only knob; unset, no keyword at all.
                                                     **({'capture_position': capture_position}
                                                        if capture_position is not None else {}),
