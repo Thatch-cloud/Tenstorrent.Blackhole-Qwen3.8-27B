@@ -483,6 +483,10 @@ def apply_environment(profile, environ=None):
     for name in LEVERN_ENV_FLAGS:
         if name not in profile['env']:
             environ.pop(name, None)
+    # The admission accounting trim (tp4/sched-1, docs/tp4-sched-1.md) likewise: an inherited switch must not skip a check under a profile that never named it.
+    for name in SCHED_NAMES:
+        if name not in profile['env']:
+            environ.pop(name, None)
     # The drafter checkpoint likewise: an inherited id under a profile that names none would pin a candidate the profile's argv does not point at.
     if DRAFTER_CHECKPOINT_FLAG not in profile['env']:
         environ.pop(DRAFTER_CHECKPOINT_FLAG, None)
@@ -701,6 +705,25 @@ def parked_engines(profile):
 def gate_profile(profile):
     """Whether the profile is a gate's: its name ends in -gate, or it is gate_only."""
     return str(profile.get('name', '')).endswith('-gate') or profile.get('gate_only') is True
+
+
+# tp4/sched-1 (docs/tp4-sched-1.md): QWEN_FAST_ADMISSION_LEAN takes three admission costs off a returning turn's rebind (the conv-slice readback after a slot's first adoption, the
+# 'dram after engine' line of a rebound request, the post-prefill backstop's allocator read when the admission's own hold reading clears it by a wide margin). Strict 0 or 1, and a
+# gate-only profile's until the owner decides (serving_prefill_admission.lean_problems names a malformed value, as the process reads it leniently inside an admission).
+LEAN_SWITCH = 'QWEN_FAST_ADMISSION_LEAN'
+SCHED_NAMES = (LEAN_SWITCH,)
+
+
+def sched_problems(profile):
+    """Every way the profile sets the tp4/sched-1 admission switch wrongly, [] when none: a value that is not 0 or 1, or 1 in a profile that serves traffic."""
+    env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
+    problems = []
+    value = env.get(LEAN_SWITCH)
+    if value is not None and value not in ('0', '1'):
+        problems.append('%s must be 0 or 1, got %r' % (LEAN_SWITCH, value))
+    elif value == '1' and not gate_profile(profile):
+        problems.append('%s=1 is a gate arm (it skips admission checks that no card run has shown unnecessary) and needs a gate-only profile' % LEAN_SWITCH)
+    return problems
 
 
 def parked_problems(profile, environ=None):
@@ -1720,6 +1743,9 @@ def boot(environ=None, orig_argv=None):
     problems = multi_problems(profile)
     if problems:
         raise ValueError('profile %s cannot serve the wave-2 levers: %s' % (profile['name'], '; '.join(problems)))
+    problems = sched_problems(profile)
+    if problems:
+        raise ValueError('profile %s misuses the tp4/sched-1 switches: %s' % (profile['name'], '; '.join(problems)))
     problems = octo_problems(profile, environ)
     if problems:
         raise ValueError('profile %s cannot serve octo-T8: %s' % (profile['name'], '; '.join(problems)))

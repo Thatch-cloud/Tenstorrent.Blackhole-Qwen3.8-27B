@@ -420,5 +420,45 @@ class SplitLineTests(Fresh):
         self.assertAlmostEqual(a + b + c, total, delta=0.2)
 
 
+class ContractTests(unittest.TestCase):
+    """The profile contract: strict 0 or 1, a gate-only profile's, and an inherited value never leaks into a profile that does not name it."""
+
+    def test_the_names_agree(self):
+        import serving_c2_contract as contract
+
+        self.assertEqual(contract.LEAN_SWITCH, admission.LEAN_FLAG)
+        self.assertEqual(contract.SCHED_NAMES, (admission.LEAN_FLAG,))
+
+    def test_a_gate_only_profile_may_name_it_a_traffic_profile_may_not(self):
+        import serving_c2_contract as contract
+
+        self.assertEqual(contract.sched_problems({'name': 'x', 'env': {}}), [])
+        self.assertEqual(contract.sched_problems({'name': 'x', 'env': {contract.LEAN_SWITCH: '0'}}), [])
+        self.assertEqual(contract.sched_problems({'name': 'x-gate', 'env': {contract.LEAN_SWITCH: '1'}}), [])
+        self.assertEqual(contract.sched_problems({'name': 'x', 'gate_only': True, 'env': {contract.LEAN_SWITCH: '1'}}), [])
+        (problem,) = contract.sched_problems({'name': 'x', 'env': {contract.LEAN_SWITCH: '1'}})
+        self.assertIn('needs a gate-only profile', problem)
+        for value in ('true', '2', '', ' 1'):
+            (problem,) = contract.sched_problems({'name': 'x-gate', 'env': {contract.LEAN_SWITCH: value}})
+            self.assertIn('must be 0 or 1', problem)
+
+    def test_an_inherited_value_is_dropped_under_a_profile_that_does_not_name_it(self):
+        import copy
+        import json
+
+        import serving_c2_contract as contract
+
+        profiles = json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))['profiles']
+        base = profiles['c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4']
+        self.assertNotIn(contract.LEAN_SWITCH, base['env'], 'the approved profile does not carry it')
+        environ = contract.apply_environment(dict(copy.deepcopy(base), name='x'), {contract.LEAN_SWITCH: '1', 'KEEP': 'me'})
+        self.assertNotIn(contract.LEAN_SWITCH, environ)
+        self.assertEqual(environ['KEEP'], 'me')
+        named = copy.deepcopy(base)
+        named['env'][contract.LEAN_SWITCH] = '0'
+        environ = contract.apply_environment(dict(named, name='x'), {contract.LEAN_SWITCH: '1'})
+        self.assertEqual(environ[contract.LEAN_SWITCH], '0', 'the profile wins over the process')
+
+
 if __name__ == '__main__':
     unittest.main()
