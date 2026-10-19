@@ -23,11 +23,11 @@ def post(path, body, timeout=900):
         return error.code, error.read().decode(errors='replace')[:400]
 
 
-def stream(messages, max_tokens, drop_after=None, timeout=1800, keep_stamps=False, on_token=None, keep_text=False, **extra):
+def stream(messages, max_tokens, drop_after=None, timeout=1800, keep_stamps=False, on_token=None, keep_text=False, headers=None, **extra):
     body = dict(model=MODEL, messages=messages, max_tokens=max_tokens, stream=True,
                 stream_options={'include_usage': True}, **extra)
     request = urllib.request.Request(BASE + '/v1/chat/completions', data=json.dumps(body).encode(), method='POST',
-                                     headers={'content-type': 'application/json'})
+                                     headers=dict({'content-type': 'application/json'}, **(headers or {})))     # headers: agent_turns' X-Request-Id, which names the request in the engine's log
     started, first, pieces, usage, finish, count = time.time(), None, [], None, None, 0
     content, reasoning, stamps = [], [], []
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -60,6 +60,7 @@ def stream(messages, max_tokens, drop_after=None, timeout=1800, keep_stamps=Fals
     # The full answer is kept as two hashes, one per field: the delta that carries </think> splits differently at a different
     # step width (16 rows packed, 4 solo), so a hash of the merged text would call identical tokens different.
     content, reasoning = ''.join(content), ''.join(reasoning)
+    details = (usage or {}).get('prompt_tokens_details')       # present only when the server reports it (vLLM's --enable-prompt-tokens-details); the key is added only then
     return dict(ttft=round(first - started, 2) if first else None, tokens=tokens, chunks_streamed=count,
                 prompt_tokens=(usage or {}).get('prompt_tokens'), finish=finish,
                 decode_tok_s=round((tokens - 1) / decode, 2) if decode and tokens > 1 else None,
@@ -67,6 +68,7 @@ def stream(messages, max_tokens, drop_after=None, timeout=1800, keep_stamps=Fals
                 content_sha256=hashlib.sha256(content.encode('utf-8')).hexdigest(), content_chars=len(content),
                 reasoning_sha256=hashlib.sha256(reasoning.encode('utf-8')).hexdigest(), reasoning_chars=len(reasoning),
                 started_at=round(started, 3), first_at=round(first, 3) if first else None, ended_at=round(ended, 3),
+                **(dict(cached_tokens=details.get('cached_tokens')) if isinstance(details, dict) else {}),
                 **(dict(delta_stamps=stamps) if keep_stamps else {}),
                 **(dict(full_content=content, full_reasoning=reasoning) if keep_text else {}))
 
@@ -768,7 +770,8 @@ SHAPE_SEATS = {'np1_live1': 1, 'np1_live2': 2, 'np1_live4': 4, 'concurrent8_skew
                'stall8_cold262k': STALL_SHORT_SEATS + 1, 'stall8_cold128k': STALL_SHORT_SEATS + 1,
                'cold2_254k': COLD2_DECODERS + COLD2_ARRIVALS, 'levern_equal_busy': 7 + 1, 'levern_decoder_finishes': 7 + 1,
                'prefill_ladder_solo': 1, 'prefill_ladder_busy': LADDER_DECODERS + 1, 'prefill_few_decoders': 3,
-               'long_answer_solo_4k': 1, 'long_answer_solo_200k': 1, 'long_answer8_4k': 8, 'long_answer8_96k': 8, 'long_answer_prefix': 1}
+               'long_answer_solo_4k': 1, 'long_answer_solo_200k': 1, 'long_answer8_4k': 8, 'long_answer8_96k': 8, 'long_answer_prefix': 1,
+               'agent_turns': 6, 'agent_turns_long': 6}
 
 
 def cold2_254k():
@@ -1454,6 +1457,62 @@ if ONLY and 'concurrent5_split' in ONLY:
     record('concurrent5_split', concurrent5_split)
 if ONLY and 'concurrent8_drain' in ONLY:
     record('concurrent8_drain', concurrent8_drain)
+
+
+# Production-shaped agent sessions (tp4/agent-turns; scripts/ci/agent_turns.py holds the plan, the numbers and the log reader). Opt-in, measurement only.
+# ---------------------------------------------------------------------------------------------------------------------
+
+def server_max_model_len():
+    """The served context length from GET /v1/models (vLLM reports max_model_len), or None where the server does not say."""
+    try:
+        with urllib.request.urlopen(BASE + '/v1/models', timeout=60) as response:
+            data = json.loads(response.read())
+        value = ((data.get('data') or [{}])[0]).get('max_model_len')
+        return int(value) if value else None
+    except Exception:
+        return None
+
+
+def agent_turns_test(name):
+    # Opt-in (tp4/agent-turns): agent_turns (6 sessions x 12 returning turns, about 13 minutes) and agent_turns_long (6 x 30, about 24). Six concurrent
+    # coding-agent sessions, each opening on a real-code context of its own length (64k / 128k / 200k tokens, seed-rotated and jittered, fitted to the server's
+    # token count) and then, turn after turn, appending ONE deterministic tool-result + instruction message (150-400 tokens) after the assistant's previous
+    # answer verbatim, generating 200-600 tokens and waiting a 1-8 s tool gap. A returning turn appends a few hundred tokens and re-prefills a few thousand
+    # old ones behind its resume checkpoint, which no other shape here reproduces. Per turn: prompt tokens, cached tokens (when the server reports them), TTFT,
+    # decode tok/s; per session and in total: the aggregate rate, TTFT by context, the re-prefill, the per-live-users table (agent_turns.py documents all of
+    # it, and c2_smoke_check reads the engine log for the prefill and decode shares). Every request carries an X-Request-Id tag naming it in the engine's lines.
+    # A prefix-reuse profile keeps a cache_salt only when it verifies against the salt key, so the smoke step mounts one and names its file in SMOKE_SALT_KEY_FILE
+    # (SMOKE_AGENT_SALT=none runs the no-reuse control). SMOKE_AGENT_* set the sessions, turns, mix, seed and gap scale (agent_turns.settings).
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import agent_turns
+    cfg = agent_turns.settings(name)
+    key = None
+    if cfg['salt_mode'] == 'auto' and os.environ.get('SMOKE_SALT_KEY_FILE'):
+        key = agent_turns.read_salt_key(os.environ['SMOKE_SALT_KEY_FILE'])
+    max_model_len = server_max_model_len()
+    if max_model_len:
+        cfg['max_context'] = min(cfg['max_context'], max_model_len)
+    the_plan = agent_turns.plan(cfg, max_model_len)
+    print(name, 'PLAN', json.dumps(dict(sessions=cfg['sessions'], turns=cfg['turns'], targets=the_plan['targets'], clamped=the_plan['clamped'],
+                                        plan_digest=agent_turns.plan_digest(the_plan), salted=bool(key), max_model_len=max_model_len,
+                                        estimate=agent_turns.estimate(cfg, the_plan['targets']))), flush=True)
+    prompts, corpus_info, fit = fitted_code_prompts(tuple(the_plan['targets']))
+    (corpus, _), _tasks = code_corpus()
+    entry = agent_turns.run(cfg, the_plan['targets'], prompts, corpus, stream, key=key, the_plan=the_plan)
+    entry.update(corpus=corpus_info, fit=fit, max_model_len=max_model_len, clamped=the_plan['clamped'])
+    print(name, 'AGGREGATE', json.dumps(dict((field, entry['aggregate'].get(field)) for field in (
+        'requests_done', 'errors', 'completion_tokens', 'wall_s', 'committed_tok_s', 'returning', 'reuse'))), flush=True)
+    for row in entry['aggregate']['live']:
+        print(name, 'LIVE', json.dumps(row), flush=True)
+    return entry
+
+
+for _agent_name in ('agent_turns', 'agent_turns_long'):
+    if ONLY and _agent_name in ONLY:
+        record(_agent_name, lambda _name=_agent_name: agent_turns_test(_name))
 
 
 def agreement():

@@ -87,6 +87,11 @@ own SMOKE_JSON line and the container log and exits non-zero on:
     logged a digest line for every prompt of a levern_equal test that ran. The hang shapes (levern_*) are judged as streams, and the exact-length
     rows as completions that counted the prompt they were sent. Nothing here compares the two arms: levern_compare.py does.
 
+  - the production-shaped agent sessions (opt-in tests agent_turns and agent_turns_long, tp4/agent-turns; agent_turns.py judges, agent_turns_problems calls it): a MEASUREMENT with no
+    speed threshold. Any request that errored or timed out fails, as does one with no tokens or no finish; on a prefix-reuse profile (QWEN_PREFIX_REUSE=1) a salted run must show reuse (the
+    usage's cached tokens, or the server's resume point read from the engine lines the run's X-Request-Id tags name) on at least 90% of its returning turns, and an UNSALTED run fails
+    unless it asked for no salt (SMOKE_AGENT_SALT=none). The facts line carries the run's rates, its prefill and decode shares of the wall time and the per-live table read from the log.
+
   python c2_smoke_check.py --smoke-log smoke.log --container-log container.log --profile P [--profiles qwen_c2_profiles.json]
 """
 
@@ -147,6 +152,8 @@ LEVERN_ROW_TESTS = ('levern_equal', 'levern_equal_long', 'levern_equal_busy')
 PARKED_ROW_TESTS = ('parked_equal', 'parked_budgets')
 PARKED_USER_TESTS = ('parked_churn', 'parked_churn_long', 'parked_abort_reuse', 'parked_turns')
 PARKED_TESTS = PARKED_ROW_TESTS + PARKED_USER_TESTS
+# The production-shaped agent sessions (tp4/agent-turns): judged by agent_turns.judge, which reads the engine log for the shares and the reuse.
+AGENT_TURNS_TESTS = ('agent_turns', 'agent_turns_long')
 REPLAY_TESTS = (REPLAY_TEST, 'replay_concurrent8')
 # Four-user streamed tests: their users get the stream rules; the code ones are code answers too (TEXT_TESTS).
 CONCURRENT_TESTS = ('concurrent4', 'concurrent4_v164order', 'concurrent4_steady', 'concurrent4_code', 'concurrent4_code_equal',
@@ -801,6 +808,27 @@ def parked_smoke_problems(results):
                 continue
             problems += stream_problems('%s user %d' % (name, index), user)
     return problems
+
+
+def agent_turns_problems(results, env=None, container_text=''):
+    """([problem], {test: facts}) for the agent_turns tests in `results` (agent_turns.judge): the stream rules on every request, then the shape's own (errors and timeouts,
+    reuse on a prefix-reuse profile). [] for a run without them."""
+    problems, facts = [], {}
+    for name in AGENT_TURNS_TESTS:
+        entry = (results or {}).get(name)
+        if entry is None:
+            continue
+        if isinstance(entry, dict) and 'error' not in entry:
+            for session in entry.get('sessions') or ():
+                for row in session.get('turns') or ():
+                    if isinstance(row, dict) and 'error' not in row:
+                        problems += stream_problems('%s session %s turn %s' % (name, row.get('session'), row.get('turn')), row)
+        import agent_turns
+        found, found_facts = agent_turns.judge(entry, env, container_text)
+        problems += found
+        if found_facts:
+            facts[name] = found_facts
+    return problems, facts
 
 
 # The one lever of the op-fusion programme that the static sampdraft tables above dispatch (WP1's S1); the sampdraft DRAFT_CONV and DRAFT_HEADS levers are part of the
@@ -2310,6 +2338,8 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     smoke = smoke_results(smoke_text)
     decode = not ladder_only(smoke)
     problems = smoke_problems(smoke, container_text)
+    agent_found, agent_facts = agent_turns_problems(smoke, env, container_text)
+    problems += agent_found
     mismatches = [line.strip()[:200] for line in container_text.splitlines() if MISMATCH.search(line)]
     problems += ['audit mismatch in the container log: %s' % line for line in mismatches[:4]]
     fell = [line.strip()[:200] for line in container_text.splitlines() if VGLUE_FELL_BACK in line]
@@ -2341,6 +2371,8 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     problems += upload_p0_problems(env, container_text)
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
+    if agent_facts:
+        facts['agent_turns'] = agent_facts
     if env is not None and env.get('QWEN_FAST_TP', '2') != '2':
         late = first_prefill_buffers(container_text)
         facts['first_prefill_model_buffers'] = late
