@@ -224,14 +224,16 @@ class FlagTests(unittest.TestCase):
         self.assertEqual(sorted(contract.PREFIX_POLICY_FLAGS),
                          sorted([registry_module.ENV_EVICT, registry_module.ENV_SUPERSEDE, registry_module.ENV_TELEMETRY,
                                  registry_module.ENV_TIER_AUDIT, registry_module.ENV_TIER_VERIFY, 'QWEN_PREFIX_CKPT_PRECONVERTED',
-                                 'QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT']))
+                                 'QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT', registry_module.ENV_TIER_SPILL_MODE]))
         self.assertEqual(contract.PREFIX_GHOST_FLAG, registry_module.ENV_GHOST)
         self.assertEqual(contract.PREFIX_POLICY_FLAGS[registry_module.ENV_EVICT], registry_module.EVICT_POLICIES)
         self.assertEqual(contract.PREFIX_POLICY_FLAGS[registry_module.ENV_TIER_VERIFY], registry_module.TIER_VERIFY_MODES)
         self.assertEqual(contract.PREFIX_TIER_GIB, registry_module.ENV_TIER_GIB)
         self.assertEqual(contract.PREFIX_TIER_OFF_PATH, registry_module.ENV_TIER_OFF_PATH)
         self.assertEqual(set(contract.PREFIX_TIER_NUMBERS), {registry_module.ENV_TIER_GIB, registry_module.ENV_TIER_SPILL_MAX,
-                                                             registry_module.ENV_TIER_MIN_TOKENS, registry_module.ENV_TIER_MIN_AVAILABLE})
+                                                             registry_module.ENV_TIER_MIN_TOKENS, registry_module.ENV_TIER_MIN_AVAILABLE,
+                                                             registry_module.ENV_TIER_SPILL_HARD_MAX, registry_module.ENV_TIER_SPILL_BATCH,
+                                                             registry_module.ENV_TIER_SPILL_WARN_MS})
         for name in ('QWEN_PREFIX_CKPT_PRECONVERTED', 'QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT', registry_module.ENV_TIER_GIB):
             self.assertIn(name, qwen_prefix_model_patch.MODEL_ADAPTER)
 

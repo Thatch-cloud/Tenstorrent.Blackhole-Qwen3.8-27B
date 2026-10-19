@@ -94,16 +94,20 @@ PREFIX_SWITCH = 'QWEN_PREFIX_REUSE'
 # plain LRU, no supersession, telemetry on.
 PREFIX_POLICY_FLAGS = {'QWEN_PREFIX_EVICT': ('lru', 'fair'), 'QWEN_PREFIX_SUPERSEDE': ('0', '1'), 'QWEN_PREFIX_TELEMETRY': ('0', '1'),
                        'QWEN_PREFIX_CKPT_PRECONVERTED': ('0', '1'), 'QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT': ('0', '1'),
-                       'QWEN_PREFIX_HOST_TIER_AUDIT': ('0', '1'), 'QWEN_PREFIX_HOST_TIER_VERIFY': ('sample', 'all', 'off')}
+                       'QWEN_PREFIX_HOST_TIER_AUDIT': ('0', '1'), 'QWEN_PREFIX_HOST_TIER_VERIFY': ('sample', 'all', 'off'),
+                       'QWEN_PREFIX_HOST_TIER_SPILL_MODE': ('cap', 'complete')}
 PREFIX_GHOST_FLAG = 'QWEN_PREFIX_GHOST_ENTRIES'
 # The host KV tier's numbers (qwen_prefix_registry.tier_config) and the files and switches that only a gate sets. None of the tier or the preconverted
 # checkpoints has run on a card: a traffic profile may not name them active until a qualification record lifts this.
 PREFIX_TIER_GIB = 'QWEN_PREFIX_HOST_TIER_GIB'
+# (the complete-spill mode's three knobs are tier numbers too: docs/tp4-sched-1.md section 3; they mean something only beside QWEN_PREFIX_HOST_TIER_SPILL_MODE=complete)
+PREFIX_SPILL_MODE = 'QWEN_PREFIX_HOST_TIER_SPILL_MODE'
+PREFIX_SPILL_KNOBS = ('QWEN_PREFIX_HOST_TIER_SPILL_HARD_MAX_BLOCKS', 'QWEN_PREFIX_HOST_TIER_SPILL_BATCH_BLOCKS', 'QWEN_PREFIX_HOST_TIER_SPILL_WARN_MS')
 PREFIX_TIER_NUMBERS = (PREFIX_TIER_GIB, 'QWEN_PREFIX_HOST_TIER_SPILL_MAX_BLOCKS', 'QWEN_PREFIX_HOST_TIER_MIN_TOKENS',
-                       'QWEN_PREFIX_HOST_TIER_MIN_AVAILABLE_GIB')
+                       'QWEN_PREFIX_HOST_TIER_MIN_AVAILABLE_GIB') + PREFIX_SPILL_KNOBS
 PREFIX_TIER_OFF_PATH = 'QWEN_PREFIX_HOST_TIER_OFF_PATH'
 PREFIX_GATE_ONLY_VALUES = (('QWEN_PREFIX_CKPT_PRECONVERTED', '1'), ('QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT', '1'),
-                           ('QWEN_PREFIX_HOST_TIER_AUDIT', '1'))
+                           ('QWEN_PREFIX_HOST_TIER_AUDIT', '1'), (PREFIX_SPILL_MODE, 'complete'))
 # Every name of the two features: the profile's to switch on, so a value inherited from the process under a profile that does not name it is dropped
 # (apply_environment), as Lever N's, engine reuse's and W2's are.
 PREFIX_TIER_ENV_NAMES = (tuple(name for name, _value in PREFIX_GATE_ONLY_VALUES) + PREFIX_TIER_NUMBERS
@@ -572,6 +576,16 @@ def prefix_policy_problems(profile):
                             'for KV pages' % (PREFIX_TIER_GIB, env[PREFIX_TIER_GIB], store_gib))
     if PREFIX_TIER_OFF_PATH in env and not re.fullmatch(r'(?!-)[A-Za-z0-9_./-]{1,200}', env[PREFIX_TIER_OFF_PATH]):
         problems.append('%s=%r is not a plain path' % (PREFIX_TIER_OFF_PATH, env[PREFIX_TIER_OFF_PATH]))
+    # The complete-spill mode (qwen_prefix_registry.spill_plan refuses all of these at boot): its knobs are whole numbers in plain digits, mean something only beside the mode,
+    # and the mode needs the tier it spills to.
+    for name in PREFIX_SPILL_KNOBS:
+        if name in env and not re.fullmatch(r'[0-9]+', env[name]):
+            problems.append('%s=%r is not a whole number in plain digits' % (name, env[name]))
+    spill_knobs = [name for name in PREFIX_SPILL_KNOBS if name in env]
+    if spill_knobs and env.get(PREFIX_SPILL_MODE) != 'complete':
+        problems.append('%s set without %s=complete: the cap mode would ignore it' % (', '.join(spill_knobs), PREFIX_SPILL_MODE))
+    if env.get(PREFIX_SPILL_MODE) == 'complete' and not numbers.get(PREFIX_TIER_GIB):
+        problems.append('%s=complete needs the host KV tier (%s > 0): there would be nothing to spill to' % (PREFIX_SPILL_MODE, PREFIX_TIER_GIB))
     quota_tokens = {}
     for name in PREFIX_QUOTA_TOKENS:
         if name in env:

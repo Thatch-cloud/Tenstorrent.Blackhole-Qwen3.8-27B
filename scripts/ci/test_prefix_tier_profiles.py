@@ -323,7 +323,9 @@ class ContractTests(unittest.TestCase):
 
     def test_every_name_the_registry_and_the_model_read_is_one_the_contract_knows(self):
         read = {registry.ENV_TIER_GIB, registry.ENV_TIER_AUDIT, registry.ENV_TIER_SPILL_MAX, registry.ENV_TIER_MIN_TOKENS, registry.ENV_TIER_MIN_AVAILABLE,
-                registry.ENV_TIER_VERIFY, registry.ENV_TIER_OFF_PATH, 'QWEN_PREFIX_CKPT_PRECONVERTED', 'QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT'}
+                registry.ENV_TIER_VERIFY, registry.ENV_TIER_OFF_PATH, 'QWEN_PREFIX_CKPT_PRECONVERTED', 'QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT',
+                # (the complete-spill mode, tp4/sched-1: test_sched_spill)
+                registry.ENV_TIER_SPILL_MODE, registry.ENV_TIER_SPILL_HARD_MAX, registry.ENV_TIER_SPILL_BATCH, registry.ENV_TIER_SPILL_WARN_MS}
         self.assertEqual(read, set(NAMES))
 
 
