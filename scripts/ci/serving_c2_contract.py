@@ -306,12 +306,9 @@ def configure_checkpoint(profile, environ, api_server, exists=os.path.isdir):
         snapshot = checkpoint.resolve_snapshot(profile['snapshots'], sel, catalog, exists)
         facts = checkpoint.configure_environment(environ, sel, snapshot)
         budget = checkpoint.request_overrides(sel).get('output_budget')
-        if budget is not None:
+        if budget is not None and not checkpoint_budget_problems(profile, request_limits(profile), budget):
             # Every process, like the keyed cache: serving_fast_policy reads QWEN_FAST_OUTPUT_BUDGET when the worker imports it, after this boot has laid the checkpoint's
-            # ceiling over the profile's value (apply_environment ran first and wrote the profile's). The API server's own copy is checkpoint_limits.
-            refusals = checkpoint_budget_problems(profile, request_limits(profile), budget)
-            if refusals:
-                raise ValueError('profile %s cannot serve the checkpoint\'s output_budget %d: %s' % (profile['name'], budget, '; '.join(refusals)))
+            # ceiling over the profile's value (apply_environment ran first and wrote the profile's). A profile that cannot carry it keeps its own (checkpoint_limits says so, once).
             environ[OUTPUT_BUDGET_ENV] = str(budget)
         if api_server:
             problems = checkpoint.verify_snapshot(snapshot, sel, catalog)
@@ -329,7 +326,8 @@ def configure_checkpoint(profile, environ, api_server, exists=os.path.isdir):
 def checkpoint_limits(limits, environ, profile=None):
     """Item 9: request_limits(profile) with the selected checkpoint's catalog numbers laid over it (qwen_c2_checkpoints.json "request": default_max_tokens, the max_tokens a
     request that omits it gets, and output_budget, the ceiling on max_tokens, both within the same clamp, prompt cap and KV admission). No selection, or the base: `limits` itself, nothing read.
-    An output_budget needs `profile` (checkpoint_budget_problems reads its window and flags); configure_checkpoint exports the same number as QWEN_FAST_OUTPUT_BUDGET in every process."""
+    An output_budget needs `profile` (checkpoint_budget_problems reads its window and flags) and is laid over a profile that can carry it only: any other keeps its own ceiling, and the log says why.
+    configure_checkpoint exports the same number as QWEN_FAST_OUTPUT_BUDGET in every process, by the same rule."""
     if not any(environ.get(name) for name in CHECKPOINT_ENV[:2]):
         return limits
     import qwen_c2_checkpoint as checkpoint
@@ -347,10 +345,11 @@ def checkpoint_limits(limits, environ, profile=None):
             raise ValueError('the checkpoint\'s output_budget %r is laid over a profile, and none was given' % (budget,))
         refusals = checkpoint_budget_problems(profile, limits, budget)
         if refusals:
-            raise ValueError('profile %s cannot serve the checkpoint\'s output_budget %d: %s' % (profile.get('name'), budget, '; '.join(refusals)))
-        log('request output budget %d for this checkpoint (its catalog entry; the profile says %d); the prompt cap %s and the KV admission are unchanged: a request reserves its prompt + max_tokens blocks',
-            budget, limits['budget'], limits['max_prompt_tokens'])
-        out['budget'] = budget
+            log('request output budget stays %d: profile %s cannot carry the checkpoint\'s output_budget %d (%s)', limits['budget'], profile.get('name'), budget, '; '.join(refusals))
+        else:
+            log('request output budget %d for this checkpoint (its catalog entry; the profile says %d); the prompt cap %s and the KV admission are unchanged: a request reserves its prompt + max_tokens blocks',
+                budget, limits['budget'], limits['max_prompt_tokens'])
+            out['budget'] = budget
     default = changes.get('default_max_tokens')
     if default is not None:
         if not 1 <= default <= out['budget']:
@@ -1573,7 +1572,7 @@ def output_budget_problems(profile, budget):
 
 def checkpoint_budget_problems(profile, limits, budget):
     """[problem] with laying a checkpoint's `budget` over `limits` (request_limits(profile)): output_budget_problems, and the rule that it only RAISES the profile's ceiling and leaves the longest
-    admitted prompt where it is (a profile with no min_answer_tokens keeps room for the whole budget, so a raise would shorten every prompt: refused by name)."""
+    admitted prompt where it is (a profile with no min_answer_tokens keeps room for the whole budget, so a raise would shorten every prompt: not laid over that profile)."""
     problems = output_budget_problems(profile, budget)
     if problems:
         return problems

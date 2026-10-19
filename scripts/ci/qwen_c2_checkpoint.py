@@ -224,7 +224,7 @@ def platform_model_problems(asked, sel, catalog):
 
 def request_overrides(sel):
     """The request-contract numbers the selected checkpoint's catalog entry replaces the profile's with ({} for the base or no selection): default_max_tokens (the max_tokens a request that omits it gets)
-    and output_budget (the ceiling on max_tokens; serving_c2_contract.checkpoint_budget_problems holds it to the profile it is laid over)."""
+    and output_budget (the ceiling on max_tokens; serving_c2_contract.checkpoint_budget_problems holds it to the profile it is laid over: a profile that cannot carry it keeps its own ceiling)."""
     if sel is None or sel.is_base:
         return {}
     return dict(sel.entry.get('request') or {})

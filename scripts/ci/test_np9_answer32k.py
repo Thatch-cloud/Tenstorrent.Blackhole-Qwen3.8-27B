@@ -232,7 +232,7 @@ class ContractLimitsTests(unittest.TestCase):
             for asked in (None, 1, 32768, 40000):
                 self.assertLessEqual(prompt + enforce(swift, prompt, asked), contract.DRAFTER_END_LIMIT)
 
-    def test_the_raise_is_swifts_alone_and_a_profile_that_would_lose_prompt_room_is_refused_by_name(self):
+    def test_the_raise_is_swifts_alone_and_a_profile_that_would_lose_prompt_room_keeps_its_own_ceiling_by_name(self):
         ship = dict(profiles()[SHIP], name=SHIP)
         limits = contract.request_limits(ship)
         self.assertEqual(contract.checkpoint_budget_problems(ship, limits, 32768), [])
@@ -250,11 +250,56 @@ class ContractLimitsTests(unittest.TestCase):
         no_reader = copy.deepcopy(ship)
         del no_reader['env']['QWEN_FAST_EXTENT_REPLAY']
         self.assertTrue(any('QWEN_FAST_EXTENT_REPLAY' in line for line in contract.checkpoint_budget_problems(no_reader, limits, 32768)))
-        with mock.patch.object(contract, 'log', lambda *args: None), self.assertRaises(ValueError) as raised:
-            contract.checkpoint_limits(contract.request_limits(no_room), dict(PAIR), no_room)
-        self.assertIn('longest admitted prompt', str(raised.exception))
+        lines = []
+        with mock.patch.object(contract, 'log', lambda message, *values: lines.append(message % values)):
+            kept = contract.checkpoint_limits(contract.request_limits(no_room), dict(PAIR), no_room)
+        self.assertEqual(kept['budget'], 16384, 'a profile that would lose prompt room keeps its own ceiling')
+        self.assertTrue(any('stays 16384' in line and 'longest admitted prompt' in line for line in lines), lines)
         with mock.patch.object(contract, 'log', lambda *args: None), self.assertRaises(ValueError):
             contract.checkpoint_limits(limits, dict(PAIR))          # no profile to hold the number to
+
+    def test_every_profile_of_the_file_either_takes_swifts_ceiling_on_the_serving_shape_or_keeps_its_own(self):
+        """Swift on a profile other than ship-4 (the tau lab's, a gate twin, the stock vLLM path of general-tp4) boots as it always did: the raise is laid only over a profile that can carry it,
+        in the API server's limits and in the environment of every process, by the same rule."""
+        taken, kept = [], []
+        for name, entry in profiles().items():
+            if 'engine' not in entry or 'QWEN_FAST_OUTPUT_BUDGET' not in entry.get('env', {}):
+                continue
+            profile = dict(entry, name=name)
+            limits = contract.request_limits(profile)
+            if limits['budget'] < SWIFT['request']['default_max_tokens']:
+                # a 256-token profile (the stock vLLM path) already refuses Swift's 16,384 default in the API server, before NP9: not a case this change opens or closes
+                with mock.patch.object(contract, 'log', lambda *args: None), self.assertRaises(ValueError) as raised:
+                    contract.checkpoint_limits(limits, dict(PAIR), profile)
+                self.assertIn('default_max_tokens', str(raised.exception))
+                kept.append(name)
+                continue
+            with mock.patch.object(contract, 'log', lambda *args: None):
+                laid = contract.checkpoint_limits(limits, dict(PAIR), profile)
+            can = not contract.checkpoint_budget_problems(profile, limits, 32768)
+            with self.subTest(profile=name):
+                self.assertEqual(laid['budget'], 32768 if can else limits['budget'])
+                self.assertEqual({k: v for k, v in laid.items() if k not in ('budget', 'default_max_tokens')}, {k: v for k, v in limits.items() if k not in ('budget', 'default_max_tokens')})
+                if can:
+                    self.assertEqual((profile['env'].get('QWEN_FAST_ANY_REQUEST'), profile['env'].get('QWEN_FAST_EXTENT_REPLAY')), ('1', '1'))
+                    self.assertEqual(contract.prompt_room(262144 if profile['engine']['max-model-len'] == 262144 else profile['engine']['max-model-len'], 32768, limits['max_prompt_tokens'],
+                                                          limits['min_answer_tokens'], limits.get('drafter_headroom_tokens', 0)),
+                                     contract.prompt_room(profile['engine']['max-model-len'], limits['budget'], limits['max_prompt_tokens'], limits['min_answer_tokens'],
+                                                          limits.get('drafter_headroom_tokens', 0)), 'the prompt cap is where it was')
+            (taken if can else kept).append(name)
+        self.assertIn(SHIP, taken)
+        self.assertIn('c2-packed-tp4', taken)
+        self.assertTrue(taken and all(name.startswith('c2-packed') for name in taken), 'only the C2-any profiles (the c2-packed family) take the raise')
+        self.assertTrue(kept, 'the stock vLLM path is among the profiles that keep their own ceiling')
+
+    def test_the_environment_of_every_process_follows_the_same_rule(self):
+        for name, expected in ((SHIP, '32768'), ('c2-packed-tp4', '32768'), ('general-tp4', '256')):
+            profile = dict(profiles()[name], name=name)
+            environ = dict(PAIR, TT_CACHE_PATH='/experiment-cache/weights')
+            contract.apply_environment(profile, environ)
+            with mock.patch.object(contract, 'log', lambda *args: None):
+                contract.configure_checkpoint(profile, environ, False, exists=lambda path: True)
+            self.assertEqual(environ['QWEN_FAST_OUTPUT_BUDGET'], expected, name)
 
     def test_a_profile_may_name_32768_itself_on_the_ship_shape_and_nowhere_else(self):
         twin = dict(profiles()[SHIP], name='twin')
