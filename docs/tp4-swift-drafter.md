@@ -98,6 +98,21 @@ bfloat8_b, which may eat some of a small gain (the tau lab on the cards is the j
 * bfloat8_b: the cards run the projection weights as bfloat8_b. Emulated in the simulator (groups of 16 input weights share an exponent, 7-bit magnitude and sign, on every projection, the convolution kernels' projections, `fc` and the selector's projection): the served drafter is unchanged
   (4.496 against 4.495 at 16 rows) and the fine-tune keeps its gain (x1.014 / x1.022 / x1.053 at 4 / 8 / 16 rows overall, x1.051 / x1.168 / x1.270 on agent turns; the bf16 numbers are x1.014 / x1.023 / x1.056 and x1.052 / x1.172 / x1.279).
 
+## v2: the larger corpus (state: stopped at step 400 of 800, no deliverable yet)
+
+A second generation block (140 minutes, the same sources and rules, groups held out in v1 excluded again) brought the corpus to 2,685 sequences and 3.59 million generated tokens (agent turns 1,176 sequences /
+0.29 M tokens, code answers 706 / 1.37 M, chained answers 803 / 1.94 M); 2,292 sequences (5.2 M stored feature rows) are usable for training and the 61 held-out sequences are the same as v1's. v2 is trained with
+the bf16-argmax label, the bidirectional rule, the block mix and lr 2e-5 (30 warm-up steps, cosine to 10% over 800 steps, 4 sequences a step). Full held-out scores of its checkpoints, same control:
+
+| checkpoint | all: 4 rows | 8 rows | 16 rows | agent turns: 4 rows | 8 rows | 16 rows |
+| --- | --- | --- | --- | --- | --- | --- |
+| v1, step 200 (corpus A) | x1.014 | x1.020 | x1.049 | x1.047 | x1.136 | x1.254 |
+| v1, final, step 300 | x1.014 | x1.023 | x1.056 | x1.052 | x1.172 | x1.279 |
+| v2, step 200 (corpus A + B) | x1.013 [1.010, 1.017] | x1.020 [1.013, 1.028] | x1.050 [1.041, 1.064] | x1.044 | x1.140 | x1.249 |
+
+At equal steps the larger corpus changes nothing (v1's gain also appeared only as the learning rate decayed). The run was paused at step ~440 for the host's production service; its last saved checkpoint is step 400 (a bf16 snapshot
+without optimizer state; training can resume from it with `--start-step 400`, or finish with a decay-only schedule). No v2 weights are offered until they are scored in full.
+
 ## Packaging (what this branch adds)
 
 * `drafter-manifests/<name>.json` with `"source": "local"`: a drafter trained here has no hub repository. Its model is `local/<name>`, its revision is the first 40 hex digits of the
