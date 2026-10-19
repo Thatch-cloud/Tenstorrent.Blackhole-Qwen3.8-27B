@@ -180,10 +180,14 @@ class OrderTests(unittest.TestCase):
 
 class TemplateTests(unittest.TestCase):
     def test_every_template_parses_with_rc_0_but_the_ship_build_which_is_refused_while_pending(self):
+        # Decision-agnostic (like test_fusion_ship): B1 is refused while the s5 waiver is PENDING and parses once the
+        # owner's decision starts APPROVED.
+        decision = json.loads((HERE / 'fusion-wp' / 'S5.json').read_text(encoding='utf-8'))
+        approved = 'APPROVED' in json.dumps(decision) and 'PENDING: the owner approves' not in json.dumps(decision)
         for name in EXPECTED:
             with self.subTest(name=name):
                 code, text = run_reader(PACK / (name + '.env'))
-                if name == 'B1-ship-build':
+                if name == 'B1-ship-build' and not approved:
                     self.assertEqual(code, 1, text)
                     self.assertIn('not APPROVED', text)
                 else:

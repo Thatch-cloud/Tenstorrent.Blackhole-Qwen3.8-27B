@@ -35190,7 +35190,7 @@
           "tp4/prefill-2 (CPU): the hand-off against the host path on the fake device (the slot's rows equal the scratch's, every other row unchanged, a failing clone leaves the slot untouched and the host path runs, an unset flag never imports the module; test_prefill_handoff). Never run on a card",
           "tp4/sched-1 (CPU): the lean admission counted against the flag-off call shape and log (test_sched_lean), the complete spills against the cap mode's stats and drops (test_sched_spill), the production numbers in the simulation (sched_sim, ESTIMATES: docs/tp4-sched-1.md section 6). Never run on a card"
         ],
-        "decision": "PENDING: the owner approves at ship time, after the tp4/next-1 gates (the audited attach A1 and the prefix arm A2, the timed pair T1, the platform replay SR) and the long-answer gates of window 2; nothing here records an approval"
+        "decision": "APPROVED by the owner 2026-10-19 (Claude Code session): ship s5 if the window gates pass - A1 audited attach 0 mismatches (PF2-H ships only if its own audit passes), N1 long answers pass, T1B no loss against the s4 control"
       }
     },
     "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic": {
