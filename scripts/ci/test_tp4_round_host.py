@@ -1180,10 +1180,15 @@ class ProfileTests(unittest.TestCase):
             data = json.load(handle)
         self.assertEqual(data['default'], 'c2-packed-tp4')
         import make_fusion_profiles as fusion
+        import make_octo3_profiles as twins_octo3
 
         # the op-fusion programme's two combined twins (gate only) carry the four levers on purpose, and the audit flag on the audited one
         combined = {fusion.NAMESPACE + 'all': {SELECT, READ, KEYED, LEAN}, fusion.NAMESPACE + 'all-audit': {SELECT, READ, KEYED, LEAN, AUDIT}}
         combined.update((name, {SELECT, READ, KEYED, LEAN}) for name in fusion.ship_names())            # the ship candidate: the timed combined arm as a traffic profile
+        import make_prefix_tier_profiles as tier
+
+        # ... and the same with the host KV tier (make_prefix_tier_profiles): the candidate as a traffic profile, its audit twin gate only with the audit flag
+        combined.update({tier.SHIP: {SELECT, READ, KEYED, LEAN}, tier.SHIP_AUDIT: {SELECT, READ, KEYED, LEAN, AUDIT}})
         # the host-gap package WPH's composition twins (-fx-wph-*) are the combined timed arm plus their own flags, so they carry the four levers (never the audit flag)
         combined.update({name: {SELECT, READ, KEYED, LEAN} for name in data['profiles'] if name.startswith(fusion.NAMESPACE + 'wph-')})
         # the single-lever composition twins on top of the combined arm are the combined arm (or the combined audited arm) plus their own flags, so they carry what their parents carry:
@@ -1191,6 +1196,13 @@ class ProfileTests(unittest.TestCase):
         # the four levers always, and the audit flag on the audited twin
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in data['profiles']
                          if name.startswith((fusion.NAMESPACE + 'all-oneq', fusion.NAMESPACE + 'all-grid13'))})
+        # tp4/octo-3: the octo twins of the combined arms (-fx-all-octo3*, -fx-all-oneq-grid13-octo3*) are those arms plus the octo env, so they carry the four levers (and the audit flag on the audited twins)
+        combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in data['profiles']
+                         if name in twins_octo3.twin_names()})
+        # tp4/ship-4: the combined candidate's twins are the octo-3 audited twin / the candidate plus their own env (test_ship4_profiles), so they carry the four levers (and the audit flag on the audited twin)
+        import make_ship4_profiles as twins_ship4
+
+        combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_ship4.twin_names()})
         for name, profile in data['profiles'].items():
             if name in self.ADDED:
                 continue
@@ -1198,7 +1210,7 @@ class ProfileTests(unittest.TestCase):
                 carried = set(round_host.FLAGS) & set(profile.get('env', {}))
                 self.assertEqual(carried, combined.get(name, set()))
                 if name in combined:
-                    self.assertIs(profile.get('gate_only'), None if name in fusion.ship_names() else True)
+                    self.assertIs(profile.get('gate_only'), None if name in fusion.ship_names() or name == tier.SHIP else True)
 
     def test_the_checked_in_twins_are_what_the_generator_makes_from_the_parent(self):
         self.assertEqual(generator.main(['--check']), 0)

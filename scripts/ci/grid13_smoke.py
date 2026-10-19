@@ -6,10 +6,14 @@ device) and its texts will still equal the control's. So, by the sub-switches th
 
   prefill   an `engaged` line for each of the three fused all-gather matmul sites: site=gdn_in, site=attn_in and the MLP's (site=gate_up for the fused SwiGLU, or
             site=mlp_gate_or_up for the separate gate and up calls)
-  verify    an `engaged` line for site=verify.out (the output projections; the in-projections only when QWEN_FAST_GRID13_CFG names them: gdn_in= / attn_in=)
+  verify    an `engaged` line for site=verify.out (the output projections; the in-projections only when QWEN_FAST_GRID13_CFG names them: gdn_in= / attn_in=), or an `unchanged`
+            line for it with its reason (the wrapper saw the projection and the plan had nothing to move: information, then no audit line is required for the site). Neither,
+            with no `verify saw` line, means the wrapper was never reached; the `installed` line says whether it was bound at all
   drafter   nothing is required: its hook is the unapplied patch fusion-wp/M1-dflash-device.patch; a site=drafter.commit line, when there is one, is read like the others
   every arm NO `fell back` line (the served ops ran: the timing is not the lever's) and NO `audit mismatch` line
-  audit on  (QWEN_FAST_GRID13_AUDIT=1; the lever must be on too) a passing `audit n=<n> exact=True site=<site>` line for every site the arm requires
+  audit on  (QWEN_FAST_GRID13_AUDIT=1; the lever must be on too) a passing `audit n=<n> exact=True site=<site>` line for every site the arm requires, and NO
+            `audit skipped reason=<why> site=<site>` line: an audit that was due and could not run (no device to synchronize, the activation could not be copied) compared
+            nothing, so an audited attach cannot pass on the served ops alone (card run 38116769673 died on that path; the skip is the logged form of it)
   lever off not one engaged, fell-back or audit line (a leak means the lever ran where nobody asked for it)
 
     python3 grid13_smoke.py --log container.log [--profile NAME [--profiles qwen_c2_profiles.json]] [--env KEY=VALUE ...]
@@ -32,6 +36,10 @@ ENGAGED = PREFIX + ' engaged'
 FELL_BACK = PREFIX + ' fell back'
 AUDIT = PREFIX + ' audit'
 MISMATCH = PREFIX + ' audit mismatch'
+AUDIT_SKIPPED = PREFIX + ' audit skipped'
+UNCHANGED = PREFIX + ' unchanged'
+SAW = PREFIX + ' verify saw'
+INSTALLED = PREFIX + ' installed'
 # Held equal to grid13_tp's by test_grid13_tp; repeated so that the rig host reads this file alone.
 PREFILL_SITES = (('gdn_in',), ('attn_in',), ('gate_up', 'mlp_gate_or_up'))
 EXACT = re.compile(r'audit n=(\d+) exact=True site=(\S+)')
@@ -62,6 +70,10 @@ def required_sites(env):
     return sites
 
 
+def _logged(lines, kind, names):
+    return any(kind in line and any('site=%s ' % name in line + ' ' for name in names) for line in lines)
+
+
 def problems(env, container_text):
     """[problem] for the profile `env` (flag name -> value) and the server log `container_text`."""
     found = []
@@ -72,12 +84,28 @@ def problems(env, container_text):
         return found
     found += ['the grid13 lever fell back (the served matmul grids ran, it saved nothing): %s' % line.strip()[:200] for line in lines if FELL_BACK in line][:4]
     found += ['audit mismatch in the log: %s' % line.strip()[:200] for line in lines if MISMATCH in line][:4]
+    found += ['an audit was skipped, so nothing was compared at that site (the lever result was served unchecked): %s' % line.strip()[:200] for line in lines if AUDIT_SKIPPED in line][:4]
+    explained = set()                       # the verify sites that logged an `unchanged` line with its reason instead of an engaged one
     for label, names in required_sites(env):
-        if not any(ENGAGED in line and any('site=%s ' % name in line + ' ' for name in names) for line in lines):
-            found.append('%s=%s is set and no engaged line (%s site=%s) was logged: that site ran the served grid' % (FLAG, env.get(FLAG), ENGAGED, label))
+        if _logged(lines, ENGAGED, names):
+            continue
+        if label.startswith('verify.') and _logged(lines, UNCHANGED, names):
+            explained.add(label)
+            continue
+        hint = ''
+        if label.startswith('verify.'):
+            if any(SAW in line for line in lines):
+                hint = ' (the wrapper was reached - see the `verify saw` lines for the operands it met)'
+            elif any(INSTALLED in line for line in lines):
+                hint = ' (the wrapper was bound - the `installed` line - and the model never called it)'
+            else:
+                hint = ' (no `installed` line: the wrapper was never bound)'
+        found.append('%s=%s is set and no engaged line (%s site=%s) was logged: that site ran the served grid%s' % (FLAG, env.get(FLAG), ENGAGED, label, hint))
     if (env or {}).get(AUDIT_FLAG) == '1':
         audited = set(site for _count, site in (EXACT.findall(line)[0] for line in lines if EXACT.search(line)))
         for label, names in required_sites(env):
+            if label in explained:
+                continue
             if not any(name in audited for name in names):
                 found.append('%s=1 is set and no passing audit line (%s n=<n> exact=True site=%s) was logged: that site was never audited' % (AUDIT_FLAG, AUDIT, label))
     elif any(AUDIT in line and 'exact=' in line for line in lines):

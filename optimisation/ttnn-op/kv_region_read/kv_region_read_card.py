@@ -8,6 +8,14 @@ served (1, 4) mesh and calls run() below), or by hand:
 
     python3 kv_region_read_card.py --devices 4 --blocks 4096 --heads-per-chip 1
 
+Version 2 of the extension adds the host KV tier's raw ops (ttnn.qwen_block_bytes, qwen_read_blocks_raw, qwen_write_blocks_raw); run_raw checks them
+when they exist (a version-1 image reports raw=absent and is not failed for it: the tier then refuses to attach). The raw arms (Q1' of the tier
+plan): the slice size equals the cache's packed block size; a raw read of the five block sets, written into a second cache at the same ids, reads
+back byte-identical through the raw read AND unpacks to the same values as the first cache through the region read (so raw bytes in are the
+bytes out, and they are the model's bytes); a deliberately changed byte does not read back as the original (the comparison has teeth); no
+program-cache growth; and the GB/s of 32, 256, 1024 and 4096 blocks each way, idle (with a decode trace replaying is the window's
+timing job, not this probe).
+
 Prints one JSON object and exits 1 on any mismatch. What it settles (the questions the patch leaves open):
   * the host tensor ttnn.allocate_tensor_on_host(shape=[n, heads_per_chip, 64, 256]) really is the per-device shard
     shape qwen_read_blocks expects (the read refuses a mismatch with a TT_FATAL, so a wrong guess fails loud);
@@ -81,6 +89,98 @@ def ensure_extension(ttnn, fallback_dir=None):
     return reason or 'this ttnn has no qwen_read_blocks', None
 
 
+RAW_SIZES = (32, 256, 1024, 4096)
+# One head's block packed as bfloat8_b: 64 x 256 values are 16 tiles of 1,088 bytes (a module constant so the CPU fake, which models
+# bfloat16, can name its own).
+PACKED_HEAD_BLOCK_BYTES = 17408
+
+
+def run_raw(ttnn, mesh, devices, cache, blocks, heads_per_chip, composer):
+    """The version-2 raw block ops against the region read, byte for byte -> (report dict, problems). cache is the filled device cache run() built."""
+    import numpy as np
+
+    problems, report = [], {}
+    names = ('qwen_block_bytes', 'qwen_read_blocks_raw', 'qwen_write_blocks_raw')
+    absent = [name for name in names if not callable(getattr(ttnn, name, None))]
+    if absent:
+        return dict(status='absent', missing=absent), problems
+    slice_bytes = int(ttnn.qwen_block_bytes(cache))
+    want_bytes = PACKED_HEAD_BLOCK_BYTES * heads_per_chip
+    report['slice_bytes'] = slice_bytes
+    if slice_bytes != want_bytes:
+        problems.append('qwen_block_bytes is %d, a 64 x 256 bfloat8_b block per head is %d' % (slice_bytes, want_bytes))
+        report['status'] = 'FAIL'
+        return report, problems
+    second = ttnn.as_tensor(torch.zeros(blocks, heads_per_chip, BLOCK, HEAD_DIM, dtype=torch.bfloat16), device=mesh,
+                            dtype=ttnn.bfloat8_b, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                            mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
+    programs = mesh.num_program_cache_entries()
+    sets = block_sets(blocks)
+    touched = {index for selected in sets.values() for index in selected}
+    outside = [index for index in (3, blocks // 3, blocks - 3) if index not in touched]
+    before = np.empty((devices, len(outside), slice_bytes), dtype=np.uint8)
+    if outside:
+        ttnn.qwen_read_blocks_raw(second, before, outside)
+    for name, selected in sets.items():
+        count = len(selected)
+        out = np.empty((devices, count, slice_bytes), dtype=np.uint8)
+        ttnn.qwen_read_blocks_raw(cache, out, selected)
+        ttnn.qwen_write_blocks_raw(second, out, selected)
+        back = np.empty_like(out)
+        ttnn.qwen_read_blocks_raw(second, back, selected)
+        same_bytes = bool(np.array_equal(out, back))
+        # The second cache, unpacked by ttnn as the model's readers unpack it, must hold the first cache's values at those blocks.
+        cache_dims = [int(cache.shape[i]) for i in range(len(cache.shape))]
+        pair = []
+        for tensor in (cache, second):
+            host = ttnn.allocate_tensor_on_host(ttnn.Shape([count] + cache_dims[1:]), tensor.dtype, tensor.layout, mesh)
+            ttnn.qwen_read_blocks(tensor, host, selected)
+            pair.append(ttnn.to_torch(host, mesh_composer=composer))
+        same_values = bool((pair[0].contiguous().view(torch.uint8) == pair[1].contiguous().view(torch.uint8)).all())
+        # The teeth: one changed byte must not read back as the original.
+        changed = out.copy()
+        changed.reshape(-1)[0] ^= 0xFF
+        ttnn.qwen_write_blocks_raw(second, changed, selected)
+        again = np.empty_like(out)
+        ttnn.qwen_read_blocks_raw(second, again, selected)
+        teeth = not bool(np.array_equal(again, out))
+        ttnn.qwen_write_blocks_raw(second, out, selected)
+        report[name] = dict(blocks=count, bytes_equal=same_bytes, values_equal=same_values, teeth=teeth)
+        for field, ok in (('raw bytes written and read back differ', same_bytes), ('the raw-written cache unpacks to other values', same_values),
+                          ('a changed byte read back as the original (the comparison has no teeth)', teeth)):
+            if not ok:
+                problems.append('%s: %s' % (name, field))
+    # A write touches only the blocks it names: blocks outside every set read back as they were before the first write.
+    if outside:
+        after = np.empty_like(before)
+        ttnn.qwen_read_blocks_raw(second, after, outside)
+        report['outside_checked'] = outside
+        if not bool(np.array_equal(before, after)):
+            problems.append('a raw write changed blocks it did not name (%s)' % outside)
+    report['program_cache_growth'] = mesh.num_program_cache_entries() - programs
+    if report['program_cache_growth']:
+        problems.append('the raw ops grew the program cache by %d' % report['program_cache_growth'])
+    rates = {}
+    for size in RAW_SIZES:
+        if size > blocks:
+            continue
+        ids = list(range(size))
+        buffer = np.empty((devices, size, slice_bytes), dtype=np.uint8)
+        begin = time.perf_counter()
+        ttnn.qwen_read_blocks_raw(cache, buffer, ids)
+        read_s = time.perf_counter() - begin
+        begin = time.perf_counter()
+        ttnn.qwen_write_blocks_raw(second, buffer, ids)
+        write_s = time.perf_counter() - begin
+        moved = buffer.nbytes
+        rates[str(size)] = dict(bytes=moved, read_ms=round(read_s * 1000, 2), write_ms=round(write_s * 1000, 2),
+                                read_gbps=round(moved / read_s / 1e9, 3), write_gbps=round(moved / write_s / 1e9, 3))
+    report['rates'] = rates
+    ttnn.deallocate(second)
+    report['status'] = 'ok' if not problems else 'FAIL'
+    return report, problems
+
+
 def run(ttnn, mesh, devices, blocks, heads_per_chip):
     """The checks on an open mesh -> the report dict (ok, problems, one entry per block set, the cost figures)."""
     problems, report = [], {}
@@ -145,6 +245,9 @@ def run(ttnn, mesh, devices, blocks, heads_per_chip):
         if biggest['read_ms'] / 1000.0 > report['whole_device_read_s']:
             problems.append('the largest set (%d blocks) took longer than the whole-cache device read' % biggest['blocks'])
     report['read_ms_per_block_largest'] = round(biggest['read_ms'] / biggest['blocks'], 4)
+    raw, raw_problems = run_raw(ttnn, mesh, devices, cache, blocks, heads_per_chip, composer)
+    report['raw'] = raw
+    problems.extend('raw: ' + problem for problem in raw_problems)
     report['ok'] = not problems
     report['problems'] = problems
     return report

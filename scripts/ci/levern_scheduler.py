@@ -271,7 +271,7 @@ class LevernRuntime(object):
         try:
             import levern_route
 
-            if not levern_route.host_memory_ok(levern_policy.PARK_NBYTES):
+            if not levern_route.host_memory_ok(levern_policy.observed_park_nbytes()):
                 return False
         except ImportError:
             pass

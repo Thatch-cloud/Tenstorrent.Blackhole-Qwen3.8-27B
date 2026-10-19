@@ -36,6 +36,15 @@ Markers (the smoke rule is grid13_smoke):
   [PINDIAG] tp4 grid13 unchanged reason=<why> site=<site>  the served ops ran because the plan has nothing to gain at this shape (too few rows, no fewer rows a core); information, not a failure
   [PINDIAG] tp4 grid13 audit n=<n> exact=True site=...     a passing audit
   [PINDIAG] tp4 grid13 audit n=<n> exact=mismatch site=... then  [PINDIAG] tp4 grid13 audit mismatch ... and an AssertionError
+  [PINDIAG] tp4 grid13 audit skipped reason=<why> site=<site>  an audit that was due and could not run (no device to synchronize, no copy of the activation): the lever's result
+                                                                   was served, nothing was compared; once per (site, reason); fails an audited smoke (card run 38116769673: the
+                                                                   verify wrapper met an activation the pinned function had already consumed, device() was None, and the TypeError
+                                                                   stopped the engine)
+  [PINDIAG] tp4 grid13 installed subs=... wrapped=... namespaces=<n>    once at startup: which tp_common functions were bound (a site that logs nothing at all can then be told from a wrapper
+                                                                       that was never bound)
+  [PINDIAG] tp4 grid13 verify saw matmul_1d_decode rows=.. k=.. n=.. lever_site=..   once per distinct operand shape the verify wrapper meets (at most 24): whether it is reached, with what,
+                                                                       and which of the calls are lever sites (card run 38106780113: site=verify.out logged nothing; the wrapper read
+                                                                       `weight.shape[-2:]`, which the card's ttnn Shape need not support, and swallowed the error)
 
 Stdlib only at import, py 3.7. The flags are strict; any of them at the pair (QWEN_FAST_TP unset) raises.
 """
@@ -60,6 +69,7 @@ UNCHANGED = PREFIX + ' unchanged'
 AUDIT_LINE = PREFIX + ' audit'
 AUDIT_MISMATCH = PREFIX + ' audit mismatch'
 SKIPPED = PREFIX + ' skipped its audit inside a trace capture'
+AUDIT_SKIPPED = PREFIX + ' audit skipped'
 
 # Everything this lever needs at run time, by basename (the overlay, the CPU allowlist and the manifest name every entry).
 RUNTIME_FILES = ('grid13_tp.py',)
@@ -82,6 +92,7 @@ _CAPTURE = {'depth': 0}
 _LOCK = threading.RLock()
 STATS = {'agmm': 0, 'verify': 0, 'drafter': 0, 'fallback': 0, 'unchanged': 0}
 _CONFIGS = {}                   # (id(served config), K, N) -> (served config, (lever config, site) or None): decided once, kept alive here
+_DEVICE = {'mesh': None}        # the last mesh any site read from a live tensor: the fallback of a site whose own operands no longer report one
 
 
 # ---------------------------------------------------------------------------------------------
@@ -212,6 +223,8 @@ def reset():
     _LOGGED.clear()
     _AUDITED.clear()
     _CONFIGS.clear()
+    _SEEN.clear()
+    _DEVICE['mesh'] = None
     _CAPTURE['depth'] = 0
     for key in STATS:
         STATS[key] = 0
@@ -231,7 +244,7 @@ def track(operations):
     functions (a fake that never captures) is left alone."""
     target = _base(operations)
     begin, end = getattr(target, 'begin_trace_capture', None), getattr(target, 'end_trace_capture', None)
-    if begin is None or end is None or getattr(begin, 'tracked_by_grid13', False):
+    if begin is None or end is None or 'grid13' in getattr(begin, 'capture_trackers', ()):
         return
 
     def begin_capture(*args, **options):
@@ -245,6 +258,11 @@ def track(operations):
         finally:
             _CAPTURE['depth'] = max(0, _CAPTURE['depth'] - 1)
 
+    # every tracker (this module's and the other fusion package's: draft_fusion_tp / grid13_tp each wrap the same two functions) lists itself and the trackers beneath it on its wrapper, so
+    # that either one finds its own wrapper ANYWHERE in the chain. Looking only at the top wrapper's own marker made the two re-wrap each other on every audit call (a chain that grew by one
+    # layer per alternation until begin_trace_capture raised RecursionError: card run 38129663805, the pair and octo draft builds mid-serving).
+    begin_capture.capture_trackers = tuple(getattr(begin, 'capture_trackers', ())) + ('grid13',)
+    end_capture.capture_trackers = tuple(getattr(end, 'capture_trackers', ())) + ('grid13',)
     begin_capture.tracked_by_grid13 = True
     end_capture.tracked_by_grid13 = True
     target.begin_trace_capture = begin_capture
@@ -267,9 +285,38 @@ def in_capture(operations=None):
 CAPTURE_WORDS = ('trace capture', 'capturing')
 
 
+def device_of(tensor):
+    """The device a tensor reports, or None. A tensor the pinned function consumed (freed) reports none, and so does one whose read raises; neither is a device to synchronize."""
+    if tensor is None:
+        return None
+    try:
+        return tensor.device()
+    except Exception:  # noqa: BLE001 - a diagnostic read
+        return None
+
+
+def resolve_mesh(*tensors):
+    """The mesh to synchronize for an audit of a call on `tensors`: the first live tensor that reports a device (the operands in the order the caller gives them: the activation
+    first, read BEFORE the call that may consume it, then the weights), else the last mesh any site read, else None. Never raises."""
+    for tensor in tensors:
+        device = device_of(tensor)
+        if device is not None:
+            with _LOCK:
+                _DEVICE['mesh'] = device
+            return device
+    with _LOCK:
+        return _DEVICE['mesh']
+
+
+def audit_skipped(site, reason):
+    """An audit that was due and could not run: say why, once per (site, reason). The smoke rule fails an audited arm on this line (nothing was compared)."""
+    note(AUDIT_SKIPPED, 'reason=%s site=%s' % (reason, site))
+
+
 def audit_begin(operations, mesh, site, rows):
     """Whether the caller may run its eager audit NOW (the device synchronized when it says yes): never inside a capture, never past AUDIT_CALLS of this (site, rows),
-    and a synchronize the device refuses for a capture is a skip, not a failure."""
+    never without a device (a logged skip: synchronize_device(None) is a TypeError on the card and stopped the engine, run 38116769673), and a synchronize the device
+    refuses for a capture is a skip, not a failure."""
     track(operations)
     if in_capture():
         note(SKIPPED, 'site=%s rows=%d' % (site, rows))
@@ -278,6 +325,9 @@ def audit_begin(operations, mesh, site, rows):
     with _LOCK:
         if _AUDITED.get(key, 0) >= AUDIT_CALLS:
             return False
+    if mesh is None:
+        audit_skipped(site, 'no device')
+        return False
     try:
         operations.synchronize_device(mesh)
     except Exception as failure:  # noqa: BLE001 - classified below
@@ -461,8 +511,10 @@ def agmm_site(kwargs):
     except Exception:  # noqa: BLE001
         return 'agmm'
     geometry = tp_shapes.active()
-    return {geometry.gdn_qkvzab_padded: 'gdn_in', geometry.attn_out * 2 + 2 * geometry.attn_kv_heads * tp_shapes.ATTENTION_HEAD_DIM: 'attn_in',
-            geometry.mlp: 'mlp_gate_or_up'}.get(width, 'agmm')
+    # (the fused GDN weight's LOGICAL width is gdn_qkvzab, 4,120 at four cards - the card's cache log says Shape([5120, 4120]) - and the tile-padded one is gdn_qkvzab_padded: a
+    # tensor reports its logical width, so the padded figure alone never matched and the site was labelled `agmm`, card run 38106780113)
+    return {geometry.gdn_qkvzab: 'gdn_in', geometry.gdn_qkvzab_padded: 'gdn_in',
+            geometry.attn_out * 2 + 2 * geometry.attn_kv_heads * tp_shapes.ATTENTION_HEAD_DIM: 'attn_in', geometry.mlp: 'mlp_gate_or_up'}.get(width, 'agmm')
 
 
 def _census(kwargs, config):
@@ -506,10 +558,7 @@ class _Shim(object):
         if reason is not None:
             fell_back(site, reason)
             return self.gather(**kwargs)
-        try:
-            device = kwargs['input_tensor'].device()
-        except Exception:  # noqa: BLE001
-            device = None
+        device = resolve_mesh(kwargs['input_tensor'], kwargs.get('weight_tensor'))
         grid = grid_of(device) if device is not None else None
         rows = int(kwargs['input_tensor'].shape[-2])
         plan = agmm_plan(-(-rows // TILE), config.compute_with_storage_grid_size.x, config.compute_with_storage_grid_size.y, config.M_block_size,
@@ -537,6 +586,8 @@ def wrap_agmm(original, settings):
 
     def twin(*args, **kwargs):
         real = namespace['ttnn']
+        # (the mesh is read before the call, from the operands as the caller handed them: after it an operand may be consumed and report no device)
+        mesh = resolve_mesh(args[0] if args else kwargs.get('x'), args[1] if len(args) > 1 else kwargs.get('weight')) if settings.audit else None
         shim = _Shim(real, settings)
         view = _View(real, experimental=_View(real.experimental, all_gather_minimal_matmul_async=shim))
         with _LOCK:
@@ -546,7 +597,7 @@ def wrap_agmm(original, settings):
             finally:
                 namespace['ttnn'] = real
         if settings.audit and shim.engaged:
-            _audit_agmm(real, original, lever, args, kwargs)
+            _audit_agmm(real, original, lever, args, kwargs, mesh)
         return lever
 
     twin.grid13_of = original
@@ -555,14 +606,11 @@ def wrap_agmm(original, settings):
     return twin
 
 
-def _audit_agmm(operations, original, lever, args, kwargs):
-    """Run the pinned function again, unshimmed, on the same operands and compare every chip's bytes with the lever's output. Only after audit_begin said yes."""
+def _audit_agmm(operations, original, lever, args, kwargs, mesh):
+    """Run the pinned function again, unshimmed, on the same operands and compare every chip's bytes with the lever's output. Only after audit_begin said yes (a call with
+    no device to synchronize is its logged skip)."""
     x = args[0] if args else kwargs['x']
     rows = int(x.shape[-2])
-    try:
-        mesh = x.device()
-    except Exception:  # noqa: BLE001
-        return
     weight = args[1] if len(args) > 1 else kwargs.get('weight')
     site = 'gate_up' if original.__name__.endswith('swiglu_prefill') else agmm_site(dict(weight_tensor=weight))
     if not audit_begin(operations, mesh, site, rows):
@@ -593,6 +641,7 @@ def decode_sites():
     """{(K, N): site} of the 64-row projections this lever may re-partition, from the geometry of the width the process serves at."""
     geometry = tp_shapes.active()
     return {(geometry.attn_out, tp_shapes.HIDDEN): 'out',
+            (tp_shapes.HIDDEN, geometry.gdn_qkvzab): 'gdn_in',                  # (the logical width a tensor reports; the tile-padded one below is kept for a caller that passes it)
             (tp_shapes.HIDDEN, geometry.gdn_qkvzab_padded): 'gdn_in',
             (tp_shapes.HIDDEN, 2 * geometry.attn_out + 2 * geometry.attn_kv_heads * tp_shapes.ATTENTION_HEAD_DIM): 'attn_in'}
 
@@ -653,45 +702,115 @@ def _build_lever(builder, settings, served, k, n, mesh, site, columns):
     return lever, site
 
 
+SEEN_LIMIT = 24                 # distinct (rows, K, N) shapes of tp_common.matmul_1d_decode calls the verify wrapper names in the log (a handful exist)
+_SEEN = set()
+
+
+def _saw_decode_call(rows, shape):
+    """One diagnostic line per distinct (rows, K, N) the verify wrapper is called with, at most SEEN_LIMIT: the card log then says whether the wrapper is reached, with which operands, and
+    which of them are lever sites (a run whose site=verify.out never logged anything could not tell a wrapper that is not installed from one that never matched)."""
+    key = (rows, shape[0], shape[1])
+    with _LOCK:
+        if key in _SEEN or len(_SEEN) >= SEEN_LIMIT:
+            return
+        _SEEN.add(key)
+    site = decode_sites().get(shape)
+    note(PREFIX + ' verify saw', 'matmul_1d_decode rows=%d k=%d n=%d lever_site=%s%s' % (
+        rows, shape[0], shape[1], 'verify.' + site if site else 'none', '' if rows == DECODE_ROWS else ' (not the %d-row packed block: the served call)' % DECODE_ROWS))
+
+
+def _release(operations, tensor):
+    """Free a temporary of an audit unless it is already gone (the pinned matmul consumes its activation); never raises, never masks the verdict."""
+    try:
+        allocated = getattr(tensor, 'is_allocated', None)
+        if callable(allocated) and not allocated():
+            return
+        operations.deallocate(tensor)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _copy_for_audit(operations, x, site):
+    """A copy of the activation `x` for the served run of an audit, made BEFORE the lever's call: tp_common.matmul_1d_decode consumes its input (it moves x to L1 and frees the
+    original: verify_t1_device_compare met 'Input Tensor is not allocated' on a second call, and card run 38116769673 met x.device() None after the lever's call), so the
+    served run cannot take x. The copy keeps x's memory config where the device can clone it so, else lands in DRAM (the pinned function moves it to L1 itself). None, with
+    one logged skip, when neither works."""
+    configs = []
+    try:
+        configs.append(x.memory_config())
+    except Exception:  # noqa: BLE001
+        pass
+    dram = getattr(operations, 'DRAM_MEMORY_CONFIG', None)
+    if dram is not None:
+        configs.append(dram)
+    failure = None
+    for config in configs:
+        try:
+            copy = operations.clone(x, memory_config=config)
+        except Exception as error:  # noqa: BLE001 - the next memory config, then a logged skip
+            failure = error
+            continue
+        if copy is not None and copy is not x:
+            return copy
+    audit_skipped(site, 'the activation cannot be copied (%s)' % (('%s: %s' % (type(failure).__name__, ' '.join(str(failure).split())[:60])) if failure is not None else 'no memory config'))
+    return None
+
+
 def wrap_matmul_1d_decode(original, settings):
     """tp_common.matmul_1d_decode with the lever's partition for the 64-row projections: called as it is, on the lever's config instead of the served one the model passes
     (the configs were built at ModelArgs, before the lever could be installed, so the swap is here, at the call). Under the audit flag a call that took a lever config is
-    run again on the served config (eager only) and the bytes compared."""
+    run again on the served config (eager only) and the bytes compared. The pinned function consumes its activation, so the device is read and the activation copied BEFORE
+    the lever's call, and the served run takes the copy; a call with no device or no copy is a logged skip, not a failure, and serves the lever's result."""
     namespace = original.__globals__
 
     def matmul_1d_decode(x, weight, decode_1d_progcfg, *args, **kwargs):
         found = None
+        mesh = None
         if 'verify' in settings.subs:
             try:
-                rows, shape = int(x.shape[-2]), tuple(int(size) for size in weight.shape[-2:])
-            except Exception:  # noqa: BLE001 - not a tensor we know: the served call
+                # (single indexes, never a slice: ttnn's Shape need not support `shape[-2:]`, and the first version of this read raised on the card, was swallowed and left
+                # site=verify.out silent - card run 38106780113)
+                rows, shape = int(x.shape[-2]), (int(weight.shape[-2]), int(weight.shape[-1]))
+            except Exception as failure:  # noqa: BLE001 - not a tensor we know: the served call, said once
                 rows, shape = 0, ()
+                unchanged('verify.operands', 'the operand shapes cannot be read (%s: %s)' % (type(failure).__name__, str(failure)[:80]))
+            if shape:
+                _saw_decode_call(rows, shape)
             if rows == DECODE_ROWS and len(shape) == 2:
-                try:
-                    mesh = x.device()
-                except Exception:  # noqa: BLE001
-                    mesh = None
-                if mesh is not None:
+                # (the mesh is read here, before the call: the pinned function consumes x, and a consumed tensor reports no device)
+                mesh = resolve_mesh(x, weight)
+                if mesh is None:
+                    unchanged('verify.operands', 'neither the activation nor the weight reports a device')
+                else:
                     found = _lever_config(namespace['create_matmul_1d_decode_progcfg'], settings, decode_1d_progcfg, shape[0], shape[1], mesh)
         if found is None:
             return original(x, weight, decode_1d_progcfg, *args, **kwargs)
         lever_config, site = found
-        lever = original(x, weight, lever_config, *args, **kwargs)
         if not settings.audit:
-            return lever
+            return original(x, weight, lever_config, *args, **kwargs)
         operations = namespace['ttnn']
-        if not audit_begin(operations, x.device(), 'verify.' + site, DECODE_ROWS):
-            return lever
-        served = original(x, weight, decode_1d_progcfg, *args, **kwargs)
+        name = 'verify.' + site
+        reference = None
+        if audit_begin(operations, mesh, name, DECODE_ROWS):
+            reference = _copy_for_audit(operations, x, name)
         try:
-            operations.synchronize_device(x.device())
+            lever = original(x, weight, lever_config, *args, **kwargs)
+        except BaseException:
+            if reference is not None:
+                _release(operations, reference)
+            raise
+        if reference is None:
+            return lever
+        served = None
+        try:
+            served = original(reference, weight, decode_1d_progcfg, *args, **kwargs)
+            operations.synchronize_device(mesh)
             bad = differing_chips(operations, lever, served)
         finally:
-            try:
-                operations.deallocate(served)
-            except Exception:  # noqa: BLE001
-                pass
-        audit_result('verify.' + site, DECODE_ROWS, bad, kind='matmul1d')
+            if served is not None:
+                _release(operations, served)
+            _release(operations, reference)
+        audit_result(name, DECODE_ROWS, bad, kind='matmul1d')
         return lever
     matmul_1d_decode.grid13_of = original
     return matmul_1d_decode
@@ -809,4 +928,6 @@ def install(environ=None, module=None):
         original = getattr(module, 'matmul_1d_decode', None)
         if original is not None and getattr(original, 'grid13_of', None) is None:
             _rebind(module, 'matmul_1d_decode', wrap_matmul_1d_decode(original, settings), changed)
+    # one line saying what was bound (a lever whose wrapper is not installed logs nothing at all at its sites)
+    note(PREFIX + ' installed', 'subs=%s wrapped=%s namespaces=%d' % (','.join(sorted(settings.subs)), ','.join(sorted(set(name for _namespace, name, _old in changed))) or 'none', len(changed)))
     return changed

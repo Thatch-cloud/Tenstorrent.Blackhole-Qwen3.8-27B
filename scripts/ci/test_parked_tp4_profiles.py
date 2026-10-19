@@ -246,6 +246,10 @@ class ProfileTests(unittest.TestCase):
         import make_w2_kill_profiles
 
         generated |= set(make_w2_kill_profiles.twin_names())
+        # the host KV tier's twin of the same parent carries them by inheritance too (test_prefix_tier_profiles holds it as that parent plus the tier names)
+        import make_prefix_tier_profiles
+
+        generated |= set(make_prefix_tier_profiles.twin_names())
         # the op-fusion programme's twins (make_fusion_profiles; test_fusion_wp holds each as the production profile plus exactly its flags) carry its parked flags by inheritance
         import make_fusion_profiles
 
@@ -260,6 +264,13 @@ class ProfileTests(unittest.TestCase):
         import make_upload_profiles
 
         generated |= set(make_upload_profiles.twin_names())
+        # the octo-3 twins of the combined arms (make_octo3_profiles; test_octo3_profiles holds each as its parent plus the octo env) carry the parent's engine-reuse flags by inheritance
+        import make_octo3_profiles
+
+        generated |= set(make_octo3_profiles.twin_names())
+        import make_ship4_profiles
+
+        generated |= set(make_ship4_profiles.twin_names())      # (tp4/ship-4's twins of the combined candidate, test_ship4_profiles)
         for name, profile in profiles.items():
             env = profile['env']
             named = [flag for flag in env if flag.startswith('QWEN_FAST_PARKED_') or flag in ('QWEN_FAST_GATE_DRAM_BALLAST', 'QWEN_FAST_LEVERN_BUILD_MS')]

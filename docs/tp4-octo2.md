@@ -69,3 +69,5 @@ Lever 3 timed, **OL1** all three, **OC2/OD2** the ABAB repeat of the first pair,
 * The draft book / parked engines with the octo draft: their traces are the quad's; the octo draft trace is not in the book. The `-octo-parked` twins therefore carry no lever.
 * A card-M mover harness (the quarter-tile kernels run first in OGA, in the model): a hang there needs a person to reset the cards; a one-card harness with the NoC sanitiser (as Q1w for K64j) would be
   the safer first step and is the recommended addition if OGA is to be risked.
+
+**tp4/octo-3** (docs/tp4-octo3.md) puts the shape and these three levers on the fused stack (W2, engine reuse, the op-fusion set), fixes the three defects of the octo-2 card runs and carries two ship candidates under an owner traffic waiver.

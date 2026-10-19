@@ -77,6 +77,9 @@ COPY scripts/ci/serving_startup.py scripts/ci/dflash_combined_request.py scripts
 # serving_startup imports drafter_fixtures (the manifest-selected drafter loader), which reads the manifests beside
 # drafter_manifest: none of the three exists in the bundle, so all of them travel with it.
 COPY scripts/ci/drafter_fixtures.py scripts/ci/drafter_manifest.py /experiment-scripts/ci/
+# serving_startup imports qwen_c2_checkpoint (another checkpoint of the same architecture, docs/tp4-swift.md; default off),
+# which reads its catalog qwen_c2_checkpoints.json from beside itself: neither is in the bundle.
+COPY scripts/ci/qwen_c2_checkpoint.py scripts/ci/qwen_c2_checkpoints.json /experiment-scripts/ci/
 COPY scripts/ci/references/drafter-manifests/ /experiment-scripts/ci/references/drafter-manifests/
 # Tensor-parallel width (S2 TP4 port; TP2 unless QWEN_FAST_TP names four cards): serving_startup and, through
 # mesh_link_policy, feature_collective / quad_draft / dflash_device import these, so they travel beside them.

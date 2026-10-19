@@ -46,6 +46,9 @@ LEVERN_WROTE_ATTR = '_qwen_levern_wrote_slot'
 # prompt, a granted hit's first one included, arrives through prefill_paged_slots_range, so a capture resumed at R takes its first call through that
 # entry instead of the prefix-reuse route's own.
 LEVERN_MERGED_ATTR = '_qwen_levern_merged'
+# The tile-aligned drafter window (tap_window_aligned, default off; pinned equal to tap_window_aligned.FLAG by its test). Unset or
+# '0', nothing is imported and every snapshot and join below is exactly as before.
+ALIGNED_FLAG = 'QWEN_FAST_TAP_WINDOW_ALIGNED'
 
 
 def _log(message, *values):
@@ -163,12 +166,12 @@ def window_programs(reset=False):
     return value
 
 
-def snapshot_prefill_tail(operations, value, position, *, checks=None, chunk_start=0, valid_rows=None):
+def snapshot_prefill_tail(operations, value, position, *, checks=None, chunk_start=0, valid_rows=None, aligned=False):
     counter = _PROGRAM_COUNTER
     programs_before = counter() if counter is not None else None
     try:
         return _snapshot_prefill_tail(operations, value, position, checks=checks, chunk_start=chunk_start,
-                                      valid_rows=valid_rows)
+                                      valid_rows=valid_rows, **({'aligned': True} if aligned else {}))
     finally:
         if programs_before is not None:
             after = counter()
@@ -176,17 +179,28 @@ def snapshot_prefill_tail(operations, value, position, *, checks=None, chunk_sta
                 _WINDOW_PROGRAMS[0] += max(0, after - programs_before)
 
 
-def _snapshot_prefill_tail(operations, value, position, *, checks=None, chunk_start=0, valid_rows=None):
+def _snapshot_prefill_tail(operations, value, position, *, checks=None, chunk_start=0, valid_rows=None, aligned=False):
     valid_rows = position if valid_rows is None else valid_rows
     window = chunk_window(position, chunk_start, valid_rows)
     if (not window['rows'] or len(value.shape) != 4 or tuple(value.shape)[:2] != (1, 1) or value.shape[2] < valid_rows
             or value.shape[3] != tp_shapes.active().draft_taps or value.dtype != operations.bfloat16):
         raise ValueError('Complete TP%d BF16 prefill feature output required; chunks cannot stand in for the full context'
                          % tp_shapes.chip_count())
+    begin, end = window['start'] - chunk_start, window['end'] - chunk_start
+    if aligned:
+        # QWEN_FAST_TAP_WINDOW_ALIGNED: the tile-aligned superset of the piece (tap_window_aligned), or the exact piece when the chunk
+        # cannot give one. Never with the host checks, which compare the exact piece.
+        import tap_window_aligned
+
+        if checks is not None:
+            raise ValueError('The aligned window snapshot is never taken under the host snapshot checks')
+        bounds = tap_window_aligned.aligned_bounds(prefill_window(position), chunk_start, valid_rows, value.shape[2])
+        if bounds is not None:
+            begin, end = bounds
     sliced = output = None
     try:
-        sliced = operations.slice(value, (0, 0, window['start'] - chunk_start, 0),
-            (1, 1, window['end'] - chunk_start, tp_shapes.active().draft_taps))
+        sliced = operations.slice(value, (0, 0, begin, 0),
+            (1, 1, end, tp_shapes.active().draft_taps))
         output = operations.clone(sliced, memory_config=operations.DRAM_MEMORY_CONFIG)
         if checks is not None:
             import torch
@@ -242,6 +256,15 @@ class PrefillWindowCapture:
             raise ValueError('A prefill resumed at %d needs the prefix-reuse route (%s) wrapped by this capture'
                              % (self.start, PREFIX_ROUTE_ENTRY))
         self.checks, self.chunks, self.children, self.merged = checks, [], [], []
+        # QWEN_FAST_TAP_WINDOW_ALIGNED (tap_window_aligned; read once here, strictly 0 or 1): the window snapshotted as tile-aligned
+        # pieces and cut out by one slice at outputs(). Never with the host snapshot checks. Off, False and nothing is imported.
+        self.aligned = self.aligned_audit = False
+        if os.environ.get(ALIGNED_FLAG, '0') != '0':
+            import tap_window_aligned
+
+            # Never with a carried window: the aligned join reads the pieces of THIS capture's chunks, and the carried rows are a part it does not know.
+            self.aligned = tap_window_aligned.enabled() and checks is None and carry is None
+            self.aligned_audit = self.aligned and tap_window_aligned.audit_enabled()
         self.cursor = self.start
         self.started = self.active = self.complete = self.closed = False
         # How many engine steps this prompt's chunks arrived across. One for an
@@ -275,9 +298,15 @@ class PrefillWindowCapture:
                 raise ValueError('Bounded native padded chunk geometry required')
             captured = None
             if piece['rows']:
+                aligned = False
+                if self.aligned:
+                    import tap_window_aligned
+
+                    aligned = tap_window_aligned.wanted(self.window, chunk_start, valid_len)
                 captured = LayerOutputCapture(self.model, self.taps,
                     snapshot=lambda value: snapshot_prefill_tail(self.operations, value, self.position,
-                        checks=self.checks, chunk_start=chunk_start, valid_rows=valid_len),
+                        checks=self.checks, chunk_start=chunk_start, valid_rows=valid_len,
+                        **({'aligned': True} if aligned else {})),
                     release=self.operations.deallocate,
                     storage_ids=lambda value: tuple(enumerate(addresses(self.operations, value))))
                 self.children.append(captured)
@@ -525,6 +554,13 @@ class PrefillWindowCapture:
             if self.carried is not None:
                 # The carried rows first (they are the window's oldest positions), uploaded once; close() releases them.
                 parts = [tuple(self.carried.upload(self.operations, self.model.mesh_device, audit=self.carry_audit))] + parts
+            if self.aligned:
+                try:
+                    self.result = self.aligned_outputs(parts)
+                except BaseException:
+                    self.close()
+                    raise
+                return self.result
             output = []
             try:
                 for index in range(len(self.taps)):
@@ -541,6 +577,66 @@ class PrefillWindowCapture:
                 self.close()
                 raise
         return self.result
+
+    def aligned_outputs(self, parts):
+        """QWEN_FAST_TAP_WINDOW_ALIGNED: each tap's window from its snapshotted parts (tap_window_aligned). Parts that are all exact
+        pieces (a window inside one chunk, or on tile boundaries) are joined exactly as outputs() joins them; aligned contiguous
+        parts by one tiled concat and one slice; anything else is cut to its exact pieces and joined as today ('fell back'). Under
+        the audit flag today's composition is built beside it and compared on every chip; a mismatch serves today's."""
+        import tap_window_aligned as twa
+
+        operations, window = self.operations, self.window
+        pieces = [(chunk['chunk_start'], chunk['valid_rows']) for chunk in self.chunks if chunk['retained_rows']]
+        output, states = [], set()
+        for index in range(len(self.taps)):
+            values = [part[index] for part in parts]
+            cover = twa.covers(window, pieces, [value.shape[2] for value in values])
+            expanded = twa.expanded(cover)
+            layout = twa.plan(window, cover) if expanded else None
+            if not expanded:
+                state = 'exact'
+                merged = values[0] if len(values) == 1 else operations.concat(values, dim=2,
+                    memory_config=operations.DRAM_MEMORY_CONFIG)
+            else:
+                merged = None
+                if layout is not None:
+                    try:
+                        merged = twa.aligned_join(operations, values, layout['lead'], window['rows'], addresses=addresses)
+                        state = 'engaged'
+                    except twa.WindowRefused:
+                        merged = None
+                if merged is None:
+                    state = 'fell back'
+                    merged = twa.exact_join(operations, values, cover, window, addresses=addresses)
+            if not any(merged is value for value in values):
+                self.merged.append(merged)
+            if state == 'engaged' and self.aligned_audit:
+                reference = twa.exact_join(operations, values, cover, window, addresses=addresses)
+                equal = twa.same_bytes(operations, merged, reference)
+                _log(twa.AUDIT_MARKER + 'exact={} tap={} parts={} lead={} union={} rows={} P={}', equal, index, len(values),
+                     layout['lead'], layout['union'], window['rows'], self.position)
+                if equal:
+                    if not any(reference is value for value in values):
+                        operations.deallocate(reference)
+                else:
+                    self.merged = [value for value in self.merged if value is not merged]
+                    operations.deallocate(merged)
+                    merged = reference
+                    if not any(reference is value for value in values):
+                        self.merged.append(reference)
+                    state = 'audit mismatch'
+            if merged.shape[2] != window['rows']:
+                raise AssertionError('Stitched prefill features must contain exactly the valid tail')
+            output.append(merged)
+            states.add(state if state != 'engaged' else 'engaged lead=%d union=%d' % (layout['lead'], layout['union']))
+        for state in sorted(states):
+            if state.startswith('engaged'):
+                _log(twa.ENGAGED_MARKER + 'taps={} parts={} {} rows={} P={}', len(self.taps), len(parts), state[len('engaged '):],
+                     window['rows'], self.position)
+            elif state in ('fell back', 'audit mismatch'):
+                _log(twa.FELL_BACK_MARKER + 'reason={} taps={} parts={} rows={} P={}', state.replace(' ', '_'), len(self.taps),
+                     len(parts), window['rows'], self.position)
+        return tuple(output)
 
     def close(self):
         if self.active:

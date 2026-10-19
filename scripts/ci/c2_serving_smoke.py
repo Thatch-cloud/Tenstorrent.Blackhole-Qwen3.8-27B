@@ -23,7 +23,7 @@ def post(path, body, timeout=900):
         return error.code, error.read().decode(errors='replace')[:400]
 
 
-def stream(messages, max_tokens, drop_after=None, timeout=1800, keep_stamps=False, on_token=None, **extra):
+def stream(messages, max_tokens, drop_after=None, timeout=1800, keep_stamps=False, on_token=None, keep_text=False, **extra):
     body = dict(model=MODEL, messages=messages, max_tokens=max_tokens, stream=True,
                 stream_options={'include_usage': True}, **extra)
     request = urllib.request.Request(BASE + '/v1/chat/completions', data=json.dumps(body).encode(), method='POST',
@@ -67,7 +67,8 @@ def stream(messages, max_tokens, drop_after=None, timeout=1800, keep_stamps=Fals
                 content_sha256=hashlib.sha256(content.encode('utf-8')).hexdigest(), content_chars=len(content),
                 reasoning_sha256=hashlib.sha256(reasoning.encode('utf-8')).hexdigest(), reasoning_chars=len(reasoning),
                 started_at=round(started, 3), first_at=round(first, 3) if first else None, ended_at=round(ended, 3),
-                **(dict(delta_stamps=stamps) if keep_stamps else {}))
+                **(dict(delta_stamps=stamps) if keep_stamps else {}),
+                **(dict(full_content=content, full_reasoning=reasoning) if keep_text else {}))
 
 
 def record(name, function):
@@ -537,6 +538,26 @@ def concurrent8_code_128k():
     return dict(run_users('concurrent8_code_128k', prompts), corpus=corpus, fit=fit)
 
 
+# tp4/octo-3: the octo shape needs six or more seats DECODING AT ONCE, and the two deep tests above never have them: eight 32k (or 120k) prompts prefill one after another
+# (about 15 s a 32k prompt, 33 s a 120k one), and an 800-token answer is over in 40 s, so the first users are done before the last arrives (the 32k test of the octo-2 card runs had
+# live4 = -75 s and NOT ONE eight-live round: its 'bundle was 4% slower at 32k' was the arrival order of a thread race, not the shape). These twins give every user a budget that
+# outlasts the whole prefill queue (ignore_eos, as the stall shape's decoders): the last user arrives while the first is still decoding, and the eight-live window at depth is
+# long enough to time (about 55 s at 32k, 60 s at 120k). Same prompts as the 800-token tests; the budgets are sized from the card logs' prefill and decode rates.
+DEEP_LONG_BUDGETS = {'concurrent8_code_32k_long': 3000, 'concurrent8_code_128k_long': 4000}
+
+
+def concurrent8_code_32k_long():
+    # Opt-in (tp4/octo-3). concurrent8_code_32k with 3,000-token budgets and ignore_eos: all eight seats decode at depth together once the queue has prefilled.
+    prompts, corpus = code_prompts((32768,) * 8)
+    return dict(run_users('concurrent8_code_32k_long', prompts, max_tokens=DEEP_LONG_BUDGETS['concurrent8_code_32k_long'], ignore_eos=True), corpus=corpus)
+
+
+def concurrent8_code_128k_long():
+    # Opt-in (tp4/octo-3). concurrent8_code_128k with 4,000-token budgets and ignore_eos: all eight seats decode at about 120k together once the queue has prefilled.
+    prompts, corpus, fit = fitted_code_prompts((DEEP_PROMPT_TOKENS,) * 8)
+    return dict(run_users('concurrent8_code_128k_long', prompts, max_tokens=DEEP_LONG_BUDGETS['concurrent8_code_128k_long'], ignore_eos=True), corpus=corpus, fit=fit)
+
+
 SKEW_LONG_TOKENS = 253920           # the stall arm's cold prompt: known to fit the 262k profile's room with a short answer
 SKEW_SHORT_TOKENS = 4096
 SKEW_TARGETS = (SKEW_LONG_TOKENS, SKEW_SHORT_TOKENS, SKEW_SHORT_TOKENS, SKEW_SHORT_TOKENS,
@@ -675,7 +696,7 @@ FEWDEC_SHAPES = ((1, 120000, 4000), (2, 253920, 6000))     # (decoders, cold pro
 
 # Every shape's concurrent request count, held at or under the eight seats of the 262k profiles by test_w2ln_smoke_shapes (a request past max-num-seqs
 # waits for a seat, and its time to first token then measures somebody else's budget).
-SHAPE_SEATS = {'concurrent8_skew': 8, 'concurrent8_code_32k': 8, 'concurrent8_code_128k': 8,
+SHAPE_SEATS = {'concurrent8_skew': 8, 'concurrent8_code_32k': 8, 'concurrent8_code_128k': 8, 'concurrent8_code_32k_long': 8, 'concurrent8_code_128k_long': 8,
                'stall8_cold262k': STALL_SHORT_SEATS + 1, 'stall8_cold128k': STALL_SHORT_SEATS + 1,
                'cold2_254k': COLD2_DECODERS + COLD2_ARRIVALS, 'levern_equal_busy': 7 + 1, 'levern_decoder_finishes': 7 + 1,
                'prefill_ladder_solo': 1, 'prefill_ladder_busy': LADDER_DECODERS + 1, 'prefill_few_decoders': 3}
@@ -1333,6 +1354,10 @@ if ONLY and 'concurrent8_code_32k' in ONLY:
     record('concurrent8_code_32k', concurrent8_code_32k)
 if ONLY and 'concurrent8_code_128k' in ONLY:
     record('concurrent8_code_128k', concurrent8_code_128k)
+if ONLY and 'concurrent8_code_32k_long' in ONLY:
+    record('concurrent8_code_32k_long', concurrent8_code_32k_long)
+if ONLY and 'concurrent8_code_128k_long' in ONLY:
+    record('concurrent8_code_128k_long', concurrent8_code_128k_long)
 if ONLY and 'concurrent8_skew' in ONLY:
     record('concurrent8_skew', concurrent8_skew)
 if ONLY and 'stall8_cold262k' in ONLY:
@@ -1398,6 +1423,70 @@ def bench():
 
 if ONLY and 'bench' in ONLY:
     record('bench', bench)
+
+
+def coding_set():
+    # Opt-in (the Swift window, docs/tp4-swift.md): the twenty self-checking Python problems of references/swift/coding-problems.json, each sent as one request (the prompt and the
+    # instructions, thinking on, greedy as the contract forces), CODING_SET_WORKERS at a time (default 8, the seats). Every answer is saved whole, the reasoning and the content apart,
+    # with the finish reason and the token counts (the server's /tokenize on each part, else none: swift_coding_report.py then splits the completion tokens by characters), as
+    # CODING_SET_OUT (else coding-set.json); swift_coding_report.py runs the tests on a CPU host. max_tokens: the file's, or CODING_SET_MAX_TOKENS. Nothing is judged here.
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, 'references', 'swift', 'coding-problems.json'), encoding='utf-8') as handle:
+        document = json.load(handle)
+    problems = document['problems']
+    max_tokens = int(os.environ.get('CODING_SET_MAX_TOKENS') or document['max_tokens'])
+    workers = max(1, int(os.environ.get('CODING_SET_WORKERS') or 8))
+    answers = [None] * len(problems)
+    cursor = [0]
+    lock = threading.Lock()
+
+    def worker():
+        while True:
+            with lock:
+                index = cursor[0]
+                cursor[0] += 1
+            if index >= len(problems):
+                return
+            problem = problems[index]
+            prompt = problem['prompt'] + '\n\n' + (document['instructions'] % problem['entry_point'])
+            try:
+                answers[index] = stream([{'role': 'user', 'content': prompt}], max_tokens, keep_text=True)
+            except Exception as error:
+                answers[index] = dict(error=repr(error)[:300])
+
+    threads = [threading.Thread(target=worker) for _ in range(min(workers, len(problems)))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    def count(text):
+        if not text:
+            return 0
+        try:
+            status, body = post('/tokenize', dict(model=MODEL, prompt=text, add_special_tokens=False), timeout=300)
+        except Exception:
+            return None
+        return body.get('count') if status == 200 and isinstance(body, dict) and isinstance(body.get('count'), int) else None
+
+    saved = []
+    for problem, answer in zip(problems, answers):
+        answer = answer or dict(error='no answer')
+        reasoning, content = answer.get('full_reasoning') or '', answer.get('full_content') or ''
+        saved.append(dict(id=problem['id'], entry_point=problem['entry_point'], finish=answer.get('finish'), error=answer.get('error'), prompt_tokens=answer.get('prompt_tokens'),
+                          completion_tokens=answer.get('completion_tokens'), ttft=answer.get('ttft'), decode_tok_s=answer.get('decode_tok_s'),
+                          reasoning=reasoning, content=content, reasoning_tokens=count(reasoning) if not answer.get('error') else None,
+                          content_tokens=count(content) if not answer.get('error') else None))
+    with open(os.environ.get('CODING_SET_OUT', 'coding-set.json'), 'w', encoding='utf-8') as handle:
+        json.dump(dict(label=os.environ.get('AGREEMENT_LABEL', 'run'), model=MODEL, max_tokens=max_tokens, version=document['version'], results=saved), handle)
+    return dict(problems=len(saved), errors=sum(1 for item in saved if item['error']), finish_length=sum(1 for item in saved if item['finish'] == 'length'),
+                empty_content=sum(1 for item in saved if not item['content'].strip()), completion_tokens=sum(item['completion_tokens'] or 0 for item in saved),
+                server_token_counts=sum(1 for item in saved if item['reasoning_tokens'] is not None and item['content_tokens'] is not None))
+
+
+if ONLY and 'coding_set' in ONLY:
+    record('coding_set', coding_set)
 print('SMOKE_JSON ' + json.dumps(results))
 if (results.get('agreement') or {}).get('ok') is False or 'error' in (results.get('agreement') or {}):
     print('SMOKE_FAILED agreement: %s' % json.dumps((results['agreement'].get('reasons') or results['agreement'].get('error')))[:600])

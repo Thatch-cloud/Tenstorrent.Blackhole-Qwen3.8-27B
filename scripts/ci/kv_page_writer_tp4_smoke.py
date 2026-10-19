@@ -31,6 +31,7 @@ FLAG = 'QWEN_FAST_KV_PAGE_WRITER'
 AUDIT_FLAG = 'QWEN_FAST_KV_PAGE_WRITER_AUDIT'
 ENGAGED = '[PINDIAG] tp4 kv page writer engaged'
 FELL_BACK = '[PINDIAG] tp4 kv page writer fell back'
+OCTO_SERVED = '[PINDIAG] tp4 kv page writer octo 8-row served path'
 AUDIT = '[PINDIAG] tp4 kv page writer audit'
 MISMATCH = '[PINDIAG] tp4 kv page writer audit mismatch'
 
@@ -39,10 +40,21 @@ def problems(env, container_text):
     lines = container_text.splitlines()
     found = ['the K/V page writer audit found a difference: %s' % line.strip()[:200] for line in lines if MISMATCH in line][:4]
     found += ['the K/V page writer fell back (the chained writer ran, it saved nothing): %s' % line.strip()[:200] for line in lines if FELL_BACK in line][:4]
+    octo = str((env or {}).get('QWEN_FAST_OCTO', 'off')) in ('live', 'alternate')
+    served = [line for line in lines if OCTO_SERVED in line]
     if env is None or env.get(FLAG) != '1':
-        if any(ENGAGED in line or AUDIT in line for line in lines):
+        if any(ENGAGED in line or AUDIT in line or OCTO_SERVED in line for line in lines):
             found.append('K/V page writer lines on a profile without %s' % FLAG)
         return found
+    # tp4/octo-3: the octo block keeps the chained writer and says so, once per process, in its own words (not a fall-back): an octo profile must log that line (the octo block
+    # was built and its captured forward asked for the writer), and a profile without the octo block must not.
+    if octo and not served:
+        found.append('%s=1 on an octo profile (QWEN_FAST_OCTO=%s) and no "%s" line was logged: the octo block\'s captured forward never asked the writer, '
+                     'or it asked and the answer was not the known one' % (FLAG, env.get('QWEN_FAST_OCTO'), OCTO_SERVED))
+    if len(served) > 1:
+        found.append('%d "%s" lines (one per process wanted)' % (len(served), OCTO_SERVED))
+    if served and not octo:
+        found.append('"%s" logged on a profile without the octo block' % OCTO_SERVED)
     engaged = [line for line in lines if ENGAGED in line]
     if not engaged:
         found.append('%s is set and no engaged line (%s) was logged: the page launch never ran' % (FLAG, ENGAGED))

@@ -915,7 +915,7 @@ class AdmissionTests(unittest.TestCase):
         import test_octo as host
 
         for name, value in (('QWEN_FAST_PIPELINED_PROPOSALS', '0'), ('QWEN_FAST_PACKED_PROPOSAL', None), ('QWEN_FAST_QUAD_DRAFT_AUDIT', '1'),
-                            ('QWEN_FAST_PARKED_ENGINES', '1'), ('QWEN_FAST_DRAFT_SINGLES_AUDIT', 'all')):
+                            ('QWEN_FAST_DRAFT_SINGLES_AUDIT', 'all'), ('QWEN_FAST_PAIR_MASK_AUDIT', '1')):
             env = self.environ()
             if value is None:
                 env.pop(name)

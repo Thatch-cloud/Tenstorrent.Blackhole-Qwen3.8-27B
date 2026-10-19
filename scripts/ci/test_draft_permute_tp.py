@@ -953,8 +953,35 @@ class SmokeTests(unittest.TestCase):
     def test_the_octo_profile_needs_the_octo_kv_line(self):
         env = dict(self.QUAD)
         env[smoke.OCTO_FLAG] = '1'
-        self.assertEqual(len(smoke.problems(env, self.full())), 1)
-        self.assertEqual(smoke.problems(env, self.full() + '\n' + self.engaged('kv', 'octo')), [])
+        # (tp4/octo-3: the octo fold and unfold are hooked, so the octo pass needs all three sites at shape=octo - once it has drafted a round)
+        drafted = '[OCTO-DRAFT] round=23 built=1 ms=4084.5'
+        self.assertEqual(len(smoke.problems(env, self.full() + '\n' + drafted)), 3)
+        self.assertEqual(smoke.problems(env, self.full() + '\n' + drafted + '\n' + '\n'.join(self.engaged(site, 'octo') for site in ('kv', 'fold', 'unfold'))), [])
+
+    def test_the_octo_sites_are_the_octo_passs_and_wait_for_a_round_it_drafted(self):
+        """Card run 38142850011 (the prefix-hit plan on the combined candidate): octo rounds at 6 and 7 live, none at 8, so the octo draft pass never drafted and drafted shapes were quad and pair; the
+        rule demanded shape=octo sites anyway."""
+        env = dict(self.QUAD)
+        env[smoke.OCTO_FLAG] = '1'
+        quads = self.full() + '\n' + '\n'.join(self.engaged(site, 'pair') for site in smoke.SITES)
+        octo_rounds_without_the_pass = quads + '\n[OCTO] round=849 shape=octo planned=octo live=7 rows=8\n[PACKED-SELECT] round=81 pairs=[[0, 1, 2, 3], [4, 5]] users=6 calls=1\n'
+        self.assertEqual(smoke.problems(env, octo_rounds_without_the_pass), [])
+        self.assertEqual(smoke.problems(env, quads), [])
+        # the pass drafted (either marker): all three octo sites are demanded again
+        for marker in ('[OCTO-DRAFT] round=107 built=0 ms=3.7', '[PACKED-SELECT] round=3 pairs=[[0, 1, 2, 3, 4, 5, 6, 7]] users=8 calls=1'):
+            with self.subTest(marker=marker):
+                found = smoke.problems(env, octo_rounds_without_the_pass + marker + '\n')
+                self.assertEqual(len(found), 3, found)
+                self.assertTrue(all('shape=octo' in item for item in found))
+        # the quads' own sites stay demanded whatever the octo pass did, and so does a fall-back
+        self.assertEqual(len(smoke.problems(env, self.engaged('kv', 'quad'))), 2)
+        self.assertTrue(smoke.problems(env, quads + '\n%s site=kv shape=octo reason=x' % smoke.FELL_BACK))
+        # the audit arm: the octo sites are audited only once the pass ran
+        audited = dict(env)
+        audited[smoke.AUDIT_FLAG] = '1'
+        passing = '\n'.join(self.audit(site, 'quad') for site in smoke.SITES)
+        self.assertEqual(smoke.problems(audited, quads + '\n' + passing), [])
+        self.assertEqual(len(smoke.problems(audited, quads + '\n' + passing + '\n[OCTO-DRAFT] round=1 built=1 ms=1.0')), 6, 'three engaged and three audit lines at shape=octo')
 
     def test_with_no_quad_or_octo_flag_any_kv_line_will_do(self):
         self.assertEqual(smoke.problems({smoke.FLAG: '1'}, self.engaged('kv', 'pair')), [])

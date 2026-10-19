@@ -104,6 +104,31 @@ def model_walk(runner, model):
             'model.other': {name: value for name, value in fields.items() if name not in named}}
 
 
+def bind_checkpoint(model, paths, environ=None, say=None):
+    """Another checkpoint was selected (QWEN_C2_MODEL_REPO / _REVISION, qwen_c2_checkpoint.py): the model that was just built must be the selected snapshot's, reading its converted
+    weights from the keyed cache directory, and the engine's target_snapshot must be that snapshot; otherwise the worker stops (fail closed). -> whether a checkpoint is selected.
+    Without a selection this returns False at its first line: the base's startup is what it was."""
+    environ = os.environ if environ is None else environ
+    if not environ.get('QWEN_C2_CHECKPOINT_KEY'):
+        return False
+    import qwen_c2_checkpoint
+
+    problems = qwen_c2_checkpoint.startup_problems(model.args, environ)
+    if paths['target_snapshot'] != Path(environ[qwen_c2_checkpoint.SNAPSHOT_ENV]).resolve():
+        problems.append('the engine\'s target_snapshot %s is not the selected snapshot %s' % (paths['target_snapshot'], environ[qwen_c2_checkpoint.SNAPSHOT_ENV]))
+    if problems:
+        raise ValueError('The loaded model is not the selected checkpoint: ' + '; '.join(problems))
+    line = '[QWEN-C2] %s %s@%s key=%s snapshot=%s weight_cache=%s' % (
+        qwen_c2_checkpoint.BOUND_LINE, environ.get(qwen_c2_checkpoint.REPO_ENV), environ.get(qwen_c2_checkpoint.REVISION_ENV), environ[qwen_c2_checkpoint.KEY_ENV],
+        environ[qwen_c2_checkpoint.SNAPSHOT_ENV], environ[qwen_c2_checkpoint.CACHE_ENV])
+    if say is None:
+        import sys
+        print(line, file=sys.stderr, flush=True)
+    else:
+        say(line)
+    return True
+
+
 def start(worker):
     if getattr(worker, '_qwen_fast_resources', None) is not None:
         raise ValueError('Fast worker already initialized')
@@ -146,6 +171,7 @@ def start(worker):
     from serving_runtime import attach_combined_runtime
 
     model = worker.model_runner.model.model[0]
+    selected = bind_checkpoint(model, paths)
     config = json.loads((paths['target_snapshot'] / 'generation_config.json').read_text())
     eos_ids = config.get('eos_token_id')
     eos_ids = (eos_ids,) if type(eos_ids) is int else tuple(eos_ids) if isinstance(eos_ids, list) else ()
@@ -177,6 +203,12 @@ def start(worker):
         worker._qwen_fast_resources = resources
         worker._qwen_fast_tp = tp
         worker._qwen_fast_attachment = dict(attached, weight_pool=pool)
+        if selected:
+            import qwen_c2_checkpoint
+
+            if qwen_c2_checkpoint.mark_first_boot_complete(os.environ):
+                import sys
+                print('[QWEN-C2] weight cache complete (first boot of this directory): %s' % os.environ.get('TT_CACHE_PATH'), file=sys.stderr, flush=True)
     except BaseException:
         resources.close()
         raise

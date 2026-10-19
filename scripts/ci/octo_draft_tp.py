@@ -525,6 +525,32 @@ class PreparedOctoDFlashProposal:
         return bucket
 
     def _execute(self, bucket, owned, retain):
+        """The octo pass. With one of the WP7 audits (QWEN_FAST_DRAFT_PERMUTE_AUDIT, _QKV1_AUDIT, _HEAD64_AUDIT) the audit is told whether this is the bucket's eager warm pass (it
+        byte-compares the served composition beside each launch there) or the capture that records the launches only - quad_draft_tp's wrapper, for this pass (tp4/octo-3: without it
+        `draft_permute_tp.auditing()` never saw an eager pass, so the WP7 audits of the fused stack ran on the quads and on no octo launch)."""
+        wp7 = any(os.environ.get(name, '0') != '0' for name in ('QWEN_FAST_DRAFT_PERMUTE_AUDIT', 'QWEN_FAST_DRAFT_QKV1_AUDIT', 'QWEN_FAST_DRAFT_HEAD64_AUDIT'))
+        wp6 = any(os.environ.get(name, '0') != '0' for name in ('QWEN_FAST_DRAFT_REDUCE_AUDIT', 'QWEN_FAST_DRAFT_TAIL_AUDIT', 'QWEN_FAST_DRAFT_GATEUP1_AUDIT', 'QWEN_FAST_DRAFT_MM_GRID_AUDIT'))
+        if not (wp7 or wp6):
+            return self._run(bucket, owned, retain)
+        previous_pass = previous_shape = None
+        if wp7:
+            import draft_permute_tp
+
+            previous_pass = draft_permute_tp.set_pass(owned is not bucket.owned)
+        if wp6:
+            # WP6's audit budget is per (lever, site, rows): the two quads' warm passes (64 rows too) spend it, so this pass is tagged and audited in its own right
+            import draft_fusion_tp
+
+            previous_shape = draft_fusion_tp.set_shape('octo')
+        try:
+            return self._run(bucket, owned, retain)
+        finally:
+            if wp6:
+                draft_fusion_tp.set_shape(previous_shape)
+            if wp7:
+                draft_permute_tp.set_pass(previous_pass)
+
+    def _run(self, bucket, owned, retain):
         rope = dict(q=bucket.rope['q'], live_k=bucket.rope['live_k'])
         return self.devices[0].execute_proposal(bucket.identifiers, None, bucket.mask, rope, context=None, pack=octo_users(self.devices),
             cached_history=bucket.cached_history, owned=owned, retain=retain, stage=lambda name, **values: None, audit=False, quad=self.quad)
@@ -725,9 +751,10 @@ class PreparedOctoDFlashProposal:
 # ---------------------------------------------------------------------------------------------
 
 REQUIRED_FLAGS = ('QWEN_FAST_PACKED_PROPOSAL', 'QWEN_FAST_PIPELINED_PROPOSALS', 'QWEN_FAST_PAIR_ROW_EXACT', 'QWEN_FAST_ROUND_B1')
+# (tp4/octo-3: QWEN_FAST_PARKED_ENGINES and QWEN_FAST_PARKED_DRAFTS are no longer here. The draft book binds the pair and quad traces to the slots for the process and the octo pass's
+# trace is not in it, so the coordinator keeps the octo trace outside the book - it follows a rebound member and a released device exactly as the quad did before the book, and the
+# next all-eight-live octo round rebuilds it: dflash_packed_proposal_coordinator._rebound / _note_generations / release_parked / close. A card has not run that lifecycle.)
 EXCLUDED_FLAGS = (
-    ('QWEN_FAST_PARKED_ENGINES', 'the parked-engine draft book binds the pair and quad traces to the slots; the octo draft trace is not in it'),
-    ('QWEN_FAST_PARKED_DRAFTS', 'the parked-engine draft book binds the pair and quad traces to the slots; the octo draft trace is not in it'),
     ('QWEN_FAST_QUAD_DRAFT_AUDIT', 'the quad shadow audit replays the first block\'s pair traces; the octo pass has no twin to compare with'),
     ('QWEN_FAST_DRAFT_SINGLES_AUDIT', 'the singles audit compares a batched draft with the members\' own T16 single-user drafts; the octo pass drafts T8'),
     ('QWEN_FAST_PAIR_MASK_AUDIT', 'the mask audit reads the quad/pair masks; the octo pass has its own T8 mask'),

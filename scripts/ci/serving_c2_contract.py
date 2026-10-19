@@ -26,7 +26,9 @@ process match it:
    every prefix-reuse graft in the image reads. A profile that sets it must also carry the engine
    flags reuse is exact under (prefix_reuse_problems), or the boot refuses; a profile that does not
    set it gets it removed, so an inherited value cannot turn half of reuse on under exact, c2 or
-   general. Under a prefix profile the API server serves the registry's metrics, which the engine
+   general. The checkpoint registry's store policies and telemetry (QWEN_PREFIX_EVICT, _SUPERSEDE,
+   _TELEMETRY, _GHOST_ENTRIES) are the profile's too: strict values, and only beside the switch
+   (prefix_policy_problems). Under a prefix profile the API server serves the registry's metrics, which the engine
    process exports (qwen_prefix_metrics); it keeps a request's cache_salt only when the salt verifies
    against the platform's salt key (salt_verdict), so a client cannot choose the cache partition it
    shares; it refuses a launched KV connector and warns on a server default that strips past
@@ -48,7 +50,10 @@ process match it:
    server: when vLLM imports vllm.parser.abstract_parser, DelegatingParser.parse_delta is wrapped
    to feed the parsers one token per sub-delta where that matters and merge the results into one
    message per step. general, the general-prefix profiles and exact never arm it (general and
-   general-prefix decode one token per step).
+   general-prefix decode one token per step). Every profile, in the same API server, arms
+   c2_toolcall_whitespace (QWEN_C2_TOOLCALL_WS=0 or "toolcall_whitespace": false turns it off): vLLM 0.25.1's
+   qwen3 tool parser strip()s every <parameter=...> value, which loses the trailing newline of a written file
+   and the indentation of an edit; the fix removes only the template's one framing newline at each end.
 8. meshes: a profile that names no mesh_device serves the pair exactly as before - the image's MESH_DEVICE
    (P300, a (1, 2) mesh) under the p150_x2 descriptor. A profile with mesh_device P150x4 (the general-tp4
    family) serves all four cards as one (1, 4) mesh: the contract sets MESH_DEVICE from it, the profile names
@@ -62,6 +67,10 @@ process match it:
    logits (the pair's 124,160). The TP4 profiles sample on device (sample_on_device_mode decode_only; the TT
    plugin still falls back to host sampling per batch for what the device sampler cannot do); the file
    HOST_SAMPLING_FILE or QWEN_HOST_SAMPLING=1 drops it at boot, so every batch samples on the host.
+
+9. another checkpoint of the same architecture (qwen_c2_checkpoint.py, qwen_c2_checkpoints.json; default off): QWEN_C2_MODEL_REPO and QWEN_C2_MODEL_REVISION, both, a pair the
+   catalog lists and that differs from the base, move the profile's snapshot to that checkpoint's, key the converted-weight directory (TT_CACHE_PATH) by the pair so two
+   checkpoints never share a cache, and refuse a snapshot whose config, tokenizer or chat template are not the base's byte for byte. Unset, the base is served exactly as before.
 
 Nothing here changes a gate: every step is off unless QWEN_C2_SERVING=1.
 """
@@ -80,6 +89,31 @@ INPUT_PROCESSOR = 'vllm.v1.engine.input_processor'
 # The prefix-reuse switch (design section 2.0.1): the model graft's supports_prefix_caching, the
 # scheduler graft's install and the runner patch all read it. Only a profile sets it.
 PREFIX_SWITCH = 'QWEN_PREFIX_REUSE'
+# The checkpoint registry's store policies and telemetry (qwen_prefix_registry.ENV_EVICT, ENV_SUPERSEDE, ENV_TELEMETRY, ENV_GHOST): a profile's
+# own env like the switch, strict in their values, and only meaningful beside it (prefix_policy_problems). Unset they are the registry's defaults:
+# plain LRU, no supersession, telemetry on.
+PREFIX_POLICY_FLAGS = {'QWEN_PREFIX_EVICT': ('lru', 'fair'), 'QWEN_PREFIX_SUPERSEDE': ('0', '1'), 'QWEN_PREFIX_TELEMETRY': ('0', '1'),
+                       'QWEN_PREFIX_CKPT_PRECONVERTED': ('0', '1'), 'QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT': ('0', '1'),
+                       'QWEN_PREFIX_HOST_TIER_AUDIT': ('0', '1'), 'QWEN_PREFIX_HOST_TIER_VERIFY': ('sample', 'all', 'off')}
+PREFIX_GHOST_FLAG = 'QWEN_PREFIX_GHOST_ENTRIES'
+# The host KV tier's numbers (qwen_prefix_registry.tier_config) and the files and switches that only a gate sets. None of the tier or the preconverted
+# checkpoints has run on a card: a traffic profile may not name them active until a qualification record lifts this.
+PREFIX_TIER_GIB = 'QWEN_PREFIX_HOST_TIER_GIB'
+PREFIX_TIER_NUMBERS = (PREFIX_TIER_GIB, 'QWEN_PREFIX_HOST_TIER_SPILL_MAX_BLOCKS', 'QWEN_PREFIX_HOST_TIER_MIN_TOKENS',
+                       'QWEN_PREFIX_HOST_TIER_MIN_AVAILABLE_GIB')
+PREFIX_TIER_OFF_PATH = 'QWEN_PREFIX_HOST_TIER_OFF_PATH'
+PREFIX_GATE_ONLY_VALUES = (('QWEN_PREFIX_CKPT_PRECONVERTED', '1'), ('QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT', '1'),
+                           ('QWEN_PREFIX_HOST_TIER_AUDIT', '1'))
+# Every name of the two features: the profile's to switch on, so a value inherited from the process under a profile that does not name it is dropped
+# (apply_environment), as Lever N's, engine reuse's and W2's are.
+PREFIX_TIER_ENV_NAMES = (tuple(name for name, _value in PREFIX_GATE_ONLY_VALUES) + PREFIX_TIER_NUMBERS
+                         + (PREFIX_TIER_OFF_PATH, 'QWEN_PREFIX_HOST_TIER_VERIFY'))
+# The per-tenant quotas of the prefix store (qwen_prefix_registry.QUOTA_ENV_NAMES; docs/prefix-store-hygiene.md "Tenant quotas"): default off and byte-identical off, strict in
+# their values, meaningful only beside the switch, and gate-only until a qualification record exists (a traffic profile may not name one). The device numbers are tokens in
+# whole 64-token blocks (a cap at least one 2048-token chunk, a floor at most the cap); the host numbers are GiB and need the host tier.
+PREFIX_QUOTA_TOKENS = ('QWEN_PREFIX_TENANT_QUOTA_DEVICE_CAP_TOKENS', 'QWEN_PREFIX_TENANT_QUOTA_DEVICE_FLOOR_TOKENS')
+PREFIX_QUOTA_GIB = ('QWEN_PREFIX_TENANT_QUOTA_HOST_CAP_GIB', 'QWEN_PREFIX_TENANT_QUOTA_HOST_FLOOR_GIB')
+PREFIX_QUOTA_NAMES = PREFIX_QUOTA_TOKENS + PREFIX_QUOTA_GIB
 # Sticky sessions (serving_fast_policy.STICKY_SESSIONS_FLAG): the fast path's side of prefix reuse. Only a
 # profile sets it, and only beside PREFIX_SWITCH and the fast path (prefix_reuse_problems).
 STICKY_SWITCH = 'QWEN_FAST_STICKY_SESSIONS'
@@ -123,6 +157,17 @@ PARKED_GATE_ONLY = ('QWEN_FAST_PARKED_AUDIT', 'QWEN_FAST_PARKED_NEGATIVE', 'QWEN
 W2_PREFIX = 'QWEN_FAST_W2_'
 W2_NAMES = ('QWEN_FAST_W2_OFF_PATH', 'QWEN_FAST_W2_OFF_AFTER')
 W2_GATE_ONLY = ('QWEN_FAST_W2_OFF_AFTER',)
+# octo-T8 and its three levers (serving_octo, octo_draft_tp, octo_attn_bundle, octo_glue8; tp4/octo-3, docs/tp4-octo3.md). Pinned equal to the modules' names by test_octo3_contract. A GATE-ONLY profile
+# carries them behind its gate marker (QWEN_C2_GATE_PROFILE=1: serving_octo admits them in a gate run only). A TRAFFIC profile carries the four levers only under its owner traffic waiver
+# (octo_problems): the shape and the levers have no pinned qualification record (the K64j 0x21 eight-row group per bundle, B > 1 entries of it, the batched GDN launch at eight users, the
+# quarter-tile glue movers), so the waiver names each at its exact value, and the profile's own QWEN_FAST_OCTO_WAIVER carries the waiver's id into the process (the one name by which
+# serving_octo.waiver_run admits a non-gate run; the contract refuses it anywhere else and an inherited value is removed). The bundle's audit and the audit sampling are a gate's own.
+OCTO_SWITCH = 'QWEN_FAST_OCTO'
+OCTO_WAIVER_ENV = 'QWEN_FAST_OCTO_WAIVER'
+OCTO_LEVERS = ('QWEN_FAST_OCTO', 'QWEN_FAST_OCTO_DRAFT', 'QWEN_FAST_OCTO_ATTN_BUNDLE', 'QWEN_FAST_OCTO_GLUE8')
+OCTO_KNOBS = ('QWEN_FAST_OCTO_MIN_LIVE', 'QWEN_FAST_OCTO_DRAFT_CONV')
+OCTO_GATE_ONLY = ('QWEN_FAST_OCTO_ATTN_BUNDLE_AUDIT', 'QWEN_FAST_SOLO_PACKED', 'QWEN_FAST_AUDIT_FIRST', 'QWEN_FAST_AUDIT_EVERY')
+OCTO_NAMES = OCTO_LEVERS + OCTO_KNOBS + OCTO_GATE_ONLY + (OCTO_WAIVER_ENV,)
 # The engine-start upload levers (qwen_device_zeros: the KV pool and the buffer pool's zero buffers filled on the device; qwen_lazy_shard: a weight-cache hit
 # without the host transpose). Pinned equal to the modules' NAMES by test_upload_p0. A profile sets them (default off, strict '0'/'1'); the audit twins are a gate
 # profile's own (the audit reads pages back and costs engine-start time); an inherited value never turns a lever on under a profile that did not name it.
@@ -235,6 +280,95 @@ def resolve_snapshot(profile, exists=os.path.isdir):
         if exists(candidate):
             return candidate
     raise ValueError('None of the pinned target snapshots is mounted: %s' % ', '.join(profile['snapshots']))
+
+
+# The names configure_checkpoint reads (qwen_c2_checkpoint.REPO_ENV, REVISION_ENV and the derived ones it sets); a test holds them equal to the module's.
+CHECKPOINT_ENV = ('QWEN_C2_MODEL_REPO', 'QWEN_C2_MODEL_REVISION', 'QWEN_C2_CHECKPOINT_KEY', 'QWEN_C2_CHECKPOINT_SNAPSHOT', 'QWEN_C2_WEIGHT_CACHE_BASE')
+
+
+def configure_checkpoint(profile, environ, api_server, exists=os.path.isdir):
+    """Item 9. -> the snapshot the engine serves instead of the profile's own, or None (nothing selected, or the base itself: the environment is left as it was).
+
+    Every process sets the environment (the keyed TT_CACHE_PATH, the derived names) so a child inherits and re-derives the same values; the identity checks, the cache marker and
+    the log line are the API server's alone. Any refusal is a ValueError: the API server exits (status 78) rather than serve another checkpoint's bytes under the base's name."""
+    if not any(environ.get(name) for name in CHECKPOINT_ENV):
+        return None      # nothing asked and nothing inherited: no import, no change (the off path is the code that was here before)
+    import qwen_c2_checkpoint as checkpoint
+
+    try:
+        sel = checkpoint.selection(environ)
+        if sel is None or sel.is_base:
+            checkpoint.configure_environment(environ, sel, None)
+            if sel is not None and api_server:
+                log('model is the base %s@%s: nothing moved (the base snapshot, its own converted weights)', sel.repo, sel.revision)
+            return None
+        catalog = checkpoint.load_catalog()
+        snapshot = checkpoint.resolve_snapshot(profile['snapshots'], sel, catalog, exists)
+        facts = checkpoint.configure_environment(environ, sel, snapshot)
+        if api_server:
+            problems = checkpoint.verify_snapshot(snapshot, sel, catalog)
+            if problems:
+                raise checkpoint.CheckpointError('; '.join(problems))
+            claim = checkpoint.claim_cache(environ, sel)
+            log('%s', checkpoint.log_text(facts, (len(catalog['identity_files']), len(sel.entry['shards']))))
+            log('weight cache %s: %s%s', facts['weight_cache'], 'created' if claim['created'] else 'found',
+                '' if claim['first_boot_complete'] or claim['created'] else ' (its first boot never completed: a truncated tensor file fails the load loudly; delete the directory to rebuild)')
+        return snapshot
+    except checkpoint.CheckpointError as error:
+        raise ValueError('profile %s cannot serve the asked checkpoint: %s' % (profile['name'], error))
+
+
+def checkpoint_limits(limits, environ):
+    """Item 9: request_limits(profile) with the selected checkpoint's catalog numbers laid over it (qwen_c2_checkpoints.json "request": today default_max_tokens, the max_tokens a
+    request that omits it gets, within the same clamp and the same output budget). No selection, or the base: `limits` itself, nothing read."""
+    if not any(environ.get(name) for name in CHECKPOINT_ENV[:2]):
+        return limits
+    import qwen_c2_checkpoint as checkpoint
+
+    try:
+        changes = checkpoint.request_overrides(checkpoint.selection(environ))
+    except checkpoint.CheckpointError as error:
+        raise ValueError(str(error))
+    if not changes:
+        return limits
+    out = dict(limits)
+    default = changes.get('default_max_tokens')
+    if default is not None:
+        if not 1 <= default <= limits['budget']:
+            raise ValueError('the checkpoint\'s default_max_tokens %r is not an integer from 1 to the output budget %d' % (default, limits['budget']))
+        log('request default max_tokens %d for this checkpoint (its catalog entry; the profile says %s); the clamp, the %d-token output budget and the KV admission are unchanged',
+            default, limits['default_max_tokens'], limits['budget'])
+        out['default_max_tokens'] = default
+    return out
+
+
+BASE_MODEL_ID = 'Qwen/Qwen3.8-27B'
+
+
+def platform_model(argv):
+    """The value of vLLM's --model in an argv (the platform's, before rewrite_argv drops it), or None."""
+    for index, token in enumerate(argv):
+        if token == '--model':
+            return argv[index + 1] if index + 1 < len(argv) else None
+        if token.startswith('--model='):
+            return token[len('--model='):]
+    return None
+
+
+def check_platform_model(argv, environ):
+    """Item 9: the model id the platform asks for must be the model this image serves (qwen_c2_checkpoint.platform_model_problems). The usual case, the base id or no id, costs nothing."""
+    asked = platform_model(argv)
+    selected = any(environ.get(name) for name in CHECKPOINT_ENV[:2])
+    if not selected and (asked is None or asked == BASE_MODEL_ID):
+        return
+    import qwen_c2_checkpoint as checkpoint
+
+    try:
+        problems = checkpoint.platform_model_problems(asked, checkpoint.selection(environ), checkpoint.load_catalog())
+    except checkpoint.CheckpointError as error:
+        problems = [str(error)]
+    if problems:
+        raise ValueError('; '.join(problems))
 
 
 def mesh_of(profile):
@@ -358,12 +492,19 @@ def apply_environment(profile, environ=None):
     for name in W2_NAMES:
         if name not in profile['env']:
             environ.pop(name, None)
+    # ...and the preconverted checkpoints and the host KV tier (default off, gate only until a qualification record lifts it): an inherited
+    # switch must not turn either on under a profile that never named it.
+    for name in PREFIX_TIER_ENV_NAMES + PREFIX_QUOTA_NAMES:
+        if name not in profile['env']:
+            environ.pop(name, None)
     # ...and the engine-start upload levers: an inherited switch must not move the KV pool's or the weights' load path under a profile that never asked.
     for name in UPLOAD_NAMES:
         if name not in profile['env']:
             environ.pop(name, None)
     # ...and exact resume P0: an inherited switch must not lift vLLM's drop or carry a window under a profile that never asked.
-    for name in EXACT_RESUME_NAMES:
+    # ...and octo-T8: an inherited flag must not turn the shape (or the waiver id that admits it in a non-gate run, or the audit sampling that thins a gate's audits) on under a profile that
+    # never named it.
+    for name in tuple(EXACT_RESUME_NAMES) + tuple(OCTO_NAMES):
         if name not in profile['env']:
             environ.pop(name, None)
     return environ
@@ -399,6 +540,89 @@ def sticky_problems(profile):
     return problems
 
 
+def prefix_policy_problems(profile):
+    """Every way the profile sets the checkpoint registry's store policies or telemetry (PREFIX_POLICY_FLAGS, PREFIX_GHOST_FLAG) wrongly, [] when
+    none: a value the registry would refuse to start on, or any of them without QWEN_PREFIX_REUSE=1 (they would be inert, and a profile that
+    names a policy it does not run is a misread of what the engine does)."""
+    env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
+    problems = []
+    for name, allowed in sorted(PREFIX_POLICY_FLAGS.items()):
+        if name in env and env[name] not in allowed:
+            problems.append('%s=%r is not one of %s' % (name, env[name], ', '.join(allowed)))
+    if PREFIX_GHOST_FLAG in env:
+        value = env[PREFIX_GHOST_FLAG]
+        if not value.isdigit():
+            problems.append('%s=%r is not a number of entries' % (PREFIX_GHOST_FLAG, value))
+    numbers = {}
+    for name in PREFIX_TIER_NUMBERS:
+        if name in env:
+            try:
+                numbers[name] = float(env[name])
+            except ValueError:
+                numbers[name] = None
+            if numbers[name] is None or not numbers[name] >= 0.0 or numbers[name] == float('inf'):
+                problems.append('%s=%r is not a non-negative number' % (name, env[name]))
+    if numbers.get(PREFIX_TIER_GIB):
+        store = env.get('QWEN_PREFIX_STORE_GIB')
+        try:
+            store_gib = float(store) if store not in (None, '') else 8.0
+        except ValueError:
+            store_gib = None
+        if store_gib is not None and numbers[PREFIX_TIER_GIB] <= store_gib:
+            problems.append('%s=%s is the whole prefix state\'s host budget and must exceed QWEN_PREFIX_STORE_GIB (%s): nothing would be left '
+                            'for KV pages' % (PREFIX_TIER_GIB, env[PREFIX_TIER_GIB], store_gib))
+    if PREFIX_TIER_OFF_PATH in env and not re.fullmatch(r'(?!-)[A-Za-z0-9_./-]{1,200}', env[PREFIX_TIER_OFF_PATH]):
+        problems.append('%s=%r is not a plain path' % (PREFIX_TIER_OFF_PATH, env[PREFIX_TIER_OFF_PATH]))
+    quota_tokens = {}
+    for name in PREFIX_QUOTA_TOKENS:
+        if name in env:
+            if not re.fullmatch(r'[0-9]+', env[name]) or int(env[name]) % 64:
+                problems.append('%s=%r is not a whole number of 64-token blocks (digits only)' % (name, env[name]))
+            else:
+                quota_tokens[name] = int(env[name])
+    cap, floor = quota_tokens.get(PREFIX_QUOTA_TOKENS[0], 0), quota_tokens.get(PREFIX_QUOTA_TOKENS[1], 0)
+    if cap and cap < 2048:
+        problems.append('%s=%d is below one 2048-token chunk' % (PREFIX_QUOTA_TOKENS[0], cap))
+    if cap and floor > cap:
+        problems.append('%s=%d exceeds %s=%d' % (PREFIX_QUOTA_TOKENS[1], floor, PREFIX_QUOTA_TOKENS[0], cap))
+    quota_gib = {}
+    for name in PREFIX_QUOTA_GIB:
+        if name in env:
+            try:
+                quota_gib[name] = float(env[name])
+            except ValueError:
+                quota_gib[name] = None
+            if quota_gib[name] is None or not quota_gib[name] >= 0.0 or quota_gib[name] == float('inf'):
+                problems.append('%s=%r is not a finite non-negative number of GiB' % (name, env[name]))
+                del quota_gib[name]
+    if any(quota_gib.values()) and not numbers.get(PREFIX_TIER_GIB):
+        problems.append('%s names a host quota but %s is not set: the quota would be inert' % (', '.join(sorted(name for name in quota_gib if quota_gib[name])), PREFIX_TIER_GIB))
+    if quota_gib.get(PREFIX_QUOTA_GIB[0]) and quota_gib.get(PREFIX_QUOTA_GIB[1], 0.0) > quota_gib[PREFIX_QUOTA_GIB[0]]:
+        problems.append('%s exceeds %s' % (PREFIX_QUOTA_GIB[1], PREFIX_QUOTA_GIB[0]))
+    if not gate_profile(profile):
+        # A traffic profile may name the tier and the preconverted checkpoints only under its owner traffic waiver (TIER_WAIVABLE_LEVERS); the audits and
+        # the kill-switch path are a gate's own.
+        unqualified = [name for name, value in PREFIX_GATE_ONLY_VALUES
+                       if env.get(name) == value and not (name in TIER_WAIVABLE_LEVERS and waived(profile, name, env))]
+        if numbers.get(PREFIX_TIER_GIB) and not waived(profile, PREFIX_TIER_GIB, env):
+            unqualified.append(PREFIX_TIER_GIB)
+        if PREFIX_TIER_OFF_PATH in env:
+            unqualified.append(PREFIX_TIER_OFF_PATH)
+        quotas = [name for name in PREFIX_QUOTA_NAMES if name in env and env[name] not in ('', '0') and (quota_tokens.get(name) or quota_gib.get(name))]
+        if quotas:
+            problems.append('%s: no qualification record exists for the per-tenant quotas of the prefix store, so only a gate-only profile may name them' % ', '.join(sorted(quotas)))
+        if unqualified:
+            problems.append('%s: no qualification record exists for the host KV tier or the preconverted checkpoints, so only a gate-only profile may name them '
+                            'active, or a traffic profile whose %s names QWEN_PREFIX_HOST_TIER_GIB and QWEN_PREFIX_CKPT_PRECONVERTED at their values (the audits and '
+                            'the kill-switch path are a gate\'s own)' % (', '.join(sorted(unqualified)), TRAFFIC_WAIVER))
+    named = [name for name in sorted(list(PREFIX_POLICY_FLAGS) + [PREFIX_GHOST_FLAG, PREFIX_TIER_OFF_PATH] + list(PREFIX_TIER_NUMBERS) + list(PREFIX_QUOTA_NAMES))
+             if name in env]
+    if named and not prefix_reuse(profile):
+        problems.append('%s set without %s=1: the registry does not exist, so the policy would be inert'
+                        % (', '.join(named), PREFIX_SWITCH))
+    return problems
+
+
 def prefix_reuse_problems(profile):
     """Every way the profile's engine flags break prefix reuse's exactness assumptions, [] when none.
 
@@ -413,7 +637,7 @@ def prefix_reuse_problems(profile):
     engine = profile.get('engine', {})
     value = profile.get('env', {}).get(PREFIX_SWITCH)
     caching = engine.get('enable-prefix-caching') is True
-    problems = sticky_problems(profile)
+    problems = sticky_problems(profile) + prefix_policy_problems(profile)
     if value is not None and str(value) not in ('0', '1'):
         problems.append('%s=%r is neither 1 nor 0' % (PREFIX_SWITCH, value))
     if caching and engine.get('no-enable-prefix-caching'):
@@ -545,7 +769,15 @@ TRAFFIC_WAIVER = 'owner_traffic_waiver'
 TRAFFIC_WAIVER_FIELDS = ('id', 'levers', 'waives', 'evidence', 'decision')
 TRAFFIC_WAIVER_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,62}')
 WAIVABLE_LEVERS = {'QWEN_FAST_TP4_SDPA': 'multi', 'QWEN_FAST_TP4_CONV_GATES_SPREAD': '1', 'QWEN_FAST_PARKED_ENGINES': '1',
-                   'QWEN_FAST_PARKED_DRAFTS': '1'}
+                   'QWEN_FAST_PARKED_DRAFTS': '1',
+                   # tp4/octo-3 (octo_problems): the octo shape at every eligible eight-live round (never `alternate`, which exists to time two shapes on one boot), its draft pass, the
+                   # bundled attention (four users a launch) and the glue levers at eight-row users; QWEN_FAST_OCTO_MIN_LIVE is the knob the shape's eligibility reads (6: the eight
+                   # segments less the two idle ones page 0 can hold)
+                   'QWEN_FAST_OCTO': 'live', 'QWEN_FAST_OCTO_DRAFT': '1', 'QWEN_FAST_OCTO_ATTN_BUNDLE': '4', 'QWEN_FAST_OCTO_GLUE8': '1', 'QWEN_FAST_OCTO_MIN_LIVE': '6'}
+# The host KV tier's two levers a waiver may ALSO name (beside WAIVABLE_LEVERS, which stay the four the earlier ship waivers hold equal): a traffic profile serves the tier
+# (QWEN_PREFIX_HOST_TIER_GIB) and the preconverted checkpoints (QWEN_PREFIX_CKPT_PRECONVERTED) only under an owner traffic waiver that names each at this value, as for W2
+# and engine reuse (prefix_policy_problems). The audits, the digest-everything mode of a gate and the kill-switch path of a gate stay a gate's own.
+TIER_WAIVABLE_LEVERS = {'QWEN_PREFIX_HOST_TIER_GIB': '32', 'QWEN_PREFIX_CKPT_PRECONVERTED': '1'}
 TRAFFIC_WAIVER_MARKER = 'OWNER TRAFFIC WAIVER'
 # The decision is a sentence that starts with one of these words. PENDING is a REQUEST: the profile boots (gates and G1 provenance boot every
 # profile) and logs the word, but no build may bake it as an image default (c2_serving_job.read_bake, build-c2-serving-image.sh) until the commit
@@ -587,12 +819,13 @@ def traffic_waiver_problems(profile):
             problems.append('%s: levers must be a non-empty object {flag: exact value}' % label)
         else:
             env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
+            waivable = dict(WAIVABLE_LEVERS, **TIER_WAIVABLE_LEVERS)
             for flag in sorted(levers):
                 value = levers[flag]
-                if flag not in WAIVABLE_LEVERS:
-                    problems.append('%s: %s is not waivable (only %s; a gate instrument never is)' % (label, flag, ', '.join(sorted(WAIVABLE_LEVERS))))
-                elif value != WAIVABLE_LEVERS[flag]:
-                    problems.append('%s: %s is waivable only at %s, not %r' % (label, flag, WAIVABLE_LEVERS[flag], value))
+                if flag not in waivable:
+                    problems.append('%s: %s is not waivable (only %s; a gate instrument never is)' % (label, flag, ', '.join(sorted(waivable))))
+                elif value != waivable[flag]:
+                    problems.append('%s: %s is waivable only at %s, not %r' % (label, flag, waivable[flag], value))
                 elif env.get(flag) != value:
                     problems.append('%s names %s=%s and the profile env has %r: a waiver names exactly the levers the profile sets'
                                     % (label, flag, value, env.get(flag)))
@@ -621,6 +854,44 @@ def waived(profile, flag, env):
     """Whether the profile's owner traffic waiver names `flag` at the value the env sets it to."""
     value = waived_levers(profile).get(flag)
     return value is not None and env.get(flag) == value
+
+
+def octo_problems(profile, environ=None):
+    """Every way the octo-T8 flags are set outside what the contract admits, [] when none (tp4/octo-3, docs/tp4-octo3.md). A profile with none of the names is clean without a read.
+    A GATE-ONLY profile may set every name but the waiver's own env (it has no waiver). A TRAFFIC profile sets the four levers (OCTO_LEVERS) only under its owner traffic waiver, each
+    named at its exact value (WAIVABLE_LEVERS) and set in the env, together with QWEN_FAST_OCTO_WAIVER equal to the waiver's id, and never the gate-only names (the bundle's audit, the
+    audit sampling, the lone-user padded round); a lever set and not named is refused here, a waiver naming a lever the profile does not set (a stale waiver) by traffic_waiver_problems, as for W2.
+    A traffic profile that sets QWEN_FAST_OCTO_WAIVER without the shape is refused too (a waiver id with nothing under it)."""
+    env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
+    if not any(name in env for name in OCTO_NAMES):
+        return []
+    problems = []
+    if profile.get('gate_only') is True:
+        if OCTO_WAIVER_ENV in env:
+            problems.append('%s is a traffic profile\'s: a gate-only profile admits the shape through its gate marker and needs no waiver id' % OCTO_WAIVER_ENV)
+        return problems
+    mode = env.get(OCTO_SWITCH, 'off')
+    on = mode != 'off' or any(env.get(name, '0') not in ('', '0') for name in OCTO_LEVERS[1:])
+    problems += ['%s=%s is a gate instrument: only a gate-only profile sets it' % (name, env[name]) for name in OCTO_GATE_ONLY if env.get(name, '0') not in ('', '0')]
+    if not on:
+        if OCTO_WAIVER_ENV in env:
+            problems.append('%s=%s without the octo shape (%s=live): a waiver id with nothing under it' % (OCTO_WAIVER_ENV, env[OCTO_WAIVER_ENV], OCTO_SWITCH))
+        return problems
+    for name in OCTO_LEVERS:
+        value = env.get(name)
+        if value in (None, '', '0', 'off'):
+            continue
+        if not waived(profile, name, env):
+            problems.append('%s=%s needs a gate-only profile: octo-T8 and its levers have no pinned qualification record (the K64j 0x21 eight-row group per bundle and B > 1 entries of '
+                            'it, the batched GDN launch at eight users, the quarter-tile glue movers) - or the owner\'s %s naming it' % (name, value, TRAFFIC_WAIVER))
+    minimum = env.get('QWEN_FAST_OCTO_MIN_LIVE')
+    if minimum is not None and not waived(profile, 'QWEN_FAST_OCTO_MIN_LIVE', env):
+        problems.append('QWEN_FAST_OCTO_MIN_LIVE=%s on a traffic profile needs the owner\'s %s naming it (at 6)' % (minimum, TRAFFIC_WAIVER))
+    waiver = profile.get(TRAFFIC_WAIVER) or {}
+    if not isinstance(waiver, dict) or env.get(OCTO_WAIVER_ENV) != waiver.get('id'):
+        problems.append('%s=%r and the profile\'s %s id is %r: the process takes the waiver\'s id from the profile, and only that one' % (
+            OCTO_WAIVER_ENV, env.get(OCTO_WAIVER_ENV), TRAFFIC_WAIVER, waiver.get('id') if isinstance(waiver, dict) else None))
+    return problems
 
 
 def multi_problems(profile):
@@ -1440,6 +1711,16 @@ def arm_parser_rechunk(profile_name):
         profile_name, c2_parser_rechunk.MODULE, c2_parser_rechunk.CLASS)
 
 
+def arm_toolcall_whitespace(profile, environ):
+    """Keep the edge whitespace of tool-call arguments in the vLLM API server (c2_toolcall_whitespace): vLLM 0.25.1's
+    qwen3 parser strip()s every argument. ON for every profile unless QWEN_C2_TOOLCALL_WS=0 or the profile says
+    "toolcall_whitespace": false. The module is imported here, at boot, so an image without it fails the API server's
+    boot instead of serving the bug; install refuses a parser that is not vLLM 0.25.1's."""
+    import c2_toolcall_whitespace
+
+    return c2_toolcall_whitespace.arm(profile, environ)
+
+
 def boot(environ=None, orig_argv=None):
     environ = os.environ if environ is None else environ
     if environ.get('QWEN_C2_SERVING') != '1':
@@ -1458,6 +1739,9 @@ def boot(environ=None, orig_argv=None):
     problems = multi_problems(profile)
     if problems:
         raise ValueError('profile %s cannot serve the wave-2 levers: %s' % (profile['name'], '; '.join(problems)))
+    problems = octo_problems(profile, environ)
+    if problems:
+        raise ValueError('profile %s cannot serve octo-T8: %s' % (profile['name'], '; '.join(problems)))
     problems = w2_problems(profile, environ)
     if problems:
         raise ValueError('profile %s misuses the W2 kill switch: %s' % (profile['name'], '; '.join(problems)))
@@ -1504,11 +1788,15 @@ def boot(environ=None, orig_argv=None):
     eos_ids = frozenset(int(token) for token in profile['eos_ids'])
     orig_argv = getattr(sys, 'orig_argv', None) if orig_argv is None else orig_argv
     api_server = is_api_server(orig_argv)
+    checkpoint_snapshot = configure_checkpoint(profile, environ, api_server)
+    if api_server:
+        limits = checkpoint_limits(limits, environ)
     if prefix_reuse(profile):
         install_prefix_metrics(api_server)
         sys.meta_path.insert(0, PostImportHook(MODEL_ENTRY, log_model_tree))
     if api_server:
-        snapshot = resolve_snapshot(profile)
+        check_platform_model(sys.argv[1:], environ)
+        snapshot = checkpoint_snapshot or resolve_snapshot(profile)
         if tt_config(profile).get('sample_on_device_mode') is not None and host_sampling_forced(environ):
             profile = dict(without_device_sampling(profile), name=profile['name'])
             log('profile %s: host sampling for every batch (%s=1 or %s): sample_on_device_mode dropped',
@@ -1534,6 +1822,7 @@ def boot(environ=None, orig_argv=None):
             counter = salt_counter()
             sys.meta_path.insert(0, PostImportHook(
                 INPUT_PROCESSOR, lambda module: install_salt_policy(module, key, counter)))
+        arm_toolcall_whitespace(profile, environ)
         if parser_rechunk(profile):
             arm_parser_rechunk(profile['name'])
         if profile.get('request_contract', True) is False:

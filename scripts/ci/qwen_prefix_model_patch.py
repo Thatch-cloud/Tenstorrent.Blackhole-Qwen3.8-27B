@@ -110,7 +110,7 @@ SOURCE_SHA256 = {
 # edit below, or to lever_n_model_patch.patch_tp_replay, changes these on purpose
 # (test_qwen_prefix_model_patch prints the new values).
 PATCHED_SHA256 = {
-    MODEL_FILE: '05f30d7c107d7c721d0d23ad7b88a2e37a23c5a64c1ed17733c5d81d8a332585',
+    MODEL_FILE: '222e936a7e8e17a1304458b1295189dffd988454357fffa490657816f490db03',
     VLLM_FILE: 'bd742abe2ebb67bbcc14cb58301c1ec27ac5810983d9521d52bf6e344e3ef189',
 }
 
@@ -418,6 +418,155 @@ def _qwen_prefix_row(index, req_id, start, actual, toks, registry, chunk_size, s
 
 def _qwen_prefix_bytes(tensor):
     return tensor.detach().contiguous().view(torch.uint8).numpy().tobytes()
+
+
+# P1b: checkpoints stored the way the device takes them (QWEN_PREFIX_CKPT_PRECONVERTED=1; default off).
+_QWEN_PREFIX_PRECONVERTED_FLAG = "QWEN_PREFIX_CKPT_PRECONVERTED"
+_QWEN_PREFIX_PRECONVERTED_AUDIT_FLAG = "QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT"
+_QWEN_PREFIX_TILE = 32
+
+
+class _QwenPrefixConverted:
+    """One checkpoint tensor held as the host tensor ttnn.from_torch built from it, in the device's tile layout
+    and dtype, so a restore is ttnn.copy_host_to_device_tensor and nothing else. shape and dtype are the torch
+    host view's (what _qwen_prefix_state_spec compares); padded_nbytes is what the tilized host tensor occupies
+    (the registry charges that); source is the torch tensor it was built from, kept only under the audit."""
+
+    __slots__ = ("host", "shape", "dtype", "padded_nbytes", "source")
+
+    def __init__(self, host, shape, dtype, padded_nbytes, source=None):
+        self.host = host
+        self.shape = tuple(shape)
+        self.dtype = dtype
+        self.padded_nbytes = int(padded_nbytes)
+        self.source = source
+
+
+def _qwen_prefix_padded_nbytes(tensor, chips):
+    """Bytes the tilized host copy of a [chips * ..., ...] torch tensor occupies: each chip's shard with its last
+    two dimensions rounded up to whole 32 x 32 tiles (the conv carry's 3 rows are 32 on the device)."""
+    shape = list(tensor.shape)
+    shape[0] = max(1, shape[0] // max(1, chips))
+    if len(shape) >= 2:
+        shape[-2] = -(-shape[-2] // _QWEN_PREFIX_TILE) * _QWEN_PREFIX_TILE
+    shape[-1] = -(-shape[-1] // _QWEN_PREFIX_TILE) * _QWEN_PREFIX_TILE
+    count = 1
+    for dim in shape:
+        count *= dim
+    return count * tensor.element_size() * max(1, chips)
+
+
+# The host KV tier's device side (QWEN_PREFIX_HOST_TIER_GIB > 0; the registry's tier and the scheduler graft's TierHooks are the host side).
+_QWEN_PREFIX_TIER_FLAG = "QWEN_PREFIX_HOST_TIER_GIB"
+_QWEN_PREFIX_TIER_OPS = ("qwen_read_blocks_raw", "qwen_write_blocks_raw", "qwen_block_bytes")
+
+
+def _qwen_prefix_tier_requested():
+    raw = os.environ.get(_QWEN_PREFIX_TIER_FLAG)
+    try:
+        return bool(raw) and float(raw) > 0
+    except ValueError:
+        return False
+
+
+def _qwen_prefix_declare_tier_io(io):
+    """Park the tier IO where the scheduler graft's registry finds it: on the registry itself when it exists, else on the holder (the
+    warmup runs before vLLM builds the scheduler, and shared_registry adopts it when it creates the registry)."""
+    import sys as _qwen_sys
+    import types as _qwen_types
+
+    holder = _qwen_sys.modules.get(_QWEN_PREFIX_REGISTRY_KEY)
+    if holder is None:
+        holder = _qwen_types.ModuleType(_QWEN_PREFIX_REGISTRY_KEY)
+        _qwen_sys.modules[_QWEN_PREFIX_REGISTRY_KEY] = holder
+    holder.tier_io = io
+    attach = getattr(getattr(holder, "registry", None), "attach_tier_io", None)
+    if callable(attach):
+        attach(io)
+
+
+class _QwenKvTierIO:
+    """Moves blocks of the paged attention-KV pool between the device and host RAM as RAW PACKED BYTES: no ttnn host tensor, no unpack, no
+    repack, so a block restored is bit for bit the block spilled. One payload per block: for each KV cache tensor (layer by layer, K
+    then V), for each chip of the mesh, that chip's page range of the block (block_bytes in all). The device calls are the
+    qwen_kv_read extension's ttnn.qwen_read_blocks_raw / qwen_write_blocks_raw (runs of consecutive block ids are one region transfer each, every
+    chip's shard, one wait); they run no program and allocate nothing on the device."""
+
+    def __init__(self, model):
+        self.model = model
+        self.caches = [cache for pair in model._paged_kv_caches for cache in pair]
+        if not self.caches:
+            raise RuntimeError("the host KV tier needs the paged KV caches: none are allocated at attach")
+        self.chips = int(model.num_devices)
+        sizes = {int(ttnn.qwen_block_bytes(cache)) for cache in self.caches}
+        if len(sizes) != 1:
+            raise RuntimeError(f"the host KV tier needs equal-sized KV blocks, the caches hold {sorted(sizes)}")
+        self.slice_bytes = sizes.pop()
+        self.block_bytes = len(self.caches) * self.chips * self.slice_bytes
+        cache = self.caches[0]
+        dims = tuple(int(cache.shape[i]) for i in range(len(cache.shape)))
+        self.fingerprint = (
+            f"kvtier1:{len(self.caches)}x{self.chips}x{self.slice_bytes}:{cache.dtype}:{dims[1:]}"
+            f":gdn_bf16={os.environ.get('QWEN35_GDN_STATE_BF16', '0')}"
+        )
+
+    # Blocks per device call: a transfer buffer of this many blocks of one cache tensor on every chip (35 MB at the production geometry) lives as long
+    # as the IO, so a restore of a whole 262k session is a few hundred calls, not a gigabyte of staging.
+    CHUNK_BLOCKS = 512
+
+    def _transfer_buffer(self, count):
+        """A C-contiguous uint8 [chips, count, slice_bytes] view of a buffer kept between calls (no page faults after the first)."""
+        import numpy as _qwen_np
+
+        need = self.chips * count * self.slice_bytes
+        if getattr(self, "_flat", None) is None or self._flat.size < need:
+            self._flat = _qwen_np.empty(need, dtype=_qwen_np.uint8)
+        return self._flat[:need].reshape(self.chips, count, self.slice_bytes)
+
+    def read_blocks(self, block_ids, into=None):
+        """One payload per block id, in order: a flat uint8 array of block_bytes (it supports len, bytes() and hashlib; the layout is the class
+        docstring's). `into`, when given, is one writable buffer of block_bytes per block (the tier's slab slots): the blocks are filled in place
+        and those buffers are returned. Raises on any failure; nothing is half-read into the caller."""
+        import numpy as _qwen_np
+
+        ids = [int(block) for block in block_ids]
+        if into is None:
+            payloads = [_qwen_np.empty(self.block_bytes, dtype=_qwen_np.uint8) for _ in ids]
+        else:
+            if len(into) != len(ids) or any(len(view) != self.block_bytes for view in into):
+                raise ValueError(f"{len(into)} buffers for {len(ids)} blocks of {self.block_bytes} bytes")
+            payloads = [_qwen_np.frombuffer(view, dtype=_qwen_np.uint8) for view in into]
+        shaped = [payload.reshape(len(self.caches), self.chips, self.slice_bytes) for payload in payloads]
+        for first in range(0, len(ids), self.CHUNK_BLOCKS):
+            chunk = ids[first : first + self.CHUNK_BLOCKS]
+            part = self._transfer_buffer(len(chunk))
+            for index, cache in enumerate(self.caches):
+                ttnn.qwen_read_blocks_raw(cache, part, chunk)
+                for offset in range(len(chunk)):
+                    shaped[first + offset][index] = part[:, offset, :]
+        return payloads
+
+    def write_blocks(self, block_ids, payloads):
+        """Write payload i into block id i of every cache, on every chip, and return when the device has it."""
+        import numpy as _qwen_np
+
+        ids = [int(block) for block in block_ids]
+        if len(payloads) != len(ids):
+            raise ValueError(f"{len(payloads)} payloads for {len(ids)} blocks")
+        shaped = []
+        for payload in payloads:
+            if len(payload) != self.block_bytes:
+                raise ValueError(f"a tier payload of {len(payload)} bytes, the KV block is {self.block_bytes}")
+            shaped.append(
+                _qwen_np.frombuffer(payload, dtype=_qwen_np.uint8).reshape(len(self.caches), self.chips, self.slice_bytes)
+            )
+        for first in range(0, len(ids), self.CHUNK_BLOCKS):
+            chunk = ids[first : first + self.CHUNK_BLOCKS]
+            part = self._transfer_buffer(len(chunk))
+            for index, cache in enumerate(self.caches):
+                for offset in range(len(chunk)):
+                    part[:, offset, :] = shaped[first + offset][index]
+                ttnn.qwen_write_blocks_raw(cache, part, chunk)
 '''
 
 MODEL_METHODS = r'''
@@ -633,6 +782,16 @@ MODEL_METHODS = r'''
             captured.append(f"{pos}:skipped")
             return
         ms = (_qwen_time.perf_counter() - began) * 1000.0
+        if os.environ.get(_QWEN_PREFIX_PRECONVERTED_FLAG) == "1" and getattr(self, "_qwen_prefix_restore_mode", None) == "h2d":
+            try:
+                began_convert = _qwen_time.perf_counter()
+                rec, carry, nbytes = self._qwen_prefix_preconvert(rec, carry)
+                logger.info(
+                    f"[PINDIAG] prefix: checkpoint preconverted req={req_id} pos={pos} tensors={len(rec) + len(carry)} "
+                    f"host_bytes={nbytes} convert_ms={(_qwen_time.perf_counter() - began_convert) * 1000.0:.1f}"
+                )
+            except Exception as error:  # the torch checkpoint is still exact; a restore converts it as before
+                logger.warning(f"[PREFIX] checkpoint not preconverted req={req_id} pos={pos}: {error!r}")
         stored = _qwen_prefix_put(registry, req_id, pos, rec, carry, nbytes, ms)
         captured.append(f"{pos}:{'stored' if stored is not None else 'refused'}:{ms:.0f}ms")
 
@@ -667,9 +826,17 @@ MODEL_METHODS = r'''
             )
         mapper = ttnn.ShardTensorToMesh(self.mesh_device, dim=0)
         held = []
+        converted = []
         for dn, rec, carry in zip(layers, rec_list, carry_list):
             for host, target in ((rec, dn.rec_state), (carry, dn.conv_carry)):
-                if mode == "h2d":
+                if isinstance(host, _QwenPrefixConverted):
+                    if mode != "h2d":
+                        raise AssertionError("prefix reuse: a preconverted checkpoint needs the h2d restore path")
+                    # Held in the device's layout and dtype since the capture: a straight upload.
+                    ttnn.copy_host_to_device_tensor(host.host, target)
+                    held.append(host.host)
+                    converted.append(host)
+                elif mode == "h2d":
                     src = ttnn.from_torch(
                         host, dtype=target.dtype, layout=ttnn.TILE_LAYOUT, device=None, mesh_mapper=mapper
                     )
@@ -683,6 +850,63 @@ MODEL_METHODS = r'''
                     ttnn.deallocate(src)
         ttnn.synchronize_device(self.device)
         held.clear()
+        if converted and os.environ.get(_QWEN_PREFIX_PRECONVERTED_AUDIT_FLAG) == "1":
+            self._qwen_prefix_audit_preconverted(layers, converted, mapper)
+
+    def _qwen_prefix_preconvert(self, rec_list, carry_list):
+        """(rec, carry, nbytes) of a freshly read checkpoint with every tensor converted the way _qwen_prefix_restore's
+        h2d path converts it - ttnn.from_torch(host, dtype=target.dtype, layout=TILE, device=None, mesh_mapper=
+        ShardTensorToMesh(dim=0)), the same call on the same bytes - and kept as the host tensor it returns.
+        nbytes is the tilized host size (the registry's byte budget). Under QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT=1 the
+        torch tensors are kept beside, for _qwen_prefix_audit_preconverted."""
+        layers = self._qwen_prefix_gdn_layers()
+        if len(rec_list) != len(layers) or len(carry_list) != len(layers):
+            raise AssertionError(
+                f"prefix reuse: checkpoint holds {len(rec_list)}/{len(carry_list)} GDN states, the model {len(layers)}"
+            )
+        mapper = ttnn.ShardTensorToMesh(self.mesh_device, dim=0)
+        keep = os.environ.get(_QWEN_PREFIX_PRECONVERTED_AUDIT_FLAG) == "1"
+        chips = max(1, int(self.num_devices))
+        out_rec, out_carry, nbytes = [], [], 0
+        for dn, rec, carry in zip(layers, rec_list, carry_list):
+            for host, target, out in ((rec, dn.rec_state, out_rec), (carry, dn.conv_carry, out_carry)):
+                src = ttnn.from_torch(host, dtype=target.dtype, layout=ttnn.TILE_LAYOUT, device=None, mesh_mapper=mapper)
+                padded = _qwen_prefix_padded_nbytes(host, chips)
+                out.append(_QwenPrefixConverted(src, host.shape, host.dtype, padded, host if keep else None))
+                nbytes += padded
+        return out_rec, out_carry, nbytes
+
+    def _qwen_prefix_audit_preconverted(self, layers, converted, mapper):
+        """QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT=1, after a restore that used preconverted tensors: (1) converting each
+        tensor's torch source again gives the same host values as the stored conversion (the conversion is
+        deterministic and nothing changed the stored bytes), and (2) the scratch, read back, equals the sources.
+        A difference stops the engine: this is a gate instrument."""
+        comp = ttnn.ConcatMeshToTensor(self.mesh_device, dim=0)
+        targets = []
+        for dn in layers:
+            targets.extend((dn.rec_state, dn.conv_carry))
+        if len(converted) != len(targets):
+            raise AssertionError("prefix reuse: the preconverted audit saw a checkpoint only partly preconverted")
+        differing = []
+        for index, item in enumerate(converted):
+            if item.source is None:
+                raise AssertionError("prefix reuse: the preconverted audit needs the torch sources kept at capture")
+            fresh = ttnn.from_torch(
+                item.source, dtype=targets[index].dtype, layout=ttnn.TILE_LAYOUT, device=None, mesh_mapper=mapper
+            )
+            if not torch.equal(ttnn.to_torch(item.host, mesh_composer=comp), ttnn.to_torch(fresh, mesh_composer=comp)):
+                differing.append(f"{index}:conversion")
+        rec_back, carry_back, _ = self._qwen_prefix_read_scratch()
+        for index, item in enumerate(converted):
+            back = (rec_back if index % 2 == 0 else carry_back)[index // 2]
+            if not torch.equal(back, item.source):
+                differing.append(f"{index}:readback")
+        logger.info(
+            f"[PREFIX-AUDIT-CKPT] tensors={len(converted)} conversion_equal={int(not any('conversion' in d for d in differing))} "
+            f"readback_equal={int(not any('readback' in d for d in differing))} differing={differing[:8]}"
+        )
+        if differing:
+            raise AssertionError(f"prefix reuse: a preconverted checkpoint restored differently from its source: {differing[:8]}")
 
     def _qwen_prefix_warm_restore(self):
         """Choose the GDN restore path and compile it before any trace is parked (F3).
@@ -758,6 +982,29 @@ MODEL_METHODS = r'''
             f"gdn_layers={len(rec_now)} checkpoint_bytes={nbytes} "
             f"rec={tuple(rec_now[0].shape)}/{rec_now[0].dtype} carry={tuple(carry_now[0].shape)}/{carry_now[0].dtype} "
             f"kv_dtype={kv} programs={programs}"
+        )
+        if _qwen_prefix_tier_requested():
+            self._qwen_prefix_tier_attach()
+
+    def _qwen_prefix_tier_attach(self):
+        """QWEN_PREFIX_HOST_TIER_GIB > 0: give the scheduler graft the tier IO. Refuses (the engine does not start) when the image lacks the
+        KV region ops: a tier that silently did nothing would look like a tier that missed."""
+        if not callable(getattr(ttnn, "qwen_read_blocks_raw", None)):
+            try:
+                import qwen_kv_read  # noqa: F401  (the extension sets the ttnn attributes when it is imported)
+            except Exception:
+                pass
+        absent = [name for name in _QWEN_PREFIX_TIER_OPS if not callable(getattr(ttnn, name, None))]
+        if absent:
+            raise AssertionError(
+                f"{_QWEN_PREFIX_TIER_FLAG} is set but this ttnn lacks ttnn.{', ttnn.'.join(absent)} (the qwen_kv_read extension, version 2: the "
+                "raw block read and write)"
+            )
+        io = _QwenKvTierIO(self)
+        _qwen_prefix_declare_tier_io(io)
+        logger.info(
+            f"[PINDIAG] prefix: host tier IO attached block_bytes={io.block_bytes} tensors={len(io.caches)} chips={io.chips} "
+            f"slice_bytes={io.slice_bytes} fingerprint={io.fingerprint}"
         )
 
     def _qwen_prefix_audit(self, row, page_row, rec_snap, conv_snap, logits):

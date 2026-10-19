@@ -1,0 +1,47 @@
+# The order of the Swift evaluation window (docs/tp4-swift.md; scripts/ci/make_swift_jobs.py): the RL post-train ukisai/Swift-1.5-Qwen3.8-27b (revision b4c84d42903a) against the base on the approved ship-4 profile c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4, ONE image (tp4-swift-1, a placeholder: B0 builds it from the pushed tp4/swift head WITH the K64j-OQ graft) and ONE window. The checkpoint is selected by the job keys C2_MODEL_REPO and C2_MODEL_REVISION; its converted weights have a directory of their own (qwen_c2_checkpoint.py), so the base's warm cache, image, profile and alias are untouched.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (the NEEDS lines skip what depended on it).
+# WHAT THIS DECIDES (the owner's, never the window's): whether Swift is worth a production cutover. The model card's claims are fewer thinking tokens and better coding scores at temperature 1.0; this stack serves greedy decoding only (the request contract), so the claim has to be re-read under greedy: the coding set (SW1 against SB1) counts passes and the thinking and answer tokens of each model; the tau pair (T1, T2) says how well the base's drafter accepts Swift's text (a lower tau is a slower decode, whatever the weights are worth); the decode ABAB (C1 L1 C2 L2) measures the rate on the ship profile; SA1 checks the fast path's exactness on the new weights. Every result is UNQUALIFIED.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z; nothing in this pack does either. B0 is a build and may run while production serves. No other window driver may be alive and no privileged builder container up.
+# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and each tag is pushed on THAT commit (the throwaway commit carries only .github/c2-serving-job.env). Push ONE tag at a time and wait for its run to finish; queued tags are cancelled. Never cancel a running card job.
+# P0. SWIFT IS ON THE CARD HOST BEFORE W0: python3 scripts/ci/qwen_c2_checkpoint.py check --hub <the hub directory> --repo ukisai/Swift-1.5-Qwen3.8-27b --revision b4c84d42903a8646b25857eb2827288d92ed85a4 exits 0 (add --hash-shards to hash the 55 GB against the hub's own sha256: minutes of disk reads, an operator's choice, off the cards' clock). The hub filesystem has at least 80 GB free. The licence of the checkpoint is the owner's decision (docs/tp4-swift.md), not this window's.
+# P0. GRID: the four cards expose a 13x10 compute grid since the firmware unlock. Read it from the run, never assume 11x10: every pair runs on one grid.
+# ARC-ZERO W0 SA1
+# ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO (minRunners and maxRunners 0, the normal values written down first, restored by the same patch with the old numbers) BEFORE W0 and restores them AFTER SA1, i.e. around every Swift boot (a model load under CI load has hit the platform's load timeout) and every timed job. B0, X0 and Z do not need the pause.
+# THE JOBS, in value order (cut the window at a block end): GATES: B0 X0 W0 SW1 (190 min); QUALITY: SB1 (70 min); ACCEPTANCE: T1 T2 (165 min); DECODE ABAB: C1 L1 C2 L2 (160 min); EXACTNESS: SA1 (110 min); END: Z (10 min). B0 is the WINDOW build.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0 <- B0
+# NEEDS W0 <- X0
+# NEEDS SW1 <- W0
+# NEEDS SB1 <- X0
+# NEEDS T1 <- X0
+# NEEDS T2 <- W0
+# NEEDS C1 <- X0
+# NEEDS L1 <- W0 C1
+# NEEDS C2 <- L1
+# NEEDS L2 <- C2
+# NEEDS SA1 <- SW1
+# READ RULES (each also needs c2_smoke_check clean and no stall; the templates' own headers have the whole text):
+#   B0   'baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4 with a session cap of 8', the provenance report with no problem line, its K64j-OQ graft line, the image id.
+#   X0   four cards present and healthy, the fabric as measured, the 13x10 grid in the run, no other window driver alive; qwen_c2_checkpoint.py check ok; 80 GB free.
+#   W0   (STOP) the checkpoint lines (c2_smoke_check --expect-checkpoint), the cache created, 'weight cache complete', the cold 'ready=1 after N s' RECORDED. A refusal line is the download's or the catalog's, never worked around.
+#   SW1  (STOP) the same lines, the warm 'ready=1 after N s' recorded, c2_smoke_check clean, coding_set saved (20 problems, 0 errors).
+#   SB1  no checkpoint line at all (the base); the same tests; coding_set saved. CPU side: swift_coding_report.py --run base=<SB1 coding-set-*.json> --run swift=<SW1 coding-set-*.json>; prefill_ladder_report.py <SB1 smoke log> --second <SW1 smoke log>.
+#   T1 T2   the lab's report complete=True (T1: the A3 calibration PASS); CPU side: swift_tau_compare.py --base <T1 summary> --other <T2 summary> (the drafter is the base's in both).
+#   C1 L1 C2 L2   octo3_report.py (the all-live window of each test, both pairs, the floors; Swift over base) and octo_judge.py on both Swift logs. NO text comparison: the checkpoints answer differently by construction.
+#   SA1  every audit line exact=True, no 'audit mismatch', no 'fell back', the checkpoint lines. Any mismatch is NO-GO for Swift on this stack.
+# NO-GO for Swift on the ship-4 stack: a refusal at W0 or SW1 (the snapshot is not the base's in config, tokenizer or chat template, or is incomplete), garbage text, a stall, an audit mismatch (SA1), a coding set that errors. A LOWER tau or a LOSS in the decode pair is a finding, not a failure; weigh it against the coding set. Adopting is the owner's decision.
+# PRODUCTION LATER (not this window): a Swift deployment needs (1) its cache built beforehand (W0), (2) QWEN_C2_MODEL_REPO and QWEN_C2_MODEL_REVISION in the serving image's environment (a thin layer's ENV lines; the node agent forwards nothing), (3) its own platform model id (docs/tp4-swift.md: alias plan) and (4) the replay job taught the new served name (C2_REPLAY_SERVED_MODEL; the replay's model pin is the base's).
+# Time (estimate, minutes): B0 40, X0 20, W0 60, SW1 70, SB1 70, T1 90, T2 75, C1 40, L1 40, C2 40, L2 40, SA1 110, Z 10: 705 minutes (11 h 45 min) in all, 665 minutes of cards (X0 to Z).
+B0-build-window stop tp4-swift-1 40
+X0-status-rescan-reset stop tp4-swift-1 20
+W0-swift-first-boot stop tp4-swift-1 60
+SW1-swift-smoke stop tp4-swift-1 70
+SB1-base-smoke soft tp4-swift-1 70
+T1-tau-base soft tp4-swift-1 90
+T2-tau-swift soft tp4-swift-1 75
+C1-base-a soft tp4-swift-1 40
+L1-swift-a soft tp4-swift-1 40
+C2-base-b soft tp4-swift-1 40
+L2-swift-b soft tp4-swift-1 40
+SA1-swift-audited-attach soft tp4-swift-1 110
+Z-reset soft tp4-swift-1 10

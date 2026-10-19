@@ -15,6 +15,7 @@
 """
 
 import os
+import re
 import subprocess
 import sys
 import types
@@ -47,11 +48,11 @@ import test_sticky_sessions as sticky_tests  # noqa: E402
 CHUNK, BLOCK = prefix_registry.CHUNK, prefix_registry.BLOCK
 UNDROP, CARRY, AUDIT = prefix_registry.ENV_UNDROP, prefix_registry.ENV_WINDOW_CARRY, prefix_registry.ENV_WINDOW_CARRY_AUDIT
 STICKY = 'QWEN_FAST_STICKY_SESSIONS'
-BASE = 'a3d6583c'
+BASE = '27af6902'
 
 
 def base_module(relative):
-    """scripts/ci/<relative> at the base commit this branch grew from (tp4/fusion-2), or None without git history."""
+    """scripts/ci/<relative> at the base commit this branch grew from (tp4/swift, whose graft the switches-off path must equal), or None without git history."""
     try:
         result = subprocess.run(['git', 'show', '%s:scripts/ci/%s' % (BASE, relative)], capture_output=True, cwd=str(HERE), timeout=60)
     except (OSError, subprocess.SubprocessError):
@@ -230,7 +231,8 @@ class GraftOffTests(Harness):
         stats = dict(installed.registry.stats)
         for name in ('capture_ms', 'restore_ms') + prefix_registry.TURN_STAT_NAMES:
             stats.pop(name, None)
-        return trace, stats, [line for line in self.logs if not line.startswith('install ')]
+        # The tier line reports the process's own resident size and the host's available memory, which differ between two scenarios of one process.
+        return trace, stats, [re.sub(r'(rss|avail)=\d+', r'\1=N', line) for line in self.logs if not line.startswith('install ')]
 
     def test_the_switches_off_make_the_base_graft_s_decisions(self):
         base = base_module('qwen_prefix_scheduler_patch.py')

@@ -288,7 +288,7 @@ class ChainedOrderedCacheWriter:
     slices (launch_rows 32). Counts `calls` as the served writers do (model_batch checks two
     per layer per forward) and notes 'kv_chains' once per call (32 per captured forward)."""
 
-    def __init__(self, mesh, operations, kernels, *, positions, pages, spans, tiles, launch_rows=64):
+    def __init__(self, mesh, operations, kernels, *, positions, pages, spans, tiles, launch_rows=64, layout_spans=None):
         import page_width_tp4
         from packed_cache_writer import validate_tiles
 
@@ -319,8 +319,10 @@ class ChainedOrderedCacheWriter:
         if any(os.environ.get(name) is not None for name in PAGE_WRITER_FLAGS):
             import kv_page_writer_tp4
 
+            from verify_trace_t2 import layout as block_layout
+
             self.page = kv_page_writer_tp4.attach(mesh, operations, kernels, positions=positions, pages=pages, spans=self.spans,
-                                                  launch_rows=launch_rows)
+                                                  launch_rows=launch_rows, layout_spans=layout_spans if layout_spans is not None else block_layout())
 
     def serve_shadow(self, cache, packed, positions, pages):
         """The served chained write of this writer's spans onto another cache: the page writer's audit runs it on its shadow cache."""

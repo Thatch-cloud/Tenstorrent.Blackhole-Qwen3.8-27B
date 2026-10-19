@@ -159,10 +159,14 @@ class ProfileTests(unittest.TestCase):
         from make_upload_profiles import twin_names as upload_twins
         # (and the op-fusion programme's twins: the production profile plus exactly one lever each, test_fusion_wp)
         from make_fusion_profiles import twin_names as fusion_twins
+        # (and the host KV tier's audited twin: the same copy plus the tier names and the multi launch's audit, test_prefix_tier_profiles)
+        from make_prefix_tier_profiles import twin_names as tier_twins
+        from make_octo3_profiles import twin_names as octo3_twins      # (and tp4/octo-3's octo twins of the combined arm, test_octo3_profiles)
+        from make_ship4_profiles import twin_names as ship4_twins      # (and tp4/ship-4's twins of the combined candidate, test_ship4_profiles)
         carriers = sorted(name for name, profile in load()['profiles'].items() if spread.FLAG in profile.get('env', {}))
-        self.assertEqual(carriers, sorted([W2, W2_AUDIT] + list(WINDOW_F1) + sorted(SHIPPED) + list(kill_twins()) + list(upload_twins()) + list(fusion_twins())))
+        self.assertEqual(carriers, sorted([W2, W2_AUDIT] + list(WINDOW_F1) + sorted(SHIPPED) + list(kill_twins()) + list(upload_twins()) + list(fusion_twins()) + list(octo3_twins()) + list(ship4_twins()) + list(tier_twins())))
         multi = sorted(name for name, profile in load()['profiles'].items() if profile.get('env', {}).get(sdpa_long_tp.FLAG) == 'multi')
-        self.assertEqual(multi, sorted([SDPA_TIMED, SDPA_AUDITED, W2, W2_AUDIT, NOF1, NOF1_AUDIT] + list(WINDOW_MULTI) + sorted(SHIPPED) + list(kill_twins()) + list(upload_twins()) + list(fusion_twins())))
+        self.assertEqual(multi, sorted([SDPA_TIMED, SDPA_AUDITED, W2, W2_AUDIT, NOF1, NOF1_AUDIT] + list(WINDOW_MULTI) + sorted(SHIPPED) + list(kill_twins()) + list(upload_twins()) + list(fusion_twins()) + list(octo3_twins()) + list(ship4_twins()) + list(tier_twins())))
 
     def test_sdpa_multi_s_own_arms_are_untouched_by_the_merge(self):
         found = load()['profiles']
@@ -248,14 +252,14 @@ class MergeSeamTests(unittest.TestCase):
     def test_the_packed_verifier_runs_both_audits_after_the_replay(self):
         source = (HERE / 'packed_verifier.py').read_text(encoding='utf-8')
         for marker in ('tile_collective_tp.audit_round(self.operations, self.fixture, self.rounds + 1)', 'sdpa_audit(self.rounds + 1)',
-                       'tp4_vglue.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1,',
-                       'gdn_conv_gates_spread.audit_round(self.operations, self.fixture.retained.records, self.rounds + 1)'):
+                       'tp4_vglue.audit_round(self.operations, self.fixture.retained.records, audit_round_number,',
+                       'gdn_conv_gates_spread.audit_round(self.operations, self.fixture.retained.records, audit_round_number)'):     # (tp4/octo-3: the sampled round number, = self.rounds + 1 unsampled)
             self.assertEqual(source.count(marker), 1, marker)
         self.assertLess(source.index('tp4_vglue.audit_round('), source.index('gdn_conv_gates_spread.audit_round('))
 
     def test_the_smoke_check_runs_every_branchs_rule(self):
         source = (HERE / 'c2_smoke_check.py').read_text(encoding='utf-8')
-        for call in ('problems += sampdraft_problems(container_text, env)', 'problems += u1_problems(env, container_text)',
+        for call in ('problems += sampdraft_problems(container_text, env, decode)', 'problems += u1_problems(env, container_text)',
                      'problems += sdpa_long_problems(env, container_text)', 'problems += sdpa_multi_problems(env, container_text)',
                      'problems += spread_problems(env, container_text)'):
             self.assertEqual(source.count(call), 1, call)

@@ -1,0 +1,32 @@
+# The RB pack: the parked-engine rebind's slow mode (scripts/ci/tap_window_aligned.py, scripts/ci/fusion-wp/RB.json). ONE image (B0), ONE window, after X0.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: the window halts at the first failure of this job.
+# THE FINDING (measured on the container logs of four card runs, 217 rebinds; python3 scripts/ci/rebind_split.py reproduces it). A returning turn's bridge build
+#   (the 'sticky engine built ... kind=rebind' ms) is A + B + C + D: A host checks and the DRAM backstop 70-80 ms (200-300 ms with a seat's slot adoption),
+#   C rebind_slot 130-190 ms, D the memory ledger's after reading 60-70 ms, and B, adoption -> ledger 'before op=rebind', which is BIMODAL: 59-176 ms or 640-770 ms.
+#   B holds the first capture.outputs(): the ttnn.concat of the drafter window's two pieces, whose heights (P-2048) mod 2048 and its complement change with every
+#   prompt length. Unaligned pieces take ttnn's untilize / row-major concat / retilize path: 3 programs keyed by the piece shapes ('four-card engine programs'
+#   +3 on 159 of 159 new unaligned splits, +1 on tile-aligned splits, +0 on a repeated length). All 91 slow rebinds were +3; 68 other +3 rebinds were fast (the
+#   kernels already in the persistent per-graft kernel cache: inferred); 0 of 52 rebinds with +0/+1 were slow. The prefill step that took the snapshots pays too:
+#   12 of 29 cold/hit twin pairs +187..+814 ms. The lever makes every shape before one final slice tile-aligned (fixed set) and that slice's input fixed (2080
+#   rows, 31 offsets), so no new prompt length compiles anything once the set is cached.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z; nothing here does either. CI paused for the timed
+#   jobs. The CPU suite green on the pushed head. Push ONE tag at a time and wait for its run to finish. Never cancel a running card job.
+# THE KERNEL CACHE CAVEAT. The JIT cache persists per graft key on the host mount, so a control arm whose prompt lengths were served before under this key
+#   shows few slow rebinds: the agent-turn prompts are deterministic. The decisive read is the MECHANISM, not the TTFT pair: the lever arm's rebinds stay
+#   in the fast group (B < 200 ms) for every prompt length after its own first sight of each (P-2048) mod 32 offset, its 'engine programs' are +0..+2 and
+#   never +3, and its final prefill steps stop compiling snapshot programs; the control's +3 rebinds and their B are listed beside it.
+# NEEDS RBA <- X0 B0
+# NEEDS RBC1 RBL1 RBC2 RBL2 <- RBA
+# DECISION. RBA: any audit mismatch, fell-back line or missing audit line -> NO-GO (skip the timed jobs). RBC/RBL: GO when (1) the lever arms log engaged
+#   lines and no fell-back, (2) no lever-arm rebind is +3 and every lever-arm rebind with B >= 400 ms is the first of its (P-2048) mod 32 offset in the image's
+#   life, (3) the transcripts equal the control's, (4) turn latency p90 B <= A in both pairs. Saving per returning turn on a split new to the cache:
+#   about 0.55 s at the rebind (B 650 -> 110 ms) plus up to 0.4 s in the tail prefill (estimate from the logs above).
+# Time (estimate, minutes): B0 40 (a build), X0 10, RBA 60, RBC1 55, RBL1 55, RBC2 55, RBL2 55, Z 5: 295 minutes of cards.
+B0-build-rb stop tp4-fusion-1 40
+X0-status-rescan-reset stop tp4-fusion-1 10
+RBA-twa-audit-attach stop tp4-fusion-1 60
+RBC1-control-turns-a soft tp4-fusion-1 55
+RBL1-twa-turns-a soft tp4-fusion-1 55
+RBC2-control-turns-b soft tp4-fusion-1 55
+RBL2-twa-turns-b soft tp4-fusion-1 55
+Z-reset stop tp4-fusion-1 5

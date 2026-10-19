@@ -163,7 +163,7 @@ def unsatisfiable_imports():
 # Modules the P8 modules plain-import that exist only in the C2 image (its overlay manifest lays them over the base):
 # the baseline as of the drafter-manifest change, plus the overlay modules the wave-2 levers (gdn_conv_gates_spread, sdpa_long_tp) and engine reuse
 # (serving_parked_engines, imported under its flags only) and tp4/upload-p0 (qwen_device_zeros, imported by serving_buffer_pool under QWEN_FAST_DEVICE_ZEROS=1 only) added; all are in docker/qwen-c2-overlay.txt. A plain import of anything else the bundle lacks is flagged.
-C2_ONLY_PLAIN_IMPORTS = frozenset(['capture_plug.py', 'extent_attention_replay.py', 'extent_attention_replay_tp.py', 'gdn_conv_gates_spread.py', 'levern_policy.py', 'levern_route.py', 'octo_attn_bundle.py', 'packed_any_admission.py', 'qwen_device_zeros.py', 'sdpa_long_tp.py', 'serving_c2_contract.py', 'serving_fast_lane.py', 'serving_fast_lane_scheduler.py', 'serving_kv_reservation.py', 'serving_parked_engines.py', 'serving_prefill_admission.py', 'serving_request_quarantine.py', 'stall_watch.py', 'trace_census.py',
+C2_ONLY_PLAIN_IMPORTS = frozenset(['audit_sampling.py', 'capture_plug.py', 'extent_attention_replay.py', 'extent_attention_replay_tp.py', 'gdn_conv_gates_spread.py', 'levern_policy.py', 'levern_route.py', 'octo_attn_bundle.py', 'packed_any_admission.py', 'qwen_device_zeros.py', 'sdpa_long_tp.py', 'serving_c2_contract.py', 'serving_fast_lane.py', 'serving_fast_lane_scheduler.py', 'serving_kv_reservation.py', 'serving_parked_engines.py', 'serving_prefill_admission.py', 'serving_request_quarantine.py', 'stall_watch.py', 'trace_census.py',
                                    # the op-fusion programme's overlay-only modules (lazy, flag-guarded imports of the copied twins; all in docker/qwen-c2-overlay.txt)
                                    'kv_page_writer_tp4.py', 'draft_reduce_tp.py', 'draft_tail_tp.py', 'draft_gateup_tp.py', 'draft_mmgrid_tp.py',
                                    'draft_permute_tp.py', 'draft_qkv_tp.py', 'draft_head64_tp.py', 'tp4_mlp_gateup.py', 'draft_fusion_tp.py',
@@ -174,7 +174,9 @@ C2_ONLY_PLAIN_IMPORTS = frozenset(['capture_plug.py', 'extent_attention_replay.p
                                    # M1 (QWEN_FAST_GRID13): imported by tp_addresses.install and dflash_device.project_features only when the flag is set (overlay-only, docker/qwen-c2-overlay.txt)
                                    'grid13_tp.py',
                                    # exact resume P0 (QWEN_PREFIX_WINDOW_CARRY): imported by serving_lifecycle only when the switch is set (overlay-only, docker/qwen-c2-overlay.txt via fusion-wp/ER.json)
-                                   'prefix_window_carry.py'])
+                                   'prefix_window_carry.py',
+                                   # RB (QWEN_FAST_TAP_WINDOW_ALIGNED): imported by dflash_prefill_window only when the flag is set (overlay-only, docker/qwen-c2-overlay.txt)
+                                   'tap_window_aligned.py'])
 
 
 def unsatisfiable_plain_imports():

@@ -158,6 +158,11 @@ class FakeTTNN(object):
         self.region_lose_shard = False
         self.region_corrupt = False
         self.region_compile = False
+        # The qwen_kv_read extension's version-2 raw block ops (the host KV tier's device side).
+        self.raw_blocks = False
+        self.raw_read_fail = False
+        self.raw_write_fail = False
+        self.raw_write_corrupt = False
         self.bfloat16 = FakeDType('bfloat16', torch.bfloat16)
         self.float32 = FakeDType('float32', torch.float32)
         self.bfloat8_b = FakeDType('bfloat8_b', torch.float32)
@@ -178,7 +183,12 @@ class FakeTTNN(object):
                      'deallocate', 'synchronize_device', 'execute_trace', 'ConcatMeshToTensor',
                      'ShardTensorToMesh', 'ReplicateTensorToMesh', 'get_device_tensors', 'get_memory_view'):
             setattr(module, name, getattr(self, name))
-        region = ('qwen_read_blocks', 'allocate_tensor_on_host', 'Shape')
+        region = ('qwen_read_blocks', 'allocate_tensor_on_host', 'Shape', 'qwen_read_blocks_raw', 'qwen_write_blocks_raw',
+                  'qwen_block_bytes')
+        if self.raw_blocks:
+            module.qwen_read_blocks_raw = self.qwen_read_blocks_raw
+            module.qwen_write_blocks_raw = self.qwen_write_blocks_raw
+            module.qwen_block_bytes = self.qwen_block_bytes
         if self.region_reads:
             module.allocate_tensor_on_host = self.allocate_tensor_on_host
             module.qwen_read_blocks = self.qwen_read_blocks
@@ -241,6 +251,57 @@ class FakeTTNN(object):
         host.data.copy_(cache.data.index_select(0, torch.as_tensor(blocks, dtype=torch.long)))
         if self.region_corrupt:  # a wrong-bytes read bug: one value of the first block
             host.data.view(-1)[0] += 1
+
+    # -- the version-2 raw block ops: a cache's data is [blocks, heads over all chips, ...]; chip c holds heads [c * hpc, (c + 1) * hpc) ----
+    def _chip_view(self, cache):
+        chips = max(1, int(cache.chips))
+        return chips, cache.data.shape[1] // chips
+
+    def qwen_block_bytes(self, cache):
+        chips, per_chip = self._chip_view(cache)
+        count = per_chip
+        for dim in cache.data.shape[2:]:
+            count *= int(dim)
+        return count * cache.data.element_size()
+
+    def qwen_read_blocks_raw(self, cache, out, blocks):
+        import numpy as np
+
+        if cache is None or cache.deallocated or not cache.on_device:
+            raise RuntimeError('qwen_read_blocks_raw needs a live device cache')
+        if self.raw_read_fail:
+            raise RuntimeError('qwen_read_blocks_raw: read refused')
+        chips, per_chip = self._chip_view(cache)
+        width = self.qwen_block_bytes(cache)
+        if out.dtype != np.uint8 or tuple(out.shape) != (chips, len(blocks), width) or not out.flags['C_CONTIGUOUS']:
+            raise RuntimeError('qwen_read_blocks_raw: out %s %s for %d blocks of %d bytes on %d chips' % (
+                out.dtype, tuple(out.shape), len(blocks), width, chips))
+        self.log.append(('read_blocks_raw', len(blocks), tuple(cache.shape)))
+        index = torch.as_tensor(list(blocks), dtype=torch.long)
+        for chip in range(chips):
+            part = cache.data.index_select(0, index)[:, chip * per_chip:(chip + 1) * per_chip].contiguous()
+            out[chip] = np.frombuffer(part.numpy().tobytes(), dtype=np.uint8).reshape(len(blocks), width)
+
+    def qwen_write_blocks_raw(self, cache, data, blocks):
+        import numpy as np
+
+        if cache is None or cache.deallocated or not cache.on_device:
+            raise RuntimeError('qwen_write_blocks_raw needs a live device cache')
+        if self.raw_write_fail:
+            raise RuntimeError('qwen_write_blocks_raw: write refused')
+        chips, per_chip = self._chip_view(cache)
+        width = self.qwen_block_bytes(cache)
+        if data.dtype != np.uint8 or tuple(data.shape) != (chips, len(blocks), width) or not data.flags['C_CONTIGUOUS']:
+            raise RuntimeError('qwen_write_blocks_raw: data %s %s for %d blocks of %d bytes on %d chips' % (
+                data.dtype, tuple(data.shape), len(blocks), width, chips))
+        self.log.append(('write_blocks_raw', len(blocks), tuple(cache.shape)))
+        shape = (len(blocks), per_chip) + tuple(cache.data.shape[2:])
+        for chip in range(chips):
+            part = torch.frombuffer(bytearray(data[chip].tobytes()), dtype=cache.data.dtype).reshape(shape).clone()
+            if self.raw_write_corrupt:
+                part.view(-1)[0] += 1
+            for offset, block in enumerate(blocks):
+                cache.data[block, chip * per_chip:(chip + 1) * per_chip] = part[offset]
 
     def copy(self, src, dst):
         for tensor in (src, dst):

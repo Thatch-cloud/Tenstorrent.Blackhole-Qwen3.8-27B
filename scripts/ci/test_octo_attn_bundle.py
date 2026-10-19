@@ -102,7 +102,9 @@ class FlagTests(unittest.TestCase):
         self.assertIn('needs QWEN_FAST_OCTO=live or alternate', bundle.admission_problems({FLAG: '4', 'QWEN_FAST_TP': '4'})[0])
         self.assertIn('needs QWEN_FAST_OCTO=live or alternate', bundle.admission_problems(dict(good, QWEN_FAST_OCTO='off'))[0])
         self.assertIn('needs QWEN_FAST_TP=4', ' '.join(bundle.admission_problems(dict(flags('4')))))
-        self.assertIn('two ways to bundle', ' '.join(bundle.admission_problems(dict(good, QWEN_FAST_TP4_SDPA='multi'))))
+        # tp4/octo-3: W2 (multi) is the M3 blocks' SDPA and never runs on the octo block, so the bundle sits beside it; any other SDPA configuration is still a second bundling
+        self.assertEqual(bundle.admission_problems(dict(good, QWEN_FAST_TP4_SDPA='multi')), [])
+        self.assertIn('two ways to bundle', ' '.join(bundle.admission_problems(dict(good, QWEN_FAST_TP4_SDPA='l1'))))
         self.assertEqual(bundle.admission_problems(dict(good, QWEN_FAST_TP4_SDPA='off')), [])
         self.assertIn('needs %s' % FLAG, bundle.admission_problems(dict(OCTO_ON, QWEN_FAST_TP='4', **{AUDIT: '1'}))[0])
         self.assertEqual(bundle.admission_problems({FLAG: '9'})[0][:len(FLAG)], FLAG)
@@ -394,6 +396,8 @@ class OctoRig(object):
         self.device, self.logs, self.refreshed, self.audits, self.fold_ins, self.fold_outs = device, [], [], [], [], []
         self.stack = ExitStack()
         test.addCleanup(self.stack.close)
+        bundle.reset_logged()                  # the engaged line is said once per process (the warm and the captured fixture build the same bundle): a test starts a new process
+        test.addCleanup(bundle.reset_logged)
         self.stack.enter_context(patch('octo_attn_bundle._log', side_effect=self.logs.append))
         self.stack.enter_context(patch('sdpa_multi_tp._log', side_effect=self.logs.append))
         self.stack.enter_context(patch('sdpa_long_tp._log', side_effect=self.logs.append))
@@ -524,6 +528,20 @@ class ReaderTests(unittest.TestCase):
                          'one eager refresh at attach per launch: a kernel that does not build fails the attach')
         self.assertEqual(len({id(tensor) for tensor in block.owned}), len(block.owned))
         self.assertIs(reader.multi, block)
+
+    def test_the_warm_fixture_and_the_captured_fixture_say_engaged_once(self):
+        # packed_verifier._warm_and_fixture builds TWO fixtures per block (the eager warm forward's, then the captured one), each with its own reader and so its own bundle: the card
+        # logs of tp4/octo-2 (OB1, OL1) held two engaged lines a boot and bundle_problems wants exactly one. Both bundles are built and refreshed; the process says it once.
+        first = self.build(**flags('4'))
+        second = self.build(**flags('4'))
+        self.assertIsNot(first.multi, second.multi, 'each reader builds its own bundle (the warm fixture closes its own)')
+        self.assertEqual(len(self.lines(bundle.ENGAGED)), 1)
+        self.assertEqual(len(self.lines(bundle.UNQUALIFIED)), 1)
+        self.assertEqual(bundle.bundle_problems('\n'.join(self.rig.logs + [
+            '%s users=8 launches=2 flags=0x21 cores_per_entry=16 audit=0' % bundle.CALL_MARKER]), dict(flags('4'))), [])
+        bundle.reset_logged()
+        self.build(**flags('4'))
+        self.assertEqual(len(self.lines(bundle.ENGAGED)), 2, 'reset_logged forgets (tests only)')
 
     def test_the_launch_split_follows_the_flags_value(self):
         for value, split in (('2', '2,2,2,2'), ('4', '4,4'), ('5', '4,4'), ('6', '4,4')):
@@ -684,11 +702,23 @@ class ReaderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'must be 0 or 1'):
             self.build(**flags('4', audit='yes'))
 
-    def test_the_sdpa_flag_beside_the_bundle_is_refused(self):
-        # the process-level question is admission_problems' (tested above); at the reader the SDPA flag's own attach, which runs first, refuses the eight-row block too
-        with self.assertRaisesRegex(ValueError, 'QWEN_FAST_TP4_SDPA=multi'):
-            self.build(**flags('4', QWEN_FAST_TP4_SDPA='multi'))
-        self.assertIn('two ways to bundle', ' '.join(bundle.admission_problems(dict(flags('4'), QWEN_FAST_TP='4', QWEN_FAST_TP4_SDPA='multi'))))
+    def test_w2_multi_beside_the_bundle_attaches_the_bundle_to_the_octo_reader_and_leaves_the_multi_launch_to_the_m3_blocks(self):
+        # tp4/octo-3: QWEN_FAST_TP4_SDPA=multi is the M3 blocks' one-launch SDPA. The reader twin leaves an eight-row reader to the octo readers (sdpa_long_tp.apply is not
+        # called for it: it would raise "qualified at 0x23 only" on the 0x21 octo segments), so `multi` is the bundle; a sixteen-row reader still gets sdpa_long_tp.apply.
+        with patch('sdpa_long_tp.apply') as apply:
+            reader = self.build(**flags('4', QWEN_FAST_TP4_SDPA='multi'))
+            self.assertIsInstance(reader.multi, bundle.OctoBundle)
+            apply.assert_not_called()
+            lent = [lend(self.device, 16, WIDTH) for user in range(4)]
+            with env(QWEN_FAST_TP4_SDPA='multi'):
+                folded.PackedExtentReplayReader(self.device, MESH, M3_SEGMENTS, WIDTH, [host_table(user + 1, WIDTH) for user in range(4)], storage=lent,
+                                                max_group_rows=8, starts=(4200,) * 4)
+            apply.assert_called_once()
+        self.assertIn('two ways to bundle', ' '.join(bundle.admission_problems(dict(flags('4'), QWEN_FAST_TP='4', QWEN_FAST_TP4_SDPA='l1'))))
+
+    def test_the_other_sdpa_configurations_beside_the_bundle_are_still_refused_at_the_attach(self):
+        with self.assertRaisesRegex(ValueError, 'QWEN_FAST_TP4_SDPA=l1|two ways to bundle|unknown'):
+            self.build(**flags('4', QWEN_FAST_TP4_SDPA='l1'))
 
     def test_a_multi_launch_already_attached_is_refused(self):
         with env(**flags('4')):

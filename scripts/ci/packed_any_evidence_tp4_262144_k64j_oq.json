@@ -1,0 +1,348 @@
+{
+ "schema": "qwen-c2-packed-any-evidence/1",
+ "what": "The four-card (QWEN_FAST_TP=4) record of packed_any_admission for the 262,144-token window (page-table width 4,096): the same three sections as packed_any_evidence_tp4.json at capacity 262,144 (CB1 over K1's families plus 196,864 and 262,144; CB2a with K2 2,030 tickets, X7 600, Z 900 and the 262,144 family; CB2b at capacity 262,144), at one KV head per chip (K64j flags 0x23) and the reader twin through the 1of4 chip view. packed_any_admission.check_evidence reads it at every 262,144 attach and its sha256 is pinned there (EVIDENCE_TP4_262K_K64J_OQ_SHA256), so a new record changes both in one commit; the 131,328 record and its pin are never touched. This is the record of the K64j-OQ binary: the K64j record beside it is untouched and keeps qualifying K64j.",
+ "provenance": "Recorded by scripts/ci/record_packed_any_evidence_tp4.py, which takes every value from the harness reports and checks each against the admission's K64j binary, kernels and reader sha256: CB1 from run 38103810962 (experiment/c2-serving-v835), report cardm/card-20261011T020204.json (sha256 2f05818cdfb67544); CB2a from run 38103882769 (experiment/c2-serving-v836), report cardm/card-20261011T020323.json (sha256 db0a7d6365e96cee); CB2b from run 38104003020 (experiment/c2-serving-v838), report cardm/reader-20261011T020531.json (sha256 46d03969574409e0). The watcher pass before CB1 is run 38103767532 (experiment/c2-serving-v834). The watcher pass before CB2a is run 38103767532 (experiment/c2-serving-v834). The watcher pass before CB2b is run 38103955222 (experiment/c2-serving-v837). The K64j binary and kernels are the pair's (K64j takes the head count and geometry as arguments). sources names extent_attention_replay_tp.py as serving/tp4-s2 holds it: CB2b ran the checkout's copy at these bytes; the admission guard is in serving_buffer_pool, never in the reader.",
+ "binary": {
+  "ttnncpp_sha256": "2b81e28f017ccf0ab50028fbae5eb31dd61cfd8a3159233a1ed785712d024a57",
+  "note": "the K64j-OQ binary (2b81e28f017ccf0a): the reports of this record were made on it. The decode kernels are K64j's four, byte for byte; the build of this binary proves its delta to K64j (optimisation/ttnn-op/sdpa_prefill_oneq/build_k64j_oq.sh)."
+ },
+ "kernels": {
+  "dataflow/reader_decode_qwen.cpp": "adb6091878ba3f0a0805846ff56f05352610d7fe779b5ae96320c437c095db49",
+  "dataflow/reader_decode_qwen_slice.cpp": "518d8096e3cceb160eaef8ab4f0ae976ccbffd3904d31176b7f9d02828c37f8a",
+  "compute/sdpa_flash_decode_qwen.cpp": "409a1aafc3ffaaca2c6afba0e999525b7d141491f0a52e5583efa70447ee5c0e",
+  "dataflow/writer_decode_qwen_slice.cpp": "642c36f809be0f1ad1664deb405dc310dabaa32d5628710320a118eb37a6cc7a"
+ },
+ "sources": {
+  "extent_attention_replay_tp.py": "89761985a45b5fe4038f9ff556e497b7c9eab84808144c3cd62748db62b10152"
+ },
+ "sections": {
+  "CB1": {
+   "status": "PASS",
+   "what": "K64j K1/K3 at one KV head per chip (6 folded rows per token): the runtime extent (0x20) at cur_pos E - 1 equals the compile-time call at capacity E, the mixed, share-slot0, trace and skip families, and the refusal of the q-slice",
+   "run": 38103810962,
+   "tag": "experiment/c2-serving-v835",
+   "card": "M",
+   "kv_heads": 1,
+   "harness": "optimisation/ttnn-op/k64j/k64j_card_b.py via run_card_b.sh, --kv-heads 1 --seeds 0,1,2,3,4 --capacity 262144 --extents 2304,16896,33024,65792,98560,131328,196864,262144",
+   "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+   ],
+   "extents": [
+    2304,
+    16896,
+    33024,
+    65792,
+    98560,
+    131328,
+    196864,
+    262144
+   ],
+   "combos": [
+    {
+     "geometry": "G4B3",
+     "flags": [
+      "0x21",
+      "0x23"
+     ]
+    },
+    {
+     "geometry": "G8B2",
+     "flags": [
+      "0x21",
+      "0x23"
+     ]
+    }
+   ],
+   "comparisons": 2278,
+   "failures": 0,
+   "families": 106,
+   "counts": {
+    "extent": [
+     2000,
+     2000
+    ],
+    "mixed": [
+     75,
+     75
+    ],
+    "share_slot0": [
+     15,
+     15
+    ],
+    "trace": [
+     144,
+     144
+    ],
+    "skip": [
+     24,
+     24
+    ]
+   },
+   "capacity": 262144,
+   "skipped_rows": "partial-unpoisoned",
+   "watcher_pass": {
+    "run": 38103767532,
+    "tag": "experiment/c2-serving-v834",
+    "status": "PASS",
+    "report_sha256": "c493e81e8fd2f2c2691d0620829dbfac28042f2e31cd16b9cd168ad731740158"
+   },
+   "report": "cardm/card-20261011T020204.json",
+   "report_sha256": "2f05818cdfb67544abb7d02951aeac9ba94e170b8f69eb67537ee736aa6911d5"
+  },
+  "CB2a": {
+   "status": "PASS",
+   "what": "K2 (native causal decode at 6 local heads on one KV head per chip == the extent path, bitwise; it sets the exactness policy), X7 (0x3 narrow == 0x3 wide with the real -inf tail) and Z (the 15 stale-writer families in one trace) at one KV head",
+   "run": 38103882769,
+   "tag": "experiment/c2-serving-v836",
+   "card": "M",
+   "kv_heads": 1,
+   "harness": "optimisation/ttnn-op/k64j/k64j_card_b.py --kv-heads 1 --sections K2,X7,Z --seeds 0,1,2,3,4 --variants normal,peaky --no-timing (the cardm action) --capacity 262144 --cb2-extents 2304,4352,16640,65792,131328,262144",
+   "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+   ],
+   "variants": [
+    "normal",
+    "peaky"
+   ],
+   "k2": {
+    "verdict": "PASS",
+    "tickets": [
+     2030,
+     2030
+    ],
+    "rows": [
+     30380,
+     30380
+    ],
+    "floor_rows_differing": [
+     0,
+     3280
+    ]
+   },
+   "x7": [
+    600,
+    600
+   ],
+   "z": {
+    "passed": [
+     900,
+     900
+    ],
+    "families": [
+     256,
+     512,
+     768,
+     1024,
+     1280,
+     1536,
+     1792,
+     2048,
+     2304,
+     2560,
+     2816,
+     3072,
+     3328,
+     3584,
+     3840
+    ]
+   },
+   "liveness": [
+    1070,
+    1070
+   ],
+   "comparisons": 3810,
+   "failures": 0,
+   "local_heads": 6,
+   "capacity": 262144,
+   "cb2_extents": [
+    2304,
+    4352,
+    16640,
+    65792,
+    131328,
+    262144
+   ],
+   "watcher_pass": {
+    "run": 38103767532,
+    "tag": "experiment/c2-serving-v834",
+    "status": "PASS",
+    "report_sha256": "c493e81e8fd2f2c2691d0620829dbfac28042f2e31cd16b9cd168ad731740158"
+   },
+   "report": "cardm/card-20261011T020323.json",
+   "report_sha256": "db0a7d6365e96cee42c5c411c927c55c5bdda18308e8a3badecaa313e3b7ba6f"
+  },
+  "CB2b": {
+   "status": "PASS",
+   "what": "W10b at four cards: the real extent reader twin over pool-like lent storage through the one-chip-of-four view - R1 (the pinned mask kernel at capacity 256 == narrow_mask_host, at G8B2, G4B3 and G4B1), S (construction and restage staging: word, cur_pos and tables read back), R2 (each segment == the 0x3 compile-time call with the wide -inf mask at capacity E, over more than 50 families), R4 (idle segments at 0/32 on the zero table)",
+   "run": 38104003020,
+   "tag": "experiment/c2-serving-v838",
+   "commit": "8b36cc59526248073218af5fcd947b04d97351a0",
+   "card": "M",
+   "image": "tp4-oneq-1",
+   "harness": "optimisation/ttnn-op/k64j/extent_reader_card_b.py through run_card_b.sh (K64J_HARNESS=extent_reader TP4_WIDTH=4), --sections R1,S,R2,R4 --seeds 0,1,2 --variants normal,peaky (the cardm action) --capacity 262144",
+   "report": "cardm/reader-20261011T020531.json",
+   "report_sha256": "46d03969574409e0b156329af8f114a762001e76508d60907c03d1f2d17902fd",
+   "verdict_line": "K64J_READER verdict=PASS scope=full r1=42/42 r1_reader=672/672 staging=1932/1932 r2=684/684 r2_trace=168/168 r4=264/264 live=12/12 families=56 capacity=262144 chips=1of4 phantom=8685 extent_sha256=89761985a45b5fe4038f9ff556e497b7c9eab84808144c3cd62748db62b10152",
+   "scope": "full",
+   "chips": "1of4",
+   "capacity": 262144,
+   "seeds": [
+    0,
+    1,
+    2
+   ],
+   "variants": [
+    "normal",
+    "peaky"
+   ],
+   "r1_geometries": {
+    "G8B2": [
+     0,
+     7,
+     32,
+     127,
+     128,
+     240,
+     255
+    ],
+    "G4B3": [
+     0,
+     7,
+     32,
+     127,
+     128,
+     240,
+     255
+    ],
+    "G4B1": [
+     0,
+     7,
+     32,
+     127,
+     128,
+     240,
+     255
+    ]
+   },
+   "r2_families": [
+    256,
+    512,
+    2304,
+    6144,
+    11520,
+    16640,
+    16896,
+    22272,
+    27648,
+    33024,
+    38144,
+    43520,
+    48896,
+    54272,
+    59392,
+    64768,
+    65792,
+    70400,
+    75776,
+    80896,
+    86272,
+    91648,
+    97024,
+    102144,
+    107520,
+    112896,
+    118272,
+    123392,
+    128768,
+    131328,
+    134400,
+    139776,
+    144896,
+    150272,
+    155648,
+    161024,
+    166144,
+    171520,
+    176896,
+    182272,
+    187392,
+    192768,
+    198144,
+    203520,
+    208640,
+    214016,
+    219392,
+    224768,
+    229888,
+    235264,
+    240640,
+    246016,
+    251136,
+    256512,
+    261888,
+    262144
+   ],
+   "idle_starts": [
+    0,
+    32
+   ],
+   "counts": {
+    "R1": [
+     714,
+     714
+    ],
+    "S": [
+     1932,
+     1932
+    ],
+    "R2": [
+     852,
+     852
+    ],
+    "R4": [
+     264,
+     264
+    ],
+    "liveness": [
+     12,
+     12
+    ]
+   },
+   "comparisons": 3762,
+   "failures": 0,
+   "warnings": 0,
+   "phantom_programs": 8685,
+   "served": {
+    "flags": "0x23",
+    "rows": 8,
+    "batch": 2,
+    "segments": 4
+   },
+   "pinned_modules": {
+    "attention_fold_dma_tp.cpp": "216a2849378920d7fb83c55fa9fa716bccfc9371b5fd5399307db141c74eec76",
+    "attention_fold_dma_tp.py": "c1fbc0f79e1fcf4f32bffb43484d9920abcc8ed016d58eaf3b756aec7ac55ebf",
+    "attention_mask_replay_tp.cpp": "7da3ccd94bb600bb6faa6a0258d3ca2e3c398262f5aa69dee799a2887fa446b9",
+    "attention_mask_replay_tp.py": "09a09b1313b16ce24ef931a2f0abdc9b83a8cd7a0d91168a60de276b2b510092"
+   },
+   "sources": {
+    "extent_attention_replay_tp.py": "89761985a45b5fe4038f9ff556e497b7c9eab84808144c3cd62748db62b10152"
+   },
+   "watcher_pass": {
+    "run": 38103955222,
+    "tag": "experiment/c2-serving-v837",
+    "status": "PASS",
+    "scope": "reduced",
+    "report_sha256": "5db04203fe433daf9b34f838228fde6955af333027e37cb0949bff6f38580110"
+   }
+  }
+ },
+ "capacity": 262144
+}

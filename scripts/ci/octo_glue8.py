@@ -38,6 +38,7 @@ V1_FLAG = 'QWEN_FAST_TP4_GDN_BLOCK_CONV'
 T2_FLAG = 'QWEN_FAST_VERIFY_T2'
 T2_SKIP_FLAG = 'QWEN_FAST_VERIFY_T2_SKIP'
 GATE_PROFILE_ENV = 'QWEN_C2_GATE_PROFILE'
+WAIVER_ENV = 'QWEN_FAST_OCTO_WAIVER'
 IMAGE_T2_DEFAULT = '1'
 
 ENGAGED = '[PINDIAG] tp4 octo glue8 engaged'
@@ -107,8 +108,9 @@ def refusal(environ=None):
         return None
     if environ.get(OCTO_FLAG, 'off') in ('', 'off'):
         return '%s needs %s=live|alternate (the octo block is the only eight-row block)' % (FLAG, OCTO_FLAG)
-    if environ.get(GATE_PROFILE_ENV) != '1':
-        return '%s is gate only: it needs a gate run of a gate-only profile (%s=1), as %s does' % (FLAG, GATE_PROFILE_ENV, OCTO_FLAG)
+    if environ.get(GATE_PROFILE_ENV) != '1' and not (environ.get(WAIVER_ENV) or '').strip():
+        # (tp4/octo-3: or the owner traffic waiver of a traffic profile, whose own QWEN_FAST_OCTO_WAIVER carries its id: serving_octo.waiver_run, serving_c2_contract.octo_problems)
+        return '%s is gate only: it needs a gate run of a gate-only profile (%s=1) or an owner traffic waiver (%s), as %s does' % (FLAG, GATE_PROFILE_ENV, WAIVER_ENV, OCTO_FLAG)
     if not sites_wanted(environ):
         return '%s needs at least one of %s=1, %s=1 beside %s=1 (nothing to make native)' % (FLAG, V2_FLAG, V1_FLAG, T2_FLAG)
     return None

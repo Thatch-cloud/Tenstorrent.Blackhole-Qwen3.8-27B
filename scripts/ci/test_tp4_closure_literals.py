@@ -55,8 +55,8 @@ packed_ordered_cache packed_weight_check padded_probe pair_row_exact page_width_
 profiled_block_stream_override publish_prewarm quad_draft_tp octo_draft_tp request_width_warm fused_commit_tp draft_singles_audit draft_convolution_fused_tp draft_shared_head_tp pair_row_exact_tp runtime_binary_override sdpa_tree_scratch serving_gather_experiment
 serving_kv_reservation serving_one_in_flight serving_packed_bridge serving_prefill_admission serving_request_quarantine serving_solo_lane serving_octo serving_fast_lane serving_fast_lane_scheduler stage_profile
 target_packed_pages target_t16_attention_8k_gate target_t16_attention_gate tile_collective_tp two_tile_decode two_tile_norm
-verifier_engine_tp verifier_position_policy c2_parser_rechunk qwen_prefix_metrics prompt_lookup levern_policy levern_scheduler levern_platform levern_route sdpa_long_tp sdpa_multi_tp
-gdn_conv_gates_spread drafter_checkpoint octo_attn_bundle
+verifier_engine_tp verifier_position_policy c2_parser_rechunk c2_toolcall_whitespace qwen_prefix_metrics prompt_lookup levern_policy levern_scheduler levern_platform levern_route sdpa_long_tp sdpa_multi_tp
+gdn_conv_gates_spread drafter_checkpoint octo_attn_bundle qwen_c2_checkpoint
 qwen_device_zeros qwen_lazy_shard
 tp4_sampdraft tp4_shard_argmax tp4_draft_conv tp4_draft_heads drafter_fixtures drafter_manifest
 serving_parked_engines
@@ -66,6 +66,7 @@ tp4_mlp_gateup tp4_mlp_fused
 prestage_diff write_packed_lean batched_reads_tp hostgap_instr
 grid13_tp
 prefix_window_carry
+tap_window_aligned
 '''.split())      # (the op-fusion programme's levers, docs/tp4-fusion.md: each imported lazily and flag-guarded by the twin that owns it, so a flags-off process never loads it)
 
 # Modules the four-card profiles never run their pair code from, and why. The closure does not follow into them.
@@ -503,7 +504,7 @@ class ClosureTests(unittest.TestCase):
         # (make_parked_profiles, make_round_host_profiles, make_octo_profiles and make_octo2_profiles are the generators of the engine-reuse, round-host, octo-T8 and octo-2 lever profile twins: the profile tests that the
         # attach test imports name them, through profile_twins; they serve nothing)
         # (make_w2_kill_profiles generates the W2 kill drill twin of the ship profile and make_kvread_profiles the region-read audit twins; the profile tests name them the same way)
-        loaded -= {'tp_test_support', 'make_parked_profiles', 'make_round_host_profiles', 'make_octo_profiles', 'make_octo2_profiles', 'make_w2_kill_profiles', 'make_kvread_profiles', 'make_fusion_profiles', 'make_upload_profiles', 'profile_twins'}
+        loaded -= {'tp_test_support', 'make_parked_profiles', 'make_round_host_profiles', 'make_octo_profiles', 'make_octo2_profiles', 'make_octo3_profiles', 'make_ship4_profiles', 'make_w2_kill_profiles', 'make_kvread_profiles', 'make_prefix_tier_profiles', 'make_fusion_profiles', 'make_upload_profiles', 'profile_twins'}
         extra = loaded - self.seen
         # What the attach loads outside the closure is a NOT_SERVED module it enters inert (each named in ATTACH_ENTERS_INERT,
         # exactly) and what those import at module level - not everything any NOT_SERVED module could ever reach.

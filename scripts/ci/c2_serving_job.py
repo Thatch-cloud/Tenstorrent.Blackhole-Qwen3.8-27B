@@ -131,6 +131,22 @@ Keys (every one optional but C2_IMAGE_TAG):
                       NOT_APPLICABLE, and a plan with no applicable arm is refused by the gate. agent-turns
                       (tp4/packed-prefix: the agent-turn replay, eight conversations of several turns) runs the prefix
                       and the control arm; agent-turns-prefix and agent-turns-baseline run one arm each (the ABAB jobs).
+                      tiers (tp4/prefix-tiers: the host KV tier and the preconverted checkpoints; needs a profile with
+                      QWEN_PREFIX_HOST_TIER_GIB, no baseline) is three arms, each also a plan: tier-attach (the audited
+                      chain: the first restore from preconverted tensors, compared with today's conversion), tier-returning
+                      (sessions, a flood the size of the KV pool, every session's return against its cold twin, the tier's
+                      kill switch) and tier-timed (TTFT of a cold prefill, a device-resident hit and a host restore at
+                      ~32k/128k/254k; a measurement beside its exactness read)
+                      tier-concurrent and tier-concurrent-timed (what the tier costs the users who are not using it: seven
+                      seats decode steadily while an eighth session returns from host RAM, and while a long fresh prompt
+                      displaces blocks into the tier; the longest wait of any seat and the round p50/p99 against the arm's own
+                      control window, the returning turn against its cold twin) are one arm each and run on a tier profile OR
+                      on its no-tier control profile (the ABAB pairs); the audited one prints the stall, the timed one judges it
+                      against the Lever N decode gap floor; scripts/ci/tier_concurrent_compare.py compares two arms' results
+                      tier-quota (per-tenant quotas, qwen_prefix_registry.QUOTA_ENV_NAMES; needs a sticky prefix profile, with or without the tier): quota-control
+                      and quota-isolated (the profile plus the quota env, derived), each also a plan: tenant A floods the device pool while tenant B's session
+                      must still be a DEVICE-RESIDENT hit when it returns (quota-isolated) and must not be (quota-control: the flood has to reach it); both
+                      tenants' returns are compared with their cold twins
                       exact-resume (judged) and exact-resume-timed (the ABAB's arm) are the exact-resume P0 returning
                       turns (docs/tp4-exact-resume.md 5.2): short tool turns on ~9k, ~33k and ~120k contexts, every turn a
                       cold/hit pair; exact_resume_compare.py pairs the hits of two timed arms
@@ -164,6 +180,12 @@ Keys (every one optional but C2_IMAGE_TAG):
                       run's turns with that run's, on the runner, and holds the verdict to the pre-registered GO rule
   C2_TAULAB_COUNTERS  production's spec-decode counters, a rig-local JSON of aggregates (default: none; positions 1-3 are then
                       NOT_ESTABLISHED in the report)
+  C2_MODEL_REPO + C2_MODEL_REVISION  another checkpoint of the SAME architecture (qwen_c2_checkpoint.py, qwen_c2_checkpoints.json; docs/tp4-swift.md), default off: both or neither,
+                      a catalog pair that is not the base, the revision the 40-hex commit. The smoke and taulab steps then start their container with QWEN_C2_MODEL_REPO and
+                      QWEN_C2_MODEL_REVISION (the contract moves the snapshot, keys the converted-weight directory by the pair and refuses a snapshot whose config, tokenizer or chat
+                      template differ from the base's), serve it under the catalog's served name (output model_served) and the smoke check reads the container log for the
+                      checkpoint lines (c2_smoke_check.py --expect-checkpoint). Needs C2_CARDS=quad and C2_ACTIONS from status rescan reset smoke taulab with a smoke or a taulab in it;
+                      the gate, prefix, replay, probe, build and push steps are refused (they do not forward it). Unset, every output is empty and no argv changes.
   C2_TT_GRID          clamp the compute grid tt-metal exposes, as insurance for cards whose firmware no longer soft-harvests Tensix
                       columns (tensix_col_disable_count 2 -> 0, so the unharvested 13x10 core descriptor is selected instead of 11x10):
                       exactly 10,9 (11x10, today's grid, valid on a harvested and an unharvested card), 11,9 (12x10) or 12,9 (13x10),
@@ -240,7 +262,7 @@ TELEMETRY_MS_RANGE = (100, 10000)
 TELEMETRY_DEFAULT_MS = 1000
 DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
 # The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
-PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify',
+PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify', 'tiers', 'tier-concurrent', 'tier-concurrent-timed', 'tier-quota',
                 # exact resume P0 (docs/tp4-exact-resume.md 5.2): the judged and the timed returning-turn arms
                 'exact-resume', 'exact-resume-timed')
 # (arm, its plan): each exactness and lifecycle arm is a plan of its own, named as the arm, that runs
@@ -251,7 +273,11 @@ PREFIX_ARM_PLANS = (('exactness-traced', 'exactness'), ('exactness-audit', 'exac
                     ('lifecycle-evict', 'lifecycle'), ('lifecycle-store', 'lifecycle'),
                     ('lifecycle-tiny', 'lifecycle'),
                     # tp4/packed-prefix: the agent-turn replay's two arms, each as a job of its own (the ABAB pairs)
-                    ('agent-turns-prefix', 'agent-turns'), ('agent-turns-baseline', 'agent-turns'))
+                    ('agent-turns-prefix', 'agent-turns'), ('agent-turns-baseline', 'agent-turns'),
+                    # tp4/prefix-tiers: the host KV tier and the preconverted checkpoints, each arm a job of its own (docs/prefix-store-hygiene.md)
+                    ('tier-attach', 'tiers'), ('tier-returning', 'tiers'), ('tier-timed', 'tiers'),
+                    # the per-tenant quotas: the control (none) and the isolated arm (the quota env, derived), each a job of its own
+                    ('quota-control', 'tier-quota'), ('quota-isolated', 'tier-quota'))
 # The W-T1 tau lab (c2_tau_lab.py): its arms, the production profile it serves and its time box.
 TAULAB_ARMS = ('A1', 'A2', 'A3', 'A4', 'A5')
 TAULAB_PROFILE = 'c2-packed-tp4'
@@ -262,6 +288,9 @@ TAULAB_DEADLINE_MINUTES = 270
 MAX_TAULAB_DEADLINE_MINUTES = 540
 TAULAB_IN_FLIGHT = 8
 MAX_TAULAB_IN_FLIGHT = 16
+# C2_MODEL_REPO / C2_MODEL_REVISION (qwen_c2_checkpoint.py): the steps that pass the selection into their container, and the ones that need no card step to be useful.
+MODEL_ACTIONS = ('status', 'rescan', 'reset', 'smoke', 'taulab')
+MODEL_SERVING_ACTIONS = ('smoke', 'taulab')
 # A rig-local path: plain characters, relative to the runner's home or absolute, never a '..' component or a leading '-'.
 PLAIN_PATH = re.compile(r'(?!-)[A-Za-z0-9_./-]{1,200}')
 PREFIX_PROFILE = 'general-prefix'
@@ -641,6 +670,7 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root, tt_grid=tt_grid)
     drafter_candidates = read_drafter_candidates(values, actions)
     box_minutes = read_box(values, actions)
+    model = read_model(values, actions, cards, lambda action: taulab['taulab_profile'] if action == 'taulab' else profile, root)
     outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), rmi_tags=rmi_tags, tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
@@ -651,6 +681,7 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
     outputs.update(s2)
     outputs.update(prefix)
     outputs.update(taulab)
+    outputs.update(model)
     return outputs
 
 
@@ -919,6 +950,40 @@ def read_taulab(values, profiles, running):
     return dict(taulab_profile=profile, taulab_data=paths['C2_TAULAB_DATA'], taulab_arms=' '.join(arms),
                 taulab_deadline=str(minutes), taulab_in_flight=str(in_flight), taulab_max_tokens=str(max_tokens),
                 taulab_counters=paths['C2_TAULAB_COUNTERS'], taulab_drafter_arm=drafter_arm, taulab_pair_control=pair_control)
+
+
+def read_model(values, actions, cards, profile_of, root=ROOT):
+    """C2_MODEL_REPO / C2_MODEL_REVISION (module docstring) as the outputs model_repo, model_revision and model_served, all empty when unset, or JobError.
+    `profile_of` maps an action to the profile name its container serves (smoke: C2_PROFILE, taulab: C2_TAULAB_PROFILE)."""
+    repo, revision = values.get('C2_MODEL_REPO', ''), values.get('C2_MODEL_REVISION', '')
+    if not repo and not revision:
+        return dict(model_repo='', model_revision='', model_served='')
+    sys.path.insert(0, HERE)
+    try:
+        import qwen_c2_checkpoint as checkpoint
+    finally:
+        sys.path.remove(HERE)
+    try:
+        catalog = checkpoint.load_catalog(os.path.join(root, 'scripts', 'ci', 'qwen_c2_checkpoints.json'))
+        sel = checkpoint.selection({checkpoint.REPO_ENV: repo, checkpoint.REVISION_ENV: revision}, catalog)
+        if sel.is_base:
+            raise checkpoint.CheckpointError('%s@%s is the base: leave C2_MODEL_REPO and C2_MODEL_REVISION empty (nothing moves for the base)' % (repo, revision[:12]))
+        if cards != 'quad':
+            raise checkpoint.CheckpointError('another checkpoint is served on the four-card mesh: it needs C2_CARDS=quad')
+        outside = sorted(set(actions) - set(MODEL_ACTIONS))
+        if outside:
+            raise checkpoint.CheckpointError('C2_ACTIONS has %s, which does not forward the checkpoint into its container (allowed: %s)' % (', '.join(outside), ' '.join(MODEL_ACTIONS)))
+        serving = [action for action in actions if action in MODEL_SERVING_ACTIONS]
+        if not serving:
+            raise checkpoint.CheckpointError('C2_ACTIONS has no smoke or taulab: nothing would serve the checkpoint')
+        with open(os.path.join(root, 'scripts', 'ci', 'qwen_c2_profiles.json'), encoding='utf-8') as handle:
+            entries = json.load(handle)['profiles']
+        for action in serving:
+            name = profile_of(action)
+            checkpoint.snapshot_candidates(entries[name]['snapshots'], sel, catalog)
+    except (checkpoint.CheckpointError, KeyError) as error:
+        raise JobError('C2_MODEL_REPO / C2_MODEL_REVISION: %s' % error)
+    return dict(model_repo=sel.repo, model_revision=sel.revision, model_served=checkpoint.served_model(sel.repo, sel.revision, catalog))
 
 
 def render(outputs):

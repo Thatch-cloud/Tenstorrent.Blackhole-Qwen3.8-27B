@@ -52,10 +52,15 @@ BEST262K = BEST262K + tuple(name for name, parent, env, why in parked_twins.spec
 # tp4/round-host: the generated gate-only twins of the Lever N traffic profile (test_tp4_round_host holds each as its parent plus its flags)
 BEST262K = BEST262K + round_host_twins.twin_names()
 # octo-T8 and the lone-user round (tp4/octo-t8): the generated gate-only twins of the levern profiles (test_octo_profiles holds each as its parent plus its flags and, for the octo ones, the memory plan)
-BEST262K = BEST262K + octo_twins.twin_names() + octo2_twins.twin_names()      # (and tp4/octo-2's lever twins, test_octo2_profiles)
+import make_octo3_profiles as octo3_twins  # noqa: E402
+import make_ship4_profiles as ship4_twins  # noqa: E402
+BEST262K = BEST262K + octo_twins.twin_names() + octo2_twins.twin_names() + octo3_twins.twin_names() + ship4_twins.twin_names()      # (and tp4/octo-2's lever twins, test_octo2_profiles; tp4/octo-3's, test_octo3_profiles; tp4/ship-4's, test_ship4_profiles)
 # the W2 kill drill twin of the ship profile (test_w2_switch holds it as that parent plus the two kill switch names)
 import make_w2_kill_profiles as w2_kill_twins  # noqa: E402
 BEST262K = BEST262K + w2_kill_twins.twin_names()
+# the host KV tier's audited twin of the same profile (make_prefix_tier_profiles; test_prefix_tier_profiles holds it as that parent plus the tier names)
+import make_prefix_tier_profiles as tier_twins  # noqa: E402
+BEST262K = BEST262K + tier_twins.twin_names() + tier_twins.ship_names()
 # the region-read audit twins of the Lever N audited profiles (make_kvread_profiles; test_kvread_profiles holds each as its parent plus one flag)
 import make_kvread_profiles as kvread_twins  # noqa: E402
 BEST262K = BEST262K + kvread_twins.twin_names()

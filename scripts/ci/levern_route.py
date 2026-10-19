@@ -29,7 +29,7 @@ wrong continuation corrupts without an error (the v73 to v80 class), so the rout
 raises before any device work otherwise. A start-0 step takes a new owner (the scheduler admits one prefill at a time); the lifecycle
 clears the owner when the request is finished or aborted mid-prefill (release).
 
-WHAT IT SKIPS. A step that is not the last runs no host snapshot of the scratch (154 MB across four chips) and no decode-slot write, and says so
+WHAT IT SKIPS. A step that is not the last runs no host snapshot of the scratch (one checkpoint, qwen_prefix_registry.checkpoint_nbytes: 78 MB with the bf16 state, across the mesh) and no decode-slot write, and says so
 (wrote_slot=0): the decoders' working row 0 is not touched, so the lifecycle does not displace the resident engine for it. The final step snapshots and
 writes the slot exactly as prefill_paged_slots does (the same _write_gdn_slot), so the engine the lifecycle then builds adopts the same state.
 
@@ -867,6 +867,7 @@ def _park(model, handle, held, log):
     finally:
         model._unbind_gdn_prefill_scratch(previous)
     handle.parks[request_id] = Park(at, rec, carry, nbytes, time.monotonic())
+    levern_policy.note_park_nbytes(nbytes)
     handle.parked_total += 1
     _clear_owner(model)
     log(levern_policy.PARK_LINE, 'out', request_id, at, (time.perf_counter() - began) * 1000.0, nbytes, len(handle.parks))

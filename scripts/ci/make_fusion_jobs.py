@@ -259,6 +259,18 @@ def render_combined_order(rows, plan, spec):
 
 SHIP_FOLDER = 'ship'
 SHIP_IMAGE = 'tp4-ship-2'
+
+
+def ship_folder(spec):
+    """The folder of one ship spec's pack: `ship` for the first ship candidate, `ship-<name>` for one built on it (a ship entry with extra env: its own image, its own gates)."""
+    if spec.get('pack'):
+        return spec['pack']
+    return SHIP_FOLDER if not spec.get('env') else '%s-%s' % (SHIP_FOLDER, spec['name'])
+
+
+def ship_image(spec):
+    """The placeholder tag of one ship pack's image: tp4-ship-2 for the first candidate, tp4-<name>-1 for one with extra env."""
+    return spec.get('image') or (SHIP_IMAGE if not spec.get('env') else 'tp4-%s-1' % spec['name'])
 G1_TESTS = ('warmup,coding,concurrent8_steady,concurrent8_skew,stall8_cold262k,levern_decoder_finishes,levern_all_decoders_finish,levern_cancel_mid_prefill,levern_arrival_during_prefill,'
             'levern_seed_stops,concurrent8_drain,parked_abort_reuse,parked_turns')
 GX_TESTS = 'warmup,parked_equal,parked_budgets,levern_equal,levern_equal_busy'
@@ -274,18 +286,23 @@ def ship_rows(plan, spec):
     same prompts), G2 (the salted prefix hit) and SR (the node agent's serving sequence on the thin layer built on B0)."""
     ship = fusion.NAMESPACE + spec['name']
     waiver = spec['waiver']
+    control = fusion.NAMESPACE + spec['control'] if spec.get('control') else fusion.PARENT
+    graft = ['C2_BAKE_GRAFT=%s' % spec['bake_graft']] if spec.get('bake_graft') else []
     telemetry = ('TELEMETRY (C2_TELEMETRY=1, scripts/ci/card_telemetry.py): the read-only ARC sidecar samples every chip once a second through the smoke step (AICLK and the limiter holding it, '
                  'power, current, temperature, kernel NOPs); read telemetry-smoke/telemetry-summary.txt beside the result; the first [TELEMETRY] line must say decode check ok. It runs on the host '
                  'and reads only.')
     levers = ', '.join(sorted(spec['env_flags']))
+    note = (' ' + spec['read_note']) if spec.get('read_note') else ''
     return [
-        dict(name='B0-ship-build', mode='stop', minutes=SHIP_MINUTES['B0'], actions='build', profile=None, bake=ship, tests=None, telemetry=False, extra=[], needs=(),
+        dict(name='B0-ship-build', mode='stop', minutes=SHIP_MINUTES['B0'], actions='build', profile=None, bake=ship, tests=None, telemetry=False, extra=list(graft), needs=(),
              why=("B0 (STOP): build the SHIP image from the commit that records the owner's approval, with %s baked as the image's serving default (ENV QWEN_C2_PROFILE) and THATCH_SERVING_SESSION_CAP baked "
                   "as its max-num-seqs (8). REFUSED by c2_serving_job.read_bake and by build-c2-serving-image.sh while the profile's owner_traffic_waiver (id %s) has a decision that does not start with "
                   "APPROVED: the owner approves first, the approval is committed (make_fusion_profiles.py --approve-ship), the CPU suite runs on that commit, and the tag is pushed on THAT commit "
                   "(docs/tp4-ship-ln-w2-er.md, docs/tp4-fusion.md). READ: 'baking the serving default %s with a session cap of 8', the provenance report '(c) the image default is the BAKED profile "
-                  "...', no problem line, the image id. A build with the fusion levers' files in the overlay: the overlay manifest is the one image list. Measured basis: the tp4-ship-1 build took 35 minutes."
-                  % (ship, waiver['id'], ship))),
+                  "...', no problem line, the image id. A build with the fusion levers' files in the overlay: the overlay manifest is the one image list. Measured basis: the tp4-ship-1 build took 35 minutes.%s"
+                  % (ship, waiver['id'], ship, (" THE IMAGE BAKES THE %s OP GRAFT (C2_BAKE_GRAFT=%s): its _ttnncpp.so is the one this profile's lever needs, and a TRAFFIC boot on it is admitted only on packed-any records "
+                                                "made on that binary (record_packed_any_evidence_tp4.py --binary k64j-oq: the RQ1 and RQ2 jobs of references/fusion-jobs/WPP), so G1, GX1, G2 and SR need those records "
+                                                "committed first." % (spec['bake_graft'], spec['bake_graft'])) if spec.get('bake_graft') else ''))),
         dict(name='G1-ship-gate', mode='stop', minutes=SHIP_MINUTES['G1'], actions='reset smoke', profile=ship, tests=G1_TESTS, telemetry=True, extra=['C2_BOX_MINUTES=90'],
              needs=('G1 <- B0',),
              why=("G1 (STOP): the card re-test of the SHIP image, unaudited (an audited 8x262k profile costs about 8.4 minutes per request): the ship profile with W2, engine reuse and the op-fusion levers "
@@ -294,17 +311,17 @@ def ship_rows(plan, spec):
                   "(c2_smoke_check, every rule clean, including the smoke's concurrent8_steady list rule and the fusion rules): '[QWEN-C2] profile %s: OWNER TRAFFIC WAIVER', 'lever N governor: ttft=180 "
                   "gap_floor=8', the tp4 sdpa multi engaged line and its UNQUALIFIED line (expected at 262,144), the conv-gates spread engaged line, EVERY op-fusion lever's engaged line and no "
                   "fell-back line (%s), the round-host engaged line with select and read taken on at least 95 percent of the drafting steps, the parked build of 8 engines at 0.41-0.51 GB each (parked_judge's "
-                  "lever band; 0.418 measured) and every rebind clean, no stall, 0 crashes, skew under 238 s, the DRAM-after-attach lines (record the free DRAM per chip). %s" % (ship, levers, telemetry))),
-        dict(name='GX0-exact-control', mode='stop', minutes=SHIP_MINUTES['GX0'], actions='reset smoke', profile=fusion.PARENT, tests=GX_TESTS, telemetry=True,
+                  "lever band; 0.418 measured) and every rebind clean, no stall, 0 crashes, skew under 238 s, the DRAM-after-attach lines (record the free DRAM per chip). %s%s" % (ship, levers, telemetry, note))),
+        dict(name='GX0-exact-control', mode='stop', minutes=SHIP_MINUTES['GX0'], actions='reset smoke', profile=control, tests=GX_TESTS, telemetry=True,
              extra=['C2_SMOKE_PARTIAL=exactness control arm: its test list is fixed by the protocol, so concurrent8_steady is not run', 'C2_BOX_MINUTES=40'], needs=('GX0 <- B0',),
-             why=("GX0 (STOP): the CONTROL of the exactness pair, on the same image as GX1: the production profile %s over the exactness test list (the parked and Lever N equal-answer tests: the same "
+             why=("GX0 (STOP): the CONTROL of the exactness pair, on the same image as GX1: the %s profile %s over the exactness test list (the parked and Lever N equal-answer tests: the same "
                   "prompts, exact-length completions, content hashes), unaudited. The smoke ends red only by the concurrent8_steady list rule (C2_SMOKE_PARTIAL names the omission). Its logs are the reference "
-                  "of GX1. %s" % (fusion.PARENT, telemetry))),
+                  "of GX1. %s" % ('ship candidate' if spec.get('control') else 'production', control, telemetry))),
         dict(name='GX1-exact-ship', mode='stop', minutes=SHIP_MINUTES['GX1'], actions='reset smoke', profile=ship, tests=GX_TESTS, telemetry=True,
              extra=['C2_SMOKE_PARTIAL=exactness ship arm: its test list is fixed by the protocol, so concurrent8_steady is not run', 'C2_BOX_MINUTES=40'], needs=('GX1 <- GX0',),
              why=("GX1 (STOP): EXACTNESS of the ship profile %s against its control GX0 on the same image: the same prompts, unaudited. READ: python3 scripts/ci/parked_compare.py --control <GX0 smoke log> "
                   "--parked <GX1 smoke log> --control-container <GX0 container log> --parked-container <GX1 container log> --profile %s: every levern_equal, levern_equal_busy and parked_equal content hash "
-                  "EQUAL (the last w2-er GX: 37 of 37), compared above 0, the parked judge with 0 problems under the lever band. Any difference is NO-GO for shipping. %s" % (ship, ship, telemetry))),
+                  "EQUAL (the last w2-er GX: 37 of 37), compared above 0, the parked judge with 0 problems under the lever band. Any difference is NO-GO for shipping. %s%s" % (ship, ship, telemetry, note))),
         dict(name='G2-prefix-hit', mode='soft', minutes=SHIP_MINUTES['G2'], actions='reset prefix', profile=None, tests=None, telemetry=False,
              extra=['C2_PREFIX_PLAN=levern-hit', 'C2_PREFIX_PROFILE=%s' % ship, 'C2_PREFIX_BASELINE=none', 'C2_BOX_MINUTES=45'], needs=('G2 <- B0',),
              why=("G2 (SOFT): the salted prefix hit on the SHIP image beside six decoding seats (c2_prefix_gate.py --plan levern-hit, no baseline): a returning turn reuses its prefix (cached tokens above 0) while "
@@ -321,15 +338,22 @@ def ship_rows(plan, spec):
                   "dropped it) - the image name stays out of this file. READ the vLLM subprocess log: '[QWEN-C2] profile %s: vLLM argv', the OWNER TRAFFIC WAIVER line, the P150x4 mesh, admission passed "
                   "with no UNQUALIFIED admission line and no 262k evidence waiver, prefix installed, the Lever N install and warm lines, the parked build line, every op-fusion lever's engaged line, the :tt "
                   "alias before and after the restart, and no kill-switch line (no levern.off, prefix-reuse.off or parked.off left on the hub). PASS: 'PLATFORM_REPLAY passed=True'. The replay turns the "
-                  "session cap off; the cap is read live after the deploy. The replay step has no telemetry sidecar. Measured basis: 25 minutes." % ship)),
+                  "session cap off; the cap is read live after the deploy. The replay step has no telemetry sidecar. Measured basis: 25 minutes.%s" % (ship, note))),
     ]
 
 
-def render_ship_env(row):
-    lines = [SHIP_HEADER % dict(image=SHIP_IMAGE)]
+def shipped_spec(plan, ship):
+    """The ship entry with the flags its profile sets over the production profile (env_flags: the combined arm's levers and the entry's own env), the spec ship_rows reads."""
+    by_id = dict((lever['id'], lever) for lever in plan['levers'])
+    combined = dict((spec['name'], spec) for spec in plan.get('combined', ()))
+    return dict(ship, env_flags=sorted(by_id[ident]['flag'] for ident in combined[ship['source']]['levers']) + sorted(ship['env']))
+
+
+def render_ship_env(row, image=SHIP_IMAGE):
+    lines = [SHIP_HEADER % dict(image=image)]
     why = row['why'] + ((' Duration (estimate): %d minutes.' % row['minutes']) if 'Duration' not in row['why'] and 'Estimate' not in row['why'] else '')
     lines += ['# ' + piece for piece in wrap(why)]
-    lines += ['C2_CARDS=quad', 'C2_ACTIONS=%s' % row['actions'], 'C2_IMAGE_TAG=%s' % SHIP_IMAGE]
+    lines += ['C2_CARDS=quad', 'C2_ACTIONS=%s' % row['actions'], 'C2_IMAGE_TAG=%s' % image]
     if row['profile']:
         lines.append('C2_PROFILE=%s' % row['profile'])
     if row.get('bake'):
@@ -344,16 +368,20 @@ def render_ship_env(row):
 
 def render_ship_order(rows, plan, spec):
     ship = fusion.NAMESPACE + spec['name']
+    image = ship_image(spec)
     total = sum(row['minutes'] for row in rows)
+    several = len(plan.get('ship', ())) > 1
+    approve = 'make_fusion_profiles.py --approve-ship \"APPROVED ...\"' + (' --ship %s' % spec['name'] if several else '')
+    extra = (' plus the extra env %s' % ', '.join('%s=%s' % pair for pair in sorted(spec['env'].items()))) if spec.get('env') else ''
     lines = [
         "# The order of the op-fusion SHIP gates (docs/tp4-fusion.md, modelled on references/tp4-ship-ln-w2-er-jobs): the profile %s = the production profile plus exactly the env of the combined gate arm "
-        "%s%s, a TRAFFIC profile under the owner traffic waiver %s. ONE image (%s, a placeholder: B0 builds it from the approved commit)." % (ship, fusion.NAMESPACE, spec['source'], spec['waiver']['id'], SHIP_IMAGE),
+        "%s%s%s, a TRAFFIC profile under the owner traffic waiver %s. ONE image (%s, a placeholder: B0 builds it from the approved commit)." % (ship, fusion.NAMESPACE, spec['source'], extra, spec['waiver']['id'], image),
         "# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: nothing later runs, and nothing ships, after a failure of this job.",
         "# P0. THE OWNER'S DECISION on the profile's owner_traffic_waiver is the only thing between this pack and B0: it is PENDING until the owner replaces the decision sentence with one starting APPROVED "
-        "(python3 scripts/ci/make_fusion_profiles.py --approve-ship \"APPROVED ...\": it edits the ship entry of scripts/ci/fusion-wp/WP0.json, the source, and regenerates the profile; the field that "
+        "(python3 scripts/ci/%s: it edits the ship entry%s of scripts/ci/fusion-wp/%s, the source, and regenerates the profile; the field that "
         "flips is owner_traffic_waiver.decision of the profile, nothing else), and the CPU suite is green on THAT commit. B0 and SR need it (B0 bakes the profile, SR boots the baked default); a PENDING profile "
         "BOOTS in a gate or a smoke and logs the word, so G1, GX0, GX1 and G2 select it by name and CAN run on any image carrying the code (the fusion image) BEFORE the approval, as evidence: the pack's "
-        "tested-image rule (the gates run the B0 image, the exact base the production layer is built on) holds for the final run.",
+        "tested-image rule (the gates run the B0 image, the exact base the production layer is built on) holds for the final run." % (approve, (' named %s' % spec['name']) if several else '', spec['file']),
         "# P0. Push ONE tag at a time and wait for its run to finish (the workflow keeps one pending run; a queued tag is cancelled). No other window driver is alive. CI PAUSED from G1 to SR (the skew is timed). "
         "Never cancel a running card job. The cards are 13x10: read the grid from the run.",
         "# READ NOTE: card jobs run in a container with a CPU quota and no core pinning, while the production serving container is pinned and unthrottled, so host-bound gains (the round-host and the host-gap levers) measured in "
@@ -370,7 +398,7 @@ def render_ship_order(rows, plan, spec):
         "# Time (estimate, minutes): %s: %d minutes (%d h %d min), plus the thin layer (about 10) and about 3 minutes of queue per tag." % (
             ', '.join('%s %d' % (row['name'].split('-')[0], row['minutes']) for row in rows), total, total // 60, total % 60),
     ]
-    lines += ['%s %s %s %d' % (row['name'], row['mode'], SHIP_IMAGE, row['minutes']) for row in rows]
+    lines += ['%s %s %s %d' % (row['name'], row['mode'], image, row['minutes']) for row in rows]
     return '\n'.join(lines) + '\n'
 
 
@@ -416,7 +444,7 @@ def package_folders(folder):
     folder = Path(folder)
     found = []
     if folder.is_dir():
-        found += ['%s/%s' % (folder.name, path.name) for path in folder.iterdir() if path.is_dir() and path.name not in (COMBINED_FOLDER, SHIP_FOLDER)]
+        found += ['%s/%s' % (folder.name, path.name) for path in folder.iterdir() if path.is_dir() and path.name not in (COMBINED_FOLDER, SHIP_FOLDER) and not path.name.startswith(SHIP_FOLDER + '-')]      # (ship-<name>: the generated pack of another ship candidate)
         if folder.name == 'fusion-jobs' and folder.parent.is_dir():
             found += [path.name for path in folder.parent.iterdir() if path.is_dir() and path.name.startswith('fusion-') and path != folder]
     return sorted(found)
@@ -451,8 +479,9 @@ def render_order(rows, plan, folder=FOLDER):
         lines.insert(-1, "# THE COMBINED PACK (references/fusion-jobs/%s: %s%s, the levers %s on together; its own ORDER.txt) runs FIRST; this ORDER is the ablation, for the levers of a combination that fails." % (
             COMBINED_FOLDER, fusion.NAMESPACE, spec['name'], ', '.join(spec['levers'])))
     for ship in plan.get('ship', ()):
-        lines.insert(-1, "# THE SHIP PACK (references/fusion-jobs/%s: B0 G1 GX0 GX1 G2 SR for the traffic profile %s%s under the owner traffic waiver %s, PENDING until the owner approves; its own ORDER.txt) runs AFTER the combined "
-                         "window passes, not before it." % (SHIP_FOLDER, fusion.NAMESPACE, ship['name'], ship['waiver']['id']))
+        lines.insert(-1, "# THE SHIP PACK (references/fusion-jobs/%s: %s for the traffic profile %s%s under the owner traffic waiver %s, PENDING until the owner approves; its own ORDER.txt) runs AFTER the combined "
+                         "window passes, not before it." % (ship_folder(ship), ('the gates, the audited attach and the timed windows, generated whole by its own script' if ship.get('pack') else 'B0 G1 GX0 GX1 G2 SR'),
+                                                            fusion.NAMESPACE, ship['name'], ship['waiver']['id']))
     for item in plan.get('pack_include', ()):
         lines.insert(-1, "# FOLDED IN: %s* are the templates of references/%s (%s), renamed and on the one image; their read and decision rules are that folder's ORDER.txt. %s" % (
             item['prefix'], item['folder'], item['wp'], ' '.join(item['reason'].split())))
@@ -487,14 +516,14 @@ def generate(plan, folder=FOLDER):
         for row in mini:
             out['%s/%s.env' % (COMBINED_FOLDER, row['name'])] = render_env(row)
         out['%s/ORDER.txt' % COMBINED_FOLDER] = render_combined_order(mini, plan, spec)
-    by_id = dict((lever['id'], lever) for lever in plan['levers'])
-    combined = dict((spec['name'], spec) for spec in plan.get('combined', ()))
     for ship in plan.get('ship', ()):
-        shipped = dict(ship, env_flags=sorted(by_id[ident]['flag'] for ident in combined[ship['source']]['levers']))
+        if ship.get('pack'):
+            continue                                    # another generator owns that folder whole (make_ship4_jobs.py)
+        shipped = shipped_spec(plan, ship)
         mini = ship_rows(plan, shipped)
         for row in mini:
-            out['%s/%s.env' % (SHIP_FOLDER, row['name'])] = render_ship_env(row)
-        out['%s/ORDER.txt' % SHIP_FOLDER] = render_ship_order(mini, plan, ship)
+            out['%s/%s.env' % (ship_folder(ship), row['name'])] = render_ship_env(row, ship_image(ship))
+        out['%s/ORDER.txt' % ship_folder(ship)] = render_ship_order(mini, plan, ship)
     return out
 
 
@@ -502,7 +531,8 @@ def stale(folder, wanted):
     """[file names] that differ from `wanted` or are not in it (the pack's own files and the combined/ sub-folder, which the generator owns whole)."""
     found = dict((path.name, path.read_text(encoding='utf-8')) for path in Path(folder).glob('*') if path.is_file())
     found.update(('%s/%s' % (COMBINED_FOLDER, path.name), path.read_text(encoding='utf-8')) for path in (Path(folder) / COMBINED_FOLDER).glob('*') if path.is_file())
-    found.update(('%s/%s' % (SHIP_FOLDER, path.name), path.read_text(encoding='utf-8')) for path in (Path(folder) / SHIP_FOLDER).glob('*') if path.is_file())
+    for ship_dir in sorted(path for path in Path(folder).glob('%s*' % SHIP_FOLDER) if path.is_dir() and (path.name == SHIP_FOLDER or path.name.startswith(SHIP_FOLDER + '-'))):
+        found.update(('%s/%s' % (ship_dir.name, path.name), path.read_text(encoding='utf-8')) for path in ship_dir.glob('*') if path.is_file())
     names = sorted(set(found) | set(wanted))
     return [name for name in names if found.get(name) != wanted.get(name)]
 

@@ -53,6 +53,18 @@ ENGINE_GB_LEVERS = (0.41, 0.51)
 ENGINE_GB_LEVERS_AUDITED = ENGINE_GB_LEVERS
 # ER0: the P7p free reading per chip at eight parked engines (design 3.2: 4.95-5.11 GB audits off, 3.69-3.85 audited, minus a margin).
 LEDGER_FREE_FLOOR_GB = dict(plain=4.7, audited=3.6)
+# THE OCTO ARMS (QWEN_FAST_OCTO set: the third packed block of eight users x eight rows, on the lowered KV pool). The audited reading is MEASURED: 2.186 GB free per chip on all four chips after
+# the eight parked engines (card run 38129663805, the audited attach of the combined candidate; P7 after the attach 5.532 GB, the parked engines 3.336 GB = 0.418 each, the same as every other
+# stack). Against the 3.69-3.85 GB of the four-user stack's audited arm the octo block costs about 1.5 GB net: its packed block is 3.602 GB against 2.471 GB for each 4 x 16 block, and the
+# lower KV pool (16,500 blocks, 9.191 GB a chip) gives back about 1.9 GB of the 11.1 GB the 19,968-block pool takes. The audited floor is that reading less 4 percent (the margin of the
+# four-user floor over its measurement): 2.1 GB. The AUDITS-OFF reading is MEASURED too: 4.907 GB free per chip on all four chips (G1 of the combined candidate on the traffic profile, card run
+# 38131783025; P7 after the attach 8.254 GB, the parked engines 0.418 each again), so the audits of the octo stack hold 2.72 GB (4.907 against 2.186), not the 1.10-1.26 GB of the four-user stack,
+# and the four-user stack's audits-off floor (4.7 GB, 4 percent under its 4.95-5.11) holds for the octo traffic arm as it is (4.907 passes with 0.2 GB to spare): its floor is the same 4.7.
+# (The first version of this table estimated 3.2 GB from the four-user audits' cost; the measurement replaces it.) The traffic arm's need after its attach is the arrival's: prefill 0.6 + rebind 0.1
+# + a released single's rebuild 0.206 + reserve 0.268 + 0.3 stranded = about 1.47 GB; the runtime consumers after P7p (the first packed round 0.11, the quad's build 0.21, the octo draft's 0.37 GB)
+# leave the traffic arm about 4.2 GB and the measured audited one 1.498 GB.
+LEDGER_FREE_FLOOR_OCTO_GB = dict(plain=4.7, audited=2.1)
+OCTO_FLAG = 'QWEN_FAST_OCTO'
 SEATS_ENV = 'QWEN_FAST_M3_BLOCKS'
 PATH_LINE = re.compile(r'\[(PACKED|SEQUENTIAL|SEQ-PUBLISH)\] request=(\S+) ([^\n]*)')
 PATH_FIELD = re.compile(r'(?<![A-Za-z0-9_])(prefix|emitted|rows)=([0-9]+|n/a)(?![0-9A-Za-z_])')
@@ -100,14 +112,19 @@ def engine_growth(facts, engines):
     return dict((chip, round((after[chip][0] - before[chip][0]) / float(engines), 3)) for chip in sorted(set(before) & set(after)))
 
 
-def ledger_problems(facts, engines, audited, band=ENGINE_GB):
+def octo_on(env):
+    """Whether the profile serves the octo shape (QWEN_FAST_OCTO=live or alternate): its blocks hold more DRAM than the four-user stack's, so its free-DRAM floors are its own."""
+    return str((env or {}).get(OCTO_FLAG, '')) in ('live', 'alternate')
+
+
+def ledger_problems(facts, engines, audited, band=ENGINE_GB, octo=False):
     """ER0's numeric rules from the memory ledger: per chip, the P7 -> P7p allocation growth is `engines` engines' (the band's GB each, ENGINE_GB unless the caller
     passes a lever arm's engine_band) and the free reading after them is above the floor. [] when the ledger was not on (nothing to read)."""
     before, after = ledger_phase(facts, 'P7'), ledger_phase(facts, 'P7p')
     if not before or not after:
         return []
     problems = []
-    floor = LEDGER_FREE_FLOOR_GB['audited' if audited else 'plain']
+    floor = (LEDGER_FREE_FLOOR_OCTO_GB if octo else LEDGER_FREE_FLOOR_GB)['audited' if audited else 'plain']
     for chip in sorted(set(before) & set(after)):
         grown = after[chip][0] - before[chip][0]
         low = band[0] * engines
@@ -121,8 +138,8 @@ def ledger_problems(facts, engines, audited, band=ENGINE_GB):
                                 % (chip, engines, grown, '%.2f-%.2f GB' % (low, high) if high is not None else 'floor of %.2f GB' % low,
                                    '%.2f-%.2f' % band if band[1] is not None else 'at least %.2f' % band[0], ENGINE_GB[0], ENGINE_GB[1]))
         if engines == 8 and after[chip][1] < floor:
-            problems.append('chip %d: %.3f GB free after the parked engines, under the %.1f GB floor of the %s arm' % (
-                chip, after[chip][1], floor, 'audited' if audited else 'audits-off'))
+            problems.append('chip %d: %.3f GB free after the parked engines, under the %.1f GB floor of the %s%s arm' % (
+                chip, after[chip][1], floor, 'octo ' if octo else '', 'audited' if audited else 'audits-off'))
     return problems
 
 
@@ -169,7 +186,7 @@ def judge(env, text, smoke=None, levers=(), lever_audits=()):
     if facts['warm'] and not any(value > 0 for value in facts['prewarm']):
         problems.append('no publish prewarm with count > 0 (%s): the first request after a restart would compile the publication programs' % (
             'skipped at history_rows=%s' % facts['prewarm_skipped'] if facts['prewarm_skipped'] else 'no prewarm line'))
-    problems += ledger_problems(facts, count, audit or bool(lever_audits), engine_band(levers, lever_audits))
+    problems += ledger_problems(facts, count, audit or bool(lever_audits), engine_band(levers, lever_audits), octo=octo_on(env))
     if levers or lever_audits:
         summary['fusion_levers'] = len(levers) + len(lever_audits)
         summary['engine_gb'] = engine_growth(facts, count)

@@ -1068,7 +1068,8 @@ class SchedulerParityTests(unittest.TestCase):
                 with graft_fakes.Quiet():
                     model.prefill(data.req_id, scheduler.requests[data.req_id].all_token_ids, data.num_computed_tokens)
             scheduler.finish(request)
-        stats = dict(registry.stats)
+        # The counters the parent kept: the store policies' and the telemetry's are fed by this graft's trim and not by the parent's.
+        stats = {name: registry.stats[name] for name in prefix_registry.LEGACY_STAT_NAMES}
         for name in ('capture_ms', 'restore_ms'):
             stats.pop(name)
         # The turn telemetry (qwen_prefix_registry.TurnMemory, docs/tp4-exact-resume.md 5.3) counts in the current graft's trim and

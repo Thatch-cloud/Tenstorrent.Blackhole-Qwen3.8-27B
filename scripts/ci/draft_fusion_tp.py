@@ -102,6 +102,7 @@ WORKER_CAP = 110                    # most cores any launch of these levers uses
 AUDIT_CALLS = 10                    # calls audited per (lever, site, rows): five layers x (attention, MLP) at the quad
 _LOGGED = set()
 _AUDITED = {}
+_SHAPE = [None]                     # the draft pass being built ('octo' while octo_draft_tp's pass is; None for the pairs and quads): part of the audit budget's key
 STATS = {'reduce': 0, 'tail': 0, 'gateup1': 0, 'mmgrid': 0, 'fallback': 0}
 
 
@@ -304,7 +305,7 @@ def track(operations):
     which looks these up on the ttnn module at call time."""
     target = _base(operations)
     begin, end = getattr(target, 'begin_trace_capture', None), getattr(target, 'end_trace_capture', None)
-    if begin is None or end is None or getattr(begin, 'tracked_by_wp6', False):
+    if begin is None or end is None or 'wp6' in getattr(begin, 'capture_trackers', ()):
         return
 
     def begin_capture(*args, **options):
@@ -318,6 +319,11 @@ def track(operations):
         finally:
             _CAPTURE['depth'] = max(0, _CAPTURE['depth'] - 1)
 
+    # every tracker (this module's and the other fusion package's: draft_fusion_tp / grid13_tp each wrap the same two functions) lists itself and the trackers beneath it on its wrapper, so
+    # that either one finds its own wrapper ANYWHERE in the chain. Looking only at the top wrapper's own marker made the two re-wrap each other on every audit call (a chain that grew by one
+    # layer per alternation until begin_trace_capture raised RecursionError: card run 38129663805, the pair and octo draft builds mid-serving).
+    begin_capture.capture_trackers = tuple(getattr(begin, 'capture_trackers', ())) + ('wp6',)
+    end_capture.capture_trackers = tuple(getattr(end, 'capture_trackers', ())) + ('wp6',)
     begin_capture.tracked_by_wp6 = True
     end_capture.tracked_by_wp6 = True
     target.begin_trace_capture = begin_capture
@@ -346,7 +352,7 @@ def audit_begin(operations, mesh, lever, site, rows):
     if in_capture():
         skipped(lever, site, rows)
         return False
-    key = (lever, site, rows)
+    key = (lever, site, rows, _SHAPE[0])
     if _AUDITED.get(key, 0) >= AUDIT_CALLS:
         return False
     try:
@@ -362,13 +368,22 @@ def audit_begin(operations, mesh, lever, site, rows):
 
 def audited_total(lever):
     """How many calls of `lever` have been audited so far (the n of the 'audit <n> exact=True' line)."""
-    return sum(count for (name, _, _), count in _AUDITED.items() if name == lever)
+    return sum(count for key, count in _AUDITED.items() if key[0] == lever)
+
+
+def set_shape(tag):
+    """The pass the caller is building (octo_draft_tp's `_execute` says 'octo'): the audit budget is per (lever, site, rows, pass), so the octo pass - 64 rows like the quads - is audited
+    in its own right instead of finding the budget the two quads' warm passes spent (tp4/octo-3). Returns the previous tag; the line texts are unchanged."""
+    previous = _SHAPE[0]
+    _SHAPE[0] = tag
+    return previous
 
 
 def reset():
     """Forget the logged lines, the audit counters and the statistics (tests only)."""
     _LOGGED.clear()
     _AUDITED.clear()
+    _SHAPE[0] = None
     _CAPTURE['depth'] = 0
     for key in STATS:
         STATS[key] = 0

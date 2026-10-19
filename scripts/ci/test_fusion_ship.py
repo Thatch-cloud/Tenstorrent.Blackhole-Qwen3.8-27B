@@ -31,6 +31,7 @@ import c2_serving_job as job  # noqa: E402
 import c2_smoke_check  # noqa: E402
 import make_fusion_jobs as jobs_gen  # noqa: E402
 import make_fusion_profiles as fusion  # noqa: E402
+import make_prefix_tier_profiles as tier_ships  # noqa: E402
 import parked_compare  # noqa: E402
 import parked_judge  # noqa: E402
 import serving_c2_contract as contract  # noqa: E402
@@ -91,14 +92,15 @@ class ProfileTests(unittest.TestCase):
     def test_the_waiver_is_well_formed_names_the_four_levers_and_is_pending_or_approved(self):
         waiver = PROFILES[SHIP][contract.TRAFFIC_WAIVER]
         self.assertEqual(contract.traffic_waiver_problems(dict(PROFILES[SHIP], name=SHIP)), [])
-        self.assertEqual(waiver['levers'], contract.WAIVABLE_LEVERS)
+        # the four levers of the production waiver (tp4/octo-3 added the octo levers to the contract's waivable table; they belong to the octo ship candidates' waivers)
+        self.assertEqual(waiver['levers'], {key: value for key, value in contract.WAIVABLE_LEVERS.items() if not key.startswith('QWEN_FAST_OCTO')})
         self.assertEqual(waiver['levers'], PROFILES[PARENT][contract.TRAFFIC_WAIVER]['levers'])
         self.assertNotEqual(waiver['id'], PROFILES[PARENT][contract.TRAFFIC_WAIVER]['id'])
         self.assertTrue(waiver['decision'].startswith(('PENDING', 'APPROVED')), waiver['decision'])
         self.assertEqual(contract.traffic_waiver_pending(dict(PROFILES[SHIP], name=SHIP)), waiver['decision'].startswith('PENDING'))
         self.assertFalse(contract.traffic_waiver_pending(dict(PROFILES[PARENT], name=PARENT)), 'the production profile stays approved')
         self.assertTrue(PROFILES[PARENT][contract.TRAFFIC_WAIVER]['decision'].startswith('APPROVED'))
-        self.assertEqual(sorted(name for name, body in PROFILES.items() if contract.TRAFFIC_WAIVER in body), sorted([fusion.NAMESPACE + 'traffic', PARENT]))
+        self.assertEqual(sorted(name for name, body in PROFILES.items() if contract.TRAFFIC_WAIVER in body), sorted(list(fusion.ship_names()) + [PARENT] + list(tier_ships.ship_names())))   # (the host KV tier's candidate: test_prefix_tier_profiles; the second ship candidate: test_oneq_ship; the octo ones: test_octo3_ship)
         self.assertGreaterEqual(len(waiver['evidence']), 5)
         self.assertEqual(waiver['decision'], SPEC['waiver']['decision'])
 
@@ -164,7 +166,7 @@ class ApprovalTests(unittest.TestCase):
     def test_approve_ship_changes_the_decision_sentence_and_nothing_else(self):
         directory = self.copy_manifests()
         before = {path.name: path.read_text(encoding='utf-8') for path in directory.glob('*.json')}
-        was = fusion.approve_ship('APPROVED by the owner 2026-10-11 (remote control): ship the op-fusion levers', directory)
+        was = fusion.approve_ship('APPROVED by the owner 2026-10-11 (remote control): ship the op-fusion levers', directory, 'traffic')
         self.assertEqual(was, SPEC['waiver']['decision'])
         after = {path.name: path.read_text(encoding='utf-8') for path in directory.glob('*.json')}
         self.assertEqual([name for name in after if after[name] != before[name]], ['WP0.json'])
@@ -184,19 +186,19 @@ class ApprovalTests(unittest.TestCase):
         directory = self.copy_manifests()
         for sentence in ('yes', 'The owner approved', '', 'APPROVED see ' + 'sha256' + ':abcd', 'APPROVED by ' + 'me' + '@' + 'there', 'APPROVED in /' + 'home' + '/x', 'APPROVED at 192' + '.168.1.1'):
             with self.subTest(sentence=sentence), self.assertRaises(fusion.ManifestError):
-                fusion.approve_ship(sentence, directory)
+                fusion.approve_ship(sentence, directory, 'traffic')
         self.assertEqual({path.name: path.read_text(encoding='utf-8') for path in directory.glob('*.json')},
                          {path.name: path.read_text(encoding='utf-8') for path in fusion.MANIFESTS.glob('*.json')})
 
     def test_it_reverts_with_pending_and_refuses_a_manifest_it_cannot_rewrite_exactly(self):
         directory = self.copy_manifests()
-        fusion.approve_ship('APPROVED by the owner 2026-10-11: ok', directory)
-        fusion.approve_ship(SPEC['waiver']['decision'], directory)
+        fusion.approve_ship('APPROVED by the owner 2026-10-11: ok', directory, 'traffic')
+        fusion.approve_ship(SPEC['waiver']['decision'], directory, 'traffic')
         self.assertEqual((directory / 'WP0.json').read_text(encoding='utf-8'), (fusion.MANIFESTS / 'WP0.json').read_text(encoding='utf-8'))
         text = (directory / 'WP0.json').read_text(encoding='utf-8')
         (directory / 'WP0.json').write_text(text.replace('\n ', '\n   ', 1), encoding='utf-8')
         with self.assertRaises(fusion.ManifestError):
-            fusion.approve_ship('APPROVED by the owner: ok', directory)
+            fusion.approve_ship('APPROVED by the owner: ok', directory, 'traffic')
 
     def test_the_command_line_flips_the_decision_in_a_scratch_copy_and_regenerates_the_profile(self):
         directory = self.copy_manifests()
@@ -212,7 +214,7 @@ class ApprovalTests(unittest.TestCase):
                                                'cpu': Path(tempfile.mkdtemp()) / 'cpu.yml', 'addresses': Path(tempfile.mkdtemp()) / 'addresses.py'}):
             for name in ('smoke', 'overlay', 'cpu', 'addresses'):
                 self.addCleanup(shutil.rmtree, str(fusion.PATHS[name].parent), True)
-            self.assertEqual(fusion.main(['--approve-ship', 'APPROVED by the owner 2026-10-11: ok', '--manifests', str(directory)]), 0)
+            self.assertEqual(fusion.main(['--approve-ship', 'APPROVED by the owner 2026-10-11: ok', '--ship', 'traffic', '--manifests', str(directory)]), 0)
         data = json.loads(profiles.read_text(encoding='utf-8'))
         self.assertTrue(data['profiles'][SHIP][contract.TRAFFIC_WAIVER]['decision'].startswith('APPROVED'))
         self.assertEqual(PROFILES_PATH.read_text(encoding='utf-8'), checked_in, 'the checked-in profile was not touched')

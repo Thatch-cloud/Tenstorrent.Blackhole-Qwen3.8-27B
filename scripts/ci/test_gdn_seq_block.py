@@ -1815,13 +1815,14 @@ class PackedVerifierFlagTests(test_padded_probe.ProbeFixture):
         source = (HERE / 'packed_verifier.py').read_text(encoding='utf-8')
         self.assertIn('import gdn_seq_block\n', source)
         self.assertIn('        self.seq_block_audit = gdn_seq_block.audit_active()\n', source)
+        # (tp4/octo-3: the four host read-back audits read the sampled round number, audit_round_number, which is self.rounds + 1 while QWEN_FAST_AUDIT_FIRST / _EVERY are unset)
         windows = source.index('verify_trace_t2.audit_round(self.operations, self.fixture.retained.records, '
-                               'self.rounds + 1)')
+                               'audit_round_number)')
         call = source.index('gdn_seq_block.audit_round(self.operations, self.fixture.retained.records, '
                             'self.seq_block_audit,')
         self.assertLess(windows, call)
         self.assertLess(call, source.index('predictions = [host[slice(*segment_rows(self.shape, segment))]'))
-        self.assertIn("if getattr(self, 'seq_block_audit', ()):", source[windows:call])
+        self.assertIn("if getattr(self, 'seq_block_audit', ()) and audit_round_number is not None:", source[windows:call])
 
 
 class GateWiringTests(unittest.TestCase):

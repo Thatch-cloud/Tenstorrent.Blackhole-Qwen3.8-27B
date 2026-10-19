@@ -1066,6 +1066,25 @@ class SmokeTests(unittest.TestCase):
         only_mismatch = '\n'.join([self.ENGAGED % 1, self.CALL % 1, mismatch])
         self.assertEqual(len(c2_smoke_check.sdpa_multi_problems(env_, only_mismatch)), 2, 'a mismatch line is not a passing line')
 
+    def test_an_arm_that_ran_one_request_at_a_time_may_drop_the_passing_audit_line_and_nothing_else(self):
+        """audit_optional (c2_prefix_gate.sdpa_audit_optional): the multi launch compares only in a packed round of two or more users."""
+        env_ = {FLAG: 'multi', AUDIT: '1'}
+        silent = self.text(1, passes=0)
+        self.assertEqual(c2_smoke_check.sdpa_multi_problems(env_, silent, audit_optional=True), [])
+        self.assertEqual(len(c2_smoke_check.sdpa_multi_problems(env_, silent)), 1, 'asked by default: the rule is unchanged where the multi launch runs')
+        self.assertEqual(len(c2_smoke_check.sdpa_multi_problems(env_, silent, audit_optional=False)), 1)
+        mismatch = '[PINDIAG] tp4 sdpa audit MISMATCH round=3 users=4 differing=2 chip 0 layer 3: 2 of 262144 words differ'
+        found = c2_smoke_check.sdpa_multi_problems(env_, self.text(1, passes=0, extra=[mismatch]), audit_optional=True)
+        self.assertEqual(len(found), 1, 'a line that WAS logged is still judged')
+        self.assertIn('audit found a difference', found[0])
+        self.assertEqual(len(c2_smoke_check.sdpa_multi_problems(env_, self.text(1, passes=0, extra=['[PINDIAG] tp4 sdpa audit 9 exact=False users=4']),
+                                                                audit_optional=True)), 1)
+        quiet = c2_smoke_check.sdpa_multi_problems(env_, 'nothing', audit_optional=True)
+        self.assertEqual(len(quiet), 2, 'the engaged and the call lines are still required')
+        self.assertFalse(any('nothing was compared' in problem for problem in quiet))
+        self.assertEqual(c2_smoke_check.lever_engagement_problems(env_, silent, sdpa_audit_optional=True), [])
+        self.assertTrue(any('nothing was compared' in problem for problem in c2_smoke_check.lever_engagement_problems(env_, silent)))
+
     def test_other_profiles_are_not_judged(self):
         for env_ in ({}, None, {FLAG: 'served'}, {FLAG: 'grid8x4'}, {FLAG: 'off'}):
             self.assertEqual(c2_smoke_check.sdpa_multi_problems(env_, 'nothing'), [], env_)
@@ -1126,12 +1145,14 @@ class ProfileTests(unittest.TestCase):
     def test_no_other_profile_carries_the_audit_flag_and_the_default_is_untouched(self):
         from test_tp4_w2ln_profiles import SDPA_AUDIT as WINDOW_AUDITED     # the combined window's audit carriers (test_tp4_w2ln_profiles)
         import make_fusion_profiles
+        from make_prefix_tier_profiles import twin_names as tier_twins      # the host KV tier's audited twin of the ship profile: the multi launch's own audit beside the gate's extent audit (test_prefix_tier_profiles)
+        from make_ship4_profiles import twin_names as ship4_twins            # tp4/ship-4: its audited twin carries the tier's audit env, this flag included (test_ship4_profiles)
 
         # (the op-fusion programme's twins on another parent than the production profile, WP6's singles audit on the audited lean twin, inherit its audits: test_fusion_wp)
         inheriting = tuple(twin['name'] for twin in make_fusion_profiles.profile_twins(make_fusion_profiles.normalise(make_fusion_profiles.read_manifests()))
                            if twin['parent'] != make_fusion_profiles.PARENT)
         for name, body in PROFILES.items():
-            if name not in (AUDITED, 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1-audit') + tuple(WINDOW_AUDITED) + inheriting:       # tp4/w2: the audited wave-2 arm carries it too (test_tp4_w2)
+            if name not in (AUDITED, 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1-audit') + tuple(WINDOW_AUDITED) + inheriting + tuple(tier_twins()) + tuple(ship4_twins()):       # tp4/w2: the audited wave-2 arm carries it too (test_tp4_w2)
                 self.assertNotIn(AUDIT, body.get('env', {}), name)
         self.assertEqual(json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))['default'], 'c2-packed-tp4')
 

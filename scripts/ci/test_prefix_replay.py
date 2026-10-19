@@ -157,6 +157,7 @@ class FakeRequest(object):
         self.prompt_token_ids = list(prompt_ids)
         self.tokens = list(prompt_ids)
         self.output_ids, self.emitted = [], []
+        self.chunks = []        # each emitted token's offset from the request's creation, as StreamState.chunk_times
         self.cache_salt = salt
         self.num_prompt_tokens = len(prompt_ids)
         self.num_preemptions = 0
@@ -419,8 +420,19 @@ class FakeEngine(object):
             return
         self.say('[PINDIAG] prefix: ' + (message % values if values else message))
 
+    # Hooks a subclass overrides to model more of the engine (test_prefix_tier_gate's host KV tier): the pool, the registry, and what is attached once the
+    # graft is built.
+    def make_pool(self, count):
+        return FakePool(count)
+
+    def make_registry(self):
+        return graft.PrefixRegistry(environ=dict(QWEN_PREFIX_STORE_GIB=str(self.store_gib)))
+
+    def attach_extras(self):
+        pass
+
     def boot(self):
-        self.pool = FakePool(self.num_blocks)
+        self.pool = self.make_pool(self.num_blocks)
         self.single = SimpleNamespace(num_cached_block={}, req_to_blocks={})
         self.coordinator = FakeCoordinator(self.pool, self.single)
         self.manager = FakeManager(self.pool, self.coordinator)
@@ -428,7 +440,7 @@ class FakeEngine(object):
             # DFlash is EAGLE-like to vLLM: the coordinator flags group 0 and a hit loses its last block.
             self.coordinator.eagle_group_ids = {0}
             self.manager.drop_last = True
-        self.registry = graft.PrefixRegistry(environ=dict(QWEN_PREFIX_STORE_GIB=str(self.store_gib)))
+        self.registry = self.make_registry()
         # The served model graft declares its mid-loop captures at warmup (qwen_prefix_model_patch).
         self.registry.enable_mid_loop_capture()
         self.graft = graft.SchedulerGraft(SimpleNamespace(kv_cache_manager=self.manager), self.registry,
@@ -442,6 +454,7 @@ class FakeEngine(object):
                                    _maybe_evict_cached_block=self.pool._maybe_evict_cached_block)
         self.graft.get_block_hash = lambda key: key
         self.pool.evict = self.graft.evict
+        self.attach_extras()
         self.waiting, self.running = deque(), []
         self.preemptions = 0
         self.dropped_hits = 0
@@ -456,6 +469,9 @@ class FakeEngine(object):
         profile = self.profile
         self.say('(APIServer pid=1) [QWEN-C2] profile %s: vLLM argv %s' % (
             self.name, json.dumps(marker_fixture.launched_argv(profile))))
+        # the API server arms the tool-call whitespace fix for every profile and logs it (c2_toolcall_whitespace; toolcall_whitespace_smoke reads the two lines of a booted API server)
+        self.say('(APIServer pid=1) [QWEN-C2] profile %s: toolcall whitespace armed: vllm.parser.qwen3._qwen3_arg_converter keeps edge whitespace' % self.name)
+        self.say('(APIServer pid=1) INFO toolcall whitespace: installed on vllm.parser.qwen3._qwen3_arg_converter: a tool argument keeps its edge whitespace')
         if self.prefix:
             self.say('INFO platform.py:83] Chunked prefill is not supported for `model_type=qwen3_5`; disabling it.')
         self.say('INFO platform.py:1153] Automatic prefix caching is %s' % ('enabled' if self.prefix else 'disabled'))
@@ -855,6 +871,7 @@ class FakeEngine(object):
             token, text = token + 100 * shift, text + 'b%d' % shift
         request.append(token)
         request.emitted.append(text)
+        request.chunks.append(round(time.time() - request.started, 4))
         if index == 0:
             request.first_at = time.time()
             if request.on_first is not None:
@@ -916,7 +933,7 @@ class FakeEngine(object):
                     token_ids=list(request.output_ids) if emitted or finish else None, prompt_ids=prompt,
                     prompt_sha=judge.token_sha(prompt) if prompt is not None else None,
                     prompt_tokens=len(prompt) if prompt is not None else None, completion_tokens=emitted,
-                    finish=finish, error=None,
+                    finish=finish, error=None, chunk_times=list(request.chunks),
                     ttft_s=round(request.first_at - request.started, 4) if request.first_at is not None else None,
                     wall_s=round(time.time() - request.started, 4), status=200, aborted=aborted, ok=aborted is None)
 
@@ -979,6 +996,11 @@ class FakeContainer(object):
 
     def exec_shell(self, script, timeout=60):
         self.scripts.append(script)
+        tier_switch = getattr(self.engine, 'tier_switch', None)
+        if tier_switch is not None and replay.TIER_DRILL_OFF_PATH in script:
+            # The host tier's own kill switch (a tier engine models it): written by the gate's echo, removed by its rm.
+            tier_switch('rm -f' not in script)
+            return 0, ''
         if ('echo %s >' % replay.KILL_SWITCH_OWNER) in script:
             self.engine.kill_switch(True)
         elif 'rm -f' in script:
