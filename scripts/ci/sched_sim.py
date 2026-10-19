@@ -301,9 +301,13 @@ def run(env, workload, seeds=4, hours=2.0):
 # The calibration and the comparison
 
 CALIBRATED = Workload(agents=10, think_s=10.0, prefill_scale=0.75, answer=(350.0, 910.0), cold_probability=0.03)
-# What QWEN_FAST_ADMISSION_LEAN removes from a returning turn's stall (ms): the backstop's reading (about 70), the slot adoption's conv-slice readback (about 145) and the
-# 'dram after engine' line's reading (about 70). The audited card run's A, B, C, D segments are in docs/tp4-sched-1.md section 4; 285 is their sum.
-LEAN_SAVES_MS = 285.0
+# What QWEN_FAST_ADMISSION_LEAN removes from a returning turn's stall (ms), from the segments of the audited card run (docs/tp4-sched-1.md section 4): the backstop's reading
+# (about 70), the slot adoption's conv-slice readback (30 to 145: the class of rebinds that compiled no programs to the class that compiled three), the 'dram after engine' line's
+# reading (about 66) and the memory ledger's op=rebind bracket (about 62 before, 65 after). The class of rebinds that production's 541 ms resembles is the second: 410. The first, 290.
+LEAN_SAVES_MS = 410.0
+LEAN_SAVES_LOW_MS = 290.0
+# QWEN_FAST_ADMISSION_DIAG_TRIM=1, an existing flag the ship-4 profile does not set: the ledger's two prefill points (after the route line, about 100 ms in the audited log) once.
+DIAG_TRIM_SAVES_MS = 100.0
 # The quiet hours: three agents, a cold long prompt now and then (a third of the turns), almost nobody decoding when it arrives.
 QUIET = Workload(agents=3, think_s=25.0, prefill_scale=0.75, answer=(400.0, 1040.0), cold_probability=0.35, cold_tokens=(65536, 253952), tail=(2500.0, 4500.0))
 LONE = Workload(agents=2, think_s=40.0, prefill_scale=0.75, answer=(500.0, 1300.0), cold_probability=0.25, cold_tokens=(65536, 200000), tail=(2500.0, 4500.0))
@@ -314,8 +318,9 @@ def variants():
     return [
         ('production', 'production (ship-4 pacing)', {}, {}),
         ('production', 'LEAN admission (-%d ms a returning turn)' % LEAN_SAVES_MS, {}, dict(lean_saves_ms=LEAN_SAVES_MS)),
-        ('production', 'LEAN admission, the low estimate (-150 ms)', {}, dict(lean_saves_ms=150.0)),
-        ('production', 'LEAN admission, the high estimate (-330 ms)', {}, dict(lean_saves_ms=330.0)),
+        ('production', 'LEAN admission, the low estimate (-%d ms)' % LEAN_SAVES_LOW_MS, {}, dict(lean_saves_ms=LEAN_SAVES_LOW_MS)),
+        ('production', 'DIAG_TRIM (existing flag; -%d ms)' % DIAG_TRIM_SAVES_MS, {}, dict(lean_saves_ms=DIAG_TRIM_SAVES_MS)),
+        ('production', 'LEAN + DIAG_TRIM (-%d ms)' % (LEAN_SAVES_MS + DIAG_TRIM_SAVES_MS), {}, dict(lean_saves_ms=LEAN_SAVES_MS + DIAG_TRIM_SAVES_MS)),
         ('production', 'owed cap 1500 ms', {'QWEN_FAST_LEVERN_OWED_CAP_MS': '1500'}, {}),
         ('production', 'short share 0.80', {'QWEN_FAST_LEVERN_SHORT_SHARE': '0.8'}, {}),
         ('production', 'short share 0.65', {'QWEN_FAST_LEVERN_SHORT_SHARE': '0.65'}, {}),

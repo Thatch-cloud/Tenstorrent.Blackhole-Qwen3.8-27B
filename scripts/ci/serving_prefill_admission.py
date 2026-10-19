@@ -552,13 +552,14 @@ def dram_reading(pool):
     return reading, None
 
 
-# QWEN_FAST_ADMISSION_LEAN (default off; gate only; docs/tp4-sched-1.md section 4): the three admission costs that are not the rebind. A returning turn's engine
+# QWEN_FAST_ADMISSION_LEAN (default off; gate only; docs/tp4-sched-1.md section 4): the four admission costs that are not the rebind. A returning turn's engine
 # build, measured 541 ms (p50) in production, is a parked rebind of 188 ms plus about 350 ms of host-side accounting around it, all of it with every seat stopped
 # (the engine is synchronous): the post-prefill DRAM backstop's allocator reading (about 70 ms: four DRAM views and four trace views), the GDN slot adoption's conv-slice
-# readback (about 115-185 ms, 48 layers, a geometry proof that is the same for every admission of a slot) and the 'dram after engine' log line (another reading, about
-# 70 ms). With the flag on: the readback is taken at each slot's first adoption only (memory_ledger.trim_enabled's rule), the line is off for a request rebound onto a
-# parked engine, and the backstop REUSES the reading this very admission's DRAM hold took a few seconds earlier when that reading leaves room by a wide margin
-# (reusable_reading). Unset or 0, every call is what it was.
+# readback (30 to 145 ms, 48 layers, a geometry proof that is the same for every admission of a slot), the memory ledger's op=rebind bracket (a reading before the rebind and
+# one after, about 62 and 65 ms; the image turns the ledger on and nothing judges the bracket per rebind) and, after the 'sticky engine built' line, the 'dram after engine' log
+# line (another reading, about 66 ms). With the flag on: the readback is taken at each slot's first adoption only (memory_ledger.trim_enabled's rule), so is the bracket
+# (serving_request_factory.lean_bracket_skipped), the line is off for a request rebound onto a parked engine, and the backstop REUSES the reading this very admission's DRAM
+# hold took a few seconds earlier when that reading leaves room by a wide margin (reusable_reading). Unset or 0, every call is what it was.
 LEAN_FLAG = 'QWEN_FAST_ADMISSION_LEAN'
 # What a reused reading is discounted by: the prefill between the hold and the backstop persists tens of MB a chip (the window snapshots; 27 MB seen in the audited
 # card run: 28.774 -> 28.801 GB allocated) and can only split the largest free block, at worst in half. The reading must fit the backstop's need after BOTH.

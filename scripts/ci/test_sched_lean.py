@@ -1,9 +1,10 @@
 """QWEN_FAST_ADMISSION_LEAN (docs/tp4-sched-1.md section 4): the admission costs that are not the rebind.
 
 A returning turn is a parked-engine rebind (188 ms) wrapped in about 350 ms of host-side accounting with every seat stopped: the post-prefill DRAM
-backstop's allocator reading, the GDN slot adoption's conv-slice readback and the 'dram after engine' line. The flag takes the readback at each slot's first
-adoption only (the trim's rule), drops the line for a rebound request, and lets the backstop reuse the reading the same admission's DRAM hold took when it
-leaves room by a wide margin. Unset, every call is what it always was.
+backstop's allocator reading, the GDN slot adoption's conv-slice readback, the 'dram after engine' line and the ledger's rebind bracket. The flag takes the readback at each slot's first
+adoption only (the trim's rule), drops the line for a rebound request, leaves the memory ledger's op=rebind bracket (a reading before and after, some 60 ms each) out
+for every rebind of a slot after its first, and lets the backstop reuse the reading the same admission's DRAM hold took when it leaves room by a wide margin. Unset, every
+call is what it always was.
 
     nice python3 -B -m unittest test_sched_lean      (from scripts/ci)
 """
@@ -48,9 +49,11 @@ class Fresh(unittest.TestCase):
     def setUp(self):
         admission.forget_readings()
         serving_request_factory._ADOPT_VERIFIED.clear()
+        serving_request_factory._REBIND_BRACKETED.clear()
         memory_ledger.reset_admission_diag()
         self.addCleanup(admission.forget_readings)
         self.addCleanup(serving_request_factory._ADOPT_VERIFIED.clear)
+        self.addCleanup(serving_request_factory._REBIND_BRACKETED.clear)
         self.addCleanup(memory_ledger.reset_admission_diag)
 
 
@@ -341,6 +344,48 @@ class RuntimeLineTests(Fresh):
         built = SimpleNamespace(engine=object(), close=Mock())
         self.assertEqual(self.lines(True, rebound), [])
         self.assertEqual(len(self.lines(True, built)), 1)
+
+
+class BracketTests(Fresh):
+    """The memory ledger's op=rebind bracket (rebind_parked): every rebind brackets it as it always did; under the flag a slot's first rebind does and the later ones do not."""
+
+    def calls(self, on, names):
+        import test_parked_tp4_wiring as wiring
+
+        calls = []
+        with environ(on), wiring.World(environment=dict(wiring.PARKED, **(LEAN if on else {}))) as world:
+            engines = wiring.make_set(world)
+            engines.build()
+            with patch.object(memory_ledger, 'before', side_effect=lambda op, **kw: calls.append((op, kw['point'])) or 'token'), \
+                    patch.object(memory_ledger, 'after', side_effect=lambda token: calls.append(('after', token))):
+                for name in names:
+                    request = wiring.admit(world, engines, name, 300, 4)
+                    wiring.run_to_end(request)
+                    request.close(name)
+        return calls
+
+    def test_flag_off_every_rebind_is_bracketed(self):
+        calls = self.calls(False, ('first', 'second', 'third'))
+        self.assertEqual([call[0] for call in calls], ['rebind', 'after'] * 3)
+        self.assertEqual(serving_request_factory._REBIND_BRACKETED, set(), 'nothing is recorded without the flag')
+
+    def test_lean_the_first_rebind_of_a_slot_is_bracketed_and_the_later_ones_are_not(self):
+        calls = self.calls(True, ('first', 'second', 'third'))
+        self.assertEqual([call[0] for call in calls], ['rebind', 'after'])
+        self.assertEqual(calls[0][1], 'req=first slot=0')
+        self.assertEqual(serving_request_factory._REBIND_BRACKETED, {0})
+
+    def test_the_skip_is_per_slot_and_off_without_the_flag(self):
+        skipped = serving_request_factory.lean_bracket_skipped
+        with environ(True):
+            self.assertEqual([skipped(0), skipped(1), skipped(0), skipped(1), skipped(2)], [False, False, True, True, False])
+        serving_request_factory._REBIND_BRACKETED.clear()
+        with environ(False):
+            self.assertEqual([skipped(0), skipped(0)], [False, False])
+        self.assertEqual(serving_request_factory._REBIND_BRACKETED, set())
+        with environ(True, QWEN_FAST_ADMISSION_LEAN='0'):
+            self.assertFalse(skipped(0))
+            self.assertFalse(skipped(0))
 
 
 class SplitLineTests(Fresh):

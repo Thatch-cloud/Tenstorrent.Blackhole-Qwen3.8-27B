@@ -24,6 +24,7 @@ LEAN_PHASES = re.compile(r'\[PINDIAG\] admission lean rebind phases request=(\S+
 LEAN_ADOPT = re.compile(r'\[PINDIAG\] admission lean adopt request=(\S+) slot=(\d+) readback=([01]) ms=([\d.]+)')
 LEAN_REUSED = '[PINDIAG] admission lean backstop reused the admission reading'
 DRAM_AFTER = '[PINDIAG] dram after engine'
+REBIND_BRACKET = re.compile(r'\[MEMLEDGER\] before op=rebind point=.* chip0 ')
 BACKSTOP_READ = re.compile(r'\[PINDIAG\] dram backstop (?:refused|unavailable)')
 SPILL = re.compile(r'host tier spill blocks=(\d+) bytes=(\d+) ms=([\d.]+) held=(\d+)(?: batches=(\d+) lifted=(\d+))?')
 SPILL_SLOW = 'host tier spill slow'
@@ -48,7 +49,7 @@ def _fit(rows):
 
 def read(lines):
     steps, sticky, splits, adopts, spills, phases = [], [], [], [], [], []
-    reused = dram_lines = slow = complete = 0
+    reused = dram_lines = brackets = slow = complete = 0
     for line in lines:
         if 'lever N step' in line:
             match = STEP.search(line)
@@ -74,6 +75,8 @@ def read(lines):
             reused += 1
         elif DRAM_AFTER in line:
             dram_lines += 1
+        elif 'before op=rebind' in line and REBIND_BRACKET.search(line):
+            brackets += 1
         elif SPILL_SLOW in line:
             slow += 1
         elif SPILL_COMPLETE in line:
@@ -82,7 +85,7 @@ def read(lines):
             match = SPILL.search(line)
             if match:
                 spills.append((int(match.group(1)), float(match.group(3)), int(match.group(6) or 0), int(match.group(5) or 0)))
-    return dict(steps=steps, sticky=sticky, splits=splits, phases=phases, adopts=adopts, reused=reused, dram_lines=dram_lines, spills=spills, slow=slow, complete=complete)
+    return dict(steps=steps, sticky=sticky, splits=splits, phases=phases, adopts=adopts, reused=reused, dram_lines=dram_lines, brackets=brackets, spills=spills, slow=slow, complete=complete)
 
 
 def figures(found):
@@ -96,7 +99,7 @@ def figures(found):
     for index, name in enumerate(('fence', 'rezero', 'project', 'copy', 'history', 'engine')):
         out['phase_' + name + '_p50'] = _pct([row[index] for row in found['phases']], 0.5)
     out.update(adopts=len(found['adopts']), adopts_skipped=sum(1 for taken, _ in found['adopts'] if not taken), adopt_ms_p50=_pct([ms for _, ms in found['adopts']], 0.5),
-               backstop_reused=found['reused'], dram_lines=found['dram_lines'])
+               backstop_reused=found['reused'], dram_lines=found['dram_lines'], rebind_brackets=found['brackets'])
     # the scheduler: a step line's prev=<kind>:<ms> is the wall time of the step BEFORE it, so the step lines give the time of every step but the last
     steps = [(int(s[0]), s[1], int(s[2]), s[3], s[8], s[10], float(s[11]) if s[11] not in ('-', '') else 0.0, s) for s in found['steps']]
     prefill_ms = sum(ms for *_, kind, ms, _ in steps if kind == 'prefill')
@@ -151,6 +154,7 @@ ROWS = (
     ('slot adoptions with the readback skipped', 'adopts', 'adopts_skipped', None, 'of the adoptions logged'),
     ('backstop readings reused', 'backstop_reused', None, None, 'admissions'),
     ('"dram after engine" lines', 'dram_lines', None, None, 'lines'),
+    ('ledger op=rebind brackets', 'rebind_brackets', None, None, 'brackets'),
     ('prefill share of the wall time while a prefill is pending', 'step_lines', 'pending_prefill_share', None, 'share'),
     ('rounds after a returning turn beside decoders', 'shorts_beside_decoders', 'rounds_after_short_p50', 'rounds_after_short_max', 'rounds (p50 / max)'),
     ('longest stretch without a decode round', 'step_lines', 'longest_stretch_ms', None, 'ms'),

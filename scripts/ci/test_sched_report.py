@@ -37,6 +37,8 @@ def shared_log():
               '[PINDIAG] sticky engine built req=r0 ms=541.0 frontier=0 prompt=4088 kind=rebind', '[PINDIAG] sticky engine built req=r1 ms=330.0 frontier=0 prompt=4088 kind=rebind',
               '[PINDIAG] sticky engine built req=r9 ms=2400.0 frontier=0 prompt=4088 kind=build',
               '[PINDIAG] dram after engine r0: chip0 allocated=28.77GB',
+              '[MEMLEDGER] before op=rebind point=req=r0 slot=3 chip0 largest_free=4437.6MB free=4.597GB estimate=100.0MB',
+              '[MEMLEDGER] before op=rebind point=req=r0 slot=3 chip1 largest_free=4437.6MB free=4.597GB estimate=100.0MB',
               '[PINDIAG] prefix: host tier spill complete on cap_blocks=512 hard_max_blocks=4096 batch_blocks=512 warn_ms=1000',
               'host tier spill blocks=1 bytes=2228224 ms=4.3 held=1 batches=1 lifted=0', 'host tier spill blocks=32 bytes=71303168 ms=57.0 held=2 batches=1 lifted=0',
               'host tier spill blocks=256 bytes=570425344 ms=439.0 held=3 batches=1 lifted=0', 'host tier spill blocks=3905 bytes=8701214720 ms=6700.0 held=4 batches=8 lifted=3393',
@@ -56,7 +58,7 @@ class ReadTests(unittest.TestCase):
         self.assertEqual((values['splits'], values['split_a_p50'], values['split_c_p50']), (2, 210.0, 190.0))
         self.assertEqual((values['phase_project_p50'], values['phase_engine_p50'], values['phase_rezero_p50']), (120.0, 26.0, 9.0))
         self.assertEqual((values['adopts'], values['adopts_skipped']), (2, 1))
-        self.assertEqual((values['backstop_reused'], values['dram_lines']), (1, 1))
+        self.assertEqual((values['backstop_reused'], values['dram_lines'], values['rebind_brackets']), (1, 1, 1), 'one bracket a rebind: chip 0 carries it')
 
     def test_the_scheduler_sees_the_rounds_after_each_returning_turn_and_the_guard(self):
         values = self.values

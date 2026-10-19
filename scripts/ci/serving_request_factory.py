@@ -115,6 +115,22 @@ def lean_enabled(environ=None):
     return (os.environ if environ is None else environ).get(LEAN_FLAG) == '1'
 
 
+# QWEN_FAST_ADMISSION_LEAN: the parked slots whose rebind the memory ledger has bracketed once in this process (op=rebind, a reading before and one after, some 60 ms each
+# with every seat stopped; nothing judges them per rebind). Only read and written under the flag.
+_REBIND_BRACKETED = set()
+
+
+def lean_bracket_skipped(slot):
+    """Whether the ledger's op=rebind bracket is left out for a rebind onto parked slot `slot`: under QWEN_FAST_ADMISSION_LEAN=1, for every rebind of a slot after its first (the
+    bracket of the first one is the record; the DRAM hold and the backstop are the checks). Off, always False and nothing is recorded."""
+    if not lean_enabled():
+        return False
+    if slot in _REBIND_BRACKETED:
+        return True
+    _REBIND_BRACKETED.add(slot)
+    return False
+
+
 def extent_replay_enabled(environ=None):
     """QWEN_FAST_EXTENT_REPLAY: '1' on, unset or '0' off, anything else refused (ValueError)."""
     value = (os.environ if environ is None else environ).get(EXTENT_REPLAY_FLAG, '0')
@@ -441,7 +457,7 @@ def rebind_parked(parked, entry, *, model, pages, state, capture, prompt, seed, 
 
     components = parked.components
     token = None
-    if extent_memory:
+    if extent_memory and not lean_bracket_skipped(entry.index):
         import memory_ledger
 
         terms = parked.slot_terms(entry)
