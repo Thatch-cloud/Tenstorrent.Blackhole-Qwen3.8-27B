@@ -311,8 +311,10 @@ def prefill_tripwire(model, capture_factory, bridge_factory, environ=None):
                         dflash_prefill_window.window_programs(), position)
         return counted
 
-    def counted_capture(position, start=0):
-        capture = capture_factory(position, start)
+    def counted_capture(position, start=0, **keywords):
+        # Every keyword the lifecycle passes reaches the factory unchanged (exact resume P0 passes carry=: a wrapper that
+        # dropped it killed the engine at the first carried resume, s5 window A1 2026-10-19).
+        capture = capture_factory(position, start, **keywords)
         segment = getattr(capture, 'segment', None)
         if callable(segment):
             # An instance attribute: capture() and the lifecycle's continuations both enter it through self.segment.

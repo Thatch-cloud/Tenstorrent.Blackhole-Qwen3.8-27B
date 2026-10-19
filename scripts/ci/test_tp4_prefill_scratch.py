@@ -191,6 +191,40 @@ class Tripwire(unittest.TestCase):
         self.assertEqual(line.call_args.args, (serving_runtime.PREFILL_PROGRAMS_MARKER + '{}->{} window={} prompt={}',
                                                103, 113, 2, 8376))
 
+    def test_the_lifecycle_keywords_reach_the_factory(self):
+        # Exact resume P0: the lifecycle passes carry= to the capture factory; the four-card wrapper must hand it on (a
+        # wrapper that took only (position, start) raised TypeError at the first carried resume and the engine died).
+        cache, seen = [100], []
+        model = Model(cache=cache)
+
+        def capture_factory(position, start=0, carry=None):
+            seen.append((position, start, carry))
+            return Capture(position)
+
+        wrapped, _ = serving_runtime.prefill_tripwire(model, capture_factory, self.factories(cache)[1], FOUR)
+        carry = object()
+        with patch.object(serving_runtime, 'pindiag'):
+            wrapped(204011, start=114688, carry=carry)
+            wrapped(54, start=2048)
+            wrapped(8)
+        self.assertEqual(seen, [(204011, 114688, carry), (54, 2048, None), (8, 0, None)])
+
+    def test_the_wrapper_takes_every_keyword_the_lifecycle_passes(self):
+        import ast
+        import inspect
+        import serving_lifecycle
+
+        passed = set()
+        for node in ast.walk(ast.parse(inspect.getsource(serving_lifecycle))):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'capture_factory'):
+                passed.update(keyword.arg for keyword in node.keywords)
+        self.assertIn('carry', passed)
+        cache = [100]
+        wrapped, _ = serving_runtime.prefill_tripwire(Model(cache=cache), *self.factories(cache), FOUR)
+        parameters = inspect.signature(wrapped).parameters
+        accepts_any = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+        self.assertTrue(accepts_any or passed <= set(parameters), sorted(passed - set(parameters)))
+
     def test_a_prefill_that_is_never_bridged_is_counted(self):
         # The platform's max_tokens=1 warmup - the first prefill after the attach - and an instant EOS end at their first
         # token and never reach the bridge; a count taken at the bridge never sees them.
