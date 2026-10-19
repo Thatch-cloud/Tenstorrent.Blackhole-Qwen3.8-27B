@@ -258,6 +258,17 @@ QUOTA_HOST_CAP_GIB = 12
 QUOTA_HOST_FLOOR_GIB = 4
 
 
+SLICE_BLOCKS = 512
+SLICE_MS = 200
+# No slice of the restore may hold the engine longer than this (the log's max_slice_ms): a slice is a bounded step, and a second is already seven seat rounds.
+SLICE_LIMIT_MS = 1000.0
+
+
+def slice_env(profile):
+    """The sliced-restore env of the derived arm: the block cap and the time budget (the profile has the tier: not_applicable leaves the arm out of one that has not)."""
+    return {registry_names.ENV_TIER_RESTORE_SLICE: str(SLICE_BLOCKS), registry_names.ENV_TIER_RESTORE_SLICE_MS: str(SLICE_MS)}
+
+
 def quota_env(profile):
     """The tenant-quota env of the isolated arm: the device numbers always, the host's only on a profile that names the tier (a host quota without one refuses to start)."""
     env = {registry_names.ENV_QUOTA_DEVICE_CAP: str(QUOTA_DEVICE_CAP_TOKENS), registry_names.ENV_QUOTA_DEVICE_FLOOR: str(QUOTA_DEVICE_FLOOR_TOKENS)}
@@ -294,6 +305,8 @@ DERIVED = dict(
     # The per-tenant quotas (the tier-quota plan's isolated arm): the profile plus a device cap and floor and, when it has the host tier, the host's. The floor is above the
     # session of the protected tenant (prefix_replay.QUOTA_B_TOKENS), the cap well under the pool, so that the flooding tenant must recycle its own blocks.
     quota=lambda profile: dict(env=quota_env(profile)),
+    # The sliced restore (the tier-concurrent-sliced plans): the profile plus QWEN_PREFIX_TIER_RESTORE_SLICE and its time budget.
+    slice=lambda profile: dict(env=slice_env(profile)),
 )
 # (arm, scenario, which profile, derived changes, docker timeout seconds, strict oracle)
 PLAN_ARMS = dict(
@@ -334,6 +347,10 @@ PLAN_ARMS = dict(
        'tier-quota': (('quota-control', 'tier_quota', 'prefix', None, 9000, False),
                       ('quota-isolated', 'tier_quota', 'prefix', 'quota', 9000, False)),
        'tier-concurrent': (('tier-concurrent', 'tier_concurrent', 'prefix', None, 7200, False),),
+       # The same two plans with the sliced restore on (DERIVED['slice']): the returning session's blocks come back a bounded slice per engine step (docs/prefix-store-hygiene.md
+       # "Sliced restore"). They need a profile with the tier. The control of the timed pair is tier-concurrent-timed on the same profile.
+       'tier-concurrent-sliced': (('tier-concurrent-sliced', 'tier_concurrent', 'prefix', 'slice', 7200, False),),
+       'tier-concurrent-timed-sliced': (('tier-concurrent-timed-sliced', 'tier_concurrent_timed', 'prefix', 'slice', 7200, False),),
        'tier-concurrent-timed': (('tier-concurrent-timed', 'tier_concurrent_timed', 'prefix', None, 7200, False),),
        # Exact resume P0 (docs/tp4-exact-resume.md 5.2; prefix_replay.scenario_exact_resume): short returning tool turns on ~9k, ~33k and ~120k contexts,
        # judged (every hit against its cold twin, the oracle's Q strict, the window carry's lines: exact_resume_findings) and timed (the same
@@ -1498,6 +1515,36 @@ def tier_findings(arm, records, events, scanned, stats):
     return problems, missing, lines
 
 
+def slice_findings(arm, event, scanned):
+    """The sliced restore's reading of a tier-concurrent arm (docs/prefix-store-hygiene.md "Sliced restore"): the install line is in the log and no fell-back or aborted line is, the
+    returning turn's restore line says it was sliced (slices, the longest slice, the steps it held the request) and no slice held the engine for SLICE_LIMIT_MS. The seats' wait
+    itself is the arm's stall reading (concurrent_findings); this says the flag did what it exists to do. -> (problems, not exercised, lines)"""
+    problems, missing, lines = [], [], []
+    on = scanned.get('tier_slice_on') or []
+    if not on:
+        missing.append('no "host tier restore slice on" line: the sliced restore was configured and never installed (an image without it, or the engine refused it)')
+    else:
+        lines.append('sliced restore: cap %s blocks, budget %s ms' % (on[0].get('blocks'), on[0].get('ms')))
+    for entry in scanned.get('tier_slice_trouble') or ():
+        text = entry['line']
+        if 'the request ended' in text:
+            continue
+        problems.append('server log line %s: %s' % (entry['index'], text[:200]))
+    restores = dict((entry.get('tag'), entry) for entry in scanned.get('tier_restores') or ())
+    restore = restores.get(event.get('return_tag'))
+    if restore is not None:
+        if not restore.get('slices'):
+            missing.append('the returning turn\'s "host tier restore" line carries no slices= field: it was restored whole (the trim ran it: nothing was decoding, or the admission wrapper did not hold it)')
+        else:
+            lines.append('the returning turn\'s restore: %s blocks in %s slices, the longest slice %s ms, the request held for %s steps, %s ms of restore work' % (
+                restore.get('blocks'), restore.get('slices'), restore.get('max_slice_ms'), restore.get('held_steps'), restore.get('ms')))
+            if (restore.get('max_slice_ms') or 0) > SLICE_LIMIT_MS:
+                problems.append('a slice of the returning turn\'s restore held the engine for %s ms, over the %.0f ms a slice may take' % (restore.get('max_slice_ms'), SLICE_LIMIT_MS))
+            if not restore.get('held_steps'):
+                missing.append('the returning turn was never held between slices (held_steps=0): no seat decoded between them')
+    return problems, missing, lines
+
+
 def concurrent_findings(arm, records, events, scanned):
     """The tier-concurrent arms' reading (prefix_replay.scenario_tier_concurrent; prefix_concurrent): every window the seven seats decoded across, the longest wait of
     any seat against the stall budget (the Lever N decode gap floor), the round time against the arm's own control window as a percentage, and on a tier profile the
@@ -1556,6 +1603,11 @@ def concurrent_findings(arm, records, events, scanned):
         missing.append('the returning turn failed (%s)' % (back.get('error') or back.get('aborted') or 'not sent'))
     if not event.get('spill_ok'):
         missing.append('the long fresh prompt failed (%s)' % ((index.get(event.get('spill_tag')) or {}).get('error') or 'not sent'))
+    if arm.get('kind') == 'slice':
+        more_problems, more_missing, more_lines = slice_findings(arm, event, scanned)
+        problems += more_problems
+        missing += more_missing
+        lines += more_lines
     if arm.get('tier'):
         restores = dict((entry.get('tag'), entry) for entry in scanned.get('tier_restores') or ())
         restore = restores.get(event.get('return_tag'))

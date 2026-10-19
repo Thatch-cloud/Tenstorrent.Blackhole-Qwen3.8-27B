@@ -143,6 +143,10 @@ Keys (every one optional but C2_IMAGE_TAG):
                       control window, the returning turn against its cold twin) are one arm each and run on a tier profile OR
                       on its no-tier control profile (the ABAB pairs); the audited one prints the stall, the timed one judges it
                       against the Lever N decode gap floor; scripts/ci/tier_concurrent_compare.py compares two arms' results
+                      tier-concurrent-sliced and tier-concurrent-timed-sliced: the same two plans on the profile plus the sliced restore
+                      (QWEN_PREFIX_TIER_RESTORE_SLICE and its time budget, derived; needs a profile with the tier): the returning session's
+                      blocks come back a bounded slice per engine step, the seats decoding in between; the timed pair's control is the
+                      unsliced timed plan on the same profile
                       tier-quota (per-tenant quotas, qwen_prefix_registry.QUOTA_ENV_NAMES; needs a sticky prefix profile, with or without the tier): quota-control
                       and quota-isolated (the profile plus the quota env, derived), each also a plan: tenant A floods the device pool while tenant B's session
                       must still be a DEVICE-RESIDENT hit when it returns (quota-isolated) and must not be (quota-control: the flood has to reach it); both
@@ -263,6 +267,7 @@ TELEMETRY_DEFAULT_MS = 1000
 DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
 # The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
 PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify', 'tiers', 'tier-concurrent', 'tier-concurrent-timed', 'tier-quota',
+                'tier-concurrent-sliced', 'tier-concurrent-timed-sliced',
                 # exact resume P0 (docs/tp4-exact-resume.md 5.2): the judged and the timed returning-turn arms
                 'exact-resume', 'exact-resume-timed')
 # (arm, its plan): each exactness and lifecycle arm is a plan of its own, named as the arm, that runs

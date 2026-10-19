@@ -1,0 +1,36 @@
+# The order of the SLICED HOST-TIER RESTORE window (docs/prefix-store-hygiene.md "Sliced restore", scripts/ci/fusion-wp/TS.json): the flag QWEN_PREFIX_TIER_RESTORE_SLICE (blocks per engine step) and QWEN_PREFIX_TIER_RESTORE_SLICE_MS (the work one step aims at),
+# derived by the gate onto the ship-4 candidate c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4 and its audited twin c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-s4-audit. ONE image (tp4-ship-4, a placeholder: B0 builds it from the pushed head that carries the package) and ONE window.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (the NEEDS lines skip what depended on it).
+# THE QUESTION: the ship-4 candidate's first card result for the tier beside seven seats (TC1, the audited twin) froze the seats 22.5 s around one 254k restore (control window p50/p99 0.493/0.712 s; restore 3,905 blocks, 8.70 GB in 6,321 ms; returning TTFT 14.9 s
+#   against 178.8 s cold). Where those seconds went is in docs/prefix-store-hygiene.md "Sliced restore" (tier_stall_breakdown.py reads any container log): the audits are most of it. WHAT THIS WINDOW MEASURES: whether doing the restore in bounded slices, the seats
+#   decoding between them, shortens the seats' longest wait (TS2 to TS5, unaudited, judged against the 8 s Lever N decode gap floor) and keeps every answer byte-identical (TS1, audited; the pairs of every arm). WHAT IT CANNOT CHANGE: the returning request's
+#   own final prefill step and engine build (about 4.2 to 4.8 s at 254k in T3, nothing else running; levern_policy.step_budget gives the final step everything left): the ESTIMATE (not measured) of the longest wait is about 5 s against about 6 s whole, NOT under 2 s.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z; nothing in this pack does either. B0 is a build and may run while production serves. No other window driver may be alive and no privileged builder container up.
+# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and each tag is pushed on THAT commit (the throwaway commit carries only .github/c2-serving-job.env). Push ONE tag at a time and wait for its run to finish;
+#     queued tags are cancelled. Never cancel a running card job. Every result is UNQUALIFIED. Read the grid from the run (13x10 since the firmware unlock), never assume 11x10.
+# ARC-ZERO TS1 TS5
+# ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO (the normal values written down first) BEFORE TS1 and restores them AFTER TS5 (the audited boot and every timed job; a model load under CI load has hit the platform's load timeout). B0, X0 and Z do not need it.
+# NOT IN THIS PACK: the ship-4 pack's gates (A1 GX0 GX1 G1), which run on the candidate first; turning the flag on in the ship entry (python3 scripts/ci/make_fusion_profiles.py after adding the line to the ship entry of fusion-wp/S4.json) waits for TS2 to TS5 to say so.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0 <- B0
+# NEEDS TS1 <- X0
+# NEEDS TS2 <- X0
+# NEEDS TS3 <- TS1 TS2
+# NEEDS TS4 <- TS3
+# NEEDS TS5 <- TS4
+# READ RULES (each also needs c2_smoke_check clean where it runs and no stall; the templates' own headers have the whole text):
+#   B0   "baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-traffic with a session cap of 8", the provenance report with no problem line, its K64j-OQ graft line and its qwen_kv_read 2 line, the image id.   X0  the status prints, the rescan finds every board, the reset completes on all four.
+#   TS1  (STOP) the tier-concurrent-sliced plan PASS (audited): every pair IDENTICAL, the line "host tier restore slice on", the restore line with slices= above 1 and held_steps= above 0, no "fell back", zero failure counters, all seven seats across every judged window; the stall printed, not judged.
+#   TS2 TS3 TS4 TS5  the tier-concurrent-timed (TS2 TS4) and tier-concurrent-timed-sliced (TS3 TS5) plans PASS each (the stall budget judged: no wait over 8 s), then tier_concurrent_compare.py over the four: the seats' text and the three answers IDENTICAL, the round p50/p99
+#     and longest wait per window side by side, the sliced arm against the control in percent, the control-to-control floor; tier_stall_breakdown.py on the TS2 and TS3 container logs (the freeze phase by phase).
+# NO-GO for the sliced restore: any text that differs, a seat that waited over the 8 s floor in any window of the sliced arm, a "slice aborted" or "fell back" line the request's own end does not explain, a tier that latched off on its own, a program compiled by a slice, a sliced arm whose longest wait is not shorter than the control's
+#   by more than the control-to-control floor (then the flag buys nothing at this size and stays off). Adopting is the owner's decision.
+# Time (estimate, minutes): B0 40, X0 20, TS1 100, TS2 50, TS3 50, TS4 50, TS5 50, Z 10: 370 minutes (6 h 10 min) in all; nothing of the sliced restore has run on a card.
+B0-slice-build stop tp4-ship-4 40
+X0-status-rescan-reset stop tp4-ship-4 20
+TS1-tier-slice-audited stop tp4-ship-4 100
+TS2-tier-slice-control-timed soft tp4-ship-4 50
+TS3-tier-slice-sliced-timed soft tp4-ship-4 50
+TS4-tier-slice-control-repeat soft tp4-ship-4 50
+TS5-tier-slice-sliced-repeat soft tp4-ship-4 50
+Z-reset soft tp4-ship-4 10

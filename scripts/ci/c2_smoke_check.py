@@ -212,6 +212,7 @@ FUSION_LEVERS = (
     ('QWEN_FAST_SDPA_PF_ONEQ', '1', '[PINDIAG] sdpa prefill oneq engaged', '[PINDIAG] sdpa prefill oneq fell back', 'S1 prefill SDPA one q chunk per core'),  # WPP
     ('QWEN_PREFIX_WINDOW_CARRY', '1', '[PINDIAG] prefix: window carry engaged', '[PINDIAG] prefix: window carry fell back', "exact resume P0: the undrop and the drafter-window carry (the scheduler graft's install line; a smoke sends no salt, so the carried admissions and the audit are the prefix gate's)"),  # ER
     ('QWEN_FAST_GRID13', '1', '[PINDIAG] tp4 grid13 engaged', '[PINDIAG] tp4 grid13 fell back', 'M1 matmul grids for the 13x10 compute grid'),  # M1
+    ('QWEN_PREFIX_TIER_RESTORE_SLICE', '512', '[PINDIAG] prefix: host tier restore slice on', '[PINDIAG] prefix: host tier restore slice fell back', 'sliced host-tier restore'),  # TS
     ('QWEN_FAST_MLP_CFG', 'g3u4d3', '[PINDIAG] tp4 mlp gateup engaged route=cfg', '[PINDIAG] tp4 mlp gateup fell back', 'MLP streaming config g3u4d3 (the card-M sweep winner)'),  # WP0
     ('QWEN_FAST_CCL_OPTIONS', 'served', '[PINDIAG] tp4 ccl options engaged', '[PINDIAG] tp4 ccl options fell back', 'CCL options (the served set)'),  # WP5
     ('QWEN_FAST_BATCHED_READS', 'async', '[PINDIAG] tp4 batched reads engaged', '[PINDIAG] tp4 batched reads fell back', 'WPH-3 batched read-backs (asynchronous copies)'),  # WPH

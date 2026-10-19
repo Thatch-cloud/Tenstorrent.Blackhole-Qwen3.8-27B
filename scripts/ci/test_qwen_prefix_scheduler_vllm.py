@@ -1465,6 +1465,82 @@ class HostTierOnRealVllmTests(unittest.TestCase):
 
 
 @unittest.skipIf(VLLM_ERROR is not None, 'vLLM is not importable here (%s)' % VLLM_ERROR)
+class SlicedRestoreOnRealVllmTests(unittest.TestCase):
+    """The sliced restore (module docstring of qwen_prefix_scheduler_patch, item h) on vLLM's own scheduler, block pool and eviction with the REAL one-fresh-prefill admission wrapper
+    (serving_prefill_admission) installed on the scheduler class: a returning conversation's blocks come back from the tier a slice per engine step while another request decodes, the
+    wrapper holding the candidate in between, and the conversation is admitted at the same Q the whole restore gives. test_qwen_prefix_tier_slice holds the same on the fakes."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.env = Env()
+
+    def setUp(self):
+        self.env.logs[:] = []
+
+    def sliced_env(self):
+        import serving_prefill_admission as admission
+
+        subclass = type('TTScheduler', (STATE['scheduler_module'].TTScheduler,), {})
+        admission.install(types.SimpleNamespace(scheduler_config=types.SimpleNamespace(scheduler_cls=subclass)), log=lambda *args, **kwargs: None)
+        env = Env()
+        env.scheduler_cls = subclass
+        return env
+
+    def traffic(self, sliced, slice_blocks=1):
+        environ = {}
+        io = FakeKvIO()
+        total = (1 << 20) + 400 * FakeKvIO.block_bytes
+        environ.update({'QWEN_PREFIX_HOST_TIER_GIB': repr(total / float(1 << 30)), 'QWEN_PREFIX_HOST_TIER_MIN_TOKENS': '0',
+                        'QWEN_PREFIX_HOST_TIER_MIN_AVAILABLE_GIB': '0', 'QWEN_PREFIX_HOST_TIER_VERIFY': 'all'})
+        if sliced:
+            environ['QWEN_PREFIX_TIER_RESTORE_SLICE'] = str(slice_blocks)
+        registry = STATE['graft'].PrefixRegistry(budget_bytes=1 << 20, environ=environ)
+        registry.tier.digest_inline = True
+        registry.attach_tier_io(io)
+        env = self.sliced_env()
+        scheduler, state = env.make(num_blocks=100, registry=registry)
+        drive = KvDrive(env, scheduler, state, 'slice-real', io)
+        x = drive.add('x', tokens(4200, 'slice-x'))
+        drive.run()
+        drive.add('y', tokens(2300, 'slice-y'), 1, salt='tenant-y')
+        drive.run()
+        drive.add('seat', tokens(700, 'slice-seat'), 60, salt='tenant-seat')
+        for _ in range(3):
+            drive.step()
+        drive.from_step = len(drive.history)
+        drive.add('x2', list(x.prompt_token_ids) + list(x.output_token_ids) + tokens(600, 'slice-x2'))
+        drive.run()
+        return drive, state, env
+
+    def test_the_conversation_comes_back_in_slices_while_the_seat_keeps_decoding(self):
+        drive, state, env = self.traffic(sliced=True)
+        stats = state.registry.stats
+        row = drive.row('x2')
+        self.assertEqual((row.start, row.q), (4096, 4096), 'the same hit the whole restore gives')
+        self.assertTrue(state.tier_hooks.slicing, 'the real admission wrapper is on the class: %s' % [line for line in env.logs if 'slice' in line])
+        self.assertGreaterEqual(stats['tier_slice_steps'], 2, 'one block a slice: several slices')
+        self.assertEqual(stats['tier_slice_held'], stats['tier_slice_steps'] - 1)
+        self.assertEqual((stats['tier_restore_requests'], stats['tier_restore_failures'], stats['tier_digest_failures']), (1, 0, 0))
+        steps = [ids for _, ids in drive.history[drive.from_step:]]
+        admitted_at = next(index for index, ids in enumerate(steps) if 'x2' in ids)
+        self.assertEqual(admitted_at, stats['tier_slice_held'], 'x2 was admitted in the step its last slice landed: every earlier pass held it back')
+        self.assertTrue(all(ids == ['seat'] for ids in steps[:admitted_at]), 'the seat, and only the seat, ran in every held pass: %s' % steps[:admitted_at])
+        self.assertTrue(drive.check_kv())
+        pool = drive.scheduler.kv_cache_manager.block_pool
+        self.assertEqual(pool.get_num_free_blocks(), 99, 'every block is free again')
+        self.assertEqual(state.tier_hooks.jobs, {})
+
+    def test_the_same_traffic_unsliced_is_one_whole_restore_with_the_same_hit(self):
+        drive, state, env = self.traffic(sliced=False)
+        stats = state.registry.stats
+        row = drive.row('x2')
+        self.assertEqual((row.start, row.q), (4096, 4096))
+        self.assertEqual(stats['tier_restore_requests'], 1)
+        self.assertFalse(any(name.startswith('tier_slice') for name in stats))
+        self.assertTrue(drive.check_kv())
+
+
+@unittest.skipIf(VLLM_ERROR is not None, 'vLLM is not importable here (%s)' % VLLM_ERROR)
 class TenantQuotaOnRealVllmTests(unittest.TestCase):
     """The per-tenant device quota (module docstring of qwen_prefix_scheduler_patch, item g) on vLLM's own scheduler, KVCacheManager.allocate_slots, block pool and
     free queue, through the real install(): tenant A floods a pool tenant B's session sits in. With the quota B's return is a hit (A evicted its own blocks, or B was
