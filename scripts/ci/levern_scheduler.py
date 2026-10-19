@@ -580,6 +580,8 @@ class LevernRuntime(object):
             short = detail.get('short')
         except Exception:
             return False
+        if ok:
+            admission.note_reading(request_id, detail)      # (QWEN_FAST_ADMISSION_LEAN: the final step's backstop may use this reading)
         if ok or unavailable:
             self.final_held = None
             return False
