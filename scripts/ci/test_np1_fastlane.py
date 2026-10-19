@@ -120,6 +120,25 @@ class FlagAndRecordTests(unittest.TestCase):
                 idle_scratch.extended_shape(bad, 1)
 
 
+class SourceTests(unittest.TestCase):
+    def test_idle_scratch_is_stdlib_only_python_37_source_that_nothing_on_the_serving_path_imports_at_module_level(self):
+        source = (HERE / 'idle_scratch.py').read_text(encoding='utf-8')
+        tree = ast.parse(source, feature_version=(3, 7))
+        top = {alias.name.split('.')[0] for node in tree.body if isinstance(node, ast.Import) for alias in node.names}
+        top |= {node.module.split('.')[0] for node in tree.body if isinstance(node, ast.ImportFrom)}
+        self.assertEqual(top, {'os'})
+        for name in ('serving_runtime', 'serving_cache_owner', 'serving_octo', 'serving_c2_contract', 'packed_verifier', 'serving_packed_step'):
+            module = ast.parse((HERE / (name + '.py')).read_text(encoding='utf-8'))
+            imported = {alias.name for node in module.body if isinstance(node, ast.Import) for alias in node.names}
+            imported |= {node.module for node in module.body if isinstance(node, ast.ImportFrom)}
+            self.assertNotIn('idle_scratch', imported, '%s imports it lazily, with the flag set only' % name)
+
+    def test_the_flag_off_paths_import_nothing_new(self):
+        for name, anchor in (('serving_cache_owner', "if os.environ.get('QWEN_FAST_SOLO_PACKED', '0') != '0':"), ('serving_runtime', "if os.environ.get('QWEN_FAST_SOLO_PACKED', '0') != '0':"),
+                             ('serving_c2_contract', "if environ.get('QWEN_FAST_SOLO_PACKED', '0') != '0':")):
+            self.assertIn(anchor, (HERE / (name + '.py')).read_text(encoding='utf-8'), name)
+
+
 class AllocationHookTests(unittest.TestCase):
     def setUp(self):
         idle_scratch.forget()
