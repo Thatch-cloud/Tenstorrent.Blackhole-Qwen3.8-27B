@@ -1402,6 +1402,7 @@ class CoverageTests(unittest.TestCase):
 
         import make_octo3_profiles as octo3
         import make_ship4_profiles as ship4
+        import make_pf2_profiles as pf2
 
         profiles = json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))['profiles']
         # (tp4/octo-3: the octo twins of the combined prefill arm carry the prefill flags beside the octo ones and the ship candidates beside the fusion ship's: test_octo3_profiles, test_octo3_ship)
@@ -1410,7 +1411,7 @@ class CoverageTests(unittest.TestCase):
                           and name not in ship4.owned_names() and not name.endswith(('-traffic-oneq', '-traffic-o3-oneq')))
         self.assertEqual(carriers, sorted(PREFILL_AUDITED_TWINS))
         for name, profile in profiles.items():
-            if not name.startswith(fusion.NAMESPACE):
+            if not name.startswith(fusion.NAMESPACE) and name not in pf2.twin_names():      # (tp4/prefill-2's three twins are the ship candidate / its audited twin plus one flag: test_pf2_profiles)
                 self.assertFalse(set(GATED_PREFILL) & set(profile['env']), name)
         self.assertFalse(set(GATED_PREFILL) & set(profiles[fusion.PARENT]['env']))
         self.assertFalse(set(GATED_PREFILL) & set(profiles[fusion.NAMESPACE + 'traffic']['env']), 'the ship profile carries no prefill-lever audit flag')

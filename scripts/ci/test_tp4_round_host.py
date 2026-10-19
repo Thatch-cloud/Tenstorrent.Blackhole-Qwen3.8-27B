@@ -1203,6 +1203,10 @@ class ProfileTests(unittest.TestCase):
         import make_ship4_profiles as twins_ship4
 
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_ship4.twin_names()})
+        # tp4/prefill-2: its three twins are the ship candidate / the ship-4 audited twin plus one flag (test_pf2_profiles)
+        import make_pf2_profiles as twins_pf2
+
+        combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_pf2.twin_names()})
         for name, profile in data['profiles'].items():
             if name in self.ADDED:
                 continue

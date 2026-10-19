@@ -1,0 +1,41 @@
+# The order of the tp4/prefill-2 window (docs/tp4-prefill-2.md; scripts/ci/make_pf2_jobs.py): the device-side hand-off of the final step's GDN state (QWEN_FAST_PREFILL_HANDOFF) on the approved ship-4 profile c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4 and its three gate-only twins (make_pf2_profiles.py), the checkpoint production serves (ukisai/Swift-1.5-Qwen3.8-27b, revision b4c84d42903a) in every smoke job, ONE image (tp4-pf2-1, a placeholder: B0 builds it from the pushed tp4/prefill-2 head WITH the K64j-OQ graft) and ONE window.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (the NEEDS lines skip what depended on it).
+# WHAT THIS DECIDES (the owner's, never the window's): whether the last step of every split prompt should write the decode slot from device-side clones of the GDN scratch instead of reading the scratch to the host and uploading it back. Today the step pays 240 blocking reads and 240 uploads before 48 layers of slot writes; the PF1 device profile of the ship-4 stack measured 48.6 ms of idle device for the reads and 115.2 ms for the writes, 8.0 ms of it device kernels, on a profiled run (so the upper end of what production pays). The expected saving is 20 to 55 ms a final step, a few percent of a returning turn's 1.1 to 1.2 s step and about twice that once the first re-prefilled chunk is gone (tp4/exact-end); the expectation is arithmetic on that profile, not a measurement. A1 and AP1 are the exactness gates; T1-T4 and R1-R2 read the saving. Every result is UNQUALIFIED.
+# THE ONE NEW DEVICE FACT: the final step makes 240 device clones of the persistent GDN scratch (ttnn.clone, two program shapes, compiled by the route's warm before the traces) and hands them to the graft's own write_slot, which consumes them. No kernel, trace or buffer of the serving path is new; the scratch is never given to the consuming write. A1 is the first card to run it, with the audit on.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z; nothing in this pack does either. B0 is a build and may run while production serves. No other window driver may be alive and no privileged builder container up.
+# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and each tag is pushed on THAT commit (the throwaway commit carries only .github/c2-serving-job.env). Push ONE tag at a time and wait for its run to finish; queued tags are cancelled. Never cancel a running card job.
+# P0. SWIFT IS ON THE CARD HOST AND ITS CONVERTED CACHE IS BUILT: python3 scripts/ci/qwen_c2_checkpoint.py check --hub <the hub directory> --repo ukisai/Swift-1.5-Qwen3.8-27b --revision b4c84d42903a8646b25857eb2827288d92ed85a4 exits 0, and the Swift window's W0 (or the production first boot) has built the keyed weight cache, so every smoke job here logs "weight cache ...: found". This pack builds nothing of it.
+# P0. GRID: the four cards expose a 13x10 compute grid since the firmware unlock. Read it from the run, never assume 11x10: every pair runs on one grid.
+# ARC-ZERO A1 R2
+# ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO (minRunners and maxRunners 0, the normal values written down first, restored by the same patch with the old numbers) BEFORE A1 and restores them AFTER R2, i.e. around every audited boot (a model load under CI load has hit the platform's load timeout) and every timed job. B0, X0 and Z do not need the pause.
+# THE JOBS, in value order (cut the window at a block end): GATES: B0 X0 A1 AP1 (240 min); SMOKE ABAB: T1 T2 T3 T4 (180 min); RETURNING TURNS: R1 R2 (180 min); END: Z (10 min). B0 is the WINDOW build.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0 <- B0
+# NEEDS A1 <- X0
+# NEEDS AP1 <- A1
+# NEEDS T1 <- A1 AP1
+# NEEDS T2 <- T1
+# NEEDS T3 <- T2
+# NEEDS T4 <- T3
+# NEEDS R1 <- AP1
+# NEEDS R2 <- R1
+# READ RULES (each also needs c2_smoke_check clean where it is a smoke job, and no stall; the templates' own headers have the whole text):
+#   B0   'baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4 with a session cap of 8', the provenance report with no problem line, its K64j-OQ graft line, the image id.
+#   X0   four cards present and healthy, the fabric as measured, the 13x10 grid in the run, no other window driver alive; the Swift weight cache found.
+#   A1   (STOP) the hand-off engaged line once, every audit line exact=True (the first eight final steps and every 24th), no 'audit mismatch', no 'fell back', the memory ledger recorded. ANY failure is NO-GO and halts the window.
+#   AP1  (STOP) the tier-timed plan PASS on c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-pf2-s4-audit and every final step's audit exact=True at 125k and 245k of context.
+#   T1 T2 T3 T4   pf2_report.py (the hand-off milliseconds of both arms, both pairs, and the floor T1 against T3), prefill_ladder_report.py (the rungs' TTFT ratio and equal answers). GO: a SAVING in the hand-off line and no LOSS in a rung.
+#   R1 R2   pf2_report.py on the returning-turn pair: the saving at 125k and 245k of context; the plan verdict PASS on both.
+# NO-GO for the hand-off: any stall, any audit mismatch, any fallback line, a text difference against the control, a program compiled after the warm, an engaged line missing on an arm, a LOSS in the hand-off line. Adopting is the owner's decision: the flag is a gate instrument today and a ship profile needs an owner traffic waiver naming it (docs/tp4-prefill-2.md).
+# Time (estimate, minutes): B0 40, X0 20, A1 90, AP1 90, T1 45, T2 45, T3 45, T4 45, R1 90, R2 90, Z 10: 610 minutes (10 h 10 min) in all, 570 minutes of cards (X0 to Z).
+B0-build-window stop tp4-pf2-1 40
+X0-status-rescan-reset stop tp4-pf2-1 20
+A1-pf2-audited-attach stop tp4-pf2-1 90
+AP1-pf2-audited-returning stop tp4-pf2-1 90
+T1-ctl-a soft tp4-pf2-1 45
+T2-pf2-a soft tp4-pf2-1 45
+T3-ctl-b soft tp4-pf2-1 45
+T4-pf2-b soft tp4-pf2-1 45
+R1-ctl-returning soft tp4-pf2-1 90
+R2-pf2-returning soft tp4-pf2-1 90
+Z-reset soft tp4-pf2-1 10

@@ -101,6 +101,8 @@ MERGED_FUNCTIONS = ('_qwen_prefix_row', '_qwen_prefix_registry', '_qwen_prefix_d
                     '_qwen_prefix_restored')
 PREFIX_ENV = 'QWEN_PREFIX_REUSE'
 STICKY_ENV = 'QWEN_FAST_STICKY_SESSIONS'
+# PF2-H (prefill_handoff.py, docs/tp4-prefill-2.md): the final step hands the GDN state to the decode slot on the device. Read by name here so that, with both unset, the module is never imported.
+HANDOFF_FLAGS = ('QWEN_FAST_PREFILL_HANDOFF', 'QWEN_FAST_PREFILL_HANDOFF_AUDIT')
 # The warm's merged prompt: [0, 2048) capturing at 2048, [2048, 4096), a CHECKPOINT restore of the 2048 state and [2048, 4096) again, the final
 # step [4096, 6208), and under host parking a park and an unpark around that final step.
 MERGED_WARM_STEPS = 4
@@ -440,6 +442,23 @@ def _read_scratch(ttnn, comp, layers):
             [[ttnn.to_torch(conv, mesh_composer=comp) for conv in dn.conv_states] for dn in layers])
 
 
+def _read_scratch_entries(ttnn, comp, model):
+    """_read_scratch for a scratch that is no longer bound (the device hand-off fell back after the unbind): the same host copies, read from the persistent scratch's own tensors."""
+    entries = model._gdn_prefill_scratch
+    return ([ttnn.to_torch(rec, mesh_composer=comp) for _dn, rec, _convs, _carry, _zero in entries],
+            [[ttnn.to_torch(conv, mesh_composer=comp) for conv in convs] for _dn, _rec, convs, _carry, _zero in entries])
+
+
+def _host_snapshot(ttnn, comp, model, rec_snap, conv_snap, read_ms):
+    """The host path's snapshot of the final step, read now from the persistent scratch when the step took none (the device hand-off fell back, or was latched off by an earlier fall-back);
+    returns (rec_snap, conv_snap, read_ms, the clock at which the slot write begins)."""
+    if rec_snap is None:
+        began = time.perf_counter()
+        rec_snap, conv_snap = _read_scratch_entries(ttnn, comp, model)
+        read_ms = (time.perf_counter() - began) * 1000.0
+    return rec_snap, conv_snap, read_ms, time.perf_counter()
+
+
 def audit_prefill(model, step, logits, page_row, rec_snap=None, conv_snap=None, log=_log, tokens=None):
     """Log the digests of a finished prefill (levern_policy.DIGEST_LINE); `rec_snap`/`conv_snap` are the scratch's host copies when the
     caller already holds them (the final step), else the scratch is read here (the whole-prompt path)."""
@@ -461,6 +480,8 @@ class Handle(object):
         self.merged, self.merged_cfg = merged, merged_cfg
         # The environment install() read: the audit digest's read mode (QWEN_FAST_LEVERN_KV_READ) comes from the same one. None: os.environ.
         self.environ = None
+        # PF2-H: the prefill_handoff.Handoff install() built (None: the flag is not set, the route is byte-for-byte the one without it).
+        self.handoff = None
         self.fault_fired = False
         self.owner_refusals = 0
         self.parks = {}
@@ -547,8 +568,16 @@ def install(runner, model, *, environ=None, log=_log):
                              'read whole caches (about 8 minutes a request at eight seats x 262k)'
                              % (levern_policy.KV_READ_FLAG, levern_policy.kv_read_mode(environ)))
         log(levern_policy.KV_READ_PREFIX + 'ready mode={}', levern_policy.kv_read_mode(environ))
+    handoff = None
+    if any(name in environ for name in HANDOFF_FLAGS):
+        import prefill_handoff
+
+        if not route_on:
+            raise ValueError('%s is a lever of the Lever N route: it needs %s=1' % (' / '.join(HANDOFF_FLAGS), levern_policy.FLAG))
+        handoff = prefill_handoff.Handoff.from_environ(environ)
     handle = Handle(wrapper, model, original, route_on, audit_on, merged=merged,
                     merged_cfg=levern_policy.merged_config(environ) if merged else None)
+    handle.handoff = handoff
     fault = levern_policy.fault(environ) if route_on else None
 
     def prefill_forward(*args, **kwargs):
@@ -593,7 +622,8 @@ def install(runner, model, *, environ=None, log=_log):
         vars(model)[MERGED_ATTR] = True
     levern_policy.reset_state()
     _publish(model)
-    log(levern_policy.ROUTE_INSTALLED_LINE, 'route=%d audit=%d' % (route_on, audit_on) + (' merged=%s' % ','.join(SOURCES) if merged else ''))
+    log(levern_policy.ROUTE_INSTALLED_LINE, 'route=%d audit=%d' % (route_on, audit_on) + (' merged=%s' % ','.join(SOURCES) if merged else '')
+        + ('' if handoff is None else ' handoff=%s%s' % ('device' if handoff.device else 'host', ' audit' if handoff.audit else '')))
     return handle
 
 
@@ -727,13 +757,16 @@ def route(model, token_ids_list, page_table, empty_slots, starts, ends, valid_le
     _set_owner(model, (step.req_id, start))
     previous = model._bind_gdn_prefill_scratch()
     rec_snap = conv_snap = None
+    handoff, read_ms = getattr(handle, 'handoff', None), 0.0
     with writes:
         try:
             lg = model.prefill_traced_chunked(tokens[:, :end], page[0:1], actual_len=end, start=start)
             host = (ttnn.to_torch(lg, mesh_composer=comp).reshape(-1, model.args.vocab_size)[:1].float().view(1, 1, -1))
             ttnn.deallocate(lg)
-            if final(step):
+            if final(step) and (handoff is None or handoff.wants_host(audit)):
+                read_began = time.perf_counter()
                 rec_snap, conv_snap = _read_scratch(ttnn, comp, layers)
+                read_ms = (time.perf_counter() - read_began) * 1000.0
         except BaseException:
             _clear_owner(model)
             raise
@@ -742,7 +775,11 @@ def route(model, token_ids_list, page_table, empty_slots, starts, ends, valid_le
         # The window is read before the slot write so a program that write compiled is not forgiven as the window's.
         window = window_programs() - window_before
         if final(step):
-            model._write_gdn_slot(int(empty_slots[0]), rec_snap, conv_snap)
+            if handoff is None or not handoff.active() or not handoff.write_slot(model, int(empty_slots[0]), writes, (rec_snap, conv_snap), log):
+                rec_snap, conv_snap, read_ms, write_began = _host_snapshot(ttnn, comp, model, rec_snap, conv_snap, read_ms)
+                model._write_gdn_slot(int(empty_slots[0]), rec_snap, conv_snap)
+                if handoff is not None:
+                    handoff.log_host(log, read_ms, (time.perf_counter() - write_began) * 1000.0, len(layers))
             _clear_owner(model)
         else:
             _set_owner(model, (step.req_id, end))
@@ -922,6 +959,7 @@ def _merged_route(model, tokens, page_table, slot, step, handle, fault, audit, l
     _set_owner(model, (request_id, start))
     previous = model._bind_gdn_prefill_scratch()
     rec_snap = conv_snap = None
+    handoff, read_ms = handle.handoff, 0.0
     with writes:
         try:
             if resolved.restore is not None:
@@ -937,8 +975,10 @@ def _merged_route(model, tokens, page_table, slot, step, handle, fault, audit, l
             lg = model.prefill_traced_chunked(tokens[:, :end], page[0:1], actual_len=end, **resume)
             host = (ttnn.to_torch(lg, mesh_composer=comp).reshape(-1, model.args.vocab_size)[:1].float().view(1, 1, -1))
             ttnn.deallocate(lg)
-            if final_step:
+            if final_step and (handoff is None or handoff.wants_host(audit)):
+                read_began = time.perf_counter()
                 rec_snap, conv_snap = _read_scratch(ttnn, comp, layers)
+                read_ms = (time.perf_counter() - read_began) * 1000.0
         except BaseException:
             _clear_owner(model)
             if handle.parks.pop(request_id, None) is not None:
@@ -958,7 +998,11 @@ def _merged_route(model, tokens, page_table, slot, step, handle, fault, audit, l
             handle.unparked_total += 1
             log(levern_policy.PARK_LINE, 'in', request_id, start, restored_ms or 0.0, parked_bytes, len(handle.parks))
         if final_step:
-            model._write_gdn_slot(slot, rec_snap, conv_snap)
+            if handoff is None or not handoff.active() or not handoff.write_slot(model, slot, writes, (rec_snap, conv_snap), log):
+                rec_snap, conv_snap, read_ms, write_began = _host_snapshot(ttnn, comp, model, rec_snap, conv_snap, read_ms)
+                model._write_gdn_slot(slot, rec_snap, conv_snap)
+                if handoff is not None:
+                    handoff.log_host(log, read_ms, (time.perf_counter() - write_began) * 1000.0, len(layers))
             _clear_owner(model)
         else:
             _set_owner(model, (request_id, end))
@@ -1051,6 +1095,12 @@ def warm(runner, model, *, environ=None, width=None, slot=0, log=_log):
     return True
 
 
+class _WarmWrites(object):
+    """The write counter the warm's hand-off is given (the warm has no lifecycle to tell)."""
+
+    count = 0
+
+
 def _warm_merged(model, handle, page, slot, log):
     """The merged warm: the four sources on the warm prompt, driven through the model directly (no registry exists before the scheduler)."""
     import torch
@@ -1063,6 +1113,7 @@ def _warm_merged(model, handle, page, slot, log):
     layers = _gdn_layers(model)
     total = WARM_PROMPT
     sink = []
+    handoff = handle.handoff
 
     def run(start, end, restore=None, capture=False, final_step=False):
         tokens = torch.zeros((1, end), dtype=torch.int32)
@@ -1077,11 +1128,14 @@ def _warm_merged(model, handle, page, slot, log):
             lg = model.prefill_traced_chunked(tokens, page[0:1], actual_len=end, **resume)
             ttnn.to_torch(lg, mesh_composer=comp)
             ttnn.deallocate(lg)
-            snapshot = _read_scratch(ttnn, comp, layers) if final_step else None
+            snapshot = _read_scratch(ttnn, comp, layers) if final_step and (handoff is None or handoff.wants_host(False)) else None
         finally:
             model._unbind_gdn_prefill_scratch(previous)
         if final_step:
-            model._write_gdn_slot(slot, *snapshot)
+            # PF2-H: the warm takes the hand-off's path too, so its device copies exist (and are counted by the tripwire) before the packed traces.
+            if handoff is None or not handoff.active() or not handoff.write_slot(model, slot, _WarmWrites(), snapshot, log):
+                snapshot = snapshot if snapshot is not None else _read_scratch_entries(ttnn, comp, model)
+                model._write_gdn_slot(slot, *snapshot)
 
     steps = [(0, 2048), (2048, 4096), (2048, 4096), (4096, total)]
     try:
