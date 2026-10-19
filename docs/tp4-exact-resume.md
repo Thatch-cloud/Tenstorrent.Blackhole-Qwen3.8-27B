@@ -6,6 +6,11 @@ split-invariance probe. Nothing has run on a card yet. Phase-0 numbers come from
 tier-timed, 38083229148 tier-returning, 38080393657 levern-hit beside six decoders). Every number is labelled **measured**
 or **estimated**.
 
+> **2026-10-19 update (`docs/tp4-exact-end.md`).** P0 is merged onto the ship-4 + Swift stack on `tp4/exact-end` and works beside the tile-aligned drafter window (the merge had switched that
+> window off under a carry). The split-invariance probe (SP0, v839) found every 128-aligned resume DIFFERENT; `tp4-exact-end.md` explains why nothing finer than P0 is worth building without a
+> kernel or numerics change, and adds the attribution arms (SP1) that say which. Section 5.4's "P1" and 5.5's "P2" stand as the E1 designs they were; their incremental value over P0 is
+> re-modelled there (about 12% of today's prefill time, and only with kernel work).
+
 ## 0. Summary
 
 - **The problem (measured).** A returning sticky-session turn resumes at `Q = floor2048(P_prev) - 2048`. It therefore

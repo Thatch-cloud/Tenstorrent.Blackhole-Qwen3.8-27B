@@ -30,6 +30,7 @@ EXPECTED = {
     'X0-xe-status-rescan-reset': ('stop', False, '', '', ''),
     'SP1-split-attribution': ('soft', False, '', '', 'split-attribute'),
     'XX-xe-exactness': ('stop', True, pack.AUDIT, 'exact-resume', ''),
+    'XT-xe-tier-returning': ('soft', True, pack.AUDIT, 'tier-returning', ''),
     'XC1-control-a': ('soft', True, pack.SHIP, 'exact-resume-timed', ''),
     'XL1-xe-a': ('soft', True, pack.ARM, 'exact-resume-timed', ''),
     'XC2-control-b': ('soft', True, pack.SHIP, 'exact-resume-timed', ''),
@@ -86,14 +87,14 @@ class OrderTests(unittest.TestCase):
                 for earlier in right:
                     self.assertLess(names.index(earlier), names.index(later), left_right)
         needed = set(token for line in directives('# NEEDS ') for token in line[:line.index('<-')])
-        self.assertTrue({'X0', 'SP1', 'XX', 'XC1', 'XL1', 'XC2', 'XL2', 'XB1', 'XB2'} <= needed)
+        self.assertTrue({'X0', 'SP1', 'XX', 'XT', 'XC1', 'XL1', 'XC2', 'XL2', 'XB1', 'XB2'} <= needed)
         self.assertIn(['XL1', '<-', 'XC1', 'XX'], directives('# NEEDS '), 'the lever is timed only after the exactness gate passed')
 
     def test_the_arc_range_covers_every_weight_load_and_timed_job_and_nothing_else(self):
         names = [row[0].split('-')[0] for row in order_lines()]
         (first, last), = directives('# ARC-ZERO ')
         self.assertEqual((first, last), ('SP1', 'XB2'))
-        for token in ('SP1', 'XX', 'XC1', 'XL1', 'XC2', 'XL2', 'XB1', 'XB2'):
+        for token in ('SP1', 'XX', 'XT', 'XC1', 'XL1', 'XC2', 'XL2', 'XB1', 'XB2'):
             self.assertTrue(names.index(first) <= names.index(token) <= names.index(last), token)
         for token in ('B0', 'X0', 'Z'):
             self.assertFalse(names.index(first) <= names.index(token) <= names.index(last), token)

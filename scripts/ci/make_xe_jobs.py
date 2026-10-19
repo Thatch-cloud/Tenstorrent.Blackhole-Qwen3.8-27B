@@ -86,6 +86,15 @@ def rows():
                          'window digests EQUAL (the hit\'s spliced drafter window is the cold twin\'s byte for byte); %s; every other audit line of the candidate exact=True; no program growth after the warm; %s '
                          'ANY difference is NO-GO. RUN WITH THE CI PAUSED. Duration (estimate): about 2 hours (the ~120k conversation\'s cold twins dominate: seven ~40 s cold prefills, and an audited 8x262k boot).'
                          % (AUDIT, SHAPE, WINDOW_LINES, CHECKPOINT_READ))))
+    out.append(dict(name='XT-xe-tier-returning', mode='soft', minutes=120, actions='reset prefix', cards=True, plan='tier-returning', profile=AUDIT, probe=None, model=True, box=170,
+                    needs=('XT <- XX',), extra=[],
+                    why=('XT (P0 BESIDE THE HOST KV TIER, SOFT; the production profile carries the 32 GiB tier and the preconverted checkpoints): the prefix gate\'s tier-returning plan (prefix_replay.scenario_tier_returning) on %s, Swift: sessions built '
+                         'to about 56k, fresh-salt floods totalling the whole KV pool so that every cached block of the sessions leaves the device pool (spilled to host RAM), then each session\'s next turn as a cold/hit pair '
+                         '(the hit\'s blocks come back from the host and its checkpoint resumes ONE CHUNK HIGHER than the tier pack measured, the window rows carried with the checkpoint), one more turn on a restored session '
+                         'and the tier\'s own kill switch. Nothing in P0 touches the tier or the checkpoint\'s preconverted tensors (the carried rows are a separate attribute of the same checkpoint); this is the card read of '
+                         'that claim. READ: the plan PASS: every pair IDENTICAL, the restore and the spill on record, a carried admission on a restored session, every window audit exact=True, the tier counters at zero failures, '
+                         'no tier latch beyond the drilled kill switch; %s. RUN WITH THE CI PAUSED. Duration (estimate): about 2 hours (an audited boot, the floods and the cold twins).'
+                         % (AUDIT, CHECKPOINT_READ))))
     for index, (control, arm) in enumerate((('XC1', 'XL1'), ('XC2', 'XL2')), 1):
         letter = 'a' if index == 1 else 'b'
         out.append(dict(name='%s-control-%s' % (control, letter), mode='soft', minutes=45, actions='reset prefix', cards=True, plan='exact-resume-timed', profile=SHIP, probe=None, model=True, box=90,
@@ -140,7 +149,7 @@ def render_order(table):
     def minutes(tokens):
         return sum(row['minutes'] for row in table if row['name'].split('-')[0] in tokens.split())
 
-    blocks = (('GATES', 'B0 X0 SP1 XX'), ('RETURNING-TURN ABAB', 'XC1 XL1 XC2 XL2'), ('EIGHT-SEAT REPLAY (optional)', 'XB1 XB2'), ('END', 'Z'))
+    blocks = (('GATES', 'B0 X0 SP1 XX'), ('HOST TIER', 'XT'), ('RETURNING-TURN ABAB', 'XC1 XL1 XC2 XL2'), ('EIGHT-SEAT REPLAY (optional)', 'XB1 XB2'), ('END', 'Z'))
     lines = [
         "# The order of the tp4/exact-end window (docs/tp4-exact-end.md; scripts/ci/make_xe_jobs.py): exact resume P0 (QWEN_PREFIX_STICKY_UNDROP=1 + QWEN_PREFIX_WINDOW_CARRY=1) on the approved ship-4 profile %s and its two gate-only twins "
         "(make_xe_profiles.py), the checkpoint production serves (%s, revision %s), ONE image (%s, a placeholder: B0 builds it from the pushed tp4/exact-end head WITH the K64j-OQ graft) and ONE window."
@@ -173,6 +182,7 @@ def render_order(table):
         "#   SP1  'SPLIT_PROBE verdict=IDENTICAL' (exit 0): a 128-aligned resume is byte-exact; 'verdict=DIFFERS' (exit 2, a valid measured answer) plus the 'SPLIT_PROBE attribution' lines: cause=bucket or cause=handoff per split (the doc's 2); "
         "'verdict=FAIL' is no answer. Soft: P0 does not depend on it.",
         "#   XX   (STOP) the exact-resume plan PASS: every cold/hit pair IDENTICAL, the oracle's Q strict, at least one carried admission, every window audit exact=True and every pair's window digests EQUAL, the checkpoint read. ANY difference is NO-GO.",
+        "#   XT   (soft) the tier-returning plan PASS beside the carry: every pair IDENTICAL, the restore and the spill on record, a carried admission on a restored session, every window audit exact=True, no tier latch beyond the drilled kill switch.",
         "#   XC1 XL1 XC2 XL2   exact_resume_compare.py (XC1, XL1) and (XC2, XL2): the hits IDENTICAL across the arms, the lever's Q one chunk higher where expected, the TTFT delta per conversation against the control-to-control spread (XC1 against XC2). "
         "GO needs both pairs negative beyond the spread and the texts equal.",
         "#   XB1 XB2  (optional) prefix_agent_turns.py: the turns IDENTICAL across the arms, the paired continuation TTFT, the stall of the other seats.",

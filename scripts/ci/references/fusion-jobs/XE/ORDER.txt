@@ -8,11 +8,12 @@
 # P0. GRID: the four cards expose a 13x10 compute grid since the firmware unlock. Read it from the run, never assume 11x10: every pair runs on one grid.
 # ARC-ZERO SP1 XB2
 # ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO (minRunners and maxRunners 0, the normal values written down first, restored by the same patch with the old numbers) BEFORE SP1 and restores them AFTER XB2, i.e. around every weight load, every audited boot (a model load under CI load has hit the platform's load timeout) and every timed job. B0, X0 and Z do not need the pause.
-# THE JOBS, in value order (cut the window at a block end): GATES: B0 X0 SP1 XX (210 min); RETURNING-TURN ABAB: XC1 XL1 XC2 XL2 (180 min); EIGHT-SEAT REPLAY (optional): XB1 XB2 (90 min); END: Z (10 min). B0 is the WINDOW build.
+# THE JOBS, in value order (cut the window at a block end): GATES: B0 X0 SP1 XX (210 min); HOST TIER: XT (120 min); RETURNING-TURN ABAB: XC1 XL1 XC2 XL2 (180 min); EIGHT-SEAT REPLAY (optional): XB1 XB2 (90 min); END: Z (10 min). B0 is the WINDOW build.
 # DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
 # NEEDS X0 <- B0
 # NEEDS SP1 <- X0
 # NEEDS XX <- X0
+# NEEDS XT <- XX
 # NEEDS XC1 <- XX
 # NEEDS XL1 <- XC1 XX
 # NEEDS XC2 <- XL1
@@ -24,14 +25,16 @@
 #   X0   four cards present and healthy, the fabric as measured, the 13x10 grid in the run, no other window driver alive; the Swift weight cache found.
 #   SP1  'SPLIT_PROBE verdict=IDENTICAL' (exit 0): a 128-aligned resume is byte-exact; 'verdict=DIFFERS' (exit 2, a valid measured answer) plus the 'SPLIT_PROBE attribution' lines: cause=bucket or cause=handoff per split (the doc's 2); 'verdict=FAIL' is no answer. Soft: P0 does not depend on it.
 #   XX   (STOP) the exact-resume plan PASS: every cold/hit pair IDENTICAL, the oracle's Q strict, at least one carried admission, every window audit exact=True and every pair's window digests EQUAL, the checkpoint read. ANY difference is NO-GO.
+#   XT   (soft) the tier-returning plan PASS beside the carry: every pair IDENTICAL, the restore and the spill on record, a carried admission on a restored session, every window audit exact=True, no tier latch beyond the drilled kill switch.
 #   XC1 XL1 XC2 XL2   exact_resume_compare.py (XC1, XL1) and (XC2, XL2): the hits IDENTICAL across the arms, the lever's Q one chunk higher where expected, the TTFT delta per conversation against the control-to-control spread (XC1 against XC2). GO needs both pairs negative beyond the spread and the texts equal.
 #   XB1 XB2  (optional) prefix_agent_turns.py: the turns IDENTICAL across the arms, the paired continuation TTFT, the stall of the other seats.
 # NO-GO for P0: any pair that differs (XX), a window digest that differs, an audit line with exact=False, a Q above the oracle's, any program compiled after the warm, a lever answer that differs from the control's, a missing checkpoint line. Adopting is the owner's decision: the switches are gate instruments today (serving_c2_contract.exact_resume_problems) and a ship profile needs an owner traffic waiver naming them (docs/tp4-exact-end.md 7).
-# Time (estimate, minutes): B0 40, X0 20, SP1 30, XX 120, XC1 45, XL1 45, XC2 45, XL2 45, XB1 45, XB2 45, Z 10: 490 minutes (8 h 10 min) in all, 450 minutes of cards (X0 to Z).
+# Time (estimate, minutes): B0 40, X0 20, SP1 30, XX 120, XT 120, XC1 45, XL1 45, XC2 45, XL2 45, XB1 45, XB2 45, Z 10: 610 minutes (10 h 10 min) in all, 570 minutes of cards (X0 to Z).
 B0-xe-build stop tp4-xe-1 40
 X0-xe-status-rescan-reset stop tp4-xe-1 20
 SP1-split-attribution soft tp4-xe-1 30
 XX-xe-exactness stop tp4-xe-1 120
+XT-xe-tier-returning soft tp4-xe-1 120
 XC1-control-a soft tp4-xe-1 45
 XL1-xe-a soft tp4-xe-1 45
 XC2-control-b soft tp4-xe-1 45
