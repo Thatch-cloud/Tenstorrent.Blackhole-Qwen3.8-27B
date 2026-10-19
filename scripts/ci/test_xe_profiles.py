@@ -91,7 +91,10 @@ class TwinTests(unittest.TestCase):
 
     def test_the_twins_sit_right_after_the_ship4_twins(self):
         names = list(PROFILES)
-        last = max(names.index(name) for name in ship4.twin_names())
+        import make_np1_profiles
+
+        # (tp4/next-1: the lone-user round's twins sit right after the ship-4 twins, these after them, the ship-5 twins after these: the generators anchor in that chain)
+        last = max(names.index(name) for name in list(ship4.twin_names()) + list(make_np1_profiles.twin_names()))
         self.assertEqual(names[last + 1:last + 3], list(twins.NAMES))
 
     def test_a_parent_that_cannot_be_twinned_is_refused(self):
@@ -118,6 +121,11 @@ class ProtectedTests(unittest.TestCase):
             self.assertEqual(PROFILES[name], profile, name)
         added = sorted(set(PROFILES) - set(before['profiles']))
         self.assertTrue(set(twins.NAMES) <= set(added))
+        import make_np1_profiles
+        import make_s5_profiles
+
+        # (tp4/next-1 integrated this branch with the lone-user round's twins and the ship-5 candidate and its audited twins)
+        added = [name for name in added if name not in make_np1_profiles.twin_names() and name not in make_s5_profiles.owned_names()]
         # (the other two are the ER package's own gate-only twins of the older combined arm, placed by make_fusion_profiles.py from fusion-wp/ER.json)
         self.assertEqual(sorted(name for name in added if name not in twins.NAMES), sorted(name for name in added if name.endswith(('-fx-all-er', '-fx-all-er-audit'))))
         self.assertEqual(len(added), 4)

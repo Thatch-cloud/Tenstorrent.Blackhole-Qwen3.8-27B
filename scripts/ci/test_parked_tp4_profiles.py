@@ -277,6 +277,9 @@ class ProfileTests(unittest.TestCase):
         import make_xe_profiles
 
         generated |= set(make_xe_profiles.twin_names())      # (tp4/exact-end's, test_xe_profiles)
+        import make_s5_profiles
+
+        generated |= set(make_s5_profiles.twin_names())      # (tp4/next-1's audited twins of the ship-5 candidate, test_s5_profiles)
         for name, profile in profiles.items():
             env = profile['env']
             named = [flag for flag in env if flag.startswith('QWEN_FAST_PARKED_') or flag in ('QWEN_FAST_GATE_DRAM_BALLAST', 'QWEN_FAST_LEVERN_BUILD_MS')]

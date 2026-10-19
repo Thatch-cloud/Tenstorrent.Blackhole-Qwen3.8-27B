@@ -11,8 +11,8 @@ THREE ORDER FILES share the folder (the window driver reads a fixed ORDER.txt, s
 
   ORDER.txt        WINDOW 1 (3 h 35 min of cards after the build): B0 build (while production serves), X0, A1 the combined audited attach on `-fx-s5-audit` (STOP; with the production-shaped agent_turns),
                    T1A and T1B the timed pair (the approved ship-4 profile against the candidate at one, two and four live seats with eight beside them, and agent_turns on both legs), Z.
-  ORDER-W2.txt     WINDOW 2: A2 the audited exact-resume prefix arm (cold-twin pairs, moved here from window 1 to keep it short), NP9's long-answer jobs N1 N2 N3 (the 32,768-token ceiling) on the same
-                   image and the candidate, A3 the audited sliced restore (optional), Z.
+  ORDER-W2.txt     WINDOW 2: A2 the audited exact-resume prefix gate on real multi-turn text (cold-twin pairs, STOP; 120 minutes, which window 1 cannot hold), NP9's long-answer jobs N1 N2 N3 (the 32,768-token
+                   ceiling) on the same image and the candidate, A3 the audited sliced restore (optional), SP1 the split-attribution probe (no build), Z.
   ORDER-SHIP.txt   AFTER THE OWNER APPROVES (and only then): B1 the ship build and SR the platform replay of the candidate, exactly as the ship-4 pack's: B1 is refused by the job reader while the waiver is PENDING.
 
 The production-shaped agent test (smoke name `agent_turns`, tp4/agent-turns, merged) is named in A1, A1N, T1A and T1B by AGENT_TURNS_TEST below; empty that constant and run this script with --write to
@@ -56,9 +56,11 @@ HEADER = """# A committed TEMPLATE of .github/c2-serving-job.env for the tp4/nex
 # ONE IMAGE FOR THE WHOLE WINDOW: C2_IMAGE_TAG=%(image)s is a PLACEHOLDER for the tag B0 builds from the pushed branch head WITH the K64j-OQ graft (sed -i 's/%(image)s/<tag>/' *.env). A commit of a file
 # the image carries needs a new B0 build and a new tag in every template. This window never stops, starts or hands back the node agent.
 # C2_MODEL_REPO / C2_MODEL_REVISION (qwen_c2_checkpoint.py): a job that carries them serves the Swift checkpoint (what production serves) from its own converted-weight directory and, since NP9, with the output
-# ceiling of its catalog entry; the keys are the same in every smoke job of this pack, so each pair differs by the profile alone. The prefix, replay and build steps do not forward the selection (the job reader
-# refuses the keys beside them): they run the base checkpoint, which is what their question (exactness of reuse against a cold twin of the same boot; the platform sequence) does not depend on."""
+# ceiling of its catalog entry; the keys are the same in every smoke and prefix job of this pack (the prefix gate serves the selection in its containers too and fails an arm whose log lacks the checkpoint lines), so each pair
+# differs by the profile alone. The replay and build steps do not forward the selection (the job reader refuses the keys beside them): they run the base checkpoint."""
 
+PREFIX_CHECKPOINT_READ = ('CHECKPOINT READ (the prefix gate checks every arm\'s container log; the smoke step passes c2_smoke_check.py --expect-checkpoint): the log holds "[QWEN-C2] checkpoint %s@%s key=... weight_cache=.../weights-ckpt/<key> '
+                          'base_cache=... (the base cache is not read or written)" once, a "weight cache ...: found" line and the worker\'s "[QWEN-C2] checkpoint bound ..." line; the arm\'s result line says "checkpoint %s@%s: read".' % (REPO, REVISION, REPO, REVISION[:12]))
 CHECKPOINT_READ = ('CHECKPOINT READ (the workflow passes c2_smoke_check.py --expect-checkpoint): the container log holds "[QWEN-C2] checkpoint %s@%s key=... weight_cache=.../weights-ckpt/<key> base_cache=... '
                    '(the base cache is not read or written)" once, a "weight cache ...: found" line (the cache the Swift window built; this pack never builds it) and the worker\'s "[QWEN-C2] checkpoint bound ..." line; '
                    'the models answer names %s.' % (REPO, REVISION, SERVED))
@@ -134,16 +136,18 @@ def rows():
     out.append(dict(name='A1N-s5-audited-attach-nowc', orders=(), mode='stop', minutes=90 + agent_minutes('A1N'), actions='reset smoke', profile=AUDIT_NOWC, tests=agent(A1_TESTS), telemetry=True, box=180, model=True, extra=[],
                     why=('A1N (the FALLBACK of A1, not in any ORDER: pushed only when A1 stopped on W3 WC alone): %s, the audited twin without W3 WC and with F1\'s audit back, on Swift, the same tests and the same READ as A1 for '
                          'everything but WC. If A1N passes the candidate is audited whole; W3 WC stays unproven and is not in the candidate. %s %s %s' % (AUDIT_NOWC, CHECKPOINT_READ, TELEMETRY, ARC))))
-    out.append(dict(name='A2-s5-prefix-exact-resume', orders=('w2',), mode='soft', minutes=55, actions='reset prefix', profile=None, tests=None, telemetry=False, box=120, model=False,
+    out.append(dict(name='A2-s5-prefix-exact-resume', orders=('w2',), mode='stop', minutes=120, actions='reset prefix', profile=None, tests=None, telemetry=False, box=170, model=True,
                     prefix=('exact-resume', AUDIT), extra=[],
-                    why=('A2 (EXACT RESUME against a COLD TWIN, the strict pair read agent_turns does not make: agent_turns proves reuse and measures it, A2 proves every hit equal to its cold prefill): c2_prefix_gate.py '
-                         '--plan exact-resume on the audited twin %s, no baseline: first prompts of about 9k, 33k and 120k tokens, then returning tool turns of 150, 400, 900, 1,700, 2,600 and 300 new tokens, EVERY turn a '
-                         'cold/hit pair under a fresh salt, on sticky sessions with the undrop and the drafter-window carry and their audits, beside the lone-user padded round (each request here is alone: every round is a '
-                         'lone-user padded round with every audit on), the preconverted checkpoints and the tier at its new size. It runs on the BASE checkpoint (the prefix step does not forward the selection; exactness is a '
-                         'cold twin of the same boot, which does not depend on the weights). READ: the plan verdict PASS, every pair IDENTICAL, the oracle\'s Q equal to the hit\'s Q on every turn, "window carry carried" lines on the '
-                         'turns that fit the window and "window carry audit ... exact=True" with the carried window\'s digest equal to the cold twin\'s, no "audit mismatch", no "fell back", no stall, no program compiled by a '
-                         'hit after its cold twin. SOFT: a failure here is NO-GO for the exact-resume lines of the candidate (QWEN_PREFIX_STICKY_UNDROP and QWEN_PREFIX_WINDOW_CARRY in the ship entry of '
-                         'scripts/ci/fusion-wp/S5.json), not for the rest; read it before the owner approves. Estimate 55 minutes (the ER pack\'s ERX estimated 50). %s' % (AUDIT, ARC))))
+                    why=('A2 (EXACTNESS of exact resume P0 on real multi-turn text against COLD TWINS, the pair read agent_turns does not make: agent_turns proves reuse and measures it, A2 proves every hit equal to its cold prefill; '
+                         'the XX job of references/fusion-jobs/XE on the candidate\'s audited twin, STOP): c2_prefix_gate.py --plan exact-resume on %s, no baseline, on Swift: three conversations of real repository text '
+                         'whose first prompts are about 9k, 33k and 120k tokens, then six returning tool turns each of 150, 400, 900, 1,700, 2,600 and 300 new tokens, so the tail a turn re-prefills crosses both sides of 2,048 - (P mod 2,048): '
+                         'the window carry engaged and not engaged. Every turn is a cold run under a fresh salt and the hit under the conversation\'s salt, compared token for token (strict), the oracle\'s Q strict, on sticky sessions with the '
+                         'undrop, the carry and its audit, beside the lone-user padded round (each request here is alone: every round is a lone-user padded round with every audit on), the preconverted checkpoints, the sliced restore '
+                         'and the tier at its new size. READ: the plan PASS: every cold/hit pair IDENTICAL; every continuation\'s Q the oracle\'s (none above it; under it only with an eviction on record); the engaged line with undrop=1 carry=1, at '
+                         'least one carried admission, every window carry audit line exact=True and every pair\'s two window digests EQUAL; beside the tile-aligned window of this profile "[PINDIAG] tap window aligned engaged ... parts=2" on a '
+                         'carried turn (the carried rows are the first aligned part: prefix_window_carry.Carried.align) with no "fell back" line; every other audit line exact=True; no program growth after the warm; no stall. %s ANY difference '
+                         'is NO-GO for the exact-resume lines of the candidate (QWEN_PREFIX_STICKY_UNDROP and QWEN_PREFIX_WINDOW_CARRY in the ship entry of scripts/ci/fusion-wp/S5.json); STOP so that the window-2 jobs that follow do not '
+                         'run on a candidate whose P0 differs. The ~120k conversation\'s cold twins dominate (seven ~40 s cold prefills and an audited 8x262k boot). Estimate 120 minutes (the XE pack\'s XX). %s' % (AUDIT, PREFIX_CHECKPOINT_READ, ARC))))
     out.append(dict(name='T1A-s4-control', orders=('w1',), mode='soft', minutes=30 + agent_minutes('T1A'), actions='reset smoke', profile=SHIP4, tests=agent(TIMED_TESTS), telemetry=True, box=95, model=True, extra=[],
                     why=('T1A (TIMED, the CONTROL of the pair): the approved ship-4 profile %s on Swift, the stack production runs: a lone live user decodes on the 4-row per-request engine, two or three on the padded 64-row block, four on '
                          'the full block, six or more on the octo block. Tests: %s%s. Every boot a fresh reset. %s %s %s' % (SHIP4, SHAPES, (', then agent_turns (production-shaped traffic). ' + AGENT_READ) if AGENT_TURNS_TEST else '', ARC, CHECKPOINT_READ, TELEMETRY))))
@@ -175,16 +179,20 @@ def rows():
                          'requests are all resident: 8 x 1,971 = 15,768 of the 16,499 blocks (docs/tp4-np9-answer32k.md), so no seat waits: the container log holds NO "kv reservation hold" line (a hold here means the pool arithmetic '
                          'is wrong). The eight prefills queue (about 26 s each), then eight seats decode at depth 96,000 to 126,000 together for 30,000 tokens. %s %s %s READ also: the per-seat rate at depth is recorded against '
                          'concurrent8_code_128k_long of the Swift window, never gated. %s %s' % (CEILING_READ, ANSWER_READ, NO_MEMORY, ARC, TELEMETRY))))
-    out.append(dict(name='A3-s5-tier-slice-audited', orders=('w2',), mode='opt', minutes=100, actions='reset prefix', profile=None, tests=None, telemetry=False, box=180, model=False,
+    out.append(dict(name='A3-s5-tier-slice-audited', orders=('w2',), mode='opt', minutes=100, actions='reset prefix', profile=None, tests=None, telemetry=False, box=180, model=True,
                     prefix=('tier-concurrent-sliced', AUDIT), extra=[],
                     why=('A3 (OPTIONAL, the sliced restore under every audit): c2_prefix_gate.py --plan tier-concurrent-sliced on the audited twin %s, no baseline: a session built to the largest size the profile admits, fresh-salt floods '
                          'the size of the KV pool so it leaves the device pool for host RAM, SEVEN SEATS decoding, a 10 s settle and a 60 s control window, then the session RETURNS (restored from the host tier in slices of 512 blocks '
-                         'of at most 200 ms, the seats decoding between them), a long (120k) fresh prompt (SPILL), the returning turn\'s COLD TWIN. It runs on the base checkpoint (the prefix step does not forward the '
-                         'selection). THE QUESTION: is a restore done in slices, at the 48 GiB tier, byte-identical to the whole one under every audit (verify=all, the read-back, the extent audit), beside the lone-user round? '
+                         'of at most 200 ms, the seats decoding between them), a long (120k) fresh prompt (SPILL), the returning turn\'s COLD TWIN. It runs on Swift (the prefix step forwards the selection). THE QUESTION: is a restore done in slices, at the 48 GiB tier, byte-identical to the whole one under every audit (verify=all, the read-back, the extent audit), beside the lone-user round? '
                          'READ: the plan verdict PASS, every pair IDENTICAL, "host tier restore slice on blocks=512 ms=200" once, a restore line with slices above 1 and held_steps above 0, no slice over 1,000 ms, no "slice aborted" '
                          'line the request\'s own end does not explain, no "fell back", zero failure counters, all seven seats across every judged window. A failure is NO-GO for the sliced-restore lines of the candidate '
                          '(QWEN_PREFIX_TIER_RESTORE_SLICE and _MS in the ship entry of scripts/ci/fusion-wp/S5.json), not for the rest. OPT: an optional job the driver admits only if it fits the window. Estimate 100 minutes '
-                         '(the tier-slice pack\'s TS1). %s' % (AUDIT, ARC))))
+                         '(the tier-slice pack\'s TS1). %s %s' % (AUDIT, PREFIX_CHECKPOINT_READ, ARC))))
+    out.append(dict(name='SP1-s5-split-attribution', orders=('w2',), mode='soft', minutes=30, actions='reset fabric', profile=None, tests=None, telemetry=False, box=40, model=False, extra=['C2_FABRIC_PROBE=split-attribute'],
+                    why=('SP1 (SOFT; the decision gate for everything that resumes OFF the 2048 grid, docs/tp4-exact-end.md 2 and 5; P0 does not depend on it): tp4_split_probe.py --attribute under the ship-4 candidate\'s own environment, from the '
+                         'checkout, inside the window image (it needs no build: it uses only the image\'s model code, the C2 graft and the G1 stage). READ: \'SPLIT_PROBE verdict=IDENTICAL\' (exit 0): a 128-aligned resume is byte-exact; '
+                         '\'verdict=DIFFERS\' (exit 2, a valid measured answer) plus the \'SPLIT_PROBE attribution\' lines (cause=bucket or cause=handoff per split); \'verdict=FAIL\' is no answer. It belongs at the end of window 1 when '
+                         'the minutes allow; window 1 of this pack does not have them, so it closes window 2. Estimate 30 minutes (the XE pack\'s SP1).')))
     # after the approval
     out.append(dict(name='B1-ship-build', orders=('ship',), mode='soft', minutes=35, actions='build', profile=None, tests=None, telemetry=False, box=None, model=False,
                     extra=['C2_BAKE_DEFAULT_PROFILE=%s' % SHIP5, 'C2_BAKE_GRAFT=K64j-OQ'],
@@ -245,7 +253,7 @@ def needs_of(name):
     """The NEEDS directives of one ORDER file, by window key."""
     return {
         'w1': ['X0 <- B0', 'A1 <- X0', 'T1A <- A1', 'T1B <- T1A'],
-        'w2': ['A2 <- X0', 'N1 <- X0', 'N2 <- N1', 'N3 <- N1', 'A3 <- X0'],
+        'w2': ['A2 <- X0', 'N1 <- A2', 'N2 <- N1', 'N3 <- N1', 'A3 <- X0', 'SP1 <- X0'],
         'ship': ['SR <- B1'],
     }[name]
 
@@ -300,8 +308,9 @@ def render_order_w1(table):
         "# THE NEW DEVICE FACTS (first on a card here): NP1 gives the K/V writers and the extent reader a block id past vLLM's pool in a page table (K1 to K4 of docs/tp4-np1-fastlane.md); exact resume wraps vLLM's hit lookup and uploads carried "
         "drafter-window rows; the sliced restore holds a returning request between slices; W3 WC launches two kernels that have never been through a compiler. A1 is the first card to do any of it, with the audits on; A2 and A3 (window 2) "
         "are the strict cold-twin and forced-eviction reads.",
-        "# WHAT WAS TRIMMED TO KEEP THIS WINDOW NEAR 3 H: A2 (the exact-resume prefix arm with cold twins, 55 min) moved to the front of window 2, because agent_turns in A1 now runs the same salted returning-turn path under every audit "
-        "(it proves reuse and measures it; A2 proves each hit equal to its cold prefill). The sliced restore's forced-eviction arm A3 (100 min) is window 2's optional tail. The window is %(total)d minutes of cards against the 180 target: the "
+        "# WHAT WAS TRIMMED TO KEEP THIS WINDOW NEAR 3 H: A2 (the exact-resume prefix gate with cold twins on real multi-turn text, 120 min, STOP) is the first job of window 2: it does not fit here, and agent_turns in A1 already runs the same salted returning-turn path "
+        "under every audit (it proves reuse and measures it; A2 proves each hit equal to its cold prefill, so the exactness proof of P0 is read there before anything ships). The sliced restore's forced-eviction arm A3 (100 min) "
+        "is window 2's optional tail and the split-attribution probe SP1 (30 min, no build) its last soft job. The window is %(total)d minutes of cards against the 180 target: the "
         "boots (A1, T1A, T1B: three model loads) are what cost. To cut more: drop agent_turns from T1A and T1B (-%(agent)d min; the pair then times the np1 shapes alone) or concurrent5_split and concurrent8_drain from A1 (about -10 min)."
         % dict(total=cards, agent=(AGENT_TURNS_MINUTES['T1A'] + AGENT_TURNS_MINUTES['T1B']) if AGENT_TURNS_TEST else 0),
     ] + COMMON_P0 + [
@@ -334,7 +343,7 @@ def render_order_w2(table):
     names, total, cards, builds = total_lines(table)
     lines = [
         "# The order of the tp4/next-1 WINDOW 2 (docs/tp4-next1.md, docs/tp4-np9-answer32k.md; scripts/ci/make_s5_jobs.py): NP9's long-answer jobs on the ship-5 candidate %s and the SAME image as window 1 (%s, the tag B0 built), Swift "
-        "(%s, revision %s) with the 32,768-token output ceiling of its catalog entry, with A2 (the audited exact-resume arm, from window 1) first and A3 the audited sliced restore last. RUN IT FROM A COMMIT WHERE THIS FILE IS ORDER.txt (git mv ORDER-W2.txt ORDER.txt): the window driver reads a fixed ORDER.txt." % (SHIP5, IMAGE, REPO, REVISION[:12]),
+        "(%s, revision %s) with the 32,768-token output ceiling of its catalog entry, with A2 (the audited exact-resume gate on real multi-turn text: P0's exactness proof, STOP) first, A3 the audited sliced restore and SP1 the split-attribution probe last. RUN IT FROM A COMMIT WHERE THIS FILE IS ORDER.txt (git mv ORDER-W2.txt ORDER.txt): the window driver reads a fixed ORDER.txt." % (SHIP5, IMAGE, REPO, REVISION[:12]),
         COMMON_FORMAT,
         CANDIDATE % (SHIP5, twins_waiver_id(), SHIP4),
         "# WHAT THIS DECIDES (the owner's, never the window's): whether the 32,768-token ceiling goes to production with the candidate. The CPU side is settled (docs/tp4-np9-answer32k.md: the ceiling allocates no device memory on the serving shape; it costs "
@@ -344,7 +353,7 @@ def render_order_w2(table):
     ] + COMMON_P0 + [
         "# ARC-ZERO A2 A3",
         "# ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO BEFORE A2 and restores them AFTER A3 (the decodes here run 7 to 30 minutes and every boot is a model load under the platform's timeout).",
-        "# THE JOBS, in value order (cut the window at a block end): %s." % blocks_text(table, (('EXACT RESUME, COLD TWINS', 'X0 A2'), ('ONE SEAT', 'N1'), ('EIGHT SEATS', 'N2 N3'), ('SLICED RESTORE', 'A3'), ('END', 'Z'))),
+        "# THE JOBS, in value order (cut the window at a block end): %s." % blocks_text(table, (('EXACT RESUME, COLD TWINS', 'X0 A2'), ('ONE SEAT', 'N1'), ('EIGHT SEATS', 'N2 N3'), ('SLICED RESTORE', 'A3'), ('SPLIT PROBE', 'SP1'), ('END', 'Z'))),
         "# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.",
     ]
     for need in needs_of('w2'):
@@ -352,7 +361,8 @@ def render_order_w2(table):
     lines += [
         "# READ RULES (each also needs c2_smoke_check clean, with the container log, and no stall; the templates' own headers have the whole text):",
         "#   X0   four cards present and healthy, the fabric as measured, the 13x10 grid in the run, no other window driver alive; Swift on the host.",
-        "#   A2   (SOFT) the exact-resume plan PASS: every pair IDENTICAL, the oracle's Q on every turn, the carry's audit lines exact=True, no stall; a failure is NO-GO for the exact-resume lines.",
+        "#   A2   (STOP) the exact-resume plan PASS: every cold/hit pair IDENTICAL, the oracle's Q strict, at least one carried admission, every window audit exact=True and every pair's window digests EQUAL, the aligned-window engaged line on a carried turn, the checkpoint read. ANY difference is NO-GO for P0.",
+        "#   SP1  (SOFT) 'SPLIT_PROBE verdict=IDENTICAL' (exit 0), or verdict=DIFFERS plus the attribution lines (a valid measured answer); verdict=FAIL is no answer. P0 does not depend on it.",
         "#   N1   (STOP) the ceiling lines (request output budget 32768; request contract installed ... <= 32768), the checkpoint lines, long_answer_prefix prefix_equal=True, every long_answer user finish length with 30000 tokens.",
         "#   N2   the same ceiling and answer rules at eight live; octo_judge clean; no hold line (4,280 of 16,499 blocks).",
         "#   N3   the same at 96,000-token prompts; NO 'kv reservation hold' line (15,768 of 16,499 blocks); the per-seat rate at depth recorded.",

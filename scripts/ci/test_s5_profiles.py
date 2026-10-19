@@ -121,7 +121,7 @@ class CandidateTests(unittest.TestCase):
                        'QWEN_PREFIX_STORE_GIB=16', 'QWEN_FAST_GRID13=1', 'output_budget', 'W3 levers', 'Nothing in this list has run on a card TOGETHER', 'switchable', 'idle_scratch.py'):
             self.assertIn(phrase, text)
         evidence = ' '.join(PROFILES[SHIP][contract.TRAFFIC_WAIVER]['evidence'])
-        for phrase in ('tp4/np1-fastlane (CPU)', 'tp4/exact-resume (CPU)', 'tp4/tier-slice (CPU)', 'what has NOT run'):
+        for phrase in ('tp4/np1-fastlane (CPU)', 'tp4/exact-end (CPU', 'tp4/tier-slice (CPU)', 'what has NOT run'):
             self.assertIn(phrase, evidence)
 
     def test_no_gate_instrument_is_in_the_candidate(self):

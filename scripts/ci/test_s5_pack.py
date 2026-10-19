@@ -34,13 +34,14 @@ EXPECTED = {
     'X0-status-rescan-reset': (False, '', '', ''),
     'A1-s5-audited-attach': (True, pack.AUDIT, ','.join(pack.A1_TESTS.split(',') + AGENT), ''),
     'A1N-s5-audited-attach-nowc': (True, pack.AUDIT_NOWC, ','.join(pack.A1_TESTS.split(',') + AGENT), ''),
-    'A2-s5-prefix-exact-resume': (False, '', '', 'exact-resume'),
+    'A2-s5-prefix-exact-resume': (True, '', '', 'exact-resume'),
     'T1A-s4-control': (True, pack.SHIP4, ','.join(pack.TIMED_TESTS.split(',') + AGENT), ''),
     'T1B-s5-candidate': (True, pack.SHIP5, ','.join(pack.TIMED_TESTS.split(',') + AGENT), ''),
     'N1-long-answer-solo': (True, pack.SHIP5, pack.NP9_SOLO_TESTS, ''),
     'N2-long-answer8-short': (True, pack.SHIP5, pack.NP9_SHORT_TESTS, ''),
     'N3-long-answer8-deep': (True, pack.SHIP5, pack.NP9_DEEP_TESTS, ''),
-    'A3-s5-tier-slice-audited': (False, '', '', 'tier-concurrent-sliced'),
+    'A3-s5-tier-slice-audited': (True, '', '', 'tier-concurrent-sliced'),
+    'SP1-s5-split-attribution': (False, '', '', ''),
     'B1-ship-build': (False, '', '', ''),
     'SR-platform-replay': (False, '', '', ''),
     'Z-reset': (False, '', '', ''),
@@ -48,7 +49,7 @@ EXPECTED = {
 # the templates each ORDER file lists, in order
 WINDOWS = {
     'ORDER.txt': ['B0-build-window', 'X0-status-rescan-reset', 'A1-s5-audited-attach', 'T1A-s4-control', 'T1B-s5-candidate', 'Z-reset'],
-    'ORDER-W2.txt': ['X0-status-rescan-reset', 'A2-s5-prefix-exact-resume', 'N1-long-answer-solo', 'N2-long-answer8-short', 'N3-long-answer8-deep', 'A3-s5-tier-slice-audited', 'Z-reset'],
+    'ORDER-W2.txt': ['X0-status-rescan-reset', 'A2-s5-prefix-exact-resume', 'N1-long-answer-solo', 'N2-long-answer8-short', 'N3-long-answer8-deep', 'A3-s5-tier-slice-audited', 'SP1-s5-split-attribution', 'Z-reset'],
     'ORDER-SHIP.txt': ['B1-ship-build', 'SR-platform-replay'],
 }
 NOT_IN_AN_ORDER = {'A1N-s5-audited-attach-nowc'}      # the fallback of A1, pushed by hand when A1 stopped on W3 WC alone
@@ -88,10 +89,10 @@ class OrderTests(unittest.TestCase):
 
     def test_the_modes_and_the_stop_rules(self):
         modes = {row[0]: row[1] for name in WINDOWS for row in order_lines(name)}
-        self.assertEqual({key: modes[key] for key in ('B0-build-window', 'X0-status-rescan-reset', 'A1-s5-audited-attach', 'N1-long-answer-solo')}, {key: 'stop' for key in (
-            'B0-build-window', 'X0-status-rescan-reset', 'A1-s5-audited-attach', 'N1-long-answer-solo')})
+        stops = ('B0-build-window', 'X0-status-rescan-reset', 'A1-s5-audited-attach', 'A2-s5-prefix-exact-resume', 'N1-long-answer-solo')
+        self.assertEqual({key: modes[key] for key in stops}, {key: 'stop' for key in stops})
         self.assertEqual(modes['A3-s5-tier-slice-audited'], 'opt', 'the optional job the driver admits only if it fits')
-        for key in ('T1A-s4-control', 'T1B-s5-candidate', 'A2-s5-prefix-exact-resume', 'Z-reset', 'B1-ship-build', 'SR-platform-replay'):
+        for key in ('T1A-s4-control', 'T1B-s5-candidate', 'SP1-s5-split-attribution', 'Z-reset', 'B1-ship-build', 'SR-platform-replay'):
             self.assertEqual(modes[key], 'soft', key)
         self.assertEqual(order_lines('ORDER-W2.txt')[-1][0], 'Z-reset', 'the end sequence is last')
         self.assertEqual(order_lines('ORDER.txt')[-1][0], 'Z-reset')
@@ -112,7 +113,9 @@ class OrderTests(unittest.TestCase):
         text = (PACK / 'ORDER.txt').read_text(encoding='utf-8')
         self.assertIn('WHAT WAS TRIMMED', text)
         self.assertIn('A2', text)
+        self.assertEqual(cards, 220)
         self.assertIn('%d minutes of cards' % cards, text)
+        self.assertEqual(int(next(row[3] for row in order_lines('ORDER-W2.txt') if row[0].startswith('A2'))), 120, 'the prefix gate that does not fit window 1')
 
     def test_the_agent_turn_test_is_in_the_audited_attach_and_both_timed_legs_and_nowhere_else(self):
         self.assertEqual(pack.AGENT_TURNS_TEST, 'agent_turns')
@@ -237,11 +240,12 @@ class TemplateTests(unittest.TestCase):
                 self.assertEqual(found['C2_TELEMETRY'], '1')
 
     def test_no_checkpoint_job_uses_a_step_that_does_not_forward_the_checkpoint(self):
+        self.assertIn('prefix', job.MODEL_ACTIONS, 'tp4/exact-end: the prefix gate serves the selection in its containers')
         for name in EXPECTED:
             actions = set(values(name)['C2_ACTIONS'].split())
             if values(name).get('C2_MODEL_REPO'):
                 self.assertFalse(actions - set(job.MODEL_ACTIONS), name)
-            if actions & {'prefix', 'replay', 'build'}:
+            if actions & {'replay', 'build', 'fabric'}:
                 self.assertNotIn('C2_MODEL_REPO', values(name), name)
 
     def test_the_prefix_arms_run_the_audited_twin_on_the_plans_they_name(self):
