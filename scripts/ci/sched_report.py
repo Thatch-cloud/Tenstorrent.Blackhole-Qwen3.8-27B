@@ -20,6 +20,7 @@ STEP = re.compile(r'\[PINDIAG\] lever N step n=(\d+) kind=(prefill|decode) seats
                   r'(?: short=([01]) cap_ms=(\S+) guard=([01]))?')
 STICKY = re.compile(r'\[PINDIAG\] sticky engine built req=(\S+) ms=([\d.]+) frontier=(\d+) prompt=(\d+)(?: kind=(build|rebind))?')
 LEAN_SPLIT = re.compile(r'\[PINDIAG\] admission lean split request=(\S+) a_ms=([\d.]+) b_ms=([\d.]+) c_ms=([\d.]+) total_ms=([\d.]+)')
+LEAN_PHASES = re.compile(r'\[PINDIAG\] admission lean rebind phases request=(\S+) slot=(\d+) fence_ms=([\d.]+) rezero_ms=([\d.]+) project_ms=([\d.]+) copy_ms=([\d.]+) history_ms=([\d.]+) engine_ms=([\d.]+)')
 LEAN_ADOPT = re.compile(r'\[PINDIAG\] admission lean adopt request=(\S+) slot=(\d+) readback=([01]) ms=([\d.]+)')
 LEAN_REUSED = '[PINDIAG] admission lean backstop reused the admission reading'
 DRAM_AFTER = '[PINDIAG] dram after engine'
@@ -46,7 +47,7 @@ def _fit(rows):
 
 
 def read(lines):
-    steps, sticky, splits, adopts, spills = [], [], [], [], []
+    steps, sticky, splits, adopts, spills, phases = [], [], [], [], [], []
     reused = dram_lines = slow = complete = 0
     for line in lines:
         if 'lever N step' in line:
@@ -61,6 +62,10 @@ def read(lines):
             match = LEAN_SPLIT.search(line)
             if match:
                 splits.append(tuple(float(value) for value in match.groups()[1:]))
+        elif 'admission lean rebind phases' in line:
+            match = LEAN_PHASES.search(line)
+            if match:
+                phases.append(tuple(float(value) for value in match.groups()[2:]))
         elif 'admission lean adopt' in line:
             match = LEAN_ADOPT.search(line)
             if match:
@@ -77,7 +82,7 @@ def read(lines):
             match = SPILL.search(line)
             if match:
                 spills.append((int(match.group(1)), float(match.group(3)), int(match.group(6) or 0), int(match.group(5) or 0)))
-    return dict(steps=steps, sticky=sticky, splits=splits, adopts=adopts, reused=reused, dram_lines=dram_lines, spills=spills, slow=slow, complete=complete)
+    return dict(steps=steps, sticky=sticky, splits=splits, phases=phases, adopts=adopts, reused=reused, dram_lines=dram_lines, spills=spills, slow=slow, complete=complete)
 
 
 def figures(found):
@@ -88,6 +93,8 @@ def figures(found):
     out.update(rebinds=len(rebinds), rebind_p50=_pct(rebinds, 0.5), rebind_p90=_pct(rebinds, 0.9), builds=len(builds), build_p50=_pct(builds, 0.5))
     out.update(split_a_p50=_pct([row[0] for row in found['splits']], 0.5), split_b_p50=_pct([row[1] for row in found['splits']], 0.5),
                split_c_p50=_pct([row[2] for row in found['splits']], 0.5), split_total_p50=_pct([row[3] for row in found['splits']], 0.5), splits=len(found['splits']))
+    for index, name in enumerate(('fence', 'rezero', 'project', 'copy', 'history', 'engine')):
+        out['phase_' + name + '_p50'] = _pct([row[index] for row in found['phases']], 0.5)
     out.update(adopts=len(found['adopts']), adopts_skipped=sum(1 for taken, _ in found['adopts'] if not taken), adopt_ms_p50=_pct([ms for _, ms in found['adopts']], 0.5),
                backstop_reused=found['reused'], dram_lines=found['dram_lines'])
     # the scheduler: a step line's prev=<kind>:<ms> is the wall time of the step BEFORE it, so the step lines give the time of every step but the last
@@ -138,6 +145,9 @@ ROWS = (
     ('lean split A: host checks, backstop, adoption', 'splits', 'split_a_p50', None, 'ms (p50)'),
     ('lean split B: placement, refusal check, window join', 'splits', 'split_b_p50', None, 'ms (p50)'),
     ('lean split C: the rebind', 'splits', 'split_c_p50', None, 'ms (p50)'),
+    ('lean rebind phases: the fence, the re-zero', 'splits', 'phase_fence_p50', 'phase_rezero_p50', 'ms (p50 / p50)'),
+    ('lean rebind phases: the projection, the copy', 'splits', 'phase_project_p50', 'phase_copy_p50', 'ms (p50 / p50)'),
+    ('lean rebind phases: the K/V history, engine.rebind', 'splits', 'phase_history_p50', 'phase_engine_p50', 'ms (p50 / p50)'),
     ('slot adoptions with the readback skipped', 'adopts', 'adopts_skipped', None, 'of the adoptions logged'),
     ('backstop readings reused', 'backstop_reused', None, None, 'admissions'),
     ('"dram after engine" lines', 'dram_lines', None, None, 'lines'),

@@ -31,6 +31,7 @@ def shared_log():
     lines += [prefill(10, 'r2', 6, 'decode', 140.0, guard=1)]
     lines += [factory.LEAN_SPLIT_MARKER + 'request=r0 a_ms=210.0 b_ms=90.0 c_ms=190.0 total_ms=490.0',
               factory.LEAN_SPLIT_MARKER + 'request=r1 a_ms=70.0 b_ms=85.0 c_ms=185.0 total_ms=340.0',
+              '[PINDIAG] admission lean rebind phases request=r0 slot=3 fence_ms=3.0 rezero_ms=9.0 project_ms=120.0 copy_ms=15.0 history_ms=12.0 engine_ms=26.0',
               factory.LEAN_ADOPT_MARKER + 'request=r0 slot=3 readback=1 ms=160.0', factory.LEAN_ADOPT_MARKER + 'request=r1 slot=3 readback=0 ms=12.0',
               admission.LEAN_REUSED_LINE.format('r1', 3000.0, 4800, 4700, 1000, 512),
               '[PINDIAG] sticky engine built req=r0 ms=541.0 frontier=0 prompt=4088 kind=rebind', '[PINDIAG] sticky engine built req=r1 ms=330.0 frontier=0 prompt=4088 kind=rebind',
@@ -53,6 +54,7 @@ class ReadTests(unittest.TestCase):
         self.assertEqual(values['rebind_p50'], 541.0)
         self.assertEqual(values['build_p50'], 2400.0)
         self.assertEqual((values['splits'], values['split_a_p50'], values['split_c_p50']), (2, 210.0, 190.0))
+        self.assertEqual((values['phase_project_p50'], values['phase_engine_p50'], values['phase_rezero_p50']), (120.0, 26.0, 9.0))
         self.assertEqual((values['adopts'], values['adopts_skipped']), (2, 1))
         self.assertEqual((values['backstop_reused'], values['dram_lines']), (1, 1))
 
@@ -75,7 +77,7 @@ class ReadTests(unittest.TestCase):
 
     def test_a_figure_with_no_line_behind_it_is_none_not_zero(self):
         values = report.figures(report.read(['nothing to see']))
-        for name in ('rebind_p50', 'split_a_p50', 'pending_prefill_share', 'rounds_after_short_p50', 'spill_ms_per_block', 'spill_lifted', 'guard_steps', 'cap_ms', 'gap_ms_p90'):
+        for name in ('rebind_p50', 'split_a_p50', 'phase_project_p50', 'pending_prefill_share', 'rounds_after_short_p50', 'spill_ms_per_block', 'spill_lifted', 'guard_steps', 'cap_ms', 'gap_ms_p90'):
             self.assertIsNone(values[name], name)
         self.assertEqual((values['rebinds'], values['spills'], values['step_lines']), (0, 0, 0))
 

@@ -55,7 +55,8 @@ REPORT = ('READ the arm with python3 scripts/ci/sched_report.py <arm container l
           '(kind=rebind) p50 / p90, the lean split A / B / C, the readbacks skipped, the backstop readings reused, prefill\'s share of the wall time while a prefill is pending, the rounds after each '
           'returning turn, the longest stretch without a decode round, the guard steps and the owed cap. Every figure prints "-" when no line is behind it.')
 LEVER_LINES = ('the lines each lever logs (a lever whose line is absent did not engage, and its arm reads NOT_EXERCISED): "[PINDIAG] admission lean split request=... a_ms=... b_ms=... c_ms=... total_ms=..." '
-               'once per rebound admission and "[PINDIAG] admission lean adopt ..." per slot adoption (QWEN_FAST_ADMISSION_LEAN); "[PINDIAG] lever N sched: owed_cap_ms=1500 short_share=0.65 short_wait_s=5" once and '
+               'once per rebound admission, "[PINDIAG] admission lean rebind phases request=... fence_ms=... rezero_ms=... project_ms=... copy_ms=... history_ms=... engine_ms=..." once per rebind (where the 188 ms go) '
+               'and "[PINDIAG] admission lean adopt ..." per slot adoption (QWEN_FAST_ADMISSION_LEAN); "[PINDIAG] lever N sched: owed_cap_ms=1500 short_share=0.65 short_wait_s=5" once and '
                'short=/cap_ms=/guard= on every "lever N step" line (the pacing); "[PINDIAG] lever N adaptive: decoders<=2 share=0.9 ttft=120 gap_floor=8" once and base=/target=/adaptive= on every step line '
                '(the few-decoder policy); "[PINDIAG] prefix: host tier spill complete on cap_blocks=512 hard_max_blocks=4096 batch_blocks=512 warn_ms=1000" once and batches=/lifted= on every spill line '
                '(complete spills)')

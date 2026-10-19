@@ -408,6 +408,25 @@ class SplitLineTests(Fresh):
             lines = self.admitted(False)
         self.assertFalse([line for line in lines if line.startswith('[PINDIAG] admission lean')])
 
+    def test_flag_off_the_rebind_logs_no_phases_and_returns_what_it_returned(self):
+        with environ(False):
+            lines = self.admitted(False)
+        self.assertFalse([line for line in lines if 'rebind phases' in line])
+
+    def test_lean_one_phases_line_per_rebind_with_six_phases_that_add_up_to_the_rebind(self):
+        import re
+
+        with environ(True):
+            lines = self.admitted(True)
+        phases = [line for line in lines if line.startswith('[PINDIAG] admission lean rebind phases ')]
+        self.assertEqual(len(phases), 1, lines)
+        self.assertRegex(phases[0], r'request=request slot=\d+ fence_ms=[0-9.]+ rezero_ms=[0-9.]+ project_ms=[0-9.]+ copy_ms=[0-9.]+ history_ms=[0-9.]+ engine_ms=[0-9.]+$')
+        rebinds = [line for line in lines if line.startswith('[PINDIAG] parked rebind req=')]
+        total = float(re.search(r' ms=([0-9.]+) ', rebinds[0]).group(1))
+        parts = [float(value) for value in re.findall(r'_ms=([0-9.]+)', phases[0])]
+        self.assertLessEqual(sum(parts[:5]), total + 0.5, 'the five device phases are inside rebind_device\'s own clock')
+        self.assertLessEqual(parts[5], total + 50.0)
+
     def test_lean_one_split_line_per_rebound_admission(self):
         with environ(True):
             lines = self.admitted(True)
