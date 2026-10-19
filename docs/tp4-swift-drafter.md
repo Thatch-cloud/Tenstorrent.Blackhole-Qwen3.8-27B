@@ -79,6 +79,25 @@ Reading: the gain is largest where the cards' traffic is: agent turns (long copi
 gain 4-5% at 16 rows and 1-2% at 4-8 rows. Held-out agent turns are few (32 sequences, 4.5 k answer tokens), so their intervals are wide. The simulator scores bf16 GPU arithmetic: the cards run the projections in
 bfloat8_b, which may eat some of a small gain (the tau lab on the cards is the judge). The public block-16 drafter (b16-98759a49) is indistinguishable from the served one on Swift in the same simulator (4.48 against 4.50 at 16 rows).
 
+### The arms (same held-out set, same control; generated-token truth)
+
+
+| drafter | all: 4 rows | 8 rows | 16 rows | agent turns: 4 rows | 8 rows | 16 rows | chained: 16 rows | code: 16 rows |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| served drafter (control) | 3.064 | 4.165 | 4.495 | 3.298 | 4.637 | 5.085 | 4.185 | 5.052 |
+| bidirectional + block mix, generated-token labels, step 50 | 3.079 (x1.005 [1.002, 1.008]) | 4.190 (x1.006 [1.000, 1.012]) | 4.635 (x1.031 [1.022, 1.041]) | 3.383 (x1.026 [1.011, 1.046]) | 4.918 (x1.061 [1.022, 1.116]) | 5.689 (x1.119 [1.064, 1.198]) | 4.300 (x1.027 [1.016, 1.039]) | 5.173 (x1.024 [1.010, 1.039]) |
+| causal in-block (the recipe), block 16, step 50 | 3.083 (x1.006 [1.003, 1.010]) | 4.201 (x1.009 [1.002, 1.016]) | 4.598 (x1.023 [1.015, 1.033]) | 3.343 (x1.014 [1.002, 1.031]) | 4.961 (x1.070 [1.033, 1.123]) | 5.635 (x1.108 [1.064, 1.170]) | 4.262 (x1.018 [1.008, 1.028]) | 5.145 (x1.019 [1.003, 1.035]) |
+| bidirectional, bf16-argmax labels, step 100 | 3.092 (x1.009 [1.006, 1.013]) | 4.221 (x1.013 [1.008, 1.021]) | 4.677 (x1.040 [1.031, 1.051]) | 3.419 (x1.037 [1.019, 1.060]) | 5.171 (x1.115 [1.061, 1.191]) | 6.006 (x1.181 [1.122, 1.276]) | 4.325 (x1.033 [1.022, 1.045]) | 5.217 (x1.033 [1.022, 1.046]) |
+| as above, lr 5e-5, step 100 | 3.093 (x1.009 [1.006, 1.013]) | 4.205 (x1.010 [1.004, 1.017]) | 4.652 (x1.035 [1.026, 1.046]) | 3.417 (x1.036 [1.013, 1.067]) | 5.129 (x1.106 [1.045, 1.192]) | 5.974 (x1.175 [1.108, 1.283]) | 4.296 (x1.026 [1.016, 1.038]) | 5.207 (x1.031 [1.018, 1.045]) |
+| bidirectional, generated-token labels, step 100 | 3.096 (x1.010 [1.007, 1.014]) | 4.226 (x1.015 [1.010, 1.021]) | 4.690 (x1.043 [1.035, 1.054]) | 3.415 (x1.035 [1.017, 1.060]) | 5.151 (x1.111 [1.059, 1.186]) | 6.044 (x1.189 [1.127, 1.282]) | 4.331 (x1.035 [1.025, 1.044]) | 5.247 (x1.039 [1.026, 1.053]) |
+| bidirectional, generated-token labels, step 150 | 3.104 (x1.013 [1.010, 1.017]) | 4.238 (x1.018 [1.012, 1.025]) | 4.716 (x1.049 [1.040, 1.061]) | 3.444 (x1.044 [1.025, 1.070]) | 5.241 (x1.130 [1.071, 1.219]) | 6.295 (x1.238 [1.163, 1.362]) | 4.350 (x1.039 [1.029, 1.051]) | 5.254 (x1.040 [1.029, 1.052]) |
+
+* LABELS: the generated token or the bf16 argmax at each position as the label: indistinguishable at this scale (step 100: x1.040 against x1.043 at 16 rows; step 150: x1.046 against x1.049). The decision for v2 is the bf16 argmax (the closest proxy of what the cards emit greedily).
+* IN-BLOCK RULE: the recipe trains CAUSAL inside a block, the TT read is bidirectional. At step 50 causal is 0.1-0.3 points better at 4-8 rows and 0.8 worse at 16 rows, inside the intervals: no evidence for training causal; the run trains the way the cards read.
+* LEARNING RATE: 5e-5 is no better than 2e-5 at step 100 (x1.035 against x1.040 at 16 rows): the fine-tune is data-limited, not step-size-limited. Agent turns were still improving at step 300 (x1.12, 1.19, 1.24, 1.25, 1.28 at 16 rows from step 50 to 300).
+* bfloat8_b: the cards run the projection weights as bfloat8_b. Emulated in the simulator (groups of 16 input weights share an exponent, 7-bit magnitude and sign, on every projection, the convolution kernels' projections, `fc` and the selector's projection): the served drafter is unchanged
+  (4.496 against 4.495 at 16 rows) and the fine-tune keeps its gain (x1.014 / x1.022 / x1.053 at 4 / 8 / 16 rows overall, x1.051 / x1.168 / x1.270 on agent turns; the bf16 numbers are x1.014 / x1.023 / x1.056 and x1.052 / x1.172 / x1.279).
+
 ## Packaging (what this branch adds)
 
 * `drafter-manifests/<name>.json` with `"source": "local"`: a drafter trained here has no hub repository. Its model is `local/<name>`, its revision is the first 40 hex digits of the
