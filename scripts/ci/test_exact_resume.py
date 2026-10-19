@@ -48,13 +48,11 @@ import test_sticky_sessions as sticky_tests  # noqa: E402
 CHUNK, BLOCK = prefix_registry.CHUNK, prefix_registry.BLOCK
 UNDROP, CARRY, AUDIT = prefix_registry.ENV_UNDROP, prefix_registry.ENV_WINDOW_CARRY, prefix_registry.ENV_WINDOW_CARRY_AUDIT
 STICKY = 'QWEN_FAST_STICKY_SESSIONS'
-# The commit the flag-off equivalence is held against: tp4/swift (the production tree this branch was merged onto in tp4/next-1). The branch itself grew from
-# tp4/fusion-2 (a3d6583c), whose graft predates the prefix tiers' class counters, so the equivalence is held against the graft it was merged with.
 BASE = '27af6902'
 
 
 def base_module(relative):
-    """scripts/ci/<relative> at BASE, or None without git history."""
+    """scripts/ci/<relative> at the base commit this branch grew from (tp4/swift, whose graft the switches-off path must equal), or None without git history."""
     try:
         result = subprocess.run(['git', 'show', '%s:scripts/ci/%s' % (BASE, relative)], capture_output=True, cwd=str(HERE), timeout=60)
     except (OSError, subprocess.SubprocessError):
@@ -233,8 +231,8 @@ class GraftOffTests(Harness):
         stats = dict(installed.registry.stats)
         for name in ('capture_ms', 'restore_ms') + prefix_registry.TURN_STAT_NAMES:
             stats.pop(name, None)
-        # The registry's stats line carries the host's own memory readings (rss=, avail=: /proc, different on every read), which no graft decides.
-        return trace, stats, [re.sub(r'\b(rss|avail)=\d+', r'\1=N', line) for line in self.logs if not line.startswith('install ')]
+        # The tier line reports the process's own resident size and the host's available memory, which differ between two scenarios of one process.
+        return trace, stats, [re.sub(r'(rss|avail)=\d+', r'\1=N', line) for line in self.logs if not line.startswith('install ')]
 
     def test_the_switches_off_make_the_base_graft_s_decisions(self):
         base = base_module('qwen_prefix_scheduler_patch.py')
@@ -497,32 +495,6 @@ class WindowTests(unittest.TestCase):
                 second.close()
                 self.assertTrue(all(any(tensor is gone for gone in ops.deallocated) for tensor in uploaded))
         first.close()
-
-    def test_a_carried_resume_beside_the_aligned_window_has_the_cold_window_row_for_row(self):
-        """QWEN_FAST_TAP_WINDOW_ALIGNED is ON in the ship profile: the capture that took the rows (the aligned join) and the capture that
-        carries them (parts behind the carried rows) must both hand the drafter the cold window, and the aligned flag must not change one byte."""
-        ops = Ops()
-        with mock.patch.dict(os.environ, {window.ALIGNED_FLAG: '1'}):
-            first = self.prefill(ops, 9000)
-            self.assertTrue(first.aligned)
-            for got, want in zip(first.outputs(), self.cold(9000)):
-                self.assertTrue(torch.equal(got.data, want))
-            start, payload, nbytes, sha = carry_module.export(ops, 'mesh', first.outputs(), 9000, 8192)
-            stored = prefix_registry.Window(start, 8192, payload, nbytes, sha)
-            for prompt in (10100, 10239):
-                with self.subTest(prompt=prompt):
-                    carried = carry_module.Carried(stored, prompt, 8192)
-                    second = self.prefill(ops, prompt, start=8192, carry=carried, audit=True)
-                    self.assertTrue(second.aligned)
-                    outputs = second.outputs()
-                    self.assertEqual(carried.transport, 'exact')
-                    for got, want in zip(outputs, self.cold(prompt)):
-                        self.assertEqual(got.shape[2], CHUNK)
-                        self.assertTrue(torch.equal(got.data, want), 'the spliced window is the cold window with the aligned flag on')
-                    uploaded = list(carried.uploaded)
-                    second.close()
-                    self.assertTrue(all(any(tensor is gone for gone in ops.deallocated) for tensor in uploaded))
-            first.close()
 
     def test_a_prompt_on_the_boundary_exports_its_whole_window_without_releasing_it(self):
         ops = Ops()

@@ -18,6 +18,10 @@ WHAT (QWEN_PREFIX_WINDOW_CARRY=1; default off, gate-only profiles; needs sticky 
 AUDIT (QWEN_PREFIX_WINDOW_CARRY_AUDIT=1, gate only): the uploaded rows are read back and compared with the host bytes (transport), and every
 sticky prefill logs the sha256 of its whole window, so the prefix gate holds a hit's window equal to its cold twin's:
     [PINDIAG] prefix: window carry audit req=<id> P=<n> Q=<n> carried=<rows> window_sha=<64 hex> transport=<exact|mismatch|none> exact=<True|False>
+TILE-ALIGNED WINDOW (QWEN_FAST_TAP_WINDOW_ALIGNED=1, the ship-4 profile's setting): the capture builds its window from tile-aligned parts so that no new
+prompt length compiles a concat (tap_window_aligned). A carried part joins them as one more aligned part: align() leads the upload with
+start % 32 zero rows (never read: the join's one slice cuts them away), so its height is a whole number of tiles and it ends on the checkpoint's
+2048-row boundary, which is where the capture's own aligned part begins. The window rows themselves are still the stored bytes.
 MARKERS: '[PINDIAG] prefix: window carry engaged' (the scheduler graft's install), '... stored req= pos= rows= bytes= ms=' (an export),
 '... carried req= Q= rows=' (a carried admission), '... skipped req= why=' (an export that could not run: the next turn resumes lower).
 Stdlib at import; torch only inside the functions that move bytes, ttnn only through the `operations` the caller passes.
@@ -28,6 +32,7 @@ import os
 import time
 
 CHUNK = 2048
+TILE = 32
 FLAG = 'QWEN_PREFIX_WINDOW_CARRY'
 AUDIT_FLAG = 'QWEN_PREFIX_WINDOW_CARRY_AUDIT'
 MARKER = '[PINDIAG] prefix: window carry'
@@ -117,9 +122,27 @@ class Carried(object):
         self.stored = int(window.end) - int(window.start)
         self.transport = 'none'
         self.uploaded = []
+        self.lead = 0
+
+    def align(self):
+        """Make the upload a whole number of tiles (QWEN_FAST_TAP_WINDOW_ALIGNED): lead it with self.start % 32 rows of padding. Returns the first
+        absolute row of the upload (a multiple of 32; the padding is never part of the window: the aligned join slices it away)."""
+        self.lead = self.start % TILE
+        return self.begin
+
+    @property
+    def begin(self):
+        """The absolute row the uploaded tensor starts at: the window start, less the padding align() added."""
+        return self.start - self.lead
 
     def host_rows(self):
-        return [tensor[:, :, self.stored - self.rows:, :].contiguous() for tensor in self.payload]
+        rows = [tensor[:, :, self.stored - self.rows:, :].contiguous() for tensor in self.payload]
+        if not self.lead:
+            return rows
+        import torch
+
+        return [torch.cat([torch.zeros(tensor.shape[0], tensor.shape[1], self.lead, tensor.shape[3], dtype=tensor.dtype), tensor], dim=2).contiguous()
+                for tensor in rows]
 
     def upload(self, operations, mesh, audit=False):
         """Device tensors of the carried rows, one per tap, laid out as the capture's own outputs (per chip, DRAM, tile); with audit, read

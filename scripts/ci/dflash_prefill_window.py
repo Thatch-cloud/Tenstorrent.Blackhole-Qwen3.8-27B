@@ -264,6 +264,10 @@ class PrefillWindowCapture:
 
             self.aligned = tap_window_aligned.enabled() and checks is None
             self.aligned_audit = self.aligned and tap_window_aligned.audit_enabled()
+            if self.aligned and carry is not None:
+                # Exact resume P0 beside the tile-aligned window (the ship-4 profile has both): the carried rows are one more aligned part, led by
+                # the padding that makes the upload a whole number of tiles (prefix_window_carry.Carried.align), so a carried turn compiles nothing.
+                carry.align()
         self.cursor = self.start
         self.started = self.active = self.complete = self.closed = False
         # How many engine steps this prompt's chunks arrived across. One for an
@@ -586,26 +590,16 @@ class PrefillWindowCapture:
 
         operations, window = self.operations, self.window
         pieces = [(chunk['chunk_start'], chunk['valid_rows']) for chunk in self.chunks if chunk['retained_rows']]
-        output, states = [], set()
-        # Exact resume P0 (QWEN_PREFIX_WINDOW_CARRY) beside the aligned window: outputs() puts the carried rows in front of this capture's own
-        # parts. They are exact bytes of rows [window start, R) (R a chunk boundary, so the capture's own parts start on a tile boundary), and
-        # their count is not a tile multiple, so no aligned join applies: the capture's parts are cut to their exact pieces (exact_join) and joined
-        # behind the carried rows in ONE concat, which is the composition a capture without the aligned flag builds.
-        carried = None
         if self.carried is not None:
-            carried, parts = parts[0], parts[1:]
+            # The carried part is the first part: absolute rows [begin, q), begin on a tile boundary (the window start less its padding).
+            pieces = [(self.carried.begin, self.carried.end - self.carried.begin)] + pieces
+        output, states = [], set()
         for index in range(len(self.taps)):
             values = [part[index] for part in parts]
             cover = twa.covers(window, pieces, [value.shape[2] for value in values])
             expanded = twa.expanded(cover)
-            layout = twa.plan(window, cover) if expanded and carried is None else None
-            if carried is not None:
-                stop = window['start'] + carried[index].shape[2]
-                state = 'carried'
-                merged = twa.exact_join(operations, [carried[index]] + values,
-                                        [dict(begin=window['start'], end=stop, start=window['start'], stop=stop, aligned=False)] + cover,
-                                        window, addresses=addresses)
-            elif not expanded:
+            layout = twa.plan(window, cover) if expanded else None
+            if not expanded:
                 state = 'exact'
                 merged = values[0] if len(values) == 1 else operations.concat(values, dim=2,
                     memory_config=operations.DRAM_MEMORY_CONFIG)

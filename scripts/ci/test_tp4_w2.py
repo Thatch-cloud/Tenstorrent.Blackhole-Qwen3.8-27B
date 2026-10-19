@@ -165,10 +165,11 @@ class ProfileTests(unittest.TestCase):
         from make_ship4_profiles import twin_names as ship4_twins      # (and tp4/ship-4's twins of the combined candidate, test_ship4_profiles)
         from make_np1_profiles import twin_names as np1_twins      # (and tp4/np1-fastlane's, test_np1_profiles)
         from make_s5_profiles import twin_names as s5_twins        # (and tp4/next-1's, test_s5_profiles)
+        from make_xe_profiles import twin_names as xe_twins      # (and tp4/exact-end's, test_xe_profiles)
         carriers = sorted(name for name, profile in load()['profiles'].items() if spread.FLAG in profile.get('env', {}))
-        self.assertEqual(carriers, sorted([W2, W2_AUDIT] + list(WINDOW_F1) + sorted(SHIPPED) + list(kill_twins()) + list(upload_twins()) + list(fusion_twins()) + list(octo3_twins()) + list(ship4_twins()) + list(np1_twins()) + list(s5_twins()) + list(tier_twins())))
+        self.assertEqual(carriers, sorted([W2, W2_AUDIT] + list(WINDOW_F1) + sorted(SHIPPED) + list(kill_twins()) + list(upload_twins()) + list(fusion_twins()) + list(octo3_twins()) + list(ship4_twins()) + list(np1_twins()) + list(s5_twins()) + list(xe_twins()) + list(tier_twins())))
         multi = sorted(name for name, profile in load()['profiles'].items() if profile.get('env', {}).get(sdpa_long_tp.FLAG) == 'multi')
-        self.assertEqual(multi, sorted([SDPA_TIMED, SDPA_AUDITED, W2, W2_AUDIT, NOF1, NOF1_AUDIT] + list(WINDOW_MULTI) + sorted(SHIPPED) + list(kill_twins()) + list(upload_twins()) + list(fusion_twins()) + list(octo3_twins()) + list(ship4_twins()) + list(np1_twins()) + list(s5_twins()) + list(tier_twins())))
+        self.assertEqual(multi, sorted([SDPA_TIMED, SDPA_AUDITED, W2, W2_AUDIT, NOF1, NOF1_AUDIT] + list(WINDOW_MULTI) + sorted(SHIPPED) + list(kill_twins()) + list(upload_twins()) + list(fusion_twins()) + list(octo3_twins()) + list(ship4_twins()) + list(np1_twins()) + list(s5_twins()) + list(xe_twins()) + list(tier_twins())))
 
     def test_sdpa_multi_s_own_arms_are_untouched_by_the_merge(self):
         found = load()['profiles']

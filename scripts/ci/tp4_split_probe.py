@@ -27,6 +27,14 @@ Compared with A, bit for bit: every GDN layer's rec_state, conv_carry and conv_s
 logits, and the K and V cache rows of [0, L) of every attention layer, each differing position classified by region (below floor2048(R),
 [floor2048(R), R), [R, H), [H, L)), with the largest absolute difference (the size of the effect, for an E1 decision).
 
+ATTRIBUTION (--attribute, C2_FABRIC_PROBE=split-attribute, SP1; docs/tp4-exact-end.md 2): a B arm differs from A for TWO reasons that the arms above cannot tell
+apart. (1) The programs: the segments run in buckets other than the cold run's 2048 (matmul program configs are chosen by the bucket,
+graft/model_config.py prefill_progcfg(seq_len, k, n), so another bucket is another arithmetic). (2) The hand-off: the GDN state and the conv carry are stored
+at R and read back, a store the cold run does not make there (rec_state is bf16 in serving, QWEN35_GDN_STATE_BF16=1, between programs). The F arms run the
+same splits with BOTH segments forced into the 2048 bucket (prefill_masked_bucket(bucket=2048)): the cold run's own program at R's rows, masked to
+the valid rows, so only the hand-off (and the mask) is left. Per split: cause=bucket (B differs, F identical: the programs), cause=handoff (F differs:
+the store at R), cause=none (both identical). The F arms are informational: the verdict line counts the B arms only, exactly as without --attribute.
+
 VERDICT LINE (also in the report file): SPLIT_PROBE verdict=IDENTICAL|DIFFERS|FAIL ...
   IDENTICAL  the controls hold and every 128-aligned split equals A everywhere. Exit 0.
   DIFFERS    the controls hold and at least one split differs (a valid measured answer: resumes off 2048 are E1). Exit 2.
@@ -68,6 +76,8 @@ OFFSETS = (128, 1024, 1920)
 MAX_LAYERS = 8
 SEED = 20261011
 CONTROLS = ('A2', 'C')
+FORCED = 'F'          # the attribution arms (--attribute): the same splits with both segments in the 2048 bucket
+FORCED_BUCKET = CHUNK
 ENV_OF_INTEREST = ('QWEN35_GDN_STATE_BF16', 'QWEN_SDPA_BF8', 'QWEN_FAST_GDN_PREFILL_CONV', 'QWEN_FAST_GDN_PREFILL_CONV_AUDIT',
                    'QWEN_FAST_SDPA_PF', 'QWEN_FAST_SDPA_PF_ONEQ', 'QWEN_FAST_GRID13', 'TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE')
 
@@ -93,8 +103,14 @@ def check_split(length, split):
     return None
 
 
-def plan_arms(length, extra=()):
-    """[(name, R or None)] for a prompt of `length`: A, A2 (None: cold), C (2048-aligned control), the 128-aligned splits."""
+def is_forced(name):
+    """Whether an arm is one of the attribution arms (F+128, F+1024, F+1920, Fend)."""
+    return name.startswith(FORCED)
+
+
+def plan_arms(length, extra=(), attribute=False):
+    """[(name, R or None)] for a prompt of `length`: A, A2 (None: cold), C (2048-aligned control), the 128-aligned splits, and with `attribute`
+    the same splits again with both segments forced into the 2048 bucket (F+128, F+1024, F+1920, Fend)."""
     if type(length) is not int or length < MIN_LENGTH:
         raise ValueError('a probe length must be an integer >= %d, got %r' % (MIN_LENGTH, length))
     mid = floor_to(length // 2, CHUNK)
@@ -108,6 +124,8 @@ def plan_arms(length, extra=()):
     for split in extra:
         if split < length:
             arms.append(('Bx%d' % split, split))
+    if attribute:
+        arms += [('F+%d' % offset, mid + offset) for offset in OFFSETS] + [('Fend', end)]
     for name, split in arms:
         if split is not None:
             why = check_split(length, split)
@@ -232,6 +250,8 @@ def verdict(lengths):
             if arm.get('error'):
                 reasons.append('L=%d %s: %s' % (item['length'], arm['name'], arm['error']))
                 continue
+            if is_forced(arm['name']):
+                continue                        # attribution arms: read by attribution(), never part of the verdict
             if arm['name'] in CONTROLS:
                 if not arm['identical']:
                     reasons.append('L=%d control %s differs from A: the harness or the device is not deterministic' % (item['length'], arm['name']))
@@ -242,6 +262,32 @@ def verdict(lengths):
     if splits_differ:
         return 'DIFFERS', splits_differ
     return 'IDENTICAL', []
+
+
+def attribution(lengths):
+    """[(length, split, B arm, F arm, B identical, F identical, cause)] for every split that has both a B arm (natural buckets) and an F arm
+    (forced 2048 bucket). cause: 'bucket' (B differs, F identical: the segments' programs), 'handoff' (F differs: the store at R, the cold run's own
+    program notwithstanding), 'none' (both identical), None when either arm did not run."""
+    rows = []
+    for item in lengths:
+        arms = dict((arm['name'], arm) for arm in item.get('arms', []))
+        for name, forced in sorted(arms.items()):
+            if not is_forced(name):
+                continue
+            natural = arms.get('B' + name[len(FORCED):] if name != 'Fend' else 'Bend')
+            if natural is None:
+                continue
+            b, f = natural.get('identical'), forced.get('identical')
+            if b is None or f is None:
+                cause = None
+            elif not f:
+                cause = 'handoff'
+            elif not b:
+                cause = 'bucket'
+            else:
+                cause = 'none'
+            rows.append((item.get('length'), forced.get('split'), natural['name'], name, b, f, cause))
+    return rows
 
 
 def apply_profile(profile_name, environ, path=PROFILES_FILE):
@@ -347,8 +393,27 @@ def logits_of(ttnn, mesh, logits, composer):
     return value
 
 
-def run_arm(ttnn, torch, model, mesh, tokens, length, split, page_table, composer):
-    """One arm into the bound scratch and its own KV block range; returns the host logits."""
+def run_arm(ttnn, torch, model, mesh, tokens, length, split, page_table, composer, forced=False):
+    """One arm into the bound scratch and its own KV block range; returns the host logits. `forced` (an attribution arm): both segments of the
+    split run in the 2048 bucket, the cold run's own program masked to the valid rows."""
+    if forced:
+        mid = floor_to(split, CHUNK)
+        first = model.prefill_traced_chunked(tokens[:, :mid], page_table, actual_len=mid)
+        ttnn.synchronize_device(mesh)
+        logits_of(ttnn, mesh, first, composer)
+        model._build_request_rope(tokens[:, :length], None)
+        first = model.prefill_masked_bucket(tokens[:, mid:split], page_table, actual_len=split - mid, chunk_start=mid, bucket=FORCED_BUCKET)
+        ttnn.synchronize_device(mesh)
+        logits_of(ttnn, mesh, first, composer)
+        head_end = min(length, ceil_to(split, CHUNK))
+        logits = model.prefill_masked_bucket(tokens[:, split:head_end], page_table, actual_len=head_end - split, chunk_start=split,
+                                             bucket=FORCED_BUCKET)
+        ttnn.synchronize_device(mesh)
+        if head_end < length:
+            logits_of(ttnn, mesh, logits, composer)
+            logits = model.prefill_traced_chunked(tokens[:, :length], page_table, actual_len=length, start=head_end)
+            ttnn.synchronize_device(mesh)
+        return logits_of(ttnn, mesh, logits, composer)
     if split is None:
         logits = model.prefill_traced_chunked(tokens[:, :length], page_table, actual_len=length)
         ttnn.synchronize_device(mesh)
@@ -372,9 +437,9 @@ def run_arm(ttnn, torch, model, mesh, tokens, length, split, page_table, compose
     return logits_of(ttnn, mesh, logits, composer)
 
 
-def measure_length(ttnn, torch, model, mesh, length, width, seed, extra, log):
+def measure_length(ttnn, torch, model, mesh, length, width, seed, extra, log, attribute=False):
     """The seven (or more) arms of one length, each in its own KV block range, compared with A."""
-    arms = plan_arms(length, extra)
+    arms = plan_arms(length, extra, attribute)
     generator = torch.Generator().manual_seed(seed + length)
     vocab = int(getattr(model, 'vocab_size', None) or model.args.vocab_size)
     tokens = torch.randint(0, vocab, (1, length), generator=generator, dtype=torch.int64).to(torch.int32)
@@ -388,7 +453,7 @@ def measure_length(ttnn, torch, model, mesh, length, width, seed, extra, log):
             page_table = torch.arange(base, base + width, dtype=torch.int32).reshape(1, width)
             began = time.time()
             try:
-                logits[name] = run_arm(ttnn, torch, model, mesh, tokens, length, split, page_table, composer)
+                logits[name] = run_arm(ttnn, torch, model, mesh, tokens, length, split, page_table, composer, forced=is_forced(name))
                 states[name] = read_state(ttnn, model, composer)
                 results.append(dict(name=name, split=split, base=base, seconds=round(time.time() - began, 2)))
             except Exception as error:  # noqa: BLE001
@@ -426,11 +491,13 @@ def default_torch():
 def run(options, ttnn=None, torch=None, model_factory=None, environ=None, log=print, checkpoint=None):
     """The measurement; returns the report dict. `checkpoint(report)` is called after every length (the incremental report)."""
     environ = os.environ if environ is None else environ
+    attribute = bool(getattr(options, 'attribute', False))
     report = dict(kind=KIND, fabric=options.fabric, profile=options.profile, lengths=list(options.lengths), extra_splits=list(options.extra_split),
+                  attribute=attribute,
                   opened=False, descriptor=environ.get('TT_MESH_GRAPH_DESC_PATH'), serving_contract=environ.get('QWEN_C2_SERVING'))
     for length in options.lengths:
         try:
-            plan_arms(length, options.extra_split)
+            plan_arms(length, options.extra_split, attribute)
         except ValueError as error:
             report.update(verdict='FAIL', error='refused: %s' % error)
             log('SPLIT_PROBE verdict=FAIL error=%s' % report['error'])
@@ -469,7 +536,7 @@ def run(options, ttnn=None, torch=None, model_factory=None, environ=None, log=pr
         model, info = model_factory(ttnn, mesh, options, environ, log)
         report['model'] = info
         width = ceil_to(ceil_to(max(options.lengths) + CHUNK, BLOCK) // BLOCK, 32)
-        arms = max(len(plan_arms(length, options.extra_split)) for length in options.lengths)
+        arms = max(len(plan_arms(length, options.extra_split, attribute)) for length in options.lengths)
         blocks = 1 + arms * width
         shape = (blocks, int(info['n_local_kv_heads']), BLOCK, int(info['head_dim']))
         model.allocate_kv_caches(shape, ttnn.bfloat16, batch_size=1)
@@ -484,7 +551,8 @@ def run(options, ttnn=None, torch=None, model_factory=None, environ=None, log=pr
         for length in options.lengths:
             began = time.time()
             try:
-                item = measure_length(ttnn, torch, model, mesh, length, width, options.seed, options.extra_split, log)
+                item = (measure_length(ttnn, torch, model, mesh, length, width, options.seed, options.extra_split, log, attribute) if attribute
+                        else measure_length(ttnn, torch, model, mesh, length, width, options.seed, options.extra_split, log))
             except Exception as error:  # noqa: BLE001
                 item = dict(length=length, error='%s: %s' % (type(error).__name__, str(error)[:500]), traceback=traceback.format_exc()[-3000:])
             item['seconds'] = round(time.time() - began, 1)
@@ -501,15 +569,23 @@ def run(options, ttnn=None, torch=None, model_factory=None, environ=None, log=pr
                 report['closed'] = True
             except Exception as error:  # noqa: BLE001
                 report['closed'] = '%s: %s' % (type(error).__name__, error)
-    splits = sum(1 for item in report.get('results', []) for arm in item.get('arms', []) if arm.get('split') and arm['name'] not in CONTROLS)
+    splits = sum(1 for item in report.get('results', []) for arm in item.get('arms', [])
+                 if arm.get('split') and arm['name'] not in CONTROLS and not is_forced(arm['name']))
     differing = sum(1 for item in report.get('results', []) for arm in item.get('arms', [])
-                    if arm.get('split') and arm['name'] not in CONTROLS and arm.get('identical') is False)
+                    if arm.get('split') and arm['name'] not in CONTROLS and not is_forced(arm['name']) and arm.get('identical') is False)
     log('SPLIT_PROBE verdict=%s lengths=%s splits=%d differing=%d grid=%s layers=%s rec_state_dtype=%s%s' % (
         report.get('verdict'), ','.join(str(length) for length in options.lengths), splits, differing, report.get('grid'),
         (report.get('model') or {}).get('layer_indices'), report.get('rec_state_dtype'),
         (' error=%s' % report['error']) if report.get('error') else ''))
     for reason in report.get('reasons') or []:
         log('SPLIT_PROBE reason: %s' % reason)
+    if attribute:
+        report['attribution'] = [dict(length=row[0], split=row[1], natural=row[2], forced=row[3], natural_identical=row[4], forced_identical=row[5],
+                                      cause=row[6]) for row in attribution(report.get('results', []))]
+        for row in report['attribution']:
+            log('SPLIT_PROBE attribution L=%s R=%s %s=%s %s=%s cause=%s' % (
+                row['length'], row['split'], row['natural'], 'IDENTICAL' if row['natural_identical'] else 'DIFFERS', row['forced'],
+                'IDENTICAL' if row['forced_identical'] else 'DIFFERS', row['cause']))
     return report
 
 
@@ -527,6 +603,7 @@ def build_parser():
     parser.add_argument('--profile', default=DEFAULT_PROFILE)
     parser.add_argument('--lengths', type=lengths_of, default=list(DEFAULT_LENGTHS))
     parser.add_argument('--extra-split', type=int, action='append', default=[])
+    parser.add_argument('--attribute', action='store_true', help='add the F arms: the same splits with both segments forced into the 2048 bucket')
     parser.add_argument('--seed', type=int, default=SEED)
     parser.add_argument('--max-seq-len', type=int, default=65536)
     return parser

@@ -4,7 +4,7 @@
     python3 scripts/ci/make_s5_profiles.py --check   exit 1 if the checked-in twin is not what its parents generate
 
 NEVER hand-merge this entry into the profiles file. Run make_fusion_profiles.py --write FIRST (it writes the ship-5 candidate, `-fx-traffic-s5`, from scripts/ci/fusion-wp/S5.json), then
-make_octo3_profiles.py and make_ship4_profiles.py (the audited twin of ship 4 is this twin's parent) and make_np1_profiles.py, then this.
+make_octo3_profiles.py and make_ship4_profiles.py (the audited twin of ship 4 is this twin's parent), make_np1_profiles.py and make_xe_profiles.py (this one is placed after the last), then this.
 
 THE CANDIDATE is the traffic profile `-fx-traffic-s5` (docs/tp4-next1.md): the approved ship-4 profile plus the lone-user padded round (NP1), exact resume P0, the sliced host-tier restore, the decode verify
 sub-switch of the 13x10 grids and the owner-approved host RAM budget (a 48 GiB tier beside a 16 GiB checkpoint store), under ONE owner traffic waiver whose decision is PENDING. Its gate-only twins:
@@ -28,7 +28,7 @@ import json
 from pathlib import Path
 import sys
 
-import make_np1_profiles as np1
+import make_xe_profiles as xe
 import make_ship4_profiles as ship4
 
 PROFILES = Path(__file__).resolve().parent / 'qwen_c2_profiles.json'
@@ -116,7 +116,7 @@ def parent_problems(profiles):
 
 
 def generate(data):
-    """data's profiles with the twin inserted right after the tp4/np1-fastlane twins (every other entry unmoved); returns the new dict."""
+    """data's profiles with the twin inserted right after the tp4/exact-end twins (every other entry unmoved); returns the new dict."""
     profiles = data['profiles']
     problems = parent_problems(profiles)
     if problems:
@@ -140,9 +140,9 @@ def generate(data):
     nowc['gate_only'] = True
     generated = {AUDIT: audit, AUDIT_NOWC: nowc}
     remaining = [name for name in profiles if name not in generated]            # a previous generation is replaced below
-    anchors = [name for name in remaining if name in np1.twin_names()]
+    anchors = [name for name in remaining if name in xe.twin_names()]
     if not anchors:
-        raise ValueError('the tp4/np1-fastlane twins are not in the profiles file (make_np1_profiles.py --write first)')
+        raise ValueError('the tp4/exact-end twins are not in the profiles file (make_xe_profiles.py --write first)')
     anchor = anchors[-1]
     result = {}
     for name in remaining:

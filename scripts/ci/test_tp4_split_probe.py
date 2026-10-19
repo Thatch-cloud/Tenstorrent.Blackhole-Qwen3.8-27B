@@ -116,6 +116,7 @@ class ToyModel(object):
         self.bound = False
         self.cold_calls = 0
         self.calls = []
+        self.masked_buckets = []
 
     # -- the image model's surface ----------------------------------------------------------------------------------------------
     def allocate_kv_caches(self, shape, dtype, batch_size=1):
@@ -144,16 +145,22 @@ class ToyModel(object):
         self.calls.append(('chunked', start, actual_len))
         if start == 0:
             self.reset()
-        return self.process(token_ids[:, start:actual_len], page_table, start, actual_len, masked_off_chunk=False)
+        # 'bucket' mode (the programs differ): the tail of a prompt that is not the cold run's own runs in another bucket than the cold run's
+        shifted = actual_len // 2048 * 2048 if self.mode == 'bucket' and actual_len != self.final_length else None
+        return self.process(token_ids[:, start:actual_len], page_table, start, actual_len, masked_off_chunk=False, shifted_from=shifted)
 
     def prefill_masked_bucket(self, token_ids, page_table, actual_len, chunk_start=0, bucket=None, flex_sdpa=True, vision_tokens=None,
                               vis_row_offset=0):
         assert self.bound
         assert chunk_start % 64 == 0, 'a fill off a block boundary'
         self.calls.append(('masked', chunk_start, actual_len))
+        self.masked_buckets.append((chunk_start, actual_len, bucket))
         if chunk_start == 0:
             self.reset()
-        return self.process(token_ids[:, :actual_len], page_table, chunk_start, chunk_start + actual_len, masked_off_chunk=chunk_start % 2048 != 0)
+        # 'bucket' mode: a masked program in the natural bucket (bucket=None) is not the cold run's program; one forced into 2048 is
+        shifted = chunk_start if self.mode == 'bucket' and bucket is None else None
+        return self.process(token_ids[:, :actual_len], page_table, chunk_start, chunk_start + actual_len,
+                            masked_off_chunk=chunk_start % 2048 != 0 and self.mode == 'sensitive', shifted_from=shifted)
 
     # -- the toy arithmetic -----------------------------------------------------------------------------------------------------
     def reset(self):
@@ -165,7 +172,7 @@ class ToyModel(object):
                 for state in layer.attention.conv_states:
                     state.data.zero_()
 
-    def process(self, tokens, page_table, begin, end, masked_off_chunk):
+    def process(self, tokens, page_table, begin, end, masked_off_chunk, shifted_from=None):
         k_cache, v_cache = self._paged_kv_caches[0]
         values = tokens.reshape(-1).to(torch.float32)
         for offset in range(end - begin):
@@ -177,12 +184,12 @@ class ToyModel(object):
                 dn = layer.attention
                 dn.rec_state.data.mul_(0.75).add_(token / VOCAB + layer.attention.index)
             row = torch.full((CHIPS, HEAD_DIM), token / VOCAB + position * 1e-3, dtype=torch.float32)
-            if self.mode == 'sensitive' and masked_off_chunk:
+            if (self.mode == 'sensitive' and masked_off_chunk) or (shifted_from is not None and position >= shifted_from):
                 row = row + 0.5
             block = int(page_table[0, position // 64])
             k_cache.data[block, :, position % 64, :] = row.to(torch.bfloat16)
             v_cache.data[block, :, position % 64, :] = (row * 2).to(torch.bfloat16)
-        if self.mode == 'sensitive' and end % 2048 and end != self.final_length:
+        if self.mode in ('sensitive', 'handoff') and end % 2048 and end != self.final_length:
             for layer in self.layers:
                 if not layer.is_full_attention:
                     dn = layer.attention
@@ -217,19 +224,21 @@ class FinalLength(object):
         model.final_length = length
 
 
-def run_probe(mode, lengths=(5000,), extra=()):
+def run_probe(mode, lengths=(5000,), extra=(), attribute=False):
     model, build = factory(mode)
     ttnn = FakeTTNN()
     lines = []
     argv = ['--output', 'unused', '--lengths', ','.join(str(length) for length in lengths)]
     for split in extra:
         argv += ['--extra-split', str(split)]
+    if attribute:
+        argv.append('--attribute')
     options = probe.build_parser().parse_args(argv)
     original_measure = probe.measure_length
 
-    def measure(ttnn_, torch_, model_, mesh, length, width, seed, extras, log):
+    def measure(ttnn_, torch_, model_, mesh, length, width, seed, extras, log, *more):
         FinalLength.attach(model_, length)
-        return original_measure(ttnn_, torch_, model_, mesh, length, width, seed, extras, log)
+        return original_measure(ttnn_, torch_, model_, mesh, length, width, seed, extras, log, *more)
 
     probe.measure_length = measure
     try:
@@ -443,6 +452,77 @@ class BuildModelTests(unittest.TestCase):
             self.assertEqual(info['tensor_cache'], str(Path(directory) / 'split-probe-weights'))
 
 
+class AttributionTests(unittest.TestCase):
+    """--attribute: the F arms (both segments forced into the 2048 bucket) say WHY a B arm differs from the cold run (docs/tp4-exact-end.md 2)."""
+
+    def test_the_default_plan_has_no_forced_arm(self):
+        self.assertEqual([name for name, _ in probe.plan_arms(9000)], ['A', 'A2', 'C', 'B+128', 'B+1024', 'B+1920', 'Bend'])
+        self.assertEqual(probe.plan_arms(9000), probe.plan_arms(9000, (), False))
+
+    def test_the_attribution_plan_repeats_the_splits_forced(self):
+        arms = dict(probe.plan_arms(9000, attribute=True))
+        self.assertEqual({name: split for name, split in arms.items() if probe.is_forced(name)},
+                         {'F+128': 4224, 'F+1024': 5120, 'F+1920': 6016, 'Fend': 8576})
+        for forced, natural in (('F+128', 'B+128'), ('F+1024', 'B+1024'), ('F+1920', 'B+1920'), ('Fend', 'Bend')):
+            self.assertEqual(arms[forced], arms[natural])
+        self.assertEqual(probe.FORCED_BUCKET, 2048)
+        self.assertFalse(any(probe.is_forced(name) for name in ('A', 'A2', 'C', 'B+128', 'Bend')))
+
+    def test_an_invariant_model_is_identical_with_the_attribution_arms_and_the_verdict_ignores_them(self):
+        report, ttnn, model, lines = run_probe('exact', attribute=True)
+        self.assertEqual(report['verdict'], 'IDENTICAL', report.get('reasons') or report.get('error'))
+        self.assertEqual({row['cause'] for row in report['attribution']}, {'none'})
+        self.assertEqual(len(report['attribution']), 4)
+        # the forced arms ran BOTH segments of the split in the 2048 bucket (the cold run's own program masked to the valid rows): for R=2176 of the 5000-token prompt,
+        # the rows [2048, 2176) at chunk_start 2048 and the head [2176, 4096) at chunk_start 2176
+        self.assertIn((2048, 128, 2048), model.masked_buckets)
+        self.assertIn((2176, 1920, 2048), model.masked_buckets)
+        # ... and the natural arms let the model pick the bucket (None here: the toy has no bucket table)
+        self.assertIn((2176, 1920, None), model.masked_buckets)
+        self.assertTrue(any(line.startswith('SPLIT_PROBE attribution L=5000 R=2176 B+128=IDENTICAL F+128=IDENTICAL cause=none') for line in lines), lines)
+
+    def test_a_model_whose_programs_differ_is_attributed_to_the_bucket(self):
+        report, ttnn, model, lines = run_probe('bucket', attribute=True)
+        self.assertEqual(report['verdict'], 'DIFFERS')
+        arms = {arm['name']: arm for arm in report['results'][0]['arms']}
+        self.assertTrue(arms['C']['identical'])
+        for name in ('B+128', 'B+1024', 'B+1920', 'Bend'):
+            self.assertFalse(arms[name]['identical'], name)
+        for name in ('F+128', 'F+1024', 'F+1920', 'Fend'):
+            self.assertTrue(arms[name]['identical'], name)
+        self.assertEqual({row['cause'] for row in report['attribution']}, {'bucket'})
+        self.assertTrue(any('B+1024=DIFFERS F+1024=IDENTICAL cause=bucket' in line for line in lines), lines)
+
+    def test_a_model_whose_store_at_the_split_differs_is_attributed_to_the_handoff(self):
+        report, ttnn, model, lines = run_probe('handoff', attribute=True)
+        self.assertEqual(report['verdict'], 'DIFFERS')
+        arms = {arm['name']: arm for arm in report['results'][0]['arms']}
+        for name in ('B+128', 'B+1024', 'B+1920', 'F+128', 'F+1024', 'F+1920'):
+            self.assertFalse(arms[name]['identical'], name)
+            self.assertGreater(arms[name]['gdn']['differing'], 0, name)
+        self.assertEqual({row['cause'] for row in report['attribution']}, {'handoff'})
+        self.assertTrue(any('B+128=DIFFERS F+128=DIFFERS cause=handoff' in line for line in lines), lines)
+
+    def test_the_verdict_counts_the_natural_splits_only(self):
+        report, _, _, lines = run_probe('bucket', attribute=True)
+        line = [text for text in lines if text.startswith('SPLIT_PROBE verdict=')][0]
+        self.assertIn('splits=4 differing=4', line)
+        report, _, _, lines = run_probe('bucket')
+        self.assertIn('splits=4 differing=4', [text for text in lines if text.startswith('SPLIT_PROBE verdict=')][0])
+        self.assertNotIn('attribution', report)
+
+    def test_attribution_reads_the_arms_it_is_given(self):
+        def item(**flags):
+            return dict(length=5000, arms=[dict(name='B+128', split=2176, identical=flags['b']), dict(name='F+128', split=2176, identical=flags['f'])])
+
+        self.assertEqual(probe.attribution([item(b=False, f=True)])[0][-1], 'bucket')
+        self.assertEqual(probe.attribution([item(b=False, f=False)])[0][-1], 'handoff')
+        self.assertEqual(probe.attribution([item(b=True, f=False)])[0][-1], 'handoff')
+        self.assertEqual(probe.attribution([item(b=True, f=True)])[0][-1], 'none')
+        self.assertIsNone(probe.attribution([dict(length=5000, arms=[dict(name='B+128', split=2176), dict(name='F+128', split=2176, error='x')])])[0][-1])
+        self.assertEqual(probe.attribution([dict(length=5000, arms=[dict(name='B+128', split=2176, identical=True)])]), [])
+
+
 class WiringTests(unittest.TestCase):
     def test_the_job_and_the_workflow_know_the_probe(self):
         self.assertIn('split', job.FABRIC_PROBES)
@@ -450,9 +530,24 @@ class WiringTests(unittest.TestCase):
         self.assertIn('split) script=tp4_split_probe.py; report=split-probe.json', workflow)
         self.assertIn('SPLIT_PROBE', workflow)
         # the weights are mounted read-only, and only for the split probe
-        self.assertIn('if [ "${PROBE:-fabric}" = split ]; then', workflow)
+        self.assertIn('if [ "${PROBE:-fabric}" = split ] || [ "${PROBE:-fabric}" = split-attribute ]; then', workflow)
         self.assertIn(':/models:ro" -e HF_HOME=/models -e HF_HUB_CACHE=/models -e HF_HUB_OFFLINE=1)', workflow)
         self.assertLess(probe.WATCHDOG_S, 45 * 60)
+
+    def test_the_attribution_probe_is_wired_like_the_split_probe(self):
+        self.assertIn('split-attribute', job.FABRIC_PROBES)
+        workflow = (ROOT / '.github' / 'workflows' / 'qwen-c2-serving.yml').read_text(encoding='utf-8')
+        self.assertIn('split-attribute) script=tp4_split_probe.py; report=split-probe.json; probe_args="--attribute --profile ', workflow)
+        line = [text for text in workflow.splitlines() if 'split-attribute) script=' in text][0]
+        profile = line.split('--profile ')[1].split('"')[0]
+        profiles = json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))['profiles']
+        self.assertIn(profile, profiles, 'the probe runs under the ship-4 candidate\'s own environment')
+        import serving_c2_contract
+
+        environ = {}
+        serving_c2_contract.apply_environment(serving_c2_contract.load_profile(str(HERE / 'qwen_c2_profiles.json'), profile), environ)
+        self.assertEqual(environ.get('QWEN_FAST_GRID13'), 'prefill,drafter')
+        self.assertEqual(environ.get('QWEN_FAST_TAP_WINDOW_ALIGNED'), '1')
 
     def test_the_template_is_a_valid_job(self):
         values = job.parse_env(TEMPLATE.read_text(encoding='utf-8'))

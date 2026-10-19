@@ -1149,12 +1149,13 @@ class ProfileTests(unittest.TestCase):
         from make_ship4_profiles import twin_names as ship4_twins            # tp4/ship-4: its audited twin carries the tier's audit env, this flag included (test_ship4_profiles)
         from make_np1_profiles import twin_names as np1_twins            # tp4/np1-fastlane: its copy of that audited twin carries it too (test_np1_profiles)
         from make_s5_profiles import twin_names as s5_twins              # tp4/next-1: the ship-5 candidate's audited twins carry it too (test_s5_profiles)
+        from make_xe_profiles import twin_names as xe_twins            # tp4/exact-end: its copy of that audited twin carries it too (test_xe_profiles)
 
         # (the op-fusion programme's twins on another parent than the production profile, WP6's singles audit on the audited lean twin, inherit its audits: test_fusion_wp)
         inheriting = tuple(twin['name'] for twin in make_fusion_profiles.profile_twins(make_fusion_profiles.normalise(make_fusion_profiles.read_manifests()))
                            if twin['parent'] != make_fusion_profiles.PARENT)
         for name, body in PROFILES.items():
-            if name not in (AUDITED, 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1-audit') + tuple(WINDOW_AUDITED) + inheriting + tuple(tier_twins()) + tuple(ship4_twins()) + tuple(np1_twins()) + tuple(s5_twins()):       # tp4/w2: the audited wave-2 arm carries it too (test_tp4_w2)
+            if name not in (AUDITED, 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1-audit') + tuple(WINDOW_AUDITED) + inheriting + tuple(tier_twins()) + tuple(ship4_twins()) + tuple(np1_twins()) + tuple(s5_twins()) + tuple(xe_twins()):       # tp4/w2: the audited wave-2 arm carries it too (test_tp4_w2)
                 self.assertNotIn(AUDIT, body.get('env', {}), name)
         self.assertEqual(json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))['default'], 'c2-packed-tp4')
 

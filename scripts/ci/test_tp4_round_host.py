@@ -1211,6 +1211,11 @@ class ProfileTests(unittest.TestCase):
         combined.update({name: {SELECT, READ, KEYED, LEAN, AUDIT} for name in twins_s5.twin_names()})            # (both are audited twins: -s5-audit and its -nowc fallback)
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set())          # exact resume's twins of the combined arms (fusion-wp/ER.json: -fx-all-er, -fx-all-er-audit)
                          for name in (fusion.NAMESPACE + 'all-er', fusion.NAMESPACE + 'all-er-audit')})
+        # tp4/exact-resume (ER, placed from fusion-wp/ER.json): the combined arm / its audited twin plus the exact-resume switches, so the four levers (and the audit flag on the audited twin)
+        combined.update({fusion.NAMESPACE + 'all-er': {SELECT, READ, KEYED, LEAN}, fusion.NAMESPACE + 'all-er-audit': {SELECT, READ, KEYED, LEAN, AUDIT}})
+        import make_xe_profiles as twins_xe      # tp4/exact-end: the ship candidate / its audited twin plus one flag, so the same round-host flags (test_xe_profiles)
+
+        combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_xe.twin_names()})
         for name, profile in data['profiles'].items():
             if name in self.ADDED:
                 continue

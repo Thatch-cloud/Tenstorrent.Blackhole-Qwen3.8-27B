@@ -34,7 +34,9 @@ Keys (every one optional but C2_IMAGE_TAG):
                       payload (core only), -quick is a short grid, a smoke of the harness) or split (tp4_split_probe.py: a prefill resumed at a
                       128-aligned position inside a 2048 chunk against the unsplit cold prefill, bit for bit, on the image's own model with its first
                       few real layers; the step mounts the hub read-only for it; SPLIT_PROBE verdict=IDENTICAL|DIFFERS|FAIL, exit 0/2/1;
-                      docs/tp4-exact-resume.md 5.3); needs the fabric action
+                      docs/tp4-exact-resume.md 5.3) or split-attribute (the same probe with --attribute: each split again with both segments forced into
+                      the 2048 bucket, so a difference is attributed to the segments' programs or to the store at the split; SPLIT_PROBE attribution
+                      lines, docs/tp4-exact-end.md 2); needs the fabric action
   C2_SUPERSEDED_BY    set on every template of a pack that a later pack replaced (references/tp4-w2-jobs); read_job REFUSES such a template
   C2_PROFILE          the C2 profile smoke and gate serve (default: general)
   C2_CARDS            the card set the hardware steps open: pair (cards M and A, the default) or quad (every
@@ -185,11 +187,12 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_TAULAB_COUNTERS  production's spec-decode counters, a rig-local JSON of aggregates (default: none; positions 1-3 are then
                       NOT_ESTABLISHED in the report)
   C2_MODEL_REPO + C2_MODEL_REVISION  another checkpoint of the SAME architecture (qwen_c2_checkpoint.py, qwen_c2_checkpoints.json; docs/tp4-swift.md), default off: both or neither,
-                      a catalog pair that is not the base, the revision the 40-hex commit. The smoke and taulab steps then start their container with QWEN_C2_MODEL_REPO and
+                      a catalog pair that is not the base, the revision the 40-hex commit. The smoke, taulab and prefix steps then start their container with QWEN_C2_MODEL_REPO and
                       QWEN_C2_MODEL_REVISION (the contract moves the snapshot, keys the converted-weight directory by the pair and refuses a snapshot whose config, tokenizer or chat
                       template differ from the base's), serve it under the catalog's served name (output model_served) and the smoke check reads the container log for the
-                      checkpoint lines (c2_smoke_check.py --expect-checkpoint). Needs C2_CARDS=quad and C2_ACTIONS from status rescan reset smoke taulab with a smoke or a taulab in it;
-                      the gate, prefix, replay, probe, build and push steps are refused (they do not forward it). Unset, every output is empty and no argv changes.
+                      checkpoint lines (c2_smoke_check.py --expect-checkpoint; the prefix gate runs the same check on every arm's log: c2_prefix_gate.py --model-repo/--model-revision, a
+                      missing or foreign checkpoint line fails the arm). Needs C2_CARDS=quad and C2_ACTIONS from status rescan reset smoke taulab prefix with a smoke, a taulab or a prefix
+                      in it; the gate, replay, probe, build and push steps are refused (they do not forward it). Unset, every output is empty and no argv changes.
   C2_TT_GRID          clamp the compute grid tt-metal exposes, as insurance for cards whose firmware no longer soft-harvests Tensix
                       columns (tensix_col_disable_count 2 -> 0, so the unharvested 13x10 core descriptor is selected instead of 11x10):
                       exactly 10,9 (11x10, today's grid, valid on a harvested and an unharvested card), 11,9 (12x10) or 12,9 (13x10),
@@ -228,7 +231,7 @@ TP4_MESH_DEVICE = 'P150x4'
 PAIR_MESH_DEVICES = (None, 'P300')
 FABRIC_CONFIGS = ('FABRIC_1D', 'FABRIC_1D_RING')
 FABRIC_PROBES = ('fabric', 'rs-tile', 'mr', 'kvread', 'ccl-sweep', 'ccl-sweep-safe', 'ccl-sweep-core', 'ccl-sweep-p8192', 'ccl-sweep-quick',
-                 'split')
+                 'split', 'split-attribute')
 DRAFTER_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,63}')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
@@ -294,8 +297,8 @@ MAX_TAULAB_DEADLINE_MINUTES = 540
 TAULAB_IN_FLIGHT = 8
 MAX_TAULAB_IN_FLIGHT = 16
 # C2_MODEL_REPO / C2_MODEL_REVISION (qwen_c2_checkpoint.py): the steps that pass the selection into their container, and the ones that need no card step to be useful.
-MODEL_ACTIONS = ('status', 'rescan', 'reset', 'smoke', 'taulab')
-MODEL_SERVING_ACTIONS = ('smoke', 'taulab')
+MODEL_ACTIONS = ('status', 'rescan', 'reset', 'smoke', 'taulab', 'prefix')
+MODEL_SERVING_ACTIONS = ('smoke', 'taulab', 'prefix')
 # A rig-local path: plain characters, relative to the runner's home or absolute, never a '..' component or a leading '-'.
 PLAIN_PATH = re.compile(r'(?!-)[A-Za-z0-9_./-]{1,200}')
 PREFIX_PROFILE = 'general-prefix'
@@ -675,7 +678,8 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
     cardm_harness, cardm_args, cardm_env = read_cardm(values, 'cardm' in actions, root=root, tt_grid=tt_grid)
     drafter_candidates = read_drafter_candidates(values, actions)
     box_minutes = read_box(values, actions)
-    model = read_model(values, actions, cards, lambda action: taulab['taulab_profile'] if action == 'taulab' else profile, root)
+    model = read_model(values, actions, cards, lambda action: (taulab['taulab_profile'] if action == 'taulab'
+                                                                 else prefix['prefix_profile'] if action == 'prefix' else profile), root)
     outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), rmi_tags=rmi_tags, tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
