@@ -142,6 +142,9 @@ user needs the same third idle target as five live seats in the octo block. The 
 only when `idle_capacity() >= 3`; the policy itself (`proposal_groups` routes any group whose block `pads` the count) needs no new code. The lone `coding` stream and the drain (live 8 to 1) are the
 tests (L0, L1).
 
+**Update (tp4/np1-fastlane, docs/tp4-np1-fastlane.md):** the third idle target is now built as a KV scratch page the model's allocation adds past vLLM's pool (`idle_scratch.py`); with it
+an M3 block holds four idle segments, the flag engages in a gate run of the twins `-fx-s4-np1` / `-fx-s4-np1-audit`, and the card jobs are `references/fusion-jobs/NP1`.
+
 ## 7. Gates (references/tp4-octo-jobs)
 
 Templates only; no tag is pushed from this branch. ORDER.txt carries the order, the dependencies and the NO-GO rule. In short: Q1w/Q1a/Q1b the K64j qualification at one eight-row group per bundle and Q2w/Q2 the GDN launch at eight users (one card each, first), A0/A1 the audited attach (the control against the arm,

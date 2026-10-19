@@ -311,6 +311,22 @@ if ONLY and 'concurrent8_steady' in ONLY:
     record('concurrent8_steady', concurrent8_steady)
 
 
+# tp4/np1-fastlane (docs/tp4-np1-fastlane.md): the live-seat counts the lone-user padded round (QWEN_FAST_SOLO_PACKED=1) is timed at. Opt-in; the first `count` prompts of concurrent8_steady (about 3,500 tokens of real
+# code each), started together, every answer to EXACTLY NP1_LIVE_BUDGET tokens (ignore_eos): at ~95 tokens a second a user the all-live window of 2,000 tokens is ~21 s, past the 10 s np1_report needs, and at the
+# per-request engine's ~37 it is ~54 s. The texts are greedy and equal between the control and the arm (np1_report.py compares them).
+NP1_LIVE_BUDGET = 2000
+NP1_LIVE_COUNTS = (1, 2, 4)
+
+
+def np1_live(count):
+    return run_users('np1_live%d' % count, steady_prompts(count), max_tokens=NP1_LIVE_BUDGET, ignore_eos=True)
+
+
+for np1_count in NP1_LIVE_COUNTS:
+    if ONLY and 'np1_live%d' % np1_count in ONLY:
+        record('np1_live%d' % np1_count, lambda count=np1_count: np1_live(count))
+
+
 def steady_resend():
     # Opt-in (named in the tests list, after concurrent4_steady): the first steady prompt again, alone. Its prefill reuses the
     # prompt geometry whose window-snapshot programs (keyed on the prompt's length, so no attach warm can cover them) the steady
@@ -696,7 +712,7 @@ FEWDEC_SHAPES = ((1, 120000, 4000), (2, 253920, 6000))     # (decoders, cold pro
 
 # Every shape's concurrent request count, held at or under the eight seats of the 262k profiles by test_w2ln_smoke_shapes (a request past max-num-seqs
 # waits for a seat, and its time to first token then measures somebody else's budget).
-SHAPE_SEATS = {'concurrent8_skew': 8, 'concurrent8_code_32k': 8, 'concurrent8_code_128k': 8, 'concurrent8_code_32k_long': 8, 'concurrent8_code_128k_long': 8,
+SHAPE_SEATS = {'np1_live1': 1, 'np1_live2': 2, 'np1_live4': 4, 'concurrent8_skew': 8, 'concurrent8_code_32k': 8, 'concurrent8_code_128k': 8, 'concurrent8_code_32k_long': 8, 'concurrent8_code_128k_long': 8,
                'stall8_cold262k': STALL_SHORT_SEATS + 1, 'stall8_cold128k': STALL_SHORT_SEATS + 1,
                'cold2_254k': COLD2_DECODERS + COLD2_ARRIVALS, 'levern_equal_busy': 7 + 1, 'levern_decoder_finishes': 7 + 1,
                'prefill_ladder_solo': 1, 'prefill_ladder_busy': LADDER_DECODERS + 1, 'prefill_few_decoders': 3}
