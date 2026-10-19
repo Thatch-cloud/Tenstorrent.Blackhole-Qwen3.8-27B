@@ -970,6 +970,17 @@ class SmokeRuleTests(unittest.TestCase):
         self.assertEqual(len(w3_wc_smoke.problems({}, line)), 1)
         self.assertEqual(len(w3_wc_smoke.problems({gdn_wc.FLAG: '1'}, '\n'.join([ENGAGED_LINE, line]))), 1)
 
+    def test_the_octo_block_s_decline_is_the_design_and_only_with_the_octo_block_on(self):
+        """tp4/next-1: the ship profile runs the octo block (8 users of 8 rows) from six live seats; WC takes 2 or 4 users and declines it with one line, so that
+        line is expected on a profile that names the octo block and a fault on any other; every other reason fails either way."""
+        octo = gdn_wc.FELL_BACK + ' reason=8 users (WC takes 2 or 4)'
+        other = gdn_wc.FELL_BACK + ' reason=3 users (WC takes 2 or 4)'
+        on = {gdn_wc.FLAG: '1', 'QWEN_FAST_OCTO': 'live'}
+        self.assertEqual(w3_wc_smoke.problems(on, '\n'.join([ENGAGED_LINE, octo])), [])
+        self.assertEqual(len(w3_wc_smoke.problems(on, '\n'.join([ENGAGED_LINE, octo, other]))), 1)
+        self.assertEqual(len(w3_wc_smoke.problems({gdn_wc.FLAG: '1'}, '\n'.join([ENGAGED_LINE, octo]))), 1)
+        self.assertEqual(len(w3_wc_smoke.problems(dict(on, QWEN_FAST_OCTO='off'), '\n'.join([ENGAGED_LINE, octo]))), 1)
+
     def test_the_audit_flag_needs_a_passing_line(self):
         env_ = {gdn_wc.FLAG: '1', gdn_wc.AUDIT_FLAG: '1'}
         self.assertEqual(len(w3_wc_smoke.problems(env_, ENGAGED_LINE)), 1)
@@ -1003,6 +1014,8 @@ class ShipmentTests(unittest.TestCase):
         # audit_round_number is self.rounds + 1 unless an audit sampling arm thins the audited rounds (audit_sampling, gate profiles only)
         self.assertIn('gdn_wc.audit_round(self.operations, self.fixture.retained.records, audit_round_number)', source)
         self.assertLess(source.index('gdn_conv_gates_spread.audit_round('), source.index('gdn_wc.audit_round('))
+        # the octo block (8 users of 8 rows) is never a WC block: its layers carry no WC entries, so the replay audit does not ask for them
+        self.assertIn("os.environ.get('QWEN_FAST_TP4_GDN_WC_AUDIT', '0') != '0' and (self.users, self.rows_per_user) != (8, 8)", source)
 
     def test_the_emulation_and_the_smoke_rule_do_not_ship_in_the_image(self):
         overlay = text('../../docker/qwen-c2-overlay.txt').splitlines()

@@ -240,6 +240,7 @@ FUSION_RULES = (
     'exact_resume_smoke',  # ER
     'grid13_smoke',  # M1
     'toolcall_whitespace_smoke',  # TW
+    'w3_wc_smoke',  # W3
     'tp4_shard_argmax_smoke',  # WP0
     'ccl_options_smoke',  # WP0
     'draft_permute_smoke',  # WP0

@@ -14,6 +14,7 @@ ENGAGED = '[PINDIAG] tp4 gdn wc engaged'
 FELL_BACK = '[PINDIAG] tp4 gdn wc fell back'
 AUDIT = '[PINDIAG] tp4 gdn wc audit'
 MISMATCH = '[PINDIAG] tp4 gdn wc audit mismatch'
+OCTO_DECLINE = 'reason=8 users (WC takes 2 or 4)'    # gdn_wc.problem() for the octo block's 8 users
 
 
 def problems(env, container_text):
@@ -21,7 +22,11 @@ def problems(env, container_text):
     audit flag, a passing audit line (the marker, '<n> exact=True')."""
     lines = container_text.splitlines()
     found = ['the gdn wc audit found a difference: %s' % line.strip()[:200] for line in lines if MISMATCH in line][:4]
-    found += ['the gdn wc launch fell back (the V1 chain ran, it saved nothing): %s' % line.strip()[:200] for line in lines if FELL_BACK in line][:4]
+    # The octo block (QWEN_FAST_OCTO=live|alternate: 8 users of 8 rows) is never a WC block: WC takes 2 or 4 users, declines it with this one line, and the block
+    # runs the served chain. That decline is the design, not a fault; every other fall-back still fails the arm.
+    octo = env is not None and env.get('QWEN_FAST_OCTO') in ('live', 'alternate')
+    found += ['the gdn wc launch fell back (the V1 chain ran, it saved nothing): %s' % line.strip()[:200] for line in lines
+              if FELL_BACK in line and not (octo and OCTO_DECLINE in line)][:4]
     if env is None or env.get(FLAG) != '1':
         if any(ENGAGED in line or AUDIT in line for line in lines):
             found.append('gdn wc lines on a profile without %s' % FLAG)

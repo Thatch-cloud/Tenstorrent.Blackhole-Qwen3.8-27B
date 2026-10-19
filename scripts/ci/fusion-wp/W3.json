@@ -1,0 +1,9 @@
+{
+  "wp": "W3",
+  "branch": "tp4/w3-wc",
+  "description": "Wave 3, the one lever of it in this tree: WC (QWEN_FAST_TP4_GDN_WC, default off), the GDN layer's windows, convolution and gates in one launch (docs/tp4-w3-wc.md). Its markers are read by its own stricter smoke rule (w3_wc_smoke), not by the generic tables, because the octo block (8 users of 8 rows) is never a WC block and its one logged decline must not fail an arm. The module, its two kernels and the tests are listed by the lines the lever's branch put in docker/qwen-c2-overlay.txt and the CPU allowlist. W3 MR and W3 keyed are not in this tree: the batched reads (QWEN_FAST_BATCHED_READS) and the round-host keyed diff (QWEN_FAST_TP4_ROUND_HOST_KEYED) of the shipped stack are the same levers.",
+  "smoke_rules": [
+    "w3_wc_smoke"
+  ],
+  "docs": "docs/tp4-w3-wc.md"
+}
