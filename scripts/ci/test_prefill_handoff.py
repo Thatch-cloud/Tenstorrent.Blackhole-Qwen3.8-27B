@@ -180,6 +180,25 @@ class StageOneRouteTests(unittest.TestCase):
         self.assertEqual(rig.marker('[PF2]'), [])
         self.assertEqual(rig.marker('handoff'), [])
 
+    def test_with_both_flags_unset_the_module_is_never_imported(self):
+        import builtins
+
+        imported = []
+        real = builtins.__import__
+
+        def spy(name, *args, **kwargs):
+            if name == 'prefill_handoff':
+                imported.append(name)
+            return real(name, *args, **kwargs)
+
+        with mock.patch.object(builtins, '__import__', spy):
+            rig = Rig(ON)
+            run_prompt(rig, 4097)
+            self.assertEqual(imported, [])
+            self.assertIsNone(rig.handle.handoff)
+            Rig(AUDITED)
+        self.assertEqual(imported, ['prefill_handoff'])
+
     def test_zero_runs_the_same_device_calls_and_only_adds_the_timing_line(self):
         plain, timed = Rig(ON), Rig(HOST_TIMED)
         _, state_p, mark_p = run_prompt(plain, 4097)

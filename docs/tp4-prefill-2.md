@@ -6,7 +6,7 @@ templates, and two kernel-class designs. **Nothing here has run on a card.** Eve
 ## 0. Summary
 
 1. **What a returning agent turn costs, and why.** A turn of 3.1k new tokens at 120,832 tokens of context is two passes (one 2,048-row chunk and a masked tail padded to a 2,048-row bucket) and costs about
-   1.19 s (**M**: the production route lines say 1.09-1.16 s for such steps; the fitted model 1.19 s). 44 percent of it is attention (SDPA), the only part that grows with context; 50 percent is the rest of the
+   1.19 s (**M**: the route lines for steps at 120,832 say 1.09-1.16 s, the median of the 15 such steps at 120-160k in the window is 1.26 s; the fitted model 1.19 s). 44 percent of it is attention (SDPA), the only part that grows with context; 50 percent is the rest of the
    device work, which is flat in context (matmuls 119 ms, GDN 49, collectives 49, glue 20, norm 12, eltwise 12 per 2,048-row chunk); about 6 percent is eager dispatch and the end-of-prompt hand-off.
 2. **Attention is already at the single-core floor.** The one-q-chunk-per-core call (oneq, in the ship-4 stack) puts each q chunk on its own core, and a core streams its K/V blocks one after another at
    13.51 us a block (**M**, card M K0a): a 120k step spends 2 x 16 layers x 960 blocks x 13.5 us = 0.41 s there whatever else is done. bf8 K/V reads are already used and the pass is compute-bound
@@ -50,7 +50,7 @@ matmul (the 2026-09-19 regrouping, `docs/prefill-profile-corrected-2026-09-19.md
 | 163,840 | 119.3 | 48.7 | 48.9 | 20.4 | 12.2 | 11.7 | 307.9 | 569.1 | 647.8 | 54% |
 | 253,952 | 119.3 | 48.7 | 48.9 | 20.4 | 12.2 | 11.7 | 474.1 | 735.2 | 835.3 | 64% |
 
-The first three rows lie inside PF1's measured range (chunks 1-63, to 129k); 163,840 and 253,952 are extrapolations of an R^2 = 1.000 line (**E**). Wall = 5.5 ms + 1.1286 x kernel (**M**, the twin).
+The first three rows lie inside or at the edge of PF1's measured range (chunks 1-63, to 129k); 163,840 and 253,952 are extrapolations of an R^2 = 1.000 line (**E**). Wall = 5.5 ms + 1.1286 x kernel (**M**, the twin).
 The paired call as profiled costs 806 ms of wall at 131k and 1,276 ms at 254k.
 
 The same chunk at 131,072 tokens of context, by the categories asked for (kernel ms; **M** except the in-situ SDPA factor):
@@ -170,7 +170,7 @@ How the brief's candidates fall out:
 | **hand-off total** | **163.8** | **8.0** | 1,919 ops, almost all host dispatch |
 
 This is a profiled run, so it is the upper end of what production pays: the production end-of-prompt pass minus a chunk pass is 25-65 ms at 40-200k of context, which bounds the production hand-off
-from above (model: 30-90 ms, central 60). The profile's slot was 0, the cheapest case: for other slots `_write_index` adds a second slice and two untilizes per tap.
+from above (model: 30-90 ms, central 60). The profile's per-tap sequence has no slice of the rows before the slot (8 ops), which is what slot 0 gives and the cheapest case: for other slots `_write_index` adds a second slice and two untilizes per tap.
 
 ### 5.2 What the lever does
 
