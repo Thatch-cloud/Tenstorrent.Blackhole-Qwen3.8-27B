@@ -574,6 +574,58 @@ def concurrent8_code_128k_long():
     return dict(run_users('concurrent8_code_128k_long', prompts, max_tokens=DEEP_LONG_BUDGETS['concurrent8_code_128k_long'], ignore_eos=True), corpus=corpus, fit=fit)
 
 
+# NP9 (docs/tp4-np9-answer32k.md): the long-answer tests. Swift's output ceiling is 32,768 (qwen_c2_checkpoints.json), and every other test of this file asks for at most a few thousand tokens, so nothing
+# has run a seat for 30,000 tokens. Each user is asked for LONG_ANSWER_TOKENS with ignore_eos (an answer that reaches its budget whatever the model says: the stop is the ceiling, not the model) and must end
+# with finish "length" and exactly that many tokens: a server whose ceiling is lower clamps the request and reads as a fault (c2_smoke_check.long_answer_problems). The eight-seat shapes hold one KV
+# reservation of prompt + 30,000 tokens per seat: 8 x ceil((96,000 + 30,000 + 32) / 64) + 8 = 15,768 of the 16,499 blocks, so every seat is resident at once. LONG_ANSWER_TOKENS and LONG_ANSWER_PREFIX_TOKENS can be set in the
+# environment (the CPU test's fake server does, to keep its wall time down); the cards run the defaults.
+LONG_ANSWER_TOKENS = 30000
+LONG_ANSWER_PREFIX_TOKENS = 16384          # the short half of long_answer_prefix: the old ceiling
+LONG_ANSWER_MARGIN_CHARS = 512             # the tail of the short answer not held to the long one (the last round and the parser's last delta)
+LONG_ANSWER_SHAPES = {'long_answer_solo_4k': (1, 4096), 'long_answer_solo_200k': (1, 200000), 'long_answer8_4k': (8, 4096), 'long_answer8_96k': (8, 96000)}
+
+
+def long_answer_tokens():
+    import os
+    return int(os.environ.get('LONG_ANSWER_TOKENS') or LONG_ANSWER_TOKENS)
+
+
+def long_answer_prefix_tokens():
+    import os
+    return int(os.environ.get('LONG_ANSWER_PREFIX_TOKENS') or LONG_ANSWER_PREFIX_TOKENS)
+
+
+def long_answer_run(name):
+    # Opt-in (NP9). `seats` users, each a real-code prompt of about `prompt_tokens` (as the server counts them, past 8k), long_answer_tokens() out with ignore_eos, started together.
+    seats, prompt_tokens = LONG_ANSWER_SHAPES[name]
+    fit = None
+    if prompt_tokens > 8192:
+        prompts, corpus, fit = fitted_code_prompts((prompt_tokens,) * seats)
+    else:
+        prompts, corpus = code_prompts((prompt_tokens,) * seats)
+    asked = long_answer_tokens()
+    out = run_users(name, prompts, max_tokens=asked, ignore_eos=True, timeout=3600)
+    return dict(out, corpus=corpus, asked=asked, **(dict(fit=fit) if fit else {}))
+
+
+def long_answer_prefix():
+    # Opt-in (NP9). One 4k real-code prompt asked twice, in turn, with ignore_eos: LONG_ANSWER_PREFIX_TOKENS (the old ceiling) and then long_answer_tokens(). Greedy decoding is deterministic and the budget enters a
+    # round only at the last few tokens (docs/tp4-np9-answer32k.md), so the long answer must begin with the short one but for its last LONG_ANSWER_MARGIN_CHARS characters: reasoning then content, as streamed.
+    prompts, corpus = code_prompts((4096,))
+    messages = [{'role': 'user', 'content': prompts[0]}]
+    short = stream(messages, long_answer_prefix_tokens(), timeout=3600, keep_text=True, ignore_eos=True)
+    long = stream(messages, long_answer_tokens(), timeout=3600, keep_text=True, ignore_eos=True)
+    first = (short.get('full_reasoning') or '') + (short.get('full_content') or '')
+    second = (long.get('full_reasoning') or '') + (long.get('full_content') or '')
+    held = first[:max(0, len(first) - LONG_ANSWER_MARGIN_CHARS)]
+    difference = next((index for index, (a, b) in enumerate(zip(held, second)) if a != b), None)
+    if difference is None and len(second) < len(held):
+        difference = len(second)
+    row = lambda answer: dict((key, answer.get(key)) for key in ('tokens', 'finish', 'ttft', 'decode_tok_s', 'prompt_tokens'))
+    return dict(short=row(short), long=row(long), asked=[long_answer_prefix_tokens(), long_answer_tokens()], compared_chars=len(held), short_chars=len(first), long_chars=len(second),
+                first_difference=difference, prefix_equal=difference is None and len(held) > 0, corpus=corpus)
+
+
 SKEW_LONG_TOKENS = 253920           # the stall arm's cold prompt: known to fit the 262k profile's room with a short answer
 SKEW_SHORT_TOKENS = 4096
 SKEW_TARGETS = (SKEW_LONG_TOKENS, SKEW_SHORT_TOKENS, SKEW_SHORT_TOKENS, SKEW_SHORT_TOKENS,
@@ -715,7 +767,8 @@ FEWDEC_SHAPES = ((1, 120000, 4000), (2, 253920, 6000))     # (decoders, cold pro
 SHAPE_SEATS = {'np1_live1': 1, 'np1_live2': 2, 'np1_live4': 4, 'concurrent8_skew': 8, 'concurrent8_code_32k': 8, 'concurrent8_code_128k': 8, 'concurrent8_code_32k_long': 8, 'concurrent8_code_128k_long': 8,
                'stall8_cold262k': STALL_SHORT_SEATS + 1, 'stall8_cold128k': STALL_SHORT_SEATS + 1,
                'cold2_254k': COLD2_DECODERS + COLD2_ARRIVALS, 'levern_equal_busy': 7 + 1, 'levern_decoder_finishes': 7 + 1,
-               'prefill_ladder_solo': 1, 'prefill_ladder_busy': LADDER_DECODERS + 1, 'prefill_few_decoders': 3}
+               'prefill_ladder_solo': 1, 'prefill_ladder_busy': LADDER_DECODERS + 1, 'prefill_few_decoders': 3,
+               'long_answer_solo_4k': 1, 'long_answer_solo_200k': 1, 'long_answer8_4k': 8, 'long_answer8_96k': 8, 'long_answer_prefix': 1}
 
 
 def cold2_254k():
@@ -1374,6 +1427,11 @@ if ONLY and 'concurrent8_code_32k_long' in ONLY:
     record('concurrent8_code_32k_long', concurrent8_code_32k_long)
 if ONLY and 'concurrent8_code_128k_long' in ONLY:
     record('concurrent8_code_128k_long', concurrent8_code_128k_long)
+for _long_name in LONG_ANSWER_SHAPES:      # NP9, in this order: the solo shapes first
+    if ONLY and _long_name in ONLY:
+        record(_long_name, lambda name=_long_name: long_answer_run(name))
+if ONLY and 'long_answer_prefix' in ONLY:
+    record('long_answer_prefix', long_answer_prefix)
 if ONLY and 'concurrent8_skew' in ONLY:
     record('concurrent8_skew', concurrent8_skew)
 if ONLY and 'stall8_cold262k' in ONLY:

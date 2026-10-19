@@ -40,7 +40,8 @@ for Swift they are an argument (same code, same shapes), and SA1 of the pack is 
   keyed directory, the engine's `target_snapshot` is the snapshot; else the worker stops. It logs `[QWEN-C2] checkpoint bound ...`.
 * **Answer room (owner-approved 2026-10-12)**: the Swift catalog entry carries `"request": {"default_max_tokens": 16384}`; `serving_c2_contract.checkpoint_limits` lays it over the profile's 8,192 in the API
   server (the ship-4 profile and the base are untouched). A request that omits `max_tokens` gets 16,384, clamped by `enforce_request` to the room a long prompt leaves (a 253,920-token prompt gets 8,192) and
-  by the output budget (16,384, unchanged); an explicit larger value is clamped as before. The per-request KV check never refuses a default request. Cost: the reservation holds each request's
+  by the output budget (the profile's 16,384; since NP9 the Swift entry also carries `"output_budget": 32768`, so an explicit `max_tokens` is clamped at 32,768 and the default stays 16,384:
+  docs/tp4-np9-answer32k.md has the evidence that this costs no device memory and the seat table it costs in KV admission). The per-request KV check never refuses a default request. Cost: the reservation holds each request's
   worst case (prompt + max_tokens), so with the default max_tokens eight seats fit the 16,499-block pool up to prompts of 115,488 tokens (123,680 with the 8,192 default); between those, the eighth
   default-max_tokens request waits for blocks instead of running. Requests that name max_tokens at 8,192 or less are unaffected.
 * Proofs: `test_qwen_c2_checkpoint` (the base and Swift resolve to different cache directories; the base's path is exactly what it was, in the environment, `keyed_cache_dir` and `contract.boot`; the off

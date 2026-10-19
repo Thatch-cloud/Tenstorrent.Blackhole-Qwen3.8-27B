@@ -1,0 +1,28 @@
+# The order of the NP9 long-answer window (docs/tp4-np9-answer32k.md; scripts/ci/make_np9_jobs.py): Swift (ukisai/Swift-1.5-Qwen3.8-27b, revision b4c84d42903a) on the approved ship-4 profile c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4 with the 32,768-token output ceiling of its catalog entry, ONE image (tp4-np9-1, a placeholder: B0 builds it from the pushed tp4/np9-answer32k head WITH the K64j-OQ graft) and ONE window. Nothing in the profile, the base or the image's defaults moves.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (the NEEDS lines skip what depended on it).
+# WHAT THIS DECIDES (the owner's, never the window's): whether the 32,768-token ceiling goes to production. The CPU side is settled (docs/tp4-np9-answer32k.md: the ceiling allocates no device memory on the serving shape; it costs KV admission only); what only a card can show is that a seat runs 30,000 tokens, alone and eight at once, at a short and a long prompt, with the text unchanged by the ceiling. Every result is UNQUALIFIED.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z; nothing in this pack does either. B0 is a build and may run while production serves. No other window driver may be alive and no privileged builder container up.
+# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and each tag is pushed on THAT commit (the throwaway commit carries only .github/c2-serving-job.env). Push ONE tag at a time and wait for its run to finish; queued tags are cancelled. Never cancel a running card job.
+# P0. SWIFT IS ON THE CARD HOST: python3 scripts/ci/qwen_c2_checkpoint.py check --hub <the hub directory> --repo ukisai/Swift-1.5-Qwen3.8-27b --revision b4c84d42903a8646b25857eb2827288d92ed85a4 exits 0, and its converted weights exist from the Swift window (otherwise N1 is the first boot, box 150).
+# ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO (minRunners and maxRunners 0, the normal values written down first, restored by the same patch with the old numbers) BEFORE N1 and restores them AFTER N3.
+# THE JOBS, in value order (cut the window at a block end): N1 is the whole question for one seat (the ceiling, the text, 200k); N2 and N3 are the eight-seat shapes. B0 is the WINDOW build.
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0 <- B0
+# NEEDS N1 <- X0
+# NEEDS N2 <- N1
+# NEEDS N3 <- N1
+# READ RULES (each also needs c2_smoke_check clean, with the container log, and no stall; the templates' own headers have the whole text):
+#   B0   'baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s4 with a session cap of 8', the provenance report with no problem line, its K64j-OQ graft line, the image id.
+#   X0   four cards present and healthy, the fabric as measured, the 13x10 grid in the run, no other window driver alive; Swift on the host.
+#   N1   (STOP) the ceiling lines (request output budget 32768; request contract installed ... <= 32768), the checkpoint lines, long_answer_prefix prefix_equal=True, every long_answer user finish length with 30000 tokens.
+#   N2   the same ceiling and answer rules at eight live; octo_judge clean; no hold line (4,280 of 16,499 blocks).
+#   N3   the same at 96,000-token prompts; NO 'kv reservation hold' line (15,768 of 16,499 blocks); the per-seat rate at depth recorded.
+# NO-GO for the 32,768 ceiling: a request that ends short of its 30,000 tokens, a prefix difference in long_answer_prefix, a stall, an audit mismatch, an engine-build or DRAM refusal that 16,384 would not have drawn, a 'kv reservation hold' at N3.
+# THEN (not this window): production takes the ceiling with a new serving image built from the branch head that passed (the catalog entry is the whole production change); the owner decides and restores production with the cutover pack's own steps.
+# Time (estimate, minutes): B0 40, X0 20, N1 75, N2 70, N3 80, Z 10: 295 minutes (4 h 55 min) in all, 255 minutes of cards (X0 to Z).
+B0-build-window stop tp4-np9-1 40
+X0-status-rescan-reset stop tp4-np9-1 20
+N1-long-answer-solo stop tp4-np9-1 75
+N2-long-answer8-short soft tp4-np9-1 70
+N3-long-answer8-deep soft tp4-np9-1 80
+Z-reset soft tp4-np9-1 10

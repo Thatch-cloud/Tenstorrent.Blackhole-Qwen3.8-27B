@@ -514,7 +514,7 @@ class PackageFolderTests(unittest.TestCase):
 
     # The integrator's own window packs name the tag their B0 builds (the window of tp4/fusion-2: tp4-fusion-6, test_fusion2_pack); every other package folder names the placeholder.
     # A package folder that needs code the fusion image does not carry names the image of its own B0 (the host tier pack: the fusion merge plus the tier's grafts and the raw block ops).
-    OWN_IMAGE = {'F2': 'tp4-fusion-6', 'O3': 'tp4-octo3-1', 'tier': 'tp4-fusion-tier-1', 'ship4': 'tp4-ship-4', 'SW': 'tp4-swift-1', 'NP1': 'tp4-np1-1'}
+    OWN_IMAGE = {'F2': 'tp4-fusion-6', 'O3': 'tp4-octo3-1', 'tier': 'tp4-fusion-tier-1', 'ship4': 'tp4-ship-4', 'SW': 'tp4-swift-1', 'NP1': 'tp4-np1-1', 'NP9': 'tp4-np9-1'}
 
     # The WPP folder's RQ jobs (the packed-any re-record on the K64j-OQ binary) name the tag OQ-B0 built, as plain words in a public tag commit; every other template of the folder is the placeholder.
     OWN_IMAGE_FILES = {('WPP', 'RQ'): 'tp4-oneq-1'}

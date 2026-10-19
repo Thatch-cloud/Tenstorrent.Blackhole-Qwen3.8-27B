@@ -1,5 +1,5 @@
 {
- "about": "The checkpoints the C2 serving stack may serve besides its base (scripts/ci/qwen_c2_checkpoint.py, docs/tp4-swift.md). Public facts of the model repositories only: file digests (sha256 of the file bytes), the safetensors index (the digest of its weight_map) and the weight shards (size and sha256, which is the hub blob name). A checkpoint is selectable only when every identity file below is byte-identical to the base entry's and its tensors, shard names and shard sizes equal the base's: the same architecture, the same shapes, the same tokenizer and chat template. Only its weights differ. A checkpoint entry may carry \"request\": {\"default_max_tokens\": N}: the max_tokens a request gets when the client omits it, replacing the profile's (serving_c2_contract.checkpoint_limits; 1 to the output budget). The base never carries one.",
+ "about": "The checkpoints the C2 serving stack may serve besides its base (scripts/ci/qwen_c2_checkpoint.py, docs/tp4-swift.md). Public facts of the model repositories only: file digests (sha256 of the file bytes), the safetensors index (the digest of its weight_map) and the weight shards (size and sha256, which is the hub blob name). A checkpoint is selectable only when every identity file below is byte-identical to the base entry's and its tensors, shard names and shard sizes equal the base's: the same architecture, the same shapes, the same tokenizer and chat template. Only its weights differ. A checkpoint entry may carry \"request\": {\"default_max_tokens\": N}: the max_tokens a request gets when the client omits it, replacing the profile's (serving_c2_contract.checkpoint_limits; 1 to the output budget), and \"output_budget\": N, the ceiling on max_tokens (QWEN_FAST_OUTPUT_BUDGET) the checkpoint is served with: a multiple of 256 up to 32768 that only RAISES the profile's, laid over a profile that is C2-any beside the extent readers and keeps its prompt cap, and ignored (with a log line) by any other (serving_c2_contract.checkpoint_budget_problems; docs/tp4-np9-answer32k.md). The base never carries one.",
  "schema": 1,
  "identity_files": [
   "config.json",
@@ -199,7 +199,8 @@
    "served_model": "ukisai/Swift-1.5-Qwen3.8-27b",
    "notes": "RL post-train of the base (the model card claims fewer thinking tokens and better coding scores at temperature 1.0; this stack serves greedy only). Weights licence: the repo's own (see its LICENSE and NOTICE): a decision for the owner, not for this file.",
    "request": {
-    "default_max_tokens": 16384
+    "default_max_tokens": 16384,
+    "output_budget": 32768
    }
   }
  ]

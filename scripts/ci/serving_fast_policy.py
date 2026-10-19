@@ -24,12 +24,16 @@ output bit-comparable is untouched.
 
 import os
 
-# The per-request output budget. Every request's verifier captures are allocated for it up
-# front, one set per 256-position mask family it can touch (verifier_engine.capture_bucket_rows),
-# so it costs device memory per admitted request rather than being a free policy number.
-# 256 is the measured C2 contract; a serving image may raise it (QWEN_FAST_OUTPUT_BUDGET, a
-# whole number of 256-token families up to 16384) and pay for it with a shorter context.
+# The per-request output budget, the server ceiling on max_tokens. What it costs depends on the capture shape (docs/tp4-np9-answer32k.md):
+# - replay attention (a profile without QWEN_FAST_ANY_REQUEST): every request's verifier captures are allocated for it up front, one set per
+#   256-position mask family it can touch (verifier_engine.capture_bucket_rows), so it costs device memory per admitted request;
+# - C2-any beside the extent readers (QWEN_FAST_ANY_REQUEST=1 and QWEN_FAST_EXTENT_REPLAY=1, every c2-packed-tp4 serving profile): the captures are the
+#   sequential widths 1, 2 and 4 whatever the budget (the pool refuses a replay width, serving_buffer_pool), one 2048 proposal bucket, one page table of
+#   the whole window, so the budget costs no device memory. It costs KV admission: serving_kv_reservation holds prompt + max_tokens per request.
+# 256 is the measured C2 contract; a serving image may raise it (QWEN_FAST_OUTPUT_BUDGET, a whole number of 256-token families up to 32768; the
+# contract refuses a value above 16384 on a profile that is not C2-any with the extent readers: serving_c2_contract.output_budget_problems).
 PACKED_FAMILY_TOKENS = 256
+MAXIMUM_OUTPUT_BUDGET = 32768
 
 
 def _output_budget(value):
@@ -39,9 +43,9 @@ def _output_budget(value):
         budget = int(value)
     except ValueError:
         budget = 0
-    if budget < PACKED_FAMILY_TOKENS or budget > 16384 or budget % PACKED_FAMILY_TOKENS:
-        raise ValueError('QWEN_FAST_OUTPUT_BUDGET must be a multiple of %d from %d to 16384, got %r'
-                         % (PACKED_FAMILY_TOKENS, PACKED_FAMILY_TOKENS, value))
+    if budget < PACKED_FAMILY_TOKENS or budget > MAXIMUM_OUTPUT_BUDGET or budget % PACKED_FAMILY_TOKENS:
+        raise ValueError('QWEN_FAST_OUTPUT_BUDGET must be a multiple of %d from %d to %d, got %r'
+                         % (PACKED_FAMILY_TOKENS, PACKED_FAMILY_TOKENS, MAXIMUM_OUTPUT_BUDGET, value))
     return budget
 
 
