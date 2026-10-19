@@ -155,7 +155,8 @@ PARKED_PROFILES = PARKED_PROFILES + tier_twins.twin_names() + tier_twins.ship_na
 import make_octo3_profiles as octo3_twins  # noqa: E402
 import make_ship4_profiles as ship4_twins  # noqa: E402
 import make_np1_profiles as np1_twins  # noqa: E402
-OCTO_PROFILES = octo_twins.twin_names() + octo2_twins.twin_names() + octo3_twins.twin_names() + ship4_twins.twin_names() + np1_twins.twin_names()      # (and tp4/octo-3's twins of the fused stack, held by test_octo3_profiles; tp4/ship-4's, test_ship4_profiles; tp4/np1-fastlane's, test_np1_profiles)
+import make_s5_profiles as s5_twins  # noqa: E402
+OCTO_PROFILES = octo_twins.twin_names() + octo2_twins.twin_names() + octo3_twins.twin_names() + ship4_twins.twin_names() + np1_twins.twin_names() + s5_twins.twin_names()      # (and tp4/next-1's audited twins, test_s5_profiles; tp4/octo-3's twins of the fused stack, held by test_octo3_profiles; tp4/ship-4's, test_ship4_profiles; tp4/np1-fastlane's, test_np1_profiles)
 # the region-read audit twins (make_kvread_profiles; test_kvread_profiles holds each as its parent plus one flag): exempt wherever the engine-reuse twins are.
 import make_kvread_profiles as kvread_twins  # noqa: E402
 PARKED_PROFILES = PARKED_PROFILES + kvread_twins.twin_names()
