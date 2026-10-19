@@ -1,7 +1,6 @@
 # tp4/next-1: the ship-5 candidate
 
-Status: **integrated and tested on CPU; nothing here has run on a card together, and NP1, exact resume, the sliced restore and W3 WC have not run on a card at all.** Nothing in
-production moved. The branch is `tp4/next-1`, cut from `tp4/swift` (the ship-4 stack plus the checkpoint selection, the production tree), and no experiment tag is pushed from it.
+Status: **SHIPPED 2026-10-19.** The owner approved the ship-5 waiver conditional on the window gates; every gate passed on the rebuilt image (section 7) and `c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s5` serves Swift-1.5 in production. The first window build is NOT a ship candidate (section 7.1).
 
 ## 1. What is in it
 
@@ -82,3 +81,49 @@ The agent test is named by `AGENT_TURNS_TEST` in `make_s5_jobs.py`; empty it and
 * The tier at 48 GiB plus the carry's window rows (up to 105 MB a checkpoint) raise the host RAM the engine process holds; the smoke container runs under an 80 GiB limit.
 * `real_text_compare` counts `QWEN_FAST_OUTPUT_BUDGET` as arithmetic: an exactness arm on the 32,768 ceiling held against a reference made at 16,384 reads NOT_COMPARABLE, never a false pass.
 * Two lever pairs of the shipped stack are untouched by the candidate and unproven together with it: exact resume beside engine reuse's rebind, and the sliced restore beside octo-T8.
+
+## 7. Card results (window 2026-10-19) and the ship
+
+All on Swift-1.5, four cards, the s5 window jobs (`S5`). Production was down for the window by the owner's decision.
+
+### 7.1 The first build and its fix
+
+* **A1 on the first build (v905) failed at the first carried resume**: the engine died at the first returning agent turn that used exact resume P0. The four-card prefill tripwire's
+  `counted_capture` took `(position, start)` and dropped P0's `carry=` keyword (TypeError). It sits on the normal four-card path, so **that build must never ship**. Every audit before the
+  failure was exact. Fixed in `3b59628c` (the tripwire hands every lifecycle keyword to the capture factory) with two regression tests; the image was rebuilt from it (v915) after a green CPU suite.
+* Lesson: the CPU lifecycle tests built the factories unwrapped, so a new keyword on a factory call passed CPU and failed on the cards. A new keyword needs every wrapper of the call checked.
+* N1 (v906) ran on the first build and passed; the fix does not touch its path, and it was repeated on the rebuilt image (7.2).
+
+### 7.2 The gates on the rebuilt image
+
+| gate | tag | result |
+| --- | --- | --- |
+| A1, audited attach | v916 | **exact**: 0 audit mismatches over 6,517 audited rounds, the engine alive throughout, carried resumes exercised. The job failed on three agent-turn client timeouts (900 s per read): the audited profile holds about 2.6 GB more DRAM per chip (largest free block 5,467 MB after load against 8,045 unaudited), so once parked engines left 1,029 MB free, below the contiguous admission need of 1,124.4 MB (reserve 268.4 + largest buffer 256 + prefill transient 600), every prompt of 2,048 tokens or more waited for the server to drain and the run went one user at a time. Audit-only: T1B (the same image unaudited) had 0 holds. |
+| A2, exact resume | v917 | **exact**: 21 of 21 cold/hit pairs identical up to 128k, solo 21 of 21, the carry's audits 0 differing, 3,440 audit lines with 0 mismatches. The job failed on three stale judge rules, fixed in `842e3f07` (the resume ceiling knows P0's carry, the store size comes from the profile, the multi-user levers read NOT_EXERCISED in a one-request-at-a-time arm); `prefix_rejudge.py --arm-dir` re-judges the saved arm to PASS with 0 problems. |
+| T1A / T1B, timed pair | v918 / v919 | **no loss anywhere** (below) |
+| N1, long answers | v920 | **pass**: 30,000-token answers at 153.4 tok/s (4k prompt) and 95.9 tok/s (200k prompt, first token 52.2 s); the 16,384-token answer is an exact prefix of the 30,000-token one; eight users steady 241 tok/s |
+
+T1A is the ship-4 profile and T1B ship-5, on the same image, back to back, with the same tests and the same 25,903 tokens on both legs:
+
+| test | T1A (s4) | T1B (s5) |
+| --- | --- | --- |
+| agent_turns throughput | 37.88 tok/s | 50.36 tok/s (+33%) |
+| returning turn, first token p50 / p90 | 3.07 / 5.28 s | 1.46 / 2.33 s |
+| np1_live1 (one user) | 34.8 tok/s | 61.2 tok/s (+76%) |
+| np1_live2 / np1_live4 | | +4% / flat |
+| concurrent8_steady, aggregate decode | 221 tok/s | 239 tok/s |
+| concurrent8_steady, worst first token | 20.0 s | 15.4 s |
+| errors, DRAM admission holds | 0, 0 | 0, 0 |
+
+Deferred to a later window: N2, N3, A3 (the audited sliced restore) and SP1.
+
+### 7.3 The ship
+
+The serving image bakes `c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s5` with a session cap of 8 and no audit instrument, on the rebuilt image. Production post-checks after the
+deploy: the model list at 262,144, the session cap 8, a coding request answered at 61.6 tok/s end to end (one user, the NP1 lane), and a two-turn reuse through the gateway that
+reused 10,240 of 11,593 prompt tokens (P0: the resume ceiling is floor2048(P-1) with a covering window; it was floor2048(P-2048), 8,192 here, before).
+
+### 7.4 Still open
+
+* Two judge defaults remain stale: the prefix oracle's store capacity default (8 GiB) and `exercised_exactness` on sticky carry arms (expects floor2048(L-2048)).
+* The 600 MB prefill transient in the admission need is an estimate (205k-token prefills ran with 1,029 MB free); measuring it would lower the need and the audit-profile holds with it.
