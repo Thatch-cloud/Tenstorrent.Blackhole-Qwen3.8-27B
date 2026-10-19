@@ -770,6 +770,10 @@ def smoke_json(text):
     return found
 
 
+def percent(share):
+    return 'n/a' if share is None else '%.1f%%' % (100.0 * share)
+
+
 def format_report(entry, facts=None):
     """The entry (and the container log's facts, if any) as text: settings, per-session summaries, the turn table, the aggregate and the tables."""
     out = []
@@ -817,9 +821,9 @@ def format_report(entry, facts=None):
             prefill, decode = facts['prefill'], facts['decode']
             out.append('CONTAINER LOG  %(lines)s lines in the run window (%(tagged_lines)s name a request)' % facts['window'])
             out.append('               prefill %s of the wall (%s route steps, %s ms; resumed turns %s, cold builds %s)' % (
-                prefill['share'], prefill['route_steps'], prefill['ms'], prefill['resumed_share'], prefill['cold_share']))
+                percent(prefill['share']), prefill['route_steps'], prefill['ms'], percent(prefill['resumed_share']), percent(prefill['cold_share'])))
             out.append('               decode  %s of the wall (%s [OCTO] rounds, %s ms; %s idle-gap rounds left out of the table); other %s' % (
-                decode['share'], decode['rounds'], decode['step_ms'], decode['idle_rounds'], facts['other_share']))
+                percent(decode['share']), decode['rounds'], decode['step_ms'], decode['idle_rounds'], percent(facts['other_share'])))
             out.append('               rebind  %s' % json.dumps(facts['rebind']))
             out.append('SERVER LIVE TABLE  live  rounds  step_ms  gap_ms  committed/live  tok/s a user  aggregate tok/s')
             for row in facts['live']:

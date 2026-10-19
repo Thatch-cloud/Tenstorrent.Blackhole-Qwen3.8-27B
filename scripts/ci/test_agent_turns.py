@@ -360,6 +360,42 @@ class RunShapeTests(AgentRuns):
         self.assertEqual([session['turns_done'] for session in results['agent_turns']['sessions']], [2, 2, 2])
 
 
+class ReportTests(AgentRuns):
+    def test_the_report_prints_every_table_from_the_smoke_log_and_the_container_log(self):
+        import contextlib
+        import io
+        _results, chats, stdout = self.agent()
+        with tempfile.TemporaryDirectory() as directory:
+            smoke_log, container, out_json = Path(directory) / 'smoke.log', Path(directory) / 'container.log', Path(directory) / 'out.json'
+            smoke_log.write_text(stdout, encoding='utf-8')
+            container.write_text(container_log(chats), encoding='utf-8')
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                code = at.main(['report', '--smoke-log', str(smoke_log), '--container-log', str(container), '--json', str(out_json)])
+            self.assertEqual(code, 0)
+            text = captured.getvalue()
+            for heading in ('PER SESSION', 'PER TURN', 'AGGREGATE', 'CLIENT LIVE TABLE', 'CONTAINER LOG', 'SERVER LIVE TABLE', 'steady window', 'rebind'):
+                self.assertIn(heading, text)
+            saved = json.loads(out_json.read_text(encoding='utf-8'))
+            self.assertEqual(saved['entry']['test'], 'agent_turns')
+            self.assertTrue(saved['log']['readable'])
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                self.assertEqual(at.main(['report', '--smoke-log', str(smoke_log), '--test', 'agent_turns_long']), 1)
+            self.assertIn('no usable agent_turns_long entry', captured.getvalue())
+
+    def test_the_plan_command_needs_no_server(self):
+        import contextlib
+        import io
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            self.assertEqual(at.main(['plan', '--test', 'agent_turns_long', '--max-model-len', '131072']), 0)
+        shown = json.loads(captured.getvalue())
+        self.assertEqual((shown['sessions'], shown['turns']), (6, 30))
+        self.assertGreater(shown['clamped'], 0)
+        self.assertIn('minutes', shown['estimate'])
+
+
 class PlanTests(unittest.TestCase):
     def cfg(self, name='agent_turns', **env):
         return at.settings(name, dict({'SMOKE_AGENT_NONCE': 'abcd1234'}, **env))
