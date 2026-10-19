@@ -257,10 +257,11 @@ class ApprovalTests(unittest.TestCase):
 class ManifestTests(unittest.TestCase):
     def test_a_pack_key_names_a_plain_folder_and_never_ship(self):
         raw = json.loads((fusion.MANIFESTS / 'S4.json').read_text(encoding='utf-8'))['ship'][0]
-        for bad in ('ship', 'Ship4', '../x', 'ship-4', 7):
+        for bad in ('ship', 'SHIP', '../x', 'ship-4', '5s', 7):
             with self.assertRaises(fusion.ManifestError):
                 fusion.ship_of('S4', dict(raw, pack=bad), 'S4')
         self.assertEqual(fusion.ship_of('S4', dict(raw, pack='ship4'), 'S4')['pack'], 'ship4')
+        self.assertEqual(fusion.ship_of('S5', dict(raw, pack='S5'), 'S5')['pack'], 'S5', 'tp4/next-1: the pack folder of the ship-5 candidate is S5, as NP1 and NP9 are NP1 and NP9')
 
 
 if __name__ == '__main__':

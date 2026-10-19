@@ -24,7 +24,7 @@ def problems(env, container_text):
     found = ['the gdn wc audit found a difference: %s' % line.strip()[:200] for line in lines if MISMATCH in line][:4]
     # The octo block (QWEN_FAST_OCTO=live|alternate: 8 users of 8 rows) is never a WC block: WC takes 2 or 4 users, declines it with this one line, and the block
     # runs the served chain. That decline is the design, not a fault; every other fall-back still fails the arm.
-    octo = env is not None and env.get('QWEN_FAST_OCTO') in ('live', 'alternate')
+    octo = env is not None and env.get(FLAG) == '1' and env.get('QWEN_FAST_OCTO') in ('live', 'alternate')
     found += ['the gdn wc launch fell back (the V1 chain ran, it saved nothing): %s' % line.strip()[:200] for line in lines
               if FELL_BACK in line and not (octo and OCTO_DECLINE in line)][:4]
     if env is None or env.get(FLAG) != '1':

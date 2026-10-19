@@ -172,6 +172,7 @@ OCTO_WAIVER_ENV = 'QWEN_FAST_OCTO_WAIVER'
 OCTO_LEVERS = ('QWEN_FAST_OCTO', 'QWEN_FAST_OCTO_DRAFT', 'QWEN_FAST_OCTO_ATTN_BUNDLE', 'QWEN_FAST_OCTO_GLUE8')
 OCTO_KNOBS = ('QWEN_FAST_OCTO_MIN_LIVE', 'QWEN_FAST_OCTO_DRAFT_CONV')
 OCTO_GATE_ONLY = ('QWEN_FAST_OCTO_ATTN_BUNDLE_AUDIT', 'QWEN_FAST_SOLO_PACKED', 'QWEN_FAST_AUDIT_FIRST', 'QWEN_FAST_AUDIT_EVERY')
+SOLO_PACKED_SWITCH = 'QWEN_FAST_SOLO_PACKED'        # NP1 (serving_octo.SOLO_PACKED_FLAG): gate-only, or named by a traffic profile's owner waiver (NEXT_WAIVABLE_LEVERS)
 OCTO_NAMES = OCTO_LEVERS + OCTO_KNOBS + OCTO_GATE_ONLY + (OCTO_WAIVER_ENV,)
 # The engine-start upload levers (qwen_device_zeros: the KV pool and the buffer pool's zero buffers filled on the device; qwen_lazy_shard: a weight-cache hit
 # without the host transpose). Pinned equal to the modules' NAMES by test_upload_p0. A profile sets them (default off, strict '0'/'1'); the audit twins are a gate
@@ -823,6 +824,12 @@ WAIVABLE_LEVERS = {'QWEN_FAST_TP4_SDPA': 'multi', 'QWEN_FAST_TP4_CONV_GATES_SPRE
 # (QWEN_PREFIX_HOST_TIER_GIB) and the preconverted checkpoints (QWEN_PREFIX_CKPT_PRECONVERTED) only under an owner traffic waiver that names each at this value, as for W2
 # and engine reuse (prefix_policy_problems). The audits, the digest-everything mode of a gate and the kill-switch path of a gate stay a gate's own.
 TIER_WAIVABLE_LEVERS = {'QWEN_PREFIX_HOST_TIER_GIB': '32', 'QWEN_PREFIX_CKPT_PRECONVERTED': '1'}
+# tp4/next-1 (the ship-5 candidate): the tier's budget the owner approved for it (the whole prefix state's host budget: a 32 GiB KV share beside a 16 GiB checkpoint store, so
+# QWEN_PREFIX_STORE_GIB=16 and this 48), a waiver may ALSO name the tier at this value; the lone-user padded round (QWEN_FAST_SOLO_PACKED, serving_octo.solo_packed_admission, admitted
+# in a waiver run like the octo shape) and exact resume P0 (the undrop and the drafter-window carry; the carry's audit stays a gate's own). Each has run on CPU alone: the waiver is the
+# owner's decision that they run unqualified, exactly as for the levers above, and the audits and the gate-only names of both stay a gate's.
+TIER_WAIVABLE_ALSO = {'QWEN_PREFIX_HOST_TIER_GIB': ('48',)}
+NEXT_WAIVABLE_LEVERS = {'QWEN_FAST_SOLO_PACKED': '1', 'QWEN_PREFIX_STICKY_UNDROP': '1', 'QWEN_PREFIX_WINDOW_CARRY': '1'}
 TRAFFIC_WAIVER_MARKER = 'OWNER TRAFFIC WAIVER'
 # The decision is a sentence that starts with one of these words. PENDING is a REQUEST: the profile boots (gates and G1 provenance boot every
 # profile) and logs the word, but no build may bake it as an image default (c2_serving_job.read_bake, build-c2-serving-image.sh) until the commit
@@ -864,13 +871,13 @@ def traffic_waiver_problems(profile):
             problems.append('%s: levers must be a non-empty object {flag: exact value}' % label)
         else:
             env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
-            waivable = dict(WAIVABLE_LEVERS, **TIER_WAIVABLE_LEVERS)
+            waivable = dict(WAIVABLE_LEVERS, **dict(TIER_WAIVABLE_LEVERS, **NEXT_WAIVABLE_LEVERS))
             for flag in sorted(levers):
                 value = levers[flag]
                 if flag not in waivable:
                     problems.append('%s: %s is not waivable (only %s; a gate instrument never is)' % (label, flag, ', '.join(sorted(waivable))))
-                elif value != waivable[flag]:
-                    problems.append('%s: %s is waivable only at %s, not %r' % (label, flag, waivable[flag], value))
+                elif value != waivable[flag] and value not in TIER_WAIVABLE_ALSO.get(flag, ()):
+                    problems.append('%s: %s is waivable only at %s, not %r' % (label, flag, ' or '.join((waivable[flag],) + TIER_WAIVABLE_ALSO.get(flag, ())), value))
                 elif env.get(flag) != value:
                     problems.append('%s names %s=%s and the profile env has %r: a waiver names exactly the levers the profile sets'
                                     % (label, flag, value, env.get(flag)))
@@ -917,10 +924,18 @@ def octo_problems(profile, environ=None):
         return problems
     mode = env.get(OCTO_SWITCH, 'off')
     on = mode != 'off' or any(env.get(name, '0') not in ('', '0') for name in OCTO_LEVERS[1:])
-    problems += ['%s=%s is a gate instrument: only a gate-only profile sets it' % (name, env[name]) for name in OCTO_GATE_ONLY if env.get(name, '0') not in ('', '0')]
+    problems += ['%s=%s is a gate instrument: only a gate-only profile sets it%s' % (name, env[name], ' (or a traffic profile whose %s names it)' % TRAFFIC_WAIVER if name in NEXT_WAIVABLE_LEVERS else '')
+                 for name in OCTO_GATE_ONLY if env.get(name, '0') not in ('', '0') and not (name in NEXT_WAIVABLE_LEVERS and waived(profile, name, env))]
+    solo = env.get(SOLO_PACKED_SWITCH, '0') not in ('', '0') and waived(profile, SOLO_PACKED_SWITCH, env)
     if not on:
-        if OCTO_WAIVER_ENV in env:
+        if OCTO_WAIVER_ENV in env and not solo:
             problems.append('%s=%s without the octo shape (%s=live): a waiver id with nothing under it' % (OCTO_WAIVER_ENV, env[OCTO_WAIVER_ENV], OCTO_SWITCH))
+        if solo:
+            # the lone-user padded round under the owner's waiver without the octo shape: the process takes the waiver's id from the profile (serving_octo.waiver_run admits it)
+            waiver = profile.get(TRAFFIC_WAIVER) or {}
+            if env.get(OCTO_WAIVER_ENV) != waiver.get('id'):
+                problems.append('%s=%r and the profile\'s %s id is %r: the process takes the waiver\'s id from the profile, and only that one' % (
+                    OCTO_WAIVER_ENV, env.get(OCTO_WAIVER_ENV), TRAFFIC_WAIVER, waiver.get('id')))
         return problems
     for name in OCTO_LEVERS:
         value = env.get(name)
@@ -1110,8 +1125,10 @@ def exact_resume_problems(profile):
     values = dict((name, str(env[name])) for name in named)
     problems += ['%s=%r: only 0 or 1' % (name, value) for name, value in sorted(values.items()) if value not in ('0', '1')]
     on = set(name for name, value in values.items() if value == '1')
-    if on and profile.get('gate_only') is not True:
-        problems.append('%s are gate-only until a qualification record exists: %s is not gate_only' % (', '.join(sorted(on)), profile.get('name')))
+    # a traffic profile may carry the undrop and the carry only under the owner's traffic waiver naming each (NEXT_WAIVABLE_LEVERS); the carry's audit is a gate's own
+    unqualified = set(name for name in on if profile.get('gate_only') is not True and not (name in NEXT_WAIVABLE_LEVERS and waived(profile, name, {key: str(value) for key, value in env.items()})))
+    if unqualified:
+        problems.append('%s are gate-only until a qualification record exists (or the owner\'s %s names the undrop and the carry): %s is not gate_only' % (', '.join(sorted(unqualified)), TRAFFIC_WAIVER, profile.get('name')))
     if on and not (prefix_reuse(profile) and sticky_sessions(profile)):
         problems.append('%s need %s=1 and %s=1 (the scheduler graft serves the fast path\'s sticky hit only)'
                         % (', '.join(sorted(on)), PREFIX_SWITCH, STICKY_SWITCH))

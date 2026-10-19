@@ -1,0 +1,13 @@
+# The order of the tp4/next-1 SHIP FLOW (docs/tp4-next1.md; scripts/ci/make_s5_jobs.py): B1 builds the ship image and SR replays the platform's serving sequence on it. BOTH WAIT FOR THE OWNER'S APPROVAL of the owner traffic waiver of c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s5 (id ship5-fx-262k-2026-10-19): B1 is refused by c2_serving_job.read_bake while its decision starts with PENDING, and SR boots the profile BY THE IMAGE DEFAULT (c2_platform_replay), so it needs B1's image. Order: the owner approves, `python3 scripts/ci/make_fusion_profiles.py --approve-ship "APPROVED ..." --ship traffic-s5` regenerates the profile, the CPU suite runs on that commit, B1's tag is pushed on THAT commit, then SR. RUN IT FROM A COMMIT WHERE THIS FILE IS ORDER.txt (git mv ORDER-SHIP.txt ORDER.txt).
+# One template per line: <template name without .env> <stop|soft|opt> <image tag> <estimated minutes>. stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (the NEEDS lines skip what depended on it). opt: optional, admitted only if it fits.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE SR and restores it after, with the cutover pack's own steps (B1 is a build and may run while production serves). The card jobs of the earlier windows are over.
+# P0. The CPU suite is green on the commit that records the approval, and each tag is pushed on THAT commit. Push ONE tag at a time and wait for its run to finish; never cancel a running card job.
+# THE JOBS: SHIP BUILD: B1 (35 min); PLATFORM REPLAY: SR (25 min).
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS SR <- B1
+# READ RULES:
+#   B1   'baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s5 with a session cap of 8', the provenance report '(c) the image default is the BAKED profile ...', no problem line, the image id.
+#   SR   'PLATFORM_REPLAY passed=True'; the lever reads of the template's header (the NP1 lines, the carry's install line, the slice line, the grid13 line, the 48 GiB tier line).
+# Time (estimate, minutes): B1 35, SR 25: 60 minutes (1 h 0 min) in all, 25 minutes of cards.
+B1-ship-build soft tp4-next-1 35
+SR-platform-replay soft tp4-next-1 25

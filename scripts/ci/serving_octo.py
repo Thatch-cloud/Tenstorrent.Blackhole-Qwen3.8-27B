@@ -1,4 +1,4 @@
-"""Octo-T8, the eight-seat adaptive round shape (QWEN_FAST_OCTO), and the lone-user packed policy (QWEN_FAST_SOLO_PACKED). BOTH GATE ONLY, both default off.
+"""Octo-T8, the eight-seat adaptive round shape (QWEN_FAST_OCTO), and the lone-user packed policy (QWEN_FAST_SOLO_PACKED). BOTH GATE ONLY OR UNDER AN OWNER TRAFFIC WAIVER (admitted_run), both default off.
 
 THE SHAPE. At eight seats the round is two 64-row M3 blocks (4 users x 16 rows each) back to back, and the measured 8-live round is two ~50 ms
 traces, ~7 ms of host verify work, two quad drafts (~43 ms) and ~6 ms of residual: 157-161 ms at 4k, 177 ms at 33k. A seat commits 3.3-4.8 tokens
@@ -356,16 +356,18 @@ def solo_packed_admission(m3, environ=None, *, log=None):
         problems.append('a lone user leaves %d idle segments of the 4-user block and a block holds %d (%s): the block refuses padded_min_users '
                         'below %d at construction%s' % (idle, capacity, IDLE_CAPACITY_NOTE, M3_USERS - capacity,
                                                          '' if scratch else ' (idle_scratch.py\'s KV scratch page, two more idle targets, was not allocated in this process)'))
-    if not gate_run(environ):
-        problems.append('%s is admitted only in a gate run of a gate-only four-card profile (QWEN_C2_GATE=1 and QWEN_C2_GATE_PROFILE=1)' % SOLO_PACKED_FLAG)
+    if not admitted_run(environ):
+        problems.append('%s is admitted only in a gate run of a gate-only four-card profile (QWEN_C2_GATE=1 and QWEN_C2_GATE_PROFILE=1) or under the owner traffic waiver of a traffic '
+                        'profile (%s names the waiver\'s id): no card run has qualified it' % (SOLO_PACKED_FLAG, WAIVER_ENV))
     if problems:
         for problem in problems:
             log('{}: {}', SOLO_PACKED_MARKER + ' refused', problem)
         raise ValueError('%s=1 is refused: %s' % (SOLO_PACKED_FLAG, '; '.join(problems)))
+    why = '(owner traffic waiver %s)' % waiver_id(environ) if waiver_run(environ) else '(gate only)'
     if scratch:
-        log('{} admitted min_users=1 scratch_pages={} (gate only)', SOLO_PACKED_MARKER, ','.join(str(page) for page in scratch))
+        log('{} admitted min_users=1 scratch_pages={} {}', SOLO_PACKED_MARKER, ','.join(str(page) for page in scratch), why)
         return dict(min_users=1, scratch_pages=scratch)
-    log('{} admitted min_users=1 (gate only)', SOLO_PACKED_MARKER)
+    log('{} admitted min_users=1 {}', SOLO_PACKED_MARKER, why)
     return dict(min_users=1)
 
 
