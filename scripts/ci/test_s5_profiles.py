@@ -304,8 +304,11 @@ class TwinTests(unittest.TestCase):
         self.assertEqual(len(w3_wc_smoke.problems(PROFILES[SHIP]['env'], decline)), 1, 'a profile that does not ask for WC logs none of its lines')
 
     def test_the_twins_need_no_owner_waiver_and_there_is_no_timed_twin(self):
+        import make_probe_profiles
+
         names = [name for name in PROFILES if name.startswith(NS) and 's5' in name]
-        self.assertEqual(sorted(names), sorted([SHIP, AUDIT, NOWC]), 'the timed arm is the candidate itself: a PENDING traffic profile boots in a smoke')
+        # (tp4/round-breakdown: the one gate-only TIMED twin is the candidate plus the round probe, which a traffic profile cannot carry: test_round_probe holds it)
+        self.assertEqual(sorted(names), sorted([SHIP, AUDIT, NOWC] + list(make_probe_profiles.twin_names())), 'the timed arm is the candidate itself: a PENDING traffic profile boots in a smoke')
 
     def test_a_twin_is_refused_when_its_parent_moves(self):
         data = copy.deepcopy(DATA)

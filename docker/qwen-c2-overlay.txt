@@ -112,6 +112,8 @@ scripts/ci/early_draft.py
 # serving_packed_bridge, serving_worker_hook, early_draft, dflash_packed_proposal, the coordinator, quad_draft_tp). The base has none, so a file of this commit
 # that imports it needs this copy beside it; host only, flag off it is read and nothing happens.
 scripts/ci/round_host.py
+# tp4/round-breakdown (QWEN_FAST_TP4_ROUND_PROBE, default off): the probe the drafts' coordinator imports lazily, only with the flag (two timed waits on a probe round, one line).
+scripts/ci/round_probe.py
 
 # The W2 runtime kill switch (w2.off, QWEN_FAST_W2_OFF_PATH; host only): serving_packed_step imports it at module level; sdpa_long_tp.apply and gdn_block_conv_tp.stage ask it
 # before they attach W2. The base has none, so a file of this commit that imports it needs this copy beside it; W2 off, it is read and nothing happens.

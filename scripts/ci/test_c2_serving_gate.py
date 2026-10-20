@@ -149,6 +149,8 @@ import make_pf2_profiles as _pf2_twins  # noqa: E402
 PARKED_TWINS = PARKED_TWINS | frozenset(_pf2_twins.twin_names())     # (and tp4/prefill-2's twins of the approved ship-4 profile, test_pf2_profiles)
 import make_upload_profiles as _upload_twins  # noqa: E402
 PARKED_TWINS = PARKED_TWINS | frozenset(_upload_twins.twin_names())     # (and the engine-start upload twins, test_upload_p0_profiles)
+import make_probe_profiles as _probe_twins  # noqa: E402
+PARKED_TWINS = PARKED_TWINS | frozenset(_probe_twins.twin_names())      # (and the round probe's twin of the ship-5 candidate, test_round_probe)
 
 class ShapeTests(unittest.TestCase):
     @classmethod

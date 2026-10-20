@@ -169,6 +169,9 @@ PARKED_PROFILES = PARKED_PROFILES + fusion_twins.twin_names() + fusion_twins.shi
 # the engine-start upload twins of the ship profile (make_upload_profiles; test_upload_p0_profiles holds each as that parent plus its switches)
 import make_upload_profiles as upload_twins  # noqa: E402
 PARKED_PROFILES = PARKED_PROFILES + upload_twins.twin_names()
+# the round probe's gate-only twin of the ship-5 candidate (make_probe_profiles; test_round_probe holds it as that parent plus the probe flags)
+import make_probe_profiles as probe_twins  # noqa: E402
+PARKED_PROFILES = PARKED_PROFILES + probe_twins.twin_names()
 NEXT5_PROFILES = NEXT5_PROFILES + PARKED_PROFILES + OCTO_PROFILES
 FIX_FLAGS = ('QWEN_FAST_CAPTURE_PLUG', 'QWEN_FAST_CAPTURE_PLUG_ENGINES', 'QWEN_FAST_CCL_HANDLE_GUARD', 'QWEN_FAST_STALL_DEADLINE_S')
 
@@ -599,7 +602,7 @@ class FreezeProfileTests(unittest.TestCase):
 
         for name, profile in profiles().items():
             if name not in FREEZE_PROFILES:
-                if name not in make_s5_profiles.owned_names():            # (tp4/next-1: the ship-5 candidate and its audited twins set the trim, QWEN_FAST_ADMISSION_DIAG_TRIM=1, by the owner's decision)
+                if name not in make_s5_profiles.owned_names() and name not in probe_twins.twin_names():            # (tp4/round-breakdown's twin of the candidate carries it too; tp4/next-1: the ship-5 candidate and its audited twins set the trim, QWEN_FAST_ADMISSION_DIAG_TRIM=1, by the owner's decision)
                     self.assertNotIn(TRIM, profile['env'], name)
                 self.assertNotIn(CREDIT, profile['env'], name)
         for flag in (TRIM, CREDIT):

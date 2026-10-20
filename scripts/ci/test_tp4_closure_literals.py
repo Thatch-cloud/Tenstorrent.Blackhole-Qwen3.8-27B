@@ -67,6 +67,7 @@ prestage_diff write_packed_lean batched_reads_tp hostgap_instr
 grid13_tp
 tap_window_aligned
 prefix_window_carry
+round_probe
 '''.split())      # (the op-fusion programme's levers, docs/tp4-fusion.md: each imported lazily and flag-guarded by the twin that owns it, so a flags-off process never loads it)
 
 # Modules the four-card profiles never run their pair code from, and why. The closure does not follow into them.
@@ -504,7 +505,7 @@ class ClosureTests(unittest.TestCase):
         # (make_parked_profiles, make_round_host_profiles, make_octo_profiles and make_octo2_profiles are the generators of the engine-reuse, round-host, octo-T8 and octo-2 lever profile twins: the profile tests that the
         # attach test imports name them, through profile_twins; they serve nothing)
         # (make_w2_kill_profiles generates the W2 kill drill twin of the ship profile and make_kvread_profiles the region-read audit twins; the profile tests name them the same way; make_np1_profiles the tp4/np1-fastlane twins; make_xe_profiles the tp4/exact-end twins)
-        loaded -= {'tp_test_support', 'make_parked_profiles', 'make_round_host_profiles', 'make_octo_profiles', 'make_octo2_profiles', 'make_octo3_profiles', 'make_ship4_profiles', 'make_np1_profiles', 'make_s5_profiles', 'make_xe_profiles', 'make_pf2_profiles', 'make_sched_profiles', 'make_w2_kill_profiles', 'make_kvread_profiles', 'make_prefix_tier_profiles', 'make_fusion_profiles', 'make_upload_profiles', 'profile_twins'}
+        loaded -= {'tp_test_support', 'make_parked_profiles', 'make_round_host_profiles', 'make_octo_profiles', 'make_octo2_profiles', 'make_octo3_profiles', 'make_ship4_profiles', 'make_np1_profiles', 'make_s5_profiles', 'make_xe_profiles', 'make_pf2_profiles', 'make_sched_profiles', 'make_w2_kill_profiles', 'make_kvread_profiles', 'make_prefix_tier_profiles', 'make_fusion_profiles', 'make_upload_profiles', 'make_probe_profiles', 'profile_twins'}
         extra = loaded - self.seen
         # What the attach loads outside the closure is a NOT_SERVED module it enters inert (each named in ATTACH_ENTERS_INERT,
         # exactly) and what those import at module level - not everything any NOT_SERVED module could ever reach.

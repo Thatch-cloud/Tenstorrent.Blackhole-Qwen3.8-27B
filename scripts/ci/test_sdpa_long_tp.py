@@ -226,9 +226,10 @@ class SmokeAndProfileTests(unittest.TestCase):
         from make_xe_profiles import twin_names as xe_twin_names      # (and tp4/exact-end's: test_xe_profiles)
         from make_pf2_profiles import twin_names as pf2_twin_names      # (and tp4/prefill-2's twins of the ship profile: test_pf2_profiles)
         from make_sched_profiles import twin_names as sched_twin_names      # (and tp4/sched-1's: test_sched_profiles)
+        from make_probe_profiles import twin_names as probe_twin_names      # (and tp4/round-breakdown's probe twins of the ship-5 candidate: test_round_probe)
         from test_tp4_w2ln_profiles import MULTI as WINDOW_MULTI, SHIPPED
         allowed = {self.TWIN, 'c2-packed-tp4-8x262k-best-sdpamulti', 'c2-packed-tp4-8x262k-best-sdpamulti-audit',
-                   'c2-packed-tp4-8x262k-w2', 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1', 'c2-packed-tp4-8x262k-w2-nof1-audit'} | set(WINDOW_MULTI) | set(kill_twins()) | set(upload_twins()) | set(fusion_twin_names()) | set(octo3_twin_names()) | set(ship4_twin_names()) | set(np1_twin_names()) | set(s5_twin_names()) | set(xe_twin_names()) | set(pf2_twin_names()) | set(sched_twin_names()) | set(tier_twins())
+                   'c2-packed-tp4-8x262k-w2', 'c2-packed-tp4-8x262k-w2-audit', 'c2-packed-tp4-8x262k-w2-nof1', 'c2-packed-tp4-8x262k-w2-nof1-audit'} | set(WINDOW_MULTI) | set(kill_twins()) | set(upload_twins()) | set(fusion_twin_names()) | set(octo3_twin_names()) | set(ship4_twin_names()) | set(np1_twin_names()) | set(s5_twin_names()) | set(xe_twin_names()) | set(pf2_twin_names()) | set(sched_twin_names()) | set(probe_twin_names()) | set(tier_twins())
         for name, body in self.PROFILES.items():
             if name in SHIPPED:
                 self.assertEqual(body['owner_traffic_waiver']['levers'].get(FLAG), body['env'].get(FLAG), name)

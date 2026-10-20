@@ -1020,6 +1020,13 @@ class PackedProposalCoordinator:
                 return True
             return False
 
+        # tp4/round-breakdown (QWEN_FAST_TP4_ROUND_PROBE; round_probe, imported only with the flag): every EVERY-th round is a probe round that waits for the queue (the
+        # step's commits) before the drafts launch and for the drafts before the window. Flag unset, this is one environment test.
+        round_probe_state = None
+        if os.environ.get('QWEN_FAST_TP4_ROUND_PROBE', '0') != '0':
+            import round_probe
+
+            round_probe_state = round_probe.begin(entries)
         try:
             ledger.mark('quads0')
             octo = self._prepare_octo(groups, by_slot, round_number, batched) if octo_draft else None
@@ -1181,6 +1188,9 @@ class PackedProposalCoordinator:
             self.singles_audit_candidates += 1
             if singles_module.selected(self.singles_audit_candidates):
                 singles_audit = singles_module.start(batched, by_slot, round_number, self._ensure_single_user)
+        if round_probe_state is not None:
+            round_probe.finish(round_probe_state, fence, round_number, round_probe.shape_of(octo, block_quads, quad, groups),
+                               sum(1 for group in groups if len(group) == 2), len(singles))
         if fence is not None and while_waiting is not None:
             ledger.mark('window0')
             with verify_prestage.hostgap_span('window'):

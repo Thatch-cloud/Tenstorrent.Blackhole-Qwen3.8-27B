@@ -1209,6 +1209,9 @@ class ProfileTests(unittest.TestCase):
         import make_s5_profiles as twins_s5      # tp4/next-1: the ship-5 candidate's audited twins (the ship-4 audited twin plus levers); the candidate itself is in fusion.ship_names()
 
         combined.update({name: {SELECT, READ, KEYED, LEAN, AUDIT} for name in twins_s5.twin_names()})            # (both are audited twins: -s5-audit and its -nowc fallback)
+        import make_probe_profiles as twins_probe      # tp4/round-breakdown: the ship-5 candidate plus the probe flags (test_round_probe), so the candidate's four levers and no audit
+
+        combined.update({name: {SELECT, READ, KEYED, LEAN} for name in twins_probe.twin_names()})
         # tp4/exact-resume (ER, placed from fusion-wp/ER.json): the combined arm / its audited twin plus the exact-resume switches, so the four levers (and the audit flag on the audited twin)
         combined.update({fusion.NAMESPACE + 'all-er': {SELECT, READ, KEYED, LEAN}, fusion.NAMESPACE + 'all-er-audit': {SELECT, READ, KEYED, LEAN, AUDIT}})
         import make_xe_profiles as twins_xe      # tp4/exact-end: the ship candidate / its audited twin plus one flag, so the same round-host flags (test_xe_profiles)
