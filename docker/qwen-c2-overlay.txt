@@ -475,6 +475,8 @@ scripts/ci/idle_scratch.py
 scripts/ci/audit_sampling.py
 # PF2: levern_route imports it at the attach once QWEN_FAST_PREFILL_HANDOFF or its audit flag is set (the device-side slot hand-off of the final step); an image without it refuses that boot
 scripts/ci/prefill_handoff.py
+# PF3: levern_route imports it at the attach once QWEN_FAST_PREFILL_TAIL_TRACE (or its audit, buckets or arena flag) is set (the masked tail pass of a prompt as a trace replay); an image without it refuses that boot
+scripts/ci/prefill_tail_trace.py
 # RB: the lever's flags, aligned bounds, join plan, joins and audit compare; dflash_prefill_window (already overlaid) imports it only when QWEN_FAST_TAP_WINDOW_ALIGNED is set and not 0
 scripts/ci/tap_window_aligned.py
 # SW: serving_c2_contract.configure_checkpoint imports it in every process once a checkpoint is asked for, and serving_startup.bind_checkpoint in the worker once one is bound; an image without it refuses that boot
