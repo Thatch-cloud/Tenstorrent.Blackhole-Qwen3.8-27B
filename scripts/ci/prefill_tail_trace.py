@@ -135,8 +135,8 @@ def settings(environ=None):
         if value != '1':
             raise ValueError('%s needs %s=1' % (ARENA_FLAG, FLAG))
         text = environ[ARENA_FLAG]
-        if not text.isdigit() or int(text) > MAX_ARENA_MB:
-            raise ValueError('%s must be a whole number of MB between 0 and %d, got %r' % (ARENA_FLAG, MAX_ARENA_MB, text))
+        if not text.isdigit() or not 1 <= int(text) <= MAX_ARENA_MB:
+            raise ValueError('%s must be a whole number of MB between 1 and %d (no arena is no protection against the holes), got %r' % (ARENA_FLAG, MAX_ARENA_MB, text))
         arena = int(text)
     return Settings(value is not None, value == '1', audit == '1', buckets, arena)
 
@@ -307,9 +307,14 @@ class TailTrace(object):
 
         def recording(tensor, *arguments, **keywords):
             try:
-                freed.append((self._addr(tensor), self._span(tensor)))
+                if self._not_dram(tensor):
+                    self.holes['l1'] = self.holes.get('l1', 0) + 1           # an L1 intermediate: the arena is DRAM, and no persistent buffer of the lever lives in L1
+                else:
+                    freed.append((self._addr(tensor), self._span(tensor)))
             except Exception:
+                # a tensor whose extent cannot be read is a hole the census cannot place: it counts against the arena (conservative, and named in the refusal)
                 self.holes['unrecorded'] = self.holes.get('unrecorded', 0) + 1
+                freed.append((None, 0))
             return original(tensor, *arguments, **keywords)
         ops.deallocate = recording
         try:
@@ -317,12 +322,21 @@ class TailTrace(object):
         finally:
             ops.deallocate = original
 
+    @staticmethod
+    def _not_dram(tensor):
+        """True for a tensor whose buffer is not in DRAM (the memory config's buffer type names L1); a tensor that cannot say is taken for DRAM."""
+        try:
+            kind = getattr(tensor.memory_config(), 'buffer_type', None)
+        except Exception:
+            return False
+        return kind is not None and 'DRAM' not in str(kind).upper()
+
     def _uncovered(self, freed):
-        """The freed extents that do not lie inside the arena on every chip."""
+        """The freed extents that do not lie inside the arena on every chip (an extent that could not be read, (None, 0), never does)."""
         start, span = self.arena_address, self.arena_span
         bad = []
         for addresses, size in freed:
-            if len(addresses) != len(start) or any(a < s or a + size > s + span for a, s in zip(addresses, start)):
+            if addresses is None or len(addresses) != len(start) or any(a < s or a + size > s + span for a, s in zip(addresses, start)):
                 bad.append((addresses, size))
         return bad
 
@@ -380,10 +394,15 @@ class TailTrace(object):
                 raise ValueError('The tap layers %r are not layers of this model' % (self.tap_ids,))
         self.model, self.log, self.sink = model, log, sink
         self.original = getattr(model, name)
-        self._set(model, name, self.shadow)
-        if self.settings.traced:
-            for index in self.tap_ids:
-                self._set(model.layers[index], 'forward', self._tap_shim(index, model.layers[index].forward))
+        try:
+            self._set(model, name, self.shadow)
+            if self.settings.traced:
+                for index in self.tap_ids:
+                    self._set(model.layers[index], 'forward', self._tap_shim(index, model.layers[index].forward))
+        except BaseException:
+            self._flush()
+            self.model = None
+            raise
         return self
 
     def uninstall(self):
@@ -444,24 +463,55 @@ class TailTrace(object):
         log = log or self.log
         ops = self._ops()
         began = self.clock()
+        caches = getattr(model, '_paged_kv_caches', None)
+        if caches and int(caches[0][0].shape[2]) != BLOCK:
+            raise ValueError('The KV block holds %d rows, not the %d the chunk page tables of the traced tail are built for' % (int(caches[0][0].shape[2]), BLOCK))
+        if self.settings.audit and getattr(model, '_qwen_prefix_restore_mode', None) is None:
+            raise ValueError('The audit restores the scratch with the prefix graft\'s _qwen_prefix_restore, whose restore path is chosen at the prefix warm (serving_startup.prefix_warm): it has not run')
         model._ensure_gdn_prefill_scratch()
         self.width = width
         previous = model._bind_gdn_prefill_scratch()
         try:
+            if not self._bound():
+                raise ValueError('The GDN layers are not bound to the entries of model._gdn_prefill_scratch after _bind_gdn_prefill_scratch: the traces would bake tensors the route never binds')
             self._allocate_all(model, width)
             for bucket in self.settings.buckets:
                 self._compile_pass(model, self.traces[bucket])
             self._capture_all(model, log)
+            self._pad_smoke(model)
         finally:
             model._unbind_gdn_prefill_scratch(previous)
         ops.synchronize_device(model.device)
         self.warmed = True
         self.engaged += 1
-        log('{}', '%s buckets=%s traces=%d sink=%d taps=%s arena_mb=%d arena_address=%s freed=%d uncovered=%d capture_ms=%.0f' % (
+        log('{}', '%s buckets=%s traces=%d sink=%d taps=%s arena_mb=%d arena_address=%s freed=%d uncovered=%d l1_skipped=%d capture_ms=%.0f' % (
             ENGAGED_MARKER, ','.join(str(b) for b in self.settings.buckets), len(self.traces), self.sink, ','.join(str(i) for i in self.tap_ids),
             self.settings.arena_mb, '-' if self.arena_address is None else ','.join(str(a) for a in self.arena_address), self.holes.get('recorded', 0), self.holes.get('uncovered', 0),
-            (self.clock() - began) * 1000.0))
+            self.holes.get('l1', 0), (self.clock() - began) * 1000.0))
         return True
+
+    def _pad_smoke(self, model):
+        """One replay of every trace over a tail of a single real row past the previous bucket (the most pad rows the bucket sees): the output and every GDN state must be finite. The compile pass and the
+        captures run with an all-zero pad vector, so PAD_GATE has not met the real ops until here; a NaN from an activation at that magnitude would otherwise be the first real tail's."""
+        import torch
+
+        for bucket in self.settings.buckets:
+            index = STOCK_BUCKETS.index(bucket)
+            valid = (STOCK_BUCKETS[index - 1] if index else 0) + 1
+            plan, why = plan_tail(valid, 0, self.width, [self.sink] * self.width, self.sink, self.settings.buckets)
+            if plan is None or plan.bucket != bucket:
+                raise ValueError('The smoke tail of %d rows is not a tail of the %d-row bucket (%s)' % (valid, bucket, why))
+            trace = self.traces[bucket]
+            model._reset_gdn_state_for_new_sequence()
+            trace.host_refs = self._stage(plan, torch.zeros(1, bucket, dtype=torch.int32), torch.full((1, self.width), self.sink, dtype=torch.int32))
+            ops = self._ops()
+            ops.execute_trace(model.device, trace.trace_id, cq_id=0, blocking=False)
+            ops.synchronize_device(model.device)
+            values = [self._host_rows(trace.out, valid)] + [tensor for state in self._snapshot() for tensor in (state[0], state[1])]
+            if not all(bool(torch.isfinite(value.float()).all()) for value in values):
+                raise ValueError('A replay over %d real rows and %d pad rows (PAD_GATE %g) left a non-finite output or GDN state: the gates do not saturate cleanly at that magnitude on these ops'
+                                 % (valid, bucket - valid, PAD_GATE))
+        model._reset_gdn_state_for_new_sequence()
 
     def _rep(self):
         return self._ops().ReplicateTensorToMesh(self.model.device)
@@ -615,16 +665,18 @@ class TailTrace(object):
             ops.synchronize_device(model.device)
         if arena_rows:
             arena = self._arena_tensor(arena_rows)
-            if self._addr(arena) != self.arena_address:
+            came = self._addr(arena)
+            if came != self.arena_address:
                 ops.deallocate(arena)
                 raise ValueError('The arena came back at %s, not at %s: the regions the captures used are not covered, so a later allocation may sit in a hole a replay writes'
-                                 % (self._addr(arena), self.arena_address))
+                                 % (came, self.arena_address))
             self.arena = arena
             bad = self._uncovered(freed_all)
             self.holes.update(recorded=len(freed_all), uncovered=len(bad))
             if bad:
-                raise ValueError('%d of %d tensors the captures freed lie outside the arena (first: addresses %s, %d bytes a bank, arena %s + %d): the allocator had free gaps below it that '
-                                 'a capture used, and a later allocation may sit in one of them' % (len(bad), len(freed_all), bad[0][0], bad[0][1], self.arena_address, self.arena_span))
+                raise ValueError('%d of %d DRAM tensors the captures freed lie outside the arena or could not be placed (%d unreadable; first: addresses %s, %d bytes a bank, arena %s + %d): the allocator '
+                                 'had free gaps below it that a capture used, and a later allocation may sit in one of them'
+                                 % (len(bad), len(freed_all), self.holes.get('unrecorded', 0), bad[0][0], bad[0][1], self.arena_address, self.arena_span))
         elif freed_all:
             self.holes.update(recorded=len(freed_all), uncovered=len(freed_all))
 
@@ -707,9 +759,13 @@ class TailTrace(object):
             return None, 'vision'
         if not flex_sdpa:
             return None, 'flex'
+        if (getattr(self.model, '_chunked_chunk_size', None) or 2048) != 2048:
+            return None, 'chunk'              # a smaller chunk size makes bucket-sized FULL chunks whose callers free the returned buffer
         capture = getattr(self.model, '_qwen_target_feature_capture', None)
-        if capture is not None and tuple(capture.layer_ids) != self.tap_ids:
+        if capture is not None and tuple(getattr(capture, 'layer_ids', None) or ()) != self.tap_ids:
             return None, 'taps'
+        if not self._bound():
+            return None, 'scratch'            # the GDN layers are not bound to the persistent B=1 scratch the traces baked
         try:
             row = page_table[0].tolist()
         except Exception:
@@ -718,6 +774,14 @@ class TailTrace(object):
         if plan is not None and plan.bucket != bucket:
             return None, 'bucket'
         return plan, reason
+
+    def _bound(self):
+        """Whether every GDN layer is bound to the persistent B=1 prefill scratch the traces were captured over (a replay writes the baked tensors, whatever the layers are bound to)."""
+        entries = getattr(self.model, '_gdn_prefill_scratch', None)
+        layers = self._gdn_layers()
+        if not entries or len(entries) != len(layers):
+            return False
+        return all(dn.rec_state is entry[1] and dn.conv_carry is entry[3] for dn, entry in zip(layers, entries))
 
     def shadow(self, token_buf, valid_len, chunk_start, page_table, bucket, flex_sdpa=True, vision_tokens=None):
         """Replacement for Qwen36Model._forward_prefill_chunk_masked_tp: a replay when the call is a tail the lever traces, the stock pass otherwise."""
@@ -742,6 +806,10 @@ class TailTrace(object):
         try:
             staged = self._stage(plan, token_buf, page_table)
         except Exception as error:
+            try:
+                self._ops().synchronize_device(self.model.device)      # the host tensors of the copies already issued must outlive them
+            except Exception:
+                pass
             self._latch('staging: %s: %s' % (type(error).__name__, error))
             return self.shadow(token_buf, valid_len, chunk_start, page_table, bucket, flex_sdpa=flex_sdpa, vision_tokens=vision_tokens)
         trace = self.traces[bucket]

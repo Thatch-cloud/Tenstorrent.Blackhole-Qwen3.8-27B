@@ -81,7 +81,7 @@ class Tensor(object):
         return tuple(self.data.shape)
 
     def memory_config(self):
-        return 'DRAM'
+        return SimpleNamespace(buffer_type='BufferType.L1' if getattr(self, 'l1', False) else 'BufferType.DRAM')
 
 
 class Allocator(object):
@@ -133,9 +133,12 @@ class Ops(object):
         self.executed = 0
 
     # -- tensors ---------------------------------------------------------------------------------
-    def _make(self, data, dtype, layout, on_device=True):
+    def _make(self, data, dtype, layout, on_device=True, l1=False):
         tensor = Tensor(self, data.to(dtype.torch).clone(), dtype, layout, on_device)
-        if on_device:
+        tensor.l1 = l1
+        if on_device and l1:
+            tensor.addr, tensor.seq = -1, 0              # L1 is another address space: the DRAM allocator never sees it
+        elif on_device:
             self.alloc.alloc(tensor.size, tensor)
             if self.capturing is not None:
                 self.capturing['made'].append(tensor)
@@ -165,7 +168,7 @@ class Ops(object):
         if tensor.deallocated or base.deallocated:
             raise RuntimeError('deallocate of a deallocated tensor')
         tensor.deallocated = base.deallocated = True
-        if base.on_device:
+        if base.on_device and not getattr(base, 'l1', False):
             self.alloc.free(base)
         self.log.append(('deallocate', tensor.shape))
 
@@ -200,10 +203,10 @@ class Ops(object):
             self.programs.add(key)
             self.log.append(('compile',) + key)
 
-    def run(self, name, function, inputs, shape=None, dtype=None, layout='TILE', into=None):
+    def run(self, name, function, inputs, shape=None, dtype=None, layout='TILE', into=None, l1=False):
         """One op: allocate the output (unless `into`), run `function(*input data)` now, or record it inside a capture. The output of a recorded op is a placeholder."""
         self._program(name, inputs)
-        out = into if into is not None else self._make(torch.zeros(tuple(shape)), dtype or inputs[0].dtype, layout)
+        out = into if into is not None else self._make(torch.zeros(tuple(shape)), dtype or inputs[0].dtype, layout, l1=l1)
 
         def execute():
             result = function(*[t.data for t in inputs])
@@ -217,7 +220,7 @@ class Ops(object):
         return out
 
     def add(self, a, b, memory_config=None):
-        return self.run('add', lambda x, y: x + y, [a, b], a.shape, a.dtype)
+        return self.run('add', lambda x, y: x + y, [a, b], a.shape, a.dtype, l1='L1' in str(getattr(memory_config, 'buffer_type', '')))
 
     def matmul(self, a, b, memory_config=None, compute_kernel_config=None):
         return self.run('matmul', lambda x, y: torch.matmul(x, y), [a, b], (a.shape[0], a.shape[1], b.shape[2]), a.dtype)
@@ -320,11 +323,12 @@ sys.modules['fake_gdn_tp'] = GDN_MODULE
 class ToyGDN(object):
     __module__ = 'fake_gdn_tp'
 
-    def __init__(self, ops, index, device, break_mask=False, engaged=True):
+    def __init__(self, ops, index, device, break_mask=False, engaged=True, nan_gate=False):
         self.ops, self.index, self.mesh, self.same_programs = ops, index, device, True
         self.Nv = NV
         self.break_mask = break_mask
         self.engaged = engaged
+        self.nan_gate = nan_gate
         self.w = torch.arange(D * (QKV + NV + NV + 2), dtype=torch.float32).reshape(D, -1).sin() * 0.3
         zeros = lambda shape: ops.from_torch(torch.zeros(shape), dtype=ops.bfloat16, layout='TILE', device=device)
         self.rec_state = ops.from_torch(torch.zeros(1, KH, KH), dtype=ops.float32, layout='TILE', device=device)
@@ -336,7 +340,7 @@ class ToyGDN(object):
         pieces = {}
         for name, lo, hi in (('qkv', 0, QKV), ('z', QKV, QKV + 2), ('a', QKV + 2, QKV + 2 + NV), ('b', QKV + 2 + NV, QKV + 2 + 2 * NV)):
             pieces[name] = ops.run('proj_' + name, lambda t, lo=lo, hi=hi: torch.matmul(t.reshape(1, S, D), w[:, lo:hi].to(t.dtype)),
-                                   [x], (1, S, hi - lo), x.dtype)
+                                   [x], (1, S, hi - lo), x.dtype, l1=(out_mc == 'L1' and name in ('qkv', 'a', 'b')))
         return pieces['qkv'], pieces['z'], pieces['a'], pieces['b']
 
     def forward_prefill(self, x, chunk_size=128, valid_len=None, capture_state=False):
@@ -347,7 +351,10 @@ class ToyGDN(object):
         q, k, v, new_state = conv_op(self, qkv, self.conv_carry, valid_len, T)
         ops.deallocate(qkv)
         dt = torch.linspace(-0.5, 0.5, NV)
-        g = ops.run('gate_g', lambda t: -torch.nn.functional.softplus(t.float() + dt), [a], (1, T, NV), ops.float32)
+        def gate(t):
+            out = -torch.nn.functional.softplus(t.float() + dt)
+            return torch.where(t.float().abs() > 1e4, torch.full_like(out, float('nan')), out) if self.nan_gate else out
+        g = ops.run('gate_g', gate, [a], (1, T, NV), ops.float32)
         beta = ops.run('gate_beta', lambda t: torch.sigmoid(t.float()), [b], (1, T, NV), ops.float32)
         ops.deallocate(a)
         ops.deallocate(b)
@@ -444,6 +451,11 @@ class ToyModel(object):
         self.kv = torch.zeros(POOL, BLOCK, D)
         self.cache = SimpleNamespace(data=self.kv)
         self.layers = [ToyLayer(ops, i, kind == 'A', self.device, cache=self.cache, **keywords) for i, kind in enumerate(layout)]
+        self._paged_kv_caches = [(SimpleNamespace(shape=(POOL, 1, BLOCK, D)),) * 2]
+        self._qwen_prefix_restore_mode = 'device'
+        self._chunked_chunk_size = None
+        gdn = [layer.attention for layer in self.layers if not layer.is_full_attention]
+        self._gdn_prefill_scratch = [(dn, dn.rec_state, dn.conv_states, dn.conv_carry, dn.conv_states[0]) for dn in gdn]
         self.vocab = 11
         self.table = (torch.arange(64 * D, dtype=torch.float32).reshape(64, D).sin())
         self.head = torch.arange(D * self.vocab, dtype=torch.float32).reshape(D, self.vocab).cos()
@@ -560,14 +572,19 @@ def build(environ=None, install=True, warm=True, taps=(1, 3), arena_mb=None, **k
     stock_warm(model)
     if environ is not None:
         environ = dict(environ)
-        if environ.get(tail.FLAG) == '1':
+        if environ.get(tail.FLAG) == '1' and arena_mb != 0:
             environ['QWEN_FAST_PREFILL_TAIL_TRACE_ARENA_MB'] = str(1 if arena_mb is None else arena_mb)         # the toy device holds 4 MiB
-        config = tail.settings(environ)
+        if environ.get(tail.FLAG) == '1' and arena_mb == 0:
+            environ.pop('QWEN_FAST_PREFILL_TAIL_TRACE_ARENA_MB', None)
+            config = tail.settings(environ)._replace(arena_mb=0)         # settings() refuses 0: this is the negative control, built by hand
+        else:
+            config = tail.settings(environ)
         instance = tail.TailTrace(config, environ, ops=ops, addresses=lambda t: (t.addr,), extent=lambda t: t.size)
         if install:
             instance.install(model, lambda message, *values: logs.append(message.format(*values) if values else message), taps=taps, sink=SINK)
         if warm and config.traced:
             instance.warm(model, WIDTH)
+            ops.executed = 0                      # (the warm's own smoke replays are not the tests')
     return Rig(ops, model, instance, logs)
 
 
@@ -654,8 +671,8 @@ class SettingsTests(unittest.TestCase):
                     tail.settings(dict(ENV, QWEN_FAST_PREFILL_TAIL_TRACE_BUCKETS=text))
         with self.assertRaises(ValueError):
             tail.settings(dict(CONTROL, QWEN_FAST_PREFILL_TAIL_TRACE_BUCKETS='128'))
-        self.assertEqual(tail.settings(dict(ENV, QWEN_FAST_PREFILL_TAIL_TRACE_ARENA_MB='0')).arena_mb, 0)
-        for text in ('-1', '1.5', 'x', '4096'):
+        self.assertEqual(tail.settings(dict(ENV, QWEN_FAST_PREFILL_TAIL_TRACE_ARENA_MB='1')).arena_mb, 1)
+        for text in ('0', '-1', '1.5', 'x', '4096'):
             with self.subTest(text=text):
                 with self.assertRaises(ValueError):
                     tail.settings(dict(ENV, QWEN_FAST_PREFILL_TAIL_TRACE_ARENA_MB=text))
@@ -878,10 +895,28 @@ class HoleTests(unittest.TestCase):
         self.assertGreater(instance.holes['uncovered'], 0)
         self.assertGreater(keeper.addr, 0)
 
-    def test_a_clean_allocator_leaves_every_hole_inside_the_arena(self):
+    def test_a_clean_allocator_leaves_every_hole_inside_the_arena_and_l1_tensors_are_not_holes(self):
         traced = build(ENV)
         self.assertGreater(traced.tail.holes['recorded'], 100)
         self.assertEqual(traced.tail.holes['uncovered'], 0)
+        self.assertGreater(traced.tail.holes['l1'], 0, 'the projections\' L1 outputs were freed inside the captures and are not DRAM holes')
+        self.assertIn('l1_skipped=', [line for line in traced.logs if line.startswith(tail.ENGAGED_MARKER)][0])
+
+    def test_a_freed_tensor_whose_extent_cannot_be_read_counts_against_the_arena(self):
+        ops = Ops()
+        model = ToyModel(ops)
+        env = dict(ENV, QWEN_FAST_PREFILL_TAIL_TRACE_ARENA_MB='1')
+
+        def addresses(tensor):
+            if tensor.dtype is ops.float32:
+                raise RuntimeError('no buffer address')
+            return (tensor.addr,)
+        instance = tail.TailTrace(tail.settings(env), env, ops=ops, addresses=addresses, extent=lambda t: t.size)
+        instance.install(model, lambda *a: None, taps=(1, 3), sink=SINK)
+        with self.assertRaises(ValueError) as caught:
+            instance.warm(model, WIDTH)
+        self.assertIn('unreadable', str(caught.exception))
+        self.assertGreater(instance.holes['unrecorded'], 0)
 
     def test_every_persistent_buffer_is_allocated_before_the_first_capture(self):
         traced = build(ENV)
@@ -926,6 +961,29 @@ class FallbackTests(unittest.TestCase):
         traced.model._bind_gdn_prefill_scratch()
         traced.model.prefill_masked_bucket(tokens(64), self.row, 64, chunk_start=0, bucket=1024)
         self.assertEqual(traced.ops.executed, 0)
+
+    def test_a_smaller_chunk_size_a_rebound_scratch_and_a_foreign_capture_run_the_stock_pass(self):
+        traced = build(ENV)
+        traced.model._bind_gdn_prefill_scratch()
+        traced.model._chunked_chunk_size = 1024            # full 1,024-row chunks would take the traced path and their callers free the result
+        traced.model.prefill_masked_bucket(tokens(100), self.row, 100, chunk_start=1024)
+        self.assertEqual(traced.ops.executed, 0)
+        self.assertIn('chunk', traced.tail.skips)
+        traced.model._chunked_chunk_size = None
+        gdn = [layer.attention for layer in traced.model.layers if not layer.is_full_attention]
+        kept = gdn[0].rec_state
+        gdn[0].rec_state = traced.ops.from_torch(torch.zeros(1, KH, KH), dtype=traced.ops.float32, layout='TILE', device=traced.model.device)      # bound to another buffer
+        traced.model.prefill_masked_bucket(tokens(100), self.row, 100, chunk_start=1024)
+        self.assertEqual(traced.ops.executed, 0)
+        self.assertIn('scratch', traced.tail.skips)
+        gdn[0].rec_state = kept
+        traced.model._qwen_target_feature_capture = SimpleNamespace(tap_ids=(1, 3))            # a capture that is not a LayerOutputCapture
+        traced.model.prefill_masked_bucket(tokens(100), self.row, 100, chunk_start=1024)
+        self.assertEqual(traced.ops.executed, 0)
+        self.assertIn('taps', traced.tail.skips)
+        del traced.model._qwen_target_feature_capture
+        traced.model.prefill_masked_bucket(tokens(100), self.row, 100, chunk_start=1024)
+        self.assertEqual(traced.ops.executed, 1)
 
     def test_another_tap_set_runs_the_stock_pass(self):
         traced = build(ENV)
@@ -1027,6 +1085,51 @@ class AuditTests(unittest.TestCase):
 
 
 class WarmTests(unittest.TestCase):
+    def test_a_gate_that_does_not_saturate_cleanly_is_found_by_the_pad_smoke_not_by_the_first_tail(self):
+        with self.assertRaises(ValueError) as caught:
+            build(ENV, nan_gate=True)
+        self.assertIn('non-finite', str(caught.exception))
+        self.assertIn('PAD_GATE', str(caught.exception))
+        # and the unaudited arm of a clean model has run every trace over the most pad rows it sees before it serves
+        clean = build(ENV)
+        self.assertGreaterEqual(sum(1 for entry in clean.ops.log if entry[0] == 'execute_trace'), len(clean.tail.traces))
+
+    def test_the_warm_refuses_what_the_traces_would_get_wrong(self):
+        model_ops = Ops()
+        wrong = ToyModel(model_ops)
+        wrong._paged_kv_caches = [(SimpleNamespace(shape=(POOL, 1, 32, D)),) * 2]
+        env = dict(ENV, QWEN_FAST_PREFILL_TAIL_TRACE_ARENA_MB='1')
+        make = lambda model, ops, config: tail.TailTrace(config, dict(env), ops=ops, addresses=lambda t: (t.addr,), extent=lambda t: t.size).install(model, lambda *a: None, taps=(1, 3), sink=SINK)
+        with self.assertRaises(ValueError) as caught:
+            make(wrong, model_ops, tail.settings(env)).warm(wrong, WIDTH)
+        self.assertIn('KV block holds 32 rows', str(caught.exception))
+        ops = Ops()
+        unbound = ToyModel(ops)
+        unbound._gdn_prefill_scratch = []                    # layers that do not match the scratch entries
+        with self.assertRaises(ValueError) as caught:
+            make(unbound, ops, tail.settings(env)).warm(unbound, WIDTH)
+        self.assertIn('not bound', str(caught.exception))
+        ops = Ops()
+        no_mode = ToyModel(ops)
+        no_mode._qwen_prefix_restore_mode = None
+        audited = dict(env, QWEN_FAST_PREFILL_TAIL_TRACE_AUDIT='1')
+        with self.assertRaises(ValueError) as caught:
+            tail.TailTrace(tail.settings(audited), audited, ops=ops, addresses=lambda t: (t.addr,), extent=lambda t: t.size).install(
+                no_mode, lambda *a: None, taps=(1, 3), sink=SINK).warm(no_mode, WIDTH)
+        self.assertIn('restore path', str(caught.exception))
+
+    def test_install_that_fails_midway_puts_everything_back(self):
+        ops = Ops()
+        model = ToyModel(ops)
+        model.layers[3].__class__ = type('Frozen', (ToyLayer,), {'__setattr__': lambda self, name, value: (_ for _ in ()).throw(AttributeError(name)) if name == 'forward' else object.__setattr__(self, name, value)})
+        before = dict(vars(model))
+        instance = tail.TailTrace(tail.settings(ENV), dict(ENV), ops=ops)
+        with self.assertRaises(AttributeError):
+            instance.install(model, lambda *a: None, taps=(1, 3), sink=SINK)
+        self.assertEqual(dict(vars(model)), before)
+        self.assertNotIn('forward', vars(model.layers[1]))
+        self.assertIsNone(instance.model)
+
     def test_a_model_whose_conv_op_is_not_engaged_is_refused(self):
         with self.assertRaises(ValueError) as caught:
             build(ENV, engaged=False)
@@ -1189,6 +1292,16 @@ class RouteTests(unittest.TestCase):
             logits_a, logits_b = plain.split('r', tokens_, a, 1), timed.split('r', tokens_, b, 1)
             self.assertTrue(torch.equal(logits_a, logits_b))
             assert_same_state(self, plain.state(a, total, 1), timed.state(b, total, 1), 'P=%d' % total)
+
+    def test_a_refusal_after_the_lever_is_parsed_leaves_the_model_untouched(self):
+        probe = RouteRig(self.ON, install=False)
+        before = dict(vars(probe.model))
+        with mock.patch.object(route.levern_policy, 'fault', side_effect=ValueError('refused after the handle was built')):
+            with self.assertRaises(ValueError) as caught:
+                with probe.scope():
+                    route.install(probe.runner, probe.model, environ=dict(self.ON, QWEN_FAST_PREFILL_TAIL_TRACE='0'), log=probe.log)
+        self.assertIn('refused after the handle', str(caught.exception))
+        self.assertEqual(dict(vars(probe.model)), before, 'the model is shadowed last, after everything that can refuse')
 
     def test_uninstall_puts_the_model_back(self):
         timed = RouteRig(dict(self.ON, QWEN_FAST_PREFILL_TAIL_TRACE='0'))

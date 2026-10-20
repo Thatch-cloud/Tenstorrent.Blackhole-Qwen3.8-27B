@@ -588,13 +588,14 @@ def install(runner, model, *, environ=None, log=_log):
 
         if not route_on:
             raise ValueError('%s is a lever of the Lever N route: it needs %s=1' % (' / '.join(TAILTRACE_FLAGS), levern_policy.FLAG))
-        tailtrace = prefill_tail_trace.TailTrace.from_environ(environ)
-        tailtrace.install(model, log)
+        tailtrace = prefill_tail_trace.TailTrace.from_environ(environ)          # (the flags are parsed here; the model is touched last, below)
     handle = Handle(wrapper, model, original, route_on, audit_on, merged=merged,
                     merged_cfg=levern_policy.merged_config(environ) if merged else None)
     handle.handoff = handoff
     handle.tailtrace = tailtrace
     fault = levern_policy.fault(environ) if route_on else None
+    if tailtrace is not None:
+        tailtrace.install(model, log)               # last of everything that can refuse: a refusal above leaves the model as it was
 
     def prefill_forward(*args, **kwargs):
         step = _take(model)
