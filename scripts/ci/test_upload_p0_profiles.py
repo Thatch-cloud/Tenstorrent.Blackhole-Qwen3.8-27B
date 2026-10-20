@@ -130,11 +130,12 @@ class TwinTests(unittest.TestCase):
         import make_np1_profiles
         import make_xe_profiles
         import make_s5_profiles
+        import make_s6_profiles
         import make_sched_profiles
         import make_ship4_profiles
         import make_pf2_profiles
 
-        combined |= set(make_octo3_profiles.twin_names()) | set(make_ship4_profiles.twin_names()) | set(make_sched_profiles.twin_names()) | set(make_pf2_profiles.twin_names()) | set(make_np1_profiles.twin_names()) | set(make_xe_profiles.twin_names()) | set(make_s5_profiles.owned_names())                                                           # (tp4/octo-3: the octo twins of the combined arms carry the combined arm's switches)
+        combined |= set(make_octo3_profiles.twin_names()) | set(make_ship4_profiles.twin_names()) | set(make_sched_profiles.twin_names()) | set(make_pf2_profiles.twin_names()) | set(make_np1_profiles.twin_names()) | set(make_xe_profiles.twin_names()) | set(make_s5_profiles.owned_names()) | set(make_s6_profiles.owned_names())                                                           # (tp4/octo-3: the octo twins of the combined arms carry the combined arm's switches)
         for name, profile in PROFILES.items():
             if name not in twins and name not in combined:
                 self.assertFalse([knob for knob in generator.KNOBS if knob in profile['env']], name)

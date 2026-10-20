@@ -130,11 +130,12 @@ class ProtectedTests(unittest.TestCase):
         # (tp4/next-1 integrated this branch with the lone-user round's, exact resume's / exact-end's and the ship-5 candidate's profiles: test_np1_profiles, test_xe_profiles, test_s5_profiles)
         import make_np1_profiles
         import make_s5_profiles
+        import make_s6_profiles
         import make_xe_profiles
 
         import make_sched_profiles
 
-        integrated = set(make_np1_profiles.twin_names()) | set(make_sched_profiles.twin_names()) | set(make_xe_profiles.twin_names()) | set(make_s5_profiles.owned_names()) | {name for name in PROFILES if name.endswith(('-fx-all-er', '-fx-all-er-audit'))}
+        integrated = set(make_np1_profiles.twin_names()) | set(make_sched_profiles.twin_names()) | set(make_xe_profiles.twin_names()) | set(make_s5_profiles.owned_names()) | set(make_s6_profiles.owned_names()) | {name for name in PROFILES if name.endswith(('-fx-all-er', '-fx-all-er-audit'))}
         self.assertEqual(sorted(set(PROFILES) - set(before['profiles']) - integrated), sorted(twins.NAMES))
 
     def test_the_approved_traffic_profile_never_names_either_flag(self):
@@ -142,12 +143,13 @@ class ProtectedTests(unittest.TestCase):
         self.assertNotIn(AUDIT_FLAG, PROFILES[SHIP]['env'])
         self.assertEqual(PROFILES[SHIP][contract.TRAFFIC_WAIVER]['decision'][:8], 'APPROVED')
         import make_s5_profiles
+        import make_s6_profiles
 
         for name, profile in PROFILES.items():
             if name not in twins.NAMES:
-                if name in make_s5_profiles.owned_names():
+                if name in make_s5_profiles.owned_names() or name in make_s6_profiles.owned_names():
                     # tp4/next-1: the ship-5 candidate carries the hand-off (under its owner traffic waiver, in words) and its audited twins carry the audit too; the audit is no traffic profile's
-                    self.assertEqual(profile['env'].get(AUDIT_FLAG), None if name == make_s5_profiles.SHIP else '1', name)
+                    self.assertEqual(profile['env'].get(AUDIT_FLAG), None if name in (make_s5_profiles.SHIP, make_s6_profiles.SHIP) else '1', name)
                     self.assertEqual(profile['env'].get(FLAG), '1', name)
                     continue
                 self.assertNotIn(FLAG, profile['env'], name)

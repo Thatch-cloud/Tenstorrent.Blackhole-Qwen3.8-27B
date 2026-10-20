@@ -1208,6 +1208,9 @@ class ProfileTests(unittest.TestCase):
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_np1.twin_names()})
         import make_s5_profiles as twins_s5      # tp4/next-1: the ship-5 candidate's audited twins (the ship-4 audited twin plus levers); the candidate itself is in fusion.ship_names()
 
+        import make_s6_profiles as twins_s6      # tp4/s6: the ship-6 candidate's audited twin (the ship-5 audited twin plus the governor); the candidate itself is in fusion.ship_names()
+
+        combined.update({name: {SELECT, READ, KEYED, LEAN, AUDIT} for name in twins_s6.twin_names()})
         combined.update({name: {SELECT, READ, KEYED, LEAN, AUDIT} for name in twins_s5.twin_names()})            # (both are audited twins: -s5-audit and its -nowc fallback)
         # tp4/exact-resume (ER, placed from fusion-wp/ER.json): the combined arm / its audited twin plus the exact-resume switches, so the four levers (and the audit flag on the audited twin)
         combined.update({fusion.NAMESPACE + 'all-er': {SELECT, READ, KEYED, LEAN}, fusion.NAMESPACE + 'all-er-audit': {SELECT, READ, KEYED, LEAN, AUDIT}})

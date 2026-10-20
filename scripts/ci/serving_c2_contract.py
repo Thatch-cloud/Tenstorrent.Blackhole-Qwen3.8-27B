@@ -873,9 +873,11 @@ TIER_WAIVABLE_LEVERS = {'QWEN_PREFIX_HOST_TIER_GIB': '32', 'QWEN_PREFIX_CKPT_PRE
 TIER_WAIVABLE_ALSO = {'QWEN_PREFIX_HOST_TIER_GIB': ('48',)}
 # tp4/sched-1 (docs/tp4-sched-1.md), the two of its levers that return device time to the decoders and trade none away: the lean admission (QWEN_FAST_ADMISSION_LEAN=1: three admission
 # costs off a returning turn's rebind) and the complete spills of the host tier (QWEN_PREFIX_HOST_TIER_SPILL_MODE=complete, only beside the tier, whose default knobs the candidate keeps). The governor knobs
-# (QWEN_FAST_LEVERN_ADAPTIVE*, _OWED_CAP_MS, _SHORT_SHARE, _SHORT_WAIT_S) trade decoder speed for first-token time and stay a gate's own.
+# (QWEN_FAST_LEVERN_ADAPTIVE*, _OWED_CAP_MS, _SHORT_SHARE, _SHORT_WAIT_S) trade decoder speed for first-token time and stay a gate's own, EXCEPT the one switch the ship-6 candidate carries
+# (tp4/s6, docs/tp4-next2.md): QWEN_FAST_LEVERN_ADAPTIVE=1 at its default knobs (the three sub-knobs _DECODERS, _SHARE and _TTFT_S, and the sched-1 pacing knobs, stay a gate's own), only under an owner
+# traffic waiver that names it, as for the levers above.
 NEXT_WAIVABLE_LEVERS = {'QWEN_FAST_SOLO_PACKED': '1', 'QWEN_PREFIX_STICKY_UNDROP': '1', 'QWEN_PREFIX_WINDOW_CARRY': '1',
-                        'QWEN_FAST_ADMISSION_LEAN': '1', 'QWEN_PREFIX_HOST_TIER_SPILL_MODE': 'complete'}
+                        'QWEN_FAST_ADMISSION_LEAN': '1', 'QWEN_PREFIX_HOST_TIER_SPILL_MODE': 'complete', 'QWEN_FAST_LEVERN_ADAPTIVE': '1'}
 TRAFFIC_WAIVER_MARKER = 'OWNER TRAFFIC WAIVER'
 # The decision is a sentence that starts with one of these words. PENDING is a REQUEST: the profile boots (gates and G1 provenance boot every
 # profile) and logs the word, but no build may bake it as an image default (c2_serving_job.read_bake, build-c2-serving-image.sh) until the commit
@@ -1087,6 +1089,8 @@ def levern_problems(profile):
         # The traffic arm (stage 1 of the short-window plan): the master switch alone, with its sibling flags and the merged route, may serve traffic
         # (the kill switch levern.off stops it with no restart); the gate instruments never may (they are the gates' own, and a fault is a negative control).
         for name in (LEVERN_AUDIT, 'QWEN_FAST_LEVERN_FAULT', 'QWEN_FAST_LEVERN_KV_READ', 'QWEN_FAST_LEVERN_KV_CROSS_STEPS') + LEVERN_ADAPTIVE_FLAGS:
+            if name in NEXT_WAIVABLE_LEVERS and waived(profile, name, env):
+                continue                                # the adaptive governor's switch, named by the owner traffic waiver at its value (NEXT_WAIVABLE_LEVERS)
             if str(env.get(name, '0')) not in ('0', ''):
                 problems.append('Lever N: %s is a gate instrument and needs a gate-only profile (a traffic profile carries the master switch and the '
                                 'policy flags only)' % name)
