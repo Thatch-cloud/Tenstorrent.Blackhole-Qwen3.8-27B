@@ -177,7 +177,9 @@ C2_ONLY_PLAIN_IMPORTS = frozenset(['audit_sampling.py', 'capture_plug.py', 'exte
                                    # RB (QWEN_FAST_TAP_WINDOW_ALIGNED): imported by dflash_prefill_window only when the flag is set (overlay-only, docker/qwen-c2-overlay.txt)
                                    'tap_window_aligned.py',
                                    # exact resume P0 (QWEN_PREFIX_WINDOW_CARRY): imported by serving_lifecycle only when the switch is set (overlay-only, docker/qwen-c2-overlay.txt via fusion-wp/ER.json)
-                                   'prefix_window_carry.py'])
+                                   'prefix_window_carry.py',
+                                   # tp4/round-breakdown (QWEN_FAST_TP4_ROUND_PROBE): imported by the drafts' coordinator only when the flag is set (overlay-only, docker/qwen-c2-overlay.txt)
+                                   'round_probe.py'])
 
 
 def unsatisfiable_plain_imports():
