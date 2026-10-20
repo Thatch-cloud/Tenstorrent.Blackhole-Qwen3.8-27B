@@ -89,6 +89,11 @@ class FastServingLifecycle:
     # rows on the checkpoint it stored. Off on the class, so a lifecycle built without __init__ behaves exactly as before.
     window_carry = False
     window_carry_audit = False
+    # tp4/sched-2 (QWEN_FAST_ADMISSION_SEED_FIRST=1; serving_runtime passes admission_pipeline.SeedFirst): the sampler may return a request's seed BEFORE the request's engine is bound.
+    # `deferred` is then the state of the request whose bind is still to run (complete_deferred, called by the schedule() wrapper the policy installs, or by the next execute as the
+    # backstop); its request_id and capture stay held until it has run. None on the class, so a lifecycle built without __init__, and every profile without the switch, binds in the sampler.
+    seed_first = None
+    deferred = None
 
     # request_id is assigned at five sites - construction, reset, the
     # EOS-at-first-token release, the prefill-to-decode handoff, and admission.
@@ -114,7 +119,7 @@ class FastServingLifecycle:
                 pass
 
     def __init__(self, worker, *, config, capture_factory, bridge_factory, eos_ids, cancelled,
-                 packed_step=None, lanes=None, idle=None, parked_poll=None):
+                 packed_step=None, lanes=None, idle=None, parked_poll=None, seed_first=None):
         validate_fast_config(config)
         runner = worker.model_runner
         if (not worker.is_driver_worker or runner._pending_samples
@@ -212,6 +217,15 @@ class FastServingLifecycle:
             if self.quarantine is None or self.packed_step is None:
                 raise ValueError('The fast lane needs the C2-any request quarantine and a packed step')
             self.lane_gate = self._install_lane_gate(config)
+        if seed_first is not None:
+            # The bind follows the seed only where the scheduler's schedule() completes it first (its clock, its hold and its gate then see the eager order): a class that cannot take the
+            # wrapper fails the attach by name, as the lane gate does, rather than serve a switch that never acts.
+            if self.admission is None:
+                raise ValueError('Seed first needs the one-fresh-prefill cap installed on the scheduler the engine runs (serving_prefill_admission.install); it could not be')
+            from serving_request_quarantine import scheduler_class
+
+            seed_first.install(self, scheduler_class(config))
+            self.seed_first = seed_first
         self.original_execute, self.original_sample = worker.execute_model, worker.sample_tokens
         self.saved = []
         for name, value in (('_qwen_fast_lifecycle', self),
@@ -436,6 +450,7 @@ class FastServingLifecycle:
         sampler rather than refuse."""
         if self.prefill_pending:
             raise ValueError('Cannot release a pending native sampler')
+        self.deferred = None
         if self.capture is not None:
             self.capture.close()
             self.capture = None
@@ -447,6 +462,9 @@ class FastServingLifecycle:
     def _execute(self, worker, scheduled):
         self._check()
         try:
+            if self.deferred is not None:
+                # Seed first, the backstop: the schedule() wrapper completes the bind before every scheduling call, so this runs only where a step reaches the worker without one (a test's).
+                self.complete_deferred()
             if self.parked_poll is not None:
                 # The parked set's kill switch is read here and nowhere else: never between a request's DRAM backstop and its slot being taken.
                 self.parked_poll()
@@ -979,37 +997,70 @@ class FastServingLifecycle:
                     return self._end_at_seed(result)
                 if self.refused is not None:
                     return self._quarantine_request(result, self.refused)
+            if self.seed_first is not None and self.seed_first.defer(self.request_id, state):
+                # Seed first (admission_pipeline): the sampler's output leaves now, and the bind (the slot adoption, the rebind, the hook) runs at the start of the next scheduling call.
+                # The request stays in its prefill phase (request_id, capture, the gate) until then; nothing else is scheduled in between.
+                self.deferred = state
+                return result
             try:
                 bridge = self.bridge_factory(state, self.capture)
             except BaseException as failure:
                 if not self._quarantinable(failure):
                     raise
                 return self._quarantine_request(result, 'bridge refused: %s' % failure)
-            try:
-                if self.hook is None:
-                    self.hook = FastWorkerHook(self.worker, bridge, cancelled=self.cancelled,
-                                               packed_step=self.packed_step,
-                                               **({'lanes': self.lanes} if self.lanes is not None else {}))
-                else:
-                    # A hook used to BE the binding of one request to the worker,
-                    # which is why a second arrival could not decode. It now holds a
-                    # registry, because probe 35436807668 showed the scheduler
-                    # putting every live decode in one step: the worker serves them
-                    # together or not at all.
-                    self.hook.attach(bridge)
-            except BaseException:
-                bridge.close()
-                raise
-            # The request leaves the prefill phase and joins the decoding set, so the
-            # prefill slot is free for the next arrival.
-            self.decoding_ids.append(self.request_id)
-            self.decoding_id = self.request_id
-            self.request_id = None
-            self.capture = None
+            self._admit_bridge(bridge)
             return result
         except BaseException:
             self.failed = True
             raise
+
+    def _admit_bridge(self, bridge):
+        """The request leaves the prefill phase and joins the decoding set, so the prefill slot is free for the next arrival."""
+        try:
+            if self.hook is None:
+                self.hook = FastWorkerHook(self.worker, bridge, cancelled=self.cancelled,
+                                           packed_step=self.packed_step,
+                                           **({'lanes': self.lanes} if self.lanes is not None else {}))
+            else:
+                # A hook used to BE the binding of one request to the worker,
+                # which is why a second arrival could not decode. It now holds a
+                # registry, because probe 35436807668 showed the scheduler
+                # putting every live decode in one step: the worker serves them
+                # together or not at all.
+                self.hook.attach(bridge)
+        except BaseException:
+            bridge.close()
+            raise
+        self.decoding_ids.append(self.request_id)
+        self.decoding_id = self.request_id
+        self.request_id = None
+        self.capture = None
+
+    def complete_deferred(self):
+        """Seed first: bind the request whose seed has already been returned (the sampler's tail, from bridge_factory on, in the same order). True when a bind ran.
+
+        A refusal raised here is FATAL, unlike the sampler's (`_quarantine_request` needs the step's output, which has gone): admission_pipeline.SeedFirst.defer lets a seed go ahead only
+        when the cold fallback's DRAM terms clear on the hold's own reading, so a refusal is not expected; the engine stops with the request named, as for any other bind failure."""
+        state = self.deferred
+        if state is None:
+            return False
+        self.deferred = None
+        self._check()
+        request_id = self.request_id
+        began = self.seed_first.clock()
+        try:
+            self._admit_bridge(self.bridge_factory(state, self.capture))
+        except BaseException as failure:
+            self.failed = True
+            try:
+                from loguru import logger
+                logger.error(f"[PINDIAG] admission seed first: the bind of {self.request_id!r} failed after its seed had gone "
+                             f"({type(failure).__name__}{' (a refusal, not quarantinable here)' if self._quarantinable(failure) else ''}): {str(failure)[:300]}")
+            except BaseException:
+                pass
+            raise
+        self.seed_first.built(request_id, began)
+        return True
 
     def _drafts(self, worker):
         self._check()
@@ -1021,6 +1072,8 @@ class FastServingLifecycle:
         for request_id in list(self.parked or ()):
             self._release_parked(request_id)
         self._release_request()
+        if self.seed_first is not None:
+            self.seed_first.uninstall()
         if self.lanes is not None:
             self.lanes.publish(None)
         for name, existed, value in reversed(self.saved):

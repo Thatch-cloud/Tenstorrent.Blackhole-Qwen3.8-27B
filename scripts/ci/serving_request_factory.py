@@ -106,6 +106,8 @@ LEAN_ADOPT_MARKER = '[PINDIAG] admission lean adopt '
 # ...and one per rebound admission: A the host checks, the DRAM backstop and the slot adoption, B the placement, the rebind's host refusal check and the first window join,
 # C the rebind itself (ParkedEngineSet.rebind_slot), all measured by the factory's own clock; total_ms is the sum, a part of the 'sticky engine built' line's ms.
 LEAN_SPLIT_MARKER = '[PINDIAG] admission lean split '
+# QWEN_FAST_ADMISSION_LEDGER_TRIM (admission_pipeline.LEDGER_FLAG, duplicated here for the same reason: the test pins them equal): no rebind bracket at all.
+LEDGER_TRIM_FLAG = 'QWEN_FAST_ADMISSION_LEDGER_TRIM'
 # W6a's executed-path marker: the buckets the engine's proposal capture actually holds, read after the build.
 PROPOSAL_BUCKETS_BUILT = '[PINDIAG] proposal buckets built request='
 
@@ -123,6 +125,8 @@ _REBIND_BRACKETED = set()
 def lean_bracket_skipped(slot):
     """Whether the ledger's op=rebind bracket is left out for a rebind onto parked slot `slot`: under QWEN_FAST_ADMISSION_LEAN=1, for every rebind of a slot after its first (the
     bracket of the first one is the record; the DRAM hold and the backstop are the checks). Off, always False and nothing is recorded."""
+    if os.environ.get(LEDGER_TRIM_FLAG) == '1':
+        return True                  # QWEN_FAST_ADMISSION_LEDGER_TRIM (admission_pipeline): the memory ledger ended after the attach, there is no bracket to take
     if not lean_enabled():
         return False
     if slot in _REBIND_BRACKETED:
@@ -196,9 +200,17 @@ def register_dram_admission(pool, *, log=None, parked=None):
         # A mis-set QWEN_FAST_DRAM_*_MB would raise inside a hold decision while serving and read as 'admit': refuse it here.
         raise ValueError('; '.join(problems))
     reserve = dram_reserve_bytes()
-    unregister = admission.register_dram_predicate(
-        admission.dram_predicate(pool, reserve) if parked is None
-        else admission.dram_predicate(pool, reserve, parked=parked.arrival_terms))
+    if os.environ.get(admission.HOLD_REUSE_FLAG) == '1':
+        # QWEN_FAST_ADMISSION_HOLD_REUSE (admission_pipeline): the hold may reuse a recent allocator reading; the reading is valid only while the parked set's slot states are the ones it saw.
+        import admission_pipeline
+
+        admission_pipeline.reset()
+        predicate = admission.dram_predicate(pool, reserve, **({} if parked is None else dict(parked=parked.arrival_terms)),
+                                             signature=lambda: admission_pipeline.parked_signature(parked))
+    else:
+        predicate = (admission.dram_predicate(pool, reserve) if parked is None
+                     else admission.dram_predicate(pool, reserve, parked=parked.arrival_terms))
+    unregister = admission.register_dram_predicate(predicate)
     reading, reason = admission.dram_reading(pool)
     (_log if log is None else log)(
         DRAM_REGISTERED + 'need = engine {} + build margin {} + prefill {} at >= {} prompt tokens + reserve {} bytes '

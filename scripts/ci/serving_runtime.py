@@ -73,6 +73,8 @@ def m3_blocks_for(policy, environ=None):
 # Engine reuse (serving_parked_engines; default off): one engine per pool slot, parked at attach.
 PARKED_ENGINES_FLAG = 'QWEN_FAST_PARKED_ENGINES'
 PARKED_AUDIT_FLAG = 'QWEN_FAST_PARKED_AUDIT'
+# tp4/sched-2 (admission_pipeline.SWITCHES, duplicated so that an attach without them imports nothing; the test pins them equal): seed first, the DRAM hold's reading reuse, the memory-ledger trim.
+ADMISSION_PIPELINE_FLAGS = ('QWEN_FAST_ADMISSION_SEED_FIRST', 'QWEN_FAST_ADMISSION_HOLD_REUSE', 'QWEN_FAST_ADMISSION_LEDGER_TRIM')
 PARKED_DRAFTS_FLAG = 'QWEN_FAST_PARKED_DRAFTS'
 
 
@@ -1110,11 +1112,37 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
         if extent_replay_enabled():
             scopes.callback(register_dram_admission(pool, **({} if parked_engines is None else dict(parked=parked_engines))))
         capture_factory, bridge_factory = prefill_tripwire(model, capture_factory, bridge_factory)
+        # tp4/sched-2 (admission_pipeline, docs/tp4-sched2.md; each switch default off, gate only): the seed-first bind, the DRAM hold's reading reuse and the memory-ledger trim. With
+        # none set nothing below imports the module and the lifecycle is built exactly as before.
+        seed_first = None
+        pipeline_switches = tuple(name for name in ADMISSION_PIPELINE_FLAGS if os.environ.get(name, '0') != '0')
+        if pipeline_switches:
+            import admission_pipeline
+
+            pipeline_problems = admission_pipeline.problems()
+            if pipeline_problems:
+                raise ValueError('; '.join(pipeline_problems))
+            if admission_pipeline.seed_first_enabled():
+                import serving_prefill_admission
+                from dflash_packed_proposal_coordinator import dram_reserve_bytes
+
+                pipeline_reserve = dram_reserve_bytes()
+                seed_first = admission_pipeline.SeedFirst(
+                    parked_engines, lambda request_id, need: serving_prefill_admission.reading_clears(request_id, need, pipeline_reserve),
+                    lambda: serving_prefill_admission.backstop_need(pipeline_reserve), log=pindiag)
+            hold_knobs = admission_pipeline.hold_state() if admission_pipeline.hold_reuse_enabled() else None
+            pindiag(admission_pipeline.INSTALLED_LINE, int(seed_first is not None), int(admission_pipeline.hold_reuse_enabled()),
+                    int(admission_pipeline.ledger_trim_enabled()), '-' if hold_knobs is None else int(hold_knobs.max_age_s * 1000),
+                    '-' if hold_knobs is None else hold_knobs.max_reuses, '-' if hold_knobs is None else hold_knobs.drift // admission_pipeline.MEGABYTE)
         lifecycle = FastServingLifecycle(worker, config=worker.vllm_config,
             capture_factory=capture_factory, bridge_factory=bridge_factory, eos_ids=eos_ids,
             cancelled=cancelled, packed_step=packed_step,
             **({'lanes': lanes} if lanes is not None else {}),
-            **({} if parked_engines is None else dict(idle=parked_engines.idle, parked_poll=parked_engines.poll_off)))
+            **({} if parked_engines is None else dict(idle=parked_engines.idle, parked_poll=parked_engines.poll_off)),
+            **({} if seed_first is None else dict(seed_first=seed_first)))
+        if pipeline_switches and admission_pipeline.ledger_trim_enabled():
+            # The attach is over: the ledger's phases P0 to P7 are recorded, and no admission reads it again.
+            admission_pipeline.trim_ledger(memory_ledger, log=pindiag)
     except BaseException as failure:
         # Closing the scopes can itself raise (the block-stream scope checks at exit
         # that every layer ran the fused candidate, which nothing has at attach), and
