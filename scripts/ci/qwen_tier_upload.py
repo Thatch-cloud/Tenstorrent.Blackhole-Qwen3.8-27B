@@ -17,6 +17,11 @@ WHAT (default off; each switch strict; every one needs the host tier, QWEN_PREFI
                                          payload against the digest taken at spill, so the verdicts, the counters and the record dropped on a failure are the sequential
                                          loop's. 0 or unset: the sequential loop, untouched.
 
+NEVER WORSE THAN THE STOCK PATH. A failure inside the threaded path (a worker's error, a device refusal) is not the caller's first sight of it: the wrapper latches itself off for the process
+(one line, `[PINDIAG] prefix: host tier upload latched off: <why>`, and the counter tier_io_latched), repeats that one call through the adapter's own serial code and goes on with the adapter for
+every later call. A device that really refuses fails the retry too, and the caller sees that error exactly as without the lever. The adapter's argument refusals (a wrong-sized payload, a count
+mismatch) are raised before any thread or device is touched and never latch.
+
 NOT IN IT. No device program, no new ttnn call, no change to a payload byte: the wrapper calls ttnn.qwen_read_blocks_raw / qwen_write_blocks_raw exactly as the
 adapter does, with buffers of the same shape ([chips, blocks, slice_bytes], uint8, C-contiguous). The model graft's pinned source is untouched.
 
@@ -39,10 +44,11 @@ BUFFERS = 3
 # The registry counters this module adds (only when a flag is on; registry.UPLOAD_STAT_NAMES is pinned equal by test_qwen_tier_upload).
 STAT_NAMES = ('tier_io_write_calls', 'tier_io_write_blocks', 'tier_io_write_ms', 'tier_io_write_device_ms', 'tier_io_write_stage_ms',
               'tier_io_read_calls', 'tier_io_read_blocks', 'tier_io_read_ms', 'tier_io_read_device_ms', 'tier_io_read_stage_ms',
-              'tier_verify_batches', 'tier_verify_blocks', 'tier_verify_ms')
+              'tier_io_latched', 'tier_verify_batches', 'tier_verify_blocks', 'tier_verify_ms')
 
 MARKER = '[PINDIAG] prefix: host tier upload'
 ON_LINE = MARKER + ' on io_threads={} io_chunk_blocks={} verify_threads={}'
+LATCHED_LINE = MARKER + ' latched off: {}'      # (the form the log line takes once the registry's log has put its head on)
 
 
 # ---------------------------------------------------------------------------------------------------------------------------------------------
@@ -137,7 +143,7 @@ class ThreadedTierIO(object):
     fingerprint, caches, chips, slice_bytes, ...) is the adapter's, by delegation. The device calls are made by the CALLING thread, one at a time, in the adapter's order
     (chunk by chunk, cache by cache); a worker only copies host bytes between a payload and a transfer buffer that no device call is using."""
 
-    def __init__(self, io, threads, chunk_blocks=0, stats=None, ops=None, clock=time.perf_counter):
+    def __init__(self, io, threads, chunk_blocks=0, stats=None, ops=None, clock=time.perf_counter, log=None):
         if int(threads) < 1:
             raise ValueError('ThreadedTierIO needs at least one thread')
         self.io = io
@@ -145,6 +151,8 @@ class ThreadedTierIO(object):
         self.chunk_blocks = int(chunk_blocks or 0)
         self.stats = stats if stats is not None else {}
         self.clock = clock
+        self.log = log if log is not None else (lambda message, *values: None)
+        self.latched = None            # why the threaded path stopped, once it has
         # The ops are the adapter's own (always resolvable in the image, where the adapter has just asked ttnn for them); a stand-in IO without them fails at its first call.
         try:
             self._ops = ops if ops is not None else device_ops(io)
@@ -156,7 +164,7 @@ class ThreadedTierIO(object):
 
     def __getattr__(self, name):
         # Only called for what this class does not define: the adapter's geometry and fingerprint.
-        if name in ('io', '_ops'):
+        if name in ('io', '_ops', 'latched'):
             raise AttributeError(name)
         return getattr(self.io, name)
 
@@ -207,19 +215,53 @@ class ThreadedTierIO(object):
                 error = error or caught
         return error
 
+    def _latch(self, call, error):
+        self.latched = '%s: %s: %s' % (call, type(error).__name__, str(error)[:160])
+        self._count('tier_io_latched', 1)
+        self.log('host tier upload latched off: %s', self.latched)       # (the registry's log adds the '[PINDIAG] prefix: ' head)
+        pool, self._pool = self._pool, None
+        if pool is not None:
+            pool.shutdown(wait=True)
+
     # -- the two calls ---------------------------------------------------------------------------
     def read_blocks(self, block_ids, into=None):
-        """The adapter's read_blocks (QwenKvTierIO.read_blocks): one payload per block id, in order, bit for bit what the adapter returns."""
+        """The adapter's read_blocks (QwenKvTierIO.read_blocks): one payload per block id, in order, bit for bit what the adapter returns. The adapter's argument checks come
+        first and never latch; a failure after them latches the threaded path off and repeats the call through the adapter."""
+        ids = [int(block) for block in block_ids]
+        if into is not None and (len(into) != len(ids) or any(len(view) != self.io.block_bytes for view in into)):
+            raise ValueError(f'{len(into)} buffers for {len(ids)} blocks of {self.io.block_bytes} bytes')
+        if self.latched is not None:
+            return self.io.read_blocks(ids, into=into)
+        try:
+            return self._read(ids, into)
+        except Exception as error:
+            self._latch('read_blocks', error)
+            return self.io.read_blocks(ids, into=into)
+
+    def write_blocks(self, block_ids, payloads):
+        """The adapter's write_blocks: payload i into block id i of every cache on every chip, returning when the device has it (same refusals, same latch and retry as read_blocks)."""
+        ids = [int(block) for block in block_ids]
+        if len(payloads) != len(ids):
+            raise ValueError(f'{len(payloads)} payloads for {len(ids)} blocks')
+        for payload in payloads:
+            if len(payload) != self.io.block_bytes:
+                raise ValueError(f'a tier payload of {len(payload)} bytes, the KV block is {self.io.block_bytes}')
+        if self.latched is not None:
+            return self.io.write_blocks(ids, payloads)
+        try:
+            return self._write(ids, payloads)
+        except Exception as error:
+            self._latch('write_blocks', error)
+            return self.io.write_blocks(ids, payloads)
+
+    def _read(self, ids, into):
         import numpy as np
 
         began = self.clock()
         io = self.io
-        ids = [int(block) for block in block_ids]
         if into is None:
             payloads = [np.empty(io.block_bytes, dtype=np.uint8) for _ in ids]
         else:
-            if len(into) != len(ids) or any(len(view) != io.block_bytes for view in into):
-                raise ValueError(f'{len(into)} buffers for {len(ids)} blocks of {io.block_bytes} bytes')
             payloads = [np.frombuffer(view, dtype=np.uint8) for view in into]
         shaped = [payload.reshape(len(io.caches), io.chips, io.slice_bytes) for payload in payloads]
         step = self._chunk()
@@ -264,20 +306,12 @@ class ThreadedTierIO(object):
         self._count('tier_io_read_stage_ms', stage_ms[0])
         return payloads
 
-    def write_blocks(self, block_ids, payloads):
-        """The adapter's write_blocks: payload i into block id i of every cache on every chip, returning when the device has it."""
+    def _write(self, ids, payloads):
         import numpy as np
 
         began = self.clock()
         io = self.io
-        ids = [int(block) for block in block_ids]
-        if len(payloads) != len(ids):
-            raise ValueError(f'{len(payloads)} payloads for {len(ids)} blocks')
-        shaped = []
-        for payload in payloads:
-            if len(payload) != io.block_bytes:
-                raise ValueError(f'a tier payload of {len(payload)} bytes, the KV block is {io.block_bytes}')
-            shaped.append(np.frombuffer(payload, dtype=np.uint8).reshape(len(io.caches), io.chips, io.slice_bytes))
+        shaped = [np.frombuffer(payload, dtype=np.uint8).reshape(len(io.caches), io.chips, io.slice_bytes) for payload in payloads]
         step = self._chunk()
         jobs = [(first, ids[first:first + step], index) for first in range(0, len(ids), step) for index in range(len(io.caches))]
         pool = self._executor()

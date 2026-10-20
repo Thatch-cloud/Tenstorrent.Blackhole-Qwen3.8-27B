@@ -378,40 +378,86 @@ class ThreadedIOTests(unittest.TestCase):
         wrapped.read_blocks(list(range(8)), into=sink)
         self.assertTrue(seen.get('copied_during_call'))
 
-    def test_a_refusing_device_raises_to_the_caller_and_the_next_call_works(self):
+    def test_a_failure_in_the_threaded_path_latches_it_off_and_the_adapter_repeats_the_call(self):
         stock_device, stock, threaded_device, wrapped, stats = self.pair(chunk=4, threads=4)
+        lines = []
+        wrapped.log = lambda message, *values: lines.append(message % values)
         ids = list(range(12))
         payloads = payload_set(stock, 12, 3)
-        threaded_device.fail_on = ('write', 4)
-        with self.assertRaisesRegex(RuntimeError, 'write refused'):
-            wrapped.write_blocks(ids, payloads)
-        self.assertEqual(stats['tier_io_write_calls'], 0, 'a failed call is not counted')
-        threaded_device.fail_on = ('read', 2)
-        with self.assertRaisesRegex(RuntimeError, 'read refused'):
-            wrapped.read_blocks(ids)
+        threaded_device.fail_on = ('write', 4)             # the sixth call of the pipeline: the device refuses once
+        wrapped.write_blocks(ids, payloads)                 # the caller does not see it: the adapter repeated the call
+        stock.write_blocks(ids, payloads)
+        self.assertTrue(wrapped.latched and 'write_blocks: RuntimeError' in wrapped.latched, wrapped.latched)
+        self.assertEqual(stats['tier_io_latched'], 1)
+        self.assertEqual(stats['tier_io_write_calls'], 0, 'a failed threaded call is not counted')
+        self.assertEqual(lines, ['host tier upload latched off: %s' % wrapped.latched])
+        self.assertTrue(all(np.array_equal(a, b) for a, b in zip(threaded_device.data, stock_device.data)), 'the repeated call wrote every byte')
         threaded_device.fail_on = None
         threaded_device.log.clear()
         wrapped.write_blocks(ids, payloads)
-        stock.write_blocks(ids, payloads)
+        self.assertEqual(len(threaded_device.log), 3 * 3, 'later calls are the adapter\'s own: chunks of 4 blocks, cache by cache, none threaded')
+        self.assertEqual(stats['tier_io_write_calls'], 0)
         got = wrapped.read_blocks(ids)
         self.assertEqual([bytes(a) for a in got], [bytes(a) for a in stock.read_blocks(ids)])
-        self.assertTrue(all(np.array_equal(a, b) for a, b in zip(threaded_device.data, stock_device.data)))
+        self.assertEqual(len(lines), 1, 'it latches once')
 
-    def test_a_failing_worker_surfaces_and_leaves_none_running(self):
+    def test_a_read_that_fails_in_the_threaded_path_is_repeated_by_the_adapter_into_the_callers_buffers(self):
+        stock_device, stock, threaded_device, wrapped, stats = self.pair(chunk=4, threads=3)
+        ids = list(range(10))
+        want = [bytes(a) for a in stock.read_blocks(ids)]
+        threaded_device.fail_on = ('read', 2)
+        sink = [bytearray(stock.block_bytes) for _ in ids]
+        returned = wrapped.read_blocks(ids, into=sink)
+        self.assertEqual([bytes(b) for b in sink], want)
+        self.assertEqual([bytes(b) for b in returned], want)
+        self.assertEqual(stats['tier_io_latched'], 1)
+
+    def test_a_device_that_really_refuses_fails_the_repeat_too_and_the_caller_sees_it(self):
+        stock_device, stock, threaded_device, wrapped, stats = self.pair(chunk=4, threads=4)
+        threaded_device.fail_always = True
+        original = threaded_device._enter
+
+        def refusing(op, cache, blocks):
+            original(op, cache, blocks)
+            raise RuntimeError('%s refused for good' % op)
+
+        threaded_device._enter = refusing
+        with self.assertRaisesRegex(RuntimeError, 'write refused for good'):
+            wrapped.write_blocks([1, 2, 3], payload_set(stock, 3, 1))
+        with self.assertRaisesRegex(RuntimeError, 'read refused for good'):
+            wrapped.read_blocks([1, 2, 3])
+        self.assertEqual(stats['tier_io_latched'], 1)
+        self.assertEqual(threaded_device.in_flight, 0)
+
+    def test_a_failing_worker_latches_the_path_leaves_none_running_and_the_adapter_finishes_the_call(self):
         stock_device, stock, threaded_device, wrapped, stats = self.pair(chunk=4, threads=3)
         ids = list(range(12))
         payloads = payload_set(stock, 12, 4)
         with mock.patch.object(upload, 'split', lambda count, parts: [(0, count + 3)]):
-            with self.assertRaises(IndexError):
-                wrapped.write_blocks(ids, payloads)
-            with self.assertRaises(IndexError):
-                wrapped.read_blocks(ids)
+            wrapped.write_blocks(ids, payloads)
+        self.assertIn('IndexError', wrapped.latched)
+        stock.write_blocks(ids, payloads)
+        self.assertTrue(all(np.array_equal(a, b) for a, b in zip(threaded_device.data, stock_device.data)))
         self.assertEqual(threaded_device.in_flight, 0)
         wrapped.close()
         self.assertFalse([t for t in threading.enumerate() if t.name.startswith('qwen-tier-io') and t.is_alive()], 'close() joins every worker')
-        wrapped.write_blocks(ids, payloads)           # the wrapper is reusable after a close: a new pool
-        stock.write_blocks(ids, payloads)
-        self.assertTrue(all(np.array_equal(a, b) for a, b in zip(threaded_device.data, stock_device.data)))
+
+    def test_a_worker_error_on_a_read_does_the_same(self):
+        stock_device, stock, threaded_device, wrapped, stats = self.pair(chunk=4, threads=3)
+        ids = list(range(12))
+        want = [bytes(a) for a in stock.read_blocks(ids)]
+        with mock.patch.object(upload, 'split', lambda count, parts: [(0, count + 3)]):
+            got = wrapped.read_blocks(ids)
+        self.assertIn('IndexError', wrapped.latched)
+        self.assertEqual([bytes(a) for a in got], want)
+
+    def test_the_adapters_argument_refusals_never_latch(self):
+        stock_device, stock, threaded_device, wrapped, stats = self.pair()
+        for call in (lambda: wrapped.write_blocks([1], [b'short']), lambda: wrapped.write_blocks([1, 2], [b'x']), lambda: wrapped.read_blocks([1, 2], into=[bytearray(3)])):
+            with self.assertRaises(ValueError):
+                call()
+        self.assertIsNone(wrapped.latched)
+        self.assertEqual(stats['tier_io_latched'], 0)
 
     def test_the_adapters_refusals_are_the_wrappers(self):
         stock_device, stock, threaded_device, wrapped, stats = self.pair()

@@ -39,6 +39,10 @@ Both raw ops release the GIL (`optimisation/ttnn-op/kv_region_read/qwen_kv_read.
 | `QWEN_PREFIX_TIER_IO_CHUNK_BLOCKS` | 16..4096, needs the threads | blocks per device call (default the adapter's 512 = 8.9 MB a card). The knob for the host-cap sweep: F1 saw one x16 card fall from ~35 to 20.5 GB/s above 32 MiB a call. 2048 blocks is 35.6 MB a card. |
 | `QWEN_PREFIX_TIER_VERIFY_THREADS` | 1..16, 0 or unset: off | the digest checks of a restore's records (`TierHooks.digest_failures`) on worker threads. `TierStore.verify` is a pure read, so the verdicts, the sampling count, the counters and the record dropped on a failure are the sequential loop's (held by tests). |
 
+**Never worse than stock:** a failure inside the threaded path (a worker's error, a device refusal) latches it off for the process (`host tier upload latched off: <call>: <error>`, counter `tier_io_latched`), the same call is
+repeated through the adapter's own serial code, and every later call is the adapter's. A device that really refuses fails the repeat too and the caller sees that error as before; the adapter's argument refusals
+come first and never latch. The gate FAILS an arm that latched.
+
 Strict parsing (digits only, in range), refused at start without the tier. The contract admits them on a gate-only profile or a traffic profile whose waiver names the tier (as the sliced restore), and drops an
 inherited value under a profile that never named them. Off, `qwen_tier_upload` is not imported and the registry adds no counter. On, the registry adds `tier_io_{write,read}_{calls,blocks,ms,device_ms,stage_ms}`
 and `tier_verify_{batches,blocks,ms}`: wall time against the time inside device calls and the staging work, so a log shows the overlap. Log lines: `host tier upload on io_threads=.. io_chunk_blocks=..
@@ -110,8 +114,8 @@ did not go through the threaded IO (`tier_io_write_blocks` 0), a restore not fas
 ## 6. Risks
 
 * Staging threads add host CPU during a restore; the seats' decode and the tokenizer share the host. The concurrent-seat stall (`tier-concurrent-timed-sliced`) is **not** in this pack; run it ABAB before shipping.
-* The wrapper takes the raw ops from the namespace of the adapter's own methods (the model module's `ttnn`); a stand-in IO without them fails at its first call, which the registry counts as a restore failure
-  (three in a row latch the tier off, as for any failing device call).
-* A worker error surfaces as the call's error after every worker has stopped; no payload or buffer is touched after the call returns (held by tests).
+* The wrapper takes the raw ops from the namespace of the adapter's own methods (the model module's `ttnn`). If the threaded path ever fails it latches itself off and the adapter repeats the call (above), so the cost of
+  a defect is one repeated call and a gate FAIL (`tier_io_latched`), not a failed restore.
+* A worker error is seen only after every worker has stopped; no payload or buffer is touched after a call returns (held by tests).
 * The levers are not in any profile: shipping is a ship-entry line (`fusion-wp/S5.json`'s successor) plus the waiver text naming them; the contract needs no change.
 * CPU numbers are from a loaded shared host; the rig's memory bandwidth decides how far the threads go.

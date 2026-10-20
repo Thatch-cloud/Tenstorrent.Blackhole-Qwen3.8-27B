@@ -1610,6 +1610,8 @@ def upload_findings(arm, scanned, stats):
         problems.append('server log line %s: %s' % (entry['index'], entry['line'][:200]))
     if not stats:
         return problems, missing, lines
+    if stats.get('tier_io_latched'):
+        problems.append('tier_io_latched=%s: the threaded tier IO failed once and the adapter\'s serial code took over (its "latched off" line names the call and the error)' % stats['tier_io_latched'])
     if io_threads and arm['scenario'] in TIER_RESTORE_SCENARIOS:
         for name in ('tier_io_write_blocks', 'tier_io_read_blocks'):
             if not stats.get(name):

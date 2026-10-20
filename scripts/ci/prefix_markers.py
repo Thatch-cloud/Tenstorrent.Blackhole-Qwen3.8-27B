@@ -119,6 +119,7 @@ never guessed around):
     [PINDIAG] prefix: host tier upload on io_threads=<n> io_chunk_blocks=<n> verify_threads=<n> io_wrapped=<0|1>     the upload levers (QWEN_PREFIX_TIER_IO_THREADS, _IO_CHUNK_BLOCKS,
         _VERIFY_THREADS; qwen_tier_upload) are configured (once, the scheduler graft); read into tier_upload_on.
     [PINDIAG] prefix: host tier upload fell back: ...     the threaded IO was asked for and the registry holds another; read into tier_upload_trouble.
+    [PINDIAG] prefix: host tier upload latched off: <call>: <error>     the threaded IO failed once and the adapter's serial code took over for the process; read into tier_upload_trouble.
     [PINDIAG] prefix: host tier latched off: ... | host tier spill failed ... | host tier restore failed ...    read into tier_trouble.
     [PREFIX-AUDIT-CKPT] tensors=<n> conversion_equal=<0|1> readback_equal=<0|1> differing=[...]
         QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT=1, after a restore from preconverted tensors; read into ckpt_audits.
@@ -185,6 +186,7 @@ TIER_SLICE_FELL_BACK = '[PINDIAG] prefix: host tier restore slice fell back'
 TIER_SLICE_ABORTED = '[PINDIAG] prefix: host tier restore slice aborted'
 TIER_UPLOAD_ON = '[PINDIAG] prefix: host tier upload on '
 TIER_UPLOAD_FELL_BACK = '[PINDIAG] prefix: host tier upload fell back'
+TIER_UPLOAD_LATCHED = '[PINDIAG] prefix: host tier upload latched off'
 TIER_TROUBLE = ('[PINDIAG] prefix: host tier latched off', '[PINDIAG] prefix: host tier spill failed', '[PINDIAG] prefix: host tier restore failed')
 CKPT_AUDIT = '[PREFIX-AUDIT-CKPT] tensors='
 CKPT_PRECONVERTED = '[PINDIAG] prefix: checkpoint preconverted '
@@ -368,7 +370,7 @@ def tier_line(out, line, where):
         entry = fields(line.split(TIER_UPLOAD_ON, 1)[1])
         entry.update(where)
         out['tier_upload_on'].append(entry)
-    elif TIER_UPLOAD_FELL_BACK in line:
+    elif TIER_UPLOAD_FELL_BACK in line or TIER_UPLOAD_LATCHED in line:
         out['tier_upload_trouble'].append(dict(where, line=line.strip()[:300]))
     elif TIER_SLICE_ON in line:
         entry = fields(line.split(TIER_SLICE_ON, 1)[1])

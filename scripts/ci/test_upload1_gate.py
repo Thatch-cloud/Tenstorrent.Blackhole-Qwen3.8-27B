@@ -184,18 +184,21 @@ class WiringTests(unittest.TestCase):
 
 class MarkerTests(unittest.TestCase):
     LINES = ['2026-10-21T01:00:00.000000001Z (EngineCore pid=9) INFO [PINDIAG] prefix: host tier upload on io_threads=4 io_chunk_blocks=128 verify_threads=4 io_wrapped=1',
-             '2026-10-21T01:00:01.000000001Z (EngineCore pid=9) INFO [PINDIAG] prefix: host tier upload fell back: the tier IO is not the threaded one (io_threads=4)']
+             '2026-10-21T01:00:01.000000001Z (EngineCore pid=9) INFO [PINDIAG] prefix: host tier upload fell back: the tier IO is not the threaded one (io_threads=4)',
+             '2026-10-21T01:00:02.000000001Z (EngineCore pid=9) INFO [PINDIAG] prefix: host tier upload latched off: write_blocks: RuntimeError: refused']
 
     def test_both_lines_are_read(self):
         scanned = pm.scan(self.LINES)
         self.assertEqual([(e['io_threads'], e['io_chunk_blocks'], e['verify_threads'], e['io_wrapped']) for e in scanned['tier_upload_on']], [(4, 128, 4, 1)])
-        self.assertEqual(len(scanned['tier_upload_trouble']), 1)
+        self.assertEqual(len(scanned['tier_upload_trouble']), 2)
         self.assertIn('fell back', scanned['tier_upload_trouble'][0]['line'])
+        self.assertIn('latched off', scanned['tier_upload_trouble'][1]['line'])
         self.assertEqual(pm.scan([])['tier_upload_on'], [])
 
     def test_the_lines_are_the_ones_the_graft_writes(self):
         self.assertEqual(pm.TIER_UPLOAD_ON, upload.MARKER + ' on ')
         self.assertTrue(upload.ON_LINE.startswith(pm.TIER_UPLOAD_ON.rstrip()))
+        self.assertTrue(upload.LATCHED_LINE.startswith(pm.TIER_UPLOAD_LATCHED))
 
 
 # -- (3) the judge -------------------------------------------------------------------------------------------
@@ -246,6 +249,12 @@ class JudgeTests(unittest.TestCase):
         self.assertTrue(any('did not run on the verifier' in text for text in missing), missing)
         _, missing, _ = self.judge(stats=dict(STATS, tier_verify_batches=0, tier_digest_checks=0))
         self.assertEqual(missing, [], 'a sampled restore that checked nothing owes no batch')
+
+    def test_a_latched_threaded_io_fails_the_arm(self):
+        problems, _, _ = self.judge(stats=dict(STATS, tier_io_latched=1))
+        self.assertTrue(any('tier_io_latched=1' in text for text in problems), problems)
+        problems, _, _ = self.judge(scanned=dict(tier_upload_on=self.ON, tier_upload_trouble=[dict(index=9, line='[PINDIAG] prefix: host tier upload latched off: write_blocks: RuntimeError: x')]))
+        self.assertEqual(len(problems), 1)
 
     def test_a_verify_only_arm_asks_nothing_of_the_io_counters(self):
         _, missing, _ = self.judge(stats=dict(STATS, tier_io_write_blocks=0, tier_io_read_blocks=0), **{VERIFY: '4'})
