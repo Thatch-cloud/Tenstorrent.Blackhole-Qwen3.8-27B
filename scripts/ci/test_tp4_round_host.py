@@ -1218,7 +1218,10 @@ class ProfileTests(unittest.TestCase):
         import make_pf2_profiles as twins_pf2
 
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_pf2.twin_names()})
-        # tp4/prefill-3: its three twins are the ship-5 candidate / its audited twin plus one flag (test_pf3k_profiles)
+        # tp4/prefill-3: the traced-tail twins and the K-split twins are the ship-5 candidate / its audited twin plus flags (test_pf3_profiles, test_pf3k_profiles)
+        import make_pf3_profiles as twins_pf3
+
+        combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if 'audit' in name else set()) for name in twins_pf3.twin_names()})
         import make_pf3k_profiles as twins_pf3k
 
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_pf3k.twin_names()})
