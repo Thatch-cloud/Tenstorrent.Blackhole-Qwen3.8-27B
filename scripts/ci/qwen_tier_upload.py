@@ -27,7 +27,6 @@ adapter does, with buffers of the same shape ([chips, blocks, slice_bytes], uint
 
 Stdlib at import (numpy and concurrent.futures are imported where the bytes move)."""
 
-import os
 import threading
 import time
 

@@ -9,7 +9,6 @@
 """
 
 import ast
-import hashlib
 import os
 import random
 import sys
