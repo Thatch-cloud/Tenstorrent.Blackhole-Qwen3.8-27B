@@ -350,5 +350,241 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual({name: env[name] for name in (IO, VERIFY)}, {IO: '4', VERIFY: '4'})
 
 
+
+# -- (5) the offline comparator -------------------------------------------------------------------------------------
+
+def write_arm(root, name, rows, tokens=(5, 6, 7), finish='stop'):
+    """A results directory of one tier-upload-timed arm: rows = {nominal: (restore_ms, return_ttft_s)}."""
+    path = os.path.join(root, name)
+    shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path)
+    events, records, log = {}, [], []
+    for index, (nominal, (restore_ms, ttft)) in enumerate(sorted(rows.items())):
+        tag = 'pfx-%s-%04d-hit' % (name, index)
+        events['tier-timed-%d' % nominal] = dict(nominal=nominal, size=nominal - 4000, build_tag='b%d' % index, build_prompt_tokens=nominal - 4000, build_ttft_s=nominal / 3000.0,
+                                                 resident_tag='r%d' % index, resident_ttft_s=3.5, return_tag=tag, return_prompt_tokens=nominal - 3000, return_ttft_s=ttft, return_ok=True)
+        records.append(dict(case='tier-timed-return', conv='tier-timed-%d' % nominal, tag=tag, token_ids=list(tokens), finish=finish))
+        if restore_ms is not None:
+            log.append('2026-10-21T00:00:%02d.000000001Z [PINDIAG] prefix: host tier restore req=chatcmpl-%s-00000001 blocks=%d bytes=%d ms=%.1f from=0 to=%d' % (
+                index, tag, nominal // 64, nominal // 64 * 2228224, restore_ms, nominal))
+    with open(os.path.join(path, 'events.json'), 'w') as handle:
+        json.dump(dict(events=events, phases=[]), handle)
+    with open(os.path.join(path, 'records.jsonl'), 'w') as handle:
+        handle.write(''.join(json.dumps(record) + '\n' for record in records))
+    with open(os.path.join(path, 'server-final.log'), 'w') as handle:
+        handle.write('\n'.join(log) + '\n')
+    return path
+
+
+CONTROL = {64000: (300.0, 3.9), 128000: (500.0, 4.2), 254000: (960.0, 6.5)}
+FASTER = {64000: (200.0, 3.7), 128000: (260.0, 3.9), 254000: (450.0, 5.9)}
+
+
+def changed(rows, nominal, value):
+    return dict(list(rows.items()) + [(nominal, value)])
+
+
+class CompareTests(unittest.TestCase):
+    def setUp(self):
+        import upload_restore_compare as compare
+
+        self.compare = compare
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def pair(self, treated, **kwargs):
+        a = self.compare.load_arm(write_arm(self.root, 'a', CONTROL))
+        b = self.compare.load_arm(write_arm(self.root, 'b', treated, **kwargs))
+        return self.compare.compare_pair(a, b)
+
+    def test_a_faster_restore_with_the_same_answers_is_go(self):
+        result = self.pair(FASTER)
+        self.assertEqual((result['verdict'], result['problems']), ('GO', []))
+        text = '\n'.join(result['lines'])
+        self.assertIn('size 254000', text)
+        self.assertIn('450.0 ms', text)
+        self.assertIn('-53.1% against control', text)
+        self.assertIn('the returning answer is IDENTICAL', text)
+
+    def test_the_gain_is_judged_at_128k_and_254k_and_must_reach_the_bar(self):
+        result = self.pair(changed(FASTER, 254000, (800.0, 6.3)))
+        self.assertEqual(result['verdict'], 'NO-GO')
+        self.assertTrue(any('size 254000' in problem and 'at least 25% faster' in problem for problem in result['problems']), result['problems'])
+        self.assertEqual(self.pair(changed(FASTER, 64000, (310.0, 3.9)))['verdict'], 'GO', '64k is read, not judged')
+
+    def test_a_returning_hit_that_got_slower_than_the_tolerance_is_no_go(self):
+        result = self.pair(changed(FASTER, 128000, (260.0, 4.6)))
+        self.assertEqual(result['verdict'], 'NO-GO')
+        self.assertTrue(any('TTFT' in problem and 'size 128000' in problem for problem in result['problems']), result['problems'])
+        a = self.compare.load_arm(write_arm(self.root, 'x', CONTROL))
+        b = self.compare.load_arm(write_arm(self.root, 'y', changed(FASTER, 128000, (260.0, 4.4))))
+        self.assertEqual(self.compare.compare_pair(a, b, floor={128000: 12.0})['verdict'], 'GO', 'inside the control\'s own repeat difference')
+
+    def test_a_different_answer_is_no_go_whatever_the_speed(self):
+        a = self.compare.load_arm(write_arm(self.root, 'a', CONTROL))
+        b_dir = write_arm(self.root, 'b', FASTER)
+        with open(os.path.join(b_dir, 'records.jsonl'), 'w') as handle:
+            handle.write(json.dumps(dict(case='tier-timed-return', conv='tier-timed-128000', tag='pfx-b-0001-hit', token_ids=[5, 6, 8], finish='stop')) + '\n')
+        result = self.compare.compare_pair(a, self.compare.load_arm(b_dir))
+        self.assertEqual(result['verdict'], 'NO-GO')
+        self.assertTrue(any('answers differ' in problem and 'first differing output token 2' in problem for problem in result['problems']), result['problems'])
+
+    def test_a_restore_that_never_happened_is_inconclusive_not_a_pass(self):
+        result = self.pair(changed(FASTER, 254000, (None, 6.0)))
+        self.assertEqual(result['verdict'], 'INCONCLUSIVE')
+        self.assertTrue(any('not restored from host RAM' in problem for problem in result['problems']), result['problems'])
+
+    def test_a_missing_size_is_inconclusive(self):
+        result = self.pair({64000: (200.0, 3.7), 128000: (260.0, 3.9)})
+        self.assertEqual(result['verdict'], 'INCONCLUSIVE')
+        self.assertTrue(any('only control ran it' in problem or 'gain is judged at' in problem for problem in result['problems']), result['problems'])
+
+    def test_main_reads_an_abab_prints_the_floor_and_exits_by_the_verdicts(self):
+        paths = [write_arm(self.root, 'a', CONTROL), write_arm(self.root, 'b', FASTER), write_arm(self.root, 'c', changed(CONTROL, 254000, (940.0, 6.6))), write_arm(self.root, 'd', FASTER)]
+        lines = []
+        code = self.compare.main(paths, out=lines.append)
+        self.assertEqual(code, 0, lines)
+        self.assertEqual([line for line in lines if line.startswith('upload restore')], ['upload restore control vs upload: GO', 'upload restore control-repeat vs upload-repeat: GO'])
+        self.assertTrue(any(line.startswith('FLOOR') and '254000: 1.5%' in line for line in lines), lines)
+        lines = []
+        self.assertEqual(self.compare.main([paths[0], paths[0]], out=lines.append), 1, 'a control against itself buys nothing')
+
+    def test_main_refuses_a_wrong_count_and_a_directory_that_is_not_an_arm(self):
+        lines = []
+        self.assertEqual(self.compare.main([self.root], out=lines.append), 2)
+        self.assertEqual(self.compare.main([self.root, self.root, self.root], out=lines.append), 2)
+        self.assertEqual(self.compare.main([self.root, self.root], out=lines.append), 2)
+        self.assertTrue(any('events.json' in line for line in lines), lines)
+
+    def test_it_reads_the_results_the_gate_itself_writes(self):
+        control = os.path.join(self.root, 'control')
+        treated = os.path.join(self.root, 'treated')
+        run_plan('tier-upload-timed-control', control)
+        run_plan('tier-upload-timed', treated)
+        a = self.compare.load_arm(os.path.join(control, 'tier-upload-timed-control'))
+        b = self.compare.load_arm(os.path.join(treated, 'tier-upload-timed'))
+        self.assertEqual(sorted(a['sizes']), [64000, 128000, 254000])
+        for nominal in a['sizes']:
+            self.assertIsNotNone(a['sizes'][nominal]['restore_ms'], nominal)
+            self.assertIsNotNone(b['sizes'][nominal]['restore_ms'], nominal)
+            self.assertEqual(a['sizes'][nominal]['token_ids'], b['sizes'][nominal]['token_ids'], 'the same prompts, greedy: the same answer with the levers on')
+        result = self.compare.compare_pair(a, b)
+        self.assertIn('IDENTICAL', '\n'.join(result['lines']))
+        self.assertFalse([problem for problem in result['problems'] if 'answers differ' in problem])
+
+
+# -- (6) the card job pack ----------------------------------------------------------------------------------------
+
+PACK = os.path.join(HERE, 'references', 'upload-1-jobs')
+
+
+def pack_order():
+    with open(os.path.join(PACK, 'ORDER.txt'), encoding='utf-8') as handle:
+        text = handle.read().splitlines()
+    rows = [line.split() for line in text if line.strip() and not line.startswith('#')]
+    needs = []
+    for line in text:
+        import re
+
+        match = re.match(r'# NEEDS ([A-Za-z0-9 ]+) <- ([A-Za-z0-9 ]+)$', line)
+        if match:
+            needs.append((match.group(1).split(), match.group(2).split()))
+    return rows, needs, '\n'.join(text)
+
+
+def pack_job(name):
+    with open(os.path.join(PACK, name + '.env'), encoding='utf-8') as handle:
+        return job.parse_env(handle.read())
+
+
+class PackTests(unittest.TestCase):
+    def test_every_template_has_an_order_row_and_the_job_parser_exits_zero_on_it(self):
+        import subprocess
+
+        rows, _, _ = pack_order()
+        names = sorted(name[:-4] for name in os.listdir(PACK) if name.endswith('.env'))
+        self.assertEqual(names, sorted(row[0] for row in rows))
+        for name in names:
+            with self.subTest(name=name):
+                result = subprocess.run([sys.executable, '-s', '-B', os.path.join(HERE, 'c2_serving_job.py'), os.path.join(PACK, name + '.env')],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=os.path.dirname(os.path.dirname(HERE)), timeout=120)
+                self.assertEqual(result.returncode, 0, result.stderr.decode('utf-8', 'replace'))
+
+    def test_the_order_rows_are_well_formed_and_every_job_runs_on_the_one_placeholder_image(self):
+        rows, _, _ = pack_order()
+        for name, mode, tag, minutes in rows:
+            self.assertIn(mode, ('stop', 'soft', 'opt'), name)
+            self.assertEqual(tag, 'tp4-upload-1-1', name)
+            self.assertTrue(minutes.isdigit() and int(minutes) > 0, name)
+            self.assertEqual(pack_job(name)['C2_IMAGE_TAG'], tag, name)
+        self.assertEqual([row[0] for row in rows], ['B0-upload1-build', 'X0-status-rescan-reset', 'F1-h2d-rerun', 'U1-upload-audited', 'U2-restore-control-a', 'U3-restore-upload-a',
+                                                    'U4-restore-control-b', 'U5-restore-upload-b', 'U6-sweep-threads8', 'U7-sweep-call128', 'U8-sweep-call2048', 'Z-reset'])
+
+    def test_the_dependency_lines_name_real_jobs_and_never_run_a_job_before_what_it_needs(self):
+        rows, needs, _ = pack_order()
+        position = dict((row[0].split('-')[0], index) for index, row in enumerate(rows))
+        self.assertTrue(needs)
+        for after, before in needs:
+            for name in after + before:
+                self.assertIn(name, position, name)
+            for name in after:
+                self.assertTrue(all(position[needed] < position[name] for needed in before), (name, before))
+        gated = dict((name, set(before)) for after, before in needs for name in after)
+        self.assertEqual(gated['U1'], {'X0'})
+        self.assertEqual(gated['U3'], {'U2'})
+        self.assertEqual(gated['U6'], {'U3'})
+
+    def test_the_prefix_jobs_run_the_plan_and_the_profile_they_are_about_with_no_baseline_and_the_swift_checkpoint(self):
+        expected = {'U1-upload-audited': ('tier-upload', AUDIT), 'U2-restore-control-a': ('tier-upload-timed-control', SHIP), 'U3-restore-upload-a': ('tier-upload-timed', SHIP),
+                    'U4-restore-control-b': ('tier-upload-timed-control', SHIP), 'U5-restore-upload-b': ('tier-upload-timed', SHIP), 'U6-sweep-threads8': ('tier-upload-timed-8', SHIP),
+                    'U7-sweep-call128': ('tier-upload-timed-c128', SHIP), 'U8-sweep-call2048': ('tier-upload-timed-c2048', SHIP)}
+        document = real_profiles()
+        rows, _, _ = pack_order()
+        minutes = dict((row[0], int(row[3])) for row in rows)
+        for name, (plan, profile) in expected.items():
+            with self.subTest(name=name):
+                values = pack_job(name)
+                self.assertEqual((values['C2_ACTIONS'], values['C2_PREFIX_PLAN'], values['C2_PREFIX_PROFILE'], values['C2_PREFIX_BASELINE']), ('reset prefix', plan, profile, 'none'))
+                self.assertEqual(values['C2_CARDS'], 'quad')
+                self.assertEqual((values['C2_MODEL_REPO'], len(values['C2_MODEL_REVISION'])), ('ukisai/Swift-1.5-Qwen3.8-27b', 40), 'the checkpoint production serves')
+                self.assertGreaterEqual(int(values['C2_BOX_MINUTES']), minutes[name], 'the box covers the estimate')
+                arms = gate.plan_arms(plan, profile, 'none', document)
+                self.assertEqual([arm['arm'] for arm in arms], [plan], 'the profile has the tier and the arm is applicable')
+
+    def test_the_timed_pair_is_the_same_plan_name_as_the_gate_derives_the_levers_from(self):
+        self.assertEqual(pack_job('U2-restore-control-a')['C2_PREFIX_PLAN'], pack_job('U4-restore-control-b')['C2_PREFIX_PLAN'])
+        self.assertEqual(pack_job('U3-restore-upload-a')['C2_PREFIX_PLAN'], pack_job('U5-restore-upload-b')['C2_PREFIX_PLAN'])
+        self.assertNotEqual(pack_job('U2-restore-control-a')['C2_PREFIX_PLAN'], pack_job('U3-restore-upload-a')['C2_PREFIX_PLAN'])
+        self.assertEqual(pack_job('U2-restore-control-a')['C2_PREFIX_PROFILE'], pack_job('U3-restore-upload-a')['C2_PREFIX_PROFILE'], 'one profile, the levers derived')
+
+    def test_the_build_bakes_the_ship_profile_and_nothing_else_and_f1_is_the_fabric_probe(self):
+        values = pack_job('B0-upload1-build')
+        self.assertEqual((values['C2_ACTIONS'], values['C2_BAKE_DEFAULT_PROFILE'], values['C2_BAKE_GRAFT']), ('build', SHIP, 'K64j-OQ'))
+        probe = pack_job('F1-h2d-rerun')
+        self.assertEqual((probe['C2_ACTIONS'], probe['C2_FABRIC_PROBE'], probe['C2_CARDS']), ('reset fabric', 'h2d', 'quad'))
+        self.assertIn('h2d', job.FABRIC_PROBES)
+        for name in ('X0-status-rescan-reset', 'Z-reset'):
+            self.assertNotIn('agentstart', pack_job(name)['C2_ACTIONS'])
+            self.assertNotIn('agentstop', pack_job(name)['C2_ACTIONS'])
+
+    def test_nothing_in_the_pack_names_a_host_an_address_a_path_or_a_secret(self):
+        import re
+
+        for name in sorted(os.listdir(PACK)):
+            with open(os.path.join(PACK, name), encoding='utf-8') as handle:
+                text = handle.read()
+            for pattern in (r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b', r'/home/', r'/root/', r'/mnt/', r'ssh ', r'@[a-z0-9-]+\.', r'\.local\b', r'(?i)password|token=|secret|api[_-]?key', r'(?i)newspark|spark-[0-9a-f]'):
+                self.assertIsNone(re.search(pattern, text), (name, pattern))
+
+    def test_the_headers_state_the_rule_before_the_run_and_label_every_estimate(self):
+        _, _, order = pack_order()
+        self.assertIn('NO-GO for the levers', order)
+        self.assertIn('upload_restore_compare.py', order)
+        for name in ('U1-upload-audited', 'U3-restore-upload-a'):
+            with open(os.path.join(PACK, name + '.env'), encoding='utf-8') as handle:
+                text = handle.read()
+            self.assertIn('ESTIMATE', text, name)
+            self.assertIn('Unqualified', text, name)
+
 if __name__ == '__main__':
     unittest.main()

@@ -1,7 +1,7 @@
 {
  "wp": "UP1",
  "branch": "tp4/upload-1",
- "description": "The upload levers of the host KV tier's host side (docs/tp4-upload1.md): QWEN_PREFIX_TIER_IO_THREADS (threaded, pipelined staging copies of the raw block IO, qwen_tier_upload.ThreadedTierIO), QWEN_PREFIX_TIER_IO_CHUNK_BLOCKS (the device call size, a sweep knob) and QWEN_PREFIX_TIER_VERIFY_THREADS (the digest checks of a restore's records on worker threads). They change how long the same bytes take to move, never which bytes.",
+ "description": "The upload levers of the host KV tier's host side (docs/tp4-upload1.md): QWEN_PREFIX_TIER_IO_THREADS (threaded, pipelined staging copies of the raw block IO, qwen_tier_upload.ThreadedTierIO), QWEN_PREFIX_TIER_IO_CHUNK_BLOCKS (the device call size, a sweep knob) and QWEN_PREFIX_TIER_VERIFY_THREADS (the digest checks of a restore's records on worker threads). They change how long the same bytes take to move, never which bytes. The engine-start zero fill (QWEN_FAST_DEVICE_ZEROS), the lazy weight loader and the preconverted checkpoints are in the ship-5 profile already.",
  "smoke": [
   {
    "flag": "QWEN_PREFIX_TIER_IO_THREADS",
@@ -35,6 +35,6 @@
   "test_qwen_tier_upload",
   "test_upload1_gate"
  ],
- "card_jobs": "scripts/ci/references/upload-1-jobs/ (ORDER.txt: B0 the build, U1 the audited attach of all three levers beside the device zero fill, U2 the byte-exact returning sessions at 64k/128k/254k, U3 U4 U5 U6 the timed restore ABAB, F1 the four-card upload re-measure)",
+ "card_jobs": "scripts/ci/references/upload-1-jobs/ (ORDER.txt: B0 the build, X0, F1 the four-card host-to-device re-measure, U1 the audited byte-exact returning sessions at 64k/128k/254k, U2 U3 U4 U5 the timed ABAB read by upload_restore_compare.py, U6 U7 U8 the optional thread-count and call-size sweeps, Z)",
  "notes": "Like the sliced restore (TS): the levers are derived onto any tier profile by the prefix gate (DERIVED['upload1']), so there is no profile twin; a traffic profile may name them only under a waiver that names the tier (serving_c2_contract.prefix_policy_problems). Off, qwen_tier_upload is not imported and the registry adds no counter."
 }
