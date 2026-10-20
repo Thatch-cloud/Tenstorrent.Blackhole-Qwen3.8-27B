@@ -90,6 +90,12 @@ named as the arm - c2_serving_job.PREFIX_ARM_PLANS - that runs only it, judged e
 
   tiers      tier-attach, tier-returning, tier-timed (tp4/prefix-tiers: the preconverted checkpoints and the host KV tier on a profile that names
              QWEN_PREFIX_HOST_TIER_GIB; docs/prefix-store-hygiene.md), each also a plan of its own.
+  tier-upload, tier-upload-timed, tier-upload-timed-control (+ -8, -c128, -c2048 sweeps)  (tp4/upload-1, docs/tp4-upload1.md; one arm each, on a tier profile): the host tier's
+             upload levers (QWEN_PREFIX_TIER_IO_THREADS / _IO_CHUNK_BLOCKS / _VERIFY_THREADS, qwen_tier_upload), derived onto the profile. tier-upload is the tier-timed cycle at
+             ~64k / 128k / 254k on the AUDITED profile with the levers on (every restored block read back and compared, every returning answer against its cold twin: byte-exact);
+             tier-upload-timed the same cycle UNAUDITED with the levers on and tier-upload-timed-control the same cycle with them off (the ABAB pair: the restore line's ms and
+             GB/s, the returning hit's TTFT); -8 eight threads, -c128 / -c2048 the device call size at 128 / 2048 blocks (the host-cap sweep: a call over 32 MiB a card fell off a
+             cliff in F1). The counters tier_io_* and tier_verify_* print the overlap (device ms against staging ms against wall ms).
   tier-concurrent, tier-concurrent-timed  (one arm each; on a tier profile or on its no-tier control): what the host tier costs the users who are not
              using it (prefix_replay.scenario_tier_concurrent). A session is built and pushed out of the device pool by floods the size of the pool, then
              seven seats decode (about 4k-token coding prompts, ignore_eos, a budget for the whole scenario) and, after a control window of the seats
@@ -309,6 +315,28 @@ DERIVED = dict(
     # The sliced restore (the tier-concurrent-sliced plans): the profile plus QWEN_PREFIX_TIER_RESTORE_SLICE and its time budget.
     slice=lambda profile: dict(env=slice_env(profile)),
 )
+# tp4/upload-1 (docs/tp4-upload1.md): the host tier's upload levers derived onto a tier profile (no profile twin, no census change; the contract admits them on a traffic profile
+# whose waiver names the tier and on any gate-only one). The engine-start zero fill (QWEN_FAST_DEVICE_ZEROS) and the lazy weight loader are in the s5 profiles already and are
+# not derived here. The audited arm runs on the audited tier profile (whose env audits every restored block); the timed arms differ from tier-timed's by the levers alone.
+UPLOAD_THREADS = 4
+UPLOAD_SWEEP_THREADS = 8
+UPLOAD_SWEEP_CHUNKS = (128, 2048)
+UPLOAD_IO_FLAG, UPLOAD_CHUNK_FLAG, UPLOAD_VERIFY_FLAG = 'QWEN_PREFIX_TIER_IO_THREADS', 'QWEN_PREFIX_TIER_IO_CHUNK_BLOCKS', 'QWEN_PREFIX_TIER_VERIFY_THREADS'
+
+
+def upload_env(threads=UPLOAD_THREADS, chunk=0):
+    env = {UPLOAD_IO_FLAG: str(threads), UPLOAD_VERIFY_FLAG: str(threads)}
+    if chunk:
+        env[UPLOAD_CHUNK_FLAG] = str(chunk)
+    return env
+
+
+DERIVED.update(
+    upload1=dict(env=upload_env()),
+    uptime=dict(env=dict(DERIVED['tiertime']['env'], **upload_env())),
+    uptime8=dict(env=dict(DERIVED['tiertime']['env'], **upload_env(UPLOAD_SWEEP_THREADS))),
+    **dict(('uptimec%d' % chunk, dict(env=dict(DERIVED['tiertime']['env'], **upload_env(chunk=chunk)))) for chunk in UPLOAD_SWEEP_CHUNKS))
+UPLOAD_KINDS = ('upload1', 'uptime', 'uptime8') + tuple('uptimec%d' % chunk for chunk in UPLOAD_SWEEP_CHUNKS)
 # (arm, scenario, which profile, derived changes, docker timeout seconds, strict oracle)
 PLAN_ARMS = dict(
     bringup=(('bringup-reference', 'bringup_reference', 'baseline', None, 2400, True),
@@ -353,6 +381,15 @@ PLAN_ARMS = dict(
        'tier-concurrent-sliced': (('tier-concurrent-sliced', 'tier_concurrent', 'prefix', 'slice', 7200, False),),
        'tier-concurrent-timed-sliced': (('tier-concurrent-timed-sliced', 'tier_concurrent_timed', 'prefix', 'slice', 7200, False),),
        'tier-concurrent-timed': (('tier-concurrent-timed', 'tier_concurrent_timed', 'prefix', None, 7200, False),),
+       # tp4/upload-1 (docs/tp4-upload1.md): the upload levers derived onto a tier profile. tier-upload: the audited cycle at ~64k / 128k / 254k (the restores read back byte for byte,
+       # each returning answer against its cold twin); tier-upload-timed / -control: the same cycle unaudited with the levers on / off (the ABAB pair); -8, -c128, -c2048: the
+       # thread count and device-call-size sweeps.
+       'tier-upload': (('tier-upload', 'tier_upload', 'prefix', 'upload1', 9000, False),),
+       'tier-upload-timed': (('tier-upload-timed', 'tier_upload_timed', 'prefix', 'uptime', 7200, False),),
+       'tier-upload-timed-control': (('tier-upload-timed-control', 'tier_upload_timed', 'prefix', 'tiertime', 7200, False),),
+       'tier-upload-timed-8': (('tier-upload-timed-8', 'tier_upload_timed', 'prefix', 'uptime8', 7200, False),),
+       'tier-upload-timed-c128': (('tier-upload-timed-c128', 'tier_upload_timed', 'prefix', 'uptimec128', 7200, False),),
+       'tier-upload-timed-c2048': (('tier-upload-timed-c2048', 'tier_upload_timed', 'prefix', 'uptimec2048', 7200, False),),
        # Exact resume P0 (docs/tp4-exact-resume.md 5.2; prefix_replay.scenario_exact_resume): short returning tool turns on ~9k, ~33k and ~120k contexts,
        # judged (every hit against its cold twin, the oracle's Q strict, the window carry's lines: exact_resume_findings) and timed (the same
        # conversations, no audit: the ABAB's arm, read by exact_resume_compare.py).
@@ -360,7 +397,7 @@ PLAN_ARMS = dict(
        'exact-resume-timed': (('exact-resume-timed', 'exact_resume_timed', 'prefix', None, 7200, False),)}
 )
 # The scenarios that measure rather than judge exactness: no extent audit, no row digests (they would time the audit).
-TIMED_SCENARIOS = ('timing', 'agent_turns', 'levern_hit', 'tier_timed', 'tier_concurrent_timed', 'exact_resume_timed')
+TIMED_SCENARIOS = ('timing', 'agent_turns', 'levern_hit', 'tier_timed', 'tier_upload_timed', 'tier_concurrent_timed', 'exact_resume_timed')
 # The scenarios that write the Lever N kill switch on purpose (the engagement rule allows its kill line there).
 LEVERN_DRILL_SCENARIOS = ('levern_faults',)
 # The single-arm plans (c2_serving_job.PREFIX_ARM_PLANS): the arm exactly as its plan runs it.
@@ -401,9 +438,10 @@ def audit_image_problems(arms, anchor):
 
 CONCURRENT_SCENARIOS = ('tier_concurrent', 'tier_concurrent_timed')
 QUOTA_SCENARIOS = ('tier_quota',)
-TIER_SCENARIOS = ('tier_attach', 'tier_returning', 'tier_timed') + CONCURRENT_SCENARIOS + QUOTA_SCENARIOS
+UPLOAD_SCENARIOS = ('tier_upload', 'tier_upload_timed')
+TIER_SCENARIOS = ('tier_attach', 'tier_returning', 'tier_timed') + UPLOAD_SCENARIOS + CONCURRENT_SCENARIOS + QUOTA_SCENARIOS
 # The tier scenarios in which a session must be seen to leave the device pool and come back from host RAM (the counters and the restore line are asked of them).
-TIER_RESTORE_SCENARIOS = ('tier_returning', 'tier_timed') + CONCURRENT_SCENARIOS
+TIER_RESTORE_SCENARIOS = ('tier_returning', 'tier_timed') + UPLOAD_SCENARIOS + CONCURRENT_SCENARIOS
 # The tier arms that also run on a profile WITHOUT the tier: the control of the concurrent pairs (the stall of a cold re-prefill beside the same seats).
 TIER_OPTIONAL_ARMS = ('tier-concurrent', 'tier-concurrent-timed')
 # The scenarios that send one request at a time and wait for it: a decode is never packed with another user's, so the multi-user SDPA launch (W2) has
@@ -1547,11 +1585,45 @@ def tier_findings(arm, records, events, scanned, stats):
         problems += more_problems
         missing += more_missing
         lines += more_lines
-    elif scenario == 'tier_timed':
+    elif scenario in ('tier_timed',) + UPLOAD_SCENARIOS:
         more_problems, more_missing, more_lines = tier_timed_rows(arm, records, events, scanned)
         problems += more_problems
         missing += more_missing
         lines += more_lines
+    return problems, missing, lines
+
+
+def upload_findings(arm, scanned, stats):
+    """The upload levers' reading of an arm that has them (docs/tp4-upload1.md; the lever lines themselves are the smoke table's, lever_engagement_problems): the configuration line
+    is in the log and no fell-back line is, and the restore and the spill went through the threaded IO and the digest checks through the verifier (the registry's tier_io_* and
+    tier_verify_* counters), with the overlap printed: the wall time of the IO calls against the time inside the device calls and the staging work the workers did (which the
+    wall time beats when the two overlap). -> (problems, not exercised, lines)"""
+    problems, missing, lines = [], [], []
+    env = arm.get('served_env') or {}
+    io_threads, verify_threads = env.get(UPLOAD_IO_FLAG), env.get(UPLOAD_VERIFY_FLAG)
+    on = scanned.get('tier_upload_on') or []
+    if not on:
+        missing.append('no "host tier upload on" line: the upload levers were configured and never installed (an image without qwen_tier_upload, or the scheduler graft refused them)')
+    else:
+        lines.append('upload levers: %s' % json.dumps(dict((key, on[0].get(key)) for key in ('io_threads', 'io_chunk_blocks', 'verify_threads', 'io_wrapped'))))
+    for entry in scanned.get('tier_upload_trouble') or ():
+        problems.append('server log line %s: %s' % (entry['index'], entry['line'][:200]))
+    if not stats:
+        return problems, missing, lines
+    if io_threads and arm['scenario'] in TIER_RESTORE_SCENARIOS:
+        for name in ('tier_io_write_blocks', 'tier_io_read_blocks'):
+            if not stats.get(name):
+                missing.append('%s is 0: the %s did not go through the threaded IO' % (name, 'restore' if 'write' in name else 'spill'))
+    if verify_threads and stats.get('tier_digest_checks') and not stats.get('tier_verify_batches'):
+        missing.append('tier_digest_checks=%s and tier_verify_batches=0: the digest checks did not run on the verifier' % stats['tier_digest_checks'])
+    for way, label in (('write', 'restore writes'), ('read', 'spill reads')):
+        blocks, wall = stats.get('tier_io_%s_blocks' % way), stats.get('tier_io_%s_ms' % way)
+        if blocks:
+            device, stage = stats.get('tier_io_%s_device_ms' % way) or 0.0, stats.get('tier_io_%s_stage_ms' % way) or 0.0
+            lines.append('threaded %s: %s blocks in %.1f ms wall; %.1f ms inside device calls, %.1f ms of staging work on the workers (serial would be %.1f ms)' % (
+                label, blocks, wall or 0.0, device, stage, device + stage))
+    if stats.get('tier_verify_batches'):
+        lines.append('parallel digest checks: %s batches, %s blocks, %.1f ms wall' % (stats['tier_verify_batches'], stats.get('tier_verify_blocks'), stats.get('tier_verify_ms') or 0.0))
     return problems, missing, lines
 
 
@@ -2087,6 +2159,11 @@ def judge_arm(arm, driver, scanned, stats, error, log_text=None, model=None):
         problems += more_problems
         missing += more_missing
         lines += more_lines
+    if arm.get('tier') and arm.get('kind') in UPLOAD_KINDS:
+        more_problems, more_missing, more_lines = upload_findings(arm, scanned, stats)
+        problems += more_problems
+        missing += more_missing
+        lines += more_lines
     if arm['scenario'] in CONCURRENT_SCENARIOS:
         more_problems, more_missing, more_lines = concurrent_findings(arm, records, driver.events, scanned)
         problems += more_problems
@@ -2400,7 +2477,7 @@ class Runner(object):
             self.log('[PREFIX-GATE] arm %s: ready after %.0f s' % (arm['arm'], self.clock() - started))
             driver.context_tokens = self.served_context(client, arm, driver)
             kwargs = {}
-            if arm['scenario'] in ('lifecycle_evict', 'lifecycle_tiny', 'tier_returning', 'tier_timed') + CONCURRENT_SCENARIOS + QUOTA_SCENARIOS:
+            if arm['scenario'] in ('lifecycle_evict', 'lifecycle_tiny', 'tier_returning', 'tier_timed') + UPLOAD_SCENARIOS + CONCURRENT_SCENARIOS + QUOTA_SCENARIOS:
                 kwargs['pool_tokens'] = markers.scan(follower.lines()).get('kv_tokens')
             if arm['scenario'] == 'lifecycle_evict':
                 kwargs['restart'] = lambda: self.restart(container, client, follower, driver)

@@ -223,7 +223,7 @@ class RegistryWiringTests(unittest.TestCase):
         for name in registry_module.UPLOAD_STAT_NAMES:
             self.assertEqual(made.registry.stats[name], 0, name)
         self.assertIs(io.stats, made.registry.stats)
-        self.assertTrue([line for line in made.lines if line == 'host tier upload on io_threads=3 io_chunk_blocks=32 verify_threads=0'], made.lines)
+        self.assertTrue([line for line in made.lines if line == 'host tier upload on io_threads=3 io_chunk_blocks=32 verify_threads=0 io_wrapped=1'], made.lines)
 
     def test_attaching_twice_never_nests_wrappers(self):
         made = self.rig(**{IO_THREADS: '2'})
@@ -240,7 +240,7 @@ class RegistryWiringTests(unittest.TestCase):
         self.assertIs(made.registry.tier_io, made.kv)
         self.assertIsInstance(made.graft.tier_hooks.verifier, upload.Verifier)
         self.assertEqual(made.graft.tier_hooks.verifier.threads, 4)
-        self.assertTrue([line for line in made.lines if line == 'host tier upload on io_threads=0 io_chunk_blocks=0 verify_threads=4'], made.lines)
+        self.assertTrue([line for line in made.lines if line == 'host tier upload on io_threads=0 io_chunk_blocks=0 verify_threads=4 io_wrapped=0'], made.lines)
 
 
 # -- (3) the threaded IO against the adapter ------------------------------------------------------------------------
@@ -656,6 +656,94 @@ class VerifyThreadTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 verifier.verdicts(store, records)
         self.assertEqual(verifier.verdicts(store, records[:1]), [True])
+
+
+# -- (4b) the profile contract -----------------------------------------------------------------------------------------
+
+class ContractTests(unittest.TestCase):
+    SHIP = 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s5'
+    AUDIT = 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-s5-audit'
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+
+        with open(os.path.join(HERE, 'qwen_c2_profiles.json'), encoding='utf-8') as handle:
+            cls.profiles = json.load(handle)['profiles']
+
+    def profile(self, name=None, **env):
+        import copy
+
+        profile = copy.deepcopy(self.profiles[name or self.SHIP])
+        for key, value in env.items():
+            if value is None:
+                profile['env'].pop(key, None)
+            else:
+                profile['env'][key] = value
+        return profile
+
+    def problems(self, profile):
+        import serving_c2_contract as contract
+
+        return contract.prefix_policy_problems(profile)
+
+    def test_the_contract_names_what_the_module_names(self):
+        import serving_c2_contract as contract
+
+        self.assertEqual(contract.PREFIX_UPLOAD_NAMES, upload.NAMES)
+
+    def test_the_shipped_profiles_name_none_of_them_and_are_clean(self):
+        for name, profile in self.profiles.items():
+            self.assertFalse(set(upload.NAMES) & set(profile.get('env') or {}), '%s: no profile names an upload lever until the owner moves it' % name)
+        self.assertEqual(self.problems(self.profile()), [])
+
+    def test_a_traffic_profile_whose_waiver_names_the_tier_may_name_them(self):
+        self.assertEqual(self.problems(self.profile(**{IO_THREADS: '4', VERIFY_THREADS: '4', IO_CHUNK: '256'})), [])
+        self.assertEqual(self.problems(self.profile(**{IO_THREADS: '8'})), [])
+
+    def test_a_traffic_profile_whose_waiver_does_not_name_the_tier_may_not(self):
+        import serving_c2_contract as contract
+
+        profile = self.profile(**{IO_THREADS: '4'})
+        profile[contract.TRAFFIC_WAIVER]['levers'].pop('QWEN_PREFIX_HOST_TIER_GIB')
+        found = [problem for problem in self.problems(profile) if 'upload levers' in problem]
+        self.assertTrue(found, self.problems(profile))
+        self.assertIn(IO_THREADS, found[0])
+
+    def test_a_gate_only_profile_may_name_them_without_a_waiver(self):
+        self.assertEqual(self.problems(self.profile(self.AUDIT, **{IO_THREADS: '4', VERIFY_THREADS: '8'})), [])
+
+    def test_the_values_are_checked_as_the_registry_checks_them(self):
+        for env, needle in (({IO_THREADS: '17'}, '1..16'), ({IO_THREADS: '-2'}, 'digits only'), ({VERIFY_THREADS: 'x'}, 'digits only'),
+                            ({IO_THREADS: '4', IO_CHUNK: '8'}, '16..4096'), ({IO_CHUNK: '256'}, 'inert')):
+            with self.subTest(env=env):
+                found = self.problems(self.profile(self.AUDIT, **env))
+                self.assertTrue(any(needle in problem for problem in found), found)
+
+    def test_they_need_the_tier_and_the_registry(self):
+        found = self.problems(self.profile(self.AUDIT, QWEN_PREFIX_HOST_TIER_GIB=None, QWEN_PREFIX_HOST_TIER_SPILL_MODE=None, QWEN_PREFIX_TIER_RESTORE_SLICE=None,
+                                           QWEN_PREFIX_TIER_RESTORE_SLICE_MS=None, QWEN_PREFIX_CKPT_PRECONVERTED=None, QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT=None,
+                                           **{IO_THREADS: '4'}))
+        self.assertTrue(any('nothing to move' in problem for problem in found), found)
+        found = self.problems(self.profile(self.AUDIT, QWEN_PREFIX_REUSE=None, **{IO_THREADS: '4'}))
+        self.assertTrue(any('registry does not exist' in problem for problem in found), found)
+
+    def test_zero_is_off_and_needs_nothing(self):
+        found = self.problems(self.profile(self.AUDIT, QWEN_PREFIX_HOST_TIER_GIB=None, QWEN_PREFIX_HOST_TIER_SPILL_MODE=None, QWEN_PREFIX_TIER_RESTORE_SLICE=None,
+                                           QWEN_PREFIX_TIER_RESTORE_SLICE_MS=None, QWEN_PREFIX_CKPT_PRECONVERTED=None, QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT=None,
+                                           **{IO_THREADS: '0', VERIFY_THREADS: '0'}))
+        self.assertFalse(any('nothing to move' in problem for problem in found), found)
+
+    def test_an_inherited_value_is_dropped_under_a_profile_that_never_named_it(self):
+        import serving_c2_contract as contract
+
+        environ = {IO_THREADS: '4', VERIFY_THREADS: '4', IO_CHUNK: '256', 'UNRELATED': 'kept'}
+        contract.apply_environment(self.profile(), environ)
+        self.assertEqual({name: environ.get(name) for name in upload.NAMES}, dict.fromkeys(upload.NAMES))
+        self.assertEqual(environ['UNRELATED'], 'kept')
+        environ = {IO_THREADS: '4'}
+        contract.apply_environment(self.profile(**{IO_THREADS: '2'}), environ)
+        self.assertEqual(environ[IO_THREADS], '2', 'a profile that names it sets it')
 
 
 # -- (5) the checkpoint store's arithmetic -------------------------------------------------------------------------

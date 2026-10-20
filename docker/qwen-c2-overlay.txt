@@ -487,6 +487,8 @@ scripts/ci/c2_toolcall_whitespace.py
 scripts/ci/toolcall_whitespace_smoke.py
 # TW: the image's own test run: the EngineTests class runs the fix against the image's installed vLLM 0.25.1 parsers (stock parser strips, fixed one keeps, render -> parse -> render identity, streaming and non-streaming)
 scripts/ci/test_c2_toolcall_whitespace.py
+# UP1: the threaded tier IO and the parallel verifier; qwen_prefix_registry.attach_tier_io and the scheduler graft's TierHooks import it only when one of its flags is set
+scripts/ci/qwen_tier_upload.py
 # WP1: JIT source of the tree fold, read beside tp4_shard_argmax.py (tp4_shard_argmax.py, _scan.cpp and _fold.cpp are listed already)
 scripts/ci/tp4_shard_argmax_fold2.cpp
 # WP2: the lever: flags, planner, evidence gate, launch, audit (imported lazily by packed_ordered_cache.ChainedOrderedCacheWriter when the flag is set)

@@ -274,6 +274,8 @@ DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
 # The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
 PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify', 'tiers', 'tier-concurrent', 'tier-concurrent-timed', 'tier-quota',
                 'tier-concurrent-sliced', 'tier-concurrent-timed-sliced',
+                # tp4/upload-1 (docs/tp4-upload1.md): the host tier's upload levers, one arm each
+                'tier-upload', 'tier-upload-timed', 'tier-upload-timed-control', 'tier-upload-timed-8', 'tier-upload-timed-c128', 'tier-upload-timed-c2048',
                 # exact resume P0 (docs/tp4-exact-resume.md 5.2): the judged and the timed returning-turn arms
                 'exact-resume', 'exact-resume-timed')
 # (arm, its plan): each exactness and lifecycle arm is a plan of its own, named as the arm, that runs

@@ -116,6 +116,9 @@ never guessed around):
     [PINDIAG] prefix: host tier restore slice fell back: ...              it could not be (no admission wrapper to hold a request between slices); read into tier_slice_trouble.
     [PINDIAG] prefix: host tier restore slice req=<id> blocks=<n> done=<n> of <n> ms=<f>     one per slice; read into tier_slices.
     [PINDIAG] prefix: host tier restore slice aborted req=<id> after <n> of <n> blocks: <why>     a job abandoned; read into tier_slice_trouble.
+    [PINDIAG] prefix: host tier upload on io_threads=<n> io_chunk_blocks=<n> verify_threads=<n> io_wrapped=<0|1>     the upload levers (QWEN_PREFIX_TIER_IO_THREADS, _IO_CHUNK_BLOCKS,
+        _VERIFY_THREADS; qwen_tier_upload) are configured (once, the scheduler graft); read into tier_upload_on.
+    [PINDIAG] prefix: host tier upload fell back: ...     the threaded IO was asked for and the registry holds another; read into tier_upload_trouble.
     [PINDIAG] prefix: host tier latched off: ... | host tier spill failed ... | host tier restore failed ...    read into tier_trouble.
     [PREFIX-AUDIT-CKPT] tensors=<n> conversion_equal=<0|1> readback_equal=<0|1> differing=[...]
         QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT=1, after a restore from preconverted tensors; read into ckpt_audits.
@@ -180,6 +183,8 @@ TIER_SLICE_ON = '[PINDIAG] prefix: host tier restore slice on '
 TIER_SLICE = '[PINDIAG] prefix: host tier restore slice req='
 TIER_SLICE_FELL_BACK = '[PINDIAG] prefix: host tier restore slice fell back'
 TIER_SLICE_ABORTED = '[PINDIAG] prefix: host tier restore slice aborted'
+TIER_UPLOAD_ON = '[PINDIAG] prefix: host tier upload on '
+TIER_UPLOAD_FELL_BACK = '[PINDIAG] prefix: host tier upload fell back'
 TIER_TROUBLE = ('[PINDIAG] prefix: host tier latched off', '[PINDIAG] prefix: host tier spill failed', '[PINDIAG] prefix: host tier restore failed')
 CKPT_AUDIT = '[PREFIX-AUDIT-CKPT] tensors='
 CKPT_PRECONVERTED = '[PINDIAG] prefix: checkpoint preconverted '
@@ -359,6 +364,12 @@ def tier_line(out, line, where):
         entry = fields(line.split(TIER_IO, 1)[1])
         entry.update(where)
         out['tier_io'].append(entry)
+    elif TIER_UPLOAD_ON in line:
+        entry = fields(line.split(TIER_UPLOAD_ON, 1)[1])
+        entry.update(where)
+        out['tier_upload_on'].append(entry)
+    elif TIER_UPLOAD_FELL_BACK in line:
+        out['tier_upload_trouble'].append(dict(where, line=line.strip()[:300]))
     elif TIER_SLICE_ON in line:
         entry = fields(line.split(TIER_SLICE_ON, 1)[1])
         entry.update(where)
@@ -404,7 +415,7 @@ def scan(lines):
                stats=None, launches=[], apc=[], chunking_off=0, chunk_replay=0, dram=[], dram_readings=[],
                kv_tokens=None, failures=[], audit_costs=[], audit_crosses=[], eager_warm=[], four_card_warm=[], sticky_installs=[], sticky_admits=[], sticky_builds=[],
                model_warm=[], model_warm_skipped=[], kv_shared=[], audit_windows=[], tier_on=[], tier_io=[], tier_spills=[], tier_restores=[],
-               tier_spill_complete=[], tier_spill_slow=[], tier_trouble=[], ckpt_audits=[], ckpt_preconverted=0, quota_on=[], tier_slice_on=[], tier_slices=[], tier_slice_trouble=[],
+               tier_spill_complete=[], tier_spill_slow=[], tier_trouble=[], ckpt_audits=[], ckpt_preconverted=0, quota_on=[], tier_slice_on=[], tier_slices=[], tier_slice_trouble=[], tier_upload_on=[], tier_upload_trouble=[],
                window_engaged=[], window_carried=[], window_stored=[], window_skipped=[], window_audits=[])
     for index, raw in enumerate(lines):
         stamp, line = split_timestamp(raw.rstrip('\n'))

@@ -696,8 +696,13 @@ class TierHooks(object):
                 import qwen_tier_upload
 
                 self.verifier = qwen_tier_upload.Verifier(upload.verify_threads, graft.registry.stats)
-            # The gate reads this line (c2_smoke_check): the upload levers are configured; the IO wrapper itself is attached by the registry with the model graft's IO.
-            graft.log('host tier upload on io_threads=%d io_chunk_blocks=%d verify_threads=%d', upload.io_threads, upload.io_chunk, upload.verify_threads)
+            # The gate reads these lines (c2_smoke_check, the fusion-wp/UP1 rows): the levers are configured, and the tier IO the registry holds is the threaded one when it was asked for.
+            import qwen_tier_upload
+
+            wrapped = isinstance(self.io, qwen_tier_upload.ThreadedTierIO)
+            graft.log('host tier upload on io_threads=%d io_chunk_blocks=%d verify_threads=%d io_wrapped=%d', upload.io_threads, upload.io_chunk, upload.verify_threads, 1 if wrapped else 0)
+            if upload.io_threads and not wrapped:
+                graft.log('host tier upload fell back: the tier IO is not the threaded one (io_threads=%d)', upload.io_threads)
 
     # -- state -----------------------------------------------------------------------------------
     @property
