@@ -515,6 +515,18 @@ def plan_counts(data, arms):
     return dict((arm, len(data.get(arm) or [])) for arm in arms)
 
 
+def effective_max_tokens(arms, manifest, override=None):
+    """{arm: the max_tokens the lab sends for it}, by the rule of Lab.arm_max_tokens: the --max-tokens option, else the data manifest's entry for the arm, else the arm's design default.
+    run.json records THIS (key max_tokens), not the option: the option is None unless asked, and a None in both runs of a pair made drafter_pair_report's `matched` gate fail for every
+    candidate (it holds the two runs to the same max_tokens and a None is nothing to hold them to). A record that carries its own max_tokens (A3's) keeps it; this is the arm's value."""
+    entries = (manifest or {}).get('arms') or {}
+    found = {}
+    for arm in arms:
+        entry = entries.get(arm) if isinstance(entries.get(arm), dict) else {}
+        found[arm] = int(override or entry.get('max_tokens') or ARM_SPEC[arm]['max_tokens'])
+    return found
+
+
 # -- the profile and the container -----------------------------------------------------------------------------------
 
 def derive_profile(profiles, base, arm=None):
@@ -1416,7 +1428,8 @@ def main(argv=None, say=print, make_stream=None, make_client=None, make_containe
     info = dict(image_tag=image_tag(options.image), production=production, audits_on=audits, profile=options.profile,
                 drafter_arm=options.drafter_arm, drafter_bf16=dict(DRAFTER_ARMS.get(options.drafter_arm, {}).get('env', ())).get(
                     'QWEN_FAST_DRAFTER_BF16') == '1',
-                derived=derived, seed=options.seed, max_tokens=options.max_tokens, arms=arms, arithmetic_extra=extra, scrub=scrub, data_counts=plan_counts(data, arms),
+                derived=derived, seed=options.seed, max_tokens=effective_max_tokens(arms, manifest, options.max_tokens), max_tokens_asked=options.max_tokens, arms=arms,
+                arithmetic_extra=extra, scrub=scrub, data_counts=plan_counts(data, arms),
                 calibration_corpus=calibration, started=started, counts={})
     status = 1
     lab = None

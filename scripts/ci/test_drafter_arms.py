@@ -472,6 +472,75 @@ class PairReportTests(unittest.TestCase):
             pair_report.build({}, {}, 'nonsense')
 
 
+class EffectiveMaxTokensTests(unittest.TestCase):
+    def test_the_rule_is_the_labs_own_for_every_arm(self):
+        manifest = dict(arms=dict(A1=dict(max_tokens=1536), A2={}, A3=dict(max_tokens=0), A4=dict(max_tokens=3000)))
+        arms = sorted(lab.ARM_SPEC)
+        self.assertEqual(lab.effective_max_tokens(arms, manifest), dict(A1=1536, A2=lab.DEFAULT_MAX_TOKENS, A3=lab.CALIBRATION_MAX_TOKENS, A4=3000, A5=lab.DEFAULT_MAX_TOKENS))
+        self.assertEqual(lab.effective_max_tokens(arms, manifest, 512), dict((arm, 512) for arm in arms), 'the option wins everywhere')
+        self.assertEqual(lab.effective_max_tokens(['A1'], {}), dict(A1=lab.DEFAULT_MAX_TOKENS), 'no manifest arms: the design defaults')
+        # the same rule Lab.arm_max_tokens applies to a manifest entry
+        the_lab = lab.Lab.__new__(lab.Lab)
+        for override in (None, 777):
+            the_lab.max_tokens = override
+            for arm in arms:
+                entry = manifest['arms'].get(arm) or {}
+                self.assertEqual(lab.effective_max_tokens([arm], manifest, override)[arm], the_lab.arm_max_tokens(arm, entry), (arm, override))
+
+
+class MatchedGateTests(unittest.TestCase):
+    """The `matched` gate against run.json files as the lab writes them now ({arm: budget}) and as it wrote them before (None, the budget read back from turns.jsonl)."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.count = 0
+
+    def public(self, control_extra=None, candidate_extra=None, control_turns=None, candidate_turns=None):
+        self.count += 1
+        base = os.path.join(self.root, 'pair%d' % self.count)
+        control, candidate = synthetic(gain=1.2)
+        write_run(os.path.join(base, 'control'), control, run_info('control', 'tp4-drafter-1', **(control_extra or {})))
+        write_run(os.path.join(base, 'candidate'), candidate, run_info('b16-bf8', CANDIDATE_IMAGES['b16-bf8'], **(candidate_extra or {})))
+        for side, turns in (('control', control_turns), ('candidate', candidate_turns)):
+            if turns is not None:
+                with open(os.path.join(base, side, 'turns.jsonl'), 'w') as handle:
+                    for arm, budget in turns:
+                        handle.write(json.dumps(dict(arm=arm, max_tokens=budget, status='ok')) + '\n')
+        controls, control_info, summary = pair_report.read_run(os.path.join(base, 'control'))
+        candidates, candidate_info, _ = pair_report.read_run(os.path.join(base, 'candidate'))
+        return pair_report.build(controls, candidates, 'b16-bf8', control_info, candidate_info, summary, seed=1, resamples=200), control_info, candidate_info
+
+    def test_the_per_arm_budgets_the_lab_records_match_when_equal_and_fail_when_not(self):
+        both = dict(max_tokens=dict(A1=2048, A2=2048))
+        public, _, _ = self.public(both, both)
+        self.assertEqual((public['gates']['matched'], public['verdict']), ('PASS', 'GO'))
+        public, _, _ = self.public(both, dict(max_tokens=dict(A1=2048, A2=1024)))
+        self.assertEqual((public['gates']['matched'], public['verdict']), ('FAIL', 'NO-GO'))
+
+    def test_a_run_that_recorded_none_is_read_back_from_its_turns(self):
+        old = dict(max_tokens=None)
+        turns = [('A1', 2048), ('A1', 2048), ('A2', 2048), ('A3', 2400), ('A3', 2400)]
+        public, control_info, candidate_info = self.public(old, old, control_turns=turns, candidate_turns=list(reversed(turns)))
+        self.assertEqual(control_info['max_tokens'], dict(A1=2048, A2=2048, A3=2400))
+        self.assertEqual((control_info['max_tokens_source'], candidate_info['max_tokens_source']), ('turns.jsonl', 'turns.jsonl'))
+        self.assertEqual((public['gates']['matched'], public['verdict']), ('PASS', 'GO'))
+        public, _, _ = self.public(old, old, control_turns=turns, candidate_turns=[('A1', 2048), ('A2', 1024), ('A3', 2400)])
+        self.assertEqual(public['gates']['matched'], 'FAIL', 'the candidate was asked something else')
+
+    def test_none_and_nothing_to_read_back_still_fails(self):
+        old = dict(max_tokens=None)
+        public, control_info, _ = self.public(old, old)
+        self.assertIsNone(control_info['max_tokens'])
+        self.assertEqual((public['gates']['matched'], public['verdict']), ('FAIL', 'NO-GO'))
+        public, _, _ = self.public(old, old, control_turns=[('A1', 2048)])
+        self.assertEqual(public['gates']['matched'], 'FAIL', 'one run with a budget and one with none is not a match')
+
+    def test_a_recorded_value_is_never_replaced_by_the_turns(self):
+        public, control_info, _ = self.public(dict(max_tokens=2400), dict(max_tokens=2400), control_turns=[('A1', 1)], candidate_turns=[('A1', 1)])
+        self.assertEqual((control_info['max_tokens'], 'max_tokens_source' in control_info, public['gates']['matched']), (2400, False, 'PASS'))
+
+
 class OrderTests(unittest.TestCase):
     def test_the_long_turns_come_forward_in_both_arms_and_the_default_order_is_untouched(self):
         records = [dict(id='t%02d' % n, bucket='80k+' if n % 7 == 0 else '16k') for n in range(40)]
@@ -526,8 +595,21 @@ class LabMainTests(unittest.TestCase):
             info = json.load(handle)
         self.assertEqual(info['launched_problems'], [])
         self.assertNotIn('error', info)
-        self.assertEqual((info['drafter_arm'], info['seed'], info['max_tokens']), ('control', lab.SEED, None))
+        self.assertEqual((info['drafter_arm'], info['seed']), ('control', lab.SEED))
+        # run.json records the max_tokens the lab SENT (per arm), not the option, which is None unless asked: a None in both runs made the pair report's `matched` gate fail for every candidate
+        sent = set(body['max_tokens'] for _path, body in engine.requests)
+        self.assertEqual(list(info['max_tokens']), ['A1'])
+        self.assertEqual(sent, {info['max_tokens']['A1']}, 'every request carried the budget run.json says')
+        self.assertIsNone(info['max_tokens_asked'])
         self.assertIn('A1', info['data_counts'])
+
+    def test_an_asked_max_tokens_is_what_the_run_records_and_what_it_sends(self):
+        code, out, results, public, engine, _ = self.run_arm('control', ['[QWEN-C2] profile %s' % self.derived('control')], ['--arms', 'A1', '--max-tokens', '512'])
+        self.assertNotEqual(code, 2)
+        with open(os.path.join(results, 'run.json'), encoding='utf-8') as handle:
+            info = json.load(handle)
+        self.assertEqual((info['max_tokens'], info['max_tokens_asked']), ({'A1': 512}, 512))
+        self.assertEqual(set(body['max_tokens'] for _path, body in engine.requests), {512})
 
     LOOKUP_LINES = ('[LOOKUP-DRAFT] engaged policy=n3m12 request=%s history=900',
                     '[LOOKUP-ROUND] request=%s position=900 source=lookup match=14 offered=15 proposed=15 committed=7')

@@ -70,9 +70,24 @@ def round_dicts(rounds):
     return [dict(zip(keys, entry)) for entry in rounds or []]
 
 
+def recorded_max_tokens(directory, info):
+    """The max_tokens a run was held to, the value the `matched` gate compares: run.json's own (c2_tau_lab.effective_max_tokens: {arm: the budget the lab sent}). A run made before the lab
+    recorded it has None there (it recorded the --max-tokens option, unasked): its turns.jsonl holds what every turn was sent, so the same {arm: highest budget} is read back from there; None
+    where neither exists (and the gate then fails: nothing to hold the two runs to)."""
+    value = info.get('max_tokens')
+    if value is not None:
+        return value, None
+    found = {}
+    for turn in read_jsonl(os.path.join(directory, 'turns.jsonl')):
+        arm, budget = turn.get('arm'), turn.get('max_tokens')
+        if arm and isinstance(budget, int) and not isinstance(budget, bool) and budget > 0:
+            found[arm] = max(found.get(arm, 0), budget)
+    return (found or None), ('turns.jsonl' if found else None)
+
+
 def read_run(directory):
     """({(arm, id): stat plus its set, cluster and output ids} for the thinking-ON primary arms of one results directory, its
-    run.json, the public summary its report kept in report.private.json or None)."""
+    run.json (with max_tokens read back from turns.jsonl where the run did not record it), the public summary its report kept in report.private.json or None)."""
     tapes = read_jsonl(os.path.join(directory, 'tapes.jsonl'))
     outputs = dict(((entry['arm'], entry['id']), entry.get('output_ids')) for entry in read_jsonl(
         os.path.join(directory, 'outputs.jsonl')))
@@ -81,6 +96,10 @@ def read_run(directory):
     if os.path.isfile(path):
         with open(path, encoding='utf-8') as handle:
             info = json.load(handle)
+    if info:
+        info['max_tokens'], source = recorded_max_tokens(directory, info)
+        if source:
+            info['max_tokens_source'] = source
     public = None
     path = os.path.join(directory, 'report.private.json')
     if os.path.isfile(path):
