@@ -241,6 +241,12 @@ QUOTA_ENV_NAMES = (ENV_QUOTA_DEVICE_CAP, ENV_QUOTA_DEVICE_FLOOR, ENV_QUOTA_HOST_
 # The counters the sliced restore adds to the registry's stats (only when QWEN_PREFIX_TIER_RESTORE_SLICE is on, so the stats of an engine without it are what they were).
 SLICE_STAT_NAMES = ('tier_slice_jobs', 'tier_slice_steps', 'tier_slice_blocks', 'tier_slice_ms', 'tier_slice_max_ms', 'tier_slice_held', 'tier_slice_aborted',
                     'tier_slice_inline')
+# The upload levers of the tier's host side (qwen_tier_upload; docs/tp4-upload1.md): threaded staging copies and parallel digest checks. The env names and the counters are
+# pinned equal to the module's by test_qwen_tier_upload; the module is imported only when one of the names is set, so an engine without them runs none of its code.
+ENV_UPLOAD_NAMES = ('QWEN_PREFIX_TIER_IO_THREADS', 'QWEN_PREFIX_TIER_IO_CHUNK_BLOCKS', 'QWEN_PREFIX_TIER_VERIFY_THREADS')
+UPLOAD_STAT_NAMES = ('tier_io_write_calls', 'tier_io_write_blocks', 'tier_io_write_ms', 'tier_io_write_device_ms', 'tier_io_write_stage_ms',
+                     'tier_io_read_calls', 'tier_io_read_blocks', 'tier_io_read_ms', 'tier_io_read_device_ms', 'tier_io_read_stage_ms',
+                     'tier_verify_batches', 'tier_verify_blocks', 'tier_verify_ms')
 # The counters a quota adds to the registry's stats (only when a quota is on, so the stats of an engine without one are what they were). Aggregates only: no per-tenant
 # label, key or line ever carries a salt or a tenant tag.
 QUOTA_STAT_NAMES = (
@@ -1325,6 +1331,12 @@ class PrefixRegistry(object):
         self.tier_config = tier_config(flags, self.budget_bytes)
         # Complete spills (SpillPlan; None: the cap): the counters it adds exist only then.
         self.spill_plan = spill_plan(flags, self.tier_config)
+        # Threaded staging and parallel digests (UploadPlan; None: the stock loops): the counters exist only then.
+        self.upload_plan = None
+        if any(flags.get(name) not in (None, '') for name in ENV_UPLOAD_NAMES):
+            import qwen_tier_upload
+
+            self.upload_plan = qwen_tier_upload.upload_plan(flags, self.tier_config)
         self.tier = None
         self.tier_io = None
         self.device_holds = None
@@ -1375,6 +1387,8 @@ class PrefixRegistry(object):
                 ENV_TIER_RESTORE_SLICE, ENV_TIER_RESTORE_SLICE_MS, ENV_TIER_GIB))
         if self.spill_plan is not None:
             self.stats.update(dict.fromkeys(SPILL_STAT_NAMES, 0))
+        if self.upload_plan is not None:
+            self.stats.update(dict.fromkeys(UPLOAD_STAT_NAMES, 0))
         if quota_counters:
             # One dict: the tier store counts into the registry's own stats.
             self.stats.update(quota_counters)
@@ -1432,6 +1446,16 @@ class PrefixRegistry(object):
     def attach_tier_io(self, io):
         """The model graft's side of the tier: io.read_blocks(block ids) -> one payload per block, io.write_blocks(block ids, payloads),
         io.block_bytes and io.fingerprint. Without it (or without QWEN_PREFIX_HOST_TIER_GIB) the tier does nothing."""
+        plan = self.upload_plan
+        if plan is not None and plan.io_threads:
+            import qwen_tier_upload
+
+            previous = self.tier_io
+            if isinstance(previous, qwen_tier_upload.ThreadedTierIO):
+                previous.close()
+            if isinstance(io, qwen_tier_upload.ThreadedTierIO):
+                io = io.io
+            io = qwen_tier_upload.ThreadedTierIO(io, plan.io_threads, plan.io_chunk, self.stats)
         self.tier_io = io
         if self.tier is not None:
             self.tier.fingerprint = str(getattr(io, 'fingerprint', ''))
