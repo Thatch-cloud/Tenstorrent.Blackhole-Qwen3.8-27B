@@ -79,7 +79,7 @@ Threads help the staging copy up to the host's memory bandwidth (here about 4); 
 host, not by the simulated device.
 
 **ESTIMATE for the cards (nothing has run):** the 254k restore falls from 0.96 s toward the device-write time, **0.4 to 0.6 s**; the spill of displaced blocks by a similar fraction; the sampled digest check (0.37 s of
-a 254k restore at 1.5 GB/s, C) to under 0.1 s. The returning hit's first token falls by that much and no more: **at most about 0.5 s of 5.4 to 6.5 s (under 10%)**. With the sliced restore on, a slice is the time budget over the measured cost per block, at most 512 blocks: at the model's 0.53 ms a block for restore plus spill (`scripts/ci/tier_slice_model.py`) about 377 blocks, 10 slices
+a 254k restore at 1.5 GB/s, C) to under 0.1 s. The returning hit's first token falls by that much and no more: **at most about 0.5 s of 5.4 to 6.5 s (under 10%)**. With the sliced restore on, a slice is the time budget over the measured cost per block, at most 512 blocks: at the model's 0.53 ms a block for restore plus spill (`scripts/ci/tier_slice_model.py`) about 377 blocks, 10 to 12 slices
 for 3,841 blocks; at roughly half that cost the 512-block cap binds (8 slices). A larger `QWEN_PREFIX_TIER_RESTORE_SLICE` is the owner's follow-up knob and is not in this pack.
 
 ## 4. The 23.9 GB/s cap
