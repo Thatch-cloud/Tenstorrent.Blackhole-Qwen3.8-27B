@@ -279,9 +279,9 @@ class TailTrace(object):
 
     def _addr(self, tensor):
         if self._addresses is None:
-            import gdn_multitoken_conv
+            import tp_addresses
 
-            return tuple(gdn_multitoken_conv.addresses(self._ops(), tensor))
+            return tuple(tp_addresses.addresses(self._ops(), tensor))        # one address per chip at the width this process serves (the pinned pair helper needs exactly two)
         return tuple(self._addresses(tensor))
 
     def _span(self, tensor):
@@ -574,6 +574,16 @@ class TailTrace(object):
             raise ValueError('The traced tail needs the GDN conv op engaged on every GDN layer (QWEN_FAST_GDN_PREFILL_CONV=1) and the gate hook on every projection: the compile pass at %d rows saw %d conv '
                              'and %d projection calls for %d GDN layers' % (trace.bucket, seen['conv'], seen['project'], gdn))
 
+    def _check_conv_audit(self):
+        """The graft conv op audits its first QWEN_FAST_GDN_PREFILL_CONV_AUDIT calls against the FIR, whose one-hot is a host write: inside a capture that is a TT_FATAL, so the audit must have run out
+        (the eager warm before this one calls the op far more often than the knob counts) before the first capture."""
+        module = sys.modules[type(self._gdn_layers()[0]).__module__]
+        state = getattr(module, '_QWEN_PREFILL_CONV', None)
+        limit = int(self.environ.get('QWEN_FAST_GDN_PREFILL_CONV_AUDIT', '0') or 0)
+        if isinstance(state, dict) and int(state.get('audited', limit)) < limit:
+            raise ValueError('The graft conv op has audited %d of its %d calls (QWEN_FAST_GDN_PREFILL_CONV_AUDIT): the next call would run the FIR inside a trace capture; the eager warm must come first'
+                             % (int(state['audited']), limit))
+
     def _arena_tensor(self, rows):
         ops = self._ops()
         return ops.zeros((1, 1, rows, ARENA_WIDTH), device=self.model.device, dtype=ops.bfloat16, layout=ops.TILE_LAYOUT, memory_config=ops.DRAM_MEMORY_CONFIG)
@@ -581,6 +591,7 @@ class TailTrace(object):
     def _capture_all(self, model, log):
         """The arena protocol around one capture per bucket (the module docstring, THE HOLES)."""
         ops = self._ops()
+        self._check_conv_audit()
         arena_rows = (self.settings.arena_mb * 1024 * 1024) // (ARENA_WIDTH * 2) // 32 * 32
         arena = None
         if arena_rows:

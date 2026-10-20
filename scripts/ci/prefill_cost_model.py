@@ -4,6 +4,7 @@ returning agent turn, and what each candidate change is worth (docs/tp4-prefill-
     python3 -B scripts/ci/prefill_cost_model.py chunk            the per-class table of one chunk at 4k / 32k / 128k / 160k / 254k of context
     python3 -B scripts/ci/prefill_cost_model.py step 120832 3112  one step: start of the step (a multiple of 2,048) and its new tokens
     python3 -B scripts/ci/prefill_cost_model.py levers 140000 3500 the candidate list priced at one step
+    python3 -B scripts/ci/prefill_cost_model.py tails              the traced tail (PF3-T) per bucket and over the production population
 
 EVERY NUMBER HERE IS EITHER MEASURED (M) OR AN ESTIMATE (E); the label is in the name of the table it lives in.
 
@@ -213,6 +214,34 @@ def traced_tail_saving_ms(start, tokens):
     return max(0.0, TRACED_TAIL_KEEP * (PRODUCTION_TAIL[bucket][0] - device))
 
 
+# -- PF3-T: the traced tail priced per bucket and over the production population (docs/tp4-prefill3.md section 4) -----------------------------------------------------------
+PF3_TRACEABLE = (128, 256, 512, 1024)
+PF3_REPLAY_OVERHEAD_MS = 8.0       # E what a replay still costs the host: nine staging copies (~3 ms) and the eager select / norm / lm_head programs after it (~5 ms)
+# M the tail buckets of the 1,022 prompts of the production window that had one (docs/tp4-prefill-2.md section 3.4: 128: 61, 256: 66, 512: 126, 1,024: 243, 2,048: 526) and the window's route
+# time as the fitted model sums it (1,336 s for 1,024 prompts; the log said 1,437 s) and the share exact resume P0 takes of it (39 percent, E, tp4/exact-end)
+PROD_TAIL_POPULATION = {128: 61, 256: 66, 512: 126, 1024: 243, 2048: 526}
+PROD_ROUTE_SECONDS_MODEL = 1336.0
+PROD_PROMPTS = 1024
+P0_SHARE = 0.39
+
+
+def pf3_saving_ms(bucket):
+    """E what a traced tail pass of `bucket` rows saves: the traced_tail_saving_ms recovery (80 percent of the eager floor above the bucket's device work) less the replay's own host cost;
+    zero for the buckets the lever does not trace (the 2,048-row bucket is device-bound and its full chunks are not tails)."""
+    if bucket not in PF3_TRACEABLE:
+        return 0.0
+    device = NON_SDPA_TOTAL_MS * WALL_PER_KERNEL * bucket / CHUNK + (PRODUCTION_TAIL[2048][0] - PRODUCTION_CHUNK[0])
+    return max(0.0, TRACED_TAIL_KEEP * (PRODUCTION_TAIL[bucket][0] - device) - PF3_REPLAY_OVERHEAD_MS)
+
+
+def pf3_population():
+    """E (ms saved per prompt on average, share of the window's route time today, share after exact resume P0) over the production population."""
+    total = sum(PROD_TAIL_POPULATION[bucket] * pf3_saving_ms(bucket) for bucket in PROD_TAIL_POPULATION)
+    per_prompt = total / sum(PROD_TAIL_POPULATION.values())
+    today = total / 1000.0 / PROD_ROUTE_SECONDS_MODEL
+    return per_prompt, today, today / (1.0 - P0_SHARE)
+
+
 def lever_table(start, tokens):
     """[(name, saving ms low, central, high, class, cost, risk, label)] priced at one final step. The classes: E0 = byte-exact by construction, E1 = exact against a split twin, T = a
     tolerance-class numerics change (owner waiver), K = needs a new kernel. Costs are engineering days (E); the label says what the saving rests on."""
@@ -239,6 +268,9 @@ def lever_table(start, tokens):
     traced = traced_tail_saving_ms(start, tokens)
     rows.append(('traced masked tails (valid_len as a device scalar in the GDN ops)', 0.0, traced, 1.25 * traced, 'E0 + K', '10-15', 'high: trace region, GDN op arguments',
                  'E: the eager floor (~320 ms) minus the device work of a small bucket'))
+    built = pf3_saving_ms(bucket_for(tail)) if tail else 0.0
+    rows.append(('PF3-T traced masked tails, built (gate-neutral pad rows, no new kernel; buckets 128-1,024)', 0.0, built, 1.25 * built, 'E0 if the card agrees', '0 (built)',
+                 'high: trace holes, claims C1 and C2', 'E: the eager floor minus the device work of the bucket, less the replay\'s host cost'))
     return rows
 
 
@@ -257,6 +289,7 @@ def main(argv=None):
     step = sub.add_parser('step')
     step.add_argument('start', type=int)
     step.add_argument('tokens', type=int)
+    sub.add_parser('tails')
     levers = sub.add_parser('levers')
     levers.add_argument('start', type=int)
     levers.add_argument('tokens', type=int)
@@ -266,6 +299,13 @@ def main(argv=None):
         print(format_chunk_table(True))
         print('\nPF1 as profiled (paired attention):')
         print(format_chunk_table(False))
+        return 0
+    if arguments.command == 'tails':
+        print('PF3-T traced tail, per bucket (E): saving per tail pass; production prompts with that bucket (M, docs/tp4-prefill-2.md 3.4)')
+        for bucket in sorted(PROD_TAIL_POPULATION):
+            print('  %5d rows: %6.1f ms   %4d prompts%s' % (bucket, pf3_saving_ms(bucket), PROD_TAIL_POPULATION[bucket], '' if bucket in PF3_TRACEABLE else '   (not traced)'))
+        per_prompt, today, after = pf3_population()
+        print('over the population: %.1f ms a prompt, %.1f%% of the window\'s route time today, %.1f%% after exact resume P0' % (per_prompt, 100 * today, 100 * after))
         return 0
     start = arguments.start - arguments.start % CHUNK
     if arguments.command == 'step':

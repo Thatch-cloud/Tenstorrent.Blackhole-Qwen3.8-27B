@@ -1044,6 +1044,24 @@ class WarmTests(unittest.TestCase):
         self.assertEqual(traced.tail.hook_calls['conv'], 3 * 4 * 2)       # three GDN layers, four buckets, a compile pass and a capture pass each
         self.assertEqual(traced.tail.hook_calls['project'], 3 * 4 * 2)
 
+    def test_an_unfinished_conv_audit_would_run_inside_a_capture_and_is_refused(self):
+        GDN_MODULE._QWEN_PREFILL_CONV = {'audited': 1}
+        self.addCleanup(lambda: vars(GDN_MODULE).pop('_QWEN_PREFILL_CONV', None))
+        env = dict(ENV, QWEN_FAST_GDN_PREFILL_CONV_AUDIT='4', QWEN_FAST_PREFILL_TAIL_TRACE_ARENA_MB='1')
+        ops = Ops()
+        model = ToyModel(ops)
+        instance = tail.TailTrace(tail.settings(env), env, ops=ops, addresses=lambda t: (t.addr,), extent=lambda t: t.size)
+        instance.install(model, lambda *a: None, taps=(1, 3), sink=SINK)
+        with self.assertRaises(ValueError) as caught:
+            instance.warm(model, WIDTH)
+        self.assertIn('audited 1 of its 4', str(caught.exception))
+        GDN_MODULE._QWEN_PREFILL_CONV = {'audited': 4}
+        again = tail.TailTrace(tail.settings(env), env, ops=Ops(), addresses=lambda t: (t.addr,), extent=lambda t: t.size)
+        ops2 = again._ops()
+        model2 = ToyModel(ops2)
+        again.install(model2, lambda *a: None, taps=(1, 3), sink=SINK)
+        self.assertTrue(again.warm(model2, WIDTH))
+
     def test_the_warm_needs_a_page_table_width_in_multiples_of_32(self):
         ops = Ops()
         model = ToyModel(ops)
