@@ -24,7 +24,7 @@
 # THROUGH CI (the owner is offsite): the cardm action of qwen-c2-serving.yml
 #   C2_CARDM_HARNESS=optimisation/ttnn-op/sdpa_prefill_ksplit/build_k64j_oq_ks.sh
 #   C2_CARDM_ENV=KS_BUILD_DRY_RUN=1      # first: every check the host can make, every command printed, nothing run
-#   C2_CARDM_ENV=                        # then the build: about four ninja runs of 30 to 60 s
+#   C2_CARDM_ENV=                        # then the build: about three ninja runs of 30 to 60 s
 # runs it on the rig host from the checkout root with QUAL_CARD = card M and ALLOW_SERVING_CARD=1 (the card is context only: nothing here opens a device).
 # BY HAND on the rig: QUAL_CARD=<board id> [ALLOW_SERVING_CARD=1] bash optimisation/ttnn-op/sdpa_prefill_ksplit/build_k64j_oq_ks.sh [graft dir]   (no default board, card B refused)
 #
@@ -66,7 +66,7 @@ OQ_LITERALS=("$OQ_LITERAL_1" "$OQ_LITERAL_2")
 
 # ---- this build's own recorded shas (test_ksplit_build.py keeps them equal to the generators and their outputs) ----
 PK_FACTORY=692c79ee9cbc2f29ac3ab88bb274828afcf3ce76461930be61bd6edd07c45e68
-PK_SCRIPT=0000000000000000000000000000000000000000000000000000000000000000
+PK_SCRIPT=e1794e011f60b5ccca050a1f734268f9e16fb4414b90718fd309df08db351377
 KS_READER=16438818a762c699d929c579903925eba175b6f0e61171efa01dc0113a8dc128
 KS_WRITER=9b9ef47f9af44cfe83dc82d587568cfd82c4881021306f7af677cb672fd589ee
 KS_COMPUTE=fc9571d178639f139b1da0f6aa385b5b10963f647df83860e763a7caff893913

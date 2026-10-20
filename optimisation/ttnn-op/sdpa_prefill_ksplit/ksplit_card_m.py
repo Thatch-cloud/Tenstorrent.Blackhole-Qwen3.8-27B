@@ -94,25 +94,37 @@ def case_label(config, qmem, seed, variant, start):
     return '%s-%s-s%d-%s@%d' % (config, qmem, seed, variant, start)
 
 
-def expected_ks_lines(requested):
-    """Counter of the 'ksplit=1' factory lines a set of built programs must have produced. requested: the harness' {(geometry, rows, width, qmem, flags, grid)}."""
-    lines = collections.Counter()
+def expected_programs(requested):
+    """Counters of the log lines a set of built programs must have produced. requested: the harness' {(geometry, rows, width, qmem, flags, grid)}.
+    -> (Counter of (flags, chains, members, order) for the F4 line, Counter of (q_chunks, cores, chains, members) for the oneq line, Counter of
+    (slices, q_chunks, cores, busy, chains, members) for the ksplit line). One program, one factory run, one line each; a ksplit program's F4 line counts ITS chains (one per slice)."""
+    flags_lines, oneq_lines, ks_lines = collections.Counter(), collections.Counter(), collections.Counter()
     for geometry, rows, _width, _qmem, flags, grid in requested:
-        if not flags & pk.FLAG_KSPLIT:
-            continue
         spec = card.GEOMETRIES[geometry]
-        the_plan = planner.plan(spec['nqh'], spec['nkh'], rows, card.Q_CHUNK, grid)
-        lines[(the_plan['slices'], the_plan['total'], the_plan['num_cores'], the_plan['busy'], the_plan['chain_count'], the_plan['member_count'])] += 1
-    return lines
+        base = card.planner.plan(spec['nqh'], spec['nkh'], rows, card.Q_CHUNK, grid, oneq=bool(flags & card.planner.FLAG_ONEQ), noc_order=bool(flags & card.planner.FLAG_NOC_ORDER))
+        mine = planner.plan(spec['nqh'], spec['nkh'], rows, card.Q_CHUNK, grid) if flags & pk.FLAG_KSPLIT else None
+        counted = mine or base
+        flags_lines[(flags, counted['chain_count'], counted['member_count'], 'noc' if flags & card.planner.FLAG_NOC_ORDER else 'raster')] += 1
+        if flags & card.planner.FLAG_ONEQ:
+            oneq_lines[(base['total'], base['num_cores'], base['chain_count'], base['member_count'])] += 1
+        if mine:
+            ks_lines[(mine['slices'], mine['total'], mine['num_cores'], mine['busy'], mine['chain_count'], mine['member_count'])] += 1
+    return flags_lines, oneq_lines, ks_lines
+
+
+def expected_ks_lines(requested):
+    return expected_programs(requested)[2]
 
 
 def check_factory_lines(text, requested):
-    """[problem]: the oneq harness' flags / oneq line check plus the 'ksplit=1' line of every ksplit program."""
-    problems = card.check_factory_lines(text, requested)
-    got = collections.Counter(tuple(int(value) for value in match.groups()) for match in KS_LINE.finditer(text))
-    want = expected_ks_lines(requested)
-    if got != want:
-        problems.append('ksplit line: unexpected %s, missing %s' % (dict(got - want) or 'none', dict(want - got) or 'none'))
+    """[problem] comparing the native log's factory lines (the F4 line, the oneq line, the ksplit line) with the planner's reading of every program the run built."""
+    flags, oneq = card.factory_lines(text)
+    got_ks = collections.Counter(tuple(int(value) for value in match.groups()) for match in KS_LINE.finditer(text))
+    want_flags, want_oneq, want_ks = expected_programs(requested)
+    problems = []
+    for name, got, want in (('flags line', collections.Counter(flags), want_flags), ('oneq line', collections.Counter(oneq), want_oneq), ('ksplit line', got_ks, want_ks)):
+        if got != want:
+            problems.append('%s: unexpected %s, missing %s' % (name, dict(got - want) or 'none', dict(want - got) or 'none'))
     return problems
 
 
@@ -193,7 +205,7 @@ def reference_for(bench, rows, seed, variant, qmem, start, torch):
         table_host = ttnn.to_torch(table).reshape(-1)
     length = start + rows
     scale = 1.0 / (card.HD ** 0.5)
-    return numerics.reference_attention(q_host, numerics.gather_pages(k_host, table_host, length), numerics.gather_pages(v_host, table_host, length), start, scale, torch)
+    return numerics.reference_attention(q_host, numerics.gather_pages(k_host, table_host, length), numerics.gather_pages(v_host, table_host, length), start, scale, torch)[None]
 
 
 def sweep(bench, args, report):
@@ -215,7 +227,7 @@ def sweep(bench, args, report):
                         oneq = bench.host(bench.call(rows, qmem, seed, variant, start, word(ARMS['oneq']), grid=grid), 'read back oneq')
                         ks = bench.host(bench.call(rows, qmem, seed, variant, start, word(ARMS['ksplit']), grid=grid), 'read back ksplit')
                         stats = numerics.error_stats(ks, oneq, torch)
-                        problems = numerics.within_bound(stats)
+                        problems = numerics.within_bound(stats, numerics.bound_for(start + rows))
                         entry = dict(case=case_label(name, qmem, seed, variant, start), config=name, rows=rows, context=start + rows, slices=shape_plan['slices'],
                                      stats=stats, problems=problems)
                         if args.anchor and seed == args.seeds[0] and variant == args.variants[0]:
@@ -316,7 +328,7 @@ def grid_checks(bench, args, report):
             oneq = bench.host(bench.call(rows, 'dram', 0, 'normal', start, word(ARMS['oneq']), grid=grid), 'read back oneq')
             ks = bench.host(bench.call(rows, 'dram', 0, 'normal', start, word(ARMS['ksplit']), grid=grid), 'read back ksplit')
             stats = numerics.error_stats(ks, oneq, torch)
-            problems = numerics.within_bound(stats)
+            problems = numerics.within_bound(stats, numerics.bound_for(start + rows))
             label = '%s-g%dx%d@%d' % (name, grid[0], grid[1], start)
             report['grid_cases'].append(dict(case=label, rows=rows, slices=the_plan['slices'], stats=stats, problems=problems))
             if problems:
@@ -485,7 +497,7 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     report = dict(passed=False, role=args.role, configs=args.configs, starts=args.starts, seeds=args.seeds, variants=args.variants, q_memory=args.q_memory,
-                  bound=numerics.BOUND, noise=numerics.NOISE, failures=[], cases=[], grid_cases=[], timing={}, expect_binary_sha256=args.expect_binary_sha256 or None)
+                  bound=numerics.BOUND, bound_growth=dict(from_blocks=numerics.GROWTH_BLOCKS, frac_cap=numerics.FRAC_CAP), noise=numerics.NOISE, failures=[], cases=[], grid_cases=[], timing={}, expect_binary_sha256=args.expect_binary_sha256 or None)
     native = Q1.NativeLog(args.out.with_name(args.out.name + '.native.log'))
     args.out.parent.mkdir(parents=True, exist_ok=True)
 

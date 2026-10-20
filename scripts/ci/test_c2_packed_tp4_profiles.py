@@ -158,8 +158,9 @@ import make_np1_profiles as np1_twins  # noqa: E402
 import make_s5_profiles as s5_twins  # noqa: E402
 import make_xe_profiles as xe_twins  # noqa: E402
 import make_pf2_profiles as pf2_twins  # noqa: E402
+import make_pf3k_profiles as pf3k_twins  # noqa: E402
 import make_sched_profiles as sched_twins  # noqa: E402
-OCTO_PROFILES = octo_twins.twin_names() + octo2_twins.twin_names() + octo3_twins.twin_names() + ship4_twins.twin_names() + sched_twins.twin_names() + pf2_twins.twin_names() + xe_twins.twin_names() + np1_twins.twin_names() + s5_twins.twin_names()      # (and tp4/next-1's audited twins, test_s5_profiles; tp4/octo-3's twins of the fused stack, held by test_octo3_profiles; tp4/ship-4's, test_ship4_profiles; tp4/np1-fastlane's, test_np1_profiles; tp4/exact-end's, test_xe_profiles; tp4/prefill-2's, test_pf2_profiles; tp4/sched-1's, test_sched_profiles)
+OCTO_PROFILES = octo_twins.twin_names() + octo2_twins.twin_names() + octo3_twins.twin_names() + ship4_twins.twin_names() + sched_twins.twin_names() + pf2_twins.twin_names() + pf3k_twins.twin_names() + xe_twins.twin_names() + np1_twins.twin_names() + s5_twins.twin_names()      # (and tp4/next-1's audited twins, test_s5_profiles; tp4/octo-3's twins of the fused stack, held by test_octo3_profiles; tp4/ship-4's, test_ship4_profiles; tp4/np1-fastlane's, test_np1_profiles; tp4/exact-end's, test_xe_profiles; tp4/prefill-2's, test_pf2_profiles; tp4/sched-1's, test_sched_profiles)
 # the region-read audit twins (make_kvread_profiles; test_kvread_profiles holds each as its parent plus one flag): exempt wherever the engine-reuse twins are.
 import make_kvread_profiles as kvread_twins  # noqa: E402
 PARKED_PROFILES = PARKED_PROFILES + kvread_twins.twin_names()
@@ -599,7 +600,7 @@ class FreezeProfileTests(unittest.TestCase):
 
         for name, profile in profiles().items():
             if name not in FREEZE_PROFILES:
-                if name not in make_s5_profiles.owned_names():            # (tp4/next-1: the ship-5 candidate and its audited twins set the trim, QWEN_FAST_ADMISSION_DIAG_TRIM=1, by the owner's decision)
+                if name not in make_s5_profiles.owned_names() and name not in pf3k_twins.twin_names():            # (tp4/next-1: the ship-5 candidate and its audited twins set the trim, QWEN_FAST_ADMISSION_DIAG_TRIM=1, by the owner's decision; tp4/prefill-3's twins are copies of them)
                     self.assertNotIn(TRIM, profile['env'], name)
                 self.assertNotIn(CREDIT, profile['env'], name)
         for flag in (TRIM, CREDIT):

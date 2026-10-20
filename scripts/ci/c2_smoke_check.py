@@ -220,6 +220,7 @@ FUSION_LEVERS = (
     ('QWEN_PREFIX_WINDOW_CARRY', '1', '[PINDIAG] prefix: window carry engaged', '[PINDIAG] prefix: window carry fell back', "exact resume P0: the undrop and the drafter-window carry (the scheduler graft's install line; a smoke sends no salt, so the carried admissions and the audit are the prefix gate's)"),  # ER
     ('QWEN_FAST_GRID13', '1', '[PINDIAG] tp4 grid13 engaged', '[PINDIAG] tp4 grid13 fell back', 'M1 matmul grids for the 13x10 compute grid'),  # M1
     ('QWEN_FAST_PREFILL_HANDOFF', '1', '[PINDIAG] prefill handoff engaged', '[PINDIAG] prefill handoff fell back', 'PF2-H device-side GDN slot hand-off of the final step'),  # PF2
+    ('QWEN_FAST_SDPA_PF_KSPLIT', '1', '[PINDIAG] sdpa prefill ksplit engaged', '[PINDIAG] sdpa prefill ksplit fell back', "PF3-K K-split of the tail passes' attention"),  # PF3K
     ('QWEN_PREFIX_TIER_RESTORE_SLICE', '512', '[PINDIAG] prefix: host tier restore slice on', '[PINDIAG] prefix: host tier restore slice fell back', 'sliced host-tier restore'),  # TS
     ('QWEN_FAST_MLP_CFG', 'g3u4d3', '[PINDIAG] tp4 mlp gateup engaged route=cfg', '[PINDIAG] tp4 mlp gateup fell back', 'MLP streaming config g3u4d3 (the card-M sweep winner)'),  # WP0
     ('QWEN_FAST_CCL_OPTIONS', 'served', '[PINDIAG] tp4 ccl options engaged', '[PINDIAG] tp4 ccl options fell back', 'CCL options (the served set)'),  # WP5
@@ -248,6 +249,7 @@ FUSION_AUDITS = (
 FUSION_RULES = (
     'exact_resume_smoke',  # ER
     'grid13_smoke',  # M1
+    'ksplit_smoke',  # PF3K
     'toolcall_whitespace_smoke',  # TW
     'w3_wc_smoke',  # W3
     'tp4_shard_argmax_smoke',  # WP0

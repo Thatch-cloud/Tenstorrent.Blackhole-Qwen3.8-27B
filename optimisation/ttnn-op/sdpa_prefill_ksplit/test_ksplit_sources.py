@@ -277,10 +277,11 @@ class OrderTests(unittest.TestCase):
 class TextTests(unittest.TestCase):
     FILES = ('reader_interleaved_qwen_ksplit.cpp', 'writer_interleaved_qwen_ksplit.cpp', 'sdpa_qwen_ksplit.cpp', 'ks_common.py', 'make_ks_reader.py', 'make_ks_writer.py',
              'make_ks_compute.py', 'apply_factory_pk.py', 'ksplit_planner.py', 'ks_protocol_model.py', 'ksplit_card_m.py', 'host_exec_ksplit.py', 'stub_compile_ksplit.py',
-             'run_card_m_ks.sh', 'build_k64j_oq_ks.sh', 'README.md')
+             'run_card_m_ks.sh', 'build_k64j_oq_ks.sh', 'README.md', 'test_ksplit_planner.py', 'test_ksplit_factory.py', 'test_ksplit_sources.py', 'test_ksplit_protocol.py',
+             'test_ksplit_card.py', 'test_ksplit_build.py', 'ksplit_estimate.py', 'ksplit_emulation.py', 'test_ksplit_estimate.py', 'test_ksplit_emulation.py')
 
     def test_lf_and_nothing_private(self):
-        private = re.compile(r'\d{1,3}(\.\d{1,3}){3}|thatch|blackhole-[0-9A-F]{8}|/home/|\bssh\b|ghp_|sha256:[0-9a-f]{16}|\.local\b', re.I)
+        private = re.compile(r'\d{1,3}(\.\d{1,3}){3}|th[a]tch|blackhole-(?!0{8})[0-9A-F]{8}|/hom[e]/|\bss[h]\b|gh[p]_|sha256:[0-9a-f]{16}|\.loca[l]\b', re.I)
         for name in self.FILES:
             path = HERE / name
             if not path.exists():
@@ -299,7 +300,7 @@ class TextTests(unittest.TestCase):
             base = {'reader_interleaved_qwen_ksplit.cpp': mr.CHAIN_READER, 'writer_interleaved_qwen_ksplit.cpp': mw.PINNED_WRITER, 'sdpa_qwen_ksplit.cpp': mc.PINNED_COMPUTE}[name]
             allowed = {char for char in base.read_text(encoding='utf-8') if ord(char) > 127}
             self.assertLessEqual({char for char in text if ord(char) > 127}, allowed, name)
-        for name in ('make_ks_reader.py', 'make_ks_writer.py', 'make_ks_compute.py', 'ks_common.py', 'ksplit_planner.py', 'ks_protocol_model.py', 'ksplit_card_m.py', 'apply_factory_pk.py'):
+        for name in ('make_ks_reader.py', 'make_ks_writer.py', 'make_ks_compute.py', 'ks_common.py', 'ksplit_planner.py', 'ks_protocol_model.py', 'ksplit_card_m.py', 'apply_factory_pk.py', 'ksplit_estimate.py', 'ksplit_emulation.py'):
             text = (HERE / name).read_text(encoding='utf-8')
             self.assertEqual({char for char in text if ord(char) > 127}, set(), name)
 

@@ -12,13 +12,22 @@ THE BOUND IS PROVISIONAL. BOUND below is the a-priori reading of the merge's rou
 merge, the final rounding), NOT a measurement. It must be replaced by the numbers card M measures (ksplit vs oneq per context, and both against the float reference) before the owner approves the
 waiver; until then it is only the audit's tripwire at a gate. NOISE says the second half of the rule: against the float reference the K-split must be no further than NOISE times the oneq call's
 own distance (the sequential kernel's accumulator is rounded to bf16 at every one of up to ~2,000 blocks; a split has fewer sequential steps per slice).
+
+THE BOUND GROWS WITH THE CONTEXT. The CPU emulation of the two arithmetics (ksplit_emulation.py, the served factory's formats: bf16 accumulator and max, fp32 sum) puts the sequential call's own
+distance from the float reference at ~0.2 ulps rms at 1k of context, ~0.7 at 8k, ~1.3 at 32k and ~2.6 at 131k (a flat softmax; peaky rows about half), growing with the square root of the number of
+K blocks, and the K-split's difference from the sequential call grows with it (the two noises add). A bound that holds at 1k and does not grow would fail a CORRECT split at 32k. bound_for(context)
+therefore multiplies max and rms by sqrt(blocks / 16) from 2,048 tokens up (and the share above 2 ulps by blocks / 16, capped): at 131k that is x8, still an order of magnitude below the error a wrong merge makes (a
+wrong weight or a lost slice is an error of the order of the row's scale, ~128 ulps).
 """
 
 import math
 
 # a-priori, provisional (see the module docstring and the doc's waiver card)
-BOUND = {'max_ulps': 8.0, 'rms_ulps': 1.5, 'frac_gt2': 0.02}
+BOUND = {'max_ulps': 8.0, 'rms_ulps': 1.5, 'frac_gt2': 0.02}       # at a context of up to GROWTH_BLOCKS K blocks (2,048 tokens); bound_for(context) is the bound at a longer one
 NOISE = {'rms': 1.25, 'max': 1.5}
+GROWTH_BLOCKS = 16                  # K blocks of 128 tokens up to which BOUND holds as it stands
+FRAC_CAP = 0.5                      # the share above 2 ulps never has to be below this at a long context (the sequential call's own noise puts a third of a flat softmax's elements there)
+MAX_CONTEXT = 262144                # the pool's window: the lenient end, used when a call's context is unknown
 BF16_MANTISSA_BITS = 7
 SCALE_FLOOR = 2.0 ** -120
 
@@ -47,6 +56,20 @@ def error_stats(candidate, reference, torch):
                 max_ulps=float(flat.max()) if count else 0.0, rms_ulps=float(flat.pow(2).mean().sqrt()) if count else 0.0, p999_ulps=p999,
                 frac_gt1=float((flat > 1.0).float().mean()) if count else 0.0, frac_gt2=float((flat > 2.0).float().mean()) if count else 0.0,
                 row_max_p99_ulps=float(torch.quantile(rows_max, 0.99)) if rows_max.numel() <= 16_000_000 else float(rows_max.max()))
+
+
+def growth(context_tokens, block=128):
+    """The factor the bound grows by at this context: sqrt(blocks / GROWTH_BLOCKS), 1 up to GROWTH_BLOCKS blocks."""
+    return math.sqrt(max(1.0, (context_tokens / float(block)) / GROWTH_BLOCKS))
+
+
+def bound_for(context_tokens=None, bound=None, block=128):
+    """The bound at a context (the K length a call attends over: its chunk start plus its rows): max and rms grow by growth(), the share above 2 ulps by growth() squared up to FRAC_CAP.
+    An unknown context (None) takes the lenient end, MAX_CONTEXT. `bound` defaults to BOUND (read at call time)."""
+    base = BOUND if bound is None else bound
+    factor = growth(MAX_CONTEXT if context_tokens is None else context_tokens, block)
+    return {'max_ulps': base['max_ulps'] * factor, 'rms_ulps': base['rms_ulps'] * factor,
+            'frac_gt2': min(max(base['frac_gt2'], FRAC_CAP), base['frac_gt2'] * factor * factor)}
 
 
 def within_bound(stats, bound=None):

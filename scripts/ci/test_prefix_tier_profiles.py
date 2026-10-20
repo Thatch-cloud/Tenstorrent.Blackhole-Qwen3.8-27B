@@ -29,6 +29,7 @@ import make_np1_profiles as np1  # noqa: E402
 import make_s5_profiles as s5  # noqa: E402
 import make_xe_profiles as xe  # noqa: E402
 import make_pf2_profiles as pf2  # noqa: E402
+import make_pf3k_profiles as pf3k  # noqa: E402
 import make_sched_profiles as sched  # noqa: E402
 import make_upload_profiles  # noqa: E402
 import make_w2_kill_profiles as kill_generator  # noqa: E402
@@ -313,7 +314,7 @@ class ContractTests(unittest.TestCase):
 
     def test_no_other_profile_names_either_feature(self):
         for name, profile in PROFILES.items():
-            if name not in generator.NAMES and name not in ship4.owned_names() and name not in np1.twin_names() and name not in s5.owned_names() and name not in xe.twin_names() and name not in pf2.twin_names() and name not in sched.twin_names():       # (tp4/ship-4's combined candidate and its audited twin carry the tier: test_ship4_profiles; so do tp4/np1-fastlane's copies of them; so do tp4/exact-end's copies of them; so do tp4/prefill-2's twins of them; so do tp4/sched-1's copies of them)
+            if name not in generator.NAMES and name not in ship4.owned_names() and name not in np1.twin_names() and name not in s5.owned_names() and name not in xe.twin_names() and name not in pf2.twin_names() and name not in pf3k.twin_names() and name not in sched.twin_names():       # (tp4/ship-4's combined candidate and its audited twin carry the tier: test_ship4_profiles; so do tp4/np1-fastlane's copies of them; so do tp4/exact-end's copies of them; so do tp4/prefill-2's twins of them; so do tp4/sched-1's copies of them)
                 self.assertFalse([flag for flag in NAMES if flag in profile['env']], name)
 
     def test_an_inherited_process_environment_never_turns_either_on_under_a_profile_that_does_not_name_it(self):

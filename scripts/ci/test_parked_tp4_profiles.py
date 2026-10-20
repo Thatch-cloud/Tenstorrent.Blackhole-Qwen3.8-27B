@@ -281,8 +281,10 @@ class ProfileTests(unittest.TestCase):
 
         generated |= set(make_s5_profiles.twin_names())      # (tp4/next-1's audited twins of the ship-5 candidate, test_s5_profiles)
         import make_pf2_profiles
+        import make_pf3k_profiles
 
         generated |= set(make_pf2_profiles.twin_names())      # (tp4/prefill-2's twins of the approved ship-4 profile, test_pf2_profiles)
+        generated |= set(make_pf3k_profiles.twin_names())      # (tp4/prefill-3's twins of the ship-5 candidate, test_pf3k_profiles)
         import make_sched_profiles
 
         generated |= set(make_sched_profiles.twin_names())      # (tp4/sched-1's, test_sched_profiles)
