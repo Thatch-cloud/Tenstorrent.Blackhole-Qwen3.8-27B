@@ -285,6 +285,10 @@ the matrix carries the peaky variant, which is what makes the harness sharp.
 **Provisional bound** (`BOUND`): max 8, rms 1.5, share above 2 u 0.02 at up to 2,048 tokens, scaled by `bound_for(context)`; and the second half of the rule, `NOISE`: against the float reference the split
 may be no further than 1.25x rms and 1.5x max the oneq call's own distance. These are a tripwire at a gate, **not a measurement**.
 
+**Why the bound is not "the oneq-vs-stock run-to-run difference".** The usual yardstick for a kernel that is not bitwise the old one is the difference between two kernels that are both accepted. Here
+oneq and stock are **byte-equal** (card M, 360 of 360 cases; the harness re-proves it on the new binary), so that difference is zero and cannot size a bound. The substitute is the sequential call's distance from a float reference
+(item 2 of 4.4): a bound of the K-split's difference from oneq that is a small multiple of the noise the shipped kernel already has against the truth.
+
 ### 4.4 The numbers that must be measured on card M before approval
 
 All from `ksplit_card_m.py` (G2-G3), in the harness's `numerics` section, over configs s2 (1,024 rows, S = 2), s4 (512 rows, S = 4), s2g (512 rows on an 8x8 grid, S = 2), both Q memories, seeds x {normal,
