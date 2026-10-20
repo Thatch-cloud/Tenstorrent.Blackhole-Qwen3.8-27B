@@ -477,6 +477,10 @@ scripts/ci/audit_sampling.py
 scripts/ci/prefill_handoff.py
 # PF3: levern_route imports it at the attach once QWEN_FAST_PREFILL_TAIL_TRACE or one of its knob flags is set (the masked tail pass of a prompt as a trace replay); an image without it refuses that boot
 scripts/ci/prefill_tail_trace.py
+# PF3K: tp_addresses.install imports it when QWEN_FAST_SDPA_PF_KSPLIT or its audit flag is SET (the wrapper that ORs the K-split bit into the oneq program word); an image without it refuses that boot
+scripts/ci/sdpa_pf_ksplit_tp.py
+# PF3K: sdpa_pf_ksplit_tp imports it in the audit (the error statistic and the provisional bound of the numerics waiver)
+scripts/ci/ksplit_numerics.py
 # RB: the lever's flags, aligned bounds, join plan, joins and audit compare; dflash_prefill_window (already overlaid) imports it only when QWEN_FAST_TAP_WINDOW_ALIGNED is set and not 0
 scripts/ci/tap_window_aligned.py
 # SW: serving_c2_contract.configure_checkpoint imports it in every process once a checkpoint is asked for, and serving_startup.bind_checkpoint in the worker once one is bound; an image without it refuses that boot

@@ -296,6 +296,14 @@ def install(environ=None):
         for namespace, name, old in sdpa_pf_oneq_tp.install(environ):
             _REBOUND.append((namespace, name, old))
             rebound += 1
+    # The K-split of the tail passes (tp4/prefill-3, QWEN_FAST_SDPA_PF_KSPLIT=1): the wrapper above is wrapped once more to OR the K-split bit into the oneq word where the factory splits the call. Bound AFTER
+    # the oneq wrapper (it captures that function), imported only when either of its flags is SET (a malformed value still reaches its strict parser); with both unset nothing of it is imported or bound.
+    if any(env.get(name) is not None for name in ('QWEN_FAST_SDPA_PF_KSPLIT', 'QWEN_FAST_SDPA_PF_KSPLIT_AUDIT')):
+        import sdpa_pf_ksplit_tp
+
+        for namespace, name, old in sdpa_pf_ksplit_tp.install(environ):
+            _REBOUND.append((namespace, name, old))
+            rebound += 1
     return rebound
 
 

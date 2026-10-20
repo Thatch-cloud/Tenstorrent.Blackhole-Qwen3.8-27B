@@ -118,10 +118,11 @@ class ProtectedTests(unittest.TestCase):
         # (tp4/next-1 integrated this branch with exact resume's twins and the ship-5 candidate's, which are generated beside NP1's: test_exact_resume, test_s5_profiles)
         integrated = (ship4.NAMESPACE + 'all-er', ship4.NAMESPACE + 'all-er-audit', ship4.NAMESPACE + 's4-xe', ship4.NAMESPACE + 's4-xe-audit', ship4.NAMESPACE + 'traffic-s5', ship4.NAMESPACE + 's5-audit', ship4.NAMESPACE + 's5-audit-nowc')
         import make_pf2_profiles
-        import make_pf3_profiles
         import make_sched_profiles
+        import make_pf3_profiles
+        import make_pf3k_profiles
 
-        integrated = integrated + tuple(make_pf2_profiles.twin_names()) + tuple(make_pf3_profiles.twin_names()) + tuple(make_sched_profiles.twin_names())      # (and prefill-2's and sched-1's twins)
+        integrated = integrated + tuple(make_pf2_profiles.twin_names()) + tuple(make_sched_profiles.twin_names()) + tuple(make_pf3_profiles.twin_names()) + tuple(make_pf3k_profiles.twin_names())      # (and prefill-2's, sched-1's and prefill-3's twins)
         self.assertEqual(sorted(set(PROFILES) - set(before['profiles'])), sorted(twins.NAMES + integrated))
         self.assertEqual(list(PROFILES)[:0], [])
 

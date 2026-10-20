@@ -1218,6 +1218,10 @@ class ProfileTests(unittest.TestCase):
         import make_pf2_profiles as twins_pf2
 
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_pf2.twin_names()})
+        # tp4/prefill-3: its three twins are the ship-5 candidate / its audited twin plus one flag (test_pf3k_profiles)
+        import make_pf3k_profiles as twins_pf3k
+
+        combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_pf3k.twin_names()})
         import make_sched_profiles as twins_sched      # tp4/sched-1: the ship candidate / its audited twin plus one flag, so the same round-host flags (test_sched_profiles)
 
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_sched.twin_names()})
