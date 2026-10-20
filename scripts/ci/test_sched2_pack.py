@@ -194,7 +194,7 @@ class TemplateTests(unittest.TestCase):
         text = re.sub(r'\s*\n#\s*', ' ', (PACK / 'L1-all-a.env').read_text(encoding='utf-8'))
         for phrase in ('sched2_report.py', 'sched2_model.py', 'admission seed first deferred', 'admission hold reading reused', 'admission ledger trim', 'ESTIMATE', '15.4 s -> about 12.7 s', 'agent_turns', 'control-to-control floor'):
             self.assertIn(phrase, text)
-        for name, phrase in (('SE1-seed-a', 'after_seed_ms'), ('HO1-hold-a', 'hold reading reused'), ('LT1-ledger-a', 'op=rebind bracket')):
+        for name, phrase in (('SE1-seed-a', "built lines' ms"), ('HO1-hold-a', 'hold reading reused'), ('LT1-ledger-a', 'op=rebind bracket')):
             self.assertIn(phrase, re.sub(r'\s*\n#\s*', ' ', (PACK / (name + '.env')).read_text(encoding='utf-8')), name)
 
     def test_the_estimates_in_the_templates_are_the_models(self):

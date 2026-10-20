@@ -177,7 +177,8 @@ class ReportTests(unittest.TestCase):
         lines += [line(20.0, '[PINDIAG] admission seed first eager request=r2 reason=no parked engines', 'admission_pipeline:_log:1')]
         rows, facts = report.parse(lines)
         self.assertTrue(rows['r1']['seed_first'])
-        self.assertEqual(report.derived(rows['r1'])['seed_gain'], 3.0)
+        self.assertAlmostEqual(report.derived(rows['r1'])['seed_gain'], 280.0, msg='the bind the first token did not wait for')
+        self.assertEqual(report.derived(rows['r1'])['seed_out'], 3.0)
         self.assertEqual(facts['seed_eager'], {'no parked engines': 1})
         text = '\n'.join(report.facts_lines(facts, list(rows.values())))
         self.assertIn('1 deferred, 1 bound in the sampler', text)

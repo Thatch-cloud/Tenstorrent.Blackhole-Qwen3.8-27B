@@ -22,7 +22,7 @@ All three are gate arms until the owner decides (serving_c2_contract.sched2_prob
     [PINDIAG] admission hold reading reused prompt=<n> age_ms=<ms> reuses=<k> free=<bytes> largest_free=<bytes>       one per reused hold reading
     [PINDIAG] admission seed first deferred request=<id> slot=<k>                                                     the seed went out before the bind
     [PINDIAG] admission seed first eager request=<id> reason=<why>                                                    the bind stayed in the sampler
-    [PINDIAG] admission seed first built request=<id> ms=<bind ms> after_seed_ms=<ms since the seed was returned>      the bind, when it ran
+    [PINDIAG] admission seed first built request=<id> ms=<bind ms> after_seed_ms=<ms since the seed was returned>      the bind, when it ran (ms is what the first token did not wait for)
     [PINDIAG] admission ledger trim: the memory ledger ended after the attach
 """
 

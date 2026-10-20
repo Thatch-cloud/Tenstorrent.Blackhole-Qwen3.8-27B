@@ -12,7 +12,7 @@ The log is the container's own ([PINDIAG] lines, loguru's timestamp). One ADMISS
     admission lean backstop reused               the first line after the prefill (the drain: what the sampler waited for after the route's own clock)
     admission lean adopt / rebind phases / split  A the slot adoption and the host checks, B the placement and the window join, C the rebind, with the phases of C
     sticky engine built                          the bind (A + B + C)
-    admission seed first deferred / built        tp4/sched-2 (SEED_FIRST): the bind followed the seed; `after_seed_ms` is how long the first token left ahead of it
+    admission seed first deferred / built        tp4/sched-2 (SEED_FIRST): the bind followed the seed; `ms` is the bind that the first token did not wait for (the gain), `after_seed_ms` how long the token had been out when the bind began
     admission hold reading reused                tp4/sched-2 (HOLD_REUSE): a hold that took no allocator reading
 
 THE SERIAL CHAIN between one arrival's prefill and the next arrival's prefill is: hold (the next arrival's) + drain + bind. `bracket` is the part of C that is not the rebind's own
@@ -147,7 +147,8 @@ def derived(row):
     # the chain after the prefill's own clock: the drain, then the bind; plus the next arrival's hold is counted with that arrival
     segments['after_prefill'] = (segments['drain'] or 0.0) + row['built_ms']
     segments['serial'] = segments['hold'] + segments['after_prefill']
-    segments['seed_gain'] = row.get('after_seed_ms')
+    segments['seed_gain'] = row.get('seed_built_ms')
+    segments['seed_out'] = row.get('after_seed_ms')
     return segments
 
 
@@ -168,7 +169,7 @@ ORDER = (('hold', 'the scheduler\'s hold: kv fit to dram fit (the allocator read
          ('c', 'C: the rebind (and, at a slot\'s first, the ledger bracket)'), ('rezero', '  C: re-zero'), ('project', '  C: projection'), ('history', '  C: K/V history'),
          ('engine', '  C: engine.rebind (page tables, carry)'), ('bracket', '  C: the ledger bracket (not a phase)'), ('readback', '  A: the conv-slice readback (first adoption of a slot)'),
          ('built', 'the bind (A + B + C)'), ('after_prefill', 'drain + bind'), ('serial', 'hold + drain + bind: the serial chain of one arrival'),
-         ('seed_gain', 'seed first: how long the first token left ahead of the bind'))
+         ('seed_gain', 'seed first: the bind the first token did not wait for (the gain)'), ('seed_out', 'seed first: how long the token had been out when the bind began'))
 
 
 def table(rows, label):

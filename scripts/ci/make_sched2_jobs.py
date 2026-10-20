@@ -46,8 +46,8 @@ REPORT = ('READ the arm with python3 scripts/ci/sched2_report.py <arm container 
           'first lines (deferred, bound in the sampler and why, how long the first token left ahead of the bind), the hold reuse lines (how many holds took no allocator reading, their age). Every figure '
           'prints "-" when no line is behind it. The model of the same arithmetic is python3 scripts/ci/sched2_model.py (ESTIMATES: docs/tp4-sched2.md section 5).')
 LEVER_LINES = ('the lines each lever logs (a lever whose line is absent did not engage, and its arm reads NOT_EXERCISED): "[PINDIAG] admission pipeline installed: seed_first=.. hold_reuse=.. ledger_trim=.." once; '
-               'SEED FIRST: "[PINDIAG] admission seed first deferred request=.. slot=.." and "[PINDIAG] admission seed first built request=.. ms=.. after_seed_ms=.." per deferred admission (after_seed_ms is how '
-               'long the first token left ahead of the bind), "[PINDIAG] admission seed first eager request=.. reason=.." for each bind that stayed in the sampler; HOLD REUSE: "[PINDIAG] admission hold '
+               'SEED FIRST: "[PINDIAG] admission seed first deferred request=.. slot=.." and "[PINDIAG] admission seed first built request=.. ms=.. after_seed_ms=.." per deferred admission (ms is the bind the first token did not wait for; after_seed_ms is how '
+               'long the token had been out when the bind began), "[PINDIAG] admission seed first eager request=.. reason=.." for each bind that stayed in the sampler; HOLD REUSE: "[PINDIAG] admission hold '
                'reading reused prompt=.. age_ms=.. reuses=.." per reused hold (the dram admission fit lines then number the real readings); LEDGER TRIM: "[PINDIAG] admission ledger trim: the memory ledger '
                'ended after the attach" once and no "memory_ledger_before" line with "op": "rebind" in the whole log')
 EXACT_READ = ('EXACT READ: every user\'s answer is byte-identical to the control\'s (the same checkpoint, greedy: a difference is a token a lever changed and is NO-GO); no "audit mismatch", no "fell back", '
@@ -99,7 +99,7 @@ def rows():
                              'the decoders\' rate and the longest gap between two tokens of a stream (a lever that only moves delay shows here). %s %s %s'
                              % (arm, 'first' if index == 1 else 'second', ARM['all'], control, LEVER_LINES, EXACT_READ, ARC, REPORT, CHECKPOINT_READ))))
     for name, suffix, what, need, lever in (
-            ('SE1-seed-a', 'seed', 'the seed first lever alone', 'SE1 <- L2', 'SEED FIRST: the first token leaves ahead of the bind by the bind\'s own time (after_seed_ms p50 about 275 ms on returning turns, '
+            ('SE1-seed-a', 'seed', 'the seed first lever alone', 'SE1 <- L2', 'SEED FIRST: the first token leaves ahead of the bind by the bind\'s own time (the built lines\' ms, p50 about 275 ms on returning turns, '
                                                                                   '500-740 ms on the cold slots); the answers EQUAL; the decoders\' gaps and the rounds after each arrival unchanged against the control'),
             ('HO1-hold-a', 'hold', 'the hold\'s reading reuse alone', 'HO1 <- SE1', 'HOLD REUSE: of every four back-to-back holds one takes an allocator reading (the "dram admission fit" lines count the readings, '
                                                                                   'the "hold reading reused" lines the reuses); no "dram hold" line the control does not have; the hold segment p50 84 ms -> about 20 ms'),
@@ -155,7 +155,7 @@ def render_order(table):
         "to finish; queued tags are cancelled. Never cancel a running card job.",
         "# P0. SWIFT IS ON THE CARD HOST AND ITS CONVERTED CACHE IS BUILT: python3 scripts/ci/qwen_c2_checkpoint.py check --hub <the hub directory> --repo %s --revision %s exits 0, so every smoke job here logs \"weight cache ...: found\"." % (REPO, REVISION),
         "# P0. GRID: the four cards expose a 13x10 compute grid since the firmware unlock. Read it from the run, never assume 11x10: every pair runs on one grid.",
-        "# P0. MERGE POINTS: the adaptive Lever N governor (levern_policy.py, levern_scheduler.py) is ported on tp4/next-2 by another branch; this branch does not edit it (docs/tp4-sched2.md section 8). Run this window from a commit of tp4/sched-2 alone.",
+        "# P0. MERGE POINTS: the adaptive Lever N governor (levern_policy.py, levern_scheduler.py) is ported on tp4/next-2 by another branch; this branch does not edit it (docs/tp4-sched2.md section 6). Run this window from a commit of tp4/sched-2 alone.",
         "# ARC-ZERO A1 LT1",
         "# ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO (minRunners and maxRunners 0, the normal values written down first, restored by the same patch with the old numbers) BEFORE A1 and restores them AFTER LT1, i.e. around "
         "every audited boot (a model load under CI load has hit the platform's load timeout) and every timed job. B0, X0 and Z do not need the pause.",
@@ -171,7 +171,7 @@ def render_order(table):
         "#   X0   four cards present and healthy, the fabric as measured, the 13x10 grid in the run, no other window driver alive; the Swift weight cache found.",
         "#   A1   (STOP) every audit line exact=True with entries above 0, no 'audit mismatch', no 'fell back', the lever lines of seed first and the hold reuse (sched2_report.py prints them), every answer equal where a control exists, no stall.",
         "#   C1 L1 C2 L2   the first token of each of the eight arrivals of concurrent8_steady and of every returning turn of agent_turns, paired against the two controls and their floor; the answers EQUAL; the decoders' rate and gaps not worse; sched2_report.py --second on the container logs.",
-        "#   SE1 HO1 LT1   the attribution of the combined arm: after_seed_ms (SE1), the real readings against the reuses and the hold segment (HO1), the rebind brackets (none) and the fresh prompts' bind (LT1).",
+        "#   SE1 HO1 LT1   the attribution of the combined arm: the seed first lines' ms (SE1), the real readings against the reuses and the hold segment (HO1), the rebind brackets (none) and the fresh prompts' bind (LT1).",
         "# NO-GO for a lever: any text that differs from the control's, an audit mismatch, a stall, a refusal at the attach, an 'engaged' line that is absent, a LOSS in a timed test beyond the floor (the decoders' rate, the agent_turns rate, a first token later than the control's), "
         "and for seed first any 'admission seed first: the bind of' error line. Adopting a lever is the owner's decision: each is a gate instrument today and a ship profile needs an owner traffic waiver naming it (docs/tp4-sched2.md).",
         "# Time (estimate, minutes): %s: %d minutes (%d h %d min) in all, %d minutes of cards (X0 to Z)." % (', '.join('%s %d' % (name.split('-')[0], row['minutes']) for name, row in zip(names, table)), total, total // 60, total % 60, cards),
