@@ -59,9 +59,11 @@ in the tree already (from `tp4/prefill-1`, via `tp4/sched-1`); `scripts/ci/prefi
 Production traffic averages about 59k-token prompts and about 690-token answers; the `agent_turns` smoke (6 sessions at 64k, 128k and 200k, 12 returning turns each) is the main judge, and the ship-5 window's T1B figures are its
 baseline (50.36 tok/s aggregate, returning-turn first token p50 1.46 s, p90 2.33 s). It is unchanged: a test pins its plan digest and settings, and `agent_turns_long` likewise.
 
-`agent_turns8` is the new, optional variant: the same plan with **eight** sessions, every seat busy. Every draw is keyed on (seed, session, turn), so its sessions 0 to 5 are exactly `agent_turns`' six and two contexts are added
-(about 195k and 64k tokens). Its budget is 1,500 s (no new turn starts after 25 minutes), so it fits a 30-minute box; the plan estimate is **about 14.5 minutes** (6 sessions: 12.8) and the pack allows 20 including the
-boot's share. At eight live seats WC and the governor mostly sit out, so this pair says whether anything is LOST at the production load. The session count was an environment parameter already (`SMOKE_AGENT_SESSIONS`), but the
+`agent_turns8` is the new, optional variant: **eight** sessions, every seat busy, weighted like production instead of like `agent_turns`. `agent_turns`' mix (64k, 128k, 200k) averages 131k tokens and its answers 400; production
+averages about 59k (p90 208k) and about 690. `agent_turns8` uses eight contexts (24k, 32k, 40k, 48k, 56k, 64k, 80k and 200k, jittered and rotated by the seed: about 550k tokens, mean ~69k) and answers capped at 300 to 1,080
+tokens (mean 690); messages, gaps and the 12 turns are the same. Eight sessions of the `agent_turns` mix would be 1.06M tokens against the 1,055,488-token pool and evict each other; this one starts well inside it.
+Its budget is 1,500 s (no new turn starts after 25 minutes), so it fits a 30-minute box; the plan estimate is **about 15.4 minutes** and the pack allows 20 with the boot's share. At eight live seats WC and the governor mostly
+sit out, so this pair says whether anything is LOST at the production load. Compare it with its own control leg, never with `agent_turns`. The session count was an environment parameter already (`SMOKE_AGENT_SESSIONS`), but the
 smoke workflow passes no `SMOKE_AGENT_*`, so a named variant was needed (and the salt-key case of the smoke step names it).
 
 | test | estimated minutes inside a boot | what it judges |
@@ -104,6 +106,6 @@ taken out by deleting its line from the ship entry of `scripts/ci/fusion-wp/S6.j
   rounds of `np1_live2`.
 * The governor trades the decoders' speed for the arrival's first token; whether that is wanted at one or two live users is the owner's call, and it is the second switchable line of the ship entry.
 * Neither lever has run in a timed run with the other, and the governor has never run on a card at all.
-* `agent_turns8` puts eight 64k to 200k contexts (about 1.06M tokens) through a 1,055,488-token pool: host-tier restores and rebinds are part of what it measures.
+* `agent_turns8` is a new test with no past numbers: its first card run is T2A (the control), so read T2B against T2A only. Eight sessions plus their growth stay inside the pool at the start; later turns may still evict.
 * The tau lab's `run.json` now records the `max_tokens` it sent per arm (a dict), where it recorded the unasked option (None) and the drafter pair report's `matched` gate could never pass; the pair report reads the value
   back from `turns.jsonl` for runs made before the change. This is lab and report code (host side, not in the image).

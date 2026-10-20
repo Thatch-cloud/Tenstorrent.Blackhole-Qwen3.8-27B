@@ -428,30 +428,37 @@ class PlanTests(unittest.TestCase):
                              (6, 2700.0, (64000, 128000, 200000), 20261012, (200, 600), (150, 400), (1.0, 8.0)), name)
         self.assertEqual((self.cfg()['turns'], self.cfg('agent_turns_long')['turns']), (12, 30))
 
-    def test_agent_turns8_is_the_same_plan_with_eight_sessions_and_a_budget_that_fits_a_half_hour_box(self):
+    def test_agent_turns8_is_eight_sessions_weighted_like_production_inside_the_pool_and_a_half_hour_box(self):
         self.assertEqual(at.EIGHT_NAME, 'agent_turns8')
         self.assertEqual(at.TESTS, ('agent_turns', 'agent_turns_long', 'agent_turns8'))
         cfg, base = self.cfg('agent_turns8'), self.cfg()
         self.assertEqual((cfg['sessions'], cfg['turns'], cfg['budget_s']), (8, 12, 1500.0))
-        for key in ('mix', 'seed', 'answer_range', 'message_range', 'gap_range', 'gap_scale', 'stagger_s', 'timeout_s', 'salt_mode', 'ignore_eos'):
+        self.assertEqual((cfg['mix'], cfg['answer_range']), (at.EIGHT_MIX, (300, 1080)))
+        for key in ('seed', 'message_range', 'gap_range', 'gap_scale', 'stagger_s', 'timeout_s', 'salt_mode', 'ignore_eos'):
             self.assertEqual(cfg[key], base[key], key)
-        eight, six = at.plan(cfg, 262144), at.plan(base, 262144)
-        self.assertEqual(eight['targets'][:6], six['targets'], 'sessions 0 to 5 are agent_turns\' six contexts')
-        self.assertEqual(eight['sessions'][:6], six['sessions'], 'and their turns, gaps and answer budgets')
-        self.assertEqual(len(eight['targets']), 8)
-        self.assertEqual(eight['clamped'], 0, 'the 262k profile holds all eight with 12 turns of growth')
-        self.assertEqual(len(set(eight['targets'])), 8)
-        # an environment parameter still wins over the variant's default, for either
+        the_plan = at.plan(cfg, 262144)
+        targets = the_plan['targets']
+        self.assertEqual(len(targets), 8)
+        self.assertEqual(len(set(targets)), 8, 'eight different contexts')
+        self.assertEqual(the_plan['clamped'], 0)
+        # production: prompts average about 59k tokens (p90 208k), answers about 690; agent_turns averages 131k and 400
+        self.assertTrue(55000 <= sum(targets) / 8.0 <= 85000, targets)
+        self.assertGreaterEqual(max(targets), 190000, 'the long tail of production')
+        self.assertLess(sum(targets), 0.6 * 1055488, 'well inside the 1,055,488-token pool: eight sessions of the agent_turns mix (1.06M) would evict each other')
+        self.assertEqual(sum(cfg['answer_range']) / 2.0, 690.0)
+        for turns in the_plan['sessions']:
+            self.assertTrue(all(300 <= draws['max_tokens'] <= 1080 for draws in turns))
+        # an environment parameter still wins over the variant's default
         self.assertEqual(self.cfg('agent_turns8', SMOKE_AGENT_BUDGET_S='900')['budget_s'], 900.0)
         self.assertEqual(self.cfg('agent_turns8', SMOKE_AGENT_SESSIONS='7')['sessions'], 7)
+        self.assertEqual(self.cfg('agent_turns8', SMOKE_AGENT_MIX='64k,128k')['mix'], (64000, 128000))
 
     def test_agent_turns8_estimate_fits_a_thirty_minute_box(self):
         cfg = self.cfg('agent_turns8')
         found = at.estimate(cfg, at.session_targets(cfg, 262144)[0])
         self.assertTrue(12 <= found['minutes'] <= 18, found)
         self.assertTrue(found['within_budget'])
-        self.assertLessEqual(cfg['budget_s'] / 60.0, 25.0, 'no new turn starts after 25 minutes: the run ends inside 30 with its last turn (a turn is under 3 minutes at 8 live)')
-        self.assertGreater(found['minutes'], at.estimate(self.cfg())['minutes'], 'two more contexts to build')
+        self.assertLessEqual(cfg['budget_s'] / 60.0, 25.0, 'no new turn starts after 25 minutes: the run ends inside 30 with its last turn (under 3 minutes at 8 live)')
 
     def test_the_plan_is_deterministic_in_the_seed_and_changes_with_it(self):
         one, two = at.plan(self.cfg()), at.plan(self.cfg())
