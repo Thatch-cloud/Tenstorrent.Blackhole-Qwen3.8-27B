@@ -91,6 +91,7 @@ PRODUCTION_TAG = 'tp4-serve-2'
 # when both agree: tp4-serve-2 ran the T1/T2 audits ON, tp4-serve-10 runs them OFF). A later ship adds its tag here.
 PRODUCTION_IMAGES = (('tp4-serve-2', True), ('tp4-serve-10', False))
 LOOKUP_FLAG = 'QWEN_FAST_LOOKUP_DRAFT'
+LOOKUP_SHADOW_FLAG = 'QWEN_FAST_LOOKUP_SHADOW'   # prompt_lookup.SHADOW_FLAG: one SHADOW line per round (logs only; the text and the rows verified are unchanged)
 LOOKUP_POLICY = 'n3m12'            # prompt_lookup's policy string: key length 3, gate 12 (docs/tp4-lookup.md)
 # DRAFTER ARMS (tp4/drafter-arms): which drafter the container serves. The image carries the drafter's fixtures (its tag selects
 # the manifest, drafter_manifest.py) and the derived profile carries only drafter-only flags, which move the proposals and never
@@ -104,7 +105,9 @@ DRAFTER_ARMS = {
     # token history replacing its proposal rows on the rounds the policy picks. The target verifies every row, so the text is the control's
     # and only the accepted length moves. No log line at startup shows it: the lookup logs one engaged line per request, so the CANARY
     # (lookup_problem) is where the arm is held to its markers, not launched_problems.
-    'lookup': dict(manifest='dedf8df6', env=((LOOKUP_FLAG, LOOKUP_POLICY),)),
+    # The arm also carries the SHADOW logging (tp4/stream-1, docs/tp4-tree-verify.md): the container log then holds both candidates of every round, and the run's end
+    # reads it into aggregates (tree_gain_report.py, written beside the public summary as tree-gain-summary.json): what a two-candidate verify would have committed.
+    'lookup': dict(manifest='dedf8df6', env=((LOOKUP_FLAG, LOOKUP_POLICY), (LOOKUP_SHADOW_FLAG, '1'))),
 }
 DRAFTER_BF16_ENGAGED = '[DRAFTER_BF16] engaged'
 LOOKUP_ENGAGED = '[LOOKUP-DRAFT] engaged'      # prompt_lookup.ENGAGED (a literal here: the lab imports nothing of the serving tree)
@@ -1295,8 +1298,36 @@ def analyze(options, say, run_info=None):
     if options.counters:
         with open(options.counters, encoding='utf-8') as handle:
             counters = json.load(handle)
-    return report.build_and_write(options.results, options.public, manifest=manifest, counters=counters,
-                                  seed=options.seed, say=say, info=info)
+    summary = report.build_and_write(options.results, options.public, manifest=manifest, counters=counters,
+                                     seed=options.seed, say=say, info=info)
+    tree_gain(options, say)
+    return summary
+
+
+def tree_gain(options, say):
+    """The lookup arm's SHADOW lines (the private server.log) -> tree_gain_report's AGGREGATES: printed as [TREEGAIN] lines and written beside the public
+    summary as tree-gain-summary.json. None for any other arm, a log without the lines or a log that cannot be read; the SHADOW lines carry token ids and never leave
+    the results directory."""
+    if getattr(options, 'drafter_arm', None) != 'lookup':
+        return None
+    path = os.path.join(options.results, 'server.log')
+    try:
+        with open(path, encoding='utf-8', errors='replace') as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    if '[LOOKUP-SHADOW]' not in text:
+        return None
+    import tree_gain_report
+    summary = tree_gain_report.from_text(text)
+    found = tree_gain_report.problems(summary)
+    for line in tree_gain_report.summary_lines(summary):
+        say(line)
+    for problem in found:
+        say('[TREEGAIN] PROBLEM: %s' % problem)
+    if options.public:
+        report.write_json(os.path.join(options.public, 'tree-gain-summary.json'), dict(summary, problems=found))
+    return summary
 
 
 def main(argv=None, say=print, make_stream=None, make_client=None, make_container=None, make_log=None, docker=None,

@@ -42,6 +42,11 @@ OFF_VALUES = ('', '0', 'off')
 
 ENGAGED = '[LOOKUP-DRAFT] engaged'
 ROUND_MARKER = '[LOOKUP-ROUND]'
+# QWEN_FAST_LOOKUP_SHADOW=1 (tp4/stream-1, default off, needs the lookup): one SHADOW line per round with both candidates the round could have verified (DFlash2's
+# rows and the lookup's) and the tokens the round committed, so tree_gain_report.py can say offline what a two-candidate verify (docs/tp4-tree-verify.md) would
+# have committed on the same text. Token ids of a user's own text: the line stays in the private container log, only the report's aggregates leave the rig.
+SHADOW_FLAG = 'QWEN_FAST_LOOKUP_SHADOW'
+SHADOW_MARKER = '[LOOKUP-SHADOW]'
 
 
 class LookupPolicy:
@@ -81,6 +86,16 @@ def parse_policy(text):
 
 def policy_from_environment(environ=None):
     return parse_policy((os.environ if environ is None else environ).get(LOOKUP_FLAG))
+
+
+def shadow_from_environment(environ=None):
+    """Whether QWEN_FAST_LOOKUP_SHADOW=1. Unset, '' and '0' are off; anything but '1' beyond those is a ValueError, never a silent off."""
+    value = (os.environ if environ is None else environ).get(SHADOW_FLAG, '')
+    if value in ('', '0'):
+        return False
+    if value == '1':
+        return True
+    raise ValueError('%s must be 0 or 1, got %r' % (SHADOW_FLAG, value))
 
 
 class TokenLookup:
@@ -137,6 +152,13 @@ class TokenLookup:
         return (tokens, length) if tokens else ((), 0)
 
 
+def lookup_chain(lookup_tokens, dflash_tokens):
+    """The ticket's proposal rows of a lookup round: the lookup's tokens lead and DFlash2's fill the rest of the width (cut to the width)."""
+    width = len(dflash_tokens)
+    lead = tuple(lookup_tokens[:width])
+    return lead + tuple(dflash_tokens[len(lead):])
+
+
 def choose(policy, lookup_tokens, match, dflash_tokens):
     """(source, tokens) for one round: the ticket's proposal rows after the seed.
 
@@ -145,8 +167,7 @@ def choose(policy, lookup_tokens, match, dflash_tokens):
     width = len(dflash_tokens)
     if policy is None or not lookup_tokens or match < policy.m or width < 1:
         return 'dflash2', tuple(dflash_tokens)
-    lead = tuple(lookup_tokens[:width])
-    return 'lookup', lead + tuple(dflash_tokens[len(lead):])
+    return 'lookup', lookup_chain(lookup_tokens, dflash_tokens)
 
 
 class RequestLookup:
@@ -156,10 +177,12 @@ class RequestLookup:
     token, so nothing hooks the commit paths); `apply` is called by FastRequest.prepare on the ticket the session
     proposed and returns the ticket the round verifies."""
 
-    def __init__(self, policy, prompt, *, request_id, vocab_size, log=None):
+    def __init__(self, policy, prompt, *, request_id, vocab_size, log=None, shadow=False):
         if not isinstance(policy, LookupPolicy):
             raise ValueError('A parsed lookup policy is required')
         self.policy, self.request_id, self.vocab_size = policy, request_id, vocab_size
+        self.shadow = shadow is True      # the SHADOW line per round (QWEN_FAST_LOOKUP_SHADOW); False is every caller as it always was
+        self.emitted_ref = None           # the session's emitted list, kept only under the shadow (its tokens are what a round committed)
         self.index = TokenLookup(tuple(prompt)[-MAX_INDEXED_PROMPT:], policy.n)
         self.synced = 0              # how many of session.emitted are in the index
         self.open = None             # the round whose commit has not been logged yet
@@ -187,10 +210,14 @@ class RequestLookup:
             lookup_tokens, match = (), 0
         source, tokens = choose(self.policy, lookup_tokens, match, ticket.tokens[1:])
         proposed = min(len(lookup_tokens), width) if source == 'lookup' else width
+        dflash_rows = tuple(ticket.tokens[1:]) if self.shadow else None      # before the replacement: DFlash2's own rows
         if source == 'lookup':
             ticket = replace_proposals(session, ticket, tokens, source, match)
         self.open = dict(position=ticket.position, source=source, match=match, proposed=proposed,
                          offered=len(lookup_tokens), emitted=len(emitted))
+        if self.shadow:
+            self.emitted_ref = emitted
+            self.open.update(dflash=dflash_rows, lookup=tuple(lookup_tokens))
         return ticket
 
     def close_round(self, emitted_now):
@@ -207,9 +234,41 @@ class RequestLookup:
         self.log('%s request=%s position=%d source=%s match=%d offered=%d proposed=%d committed=%d' % (
             ROUND_MARKER, self.request_id, round_['position'], round_['source'], round_['match'], round_['offered'],
             round_['proposed'], committed), flush=True)
+        if self.shadow:
+            self.log(shadow_line(self.request_id, round_, tuple(self.emitted_ref[round_['emitted']:emitted_now])), flush=True)
 
     def finish(self, emitted_now):
         self.close_round(emitted_now)
+
+
+def _csv(tokens):
+    return ','.join(str(token) for token in tokens) or '-'
+
+
+def shadow_line(request_id, round_, committed):
+    """The SHADOW line of one round: both candidates' rows (DFlash2's `dflash`, the lookup's raw `lookup`, '-' when empty) and the committed tokens."""
+    return '%s request=%s position=%d source=%s match=%d dflash=%s lookup=%s committed=%s' % (
+        SHADOW_MARKER, request_id, round_['position'], round_['source'], round_['match'], _csv(round_['dflash']),
+        _csv(round_['lookup']), _csv(committed))
+
+
+def parse_shadow_line(line):
+    """The dict a SHADOW line carries (request, position, source, match, dflash, lookup, committed as tuples of ints), or None when `line` is not one."""
+    index = line.find(SHADOW_MARKER)
+    if index < 0:
+        return None
+    fields = {}
+    for word in line[index + len(SHADOW_MARKER):].split():
+        name, separator, value = word.partition('=')
+        if separator:
+            fields[name] = value
+    try:
+        def tokens(name):
+            return () if fields[name] == '-' else tuple(int(token) for token in fields[name].split(','))
+        return dict(request=fields['request'], position=int(fields['position']), source=fields['source'], match=int(fields['match']),
+                    dflash=tokens('dflash'), lookup=tokens('lookup'), committed=tokens('committed'))
+    except (KeyError, ValueError):
+        return None
 
 
 def replace_proposals(session, ticket, tokens, source, match):
@@ -236,6 +295,7 @@ def for_request(prompt, session, *, request_id, environ=None, log=None):
     policy = policy_from_environment(environ)
     if policy is None:
         return None
-    lookup = RequestLookup(policy, prompt, request_id=request_id, vocab_size=session.vocab_size, log=log)
+    lookup = RequestLookup(policy, prompt, request_id=request_id, vocab_size=session.vocab_size, log=log,
+                           shadow=shadow_from_environment(environ))
     lookup.sync(session.emitted)
     return lookup

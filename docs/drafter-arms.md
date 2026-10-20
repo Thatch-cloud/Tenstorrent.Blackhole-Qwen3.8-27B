@@ -67,11 +67,12 @@ profile, which adds only that arm's drafter-only flags on top of the production 
 | `b16-bf8` | candidate manifest | `QWEN_DRAFTER_MANIFEST` | `[DRAFTER_MANIFEST] ... in force` |
 | `b32-bf8` | candidate manifest (measurement only) | `QWEN_DRAFTER_MANIFEST` | `[DRAFTER_MANIFEST] ... in force` |
 | `dedf-bf16` | default manifest | `QWEN_FAST_DRAFTER_BF16=1` | `[DRAFTER_BF16] engaged` |
-| `lookup` | default manifest | `QWEN_FAST_LOOKUP_DRAFT=n3m12` | none at startup (the lookup logs per request); the lab's canary after the first turns requires `[LOOKUP-DRAFT] engaged policy=n3m12` and a `[LOOKUP-ROUND]` line, and stops the lab without them |
+| `lookup` | default manifest | `QWEN_FAST_LOOKUP_DRAFT=n3m12`, `QWEN_FAST_LOOKUP_SHADOW=1` | none at startup (the lookup logs per request); the lab's canary after the first turns requires `[LOOKUP-DRAFT] engaged policy=n3m12` and a `[LOOKUP-ROUND]` line, and stops the lab without them |
 
 The `lookup` arm (D-T5, docs/tp4-lookup.md) is the served drafter with a host-side prompt lookup over each user's own token history replacing its proposal rows on the rounds
-the policy picks. It runs on the control image like `dedf-bf16`, is judged by the same GO rule (equal image tags are its `matched` clause), and is measurement only: it cannot run on a profile
-with engine reuse (a rebound engine attaches no lookup; the lab refuses such a base), and what it costs a round is the timing pack's (`tp4-lookup-jobs`).
+the policy picks. It runs on the control image like `dedf-bf16`, is judged by the same GO rule (equal image tags are its `matched` clause), and is measurement only. Since tp4/stream-1 it runs on a profile with engine reuse too (a rebound request attaches
+the lookup like a built one), so it can be tau-tested on the production profile; what it costs a round is the timing pack's (`tp4-lookup-jobs`) or the paired `speed` the pair report reads
+from the lab's own turn timings. The arm also sets `QWEN_FAST_LOOKUP_SHADOW=1` (docs/tp4-lookup.md): the lab writes `tree-gain-summary.json` beside its public summary.
 
 The drafter flags move the proposals and never the text, so they are the one arithmetic difference an arm may add (the lab's check refuses any
 other). The refusal is real: with a drafter arm, a container log that does not show the arm's own markers (the wrong image tag, a bf16 switch that never engaged) ends the lab before
