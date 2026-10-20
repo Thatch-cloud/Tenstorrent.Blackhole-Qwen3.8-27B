@@ -292,10 +292,14 @@ class SeedFirst(object):
 
     # -- the scheduler side ---------------------------------------------------------------------------------------------------------------------
 
-    def install(self, lifecycle, scheduler, modules=None):
-        """Register the lifecycle's completion under HOLDER_KEY and wrap `scheduler.schedule` (the class the engine runs) so that every call completes a pending bind FIRST, before the
-        scheduler's own wrappers (the alternator's clock, the DRAM hold, the gate) see the call. Raises ValueError for a class without schedule: the lever would never complete."""
+    def install(self, lifecycle, config, modules=None, resolve=None):
+        """Register the lifecycle's completion under HOLDER_KEY and wrap `schedule` of the scheduler class the engine runs (the one `config` names: serving_request_quarantine.scheduler_class,
+        or `resolve(config)`) so that every call completes a pending bind FIRST, before the scheduler's own wrappers (the alternator's clock, the DRAM hold, the gate) see the call. Raises
+        ValueError for a class without schedule: the lever would never complete."""
         modules = sys.modules if modules is None else modules
+        if resolve is None:
+            from serving_request_quarantine import scheduler_class as resolve
+        scheduler = resolve(config)
         schedule = getattr(scheduler, 'schedule', None)
         if not callable(schedule):
             raise ValueError('%s=1 needs a scheduler class with schedule(): %r has none' % (SEED_FLAG, scheduler))

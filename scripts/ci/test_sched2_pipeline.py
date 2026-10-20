@@ -22,6 +22,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent.parent / 'speculative-decoding/harness'))
 
 import admission_pipeline as pipeline  # noqa: E402
+import profile_twins  # noqa: E402
 import memory_ledger  # noqa: E402
 import serving_c2_contract as contract  # noqa: E402
 import serving_prefill_admission as admission  # noqa: E402
@@ -143,7 +144,7 @@ class FlagTests(Fresh):
         profiles = data['profiles']
         self.assertIn(PREFIX, profiles)
         for name, profile in profiles.items():
-            if '-sch2-' in name:
+            if name in profile_twins.twin_names() and name.startswith('c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-sch-s5-'):
                 continue
             env = profile.get('env') or {}
             self.assertEqual([flag for flag in pipeline.NAMES if flag in env], [], name)
@@ -555,9 +556,9 @@ class SeedFirstPolicyTests(Fresh):
         scheduler = type('S', (), {'schedule': lambda self, *a, **k: done.append(('schedule', a, k)) or 'out'})
         seed, _ = policy()
         lifecycle = SimpleNamespace(complete_deferred=lambda: done.append('complete'))
-        seed.install(lifecycle, scheduler, modules=modules)
+        seed.install(lifecycle, 'config', modules=modules, resolve=lambda config: scheduler)
         first = scheduler.schedule
-        seed.install(lifecycle, scheduler, modules=modules)
+        seed.install(lifecycle, 'config', modules=modules, resolve=lambda config: scheduler)
         self.assertIs(scheduler.schedule, first, 'wrapped once')
         self.assertEqual(scheduler().schedule(1, flag=2), 'out')
         self.assertEqual(done, ['complete', ('schedule', (1,), {'flag': 2})], 'the completion runs first')
@@ -570,7 +571,7 @@ class SeedFirstPolicyTests(Fresh):
     def test_a_scheduler_without_schedule_is_refused_by_name(self):
         seed, _ = policy()
         with self.assertRaisesRegex(ValueError, 'schedule'):
-            seed.install(SimpleNamespace(complete_deferred=lambda: None), object, modules={})
+            seed.install(SimpleNamespace(complete_deferred=lambda: None), 'config', modules={}, resolve=lambda config: object)
 
     def test_complete_pending_with_nothing_registered_does_nothing(self):
         pipeline.complete_pending({})
@@ -739,6 +740,69 @@ class SeedFirstLifecycleTests(Fresh):
         scheduler().schedule()
         self.assertEqual(lifecycle.decoding_ids, ['request', 'second'])
         self.assertIsNone(lifecycle.request_id)
+
+
+class PacingIdentityTests(Fresh):
+    """The real alternator on the plugin's scheduler over a fake clock: the step time it measures for a prefill step, the debt it owes the decoders and every decision it takes are the
+    same whether the bind ran in the sampler (eager) or at the start of the next schedule() call (seed first), because the completion runs BEFORE the alternator's begin()."""
+
+    def story(self, seed_first):
+        import test_levern_scheduler as base
+
+        clock = base.Clock()
+        cls, runtime, log = base.install_levern({'QWEN_FAST_LEVER_N': '1', 'QWEN_FAST_LEVERN_PREFILL_SHARE': '0.5', 'QWEN_FAST_LEVERN_MAX_ROUNDS': '64'}, clock=clock)
+        scheduler = base.new_scheduler(cls)
+        for index in range(3):
+            scheduler.add_decoder('d%d' % index)
+        scheduler.add_request(base.Request('cold-a', 3000))
+        scheduler.add_request(base.Request('cold-b', 3000))
+        pending = []
+
+        class Lifecycle(object):
+            def complete_deferred(self):
+                if pending:
+                    pending.pop()
+                    clock.advance_ms(BIND_MS)
+
+        seed = pipeline.SeedFirst(SimpleNamespace(), lambda request_id, need: True, lambda: 1, log=lambda *a: None, clock=clock)
+        if seed_first:
+            seed.install(Lifecycle(), 'config', modules={}, resolve=lambda config: cls)
+        seeds, decisions = [], []
+        for _ in range(60):
+            before = {request.request_id: request.num_computed_tokens for request in scheduler.running}
+            result = scheduler.schedule()
+            decisions.append((runtime.alternator.last_kind, round(runtime.alternator.owed_ms, 3), runtime.alternator.owed_rounds, round(clock.now, 6)))
+            new = [request.req_id for request in result.scheduled_new_reqs]
+            if new:
+                clock.advance_ms(PREFILL_MS)                    # the prefill step: the seed is sampled
+                if seed_first:
+                    seeds.append(clock.now)                     # the first token leaves now
+                    pending.append(True)                        # the bind runs inside the next schedule() wrapper
+                else:
+                    clock.advance_ms(BIND_MS)                   # the bind inside the sampler
+                    seeds.append(clock.now)                     # the first token leaves after it
+            else:
+                clock.advance_ms(ROUND_MS)                      # a decode round
+        return decisions, seeds, clock.now
+
+    def test_the_alternator_sees_the_same_steps_the_same_debt_and_the_same_clock(self):
+        eager = self.story(False)
+        lazy = self.story(True)
+        self.assertEqual(eager[0], lazy[0], 'every decision, every debt, the clock at every scheduling call')
+        self.assertEqual(eager[2], lazy[2], 'the run ends at the same instant')
+        self.assertEqual(len(eager[1]), 2, 'both cold prompts were prefilled')
+        for early, late in zip(lazy[1], eager[1]):
+            self.assertAlmostEqual(late - early, BIND_MS / 1000.0, places=6, msg='the first token leaves earlier by the bind in the seed-first order')
+
+    def test_the_debt_is_charged_for_the_bind_either_way(self):
+        """dt of the prefill step includes the bind in both orders, so the decoders are owed the same time."""
+        eager, lazy = self.story(False)[0], self.story(True)[0]
+        owed = [entry[1] for entry in eager]
+        self.assertTrue(any(value > 0 for value in owed))
+        self.assertEqual(owed, [entry[1] for entry in lazy])
+
+
+PREFILL_MS, BIND_MS, ROUND_MS = 700.0, 275.0, 80.0
 
 
 if __name__ == '__main__':

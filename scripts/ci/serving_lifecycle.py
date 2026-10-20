@@ -222,9 +222,7 @@ class FastServingLifecycle:
             # wrapper fails the attach by name, as the lane gate does, rather than serve a switch that never acts.
             if self.admission is None:
                 raise ValueError('Seed first needs the one-fresh-prefill cap installed on the scheduler the engine runs (serving_prefill_admission.install); it could not be')
-            from serving_request_quarantine import scheduler_class
-
-            seed_first.install(self, scheduler_class(config))
+            seed_first.install(self, config)
             self.seed_first = seed_first
         self.original_execute, self.original_sample = worker.execute_model, worker.sample_tokens
         self.saved = []

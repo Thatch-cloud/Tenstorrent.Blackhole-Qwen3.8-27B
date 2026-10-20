@@ -141,11 +141,12 @@ class ProtectedTests(unittest.TestCase):
         import make_np1_profiles
         import make_pf2_profiles
         import make_s5_profiles
+        import make_sched2_profiles
         import make_xe_profiles
 
         # (tp4/next-1 integrated this branch with the lone-user round's, exact-end's, prefill-2's and the ship-5 candidate's profiles)
         integrated = (set(make_np1_profiles.twin_names()) | set(make_xe_profiles.twin_names()) | set(make_pf2_profiles.twin_names()) | set(make_s5_profiles.owned_names())
-                      | {name for name in PROFILES if name.endswith(('-fx-all-er', '-fx-all-er-audit'))})
+                      | {name for name in PROFILES if name.endswith(('-fx-all-er', '-fx-all-er-audit'))} | set(make_sched2_profiles.twin_names()))
         self.assertEqual(sorted(set(PROFILES) - set(before['profiles']) - integrated), sorted(twins.NAMES))
 
     def test_the_approved_traffic_profile_never_names_a_lever_and_a_traffic_profile_that_did_would_be_refused(self):
@@ -162,9 +163,14 @@ class ProtectedTests(unittest.TestCase):
 
     def test_no_other_profile_names_a_lever(self):
         import make_s5_profiles
+        import make_sched2_profiles
 
         governor = ('QWEN_FAST_LEVERN_ADAPTIVE', 'QWEN_FAST_LEVERN_OWED_CAP_MS', 'QWEN_FAST_LEVERN_SHORT_SHARE', 'QWEN_FAST_LEVERN_SHORT_WAIT_S')
         for name, profile in PROFILES.items():
+            if name in make_sched2_profiles.twin_names():
+                # tp4/sched-2: children of the ship-5 candidate (the lean admission and the complete spills it carries), with the governor knobs of neither
+                self.assertFalse([flag for flag in governor if flag in profile['env']], name)
+                continue
             if name in make_s5_profiles.owned_names():
                 # tp4/next-1: the ship-5 candidate and its audited twins carry the lean admission and the complete spills (under the owner's waiver, in words and in the contract), never the governor
                 self.assertFalse([flag for flag in ALL_NAMES if flag in profile['env'] and flag not in ('QWEN_FAST_ADMISSION_LEAN', 'QWEN_PREFIX_HOST_TIER_SPILL_MODE')], name)
