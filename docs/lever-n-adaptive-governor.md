@@ -1,6 +1,6 @@
 # The adaptive Lever N governor (QWEN_FAST_LEVERN_ADAPTIVE)
 
-Status: ported from the `tp4/prefill-1` branch onto the ship-4 stack by `tp4/sched-1`; built and unit-tested on the CPU, never run on a card. Gate only, default off, and byte for byte today's behaviour when off. Every number in the
+Status: ported from the `tp4/prefill-1` branch onto the ship-4 stack by `tp4/sched-1`; built and unit-tested on the CPU, never run on a card. Gate only, default off, and byte for byte today's behaviour when off. `tp4/s6` (docs/tp4-next2.md) carries the switch in its traffic candidate under an owner traffic waiver that names it (the contract admits it on a traffic profile only so; the three knobs stay a gate's own). Every number in the
 "Expected effect" section is an ESTIMATE from the repository's timing model, not a measurement.
 
 ## What it changes and why

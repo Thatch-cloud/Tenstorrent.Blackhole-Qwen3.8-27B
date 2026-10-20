@@ -1165,13 +1165,13 @@ jobs:
           ( while :; do echo "[LOAD] $(date +%s) $(cut -d' ' -f1 /proc/loadavg)" >> "$results/load.log"; sleep 60; done ) &
           load_pid=$!
           . scripts/ci/card_telemetry.sh
-          # agent_turns / agent_turns_long (scripts/ci/agent_turns.py): a prefix-reuse profile keeps a request's cache_salt only when it verifies against the salt key the contract reads, so for
-          # those two tests ONLY the step writes a throwaway key outside the uploaded results, mounts it read-only and points the contract at it (QWEN_PREFIX_SALT_KEY_FILE, as the gate does), and
+          # agent_turns / agent_turns_long / agent_turns8 (scripts/ci/agent_turns.py): a prefix-reuse profile keeps a request's cache_salt only when it verifies against the salt key the contract reads, so for
+          # those three tests ONLY the step writes a throwaway key outside the uploaded results, mounts it read-only and points the contract at it (QWEN_PREFIX_SALT_KEY_FILE, as the gate does), and
           # the smoke client mints its sessions' salts under the same file (SMOKE_SALT_KEY_FILE). Without it the run is unsalted and measures a server with reuse off. Every other job is unchanged.
           salt_key=
           salt_args=()
           case ",$TESTS," in
-            *,agent_turns,*|*,agent_turns_long,*)
+            *,agent_turns,*|*,agent_turns_long,*|*,agent_turns8,*)
               salt_key="$RUNNER_TEMP/c2-smoke-salt.key"
               python3 -c 'import binascii, os, sys; open(sys.argv[1], "wb").write(binascii.hexlify(os.urandom(32)) + b"\n")' "$salt_key"
               chmod 0644 "$salt_key"

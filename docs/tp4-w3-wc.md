@@ -1,5 +1,7 @@
 # tp4/w3 WC: the GDN layer's windows, convolution and gates in one launch
 
+Update (tp4/s6, docs/tp4-next2.md): the lever has since compiled and run on cards in the audited twin `...-fx-s5-audit` (two runs, 0 audit mismatches over about 12,800 audited rounds); no timed run yet. The ship-6 candidate carries it. The status below is the one it was written with.
+
 Status: **built on `tp4/w3-wc`, behind `QWEN_FAST_TP4_GDN_WC` (off by default), CPU-tested, never compiled or run on a card.** The kernels have never been through a compiler: the attempt to compile them in a throwaway toolchain container on the rig was refused by the session's permission classifier and not retried, so the first compile is the card-M byte gate. Their API surface is the production kernels' (a test holds every `noc_`/`cb_`/`get_` call to one a production kernel already makes); the one exception is `invalidate_l1_cache()`, which only the non-default branch of the T2 windows kernel calls (its settings matrix ran on a card). The estimate is the fusion
 audit's (ESTIMATED, not measured): WC replaces G3-G8 of a GDN layer (the V2 split, the T2 windows, the canon block, the window stack, the conv-gates
 launch, the unstack: 139.3 us a layer of kernels and gaps, 6.69 ms a verify) with one launch of 25-40 us, which the audit's review haircuts to

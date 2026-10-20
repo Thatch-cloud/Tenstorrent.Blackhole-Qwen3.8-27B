@@ -7,7 +7,8 @@ the checkpoint to the end of the old prompt is prefilled again), pays an engine 
 On the 2026-10 ship-4 stack the card's wall time in production was ~58% prefill steps, ~36% decode rounds, ~6% other, with 14-22 tok/s a user at
 four to seven live users. This test reproduces that shape deterministically so a card window can read the same numbers.
 
-THE SHAPE (c2_serving_smoke.py: agent_turns, agent_turns_long). `sessions` concurrent sessions (default 6, under the eight seats), each:
+THE SHAPE (c2_serving_smoke.py: agent_turns, agent_turns_long, agent_turns8). `sessions` concurrent sessions (default 6, under the eight seats; agent_turns8 is the same plan with EIGHT, every seat of the
+profile busy, and a 25-minute budget so that it fits a 30-minute box), each:
   turn 0   a coding-text context of its own length (the mix cycles 64k / 128k / 200k tokens, rotated and jittered by the seed; fitted to the
            server's own token count where /tokenize answers; real code from the corpus the long-context smokes read) plus a code task, the
            opening request: the cold prefill that builds the session;
@@ -56,9 +57,14 @@ import time
 
 NAME = 'agent_turns'
 LONG_NAME = 'agent_turns_long'
-TESTS = (NAME, LONG_NAME)
-# name -> (sessions, turns): the two named shapes. Environment parameters (settings) override either.
-VARIANTS = {NAME: (6, 12), LONG_NAME: (6, 30)}
+EIGHT_NAME = 'agent_turns8'
+TESTS = (NAME, LONG_NAME, EIGHT_NAME)
+# name -> (sessions, turns): the named shapes. Environment parameters (settings) override any. agent_turns and agent_turns_long are unchanged (the baseline of past results); agent_turns8 is the
+# same plan (mix, answers, messages, gaps, seed) with eight sessions: every draw is keyed on (seed, session, turn), so its sessions 0 to 5 are EXACTLY agent_turns' six (same contexts, same turns,
+# same gaps) and sessions 6 and 7 are added (two more contexts from the same mix, about 195k and 64k tokens): test_agent_turns holds the prefix equal.
+VARIANTS = {NAME: (6, 12), LONG_NAME: (6, 30), EIGHT_NAME: (8, 12)}
+# name -> the budget (seconds) after which no session starts a new turn, where it is not BUDGET_S. agent_turns8 must fit a 30-minute box (boot and warm-up included): 1,500 s, estimate about 14.5 minutes.
+VARIANT_BUDGET_S = {EIGHT_NAME: 1500.0}
 SEED = 20261012
 MIX = (64000, 128000, 200000)            # the context lengths the sessions cycle through (tokens); production prompts: p50 69k, p90 208k
 GAP_RANGE_S = (1.0, 8.0)                 # the tool gap after a turn
@@ -153,7 +159,7 @@ def settings(name, environ=None):
     return dict(name=name, sessions=read('SESSIONS', int, sessions, 1, MAX_SESSIONS), turns=read('TURNS', int, turns, 1, MAX_TURNS),
                 seed=read('SEED', int, SEED), mix=mix, gap_scale=read('GAP_SCALE', float, 1.0, 0.0, 100.0),
                 gap_range=GAP_RANGE_S, answer_range=ANSWER_RANGE, message_range=MESSAGE_RANGE,
-                budget_s=read('BUDGET_S', float, BUDGET_S, 60.0, 14400.0), timeout_s=read('TIMEOUT_S', float, TIMEOUT_S, 10.0, 7200.0),
+                budget_s=read('BUDGET_S', float, VARIANT_BUDGET_S.get(name, BUDGET_S), 60.0, 14400.0), timeout_s=read('TIMEOUT_S', float, TIMEOUT_S, 10.0, 7200.0),
                 stagger_s=read('STAGGER_S', float, STAGGER_S, 0.0, 600.0), ignore_eos=bool(read('IGNORE_EOS', int, 0, 0, 1)),
                 salt_mode=salt, max_context=read('MAX_CONTEXT', int, DEFAULT_MAX_CONTEXT, 4096, 4194304), nonce=nonce)
 

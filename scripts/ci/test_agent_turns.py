@@ -270,6 +270,18 @@ class RunShapeTests(AgentRuns):
         self.assertTrue(aggregate['live'], 'the client-side per-live table')
         self.assertEqual(entry['plan_digest'], at.plan_digest(at.plan(at.settings('agent_turns', dict(self.ENV)))))
 
+    def test_agent_turns8_runs_and_is_judged_under_its_own_name(self):
+        results, chats, stdout = self.agent('agent_turns8', env={'SMOKE_AGENT_SESSIONS': '8', 'SMOKE_AGENT_TURNS': '2'})
+        entry = results['agent_turns8']
+        self.assertNotIn('error', entry, {key: value for key, value in entry.items() if key != 'sessions'})
+        self.assertEqual((entry['sessions_planned'], entry['turns_planned']), (8, 2))
+        self.assertEqual(len(chats), 8 * 3)
+        self.assertEqual(sorted({int(re.search(r'-s(\d+)-t', chat['tag']).group(1)) for chat in chats}), list(range(8)))
+        problems, facts = check.check(stdout, container_log(chats, round_live=8), False, env={'QWEN_PREFIX_REUSE': '1'})
+        self.assertEqual([item for item in problems if 'agent_turns' in item], [], problems)
+        self.assertIn('agent_turns8', facts['agent_turns'])
+        self.assertEqual((facts['agent_turns']['agent_turns8']['requests'], facts['agent_turns']['agent_turns8']['errors']), (24, 0))
+
     def test_the_requests_are_the_same_on_a_second_run(self):
         _results, chats, _ = self.agent()
         with AgentFake() as fake:
@@ -406,6 +418,40 @@ class PlanTests(unittest.TestCase):
         self.assertEqual((self.cfg('agent_turns_long')['sessions'], self.cfg('agent_turns_long')['turns']), (6, 30))
         self.assertEqual(self.cfg()['mix'], (64000, 128000, 200000))
         self.assertEqual(self.cfg()['seed'], at.SEED)
+
+    def test_the_existing_tests_plans_and_settings_are_frozen(self):
+        # agent_turns and agent_turns_long are the baseline of past results (the 2026-10-19 window's T1A/T1B): adding agent_turns8 must not move what they measure
+        for name, digest in (('agent_turns', '9fb35dd44ea15464'), ('agent_turns_long', 'e0a2af94ab80930f')):
+            cfg = self.cfg(name)
+            self.assertEqual(at.plan_digest(at.plan(cfg, 262144)), digest, name)
+            self.assertEqual((cfg['sessions'], cfg['budget_s'], cfg['mix'], cfg['seed'], cfg['answer_range'], cfg['message_range'], cfg['gap_range']),
+                             (6, 2700.0, (64000, 128000, 200000), 20261012, (200, 600), (150, 400), (1.0, 8.0)), name)
+        self.assertEqual((self.cfg()['turns'], self.cfg('agent_turns_long')['turns']), (12, 30))
+
+    def test_agent_turns8_is_the_same_plan_with_eight_sessions_and_a_budget_that_fits_a_half_hour_box(self):
+        self.assertEqual(at.EIGHT_NAME, 'agent_turns8')
+        self.assertEqual(at.TESTS, ('agent_turns', 'agent_turns_long', 'agent_turns8'))
+        cfg, base = self.cfg('agent_turns8'), self.cfg()
+        self.assertEqual((cfg['sessions'], cfg['turns'], cfg['budget_s']), (8, 12, 1500.0))
+        for key in ('mix', 'seed', 'answer_range', 'message_range', 'gap_range', 'gap_scale', 'stagger_s', 'timeout_s', 'salt_mode', 'ignore_eos'):
+            self.assertEqual(cfg[key], base[key], key)
+        eight, six = at.plan(cfg, 262144), at.plan(base, 262144)
+        self.assertEqual(eight['targets'][:6], six['targets'], 'sessions 0 to 5 are agent_turns\' six contexts')
+        self.assertEqual(eight['sessions'][:6], six['sessions'], 'and their turns, gaps and answer budgets')
+        self.assertEqual(len(eight['targets']), 8)
+        self.assertEqual(eight['clamped'], 0, 'the 262k profile holds all eight with 12 turns of growth')
+        self.assertEqual(len(set(eight['targets'])), 8)
+        # an environment parameter still wins over the variant's default, for either
+        self.assertEqual(self.cfg('agent_turns8', SMOKE_AGENT_BUDGET_S='900')['budget_s'], 900.0)
+        self.assertEqual(self.cfg('agent_turns8', SMOKE_AGENT_SESSIONS='7')['sessions'], 7)
+
+    def test_agent_turns8_estimate_fits_a_thirty_minute_box(self):
+        cfg = self.cfg('agent_turns8')
+        found = at.estimate(cfg, at.session_targets(cfg, 262144)[0])
+        self.assertTrue(12 <= found['minutes'] <= 18, found)
+        self.assertTrue(found['within_budget'])
+        self.assertLessEqual(cfg['budget_s'] / 60.0, 25.0, 'no new turn starts after 25 minutes: the run ends inside 30 with its last turn (a turn is under 3 minutes at 8 live)')
+        self.assertGreater(found['minutes'], at.estimate(self.cfg())['minutes'], 'two more contexts to build')
 
     def test_the_plan_is_deterministic_in_the_seed_and_changes_with_it(self):
         one, two = at.plan(self.cfg()), at.plan(self.cfg())
@@ -692,13 +738,21 @@ class JudgeTests(unittest.TestCase):
 class RegistrationTests(unittest.TestCase):
     def test_the_smoke_dispatches_both_tests_opt_in_and_declares_their_seats(self):
         source = SMOKE.read_text(encoding='utf-8')
-        self.assertIn("for _agent_name in ('agent_turns', 'agent_turns_long'):", source)
+        self.assertIn("for _agent_name in ('agent_turns', 'agent_turns_long', 'agent_turns8'):", source)
         self.assertIn('if ONLY and _agent_name in ONLY:', source)
         self.assertEqual(at.TESTS, check.AGENT_TURNS_TESTS)
         seats = constants()['SHAPE_SEATS']
         for name in at.TESTS:
             self.assertEqual(seats[name], at.VARIANTS[name][0], name)
             self.assertLessEqual(seats[name], 8)
+
+    def test_agent_turns8_is_dispatched_judged_and_given_a_salt_key_by_the_smoke_step(self):
+        self.assertIn('agent_turns8', check.AGENT_TURNS_TESTS)
+        self.assertIn('agent_turns8', check.LEVERN_SCHED_RETURNING_TESTS)
+        self.assertEqual(constants()['SHAPE_SEATS']['agent_turns8'], 8, 'every seat of the profile')
+        text = (HERE.parent.parent / '.github' / 'workflows' / 'qwen-c2-serving.yml').read_text(encoding='utf-8')
+        step = text[text.index('- name: Smoke on the four-card set'):text.index('- name: Replay the node agent')]
+        self.assertIn('*,agent_turns8,*', step, 'a job that names only agent_turns8 still gets the throwaway salt key (without it the run is unsalted and measures a server with reuse off)')
 
     def test_the_default_test_list_does_not_include_them(self):
         # opt-in: with no test list the smoke records only warmup and its default set (nothing here names the agent tests outside the dispatch)

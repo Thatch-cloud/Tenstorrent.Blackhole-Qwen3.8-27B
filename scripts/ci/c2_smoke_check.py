@@ -87,7 +87,7 @@ own SMOKE_JSON line and the container log and exits non-zero on:
     logged a digest line for every prompt of a levern_equal test that ran. The hang shapes (levern_*) are judged as streams, and the exact-length
     rows as completions that counted the prompt they were sent. Nothing here compares the two arms: levern_compare.py does.
 
-  - the production-shaped agent sessions (opt-in tests agent_turns and agent_turns_long, tp4/agent-turns; agent_turns.py judges, agent_turns_problems calls it): a MEASUREMENT with no
+  - the production-shaped agent sessions (opt-in tests agent_turns, agent_turns_long and agent_turns8, tp4/agent-turns; agent_turns.py judges, agent_turns_problems calls it): a MEASUREMENT with no
     speed threshold. Any request that errored or timed out fails, as does one with no tokens or no finish; on a prefix-reuse profile (QWEN_PREFIX_REUSE=1) a salted run must show reuse (the
     usage's cached tokens, or the server's resume point read from the engine lines the run's X-Request-Id tags name) on at least 90% of its returning turns, and an UNSALTED run fails
     unless it asked for no salt (SMOKE_AGENT_SALT=none). The facts line carries the run's rates, its prefill and decode shares of the wall time and the per-live table read from the log.
@@ -153,7 +153,7 @@ PARKED_ROW_TESTS = ('parked_equal', 'parked_budgets')
 PARKED_USER_TESTS = ('parked_churn', 'parked_churn_long', 'parked_abort_reuse', 'parked_turns')
 PARKED_TESTS = PARKED_ROW_TESTS + PARKED_USER_TESTS
 # The production-shaped agent sessions (tp4/agent-turns): judged by agent_turns.judge, which reads the engine log for the shares and the reuse.
-AGENT_TURNS_TESTS = ('agent_turns', 'agent_turns_long')
+AGENT_TURNS_TESTS = ('agent_turns', 'agent_turns_long', 'agent_turns8')
 REPLAY_TESTS = (REPLAY_TEST, 'replay_concurrent8')
 # Four-user streamed tests: their users get the stream rules; the code ones are code answers too (TEXT_TESTS).
 CONCURRENT_TESTS = ('concurrent4', 'concurrent4_v164order', 'concurrent4_steady', 'concurrent4_code', 'concurrent4_code_equal',
@@ -2083,7 +2083,7 @@ def levern_adaptive_problems(steps, env, container_text, results=None):
 LEVERN_SCHED_FLAGS = ('QWEN_FAST_LEVERN_OWED_CAP_MS', 'QWEN_FAST_LEVERN_SHORT_SHARE', 'QWEN_FAST_LEVERN_SHORT_WAIT_S')
 LEVERN_SCHED_LINE = '[PINDIAG] lever N sched: '
 # The shapes whose returning turns judge the short pacing: a run that names none of them has not exercised it (no NOT EXERCISED then).
-LEVERN_SCHED_RETURNING_TESTS = ('agent_turns', 'parked_turns', 'concurrent8_skew')
+LEVERN_SCHED_RETURNING_TESTS = ('agent_turns', 'agent_turns8', 'parked_turns', 'concurrent8_skew')
 
 
 def levern_sched_problems(steps, env, container_text, results=None):
