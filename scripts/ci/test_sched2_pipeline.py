@@ -11,6 +11,7 @@ Three switches, each default off, and the claim of each is the same: the decisio
 
 import json
 import os
+from contextlib import nullcontext
 from pathlib import Path
 import random
 import sys
@@ -803,6 +804,45 @@ class PacingIdentityTests(Fresh):
 
 
 PREFILL_MS, BIND_MS, ROUND_MS = 700.0, 275.0, 80.0
+
+
+class AttachWiringTests(Fresh):
+    """serving_runtime's attach: with none of the switches it builds the lifecycle exactly as before; with them, the policy object, the strict check and the ledger's end are wired in."""
+
+    def attach(self, extra_env=None, parked=None, strict=True):
+        import test_serving_runtime
+
+        test = test_serving_runtime.RuntimeAttachmentTests()
+        lines = []
+        # (The harness's fake worker has no prefill_forward, so it cannot take Lever N: a test that needs QWEN_FAST_LEVER_N=1 for the policy's own check leaves the check out here, and
+        # FlagTests holds the check itself.)
+        checked = nullcontext() if strict else patch.object(pipeline, 'problems', lambda environ=None: [])
+        with patch.object(pipeline, 'SeedFirst') as seed, patch.object(pipeline, 'trim_ledger') as trim, patch.object(pipeline, '_log', lambda *a: lines.append(a)), checked:
+            test.exercise(extra_env=extra_env, parked=parked)
+        test.installed = [line for line in lines if line[0] == pipeline.INSTALLED_LINE]
+        return test, seed, trim
+
+    def test_without_a_switch_nothing_is_built_and_nothing_trimmed(self):
+        test, seed, trim = self.attach()
+        seed.assert_not_called()
+        trim.assert_not_called()
+        self.assertEqual(test.installed, [], 'no line either')
+
+    def test_the_ledger_trim_ends_the_ledger_once_after_the_lifecycle_is_built(self):
+        test, seed, trim = self.attach(extra_env={pipeline.LEDGER_FLAG: '1'})
+        trim.assert_called_once()
+        self.assertIs(trim.call_args.args[0], memory_ledger)
+        seed.assert_not_called()
+        self.assertEqual(test.installed, [(pipeline.INSTALLED_LINE, 0, 0, 1, '-', '-', '-')])
+
+    def test_seed_first_builds_the_policy_over_the_parked_set(self):
+        env = {pipeline.SEED_FLAG: '1', 'QWEN_FAST_ADMISSION_LEAN': '1'}
+        test, seed, trim = self.attach(extra_env=env, parked={}, strict=False)
+        seed.assert_called_once()
+        self.assertIs(seed.call_args.args[0], test.parked_sets[0])
+        self.assertTrue(callable(seed.call_args.args[1]) and callable(seed.call_args.args[2]))
+        trim.assert_not_called()
+        self.assertEqual(test.installed, [(pipeline.INSTALLED_LINE, 1, 0, 0, '-', '-', '-')])
 
 
 if __name__ == '__main__':

@@ -223,13 +223,21 @@ def hold_reading(pool, read, short_of, signature=None, prompt='-', log=_log):
 
 # -- the memory ledger ----------------------------------------------------------------------------------------------------------------------------
 
-def trim_ledger(memory_ledger, log=_log):
+def announce(seed_first, log=None):
+    """The attach's one line naming the switches and the hold's knobs (INSTALLED_LINE)."""
+    hold = hold_state() if hold_reuse_enabled() else None
+    log = _log if log is None else log
+    log(INSTALLED_LINE, int(bool(seed_first)), int(hold_reuse_enabled()), int(ledger_trim_enabled()), '-' if hold is None else int(hold.max_age_s * 1000),
+        '-' if hold is None else hold.max_reuses, '-' if hold is None else hold.drift // MEGABYTE)
+
+
+def trim_ledger(memory_ledger, log=None):
     """End the process's memory ledger after the attach (QWEN_FAST_ADMISSION_LEDGER_TRIM=1): every later reading (the prefill points, the engine points, the rebind bracket, the first packed round, the
     pair, quad and octo points of a capture) is a no-op, none of them a check (Ledger.before swallows its own errors and no judge reads a bracket per rebind). The attach's own phases are kept."""
     if memory_ledger.active() is None:
         return False
     memory_ledger.end()
-    log(LEDGER_TRIM_LINE)
+    (_log if log is None else log)(LEDGER_TRIM_LINE)
     return True
 
 

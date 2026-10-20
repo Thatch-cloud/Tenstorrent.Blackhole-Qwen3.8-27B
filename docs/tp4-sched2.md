@@ -158,7 +158,7 @@ reuse also wants a ballast-boundary run (the engine-reuse ballast ladder, on the
 
 ## 9. Tests
 
-New: `test_sched2_pipeline` (51: the switches' strictness and their equality across the five modules that name them; the reuse rule with a randomised allocator model and the verdict grid; the ledger; seed first on
-the real lifecycle fixtures: the whole story of a request equal with and without it, the order, the timing on a fake clock, failure, close, abort; the real alternator), `test_sched2_model` (23: calibration, lever arithmetic,
+New: `test_sched2_pipeline` (54: the switches' strictness and their equality across the five modules that name them; the reuse rule with a randomised allocator model and the verdict grid; the ledger; seed first on
+the real lifecycle fixtures: the whole story of a request equal with and without it, the order, the timing on a fake clock, failure, close, abort; the real alternator; the attach wiring), `test_sched2_model` (23: calibration, lever arithmetic,
 the report on synthetic logs), `test_sched2_profiles` (12), `test_sched2_pack` (19), all named in `qwen-integration-cpu.yml`. The new module is in `docker/qwen-c2-overlay.txt` and the closure tests. Run narrow, niced, from
 `scripts/ci`: `CUDA_VISIBLE_DEVICES= PYTHONDONTWRITEBYTECODE=1 nice -n 15 python -B -m unittest test_sched2_pipeline`.
