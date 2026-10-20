@@ -70,6 +70,7 @@ TIMING_MARKER = '[PF3] tail'
 SKIP_MARKER = '[PF3] tail skip'
 AUDIT_FIRST = 8
 AUDIT_STRIDE = 24
+AUDIT_PER_BUCKET = 2          # and the first two tails of every traced bucket, whatever the schedule: a bucket's program is its own
 
 BLOCK = 64                                   # KV block size (rows)
 STATE_ROWS = 3                               # K - 1 of the depthwise conv
@@ -189,7 +190,7 @@ def select_indices(valid_len):
 
 
 def audit_due(index):
-    """Whether the `index`-th (0-based) traced tail is audited: the first AUDIT_FIRST, then every AUDIT_STRIDE-th."""
+    """Whether the `index`-th (0-based) traced tail is audited by the schedule: the first AUDIT_FIRST, then every AUDIT_STRIDE-th (a bucket's first AUDIT_PER_BUCKET tails are audited besides)."""
     return index < AUDIT_FIRST or (index - AUDIT_FIRST) % AUDIT_STRIDE == AUDIT_STRIDE - 1
 
 
@@ -255,6 +256,7 @@ class TailTrace(object):
         self.traced_calls = 0
         self.eager_calls = 0
         self.audited = 0
+        self.bucket_calls = {}
         self.mismatches = 0
         self.skips = {}
         self.fallbacks = 0
@@ -455,9 +457,10 @@ class TailTrace(object):
         ops.synchronize_device(model.device)
         self.warmed = True
         self.engaged += 1
-        log('{}', '%s buckets=%s traces=%d sink=%d taps=%s arena_mb=%d arena_address=%s capture_ms=%.0f' % (
+        log('{}', '%s buckets=%s traces=%d sink=%d taps=%s arena_mb=%d arena_address=%s freed=%d uncovered=%d capture_ms=%.0f' % (
             ENGAGED_MARKER, ','.join(str(b) for b in self.settings.buckets), len(self.traces), self.sink, ','.join(str(i) for i in self.tap_ids),
-            self.settings.arena_mb, '-' if self.arena_address is None else ','.join(str(a) for a in self.arena_address), (self.clock() - began) * 1000.0))
+            self.settings.arena_mb, '-' if self.arena_address is None else ','.join(str(a) for a in self.arena_address), self.holes.get('recorded', 0), self.holes.get('uncovered', 0),
+            (self.clock() - began) * 1000.0))
         return True
 
     def _rep(self):
@@ -722,7 +725,8 @@ class TailTrace(object):
         index = self.traced_calls
         self.traced_calls += 1
         self.calls += 1
-        if self.settings.audit and audit_due(index):
+        nth = self.bucket_calls[bucket] = self.bucket_calls.get(bucket, 0) + 1
+        if self.settings.audit and (audit_due(index) or nth <= AUDIT_PER_BUCKET):
             return self._audited(plan, token_buf, valid_len, chunk_start, page_table, bucket, flex_sdpa, vision_tokens, began)
         try:
             staged = self._stage(plan, token_buf, page_table)

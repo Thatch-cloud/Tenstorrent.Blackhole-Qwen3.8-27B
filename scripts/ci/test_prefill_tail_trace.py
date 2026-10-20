@@ -799,6 +799,10 @@ class ReplayTests(unittest.TestCase):
             rig.model._bind_gdn_prefill_scratch()
             rig.model.prefill_masked_bucket(tokens(100), row, 100, chunk_start=1024)
         self.assertTrue(any(line.startswith(tail.TIMING_MARKER + ' mode=traced bucket=128 valid=100 start=1024') for line in traced.logs))
+        engaged = [line for line in traced.logs if line.startswith(tail.ENGAGED_MARKER)]
+        self.assertEqual(len(engaged), 1)
+        self.assertIn('freed=', engaged[0])
+        self.assertIn('uncovered=0', engaged[0])
         self.assertTrue(any(line.startswith(tail.TIMING_MARKER + ' mode=eager bucket=128 valid=100 start=1024') for line in control.logs))
         self.assertFalse(any(tail.ENGAGED_MARKER in line for line in control.logs))
         self.assertEqual(sum(tail.ENGAGED_MARKER in line for line in traced.logs), 1)
@@ -983,6 +987,16 @@ class AuditTests(unittest.TestCase):
         self.run_tails(audited, 60)
         self.assertEqual(audited.tail.audited, 10)
         self.assertEqual(sum(tail.AUDIT_MARKER + ' n=' in line for line in audited.logs), 10)
+
+    def test_the_first_two_tails_of_every_bucket_are_audited_besides(self):
+        audited = build(AUDITED)
+        audited.model._bind_gdn_prefill_scratch()
+        for valid in [100] * 9 + [200, 200, 200, 300, 300, 300, 900, 900, 900]:
+            audited.model._reset_gdn_state_for_new_sequence()
+            audited.model.prefill_masked_bucket(tokens(valid), self.row, valid, chunk_start=1024)
+        # nine tails of bucket 128 (the schedule audits the first eight), then two each of 256, 512 and 1024 by the per-bucket rule alone
+        self.assertEqual(audited.tail.audited, 8 + 2 + 2 + 2)
+        self.assertEqual(sorted({line.split('bucket=')[1].split()[0] for line in audited.logs if line.startswith(tail.AUDIT_MARKER + ' n=')}), ['1024', '128', '256', '512'])
 
     def test_a_kernel_whose_masked_arithmetic_differs_is_caught_and_unnoticed_without_the_audit(self):
         audited = build(AUDITED, break_mask=True)
