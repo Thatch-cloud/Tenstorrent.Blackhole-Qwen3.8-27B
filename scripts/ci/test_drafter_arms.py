@@ -24,6 +24,10 @@ with open(os.path.join(HERE, 'qwen_c2_profiles.json'), encoding='utf-8') as _han
 NAMES = sorted(PROFILES['profiles'])
 FOLDER = os.path.join(HERE, 'references', 'tp4-drafter-jobs')
 BASE = 'c2-packed-tp4'
+# The environment the parked engines need at eight seats (test_parked_tp4_profiles.GOOD), for the policy check below.
+PARKED_GOOD = {'QWEN_FAST_ANY_REQUEST': '1', 'QWEN_FAST_EXTENT_REPLAY': '1', 'QWEN_FAST_PACKED_STEP': '1', 'QWEN_FAST_SHARED_CCL': '1',
+               'QWEN_FAST_VERIFY_T1': '1', 'QWEN_FAST_TP': '4', 'QWEN_FAST_M3_REQUEST_WARM': '1', 'QWEN_FAST_M3_BLOCKS': '2',
+               'QWEN_FAST_PARKED_ENGINES': '1'}
 CANDIDATE_IMAGES = {'b16-bf8': 'tp4-drafter-b16-1', 'b32-bf8': 'tp4-drafter-b32-1', 'dedf-bf16': 'tp4-drafter-1', 'lookup': 'tp4-drafter-1'}
 
 
@@ -104,18 +108,45 @@ class ArmProfileTests(unittest.TestCase):
         self.assertEqual(admission.width(over_image), 4)
         self.assertEqual(admission.check_environment(over_image, profile_tests.M3), [])
 
-    def test_the_lookup_arm_refuses_a_base_that_runs_engine_reuse(self):
+    def test_the_lookup_arm_runs_on_a_base_that_runs_engine_reuse(self):
+        """tp4/stream-1: a rebound request attaches the lookup like a built one (serving_request_factory.attach_lookup), so the arm no longer refuses a
+        base with QWEN_FAST_PARKED_ENGINES=1: the production profiles do, and the lab derives the lookup arm on them."""
         import serving_fast_policy as policy
         reuse = copy.deepcopy(PROFILES)
         reuse['profiles'][BASE]['env']['QWEN_FAST_PARKED_ENGINES'] = '1'
-        with self.assertRaisesRegex(lab.LabError, 'engine reuse'):
-            lab.derive_profile(reuse, BASE, 'lookup')
-        # the other arms and the lab as it was are not the lookup's business
-        self.assertEqual(lab.derive_profile(reuse, BASE, 'dedf-bf16')[0], BASE + '+taulab+dedf-bf16')
-        self.assertEqual(lab.derive_profile(reuse, BASE)[0], BASE + '+taulab')
-        # and the contract's own rule is the reason: the pair is refused at boot
+        name, document = lab.derive_profile(reuse, BASE, 'lookup')
+        self.assertEqual(name, BASE + '+taulab+lookup')
+        self.assertEqual(document['profiles'][name]['env']['QWEN_FAST_PARKED_ENGINES'], '1')
+        self.assertEqual(document['profiles'][name]['env']['QWEN_FAST_LOOKUP_DRAFT'], 'n3m12')
+        self.assertEqual(lab.arithmetic_diff(reuse, BASE, document, 'lookup'), [])
+        # the policy agrees: the pair is admitted at the boot, and only a malformed lookup policy is refused beside engine reuse
+        good = dict(PARKED_GOOD, QWEN_FAST_LOOKUP_DRAFT='n3m12')
+        self.assertEqual(policy.parked_engine_problems(good, 8), [])
         self.assertTrue(any('QWEN_FAST_LOOKUP_DRAFT' in text for text in policy.parked_engine_problems(
-            {'QWEN_FAST_PARKED_ENGINES': '1', 'QWEN_FAST_LOOKUP_DRAFT': 'n3m12'}, 8)))
+            dict(good, QWEN_FAST_LOOKUP_DRAFT='rolling'), 8)))
+
+    def test_the_lookup_arm_derives_on_the_s5_traffic_profile_and_the_contract_boots_it(self):
+        """The production stack (engine reuse, octo, the lone-user round): the derived profile adds the two log flags and the lookup policy, nothing
+        else, and the contract's checks pass on it."""
+        import serving_c2_contract as contract
+        s5 = 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s5'
+        name, document = lab.derive_profile(PROFILES, s5, 'lookup')
+        self.assertEqual(name, s5 + '+taulab+lookup')
+        base, derived = PROFILES['profiles'][s5]['env'], document['profiles'][name]['env']
+        added = dict((key, value) for key, value in derived.items() if base.get(key) != value)
+        self.assertEqual(added, dict(QWEN_FAST_PACKED_AUDIT='1', QWEN_FAST_PHASE_TIMING='1', QWEN_FAST_LOOKUP_DRAFT='n3m12'))
+        self.assertEqual(derived['QWEN_FAST_PARKED_ENGINES'], '1')
+        self.assertEqual(lab.arithmetic_diff(PROFILES, s5, document, 'lookup'), [])
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, 'profiles.json')
+        with open(path, 'w') as handle:
+            json.dump(document, handle)
+        profile = contract.load_profile(path, name)
+        self.assertEqual(contract.apply_environment(profile, {})['QWEN_FAST_LOOKUP_DRAFT'], 'n3m12')
+        for check in (contract.parked_problems, contract.drafter_problems, contract.levern_problems, contract.mesh_problems,
+                      contract.sticky_problems, contract.prefix_reuse_problems, contract.multi_problems):
+            self.assertEqual(check(profile), [], check.__name__)
 
     def test_the_arm_flags_are_arithmetic_only_for_their_own_arm(self):
         name, document = lab.derive_profile(PROFILES, BASE, 'dedf-bf16')

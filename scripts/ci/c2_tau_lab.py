@@ -526,10 +526,6 @@ def derive_profile(profiles, base, arm=None):
     if profile.get('gate_only') is True:
         raise LabError('profile %s is gate-only: the lab serves the production profile' % base)
     env = profile.setdefault('env', {})
-    if arm == 'lookup' and str(env.get('QWEN_FAST_PARKED_ENGINES', '0')) == '1':
-        # A rebound engine attaches no prompt lookup (serving_fast_policy.parked_engine_problems refuses the pair at boot): measure the lookup on
-        # a profile that builds its engines per request.
-        raise LabError('profile %s runs engine reuse (QWEN_FAST_PARKED_ENGINES=1), which does not run beside the lookup arm' % base)
     for name, value in LOG_FLAGS:
         if str(env.get(name, value)) != value:
             raise LabError('profile %s sets %s to %s, not %s' % (base, name, env[name], value))

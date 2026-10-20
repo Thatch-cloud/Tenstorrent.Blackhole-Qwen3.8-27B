@@ -130,7 +130,7 @@ def prefix_cache_admitted(cache, environ=None):
 #   padded round would otherwise overwrite an idle parked slot's carry;
 # - QWEN_FAST_M3_REQUEST_WARM=1: the S8 hang class (a program first compiled after a block's first replay) is covered by that warm, not by the
 #   attach ordering alone;
-# - no lane or solo lane (they drive their own slot orders), no prompt-lookup draft (a rebind attaches none), no gather experiment.
+# - no lane or solo lane (they drive their own slot orders), no gather experiment (a prompt-lookup draft, QWEN_FAST_LOOKUP_DRAFT, runs beside it since tp4/stream-1: a rebind attaches the lookup too).
 # QWEN_FAST_PARKED_DRAFTS=1 ("2c": the pair and quad traces bound to the slots) additionally needs the engines, the quad over both blocks
 # (QWEN_FAST_QUAD_DRAFT=1, QWEN_FAST_QUAD_DRAFT_BLOCKS=2), the live K/V banks (QWEN_FAST_FUSED_COMMIT_LIVE_BANKS=1), and no wide-drafter candidate
 # (QWEN_FAST_TP4_DRAFT_WIDE: a persistent L1 buffer allocated after a drafter capture could land on freed shard addresses a bound trace
@@ -157,6 +157,20 @@ def parked_engines_enabled(environ=None):
     if value not in ('0', '1'):
         raise ValueError('%s must be 0 or 1, got %r' % (PARKED_ENGINES_FLAG, value))
     return value == '1'
+
+
+def lookup_policy_wellformed(text):
+    """Whether `text` is a prompt-lookup policy prompt_lookup.parse_policy accepts ('n<N>m<M>': N 2..6, M N..64). The grammar is repeated here, not
+    imported: this file is also the TT plugin's own copy (qwen_fast_policy.py), which cannot import the experiment scripts' modules at the config
+    check. test_parked_tp4_profiles holds the two grammars equal."""
+    text = (text or '').strip().lower()
+    head, separator, tail = text[1:].partition('m') if text.startswith('n') else ('', '', '')
+    if not separator or not (head.isdigit() and tail.isdigit()):
+        return False
+    try:
+        return 2 <= int(head) <= 6 and int(head) <= int(tail) <= 64
+    except ValueError:               # a digit int() cannot read (a superscript): prompt_lookup refuses it the same way
+        return False
 
 
 def parked_engine_problems(environ, users):
@@ -200,8 +214,11 @@ def parked_engine_problems(environ, users):
     for name in ('QWEN_FAST_LANE', 'QWEN_FAST_SOLO_LANE'):
         if environ.get(name, '0') not in ('', '0'):
             problems.append('%s=1 does not run beside %s: the lanes drive their own slot orders' % (PARKED_ENGINES_FLAG, name))
-    if environ.get('QWEN_FAST_LOOKUP_DRAFT', '').strip().lower() not in ('', '0', 'off'):
-        problems.append('%s=1 does not run beside QWEN_FAST_LOOKUP_DRAFT: a rebind attaches no prompt lookup' % PARKED_ENGINES_FLAG)
+    if environ.get('QWEN_FAST_LOOKUP_DRAFT', '').strip().lower() not in ('', '0', 'off') and not lookup_policy_wellformed(environ.get('QWEN_FAST_LOOKUP_DRAFT')):
+        # tp4/stream-1: a rebound request attaches the prompt lookup like a built one (serving_request_factory.attach_lookup), so a policy runs beside
+        # engine reuse; one prompt_lookup would refuse is still refused here, at the boot, rather than at the first request.
+        problems.append('%s=1 with QWEN_FAST_LOOKUP_DRAFT=%r: the policy must be off or n<N>m<M> (N 2..6, M N..64, for example n3m12)'
+                        % (PARKED_ENGINES_FLAG, environ.get('QWEN_FAST_LOOKUP_DRAFT')))
     for name in ('QWEN_GDN_GROUPED_GATHER_ABBA', 'QWEN_GDN_GATE_EXP_ABBA'):
         if environ.get(name, '0') != '0':
             problems.append('%s=1 does not run beside a gather experiment (%s=%s)' % (PARKED_ENGINES_FLAG, name, environ.get(name)))
