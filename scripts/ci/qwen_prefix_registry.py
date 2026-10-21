@@ -35,7 +35,8 @@ process holds what vLLM cannot know about a hit: the GatedDeltaNet (GDN) state t
   (TierStore.spill_sink) and a checkpoint the store evicts for its budget are written there by a writer thread; the trim's reach (TierHooks.effective_hit) extends over the drive's
   blocks, a checkpoint the store lost is adopted back (adopt), and NVMe-resident blocks are read into host records before the existing restore. Entries carry a layout fingerprint
   and a digest; any failure is a miss. Off, none of it is imported and the registry is byte for byte what it was. The tier does not start on a node that looks zero-retention
-  (nvme_refusal), and a drive that cannot be opened costs the engine its NVMe level only.
+  (nvme_refusal), and a drive that cannot be opened, or that vanishes at run time, costs the engine its NVMe level only. Write-through is its default (a finished session is
+  queued for the drive at its next step) and a graceful stop drains the writer queue; the fingerprint holds neither the image build nor the profile name (KV_EPOCH, by hand).
 - Tenant quotas (QWEN_PREFIX_TENANT_QUOTA_*, default off, byte-identical off; docs/prefix-store-hygiene.md "Tenant quotas"): a per-tenant cap and floor on the cached prefix
   tokens in the device pool (the scheduler graft's DeviceQuota) and on the bytes in the host tier (TierStore), keyed by the salt's tenant tag. The cap makes a tenant that passes it
   lose its OWN oldest blocks (records) first; the floor spares a tenant's last tokens (bytes) from everyone else's allocations (spills). quota_config parses the four knobs strictly;
@@ -252,8 +253,9 @@ SLICE_STAT_NAMES = ('tier_slice_jobs', 'tier_slice_steps', 'tier_slice_blocks', 
 # its counters are the module's own (merged into snapshot() only while the tier exists), never keys of self.stats.
 ENV_NVME_NAMES = ('QWEN_PREFIX_NVME', 'QWEN_PREFIX_NVME_DEVICE', 'QWEN_PREFIX_NVME_TTL_S', 'QWEN_PREFIX_NVME_MAX_AGE_S', 'QWEN_PREFIX_NVME_MAX_BYTES', 'QWEN_PREFIX_NVME_VERIFY',
                   'QWEN_PREFIX_NVME_RESTORE', 'QWEN_PREFIX_NVME_FREE_FLOOR_BYTES', 'QWEN_PREFIX_NVME_QUEUE_BYTES', 'QWEN_PREFIX_NVME_THREADS', 'QWEN_PREFIX_NVME_FORMAT',
-                  'QWEN_PREFIX_NVME_DISCARD', 'QWEN_PREFIX_NVME_CODE_VERSION', 'QWEN_PREFIX_NVME_CMD_DIR', 'QWEN_PREFIX_NVME_AUDIT', 'QWEN_PREFIX_NVME_SPILL', 'QWEN_PREFIX_NVME_THROUGH_BLOCKS',
-                  'QWEN_PREFIX_NVME_THROUGH_IDLE_S', 'QWEN_PREFIX_NVME_RETENTION_ACK', 'QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION')
+                  'QWEN_PREFIX_NVME_DISCARD', 'QWEN_PREFIX_NVME_COMPAT', 'QWEN_PREFIX_NVME_CMD_DIR', 'QWEN_PREFIX_NVME_AUDIT', 'QWEN_PREFIX_NVME_SPILL', 'QWEN_PREFIX_NVME_THROUGH_BLOCKS',
+                  'QWEN_PREFIX_NVME_THROUGH_IDLE_S', 'QWEN_PREFIX_NVME_RETENTION_ACK', 'QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION',
+                  'QWEN_PREFIX_NVME_DRAIN_S')
 # The counters a quota adds to the registry's stats (only when a quota is on, so the stats of an engine without one are what they were). Aggregates only: no per-tenant
 # label, key or line ever carries a salt or a tenant tag.
 QUOTA_STAT_NAMES = (
@@ -1540,8 +1542,8 @@ class PrefixRegistry(object):
                 self._attach_nvme(io)
 
     def _attach_nvme(self, io):
-        """Open the NVMe tier on the model's IO (a second attach of another IO reopens it). A device that cannot be opened stops the engine at start: a tier that silently did
-        nothing would look like a tier that missed."""
+        """Open the NVMe tier on the model's IO (a second attach of another IO reopens it). A device that cannot be opened (missing, a namespace that reads 0 bytes, not the
+        store's, locked) does NOT stop the engine: one loud line and the nvme_unavailable counter, and the host tier serves; a restart with a live device opens the tier."""
         import qwen_kv_nvme
 
         if self.nvme is not None:
@@ -1562,6 +1564,7 @@ class PrefixRegistry(object):
         self.tier.spill_sink = self.nvme.offer
         if self.nvme.through:
             self.tier.commit_sink = self.nvme.offer_through
+        self.nvme.arm_stop_hooks()                 # a graceful stop (SIGTERM, an engine shutdown) drains the queue first; QWEN_PREFIX_NVME_DRAIN_S=0 leaves it out
 
     @property
     def tier_on(self):

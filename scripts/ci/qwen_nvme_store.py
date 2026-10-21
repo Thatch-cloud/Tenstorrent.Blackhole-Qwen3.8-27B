@@ -36,6 +36,7 @@ import ctypes
 import hashlib
 import mmap
 import os
+import re
 import stat
 import struct
 import threading
@@ -84,6 +85,62 @@ class Corrupt(StoreError):
 
 class StoreFull(StoreError):
     """Nothing could be evicted to make room."""
+
+
+class DeviceGone(StoreError):
+    """The device cannot be used any more: its node vanished, its namespace reads 0 bytes (or fewer than the store was formatted for), or its controller is dead. Not a
+    fault of the store: a reset, a PCI rescan or a surprise removal took the drive away."""
+
+
+SYSFS = '/sys'
+DEAD_STATES = ('dead', 'deleting', 'deleting (no IO)')       # the kernel's controller states that never come back (resetting / connecting do)
+
+
+def _sysfs_text(path):
+    try:
+        with open(path) as handle:
+            return handle.read().strip()
+    except (OSError, ValueError):
+        return None
+
+
+def device_problem(path, expect_bytes=0, sysfs=SYSFS):
+    """Why the device at `path` cannot be used any more, as a sentence; None when nothing says so. Cheap and safe from any thread: a stat and a few sysfs attribute reads,
+    never an IO to the device (a dead controller must not be able to hang the caller). A block device: the node must exist and have a sysfs entry, its size must read
+    non-zero (and at least `expect_bytes`, what the store was formatted for), and its controller's state must not be dead or deleting. A regular file (the CPU tests): it must
+    exist and be at least expect_bytes long. A host without a sysfs block directory cannot be asked, and is not blamed. Transient states (resetting, connecting) are not
+    reported: the failing IO itself says what they cost."""
+    try:
+        info = os.stat(path)
+    except OSError as error:
+        return '%s is gone (%s)' % (path, error.strerror or error)
+    if not stat.S_ISBLK(info.st_mode):
+        if info.st_size == 0:
+            return '%s now reads 0 bytes' % path
+        if expect_bytes and info.st_size < expect_bytes:
+            return '%s now reads %d bytes, the store was formatted for %d' % (path, info.st_size, expect_bytes)
+        return None
+    blocks = os.path.join(sysfs, 'block')
+    if not os.path.isdir(blocks):
+        return None
+    name = os.path.basename(os.path.realpath(path))
+    base = os.path.join(blocks, name)
+    if not os.path.isdir(base):
+        return 'the block node %s has no sysfs entry any more (the device was removed)' % name
+    sectors = _sysfs_text(os.path.join(base, 'size'))
+    if sectors is not None and sectors.isdigit():
+        nbytes = int(sectors) * 512
+        if nbytes == 0:
+            return 'the namespace %s now reads 0 bytes' % name
+        if expect_bytes and nbytes < expect_bytes:
+            return 'the namespace %s now reads %d bytes, the store was formatted for %d' % (name, nbytes, expect_bytes)
+    match = re.match(r'nvme[0-9]+', name)
+    controller = match.group(0) if match else None
+    for state_file in (os.path.join(base, 'device', 'state'), os.path.join(sysfs, 'class', 'nvme', controller, 'state') if controller else None):
+        state = _sysfs_text(state_file) if state_file else None
+        if state in DEAD_STATES:
+            return 'the controller of %s is %s' % (name, state)
+    return None
 
 
 def roundup(count, align=ALIGN):
@@ -597,6 +654,9 @@ class NvmeStore(object):
     def _open_on(cls, bf, format, snap_bytes, journal_bytes, clock, options):
         if format not in ('auto', 'force', 'never'):
             raise ValueError('format must be auto, force or never, not %r' % (format,))
+        if bf.size <= 0:
+            # (a namespace whose controller was disabled keeps its node and reads 0 bytes: never mistaken for a blank device, whatever the format policy says)
+            raise DeviceGone('%s reads 0 bytes: the namespace is gone or its controller is not live' % bf.path)
         found = cls._read_superblocks(bf)
         superblock = None
         if found:

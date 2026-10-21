@@ -11,9 +11,16 @@ RAW NVMe namespace (qwen_nvme_store: no filesystem, a journal, O_DIRECT, 4 KiB-a
   RESTORE  A returning request's effective hit (TierHooks.effective_hit) reaches through the host tier's consecutive blocks AND the NVMe's; a checkpoint missing from the
            store is read back from the NVMe (adopt). The missing blocks are read into slab slots of the host tier (backend 'host': NVMe -> host buffer), committed as host
            records and restored to the device by the existing code, byte for byte. Everything the host tier checks, it still checks; the NVMe adds its own digest check.
-  THROUGH  Opt-in write-through (QWEN_PREFIX_NVME_SPILL=through, default evict): a session's blocks are also copied toward the drive soon after it goes idle - a bounded slice of
-           its still-cached device blocks per scheduler step is read into the host tier (TierHooks.copy_idle) and every record that enters the host tier is queued to the writer at
-           once (offer_through) - so a warm copy exists before the eviction that would otherwise be the first chance to write it, and a restart loses only the last idle seconds.
+  THROUGH  Write-through, the DEFAULT (QWEN_PREFIX_NVME_SPILL=through; =evict is the explicit alternative): a finished request's blocks are copied toward the drive at once
+           (QWEN_PREFIX_NVME_THROUGH_IDLE_S=0: idle 0 means 'queue them now', not 'off') - a bounded slice of its still-cached device blocks per scheduler step is read into the
+           host tier (TierHooks.copy_idle) and every record that enters the host tier is queued to the writer (offer_through) - so a warm copy exists before the eviction that would
+           otherwise be the first chance to write it, and a restart loses only the last seconds.
+  STOP     A graceful stop (SIGTERM, an engine shutdown, an interpreter exit) drains: arm_stop_hooks() chains the SIGTERM handler (so the drain starts at the signal, in parallel
+           with the engine's own shutdown) and registers an exit finalizer; shutdown() stops taking offers, flushes the queue for up to QWEN_PREFIX_NVME_DRAIN_S seconds (default 4,
+           inside the platform's ~10 s stop grace), journals the TTL clocks, snapshots the index when time remains and closes the device - so a deploy restart finds the warm tier.
+  DEVICE   The drive may vanish at run time (a PCI rescan after a card reset took it once: the controller is disabled, the namespace reads 0 bytes). The tier notices through
+           the failing IO itself, a periodic look at the device's node and sysfs entries (device_problem: never an IO), and latches off at once with ONE line and a counter
+           (nvme_device_lost); the host tier serves as if the NVMe level did not exist, the scheduler never waits on the drive, and a restart with a live device brings it back.
   GUARDS   The tier keeps prompt-derived data on a drive for days. A node that advertises zero-retention signs teardown attestations that nothing survived; the tier therefore
            REFUSES to start (a loud line and a counter; the engine serves without it) when the process sees a zero-retention signal (zero_retention_signals) unless
            QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION=1, and it needs QWEN_PREFIX_NVME_RETENTION_ACK=1 always: the serving process cannot know what its node agent advertises.
@@ -21,19 +28,24 @@ RAW NVMe namespace (qwen_nvme_store: no filesystem, a journal, O_DIRECT, 4 KiB-a
            blocks straight to the freshly allocated device blocks instead of through the host (TierHooks.load_direct).
 
 KEYS. The host tier's own: vLLM's chained block hash (it carries the tenant's cache salt, so tenants never meet), kind KV; the checkpoint's boundary block hash, kind CKPT.
-Every entry also carries a LAYOUT FINGERPRINT (model repo + revision, profile, KV layout/dtype/page size, mesh, GDN dtype, code version): an entry of another fingerprint
-is dropped at open and never restored. The tenant tag is stored only as an 8-byte hash.
+Every entry also carries a LAYOUT FINGERPRINT (KV_EPOCH, model repo + revision, drafter checkpoint, KV layout/dtype/page size, mesh, GDN dtype, the few env switches that
+change stored bytes by design - FINGERPRINTED_ENV): an entry of another fingerprint is dropped at open and never restored. The image build and the profile NAME are NOT in
+it: a deploy keeps the warm tier unless it changes what the stored bytes mean, and KV_EPOCH is the by-hand switch for that (docs/tp4-kv-nvme.md, "The layout fingerprint").
+The tenant tag is stored only as an 8-byte hash.
 
 Pure python; imports nothing outside the standard library (torch and ttnn only through the objects the model hands in).
 """
 
 import array
+import atexit
 import collections
+import errno
 import hashlib
 import importlib
 import json
 import os
 import re
+import signal
 import struct
 import sys
 import threading
@@ -57,7 +69,7 @@ ENV_QUEUE = 'QWEN_PREFIX_NVME_QUEUE_BYTES'
 ENV_THREADS = 'QWEN_PREFIX_NVME_THREADS'
 ENV_FORMAT = 'QWEN_PREFIX_NVME_FORMAT'
 ENV_DISCARD = 'QWEN_PREFIX_NVME_DISCARD'
-ENV_CODE_VERSION = 'QWEN_PREFIX_NVME_CODE_VERSION'
+ENV_COMPAT = 'QWEN_PREFIX_NVME_COMPAT'
 ENV_CMD_DIR = 'QWEN_PREFIX_NVME_CMD_DIR'
 ENV_AUDIT = 'QWEN_PREFIX_NVME_AUDIT'
 ENV_SPILL = 'QWEN_PREFIX_NVME_SPILL'
@@ -65,15 +77,17 @@ ENV_THROUGH_BLOCKS = 'QWEN_PREFIX_NVME_THROUGH_BLOCKS'
 ENV_THROUGH_IDLE_S = 'QWEN_PREFIX_NVME_THROUGH_IDLE_S'
 ENV_RETENTION_ACK = 'QWEN_PREFIX_NVME_RETENTION_ACK'
 ENV_ALLOW_ZERO_RETENTION = 'QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION'
+ENV_DRAIN_S = 'QWEN_PREFIX_NVME_DRAIN_S'
 NAMES = (ENV_SWITCH, ENV_DEVICE, ENV_TTL_S, ENV_MAX_AGE_S, ENV_MAX_BYTES, ENV_VERIFY, ENV_RESTORE, ENV_FREE_FLOOR, ENV_QUEUE, ENV_THREADS, ENV_FORMAT, ENV_DISCARD,
-         ENV_CODE_VERSION, ENV_CMD_DIR, ENV_AUDIT, ENV_SPILL, ENV_THROUGH_BLOCKS, ENV_THROUGH_IDLE_S, ENV_RETENTION_ACK, ENV_ALLOW_ZERO_RETENTION)
+         ENV_COMPAT, ENV_CMD_DIR, ENV_AUDIT, ENV_SPILL, ENV_THROUGH_BLOCKS, ENV_THROUGH_IDLE_S, ENV_RETENTION_ACK, ENV_ALLOW_ZERO_RETENTION, ENV_DRAIN_S)
 # What only a gate sets (the contract refuses them on a traffic profile even under the owner's waiver).
 GATE_ONLY = (ENV_AUDIT, ENV_FORMAT, ENV_CMD_DIR, ENV_ALLOW_ZERO_RETENTION)
 VERIFY_MODES = ('sample', 'all', 'off')
 SPILL_MODES = ('evict', 'through')
+DEFAULT_SPILL = 'through'            # owner, 2026-10-21: seats are released at turn end, so a finished session is copied to the drive straight away
 DEFAULT_THROUGH_BLOCKS = 32          # device blocks one scheduler step may copy toward the drive (about 13 ms of device reads at 0.4 ms a block)
 MAX_THROUGH_BLOCKS = 4096
-DEFAULT_THROUGH_IDLE_S = 60          # a finished request's blocks are copied once it has been idle this long (a follow-up turn within it reuses them on the device)
+DEFAULT_THROUGH_IDLE_S = 0           # a finished request's blocks are queued for the drive at once (0 = immediately; a larger value waits that long first)
 IDLE_BACKLOG = 1024                  # finished requests remembered for the copy
 # What tells a process it runs on a node that advertises zero-retention (see zero_retention_signals); the node agent's own attestation key is the node agent's secret and is
 # never meant to be in a serving container, so its presence here is a conflict by itself.
@@ -87,9 +101,45 @@ DEFAULT_QUEUE_BYTES = 2 << 30
 MIN_QUEUE_BYTES = 16 << 20
 DEFAULT_THREADS = 4
 DEFAULT_FREE_FLOOR_FRACTION = 0.05
-CODE_VERSION_FILE = '/opt/qwen-c2/source-revision'
+DEFAULT_DRAIN_S = 4                  # a graceful stop flushes the queue for up to this long; the platform's stop grace is ~10 s and the engine's own shutdown shares it
+MAX_DRAIN_S = 8
+LEGACY_CLOSE_S = 10.0              # close() on a tier whose stop budget is 0 (hooks off) still flushes this long, as it always did
+SNAPSHOT_BASE_S = 1.0                # a stop snapshots the index only when this much plus SNAPSHOT_ENTRY_S per entry is left of the drain budget
+SNAPSHOT_ENTRY_S = 4e-6
+HEALTH_EVERY_S = 2.0                 # how often poll() looks at the device's node and sysfs entries (no IO)
+# errnos that mean the device itself is gone (a failing write with one of these latches the tier at once instead of after three strikes)
+GONE_ERRNOS = (errno.ENODEV, errno.ENXIO, errno.ESHUTDOWN, errno.ENOMEDIUM)
 LAYOUT = 'packed-v1'                 # the on-disk payload layout: the host tier's raw packed block ([cache tensor][chip][slice]); a new layout is a new fingerprint
 CKPT_FORMAT = 1
+
+# ==========================================================================================================================================================================
+# KV_EPOCH: THE BY-HAND COMPATIBILITY SWITCH OF THE STORED KV. READ THIS BEFORE YOU SHIP A KERNEL OR A MODEL-PATH CHANGE.
+#
+# The NVMe tier keeps a session's KV and GDN checkpoints for days, ACROSS deploys: an image build and a serving-profile name are deliberately NOT part of the layout
+# fingerprint. What keeps it honest is this number. BUMP IT (one line, in the same commit as the change) whenever a change alters what a prefill PUBLISHES:
+#   * prefill NUMERICS: any change to what the prefill path computes that is not bit-for-bit what the old path computed - an attention, matmul, norm, activation or GDN kernel
+#     or program config (fidelity, fp32 accumulation, summation or reduction order, topology, tile or chunk partitioning that moves a reduction), a dtype, a quantisation, a
+#     different weights file, a rounding mode. A change you have PROVEN bit-exact (an audit twin, byte-for-byte) does not need a bump.
+#   * the BYTE MEANING of anything stored: the KV block layout or cache-tensor order, the GDN state or conv-carry layout or dtype, the checkpoint object format, the
+#     drafter window rows (which taps, their order, their alignment).
+#   * the drafter's state layout, if a stored checkpoint ever carries drafter-side state beyond today's target-tap window rows.
+# A bump makes every stored entry another fingerprint: dropped at the next open, never restored, a cold prefill for every returning session (and the drive is reusable at
+# once). NOT bumping a real numerics change is the dangerous direction: a returning session is then restored from the OLD numerics' KV, so its answer continues from the old
+# image's state and equals the old image's continuation, NOT the new image's own cold prefill of the same prompt; nothing at run time can tell. The UPGRADE card gate
+# (docs/tp4-kv-nvme.md, section 12) is the check that two images are KV-compatible: a mismatch there means bump this number.
+KV_EPOCH = 1
+
+# The env switches whose VALUES change the stored bytes by design (a different computation, not a faster route to the same bytes), read from the process environment the
+# tier is opened in (the profile's values over the image's defaults). They go in the fingerprint; a switch that is bit-exact against its baseline (qualified by an audit twin)
+# does not, and the many that do not touch the prefill path do not either. scripts/ci/test_qwen_kv_compat.py classifies EVERY env name of the profile table and of the image's
+# ENV defaults, and fails on a name it has not seen: a new switch must be put in one of its classes, and this tuple must equal its 'kv' class.
+FINGERPRINTED_ENV = (
+    'QWEN_SDPA_BF8',                      # the served KV and the prefill SDPA operands are bf8 (the dtype also shows in io.fingerprint; the switch is what selects it)
+    'QWEN_GDN_PREFILL_MMRS',              # fused out-projection + reduce-scatter in the GDN prefill: a different fp32 summation order, not proven exact
+    'QWEN_PREFIX_CKPT_PRECONVERTED',      # the checkpoint object's form (the model's device-ready host tensors, or torch tensors): a stored form restores only as itself
+)
+DRAFTER_FLAG = 'QWEN_FAST_DRAFTER_CHECKPOINT'
+DRAFTER_MODULE = 'drafter_checkpoint'
 SWEEP_EVERY_S = 60.0
 CMD_EVERY_S = 2.0
 MAX_BATCH_ITEMS = 256
@@ -110,7 +160,7 @@ COUNTER_NAMES = (
     'nvme_deleted_tenant', 'nvme_wipes', 'nvme_audit_reads', 'nvme_audit_mismatches', 'nvme_latched', 'nvme_recovered_entries', 'nvme_recovered_records',
     'nvme_recover_dropped', 'nvme_journal_records', 'nvme_snapshots', 'nvme_store_hits', 'nvme_store_misses', 'nvme_discarded_bytes', 'nvme_through_queued',
     'nvme_through_known', 'nvme_through_dropped_queue', 'nvme_through_copied_blocks', 'nvme_through_copied_bytes', 'nvme_through_copy_ms', 'nvme_through_copy_steps',
-    'nvme_through_failures', 'nvme_spill_retries', 'nvme_refused_zero_retention', 'nvme_unavailable')
+    'nvme_through_failures', 'nvme_spill_retries', 'nvme_refused_zero_retention', 'nvme_unavailable', 'nvme_device_lost')
 GAUGE_NAMES = ('nvme_on', 'nvme_bytes', 'nvme_entries', 'nvme_kv_entries', 'nvme_ckpt_entries', 'nvme_capacity_bytes', 'nvme_free_bytes', 'nvme_queue_bytes',
                'nvme_journal_used_bytes', 'nvme_largest_free_bytes', 'nvme_through_backlog_blocks')
 
@@ -133,8 +183,8 @@ class NotBuilt(NotImplementedError):
 class NvmePlan(object):
     """The NVMe tier's settings (nvme_plan)."""
 
-    __slots__ = ('device', 'ttl_s', 'max_age_s', 'max_bytes', 'verify', 'restore', 'free_floor_bytes', 'queue_bytes', 'threads', 'format', 'discard', 'code_version',
-                 'cmd_dir', 'audit', 'direct', 'snap_bytes', 'journal_bytes', 'spill', 'through_blocks', 'through_idle_s', 'allow_zero_retention')
+    __slots__ = ('device', 'ttl_s', 'max_age_s', 'max_bytes', 'verify', 'restore', 'free_floor_bytes', 'queue_bytes', 'threads', 'format', 'discard', 'compat',
+                 'cmd_dir', 'audit', 'direct', 'snap_bytes', 'journal_bytes', 'spill', 'through_blocks', 'through_idle_s', 'allow_zero_retention', 'drain_s')
 
     @property
     def through(self):
@@ -217,15 +267,15 @@ def parse(env):
     plan.format = 'force' if _switch(env, ENV_FORMAT, problems) else 'auto'
     plan.discard = _switch(env, ENV_DISCARD, problems)
     plan.audit = _switch(env, ENV_AUDIT, problems)
-    version = env.get(ENV_CODE_VERSION)
-    if version not in (None, '') and not TOKEN.fullmatch(version):
-        problems.append('%s=%r is not a short token (letters, digits, . _ -)' % (ENV_CODE_VERSION, version))
-    plan.code_version = version or None
+    token = env.get(ENV_COMPAT)
+    if token not in (None, '') and not TOKEN.fullmatch(token):
+        problems.append('%s=%r is not a short token (letters, digits, . _ -)' % (ENV_COMPAT, token))
+    plan.compat = token or None
     cmd = env.get(ENV_CMD_DIR)
     if cmd not in (None, '') and not PATH.fullmatch(cmd):
         problems.append('%s=%r is not a plain absolute path' % (ENV_CMD_DIR, cmd))
     plan.cmd_dir = cmd or None
-    spill = env.get(ENV_SPILL) or 'evict'
+    spill = env.get(ENV_SPILL) or DEFAULT_SPILL
     if spill not in SPILL_MODES:
         problems.append('%s=%r must be one of %s' % (ENV_SPILL, spill, ', '.join(SPILL_MODES)))
     plan.spill = spill
@@ -234,7 +284,8 @@ def parse(env):
     if spill != 'through':
         knobs = [name for name in (ENV_THROUGH_BLOCKS, ENV_THROUGH_IDLE_S) if env.get(name) not in (None, '')]
         if knobs:
-            problems.append('%s set without %s=through: the evict mode would ignore it' % (', '.join(knobs), ENV_SPILL))
+            problems.append('%s set with %s=%s: the evict mode would ignore it (write-through is the default; drop the knob or the override)' % (', '.join(knobs), ENV_SPILL, spill))
+    plan.drain_s = _digits(env, ENV_DRAIN_S, DEFAULT_DRAIN_S, 0, MAX_DRAIN_S, problems)
     # The retention acknowledgement: the serving process cannot know what its node agent advertises, so the profile says, in so many words, that this node keeps prompt-derived
     # data on a drive for days and is not a zero-retention node.
     if env.get(ENV_RETENTION_ACK) != '1':
@@ -297,40 +348,30 @@ def spare_slots(plan, block_bytes):
 # ------------------------------------------------------------------------------------------------
 # The layout fingerprint
 # ------------------------------------------------------------------------------------------------
-def profile_name(environ):
-    """The serving profile's name: QWEN_C2_PROFILE, else the contract's default (the engine's own resolution)."""
-    name = environ.get('QWEN_C2_PROFILE')
-    if name:
-        return name
+def drafter_identity(environ):
+    """What names the drafter checkpoint a stored checkpoint's window rows were taken for: 'id@revision' from the pinned table (drafter_checkpoint, imported by name so this
+    module's closure does not grow), the table's default when QWEN_FAST_DRAFTER_CHECKPOINT is unset; the bare id, or 'default', when the table cannot be read."""
+    name = str(environ.get(DRAFTER_FLAG) or '').strip()
     try:
-        # (by name, not by an import statement: the registry's image closure must not grow the contract's)
-        contract = importlib.import_module('serving_c2_contract')
-        return contract.load_profile(environ.get('QWEN_C2_PROFILES', contract.PROFILES))['name']
-    except Exception as error:
-        raise ValueError('the NVMe tier cannot tell which serving profile this is (QWEN_C2_PROFILE unset, the default unreadable: %s)' % error)
+        table = importlib.import_module(DRAFTER_MODULE).load()
+        chosen = name or table['default']
+        return '%s@%s' % (chosen, str(table['checkpoints'][chosen]['revision'])[:12])
+    except Exception:
+        return name or 'default'
 
 
-def code_version(plan, environ, reader=None):
-    if plan.code_version:
-        return plan.code_version
-    path = CODE_VERSION_FILE
-    try:
-        with (reader or open)(path) as handle:
-            text = handle.read().strip()
-    except Exception as error:
-        raise ValueError('the NVMe tier cannot tell which image this is: %s unreadable (%s); name it with %s' % (path, error, ENV_CODE_VERSION))
-    if not TOKEN.fullmatch(text):
-        raise ValueError('%s does not hold a short token: %r' % (path, text[:80]))
-    return text
+def layout_fingerprint(io, plan, environ):
+    """(8-byte fingerprint, components): everything that makes a stored block mean something else. An entry whose fingerprint differs is never restored.
 
-
-def layout_fingerprint(io, plan, environ, reader=None):
-    """(8-byte fingerprint, components): everything that makes a stored block mean something else. An entry whose fingerprint differs is never restored."""
+    NOT in it, on purpose: the image build (its source revision) and the serving profile's name. A deploy that changes neither the KV_EPOCH nor one of the components below
+    keeps the tier warm; KV_EPOCH is what a kernel author bumps when a change alters prefill numerics or the byte meaning of what is stored (see its comment).
+    QWEN_PREFIX_NVME_COMPAT is the explicit override: any token other than the empty one is its own fingerprint, so a gate (or an operator) can force a fresh tier."""
     repo, revision = environ.get('QWEN_C2_MODEL_REPO') or '', environ.get('QWEN_C2_MODEL_REVISION') or ''
     components = collections.OrderedDict([
         ('layout', LAYOUT),
+        ('epoch', KV_EPOCH),
         ('model', '%s@%s' % (repo, revision) if repo or revision else 'base'),
-        ('profile', profile_name(environ)),
+        ('drafter', drafter_identity(environ)),
         ('kv', str(getattr(io, 'fingerprint', ''))),
         ('block_bytes', int(getattr(io, 'block_bytes', 0) or 0)),
         ('page', BLOCK),
@@ -338,7 +379,8 @@ def layout_fingerprint(io, plan, environ, reader=None):
         ('mesh', 'tp%s' % (getattr(io, 'chips', None) or '?')),
         ('gdn_bf16', environ.get('QWEN35_GDN_STATE_BF16', '0')),
         ('ckpt_format', CKPT_FORMAT),
-        ('code', code_version(plan, environ, reader)),
+        ('env', ['%s=%s' % (name, environ.get(name, '')) for name in FINGERPRINTED_ENV]),
+        ('compat', plan.compat or ''),
     ])
     text = json.dumps(components, sort_keys=False, separators=(',', ':'))
     return hashlib.sha256(text.encode()).digest()[:8], components
@@ -663,14 +705,14 @@ class NvmeTier(object):
     plus whoever calls delete_salt / wipe (they serialise on the store). Counters are split by thread so none is updated from two: self.c (the scheduler's and callers')
     and self.w (the writer's)."""
 
-    def __init__(self, plan, io, registry, logger=log, clock=time.time, environ=None, store=None, backend=None, reader=None, file_factory=None):
+    def __init__(self, plan, io, registry, logger=log, clock=time.time, environ=None, store=None, backend=None, file_factory=None, probe=None):
         self.plan = plan
         self.io = io
         self.registry = registry
         self.log = logger
         self.clock = clock
         environ = os.environ if environ is None else environ
-        self.fp, self.components = layout_fingerprint(io, plan, environ, reader)
+        self.fp, self.components = layout_fingerprint(io, plan, environ)
         self.block_bytes = int(getattr(io, 'block_bytes', 0) or 0)
         if self.block_bytes and plan.queue_bytes < self.block_bytes:
             raise ValueError('%s=%d holds less than one KV block (%d bytes)' % (ENV_QUEUE, plan.queue_bytes, self.block_bytes))
@@ -680,6 +722,12 @@ class NvmeTier(object):
         self.w = dict.fromkeys(COUNTER_NAMES, 0)
         self.latched = None
         self.closed = False
+        self.stopping = False                    # a graceful stop began: no new offers (set by begin_stop, from a signal handler too: assignments only)
+        self.stop_deadline = None                # clock() time the drain budget ends (set by begin_stop)
+        self.last_health = clock()
+        self._probe = probe                      # None: the store's own device_problem; tests inject a callable -> str or None
+        self._hooks_armed = False
+        self._pid = os.getpid()                  # a forked child must never write the drive its parent holds
         self.failures = 0
         self.read_failures = 0
         self.checked = 0
@@ -700,6 +748,10 @@ class NvmeTier(object):
         self.min_tokens = int(getattr(getattr(registry, 'tier_config', None), 'min_tokens', 0) or 0)
         self._hash_pool = None
         if store is None:
+            # (a drive that a reset or rescan took away can leave its node behind with a size of 0: say so, rather than let the format policy or a short read speak)
+            gone = store_module.device_problem(plan.device) if probe is None else probe()
+            if gone:
+                raise store_module.DeviceGone(gone)
             options = dict(ttl_s=plan.ttl_s, max_age_s=plan.max_age_s, max_bytes=plan.max_bytes, discard=plan.discard, threads=plan.threads)
             kwargs = dict(format=plan.format, direct=plan.direct, snap_bytes=plan.snap_bytes, journal_bytes=plan.journal_bytes, clock=clock)
             if file_factory is not None:
@@ -720,6 +772,7 @@ class NvmeTier(object):
                  plan.device, self.backend.name, plan.ttl_s, plan.max_age_s, plan.max_bytes, self.store.capacity_bytes(), self.store.free_floor_bytes, stats['entries'],
                  stats['kv_entries'], stats['ckpt_entries'], self.store.stats['recovered_records'], self.store.stats['recover_dropped'], dropped, plan.verify,
                  plan.queue_bytes, plan.threads, int(plan.audit), plan.spill, self.fp.hex())
+        self.log('nvme tier fingerprint %s components=%s', self.fp.hex(), json.dumps(self.components, separators=(',', ':')))
         if dropped:
             self.log('nvme tier dropped %d entries of another layout fingerprint (never restored)', dropped)
         self.commands.append(('sweep', None))                  # what expired while the engine was down goes at once
@@ -729,15 +782,42 @@ class NvmeTier(object):
     # -- state ---------------------------------------------------------------------------------------
     @property
     def active(self):
-        return self.latched is None and not self.closed and self.registry.tier_on
+        return self.latched is None and not self.closed and not self.stopping and self.registry.tier_on
 
-    def latch(self, reason):
-        """Stop spilling and restoring for the life of the process (the data stays on the drive)."""
+    def latch(self, reason, lost=False):
+        """Stop spilling and restoring for the life of the process (the data stays on the drive). ONE log line, however many callers find the same trouble. `lost`: the cause is
+        the device itself having gone away (counted as nvme_device_lost too)."""
         if self.latched is None:
-            self.latched = str(reason)
+            self.latched = ('device lost: %s' % reason) if lost else str(reason)
             self.c['nvme_latched'] = 1
-            self.log('nvme tier latched off: %s', reason)
+            if lost:
+                self.c['nvme_device_lost'] = 1
+                self.log('nvme tier DEVICE LOST: %s: latched off, the host tier serves without it until a restart finds the device live', reason)
+            else:
+                self.log('nvme tier latched off: %s', reason)
         self._drop_queue()
+
+    def _device_down(self, error=None):
+        """Why the drive is gone (a sentence), None when nothing says so. From an error: DeviceGone, or an errno that only a vanished device returns. Otherwise the device's
+        node and sysfs entries (device_problem: no IO, so a dead controller cannot hang this)."""
+        if isinstance(error, store_module.DeviceGone):
+            return str(error)
+        if isinstance(error, OSError) and error.errno in GONE_ERRNOS:
+            return '%s (errno %s)' % (error.strerror or type(error).__name__, error.errno)
+        try:
+            if self._probe is not None:
+                return self._probe()
+            return store_module.device_problem(self.plan.device, self.store.geometry.device_bytes)
+        except Exception:
+            return None
+
+    def _io_trouble(self, error=None, strikes=None, what='IO'):
+        """A device call failed. A device that is gone latches the tier at once; otherwise `strikes` (a count of failures in a row) latches it at three."""
+        gone = self._device_down(error)
+        if gone:
+            self.latch(gone, lost=True)
+        elif strikes is not None and strikes >= 3:
+            self.latch('three NVMe %s in a row failed' % what)
 
     # -- the spill sink and the checkpoint offer (scheduler thread) ---------------------------------------
     def offer(self, record):
@@ -888,8 +968,7 @@ class NvmeTier(object):
         io_errors = sum(1 for result in results if result == 'io')
         if io_errors:
             self.read_failures += 1
-            if self.read_failures >= 3:
-                self.latch('three NVMe reads in a row failed')
+            self._io_trouble(None, self.read_failures, 'reads')
         elif all(result is None for result in results):
             self.read_failures = 0
         if bad:
@@ -931,8 +1010,7 @@ class NvmeTier(object):
             self.log('nvme tier checkpoint restore failed pos=%d: %s: %s', pinned.index, type(error).__name__, error)
             if isinstance(error, (OSError, IOError)):
                 self.read_failures += 1
-                if self.read_failures >= 3:
-                    self.latch('three NVMe reads in a row failed')
+                self._io_trouble(error, self.read_failures, 'reads')
             return None
         finally:
             self.reading -= 1
@@ -965,8 +1043,21 @@ class NvmeTier(object):
         tag = from_registry(salt) if from_registry is not None else salt
         return self.delete_tenant(tag)
 
+    def _durable(self, what, call):
+        """Run a deletion on the store. A device that is gone cannot take it: the tier latches (one line), the deletion is reported NOT APPLIED, and 0 comes back - the entries
+        stay on the drive, so the operator repeats the deletion once a restart finds the device live. Any other failure is the caller's."""
+        try:
+            return call()
+        except (OSError, IOError, store_module.StoreError) as error:
+            gone = self._device_down(error)
+            if gone is None:
+                raise
+            self.latch(gone, lost=True)
+            self.log('nvme tier %s NOT APPLIED: the device is gone (%s); the entries stay on the drive until it is live and the deletion is repeated', what, gone)
+            return 0
+
     def delete_tenant(self, tag):
-        removed = self.store.delete_tenant(tag)
+        removed = self._durable('tenant delete', lambda: self.store.delete_tenant(tag))
         self.c['nvme_deleted_tenant'] += removed
         self.log('nvme tier tenant delete entries=%d', removed)
         return removed
@@ -974,7 +1065,7 @@ class NvmeTier(object):
     def wipe(self, why='requested'):
         """Remove everything, durably and at once (a reset_prefix_cache, the kill switch). The queued spills are dropped. -> entries."""
         self._drop_queue()
-        removed = self.store.wipe()
+        removed = self._durable('wipe', self.store.wipe)
         self.c['nvme_wipes'] += 1
         self.log('nvme tier wiped entries=%d why=%s', removed, why)
         return removed
@@ -993,6 +1084,11 @@ class NvmeTier(object):
         if self.closed:
             return
         now = self.clock()
+        if self.latched is None and now - self.last_health >= HEALTH_EVERY_S:
+            self.last_health = now
+            gone = self._device_down()
+            if gone:
+                self.latch(gone, lost=True)
         if self.plan.cmd_dir and now - self.last_cmd >= CMD_EVERY_S:
             self.last_cmd = now
             self._read_commands()
@@ -1058,34 +1154,46 @@ class NvmeTier(object):
 
     def _writer_loop(self):
         while True:
-            with self.cond:
-                while not self.queue and not self.commands and not self.closed:
-                    self.cond.wait(timeout=1.0)
-                if self.closed and not self.queue and not self.commands:
+            try:
+                if self._writer_round():
                     return
-                commands = list(self.commands)
-                self.commands.clear()
-                batch, size = [], 0
-                while self.queue and len(batch) < MAX_BATCH_ITEMS and size < MAX_BATCH_BYTES:
-                    item = self.queue.popleft()
-                    batch.append(item)
-                    size += item.nbytes
-            for command, argument in commands:
-                self._run_command(command, argument)
-            if batch:
-                self._wait_for_readers()
-                try:
-                    self._write_batch(batch)
-                finally:
-                    # the slots go back BEFORE the bytes leave the queue's count: a new offer is admitted only when its retained slot is certain to exist
+            except Exception as error:
+                # whatever went wrong, the thread must not die quietly with the queue full of retained slots: the tier latches (which gives the slots back) and carries on
+                self.log('nvme tier writer error: %s: %s', type(error).__name__, error)
+                self.latch('the NVMe writer thread failed: %s: %s' % (type(error).__name__, error))
+                time.sleep(0.1)
+
+    def _writer_round(self):
+        """One pass of the writer: True when the thread should end."""
+        with self.cond:
+            while not self.queue and not self.commands and not self.closed:
+                self.cond.wait(timeout=1.0)
+            if self.closed and not self.queue and not self.commands:
+                return True
+            commands = list(self.commands)
+            self.commands.clear()
+            batch, size = [], 0
+            while self.queue and len(batch) < MAX_BATCH_ITEMS and size < MAX_BATCH_BYTES:
+                item = self.queue.popleft()
+                batch.append(item)
+                size += item.nbytes
+        for command, argument in commands:
+            self._run_command(command, argument)
+        if batch:
+            self._wait_for_readers()
+            try:
+                self._write_batch(batch)
+            finally:
+                # the slots go back BEFORE the bytes leave the queue's count: a new offer is admitted only when its retained slot is certain to exist
+                for item in batch:
+                    self._release(item)
+                with self.cond:
                     for item in batch:
-                        self._release(item)
-                    with self.cond:
-                        for item in batch:
-                            if isinstance(item, SpillKV):
-                                self.queue_kv_bytes -= item.nbytes
-                            else:
-                                self.queue_ckpt_bytes -= item.nbytes
+                        if isinstance(item, SpillKV):
+                            self.queue_kv_bytes = max(0, self.queue_kv_bytes - item.nbytes)      # (a latch zeroed the counts while this batch was in flight)
+                        else:
+                            self.queue_ckpt_bytes = max(0, self.queue_ckpt_bytes - item.nbytes)
+        return False
 
     def _wait_for_readers(self):
         """A restore is latency-critical and a spill is not: hold the next write while a read is in flight (bounded)."""
@@ -1153,6 +1261,8 @@ class NvmeTier(object):
             try:
                 results = self.store.put_batch(puts)
             except (OSError, IOError, store_module.StoreError) as error:
+                if self._device_down(error):
+                    raise                                 # the drive is gone: a retry would only fail the same way
                 # one retry: a transient device error must not cost a session the one chance its blocks had to be written
                 w['nvme_spill_retries'] += 1
                 self.log('nvme tier spill retry after %s: %s', type(error).__name__, error)
@@ -1162,8 +1272,7 @@ class NvmeTier(object):
             w['nvme_spill_failures'] += 1
             self.failures += 1
             self.log('nvme tier spill failed (%d so far): %s: %s', self.failures, type(error).__name__, error)
-            if self.failures >= 3:
-                self.latch('three NVMe writes in a row failed')
+            self._io_trouble(error, self.failures, 'writes')
             return
         self.failures = 0
         stored = stored_bytes = full = 0
@@ -1235,7 +1344,7 @@ class NvmeTier(object):
         return dict(device=self.plan.device, backend=self.backend.name, ttl_s=self.plan.ttl_s, max_age_s=self.plan.max_age_s, verify=self.plan.verify,
                     audit=int(self.plan.audit), queue_bytes=self.plan.queue_bytes, capacity_bytes=self.store.capacity_bytes(), fingerprint=self.fp.hex(),
                     spill=self.plan.spill, through_blocks=self.plan.through_blocks if self.plan.through else 0,
-                    through_idle_s=self.plan.through_idle_s if self.plan.through else 0)
+                    through_idle_s=self.plan.through_idle_s if self.plan.through else 0, drain_s=self.plan.drain_s)
 
     def flush(self, timeout=30.0):
         """Wait for the queue to empty (tests, a graceful stop). -> True when it did."""
@@ -1252,15 +1361,90 @@ class NvmeTier(object):
         with self.cond:
             return not self.queue and not self.commands and self.queue_kv_bytes == 0 and self.queue_ckpt_bytes == 0
 
-    def close(self):
-        if self.closed:
-            return
-        self.flush(timeout=10.0)
+    # -- the graceful stop ----------------------------------------------------------------------------------
+    def begin_stop(self):
+        """A graceful stop has begun: no new offers or restores from now on, and the drain budget starts. Assignments only - safe in a signal handler."""
+        if not self.stopping:
+            self.stop_deadline = time.monotonic() + (self.plan.drain_s or LEGACY_CLOSE_S)
+            self.stopping = True
+
+    def shutdown(self, budget_s=None):
+        """Drain and close: stop taking offers, let the writer flush the queue for what is left of the budget (QWEN_PREFIX_NVME_DRAIN_S from begin_stop, or `budget_s` from now),
+        drop whatever it could not reach, then journal the TTL clocks, snapshot the index when time remains for it, and close the device. Bounded: it returns by the budget (a
+        writer stuck in a device call is abandoned, not waited for). Idempotent; a forked child does nothing. -> True when the queue was flushed whole."""
+        if self.closed or os.getpid() != self._pid:
+            return True
+        self.begin_stop()
+        if budget_s is not None:
+            self.stop_deadline = time.monotonic() + max(0.0, float(budget_s))
+        began = time.monotonic()
+        remaining = max(0.0, self.stop_deadline - began)
+        drained = True
+        if self.latched is None:
+            drained = self.flush(timeout=max(0.0, remaining - min(SNAPSHOT_BASE_S, remaining / 2.0)))
+        self._drop_queue()                                    # what the flush did not reach is not written: the host tier always lost these
         with self.cond:
             self.closed = True
             self.cond.notify_all()
-        self.writer.join(timeout=10.0)
+        self.writer.join(timeout=max(0.2, self.stop_deadline - time.monotonic()))
+        if self.writer.is_alive():
+            self.log('nvme tier stop: the writer is stuck in a device call; the device is left as it is (the journal is consistent at every record)')
+            return False
+        snapshotted = False
+        if self.latched is None:
+            entries = self.store.snapshot_stats()['entries']
+            if self.stop_deadline - time.monotonic() >= SNAPSHOT_BASE_S + SNAPSHOT_ENTRY_S * entries:
+                try:
+                    self.store.snapshot()
+                    snapshotted = True
+                except Exception as error:
+                    self.log('nvme tier stop: snapshot failed: %s: %s', type(error).__name__, error)
         if self._hash_pool is not None:
             self._hash_pool.shutdown(wait=True)
             self._hash_pool = None
-        self.store.close()
+        try:
+            self.store.close()
+        except Exception as error:
+            self.log('nvme tier stop: close failed: %s: %s', type(error).__name__, error)
+        self.log('nvme tier stopped drained=%d snapshot=%d latched=%d ms=%.0f', int(drained), int(snapshotted), int(self.latched is not None),
+                 (time.monotonic() - began) * 1000.0)
+        return drained
+
+    def close(self, budget_s=None):
+        """Close the tier (a re-attach, a test, the exit hooks): the same bounded drain as a stop."""
+        return self.shutdown(budget_s)
+
+    def arm_stop_hooks(self, signal_module=signal):
+        """Make a graceful stop of this process drain the tier (QWEN_PREFIX_NVME_DRAIN_S > 0; the registry calls this once the tier is open). Three hooks, all calling
+        shutdown(): the SIGTERM handler, CHAINED so that the drain clock starts at the signal and the writer flushes while the engine shuts itself down (when the previous
+        handler is the default one, nothing would run at all, so this one drains and re-raises the signal with the default disposition); a multiprocessing finalizer (an
+        engine-core child leaves through os._exit, which skips atexit); and atexit. -> True when armed."""
+        if self._hooks_armed or self.plan.drain_s <= 0:
+            return False
+        self._hooks_armed = True
+        try:
+            previous = signal_module.getsignal(signal_module.SIGTERM)
+            if previous != signal_module.SIG_IGN:
+                tier = self
+
+                def handler(signum, frame):
+                    if os.getpid() != tier._pid:
+                        return previous(signum, frame) if callable(previous) else None
+                    tier.begin_stop()
+                    if callable(previous):
+                        return previous(signum, frame)
+                    tier.shutdown()
+                    signal_module.signal(signum, signal_module.SIG_DFL)
+                    os.kill(os.getpid(), signum)
+
+                signal_module.signal(signal_module.SIGTERM, handler)
+        except (ValueError, OSError, AttributeError):
+            pass                                              # not the main thread: the finalizers below still run on an exit
+        try:
+            from multiprocessing import util as multiprocessing_util
+
+            multiprocessing_util.Finalize(None, self.shutdown, exitpriority=100)
+        except Exception:
+            pass
+        atexit.register(self.shutdown)
+        return True

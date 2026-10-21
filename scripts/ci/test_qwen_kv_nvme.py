@@ -17,11 +17,14 @@ Held:
 """
 
 import array
+import errno
 import hashlib
 import json
 import os
 import random
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -51,8 +54,10 @@ ALIGN = store_module.ALIGN
 
 def nvme_environ(device, **extra):
     environ = {'QWEN_PREFIX_NVME': '1', 'QWEN_PREFIX_NVME_DEVICE': device, 'QWEN_PREFIX_NVME_VERIFY': 'all', 'QWEN_PREFIX_NVME_QUEUE_BYTES': str(16 << 20),
-               'QWEN_C2_PROFILE': PROFILE, 'QWEN_PREFIX_NVME_CODE_VERSION': 'rev1', 'QWEN_PREFIX_NVME_THREADS': '2',
-               'QWEN_PREFIX_NVME_RETENTION_ACK': '1'}
+               'QWEN_C2_PROFILE': PROFILE, 'QWEN_PREFIX_NVME_COMPAT': 'rev1', 'QWEN_PREFIX_NVME_THREADS': '2',
+               'QWEN_PREFIX_NVME_RETENTION_ACK': '1',
+               # (the rig is the evict mode with no stop hooks unless a test asks otherwise: the defaults - write-through, a 4 s drain that arms process-wide hooks - have their own tests)
+               'QWEN_PREFIX_NVME_SPILL': 'evict', 'QWEN_PREFIX_NVME_DRAIN_S': '0'}
     environ.update(extra)
     return environ
 
@@ -187,7 +192,7 @@ class FlagTests(unittest.TestCase):
     def test_defaults(self):
         plan, problems = kvnvme.parse(ACKED)
         self.assertEqual(problems, [])
-        self.assertEqual((plan.spill, plan.through_blocks, plan.through_idle_s, plan.allow_zero_retention), ('evict', 32, 60, False))
+        self.assertEqual((plan.spill, plan.through_blocks, plan.through_idle_s, plan.allow_zero_retention), ('through', 32, 0, False))
         self.assertEqual((plan.device, plan.ttl_s, plan.max_age_s, plan.max_bytes, plan.verify, plan.restore, plan.free_floor_bytes),
                          ('/dev/nvme1n1', 86400, 0, 0, 'sample', 'host', None))
         self.assertEqual((plan.queue_bytes, plan.threads, plan.format, plan.discard, plan.audit, plan.cmd_dir), (2 << 30, 4, 'auto', False, False, None))
@@ -201,7 +206,8 @@ class FlagTests(unittest.TestCase):
             ('QWEN_PREFIX_NVME_TTL_S', ' 5'), ('QWEN_PREFIX_NVME_TTL_S', '99999999999'), ('QWEN_PREFIX_NVME_MAX_AGE_S', 'x'), ('QWEN_PREFIX_NVME_MAX_BYTES', '12.5'),
             ('QWEN_PREFIX_NVME_MAX_BYTES', '4096'), ('QWEN_PREFIX_NVME_VERIFY', 'fast'), ('QWEN_PREFIX_NVME_RESTORE', 'dma'), ('QWEN_PREFIX_NVME_FREE_FLOOR_BYTES', '-1'),
             ('QWEN_PREFIX_NVME_QUEUE_BYTES', '1024'), ('QWEN_PREFIX_NVME_THREADS', '0'), ('QWEN_PREFIX_NVME_THREADS', '65'), ('QWEN_PREFIX_NVME_FORMAT', 'yes'),
-            ('QWEN_PREFIX_NVME_DISCARD', '2'), ('QWEN_PREFIX_NVME_AUDIT', 'on'), ('QWEN_PREFIX_NVME_CODE_VERSION', 'a b'), ('QWEN_PREFIX_NVME_CODE_VERSION', 'x' * 65),
+            ('QWEN_PREFIX_NVME_DISCARD', '2'), ('QWEN_PREFIX_NVME_AUDIT', 'on'), ('QWEN_PREFIX_NVME_COMPAT', 'a b'), ('QWEN_PREFIX_NVME_COMPAT', 'x' * 65),
+            ('QWEN_PREFIX_NVME_DRAIN_S', '9'), ('QWEN_PREFIX_NVME_DRAIN_S', '-1'), ('QWEN_PREFIX_NVME_DRAIN_S', '2.5'),
             ('QWEN_PREFIX_NVME_CMD_DIR', 'relative/dir')]
         for name, value in bad:
             plan, problems = kvnvme.parse(dict(base, **{name: value}))
@@ -209,8 +215,8 @@ class FlagTests(unittest.TestCase):
             self.assertTrue(any(name in problem for problem in problems), (name, value, problems))
         good = dict(base, QWEN_PREFIX_NVME_TTL_S='3600', QWEN_PREFIX_NVME_MAX_AGE_S='86400', QWEN_PREFIX_NVME_MAX_BYTES='1073741824', QWEN_PREFIX_NVME_VERIFY='all',
                     QWEN_PREFIX_NVME_FREE_FLOOR_BYTES='0', QWEN_PREFIX_NVME_QUEUE_BYTES=str(1 << 30), QWEN_PREFIX_NVME_THREADS='8', QWEN_PREFIX_NVME_FORMAT='1',
-                    QWEN_PREFIX_NVME_DISCARD='1', QWEN_PREFIX_NVME_AUDIT='1', QWEN_PREFIX_NVME_CODE_VERSION='abc-1.2_x', QWEN_PREFIX_NVME_CMD_DIR='/models/.qwen-c2/nvme', QWEN_PREFIX_NVME_SPILL='through', QWEN_PREFIX_NVME_THROUGH_BLOCKS='64',
-                    QWEN_PREFIX_NVME_THROUGH_IDLE_S='0', QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION='1')
+                    QWEN_PREFIX_NVME_DISCARD='1', QWEN_PREFIX_NVME_AUDIT='1', QWEN_PREFIX_NVME_COMPAT='abc-1.2_x', QWEN_PREFIX_NVME_CMD_DIR='/models/.qwen-c2/nvme', QWEN_PREFIX_NVME_SPILL='through', QWEN_PREFIX_NVME_THROUGH_BLOCKS='64',
+                    QWEN_PREFIX_NVME_THROUGH_IDLE_S='0', QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION='1', QWEN_PREFIX_NVME_DRAIN_S='8')
         plan, problems = kvnvme.parse(good)
         self.assertEqual(problems, [])
         self.assertEqual((plan.ttl_s, plan.max_age_s, plan.max_bytes, plan.free_floor_bytes, plan.format, plan.discard, plan.audit),
@@ -240,12 +246,25 @@ class FlagTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'QWEN_PREFIX_NVME_RETENTION_ACK'):
             PrefixRegistry(budget_bytes=1 << 20, environ={'QWEN_PREFIX_NVME': '1', 'QWEN_PREFIX_NVME_DEVICE': '/dev/x', 'QWEN_PREFIX_HOST_TIER_GIB': '1'})
 
-    def test_the_through_knobs_mean_something_only_beside_the_through_mode(self):
+    def test_write_through_is_the_default_and_idle_zero_means_at_once(self):
+        plan, problems = kvnvme.parse(ACKED)
+        self.assertEqual((problems, plan.spill, plan.through, plan.through_blocks, plan.through_idle_s), ([], 'through', True, 32, 0))
+        self.assertEqual(plan.drain_s, 4)
+        self.assertEqual((kvnvme.DEFAULT_SPILL, kvnvme.DEFAULT_THROUGH_IDLE_S), ('through', 0))
+
+    def test_the_through_knobs_are_valid_by_default_and_refused_beside_the_evict_override(self):
         plan, problems = kvnvme.parse(dict(ACKED, QWEN_PREFIX_NVME_THROUGH_BLOCKS='8'))
-        self.assertIsNone(plan)
-        self.assertTrue(any('without QWEN_PREFIX_NVME_SPILL=through' in problem for problem in problems), problems)
+        self.assertEqual((problems, plan.through, plan.through_blocks), ([], True, 8))
+        plan, problems = kvnvme.parse(dict(ACKED, QWEN_PREFIX_NVME_THROUGH_IDLE_S='30'))
+        self.assertEqual((problems, plan.through_idle_s), ([], 30))
         plan, problems = kvnvme.parse(dict(ACKED, QWEN_PREFIX_NVME_SPILL='through', QWEN_PREFIX_NVME_THROUGH_BLOCKS='8'))
         self.assertEqual((problems, plan.through, plan.through_blocks), ([], True, 8))
+        for knob in ('QWEN_PREFIX_NVME_THROUGH_BLOCKS', 'QWEN_PREFIX_NVME_THROUGH_IDLE_S'):
+            plan, problems = kvnvme.parse(dict(ACKED, QWEN_PREFIX_NVME_SPILL='evict', **{knob: '8'}))
+            self.assertIsNone(plan)
+            self.assertTrue(any(knob in problem and 'evict mode would ignore it' in problem for problem in problems), problems)
+        plan, problems = kvnvme.parse(dict(ACKED, QWEN_PREFIX_NVME_SPILL='evict'))
+        self.assertEqual((problems, plan.spill, plan.through), ([], 'evict', False))
 
     def test_the_registry_refuses_to_start_on_a_bad_value_or_without_the_host_tier(self):
         with self.assertRaisesRegex(ValueError, 'QWEN_PREFIX_NVME_TTL_S'):
@@ -267,26 +286,26 @@ class FlagTests(unittest.TestCase):
 
 class FingerprintTests(unittest.TestCase):
     def plan(self, **env):
-        plan, problems = kvnvme.parse(dict(dict(ACKED, QWEN_PREFIX_NVME_CODE_VERSION='rev1'), **env))
+        plan, problems = kvnvme.parse(dict(ACKED, **env))
         self.assertEqual(problems, [])
         return plan
 
     def fingerprint(self, io=None, environ=None, **plan_env):
-        plan = self.plan(**plan_env)
-        environ = dict({'QWEN_C2_PROFILE': PROFILE}, **(environ or {}))
-        return kvnvme.layout_fingerprint(io or FakeKvIO(), plan, environ)
+        return kvnvme.layout_fingerprint(io or FakeKvIO(), self.plan(**plan_env), dict(environ or {}))
 
     def test_the_fingerprint_names_what_makes_a_block_mean_something_else(self):
         base, components = self.fingerprint()
         self.assertEqual(len(base), 8)
-        self.assertEqual(list(components), ['layout', 'model', 'profile', 'kv', 'block_bytes', 'page', 'chunk', 'mesh', 'gdn_bf16', 'ckpt_format', 'code'])
+        self.assertEqual(list(components), ['layout', 'epoch', 'model', 'drafter', 'kv', 'block_bytes', 'page', 'chunk', 'mesh', 'gdn_bf16', 'ckpt_format', 'env', 'compat'])
         self.assertEqual(self.fingerprint()[0], base, 'deterministic')
         changed = {
-            'profile': self.fingerprint(environ={'QWEN_C2_PROFILE': 'other'})[0],
             'model repo': self.fingerprint(environ={'QWEN_C2_MODEL_REPO': 'org/model', 'QWEN_C2_MODEL_REVISION': 'a' * 40})[0],
             'model revision': self.fingerprint(environ={'QWEN_C2_MODEL_REPO': 'org/model', 'QWEN_C2_MODEL_REVISION': 'b' * 40})[0],
-            'code version': self.fingerprint(QWEN_PREFIX_NVME_CODE_VERSION='rev2')[0],
+            'compat token': self.fingerprint(QWEN_PREFIX_NVME_COMPAT='rev2')[0],
+            'another compat token': self.fingerprint(QWEN_PREFIX_NVME_COMPAT='rev3')[0],
             'gdn dtype': self.fingerprint(environ={'QWEN35_GDN_STATE_BF16': '1'})[0],
+            'a byte-defining switch': self.fingerprint(environ={'QWEN_SDPA_BF8': '1'})[0],
+            'drafter': self.fingerprint(environ={'QWEN_FAST_DRAFTER_CHECKPOINT': 'some-other-drafter'})[0],
         }
         io = FakeKvIO()
         io.fingerprint = 'another-kv-layout'
@@ -297,22 +316,36 @@ class FingerprintTests(unittest.TestCase):
         io3 = FakeKvIO()
         io3.chips = 4
         changed['mesh'] = self.fingerprint(io=io3)[0]
+        with mock.patch.object(kvnvme, 'KV_EPOCH', kvnvme.KV_EPOCH + 1):
+            changed['epoch'] = self.fingerprint()[0]
         self.assertEqual(len(set(changed.values()) | {base}), len(changed) + 1, changed)
 
-    def test_the_code_version_comes_from_the_image_file_when_not_named_and_is_required(self):
-        plan, _ = kvnvme.parse(ACKED)
-        import io as iolib
+    def test_a_deploy_does_not_change_it_neither_the_profile_name_nor_the_image_build(self):
+        base = self.fingerprint(environ={'QWEN_C2_PROFILE': 'one-profile'})[0]
+        self.assertEqual(self.fingerprint(environ={'QWEN_C2_PROFILE': 'another-profile-name'})[0], base)
+        self.assertEqual(self.fingerprint(environ={})[0], base)
+        # the image's source revision file is not read any more (no code-version component exists)
+        with mock.patch('builtins.open', side_effect=AssertionError('the fingerprint must not read a file')):
+            self.assertEqual(self.fingerprint(environ={'QWEN_C2_PROFILE': 'x'})[0], base)
+        self.assertFalse(hasattr(kvnvme, 'code_version') or hasattr(kvnvme, 'CODE_VERSION_FILE'))
 
-        value = kvnvme.code_version(plan, {}, reader=lambda path: iolib.StringIO('86a8d3c-s5b\n'))
-        self.assertEqual(value, '86a8d3c-s5b')
-        with self.assertRaisesRegex(ValueError, 'cannot tell which image'):
-            kvnvme.code_version(plan, {}, reader=lambda path: (_ for _ in ()).throw(FileNotFoundError(path)))
-        with self.assertRaisesRegex(ValueError, 'short token'):
-            kvnvme.code_version(plan, {}, reader=lambda path: iolib.StringIO('not a token!'))
+    def test_the_drafter_is_the_pinned_table_entry_and_the_default_is_the_unset_flag(self):
+        table = json.loads((Path(__file__).resolve().parent / 'drafter_checkpoints.json').read_text(encoding='utf-8'))
+        default = table['default']
+        identity = kvnvme.drafter_identity({})
+        self.assertEqual(identity, '%s@%s' % (default, table['checkpoints'][default]['revision'][:12]))
+        self.assertEqual(kvnvme.drafter_identity({'QWEN_FAST_DRAFTER_CHECKPOINT': default}), identity, 'naming the default is not another drafter')
+        self.assertEqual(kvnvme.drafter_identity({'QWEN_FAST_DRAFTER_CHECKPOINT': 'not-in-the-table'}), 'not-in-the-table')
+        with mock.patch.object(kvnvme.importlib, 'import_module', side_effect=ImportError('no table')):
+            self.assertEqual(kvnvme.drafter_identity({}), 'default')
+            self.assertEqual(kvnvme.drafter_identity({'QWEN_FAST_DRAFTER_CHECKPOINT': 'x-y'}), 'x-y')
 
-    def test_the_profile_must_be_known(self):
-        with self.assertRaisesRegex(ValueError, 'which serving profile'):
-            kvnvme.profile_name({'QWEN_C2_PROFILES': '/nonexistent/profiles.json'})
+    def test_the_epoch_is_a_plain_integer_a_kernel_author_can_bump(self):
+        self.assertIs(type(kvnvme.KV_EPOCH), int)
+        self.assertGreaterEqual(kvnvme.KV_EPOCH, 1)
+        source = (Path(__file__).resolve().parent / 'qwen_kv_nvme.py').read_text(encoding='utf-8')
+        self.assertIn('BUMP IT', source)
+        self.assertIn('prefill NUMERICS', source)
 
 
 class FakeTorch(object):
@@ -936,7 +969,7 @@ class FingerprintDropTests(NvmeCase):
         entries = made.registry.snapshot()['nvme_entries']
         self.assertGreater(entries, 0)
         made.close()
-        other = self.rig(nvme_env={'QWEN_C2_PROFILE': 'another-profile'})
+        other = self.rig(environ={'QWEN_SDPA_BF8': '1'})                # a switch that changes the stored bytes by design
         stats = other.registry.snapshot()
         self.assertEqual((stats['nvme_fp_drops'], stats['nvme_entries']), (entries, 0))
         self.assertTrue(any('dropped %d entries of another layout fingerprint' % entries in line for line in other.lines), other.lines[:4])
@@ -944,15 +977,39 @@ class FingerprintDropTests(NvmeCase):
         self.assertEqual(start, 0)
         self.assertEqual(other.registry.snapshot()['nvme_restore_requests'], 0)
         other.close()
-        back = self.rig()
-        self.assertEqual(back.registry.snapshot()['nvme_entries'] - back.registry.snapshot()['nvme_ckpt_entries'] >= 0, True)
 
-    def test_a_new_code_version_is_a_new_fingerprint(self):
+    def test_a_deploy_keeps_the_tier_warm_a_new_profile_name_and_image_do_not_matter(self):
+        made = self.rig()
+        a = self.push_all_the_way(made, first_turn())
+        entries = made.registry.snapshot()['nvme_entries']
+        self.assertGreater(entries, 0)
+        made.close()
+        # another image build serving a renamed profile, and a switch that is bit-exact against its baseline flipped: the same tier
+        after = self.rig(environ={'QWEN_C2_PROFILE': 'a-renamed-profile', 'QWEN_FAST_SDPA_PF_ONEQ': '1', 'QWEN_FAST_LEVER_N': '1'})
+        stats = after.registry.snapshot()
+        self.assertEqual((stats['nvme_fp_drops'], stats['nvme_entries']), (0, entries))
+        start, grant = after.serve(self.returning(a))
+        self.assertEqual((start, grant.q), (4096, 4096), 'the returning session restored from the drive after the deploy')
+        self.assertGreater(after.registry.snapshot()['nvme_restore_blocks'], 0)
+        self.assertTrue(after.check_kv())
+        after.close()
+
+    def test_a_new_epoch_is_a_new_fingerprint(self):
         made = self.rig()
         self.push_out(made, first_turn())
         made.close()
-        newer = self.rig(nvme_env={'QWEN_PREFIX_NVME_CODE_VERSION': 'rev2'})
+        with mock.patch.object(kvnvme, 'KV_EPOCH', kvnvme.KV_EPOCH + 1):
+            newer = self.rig()
+            self.assertEqual(newer.registry.snapshot()['nvme_entries'], 0)
+            newer.close()
+
+    def test_the_compat_token_forces_a_fresh_tier(self):
+        made = self.rig()
+        self.push_out(made, first_turn())
+        made.close()
+        newer = self.rig(nvme_env={'QWEN_PREFIX_NVME_COMPAT': 'rev2'})
         self.assertEqual(newer.registry.snapshot()['nvme_entries'], 0)
+        newer.close()
 
 
 class DeletionTests(NvmeCase):
@@ -1487,6 +1544,542 @@ class WriteThroughTests(NvmeCase):
         self.assertGreater(stats['nvme_through_copied_blocks'], 0)
         self.assertEqual((stats['nvme_digest_failures'], stats['nvme_spill_failures'], stats['nvme_through_failures']), (0, 0, 0))
         self.assertEqual(len(made.registry.tier.held), 0)
+
+
+class DefaultWriteThroughTests(NvmeCase):
+    """The defaults (owner, 2026-10-21): write-through, idle 0. A finished session is queued for the drive at the next step, with nothing evicted and the clock not advancing."""
+
+    def test_idle_zero_is_immediate_not_off(self):
+        made = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': ''})               # (no override: whatever the defaults are)
+        self.assertEqual((made.nvme.plan.spill, made.nvme.plan.through_idle_s, made.nvme.plan.through_blocks), ('through', 0, 32))
+        self.assertIsNotNone(made.registry.tier.commit_sink)
+        frozen = types.SimpleNamespace(now=5000.0)
+        made.graft.kill_switch.clock = lambda: frozen.now                                       # (time never moves: 'idle 0' must not wait for it)
+        a = first_turn()
+        made.serve(a)
+        self.assertGreater(made.nvme.backlog_blocks, 0, 'the finished request is queued for the copy')
+        for index in range(8):
+            made.serve(Request('idle-%d' % index, span(300, 900 + index), salt=salt_of('idler')))
+        made.settle()
+        self.assertEqual(made.nvme_has_session(a, 64).count(True), 64, 'every block reached the drive without an eviction and without the clock moving')
+        self.assertEqual(made.registry.snapshot()['tier_spill_blocks'], 0)
+        self.assertIsNotNone(made.nvme.store.lookup(store_module.CKPT, a.block_hashes[63]))
+        self.assertEqual(made.nvme.backlog_blocks, 0)
+
+    def test_the_evict_override_is_still_a_choice(self):
+        made = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': 'evict'})
+        self.assertIsNone(made.registry.tier.commit_sink)
+        made.serve(first_turn())
+        made.settle()
+        self.assertEqual(made.registry.snapshot()['nvme_entries'], 0)
+
+    def test_a_deploy_restart_keeps_a_session_that_was_never_evicted(self):
+        made = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': ''})
+        a = first_turn()
+        made.serve(a)
+        for index in range(8):
+            made.serve(Request('idle-%d' % index, span(300, 900 + index), salt=salt_of('idler')))
+        made.close()                                                                            # the drain
+        again = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': ''}, environ={'QWEN_C2_PROFILE': 'the-next-profile'})
+        start, grant = again.serve(self.returning(a))
+        self.assertEqual((start, grant.q), (4096, 4096))
+        self.assertTrue(again.check_kv())
+
+
+class DriveLossTests(NvmeCase):
+    """The drive vanishing at run time (a PCI rescan after a card reset disabled its controller: the node stays, the namespace reads 0 bytes). The tier degrades to the host tier with
+    ONE line and one counter, never crashes or wedges the scheduler, and comes back on a restart once the device is live."""
+
+    def lost(self, made, why='the namespace nvme0n1 now reads 0 bytes'):
+        state = types.SimpleNamespace(problem=None)
+        made.nvme._probe = lambda: state.problem
+        state.why = why
+        return state
+
+    def trouble(self, made):
+        return [line for line in made.lines if 'DEVICE LOST' in line]
+
+    def traffic(self, made, count=8):
+        """Short requests: the scheduler steps that run the idle copy of whatever finished before them."""
+        for index in range(count):
+            made.serve(Request('idle-%d-%d' % (len(made.rows), index), span(300, 900 + index), salt=salt_of('idler')))
+
+    def assert_degraded(self, made, a):
+        stats = made.registry.snapshot()
+        self.assertEqual((stats['nvme_device_lost'], stats['nvme_latched'], stats['nvme_on']), (1, 1, 0))
+        self.assertEqual(len(self.trouble(made)), 1, [line for line in made.lines if 'nvme' in line][-6:])
+        before = len(made.lines)
+        # the engine carries on: new sessions, a returning one (a cold prefill or a host-tier hit), the idle copy and the spill sink all quiet
+        made.serve(first_turn('b1', 'beta', seed=5))
+        start, grant = made.serve(self.returning(a))
+        self.assertTrue(made.check_kv())
+        for index in range(6):
+            made.serve(Request('more-%d' % index, span(6000, 70 + index), salt=salt_of('filler%d' % index)))
+        self.assertEqual([line for line in made.lines[before:] if 'nvme tier' in line], [], 'one line, however long the drive stays gone')
+        self.assertEqual(made.registry.snapshot()['nvme_device_lost'], 1)
+        self.assertFalse(made.graft.tier_hooks.idle, 'nothing is waiting for a copy toward a drive that is gone')
+
+    def test_the_health_look_notices_the_vanished_namespace_between_steps(self):
+        made = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': ''})
+        state = self.lost(made)
+        a = first_turn()
+        made.serve(a)
+        self.traffic(made)
+        made.settle()
+        self.assertEqual(made.registry.snapshot()['nvme_on'], 1)
+        state.problem = state.why
+        made.nvme.last_health = 0.0                                                             # (the periodic look is due)
+        made.nvme.poll()
+        self.assertIn('device lost', made.nvme.latched)
+        self.assert_degraded(made, a)
+
+    def test_a_write_the_device_refuses_with_a_gone_errno_latches_at_once_with_no_retry(self):
+        made = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': ''})
+        a = first_turn()
+
+        def fail(op, offset, length):
+            if op in ('write', 'sync'):
+                raise OSError(errno.ENODEV, 'No such device')
+
+        made.nvme.store.bf.fail = fail
+        made.serve(a)
+        self.traffic(made)
+        made.nvme.flush(10.0)
+        stats = made.registry.snapshot()
+        self.assertEqual((stats['nvme_spill_failures'], stats['nvme_spill_retries']), (1, 0), 'one failed batch, and no second try on a device that is gone')
+        self.assert_degraded(made, a)
+
+    def test_an_io_error_latches_at_once_when_the_probe_says_the_device_is_gone_else_after_three(self):
+        made = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': ''})
+        state = self.lost(made)
+
+        def fail(op, offset, length):
+            if op in ('write', 'sync'):
+                raise OSError(errno.EIO, 'Input/output error')
+
+        made.nvme.store.bf.fail = fail
+        a = first_turn()
+        state.problem = None
+        made.serve(a)
+        self.traffic(made)
+        made.nvme.flush(10.0)
+        self.assertIsNone(made.nvme.latched, 'an EIO the probe cannot explain is a strike, not a verdict')
+        self.assertTrue(0 < made.registry.snapshot()['nvme_spill_failures'] < 3)
+        made.nvme.failures = 0                                                                  # (clean slate: the next failure alone must decide)
+        state.problem = state.why
+        made.serve(first_turn('b1', 'beta', seed=5))
+        self.traffic(made)
+        made.nvme.flush(10.0)
+        self.assertIn('device lost', made.nvme.latched or '')
+        self.assert_degraded(made, a)
+
+    def test_reads_of_a_vanished_drive_make_the_returning_turn_cold_and_latch(self):
+        made = self.rig()
+        a = self.push_all_the_way(made, first_turn())
+        self.assertGreater(made.registry.snapshot()['nvme_entries'], 60)
+        made.close()
+        again = self.rig()
+        state = self.lost(again)
+        state.problem = state.why
+
+        def fail(op, offset, length):
+            if op == 'read':
+                raise OSError(errno.EIO, 'Input/output error')
+
+        again.nvme.store.bf.fail = fail
+        start, grant = again.serve(self.returning(a))
+        self.assertEqual(start, 0, 'a cold prefill: the NVMe blocks could not be read')
+        self.assertTrue(again.check_kv())
+        self.assertIn('device lost', again.nvme.latched)
+        self.assertEqual(again.registry.snapshot()['nvme_device_lost'], 1)
+        self.assertEqual(len(self.trouble(again)), 1)
+
+    def test_a_checkpoint_read_of_a_vanished_drive_latches_too(self):
+        made = self.rig()
+        a = self.push_all_the_way(made, first_turn())
+        entry = made.nvme.store.lookup(store_module.CKPT, a.block_hashes[63])
+        self.assertIsNotNone(entry)
+        state = self.lost(made)
+        state.problem = state.why
+
+        def fail(op, offset, length):
+            if op == 'read':
+                raise OSError(errno.ENXIO, 'No such device or address')
+
+        made.nvme.store.bf.fail = fail
+        self.assertIsNone(made.nvme.load_checkpoint(entry))
+        self.assertIn('device lost', made.nvme.latched)
+        self.assertEqual(len(self.trouble(made)), 1)
+
+    def test_a_wipe_or_a_tenant_delete_that_cannot_reach_the_drive_says_so_and_does_not_raise(self):
+        made = self.rig()
+        a = self.push_out(made, first_turn())
+        self.assertGreater(made.registry.snapshot()['nvme_entries'], 0)
+        state = self.lost(made)
+        state.problem = state.why
+
+        def fail(op, offset, length):
+            if op in ('write', 'sync'):
+                raise OSError(errno.EIO, 'Input/output error')
+
+        made.nvme.store.bf.fail = fail
+        self.assertEqual(made.nvme.wipe('test'), 0)
+        self.assertTrue(any('wipe NOT APPLIED' in line for line in made.lines), made.lines[-4:])
+        self.assertGreater(len(made.nvme.store.entries), 0, 'the entries are still the drive\'s')
+        self.assertEqual(made.nvme.delete_salt(a.cache_salt), 0)
+        self.assertTrue(any('tenant delete NOT APPLIED' in line for line in made.lines))
+        self.assertEqual(len(self.trouble(made)), 1)
+        # a failure the probe cannot explain is not swallowed
+        state.problem = None
+        made.nvme.latched = None
+        with self.assertRaises(OSError):
+            made.nvme.wipe('test')
+
+    def test_the_tier_is_back_after_a_restart_once_the_device_is_live(self):
+        made = self.rig()
+        a = self.push_all_the_way(made, first_turn())
+        entries = made.registry.snapshot()['nvme_entries']
+        self.assertGreater(entries, 60)
+        state = self.lost(made)
+        state.problem = state.why
+        made.nvme.last_health = 0.0
+        made.nvme.poll()
+        self.assertIsNotNone(made.nvme.latched)
+        made.close()
+        back = self.rig()
+        self.assertEqual((back.registry.snapshot()['nvme_on'], back.registry.snapshot()['nvme_entries']), (1, entries))
+        start, grant = back.serve(self.returning(a))
+        self.assertEqual((start, grant.q), (4096, 4096))
+
+    def test_a_namespace_that_reads_zero_bytes_at_start_is_unavailable_and_never_formatted(self):
+        with open(self.device, 'wb') as handle:
+            handle.truncate(0)
+        for extra in ({}, {'QWEN_PREFIX_NVME_FORMAT': '1'}):
+            made = NvmeRig(self.device, tier=self.TIER, num_blocks=SMALL_POOL, budget=1 << 20, nvme_env=extra)
+            self.addCleanup(made.close)
+            self.assertIsNone(made.registry.nvme)
+            self.assertEqual(made.registry.nvme_refusal, 'unavailable')
+            self.assertTrue(any('nvme tier UNAVAILABLE' in line and 'reads 0 bytes' in line for line in made.lines), made.lines[:3])
+            self.assertEqual(os.path.getsize(self.device), 0, 'nothing was written to it')
+        with self.assertRaises(store_module.DeviceGone):
+            store_module.NvmeStore.open(self.device, format='force')
+        self.assertEqual(os.path.getsize(self.device), 0)
+
+    def test_the_writer_thread_never_dies_quietly(self):
+        made = self.rig()
+        original = made.nvme._write_batch
+
+        def broken(batch):
+            raise RuntimeError('boom')
+
+        made.nvme._write_batch = broken
+        self.push_out(made, first_turn())
+        self.assertTrue(made.nvme.flush(10.0), 'the queue drained: the writer latched and gave the slots back')
+        self.assertIn('writer thread failed', made.nvme.latched)
+        self.assertEqual(made.nvme.queue_kv_bytes + made.nvme.queue_ckpt_bytes, 0)
+        self.assertTrue(made.check_kv())
+        made.nvme._write_batch = original
+
+
+class DeviceProbeTests(unittest.TestCase):
+    """device_problem: a stat and a few sysfs attribute reads, never device IO."""
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp(prefix='qkvn-sysfs-')
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.sysfs = os.path.join(self.directory, 'sys')
+        self.node = os.path.join(self.directory, 'nvme9n1')
+        Path(self.node).write_bytes(b'x' * 4096)
+        patcher = mock.patch.object(store_module.stat, 'S_ISBLK', lambda mode: True)       # (a regular file stands in for the block node)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def attribute(self, relative, text):
+        path = os.path.join(self.sysfs, relative)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        Path(path).write_text(text + '\n')
+
+    def live(self, sectors='1953525168', state='live'):
+        self.attribute('block/nvme9n1/size', sectors)
+        self.attribute('block/nvme9n1/device/state', state)
+        self.attribute('class/nvme/nvme9/state', state)
+
+    def problem(self, expect=0):
+        return store_module.device_problem(self.node, expect, self.sysfs)
+
+    def test_a_live_device_is_fine(self):
+        self.live()
+        self.assertIsNone(self.problem(expect=900 << 30))
+
+    def test_a_dead_controller_is_reported_whichever_attribute_says_so(self):
+        self.live(state='dead')
+        self.assertIn('is dead', self.problem())
+        self.live()
+        self.attribute('block/nvme9n1/device/state', 'live')
+        self.attribute('class/nvme/nvme9/state', 'deleting')
+        self.assertIn('is deleting', self.problem())
+
+    def test_a_namespace_that_reads_zero_bytes_or_less_than_it_was_formatted_for(self):
+        self.live(sectors='0')
+        self.assertIn('reads 0 bytes', self.problem())
+        self.live(sectors='2048')
+        self.assertIn('now reads 1048576 bytes, the store was formatted for 2097152', self.problem(expect=2 << 20))
+        self.assertIsNone(self.problem(expect=1 << 20))
+
+    def test_transient_states_are_not_a_verdict(self):
+        for state in ('resetting', 'connecting', 'new'):
+            self.live(state=state)
+            self.assertIsNone(self.problem(), state)
+
+    def test_a_node_with_no_sysfs_entry_is_gone_but_a_host_without_block_sysfs_cannot_be_asked(self):
+        os.makedirs(os.path.join(self.sysfs, 'block', 'nvme0n1'))
+        self.assertIn('no sysfs entry', self.problem())
+        self.assertIsNone(store_module.device_problem(self.node, 0, os.path.join(self.directory, 'no-sysfs-here')))
+
+    def test_a_node_that_is_gone(self):
+        os.remove(self.node)
+        self.assertIn('is gone', self.problem())
+
+    def test_a_regular_file_stands_in_for_a_device_in_the_tests(self):
+        with mock.patch.object(store_module.stat, 'S_ISBLK', lambda mode: False):
+            self.assertIsNone(self.problem(expect=4096))
+            self.assertIn('formatted for 8192', self.problem(expect=8192))
+            Path(self.node).write_bytes(b'')
+            self.assertIn('reads 0 bytes', self.problem())
+
+
+class StopTests(NvmeCase):
+    """A graceful stop drains the writer's queue inside a bounded time, journals, snapshots when there is time, and leaves the device consistent."""
+
+    def slow(self, made, seconds):
+        def fail(op, offset, length):
+            if op == 'write':
+                time.sleep(seconds)
+
+        made.nvme.store.bf.fail = fail
+
+    def queued(self, made, count=8):
+        a = first_turn()
+        made.serve(a)
+        for index in range(count):
+            made.serve(Request('idle-%d' % index, span(300, 900 + index), salt=salt_of('idler')))
+        return a
+
+    def test_a_stop_flushes_what_is_queued_then_closes_and_a_restart_finds_it(self):
+        made = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': ''})
+        self.slow(made, 0.02)
+        a = self.queued(made)
+        self.assertGreater(made.nvme.queue_kv_bytes, 0, 'the writer is behind')
+        began = time.monotonic()
+        self.assertTrue(made.nvme.shutdown(budget_s=8))
+        self.assertLess(time.monotonic() - began, 6)
+        self.assertTrue(made.nvme.closed)
+        self.assertTrue(any('nvme tier stopped drained=1' in line for line in made.lines), made.lines[-3:])
+        again = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': ''})
+        self.assertEqual(again.nvme_has_session(a, 64).count(True), 64)
+        self.assertIsNotNone(again.nvme.store.lookup(store_module.CKPT, a.block_hashes[63]))
+
+    def test_the_budget_is_kept_and_what_the_writer_did_not_reach_is_dropped_cleanly(self):
+        made = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': ''})
+        self.slow(made, 0.15)
+        self.queued(made)
+        began = time.monotonic()
+        drained = made.nvme.shutdown(budget_s=1.5)
+        elapsed = time.monotonic() - began
+        self.assertFalse(drained)
+        self.assertLess(elapsed, 4.0, 'the stop returned by its budget plus the batch in hand')
+        self.assertTrue(made.nvme.closed)
+        made.nvme.writer.join(10)                                                                  # (the batch in hand finishes and gives its holds back)
+        self.assertFalse(made.nvme.writer.is_alive())
+        self.assertEqual(len(made.registry.tier.held), 0, 'every hold was given back')
+        self.assertTrue(made.nvme.queue_kv_bytes + made.nvme.queue_ckpt_bytes == 0)
+        made.nvme.store.close()                                  # (an abandoned writer leaves the store open: in a real stop the process is exiting; here the lock must go)
+        again = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': ''})
+        self.assertIsNotNone(again.nvme, 'the device is consistent: it opens, with whatever prefix was written')
+
+    def test_no_offers_after_the_stop_began_and_a_second_stop_is_a_no_op(self):
+        made = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': ''})
+        self.assertTrue(made.nvme.active)
+        made.nvme.begin_stop()
+        self.assertFalse(made.nvme.active)
+        self.assertGreater(made.nvme.stop_deadline, time.monotonic())
+        self.assertTrue(made.nvme.shutdown(budget_s=3))
+        began = time.monotonic()
+        self.assertTrue(made.nvme.shutdown(budget_s=3))
+        self.assertLess(time.monotonic() - began, 0.1)
+
+    def test_the_index_is_snapshotted_when_time_remains_and_not_when_it_does_not(self):
+        made = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': ''})
+        self.queued(made)
+        before = made.nvme.store.stats['snapshots']
+        made.nvme.shutdown(budget_s=6)
+        self.assertEqual(made.nvme.store.stats['snapshots'], before + 1)
+        quick = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': ''})
+        before = quick.nvme.store.stats['snapshots']
+        quick.nvme.shutdown(budget_s=0.2)
+        self.assertEqual(quick.nvme.store.stats['snapshots'], before, 'no time for one: the journal is enough')
+
+    def test_a_lost_device_is_not_waited_for(self):
+        made = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': ''})
+        made.nvme._probe = lambda: 'gone'
+        made.nvme.latch('device lost: gone', lost=True)
+        began = time.monotonic()
+        made.nvme.shutdown(budget_s=8)
+        self.assertLess(time.monotonic() - began, 1.0)
+        self.assertTrue(made.nvme.closed)
+
+    def test_a_forked_child_never_closes_or_writes_the_parents_drive(self):
+        made = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': ''})
+        made.nvme._pid += 1                                                                    # (as if this were a child process holding a copy)
+        self.assertTrue(made.nvme.shutdown(budget_s=1))
+        self.assertFalse(made.nvme.closed)
+        made.nvme._pid -= 1
+
+    def test_the_hooks_chain_sigterm_and_register_the_exit_finalizers(self):
+        fake = types.SimpleNamespace(SIGTERM=15, SIG_DFL=0, SIG_IGN=1, handlers={})
+        fake.getsignal = lambda number: fake.handlers.get(number, fake.SIG_DFL)
+        fake.signal = lambda number, handler: fake.handlers.__setitem__(number, handler)
+        made = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_DRAIN_S': '5', 'QWEN_PREFIX_NVME_SPILL': 'evict'})
+        calls = []
+        with mock.patch('multiprocessing.util.Finalize') as finalize, mock.patch.object(kvnvme.atexit, 'register') as registered, \
+                mock.patch.object(kvnvme.os, 'kill', lambda pid, number: calls.append(('kill', number))):
+            made.nvme._hooks_armed = False
+            self.assertTrue(made.nvme.arm_stop_hooks(fake))
+            self.assertFalse(made.nvme.arm_stop_hooks(fake), 'armed once')
+            self.assertEqual(finalize.call_args[0][0], None)
+            self.assertEqual(finalize.call_args[1]['exitpriority'], 100)
+            registered.assert_called_once_with(made.nvme.shutdown)
+        handler = fake.handlers[15]
+        self.assertTrue(callable(handler))
+        with mock.patch.object(kvnvme.os, 'kill', lambda pid, number: calls.append(('kill', number))):
+            handler(15, None)                                        # the previous handler was the default one: drain, then die by it
+        self.assertTrue(made.nvme.closed)
+        self.assertEqual(calls, [('kill', 15)])
+        self.assertEqual(fake.handlers[15], fake.SIG_DFL)
+
+    def test_a_previous_handler_is_called_after_the_drain_clock_starts_and_an_ignored_signal_stays_ignored(self):
+        seen = []
+        fake = types.SimpleNamespace(SIGTERM=15, SIG_DFL=0, SIG_IGN=1, handlers={15: lambda number, frame: seen.append(('previous', self.tier.stopping))})
+        fake.getsignal = lambda number: fake.handlers.get(number, fake.SIG_DFL)
+        fake.signal = lambda number, handler: fake.handlers.__setitem__(number, handler)
+        made = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_DRAIN_S': '5', 'QWEN_PREFIX_NVME_SPILL': 'evict'})
+        self.tier = made.nvme
+        with mock.patch('multiprocessing.util.Finalize'), mock.patch.object(kvnvme.atexit, 'register'):
+            made.nvme._hooks_armed = False
+            made.nvme.arm_stop_hooks(fake)
+            fake.handlers[15](15, None)
+        self.assertEqual(seen, [('previous', True)])
+        self.assertFalse(made.nvme.closed, 'the previous handler (the engine\'s own: it raises SystemExit) owns the exit; the finalizer completes the drain')
+        ignored = types.SimpleNamespace(SIGTERM=15, SIG_DFL=0, SIG_IGN=1, handlers={15: 1})
+        ignored.getsignal = lambda number: ignored.handlers[number]
+        ignored.signal = lambda number, handler: self.fail('SIG_IGN must be left alone')
+        made.close()
+        other = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_DRAIN_S': '5', 'QWEN_PREFIX_NVME_SPILL': 'evict'})
+        with mock.patch('multiprocessing.util.Finalize'), mock.patch.object(kvnvme.atexit, 'register'):
+            other.nvme._hooks_armed = False
+            other.nvme.arm_stop_hooks(ignored)
+
+    def test_drain_zero_arms_nothing_and_a_plain_close_still_flushes(self):
+        made = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': ''})              # (the rig's DRAIN_S is 0)
+        self.assertEqual(made.nvme.plan.drain_s, 0)
+        fake = types.SimpleNamespace(SIGTERM=15, SIG_DFL=0, SIG_IGN=1)
+        fake.getsignal = lambda number: self.fail('no signal handler may be touched')
+        self.assertFalse(made.nvme.arm_stop_hooks(fake))
+        self.slow(made, 0.01)
+        a = self.queued(made, count=4)
+        self.assertTrue(made.nvme.close())
+        again = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_SPILL': ''})
+        self.assertEqual(again.nvme_has_session(a, 64).count(True), 64)
+
+    def test_the_registry_arms_the_hooks_of_a_tier_with_a_drain_budget(self):
+        with mock.patch.object(kvnvme.NvmeTier, 'arm_stop_hooks', autospec=True, return_value=True) as arm:
+            made = self.rig(nvme_env={'QWEN_PREFIX_NVME_DRAIN_S': '4'})
+            self.assertEqual(arm.call_count, 1)
+            self.assertIs(arm.call_args[0][0], made.nvme)
+
+
+@unittest.skipUnless(os.environ.get('QWEN_NVME_STOP_CHILD'), 'the body of a child process of StopProcessTests')
+class StopChildProbe(NvmeCase):
+    """Run only as a child of StopProcessTests: a rig with a slow writer and the real stop hooks. Mode 'default': this very process takes the SIGTERM (default disposition before the
+    hooks). Mode 'engine': a multiprocessing child (fork) whose previous SIGTERM handler raises SystemExit, as vLLM's engine core does; its exit runs the finalizers."""
+
+    def test_child(self):
+        mode, report = os.environ['QWEN_NVME_STOP_CHILD'].split(':', 1)
+        shutil.rmtree(self.directory, True)
+        self.directory = os.path.dirname(report)
+        self.device = os.path.join(self.directory, 'nvme.img')
+
+        def run():
+            if mode == 'engine':
+                def previous(number, frame):
+                    raise SystemExit()
+
+                signal.signal(signal.SIGTERM, previous)
+            made = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_DRAIN_S': '6', 'QWEN_PREFIX_NVME_SPILL': ''})
+
+            def slow(op, offset, length):
+                if op == 'write':
+                    time.sleep(0.03)
+
+            made.nvme.store.bf.fail = slow
+            made.serve(first_turn())
+            for index in range(8):
+                made.serve(Request('idle-%d' % index, span(300, 900 + index), salt=salt_of('idler')))
+            Path(report).write_text('ready %d %d\n' % (made.nvme.queue_kv_bytes, os.getpid()))
+            time.sleep(120)
+
+        if mode == 'engine':
+            import multiprocessing
+
+            process = multiprocessing.get_context('fork').Process(target=run)
+            process.start()
+            process.join(110)
+            Path(report + '.exit').write_text('%s\n' % process.exitcode)
+        else:
+            run()
+
+
+class StopProcessTests(NvmeCase):
+    """A real SIGTERM to a real process: default disposition (the handler drains, then dies by the signal) and the engine-core pattern (a previous handler raising SystemExit in a
+    multiprocessing child, whose exit runs the finalizers instead of atexit)."""
+
+    def run_child(self, mode):
+        report = os.path.join(self.directory, 'report.txt')
+        with open(self.device, 'wb') as handle:
+            handle.truncate(64 << 20)
+        environ = dict(os.environ, QWEN_NVME_STOP_CHILD='%s:%s' % (mode, report), PYTHONDONTWRITEBYTECODE='1')
+        child = subprocess.Popen([sys.executable, '-B', '-m', 'unittest', 'test_qwen_kv_nvme.StopChildProbe.test_child'], cwd=os.path.dirname(os.path.abspath(__file__)), env=environ,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        end = time.monotonic() + 60
+        while time.monotonic() < end and not os.path.exists(report) and child.poll() is None:
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(report), 'the child did not get ready')
+        fields = Path(report).read_text().split()
+        self.assertGreater(int(fields[1]), 0, 'the writer is behind: there is something to drain')
+        began = time.monotonic()
+        os.kill(int(fields[2]), signal.SIGTERM)
+        code = child.wait(timeout=60)
+        return code, time.monotonic() - began, report
+
+    def check_drained(self, expected_blocks=64):
+        store = store_module.NvmeStore.open(self.device, format='never')
+        self.addCleanup(store.close)
+        stats = store.snapshot_stats()
+        self.assertGreaterEqual(stats['kv_entries'], expected_blocks)
+        self.assertGreaterEqual(stats['ckpt_entries'], 1)
+
+    def test_sigterm_with_the_default_disposition_drains_then_dies_by_the_signal(self):
+        code, elapsed, report = self.run_child('default')
+        self.assertEqual(code, -signal.SIGTERM)
+        self.assertLess(elapsed, 9)
+        self.check_drained()
+
+    def test_the_engine_core_pattern_systemexit_in_a_child_drains_in_the_finalizer(self):
+        code, elapsed, report = self.run_child('engine')
+        self.assertEqual(Path(report + '.exit').read_text().strip(), '0', 'SystemExit() leaves the child normally')
+        self.assertLess(elapsed, 9)
+        self.check_drained()
 
 
 class ContractTests(unittest.TestCase):

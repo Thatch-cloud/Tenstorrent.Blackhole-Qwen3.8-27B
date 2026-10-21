@@ -292,7 +292,7 @@ COUNTERS = {
     'nvme_store_hits': 'store lookups that found a live entry',
     'nvme_store_misses': 'store lookups that found nothing (or an expired entry)',
     'nvme_discarded_bytes': 'bytes the store asked the drive to discard (TRIM) after freeing them',
-    'nvme_through_queued': 'write-through (QWEN_PREFIX_NVME_SPILL=through): host-tier records queued to the drive as they entered the tier',
+    'nvme_through_queued': 'write-through (QWEN_PREFIX_NVME_SPILL=through, the default): host-tier records queued to the drive as they entered the tier',
     'nvme_through_known': 'write-through records the drive already held or had queued',
     'nvme_through_dropped_queue': 'write-through records not queued: the writer queue was full',
     'nvme_through_copied_blocks': 'device blocks of idle sessions copied into the host tier by the idle copy',
@@ -303,6 +303,7 @@ COUNTERS = {
     'nvme_spill_retries': 'spill batches written again once after a device or store error',
     'nvme_refused_zero_retention': '1 when the NVMe tier refused to start because the node looks zero-retention (QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION=1 overrides)',
     'nvme_unavailable': '1 when the NVMe tier could not open its device and the engine serves without it',
+    'nvme_device_lost': '1 when the drive disappeared at run time (its node or controller went away, the namespace read 0 bytes) and the tier latched off; a restart with a live device brings it back',
 }
 
 
