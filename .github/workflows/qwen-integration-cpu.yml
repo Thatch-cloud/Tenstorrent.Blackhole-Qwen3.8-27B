@@ -295,6 +295,8 @@ jobs:
           python -B -m unittest test_np1_fastlane test_np1_profiles test_np1_pack
           # NP9
           python -B -m unittest test_np9_answer32k test_np9_pack
+          # NVME
+          python -B -m unittest test_qwen_nvme_store test_qwen_kv_nvme
           # O3
           python -B -m unittest test_audit_sampling test_octo3_contract test_octo3_profiles test_octo3_judge test_octo3_pack test_octo3_ship test_block_warm_capture test_capture_trackers
           # PF2

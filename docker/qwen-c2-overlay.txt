@@ -234,10 +234,6 @@ scripts/ci/qwen_prefix_scheduler_patch.py  /experiment-scripts/ci/qwen_prefix_sc
 scripts/ci/qwen_prefix_runner_patch.py
 scripts/ci/qwen_prefix_model_patch.py
 scripts/ci/qwen_prefix_metrics.py
-# NVME: the NVMe cold tier below the host KV tier (docs/tp4-kv-nvme.md): qwen_kv_nvme (flags, layout fingerprint, checkpoint codec, restore backends, the spill writer; imported by
-# qwen_prefix_registry and the contract only when a QWEN_PREFIX_NVME name is set) over qwen_nvme_store (the raw-namespace object store: journal, snapshots, extent allocator)
-scripts/ci/qwen_kv_nvme.py
-scripts/ci/qwen_nvme_store.py
 scripts/ci/lever_n_model_patch.py
 
 # Sticky sessions, phase 1 (QWEN_FAST_STICKY_SESSIONS; the c2-packed-prefix profiles): the fast path's
@@ -479,6 +475,10 @@ scripts/ci/prefix_window_carry.py
 scripts/ci/grid13_tp.py
 # NP1: serving_c2_contract imports it at boot once QWEN_FAST_SOLO_PACKED is set (the allocation hook on the model entry), and serving_cache_owner and serving_octo import it lazily with the flag set; an image without it refuses that boot
 scripts/ci/idle_scratch.py
+# NVME: the NVMe tier: flags, layout fingerprint, checkpoint codec, restore backends, the spill writer; qwen_prefix_registry and the contract import it only when a QWEN_PREFIX_NVME name is set
+scripts/ci/qwen_kv_nvme.py
+# NVME: the raw-namespace object store under it: superblocks, journal, snapshots, extent allocator, O_DIRECT IO
+scripts/ci/qwen_nvme_store.py
 # O3: packed_verifier imports it at module level (QWEN_FAST_AUDIT_FIRST / QWEN_FAST_AUDIT_EVERY: the sampled host read-back audits); inert while both are unset
 scripts/ci/audit_sampling.py
 # PF2: levern_route imports it at the attach once QWEN_FAST_PREFILL_HANDOFF or its audit flag is set (the device-side slot hand-off of the final step); an image without it refuses that boot
