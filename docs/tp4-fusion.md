@@ -57,6 +57,10 @@ did: WP6's audits at 9175d883 (a synchronize inside the capture) and WP2's audit
 then Z. A lever that cannot engage yet (WP2 until its card-M record lands) runs last in each section (`pack_last`). The packages' own card-M and detail templates are in their
 folders beside the pack.
 
+## Before you ship a numerics change: `KV_EPOCH`
+
+The NVMe cold tier (`docs/tp4-kv-nvme.md`) keeps a session's KV and GDN checkpoints on a drive for a day **across deploys**: the image build and the profile's name are not part of what it checks. What keeps a stored block honest is `qwen_kv_nvme.KV_EPOCH`, a number bumped **by hand, in the same commit**, whenever a change alters what a prefill publishes: prefill numerics (any kernel, program config, dtype, reduction or summation order, topology, weights file that is not bit-for-bit what it replaces), the byte meaning of anything stored (KV block layout, GDN state or conv-carry layout, the checkpoint format, the drafter window rows), or the drafter's state layout. A change proven bit-exact by an audit twin needs no bump; one nobody bumps for makes returning sessions restore from the old numerics' KV, so their answers continue from the OLD image's state and equal the old image's continuation, not the new image's cold prefill. Adding a profile env switch also fails `test_qwen_kv_compat` until it is classified (does it change the stored bytes? then it joins `FINGERPRINTED_ENV`). The UPGRADE gate (U1 in the NVMe plan) is the card check that two images are KV-compatible.
+
 ## Reading a card run
 
 `tp4_profile_report.py` classifies a replay by what it holds: the multi-SDPA 64-row block (one SDPA launch per attention layer, no named conv-gates launch) is the packed

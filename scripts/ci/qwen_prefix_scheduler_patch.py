@@ -716,7 +716,7 @@ class TierHooks(object):
         graft.registry.tier_slack = 1 if graft.drop_last else 0
         # The NVMe cold tier (docstring item j): None unless the registry opened one on the model's IO.
         self.nvme = getattr(graft.registry, 'nvme', None)
-        # Write-through (QWEN_PREFIX_NVME_SPILL=through): finished requests whose still-cached device blocks are copied toward the drive once idle, a bounded slice per step.
+        # Write-through (QWEN_PREFIX_NVME_SPILL=through, the default): finished requests whose still-cached device blocks are copied toward the drive once idle (idle 0: at once), a bounded slice per step.
         self.idle = OrderedDict()
         # The gate reads this line (prefix_markers.TIER_ON): the tier is configured and the model graft's IO is attached.
         graft.log('host tier on gib=%.2f kv_gib=%.2f block_bytes=%d verify=%s audit=%d spill_max_blocks=%d min_tokens=%d slack=%d off_path=%s',
@@ -726,9 +726,10 @@ class TierHooks(object):
         if self.nvme is not None:
             # The gate reads this line (prefix_markers.NVME_ON): the NVMe level is configured, opened, and wired to the scheduler graft.
             described = self.nvme.describe()
-            graft.log('nvme tier on backend=%s ttl_s=%d max_age_s=%d verify=%s audit=%d queue_bytes=%d capacity_bytes=%d spill=%s through_blocks=%d through_idle_s=%d fingerprint=%s',
+            graft.log('nvme tier on backend=%s ttl_s=%d max_age_s=%d verify=%s audit=%d queue_bytes=%d capacity_bytes=%d spill=%s through_blocks=%d through_idle_s=%d drain_s=%d fingerprint=%s',
                       described['backend'], described['ttl_s'], described['max_age_s'], described['verify'], described['audit'], described['queue_bytes'],
-                      described['capacity_bytes'], described['spill'], described['through_blocks'], described['through_idle_s'], described['fingerprint'])
+                      described['capacity_bytes'], described['spill'], described['through_blocks'], described['through_idle_s'], described['drain_s'],
+                      described['fingerprint'])
         plan = getattr(graft.registry, 'spill_plan', None)
         if plan is not None:
             # The gate reads this line (prefix_markers.TIER_SPILL_COMPLETE): the cap is lifted to the hard maximum, in batches.
@@ -1575,10 +1576,10 @@ class TierHooks(object):
 
     # -- write-through: the idle copy (docstring item j) ---------------------------------------------------------
     def note_idle(self, request):
-        """A request finished (the free hook): its published prompt blocks stay cached on the device, and under QWEN_PREFIX_NVME_SPILL=through they are copied toward the drive
-        once the request has been idle for QWEN_PREFIX_NVME_THROUGH_IDLE_S."""
+        """A request finished (the free hook): its published prompt blocks stay cached on the device, and under QWEN_PREFIX_NVME_SPILL=through (the default) they are copied toward
+        the drive once the request has been idle for QWEN_PREFIX_NVME_THROUGH_IDLE_S (default 0: the next step)."""
         nvme = self.nvme
-        if nvme is None or not nvme.through or not self.active or not self.eligible(request):
+        if nvme is None or not nvme.through or not nvme.active or not self.active or not self.eligible(request):
             return
         hashes = request.block_hashes
         count = min(len(hashes), floor_chunk(request.num_prompt_tokens) // BLOCK)
@@ -1598,6 +1599,9 @@ class TierHooks(object):
         copy is on its way before any eviction. Blocks the host tier or the drive already holds, blocks no longer cached, blocks cached in this very step (not yet written) and blocks
         no checkpoint reaches are skipped. A failing read is counted and, three in a row, latches the host tier as for a spill."""
         nvme, registry, tier, pool = self.nvme, self.registry, self.tier, self.graft.block_pool
+        if nvme is not None and self.idle and not nvme.active:
+            self.idle.clear()                      # the NVMe level is latched or stopping (a lost drive, a stop): nothing to copy toward
+            return
         if not self.idle or not self.active or nvme is None or not nvme.through:
             return
         counters = nvme.c
