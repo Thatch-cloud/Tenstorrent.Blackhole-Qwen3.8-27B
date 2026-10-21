@@ -98,6 +98,17 @@ never guessed around):
     [PINDIAG] prefix: tenant quota on device_cap_tokens=<n> device_floor_tokens=<n> host_cap_bytes=<n> host_floor_bytes=<n> device=<0|1> host=<0|1>
         the scheduler graft, once, when a quota is configured: the numbers only, never a tenant; read into quota_on.
 
+  the NVMe cold tier (QWEN_PREFIX_NVME*; docs/tp4-kv-nvme.md), all read into the nvme_* lists:
+    [PINDIAG] prefix: nvme tier open device=<path> backend=<host> ttl_s=<n> ... entries=<n> kv=<n> ckpt=<n> recovered_records=<n> fp_drops=<n> verify=<mode> ... spill=<evict|through> fingerprint=<hex>
+        the registry, once, when the model's tier IO is attached and the drive is open; read into nvme_open.
+    [PINDIAG] prefix: nvme tier on backend=<host> ttl_s=<n> max_age_s=<n> verify=<mode> audit=<0|1> queue_bytes=<n> capacity_bytes=<n> spill=<evict|through> through_blocks=<n> through_idle_s=<n> fingerprint=<hex>
+        the scheduler graft, once, when the tier is wired to it; read into nvme_on.
+    [PINDIAG] prefix: nvme tier spill blocks=<n> bytes=<n> ckpts=<n> ckpt_bytes=<n> ms=<f> queue=<n>      one per written batch (the writer thread); read into nvme_spills.
+    [PINDIAG] prefix: nvme tier restore req=<id> blocks=<n> bytes=<n> from=<tokens> to=<tokens> backend=<host> verify=<mode>     NVMe blocks read into host records; read into nvme_restores.
+    [PINDIAG] prefix: nvme tier checkpoint restored pos=<n> bytes=<n> ms=<f>        a checkpoint read back into the store; read into nvme_ckpt_restores.
+    [PINDIAG] prefix: nvme tier REFUSED to start on a zero-retention node: ... | nvme tier UNAVAILABLE, ... | nvme tier latched off: ... | nvme tier spill failed ... | nvme tier ... failed its digest ...
+        the tier did not start, or stopped, or dropped something that failed its check; read into nvme_trouble (a gate that asks for the tier needs nvme_on and an empty nvme_trouble).
+
   the host KV tier and the preconverted checkpoints (QWEN_PREFIX_HOST_TIER_GIB, QWEN_PREFIX_CKPT_PRECONVERTED; docs/prefix-store-hygiene.md):
     [PINDIAG] prefix: host tier on gib=<f> kv_gib=<f> block_bytes=<n> verify=<sample|all|off> audit=<0|1> spill_max_blocks=<n> min_tokens=<n> slack=<n> off_path=<path>
         the scheduler graft, once, when the tier is configured and the model graft's IO is attached; read into tier_on.
@@ -188,6 +199,9 @@ TIER_UPLOAD_ON = '[PINDIAG] prefix: host tier upload on '
 TIER_UPLOAD_FELL_BACK = '[PINDIAG] prefix: host tier upload fell back'
 TIER_UPLOAD_LATCHED = '[PINDIAG] prefix: host tier upload latched off'
 TIER_TROUBLE = ('[PINDIAG] prefix: host tier latched off', '[PINDIAG] prefix: host tier spill failed', '[PINDIAG] prefix: host tier restore failed')
+NVME = '[PINDIAG] prefix: nvme tier '
+NVME_TROUBLE = ('REFUSED', 'UNAVAILABLE', 'latched off', 'spill failed', 'failed its digest', 'restore failed', 'AUDIT MISMATCH', 'checkpoint restore failed',
+                'checkpoint failed its digest', 'idle copy failed', 'command ')
 CKPT_AUDIT = '[PREFIX-AUDIT-CKPT] tensors='
 CKPT_PRECONVERTED = '[PINDIAG] prefix: checkpoint preconverted '
 STATS = re.compile(r'\[PINDIAG\] prefix: stats (\{.*\})\s*$')
@@ -356,6 +370,34 @@ def dram_reading(line):
     return dict(point=match.group(1).strip(), chips=chips, unavailable=unavailable, text=text[:400])
 
 
+def nvme_line(out, line, where):
+    """One of the NVMe cold tier's lines (NVME) into the scan's nvme_* lists."""
+    body = line.split(NVME, 1)[1]
+    if body.startswith('open '):
+        entry = fields(body[len('open '):])
+        entry.update(where)
+        out['nvme_open'].append(entry)
+    elif body.startswith('on '):
+        entry = fields(body[len('on '):])
+        entry.update(where)
+        out['nvme_on'].append(entry)
+    elif body.startswith('spill blocks='):
+        entry = fields(body[len('spill '):])
+        entry.update(where)
+        out['nvme_spills'].append(entry)
+    elif body.startswith('restore req='):
+        entry = fields(body[len('restore '):])
+        entry.update(where)
+        entry['tag'] = request_tag(entry['req']) if isinstance(entry.get('req'), str) else None
+        out['nvme_restores'].append(entry)
+    elif body.startswith('checkpoint restored '):
+        entry = fields(body[len('checkpoint restored '):])
+        entry.update(where)
+        out['nvme_ckpt_restores'].append(entry)
+    elif any(marker in body for marker in NVME_TROUBLE):
+        out['nvme_trouble'].append(dict(where, line=line.strip()[:300]))
+
+
 def tier_line(out, line, where):
     """One of the host tier's or the preconverted checkpoints' lines (TIER_*, CKPT_*) into the scan's lists."""
     if TIER_ON in line:
@@ -418,7 +460,8 @@ def scan(lines):
                kv_tokens=None, failures=[], audit_costs=[], audit_crosses=[], eager_warm=[], four_card_warm=[], sticky_installs=[], sticky_admits=[], sticky_builds=[],
                model_warm=[], model_warm_skipped=[], kv_shared=[], audit_windows=[], tier_on=[], tier_io=[], tier_spills=[], tier_restores=[],
                tier_spill_complete=[], tier_spill_slow=[], tier_trouble=[], ckpt_audits=[], ckpt_preconverted=0, quota_on=[], tier_slice_on=[], tier_slices=[], tier_slice_trouble=[], tier_upload_on=[], tier_upload_trouble=[],
-               window_engaged=[], window_carried=[], window_stored=[], window_skipped=[], window_audits=[])
+               window_engaged=[], window_carried=[], window_stored=[], window_skipped=[], window_audits=[],
+               nvme_open=[], nvme_on=[], nvme_spills=[], nvme_restores=[], nvme_ckpt_restores=[], nvme_trouble=[])
     for index, raw in enumerate(lines):
         stamp, line = split_timestamp(raw.rstrip('\n'))
         where = dict(index=index, time=stamp)
@@ -519,6 +562,8 @@ def scan(lines):
             out['quota_on'].append(entry)
         if '] prefix: host tier ' in line or CKPT_AUDIT in line or CKPT_PRECONVERTED in line:
             tier_line(out, line, where)
+        elif NVME in line:
+            nvme_line(out, line, where)
         if EAGER_WARM in line:
             entry = fields(line.split(EAGER_WARM, 1)[1])
             entry.update(where)
