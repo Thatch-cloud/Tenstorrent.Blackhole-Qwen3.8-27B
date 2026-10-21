@@ -186,7 +186,7 @@ class BlockFile(object):
         if self.direct:
             flags |= getattr(os, 'O_DIRECT', 0)
         flags |= getattr(os, 'O_CLOEXEC', 0)
-        self.fd = os.open(path, flags, 0o600)
+        self.fd = os.open(path, flags, stat.S_IRUSR | stat.S_IWUSR)
         self.readonly = readonly
         self.local = threading.local()
         if not self.is_block and size is not None and os.fstat(self.fd).st_size < size:
