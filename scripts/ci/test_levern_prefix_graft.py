@@ -84,6 +84,17 @@ class InstallRuleTests(unittest.TestCase):
         self.assertTrue(graft_module.levern_chunked(scheduler, STICKY))
         self.assertEqual(graft_module.install_problems(scheduler, STICKY), [])
 
+    def test_seed_first_installed_after_lever_n_keeps_the_merged_route(self):
+        # S7B-A1 (card run 39649281798): QWEN_FAST_ADMISSION_SEED_FIRST wraps the class's schedule after Lever N; the graft must still see Lever N's wrapper.
+        import admission_pipeline
+        scheduler = self.sticky_scheduler()
+        scheduler.__class__ = type('Fresh', (type(scheduler),), {})
+        seed = admission_pipeline.SeedFirst(SimpleNamespace(), lambda request_id, need: True, lambda: 1, log=lambda *a: None)
+        seed.install(SimpleNamespace(complete_deferred=lambda: None), 'config', modules={}, resolve=lambda config: type(scheduler))
+        self.assertTrue(getattr(type(scheduler).schedule, admission_pipeline.SCHEDULE_WRAPPED, False))
+        self.assertEqual(graft_module.levern_chunking_problems(scheduler, STICKY), [])
+        self.assertEqual(graft_module.install_problems(scheduler, STICKY), [])
+
     def test_every_missing_piece_is_named_and_todays_text_is_the_prefix_of_the_message(self):
         cases = (
             ('QWEN_FAST_STICKY_SESSIONS=1', lambda s: None, {'QWEN_FAST_LEVER_N': '1'}),

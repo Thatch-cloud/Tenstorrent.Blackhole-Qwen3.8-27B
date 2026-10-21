@@ -573,6 +573,22 @@ class SeedFirstPolicyTests(Fresh):
         scheduler().schedule()
         self.assertEqual(done, [('schedule', (), {})], 'a wrapper left on the class calls nothing once the lifecycle has gone')
 
+    def test_install_keeps_the_inner_wrappers_marks_on_the_class_schedule(self):
+        # S7B-A1 (card run 39649281798): the bare wrapper hid Lever N's mark and the prefix graft refused chunked prefill at engine start.
+        def inner(self, *a, **k):
+            return 'out'
+        inner._qwen_levern_schedule = True
+        inner._qwen_one_fresh_prefill = True
+        scheduler = type('S', (), {'schedule': inner})
+        seed, _ = policy()
+        seed.install(SimpleNamespace(complete_deferred=lambda: None), 'config', modules={}, resolve=lambda config: scheduler)
+        self.assertIsNot(scheduler.schedule, inner)
+        self.assertTrue(getattr(scheduler.schedule, pipeline.SCHEDULE_WRAPPED, False))
+        self.assertTrue(getattr(scheduler.schedule, '_qwen_levern_schedule', False))
+        self.assertTrue(getattr(scheduler.schedule, '_qwen_one_fresh_prefill', False))
+        self.assertIs(scheduler.schedule.__wrapped__, inner)
+        self.assertFalse(getattr(inner, pipeline.SCHEDULE_WRAPPED, False), 'the inner function is not marked')
+
     def test_a_scheduler_without_schedule_is_refused_by_name(self):
         seed, _ = policy()
         with self.assertRaisesRegex(ValueError, 'schedule'):

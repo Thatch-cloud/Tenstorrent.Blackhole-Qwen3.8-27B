@@ -26,6 +26,7 @@ All three are gate arms until the owner decides (serving_c2_contract.sched2_prob
     [PINDIAG] admission ledger trim: the memory ledger ended after the attach
 """
 
+import functools
 import os
 import sys
 import time
@@ -320,8 +321,10 @@ class SeedFirst(object):
                 complete_pending(modules)
                 return schedule(this, *args, **kwargs)
 
+            # update_wrapper carries the inner wrappers' marks (Lever N's _qwen_levern_schedule, the cap's): the prefix graft's install check reads them on the class's
+            # schedule, and a bare wrapper hid Lever N from it (S7B-A1 card run 39649281798: 'prefix reuse refused: ... Lever N's schedule wrapper installed on the class').
+            functools.update_wrapper(wrapped, schedule)
             setattr(wrapped, SCHEDULE_WRAPPED, True)
-            wrapped.__wrapped__ = schedule
             setattr(scheduler, 'schedule', wrapped)
         return self
 
