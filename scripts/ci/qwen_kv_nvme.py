@@ -24,6 +24,9 @@ RAW NVMe namespace (qwen_nvme_store: no filesystem, a journal, O_DIRECT, 4 KiB-a
   GUARDS   The tier keeps prompt-derived data on a drive for days. A node that advertises zero-retention signs teardown attestations that nothing survived; the tier therefore
            REFUSES to start (a loud line and a counter; the engine serves without it) when the process sees a zero-retention signal (zero_retention_signals) unless
            QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION=1, and it needs QWEN_PREFIX_NVME_RETENTION_ACK=1 always: the serving process cannot know what its node agent advertises.
+  AT REST  The drive must be an Opal self-encrypting drive with locking enabled and currently unlocked (QWEN_PREFIX_NVME_REQUIRE_SED, on by default; 0 is a gate's own): sed_check asks
+           the drive (IOC_OPAL_DISCOVERY, read-only) or, where the container lacks CAP_SYS_ADMIN, reads the status file the host's boot unit writes; anything it cannot show is
+           NOT encrypted and the tier never opens the drive (one REFUSED line, nvme_refused_not_encrypted). TRIM of freed extents is on by default (QWEN_PREFIX_NVME_DISCARD).
   BACKENDS RestoreBackend: 'host' (built) and 'p2p' (a stub that raises NotBuilt, its contract below). TierHooks asks backend.direct: a direct backend restores NVMe-resident
            blocks straight to the freshly allocated device blocks instead of through the host (TierHooks.load_direct).
 
