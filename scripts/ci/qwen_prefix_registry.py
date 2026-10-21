@@ -35,7 +35,8 @@ process holds what vLLM cannot know about a hit: the GatedDeltaNet (GDN) state t
   (TierStore.spill_sink) and a checkpoint the store evicts for its budget are written there by a writer thread; the trim's reach (TierHooks.effective_hit) extends over the drive's
   blocks, a checkpoint the store lost is adopted back (adopt), and NVMe-resident blocks are read into host records before the existing restore. Entries carry a layout fingerprint
   and a digest; any failure is a miss. Off, none of it is imported and the registry is byte for byte what it was. The tier does not start on a node that looks zero-retention
-  (nvme_refusal), and a drive that cannot be opened, or that vanishes at run time, costs the engine its NVMe level only. Write-through is its default (a finished session is
+  (nvme_refusal), neither does it open a drive that is not an Opal self-encrypting drive, locking enabled and unlocked (QWEN_PREFIX_NVME_REQUIRE_SED, on by default), and a drive
+  that cannot be opened, or that vanishes at run time, costs the engine its NVMe level only. Write-through is its default (a finished session is
   queued for the drive at its next step) and a graceful stop drains the writer queue; the fingerprint holds neither the image build nor the profile name (KV_EPOCH, by hand).
 - Tenant quotas (QWEN_PREFIX_TENANT_QUOTA_*, default off, byte-identical off; docs/prefix-store-hygiene.md "Tenant quotas"): a per-tenant cap and floor on the cached prefix
   tokens in the device pool (the scheduler graft's DeviceQuota) and on the bytes in the host tier (TierStore), keyed by the salt's tenant tag. The cap makes a tenant that passes it
@@ -255,7 +256,7 @@ ENV_NVME_NAMES = ('QWEN_PREFIX_NVME', 'QWEN_PREFIX_NVME_DEVICE', 'QWEN_PREFIX_NV
                   'QWEN_PREFIX_NVME_RESTORE', 'QWEN_PREFIX_NVME_FREE_FLOOR_BYTES', 'QWEN_PREFIX_NVME_QUEUE_BYTES', 'QWEN_PREFIX_NVME_THREADS', 'QWEN_PREFIX_NVME_FORMAT',
                   'QWEN_PREFIX_NVME_DISCARD', 'QWEN_PREFIX_NVME_COMPAT', 'QWEN_PREFIX_NVME_CMD_DIR', 'QWEN_PREFIX_NVME_AUDIT', 'QWEN_PREFIX_NVME_SPILL', 'QWEN_PREFIX_NVME_THROUGH_BLOCKS',
                   'QWEN_PREFIX_NVME_THROUGH_IDLE_S', 'QWEN_PREFIX_NVME_RETENTION_ACK', 'QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION',
-                  'QWEN_PREFIX_NVME_DRAIN_S')
+                  'QWEN_PREFIX_NVME_DRAIN_S', 'QWEN_PREFIX_NVME_REQUIRE_SED', 'QWEN_PREFIX_NVME_SED_STATUS')
 # The counters a quota adds to the registry's stats (only when a quota is on, so the stats of an engine without one are what they were). Aggregates only: no per-tenant
 # label, key or line ever carries a salt or a tenant tag.
 QUOTA_STAT_NAMES = (
@@ -1555,6 +1556,13 @@ class PrefixRegistry(object):
             self.nvme = None
         try:
             self.nvme = qwen_kv_nvme.NvmeTier(self.nvme_plan, io, self, logger=log, environ=self.flags)
+        except qwen_kv_nvme.NotEncrypted as error:
+            # QWEN_PREFIX_NVME_REQUIRE_SED=1 (the default) and the drive is not shown to be an Opal self-encrypting drive with locking enabled and unlocked: it is never opened.
+            # One loud line, its own counter, and the host tier serves.
+            self.nvme_refusal = 'not_encrypted'
+            self.nvme = None
+            log('nvme tier REFUSED to open the drive: %s; the host tier serves without it (QWEN_PREFIX_NVME_REQUIRE_SED=0 is a gate\'s override, not a traffic profile\'s)', error)
+            return
         except (OSError, qwen_kv_nvme.store_module.StoreError) as error:
             # The drive is not there, is not ours, is locked, is unreadable: the tier does not start and the engine does not die of it. Loud, and counted.
             self.nvme_refusal = 'unavailable'

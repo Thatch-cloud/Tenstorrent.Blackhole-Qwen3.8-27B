@@ -133,8 +133,10 @@ PREFIX_NVME_NAMES = ('QWEN_PREFIX_NVME', 'QWEN_PREFIX_NVME_DEVICE', 'QWEN_PREFIX
                      'QWEN_PREFIX_NVME_RESTORE', 'QWEN_PREFIX_NVME_FREE_FLOOR_BYTES', 'QWEN_PREFIX_NVME_QUEUE_BYTES', 'QWEN_PREFIX_NVME_THREADS', 'QWEN_PREFIX_NVME_FORMAT',
                      'QWEN_PREFIX_NVME_DISCARD', 'QWEN_PREFIX_NVME_COMPAT', 'QWEN_PREFIX_NVME_CMD_DIR', 'QWEN_PREFIX_NVME_AUDIT', 'QWEN_PREFIX_NVME_SPILL',
                      'QWEN_PREFIX_NVME_THROUGH_BLOCKS', 'QWEN_PREFIX_NVME_THROUGH_IDLE_S', 'QWEN_PREFIX_NVME_RETENTION_ACK', 'QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION',
-                     'QWEN_PREFIX_NVME_DRAIN_S')
+                     'QWEN_PREFIX_NVME_DRAIN_S', 'QWEN_PREFIX_NVME_REQUIRE_SED', 'QWEN_PREFIX_NVME_SED_STATUS')
 PREFIX_NVME_GATE_ONLY = ('QWEN_PREFIX_NVME_AUDIT', 'QWEN_PREFIX_NVME_FORMAT', 'QWEN_PREFIX_NVME_CMD_DIR', 'QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION')
+# Names whose OFF value is a gate's own: the at-rest encryption check (QWEN_PREFIX_NVME_REQUIRE_SED) is on by default and a traffic profile may name it only at 1.
+PREFIX_NVME_GATE_ONLY_VALUES = (('QWEN_PREFIX_NVME_REQUIRE_SED', '0'),)
 # Sticky sessions (serving_fast_policy.STICKY_SESSIONS_FLAG): the fast path's side of prefix reuse. Only a
 # profile sets it, and only beside PREFIX_SWITCH and the fast path (prefix_reuse_problems).
 STICKY_SWITCH = 'QWEN_FAST_STICKY_SESSIONS'
@@ -706,6 +708,10 @@ def prefix_policy_problems(profile):
         if gate_names:
             problems.append('%s: a gate\'s own (the audit, the format override, the command directory and the zero-retention override), not a traffic profile\'s, whatever its waiver says'
                             % ', '.join(gate_names))
+        off_by_gate = [name for name, value in PREFIX_NVME_GATE_ONLY_VALUES if env.get(name) == value]
+        if off_by_gate:
+            problems.append('%s=0: the drive must be a self-encrypting drive with locking enabled and unlocked (owner, 2026-10-21: Opal on the cache drive), and turning the check off is a '
+                            'gate\'s own, not a traffic profile\'s' % ', '.join(off_by_gate))
         quotas = [name for name in PREFIX_QUOTA_NAMES if name in env and env[name] not in ('', '0') and (quota_tokens.get(name) or quota_gib.get(name))]
         if quotas:
             problems.append('%s: no qualification record exists for the per-tenant quotas of the prefix store, so only a gate-only profile may name them' % ', '.join(sorted(quotas)))

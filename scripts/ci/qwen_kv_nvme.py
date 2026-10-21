@@ -39,6 +39,7 @@ Pure python; imports nothing outside the standard library (torch and ttnn only t
 import array
 import atexit
 import collections
+import ctypes
 import errno
 import hashlib
 import importlib
@@ -78,10 +79,14 @@ ENV_THROUGH_IDLE_S = 'QWEN_PREFIX_NVME_THROUGH_IDLE_S'
 ENV_RETENTION_ACK = 'QWEN_PREFIX_NVME_RETENTION_ACK'
 ENV_ALLOW_ZERO_RETENTION = 'QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION'
 ENV_DRAIN_S = 'QWEN_PREFIX_NVME_DRAIN_S'
+ENV_REQUIRE_SED = 'QWEN_PREFIX_NVME_REQUIRE_SED'
+ENV_SED_STATUS = 'QWEN_PREFIX_NVME_SED_STATUS'
 NAMES = (ENV_SWITCH, ENV_DEVICE, ENV_TTL_S, ENV_MAX_AGE_S, ENV_MAX_BYTES, ENV_VERIFY, ENV_RESTORE, ENV_FREE_FLOOR, ENV_QUEUE, ENV_THREADS, ENV_FORMAT, ENV_DISCARD,
-         ENV_COMPAT, ENV_CMD_DIR, ENV_AUDIT, ENV_SPILL, ENV_THROUGH_BLOCKS, ENV_THROUGH_IDLE_S, ENV_RETENTION_ACK, ENV_ALLOW_ZERO_RETENTION, ENV_DRAIN_S)
+         ENV_COMPAT, ENV_CMD_DIR, ENV_AUDIT, ENV_SPILL, ENV_THROUGH_BLOCKS, ENV_THROUGH_IDLE_S, ENV_RETENTION_ACK, ENV_ALLOW_ZERO_RETENTION, ENV_DRAIN_S, ENV_REQUIRE_SED, ENV_SED_STATUS)
 # What only a gate sets (the contract refuses them on a traffic profile even under the owner's waiver).
 GATE_ONLY = (ENV_AUDIT, ENV_FORMAT, ENV_CMD_DIR, ENV_ALLOW_ZERO_RETENTION)
+# Names whose OFF value is the gate's own: a traffic profile may carry the name (at 1, or by default) but never 0. The encryption check is on unless a gate turns it off.
+GATE_ONLY_VALUES = ((ENV_REQUIRE_SED, '0'),)
 VERIFY_MODES = ('sample', 'all', 'off')
 SPILL_MODES = ('evict', 'through')
 DEFAULT_SPILL = 'through'            # owner, 2026-10-21: seats are released at turn end, so a finished session is copied to the drive straight away
@@ -106,6 +111,10 @@ MAX_DRAIN_S = 8
 LEGACY_CLOSE_S = 10.0              # close() on a tier whose stop budget is 0 (hooks off) still flushes this long, as it always did
 SNAPSHOT_BASE_S = 1.0                # a stop snapshots the index only when this much plus SNAPSHOT_ENTRY_S per entry is left of the drain budget
 SNAPSHOT_ENTRY_S = 4e-6
+DEFAULT_SED_STATUS = '/run/thatch-cache-drive/status.json'      # written by the host's boot unit; a container without CAP_SYS_ADMIN reads it instead of asking the drive
+DEFAULT_DISCARD = True               # TRIM freed extents (delete, expiry, eviction): the encryption scoping's recommendation, and what keeps a full drive's write amplification down
+IOC_OPAL_DISCOVERY = 0x401070EF      # _IOW('p', 239, struct opal_discovery {u64 data; u64 size;}): a Level 0 Discovery (a Security Receive: reads, changes no state)
+OPAL_DISCOVERY_BYTES = 4096
 HEALTH_EVERY_S = 2.0                 # how often poll() looks at the device's node and sysfs entries (no IO)
 # errnos that mean the device itself is gone (a failing write with one of these latches the tier at once instead of after three strikes)
 GONE_ERRNOS = (errno.ENODEV, errno.ENXIO, errno.ESHUTDOWN, errno.ENOMEDIUM)
@@ -160,9 +169,9 @@ COUNTER_NAMES = (
     'nvme_deleted_tenant', 'nvme_wipes', 'nvme_audit_reads', 'nvme_audit_mismatches', 'nvme_latched', 'nvme_recovered_entries', 'nvme_recovered_records',
     'nvme_recover_dropped', 'nvme_journal_records', 'nvme_snapshots', 'nvme_store_hits', 'nvme_store_misses', 'nvme_discarded_bytes', 'nvme_through_queued',
     'nvme_through_known', 'nvme_through_dropped_queue', 'nvme_through_copied_blocks', 'nvme_through_copied_bytes', 'nvme_through_copy_ms', 'nvme_through_copy_steps',
-    'nvme_through_failures', 'nvme_spill_retries', 'nvme_refused_zero_retention', 'nvme_unavailable', 'nvme_device_lost')
+    'nvme_through_failures', 'nvme_spill_retries', 'nvme_refused_zero_retention', 'nvme_unavailable', 'nvme_device_lost', 'nvme_refused_not_encrypted')
 GAUGE_NAMES = ('nvme_on', 'nvme_bytes', 'nvme_entries', 'nvme_kv_entries', 'nvme_ckpt_entries', 'nvme_capacity_bytes', 'nvme_free_bytes', 'nvme_queue_bytes',
-               'nvme_journal_used_bytes', 'nvme_largest_free_bytes', 'nvme_through_backlog_blocks')
+               'nvme_journal_used_bytes', 'nvme_largest_free_bytes', 'nvme_through_backlog_blocks', 'nvme_at_rest')
 
 
 def log(message, *values):
@@ -184,7 +193,7 @@ class NvmePlan(object):
     """The NVMe tier's settings (nvme_plan)."""
 
     __slots__ = ('device', 'ttl_s', 'max_age_s', 'max_bytes', 'verify', 'restore', 'free_floor_bytes', 'queue_bytes', 'threads', 'format', 'discard', 'compat',
-                 'cmd_dir', 'audit', 'direct', 'snap_bytes', 'journal_bytes', 'spill', 'through_blocks', 'through_idle_s', 'allow_zero_retention', 'drain_s')
+                 'cmd_dir', 'audit', 'direct', 'snap_bytes', 'journal_bytes', 'spill', 'through_blocks', 'through_idle_s', 'allow_zero_retention', 'drain_s', 'require_sed', 'sed_status')
 
     @property
     def through(self):
@@ -213,13 +222,13 @@ def _digits(env, name, default, low, high, problems):
     return value
 
 
-def _switch(env, name, problems):
+def _switch(env, name, problems, default=False):
     raw = env.get(name)
     if raw is None or raw == '':
-        return False
+        return default
     if raw not in ('0', '1'):
         problems.append('%s=%r must be 0 or 1' % (name, raw))
-        return False
+        return default
     return raw == '1'
 
 
@@ -265,7 +274,7 @@ def parse(env):
     plan.queue_bytes = _digits(env, ENV_QUEUE, DEFAULT_QUEUE_BYTES, MIN_QUEUE_BYTES, 1 << 40, problems)
     plan.threads = _digits(env, ENV_THREADS, DEFAULT_THREADS, 1, 64, problems)
     plan.format = 'force' if _switch(env, ENV_FORMAT, problems) else 'auto'
-    plan.discard = _switch(env, ENV_DISCARD, problems)
+    plan.discard = _switch(env, ENV_DISCARD, problems, DEFAULT_DISCARD)
     plan.audit = _switch(env, ENV_AUDIT, problems)
     token = env.get(ENV_COMPAT)
     if token not in (None, '') and not TOKEN.fullmatch(token):
@@ -286,6 +295,13 @@ def parse(env):
         if knobs:
             problems.append('%s set with %s=%s: the evict mode would ignore it (write-through is the default; drop the knob or the override)' % (', '.join(knobs), ENV_SPILL, spill))
     plan.drain_s = _digits(env, ENV_DRAIN_S, DEFAULT_DRAIN_S, 0, MAX_DRAIN_S, problems)
+    # At-rest encryption (owner, 2026-10-21: Opal self-encryption on the cache drive): the tier refuses to open a drive that is not a self-encrypting drive with locking enabled and
+    # unlocked, unless a gate turns the check off. On by default; 0 is a gate's own value (the contract refuses it in a traffic profile).
+    plan.require_sed = _switch(env, ENV_REQUIRE_SED, problems, True)
+    status = env.get(ENV_SED_STATUS)
+    if status not in (None, '') and not PATH.fullmatch(status):
+        problems.append('%s=%r is not a plain absolute path' % (ENV_SED_STATUS, status))
+    plan.sed_status = status or DEFAULT_SED_STATUS
     # The retention acknowledgement: the serving process cannot know what its node agent advertises, so the profile says, in so many words, that this node keeps prompt-derived
     # data on a drive for days and is not a zero-retention node.
     if env.get(ENV_RETENTION_ACK) != '1':
@@ -336,8 +352,180 @@ def refused_metrics(kind):
     """The registry snapshot's NVMe keys while the tier is configured but not running: every counter 0, the gauges 0, and the reason's own counter 1."""
     values = dict.fromkeys(COUNTER_NAMES, 0)
     values.update(dict.fromkeys(GAUGE_NAMES, 0))
-    values['nvme_refused_zero_retention' if kind == 'zero_retention' else 'nvme_unavailable'] = 1
+    values[{'zero_retention': 'nvme_refused_zero_retention', 'not_encrypted': 'nvme_refused_not_encrypted'}.get(kind, 'nvme_unavailable')] = 1
     return values
+
+
+# ------------------------------------------------------------------------------------------------
+# At-rest encryption: the drive must be a self-encrypting drive (TCG Opal) with locking enabled, unlocked
+# ------------------------------------------------------------------------------------------------
+class NotEncrypted(store_module.StoreError):
+    """QWEN_PREFIX_NVME_REQUIRE_SED=1 and the drive is not, or cannot be shown to be, an Opal self-encrypting drive with locking enabled and currently unlocked."""
+
+
+OPAL_FEATURES = {0x0200: 'opal', 0x0203: 'opal'}      # Opal SSC 1.0 and 2.x feature descriptors; Pyrite (0x0302, 0x0303) does not encrypt the media and is not Opal
+LOCKING_FEATURE = 0x0002
+DISCOVERY_HEADER = 48
+
+
+def parse_level0(data):
+    """What a TCG Level 0 Discovery response says that matters here: dict(sed='opal' or None, locking_supported, locking_enabled, locked, media_encryption). The response is a
+    48-byte header (its first four bytes, big-endian, count the bytes after them) and feature descriptors (code 2 bytes, version 1, length 1, data); the Locking feature's first
+    data byte holds the flags (bit 0 supported, 1 enabled, 2 locked, 3 media encryption). ValueError on a response that does not parse."""
+    data = bytes(data)
+    if len(data) < DISCOVERY_HEADER:
+        raise ValueError('a discovery response of %d bytes is shorter than its header' % len(data))
+    end = min(struct.unpack('>I', data[0:4])[0] + 4, len(data))
+    sed, flags, position = None, 0, DISCOVERY_HEADER
+    while position + 4 <= end:
+        code, _version, length = struct.unpack('>HBB', data[position:position + 4])
+        body = data[position + 4:position + 4 + length]
+        if len(body) < length:
+            raise ValueError('a discovery feature (0x%04x) is cut short' % code)
+        if code in OPAL_FEATURES:
+            sed = OPAL_FEATURES[code]
+        elif code == LOCKING_FEATURE and body:
+            flags = body[0]
+        position += 4 + length
+    return dict(sed=sed, locking_supported=bool(flags & 1), locking_enabled=bool(flags & 2), locked=bool(flags & 4), media_encryption=bool(flags & 8))
+
+
+def opal_discovery(device, ioctl=None):
+    """IOC_OPAL_DISCOVERY on the device: the drive's Level 0 Discovery response as bytes (a Security Receive: it changes nothing). OSError from the open or the ioctl as it comes: a
+    container without CAP_SYS_ADMIN gets EACCES (the kernel's sed-opal ioctls check the capability), a kernel or drive without Opal ENOTTY or EOPNOTSUPP."""
+    import fcntl
+
+    fd = os.open(device, os.O_RDONLY | getattr(os, 'O_CLOEXEC', 0))
+    try:
+        buffer = ctypes.create_string_buffer(OPAL_DISCOVERY_BYTES)
+        argument = struct.pack('QQ', ctypes.addressof(buffer), OPAL_DISCOVERY_BYTES)
+        (ioctl or fcntl.ioctl)(fd, IOC_OPAL_DISCOVERY, argument)
+        return bytes(buffer.raw)
+    finally:
+        os.close(fd)
+
+
+def _read_file(path):
+    with open(path) as handle:
+        return handle.read()
+
+
+def boot_time(read=None):
+    """When this host booted, in epoch seconds (/proc/stat btime, else now minus /proc/uptime). OSError when neither can be read."""
+    read = read or _read_file
+    try:
+        for line in read('/proc/stat').splitlines():
+            if line.startswith('btime '):
+                return float(line.split()[1])
+    except (OSError, ValueError):
+        pass
+    return time.time() - float(read('/proc/uptime').split()[0])
+
+
+def parse_timestamp(value):
+    """A status file's `ts`: epoch seconds (a number, or digits in a string) or an ISO-8601 time (a Z or an offset; no zone means UTC). ValueError otherwise."""
+    if isinstance(value, bool):
+        raise ValueError('ts is a boolean')
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            import datetime
+
+            moment = datetime.datetime.fromisoformat(value.strip().replace('Z', '+00:00'))
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=datetime.timezone.utc)
+            return moment.timestamp()
+    raise ValueError('ts is not a time')
+
+
+def same_drive(status, device, sysfs=store_module.SYSFS, by_id_dir='/dev/disk/by-id'):
+    """(True, '') when the status file is about the drive at `device`, else (False, why). Two independent looks, each match / mismatch / unknown, at least one match and no mismatch:
+    `by_id` (the device is that /dev/disk/by-id name, or resolves to the same node as its link) and `pci` (the device's sysfs path, found by device number, runs through that PCI
+    function). A file that names neither, or names only what this host cannot check, is not trusted."""
+    verdicts = []
+    by_id = status.get('by_id')
+    if isinstance(by_id, str) and by_id:
+        name = os.path.basename(by_id)
+        link = os.path.join(by_id_dir, name)
+        if os.path.basename(device) == name:
+            verdicts.append(True)
+        elif os.path.dirname(device) == by_id_dir:
+            verdicts.append(False)                                  # the device IS a by-id name, and another one
+        elif os.path.exists(link) and os.path.exists(device):
+            verdicts.append(os.path.realpath(link) == os.path.realpath(device))
+    pci = status.get('pci')
+    if isinstance(pci, str) and pci:
+        try:
+            info = os.stat(device)
+            real = os.path.realpath(os.path.join(sysfs, 'dev', 'block', '%d:%d' % (os.major(info.st_rdev), os.minor(info.st_rdev))))
+            if os.path.isdir(real):
+                verdicts.append(('/%s/' % pci) in (real + '/'))
+        except OSError:
+            pass
+    if False in verdicts:
+        return False, 'it describes another drive'
+    if True in verdicts:
+        return True, ''
+    return False, 'nothing in it can be checked against this device'
+
+
+def sed_check(device, status_path=DEFAULT_SED_STATUS, discover=None, read=None, boot=None, sysfs=store_module.SYSFS, by_id_dir='/dev/disk/by-id'):
+    """Whether the drive is a self-encrypting drive (Opal) with locking enabled and currently unlocked. -> (source, facts) with source 'ioctl' or 'status file'; NotEncrypted(why) when
+    it is not, or cannot be shown to be. First an IOC_OPAL_DISCOVERY on the device (read-only). A serving container normally lacks CAP_SYS_ADMIN, which the kernel's sed-opal ioctls
+    require, so EACCES or EPERM (from the open or the ioctl) sends us to the status file the host's boot unit writes: JSON with sed="opal", locking_enabled, locked, by_id, pci,
+    link_gts and ts. A missing, unreadable or malformed file, one older than this boot (the drive may have been reset since), one about another drive, or a drive that answers
+    nothing, all count as NOT encrypted."""
+    try:
+        facts = parse_level0((discover or opal_discovery)(device))
+    except OSError as error:
+        if error.errno not in (errno.EACCES, errno.EPERM):
+            raise NotEncrypted('the drive does not answer an Opal discovery (%s)' % (error.strerror or error))
+        return 'status file', status_file_facts(device, status_path, read, boot, sysfs, by_id_dir)
+    except ValueError as error:
+        raise NotEncrypted('the drive\'s Opal discovery cannot be read (%s)' % error)
+    if facts['sed'] != 'opal':
+        raise NotEncrypted('the drive is not an Opal self-encrypting drive (no Opal feature in its discovery)')
+    if not (facts['locking_supported'] and facts['locking_enabled']):
+        raise NotEncrypted('the drive\'s locking is not enabled (supported=%d enabled=%d)' % (facts['locking_supported'], facts['locking_enabled']))
+    if not facts['media_encryption']:
+        raise NotEncrypted('the drive does not report media encryption')
+    if facts['locked']:
+        raise NotEncrypted('the drive is locked')
+    return 'ioctl', facts
+
+
+def status_file_facts(device, status_path, read=None, boot=None, sysfs=store_module.SYSFS, by_id_dir='/dev/disk/by-id'):
+    """The boot unit's status file, validated (see sed_check). -> its facts; NotEncrypted(why)."""
+    try:
+        text = (read or _read_file)(status_path)
+    except OSError as error:
+        raise NotEncrypted('no Opal discovery is allowed here and the status file %s cannot be read (%s)' % (status_path, error.strerror or error))
+    try:
+        status = json.loads(text)
+        if not isinstance(status, dict):
+            raise ValueError('not an object')
+    except ValueError as error:
+        raise NotEncrypted('the status file %s is not a JSON object (%s)' % (status_path, error))
+    if status.get('sed') != 'opal':
+        raise NotEncrypted('the status file does not say the drive is an Opal self-encrypting drive (sed=%r)' % (status.get('sed'),))
+    if status.get('locking_enabled') is not True:
+        raise NotEncrypted('the status file does not say locking is enabled')
+    if status.get('locked') is not False:
+        raise NotEncrypted('the status file says the drive is locked, or does not say it is not')
+    try:
+        stamp = parse_timestamp(status.get('ts'))
+        booted = (boot or boot_time)()
+    except (ValueError, OSError, TypeError) as error:
+        raise NotEncrypted('the status file\'s time (ts) or this boot\'s time cannot be read (%s)' % error)
+    if stamp < booted:
+        raise NotEncrypted('the status file is older than this boot (the drive may have been reset or re-locked since)')
+    ok, why = same_drive(status, device, sysfs, by_id_dir)
+    if not ok:
+        raise NotEncrypted('the status file does not belong to this drive: %s' % why)
+    return dict(sed='opal', locking_supported=True, locking_enabled=True, locked=False, media_encryption=True, link_gts=status.get('link_gts'))
 
 
 def spare_slots(plan, block_bytes):
@@ -722,6 +910,7 @@ class NvmeTier(object):
         self.w = dict.fromkeys(COUNTER_NAMES, 0)
         self.latched = None
         self.closed = False
+        self.at_rest = 'unchecked'               # 'opal' once the drive was shown to be a self-encrypting drive with locking enabled and unlocked (QWEN_PREFIX_NVME_REQUIRE_SED)
         self.stopping = False                    # a graceful stop began: no new offers (set by begin_stop, from a signal handler too: assignments only)
         self.stop_deadline = None                # clock() time the drain budget ends (set by begin_stop)
         self.last_health = clock()
@@ -752,6 +941,11 @@ class NvmeTier(object):
             gone = store_module.device_problem(plan.device) if probe is None else probe()
             if gone:
                 raise store_module.DeviceGone(gone)
+            if plan.require_sed:
+                # (before anything touches the drive: a plaintext drive is never opened, whatever it holds)
+                source, facts = sed_check(plan.device, plan.sed_status)
+                self.at_rest = 'opal'
+                self.log('nvme tier at-rest encryption verified: opal locking_enabled=1 locked=0 media_encryption=1 source=%s', source.replace(' ', '-'))
             options = dict(ttl_s=plan.ttl_s, max_age_s=plan.max_age_s, max_bytes=plan.max_bytes, discard=plan.discard, threads=plan.threads)
             kwargs = dict(format=plan.format, direct=plan.direct, snap_bytes=plan.snap_bytes, journal_bytes=plan.journal_bytes, clock=clock)
             if file_factory is not None:
@@ -768,10 +962,10 @@ class NvmeTier(object):
         self.w['nvme_fp_drops'] += dropped
         stats = self.store.snapshot_stats()
         self.log('nvme tier open device=%s backend=%s ttl_s=%d max_age_s=%d max_bytes=%d capacity_bytes=%d free_floor_bytes=%d entries=%d kv=%d ckpt=%d '
-                 'recovered_records=%d recover_dropped=%d fp_drops=%d verify=%s queue_bytes=%d threads=%d audit=%d spill=%s retention_ack=1 fingerprint=%s',
+                 'recovered_records=%d recover_dropped=%d fp_drops=%d verify=%s queue_bytes=%d threads=%d audit=%d spill=%s retention_ack=1 at_rest=%s fingerprint=%s',
                  plan.device, self.backend.name, plan.ttl_s, plan.max_age_s, plan.max_bytes, self.store.capacity_bytes(), self.store.free_floor_bytes, stats['entries'],
                  stats['kv_entries'], stats['ckpt_entries'], self.store.stats['recovered_records'], self.store.stats['recover_dropped'], dropped, plan.verify,
-                 plan.queue_bytes, plan.threads, int(plan.audit), plan.spill, self.fp.hex())
+                 plan.queue_bytes, plan.threads, int(plan.audit), plan.spill, self.at_rest, self.fp.hex())
         self.log('nvme tier fingerprint %s components=%s', self.fp.hex(), json.dumps(self.components, separators=(',', ':')))
         if dropped:
             self.log('nvme tier dropped %d entries of another layout fingerprint (never restored)', dropped)
@@ -1336,7 +1530,7 @@ class NvmeTier(object):
         values.update(nvme_on=int(self.active), nvme_bytes=stats['logical_bytes'], nvme_entries=stats['entries'], nvme_kv_entries=stats['kv_entries'],
                       nvme_ckpt_entries=stats['ckpt_entries'], nvme_capacity_bytes=stats['capacity_bytes'], nvme_free_bytes=stats['free_bytes'],
                       nvme_queue_bytes=self.queue_kv_bytes + self.queue_ckpt_bytes, nvme_journal_used_bytes=stats['journal_used'],
-                      nvme_largest_free_bytes=stats['largest_free'], nvme_through_backlog_blocks=self.backlog_blocks)
+                      nvme_largest_free_bytes=stats['largest_free'], nvme_through_backlog_blocks=self.backlog_blocks, nvme_at_rest=int(self.at_rest == 'opal'))
         return values
 
     def describe(self):
@@ -1344,7 +1538,7 @@ class NvmeTier(object):
         return dict(device=self.plan.device, backend=self.backend.name, ttl_s=self.plan.ttl_s, max_age_s=self.plan.max_age_s, verify=self.plan.verify,
                     audit=int(self.plan.audit), queue_bytes=self.plan.queue_bytes, capacity_bytes=self.store.capacity_bytes(), fingerprint=self.fp.hex(),
                     spill=self.plan.spill, through_blocks=self.plan.through_blocks if self.plan.through else 0,
-                    through_idle_s=self.plan.through_idle_s if self.plan.through else 0, drain_s=self.plan.drain_s)
+                    through_idle_s=self.plan.through_idle_s if self.plan.through else 0, drain_s=self.plan.drain_s, at_rest=self.at_rest)
 
     def flush(self, timeout=30.0):
         """Wait for the queue to empty (tests, a graceful stop). -> True when it did."""

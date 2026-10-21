@@ -111,6 +111,7 @@ GAUGES = {
     'nvme_journal_used_bytes': 'bytes of the journal used since the last snapshot',
     'nvme_largest_free_bytes': 'the largest contiguous free extent of the data region',
     'nvme_through_backlog_blocks': 'blocks of finished requests waiting for the idle copy (write-through)',
+    'nvme_at_rest': '1 when the drive was shown at open to be an Opal self-encrypting drive with locking enabled and unlocked (0: the check is off, a gate\'s setting)',
 }
 # Levels that are the host's, not the writer's: the largest over writers, not the sum.
 MAX_KEYS = ('host_mem_available_bytes',)
@@ -303,6 +304,7 @@ COUNTERS = {
     'nvme_spill_retries': 'spill batches written again once after a device or store error',
     'nvme_refused_zero_retention': '1 when the NVMe tier refused to start because the node looks zero-retention (QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION=1 overrides)',
     'nvme_unavailable': '1 when the NVMe tier could not open its device and the engine serves without it',
+    'nvme_refused_not_encrypted': '1 when the NVMe tier refused to open the drive because it is not an Opal self-encrypting drive with locking enabled and unlocked (QWEN_PREFIX_NVME_REQUIRE_SED=0 is a gate\'s override)',
     'nvme_device_lost': '1 when the drive disappeared at run time (its node or controller went away, the namespace read 0 bytes) and the tier latched off; a restart with a live device brings it back',
 }
 

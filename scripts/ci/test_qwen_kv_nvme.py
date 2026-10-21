@@ -17,6 +17,7 @@ Held:
 """
 
 import array
+import ctypes
 import errno
 import hashlib
 import json
@@ -24,6 +25,7 @@ import os
 import random
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
@@ -57,7 +59,9 @@ def nvme_environ(device, **extra):
                'QWEN_C2_PROFILE': PROFILE, 'QWEN_PREFIX_NVME_COMPAT': 'rev1', 'QWEN_PREFIX_NVME_THREADS': '2',
                'QWEN_PREFIX_NVME_RETENTION_ACK': '1',
                # (the rig is the evict mode with no stop hooks unless a test asks otherwise: the defaults - write-through, a 4 s drain that arms process-wide hooks - have their own tests)
-               'QWEN_PREFIX_NVME_SPILL': 'evict', 'QWEN_PREFIX_NVME_DRAIN_S': '0'}
+               'QWEN_PREFIX_NVME_SPILL': 'evict', 'QWEN_PREFIX_NVME_DRAIN_S': '0',
+               # (a file is not a self-encrypting drive: the rig is a gate, which turns the check off. SedTests drive the check itself.)
+               'QWEN_PREFIX_NVME_REQUIRE_SED': '0'}
     environ.update(extra)
     return environ
 
@@ -195,7 +199,8 @@ class FlagTests(unittest.TestCase):
         self.assertEqual((plan.spill, plan.through_blocks, plan.through_idle_s, plan.allow_zero_retention), ('through', 32, 0, False))
         self.assertEqual((plan.device, plan.ttl_s, plan.max_age_s, plan.max_bytes, plan.verify, plan.restore, plan.free_floor_bytes),
                          ('/dev/nvme1n1', 86400, 0, 0, 'sample', 'host', None))
-        self.assertEqual((plan.queue_bytes, plan.threads, plan.format, plan.discard, plan.audit, plan.cmd_dir), (2 << 30, 4, 'auto', False, False, None))
+        self.assertEqual((plan.queue_bytes, plan.threads, plan.format, plan.discard, plan.audit, plan.cmd_dir), (2 << 30, 4, 'auto', True, False, None))
+        self.assertEqual((plan.require_sed, plan.sed_status), (True, '/run/thatch-cache-drive/status.json'))
 
     def test_every_value_is_strict(self):
         base = {'QWEN_PREFIX_NVME': '1', 'QWEN_PREFIX_NVME_DEVICE': '/dev/x', 'QWEN_PREFIX_NVME_RETENTION_ACK': '1'}
@@ -2006,7 +2011,9 @@ class StopTests(NvmeCase):
 @unittest.skipUnless(os.environ.get('QWEN_NVME_STOP_CHILD'), 'the body of a child process of StopProcessTests')
 class StopChildProbe(NvmeCase):
     """Run only as a child of StopProcessTests: a rig with a slow writer and the real stop hooks. Mode 'default': this very process takes the SIGTERM (default disposition before the
-    hooks). Mode 'engine': a multiprocessing child (fork) whose previous SIGTERM handler raises SystemExit, as vLLM's engine core does; its exit runs the finalizers."""
+    hooks). Mode 'engine': a multiprocessing child (fork) whose previous SIGTERM handler raises SystemExit, as vLLM's engine core does; its exit runs the finalizers. Mode 'atexit':
+    a plain interpreter exit with the serving contract's own teardown skip registered FIRST (an atexit handler that calls os._exit, serving_c2_contract.exit_without_device_teardown):
+    atexit is last-in-first-out, so the drain, registered later, must run before it."""
 
     def test_child(self):
         mode, report = os.environ['QWEN_NVME_STOP_CHILD'].split(':', 1)
@@ -2020,6 +2027,10 @@ class StopChildProbe(NvmeCase):
                     raise SystemExit()
 
                 signal.signal(signal.SIGTERM, previous)
+            if mode == 'atexit':
+                import atexit
+
+                atexit.register(os._exit, 0)
             made = self.rig(num_blocks=3000, nvme_env={'QWEN_PREFIX_NVME_DRAIN_S': '6', 'QWEN_PREFIX_NVME_SPILL': ''})
 
             def slow(op, offset, length):
@@ -2031,6 +2042,11 @@ class StopChildProbe(NvmeCase):
             for index in range(8):
                 made.serve(Request('idle-%d' % index, span(300, 900 + index), salt=salt_of('idler')))
             Path(report).write_text('ready %d %d\n' % (made.nvme.queue_kv_bytes, os.getpid()))
+            if mode == 'atexit':
+                end = time.monotonic() + 120
+                while not os.path.exists(report + '.go') and time.monotonic() < end:
+                    time.sleep(0.02)
+                sys.exit(0)
             time.sleep(120)
 
         if mode == 'engine':
@@ -2063,7 +2079,10 @@ class StopProcessTests(NvmeCase):
         fields = Path(report).read_text().split()
         self.assertGreater(int(fields[1]), 0, 'the writer is behind: there is something to drain')
         began = time.monotonic()
-        os.kill(int(fields[2]), signal.SIGTERM)
+        if mode == 'atexit':
+            Path(report + '.go').write_text('go\n')
+        else:
+            os.kill(int(fields[2]), signal.SIGTERM)
         code = child.wait(timeout=60)
         return code, time.monotonic() - began, report
 
@@ -2080,11 +2099,347 @@ class StopProcessTests(NvmeCase):
         self.assertLess(elapsed, 9)
         self.check_drained()
 
+    def test_a_plain_exit_drains_before_the_teardown_skip_that_ends_the_process(self):
+        code, elapsed, report = self.run_child('atexit')
+        self.assertEqual(code, 0)
+        self.assertLess(elapsed, 9)
+        self.check_drained()
+
     def test_the_engine_core_pattern_systemexit_in_a_child_drains_in_the_finalizer(self):
         code, elapsed, report = self.run_child('engine')
         self.assertEqual(Path(report + '.exit').read_text().strip(), '0', 'SystemExit() leaves the child normally')
         self.assertLess(elapsed, 9)
         self.check_drained()
+
+
+def level0(opal='opal2', supported=True, enabled=True, locked=False, media=True, extra=True):
+    """A TCG Level 0 Discovery response: the 48-byte header, then feature descriptors (code, version, length, data)."""
+    features = b''
+    if extra:
+        features += struct.pack('>HBB', 0x0001, 0x10, 12) + bytes([0x11]) + bytes(11)            # TPer
+    flags = (1 if supported else 0) | (2 if enabled else 0) | (4 if locked else 0) | (8 if media else 0)
+    features += struct.pack('>HBB', 0x0002, 0x10, 12) + bytes([flags]) + bytes(11)                # Locking
+    if opal == 'opal2':
+        features += struct.pack('>HBB', 0x0203, 0x10, 16) + bytes(16)
+    elif opal == 'opal1':
+        features += struct.pack('>HBB', 0x0200, 0x10, 16) + bytes(16)
+    elif opal == 'pyrite':
+        features += struct.pack('>HBB', 0x0302, 0x10, 12) + bytes(12)
+    return struct.pack('>I', 44 + len(features)) + struct.pack('>I', 1) + bytes(40) + features
+
+
+class DiscoveryTests(unittest.TestCase):
+    def test_the_parser_reads_the_locking_flags_and_the_opal_feature(self):
+        self.assertEqual(kvnvme.parse_level0(level0()), dict(sed='opal', locking_supported=True, locking_enabled=True, locked=False, media_encryption=True))
+        self.assertEqual(kvnvme.parse_level0(level0('opal1'))['sed'], 'opal')
+        self.assertTrue(kvnvme.parse_level0(level0(locked=True))['locked'])
+        self.assertFalse(kvnvme.parse_level0(level0(enabled=False))['locking_enabled'])
+        self.assertFalse(kvnvme.parse_level0(level0(media=False))['media_encryption'])
+        self.assertIsNone(kvnvme.parse_level0(level0('pyrite'))['sed'], 'Pyrite does not encrypt the media')
+        self.assertIsNone(kvnvme.parse_level0(level0(None))['sed'])
+        self.assertFalse(kvnvme.parse_level0(bytes(48) + bytes(100))['locking_supported'], 'a response with no features says nothing is supported')
+
+    def test_a_response_that_does_not_parse_is_an_error(self):
+        with self.assertRaises(ValueError):
+            kvnvme.parse_level0(b'\0' * 10)
+        cut = level0()[:-5]
+        with self.assertRaises(ValueError):
+            kvnvme.parse_level0(cut)
+
+    def test_the_ioctl_is_the_kernels_opal_discovery_with_a_user_buffer(self):
+        number = (1 << 30) | (16 << 16) | (ord('p') << 8) | 239                                # _IOW('p', 239, struct opal_discovery { __u64 data; __u64 size; })
+        self.assertEqual(kvnvme.IOC_OPAL_DISCOVERY, number)
+        seen = []
+        response = level0()
+
+        def fake(fd, request, argument):
+            address, size = struct.unpack('QQ', argument)
+            seen.append((request, size))
+            ctypes.memmove(address, response, len(response))
+            return 0
+
+        with tempfile.TemporaryDirectory() as directory:
+            node = os.path.join(directory, 'node')
+            Path(node).write_bytes(b'')
+            data = kvnvme.opal_discovery(node, ioctl=fake)
+        self.assertEqual(seen, [(number, kvnvme.OPAL_DISCOVERY_BYTES)])
+        self.assertEqual(data[:len(response)], response)
+
+
+class SedCheckTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.mkdtemp(prefix='qkvn-sed-')
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.device = os.path.join(self.directory, 'nvme-Example_Model_SERIAL0001_1')
+        Path(self.device).write_bytes(b'')
+        self.status = os.path.join(self.directory, 'status.json')
+        self.boot = 1000.0
+
+    def good(self, **change):
+        status = dict(sed='opal', locking_enabled=True, locked=False, by_id=os.path.basename(self.device), pci='0000:00:00.0', link_gts=16.0, ts=2000.0)
+        status.update(change)
+        return status
+
+    def check(self, status=None, discover=None, raw=None, read=None, boot=None, **kwargs):
+        if raw is None and status is not None:
+            raw = json.dumps(status)
+        if read is None:
+            def read(path):
+                if raw is None:
+                    raise FileNotFoundError(path)
+                return raw
+        return kvnvme.sed_check(self.device, self.status, discover=discover or self.denied, read=read, boot=boot or (lambda: self.boot), sysfs=os.path.join(self.directory, 'sys'),
+                                by_id_dir=os.path.join(self.directory, 'by-id'), **kwargs)
+
+    @staticmethod
+    def denied(device):
+        raise PermissionError(errno.EACCES, 'Operation not permitted')
+
+    def refused(self, *words, **kwargs):
+        with self.assertRaises(kvnvme.NotEncrypted) as caught:
+            self.check(**kwargs)
+        for word in words:
+            self.assertIn(word, str(caught.exception))
+        return str(caught.exception)
+
+    # -- the ioctl first
+    def test_an_unlocked_opal_drive_with_locking_enabled_passes_by_the_ioctl(self):
+        source, facts = self.check(discover=lambda device: level0())
+        self.assertEqual((source, facts['sed'], facts['locking_enabled'], facts['locked']), ('ioctl', 'opal', True, False))
+
+    def test_the_ioctl_refuses_what_is_not_an_unlocked_locking_enabled_opal_drive(self):
+        self.refused('locked', discover=lambda device: level0(locked=True))
+        self.refused('locking is not enabled', discover=lambda device: level0(enabled=False))
+        self.refused('locking is not enabled', discover=lambda device: level0(supported=False, enabled=False))
+        self.refused('media encryption', discover=lambda device: level0(media=False))
+        self.refused('not an Opal', discover=lambda device: level0('pyrite'))
+        self.refused('not an Opal', discover=lambda device: level0(None))
+        self.refused('cannot be read', discover=lambda device: b'\0' * 7)
+
+    def test_a_device_that_does_not_answer_the_discovery_is_not_encrypted_and_does_not_fall_back(self):
+        for code in (errno.ENOTTY, errno.EOPNOTSUPP, errno.EINVAL, errno.ENODEV, errno.EIO):
+            def discover(device, code=code):
+                raise OSError(code, os.strerror(code))
+
+            self.refused('does not answer an Opal discovery', discover=discover, status=self.good())
+
+    def test_eacces_and_eperm_fall_back_to_the_status_file_from_the_open_or_the_ioctl(self):
+        for error in (PermissionError(errno.EACCES, 'denied'), PermissionError(errno.EPERM, 'not permitted')):
+            def discover(device, error=error):
+                raise error
+
+            source, facts = self.check(self.good(), discover=discover)
+            self.assertEqual(source, 'status file')
+            self.assertEqual((facts['sed'], facts['locking_enabled'], facts['locked'], facts['link_gts']), ('opal', True, False, 16.0))
+
+    # -- the status file
+    def test_a_missing_or_unreadable_file_counts_as_not_encrypted(self):
+        self.refused('status file', 'cannot be read')
+        self.refused('not a JSON object', raw='{not json')
+        self.refused('not a JSON object', raw='[1, 2]')
+
+    def test_the_file_must_say_opal_locking_enabled_and_not_locked(self):
+        self.refused('sed=', status=self.good(sed='none'))
+        self.refused('sed=', status=self.good(sed=None))
+        self.refused('locking is enabled', status=self.good(locking_enabled=False))
+        self.refused('locking is enabled', status=self.good(locking_enabled='true'))
+        self.refused('locked', status=self.good(locked=True))
+        status = self.good()
+        del status['locked']
+        self.refused('locked', status=status)
+
+    def test_a_file_older_than_this_boot_is_not_trusted(self):
+        self.refused('older than this boot', status=self.good(ts=999.0))
+        self.assertEqual(self.check(self.good(ts=1000.0))[0], 'status file', 'written at the boot second itself: not older')
+
+    def test_the_time_may_be_epoch_seconds_digits_or_iso(self):
+        for stamp in (2000, 2000.5, '2000', '2026-10-21T04:00:00Z', '2026-10-21T04:00:00+00:00', '2026-10-21T04:00:00'):
+            self.boot = 1000.0
+            self.assertEqual(self.check(self.good(ts=stamp))[0], 'status file', stamp)
+        self.boot = time.time() + 3600.0                                              # a boot that happened after the ISO times above
+        self.refused('older than this boot', status=self.good(ts='2026-10-21T04:00:00Z'))
+        for bad in (None, True, 'yesterday', [1]):
+            self.boot = 1000.0
+            self.refused('time (ts)', status=self.good(ts=bad))
+
+    def test_a_boot_time_that_cannot_be_read_is_not_trusted(self):
+        def boot():
+            raise OSError('no /proc')
+
+        self.refused('time (ts)', status=self.good(), boot=boot)
+
+    def test_the_file_must_describe_this_drive(self):
+        self.refused('does not belong', 'nothing in it can be checked', status=self.good(by_id='nvme-Another_Model_SERIAL0002_1'))
+        # a device configured as a by-id name is that name or it is another drive
+        by_id_dir = os.path.join(self.directory, 'by-id')
+        os.makedirs(by_id_dir)
+        self.device = os.path.join(by_id_dir, 'nvme-Example_Model_SERIAL0001_1')
+        Path(self.device).write_bytes(b'')
+        self.assertEqual(self.check(self.good(by_id='nvme-Example_Model_SERIAL0001_1'))[0], 'status file')
+        self.refused('another drive', status=self.good(by_id='nvme-Another_Model_SERIAL0002_1'))
+        # nothing in it that this host can check: not trusted
+        shutil.rmtree(by_id_dir)
+        os.makedirs(os.path.join(self.directory, 'by-id'), exist_ok=True)
+        self.device = os.path.join(self.directory, 'renamed-node-in-a-container')
+        Path(self.device).write_bytes(b'')
+        self.refused('does not belong', 'nothing in it can be checked', status=self.good(by_id='nvme-Example_Model_SERIAL0001_1', pci=''))
+
+    def test_the_by_id_link_and_the_pci_function_are_each_a_way_to_know_the_drive(self):
+        by_id_dir = os.path.join(self.directory, 'by-id')
+        os.makedirs(by_id_dir)
+        self.device = os.path.join(self.directory, 'renamed-node-in-a-container')
+        Path(self.device).write_bytes(b'')
+        os.symlink(self.device, os.path.join(by_id_dir, 'nvme-Example_Model_SERIAL0001_1'))
+        self.assertEqual(self.check(self.good(by_id='nvme-Example_Model_SERIAL0001_1', pci=''))[0], 'status file', 'the by-id link resolves to this very node')
+        other = os.path.join(self.directory, 'some-other-node')
+        Path(other).write_bytes(b'')
+        os.symlink(other, os.path.join(by_id_dir, 'nvme-Another_SERIAL0002_1'))
+        self.refused('another drive', status=self.good(by_id='nvme-Another_SERIAL0002_1', pci=''))
+        # the PCI function, from the device's sysfs path (found by device number; a regular file stands in for the node: 0:0)
+        sysfs = os.path.join(self.directory, 'sys')
+        function = os.path.join(sysfs, 'devices', 'pci0000:00', '0000:00:01.1', '0000:05:00.0', 'nvme', 'nvme3', 'nvme3n1')
+        os.makedirs(function)
+        os.makedirs(os.path.join(sysfs, 'dev', 'block'))
+        os.symlink(function, os.path.join(sysfs, 'dev', 'block', '0:0'))
+        self.assertEqual(self.check(self.good(by_id='', pci='0000:05:00.0'))[0], 'status file')
+        self.refused('another drive', status=self.good(by_id='', pci='0000:06:00.0'))
+        self.refused('another drive', status=self.good(by_id='nvme-Example_Model_SERIAL0001_1', pci='0000:06:00.0'))
+
+
+class TrimDefaultTests(NvmeCase):
+    """QWEN_PREFIX_NVME_DISCARD=1 is the default: freed extents (a delete, an expiry, an eviction) are TRIMmed - on the writer side, never on the scheduler thread."""
+
+    def test_the_plan_trims_by_default_and_a_switch_turns_it_off(self):
+        plan, problems = kvnvme.parse(ACKED)
+        self.assertEqual((problems, plan.discard), ([], True))
+        plan, problems = kvnvme.parse(dict(ACKED, QWEN_PREFIX_NVME_DISCARD='0'))
+        self.assertEqual((problems, plan.discard), ([], False))
+
+    def test_deletes_expiry_and_eviction_ask_the_drive_to_discard_and_the_tier_threads_stay_off_the_device(self):
+        asked = []
+
+        class Trimming(store_module.BlockFile):
+            def discard(self, offset, length):
+                asked.append((offset, length, threading.current_thread().name))
+                return True
+
+        made = NvmeRig(self.device, tier=self.TIER, num_blocks=SMALL_POOL, budget=1 << 20, file_factory=Trimming, nvme_env={'QWEN_PREFIX_NVME_DISCARD': ''})
+        self.addCleanup(made.close)
+        self.assertTrue(made.nvme.store.discard_on_free)
+        a = self.push_out(made, first_turn('a1', 'alpha'))
+        b = self.push_out(made, first_turn('b1', 'beta', seed=9))
+        self.assertGreater(made.registry.snapshot()['nvme_entries'], 100)
+        removed = made.nvme.delete_salt(a.cache_salt)                       # a tenant delete
+        self.assertGreater(removed, 60)
+        self.assertGreater(len(asked), 0, 'the freed extents were TRIMmed')
+        self.assertLess(len(asked), removed, 'adjacent extents went out as one call')
+        before = len(asked)
+        made.nvme.store.sweep(now=time.time() + 10 * 86400)                 # expiry
+        self.assertGreater(len(asked), before)
+        self.assertEqual(made.registry.snapshot()['nvme_entries'], 0)
+        self.assertTrue(made.nvme.store.stats['discarded_bytes'] > 0)
+        self.assertTrue(made.check_kv())
+
+
+class SedTierTests(NvmeCase):
+    """QWEN_PREFIX_NVME_REQUIRE_SED through the registry: on by default, the drive is never opened when it cannot be shown to be encrypted, one line and one counter, the host tier serves."""
+
+    def start(self, check=None, nvme_env=None, environ=None):
+        extra = {'QWEN_PREFIX_NVME_REQUIRE_SED': ''}
+        extra.update(nvme_env or {})
+        patches = []
+        if check is not None:
+            patches.append(mock.patch.object(kvnvme, 'sed_check', check))
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        made = NvmeRig(self.device, tier=self.TIER, num_blocks=SMALL_POOL, budget=1 << 20, nvme_env=extra, environ=environ)
+        self.addCleanup(made.close)
+        return made
+
+    def test_the_default_is_to_require_it_and_a_gate_turns_it_off(self):
+        plan, problems = kvnvme.parse(ACKED)
+        self.assertEqual((problems, plan.require_sed, plan.sed_status), ([], True, '/run/thatch-cache-drive/status.json'))
+        plan, problems = kvnvme.parse(dict(ACKED, QWEN_PREFIX_NVME_REQUIRE_SED='0', QWEN_PREFIX_NVME_SED_STATUS='/run/x/status.json'))
+        self.assertEqual((problems, plan.require_sed, plan.sed_status), ([], False, '/run/x/status.json'))
+        for name, value in (('QWEN_PREFIX_NVME_REQUIRE_SED', '2'), ('QWEN_PREFIX_NVME_SED_STATUS', 'status.json'), ('QWEN_PREFIX_NVME_SED_STATUS', '/a b')):
+            plan, problems = kvnvme.parse(dict(ACKED, **{name: value}))
+            self.assertIsNone(plan)
+            self.assertTrue(any(name in problem for problem in problems), (name, problems))
+
+    def test_a_drive_that_is_not_shown_to_be_encrypted_is_never_opened(self):
+        before = Path(self.device).read_bytes()
+
+        def check(device, status_path):
+            raise kvnvme.NotEncrypted('the status file /run/x/status.json cannot be read (No such file or directory)')
+
+        with mock.patch.object(kvnvme.NvmeStore, 'open', side_effect=AssertionError('the drive must not be opened')):
+            made = self.start(check)
+        self.assertIsNone(made.registry.nvme)
+        self.assertEqual(made.registry.nvme_refusal, 'not_encrypted')
+        refusals = [line for line in made.lines if 'REFUSED to open the drive' in line]
+        self.assertEqual(len(refusals), 1, 'one line')
+        self.assertIn('cannot be read', refusals[0])
+        self.assertIn('QWEN_PREFIX_NVME_REQUIRE_SED=0', refusals[0])
+        snapshot = made.registry.snapshot()
+        self.assertEqual((snapshot['nvme_refused_not_encrypted'], snapshot['nvme_on'], snapshot['nvme_unavailable'], snapshot['nvme_at_rest']), (1, 0, 0, 0))
+        self.assertIsNone(made.registry.tier.spill_sink)
+        made.serve(first_turn())
+        self.assertTrue(made.check_kv())
+        self.assertEqual(Path(self.device).read_bytes(), before, 'not a byte written')
+        self.assertEqual(len([line for line in made.lines if 'nvme tier' in line]), 1, 'and nothing else is said about it')
+        scanned = prefix_markers.scan(['[PINDIAG] prefix: ' + line for line in made.lines])
+        self.assertEqual(len(scanned['nvme_trouble']), 1, 'the gate reads it as trouble')
+
+    def test_a_verified_drive_opens_and_says_so(self):
+        calls = []
+
+        def check(device, status_path):
+            calls.append((device, status_path))
+            return 'status file', dict(sed='opal')
+
+        made = self.start(check, nvme_env={'QWEN_PREFIX_NVME_SED_STATUS': '/run/x/status.json'})
+        self.assertIsNotNone(made.registry.nvme)
+        self.assertEqual(calls, [(self.device, '/run/x/status.json')])
+        self.assertEqual(made.nvme.at_rest, 'opal')
+        self.assertTrue(any('at-rest encryption verified' in line and 'source=status-file' in line for line in made.lines))
+        self.assertTrue(any('nvme tier open' in line and 'at_rest=opal' in line for line in made.lines))
+        snapshot = made.registry.snapshot()
+        self.assertEqual((snapshot['nvme_at_rest'], snapshot['nvme_on'], snapshot['nvme_refused_not_encrypted']), (1, 1, 0))
+        self.assertEqual(made.nvme.describe()['at_rest'], 'opal')
+
+    def test_with_the_check_off_it_is_not_asked_and_the_gauge_says_so(self):
+        def check(device, status_path):
+            raise AssertionError('not asked')
+
+        made = self.start(check, nvme_env={'QWEN_PREFIX_NVME_REQUIRE_SED': '0'})
+        self.assertIsNotNone(made.registry.nvme)
+        self.assertEqual(made.nvme.at_rest, 'unchecked')
+        self.assertEqual(made.registry.snapshot()['nvme_at_rest'], 0)
+        self.assertTrue(any('at_rest=unchecked' in line for line in made.lines))
+
+    def test_end_to_end_a_file_is_not_a_self_encrypting_drive(self):
+        made = self.start()
+        self.assertIsNone(made.registry.nvme)
+        self.assertTrue(any('REFUSED to open the drive' in line and 'does not answer an Opal discovery' in line for line in made.lines), made.lines[:3])
+
+    def test_end_to_end_a_container_reads_the_boot_units_file_when_the_ioctl_is_denied(self):
+        status = os.path.join(self.directory, 'status.json')
+        Path(status).write_text(json.dumps(dict(sed='opal', locking_enabled=True, locked=False, by_id=os.path.basename(self.device), pci='0000:00:00.0', link_gts=16.0, ts=time.time())))
+
+        def denied(device, ioctl=None):
+            raise PermissionError(errno.EACCES, 'Operation not permitted')
+
+        with mock.patch.object(kvnvme, 'opal_discovery', denied):
+            made = self.start(nvme_env={'QWEN_PREFIX_NVME_SED_STATUS': status})
+        self.assertIsNotNone(made.registry.nvme)
+        self.assertEqual(made.nvme.at_rest, 'opal')
+        Path(status).write_text(json.dumps(dict(sed='opal', locking_enabled=True, locked=True, by_id=os.path.basename(self.device), ts=time.time())))
+        made.close()
+        with mock.patch.object(kvnvme, 'opal_discovery', denied):
+            again = self.start(nvme_env={'QWEN_PREFIX_NVME_SED_STATUS': status})
+        self.assertIsNone(again.registry.nvme)
+        self.assertTrue(any('says the drive is locked' in line for line in again.lines))
 
 
 class ContractTests(unittest.TestCase):
@@ -2155,6 +2510,17 @@ class ContractTests(unittest.TestCase):
             profile = self.profile(name='x-traffic', waiver=self.waiver(), **{name: value})
             problems = self.nvme_problems(profile)
             self.assertTrue(any(name in problem and "a gate's own" in problem for problem in problems), (name, problems))
+
+    def test_the_encryption_check_is_on_in_a_traffic_profile_and_only_a_gate_turns_it_off(self):
+        self.assertEqual(contract.PREFIX_NVME_GATE_ONLY_VALUES, kvnvme.GATE_ONLY_VALUES)
+        self.assertEqual(self.nvme_problems(self.profile(name='x-traffic', waiver=self.waiver())), [], 'unset: on by default')
+        self.assertEqual(self.nvme_problems(self.profile(name='x-traffic', waiver=self.waiver(), QWEN_PREFIX_NVME_REQUIRE_SED='1')), [])
+        self.assertEqual(self.nvme_problems(self.profile(name='x-traffic', waiver=self.waiver(), QWEN_PREFIX_NVME_REQUIRE_SED='1', QWEN_PREFIX_NVME_SED_STATUS='/run/x/status.json')), [])
+        problems = self.nvme_problems(self.profile(name='x-traffic', waiver=self.waiver(), QWEN_PREFIX_NVME_REQUIRE_SED='0'))
+        self.assertTrue(any('QWEN_PREFIX_NVME_REQUIRE_SED=0' in problem and "a gate's own" in problem for problem in problems), problems)
+        self.assertEqual(self.nvme_problems(self.profile(QWEN_PREFIX_NVME_REQUIRE_SED='0')), [], 'a gate profile may')
+        problems = self.nvme_problems(self.profile(QWEN_PREFIX_NVME_REQUIRE_SED='2'))
+        self.assertTrue(any('QWEN_PREFIX_NVME_REQUIRE_SED' in problem for problem in problems), problems)
 
     def test_an_inherited_value_is_dropped_under_a_profile_that_does_not_name_it(self):
         environ = dict((name, '1') for name in contract.PREFIX_NVME_NAMES)
