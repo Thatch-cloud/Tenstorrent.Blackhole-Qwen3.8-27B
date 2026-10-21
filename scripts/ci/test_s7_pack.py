@@ -280,7 +280,7 @@ class TemplateTests(unittest.TestCase):
 
     def test_the_templates_name_the_lines_the_arms_log_and_the_estimates_are_marked(self):
         text = re.sub(r'\s*\n#\s*', ' ', (PACK / 'T1B-s7-candidate.env').read_text(encoding='utf-8'))
-        for phrase in ('[PINDIAG] prefix: host tier upload on', 'latched off', '[PINDIAG] admission pipeline installed: seed_first=1', 'seed first deferred', 'admission ledger trim', '[LOOKUP-DRAFT] engaged policy=n3m12',
+        for phrase in ('[PINDIAG] prefix: host tier upload on', 'latched off', 'admission ledger trim', '[LOOKUP-DRAFT] engaged policy=n3m12',
                        '[LOOKUP-ROUND]', '[PINDIAG] tp4 gdn wc engaged', 'reason=8 users (WC takes 2 or 4)', 'adaptive=1', 'prefill_ladder_report.py',
                        'np1_report.py', 'octo_compare.py', 'agent_turns.py report', 'sched2_report.py', 'ESTIMATE', 'NO-GO for the candidate'):
             self.assertIn(phrase, text)
@@ -288,7 +288,7 @@ class TemplateTests(unittest.TestCase):
         for phrase in ('exact=True', 'audit mismatch', 'latched off', 'about 2.6 GB more DRAM', 'The ledger trim is NOT in the twin'):
             self.assertIn(phrase, text)
         text = re.sub(r'\s*\n#\s*', ' ', (PACK / 'T1A-s6-control.env').read_text(encoding='utf-8'))
-        self.assertIn('The control logs none of the four groups', text)
+        self.assertIn('The control logs none of the three groups', text)
         text = re.sub(r'\s*\n#\s*', ' ', (PACK / 'R2-restore-s7-candidate.env').read_text(encoding='utf-8'))
         for phrase in ('upload_restore_compare.py', 'There is no restore-heavy smoke test', 'tier_io_write_blocks', 'ESTIMATE'):
             self.assertIn(phrase, text)
@@ -298,8 +298,16 @@ class TemplateTests(unittest.TestCase):
             text = path.read_text(encoding='utf-8')
             for line in text.splitlines():
                 if not line.startswith('#'):
-                    for flag in ('QWEN_FAST_ADMISSION_HOLD_REUSE', 'QWEN_FAST_SDPA_PF_KSPLIT', 'QWEN_FAST_LOOKUP_SHADOW', 'QWEN_FAST_PREFILL_TAIL_TRACE'):
+                    for flag in ('QWEN_FAST_ADMISSION_HOLD_REUSE', 'QWEN_FAST_SDPA_PF_KSPLIT', 'QWEN_FAST_LOOKUP_SHADOW', 'QWEN_FAST_PREFILL_TAIL_TRACE',
+                                 'QWEN_FAST_ADMISSION_SEED_FIRST'):
                         self.assertNotIn(flag, line, path.name)
+
+    def test_no_template_reads_for_seed_first_lines(self):
+        # tp4/s7c: admission pipelining is out of the candidate; a read rule for its lines would fail a healthy run (it never logs them)
+        for path in PACK.glob('*.env'):
+            text = re.sub(r'\s*\n#\s*', ' ', path.read_text(encoding='utf-8'))
+            for phrase in ('seed first deferred', 'seed first built', 'seed_first=1', 'SEED FIRST ('):
+                self.assertNotIn(phrase, text, (path.name, phrase))
 
 
 class GeneratedTests(unittest.TestCase):

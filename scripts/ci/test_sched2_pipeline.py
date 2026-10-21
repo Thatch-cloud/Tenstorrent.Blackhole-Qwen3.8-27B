@@ -763,6 +763,54 @@ class SeedFirstLifecycleTests(Fresh):
         self.assertIsNone(lifecycle.request_id)
 
 
+    # -- vLLM's own order (tp4/s7c) ----------------------------------------------------------------------------------------------------------------------------------------------------------
+    # vLLM 0.25.1 EngineCore._process_engine_step (vllm/v1/engine/core.py) runs step() = schedule, execute_model, update_from_output, queues the outputs, then post_step() = take_draft_token_ids(),
+    # and only after that the next schedule(). Seed first completes the deferred bind at the START of the next schedule(), so take_draft_token_ids() runs without the new request: no draft rows and
+    # no prepared request ticket (serving_vllm_contract.prepared_ticket) exist for it, and the next packed step raises 'Live prepared request ticket required before scheduler admission'
+    # (S7B window review; the lever was taken out of the ship-7 candidate, docs/tp4-s7.md). script() above calls schedule() BEFORE take_draft_token_ids(), the reverse of vLLM's order, which is
+    # why nothing here saw it.
+
+    def post_step(self, seed_first):
+        """(what take_draft_token_ids() returns, lifecycle, build mock, scheduler, worker) after the step's execute and sample, in vLLM's order: the post-step call comes BEFORE the next schedule()."""
+        from types import ModuleType
+
+        lifecycle, worker, bridge, capture, build, scheduled, decode, scheduler, events, seed = self.drive(seed_first)
+        self.addCleanup(lambda: lifecycle.closed or lifecycle.close())
+        outputs = ModuleType('vllm.v1.outputs')
+        outputs.ModelRunnerOutput = outputs.DraftTokenIds = SimpleNamespace
+        with patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+            return worker.take_draft_token_ids(), lifecycle, build, scheduler, worker, outputs
+
+    def test_in_vllms_order_the_eager_bind_has_its_drafts_at_the_post_step(self):
+        drafts, lifecycle, build, scheduler, worker, outputs = self.post_step(None)
+        build.assert_called_once()
+        self.assertEqual(drafts.req_ids, ['request'])
+        self.assertEqual(len(drafts.draft_token_ids), 1)
+        self.assertTrue(drafts.draft_token_ids[0], 'the drafts the next packed step verifies')
+
+    def test_in_vllms_order_a_deferred_request_has_no_drafts_at_the_post_step_the_documented_limitation(self):
+        seed, _ = policy()
+        drafts, lifecycle, build, scheduler, worker, outputs = self.post_step(seed)
+        self.assertEqual(seed.deferred, 1)
+        self.assertIsNone(drafts, 'take_draft_token_ids() ran before the bind: nothing for the new request (so no prepared ticket for the next packed step)')
+        build.assert_not_called()
+        self.assertIsNotNone(lifecycle.deferred)
+        scheduler().schedule()          # only now, at the start of the NEXT schedule(), does the bind run
+        build.assert_called_once()
+        with patch.dict('sys.modules', {'vllm.v1.outputs': outputs}):
+            late = worker.take_draft_token_ids()
+        self.assertEqual(late.req_ids, ['request'], 'the drafts exist after the bind, one post-step too late for vLLM')
+
+    @unittest.expectedFailure
+    def test_in_vllms_order_seed_first_has_the_eager_orders_drafts_at_the_post_step(self):
+        """What a redesign of the lever must satisfy (turn this green and delete the limitation test above): at take_draft_token_ids() time, in vLLM's order, the deferred request has
+        the drafts (and the ticket) the eager bind has."""
+        eager, *_ = self.post_step(None)
+        seed, _ = policy()
+        pipelined, *_ = self.post_step(seed)
+        self.assertEqual(pipelined, eager)
+
+
 class PacingIdentityTests(Fresh):
     """The real alternator on the plugin's scheduler over a fake clock: the step time it measures for a prefill step, the debt it owes the decoders and every decision it takes are the
     same whether the bind ran in the sampler (eager) or at the start of the next schedule() call (seed first), because the completion runs BEFORE the alternator's begin()."""
