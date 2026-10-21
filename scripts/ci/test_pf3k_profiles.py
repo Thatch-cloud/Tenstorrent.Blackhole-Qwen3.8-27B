@@ -107,7 +107,10 @@ class TwinTests(unittest.TestCase):
         import make_pf3_profiles
 
         names = list(PROFILES)
-        last_s5 = max(names.index(name) for name in s5.twin_names())
+        import make_s6_profiles
+        import make_sched2_profiles
+
+        last_s5 = max(names.index(name) for name in tuple(s5.twin_names()) + tuple(make_s6_profiles.twin_names()) + tuple(make_sched2_profiles.twin_names()))      # (tp4/s7: the ship-6 audited twin and the sched-2 twins sit between)
         self.assertEqual(names[last_s5 + 1:last_s5 + 1 + len(make_pf3_profiles.NAMES)], list(make_pf3_profiles.NAMES))
         last = last_s5 + len(make_pf3_profiles.NAMES)
         self.assertEqual(names[last + 1:last + 4], list(twins.NAMES))
@@ -190,7 +193,8 @@ class ProtectedTests(unittest.TestCase):
         import make_pf3_profiles
 
         # (the other lever of tp4/prefill-3, the traced tail, generated its own twins on the same branch: test_pf3_profiles)
-        self.assertEqual(sorted(set(PROFILES) - set(before['profiles']) - set(make_pf3_profiles.twin_names())), sorted(twins.NAMES))
+        # (tp4/s7 merged other branches' generated twins and the s7 candidate beside these)
+        self.assertEqual(sorted(set(PROFILES) - set(before['profiles']) - set(make_pf3_profiles.twin_names()) - (set(profile_twins.generated_names()) - set(twins.NAMES))), sorted(twins.NAMES))
 
     def test_the_approved_traffic_profile_never_names_either_flag(self):
         self.assertNotIn(FLAG, PROFILES[SHIP]['env'])

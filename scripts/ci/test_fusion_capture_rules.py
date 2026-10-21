@@ -1405,6 +1405,7 @@ class CoverageTests(unittest.TestCase):
         import make_np1_profiles as np1
         import make_s5_profiles as s5
         import make_s6_profiles as s6
+        import make_s7_profiles as s7
         import make_xe_profiles as xe
         import make_pf2_profiles as pf2
         import make_pf3_profiles as pf3
@@ -1416,7 +1417,7 @@ class CoverageTests(unittest.TestCase):
         # (tp4/octo-3: the octo twins of the combined prefill arm carry the prefill flags beside the octo ones and the ship candidates beside the fusion ship's: test_octo3_profiles, test_octo3_ship)
         carriers = sorted(name[len(fusion.NAMESPACE):] for name, profile in profiles.items()
                           if name.startswith(fusion.NAMESPACE) and set(GATED_PREFILL) & set(profile['env']) and name not in octo3.owned_names()
-                          and name not in ship4.owned_names() and name not in np1.twin_names() and name not in s5.owned_names() and name not in s6.owned_names() and name not in xe.twin_names() and name not in sched.twin_names() and name not in sched2.twin_names() and not name.endswith(('-traffic-oneq', '-traffic-o3-oneq')))      # (tp4/np1-fastlane's two twins are the ship candidate / its audited twin plus one flag: test_np1_profiles)      # (tp4/exact-end's two twins are the ship candidate / its audited twin plus one flag: test_xe_profiles)      # (tp4/sched-1's twins are the ship candidate / its audited twin plus the scheduler levers: test_sched_profiles)
+                          and name not in ship4.owned_names() and name not in np1.twin_names() and name not in s5.owned_names() and name not in s6.owned_names() + s7.owned_names() and name not in xe.twin_names() and name not in sched.twin_names() and name not in sched2.twin_names() and not name.endswith(('-traffic-oneq', '-traffic-o3-oneq')))      # (tp4/np1-fastlane's two twins are the ship candidate / its audited twin plus one flag: test_np1_profiles)      # (tp4/exact-end's two twins are the ship candidate / its audited twin plus one flag: test_xe_profiles)      # (tp4/sched-1's twins are the ship candidate / its audited twin plus the scheduler levers: test_sched_profiles)
         self.assertEqual(carriers, sorted(PREFILL_AUDITED_TWINS))
         for name, profile in profiles.items():
             if not name.startswith(fusion.NAMESPACE) and name not in pf2.twin_names() and name not in pf3.twin_names() and name not in pf3k.twin_names() and name not in sched.twin_names() and name not in sched2.twin_names():      # (tp4/prefill-3's three twins are the ship-5 candidate / its audited twin plus one flag: test_pf3k_profiles)       # (tp4/prefill-2's three twins are the ship candidate / its audited twin plus one flag: test_pf2_profiles)       # (tp4/sched-1's audited twin is the ship-4 audited twin plus the scheduler levers and sits outside the fusion namespace)

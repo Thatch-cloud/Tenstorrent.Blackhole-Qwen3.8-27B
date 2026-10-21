@@ -107,6 +107,7 @@ class CandidateTests(unittest.TestCase):
         for name, body in parent.items():
             self.assertEqual(PROFILES[name], body, name)
         added = [name for name in PROFILES if name not in parent]
+        added = [name for name in added if name not in set(profile_twins.generated_names()) - {SHIP, AUDIT}]      # (tp4/s7 merged other branches' generated twins and the s7 candidate beside these)
         self.assertEqual(sorted(added), sorted([SHIP, AUDIT]))
         self.assertEqual(PROFILES[SHIP5][contract.TRAFFIC_WAIVER]['id'], 'ship5-fx-262k-2026-10-19')
         self.assertTrue(PROFILES[SHIP5][contract.TRAFFIC_WAIVER]['decision'].startswith('APPROVED'))

@@ -141,12 +141,16 @@ class FlagTests(Fresh):
             self.assertEqual(contract.sched2_problems(profile), [], 'an explicit 0 is a traffic profile\'s too')
 
     def test_the_ship_5_candidate_and_every_profile_that_exists_name_none_of_them(self):
+        import make_s7_profiles
+
         data = json.loads((HERE / 'qwen_c2_profiles.json').read_text(encoding='utf-8'))
         profiles = data['profiles']
         self.assertIn(PREFIX, profiles)
         for name, profile in profiles.items():
             if name in profile_twins.twin_names() and name.startswith('c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-sch-s5-'):
                 continue
+            if name in make_s7_profiles.owned_names():
+                continue        # (tp4/s7: the ship-7 candidate carries seed first and the ledger trim under its waiver, its audited twins seed first: test_s7_profiles)
             env = profile.get('env') or {}
             self.assertEqual([flag for flag in pipeline.NAMES if flag in env], [], name)
 

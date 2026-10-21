@@ -143,10 +143,11 @@ import make_ship4_profiles as _ship4_twins  # noqa: E402
 import make_np1_profiles as _np1_twins  # noqa: E402
 import make_s5_profiles as _s5_twins  # noqa: E402
 import make_s6_profiles as _s6_twins  # noqa: E402
+import make_s7_profiles as _s7_twins  # noqa: E402
 import make_xe_profiles as _xe_twins  # noqa: E402
 import make_sched_profiles as _sched_twins  # noqa: E402
 import make_sched2_profiles as _sched2_twins  # noqa: E402
-PARKED_TWINS = PARKED_TWINS | frozenset(_ship4_twins.twin_names()) | frozenset(_sched_twins.twin_names()) | frozenset(_sched2_twins.twin_names()) | frozenset(_xe_twins.twin_names()) | frozenset(_np1_twins.twin_names()) | frozenset(_s5_twins.twin_names()) | frozenset(_s6_twins.twin_names())     # (tp4/next-1's audited twins of the ship-5 candidate, test_s5_profiles; and tp4/ship-4's twins of the combined candidate, test_ship4_profiles; tp4/np1-fastlane's, test_np1_profiles; tp4/exact-end's, test_xe_profiles; tp4/sched-1's, test_sched_profiles)
+PARKED_TWINS = PARKED_TWINS | frozenset(_ship4_twins.twin_names()) | frozenset(_sched_twins.twin_names()) | frozenset(_sched2_twins.twin_names()) | frozenset(_xe_twins.twin_names()) | frozenset(_np1_twins.twin_names()) | frozenset(_s5_twins.twin_names()) | frozenset(_s6_twins.twin_names() + _s7_twins.twin_names())     # (tp4/next-1's audited twins of the ship-5 candidate, test_s5_profiles; and tp4/ship-4's twins of the combined candidate, test_ship4_profiles; tp4/np1-fastlane's, test_np1_profiles; tp4/exact-end's, test_xe_profiles; tp4/sched-1's, test_sched_profiles)
 import make_pf2_profiles as _pf2_twins  # noqa: E402
 import make_pf3_profiles as _pf3_twins  # noqa: E402
 import make_pf3k_profiles as _pf3k_twins  # noqa: E402

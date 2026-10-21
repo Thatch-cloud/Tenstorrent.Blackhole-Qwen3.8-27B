@@ -123,7 +123,10 @@ class TwinTests(unittest.TestCase):
 
     def test_the_twins_sit_right_after_the_ship5_audited_twins(self):
         names = list(PROFILES)
-        last = max(names.index(name) for name in s5.twin_names())
+        import make_s6_profiles
+        import make_sched2_profiles
+
+        last = max(names.index(name) for name in tuple(s5.twin_names()) + tuple(make_s6_profiles.twin_names()) + tuple(make_sched2_profiles.twin_names()))      # (tp4/s7: the ship-6 audited twin and the sched-2 twins sit between)
         self.assertEqual(names[last + 1:last + 1 + len(twins.NAMES)], list(twins.NAMES))
 
     def test_a_parent_that_cannot_be_twinned_is_refused(self):
@@ -148,7 +151,8 @@ class ProtectedTests(unittest.TestCase):
         self.assertEqual(DATA['default'], before['default'])
         for name, profile in before['profiles'].items():
             self.assertEqual(PROFILES[name], profile, name)
-        self.assertEqual(sorted(set(PROFILES) - set(before['profiles']) - self.later_branches()), sorted(twins.NAMES))
+        # (tp4/s7 merged other branches' generated twins and the s7 candidate beside these)
+        self.assertEqual(sorted(set(PROFILES) - set(before['profiles']) - self.later_branches() - (set(profile_twins.generated_names()) - set(twins.NAMES))), sorted(twins.NAMES))
 
     @staticmethod
     def later_branches():
@@ -164,8 +168,10 @@ class ProtectedTests(unittest.TestCase):
     def test_no_approved_profile_names_a_flag(self):
         self.assertEqual(PROFILES[SHIP][contract.TRAFFIC_WAIVER]['decision'][:8], 'APPROVED', 'the ship-5 candidate\'s decision is the owner\'s; this branch did not touch it')
         self.assertNotIn(FLAG, PROFILES[SHIP]['env'])
+        import make_s7_profiles
+
         for name, profile in PROFILES.items():
-            if name not in twins.NAMES:
+            if name not in twins.NAMES and name not in make_s7_profiles.owned_names():      # (tp4/s7: the ship-7 candidate carries the traced tails under its waiver, its audited twins with their audit)
                 for flag in prefill_tail_trace.FLAGS:
                     self.assertNotIn(flag, profile['env'], '%s names %s' % (name, flag))
 

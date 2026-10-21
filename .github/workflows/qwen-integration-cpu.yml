@@ -312,6 +312,8 @@ jobs:
           python -B -m unittest test_s5_profiles test_s5_pack
           # S6
           python -B -m unittest test_s6_profiles test_s6_pack
+          # S7
+          python -B -m unittest test_s7_profiles test_s7_pack test_sched2_pipeline test_sched2_model test_sched2_profiles test_sched2_pack
           # SCH
           python -B -m unittest test_sched_lean test_sched_spill test_sched_sim test_sched_report test_sched_profiles test_sched_pack
           # SW

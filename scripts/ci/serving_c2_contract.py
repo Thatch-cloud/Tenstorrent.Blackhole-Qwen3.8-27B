@@ -810,8 +810,9 @@ def sched2_problems(profile):
         value = env.get(name)
         if value is not None and value not in ('0', '1'):
             problems.append('%s must be 0 or 1, got %r' % (name, value))
-        elif value == '1' and not gate_profile(profile):
-            problems.append('%s=1 is a gate arm (docs/tp4-sched2.md: it changes when work happens at an admission, and no card has run it) and needs a gate-only profile' % name)
+        elif value == '1' and not gate_profile(profile) and not (name in SCHED2_WAIVABLE_LEVERS and waived(profile, name, env)):
+            problems.append('%s=1 is a gate arm (docs/tp4-sched2.md: it changes when work happens at an admission, and no card has run it) and needs a gate-only profile%s'
+                            % (name, ', or a traffic profile whose %s names it' % TRAFFIC_WAIVER if name in SCHED2_WAIVABLE_LEVERS else ''))
     for name, (low, high) in sorted(SCHED2_HOLD_KNOBS.items()):
         value = env.get(name)
         if value is None:
@@ -933,6 +934,10 @@ KSPLIT_SWITCH = 'QWEN_FAST_SDPA_PF_KSPLIT'
 KSPLIT_AUDIT = KSPLIT_SWITCH + '_AUDIT'
 KSPLIT_WAIVABLE_LEVERS = {KSPLIT_SWITCH: '1'}
 NEXT_WAIVABLE_LEVERS.update(KSPLIT_WAIVABLE_LEVERS)
+# tp4/s7 (docs/tp4-s7.md): two of the three tp4/sched-2 switches may serve traffic under an owner traffic waiver that names each at this value (the ship-7 candidate): seed first (the seed token leaves before
+# the bind) and the memory-ledger trim. The hold reuse (QWEN_FAST_ADMISSION_HOLD_REUSE) and its knobs stay a gate's own until a ballast-boundary run has been read.
+SCHED2_WAIVABLE_LEVERS = {'QWEN_FAST_ADMISSION_SEED_FIRST': '1', 'QWEN_FAST_ADMISSION_LEDGER_TRIM': '1'}
+NEXT_WAIVABLE_LEVERS.update(SCHED2_WAIVABLE_LEVERS)
 TRAFFIC_WAIVER_MARKER = 'OWNER TRAFFIC WAIVER'
 # The decision is a sentence that starts with one of these words. PENDING is a REQUEST: the profile boots (gates and G1 provenance boot every
 # profile) and logs the word, but no build may bake it as an image default (c2_serving_job.read_bake, build-c2-serving-image.sh) until the commit

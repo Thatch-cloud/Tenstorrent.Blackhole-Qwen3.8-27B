@@ -142,13 +142,14 @@ class ProtectedTests(unittest.TestCase):
         import make_pf2_profiles
         import make_s5_profiles
         import make_s6_profiles
+        import make_s7_profiles
         import make_sched2_profiles
         import make_xe_profiles
         import make_pf3_profiles
         import make_pf3k_profiles
 
         # (tp4/next-1 integrated this branch with the lone-user round's, exact-end's, prefill-2's and the ship-5 candidate's profiles; tp4/prefill-3's three twins of the candidate sit beside them)
-        integrated = (set(make_np1_profiles.twin_names()) | set(make_xe_profiles.twin_names()) | set(make_pf2_profiles.twin_names()) | set(make_s5_profiles.owned_names()) | set(make_pf3_profiles.twin_names()) | set(make_pf3k_profiles.twin_names()) | set(make_s6_profiles.owned_names())
+        integrated = (set(make_np1_profiles.twin_names()) | set(make_xe_profiles.twin_names()) | set(make_pf2_profiles.twin_names()) | set(make_s5_profiles.owned_names()) | set(make_pf3_profiles.twin_names()) | set(make_pf3k_profiles.twin_names()) | set(make_s6_profiles.owned_names() + make_s7_profiles.owned_names())
                       | {name for name in PROFILES if name.endswith(('-fx-all-er', '-fx-all-er-audit'))} | set(make_sched2_profiles.twin_names()))
         self.assertEqual(sorted(set(PROFILES) - set(before['profiles']) - integrated), sorted(twins.NAMES))
 
@@ -169,6 +170,7 @@ class ProtectedTests(unittest.TestCase):
         import make_pf3k_profiles
         import make_s5_profiles
         import make_s6_profiles
+        import make_s7_profiles
         import make_sched2_profiles
 
         governor = ('QWEN_FAST_LEVERN_ADAPTIVE', 'QWEN_FAST_LEVERN_OWED_CAP_MS', 'QWEN_FAST_LEVERN_SHORT_SHARE', 'QWEN_FAST_LEVERN_SHORT_WAIT_S')
@@ -177,7 +179,7 @@ class ProtectedTests(unittest.TestCase):
                 # tp4/sched-2: children of the ship-5 candidate (the lean admission and the complete spills it carries), with the governor knobs of neither
                 self.assertFalse([flag for flag in governor if flag in profile['env']], name)
                 continue
-            if name in make_s6_profiles.owned_names():
+            if name in make_s6_profiles.owned_names() + make_s7_profiles.owned_names():
                 # tp4/s6: the ship-6 candidate and its audited twin carry the adaptive governor's switch (under the owner's waiver in the candidate), none of its knobs or the pacing's
                 self.assertFalse([flag for flag in ALL_NAMES if flag in profile['env'] and flag not in ('QWEN_FAST_ADMISSION_LEAN', 'QWEN_PREFIX_HOST_TIER_SPILL_MODE', 'QWEN_FAST_LEVERN_ADAPTIVE')], name)
                 continue
