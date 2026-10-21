@@ -24,7 +24,7 @@ Read from the code of this tree and from the round-breakdown numbers (tp4/round-
    finds the segment by carry identity), the draft history and K/V banks are the slot's own: nothing can be re-pointed while the request decodes.
 3. The rule (`placement_slot`): the block holding exactly ONE live request first, else the fuller block that is not full (the first on a tie), the lowest free slot of it. It was written when a
    block with fewer than four live ran the sequential step ("a lone user is rare and a block runs packed whenever it can"). With padded blocks a block with one user costs a whole pass.
-4. What is NOT the cause: seat hold or parked seats (a parked engine's slot is lent but not live in the placement predicate, `ParkedEngineSet.live`); the order of free slots inside a block (all four
+4. What is NOT the cause: a seat kept after its turn (nothing in this tree holds one past the request's close; a parked engine's slot is lent but not live in the placement predicate, `ParkedEngineSet.live`); the order of free slots inside a block (all four
    are replicas); the prefix store, host tier and exact resume (they key on tokens and pages, never on a seat: no `pool_slot` in prefix_window_carry or the registry); arrivals alone (they fill block A
    first, so 1 to 4 live are one block and five are 4 + 1).
 5. What is: DEPARTURES. Turns end in an order nobody chooses, and each leaves its hole in its own block: five live as 4 + 1, one of block A finishes, four live sit in two blocks. Then the rule
@@ -33,8 +33,8 @@ Read from the code of this tree and from the round-breakdown numbers (tp4/round-
 
 How much each part is worth, from the Markov model (section 4, `scripts/ci/place_model.py`, fitted to the production live-count mix): share of rounds in two passes at 4 live, 32% today, 28% under the
 fullest-block rule (an admission-time choice cannot do better, section 4), and 0% only if the order of departures were controlled. Measured production: 8.7% at 3 live, 43.8% at 4, 99.9% at 5 (five live need
-two M3 passes under ANY placement). The model has 12%, 32% and 100%: it under-reads the 4-live splits and over-reads the 3-live ones, which says production turns are less memoryless than the model, not that
-the cause is another.
+two M3 passes under ANY placement). The model has 12%, 32% and 100%: it under-reads the 4-live splits and over-reads the 3-live ones, which may mean that production turns are stickier than the model's, or the
+arrivals burstier; it does not change the cause.
 
 ## 3. The switch
 
@@ -54,8 +54,8 @@ Interplay, each read in the code and held by test_place_compact where it can be 
   either way; tested with every slot lent and three serving.
 * Solo packed (`QWEN_FAST_SOLO_PACKED`, the lone-user fast lane): admits a lone user into the padded block wherever the block is; placement only decides which block. Compact placement is meant FOR
   this stack (padded blocks cost a pass for one user); without it blocks with fewer than four live run the sequential step and the effect is not modelled.
-* Octo (`QWEN_FAST_OCTO=live`, six or more live): every block is full or the octo pass runs over all eight seats; the placement does not matter once the round is an octo round, and it is the same
-  function before and after.
+* Octo (`QWEN_FAST_OCTO=live`, six or more live): the round is one octo pass over all eight seats wherever the users sit, so the placement does not matter to it; it only decides the state the system is
+  in when the live count falls back to five or fewer.
 * Prefix store, host tier, exact resume, sticky sessions: seat independent. The carried drafter window is the request's capture, not a slot.
 * `QWEN_FAST_LANE` / `pool.slot_order`: an explicit slot order still wins over placement (tested); not in any traffic profile.
 
@@ -64,7 +64,7 @@ Interplay, each read in the code and held by test_place_compact where it can be 
 The switch changes WHICH pool slot an admitted request takes and nothing a slot does: the same code, the same weights, the same device ops. The eight slots are replicas by construction (one allocation
 loop; two blocks of the one M3 shape, captured against different slots), and a request's verify result in a padded or full round does not depend on its neighbours (the packed block's qualified
 property: per-segment identical to the request's own sequential engine, idle segments on page 0 / the NP1 scratch, V1/V2/T1 audits per request). Every combination of live segments the new rule produces is one
-today's rule produces after some order of departures (any subset of slots can be live today), so no (block, segment) pairing is new. The target's argmax is the only token ever committed; the draft shape (a quad when
+today's rule can produce (arrivals alone fill all eight slots, and then any subset of them can leave), so no (block, segment) pairing is new. The target's argmax is the only token ever committed; the draft shape (a quad when
 all four slots of a block are live, pairs and singles otherwise) moves only tau and time. The gate (section 6) still compares text, per request, byte for byte, with the switch on and off.
 
 ## 4. Expected gain, recomputed
@@ -87,7 +87,7 @@ sum of live / wall, the occupancy held (placement does not change who is live).
   are in the test). The reason is structural: the arrival's block can only pick which hole to fill, and filling the fuller block leaves the fewest blocks occupied.
 * Sensitivity to the memoryless turn (`--simulate`, rho 2, 64k walls): log-normal turns of sigma 1.0 and 1.5 and arrivals in pairs give +0.84 to +1.47% (exponential single arrivals +1.25%). The sign and size hold.
 * The round breakdown's "~5%" for one-block placement at 3 to 5 live is between the placement alone (+1.4%) and the free-migration bound (+9%): it needs the users to move, not only the arrivals to choose.
-* One tenth of a percent here is not resolvable on a card; the claim to check is the two-pass share (section 6).
+* A gain of one to two percent is not resolvable in a timed pair on a card; the claim to check is the two-pass share (section 6).
 
 ## 5. What would get the rest (not built)
 
@@ -95,11 +95,11 @@ sum of live / wall, the occupancy held (placement does not change who is live).
 state and convolution; 154 MB across the four chips, about 38 MB each), the slot's draft history and K/V banks, the verifier's per-slot buckets and replay tables (rewritten from the page table each
 round), and the parked engine rebound to the destination (`rebind_slot`, which today seeds from a prefill capture, not from a decoding session). The KV pages need no copy (the page pool is shared).
 Exactness would be a bit copy plus the rebind rules R1 to R3 (digest equality source against destination, as `audit_rebound_state` does for a rebind). Cost per move: the copies are tens of
-megabytes a chip, and one skipped round of that user; a minority user that stays 20 rounds pays back in two. Not cheap to BUILD: R2 (no foreign replay between a verify and its publish), the deferred
+megabytes a chip, and one skipped round of that user; a minority user that stays 20 rounds pays that back in a round or two (an estimate, from a pass of about 65 ms). Not cheap to BUILD: R2 (no foreign replay between a verify and its publish), the deferred
 commit flush order across the two blocks, the pre-stage epochs and the draft traces bound to the old slot are all per-slot state no CPU test reaches. A separate default-off switch
 (`QWEN_FAST_TP4_PLACE_MIGRATE`, name reserved) and its own card window; I would build it only if the octo route below is refused.
 
-**The octo pass for a split round (+5 to +7%, no migration).** At 5 live or fewer with users in both blocks, one octo pass (52.2 ms verify at 3.6k with the idle segments masked, 81.7 ms the round) replaces two M3
+**The octo pass for a split round (+5 to +7%, no migration).** At 5 live or fewer with users in both blocks, one octo pass (52.2 ms verify at 3.6k, measured with eight live; the model charges the same with idle segments, 81.7 ms the round) replaces two M3
 passes, and it also serves the five-live rounds (99.9% two-pass today) that no placement or migration can help. It needs what the octo block does not have: idle write targets for 3 to 6 idle segments
 (NP1's scratch pages are wired to the M3 blocks only, `serving_runtime`: `idle_scratch_pages ... if not is_octo`), the octo draft pass for fewer than eight live seats (it refuses today), and a policy that
 takes the octo pass only for a split round (a one-block round is cheaper on its M3 trace: 65.3 against 81.7 ms). The model charges 8 rows a user (tau x 0.9, round_shape_model K1 at 5 live).
