@@ -534,6 +534,22 @@ def dram_line(pool):
         return 'unavailable (%s: %s)' % (type(failure).__name__, str(failure)[:120])
 
 
+# tp4/place-1 (docs/tp4-place-1.md; QWEN_FAST_TP4_PLACE_COMPACT, default off): at QWEN_FAST_M3_BLOCKS=2 a new request takes a slot of the FULLEST block that is not full (the first on a tie),
+# in place of the block with exactly one live request first. It changes which pool slot - which seat, which segment of which block's trace - an admitted request takes and nothing a seat does.
+PLACE_COMPACT_FLAG = 'QWEN_FAST_TP4_PLACE_COMPACT'
+PLACE_COMPACT_USERS = 8
+PLACE_COMPACT_MARKER = '[PINDIAG] placement compact engaged over blocks {} (QWEN_FAST_TP4_PLACE_COMPACT=1): a new request takes the fullest block that is not full'
+
+
+def place_compact_enabled(environ=None):
+    """QWEN_FAST_TP4_PLACE_COMPACT, strictly: unset or '0' is off (today's placement), '1' is on, and anything else - an empty value included - is a configuration error naming
+    the flag, refused before anything is built."""
+    value = (os.environ if environ is None else environ).get(PLACE_COMPACT_FLAG, '0')
+    if value not in ('0', '1'):
+        raise ValueError('%s must be 0 or 1, got %r' % (PLACE_COMPACT_FLAG, value))
+    return value == '1'
+
+
 class ServingBufferPool:
     def dram_statistics(self):
         """The DRAM allocator's figures per chip, read through the pool's first buffer."""
@@ -574,6 +590,11 @@ class ServingBufferPool:
         if type(users) is not int or not 1 <= users <= NATIVE_GDN_SLOTS:
             raise ValueError('Explicit scheduler request count within the %d native GDN slots required'
                              % NATIVE_GDN_SLOTS)
+        # tp4/place-1: read strictly before anything is allocated. Compact placement chooses between the two 4-user M3 blocks of the eight-seat shape; at any other seat count the flag would
+        # silently do nothing, so it is refused by name.
+        if place_compact_enabled() and users != PLACE_COMPACT_USERS:
+            raise ValueError('%s=1 places new requests by block and is admitted at exactly %d pool slots (QWEN_FAST_M3_BLOCKS=2), not %d'
+                             % (PLACE_COMPACT_FLAG, PLACE_COMPACT_USERS, users))
         draft_masks = validate_draft_masks(draft_masks, users)
         draft_outputs = validate_draft_outputs(draft_outputs, users)
         bucket_rows = tuple(bucket_rows)
@@ -901,10 +922,16 @@ class ServingBufferPool:
             return None
         return self.draft_outputs.get(tuple(group))
 
-    def place_blocks(self, blocks):
+    def place_blocks(self, blocks, compact=None):
         """QWEN_FAST_M3_BLOCKS=2: the pool slots each packed block binds, so acquire() places a new request by block
         (`placement_slot`) instead of the lowest free slot. Called once at attach, before any request; not called (the
-        default), acquire lends the lowest free slot as ever."""
+        default), acquire lends the lowest free slot as ever.
+
+        `compact` (tp4/place-1): None, the default, asks QWEN_FAST_TP4_PLACE_COMPACT (place_compact_enabled; unset or 0 is today's rule byte for byte); a bool names it. True: the
+        placement rule is the fullest open block (placement_slot), and the engaged line is written once."""
+        compact = place_compact_enabled() if compact is None else compact
+        if type(compact) is not bool:
+            raise ValueError('Compact placement is an explicit bool')
         blocks = tuple(tuple(block) for block in blocks)
         flat = [index for block in blocks for index in block]
         if (len(blocks) < 2 or len(set(flat)) != len(flat)
@@ -913,6 +940,9 @@ class ServingBufferPool:
         if getattr(self, '_blocks', None) is not None:
             raise ValueError('The placement blocks are already set')
         self._blocks = blocks
+        self._compact = compact
+        if compact:
+            pindiag(PLACE_COMPACT_MARKER, [list(block) for block in blocks])
 
     def placement_slot(self, live=None):
         """The free slot a new request takes under place_blocks: in the block with exactly ONE live request first (it
@@ -924,7 +954,11 @@ class ServingBufferPool:
         holds it), so under engine reuse `lent` would count every parked slot as live and every block as full; the set
         asks this one function with the serving slots as the live ones, so the pool and the set place the same arrivals
         on the same slots (design 5.8, R5). None, the default and the only value without the flag, is `lent`: the rule
-        byte for byte."""
+        byte for byte.
+
+        Under place_blocks(compact=True) (QWEN_FAST_TP4_PLACE_COMPACT=1, tp4/place-1) the lone-block preference is dropped: the block is the fullest of the open blocks, the first on a tie. The
+        two rules differ only when one block holds exactly one live request and the other two or three: today's gives the arrival to the one (two blocks stay occupied, two passes a round), this
+        one to the fuller (the one's block still runs its pass until that user leaves, and the arrival adds none)."""
         blocks = self._blocks
         if live is None:
             def live(index):
@@ -933,7 +967,7 @@ class ServingBufferPool:
         open_blocks = [position for position, block in enumerate(blocks) if counts[position] < len(block)]
         if not open_blocks:
             return None
-        lone = [position for position in open_blocks if counts[position] == 1]
+        lone = [] if getattr(self, '_compact', False) else [position for position in open_blocks if counts[position] == 1]
         chosen = lone[0] if lone else max(open_blocks, key=lambda position: (counts[position], -position))
         return next(self.slots[index] for index in blocks[chosen] if not live(index))
 
