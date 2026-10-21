@@ -1,0 +1,35 @@
+# The order of the tp4/stream-1 card jobs (docs/tp4-stream-1.md): the PROMPT LOOKUP on the production path (ship 5: engine reuse, octo, the lone-user round), tau-tested and speed-read on the production checkpoint, in
+# the tau lab, as pairs (a control arm and the lookup arm over the same turns). ONE image (tp4-stream-1, a placeholder: B0 builds it from the pushed tp4/stream-1 head WITH the K64j-OQ graft) and ONE short window.
+# One template per line: <template name without .env> <stop|soft> <image tag> <estimated minutes>. stop: the window halts at the first failure of this job. soft: a failure or a skip does not stop the window (the NEEDS lines skip what depended on it).
+# WHAT THIS DECIDES (the owner's, never the window's): whether the lookup is worth a timed ship pair on the production stack, and whether the two-candidate (tree) verify of docs/tp4-tree-verify.md is worth building. TL0/TL1 give the
+# paired tau and decode-rate ratios of the lookup at four live seats and the TREEGAIN readout (what a two-candidate verify would have committed on the same text); TL2/TL3 the same for a lone user (the fast-lane shape). Every result is UNQUALIFIED.
+# P0. PRODUCTION: the owner stops the node agent and unserves production BEFORE X0 and restores it after Z; nothing in this pack does either. B0 is a build and may run while production serves. No other window driver may be alive and no privileged builder container up.
+# P0. The CPU suite is green on the pushed branch head (gh workflow run qwen-cpu-suite.yml -f ref=<sha>) and each tag is pushed on THAT commit (the throwaway commit carries only .github/c2-serving-job.env). Push ONE tag at a time and wait for its run to finish; queued tags are cancelled. Never cancel a running card job.
+# P0. SWIFT IS ON THE CARD HOST AND ITS CONVERTED CACHE IS BUILT (the production first boot or the Swift window did it): every taulab job logs "weight cache ...: found". The tau lab's data directory is rig-local (kwork64/taulab/data under the runner's home) and read-only to the jobs.
+# ARC-ZERO TL0 TL1 TL2 TL3
+# ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO (minRunners and maxRunners 0, the normal values written down first, restored by the same patch with the old numbers) BEFORE TL0 and restores them AFTER TL3 (or after TL1 when the window is cut there). B0, X0 and Z do not need the pause.
+# THE JOBS, in value order (cut the window at a block end): FAST PATH: X0 TL0 TL1 (125 min of cards, after the 40-minute build); LONE USER: TL2 TL3 (90 min); END: Z (5 min).
+# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.
+# NEEDS X0-status-rescan-reset <- B0-build-s5
+# NEEDS TL0-tau-control-4seat <- X0-status-rescan-reset
+# NEEDS TL1-tau-lookup-4seat <- TL0-tau-control-4seat
+# NEEDS TL2-tau-control-lone <- TL1-tau-lookup-4seat
+# NEEDS TL3-tau-lookup-lone <- TL2-tau-control-lone
+# PAIRING: TL1 and TL3 are refused by the job reader without C2_TAULAB_PAIR_CONTROL=<the digits of the run id of their control job> (TL0 and TL2): add it to the template before pushing the tag.
+# READ RULES (the lab's own lines; its container log and turns stay rig-local, only aggregates reach the artifact):
+#   B0   'baking the serving default c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s5 with a session cap of 8', the provenance report with no problem line, its K64j-OQ graft line, the image id.
+#   X0   four cards present and healthy, the fabric as measured, the grid read from the run, no other window driver alive; the Swift weight cache found.
+#   TL0 TL2   '[TAULAB-REPORT] ... complete=True'; the checkpoint lines; '[PACKED]' rounds in the canary (the lab stops itself without them: first minutes of the job).
+#   TL1 TL3   as above, plus '[LOOKUP-DRAFT] engaged policy=n3m12 ... build_ms=' once per request and '[LOOKUP-ROUND]' lines (the lab's canary); '[DRAFTER-PAIR] arm=lookup verdict=...' (GO needs the pooled tau lower bound above 1.00, no 80k+ or p10 regression, identical
+#            text on every paired turn); '[DRAFTER-PAIR] speed ...' (paired decode tok/s, control against lookup: the ratio to read against the tau ratio); '[TREEGAIN] ...' lines (checks: dflash_replay_mismatches=0, continuation_conflicts=0, walk(run)=run True; the gain of a
+#            two-candidate verify is read between the 'walk' (lower) and 'recorded' (upper) rates).
+# STOP RULES: a canary that finds no lookup line ends the arm (the lookup never attached: look at the rebind path first). Any text difference between the arms is NO-GO for the lookup until explained. After TL1: if the speed ratio is below 1.00 with its upper bound below 1.00, stop (the lookup costs more than it gains); if tau GO and
+#            TREEGAIN's walk gain over the run is under 3%, stop the tree work. Continue to TL2 TL3 when the four-seat pair is not a NO-GO.
+# Time (estimate, minutes): B0 40 (build host), X0 15, TL0 55, TL1 55, TL2 45, TL3 45, Z 5: 260 minutes in all, 220 of cards (X0 to Z).
+B0-build-s5 stop tp4-stream-1 40
+X0-status-rescan-reset stop tp4-stream-1 15
+TL0-tau-control-4seat soft tp4-stream-1 55
+TL1-tau-lookup-4seat soft tp4-stream-1 55
+TL2-tau-control-lone soft tp4-stream-1 45
+TL3-tau-lookup-lone soft tp4-stream-1 45
+Z-reset soft tp4-stream-1 5

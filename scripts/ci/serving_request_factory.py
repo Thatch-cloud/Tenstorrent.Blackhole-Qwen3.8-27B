@@ -496,6 +496,23 @@ def rebind_parked(parked, entry, *, model, pages, state, capture, prompt, seed, 
     return request
 
 
+def attach_lookup(request, prompt, request_id):
+    """QWEN_FAST_LOOKUP_DRAFT (default off; prompt_lookup, docs/tp4-lookup.md): give `request` a host-side lookup over its own token history, which
+    replaces DFlash2's proposal rows on the rounds its policy picks. Called for a built request and, since tp4/stream-1, for a REBOUND one (engine
+    reuse): the lookup is host state on the FastRequest and touches no device, so a parked engine needs nothing from it. Unset, '', '0' or 'off':
+    nothing is imported, built or logged. A malformed policy raises ValueError (never a silent off). The engaged line carries the index build time
+    (it runs on the engine step thread, so every decoding seat waits for it)."""
+    if os.environ.get('QWEN_FAST_LOOKUP_DRAFT', '').strip().lower() in ('', '0', 'off'):
+        return
+    import prompt_lookup
+
+    began = time.perf_counter()
+    request.lookup = prompt_lookup.for_request(prompt, request.session, request_id=request_id)
+    if request.lookup is not None:
+        _log('{} policy={} request={} history={} build_ms={:.1f}', prompt_lookup.ENGAGED, request.lookup.policy, request_id,
+             len(request.lookup.index), (time.perf_counter() - began) * 1000.0)
+
+
 def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, fixtures, eos_ids,
                  collectives=None, buffer_pool=None, shared_weights=None, capture_rows=None, parked=None):
     from dflash_request_runtime import TARGET_TAPS
@@ -635,6 +652,12 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
                     done = time.perf_counter()
                     _log(LEAN_SPLIT_MARKER + 'request={} a_ms={:.1f} b_ms={:.1f} c_ms={:.1f} total_ms={:.1f}', str(state.req_id)[:48], (adopted - entered) * 1000.0,
                          (rebinding - adopted) * 1000.0, (done - rebinding) * 1000.0, (done - entered) * 1000.0)
+                try:
+                    attach_lookup(request, prompt, state.req_id)
+                except BaseException:
+                    # The engine is bound to this request and the capture is released: nothing else owns the slot, so park it as a close does.
+                    request.close(state.req_id)
+                    raise
                 owned.pop_all()
                 return request
             fell_back = True
@@ -794,14 +817,6 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
             publish_prewarm.warm(device, engine)
         request = FastRequest(session, engine, runtime, release_drafter=device.close,
             collect_timings=os.environ.get('QWEN_FAST_PHASE_TIMING') == '1')
-        # QWEN_FAST_LOOKUP_DRAFT (default off): a host-side lookup over this request's token history that replaces
-        # DFlash2's proposal rows on the rounds its policy picks. Unset, nothing is imported or built.
-        if os.environ.get('QWEN_FAST_LOOKUP_DRAFT', '').strip().lower() not in ('', '0', 'off'):
-            import prompt_lookup
-
-            request.lookup = prompt_lookup.for_request(prompt, session, request_id=state.req_id)
-            if request.lookup is not None:
-                _log('{} policy={} request={} history={}', prompt_lookup.ENGAGED, request.lookup.policy, state.req_id,
-                     len(request.lookup.index))
+        attach_lookup(request, prompt, state.req_id)
         owned.pop_all()
     return request

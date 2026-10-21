@@ -24,6 +24,10 @@ with open(os.path.join(HERE, 'qwen_c2_profiles.json'), encoding='utf-8') as _han
 NAMES = sorted(PROFILES['profiles'])
 FOLDER = os.path.join(HERE, 'references', 'tp4-drafter-jobs')
 BASE = 'c2-packed-tp4'
+# The environment the parked engines need at eight seats (test_parked_tp4_profiles.GOOD), for the policy check below.
+PARKED_GOOD = {'QWEN_FAST_ANY_REQUEST': '1', 'QWEN_FAST_EXTENT_REPLAY': '1', 'QWEN_FAST_PACKED_STEP': '1', 'QWEN_FAST_SHARED_CCL': '1',
+               'QWEN_FAST_VERIFY_T1': '1', 'QWEN_FAST_TP': '4', 'QWEN_FAST_M3_REQUEST_WARM': '1', 'QWEN_FAST_M3_BLOCKS': '2',
+               'QWEN_FAST_PARKED_ENGINES': '1'}
 CANDIDATE_IMAGES = {'b16-bf8': 'tp4-drafter-b16-1', 'b32-bf8': 'tp4-drafter-b32-1', 'dedf-bf16': 'tp4-drafter-1', 'lookup': 'tp4-drafter-1'}
 
 
@@ -65,13 +69,14 @@ class ArmProfileTests(unittest.TestCase):
         import prompt_lookup
         name, document, added = self.added('lookup')
         self.assertEqual(name, BASE + '+taulab+lookup')
-        self.assertEqual(added, dict(QWEN_FAST_PACKED_AUDIT='1', QWEN_FAST_PHASE_TIMING='1', QWEN_FAST_LOOKUP_DRAFT='n3m12'))
+        self.assertEqual(added, dict(QWEN_FAST_PACKED_AUDIT='1', QWEN_FAST_PHASE_TIMING='1', QWEN_FAST_LOOKUP_DRAFT='n3m12', QWEN_FAST_LOOKUP_SHADOW='1'))
         self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document, 'lookup'), [])
         self.assertIsNot(document['profiles'][name].get('gate_only'), True)
         # the policy the arm names is one prompt_lookup parses (a malformed one raises at the first request, never at the boot), the one the
         # smoke arms and docs/tp4-lookup.md run, and the served drafter is the control's
         self.assertEqual(repr(prompt_lookup.parse_policy(lab.LOOKUP_POLICY)), 'n3m12')
         self.assertEqual(lab.LOOKUP_FLAG, prompt_lookup.LOOKUP_FLAG)
+        self.assertEqual(lab.LOOKUP_SHADOW_FLAG, prompt_lookup.SHADOW_FLAG)
         self.assertEqual(lab.DRAFTER_ARMS['lookup']['manifest'], lab.DRAFTER_ARMS['control']['manifest'])
         self.assertNotIn('QWEN_DRAFTER_MANIFEST', document['profiles'][name]['env'])
         self.assertNotIn(prompt_lookup.LOOKUP_FLAG, PROFILES['profiles'][BASE]['env'], 'the control arm carries no lookup')
@@ -97,6 +102,7 @@ class ArmProfileTests(unittest.TestCase):
         profile = contract.load_profile(path, name)
         environ = contract.apply_environment(profile, {})
         self.assertEqual(environ['QWEN_FAST_LOOKUP_DRAFT'], 'n3m12')
+        self.assertEqual(environ['QWEN_FAST_LOOKUP_SHADOW'], '1')
         for check in (contract.parked_problems, contract.drafter_problems, contract.levern_problems, contract.mesh_problems,
                       contract.sticky_problems, contract.prefix_reuse_problems, contract.multi_problems, contract.traffic_waiver_problems):
             self.assertEqual(check(profile), [], check.__name__)
@@ -104,18 +110,45 @@ class ArmProfileTests(unittest.TestCase):
         self.assertEqual(admission.width(over_image), 4)
         self.assertEqual(admission.check_environment(over_image, profile_tests.M3), [])
 
-    def test_the_lookup_arm_refuses_a_base_that_runs_engine_reuse(self):
+    def test_the_lookup_arm_runs_on_a_base_that_runs_engine_reuse(self):
+        """tp4/stream-1: a rebound request attaches the lookup like a built one (serving_request_factory.attach_lookup), so the arm no longer refuses a
+        base with QWEN_FAST_PARKED_ENGINES=1: the production profiles do, and the lab derives the lookup arm on them."""
         import serving_fast_policy as policy
         reuse = copy.deepcopy(PROFILES)
         reuse['profiles'][BASE]['env']['QWEN_FAST_PARKED_ENGINES'] = '1'
-        with self.assertRaisesRegex(lab.LabError, 'engine reuse'):
-            lab.derive_profile(reuse, BASE, 'lookup')
-        # the other arms and the lab as it was are not the lookup's business
-        self.assertEqual(lab.derive_profile(reuse, BASE, 'dedf-bf16')[0], BASE + '+taulab+dedf-bf16')
-        self.assertEqual(lab.derive_profile(reuse, BASE)[0], BASE + '+taulab')
-        # and the contract's own rule is the reason: the pair is refused at boot
+        name, document = lab.derive_profile(reuse, BASE, 'lookup')
+        self.assertEqual(name, BASE + '+taulab+lookup')
+        self.assertEqual(document['profiles'][name]['env']['QWEN_FAST_PARKED_ENGINES'], '1')
+        self.assertEqual(document['profiles'][name]['env']['QWEN_FAST_LOOKUP_DRAFT'], 'n3m12')
+        self.assertEqual(lab.arithmetic_diff(reuse, BASE, document, 'lookup'), [])
+        # the policy agrees: the pair is admitted at the boot, and only a malformed lookup policy is refused beside engine reuse
+        good = dict(PARKED_GOOD, QWEN_FAST_LOOKUP_DRAFT='n3m12')
+        self.assertEqual(policy.parked_engine_problems(good, 8), [])
         self.assertTrue(any('QWEN_FAST_LOOKUP_DRAFT' in text for text in policy.parked_engine_problems(
-            {'QWEN_FAST_PARKED_ENGINES': '1', 'QWEN_FAST_LOOKUP_DRAFT': 'n3m12'}, 8)))
+            dict(good, QWEN_FAST_LOOKUP_DRAFT='rolling'), 8)))
+
+    def test_the_lookup_arm_derives_on_the_s5_traffic_profile_and_the_contract_boots_it(self):
+        """The production stack (engine reuse, octo, the lone-user round): the derived profile adds the two log flags and the lookup policy, nothing
+        else, and the contract's checks pass on it."""
+        import serving_c2_contract as contract
+        s5 = 'c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic-s5'
+        name, document = lab.derive_profile(PROFILES, s5, 'lookup')
+        self.assertEqual(name, s5 + '+taulab+lookup')
+        base, derived = PROFILES['profiles'][s5]['env'], document['profiles'][name]['env']
+        added = dict((key, value) for key, value in derived.items() if base.get(key) != value)
+        self.assertEqual(added, dict(QWEN_FAST_PACKED_AUDIT='1', QWEN_FAST_PHASE_TIMING='1', QWEN_FAST_LOOKUP_DRAFT='n3m12', QWEN_FAST_LOOKUP_SHADOW='1'))
+        self.assertEqual(derived['QWEN_FAST_PARKED_ENGINES'], '1')
+        self.assertEqual(lab.arithmetic_diff(PROFILES, s5, document, 'lookup'), [])
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, 'profiles.json')
+        with open(path, 'w') as handle:
+            json.dump(document, handle)
+        profile = contract.load_profile(path, name)
+        self.assertEqual(contract.apply_environment(profile, {})['QWEN_FAST_LOOKUP_DRAFT'], 'n3m12')
+        for check in (contract.parked_problems, contract.drafter_problems, contract.levern_problems, contract.mesh_problems,
+                      contract.sticky_problems, contract.prefix_reuse_problems, contract.multi_problems):
+            self.assertEqual(check(profile), [], check.__name__)
 
     def test_the_arm_flags_are_arithmetic_only_for_their_own_arm(self):
         name, document = lab.derive_profile(PROFILES, BASE, 'dedf-bf16')
@@ -126,8 +159,8 @@ class ArmProfileTests(unittest.TestCase):
         document['profiles'][name]['env']['QWEN_FAST_QUAD_DRAFT'] = '1' if PROFILES['profiles'][BASE]['env'].get('QWEN_FAST_QUAD_DRAFT') != '1' else '0'
         self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document, 'dedf-bf16'), ['QWEN_FAST_QUAD_DRAFT'])
         looked, document = lab.derive_profile(PROFILES, BASE, 'lookup')
-        self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document), ['QWEN_FAST_LOOKUP_DRAFT'])
-        self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document, 'dedf-bf16'), ['QWEN_FAST_LOOKUP_DRAFT'])
+        self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document), ['QWEN_FAST_LOOKUP_DRAFT', 'QWEN_FAST_LOOKUP_SHADOW'])
+        self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document, 'dedf-bf16'), ['QWEN_FAST_LOOKUP_DRAFT', 'QWEN_FAST_LOOKUP_SHADOW'])
         self.assertEqual(lab.arithmetic_diff(PROFILES, BASE, document, 'lookup'), [])
 
     def test_what_is_refused(self):
@@ -209,6 +242,43 @@ class LabRuleTests(unittest.TestCase):
         self.assertTrue(lab.launched_problems(['[QWEN-C2] profile %s' % control, '[DRAFTER_BF16] engaged'], control, 'control'))
         self.assertTrue(lab.launched_problems(['[QWEN-C2] profile %s' % control] + good[1:], control, 'control'))
         self.assertEqual(lab.launched_problems(['[QWEN-C2] profile %s' % control], control), [])
+
+    def test_the_lab_reads_the_shadow_lines_into_aggregates_beside_the_public_summary(self):
+        import types
+        import test_tree_gain_report as shadow
+        import prompt_lookup
+        _, lines, _ = shadow.run_request(shadow.SHADOW, budget=200)
+        results, public = tempfile.mkdtemp(), tempfile.mkdtemp()
+        for directory in (results, public):
+            self.addCleanup(shutil.rmtree, directory, True)
+        with open(os.path.join(results, 'server.log'), 'w') as handle:
+            handle.write('noise\n' + '\n'.join(lines) + '\n')
+        said = []
+        options = types.SimpleNamespace(drafter_arm='lookup', results=results, public=public)
+        summary = lab.tree_gain(options, said.append)
+        self.assertGreater(summary['rounds'], 10)
+        self.assertTrue(said and all(line.startswith('[TREEGAIN]') for line in said))
+        with open(os.path.join(public, 'tree-gain-summary.json')) as handle:
+            written = json.load(handle)
+        self.assertEqual(written['problems'], [])
+        self.assertEqual(written['rounds'], summary['rounds'])
+        text = json.dumps(written)
+        for line in lines[:4]:
+            for token in prompt_lookup.parse_shadow_line(line)['committed'] if prompt_lookup.SHADOW_MARKER in line else ():
+                self.assertNotIn('[%d,' % token, text)
+        # every other arm, a log without the lines, and a lab without --public: nothing written
+        for arm in (None, 'control', 'dedf-bf16'):
+            self.assertIsNone(lab.tree_gain(types.SimpleNamespace(drafter_arm=arm, results=results, public=public), said.append))
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty, True)
+        with open(os.path.join(empty, 'server.log'), 'w') as handle:
+            handle.write('[LOOKUP-ROUND] request=r position=1 source=dflash2 match=0 offered=0 proposed=15 committed=3\n')
+        self.assertIsNone(lab.tree_gain(types.SimpleNamespace(drafter_arm='lookup', results=empty, public=public), said.append))
+        self.assertIsNone(lab.tree_gain(types.SimpleNamespace(drafter_arm='lookup', results=os.path.join(empty, 'missing'), public=public), said.append))
+        no_public = types.SimpleNamespace(drafter_arm='lookup', results=results, public=None)
+        os.remove(os.path.join(public, 'tree-gain-summary.json'))
+        self.assertIsNotNone(lab.tree_gain(no_public, said.append))
+        self.assertFalse(os.path.exists(os.path.join(public, 'tree-gain-summary.json')))
 
     def test_the_lookup_arm_has_no_startup_marker_and_the_canary_holds_it_to_its_lines(self):
         import prompt_lookup
@@ -350,6 +420,61 @@ class PairReportTests(unittest.TestCase):
         self.assertEqual(public['pairs']['different_text'], 0)
         self.assertEqual(public['pairs']['turns'], 40)
         self.assertEqual(set(public['gates'].values()), {'PASS'})
+
+    def write_speeds(self, base, tapes, rates, tokens=600, ttft=1.5, status='ok'):
+        """A turns.jsonl for each tape: `tokens` completion tokens decoded at rates[i % len(rates)] tokens per second after a first token at `ttft`."""
+        with open(os.path.join(base, 'turns.jsonl'), 'w') as handle:
+            for index, entry in enumerate(tapes):
+                rate = rates[index % len(rates)]
+                handle.write(json.dumps(dict(arm=entry['arm'], id=entry['id'], status=status, completion_tokens=tokens, ttft=ttft,
+                                             seconds=round(ttft + tokens / float(rate), 3))) + '\n')
+
+    def test_the_decode_speed_of_the_paired_turns_is_read_beside_the_verdict(self):
+        control, candidate = synthetic(gain=1.15)
+        self.count += 1
+        base = os.path.join(self.root, 'speed%d' % self.count)
+        write_run(os.path.join(base, 'control'), control, run_info('control', 'tp4-drafter-1'),
+                  public=dict(calibration=dict(verdict='PASS')))
+        write_run(os.path.join(base, 'candidate'), candidate, run_info('lookup', 'tp4-drafter-1'))
+        self.write_speeds(os.path.join(base, 'control'), control, [50.0, 60.0, 70.0])
+        self.write_speeds(os.path.join(base, 'candidate'), candidate, [55.0, 66.0, 77.0])        # every turn 10% faster
+        controls, control_info, summary = pair_report.read_run(os.path.join(base, 'control'))
+        candidates, candidate_info, _ = pair_report.read_run(os.path.join(base, 'candidate'))
+        speeds = (pair_report.read_turn_speeds(os.path.join(base, 'control')), pair_report.read_turn_speeds(os.path.join(base, 'candidate')))
+        self.assertEqual(len(speeds[0]), 40)
+        public = pair_report.build(controls, candidates, 'lookup', control_info, candidate_info, summary, seed=1, resamples=300, speeds=speeds)
+        report.assert_public(public)
+        speed = public['speed']
+        self.assertEqual(speed['turns'], 40)
+        self.assertAlmostEqual(speed['ratio'], 1.10, places=1)
+        self.assertLessEqual(speed['ci95_low'], speed['ratio'])
+        self.assertGreaterEqual(speed['ci95_high'], speed['ratio'])
+        self.assertGreater(speed['candidate_tok_s'], speed['control_tok_s'])
+        self.assertEqual(public['verdict'], 'GO', 'the speed is read beside the verdict and never decides it')
+        lines = pair_report.summary_lines(public)
+        self.assertEqual(len(lines), 2)
+        self.assertIn('speed arm=lookup', lines[1])
+        # without turn timing there is no speed and the verdict is the same
+        without = pair_report.build(controls, candidates, 'lookup', control_info, candidate_info, summary, seed=1, resamples=300)
+        self.assertIsNone(without['speed'])
+        self.assertEqual(without['verdict'], public['verdict'])
+        self.assertEqual(len(pair_report.summary_lines(without)), 1)
+
+    def test_turns_that_cannot_give_a_rate_are_left_out(self):
+        control, _ = synthetic(gain=1.0, clusters=4)
+        base = os.path.join(self.root, 'rates')
+        os.makedirs(base)
+        self.write_speeds(base, control[:2], [50.0])
+        with open(os.path.join(base, 'turns.jsonl'), 'a') as handle:
+            for record in (dict(arm='A1', id='short', status='ok', completion_tokens=8, ttft=1.0, seconds=2.0),
+                           dict(arm='A1', id='failed', status='error', completion_tokens=600, ttft=1.0, seconds=20.0),
+                           dict(arm='A1', id='no-first-token', status='ok', completion_tokens=600, ttft=None, seconds=20.0),
+                           dict(arm='A1', id='no-window', status='ok', completion_tokens=600, ttft=20.0, seconds=20.0),
+                           dict(arm='A9', id='other-arm', status='ok', completion_tokens=600, ttft=1.0, seconds=20.0)):
+                handle.write(json.dumps(record) + '\n')
+        self.assertEqual(sorted(pair_report.read_turn_speeds(base)), sorted((entry['arm'], entry['id']) for entry in control[:2]))
+        self.assertEqual(pair_report.read_turn_speeds(os.path.join(self.root, 'nothing-here')), {})
+        self.assertIsNone(pair_report.speed_summary([], {}, {}))
 
     def test_no_gain_is_not_a_go(self):
         public = self.run_pair(*synthetic(gain=1.0))
@@ -856,7 +981,7 @@ class TemplateTests(unittest.TestCase):
         with open(os.path.join(FOLDER, 'D-T5-lookup.env'), encoding='utf-8') as handle:
             header = handle.read()
         self.assertIn('QWEN_FAST_LOOKUP_DRAFT=n3m12', header)
-        self.assertEqual(dict(lab.DRAFTER_ARMS['lookup']['env']), {'QWEN_FAST_LOOKUP_DRAFT': 'n3m12'})
+        self.assertEqual(dict(lab.DRAFTER_ARMS['lookup']['env']), {'QWEN_FAST_LOOKUP_DRAFT': 'n3m12', 'QWEN_FAST_LOOKUP_SHADOW': '1'})
         self.assertIn("'[LOOKUP-DRAFT] engaged policy=n3m12'", header)
 
     def test_a_bf16_go_is_not_routed_to_a_pack_that_cannot_qualify_it(self):
