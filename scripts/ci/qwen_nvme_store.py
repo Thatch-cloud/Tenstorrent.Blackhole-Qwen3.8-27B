@@ -36,7 +36,6 @@ import ctypes
 import hashlib
 import mmap
 import os
-import re
 import stat
 import struct
 import threading
@@ -106,10 +105,11 @@ def _sysfs_text(path):
 
 def device_problem(path, expect_bytes=0, sysfs=SYSFS):
     """Why the device at `path` cannot be used any more, as a sentence; None when nothing says so. Cheap and safe from any thread: a stat and a few sysfs attribute reads,
-    never an IO to the device (a dead controller must not be able to hang the caller). A block device: the node must exist and have a sysfs entry, its size must read
-    non-zero (and at least `expect_bytes`, what the store was formatted for), and its controller's state must not be dead or deleting. A regular file (the CPU tests): it must
-    exist and be at least expect_bytes long. A host without a sysfs block directory cannot be asked, and is not blamed. Transient states (resetting, connecting) are not
-    reported: the failing IO itself says what they cost."""
+    never an IO to the device (a dead controller must not be able to hang the caller). A block device: the node must exist and its major:minor must still have a sysfs entry
+    (/sys/dev/block/<major>:<minor>, found by NUMBER, not by name: inside a container the node can be called anything), its size must read non-zero (and at least `expect_bytes`,
+    what the store was formatted for), and its controller's state (the namespace's device, or the nvme controller above it) must not be dead or deleting. A regular file (the CPU
+    tests): it must exist and be at least expect_bytes long. A host without a sysfs block directory cannot be asked, and is not blamed. Transient states (resetting, connecting)
+    are not reported: the failing IO itself says what they cost."""
     try:
         info = os.stat(path)
     except OSError as error:
@@ -120,13 +120,14 @@ def device_problem(path, expect_bytes=0, sysfs=SYSFS):
         if expect_bytes and info.st_size < expect_bytes:
             return '%s now reads %d bytes, the store was formatted for %d' % (path, info.st_size, expect_bytes)
         return None
-    blocks = os.path.join(sysfs, 'block')
-    if not os.path.isdir(blocks):
+    registry = os.path.join(sysfs, 'dev', 'block')
+    if not os.path.isdir(registry):
         return None
-    name = os.path.basename(os.path.realpath(path))
-    base = os.path.join(blocks, name)
+    number = '%d:%d' % (os.major(info.st_rdev), os.minor(info.st_rdev))
+    base = os.path.realpath(os.path.join(registry, number))
     if not os.path.isdir(base):
-        return 'the block node %s has no sysfs entry any more (the device was removed)' % name
+        return 'the block device %s has no sysfs entry any more (it was removed)' % number
+    name = os.path.basename(base)
     sectors = _sysfs_text(os.path.join(base, 'size'))
     if sectors is not None and sectors.isdigit():
         nbytes = int(sectors) * 512
@@ -134,10 +135,14 @@ def device_problem(path, expect_bytes=0, sysfs=SYSFS):
             return 'the namespace %s now reads 0 bytes' % name
         if expect_bytes and nbytes < expect_bytes:
             return 'the namespace %s now reads %d bytes, the store was formatted for %d' % (name, nbytes, expect_bytes)
-    match = re.match(r'nvme[0-9]+', name)
-    controller = match.group(0) if match else None
-    for state_file in (os.path.join(base, 'device', 'state'), os.path.join(sysfs, 'class', 'nvme', controller, 'state') if controller else None):
-        state = _sysfs_text(state_file) if state_file else None
+    holders = [os.path.join(base, 'device')]
+    parent = base
+    for _level in range(3):
+        parent = os.path.dirname(parent)
+        if os.path.basename(parent).startswith('nvme'):
+            holders.append(parent)
+    for holder in holders:
+        state = _sysfs_text(os.path.join(holder, 'state'))
         if state in DEAD_STATES:
             return 'the controller of %s is %s' % (name, state)
     return None

@@ -1782,42 +1782,46 @@ class DriveLossTests(NvmeCase):
 
 
 class DeviceProbeTests(unittest.TestCase):
-    """device_problem: a stat and a few sysfs attribute reads, never device IO."""
+    """device_problem: a stat and a few sysfs attribute reads, never device IO. The block device is found by major:minor (inside a container its node can have any name)."""
 
     def setUp(self):
         self.directory = tempfile.mkdtemp(prefix='qkvn-sysfs-')
         self.addCleanup(shutil.rmtree, self.directory, True)
         self.sysfs = os.path.join(self.directory, 'sys')
-        self.node = os.path.join(self.directory, 'nvme9n1')
-        Path(self.node).write_bytes(b'x' * 4096)
-        patcher = mock.patch.object(store_module.stat, 'S_ISBLK', lambda mode: True)       # (a regular file stands in for the block node)
+        self.node = os.path.join(self.directory, 'any-name-in-a-container')
+        Path(self.node).write_bytes(b'x' * 4096)                                      # (a regular file stands in for the node: its major:minor is 0:0)
+        patcher = mock.patch.object(store_module.stat, 'S_ISBLK', lambda mode: True)
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.controller = os.path.join(self.sysfs, 'devices', 'pci0000:00', 'nvme', 'nvme9')
+        self.namespace = os.path.join(self.controller, 'nvme9n1')
 
-    def attribute(self, relative, text):
-        path = os.path.join(self.sysfs, relative)
+    def attribute(self, path, text):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         Path(path).write_text(text + '\n')
 
-    def live(self, sectors='1953525168', state='live'):
-        self.attribute('block/nvme9n1/size', sectors)
-        self.attribute('block/nvme9n1/device/state', state)
-        self.attribute('class/nvme/nvme9/state', state)
+    def live(self, sectors='1953525168', state='live', linked=True):
+        self.attribute(os.path.join(self.namespace, 'size'), sectors)
+        self.attribute(os.path.join(self.controller, 'state'), state)
+        os.makedirs(os.path.join(self.sysfs, 'dev', 'block'), exist_ok=True)
+        link = os.path.join(self.sysfs, 'dev', 'block', '0:0')
+        if linked and not os.path.lexists(link):
+            os.symlink(self.namespace, link)
 
     def problem(self, expect=0):
         return store_module.device_problem(self.node, expect, self.sysfs)
 
-    def test_a_live_device_is_fine(self):
+    def test_a_live_device_is_fine_whatever_its_node_is_called(self):
         self.live()
         self.assertIsNone(self.problem(expect=900 << 30))
 
-    def test_a_dead_controller_is_reported_whichever_attribute_says_so(self):
+    def test_a_dead_or_deleting_controller_is_reported(self):
         self.live(state='dead')
         self.assertIn('is dead', self.problem())
-        self.live()
-        self.attribute('block/nvme9n1/device/state', 'live')
-        self.attribute('class/nvme/nvme9/state', 'deleting')
+        self.attribute(os.path.join(self.controller, 'state'), 'deleting')
         self.assertIn('is deleting', self.problem())
+        self.attribute(os.path.join(self.controller, 'state'), 'deleting (no IO)')
+        self.assertIn('deleting (no IO)', self.problem())
 
     def test_a_namespace_that_reads_zero_bytes_or_less_than_it_was_formatted_for(self):
         self.live(sectors='0')
@@ -1829,10 +1833,11 @@ class DeviceProbeTests(unittest.TestCase):
     def test_transient_states_are_not_a_verdict(self):
         for state in ('resetting', 'connecting', 'new'):
             self.live(state=state)
+            self.attribute(os.path.join(self.controller, 'state'), state)
             self.assertIsNone(self.problem(), state)
 
-    def test_a_node_with_no_sysfs_entry_is_gone_but_a_host_without_block_sysfs_cannot_be_asked(self):
-        os.makedirs(os.path.join(self.sysfs, 'block', 'nvme0n1'))
+    def test_a_device_number_with_no_sysfs_entry_is_gone_but_a_host_without_block_sysfs_cannot_be_asked(self):
+        self.live(linked=False)
         self.assertIn('no sysfs entry', self.problem())
         self.assertIsNone(store_module.device_problem(self.node, 0, os.path.join(self.directory, 'no-sysfs-here')))
 
