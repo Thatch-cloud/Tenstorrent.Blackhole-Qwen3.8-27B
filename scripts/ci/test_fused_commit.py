@@ -1566,8 +1566,8 @@ class ParentTests(unittest.TestCase):
             self.skipTest('no git history for %s' % PARENT)
         before = result.stdout.decode('utf-8').splitlines()
         after = without_trace_census(without_levern(without_diag_trim(without_prefill_scratch(without_any_request(without_sticky(
-            without_solo_and_lanes(without_m3_blocks(without_request_warm(without_parked_engines(without_octo(without_admission_lean(without_idle_scratch(without_exact_resume(
-                (HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines()))))))))))))))
+            without_solo_and_lanes(without_m3_blocks(without_request_warm(without_parked_engines(without_octo(without_admission_lean(without_idle_scratch(without_exact_resume(without_admission_pipeline(
+                (HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines())))))))))))))))
         changed = [line for line in difflib.unified_diff(before, after, lineterm='', n=0)
                    if line[:1] in '+-' and not line.startswith(('+++', '---'))]
         added = [line[1:].strip() for line in changed if line.startswith('+')]
@@ -2029,6 +2029,31 @@ def without_trace_census(lines):
     if sorted(value.strip() for value in found) != sorted(hooks):
         raise AssertionError('The trace_census hooks are not in serving_runtime.py exactly once each')
     return [value for value in lines if value.strip() not in hooks]
+
+
+def without_admission_pipeline(lines):
+    """serving_runtime.py less tp4/sched-2's admission pipeline (QWEN_FAST_ADMISSION_SEED_FIRST, _HOLD_REUSE, _LEDGER_TRIM; default off), which landed after this parent: the two flag-name lines, the block that builds
+    the seed-first policy ahead of the lifecycle, the lifecycle's seed_first keyword and the ledger trim after it, each asserted to be exactly that and found once."""
+    stripped = [value.strip() for value in lines]
+    flags = [at for at, value in enumerate(stripped) if value.startswith("ADMISSION_PIPELINE_FLAGS = ('QWEN_FAST_ADMISSION_SEED_FIRST', ")]
+    if len(flags) != 1 or not stripped[flags[0] - 1].startswith('# tp4/sched-2 (admission_pipeline.SWITCHES, duplicated'):
+        raise AssertionError('The admission pipeline flag names are not in serving_runtime.py exactly once')
+    lines = lines[:flags[0] - 1] + lines[flags[0] + 1:]
+    stripped = [value.strip() for value in lines]
+    starts = [at for at, value in enumerate(stripped) if value.startswith('# tp4/sched-2 (admission_pipeline, docs/tp4-sched2.md; each switch default off, gate only)')]
+    ends = [at for at, value in enumerate(stripped) if value == 'admission_pipeline.announce(seed_first is not None)']
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0] or stripped[ends[0] + 1] != 'lifecycle = FastServingLifecycle(worker, config=worker.vllm_config,':
+        raise AssertionError('The admission pipeline block is not in serving_runtime.py exactly once, ahead of the lifecycle')
+    lines = lines[:starts[0]] + lines[ends[0] + 1:]
+    stripped = [value.strip() for value in lines]
+    keywords = [at for at, value in enumerate(stripped) if value == "**({} if seed_first is None else dict(seed_first=seed_first)))"]
+    if len(keywords) != 1 or not stripped[keywords[0] - 1].endswith('parked_poll=parked_engines.poll_off)),') or stripped[keywords[0] + 1] != 'if pipeline_switches and admission_pipeline.ledger_trim_enabled():' \
+            or stripped[keywords[0] + 3] != 'admission_pipeline.trim_ledger(memory_ledger)':
+        raise AssertionError('The admission pipeline keyword and ledger trim are not in serving_runtime.py exactly once after the lifecycle')
+    previous = lines[keywords[0] - 1]
+    if not previous.endswith(','):
+        raise AssertionError('The admission pipeline keyword does not follow a comma')
+    return lines[:keywords[0] - 1] + [previous[:-1] + ')'] + lines[keywords[0] + 4:]        # (the keyword line also closed the call)
 
 
 def without_admission_lean(lines):
