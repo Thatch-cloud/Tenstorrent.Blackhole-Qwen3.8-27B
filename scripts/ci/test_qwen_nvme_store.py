@@ -622,6 +622,49 @@ class PinTests(StoreCase):
         self.assertEqual(store.put_batch([item('late')]), [True])
 
 
+class FailureTests(StoreCase):
+    def test_a_put_that_fails_before_the_journal_gives_its_extents_back_and_one_that_fails_after_it_does_not(self):
+        store = self.open()
+        free = store.allocator.free
+        syncs = []
+
+        def fail_data_sync(what, offset, length):
+            if what == 'sync':
+                syncs.append(1)
+                if len(syncs) == 1:
+                    raise IOError('the data sync')
+
+        store.bf.fail = fail_data_sync
+        with self.assertRaises(IOError):
+            store.put_batch([item('a')])
+        self.assertEqual(store.allocator.free, free, 'nothing named the extents: free again')
+        store.bf.fail = None
+        count = [0]
+
+        def fail_journal_sync(what, offset, length):
+            if what == 'sync':
+                count[0] += 1
+                if count[0] == 2:
+                    raise IOError('the journal sync')
+
+        store.bf.fail = fail_journal_sync
+        with self.assertRaises(IOError):
+            store.put_batch([item('b')])
+        self.assertEqual(store.allocator.free, free - SMALL, 'a record may be on the media: the extent is not handed to anything else')
+        store.bf.fail = None
+        again = self.reopen(store)
+        entry = again.lookup(KV, key_of('b'))
+        self.assertIsNotNone(entry, 'the record did reach the file')
+        self.assertEqual(self.read(again, 'b'), payload_of('b'))
+        self.assertEqual(again.allocator.free, free - SMALL, 'and the reopened allocator accounts for it')
+
+    def test_the_same_object_twice_in_a_batch_is_stored_once(self):
+        store = self.open()
+        self.assertEqual(store.put_batch([item('d'), item('d'), item('e')]), [True, True, True])
+        self.assertEqual(store.snapshot_stats()['entries'], 2)
+        self.assertEqual(store.logical_bytes, 2 * SMALL)
+
+
 class JournalTests(StoreCase):
     def test_a_full_journal_snapshots_and_the_state_survives_many_cycles(self):
         store = self.open(size=4 << 20, snap_bytes=32 * ALIGN, journal_bytes=8 * ALIGN)

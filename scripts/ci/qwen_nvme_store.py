@@ -1182,8 +1182,13 @@ class NvmeStore(object):
         with self._wlock:
             now = self.clock()
             fresh = []
+            seen = set()
             for position, item in enumerate(items):
                 pair = (item.kind, item.key)
+                if pair in seen:
+                    results[position] = True              # the same object twice in one batch: stored once
+                    continue
+                seen.add(pair)
                 with self._mutex:
                     old = self.entries.get(pair)
                     if old is not None and not self._expired(old, now):
@@ -1213,6 +1218,7 @@ class NvmeStore(object):
                 self.stats['put_refused'] += len(fresh)
                 return results
             entries = []
+            journaling = False
             try:
                 self._write_data(placed, items)
                 self.bf.sync()
@@ -1222,12 +1228,15 @@ class NvmeStore(object):
                     entries.append(Entry(item.kind, item.key, offset, item.nbytes, item.tenant, item.chain, item.index, item.extra, created, created, item.digest,
                                          item.fp))
                 records = self._touch_records() + self._put_payloads(entries)
+                journaling = True
                 self._journal_append(records)
             except BaseException:
-                # nothing named these extents durably: they are free again
-                with self._mutex:
-                    for position, offset in placed:
-                        self.allocator.release(offset, roundup(items[position].nbytes))
+                # Before the journal was touched nothing names these extents durably: they are free again. Once it was, a group of records may be on the media whatever the error says,
+                # so the extents are NOT given back (a record that survived must never name bytes something else has overwritten); the next open rebuilds the allocator from the index.
+                if not journaling:
+                    with self._mutex:
+                        for position, offset in placed:
+                            self.allocator.release(offset, roundup(items[position].nbytes))
                 raise
             for entry in entries:
                 self._index_add(entry)
