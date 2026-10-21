@@ -1,11 +1,12 @@
-"""tp4/s7: the ship-7 candidate (a traffic profile generated from fusion-wp/S7.json by make_fusion_profiles.py), its two gate-only audited twins (make_s7_profiles) and the contract's admission of the two
+"""tp4/s7b: the ship-7 candidate (a traffic profile generated from fusion-wp/S7.json by make_fusion_profiles.py), its gate-only audited twin (make_s7_profiles) and the contract's admission of the two
 tp4/sched-2 switches the candidate carries.
 
   -fx-traffic-s7   the ship-6 profile + the host tier's threaded upload (QWEN_PREFIX_TIER_IO_THREADS, QWEN_PREFIX_TIER_VERIFY_THREADS) + admission pipelining (QWEN_FAST_ADMISSION_SEED_FIRST) + the memory-ledger trim
-                   (QWEN_FAST_ADMISSION_LEDGER_TRIM) + prompt lookup (QWEN_FAST_LOOKUP_DRAFT) + the traced masked tails (QWEN_FAST_PREFILL_TAIL_TRACE), under ONE owner traffic waiver (decision PENDING or
-                   APPROVED: nothing here reads it);
-  -fx-s7-audit     its audited twin for the tail buckets 128 and 1,024: the ship-6 audited twin + every difference of the candidate except the ledger trim + the traced tails' audit;
-  -fx-s7-audit-mid the same for the buckets 256 and 512.
+                   (QWEN_FAST_ADMISSION_LEDGER_TRIM) + prompt lookup (QWEN_FAST_LOOKUP_DRAFT), under ONE owner traffic waiver (decision PENDING or APPROVED: nothing here reads it);
+  -fx-s7-audit     its audited twin: the ship-6 audited twin + every difference of the candidate except the ledger trim.
+
+THE TRACED MASKED TAILS (QWEN_FAST_PREFILL_TAIL_TRACE, tp4/prefill-3) ARE OUT of both: the tp4/s7 window's audited attaches died at engine start on a read inside the trace capture (the oneq SDPA audit; docs/tp4-s7.md),
+and the second audited twin (-fx-s7-audit-mid, the other two traced buckets) is retired with them (TraceTests).
 
 The ship-6 profile, its waiver and every profile that existed before this branch stay byte-identical; nothing here is hand-edited. The control of every timed pair is the ship-6 profile itself. The tests are
 decision-agnostic: the owner's approval changes one sentence of the manifest and these tests still pass (ApprovalTests)."""
@@ -38,17 +39,17 @@ PROFILES_PATH = HERE / 'qwen_c2_profiles.json'
 DATA = json.loads(PROFILES_PATH.read_text(encoding='utf-8'))
 PROFILES = DATA['profiles']
 NS = fusion.NAMESPACE
-SHIP6, SHIP, AUDIT6, AUDIT, AUDIT_MID = s6.SHIP, twins.SHIP, s6.AUDIT, twins.AUDIT, twins.AUDIT_MID
+SHIP6, SHIP, AUDIT6, AUDIT = s6.SHIP, twins.SHIP, s6.AUDIT, twins.AUDIT
 PLAN = fusion.normalise(fusion.read_manifests())
 SPEC = next(item for item in PLAN['ship'] if item['name'] == 'traffic-s7')
 PARENT_COMMIT = '43c60a52'                      # tp4/s6 at its approval: the tree this branch was cut from
 # what the candidate sets that ship 6 does not, the waiver id aside
 CHANGES = {'QWEN_PREFIX_TIER_IO_THREADS': '4', 'QWEN_PREFIX_TIER_VERIFY_THREADS': '4', 'QWEN_FAST_ADMISSION_SEED_FIRST': '1', 'QWEN_FAST_ADMISSION_LEDGER_TRIM': '1',
-           'QWEN_FAST_LOOKUP_DRAFT': 'n3m12', 'QWEN_FAST_PREFILL_TAIL_TRACE': '1'}
+           'QWEN_FAST_LOOKUP_DRAFT': 'n3m12'}
 # what the four branches carry that stays OUT of the candidate (default off, a gate's own or another waiver's)
 LEFT_OUT = ('QWEN_FAST_ADMISSION_HOLD_REUSE', 'QWEN_FAST_ADMISSION_HOLD_REUSE_MAX_AGE_MS', 'QWEN_FAST_ADMISSION_HOLD_REUSE_MAX_REUSES', 'QWEN_FAST_ADMISSION_HOLD_REUSE_DRIFT_MB',
             'QWEN_FAST_SDPA_PF_KSPLIT', 'QWEN_FAST_SDPA_PF_KSPLIT_AUDIT', 'QWEN_FAST_LOOKUP_SHADOW', 'QWEN_PREFIX_TIER_IO_CHUNK_BLOCKS',
-            'QWEN_FAST_PREFILL_TAIL_TRACE_AUDIT', 'QWEN_FAST_PREFILL_TAIL_TRACE_BUCKETS', 'QWEN_FAST_PREFILL_TAIL_TRACE_ARENA_MB')
+            'QWEN_FAST_PREFILL_TAIL_TRACE', 'QWEN_FAST_PREFILL_TAIL_TRACE_AUDIT', 'QWEN_FAST_PREFILL_TAIL_TRACE_BUCKETS', 'QWEN_FAST_PREFILL_TAIL_TRACE_ARENA_MB')
 
 
 def boot_problems(profile):
@@ -77,7 +78,7 @@ class CandidateTests(unittest.TestCase):
         self.assertNotIn('gate_only', PROFILES[SHIP])
         self.assertEqual((SPEC['pack'], SPEC['image'], SPEC['control'], SPEC['bake_graft'], SPEC['memory_plan']), ('S7', 'tp4-s7-1', 'traffic-s6', 'K64j-OQ', 'octo'))
 
-    def test_the_candidate_is_the_ship_6_profile_plus_exactly_the_five_groups_of_levers(self):
+    def test_the_candidate_is_the_ship_6_profile_plus_exactly_the_four_groups_of_levers(self):
         old, new = PROFILES[SHIP6], PROFILES[SHIP]
         changed = {key: new['env'].get(key) for key in set(old['env']) | set(new['env']) if old['env'].get(key) != new['env'].get(key)}
         self.assertEqual(changed, dict(CHANGES, **{contract.OCTO_WAIVER_ENV: PROFILES[SHIP][contract.TRAFFIC_WAIVER]['id']}))
@@ -100,10 +101,9 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(qwen_tier_upload.flag_problems(env), [])
         self.assertEqual(admission_pipeline.problems(env) if hasattr(admission_pipeline, 'problems') else [], [])
         self.assertIsNotNone(prompt_lookup.parse_policy(env['QWEN_FAST_LOOKUP_DRAFT']))
-        self.assertEqual(env['QWEN_FAST_PREFILL_TAIL_TRACE'], '1')
-        self.assertIn('QWEN_FAST_PREFILL_TAIL_TRACE', prefill_tail_trace.FLAGS)
-        self.assertEqual(pf3.parent_problems(SHIP, PROFILES[SHIP], False), ['%s already names %s: a parent never carries the knob it is twinned with' % (SHIP, 'QWEN_FAST_PREFILL_TAIL_TRACE')],
-                         'the only complaint of the tail twin generator about the candidate is that the flag is already there')
+        for flag in prefill_tail_trace.FLAGS:
+            self.assertNotIn(flag, env, 'the traced masked tails are out of the candidate: %s' % flag)
+        self.assertEqual(pf3.parent_problems(SHIP, PROFILES[SHIP], False), [], 'the tail twin generator has no complaint about a candidate without the flag')
 
     def test_the_ship_6_profile_and_every_earlier_profile_are_untouched(self):
         parent = parent_profiles()
@@ -113,7 +113,7 @@ class CandidateTests(unittest.TestCase):
             self.assertEqual(PROFILES[name], body, name)
         added = [name for name in PROFILES if name not in parent]
         added = [name for name in added if name not in set(profile_twins.generated_names()) - set(twins.owned_names())]      # (the other branches' generated twins merged beside)
-        self.assertEqual(sorted(added), sorted([SHIP, AUDIT, AUDIT_MID]))
+        self.assertEqual(sorted(added), sorted([SHIP, AUDIT]))
         self.assertTrue(PROFILES[SHIP6][contract.TRAFFIC_WAIVER]['decision'].startswith('APPROVED'))
         self.assertEqual(PROFILES[SHIP6][contract.TRAFFIC_WAIVER]['id'], 'ship6-fx-262k-2026-10-21')
         for flag in CHANGES:
@@ -140,11 +140,14 @@ class CandidateTests(unittest.TestCase):
         self.assertIn(old, text, 'the ship-6 waiver text is carried verbatim')
         added = text[text.index(old) + len(old):]
         for phrase in ('(S) The host tier\'s threaded upload', 'QWEN_PREFIX_TIER_IO_THREADS=4', '(T) Admission pipelining', 'QWEN_FAST_ADMISSION_SEED_FIRST=1', '(U) The memory-ledger trim',
-                       'QWEN_FAST_ADMISSION_LEDGER_TRIM=1', '(V) Prompt lookup', 'QWEN_FAST_LOOKUP_DRAFT=n3m12', '(W) The traced masked tails', 'QWEN_FAST_PREFILL_TAIL_TRACE=1', 'ESTIMATE',
+                       'QWEN_FAST_ADMISSION_LEDGER_TRIM=1', '(V) Prompt lookup', 'QWEN_FAST_LOOKUP_DRAFT=n3m12', 'ESTIMATE',
                        'Never run on a card', 'Switchable line', 'NOT IN THIS PROFILE', 'QWEN_FAST_ADMISSION_HOLD_REUSE', 'QWEN_FAST_SDPA_PF_KSPLIT', 'tree verify'):
             self.assertIn(phrase, added)
+        self.assertNotIn('(W) ', added, 'items (S) to (V) only: the traced masked tails are not waived')
+        self.assertNotIn('QWEN_FAST_PREFILL_TAIL_TRACE', added)
+        self.assertIn('(S) to (V)', text)
         evidence = ' '.join(PROFILES[SHIP][contract.TRAFFIC_WAIVER]['evidence'])
-        for phrase in ('tp4/s6 (the ship-6 candidate', 'tp4/upload-1 (CPU)', 'tp4/sched-2 (CPU)', 'tp4/stream-1 (CPU)', 'tp4/prefill-3 (CPU)', 'what has NOT run'):
+        for phrase in ('tp4/s6 (the ship-6 candidate', 'tp4/upload-1 (CPU)', 'tp4/sched-2 (CPU)', 'tp4/stream-1 (CPU)', 'what has NOT run'):
             self.assertIn(phrase, evidence)
         self.assertEqual(PROFILES[SHIP][contract.TRAFFIC_WAIVER]['evidence'][:len(PROFILES[SHIP6][contract.TRAFFIC_WAIVER]['evidence'])], PROFILES[SHIP6][contract.TRAFFIC_WAIVER]['evidence'])
 
@@ -159,7 +162,7 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual((env['QWEN_PREFIX_HOST_TIER_AUDIT'], env['QWEN_PREFIX_CKPT_PRECONVERTED_AUDIT'], env['QWEN_PREFIX_HOST_TIER_VERIFY']), ('0', '0', 'sample'))
 
     def test_the_text_of_the_profile_is_public_safe(self):
-        text = json.dumps([PROFILES[SHIP]['description'], PROFILES[SHIP][contract.TRAFFIC_WAIVER], PROFILES[AUDIT]['description'], PROFILES[AUDIT_MID]['description']])
+        text = json.dumps([PROFILES[SHIP]['description'], PROFILES[SHIP][contract.TRAFFIC_WAIVER], PROFILES[AUDIT]['description']])
         for word in fusion.SHIP_FORBIDDEN:
             self.assertNotIn(word, text)
         self.assertTrue(PROFILES[SHIP]['description'].startswith('A SHIP CANDIDATE'))
@@ -218,7 +221,7 @@ class ContractTests(unittest.TestCase):
 
 class TwinTests(unittest.TestCase):
     def test_the_twins_are_gate_only_generated_and_boot_clean(self):
-        for name in (AUDIT, AUDIT_MID):
+        for name in (AUDIT,):
             self.assertIs(PROFILES[name]['gate_only'], True, name)
             self.assertNotIn(contract.TRAFFIC_WAIVER, PROFILES[name])
             self.assertNotIn(contract.OCTO_WAIVER_ENV, PROFILES[name]['env'])
@@ -226,40 +229,30 @@ class TwinTests(unittest.TestCase):
             self.assertEqual(boot_problems(dict(PROFILES[name], name=name)), [], name)
             self.assertIn(name, profile_twins.twin_names())
             self.assertLessEqual(len(name), twins.MAX_NAME)
-        self.assertEqual(twins.twin_names(), (AUDIT, AUDIT_MID))
-        self.assertEqual(twins.owned_names(), (AUDIT, AUDIT_MID, SHIP))
+        self.assertEqual(twins.twin_names(), (AUDIT,))
+        self.assertEqual(twins.owned_names(), (AUDIT, SHIP))
         self.assertEqual(twins.generate(DATA), DATA, 'the file is what the generator makes')
         self.assertEqual(twins.main(['--check']), 0)
 
-    def test_the_twins_are_the_ship_6_audited_twin_plus_the_candidates_levers_and_the_tail_audit_but_not_the_ledger_trim(self):
+    def test_the_twin_is_the_ship_6_audited_twin_plus_the_candidates_levers_but_not_the_ledger_trim(self):
         parent = PROFILES[AUDIT6]
-        for name, buckets in ((AUDIT, '128,1024'), (AUDIT_MID, '256,512')):
-            audit = PROFILES[name]
-            changed = {key: audit['env'].get(key) for key in set(parent['env']) | set(audit['env']) if parent['env'].get(key) != audit['env'].get(key)}
-            want = dict((flag, value) for flag, value in CHANGES.items() if flag != 'QWEN_FAST_ADMISSION_LEDGER_TRIM')
-            want.update(QWEN_FAST_PREFILL_TAIL_TRACE_AUDIT='1', QWEN_FAST_PREFILL_TAIL_TRACE_BUCKETS=buckets, QWEN_FAST_PREFILL_TAIL_TRACE_ARENA_MB=pf3.ARENA_MB)
-            self.assertEqual(changed, want, name)
-            for key in parent:
-                if key not in ('env', 'description'):
-                    self.assertEqual(audit[key], parent[key], key)
-            self.assertEqual(audit['engine'], PROFILES[SHIP]['engine'], 'the audited twin has the candidate\'s memory plan')
-        self.assertEqual(sorted(set('128,1024'.split(',')) | set('256,512'.split(','))), sorted(['128', '256', '512', '1024']), 'together the twins audit every bucket the candidate traces')
-        self.assertEqual(sorted(prefill_tail_trace.DEFAULT_BUCKETS if hasattr(prefill_tail_trace, 'DEFAULT_BUCKETS') else (128, 256, 512, 1024)), [128, 256, 512, 1024])
-
-    def test_the_wiring_the_tail_twins_need_is_in_the_parent(self):
-        env = PROFILES[AUDIT6]['env']
-        self.assertEqual((env['QWEN_FAST_LEVER_N'], env['QWEN_FAST_SOLO_PACKED']), ('1', '1'))
-        self.assertIsNotNone(env.get('QWEN_FAST_GDN_PREFILL_CONV_AUDIT'))
+        audit = PROFILES[AUDIT]
+        changed = {key: audit['env'].get(key) for key in set(parent['env']) | set(audit['env']) if parent['env'].get(key) != audit['env'].get(key)}
+        want = dict((flag, value) for flag, value in CHANGES.items() if flag != 'QWEN_FAST_ADMISSION_LEDGER_TRIM')
+        self.assertEqual(changed, want)
+        for key in parent:
+            if key not in ('env', 'description'):
+                self.assertEqual(audit[key], parent[key], key)
+        self.assertEqual(audit['engine'], PROFILES[SHIP]['engine'], 'the audited twin has the candidate\'s memory plan')
 
     def test_the_twins_need_no_owner_waiver_and_there_is_no_timed_twin(self):
         names = [name for name in PROFILES if name.startswith(NS) and 's7' in name]
-        self.assertEqual(sorted(names), sorted([SHIP, AUDIT, AUDIT_MID]), 'the timed arm is the candidate itself, its control the ship-6 profile')
+        self.assertEqual(sorted(names), sorted([SHIP, AUDIT]), 'the timed arm is the candidate itself, its control the ship-6 profile')
 
     def test_a_twin_is_refused_when_its_parent_moves(self):
         for mutate in (lambda data: data['profiles'][AUDIT6]['env'].__setitem__('QWEN_FAST_PREFILL_TAIL_TRACE', '1'),
-                       lambda data: data['profiles'][SHIP]['env'].pop('QWEN_FAST_PREFILL_TAIL_TRACE'),
+                       lambda data: data['profiles'][SHIP]['env'].__setitem__('QWEN_FAST_PREFILL_TAIL_TRACE', '1'),
                        lambda data: data['profiles'][SHIP]['env'].pop(contract.OCTO_WAIVER_ENV),
-                       lambda data: data['profiles'][AUDIT6]['env'].pop('QWEN_FAST_SOLO_PACKED'),
                        lambda data: data['profiles'][AUDIT6].pop('gate_only'),
                        lambda data: data['profiles'].pop(AUDIT6)):
             data = copy.deepcopy(DATA)
@@ -275,6 +268,30 @@ class TwinTests(unittest.TestCase):
         for module in (twins, make_pf3k_profiles, make_sched2_profiles, s6, twins):
             data = module.generate(data)
         self.assertEqual(list(data['profiles']), list(DATA['profiles']), 'every generator places its twins by the chain, so the order they run in does not matter')
+
+
+class TraceTests(unittest.TestCase):
+    """The traced masked tails (tp4/prefill-3) are out of the s7 chain, and the second audited twin with them."""
+
+    def test_neither_the_candidate_nor_its_twin_nor_the_manifest_names_a_traced_tails_knob(self):
+        raw = json.loads((fusion.MANIFESTS / 'S7.json').read_text(encoding='utf-8'))['ship'][0]
+        for flag in prefill_tail_trace.FLAGS:
+            for name in (SHIP, AUDIT):
+                self.assertNotIn(flag, PROFILES[name]['env'], (name, flag))
+            self.assertNotIn(flag, raw['env'], flag)
+            self.assertNotIn(flag, json.dumps(PROFILES[SHIP][contract.TRAFFIC_WAIVER]['waives']), 'the waiver does not waive the lever')
+
+    def test_the_second_audited_twin_is_retired_and_the_generator_drops_a_stale_copy(self):
+        retired = NS + 's7-audit-mid'
+        self.assertEqual(twins.RETIRED, (retired,))
+        self.assertNotIn(retired, PROFILES)
+        stale = copy.deepcopy(DATA)
+        stale['profiles'][retired] = copy.deepcopy(PROFILES[AUDIT])
+        self.assertEqual(twins.generate(stale), DATA, 'a previous generation\'s second twin is dropped')
+
+    def test_the_decision_sentence_names_no_second_audited_twin(self):
+        decision = PROFILES[SHIP][contract.TRAFFIC_WAIVER]['decision']
+        self.assertNotIn('-s7-audit-mid', decision)
 
 
 class ApprovalTests(unittest.TestCase):

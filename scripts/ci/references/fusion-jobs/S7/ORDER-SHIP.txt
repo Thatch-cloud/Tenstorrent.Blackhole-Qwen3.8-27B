@@ -5,6 +5,6 @@
 # THE JOB: PLATFORM REPLAY: SR (25 min).
 # DEPENDENCIES (machine-greppable): none: SR needs the image B0 built and the gates read.
 # READ RULES:
-#   SR   'PLATFORM_REPLAY passed=True'; the lever reads of the template's header (the upload, admission pipeline, governor, WC, lookup and traced-tail lines).
+#   SR   'PLATFORM_REPLAY passed=True'; the lever reads of the template's header (the upload, admission pipeline, governor, WC and lookup lines).
 # Time (estimate, minutes): SR 25: 25 minutes (0 h 25 min) in all, 25 minutes of cards.
 SR-platform-replay soft tp4-s7-1 25

@@ -32,7 +32,6 @@ EXPECTED = {
     'B0-ship-build': (False, '', ''),
     'X0-status-rescan-reset': (False, '', ''),
     'A1-s7-audited-attach': (True, pack.AUDIT, pack.A1_TESTS),
-    'A2-s7-audited-attach-mid': (True, pack.AUDIT_MID, pack.A2_TESTS),
     'T1A-s6-control': (True, pack.SHIP6, pack.T1_TESTS),
     'T1B-s7-candidate': (True, pack.SHIP7, pack.T1_TESTS),
     'R1-restore-s6-control': (True, '', ''),
@@ -43,7 +42,7 @@ EXPECTED = {
     'Z-reset': (False, '', ''),
 }
 WINDOWS = {
-    'ORDER.txt': ['B0-ship-build', 'X0-status-rescan-reset', 'A1-s7-audited-attach', 'A2-s7-audited-attach-mid', 'T1A-s6-control', 'T1B-s7-candidate', 'R1-restore-s6-control', 'R2-restore-s7-candidate',
+    'ORDER.txt': ['B0-ship-build', 'X0-status-rescan-reset', 'A1-s7-audited-attach', 'T1A-s6-control', 'T1B-s7-candidate', 'R1-restore-s6-control', 'R2-restore-s7-candidate',
                   'T2A-s6-control-8', 'T2B-s7-candidate-8', 'Z-reset'],
     'ORDER-SHIP.txt': ['SR-platform-replay'],
 }
@@ -85,7 +84,7 @@ class OrderTests(unittest.TestCase):
         modes = {row[0]: row[1] for name in WINDOWS for row in order_lines(name)}
         for key in ('B0-ship-build', 'X0-status-rescan-reset', 'A1-s7-audited-attach'):
             self.assertEqual(modes[key], 'stop', key)
-        for key in ('A2-s7-audited-attach-mid', 'T1A-s6-control', 'T1B-s7-candidate', 'R1-restore-s6-control', 'R2-restore-s7-candidate', 'Z-reset', 'SR-platform-replay'):
+        for key in ('T1A-s6-control', 'T1B-s7-candidate', 'R1-restore-s6-control', 'R2-restore-s7-candidate', 'Z-reset', 'SR-platform-replay'):
             self.assertEqual(modes[key], 'soft', key)
         for key in ('T2A-s6-control-8', 'T2B-s7-candidate-8'):
             self.assertEqual(modes[key], 'opt', 'the production-load pair runs when the window has the minutes')
@@ -119,14 +118,14 @@ class OrderTests(unittest.TestCase):
                 for later in left:
                     for earlier in right:
                         self.assertLess(names.index(earlier), names.index(later), (name, left_right))
-        self.assertEqual(directives('ORDER.txt', '# NEEDS '), [['X0', '<-', 'B0'], ['A1', '<-', 'X0'], ['A2', '<-', 'A1'], ['T1A', '<-', 'A1'], ['T1B', '<-', 'T1A'], ['R1', '<-', 'T1B'],
+        self.assertEqual(directives('ORDER.txt', '# NEEDS '), [['X0', '<-', 'B0'], ['A1', '<-', 'X0'], ['T1A', '<-', 'A1'], ['T1B', '<-', 'T1A'], ['R1', '<-', 'T1B'],
                                                                ['R2', '<-', 'R1'], ['T2A', '<-', 'T1B'], ['T2B', '<-', 'T2A']])
 
     def test_the_arc_range_covers_every_audited_boot_and_every_timed_job_and_nothing_else(self):
         names = [row[0].split('-')[0] for row in order_lines('ORDER.txt')]
         (first, last), = directives('ORDER.txt', '# ARC-ZERO ')
         self.assertEqual((first, last), ('A1', 'T2B'))
-        for token in ('A1', 'A2', 'T1A', 'T1B', 'R1', 'R2', 'T2A', 'T2B'):
+        for token in ('A1', 'T1A', 'T1B', 'R1', 'R2', 'T2A', 'T2B'):
             self.assertTrue(names.index(first) <= names.index(token) <= names.index(last), token)
         for token in ('B0', 'X0', 'Z'):
             self.assertFalse(names.index(first) <= names.index(token) <= names.index(last), token)
@@ -225,14 +224,13 @@ class TemplateTests(unittest.TestCase):
         self.assertNotIn('agent_turns8', t1, 'agent_turns8 is the production-load pair\'s own')
         t2 = values('T2B-s7-candidate-8')['C2_SMOKE_TESTS'].split(',')
         self.assertEqual(t2, ['warmup', 'concurrent8_steady', 'agent_turns8'])
-        for name in ('A1-s7-audited-attach', 'A2-s7-audited-attach-mid'):
-            tests = values(name)['C2_SMOKE_TESTS'].split(',')
-            for test in ('concurrent8_steady', 'agent_turns'):
-                self.assertIn(test, tests, name)
+        tests = values('A1-s7-audited-attach')['C2_SMOKE_TESTS'].split(',')
+        for test in ('concurrent8_steady', 'agent_turns'):
+            self.assertIn(test, tests, 'A1-s7-audited-attach')
 
-    def test_the_audited_attaches_run_the_candidates_audited_twins_inside_a_box_longer_than_their_estimate(self):
+    def test_the_audited_attach_runs_the_candidates_audited_twin_inside_a_box_longer_than_its_estimate(self):
         minutes = {row[0].split('-')[0]: int(row[3]) for row in order_lines('ORDER.txt')}
-        for name, profile in (('A1-s7-audited-attach', pack.AUDIT), ('A2-s7-audited-attach-mid', pack.AUDIT_MID)):
+        for name, profile in (('A1-s7-audited-attach', pack.AUDIT),):
             found = values(name)
             self.assertEqual(found['C2_PROFILE'], profile)
             self.assertGreater(int(found['C2_BOX_MINUTES']), minutes[name.split('-')[0]], name)
@@ -283,17 +281,14 @@ class TemplateTests(unittest.TestCase):
     def test_the_templates_name_the_lines_the_arms_log_and_the_estimates_are_marked(self):
         text = re.sub(r'\s*\n#\s*', ' ', (PACK / 'T1B-s7-candidate.env').read_text(encoding='utf-8'))
         for phrase in ('[PINDIAG] prefix: host tier upload on', 'latched off', '[PINDIAG] admission pipeline installed: seed_first=1', 'seed first deferred', 'admission ledger trim', '[LOOKUP-DRAFT] engaged policy=n3m12',
-                       '[LOOKUP-ROUND]', '[PINDIAG] prefill tail trace engaged', 'uncovered=0', '[PF3] tail mode=traced', '[PINDIAG] tp4 gdn wc engaged', 'reason=8 users (WC takes 2 or 4)', 'adaptive=1', 'prefill_ladder_report.py',
-                       'np1_report.py', 'octo_compare.py', 'agent_turns.py report', 'sched2_report.py', 'pf3_report.py', 'ESTIMATE', 'NO-GO for the candidate'):
+                       '[LOOKUP-ROUND]', '[PINDIAG] tp4 gdn wc engaged', 'reason=8 users (WC takes 2 or 4)', 'adaptive=1', 'prefill_ladder_report.py',
+                       'np1_report.py', 'octo_compare.py', 'agent_turns.py report', 'sched2_report.py', 'ESTIMATE', 'NO-GO for the candidate'):
             self.assertIn(phrase, text)
         text = re.sub(r'\s*\n#\s*', ' ', (PACK / 'A1-s7-audited-attach.env').read_text(encoding='utf-8'))
-        for phrase in ('exact=True', 'audit mismatch', 'prefill tail trace audit n=.. exact=True', 'latched off', 'about 2.6 GB more DRAM', 'The ledger trim is NOT in the twin', '128 and 1,024'):
-            self.assertIn(phrase, text)
-        text = re.sub(r'\s*\n#\s*', ' ', (PACK / 'A2-s7-audited-attach-mid.env').read_text(encoding='utf-8'))
-        for phrase in ('256 and 512', 'does not halt the window'):
+        for phrase in ('exact=True', 'audit mismatch', 'latched off', 'about 2.6 GB more DRAM', 'The ledger trim is NOT in the twin'):
             self.assertIn(phrase, text)
         text = re.sub(r'\s*\n#\s*', ' ', (PACK / 'T1A-s6-control.env').read_text(encoding='utf-8'))
-        self.assertIn('The control logs none of the five groups', text)
+        self.assertIn('The control logs none of the four groups', text)
         text = re.sub(r'\s*\n#\s*', ' ', (PACK / 'R2-restore-s7-candidate.env').read_text(encoding='utf-8'))
         for phrase in ('upload_restore_compare.py', 'There is no restore-heavy smoke test', 'tier_io_write_blocks', 'ESTIMATE'):
             self.assertIn(phrase, text)
@@ -303,7 +298,7 @@ class TemplateTests(unittest.TestCase):
             text = path.read_text(encoding='utf-8')
             for line in text.splitlines():
                 if not line.startswith('#'):
-                    for flag in ('QWEN_FAST_ADMISSION_HOLD_REUSE', 'QWEN_FAST_SDPA_PF_KSPLIT', 'QWEN_FAST_LOOKUP_SHADOW'):
+                    for flag in ('QWEN_FAST_ADMISSION_HOLD_REUSE', 'QWEN_FAST_SDPA_PF_KSPLIT', 'QWEN_FAST_LOOKUP_SHADOW', 'QWEN_FAST_PREFILL_TAIL_TRACE'):
                         self.assertNotIn(flag, line, path.name)
 
 

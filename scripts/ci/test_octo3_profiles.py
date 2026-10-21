@@ -133,7 +133,7 @@ class TwinTests(unittest.TestCase):
 
         for name, profile in PROFILES.items():
             has = 'QWEN_FAST_AUDIT_EVERY' in profile['env']
-            self.assertEqual(has, name in (twins.FX_ALL + '-octo3-audit', twins.FX_ALL_PREFILL + '-octo3-audit', make_ship4_profiles.AUDIT, make_np1_profiles.AUDIT, make_s5_profiles.AUDIT, make_s5_profiles.AUDIT_NOWC, make_s6_profiles.AUDIT, make_s7_profiles.AUDIT, make_s7_profiles.AUDIT_MID, make_xe_profiles.AUDIT, make_pf2_profiles.AUDIT, make_pf3_profiles.AUDIT, make_pf3_profiles.AUDIT_MID, make_pf3k_profiles.AUDIT, make_sched_profiles.NAMESPACE + "all-audit", make_sched2_profiles.NAMESPACE + "audit"), name)      # (and tp4/ship-4's audited twin of the combined candidate, and tp4/np1-fastlane's copy of it, and tp4/exact-end's copy of it, and tp4/sched-1's copy of it, and tp4/sched-2's child of the ship-5 audited twin)
+            self.assertEqual(has, name in (twins.FX_ALL + '-octo3-audit', twins.FX_ALL_PREFILL + '-octo3-audit', make_ship4_profiles.AUDIT, make_np1_profiles.AUDIT, make_s5_profiles.AUDIT, make_s5_profiles.AUDIT_NOWC, make_s6_profiles.AUDIT, make_s7_profiles.AUDIT, make_xe_profiles.AUDIT, make_pf2_profiles.AUDIT, make_pf3_profiles.AUDIT, make_pf3_profiles.AUDIT_MID, make_pf3k_profiles.AUDIT, make_sched_profiles.NAMESPACE + "all-audit", make_sched2_profiles.NAMESPACE + "audit"), name)      # (and tp4/ship-4's audited twin of the combined candidate, and tp4/np1-fastlane's copy of it, and tp4/exact-end's copy of it, and tp4/sched-1's copy of it, and tp4/sched-2's child of the ship-5 audited twin)
         import audit_sampling
 
         for name in (twins.FX_ALL + '-octo3-audit', twins.FX_ALL_PREFILL + '-octo3-audit'):

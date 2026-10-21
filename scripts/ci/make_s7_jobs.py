@@ -4,19 +4,19 @@
     python3 scripts/ci/make_s7_jobs.py --check   exit 1 if the checked-in pack is not what this generates
 
 The ship-7 candidate (docs/tp4-s7.md): the traffic profile `-fx-traffic-s7` (scripts/ci/fusion-wp/S7.json, owner traffic waiver ship7-fx-262k-2026-10-21) = the ship-6 profile plus the host tier's threaded upload,
-admission pipelining, the memory-ledger trim, prompt lookup beside engine reuse and the traced masked tails; its two audited twins (make_s7_profiles.py); THE SHIP-6 PROFILE ITSELF as the control of every pair; ONE
-image (tp4-s7-1, a placeholder: B0 builds it from the pushed tp4/s7 head WITH the K64j-OQ graft AND THE SHIP-7 PROFILE BAKED AS THE SERVING DEFAULT, so the same image is the window's and, if the gates pass, the
-ship's: the waiver's decision must already be APPROVED when B0 is pushed, the job reader refuses a PENDING one), the checkpoint production serves (selected by the job keys C2_MODEL_REPO and C2_MODEL_REVISION:
-qwen_c2_checkpoint.py). Templates only: no tag is pushed from the branch.
+admission pipelining, the memory-ledger trim and prompt lookup beside engine reuse (the traced masked tails are NOT in it: docs/tp4-s7.md); its audited twin (make_s7_profiles.py); THE SHIP-6 PROFILE ITSELF as the
+control of every pair; ONE image (tp4-s7-1, a placeholder: B0 builds it from the pushed tp4/s7b head WITH the K64j-OQ graft AND THE SHIP-7 PROFILE BAKED AS THE SERVING DEFAULT, so the same image is the window's and,
+if the gates pass, the ship's: the waiver's decision must already be APPROVED when B0 is pushed, the job reader refuses a PENDING one), the checkpoint production serves (selected by the job keys C2_MODEL_REPO and
+C2_MODEL_REVISION: qwen_c2_checkpoint.py). Templates only: no tag is pushed from the branch.
 
 TWO ORDER FILES share the folder (the window driver reads a fixed ORDER.txt, so the flow after the window is run from a commit where its file is ORDER.txt: `git mv ORDER-SHIP.txt ORDER.txt`):
 
-  ORDER.txt        THE WINDOW: B0 the ship-image build (while production serves), X0, A1 and A2 the audited attaches of the candidate's twins (A1 STOP; the traced buckets 128 and 1,024, then 256 and 512), T1A and T1B the
-                   timed pair at one, two and four live seats, the governor's own shape (prefill_few_decoders), eight beside them and agent_turns (the main judge), R1 and R2 the restore pair (a returning session
-                   evicted to the host tier and restored: the threaded upload's own test), T2A and T2B the production-load pair on agent_turns8 (optional), Z.
+  ORDER.txt        THE WINDOW: B0 the ship-image build (while production serves), X0, A1 the audited attach of the candidate's twin (STOP), T1A and T1B the timed pair at one, two and four live seats, the
+                   governor's own shape (prefill_few_decoders), eight beside them and agent_turns (the main judge), R1 and R2 the restore pair (a returning session evicted to the host tier and restored: the
+                   threaded upload's own test), T2A and T2B the production-load pair on agent_turns8 (optional), Z.
   ORDER-SHIP.txt   AFTER THE GATES (and the owner's reading of them): SR the platform replay of the candidate on the B0 image. There is no B1: B0 already baked the ship profile.
 
-Every minute below is an ESTIMATE from the 2026-10-21 ship-6 window's jobs (X0 1, A1 61, T1A and T1B 18 each, T2A and T2B 15 each) and, for A2, R1 and R2, from the upload-1 and prefill-3 packs' own estimates; the card decides.
+Every minute below is an ESTIMATE from the 2026-10-21 ship-6 window's jobs (X0 1, A1 61, T1A and T1B 18 each, T2A and T2B 15 each) and, for R1 and R2, from the upload-1 pack's own estimates; the card decides.
 """
 
 import argparse
@@ -36,17 +36,14 @@ IMAGE = 'tp4-s7-1'
 REPO, REVISION, SERVED, MODEL = s5jobs.REPO, s5jobs.REVISION, s5jobs.SERVED, s5jobs.MODEL
 SHIP6 = s6.SHIP                         # the ship-6 profile: the control of every pair (approved 2026-10-21, about to ship)
 SHIP7 = twins.SHIP                      # the candidate (a traffic profile; the window image bakes it as the serving default)
-AUDIT = twins.AUDIT                     # the audited twin of the candidate for the traced buckets 128 and 1,024
-AUDIT_MID = twins.AUDIT_MID             # the same for the buckets 256 and 512
-# the audited attach: ship 6's A1 tests (the live counts WC acts at, the governor's shape, the drain through every live count, the octo rounds, the agent sessions: about seventy returning-turn tails in agent_turns)
+AUDIT = twins.AUDIT                     # the audited twin of the candidate
+# the audited attach: ship 6's A1 tests (the live counts WC acts at, the governor's shape, the drain through every live count, the octo rounds, the agent sessions with their returning turns)
 A1_TESTS = s6jobs.A1_TESTS
-# the second audited attach: only what the other two buckets need (returning turns of agent_turns put tails of every size through the traced pass)
-A2_TESTS = 'warmup,coding,concurrent8_steady,agent_turns'
 T1_TESTS = s6jobs.T1_TESTS
 T2_TESTS = s6jobs.T2_TESTS
 RESTORE_PLAN, RESTORE_CONTROL_PLAN = 'tier-upload-timed', 'tier-upload-timed-control'
-MINUTES = {'B0': 40, 'X0': 1, 'A1': 61, 'A2': 41, 'T1A': 18, 'T1B': 18, 'R1': 45, 'R2': 45, 'T2A': 15, 'T2B': 15, 'Z': 5, 'SR': 25}
-BOX = {'A1': 110, 'A2': 80, 'T1A': 45, 'T1B': 45, 'R1': 90, 'R2': 90, 'T2A': 40, 'T2B': 40}
+MINUTES = {'B0': 40, 'X0': 1, 'A1': 61, 'T1A': 18, 'T1B': 18, 'R1': 45, 'R2': 45, 'T2A': 15, 'T2B': 15, 'Z': 5, 'SR': 25}
+BOX = {'A1': 110, 'T1A': 45, 'T1B': 45, 'R1': 90, 'R2': 90, 'T2A': 40, 'T2B': 40}
 ORDERS = ('ORDER.txt', 'ORDER-SHIP.txt')
 TEST_MINUTES = s6jobs.TEST_MINUTES
 
@@ -71,18 +68,12 @@ LEDGER_READ = ("LEDGER TRIM (QWEN_FAST_ADMISSION_LEDGER_TRIM=1, the candidate on
 LOOKUP_READ = ("LOOKUP (QWEN_FAST_LOOKUP_DRAFT=n3m12, the first card run of the lookup anywhere): \"[LOOKUP-DRAFT] engaged policy=n3m12\" per rebound request (build_ms in it: the index build runs on the step thread and "
                "stalls every decoding seat; about 0.07 s at the 32,768-token cap, ESTIMATE) and a \"[LOOKUP-ROUND]\" line per user per round. The target verifies every row, so the answers must be EQUAL to the control's; "
                "only the tokens a round commits can move. If the container log carries no engaged line the engine-core subprocess's output is not reaching it: say so, do not read the arm.")
-TAIL_READ = ("TRACED TAILS (QWEN_FAST_PREFILL_TAIL_TRACE=1, buckets 128, 256, 512 and 1,024, arena 320 MB a chip): \"[PINDIAG] prefill tail trace engaged ... uncovered=0\" once (the hole census), \"[PF3] tail mode=traced bucket=.. "
-             "valid=.. start=.. ms=..\" lines for the returning turns' tails; in the audited twins \"prefill tail trace audit n=.. exact=True\" for every audited tail and NO \"audit mismatch\" (a mismatch names the claim: layer <i> "
-             "recurrent state is C1 false, layer <i> conv window is C2 false, tap layer <i> rows the tap hand-off, the output rows the attention or K/V path); NO \"fell back\" line. python3 scripts/ci/pf3_report.py --headroom <container "
-             "log> --traces 2 prints the trace region left on the audited twins (114.8 MB free before the traces). The two audited twins audit two buckets each, A1 128 and 1,024 and A2 256 and 512: a bucket nobody audited is "
-             "not shipped (delete QWEN_FAST_PREFILL_TAIL_TRACE, or narrow QWEN_FAST_PREFILL_TAIL_TRACE_BUCKETS in the ship entry of scripts/ci/fusion-wp/S7.json, and rebuild). ESTIMATE: 110 to 170 ms off a tail pass, "
-             "60 ms a prompt on the production population.")
 INHERITED_READ = ("The ship-6 reads stand: " + s6jobs.WC_READ + " " + s6jobs.GOVERNOR_READ)
-NO_GO = ("NO-GO for the candidate: any text difference against the control, an audit mismatch, a latch or fall-back line of any of the five groups, a fall-back line beyond the octo block's one WC line, a floor violation "
+NO_GO = ("NO-GO for the candidate: any text difference against the control, an audit mismatch, a latch or fall-back line of any of the four groups, a fall-back line beyond the octo block's one WC line, a floor violation "
          "(a decode gap over 8 s), an allocator or admission failure, an eight-live window outside the boot-to-boot drift of the control, a loss in the restore pair, an errored or timed-out agent request. A failing lever is "
          "taken out by deleting its line from the ship entry of scripts/ci/fusion-wp/S7.json (and, for seed first and the ledger trim, from the waiver's levers) and regenerating (a new build): "
-         "QWEN_PREFIX_TIER_IO_THREADS with QWEN_PREFIX_TIER_VERIFY_THREADS, QWEN_FAST_ADMISSION_SEED_FIRST, QWEN_FAST_ADMISSION_LEDGER_TRIM, QWEN_FAST_LOOKUP_DRAFT, QWEN_FAST_PREFILL_TAIL_TRACE.")
-READS = ' '.join((UPLOAD_READ, SEED_READ, LEDGER_READ, LOOKUP_READ, TAIL_READ))
+         "QWEN_PREFIX_TIER_IO_THREADS with QWEN_PREFIX_TIER_VERIFY_THREADS, QWEN_FAST_ADMISSION_SEED_FIRST, QWEN_FAST_ADMISSION_LEDGER_TRIM, QWEN_FAST_LOOKUP_DRAFT.")
+READS = ' '.join((UPLOAD_READ, SEED_READ, LEDGER_READ, LOOKUP_READ))
 
 
 def agent_read_for(tests):
@@ -94,7 +85,7 @@ def rows():
     out = []
     out.append(dict(name='B0-ship-build', orders=('w',), mode='stop', minutes=MINUTES['B0'], actions='build', profile=None, tests=None, telemetry=False, box=None, model=False,
                     extra=['C2_BAKE_DEFAULT_PROFILE=%s' % SHIP7, 'C2_BAKE_GRAFT=K64j-OQ'],
-                    why=('B0 (STOP): the WINDOW AND SHIP image %s, built from the pushed tp4/s7 head (the ship-6 stack plus the five groups of levers, each default off in its code) with the ship-7 candidate %s baked as the '
+                    why=('B0 (STOP): the WINDOW AND SHIP image %s, built from the pushed tp4/s7b head (the ship-6 stack plus the four groups of levers, each default off in its code) with the ship-7 candidate %s baked as the '
                          'serving default (ENV QWEN_C2_PROFILE) and THATCH_SERVING_SESSION_CAP baked as its max-num-seqs (8), plus C2_BAKE_GRAFT=K64j-OQ. REFUSED by c2_serving_job.read_bake and by build-c2-serving-image.sh while the '
                          'profile\'s owner_traffic_waiver has a decision that does not start with APPROVED: the owner\'s approval (conditional on this window\'s gates) is committed first (make_fusion_profiles.py --approve-ship '
                          '--ship traffic-s7), the CPU suite runs on that commit and the tag is pushed on THAT commit. The control %s is a profile of the file chosen by a job\'s C2_PROFILE, so one image serves both arms of every pair. '
@@ -106,22 +97,17 @@ def rows():
                          '(13x10 since the firmware unlock), no other window driver alive. The Swift weight cache exists on the card host: "weight cache ...: found" is the read of every smoke job below. Stop rule: anything else. '
                          'The owner stops the node agent and unserves production BEFORE it and restores production after Z with the cutover pack\'s own steps.')))
     out.append(dict(name='A1-s7-audited-attach', orders=('w',), mode='stop', minutes=MINUTES['A1'], actions='reset smoke', profile=AUDIT, tests=A1_TESTS, telemetry=True, box=BOX['A1'], model=True, extra=[],
-                    why=('A1 (EXACTNESS of the whole candidate, STOP): %s, the audited twin of the ship-7 candidate for the traced-tail buckets 128 and 1,024: every audit of the shipped stack (the K/V page writer, the verify T2 audit, the '
+                    why=('A1 (EXACTNESS of the whole candidate, STOP): %s, the audited twin of the ship-7 candidate: every audit of the shipped stack (the K/V page writer, the verify T2 audit, the '
                          'pre-stage audits, the multi-user SDPA launch, the vglue, conv-gates and octo-lever audits, the 13x10 grids, the host tier with every instrument on, the carry\'s audit, the hand-off\'s audit), W3 WC with its audit '
-                         'and the adaptive governor (all three passed their card gates in the ship-6 window) PLUS the threaded upload, seed first, the lookup and the traced tails with their audit, on Swift. The ledger trim is NOT in '
-                         'the twin (the audit\'s judge reads the ledger\'s points). Tests: warmup; coding; np1_live2 and np1_live4; prefill_few_decoders (the governor\'s shape, with traced tails of its own); concurrent8_drain (every '
-                         'live count from 8 to 1); concurrent8_steady (the octo rounds, required by the smoke check on this profile); agent_turns last (about seventy returning-turn tails, the audited traced pass\'s main food, and the '
-                         'returning sessions the host tier restores). READ: c2_smoke_check clean (its fusion, octo, grid13, WC, governor and traced-tail rules read the container log); every audit line exact=True with entries above 0; '
+                         'and the adaptive governor (all three passed their card gates in the ship-6 window) PLUS the threaded upload, seed first and the lookup, on Swift. The ledger trim is NOT in '
+                         'the twin (the audit\'s judge reads the ledger\'s points). Tests: warmup; coding; np1_live2 and np1_live4; prefill_few_decoders (the governor\'s shape); concurrent8_drain (every '
+                         'live count from 8 to 1); concurrent8_steady (the octo rounds, required by the smoke check on this profile); agent_turns last (about seventy returning turns, and the '
+                         'returning sessions the host tier restores). READ: c2_smoke_check clean (its fusion, octo, grid13, WC and governor rules read the container log); every audit line exact=True with entries above 0; '
                          'octo_judge.py --container-log <container log> --profile %s clean; NO "audit mismatch", NO "fell back" but the octo block\'s one WC line, NO "latched off", NO "kv shared", no stall. %s %s %s Then '
                          'python3 scripts/ci/sched_report.py <container log>. The audited profile holds about 2.6 GB more DRAM per chip than the unaudited one (the ship-5 and ship-6 windows\' A1 timed out three agent-turn reads on '
-                         'admission holds that T1B did not have; the owner accepted that for ships 5 and 6) and the traced tails\' arena (320 MB a chip, ESTIMATE) comes out of the same headroom: a hold line or a client timeout on '
-                         'this job is the audit\'s own weight, not the candidate\'s, and it is not a stop reason by itself. ANY audit mismatch, a latch, a refusal naming the arena, the census or the conv op, or a stall is NO-GO for '
+                         'admission holds that T1B did not have; the owner accepted that for ships 5 and 6): a hold line or a client timeout on '
+                         'this job is the audit\'s own weight, not the candidate\'s, and it is not a stop reason by itself. ANY audit mismatch, a latch, or a stall is NO-GO for '
                          'the group it names and halts the window. %s %s %s %s' % (AUDIT, AUDIT, READS, INHERITED_READ, agent_read_for(A1_TESTS), NO_GO, s5jobs.CHECKPOINT_READ, s5jobs.TELEMETRY, s5jobs.ARC))))
-    out.append(dict(name='A2-s7-audited-attach-mid', orders=('w',), mode='soft', minutes=MINUTES['A2'], actions='reset smoke', profile=AUDIT_MID, tests=A2_TESTS, telemetry=True, box=BOX['A2'], model=True, extra=[],
-                    why=('A2 (EXACTNESS of the other two traced buckets): %s, the audited twin for the buckets 256 and 512 (the trace region has room for two traces a twin on the audited stack), otherwise A1\'s twin. Tests: warmup; '
-                         'coding; concurrent8_steady (required by the smoke check on this profile); agent_turns (the returning turns put tails of every size through the audited traced pass). READ: as A1 for the traced tails\' lines (%s) with the buckets named 256 and 512, c2_smoke_check clean, '
-                         'no "audit mismatch", no "fell back", no "latched off". A mismatch here does not halt the window: the buckets 256 and 512 are then NOT shipped (narrow QWEN_FAST_PREFILL_TAIL_TRACE_BUCKETS to 128,1024 in the '
-                         'ship entry and rebuild); T1B has traced them already, so read its answers against the control before the rebuild. %s %s %s %s' % (AUDIT_MID, TAIL_READ, agent_read_for(A2_TESTS), s5jobs.CHECKPOINT_READ, s5jobs.TELEMETRY, s5jobs.ARC))))
     for letter, role, profile, tests, minutes, box, what in (
             ('T1A', 's6-control', SHIP6, T1_TESTS, MINUTES['T1A'], BOX['T1A'], 'CONTROL'),
             ('T1B', 's7-candidate', SHIP7, T1_TESTS, MINUTES['T1B'], BOX['T1B'], 'CANDIDATE'),
@@ -137,9 +123,9 @@ def rows():
                      '--profile %s (an ABAB reader fed one boot a side: each smoke is passed twice, the boot-to-boot floors read exactly 1; a LOSS of 2 to 5 percent at a parity row is boot noise until a second pair says otherwise) '
                      'and python3 scripts/ci/octo_compare.py --control <T1A smoke> --octo <T1B smoke> --octo-container <T1B container> --profile %s (every answer equal, user by user), python3 scripts/ci/agent_turns.py '
                      'report on both legs side by side (the per-turn answer hashes EQUAL; the returning-turn first token p50 and p90 against the control, the ship-6 window\'s T1B being the baseline), python3 scripts/ci/sched2_report.py '
-                     '<T1B container> and python3 scripts/ci/pf3_report.py --control <T1A smoke> --arm <T1B smoke> (the traced tails\' saving). %s %s' % (
+                     '<T1B container>. %s %s' % (
                          '' if what == 'CONTROL' else ' (T1B)', '' if what == 'CONTROL' else ' and octo_judge.py clean on the candidate\'s log', SHIP7, SHIP7,
-                         ('The control logs none of the five groups\' lines (the smoke check fails a line on a profile that does not ask for it).' if what == 'CONTROL' else READS + ' ' + INHERITED_READ), NO_GO if what == 'CANDIDATE' else ''))
+                         ('The control logs none of the four groups\' lines (the smoke check fails a line on a profile that does not ask for it).' if what == 'CONTROL' else READS + ' ' + INHERITED_READ), NO_GO if what == 'CANDIDATE' else ''))
         else:
             body = ('Tests: concurrent8_steady (the octo rounds, required by the smoke check) and agent_turns8 (EIGHT sessions of the agent_turns plan, every seat busy). OPTIONAL: it runs when the window has the minutes. %s' % s6jobs.AGENT_READ)
             reads = ('READ: c2_smoke_check clean on both legs; python3 scripts/ci/agent_turns.py report --test agent_turns8 on each leg side by side; the answer hashes equal; no LOSS of the candidate against the control '
@@ -165,13 +151,13 @@ def rows():
                          'B0 image (C2_PLATFORM_IMAGE=local:thin-layer: the step reads the image name from a file the operator writes on the runner; it is never committed). The replay sets no profile, so it boots the ship profile BY THE '
                          'IMAGE DEFAULT, which is why it needs the baked B0 image and so the APPROVED decision. The replay needs the recorded source image present on the rig host (c2_platform_replay.source_problem); the image name stays '
                          'out of this file. READ the vLLM subprocess log: \'[QWEN-C2] profile %s: vLLM argv\', the OWNER TRAFFIC WAIVER line, the P150x4 mesh, admission passed with no UNQUALIFIED admission line and no 262k evidence '
-                         'waiver, prefix installed, the host tier upload line, the Lever N install line and the governor\'s, the admission pipeline install line, the parked build line, WC\'s engaged line, the lookup\'s and the traced '
-                         'tails\' engaged lines, every op-fusion lever\'s engaged line, the :tt alias before and after the restart, and no kill-switch line. PASS: \'PLATFORM_REPLAY passed=True\'. The replay runs the base checkpoint '
+                         'waiver, prefix installed, the host tier upload line, the Lever N install line and the governor\'s, the admission pipeline install line, the parked build line, WC\'s engaged line, the lookup\'s engaged line, '
+                         'every op-fusion lever\'s engaged line, the :tt alias before and after the restart, and no kill-switch line. PASS: \'PLATFORM_REPLAY passed=True\'. The replay runs the base checkpoint '
                          '(the replay step does not forward the selection); production picks Swift from its node environment. Measured basis for the estimate: 25 minutes.' % SHIP7)))
     out.append(dict(name='Z-reset', orders=('w',), mode='soft', minutes=MINUTES['Z'], actions='status reset', profile=None, tests=None, telemetry=False, box=None, model=False, extra=[],
                     why=('Z: the window\'s end: status and an all-four reset, no agent start (the cards stay under development). The owner restores the ARC runner sets to their normal scale, then production: card reset, link '
                          'measurement, topology republish, agent restart, deploy and the post-checks. Nothing in this window touched production\'s image, profile, alias or cache.')))
-    order = ('B0', 'X0', 'A1', 'A2', 'T1A', 'T1B', 'R1', 'R2', 'T2A', 'T2B', 'SR', 'Z')
+    order = ('B0', 'X0', 'A1', 'T1A', 'T1B', 'R1', 'R2', 'T2A', 'T2B', 'SR', 'Z')
     return sorted(out, key=lambda row: order.index(row['name'].split('-')[0]))
 
 
@@ -213,11 +199,11 @@ def totals(table):
 
 COMMON_FORMAT = s6jobs.COMMON_FORMAT
 
-CANDIDATE = ("# THE CANDIDATE (docs/tp4-s7.md): %s, a TRAFFIC profile under ONE owner traffic waiver (id %s, decision %s) = the ship-6 profile %s (the control of every pair) plus five groups of levers, "
+CANDIDATE = ("# THE CANDIDATE (docs/tp4-s7.md): %s, a TRAFFIC profile under ONE owner traffic waiver (id %s, decision %s) = the ship-6 profile %s (the control of every pair) plus four groups of levers, "
              "each one line of its ship entry: the host tier's threaded upload (QWEN_PREFIX_TIER_IO_THREADS=4, QWEN_PREFIX_TIER_VERIFY_THREADS=4), admission pipelining (QWEN_FAST_ADMISSION_SEED_FIRST=1), the memory-ledger trim "
-             "(QWEN_FAST_ADMISSION_LEDGER_TRIM=1), prompt lookup beside engine reuse (QWEN_FAST_LOOKUP_DRAFT=n3m12) and the traced masked tails (QWEN_FAST_PREFILL_TAIL_TRACE=1). Its audited twins are %s (traced buckets 128 and 1,024) "
-             "and %s (256 and 512). LEFT OUT and default off: the hold reuse, the K-split of the tail passes (a numerics waiver of its own), the tree verify and the lookup shadow. ESTIMATES (nothing here has run on a card): "
-             "a returning turn's first token p50 1.46 s to about 1.1 s (seed first, the traced tails), +3 percent tokens a second from the lookup, a 254k restore from about 1 s to 0.4 to 0.6 s.")
+             "(QWEN_FAST_ADMISSION_LEDGER_TRIM=1) and prompt lookup beside engine reuse (QWEN_FAST_LOOKUP_DRAFT=n3m12). Its audited twin is %s. LEFT OUT and default off: the traced masked tails (QWEN_FAST_PREFILL_TAIL_TRACE: "
+             "tp4/s7's audited attaches died at engine start on a device read inside the trace capture), the hold reuse, the K-split of the tail passes (a numerics waiver of its own), the tree verify and the lookup shadow. "
+             "ESTIMATES (nothing here has run on a card): a returning turn's first token p50 1.46 s to about 1.19 s (seed first), +3 percent tokens a second from the lookup, a 254k restore from about 1 s to 0.4 to 0.6 s.")
 
 
 def decision_word():
@@ -234,37 +220,35 @@ def render_order_window(table):
         "placeholder: B0 builds it from the pushed tp4/s7 head WITH the K64j-OQ graft AND THE CANDIDATE BAKED AS THE SERVING DEFAULT, so the window's image is the ship image) and ONE window. The control of every pair is the ship-6 "
         "profile %s on the same image." % (SHIP7, REPO, REVISION[:12], IMAGE, SHIP6),
         COMMON_FORMAT,
-        CANDIDATE % (SHIP7, waiver_id(), decision_word(), SHIP6, AUDIT, AUDIT_MID),
+        CANDIDATE % (SHIP7, waiver_id(), decision_word(), SHIP6, AUDIT),
         "# WHAT THIS DECIDES (the owner's, never the window's): whether the candidate goes to production in place of the ship-6 profile. The owner approved the ship conditionally (\"Yes approve s7 if it passes\"); the "
-        "waiver's decision sentence records the conditions. A1 A2 are the exactness gates of the five groups with every audit of the shipped stack; T1A T1B time the candidate against ship 6 at one, two and four live seats, on "
+        "waiver's decision sentence records the conditions. A1 is the exactness gate of the four groups with every audit of the shipped stack; T1A T1B time the candidate against ship 6 at one, two and four live seats, on "
         "the governor's shape, with eight beside them and on agent_turns (the main judge); R1 R2 are the restore pair; T2A T2B repeat the comparison at the production load (agent_turns8) and are optional. Every result is UNQUALIFIED.",
         "# ESTIMATES OF THE TESTS (minutes inside a boot; the card decides): %s. A boot is 12 to 15 minutes before the first test." % ', '.join('%s %d' % pair for pair in TEST_MINUTES),
-        "# THE NEW DEVICE FACTS (first on a card here): the threaded upload, seed first, the ledger trim, the lookup and the traced tails have never run on a card, alone or together, audited or not; the traced tails are a "
-        "trace-replay lever with the 'holes' hazard of docs/tp4-traced-publish.md section 5 (the arena and the census are the mitigation; a stall or a corrupt later allocation is the failure to look for) and they compile "
-        "nothing new for the device (no new kernel); W3 WC and the governor passed their card gates in the ship-6 window. A1 is the first card to run everything with every audit on; A2 the second half of the traced buckets; "
-        "T1B the first timed run of any of the five.",
+        "# THE NEW DEVICE FACTS (first on a card here): the threaded upload, seed first, the ledger trim and the lookup have never run on a card, alone or together, audited or not; they compile "
+        "nothing new for the device (no new kernel); W3 WC and the governor passed their card gates in the ship-6 window. A1 is the first card to run everything with every audit on; "
+        "T1B the first timed run of any of the four.",
     ] + s5jobs.COMMON_P0 + [
         "# ARC-ZERO A1 T2B",
         "# ARC PAUSE / RESTORE: the owner scales the rig's ARC runner sets to ZERO (minRunners and maxRunners 0, the normal values written down first, restored by the same patch with the old numbers) BEFORE A1 and restores them AFTER the "
         "last timed job that runs (R2, or T2B when the window has the minutes), i.e. around every audited boot (a model load under CI load has hit the platform's load timeout) and every timed job. B0, X0 and Z do not need the pause.",
-        "# THE JOBS, in value order (cut the window at a block end): GATES: X0 A1 A2 (%d min); DECODE PAIR: T1A T1B (%d min); RESTORE PAIR: R1 R2 (%d min); PRODUCTION LOAD: T2A T2B (%d min, optional); END: Z. "
+        "# THE JOBS, in value order (cut the window at a block end): GATES: X0 A1 (%d min); DECODE PAIR: T1A T1B (%d min); RESTORE PAIR: R1 R2 (%d min); PRODUCTION LOAD: T2A T2B (%d min, optional); END: Z. "
         "The core (X0 A1 T1A T1B Z) is %d minutes of cards. B0 is the build of the ship image and runs while production serves, so it is outside the card minutes."
-        % (MINUTES['X0'] + MINUTES['A1'] + MINUTES['A2'], MINUTES['T1A'] + MINUTES['T1B'], MINUTES['R1'] + MINUTES['R2'], MINUTES['T2A'] + MINUTES['T2B'], core),
+        % (MINUTES['X0'] + MINUTES['A1'], MINUTES['T1A'] + MINUTES['T1B'], MINUTES['R1'] + MINUTES['R2'], MINUTES['T2A'] + MINUTES['T2B'], core),
         "# DEPENDENCIES (machine-greppable): '# NEEDS <jobs> <- <jobs>' means the jobs on the left run only if every job on the right completed and passed its READ rule; otherwise the driver skips them.",
     ]
-    for need in ('X0 <- B0', 'A1 <- X0', 'A2 <- A1', 'T1A <- A1', 'T1B <- T1A', 'R1 <- T1B', 'R2 <- R1', 'T2A <- T1B', 'T2B <- T2A'):
+    for need in ('X0 <- B0', 'A1 <- X0', 'T1A <- A1', 'T1B <- T1A', 'R1 <- T1B', 'R2 <- R1', 'T2A <- T1B', 'T2B <- T2A'):
         lines.append('# NEEDS ' + need)
     lines += [
-        "# READ RULES (each also needs c2_smoke_check clean, whose fusion, octo, grid13, exact-resume, WC, governor and traced-tail rules read the container log, and no stall; the templates' own headers have the whole text):",
+        "# READ RULES (each also needs c2_smoke_check clean, whose fusion, octo, grid13, exact-resume, WC and governor rules read the container log, and no stall; the templates' own headers have the whole text):",
         "#   B0   'baking the serving default %s with a session cap of 8', the provenance report with no problem line, its K64j-OQ graft line, the image id." % SHIP7,
         "#   X0   four cards present and healthy, the fabric as measured, the 13x10 grid in the run, no other window driver alive; the Swift weight cache found.",
         "#   A1   (STOP) every audit line exact=True with entries above 0, octo_judge.py clean under %s, WC's engaged and audit lines (the octo block's one 'fell back reason=8 users' line is the design), the governor's install line and "
-        "adaptive fields, the upload line and no latch, the admission pipeline install line, the lookup's engaged lines, the traced tails' engaged line (uncovered=0) and audit lines exact=True for the buckets 128 and 1,024, "
+        "adaptive fields, the upload line and no latch, the admission pipeline install line, the lookup's engaged lines, "
         "agent_turns judged (no errored or timed-out request but the audit's own three; reuse on at least 90%% of the returning turns), no 'audit mismatch', no other 'fell back', no 'kv shared', sched_report.py read. ANY other "
         "failure is NO-GO and halts the window." % AUDIT,
-        "#   A2   (soft) the same traced-tail reads for the buckets 256 and 512; a failure narrows the buckets and rebuilds, it does not halt the window.",
         "#   T1A T1B   c2_smoke_check clean on both; np1_report.py (no LOSS at np1_live1, np1_live2, np1_live4), prefill_ladder_report.py --second (the cold arrival's first-token ratio B over A, the decoders' longest gaps, the answer "
-        "hashes equal), octo_compare.py (every answer equal), agent_turns.py report on both legs side by side (the main judge), sched2_report.py and pf3_report.py on the candidate's log.",
+        "hashes equal), octo_compare.py (every answer equal), agent_turns.py report on both legs side by side (the main judge), sched2_report.py on the candidate's log.",
         "#   R1 R2   the tier-upload-timed plans PASS each (every returning answer IDENTICAL to its cold twin), then upload_restore_compare.py: the restore ms down at 128k and 254k, the returning TTFT not up beyond the floor.",
         "#   T2A T2B   (OPT) c2_smoke_check clean on both; agent_turns.py report --test agent_turns8 side by side; no LOSS outside the boot-to-boot drift.",
         "# " + NO_GO,
@@ -287,7 +271,7 @@ def render_order_ship(table):
         "# THE JOB: PLATFORM REPLAY: SR (%d min)." % MINUTES['SR'],
         "# DEPENDENCIES (machine-greppable): none: SR needs the image B0 built and the gates read.",
         "# READ RULES:",
-        "#   SR   'PLATFORM_REPLAY passed=True'; the lever reads of the template's header (the upload, admission pipeline, governor, WC, lookup and traced-tail lines).",
+        "#   SR   'PLATFORM_REPLAY passed=True'; the lever reads of the template's header (the upload, admission pipeline, governor, WC and lookup lines).",
         "# Time (estimate, minutes): %s: %d minutes (%d h %d min) in all, %d minutes of cards." % (', '.join('%s %d' % (name, row['minutes']) for name, row in zip(names, table)), total, total // 60, total % 60, cards),
     ]
     lines += ['%s %s %s %d' % (row['name'], row['mode'], IMAGE, row['minutes']) for row in table]
