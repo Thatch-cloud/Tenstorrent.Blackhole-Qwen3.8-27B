@@ -793,6 +793,40 @@ def sched_problems(profile):
     return problems
 
 
+# tp4/sched-2 (docs/tp4-sched2.md; admission_pipeline.py): admission pipelining and the memory-ledger trim. Three switches and the hold's three knobs, all gate arms until the owner decides: a
+# traffic profile carries none of them, whatever its waiver names. Strict, and the same arithmetic as admission_pipeline.problems() (the profile reads its own env here, the process reads
+# its own there; test_sched2_pipeline pins the two to the same verdicts).
+SCHED2_SWITCHES = ('QWEN_FAST_ADMISSION_SEED_FIRST', 'QWEN_FAST_ADMISSION_HOLD_REUSE', 'QWEN_FAST_ADMISSION_LEDGER_TRIM')
+SCHED2_HOLD_KNOBS = {'QWEN_FAST_ADMISSION_HOLD_REUSE_MAX_AGE_MS': (100, 60000), 'QWEN_FAST_ADMISSION_HOLD_REUSE_MAX_REUSES': (1, 16),
+                     'QWEN_FAST_ADMISSION_HOLD_REUSE_DRIFT_MB': (16, 1024)}
+
+
+def sched2_problems(profile):
+    """Every way the profile sets the tp4/sched-2 switches wrongly, [] when none: a value that is not 0 or 1, a knob outside its range or without the hold's switch, a switch without what it rides
+    on (the hold needs the extent replay, seed first engine reuse, the lean admission and Lever N), or any of them in a profile that serves traffic."""
+    env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
+    problems = []
+    for name in SCHED2_SWITCHES:
+        value = env.get(name)
+        if value is not None and value not in ('0', '1'):
+            problems.append('%s must be 0 or 1, got %r' % (name, value))
+        elif value == '1' and not gate_profile(profile):
+            problems.append('%s=1 is a gate arm (docs/tp4-sched2.md: it changes when work happens at an admission, and no card has run it) and needs a gate-only profile' % name)
+    for name, (low, high) in sorted(SCHED2_HOLD_KNOBS.items()):
+        value = env.get(name)
+        if value is None:
+            continue
+        if not value.isascii() or not value.isdigit() or not low <= int(value) <= high:
+            problems.append('%s must be a whole number from %d to %d in plain digits, got %r' % (name, low, high, value))
+        if env.get('QWEN_FAST_ADMISSION_HOLD_REUSE') != '1':
+            problems.append('%s is set without QWEN_FAST_ADMISSION_HOLD_REUSE=1: it would be ignored' % name)
+    if env.get('QWEN_FAST_ADMISSION_HOLD_REUSE') == '1' and env.get('QWEN_FAST_EXTENT_REPLAY') != '1':
+        problems.append('QWEN_FAST_ADMISSION_HOLD_REUSE=1 needs QWEN_FAST_EXTENT_REPLAY=1: the DRAM hold it reuses is registered only there')
+    if env.get('QWEN_FAST_ADMISSION_SEED_FIRST') == '1':
+        problems += ['QWEN_FAST_ADMISSION_SEED_FIRST=1 needs %s=1' % name for name in ('QWEN_FAST_PARKED_ENGINES', 'QWEN_FAST_ADMISSION_LEAN', 'QWEN_FAST_LEVER_N') if env.get(name) != '1']
+    return problems
+
+
 def parked_problems(profile, environ=None):
     """Every way engine reuse is set without what it needs, [] when none: the switch is the fast path's (qwen_fast_t16), the four-card mesh's
     and a gate-only profile's (nothing serves traffic on it until its exactness, lifecycle, memory and hang gates have run), and needs the S2
@@ -1939,6 +1973,9 @@ def boot(environ=None, orig_argv=None):
     problems = sched_problems(profile)
     if problems:
         raise ValueError('profile %s misuses the tp4/sched-1 switches: %s' % (profile['name'], '; '.join(problems)))
+    problems = sched2_problems(profile)
+    if problems:
+        raise ValueError('profile %s misuses the tp4/sched-2 switches: %s' % (profile['name'], '; '.join(problems)))
     problems = octo_problems(profile, environ)
     if problems:
         raise ValueError('profile %s cannot serve octo-T8: %s' % (profile['name'], '; '.join(problems)))

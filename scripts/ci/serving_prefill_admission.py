@@ -598,6 +598,10 @@ def note_reading(request_id, detail, clock=time.monotonic):
         return
     _LEAN_READINGS.pop(request_id, None)
     _LEAN_READINGS[request_id] = dict(at=clock(), free=free, largest_free=largest, trace_largest_free=detail.get('trace_largest_free'))
+    if detail.get('read_at') is not None:
+        # QWEN_FAST_ADMISSION_HOLD_REUSE (admission_pipeline): the hold used an older reading. Its age counts from the allocator read, and the admissions since it are an
+        # allowance of their own on top of the prefill's (extra_allowance, bytes per chip off both the free total and the largest block).
+        _LEAN_READINGS[request_id].update(at=detail['read_at'], extra=int(detail.get('extra_allowance', 0)))
     while len(_LEAN_READINGS) > LEAN_READINGS_KEPT:
         _LEAN_READINGS.pop(next(iter(_LEAN_READINGS)))
 
@@ -616,7 +620,8 @@ def reusable_reading(request_id, need, reserve, *, trace_need=None, clock=time.m
         return None
     if clock() - kept['at'] > LEAN_READING_MAX_AGE_S:
         return None
-    free, largest = kept['free'] - LEAN_ALLOWANCE_BYTES, kept['largest_free'] // 2 - LEAN_ALLOWANCE_BYTES
+    extra = kept.get('extra', 0)
+    free, largest = kept['free'] - LEAN_ALLOWANCE_BYTES - extra, kept['largest_free'] // 2 - LEAN_ALLOWANCE_BYTES - extra
     if free < 0 or largest < 0:
         return None
     wanted = TRACE_CONTIGUOUS_BYTES if trace_need is None else trace_need
@@ -628,7 +633,28 @@ def reusable_reading(request_id, need, reserve, *, trace_need=None, clock=time.m
     return kept
 
 
-def dram_predicate(pool, reserve, parked=None):
+def reading_clears(request_id, need, reserve, *, trace_need=None, clock=time.monotonic):
+    """Whether the reading kept for `request_id` would let its post-prefill backstop skip the allocator read for `need` (reusable_reading's rule), WITHOUT using it up: the seed-first lever
+    (admission_pipeline.SeedFirst) asks it for the cold fallback's need before it lets a token go out ahead of the bind, so that a refusal cannot be raised after it. False when nothing was kept."""
+    kept = _LEAN_READINGS.get(request_id)
+    if kept is None or not lean_enabled():
+        return False
+    if clock() - kept['at'] > LEAN_READING_MAX_AGE_S:
+        return False
+    extra = kept.get('extra', 0)
+    free, largest = kept['free'] - LEAN_ALLOWANCE_BYTES - extra, kept['largest_free'] // 2 - LEAN_ALLOWANCE_BYTES - extra
+    if free < 0 or largest < 0:
+        return False
+    wanted = TRACE_CONTIGUOUS_BYTES if trace_need is None else trace_need
+    if wanted > 0 and kept['trace_largest_free'] is None:
+        return False
+    return not split_short(free, largest, need, reserve, kept['trace_largest_free'], trace_need=trace_need)
+
+
+HOLD_REUSE_FLAG = 'QWEN_FAST_ADMISSION_HOLD_REUSE'     # admission_pipeline.HOLD_FLAG, duplicated so that an admission without it imports nothing (the test pins them equal)
+
+
+def dram_predicate(pool, reserve, parked=None, signature=None):
     """The predicate the worker registers, admits(prompt_tokens) -> (ok, detail): ok is False only when the
     pool's reading exists and is short of a term of THE SPLIT for dram_need, its contiguous term the admission's
     (admission_contiguous_need: the prefill transient in the block for a long prompt), detail['short'] naming them.
@@ -638,7 +664,11 @@ def dram_predicate(pool, reserve, parked=None):
     `parked` (engine reuse, QWEN_FAST_PARKED_ENGINES=1 only; None otherwise, and then every call is today's): a zero-argument callable asked at
     each call - serving_parked_engines.ParkedEngineSet.arrival_terms - answering None when the next request's slot is served by today's
     per-request build (today's terms), else dict(rebind=, single=, credit=) for its parked engine: THE PARKED TERMS (parked_need,
-    parked_trace_need) with the ladder's credit on the free term, detail['parked'] then carrying them."""
+    parked_trace_need) with the ladder's credit on the free term, detail['parked'] then carrying them.
+
+    `signature` (QWEN_FAST_ADMISSION_HOLD_REUSE=1 only): a zero-argument callable, admission_pipeline.parked_signature of the parked set, naming what must not have changed between a
+    reading and its reuse. With the switch on, a hold takes the allocator reading from admission_pipeline.hold_reading (a recent one when it clears the same terms after a drift allowance,
+    else a real one), and detail then carries read_at, reuses and extra_allowance for the backstop's reuse (note_reading). With it off every call is what it was."""
     _reserve(reserve)
     if parked is not None and not callable(parked):
         raise ValueError('The parked arrival terms must be a zero-argument callable or None')
@@ -649,7 +679,18 @@ def dram_predicate(pool, reserve, parked=None):
             need = dram_need(prompt_tokens, reserve)
         else:
             need = parked_need(prompt_tokens, reserve, rebind=terms['rebind'], single=terms['single'])
-        reading, reason = dram_reading(pool)
+        reuse = None
+        if os.environ.get(HOLD_REUSE_FLAG) == '1':
+            import admission_pipeline
+
+            def short_of(candidate):
+                return split_short(candidate['free'], candidate['largest_free'], need, reserve, candidate['trace_largest_free'],
+                                   contiguous=admission_contiguous_need(prompt_tokens, reserve),
+                                   **({} if terms is None else dict(trace_need=parked_trace_need(terms['single']), credit=terms.get('credit', 0))))
+
+            reading, reason, reuse = admission_pipeline.hold_reading(pool, dram_reading, short_of, signature, prompt_tokens)
+        else:
+            reading, reason = dram_reading(pool)
         if reading is None:
             return True, dict(largest_free=None, need=need, unavailable=reason, **({} if terms is None else dict(parked=terms)))
         short = split_short(reading['free'], reading['largest_free'], need, reserve, reading['trace_largest_free'],
@@ -658,7 +699,9 @@ def dram_predicate(pool, reserve, parked=None):
                                                              credit=terms.get('credit', 0))))
         return not short, dict(largest_free=reading['largest_free'], need=need, free=reading['free'],
                                trace_largest_free=reading['trace_largest_free'], short=short,
-                               **({} if terms is None else dict(parked=terms)))
+                               **({} if terms is None else dict(parked=terms)),
+                               **({} if reuse is None else dict(read_at=reuse['read_at'], reuses=reuse['reuses'],
+                                                                extra_allowance=reuse['reuses'] * admission_pipeline.hold_state().drift)))
 
     return admits
 

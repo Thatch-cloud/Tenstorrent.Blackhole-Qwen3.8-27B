@@ -22,6 +22,7 @@ import make_s6_profiles as s6_twins  # noqa: E402
 import make_xe_profiles as xe_twins  # noqa: E402
 import make_pf2_profiles as pf2_twins  # noqa: E402
 import make_sched_profiles as sched_twins  # noqa: E402
+import make_sched2_profiles as sched2_twins  # noqa: E402
 import make_parked_profiles as parked  # noqa: E402
 import serving_c2_contract as contract  # noqa: E402
 import serving_octo as octo  # noqa: E402
@@ -158,7 +159,7 @@ class TwinTests(unittest.TestCase):
 class NoOtherProfileTests(unittest.TestCase):
     def test_no_other_profile_and_not_the_image_names_a_flag(self):
         for name, profile in profiles().items():
-            if name in twins.twin_names() or name in octo2_twins.twin_names() or name in octo3_twins.owned_names() or name in ship4_twins.owned_names() or name in np1_twins.twin_names() or name in s5_twins.owned_names() or name in s6_twins.owned_names() or name in xe_twins.twin_names() or name in pf2_twins.twin_names() or name in sched_twins.twin_names():     # the lever twins of tp4/octo-2 are octo twins plus their own flags; tp4/octo-3's are the fused stack's
+            if name in twins.twin_names() or name in octo2_twins.twin_names() or name in octo3_twins.owned_names() or name in ship4_twins.owned_names() or name in np1_twins.twin_names() or name in s5_twins.owned_names() or name in s6_twins.owned_names() or name in xe_twins.twin_names() or name in pf2_twins.twin_names() or name in sched_twins.twin_names() or name in sched2_twins.twin_names():     # the lever twins of tp4/octo-2 are octo twins plus their own flags; tp4/octo-3's are the fused stack's
                 continue
             with self.subTest(profile=name):
                 for flag in twins.LEVERS:

@@ -1224,6 +1224,9 @@ class ProfileTests(unittest.TestCase):
         import make_sched_profiles as twins_sched      # tp4/sched-1: the ship candidate / its audited twin plus one flag, so the same round-host flags (test_sched_profiles)
 
         combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_sched.twin_names()})
+        import make_sched2_profiles as twins_sched2      # tp4/sched-2: the ship-5 candidate / its audited twin plus the admission switches, so the same round-host flags (test_sched2_profiles)
+
+        combined.update({name: {SELECT, READ, KEYED, LEAN} | ({AUDIT} if name.endswith('-audit') else set()) for name in twins_sched2.twin_names()})
         for name, profile in data['profiles'].items():
             if name in self.ADDED:
                 continue

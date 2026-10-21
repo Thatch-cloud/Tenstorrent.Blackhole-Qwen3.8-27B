@@ -127,10 +127,11 @@ class ProtectedTests(unittest.TestCase):
         import make_s5_profiles
         import make_s6_profiles
         import make_sched_profiles
+        import make_sched2_profiles
 
         # (tp4/next-1 integrated this branch with the lone-user round's, prefill-2's and sched-1's twins and the ship-5 candidate and its audited twins)
         added = [name for name in added if name not in make_np1_profiles.twin_names() and name not in make_s5_profiles.owned_names() and name not in make_s6_profiles.owned_names() and name not in make_pf2_profiles.twin_names()
-                 and name not in make_sched_profiles.twin_names()]
+                 and name not in make_sched_profiles.twin_names() and name not in make_sched2_profiles.twin_names()]
         # (the other two are the ER package's own gate-only twins of the older combined arm, placed by make_fusion_profiles.py from fusion-wp/ER.json)
         self.assertEqual(sorted(name for name in added if name not in twins.NAMES), sorted(name for name in added if name.endswith(('-fx-all-er', '-fx-all-er-audit'))))
         self.assertEqual(len(added), 4)

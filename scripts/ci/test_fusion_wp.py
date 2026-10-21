@@ -181,6 +181,7 @@ class CheckedInTests(unittest.TestCase):
         import make_s6_profiles
         import make_xe_profiles
         import make_sched_profiles
+        import make_sched2_profiles
         import make_octo3_profiles
         import make_ship4_profiles
 
@@ -188,7 +189,7 @@ class CheckedInTests(unittest.TestCase):
         self.assertFalse([name for name in profiles if name.startswith(gen.NAMESPACE) and name not in make_octo3_profiles.twin_names() and name not in make_ship4_profiles.twin_names()
                           and name not in make_np1_profiles.twin_names() and name not in make_s5_profiles.twin_names() and name not in make_s6_profiles.twin_names()
                           and name not in make_xe_profiles.twin_names()
-                          and name not in make_sched_profiles.twin_names()])
+                          and name not in make_sched_profiles.twin_names() and name not in make_sched2_profiles.twin_names()])
         for name in ('smoke', 'overlay', 'cpu', 'addresses'):
             self.assertEqual(gen.outside(new[name]), gen.outside(texts[name]), name)
         self.assertEqual(block(new['smoke']), ['FUSION_LEVERS = (', ')', 'FUSION_AUDITS = (', ')', 'FUSION_RULES = (', ')'])
@@ -289,13 +290,14 @@ class EveryEntryLandsTests(unittest.TestCase):
         import make_s6_profiles
         import make_xe_profiles
         import make_sched_profiles
+        import make_sched2_profiles
         import make_octo3_profiles
         import make_ship4_profiles
 
         generated = [name for name in profiles if name.startswith(gen.NAMESPACE) and name not in make_octo3_profiles.twin_names() and name not in make_ship4_profiles.twin_names()
                      and name not in make_np1_profiles.twin_names() and name not in make_s5_profiles.twin_names() and name not in make_s6_profiles.twin_names()
                      and name not in make_xe_profiles.twin_names()
-                     and name not in make_sched_profiles.twin_names()]
+                     and name not in make_sched_profiles.twin_names() and name not in make_sched2_profiles.twin_names()]
         self.assertEqual(sorted(name[len(gen.BASE) + 1:] for name in generated), sorted(want))
         for suffix, env in want.items():
             twin = copy.deepcopy(profiles[gen.BASE + '-' + suffix])
