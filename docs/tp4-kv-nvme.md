@@ -7,7 +7,7 @@ Every effect in this note that is not a CPU measurement is labelled **ESTIMATE**
 
 ## 0. Owner decisions (2026-10-21) this build follows
 
-1. **Retention is for all tenants, for now.** No tenant allowlist. Keys still carry the tenant's cache salt (vLLM's chained block hash), so one tenant's blocks can never be named by another. **TTL 7 days** (`QWEN_PREFIX_NVME_TTL_S`, default 604,800), counted from the last use.
+1. **Retention is for all tenants, for now.** No tenant allowlist. Keys still carry the tenant's cache salt (vLLM's chained block hash), so one tenant's blocks can never be named by another. **TTL 1 day** (`QWEN_PREFIX_NVME_TTL_S`, default 86,400), counted from the last use. (The first ask was 7 days; the owner cut it to one day once the capacity table in section 8 showed a 1 TB drive holds about 2.3 days at the stated load.)
 2. **Seats are released at the end of a turn** (a separate change); the tiers are what keep a session's KV warm. So spilling to the NVMe has to be reliable when a session's KV leaves the card or the host tier, and there is a **write-through option** (`QWEN_PREFIX_NVME_SPILL=through`, default off, section 5) that puts a warm copy on the drive soon after a session goes idle. Its write rate is in section 8.
 3. **A zero-retention node must not run the tier by accident.** The tier refuses to start (a loud line and a counter; the engine serves without it) when the process sees a zero-retention signal, unless an explicit override says otherwise, and it always needs an explicit retention acknowledgement. Section 9.
 
@@ -46,7 +46,7 @@ Code: `scripts/ci/qwen_nvme_store.py` (the store), `scripts/ci/qwen_kv_nvme.py` 
 * **A put that fails.** Before the journal was touched nothing names the extents, so they are given back; once it was, a record may be on the media whatever the error says, so the extents are *not* given back until the next open rebuilds the allocator from the index (a surviving record must never name bytes something else has overwritten). The writer retries a failed batch once, then counts it; three failures in a row latch the NVMe level off.
 * **Format safety.** The store writes to a device only if it carries its own superblock, or its first MiB is all zero, or `QWEN_PREFIX_NVME_FORMAT=1` says to destroy whatever is there. A device with the store's magic and no valid superblock is *corrupt*, not blank. The device is locked exclusively (`flock`) while open: two engines on one namespace would corrupt it.
 * **Entries.** Kind (KV block / checkpoint), key (the host tier's block hash; the checkpoint's boundary block hash), extent, size, the tenant tag as an 8-byte blake2b (the tag itself never reaches the device), the chain (the prompt's first block hash), the index (block number / checkpoint position), created, last used, sha256 of the bytes, the layout fingerprint. About 160 bytes each.
-* **TTL, age, LRU, floor.** `QWEN_PREFIX_NVME_TTL_S` (default 7 days) is counted from the last use (a restore, or a re-spill of a held block); `..._MAX_AGE_S` (default off) is an absolute cap from the write, for a retention policy that must hold whatever the use. The LRU order is the order of last use (persisted by the snapshot and by TOUCH records at most once a minute). When the tier is full a put evicts the least recently used, never a pinned entry. The free-space floor (`..._FREE_FLOOR_BYTES`, default 5% of the data region) keeps contiguous room for the allocator and over-provisioning for the drive. `..._MAX_BYTES` caps the tier below the device.
+* **TTL, age, LRU, floor.** `QWEN_PREFIX_NVME_TTL_S` (default 1 day) is counted from the last use (a restore, or a re-spill of a held block); `..._MAX_AGE_S` (default off) is an absolute cap from the write, for a retention policy that must hold whatever the use. The LRU order is the order of last use (persisted by the snapshot and by TOUCH records at most once a minute). When the tier is full a put evicts the least recently used, never a pinned entry. The free-space floor (`..._FREE_FLOOR_BYTES`, default 5% of the data region) keeps contiguous room for the allocator and over-provisioning for the drive. `..._MAX_BYTES` caps the tier below the device.
 * **Deletion.** `delete_tenant` (one journal record), `wipe` (one record; the index is cleared wholesale), `drop_where` (the fingerprint sweep). Logical deletion is immediate and durable; the bytes stay on the media until they are overwritten. `QWEN_PREFIX_NVME_DISCARD=1` asks the drive to discard (TRIM) freed extents.
 
 ## 3. Keys, the layout fingerprint, integrity
@@ -76,7 +76,7 @@ All default off; all strict (plain digits, no sign, no exponent, no space); a na
 | `QWEN_PREFIX_NVME` | off | `1` turns the tier on |
 | `QWEN_PREFIX_NVME_DEVICE` | - | the raw namespace (an absolute path); a regular file works for tests |
 | `QWEN_PREFIX_NVME_RETENTION_ACK` | - | **required** `1`: the operator confirms the owner's retention decision (all tenants, up to the TTL) and that this node does not advertise zero-retention (section 9) |
-| `QWEN_PREFIX_NVME_TTL_S` | 604800 | seconds since last use after which an object is gone (1 to 366 days) |
+| `QWEN_PREFIX_NVME_TTL_S` | 86400 | seconds since last use after which an object is gone (1 to 366 days) |
 | `QWEN_PREFIX_NVME_MAX_AGE_S` | 0 (off) | absolute cap, seconds since written |
 | `QWEN_PREFIX_NVME_MAX_BYTES` | 0 (all) | most bytes the tier holds (at least 1 MiB) |
 | `QWEN_PREFIX_NVME_FREE_FLOOR_BYTES` | 5% of the data region | bytes of the data region never used |
@@ -127,13 +127,14 @@ Sizes (measured on the cards, `docs/prefix-store-hygiene.md`): a KV block is 2,2
 
 **Capacity of a 1 TB namespace.** Metadata is 2 snapshot slots (device/2,048 = 488 MB each) + a journal (device/4,096 = 244 MB) + 8 KiB: 1.2 GB (0.12%). With the 5% floor about 950 GB of objects: **~430 average sessions** (~370,000 index entries, ~190 MB of host RAM for the index: ESTIMATE ~500 B per entry in CPython objects).
 
-**Retention is capacity-bound before it is TTL-bound.** At the specification's spill rate of ~416 GB/day (~190 average sessions a day):
+**At a 7-day TTL retention was capacity-bound; at the 1-day TTL it is TTL-bound.** At the specification's spill rate of ~416 GB/day (~190 average sessions a day):
 
 | spill rate (GB/day) | 100 | 136 | 200 | 416 | 800 |
 | --- | --- | --- | --- | --- | --- |
 | retention of the least recently used session (days) = min(7, 950 / rate) | 7 (9.5) | 7.0 | 4.7 | **2.3** | 1.2 |
+| the same at the 1-day TTL = min(1, 950 / rate) | 1 | 1 | 1 | **1** | 1 |
 
-To hold 7 days at 416 GB/day the namespace must be ~3.1 TB. At 1 TB the TTL is a ceiling the drive reaches only below ~136 GB/day (~62 average sessions a day); the real retention is "until the LRU gets to it".
+To hold 7 days at 416 GB/day the namespace must be ~3.1 TB. With the 1-day TTL (owner, 2026-10-21) a 1 TB namespace holds the full TTL up to ~950 GB/day, about 2.3 times the stated load, so the TTL, not the LRU, decides the retention.
 
 **Endurance.** 416 GB/day is ~152 TB a year. A 600 TBW consumer-class 1 TB drive: ~3.9 years; an enterprise 1 DWPD / 5 year drive (1,825 TBW): ~12 years. Write amplification inside the drive should stay near 1 to 1.3 (large sequential writes, whole-extent frees, 5% free floor, optional TRIM): 152 to 198 TB a year. Journal and snapshot writes are negligible (~30 MB/day of journal; a ~60 MB snapshot every few days).
 
@@ -153,7 +154,7 @@ To hold 7 days at 416 GB/day the namespace must be ~3.1 TB. At 1 TB the TTL is a
 
 **What is kept.** The drive holds KV derived from tenants' prompts (and the GDN state at 2,048-token boundaries, and drafter window rows): data that can in principle be turned back into text. It is plaintext on the media unless encrypted (below). Keys carry the tenant's salt; the tenant tag is stored as an 8-byte hash; no salt, tag or token is logged or exported.
 
-**Policy (owner decision 2026-10-21).** All tenants. TTL 7 days since the last use. There is no allowlist. An absolute cap (`..._MAX_AGE_S`) exists for a policy that must bound the age of the data whatever its use (open question 1). A tenant's data can be deleted by `NvmeTier.delete_salt(salt)` / `delete_tenant(tag)` (one durable journal record; admin thread) or a `tenant.<tag>` file in the command directory (gate only), the whole tier by `NvmeTier.wipe()` (also what a `reset_prefix_cache`, the prefix kill switch and the host tier's kill switch do). Deletion is logical and immediate; the bytes remain on the media until overwritten. `QWEN_PREFIX_NVME_DISCARD=1` issues TRIM, which the drive may honour late or not at all. Strong erasure is a crypto-erase or a full secure-erase of the namespace.
+**Policy (owner decision 2026-10-21).** All tenants. TTL 1 day since the last use (first 7 days, cut to 1 day for capacity). There is no allowlist. An absolute cap (`..._MAX_AGE_S`) exists for a policy that must bound the age of the data whatever its use (open question 1). A tenant's data can be deleted by `NvmeTier.delete_salt(salt)` / `delete_tenant(tag)` (one durable journal record; admin thread) or a `tenant.<tag>` file in the command directory (gate only), the whole tier by `NvmeTier.wipe()` (also what a `reset_prefix_cache`, the prefix kill switch and the host tier's kill switch do). Deletion is logical and immediate; the bytes remain on the media until overwritten. `QWEN_PREFIX_NVME_DISCARD=1` issues TRIM, which the drive may honour late or not at all. Strong erasure is a crypto-erase or a full secure-erase of the namespace.
 
 **The conflict.** A node whose agent holds an attestation key advertises `zero_retention` as a node label, gates no-retention work onto itself, and signs a teardown confirmation each time it destroys an inference container: *nothing survived*. A tier that keeps KV on a drive for days after the container is gone makes that statement false for any node it runs on.
 
@@ -218,11 +219,11 @@ About 380 minutes of cards after the build (D0 and B0 need none). Read rules: id
 
 ## 13. Open questions for the owner
 
-1. **TTL since last use, or an absolute age?** As built a session used daily lives as long as it is used. If the policy is "no prompt-derived data on a drive older than 7 days", set `..._MAX_AGE_S=604800`; a session older than that is then cold.
+1. **TTL since last use, or an absolute age?** As built a session used daily lives as long as it is used. If the policy is "no prompt-derived data on a drive older than a day", set `..._MAX_AGE_S=86400`; a session older than that is then cold.
 2. **Encryption at rest:** Opal for the namespace now (keeps P2P possible, no per-tenant shred) or software keys (per-tenant shred, no P2P)?
 3. **Host RAM:** the queue's 2 GiB and the index (~190 MB) are outside the 48 GiB budget. Accept, or shrink `QWEN_PREFIX_NVME_QUEUE_BYTES`?
 4. **`through` in production?** Its write cost is section 8; it is what makes a restart not lose the last hours. It is a flag, default off.
-5. **Capacity.** At 416 GB/day a 1 TB namespace retains ~2.3 days, not 7. Buy 3 TB, or accept "until the LRU gets to it"?
+5. **Capacity.** ANSWERED 2026-10-21: TTL 1 day, which a 1 TB namespace holds at up to ~950 GB/day. 7 days would need ~3.1 TB.
 6. **The code version in the fingerprint** empties the tier at every deploy. Pin it across KV-compatible images (needs a qualification record that says which images are), or accept?
 7. **Zero-retention placement.** The guard and the acknowledgement are in; the node agent forwarding `THATCH_ZERO_RETENTION=1` and the teardown attestation's wording are the platform's work.
 8. **Gate prerequisites** (section 12): who writes the runner's device mapping and the plan wiring, and which namespace the gate may format.
