@@ -44,7 +44,8 @@ import uuid
 import zlib
 
 ALIGN = 4096
-KV, CKPT = 1, 2
+KV = 1
+CKPT = 2
 KINDS = (KV, CKPT)
 MAX_KEY = 255
 HEADER_BYTES = 2 * ALIGN
