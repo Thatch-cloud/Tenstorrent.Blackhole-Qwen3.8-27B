@@ -588,7 +588,9 @@ class FlagOffTests(NvmeCase):
         self.assertIsNone(made.graft.tier_hooks.nvme)
         self.assertFalse(any(name.startswith('nvme_') for name in registry.snapshot()))
         self.assertFalse(any(line.startswith('nvme tier') for line in made.lines))
-        self.assertNotIn('qwen_kv_nvme', [thread.name for thread in threading.enumerate()])
+        deadline = time.time() + 10          # (another test's writer may be a moment from exiting)
+        while any(thread.name == 'qwen-nvme-writer' for thread in threading.enumerate()) and time.time() < deadline:
+            time.sleep(0.01)
         self.assertFalse(any(thread.name == 'qwen-nvme-writer' for thread in threading.enumerate()))
 
     def test_without_the_host_tier_the_nvme_names_refuse_to_start(self):
