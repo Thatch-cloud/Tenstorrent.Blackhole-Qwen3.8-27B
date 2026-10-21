@@ -35610,7 +35610,7 @@
           "tp4/prefill-1 and tp4/sched-1 (CPU): the adaptive governor against the flag-off scheduler (the whole log of two schedules compared with the flag off, the floor tests re-run with the policy in force, the two-cold-prompt and concurrent8_skew shapes replayed through the smoke check's alternation and floor rules, 200 seeded random schedules: the floor never broken and the share never below the control's; test_levern_policy, test_levern_prefix_scheduler); the timing-model estimates are NOT measurements",
           "tp4/s6 (CPU): the contract admits the governor switch on a traffic profile only under a waiver naming it, the profile is the ship-5 profile plus exactly WC and the governor (test_s6_profiles); what has NOT run: the governor on any card, WC in a timed run, both together, the S6 audited twin, the S6 timed pair (FD-style few-decoder pair and agent_turns / agent_turns8)"
         ],
-        "decision": "PENDING: the owner approves at ship time, after the S6 window gates (the audited attach of -s6-audit: 0 mismatches and no fall-back line but the octo decline; the few-decoder pair with identical answers and no floor violation; the production-shaped timed pair with no loss against the ship-5 control)"
+        "decision": "APPROVED 2026-10-21 by the owner, conditional on the S6 window gates: the audited attach of -s6-audit with 0 mismatches and no fall-back line but the octo decline; the few-decoder pair with identical answers and no floor violation; the production-shaped timed pair with no loss against the ship-5 control. The ship build is pushed only after those gates are read."
       }
     },
     "c2-packed-tp4-8x262k-ship-prefix-levern-w2-er-fx-traffic": {
