@@ -100,6 +100,8 @@ DRAFTER_ARMS = {
     'control': dict(manifest='dedf8df6', env=()),
     'b16-bf8': dict(manifest='b16-98759a49', env=(('QWEN_DRAFTER_MANIFEST', 'b16-98759a49'),)),
     'b32-bf8': dict(manifest='b32-fc65843b', env=(('QWEN_DRAFTER_MANIFEST', 'b32-fc65843b'),)),
+    # The served drafter fine-tuned on Swift-1.5's own greedy text with long-context sequences (v3): a LOCAL manifest, run with the Swift checkpoint keys.
+    'sw1ft3-bf8': dict(manifest='sw1-ft3-d35114a8', env=(('QWEN_DRAFTER_MANIFEST', 'sw1-ft3-d35114a8'),)),
     'dedf-bf16': dict(manifest='dedf8df6', env=(('QWEN_FAST_DRAFTER_BF16', '1'),)),
     # Prompt lookup (tp4/lookup, docs/tp4-lookup.md): the served drafter on the control image, with a host-side lookup over each user's own
     # token history replacing its proposal rows on the rounds the policy picks. The target verifies every row, so the text is the control's
@@ -1236,7 +1238,8 @@ def build_parser():
     parser.add_argument('--profiles', default=None, help='a profiles JSON instead of the image\'s own')
     parser.add_argument('--drafter-arm', choices=sorted(DRAFTER_ARMS), default=None,
                         help='which drafter this run serves (the image carries its fixtures): control (the served drafter), '
-                        'b16-bf8 (the block-16 candidate), b32-bf8 (the block-32 candidate, measurement only: used at T16, so positions 1-15) '
+                        'b16-bf8 (the block-16 candidate), b32-bf8 (the block-32 candidate, measurement only: used at T16, so positions 1-15), '
+                        'sw1ft3-bf8 (the Swift-1.5 long-context fine-tune of the served drafter; with --model-repo/--model-revision naming Swift), '
                         'dedf-bf16 (the served drafter with bfloat16 projection weights) or lookup (the served drafter with prompt lookup, '
                         'QWEN_FAST_LOOKUP_DRAFT=n3m12: the text is the control\'s, only tau moves). '
                         'A3 runs on the control arm only. Default: none, the lab as it was')

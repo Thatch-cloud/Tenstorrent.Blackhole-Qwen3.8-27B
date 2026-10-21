@@ -28,7 +28,7 @@ BASE = 'c2-packed-tp4'
 PARKED_GOOD = {'QWEN_FAST_ANY_REQUEST': '1', 'QWEN_FAST_EXTENT_REPLAY': '1', 'QWEN_FAST_PACKED_STEP': '1', 'QWEN_FAST_SHARED_CCL': '1',
                'QWEN_FAST_VERIFY_T1': '1', 'QWEN_FAST_TP': '4', 'QWEN_FAST_M3_REQUEST_WARM': '1', 'QWEN_FAST_M3_BLOCKS': '2',
                'QWEN_FAST_PARKED_ENGINES': '1'}
-CANDIDATE_IMAGES = {'b16-bf8': 'tp4-drafter-b16-1', 'b32-bf8': 'tp4-drafter-b32-1', 'dedf-bf16': 'tp4-drafter-1', 'lookup': 'tp4-drafter-1'}
+CANDIDATE_IMAGES = {'b16-bf8': 'tp4-drafter-b16-1', 'b32-bf8': 'tp4-drafter-b32-1', 'sw1ft3-bf8': 'tp4-s7-dr3', 'dedf-bf16': 'tp4-drafter-1', 'lookup': 'tp4-drafter-1'}
 
 
 class ArmProfileTests(unittest.TestCase):
@@ -546,7 +546,7 @@ class PairReportTests(unittest.TestCase):
             public = self.run_pair(*synthetic(gain=1.15), arm=arm)
             self.assertEqual((public['verdict'], set(public['gates'].values())), ('GO', {'PASS'}), arm)
             self.assertEqual(self.run_pair(*synthetic(gain=1.0), arm=arm)['verdict'], 'NO-GO', arm)
-        self.assertEqual(pair_report.CANDIDATE_ARMS, ('b16-bf8', 'b32-bf8', 'dedf-bf16', 'lookup'))
+        self.assertEqual(pair_report.CANDIDATE_ARMS, ('b16-bf8', 'b32-bf8', 'sw1ft3-bf8', 'dedf-bf16', 'lookup'))
         self.assertEqual(pair_report.SAME_IMAGE_ARMS, ('dedf-bf16', 'lookup'))
         self.assertEqual(sorted(pair_report.CANDIDATE_ARMS + ('control',)), sorted(lab.DRAFTER_ARMS))
         self.assertEqual(sorted(pair_report.CANDIDATE_ARMS + ('control',)), sorted(job.TAULAB_DRAFTER_ARMS))

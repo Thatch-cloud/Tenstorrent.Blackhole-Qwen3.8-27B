@@ -127,10 +127,10 @@ import json, sys
 entry = json.load(open(sys.argv[1], encoding='utf-8'))
 if entry.get('name') != sys.argv[2] or len(entry.get('revision', '')) != 40 or len(entry.get('config_sha256', '')) != 64:
     sys.exit('drafter manifest %s is incomplete' % sys.argv[2])
-print(entry['model'], entry['revision'], entry['config_sha256'])
+print(entry['model'], entry['revision'], entry['config_sha256'], entry.get('source', 'hub'))
 PY
   )
-  read -r drafter_model revision drafter_config_sha256 <<< "$drafter_fields"
+  read -r drafter_model revision drafter_config_sha256 drafter_source <<< "$drafter_fields"
   echo "drafter manifest $drafter: $drafter_model @ $revision"
   printf '%s\n' "$drafter" > "$ctx/fixture/DRAFTER_MANIFEST"
   # A candidate's fixtures are staged by drafter_stage.py (stage --manifest $drafter) into its own cache, never into the served
@@ -159,8 +159,13 @@ done
 for layer in 1 2 3 4; do
   cp -al "$fixtures/dflash2-stack-$revision/layer-$layer" "$ctx/fixture/layer-$layer"
 done
-curl -fsSL --max-time 30 "https://huggingface.co/$drafter_model/resolve/$revision/config.json" \
-  > "$ctx/draft-config/config.json"
+if [ "${drafter_source:-hub}" = local ]; then
+  # A drafter trained here has no hub repository: its config is the committed file (references/drafter-configs), pinned by the same sha256 below.
+  cp "$ctx/overlay/scripts/ci/references/drafter-configs/$drafter.config.json" "$ctx/draft-config/config.json"
+else
+  curl -fsSL --max-time 30 "https://huggingface.co/$drafter_model/resolve/$revision/config.json" \
+    > "$ctx/draft-config/config.json"
+fi
 if [ "$(sha256sum < "$ctx/draft-config/config.json" | cut -c1-64)" != "$drafter_config_sha256" ]; then
   echo "the draft config at $drafter_model@$revision is not the manifest's config.json" >&2
   exit 2
