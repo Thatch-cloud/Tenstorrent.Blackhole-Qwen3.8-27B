@@ -451,6 +451,65 @@ class CodecTests(unittest.TestCase):
         self.assertEqual([type(ops).__name__ for ops in kvnvme.default_codec(io).ops], ['BytesOps', 'ConvertedOps', 'TorchOps'])
 
 
+try:
+    import torch as real_torch
+    import qwen_prefix_model_fixture as F
+    import test_qwen_prefix_model_runtime as M
+except ImportError:          # (the stdlib-only lane: the rest of this file needs none of it)
+    real_torch = None
+
+
+@unittest.skipUnless(real_torch is not None, 'needs torch (the CPU suite has it)')
+class RealModelCodecTests(unittest.TestCase if real_torch is None else M.ExactTestBase):
+    """The codec against the REAL staged model source (qwen_prefix_model_patch's adapter and methods, on the model fixture's recording ttnn): a checkpoint that went through
+    pack and unpack restores the same state a cold prefill computes, byte for byte, whether the store holds torch tensors or the model's preconverted host tensors."""
+
+    def checkpoint(self, environ):
+        engine = M.Engine(traced=False, environ=environ)
+        engine.warm()
+        base = F.prompt(12000, seed=91)
+        conv = {'id': 'codec'}
+        engine.turn(conv, base[:5000], 0, [4096])
+        entry = engine.registry.get(F.key_at(base[:5000].tolist(), 4096))
+        self.assertIsNotNone(entry)
+        return engine, base, conv, entry
+
+    def codec_for(self, engine):
+        return kvnvme.default_codec(types.SimpleNamespace(model=engine.model))
+
+    def test_preconverted_checkpoints_survive_pack_and_unpack_and_restore_exactly(self):
+        engine, base, conv, entry = self.checkpoint(M.PreconvertedCheckpoints.ENV)
+        self.assertTrue(all(hasattr(item, 'host') for item in list(entry.rec) + list(entry.carry)), 'the store holds preconverted tensors')
+        codec = self.codec_for(engine)
+        self.assertEqual([type(ops).__name__ for ops in codec.ops], ['BytesOps', 'ConvertedOps', 'TorchOps'])
+        data = b''.join(bytes(buffer) for buffer in codec.pack(entry))
+        image = codec.unpack(data)
+        self.assertEqual((image.pos, list(image.token_ids) == list(entry.token_ids), image.nbytes), (entry.pos, True, entry.nbytes))
+        self.assertEqual(len(image.rec), len(entry.rec))
+        for original, back in zip(list(entry.rec) + list(entry.carry), list(image.rec) + list(image.carry)):
+            self.assertTrue(torch_equal(original.host.data, back.host.data), 'the host tensor that comes back is the one that was stored')
+            self.assertEqual((back.shape, back.dtype, back.padded_nbytes), (original.shape, original.dtype, original.padded_nbytes))
+        entry.rec, entry.carry = image.rec, image.carry              # the store now holds what came off the drive
+        self.run_turn_and_cold(engine, conv, base[:6500], 4096, [6144])
+        self.assertEqual(engine.registry.stats['restores'], 1)
+
+    def test_torch_checkpoints_survive_pack_and_unpack_and_restore_exactly(self):
+        engine, base, conv, entry = self.checkpoint(M.ON)
+        self.assertTrue(all(isinstance(item, real_torch.Tensor) for item in list(entry.rec) + list(entry.carry)))
+        codec = self.codec_for(engine)
+        data = b''.join(bytes(buffer) for buffer in codec.pack(entry))
+        image = codec.unpack(data)
+        for original, back in zip(list(entry.rec) + list(entry.carry), list(image.rec) + list(image.carry)):
+            self.assertEqual((back.dtype, tuple(back.shape)), (original.dtype, tuple(original.shape)))
+            self.assertTrue(real_torch.equal(original, back))
+        entry.rec, entry.carry = image.rec, image.carry
+        self.run_turn_and_cold(engine, conv, base[:6500], 4096, [6144])
+
+
+def torch_equal(a, b):
+    return bool(real_torch.equal(a, b))
+
+
 class BackendTests(unittest.TestCase):
     def test_host_is_built_and_p2p_raises_not_built_with_its_contract_documented(self):
         self.assertEqual((kvnvme.make_backend('host').name, kvnvme.make_backend('host').direct), ('host', False))
@@ -553,11 +612,22 @@ class SpillAndRestoreTests(NvmeCase):
         self.assertGreater(stats['nvme_digest_checks'], 0)
         self.assertEqual(stats['tier_restore_requests'], 1, 'and then the host tier restores it to the device, as it always did')
         self.assertTrue(made.check_kv())
+        self.assertEqual(made.registry.tier.pinned, set(), 'a restore leaves no pin behind')
         self.assertTrue(any(line.startswith('nvme tier restore req=again-a1 blocks=') and 'backend=host verify=all' in line for line in made.lines), made.lines[-8:])
         self.assertTrue(any(line.startswith('nvme tier checkpoint restored pos=4096') for line in made.lines))
         self.assertTrue(any(line.startswith('nvme tier spill blocks=') for line in made.lines))
         self.assertTrue(any(line.startswith('nvme tier open device=') for line in made.lines))
         self.assertTrue(any(line.startswith('nvme tier on backend=host') for line in made.lines))
+
+    def test_a_restore_the_pool_has_no_room_for_is_a_miss_that_reads_and_pins_nothing(self):
+        made = self.rig(num_blocks=100)
+        a = self.push_out(made, first_turn())
+        start, grant = made.serve(Request('long', a.all_token_ids + span(2200, 3), salt=a.cache_salt))
+        stats = made.registry.snapshot()
+        self.assertEqual(start, 0)
+        self.assertEqual((stats['tier_restore_refused_room'], stats['nvme_restore_blocks']), (1, 0))
+        self.assertEqual(made.registry.tier.pinned, set())
+        self.assertTrue(made.check_kv())
 
     def test_without_the_nvme_the_same_traffic_is_a_miss(self):
         plain = Rig(num_blocks=SMALL_POOL, budget=1 << 20, tier=200)
@@ -601,7 +671,7 @@ class SpillAndRestoreTests(NvmeCase):
 
     def test_a_full_queue_drops_the_record_as_the_host_tier_always_did(self):
         made = self.rig()
-        made.nvme.plan.queue_bytes = 8 * FakeKvIO.block_bytes
+        made.nvme.plan.queue_bytes = 1000          # (31 blocks; the shared budget also holds the checkpoints, which then do not fit either)
         with made.nvme.store._wlock:
             a = first_turn()
             made.serve(a)
@@ -1082,6 +1152,7 @@ class SlicedRestoreTests(NvmeCase):
         self.assertGreater(stats['nvme_restore_requests'], 1, 'one NVMe read per slice')
         start, grant = made.serve(again)
         self.assertEqual((start, grant.q), (4096, 4096))
+        self.assertEqual(made.registry.tier.pinned, set(), 'the job let go of every pin')
         self.assertTrue(made.check_kv())
 
     def test_a_sliced_restore_whose_nvme_block_vanished_is_abandoned_and_the_turn_goes_cold(self):

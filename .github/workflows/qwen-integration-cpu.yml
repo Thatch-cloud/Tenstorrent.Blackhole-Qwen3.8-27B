@@ -314,6 +314,8 @@ jobs:
           python -B -m unittest test_qwen_prefix_tier_slice test_tier_slice_tools
           # TW
           python -B -m unittest test_c2_toolcall_whitespace
+          # NVME
+          python -B -m unittest test_qwen_nvme_store test_qwen_kv_nvme
           # WP0
           python -B -m unittest test_fusion2_pack test_smoke_ladder_only
           # WP1

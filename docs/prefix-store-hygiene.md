@@ -450,6 +450,6 @@ The cost of the floor's walk and of the demotion is a few list operations per al
 
 ### Not done
 
-Per-tenant quota numbers (every tenant has the same); the quotas on a traffic profile (gate-only until a qualification record); the cold-tier service (only its client interface and a fake); the NVMe tier; the tier on a traffic profile beyond the ship candidate's own PENDING waiver (the contract refuses it anywhere else); the restore through
+Per-tenant quota numbers (every tenant has the same); the quotas on a traffic profile (gate-only until a qualification record); the cold-tier service (only its client interface and a fake); the NVMe tier (built since: `docs/tp4-kv-nvme.md`, default off); the tier on a traffic profile beyond the ship candidate's own PENDING waiver (the contract refuses it anywhere else); the restore through
 vLLM's connector API (not needed: the pages are cached before the hit is looked up); a device-side gather that would let the
 spill overlap the step; arming anything on the production profile.

@@ -855,5 +855,31 @@ class ConcurrencyTests(StoreCase):
         self.assertLessEqual(store.logical_bytes, store.capacity_bytes())
 
 
+class BenchTests(StoreCase):
+    def test_the_bench_writes_reads_and_reports_on_a_file(self):
+        import nvme_store_bench
+
+        lines = []
+        result = nvme_store_bench.run(self.path, gib=0.004, block_bytes=8 * ALIGN, batch_blocks=16, threads=2, verify='all', out=lines.append)
+        self.assertGreater(result['blocks'], 100)
+        self.assertEqual(result['read_failures'], 0)
+        self.assertGreater(result['write_gbps'], 0)
+        self.assertGreater(result['read_sequential_gbps'], 0)
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(result['puts'], result['blocks'])
+
+    def test_a_block_device_is_refused_without_both_flags(self):
+        import nvme_store_bench
+        from unittest import mock
+
+        with open(self.path, 'wb') as handle:
+            handle.truncate(1 << 20)
+        with mock.patch('stat.S_ISBLK', return_value=True):
+            with self.assertRaises(SystemExit):
+                nvme_store_bench.main([self.path])
+            with self.assertRaises(SystemExit):
+                nvme_store_bench.main([self.path, '--format-force'])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -30,6 +30,7 @@ Pure python; imports nothing outside the standard library (torch and ttnn only t
 import array
 import collections
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -302,9 +303,9 @@ def profile_name(environ):
     if name:
         return name
     try:
-        import serving_c2_contract
-
-        return serving_c2_contract.load_profile(environ.get('QWEN_C2_PROFILES', serving_c2_contract.PROFILES))['name']
+        # (by name, not by an import statement: the registry's image closure must not grow the contract's)
+        contract = importlib.import_module('serving_c2_contract')
+        return contract.load_profile(environ.get('QWEN_C2_PROFILES', contract.PROFILES))['name']
     except Exception as error:
         raise ValueError('the NVMe tier cannot tell which serving profile this is (QWEN_C2_PROFILE unset, the default unreadable: %s)' % error)
 
@@ -409,9 +410,13 @@ class ConvertedOps(TorchOps):
     def __init__(self, model):
         TorchOps.__init__(self)
         self.model = model
-        module = sys.modules.get(type(model).__module__)
-        self.ttnn = getattr(module, 'ttnn', None)
-        self._torch = getattr(module, 'torch', None)
+        # ttnn and torch are globals of the model file; the globals of the model's own preconvert method are that file's, whether or not it is registered as a module
+        method = getattr(model, '_qwen_prefix_preconvert', None)
+        namespace = getattr(sys.modules.get(type(model).__module__), '__dict__', {})
+        if namespace.get('ttnn') is None:
+            namespace = getattr(getattr(method, '__func__', method), '__globals__', None) or {}
+        self.ttnn = namespace.get('ttnn')
+        self._torch = namespace.get('torch')
 
     def describe(self, item):
         if hasattr(item, 'host') and hasattr(item, 'padded_nbytes') and hasattr(item, 'shape') and hasattr(item, 'dtype'):
@@ -546,11 +551,12 @@ class CheckpointCodec(object):
 
 def default_codec(io):
     """The codec for a tier IO: its own (io.checkpoint_codec) when it brings one, else bytes + torch, and the model's preconverted items when the IO knows its model."""
-    own = getattr(io, 'checkpoint_codec', None)
+    inner = getattr(io, 'io', None)            # (a wrapper such as tp4/upload-1's ThreadedTierIO holds the model's IO as .io)
+    own = getattr(io, 'checkpoint_codec', None) or getattr(inner, 'checkpoint_codec', None)
     if own is not None:
         return own
     ops = [BytesOps(), TorchOps()]
-    model = getattr(io, 'model', None)
+    model = getattr(io, 'model', None) or getattr(inner, 'model', None)
     if model is not None and hasattr(model, '_qwen_prefix_preconvert'):
         ops.insert(1, ConvertedOps(model))
     return CheckpointCodec(ops)
@@ -749,7 +755,7 @@ class NvmeTier(object):
         if self.registry._tier_dead(record):
             c['nvme_spill_dropped_useless'] += 1
             return False
-        if self.queue_kv_bytes + record.nbytes > self.plan.queue_bytes:
+        if self.queue_kv_bytes + self.queue_ckpt_bytes + record.nbytes > self.plan.queue_bytes:
             c['nvme_spill_dropped_queue'] += 1
             return False
         item = SpillKV(key, record.payload, record.tenant, record.chain, record.index, record.slot)
@@ -777,7 +783,7 @@ class NvmeTier(object):
             return
         if self.registry._tier_dead(record):
             return
-        if self.queue_kv_bytes + record.nbytes > self.plan.queue_bytes:
+        if self.queue_kv_bytes + self.queue_ckpt_bytes + record.nbytes > self.plan.queue_bytes:
             c['nvme_through_dropped_queue'] += 1
             return
         tier = self.registry.tier
@@ -807,8 +813,10 @@ class NvmeTier(object):
         if self.store.lookup(CKPT, checkpoint.key) is not None:
             self.store.touch(CKPT, checkpoint.key)
             return False
+        if checkpoint.chain is not None and checkpoint.pos in self.queued_ckpt.get(bytes(checkpoint.chain), ()):
+            return False                                  # already on its way
         item = SpillCkpt(checkpoint)
-        if self.queue_ckpt_bytes + item.nbytes > self.plan.queue_bytes:
+        if self.queue_kv_bytes + self.queue_ckpt_bytes + item.nbytes > self.plan.queue_bytes:
             c['nvme_ckpt_spill_dropped'] += 1
             return False
         with self.cond:
