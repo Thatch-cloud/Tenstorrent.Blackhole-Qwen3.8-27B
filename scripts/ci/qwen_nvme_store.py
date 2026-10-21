@@ -600,7 +600,7 @@ class PutItem(object):
 
 STAT_NAMES = ('puts', 'put_bytes', 'put_duplicates', 'put_refused', 'put_evictions', 'gets', 'get_hits', 'get_misses', 'reads', 'read_bytes', 'read_errors',
               'digest_failures', 'evicted_lru', 'expired_ttl', 'expired_age', 'deleted_keys', 'deleted_tenant', 'wipes', 'journal_records', 'journal_syncs',
-              'snapshots', 'discarded_bytes', 'fp_drops', 'recovered_entries', 'recovered_records', 'recover_dropped', 'touch_records')
+              'snapshots', 'discarded_bytes', 'trim_calls', 'fp_drops', 'recovered_entries', 'recovered_records', 'recover_dropped', 'touch_records')
 
 
 class NvmeStore(object):
@@ -615,6 +615,7 @@ class NvmeStore(object):
         self.max_bytes = int(max_bytes or 0)
         self.free_floor_bytes = int(free_floor_bytes or 0)
         self.discard_on_free = bool(discard)
+        self._to_trim = []                                 # extents freed while discard is on, waiting for their TRIM (offset, length); made allocatable by _flush_trim (under _mutex)
         self.threads = max(1, int(threads))
         self._mutex = threading.RLock()
         self._wlock = threading.RLock()
@@ -1008,10 +1009,40 @@ class NvmeStore(object):
             return entry
 
     def _release_extent(self, entry):
-        self.allocator.release(entry.offset, entry.alloc)
+        """Give an entry's extent back. Holds _mutex, so NO device IO here (the scheduler thread's unpin lands here too): with TRIM on, the extent waits in _to_trim, unallocatable,
+        until _flush_trim (the writer's side) has asked the drive to discard it and made it allocatable - so a TRIM can never land on bytes a later put has written there."""
         if self.discard_on_free:
-            if self.bf.discard(entry.offset, entry.alloc):
-                self.stats['discarded_bytes'] += entry.alloc
+            self._to_trim.append((entry.offset, entry.alloc))
+        else:
+            self.allocator.release(entry.offset, entry.alloc)
+
+    def _flush_trim(self):
+        """TRIM the extents freed since the last call (adjacent ones merged into one call), then make them allocatable. Holds _wlock (the only place the allocator is drawn from),
+        takes _mutex only to swap the list and to release - never during the device call. -> bytes the drive was asked to discard."""
+        if not self.discard_on_free:
+            return 0
+        with self._mutex:
+            pending, self._to_trim = self._to_trim, []
+        if not pending:
+            return 0
+        merged = []
+        for offset, length in sorted(pending):
+            if merged and merged[-1][0] + merged[-1][1] == offset:
+                merged[-1][1] += length
+            else:
+                merged.append([offset, length])
+        asked = 0
+        try:
+            for offset, length in merged:
+                if self.bf.discard(offset, length):
+                    asked += length
+        finally:
+            with self._mutex:
+                for offset, length in pending:
+                    self.allocator.release(offset, length)
+                self.stats['discarded_bytes'] += asked
+                self.stats['trim_calls'] += len(merged)
+        return asked
 
     # -- lookups (scheduler thread; short lock, no device IO) -----------------------------------------------------------
     def _expired(self, entry, now):
@@ -1234,6 +1265,7 @@ class NvmeStore(object):
             for entry in part:
                 self._index_remove((entry.kind, entry.key), free=True)
         self.stats[counter] += len(entries)
+        self._flush_trim()
 
     # -- writes ----------------------------------------------------------------------------------------------
     def put_batch(self, items):
@@ -1246,6 +1278,7 @@ class NvmeStore(object):
                 item.digest = digest_of(item.buffers)
         results = [False] * len(items)
         with self._wlock:
+            self._flush_trim()                            # extents a reader's unpin freed since the last writer call
             now = self.clock()
             fresh = []
             seen = set()
@@ -1429,6 +1462,7 @@ class NvmeStore(object):
             for pair in pairs:
                 self._index_remove(pair, free=True)
             self.stats['deleted_tenant'] += len(pairs)
+            self._flush_trim()
             return len(pairs)
 
     def wipe(self):
@@ -1450,6 +1484,7 @@ class NvmeStore(object):
                 self.kind_counts = {KV: 0, CKPT: 0}
                 self.logical_bytes = 0
                 self._dead = []
+                self._to_trim = []                        # (the whole region is discarded below; the allocator is rebuilt)
                 geometry = self.geometry
                 self.allocator = Allocator.from_used(geometry.data_off, geometry.data_bytes, sorted((entry.offset, entry.alloc) for entry in held))
             self.stats['wipes'] += 1
@@ -1481,6 +1516,7 @@ class NvmeStore(object):
                     if entry.pins == 0:
                         self._release_extent(entry)
             self.stats['deleted_keys'] += len(dead)
+            self._flush_trim()
             return len(dead)
 
     def drop_where(self, predicate, counter='fp_drops'):

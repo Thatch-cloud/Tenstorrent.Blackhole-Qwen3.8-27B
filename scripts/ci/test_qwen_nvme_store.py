@@ -582,6 +582,83 @@ class DeletionTests(StoreCase):
         self.assertEqual(store.stats['discarded_bytes'], SMALL)
 
 
+class TrimTests(StoreCase):
+    """TRIM on free (the default of the tier): never device IO under the index lock or on the scheduler's unpin, adjacent extents in one call, and an extent is not
+    allocatable until its TRIM has been asked for - a TRIM must never land on bytes a later put wrote there."""
+
+    def open_trimming(self, calls, size=4 << 20, owner=None):
+        class Discarding(BlockFile):
+            def discard(self, offset, length):
+                calls.append((offset, length, threading.current_thread().name, store._mutex._is_owned() if owner is None else False))
+                return True
+
+        store = NvmeStore.open(self.path, size=size, snap_bytes=16 * ALIGN, journal_bytes=16 * ALIGN, file_factory=Discarding, clock=self.clock, discard=True)
+        self.opened.append(store)
+        return store
+
+    def test_adjacent_freed_extents_are_one_call_and_never_asked_under_the_index_lock(self):
+        calls = []
+        store = self.open_trimming(calls)
+        for name in 'abcd':
+            self.put(store, name)
+        store.delete([(KV, key_of(name)) for name in 'abcd'])
+        self.assertEqual(len(calls), 1, 'four back-to-back extents, one discard')
+        self.assertEqual(calls[0][1], 4 * SMALL)
+        self.assertFalse(calls[0][3], 'the discard is not issued with the index lock held')
+        self.assertEqual((store.stats['discarded_bytes'], store.stats['trim_calls']), (4 * SMALL, 1))
+
+    def test_an_unpin_does_no_device_io_and_the_extent_waits_for_the_writer(self):
+        calls = []
+        store = self.open_trimming(calls)
+        self.put(store, 'a')
+        pinned = store.pin([(KV, key_of('a'))])
+        store.delete([(KV, key_of('a'))])
+        self.assertEqual(calls, [], 'a pinned extent is not freed yet')
+        store.unpin(pinned)
+        self.assertEqual(calls, [], 'the unpin (the scheduler\'s thread) only queues the extent')
+        free_before = store.snapshot_stats()['free_bytes']
+        self.put(store, 'b')                                 # the writer's next call flushes the TRIM first
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1], SMALL)
+        self.assertGreaterEqual(store.snapshot_stats()['free_bytes'] + SMALL, free_before)
+
+    def test_a_freed_extent_is_not_allocatable_until_it_has_been_trimmed(self):
+        order = []
+
+        class Ordered(BlockFile):
+            def discard(self, offset, length):
+                order.append(('trim', offset, length))
+                return True
+
+            def pwrite_from(self, offset, views):
+                order.append(('write', offset, sum(len(view) for view in views)))
+                BlockFile.pwrite_from(self, offset, views)
+
+        store = NvmeStore.open(self.path, size=1 << 20, snap_bytes=8 * ALIGN, journal_bytes=8 * ALIGN, file_factory=Ordered, clock=self.clock, discard=True)
+        self.opened.append(store)
+        capacity = store.capacity_bytes() // SMALL
+        for n in range(capacity):
+            self.put(store, 'f%d' % n)
+        store.delete([(KV, key_of('f0'))])
+        freed = [entry for entry in order if entry[0] == 'trim'][-1]
+        self.put(store, 'again')
+        entry = store.lookup(KV, key_of('again'))
+        later = order[order.index(freed) + 1:]
+        self.assertIn(('write', entry.offset, SMALL), later, 'the new object was written after the extent had been trimmed')
+
+    def test_the_default_of_a_store_is_no_trim_and_a_file_never_trims(self):
+        store = self.open()
+        self.put(store, 'a')
+        store.delete([(KV, key_of('a'))])
+        self.assertEqual(store.stats['discarded_bytes'], 0)
+        calls = []
+        plain = NvmeStore.open(self.path + '.2', size=1 << 20, snap_bytes=8 * ALIGN, journal_bytes=8 * ALIGN, clock=self.clock, discard=True)
+        self.opened.append(plain)
+        self.put(plain, 'a')
+        plain.delete([(KV, key_of('a'))])
+        self.assertEqual(plain.stats['discarded_bytes'], 0, 'a regular file cannot be asked to discard: the call is a no-op')
+
+
 class PinTests(StoreCase):
     def test_a_pinned_extent_is_not_reused_until_the_reader_lets_go(self):
         store = self.open(size=1 << 20, snap_bytes=8 * ALIGN, journal_bytes=8 * ALIGN)
