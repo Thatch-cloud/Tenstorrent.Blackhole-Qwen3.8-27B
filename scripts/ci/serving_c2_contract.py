@@ -927,6 +927,12 @@ TIER_WAIVABLE_ALSO = {'QWEN_PREFIX_HOST_TIER_GIB': ('48',)}
 # traffic waiver that names it, as for the levers above.
 NEXT_WAIVABLE_LEVERS = {'QWEN_FAST_SOLO_PACKED': '1', 'QWEN_PREFIX_STICKY_UNDROP': '1', 'QWEN_PREFIX_WINDOW_CARRY': '1',
                         'QWEN_FAST_ADMISSION_LEAN': '1', 'QWEN_PREFIX_HOST_TIER_SPILL_MODE': 'complete', 'QWEN_FAST_LEVERN_ADAPTIVE': '1'}
+# tp4/prefill-3 (docs/tp4-prefill3-ksplit.md): the K-split attention of the tail passes. Its output differs from the oneq call's in the last bits (a different association of the softmax: a
+# tolerance-class numerics change), so a traffic profile carries it only under the owner's traffic waiver that names it; its audit (judged by a statistic against a bound, not bitwise) is a gate's own.
+KSPLIT_SWITCH = 'QWEN_FAST_SDPA_PF_KSPLIT'
+KSPLIT_AUDIT = KSPLIT_SWITCH + '_AUDIT'
+KSPLIT_WAIVABLE_LEVERS = {KSPLIT_SWITCH: '1'}
+NEXT_WAIVABLE_LEVERS.update(KSPLIT_WAIVABLE_LEVERS)
 TRAFFIC_WAIVER_MARKER = 'OWNER TRAFFIC WAIVER'
 # The decision is a sentence that starts with one of these words. PENDING is a REQUEST: the profile boots (gates and G1 provenance boot every
 # profile) and logs the word, but no build may bake it as an image default (c2_serving_job.read_bake, build-c2-serving-image.sh) until the commit
@@ -1238,6 +1244,29 @@ def exact_resume_problems(profile):
         problems.append('%s=1 without %s=1' % (EXACT_RESUME_NAMES[1], EXACT_RESUME_NAMES[0]))
     if EXACT_RESUME_NAMES[2] in on and EXACT_RESUME_NAMES[1] not in on:
         problems.append('%s=1 without %s=1' % (EXACT_RESUME_NAMES[2], EXACT_RESUME_NAMES[1]))
+    return problems
+
+
+def ksplit_problems(profile):
+    """[problem] when a profile names the K-split switches wrongly (nothing is checked for a profile that names none): a value that is not '0'/'1', the audit without the switch, the switch
+    without the oneq call it splits (QWEN_FAST_SDPA_PF_ONEQ=1), the audit on a traffic profile (a gate's instrument), and - the numerics waiver - the switch on a TRAFFIC
+    profile whose owner traffic waiver does not name it (a gate-only profile boots it)."""
+    env = {key: str(value) for key, value in (profile.get('env') or {}).items()}
+    named = [name for name in (KSPLIT_SWITCH, KSPLIT_AUDIT) if name in env]
+    if not named:
+        return []
+    problems = ['%s=%r: only 0 or 1' % (name, env[name]) for name in named if env[name] not in ('0', '1')]
+    on, audit = env.get(KSPLIT_SWITCH) == '1', env.get(KSPLIT_AUDIT) == '1'
+    if audit and not on:
+        problems.append('%s=1 without %s=1' % (KSPLIT_AUDIT, KSPLIT_SWITCH))
+    if on and env.get('QWEN_FAST_SDPA_PF_ONEQ') != '1':
+        problems.append('%s=1 splits the oneq call\'s K stream: it needs QWEN_FAST_SDPA_PF_ONEQ=1 (and so the chain, QWEN_FAST_SDPA_PF=1, which the image environment sets)' % KSPLIT_SWITCH)
+    if profile.get('gate_only') is not True:
+        if audit:
+            problems.append('%s=1 is a gate instrument (it doubles the split calls): %s is not gate_only' % (KSPLIT_AUDIT, profile.get('name')))
+        if on and not waived(profile, KSPLIT_SWITCH, env):
+            problems.append('%s=1 is a numerics change (the softmax is merged from partial results: the output differs from the oneq call in the last bits) with no pinned qualification record: '
+                            'gate-only, or the owner\'s %s names it (the numerics waiver is absent): %s is not gate_only' % (KSPLIT_SWITCH, TRAFFIC_WAIVER, profile.get('name')))
     return problems
 
 
@@ -1988,6 +2017,9 @@ def boot(environ=None, orig_argv=None):
     problems = exact_resume_problems(profile)
     if problems:
         raise ValueError('profile %s misuses the exact-resume switches: %s' % (profile['name'], '; '.join(problems)))
+    problems = ksplit_problems(profile)
+    if problems:
+        raise ValueError('profile %s misuses the K-split switches: %s' % (profile['name'], '; '.join(problems)))
     problems = drafter_problems(profile)
     if problems:
         raise ValueError('profile %s cannot serve its drafter checkpoint: %s' % (profile['name'], '; '.join(problems)))

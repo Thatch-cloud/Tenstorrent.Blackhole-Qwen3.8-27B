@@ -220,6 +220,8 @@ FUSION_LEVERS = (
     ('QWEN_PREFIX_WINDOW_CARRY', '1', '[PINDIAG] prefix: window carry engaged', '[PINDIAG] prefix: window carry fell back', "exact resume P0: the undrop and the drafter-window carry (the scheduler graft's install line; a smoke sends no salt, so the carried admissions and the audit are the prefix gate's)"),  # ER
     ('QWEN_FAST_GRID13', '1', '[PINDIAG] tp4 grid13 engaged', '[PINDIAG] tp4 grid13 fell back', 'M1 matmul grids for the 13x10 compute grid'),  # M1
     ('QWEN_FAST_PREFILL_HANDOFF', '1', '[PINDIAG] prefill handoff engaged', '[PINDIAG] prefill handoff fell back', 'PF2-H device-side GDN slot hand-off of the final step'),  # PF2
+    ('QWEN_FAST_PREFILL_TAIL_TRACE', '1', '[PINDIAG] prefill tail trace engaged', '[PINDIAG] prefill tail trace fell back', 'PF3-T masked tail pass as a trace replay'),  # PF3
+    ('QWEN_FAST_SDPA_PF_KSPLIT', '1', '[PINDIAG] sdpa prefill ksplit engaged', '[PINDIAG] sdpa prefill ksplit fell back', "PF3-K K-split of the tail passes' attention"),  # PF3K
     ('QWEN_PREFIX_TIER_RESTORE_SLICE', '512', '[PINDIAG] prefix: host tier restore slice on', '[PINDIAG] prefix: host tier restore slice fell back', 'sliced host-tier restore'),  # TS
     ('QWEN_PREFIX_TIER_IO_THREADS', '4', '[PINDIAG] prefix: host tier upload on', '[PINDIAG] prefix: host tier upload fell back', "threaded staging copies of the host tier's raw block IO"),  # UP1
     ('QWEN_PREFIX_TIER_IO_THREADS', '8', '[PINDIAG] prefix: host tier upload on', '[PINDIAG] prefix: host tier upload fell back', "threaded staging copies of the host tier's raw block IO (8 threads)"),  # UP1
@@ -247,10 +249,12 @@ FUSION_AUDITS = (
     ('QWEN_FAST_SDPA_PF_ONEQ_AUDIT', '[PINDIAG] sdpa prefill oneq audit', 'S1 prefill SDPA one q chunk per core'),  # WPP
     ('QWEN_FAST_GRID13_AUDIT', '[PINDIAG] tp4 grid13 audit', 'M1 matmul grids for the 13x10 compute grid'),  # M1
     ('QWEN_FAST_PREFILL_HANDOFF_AUDIT', '[PINDIAG] prefill handoff audit', 'PF2-H device-side GDN slot hand-off of the final step'),  # PF2
+    ('QWEN_FAST_PREFILL_TAIL_TRACE_AUDIT', '[PINDIAG] prefill tail trace audit', 'PF3-T masked tail pass as a trace replay'),  # PF3
 )
 FUSION_RULES = (
     'exact_resume_smoke',  # ER
     'grid13_smoke',  # M1
+    'ksplit_smoke',  # PF3K
     'toolcall_whitespace_smoke',  # TW
     'w3_wc_smoke',  # W3
     'tp4_shard_argmax_smoke',  # WP0

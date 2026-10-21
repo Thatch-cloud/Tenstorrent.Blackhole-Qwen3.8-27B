@@ -299,6 +299,11 @@ jobs:
           python -B -m unittest test_audit_sampling test_octo3_contract test_octo3_profiles test_octo3_judge test_octo3_pack test_octo3_ship test_block_warm_capture test_capture_trackers
           # PF2
           python -B -m unittest test_prefill_handoff test_prefill_cost_model test_pf2_profiles test_pf2_pack
+          # PF3
+          python -B -m unittest test_prefill_tail_trace test_pf3_profiles test_pf3_report test_pf3_pack
+          # PF3K
+          python -B -m unittest test_sdpa_ksplit_tp test_pf3k_profiles
+          python -B -m unittest discover -s optimisation/ttnn-op/sdpa_prefill_ksplit -p 'test_*.py'
           # RB
           python -B -m unittest test_tap_window_aligned
           # S4

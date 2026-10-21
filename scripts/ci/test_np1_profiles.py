@@ -120,8 +120,10 @@ class ProtectedTests(unittest.TestCase):
         import make_pf2_profiles
         import make_sched_profiles
         import make_sched2_profiles
+        import make_pf3_profiles
+        import make_pf3k_profiles
 
-        integrated = integrated + tuple(make_pf2_profiles.twin_names()) + tuple(make_sched_profiles.twin_names()) + tuple(make_sched2_profiles.twin_names())      # (and prefill-2's and sched-1's twins)
+        integrated = integrated + tuple(make_pf2_profiles.twin_names()) + tuple(make_sched_profiles.twin_names()) + tuple(make_sched2_profiles.twin_names()) + tuple(make_pf3_profiles.twin_names()) + tuple(make_pf3k_profiles.twin_names())      # (and prefill-2's, sched-1's, sched-2's and prefill-3's twins)
         self.assertEqual(sorted(set(PROFILES) - set(before['profiles'])), sorted(twins.NAMES + integrated))
         self.assertEqual(list(PROFILES)[:0], [])
 

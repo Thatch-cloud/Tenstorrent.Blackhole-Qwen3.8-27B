@@ -162,6 +162,24 @@ class LeverTests(unittest.TestCase):
         self.assertLess(model.handoff_saving_ms('low'), model.handoff_saving_ms('central'))
         self.assertLess(model.handoff_saving_ms('central'), model.handoff_saving_ms('high'))
 
+    def test_the_pf3_traced_tail_is_priced_per_bucket_and_over_the_population(self):
+        self.assertEqual([round(model.pf3_saving_ms(bucket)) for bucket in (128, 256, 512, 1024, 2048)], [168, 126, 128, 110, 0])
+        self.assertGreater(model.pf3_saving_ms(128), model.pf3_saving_ms(1024), 'a smaller bucket has less device work to hide behind the eager floor')
+        self.assertLess(model.pf3_saving_ms(512), model.traced_tail_saving_ms(0, 2048 + 512), 'the replay\'s own host cost is taken off')
+        per_prompt, today, after = model.pf3_population()
+        self.assertAlmostEqual(per_prompt, 60.1, places=1)
+        self.assertAlmostEqual(100 * today, 4.6, places=1)
+        self.assertAlmostEqual(100 * after, 7.5, places=1)
+        self.assertEqual(sum(model.PROD_TAIL_POPULATION.values()), 1022)
+        self.assertEqual(model.PF3_TRACEABLE, (128, 256, 512, 1024))
+
+    def test_the_pf3_row_is_in_the_lever_table_and_prices_a_traced_bucket_only(self):
+        rows = {row[0]: row for row in model.lever_table(120832, 2048 + 100)}
+        built = next(row for name, row in rows.items() if name.startswith('PF3-T'))
+        self.assertAlmostEqual(built[2], model.pf3_saving_ms(128))
+        long_tail = next(row for name, row in {r[0]: r for r in model.lever_table(120832, 2048 + 1500)}.items() if name.startswith('PF3-T'))
+        self.assertEqual(long_tail[2], 0.0)
+
     def test_the_command_line_prints_the_tables(self):
         import contextlib
         import io

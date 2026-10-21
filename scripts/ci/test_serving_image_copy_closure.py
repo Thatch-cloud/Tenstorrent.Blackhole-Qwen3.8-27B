@@ -170,6 +170,8 @@ C2_ONLY_PLAIN_IMPORTS = frozenset(['audit_sampling.py', 'capture_plug.py', 'exte
                                    'draft_permute_tp.py', 'draft_qkv_tp.py', 'draft_head64_tp.py', 'tp4_mlp_gateup.py', 'draft_fusion_tp.py',
                                    # tp4/prefill-sdpa: imported by tp_addresses.install only when QWEN_FAST_SDPA_PF_ONEQ[_AUDIT] is set (overlay-only, docker/qwen-c2-overlay.txt)
                                    'sdpa_pf_oneq_tp.py',
+                                   # tp4/prefill-3: imported by tp_addresses.install only when QWEN_FAST_SDPA_PF_KSPLIT[_AUDIT] is set (overlay-only, docker/qwen-c2-overlay.txt)
+                                   'sdpa_pf_ksplit_tp.py',
                                    # the host-gap package WPH (lazy, flag-guarded imports; all in docker/qwen-c2-overlay.txt)
                                    'prestage_diff.py', 'write_packed_lean.py', 'batched_reads_tp.py', 'hostgap_instr.py',
                                    # M1 (QWEN_FAST_GRID13): imported by tp_addresses.install and dflash_device.project_features only when the flag is set (overlay-only, docker/qwen-c2-overlay.txt)
