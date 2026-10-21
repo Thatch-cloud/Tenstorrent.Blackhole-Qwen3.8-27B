@@ -31,6 +31,11 @@ process holds what vLLM cannot know about a hit: the GatedDeltaNet (GDN) state t
   budget: checkpoints (QWEN_PREFIX_STORE_GIB) plus KV pages take the rest. Blocks are keyed by vLLM's chained block hash,
   which carries the salt, so tenants never meet. A restored block is the evicted block's bytes (a digest checked on
   restore, a read-back compared under QWEN_PREFIX_HOST_TIER_AUDIT=1); any failure is a miss.
+- NVMe cold tier (QWEN_PREFIX_NVME*, default off; qwen_kv_nvme and qwen_nvme_store, docs/tp4-kv-nvme.md): below the host tier, on a raw namespace. A record the tier evicts
+  (TierStore.spill_sink) and a checkpoint the store evicts for its budget are written there by a writer thread; the trim's reach (TierHooks.effective_hit) extends over the drive's
+  blocks, a checkpoint the store lost is adopted back (adopt), and NVMe-resident blocks are read into host records before the existing restore. Entries carry a layout fingerprint
+  and a digest; any failure is a miss. Off, none of it is imported and the registry is byte for byte what it was. The tier does not start on a node that looks zero-retention
+  (nvme_refusal), and a drive that cannot be opened costs the engine its NVMe level only.
 - Tenant quotas (QWEN_PREFIX_TENANT_QUOTA_*, default off, byte-identical off; docs/prefix-store-hygiene.md "Tenant quotas"): a per-tenant cap and floor on the cached prefix
   tokens in the device pool (the scheduler graft's DeviceQuota) and on the bytes in the host tier (TierStore), keyed by the salt's tenant tag. The cap makes a tenant that passes it
   lose its OWN oldest blocks (records) first; the floor spares a tenant's last tokens (bytes) from everyone else's allocations (spills). quota_config parses the four knobs strictly;

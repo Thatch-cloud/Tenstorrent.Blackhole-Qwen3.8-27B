@@ -219,6 +219,7 @@ FUSION_LEVERS = (
     ('QWEN_FAST_SDPA_PF_ONEQ', '1', '[PINDIAG] sdpa prefill oneq engaged', '[PINDIAG] sdpa prefill oneq fell back', 'S1 prefill SDPA one q chunk per core'),  # WPP
     ('QWEN_PREFIX_WINDOW_CARRY', '1', '[PINDIAG] prefix: window carry engaged', '[PINDIAG] prefix: window carry fell back', "exact resume P0: the undrop and the drafter-window carry (the scheduler graft's install line; a smoke sends no salt, so the carried admissions and the audit are the prefix gate's)"),  # ER
     ('QWEN_FAST_GRID13', '1', '[PINDIAG] tp4 grid13 engaged', '[PINDIAG] tp4 grid13 fell back', 'M1 matmul grids for the 13x10 compute grid'),  # M1
+    ('QWEN_PREFIX_NVME', '1', '[PINDIAG] prefix: nvme tier on', '[PINDIAG] prefix: nvme tier UNAVAILABLE', "NVMe cold tier below the host KV tier (the scheduler graft's install line; a REFUSED line, the zero-retention guard, logs no 'on' line and so fails the arm too)"),  # NVME
     ('QWEN_FAST_PREFILL_HANDOFF', '1', '[PINDIAG] prefill handoff engaged', '[PINDIAG] prefill handoff fell back', 'PF2-H device-side GDN slot hand-off of the final step'),  # PF2
     ('QWEN_PREFIX_TIER_RESTORE_SLICE', '512', '[PINDIAG] prefix: host tier restore slice on', '[PINDIAG] prefix: host tier restore slice fell back', 'sliced host-tier restore'),  # TS
     ('QWEN_FAST_MLP_CFG', 'g3u4d3', '[PINDIAG] tp4 mlp gateup engaged route=cfg', '[PINDIAG] tp4 mlp gateup fell back', 'MLP streaming config g3u4d3 (the card-M sweep winner)'),  # WP0

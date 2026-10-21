@@ -1,0 +1,30 @@
+{
+ "wp": "NVME",
+ "branch": "tp4/kv-nvme-1",
+ "description": "The NVMe cold tier below the host KV tier (docs/tp4-kv-nvme.md): a raw-namespace spill of the host tier's evictions and of the checkpoint store's, restored on a miss in both host stores, so a returning session's KV stays warm for up to 7 days (owner decision 2026-10-21: all tenants) and comes back in about a second or two instead of a 75 to 145 s cold re-prefill. QWEN_PREFIX_NVME=1 with QWEN_PREFIX_NVME_DEVICE and the required QWEN_PREFIX_NVME_RETENTION_ACK=1, and the optional write-through (QWEN_PREFIX_NVME_SPILL=through). Never run on a card.",
+ "smoke": [
+  {
+   "flag": "QWEN_PREFIX_NVME",
+   "value": "1",
+   "engaged": "[PINDIAG] prefix: nvme tier on",
+   "fell_back": "[PINDIAG] prefix: nvme tier UNAVAILABLE",
+   "what": "NVMe cold tier below the host KV tier (the scheduler graft's install line; a REFUSED line, the zero-retention guard, logs no 'on' line and so fails the arm too)"
+  }
+ ],
+ "image_files": [
+  {
+   "path": "scripts/ci/qwen_kv_nvme.py",
+   "reason": "the NVMe tier: flags, layout fingerprint, checkpoint codec, restore backends, the spill writer; qwen_prefix_registry and the contract import it only when a QWEN_PREFIX_NVME name is set"
+  },
+  {
+   "path": "scripts/ci/qwen_nvme_store.py",
+   "reason": "the raw-namespace object store under it: superblocks, journal, snapshots, extent allocator, O_DIRECT IO"
+  }
+ ],
+ "tests": [
+  "test_qwen_nvme_store",
+  "test_qwen_kv_nvme"
+ ],
+ "card_jobs": "none written: docs/tp4-kv-nvme.md section 12 is the plan (D0 the drive bench, A1 the audited attach, N1 exactness at 64k/128k/254k, N2 timed restore, N3 spill under eight live seats, N4 the concurrent restore ABAB, N5 restart persistence, N6 write-through), and lists what the runner and the gate need first",
+ "notes": "FLAGS. All default off and strict (qwen_kv_nvme.parse); the switch needs the host tier, the device and QWEN_PREFIX_NVME_RETENTION_ACK=1. A traffic profile may name QWEN_PREFIX_NVME=1 only under an owner traffic waiver that names it (serving_c2_contract.NVME_WAIVABLE_LEVERS); the audit, the format override, the command directory and the zero-retention override stay a gate's. NO PROFILE TWIN YET: the gate arms are derived like the sliced restore's, and the plans are part of the gate work. The tier does not start (a REFUSED line, nvme_refused_zero_retention) on a node that looks zero-retention unless QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION=1; a drive that cannot be opened logs UNAVAILABLE and the host tier serves."
+}
