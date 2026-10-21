@@ -234,6 +234,10 @@ scripts/ci/qwen_prefix_scheduler_patch.py  /experiment-scripts/ci/qwen_prefix_sc
 scripts/ci/qwen_prefix_runner_patch.py
 scripts/ci/qwen_prefix_model_patch.py
 scripts/ci/qwen_prefix_metrics.py
+# NVME: the NVMe cold tier below the host KV tier (docs/tp4-kv-nvme.md): qwen_kv_nvme (flags, layout fingerprint, checkpoint codec, restore backends, the spill writer; imported by
+# qwen_prefix_registry and the contract only when a QWEN_PREFIX_NVME name is set) over qwen_nvme_store (the raw-namespace object store: journal, snapshots, extent allocator)
+scripts/ci/qwen_kv_nvme.py
+scripts/ci/qwen_nvme_store.py
 scripts/ci/lever_n_model_patch.py
 
 # Sticky sessions, phase 1 (QWEN_FAST_STICKY_SESSIONS; the c2-packed-prefix profiles): the fast path's

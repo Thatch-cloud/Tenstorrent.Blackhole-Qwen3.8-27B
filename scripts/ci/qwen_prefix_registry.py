@@ -103,6 +103,7 @@ import json
 import os
 import sys
 import time
+import threading
 import types
 import weakref
 from array import array
@@ -241,6 +242,13 @@ QUOTA_ENV_NAMES = (ENV_QUOTA_DEVICE_CAP, ENV_QUOTA_DEVICE_FLOOR, ENV_QUOTA_HOST_
 # The counters the sliced restore adds to the registry's stats (only when QWEN_PREFIX_TIER_RESTORE_SLICE is on, so the stats of an engine without it are what they were).
 SLICE_STAT_NAMES = ('tier_slice_jobs', 'tier_slice_steps', 'tier_slice_blocks', 'tier_slice_ms', 'tier_slice_max_ms', 'tier_slice_held', 'tier_slice_aborted',
                     'tier_slice_inline')
+# The NVMe cold tier below the host tier (qwen_kv_nvme; docs/tp4-kv-nvme.md): a raw-namespace spill of the host tier's evictions and of the checkpoint store's, restored on a miss in
+# both. The names are pinned equal to the module's NAMES by test_qwen_kv_nvme; the module is imported only when one of them is set, so an engine without them runs none of its code, and
+# its counters are the module's own (merged into snapshot() only while the tier exists), never keys of self.stats.
+ENV_NVME_NAMES = ('QWEN_PREFIX_NVME', 'QWEN_PREFIX_NVME_DEVICE', 'QWEN_PREFIX_NVME_TTL_S', 'QWEN_PREFIX_NVME_MAX_AGE_S', 'QWEN_PREFIX_NVME_MAX_BYTES', 'QWEN_PREFIX_NVME_VERIFY',
+                  'QWEN_PREFIX_NVME_RESTORE', 'QWEN_PREFIX_NVME_FREE_FLOOR_BYTES', 'QWEN_PREFIX_NVME_QUEUE_BYTES', 'QWEN_PREFIX_NVME_THREADS', 'QWEN_PREFIX_NVME_FORMAT',
+                  'QWEN_PREFIX_NVME_DISCARD', 'QWEN_PREFIX_NVME_CODE_VERSION', 'QWEN_PREFIX_NVME_CMD_DIR', 'QWEN_PREFIX_NVME_AUDIT', 'QWEN_PREFIX_NVME_SPILL', 'QWEN_PREFIX_NVME_THROUGH_BLOCKS',
+                  'QWEN_PREFIX_NVME_THROUGH_IDLE_S', 'QWEN_PREFIX_NVME_RETENTION_ACK', 'QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION')
 # The counters a quota adds to the registry's stats (only when a quota is on, so the stats of an engine without one are what they were). Aggregates only: no per-tenant
 # label, key or line ever carries a salt or a tenant tag.
 QUOTA_STAT_NAMES = (
@@ -1003,6 +1011,18 @@ class TierStore(object):
         self._serials = itertools.count(1)
         self.slot_bytes = 0
         self.slab_error = None
+        # The NVMe tier's hooks (qwen_kv_nvme; None and 0: the store is what it was): spill_sink(record) is called for a record the tier evicts, on the evicting thread, before
+        # its slot is freed, and returns True to keep the slot until release_slot hands it back (the slab is mapped with `spare` slots beyond the cap for the records in flight).
+        self.spill_sink = None
+        # Write-through (QWEN_PREFIX_NVME_SPILL=through): commit_sink(record) is called for every new record filed in the tier; the NVMe tier may hold a record (held: never
+        # chosen as a victim, its slot kept if it is removed meanwhile - zombies) until its writer thread has the bytes, and gives it back with release_held.
+        self.commit_sink = None
+        self.held = set()
+        self.zombies = {}
+        self._held_lock = threading.Lock()
+        self._spare = 0
+        self._cap_slots = 0
+        self._taken = 0
         self.pinned = set()
         self._map = None
         self._view = None
@@ -1011,8 +1031,9 @@ class TierStore(object):
                       'digested': 0}
 
     # -- the slab ----------------------------------------------------------------------------------
-    def configure(self, slot_bytes):
-        """Switch to slab mode for blocks of slot_bytes. The cap becomes a whole number of slots. Only on an empty store, once."""
+    def configure(self, slot_bytes, spare_slots=0):
+        """Switch to slab mode for blocks of slot_bytes. The cap becomes a whole number of slots. Only on an empty store, once. spare_slots: slots mapped beyond the cap, for
+        evicted records the spill sink still holds (0: none, the store as it was)."""
         import mmap
 
         slot_bytes = int(slot_bytes)
@@ -1023,8 +1044,9 @@ class TierStore(object):
         slots = self.cap // slot_bytes
         if slots < 1:
             raise ValueError('the tier cap (%d bytes) does not hold one block of %d bytes' % (self.cap, slot_bytes))
+        spare = int(spare_slots or 0)
         try:
-            mapping = mmap.mmap(-1, slots * slot_bytes)
+            mapping = mmap.mmap(-1, (slots + spare) * slot_bytes)
         except (OSError, ValueError, OverflowError, MemoryError) as error:
             # No room for one mapping of the whole cap (a strict overcommit policy, a small host): the store stays in heap mode, one array per record,
             # and its cap still bounds the bytes. A tier that could not start would be worse than a slower one.
@@ -1032,13 +1054,15 @@ class TierStore(object):
             return False
         self.slot_bytes = slot_bytes
         self.cap = slots * slot_bytes
+        self._spare = spare
+        self._cap_slots = slots
         self._map = mapping
         try:
             self._map.madvise(mmap.MADV_DONTDUMP)
         except (AttributeError, OSError):
             pass
         self._view = memoryview(self._map)
-        self._free = list(range(slots - 1, -1, -1))
+        self._free = list(range(slots + spare - 1, -1, -1))
         return True
 
     def _slot_view(self, index):
@@ -1048,12 +1072,17 @@ class TierStore(object):
         if self.tenant_cap and not self._enforce_cap(tenant, self.slot_bytes):
             self._count('quota_host_refused')
             return None
-        if not self._free:
+        if not self._free or (self._spare and self._taken >= self._cap_slots):
             victim = self._victim()
             if victim is None:
                 return None
             self.remove(victim, evicted=True, reason='global')
-        return Slot(self._free.pop(), None, tenant) if self._free else None
+        if self._spare and self._taken >= self._cap_slots:
+            return None
+        if not self._free:
+            return None
+        self._taken += 1
+        return Slot(self._free.pop(), None, tenant)
 
     def reserve(self, count, tenants=None):
         """Up to `count` slots to read blocks into, evicting by policy to make them (fewer when the store cannot: every slot is a
@@ -1081,7 +1110,20 @@ class TierStore(object):
     def abort(self, slots):
         for slot in slots:
             self._release_reservation(slot)
+            self._taken -= 1
             self._free.append(slot.index)
+
+    def release_held(self, key):
+        """The NVMe writer is done with a record it held (any thread): it may be evicted again, and if it was removed meanwhile its slot comes back."""
+        with self._held_lock:
+            self.held.discard(key)
+            slot = self.zombies.pop(key, None)
+        if slot is not None:
+            self._free.append(slot)
+
+    def release_slot(self, index):
+        """A slot the spill sink kept comes back (called from the NVMe writer thread: list.append is atomic, and only the evicting thread pops, so no lock)."""
+        self._free.append(index)
 
     def commit(self, slot, key, tenant=None, chain=None, index=0):
         """File a reserved slot, now holding a block's bytes, under key. A key already held keeps its record and the slot goes back."""
@@ -1091,6 +1133,7 @@ class TierStore(object):
             self.records.move_to_end(key)
             self.by_tenant[existing.tenant].move_to_end(key)
             self.stats['duplicates'] += 1
+            self._taken -= 1
             self._free.append(slot.index)
             return True
         return self._file(TierRecord(key, slot.view, tenant, chain, int(index), next(self._serials), slot.index))
@@ -1102,6 +1145,11 @@ class TierStore(object):
         self.bytes += record.nbytes
         self.stats['puts'] += 1
         self._digest(record)
+        if self.commit_sink is not None:
+            try:
+                self.commit_sink(record)
+            except Exception as error:
+                log('nvme tier commit sink failed: %s: %s', type(error).__name__, error)
         return True
 
     # -- reads -------------------------------------------------------------------------------------
@@ -1172,7 +1220,7 @@ class TierStore(object):
         while self.tenant_bytes.get(tenant, 0) + self.reserved.get(tenant, 0) + need > cap:
             victim = None
             for key in (group or ()):
-                if key not in self.pinned:
+                if key not in self.pinned and key not in self.held:
                     victim = key
                     break
             if victim is None:
@@ -1195,11 +1243,12 @@ class TierStore(object):
 
     def _victim(self):
         pinned = self.pinned
+        holding = self.held
         if self.dead is not None:
             for position, (key, record) in enumerate(self.records.items()):
                 if position >= TIER_DEAD_SCAN:
                     break
-                if key not in pinned and self.dead(record):
+                if key not in pinned and key not in holding and self.dead(record):
                     return key
         held = 0
         found = None
@@ -1207,7 +1256,7 @@ class TierStore(object):
             # The tenants holding the most bytes first: the oldest unpinned record of the first that has one.
             for tenant in sorted(self.tenant_bytes, key=lambda name: -self.tenant_bytes[name]):
                 for key in self.by_tenant[tenant]:
-                    if key in pinned:
+                    if key in pinned or key in holding:
                         continue
                     if self.tenant_floor and self._protected(self.records[key]):
                         held += 1
@@ -1218,7 +1267,7 @@ class TierStore(object):
                     break
         else:
             for key, record in self.records.items():
-                if key in pinned:
+                if key in pinned or key in holding:
                     continue
                 if self.tenant_floor and self._protected(record):
                     held += 1
@@ -1244,8 +1293,22 @@ class TierStore(object):
         else:
             self.tenant_bytes.pop(record.tenant, None)
         self.bytes -= record.nbytes
+        retained = False
         if record.slot is not None:
-            self._free.append(record.slot)
+            self._taken -= 1
+        if evicted and self.spill_sink is not None:
+            try:
+                retained = bool(self.spill_sink(record)) and record.slot is not None
+            except Exception as error:
+                log('nvme tier spill sink failed: %s: %s', type(error).__name__, error)
+        if record.slot is not None and not retained:
+            if self.held:
+                with self._held_lock:
+                    if key in self.held:
+                        self.zombies[key] = record.slot          # (a writer thread is still reading it: release_held gives the slot back)
+                        retained = True
+            if not retained:
+                self._free.append(record.slot)
         if evicted:
             self.stats['evicted'] += 1
             if reason is not None:
@@ -1255,8 +1318,14 @@ class TierStore(object):
         return record
 
     def clear(self):
-        for record in self.records.values():
+        for key, record in self.records.items():
             if record.slot is not None:
+                self._taken -= 1
+                if self.held:
+                    with self._held_lock:
+                        if key in self.held:
+                            self.zombies[key] = record.slot
+                            continue
                 self._free.append(record.slot)
         self.records.clear()
         self.by_tenant.clear()
@@ -1328,6 +1397,25 @@ class PrefixRegistry(object):
         self.tier = None
         self.tier_io = None
         self.device_holds = None
+        # The NVMe cold tier (ENV_NVME_NAMES): the plan is read (and refused when wrong) here; the device is opened when the model's tier IO is attached.
+        self.nvme_plan = None
+        self.nvme = None
+        self.flags = flags
+        # (why a configured NVMe tier is not running: 'zero_retention' or 'unavailable'; the snapshot says so, with a counter)
+        self.nvme_refusal = None
+        if any(flags.get(name) not in (None, '') for name in ENV_NVME_NAMES):
+            import qwen_kv_nvme
+
+            self.nvme_plan = qwen_kv_nvme.nvme_plan(flags, self.tier_config)
+            signals = qwen_kv_nvme.zero_retention_signals(flags) if self.nvme_plan is not None else []
+            if signals and not self.nvme_plan.allow_zero_retention:
+                # The node advertises zero-retention (or looks as if it does) and this tier keeps prompt-derived KV on a drive: it does not start. The engine serves without it.
+                self.nvme_refusal = 'zero_retention'
+                log('nvme tier REFUSED to start on a zero-retention node: %s; the host tier serves without it (set %s=1 to override: the owner\'s decision of 2026-10-21 is retention '
+                    'for all tenants for up to %d s)', '; '.join(signals), 'QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION', self.nvme_plan.ttl_s)
+                self.nvme_plan = None
+            elif signals:
+                log('nvme tier starts on a node that looks zero-retention because %s=1 says so: %s', 'QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION', '; '.join(signals))
         # Per-tenant quotas (QUOTA_ENV_NAMES): None unless named. The counters exist only then, so an engine without one keeps the stats it had.
         self.quota = quota_config(flags, self.tier_config.kv_bytes if self.tier_config is not None else None)
         # Blocks past a checkpoint's boundary a restore must still have: 1 when vLLM drops a hit's last block (sticky sessions), else 0.
@@ -1436,8 +1524,39 @@ class PrefixRegistry(object):
         if self.tier is not None:
             self.tier.fingerprint = str(getattr(io, 'fingerprint', ''))
             block_bytes = int(getattr(io, 'block_bytes', 0) or 0)
-            if block_bytes and not self.tier.configure(block_bytes):
+            spare = 0
+            if self.nvme_plan is not None and block_bytes:
+                import qwen_kv_nvme
+
+                spare = qwen_kv_nvme.spare_slots(self.nvme_plan, block_bytes)
+            if block_bytes and not self.tier.configure(block_bytes, spare):
                 log('host tier slab not mapped (%s): the blocks are held as separate arrays, the cap still bounds the bytes', self.tier.slab_error)
+            if self.nvme_plan is not None:
+                self._attach_nvme(io)
+
+    def _attach_nvme(self, io):
+        """Open the NVMe tier on the model's IO (a second attach of another IO reopens it). A device that cannot be opened stops the engine at start: a tier that silently did
+        nothing would look like a tier that missed."""
+        import qwen_kv_nvme
+
+        if self.nvme is not None:
+            if self.nvme.io is io:
+                return
+            self.tier.spill_sink = None
+            self.tier.commit_sink = None
+            self.nvme.close()
+            self.nvme = None
+        try:
+            self.nvme = qwen_kv_nvme.NvmeTier(self.nvme_plan, io, self, logger=log, environ=self.flags)
+        except (OSError, qwen_kv_nvme.store_module.StoreError) as error:
+            # The drive is not there, is not ours, is locked, is unreadable: the tier does not start and the engine does not die of it. Loud, and counted.
+            self.nvme_refusal = 'unavailable'
+            self.nvme = None
+            log('nvme tier UNAVAILABLE, the host tier serves without it: %s: %s', type(error).__name__, error)
+            return
+        self.tier.spill_sink = self.nvme.offer
+        if self.nvme.through:
+            self.tier.commit_sink = self.nvme.offer_through
 
     @property
     def tier_on(self):
@@ -1450,19 +1569,28 @@ class PrefixRegistry(object):
             log('host tier latched off: %s', reason)
         if self.tier is not None:
             self.tier.clear()
+        if self.nvme is not None:
+            # (the NVMe level stops with the host tier it sits under; a kill switch also empties it, as it empties the host tier and the checkpoint store)
+            self.nvme.latch('host tier latched: %s' % reason)
+            if str(reason).startswith('kill switch'):
+                self.nvme.wipe(reason)
 
     def _tier_dead(self, record):
         """Whether no checkpoint reaches the block (the tier's eviction takes such records first, and the spill never stores them): a KV
         block is useful only with a checkpoint of its chain at or above it, and above the smallest session worth a restore."""
         keys = self.by_chain.get(record.chain)
-        if not keys:
-            return True
         need = max((record.index + 1 - self.tier_slack) * BLOCK, self.tier_config.min_tokens if self.tier_config is not None else 0)
+        if not keys:
+            return not self._nvme_reaches(record.chain, need)
         for key in keys:
             entry = self.entries.get(key)
             if entry is not None and entry.pos >= need:
                 return False
-        return True
+        return not self._nvme_reaches(record.chain, need)
+
+    def _nvme_reaches(self, chain, need):
+        """Whether the NVMe tier holds a checkpoint of the chain at or above `need` tokens (it keeps what the store let go)."""
+        return self.nvme is not None and self.nvme.chain_reaches(chain, need)
 
     def _tier_evicted(self, record):
         """The tier gave a record up: the checkpoint at its key (the boundary block) has no KV left in the tier, so unless the device
@@ -1526,7 +1654,30 @@ class PrefixRegistry(object):
                 ghost = self.ghost.get(key)
                 if ghost is not None:
                     ghost.state = reason
+            if reason == 'budget' and self.nvme is not None:
+                self.nvme.offer_checkpoint(checkpoint)
         return checkpoint
+
+    def adopt(self, key, image, chain=None, tenant=None):
+        """File a checkpoint the NVMe tier read back (qwen_kv_nvme.CheckpointImage) as the store's own: the same entry a capture would have made, without counting a capture.
+        -> the checkpoint, or None when the registry is off or it does not fit the budget."""
+        if self.disabled is not None or image.nbytes > self.budget_bytes:
+            return None
+        old = self.entries.get(key)
+        if old is not None:
+            return old
+        checkpoint = Checkpoint(key, image.pos, image.token_ids, image.rec, image.carry, image.nbytes, next(self._serials), chain, tenant, False)
+        if image.window is not None and self.window_carry:
+            window = image.window
+            checkpoint.window = Window(window['start'], window['end'], window['payload'], window['nbytes'], window['digest'])
+        self.entries[key] = checkpoint
+        self.bytes += checkpoint.nbytes
+        self._index(checkpoint)
+        ghost = self.ghost.get(key)
+        if ghost is not None:
+            ghost.state = 'stored'
+        self._enforce_budget(protect=key)
+        return checkpoint if self.entries.get(key) is checkpoint else None
 
     def _index(self, checkpoint):
         if checkpoint.chain is not None:
@@ -1642,6 +1793,8 @@ class PrefixRegistry(object):
         self.token_checks.clear()
         if self.tier is not None:
             self.tier.clear()
+        if self.nvme is not None:
+            self.nvme.wipe('registry clear')
         self.stats['clears'] += 1
 
     def disable(self, reason):
@@ -2044,6 +2197,10 @@ class PrefixRegistry(object):
                 ('kv_bytes', 'tier_bytes'), ('kv_entries', 'tier_entries'), ('kv_spilled', 'tier_spill_blocks'),
                 ('kv_restored', 'tier_restore_blocks'), ('kv_restore_reqs', 'tier_restore_requests'),
                 ('kv_digest_fail', 'tier_digest_failures'), ('kv_on', 'tier_on')))
+        if self.nvme is not None:
+            head.extend('%s=%d' % (name, values[key]) for name, key in (
+                ('nvme_bytes', 'nvme_bytes'), ('nvme_entries', 'nvme_entries'), ('nvme_spilled', 'nvme_spill_blocks'), ('nvme_restored', 'nvme_restore_blocks'),
+                ('nvme_restore_reqs', 'nvme_restore_requests'), ('nvme_digest_fail', 'nvme_digest_failures'), ('nvme_on', 'nvme_on')))
         head.extend('%s=%d' % (name, values['class_' + name]) for name in CLASSES)
         head.extend('%s=%d' % (name, values[key]) for name, key in (
             ('lost_kv', 'lost_tokens_kv_evicted'), ('lost_ckpt', 'lost_tokens_ckpt_evicted'),
@@ -2079,6 +2236,12 @@ class PrefixRegistry(object):
                       supersede=int(self.supersede), telemetry=int(self.telemetry))
         tier = self.tier.snapshot() if self.tier is not None else dict(bytes=0, entries=0, cap=0)
         values.update(tier_bytes=tier['bytes'], tier_entries=tier['entries'], tier_cap_bytes=tier['cap'], tier_on=int(self.tier_on))
+        if self.nvme is not None:
+            values.update(self.nvme.metrics())
+        elif self.nvme_refusal is not None:
+            import qwen_kv_nvme
+
+            values.update(qwen_kv_nvme.refused_metrics(self.nvme_refusal))
         if self.quota is not None:
             # Aggregates only: how many tenants the quotas see and how many hold their cap, never which (no tenant tag, salt or digest is exported).
             values.update(quota_on=1, quota_dev_tenants=0, quota_dev_at_cap=0, quota_host_tenants=len(self.tier.tenant_bytes) if self.tier is not None else 0,

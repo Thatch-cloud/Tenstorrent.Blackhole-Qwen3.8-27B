@@ -66,6 +66,12 @@ h. The sliced restore (QWEN_PREFIX_TIER_RESTORE_SLICE blocks, QWEN_PREFIX_TIER_R
    a failure (a miss: the request is admitted cold, and its tier hit is not retried); a trim that reaches a request whose job is unfinished finishes it whole. What it cannot slice
    is what a device-resident hit costs anyway: the tail prefill and the engine build.
 
+j. The NVMe cold tier (QWEN_PREFIX_NVME*, qwen_kv_nvme, docs/tp4-kv-nvme.md; off unless named, and then none of it runs). Below the host tier: a record the tier evicts is queued to a
+   raw NVMe namespace by the tier's spill sink, a checkpoint leaving the store likewise, both on a writer thread. The restore's reach grows with it: effective_hit counts the host
+   tier's consecutive blocks AND the NVMe's, a checkpoint missing from the store is read back from the NVMe and filed as its own (adopt_checkpoint), and the NVMe-resident blocks of
+   a restore are read into host-tier records first (promote, whole in the trim; fill, a slice at a time in the sliced restore) - after which the restore is item f's, unchanged,
+   so every digest it checks it still checks. A direct restore backend (none is built) takes NVMe-resident blocks to the device without the host (load_direct). Any failure is a miss.
+
 g. Tenant quotas (qwen_prefix_registry.QuotaConfig, DeviceQuota below; QWEN_PREFIX_TENANT_QUOTA_DEVICE_CAP_TOKENS / _FLOOR_TOKENS, off unless named and then none of
    this runs). The tenant is the salt's (tenant_of_salt); the same numbers apply to every tenant. A tenant's RESIDENT tokens are its cached prefix blocks in the
    device pool, running or idle. The CAP is soft by what is running (a running request's blocks cannot be evicted): when a tenant's resident blocks pass its cap,
@@ -639,7 +645,33 @@ class RestoreJob(object):
 
 
 class SliceRefused(Exception):
-    """A slice could not be written (a record failed its digest): the job is abandoned and the request goes on without the tier."""
+    """A slice could not be written (a record failed its digest, or an NVMe block could not be brought back): the job is abandoned and the request goes on without the tier."""
+
+    def __init__(self, reason='a record failed its digest'):
+        Exception.__init__(self, reason)
+        self.reason = reason
+
+
+class IdleCopy(object):
+    """A finished request's published prompt blocks waiting for the idle copy: when they are due (ready), the hash of every block of its prompt, how many are published (count),
+    the next one to look at, and the chain and tenant they belong to."""
+
+    __slots__ = ('ready', 'hashes', 'count', 'next', 'chain', 'tenant')
+
+    def __init__(self, ready, hashes, count, chain, tenant):
+        self.ready, self.hashes, self.count, self.next, self.chain, self.tenant = ready, hashes, count, 0, chain, tenant
+
+
+IDLE_BACKLOG = 1024        # finished requests remembered for the idle copy
+
+
+class Pending(object):
+    """A block of a sliced restore that is on the NVMe tier and not yet in the host tier: filled (read into a host record) by the slice that needs it."""
+
+    __slots__ = ('key', 'index')
+
+    def __init__(self, key, index):
+        self.key, self.index = key, index
 
 
 # The blocks of the first slice of a job when no cost per block has been measured yet (a probe), and the longest one slice may hold the engine before the gate calls it a defect.
@@ -674,11 +706,21 @@ class TierHooks(object):
         self.kill_switch = prefix_registry.KillSwitch(self.config.off_path, prefix_registry.KILL_SWITCH_POLL_S, graft.kill_switch.clock)
         graft.registry.device_holds = self.device_holds
         graft.registry.tier_slack = 1 if graft.drop_last else 0
+        # The NVMe cold tier (docstring item j): None unless the registry opened one on the model's IO.
+        self.nvme = getattr(graft.registry, 'nvme', None)
+        # Write-through (QWEN_PREFIX_NVME_SPILL=through): finished requests whose still-cached device blocks are copied toward the drive once idle, a bounded slice per step.
+        self.idle = OrderedDict()
         # The gate reads this line (prefix_markers.TIER_ON): the tier is configured and the model graft's IO is attached.
         graft.log('host tier on gib=%.2f kv_gib=%.2f block_bytes=%d verify=%s audit=%d spill_max_blocks=%d min_tokens=%d slack=%d off_path=%s',
                   self.config.total / float(1 << 30), self.config.kv_bytes / float(1 << 30), int(getattr(self.io, 'block_bytes', 0) or 0),
                   self.config.verify, 1 if self.config.audit else 0, self.config.spill_max, self.config.min_tokens, graft.registry.tier_slack,
                   self.config.off_path)
+        if self.nvme is not None:
+            # The gate reads this line (prefix_markers.NVME_ON): the NVMe level is configured, opened, and wired to the scheduler graft.
+            described = self.nvme.describe()
+            graft.log('nvme tier on backend=%s ttl_s=%d max_age_s=%d verify=%s audit=%d queue_bytes=%d capacity_bytes=%d spill=%s through_blocks=%d through_idle_s=%d fingerprint=%s',
+                      described['backend'], described['ttl_s'], described['max_age_s'], described['verify'], described['audit'], described['queue_bytes'],
+                      described['capacity_bytes'], described['spill'], described['through_blocks'], described['through_idle_s'], described['fingerprint'])
         plan = getattr(graft.registry, 'spill_plan', None)
         if plan is not None:
             # The gate reads this line (prefix_markers.TIER_SPILL_COMPLETE): the cap is lifted to the hard maximum, in batches.
@@ -693,6 +735,8 @@ class TierHooks(object):
         if self.kill_switch.poll():
             self.registry.tier_latch('kill switch %s present' % self.kill_switch.path)
             self.pending.clear()
+        if self.nvme is not None:
+            self.nvme.poll()
         return self.active
 
     def key_of(self, block_hash):
@@ -906,11 +950,49 @@ class TierHooks(object):
         start = h // BLOCK + drop
         limit = min(len(hashes), floor_chunk(request.num_prompt_tokens) // BLOCK, (request.num_tokens - 1) // BLOCK)
         count = 0
-        while start + count < limit and self.tier.has(hashes[start + count]):
+        holds = self.tier.has if self.nvme is None else self.holds
+        while start + count < limit and holds(hashes[start + count]):
             count += 1
-        if not count:
-            return h
-        return (start + count) * BLOCK - (BLOCK if graft.drop_last else 0)
+        effective = h
+        if count:
+            effective = (start + count) * BLOCK - (BLOCK if graft.drop_last else 0)
+        if self.nvme is not None and effective >= CHUNK:
+            self.adopt_checkpoint(request, effective)
+        return effective
+
+    def holds(self, key):
+        """Whether the block is in the host tier or the NVMe tier (the restore can bring it back)."""
+        return self.tier.has(key) or self.nvme.has_kv(key)
+
+    def adopt_checkpoint(self, request, h):
+        """The NVMe tier's half of the trim: the highest checkpoint the trim could choose for a hit of h tokens, if the store lost it and the NVMe kept it, is read back and
+        filed in the store as its own (the trim then finds it, and checks its token ids as for any checkpoint). The candidates are the ones select() walks (its sticky ceilings
+        included); the first one the store already holds ends the walk."""
+        graft, registry, nvme = self.graft, self.registry, self.nvme
+        hashes = request.block_hashes
+        k = h // CHUNK
+        if graft.sticky:
+            window_ceiling = max(0, request.num_prompt_tokens - CHUNK) // CHUNK * CHUNK
+            if getattr(graft, 'carry', False):
+                k = min(k, max(0, request.num_prompt_tokens - 1) // CHUNK)
+            else:
+                k = min(k, window_ceiling // CHUNK)
+        while k > 0:
+            count = k * CHUNK // BLOCK
+            k -= 1
+            if count > len(hashes):
+                continue
+            key = hashes[count - 1]
+            if registry.entries.get(key) is not None:
+                return
+            entry = nvme.checkpoint_entry(key)
+            if entry is None or entry.index != (k + 1) * CHUNK:
+                continue
+            image = nvme.load_checkpoint(entry)
+            if image is None:
+                continue
+            if registry.adopt(key, image, chain=hashes[0] if len(hashes) else None, tenant=prefix_registry.tenant_of_salt(request.cache_salt)) is not None:
+                return
 
     def recompute(self, request):
         """vLLM's own hit again, without a trace in its prefix-cache statistics."""
@@ -958,6 +1040,19 @@ class TierHooks(object):
         if need <= first:
             return False
         hashes = request.block_hashes
+        if self.nvme is not None:
+            # The NVMe tier's part of the restore (docstring item j): what the host tier lacks and the NVMe holds is read into host records first.
+            if self.nvme.backend.direct:
+                return self.load_direct(request, blocks, h, first, need, drop)
+            absent = [index for index in range(first, need) if not tier.has(hashes[index])]
+            if absent:
+                lookahead = int(getattr(graft.scheduler, 'num_lookahead_tokens', 0) or 0)
+                beyond = -(-(request.num_tokens + lookahead) // BLOCK) - need + 1
+                if pool.get_num_free_blocks() < (need - first) + max(0, beyond):
+                    stats['tier_restore_refused_room'] += 1
+                    return False
+                if self.promote(request, first, need, absent) is None:
+                    return False
         records = []
         for index in range(first, need):
             record = tier.get(hashes[index])
@@ -1037,6 +1132,200 @@ class TierHooks(object):
                       elapsed, first * BLOCK, need * BLOCK)
         return ok
 
+    # -- the NVMe tier's part of a restore (docstring item j) -------------------------------------------------------
+    def promote_records(self, request, indices, protect=()):
+        """Read the NVMe-resident blocks `indices` of `request` into host-tier records (slab slots reserved by policy, so what that evicts is itself spilled to the NVMe if it
+        is worth it), checking the NVMe tier's digests. -> {index: TierRecord}, or None (counted) when any block is gone, there is no room, a digest failed or the device
+        failed. `protect`: keys of host records the reservation must not take. A restore that fails after this keeps the records: they are valid host-tier blocks."""
+        tier, nvme, stats = self.tier, self.nvme, self.registry.stats
+        counters = nvme.c
+        hashes = request.block_hashes
+        tenant = prefix_registry.tenant_of_salt(request.cache_salt)
+        chain = hashes[0] if len(hashes) else None
+        keys = [hashes[index] for index in indices]
+        mine = [key for key in list(protect) if key not in tier.pinned]
+        tier.pin(mine)
+        entries = nvme.pin_kv(keys)
+        slots = []
+        try:
+            if any(entry is None for entry in entries):
+                counters['nvme_miss_blocks'] += sum(1 for entry in entries if entry is None)
+                counters['nvme_restore_failures'] += 1
+                stats['tier_restore_failures'] += 1
+                return None
+            if tier.slot_bytes:
+                slots = tier.reserve(len(keys), [tenant] * len(keys))
+                if len(slots) < len(keys):
+                    tier.abort(slots)
+                    slots = []
+                    counters['nvme_restore_refused_room'] += 1
+                    return None
+                views = [slot.view for slot in slots]
+            else:
+                views = [bytearray(entry.nbytes) for entry in entries]
+            results = nvme.backend.read_to_host(nvme, entries, views)
+            failed = [index for index, result in zip(indices, results) if result is not None]
+            if failed:
+                if slots:
+                    tier.abort(slots)
+                    slots = []
+                if any(result == 'digest' for result in results):
+                    counters['nvme_restore_refused_digest'] += 1
+                    self.graft.log('nvme tier record failed its digest req=%s block=%d: dropped', request.request_id, failed[0])
+                else:
+                    counters['nvme_restore_failures'] += 1
+                return None
+            made = {}
+            for position, index in enumerate(indices):
+                if slots:
+                    tier.commit(slots[position], keys[position], tenant, chain, index)
+                    record = tier.get(keys[position], touch=False)
+                elif tier.put(keys[position], views[position], tenant, chain, index):
+                    record = tier.get(keys[position], touch=False)
+                else:
+                    record = None
+                if record is None:
+                    counters['nvme_restore_failures'] += 1
+                    return None
+                made[index] = record
+            slots = []
+            tier.pin(keys)
+            nvme.touch_kv(keys)
+            return made
+        except Exception as error:
+            counters['nvme_restore_failures'] += 1
+            stats['tier_restore_failures'] += 1
+            self.graft.log('nvme tier restore failed req=%s: %s: %s', request.request_id, type(error).__name__, error)
+            return None
+        finally:
+            if slots:
+                tier.abort(slots)
+            tier.unpin(mine)
+            nvme.unpin(entries)
+
+    def promote(self, request, first, need, absent):
+        """The whole restore's NVMe step: bring `absent` (indexes of the blocks [first, need) the host tier lacks) in as host records. The pins it takes on the new records stay
+        for load(), which pins the whole range itself and lets go at its end. -> the records, or None."""
+        hashes = request.block_hashes
+        gone = set(absent)
+        present = [hashes[index] for index in range(first, need) if index not in gone]
+        began = time.perf_counter()
+        made = self.promote_records(request, absent, protect=present)
+        if made is None:
+            return None
+        size = sum(len(record.payload) for record in made.values())
+        self.nvme.note_restore(len(made), size, first, need, request.request_id)
+        return made
+
+    def fill(self, job, low, count):
+        """The sliced restore's NVMe step: the Pending blocks among job.records[low:low + count] become host records (SliceRefused when they cannot)."""
+        wanted = [position for position in range(low, low + count) if isinstance(job.records[position], Pending)]
+        if not wanted:
+            return
+        indices = [job.records[position].index for position in wanted]
+        made = self.promote_records(job.request, indices)
+        if made is None:
+            raise SliceRefused('an NVMe block could not be brought back')
+        for position, index in zip(wanted, indices):
+            job.records[position] = made[index]
+        size = sum(len(record.payload) for record in made.values())
+        self.nvme.note_restore(len(made), size, job.first + wanted[0], job.first + wanted[-1] + 1, job.request_id)
+
+    def load_direct(self, request, blocks, h, first, need, drop):
+        """load() for a DIRECT backend (RestoreBackend.direct: NVMe -> device with no host copy): the blocks the host tier holds are written as before, the NVMe-resident
+        ones are handed to the backend with the device blocks the pool allocated for them. No backend is built; test_qwen_kv_nvme drives this seam with a double. Everything else is
+        load()'s, including the miss on any failure."""
+        graft, registry, stats, tier, pool, nvme = self.graft, self.registry, self.registry.stats, self.tier, self.graft.block_pool, self.nvme
+        hashes = request.block_hashes
+        records, cold = {}, []
+        for index in range(first, need):
+            record = tier.get(hashes[index])
+            if record is not None:
+                records[index] = record
+            elif nvme.has_kv(hashes[index]):
+                cold.append(index)
+            else:
+                stats['tier_restore_failures'] += 1
+                return False
+        lookahead = int(getattr(graft.scheduler, 'num_lookahead_tokens', 0) or 0)
+        beyond = -(-(request.num_tokens + lookahead) // BLOCK) - need + 1
+        if pool.get_num_free_blocks() < (need - first) + max(0, beyond):
+            stats['tier_restore_refused_room'] += 1
+            return False
+        for record in list(records.values()):
+            if not self.check_digest(record):
+                stats['tier_restore_refused_digest'] += 1
+                graft.log('host tier record failed its digest req=%s block=%d: dropped', request.request_id, record.index)
+                tier.remove(record.key)
+                self.unhold([record.key])
+                return False
+        entries = nvme.pin_kv([hashes[index] for index in cold])
+        if any(entry is None for entry in entries):
+            nvme.c['nvme_miss_blocks'] += sum(1 for entry in entries if entry is None)
+            nvme.c['nvme_restore_failures'] += 1
+            nvme.unpin(entries)
+            return False
+        protected = list(blocks.blocks[0])
+        if drop:
+            extra = pool.cached_block_hash_to_block.get_one_block(self.key_of(hashes[h // BLOCK]))
+            if extra is None:
+                stats['tier_restore_failures'] += 1
+                nvme.unpin(entries)
+                return False
+            protected.append(extra)
+        began = time.perf_counter()
+        new = []
+        ok = False
+        pool.touch(protected)
+        tier.pin([record.key for record in records.values()])
+        tenant = prefix_registry.tenant_of_salt(request.cache_salt)
+        quota = graft.quota
+        if quota is not None:
+            quota.allocating = tenant
+        try:
+            new = pool.get_new_blocks(need - first)
+            self.flush()
+            ids = [block.block_id for block in new]
+            warm = sorted(records)
+            if warm:
+                self.io.write_blocks([ids[index - first] for index in warm], [records[index].payload for index in warm])
+            if cold:
+                nvme.restore_to_device(entries, [ids[index - first] for index in cold])
+            pool.cache_full_blocks(request, [None] * first + list(new), first, need, BLOCK, 0)
+            chain = hashes[0] if len(hashes) else None
+            for offset, block in enumerate(new):
+                self.meta[block.block_id] = (hashes[first + offset], chain, tenant, first + offset)
+            if quota is not None:
+                quota.note_published(new, tenant)
+            ok = True
+        except Exception as error:
+            stats['tier_restore_failures'] += 1
+            nvme.c['nvme_restore_failures'] += 1
+            self.failures += 1
+            graft.log('nvme tier direct restore failed req=%s (%d so far): %s: %s', request.request_id, self.failures, type(error).__name__, error)
+            if self.failures >= 3:
+                registry.tier_latch('three restores in a row failed')
+        finally:
+            if quota is not None:
+                quota.allocating = None
+            tier.unpin([record.key for record in records.values()])
+            nvme.unpin(entries)
+            if new:
+                pool.free_blocks(reversed(new))
+            pool.free_blocks(reversed(protected))
+        if ok:
+            self.failures = 0
+            elapsed = (time.perf_counter() - began) * 1000.0
+            cold_bytes = sum(entry.nbytes for entry in entries)
+            size = sum(len(record.payload) for record in records.values()) + cold_bytes
+            stats['tier_restore_requests'] += 1
+            stats['tier_restore_blocks'] += need - first
+            stats['tier_restore_bytes'] += size
+            stats['tier_restore_ms'] += elapsed
+            nvme.note_restore(len(cold), cold_bytes, first, need, request.request_id)
+            graft.log('host tier restore req=%s blocks=%d bytes=%d ms=%.1f from=%d to=%d', request.request_id, need - first, size, elapsed, first * BLOCK, need * BLOCK)
+        return ok
+
     # -- the sliced restore (docstring item h) -------------------------------------------------------------------
     def hold(self, request):
         """Called by the one-fresh-prefill admission for the candidate it is about to admit: True while the request's blocks are not all back from the tier (this call restored a
@@ -1085,8 +1374,12 @@ class TierHooks(object):
         for index in range(first, need):
             record = tier.get(hashes[index])
             if record is None:
-                stats['tier_restore_failures'] += 1
-                return None
+                if self.nvme is not None and not self.nvme.backend.direct and self.nvme.has_kv(hashes[index]):
+                    # On the NVMe tier only: the slice that needs it reads it back (fill). (A direct backend has no sliced restore: the trim restores whole.)
+                    record = Pending(hashes[index], index)
+                else:
+                    stats['tier_restore_failures'] += 1
+                    return None
             records.append(record)
         lookahead = int(getattr(graft.scheduler, 'num_lookahead_tokens', 0) or 0)
         beyond = -(-(request.num_tokens + lookahead) // BLOCK) - need + 1
@@ -1131,6 +1424,9 @@ class TierHooks(object):
         began = time.perf_counter()
         quota = graft.quota
         try:
+            if self.nvme is not None:
+                self.fill(job, low, count)
+                records = job.records[low:low + count]
             for record in records:
                 if not self.check_digest(record):
                     stats['tier_restore_refused_digest'] += 1
@@ -1152,8 +1448,8 @@ class TierHooks(object):
             self.io.write_blocks(ids, payloads)
             if self.config.audit:
                 self.audit(job.request, ids, payloads)
-        except SliceRefused:
-            self.abort(job, 'a record failed its digest')
+        except SliceRefused as refused:
+            self.abort(job, refused.reason)
             return 'failed'
         except TierAuditError:
             self.abort(job, 'the audit failed', refuse=False)
@@ -1227,6 +1523,96 @@ class TierHooks(object):
         self.release(job)
         if refuse:
             self.refused.add(job.request_id)
+
+    # -- write-through: the idle copy (docstring item j) ---------------------------------------------------------
+    def note_idle(self, request):
+        """A request finished (the free hook): its published prompt blocks stay cached on the device, and under QWEN_PREFIX_NVME_SPILL=through they are copied toward the drive
+        once the request has been idle for QWEN_PREFIX_NVME_THROUGH_IDLE_S."""
+        nvme = self.nvme
+        if nvme is None or not nvme.through or not self.active or not self.eligible(request):
+            return
+        hashes = request.block_hashes
+        count = min(len(hashes), floor_chunk(request.num_prompt_tokens) // BLOCK)
+        if count * BLOCK < max(self.config.min_tokens, CHUNK):
+            return
+        clock = self.graft.kill_switch.clock
+        chain = hashes[0] if len(hashes) else None
+        self.idle.pop(request.request_id, None)
+        self.idle[request.request_id] = IdleCopy(clock() + nvme.plan.through_idle_s, hashes, count, chain, prefix_registry.tenant_of_salt(request.cache_salt))
+        while len(self.idle) > IDLE_BACKLOG:
+            self.idle.popitem(last=False)
+        nvme.backlog_blocks = sum(entry.count - entry.next for entry in self.idle.values())
+
+    def copy_idle(self):
+        """At the end of a schedule() call (the device idle, nothing yet written for the step - flush's own moment): read up to QWEN_PREFIX_NVME_THROUGH_BLOCKS of the cached
+        device blocks of requests that have been idle long enough into the host tier. Each record that enters the tier is queued to the drive by the tier's commit sink, so a warm
+        copy is on its way before any eviction. Blocks the host tier or the drive already holds, blocks no longer cached, blocks cached in this very step (not yet written) and blocks
+        no checkpoint reaches are skipped. A failing read is counted and, three in a row, latches the host tier as for a spill."""
+        nvme, registry, tier, pool = self.nvme, self.registry, self.tier, self.graft.block_pool
+        if not self.idle or not self.active or nvme is None or not nvme.through:
+            return
+        counters = nvme.c
+        clock = self.graft.kill_switch.clock
+        now = clock()
+        gauges = prefix_registry.host_gauges()
+        available = gauges.get('host_mem_available_bytes')
+        if available is not None and available < self.config.min_available:
+            return
+        budget = nvme.plan.through_blocks
+        picked = []
+        for request_id in list(self.idle):
+            entry = self.idle[request_id]
+            if entry.ready > now:
+                break
+            while entry.next < entry.count and len(picked) < budget:
+                index = entry.next
+                entry.next += 1
+                key = entry.hashes[index]
+                if tier.has(key) or nvme.has_kv(key) or key in nvme.queued_keys:
+                    continue
+                block = pool.cached_block_hash_to_block.get_one_block(self.key_of(key))
+                if block is None or block.block_id in registry.same_step_blocks:
+                    continue
+                if registry._tier_dead(types.SimpleNamespace(chain=entry.chain, index=index)):
+                    continue
+                picked.append((key, block.block_id, entry.tenant, entry.chain, index))
+            if entry.next >= entry.count:
+                del self.idle[request_id]
+            if len(picked) >= budget:
+                break
+        nvme.backlog_blocks = sum(entry.count - entry.next for entry in self.idle.values())
+        if not picked:
+            return
+        began = time.perf_counter()
+        slots = tier.reserve(len(picked), [item[2] for item in picked]) if tier.slot_bytes else []
+        if tier.slot_bytes and len(slots) < len(picked):
+            tier.abort(slots)
+            return
+        try:
+            payloads = self.io.read_blocks([item[1] for item in picked], into=[slot.view for slot in slots] if slots else None)
+            if len(payloads) != len(picked):
+                raise ValueError('the tier IO read %d payloads for %d blocks' % (len(payloads), len(picked)))
+        except Exception as error:
+            tier.abort(slots)
+            counters['nvme_through_failures'] += 1
+            self.failures += 1
+            self.graft.log('nvme tier idle copy failed (%d so far): %s: %s', self.failures, type(error).__name__, error)
+            if self.failures >= 3:
+                registry.tier_latch('three device reads in a row failed')
+            return
+        self.failures = 0
+        filed = 0
+        for position, (key, _block, tenant, chain, index) in enumerate(picked):
+            if slots:
+                tier.commit(slots[position], key, tenant, chain, index)
+                filed += 1
+            elif tier.put(key, payloads[position], tenant, chain, index):
+                filed += 1
+        elapsed = (time.perf_counter() - began) * 1000.0
+        counters['nvme_through_copied_blocks'] += filed
+        counters['nvme_through_copied_bytes'] += sum(len(payload) for payload in payloads)
+        counters['nvme_through_copy_ms'] += elapsed
+        counters['nvme_through_copy_steps'] += 1
 
     def cancel(self, request_id):
         """The request ended (finished, aborted, freed): its job goes with it, and so does the memory of a refusal."""
@@ -1815,6 +2201,8 @@ class SchedulerGraft(object):
                 raise
             if hooks is not None:
                 hooks.flush()
+                if hooks.nvme is not None and hooks.nvme.through:
+                    hooks.copy_idle()
             self.commit(output)
             return output
 
@@ -1844,6 +2232,8 @@ class SchedulerGraft(object):
                 registry.turns.forget(request.request_id)
             if self.tier_hooks is not None:
                 self.tier_hooks.cancel(request.request_id)
+                if self.tier_hooks.nvme is not None:
+                    self.tier_hooks.note_idle(request)
             registry.forget_request(request.request_id)
             return original['_free_request'](request, *args, **kwargs)
 
