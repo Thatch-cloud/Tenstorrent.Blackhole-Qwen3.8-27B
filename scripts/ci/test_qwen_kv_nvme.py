@@ -189,7 +189,7 @@ class FlagTests(unittest.TestCase):
         self.assertEqual(problems, [])
         self.assertEqual((plan.spill, plan.through_blocks, plan.through_idle_s, plan.allow_zero_retention), ('evict', 32, 60, False))
         self.assertEqual((plan.device, plan.ttl_s, plan.max_age_s, plan.max_bytes, plan.verify, plan.restore, plan.free_floor_bytes),
-                         ('/dev/nvme1n1', 7 * 86400, 0, 0, 'sample', 'host', None))
+                         ('/dev/nvme1n1', 86400, 0, 0, 'sample', 'host', None))
         self.assertEqual((plan.queue_bytes, plan.threads, plan.format, plan.discard, plan.audit, plan.cmd_dir), (2 << 30, 4, 'auto', False, False, None))
 
     def test_every_value_is_strict(self):

@@ -125,7 +125,7 @@ PREFIX_SLICE_MS = 'QWEN_PREFIX_TIER_RESTORE_SLICE_MS'
 PREFIX_SLICE_NAMES = (PREFIX_SLICE_BLOCKS, PREFIX_SLICE_MS)
 # The NVMe cold tier below the host tier (qwen_kv_nvme.NAMES and GATE_ONLY, pinned equal by test_qwen_kv_nvme; docs/tp4-kv-nvme.md): a raw-namespace spill of the host tier's evictions and of
 # the checkpoint store's, restored on a miss in both. Default off and byte-identical off, strict, only beside the host tier. It keeps prompt-derived data on a drive for up to its TTL (owner
-# decision 2026-10-21: all tenants, 7 days), so a TRAFFIC profile may name it only under an owner traffic waiver that names QWEN_PREFIX_NVME=1 (NVME_WAIVABLE_LEVERS), and the names that
+# decisions 2026-10-21: all tenants, 1 day), so a TRAFFIC profile may name it only under an owner traffic waiver that names QWEN_PREFIX_NVME=1 (NVME_WAIVABLE_LEVERS), and the names that
 # are a gate's own (the audit, the format override, the command directory, and the zero-retention override: a baked override would defeat the guard on every node the image runs on)
 # stay a gate's. Every profile that names it must carry the retention acknowledgement (qwen_kv_nvme.parse says why).
 PREFIX_NVME_SWITCH = 'QWEN_PREFIX_NVME'
@@ -699,7 +699,7 @@ def prefix_policy_problems(profile):
         if slice_blocks and not waived(profile, PREFIX_TIER_GIB, env):
             problems.append('%s: the sliced restore is the host tier\'s, so a traffic profile may name it only when its %s names the tier (%s)' % (PREFIX_SLICE_BLOCKS, TRAFFIC_WAIVER, PREFIX_TIER_GIB))
         if nvme_on and not waived(profile, PREFIX_NVME_SWITCH, env):
-            problems.append('%s=1: the NVMe tier keeps prompt-derived KV on a drive for up to its TTL (owner decision 2026-10-21: all tenants, 7 days), so a traffic profile may name it '
+            problems.append('%s=1: the NVMe tier keeps prompt-derived KV on a drive for up to its TTL (owner decisions 2026-10-21: all tenants, 1 day), so a traffic profile may name it '
                             'only when its %s names it (%s)' % (PREFIX_NVME_SWITCH, TRAFFIC_WAIVER, PREFIX_NVME_SWITCH))
         gate_names = [name for name in PREFIX_NVME_GATE_ONLY if env.get(name) not in (None, '', '0')]
         if gate_names:
@@ -899,7 +899,7 @@ TIER_WAIVABLE_LEVERS = {'QWEN_PREFIX_HOST_TIER_GIB': '32', 'QWEN_PREFIX_CKPT_PRE
 # in a waiver run like the octo shape) and exact resume P0 (the undrop and the drafter-window carry; the carry's audit stays a gate's own). Each has run on CPU alone: the waiver is the
 # owner's decision that they run unqualified, exactly as for the levers above, and the audits and the gate-only names of both stay a gate's.
 TIER_WAIVABLE_ALSO = {'QWEN_PREFIX_HOST_TIER_GIB': ('48',)}
-# The NVMe cold tier (docs/tp4-kv-nvme.md): a waiver may ALSO name it. Owner decision 2026-10-21: retention for all tenants, TTL 7 days. The acknowledgement, the audit, the format override,
+# The NVMe cold tier (docs/tp4-kv-nvme.md): a waiver may ALSO name it. Owner decisions 2026-10-21: retention for all tenants, TTL 1 day. The acknowledgement, the audit, the format override,
 # the command directory and the zero-retention override stay out of it (prefix_policy_problems).
 NVME_WAIVABLE_LEVERS = {'QWEN_PREFIX_NVME': '1'}
 # tp4/sched-1 (docs/tp4-sched-1.md), the two of its levers that return device time to the decoders and trade none away: the lean admission (QWEN_FAST_ADMISSION_LEAN=1: three admission

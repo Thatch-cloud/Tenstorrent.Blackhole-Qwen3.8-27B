@@ -81,7 +81,7 @@ ZERO_RETENTION_ENV = ('THATCH_ATTESTATION_PRIVATE_KEY', 'THATCH_ZERO_RETENTION',
 ZERO_RETENTION_MARKER = '/models/.qwen-c2/zero-retention'
 VERIFY_EVERY = 16
 RESTORE_BACKENDS = ('host', 'p2p')
-DEFAULT_TTL_S = 7 * 24 * 3600
+DEFAULT_TTL_S = 24 * 3600
 MAX_TTL_S = 366 * 24 * 3600
 DEFAULT_QUEUE_BYTES = 2 << 30
 MIN_QUEUE_BYTES = 16 << 20
@@ -238,7 +238,7 @@ def parse(env):
     # The retention acknowledgement: the serving process cannot know what its node agent advertises, so the profile says, in so many words, that this node keeps prompt-derived
     # data on a drive for days and is not a zero-retention node.
     if env.get(ENV_RETENTION_ACK) != '1':
-        problems.append('%s=1 is required with %s=1: the tier keeps prompt-derived KV on a drive for up to its TTL (default 7 days; all tenants; owner decision 2026-10-21), which a '
+        problems.append('%s=1 is required with %s=1: the tier keeps prompt-derived KV on a drive for up to its TTL (default 1 day; all tenants; owner decisions 2026-10-21), which a '
                         'node that advertises zero-retention must not do, and a serving process cannot tell what its node advertises' % (ENV_RETENTION_ACK, ENV_SWITCH))
     plan.allow_zero_retention = _switch(env, ENV_ALLOW_ZERO_RETENTION, problems)
     return (None if problems else plan), problems

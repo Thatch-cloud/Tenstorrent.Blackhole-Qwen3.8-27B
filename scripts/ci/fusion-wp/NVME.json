@@ -1,7 +1,7 @@
 {
  "wp": "NVME",
  "branch": "tp4/kv-nvme-1",
- "description": "The NVMe cold tier below the host KV tier (docs/tp4-kv-nvme.md): a raw-namespace spill of the host tier's evictions and of the checkpoint store's, restored on a miss in both host stores, so a returning session's KV stays warm for up to 7 days (owner decision 2026-10-21: all tenants) and comes back in about a second or two instead of a 75 to 145 s cold re-prefill. QWEN_PREFIX_NVME=1 with QWEN_PREFIX_NVME_DEVICE and the required QWEN_PREFIX_NVME_RETENTION_ACK=1, and the optional write-through (QWEN_PREFIX_NVME_SPILL=through). Never run on a card.",
+ "description": "The NVMe cold tier below the host KV tier (docs/tp4-kv-nvme.md): a raw-namespace spill of the host tier's evictions and of the checkpoint store's, restored on a miss in both host stores, so a returning session's KV stays warm for up to a day since its last use (owner decisions 2026-10-21: all tenants, TTL 1 day) and comes back in about a second or two instead of a 75 to 145 s cold re-prefill. QWEN_PREFIX_NVME=1 with QWEN_PREFIX_NVME_DEVICE and the required QWEN_PREFIX_NVME_RETENTION_ACK=1, and the optional write-through (QWEN_PREFIX_NVME_SPILL=through). Never run on a card.",
  "smoke": [
   {
    "flag": "QWEN_PREFIX_NVME",
