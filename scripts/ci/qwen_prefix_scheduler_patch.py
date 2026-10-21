@@ -1192,7 +1192,10 @@ class TierHooks(object):
         tenant = prefix_registry.tenant_of_salt(request.cache_salt)
         chain = hashes[0] if len(hashes) else None
         keys = [hashes[index] for index in indices]
-        mine = [key for key in list(protect) if key not in tier.pinned]
+        # (pins: the host records the reservation must not take are pinned for its length; a pin someone else holds - a sliced job's - is theirs and stays. The new records are
+        # not left pinned: the caller pins what it uses, and nothing touches the tier in between.)
+        before = set(tier.pinned)
+        mine = [key for key in list(protect) if key not in before]
         tier.pin(mine)
         entries = nvme.pin_kv(keys)
         slots = []
@@ -1238,7 +1241,6 @@ class TierHooks(object):
                     return None
                 made[index] = record
             slots = []
-            tier.pin(keys)
             nvme.touch_kv(keys)
             return made
         except Exception as error:
