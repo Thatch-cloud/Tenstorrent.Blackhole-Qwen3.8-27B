@@ -221,6 +221,9 @@ FUSION_LEVERS = (
     ('QWEN_FAST_GRID13', '1', '[PINDIAG] tp4 grid13 engaged', '[PINDIAG] tp4 grid13 fell back', 'M1 matmul grids for the 13x10 compute grid'),  # M1
     ('QWEN_FAST_PREFILL_HANDOFF', '1', '[PINDIAG] prefill handoff engaged', '[PINDIAG] prefill handoff fell back', 'PF2-H device-side GDN slot hand-off of the final step'),  # PF2
     ('QWEN_PREFIX_TIER_RESTORE_SLICE', '512', '[PINDIAG] prefix: host tier restore slice on', '[PINDIAG] prefix: host tier restore slice fell back', 'sliced host-tier restore'),  # TS
+    ('QWEN_PREFIX_TIER_IO_THREADS', '4', '[PINDIAG] prefix: host tier upload on', '[PINDIAG] prefix: host tier upload fell back', "threaded staging copies of the host tier's raw block IO"),  # UP1
+    ('QWEN_PREFIX_TIER_IO_THREADS', '8', '[PINDIAG] prefix: host tier upload on', '[PINDIAG] prefix: host tier upload fell back', "threaded staging copies of the host tier's raw block IO (8 threads)"),  # UP1
+    ('QWEN_PREFIX_TIER_VERIFY_THREADS', '4', '[PINDIAG] prefix: host tier upload on', '[PINDIAG] prefix: host tier upload fell back', "digest checks of the host tier's restores on worker threads"),  # UP1
     ('QWEN_FAST_MLP_CFG', 'g3u4d3', '[PINDIAG] tp4 mlp gateup engaged route=cfg', '[PINDIAG] tp4 mlp gateup fell back', 'MLP streaming config g3u4d3 (the card-M sweep winner)'),  # WP0
     ('QWEN_FAST_CCL_OPTIONS', 'served', '[PINDIAG] tp4 ccl options engaged', '[PINDIAG] tp4 ccl options fell back', 'CCL options (the served set)'),  # WP5
     ('QWEN_FAST_BATCHED_READS', 'async', '[PINDIAG] tp4 batched reads engaged', '[PINDIAG] tp4 batched reads fell back', 'WPH-3 batched read-backs (asynchronous copies)'),  # WPH

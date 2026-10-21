@@ -123,6 +123,10 @@ PREFIX_QUOTA_NAMES = PREFIX_QUOTA_TOKENS + PREFIX_QUOTA_GIB
 PREFIX_SLICE_BLOCKS = 'QWEN_PREFIX_TIER_RESTORE_SLICE'
 PREFIX_SLICE_MS = 'QWEN_PREFIX_TIER_RESTORE_SLICE_MS'
 PREFIX_SLICE_NAMES = (PREFIX_SLICE_BLOCKS, PREFIX_SLICE_MS)
+# The upload levers of the tier's host side (qwen_tier_upload.NAMES, pinned equal by test_qwen_tier_upload; docs/tp4-upload1.md): threaded staging copies of the raw block IO and
+# parallel digest checks. Like the sliced restore: default off and byte-identical off, strict, only beside the tier (they change how long the same bytes take to move, never which),
+# and a traffic profile may name them only when its owner traffic waiver names the tier.
+PREFIX_UPLOAD_NAMES = ('QWEN_PREFIX_TIER_IO_THREADS', 'QWEN_PREFIX_TIER_IO_CHUNK_BLOCKS', 'QWEN_PREFIX_TIER_VERIFY_THREADS')
 # Sticky sessions (serving_fast_policy.STICKY_SESSIONS_FLAG): the fast path's side of prefix reuse. Only a
 # profile sets it, and only beside PREFIX_SWITCH and the fast path (prefix_reuse_problems).
 STICKY_SWITCH = 'QWEN_FAST_STICKY_SESSIONS'
@@ -531,7 +535,7 @@ def apply_environment(profile, environ=None):
             environ.pop(name, None)
     # ...and the preconverted checkpoints and the host KV tier (default off, gate only until a qualification record lifts it): an inherited
     # switch must not turn either on under a profile that never named it.
-    for name in PREFIX_TIER_ENV_NAMES + PREFIX_QUOTA_NAMES + PREFIX_SLICE_NAMES:
+    for name in PREFIX_TIER_ENV_NAMES + PREFIX_QUOTA_NAMES + PREFIX_SLICE_NAMES + PREFIX_UPLOAD_NAMES:
         if name not in profile['env']:
             environ.pop(name, None)
     # ...and the engine-start upload levers: an inherited switch must not move the KV pool's or the weights' load path under a profile that never asked.
@@ -630,6 +634,15 @@ def prefix_policy_problems(profile):
             problems.append('%s is set and %s is not: the time budget would be inert' % (PREFIX_SLICE_MS, PREFIX_SLICE_BLOCKS))
     if slice_blocks and not numbers.get(PREFIX_TIER_GIB):
         problems.append('%s names a sliced restore but %s is not set: the restore would be inert' % (PREFIX_SLICE_BLOCKS, PREFIX_TIER_GIB))
+    # The upload levers (qwen_tier_upload.upload_plan refuses all of these at boot): strict values, a call size only beside the IO threads, and the host tier beside them.
+    upload_on = []
+    if any(name in env for name in PREFIX_UPLOAD_NAMES):
+        import qwen_tier_upload
+
+        problems += qwen_tier_upload.flag_problems(env)
+        upload_on = [name for name in PREFIX_UPLOAD_NAMES if env.get(name) not in (None, '', '0')]
+        if upload_on and not numbers.get(PREFIX_TIER_GIB):
+            problems.append('%s name the upload levers of the host tier but %s is not set: there would be nothing to move' % (', '.join(upload_on), PREFIX_TIER_GIB))
     # The complete-spill mode (qwen_prefix_registry.spill_plan refuses all of these at boot): its knobs are whole numbers in plain digits, mean something only beside the mode,
     # and the mode needs the tier it spills to.
     for name in PREFIX_SPILL_KNOBS:
@@ -677,6 +690,8 @@ def prefix_policy_problems(profile):
             unqualified.append(PREFIX_TIER_OFF_PATH)
         if slice_blocks and not waived(profile, PREFIX_TIER_GIB, env):
             problems.append('%s: the sliced restore is the host tier\'s, so a traffic profile may name it only when its %s names the tier (%s)' % (PREFIX_SLICE_BLOCKS, TRAFFIC_WAIVER, PREFIX_TIER_GIB))
+        if upload_on and not waived(profile, PREFIX_TIER_GIB, env):
+            problems.append('%s: the upload levers are the host tier\'s, so a traffic profile may name them only when its %s names the tier (%s)' % (', '.join(upload_on), TRAFFIC_WAIVER, PREFIX_TIER_GIB))
         quotas = [name for name in PREFIX_QUOTA_NAMES if name in env and env[name] not in ('', '0') and (quota_tokens.get(name) or quota_gib.get(name))]
         if quotas:
             problems.append('%s: no qualification record exists for the per-tenant quotas of the prefix store, so only a gate-only profile may name them' % ', '.join(sorted(quotas)))
@@ -684,7 +699,7 @@ def prefix_policy_problems(profile):
             problems.append('%s: no qualification record exists for the host KV tier or the preconverted checkpoints, so only a gate-only profile may name them '
                             'active, or a traffic profile whose %s names QWEN_PREFIX_HOST_TIER_GIB and QWEN_PREFIX_CKPT_PRECONVERTED at their values (the audits and '
                             'the kill-switch path are a gate\'s own)' % (', '.join(sorted(unqualified)), TRAFFIC_WAIVER))
-    named = [name for name in sorted(list(PREFIX_POLICY_FLAGS) + [PREFIX_GHOST_FLAG, PREFIX_TIER_OFF_PATH] + list(PREFIX_TIER_NUMBERS) + list(PREFIX_QUOTA_NAMES) + list(PREFIX_SLICE_NAMES))
+    named = [name for name in sorted(list(PREFIX_POLICY_FLAGS) + [PREFIX_GHOST_FLAG, PREFIX_TIER_OFF_PATH] + list(PREFIX_TIER_NUMBERS) + list(PREFIX_QUOTA_NAMES) + list(PREFIX_SLICE_NAMES) + list(PREFIX_UPLOAD_NAMES))
              if name in env]
     if named and not prefix_reuse(profile):
         problems.append('%s set without %s=1: the registry does not exist, so the policy would be inert'

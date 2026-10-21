@@ -66,6 +66,11 @@ h. The sliced restore (QWEN_PREFIX_TIER_RESTORE_SLICE blocks, QWEN_PREFIX_TIER_R
    a failure (a miss: the request is admitted cold, and its tier hit is not retried); a trim that reaches a request whose job is unfinished finishes it whole. What it cannot slice
    is what a device-resident hit costs anyway: the tail prefill and the engine build.
 
+i. The upload levers of the tier's host side (QWEN_PREFIX_TIER_VERIFY_THREADS here, QWEN_PREFIX_TIER_IO_THREADS and _IO_CHUNK_BLOCKS in the registry's attach_tier_io; qwen_tier_upload,
+   docs/tp4-upload1.md; off unless named, and then none of it runs). The digest checks of a restore's records (item f and h) run on worker threads instead of one after another: the
+   verdicts, the sampling, the counters and the record dropped on a failure are the sequential loop's (digest_failures); the staging copies of the raw device calls run on workers beside
+   the device call (ThreadedTierIO). Neither changes a byte or a decision, only how long the same work takes.
+
 g. Tenant quotas (qwen_prefix_registry.QuotaConfig, DeviceQuota below; QWEN_PREFIX_TENANT_QUOTA_DEVICE_CAP_TOKENS / _FLOOR_TOKENS, off unless named and then none of
    this runs). The tenant is the salt's (tenant_of_salt); the same numbers apply to every tenant. A tenant's RESIDENT tokens are its cached prefix blocks in the
    device pool, running or idle. The CAP is soft by what is running (a running request's blocks cannot be evicted): when a tenant's resident blocks pass its cap,
@@ -672,6 +677,9 @@ class TierHooks(object):
         self.hold_ready = False
         self.rate = None
         self.kill_switch = prefix_registry.KillSwitch(self.config.off_path, prefix_registry.KILL_SWITCH_POLL_S, graft.kill_switch.clock)
+        # The upload levers (docstring item i; qwen_tier_upload): threads for the digest checks of a restore. None unless named, and then check_digest runs as before.
+        self.verifier = None
+        upload = getattr(graft.registry, 'upload_plan', None)
         graft.registry.device_holds = self.device_holds
         graft.registry.tier_slack = 1 if graft.drop_last else 0
         # The gate reads this line (prefix_markers.TIER_ON): the tier is configured and the model graft's IO is attached.
@@ -683,6 +691,18 @@ class TierHooks(object):
         if plan is not None:
             # The gate reads this line (prefix_markers.TIER_SPILL_COMPLETE): the cap is lifted to the hard maximum, in batches.
             graft.log('host tier spill complete on cap_blocks=%d hard_max_blocks=%d batch_blocks=%d warn_ms=%d', self.config.spill_max, plan.hard_max, plan.batch, plan.warn_ms)
+        if upload is not None:
+            if upload.verify_threads:
+                import qwen_tier_upload
+
+                self.verifier = qwen_tier_upload.Verifier(upload.verify_threads, graft.registry.stats)
+            # The gate reads these lines (c2_smoke_check, the fusion-wp/UP1 rows): the levers are configured, and the tier IO the registry holds is the threaded one when it was asked for.
+            import qwen_tier_upload
+
+            wrapped = isinstance(self.io, qwen_tier_upload.ThreadedTierIO)
+            graft.log('host tier upload on io_threads=%d io_chunk_blocks=%d verify_threads=%d io_wrapped=%d', upload.io_threads, upload.io_chunk, upload.verify_threads, 1 if wrapped else 0)
+            if upload.io_threads and not wrapped:
+                graft.log('host tier upload fell back: the tier IO is not the threaded one (io_threads=%d)', upload.io_threads)
 
     # -- state -----------------------------------------------------------------------------------
     @property
@@ -940,6 +960,36 @@ class TierHooks(object):
             self.registry.stats['tier_digest_failures'] += 1
         return verdict
 
+    def digest_failures(self, records):
+        """The records that fail their digest, in order, lazily: the caller leaves its loop at the first (it drops the record and refuses the restore). Without verify threads
+        this is the loop `for record in records: if not self.check_digest(record)` itself. With them the same verdicts come from the worker threads: the same records are
+        sampled (the running count advances record by record and is put back to the failing record's own on a failure, as the sequential loop would have left it), the same
+        counters move for the records up to and including the failing one."""
+        if self.verifier is None:
+            for record in records:
+                if not self.check_digest(record):
+                    yield record
+            return
+        mode = self.config.verify
+        if mode == 'off':
+            return
+        chosen = []
+        for record in records:
+            self.checked += 1
+            if mode == 'sample' and self.checked % prefix_registry.TIER_VERIFY_EVERY:
+                continue
+            chosen.append((record, self.checked))
+        stats = self.registry.stats
+        for (record, checked), verdict in zip(chosen, self.verifier.verdicts(self.tier, [record for record, _ in chosen])):
+            if verdict is None:
+                continue
+            stats['tier_digest_checks'] += 1
+            if not verdict:
+                stats['tier_digest_failures'] += 1
+                self.checked = checked
+                yield record
+                return
+
     def load(self, request, blocks, h, q):
         """Make the blocks below Q that the device lacks cached on the device again, from the tier. True when vLLM will now hit them."""
         graft, registry, stats, tier, pool = self.graft, self.registry, self.registry.stats, self.tier, self.graft.block_pool
@@ -970,13 +1020,12 @@ class TierHooks(object):
         if pool.get_num_free_blocks() < (need - first) + max(0, beyond):
             stats['tier_restore_refused_room'] += 1
             return False
-        for record in records:
-            if not self.check_digest(record):
-                stats['tier_restore_refused_digest'] += 1
-                graft.log('host tier record failed its digest req=%s block=%d: dropped', request.request_id, record.index)
-                tier.remove(record.key)
-                self.unhold([record.key])
-                return False
+        for record in self.digest_failures(records):
+            stats['tier_restore_refused_digest'] += 1
+            graft.log('host tier record failed its digest req=%s block=%d: dropped', request.request_id, record.index)
+            tier.remove(record.key)
+            self.unhold([record.key])
+            return False
         # The request's own device hit must not be among the victims: take it off the free queue for the length of the restore.
         protected = list(blocks.blocks[0])
         if drop:
@@ -1131,13 +1180,12 @@ class TierHooks(object):
         began = time.perf_counter()
         quota = graft.quota
         try:
-            for record in records:
-                if not self.check_digest(record):
-                    stats['tier_restore_refused_digest'] += 1
-                    graft.log('host tier record failed its digest req=%s block=%d: dropped', job.request_id, record.index)
-                    tier.remove(record.key)
-                    self.unhold([record.key])
-                    raise SliceRefused()
+            for record in self.digest_failures(records):
+                stats['tier_restore_refused_digest'] += 1
+                graft.log('host tier record failed its digest req=%s block=%d: dropped', job.request_id, record.index)
+                tier.remove(record.key)
+                self.unhold([record.key])
+                raise SliceRefused()
             if quota is not None:
                 quota.allocating = job.tenant
             try:

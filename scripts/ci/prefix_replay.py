@@ -1939,12 +1939,15 @@ def scenario_levern_faults(driver):
 #                   and the tier's own kill switch (the tier latches off; the next turn is still exact).
 #   tier_timed      TIMED restore at ~32k / 128k / 254k, one cycle per size: the cold prefill's TTFT, the device-resident hit's, then - after floods
 #                   the size of the pool - the returning hit's (restore from host RAM), and its cold twin for exactness.
+#   tier_upload / tier_upload_timed   the tier_timed cycle at ~64k / 128k / 254k (TIER_UPLOAD_SIZES), the audited arm (every restored block read back and compared, the
+#                   returning answer against its cold twin) and the timed one (the restore line's ms is the figure): the upload levers' exactness and timing plans (tp4/upload-1).
 TIER_SESSIONS = 3
 TIER_SESSION_TOKENS = 56000      # the evict arm's longest conversation: the returning turn stays inside a 64k context's headroom too
 TIER_FLOOD_TOKENS = 56000
 TIER_RETURN_INPUT_TOKENS = 1500
 TIER_AGAIN_INPUT_TOKENS = 800
 TIER_TIMED_SIZES = (32000, 128000, 254000)
+TIER_UPLOAD_SIZES = (64000, 128000, 254000)      # tp4/upload-1 (docs/tp4-upload1.md): the same cycle at the sizes the upload levers are judged at
 TIER_TIMED_FLOOD_TOKENS = 120000
 TIER_TIMED_MAX_TOKENS = 128      # short answers: the read is the first token's time
 TIER_FLOOD_MARGIN_FLOODS = 1     # floods beyond the pool's worth: a pool's worth of new tokens reaches the sessions' blocks (they queue behind the never-used ones)
@@ -2024,6 +2027,11 @@ def scenario_tier_returning(driver, pool_tokens=None, sessions=None, session_tok
         removed = tier_drill(driver, False) if driver.container is not None else None
     driver.event('tier-kill', written=written, removed=removed, latched_tag=latched.get('tag'))
     return convs
+
+
+def scenario_tier_upload(driver, pool_tokens=None, sizes=None, flood_tokens=None):
+    """scenario_tier_timed at TIER_UPLOAD_SIZES (the events keep the tier-timed-<size> names the gate's reading expects)."""
+    return scenario_tier_timed(driver, pool_tokens=pool_tokens, sizes=tuple(sizes or TIER_UPLOAD_SIZES), flood_tokens=flood_tokens)
 
 
 def tier_timed_size(driver, nominal):
@@ -2282,6 +2290,7 @@ SCENARIOS = dict(bringup_reference=scenario_bringup_reference, bringup_prefix=sc
                  levern_hit=lambda driver, **_: scenario_levern_hit(driver),
                  levern_faults=lambda driver, **_: scenario_levern_faults(driver),
                  tier_attach=scenario_tier_attach, tier_returning=scenario_tier_returning, tier_timed=scenario_tier_timed,
+                 tier_upload=scenario_tier_upload, tier_upload_timed=scenario_tier_upload,
                  tier_concurrent=scenario_tier_concurrent, tier_concurrent_timed=scenario_tier_concurrent, tier_quota=scenario_tier_quota,
                  exact_resume=scenario_exact_resume, exact_resume_timed=scenario_exact_resume)
 

@@ -36,7 +36,10 @@ Keys (every one optional but C2_IMAGE_TAG):
                       few real layers; the step mounts the hub read-only for it; SPLIT_PROBE verdict=IDENTICAL|DIFFERS|FAIL, exit 0/2/1;
                       docs/tp4-exact-resume.md 5.3) or split-attribute (the same probe with --attribute: each split again with both segments forced into
                       the 2048 bucket, so a difference is attributed to the segments' programs or to the store at the split; SPLIT_PROBE attribution
-                      lines, docs/tp4-exact-end.md 2); needs the fabric action
+                      lines, docs/tp4-exact-end.md 2) or h2d (tp4_h2d_probe.py: per-card host->device bandwidth, x16 against x4, each card alone and the four
+                      together, the GDN restore's conversion against its copies, and the relay's one-coordinate host write; H2D_PROBE verdict=MEASURED|...)
+                      or p2p (tp4_p2p_probe.py: ttnn.point_to_point unicast over the fabric, x16 -> x4 relay pairs, every line edge, byte for byte;
+                      P2P_PROBE verdict=MEASURED|...; docs/tp4-fabric-upload.md); needs the fabric action
   C2_SUPERSEDED_BY    set on every template of a pack that a later pack replaced (references/tp4-w2-jobs); read_job REFUSES such a template
   C2_PROFILE          the C2 profile smoke and gate serve (default: general)
   C2_CARDS            the card set the hardware steps open: pair (cards M and A, the default) or quad (every
@@ -231,7 +234,7 @@ TP4_MESH_DEVICE = 'P150x4'
 PAIR_MESH_DEVICES = (None, 'P300')
 FABRIC_CONFIGS = ('FABRIC_1D', 'FABRIC_1D_RING')
 FABRIC_PROBES = ('fabric', 'rs-tile', 'mr', 'kvread', 'ccl-sweep', 'ccl-sweep-safe', 'ccl-sweep-core', 'ccl-sweep-p8192', 'ccl-sweep-quick',
-                 'split', 'split-attribute')
+                 'split', 'split-attribute', 'h2d', 'p2p')
 DRAFTER_ID = re.compile(r'[a-z0-9][a-z0-9.-]{2,63}')
 GATE_PLANS = ('bringup', 'matrix', 'memory', 'lifecycle')
 # S2 (s2-design.md 6.3), run on the S2 image (graft K64j) and its c2-packed profiles; c2_serving_gate.py says what
@@ -271,6 +274,8 @@ DECISION = re.compile(r'[A-Za-z0-9_.,:=/+@%#-]{3,200}')
 # The prefix-reuse G1 gates (TT prefix-reuse design 2.2; c2_prefix_gate.py).
 PREFIX_PLANS = ('bringup', 'exactness', 'lifecycle', 'timing', 'agent-turns', 'levern-faults', 'levern-hit', 'read-qualify', 'tiers', 'tier-concurrent', 'tier-concurrent-timed', 'tier-quota',
                 'tier-concurrent-sliced', 'tier-concurrent-timed-sliced',
+                # tp4/upload-1 (docs/tp4-upload1.md): the host tier's upload levers, one arm each
+                'tier-upload', 'tier-upload-timed', 'tier-upload-timed-control', 'tier-upload-timed-8', 'tier-upload-timed-c128', 'tier-upload-timed-c2048',
                 # exact resume P0 (docs/tp4-exact-resume.md 5.2): the judged and the timed returning-turn arms
                 'exact-resume', 'exact-resume-timed')
 # (arm, its plan): each exactness and lifecycle arm is a plan of its own, named as the arm, that runs
