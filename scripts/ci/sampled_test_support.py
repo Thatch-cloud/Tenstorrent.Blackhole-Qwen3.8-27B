@@ -194,12 +194,14 @@ class Ops(object):
         self.fences += 1
 
 
-def logits_tensor(rows_by_chip_free_array):
-    """The pre-gather logits tensor of a block from a (rows, 248,320) float array: chip c holds columns [c * 62080, (c + 1) * 62080) as bf16."""
+def logits_tensor(rows_by_chip_free_array, chips=CHIPS):
+    """The pre-gather logits tensor of a block from a (rows, 248,320) float array: chip c holds columns [c * shard, (c + 1) * shard) as bf16 (62,080 columns at four chips; the pair's
+    124,160 with chips=2, which the real-verify test uses because test_packed_verifier's fake ttnn is the pair's)."""
     array = np.asarray(rows_by_chip_free_array, dtype=np.float32)
     rows = array.shape[0]
-    chips = [torch.from_numpy(np.ascontiguousarray(array[:, chip * SHARD:(chip + 1) * SHARD])).reshape(1, 1, rows, SHARD).bfloat16() for chip in range(CHIPS)]
-    return Tensor(chips, 'bf16', 'tile')
+    shard = array.shape[1] // chips
+    parts = [torch.from_numpy(np.ascontiguousarray(array[:, chip * shard:(chip + 1) * shard])).reshape(1, 1, rows, shard).bfloat16() for chip in range(chips)]
+    return Tensor(parts, 'bf16', 'tile')
 
 
 def clean_environment(extra=None):

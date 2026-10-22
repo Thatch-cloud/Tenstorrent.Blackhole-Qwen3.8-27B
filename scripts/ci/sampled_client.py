@@ -9,7 +9,8 @@ decide what a "sampled" request looks like, so two runs on two profiles are comp
 The seed is a pure function of the arm's base seed (C2_SMOKE_SEED / the lab's --sampling-seed, default 20261022) and the request's PROMPT: the same prompt always carries the same seed, in any run,
 on any profile, whatever the budget, the test it appears in or the order it is sent. So a re-sent prompt re-draws the same text (the server keys its noise by (seed, position) only), a longer
 budget answer begins with the shorter budget's, and the same request sent to a sampled profile and to a plain-sampling reference gets the same seed. Requests that are not completions (tokenize,
-models) are left alone.
+models) are left alone, and a request that names its own temperature, top_p, top_k or seed keeps it. The smoke's own `agreement` (log-probabilities) and `bench` (fixed shapes) tests build their
+requests elsewhere (tp_agreement, tp_decode_bench) and stay greedy: logprobs are refused under sampling.
 """
 
 import hashlib

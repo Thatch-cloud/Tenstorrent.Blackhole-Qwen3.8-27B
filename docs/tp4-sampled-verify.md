@@ -269,12 +269,13 @@ switch and byte-identical with it off: `serving_c2_contract.py` (the request ter
 `test_tp4_closure_literals.SERVED` name `sampled_verify`, which six copied modules import lazily). `sampled_client.py`, `make_sampled_profiles.py` and the test support are not served.
 
 **Tests** (all in the CPU allowlist, `qwen-integration-cpu.yml`; Python 3.11, numpy and torch): `cd scripts/ci && python -B -m unittest test_sampled_accept test_sampled_contract test_sampled_verify test_sampled_packed_path
-test_sampled_first_token test_sampled_reference test_sampled_profiles test_sampled_clients`.
+test_sampled_first_token test_sampled_block_round test_sampled_reference test_sampled_profiles test_sampled_clients`.
   * `test_sampled_packed_path`: the real `GreedySession` driving four requests of different specs and seeds through the packed readback path over a fake mesh (device slice, batched read, merge, draw, commit): the committed
     text equals plain one-token-at-a-time sampling for four drafters, four specs, idle segments, early finishers and shuffled segments; a greedy request in a sampled block keeps the argmax path; a block of greedy
     requests reads nothing; with the switch off the gate is the old function call for call and every hook is inert.
   * `test_sampled_verify`: the request terms, the closed gate, the layout, the topk call shapes (k=64, 32,768-column chunks, 32-row pieces, intermediates freed, a refusing build), the merge against the full-vocabulary
     slice, tie order, the reads per batched-reads mode, the audit catching a corrupted slice and a wrong draw, the sequential engine, the first-token wrapper.
+  * `test_sampled_block_round`: the REAL `PackedVerifierEngine.verify` (test_packed_verifier's four-user fixture, switched to the readback) returning the keyed draws of the sampled entries and the argmax rows of the rest, in entry order, with the metrics; the same round without the readback is the old one.
   * `test_sampled_first_token`: the real `FastServingLifecycle`: the keyed first token, a greedy request, the engine failing closed when the plugin sampled an armed request itself, the restore at close.
   * `test_sampled_reference`: `measure_request`'s keyed gold against the plain sampler, a wrong draw caught at its token.
   * `test_sampled_profiles`, `test_sampled_clients`: the profiles and their parents, the seeded arm in the smoke (against the fake server), the tau lab and the job reader, the smoke check's rules.

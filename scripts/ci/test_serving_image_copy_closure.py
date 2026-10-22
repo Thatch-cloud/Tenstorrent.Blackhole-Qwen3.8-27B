@@ -184,7 +184,9 @@ C2_ONLY_PLAIN_IMPORTS = frozenset(['audit_sampling.py', 'capture_plug.py', 'exte
                                    'admission_pipeline.py',
                                    # tp4/sampled-verify (QWEN_FAST_SAMPLED): imported by packed_verifier, verifier_engine_tp, serving_lifecycle, serving_request_factory, serving_runtime and serving_fast_policy only when
                                    # the switch is set (overlay-only, docker/qwen-c2-overlay.txt, with sampled_accept.py which only it imports)
-                                   'sampled_verify.py'])
+                                   'sampled_verify.py',
+                                   # full_request.measure_request imports sampled_accept (always with sampled_verify) only when asked for a sampled reference (sampling=...); overlay-only too
+                                   'sampled_accept.py'])
 
 
 def unsatisfiable_plain_imports():

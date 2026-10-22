@@ -492,6 +492,7 @@ def read_sampling(values, actions, profile, taulab_profile, envs):
         if mode == 'model-default':
             if action not in actions:
                 raise JobError('%s=model-default: C2_ACTIONS has no %s' % (mode_key, action))
+            envs = profile_envs() if envs is None else envs         # (read only for a job that asks for the arm)
             if str((envs.get(name) or {}).get('QWEN_FAST_SAMPLED', '')) != '1':
                 raise JobError('%s=model-default needs a profile that turns QWEN_FAST_SAMPLED on; %s does not (the server would serve the arm greedy)' % (mode_key, name))
         out += [mode, seed]
@@ -717,7 +718,7 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
     model = read_model(values, actions, cards, lambda action: (taulab['taulab_profile'] if action == 'taulab'
                                                                  else prefix['prefix_profile'] if action == 'prefix' else profile), root)
     smoke_sampling, smoke_seed, taulab_sampling, taulab_sampling_seed = read_sampling(
-        values, actions, profile, taulab['taulab_profile'], profile_envs() if envs is None else envs)
+        values, actions, profile, taulab['taulab_profile'], envs)
     outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), rmi_tags=rmi_tags, tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),

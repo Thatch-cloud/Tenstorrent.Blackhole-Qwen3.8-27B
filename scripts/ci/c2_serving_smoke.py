@@ -20,7 +20,8 @@ SAMPLING = sampled_client.Arm.from_environ(os.environ)
 
 
 def post(path, body, timeout=900):
-    body = SAMPLING.apply(body, path)
+    if globals().get('SAMPLING') is not None:        # (the arm; a snippet of this file exec'd without it - test_speed_window_compare - sends what it always sent)
+        body = SAMPLING.apply(body, path)
     request = urllib.request.Request(BASE + path, data=json.dumps(body).encode(), method='POST',
                                      headers={'content-type': 'application/json'})
     try:
@@ -31,8 +32,10 @@ def post(path, body, timeout=900):
 
 
 def stream(messages, max_tokens, drop_after=None, timeout=1800, keep_stamps=False, on_token=None, keep_text=False, headers=None, **extra):
-    body = SAMPLING.apply(dict(model=MODEL, messages=messages, max_tokens=max_tokens, stream=True,
-                               stream_options={'include_usage': True}, **extra), '/v1/chat/completions')
+    body = dict(model=MODEL, messages=messages, max_tokens=max_tokens, stream=True,
+                stream_options={'include_usage': True}, **extra)
+    if globals().get('SAMPLING') is not None:
+        body = SAMPLING.apply(body, '/v1/chat/completions')
     request = urllib.request.Request(BASE + '/v1/chat/completions', data=json.dumps(body).encode(), method='POST',
                                      headers=dict({'content-type': 'application/json'}, **(headers or {})))     # headers: agent_turns' X-Request-Id, which names the request in the engine's log
     started, first, pieces, usage, finish, count = time.time(), None, [], None, None, 0
@@ -354,8 +357,10 @@ def stream_events(messages, max_tokens, **extra):
     """One streamed chat completion, kept apart by kind (stream() merges content with reasoning): the content, the
     reasoning, the tool-call deltas accumulated by index ({name, arguments}), the finish reason, the delta count and the
     usage. Parser M (c2_parser_rechunk) runs on this path only."""
-    body = SAMPLING.apply(dict(model=MODEL, messages=messages, max_tokens=max_tokens, stream=True,
-                               stream_options={'include_usage': True}, **extra), '/v1/chat/completions')
+    body = dict(model=MODEL, messages=messages, max_tokens=max_tokens, stream=True,
+                stream_options={'include_usage': True}, **extra)
+    if globals().get('SAMPLING') is not None:
+        body = SAMPLING.apply(body, '/v1/chat/completions')
     request = urllib.request.Request(BASE + '/v1/chat/completions', data=json.dumps(body).encode(), method='POST',
                                      headers={'content-type': 'application/json'})
     content, reasoning, calls, finish, deltas, usage = [], [], {}, None, 0, None
@@ -1627,7 +1632,7 @@ def coding_set():
 
 if ONLY and 'coding_set' in ONLY:
     record('coding_set', coding_set)
-results['sampling'] = SAMPLING.report()       # (the arm the requests above used: mode greedy|model-default, the base seed, the terms and how many requests carried them)
+results.update(sampling=SAMPLING.report())       # (the arm the requests above used: mode greedy|model-default, the base seed, the terms and how many requests carried them)
 print('SMOKE_JSON ' + json.dumps(results))
 if (results.get('agreement') or {}).get('ok') is False or 'error' in (results.get('agreement') or {}):
     print('SMOKE_FAILED agreement: %s' % json.dumps((results['agreement'].get('reasons') or results['agreement'].get('error')))[:600])

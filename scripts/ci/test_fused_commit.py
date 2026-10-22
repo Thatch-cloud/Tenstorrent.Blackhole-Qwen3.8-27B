@@ -1566,8 +1566,8 @@ class ParentTests(unittest.TestCase):
             self.skipTest('no git history for %s' % PARENT)
         before = result.stdout.decode('utf-8').splitlines()
         after = without_trace_census(without_levern(without_diag_trim(without_prefill_scratch(without_any_request(without_sticky(
-            without_solo_and_lanes(without_m3_blocks(without_request_warm(without_parked_engines(without_octo(without_admission_lean(without_idle_scratch(without_exact_resume(without_admission_pipeline(
-                (HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines())))))))))))))))
+            without_solo_and_lanes(without_m3_blocks(without_request_warm(without_parked_engines(without_octo(without_admission_lean(without_idle_scratch(without_exact_resume(without_admission_pipeline(without_sampled(
+                (HERE / 'serving_runtime.py').read_text(encoding='utf-8').splitlines()))))))))))))))))
         changed = [line for line in difflib.unified_diff(before, after, lineterm='', n=0)
                    if line[:1] in '+-' and not line.startswith(('+++', '---'))]
         added = [line[1:].strip() for line in changed if line.startswith('+')]
@@ -2029,6 +2029,12 @@ def without_trace_census(lines):
     if sorted(value.strip() for value in found) != sorted(hooks):
         raise AssertionError('The trace_census hooks are not in serving_runtime.py exactly once each')
     return [value for value in lines if value.strip() not in hooks]
+
+
+def without_sampled(lines):
+    """serving_runtime.py less tp4/sampled-verify's attach hook (QWEN_FAST_SAMPLED; default off), which landed after this parent: the one block, from its switch test to the end of its attach call,
+    cut exactly once to its known last line, so nothing else is hidden."""
+    return cut_once(lines, "if os.environ.get('QWEN_FAST_SAMPLED', '0') != '0':", "if packed_shapes else [], log=pindiag)")
 
 
 def without_admission_pipeline(lines):

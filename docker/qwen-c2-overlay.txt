@@ -583,3 +583,5 @@ scripts/ci/qwen_lazy_shard.py
 # serving_request_factory, serving_runtime and serving_fast_policy import it lazily, only with the profile's switch set (all six are in this list or the base's).
 scripts/ci/sampled_accept.py
 scripts/ci/sampled_verify.py
+# ...and the reference harness's keyed gold decode (full_request.measure_request(sampling=..), docs/tp4-sampled-verify.md section 4); a bundle module changed since the bundle, so it is in the P8 lists too
+scripts/ci/full_request.py

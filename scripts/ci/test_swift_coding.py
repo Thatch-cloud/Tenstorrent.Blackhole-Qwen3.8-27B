@@ -175,7 +175,8 @@ class SmokeTests(unittest.TestCase):
 
     def test_it_ran_clean_and_recorded_only_the_coding_set(self):
         self.assertEqual(self.done.returncode, 0, self.done.stdout[-800:] + self.done.stderr[-800:])
-        self.assertEqual(sorted(self.results), ['coding_set'])
+        self.assertEqual(sorted(self.results), ['coding_set', 'sampling'])
+        self.assertEqual(self.results['sampling']['mode'], 'greedy', 'the arm the requests used is reported (tp4/sampled-verify), and the default is every smoke as it was')
         entry = self.results['coding_set']
         self.assertEqual((entry['problems'], entry['errors'], entry['finish_length'], entry['empty_content'], entry['server_token_counts']), (20, 0, 0, 0, 20))
 

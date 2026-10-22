@@ -178,18 +178,14 @@ class TextTests(Clean):
         for request in requests:
             self.assertEqual(texts[request.name], support.plain_run(request.prompt, request.count, request.seed, request.spec), request.name)
 
-    def test_the_text_does_not_depend_on_the_draft_width_or_the_segment_a_request_lands_in(self):
+    def test_the_text_does_not_depend_on_the_segment_a_request_lands_in_or_who_else_is_live(self):
         texts = []
-        for width, seed in ((16, 1), (16, 2)):
-            request = Request('r', self.PROMPTS[1], 50, support.SPECS[1], 321, support.approx_drafter)
-
-            class Narrow(PackedRoundRunner):
-                def round(inner):
-                    return super(Narrow, inner).round()
-
-            runner = Narrow(self, [request], random.Random(seed))
-            texts.append(runner.run()['r'])
+        for seed, crowd in ((1, 0), (2, 0), (3, 2)):
+            requests = [Request('r', self.PROMPTS[1], 50, support.SPECS[1], 321, support.approx_drafter)]
+            requests += [Request('x%d' % index, self.PROMPTS[index], 20 + 9 * index, support.SPECS[index], 7 + index, support.approx_drafter) for index in range(crowd)]
+            texts.append(PackedRoundRunner(self, requests, random.Random(seed)).run()['r'])
         self.assertEqual(texts[0], texts[1])
+        self.assertEqual(texts[0], texts[2])
         self.assertEqual(texts[0], support.plain_run(self.PROMPTS[1], 50, 321, support.SPECS[1]))
 
     def test_a_different_seed_gives_a_different_text(self):
