@@ -80,6 +80,7 @@ import hmac
 import json
 import os
 import re
+import secrets
 import sys
 
 PROFILES = '/opt/qwen-c2/profiles.json'
@@ -195,6 +196,16 @@ UPLOAD_NAMES = ('QWEN_FAST_DEVICE_ZEROS', 'QWEN_FAST_DEVICE_ZEROS_AUDIT', 'QWEN_
 UPLOAD_GATE_ONLY = ('QWEN_FAST_DEVICE_ZEROS_AUDIT', 'QWEN_FAST_LAZY_SHARD_W_AUDIT')
 # The sources the merged route must carry (levern_route.SOURCES, pinned equal by test_levern_prefix_contract).
 MERGED_SOURCES = ('COLD', 'CHECKPOINT', 'SCRATCH', 'PARKED')
+
+# Sampled verification (docs/tp4-sampled-verify.md; default off, gate-only until a card has judged it). With QWEN_FAST_SAMPLED=1 the request contract honours
+# a request's temperature, top_p and top_k (the model's own defaults for what it omits; temperature 0 stays greedy) instead of forcing greedy, and carries the
+# request seed (the client's, else a random one) to the engine in SamplingParams.extra_args. The verifier that DRAWS the tokens is the device step's: until it
+# exists the engine-side gate (serving_fast_policy.validate_request_sampling) still refuses a non-greedy request, so the switch fails closed. Only a profile
+# sets the switch (apply_environment drops an inherited value); no shipped profile does.
+SAMPLED_SWITCH = 'QWEN_FAST_SAMPLED'
+SAMPLED_K_MAX = 64                  # sampled_accept.K_MAX: the candidates per row the filter sees (a test holds both equal; not imported: this module cannot import numpy at boot)
+SAMPLED_MODEL_DEFAULTS = dict(temperature=1.0, top_p=0.95, top_k=20)   # generation_config.json of the base snapshot = sampled_accept.MODEL_DEFAULTS (held equal by a test)
+SAMPLED_SEED_KEY = 'qwen_sampled_seed'     # the SamplingParams.extra_args key that carries the request seed to the engine
 
 # The meshes a profile may open (item 8), keyed by its mesh_device: None is every profile that names none (the
 # pair, under the image's own MESH_DEVICE=P300), P150x4 the four-card (1, 4) ring (tp4_mesh.DESCRIPTOR_PATH,
@@ -547,6 +558,9 @@ def apply_environment(profile, environ=None):
     for name in OCTO_NAMES:
         if name not in profile['env']:
             environ.pop(name, None)
+    # ...and sampled verification: an inherited switch must not make the request contract stop forcing greedy under a profile that never named it.
+    if SAMPLED_SWITCH not in profile['env']:
+        environ.pop(SAMPLED_SWITCH, None)
     # ...and exact resume P0: an inherited switch must not lift vLLM's drop or carry a window under a profile that never asked.
     for name in EXACT_RESUME_NAMES:
         if name not in profile['env']:
@@ -888,6 +902,55 @@ def drafter_problems(profile):
     if DRAFTER_CHECKPOINT_FLAG in (profile.get('env') or {}) and profile.get('gate_only') is not True:
         problems.append('%s needs a gate-only profile (nothing serves traffic on a drafter that has not been judged)' % DRAFTER_CHECKPOINT_FLAG)
     return problems
+
+
+def sampled_enabled(environ=None):
+    """Whether QWEN_FAST_SAMPLED=1. Read per call, like any_request_enabled; anything but unset, '0' or '1' is a configuration error, never a silent off."""
+    environ = os.environ if environ is None else environ
+    value = environ.get(SAMPLED_SWITCH, '0')
+    if value not in ('0', '1'):
+        raise ValueError('%s must be 0 or 1, got %r' % (SAMPLED_SWITCH, value))
+    return value == '1'
+
+
+def sampled_on(profile):
+    """Whether the profile turns sampled verification on."""
+    return str((profile.get('env') or {}).get(SAMPLED_SWITCH, '')) == '1'
+
+
+def sampled_problems(profile):
+    """Every way the profile's sampled-verify switch is wrong, [] when it names none (every shipped profile) or names 0. On, it needs C2-any (a host-side
+    refusal of one request's own terms ends that request, not the engine), the request contract (the only place the sampling terms are read) and a gate-only
+    profile: no sampled verifier has run on a card, so nothing serves traffic on it yet."""
+    env = profile.get('env') or {}
+    if SAMPLED_SWITCH not in env:
+        return []
+    value = str(env[SAMPLED_SWITCH])
+    if value not in ('0', '1'):
+        return ['%s must be 0 or 1, got %r' % (SAMPLED_SWITCH, env[SAMPLED_SWITCH])]
+    if value == '0':
+        return []
+    problems = []
+    if str(env.get('QWEN_FAST_ANY_REQUEST', '0')) != '1':
+        problems.append('%s=1 needs QWEN_FAST_ANY_REQUEST=1 (a refusal of one request\'s sampling terms must end that request, not the engine)' % SAMPLED_SWITCH)
+    if profile.get('request_contract', True) is False:
+        problems.append('%s=1 needs the request contract (request_contract is false: nothing would read the sampling terms)' % SAMPLED_SWITCH)
+    if profile.get('gate_only') is not True:
+        problems.append('%s=1 needs a gate-only profile (no sampled verifier has been judged on a card, so nothing serves traffic on it)' % SAMPLED_SWITCH)
+    return problems
+
+
+def sampled_launch_problems(argv):
+    """Refusals of a sampled profile's launched argv. The contract cannot tell an omitted top_p/top_k from an explicit one (vLLM has filled the omitted ones by
+    the time the request reaches it), so the model's own defaults reach a request that omits them only through vLLM's generation-config fill, which
+    `--generation-config vllm` (or a path that is not the model's) turns off."""
+    refusals = []
+    for value in launched_values(argv, 'generation-config'):
+        if value != 'auto':
+            refusals.append('--generation-config %s: the model\'s defaults (temperature, top_p, top_k) reach a request that omits them only through "auto"' % (value or '(none)'))
+    if launched_values(argv, 'override-generation-config'):
+        refusals.append('--override-generation-config: it would move the defaults a request that omits its sampling terms gets away from the model\'s')
+    return refusals
 
 
 MULTI_SWITCH = 'QWEN_FAST_TP4_SDPA'
@@ -1612,9 +1675,68 @@ def omitted_max_tokens(max_tokens, *, prompt_tokens, max_model_len):
     return max_tokens is None or (prompt_tokens is not None and max_tokens == max_model_len - prompt_tokens)
 
 
+def sampled_terms(params):
+    """QWEN_FAST_SAMPLED=1: the request's sampling terms as the sampled verifier applies them, written back into `params`; ContractError for what it cannot.
+
+    - temperature 0 stays greedy and is coerced exactly as the greedy contract coerces it (temperature 0, top_p 1, top_k 0, no seed);
+    - otherwise temperature, top_p and top_k are the request's; a field that is None takes the model's default (SAMPLED_MODEL_DEFAULTS). By the time a request
+      reaches this hook vLLM has already filled the ones the client omitted (from the model's generation config, which sampled_launch_problems keeps on), so
+      this default only reaches an offline-engine caller that left a field None;
+    - top_k <= 0 (disabled) or above SAMPLED_K_MAX is clamped to SAMPLED_K_MAX: the one approximation (docs/tp4-sampled-verify.md section 5);
+    - the request seed is the client's or, if it sent none, a random 64-bit one; it travels in extra_args[SAMPLED_SEED_KEY] and params.seed is cleared, because
+      the pinned samplers refuse a block while a request seed is active in the plugin's seed manager (force_argmax.sample_rows, verify_trace_t1);
+    - min_p and the three penalties are refused, greedy or not: the verifier applies neither, and dropping them silently (what the greedy contract does) would
+      return text the client did not ask for."""
+    if (getattr(params, 'presence_penalty', 0.0) or 0.0) != 0 or (getattr(params, 'frequency_penalty', 0.0) or 0.0) != 0 \
+            or (1.0 if getattr(params, 'repetition_penalty', None) is None else params.repetition_penalty) != 1.0:
+        raise ContractError('presence_penalty, frequency_penalty and repetition_penalty are not supported on this model')
+    if (getattr(params, 'min_p', 0.0) or 0.0) != 0:
+        raise ContractError('min_p is not supported on this model')
+    defaults = SAMPLED_MODEL_DEFAULTS
+    temperature = defaults['temperature'] if params.temperature is None else params.temperature
+    top_p = defaults['top_p'] if getattr(params, 'top_p', None) is None else params.top_p
+    top_k = defaults['top_k'] if getattr(params, 'top_k', None) is None else params.top_k
+    if type(temperature) not in (int, float) or not 0 <= temperature < float('inf'):
+        raise ContractError('temperature must be a finite number >= 0, got %r' % (temperature,))
+    if temperature == 0:
+        params.temperature = 0.0
+        params.top_p = 1.0
+        params.top_k = 0
+        params.min_p = 0.0
+        params.presence_penalty = 0.0
+        params.frequency_penalty = 0.0
+        params.repetition_penalty = 1.0
+        params.seed = None
+        return params
+    if type(top_p) not in (int, float) or not 0 < top_p <= 1:
+        raise ContractError('top_p must be in (0, 1], got %r' % (top_p,))
+    if type(top_k) is not int:
+        raise ContractError('top_k must be an integer, got %r' % (top_k,))
+    seed = getattr(params, 'seed', None)
+    if seed is None:
+        seed = secrets.randbits(64)
+    elif type(seed) is not int:
+        raise ContractError('seed must be an integer, got %r' % (seed,))
+    params.temperature = float(temperature)
+    params.top_p = float(top_p)
+    params.top_k = SAMPLED_K_MAX if top_k <= 0 else min(top_k, SAMPLED_K_MAX)
+    params.min_p = 0.0
+    params.presence_penalty = 0.0
+    params.frequency_penalty = 0.0
+    params.repetition_penalty = 1.0
+    params.seed = None
+    extra = dict(getattr(params, 'extra_args', None) or {})
+    extra[SAMPLED_SEED_KEY] = seed & ((1 << 64) - 1)
+    params.extra_args = extra
+    return params
+
+
 def enforce_request(params, *, prompt_tokens, max_model_len, budget, eos_ids, max_prompt_tokens=None,
-                    min_answer_tokens=None, default_max_tokens=None, drafter_headroom_tokens=0, kv_pool_blocks=None):
+                    min_answer_tokens=None, default_max_tokens=None, drafter_headroom_tokens=0, kv_pool_blocks=None, sampled=None):
     """Refuse what the fast path cannot serve; coerce the rest to its greedy contract.
+
+    sampled (None: QWEN_FAST_SAMPLED, off in every shipped profile) lifts the coercion to greedy for a request that asks for sampling (sampled_terms); off,
+    which is every caller as it always was, nothing below it changes.
 
     min_answer_tokens and default_max_tokens are the c2 profile's (both None elsewhere, and
     then this is exactly the contract every earlier profile ran): the answer room every
@@ -1652,14 +1774,17 @@ def enforce_request(params, *, prompt_tokens, max_model_len, budget, eos_ids, ma
                             'tokens of answer room)' % (prompt_tokens, room, min_answer_tokens))
     # Greedy: the fast path's verifier commits argmax tokens whatever these say, and the
     # first token is sampled by vLLM from them, so they must agree with it.
-    params.temperature = 0.0
-    params.top_p = 1.0
-    params.top_k = 0
-    params.min_p = 0.0
-    params.presence_penalty = 0.0
-    params.frequency_penalty = 0.0
-    params.repetition_penalty = 1.0
-    params.seed = None
+    if sampled_enabled() if sampled is None else sampled:
+        sampled_terms(params)
+    else:
+        params.temperature = 0.0
+        params.top_p = 1.0
+        params.top_k = 0
+        params.min_p = 0.0
+        params.presence_penalty = 0.0
+        params.frequency_penalty = 0.0
+        params.repetition_penalty = 1.0
+        params.seed = None
     limit = budget if prompt_tokens is None else min(budget, max_model_len - drafter_headroom_tokens - prompt_tokens)
     if default_max_tokens is not None and omitted_max_tokens(params.max_tokens, prompt_tokens=prompt_tokens,
                                                              max_model_len=max_model_len):
@@ -1862,6 +1987,8 @@ def install_request_contract(module, *, budget, eos_ids, max_prompt_tokens=None,
     processor._qwen_c2_contract = True
     log('request contract installed: greedy, max_tokens <= %d, prompt <= %s, eos %s', budget,
         max_prompt_tokens or 'context - budget', sorted(eos_ids))
+    if sampled_enabled():
+        log('request contract: sampling honoured (%s=1; temperature 0 stays greedy, top_k clamped to %d)', SAMPLED_SWITCH, SAMPLED_K_MAX)
     if min_answer_tokens is not None or default_max_tokens is not None:
         log('request contract: every prompt keeps >= %s answer tokens, max_tokens defaults to %s when omitted',
             min_answer_tokens if min_answer_tokens is not None else budget,
@@ -2031,6 +2158,9 @@ def boot(environ=None, orig_argv=None):
     problems = parked_problems(profile, environ)
     if problems:
         raise ValueError('profile %s cannot serve parked engines: %s' % (profile['name'], '; '.join(problems)))
+    problems = sampled_problems(profile)
+    if problems:
+        raise ValueError('profile %s misuses the sampled-verify switch: %s' % (profile['name'], '; '.join(problems)))
     problems = mesh_problems(profile)
     if problems:
         raise ValueError('profile %s cannot open its mesh: %s' % (profile['name'], '; '.join(problems)))
@@ -2073,6 +2203,10 @@ def boot(environ=None, orig_argv=None):
         arm_idle_scratch(profile['name'], environ)
     if api_server:
         check_platform_model(sys.argv[1:], environ)
+        if sampled_on(profile):
+            refusals = sampled_launch_problems(sys.argv[1:])
+            if refusals:
+                raise ValueError('profile %s cannot serve sampled verification with this launch: %s' % (profile['name'], '; '.join(refusals)))
         snapshot = checkpoint_snapshot or resolve_snapshot(profile)
         if tt_config(profile).get('sample_on_device_mode') is not None and host_sampling_forced(environ):
             profile = dict(without_device_sampling(profile), name=profile['name'])
