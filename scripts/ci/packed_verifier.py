@@ -1007,6 +1007,19 @@ class PackedVerifierEngine:
         # output[1] and output[2] only, and the audit's compare stays gated on shard_audit).
         self.sampler_prewarm = self.shard_argmax and not self.shard_audit and sampler_arm_enabled(SAMPLER_PREWARM_FLAG)
         self.sampler_in_trace = self.shard_argmax and not self.shard_audit and sampler_arm_enabled(SAMPLER_IN_TRACE_FLAG)
+        # QWEN_FAST_SAMPLED (sampled_verify, docs/tp4-sampled-verify.md; default off, gate-only profiles): beside the shard argmax (which still serves every greedy request) the verify
+        # trace takes each chip's top-64 of every row through stock ttnn.topk and verify() draws a sampled entry's rows from the merged slices with the entry's own spec, seed and
+        # positions. A block that cannot take it refuses its construction (fail closed), never serves a sampled request's rows as argmax. Off, none of it exists.
+        self.sampled = False
+        if os.environ.get('QWEN_FAST_SAMPLED', '0') != '0':
+            import sampled_verify
+
+            if sampled_verify.enabled():
+                sampled_problem = sampled_verify.block_problem(self)
+                if sampled_problem is not None:
+                    diagnostic('%s: %s' % (sampled_verify.REFUSED_MARKER, sampled_problem))
+                    raise ValueError('QWEN_FAST_SAMPLED=1 but this packed block cannot take the sampled readback: %s' % sampled_problem)
+                self.sampled = True
         # QWEN_FAST_VERIFY_T2 (verify_trace_t2): read once here too. #2 (kv_chains) makes the
         # warm fixture's K/V write one chain (build_fixture); the fixture decides the writer
         # (model_batch) and this block reads what it became (kv_chains, warm_kv_chains). The
@@ -1229,6 +1242,10 @@ class PackedVerifierEngine:
                 mlp.audit_claim(self.fixture, 'capture')
         if self.verify_t1:
             self.note_verify_t1(verify_trace_t1.take())
+        if self.sampled:
+            import sampled_verify
+
+            diagnostic(sampled_verify.engaged_line(self))
         if self.verify_t2:
             self.note_verify_t2(verify_trace_t2.take())
         self.note_vglue(tp4_vglue.take())
@@ -1592,6 +1609,8 @@ class PackedVerifierEngine:
                 captures.enter_context(self.feature_capture.capture())
                 logits = fixture.run(sharded_logits=True)
             if self.shard_argmax:
+                if self.sampled:
+                    return self.sampled_outputs(logits, self.sample_shards(logits, warm=warm))
                 return (logits, *self.sample_shards(logits, warm=warm))
             ids = sample_rows(self.sampler, logits, self.block_rows, self.operations, native_rows=False)
             return logits, ids
@@ -1599,6 +1618,19 @@ class PackedVerifierEngine:
             if logits is not None:
                 self.operations.deallocate(logits)
             raise
+
+    def sampled_outputs(self, logits, shards):
+        """QWEN_FAST_SAMPLED: the trace's outputs (logits, ids, values, reference or None) followed by the top-K slice tensors (sampled_verify.device_slice), which
+        sampled_verify.tensors_of finds at the end. The shard argmax's own outputs stay where they were, so the readback, the audits and the release are unchanged."""
+        import sampled_verify
+
+        ids, values, reference = (*shards, None)[:3]
+        try:
+            slices = sampled_verify.device_slice(self.operations, logits, self.block_rows)
+        except BaseException:
+            release_owned(self.operations, [value for value in shards if value is not None])
+            raise
+        return (logits, ids, values, reference, *slices)
 
     def sample_shards(self, logits, warm=False):
         """QWEN_FAST_VERIFY_T1 (#8a): each chip's argmax and max over its own vocab shard, no
@@ -2077,6 +2109,12 @@ class PackedVerifierEngine:
 
                 kv_page_writer_tp4.audit_round(self.operations, self.rounds + 1)
             predictions = [host[slice(*segment_rows(self.shape, segment))] for segment in segments]
+            sampled_metrics = None
+            if self.sampled:
+                # QWEN_FAST_SAMPLED: a sampled entry's rows become its keyed draws from the merged top-K slices (greedy entries keep the argmax rows above)
+                import sampled_verify
+
+                predictions, sampled_metrics = sampled_verify.packed_predictions(self, entries, segments, host, predictions, audit_round_number)
             finished = time.perf_counter()
             if hostgap:
                 self.note_hostgap_verify(segments, snapshot, (staged_at - started) * 1000,
@@ -2121,6 +2159,8 @@ class PackedVerifierEngine:
                 input_ms=(staged_at - started) * 1000, verify_readback_ms=(finished - staged_at) * 1000,
                 blocking_trace_host_ms=trace_ms, replay_checks_sync_ms=(replayed - staged_at) * 1000 - trace_ms,
                 output_readback_host_ms=(finished - replayed) * 1000, users=self.users)
+            if sampled_metrics is not None:
+                metrics.update(sampled=sampled_metrics)
             if self.padded_min_users is not None:
                 # QWEN_FAST_PADDED_BLOCK only: the round's live and idle segments (every round, the
                 # all-live ones included), into each user's phase-timing record.
@@ -2366,7 +2406,8 @@ class PackedVerifierEngine:
             **({} if self.fused is None else dict(fused_commit=self.fused.describe())),
             **({} if getattr(self, 'publication_warm', None) is None else dict(publication_warm=dict(
                 self.publication_warm, program_cache=list(self.publication_warm['program_cache'])))),
-            **({} if not getattr(self, 'gdn_after_pairs', False) else dict(gdn_after_pairs=True)))
+            **({} if not getattr(self, 'gdn_after_pairs', False) else dict(gdn_after_pairs=True)),
+            **({} if not getattr(self, 'sampled', False) else dict(sampled=dict(k=64, rounds=getattr(self, 'sampled_rounds', 0)))))
 
     def close(self, *, wait=True):
         """Release the block. `wait=False` is the failed construction: the device may still be

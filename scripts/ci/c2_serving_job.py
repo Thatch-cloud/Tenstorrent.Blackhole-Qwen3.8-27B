@@ -60,6 +60,10 @@ Keys (every one optional but C2_IMAGE_TAG):
                       unchanged, so such a run still ends red on its concurrent8_steady rule: read its logs, not its conclusion. A
                       committed template that needs the key is held to it by test_c2_serving_job; one that does not never carries it
   C2_BENCH_SHAPES     the bench test's shapes, comma-separated STREAMSxPROMPT (default: tp_decode_bench's ladder)
+  C2_SMOKE_SAMPLING   greedy (default, rendered empty: every request as it always was) or model-default: the smoke's seeded sampled arm (sampled_client.py) - the model's own temperature,
+                      top_p and top_k and a fixed seed drawn from each prompt on every completion request. model-default needs a smoke action and a profile that turns
+                      QWEN_FAST_SAMPLED on (otherwise the server's request contract serves it greedy, and the result would be mislabelled); SMOKE_JSON's `sampling` entry says which ran
+  C2_SMOKE_SEED       the sampled arm's base seed (a decimal integer below 2^63; default 20261022); needs C2_SMOKE_SAMPLING=model-default
   C2_PLATFORM_IMAGE   the thatch-serving-tt image the replay runs
   C2_BAKE_DEFAULT_PROFILE  build only: bake this profile as the image's serving default (the image ENV QWEN_C2_PROFILE) and
                       THATCH_SERVING_SESSION_CAP as its max-num-seqs (the node agent forwards neither, so the image is what a platform launch
@@ -179,6 +183,8 @@ Keys (every one optional but C2_IMAGE_TAG):
   C2_TAULAB_DEADLINE  the whole run in minutes, container load included (default 270, at most 540)
   C2_TAULAB_IN_FLIGHT requests in flight per independent-turn arm (default 8: the four seats and four queued; 1..16)
   C2_TAULAB_MAX_TOKENS  the answer budget of A1, A2, A4 and A5 (default, rendered empty: 2048; A3 always keeps the lanes' 2400)
+  C2_TAULAB_SAMPLING  greedy (default, rendered empty) or model-default: the lab's seeded sampled arm (c2_tau_lab.py --sampling); needs a C2_TAULAB_PROFILE that turns QWEN_FAST_SAMPLED on
+  C2_TAULAB_SAMPLING_SEED  the lab's sampled-arm base seed (decimal, below 2^63; default 20261022); needs C2_TAULAB_SAMPLING=model-default
   C2_TAULAB_DRAFTER_ARM  which drafter the run serves (default, rendered empty: the lab as it was): control (the served drafter),
                       b16-bf8 (the block-16 candidate), b32-bf8 (the block-32 candidate, measurement only), dedf-bf16 (the
                       served drafter with bfloat16 projection weights) or lookup (the served drafter with prompt lookup,
@@ -467,6 +473,31 @@ def bench_shapes(values):
     return shapes
 
 
+SAMPLING_MODES = ('greedy', 'model-default')
+SAMPLING_SEED = re.compile(r'[0-9]{1,18}')
+
+
+def read_sampling(values, actions, profile, taulab_profile, envs):
+    """(smoke_sampling, smoke_seed, taulab_sampling, taulab_sampling_seed), each rendered empty when unset. The seeded sampled arm is only meaningful against a profile that turns sampled
+    verification on (QWEN_FAST_SAMPLED=1): any other serves a request's temperature as greedy, so the arm is refused there instead of being reported as something it was not."""
+    out = []
+    for mode_key, seed_key, action, name in (('C2_SMOKE_SAMPLING', 'C2_SMOKE_SEED', 'smoke', profile), ('C2_TAULAB_SAMPLING', 'C2_TAULAB_SAMPLING_SEED', 'taulab', taulab_profile)):
+        mode, seed = values.get(mode_key, ''), values.get(seed_key, '')
+        if mode not in ('',) + SAMPLING_MODES:
+            raise JobError('%s must be one of %s, got %r' % (mode_key, ', '.join(SAMPLING_MODES), mode))
+        if seed and not SAMPLING_SEED.fullmatch(seed):
+            raise JobError('%s is a decimal integer, got %r' % (seed_key, seed))
+        if seed and mode != 'model-default':
+            raise JobError('%s is the sampled arm\'s base seed: set %s=model-default' % (seed_key, mode_key))
+        if mode == 'model-default':
+            if action not in actions:
+                raise JobError('%s=model-default: C2_ACTIONS has no %s' % (mode_key, action))
+            if str((envs.get(name) or {}).get('QWEN_FAST_SAMPLED', '')) != '1':
+                raise JobError('%s=model-default needs a profile that turns QWEN_FAST_SAMPLED on; %s does not (the server would serve the arm greedy)' % (mode_key, name))
+        out += [mode, seed]
+    return tuple(out)
+
+
 def fabric_config(values):
     fabric = values.get('C2_FABRIC') or FABRIC_CONFIGS[0]
     if fabric not in FABRIC_CONFIGS:
@@ -685,13 +716,16 @@ def read_job(values, profiles, root=ROOT, meshes=None, envs=None):
     box_minutes = read_box(values, actions)
     model = read_model(values, actions, cards, lambda action: (taulab['taulab_profile'] if action == 'taulab'
                                                                  else prefix['prefix_profile'] if action == 'prefix' else profile), root)
+    smoke_sampling, smoke_seed, taulab_sampling, taulab_sampling_seed = read_sampling(
+        values, actions, profile, taulab['taulab_profile'], profile_envs() if envs is None else envs)
     outputs = dict(cards=cards, fabric=fabric_config(values), fabric_probe=fabric_probe(values, actions), bench_shapes=bench_shapes(values), actions=' '.join(actions), rmi_tags=rmi_tags, tag=tag, profile=profile, tests=values.get('C2_SMOKE_TESTS', ''),
                    platform_image=platform_image, gate_plan=','.join(plans),
                    gate_lengths=','.join(str(length) for length in lengths), gate_max_tokens=str(max_tokens),
                    gate_memory_prompt=str(memory_prompt), gate_memory_users=str(memory_users), replay_profile=replay_profile,
                    replay_served_model=replay_served_model, replay_budget_smoke=budget_smoke, cardm_harness=cardm_harness, cardm_args=cardm_args,
                    cardm_env=cardm_env, bake_default_profile=bake_profile, bake_graft=bake_graft, drafter_candidates=drafter_candidates, box_minutes=box_minutes, drafter_manifest=drafter_manifest, tt_grid=tt_grid,
-                   telemetry=telemetry, telemetry_ms=telemetry_ms)
+                   telemetry=telemetry, telemetry_ms=telemetry_ms, smoke_sampling=smoke_sampling, smoke_seed=smoke_seed,
+                   taulab_sampling=taulab_sampling, taulab_sampling_seed=taulab_sampling_seed)
     outputs.update(s2)
     outputs.update(prefix)
     outputs.update(taulab)

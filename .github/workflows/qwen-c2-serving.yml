@@ -1034,6 +1034,8 @@ jobs:
           TAULAB_COUNTERS: ${{ steps.job.outputs.taulab_counters }}
           TAULAB_DRAFTER_ARM: ${{ steps.job.outputs.taulab_drafter_arm }}
           TAULAB_PAIR_CONTROL: ${{ steps.job.outputs.taulab_pair_control }}
+          TAULAB_SAMPLING: ${{ steps.job.outputs.taulab_sampling }}
+          TAULAB_SAMPLING_SEED: ${{ steps.job.outputs.taulab_sampling_seed }}
           TT_GRID: ${{ steps.job.outputs.tt_grid }}
           MODEL_REPO: ${{ steps.job.outputs.model_repo }}
           MODEL_REVISION: ${{ steps.job.outputs.model_revision }}
@@ -1083,6 +1085,9 @@ jobs:
           args=(--image "$image" --profile "$TAULAB_PROFILE" --data "$data" --results "$run" --public "$public"
                 --arms "$TAULAB_ARMS" --deadline-seconds "$budget" --in-flight "$TAULAB_IN_FLIGHT" --cards quad)
           if [ -n "$TAULAB_MAX_TOKENS" ]; then args+=(--max-tokens "$TAULAB_MAX_TOKENS"); fi
+          # C2_TAULAB_SAMPLING (default empty: greedy): the lab's seeded sampled arm against a profile that turns sampled verification on (c2_tau_lab.py --sampling).
+          if [ -n "$TAULAB_SAMPLING" ]; then args+=(--sampling "$TAULAB_SAMPLING"); fi
+          if [ -n "$TAULAB_SAMPLING_SEED" ]; then args+=(--sampling-seed "$TAULAB_SAMPLING_SEED"); fi
           # C2_TT_GRID: the compute-grid clamp for the lab's container (the driver prints the one line saying so).
           if [ -n "$TT_GRID" ]; then args+=(--tt-grid "$TT_GRID"); fi
           # A drafter arm (tp4/drafter-arms): the image carries that drafter's fixtures, the derived profile only its drafter-only flags.
@@ -1137,6 +1142,8 @@ jobs:
           MODEL_REPO: ${{ steps.job.outputs.model_repo }}
           MODEL_REVISION: ${{ steps.job.outputs.model_revision }}
           SERVED_MODEL: ${{ steps.job.outputs.model_served }}
+          SMOKE_SAMPLING: ${{ steps.job.outputs.smoke_sampling }}
+          SMOKE_SEED: ${{ steps.job.outputs.smoke_seed }}
         run: |
           set -euo pipefail
           # The pair smoke's shape on every Blackhole board present (a general-tp4 profile: the contract sets
@@ -1230,8 +1237,10 @@ jobs:
             smoke_wrap=(timeout -k 30 "$left")
           fi
           smoke_status=0
+          # C2_SMOKE_SAMPLING / C2_SMOKE_SEED (default empty: greedy): the seeded sampled arm of a profile that turns sampled verification on (sampled_client.py); SMOKE_JSON says which ran.
           AGREEMENT_OUT="$results/agreement-$PROFILE.json" BENCH_OUT="$results/bench-$PROFILE.json" \
             CODING_SET_OUT="$results/coding-set-$PROFILE.json" \
+            C2_SMOKE_SAMPLING="$SMOKE_SAMPLING" C2_SMOKE_SEED="$SMOKE_SEED" \
             AGREEMENT_LABEL="$PROFILE" AGREEMENT_ROOT="$PWD" \
             ${smoke_wrap[@]+"${smoke_wrap[@]}"} python3 scripts/ci/c2_serving_smoke.py http://127.0.0.1:8010 "$served" "$TESTS" \
             "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')/typing.py" \

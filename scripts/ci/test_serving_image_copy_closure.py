@@ -181,7 +181,10 @@ C2_ONLY_PLAIN_IMPORTS = frozenset(['audit_sampling.py', 'capture_plug.py', 'exte
                                    # exact resume P0 (QWEN_PREFIX_WINDOW_CARRY): imported by serving_lifecycle only when the switch is set (overlay-only, docker/qwen-c2-overlay.txt via fusion-wp/ER.json)
                                    'prefix_window_carry.py',
                                    # tp4/sched-2 (QWEN_FAST_ADMISSION_SEED_FIRST / _HOLD_REUSE / _LEDGER_TRIM): imported by serving_runtime and serving_request_factory only when a switch is set (overlay-only, docker/qwen-c2-overlay.txt)
-                                   'admission_pipeline.py'])
+                                   'admission_pipeline.py',
+                                   # tp4/sampled-verify (QWEN_FAST_SAMPLED): imported by packed_verifier, verifier_engine_tp, serving_lifecycle, serving_request_factory, serving_runtime and serving_fast_policy only when
+                                   # the switch is set (overlay-only, docker/qwen-c2-overlay.txt, with sampled_accept.py which only it imports)
+                                   'sampled_verify.py'])
 
 
 def unsatisfiable_plain_imports():

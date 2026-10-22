@@ -40,7 +40,15 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                     mtp_runtime=None, mtp_factory=None, progress=None, native_sampling_rows=False, short_context=False,
                     attention_audit=False, feature_factory=None, commit_only_gdn=False, audit_commit_only_gdn=False,
                     verifier_observer=None, feature_drafter_name='dflash2', verifier_before_capture=None,
-                    target_attention_t16=False):
+                    target_attention_t16=False, sampling=None, prefill_logits=None):
+    # sampling (sampled_verify.Sampling; None, the default and every caller as it always was, is the greedy gold): the reference of a SAMPLED request (docs/tp4-sampled-verify.md section 4).
+    # The gold decode samples every token with sampled_accept.sample_logits - the keyed draw at the token's absolute position from the same top-64 filter, on the same logits - so the
+    # committed-prefix check stays "0 mismatches" for a sampled request. `prefill_logits(prompt)` runs the same native prefill as `prefill(prompt)` and returns its last row's logits (the
+    # first token is the draw at position len(prompt)); the verifier's rows are the draws of the engine's own logits (sampled_verify.sequential_predictions).
+    if sampling is not None and not callable(prefill_logits):
+        raise ValueError('A sampled reference needs prefill_logits: the first token is the keyed draw from the prefill logits')
+    if sampling is None and prefill_logits is not None:
+        raise ValueError('prefill_logits belongs to a sampled reference')
     if verifier_before_capture is not None and not callable(verifier_before_capture):
         raise ValueError('Callable verifier pre-capture preparation required')
     if (feature_drafter_name not in ('dflash2', 'dspark')
@@ -100,18 +108,28 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
     if attention_replay and (not norm_batch or not family_routing):
         raise ValueError('Replay attention requires norm batching and bounded family routing')
     validate_replay_options(attention_replay, attention_mask_once, replay_group_rows)
+    if sampling is None:
+        first_token = prefill
+    else:
+        import sampled_accept
+
+        def first_token(request):
+            return sampled_accept.sample_logits(prefill_logits(request).reshape(-1, model.args.vocab_size)[0].float().numpy(), sampling.spec, sampling.seed, len(request))
     started = time.perf_counter()
-    gold = [prefill(prompt)]
+    gold = [first_token(prompt)]
     native_prefill_ms = (time.perf_counter() - started) * 1000
     started = time.perf_counter()
     while len(gold) < max_new_tokens and gold[-1] not in eos_ids:
         logits = decode(gold[-1], len(prompt) + len(gold) - 1, True)
-        gold.append(int(logits.reshape(-1, model.args.vocab_size)[0].float().argmax()))
+        if sampling is None:
+            gold.append(int(logits.reshape(-1, model.args.vocab_size)[0].float().argmax()))
+        else:
+            gold.append(sampled_accept.sample_logits(logits.reshape(-1, model.args.vocab_size)[0].float().numpy(), sampling.spec, sampling.seed, len(prompt) + len(gold)))
     native_decode_ms = (time.perf_counter() - started) * 1000
     gold_state = live_digest()
     gold_kv = kv_digest(len(prompt) + len(gold) - 1)
     started = time.perf_counter()
-    seed = prefill(prompt)
+    seed = first_token(prompt)
     prefill_ms = (time.perf_counter() - started) * 1000
     if seed != gold[0]:
         raise AssertionError(f'Fresh request prefill changed the native seed: native={gold[0]}, candidate={seed}')
@@ -140,6 +158,8 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
     inactive_before = inactive_digest()
     session = GreedySession('lookup-pilot', prompt, seed, vocab_size=model.args.vocab_size,
         max_new_tokens=max_new_tokens, eos_ids=eos_ids, verifier_rows=32, neural=neural, lookup_enabled=lookup_enabled)
+    if sampling is not None:
+        session.sampling = sampling
     engine = None
     blocks = []
     setup_ms = decode_ms = 0.0
@@ -182,6 +202,10 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
                 before_verify = live_digest() if audit_commit_only_gdn and len(ticket.tokens) > 1 else None
                 with verifier_observer(engine, ticket) if verifier_observer is not None else nullcontext():
                     predictions, components = engine.verify(ticket)
+                if sampling is not None:
+                    import sampled_verify
+
+                    predictions = sampled_verify.sequential_predictions(engine, engine.buckets[engine.pending_key]['output'], ticket, sampling)
                 if before_verify is not None:
                     if live_digest() != before_verify:
                         raise AssertionError('Commit-only verification modified native GDN state before the decision')
@@ -221,6 +245,7 @@ def measure_request(model, sampler, prompt, pages, helpers, *, prefill, decode, 
             drafting_policy='lookup-first' if lookup_enabled else 'neural-with-target-fallback',
             prompt_tokens=list(prompt), emitted=gold, max_new_tokens=max_new_tokens, eos_ids=list(eos_ids),
             vocab_size=model.args.vocab_size,
+            **({} if sampling is None else dict(sampled=dict(temperature=sampling.spec.temperature, top_p=sampling.spec.top_p, top_k=sampling.spec.top_k, seed=sampling.seed))),
             prompt_sha256=hashlib.sha256(json.dumps(list(prompt)).encode()).hexdigest(),
             output_sha256=hashlib.sha256(json.dumps(gold).encode()).hexdigest(),
             committed_decode_tokens=session.committed_decode_tokens, proposed=session.committed_block_proposals,

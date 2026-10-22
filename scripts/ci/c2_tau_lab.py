@@ -81,6 +81,7 @@ import c2_prefix_gate as pg  # noqa: E402
 import c2_serving_gate as gate  # noqa: E402
 import c2_serving_job  # noqa: E402
 import prefix_replay as replay  # noqa: E402
+import sampled_client  # noqa: E402
 import tau_lab_report as report  # noqa: E402
 
 ARMS = ('A1', 'A2', 'A3', 'A4', 'A5')
@@ -526,10 +527,12 @@ def effective_max_tokens(arms, manifest, override=None):
 
 # -- the profile and the container -----------------------------------------------------------------------------------
 
-def derive_profile(profiles, base, arm=None):
+def derive_profile(profiles, base, arm=None, sampling=False):
     """(derived name, a profiles document holding only it): `base` with the two log flags and, for a drafter arm, that arm's
     drafter-only flags. Refuses a base the lab cannot mean: not a four-card profile, a gate-only one, or one that already sets a
-    flag to something else; an unknown arm."""
+    flag to something else; an unknown arm. `sampling` (the seeded sampled arm, --sampling model-default; docs/tp4-sampled-verify.md) is the one case a gate-only base is
+    served: a profile that turns sampled verification on (QWEN_FAST_SAMPLED=1) is gate-only by contract, and a sampled arm sent to any other profile would be coerced to greedy
+    by the server's request contract and mislabelled."""
     if arm is not None and arm not in DRAFTER_ARMS:
         raise LabError('unknown drafter arm %s (known: %s)' % (arm, ' '.join(sorted(DRAFTER_ARMS))))
     names = profiles['profiles']
@@ -538,9 +541,13 @@ def derive_profile(profiles, base, arm=None):
     profile = copy.deepcopy(names[base])
     if profile.get('mesh_device') != 'P150x4':
         raise LabError('profile %s does not open the four-card mesh' % base)
-    if profile.get('gate_only') is True:
-        raise LabError('profile %s is gate-only: the lab serves the production profile' % base)
     env = profile.setdefault('env', {})
+    if sampling and str(env.get('QWEN_FAST_SAMPLED')) != '1':
+        raise LabError('profile %s does not turn sampled verification on (QWEN_FAST_SAMPLED=1): the server would serve the sampled arm greedy' % base)
+    if not sampling and str(env.get('QWEN_FAST_SAMPLED')) == '1':
+        raise LabError('profile %s turns sampled verification on: the lab serves it only for the sampled arm (--sampling model-default)' % base)
+    if profile.get('gate_only') is True and not sampling:
+        raise LabError('profile %s is gate-only: the lab serves the production profile' % base)
     for name, value in LOG_FLAGS:
         if str(env.get(name, value)) != value:
             raise LabError('profile %s sets %s to %s, not %s' % (base, name, env[name], value))
@@ -605,9 +612,11 @@ def is_production_run(image, audits, arm=None):
 
 # -- the requests ----------------------------------------------------------------------------------------------------
 
-def request_body(job, thinking, max_tokens, model):
+def request_body(job, thinking, max_tokens, model, sampling=None):
     """(path, body) for one turn. Greedy, streamed, with the continuous usage stats the third source needs and the token
-    ids the tapes need. Thinking ON sends no chat_template_kwargs (the template's default is what production agents get)."""
+    ids the tapes need. Thinking ON sends no chat_template_kwargs (the template's default is what production agents get).
+    `sampling` (a sampled_client.Arm; None and the greedy arm are the lab as it was) is the seeded sampled arm: the model's own temperature, top_p and top_k and a fixed
+    seed drawn from the prompt, so a turn re-sent on another profile carries the same seed."""
     options = dict(include_usage=True, continuous_usage_stats=True)
     common = dict(model=model, max_tokens=int(max_tokens), temperature=0.0, top_p=1.0, stream=True,
                   stream_options=options, return_token_ids=True)
@@ -618,9 +627,16 @@ def request_body(job, thinking, max_tokens, model):
             body['tool_choice'] = 'auto'
         if thinking is False:
             body['chat_template_kwargs'] = dict(enable_thinking=False)
-        return '/v1/chat/completions', body
+        return '/v1/chat/completions', sampled_body(body, sampling)
     ids = job.get('prompt_ids_nothink') if thinking is False and job.get('prompt_ids_nothink') else job['prompt_ids']
-    return '/v1/completions', dict(common, prompt=list(ids))
+    return '/v1/completions', sampled_body(dict(common, prompt=list(ids)), sampling)
+
+
+def sampled_body(body, sampling):
+    """`body` with the sampled arm's terms in place of the greedy ones (a copy); the body itself for no arm or the greedy arm."""
+    if sampling is None or not sampling.sampled:
+        return body
+    return dict(body, **sampling.terms(body))
 
 
 class Chunks(object):
@@ -824,7 +840,8 @@ class Lab(object):
 
     def __init__(self, results, stream, limits, seed=SEED, in_flight=DEFAULT_IN_FLIGHT, max_tokens=None, model=replay.SERVED_NAME,
                  clock=time.time, sleep=time.sleep, say=print, corpus=None, alive=None, canary=None,
-                 think_end=THINK_END_TOKEN, tool_call=TOOL_CALL_TOKEN):
+                 think_end=THINK_END_TOKEN, tool_call=TOOL_CALL_TOKEN, sampling=None):
+        self.sampling = sampling              # a sampled_client.Arm, or None (greedy: the lab as it was)
         self.results, self.stream, self.limits = results, stream, limits
         self.seed, self.in_flight, self.max_tokens, self.model = seed, in_flight, max_tokens, model
         self.clock, self.sleep, self.say = clock, sleep, say
@@ -876,7 +893,7 @@ class Lab(object):
     def send(self, arm, job, thinking, max_tokens, ends, turn=None, extra=None, keep_content=False):
         """One turn: -> (turn record, output record). Never raises on a request failure: the turn is recorded failed."""
         spec = ARM_SPEC[arm]
-        path, body = request_body(job, thinking, max_tokens, self.model)
+        path, body = request_body(job, thinking, max_tokens, self.model, self.sampling)
         started = self.clock()
         timeout = max(60.0, ends - started + TURN_GRACE_SECONDS)
         try:
@@ -1229,6 +1246,10 @@ def build_parser():
                         help='the whole run, the container load included; the last %d s are the stop and the report'
                         % RESERVE_SECONDS)
     parser.add_argument('--seed', type=int, default=SEED)
+    parser.add_argument('--sampling', choices=sampled_client.MODES, default=sampled_client.DEFAULT_MODE,
+                        help='greedy (default: the lab as it was) or model-default: the model\'s own temperature / top_p / top_k and a fixed seed drawn from each prompt '
+                        '(sampled_client.py); needs a profile that turns QWEN_FAST_SAMPLED on (a gate-only profile), and tau is then a different number')
+    parser.add_argument('--sampling-seed', type=int, default=sampled_client.DEFAULT_BASE_SEED, help='the sampled arm\'s base seed (the same prompt gets the same seed in every run)')
     parser.add_argument('--in-flight', type=int, default=DEFAULT_IN_FLIGHT)
     parser.add_argument('--max-tokens', type=int, default=None, help='every arm\'s answer budget (default per arm; A3 keeps its '
                                                                     'own 2400, the lanes\' budget)')
@@ -1385,8 +1406,9 @@ def main(argv=None, say=print, make_stream=None, make_client=None, make_containe
             say('refused: the image\'s profiles could not be read (%s)' % type(error).__name__)
             return 2
     try:
-        derived, document = derive_profile(profiles, options.profile, options.drafter_arm)
-    except LabError as error:
+        sampling = sampled_client.Arm(options.sampling, options.sampling_seed)
+        derived, document = derive_profile(profiles, options.profile, options.drafter_arm, sampling=sampling.sampled)
+    except (LabError, sampled_client.SamplingError) as error:
         say('refused: %s' % error)
         return 2
     extra = arithmetic_diff(profiles, options.profile, document, options.drafter_arm)
@@ -1449,6 +1471,7 @@ def main(argv=None, say=print, make_stream=None, make_client=None, make_containe
                 drafter_arm=options.drafter_arm, drafter_bf16=dict(DRAFTER_ARMS.get(options.drafter_arm, {}).get('env', ())).get(
                     'QWEN_FAST_DRAFTER_BF16') == '1',
                 derived=derived, seed=options.seed, max_tokens=effective_max_tokens(arms, manifest, options.max_tokens), max_tokens_asked=options.max_tokens, arms=arms,
+                **({'sampling': sampling.report(counted=False)} if sampling.sampled else {}),
                 arithmetic_extra=extra, scrub=scrub, data_counts=plan_counts(data, arms),
                 calibration_corpus=calibration, started=started, counts={})
     status = 1
@@ -1479,7 +1502,7 @@ def main(argv=None, say=print, make_stream=None, make_client=None, make_containe
             options.port, path, body, timeout, keep_content=keep)))()
         lab = Lab(results, stream, limits, seed=options.seed, in_flight=options.in_flight, max_tokens=options.max_tokens,
                   clock=clock, sleep=sleep, say=say, corpus=corpus, alive=container.running, think_end=think_end,
-                  tool_call=tool_call)
+                  tool_call=tool_call, sampling=sampling if sampling.sampled else None)
         lab.canary = (make_canary_check or make_canary)(log_path, results)
         if options.drafter_arm is not None:
             # A drafter arm's lookup markers: only the lookup arm may show them (nothing at startup does, so launched_problems cannot).

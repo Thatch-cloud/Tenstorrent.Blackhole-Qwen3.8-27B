@@ -581,7 +581,14 @@ class VerifierEngine(PairVerifierEngine):
                 bucket['fixture'].replay_reader.audit.check(ticket.position, ticket.tokens)
             replay_finished = time.perf_counter()
             mark('readback')
-            if len(bucket['output']) > 2:
+            sampling = getattr(self.session, 'sampling', None)
+            if sampling is not None:
+                # QWEN_FAST_SAMPLED (sampled_verify; a greedy request and every profile without the switch have no `sampling` and take the branches below): a sampled
+                # request's rows are the keyed draws from the logits read back whole and sliced on the host.
+                import sampled_verify
+
+                predictions = sampled_verify.sequential_predictions(self, bucket['output'], ticket, sampling)
+            elif len(bucket['output']) > 2:
                 predictions = self.shard_predictions(bucket['output'], len(ticket.tokens))
             else:
                 logits, ids = bucket['output']

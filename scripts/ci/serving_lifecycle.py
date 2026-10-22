@@ -94,6 +94,9 @@ class FastServingLifecycle:
     # backstop); its request_id and capture stay held until it has run. None on the class, so a lifecycle built without __init__, and every profile without the switch, binds in the sampler.
     seed_first = None
     deferred = None
+    # QWEN_FAST_SAMPLED (sampled_verify.FirstToken; default off, set per instance in __init__): the wrapper on the plugin runner's host sampler that draws a sampled request's first
+    # token with the request's keyed noise. None on the class, so a lifecycle built without __init__, and every profile without the switch, samples token 0 as the plugin does.
+    first_token = None
 
     # request_id is assigned at five sites - construction, reset, the
     # EOS-at-first-token release, the prefill-to-decode handoff, and admission.
@@ -225,6 +228,14 @@ class FastServingLifecycle:
             seed_first.install(self, config)
             self.seed_first = seed_first
         self.original_execute, self.original_sample = worker.execute_model, worker.sample_tokens
+        import os as _os
+
+        if _os.environ.get('QWEN_FAST_SAMPLED', '0') != '0':
+            # Sampled verification (docs/tp4-sampled-verify.md section 2.2): the prefill's token 0 is the keyed draw at position len(prompt), not the plugin's unkeyed one.
+            import sampled_verify
+
+            if sampled_verify.enabled():
+                self.first_token = sampled_verify.FirstToken.install(runner)
         self.saved = []
         for name, value in (('_qwen_fast_lifecycle', self),
                 ('execute_model', MethodType(self._execute, worker)),
@@ -635,6 +646,12 @@ class FastServingLifecycle:
                 if self.quarantine is None:
                     raise
                 refused = 'sampling contract: %s' % refusal
+            if self.first_token is not None:
+                # Sampled verification: a well-formed sampled request is armed for the keyed first-token draw (a greedy one disarms whatever an earlier request left); one
+                # the gate refused above is quarantined at its first token like any other refusal and draws nothing.
+                self.first_token.disarm()
+                if refused is None:
+                    self.first_token.arm(new.req_id, new.sampling_params, len(new.prompt_token_ids))
             # A terminal first token only ends the request when EOS is honoured.
             self.ignore_eos = bool(getattr(new.sampling_params, 'ignore_eos', False))
             self.refused = refused
@@ -970,6 +987,9 @@ class FastServingLifecycle:
             state = self.runner.requests[self.request_id]
             if state.output_token_ids != result.sampled_token_ids[0]:
                 raise ValueError('Native prefill output and runner state disagree')
+            if self.first_token is not None:
+                # an armed request must have started from the keyed draw (SampledRefused is a ValueError: the engine fails closed)
+                self.first_token.finish(self.request_id, result)
             if state.output_token_ids[0] in self.eos_ids and not self.ignore_eos:
                 # Finished at its first token: no bridge, no hook. The prefill slot
                 # MUST be freed here - leaving it held is invisible with one user,
@@ -1079,4 +1099,7 @@ class FastServingLifecycle:
                 setattr(self.worker, name, value)
             else:
                 delattr(self.worker, name)
+        if self.first_token is not None:
+            self.first_token.uninstall(self.runner)
+            self.first_token = None
         self.closed = True

@@ -14,7 +14,8 @@ for ~8 fewer committed rows per seat-round. At <= 4 live nothing changes: M3 at 
     exactly as the one-user D0 block shares slot 0's with M3's segment 0. Which block a round runs on is the PackedStep's policy
     (serving_packed_step.PackedStep.proposal_groups / route_octo); each switch of shape bumps the fixture write epoch (note_switch).
 
-EXACTNESS (owner rule: STRICT). Only the target's own argmax is ever committed; speculation changes only HOW MANY tokens a round commits. The octo
+EXACTNESS (owner rule: STRICT). Only the target's own argmax is ever committed - under QWEN_FAST_SAMPLED=1 (docs/tp4-sampled-verify.md), for a sampled request, only the target's own keyed
+draw (sampled_verify.packed_predictions: the same walk per segment, the draw at ticket.position + 1 + row from the row's top-64 slice) - speculation changes only HOW MANY tokens a round commits. The octo
 round is the M3 round at another row geometry: GDN state commits at the accepted prefix (the block's per-user commit traces: 8 users x prefixes 1..8),
 K/V rows past the frontier are overwritten later, the drafter's history takes verified features only (the block's taps at the segment's 8 rows), every
 shape switch bumps the fixture epoch, and native GDN slot 0 stays untrusted after a packed step (verifier_engine.note_packed_step).

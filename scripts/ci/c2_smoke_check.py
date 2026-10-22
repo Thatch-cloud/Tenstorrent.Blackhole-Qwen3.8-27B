@@ -2327,6 +2327,53 @@ W2_OFF_AFTER_FLAG = 'QWEN_FAST_W2_OFF_AFTER'
 PACKED_ROUND_LINE = '[PINDIAG] packed extent round'
 
 
+# Sampled verification (QWEN_FAST_SAMPLED=1, docs/tp4-sampled-verify.md; sampled_verify.py's markers - held equal by test_sampled_smoke): what a gate run of a sampled profile must show.
+SAMPLED_FLAG = 'QWEN_FAST_SAMPLED'
+SAMPLED_AUDIT_FLAG = 'QWEN_FAST_SAMPLED_AUDIT'
+SAMPLED_ATTACH = '[PINDIAG] sampled verify attach'
+SAMPLED_ENGAGED = '[PINDIAG] sampled verify engaged'
+SAMPLED_REFUSED = '[PINDIAG] sampled verify refused'
+SAMPLED_ROUND = '[PINDIAG] sampled verify round'
+SAMPLED_AUDIT = '[PINDIAG] sampled verify audit '
+SAMPLED_FIRST_TOKEN = '[PINDIAG] sampled first token'
+
+
+def sampled_problems(env, smoke, container_text, decode=True):
+    """[problem] for a sampled profile's run (none for any other): the attach line (every block can draw: until it, the gate refuses a sampled request), one engaged line per packed block with
+    the launches the block's rows imply, no refusal line, and - for a smoke that sent sampled requests (SMOKE_JSON's `sampling` entry says model-default) - the keyed first-token lines, the sampled
+    rounds' lines and, audited, a passing slice-and-draw audit line. A smoke that sent only greedy requests to a sampled profile checked nothing the profile is for."""
+    if env is None or env.get(SAMPLED_FLAG) != '1':
+        return []
+    lines = container_text.splitlines()
+    problems = []
+    attach = [line for line in lines if SAMPLED_ATTACH in line]
+    if len(attach) != 1:
+        problems.append('%s=1 and %d attach lines (%s): the engine-side gate opens on exactly one, after every packed block engaged the sampled readback' % (SAMPLED_FLAG, len(attach), SAMPLED_ATTACH))
+    refused = [line.strip()[:200] for line in lines if SAMPLED_REFUSED in line]
+    problems += ['a block refused the sampled readback: %s' % line for line in refused[:4]]
+    engaged = [line for line in lines if SAMPLED_ENGAGED in line]
+    if not engaged:
+        problems.append('%s=1 and no engaged line (%s): no packed block took the sampled readback' % (SAMPLED_FLAG, SAMPLED_ENGAGED))
+    declared = re.search(r'blocks=(\d+)', attach[0]) if attach else None
+    if declared and int(declared.group(1)) != len(engaged):
+        problems.append('the attach line says %s block(s) and %d engaged line(s) were logged' % (declared.group(1), len(engaged)))
+    if not decode:
+        return problems
+    arm = (smoke or {}).get('sampling') if isinstance(smoke, dict) else None
+    if not isinstance(arm, dict) or arm.get('mode') != 'model-default':
+        problems.append('the profile serves sampled verification and the smoke sent greedy requests only (SMOKE_JSON sampling %r): set C2_SMOKE_SAMPLING=model-default' % (arm.get('mode') if isinstance(arm, dict) else None))
+        return problems
+    if not arm.get('requests'):
+        problems.append('SMOKE_JSON says the model-default arm but no request carried its terms')
+    if not any(SAMPLED_FIRST_TOKEN in line for line in lines):
+        problems.append('sampled requests were sent and no keyed first-token line (%s) was logged: token 0 came from the plugin\'s own sampler' % SAMPLED_FIRST_TOKEN)
+    if not any(SAMPLED_ROUND in line for line in lines):
+        problems.append('sampled requests were sent and no sampled round line (%s) was logged: no packed round drew a token' % SAMPLED_ROUND)
+    if env.get(SAMPLED_AUDIT_FLAG) == '1' and not any(SAMPLED_AUDIT in line and 'slice=exact draws=exact' in line for line in lines):
+        problems.append('%s=1 and no passing audit line (%s... slice=exact draws=exact): the device slice and the draws were never compared with the reference' % (SAMPLED_AUDIT_FLAG, SAMPLED_AUDIT.strip()))
+    return problems
+
+
 def w2_kill_problems(env, container_text):
     """[problem] for the W2 kill switch lines of a server log (see the block comment above): none for a log with no kill line and a profile without the drill."""
     lines = container_text.splitlines()
@@ -2512,6 +2559,7 @@ def check(smoke_text, container_text, slide, max_ramp_ms=50.0, env=None, entry=N
     problems += drafter_checkpoint_problems(env, container_text)
     problems += w2_kill_problems(env, container_text)
     problems += upload_p0_problems(env, container_text)
+    problems += sampled_problems(env, smoke, container_text, decode)
     median, rounds = ramp_kv_median(container_text)
     facts = dict(audit_mismatches=len(mismatches), publish_rounds=rounds, largest_prepare_history_median_ms=median)
     if agent_facts:

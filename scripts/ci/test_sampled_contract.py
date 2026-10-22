@@ -5,11 +5,13 @@ What is held:
     enforce_request (the same refusals with the same messages, the same mutations of the params, nothing added), and a golden table;
   - flag ON honours temperature, top_p and top_k (the model's defaults for a field left None; temperature 0 stays greedy; top_k 0 or above K_MAX clamps to
     K_MAX), carries the request seed (the client's, else random) in extra_args and clears params.seed, and still refuses everything the fast path cannot do;
-    penalties and min_p are refused, greedy or not;
-  - the switch is the profile's alone: no shipped profile names it, an inherited value is dropped, a profile that turns it on needs C2-any, the request
-    contract and a gate-only profile, and a launch that moves the model's generation-config defaults is refused;
-  - it fails closed: the engine-side gate (serving_fast_policy.validate_request_sampling) still refuses a non-greedy request, so no sampled request reaches
-    a verifier that would commit argmax for it;
+    penalties and min_p are NOT refused (clients send them today and must keep working): they are forced off as the greedy contract forces them, greedy or not,
+    and a request that sent one gets one log line;
+  - the switch is the profile's alone: no shipped profile names it (only the two gate-only sampled profiles of make_sampled_profiles do), an inherited value is
+    dropped, a profile that turns it on needs the four-card mesh, C2-any, the request contract and a gate-only profile, and a launch that moves the model's
+    generation-config defaults is refused;
+  - it fails closed: the engine-side gate (serving_fast_policy.validate_request_sampling) refuses a non-greedy request until the attach proved every verifier can
+    draw (test_sampled_verify, test_sampled_packed_path), so no sampled request reaches a verifier that would commit argmax for it;
   - the contract's constants are the sampler module's.
 """
 import contextlib
@@ -290,13 +292,49 @@ class FlagOnTest(unittest.TestCase):
         with self.assertRaises(ContractError):
             enforce(Params(), sampled=True, prompt_tokens=61441)               # the prompt cap is the greedy contract's
 
-    def test_penalties_and_min_p_are_refused_greedy_or_not(self):
+    def sampled_logged(self, **values):
+        with contextlib.redirect_stderr(io.StringIO()) as log:
+            params = self.sampled(**values)
+        return params, [line for line in log.getvalue().splitlines() if 'ignored' in line]
+
+    def test_penalties_and_min_p_are_forced_off_not_refused_greedy_or_not(self):
         for values in (dict(presence_penalty=0.5), dict(frequency_penalty=-0.5), dict(repetition_penalty=1.05), dict(min_p=0.05)):
             for temperature in (0.0, 0.7):
-                with self.subTest(values=values, temperature=temperature), self.assertRaises(ContractError):
-                    self.sampled(temperature=temperature, **values)
-        self.sampled(presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, min_p=0.0)
-        self.sampled(presence_penalty=None, repetition_penalty=None, min_p=None)
+                with self.subTest(values=values, temperature=temperature):
+                    params, lines = self.sampled_logged(temperature=temperature, **values)
+                    self.assertEqual((params.min_p, params.presence_penalty, params.frequency_penalty, params.repetition_penalty), (0.0, 0.0, 0.0, 1.0))
+                    self.assertEqual(params.temperature, 0.0 if temperature == 0.0 else 0.7)
+                    self.assertEqual(len(lines), 1, lines)
+                    self.assertIn(next(iter(values)), lines[0])
+                    legacy_params = Params(temperature=temperature, **values)
+                    legacy(legacy_params)
+                    self.assertEqual((legacy_params.min_p, legacy_params.presence_penalty, legacy_params.frequency_penalty, legacy_params.repetition_penalty),
+                                     (params.min_p, params.presence_penalty, params.frequency_penalty, params.repetition_penalty), 'the same neutral values the greedy contract writes')
+
+    def test_the_log_names_every_dropped_term_once_per_request(self):
+        params, lines = self.sampled_logged(presence_penalty=0.5, frequency_penalty=0.1, repetition_penalty=1.2, min_p=0.1)
+        self.assertEqual(len(lines), 1)
+        for name in ('presence_penalty', 'frequency_penalty', 'repetition_penalty', 'min_p'):
+            self.assertIn(name, lines[0])
+        with contextlib.redirect_stderr(io.StringIO()) as again:
+            enforce(params, sampled=True)                                   # a second pass through the hook: the terms are neutral now
+        self.assertEqual(again.getvalue(), '')
+
+    def test_neutral_terms_log_nothing(self):
+        for values in (dict(), dict(presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, min_p=0.0), dict(presence_penalty=None, repetition_penalty=None, min_p=None)):
+            self.assertEqual(self.sampled_logged(**values)[1], [], values)
+
+    def test_a_request_refused_for_another_reason_logs_nothing_about_its_penalties(self):
+        with contextlib.redirect_stderr(io.StringIO()) as log, self.assertRaises(ContractError):
+            self.sampled(presence_penalty=0.5, temperature=-1.0)
+        self.assertNotIn('ignored', log.getvalue())
+
+    def test_the_flag_off_contract_drops_them_silently_as_it_always_did(self):
+        params = Params(presence_penalty=0.5, min_p=0.1)
+        with contextlib.redirect_stderr(io.StringIO()) as log:
+            enforce(params, sampled=False)
+        self.assertEqual(log.getvalue(), '')
+        self.assertEqual((params.presence_penalty, params.min_p), (0.0, 0.0))
 
     def test_malformed_terms_are_refused(self):
         for values in (dict(temperature=-0.1), dict(temperature=float('nan')), dict(temperature=float('inf')), dict(temperature='1'), dict(temperature=True),
@@ -340,12 +378,22 @@ class ProfileAndBootTest(unittest.TestCase):
             return json.load(handle)
 
     def test_no_shipped_profile_or_image_file_names_the_switch(self):
+        import make_sampled_profiles
+
         document = self.document()
+        owned = set(make_sampled_profiles.twin_names())
         for name, profile in document['profiles'].items():
+            if name in owned:
+                continue
             self.assertNotIn(contract.SAMPLED_SWITCH, profile.get('env', {}), name)
+            self.assertNotIn(contract.SAMPLED_AUDIT_SWITCH, profile.get('env', {}), name)
             self.assertEqual(contract.sampled_problems(dict(profile, name=name)), [], name)
             self.assertFalse(contract.sampled_on(profile), name)
-        self.assertNotIn(contract.SAMPLED_SWITCH, PROFILES.read_text(encoding='utf-8'))
+        for name in owned:
+            self.assertTrue(contract.sampled_on(document['profiles'][name]), name)
+            self.assertIs(document['profiles'][name]['gate_only'], True, name)
+            self.assertEqual(contract.sampled_problems(dict(document['profiles'][name], name=name)), [], name)
+        self.assertEqual(sum(profile.get('env', {}).get(contract.SAMPLED_SWITCH) == '1' for profile in document['profiles'].values()), len(owned))
         named = []
         for pattern in ('docker/*', '.github/workflows/*.yml'):
             for path in sorted(ROOT.glob(pattern)):
@@ -354,27 +402,34 @@ class ProfileAndBootTest(unittest.TestCase):
         self.assertEqual(named, [])
 
     def test_the_switch_is_validated_on_the_profile(self):
-        base = dict(name='p', gate_only=True, env={'QWEN_FAST_ANY_REQUEST': '1', contract.SAMPLED_SWITCH: '1'})
+        good = {'QWEN_FAST_ANY_REQUEST': '1', 'QWEN_FAST_TP': '4', contract.SAMPLED_SWITCH: '1'}
+        base = dict(name='p', gate_only=True, mesh_device='P150x4', env=good)
         self.assertEqual(contract.sampled_problems(base), [])
         self.assertTrue(contract.sampled_on(base))
-        self.assertEqual(contract.sampled_problems(dict(base, env={'QWEN_FAST_ANY_REQUEST': '1', contract.SAMPLED_SWITCH: '0'})), [])
+        self.assertEqual(contract.sampled_problems(dict(base, env=dict(good, **{contract.SAMPLED_AUDIT_SWITCH: '1'}))), [])
+        self.assertEqual(contract.sampled_problems(dict(base, env=dict(good, **{contract.SAMPLED_SWITCH: '0'}))), [])
         self.assertEqual(contract.sampled_problems(dict(base, env={})), [])
-        self.assertEqual(contract.sampled_problems(dict(base, env={'QWEN_FAST_ANY_REQUEST': '1', contract.SAMPLED_SWITCH: 1})), [])   # (a JSON 1 is str()ed like every flag value)
+        self.assertEqual(contract.sampled_problems(dict(base, env=dict(good, **{contract.SAMPLED_SWITCH: 1}))), [])   # (a JSON 1 is str()ed like every flag value)
         for bad in ('yes', 'true', '', 'True', 2):
-            problems = contract.sampled_problems(dict(base, env={'QWEN_FAST_ANY_REQUEST': '1', contract.SAMPLED_SWITCH: bad}))
+            problems = contract.sampled_problems(dict(base, env=dict(good, **{contract.SAMPLED_SWITCH: bad})))
             self.assertTrue(any('must be 0 or 1' in p for p in problems), bad)
         for broken, needle in ((dict(base, gate_only=False), 'gate-only'), (dict(base, gate_only=None), 'gate-only'),
-                               (dict(base, env={contract.SAMPLED_SWITCH: '1'}), 'QWEN_FAST_ANY_REQUEST'),
-                               (dict(base, env={'QWEN_FAST_ANY_REQUEST': '0', contract.SAMPLED_SWITCH: '1'}), 'QWEN_FAST_ANY_REQUEST'),
-                               (dict(base, request_contract=False), 'request contract')):
+                               (dict(base, env={'QWEN_FAST_TP': '4', contract.SAMPLED_SWITCH: '1'}), 'QWEN_FAST_ANY_REQUEST'),
+                               (dict(base, env=dict(good, QWEN_FAST_ANY_REQUEST='0')), 'QWEN_FAST_ANY_REQUEST'),
+                               (dict(base, request_contract=False), 'request contract'),
+                               (dict(base, mesh_device=None), 'four-card'), (dict(base, env=dict(good, QWEN_FAST_TP='2')), 'four-card'),
+                               (dict(base, env={'QWEN_FAST_ANY_REQUEST': '1', 'QWEN_FAST_TP': '4', contract.SAMPLED_AUDIT_SWITCH: '1'}), 'needs QWEN_FAST_SAMPLED=1'),
+                               (dict(base, env=dict(good, **{contract.SAMPLED_SWITCH: '0', contract.SAMPLED_AUDIT_SWITCH: '1'})), 'needs QWEN_FAST_SAMPLED=1'),
+                               (dict(base, env=dict(good, **{contract.SAMPLED_AUDIT_SWITCH: 'yes'})), 'must be 0 or 1')):
             problems = contract.sampled_problems(broken)
             self.assertTrue(any(needle in p for p in problems), (needle, problems))
 
     def test_an_inherited_switch_is_dropped_unless_the_profile_names_it(self):
         profile = self.document()['profiles'][self.GATE]
-        environ = {contract.SAMPLED_SWITCH: '1', 'OTHER': 'x'}
+        environ = {contract.SAMPLED_SWITCH: '1', contract.SAMPLED_AUDIT_SWITCH: '1', 'OTHER': 'x'}
         contract.apply_environment(profile, environ)
         self.assertNotIn(contract.SAMPLED_SWITCH, environ)
+        self.assertNotIn(contract.SAMPLED_AUDIT_SWITCH, environ)
         self.assertEqual(environ['OTHER'], 'x')
         named = dict(profile, env=dict(profile['env'], **{contract.SAMPLED_SWITCH: '1'}))
         environ = {}
@@ -429,9 +484,9 @@ class ProfileAndBootTest(unittest.TestCase):
 
 
 class FailsClosedTest(unittest.TestCase):
-    def test_the_engine_side_gate_still_refuses_a_sampled_request(self):
-        """Until the device step lands a verifier that draws, a request the contract lets through with temperature > 0 is refused at the engine (ending only that
-        request under C2-any), never committed as argmax."""
+    def test_the_engine_side_gate_refuses_a_sampled_request_until_the_attach_proved_the_verifiers_can_draw(self):
+        """A request the contract lets through with temperature > 0 is refused at the engine (ending only that request under C2-any) until sampled_verify.attach has
+        proved every block draws (test_sampled_verify holds the open gate), never committed as argmax."""
         import serving_fast_policy as policy
 
         params = types.SimpleNamespace(temperature=0, n=1, max_tokens=256, min_tokens=0, ignore_eos=False, logprobs=None, prompt_logprobs=None,

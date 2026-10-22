@@ -1,19 +1,26 @@
 """Smoke a C2 serving container over its OpenAI API (stdlib only; runs on the rig host)."""
 import hashlib
 import json
+import os
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 
+import sampled_client
+
 BASE = sys.argv[1] if len(sys.argv) > 1 else 'http://127.0.0.1:8010'
 MODEL = sys.argv[2] if len(sys.argv) > 2 else 'Qwen/Qwen3.8-27B'
 ONLY = set(filter(None, sys.argv[3].split(','))) if len(sys.argv) > 3 else None
 results = {}
+# C2_SMOKE_SAMPLING=greedy|model-default (default greedy: every request as it always was) and C2_SMOKE_SEED: the seeded sampled arm (sampled_client.py, docs/tp4-sampled-verify.md). model-default
+# adds the model's own temperature / top_p / top_k and a fixed seed drawn from the prompt to every completion request that does not name them; SMOKE_JSON's `sampling` entry says which was used.
+SAMPLING = sampled_client.Arm.from_environ(os.environ)
 
 
 def post(path, body, timeout=900):
+    body = SAMPLING.apply(body, path)
     request = urllib.request.Request(BASE + path, data=json.dumps(body).encode(), method='POST',
                                      headers={'content-type': 'application/json'})
     try:
@@ -24,8 +31,8 @@ def post(path, body, timeout=900):
 
 
 def stream(messages, max_tokens, drop_after=None, timeout=1800, keep_stamps=False, on_token=None, keep_text=False, headers=None, **extra):
-    body = dict(model=MODEL, messages=messages, max_tokens=max_tokens, stream=True,
-                stream_options={'include_usage': True}, **extra)
+    body = SAMPLING.apply(dict(model=MODEL, messages=messages, max_tokens=max_tokens, stream=True,
+                               stream_options={'include_usage': True}, **extra), '/v1/chat/completions')
     request = urllib.request.Request(BASE + '/v1/chat/completions', data=json.dumps(body).encode(), method='POST',
                                      headers=dict({'content-type': 'application/json'}, **(headers or {})))     # headers: agent_turns' X-Request-Id, which names the request in the engine's log
     started, first, pieces, usage, finish, count = time.time(), None, [], None, None, 0
@@ -347,8 +354,8 @@ def stream_events(messages, max_tokens, **extra):
     """One streamed chat completion, kept apart by kind (stream() merges content with reasoning): the content, the
     reasoning, the tool-call deltas accumulated by index ({name, arguments}), the finish reason, the delta count and the
     usage. Parser M (c2_parser_rechunk) runs on this path only."""
-    body = dict(model=MODEL, messages=messages, max_tokens=max_tokens, stream=True,
-                stream_options={'include_usage': True}, **extra)
+    body = SAMPLING.apply(dict(model=MODEL, messages=messages, max_tokens=max_tokens, stream=True,
+                               stream_options={'include_usage': True}, **extra), '/v1/chat/completions')
     request = urllib.request.Request(BASE + '/v1/chat/completions', data=json.dumps(body).encode(), method='POST',
                                      headers={'content-type': 'application/json'})
     content, reasoning, calls, finish, deltas, usage = [], [], {}, None, 0, None
@@ -1620,6 +1627,7 @@ def coding_set():
 
 if ONLY and 'coding_set' in ONLY:
     record('coding_set', coding_set)
+results['sampling'] = SAMPLING.report()       # (the arm the requests above used: mode greedy|model-default, the base seed, the terms and how many requests carried them)
 print('SMOKE_JSON ' + json.dumps(results))
 if (results.get('agreement') or {}).get('ok') is False or 'error' in (results.get('agreement') or {}):
     print('SMOKE_FAILED agreement: %s' % json.dumps((results['agreement'].get('reasons') or results['agreement'].get('error')))[:600])

@@ -348,6 +348,16 @@ def internal_batch_capacity(config):
     return int(config.scheduler_config.max_num_seqs)
 
 
+def sampled_request(parameters):
+    """QWEN_FAST_SAMPLED (sampled_verify; default off): whether a request with a non-zero temperature is one the verifiers can draw for - the switch is on, the attach proved
+    every block can draw (sampled_verify.attach) and the request is a well-formed keyed one. Off, False without importing anything, which is the refusal this gate has always made."""
+    if os.environ.get('QWEN_FAST_SAMPLED', '0') == '0':
+        return False
+    import sampled_verify
+
+    return sampled_verify.accepts(parameters)
+
+
 def validate_request_sampling(parameters, *, prompt_tokens, eos_ids=()):
     primary_eos = getattr(parameters, '_eos_token_id', None)
     if (any(type(token) is not int or token < 0 for token in eos_ids)
@@ -361,7 +371,7 @@ def validate_request_sampling(parameters, *, prompt_tokens, eos_ids=()):
     # and every claim downstream of this module depends on that comparability.
     if (type(prompt_tokens) is not int or prompt_tokens < 1
             or prompt_tokens > MAXIMUM_PROMPT_TOKENS
-            or parameters.temperature != 0 or parameters.n != 1
+            or (parameters.temperature != 0 and not sampled_request(parameters)) or parameters.n != 1
             or type(parameters.max_tokens) is not int
             or not 1 <= parameters.max_tokens <= OUTPUT_BUDGET
             or parameters.min_tokens != 0
@@ -375,4 +385,6 @@ def validate_request_sampling(parameters, *, prompt_tokens, eos_ids=()):
             or getattr(parameters, 'allowed_token_ids', None)
             or getattr(parameters, 'bad_words', None)):
         raise ValueError('Fast serving requires a greedy single-sequence request with an '
-                         'unpenalised sampler and at most %d output tokens' % OUTPUT_BUDGET)
+                         'unpenalised sampler and at most %d output tokens' % OUTPUT_BUDGET
+                         + ('' if os.environ.get('QWEN_FAST_SAMPLED', '0') == '0' else
+                            ' (QWEN_FAST_SAMPLED=1: a sampled request also needs the attach to have proven every verifier can draw for it, and a keyed seed, top_p and top_k within the slice)'))

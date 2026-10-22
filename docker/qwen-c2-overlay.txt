@@ -575,3 +575,11 @@ scripts/ci/sdpa_pf_oneq_tp.py
 # post-import replacements of one function each, taken only when its source digest is the pinned one).
 scripts/ci/qwen_device_zeros.py
 scripts/ci/qwen_lazy_shard.py
+
+# tp4/sampled-verify (docs/tp4-sampled-verify.md): sampling on the fast path, off unless a gate-only profile turns it on (neither module is imported by a served path otherwise).
+# sampled_accept: the scheme (keyed SplitMix64 noise, the temperature / top_k / top_p filter over a top-64 slice, the draw, the coupled accept walk); numpy only.
+# sampled_verify: the serving side - the verify trace's per-chip top-64 (stock ttnn.topk), the host merge and draws, the sequential engine's host slice, the first-token draw wrapped
+# around the plugin's host sampler, and the engine-side gate that stays closed until the attach proved every block can draw. packed_verifier, verifier_engine_tp, serving_lifecycle,
+# serving_request_factory, serving_runtime and serving_fast_policy import it lazily, only with the profile's switch set (all six are in this list or the base's).
+scripts/ci/sampled_accept.py
+scripts/ci/sampled_verify.py

@@ -508,6 +508,17 @@ def rebind_parked(parked, entry, *, model, pages, state, capture, prompt, seed, 
     return request
 
 
+def attach_sampling(request, sampling_params):
+    """QWEN_FAST_SAMPLED (sampled_verify; default off): the request's session carries its Sampling - the verifier's spec and the 64-bit key of its noise - or None for a greedy
+    request, which every verifier serves with the argmax path as before. Called for a built request and for a REBOUND one (engine reuse), like attach_lookup: it is host state on the
+    session. Unset or '0': nothing is imported or touched. A sampled request that is not well-formed raises ValueError (the gate refused it already; this is the backstop)."""
+    if os.environ.get('QWEN_FAST_SAMPLED', '0') == '0':
+        return
+    import sampled_verify
+
+    sampled_verify.attach_sampling(request, sampling_params)
+
+
 def attach_lookup(request, prompt, request_id):
     """QWEN_FAST_LOOKUP_DRAFT (default off; prompt_lookup, docs/tp4-lookup.md): give `request` a host-side lookup over its own token history, which
     replaces DFlash2's proposal rows on the rounds its policy picks. Called for a built request and, since tp4/stream-1, for a REBOUND one (engine
@@ -665,6 +676,7 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
                     _log(LEAN_SPLIT_MARKER + 'request={} a_ms={:.1f} b_ms={:.1f} c_ms={:.1f} total_ms={:.1f}', str(state.req_id)[:48], (adopted - entered) * 1000.0,
                          (rebinding - adopted) * 1000.0, (done - rebinding) * 1000.0, (done - entered) * 1000.0)
                 try:
+                    attach_sampling(request, state.sampling_params)
                     attach_lookup(request, prompt, state.req_id)
                 except BaseException:
                     # The engine is bound to this request and the capture is released: nothing else owns the slot, so park it as a close does.
@@ -829,6 +841,7 @@ def from_prefill(operations, model, sampler, pages, helpers, *, state, capture, 
             publish_prewarm.warm(device, engine)
         request = FastRequest(session, engine, runtime, release_drafter=device.close,
             collect_timings=os.environ.get('QWEN_FAST_PHASE_TIMING') == '1')
+        attach_sampling(request, state.sampling_params)
         attach_lookup(request, prompt, state.req_id)
         owned.pop_all()
     return request

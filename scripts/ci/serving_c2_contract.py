@@ -199,10 +199,12 @@ MERGED_SOURCES = ('COLD', 'CHECKPOINT', 'SCRATCH', 'PARKED')
 
 # Sampled verification (docs/tp4-sampled-verify.md; default off, gate-only until a card has judged it). With QWEN_FAST_SAMPLED=1 the request contract honours
 # a request's temperature, top_p and top_k (the model's own defaults for what it omits; temperature 0 stays greedy) instead of forcing greedy, and carries the
-# request seed (the client's, else a random one) to the engine in SamplingParams.extra_args. The verifier that DRAWS the tokens is the device step's: until it
-# exists the engine-side gate (serving_fast_policy.validate_request_sampling) still refuses a non-greedy request, so the switch fails closed. Only a profile
-# sets the switch (apply_environment drops an inherited value); no shipped profile does.
+# request seed (the client's, else a random one) to the engine in SamplingParams.extra_args. The verifiers that DRAW the tokens are sampled_verify's (the packed
+# block's top-K readback, the sequential engine's host slice, the first token's graft): the engine-side gate (serving_fast_policy.validate_request_sampling) admits a
+# non-greedy request only after the attach proved every block can draw (sampled_verify.attach), so the switch fails closed. Only a profile sets the switch
+# (apply_environment drops an inherited value); no shipped profile does - the two gate-only sampled profiles of make_sampled_profiles are the only ones that name it.
 SAMPLED_SWITCH = 'QWEN_FAST_SAMPLED'
+SAMPLED_AUDIT_SWITCH = 'QWEN_FAST_SAMPLED_AUDIT'     # sampled_verify.AUDIT_FLAG: the audited rounds read the logits back and compare the slice and the draw (gate profiles only)
 SAMPLED_K_MAX = 64                  # sampled_accept.K_MAX: the candidates per row the filter sees (a test holds both equal; not imported: this module cannot import numpy at boot)
 SAMPLED_MODEL_DEFAULTS = dict(temperature=1.0, top_p=0.95, top_k=20)   # generation_config.json of the base snapshot = sampled_accept.MODEL_DEFAULTS (held equal by a test)
 SAMPLED_SEED_KEY = 'qwen_sampled_seed'     # the SamplingParams.extra_args key that carries the request seed to the engine
@@ -559,8 +561,9 @@ def apply_environment(profile, environ=None):
         if name not in profile['env']:
             environ.pop(name, None)
     # ...and sampled verification: an inherited switch must not make the request contract stop forcing greedy under a profile that never named it.
-    if SAMPLED_SWITCH not in profile['env']:
-        environ.pop(SAMPLED_SWITCH, None)
+    for name in (SAMPLED_SWITCH, SAMPLED_AUDIT_SWITCH):
+        if name not in profile['env']:
+            environ.pop(name, None)
     # ...and exact resume P0: an inherited switch must not lift vLLM's drop or carry a window under a profile that never asked.
     for name in EXACT_RESUME_NAMES:
         if name not in profile['env']:
@@ -923,14 +926,20 @@ def sampled_problems(profile):
     refusal of one request's own terms ends that request, not the engine), the request contract (the only place the sampling terms are read) and a gate-only
     profile: no sampled verifier has run on a card, so nothing serves traffic on it yet."""
     env = profile.get('env') or {}
+    audit = str(env.get(SAMPLED_AUDIT_SWITCH, '0'))
+    if SAMPLED_AUDIT_SWITCH in env and audit not in ('0', '1'):
+        return ['%s must be 0 or 1, got %r' % (SAMPLED_AUDIT_SWITCH, env[SAMPLED_AUDIT_SWITCH])]
     if SAMPLED_SWITCH not in env:
-        return []
+        return ['%s needs %s=1' % (SAMPLED_AUDIT_SWITCH, SAMPLED_SWITCH)] if audit == '1' else []
     value = str(env[SAMPLED_SWITCH])
     if value not in ('0', '1'):
         return ['%s must be 0 or 1, got %r' % (SAMPLED_SWITCH, env[SAMPLED_SWITCH])]
     if value == '0':
-        return []
+        return ['%s needs %s=1' % (SAMPLED_AUDIT_SWITCH, SAMPLED_SWITCH)] if audit == '1' else []
     problems = []
+    if str(env.get(FAST_TP_ENV, '')) != '4' or profile.get('mesh_device') != 'P150x4':
+        problems.append('%s=1 is the four-card fast path\'s (mesh_device P150x4 and %s=4): the top-K readback and the sequential engine\'s host slice are four-shard code, and the pair\'s '
+                        'verifier_engine is not touched' % (SAMPLED_SWITCH, FAST_TP_ENV))
     if str(env.get('QWEN_FAST_ANY_REQUEST', '0')) != '1':
         problems.append('%s=1 needs QWEN_FAST_ANY_REQUEST=1 (a refusal of one request\'s sampling terms must end that request, not the engine)' % SAMPLED_SWITCH)
     if profile.get('request_contract', True) is False:
@@ -1675,6 +1684,27 @@ def omitted_max_tokens(max_tokens, *, prompt_tokens, max_model_len):
     return max_tokens is None or (prompt_tokens is not None and max_tokens == max_model_len - prompt_tokens)
 
 
+def sampled_dropped_terms(params):
+    """The sampling terms of `params` that the fast path forces off and a client set to something other than their neutral value: min_p, presence_penalty, frequency_penalty,
+    repetition_penalty (the same neutral values enforce_request writes)."""
+    dropped = []
+    if (getattr(params, 'min_p', 0.0) or 0.0) != 0:
+        dropped.append('min_p')
+    if (getattr(params, 'presence_penalty', 0.0) or 0.0) != 0:
+        dropped.append('presence_penalty')
+    if (getattr(params, 'frequency_penalty', 0.0) or 0.0) != 0:
+        dropped.append('frequency_penalty')
+    if (1.0 if getattr(params, 'repetition_penalty', None) is None else params.repetition_penalty) != 1.0:
+        dropped.append('repetition_penalty')
+    return dropped
+
+
+def sampled_dropped_log(dropped):
+    """The one line a request that sent a term the fast path forces off gets (sampled_terms)."""
+    if dropped:
+        log('request contract: %s ignored (forced off, the fast path applies none; %s=1)', ', '.join(dropped), SAMPLED_SWITCH)
+
+
 def sampled_terms(params):
     """QWEN_FAST_SAMPLED=1: the request's sampling terms as the sampled verifier applies them, written back into `params`; ContractError for what it cannot.
 
@@ -1686,13 +1716,10 @@ def sampled_terms(params):
     - the request seed is the client's or, if it sent none, a random 64-bit one (running a request through this hook twice keeps the first one); it travels in
       extra_args[SAMPLED_SEED_KEY] and params.seed is cleared, because
       the pinned samplers refuse a block while a request seed is active in the plugin's seed manager (force_argmax.sample_rows, verify_trace_t1);
-    - min_p and the three penalties are refused, greedy or not: the verifier applies neither, and dropping them silently (what the greedy contract does) would
-      return text the client did not ask for."""
-    if (getattr(params, 'presence_penalty', 0.0) or 0.0) != 0 or (getattr(params, 'frequency_penalty', 0.0) or 0.0) != 0 \
-            or (1.0 if getattr(params, 'repetition_penalty', None) is None else params.repetition_penalty) != 1.0:
-        raise ContractError('presence_penalty, frequency_penalty and repetition_penalty are not supported on this model')
-    if (getattr(params, 'min_p', 0.0) or 0.0) != 0:
-        raise ContractError('min_p is not supported on this model')
+    - min_p and the three penalties are forced off, greedy or not, exactly as the greedy contract forces them (a client may send them today and must keep working: the
+      verifier applies none of them), and a request that sent a non-neutral one gets ONE log line naming them (a request already through this hook has them neutral, so a
+      second pass logs nothing)."""
+    dropped = sampled_dropped_terms(params)
     defaults = SAMPLED_MODEL_DEFAULTS
     temperature = defaults['temperature'] if params.temperature is None else params.temperature
     top_p = defaults['top_p'] if getattr(params, 'top_p', None) is None else params.top_p
@@ -1708,6 +1735,7 @@ def sampled_terms(params):
         params.frequency_penalty = 0.0
         params.repetition_penalty = 1.0
         params.seed = None
+        sampled_dropped_log(dropped)
         return params
     if type(top_p) not in (int, float) or not 0 < top_p <= 1:
         raise ContractError('top_p must be in (0, 1], got %r' % (top_p,))
@@ -1732,6 +1760,7 @@ def sampled_terms(params):
     extra = dict(getattr(params, 'extra_args', None) or {})
     extra[SAMPLED_SEED_KEY] = seed & ((1 << 64) - 1)
     params.extra_args = extra
+    sampled_dropped_log(dropped)
     return params
 
 

@@ -953,6 +953,14 @@ def attach_combined_runtime(worker, operations, *, directory, runtime_root, fixt
             # before the lifecycle admits a request (the scopes close the block, the weights and the pool).
             packed_any_admission.admit_blocks(packed_blocks + ([octo_block] if octo_block is not None else [])
                                               + ([solo_block] if solo_block is not None else []), log=pindiag)
+        if os.environ.get('QWEN_FAST_SAMPLED', '0') != '0':
+            # QWEN_FAST_SAMPLED (sampled_verify, docs/tp4-sampled-verify.md; default off, gate-only profiles): every block built engaged the top-K readback (a block that could not
+            # refused its own construction); only now does the engine-side gate admit a sampled request, so until then (and on any image whose runtime predates this call) a
+            # non-greedy request is refused and never committed as argmax. Imported only with the switch set.
+            import sampled_verify
+
+            sampled_verify.attach((packed_blocks + ([octo_block] if octo_block is not None else []) + ([solo_block] if solo_block is not None else []))
+                                  if packed_shapes else [], log=pindiag)
         # One line with every pre-trace address - the pooled history pairs, each named
         # shared weight and, when built, the packed block's taps, checkpoints and carries -
         # so a diverged address from the shard check can be placed against what was
