@@ -9,11 +9,9 @@
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 import unittest
-from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent

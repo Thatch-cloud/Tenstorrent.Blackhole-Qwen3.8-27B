@@ -47,7 +47,6 @@ class Fixture(object):
         return torch.from_numpy(support.full_row(self.context)).reshape(1, -1)
 
     def factory(self, model, session, pages, helpers, sampler, **options):
-        fixture = self
         engine = SimpleNamespace(setup_ms=1.0, phase='idle', close=mock.Mock(), buckets={}, pending_key=None, session=session, operations=support.Ops(), model=model)
 
         def verify(ticket):

@@ -1242,7 +1242,7 @@ class PackedVerifierEngine:
                 mlp.audit_claim(self.fixture, 'capture')
         if self.verify_t1:
             self.note_verify_t1(verify_trace_t1.take())
-        if self.sampled:
+        if getattr(self, 'sampled', False):
             import sampled_verify
 
             diagnostic(sampled_verify.engaged_line(self))
@@ -1609,7 +1609,7 @@ class PackedVerifierEngine:
                 captures.enter_context(self.feature_capture.capture())
                 logits = fixture.run(sharded_logits=True)
             if self.shard_argmax:
-                if self.sampled:
+                if getattr(self, 'sampled', False):
                     return self.sampled_outputs(logits, self.sample_shards(logits, warm=warm))
                 return (logits, *self.sample_shards(logits, warm=warm))
             ids = sample_rows(self.sampler, logits, self.block_rows, self.operations, native_rows=False)
@@ -2110,7 +2110,7 @@ class PackedVerifierEngine:
                 kv_page_writer_tp4.audit_round(self.operations, self.rounds + 1)
             predictions = [host[slice(*segment_rows(self.shape, segment))] for segment in segments]
             sampled_metrics = None
-            if self.sampled:
+            if getattr(self, 'sampled', False):
                 # QWEN_FAST_SAMPLED: a sampled entry's rows become its keyed draws from the merged top-K slices (greedy entries keep the argmax rows above)
                 import sampled_verify
 

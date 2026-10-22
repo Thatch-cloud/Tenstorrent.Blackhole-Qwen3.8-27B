@@ -185,6 +185,10 @@ def accepts(params, environ=None):
     verifiers can draw, and the request is a well-formed sampled one (of_params)."""
     if not enabled(environ) or not STATE.ready:
         return False
+    import tp_shapes
+
+    if tp_shapes.chip_count() != 4:
+        return False                 # (the pair's sequential engine, verifier_engine.py, is not touched: it would commit argmax for a sampled request)
     try:
         return of_params(params) is not None
     except ValueError:

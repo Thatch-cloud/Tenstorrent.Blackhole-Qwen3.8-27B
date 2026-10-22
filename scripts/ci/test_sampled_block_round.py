@@ -8,7 +8,6 @@ greedy entry's the argmax rows, the entries' order is not the segments', the met
 import os
 from pathlib import Path
 import sys
-from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -99,7 +98,6 @@ class SampledBlockRoundTests(pv.FourUserFixture):
         self.assertEqual(block.rounds, 2)
 
     def test_without_the_readback_the_round_is_the_old_one(self):
-        array = self.rows(7)
         block = self.build()
         self.assertFalse(block.sampled)
         entries = self.four()

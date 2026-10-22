@@ -107,7 +107,7 @@ class Clean(unittest.TestCase):
 
 class FirstTokenLifecycleTests(Clean):
     def test_a_sampled_request_starts_from_the_keyed_draw_at_the_prompt_length(self):
-        with mock.patch.dict(os.environ, {sv.FLAG: '1'}):
+        with mock.patch.dict(os.environ, {sv.FLAG: '1', 'QWEN_FAST_TP': '4'}):
             lifecycle, worker, bridge, capture, build, scheduled, _ = self.lifecycle(True)
             sv.attach([SimpleNamespace(sampled=True)])
             request = scheduled.scheduled_new_reqs[0]
@@ -126,7 +126,7 @@ class FirstTokenLifecycleTests(Clean):
         self.assertEqual(lifecycle.decoding_ids, ['request'])
 
     def test_a_greedy_request_in_a_sampled_profile_keeps_the_plugins_sampler(self):
-        with mock.patch.dict(os.environ, {sv.FLAG: '1'}):
+        with mock.patch.dict(os.environ, {sv.FLAG: '1', 'QWEN_FAST_TP': '4'}):
             lifecycle, worker, bridge, capture, build, scheduled, _ = self.lifecycle(True)
             sv.attach([SimpleNamespace(sampled=True)])
             plugin = Plugin(lifecycle, worker, bridge, torch.ones(1, 10))
@@ -138,7 +138,7 @@ class FirstTokenLifecycleTests(Clean):
         self.assertFalse(lifecycle.failed)
 
     def test_an_armed_request_the_plugin_sampled_itself_fails_the_engine_closed(self):
-        with mock.patch.dict(os.environ, {sv.FLAG: '1'}):
+        with mock.patch.dict(os.environ, {sv.FLAG: '1', 'QWEN_FAST_TP': '4'}):
             lifecycle, worker, bridge, capture, build, scheduled, _ = self.lifecycle(True)
             sv.attach([SimpleNamespace(sampled=True)])
             request = scheduled.scheduled_new_reqs[0]
@@ -151,7 +151,7 @@ class FirstTokenLifecycleTests(Clean):
         build.assert_not_called()
 
     def test_a_request_the_gate_refused_is_not_armed_and_draws_nothing(self):
-        with mock.patch.dict(os.environ, {sv.FLAG: '1'}):
+        with mock.patch.dict(os.environ, {sv.FLAG: '1', 'QWEN_FAST_TP': '4'}):
             lifecycle, worker, bridge, capture, build, scheduled, _ = self.lifecycle(True)
             request = scheduled.scheduled_new_reqs[0]
             request.sampling_params = sampled_params(request.sampling_params)
@@ -161,7 +161,7 @@ class FirstTokenLifecycleTests(Clean):
         self.assertEqual(lifecycle.first_token.arms, {})
 
     def test_close_gives_the_plugins_sampler_back(self):
-        with mock.patch.dict(os.environ, {sv.FLAG: '1'}):
+        with mock.patch.dict(os.environ, {sv.FLAG: '1', 'QWEN_FAST_TP': '4'}):
             lifecycle, worker, bridge, capture, build, scheduled, _ = self.lifecycle(True)
             wrapper = worker.model_runner.host_sampler
             self.assertIsInstance(wrapper, sv.FirstToken)

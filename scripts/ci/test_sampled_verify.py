@@ -112,6 +112,13 @@ class SwitchAndRequestTests(Clean):
             self.assertIn('blocks=2', self.lines(sv.ATTACH_MARKER)[0])
         self.assertFalse(sv.accepts(sampled), 'the switch is off')
 
+    def test_the_gate_stays_closed_outside_the_four_card_mesh(self):
+        with mock.patch.dict(os.environ, SWITCH):
+            sv.attach([SimpleNamespace(sampled=True)])
+            self.assertTrue(sv.accepts(params()))
+            with mock.patch.dict(os.environ, {'QWEN_FAST_TP': '2'}):
+                self.assertFalse(sv.accepts(params()), 'the pair\'s sequential engine would commit argmax for it')
+
     def test_the_attach_refuses_a_block_that_did_not_engage_and_does_nothing_with_the_switch_off(self):
         with mock.patch.dict(os.environ, SWITCH):
             with self.assertRaisesRegex(sv.SampledRefused, r'block\(s\) \[1\]'):
