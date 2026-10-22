@@ -115,13 +115,13 @@ class FirstTokenLifecycleTests(Clean):
             row = np.round(np.random.default_rng(3).normal(size=support.VOCAB) * 16).astype(np.float32) / 8
             plugin = Plugin(lifecycle, worker, bridge, torch.from_numpy(row).reshape(1, -1).clone())
             self.assertIsNone(worker.execute_model(scheduled))
-            self.assertIsNotNone(lifecycle.first_token.armed)
+            self.assertEqual(list(lifecycle.first_token.arms), ['request'])
             worker.sample_tokens(None)
         expected = sa.sample_logits(row, sa.SamplingSpec(0.7, 0.9, 8), 4242, len(request.prompt_token_ids))
         self.assertEqual(bridge.state.output_token_ids[0], expected)
         self.assertNotEqual(expected, plugin.token, 'the plugin\'s own token was replaced')
         self.assertTrue(torch.equal(plugin.seen[0], torch.from_numpy(row).reshape(1, -1)), 'the plugin\'s sampler ran on the pristine logits')
-        self.assertIsNone(lifecycle.first_token.armed)
+        self.assertEqual(lifecycle.first_token.arms, {})
         build.assert_called_once()
         self.assertEqual(lifecycle.decoding_ids, ['request'])
 
@@ -131,7 +131,7 @@ class FirstTokenLifecycleTests(Clean):
             sv.attach([SimpleNamespace(sampled=True)])
             plugin = Plugin(lifecycle, worker, bridge, torch.ones(1, 10))
             worker.execute_model(scheduled)
-            self.assertIsNone(lifecycle.first_token.armed)
+            self.assertEqual(lifecycle.first_token.arms, {})
             worker.sample_tokens(None)
         self.assertEqual(bridge.state.output_token_ids[0], plugin.token)
         self.assertEqual(len(plugin.seen), 1)
@@ -158,7 +158,7 @@ class FirstTokenLifecycleTests(Clean):
             # no attach: the gate is closed, so the fixture's lifecycle (no quarantine) raises the old refusal at admission
             with self.assertRaisesRegex(ValueError, 'Fast serving requires a greedy single-sequence request'):
                 worker.execute_model(scheduled)
-        self.assertIsNone(lifecycle.first_token.armed)
+        self.assertEqual(lifecycle.first_token.arms, {})
 
     def test_close_gives_the_plugins_sampler_back(self):
         with mock.patch.dict(os.environ, {sv.FLAG: '1'}):

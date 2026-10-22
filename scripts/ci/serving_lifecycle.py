@@ -466,6 +466,8 @@ class FastServingLifecycle:
         if self.levern is not None and self.request_id is not None:
             # Lever N: a prompt finished or aborted between two of its steps leaves a scratch nobody continues (levern_route.release).
             self.levern.release(self.runner.model.model[0], self.request_id)
+        if self.first_token is not None and self.request_id is not None:
+            self.first_token.forget(self.request_id)
         self.request_id = None
 
     def _execute(self, worker, scheduled):
@@ -649,7 +651,7 @@ class FastServingLifecycle:
             if self.first_token is not None:
                 # Sampled verification: a well-formed sampled request is armed for the keyed first-token draw (a greedy one disarms whatever an earlier request left); one
                 # the gate refused above is quarantined at its first token like any other refusal and draws nothing.
-                self.first_token.disarm()
+                self.first_token.forget(new.req_id)
                 if refused is None:
                     self.first_token.arm(new.req_id, new.sampling_params, len(new.prompt_token_ids))
             # A terminal first token only ends the request when EOS is honoured.
@@ -828,6 +830,8 @@ class FastServingLifecycle:
     def _release_parked(self, request_id):
         """A parked prefill that finished or was aborted: its capture and its parked state are nobody's any more."""
         state = self.parked.pop(request_id, None)
+        if self.first_token is not None:
+            self.first_token.forget(request_id)
         if state is not None and state['capture'] is not None:
             state['capture'].close()
         if self.levern is not None:
@@ -979,7 +983,11 @@ class FastServingLifecycle:
                 return self.original_sample(grammar_output)
             if not self.prefill_pending or grammar_output is not None:
                 raise ValueError('Only an unstructured pending prefill may use native sampling')
-            result = self.original_sample(grammar_output)
+            if self.first_token is None:
+                result = self.original_sample(grammar_output)
+            else:
+                with self.first_token.sampling_for(self.request_id):
+                    result = self.original_sample(grammar_output)
             self.prefill_pending = False
             if (result is None or result.req_ids != [self.request_id]
                     or len(result.sampled_token_ids) != 1 or len(result.sampled_token_ids[0]) != 1):

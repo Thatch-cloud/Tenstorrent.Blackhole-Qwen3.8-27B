@@ -18,6 +18,7 @@ sampled_accept.py is the scheme (keyed noise, the filter, the draw, the coupled 
 Everything is behind QWEN_FAST_SAMPLED=1. With the switch unset or 0 nothing here is imported by a served path and every module that hooks it behaves as it did.
 """
 
+import contextlib
 import os
 import time
 
@@ -43,6 +44,9 @@ ATTACH_MARKER = '[PINDIAG] sampled verify attach'
 FIRST_TOKEN_MARKER = '[PINDIAG] sampled first token'
 SEQUENTIAL_MARKER = '[PINDIAG] sampled verify sequential'
 LOG_EVERY = 256
+
+
+_SEQUENTIAL = dict(calls=0)
 
 
 class SampledRefused(ValueError):
@@ -158,6 +162,7 @@ STATE = _State()
 def reset():
     STATE.ready = False
     STATE.blocks = 0
+    _SEQUENTIAL['calls'] = 0
 
 
 def attach(blocks, log=None):
@@ -457,6 +462,9 @@ def sequential_predictions(engine, output, ticket, sampling):
         raise SampledRefused('the sequential verify output holds %d columns a chip: neither the %d-column shard nor the %d-column row' % (last, width, vocab))
     spec = sampling.spec
     draws = sa.draw_batch(values, ids, spec.temperature, spec.top_p, spec.top_k, [sampling.seed] * rows, sa.noise_positions(ticket.position, rows))
+    _SEQUENTIAL['calls'] += 1
+    if _SEQUENTIAL['calls'] <= FIRST_LOGGED or _SEQUENTIAL['calls'] % LOG_EVERY == 0:
+        log_line('%s n=%d rows=%d position=%d' % (SEQUENTIAL_MARKER, _SEQUENTIAL['calls'], rows, ticket.position))
     return [int(token) for token in draws]
 
 
@@ -466,13 +474,19 @@ def sequential_predictions(engine, output, ticket, sampling):
 
 class FirstToken(object):
     """The plugin's `host_sampler` for a sampled request's prefill: token 0 is the keyed draw at position len(prompt), the same filter and noise as every later token, from
-    the prefill logits (bf16 values in float32). Armed by the lifecycle at admission, consumed by the one host-sampler call of the request's final prefill chunk, checked after
-    the plugin's sample_tokens (finish): a request that was armed and not drawn here fails the engine rather than start its text from an unkeyed token. Any other call (a
-    greedy request, the warmup) passes through to the plugin's sampler untouched."""
+    the prefill logits (bf16 values in float32).
+
+    Arms are kept PER REQUEST (a long prefill parked by admission v2 resumes after a short one was admitted and armed or not, so one slot would lose it): arm() at the request's
+    admission, the lifecycle names the request whose final chunk is being sampled (`current`) around the plugin's sample_tokens, the one host-sampler call of that chunk returns the
+    draw, and finish() checks after sample_tokens that the token the lifecycle commits is that draw - a request that was armed and not drawn here fails the engine rather than
+    start its text from an unkeyed token. Any call with no armed `current` (a greedy request, the warmup, a mid-prompt step) passes through to the plugin's sampler untouched."""
+
+    MAX_ARMS = 64
 
     def __init__(self, inner):
         self.inner = inner
-        self.armed = None          # (request_id, Sampling, position)
+        self.arms = {}             # request_id -> (Sampling, position)
+        self.current = None        # the request whose final prefill chunk the plugin is sampling now
         self.drawn = None          # (request_id, token)
 
     def __getattr__(self, name):
@@ -493,47 +507,68 @@ class FirstToken(object):
         if getattr(runner, 'host_sampler', None) is self:
             runner.host_sampler = self.inner
 
+    @property
+    def armed(self):
+        """The (request id, Sampling, position) armed for the request being sampled now, or None."""
+        entry = self.arms.get(self.current)
+        return None if entry is None else (self.current, entry[0], entry[1])
+
     def arm(self, request_id, params, prompt_tokens):
-        """The admission of a request: its Sampling (None for a greedy one) and the position of its first token."""
+        """The admission of a request: its Sampling (None for a greedy one, which holds no arm) and the position of its first token."""
         sampling = of_params(params)
-        self.drawn = None
-        self.armed = None if sampling is None else (request_id, sampling, prompt_tokens)
+        self.arms.pop(request_id, None)
+        if sampling is not None:
+            while len(self.arms) >= self.MAX_ARMS:
+                self.arms.pop(next(iter(self.arms)))            # (a request aborted before its first token never finishes: the oldest goes)
+            self.arms[request_id] = (sampling, prompt_tokens)
         return sampling
 
+    def forget(self, request_id):
+        """A prefill that finished or was aborted without reaching its first token."""
+        self.arms.pop(request_id, None)
+
     def disarm(self):
-        self.armed = self.drawn = None
+        self.arms.clear()
+        self.current = self.drawn = None
+
+    @contextlib.contextmanager
+    def sampling_for(self, request_id):
+        """`with first_token.sampling_for(id): result = original_sample(...)`: the plugin's sample_tokens is sampling the final prefill chunk of request `id`."""
+        self.current, self.drawn = request_id, None
+        try:
+            yield self
+        finally:
+            self.current = None
 
     def __call__(self, *args, **kwargs):
-        armed = self.armed
-        if armed is None:
+        entry = self.arms.get(self.current)
+        if entry is None:
             return self.inner(*args, **kwargs)
         import torch
 
         logits = kwargs.get('logits', args[0] if args else None)
-        vocab = int(logits.shape[-1]) if logits is not None and logits.dim() == 2 else None
-        if vocab is None or int(logits.shape[0]) != 1:
+        if logits is None or logits.dim() != 2 or int(logits.shape[0]) != 1:
             raise SampledRefused('the first token of a sampled request is drawn from exactly one logits row, got %r' % (None if logits is None else tuple(logits.shape),))
-        request_id, sampling, position = armed
+        sampling, position = entry
         # drawn BEFORE the plugin's sampler runs: vLLM's sampler may rescale the logits in place
         row = np.array(logits[0].detach().to(torch.float32).cpu().numpy(), dtype=np.float32, copy=True)
         token = sa.sample_logits(row, sampling.spec, sampling.seed, position)
         output = self.inner(*args, **kwargs)
         sampled = output.sampled_token_ids
         output.sampled_token_ids = torch.full_like(sampled, token)
-        self.drawn = (request_id, token)
-        log_line('%s request=%s position=%d token=%d' % (FIRST_TOKEN_MARKER, str(request_id)[:48], position, token))
+        self.drawn = (self.current, token)
+        log_line('%s request=%s position=%d token=%d' % (FIRST_TOKEN_MARKER, str(self.current)[:48], position, token))
         return output
 
     def finish(self, request_id, result):
-        """After the plugin's sample_tokens returned `result` for the request in its prefill phase: an armed request must have been drawn here and be the token the plugin
-        returned. Raises ValueError otherwise (the lifecycle fails the engine)."""
-        armed, drawn = self.armed, self.drawn
-        self.armed = self.drawn = None
-        if armed is None:
+        """After the plugin's sample_tokens returned `result` for the request in its prefill phase: a request that was armed must have been drawn here and be the token the
+        plugin returned (and an arm is spent). Raises SampledRefused (a ValueError) otherwise, so the lifecycle fails the engine."""
+        entry = self.arms.pop(request_id, None)
+        drawn, self.drawn = self.drawn, None
+        if entry is None:
             return None
-        if armed[0] != request_id or drawn is None or drawn[0] != request_id:
-            raise SampledRefused('the sampled request %s reached its first token without the keyed draw (armed for %s, drawn for %s)'
-                                 % (str(request_id)[:48], armed[0], None if drawn is None else drawn[0]))
+        if drawn is None or drawn[0] != request_id:
+            raise SampledRefused('the sampled request %s reached its first token without the keyed draw (drawn for %s)' % (str(request_id)[:48], None if drawn is None else drawn[0]))
         returned = result.sampled_token_ids[0][0] if result is not None and result.sampled_token_ids else None
         if returned != drawn[1]:
             raise SampledRefused('the sampled request %s first token %r is not the keyed draw %r' % (str(request_id)[:48], returned, drawn[1]))

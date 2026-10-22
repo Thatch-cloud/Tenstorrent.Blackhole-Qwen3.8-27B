@@ -464,6 +464,15 @@ class SequentialTests(Clean):
             bf16 = torch.from_numpy(array).bfloat16().float().numpy()
             self.assertEqual(got, [sa.sample_logits(bf16[row], sampling.spec, sampling.seed, 311 + row) for row in range(rows)], rows)
 
+    def test_the_first_calls_are_logged_so_a_card_run_can_see_the_path_ran(self):
+        engine, output = self.engine(random_rows(2, 62))
+        ticket = SimpleNamespace(tokens=(1, 2), position=40)
+        for _ in range(6):
+            sv.sequential_predictions(engine, output, ticket, sv.Sampling(sa.SamplingSpec(), 1))
+        lines = self.lines(sv.SEQUENTIAL_MARKER)
+        self.assertEqual(len(lines), sv.FIRST_LOGGED)
+        self.assertIn('n=1 rows=2 position=40', lines[0])
+
     def test_the_replicated_full_row_gives_the_same_draws(self):
         array = random_rows(4, 60)
         sampling = sv.Sampling(sa.SamplingSpec(1.0, 1.0, 64), 7)
@@ -499,6 +508,10 @@ class FirstTokenTests(Clean):
     def runner(self, **options):
         return SimpleNamespace(host_sampler=FakeSampler(), sample_on_device_mode=options.get('mode'))
 
+    def draw(self, wrapper, request_id, array, **kwargs):
+        with wrapper.sampling_for(request_id):
+            return wrapper(logits=torch.from_numpy(array).reshape(1, support.VOCAB).clone(), **kwargs)
+
     def test_the_wrapper_draws_token_zero_at_the_prompt_length_from_the_pristine_logits(self):
         runner = self.runner()
         inner = runner.host_sampler
@@ -507,14 +520,14 @@ class FirstTokenTests(Clean):
         sampling = sv.of_params(params())
         self.assertEqual(wrapper.arm('req-1', params(), 1000), sampling)
         array = random_rows(1, 70)
-        logits = torch.from_numpy(array).reshape(1, support.VOCAB).clone()
-        output = wrapper(logits=logits, sampling_metadata=object())
+        output = self.draw(wrapper, 'req-1', array, sampling_metadata=object())
         expected = sa.sample_logits(array[0], sampling.spec, sampling.seed, 1000)
         self.assertEqual(int(output.sampled_token_ids[0, 0]), expected)
         self.assertEqual(output.sampled_token_ids.dtype, torch.int32)
         self.assertTrue(torch.equal(inner.calls[0], torch.from_numpy(array).reshape(1, support.VOCAB)), 'the plugin\'s sampler still ran, on the same logits')
         result = SimpleNamespace(sampled_token_ids=[[expected]])
         self.assertEqual(wrapper.finish('req-1', result), expected)
+        self.assertEqual(wrapper.arms, {}, 'an arm is spent')
         self.assertEqual(len(self.lines(sv.FIRST_TOKEN_MARKER)), 1)
         self.assertIn('position=1000', self.lines(sv.FIRST_TOKEN_MARKER)[0])
         wrapper.uninstall(runner)
@@ -527,52 +540,91 @@ class FirstTokenTests(Clean):
         tokens = []
         for position in (50, 50, 51):
             wrapper.arm('r', params(), position)
-            tokens.append(int(wrapper(logits=torch.from_numpy(array).reshape(1, support.VOCAB).clone()).sampled_token_ids[0, 0]))
-            wrapper.disarm()
+            tokens.append(int(self.draw(wrapper, 'r', array).sampled_token_ids[0, 0]))
+            wrapper.forget('r')
         self.assertEqual(tokens[0], tokens[1])
         spec = sv.of_params(params()).spec
         self.assertEqual(tokens[2], sa.sample_logits(array[0], spec, 1234, 51))
 
-    def test_an_unarmed_call_passes_through_untouched(self):
+    def test_a_call_outside_the_scope_of_an_armed_request_passes_through_untouched(self):
         runner = self.runner()
         inner = runner.host_sampler
         wrapper = sv.FirstToken.install(runner)
-        logits = torch.ones(3, 10)
-        output = wrapper(logits=logits)
+        wrapper.arm('r', params(), 5)                              # armed, but the plugin is not sampling its final chunk (a mid-prompt step, another request's prefill)
+        output = wrapper(logits=torch.ones(3, 10))
         self.assertEqual(output.sampled_token_ids.shape, (3, 1))
         self.assertEqual(int(output.sampled_token_ids[0, 0]), inner.token)
-        self.assertIsNone(wrapper.finish('r', None), 'nothing armed, nothing to check')
+        with wrapper.sampling_for('someone-else'):
+            wrapper(logits=torch.ones(1, 10))
         self.assertEqual(self.lines(sv.FIRST_TOKEN_MARKER), [])
+        self.assertIn('r', wrapper.arms, 'and its arm is still there')
+        self.assertIsNone(wrapper.finish('unarmed', None), 'nothing armed, nothing to check')
 
-    def test_a_greedy_request_disarms_what_an_earlier_one_left(self):
+    def test_arms_are_per_request_so_a_parked_prefill_that_resumes_is_still_drawn(self):
+        runner = self.runner()
+        wrapper = sv.FirstToken.install(runner)
+        long_array, short_array = random_rows(1, 80), random_rows(1, 81)
+        wrapper.arm('long', params(extra_args={sv.SEED_KEY: 11}), 9000)       # admitted first, then parked while a short one ran
+        wrapper.arm('short', params(extra_args={sv.SEED_KEY: 22}), 100)
+        short = int(self.draw(wrapper, 'short', short_array).sampled_token_ids[0, 0])
+        self.assertEqual(wrapper.finish('short', SimpleNamespace(sampled_token_ids=[[short]])), short)
+        long = int(self.draw(wrapper, 'long', long_array).sampled_token_ids[0, 0])
+        spec = sv.of_params(params()).spec
+        self.assertEqual(short, sa.sample_logits(short_array[0], spec, 22, 100))
+        self.assertEqual(long, sa.sample_logits(long_array[0], spec, 11, 9000))
+        self.assertEqual(wrapper.finish('long', SimpleNamespace(sampled_token_ids=[[long]])), long)
+
+    def test_a_greedy_request_holds_no_arm_and_clears_a_stale_one_of_its_own_id(self):
         runner = self.runner()
         wrapper = sv.FirstToken.install(runner)
         wrapper.arm('a', params(), 10)
         self.assertIsNone(wrapper.arm('b', params(temperature=0.0, top_p=1.0, top_k=0, extra_args=None), 20))
-        output = wrapper(logits=torch.ones(1, 10))
-        self.assertEqual(int(output.sampled_token_ids[0, 0]), runner.host_sampler.inner.token if hasattr(runner.host_sampler, 'inner') else 11)
+        self.assertEqual(sorted(wrapper.arms), ['a'])
+        self.assertIsNone(wrapper.arm('a', params(temperature=0.0, top_p=1.0, top_k=0, extra_args=None), 20))
+        self.assertEqual(wrapper.arms, {})
+        with wrapper.sampling_for('b'):
+            output = wrapper(logits=torch.ones(1, 10))
+        self.assertEqual(int(output.sampled_token_ids[0, 0]), 11)
+
+    def test_the_oldest_arm_goes_when_too_many_requests_were_armed_and_never_finished(self):
+        wrapper = sv.FirstToken.install(self.runner())
+        for number in range(sv.FirstToken.MAX_ARMS + 5):
+            wrapper.arm('r%d' % number, params(), number)
+        self.assertEqual(len(wrapper.arms), sv.FirstToken.MAX_ARMS)
+        self.assertNotIn('r0', wrapper.arms)
+        self.assertIn('r%d' % (sv.FirstToken.MAX_ARMS + 4), wrapper.arms)
 
     def test_an_armed_request_that_was_not_drawn_fails_closed(self):
         runner = self.runner()
         wrapper = sv.FirstToken.install(runner)
         wrapper.arm('r', params(), 5)
+        with wrapper.sampling_for('r'):
+            pass                                                   # the plugin never called the host sampler for it
         with self.assertRaisesRegex(sv.SampledRefused, 'without the keyed draw'):
             wrapper.finish('r', SimpleNamespace(sampled_token_ids=[[3]]))
         wrapper.arm('r', params(), 5)
-        wrapper(logits=torch.from_numpy(random_rows(1, 72)).reshape(1, support.VOCAB).clone())
+        self.draw(wrapper, 'r', random_rows(1, 72))
         with self.assertRaisesRegex(sv.SampledRefused, 'is not the keyed draw'):
             wrapper.finish('r', SimpleNamespace(sampled_token_ids=[[3]]))
         wrapper.arm('r', params(), 5)
-        wrapper(logits=torch.from_numpy(random_rows(1, 72)).reshape(1, support.VOCAB).clone())
-        with self.assertRaisesRegex(sv.SampledRefused, 'armed for r, drawn for'):
-            wrapper.finish('other', SimpleNamespace(sampled_token_ids=[[3]]))
+        self.draw(wrapper, 'r', random_rows(1, 72))
+        with self.assertRaisesRegex(sv.SampledRefused, 'first token None is not the keyed draw'):
+            wrapper.finish('r', None)
+
+    def test_a_draw_for_another_request_is_not_this_ones(self):
+        wrapper = sv.FirstToken.install(self.runner())
+        wrapper.arm('a', params(), 5)
+        wrapper.arm('b', params(), 6)
+        self.draw(wrapper, 'a', random_rows(1, 73))
+        with self.assertRaisesRegex(sv.SampledRefused, 'drawn for a'):
+            wrapper.finish('b', SimpleNamespace(sampled_token_ids=[[3]]))
 
     def test_one_logits_row_is_required(self):
         runner = self.runner()
         wrapper = sv.FirstToken.install(runner)
         wrapper.arm('r', params(), 5)
         for logits in (torch.ones(2, 10), torch.ones(10), None):
-            with self.subTest(shape=None if logits is None else tuple(logits.shape)), self.assertRaises(sv.SampledRefused):
+            with self.subTest(shape=None if logits is None else tuple(logits.shape)), self.assertRaises(sv.SampledRefused), wrapper.sampling_for('r'):
                 wrapper(logits=logits)
 
     def test_the_prefill_must_be_sampled_on_the_host(self):
