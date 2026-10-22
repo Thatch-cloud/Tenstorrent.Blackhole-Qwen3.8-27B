@@ -1683,7 +1683,8 @@ def sampled_terms(params):
       reaches this hook vLLM has already filled the ones the client omitted (from the model's generation config, which sampled_launch_problems keeps on), so
       this default only reaches an offline-engine caller that left a field None;
     - top_k <= 0 (disabled) or above SAMPLED_K_MAX is clamped to SAMPLED_K_MAX: the one approximation (docs/tp4-sampled-verify.md section 5);
-    - the request seed is the client's or, if it sent none, a random 64-bit one; it travels in extra_args[SAMPLED_SEED_KEY] and params.seed is cleared, because
+    - the request seed is the client's or, if it sent none, a random 64-bit one (running a request through this hook twice keeps the first one); it travels in
+      extra_args[SAMPLED_SEED_KEY] and params.seed is cleared, because
       the pinned samplers refuse a block while a request seed is active in the plugin's seed manager (force_argmax.sample_rows, verify_trace_t1);
     - min_p and the three penalties are refused, greedy or not: the verifier applies neither, and dropping them silently (what the greedy contract does) would
       return text the client did not ask for."""
@@ -1714,7 +1715,10 @@ def sampled_terms(params):
         raise ContractError('top_k must be an integer, got %r' % (top_k,))
     seed = getattr(params, 'seed', None)
     if seed is None:
-        seed = secrets.randbits(64)
+        # (idempotent: a request that already went through this hook has params.seed cleared and its seed in extra_args; a client that sends the key
+        # itself, as vllm_xargs, is choosing a seed exactly as `seed` does)
+        previous = (getattr(params, 'extra_args', None) or {}).get(SAMPLED_SEED_KEY)
+        seed = previous if type(previous) is int else secrets.randbits(64)
     elif type(seed) is not int:
         raise ContractError('seed must be an integer, got %r' % (seed,))
     params.temperature = float(temperature)

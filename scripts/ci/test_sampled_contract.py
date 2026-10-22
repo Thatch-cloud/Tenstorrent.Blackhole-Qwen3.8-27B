@@ -261,12 +261,25 @@ class FlagOnTest(unittest.TestCase):
         params = self.sampled(seed=5)
         self.assertIsNone(params.seed)                            # the pinned samplers refuse a block while a request seed is active
 
-    def test_extra_args_keep_the_others_and_the_clients_own_seed_key_is_overwritten(self):
+    def test_extra_args_keep_the_others_and_the_seed_field_wins_over_the_key(self):
         params = self.sampled(seed=7, extra_args={'qwen_lane': 'fast', contract.SAMPLED_SEED_KEY: 99})
         self.assertEqual(params.extra_args, {'qwen_lane': 'fast', contract.SAMPLED_SEED_KEY: 7})
         original = {'qwen_lane': 'fast'}
         params = self.sampled(seed=7, extra_args=original)
         self.assertEqual(original, {'qwen_lane': 'fast'})         # not mutated in place
+
+    def test_the_hook_is_idempotent_and_a_client_sent_key_is_a_seed(self):
+        """Run twice, a request keeps its first seed (params.seed was cleared the first time); the key sent as vllm_xargs is a seed like `seed`."""
+        once = self.sampled(seed=None)
+        twice = enforce(once, sampled=True)
+        self.assertEqual(twice.extra_args, once.extra_args)
+        snapshot = dict(vars(twice))
+        self.assertEqual(vars(enforce(twice, sampled=True)), snapshot)
+        self.assertEqual(self.sampled(seed=None, extra_args={contract.SAMPLED_SEED_KEY: 99}).extra_args[contract.SAMPLED_SEED_KEY], 99)
+        for junk in ('x', 1.5, None, True):
+            seed = self.sampled(seed=None, extra_args={contract.SAMPLED_SEED_KEY: junk}).extra_args[contract.SAMPLED_SEED_KEY]
+            self.assertIsInstance(seed, int)
+            self.assertNotEqual(seed, junk)
 
     def test_what_the_fast_path_cannot_serve_is_still_refused(self):
         for values in (dict(n=2), dict(logprobs=1), dict(prompt_logprobs=0), dict(structured_outputs=object()), dict(logit_bias={1: 1.0}),
