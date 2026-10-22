@@ -151,9 +151,10 @@ class ProfileTests(unittest.TestCase):
 
     def test_the_flag_is_off_everywhere_else_and_the_policy_parses(self):
         import make_s7_profiles
+        import make_sampled_profiles
 
         for name, profile in PROFILES.items():
-            self.assertEqual(FLAG in profile['env'], name in (ARM, SMOKE_ARM, 'c2-packed-tp4-8x262k-best-time-gate-lookup') + make_s7_profiles.owned_names(), name)      # (tp4/s7: the ship-7 candidate carries the lookup under its waiver, its audited twins beside it)
+            self.assertEqual(FLAG in profile['env'], name in (ARM, SMOKE_ARM, 'c2-packed-tp4-8x262k-best-time-gate-lookup') + (make_s7_profiles.owned_names() + make_sampled_profiles.owned_names()), name)      # (tp4/s7: the ship-7 candidate carries the lookup under its waiver, its audited twins beside it)
         self.assertEqual(repr(prompt_lookup.parse_policy(PROFILES[ARM]['env'][FLAG])), POLICY)
 
     def test_the_default_stays_production(self):

@@ -157,9 +157,10 @@ class ProtectedTests(unittest.TestCase):
 
     def test_no_other_profile_names_a_lever(self):
         import make_s7_profiles
+        import make_sampled_profiles
 
         for name, profile in PROFILES.items():
-            if name not in twins.NAMES and name not in make_s7_profiles.owned_names():      # (tp4/s7c: the ship-7 candidate carries the ledger trim under its waiver, its audited twin none; test_s7_profiles holds that neither carries seed first)
+            if name not in twins.NAMES and name not in (make_s7_profiles.owned_names() + make_sampled_profiles.owned_names()):      # (tp4/s7c: the ship-7 candidate carries the ledger trim under its waiver, its audited twin none; test_s7_profiles holds that neither carries seed first)
                 self.assertFalse([flag for flag in pipeline.NAMES if flag in profile['env']], name)
 
     def test_every_twin_names_exactly_its_levers_among_the_sched_2_names(self):

@@ -71,6 +71,11 @@ def twin_names():
     return NAMES
 
 
+def owned_names():
+    """The names the census tests that exempt the generated families read, as make_s7_profiles.owned_names does: here the twins alone (both are gate-only; the ship-7 candidate they derive from is the s7 generator's)."""
+    return NAMES
+
+
 def parent_problems(profiles):
     """Why the profiles cannot be generated, [] when they can."""
     problems = []
