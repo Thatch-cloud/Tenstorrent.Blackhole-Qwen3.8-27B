@@ -15,6 +15,7 @@ import ctypes
 import importlib.util
 import json
 import os
+import re
 import shutil
 import struct
 import sys
@@ -166,8 +167,8 @@ class FakeLink(object):
 
 
 class AsBuiltMesh(FakeMesh):
-    """The device-op extension AS BUILT (qwen_kv_read version 3): the copy op takes contiguous rows only (no row_stride), the checksum op ONE range (a 4th positional argument is `bank`, not a
-    count), and the info record has the as-built fields. The host must work with these: StagingApi's compat mode."""
+    """The device-op extension as it was built BEFORE row_stride and count (an image that still carries that .so): the copy op takes contiguous rows only (no row_stride), the checksum op ONE
+    range (a 4th positional argument is `bank`, not a count), and the info record has the as-built fields. The host must work with these: StagingApi's compat mode."""
 
     def qwen_staging_checksum(self, handle, byte_offset, length, bank=None, cores=64):
         assert bank is None, 'the host passed something as `bank`: a count meant for an op that has none'
@@ -185,6 +186,71 @@ class AsBuiltMesh(FakeMesh):
                           endpoint_index=0, aligned_4k_offset=lead, aligned_4k_address=record['address'] + lead, aligned_4k_size=(record['size'] - lead) // 4096 * 4096)
             out.append(record)
         return out
+
+
+class RealSignatureMesh(FakeMesh):
+    """The device-op extension with the signatures it is BUILT with (qwen_kv_read.cpp: the nb::arg names and their order), checked by the source test below:
+         qwen_write_blocks_from_staging(device_tensor, staging, byte_offset, blocks, bank=None, row_stride=None)
+         qwen_staging_checksum(staging, byte_offset, length, bank=None, cores=64, count=None) -> [int per device], or with count [[int] * count] per device
+    A host that passed the handle or a count in the wrong place (a count as the 4th positional is `bank`) fails here."""
+
+    def qwen_staging_checksum(self, staging, byte_offset, length, bank=None, cores=64, count=None):
+        assert bank is None and cores == 64, 'the host passed something past `length` positionally'
+        rows = FakeMesh.qwen_staging_checksum(self, staging, byte_offset, length, 1 if count is None else count)
+        return [row[0] for row in rows] if count is None else rows
+
+    def qwen_write_blocks_from_staging(self, device_tensor, staging, byte_offset, blocks, bank=None, row_stride=None):
+        assert bank is None, 'the host passed something as `bank`'
+        return FakeMesh.qwen_write_blocks_from_staging(self, device_tensor, staging, byte_offset, blocks, self.layout.slice_bytes if row_stride is None else row_stride)
+
+
+class NanobindFunction(object):
+    """What a nanobind function looks like to `inspect`: no signature to find (inspect raises ValueError); the signature is the first line of its docstring."""
+
+    def __init__(self, function, doc, varargs=False):
+        self._function = function
+        self.__doc__ = doc
+        self._varargs = varargs               # True: inspect finds the useless `(*args, **kwargs)` instead of nothing
+
+    @property
+    def __signature__(self):
+        if self._varargs:
+            import inspect
+
+            return inspect.Signature([inspect.Parameter('args', inspect.Parameter.VAR_POSITIONAL), inspect.Parameter('kwargs', inspect.Parameter.VAR_KEYWORD)])
+        raise ValueError('no signature found for builtin')
+
+    def __call__(self, *args, **kwargs):
+        return self._function(*args, **kwargs)
+
+
+# the first lines of the docstrings nanobind writes for the two ops: the strided build, and the build before it
+NEW_WRITE_DOC = ('qwen_write_blocks_from_staging(device_tensor: ttnn._ttnn.tensor.Tensor, staging: QwenP2PStaging, byte_offset: int, blocks: collections.abc.Sequence[int], '
+                 'bank: int | None = None, row_stride: int | None = None) -> None\n\nqwen_write_blocks_raw with the source in the staging range.')
+NEW_CHECKSUM_DOC = ('qwen_staging_checksum(staging: QwenP2PStaging, byte_offset: int, length: int, bank: int | None = None, cores: int = 64, count: int | None = None) -> object\n\n'
+                    'Per device, S = sum_k (((k * 2654435761 + 1) mod 2^32) * x_k) mod 2^64. count=N checksums N consecutive ranges.')
+OLD_WRITE_DOC = ('qwen_write_blocks_from_staging(device_tensor: ttnn._ttnn.tensor.Tensor, staging: QwenP2PStaging, byte_offset: int, blocks: collections.abc.Sequence[int], '
+                 'bank: int | None = None) -> None\n\nqwen_write_blocks_raw with the source in the staging range.')
+OLD_CHECKSUM_DOC = ('qwen_staging_checksum(staging: QwenP2PStaging, byte_offset: int, length: int, bank: int | None = None, cores: int = 64) -> list[int]\n\n'
+                    'Per device, S = sum_k (((k * 2654435761 + 1) mod 2^32) * x_k) mod 2^64 over the words of the account. Blocking.')
+
+
+class NanobindStyleMesh(RealSignatureMesh):
+    """The strided extension seen the way a nanobind module shows it: the ops have no inspectable signature, only the docstring's first line."""
+
+    def __init__(self, *args, **kwargs):
+        RealSignatureMesh.__init__(self, *args, **kwargs)
+        self.qwen_staging_checksum = NanobindFunction(RealSignatureMesh.qwen_staging_checksum.__get__(self), NEW_CHECKSUM_DOC)
+        self.qwen_write_blocks_from_staging = NanobindFunction(RealSignatureMesh.qwen_write_blocks_from_staging.__get__(self), NEW_WRITE_DOC)
+
+
+class OldNanobindStyleMesh(AsBuiltMesh):
+    """The extension BEFORE row_stride and count, seen the same way (an image that still carries the old .so)."""
+
+    def __init__(self, *args, **kwargs):
+        AsBuiltMesh.__init__(self, *args, **kwargs)
+        self.qwen_staging_checksum = NanobindFunction(AsBuiltMesh.qwen_staging_checksum.__get__(self), OLD_CHECKSUM_DOC)
+        self.qwen_write_blocks_from_staging = NanobindFunction(AsBuiltMesh.qwen_write_blocks_from_staging.__get__(self), OLD_WRITE_DOC)
 
 
 def make_links(mesh):
@@ -1255,6 +1321,145 @@ class AsBuiltOpsTests(EngineCase):
         self.build(blocks=2, chunk_blocks=2)
         info = self.mesh.qwen_p2p_staging_info(self.mesh.handle)[1]
         self.assertEqual((info['pcie_device'], len(info['noc_endpoints']), info['aligned_4k_offset']), (1, 3, 0))
+
+
+class StridedBuildTests(EngineCase):
+    """The extension as it is built now (row_stride on the copy, count on the checksum), with its real signatures: 'strided' mode, a chunk a few launches."""
+
+    MESH = RealSignatureMesh
+
+    def test_the_mode_is_strided_and_a_restore_is_exact_with_one_checksum_call_and_one_copy_per_cache_tensor_a_chunk(self):
+        self.build(blocks=7, chunk_blocks=3)
+        self.assertEqual((self.api.strided, self.api.ranged, self.api.mode), (True, True, 'strided'))
+        entries, ids = self.restore()
+        self.assertTrue(self.exact(ids))
+        self.assertEqual(self.engine.describe()['device_ops'], 'strided')
+        self.assertEqual([(entry[1], entry[2], entry[3]) for entry in self.mesh.ops('checksum')],
+                         [(0, self.layout.shard_bytes, 3), (self.engine.half_bytes, self.layout.shard_bytes, 3), (0, self.layout.shard_bytes, 1)])
+        self.assertEqual(len(self.mesh.ops('write')), 3 * self.layout.caches)
+        self.assertTrue(all(entry[4] == self.layout.shard_bytes for entry in self.mesh.ops('write')), 'the rows of one cache tensor are a shard apart')
+
+    def test_a_flipped_byte_is_a_mismatch_of_its_block_only(self):
+        self.build(blocks=7, chunk_blocks=3)
+        self.drive.flip(block=4, chip=3, byte=11)
+        with self.assertRaises(p2p.P2PMismatch) as caught:
+            self.restore()
+        self.assertEqual(caught.exception.bad, [(4, 3)])
+        self.assertEqual({block for entry in self.mesh.ops('write') for block in entry[3]}, {500, 501, 502})
+
+    def test_the_ops_called_by_their_real_signatures_answer_the_shapes_the_host_reads(self):
+        self.build(blocks=2, chunk_blocks=2)
+        self.restore()
+        flat = self.mesh.qwen_staging_checksum(self.mesh.handle, 0, self.layout.shard_bytes)
+        ranged = self.mesh.qwen_staging_checksum(self.mesh.handle, 0, self.layout.shard_bytes, count=2)
+        self.assertEqual(len(flat), 4)
+        self.assertTrue(all(isinstance(value, int) for value in flat))
+        self.assertEqual([len(row) for row in ranged], [2, 2, 2, 2])
+        self.assertEqual(flat, [row[0] for row in ranged])
+
+
+class NanobindStyleTests(EngineCase):
+    """The mode is found from the docstring when the ops have no signature (a nanobind function): the new build is `strided`, the build before it is `compat`, whole words only."""
+
+    def test_the_new_build_is_strided_from_its_docstrings(self):
+        self.MESH = NanobindStyleMesh
+        self.build(blocks=7, chunk_blocks=3)
+        self.assertEqual((self.api.strided, self.api.ranged, self.api.mode), (True, True, 'strided'))
+        entries, ids = self.restore()
+        self.assertTrue(self.exact(ids))
+        self.assertEqual(len(self.mesh.ops('checksum')), 3)
+
+    def test_the_old_build_is_compat_from_its_docstrings_even_with_the_word_account_in_one(self):
+        self.MESH = OldNanobindStyleMesh
+        self.build(blocks=7, chunk_blocks=3)
+        self.assertEqual((self.api.strided, self.api.ranged, self.api.mode), (False, False, 'compat'))
+        entries, ids = self.restore()
+        self.assertTrue(self.exact(ids))
+        self.assertEqual(len(self.mesh.ops('checksum')), 7)
+        self.assertEqual(len(self.mesh.ops('write')), 7 * self.layout.caches)
+
+    def test_accepts_matches_whole_words_only(self):
+        self.assertTrue(p2p._accepts(NanobindFunction(None, NEW_CHECKSUM_DOC), 'count'))
+        self.assertFalse(p2p._accepts(NanobindFunction(None, OLD_CHECKSUM_DOC), 'count'))
+        self.assertTrue(p2p._accepts(NanobindFunction(None, NEW_WRITE_DOC), 'row_stride'))
+        self.assertFalse(p2p._accepts(NanobindFunction(None, OLD_WRITE_DOC), 'row_stride'))
+        self.assertFalse(p2p._accepts(NanobindFunction(None, None), 'count'))
+        # a signature that is only (*args, **kwargs) says nothing: the docstring decides
+        self.assertTrue(p2p._accepts(NanobindFunction(None, NEW_CHECKSUM_DOC, varargs=True), 'count'))
+        self.assertFalse(p2p._accepts(NanobindFunction(None, OLD_CHECKSUM_DOC, varargs=True), 'count'))
+        self.assertFalse(p2p._accepts(NanobindFunction(None, None, varargs=True), 'count'))
+        # a signature that names its parameters is believed over a docstring that mentions the word
+        def documented(staging, offset, length):
+            """count=N is described here"""
+        self.assertFalse(p2p._accepts(documented, 'count'))
+        self.assertFalse(p2p._accepts(lambda staging, offset, length, bank=None, cores=64: None, 'count'))
+        self.assertTrue(p2p._accepts(lambda staging, offset, length, bank=None, cores=64, count=None: None, 'count'))
+
+
+class HalfCompatTests(EngineCase):
+    """A build with only one of the two keywords works too, and says so."""
+
+    def test_row_stride_without_count(self):
+        class StrideOnly(RealSignatureMesh):
+            def qwen_staging_checksum(self, staging, byte_offset, length, bank=None, cores=64):
+                return RealSignatureMesh.qwen_staging_checksum(self, staging, byte_offset, length, bank, cores)
+
+        self.MESH = StrideOnly
+        self.build(blocks=7, chunk_blocks=3)
+        self.assertEqual((self.api.strided, self.api.ranged, self.api.mode), (True, False, 'half-compat'))
+        entries, ids = self.restore()
+        self.assertTrue(self.exact(ids))
+        self.assertEqual(len(self.mesh.ops('write')), 3 * self.layout.caches)
+        self.assertEqual(len(self.mesh.ops('checksum')), 7)
+
+    def test_count_without_row_stride(self):
+        class CountOnly(RealSignatureMesh):
+            def qwen_write_blocks_from_staging(self, device_tensor, staging, byte_offset, blocks, bank=None):
+                return RealSignatureMesh.qwen_write_blocks_from_staging(self, device_tensor, staging, byte_offset, blocks, bank)
+
+        self.MESH = CountOnly
+        self.build(blocks=7, chunk_blocks=3)
+        self.assertEqual((self.api.strided, self.api.ranged, self.api.mode), (False, True, 'half-compat'))
+        entries, ids = self.restore()
+        self.assertTrue(self.exact(ids))
+        self.assertEqual(len(self.mesh.ops('write')), 7 * self.layout.caches)
+        self.assertEqual(len(self.mesh.ops('checksum')), 3)
+
+
+class ExtensionSourceTests(unittest.TestCase):
+    """The host finds the strided forms from the ops' parameter names. The names are the extension source's own: a rename there must fail here, not on a card."""
+
+    SOURCE = HERE.parents[1] / 'optimisation' / 'ttnn-op' / 'kv_region_read' / 'qwen_kv_read.cpp'
+
+    def parameters(self, op):
+        text = self.SOURCE.read_text(encoding='utf-8')
+        match = re.search(r'm\.def\(\s*"%s",' % op, text)
+        self.assertIsNotNone(match, op)
+        end = min(position for position in (text.find('m.def(', match.end()), text.find('m.attr(', match.end())) if position >= 0)
+        return re.findall(r'nb::arg\("(\w+)"\)', text[match.end():end])
+
+    def function_with(self, names, required):
+        scope = {}
+        exec('def op(%s): return None' % ', '.join(name if index < required else name + '=None' for index, name in enumerate(names)), scope)
+        return scope['op']
+
+    def test_the_parameters_of_the_two_ops(self):
+        self.assertEqual(self.parameters('qwen_write_blocks_from_staging'), ['device_tensor', 'staging', 'byte_offset', 'blocks', 'bank', 'row_stride'])
+        self.assertEqual(self.parameters('qwen_staging_checksum'), ['staging', 'byte_offset', 'length', 'bank', 'cores', 'count'])
+
+    def test_staging_api_finds_the_strided_mode_against_those_signatures(self):
+        write = self.function_with(self.parameters('qwen_write_blocks_from_staging'), 4)
+        checksum = self.function_with(self.parameters('qwen_staging_checksum'), 3)
+        ttnn = types.SimpleNamespace(qwen_p2p_staging_alloc=lambda *a, **k: 1, qwen_p2p_staging_info=lambda *a, **k: [], qwen_write_blocks_from_staging=write, qwen_staging_checksum=checksum)
+        api = p2p.StagingApi(ttnn, 'mesh', [1])
+        self.assertEqual((api.strided, api.ranged, api.mode), (True, True, 'strided'))
+
+    def test_the_extension_without_them_is_compat(self):
+        write = self.function_with(self.parameters('qwen_write_blocks_from_staging')[:-1], 4)
+        checksum = self.function_with(self.parameters('qwen_staging_checksum')[:-1], 3)
+        ttnn = types.SimpleNamespace(qwen_p2p_staging_alloc=lambda *a, **k: 1, qwen_p2p_staging_info=lambda *a, **k: [], qwen_write_blocks_from_staging=write, qwen_staging_checksum=checksum)
+        api = p2p.StagingApi(ttnn, 'mesh', [1])
+        self.assertEqual((api.strided, api.ranged, api.mode), (False, False, 'compat'))
 
 
 class AlignedStagingTests(EngineCase):

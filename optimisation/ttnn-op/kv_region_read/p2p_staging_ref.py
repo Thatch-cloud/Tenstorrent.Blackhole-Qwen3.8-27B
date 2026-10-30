@@ -41,6 +41,23 @@ def vector_prng():
     return np.random.default_rng(PRNG_SEED).integers(0, 256, 1 << 20, np.uint8).tobytes()
 
 
+def vector_ranged_small():
+    """4 ranges of 4096 bytes, each one of the single-range vectors: zeros, i % 251, i % 251, zeros."""
+    return vector_zero() + vector_mod251() + vector_mod251() + vector_zero()
+
+
+RANGED_SMALL_EXPECTED = [VECTOR_ZERO_4096, VECTOR_MOD251_4096, VECTOR_MOD251_4096, VECTOR_ZERO_4096]
+
+
+def vector_ranged_prng():
+    """4 ranges of 1 MiB: the PRNG vector, zeros (of the vector's length), the PRNG vector, zeros."""
+    prng = vector_prng()
+    return prng + bytes(len(prng)) + prng + bytes(len(prng))
+
+
+RANGED_PRNG_EXPECTED = [VECTOR_PRNG_1MIB, 0, VECTOR_PRNG_1MIB, 0]
+
+
 def checksum_numpy(data):
     """S of `data` (a multiple of 4 bytes) with numpy; uint64 arithmetic wraps mod 2^64."""
     if len(data) % 4:
@@ -62,6 +79,14 @@ def checksum_python(data):
     return total
 
 
+def checksum_ranges(data, length, count, function=None):
+    """What qwen_staging_checksum(..., length, count=N) answers for one device: N consecutive ranges of `length` bytes, each with k counted from ITS OWN start."""
+    function = function or checksum_numpy
+    if len(data) < length * count:
+        raise ValueError('the data is shorter than count ranges')
+    return [function(data[index * length:(index + 1) * length]) for index in range(count)]
+
+
 # -- Python mirrors of qwen_p2p_plan.hpp (the CPU test compiles the header and checks every function against these) ------------------------
 
 SCATTER_COLUMNS = 8
@@ -71,7 +96,7 @@ SCATTER_MAX_BLOCKS_PER_CORE = 32
 SCATTER_CHUNK_PAGES = 16
 SCATTER_MAX_PAGE_BYTES = 8192
 SCATTER_LAUNCH_BLOCKS = SCATTER_CORES * SCATTER_MAX_BLOCKS_PER_CORE
-SCATTER_FIXED_ARGS = 5
+SCATTER_FIXED_ARGS = 6
 SCATTER_ARGS = SCATTER_FIXED_ARGS + SCATTER_MAX_BLOCKS_PER_CORE
 CHECKSUM_UNIT = 4096
 CHECKSUM_CHUNK_BYTES = 32768
@@ -79,11 +104,16 @@ CHECKSUM_PARTIAL_BYTES = 64
 CHECKSUM_COLUMNS = 8
 CHECKSUM_DEFAULT_CORES = 64
 CHECKSUM_MAX_CORES = 80
-CHECKSUM_ARGS = 7
+CHECKSUM_MAX_RANGES = 512
+CHECKSUM_ARGS = 10
 
 
 def scatter_launches(n):
     return [(first, min(n - first, SCATTER_LAUNCH_BLOCKS)) for first in range(0, n, SCATTER_LAUNCH_BLOCKS)]
+
+
+def checksum_launches(n):
+    return [(first, min(n - first, CHECKSUM_MAX_RANGES)) for first in range(0, n, CHECKSUM_MAX_RANGES)]
 
 
 def split_blocks(n, cores):
@@ -112,28 +142,35 @@ def checksum_cb_bytes():
     return 64 + 2 * CHECKSUM_CHUNK_BYTES + CHECKSUM_PARTIAL_BYTES
 
 
-def scatter_core_args(destination_address, staging_address, bank, byte_offset, slice_bytes, blocks, launch_first, run):
+def scatter_core_args(destination_address, staging_address, bank, byte_offset, row_stride, blocks, launch_first, run):
     values = [0] * SCATTER_ARGS
     values[0], values[1], values[2] = destination_address, staging_address, bank
-    values[3] = (byte_offset + (launch_first + run[0]) * slice_bytes) & MASK32
+    values[3] = (byte_offset + (launch_first + run[0]) * row_stride) & MASK32
     values[4] = run[1]
+    values[5] = row_stride & MASK32
     for i in range(run[1]):
         values[SCATTER_FIXED_ARGS + i] = blocks[launch_first + run[0] + i]
     return values
 
 
-def checksum_core_args(staging_address, partials_address, bank, byte_offset, units, slot):
+def checksum_core_args(staging_address, partials_address, bank, byte_offset, units, slot, ranges, range_bytes, slot_stride):
+    """The args of one checksum core. units = its (first, last) 4 KiB units of EACH range (range_bytes long, the first at byte_offset); its partial for range r
+    goes to partials page slot + r * slot_stride."""
     values = [0] * CHECKSUM_ARGS
     values[0], values[1], values[2] = staging_address, partials_address, bank
     values[3] = (byte_offset + units[0] * CHECKSUM_UNIT) & MASK32
     values[4] = (units[1] - units[0]) * CHECKSUM_UNIT
     values[5] = start_weight(units[0] * CHECKSUM_UNIT // 4)
     values[6] = slot
+    values[7] = ranges
+    values[8] = range_bytes & MASK32
+    values[9] = slot_stride
     return values
 
 
-def check_scatter(byte_offset, slice_bytes, page_bytes, blocks, staging_bytes):
-    """-> None, or the reason the arguments are refused (the C++ check_scatter)."""
+def check_scatter(byte_offset, slice_bytes, page_bytes, blocks, staging_bytes, row_stride=None):
+    """-> None, or the reason the arguments are refused (the C++ check_scatter). row_stride None: contiguous rows (slice_bytes)."""
+    row_stride = slice_bytes if row_stride is None else row_stride
     if page_bytes == 0 or page_bytes % DRAM_ALIGNMENT:
         return "the tensor's page size must be a multiple of 64 bytes (a whole DRAM-aligned page)"
     if page_bytes > SCATTER_MAX_PAGE_BYTES:
@@ -142,19 +179,23 @@ def check_scatter(byte_offset, slice_bytes, page_bytes, blocks, staging_bytes):
         return 'a block must be a whole number of tensor pages'
     if byte_offset % DRAM_ALIGNMENT:
         return 'byte_offset must be a multiple of 64'
+    if row_stride % DRAM_ALIGNMENT or row_stride < slice_bytes:
+        return 'row_stride must be a multiple of 64 and at least the block size (the slice bytes)'
     if blocks == 0:
         return 'no blocks'
-    if byte_offset > staging_bytes or blocks > (staging_bytes - byte_offset) // slice_bytes:
+    if byte_offset > staging_bytes or slice_bytes > staging_bytes - byte_offset or blocks - 1 > (staging_bytes - byte_offset - slice_bytes) // row_stride:
         return 'the byte range lies outside the staging range'
     return None
 
 
-def check_checksum(byte_offset, length, staging_bytes, cores):
+def check_checksum(byte_offset, length, staging_bytes, cores, ranges=1):
     if length == 0 or length % CHECKSUM_UNIT:
         return 'length must be a positive multiple of 4096'
     if byte_offset % DRAM_ALIGNMENT:
         return 'byte_offset must be a multiple of 64'
-    if byte_offset > staging_bytes or length > staging_bytes - byte_offset:
+    if ranges == 0:
+        return 'count must be at least 1'
+    if byte_offset > staging_bytes or length > staging_bytes - byte_offset or ranges - 1 > (staging_bytes - byte_offset - length) // length:
         return 'the byte range lies outside the staging range'
     if cores == 0 or cores > CHECKSUM_MAX_CORES or cores % CHECKSUM_COLUMNS:
         return 'cores must be a multiple of 8, at most 80'
@@ -243,9 +284,10 @@ def _after(end, gap=4096):
 
 
 def run_scatter_emulation(directory, page_bytes, pages_per_block, bank, staging_address, byte_offset, staging_range, dst_pages, dst_address,
-                          blocks, dst_in, bank_bytes=None, eager=False):
+                          blocks, dst_in, bank_bytes=None, eager=False, row_stride=None):
     """Runs qwen_p2p_scatter.cpp for the blocks. staging_range: the bytes of the staging range from byte 0 (they sit at staging_address in the bank).
-    dst_in: uint8 [dst_pages, page_bytes]. -> (dst_out uint8 [dst_pages, page_bytes], stdout line)."""
+    row_stride: bytes between the starts of two blocks' rows in the staging range (None: contiguous). dst_in: uint8 [dst_pages, page_bytes].
+    -> (dst_out uint8 [dst_pages, page_bytes], stdout line)."""
     exe = build_emulation('scatter', [page_bytes, pages_per_block, SCATTER_CHUNK_PAGES, SCATTER_MAX_BLOCKS_PER_CORE, 0, 0, 0, 0], directory, eager)
     aligned = -(-page_bytes // 64) * 64
     if dst_address is None:
@@ -257,7 +299,7 @@ def run_scatter_emulation(directory, page_bytes, pages_per_block, bank, staging_
     scenario = os.path.join(directory, 'scatter.txt')
     _write_scenario(scenario, [('page_bytes', page_bytes), ('pages_per_block', pages_per_block), ('bank', bank), ('staging_address', staging_address),
                                ('byte_offset', byte_offset), ('dst_address', dst_address), ('dst_pages', dst_pages), ('bank_bytes', bank_bytes),
-                               ('blocks', list(blocks))])
+                               ('blocks', list(blocks))] + ([] if row_stride is None else [('row_stride', row_stride)]))
     staging_file, in_file, out_file = (os.path.join(directory, n) for n in ('staging.bin', 'dst_in.bin', 'dst_out.bin'))
     with open(staging_file, 'wb') as handle:
         handle.write(bytes(staging_range))
@@ -271,18 +313,23 @@ def run_scatter_emulation(directory, page_bytes, pages_per_block, bank, staging_
     return out, done.stdout.strip()
 
 
-def run_checksum_emulation(directory, staging_address, partials_address, bank, byte_offset, data, cores=CHECKSUM_DEFAULT_CORES, bank_bytes=None, eager=False):
-    """Runs qwen_p2p_checksum.cpp over `data` (placed at byte_offset of the staging range) on `cores` cores -> (S, stdout)."""
+def run_checksum_ranges_emulation(directory, staging_address, partials_address, bank, byte_offset, data, ranges, cores=CHECKSUM_DEFAULT_CORES, bank_bytes=None,
+                                  eager=False):
+    """Runs qwen_p2p_checksum.cpp ONCE over `ranges` consecutive ranges (data = all of them back to back, placed at byte_offset of the staging range) on `cores`
+    cores -> ([S per range], stdout)."""
+    if len(data) % ranges:
+        raise ValueError('data is not a whole number of ranges')
+    length = len(data) // ranges
     exe = build_emulation('checksum', [CHECKSUM_CHUNK_BYTES, CHECKSUM_PARTIAL_BYTES, 0, 0, 0, 0], directory, eager)
     if partials_address is None:
         partials_address = _after(staging_address + byte_offset + len(data))
     elif partials_address < staging_address + byte_offset + len(data):
         raise ValueError('the partials overlap the staging range')
     if bank_bytes is None:
-        bank_bytes = max(staging_address + byte_offset + len(data), partials_address + 64 * cores) + 4096
+        bank_bytes = max(staging_address + byte_offset + len(data), partials_address + 64 * cores * ranges) + 4096
     scenario = os.path.join(directory, 'checksum.txt')
     _write_scenario(scenario, [('staging_address', staging_address), ('partials_address', partials_address), ('bank', bank),
-                               ('byte_offset', byte_offset), ('length', len(data)), ('cores', cores), ('bank_bytes', bank_bytes)])
+                               ('byte_offset', byte_offset), ('length', length), ('cores', cores), ('bank_bytes', bank_bytes), ('ranges', ranges)])
     staging_file = os.path.join(directory, 'staging_ck.bin')
     with open(staging_file, 'wb') as handle:
         handle.write(bytes(data))
@@ -290,9 +337,15 @@ def run_checksum_emulation(directory, staging_address, partials_address, bank, b
     if done.returncode:
         raise RuntimeError('emulation exit %d: %s' % (done.returncode, (done.stdout + done.stderr).strip()[-2000:]))
     for line in done.stdout.splitlines():
-        if line.startswith('SUM '):
-            return int(line.split()[1]), done.stdout.strip()
-    raise RuntimeError('no SUM line: ' + done.stdout)
+        if line.startswith('SUMS '):
+            return [int(word) for word in line.split()[1:]], done.stdout.strip()
+    raise RuntimeError('no SUMS line: ' + done.stdout)
+
+
+def run_checksum_emulation(directory, staging_address, partials_address, bank, byte_offset, data, cores=CHECKSUM_DEFAULT_CORES, bank_bytes=None, eager=False):
+    """Runs qwen_p2p_checksum.cpp over `data` (placed at byte_offset of the staging range) on `cores` cores -> (S, stdout): the one-range launch."""
+    sums, line = run_checksum_ranges_emulation(directory, staging_address, partials_address, bank, byte_offset, data, 1, cores, bank_bytes, eager)
+    return sums[0], line
 
 
 def scratch_directory():

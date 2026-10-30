@@ -41,6 +41,11 @@ inline uint64_t one(const std::map<std::string, std::vector<uint64_t>>& config, 
     return it->second[0];
 }
 
+// A key that may be absent (`fallback` then), else exactly one value.
+inline uint64_t one_or(const std::map<std::string, std::vector<uint64_t>>& config, const char* key, uint64_t fallback) {
+    return config.find(key) == config.end() ? fallback : one(config, key);
+}
+
 inline std::vector<uint8_t> read_file(const char* path) {
     std::ifstream in(path, std::ios::binary);
     return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());

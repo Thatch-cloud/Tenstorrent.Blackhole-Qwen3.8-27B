@@ -13,11 +13,20 @@
 // read overlaps the arithmetic on the other half. Every DRAM access is a whole aligned chunk (a multiple of 4096 bytes); the output is
 // one whole 64-byte page per core.
 //
+// MANY RANGES IN ONE LAUNCH (qwen_staging_checksum(..., count=N)): the launch checksums `ranges` consecutive ranges, `range_stride` bytes apart
+// (the ranges are adjacent, so the stride is the range length). Every range is split among the cores the same way, so a core takes the same run of
+// units of EACH range, starts every range at the same weight (k restarts at each range's own first word), and writes one partial page per range, at
+// partials page slot + r * slot_stride. The chunks of consecutive ranges form one stream, so the read of a range's first chunk overlaps the arithmetic on
+// the previous range's last. A core with no units (bytes == 0) still writes its zero partial for every range: the partials buffer is reused between calls.
+//
 // The arithmetic between the markers is compiled on a CPU by the unit test (test_p2p_staging.py) and compared with the numpy reference.
 //
 // Compile-time args: [chunk_bytes, out_page_bytes] + TensorAccessorArgs(staging) + TensorAccessorArgs(partials).
-// Per-core runtime args: [0] staging address  [1] partials address  [2] staging bank  [3] staging byte offset of this core's first byte
-//   [4] bytes for this core (0 for an idle core; a multiple of 4096)  [5] w_(k0) (uint32)  [6] this core's slot (a page id of partials)
+// Per-core runtime args (a constant count):
+//   [0] staging address  [1] partials address  [2] staging bank  [3] staging byte offset of this core's first byte of range 0
+//   [4] bytes for this core in EACH range (0 for an idle core; a multiple of 4096)  [5] w_(k0) (uint32), counted from the start of a range
+//   [6] this core's slot for range 0 (a page id of partials)  [7] number of ranges (>= 1)  [8] bytes between the starts of two ranges
+//   [9] partials pages between the slots of two ranges
 
 #include <cstdint>
 
@@ -53,6 +62,33 @@ inline uint64_t qwen_p2p_accumulate(volatile tt_l1_ptr uint32_t* words, uint32_t
 }
 // END-CHECKSUM-ARITHMETIC
 
+// Starts the read of chunk `within` of range `range` of this core into half `half` of the scratch.
+template <typename Accessor>
+inline void qwen_p2p_read_chunk(
+    const Accessor& staging,
+    uint32_t bank,
+    uint32_t source_offset,
+    uint32_t range_stride,
+    uint32_t bytes,
+    uint32_t chunk_bytes,
+    uint32_t range,
+    uint32_t within,
+    uint32_t destination) {
+    const uint32_t done = within * chunk_bytes;
+    const uint32_t count = bytes - done < chunk_bytes ? bytes - done : chunk_bytes;
+    noc_async_read(staging.get_noc_addr(bank, source_offset + range * range_stride + done), destination, count);
+}
+
+// One partial sum as a whole page: low word, high word (the rest of the page is zero, set once by the caller). Waits for the write: the page is reused.
+template <typename Accessor>
+inline void qwen_p2p_put_partial(
+    const Accessor& partials, uint32_t page, volatile tt_l1_ptr uint32_t* out, uint32_t out_page, uint32_t out_page_bytes, uint64_t sum) {
+    out[0] = static_cast<uint32_t>(sum);
+    out[1] = static_cast<uint32_t>(sum >> 32);
+    noc_async_write(out_page, partials.get_noc_addr(page), out_page_bytes);
+    noc_async_write_barrier();
+}
+
 void kernel_main() {
     constexpr uint32_t chunk_bytes = get_compile_time_arg_val(0);
     constexpr uint32_t out_page_bytes = get_compile_time_arg_val(1);
@@ -64,50 +100,66 @@ void kernel_main() {
     const uint32_t bank = get_arg_val<uint32_t>(2);
     const uint32_t source_offset = get_arg_val<uint32_t>(3);
     const uint32_t bytes = get_arg_val<uint32_t>(4);
-    uint32_t weight = get_arg_val<uint32_t>(5);
+    const uint32_t weight_start = get_arg_val<uint32_t>(5);
     const uint32_t slot = get_arg_val<uint32_t>(6);
+    const uint32_t ranges = get_arg_val<uint32_t>(7);
+    const uint32_t range_stride = get_arg_val<uint32_t>(8);
+    const uint32_t slot_stride = get_arg_val<uint32_t>(9);
     const auto staging = TensorAccessor(staging_args, staging_address, chunk_bytes);
     const auto partials = TensorAccessor(partials_args, partials_address, out_page_bytes);
 
     // L1 of circular buffer 0 (never pushed): two read halves of chunk_bytes, then the output page.
     const uint32_t scratch = (get_write_ptr(0) + 63) & ~63u;
     const uint32_t out_page = scratch + 2 * chunk_bytes;
-
-    uint64_t sum = 0;
-    if (bytes != 0) {
-        uint32_t done = 0;
-        uint32_t half = 0;
-        uint32_t count = bytes < chunk_bytes ? bytes : chunk_bytes;
-        noc_async_read(staging.get_noc_addr(bank, source_offset), scratch, count);
-        while (true) {
-            noc_async_read_barrier();
-            const uint32_t next = done + count;
-            uint32_t next_count = 0;
-            if (next < bytes) {
-                next_count = bytes - next < chunk_bytes ? bytes - next : chunk_bytes;
-                noc_async_read(
-                    staging.get_noc_addr(bank, source_offset + next),
-                    scratch + (half ^ 1u) * chunk_bytes,
-                    next_count);
-            }
-            sum = qwen_p2p_accumulate(
-                reinterpret_cast<volatile tt_l1_ptr uint32_t*>(scratch + half * chunk_bytes), count >> 2, weight, sum);
-            if (next >= bytes) {
-                break;
-            }
-            done = next;
-            count = next_count;
-            half ^= 1u;
-        }
-    }
-
-    // The partial sum as one whole page: low word, high word, then zeros.
     volatile tt_l1_ptr uint32_t* out = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(out_page);
-    out[0] = static_cast<uint32_t>(sum);
-    out[1] = static_cast<uint32_t>(sum >> 32);
     for (uint32_t i = 2; i < out_page_bytes / 4; ++i) {
         out[i] = 0;
     }
-    noc_async_write(out_page, partials.get_noc_addr(slot), out_page_bytes);
-    noc_async_write_barrier();
+
+    if (bytes == 0) {
+        for (uint32_t range = 0; range < ranges; ++range) {
+            qwen_p2p_put_partial(partials, slot + range * slot_stride, out, out_page, out_page_bytes, 0);
+        }
+        return;
+    }
+    if (ranges == 0) {
+        return;
+    }
+
+    // The chunks of all ranges, in order, are one stream: chunk i is chunk `within` of range `range`, and the read of chunk i + 1 is started once chunk i has
+    // landed, so it overlaps the arithmetic on chunk i.
+    const uint32_t chunks = (bytes + chunk_bytes - 1) / chunk_bytes;
+    const uint32_t total = ranges * chunks;
+    uint32_t range = 0;
+    uint32_t within = 0;
+    uint32_t weight = weight_start;
+    uint64_t sum = 0;
+    qwen_p2p_read_chunk(staging, bank, source_offset, range_stride, bytes, chunk_bytes, range, within, scratch);
+    for (uint32_t i = 0; i < total; ++i) {
+        const uint32_t half = i & 1u;
+        noc_async_read_barrier();
+        uint32_t next_range = range;
+        uint32_t next_within = within + 1;
+        if (next_within == chunks) {
+            next_within = 0;
+            ++next_range;
+        }
+        if (i + 1 < total) {
+            qwen_p2p_read_chunk(
+                staging, bank, source_offset, range_stride, bytes, chunk_bytes, next_range, next_within, scratch + (half ^ 1u) * chunk_bytes);
+        }
+        if (within == 0) {
+            sum = 0;
+            weight = weight_start;
+        }
+        const uint32_t done = within * chunk_bytes;
+        const uint32_t count = bytes - done < chunk_bytes ? bytes - done : chunk_bytes;
+        sum = qwen_p2p_accumulate(
+            reinterpret_cast<volatile tt_l1_ptr uint32_t*>(scratch + half * chunk_bytes), count >> 2, weight, sum);
+        if (next_within == 0) {
+            qwen_p2p_put_partial(partials, slot + range * slot_stride, out, out_page, out_page_bytes, sum);
+        }
+        range = next_range;
+        within = next_within;
+    }
 }

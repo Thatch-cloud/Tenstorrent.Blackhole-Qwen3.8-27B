@@ -51,21 +51,25 @@ So this branch changes what the drive holds, behind the flag, as the contract al
   host tier's `[cache][chip][slice]` with `ShardLayout.from_chipmajor`. The spill thread converts the other way (`_chipmajor`, into one page-aligned arena per batch, so the device write needs no bounce); batches
   are capped at 128 MiB in this layout because the conversion needs a second buffer. GDN checkpoints are not touched.
 
-**The device ops as built** (`tp4/p2p-devop`, `docs/tp4-p2p-restore.md`: qwen_kv_read version 3) are the contract's, with their corrections: `qwen_p2p_staging_alloc(mesh, size, bank=0)`, `qwen_p2p_staging_info`,
-`qwen_write_blocks_from_staging(tensor, handle, byte_offset, blocks)` (device d's `blocks[i]` gets `staging_d[byte_offset + i * slice_bytes : + slice_bytes]`: **contiguous rows**, enqueued, `byte_offset` a multiple of 64),
-`qwen_staging_checksum(handle, byte_offset, length)` (**one range**, blocking, `[int per device]`, `length` a multiple of 4096). The device-op branch's per-card object is `[cache][block][slice]` for a run of blocks. That
+**The device ops** (`tp4/p2p-devop`, `docs/tp4-p2p-restore.md`: qwen_kv_read version 3) are the contract's, with their corrections: `qwen_p2p_staging_alloc(mesh, size, bank=0)`, `qwen_p2p_staging_info`,
+`qwen_write_blocks_from_staging(tensor, handle, byte_offset, blocks, bank=None, row_stride=None)` (device d's `blocks[i]` gets `staging_d[byte_offset + i * row_stride : + slice_bytes]`; `row_stride=None` is `slice_bytes`, **contiguous rows**; enqueued, `byte_offset` and `row_stride` multiples of 64),
+`qwen_staging_checksum(handle, byte_offset, length, bank=None, cores=64, count=None)` (blocking, `length` a multiple of 4096; `count=None`: **one range**, `[int per device]`; `count=N`: N consecutive ranges of `length`, k restarting at each, `[[int] * N per device]`).
+**Both keywords are in the device-op extension now**; the first builds of version 3 had neither, and an image that still carries such a `.so` is what compat mode is for. The device-op branch's original per-card object is `[cache][block][slice]` for a run of blocks. That
 arrangement cannot be what the NVMe tier stores: the tier's unit is the block (entries come and go one block at a time), and a card cannot read 17,408-byte pieces scattered through a run with aligned reads. So the
 host lays a chunk out **block-major** in the staging buffer (`staging[block j][cache tensor t][slice]`: block j's whole shard at `j * shard_bytes`, tensor t at `+ t * slice_bytes`), and cache tensor t's rows are
-`shard_bytes` apart, not `slice_bytes`. Two small additions to the extension take that off the host, and **the host works without them** (`StagingApi`, found from the ops' signatures):
+`shard_bytes` apart, not `slice_bytes`. The two keywords take that off the host (`StagingApi` finds them from the ops' signatures, or from the docstring's signature line when the function has none, as a nanobind function), and **the host still works without them**:
 
-| | with the additions (`strided`) | as built (`compat`) |
+| | the current extension (`strided`) | an older extension: no keywords (`compat`) |
 |---|---|---|
 | copy | `qwen_write_blocks_from_staging(..., row_stride=)`: row i at `byte_offset + i * row_stride`; one launch per cache tensor per chunk (32 a chunk) | one launch per block and cache tensor (`blocks=[id]`): `32 n` launches for n blocks |
 | checksum | `qwen_staging_checksum(..., count=)`: `count` consecutive ranges of `length`, one value each per device; one call a chunk | one blocking call per block |
 | rate | a chunk of 60 blocks: 32 launches and one readback | **correct and slow**: at 254k (3,969 blocks) about 127,000 launches and 3,969 blocking readbacks; P3a measures it (`device_ops=compat` in its log and report) |
 
-Requests to the device-op branch, in order of value: (1) `row_stride` on the copy op (the kernel reads staging pages at `bank, address + offset + i * stride`; today `i * slice_bytes`); (2) `count` on the checksum op
-(the kernel already splits a range among cores; it would loop over `count` ranges and write `count` partials).
+**Compat mode is only for old builds.** A build with only one of the two keywords runs `half-compat` (the copy strided and the checksums one at a time, or the reverse). The tier logs `device_ops=` once at start and, when it is not
+`strided`, says that every restore costs a launch per block and cache tensor. What the device side does with the two keywords (the stride is a runtime argument of the copy kernel; the checksum kernel loops over the ranges in one launch, a
+partial page per core and range, and splits more than 512 ranges into several launches itself, so the host never has to) is in `docs/tp4-p2p-restore.md` sections 2 and 3. `p2p_staging_card.run()` reports the same `device_ops` and, on a
+strided build, checks both keywords against the numpy reference on a chipmajor-v1 chunk (a build without them is reported `compat`, not failed, unless the check is run with `--require-strided`). The CPU tests cover `strided`
+(fakes with the extension's real signatures, and with nanobind-style functions that have only a docstring), `compat`, and `half-compat`, and read the extension's source so that a renamed keyword fails them.
 
 Other things the as-built info record changes on the host side, all built:
 
@@ -173,7 +177,7 @@ inside `load_direct` it would stall just as long. **The minimal change that lets
   rounds); if so it runs the checksum op, takes the chunk's blocks from the pool (nothing is allocated for a chunk that does not verify), writes the host-tier records of the chunk as before, enqueues the copy
   ops, and lets the next read start (after a device sync of the half);
 * the only work left on the scheduler thread per step is the checksum op with its readback, the block allocation (with the existing `flush` of what it evicts), and the copy enqueue: estimated **ms to tens of ms
-  per 60-block chunk** in the strided form (the copy is 33 MB per card of DRAM-to-DRAM; in compat mode the launches dominate: section 1), against ~40 ms of drive read per chunk that is now off-thread. **UNTESTED/UNMEASURED**: P3a prints the check and copy times per chunk and
+  per 60-block chunk** in the strided form (the copy is 33 MB per card of DRAM-to-DRAM; in compat mode, against an old extension, the launches dominate: section 1), against ~40 ms of drive read per chunk that is now off-thread. **UNTESTED/UNMEASURED**: P3a prints the check and copy times per chunk and
   the restore's end-to-end rate; G-C3 judges the disturbance.
 * a block is **published only after** the device has been synced past the job's last copy (`sync_p2p`; also before an abandoned job's blocks are freed): whatever queue the model's rounds use, a published block is a
   written block (ADR rule R2). A stream that is closed with reads still in flight hands its staging half back when the last of them lands (`reap`); a synchronous restore waits for a chunk at most 60 s;

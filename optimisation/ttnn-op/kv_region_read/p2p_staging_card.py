@@ -19,6 +19,10 @@ What it settles, per device and with different bytes on every device:
     and shuffled ids; several cache tensors from one object at the offsets INTERFACE section 1 gives; blocks the call does not name are untouched;
     more blocks than one launch carries when the pool allows it;
   * bank= : the same bytes in another bank of the staging buffer read back through bank=, and a different bank holds different bytes;
+  * the two forms the host needs to drop its slow compat mode, when the build has them (found from the signatures; `strided=True` / --require-strided makes
+    a build without them a failure): row_stride on the copy (a chipmajor-v1 chunk: block-major, each block's shard [cache][slice], so one cache tensor's
+    rows are a shard apart) and count on the checksum (one sum per block of the chunk in one call, equal to the numpy reference of each block alone;
+    more ranges than one launch carries). The report says `device_ops`: strided | compat;
   * the cost: GB/s of the checksum and the write op (host-side wall time, the op is waited for).
 
 Prints one JSON object and exits 1 on any mismatch.
@@ -44,6 +48,23 @@ STAGING_PAGE = 4096                      # the staging page of this check: byte 
 def _ref():
     import p2p_staging_ref
     return p2p_staging_ref
+
+
+def takes(function, name):
+    """Whether a callable has a parameter called `name`: from its signature when that names real parameters, else from its docstring (a nanobind function states its signature there, and
+    `inspect` may find none or only (*args, **kwargs) for it). The same rule as the host's StagingApi, which this check must agree with."""
+    import inspect
+    import re
+
+    try:
+        parameters = inspect.signature(function).parameters
+        if name in parameters:
+            return True
+        if any(parameter.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD) for parameter in parameters.values()):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return re.search(r'(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])' % re.escape(name), str(getattr(function, '__doc__', None) or '')) is not None
 
 
 def formula_endpoint(bank):
@@ -135,8 +156,26 @@ def check_info(info, devices, staging_bytes, bank, report, problems):
         report['staging']['note'] = 'the probe formula names an endpoint tt-metal does not list for this bank: aim the window at noc_x/noc_y from info'
 
 
-def run(ttnn, mesh, devices, blocks=1024, heads_per_chip=1, staging_mib=32, bank=3, long_run=True):
-    """The checks on an open mesh -> the report dict (ok, problems, one entry per case, the cost figures)."""
+SHARD_TENSORS = 4                        # cache tensors of the strided cases: 4 x 17,408 = 69,632 = 17 x 4096, so a block's shard is whole 4096-byte units (production: 32 tensors, 136 units)
+MANY_RANGES = 520                        # more ranges than one checksum launch carries (qwen_p2p_plan.hpp kChecksumMaxRanges = 512)
+
+
+def ranged_ints(sums, devices, count, problems, label):
+    """The answer of a count= checksum as [[int] * count] per device, or None (and a problem) when it is not that shape."""
+    try:
+        rows = [[int(v) for v in row] for row in sums]
+    except (TypeError, ValueError):
+        rows = None
+    if rows is None or len(rows) != devices or any(len(row) != count for row in rows):
+        problems.append('%s: count=%d answered %s, wanted %d devices x %d checksums' % (
+            label, count, 'something that is not a list of lists of integers' if rows is None else [len(row) for row in rows], devices, count))
+        return None
+    return rows
+
+
+def run(ttnn, mesh, devices, blocks=1024, heads_per_chip=1, staging_mib=32, bank=3, long_run=True, strided=None):
+    """The checks on an open mesh -> the report dict (ok, problems, one entry per case, the cost figures). strided: None runs the row_stride / count cases when the
+    build has the keywords (the report's device_ops says which), True requires them (a build without is a failure), False skips them."""
     import numpy as np
 
     ref = _ref()
@@ -159,7 +198,16 @@ def run(ttnn, mesh, devices, blocks=1024, heads_per_chip=1, staging_mib=32, bank
             report['problems'] = problems
             return report
         tensors = 3
-        caches = [cache_a] + [make_cache(ttnn, mesh, blocks, heads_per_chip) for _ in range(tensors - 1)]
+        has_stride = takes(ttnn.qwen_write_blocks_from_staging, 'row_stride')
+        has_count = takes(ttnn.qwen_staging_checksum, 'count')
+        report['device_ops'] = 'strided' if has_stride and has_count else ('compat' if not has_stride and not has_count else 'half-compat')
+        report['row_stride'], report['count'] = has_stride, has_count
+        run_strided = (has_stride and has_count) if strided is None else bool(strided)
+        if strided and not (has_stride and has_count):
+            problems.append('this build lacks %s (the host would run in compat mode)' % ' and '.join(
+                name for name, found in (('row_stride on qwen_write_blocks_from_staging', has_stride), ('count on qwen_staging_checksum', has_count)) if not found))
+            run_strided = False
+        caches = [cache_a] + [make_cache(ttnn, mesh, blocks, heads_per_chip) for _ in range((SHARD_TENSORS if run_strided else tensors) - 1)]
         cases = {}
         everything = list(range(blocks))
         # What each cache holds, block by block: the state the ops must leave behind (a write names its blocks and nothing else).
@@ -243,6 +291,101 @@ def run(ttnn, mesh, devices, blocks=1024, heads_per_chip=1, staging_mib=32, bank
         cases['other_bank']['banks_differ'] = same_range != other_range
         if same_range == other_range:
             problems.append('the same range reads the same checksum in two banks: bank= does not select the bank')
+        # 7b. rows apart (row_stride) and many ranges (count): the chipmajor-v1 chunk the host stages
+        if run_strided:
+            def strided_case(name, offset, selected, tensor_count=SHARD_TENSORS, gap=0):
+                """A chunk staged block-major (block j's shard [cache][slice] at offset + j * stride): one checksum call with count=n, then one copy per cache tensor
+                with row_stride = the shard stride (gap > 0: a stride larger than the shard, bytes between two shards that nothing may read or checksum)."""
+                n = len(selected)
+                slices = device_slices(rng, devices, tensor_count, n, slice_bytes)
+                shard = tensor_count * slice_bytes
+                stride = shard + gap
+                if offset % STAGING_PAGE or stride % 64 or (gap == 0 and shard % 4096) or offset + (n - 1) * stride + shard > staging_bytes:
+                    raise ValueError('%s: the chunk does not fit the ring at %d' % (name, offset))
+                span = ((n - 1) * stride + shard + STAGING_PAGE - 1) // STAGING_PAGE * STAGING_PAGE
+                rows = rng.integers(0, 256, (devices, span), dtype=np.uint8)                      # the gaps (and the tail) hold noise too
+                for d in range(devices):
+                    for j in range(n):
+                        rows[d, j * stride:j * stride + shard] = np.concatenate([slices[d][t][j] for t in range(tensor_count)])
+                case = dict(blocks=n, offset=offset, row_stride=stride, shard_bytes=shard, object_bytes=int(rows.shape[1]))
+                ttnn.qwen_p2p_staging_write(staging, offset, rows)
+                if gap == 0:
+                    begin = time.perf_counter()
+                    sums = ttnn.qwen_staging_checksum(staging, offset, shard, count=n)
+                    case['checksum_ms'] = round((time.perf_counter() - begin) * 1000, 3)
+                    got = ranged_ints(sums, devices, n, problems, name)
+                    want = [[ref.checksum_numpy(bytes(rows[d, j * shard:(j + 1) * shard])) for j in range(n)] for d in range(devices)]
+                    case['checksum_equal'] = got == want
+                    if got is not None and got != want:
+                        problems.append('%s: count=%d checksums %s, numpy reference %s' % (name, n, got, want))
+                    # a one-range call and the first entry of the ranged call agree (count=None is today's answer)
+                    single = [int(v) for v in ttnn.qwen_staging_checksum(staging, offset, shard)]
+                    case['single_equal'] = single == [row[0] for row in want]
+                    if not case['single_equal']:
+                        problems.append('%s: the one-range checksum %s differs from the first of the ranged call %s' % (name, single, [row[0] for row in want]))
+                begin = time.perf_counter()
+                for tensor in range(tensor_count):
+                    ttnn.qwen_write_blocks_from_staging(caches[tensor], staging, offset + tensor * slice_bytes, selected, row_stride=stride)
+                synchronize(ttnn, mesh, caches[0])
+                case['write_ms'] = round((time.perf_counter() - begin) * 1000, 3)
+                equal = True
+                for tensor in range(tensor_count):
+                    got = np.empty((devices, n, slice_bytes), dtype=np.uint8)
+                    ttnn.qwen_read_blocks_raw(caches[tensor], got, selected)
+                    expected = np.stack([slices[d][tensor] for d in range(devices)])
+                    shadow[tensor][:, selected] = expected
+                    same = bool(np.array_equal(got, expected))
+                    equal = equal and same
+                    if not same:
+                        problems.append('%s: tensor %d (row_stride %d) read back differs from the staged rows (devices %s)' % (
+                            name, tensor, stride, [d for d in range(devices) if not np.array_equal(got[d], expected[d])]))
+                case['bytes_equal'] = equal
+                case['devices_differ'] = len({hash(rows[d].tobytes()) for d in range(devices)}) == devices
+                cases[name] = case
+
+            strided_case('strided_chipmajor', 19 * STAGING_PAGE, sorted(int(x) for x in rng.permutation(blocks)[:21]))
+            strided_case('strided_shuffled', 41 * STAGING_PAGE, [int(x) for x in rng.permutation(blocks)[:9]])
+            strided_case('strided_gaps', 3 * STAGING_PAGE, [int(x) for x in rng.permutation(blocks)[:7]], tensor_count=2, gap=4096 + 64)
+            shard_end = SHARD_TENSORS * slice_bytes
+            n_end = 5
+            strided_case('strided_end_of_ring', staging_bytes - (n_end * shard_end + STAGING_PAGE - 1) // STAGING_PAGE * STAGING_PAGE,
+                         [int(x) for x in rng.permutation(blocks)[:n_end]])
+            if long_run and blocks >= LAUNCH_BLOCKS + 80:
+                n_long = LAUNCH_BLOCKS + 70
+                if n_long * (slice_bytes + 4096) + STAGING_PAGE <= staging_bytes:
+                    strided_case('strided_two_launches', 0, [int(x) for x in rng.permutation(blocks)[:n_long]], tensor_count=1, gap=4096)
+            # more ranges than one launch carries: several launches, one answer per range
+            count = MANY_RANGES
+            if count * STAGING_PAGE <= staging_bytes:
+                noise = rng.integers(0, 256, (devices, count * STAGING_PAGE), dtype=np.uint8)
+                ttnn.qwen_p2p_staging_write(staging, 0, noise)
+                begin = time.perf_counter()
+                sums = ttnn.qwen_staging_checksum(staging, 0, STAGING_PAGE, count=count)
+                elapsed = round((time.perf_counter() - begin) * 1000, 3)
+                got = ranged_ints(sums, devices, count, problems, 'many_ranges')
+                want = [[ref.checksum_numpy(bytes(noise[d, j * STAGING_PAGE:(j + 1) * STAGING_PAGE])) for j in range(count)] for d in range(devices)]
+                cases['many_ranges'] = dict(ranges=count, length=STAGING_PAGE, checksum_ms=elapsed, checksum_equal=got == want)
+                if got is not None and got != want:
+                    problems.append('many_ranges: count=%d checksums differ from the numpy reference at ranges %s' % (
+                        count, [j for j in range(count) if any(j >= len(got[d]) or got[d][j] != want[d][j] for d in range(devices))][:8]))
+            # a flipped byte in one block of a ranged call changes that range's sum only
+            n = 6
+            slices = device_slices(rng, devices, 1, n, slice_bytes)
+            data = stack(objects_from(slices, ref))
+            span = STAGING_PAGE * (data.shape[1] // STAGING_PAGE)
+            ttnn.qwen_p2p_staging_write(staging, 0, data)
+            ranges = span // STAGING_PAGE
+            before = ranged_ints(ttnn.qwen_staging_checksum(staging, 0, STAGING_PAGE, count=ranges), devices, ranges, problems, 'ranged_flipped_byte')
+            flipped = data.copy()
+            flipped[3, 2 * STAGING_PAGE + 77] ^= 0x08
+            ttnn.qwen_p2p_staging_write(staging, 0, flipped)
+            after = ranged_ints(ttnn.qwen_staging_checksum(staging, 0, STAGING_PAGE, count=ranges), devices, ranges, problems, 'ranged_flipped_byte')
+            if before is not None and after is not None:
+                changed = [(d, j) for d in range(devices) for j in range(ranges) if before[d][j] != after[d][j]]
+                cases['ranged_flipped_byte'] = dict(changed=changed, only_that_range=changed == [(3, 2)])
+                if changed != [(3, 2)]:
+                    problems.append('a flipped byte of device 3, range 2 changed the ranged checksums at %s' % changed)
+
         # 8. a single flipped byte in the staging range changes the checksum (the comparison has teeth)
         n = 5
         slices = device_slices(rng, devices, 1, n, slice_bytes)
@@ -270,12 +413,16 @@ def run(ttnn, mesh, devices, blocks=1024, heads_per_chip=1, staging_mib=32, bank
         if wrong:
             problems.append('after the cases some blocks differ from the expected state (tensor, first blocks): %s' % wrong)
         report['cases'] = cases
-        timed = [case['checksum_ms'] for case in cases.values() if 'checksum_ms' in case and case['object_bytes'] >= (1 << 20)]
+        one_range = [case for case in cases.values() if 'checksum_ms' in case and 'object_bytes' in case and 'row_stride' not in case]
+        timed = [case['checksum_ms'] for case in one_range if case['object_bytes'] >= (1 << 20)]
         if timed:
-            biggest = max((case for case in cases.values() if 'checksum_ms' in case), key=lambda case: case['object_bytes'])
+            biggest = max(one_range, key=lambda case: case['object_bytes'])
             report['checksum_gbps_per_card'] = round(biggest['object_bytes'] / max(biggest['checksum_ms'] / 1000.0, 1e-9) / 1e9, 3)
+        if 'strided_chipmajor' in cases and 'checksum_ms' in cases['strided_chipmajor']:
+            chunk = cases['strided_chipmajor']
+            report['ranged_checksum_gbps_per_card'] = round(chunk['blocks'] * chunk['shard_bytes'] / max(chunk['checksum_ms'] / 1000.0, 1e-9) / 1e9, 3)
         for name, case in cases.items():
-            for field in ('checksum_equal', 'staging_equal', 'bytes_equal', 'devices_differ'):
+            for field in ('checksum_equal', 'single_equal', 'staging_equal', 'bytes_equal', 'devices_differ'):
                 if field in case and not case[field]:
                     problems.append('%s: %s is false' % (name, field))
         for cache in caches:
@@ -294,6 +441,7 @@ def main(argv=None):
     parser.add_argument('--heads-per-chip', type=int, default=1)
     parser.add_argument('--staging-mib', type=int, default=32)
     parser.add_argument('--bank', type=int, default=3)
+    parser.add_argument('--require-strided', action='store_true', help='fail a build whose ops lack row_stride / count (the host would run in compat mode)')
     options = parser.parse_args(argv)
 
     import ttnn
@@ -311,7 +459,8 @@ def main(argv=None):
         return 1
     mesh = ttnn.open_mesh_device(ttnn.MeshShape(1, options.devices))
     try:
-        report = run(ttnn, mesh, options.devices, options.blocks, options.heads_per_chip, options.staging_mib, options.bank)
+        report = run(ttnn, mesh, options.devices, options.blocks, options.heads_per_chip, options.staging_mib, options.bank,
+                     strided=True if options.require_strided else None)
     finally:
         ttnn.close_mesh_device(mesh)
     print(json.dumps(report, indent=1))

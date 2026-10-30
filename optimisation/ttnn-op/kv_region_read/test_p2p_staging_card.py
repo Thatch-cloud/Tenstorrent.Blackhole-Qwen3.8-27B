@@ -121,26 +121,40 @@ class FakeTTNN(object):
         bank_array = self._region(staging, offset, out.shape[1], bank)
         out[:] = bank_array[:, offset:offset + out.shape[1]]
 
-    def qwen_staging_checksum(self, staging, offset, length, bank=None, cores=64):
-        problem = ref.check_checksum(offset, length, staging.size_bytes, cores)
+    def qwen_staging_checksum(self, staging, offset, length, bank=None, cores=64, count=None):
+        problem = ref.check_checksum(offset, length, staging.size_bytes, cores, 1 if count is None else count)
         if problem:
             raise ValueError(problem)
         use = staging.bank if bank is None or self.knobs.get('ignore_bank') else bank
-        sums = [ref.checksum_numpy(bytes(staging.data[use][d, offset:offset + length])) for d in range(self.devices)]
-        if self.knobs.get('bad_checksum'):
-            sums[1] ^= 1
+        if count is None:
+            sums = [ref.checksum_numpy(bytes(staging.data[use][d, offset:offset + length])) for d in range(self.devices)]
+            if self.knobs.get('bad_checksum'):
+                sums[1] ^= 1
+            return sums
+        sums = [[ref.checksum_numpy(bytes(staging.data[use][d, offset + j * length:offset + (j + 1) * length])) for j in range(count)] for d in range(self.devices)]
+        if self.knobs.get('ranges_swapped'):
+            sums = [row[::-1] for row in sums]
+        if self.knobs.get('k_continues'):
+            # the mistake of one running k: every range after the first is summed as if it continued the first (k not restarted)
+            sums = [[row[0]] + [ref.checksum_numpy(bytes(staging.data[use][d, offset:offset + (j + 1) * length]))
+                                - ref.checksum_numpy(bytes(staging.data[use][d, offset:offset + j * length])) & ref.MASK64 for j in range(1, count)]
+                    for d, row in enumerate(sums)]
+        if self.knobs.get('count_short'):
+            sums = [row[:-1] for row in sums]
         return sums
 
-    def qwen_write_blocks_from_staging(self, cache, staging, byte_offset, blocks, bank=None):
+    def qwen_write_blocks_from_staging(self, cache, staging, byte_offset, blocks, bank=None, row_stride=None):
         blocks = list(blocks)
-        problem = ref.check_scatter(byte_offset, cache.data.shape[2], ref.DRAM_ALIGNMENT * 17, len(blocks), staging.size_bytes)
+        slice_bytes = cache.data.shape[2]
+        problem = ref.check_scatter(byte_offset, slice_bytes, ref.DRAM_ALIGNMENT * 17, len(blocks), staging.size_bytes, row_stride)
         if problem:
             raise ValueError(problem)
         if len(set(blocks)) != len(blocks):
             raise ValueError('the block ids must be distinct')
         use = staging.bank if bank is None or self.knobs.get('ignore_bank') else bank
-        slice_bytes = cache.data.shape[2]
-        rows = staging.data[use][:, byte_offset:byte_offset + len(blocks) * slice_bytes].reshape(self.devices, len(blocks), slice_bytes).copy()
+        stride = slice_bytes if row_stride is None or self.knobs.get('stride_ignored') else row_stride - (64 if self.knobs.get('stride_short') else 0)
+        data = staging.data[use]
+        rows = np.stack([data[:, byte_offset + i * stride:byte_offset + i * stride + slice_bytes] for i in range(len(blocks))], axis=1).copy()
         if self.knobs.get('same_data_everywhere'):
             rows[:] = rows[0]
         if self.knobs.get('forget_block'):
@@ -163,9 +177,14 @@ class CardCheckOnTheFakeTests(unittest.TestCase):
         ttnn, report = run()
         self.assertTrue(report['ok'], report['problems'])
         self.assertEqual(sorted(report['cases']),
-                         ['end_of_ring', 'flipped_byte', 'one_block', 'other_bank', 'run', 'scattered', 'shuffled', 'two_launches', 'two_runs_and_one'])
+                         ['end_of_ring', 'flipped_byte', 'many_ranges', 'one_block', 'other_bank', 'ranged_flipped_byte', 'run', 'scattered', 'shuffled',
+                          'strided_chipmajor', 'strided_end_of_ring', 'strided_gaps', 'strided_shuffled', 'strided_two_launches', 'two_launches', 'two_runs_and_one'])
         self.assertTrue(all(case['checksum_equal'] and case['bytes_equal'] and case['devices_differ'] for name, case in report['cases'].items()
-                            if name != 'flipped_byte'))
+                            if name in ('end_of_ring', 'one_block', 'other_bank', 'run', 'scattered', 'shuffled', 'two_launches', 'two_runs_and_one')))
+        self.assertEqual(report['device_ops'], 'strided')
+        self.assertTrue(report['cases']['many_ranges']['checksum_equal'])
+        self.assertGreater(report['cases']['many_ranges']['ranges'], 512, 'more ranges than one launch carries')
+        self.assertTrue(report['cases']['ranged_flipped_byte']['only_that_range'])
         self.assertTrue(report['whole_cache_equal'])
         self.assertTrue(report['cases']['other_bank']['banks_differ'])
         self.assertTrue(report['cases']['flipped_byte']['only_device_1_changed'])
@@ -173,6 +192,21 @@ class CardCheckOnTheFakeTests(unittest.TestCase):
         self.assertEqual(report['staging']['bank'], 3)
         self.assertEqual(report['staging']['bytes_reserved_per_card'], STAGING_MIB * 8 << 20)
         self.assertTrue(report['staging']['formula_first_endpoint_in_info'])
+
+    def test_the_strided_cases_stage_chipmajor_chunks_with_a_row_stride_and_count(self):
+        ttnn, report = run()
+        cases = report['cases']
+        shard = card.SHARD_TENSORS * SLICE
+        self.assertEqual(shard % 4096, 0, 'a block\'s shard is whole 4096-byte units, as production\'s 32 x 17,408 = 136 units')
+        for name in ('strided_chipmajor', 'strided_shuffled', 'strided_end_of_ring'):
+            self.assertEqual((cases[name]['row_stride'], cases[name]['shard_bytes']), (shard, shard), name)
+            self.assertTrue(cases[name]['checksum_equal'] and cases[name]['single_equal'] and cases[name]['bytes_equal'] and cases[name]['devices_differ'], name)
+        self.assertGreater(cases['strided_gaps']['row_stride'], cases['strided_gaps']['shard_bytes'], 'a stride with gaps between the shards')
+        self.assertNotIn('checksum_equal', cases['strided_gaps'], 'the gaps are not part of any checksummed range')
+        self.assertTrue(cases['strided_gaps']['bytes_equal'])
+        end = cases['strided_end_of_ring']
+        self.assertEqual(end['offset'] + end['object_bytes'], STAGING_MIB << 20, 'the last shard ends on the last byte of the ring')
+        self.assertEqual(report['cases']['strided_two_launches']['blocks'], card.LAUNCH_BLOCKS + 70)
 
     def test_the_end_of_ring_object_ends_on_the_last_byte(self):
         _, report = run()
@@ -197,12 +231,62 @@ class CardCheckOnTheFakeTests(unittest.TestCase):
             'address_differs': 'address differs between devices',
             'misaligned': 'not 64-byte aligned',
             'block_bytes_off': 'qwen_block_bytes',
+            # the two new forms
+            'stride_ignored': 'row_stride',
+            'stride_short': 'row_stride',
+            'ranges_swapped': 'count=',
+            'k_continues': 'count=',
+            'count_short': 'count=',
         }
         for knob, text in mistakes.items():
             with self.subTest(mistake=knob):
                 _, report = run(**{knob: 1})
                 self.assertFalse(report['ok'], knob)
                 self.assertTrue(any(text in problem for problem in report['problems']), (knob, report['problems']))
+
+    def test_a_build_without_the_new_keywords_is_the_compat_build_and_still_passes(self):
+        """An image carrying the old .so: no row_stride, no count. The card check runs the cases it always ran, says `compat`, and passes (the host works in compat mode)."""
+        ttnn = OldBuildTTNN()
+        report = card.run(ttnn, FakeMesh(), DEVICES, blocks=1024, heads_per_chip=1, staging_mib=STAGING_MIB, bank=3)
+        self.assertTrue(report['ok'], report['problems'])
+        self.assertEqual((report['device_ops'], report['row_stride'], report['count']), ('compat', False, False))
+        self.assertFalse([name for name in report['cases'] if name.startswith('strided') or name.startswith('many') or name.startswith('ranged')])
+
+    def test_requiring_the_new_forms_fails_the_old_build_and_passes_the_new_one(self):
+        report = card.run(OldBuildTTNN(), FakeMesh(), DEVICES, blocks=1024, heads_per_chip=1, staging_mib=STAGING_MIB, bank=3, strided=True)
+        self.assertFalse(report['ok'])
+        self.assertTrue(any('lacks row_stride on qwen_write_blocks_from_staging and count on qwen_staging_checksum' in problem for problem in report['problems']), report['problems'])
+        report = card.run(FakeTTNN(), FakeMesh(), DEVICES, blocks=1024, heads_per_chip=1, staging_mib=STAGING_MIB, bank=3, strided=True)
+        self.assertTrue(report['ok'], report['problems'])
+
+    def test_skipping_the_new_forms_runs_the_old_cases_on_the_new_build(self):
+        report = card.run(FakeTTNN(), FakeMesh(), DEVICES, blocks=1024, heads_per_chip=1, staging_mib=STAGING_MIB, bank=3, strided=False)
+        self.assertTrue(report['ok'], report['problems'])
+        self.assertEqual(report['device_ops'], 'strided', 'what the build has is reported even when the cases are skipped')
+        self.assertFalse([name for name in report['cases'] if name.startswith('strided')])
+
+    def test_the_keywords_are_found_from_a_signature_or_a_docstring(self):
+        def with_signature(staging, offset, length, bank=None, cores=64, count=None):
+            return None
+
+        class DocOnly(object):
+            """qwen_staging_checksum(staging: QwenP2PStaging, byte_offset: int, length: int, bank: int | None = None, cores: int = 64, count: int | None = None) -> object"""
+            @property
+            def __signature__(self):
+                raise ValueError('no signature found for builtin')
+
+            def __call__(self, *args, **kwargs):
+                return None
+
+        class OldDoc(DocOnly):
+            """qwen_staging_checksum(staging: QwenP2PStaging, byte_offset: int, length: int, bank: int | None = None, cores: int = 64) -> list[int]
+            Per device, S = sum over the account of the words. Blocking: returns a list with one int per device."""
+
+        self.assertTrue(card.takes(with_signature, 'count'))
+        self.assertFalse(card.takes(with_signature, 'row_stride'))
+        self.assertTrue(card.takes(DocOnly(), 'count'))
+        self.assertFalse(card.takes(OldDoc(), 'count'), 'a word that merely contains `count` (account) is not the keyword')
+        self.assertTrue(card.takes(OldDoc(), 'cores'))
 
     def test_an_extension_without_the_p2p_ops_is_reported_absent(self):
         ttnn = FakeTTNN()
@@ -236,6 +320,16 @@ class CardCheckOnTheFakeTests(unittest.TestCase):
         self.assertGreaterEqual(1024, card.LAUNCH_BLOCKS + 80)
         self.assertLess((card.LAUNCH_BLOCKS + 70) * SLICE + card.STAGING_PAGE, STAGING_MIB << 20)
         self.assertLess((card.LAUNCH_BLOCKS + 70) * SLICE + card.STAGING_PAGE, 32 << 20, 'and the default 32 MiB ring of the command line')
+
+
+class OldBuildTTNN(FakeTTNN):
+    """The extension as it was built before row_stride and count: contiguous rows, one checksum range, the same ops otherwise."""
+
+    def qwen_staging_checksum(self, staging, offset, length, bank=None, cores=64):
+        return FakeTTNN.qwen_staging_checksum(self, staging, offset, length, bank, cores)
+
+    def qwen_write_blocks_from_staging(self, cache, staging, byte_offset, blocks, bank=None):
+        return FakeTTNN.qwen_write_blocks_from_staging(self, cache, staging, byte_offset, blocks, bank)
 
 
 _CHECKSUM = FakeTTNN.qwen_staging_checksum

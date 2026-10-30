@@ -4,7 +4,8 @@
 # qwen_p2p_staging_alloc / _info / _write / _read, qwen_write_blocks_from_staging, qwen_staging_checksum, docs/tp4-p2p-restore.md). Version 3 also
 # SHIPS the two device kernels (qwen_p2p_scatter.cpp, qwen_p2p_checksum.cpp) beside the .so, which JIT-compiles them at its first dispatch, and compiles
 # qwen_p2p_plan.hpp into itself: the build directory is the unit of delivery (the image copies the whole directory), so build version 3 into its OWN
-# directory (bash build_kv_read.sh ~/opgraft-KVR3), then `python3 scripts/ci/pin_kvread.py --dir ~/opgraft-KVR3 --write`.
+# directory (bash build_kv_read.sh ~/opgraft-KVR3), then `python3 scripts/ci/pin_kvread.py --dir ~/opgraft-KVR3 --write`. The two P2P ops carry row_stride (copy) and count (checksum); the
+# import check below refuses a build whose op signatures (the first line of each docstring, where the host's StagingApi looks) lack them.
 # (the prefix audit's region read, docs/prefix-audit-cost.md) WITHOUT replacing any pinned image binary. It is compiled in the
 # ttbuild container against the tt-metal tree the served binaries came from (9f9cd4fd), with the flags ninja uses for the
 # ttnn unity sources, and linked against ttbuild's _ttnncpp.so / libtt_metal.so / nanobind static library; at run time it
@@ -103,7 +104,7 @@ for image in $images; do
   echo "$image: unresolved non-Python symbols: $unresolved"
   test "$unresolved" = 0 || fail=1
   docker run --rm --network none --entrypoint python3 -v "$work:/kvr:ro" -e PYTHONPATH=/kvr "$image" -c \
-    'import ttnn, qwen_kv_read; assert qwen_kv_read.QWEN_KV_READ_VERSION == "3"; assert all(callable(getattr(ttnn, n)) for n in ("qwen_read_blocks", "qwen_block_bytes", "qwen_read_blocks_raw", "qwen_write_blocks_raw", "qwen_p2p_staging_alloc", "qwen_p2p_staging_info", "qwen_write_blocks_from_staging", "qwen_staging_checksum", "qwen_p2p_staging_write", "qwen_p2p_staging_read")); o = __import__("os").path; d = o.dirname(qwen_kv_read.__file__); assert all(o.getsize(o.join(d, k)) > 0 for k in ("qwen_p2p_scatter.cpp", "qwen_p2p_checksum.cpp")); print("IMPORT-OK", qwen_kv_read.QWEN_KV_READ_VERSION)' 2>&1 | grep -E "IMPORT-OK|Error|error" | tail -3 \
+    'import ttnn, qwen_kv_read; assert qwen_kv_read.QWEN_KV_READ_VERSION == "3"; assert all(callable(getattr(ttnn, n)) for n in ("qwen_read_blocks", "qwen_block_bytes", "qwen_read_blocks_raw", "qwen_write_blocks_raw", "qwen_p2p_staging_alloc", "qwen_p2p_staging_info", "qwen_write_blocks_from_staging", "qwen_staging_checksum", "qwen_p2p_staging_write", "qwen_p2p_staging_read")); o = __import__("os").path; d = o.dirname(qwen_kv_read.__file__); assert all(o.getsize(o.join(d, k)) > 0 for k in ("qwen_p2p_scatter.cpp", "qwen_p2p_checksum.cpp")); sig = lambda n: (getattr(ttnn, n).__doc__ or "").splitlines()[0]; assert "row_stride:" in sig("qwen_write_blocks_from_staging") and "count:" in sig("qwen_staging_checksum"), "row_stride / count are not in the ops signatures: the host would run in compat mode"; print("IMPORT-OK", qwen_kv_read.QWEN_KV_READ_VERSION, "row_stride+count")' 2>&1 | grep -E "IMPORT-OK|Error|error" | tail -3 \
     | tee "$work/import-$tagname.txt"
   grep -q IMPORT-OK "$work/import-$tagname.txt" || { echo "FAIL $image: the module does not import" >&2; fail=1; }
 done

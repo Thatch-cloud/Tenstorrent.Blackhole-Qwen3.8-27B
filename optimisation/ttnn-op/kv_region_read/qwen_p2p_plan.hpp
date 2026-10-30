@@ -21,8 +21,8 @@ constexpr uint32_t kScatterChunkPages = 16;
 // The scatter's L1 scratch is two halves of kScatterChunkPages pages: a page above this would not leave room next to a served model's L1 buffers.
 constexpr uint32_t kScatterMaxPageBytes = 8192;
 constexpr uint32_t kScatterLaunchBlocks = kScatterCores * kScatterMaxBlocksPerCore;
-// Runtime args of one scatter core: staging/destination addresses, bank, source offset, block count, then the block ids (padded).
-constexpr uint32_t kScatterFixedArgs = 5;
+// Runtime args of one scatter core: staging/destination addresses, bank, source offset, block count, row stride, then the block ids (padded).
+constexpr uint32_t kScatterFixedArgs = 6;
 constexpr uint32_t kScatterArgs = kScatterFixedArgs + kScatterMaxBlocksPerCore;
 
 // qwen_staging_checksum: the cores work on 4,096-byte units, read the range in 32 KiB chunks, and write a 64-byte partial-sum page each.
@@ -32,7 +32,10 @@ constexpr uint32_t kChecksumPartialBytes = 64;
 constexpr uint32_t kChecksumColumns = 8;
 constexpr uint32_t kChecksumDefaultCores = 64;
 constexpr uint32_t kChecksumMaxCores = 80;  // 8 columns x 10 rows: the Blackhole compute grid is 13 x 10
-constexpr uint32_t kChecksumArgs = 7;
+// A launch checksums up to this many consecutive ranges (qwen_staging_checksum(..., count=N) with more is several launches). Every core writes one 64-byte
+// partial page per range, so the partials buffer is kChecksumMaxRanges x kChecksumMaxCores pages.
+constexpr uint32_t kChecksumMaxRanges = 512;
+constexpr uint32_t kChecksumArgs = 10;
 constexpr uint64_t kChecksumStep = 2654435761ull;
 
 // The staging buffer is an interleaved DRAM buffer of 8 banks; its page size is a parameter (the default keeps a 128 MiB range at 128 pages).
@@ -45,6 +48,16 @@ inline std::vector<std::pair<uint32_t, uint32_t>> scatter_launches(uint32_t n) {
     std::vector<std::pair<uint32_t, uint32_t>> launches;
     for (uint32_t first = 0; first < n; first += kScatterLaunchBlocks) {
         launches.emplace_back(first, n - first < kScatterLaunchBlocks ? n - first : kScatterLaunchBlocks);
+    }
+    return launches;
+}
+
+// The checksum launches of n ranges: (first range, range count) each, every count <= kChecksumMaxRanges. The launches share one partials buffer, so the host
+// reads each back before the next.
+inline std::vector<std::pair<uint32_t, uint32_t>> checksum_launches(uint32_t n) {
+    std::vector<std::pair<uint32_t, uint32_t>> launches;
+    for (uint32_t first = 0; first < n; first += kChecksumMaxRanges) {
+        launches.emplace_back(first, n - first < kChecksumMaxRanges ? n - first : kChecksumMaxRanges);
     }
     return launches;
 }
@@ -81,13 +94,14 @@ inline uint32_t scatter_cb_bytes(uint32_t page_bytes) { return 2 * kScatterChunk
 inline uint32_t checksum_cb_bytes() { return 64 + 2 * kChecksumChunkBytes + kChecksumPartialBytes; }
 
 // The runtime args of one scatter core (kScatterArgs words, the same count on every call): `run` is the core's (first, count) inside the launch
-// that starts at block launch_first of `blocks`; the staging byte offset is where that core's first block begins.
+// that starts at block launch_first of `blocks`; the staging byte offset is where that core's first row begins. Row i of the call (block blocks[i])
+// is read from byte_offset + i * row_stride; the kernel finds the later rows of the core from the stride.
 inline std::vector<uint32_t> scatter_core_args(
     uint32_t destination_address,
     uint32_t staging_address,
     uint32_t bank,
     uint64_t byte_offset,
-    uint64_t slice_bytes,
+    uint64_t row_stride,
     const std::vector<uint32_t>& blocks,
     uint32_t launch_first,
     std::pair<uint32_t, uint32_t> run) {
@@ -95,22 +109,28 @@ inline std::vector<uint32_t> scatter_core_args(
     values[0] = destination_address;
     values[1] = staging_address;
     values[2] = bank;
-    values[3] = static_cast<uint32_t>(byte_offset + uint64_t(launch_first + run.first) * slice_bytes);
+    values[3] = static_cast<uint32_t>(byte_offset + uint64_t(launch_first + run.first) * row_stride);
     values[4] = run.second;
+    values[5] = static_cast<uint32_t>(row_stride);
     for (uint32_t i = 0; i < run.second; ++i) {
         values[kScatterFixedArgs + i] = blocks[launch_first + run.first + i];
     }
     return values;
 }
 
-// The runtime args of one checksum core (kChecksumArgs words): its units [first, last) of the range that starts at byte_offset, and its partial slot.
+// The runtime args of one checksum core (kChecksumArgs words). The launch checksums `ranges` consecutive ranges of range_bytes each, the first at byte_offset; every
+// range is split among the cores the same way, so a core takes its units [first, last) of EACH range (units are relative to the range start) and starts its
+// weight at w_(k0) of its first word counted from the start of that range. Its partial for range r goes to partials page slot + r * slot_stride.
 inline std::vector<uint32_t> checksum_core_args(
     uint32_t staging_address,
     uint32_t partials_address,
     uint32_t bank,
     uint64_t byte_offset,
     std::pair<uint64_t, uint64_t> units,
-    uint32_t slot) {
+    uint32_t slot,
+    uint32_t ranges,
+    uint64_t range_bytes,
+    uint32_t slot_stride) {
     std::vector<uint32_t> values(kChecksumArgs, 0);
     values[0] = staging_address;
     values[1] = partials_address;
@@ -119,12 +139,16 @@ inline std::vector<uint32_t> checksum_core_args(
     values[4] = static_cast<uint32_t>((units.second - units.first) * kChecksumUnit);
     values[5] = start_weight(units.first * kChecksumUnit / 4);
     values[6] = slot;
+    values[7] = ranges;
+    values[8] = static_cast<uint32_t>(range_bytes);
+    values[9] = slot_stride;
     return values;
 }
 
 // Argument checks shared by the ops; each returns nullptr when the arguments are fine, else the reason.
+// Rows are row_stride apart (row_stride == slice_bytes: contiguous). The last row ends at byte_offset + (blocks - 1) * row_stride + slice_bytes, which must lie inside the staging range.
 inline const char* check_scatter(
-    uint64_t byte_offset, uint64_t slice_bytes, uint64_t page_bytes, uint64_t blocks, uint64_t staging_bytes) {
+    uint64_t byte_offset, uint64_t slice_bytes, uint64_t page_bytes, uint64_t blocks, uint64_t staging_bytes, uint64_t row_stride) {
     if (page_bytes == 0 || page_bytes % kDramAlignment != 0) {
         return "the tensor's page size must be a multiple of 64 bytes (a whole DRAM-aligned page)";
     }
@@ -137,23 +161,32 @@ inline const char* check_scatter(
     if (byte_offset % kDramAlignment != 0) {
         return "byte_offset must be a multiple of 64";
     }
+    if (row_stride % kDramAlignment != 0 || row_stride < slice_bytes) {
+        return "row_stride must be a multiple of 64 and at least the block size (the slice bytes)";
+    }
     if (blocks == 0) {
         return "no blocks";
     }
-    if (byte_offset > staging_bytes || blocks > (staging_bytes - byte_offset) / slice_bytes) {
+    if (byte_offset > staging_bytes || slice_bytes > staging_bytes - byte_offset ||
+        blocks - 1 > (staging_bytes - byte_offset - slice_bytes) / row_stride) {
         return "the byte range lies outside the staging range";
     }
     return nullptr;
 }
 
-inline const char* check_checksum(uint64_t byte_offset, uint64_t length, uint64_t staging_bytes, uint32_t cores) {
+// `ranges` consecutive ranges of `length` bytes from byte_offset (ranges == 1: one range). `ranges` has no limit of its own: the op makes several launches.
+inline const char* check_checksum(
+    uint64_t byte_offset, uint64_t length, uint64_t staging_bytes, uint32_t cores, uint64_t ranges = 1) {
     if (length == 0 || length % kChecksumUnit != 0) {
         return "length must be a positive multiple of 4096";
     }
     if (byte_offset % kDramAlignment != 0) {
         return "byte_offset must be a multiple of 64";
     }
-    if (byte_offset > staging_bytes || length > staging_bytes - byte_offset) {
+    if (ranges == 0) {
+        return "count must be at least 1";
+    }
+    if (byte_offset > staging_bytes || length > staging_bytes - byte_offset || ranges - 1 > (staging_bytes - byte_offset - length) / length) {
         return "the byte range lies outside the staging range";
     }
     if (cores == 0 || cores > kChecksumMaxCores || cores % kChecksumColumns != 0) {

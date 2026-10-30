@@ -1,8 +1,9 @@
 // Runs qwen_p2p_scatter.cpp on the CPU (against the stand-in dataflow API, emu/api/dataflow/dataflow_api.h) the way the host drives it: the
 // launches, the per-core argument vectors and the circular buffer size all come from qwen_p2p_plan.hpp, the same header the extension uses.
 //   emu_scatter <scenario> <staging.bin> <dst_in.bin> <dst_out.bin>
-// scenario: page_bytes pages_per_block bank staging_address byte_offset dst_address dst_pages bank_bytes blocks...
-// staging.bin = the bytes of the staging range [staging_address, + n * slice_bytes + byte_offset); dst_in/out = dst_pages pages in page order.
+// scenario: page_bytes pages_per_block bank staging_address byte_offset dst_address dst_pages bank_bytes blocks... and, optionally, row_stride (default: the
+// block size, contiguous rows)
+// staging.bin = the bytes of the staging range [staging_address, + the end of the last row); dst_in/out = dst_pages pages in page order.
 // Prints "OK reads=<n> writes=<n> stray=<bytes changed outside the destination>".
 #include "api/dataflow/dataflow_api.h"
 #include "emu_common.hpp"
@@ -27,6 +28,7 @@ int main(int argc, char** argv) {
     std::vector<uint32_t> blocks;
     for (uint64_t block : config.at("blocks")) blocks.push_back(static_cast<uint32_t>(block));
     const uint64_t slice_bytes = uint64_t(page) * pages_per_block;
+    const uint64_t row_stride = emu_run::one_or(config, "row_stride", slice_bytes);
     const uint32_t aligned = (page + 63u) & ~63u;
 
     auto& state = emu::state;
@@ -46,7 +48,9 @@ int main(int argc, char** argv) {
     state.cb_bytes = qwen_p2p::scatter_cb_bytes(page);
     state.read_bank = bank;
     state.read_lo = staging_address + byte_offset;
-    state.read_hi = state.read_lo + uint64_t(blocks.size()) * slice_bytes;
+    state.read_hi = state.read_lo + uint64_t(blocks.size() - 1) * row_stride + slice_bytes;
+    state.read_row_stride = row_stride;
+    state.read_row_bytes = slice_bytes;
     state.write_lo = dst_address;
     state.write_hi = bank_bytes;
     state.write_page = page;
@@ -54,7 +58,7 @@ int main(int argc, char** argv) {
     for (const auto& [launch_first, launch_count] : qwen_p2p::scatter_launches(static_cast<uint32_t>(blocks.size()))) {
         const auto runs = qwen_p2p::split_blocks(launch_count, qwen_p2p::kScatterCores);
         for (uint32_t core = 0; core < qwen_p2p::kScatterCores; ++core) {
-            state.args = qwen_p2p::scatter_core_args(dst_address, staging_address, bank, byte_offset, slice_bytes, blocks, launch_first, runs[core]);
+            state.args = qwen_p2p::scatter_core_args(dst_address, staging_address, bank, byte_offset, row_stride, blocks, launch_first, runs[core]);
             kernel_main();
             if (!state.reads.empty() || !state.writes.empty()) emu::violation("the kernel ended with a transfer pending");
         }

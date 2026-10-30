@@ -10,7 +10,8 @@
 //     kernel is right under both;
 //   * the rules that bite on this stack: every DRAM access starts 64-byte aligned, L1 destinations of reads are 64-byte aligned, an access
 //     is a WHOLE page (the sub-page DRAM no-op), nothing is read or written outside the ranges the harness allows, all L1 traffic stays
-//     inside the circular buffer, runtime args are read only inside the argument count, and a kernel ends with no transfer pending.
+//     inside the circular buffer, runtime args are read only inside the argument count, and a kernel ends with no transfer pending. A read range may be ROWS
+//     (a stride and a row length): reads must stay inside the rows, the bytes between two rows are not the kernel's to read.
 // Any violation prints "EMU-VIOLATION: ..." and exits 3.
 #pragma once
 
@@ -44,6 +45,8 @@ struct State {
     uint64_t write_lo = 0, write_hi = 0;
     uint32_t write_page = 0;
     uint32_t read_unit = 0;  // reads must be a multiple of this many bytes
+    // Rows of the read range (0: the range is solid): bytes [lo + i * read_row_stride, lo + i * read_row_stride + read_row_bytes) are allowed, the gaps between rows are not.
+    uint64_t read_row_stride = 0, read_row_bytes = 0;
     uint64_t reads_issued = 0, writes_issued = 0;
 };
 inline State state;
@@ -133,6 +136,9 @@ inline void noc_async_read(uint64_t source, uint32_t destination_l1, uint32_t si
         violation("read outside the allowed staging range", bank, address);
     }
     if (state.read_unit != 0 && size % state.read_unit != 0) violation("read is not a whole unit", size, state.read_unit);
+    if (state.read_row_stride != 0 && (address - state.read_lo) % state.read_row_stride + size > state.read_row_bytes) {
+        violation("read reaches into the gap between two rows", bank, address);
+    }
     if (kEager) {
         perform_read({source, destination_l1, size});
     } else {

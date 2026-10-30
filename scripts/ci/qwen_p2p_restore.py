@@ -604,28 +604,37 @@ class TtLink(object):
 # The device ops
 # ================================================================================================
 def _accepts(function, name):
-    """Whether a callable takes a parameter called `name`: from its signature, else from its docstring (a pybind11 function states its signature there). False when neither says."""
+    """Whether a callable takes a parameter called `name`: from its signature when that names real parameters, else from its docstring (a pybind11 or nanobind function states its signature
+    there, and `inspect` may find none or only `(*args, **kwargs)` for it; `name` must be a whole word of the docstring: `count` is not found in `account`). False when neither says."""
     try:
         import inspect
 
-        return name in inspect.signature(function).parameters
+        parameters = inspect.signature(function).parameters
+        if name in parameters:
+            return True
+        if any(parameter.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD) for parameter in parameters.values()):
+            return False                        # the signature names its parameters and `name` is not one of them
     except (TypeError, ValueError):
         pass
-    return name in str(getattr(function, '__doc__', None) or '')
+    import re
+
+    return re.search(r'(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])' % re.escape(name), str(getattr(function, '__doc__', None) or '')) is not None
 
 
 class StagingApi(object):
     """The device-op extension's ops (qwen_kv_read version 3, as built by the device-op branch) behind one adapter (a ttnn module or a fake):
          qwen_p2p_staging_alloc(mesh, size_bytes, bank=0) -> handle     qwen_p2p_staging_info(handle) -> one dict per device (see StagingApi.info)
-         qwen_staging_checksum(handle, byte_offset, length) -> [int per device], blocking, ONE range
-         qwen_write_blocks_from_staging(cache, handle, byte_offset, blocks) -> row i of device d's [len(blocks), slice_bytes] = staging_d[byte_offset + i * slice_bytes : + slice_bytes], enqueued
+         qwen_staging_checksum(handle, byte_offset, length, bank=None, cores=64, count=None) -> [int per device] (blocking; one range) or, with count, [[int] * count] per device
+         qwen_write_blocks_from_staging(cache, handle, byte_offset, blocks, bank=None, row_stride=None) -> row i of device d's [len(blocks), slice_bytes] = staging_d[byte_offset + i * row_stride :
+                                                                                                    + slice_bytes] (row_stride=None: slice_bytes, contiguous rows), enqueued
        and ttnn.synchronize_device(mesh).
        The host lays a chunk out BLOCK-MAJOR (block j's whole shard at j * shard_bytes: that is what one aligned read per block and card can produce), so cache tensor t's rows are
-       `shard_bytes` apart, not `slice_bytes`; the as-built copy op takes only contiguous rows. Two optional extensions take that off the host:
+       `shard_bytes` apart, not `slice_bytes`. The two keywords take that off the host:
          qwen_write_blocks_from_staging(..., row_stride=)   row i at byte_offset + i * row_stride
-         qwen_staging_checksum(..., count=)                  `count` consecutive ranges of `length`, one value each: [[int] * count] per device
-       When the ops have them (`strided`, `ranged`: found from their signatures, or given) one call does a chunk's tensor / a chunk's checksums. When they do not (COMPAT MODE) the host calls
-       the copy once per block and tensor, and the checksum once per block: correct, and slow (n x 32 launches for n blocks; n blocking readbacks). P3a prints which mode it ran in."""
+         qwen_staging_checksum(..., count=)                  `count` consecutive ranges of `length`, one value each: [[int] * count] per device (k restarts at each range's own start)
+       Both are in the device-op extension since the strided build (docs/tp4-p2p-restore.md section 2); `strided` / `ranged` are found from the ops' signatures (or given), and one call then does a
+       chunk's tensor / a chunk's checksums. COMPAT MODE is for an image that still carries the OLD extension (no such keywords): the host then calls the copy once per block and tensor, and the
+       checksum once per block: correct, and slow (n x 32 launches for n blocks; n blocking readbacks). P3a prints which mode it ran in."""
 
     REQUIRED = ('qwen_p2p_staging_alloc', 'qwen_p2p_staging_info', 'qwen_staging_checksum', 'qwen_write_blocks_from_staging')
 

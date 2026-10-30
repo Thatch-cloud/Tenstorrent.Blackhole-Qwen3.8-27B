@@ -18,8 +18,10 @@
 // no program:
 //   ttnn.qwen_p2p_staging_alloc(mesh_device, size_bytes=128 MiB, bank=0, page_bytes=64 KiB, bottom_up=False) -> QwenP2PStaging
 //   ttnn.qwen_p2p_staging_info(staging) -> one dict per device (dram_bank, noc_x, noc_y, address, size, ...)
-//   ttnn.qwen_write_blocks_from_staging(device_tensor, staging, byte_offset, blocks, bank=None)   staging bytes -> KV blocks, enqueued
-//   ttnn.qwen_staging_checksum(staging, byte_offset, length, bank=None, cores=64) -> [uint64 per device]   (blocking)
+//   ttnn.qwen_write_blocks_from_staging(device_tensor, staging, byte_offset, blocks, bank=None, row_stride=None)   staging bytes -> KV blocks, enqueued
+//       (row i of a device comes from staging[byte_offset + i * row_stride : + slice bytes]; row_stride=None is the slice bytes: contiguous rows)
+//   ttnn.qwen_staging_checksum(staging, byte_offset, length, bank=None, cores=64, count=None) -> [uint64 per device]   (blocking)
+//       (count=N: N consecutive ranges of `length` bytes, one checksum each, k counted from each range's own start -> [[uint64] * N per device])
 //   ttnn.qwen_p2p_staging_write / qwen_p2p_staging_read (diagnostics: host bytes into / out of the staging range through the command queue)
 // The two kernels (qwen_p2p_scatter.cpp, qwen_p2p_checksum.cpp) are read from the directory of this module and JIT-compiled at the first
 // dispatch; qwen_p2p_plan.hpp is the pure arithmetic (compiled and checked by the CPU test). NOT YET RUN ON A CARD: p2p_staging_card.py.
@@ -227,12 +229,13 @@ public:
         buffer_ = distributed::MeshBuffer::create(
             distributed::ReplicatedBufferConfig{.size = size_bytes * num_banks_}, local, &mesh);
         address_ = buffer_->address();
-        // The checksum's partial sums: one whole 64-byte page per core.
+        // The checksum's partial sums: one whole 64-byte page per core and range of a launch (up to kChecksumMaxRanges ranges: 2.5 MiB, spread over the banks).
         distributed::DeviceLocalBufferConfig partial_local;
         partial_local.page_size = qwen_p2p::kChecksumPartialBytes;
         partial_local.buffer_type = BufferType::DRAM;
         partials_ = distributed::MeshBuffer::create(
-            distributed::ReplicatedBufferConfig{.size = uint64_t(qwen_p2p::kChecksumMaxCores) * qwen_p2p::kChecksumPartialBytes},
+            distributed::ReplicatedBufferConfig{
+                .size = uint64_t(qwen_p2p::kChecksumMaxRanges) * qwen_p2p::kChecksumMaxCores * qwen_p2p::kChecksumPartialBytes},
             partial_local,
             &mesh);
         dram_free_after_ = allocator->get_statistics(BufferType::DRAM);
@@ -448,12 +451,14 @@ void set_args(P2PStaging::Cached& cached, size_t core, const std::vector<uint32_
 }
 
 // ttnn.qwen_write_blocks_from_staging: the semantics of qwen_write_blocks_raw with the source bytes in the staging range. Returns without waiting.
+// Row i (the bytes of blocks[i]) comes from staging[byte_offset + i * row_stride : + slice bytes]; no row_stride is the slice bytes (contiguous rows).
 void write_blocks_from_staging(
     const ttnn::Tensor& device_tensor,
     P2PStaging& staging,
     uint64_t byte_offset,
     const std::vector<uint32_t>& blocks,
-    std::optional<uint32_t> bank_opt) {
+    std::optional<uint32_t> bank_opt,
+    std::optional<uint64_t> row_stride_opt) {
     using namespace tt::tt_metal;
     auto* mesh = device_tensor.device();
     if (mesh == nullptr || !device_tensor.is_allocated()) {
@@ -493,8 +498,9 @@ void write_blocks_from_staging(
     if (bank >= staging.num_banks()) {
         throw nb::value_error("qwen_write_blocks_from_staging: bank is outside the device's DRAM banks");
     }
+    const uint64_t row_stride = row_stride_opt.value_or(slice_bytes);
     if (const char* problem =
-            qwen_p2p::check_scatter(byte_offset, slice_bytes, page_bytes, blocks.size(), staging.size_bytes())) {
+            qwen_p2p::check_scatter(byte_offset, slice_bytes, page_bytes, blocks.size(), staging.size_bytes(), row_stride)) {
         throw nb::value_error((std::string("qwen_write_blocks_from_staging: ") + problem).c_str());
     }
     for (uint32_t index : blocks) {
@@ -545,17 +551,19 @@ void write_blocks_from_staging(
                 *slot,
                 core,
                 qwen_p2p::scatter_core_args(
-                    destination_address, staging_address, bank, byte_offset, slice_bytes, blocks, launch_first, runs[core]));
+                    destination_address, staging_address, bank, byte_offset, row_stride, blocks, launch_first, runs[core]));
         }
         distributed::EnqueueMeshWorkload(mesh->mesh_command_queue(), slot->workload, /*blocking=*/false);
     }
 }
 
-// ttnn.qwen_staging_checksum: the per-device checksum of a staging byte range (the algorithm of qwen_p2p_checksum.cpp). Blocking.
-std::vector<uint64_t> staging_checksum(
-    P2PStaging& staging, uint64_t byte_offset, uint64_t length, std::optional<uint32_t> bank_opt, uint32_t cores) {
+// ttnn.qwen_staging_checksum: the per-device checksums of `count` consecutive staging byte ranges of `length` bytes (the algorithm of qwen_p2p_checksum.cpp, k
+// from 0 at the start of EACH range). Blocking. -> [device][range]. One launch carries up to kChecksumMaxRanges ranges; more are several launches, each read back
+// before the next because they share the partials buffer.
+std::vector<std::vector<uint64_t>> staging_checksum(
+    P2PStaging& staging, uint64_t byte_offset, uint64_t length, std::optional<uint32_t> bank_opt, uint32_t cores, uint32_t count) {
     using namespace tt::tt_metal;
-    if (const char* problem = qwen_p2p::check_checksum(byte_offset, length, staging.size_bytes(), cores)) {
+    if (const char* problem = qwen_p2p::check_checksum(byte_offset, length, staging.size_bytes(), cores, count)) {
         throw nb::value_error((std::string("qwen_staging_checksum: ") + problem).c_str());
     }
     const uint32_t bank = bank_opt.value_or(staging.bank());
@@ -590,33 +598,50 @@ std::vector<uint64_t> staging_checksum(
             qwen_p2p::kChecksumArgs);
     }
     const auto units = qwen_p2p::split_units(length / qwen_p2p::kChecksumUnit, cores);
-    for (uint32_t core = 0; core < cores; ++core) {
-        set_args(
-            *slot,
-            core,
-            qwen_p2p::checksum_core_args(
-                static_cast<uint32_t>(staging.address()), static_cast<uint32_t>(partials->address()), bank, byte_offset, units[core], core));
-    }
     auto& queue = mesh.mesh_command_queue();
-    distributed::EnqueueMeshWorkload(queue, slot->workload, /*blocking=*/false);
-
     const MeshCoordinateRange all(mesh.shape());
     const std::vector<MeshCoordinate> coords(all.begin(), all.end());
-    const uint64_t per_device = uint64_t(cores) * qwen_p2p::kChecksumPartialBytes;
-    std::vector<uint8_t> host(coords.size() * per_device);
-    std::vector<ShardDataTransfer> transfers;
-    for (size_t device = 0; device < coords.size(); ++device) {
-        transfers.push_back(ShardDataTransfer{coords[device]}
-                                .host_data(host.data() + device * per_device)
-                                .region(BufferRegion(0, per_device)));
-    }
-    queue.enqueue_read_shards(transfers, partials, /*blocking=*/true);
-    std::vector<uint64_t> sums(coords.size(), 0);
-    for (size_t device = 0; device < coords.size(); ++device) {
+    std::vector<std::vector<uint64_t>> sums(coords.size(), std::vector<uint64_t>(count, 0));
+    for (const auto& [launch_first, launch_count] : qwen_p2p::checksum_launches(count)) {
+        const uint64_t launch_offset = byte_offset + uint64_t(launch_first) * length;
         for (uint32_t core = 0; core < cores; ++core) {
-            uint64_t partial = 0;
-            std::copy_n(host.data() + device * per_device + uint64_t(core) * qwen_p2p::kChecksumPartialBytes, 8, reinterpret_cast<uint8_t*>(&partial));
-            sums[device] += partial;  // mod 2^64
+            set_args(
+                *slot,
+                core,
+                qwen_p2p::checksum_core_args(
+                    static_cast<uint32_t>(staging.address()),
+                    static_cast<uint32_t>(partials->address()),
+                    bank,
+                    launch_offset,
+                    units[core],
+                    core,
+                    launch_count,
+                    length,
+                    cores));
+        }
+        distributed::EnqueueMeshWorkload(queue, slot->workload, /*blocking=*/false);
+
+        // The partial of range r, core c is partials page r * cores + c.
+        const uint64_t per_device = uint64_t(launch_count) * cores * qwen_p2p::kChecksumPartialBytes;
+        std::vector<uint8_t> host(coords.size() * per_device);
+        std::vector<ShardDataTransfer> transfers;
+        for (size_t device = 0; device < coords.size(); ++device) {
+            transfers.push_back(ShardDataTransfer{coords[device]}
+                                    .host_data(host.data() + device * per_device)
+                                    .region(BufferRegion(0, per_device)));
+        }
+        queue.enqueue_read_shards(transfers, partials, /*blocking=*/true);
+        for (size_t device = 0; device < coords.size(); ++device) {
+            for (uint32_t range = 0; range < launch_count; ++range) {
+                for (uint32_t core = 0; core < cores; ++core) {
+                    uint64_t partial = 0;
+                    std::copy_n(
+                        host.data() + device * per_device + (uint64_t(range) * cores + core) * qwen_p2p::kChecksumPartialBytes,
+                        8,
+                        reinterpret_cast<uint8_t*>(&partial));
+                    sums[device][launch_first + range] += partial;  // mod 2^64
+                }
+            }
         }
     }
     return sums;
@@ -862,28 +887,47 @@ NB_MODULE(qwen_kv_read, m) {
            P2PStaging& staging,
            uint64_t byte_offset,
            const std::vector<uint32_t>& blocks,
-           std::optional<uint32_t> bank) {
-            qwen_p2p_host::write_blocks_from_staging(device_tensor, staging, byte_offset, blocks, bank);
+           std::optional<uint32_t> bank,
+           std::optional<uint64_t> row_stride) {
+            qwen_p2p_host::write_blocks_from_staging(device_tensor, staging, byte_offset, blocks, bank, row_stride);
         },
         nb::arg("device_tensor"),
         nb::arg("staging"),
         nb::arg("byte_offset"),
         nb::arg("blocks"),
         nb::arg("bank") = nb::none(),
+        nb::arg("row_stride") = nb::none(),
         "qwen_write_blocks_raw with the source in the staging range: device d's slice blocks[i] of device_tensor gets "
-        "staging_d[byte_offset + i * slice_bytes : + slice_bytes]. Full tile pages only; enqueued, it does not wait.");
+        "staging_d[byte_offset + i * row_stride : + slice_bytes]. row_stride=None is slice_bytes (contiguous rows); otherwise a multiple of 64 and at least "
+        "slice_bytes, and the whole range must lie inside the staging range. Full tile pages only; enqueued, it does not wait.");
     m.def(
         "qwen_staging_checksum",
-        [](P2PStaging& staging, uint64_t byte_offset, uint64_t length, std::optional<uint32_t> bank, uint32_t cores) {
-            return qwen_p2p_host::staging_checksum(staging, byte_offset, length, bank, cores);
+        [](P2PStaging& staging,
+           uint64_t byte_offset,
+           uint64_t length,
+           std::optional<uint32_t> bank,
+           uint32_t cores,
+           std::optional<uint32_t> count) -> nb::object {
+            const auto sums = qwen_p2p_host::staging_checksum(staging, byte_offset, length, bank, cores, count.value_or(1));
+            if (count.has_value()) {
+                return nb::cast(sums);  // [device][range]
+            }
+            std::vector<uint64_t> flat;
+            for (const auto& device : sums) {
+                flat.push_back(device[0]);
+            }
+            return nb::cast(flat);  // [device]
         },
         nb::arg("staging"),
         nb::arg("byte_offset"),
         nb::arg("length"),
         nb::arg("bank") = nb::none(),
         nb::arg("cores") = qwen_p2p::kChecksumDefaultCores,
+        nb::arg("count") = nb::none(),
         "Per device, S = sum_k (((k * 2654435761 + 1) mod 2^32) * x_k) mod 2^64 over the little-endian uint32 words x_k of staging[byte_offset : + length] "
-        "(k from 0 at byte_offset; length a multiple of 4096). Blocking: returns a list with one int per device in mesh order.");
+        "(k from 0 at byte_offset; length a multiple of 4096). Blocking: returns a list with one int per device in mesh order. count=N checksums N consecutive "
+        "ranges of `length` bytes (the range r starts at byte_offset + r * length) in one call, k counted from each range's own start, and returns a list "
+        "with a list of N ints per device.");
     m.def(
         "qwen_p2p_staging_write",
         [](P2PStaging& staging, uint64_t byte_offset, nb::ndarray<const uint8_t, nb::c_contig, nb::device::cpu> data, std::optional<uint32_t> bank) {

@@ -1,24 +1,36 @@
 // qwen_p2p_scatter: the device kernel behind ttnn.qwen_write_blocks_from_staging (docs/tp4-p2p-restore.md, section 3).
 //
-// Copies whole tile pages from ONE contiguous byte range in ONE DRAM bank (the P2P staging buffer, optimisation/ttnn-op/kv_region_read/
+// Copies whole tile pages from ONE byte range in ONE DRAM bank (the P2P staging buffer, optimisation/ttnn-op/kv_region_read/
 // qwen_kv_read.cpp: P2PStaging) into the pages of dimension-0 slices (paged KV cache blocks) of an interleaved DRAM tensor:
 //
-//   block blocks[i], page j (0 <= j < pages_per_block)  <-  staging bank bytes  src_offset + (i * pages_per_block + j) * page_bytes
+//   block blocks[i], page j (0 <= j < pages_per_block)  <-  staging bank bytes  src_offset + i * row_stride + j * page_bytes
+//
+// Row i (the bytes of block blocks[i], pages_per_block pages) starts at src_offset + i * row_stride. row_stride == pages_per_block * page_bytes is the
+// contiguous layout; a larger stride (a multiple of 64) reads rows that sit apart in the staging bytes, for example one cache tensor's slice of every block
+// of a chunk laid out block-major. The bytes between two rows are never read.
 //
 // Every DRAM access is one WHOLE page (page_bytes, a multiple of 64): a sub-page DRAM read or write silently does nothing on this stack.
 // The staging bytes are read straight from the bank (TensorAccessor page id = the bank id, so the address is base + offset in that bank),
 // so no page of the staging buffer's own interleaving is ever assumed. The same bytes come out as went in: no pack, no unpack.
 //
 // Compile-time args: [page_bytes, pages_per_block, chunk_pages, max_blocks] + TensorAccessorArgs(destination) + TensorAccessorArgs(staging).
-// Per-core runtime args (a CONSTANT count, the program is cached and only its values change between calls):
+// Per-core runtime args (a CONSTANT count, the program is cached and only its values change between calls; the stride is an argument, so one program
+// serves every stride):
 //   [0] destination buffer address   [1] staging buffer address   [2] staging bank   [3] staging byte offset of this core's first block
-//   [4] number of blocks of this core (<= max_blocks)             [5 .. 5 + max_blocks) the block ids (unused entries are not read)
+//   [4] number of blocks of this core (<= max_blocks)             [5] row stride in bytes
+//   [6 .. 6 + max_blocks) the block ids (unused entries are not read)
 // The scratch is the L1 of circular buffer 0 (never pushed): two halves of chunk_pages pages, so the reads of chunk c + 1 overlap the
 // writes of chunk c.
 
 #include <cstdint>
 
 #include "api/dataflow/dataflow_api.h"
+
+// Staging byte offset of page `page` of this core's run (pages count from the core's first block): the block's row, then the page inside it.
+inline uint32_t qwen_p2p_source(
+    uint32_t source_offset, uint32_t row_stride, uint32_t page, uint32_t pages_per_block, uint32_t page_bytes) {
+    return source_offset + (page / pages_per_block) * row_stride + (page % pages_per_block) * page_bytes;
+}
 
 void kernel_main() {
     constexpr uint32_t page_bytes = get_compile_time_arg_val(0);
@@ -33,6 +45,8 @@ void kernel_main() {
     const uint32_t bank = get_arg_val<uint32_t>(2);
     const uint32_t source_offset = get_arg_val<uint32_t>(3);
     const uint32_t blocks = get_arg_val<uint32_t>(4);
+    const uint32_t row_stride = get_arg_val<uint32_t>(5);
+    constexpr uint32_t block_ids = 6;
     const auto destination = TensorAccessor(destination_args, destination_address, page_bytes);
     const auto staging = TensorAccessor(staging_args, staging_address, page_bytes);
 
@@ -47,7 +61,8 @@ void kernel_main() {
     uint32_t count = total < chunk_pages ? total : chunk_pages;
     uint32_t half = 0;
     for (uint32_t k = 0; k < count; ++k) {
-        noc_async_read(staging.get_noc_addr(bank, source_offset + k * page_bytes), scratch + k * page_bytes, page_bytes);
+        noc_async_read(
+            staging.get_noc_addr(bank, qwen_p2p_source(source_offset, row_stride, k, pages_per_block, page_bytes)), scratch + k * page_bytes, page_bytes);
     }
     noc_async_read_barrier();
 
@@ -56,7 +71,7 @@ void kernel_main() {
         const uint32_t base = scratch + half * chunk_pages * page_bytes;
         for (uint32_t k = 0; k < count; ++k) {
             const uint32_t page = first + k;
-            const uint32_t block = get_arg_val<uint32_t>(5 + page / pages_per_block);
+            const uint32_t block = get_arg_val<uint32_t>(block_ids + page / pages_per_block);
             const uint32_t destination_page = block * pages_per_block + page % pages_per_block;
             noc_async_write(base + k * page_bytes, destination.get_noc_addr(destination_page), page_bytes);
         }
@@ -68,7 +83,9 @@ void kernel_main() {
             const uint32_t other = scratch + (half ^ 1u) * chunk_pages * page_bytes;
             for (uint32_t k = 0; k < next_count; ++k) {
                 noc_async_read(
-                    staging.get_noc_addr(bank, source_offset + (next + k) * page_bytes), other + k * page_bytes, page_bytes);
+                    staging.get_noc_addr(bank, qwen_p2p_source(source_offset, row_stride, next + k, pages_per_block, page_bytes)),
+                    other + k * page_bytes,
+                    page_bytes);
             }
         }
         noc_async_read_barrier();

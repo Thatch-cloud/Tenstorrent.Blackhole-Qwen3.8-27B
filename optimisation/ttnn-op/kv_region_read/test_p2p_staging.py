@@ -60,6 +60,25 @@ class ChecksumReferenceTests(unittest.TestCase):
         self.assertEqual(ref.PRNG_SEED, 20261030)
         self.assertEqual(ref.vector_prng(), np.random.default_rng(20261030).integers(0, 256, 1 << 20, np.uint8).tobytes())
 
+    def test_the_ranged_vectors(self):
+        """4 ranges, each one of the single-range vectors: the ranged reference gives each range's own value (numpy and plain Python agree)."""
+        for name, data, length, want in (('small', ref.vector_ranged_small(), 4096, ref.RANGED_SMALL_EXPECTED),
+                                         ('mib', ref.vector_ranged_prng(), 1 << 20, ref.RANGED_PRNG_EXPECTED)):
+            with self.subTest(vector=name):
+                self.assertEqual(len(data), 4 * length)
+                self.assertEqual(ref.checksum_ranges(data, length, 4), want)
+                if length == 4096:
+                    self.assertEqual(ref.checksum_ranges(data, length, 4, ref.checksum_python), want)
+        self.assertEqual(ref.RANGED_SMALL_EXPECTED, [0, 17453227578024978262, 17453227578024978262, 0])
+        self.assertEqual(ref.RANGED_PRNG_EXPECTED, [4942361704597259676, 0, 4942361704597259676, 0])
+
+    def test_every_range_restarts_k(self):
+        """The same bytes in every range give the same sum in every range (k is counted from each range's own start, not from the first range)."""
+        block = ref.vector_prng()[:8192]
+        sums = ref.checksum_ranges(block * 5, 8192, 5)
+        self.assertEqual(sums, [ref.checksum_numpy(block)] * 5)
+        self.assertNotEqual(ref.checksum_numpy(block * 5), sums[0] * 5 & ref.MASK64)
+
     def test_k_counts_from_the_start_of_the_range(self):
         """The weights restart at every object: a range embedded at a byte offset has the checksum of the range alone."""
         data = ref.vector_prng()[:65536]
@@ -102,6 +121,75 @@ class ChecksumReferenceTests(unittest.TestCase):
             self.assertEqual(total, ref.checksum_numpy(data), cores)
 
 
+MIB = 1 << 20
+# check_scatter(byte_offset, slice_bytes, page_bytes, blocks, staging_bytes, row_stride): the contiguous cases (row_stride == slice_bytes) are the ones the
+# op had before row_stride; the rest are strided rows.
+SCATTER_CASES = [
+    (64, 17408, 1088, 3, MIB, 17408),                      # 0: fine
+    (0, 17408, 1088, 0, MIB, 17408),                       # no blocks
+    (0, 17000, 1088, 1, MIB, 17000),                       # a block that is not whole pages
+    (32, 17408, 1088, 1, MIB, 17408),                      # byte_offset not a multiple of 64
+    (0, 17408, 1000, 1, MIB, 17408),                       # a page that is not a multiple of 64
+    (MIB, 17408, 1088, 1, MIB, 17408),                     # starts at the end
+    (MIB - 3 * 17408, 17408, 1088, 3, MIB, 17408),         # 6: ends exactly at the end of the ring
+    (MIB - 3 * 17408, 17408, 1088, 4, MIB, 17408),         # one block past the end
+    (0, 65536, 8192, 1, MIB, 65536),                       # the largest page
+    (0, 65536, 16384, 1, MIB, 65536),                      # a page above 8192
+    (0, 17408, 1088, 3, MIB, 17408 + 64),                  # 10: strided, fine
+    (0, 17408, 1088, 3, 4 * MIB, 557056),                  # strided: the chipmajor-v1 rows (32 caches x 17408 apart)
+    (0, 17408, 1088, 3, MIB, 17408 + 32),                  # 12: a stride that is not a multiple of 64
+    (0, 17408, 1088, 3, MIB, 17408 - 64),                  # a stride smaller than the block (overlapping rows)
+    (0, 17408, 1088, 3, MIB, 0),                           # a stride of zero
+    (0, 17408, 1088, 2, 17408 + 557056, 557056),           # 15: strided and ending exactly at the end (the last row's last byte is the last byte)
+    (0, 17408, 1088, 2, 17408 + 557056 - 64, 557056),      # strided, one row byte past the end... 64 bytes short
+    (0, 17408, 1088, 1, 17408, 557056),                    # one row needs no room for a stride
+    (64, 17408, 1088, 1, 17408, 557056),                   # 18: one row, shifted by 64, 64 bytes past the end
+    (0, 17408, 1088, 1000, MIB, 1 << 40),                  # a stride so large that blocks * stride would wrap nothing but is far outside
+    (0, 17408, 1088, (1 << 33), (4 << 30) - 1, 17408),     # 20: more blocks than 32 bits can count, contiguous: outside
+    (0, 17408, 1088, 2, MIB, (1 << 63) + 64),              # a huge stride (blocks * stride would wrap 64 bits)
+]
+# check_checksum(byte_offset, length, staging_bytes, cores, ranges)
+CHECKSUM_CASES = [
+    (0, 4096, 8192, 64, 1),                                # 0: fine
+    (0, 0, 8192, 64, 1),                                   # empty
+    (0, 4000, 8192, 64, 1),                                # not a multiple of 4096
+    (8, 4096, 8192, 64, 1),                                # byte_offset not a multiple of 64
+    (4096, 8192, 8192, 64, 1),                             # past the end
+    (0, 4096, 8192, 7, 1),                                 # cores not a multiple of 8
+    (0, 4096, 8192, 88, 1),                                # more than 80 cores
+    (0, 4096, 8192, 0, 1),                                 # no cores
+    (0, 4096, 8192, 64, 2),                                # 8: two ranges, exactly the staging
+    (0, 4096, 8192, 64, 3),                                # a third range is outside
+    (0, 4096, 8192, 64, 0),                                # count 0
+    (4096, 4096, 8192, 64, 1),                             # 11: the last range
+    (4096, 4096, 8192, 64, 2),                             # the last range and one more
+    (64, 4096, 8192, 64, 2),                               # two ranges shifted by 64: the second ends 64 past the end
+    (64, 4096 * 3, 1 << 20, 80, 85),                       # 14: fine
+    (64, 4096 * 3, 1 << 20, 80, 86),                       # the 86th range ends past the end
+    (0, 4096, 1 << 30, 64, 1 << 18),                       # 16: 2^18 ranges (several launches): fine
+    (0, 4096, 1 << 30, 64, (1 << 18) + 1),                 # one more
+    (0, 4096, 8192, 64, (1 << 32) - 1),                    # 18: a count that wraps 32 bits when multiplied: outside
+]
+# scatter_core_args(destination 111, staging 222, bank 5, byte_offset, row_stride, blocks, launch_first, run): (byte_offset, row_stride, launch_first, run_first, run_count)
+SCATTER_ARG_CASES = [
+    (4160, 17408, 0, 3, 4),                                # contiguous rows
+    (4160, 557056, 0, 3, 4),                               # strided rows
+    (64, 17408 + 128, 16, 5, 3),                           # a second launch with a stride that is not the block size
+    (0, 557056, 0, 0, 0),                                  # an idle core
+]
+# checksum_core_args(staging 111, partials 222, bank 5, byte_offset, units (first, last), slot, ranges, range_bytes, slot_stride)
+CHECKSUM_ARG_CASES = [
+    (4160, 7, 12, 3, 1, 64 * 4096, 64),                    # one range
+    (4160, 7, 12, 3, 60, 557056, 64),                      # sixty ranges of 136 units
+    (0, 0, 0, 79, 512, 4096, 80),                          # an idle core of the largest launch
+]
+
+
+def cpp_table(name, rows):
+    """A C++ table of uint64 rows -> the source of `static const unsigned long long name[][n] = {...}` (as std::vector rows for range-for)."""
+    return 'static const std::vector<std::vector<unsigned long long>> %s = {%s};' % (name, ', '.join('{%s}' % ', '.join('%dull' % v for v in row) for row in rows))
+
+
 class PlanMirrorTests(unittest.TestCase):
     """qwen_p2p_plan.hpp compiled and run against the Python mirrors."""
 
@@ -113,13 +201,23 @@ class PlanMirrorTests(unittest.TestCase):
         source = os.path.join(cls.directory, 'dump.cpp')
         with open(source, 'w') as handle:
             handle.write('''#include <cstdio>
+#include <vector>
 #include "%s"
 using namespace qwen_p2p;
 static void pr(const char* s) { std::printf("%%s\\n", s ? s : "OK"); }
+%s
+%s
+%s
+%s
 int main() {
   for (uint32_t n : {0u, 1u, 5u, 16u, 17u, 100u, 512u, 513u, 1030u}) {
     std::printf("L %%u:", n);
     for (auto l : scatter_launches(n)) std::printf(" %%u,%%u", l.first, l.second);
+    std::printf("\\n");
+  }
+  for (uint32_t n : {0u, 1u, 5u, 511u, 512u, 513u, 1024u, 1030u}) {
+    std::printf("Q %%u:", n);
+    for (auto l : checksum_launches(n)) std::printf(" %%u,%%u", l.first, l.second);
     std::printf("\\n");
   }
   for (uint32_t n : {1u, 5u, 16u, 17u, 100u, 511u, 512u}) {
@@ -134,24 +232,8 @@ int main() {
   }
   for (uint64_t k : {0ull, 1ull, 1024ull, 123456789ull, 1ull << 33, (1ull << 40) + 7}) std::printf("W %%llu %%u\\n", (unsigned long long)k, start_weight(k));
   for (uint32_t p : {64u, 1088u, 4096u}) std::printf("C %%u %%u %%u\\n", p, scatter_cb_bytes(p), checksum_cb_bytes());
-  std::printf("S "); pr(check_scatter(64, 17408, 1088, 3, 1 << 20));
-  std::printf("S "); pr(check_scatter(0, 17408, 1088, 0, 1 << 20));
-  std::printf("S "); pr(check_scatter(0, 17000, 1088, 1, 1 << 20));
-  std::printf("S "); pr(check_scatter(32, 17408, 1088, 1, 1 << 20));
-  std::printf("S "); pr(check_scatter(0, 17408, 1000, 1, 1 << 20));
-  std::printf("S "); pr(check_scatter(1 << 20, 17408, 1088, 1, 1 << 20));
-  std::printf("S "); pr(check_scatter((1 << 20) - 3 * 17408, 17408, 1088, 3, 1 << 20));
-  std::printf("S "); pr(check_scatter((1 << 20) - 3 * 17408, 17408, 1088, 4, 1 << 20));
-  std::printf("S "); pr(check_scatter(0, 65536, 8192, 1, 1 << 20));
-  std::printf("S "); pr(check_scatter(0, 65536, 16384, 1, 1 << 20));
-  std::printf("K "); pr(check_checksum(0, 4096, 8192, 64));
-  std::printf("K "); pr(check_checksum(0, 0, 8192, 64));
-  std::printf("K "); pr(check_checksum(0, 4000, 8192, 64));
-  std::printf("K "); pr(check_checksum(8, 4096, 8192, 64));
-  std::printf("K "); pr(check_checksum(4096, 8192, 8192, 64));
-  std::printf("K "); pr(check_checksum(0, 4096, 8192, 7));
-  std::printf("K "); pr(check_checksum(0, 4096, 8192, 88));
-  std::printf("K "); pr(check_checksum(0, 4096, 8192, 0));
+  for (const auto& c : scatter_cases) { std::printf("S "); pr(check_scatter(c[0], c[1], c[2], c[3], c[4], c[5])); }
+  for (const auto& c : checksum_cases) { std::printf("K "); pr(check_checksum(c[0], c[1], c[2], (uint32_t)c[3], c[4])); }
   std::printf("G "); pr(check_staging(1 << 20, 4096, 0, 8, 1ull << 30));
   std::printf("G "); pr(check_staging(1 << 20, 4096, 8, 8, 1ull << 30));
   std::printf("G "); pr(check_staging(1000, 4096, 0, 8, 1ull << 30));
@@ -161,12 +243,17 @@ int main() {
   std::printf("G "); pr(check_staging(1ull << 32, 4096, 0, 8, 1ull << 40));
   std::printf("G "); pr(check_staging(1ull << 30, 4096, 0, 8, 1ull << 30));
   std::vector<uint32_t> blocks; for (uint32_t i = 0; i < 40; ++i) blocks.push_back(1000 - 7 * i);
-  auto args = scatter_core_args(111, 222, 5, 4160, 17408, blocks, 0, {3, 4});
-  std::printf("A"); for (auto v : args) std::printf(" %%u", v); std::printf("\\n");
-  auto cargs = checksum_core_args(111, 222, 5, 4160, {7, 12}, 3);
-  std::printf("T"); for (auto v : cargs) std::printf(" %%u", v); std::printf("\\n");
+  for (auto a : scatter_arg_cases) {
+    auto args = scatter_core_args(111, 222, 5, a[0], a[1], blocks, (uint32_t)a[2], {(uint32_t)a[3], (uint32_t)a[4]});
+    std::printf("A"); for (auto v : args) std::printf(" %%u", v); std::printf("\\n");
+  }
+  for (auto a : checksum_arg_cases) {
+    auto cargs = checksum_core_args(111, 222, 5, a[0], {a[1], a[2]}, (uint32_t)a[3], (uint32_t)a[4], a[5], (uint32_t)a[6]);
+    std::printf("T"); for (auto v : cargs) std::printf(" %%u", v); std::printf("\\n");
+  }
 }
-''' % PLAN.replace('\\', '/'))
+''' % (PLAN.replace('\\', '/'), cpp_table('scatter_cases', SCATTER_CASES), cpp_table('checksum_cases', CHECKSUM_CASES),
+       cpp_table('scatter_arg_cases', SCATTER_ARG_CASES), cpp_table('checksum_arg_cases', CHECKSUM_ARG_CASES)))
         exe = os.path.join(cls.directory, 'dump')
         done = subprocess.run([ref.compiler(), '-std=c++17', '-Wall', '-Wextra', '-Werror', source, '-o', exe], capture_output=True, text=True)
         if done.returncode:
@@ -186,7 +273,8 @@ int main() {
                             ('kScatterChunkPages', ref.SCATTER_CHUNK_PAGES), ('kScatterMaxPageBytes', ref.SCATTER_MAX_PAGE_BYTES), ('kScatterFixedArgs', ref.SCATTER_FIXED_ARGS), ('kChecksumUnit', ref.CHECKSUM_UNIT),
                             ('kChecksumChunkBytes', ref.CHECKSUM_CHUNK_BYTES), ('kChecksumPartialBytes', ref.CHECKSUM_PARTIAL_BYTES),
                             ('kChecksumColumns', ref.CHECKSUM_COLUMNS), ('kChecksumDefaultCores', ref.CHECKSUM_DEFAULT_CORES),
-                            ('kChecksumMaxCores', ref.CHECKSUM_MAX_CORES), ('kChecksumArgs', ref.CHECKSUM_ARGS), ('kDramAlignment', ref.DRAM_ALIGNMENT)):
+                            ('kChecksumMaxCores', ref.CHECKSUM_MAX_CORES), ('kChecksumMaxRanges', ref.CHECKSUM_MAX_RANGES), ('kChecksumArgs', ref.CHECKSUM_ARGS),
+                            ('kDramAlignment', ref.DRAM_ALIGNMENT)):
             match = re.search(r'constexpr uint32_t %s = (\d+);' % name, text)
             self.assertIsNotNone(match, name)
             self.assertEqual(int(match.group(1)), value, name)
@@ -197,6 +285,13 @@ int main() {
             n, rest = line.split(':')
             got = [tuple(int(x) for x in item.split(',')) for item in rest.split()]
             self.assertEqual(got, ref.scatter_launches(int(n)), line)
+        for line in self.of('Q'):
+            n, rest = line.split(':')
+            got = [tuple(int(x) for x in item.split(',')) for item in rest.split()]
+            self.assertEqual(got, ref.checksum_launches(int(n)), line)
+            self.assertEqual(sum(count for _, count in got), int(n))
+            self.assertTrue(all(count <= ref.CHECKSUM_MAX_RANGES for _, count in got))
+            self.assertTrue(all(a[0] + a[1] == b[0] for a, b in zip(got, got[1:])), 'launches are contiguous')
         for line in self.of('B'):
             n, rest = line.split(':')
             got = [tuple(int(x) for x in item.split(',')) for item in rest.split()]
@@ -222,36 +317,65 @@ int main() {
             self.assertEqual((scatter, checksum), (ref.scatter_cb_bytes(page), ref.checksum_cb_bytes()), line)
 
     def test_argument_checks(self):
-        want = [ref.check_scatter(64, 17408, 1088, 3, 1 << 20), ref.check_scatter(0, 17408, 1088, 0, 1 << 20), ref.check_scatter(0, 17000, 1088, 1, 1 << 20),
-                ref.check_scatter(32, 17408, 1088, 1, 1 << 20), ref.check_scatter(0, 17408, 1000, 1, 1 << 20), ref.check_scatter(1 << 20, 17408, 1088, 1, 1 << 20),
-                ref.check_scatter((1 << 20) - 3 * 17408, 17408, 1088, 3, 1 << 20), ref.check_scatter((1 << 20) - 3 * 17408, 17408, 1088, 4, 1 << 20),
-                ref.check_scatter(0, 65536, 8192, 1, 1 << 20), ref.check_scatter(0, 65536, 16384, 1, 1 << 20)]
-        self.assertEqual([line or None for line in (x if x != 'OK' else None for x in self.of('S'))], want)
-        self.assertEqual(want[0], None)
-        self.assertEqual(want[6], None, 'a run that ends exactly at the end of the ring is fine')
+        want = [ref.check_scatter(*case) for case in SCATTER_CASES]
+        self.assertEqual([None if x == 'OK' else x for x in self.of('S')], want)
+        self.assertEqual([index for index, problem in enumerate(want) if problem is None], [0, 6, 8, 10, 11, 15, 17])
         self.assertIsNotNone(want[7], 'one block past the end is refused')
-        want = [ref.check_checksum(0, 4096, 8192, 64), ref.check_checksum(0, 0, 8192, 64), ref.check_checksum(0, 4000, 8192, 64), ref.check_checksum(8, 4096, 8192, 64),
-                ref.check_checksum(4096, 8192, 8192, 64), ref.check_checksum(0, 4096, 8192, 7), ref.check_checksum(0, 4096, 8192, 88), ref.check_checksum(0, 4096, 8192, 0)]
+        self.assertIsNone(want[6], 'a run that ends exactly at the end of the ring is fine')
+        self.assertIsNone(want[15], 'and so does a strided one: the last row ends on the last byte')
+        for index in (12, 13, 14):
+            self.assertIn('row_stride', want[index], index)
+        for index in (16, 18, 19, 20, 21):
+            self.assertEqual(want[index], 'the byte range lies outside the staging range', index)
+        want = [ref.check_checksum(*case) for case in CHECKSUM_CASES]
         self.assertEqual([None if x == 'OK' else x for x in self.of('K')], want)
-        self.assertEqual([want[0]] + [bool(x) for x in want[1:]], [None] + [True] * 7)
+        self.assertEqual([index for index, problem in enumerate(want) if problem is None], [0, 8, 11, 14, 16])
+        self.assertEqual(want[10], 'count must be at least 1')
+        for index in (9, 12, 13, 15, 17, 18):
+            self.assertEqual(want[index], 'the byte range lies outside the staging range', index)
         want = [ref.check_staging(1 << 20, 4096, 0, 8, 1 << 30), ref.check_staging(1 << 20, 4096, 8, 8, 1 << 30), ref.check_staging(1000, 4096, 0, 8, 1 << 30),
                 ref.check_staging(1 << 20, 100, 0, 8, 1 << 30), ref.check_staging(0, 4096, 0, 8, 1 << 30), ref.check_staging(2 << 30, 4096, 0, 8, 1 << 30),
                 ref.check_staging(1 << 32, 4096, 0, 8, 1 << 40), ref.check_staging(1 << 30, 4096, 0, 8, 1 << 30)]
         self.assertEqual([None if x == 'OK' else x for x in self.of('G')], want)
         self.assertEqual([x is None for x in want], [True, False, False, False, False, False, False, True])
 
+    def test_the_contiguous_default_is_todays_behaviour(self):
+        """row_stride == slice_bytes (what None means) is accepted and refused exactly where the contiguous op was: the same reasons, the same boundaries."""
+        for byte_offset in (0, 64, 4096, MIB - 17408 * 5, MIB - 17408 * 5 + 64, MIB - 17408):
+            for blocks in (0, 1, 4, 5, 6, 61, 62):
+                old = None
+                if blocks == 0:
+                    old = 'no blocks'
+                elif byte_offset > MIB or blocks > (MIB - byte_offset) // 17408:
+                    old = 'the byte range lies outside the staging range'
+                self.assertEqual(ref.check_scatter(byte_offset, 17408, 1088, blocks, MIB), old, (byte_offset, blocks))
+                self.assertEqual(ref.check_scatter(byte_offset, 17408, 1088, blocks, MIB, 17408), old, (byte_offset, blocks))
+
     def test_runtime_argument_vectors_are_constant_length_and_match(self):
         blocks = [1000 - 7 * i for i in range(40)]
-        args = ref.scatter_core_args(111, 222, 5, 4160, 17408, blocks, 0, (3, 4))
-        self.assertEqual(len(args), ref.SCATTER_ARGS)
-        self.assertEqual([int(x) for x in self.of('A')[0].split()], args)
-        self.assertEqual(args[:5], [111, 222, 5, 4160 + 3 * 17408, 4])
-        self.assertEqual(args[5:9], blocks[3:7])
-        self.assertTrue(all(v == 0 for v in args[9:]), 'unused block slots are zero')
-        cargs = ref.checksum_core_args(111, 222, 5, 4160, (7, 12), 3)
-        self.assertEqual(len(cargs), ref.CHECKSUM_ARGS)
-        self.assertEqual([int(x) for x in self.of('T')[0].split()], cargs)
-        self.assertEqual(cargs, [111, 222, 5, 4160 + 7 * 4096, 5 * 4096, ref.start_weight(7 * 1024), 3])
+        lines = self.of('A')
+        self.assertEqual(len(lines), len(SCATTER_ARG_CASES))
+        for line, (byte_offset, row_stride, launch_first, first, count) in zip(lines, SCATTER_ARG_CASES):
+            args = ref.scatter_core_args(111, 222, 5, byte_offset, row_stride, blocks, launch_first, (first, count))
+            self.assertEqual(len(args), ref.SCATTER_ARGS)
+            self.assertEqual([int(x) for x in line.split()], args)
+            self.assertEqual(args[:6], [111, 222, 5, byte_offset + (launch_first + first) * row_stride, count, row_stride])
+            self.assertEqual(args[6:6 + count], blocks[launch_first + first:launch_first + first + count])
+            self.assertTrue(all(v == 0 for v in args[6 + count:]), 'unused block slots are zero')
+        args = ref.scatter_core_args(111, 222, 5, 4160, 557056, blocks, 0, (3, 4))
+        self.assertEqual(args[:6], [111, 222, 5, 4160 + 3 * 557056, 4, 557056], 'a chipmajor-v1 shard apart: the core starts at its first row')
+        lines = self.of('T')
+        self.assertEqual(len(lines), len(CHECKSUM_ARG_CASES))
+        for line, (byte_offset, first, last, slot, ranges, range_bytes, slot_stride) in zip(lines, CHECKSUM_ARG_CASES):
+            cargs = ref.checksum_core_args(111, 222, 5, byte_offset, (first, last), slot, ranges, range_bytes, slot_stride)
+            self.assertEqual(len(cargs), ref.CHECKSUM_ARGS)
+            self.assertEqual([int(x) for x in line.split()], cargs)
+            self.assertEqual(cargs, [111, 222, 5, byte_offset + first * 4096, (last - first) * 4096, ref.start_weight(first * 1024), slot, ranges, range_bytes,
+                                     slot_stride])
+        self.assertEqual(ref.checksum_core_args(111, 222, 5, 4160, (7, 12), 3, 1, 64 * 4096, 64),
+                         [111, 222, 5, 4160 + 7 * 4096, 5 * 4096, ref.start_weight(7 * 1024), 3, 1, 64 * 4096, 64])
+        self.assertEqual(ref.start_weight(7 * 1024), ref.checksum_core_args(111, 222, 5, 4160, (7, 12), 3, 60, 557056, 64)[5],
+                         'the weight a core starts a range with is relative to the range start, the same in every range')
 
 
 class StagingGeometryTests(unittest.TestCase):
@@ -347,18 +471,19 @@ class ScatterKernelEmulationTests(unittest.TestCase):
         self.directory = tempfile.mkdtemp(prefix='p2p_scatter_')
         self.addCleanup(shutil.rmtree, self.directory, True)
 
-    def scenario(self, rng, page_bytes, pages_per_block, bank, byte_offset, blocks, slices, staging_address=4096, dst_address=None, ring=None):
+    def scenario(self, rng, page_bytes, pages_per_block, bank, byte_offset, blocks, slices, staging_address=4096, dst_address=None, ring=None, row_stride=None):
         slice_bytes = page_bytes * pages_per_block
-        needed = byte_offset + len(blocks) * slice_bytes
+        stride = slice_bytes if row_stride is None else row_stride
+        needed = byte_offset + (len(blocks) - 1) * stride + slice_bytes
         ring = needed if ring is None else ring
-        staging = rng.integers(0, 256, ring, dtype=np.uint8)
+        staging = rng.integers(0, 256, ring, dtype=np.uint8)       # (the bytes between two rows are random too: a read of a gap shows in the result)
         dst_pages = slices * pages_per_block
         dst_in = rng.integers(0, 256, (dst_pages, page_bytes), dtype=np.uint8)
         out, line = ref.run_scatter_emulation(self.directory, page_bytes, pages_per_block, bank, staging_address, byte_offset, staging.tobytes(), dst_pages,
-                                              dst_address, blocks, dst_in, eager=self.eager)
+                                              dst_address, blocks, dst_in, eager=self.eager, row_stride=row_stride)
         want = dst_in.copy()
         for i, block in enumerate(blocks):
-            start = byte_offset + i * slice_bytes
+            start = byte_offset + i * stride
             want[block * pages_per_block:(block + 1) * pages_per_block] = staging[start:start + slice_bytes].reshape(pages_per_block, page_bytes)
         return out, want, line, dst_in
 
@@ -420,6 +545,48 @@ class ScatterKernelEmulationTests(unittest.TestCase):
     def test_a_destination_that_is_not_at_a_round_address(self):
         self.check(1088, 16, 2, 0, [0, 1], 4, dst_address=(1 << 20) + 64 * 3, staging_address=4096 + 64 * 5)
 
+    def test_rows_apart_in_the_staging_bytes(self):
+        """row_stride: row i of the call is read from byte_offset + i * row_stride; the bytes between two rows are never read."""
+        for stride in (17408 + 64, 17408 + 4096, 17408 * 2, 17408 * 16 + 192):
+            with self.subTest(row_stride=stride):
+                line, _ = self.check(1088, 16, 3, 128, [9, 2, 30, 17, 4, 11], 40, row_stride=stride, seed=stride)
+                self.assertIn('reads=96 writes=96', line, 'only the rows are read')
+
+    def test_the_chipmajor_shard_stride_of_one_cache_tensor(self):
+        """The host's chipmajor-v1 object: [cache][slice] per block, so one cache tensor's rows of consecutive blocks are 32 x 17408 = 557,056 bytes apart."""
+        self.assertEqual(32 * 17408, 557056)
+        line, _ = self.check(1088, 16, 5, 64 + 7 * 17408, [100, 101, 102, 7, 8, 55, 54, 53], 120, row_stride=557056, seed=3)
+        self.assertIn('reads=128 writes=128', line)
+
+    def test_strided_rows_of_many_blocks_cross_cores_and_launches(self):
+        """17, 100, 513 and 600 blocks with a stride (a run on each of the 16 cores, then a second launch): the offsets of the later launches carry the stride."""
+        for n in (17, 100, 513, 600):
+            with self.subTest(blocks=n):
+                rng = np.random.default_rng(n + 7)
+                blocks = [int(b) for b in rng.permutation(n + 30)[:n]]
+                line, _ = self.check(64, 2, 5, 192, blocks, n + 30, row_stride=128 + 64 * 3, seed=n)
+                self.assertIn('reads=%d writes=%d' % (2 * n, 2 * n), line)
+
+    def test_a_strided_range_that_ends_on_the_last_byte_of_the_ring(self):
+        page, ppb, stride, n = 1088, 16, 557056, 3
+        ring = 1 << 22
+        offset = ring - ((n - 1) * stride + page * ppb)
+        self.assertEqual(offset % 64, 0)
+        self.check(page, ppb, 1, offset, [3, 0, 7], 8, ring=ring, row_stride=stride)
+
+    def test_strided_rows_for_other_page_sizes_and_block_shapes(self):
+        for page, ppb in ((64, 1), (576, 3), (2048, 32), (1088, 1), (1088, 48), (4096, 5), (8192, 2)):
+            with self.subTest(page=page, pages_per_block=ppb):
+                self.check(page, ppb, 6, 64, [4, 1, 7, 6], 10, row_stride=page * ppb + 192, seed=page)
+
+    def test_a_stride_equal_to_the_block_is_the_contiguous_layout(self):
+        rng = np.random.default_rng(21)
+        out_a, want_a, _, _ = self.scenario(rng, 1088, 16, 2, 4160, [3, 5, 1], 8)
+        rng = np.random.default_rng(21)
+        out_b, want_b, _, _ = self.scenario(rng, 1088, 16, 2, 4160, [3, 5, 1], 8, row_stride=17408)
+        self.assertTrue(np.array_equal(out_a, out_b))
+        self.assertTrue(np.array_equal(want_a, want_b))
+
     def test_the_stand_in_refuses_a_misaligned_destination_page(self):
         """The emulation has a rule for the sub-page no-op: a page size that is not a multiple of 64 cannot be addressed whole."""
         rng = np.random.default_rng(3)
@@ -474,6 +641,52 @@ class ChecksumKernelEmulationTests(unittest.TestCase):
         self.assertEqual(total, ref.VECTOR_PRNG_1MIB)
         self.assertIn('reads=%d' % (8 * 4), line, '1 MiB over 8 cores is 128 KiB each: four 32 KiB chunks per core')
 
+    def ranged(self, offset, bank, data, count, cores, partials_address=None):
+        sums, line = ref.run_checksum_ranges_emulation(self.directory, 8192, partials_address, bank, offset, data, count, cores=cores, eager=self.eager)
+        return sums, line
+
+    def test_many_ranges_in_one_launch_each_with_k_from_its_own_start(self):
+        """count ranges of `length` bytes, adjacent, one launch: one sum per range, equal to the reference of that range alone."""
+        rng = np.random.default_rng(31)
+        # (offset, bank, units per range, ranges, cores): idle cores (more cores than units), a core's run crossing a chunk, ranges not a multiple of anything
+        for offset, bank, units, count, cores in ((0, 0, 1, 1, 64), (64, 3, 2, 5, 8), (4096, 7, 3, 17, 64), (4160, 5, 33, 4, 16), (0, 2, 136, 7, 64),
+                                                  (192, 4, 65, 3, 80), (8192, 1, 9, 60, 24), (0, 6, 257, 2, 64), (64, 0, 1, 40, 80), (0, 5, 8, 9, 8)):
+            with self.subTest(offset=offset, bank=bank, units=units, count=count, cores=cores):
+                data = rng.integers(0, 256, units * 4096 * count, dtype=np.uint8).tobytes()
+                sums, _ = self.ranged(offset, bank, data, count, cores)
+                self.assertEqual(sums, ref.checksum_ranges(data, units * 4096, count))
+                self.assertEqual(sums, ref.checksum_ranges(data, units * 4096, count, ref.checksum_python))
+
+    def test_the_ranged_vectors(self):
+        """4 ranges, each the same as one of the single-range vectors: 4 x 4096 bytes, and 4 x 1 MiB."""
+        for name, data, count, want in (('small', ref.vector_ranged_small(), 4, ref.RANGED_SMALL_EXPECTED), ('mib', ref.vector_ranged_prng(), 4, ref.RANGED_PRNG_EXPECTED)):
+            for cores in (8, 64, 80):
+                for offset in (0, 4160):
+                    with self.subTest(vector=name, cores=cores, offset=offset):
+                        sums, _ = self.ranged(offset, 3, data, count, cores)
+                        self.assertEqual(sums, want)
+
+    def test_one_range_through_the_ranged_launch_is_the_single_range_result(self):
+        for name, data, want in (('zero', ref.vector_zero(), ref.VECTOR_ZERO_4096), ('mod251', ref.vector_mod251(), ref.VECTOR_MOD251_4096),
+                                 ('prng', ref.vector_prng(), ref.VECTOR_PRNG_1MIB)):
+            with self.subTest(vector=name):
+                sums, _ = self.ranged(0, 0, data, 1, 64)
+                self.assertEqual(sums, [want])
+
+    def test_ranges_are_read_in_one_stream(self):
+        """4 ranges of 1 MiB on 8 cores: each core takes 128 KiB of every range, four 32 KiB chunks, so 16 reads and 4 partial pages a core."""
+        sums, line = self.ranged(0, 0, ref.vector_ranged_prng(), 4, 8)
+        self.assertEqual(sums, ref.RANGED_PRNG_EXPECTED)
+        self.assertIn('reads=%d writes=%d' % (8 * 16, 8 * 4), line)
+
+    def test_a_changed_byte_changes_only_its_range(self):
+        data = bytearray(ref.vector_ranged_prng())
+        want = ref.RANGED_PRNG_EXPECTED
+        data[(1 << 20) * 1 + 12345] ^= 0x40                  # a byte of range 1 (zeros): its sum, and only its sum, changes
+        sums, _ = self.ranged(0, 2, bytes(data), 4, 64)
+        self.assertEqual([a != b for a, b in zip(sums, want)], [False, True, False, False])
+        self.assertEqual(sums[1], ref.checksum_numpy(bytes(data[1 << 20:2 << 20])))
+
     def test_the_sum_is_over_the_range_not_the_ring(self):
         data = ref.vector_prng()[:16384]
         a, _ = ref.run_checksum_emulation(self.directory, 4096, None, 0, 4096, data, cores=8, eager=self.eager)
@@ -500,48 +713,53 @@ class EmulationHasTeethTests(unittest.TestCase):
         compile_args = ([1088, 16, 16, 32, 0, 0, 0, 0] if kind == 'scatter' else [32768, 64, 0, 0, 0, 0])
         return ref.build_emulation(kind, compile_args, self.directory, eager=eager, kernel_file=path, strict=False)
 
-    def run_scatter(self, exe, blocks=(3, 9, 1, 12, 6, 0, 20, 17, 8, 5, 30, 31, 2, 4, 10, 11, 13, 14, 15, 16, 18, 19, 21, 22, 23)):
+    def run_scatter(self, exe, blocks=(3, 9, 1, 12, 6, 0, 20, 17, 8, 5, 30, 31, 2, 4, 10, 11, 13, 14, 15, 16, 18, 19, 21, 22, 23), row_stride=17408 + 192):
         rng = np.random.default_rng(9)
         page, ppb, slices = 1088, 16, 40
-        staging = rng.integers(0, 256, len(blocks) * page * ppb, dtype=np.uint8)
+        slice_bytes = page * ppb
+        stride = slice_bytes if row_stride is None else row_stride
+        staging = rng.integers(0, 256, (len(blocks) - 1) * stride + slice_bytes, dtype=np.uint8)
         dst_in = rng.integers(0, 256, (slices * ppb, page), dtype=np.uint8)
         d = self.directory
         scenario = os.path.join(d, 'm.txt')
         ref._write_scenario(scenario, [('page_bytes', page), ('pages_per_block', ppb), ('bank', 2), ('staging_address', 4096), ('byte_offset', 0), ('dst_address', 1 << 20),
-                                       ('dst_pages', slices * ppb), ('bank_bytes', 1 << 22), ('blocks', list(blocks))])
+                                       ('dst_pages', slices * ppb), ('bank_bytes', 1 << 22), ('blocks', list(blocks))] + ([] if row_stride is None else [('row_stride', row_stride)]))
         for name, data in (('s.bin', staging), ('i.bin', dst_in)):
             with open(os.path.join(d, name), 'wb') as handle:
                 handle.write(data.tobytes())
         done = subprocess.run([exe, scenario, os.path.join(d, 's.bin'), os.path.join(d, 'i.bin'), os.path.join(d, 'o.bin')], capture_output=True, text=True)
         want = dst_in.copy()
         for i, block in enumerate(blocks):
-            want[block * ppb:(block + 1) * ppb] = staging[i * page * ppb:(i + 1) * page * ppb].reshape(ppb, page)
+            want[block * ppb:(block + 1) * ppb] = staging[i * stride:i * stride + slice_bytes].reshape(ppb, page)
         if done.returncode:
             return 'violation', done.stdout
         with open(os.path.join(d, 'o.bin'), 'rb') as handle:
             out = np.frombuffer(handle.read(), dtype=np.uint8).reshape(slices * ppb, page)
         return ('ok' if np.array_equal(out, want) and 'stray=0' in done.stdout else 'wrong'), done.stdout
 
-    def run_checksum(self, exe, cores=8, units=130):
-        data = ref.vector_prng()[:units * 4096]
+    def run_checksum(self, exe, cores=8, units=130, ranges=1):
+        data = ref.vector_prng()[:units * 4096 * ranges]
         d = self.directory
         scenario = os.path.join(d, 'c.txt')
-        ref._write_scenario(scenario, [('staging_address', 4096), ('partials_address', 1 << 20), ('bank', 1), ('byte_offset', 64), ('length', len(data)), ('cores', cores),
-                                       ('bank_bytes', 1 << 21)])
+        ref._write_scenario(scenario, [('staging_address', 4096), ('partials_address', 1 << 20), ('bank', 1), ('byte_offset', 64), ('length', units * 4096), ('cores', cores),
+                                       ('bank_bytes', 1 << 21), ('ranges', ranges)])
         with open(os.path.join(d, 'c.bin'), 'wb') as handle:
             handle.write(data)
         done = subprocess.run([exe, scenario, os.path.join(d, 'c.bin')], capture_output=True, text=True)
         if done.returncode:
             return 'violation', done.stdout
-        total = int([line for line in done.stdout.splitlines() if line.startswith('SUM')][0].split()[1])
-        return ('ok' if total == ref.checksum_numpy(data) else 'wrong'), done.stdout
+        totals = [int(word) for word in [line for line in done.stdout.splitlines() if line.startswith('SUMS ')][0].split()[1:]]
+        return ('ok' if totals == ref.checksum_ranges(data, units * 4096, ranges) else 'wrong'), done.stdout
 
     def verdicts(self, kind, source, old, new, runner):
         return [runner(self.build_mutant(kind, source, old, new, eager))[0] for eager in (False, True)]
 
     def test_the_unbroken_kernels_pass_the_same_checks_under_both_schedules(self):
         self.assertEqual(self.verdicts('scatter', SCATTER, 'half ^= 1u;', 'half ^= 1u;', self.run_scatter), ['ok', 'ok'])
-        self.assertEqual(self.verdicts('checksum', CHECKSUM, 'half ^= 1u;', 'half ^= 1u;', self.run_checksum), ['ok', 'ok'])
+        self.assertEqual(self.verdicts('scatter', SCATTER, 'half ^= 1u;', 'half ^= 1u;', lambda exe: self.run_scatter(exe, row_stride=None)), ['ok', 'ok'])
+        self.assertEqual(self.verdicts('checksum', CHECKSUM, 'const uint32_t half = i & 1u;', 'const uint32_t half = i & 1u;', self.run_checksum), ['ok', 'ok'])
+        self.assertEqual(self.verdicts('checksum', CHECKSUM, 'const uint32_t half = i & 1u;', 'const uint32_t half = i & 1u;', lambda exe: self.run_checksum(exe, cores=8, units=3, ranges=5)), ['ok', 'ok'])
+        self.assertEqual(self.verdicts('checksum', CHECKSUM, 'const uint32_t half = i & 1u;', 'const uint32_t half = i & 1u;', lambda exe: self.run_checksum(exe, cores=64, units=2, ranges=7)), ['ok', 'ok'])
 
     def test_scatter_mutants_are_caught(self):
         mutants = {
@@ -552,11 +770,17 @@ class EmulationHasTeethTests(unittest.TestCase):
             'the read barrier is dropped': ('        noc_async_read_barrier();\n        noc_async_write_barrier();\n        if (next >= total) {',
                                             '        noc_async_write_barrier();\n        if (next >= total) {'),
             'a destination page off by one': ('block * pages_per_block + page % pages_per_block', 'block * pages_per_block + page % pages_per_block + 1'),
-            'the staging offset ignores the core start': ('source_offset + k * page_bytes), scratch + k * page_bytes', '0 + k * page_bytes), scratch + k * page_bytes'),
+            'the staging offset ignores the core start': ('qwen_p2p_source(source_offset, row_stride, k,', 'qwen_p2p_source(0, row_stride, k,'),
             'a half page is written': ('destination.get_noc_addr(destination_page), page_bytes);', 'destination.get_noc_addr(destination_page), page_bytes / 2);'),
-            'the second chunk reads from the wrong source': ('staging.get_noc_addr(bank, source_offset + (next + k) * page_bytes)',
-                                                           'staging.get_noc_addr(bank, source_offset + (next + k) * page_bytes + 64)'),
-            'the block table is indexed by the page, not the block': ('get_arg_val<uint32_t>(5 + page / pages_per_block)', 'get_arg_val<uint32_t>(5 + page % 32)'),
+            'the second chunk reads from the wrong source': ('qwen_p2p_source(source_offset, row_stride, next + k,', 'qwen_p2p_source(source_offset, row_stride, next + k + 1,'),
+            'the block table is indexed by the page, not the block': ('get_arg_val<uint32_t>(block_ids + page / pages_per_block)', 'get_arg_val<uint32_t>(block_ids + page % 32)'),
+            'the block table starts one word early (the stride word is read as a block id)': ('constexpr uint32_t block_ids = 6;', 'constexpr uint32_t block_ids = 5;'),
+            # the row stride
+            'the stride is ignored (rows are read back to back)': ('(page / pages_per_block) * row_stride', '(page / pages_per_block) * pages_per_block * page_bytes'),
+            'the stride is applied to every page, not every block': ('(page / pages_per_block) * row_stride', 'page * row_stride'),
+            'the stride is one alignment unit short': ('(page / pages_per_block) * row_stride', '(page / pages_per_block) * (row_stride - 64)'),
+            'the page inside the row is dropped (every page of a block reads the first)': ('+ (page % pages_per_block) * page_bytes;', '+ 0 * page_bytes;'),
+            'the stride is read from the wrong argument': ('const uint32_t row_stride = get_arg_val<uint32_t>(5);', 'const uint32_t row_stride = get_arg_val<uint32_t>(3);'),
         }
         for name, (old, new) in mutants.items():
             with self.subTest(mutant=name):
@@ -569,17 +793,49 @@ class EmulationHasTeethTests(unittest.TestCase):
             'the weight restarts for every chunk': ('weight, sum);', '(weight = get_arg_val<uint32_t>(5)), sum);'),
             'the product is truncated to 32 bits': ('sum += static_cast<uint64_t>(weight) * x0;', 'sum += static_cast<uint32_t>(weight * x0);'),
             'the last word of a chunk is dropped': ('count >> 2, weight, sum);', '(count >> 2) - 1, weight, sum);'),
-            'the next chunk is read into the half being summed': ('scratch + (half ^ 1u) * chunk_bytes,\n                    next_count);',
-                                                                   'scratch + half * chunk_bytes,\n                    next_count);'),
-            'the partial is added at the wrong slot': ('partials.get_noc_addr(slot)', 'partials.get_noc_addr(slot + 1)'),
+            'the next chunk is read into the half being summed': ('next_range, next_within, scratch + (half ^ 1u) * chunk_bytes);',
+                                                                   'next_range, next_within, scratch + half * chunk_bytes);'),
+            'the partial is added at the wrong slot': ('slot + range * slot_stride, out, out_page, out_page_bytes, sum);',
+                                                       'slot + range * slot_stride + 1, out, out_page, out_page_bytes, sum);'),
             'the high word is not stored': ('out[1] = static_cast<uint32_t>(sum >> 32);', 'out[1] = 0;'),
-            'the weight of the first word is wrong': ('uint32_t weight = get_arg_val<uint32_t>(5);', 'uint32_t weight = get_arg_val<uint32_t>(5) + 1;'),
-            'the first chunk is not awaited': ('        while (true) {\n            noc_async_read_barrier();', '        while (true) {'),
+            'the weight of the first word is wrong': ('const uint32_t weight_start = get_arg_val<uint32_t>(5);', 'const uint32_t weight_start = get_arg_val<uint32_t>(5) + 1;'),
+            'a chunk is not awaited': ('        const uint32_t half = i & 1u;\n        noc_async_read_barrier();', '        const uint32_t half = i & 1u;'),
         }
         for name, (old, new) in mutants.items():
             with self.subTest(mutant=name):
                 verdicts = self.verdicts('checksum', CHECKSUM, old, new, self.run_checksum)
                 self.assertNotEqual(set(verdicts), {'ok'}, 'the emulation accepted: ' + name)
+
+    def test_many_ranges_mutants_are_caught(self):
+        """The slips that only a launch of several ranges can make; each runs the ranged scenarios (and an idle-core one: more cores than units)."""
+        mutants = {
+            'the weight is not restarted for the next range': ('            weight = weight_start;\n', ''),
+            'the sum is not restarted for the next range': ('            sum = 0;\n            weight = weight_start;', '            weight = weight_start;'),
+            'the next range is read from the wrong place': ('source_offset + range * range_stride + done', 'source_offset + range * bytes + done'),
+            'a range is read from the previous range': ('source_offset + range * range_stride + done', 'source_offset + (range ? range - 1 : 0) * range_stride + done'),
+            'a range writes the previous range\'s slot': ('slot + range * slot_stride, out, out_page, out_page_bytes, sum);',
+                                                          'slot + (range ? range - 1 : 0) * slot_stride, out, out_page, out_page_bytes, sum);'),
+            'the slot stride is ignored': ('slot + range * slot_stride, out, out_page, out_page_bytes, sum);', 'slot + range, out, out_page, out_page_bytes, sum);'),
+            'the last range is dropped': ('const uint32_t total = ranges * chunks;', 'const uint32_t total = (ranges - 1) * chunks;'),
+            'an idle core writes no partials': ('if (bytes == 0) {\n        for (uint32_t range = 0; range < ranges; ++range) {',
+                                                'if (bytes == 0) {\n        for (uint32_t range = 0; range < 0; ++range) {'),
+            'an idle core writes only the first range': ('qwen_p2p_put_partial(partials, slot + range * slot_stride, out, out_page, out_page_bytes, 0);',
+                                                         'qwen_p2p_put_partial(partials, slot, out, out_page, out_page_bytes, 0);'),
+            'a partial is not awaited before the page is reused': ('    noc_async_write(out_page, partials.get_noc_addr(page), out_page_bytes);\n    noc_async_write_barrier();',
+                                                                   '    noc_async_write(out_page, partials.get_noc_addr(page), out_page_bytes);'),
+            'the range stride is read from the wrong argument': ('const uint32_t range_stride = get_arg_val<uint32_t>(8);', 'const uint32_t range_stride = get_arg_val<uint32_t>(4);'),
+            'the number of ranges is read from the wrong argument': ('const uint32_t ranges = get_arg_val<uint32_t>(7);', 'const uint32_t ranges = get_arg_val<uint32_t>(9);'),
+        }
+        runners = (lambda exe: self.run_checksum(exe, cores=8, units=5, ranges=4), lambda exe: self.run_checksum(exe, cores=64, units=2, ranges=7),
+                   lambda exe: self.run_checksum(exe, cores=8, units=130, ranges=3))
+        for name, (old, new) in mutants.items():
+            with self.subTest(mutant=name):
+                caught = False
+                for eager in (False, True):
+                    exe = self.build_mutant('checksum', CHECKSUM, old, new, eager)
+                    if any(runner(exe)[0] != 'ok' for runner in runners):
+                        caught = True
+                self.assertTrue(caught, 'the emulation accepted: ' + name)
 
 
 class SourceAgreementTests(unittest.TestCase):
@@ -596,6 +852,33 @@ class SourceAgreementTests(unittest.TestCase):
         self.assertRegex(text, r'nb::arg\("staging"\),\s*nb::arg\("byte_offset"\),\s*nb::arg\("length"\)')
         self.assertIn('m.attr("QWEN_KV_READ_VERSION") = "3";', text)
         self.assertIn('#include "qwen_p2p_plan.hpp"', text)
+
+    def test_the_two_new_keywords_are_registered_last_with_defaults_so_every_positional_call_stays_valid(self):
+        """qwen_write_blocks_from_staging(device_tensor, staging, byte_offset, blocks, bank=None, row_stride=None) and
+        qwen_staging_checksum(staging, byte_offset, length, bank=None, cores=64, count=None): the host (StagingApi) finds the forms from these names."""
+        text = read(EXTENSION)
+        self.assertRegex(text, r'nb::arg\("blocks"\),\s*nb::arg\("bank"\) = nb::none\(\),\s*nb::arg\("row_stride"\) = nb::none\(\),\s*"')
+        self.assertRegex(text, r'nb::arg\("length"\),\s*nb::arg\("bank"\) = nb::none\(\),\s*nb::arg\("cores"\) = qwen_p2p::kChecksumDefaultCores,\s*'
+                               r'nb::arg\("count"\) = nb::none\(\),\s*"')
+        # the lambdas take them in the same order, as optionals (None = today's behaviour)
+        self.assertIn('std::optional<uint32_t> bank,\n           std::optional<uint64_t> row_stride)', text)
+        self.assertIn('uint32_t cores,\n           std::optional<uint32_t> count)', text)
+        self.assertIn('count.value_or(1)', text)
+        self.assertIn('row_stride_opt.value_or(slice_bytes)', text)
+        # the docstring states both names (a nanobind function states its signature there: StagingApi falls back to it)
+        for name in ('row_stride', 'count'):
+            self.assertEqual(len(re.findall(r'nb::arg\("%s"\)' % name, text)), 1, name)
+
+    def test_the_checksum_makes_several_launches_for_more_ranges_than_the_partials_hold(self):
+        text = read(EXTENSION)
+        body = text[text.index('std::vector<std::vector<uint64_t>> staging_checksum('):text.index('// Diagnostics: bytes of the staging range')]
+        self.assertIn('qwen_p2p::checksum_launches(count)', body)
+        self.assertIn('enqueue_read_shards(transfers, partials, /*blocking=*/true)', body, 'each launch is read back before the next reuses the partials buffer')
+        self.assertIn('(uint64_t(range) * cores + core) * qwen_p2p::kChecksumPartialBytes', body, 'the partial of range r, core c is partials page r * cores + c')
+        self.assertIn('uint64_t(qwen_p2p::kChecksumMaxRanges) * qwen_p2p::kChecksumMaxCores * qwen_p2p::kChecksumPartialBytes', text,
+                      'the partials buffer holds one page per core of the largest launch')
+        self.assertIn('qwen_p2p::scatter_core_args(', text)
+        self.assertIn('destination_address, staging_address, bank, byte_offset, row_stride, blocks, launch_first, runs[core]', text)
 
     def test_the_default_staging_is_two_times_64_mib(self):
         self.assertIn('uint64_t(128) << 20', read(EXTENSION))
