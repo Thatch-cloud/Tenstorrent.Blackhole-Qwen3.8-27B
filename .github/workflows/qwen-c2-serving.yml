@@ -77,6 +77,11 @@ name: Qwen C2 serving image
 # C2_TT_GRID (10,9 | 11,9 | 12,9, or unset: nothing is passed) clamps the compute grid tt-metal exposes, as insurance for cards that no longer soft-harvest
 # Tensix columns: every step that opens a card gives its container TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=<value> - the fabric probe, the pair and four-card smokes,
 # the gate, prefix and tau lab drivers and the replay (--tt-grid), and the cardm harness (QUAL_TT_GRID, which the harness puts into its container).
+# C2_NVME_DEVICE (a /dev/disk/by-id path, or `status`: the by_id of the cache drive's status file) and C2_P2PMEM (PCI addresses, or `auto`) give the fabric, four-card smoke and prefix
+# containers the NVMe cache drive and the cards' p2pmem (scripts/ci/c2_cache_drive.py; docs/tp4-kv-nvme.md section 12): the drive is resolved from its link at run time, the R1 readings
+# (controller state, namespace size) are printed and the job is refused unless the controller is live and the namespace is above 0 bytes; the container gets --device <resolved>:/dev/c2-cache-drive,
+# the status file read-only and QWEN_PREFIX_NVME_DEVICE; p2pmem/allocate of each named card is bound read-write (one file; the rest of sysfs stays read-only) with
+# --security-opt apparmor=unconfined, and QWEN_P2PMEM_DEVICES. Both keys unset: nothing is added. The values are the private job config's: nothing here prints them (the job step masks them).
 # C2_TELEMETRY=1 (and C2_TELEMETRY_MS, default 1000) runs the read-only card telemetry sidecar (scripts/ci/card_telemetry.sh) through the smoke and gate steps: per-chip ARC telemetry
 # (AICLK and the limiter holding it, VCORE, power, current, temperatures, kernel NOP counters) into telemetry-smoke/ and telemetry-gate/ of the results, one summary line per chip
 # in the step's log. It reads over PCIe the table the ARC firmware publishes (the read tt-smi makes), sends no ARC message, and never fails a step.
@@ -114,6 +119,8 @@ jobs:
           set -euo pipefail
           test "$RUNNER_NAME" = thatch-build-amd64-02-cp-temp
           python3 scripts/ci/c2_serving_job.py .github/c2-serving-job.env >> "$GITHUB_OUTPUT"
+          # C2_NVME_DEVICE / C2_P2PMEM literals (a by-id name carries the drive's serial; PCI addresses) are masked before anything below prints the outputs or a step's env block.
+          python3 scripts/ci/c2_cache_drive.py mask "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
           # When the job began: the gate step budgets its plans against what the job's timeout leaves.
           echo "C2_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
@@ -434,6 +441,8 @@ jobs:
           PROBE: ${{ steps.job.outputs.fabric_probe }}
           BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}
           TT_GRID: ${{ steps.job.outputs.tt_grid }}
+          NVME_DEVICE: ${{ steps.job.outputs.nvme_device }}
+          P2PMEM: ${{ steps.job.outputs.peer_memory }}
         run: |
           set -euo pipefail
           # The (1, 4) mesh under the ring descriptor, opened once (one fabric config, one open: a second open in a
@@ -477,6 +486,13 @@ jobs:
           fi
           devices=()
           for node in $(card_set_devices); do devices+=(--device "$node"); done
+          # C2_NVME_DEVICE / C2_P2PMEM (scripts/ci/c2_cache_drive.py): the cache drive and the cards' p2pmem. A drive that is not live (or reads 0 bytes) refuses the probe here, before the
+          # container; both unset adds nothing.
+          cache_args=()
+          if [ -n "$NVME_DEVICE$P2PMEM" ]; then
+            python3 scripts/ci/c2_cache_drive.py args ${NVME_DEVICE:+--nvme-device "$NVME_DEVICE"} ${P2PMEM:+--p2pmem "$P2PMEM"} --out "$RUNNER_TEMP/cache-drive-fabric.args"
+            mapfile -d '' -t cache_args < "$RUNNER_TEMP/cache-drive-fabric.args"
+          fi
           # kvread qualifies the BAKED extension (qwen_kv_read, optimisation/ttnn-op/kv_region_read). The rig's graft directory is mounted read-only
           # beside it and is NOT on the path: the probe imports the baked module first and falls back to the mount only for an image built before
           # B0 baked the graft, and its report says which ran ('extension_source'), so a mount can never shadow the baked bytes.
@@ -496,7 +512,7 @@ jobs:
           timeout -k 30 "$limit" docker run --rm --name "$name" --read-only \
             --tmpfs /tmp:rw,exec,nosuid,size=512m --tmpfs /opt/tt-metal/generated:rw,exec,nosuid,size=1g \
             --tmpfs /root/.cache/ttnn:rw,exec,nosuid,size=1g --tmpfs /root/.cache/tt-metal-cache:rw,exec,nosuid,size=8g \
-            --shm-size 4g --memory 80g --cpus 8 "${devices[@]}" \
+            --shm-size 4g --memory 80g --cpus 8 "${devices[@]}" ${cache_args[@]+"${cache_args[@]}"} \
             -v /dev/hugepages-1G:/dev/hugepages-1G --cap-add SYS_NICE \
             -v "$PWD:/c2:ro" -v "$results:/probe-results" ${kvmount[@]+"${kvmount[@]}"} \
             -e MESH_DEVICE=P150x4 -e PYTHONDONTWRITEBYTECODE=1 -e QWEN_C2_SERVING=0 \
@@ -942,6 +958,8 @@ jobs:
           BOX_MINUTES: ${{ steps.job.outputs.box_minutes }}
           CARDS: ${{ steps.job.outputs.cards }}
           TT_GRID: ${{ steps.job.outputs.tt_grid }}
+          NVME_DEVICE: ${{ steps.job.outputs.nvme_device }}
+          P2PMEM: ${{ steps.job.outputs.peer_memory }}
         run: |
           set -euo pipefail
           # TT prefix-reuse design 2.2 (G1): a serving container per arm in the agent's shape, launched
@@ -1008,6 +1026,7 @@ jobs:
             --baseline "$PREFIX_BASELINE" --agents "$PREFIX_AGENTS" --budget-seconds "$budget" ${box_left:+--box-seconds "$box_left"} \
             ${PREFIX_KVREAD_MOUNT:+--kvread-mount /home/thatch/opgraft-KVR-s0808fix} \
             ${TT_GRID:+--tt-grid "$TT_GRID"} \
+            ${NVME_DEVICE:+--nvme-device "$NVME_DEVICE"} ${P2PMEM:+--p2pmem "$P2PMEM"} \
             ${MODEL_REPO:+--model-repo "$MODEL_REPO" --model-revision "$MODEL_REVISION"} \
             --results "$results" --cards "$CARDS" 2>&1 | tee "$RUNNER_TEMP/c2-results/prefix.log" || status=$?
           # Read the launched argv (memory read-the-launched-argv) and the graft's install line, per arm.
@@ -1137,6 +1156,8 @@ jobs:
           MODEL_REPO: ${{ steps.job.outputs.model_repo }}
           MODEL_REVISION: ${{ steps.job.outputs.model_revision }}
           SERVED_MODEL: ${{ steps.job.outputs.model_served }}
+          NVME_DEVICE: ${{ steps.job.outputs.nvme_device }}
+          P2PMEM: ${{ steps.job.outputs.peer_memory }}
         run: |
           set -euo pipefail
           # The pair smoke's shape on every Blackhole board present (a general-tp4 profile: the contract sets
@@ -1160,6 +1181,13 @@ jobs:
           fi
           devices=()
           for node in $(card_set_devices); do devices+=(--device "$node"); done
+          # C2_NVME_DEVICE / C2_P2PMEM (scripts/ci/c2_cache_drive.py): the cache drive (resolved from its by-id link now, the R1 readings printed, the job refused unless the controller is live and
+          # the namespace above 0 bytes) and the cards' p2pmem; both unset adds nothing and the container is what it was.
+          cache_args=()
+          if [ -n "$NVME_DEVICE$P2PMEM" ]; then
+            python3 scripts/ci/c2_cache_drive.py args ${NVME_DEVICE:+--nvme-device "$NVME_DEVICE"} ${P2PMEM:+--p2pmem "$P2PMEM"} --out "$RUNNER_TEMP/cache-drive-smoke.args"
+            mapfile -d '' -t cache_args < "$RUNNER_TEMP/cache-drive-smoke.args"
+          fi
           # The job's BOX (C2_BOX_MINUTES, c2_serving_job.py), enforced from inside and never by cancelling the run: the wait for the API ends at the box,
           # and the smoke client runs under `timeout` for what the box has left; the trap below still removes the container and saves its log.
           # The box counts from the job's start (C2_JOB_STARTED), so the reset before this step is inside it.
@@ -1195,7 +1223,7 @@ jobs:
           docker run -d --name "$name" --read-only \
             --tmpfs /tmp:rw,size=512m --tmpfs /opt/tt-metal/generated:rw,size=1g \
             --tmpfs /root/.cache/ttnn:rw,size=1g --tmpfs /root/.cache/tt-metal-cache:rw,size=8g \
-            --shm-size 4g --memory 80g --cpus 8 "${devices[@]}" ${salt_args[@]+"${salt_args[@]}"} \
+            --shm-size 4g --memory 80g --cpus 8 "${devices[@]}" ${cache_args[@]+"${cache_args[@]}"} ${salt_args[@]+"${salt_args[@]}"} \
             -v /dev/hugepages-1G:/dev/hugepages-1G --cap-add SYS_NICE \
             -v /home/thatch/hf-cache/hub:/models -e HF_HOME=/models -e HF_HUB_CACHE=/models \
             -e MESH_DEVICE=P300 -e QWEN36_BATCHED_DECODE_MODE=host -e VLLM_RPC_TIMEOUT=100000 \
