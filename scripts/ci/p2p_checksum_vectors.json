@@ -1,0 +1,23 @@
+{
+ "algorithm": "words x_k = little-endian uint32 at byte 4k of the range; w_k = (k * 2654435761 + 1) mod 2^32; S = sum_k(w_k * x_k) mod 2^64; k counts from the first byte of the range (docs/tp4-p2p-restore.md, section 3)",
+ "vectors": [
+  {
+   "name": "zero_4096",
+   "definition": "4096 bytes of zero",
+   "length": 4096,
+   "checksum": "0"
+  },
+  {
+   "name": "mod251_4096",
+   "definition": "4096 bytes, byte i = i % 251",
+   "length": 4096,
+   "checksum": "17453227578024978262"
+  },
+  {
+   "name": "prng_1mib",
+   "definition": "numpy.random.default_rng(20261030).integers(0, 256, 1 << 20, dtype=numpy.uint8)",
+   "length": 1048576,
+   "checksum": "4942361704597259676"
+  }
+ ]
+}

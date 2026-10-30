@@ -106,7 +106,7 @@ never guessed around):
     [PINDIAG] prefix: nvme tier spill blocks=<n> bytes=<n> ckpts=<n> ckpt_bytes=<n> ms=<f> queue=<n>      one per written batch (the writer thread); read into nvme_spills.
     [PINDIAG] prefix: nvme tier restore req=<id> blocks=<n> bytes=<n> from=<tokens> to=<tokens> backend=<host> verify=<mode>     NVMe blocks read into host records; read into nvme_restores.
     [PINDIAG] prefix: nvme tier checkpoint restored pos=<n> bytes=<n> ms=<f>        a checkpoint read back into the store; read into nvme_ckpt_restores.
-    [PINDIAG] prefix: nvme tier REFUSED to start on a zero-retention node: ... | nvme tier UNAVAILABLE, ... | nvme tier latched off: ... | nvme tier DEVICE LOST: ... | nvme tier ... NOT APPLIED ... | nvme tier spill failed ... | nvme tier ... failed its digest ...
+    [PINDIAG] prefix: nvme tier REFUSED to start on a zero-retention node: ... | nvme tier UNAVAILABLE, ... | nvme tier latched off: ... | nvme tier DEVICE LOST: ... | nvme tier ... NOT APPLIED ... | nvme tier spill failed ... | nvme tier ... failed its digest ... | nvme tier p2p UNAVAILABLE, ... | nvme tier p2p latched off: ... | nvme tier p2p restore failed ... | nvme tier p2p CHECKSUM MISMATCH ...
         the tier did not start, or stopped, or dropped something that failed its check; read into nvme_trouble (a gate that asks for the tier needs nvme_on and an empty nvme_trouble).
 
   the host KV tier and the preconverted checkpoints (QWEN_PREFIX_HOST_TIER_GIB, QWEN_PREFIX_CKPT_PRECONVERTED; docs/prefix-store-hygiene.md):
@@ -194,7 +194,7 @@ TIER_SLICE_ABORTED = '[PINDIAG] prefix: host tier restore slice aborted'
 TIER_TROUBLE = ('[PINDIAG] prefix: host tier latched off', '[PINDIAG] prefix: host tier spill failed', '[PINDIAG] prefix: host tier restore failed')
 NVME = '[PINDIAG] prefix: nvme tier '
 NVME_TROUBLE = ('REFUSED', 'UNAVAILABLE', 'latched off', 'spill failed', 'failed its digest', 'restore failed', 'AUDIT MISMATCH', 'checkpoint restore failed',
-                'checkpoint failed its digest', 'idle copy failed', 'command ', 'DEVICE LOST', 'NOT APPLIED', 'writer error', 'stop: ')
+                'checkpoint failed its digest', 'idle copy failed', 'command ', 'DEVICE LOST', 'NOT APPLIED', 'writer error', 'stop: ', 'CHECKSUM MISMATCH')
 CKPT_AUDIT = '[PREFIX-AUDIT-CKPT] tensors='
 CKPT_PRECONVERTED = '[PINDIAG] prefix: checkpoint preconverted '
 STATS = re.compile(r'\[PINDIAG\] prefix: stats (\{.*\})\s*$')

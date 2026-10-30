@@ -182,6 +182,16 @@ class EnvClassTests(unittest.TestCase):
     def test_the_nvme_tiers_own_names_are_never_in_the_table(self):
         self.assertEqual(sorted(name for name in classified() if name in kvnvme.NAMES), [])
 
+    def test_the_peer_to_peer_names_are_the_tiers_own_and_the_layout_component_carries_the_switch(self):
+        # QWEN_PREFIX_NVME_P2P changes the stored bytes' ORDER (chip-major), so it is not a 'kv' env switch (those are read from the process environment by value): it is the plan's
+        # `p2p`, and the fingerprint's 'layout' component says so. Its knobs (threads, staging size, the card list) change nothing stored.
+        for name in ('QWEN_PREFIX_NVME_P2P', 'QWEN_PREFIX_NVME_P2P_THREADS', 'QWEN_PREFIX_NVME_P2P_STAGING_MIB', 'QWEN_PREFIX_NVME_P2PMEM'):
+            self.assertIn(name, kvnvme.NAMES)
+            self.assertNotIn(name, classified())
+            self.assertEqual(unclassified([name]), [])
+        self.assertNotIn('QWEN_PREFIX_NVME_P2P', kvnvme.FINGERPRINTED_ENV)
+        self.assertIn('QWEN_PREFIX_NVME_P2P', kvnvme.GATE_ONLY)
+
     def test_the_two_components_with_their_own_env_name_are_in_the_table(self):
         self.assertIn('QWEN35_GDN_STATE_BF16', PARSED['covered'])
         self.assertIn(kvnvme.DRAFTER_FLAG, PARSED['drafter'])
@@ -221,6 +231,16 @@ class FingerprintEnvTests(unittest.TestCase):
         self.assertEqual(self.fingerprint({'QWEN_C2_PROFILE': 'one-profile'}), base)
         self.assertEqual(self.fingerprint({'QWEN_C2_PROFILE': 'another-profile'}), base)
         self.assertEqual(sorted(components), sorted(['layout', 'epoch', 'model', 'drafter', 'kv', 'block_bytes', 'page', 'chunk', 'mesh', 'gdn_bf16', 'ckpt_format', 'env', 'compat']))
+
+    def test_the_peer_to_peer_switch_moves_the_layout_component_and_so_the_fingerprint_and_its_knobs_do_not(self):
+        base, components = self.components({})
+        on, on_components = self.components({}, QWEN_PREFIX_NVME_P2P='1')
+        self.assertEqual((components['layout'], on_components['layout']), (kvnvme.LAYOUT, kvnvme.LAYOUT_CHIPMAJOR))
+        self.assertNotEqual(on, base)
+        for knob in ({'QWEN_PREFIX_NVME_P2P_THREADS': '2'}, {'QWEN_PREFIX_NVME_P2P_STAGING_MIB': '64'}, {'QWEN_PREFIX_NVME_P2PMEM': '0000:88:00.0'}):
+            self.assertEqual(self.fingerprint({}, QWEN_PREFIX_NVME_P2P='1', **knob), on, knob)
+        # (the env the process runs under cannot move it either: the switch is read from the plan)
+        self.assertEqual(self.fingerprint({'QWEN_PREFIX_NVME_P2P': '1'}), base)
 
     def test_the_epoch_is_part_of_it_and_so_is_the_override_token(self):
         original = kvnvme.KV_EPOCH

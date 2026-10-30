@@ -111,6 +111,8 @@ GAUGES = {
     'nvme_journal_used_bytes': 'bytes of the journal used since the last snapshot',
     'nvme_largest_free_bytes': 'the largest contiguous free extent of the data region',
     'nvme_through_backlog_blocks': 'blocks of finished requests waiting for the idle copy (write-through)',
+    'nvme_p2p_on': '1 while restores go NVMe -> card (QWEN_PREFIX_NVME_P2P=1, the path started and was not latched off); 0 when the host backend serves them',
+    'nvme_p2p_map_verified': '1 when /proc/self/pagemap confirmed that the cards\' p2pmem mappings sit where the TLB windows point (needs CAP_SYS_ADMIN), 0 when it could not say',
     'nvme_at_rest': '1 when the drive was shown at open to be an Opal self-encrypting drive with locking enabled and unlocked (0: the check is off, a gate\'s setting)',
 }
 # Levels that are the host's, not the writer's: the largest over writers, not the sum.
@@ -306,6 +308,19 @@ COUNTERS = {
     'nvme_unavailable': '1 when the NVMe tier could not open its device and the engine serves without it',
     'nvme_refused_not_encrypted': '1 when the NVMe tier refused to open the drive because it is not an Opal self-encrypting drive with locking enabled and unlocked (QWEN_PREFIX_NVME_REQUIRE_SED=0 is a gate\'s override)',
     'nvme_device_lost': '1 when the drive disappeared at run time (its node or controller went away, the namespace read 0 bytes) and the tier latched off; a restart with a live device brings it back',
+    # the peer-to-peer restore (QWEN_PREFIX_NVME_P2P; docs/tp4-p2p-restore.md)
+    'nvme_p2p_restores': 'restores whose NVMe blocks were read into the cards\' staging buffers (the ones that fell back to the host path are counted here and in nvme_p2p_fallbacks)',
+    'nvme_p2p_blocks': 'KV blocks copied from the staging buffers into the cache after their checksums matched',
+    'nvme_p2p_bytes': 'bytes of those blocks',
+    'nvme_p2p_read_ms': 'time from the first shard read of a chunk being submitted to the last one returning, summed over chunks (the drive\'s time; reads of the next chunk overlap the checks of this one)',
+    'nvme_p2p_check_ms': 'time the scheduler thread spent in the cards\' checksum ops and their comparison',
+    'nvme_p2p_write_ms': 'time the scheduler thread spent enqueueing the staging-to-cache copy ops',
+    'nvme_p2p_mismatch': 'shards (one block on one card) whose device checksum differed from the one stored at spill: the restore was a miss and nothing was written for them',
+    'nvme_p2p_late_data': 'checksum comparisons that failed once and matched after a device sync and a moment (a posted write trailing the drive\'s completion)',
+    'nvme_p2p_errors': 'peer-to-peer restores that failed for any reason other than a checksum mismatch (a read error, a device op error)',
+    'nvme_p2p_fallbacks': 'those errors\' restores that were redone through the host path',
+    'nvme_p2p_latched': '1 once the peer-to-peer path latched itself off (three failures in a row, or a device-op error); restores then use the host path until a restart',
+    'nvme_p2p_unavailable': '1 when the peer-to-peer path could not start (no staging op, no published window, a failed canary) and the host backend serves the restores',
 }
 
 

@@ -424,9 +424,9 @@ class BlockFile(object):
 class Entry(object):
     """One object: where it is (offset, alloc bytes reserved, nbytes of data) and what it is."""
 
-    __slots__ = ('kind', 'key', 'offset', 'nbytes', 'alloc', 'tenant', 'chain', 'index', 'extra', 'created', 'last_used', 'digest', 'fp', 'pins', 'dead', 'durable')
+    __slots__ = ('kind', 'key', 'offset', 'nbytes', 'alloc', 'tenant', 'chain', 'index', 'extra', 'created', 'last_used', 'digest', 'fp', 'aux', 'pins', 'dead', 'durable')
 
-    def __init__(self, kind, key, offset, nbytes, tenant, chain, index, extra, created, last_used, digest, fp):
+    def __init__(self, kind, key, offset, nbytes, tenant, chain, index, extra, created, last_used, digest, fp, aux=b''):
         self.kind = kind
         self.key = key
         self.offset = offset
@@ -440,12 +440,15 @@ class Entry(object):
         self.last_used = last_used
         self.digest = digest
         self.fp = fp
+        self.aux = aux                 # up to MAX_AUX bytes the layout beside the digest wants (the peer-to-peer checksums of a chip-major block); empty for every other entry
         self.pins = 0
         self.dead = False
         self.durable = False           # (dead only) the removal is in the journal: the extent may be reused as soon as no reader pins it
 
 
 _ENTRY = struct.Struct('<BBBBIQQQdd')
+FLAG_AUX = 1                  # the entry's flags byte: a length byte and that many auxiliary bytes follow the fingerprint
+MAX_AUX = 64
 _SB = struct.Struct('<8sIIQ16sIQQQQQQQQIQIQQI')
 _SNAP_HEAD = struct.Struct('<8sQQQQ')
 _JHEAD = struct.Struct('<IIQQHHI')
@@ -453,12 +456,16 @@ _TOUCH = struct.Struct('<d')
 
 
 def pack_entry(entry):
-    return b''.join((_ENTRY.pack(entry.kind, len(entry.key), len(entry.chain), 0, entry.index & 0xFFFFFFFF, entry.offset, entry.nbytes, entry.extra,
-                                 entry.created, entry.last_used), entry.key, entry.chain, entry.tenant, entry.digest, entry.fp))
+    aux = entry.aux
+    parts = [_ENTRY.pack(entry.kind, len(entry.key), len(entry.chain), FLAG_AUX if aux else 0, entry.index & 0xFFFFFFFF, entry.offset, entry.nbytes, entry.extra,
+                         entry.created, entry.last_used), entry.key, entry.chain, entry.tenant, entry.digest, entry.fp]
+    if aux:
+        parts += [bytes((len(aux),)), aux]
+    return b''.join(parts)
 
 
 def unpack_entry(buffer, position):
-    kind, klen, clen, _flags, index, offset, nbytes, extra, created, last_used = _ENTRY.unpack_from(buffer, position)
+    kind, klen, clen, flags, index, offset, nbytes, extra, created, last_used = _ENTRY.unpack_from(buffer, position)
     position += _ENTRY.size
     key = bytes(buffer[position:position + klen])
     position += klen
@@ -472,7 +479,16 @@ def unpack_entry(buffer, position):
     position += 8
     if len(fp) != 8 or len(digest) != 32 or len(key) != klen:
         raise ValueError('truncated entry')
-    return Entry(kind, key, offset, nbytes, tenant, chain, index, extra, created, last_used, digest, fp), position
+    aux = b''
+    if flags & FLAG_AUX:
+        if position >= len(buffer):
+            raise ValueError('truncated entry')
+        count = buffer[position]
+        aux = bytes(buffer[position + 1:position + 1 + count])
+        position += 1 + count
+        if len(aux) != count:
+            raise ValueError('truncated entry')
+    return Entry(kind, key, offset, nbytes, tenant, chain, index, extra, created, last_used, digest, fp, aux), position
 
 
 class Geometry(object):
@@ -583,9 +599,9 @@ class Allocator(object):
 class PutItem(object):
     """One object to store: buffers (bytes-like, concatenated = the object), its identity and, optionally, its digest (computed here when absent)."""
 
-    __slots__ = ('kind', 'key', 'buffers', 'tenant', 'chain', 'index', 'extra', 'fp', 'digest', 'nbytes')
+    __slots__ = ('kind', 'key', 'buffers', 'tenant', 'chain', 'index', 'extra', 'fp', 'digest', 'nbytes', 'aux')
 
-    def __init__(self, kind, key, buffers, tenant, chain, index, fp, extra=0, digest=None):
+    def __init__(self, kind, key, buffers, tenant, chain, index, fp, extra=0, digest=None, aux=b''):
         self.kind = kind
         self.key = bytes(key)
         self.buffers = list(buffers)
@@ -596,6 +612,9 @@ class PutItem(object):
         self.fp = fp
         self.extra = int(extra)
         self.digest = digest
+        self.aux = bytes(aux or b'')
+        if len(self.aux) > MAX_AUX:
+            raise ValueError('an entry carries at most %d auxiliary bytes, not %d' % (MAX_AUX, len(self.aux)))
 
 
 STAT_NAMES = ('puts', 'put_bytes', 'put_duplicates', 'put_refused', 'put_evictions', 'gets', 'get_hits', 'get_misses', 'reads', 'read_bytes', 'read_errors',
@@ -1325,7 +1344,7 @@ class NvmeStore(object):
                 for position, offset in placed:
                     item = items[position]
                     entries.append(Entry(item.kind, item.key, offset, item.nbytes, item.tenant, item.chain, item.index, item.extra, created, created, item.digest,
-                                         item.fp))
+                                         item.fp, item.aux))
                 records = self._touch_records() + self._put_payloads(entries)
                 journaling = True
                 self._journal_append(records)

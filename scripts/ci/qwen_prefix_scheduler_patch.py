@@ -623,7 +623,8 @@ class RestoreJob(object):
     """One returning request's restore in progress (docstring item h): the records to write back (one per block from `first` to `need`), the request's own device hit
     (`protected`, touched for the job's length so no allocation of the job can take it), the blocks written so far (`new`, held by the job, not yet hashed), and the cost so far."""
 
-    __slots__ = ('request', 'request_id', 'first', 'need', 'records', 'keys', 'protected', 'new', 'tenant', 'work_ms', 'slices', 'max_ms', 'held', 'step', 'bytes')
+    __slots__ = ('request', 'request_id', 'first', 'need', 'records', 'keys', 'protected', 'new', 'tenant', 'work_ms', 'slices', 'max_ms', 'held', 'step', 'bytes',
+                 'stream', 'stream_base', 'nvme_entries', 'progress_at', 'host_only')
 
     def __init__(self, request, first, need, records, protected, tenant):
         self.request, self.request_id = request, request.request_id
@@ -638,6 +639,11 @@ class RestoreJob(object):
         self.held = 0
         self.step = None
         self.bytes = 0
+        self.stream = None            # the peer-to-peer reads of the job's NVMe blocks (a direct backend that slices), begun by the first slice
+        self.stream_base = 0          # the job position its first chunk starts at
+        self.nvme_entries = []        # their pinned store entries, given back when the job is released
+        self.progress_at = None       # (monotonic) when the last peer-to-peer chunk was taken, or the stream began
+        self.host_only = False        # the peer-to-peer reads failed for this job: the rest of it comes through the host path
 
     @property
     def total(self):
@@ -676,6 +682,8 @@ class Pending(object):
 
 # The blocks of the first slice of a job when no cost per block has been measured yet (a probe), and the longest one slice may hold the engine before the gate calls it a defect.
 SLICE_PROBE_BLOCKS = 8
+# A peer-to-peer sliced restore whose reads have not landed a chunk for this long (monotonic seconds) is abandoned, and the path latched off: a drive that stopped answering.
+P2P_STALL_S = 20.0
 
 
 class TierHooks(object):
@@ -1294,6 +1302,8 @@ class TierHooks(object):
                 self.io.write_blocks([ids[index - first] for index in warm], [records[index].payload for index in warm])
             if cold:
                 nvme.restore_to_device(entries, [ids[index - first] for index in cold])
+                if self.config.audit:
+                    self.audit_direct(request, [ids[index - first] for index in cold], entries)
             pool.cache_full_blocks(request, [None] * first + list(new), first, need, BLOCK, 0)
             chain = hashes[0] if len(hashes) else None
             for offset, block in enumerate(new):
@@ -1301,10 +1311,13 @@ class TierHooks(object):
             if quota is not None:
                 quota.note_published(new, tenant)
             ok = True
+        except TierAuditError:
+            raise
         except Exception as error:
             stats['tier_restore_failures'] += 1
             nvme.c['nvme_restore_failures'] += 1
-            self.failures += 1
+            if not getattr(error, 'miss_only', False):          # (a checksum mismatch is a miss and the path's own strike; it does not count toward latching the host tier)
+                self.failures += 1
             graft.log('nvme tier direct restore failed req=%s (%d so far): %s: %s', request.request_id, self.failures, type(error).__name__, error)
             if self.failures >= 3:
                 registry.tier_latch('three restores in a row failed')
@@ -1356,6 +1369,11 @@ class TierHooks(object):
             return True
         return False
 
+    def nvme_slices(self):
+        """Whether the NVMe tier's blocks can be restored a slice at a time: the host backend (fill), or a direct backend that slices and is still usable."""
+        backend = self.nvme.backend
+        return not backend.direct or bool(getattr(backend, 'sliced', False))
+
     def start(self, request):
         """The job for a request that needs the tier's blocks, or None (nothing to restore, a record gone, no room, no slice to give): what load() checks before it allocates, without
         allocating. Takes the pins and touches the request's own device hit; abort() gives them back."""
@@ -1377,8 +1395,9 @@ class TierHooks(object):
         for index in range(first, need):
             record = tier.get(hashes[index])
             if record is None:
-                if self.nvme is not None and not self.nvme.backend.direct and self.nvme.has_kv(hashes[index]):
-                    # On the NVMe tier only: the slice that needs it reads it back (fill). (A direct backend has no sliced restore: the trim restores whole.)
+                if self.nvme is not None and self.nvme_slices() and self.nvme.has_kv(hashes[index]):
+                    # On the NVMe tier only: the slice that needs it reads it back (fill), or, on a direct backend that slices, the chunk that holds it is read into the cards' staging
+                    # buffers beside the other seats' decode rounds (advance_direct). (Any other direct backend has no sliced restore: the trim restores whole.)
                     record = Pending(hashes[index], index)
                 else:
                     stats['tier_restore_failures'] += 1
@@ -1416,6 +1435,16 @@ class TierHooks(object):
         """One slice of `job` (all that is left when `whole`): the digests of its records, an allocation of its blocks (what that evicts is spilled before anything is written), the raw write,
         the read-back audit. -> 'more', 'done' (the job is finished and gone) or 'failed' (abandoned and gone)."""
         graft, registry, stats, tier, pool = self.graft, self.registry, self.registry.stats, self.tier, self.graft.block_pool
+        if self.nvme is not None and any(isinstance(record, Pending) for record in job.records[len(job.new):]):
+            backend = self.nvme.backend
+            if job.stream is not None and not backend.direct:
+                self.end_stream(job)                      # the path latched off under the job: the host path (fill) takes the rest
+            elif job.stream is None and backend.direct and getattr(backend, 'sliced', False) and not job.host_only:
+                state = self.begin_stream(job)
+                if state is not None:
+                    return state
+            if job.stream is not None:
+                return self.advance_direct(job, whole)
         remaining = job.total - len(job.new)
         count = remaining if whole else self.slice_size(remaining)
         low = len(job.new)
@@ -1484,6 +1513,151 @@ class TierHooks(object):
         self.finish(job)
         return 'done'
 
+    def begin_stream(self, job):
+        """A direct backend that slices: pin the job's NVMe blocks and start their reads (chunks of at most the slice cap), in the background. -> None on success (the first slice then runs
+        in this call), 'failed' (a block is gone: the job was abandoned)."""
+        nvme, stats = self.nvme, self.registry.stats
+        pending = [record for record in job.records[len(job.new):] if isinstance(record, Pending)]
+        entries = nvme.pin_kv([record.key for record in pending])
+        if any(entry is None for entry in entries):
+            nvme.c['nvme_miss_blocks'] += sum(1 for entry in entries if entry is None)
+            nvme.c['nvme_restore_failures'] += 1
+            stats['tier_restore_failures'] += 1
+            nvme.unpin(entries)
+            self.abort(job, 'an NVMe block could not be brought back')
+            return 'failed'
+        found = iter(entries)
+        items = [next(found) if isinstance(record, Pending) else None for record in job.records[len(job.new):]]
+        try:
+            job.stream = nvme.backend.start_stream(items, self.slice_blocks or None)
+        except Exception as error:
+            nvme.unpin(entries)
+            nvme.backend.note_error(nvme, error)
+            job.host_only = True
+            return None                                  # (the host path takes the job: fill reads the Pending blocks)
+        job.nvme_entries = entries
+        job.stream_base = len(job.new)
+        job.progress_at = time.monotonic()
+        return None
+
+    def end_stream(self, job, wait=True):
+        """Stop the job's peer-to-peer reads (they cannot be cancelled: wait for the ones in flight, a moment only when the job is being abandoned) and give back the pins."""
+        stream, job.stream = job.stream, None
+        if stream is not None:
+            stream.close(timeout=60.0 if wait else 1.0)
+        if job.nvme_entries:
+            self.nvme.unpin(job.nvme_entries)
+            job.nvme_entries = []
+
+    def advance_direct(self, job, whole=False):
+        """One slice of a job whose NVMe blocks come through the peer-to-peer reads: the next chunk of positions, once all its shards have landed in the cards' staging buffers. Not
+        ready (and not `whole`): nothing happens, the pass goes on without this request (the reads proceed on their threads beside the seats' decode rounds). Ready: the cards'
+        checksums are compared with the stored ones (a mismatch abandons the job: a miss), the pool allocates the chunk's blocks, the host-tier records of the chunk are written as
+        before, and the staged bytes are copied into the blocks by the device. -> 'more', 'done' or 'failed', as advance()."""
+        import qwen_p2p_restore as p2p
+
+        graft, stats, pool, nvme = self.graft, self.registry.stats, self.graft.block_pool, self.nvme
+        backend, stream = nvme.backend, job.stream
+        low = len(job.new)
+        began = time.perf_counter()
+        quota = graft.quota
+        chunk = None
+        allocated = False
+        try:
+            chunk = stream.take(wait=whole)
+            if chunk is None:
+                if stream.finished:
+                    raise SliceRefused('the peer-to-peer stream ended before the job did')
+                if time.monotonic() - job.progress_at > P2P_STALL_S:
+                    backend.strike('no chunk landed in %d s' % P2P_STALL_S, at_once=True)
+                    raise SliceRefused('the peer-to-peer reads stalled')
+                return 'more'
+            job.progress_at = time.monotonic()
+            count = chunk.count
+            if job.stream_base + chunk.first != low:
+                raise SliceRefused('the stream is at position %d, the job at %d' % (job.stream_base + chunk.first, low))
+            if pool.get_num_free_blocks() < count:
+                stats['tier_restore_refused_room'] += 1
+                self.abort(job, 'no room for %d blocks' % count)
+                return 'failed'
+            records = job.records[low:low + count]
+            for record in records:
+                if not isinstance(record, Pending) and not self.check_digest(record):
+                    stats['tier_restore_refused_digest'] += 1
+                    graft.log('host tier record failed its digest req=%s block=%d: dropped', job.request_id, record.index)
+                    self.tier.remove(record.key)
+                    self.unhold([record.key])
+                    raise SliceRefused()
+            stream.verify(chunk)                       # before any block is taken: a chunk that does not check allocates nothing and writes nothing
+            if quota is not None:
+                quota.allocating = job.tenant
+            try:
+                new = pool.get_new_blocks(count)
+            finally:
+                if quota is not None:
+                    quota.allocating = None
+            job.new.extend(new)
+            allocated = True
+            self.flush()
+            ids = [block.block_id for block in new]
+            held = [offset for offset, record in enumerate(records) if not isinstance(record, Pending)]
+            if held:
+                self.io.write_blocks([ids[offset] for offset in held], [records[offset].payload for offset in held])
+            stream.write(chunk, [ids[position - chunk.first] for position, _entry in chunk.pending])
+            stream.release(chunk)
+            if self.config.audit:
+                self.audit_direct(job.request, [ids[position - chunk.first] for position, _entry in chunk.pending], [entry for _position, entry in chunk.pending])
+                held_payloads = [records[offset].payload for offset in held]
+                if held:
+                    self.audit(job.request, [ids[offset] for offset in held], held_payloads)
+        except SliceRefused as refused:
+            self.abort(job, refused.reason)
+            return 'failed'
+        except p2p.P2PMismatch as error:
+            backend.note_mismatch(nvme, error)
+            nvme.c['nvme_restore_failures'] += 1
+            stats['tier_restore_failures'] += 1
+            self.abort(job, 'the cards\' checksums differ from the stored ones')
+            return 'failed'
+        except TierAuditError:
+            self.abort(job, 'the audit failed', refuse=False)
+            raise
+        except Exception as error:
+            backend.note_error(nvme, error)
+            if not allocated and isinstance(error, (p2p.P2PReadError, p2p.P2PDeviceError)):
+                # Nothing of the chunk reached a block: the host path (fill) takes the job from here.
+                if chunk is not None:
+                    stream.release(chunk)
+                job.host_only = True
+                self.end_stream(job)
+                return 'more'
+            stats['tier_restore_failures'] += 1
+            self.failures += 1
+            graft.log('nvme tier direct restore failed req=%s (%d so far): %s: %s', job.request_id, self.failures, type(error).__name__, error)
+            if self.failures >= 3:
+                self.registry.tier_latch('three restores in a row failed')
+            self.abort(job, 'a slice failed')
+            return 'failed'
+        elapsed = (time.perf_counter() - began) * 1000.0
+        size = sum(entry.nbytes for _position, entry in chunk.pending) + sum(len(record.payload) for record in records if not isinstance(record, Pending))
+        job.work_ms += elapsed
+        job.bytes += size
+        job.slices += 1
+        job.max_ms = max(job.max_ms, elapsed)
+        job.step = graft.step_no
+        stats['tier_slice_steps'] += 1
+        stats['tier_slice_blocks'] += count
+        stats['tier_slice_ms'] += elapsed
+        stats['tier_slice_max_ms'] = max(stats['tier_slice_max_ms'], elapsed)
+        if chunk.pending:
+            nvme.note_restore(len(chunk.pending), sum(entry.nbytes for _position, entry in chunk.pending), job.first + low, job.first + low + count, job.request_id)
+            nvme.c['nvme_p2p_restores'] += 1
+        graft.log('host tier restore slice req=%s blocks=%d done=%d of %d ms=%.1f p2p=%d', job.request_id, count, len(job.new), job.total, elapsed, len(chunk.pending))
+        if len(job.new) < job.total:
+            return 'more'
+        self.finish(job)
+        return 'done'
+
     def finish(self, job):
         """The last slice has landed: hash the blocks into the pool and free them as cached ones (vLLM's own hit logic takes them), let go of the pins and the request's own hit."""
         graft, registry, stats, tier, pool = self.graft, self.registry, self.registry.stats, self.tier, self.graft.block_pool
@@ -1510,6 +1684,8 @@ class TierHooks(object):
         pool = self.graft.block_pool
         self.jobs.pop(job.request_id, None)
         self.tier.unpin(job.keys)
+        if job.stream is not None or job.nvme_entries:
+            self.end_stream(job, wait=bool(job.stream is not None and job.stream.finished))
         try:
             if job.new:
                 pool.free_blocks(reversed(job.new))
@@ -1637,6 +1813,25 @@ class TierHooks(object):
             stats['tier_audit_mismatches'] += max(1, len(bad))
             raise TierAuditError('host tier audit: req=%s %d of %d restored blocks read back differently from the bytes written (first '
                                  'at %s)' % (request.request_id, len(bad), len(ids), bad[:4]))
+
+    def audit_direct(self, request, ids, entries):
+        """QWEN_PREFIX_HOST_TIER_AUDIT=1 on a peer-to-peer restore: the host never saw the bytes, so read the blocks the cards filled back through the model's own IO and compare the
+        sha256 of their chip-major conversion with the digest stored with the object. This is the end-to-end check (drive -> card -> cache -> host) a gate asks for."""
+        stats, nvme = self.registry.stats, self.nvme
+        if nvme is None or nvme.shards is None or not ids:
+            return
+        back = self.io.read_blocks(ids)
+        stats['tier_audit_reads'] += len(ids)
+        scratch = bytearray(nvme.block_bytes)
+        bad = []
+        for index, (payload, entry) in enumerate(zip(back, entries)):
+            nvme.shards.to_chipmajor(payload, scratch)
+            if hashlib.sha256(scratch).digest() != entry.digest:
+                bad.append(index)
+        if len(back) != len(entries) or bad:
+            stats['tier_audit_mismatches'] += max(1, len(bad))
+            raise TierAuditError('nvme tier audit: req=%s %d of %d blocks the cards restored read back differently from what the drive holds (first at %s)'
+                                 % (request.request_id, len(bad), len(ids), bad[:4]))
 
 
 class DeviceQuota(object):

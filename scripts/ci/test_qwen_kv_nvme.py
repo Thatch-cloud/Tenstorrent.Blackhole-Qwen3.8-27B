@@ -6,7 +6,7 @@ scenario below also proves that what came back from the NVMe is exactly what a c
 block the pool serves, and every record of the host tier, holds the bytes of its hash.
 
 Held:
-  * the flags: strict parsing, the refusals (p2p not built, a name without the switch, the switch without the host tier), the registry refusing to start on a bad one;
+  * the flags: strict parsing, the refusals (a name without the switch, the switch without the host tier; the peer-to-peer restore has its own tests, test_qwen_p2p_tier), the registry refusing to start on a bad one;
   * FLAG-OFF IDENTITY: with the host tier on and the NVMe names unset, the registry, the tier and the device calls of a random traffic are what they were on tp4/next-1
     (the pinned digest), and no key, slot or thread of the NVMe tier exists;
   * spill on host-tier eviction (async: the scheduler never waits for the drive, a full queue drops the record as the host tier always did), restore on a miss in both
@@ -227,10 +227,10 @@ class FlagTests(unittest.TestCase):
         self.assertEqual((plan.ttl_s, plan.max_age_s, plan.max_bytes, plan.free_floor_bytes, plan.format, plan.discard, plan.audit),
                          (3600, 86400, 1 << 30, 0, 'force', True, True))
 
-    def test_p2p_is_refused_until_it_is_built(self):
+    def test_the_restore_name_p2p_is_not_a_setting_the_flag_is_qwen_prefix_nvme_p2p(self):
         plan, problems = kvnvme.parse(dict(ACKED, QWEN_PREFIX_NVME_RESTORE='p2p'))
         self.assertIsNone(plan)
-        self.assertTrue(any('not built' in problem for problem in problems), problems)
+        self.assertTrue(any('QWEN_PREFIX_NVME_P2P=1' in problem for problem in problems), problems)
 
     def test_a_name_without_the_switch_would_be_inert_and_is_refused(self):
         for env in ({'QWEN_PREFIX_NVME_DEVICE': '/dev/x'}, {'QWEN_PREFIX_NVME': '0', 'QWEN_PREFIX_NVME_TTL_S': '60'}, {'QWEN_PREFIX_NVME_AUDIT': '1'}):
@@ -549,20 +549,19 @@ def torch_equal(a, b):
 
 
 class BackendTests(unittest.TestCase):
-    def test_host_is_built_and_p2p_raises_not_built_with_its_contract_documented(self):
+    def test_host_is_built_and_the_p2p_backend_is_the_tiers_to_build_with_its_contract_documented(self):
         self.assertEqual((kvnvme.make_backend('host').name, kvnvme.make_backend('host').direct), ('host', False))
-        with self.assertRaises(kvnvme.NotBuilt):
-            kvnvme.make_backend('p2p')
-        with self.assertRaises(kvnvme.NotBuilt):
-            kvnvme.P2PBackend()
+        with self.assertRaises(ValueError):
+            kvnvme.make_backend('p2p')              # (it needs the tier's IO and device: NvmeTier._start_p2p builds it, test_qwen_p2p_tier)
         with self.assertRaises(ValueError):
             kvnvme.make_backend('dma')
         doc = kvnvme.P2PBackend.__doc__
-        for word in ('3 GiB', '1 GiB', 'ALIGNMENT', 'SCATTER', 'INTEGRITY', 'ENCRYPTION', '6.95 GB/s'):
+        for word in ('direct', 'host path', 'MISS', 'checksum', 'strike', 'ENCRYPTION'):
             self.assertIn(word.lower(), doc.lower())
-        self.assertEqual((kvnvme.P2PBackend.STAGING_WINDOW_MAX_BYTES, kvnvme.P2PBackend.STAGING_WINDOW_OFFSET), (3 << 30, 1 << 30))
-        self.assertEqual(kvnvme.P2PBackend.window_blocks(2228224), 1445)
-        self.assertTrue(kvnvme.P2PBackend.direct)
+        backend = kvnvme.P2PBackend(None, None)
+        self.assertFalse(backend.direct, 'a backend without an engine is not direct')
+        self.assertEqual(backend.reading(), 0)
+        self.assertTrue(backend.sliced)
 
     def test_the_interface_is_two_methods(self):
         backend = kvnvme.RestoreBackend()
@@ -2478,7 +2477,7 @@ class ContractTests(unittest.TestCase):
         problems = self.nvme_problems(self.profile(QWEN_PREFIX_NVME_TTL_S='0'))
         self.assertTrue(any('QWEN_PREFIX_NVME_TTL_S' in problem for problem in problems), problems)
         problems = self.nvme_problems(self.profile(QWEN_PREFIX_NVME_RESTORE='p2p'))
-        self.assertTrue(any('not built' in problem for problem in problems), problems)
+        self.assertTrue(any('QWEN_PREFIX_NVME_P2P=1' in problem for problem in problems), problems)
 
     def test_the_acknowledgement_is_required_of_every_profile_that_names_the_tier(self):
         problems = self.nvme_problems(self.profile(QWEN_PREFIX_NVME_RETENTION_ACK=None))

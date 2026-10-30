@@ -27,8 +27,10 @@ RAW NVMe namespace (qwen_nvme_store: no filesystem, a journal, O_DIRECT, 4 KiB-a
   AT REST  The drive must be an Opal self-encrypting drive with locking enabled and currently unlocked (QWEN_PREFIX_NVME_REQUIRE_SED, on by default; 0 is a gate's own): sed_check asks
            the drive (IOC_OPAL_DISCOVERY, read-only) or, where the container lacks CAP_SYS_ADMIN, reads the status file the host's boot unit writes; anything it cannot show is
            NOT encrypted and the tier never opens the drive (one REFUSED line, nvme_refused_not_encrypted). TRIM of freed extents is on by default (QWEN_PREFIX_NVME_DISCARD).
-  BACKENDS RestoreBackend: 'host' (built) and 'p2p' (a stub that raises NotBuilt, its contract below). TierHooks asks backend.direct: a direct backend restores NVMe-resident
-           blocks straight to the freshly allocated device blocks instead of through the host (TierHooks.load_direct).
+  BACKENDS RestoreBackend: 'host' and 'p2p' (QWEN_PREFIX_NVME_P2P=1, docs/tp4-p2p-restore.md: the drive's O_DIRECT read lands in the cards' staging buffers through the published BAR4
+           window, a device checksum is compared with the one stored at spill, and a device op copies the bytes into the KV blocks; the host backend is its fallback). TierHooks asks
+           backend.direct: a direct backend restores NVMe-resident blocks straight to the freshly allocated device blocks instead of through the host (TierHooks.load_direct). With the
+           flag on the drive holds each block CHIP-MAJOR ([chip][cache][slice], layout 'chipmajor-v1', its own fingerprint): chip d's share is one aligned run a card can read alone.
 
 KEYS. The host tier's own: vLLM's chained block hash (it carries the tenant's cache salt, so tenants never meet), kind KV; the checkpoint's boundary block hash, kind CKPT.
 Every entry also carries a LAYOUT FINGERPRINT (KV_EPOCH, model repo + revision, drafter checkpoint, KV layout/dtype/page size, mesh, GDN dtype, the few env switches that
@@ -84,10 +86,16 @@ ENV_ALLOW_ZERO_RETENTION = 'QWEN_PREFIX_NVME_ALLOW_ON_ZERO_RETENTION'
 ENV_DRAIN_S = 'QWEN_PREFIX_NVME_DRAIN_S'
 ENV_REQUIRE_SED = 'QWEN_PREFIX_NVME_REQUIRE_SED'
 ENV_SED_STATUS = 'QWEN_PREFIX_NVME_SED_STATUS'
+ENV_P2P = 'QWEN_PREFIX_NVME_P2P'
+ENV_P2P_THREADS = 'QWEN_PREFIX_NVME_P2P_THREADS'
+ENV_P2P_STAGING_MIB = 'QWEN_PREFIX_NVME_P2P_STAGING_MIB'
+ENV_P2PMEM = 'QWEN_PREFIX_NVME_P2PMEM'
 NAMES = (ENV_SWITCH, ENV_DEVICE, ENV_TTL_S, ENV_MAX_AGE_S, ENV_MAX_BYTES, ENV_VERIFY, ENV_RESTORE, ENV_FREE_FLOOR, ENV_QUEUE, ENV_THREADS, ENV_FORMAT, ENV_DISCARD,
-         ENV_COMPAT, ENV_CMD_DIR, ENV_AUDIT, ENV_SPILL, ENV_THROUGH_BLOCKS, ENV_THROUGH_IDLE_S, ENV_RETENTION_ACK, ENV_ALLOW_ZERO_RETENTION, ENV_DRAIN_S, ENV_REQUIRE_SED, ENV_SED_STATUS)
-# What only a gate sets (the contract refuses them on a traffic profile even under the owner's waiver).
-GATE_ONLY = (ENV_AUDIT, ENV_FORMAT, ENV_CMD_DIR, ENV_ALLOW_ZERO_RETENTION)
+         ENV_COMPAT, ENV_CMD_DIR, ENV_AUDIT, ENV_SPILL, ENV_THROUGH_BLOCKS, ENV_THROUGH_IDLE_S, ENV_RETENTION_ACK, ENV_ALLOW_ZERO_RETENTION, ENV_DRAIN_S, ENV_REQUIRE_SED, ENV_SED_STATUS,
+         ENV_P2P, ENV_P2P_THREADS, ENV_P2P_STAGING_MIB, ENV_P2PMEM)
+# What only a gate sets (the contract refuses them on a traffic profile even under the owner's waiver). The peer-to-peer restore is a gate's until a card has qualified it (docs/tp4-p2p-restore.md);
+# its three knobs are refused as inert unless it is on, so they cannot reach a traffic profile without it.
+GATE_ONLY = (ENV_AUDIT, ENV_FORMAT, ENV_CMD_DIR, ENV_ALLOW_ZERO_RETENTION, ENV_P2P)
 # Names whose OFF value is the gate's own: a traffic profile may carry the name (at 1, or by default) but never 0. The encryption check is on unless a gate turns it off.
 GATE_ONLY_VALUES = ((ENV_REQUIRE_SED, '0'),)
 VERIFY_MODES = ('sample', 'all', 'off')
@@ -122,6 +130,13 @@ HEALTH_EVERY_S = 2.0                 # how often poll() looks at the device's no
 # errnos that mean the device itself is gone (a failing write with one of these latches the tier at once instead of after three strikes)
 GONE_ERRNOS = (errno.ENODEV, errno.ENXIO, errno.ESHUTDOWN, errno.ENOMEDIUM)
 LAYOUT = 'packed-v1'                 # the on-disk payload layout: the host tier's raw packed block ([cache tensor][chip][slice]); a new layout is a new fingerprint
+LAYOUT_CHIPMAJOR = 'chipmajor-v1'    # the same bytes as [chip][cache tensor][slice] (QWEN_PREFIX_NVME_P2P=1): chip d's share of a block is one 4 KiB-aligned run (docs/tp4-p2p-restore.md)
+DEFAULT_P2P_THREADS = 8              # reads in flight over all cards
+DEFAULT_P2P_STAGING_MIB = 128        # staging buffer per card: two halves
+P2P_BATCH_BYTES = 128 << 20          # a chip-major spill batch is converted in a second buffer of its size: keep batches smaller than the 512 MiB of the host layout
+P2P_READ_GROUP = 16                  # blocks a chip-major host read converts at a time (the scratch it needs is this many blocks)
+P2P_STRIKES = 3                      # consecutive failed peer-to-peer restores (or checksum mismatches on bytes the host path proves good) that latch the path off
+P2P_MISMATCH_CHECKS = 8              # blocks a checksum mismatch re-reads through the host path to tell a bad drive from a bad path
 CKPT_FORMAT = 1
 
 # ==========================================================================================================================================================================
@@ -161,6 +176,7 @@ WRITER_YIELD_MAX_S = 2.0
 PATH = re.compile(r'(?!-)/[A-Za-z0-9_./:@+-]{1,200}')
 TOKEN = re.compile(r'[A-Za-z0-9._-]{1,64}')
 DIGITS = re.compile(r'[0-9]{1,18}')
+PCI_ADDRESS = re.compile(r'(?:[0-9A-Fa-f]{4}:)?[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}\.[0-7]')
 
 # The counters the NVMe tier adds to the registry's snapshot (exported as qwen_prefix_<name>_total; ms timers as _seconds_total). Present only while the tier is on.
 COUNTER_NAMES = (
@@ -172,9 +188,12 @@ COUNTER_NAMES = (
     'nvme_deleted_tenant', 'nvme_wipes', 'nvme_audit_reads', 'nvme_audit_mismatches', 'nvme_latched', 'nvme_recovered_entries', 'nvme_recovered_records',
     'nvme_recover_dropped', 'nvme_journal_records', 'nvme_snapshots', 'nvme_store_hits', 'nvme_store_misses', 'nvme_discarded_bytes', 'nvme_through_queued',
     'nvme_through_known', 'nvme_through_dropped_queue', 'nvme_through_copied_blocks', 'nvme_through_copied_bytes', 'nvme_through_copy_ms', 'nvme_through_copy_steps',
-    'nvme_through_failures', 'nvme_spill_retries', 'nvme_refused_zero_retention', 'nvme_unavailable', 'nvme_device_lost', 'nvme_refused_not_encrypted')
+    'nvme_through_failures', 'nvme_spill_retries', 'nvme_refused_zero_retention', 'nvme_unavailable', 'nvme_device_lost', 'nvme_refused_not_encrypted',
+    # the peer-to-peer restore (QWEN_PREFIX_NVME_P2P): present, at 0, while the tier is on whether or not the path is
+    'nvme_p2p_restores', 'nvme_p2p_blocks', 'nvme_p2p_bytes', 'nvme_p2p_read_ms', 'nvme_p2p_check_ms', 'nvme_p2p_write_ms', 'nvme_p2p_mismatch', 'nvme_p2p_late_data',
+    'nvme_p2p_errors', 'nvme_p2p_fallbacks', 'nvme_p2p_latched', 'nvme_p2p_unavailable')
 GAUGE_NAMES = ('nvme_on', 'nvme_bytes', 'nvme_entries', 'nvme_kv_entries', 'nvme_ckpt_entries', 'nvme_capacity_bytes', 'nvme_free_bytes', 'nvme_queue_bytes',
-               'nvme_journal_used_bytes', 'nvme_largest_free_bytes', 'nvme_through_backlog_blocks', 'nvme_at_rest')
+               'nvme_journal_used_bytes', 'nvme_largest_free_bytes', 'nvme_through_backlog_blocks', 'nvme_at_rest', 'nvme_p2p_on', 'nvme_p2p_map_verified')
 
 
 def log(message, *values):
@@ -185,10 +204,6 @@ def log(message, *values):
         pass
 
 
-class NotBuilt(NotImplementedError):
-    """A restore backend that is designed (its contract is in its class docstring) and not built."""
-
-
 # ------------------------------------------------------------------------------------------------
 # The flags
 # ------------------------------------------------------------------------------------------------
@@ -196,7 +211,8 @@ class NvmePlan(object):
     """The NVMe tier's settings (nvme_plan)."""
 
     __slots__ = ('device', 'ttl_s', 'max_age_s', 'max_bytes', 'verify', 'restore', 'free_floor_bytes', 'queue_bytes', 'threads', 'format', 'discard', 'compat',
-                 'cmd_dir', 'audit', 'direct', 'snap_bytes', 'journal_bytes', 'spill', 'through_blocks', 'through_idle_s', 'allow_zero_retention', 'drain_s', 'require_sed', 'sed_status')
+                 'cmd_dir', 'audit', 'direct', 'snap_bytes', 'journal_bytes', 'spill', 'through_blocks', 'through_idle_s', 'allow_zero_retention', 'drain_s', 'require_sed', 'sed_status',
+                 'p2p', 'p2p_threads', 'p2p_staging_bytes', 'p2pmem')
 
     @property
     def through(self):
@@ -270,7 +286,7 @@ def parse(env):
     if restore not in RESTORE_BACKENDS:
         problems.append('%s=%r must be one of %s' % (ENV_RESTORE, restore, ', '.join(RESTORE_BACKENDS)))
     elif restore == 'p2p':
-        problems.append('%s=p2p is not built: the peer-to-peer restore needs a device-side scatter op (docs/tp4-kv-nvme.md, "The peer-to-peer follow-up")' % ENV_RESTORE)
+        problems.append('%s=p2p is not a setting: the peer-to-peer restore is %s=1, which keeps the host backend as its fallback (docs/tp4-p2p-restore.md)' % (ENV_RESTORE, ENV_P2P))
     plan.restore = restore
     floor = env.get(ENV_FREE_FLOOR)
     plan.free_floor_bytes = None if floor in (None, '') else _digits(env, ENV_FREE_FLOOR, 0, 0, 1 << 60, problems)
@@ -311,6 +327,22 @@ def parse(env):
         problems.append('%s=1 is required with %s=1: the tier keeps prompt-derived KV on a drive for up to its TTL (default 1 day; all tenants; owner decisions 2026-10-21), which a '
                         'node that advertises zero-retention must not do, and a serving process cannot tell what its node advertises' % (ENV_RETENTION_ACK, ENV_SWITCH))
     plan.allow_zero_retention = _switch(env, ENV_ALLOW_ZERO_RETENTION, problems)
+    # The peer-to-peer restore (docs/tp4-p2p-restore.md): off unless named. On, the drive holds the blocks chip-major (a new layout in the fingerprint) and the restores go NVMe -> card.
+    plan.p2p = _switch(env, ENV_P2P, problems)
+    plan.p2p_threads = _digits(env, ENV_P2P_THREADS, DEFAULT_P2P_THREADS, 1, 64, problems)
+    plan.p2p_staging_bytes = _digits(env, ENV_P2P_STAGING_MIB, DEFAULT_P2P_STAGING_MIB, 2, 4096, problems) << 20
+    plan.p2pmem = ()
+    listed = env.get(ENV_P2PMEM)
+    if listed not in (None, ''):
+        names = [name.strip() for name in listed.split(',')]
+        if not all(PCI_ADDRESS.fullmatch(name) for name in names):
+            problems.append('%s=%r must be a comma-separated list of PCI addresses (0000:bb:dd.f)' % (ENV_P2PMEM, listed))
+        else:
+            plan.p2pmem = tuple(sorted(name.lower() if name.count(':') == 2 else '0000:' + name.lower() for name in names))
+    if not plan.p2p:
+        knobs = [name for name in (ENV_P2P_THREADS, ENV_P2P_STAGING_MIB, ENV_P2PMEM) if env.get(name) not in (None, '')]
+        if knobs:
+            problems.append('%s set without %s=1: the peer-to-peer restore would ignore it' % (', '.join(knobs), ENV_P2P))
     return (None if problems else plan), problems
 
 
@@ -559,7 +591,7 @@ def layout_fingerprint(io, plan, environ):
     QWEN_PREFIX_NVME_COMPAT is the explicit override: any token other than the empty one is its own fingerprint, so a gate (or an operator) can force a fresh tier."""
     repo, revision = environ.get('QWEN_C2_MODEL_REPO') or '', environ.get('QWEN_C2_MODEL_REVISION') or ''
     components = collections.OrderedDict([
-        ('layout', LAYOUT),
+        ('layout', LAYOUT_CHIPMAJOR if getattr(plan, 'p2p', False) else LAYOUT),
         ('epoch', KV_EPOCH),
         ('model', '%s@%s' % (repo, revision) if repo or revision else 'base'),
         ('drafter', drafter_identity(environ)),
@@ -814,6 +846,13 @@ class RestoreBackend(object):
     def restore_to_device(self, tier, entries, block_ids, io):
         raise NotImplementedError
 
+    def reading(self):
+        """Reads this backend has in flight outside the tier's own count (the spill writer yields to them)."""
+        return 0
+
+    def close(self):
+        """Give back whatever the backend holds (the tier's shutdown)."""
+
 
 class HostBounceBackend(RestoreBackend):
     """NVMe -> pinned host buffer -> the existing upload. The device reads happen on `threads` workers, runs of back-to-back blocks as one call; the digest checks (the
@@ -826,47 +865,145 @@ class HostBounceBackend(RestoreBackend):
         return tier.read_into(entries, views)
 
 
-class P2PBackend(RestoreBackend):
-    """NOT BUILT. The contract a peer-to-peer restore (NVMe -> card, no host copy) must meet; 'p2p' is refused at start until it does.
-
-    Proven on 2026-10-21 (not in this repository): a read from the namespace into a card's BAR4 window through the patched kernel driver at 6.95 GB/s, byte-exact. What
-    that leaves to build:
-      * a STAGING WINDOW per card: at most 3 GiB (STAGING_WINDOW_MAX_BYTES), at a 1 GiB offset into the 4 GiB BAR (STAGING_WINDOW_OFFSET; the top of the window failed
-        its self-test), so one restore moves at most floor(3 GiB / block_bytes) blocks (1,445 at 2,228,224 bytes) per window fill;
-      * CHUNK ALIGNMENT: every entry is already a whole number of 4 KiB blocks at a 4 KiB-aligned namespace LBA (qwen_nvme_store), and block_bytes = 544 x 4,096, so a
-        run of blocks is one aligned read; the window offset and each chunk must stay 4 KiB-aligned;
-      * a DEVICE-SIDE SCATTER OP, e.g. ttnn.qwen_scatter_blocks_from_window(cache_tensors, window, block_ids, block_bytes, slice_bytes): for each block in the window, copy
-        its [cache tensor][chip][slice] pieces to the page range of block_ids[i] in every cache tensor on every chip - the inverse of qwen_write_blocks_raw without the
-        host buffer. A block's payload is laid out [cache][chip][slice_bytes = 17,408 = 4.25 pages], so a chip's pieces are not page-aligned inside the block: either the
-        scatter distributes the whole block to all four chips over the fabric, or a later layout version ('chip-major, page-padded') changes the fingerprint and rewrites
-        the cache;
-      * INTEGRITY without the host: the bytes never visit host RAM, so the sha256 check cannot run on them. The options are a device-side checksum op over the window
-        (compared with the entry's digest, or a CRC stored beside it), or the drive's end-to-end protection information; until one exists a P2P restore verifies nothing,
-        and QWEN_PREFIX_NVME_VERIFY must say so;
-      * ENCRYPTION AT REST works only at the drive (Opal self-encrypting namespace): host software AES cannot touch bytes that go from the drive to the card;
-      * the same sliced hold TierHooks gives the host path (the restore may not freeze the other seats), and the same fall back to a miss on any failure."""
+class P2PBackend(HostBounceBackend):
+    """NVMe -> card with no host copy (QWEN_PREFIX_NVME_P2P=1; docs/tp4-p2p-restore.md). `direct` while the path is usable; the host path (read_to_host, inherited) is always there, and is
+    what any failure falls back to, so a restore is never worse than a miss:
+      * the engine (qwen_p2p_restore.P2PEngine) reads each card's share of every block from the drive into the card's staging buffer (O_DIRECT into the published p2pmem), checks it on
+        the card against the checksums recorded at spill, and only then asks the device to copy it into the KV blocks the pool allocated;
+      * a checksum that differs is a MISS: nothing is written for that chunk, the turn prefills cold, the blocks are counted (nvme_p2p_mismatch), the entries are re-read through the
+        host path to tell a bad drive (sha256 fails: the entry is dropped) from a bad path (sha256 holds: a strike; three latch the path off);
+      * any other failure (a read error, a device op that raises, a window problem) restores the same blocks through the host path and counts a strike; three latch the path off at
+        run time (`direct` turns False and TierHooks goes back to the host records), a device-op error at once;
+      * if the path cannot start (no staging op, no published window, a failed canary) the tier serves from the host backend and says so once (nvme_p2p_unavailable);
+      * ENCRYPTION AT REST works only at the drive (Opal): the bytes go from the drive to the card in the clear."""
 
     name = 'p2p'
-    direct = True
-    STAGING_WINDOW_MAX_BYTES = 3 << 30
-    STAGING_WINDOW_OFFSET = 1 << 30
-    ALIGN = 4096
+    sliced = True                  # TierHooks may run a sliced restore through start_stream (the reads run beside the other seats' decode rounds)
 
-    def __init__(self, *args, **kwargs):
-        raise NotBuilt('the peer-to-peer NVMe restore is not built (it needs a device-side scatter op); see the P2PBackend docstring')
+    def __init__(self, engine, tier):
+        self.engine = engine
+        self.tier = tier
+        self.latched = None
+        self.strikes = 0
 
-    @classmethod
-    def window_blocks(cls, block_bytes):
-        """How many blocks one staging window holds."""
-        return cls.STAGING_WINDOW_MAX_BYTES // int(block_bytes)
+    @property
+    def direct(self):
+        return self.engine is not None and self.latched is None
+
+    def reading(self):
+        """Shard reads in flight (the spill writer yields to them, as it does to a host read)."""
+        return self.engine.inflight if self.engine is not None else 0
+
+    def latch(self, why):
+        if self.latched is None:
+            self.latched = str(why)
+            self.tier.c['nvme_p2p_latched'] = 1
+            self.tier.log('nvme tier p2p latched off: %s: the restores go through the host path until a restart', why)
+
+    def strike(self, why, at_once=False):
+        self.strikes += 1
+        if at_once or self.strikes >= P2P_STRIKES:
+            self.latch(why)
+
+    def start_stream(self, items, max_chunk_blocks=None):
+        """A restore's reads, begun (TierHooks' sliced restore): `items` is one pinned entry, or None for a block the host tier holds, per position."""
+        return self.engine.start(items, max_chunk_blocks)
+
+    def restore_to_device(self, tier, entries, block_ids, io):
+        """TierHooks.load_direct's call: entries pinned, block_ids allocated by the pool. Returns when the blocks hold the bytes (the host fallback included); raises when the restore is a
+        miss (a checksum mismatch, or the host path failing too)."""
+        import qwen_p2p_restore as p2p
+
+        c = tier.c
+        began = time.perf_counter()
+        try:
+            self.engine.restore(entries, block_ids)
+        except p2p.P2PMismatch as error:
+            self.note_mismatch(tier, error)
+            raise
+        except Exception as error:
+            self.note_error(tier, error)
+            tier._restore_via_host(entries, block_ids)
+            c['nvme_p2p_fallbacks'] += 1
+            c['nvme_p2p_restores'] += 1
+            return
+        self.strikes = 0
+        c['nvme_p2p_restores'] += 1
+        tier.log('nvme tier p2p restore blocks=%d bytes=%d ms=%.1f', len(entries), sum(entry.nbytes for entry in entries), (time.perf_counter() - began) * 1000.0)
+
+    def note_error(self, tier, error):
+        """A peer-to-peer restore failed for a reason other than a checksum: counted, a strike (a device-op error latches the path at once)."""
+        import qwen_p2p_restore as p2p
+
+        tier.c['nvme_p2p_errors'] += 1
+        self.strike('%s: %s' % (type(error).__name__, error), at_once=isinstance(error, p2p.P2PDeviceError))
+        tier.log('nvme tier p2p restore failed (%s: %s): the blocks go through the host path', type(error).__name__, error)
+
+    def note_mismatch(self, tier, error):
+        tier.c['nvme_p2p_mismatch'] += len(error.bad)
+        self._mismatch(tier, error)
+
+    def _mismatch(self, tier, error):
+        """The cards' checksums disagreed with the stored ones. Re-read a few of the blocks through the host path: bytes whose sha256 fails are bad on the drive (the entry is dropped);
+        bytes that verify mean the path delivered them wrong (a strike against the path; the entries stay)."""
+        seen, bad_on_drive, good = [], [], 0
+        for entry in error.entries:
+            if entry in seen:
+                continue
+            seen.append(entry)
+            if len(seen) > P2P_MISMATCH_CHECKS:
+                break
+            try:
+                data = tier.store.read_bytes(entry)
+                ok = hashlib.sha256(data).digest() == entry.digest
+            except Exception:
+                ok = False
+            if ok:
+                good += 1
+            else:
+                bad_on_drive.append(entry)
+        if bad_on_drive:
+            tier.c['nvme_digest_failures'] += len(bad_on_drive)
+            tier._forget(bad_on_drive)
+        tier.log('nvme tier p2p CHECKSUM MISMATCH on %d shard(s) of %d block(s): %d re-read through the host path verify, %d fail their sha256 and are dropped; the turn prefills cold',
+                 len(error.bad), len(error.entries), good, len(bad_on_drive))
+        if good:
+            self.strike('the cards\' checksums disagree with the stored ones for bytes the host path proves good')
+
+    def close(self):
+        engine, self.engine = self.engine, None
+        if engine is not None:
+            engine.close()
+
+
+def default_p2p_engine(tier):
+    """The engine of a real mesh, built from the tier's IO: the staging ops of the device-op extension, the cards' windows, the reader on the tier's own device file. P2PUnavailable
+    (or whatever went wrong) when the path cannot start; the caller serves from the host backend."""
+    import importlib
+
+    import qwen_p2p_restore as p2p
+
+    io = tier.io
+    inner = getattr(io, 'io', None)
+    mesh = getattr(io, 'mesh_device', None) or getattr(getattr(io, 'model', None), 'mesh_device', None) or getattr(inner, 'mesh_device', None) or getattr(getattr(inner, 'model', None), 'mesh_device', None)
+    caches = getattr(io, 'caches', None) or getattr(inner, 'caches', None)
+    if mesh is None or not caches:
+        raise p2p.P2PUnavailable('the tier IO exposes no mesh device or cache tensors')
+    try:
+        ttnn = importlib.import_module('ttnn')
+    except ImportError as error:
+        raise p2p.P2PUnavailable('ttnn is not importable: %s' % error)
+    api = p2p.StagingApi(ttnn, mesh, caches)
+    return p2p.P2PEngine(api, tier.shards, tier.p2p_reader, threads=tier.plan.p2p_threads, staging_bytes=tier.plan.p2p_staging_bytes, expected=tier.plan.p2pmem, logger=tier.log,
+                         io_align=tier.store.bf.align)
 
 
 def make_backend(name):
     if name == 'host':
         return HostBounceBackend()
     if name == 'p2p':
-        return P2PBackend()
-    raise ValueError('restore backend %r (host or p2p)' % (name,))
+        raise ValueError('the peer-to-peer backend is built by the tier (NvmeTier._start_p2p) when QWEN_PREFIX_NVME_P2P=1: it needs the tier\'s IO and device')
+    raise ValueError('restore backend %r (host)' % (name,))
 
 
 # ------------------------------------------------------------------------------------------------
@@ -896,7 +1033,7 @@ class NvmeTier(object):
     plus whoever calls delete_salt / wipe (they serialise on the store). Counters are split by thread so none is updated from two: self.c (the scheduler's and callers')
     and self.w (the writer's)."""
 
-    def __init__(self, plan, io, registry, logger=log, clock=time.time, environ=None, store=None, backend=None, file_factory=None, probe=None):
+    def __init__(self, plan, io, registry, logger=log, clock=time.time, environ=None, store=None, backend=None, file_factory=None, probe=None, p2p_engine=None):
         self.plan = plan
         self.io = io
         self.registry = registry
@@ -908,6 +1045,16 @@ class NvmeTier(object):
         if self.block_bytes and plan.queue_bytes < self.block_bytes:
             raise ValueError('%s=%d holds less than one KV block (%d bytes)' % (ENV_QUEUE, plan.queue_bytes, self.block_bytes))
         self.codec = default_codec(io)
+        # QWEN_PREFIX_NVME_P2P=1: the drive holds each KV block chip-major, which needs the IO's geometry (cache tensors, chips, bytes per slice).
+        self.shards = None
+        if plan.p2p:
+            import qwen_p2p_restore
+
+            self.shards = qwen_p2p_restore.ShardLayout.of_io(io)
+            if self.shards is None:
+                raise store_module.StoreError('%s=1 needs the tier IO\'s geometry (caches, chips, slice_bytes) to lay the blocks out chip-major' % ENV_P2P)
+            if self.shards.block_bytes != self.block_bytes:
+                raise store_module.StoreError('the tier IO\'s geometry makes a block of %d bytes, its block_bytes says %d' % (self.shards.block_bytes, self.block_bytes))
         self.backend = backend if backend is not None else make_backend(plan.restore)
         self.c = dict.fromkeys(COUNTER_NAMES, 0)
         self.w = dict.fromkeys(COUNTER_NAMES, 0)
@@ -955,6 +1102,8 @@ class NvmeTier(object):
                 kwargs['file_factory'] = file_factory
             store = NvmeStore.open(plan.device, **dict(kwargs, **options))
         self.store = store
+        if plan.p2p and backend is None:
+            self._start_p2p(p2p_engine)
         if plan.free_floor_bytes is None:
             self.store.free_floor_bytes = int(self.store.geometry.data_bytes * DEFAULT_FREE_FLOOR_FRACTION)
         else:
@@ -1155,7 +1304,7 @@ class NvmeTier(object):
         self.reading += 1
         began = time.perf_counter()
         try:
-            results = self.store.read_many(entries, views, verify=verify if chosen else None)
+            results = self._read_many(entries, views, verify if chosen else None)
         finally:
             self.reading -= 1
         c = self.c
@@ -1172,6 +1321,63 @@ class NvmeTier(object):
             self._forget(bad)
         c['nvme_restore_ms'] += (time.perf_counter() - began) * 1000.0
         return results
+
+    def _read_many(self, entries, views, verify):
+        """store.read_many into the host tier's views. On a chip-major drive (QWEN_PREFIX_NVME_P2P=1) the objects are read, digest-checked as stored, into aligned scratch a few blocks at a
+        time and converted back to the host tier's [cache][chip][slice] layout."""
+        if self.shards is None:
+            return self.store.read_many(entries, views, verify=verify)
+        import mmap
+
+        results = []
+        group = P2P_READ_GROUP
+        for low in range(0, len(entries), group):
+            part = entries[low:low + group]
+            arena = mmap.mmap(-1, len(part) * self.block_bytes)
+            scratch = [memoryview(arena)[index * self.block_bytes:(index + 1) * self.block_bytes] for index in range(len(part))]
+            got = self.store.read_many(part, scratch, verify=verify)
+            for source, target, result in zip(scratch, views[low:low + group], got):
+                if result is None:
+                    self.shards.from_chipmajor(source, target)
+            results.extend(got)
+            for source in scratch:
+                source.release()
+            del scratch
+            try:
+                arena.close()
+            except BufferError:
+                pass
+        return results
+
+    def _restore_via_host(self, entries, block_ids, group=P2P_READ_GROUP):
+        """The host path to the device blocks, for the peer-to-peer backend's fallback: read (and verify, per the verify mode) a few blocks at a time and write them with the model\'s
+        own tier IO. Raises when a block cannot be brought back; the caller's restore is then a miss."""
+        for low in range(0, len(entries), group):
+            part = entries[low:low + group]
+            payloads = [bytearray(self.block_bytes) for _ in part]
+            results = self.read_into(part, payloads)
+            if any(result is not None for result in results):
+                self.c['nvme_restore_failures'] += 1
+                raise store_module.StoreError('%d of %d blocks could not be read back through the host path (%s)' % (sum(1 for item in results if item is not None), len(part), sorted(set(item for item in results if item))))
+            self.io.write_blocks(block_ids[low:low + group], payloads)
+
+    def p2p_reader(self, offset, view):
+        """The peer-to-peer engine's read: fill `view` (a window onto a card's p2pmem) from the drive at `offset`, through the store's own device file (alignment checks, test hooks)."""
+        self.store.bf.pread_into(offset, [view])
+
+    def _start_p2p(self, factory=None):
+        """Bring the peer-to-peer path up (QWEN_PREFIX_NVME_P2P=1). It is optional: when it cannot start (no staging op, no published window, a failed canary) the tier says so once, counts
+        it and serves from the host backend, which reads the same chip-major objects."""
+        try:
+            engine = (factory or default_p2p_engine)(self)
+        except Exception as error:
+            self.c['nvme_p2p_unavailable'] = 1
+            self.log('nvme tier p2p UNAVAILABLE, the host backend serves the restores (the drive keeps its chip-major layout): %s: %s', type(error).__name__, error)
+            return
+        self.backend = P2PBackend(engine, self)
+        info = engine.describe()
+        self.log('nvme tier p2p on cards=%d threads=%d staging_bytes=%d chunk_blocks=%d shard_bytes=%d mapping_verified=%d window=%s', info['cards'], info['threads'], info['staging_bytes'],
+                 info['chunk_blocks'], info['shard_bytes'], info['mapping_verified'], info['window'])
 
     def _forget(self, entries):
         """Entries that failed their digest: out of the index at once, their journal record and extents on the writer thread."""
@@ -1370,7 +1576,8 @@ class NvmeTier(object):
             commands = list(self.commands)
             self.commands.clear()
             batch, size = [], 0
-            while self.queue and len(batch) < MAX_BATCH_ITEMS and size < MAX_BATCH_BYTES:
+            limit = MAX_BATCH_BYTES if self.shards is None else P2P_BATCH_BYTES
+            while self.queue and len(batch) < MAX_BATCH_ITEMS and size < limit:
                 item = self.queue.popleft()
                 batch.append(item)
                 size += item.nbytes
@@ -1395,7 +1602,7 @@ class NvmeTier(object):
     def _wait_for_readers(self):
         """A restore is latency-critical and a spill is not: hold the next write while a read is in flight (bounded)."""
         waited = 0.0
-        while self.reading and waited < WRITER_YIELD_MAX_S and not self.closed:
+        while (self.reading or self.backend.reading()) and waited < WRITER_YIELD_MAX_S and not self.closed:
             time.sleep(WRITER_YIELD_S)
             waited += WRITER_YIELD_S
 
@@ -1429,6 +1636,28 @@ class NvmeTier(object):
             self._hash_pool = ThreadPoolExecutor(max_workers=self.plan.threads, thread_name_prefix='qwen-nvme-hash')
         return list(self._hash_pool.map(lambda item: hashlib.sha256(item.payload).digest(), items))
 
+    def _chipmajor(self, kvs):
+        """The batch's blocks laid out chip-major in one page-aligned arena (so the device write goes out from it without a bounce): -> [(buffer, sha256 of it, the per-chip checksums
+        packed)] parallel to `kvs`. The per-chip checksums (qwen_p2p_restore.p2p_checksum) are what a card compares its staged shard with at a peer-to-peer restore."""
+        import mmap
+
+        shards, block_bytes = self.shards, self.block_bytes
+        arena = mmap.mmap(-1, len(kvs) * block_bytes)
+        view = memoryview(arena)
+
+        def convert(index):
+            buffer = view[index * block_bytes:(index + 1) * block_bytes]
+            shards.to_chipmajor(kvs[index].payload, buffer)
+            return buffer, hashlib.sha256(buffer).digest(), shards.pack_checksums(shards.checksums(buffer))
+
+        if len(kvs) < 2 or self.plan.threads < 2:
+            return [convert(index) for index in range(len(kvs))]
+        if self._hash_pool is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            self._hash_pool = ThreadPoolExecutor(max_workers=self.plan.threads, thread_name_prefix='qwen-nvme-hash')
+        return list(self._hash_pool.map(convert, range(len(kvs))))
+
     def _write_batch(self, batch):
         w = self.w
         began = time.perf_counter()
@@ -1436,10 +1665,16 @@ class NvmeTier(object):
         ckpts = [item for item in batch if isinstance(item, SpillCkpt)]
         puts, owners = [], []
         try:
-            digests = self._digests(kvs) if kvs else []
-            for item, digest in zip(kvs, digests):
-                puts.append(PutItem(KV, item.key, [item.payload], item.tenant, item.chain, item.index, self.fp, digest=digest))
-                owners.append(item)
+            if self.shards is not None:
+                stored = self._chipmajor(kvs) if kvs else []
+                for item, (buffer, digest, aux) in zip(kvs, stored):
+                    puts.append(PutItem(KV, item.key, [buffer], item.tenant, item.chain, item.index, self.fp, digest=digest, aux=aux))
+                    owners.append(item)
+            else:
+                digests = self._digests(kvs) if kvs else []
+                for item, digest in zip(kvs, digests):
+                    puts.append(PutItem(KV, item.key, [item.payload], item.tenant, item.chain, item.index, self.fp, digest=digest))
+                    owners.append(item)
             packed = []
             for item in ckpts:
                 try:
@@ -1530,6 +1765,12 @@ class NvmeTier(object):
                              ('journal_records', 'nvme_journal_records'), ('evicted_lru', 'nvme_evicted_lru'), ('expired_ttl', 'nvme_expired_ttl'),
                              ('expired_age', 'nvme_expired_age'), ('discarded_bytes', 'nvme_discarded_bytes'), ('fp_drops', 'nvme_fp_drops')):
             values[name] = stats[source]
+        engine = getattr(self.backend, 'engine', None)
+        if engine is not None:
+            for source, name in (('read_ms', 'nvme_p2p_read_ms'), ('check_ms', 'nvme_p2p_check_ms'), ('write_ms', 'nvme_p2p_write_ms'), ('blocks', 'nvme_p2p_blocks'),
+                                 ('bytes', 'nvme_p2p_bytes'), ('mismatch_retries', 'nvme_p2p_late_data')):
+                values[name] += engine.stats[source]
+        values.update(nvme_p2p_on=int(self.active and self.backend.direct), nvme_p2p_map_verified=int(bool(engine is not None and engine.describe()['mapping_verified'])))
         values.update(nvme_on=int(self.active), nvme_bytes=stats['logical_bytes'], nvme_entries=stats['entries'], nvme_kv_entries=stats['kv_entries'],
                       nvme_ckpt_entries=stats['ckpt_entries'], nvme_capacity_bytes=stats['capacity_bytes'], nvme_free_bytes=stats['free_bytes'],
                       nvme_queue_bytes=self.queue_kv_bytes + self.queue_ckpt_bytes, nvme_journal_used_bytes=stats['journal_used'],
@@ -1599,6 +1840,10 @@ class NvmeTier(object):
         if self._hash_pool is not None:
             self._hash_pool.shutdown(wait=True)
             self._hash_pool = None
+        try:
+            self.backend.close()
+        except Exception as error:
+            self.log('nvme tier stop: the peer-to-peer engine did not close: %s: %s', type(error).__name__, error)
         try:
             self.store.close()
         except Exception as error:

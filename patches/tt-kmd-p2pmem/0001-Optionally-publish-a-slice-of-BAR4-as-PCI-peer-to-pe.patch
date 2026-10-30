@@ -1,0 +1,672 @@
+From: Liam Beale <94578031+MrLBeale@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 15:46:03 +1300
+Subject: [PATCH] Optionally publish a slice of BAR4 as PCI peer-to-peer memory
+ (Blackhole)
+
+Add p2pmem.c: when the p2pmem_devices module parameter names a Blackhole
+device, call pci_p2pdma_add_resource() on a configurable slice of BAR4
+(p2pmem_offset_mb, p2pmem_size_mb; default one 4 GiB TLB window) so that
+the slice gets struct pages and Linux 6.2+ userspace can mmap
+/sys/bus/pci/devices/<bdf>/p2pmem/allocate and O_DIRECT-read from an NVMe
+drive straight into the card, with no bounce through host RAM.
+
+Off by default (p2pmem_devices is empty). BAR0 is never offered. The driver
+programs no TLB window; the user of the memory owns and configures the
+window and must keep it (a dma-buf export of the window pins it past
+FREE_TLB and close). A read-only "p2pmem" sysfs group reports the slice and
+the TLB windows that cover it.
+
+RESET_DEVICE with a destructive flag returns EBUSY while any of the slice is
+allocated, as it already does while a TLB window is exported as a dma-buf,
+and holds the whole slice for the length of the reset so that nothing can
+start a DMA into it meanwhile. System suspend is refused while any of the
+slice is allocated. Removing a device with the slice allocated logs a
+warning: the PCI core offers no way to revoke the mappings sooner.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01WPkg1xnoRyTfVHFMzui62d
+---
+ Makefile                    |   2 +-
+ chardev.c                   |  58 ++++--
+ device.h                    |   4 +
+ docs/sysfs-attributes.md    |  33 ++++
+ enumerate.c                 |  10 +-
+ modprobe.d-tenstorrent.conf |  11 ++
+ p2pmem.c                    | 347 ++++++++++++++++++++++++++++++++++++
+ p2pmem.h                    |  46 +++++
+ 8 files changed, 495 insertions(+), 16 deletions(-)
+ create mode 100644 p2pmem.c
+ create mode 100644 p2pmem.h
+
+diff --git a/Makefile b/Makefile
+index 7d41094..f1ff45d 100644
+--- a/Makefile
++++ b/Makefile
+@@ -2,7 +2,7 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ 
+ obj-m += tenstorrent.o
+-tenstorrent-y := module.o chardev.o enumerate.o interrupt.o wormhole.o blackhole.o fwlog.o fwlog_parser.o msgqueue.o pcie.o sg_helpers.o memory.o tlb.o telemetry.o
++tenstorrent-y := module.o chardev.o enumerate.o interrupt.o wormhole.o blackhole.o fwlog.o fwlog_parser.o msgqueue.o pcie.o sg_helpers.o memory.o tlb.o telemetry.o p2pmem.o
+ 
+ # Capture the module directory at the top level before kernel build system changes context
+ MODULE_DIR := $(CURDIR)
+diff --git a/chardev.c b/chardev.c
+index c74e534..9f8d5dc 100644
+--- a/chardev.c
++++ b/chardev.c
+@@ -24,6 +24,7 @@
+ #include "pcie.h"
+ #include "memory.h"
+ #include "module.h"
++#include "p2pmem.h"
+ #include "tlb.h"
+ 
+ #define TT_POWER_FLAG_ALL 0x7FFF
+@@ -256,8 +257,22 @@ static void tenstorrent_reset_reclaim_tlbs(struct tenstorrent_device *tt_dev)
+ 	mutex_unlock(&tt_dev->chardev_mutex);
+ }
+ 
+-static long ioctl_reset_device(struct chardev_private *priv,
+-			       struct tenstorrent_reset_device __user *arg)
++static bool reset_flags_destructive(u32 flags)
++{
++	switch (flags) {
++	case TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK:
++	case TENSTORRENT_RESET_DEVICE_CONFIG_WRITE:
++	case TENSTORRENT_RESET_DEVICE_USER_RESET:
++	case TENSTORRENT_RESET_DEVICE_ASIC_RESET:
++	case TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET:
++		return true;
++	default:
++		return false;
++	}
++}
++
++static long do_reset_device(struct chardev_private *priv,
++			    struct tenstorrent_reset_device __user *arg)
+ {
+ 	struct tenstorrent_device *tt_dev = priv->device;
+ 	struct pci_dev *pdev = priv->device->pdev;
+@@ -278,18 +293,8 @@ static long ioctl_reset_device(struct chardev_private *priv,
+ 	// EXPORT_TLB_DMABUF rationale in ioctl.h. RESTORE_STATE/POST_RESET are the
+ 	// re-init halves of a reset sequence, not destructive, so they are left
+ 	// alone.
+-	switch (in.flags) {
+-	case TENSTORRENT_RESET_DEVICE_RESET_PCIE_LINK:
+-	case TENSTORRENT_RESET_DEVICE_CONFIG_WRITE:
+-	case TENSTORRENT_RESET_DEVICE_USER_RESET:
+-	case TENSTORRENT_RESET_DEVICE_ASIC_RESET:
+-	case TENSTORRENT_RESET_DEVICE_ASIC_DMC_RESET:
+-		if (tenstorrent_has_tlb_dmabuf_exports(tt_dev))
+-			return -EBUSY;
+-		break;
+-	default:
+-		break;
+-	}
++	if (reset_flags_destructive(in.flags) && tenstorrent_has_tlb_dmabuf_exports(tt_dev))
++		return -EBUSY;
+ 
+ 	// Drain any deferred idle powerdown before disturbing the device.
+ 	// open()/release() take reset_rwsem shared and we hold it exclusive
+@@ -376,6 +381,31 @@ static long ioctl_reset_device(struct chardev_private *priv,
+ 	return 0;
+ }
+ 
++// The same refusal for p2pmem (published slices of BAR4 that an NVMe drive may be writing into),
++// but held for the whole reset: checking and then letting go would leave a window in which a
++// process could map the slice and start a DMA while the ASIC resets. While the slice is held,
++// p2pmem/allocate gives ENOMEM.
++static long ioctl_reset_device(struct chardev_private *priv,
++			       struct tenstorrent_reset_device __user *arg)
++{
++	struct tenstorrent_device *tt_dev = priv->device;
++	struct tenstorrent_reset_device_in in;
++	void *p2pmem_hold = NULL;
++	long ret;
++
++	memset(&in, 0, sizeof(in));
++	if (copy_from_user(&in, &arg->in, sizeof(in)) != 0)
++		return -EFAULT;
++
++	if (reset_flags_destructive(in.flags) && tt_p2pmem_hold(tt_dev, &p2pmem_hold))
++		return -EBUSY;
++
++	ret = do_reset_device(priv, arg);
++
++	tt_p2pmem_release(tt_dev, p2pmem_hold);
++	return ret;
++}
++
+ // Resource locks survive reset.  A reset invalidates every pre-reset fd
+ // (open_reset_gen no longer matches reset_gen), so the holder cannot release
+ // via ioctl; only close(fd) clears the bits.  ACQUIRE_BLOCKING from a
+diff --git a/device.h b/device.h
+index 14a3c92..e8303b8 100644
+--- a/device.h
++++ b/device.h
+@@ -18,6 +18,7 @@
+ #include "memory.h"
+ #include "telemetry.h"
+ #include "fwlog_kmd.h"
++#include "p2pmem.h"
+ 
+ #define MAX_TLB_KINDS 4
+ 
+@@ -92,6 +93,9 @@ struct tenstorrent_device {
+ 	struct list_head dmabuf_exports;
+ 	struct mutex dmabuf_export_lock;
+ 
++	// Optional PCI peer-to-peer memory (p2pmem_devices module parameter); off unless named there.
++	struct tt_p2pmem p2pmem;
++
+ 	struct mutex arc_msg_mutex; // Always innermost; don't take reset_rwsem while holding.
+ 	struct list_head arc_msg_queue;	// SW queue of chardev_private, via chardev_msg.queue_node
+ 	struct chardev_private *arc_msg_inflight; // owner of the message in the FW queue, or NULL
+diff --git a/docs/sysfs-attributes.md b/docs/sysfs-attributes.md
+index 3e8a7e8..c1b2636 100644
+--- a/docs/sysfs-attributes.md
++++ b/docs/sysfs-attributes.md
+@@ -148,3 +148,36 @@ To read the number of posted write data words sent by the master interface via N
+ ```bash
+ cat '/sys/class/tenstorrent/tenstorrent!0/pcie_perf_counters/mst_posted_wr_data_word_sent0'
+ ```
++
++---
++
++## P2P Memory Attributes (optional)
++
++When the `p2pmem_devices` module parameter names a Blackhole device, a slice of
++its BAR4 is published as PCI peer-to-peer memory (see the module parameters
++`p2pmem_devices`, `p2pmem_offset_mb`, `p2pmem_size_mb` and `p2pmem_publish`).
++The memory is then allocated from userspace through
++`/sys/bus/pci/devices/<YYYY:XX:ZZ.Z>/p2pmem/allocate` (Linux 6.2 or later).
++
++The driver programs no TLB window: whoever uses the memory must own a TLB
++window that covers it (`ALLOCATE_TLB` and `CONFIGURE_TLB`) for as long as the
++memory is mapped.
++
++**Location**: `/sys/class/tenstorrent/tenstorrent!<N>/p2pmem/`, present only
++when the memory was published. All files are readable by root only.
++
++| sysfs Filename | Description                                                         |
++|----------------|---------------------------------------------------------------------|
++| `bar`          | The BAR the slice is in (always 4)                                  |
++| `offset`       | Byte offset of the slice inside the BAR                             |
++| `size`         | Slice length in bytes                                               |
++| `bus_addr`     | PCI bus address of the first byte of the slice (hex)                |
++| `tlb_first`    | First inbound TLB window id overlapping the slice (-1 if none)      |
++| `tlb_last`     | Last inbound TLB window id overlapping the slice (-1 if none)       |
++
++Whether any of the slice is allocated is the PCI core's `p2pmem/size` and
++`p2pmem/available` under `/sys/bus/pci/devices/<YYYY:XX:ZZ.Z>/` (equal when
++nothing is). While any of it is allocated, `RESET_DEVICE` with a destructive
++flag, and system suspend, return `EBUSY`: a reset under in-flight peer-to-peer
++DMA can wedge the host. During a reset the whole slice is held, so
++`p2pmem/allocate` fails with `ENOMEM`.
+diff --git a/enumerate.c b/enumerate.c
+index 0c52776..78a497d 100644
+--- a/enumerate.c
++++ b/enumerate.c
+@@ -22,6 +22,7 @@
+ #include "chardev_private.h"
+ #include "wormhole.h"
+ #include "tlb.h"
++#include "p2pmem.h"
+ 
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0) || TT_RHEL_RELEASE_GE(9, 4)
+ #define pci_enable_pcie_error_reporting(dev) do { } while (0)
+@@ -378,6 +379,8 @@ static int tenstorrent_pci_probe(struct pci_dev *dev, const struct pci_device_id
+ 
+ 	tenstorrent_register_device(tt_dev);
+ 
++	tt_p2pmem_probe(tt_dev);
++
+ 	if (device_class->reboot) {
+ 		tt_dev->reboot_notifier.notifier_call = tenstorrent_reboot_notifier;
+ 		register_reboot_notifier(&tt_dev->reboot_notifier);
+@@ -413,7 +416,8 @@ static void tenstorrent_pci_remove(struct pci_dev *dev)
+ 	struct chardev_private *priv;
+ 	u16 vendor_id;
+ 
+-	// Tear down telemetry first.
++	// Say so first if p2pmem is still allocated; then tear down telemetry.
++	tt_p2pmem_remove(tt_dev);
+ 	tt_telemetry_cleanup(tt_dev);
+ 
+ 	// Fence deferred-powerdown arming before draining.  tt_cdev_release
+@@ -507,6 +511,10 @@ static int tenstorrent_suspend(struct device *dev) {
+ 	struct pci_dev *pdev = to_pci_dev(dev);
+ 	struct tenstorrent_device *tt_dev = pci_get_drvdata(pdev);
+ 
++	// Unlike a dma-buf export, p2pmem cannot be revoked: refuse to suspend while any is allocated.
++	if (tt_p2pmem_busy(tt_dev))
++		return -EBUSY;
++
+ 	cancel_delayed_work_sync(&tt_dev->power_down_work);
+ 	tenstorrent_revoke_tlb_dmabufs(tt_dev);
+ 
+diff --git a/modprobe.d-tenstorrent.conf b/modprobe.d-tenstorrent.conf
+index 6c4b78b..587abf0 100644
+--- a/modprobe.d-tenstorrent.conf
++++ b/modprobe.d-tenstorrent.conf
+@@ -11,3 +11,14 @@
+ 
+ # Timeout duration in seconds for M3 auto reset to occur. (byte)
+ # options tenstorrent auto_reset_timeout=10
++
++# Publish a slice of BAR4 as PCI peer-to-peer memory (Blackhole only). Off unless
++# devices are named: a comma-separated list of PCI addresses, or "all". (string)
++# options tenstorrent p2pmem_devices=0000:41:00.0
++
++# Offset and size of the published slice inside BAR4, in MiB (even numbers).
++# Defaults: 0 and 4096 (the first 4 GiB TLB window). (ulong)
++# options tenstorrent p2pmem_offset_mb=0 p2pmem_size_mb=4096
++
++# Also let in-kernel orchestrators (nvmet) use the memory on their own. (bool)
++# options tenstorrent p2pmem_publish=0
+diff --git a/p2pmem.c b/p2pmem.c
+new file mode 100644
+index 0000000..42d8c00
+--- /dev/null
++++ b/p2pmem.c
+@@ -0,0 +1,347 @@
++// SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
++// SPDX-License-Identifier: GPL-2.0-only
++
++// Optional PCI peer-to-peer memory (p2pmem) for Blackhole.
++//
++// BAR4 of a Blackhole is a window onto the NOC: each 4 GiB TLB window in it is routed,
++// by a TLB register that userspace programs with CONFIGURE_TLB, to an address in one
++// NOC endpoint (a DRAM bank, say).  Publishing (part of) BAR4 as p2pmem gives that
++// range struct pages, so the kernel's own peer-to-peer machinery can DMA into it: a
++// userspace process mmaps /sys/bus/pci/devices/<bdf>/p2pmem/allocate (Linux 6.2+) and
++// O_DIRECT-reads a file from an NVMe drive into the mapping, and the drive writes the
++// data to the card without it passing through host RAM.
++//
++// This file only publishes the memory.  It programs no TLB: whoever uses the memory
++// must own a TLB window that covers it (ALLOCATE_TLB + CONFIGURE_TLB) for as long as
++// the mapping exists.  A window that is unconfigured, or reconfigured while a DMA is in
++// flight, sends the data wherever the NOC is told to send it.
++//
++// OFF by default: nothing is published unless the p2pmem_devices module parameter
++// names the device.
++
++#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
++
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/pci.h>
++#include <linux/slab.h>
++#include <linux/sizes.h>
++#include <linux/string.h>
++#include <linux/device.h>
++#include <linux/sysfs.h>
++#include <linux/version.h>
++
++#if IS_ENABLED(CONFIG_PCI_P2PDMA)
++#include <linux/pci-p2pdma.h>
++#endif
++
++#include "device.h"
++#include "module.h"
++#include "p2pmem.h"
++#include "tlb.h"
++
++// BAR4 is the Blackhole 4 GiB-window aperture.  BAR0 holds the TLB registers and the
++// 2 MiB windows onto device registers, which are not memory, so it is never offered.
++#define TT_P2PMEM_BAR 4
++
++static char p2pmem_devices[256];
++module_param_string(p2pmem_devices, p2pmem_devices, sizeof(p2pmem_devices), 0444);
++MODULE_PARM_DESC(p2pmem_devices,
++		 "Blackhole devices whose BAR4 slice is published as PCI peer-to-peer memory: "
++		 "a comma-separated list of PCI addresses (0000:41:00.0,0000:42:00.0) or \"all\". "
++		 "Empty (the default) publishes nothing.");
++
++static ulong p2pmem_offset_mb;
++module_param(p2pmem_offset_mb, ulong, 0444);
++MODULE_PARM_DESC(p2pmem_offset_mb,
++		 "Offset of the published slice inside BAR4, in MiB (even; default 0). "
++		 "TLB window k of 4 GiB starts at 4096 * k.");
++
++static ulong p2pmem_size_mb = 4096;
++module_param(p2pmem_size_mb, ulong, 0444);
++MODULE_PARM_DESC(p2pmem_size_mb,
++		 "Size of the published slice, in MiB (even; default 4096, one 4 GiB window). "
++		 "The kernel spends 64 bytes of host RAM per 4 KiB page of it.");
++
++static bool p2pmem_publish;
++module_param(p2pmem_publish, bool, 0444);
++MODULE_PARM_DESC(p2pmem_publish,
++		 "Also call pci_p2pmem_publish() so that in-kernel orchestrators (nvmet) may pick "
++		 "the memory on their own (default off). Userspace allocation through "
++		 "p2pmem/allocate does not need it.");
++
++#if IS_ENABLED(CONFIG_PCI_P2PDMA)
++
++static bool p2pmem_wanted(struct pci_dev *pdev)
++{
++	char *list, *cursor, *token;
++	bool wanted = false;
++
++	if (!p2pmem_devices[0])
++		return false;
++
++	list = kstrdup(p2pmem_devices, GFP_KERNEL);
++	if (!list)
++		return false;
++
++	cursor = list;
++	while ((token = strsep(&cursor, ",; \t\n")) != NULL) {
++		token = strim(token);
++		if (!*token)
++			continue;
++		// Both 0000:41:00.0 and 41:00.0 (domain 0) name a device.
++		if (!strcasecmp(token, "all") || !strcasecmp(token, pci_name(pdev)) ||
++		    (strlen(token) == 7 && !strcasecmp(token, pci_name(pdev) + 5))) {
++			wanted = true;
++			break;
++		}
++	}
++
++	kfree(list);
++	return wanted;
++}
++
++static ssize_t bar_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
++
++	return scnprintf(buf, PAGE_SIZE, "%d\n", tt_dev->p2pmem.bar);
++}
++static DEVICE_ATTR(bar, 0400, bar_show, NULL);
++
++static ssize_t offset_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
++
++	return scnprintf(buf, PAGE_SIZE, "%llu\n", tt_dev->p2pmem.offset);
++}
++static DEVICE_ATTR(offset, 0400, offset_show, NULL);
++
++static ssize_t size_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
++
++	return scnprintf(buf, PAGE_SIZE, "%llu\n", tt_dev->p2pmem.size);
++}
++static DEVICE_ATTR(size, 0400, size_show, NULL);
++
++static ssize_t bus_addr_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
++
++	return scnprintf(buf, PAGE_SIZE, "0x%llx\n", tt_dev->p2pmem.bus_addr);
++}
++static DEVICE_ATTR(bus_addr, 0400, bus_addr_show, NULL);
++
++static ssize_t tlb_first_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
++
++	return scnprintf(buf, PAGE_SIZE, "%d\n", tt_dev->p2pmem.tlb_first);
++}
++static DEVICE_ATTR(tlb_first, 0400, tlb_first_show, NULL);
++
++static ssize_t tlb_last_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct tenstorrent_device *tt_dev = dev_get_drvdata(dev);
++
++	return scnprintf(buf, PAGE_SIZE, "%d\n", tt_dev->p2pmem.tlb_last);
++}
++static DEVICE_ATTR(tlb_last, 0400, tlb_last_show, NULL);
++
++static struct attribute *tt_p2pmem_attrs[] = {
++	&dev_attr_bar.attr,
++	&dev_attr_offset.attr,
++	&dev_attr_size.attr,
++	&dev_attr_bus_addr.attr,
++	&dev_attr_tlb_first.attr,
++	&dev_attr_tlb_last.attr,
++	NULL,
++};
++
++static const struct attribute_group tt_p2pmem_group = {
++	.name = "p2pmem",
++	.attrs = tt_p2pmem_attrs,
++};
++
++// Which inbound TLB windows route traffic that lands in [offset, offset + size) of the BAR.
++static void p2pmem_find_tlbs(struct tenstorrent_device *tt_dev, struct tt_p2pmem *p)
++{
++	int id;
++
++	if (!tt_dev->dev_class->describe_tlb)
++		return;
++
++	for (id = 0; id < TENSTORRENT_MAX_INBOUND_TLBS; id++) {
++		struct tlb_descriptor desc = { 0 };
++
++		if (tt_dev->dev_class->describe_tlb(tt_dev, id, &desc))
++			continue;
++		if (desc.bar != p->bar)
++			continue;
++		if (desc.bar_offset + desc.size <= p->offset || desc.bar_offset >= p->offset + p->size)
++			continue;
++
++		if (p->tlb_first < 0)
++			p->tlb_first = id;
++		p->tlb_last = id;
++	}
++}
++
++void tt_p2pmem_probe(struct tenstorrent_device *tt_dev)
++{
++	struct tt_p2pmem *p = &tt_dev->p2pmem;
++	struct pci_dev *pdev = tt_dev->pdev;
++	resource_size_t bar_len;
++	u64 offset, size;
++	int ret;
++
++	p->bar = TT_P2PMEM_BAR;
++	p->tlb_first = -1;
++	p->tlb_last = -1;
++
++	if (!p2pmem_wanted(pdev))
++		return;
++
++	if (tt_dev->dev_class != &blackhole_class) {
++		dev_warn(&pdev->dev, "p2pmem: only Blackhole devices can publish p2pmem; not publishing\n");
++		return;
++	}
++
++	if (p2pmem_offset_mb >= BIT(30) || p2pmem_size_mb >= BIT(30)) {
++		dev_warn(&pdev->dev, "p2pmem: offset or size is out of range; not publishing\n");
++		return;
++	}
++
++	offset = (u64)p2pmem_offset_mb << 20;
++	size = (u64)p2pmem_size_mb << 20;
++
++	// The pages are created in whole 2 MiB sub-sections.
++	if (!size || (offset | size) & (SZ_2M - 1)) {
++		dev_warn(&pdev->dev,
++			 "p2pmem: offset %llu and size %llu bytes must be non-zero multiples of 2 MiB; not publishing\n",
++			 offset, size);
++		return;
++	}
++
++	bar_len = pci_resource_len(pdev, TT_P2PMEM_BAR);
++	if (offset >= bar_len || size > bar_len - offset) {
++		dev_warn(&pdev->dev,
++			 "p2pmem: slice [%llu, +%llu) does not fit in BAR%d (%llu bytes); not publishing\n",
++			 offset, size, TT_P2PMEM_BAR, (u64)bar_len);
++		return;
++	}
++
++	ret = pci_p2pdma_add_resource(pdev, TT_P2PMEM_BAR, size, offset);
++	if (ret) {
++		dev_warn(&pdev->dev, "p2pmem: pci_p2pdma_add_resource failed (%d); not publishing\n", ret);
++		return;
++	}
++
++	p->offset = offset;
++	p->size = size;
++	p->bus_addr = pci_bus_address(pdev, TT_P2PMEM_BAR) + offset;
++	p2pmem_find_tlbs(tt_dev, p);
++	smp_store_release(&p->published, true);
++
++	if (p2pmem_publish)
++		pci_p2pmem_publish(pdev, true);
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0)
++	dev_warn(&pdev->dev, "p2pmem: this kernel has no p2pmem/allocate (Linux 6.2 or later); only in-kernel users can use the memory\n");
++#endif
++
++	ret = device_add_group(&tt_dev->dev, &tt_p2pmem_group);
++	if (ret)
++		dev_warn(&pdev->dev, "p2pmem: sysfs group not created (%d)\n", ret);
++	else
++		p->group_registered = true;
++
++	dev_info(&pdev->dev,
++		 "p2pmem: BAR%d [%#llx, +%#llx) is peer-to-peer memory (TLB windows %d..%d), %s; "
++		 "the user must own and configure those windows\n",
++		 TT_P2PMEM_BAR, offset, size, p->tlb_first, p->tlb_last,
++		 p2pmem_publish ? "published for in-kernel users" : "for userspace allocation only");
++}
++
++void tt_p2pmem_remove(struct tenstorrent_device *tt_dev)
++{
++	struct tt_p2pmem *p = &tt_dev->p2pmem;
++
++	if (p->group_registered) {
++		device_remove_group(&tt_dev->dev, &tt_p2pmem_group);
++		p->group_registered = false;
++	}
++
++	// The PCI core unmaps the userspace mappings and waits for the pages only when the driver
++	// has finished unbinding, after this driver has stopped the card; it offers no way to revoke
++	// them sooner. Nothing may be allocated when a device is removed or the module unloaded.
++	if (p->published && tt_p2pmem_busy(tt_dev))
++		dev_warn(&tt_dev->pdev->dev,
++			 "p2pmem: removing a device whose p2pmem is still allocated; a DMA into it may be in flight\n");
++
++	smp_store_release(&p->published, false);
++}
++
++// The pool is the one slice, so it can be allocated whole exactly when nothing else holds
++// any of it. Allocating it is the only way to ask, and to keep anyone else out, without
++// reaching into the PCI core's private state. The pool's bits stay set until the last
++// page reference is dropped, so a mapping, a pinned page and a bio in flight all count.
++int tt_p2pmem_hold(struct tenstorrent_device *tt_dev, void **cookie)
++{
++	struct tt_p2pmem *p = &tt_dev->p2pmem;
++
++	*cookie = NULL;
++
++	if (!smp_load_acquire(&p->published))
++		return 0;
++
++	*cookie = pci_alloc_p2pmem(tt_dev->pdev, p->size);
++	return *cookie ? 0 : -EBUSY;
++}
++
++void tt_p2pmem_release(struct tenstorrent_device *tt_dev, void *cookie)
++{
++	if (cookie)
++		pci_free_p2pmem(tt_dev->pdev, cookie, tt_dev->p2pmem.size);
++}
++
++bool tt_p2pmem_busy(struct tenstorrent_device *tt_dev)
++{
++	void *cookie;
++
++	if (tt_p2pmem_hold(tt_dev, &cookie))
++		return true;
++
++	tt_p2pmem_release(tt_dev, cookie);
++	return false;
++}
++
++#else /* !CONFIG_PCI_P2PDMA */
++
++void tt_p2pmem_probe(struct tenstorrent_device *tt_dev)
++{
++	if (p2pmem_devices[0])
++		dev_warn(&tt_dev->pdev->dev, "p2pmem: this kernel was built without CONFIG_PCI_P2PDMA; not publishing\n");
++}
++
++void tt_p2pmem_remove(struct tenstorrent_device *tt_dev)
++{
++}
++
++int tt_p2pmem_hold(struct tenstorrent_device *tt_dev, void **cookie)
++{
++	*cookie = NULL;
++	return 0;
++}
++
++void tt_p2pmem_release(struct tenstorrent_device *tt_dev, void *cookie)
++{
++}
++
++bool tt_p2pmem_busy(struct tenstorrent_device *tt_dev)
++{
++	return false;
++}
++
++#endif
+diff --git a/p2pmem.h b/p2pmem.h
+new file mode 100644
+index 0000000..fdbc48c
+--- /dev/null
++++ b/p2pmem.h
+@@ -0,0 +1,46 @@
++// SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
++// SPDX-License-Identifier: GPL-2.0-only
++
++#ifndef TTDRIVER_P2PMEM_H_INCLUDED
++#define TTDRIVER_P2PMEM_H_INCLUDED
++
++#include <linux/types.h>
++#include <linux/mutex.h>
++
++struct tenstorrent_device;
++
++// State of the optional PCI peer-to-peer memory (p2pmem) slice of a device's BAR.
++// Everything here is written once at probe, before the sysfs group is added.
++struct tt_p2pmem {
++	bool published;		// pci_p2pdma_add_resource() succeeded; set last, with release semantics, after the fields below
++	bool group_registered;	// the "p2pmem" sysfs group is on tt_dev->dev
++	int bar;
++	u64 offset;		// byte offset of the slice inside the BAR
++	u64 size;		// slice length in bytes
++	u64 bus_addr;		// PCI bus address of the first byte of the slice
++	int tlb_first;		// first inbound TLB window overlapping the slice, or -1
++	int tlb_last;		// last such window, or -1
++};
++
++// Publish the configured slice of the device's BAR as p2pmem, if the p2pmem_devices
++// module parameter names this device. Never fatal: a failure is logged and the device
++// carries on without p2pmem. Call after the device is registered.
++void tt_p2pmem_probe(struct tenstorrent_device *tt_dev);
++
++// Remove the sysfs group. The pages themselves are devm-managed by the PCI core and go
++// away when the driver unbinds from the device.
++void tt_p2pmem_remove(struct tenstorrent_device *tt_dev);
++
++// Take the whole slice, so that nothing can be allocated from it (no new mapping of
++// p2pmem/allocate, no in-kernel user) until tt_p2pmem_release(). 0 on success, with
++// *cookie NULL when nothing is published; -EBUSY when any part of the slice is allocated
++// (mapped by userspace or in use by a DMA). A device reset while the slice is allocated
++// can wedge the host, so the reset ioctl holds it for the length of the reset.
++int tt_p2pmem_hold(struct tenstorrent_device *tt_dev, void **cookie);
++void tt_p2pmem_release(struct tenstorrent_device *tt_dev, void *cookie);
++
++// True while any part of the slice is allocated. A momentary hold: a concurrent
++// allocation can see ENOMEM once.
++bool tt_p2pmem_busy(struct tenstorrent_device *tt_dev);
++
++#endif // TTDRIVER_P2PMEM_H_INCLUDED
