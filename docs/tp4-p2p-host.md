@@ -78,8 +78,10 @@ Other things the as-built info record changes on the host side, all built:
   `/dev/tenstorrent/N` it opened is that PCI address, before touching the window.
 * **Flush.** After the drive's completion and before the first device op over a chunk, one non-posted read through each card's window (`TtLink.flush`). It does not strictly order the drive's writes; the checksum is the arbiter.
 * **Release.** `StagingApi.release()` (the handle's `release()`) is called by `P2PEngine.close()`, after the links and before the mesh may be closed.
-* Warm the two programs at engine start (their JIT compile takes seconds): the first `verify` / `write` of a P3a run does it; the tier's first restore would, in production. **Not done yet**: a warm-up call in `NvmeTier._start_p2p`
-  (it needs a scratch block to scatter into).
+* **Warm-up.** The two programs JIT-compile (seconds) and take a little DRAM at their first dispatch, which belongs before any decode trace is captured. `P2PEngine.warm()` dispatches the checksum program once at engine
+  start (a program that does not run makes the path `UNAVAILABLE` there, not a failed first restore). **The copy program is not warmed**: it needs a scratch block to scatter into and the pool owns every block id;
+  its first dispatch is the first real restore. Whether the tier attaches before or after the decode traces are captured is the model graft's order, not checked here; the device-op branch's note says allocate after the KV pool
+  and before any trace capture.
 
 ## 2. The window: how a process takes it and aims it
 

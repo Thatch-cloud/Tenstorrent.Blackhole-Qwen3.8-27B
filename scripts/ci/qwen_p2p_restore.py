@@ -937,7 +937,7 @@ class P2PEngine(object):
     the host backend). `reader(offset, view)` fills a writable view from the drive at an aligned offset (qwen_nvme_store's BlockFile.pread_into)."""
 
     def __init__(self, api, layout, reader, threads=DEFAULT_THREADS, staging_bytes=DEFAULT_STAGING_BYTES, ordering='relaxed', link_factory=None, expected=None, logger=None,
-                 sleep=time.sleep, recheck_s=0.002, io_align=PAGE, sysfs_class=SYSFS_CLASS, settle=1.0, allow_unverified_map=False):
+                 sleep=time.sleep, recheck_s=0.002, io_align=PAGE, sysfs_class=SYSFS_CLASS, settle=1.0, allow_unverified_map=False, warm=True):
         self.api, self.layout, self.reader = api, layout, reader
         self.log = logger or (lambda message, *values: None)
         self.sleep, self.recheck_s, self.io_align = sleep, recheck_s, io_align
@@ -996,9 +996,20 @@ class P2PEngine(object):
                     link = TtLink.open(index, bdf, staging, ordering, settle=settle, logger=self.log, sysfs_class=sysfs_class, require_verified=not allow_unverified_map)
                 self.links.append(link)
             self.pool = _make_pool(self.threads)
+            if warm:
+                self.warm()
         except BaseException:
             self.close()
             raise
+
+    def warm(self):
+        """Dispatch the checksum program once, here, at engine start: its kernel compiles and links at the first dispatch (seconds) and its binary takes a little DRAM, which belongs before any decode
+        trace is captured, not in the middle of a restore. A program that does not run is `UNAVAILABLE` now rather than a failed first restore. (The copy program has no safe scratch block to
+        be warmed on at this point: the engine's pool owns every block id.)"""
+        try:
+            self.api.checksums(self.base, PAGE, 1, self.layout.chips)
+        except P2PError as error:
+            raise P2PUnavailable('the checksum program did not run at engine start: %s' % error)
 
     # -- the reads ---------------------------------------------------------------------------------
     def read_task(self, chunk, slot, chip, entry):

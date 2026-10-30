@@ -798,6 +798,7 @@ class EngineCase(TmpCase):
     def build(self, blocks=7, chunk_blocks=3, threads=4, geometry=SMALL, io_align=1, **kwargs):
         self.layout = p2p.ShardLayout(**geometry)
         self.device = Device(self.layout)
+        warm = kwargs.pop('warm', False)
         kwargs.setdefault('deferred', True)
         self.mesh = self.MESH(self.layout, self.device.sink, **kwargs)
         self.drive = FileDrive(self.directory, self.layout, blocks)
@@ -805,7 +806,7 @@ class EngineCase(TmpCase):
         factory, self.links = make_links(self.mesh)
         self.api = p2p.StagingApi(self.mesh, 'mesh', list(range(self.layout.caches)))
         self.engine = p2p.P2PEngine(self.api, self.layout, self.drive.reader, threads=threads, staging_bytes=self.layout.shard_bytes * chunk_blocks * 2, link_factory=factory,
-                                    io_align=io_align, sleep=lambda seconds: None)
+                                    io_align=io_align, sleep=lambda seconds: None, warm=warm)
         self.addCleanup(self.engine.close)
         return self.engine
 
@@ -1289,6 +1290,23 @@ class AlignedStagingTests(EngineCase):
         factory, links = make_links(mesh)
         with self.assertRaisesRegex(p2p.P2PUnavailable, 'different offsets'):
             p2p.P2PEngine(p2p.StagingApi(mesh, 'mesh', [0, 1]), layout, lambda o, v: None, staging_bytes=layout.shard_bytes * 4, link_factory=factory, io_align=1)
+
+
+class WarmUpTests(EngineCase):
+    def test_the_checksum_program_runs_once_at_engine_start(self):
+        self.build(blocks=2, chunk_blocks=2, warm=True)
+        checks = self.mesh.ops('checksum')
+        self.assertEqual(checks, [('checksum', self.engine.base, 4096, 1)])
+
+    def test_a_checksum_program_that_does_not_run_makes_the_path_unavailable_at_start(self):
+        layout = p2p.ShardLayout(**SMALL)
+        mesh = FakeMesh(layout)
+        mesh.fail_checksum = True
+        factory, links = make_links(mesh)
+        with self.assertRaisesRegex(p2p.P2PUnavailable, 'did not run at engine start'):
+            p2p.P2PEngine(p2p.StagingApi(mesh, 'mesh', [0, 1]), layout, lambda o, v: None, staging_bytes=layout.shard_bytes * 4, link_factory=factory, io_align=1)
+        self.assertTrue(all(link.closed for link in links))
+        self.assertTrue(mesh.handle.released)
 
 
 class FlushAndReleaseTests(EngineCase):
